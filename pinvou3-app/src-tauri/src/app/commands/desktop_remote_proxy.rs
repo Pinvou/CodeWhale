@@ -13,6 +13,7 @@ use crate::features::remote_control::controller::controlling_session::{
 };
 use crate::features::remote_control::controller::encrypted_lane::ControllingLaneState;
 use crate::features::sessions::SessionStore;
+use crate::features::sessions::application::dispatch_remote::RemoteDispatchService;
 use crate::features::sessions::remote_proxy::binding::LiveRemoteContext;
 
 #[derive(Serialize)]
@@ -179,6 +180,7 @@ fn list_metadata(store: &SessionStore, include_hidden: bool) -> Vec<Value> {
                 "pinned": item.ui.pinned,
                 "lastOpenedAt": item.ui.last_opened_at,
                 "projectedEntryCount": item.projected_entry_count,
+                "pendingCount": item.pending_count,
                 "hidden": item.ui.hidden,
             })
         })
@@ -248,6 +250,8 @@ fn read_visible(store: &SessionStore, local_session_id: &str) -> Result<Value, S
         "entries": entries,
         "authenticatedCursor": cursor,
         "pendingUnknownCount": view.pending_unknown_count,
+        "quarantined": view.quarantined,
+        "frozenPreparedCount": view.frozen_prepared_count,
         "rejections": view.rejections.into_iter().map(|(task_id, code)| json!({"taskId":task_id,"code":code})).collect::<Vec<_>>(),
         "unattemptedPending": unattempted_pending,
     }))
@@ -313,33 +317,61 @@ pub(crate) async fn desktop_remote_proxy_archive<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
     local_session_id: String,
 ) -> Result<bool, String> {
+    super::desktop_remote_state::ensure_ready(&app)?;
+    seal_history(app, local_session_id, false).await
+}
+
+#[tauri::command]
+pub(crate) async fn desktop_remote_proxy_quarantine<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    local_session_id: String,
+    confirmed: bool,
+) -> Result<bool, String> {
+    super::desktop_remote_state::ensure_ready(&app)?;
+    if !confirmed {
+        return Err("remote_proxy_quarantine_confirmation_required".to_owned());
+    }
+    seal_history(app, local_session_id, true).await
+}
+
+async fn seal_history<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    local_session_id: String,
+    quarantine: bool,
+) -> Result<bool, String> {
     super::desktop_remote_task::run_a_dispatch_blocking(move || {
-        let store = super::desktop_remote_state::ready_state::<_, SessionStore>(&app)?;
+        let dispatch = super::desktop_remote_state::ready_state::<_, RemoteDispatchService>(&app)?;
         let manager =
             super::desktop_remote_state::ready_state::<_, ControllingDeviceManager>(&app)?;
-        manager.with_remote_archive_owner(|identity| {
-            let live = identity.map(|(lease, peer_id, resume_boundary_id)| LiveRemoteContext {
-                peer_id,
-                resume_boundary_id,
-                connection_id: lease.connection_id,
-                controller_lease_id: lease.controller_lease_id,
-                lease_epoch: lease.lease_epoch,
-                relay_epoch: lease.relay_epoch,
-                generation: lease.remote_control_generation,
-                control_connected: true,
-                encrypted_channel_connected: true,
-            });
-            store
-                .archive_remote_proxy(&local_session_id, live.as_ref())
-                .map_err(|error| {
+        dispatch.with_remote_history_seal(&local_session_id, |store| {
+            manager.with_remote_archive_owner(|identity| {
+                let live = identity.map(|(lease, peer_id, resume_boundary_id)| LiveRemoteContext {
+                    peer_id,
+                    resume_boundary_id,
+                    connection_id: lease.connection_id,
+                    controller_lease_id: lease.controller_lease_id,
+                    lease_epoch: lease.lease_epoch,
+                    relay_epoch: lease.relay_epoch,
+                    generation: lease.remote_control_generation,
+                    control_connected: true,
+                    encrypted_channel_connected: true,
+                });
+                let result = if quarantine {
+                    store.quarantine_remote_proxy(&local_session_id, live.as_ref(), true)
+                } else {
+                    store.archive_remote_proxy(&local_session_id, live.as_ref())
+                };
+                result.map_err(|error| {
                     match error.to_string().as_str() {
                         "remote_proxy_archive_online" => "remote_proxy_archive_online",
                         "remote_proxy_archive_pending" => "remote_proxy_archive_pending",
                         "remote_proxy_not_found" => "remote_proxy_not_found",
+                        "remote_proxy_archive_conflict" => "remote_proxy_archive_conflict",
                         _ => "remote_proxy_archive_unavailable",
                     }
                     .to_owned()
                 })
+            })
         })
     })
     .await
@@ -581,6 +613,104 @@ mod tests {
         assert_eq!(
             record.pending[0].dispatch_state,
             PendingDispatchState::AttemptMayHaveOccurred
+        );
+    }
+
+    /// Shared fixtures are checked against the actual Store -> allowlisted DTO
+    /// producer. Only the random local UUID is normalized for the JS consumer.
+    #[test]
+    fn quarantine_dto_shared_fixtures_preserve_unknowns_and_withdraw_execution_handles() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = SessionStore::boot_at_test_dir(temp.path()).unwrap();
+        let context = live();
+        let opened = store.test_commit_remote_proxy_open(None, &context).unwrap();
+        store
+            .confirm_remote_mapping(
+                &opened.local_session_id,
+                &context,
+                &AuthenticatedMapping {
+                    remote_session_ref: opened.remote_session_ref.clone(),
+                    controlled_session_id: "fixture-controlled-session".into(),
+                },
+            )
+            .unwrap();
+        for (client, task) in [
+            ("request-prepared", "task-prepared"),
+            ("request-attempted", "task-attempted"),
+        ] {
+            store
+                .insert_remote_pending(
+                    &opened.local_session_id,
+                    &opened.remote_session_ref,
+                    &context,
+                    PendingRemoteRequest {
+                        client_request_id: client.into(),
+                        task_id: task.into(),
+                        request_fingerprint: "a".repeat(64),
+                        dispatch_state: PendingDispatchState::PreparedNeverAttempted,
+                        reservation_fingerprint: None,
+                    },
+                )
+                .unwrap();
+        }
+        store
+            .mark_remote_dispatch_attempt(
+                &opened.local_session_id,
+                &opened.remote_session_ref,
+                &context,
+                "request-attempted",
+                "task-attempted",
+                &"a".repeat(64),
+            )
+            .unwrap();
+        let original = store
+            .remote_proxy_snapshot(&opened.local_session_id)
+            .unwrap();
+        let before: Value = serde_json::from_str(include_str!(
+            "../../../../tests/fixtures/remote_quarantine_before.json"
+        ))
+        .unwrap();
+        let after: Value = serde_json::from_str(include_str!(
+            "../../../../tests/fixtures/remote_quarantine_after.json"
+        ))
+        .unwrap();
+        let normalize = |mut dto: Value| {
+            dto["localSessionId"] = before["localSessionId"].clone();
+            dto
+        };
+        assert_eq!(
+            normalize(read_visible(&store, &opened.local_session_id).unwrap()),
+            before
+        );
+        assert!(
+            store
+                .quarantine_remote_proxy(&opened.local_session_id, None, true)
+                .unwrap()
+        );
+        assert_eq!(
+            normalize(read_visible(&store, &opened.local_session_id).unwrap()),
+            after
+        );
+        drop(store);
+        let restarted = SessionStore::boot_at_test_dir(temp.path()).unwrap();
+        assert_eq!(
+            normalize(read_visible(&restarted, &opened.local_session_id).unwrap()),
+            after
+        );
+        assert!(
+            restarted
+                .remote_proxy_snapshot(&opened.local_session_id)
+                .is_none()
+        );
+        assert!(
+            !list_visible(&restarted)
+                .iter()
+                .any(|dto| dto["localSessionId"] == opened.local_session_id)
+        );
+        assert_eq!(original.pending.len(), 2);
+        assert!(
+            include_str!("../../lib.rs")
+                .contains("commands::desktop_remote_proxy::desktop_remote_proxy_quarantine,")
         );
     }
 

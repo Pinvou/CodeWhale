@@ -391,14 +391,20 @@ async function visibilityBox(page, cardText, modeLabel, click) {
     document.body.innerText.includes('杭州今天天气')
       && document.body.innerText.includes('已安装 · 首次提问时自动开启')));
   await clickExact(page,'杭州今天天气');
-  await sleep(300);
+  // 等两条 invoke 真实落地再断言(固定 sleep 会把慢机误报为失败)。
+  await page.waitForFunction(() => {
+    const calls=window.__TOOL_STORE_TEST__.calls;
+    return calls.some(x=>x.cmd==='enable_marketplace_packages'&&(x.args.packageIds||[]).includes('weather')&&x.args.scope==='plain')
+      &&calls.some(x=>x.cmd==='chat'&&x.args.message==='杭州今天天气');
+  }, {timeout:10000}).catch(()=>{});
   rec('欢迎问题点击沿用聊天发送链路',await page.evaluate(() => {
     const calls=window.__TOOL_STORE_TEST__.calls;
-    return calls.some(x=>x.cmd==='enable_marketplace_packages'&&(x.args.packageIds||[]).includes('weather'))
+    return calls.some(x=>x.cmd==='enable_marketplace_packages'&&(x.args.packageIds||[]).includes('weather')&&x.args.scope==='plain')
       &&calls.some(x=>x.cmd==='chat'&&x.args.message==='杭州今天天气');
   }));
   await page.evaluate(()=>document.querySelector('[data-nav="toolstore"]')?.dispatchEvent(new MouseEvent('click',{bubbles:true,cancelable:true})));
   await page.waitForFunction((selector) => !!document.querySelector(selector), {timeout:10000}, TOOL_STORE_SEARCH_SELECTOR).catch(()=>{});
+  await dismiss(page);
 
   await action(page,'同花顺问财','配置','iwencai');
   rec('同花顺问财安装前展示必填 Key 配置',await page.evaluate(()=>{

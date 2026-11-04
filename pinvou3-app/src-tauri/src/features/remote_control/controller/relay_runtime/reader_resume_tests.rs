@@ -11,6 +11,9 @@ use tokio_tungstenite::{WebSocketStream, tungstenite::Message};
 
 pub(super) type Socket = WebSocketStream<TcpStream>;
 
+#[path = "reader_resume_tests/journal_owner_tests.rs"]
+pub(crate) mod journal_owner_tests;
+
 fn fixture_wall_clock_millis() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -51,10 +54,14 @@ pub(super) async fn accept(listener: &TcpListener) -> Socket {
 
 pub(super) async fn send(socket: &mut Socket, value: &Value) {
     if value["v"] == 1 {
-        let role = match value["sender_role"].as_str() {
-            Some("A") => SenderRole::ControllerA,
-            Some("B") => SenderRole::ControlledB,
-            _ => SenderRole::Relay,
+        let role = if value["sender_role"] == "A"
+            || (value["type"] == "encrypted_frame" && value["direction"] == "a_to_b")
+        {
+            SenderRole::ControllerA
+        } else if value["sender_role"] == "B" {
+            SenderRole::ControlledB
+        } else {
+            SenderRole::Relay
         };
         validate_controller_message_json(&value.to_string(), role).unwrap();
     }

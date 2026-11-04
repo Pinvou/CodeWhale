@@ -15,16 +15,16 @@
     "rust_cyclic_feature_dependencies": {
       "assistant->connectors": 11,
       "assistant->knowledge": 1,
-      "assistant->marketplace": 64,
+      "assistant->marketplace": 63,
       "assistant->remote_control": 32,
       "assistant->runtime_bundle": 2,
-      "connectors->marketplace": 8,
+      "connectors->marketplace": 7,
       "connectors->runtime_bundle": 7,
       "knowledge->assistant": 9,
       "marketplace->assistant": 1,
       "remote_control->connectors": 2,
       "runtime_bundle->assistant": 2,
-      "runtime_bundle->marketplace": 60
+      "runtime_bundle->marketplace": 58
     },
     "rust_feature_depends_on_app": {},
     "rust_platform_depends_on_upper_layer": {

@@ -226,7 +226,11 @@ const expectedProtocolHashes = {
   memory: 'ca88a71d9f0f9b15f1df52cf80218694f76b2295add98e65a0d167fc88b627c8',
   monitor: 'e63e8d5d4edf813640e08c9951a12abdbc3cad4991763d3dd956e883e277fb1c',
   personas: '33efcab9c42a6830ade35861b8a6c60891da9cb282954e78c3bda42091e2474d',
-  remoteControl: '8a47f7ef3fbf569a6ae380153f84640d245025e0beb2215eb365287fe06aa00c',
+  // 为 rebase 带入的已合并面重算（PR #2322，community #781）：
+  // bridge/remote-control.js 增 web_access_revoke_host_workspace 一个 invoke
+  // （允许工作区撤销命令，随 #781 合入 main 后经 rebase 进入本分支）；
+  // 逐签名 diff 确认除此之外无任何增删。
+  remoteControl: 'e2b52e8c6ed48c9a353a5058f68cb50470844224a8488b5be12fb9b9d8b9f771',
   scheduled: '9081c503ef3600f83a0cfd2506955990f6556b196d9ba3903ad08b308b2966b1',
   // Recomputed for the combined session archive and #445 workspace binding
   // surfaces while retaining Official's materialization behavior.

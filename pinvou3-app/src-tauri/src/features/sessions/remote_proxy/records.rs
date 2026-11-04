@@ -43,7 +43,7 @@ impl SessionStore {
             })
             .ok_or_else(|| anyhow::anyhow!("rejection does not match an attempted request"))?;
         if record.retired_requests.len() >= MAX_RETIRED_REQUESTS {
-            bail!("retired remote request capacity reached");
+            return Err(RemoteProxyCapacityError::RetirementBudget.into());
         }
         let pending = record.pending.remove(index);
         record.retired_requests.push(RetiredRemoteRequest {
@@ -66,6 +66,7 @@ impl SessionStore {
                 local_session_id: record.local_session_id.clone(),
                 ui: record.ui.clone(),
                 projected_entry_count: record.projection.entries.len(),
+                pending_count: record.pending.len(),
             })
             .collect();
         list.sort_by(|left, right| {
@@ -81,11 +82,12 @@ impl SessionStore {
 
     pub(crate) fn read_remote_proxy_history(&self, id: &str) -> Option<RemoteOfflineView> {
         let state = self.remote_proxies.lock();
-        let archived = state.archives.read(id).ok().flatten();
-        state
-            .records
-            .get(id)
-            .or(archived.as_ref())
+        let archived = state.archives.read_snapshot(id).ok().flatten();
+        let quarantined = archived.as_ref().is_some_and(|item| item.is_quarantined());
+        archived
+            .as_ref()
+            .map(|item| item.record())
+            .or_else(|| state.records.get(id))
             .map(|record| RemoteOfflineView {
                 local_session_id: record.local_session_id.clone(),
                 ui: record.ui.clone(),
@@ -108,11 +110,24 @@ impl SessionStore {
                         item.dispatch_state == PendingDispatchState::AttemptMayHaveOccurred
                     })
                     .count(),
+                quarantined,
+                frozen_prepared_count: if quarantined {
+                    record
+                        .pending
+                        .iter()
+                        .filter(|item| {
+                            item.dispatch_state == PendingDispatchState::PreparedNeverAttempted
+                        })
+                        .count()
+                } else {
+                    0
+                },
                 unattempted_pending: record
                     .pending
                     .iter()
                     .filter(|item| {
-                        item.dispatch_state == PendingDispatchState::PreparedNeverAttempted
+                        !quarantined
+                            && item.dispatch_state == PendingDispatchState::PreparedNeverAttempted
                     })
                     .cloned()
                     .collect(),
@@ -157,10 +172,11 @@ impl SessionStore {
         }) {
             bail!("retired remote request identifier cannot be reused");
         }
-        if record.pending.len() >= MAX_PENDING_REQUESTS
-            || record.retired_requests.len() + record.pending.len() >= MAX_RETIRED_REQUESTS
-        {
-            bail!("remote pending capacity reached");
+        if record.retired_requests.len() + record.pending.len() >= MAX_RETIRED_REQUESTS {
+            return Err(RemoteProxyCapacityError::RetirementBudget.into());
+        }
+        if record.pending.len() >= MAX_PENDING_REQUESTS {
+            return Err(RemoteProxyCapacityError::PendingLimit.into());
         }
         record.pending.push(pending);
         validate_request_ids(&record.pending, &record.retired_requests)?;
@@ -299,7 +315,7 @@ impl SessionStore {
             bail!("remote dispatch may have been attempted");
         }
         if record.retired_requests.len() >= MAX_RETIRED_REQUESTS {
-            bail!("retired remote request capacity reached");
+            return Err(RemoteProxyCapacityError::RetirementBudget.into());
         }
         record.pending.remove(index);
         record.retired_requests.push(RetiredRemoteRequest {

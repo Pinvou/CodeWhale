@@ -55,12 +55,14 @@ impl<'a, 'de: 'a, T: Send + Sync + 'static, R: Runtime> CommandArg<'de, R>
         if !crate::platform::capabilities::current().desktop_remote_control_supported {
             return Err(InvokeError("desktop_remote_control_unsupported".into()));
         }
-        let states = command.message.state_ref();
-        if states.try_get::<DesktopRemoteReady>().is_none() {
+        // state_ref() was deprecated by the Tauri 2.12 line: the webview
+        // implements Manager and resolves the same application-wide state map.
+        let webview = command.message.webview_ref();
+        if webview.try_state::<DesktopRemoteReady>().is_none() {
             return Err(InvokeError(UNAVAILABLE.into()));
         }
-        states
-            .try_get::<T>()
+        webview
+            .try_state::<T>()
             .map(Self)
             .ok_or_else(|| InvokeError(UNAVAILABLE.into()))
     }
@@ -162,6 +164,7 @@ mod tests {
                 commands::desktop_remote_proxy::desktop_remote_proxy_history_read,
                 commands::desktop_remote_proxy::desktop_remote_proxy_history_delete,
                 commands::desktop_remote_proxy::desktop_remote_proxy_archive,
+                commands::desktop_remote_proxy::desktop_remote_proxy_quarantine,
                 commands::desktop_remote_proxy::desktop_remote_proxy_archive_list,
                 commands::desktop_remote_proxy::desktop_remote_proxy_archive_candidates,
                 commands::desktop_remote_model::desktop_remote_model_list_exportable,
@@ -183,7 +186,7 @@ mod tests {
         assert!(!is_ready(app.handle()));
         let payload = serde_json::json!({"taskId":"fixture-task", "epoch":"fixture",
             "sequence":0, "remoteSessionRef":"fixture-session", "reason":"fixture",
-            "localSessionId":"fixture-session", "remoteRef":"fixture-ref", "sessionId":"fixture-session",
+            "localSessionId":"fixture-session", "remoteRef":"fixture-ref", "sessionId":"fixture-session", "confirmed":true,
             "request":{"title":"Report","bSessionReference":null},
             "intent":{"kind":"new","text":"hello","mode":"chat","workspaceId":null,
                 "skillIds":[],"modelSource":"controlled_device","selectedModelId":null},
@@ -212,6 +215,7 @@ mod tests {
                 "proxy_history_read",
                 "proxy_history_delete",
                 "proxy_archive",
+                "proxy_quarantine",
                 "proxy_archive_list",
                 "proxy_archive_candidates",
                 "model_list_exportable",

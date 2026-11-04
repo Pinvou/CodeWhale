@@ -127,7 +127,7 @@ const formatMemoryTime = (item, copy) => {
     const SSegmented = ({ options, value, onChange }) => (
       <div data-testid="settings-segmented" className={`p-1 rounded-full flex flex-wrap justify-end gap-1 max-w-full max-sm:w-full max-sm:flex-nowrap bg-[#E1E5EA] dark:bg-[#131314]`}>
         {options.map(o => (
-          <button
+          <button type="button"
             key={o.key}
             onClick={() => onChange(o.key)}
             className={`min-w-[72px] px-4 py-2 rounded-full text-[14px] font-medium transition-colors max-sm:min-w-0 max-sm:flex-1 max-sm:px-2 ${
@@ -192,8 +192,13 @@ const formatMemoryTime = (item, copy) => {
       const remoteCopy = t.uiRemote;
       const statusColors = { idle:'#8A9097', starting:'#F9AB00', connecting_relay:'#F9AB00', waiting_web_client:'#F9AB00', web_client_connected:'#34A853', web_client_disconnected:'#F9AB00', revoked:'#EA4335', stopped:'#8A9097', error:'#EA4335' };
       const statusCopy = remoteCopy.status[statusKey];
+      // 注册终结码的稳定恢复码映射三语文案;缺码(非注册类错误)回退原文。
+      const registerHint = webAccess.last_error_code
+        ? remoteCopy.registerHints?.[webAccess.last_error_code]
+        : null;
+      const webAccessErrorText = registerHint || webAccess.last_error || null;
       const statusMeta = statusCopy
-        ? { label: statusCopy[0], detail: statusKey === 'error' ? (webAccess.last_error || statusCopy[1]) : statusCopy[1], color: statusColors[statusKey] }
+        ? { label: statusCopy[0], detail: statusKey === 'error' ? (webAccessErrorText || statusCopy[1]) : statusCopy[1], color: statusColors[statusKey] }
         : { label: String(statusKey), detail: remoteCopy.updated, color: '#8A9097' };
 
       async function handleRotateWebAccess() {
@@ -214,16 +219,36 @@ const formatMemoryTime = (item, copy) => {
         try {
           await bridge.remoteControl.stopRemoteControl();
           onClose();
-        } finally {
+        } catch { /* stop failure surfaced by the banner */ } finally {
           setActionBusy(false);
         }
       }
 
-      async function handleRetryWebAccess() {
+      // Enable only starts the link; granting host folders stays a separate explicit
+      // consent step, so a single Enable click can never latch folder authorization.
+      async function handleEnableWebAccess() {
+        if (!bridge.available) return;
+        setActionBusy(true);
+        try { await bridge.remoteControl.startRemoteControl({}); }
+        catch { /* start failure surfaced by the banner */ }
+        finally { setActionBusy(false); }
+      }
+
+      async function handleAllowHostWorkspace() {
         if (!bridge.available) return;
         setActionBusy(true);
         try { await bridge.remoteControl.startRemoteControl({ allowHostWorkspace: true }); }
-        catch (_) {}
+        catch { /* start failure surfaced by the banner */ }
+        finally { setActionBusy(false); }
+      }
+
+      // 撤销本机目录授权但保持链接：folder 授权的独立收回路径，不复用
+      // Stop（那会断开整条链接）。
+      async function handleRevokeHostWorkspace() {
+        if (!bridge.available) return;
+        setActionBusy(true);
+        try { await bridge.remoteControl.revokeRemoteHostWorkspace(); }
+        catch { /* revoke failure surfaced by the banner */ }
         finally { setActionBusy(false); }
       }
 
@@ -237,7 +262,7 @@ const formatMemoryTime = (item, copy) => {
                 <div className="text-[17px] font-semibold">{remoteCopy.title}</div>
                 <div className={`text-[12px] mt-1 text-[#5F6368] dark:text-[#AEB4BC]`}>{remoteCopy.desc}</div>
               </div>
-              <button onClick={onClose} className={`w-8 h-8 rounded-full flex items-center justify-center hover:bg-black/5 dark:hover:bg-white/10`}><X size={17} /></button>
+              <button type="button" onClick={onClose} className={`w-8 h-8 rounded-full flex items-center justify-center hover:bg-black/5 dark:hover:bg-white/10`}><X size={17} /></button>
             </div>
             <div className={`rounded-[16px] border p-3 mb-4 border-black/10 bg-[#F8F9FA] dark:border-white/10 dark:bg-white/[0.035]`}>
               <div className="flex items-start justify-between gap-3">
@@ -252,7 +277,7 @@ const formatMemoryTime = (item, copy) => {
                   <span className={`inline-flex items-center gap-1.5 px-2 py-1 rounded-full text-[11px] bg-white text-[#5F6368] dark:bg-white/5 dark:text-[#C4C7C5]`}>
                     <span className="w-1.5 h-1.5 rounded-full" style={{ background: statusMeta.color }}></span>{statusMeta.label}
                   </span>
-                  {webAccessActive && <button disabled={actionBusy} onClick={handleDisableWebAccess}
+                  {webAccessActive && <button type="button" disabled={actionBusy} onClick={handleDisableWebAccess}
                     className={`px-3 py-1.5 rounded-lg text-[12px] disabled:opacity-50 border border-black/10 hover:bg-black/5 dark:border dark:border-white/10 dark:hover:bg-white/10`}>{remoteCopy.stop}</button>}
                 </div>
               </div>
@@ -273,19 +298,32 @@ const formatMemoryTime = (item, copy) => {
               </div>
             ) : (
               <div className={`text-[13px] px-3 py-4 rounded-xl bg-[#F1F3F4] text-[#3C4043] dark:bg-white/5 dark:text-[#C4C7C5]`}>
-                {webAccess.starting ? remoteCopy.generating : (webAccess.last_error || remoteCopy.notStarted)}
+                {/* 错误文本已由状态行 detail 与红色横幅各渲染一次;占位盒退回
+                    「未开启」缺省,同一句恢复提示不再在弹窗里连排三遍。 */}
+                {webAccess.starting
+                  ? remoteCopy.generating
+                  : (statusKey === 'error' ? remoteCopy.notStarted : (webAccessErrorText || remoteCopy.notStarted))}
               </div>
             )}
-            {webAccess.last_error && <div className="mt-3 text-[12px] text-[#EA4335] break-all">{webAccess.last_error}</div>}
+            {webAccessErrorText && <div className="mt-3 text-[12px] text-[#EA4335] break-all">{webAccessErrorText}</div>}
+            {webAccessActive && hostWorkspaceAuthorized && (
+              // 授权状态 affirmative 可见 + 可单独撤销:旧版本「开启访问」顺带
+              // 写下的 allow_host_workspace 不再只能靠 Stop 整体清除。
+              <div className="mt-3 flex items-center justify-between gap-2 rounded-xl px-3 py-2 bg-[#E6F4EA] dark:bg-[#0D2B1A]">
+                <span className="text-[12px] text-[#137333] dark:text-[#81C995]">{remoteCopy.workspaceAllowed}</span>
+                <button type="button" disabled={actionBusy} onClick={handleRevokeHostWorkspace}
+                  className={`px-3 py-1.5 rounded-lg text-[12px] disabled:opacity-50 border border-[#137333]/30 text-[#137333] hover:bg-black/5 dark:border-[#81C995]/30 dark:text-[#81C995] dark:hover:bg-white/10`}>{remoteCopy.revokeWorkspace}</button>
+              </div>
+            )}
             <div className="mt-4 flex items-center justify-end gap-2">
               <button type="button" onClick={() => { if (webAccess.url) copyClipboardText(webAccess.url); }}
-                disabled={!webAccess.url}
+                disabled={actionBusy || !webAccess.url}
                 className={`px-3.5 py-2 rounded-full text-[13px] bg-black/5 hover:bg-black/10 disabled:opacity-40 dark:bg-white/10 dark:hover:bg-white/15 dark:disabled:opacity-40`}>{remoteCopy.copy}</button>
-              {webAccessActive && !hostWorkspaceAuthorized && <button disabled={actionBusy} onClick={handleRetryWebAccess}
+              {webAccessActive && !hostWorkspaceAuthorized && <button type="button" disabled={actionBusy} onClick={handleAllowHostWorkspace}
                 className="px-3.5 py-2 rounded-full text-[13px] bg-[#0B57D0] text-white hover:bg-[#0A4BB8] disabled:opacity-50 dark:bg-[#A8C7FA] dark:text-[#062E6F] dark:hover:bg-[#C2DBFF]">{remoteCopy.allowWorkspace}</button>}
-              {webAccessActive ? <button disabled={actionBusy} onClick={() => setRefreshConfirmOpen(true)}
+              {webAccessActive ? <button type="button" disabled={actionBusy} onClick={() => setRefreshConfirmOpen(true)}
                 className={`px-3.5 py-2 rounded-full text-[13px] disabled:opacity-50 bg-black/5 hover:bg-black/10 dark:bg-white/10 dark:hover:bg-white/15`}>{remoteCopy.refresh}</button>
-                : <button disabled={actionBusy} onClick={handleRetryWebAccess}
+                : <button type="button" disabled={actionBusy} onClick={handleEnableWebAccess}
                   className="px-3.5 py-2 rounded-full text-[13px] bg-[#0B57D0] text-white hover:bg-[#0A4BB8] disabled:opacity-50 dark:bg-[#A8C7FA] dark:text-[#062E6F] dark:hover:bg-[#C2DBFF]">{remoteCopy.enable}</button>}
             </div>
             {refreshConfirmOpen && (
@@ -294,8 +332,8 @@ const formatMemoryTime = (item, copy) => {
                   <div className="text-[16px] font-semibold">{remoteCopy.refreshTitle}</div>
                   <div className={`text-[13px] leading-relaxed mt-2 text-[#5F6368] dark:text-[#B7BBC0]`}>{remoteCopy.refreshDesc}</div>
                   <div className="mt-5 flex justify-end gap-2">
-                    <button disabled={actionBusy} onClick={() => setRefreshConfirmOpen(false)} className={`px-4 py-2 rounded-lg text-[13px] bg-black/5 hover:bg-black/10 dark:bg-white/5 dark:hover:bg-white/10`}>{t.cancel}</button>
-                    <button disabled={actionBusy} onClick={handleRotateWebAccess} className="px-4 py-2 rounded-lg text-[13px] font-medium bg-[#0B57D0] text-white hover:bg-[#0A4BB8] disabled:opacity-60 dark:bg-[#A8C7FA] dark:text-[#062E6F] dark:hover:bg-[#C2DBFF]">{actionBusy ? remoteCopy.refreshing : remoteCopy.refresh}</button>
+                    <button type="button" disabled={actionBusy} onClick={() => setRefreshConfirmOpen(false)} className={`px-4 py-2 rounded-lg text-[13px] bg-black/5 hover:bg-black/10 dark:bg-white/5 dark:hover:bg-white/10`}>{t.cancel}</button>
+                    <button type="button" disabled={actionBusy} onClick={handleRotateWebAccess} className="px-4 py-2 rounded-lg text-[13px] font-medium bg-[#0B57D0] text-white hover:bg-[#0A4BB8] disabled:opacity-60 dark:bg-[#A8C7FA] dark:text-[#062E6F] dark:hover:bg-[#C2DBFF]">{actionBusy ? remoteCopy.refreshing : remoteCopy.refresh}</button>
                   </div>
                 </div>
               </div>
@@ -1227,7 +1265,7 @@ const formatMemoryTime = (item, copy) => {
                   <h2 className="text-[20px] leading-6 font-semibold">{t.modelFormAddTitle}</h2>
                   <p className={`mt-1 text-[13px] leading-[18px] text-[#8A8A8E] dark:text-[#98989D]`}>{settingsCopy.chooseModelDesc}</p>
                 </div>
-                <button data-testid="model-form-cancel" onClick={onCancel} className={`h-9 w-9 shrink-0 rounded-full flex items-center justify-center bg-[#E5E5EA] text-[#636366] dark:bg-white/[0.08] dark:text-[#C7C7CC]`}><X size={18} /></button>
+                <button type="button" data-testid="model-form-cancel" onClick={onCancel} className={`h-9 w-9 shrink-0 rounded-full flex items-center justify-center bg-[#E5E5EA] text-[#636366] dark:bg-white/[0.08] dark:text-[#C7C7CC]`}><X size={18} /></button>
               </div>
               <div className="px-5 pt-4">
                 <div className={`p-1 rounded-full grid grid-cols-2 gap-1 bg-[#F2F2F7] dark:bg-[#2C2C2E]`}>
@@ -1259,7 +1297,7 @@ const formatMemoryTime = (item, copy) => {
                 <h2 className="text-[20px] leading-6 font-semibold">{modalTitle}</h2>
                 <p className={`mt-1 text-[13px] leading-[18px] text-[#8A8A8E] dark:text-[#98989D]`}>{isLocalPreset ? selectedModelLabel : `${isCodingPlan ? `Coding Plan · ${settingsCopy.toolCalling}` : selectedProvider + ' · ' + selectedModelLabel}`}</p>
               </div>
-              <button data-testid="model-form-cancel" onClick={onCancel} className={`h-9 w-9 shrink-0 rounded-full flex items-center justify-center bg-[#E5E5EA] text-[#636366] dark:bg-white/[0.08] dark:text-[#C7C7CC]`}><X size={18} /></button>
+              <button type="button" data-testid="model-form-cancel" onClick={onCancel} className={`h-9 w-9 shrink-0 rounded-full flex items-center justify-center bg-[#E5E5EA] text-[#636366] dark:bg-white/[0.08] dark:text-[#C7C7CC]`}><X size={18} /></button>
             </div>
             <div className="space-y-4 px-5 py-4">
               <div className={`overflow-hidden rounded-[18px] border border-black/[0.08] bg-white dark:border-white/[0.10] dark:bg-[#2C2C2E]`}>
@@ -1403,7 +1441,7 @@ const formatMemoryTime = (item, copy) => {
                     <>
                       <span className={`text-[12px] text-[#137333] dark:text-[#93D5A6]`}>{t.vllmDetectFound(detectResult.candidates.length)}</span>
                       {detectResult.candidates.map(c => (
-                        <button key={c.base_url} onClick={() => applyCandidate(c)}
+                        <button type="button" key={c.base_url} onClick={() => applyCandidate(c)}
                           className={`w-full text-left rounded-lg border px-3 py-2 transition-colors border-[#E0E3E7] hover:bg-[#F0F4F9] dark:border-[#333537] dark:hover:bg-[#2A2B2D]`}>
                           <div className={`text-[13px] truncate text-[#1F1F1F] dark:text-[#E3E3E3]`}>{c.base_url}</div>
                           <div className={`text-[11px] truncate text-[#5F6368] dark:text-[#9AA0A6]`}>
@@ -1428,8 +1466,8 @@ const formatMemoryTime = (item, copy) => {
               </div>
             )}
             <div className={`flex justify-end gap-2 px-5 py-4 border-t ${formDivider}`}>
-              <button data-testid="model-form-cancel" onClick={onCancel} className={`h-10 px-4 rounded-full text-[15px] font-normal transition-colors text-[#007AFF] hover:bg-black/[0.04] dark:text-[#0A84FF] dark:hover:bg-white/[0.06]`}>{t.cpCancel}</button>
-              <button data-testid="model-form-save" onClick={() => doSave()} disabled={!canSave || savingModel}
+              <button type="button" data-testid="model-form-cancel" onClick={onCancel} className={`h-10 px-4 rounded-full text-[15px] font-normal transition-colors text-[#007AFF] hover:bg-black/[0.04] dark:text-[#0A84FF] dark:hover:bg-white/[0.06]`}>{t.cpCancel}</button>
+              <button type="button" data-testid="model-form-save" onClick={() => doSave()} disabled={!canSave || savingModel}
                 className="h-10 px-5 rounded-full bg-[#007AFF] text-white text-[15px] font-semibold transition-colors disabled:opacity-35">
                 {savingModel ? settingsCopy.saving : t.modelSaveBtn}
               </button>
@@ -2519,7 +2557,7 @@ const formatMemoryTime = (item, copy) => {
         const title = alias || m.model || m.name;
         return (
           <div key={m.id} className={`min-h-[60px] grid grid-cols-[24px_32px_minmax(0,1fr)_auto] items-center gap-3 px-4 py-3 border-b last:border-b-0 border-black/[0.12] dark:border-white/[0.10]`}>
-            <button onClick={() => !isActive && onSetActiveModel(m.id)} className="shrink-0" title={t.setActiveModel}>
+            <button type="button" onClick={() => !isActive && onSetActiveModel(m.id)} className="shrink-0" title={t.setActiveModel}>
               <RadioDot active={isActive} />
             </button>
             <ProviderIcon preset={m.preset || (isLocal ? 'local_vllm' : 'openai_compatible')} vendor={m.vendor} providerKind={m.provider_kind} model={m.model} compact />
@@ -2545,7 +2583,7 @@ const formatMemoryTime = (item, copy) => {
                       <option value={m.model || ''}>{t.builtinModelEmpty}</option>
                     ) : builtinAvailableModels.map(model => <option key={model} value={model}>{model}</option>)}
                   </select>
-                  <button onClick={refreshBuiltinModels} disabled={llmApiModelBusy}
+                  <button type="button" onClick={refreshBuiltinModels} disabled={llmApiModelBusy}
                     className={`min-h-8 px-3 rounded-full text-[14px] font-medium disabled:opacity-50 ${actionButton('blue')}`}>
                     {llmApiModelBusy ? t.builtinModelLoading : t.builtinModelRefresh}
                   </button>
@@ -2553,8 +2591,8 @@ const formatMemoryTime = (item, copy) => {
               )}
             </div>
             <div className="shrink-0 flex items-center gap-2">
-              {!isReadonly && <button onClick={() => setEditingModel({ ...m, __scope: isLocal ? 'local' : 'cloud' })} className={`min-h-8 px-3 rounded-full text-[14px] font-medium ${actionButton('blue')}`}>{settingsCopy.edit}</button>}
-              {!isReadonly && total > 1 && <button onClick={() => setModelDeleteConfirm(m)} className={`min-h-8 px-3 rounded-full text-[14px] font-medium ${actionButton('red')}`}>{settingsCopy.delete}</button>}
+              {!isReadonly && <button type="button" onClick={() => setEditingModel({ ...m, __scope: isLocal ? 'local' : 'cloud' })} className={`min-h-8 px-3 rounded-full text-[14px] font-medium ${actionButton('blue')}`}>{settingsCopy.edit}</button>}
+              {!isReadonly && total > 1 && <button type="button" onClick={() => setModelDeleteConfirm(m)} className={`min-h-8 px-3 rounded-full text-[14px] font-medium ${actionButton('red')}`}>{settingsCopy.delete}</button>}
             </div>
           </div>
         );
@@ -2773,7 +2811,7 @@ const formatMemoryTime = (item, copy) => {
                   </>
                 );
               })()}
-              <button data-testid="settings-model-add" onClick={() => setEditingModel(newModelDraft('deepseek'))}
+              <button type="button" data-testid="settings-model-add" onClick={() => setEditingModel(newModelDraft('deepseek'))}
                 className={`w-full min-h-[52px] flex items-center justify-center gap-2 px-4 text-[16px] font-normal border-t border-black/[0.12] text-[#007AFF] hover:bg-black/[0.035] dark:border-white/[0.10] dark:text-[#0A84FF] dark:hover:bg-white/[0.05]`}>
                 <Plus size={18} />
                 <span>{settingsCopy.addModel}</span>
@@ -2793,7 +2831,7 @@ const formatMemoryTime = (item, copy) => {
             {enabledSearchList.map(item => {
               return (
                 <div key={item.key} className={`min-h-[60px] grid grid-cols-[24px_minmax(0,1fr)_auto] items-center gap-[14px] px-4 py-3 border-b last:border-b-0 border-black/[0.12] dark:border-white/[0.10]`}>
-                  <button onClick={() => { setSearchProvider(item.key); setRestartDialog('search'); }} className="shrink-0" title={settingsCopy.setDefault}>
+                  <button type="button" onClick={() => { setSearchProvider(item.key); setRestartDialog('search'); }} className="shrink-0" title={settingsCopy.setDefault}>
                     <RadioDot active={searchProvider === item.key} />
                   </button>
                   <div className="min-w-0">
@@ -2804,13 +2842,13 @@ const formatMemoryTime = (item, copy) => {
                     <div className={`mt-0.5 text-[12px] leading-[17px] truncate text-[#8A8A8E] dark:text-[#98989D]`}>{item.desc}</div>
                   </div>
                   <div className="flex items-center gap-2">
-                    {item.key !== 'bing' && <button onClick={() => { setPendingSearchProvider(null); setEditingSearch(item.key); }} className={`shrink-0 min-h-8 px-3 rounded-full text-[14px] font-medium ${actionButton('blue')}`}>{settingsCopy.edit}</button>}
-                    {item.key !== 'bing' && <button onClick={() => setSearchDeleteConfirm(item)} className={`shrink-0 min-h-8 px-3 rounded-full text-[14px] font-medium ${actionButton('red')}`}>{settingsCopy.delete}</button>}
+                    {item.key !== 'bing' && <button type="button" onClick={() => { setPendingSearchProvider(null); setEditingSearch(item.key); }} className={`shrink-0 min-h-8 px-3 rounded-full text-[14px] font-medium ${actionButton('blue')}`}>{settingsCopy.edit}</button>}
+                    {item.key !== 'bing' && <button type="button" onClick={() => setSearchDeleteConfirm(item)} className={`shrink-0 min-h-8 px-3 rounded-full text-[14px] font-medium ${actionButton('red')}`}>{settingsCopy.delete}</button>}
                   </div>
                 </div>
               );
             })}
-            <button onClick={() => setSearchPickerOpen(true)}
+            <button type="button" onClick={() => setSearchPickerOpen(true)}
               className={`w-full min-h-[52px] flex items-center justify-center gap-2 px-4 text-[16px] font-normal border-t border-black/[0.12] text-[#007AFF] hover:bg-black/[0.035] dark:border-white/[0.10] dark:text-[#0A84FF] dark:hover:bg-white/[0.05]`}>
               <Plus size={18} />
               <span>{settingsCopy.addSearch}</span>
@@ -2918,8 +2956,8 @@ const formatMemoryTime = (item, copy) => {
             <IOSSection title={settingsCopy.hiddenTasks}>
               {archivedSessions.length ? archivedSessions.map(s => (
                 <IOSRow key={s.id} label={s.title || t.newChat} desc={settingsCopy.archivedAt(formatSessionDate(s.archived_at || s.updated_at || s.created_at, language))}>
-                  <button onClick={() => onRestoreArchived && onRestoreArchived(s.id)} className={`shrink-0 text-[14px] px-3 py-1.5 rounded-full ${actionButton('blue')}`}>{settingsCopy.restore}</button>
-                  <button onClick={() => setArchivedDeleteConfirm(s)} className={`shrink-0 text-[14px] px-3 py-1.5 rounded-full ${actionButton('red')}`}>{settingsCopy.delete}</button>
+                  <button type="button" onClick={() => onRestoreArchived && onRestoreArchived(s.id)} className={`shrink-0 text-[14px] px-3 py-1.5 rounded-full ${actionButton('blue')}`}>{settingsCopy.restore}</button>
+                  <button type="button" onClick={() => setArchivedDeleteConfirm(s)} className={`shrink-0 text-[14px] px-3 py-1.5 rounded-full ${actionButton('red')}`}>{settingsCopy.delete}</button>
                 </IOSRow>
               )) : <IOSRow label={settingsCopy.noHiddenTasks} desc={settingsCopy.noHiddenTasksDesc} />}
             </IOSSection>
@@ -2973,7 +3011,7 @@ const formatMemoryTime = (item, copy) => {
             <IOSSection title={t.uiSettings.version}>
               <IOSRow label={t.uiSettings.currentVersion} desc={t.uiSettings.beta} value={`v${currentVersion}`} />
               <IOSRow label={upd && upd.available ? t.newVersionFound : t.checkUpdate} desc={updateStatusDesc}>
-              <button data-settings-update-action="true" onClick={handleUpdateAction} disabled={updateButtonDisabled} className="h-9 px-4 rounded-full bg-[#007AFF] text-white text-[14px] font-semibold whitespace-nowrap disabled:opacity-50 disabled:cursor-not-allowed">{updateButtonLabel}</button>
+              <button type="button" data-settings-update-action="true" onClick={handleUpdateAction} disabled={updateButtonDisabled} className="h-9 px-4 rounded-full bg-[#007AFF] text-white text-[14px] font-semibold whitespace-nowrap disabled:opacity-50 disabled:cursor-not-allowed">{updateButtonLabel}</button>
             </IOSRow>
             </IOSSection>
             {updateError && (
@@ -3020,7 +3058,7 @@ const formatMemoryTime = (item, copy) => {
                   label={checking ? t.depChecking : (!checked ? t.depCheckTitle : (missing.length ? `${missing.length}${t.depMissingSuffix}` : t.depAllOk))}
                   desc={progressText || (installing ? t.depInstalling : (installError ? String(installError) : ''))}
                 >
-                  <button
+                  <button type="button"
                     onClick={() => bridge.available && bridge.dependencies.checkDependencies()}
                     disabled={!bridge.available || busy}
                     className={`h-9 px-4 rounded-full text-[14px] font-semibold disabled:opacity-50 bg-[#E5E5EA] text-[#007AFF] dark:bg-white/[0.08] dark:text-[#0A84FF]`}
@@ -3033,7 +3071,7 @@ const formatMemoryTime = (item, copy) => {
                 ))}
                 {hasInstallableMissing && (
                   <IOSRow label={usesBundledDependencyInstaller ? settingsCopy.installMissing : t.depGoInstall}>
-                    <button
+                    <button type="button"
                       onClick={() => bridge.available && bridge.dependencies.installDependencies()}
                       disabled={!bridge.available || busy}
                       className="h-9 px-4 rounded-full bg-[#007AFF] text-white text-[14px] font-semibold disabled:opacity-50"
@@ -3050,7 +3088,7 @@ const formatMemoryTime = (item, copy) => {
           <DiagnosticsPanel copy={t.diagnostics} />
           <IOSSection>
             <IOSRow label={settingsCopy.feedbackTitle} desc={settingsCopy.feedbackDesc}>
-              <button onClick={() => setFeedbackOpen(true)} className="h-9 px-4 rounded-full bg-[#007AFF] text-white text-[14px] font-semibold">{settingsCopy.submitFeedback}</button>
+              <button type="button" onClick={() => setFeedbackOpen(true)} className="h-9 px-4 rounded-full bg-[#007AFF] text-white text-[14px] font-semibold">{settingsCopy.submitFeedback}</button>
             </IOSRow>
           </IOSSection>
           <IOSSection>
@@ -3138,7 +3176,7 @@ const formatMemoryTime = (item, copy) => {
               </div>
             </aside>
             {onCloseSettings && (
-              <button data-testid="settings-close" onClick={onCloseSettings} aria-label={settingsCopy.closeSettings} className={`sm:absolute sm:right-5 sm:top-5 z-20 h-9 w-9 shrink-0 max-sm:mr-3 rounded-full flex items-center justify-center bg-[#E5E5EA] text-[#636366] dark:bg-white/[0.08] dark:text-[#C7C7CC]`}>
+              <button type="button" data-testid="settings-close" onClick={onCloseSettings} aria-label={settingsCopy.closeSettings} className={`sm:absolute sm:right-5 sm:top-5 z-20 h-9 w-9 shrink-0 max-sm:mr-3 rounded-full flex items-center justify-center bg-[#E5E5EA] text-[#636366] dark:bg-white/[0.08] dark:text-[#C7C7CC]`}>
                 <X size={18} />
               </button>
             )}
@@ -3193,7 +3231,7 @@ const formatMemoryTime = (item, copy) => {
                     <h2 className="text-[20px] leading-6 font-semibold">{settingsCopy.addSearch}</h2>
                     <p className={`mt-1 text-[13px] leading-[18px] text-[#8A8A8E] dark:text-[#98989D]`}>{settingsCopy.addSearchDesc}</p>
                   </div>
-                  <button onClick={() => setSearchPickerOpen(false)} className={`h-9 w-9 shrink-0 rounded-full flex items-center justify-center bg-[#E5E5EA] text-[#636366] dark:bg-white/[0.08] dark:text-[#C7C7CC]`}><X size={18} /></button>
+                  <button type="button" onClick={() => setSearchPickerOpen(false)} className={`h-9 w-9 shrink-0 rounded-full flex items-center justify-center bg-[#E5E5EA] text-[#636366] dark:bg-white/[0.08] dark:text-[#C7C7CC]`}><X size={18} /></button>
                 </div>
                 <div className="px-5 py-4">
                   <div className={`overflow-hidden rounded-[16px] bg-[#F2F2F7] dark:bg-[#2C2C2E]`}>
@@ -3230,7 +3268,7 @@ const formatMemoryTime = (item, copy) => {
                     <h2 className="text-[22px] leading-7 font-semibold">{memoryEditor.title}</h2>
                     <p className={`mt-1 text-[13px] leading-[18px] text-[#8A8A8E] dark:text-[#98989D]`}>{memoryEditor.subtitle}</p>
                   </div>
-                  <button onClick={() => setMemoryEditor(null)} disabled={memorySaving} className={`h-10 w-10 rounded-full flex items-center justify-center bg-[#E5E5EA] dark:bg-white/[0.08] disabled:opacity-40`}><X size={20} /></button>
+                  <button type="button" onClick={() => setMemoryEditor(null)} disabled={memorySaving} className={`h-10 w-10 rounded-full flex items-center justify-center bg-[#E5E5EA] dark:bg-white/[0.08] disabled:opacity-40`}><X size={20} /></button>
                 </div>
                 <div className="px-6 py-5">
                   <label className="block">
@@ -3253,8 +3291,8 @@ const formatMemoryTime = (item, copy) => {
                   </label>
                   {memoryEditorError && <div data-testid="memory-editor-error" role="alert" aria-live="assertive" className="mt-3 text-[13px] leading-5 text-[#FF3B30]">{settingsCopy.memorySaveFailed}</div>}
                   <div className="mt-6 flex justify-end gap-2.5">
-                    <button onClick={() => setMemoryEditor(null)} disabled={memorySaving} className={`h-10 px-4 rounded-full text-[14px] font-semibold bg-[#E5E5EA] dark:bg-[#2C2C2E] disabled:opacity-40`}>{settingsCopy.cancel}</button>
-                    <button data-testid="memory-editor-save" onClick={saveMemoryEditor} disabled={memorySaving} className="h-10 px-4 rounded-full bg-[#007AFF] text-white text-[14px] font-semibold disabled:opacity-40">{memorySaving ? settingsCopy.saving : settingsCopy.save}</button>
+                    <button type="button" onClick={() => setMemoryEditor(null)} disabled={memorySaving} className={`h-10 px-4 rounded-full text-[14px] font-semibold bg-[#E5E5EA] dark:bg-[#2C2C2E] disabled:opacity-40`}>{settingsCopy.cancel}</button>
+                    <button type="button" data-testid="memory-editor-save" onClick={saveMemoryEditor} disabled={memorySaving} className="h-10 px-4 rounded-full bg-[#007AFF] text-white text-[14px] font-semibold disabled:opacity-40">{memorySaving ? settingsCopy.saving : settingsCopy.save}</button>
                   </div>
                 </div>
               </div>
@@ -3282,7 +3320,7 @@ const formatMemoryTime = (item, copy) => {
                     <h2 className="text-[20px] leading-6 font-semibold">{t.feedbackDialogTitle}</h2>
                     <p className={`mt-1 text-[13px] leading-[18px] text-[#8A8A8E] dark:text-[#98989D]`}>{t.feedbackDesc}</p>
                   </div>
-                  <button onClick={closeFeedback} className={`h-9 w-9 shrink-0 rounded-full flex items-center justify-center bg-[#E5E5EA] text-[#636366] dark:bg-white/[0.08] dark:text-[#C7C7CC]`}><X size={18} /></button>
+                  <button type="button" onClick={closeFeedback} className={`h-9 w-9 shrink-0 rounded-full flex items-center justify-center bg-[#E5E5EA] text-[#636366] dark:bg-white/[0.08] dark:text-[#C7C7CC]`}><X size={18} /></button>
                 </div>
                 <div className="space-y-4 px-5 py-4">
                   <section>
@@ -3318,14 +3356,14 @@ const formatMemoryTime = (item, copy) => {
                             {feedbackDraft.attachments.length > 0 ? `${feedbackDraft.attachments.length}/5` : t.feedbackNoAttachments}
                           </div>
                         </div>
-                        {canPickHostFiles && <button onClick={pickFeedbackAttachments} className="shrink-0 text-[14px] text-[#007AFF]">{t.feedbackAddAttachment}</button>}
+                        {canPickHostFiles && <button type="button" onClick={pickFeedbackAttachments} className="shrink-0 text-[14px] text-[#007AFF]">{t.feedbackAddAttachment}</button>}
                       </div>
                       {feedbackDraft.attachments.length > 0 && (
                         <div>
                         {feedbackDraft.attachments.map((a, idx) => (
                           <div key={`${a.path}-${idx}`} className={`min-h-[48px] flex items-center justify-between gap-3 px-4 py-2.5 border-b last:border-b-0 border-black/[0.10] dark:border-white/[0.10]`}>
                             <span className={`min-w-0 truncate text-[13px] text-[#636366] dark:text-[#C7C7CC]`}>{a.name}</span>
-                            <button onClick={() => setFeedbackDraft(prev => ({ ...prev, attachments: prev.attachments.filter((_, i) => i !== idx) }))} className="shrink-0 text-[14px] text-[#FF3B30]">{t.cpDelete}</button>
+                            <button type="button" onClick={() => setFeedbackDraft(prev => ({ ...prev, attachments: prev.attachments.filter((_, i) => i !== idx) }))} className="shrink-0 text-[14px] text-[#FF3B30]">{t.cpDelete}</button>
                           </div>
                         ))}
                         </div>
@@ -3341,11 +3379,11 @@ const formatMemoryTime = (item, copy) => {
                   )}
                 </div>
                 <div className={`flex justify-end gap-2 px-5 py-4 border-t border-black/[0.10] dark:border-white/[0.10]`}>
-                    <button onClick={closeFeedback} className={`h-10 px-4 rounded-full text-[15px] font-normal transition-colors text-[#007AFF] hover:bg-black/[0.04] dark:text-[#0A84FF] dark:hover:bg-white/[0.06]`}>{t.cancel}</button>
+                    <button type="button" onClick={closeFeedback} className={`h-10 px-4 rounded-full text-[15px] font-normal transition-colors text-[#007AFF] hover:bg-black/[0.04] dark:text-[#0A84FF] dark:hover:bg-white/[0.06]`}>{t.cancel}</button>
                     {feedbackStatus.state === 'failed_retryable' && (
-                      <button onClick={submitFeedbackDraft} className={`h-10 px-4 rounded-full text-[15px] font-normal transition-colors text-[#007AFF] hover:bg-black/[0.04] dark:text-[#0A84FF] dark:hover:bg-white/[0.06]`}>{t.feedbackRetry}</button>
+                      <button type="button" onClick={submitFeedbackDraft} className={`h-10 px-4 rounded-full text-[15px] font-normal transition-colors text-[#007AFF] hover:bg-black/[0.04] dark:text-[#0A84FF] dark:hover:bg-white/[0.06]`}>{t.feedbackRetry}</button>
                     )}
-                    <button onClick={submitFeedbackDraft} disabled={feedbackStatus.state === 'submitting'} className="h-10 px-5 rounded-full bg-[#007AFF] text-white text-[15px] font-semibold disabled:opacity-35">
+                    <button type="button" onClick={submitFeedbackDraft} disabled={feedbackStatus.state === 'submitting'} className="h-10 px-5 rounded-full bg-[#007AFF] text-white text-[15px] font-semibold disabled:opacity-35">
                       {feedbackStatus.state === 'submitting' ? t.feedbackSubmitting : t.feedbackSubmit}
                     </button>
                 </div>

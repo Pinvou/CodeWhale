@@ -649,6 +649,7 @@ mod attachment_record_tests {
     #[test]
     fn attachment_display_protocol_preserves_delimiter_inside_filename() {
         let attachments = vec![IngestResult {
+            read_owner: None,
             kind: "xlsx".into(),
             basename: "预算 · 最终.xlsx".into(),
             path: "/tmp/预算 · 最终.xlsx".into(),
