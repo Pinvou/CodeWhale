@@ -8,8 +8,8 @@
 //!   approval policy → request-time runtime metadata.
 //! Tool availability comes only from the per-turn model catalog.
 //!
-//! Keeping every layer's text in one module makes prompt tuning a
-//! single-file operation.
+//! Every layer's text stays a compile-time constant — this module and
+//! `text`, per the split above.
 
 use crate::models::{SystemBlock, SystemPrompt};
 use crate::project_context::load_project_context_with_parents;
@@ -3136,7 +3136,7 @@ mod tests {
     }
 
     #[test]
-    fn handoff_artifact_is_prepended_to_system_prompt_when_present() {
+    fn handoff_artifact_is_included_in_the_system_prompt_when_present() {
         let tmp = tempdir().expect("tempdir");
         let workspace = tmp.path();
         let handoff_dir = workspace.join(".deepseek");
