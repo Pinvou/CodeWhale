@@ -9383,6 +9383,19 @@ mod tests {
                 "https://api.kimi.com/coding/v1",
                 "k3.1-pro-highspeed",
             ),
+            // The official overseas Kimi Code alias the host catalog
+            // registers and prefs preserves verbatim (review P2,
+            // pinjou-agent#825): the replay contract must hold there too.
+            (
+                "kimi code overseas",
+                "https://api.kimi.ai/coding/v1",
+                "k3.1-pro",
+            ),
+            (
+                "kimi code overseas highspeed",
+                "https://api.kimi.ai/coding/v1",
+                "k3.1-pro-highspeed",
+            ),
         ] {
             let request = MessageRequest {
                 model: model.to_string(),
