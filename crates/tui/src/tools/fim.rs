@@ -297,4 +297,63 @@ mod tests {
             "unique anchors must reach the API boundary: {message}"
         );
     }
+
+    #[tokio::test]
+    async fn empty_prefix_anchor_is_refused_with_char_boundary_count() {
+        // An empty anchor matches at every char boundary including EOF, so
+        // the count is characters + 1 — not bytes + 1. The multi-byte
+        // fixture pins the char-boundary semantics against a byte-offset
+        // refactor ("hé\n" = 3 chars / 4 bytes → 4 locations, not 5).
+        let (_tmp, context) = workspace_with("hé\n");
+        let message = execution_error(
+            serde_json::json!({
+                "path": "sample.txt",
+                "prefix_anchor": "",
+                "suffix_anchor": "é",
+            }),
+            &context,
+        )
+        .await;
+        assert!(message.contains("matches 4 locations"), "{message}");
+        assert!(message.contains("exactly once"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn suffix_occurrences_before_the_prefix_do_not_count() {
+        // Only the region after the prefix participates in the uniqueness
+        // check: an earlier occurrence is invisible, and one suffix after
+        // the prefix passes validation.
+        let (_tmp, context) = workspace_with("return 1\nhead\nmid\nreturn 1\ntail\n");
+        let message = execution_error(
+            serde_json::json!({
+                "path": "sample.txt",
+                "prefix_anchor": "head",
+                "suffix_anchor": "return 1",
+            }),
+            &context,
+        )
+        .await;
+        assert!(
+            message.contains("FIM API client not available"),
+            "one suffix after the prefix must pass validation: {message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn suffix_only_before_the_prefix_is_not_found() {
+        let (_tmp, context) = workspace_with("return 1\nhead\nmid\ntail\n");
+        let message = execution_error(
+            serde_json::json!({
+                "path": "sample.txt",
+                "prefix_anchor": "head",
+                "suffix_anchor": "return 1",
+            }),
+            &context,
+        )
+        .await;
+        assert!(
+            message.contains("Suffix anchor not found after prefix anchor"),
+            "{message}"
+        );
+    }
 }
