@@ -1918,6 +1918,14 @@ mod tests {
         assert!(note.contains("downsampled to 2048x1024"), "{note}");
         assert!(note.contains("fine detail may be lost"), "{note}");
         assert!(
+            note.contains("(encoded payload)"),
+            "size line must label the pre-base64 bytes as encoded payload: {note}"
+        );
+        assert!(
+            !note.contains("(wire payload)"),
+            "the pre-base64 size must not be labeled as the wire payload: {note}"
+        );
+        assert!(
             note.contains(
                 "call read_media again with the crop parameter (original-image pixel coordinates)"
             ),
