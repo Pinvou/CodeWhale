@@ -1006,6 +1006,15 @@ pub struct CompactionResult {
     pub messages: Vec<Message>,
     /// Host-persistence copy of the history checkpoint.
     pub summary_prompt: Option<SystemPrompt>,
+    /// The local summary builder's origin map for `messages` (see
+    /// `last_round::ReplacementHistory`): `Some` only when the summary path
+    /// authored the replacement, with `map[i]` naming the pre-compaction
+    /// history index `messages[i]` was carried from (`None` for the appended
+    /// checkpoint). `None` for every other shape — the mechanical PruneOnly
+    /// prune keeps every slot, so positional records stay exact there, and a
+    /// caller that cannot map a replacement slot-for-slot must treat its
+    /// positional bookkeeping as vacated.
+    pub summary_origins: Option<Vec<Option<usize>>>,
     /// Number of retries used before success
     pub retries_used: u32,
     /// Last-round coverage for inspector receipts.
@@ -1186,6 +1195,10 @@ pub async fn compact_messages_safe(
             return Ok(CompactionResult {
                 messages: kept,
                 summary_prompt: None,
+                // An in-place mechanical prune keeps every slot, so there is
+                // nothing to relocate (the layout check re-anchors the
+                // entries directly).
+                summary_origins: None,
                 retries_used: 0,
                 coverage,
             });
@@ -1218,7 +1231,7 @@ pub async fn compact_messages_safe(
         )
         .await
         {
-            Ok((msgs, prompt, mut coverage)) => {
+            Ok((msgs, prompt, mut coverage, origins)) => {
                 let kept = sanitize_retained_messages(msgs);
                 last_round::validate_last_round_coverage(compaction_input, &kept)?;
                 let keep: CompactionKeep = inspect_compaction_keep(&kept);
@@ -1228,6 +1241,10 @@ pub async fn compact_messages_safe(
                 return Ok(CompactionResult {
                     messages: kept,
                     summary_prompt: prompt,
+                    // `sanitize_retained_messages` rewrites oversized blocks
+                    // in place, so the builder's origin map still describes
+                    // `kept` slot for slot.
+                    summary_origins: Some(origins),
                     retries_used: attempt.saturating_add(quality_retries),
                     coverage,
                 });
@@ -1273,9 +1290,25 @@ pub(crate) fn retained_user_messages(
     messages: &[Message],
     max_tokens: usize,
 ) -> Vec<Message> {
+    retained_user_messages_with_origins(checkpoints, messages, max_tokens).0
+}
+
+/// [`retained_user_messages`] plus each selected message's origin: the
+/// parallel result carries, for every rebuilt message, the index it was
+/// carried from in `messages`. The selection is value-preserving (newest
+/// texts may be prefix-truncated to fit), so the origin is what a caller
+/// needs to keep positional bookkeeping — e.g. the standing-baseline
+/// entries the summary replacement relocates — aligned with the turn a
+/// record was taken for.
+pub(crate) fn retained_user_messages_with_origins(
+    checkpoints: crate::history_recognition::CheckpointEra,
+    messages: &[Message],
+    max_tokens: usize,
+) -> (Vec<Message>, Vec<Option<usize>>) {
     let mut selected: Vec<Message> = Vec::new();
+    let mut origins: Vec<Option<usize>> = Vec::new();
     let mut remaining = max_tokens;
-    for msg in messages.iter().rev() {
+    for (index, msg) in messages.iter().enumerate().rev() {
         if remaining == 0 {
             break;
         }
@@ -1306,9 +1339,11 @@ pub(crate) fn retained_user_messages(
                 cache_control: None,
             }],
         });
+        origins.push(Some(index));
     }
     selected.reverse();
-    selected
+    origins.reverse();
+    (selected, origins)
 }
 
 /// User-pinned facts from `/anchor` (`.codewhale/anchors.md`). These are the
@@ -1328,11 +1363,22 @@ async fn compact_messages(
     config: &CompactionConfig,
 ) -> Result<(Vec<Message>, Option<SystemPrompt>, Vec<Message>)> {
     let mut quality_retries = 0;
-    let (messages, summary_prompt, _coverage) =
+    let (messages, summary_prompt, _coverage, _origins) =
         compact_messages_with_metadata(client, messages, config, &mut quality_retries, &mut None)
             .await?;
     Ok((messages, summary_prompt, Vec::new()))
 }
+
+/// The summary path's result pieces: the replacement history, the host
+/// checkpoint prompt, inspector coverage, and the builder's origin map (see
+/// [`last_round::ReplacementHistory`]). `None` origins never leave this
+/// function — every `Ok` return here is a builder-authored replacement.
+type SummaryMetadata = (
+    Vec<Message>,
+    Option<SystemPrompt>,
+    CompactionCoverage,
+    Vec<Option<usize>>,
+);
 
 async fn compact_messages_with_metadata(
     client: &dyn ModelClient,
@@ -1340,9 +1386,9 @@ async fn compact_messages_with_metadata(
     config: &CompactionConfig,
     quality_retries: &mut u32,
     summary_operation: &mut Option<(String, uuid::Uuid)>,
-) -> Result<(Vec<Message>, Option<SystemPrompt>, CompactionCoverage)> {
+) -> Result<SummaryMetadata> {
     if messages.is_empty() {
-        return Ok((Vec::new(), None, CompactionCoverage::default()));
+        return Ok((Vec::new(), None, CompactionCoverage::default(), Vec::new()));
     }
 
     let summary =
@@ -1357,23 +1403,24 @@ async fn compact_messages_with_metadata(
         }),
     };
 
-    let retained = last_round::build_replacement_history(
+    let replacement = last_round::build_replacement_history(
         messages,
         &checkpoint_text,
         pinned_anchors_text(config.workspace.as_deref()).as_deref(),
     )?;
     let coverage = last_round::measure_coverage(
         messages,
-        &retained,
+        &replacement.messages,
         CompactionPath::Summary,
         pinned_anchors_text(config.workspace.as_deref())
             .map(|text| text.chars().count())
             .unwrap_or(0),
     );
     Ok((
-        retained,
+        replacement.messages,
         Some(SystemPrompt::Blocks(vec![summary_block])),
         coverage,
+        replacement.origins,
     ))
 }
 

@@ -2193,6 +2193,7 @@ impl RemoteControlController {
         _input: &Value,
         _approval_key: &str,
         _intent_summary: Option<&str>,
+        approval_force_prompt: bool,
     ) -> String {
         let gate = projected_approval_id(tool_id);
         self.pending_approvals.insert(
@@ -2211,6 +2212,7 @@ impl RemoteControlController {
                     "approval_id": gate,
                     "tool_name": tool_name,
                     "description": description,
+                    "approval_force_prompt": approval_force_prompt,
                 }),
             );
         }
@@ -6235,6 +6237,7 @@ mod tests {
             &json!({ "credential": "must-not-cross" }),
             "approval-key",
             None,
+            false,
         );
 
         let mut envelopes = Vec::new();
@@ -6263,9 +6266,39 @@ mod tests {
             envelopes[2]["payload"]["approval_id"].as_str(),
             Some(gate.as_str())
         );
+        // The compat SSE surface must carry the same force-prompt flag the
+        // runtime pump payloads carry, so external clients can tell a
+        // consent-hold card from an ordinary approval (#809 review follow-up).
+        assert_eq!(envelopes[2]["payload"]["approval_force_prompt"], false);
         let projected = serde_json::to_string(&envelopes).unwrap();
         assert!(!projected.contains("must-not-cross"));
         assert!(!projected.contains("approval-key"));
+        let forced_gate = controller.record_remote_approval(
+            "tool_forced",
+            "start_mcp_server",
+            "armed consent hold fixture",
+            &json!({}),
+            "approval-key",
+            None,
+            true,
+        );
+        let WorkerCommand::Upload {
+            envelopes: forced_batch,
+            ..
+        } = worker_rx.try_recv().expect("forced-hold upload envelope")
+        else {
+            panic!("active-turn state must use the runtime envelope channel");
+        };
+        let forced_envelopes = forced_batch;
+        let forced = forced_envelopes
+            .iter()
+            .find(|event| event["event"] == "approval.required")
+            .expect("forced approval.required envelope");
+        assert_eq!(
+            forced["payload"]["approval_id"].as_str(),
+            Some(forced_gate.as_str())
+        );
+        assert_eq!(forced["payload"]["approval_force_prompt"], true);
         assert!(worker_rx.try_recv().is_err());
     }
 

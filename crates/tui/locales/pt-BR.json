@@ -2098,5 +2098,6 @@
   "AutomationEditorFriday": "Sex",
   "AutomationEditorSaturday": "Sáb",
   "AutomationEditorSunday": "Dom",
-  "AttachedRootsNotRevertedNote": "Apenas o workspace primário foi revertido; as raízes anexadas do workspace não foram revertidas (diretórios excluídos do snapshot — como vendor/ — e repositórios aninhados mantêm suas alterações)."
+  "AttachedRootsNotRevertedNote": "Apenas o workspace primário foi revertido; as raízes anexadas do workspace não foram revertidas (diretórios excluídos do snapshot — como vendor/ — e repositórios aninhados mantêm suas alterações).",
+  "RemoteApprovalOutcomeUnconfirmed": "Resultado da aprovação ainda não confirmado; o cartão permanece aberto até o engine reportar."
 }

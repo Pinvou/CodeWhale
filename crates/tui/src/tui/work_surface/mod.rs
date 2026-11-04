@@ -502,6 +502,7 @@ mod tests {
                 },
                 sequence: 1,
                 isolated_worktree: false,
+                worktree_root: None,
             }],
             reconciliations: Vec::new(),
             context_projections: Vec::new(),

@@ -1038,6 +1038,7 @@ pub fn op_to_protocol(op: &Op) -> wire_op::Op {
             auto_approve,
             approval_mode,
             configured_sandbox_mode,
+            ask_on_guardrail,
         } => wire_op::Op::ChangeMode {
             mode: app_mode_str(*mode).to_string(),
             allow_shell: *allow_shell,
@@ -1045,6 +1046,7 @@ pub fn op_to_protocol(op: &Op) -> wire_op::Op {
             auto_approve: *auto_approve,
             approval_mode: approval_mode_str(*approval_mode).to_string(),
             configured_sandbox_mode: configured_sandbox_mode.clone(),
+            ask_on_guardrail: *ask_on_guardrail,
         },
         Op::SetDisallowedTools { tools } => wire_op::Op::SetDisallowedTools {
             tools: tools.clone(),

@@ -10440,6 +10440,200 @@ async fn auto_review_force_prompt_is_denied_without_opening_a_modal() -> Result<
 }
 
 #[tokio::test]
+async fn forkguard_pump_never_auto_approves_a_force_prompt_hold() -> Result<()> {
+    // `approval_force_prompt` is the host-armed consent contract: even under
+    // a Full Access posture whose shortcuts would auto-approve, the pump
+    // must register the request for a human decision instead of resolving
+    // it itself. Without this pin, an armed hold that reaches this
+    // deployment would execute the guarded call with no human answer.
+    let manager = test_manager(test_runtime_dir())?;
+    let thread = manager
+        .create_thread(CreateThreadRequest {
+            auto_approve: Some(true),
+            ..Default::default()
+        })
+        .await?;
+    assert_eq!(thread.permission_posture.as_deref(), Some("full_access"));
+
+    let mut harness = install_mock_engine(&manager, &thread.id).await;
+    let turn = manager
+        .start_turn(
+            &thread.id,
+            StartTurnRequest {
+                prompt: "armed hold must reach a human".to_string(),
+                ..Default::default()
+            },
+        )
+        .await?;
+    assert!(matches!(
+        harness.rx_op.recv().await,
+        Some(Op::SendMessage {
+            auto_approve: true,
+            ..
+        })
+    ));
+
+    harness
+        .tx_event
+        .send(EngineEvent::ApprovalRequired {
+            approval_key: "armed_hold".to_string(),
+            approval_grouping_key: "armed_hold".to_string(),
+            id: "tool_armed_hold".to_string(),
+            tool_name: "exec_command".to_string(),
+            description: "armed guardrail hold under full access".to_string(),
+            input: serde_json::json!({}),
+            intent_summary: None,
+            approval_force_prompt: true,
+        })
+        .await?;
+
+    // The forced hold must be pending for a human, not auto-resolved.
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < deadline && manager.pending_approvals_count() == 0 {
+        sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(
+        manager.pending_approvals_count(),
+        1,
+        "a force_prompt hold must stay pending for a human decision"
+    );
+    assert!(
+        !manager.events_since(&thread.id, None)?.iter().any(|event| {
+            event.event == "approval.decided"
+                && event.payload.get("approval_id").and_then(Value::as_str)
+                    == Some("tool_armed_hold")
+        }),
+        "the pump must not auto-decide a force_prompt hold"
+    );
+
+    // The card the client receives must itself carry the consent contract:
+    // an armed host renders the hold as a consent card only if the flag
+    // rides the payload, not just the engine event.
+    let events = manager.events_since(&thread.id, None)?;
+    let forced_card = events
+        .iter()
+        .find(|event| {
+            event.event == "approval.required"
+                && event.payload.get("approval_id").and_then(Value::as_str)
+                    == Some("tool_armed_hold")
+        })
+        .expect("the forced hold must reach clients as approval.required");
+    assert_eq!(
+        forced_card.payload.get("approval_force_prompt"),
+        Some(&Value::Bool(true)),
+        "the approval.required payload must carry the force_prompt flag"
+    );
+
+    // The human denies; only then does the engine observe the outcome.
+    assert!(manager.deliver_external_approval(
+        "tool_armed_hold",
+        ExternalApprovalDecision::Deny { remember: false },
+    ));
+    assert_eq!(
+        harness.recv_approval_event().await,
+        Some(MockApprovalEvent::Denied {
+            id: "tool_armed_hold".to_string(),
+        })
+    );
+
+    harness
+        .tx_event
+        .send(EngineEvent::TurnComplete {
+            turn_id: None,
+            submission_id: None,
+            compaction_id: None,
+            usage: Usage::default(),
+            status: TurnOutcomeStatus::Completed,
+            error: None,
+            tool_catalog: None,
+            base_url: None,
+        })
+        .await?;
+    let terminal = wait_for_terminal_turn(&manager, &turn.id, Duration::from_secs(2)).await?;
+    assert_eq!(terminal.status, RuntimeTurnStatus::Completed);
+
+    // Phase two: an ordinary (unforced) hold under the same auto-approve
+    // posture keeps the short-circuit path, and its card reports the flag
+    // as false so clients see one stable payload schema on both paths.
+    let turn_two = manager
+        .start_turn(
+            &thread.id,
+            StartTurnRequest {
+                prompt: "ordinary hold still auto-resolves".to_string(),
+                ..Default::default()
+            },
+        )
+        .await?;
+    assert!(matches!(
+        harness.rx_op.recv().await,
+        Some(Op::SendMessage {
+            auto_approve: true,
+            ..
+        })
+    ));
+    harness
+        .tx_event
+        .send(EngineEvent::ApprovalRequired {
+            approval_key: "ordinary_hold".to_string(),
+            approval_grouping_key: "ordinary_hold".to_string(),
+            id: "tool_ordinary_hold".to_string(),
+            tool_name: "exec_command".to_string(),
+            description: "ordinary approval under full access".to_string(),
+            input: serde_json::json!({}),
+            intent_summary: None,
+            approval_force_prompt: false,
+        })
+        .await?;
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let decided = manager.events_since(&thread.id, None)?.iter().any(|event| {
+            event.event == "approval.decided"
+                && event.payload.get("approval_id").and_then(Value::as_str)
+                    == Some("tool_ordinary_hold")
+        });
+        if decided {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "an ordinary hold under auto-approve must still auto-decide"
+        );
+        sleep(Duration::from_millis(20)).await;
+    }
+    let events = manager.events_since(&thread.id, None)?;
+    let ordinary_card = events
+        .iter()
+        .find(|event| {
+            event.event == "approval.required"
+                && event.payload.get("approval_id").and_then(Value::as_str)
+                    == Some("tool_ordinary_hold")
+        })
+        .expect("the ordinary hold must still be announced as approval.required");
+    assert_eq!(
+        ordinary_card.payload.get("approval_force_prompt"),
+        Some(&Value::Bool(false)),
+        "the auto-path payload carries the same schema with the flag false"
+    );
+
+    harness
+        .tx_event
+        .send(EngineEvent::TurnComplete {
+            turn_id: None,
+            submission_id: None,
+            compaction_id: None,
+            usage: Usage::default(),
+            status: TurnOutcomeStatus::Completed,
+            error: None,
+            tool_catalog: None,
+            base_url: None,
+        })
+        .await?;
+    let terminal = wait_for_terminal_turn(&manager, &turn_two.id, Duration::from_secs(2)).await?;
+    assert_eq!(terminal.status, RuntimeTurnStatus::Completed);
+    Ok(())
+}
+
+#[tokio::test]
 async fn approval_pends_until_interrupt_and_next_turn_can_start() -> Result<()> {
     let manager = test_manager(test_runtime_dir())?;
     let thread = manager
