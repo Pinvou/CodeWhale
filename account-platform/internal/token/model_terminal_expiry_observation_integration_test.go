@@ -106,12 +106,12 @@ func TestModelTerminalObservationPreservesExpiryProofPostgres(t *testing.T) {
 				if err != nil || len(targets) != 1 || targets[0].ID != id {
 					t.Fatal("real original target claim", targets, err)
 				}
-				pre, terminal, err := f.r.requestEmergencyCancellation(f.ctx, id, ProviderCancelUnsupported, f.service.upstream.AdapterVersion())
+				pre, terminal, err := f.r.requestEmergencyCancellation(f.ctx, targets[0], ProviderCancelUnsupported, f.service.upstream.AdapterVersion())
 				if err != nil || pre || !terminal {
 					t.Fatal("model did not observe the existing terminal", pre, terminal, err)
 				}
 				if stage != "requested" {
-					if err := f.r.recordEmergencyCancellationAttempt(f.ctx, id, ProviderCancelUnsupported, false, pre, terminal); err != nil {
+					if err := f.r.recordEmergencyCancellationAttempt(f.ctx, targets[0], ProviderCancelUnsupported, false, pre, terminal); err != nil {
 						t.Fatal(err)
 					}
 				}
@@ -172,11 +172,11 @@ func TestModelTerminalObservationRejectsUntrustedEvidencePostgres(t *testing.T) 
 	if err != nil || len(targets) != 1 || targets[0].ID != target {
 		t.Fatal("original model claim", targets, err)
 	}
-	pre, terminal, err := f.r.requestEmergencyCancellation(f.ctx, target, ProviderCancelUnsupported, f.service.upstream.AdapterVersion())
+	pre, terminal, err := f.r.requestEmergencyCancellation(f.ctx, targets[0], ProviderCancelUnsupported, f.service.upstream.AdapterVersion())
 	if err != nil || pre || !terminal {
 		t.Fatal("original model terminal observation", pre, terminal, err)
 	}
-	if err := f.r.recordEmergencyCancellationAttempt(f.ctx, target, ProviderCancelUnsupported, false, pre, terminal); err != nil {
+	if err := f.r.recordEmergencyCancellationAttempt(f.ctx, targets[0], ProviderCancelUnsupported, false, pre, terminal); err != nil {
 		t.Fatal(err)
 	}
 	// Pause before CONVERGED so each adversarial convergence insert is new,
