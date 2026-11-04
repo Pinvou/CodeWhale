@@ -489,7 +489,8 @@ pub fn is_parallel_readonly_command(command: &str) -> bool {
     if trimmed.chars().any(|ch| {
         matches!(
             ch,
-            '\n' | '\r'
+            '\0' | '\n'
+                | '\r'
                 | ';'
                 | '&'
                 | '|'
@@ -1453,6 +1454,29 @@ fn is_numeric_count_shorthand(token: &str) -> bool {
 /// tail, and friends accept the glued spelling; the value stays bound to
 /// its flag inside one argv word, so it cannot introduce an operand, and
 /// the per-row value list decides which flags the glued form rides.
+/// The value options whose value is a count on every row that carries them.
+/// The separated spelling (`head -n 10`) gets the same digit validation the
+/// glued spelling (`-n5`) applies; range (`git blame -L 5,10`) and
+/// string-valued options are deliberately absent.
+const NUMERIC_VALUE_FLAGS: &[&str] = &[
+    "-n",
+    "--lines",
+    "-c",
+    "--bytes",
+    "-m",
+    "--max-count",
+    "-A",
+    "--after-context",
+    "-B",
+    "--before-context",
+    "-C",
+    "--context",
+    "-U",
+    "--unified",
+    "-d",
+    "--max-depth",
+];
+
 fn glued_numeric_value_option(token: &str, values: &str) -> bool {
     if !token.starts_with('-') || token.starts_with("--") {
         return false;
@@ -1502,6 +1526,21 @@ fn options_match_allowlist(tokens: &[&str], switches: &str, values: &str) -> boo
             } else if values.split_ascii_whitespace().any(|name| name == token) {
                 index += 1;
                 if index >= tokens.len() || tokens[index].starts_with('-') {
+                    return false;
+                }
+                // A count option's separated value gets the same digit
+                // validation the glued spelling (`-n5`) already applies:
+                // `head -n foo` is refused, `head -n 10` stays admitted.
+                // The set is exactly the flags whose value is a count
+                // everywhere they appear as a value option; range flags
+                // (`git blame -L 5,10`) and string-valued flags (`git log
+                // --author x`, `rg -g '*.rs'`, gh `--limit`) keep admitting
+                // their separated values, and switch spellings that share a
+                // letter (`grep -c`) never reach this branch — the switch
+                // arm matches first.
+                if NUMERIC_VALUE_FLAGS.contains(&token)
+                    && !tokens[index].bytes().all(|byte| byte.is_ascii_digit())
+                {
                     return false;
                 }
             } else {
@@ -3343,6 +3382,55 @@ mod tests {
                 "{command} stays refused"
             );
         }
+    }
+
+    /// A count option's SEPARATED value gets the same digit validation the
+    /// glued spelling applies: `head -n foo` refuses (a non-numeric count is
+    /// never a legitimate value, and admitting one let the word ride in a
+    /// slot the gate never validated), while `head -n 10` stays admitted.
+    /// Range (`git blame -L 5,10`) and string-valued options keep admitting
+    /// their separated values.
+    #[test]
+    fn agent_readonly_shell_validates_separated_count_option_values() {
+        for command in [
+            "head -n foo f.txt",
+            "head --lines zz f.txt",
+            "tail -c x f.txt",
+            "grep -m pat f.txt",
+            "grep --max-count pat f.txt",
+            "du -d deep f",
+        ] {
+            assert!(
+                !is_agent_readonly_shell_command(command),
+                "{command} must refuse: a count option's value must be all digits"
+            );
+        }
+        for command in [
+            "head -n 10 f.txt",
+            "head --lines 3 f.txt",
+            "tail -c 512 f.txt",
+            "grep -m 2 TODO f.txt",
+            "grep --max-count 2 TODO f.txt",
+            "git log --max-count 5",
+            "git blame -L 5,10 f.txt",
+            "rg -g '*.rs' TODO",
+            "git log --author someone",
+            "du -d 2 .",
+        ] {
+            assert!(
+                is_agent_readonly_shell_command(command),
+                "{command} must stay admitted (count values are digits; string/range values unchanged)"
+            );
+        }
+    }
+
+    /// The parallel classifier's charset refuses NUL like the agent charset:
+    /// the byte cannot appear in an admitted read-only command on either
+    /// path.
+    #[test]
+    fn parallel_readonly_charset_refuses_nul() {
+        assert!(!is_parallel_readonly_command("cat f\u{0}g"));
+        assert!(is_parallel_readonly_command("cat fg"));
     }
 
     /// wc's row letters are all no-value switches, so the POSIX getopt

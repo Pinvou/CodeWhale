@@ -91,7 +91,12 @@ pub(super) fn description() -> &'static str {
          exit; `tty` always selects a background terminal task, and a foreground \
          command with `combined_output` runs on a terminal lane that nothing \
          writes to unless a session member interacts with the task, so a \
-         stdin-reading command waits until the watchdog ends it. A foreground run may carry one inline stdin payload (delivered to the command, then end-of-file); for multi-write input-driven workflows supply stdin on the background lane: \
+         stdin-reading command waits until the watchdog ends it. A foreground \
+         run without `combined_output` may carry one inline stdin payload \
+         (delivered to the command, then end-of-file); a `combined_output` \
+         foreground run delivers the payload but its terminal lane stays \
+         open, so no end-of-file follows it. For multi-write input-driven \
+         workflows supply stdin on the background lane: \
          use background=true plus \
          action=\"interact\". \
          Output is truncated per stream (~30KB: head/tail kept, middle summarized; \

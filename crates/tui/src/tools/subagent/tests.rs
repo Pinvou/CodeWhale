@@ -8316,9 +8316,12 @@ async fn verifier_child_executes_a_bounded_readonly_bash_probe_for_evidence() {
         )
         .await
         .unwrap_or_else(|error| panic!("verifier probe must run `{command}`: {error}"));
-    assert!(
-        output.contains("10"),
-        "verifier probe must report the fixture's byte count: {output}"
+    // The count is wc's FIRST whitespace-separated field (`10 /path`), not a
+    // substring: `contains("10")` would also match line noise like `210`.
+    let count = output.split_ascii_whitespace().next().unwrap_or_default();
+    assert_eq!(
+        count, "10",
+        "verifier probe must report the fixture's byte count as wc's first field: {output}"
     );
 }
 

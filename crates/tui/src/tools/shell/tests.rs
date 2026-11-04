@@ -1312,6 +1312,10 @@ fn discover_pins(
 
 /// A plain git invocation with identity config, for fixtures that need a
 /// real index: any failure is the fixture's fault, asserted here.
+/// Unix-only: every caller is a `#[cfg(unix)]` fixture, and without this
+/// attribute the helper is dead code on the windows test lane, which
+/// `RUSTFLAGS: -Dwarnings` compiles (`Test (windows-latest)` red).
+#[cfg(unix)]
 fn git_helper(args: &[&str], cwd: &std::path::Path) {
     let output = std::process::Command::new("git")
         .args(["-c", "user.name=t", "-c", "user.email=t@example.invalid"])
@@ -1324,6 +1328,14 @@ fn git_helper(args: &[&str], cwd: &std::path::Path) {
         "git {args:?} failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+/// Mode-000 fixtures prove nothing under a root test runner (root reads
+/// through any permission bits), so the chmod-000 tests skip there instead
+/// of failing on a fixture that cannot exist for the effective user.
+#[cfg(unix)]
+fn running_as_root() -> bool {
+    unsafe { libc::getuid() == 0 }
 }
 
 /// A minimal on-disk git directory git itself accepts — HEAD plus the
@@ -2560,6 +2572,10 @@ fn readonly_filter_discovery_follows_a_padded_commondir_that_resolves() {
 #[test]
 fn readonly_git_c_operand_refuses_unsearchable_stage_root() {
     use std::os::unix::fs::PermissionsExt as _;
+    if running_as_root() {
+        eprintln!("skipped: the mode-000 fixture is invisible to a root runner");
+        return;
+    }
     let workspace = tempdir().expect("workspace");
     let vault = workspace.path().join("vault");
     std::fs::create_dir(&vault).expect("vault dir");
@@ -3368,10 +3384,12 @@ fn readonly_discovery_git_child_is_bounded_when_a_repo_file_blocks() {
     // check loop lands the kill at the first tick at-or-past the deadline,
     // so moderate quantum growth still kills at ~10 s — the quantum itself
     // is pinned below, because the LATENCY it adds to every admitted git
-    // command is the property it exists to hold.)
+    // command is the property it exists to hold.) No upper bound: under a
+    // saturated suite the kill can land late without any boundary
+    // regression (the round-17b precedent for timing upper guards), and the
+    // 30 s recv_timeout above is the outer hang guard.
     let elapsed = started.elapsed();
-    if !(std::time::Duration::from_secs(9)..=std::time::Duration::from_secs(15)).contains(&elapsed)
-    {
+    if elapsed < std::time::Duration::from_secs(9) {
         panic!("the FIFO-index refusal must land at the discovery bound, not {elapsed:?}");
     }
 }
@@ -9685,6 +9703,10 @@ fn readonly_operand_gate_refuses_cd_operands_the_shell_reinterprets() {
 #[test]
 fn readonly_operand_gate_refuses_cd_destinations_the_shell_cannot_enter() {
     use std::os::unix::fs::PermissionsExt;
+    if running_as_root() {
+        eprintln!("skipped: the mode-000 fixture is invisible to a root runner");
+        return;
+    }
     struct ChmodGuard<'a>(&'a std::path::Path);
     impl Drop for ChmodGuard<'_> {
         fn drop(&mut self) {
@@ -9895,6 +9917,10 @@ async fn readonly_shell_refuses_judged_and_run_name_divergences_end_to_end() {
 #[tokio::test]
 async fn readonly_shell_refuses_unsearchable_cd_destinations_end_to_end() {
     use std::os::unix::fs::PermissionsExt;
+    if running_as_root() {
+        eprintln!("skipped: the mode-000 fixture is invisible to a root runner");
+        return;
+    }
     struct ChmodGuard<'a>(&'a std::path::Path);
     impl Drop for ChmodGuard<'_> {
         fn drop(&mut self) {
@@ -11056,4 +11082,290 @@ async fn readonly_shell_lane_git_stage_glob_judges_the_shell_expansion_base() {
             "{command}: the admitted wildcard must leak nothing"
         );
     }
+}
+
+/// Round-18 blocker (B1): the `#5595` absolute branch proved the LITERAL
+/// spelling inside the workspace and skipped the glob walk, so an absolute
+/// glob (`cat <ws>/x*` with a planted `x*`-named entry) was admitted while
+/// the shell expanded it onto an outside symlink (`xfoo`) the walker never
+/// judged. The raw control leaks; the operand gate refuses; without the
+/// planted literal the spelling still refuses unresolved; a plain absolute
+/// glob whose expansion stays inside stays admitted.
+#[cfg(unix)]
+#[test]
+fn readonly_operand_gate_judges_absolute_glob_expansions() {
+    let workspace = tempdir().expect("workspace");
+    let outside = tempdir().expect("outside");
+    std::fs::write(outside.path().join("secret.txt"), "TOPSECRET-ABS-GLOB\n")
+        .expect("outside secret");
+    std::fs::write(workspace.path().join("x*"), "literal star\n").expect("literal star");
+    std::os::unix::fs::symlink(
+        outside.path().join("secret.txt"),
+        workspace.path().join("xfoo"),
+    )
+    .expect("outside symlink");
+    let roots = [workspace.path().to_path_buf()];
+    let absolute = format!("cat {}", workspace.path().join("x*").display());
+    let error = enforce_readonly_workspace_operands(&absolute, &roots, workspace.path())
+        .expect_err("the absolute glob's expansion must be judged like a relative one")
+        .to_string();
+    assert!(
+        error.contains("[shell.readonly.operand.outside_workspace]"),
+        "the walker's location judge must fire on the absolute expansion: {error}"
+    );
+
+    // A glob in a deeper component walks from that component's canonical
+    // parent and judges the same way.
+    std::fs::create_dir(workspace.path().join("sub")).expect("sub");
+    std::fs::write(workspace.path().join("sub").join("y*"), "literal\n").expect("literal y");
+    std::os::unix::fs::symlink(
+        outside.path().join("secret.txt"),
+        workspace.path().join("sub").join("yfoo"),
+    )
+    .expect("outside symlink in sub");
+    let deep = format!("cat {}", workspace.path().join("sub").join("y*").display());
+    let error = enforce_readonly_workspace_operands(&deep, &roots, workspace.path())
+        .expect_err("the deeper absolute glob must judge its expansion too")
+        .to_string();
+    assert!(
+        error.contains("[shell.readonly.operand.outside_workspace]"),
+        "{error}"
+    );
+
+    // Without the planted literal the absolute spelling stays fail-closed at
+    // the canonicalize (the pre-existing unresolved refusal).
+    std::fs::remove_file(workspace.path().join("x*")).expect("remove literal star");
+    let error = enforce_readonly_workspace_operands(&absolute, &roots, workspace.path())
+        .expect_err("without the literal the spelling cannot resolve")
+        .to_string();
+    assert!(
+        error.contains("[shell.readonly.operand.unresolved]"),
+        "{error}"
+    );
+
+    // A plain absolute glob whose expansion stays inside admits.
+    // The literal `plain*` entry is load-bearing exactly as in the leak
+    // case: the absolute branch canonicalizes the literal spelling, so a
+    // bait-free absolute glob must still plant one to reach the walk.
+    std::fs::write(workspace.path().join("plain*"), "literal plain\n").expect("literal plain");
+    std::fs::write(workspace.path().join("plain.txt"), "benign\n").expect("plain");
+    let plain = format!("cat {}", workspace.path().join("plain*").display());
+    enforce_readonly_workspace_operands(&plain, &roots, workspace.path())
+        .expect("an absolute glob expanding inside the workspace admits");
+}
+
+/// The tool-boundary twin of the absolute-glob pin: the raw control leaks
+/// through the expansion, the lane refuses before spawn and leaks nothing.
+#[cfg(unix)]
+#[tokio::test]
+async fn readonly_shell_lane_refuses_an_absolute_glob_whose_expansion_reaches_outside() {
+    let workspace = tempdir().expect("workspace");
+    let outside = tempdir().expect("outside");
+    std::fs::write(outside.path().join("secret.txt"), "TOPSECRET-ABS-GLOB\n")
+        .expect("outside secret");
+    std::fs::write(workspace.path().join("x*"), "literal star\n").expect("literal star");
+    std::os::unix::fs::symlink(
+        outside.path().join("secret.txt"),
+        workspace.path().join("xfoo"),
+    )
+    .expect("outside symlink");
+    let absolute = format!("cat {}", workspace.path().join("x*").display());
+
+    // Positive control: a raw shell runs the same text and reads the outside
+    // secret through the expansion — the fixture discriminates.
+    let control = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(format!("{} | head -c 200", absolute))
+        .current_dir(workspace.path())
+        .output()
+        .expect("control shell runs");
+    let control_out = String::from_utf8_lossy(&control.stdout);
+    assert!(
+        control_out.contains("TOPSECRET-ABS-GLOB"),
+        "the raw expansion must reach the outside symlink for this fixture to discriminate: {control_out}"
+    );
+
+    let context = ToolContext::new(workspace.path().to_path_buf())
+        .with_shell_policy(crate::worker_profile::ShellPolicy::ReadOnly);
+    let refused = LowercaseBashTool
+        .execute(json!({ "command": absolute }), &context)
+        .await
+        .expect_err("the absolute glob must refuse: its expansion is judged")
+        .to_string();
+    assert!(
+        refused.contains("[shell.readonly.operand.outside_workspace]"),
+        "{refused}"
+    );
+
+    // The plain absolute glob admits and reads only the benign entry.
+    // The literal `plain*` entry is load-bearing exactly as in the leak
+    // case: the absolute branch canonicalizes the literal spelling, so a
+    // bait-free absolute glob must still plant one to reach the walk.
+    std::fs::write(workspace.path().join("plain*"), "literal plain\n").expect("literal plain");
+    std::fs::write(workspace.path().join("plain.txt"), "benign\n").expect("plain");
+    let admitted = LowercaseBashTool
+        .execute(
+            json!({ "command": format!("cat {}", workspace.path().join("plain*").display()) }),
+            &context,
+        )
+        .await
+        .expect("an absolute glob expanding inside the workspace admits");
+    assert!(admitted.success, "{}", admitted.content);
+    assert!(admitted.content.contains("benign"));
+    assert!(!admitted.content.contains("TOPSECRET-ABS-GLOB"));
+}
+
+/// Round-18 blocker (B2): shlex (the gate's tokenizer) drops a
+/// `#`-word-start run to end of line as a POSIX comment, so `cat f # x` is
+/// judged as the words `cat` and `f` alone — while cmd.exe, which has no
+/// comment syntax, passes `#` and `x` as live argv words the gate never
+/// judged. The cmd lane refuses; the POSIX/PowerShell lanes honor `#`
+/// comments and run LESS than judged, so no wall there.
+#[test]
+fn readonly_compound_refusal_names_the_cmd_comment_wall() {
+    use crate::shell_dispatcher::ShellKind;
+    let refusal =
+        super::readonly_compound_refused_by_shell_kind(&ShellKind::Cmd, "cat f # x | wc -l")
+            .expect("a cmd compound carrying `#` must refuse");
+    assert!(
+        refusal.contains("no comment syntax"),
+        "the wall must name the missing cmd comment syntax: {refusal}"
+    );
+    // Quoted occurrences refuse too (any-occurrence shape, like `%`).
+    assert!(
+        super::readonly_compound_refused_by_shell_kind(&ShellKind::Cmd, "cat 'f#' | wc -l")
+            .is_some(),
+        "quoted `#` refuses too on cmd"
+    );
+    // A `#` inside a word is an ordinary byte to shlex (only word start
+    // comments) — the gate judged the whole word, cmd passes the whole word;
+    // the any-occurrence wall still refuses, deliberately.
+    assert!(
+        super::readonly_compound_refused_by_shell_kind(&ShellKind::Cmd, "cat f#x").is_some(),
+        "the wall is any-occurrence"
+    );
+    for kind in [
+        ShellKind::Bash,
+        ShellKind::Sh,
+        ShellKind::Pwsh,
+        ShellKind::WindowsPowerShell,
+    ] {
+        assert!(
+            super::readonly_compound_refused_by_shell_kind(&kind, "cat f # x | wc -l").is_none(),
+            "{kind:?} honors `#` comments and runs less than the gate judged"
+        );
+    }
+}
+
+/// The owned-writer bounded stdin write (the Windows/ohos fallback path):
+/// a consuming child gets the payload and the writer handed back; a child
+/// that never reads fills its pipe buffer and past the deadline the helper
+/// reports TimedOut with the writer left to the abandoned worker — the
+/// caller's lock is never held across the deadline. Present on every
+/// target; production unix keeps the fd-clone path, so this exercise is
+/// test-only there.
+#[cfg(unix)]
+#[test]
+fn bounded_stdin_write_owned_returns_the_writer_and_times_out_clean() {
+    use std::process::{Command, Stdio};
+
+    let mut child = Command::new("cat")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .spawn()
+        .expect("cat spawns");
+    let stdin = child.stdin.take().expect("stdin piped");
+    let (returned, result) =
+        super::bounded_stdin_write_owned(super::StdinWriter::Pipe(stdin), b"hello\n".to_vec());
+    result.expect("a consuming child accepts the payload");
+    assert!(returned.is_some(), "the writer is handed back on success");
+    drop(returned);
+    child.wait().expect("cat exits after its stdin closes");
+
+    let mut child = Command::new("sleep")
+        .arg("120")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .spawn()
+        .expect("sleep spawns");
+    let stdin = child.stdin.take().expect("stdin piped");
+    let payload = vec![b'x'; 256 * 1024]; // well past the 64 KiB pipe buffer
+    let started = std::time::Instant::now();
+    let (returned, result) =
+        super::bounded_stdin_write_owned(super::StdinWriter::Pipe(stdin), payload);
+    let elapsed = started.elapsed();
+    let error = result.expect_err("a non-reading child must time the write out");
+    assert_eq!(error.kind(), std::io::ErrorKind::TimedOut, "{error}");
+    assert!(
+        returned.is_none(),
+        "a timed-out writer stays with the abandoned worker"
+    );
+    assert!(
+        elapsed >= super::STDIN_WRITE_DEADLINE,
+        "the timeout must honor the deadline, not fire early: {elapsed:?}"
+    );
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+/// The aggregate discovery wall-clock budget: a spent budget refuses before
+/// any of this repository's children run, and the refusal does not spend a
+/// repo slot (the deadline check follows the dedup insert, so only repos
+/// that would actually be scanned pay it).
+#[cfg(unix)]
+#[test]
+fn readonly_git_discovery_refuses_when_the_aggregate_budget_is_spent() {
+    let repo = tempdir().expect("repo");
+    let gitdir = repo.path().join(".git");
+    seed_minimal_gitdir(&gitdir);
+    let roots = [repo.path().to_path_buf()];
+    let mut pins = Vec::new();
+    let mut scanned = std::collections::HashSet::new();
+    let mut repos_remaining = super::MAX_READONLY_GIT_REPOS_SCANNED;
+    let error = super::scan_readonly_repository_at(
+        repo.path(),
+        &mut pins,
+        &mut scanned,
+        &mut repos_remaining,
+        &roots,
+        None,
+        std::time::Instant::now() - std::time::Duration::from_secs(1),
+    )
+    .expect_err("a spent discovery budget must refuse before any child runs")
+    .to_string();
+    assert!(
+        error.contains("aggregate wall-clock budget"),
+        "the refusal must name the aggregate budget: {error}"
+    );
+    assert_eq!(
+        repos_remaining,
+        super::MAX_READONLY_GIT_REPOS_SCANNED,
+        "the deadline refusal must not spend a repo slot"
+    );
+}
+
+/// The spawn-env overrides are the single pinned source of the four fixed
+/// key/value pairs every admitted read-only child runs under: the
+/// startup-env walls plus the CDPATH and ripgrep config clears. A dropped
+/// insertion site turns this fn dead (deny(warnings)); a changed value
+/// reds here.
+#[test]
+fn readonly_spawn_env_overrides_carry_the_four_fixed_keys() {
+    let overrides = super::readonly_spawn_env_overrides();
+    let lookup = |key: &str| {
+        overrides
+            .iter()
+            .find(|(k, _)| *k == key)
+            .map(|(_, v)| v.as_str())
+            .unwrap_or_else(|| panic!("{key} missing from the spawn-env overrides"))
+    };
+    assert_eq!(lookup("ZDOTDIR"), "/");
+    assert_eq!(lookup("GLOBIGNORE"), "");
+    assert_eq!(lookup("CDPATH"), "");
+    assert_eq!(lookup("RIPGREP_CONFIG_PATH"), "");
+    assert_eq!(
+        overrides.len(),
+        4,
+        "no unlisted key rides along: {overrides:?}"
+    );
 }

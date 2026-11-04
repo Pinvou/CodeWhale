@@ -897,6 +897,41 @@ impl StdinWriter {
     }
 }
 
+/// The bounded stdin write for the platforms that cannot clone an fd out of
+/// their handle (Windows and ohos, see [`ShellTask::write_stdin`]): the
+/// worker thread takes the writer by value, finishes the payload, and hands
+/// the writer back through the channel. `Ok` returns `(Some(writer), ok)`;
+/// a deadline timeout returns `(None, TimedOut)` — the writer stays with
+/// the abandoned worker, the bytes still land if the command resumes
+/// reading, and the caller marks the stall. Present on every target so the
+/// unix-host test suite exercises it directly; production unix keeps the
+/// fd-clone path, which is why the allow only covers the non-unix side.
+#[cfg_attr(all(unix, not(target_env = "ohos")), allow(dead_code))]
+fn bounded_stdin_write_owned(
+    writer: StdinWriter,
+    payload: Vec<u8>,
+) -> (Option<StdinWriter>, std::io::Result<()>) {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut writer = writer;
+        let result = writer.write_all(&payload).and_then(|_| writer.flush());
+        // The writer moves back out only on the send path; a send failure
+        // (receiver gone) drops it, which is fine — the caller already
+        // gave up on the handle at that point.
+        let _ = sender.send((writer, result));
+    });
+    match receiver.recv_timeout(STDIN_WRITE_DEADLINE) {
+        Ok((writer, result)) => (Some(writer), result),
+        Err(_) => (
+            None,
+            Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "the stdin write did not complete within the deadline",
+            )),
+        ),
+    }
+}
+
 fn spawn_reader_thread<R: Read + Send + 'static>(
     mut reader: R,
     buffer: SharedRawOutput,
@@ -1403,9 +1438,15 @@ impl BackgroundShell {
     }
 
     fn write_stdin(&mut self, input: &str, close: bool) -> Result<()> {
-        if let Some(stdin) = self.stdin.as_mut() {
+        // Taken owned so the Windows/ohos fallback can move the writer into
+        // its bounded worker and hand it back; every exit below restores the
+        // slot first, keeping the stall/eof refusal ordering identical with
+        // the pinned unix behavior.
+        let mut slot = self.stdin.take();
+        if slot.is_some() {
             if !input.is_empty() {
                 if self.stdin_write_stalled {
+                    self.stdin = slot;
                     return Err(anyhow!(
                         "stdin writes to task {} are refused: an earlier write did not complete within {STDIN_WRITE_DEADLINE:?} because the command stopped consuming its stdin; the abandoned bytes still land if it resumes. Kill the task and start a new one instead of feeding it further.",
                         self.id
@@ -1417,38 +1458,36 @@ impl BackgroundShell {
                 // reads (the exact stall the inline-payload cap exists to
                 // close on the run boundary — interact chunks and
                 // small-buffer platforms hit the same wall one chunk later).
-                // On unix the write is bounded for BOTH handle kinds: pipes
-                // clone the `ChildStdin` fd, and the PTY lane clones the
-                // dup'd master fd it spawned with — a worker thread owns the
-                // clone and finishes the payload in the background (it still
-                // lands if the child resumes), the caller learns about the
-                // stall at the deadline, and the stall flag refuses any
-                // further write so two writers can never interleave on one
-                // handle. Windows keeps a blocking write for both: the pipe
-                // handle is cloneable there via `ChildStdin::try_clone` (a
-                // scope choice, not a platform necessity) and the portable-pty
-                // writer box exposes no fd to clone, so the lane does not
-                // complicate the Windows path with a background writer — the
-                // per-call cap keeps each payload at one buffer's worth, so
-                // the worst case is a wedged write on the session's shell
-                // lock; the unix deadline is an improvement there, not a
-                // guarantee.
+                // Every platform bounds the write now, by what its handle
+                // offers: on unix the write is bounded for BOTH handle kinds
+                // by fd clone — pipes clone the `ChildStdin` fd, and the PTY
+                // lane clones the dup'd master fd it spawned with — a worker
+                // thread owns the clone and finishes the payload in the
+                // background (it still lands if the child resumes), the
+                // caller learns about the stall at the deadline, and the
+                // stall flag refuses any further write so two writers can
+                // never interleave on one handle.
                 // The same predicate as the `PtyFile` variant. ohos strips
                 // this whole statement (the attribute gates the if-else), so
-                // ohos's only write is the `any(target_env = "ohos",
-                // not(unix))` block below — that predicate is what keeps
-                // ohos compiling with a live write and no dead binding,
-                // field, or methods under the workspace deny(warnings). The
-                // per-call cap keeps the worst case a wedged write on the
-                // session's shell lock (the deadline is a unix-non-ohos
-                // improvement, not a guarantee — ohos is a niche target,
-                // disclosed here).
+                // ohos takes the owned-writer fallback below — that
+                // predicate is what keeps ohos compiling with a live write
+                // and no dead binding, field, or methods under the workspace
+                // deny(warnings).
                 #[cfg(all(unix, not(target_env = "ohos")))]
-                if matches!(stdin, StdinWriter::Pipe(_) | StdinWriter::PtyFile(_)) {
+                if matches!(
+                    slot,
+                    Some(StdinWriter::Pipe(_)) | Some(StdinWriter::PtyFile(_))
+                ) {
                     use std::os::fd::AsFd;
-                    let dup_fd = match stdin {
-                        StdinWriter::Pipe(pipe) => pipe.as_fd().try_clone_to_owned(),
-                        StdinWriter::PtyFile(file) => file.as_fd().try_clone_to_owned(),
+                    let dup_fd = match slot.as_ref() {
+                        Some(StdinWriter::Pipe(pipe)) => pipe.as_fd().try_clone_to_owned(),
+                        Some(StdinWriter::PtyFile(file)) => file.as_fd().try_clone_to_owned(),
+                        // The matches! above proves Some(Pipe | PtyFile); the
+                        // None leg exists only for exhaustiveness (clippy
+                        // flags an expect-after-is_some here, and an
+                        // exhaustive match without it would be an
+                        // unreachable-pattern warning).
+                        _ => unreachable!("variant checked above"),
                     }
                     .context("Failed to clone the stdin handle for the bounded write")?;
                     let mut writer = std::process::ChildStdin::from(dup_fd);
@@ -1460,8 +1499,21 @@ impl BackgroundShell {
                     });
                     match receiver.recv_timeout(STDIN_WRITE_DEADLINE) {
                         Ok(result) => result.context("Failed to write to stdin")?,
-                        Err(_) => {
+                        // A channel close without a send means the worker
+                        // died before completing (a panic in the write
+                        // path): that is a writer failure, not a stall, so
+                        // the task is not marked stalled — a healthy write
+                        // after this must not be refused by the flag.
+                        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                            self.stdin = slot;
+                            return Err(anyhow!(
+                                "the stdin writer for task {} failed: the background write ended without completing or reporting (the writer task panicked); the payload's delivery is unknown. Kill the task and start a new one.",
+                                self.id
+                            ));
+                        }
+                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                             self.stdin_write_stalled = true;
+                            self.stdin = slot;
                             return Err(anyhow!(
                                 "the write to task {} did not complete within {STDIN_WRITE_DEADLINE:?}: the command stopped consuming its stdin, so its input buffer filled and the rest of the payload was abandoned to a background writer (it still lands if the command resumes reading). Further stdin writes to this task are refused; kill it and start a new one.",
                                 self.id
@@ -1469,23 +1521,51 @@ impl BackgroundShell {
                         }
                     }
                 } else {
-                    stdin
-                        .write_all(input.as_bytes())
-                        .context("Failed to write to stdin")?;
-                    stdin.flush().ok();
+                    // Armor for a future third variant on this cfg: the
+                    // matches! above proved Some, and this arm never runs on
+                    // Windows/ohos (stripped with the whole if-else).
+                    if let Some(writer) = slot.as_mut() {
+                        writer
+                            .write_all(input.as_bytes())
+                            .context("Failed to write to stdin")?;
+                        writer.flush().ok();
+                    }
                 }
-                // Windows and ohos share one blocking write: Windows strips
-                // the bounded statement above (`unix` false) and ohos strips
-                // it by the `not(target_env = "ohos")` half — the `any` here
-                // is the surviving fallback on both, which is what keeps the
-                // `stdin` binding, the `Pipe` field, and the `StdinWriter`
-                // methods live on every target.
+                // Windows and ohos cannot clone an fd out of their handle
+                // (Windows strips the statement above because `unix` is
+                // false, ohos by the `not(target_env = "ohos")` half — the
+                // portable-pty writer box exposes no cloneable handle at
+                // all). They bound by ownership instead: the worker takes
+                // the writer, finishes the payload, and hands the writer
+                // back through the channel; a deadline timeout leaves the
+                // writer with the abandoned worker (the bytes still land if
+                // the command resumes), marks the stall, and the caller
+                // returns with the session's shell lock released — cancel,
+                // kill, and wait all stay live. This is the same wedge the
+                // unix comment above describes, closed here too.
                 #[cfg(any(target_env = "ohos", not(unix)))]
                 {
-                    stdin
-                        .write_all(input.as_bytes())
-                        .context("Failed to write to stdin")?;
-                    stdin.flush().ok();
+                    let writer = slot.take().expect("slot held above");
+                    let (returned, result) =
+                        bounded_stdin_write_owned(writer, input.as_bytes().to_vec());
+                    match result {
+                        Ok(()) => {
+                            slot = returned;
+                        }
+                        Err(error) if error.kind() == std::io::ErrorKind::TimedOut => {
+                            self.stdin_write_stalled = true;
+                            // `slot` stays None: the abandoned worker owns
+                            // the handle, so the close below cannot claim
+                            // EOF and further writes hit the stall refusal.
+                            return Err(anyhow!(
+                                "the write to task {} did not complete within {STDIN_WRITE_DEADLINE:?}: the command stopped consuming its stdin, so its input buffer filled and the rest of the payload was abandoned to a background writer (it still lands if the command resumes reading). Further stdin writes to this task are refused; kill it and start a new one.",
+                                self.id
+                            ));
+                        }
+                        Err(error) => {
+                            return Err(anyhow!(error).context("Failed to write to stdin"));
+                        }
+                    }
                 }
             }
             if close {
@@ -1497,8 +1577,10 @@ impl BackgroundShell {
                 // bytes have not finished landing, so the flag stays down
                 // and the tail refusal reports the stall instead.
                 self.stdin_closed_at_eof =
-                    matches!(self.stdin, Some(StdinWriter::Pipe(_))) && !self.stdin_write_stalled;
+                    matches!(slot, Some(StdinWriter::Pipe(_))) && !self.stdin_write_stalled;
                 self.stdin = None;
+            } else {
+                self.stdin = slot;
             }
             return Ok(());
         }
@@ -4112,6 +4194,23 @@ fn readonly_shell_startup_env_walls() -> [(&'static str, &'static str); 2] {
     [("ZDOTDIR", "/"), ("GLOBIGNORE", "")]
 }
 
+/// The fixed spawn-env overrides every admitted read-only child runs under,
+/// beyond the computed GIT_* pin block: the startup-env walls (see
+/// [`readonly_shell_startup_env_walls`]) plus the `CDPATH` clear (a hostile
+/// CDPATH rewrites what a bare `cd sub` resolves to) and the ripgrep config
+/// clear (a hostile `RIPGREP_CONFIG_PATH` re-arms flags on an admitted
+/// `rg`). Extracted so the application site has one pinned source and a
+/// dropped call site turns into dead code under `deny(warnings)`.
+fn readonly_spawn_env_overrides() -> Vec<(&'static str, String)> {
+    let mut overrides: Vec<(&'static str, String)> = readonly_shell_startup_env_walls()
+        .iter()
+        .map(|(key, value)| (*key, value.to_string()))
+        .collect();
+    overrides.push(("CDPATH", String::new()));
+    overrides.push(("RIPGREP_CONFIG_PATH", String::new()));
+    overrides
+}
+
 fn readonly_compound_refused_by_shell_kind(
     kind: &crate::shell_dispatcher::ShellKind,
     command: &str,
@@ -4128,6 +4227,21 @@ fn readonly_compound_refused_by_shell_kind(
     }
     if !matches!(kind, crate::shell_dispatcher::ShellKind::Cmd) {
         return None;
+    }
+    // cmd.exe has no comment syntax, but the tokenizer this gate shares with
+    // the classifier (shlex) drops a `#`-word-start run to end-of-line as a
+    // POSIX comment: `cat f # x | wc -l` is judged as the words `cat` and `f`
+    // alone, while cmd.exe passes `#` and `x` as live argv words the gate
+    // never judged — a planted outside symlink spelled `#` opens unjudged.
+    // The POSIX and PowerShell lanes run LESS than the gate judged (they do
+    // honor `#` comments), so this wall is cmd-only, and any occurrence
+    // refuses rather than trying to re-derive shlex's word-start rule on raw
+    // text — nothing in the admitted grammar legitimately carries `#`.
+    // Quoted occurrences refuse too, mirroring the `%` wall's shape.
+    if command.contains('#') {
+        return Some(
+            "[shell.readonly.sequence.unsupported_shell] cmd.exe has no comment syntax, so a read-only probe carrying `#` could run words the gate judged as a comment (quoted occurrences refuse too, fail-closed); run the probe without `#`.",
+        );
     }
     // cmd.exe tokenizes `,` and `=` as argument delimiters when it passes
     // the line to a program (the same phase that splits spaces — `mkdir a,b`
@@ -4150,7 +4264,7 @@ fn readonly_compound_refused_by_shell_kind(
     }
     if readonly_sequence_segments(command).is_some_and(|segments| segments.len() > 1) {
         return Some(
-            "[shell.readonly.sequence.unsupported_shell] multi-segment cmd compound probes refuse as a fail-closed per-shell decision: `;` is an argument delimiter there, so every `;`/`&&`/`||` sequence is refused for a cmd shell, while a single-stage `|` pipeline still runs once the raw-text walls above (`%`, `^`, `,`, `=`) pass; run the probes one at a time.",
+            "[shell.readonly.sequence.unsupported_shell] multi-segment cmd compound probes refuse as a fail-closed per-shell decision: `;` is an argument delimiter there, so every `;`/`&&`/`||` sequence is refused for a cmd shell, while a single-stage `|` pipeline still runs once the raw-text walls above (`#`, `%`, `^`, `,`, `=`) pass; run the probes one at a time.",
         );
     }
     None
@@ -4248,7 +4362,9 @@ fn exec_shell_input_agent_readonly(input: &serde_json::Value) -> bool {
 
 /// `exec_shell_input_agent_readonly` is also the gate-side predicate for the
 /// subagent posture check (#5426): the catalog carve-out that admits
-/// canonical `bash` to Scout/Reviewer/Planner must judge the same call the
+/// canonical `bash` to the read-only inspection roles (Scout/Reviewer/
+/// Planner) and to a `test` child whose session grants the bounded probe
+/// lane must judge the same call the
 /// `BashTool::execute` `ShellPolicy::ReadOnly` branch will judge, so the
 /// posture gate can admit a proven-readonly call without ever widening past
 /// the execute-time refusal.
@@ -4535,6 +4651,15 @@ const MAX_DISCOVERED_FILTER_NAME_BYTES: usize = 64;
 /// beyond it the gate refuses instead of pinning a partial set.
 const MAX_READONLY_GIT_REPOS_SCANNED: usize = 32;
 
+/// Wall-clock bound on one command's whole filter discovery, mirroring the
+/// glob walk's expansion budget. The per-repo count (32) and the per-child
+/// watchdog (10 s) bound the scans individually but not together: a hostile
+/// workspace chaining 32 slow-but-not-failing repositories would otherwise
+/// buy minutes of pre-spawn host work per command (measured: one FIFO-index
+/// repository lands its own refusal at the watchdog; a benign 33-repo
+/// workspace scans in ~100 ms, so the aggregate never fires on real work).
+const MAX_READONLY_DISCOVERY_WALL_CLOCK: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// Read bound for one repository config file during filter discovery.
 const READONLY_GIT_CONFIG_SCAN_CAP: usize = 256 * 1024;
 
@@ -4709,6 +4834,7 @@ fn discover_readonly_git_filter_pins(
     let mut pins: Vec<ReadonlyGitFilterPin> = Vec::new();
     let mut scanned: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
     let mut repos_remaining = MAX_READONLY_GIT_REPOS_SCANNED;
+    let discovery_deadline = std::time::Instant::now() + MAX_READONLY_DISCOVERY_WALL_CLOCK;
     let mut live_cwd = effective_cwd.to_path_buf();
     // The raw PATH the discovery git's sanitized environment is built from,
     // read once per pass so every exec in the walk sees the same search set.
@@ -4742,6 +4868,7 @@ fn discover_readonly_git_filter_pins(
                 &mut repos_remaining,
                 roots,
                 env_path.as_deref(),
+                discovery_deadline,
             )?;
         }
         if stages.len() > 1 {
@@ -5037,8 +5164,10 @@ fn readonly_git_stage_root(
 }
 
 /// The discovery git's environment, shared by every git invocation this lane
-/// makes before a child exists (the submodule enumeration and the version
-/// probe alike): a cleared environment plus the same sanitized PATH the
+/// makes (the submodule enumeration and the version probe alike — note the
+/// enumeration child of a scanned repository may run before the version
+/// gate refuses an old git, so this arming applies to both): a cleared
+/// environment plus the same sanitized PATH the
 /// read-only child runs under — entries under any declared workspace root
 /// are dropped by the exact construction the child env block uses
 /// (`readonly_sanitized_path`), so an agent-planted `git` shim is never the
@@ -5377,6 +5506,7 @@ fn scan_readonly_repository_at(
     repos_remaining: &mut usize,
     roots: &[PathBuf],
     env_path: Option<&std::ffi::OsStr>,
+    deadline: std::time::Instant,
 ) -> Result<(), ToolError> {
     let refuse = |reason: String| {
         ToolError::permission_denied(format!(
@@ -5394,6 +5524,13 @@ fn scan_readonly_repository_at(
         return Err(refuse(
             "this command's git stages reach more repositories than the lane scans".to_string(),
         ));
+    }
+    // Checked after the dedup insert so only repos that would actually be
+    // scanned pay the check, and before any of this repo's children run.
+    if std::time::Instant::now() >= deadline {
+        return Err(refuse(format!(
+            "this command's git-stage discovery outlasted its {MAX_READONLY_DISCOVERY_WALL_CLOCK:?} aggregate wall-clock budget, so the workspace chains more repositories than the lane can scan in time; narrow the command's git stages"
+        )));
     }
     *repos_remaining -= 1;
     let names = readonly_git_config_filter_names(&gitdir, &worktree_dir).map_err(refuse)?;
@@ -5430,6 +5567,7 @@ fn scan_readonly_repository_at(
             repos_remaining,
             roots,
             env_path,
+            deadline,
         )?;
     }
     Ok(())
@@ -6753,6 +6891,50 @@ fn enforce_readonly_argv_operands(
                     "[shell.readonly.operand.outside_workspace] Read-only shell operand {value:?} resolves outside the workspace. Use the bounded File read/search actions for project evidence."
                 )));
             }
+            // A glob-bearing absolute operand cannot stop here: the shell
+            // pathname-expands an absolute word exactly like a relative one,
+            // so containment of the LITERAL spelling (this canonicalize
+            // proved a planted `x*`-named entry, not the expansion) proves
+            // nothing about what the expansion hands the program — every
+            // match the shell synthesizes still needs judging. Walk the
+            // glob-bearing suffix from the literal's canonical parent: the
+            // match judge applies the same resolved-location,
+            // dash-named-wall, and shared-budget rules a relative operand's
+            // matches get. The literal prefix above the first glob component
+            // is already validated by this canonicalize (and resolves any
+            // symlinked directory chain), so only the suffix is walked.
+            if value.contains('*') {
+                let components: Vec<&str> = value
+                    .split('/')
+                    .filter(|component| !component.is_empty() && *component != ".")
+                    .collect();
+                let Some(first_glob) = components
+                    .iter()
+                    .position(|component| component.contains('*'))
+                else {
+                    // `value.contains('*')` but no `/`-component carries it:
+                    // the `*` rides a separator spelling the component filter
+                    // dropped, so there is no expansion surface to judge.
+                    continue;
+                };
+                let suffix = components[first_glob..].join("/");
+                // The walk base is the directory that CONTAINS the first
+                // glob component: the canonical literal, popped once per
+                // suffix component (canonicalize proved each literal prefix
+                // segment and resolved its symlink chain; the suffix is the
+                // only part the shell still expands).
+                let mut walk_base = resolved.as_path();
+                for _ in 0..components.len() - first_glob {
+                    walk_base = walk_base
+                        .parent()
+                        .ok_or_else(|| {
+                            ToolError::permission_denied(format!(
+                                "[shell.readonly.operand.shape] Read-only shell operand {value:?} has no parent directory to walk; refused."
+                            ))
+                        })?;
+                }
+                enforce_readonly_glob_operand(&suffix, roots, walk_base, glob_budget)?;
+            }
             continue;
         }
 
@@ -6854,7 +7036,10 @@ fn enforce_readonly_argv_operands(
 /// symlink for an outside one after the walk and before the child opens its
 /// expansion. The child opens strictly after the walk completes, and the
 /// threat model is hostile workspace content, so this is the same declared
-/// race the fold documents at its own probe.
+/// race the fold documents at its own probe. A hardlink to an outside file
+/// is likewise invisible to any path-based gate (the resolved location is
+/// genuinely inside the workspace) and is disclosed as out of scope at
+/// `docs/CONFIGURATION.md` ("does not stop a hardlink to a denied file").
 ///
 /// Design note: a simpler contract — admit a glob only in the final path
 /// component, refuse `*` anywhere else — would need about half of this
@@ -8335,11 +8520,9 @@ impl ToolSpec for BashTool {
             // likewise widen what a pattern matches. The child's live env
             // is not observable through the admitted grammar (env-reading
             // commands refuse), so the values pin at the table.
-            for (key, value) in readonly_shell_startup_env_walls() {
-                extra_env.insert(key.to_string(), value.to_string());
+            for (key, value) in readonly_spawn_env_overrides() {
+                extra_env.insert(key.to_string(), value);
             }
-            extra_env.insert("CDPATH".to_string(), String::new());
-            extra_env.insert("RIPGREP_CONFIG_PATH".to_string(), String::new());
             // Ignore user/system Git configuration and replace any repository
             // external diff helper with a fixed inert executable. Repository
             // config and attributes are attacker-controlled evidence inputs;
