@@ -25,7 +25,7 @@ test('retained development Compose renders direct defaults and exact per-service
   args.push('-f', fileURLToPath(new URL('../../deploy/compose/compose.yaml', import.meta.url)),
     '-f', fileURLToPath(new URL('../../deploy/compose/compose.model-token.yaml', import.meta.url)),
     '--profile', 'model-token', '--profile', 'governance-operations', '--profile', 'real-newapi', 'config', '--format', 'json');
-  for (const value of ['', '192.0.2.10,2001:db8::10']) {
+  for (const value of ['', '192.0.2.10', '2001:db8::10', '192.0.2.10,2001:db8::10']) {
     const env = { ...process.env, COMPOSE_CONVERT_WINDOWS_PATHS: '1' };
     for (const name of services) env[`${name.toUpperCase().replaceAll('-', '_')}_HTTP_TRUSTED_PROXY_IPS`] = value;
     const result = spawnSync(process.env.PINVOU_TEST_KMS_COMPOSE_BINARY, args, { cwd: root, env,
@@ -33,6 +33,7 @@ test('retained development Compose renders direct defaults and exact per-service
     assert.equal(result.status, 0, 'public development Compose config failed');
     const actual = JSON.parse(result.stdout);
     for (const name of services) assert.equal(admission(actual.services[name].environment), value, name);
+    assert.equal(actual.services["token-portal"].environment.PORTAL_TRUSTED_PROXY_IPS, value);
   }
 });
 
@@ -44,6 +45,7 @@ for (const profile of ['personal', 'models']) test(`current ${profile} Compose p
     const portal = actual['token-portal'].networks.backend.ipv4_address;
     for (const name of services) assert.equal(admission(actual[name].environment),
       ['identity-service', 'token-portal'].includes(name) ? edge : `${edge},${portal}`, name);
+    assert.equal(actual["token-portal"].environment.PORTAL_TRUSTED_PROXY_IPS, edge);
   } finally { fixture.dispose(); }
 });
 
@@ -56,12 +58,14 @@ test('Helm renders safe defaults and exact per-service trust without changing ex
     const defaults = environments();
     assert.equal(Object.keys(defaults).length, services.length);
     for (const name of services) assert.equal(admission(defaults[name]), '', name);
+    assert.equal(defaults['token-portal'].PORTAL_TRUSTED_PROXY_IPS, '');
     const values = JSON.parse(readFileSync(fixture.recipe.valuesFile, 'utf8'));
     values.security = { httpTrustedProxyIPs: Object.fromEntries(services.map((name, index) => [name, [`192.0.2.${index + 1}`, '2001:db8::10']])) };
     writeFileSync(fixture.recipe.valuesFile, JSON.stringify(values));
     fixture.rerender();
     const configured = environments();
     for (const [index, name] of services.entries()) assert.equal(admission(configured[name]), `192.0.2.${index + 1},2001:db8::10`, name);
+    assert.equal(configured['token-portal'].PORTAL_TRUSTED_PROXY_IPS, '192.0.2.5,2001:db8::10');
     assert.ok(fixture.render.config.every(resource => resource.metadata?.namespace !== 'ingress-nginx'));
     for (const resource of fixture.render.config) assert.ok(!Object.hasOwn(resource.metadata?.annotations || {}, 'nginx.ingress.kubernetes.io/proxy-set-headers'));
   } finally { fixture.dispose(); }

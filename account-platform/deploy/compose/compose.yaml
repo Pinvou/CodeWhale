@@ -403,6 +403,7 @@ services:
         SERVICE: token-portal
     environment:
       HTTP_TRUSTED_PROXY_IPS: ${TOKEN_PORTAL_HTTP_TRUSTED_PROXY_IPS:-}
+      PORTAL_TRUSTED_PROXY_IPS: ${TOKEN_PORTAL_HTTP_TRUSTED_PROXY_IPS:-}
       <<: *client-compatibility
       APP_ENV: development
       PORT: 8080
