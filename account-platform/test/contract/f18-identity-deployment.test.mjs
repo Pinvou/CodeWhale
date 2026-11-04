@@ -23,7 +23,7 @@ function render(overrides = [], production = true) {
     // Config-only fixture member; production values require real deployed on-call users.
     ...(production ? ['--set-json', 'global.manualReviewOnCallUserIds=["00000000-0000-4000-8000-000000000707"]', ...productionImageDigestArgs] : []),
     ...[...newApi, ...overrides].flatMap(value =>
-      [/^(keycloak|sms)\.enabled=(true|false)$/.test(value) ? '--set' : '--set-string', value])];
+      [/^(?:(keycloak|sms|ingress)\.enabled|security\.authRiskEnabled)=(true|false)$/.test(value) ? '--set' : '--set-string', value])];
   return spawnSync(process.env.PINVOU_TEST_KMS_HELM_BINARY || 'helm', args,
     { encoding: 'utf8', timeout: 30000, maxBuffer: 4 * 1024 * 1024, env: publicEnvironment() });
 }
@@ -122,6 +122,78 @@ test('production Identity chart satisfies its strict Keycloak input and network 
     assert.equal(env.KEYCLOAK_CA_FILE, undefined);
     assert.ok(pod.containers[0].env.find(item => item.name === 'KEYCLOAK_PROVISIONER_CLIENT_SECRET').valueFrom.secretKeyRef);
   });
+});
+
+test('staging external Keycloak keeps SMS endpoint checks without requiring a CA ConfigMap', {
+  skip: process.env.PINVOU_TEST_KMS_HELM !== '1',
+}, async t => {
+  const direct = ['global.environment=staging', 'sms.enabled=true', 'keycloak.enabled=false',
+    'ingress.enabled=false', 'keycloak.adminApiUrl=http://keycloak-backchannel.example.invalid',
+    'keycloak.provisionerTokenUrl=http://keycloak-backchannel.example.invalid/realms/pinvou/protocol/openid-connect/token',
+    'oidc.jwksUrl=https://issuer.example.invalid/certs', 'oidc.tokenUrl=https://issuer.example.invalid/token'];
+  await t.test('same_origin_http_is_accepted', () => {
+    const items = documents(render(direct, false));
+    const env = environment(deployment(items, 'identity-service').spec.template.spec.containers[0]);
+    assert.equal(env.KEYCLOAK_ADMIN_API_URL, 'http://keycloak-backchannel.example.invalid');
+    assert.equal(env.KEYCLOAK_PROVISIONER_TOKEN_URL, 'http://keycloak-backchannel.example.invalid/realms/pinvou/protocol/openid-connect/token');
+    assert.equal(env.KEYCLOAK_CA_FILE, undefined);
+  });
+  await t.test('same_origin_https_is_accepted_without_ca', () => {
+    const https = direct.map(value => value.replace('http://keycloak-backchannel.example.invalid', 'https://keycloak-backchannel.example.invalid'));
+    const items = documents(render(https, false));
+    const env = environment(deployment(items, 'identity-service').spec.template.spec.containers[0]);
+    assert.equal(new URL(env.KEYCLOAK_ADMIN_API_URL).protocol, 'https:');
+    assert.equal(new URL(env.KEYCLOAK_PROVISIONER_TOKEN_URL).protocol, 'https:');
+    assert.equal(env.KEYCLOAK_CA_FILE, undefined);
+  });
+  for (const changes of [
+    [...direct, 'keycloak.caConfigMap=fixture-only-staging-ca'],
+    [...direct, 'keycloak.provisionerTokenUrl=http://other-keycloak.example.invalid/realms/pinvou/protocol/openid-connect/token'],
+    [...direct, 'keycloak.adminApiUrl=http://accounts.staging.example.com', 'keycloak.provisionerTokenUrl=http://accounts.staging.example.com/realms/pinvou/protocol/openid-connect/token',
+      'ingress.enabled=true', 'ingress.keycloakHost=accounts.staging.example.com'],
+  ]) await t.test('invalid_same_origin_or_public_proxy_is_rejected', () => {
+    const result = render(changes, false);
+    assert.equal(result.error, undefined);
+    assert.notEqual(result.status, 0, result.stderr);
+    assert.match(result.stderr, /Identity .*Keycloak/);
+  });
+  const ingressHost = 'accounts.staging.example.com';
+  const issuerHost = 'public-issuer.example.invalid';
+  for (const authRisk of [false, true]) for (const [scheme, defaultPort] of [['http', '80'], ['https', '443']]) {
+    const base = [...direct, 'ingress.enabled=true', 'ingress.className=nginx',
+      `security.authRiskEnabled=${authRisk}`, `ingress.keycloakHost=${ingressHost}`];
+    const rejectPublic = (host, endpointPort, issuer) => {
+      const result = render([...base, `oidc.issuer=${issuer}`,
+        `keycloak.adminApiUrl=${scheme}://${host}${endpointPort}`,
+        `keycloak.provisionerTokenUrl=${scheme}://${host}${endpointPort}/realms/pinvou/protocol/openid-connect/token`], false);
+      assert.equal(result.error, undefined);
+      assert.notEqual(result.status, 0, result.stderr);
+      assert.match(result.stderr, /backchannel must bypass the public Identity token proxy/);
+    };
+    for (const port of ['', ':', `:${defaultPort}`, `:0${defaultPort}`, `:00${defaultPort}`]) {
+      await t.test(`ingress_${scheme}_${port || 'absent'}_risk_${authRisk}`, () => {
+        rejectPublic(ingressHost, port, `https://${issuerHost}/realms/pinvou`);
+      });
+      await t.test(`issuer_${scheme}_${port || 'absent'}_risk_${authRisk}`, () => {
+        // Different ingress host keeps this assertion dependent on issuer
+        // normalization, so the ingress comparison cannot hide its removal.
+        rejectPublic(issuerHost, '', `${scheme}://${issuerHost}${port}/realms/pinvou`);
+      });
+    }
+    for (const port of [':8080', ':08080']) {
+      await t.test(`issuer_nondefault_${scheme}_${port}_risk_${authRisk}`, () => {
+        rejectPublic(issuerHost, port, `${scheme}://${issuerHost}:8080/realms/pinvou`);
+      });
+      await t.test(`direct_nondefault_${scheme}_${port}_risk_${authRisk}`, () => {
+        const tokenURL = `${scheme}://${ingressHost}${port}/realms/pinvou/protocol/openid-connect/token`;
+        const items = documents(render([...base, `oidc.issuer=https://${issuerHost}/realms/pinvou`,
+          `keycloak.adminApiUrl=${scheme}://${ingressHost}${port}`, `keycloak.provisionerTokenUrl=${tokenURL}`], false));
+        const env = environment(deployment(items, 'identity-service').spec.template.spec.containers[0]);
+        assert.equal(env.KEYCLOAK_PROVISIONER_TOKEN_URL, tokenURL);
+        assert.equal(env.AUTH_RISK_REDIS_URL !== undefined, authRisk);
+      });
+    }
+  }
 });
 
 test('real remote Compose keeps Portal issuer aligned with its authorization and Keycloak issuer', {
