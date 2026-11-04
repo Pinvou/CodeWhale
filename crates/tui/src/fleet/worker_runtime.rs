@@ -1600,7 +1600,12 @@ mod tests {
             ..WorkerRuntimeProfile::default()
         };
 
-        for role in [FleetRole::Scout, FleetRole::Reviewer, FleetRole::Planner] {
+        for role in [
+            FleetRole::Scout,
+            FleetRole::Reviewer,
+            FleetRole::Planner,
+            FleetRole::Verifier,
+        ] {
             let effective = role::effective_runtime_profile_for_role(&role, &requested);
             assert_eq!(effective.shell, ShellPolicy::ReadOnly, "{role:?}");
             assert_eq!(

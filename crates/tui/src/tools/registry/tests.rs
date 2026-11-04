@@ -711,6 +711,38 @@ fn readonly_verifier_context(workspace: &std::path::Path) -> ToolContext {
         .expect("bounded verifier authority")
 }
 
+/// A worker whose envelope grants no shell authority refuses every bash call
+/// at dispatch (`enforce_tool_authority` demands `ToolShellAuthority::ReadOnly`
+/// for bash/Bash), so the evidence catalog must not advertise the lane it can
+/// never use — while a worker whose envelope DOES grant read-only shell keeps
+/// the classifier-bounded probe lane.
+#[test]
+fn machine_catalog_omits_bash_without_shell_authority() {
+    let tmp = tempdir().expect("tempdir");
+    let shell_less = ToolRegistryBuilder::new()
+        .with_read_only_shell_tool()
+        .build(readonly_verifier_context(tmp.path()));
+    let shell_less_tools = shell_less.to_api_tools();
+    let names: Vec<&str> = shell_less_tools
+        .iter()
+        .map(|tool| tool.name.as_str())
+        .collect();
+    assert!(
+        !names.contains(&"bash") && !names.contains(&"Bash"),
+        "a shell-less verifier catalog must not list the bash lane: {names:?}"
+    );
+    // The twin: a read-only-shell envelope keeps the lane.
+    let scoped = ToolRegistryBuilder::new()
+        .with_read_only_shell_tool()
+        .build(readonly_scout_context(tmp.path(), true));
+    let scoped_tools = scoped.to_api_tools();
+    let names: Vec<&str> = scoped_tools.iter().map(|tool| tool.name.as_str()).collect();
+    assert!(
+        names.contains(&"bash"),
+        "a read-only-shell scout catalog keeps the classified probe lane: {names:?}"
+    );
+}
+
 #[test]
 fn machine_verifier_catalog_and_dispatch_add_only_bounded_run() {
     let tmp = tempdir().expect("tempdir");
@@ -917,6 +949,30 @@ fn fleet_authority_intersects_readonly_github_bash_with_network_ceiling() {
         .expect_err("network denial must win")
         .to_string();
     assert!(error.contains("does not grant network access"), "{error}");
+    // The envelope admits Bash through the parallel classifier, which refuses
+    // compounds and globs outright, so a gh read inside one fails closed
+    // before the per-stage network predicate is consulted — with or without
+    // a network grant. Compound probes are an in-session `agent` capability,
+    // not a fleet one.
+    for command in [
+        "pwd; gh repo view",
+        "gh pr list --search '*'",
+        "gh repo view | head -n 3",
+    ] {
+        let compound = json!({"action": "run", "command": command});
+        for context in [&offline, &networked] {
+            let error = enforce_tool_authority("Bash", &compound, &shell, context)
+                .expect_err("a compound gh read fails closed under the fleet envelope")
+                .to_string();
+            // The wall that fires is the parallel classifier's (compounds
+            // are never parallel-admitted), not the network ceiling: name it
+            // so a refusal from any other wall cannot green this leg.
+            assert!(
+                error.contains("outside its machine-readable authority envelope"),
+                "{command}: {error}"
+            );
+        }
+    }
 }
 
 #[tokio::test]
