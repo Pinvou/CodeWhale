@@ -17,8 +17,8 @@ type organizationRepository interface {
 	ListUnits(context.Context, identity.Principal, uuid.UUID, *uuid.UUID) (UnitTree, error)
 	ListMembers(context.Context, identity.Principal, uuid.UUID, *uuid.UUID, MemberListQuery) (MemberPage, error)
 	ListQuotaMembers(context.Context, identity.Principal, uuid.UUID, MemberListQuery) (QuotaMemberPage, error)
-	ListMyRoleBindings(context.Context, identity.Principal) ([]RoleBinding, error)
-	ListOrganizationRoleBindings(context.Context, identity.Principal, uuid.UUID) ([]RoleBinding, error)
+	ListMyRoleBindings(context.Context, identity.Principal) (RoleBindingList, error)
+	ListOrganizationRoleBindings(context.Context, identity.Principal, uuid.UUID) (RoleBindingList, error)
 	GrantOrganizationRoleBinding(context.Context, identity.Principal, RoleBindingGrant) (RoleBinding, error)
 	RevokeOrganizationRoleBinding(context.Context, identity.Principal, uuid.UUID, uuid.UUID) (RoleBinding, error)
 	ReplaceMemberRoles(context.Context, identity.Principal, uuid.UUID, uuid.UUID, []string) (Member, error)
@@ -128,7 +128,7 @@ func (s *Service) listMyRoleBindings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store")
-	api.WriteJSON(w, http.StatusOK, map[string]any{"items": items})
+	api.WriteJSON(w, http.StatusOK, items)
 }
 
 func (s *Service) listOrganizationRoleBindings(w http.ResponseWriter, r *http.Request) {
@@ -147,7 +147,7 @@ func (s *Service) listOrganizationRoleBindings(w http.ResponseWriter, r *http.Re
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store")
-	api.WriteJSON(w, http.StatusOK, map[string]any{"items": items})
+	api.WriteJSON(w, http.StatusOK, items)
 }
 
 func (s *Service) grantOrganizationRoleBinding(w http.ResponseWriter, r *http.Request) {

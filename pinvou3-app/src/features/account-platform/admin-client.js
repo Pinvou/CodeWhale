@@ -367,8 +367,10 @@ export class AdminPlatformClient {
     if (typeof userID === 'string') userID = userID.trim().toLowerCase();
     if (userID) requireFinanceID(userID);
     const payload = await this.request('account', '/admin/v1/role-bindings' + (userID ? `?user_id=${encodeURIComponent(userID)}` : ''), signal);
-    if (!Array.isArray(payload?.items)) throw new Error('INVALID_ROLE_BINDINGS');
-    return payload.items.map(item => requirePlatformRoleBinding(item));
+    if (!Array.isArray(payload?.items) || typeof payload.truncated !== 'boolean' || payload.items.length > 500 || payload.truncated && payload.items.length !== 500) throw new Error('INVALID_ROLE_BINDINGS');
+    const items = payload.items.map(item => requirePlatformRoleBinding(item));
+    Object.defineProperty(items, 'truncated', { value: payload.truncated, enumerable: false });
+    return items;
   }
   async grantPlatformRole(owner, body, signal) {
     requireFinanceID(owner);

@@ -33,7 +33,7 @@ test('installed membership states include suspended members and reject non-domai
 test('scheduled role receipts retain strict owner and request identity checks', async () => {
  const body={user_id:user,role_code:'AUDITOR',unit_id:null,starts_at:'2099-01-01T00:00:00.000Z',reason:'Controlled scheduled grant'};
  const value={binding_id:grantID,organization_id:org,user_id:user,role_code:'AUDITOR',unit_id:null,status:'SCHEDULED',starts_at:body.starts_at};
- const calls=[];const client=new OrganizationClient({request:async(area,path,options)=>{calls.push({area,path,options});return options.method==='GET'?{items:[value]}:value;}});
+ const calls=[];const client=new OrganizationClient({request:async(area,path,options)=>{calls.push({area,path,options});return options.method==='GET'?{items:[value],truncated:false}:value;}});
  assert.equal((await client.bindings(org))[0].status,'SCHEDULED');
  assert.equal((await client.grantRole(org,body,'original-scheduled-role-key')).status,'SCHEDULED');
  assert.equal(calls[1].options.body.starts_at,body.starts_at);assert.equal(calls[1].options.body.idempotency_key,'original-scheduled-role-key');
@@ -41,6 +41,16 @@ test('scheduled role receipts retain strict owner and request identity checks', 
   client.client.request=async()=>({...value,...changed});await assert.rejects(client.grantRole(org,body,'original-scheduled-role-key'),/INVALID_ORGANIZATION_ACK/);
  }
  client.client.request=async()=>({...value,binding_id:other});await assert.rejects(client.revokeRole(org,grantID,'original-revoke-role-key'),/INVALID_ORGANIZATION_ACK/);
+});
+test('role binding collection requires and preserves the bounded truncation contract', async () => {
+ const value={binding_id:grantID,organization_id:org,user_id:user,role_code:'AUDITOR',unit_id:null,status:'ACTIVE'};
+ const exact=await new OrganizationClient({request:async()=>({items:Array.from({ length: 500 }, () => value),truncated:false})}).bindings(org);
+ assert.equal(exact.length,500);
+ assert.equal(exact.truncated,false);
+ const truncated=await new OrganizationClient({request:async()=>({items:Array.from({ length: 500 }, () => value),truncated:true})}).bindings(org);
+ assert.equal(truncated.truncated,true);
+ await assert.rejects(new OrganizationClient({request:async()=>({items:Array.from({ length: 499 }, () => value),truncated:true})}).bindings(org),/INVALID_ORGANIZATION_ACK/);
+ await assert.rejects(new OrganizationClient({request:async()=>({items:[value]})}).bindings(org),/INVALID_ORGANIZATION_ACK/);
 });
 test('actual Admin list DTO has no fictional version requirement; public collection checks each organization', async()=>{
  const admin=new OrganizationAdminClient({request:async()=>({items:[{organization_id:org,name:'Owned',status:'ACTIVE',member_count:1}],next_cursor:null})});assert.equal((await admin.list()).items[0].organization_id,org);

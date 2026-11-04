@@ -31,9 +31,9 @@ func (r *organizationProfileRepository) Authorize(_ context.Context, _ identity.
 func (*organizationProfileRepository) RecordPermissionDenial(context.Context, identity.Principal, string, string) error {
 	return nil
 }
-func (r *organizationProfileRepository) ListMyRoleBindings(context.Context, identity.Principal) ([]RoleBinding, error) {
+func (r *organizationProfileRepository) ListMyRoleBindings(context.Context, identity.Principal) (RoleBindingList, error) {
 	r.roleCalls++
-	return []RoleBinding{}, nil
+	return RoleBindingList{Items: []RoleBinding{}}, nil
 }
 func (r *organizationProfileRepository) ListOrganizations(context.Context, identity.Principal) ([]Organization, error) {
 	r.organizationCalls++

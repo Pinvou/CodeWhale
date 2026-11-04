@@ -39,40 +39,50 @@ type RoleBindingGrant struct {
 	Reason         string
 }
 
-const effectiveRoleAssignmentSQL = "ra.revoked_at IS NULL AND ra.starts_at <= now() AND (ra.expires_at IS NULL OR ra.expires_at > now())"
-
-func (r *PostgresRepository) ListMyRoleBindings(ctx context.Context, principal identity.Principal) ([]RoleBinding, error) {
-	var userID uuid.UUID
-	if err := r.pool.QueryRow(ctx, `SELECT u.id FROM identities i JOIN users u ON u.id=i.user_id WHERE i.issuer=$1 AND i.subject=$2 AND u.status='ACTIVE'`, principal.Issuer, principal.Subject).Scan(&userID); errors.Is(err, pgx.ErrNoRows) {
-		return nil, ErrForbidden
-	} else if err != nil {
-		return nil, err
-	}
-	return r.queryRoleBindings(ctx, `ra.user_id=$1`, userID)
+type RoleBindingList struct {
+	Items     []RoleBinding `json:"items"`
+	Truncated bool          `json:"truncated"`
 }
 
-func (r *PostgresRepository) ListOrganizationRoleBindings(ctx context.Context, principal identity.Principal, organizationID uuid.UUID) ([]RoleBinding, error) {
+const effectiveRoleAssignmentSQL = "ra.revoked_at IS NULL AND ra.starts_at <= now() AND (ra.expires_at IS NULL OR ra.expires_at > now())"
+
+func (r *PostgresRepository) ListMyRoleBindings(ctx context.Context, principal identity.Principal) (RoleBindingList, error) {
+	var userID uuid.UUID
+	if err := r.pool.QueryRow(ctx, `SELECT u.id FROM identities i JOIN users u ON u.id=i.user_id WHERE i.issuer=$1 AND i.subject=$2 AND u.status='ACTIVE'`, principal.Issuer, principal.Subject).Scan(&userID); errors.Is(err, pgx.ErrNoRows) {
+		return RoleBindingList{}, ErrForbidden
+	} else if err != nil {
+		return RoleBindingList{}, err
+	}
+	items, truncated, err := r.queryRoleBindingsBounded(ctx, `ra.user_id=$1`, userID)
+	return RoleBindingList{Items: items, Truncated: truncated}, err
+}
+
+func (r *PostgresRepository) ListOrganizationRoleBindings(ctx context.Context, principal identity.Principal, organizationID uuid.UUID) (RoleBindingList, error) {
 	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
 	if err != nil {
-		return nil, err
+		return RoleBindingList{}, err
 	}
 	defer tx.Rollback(ctx)
 	actorID, err := activeUserID(ctx, tx, principal)
 	if err != nil {
-		return nil, err
+		return RoleBindingList{}, err
 	}
 	if err := requireOrganizationPermission(ctx, tx, actorID, organizationID, nil, "org.roles.read"); err != nil {
-		return nil, err
+		return RoleBindingList{}, err
 	}
-	items, err := queryRoleBindings(ctx, tx, `ra.organization_id=$1`, organizationID)
+	items, truncated, err := queryRoleBindingsBounded(ctx, tx, `ra.organization_id=$1`, organizationID)
 	if err != nil {
-		return nil, err
+		return RoleBindingList{}, err
 	}
-	return items, tx.Commit(ctx)
+	return RoleBindingList{Items: items, Truncated: truncated}, tx.Commit(ctx)
 }
 
 func (r *PostgresRepository) queryRoleBindings(ctx context.Context, condition string, args ...any) ([]RoleBinding, error) {
 	return queryRoleBindings(ctx, r.pool, condition, args...)
+}
+
+func (r *PostgresRepository) queryRoleBindingsBounded(ctx context.Context, condition string, args ...any) ([]RoleBinding, bool, error) {
+	return queryRoleBindingsBounded(ctx, r.pool, condition, args...)
 }
 
 type roleBindingQuerier interface {
@@ -80,6 +90,11 @@ type roleBindingQuerier interface {
 }
 
 func queryRoleBindings(ctx context.Context, database roleBindingQuerier, condition string, args ...any) ([]RoleBinding, error) {
+	items, _, err := queryRoleBindingsBounded(ctx, database, condition, args...)
+	return items, err
+}
+
+func queryRoleBindingsBounded(ctx context.Context, database roleBindingQuerier, condition string, args ...any) ([]RoleBinding, bool, error) {
 	rows, err := database.Query(ctx, `
 SELECT ra.id,ra.user_id,ra.role_code,ro.scope,ra.organization_id,ra.unit_id,
        ra.starts_at,ra.expires_at,
@@ -90,20 +105,27 @@ SELECT ra.id,ra.user_id,ra.role_code,ro.scope,ra.organization_id,ra.unit_id,
        ra.grant_source,ra.created_by,ra.created_at,ra.revoked_at,ra.revoked_by
 FROM role_assignments ra JOIN roles ro ON ro.code=ra.role_code
 WHERE `+condition+`
-ORDER BY ro.scope,ra.organization_id NULLS FIRST,ra.user_id,ra.role_code,ra.unit_id NULLS FIRST,ra.starts_at,ra.id LIMIT 500`, args...)
+ORDER BY ro.scope,ra.organization_id NULLS FIRST,ra.user_id,ra.role_code,ra.unit_id NULLS FIRST,ra.starts_at,ra.id LIMIT 501`, args...)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	defer rows.Close()
 	items := make([]RoleBinding, 0)
 	for rows.Next() {
 		var item RoleBinding
 		if err := rows.Scan(&item.ID, &item.UserID, &item.RoleCode, &item.Scope, &item.OrganizationID, &item.UnitID, &item.StartsAt, &item.ExpiresAt, &item.Status, &item.GrantSource, &item.CreatedBy, &item.CreatedAt, &item.RevokedAt, &item.RevokedBy); err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		items = append(items, item)
 	}
-	return items, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, false, err
+	}
+	truncated := len(items) > 500
+	if truncated {
+		items = items[:500]
+	}
+	return items, truncated, nil
 }
 
 func normalizeRoleBindingGrant(request RoleBindingGrant, now time.Time) (RoleBindingGrant, error) {
