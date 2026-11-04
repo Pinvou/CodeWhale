@@ -9329,8 +9329,11 @@ mod tests {
     /// spellings inherit the K3 contract verbatim, and the Kimi Code error
     /// reference makes a replayed tool-call assistant message WITHOUT its
     /// `reasoning_content` an HTTP 400. The exact-K3 matchers only learn the
-    /// bare k3 ids, so the replay gate carries its own K3.1 arm — pin both
-    /// vendor routes (direct platform + Kimi Code membership endpoint).
+    /// bare k3 ids, so the replay gate carries its own K3.1 arm — pin all
+    /// four spellings across both vendor routes (direct platform + Kimi Code
+    /// membership endpoint), the stale-effort-off always-replay case, the
+    /// case/padding normalization, and the custom-gateway / non-Moonshot
+    /// dialect boundary.
     #[test]
     fn kimi_k31_tool_rounds_replay_reasoning_content_on_the_vendor_routes() {
         let tool_round = || {
@@ -9372,31 +9375,12 @@ mod tests {
                 },
             ]
         };
-        for (label, base_url, model) in [
-            (
-                "direct platform",
-                "https://api.moonshot.cn/v1",
-                "kimi-k3.1-pro",
-            ),
-            (
-                "kimi code",
-                "https://api.kimi.com/coding/v1",
-                "k3.1-pro-highspeed",
-            ),
-            // The official overseas Kimi Code alias the host catalog
-            // registers and prefs preserves verbatim (review P2,
-            // pinjou-agent#825): the replay contract must hold there too.
-            (
-                "kimi code overseas",
-                "https://api.kimi.ai/coding/v1",
-                "k3.1-pro",
-            ),
-            (
-                "kimi code overseas highspeed",
-                "https://api.kimi.ai/coding/v1",
-                "k3.1-pro-highspeed",
-            ),
-        ] {
+        let tool_assistant_reasoning = |label: &str,
+                                        provider: ApiProvider,
+                                        base_url: &str,
+                                        model: &str,
+                                        effort: Option<&str>|
+         -> Option<String> {
             let request = MessageRequest {
                 model: model.to_string(),
                 messages: tool_round(),
@@ -9406,15 +9390,13 @@ mod tests {
                 tool_choice: None,
                 metadata: None,
                 thinking: None,
-                reasoning_effort: None,
+                reasoning_effort: effort.map(str::to_string),
                 stream: None,
                 temperature: None,
                 top_p: None,
             };
             let out = build_chat_messages_for_request_and_provider_and_route(
-                &request,
-                ApiProvider::Moonshot,
-                base_url,
+                &request, provider, base_url,
             );
             let tool_assistant = out
                 .iter()
@@ -9423,12 +9405,99 @@ mod tests {
                         && value.get("tool_calls").is_some()
                 })
                 .unwrap_or_else(|| panic!("{label}: tool-call assistant message missing"));
+            tool_assistant
+                .get("reasoning_content")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        };
+        for (label, base_url, model, effort) in [
+            (
+                "direct platform",
+                "https://api.moonshot.cn/v1",
+                "kimi-k3.1-pro",
+                None,
+            ),
+            (
+                "direct platform highspeed",
+                "https://api.moonshot.ai/v1",
+                "kimi-k3.1-pro-highspeed",
+                None,
+            ),
+            // The arm must precede the effort check like bare K3: a stored
+            // effort off would otherwise strip the field via the generic
+            // path on the direct platform, where no catalog entry or
+            // `kimi-`-prefix-independent pin exists.
+            (
+                "direct platform ignores a stale effort off",
+                "https://api.moonshot.cn/v1",
+                "kimi-k3.1-pro",
+                Some("off"),
+            ),
+            (
+                "kimi code",
+                "https://api.kimi.com/coding/v1",
+                "k3.1-pro-highspeed",
+                None,
+            ),
+            // The official overseas Kimi Code alias the app's model catalog
+            // registers and prefs preserve verbatim (review P2,
+            // pinjou-agent#825): the replay contract must hold there too.
+            (
+                "kimi code overseas",
+                "https://api.kimi.ai/coding/v1",
+                "k3.1-pro",
+                None,
+            ),
+            (
+                "kimi code overseas highspeed",
+                "https://api.kimi.ai/coding/v1",
+                "k3.1-pro-highspeed",
+                None,
+            ),
+            // The spelling matcher normalizes case and padding; pin it on
+            // the bare Kimi Code ids, where no generic heuristic would
+            // replay in the matcher's place.
+            (
+                "kimi code is case-insensitive",
+                "https://api.kimi.com/coding/v1",
+                "K3.1-PRO",
+                None,
+            ),
+            (
+                "kimi code trims padding",
+                "https://api.kimi.com/coding/v1",
+                "  k3.1-pro  ",
+                None,
+            ),
+        ] {
             assert_eq!(
-                tool_assistant
-                    .get("reasoning_content")
-                    .and_then(Value::as_str),
-                Some("Need to call a tool"),
+                tool_assistant_reasoning(label, ApiProvider::Moonshot, base_url, model, effort),
+                Some("Need to call a tool".to_string()),
                 "{label}: the K3.1 replay contract must keep reasoning_content on the tool-round assistant message"
+            );
+        }
+
+        // The arm is pinned to the vendor's own routes: a custom
+        // Moonshot-compatible gateway keeps its own dialect, and so does a
+        // different provider that happens to point at the membership host.
+        for (label, provider, base_url, model) in [
+            (
+                "custom gateway keeps its own dialect",
+                ApiProvider::Moonshot,
+                "https://gateway.example/v1",
+                "k3.1-pro",
+            ),
+            (
+                "non-moonshot provider keeps its own dialect",
+                ApiProvider::Openai,
+                "https://api.kimi.com/coding/v1",
+                "k3.1-pro",
+            ),
+        ] {
+            assert_eq!(
+                tool_assistant_reasoning(label, provider, base_url, model, None),
+                None,
+                "{label}: reasoning_content must stay stripped outside the vendor routes"
             );
         }
     }

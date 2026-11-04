@@ -3482,6 +3482,15 @@ fn should_replay_reasoning_content_for_provider(
     should_replay_reasoning_content_for_provider_on_route(provider, "", model, effort)
 }
 
+/// Whether `model` is one of the K3.1 family spellings across the Kimi Code
+/// and direct-platform routes, case-insensitive with insignificant padding.
+fn is_kimi_k31_model_spelling(model: &str) -> bool {
+    matches!(
+        model.trim().to_ascii_lowercase().as_str(),
+        "kimi-k3.1-pro" | "kimi-k3.1-pro-highspeed" | "k3.1-pro" | "k3.1-pro-highspeed"
+    )
+}
+
 /// Route-aware reasoning replay policy.
 ///
 /// Keep the bare K3 identifier out of the global model catalog: direct
@@ -3490,17 +3499,9 @@ fn should_replay_reasoning_content_for_provider(
 /// replay contract.
 ///
 /// The K3.1 family spellings (`kimi-k3.1-pro[-highspeed]` on the direct
-/// platform, `k3.1-pro[-highspeed]` on Kimi Code) ride the same replay
-/// contract — see the arm inside.
-/// The K3.1 family spellings across the Kimi Code and direct-platform
-/// routes, case-insensitive.
-fn is_kimi_k31_model_spelling(model: &str) -> bool {
-    matches!(
-        model.trim().to_ascii_lowercase().as_str(),
-        "kimi-k3.1-pro" | "kimi-k3.1-pro-highspeed" | "k3.1-pro" | "k3.1-pro-highspeed"
-    )
-}
-
+/// platform, `k3.1-pro[-highspeed]` on Kimi Code) inherit the K3 replay
+/// contract verbatim through their own arm below — always-reasoning, so
+/// like bare K3 the arm precedes the effort check.
 fn should_replay_reasoning_content_for_provider_on_route(
     provider: ApiProvider,
     base_url: &str,
