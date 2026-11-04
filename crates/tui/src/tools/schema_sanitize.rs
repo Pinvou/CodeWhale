@@ -3323,4 +3323,125 @@ mod kimi_tests {
         assert!(!error.to_string().contains("private-scalar-name-4831"));
         assert_eq!(schema, original, "a rejected schema must never be emitted");
     }
+
+    // Cross-repo integration seam (parent-repo batch 2026-11-04): the fixture
+    // is the shipped `make_pptx` tool definition exported verbatim from the
+    // parent repository's pptx MCP server
+    // (pinvou3-app/resources/mcp-servers/pptx/server.py, `TOOL_DEFS`). Its
+    // slides.items is a per-layout anyOf — exactly one explicit `type: object`
+    // branch per layout, the MFJS branch budget used to the last slot — with
+    // per-branch required groups, a nested string-or-object item union
+    // (agenda/kpi entries), and typed nested arrays (chart series). The shape
+    // exists so constrained tool-call decoding (Kimi K3) fills the per-branch
+    // required fields instead of collapsing to layout+title-only pages. This
+    // test pins the seam between the host-side schema authoring and this
+    // Moonshot compatibility layer: the shipped schema must normalize, pass
+    // the MFJS validator, and keep its union structure on both Moonshot
+    // routes. A schema drift past an MFJS budget turns the normalization red;
+    // a renewed flattening of nested unions turns the branch assertions red —
+    // each on exactly the side that regressed.
+    const SHIPPED_PPTX_TOOL_DEFS: &str =
+        include_str!("../../tests/fixtures/pptx_make_pptx_schema.json");
+
+    #[test]
+    fn shipped_pptx_slides_schema_passes_moonshot_validation_on_both_routes() {
+        let fixture: Value = serde_json::from_str(SHIPPED_PPTX_TOOL_DEFS)
+            .expect("the exported pptx tool definitions must stay valid JSON");
+        let shipped = Value::Object(
+            fixture["tools"][0]["inputSchema"]
+                .as_object()
+                .expect("fixture must carry the make_pptx inputSchema")
+                .clone(),
+        );
+
+        // Fixture sanity: the shipped shape is the per-layout union. Every
+        // branch declares an explicit object type, selects its layout through
+        // a single-value enum, and carries the required group its renderer
+        // needs.
+        let branch_contract = |branches: &[Value]| -> Vec<(String, Vec<String>)> {
+            branches
+                .iter()
+                .map(|branch| {
+                    assert_eq!(
+                        branch["type"], "object",
+                        "every shipped branch declares an explicit object type"
+                    );
+                    let mut layouts: Vec<String> = branch["properties"]["layout"]["enum"]
+                        .as_array()
+                        .expect("branch layout enum")
+                        .iter()
+                        .map(|value| value.as_str().expect("string layout").to_string())
+                        .collect();
+                    assert_eq!(
+                        layouts.len(),
+                        1,
+                        "selecting a branch is selecting a layout: single-value enum"
+                    );
+                    let required: Vec<String> = branch["required"]
+                        .as_array()
+                        .expect("per-branch required group")
+                        .iter()
+                        .map(|value| value.as_str().expect("string name").to_string())
+                        .collect();
+                    (layouts.remove(0), required)
+                })
+                .collect()
+        };
+        let shipped_branches = shipped["properties"]["slides"]["items"]["anyOf"]
+            .as_array()
+            .expect("slides.items must carry the per-layout anyOf");
+        assert_eq!(
+            shipped_branches.len(),
+            10,
+            "the shipped union has exactly one branch per layout"
+        );
+        let expected = branch_contract(shipped_branches);
+
+        for route in [KimiParameterRoute::Platform, KimiParameterRoute::KimiCode] {
+            let mut parameters = shipped.clone();
+            let note = sanitize_for_kimi_parameters(&mut parameters, route)
+                .expect("the shipped make_pptx schema must pass Moonshot normalization");
+            assert_eq!(
+                note, None,
+                "the shipped schema drops no composition, so it must stay unannotated"
+            );
+            validate_mfjs_parameters(&parameters, route)
+                .expect("the normalized schema must satisfy the MFJS validator");
+
+            // The root stays the plain object schema the tool declared.
+            assert_eq!(parameters["type"], "object");
+            assert_eq!(parameters["required"], json!(["slides"]));
+
+            // The union survives intact: no flatten into a merged object,
+            // same branch count, same per-branch layout/required contract.
+            let items = &parameters["properties"]["slides"]["items"];
+            assert!(
+                items.get("properties").is_none(),
+                "slides.items must not be flattened into a merged object: {items}"
+            );
+            let branches = items["anyOf"]
+                .as_array()
+                .expect("the slides.items union must survive normalization");
+            assert_eq!(
+                branches.len(),
+                10,
+                "normalization must not change the branch count"
+            );
+            assert_eq!(branch_contract(branches), expected);
+
+            // The nested item union (agenda/kpi entries) survives too.
+            for layout in ["agenda", "kpi"] {
+                let branch = branches
+                    .iter()
+                    .find(|branch| branch["properties"]["layout"]["enum"][0] == json!(layout))
+                    .expect("layout branch");
+                let nested = &branch["properties"]["items"]["items"]["anyOf"];
+                assert_eq!(
+                    nested.as_array().map(Vec::len),
+                    Some(2),
+                    "the {layout} item union must keep both branches: {nested}"
+                );
+            }
+        }
+    }
 }
