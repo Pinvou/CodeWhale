@@ -939,24 +939,76 @@ fn apply_direct_moonshot_k3_fixed_sampling(
     }
 }
 
-/// Kimi Code's membership endpoint owns the sampling behavior of every model
-/// it serves. Strip generic controls from the exact first-party route
+/// Whether a configured route is exactly one of Kimi Code's official
+/// membership endpoints: China `https://api.kimi.com/coding/v1` or overseas
+/// `https://api.kimi.ai/coding/v1`.
+///
+/// The official Kimi Code documentation lists both hosts for the same
+/// product ("Kimi Code API address — China `https://api.kimi.com/coding/v1`,
+/// Overseas `https://api.kimi.ai/coding/v1`",
+/// <https://www.kimi.com/code/docs/en/third-party-tools/codex.html>, re-verified
+/// 2026-11-05), so the membership route contract spans both spellings.
+///
+/// Matching semantics mirror `codewhale_config::provider::is_exact_https_route`
+/// (the config-crate matcher behind `is_exact_kimi_code_route`): scheme and
+/// authority compare ASCII case-insensitively, the path compares exactly, a
+/// single trailing slash is insignificant, and lookalike hosts or neighboring
+/// paths never match. That helper is private to the config crate and widening
+/// `is_exact_kimi_code_route` itself belongs to in-flight PR #137, so the
+/// sampling strip carries this route-scoped twin here; it must stay in sync
+/// with those semantics.
+///
+/// Deliberately narrower consumers keep the stricter China-only predicate
+/// (`moonshot_base_url_is_exact_kimi_code`): the `KimiParameterRoute`
+/// whitelist selection is probe-backed only for `.com`, and the replay /
+/// billing contracts aligned with it advance through #137.
+#[must_use]
+fn kimi_code_sampling_route(base_url: &str) -> bool {
+    const KIMI_CODE_ENDPOINTS: [(&str, &str); 2] =
+        [("api.kimi.com", "coding/v1"), ("api.kimi.ai", "coding/v1")];
+
+    let trimmed = base_url.trim();
+    let normalized = trimmed.strip_suffix('/').unwrap_or(trimmed);
+    let Some((scheme, authority_and_path)) = normalized.split_once("://") else {
+        return false;
+    };
+    let Some((authority, path)) = authority_and_path.split_once('/') else {
+        return false;
+    };
+
+    scheme.eq_ignore_ascii_case("https")
+        && KIMI_CODE_ENDPOINTS.iter().any(|(host, endpoint_path)| {
+            authority.eq_ignore_ascii_case(host) && path == *endpoint_path
+        })
+}
+
+/// Kimi Code's membership endpoints own the sampling behavior of every model
+/// they serve. Strip generic controls from the exact first-party routes
 /// regardless of model id; custom gateways and the direct platform route
 /// keep their own wire contract.
 ///
 /// The strip is deliberately route-scoped, not roster-scoped: a 2026-11-04
-/// live probe of this endpoint (GET /models plus per-model requests) showed
-/// all six served ids — `k3`, `k3-256k`, `k3.1-pro`, `k3.1-pro-highspeed`,
-/// `kimi-for-coding`, `kimi-for-coding-highspeed` — reject anything but the
-/// fixed values with a 400 ("invalid temperature: only 1 is allowed for this
-/// model" / "invalid top_p: only 0.95 is allowed for this model"). The
-/// roster has already lagged behind this endpoint three times (`k3-256k`,
-/// `kimi-for-coding-highspeed`, then both `k3.1-pro` spellings), so any
-/// model id the endpoint serves next is covered without a code change.
+/// live probe of the China endpoint (GET /models plus per-model requests)
+/// showed all six served ids — `k3`, `k3-256k`, `k3.1-pro`,
+/// `k3.1-pro-highspeed`, `kimi-for-coding`, `kimi-for-coding-highspeed` —
+/// reject anything but the fixed values with a 400 ("invalid temperature:
+/// only 1 is allowed for this model" / "invalid top_p: only 0.95 is allowed
+/// for this model"). The roster has already lagged behind this endpoint
+/// three times (`k3-256k`, `kimi-for-coding-highspeed`, then both `k3.1-pro`
+/// spellings), so any model id the endpoint serves next is covered without a
+/// code change.
+///
+/// The overseas host `api.kimi.ai` joins on contract extrapolation: the
+/// official documentation presents both regional endpoints as the same
+/// product with the same wire contract, and the 6/6-model 400 probe covered
+/// only the China spelling. The failure mode of the extrapolation is benign —
+/// not sending `temperature`/`top_p` is exactly the official recommended
+/// configuration for this endpoint, so an `.ai` route that would have
+/// tolerated generic sampling merely ships the documented shape instead.
 /// Source: <https://www.kimi.com/code/docs/en/third-party-tools/codex.html>
 /// (verified 2026-08-26; probe verified 2026-11-04).
 fn apply_kimi_code_fixed_sampling(body: &mut Value, provider: ApiProvider, base_url: &str) {
-    if provider != ApiProvider::Moonshot || !moonshot_base_url_is_exact_kimi_code(base_url) {
+    if provider != ApiProvider::Moonshot || !kimi_code_sampling_route(base_url) {
         return;
     }
     if let Some(object) = body.as_object_mut() {
@@ -1054,6 +1106,14 @@ fn mirror_minimax_reasoning_details_for_body(body: &mut Value, provider: ApiProv
 /// from this request with a warning instead of failing the whole request
 /// before transport. The tool name is safe to log — it is already visible in
 /// the UI — while the error's `Display` deliberately carries no schema values.
+///
+/// The route selects the keyword whitelist: the exact Kimi Code endpoint
+/// (`moonshot_base_url_is_exact_kimi_code`, the China-only predicate) admits
+/// the keywords its 2026-11-04 live probe verified, while platform endpoints
+/// keep the conservative MFJS whitelist. This predicate is deliberately
+/// stricter than the fixed-sampling strip (`kimi_code_sampling_route`), whose
+/// overseas `.ai` host has no probe evidence of its own and therefore no
+/// whitelist relaxation either.
 ///
 /// Returns the names of the dropped tools, in catalog order.
 fn sanitize_moonshot_chat_tools(chat_tools: &mut Vec<Value>) -> Vec<String> {
@@ -6605,6 +6665,20 @@ mod alias_thinking_detection_tests {
                 crate::config::DEFAULT_KIMI_CODE_BASE_URL,
                 crate::config::KIMI_CODE_K3_256K_MODEL,
             ),
+            // Neighboring paths on the overseas membership host are not the
+            // coding endpoint; the path must match exactly.
+            (
+                ApiProvider::Moonshot,
+                "https://api.kimi.ai/coding/v2",
+                crate::config::KIMI_CODE_K3_256K_MODEL,
+            ),
+            // Neighboring paths on the China membership host stay neighbors
+            // even when they share the `coding` prefix.
+            (
+                ApiProvider::Moonshot,
+                "https://api.kimi.com/coding/",
+                crate::config::KIMI_CODE_K3_256K_MODEL,
+            ),
         ] {
             let request = sampling_probe_request(model);
             let body =
@@ -6621,6 +6695,119 @@ mod alias_thinking_detection_tests {
                 body.body
             );
         }
+    }
+
+    #[test]
+    fn kimi_code_fixed_sampling_covers_the_overseas_api_kimi_ai_endpoint() {
+        // The official Kimi Code documentation lists two regional endpoints
+        // for the same membership product: China
+        // `https://api.kimi.com/coding/v1` and overseas
+        // `https://api.kimi.ai/coding/v1` (codex.html, "Kimi Code API
+        // address"). A configured base_url on the overseas host is the same
+        // route contract, so the strip must follow the route, not one
+        // spelling of its host.
+        for base_url in [
+            "https://api.kimi.ai/coding/v1",
+            // A trailing slash is insignificant and scheme/host are ASCII
+            // case-insensitive — the same semantics the config-crate
+            // exact-route matcher applies to the `.com` spelling.
+            "https://api.kimi.ai/coding/v1/",
+            "https://API.KIMI.AI/coding/v1",
+        ] {
+            let request = sampling_probe_request("k3.1-pro");
+            let body = crate::client::chat::build_chat_wire_body(
+                &request,
+                ApiProvider::Moonshot,
+                base_url,
+                false,
+            )
+            .expect("overseas Kimi Code wire body");
+            assert!(
+                body.body.get("temperature").is_none(),
+                "{base_url}: fixed sampling must strip temperature: {}",
+                body.body
+            );
+            assert!(
+                body.body.get("top_p").is_none(),
+                "{base_url}: fixed sampling must strip top_p: {}",
+                body.body
+            );
+            assert_eq!(body.body["model"], json!("k3.1-pro"), "{base_url}");
+        }
+    }
+
+    #[test]
+    fn overseas_kimi_ai_endpoint_keeps_the_conservative_parameter_whitelist() {
+        // Widening the sampling strip to the overseas host must NOT widen
+        // the KimiParameterRoute selection: the relaxed whitelist tier is
+        // backed by a live probe of the China endpoint only, so `pattern` (a
+        // KimiCode-route keyword) still fails the platform whitelist on
+        // `.ai` and the tool degrades per tool. Sampling shaping and route
+        // selection are deliberately split.
+        let patterned_tool = crate::models::Tool {
+            tool_type: None,
+            name: "patterned".to_string(),
+            description: "Find a label.".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "label": {"type": "string", "pattern": "^[a-z]+$"}
+                },
+                "required": ["label"]
+            }),
+            allowed_callers: None,
+            defer_loading: None,
+            input_examples: None,
+            strict: None,
+            cache_control: None,
+        };
+        let mut request = sampling_probe_request("k3.1-pro");
+        request.tools = Some(vec![patterned_tool]);
+
+        let overseas = crate::client::chat::build_chat_wire_body(
+            &request,
+            ApiProvider::Moonshot,
+            "https://api.kimi.ai/coding/v1",
+            false,
+        )
+        .expect("overseas Kimi Code wire body");
+        assert_eq!(
+            overseas.omitted_tool_names,
+            vec!["patterned".to_string()],
+            "the conservative platform whitelist must stay in force on `.ai`"
+        );
+        assert!(
+            overseas.body.get("tools").is_none(),
+            "the dropped tool must not ship: {}",
+            overseas.body
+        );
+        // The sampling strip, by contrast, does cover the overseas route.
+        assert!(
+            overseas.body.get("temperature").is_none() && overseas.body.get("top_p").is_none(),
+            "fixed sampling must still strip on `.ai`: {}",
+            overseas.body
+        );
+
+        // The China endpoint keeps the relaxed tier it was probed for: the
+        // same tool ships with its `pattern` intact.
+        let china = crate::client::chat::build_chat_wire_body(
+            &request,
+            ApiProvider::Moonshot,
+            crate::config::DEFAULT_KIMI_CODE_BASE_URL,
+            false,
+        )
+        .expect("China Kimi Code wire body");
+        assert!(
+            china.omitted_tool_names.is_empty(),
+            "the probe-verified keyword must ship on the probed route: {:?}",
+            china.omitted_tool_names
+        );
+        assert_eq!(
+            china.body["tools"][0]["function"]["parameters"]["properties"]["label"]["pattern"],
+            json!("^[a-z]+$"),
+            "pattern must survive on the China coding route: {}",
+            china.body
+        );
     }
 
     #[test]
