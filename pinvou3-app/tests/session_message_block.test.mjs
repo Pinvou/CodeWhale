@@ -208,3 +208,34 @@ test('JS↔Rust drift pin: the Ask-rule tool name stays byte-identical to the se
     'the Ask-rule constant must stay byte-identical to the manifest registration',
   );
 });
+
+test('JS↔Rust drift pin: the session-creation Ask-rule tool name stays byte-identical to the session-reader manifest registration', () => {
+  // Same pattern as the messaging-send pin above, for the create_session
+  // tool (docs/session-reader-session-creation-tool-design-and-acceptance.md):
+  // the execpolicy Ask rule is built from the Rust SESSION_CREATE_TOOL
+  // constant, so a rename on either side — the manifest registration (tool
+  // entry + session-creation feature mapping) or the constant — would
+  // silently stop the rule from matching or detach the feature switch. The
+  // assistant-side Rust test cannot reference the marketplace catalog
+  // (assistant->marketplace has no spare cycle-debt allowance), so this
+  // node suite carries the manifest half, mirroring the messaging pin.
+  const manifest = JSON.parse(readFileSync(
+    new URL('../resources/mcp-servers/session-reader/manifest.json', import.meta.url), 'utf8'));
+  const createTool = 'mcp_session-reader_create_session';
+  assert.ok(
+    manifest.mcp_tools.includes(createTool),
+    'the manifest must register the session-creation tool under its full name',
+  );
+  assert.deepEqual(
+    manifest.tool_features[createTool],
+    ['session-creation'],
+    'the create tool must map to its own session-creation feature',
+  );
+  const bridgeRs2 = readFileSync(
+    new URL('../src-tauri/src/features/assistant/platform/bridge.rs', import.meta.url), 'utf8');
+  assert.match(
+    bridgeRs2,
+    /pub const SESSION_CREATE_TOOL: &str = "mcp_session-reader_create_session";/,
+    'the Ask-rule constant must stay byte-identical to the manifest registration',
+  );
+});

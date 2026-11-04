@@ -48,3 +48,24 @@ test('marketplace and connector installs have a guarded terminal event', () => {
   assert(telemetry.includes('tool_install_terminal_waits_for_renewal_and_drops_after_reauthorization'));
   assert(telemetry.includes('tool_install_persistence_failures_do_not_accumulate_and_recovery_converges'));
 });
+
+test('all CLI installation commands record the returned result before propagating errors', () => {
+  for (const id of ['feishu', 'wecom', 'dingtalk', 'tmeet']) {
+    const start = connectors.indexOf(`pub async fn ${id}_ensure_cli(`);
+    const body = connectors.slice(start, connectors.indexOf('\n}', start) + 2);
+    assert.match(body, new RegExp(`install\\.finish\\(${id}_domain::${id}_ensure_cli\\(\\)\\.await\\)`));
+    assert.doesNotMatch(body, /\.await\?/);
+  }
+});
+
+test('marketplace sync and join errors reach the installation guard before returning', () => {
+  for (const name of ['tool', 'skill']) {
+    const start = marketplace.indexOf(`pub async fn install_marketplace_${name}(`);
+    const body = marketplace.slice(start, marketplace.indexOf('\n}', start) + 2);
+    assert.match(body, /let installed\s*=[\s\S]*?\.map_err\([\s\S]*?\.and_then\(std::convert::identity\);/);
+    assert.match(body, /if let Err\(error\) = installed\s*\{\s*return telemetry_install\.finish\(Err\(error\)\);/);
+  }
+  const start = marketplace.indexOf('pub async fn install_marketplace_tool(');
+  const body = marketplace.slice(start, marketplace.indexOf('\n}', start) + 2);
+  assert.match(body, /let post_install =[\s\S]*?mark_mcp_config_updated\(\);[\s\S]*?hot_refresh\(&pool, true\)\.await;\s*telemetry_install\.finish\(post_install\)/);
+});

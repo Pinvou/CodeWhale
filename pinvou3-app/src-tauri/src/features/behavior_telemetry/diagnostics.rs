@@ -647,6 +647,56 @@ pub(crate) fn capture_failure_context(
     context.http = http;
     context.site = if acp { "acp_error" } else { "assistant_error" }.into();
 }
+// Per-thread, one-shot observation points let tests fix the actual lock ordering
+// without replacing authorization, publication or persistence decisions.
+#[cfg(test)]
+pub(super) mod enrich_lock_probe {
+    use std::cell::RefCell;
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    pub(crate) enum Point {
+        BeforeLock,
+        Locked,
+    }
+
+    type Hook = (Point, Box<dyn FnOnce()>);
+    thread_local! {
+        static HOOK: RefCell<Option<Hook>> = const { RefCell::new(None) };
+    }
+
+    pub(crate) fn with_hook<T>(
+        point: Point,
+        hook: impl FnOnce() + 'static,
+        run: impl FnOnce() -> T,
+    ) -> T {
+        struct Restore(Option<Hook>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                HOOK.with(|slot| *slot.borrow_mut() = self.0.take());
+            }
+        }
+        let _restore = Restore(HOOK.with(|slot| slot.replace(Some((point, Box::new(hook))))));
+        run()
+    }
+
+    pub(super) fn observe(point: Point) {
+        let hook = HOOK.with(|slot| {
+            let mut slot = slot.borrow_mut();
+            if slot
+                .as_ref()
+                .is_some_and(|(expected, _)| *expected == point)
+            {
+                slot.take()
+            } else {
+                None
+            }
+        });
+        if let Some((_, hook)) = hook {
+            hook();
+        }
+    }
+}
+
 pub(super) fn enrich(
     telemetry: &BehaviorTelemetry,
     event: &mut BehaviorEvent,
@@ -689,9 +739,18 @@ pub(super) fn enrich(
             field(event, "turn_id").unwrap_or("unknown")
         );
     }
+    #[cfg(test)]
+    enrich_lock_probe::observe(enrich_lock_probe::Point::BeforeLock);
     let Ok(mut state) = telemetry.diagnostics.lock() else {
         return;
     };
+    // Consent may have been withdrawn while this observer waited. Serialize
+    // the final authorization check with clear() before any local side effect.
+    if !telemetry.lease_is_current(lease) {
+        return;
+    }
+    #[cfg(test)]
+    enrich_lock_probe::observe(enrich_lock_probe::Point::Locked);
     prune(&mut state);
     if event.event_name == "task_submitted" || !state.contexts.contains_key(&key) {
         let source = (event.event_name == "response_feedback_changed")

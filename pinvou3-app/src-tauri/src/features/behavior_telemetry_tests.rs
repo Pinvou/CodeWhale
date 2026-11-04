@@ -7,6 +7,12 @@ use tokio::net::TcpListener;
 #[path = "behavior_telemetry/shell_producer_tests.rs"]
 pub(crate) mod shell_producer;
 
+#[path = "behavior_telemetry/install_tests.rs"]
+mod install;
+
+#[path = "behavior_telemetry/diagnostic_cleanup_tests.rs"]
+mod diagnostic_cleanup;
+
 #[path = "behavior_telemetry/voice_diagnostic_tests.rs"]
 mod voice_diagnostic;
 
