@@ -397,6 +397,14 @@ fn root_composition_constraint_note(obj: &Map<String, Value>) -> Option<String> 
 /// `sanitize_moonshot_chat_tools`, which fails the whole request build, so one
 /// composed schema would break *every* tool-bearing Moonshot turn rather than
 /// degrade its own tool.
+///
+/// Status note (2026-11-04): that whole-request failure mode no longer
+/// exists — the request builder degrades per tool (drop + projection
+/// warning), and the keyword whitelist itself is now route-aware
+/// ([`KimiParameterRoute`]). These two conditional keywords remain outside
+/// both whitelists (the walle MFJS specification has no conditional
+/// keywords), so the strip stays the semantics-preserving way to keep such a
+/// tool shippable.
 fn drop_dependent_keywords(schema: &mut Value) -> Option<String> {
     strip_dependent_keywords(schema).then(|| {
         "This provider cannot express conditional requirements from the original schema. \
@@ -1258,7 +1266,8 @@ fn sanitize_kimi_parameters_candidate(
     // apply_patch and retain its dropped required-group contract as a prompt
     // note for the model.
     // MFJS has no conditional keywords. The shared compatibility pass drops
-    // them with a bounded description note instead of failing the whole turn.
+    // them with a bounded description note instead of sending a shape the
+    // validator would reject (which would drop the whole tool).
     let constraint_note = sanitize_for_responses(parameters);
 
     // Restore nullable unions collapsed by the registry's provider-neutral
@@ -2228,8 +2237,12 @@ mod kimi_tests {
         assert!(schema["properties"].get("type").is_none());
     }
 
-    // Function parameters must end as a plain object root. Composition stays
-    // available only in valid nested anyOf positions.
+    // Function parameters must end as a plain object root, or — since the
+    // walle specification listed anyOf as an applicator and the 2026-11-04
+    // probe confirmed it live — as a root union of explicit object branches
+    // (see kimi_parameters_passes_root_anyof_of_object_branches_through).
+    // Every other composition stays flattened; the tests below pin those
+    // protective shapes.
 
     #[test]
     fn kimi_parameters_add_type_to_anyof_root() {
