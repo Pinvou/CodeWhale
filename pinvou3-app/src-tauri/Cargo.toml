@@ -346,7 +346,9 @@ msg_parser = "0.3.0"
 # voice/platform/windows.rs 仅用 COM 基础类型(Interface/HSTRING/Result),它们源自
 # windows-core——不必拉入完整 windows crate。windows-core 已由 webview2-com 传递引入,
 # 此处显式声明只为把 app 直接依赖收敛到更轻的 windows-core(windows::core::* 即其 re-export)。
-windows-core = "0.61"
+# 0.62：与 webview2-com 0.39（wry 0.57）解析到的 windows-core 0.62 统一单实例,
+# 否则 Interface trait 跨实例不实现,voice 的 cast::<ICoreWebView2_13> 编译失败。
+windows-core = "0.62"
 # Computer Use accessibility tree (features/computer_use): Windows UI Automation.
 uiautomation = "0.25"
 # The same `windows` release uiautomation builds against, so it is already in
