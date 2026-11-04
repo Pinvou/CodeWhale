@@ -99,6 +99,10 @@ pub(crate) use platform::store_weights_roots_checked;
 // 已安装卡片实际引用的权重路径（可失败）：设备移除守卫的存量引用保护臂。
 // 见 platform::installed_weight_paths_checked 的说明。
 pub(crate) use platform::installed_weight_paths_checked;
+// 在册卡片权重目录的约定名集合（可失败）：设备移除守卫的零痕迹旧根名字臂
+// （旧版本自定义权重根不留痕，路径臂恢复不了，按名字 fail-closed 拦截）。
+// 见 platform::installed_weight_candidate_names_checked 的说明。
+pub(crate) use platform::installed_weight_candidate_names_checked;
 // 本机 Ollama 守护进程基地址：设备管理的外部模型探测/标签/删除与商店生命周期
 // 对齐到同一实例。见 platform::ollama_base_url 的说明。
 pub(crate) use platform::ollama_base_url;

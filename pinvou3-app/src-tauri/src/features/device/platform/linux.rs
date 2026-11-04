@@ -886,10 +886,13 @@ mod tests {
         .expect("insert downloaded model");
         let dir = registry_dir();
         std::fs::create_dir_all(&dir).expect("registry dir");
+        // 注册名刻意与在册 model_name（"upg-model"）不同：同名会让守卫 2 的
+        // 商店名单名字臂先命中（"由模型商店管理"），本用例要钉的是其后的
+        // 存量引用臂（f3e00ff90 初版同名，该提交起 CI 未跑过 Linux 测试）。
         std::fs::write(
             dir.join("m-upg01.json"),
             format!(
-                r#"{{"schema":1,"id":"m-upg01","name":"upg-model","kind":"other","weights_path":{}}}"#,
+                r#"{{"schema":1,"id":"m-upg01","name":"upg-ext","kind":"other","weights_path":{}}}"#,
                 serde_json::to_string(&weights.to_string_lossy()).expect("json string")
             ),
         )
@@ -901,7 +904,7 @@ mod tests {
             .expect("test runtime");
         runtime.block_on(async move {
             let error =
-                remove_external_model("m-upg01".to_string(), true, "upg-model".to_string(), None)
+                remove_external_model("m-upg01".to_string(), true, "upg-ext".to_string(), None)
                     .await
                     .expect_err("empty-history upgrade must still shield reused weights");
             assert!(
@@ -963,10 +966,12 @@ mod tests {
         .expect("insert downloaded model");
         let dir = registry_dir();
         std::fs::create_dir_all(&dir).expect("registry dir");
+        // 注册名与在册 model_name（"evict-model"）刻意不同：同名字臂先命中，
+        // 钉不住本用例目标的存量引用臂（与 upgrade 用例同一更正）。
         std::fs::write(
             dir.join("m-evict01.json"),
             format!(
-                r#"{{"schema":1,"id":"m-evict01","name":"evict-model","kind":"other","weights_path":{}}}"#,
+                r#"{{"schema":1,"id":"m-evict01","name":"evict-ext","kind":"other","weights_path":{}}}"#,
                 serde_json::to_string(&weights.to_string_lossy()).expect("json string")
             ),
         )
@@ -995,19 +1000,162 @@ mod tests {
             .build()
             .expect("test runtime");
         runtime.block_on(async move {
-            let error = remove_external_model(
-                "m-evict01".to_string(),
-                true,
-                "evict-model".to_string(),
-                None,
-            )
-            .await
-            .expect_err("evicted root must not lift installed-reference protection");
+            let error =
+                remove_external_model("m-evict01".to_string(), true, "evict-ext".to_string(), None)
+                    .await
+                    .expect_err("evicted root must not lift installed-reference protection");
             assert!(
                 error.contains("已安装商店模型引用"),
                 "rejection must come from the installed-reference arm, got: {error}"
             );
             assert!(weights.exists(), "referenced weights must survive");
+        });
+    }
+
+    /// 2026-11-04 评审 P2（5768052838）zhuowp 点名的存量场景——**升级前自定义
+    /// 权重根零痕迹**：旧版本用自定义权重根 X 安装卡片，之后仍在旧版本的保存中
+    /// 换根到 Y 并移除扫描目录——旧版本无任何留痕机制，升级后 settings 的两类
+    /// history 全空、models_dir=Y，X 不在任何历史/内置根中。路径臂（已知根 ×
+    /// 约定名）恢复不了 X 上的引用，由名字臂兜底：删除 X 本身（一级子目录命中）
+    /// 与删除 X/<Repo>（叶名命中）都被拒绝、卡片与注册记录存活；不相关名目录
+    /// 照常放行（负验证，钉「宁可漏」边界不误伤）。
+    #[test]
+    fn untraced_legacy_custom_root_is_shielded_by_candidate_names() {
+        use crate::features::device::{external_models::registry_dir, remove_external_model};
+        use crate::features::model_store::platform::linux::{config, db};
+        use crate::platform::paths::user_home_dir;
+        let ctx = config::TempHome::new();
+        point_ollama_at_dead_port();
+        db::init_db().expect("init store db");
+        // 手写存量升级形态的 settings：models_dir=Y + ollama_host 合并写（覆盖
+        // point_ollama_at_dead_port 的单键文件），两条 history 均不存在。
+        let models_dir_y = ctx.path().join("weights-y");
+        std::fs::create_dir_all(&models_dir_y).expect("create models_dir Y");
+        std::fs::write(
+            config::config_dir().join("config.json"),
+            format!(
+                r#"{{"ollama_host": "http://127.0.0.1:1", "models_dir": "{}"}}"#,
+                models_dir_y.to_string_lossy()
+            ),
+        )
+        .expect("write pre-upgrade settings");
+        let settings = config::load_settings();
+        assert!(
+            settings.models_dir_history.is_empty() && settings.import_scan_dirs_history.is_empty(),
+            "precondition: pre-upgrade settings carry no history, got {:?} / {:?}",
+            settings.models_dir_history,
+            settings.import_scan_dirs_history
+        );
+        // 零痕迹旧根 X 及其上的卡片权重（约定形状恰一层：<X>/<Repo>）。
+        let legacy_root = user_home_dir().join("legacy-custom");
+        let weights = legacy_root.join("Repo");
+        std::fs::create_dir_all(&weights).expect("create legacy weights");
+        std::fs::write(weights.join("weight.bin"), b"weights").expect("write weight");
+        // 在册卡片：约定名两臂 = "Repo"（source_repo_id 末段）与 "zero-model"。
+        db::add_store_model(db::AddStoreModelParams {
+            card_id: "c-zero",
+            model_name: "zero-model",
+            card_name: "c-zero",
+            org: None,
+            description: None,
+            engine_name: "e",
+            engine_version: None,
+            size_bytes: 0,
+            quantization: None,
+            source_repo_id: Some("org/Repo"),
+            source_filename: None,
+            scripts: &std::collections::BTreeMap::new(),
+            status: "downloaded",
+            profiles: &[],
+            deploy_topology: crate::features::model_store::platform::linux::store_client::DeployTopology::default(),
+            card_source: "store",
+        })
+        .expect("insert downloaded model");
+        // 注册记录名与在册 model_name 刻意不同：同名会让守卫 2 名字臂先命中，
+        // 钉不住本用例的名字臂（与 upgrade/evict 用例同一更正）。
+        let dir = registry_dir();
+        std::fs::create_dir_all(&dir).expect("registry dir");
+        let write_record = |id: &str, name: &str, path: &std::path::Path| {
+            std::fs::write(
+                dir.join(format!("{id}.json")),
+                format!(
+                    r#"{{"schema":1,"id":"{id}","name":"{name}","kind":"other","weights_path":{}}}"#,
+                    serde_json::to_string(&path.to_string_lossy()).expect("json string")
+                ),
+            )
+            .expect("write registry record");
+        };
+        write_record("m-zero1", "legacy-ext-leaf", &weights);
+        write_record("m-zero2", "legacy-ext-root", &legacy_root);
+        // 负验证对照：不相关名的家目录三层权重目录（深度臂放行的形状），登记
+        // 名/叶名/一级子名都不命中约定名集合。
+        let unrelated = user_home_dir()
+            .join("unrelated-place")
+            .join("deep")
+            .join("store-free");
+        std::fs::create_dir_all(&unrelated).expect("create unrelated weights");
+        std::fs::write(unrelated.join("weight.bin"), b"weights").expect("write unrelated weight");
+        write_record("m-free01", "legacy-ext-free", &unrelated);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        runtime.block_on(async move {
+            // 叶删：删除 <X>/<Repo>（记录 m-zero1）→ 名字臂叶名命中拒绝。
+            let leaf_error = remove_external_model(
+                "m-zero1".to_string(),
+                true,
+                "legacy-ext-leaf".to_string(),
+                None,
+            )
+            .await
+            .expect_err("untraced legacy root weights must stay shielded");
+            assert!(
+                leaf_error.contains("约定同名") && leaf_error.contains("不留痕"),
+                "leaf deletion must be refused by the legacy-root name arm, got: {leaf_error}"
+            );
+            // 父删：删除 <X> 本身（记录 m-zero2）→ 一级子目录名命中拒绝。
+            let root_error = remove_external_model(
+                "m-zero2".to_string(),
+                true,
+                "legacy-ext-root".to_string(),
+                None,
+            )
+            .await
+            .expect_err("the untraced root itself must stay shielded too");
+            assert!(
+                root_error.contains("约定同名"),
+                "parent deletion must be refused by the legacy-root name arm, got: {root_error}"
+            );
+            // 卡片、权重目录与注册记录全部存活。
+            assert!(
+                db::get_store_model("c-zero")
+                    .expect("query store model")
+                    .is_some(),
+                "the in-store card must survive the rejections"
+            );
+            assert!(weights.exists(), "referenced weights must survive");
+            assert!(legacy_root.exists(), "the legacy root must survive");
+            assert!(dir.join("m-zero1.json").exists());
+            assert!(dir.join("m-zero2.json").exists());
+            // 负验证：不相关名目录照常放行（整单删除成功），钉住新臂不误伤。
+            let outcome = remove_external_model(
+                "m-free01".to_string(),
+                true,
+                "legacy-ext-free".to_string(),
+                None,
+            )
+            .await
+            .expect("unrelated-name weights must delete normally");
+            assert!(
+                outcome.removed_weights,
+                "unrelated-name weights must be deleted"
+            );
+            assert!(outcome.removed_registry);
+            assert!(
+                !unrelated.exists(),
+                "unrelated-name weights must be gone after delete_weights=true"
+            );
         });
     }
 

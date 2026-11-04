@@ -58,11 +58,14 @@ pub use service::{
     start_lifecycle, storage_settings, take_startup_cleanup, test_store_state, unlock_test_store,
 };
 
-// 可见性契约：`installed_weight_paths_checked` 是 crate 内部守卫助手（service.rs
-// 里 pub(crate)，非公开命令面），所以不进上面的 `pub use`——pub 重导出 crate
-// 可见项是 E0364（Linux CI 编译错误 2026-11-04）。下游 platform/mod.rs 与
-// model_store/mod.rs 的 `pub(crate) use` 两跳照常转发。
-pub(crate) use service::installed_weight_paths_checked;
+// 可见性契约：`installed_weight_paths_checked` 与 `installed_weight_candidate_names_checked`
+// 是 crate 内部的设备守卫助手（service.rs 里 pub(crate)，非公开命令面），所以
+// 不进上面的 `pub use`——pub 重导出 crate 可见项是 E0364（Linux CI 编译错误
+// 2026-11-04）。下游 platform/mod.rs 与 model_store/mod.rs 的 `pub(crate) use`
+// 两跳照常转发。
+pub(crate) use service::{
+    installed_weight_candidate_names_checked, installed_weight_paths_checked,
+};
 
 /// Linux 上模型商店总是可用的。
 ///

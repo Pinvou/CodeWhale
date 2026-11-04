@@ -1000,7 +1000,25 @@ pub async fn remove_external_model(
                 Some(weights) => paths_intersect_any(Path::new(weights), &installed_refs),
                 None => false,
             };
-            Ok((name_hit, ollama_model_hit, weights_hit, installed_weight_hit))
+            // 零痕迹旧根名字臂（2026-11-04 评审 P2 zhuowp 场景）：路径臂按
+            // 「已知根 × 约定名」恢复引用，覆盖不了旧版本自定义权重根不留痕的
+            // 存量——旧版本保存存储设置时换根并移除扫描目录，旧根不在任何
+            // 历史/内置根中，升级后零痕迹。这里按名字 fail-closed 兜底：约定
+            // 名集合只依赖在册记录（覆盖零痕迹旧根的原因），目标叶名或一级
+            // 子目录名命中即拒绝。fail-closed 与名单/权重根查询同口径。
+            let candidate_names =
+                crate::features::model_store::installed_weight_candidate_names_checked()?;
+            let installed_name_hit = match weights_path.as_deref() {
+                Some(weights) => target_matches_candidate_names(Path::new(weights), &candidate_names),
+                None => false,
+            };
+            Ok((
+                name_hit,
+                ollama_model_hit,
+                weights_hit,
+                installed_weight_hit,
+                installed_name_hit,
+            ))
         }
     })
     .await
@@ -1011,12 +1029,14 @@ pub async fn remove_external_model(
         // "稍后重试"是死路，记录会从 UI 永远删不掉。
         format!("{error}；为防误删商店管理的模型，本次移除已被拒绝，请稍后重试{STORE_BOUNDARY_ESCAPE_HINT}")
     })?;
-    let (name_hit, ollama_model_hit, weights_hit, installed_weight_hit) = boundary;
+    let (name_hit, ollama_model_hit, weights_hit, installed_weight_hit, installed_name_hit) =
+        boundary;
     removal_boundary_error(
         &record.name,
         &confirm_name,
         weights_hit,
         installed_weight_hit,
+        installed_name_hit,
         name_hit.as_deref(),
         ollama_model_hit.as_deref(),
     )?;
@@ -1142,6 +1162,17 @@ pub async fn remove_external_model(
                                         )
                                     })?;
                             ensure_recheck_outside_installed_refs(&recheck, &installed_refs)?;
+                            // 零痕迹旧根名字删除时刻复查（2026-11-04 评审 P2
+                            // zhuowp 场景）：与边界闭包的名字判定镜像同一口径，
+                            // 查询失败按拒绝（fail-closed 同口径）。
+                            let candidate_names =
+                                crate::features::model_store::installed_weight_candidate_names_checked()
+                                    .map_err(|error| {
+                                        format!(
+                                            "拒绝删除：在册卡片约定名读取失败（{error}），为防误删已拒绝"
+                                        )
+                                    })?;
+                            ensure_recheck_not_candidate_named(&recheck, &candidate_names)?;
                             // 并发移除兜底：另一窗口/通道已把目录删掉时
                             // remove_dir_all 报 NotFound——与存在性预检的
                             // Ok(None) 同口径按"已删除"收敛，不报误导性的
@@ -1228,13 +1259,15 @@ pub async fn remove_external_model(
 
 /// 守卫 1 + 守卫 2 的纯逻辑（测试矩阵直打）：确认名一致 → 名字未由商店管理 →
 /// Ollama 有效删除名未由商店管理（别名记录不许把商店模型从守护进程里删掉）→
-/// 权重不在任一商店权重根之下。商店名单/权重根的查询结果由调用方先在 blocking
-/// 池算好传入，这里保持纯计算、可测试矩阵直打。
+/// 权重不在任一商店权重根之下 → 与在册卡片引用路径不相交 → 目录名不在零痕迹
+/// 旧根名字臂命中。商店名单/权重根/引用路径/约定名的查询结果由调用方先在
+/// blocking 池算好传入，这里保持纯计算、可测试矩阵直打。
 fn removal_boundary_error(
     record_name: &str,
     confirm_name: &str,
     weights_in_store: bool,
     installed_weight_hit: bool,
+    installed_name_hit: bool,
     store_name_hit: Option<&str>,
     ollama_model_store_hit: Option<&str>,
 ) -> Result<(), String> {
@@ -1271,6 +1304,15 @@ fn removal_boundary_error(
         // 在册卡片引用路径兜底。
         return Err(format!(
             "该模型的权重目录与已安装商店模型引用的权重路径相交（就地复用），删除会破坏仍在使用的商店模型，请在模型商店中操作{STORE_BOUNDARY_ESCAPE_HINT}"
+        ));
+    }
+    if installed_name_hit {
+        // 零痕迹旧根名字臂（2026-11-04 评审 P2 zhuowp 场景）：旧版本允许在
+        // 保存存储设置时换权重根并移除扫描目录且不留任何历史，那样的旧自定义
+        // 根升级后不在任何已知商店根之下，路径臂恢复不了它的引用——目录名与
+        // 在册卡片约定同名时无法确认归属，拦住删除（宁可误拒，不误删）。
+        return Err(format!(
+            "该目录名与在册商店卡片的权重目录约定同名，且不在任何已知商店根之下，无法确认它不是仍被引用的原始权重（旧版本自定义权重根不留痕），删除可能破坏仍在使用的商店模型，请在模型商店中操作{STORE_BOUNDARY_ESCAPE_HINT}"
         ));
     }
     Ok(())
@@ -1597,6 +1639,47 @@ fn ensure_recheck_outside_installed_refs(
     if paths_intersect_any(recheck, installed_refs) {
         return Err(
             "拒绝删除：目标目录与已安装商店模型引用的权重路径相交（就地复用），由模型商店管理，请在模型商店中操作".to_string(),
+        );
+    }
+    Ok(())
+}
+
+/// 零痕迹旧根名字臂的判定（边界闭包与删除时刻复查共用；名字比对是纯计算，
+/// 「一级子目录存在性」是一次 stat，调用方都在 blocking 池）：删除目标**自身
+/// 的叶目录名**命中在册卡片约定名（直接删权重目录），或目标之下**恰好一层**
+/// 存在约定名子目录（删其父目录连带权重），即视为无法排除是仍被引用的原始
+/// 权重。卡片脚本按约定把权重放在 `$ROOT/<name>` 一层（import_scan 候选约定，
+/// 与 model_store 两臂约定名同一口径），所以两查恰好覆盖「叶删」与「父删」；
+/// 更深的祖先（约定名的祖父目录）不含约定名分量、两查都落空——按「宁可漏」
+/// 边界如实放行，不向上扩散（评审处方：在无法确认归属时拦住删除，而不是把
+/// 任意祖先目录都当可疑）。
+fn target_matches_candidate_names(target: &Path, names: &[String]) -> bool {
+    if names.is_empty() {
+        return false;
+    }
+    let named = |name: &str| names.iter().any(|candidate| candidate == name);
+    // 叶删：目标就是权重目录本身（<零痕迹旧根>/<约定名>）。
+    if target
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(named)
+    {
+        return true;
+    }
+    // 父删：目标是权重目录的父目录，其下一级就是约定名目录。
+    names.iter().any(|name| target.join(name).exists())
+}
+
+/// 删除时刻的零痕迹旧根名字复查（纯函数 + 存在性探测，测试直打）：与边界
+/// 闭包的名字判定镜像同一口径（[`target_matches_candidate_names`]），收窄
+/// 「守卫时刻判断正确、删除时刻目录已被换成零痕迹旧根形状」的窗口。
+fn ensure_recheck_not_candidate_named(
+    recheck: &Path,
+    candidate_names: &[String],
+) -> Result<(), String> {
+    if target_matches_candidate_names(recheck, candidate_names) {
+        return Err(
+            "拒绝删除：目标目录名与在册商店卡片的权重目录约定同名，且不在任何已知商店根之下，无法确认它不是仍被引用的原始权重（旧版本自定义权重根不留痕），为防误删已拒绝".to_string(),
         );
     }
     Ok(())
@@ -2116,6 +2199,62 @@ mod tests {
             )
             .is_ok()
         );
+    }
+
+    // 零痕迹旧根名字臂矩阵（2026-11-04 评审 P2 zhuowp 场景）：约定形状恰是
+    // $ROOT/<name> 一层——叶删（目标自身名命中）与父删（一级子目录命中）都
+    // 必须拦；不相关名放行（该臂不误伤无关目录）；空名字集恒放行（无在册
+    // 卡片/非商店平台）。删除时刻复查与边界闭包共用同一判定，顺带钉其文案。
+    #[test]
+    fn candidate_name_arm_hits_leaf_and_first_level_child_only() {
+        let names = vec!["Repo".to_string(), "my-model".to_string()];
+        let dir = TempDir::new("legacy-root-names");
+        // 叶删：目标就是约定名目录（名字比对纯计算，无需盘上存在）。
+        assert!(target_matches_candidate_names(
+            &dir.path().join("Repo"),
+            &names
+        ));
+        assert!(target_matches_candidate_names(
+            &dir.path().join("my-model"),
+            &names
+        ));
+        // 父删：目标之下恰好一层存在约定名子目录（需要真实盘上目录）。
+        std::fs::create_dir_all(dir.path().join("legacy-custom").join("Repo"))
+            .expect("create first-level candidate");
+        assert!(target_matches_candidate_names(
+            &dir.path().join("legacy-custom"),
+            &names
+        ));
+        // 更深祖先：约定名在两级之下，两查都落空——「宁可漏」边界如实放行。
+        std::fs::create_dir_all(dir.path().join("deep").join("mid").join("Repo"))
+            .expect("create deeper candidate");
+        assert!(
+            !target_matches_candidate_names(&dir.path().join("deep"), &names),
+            "ancestors beyond one level must stay outside the arm's reach"
+        );
+        // 不相关名放行：叶名与一级子目录名都不在约定名集合。
+        let unrelated = dir.path().join("unrelated-root");
+        std::fs::create_dir_all(unrelated.join("user-stuff")).expect("create unrelated tree");
+        assert!(!target_matches_candidate_names(&unrelated, &names));
+        // 大小写敏感：约定名比较按原串，不折叠（与 safe_path_component 保留
+        // 原样一致；大小写变形的目录不是约定形状）。
+        assert!(!target_matches_candidate_names(
+            &dir.path().join("repo"),
+            &names
+        ));
+        // 空名字集（无在册卡片/非商店平台）恒放行。
+        assert!(!target_matches_candidate_names(
+            &dir.path().join("Repo"),
+            &[]
+        ));
+        // 删除时刻复查：命中拒绝且文案点名 fail-closed 语义，不相关名通过。
+        let error = ensure_recheck_not_candidate_named(&dir.path().join("Repo"), &names)
+            .expect_err("leaf hit must be refused at deletion time");
+        assert!(
+            error.contains("约定同名") && error.contains("为防误删已拒绝"),
+            "got: {error}"
+        );
+        assert!(ensure_recheck_not_candidate_named(&unrelated, &names).is_ok());
     }
 
     #[test]
@@ -2678,15 +2817,23 @@ mod tests {
     fn removal_boundary_rejects_confirm_mismatch_store_names_and_store_weights() {
         // 双侧都 trim：存量记录名带空白时确认输入 trim 后仍应匹配（Ok 而非 Err）。
         assert!(
-            removal_boundary_error(" qwen3 ", "qwen3", false, false, None, None).is_ok(),
+            removal_boundary_error(" qwen3 ", "qwen3", false, false, false, None, None).is_ok(),
             "trailing-space record names must stay removable"
         );
-        let error =
-            removal_boundary_error("qwen3", " qwen3x ", false, false, None, None).unwrap_err();
+        let error = removal_boundary_error("qwen3", " qwen3x ", false, false, false, None, None)
+            .unwrap_err();
         assert!(error.contains("确认名"));
         // 守卫 2 名字臂：名字命中商店名单。
-        let error = removal_boundary_error("qwen3", "qwen3", false, false, Some("Qwen3-30B"), None)
-            .unwrap_err();
+        let error = removal_boundary_error(
+            "qwen3",
+            "qwen3",
+            false,
+            false,
+            false,
+            Some("Qwen3-30B"),
+            None,
+        )
+        .unwrap_err();
         assert!(error.contains("模型商店"));
         // 守卫 2 model 臂：别名记录的 Ollama 有效删除名命中商店名单（第三轮
         // 评审 P1）——名字臂拦不住它，必须单独立臂。
@@ -2695,16 +2842,32 @@ mod tests {
             "my-alias",
             false,
             false,
+            false,
             None,
             Some("qwen3:30b"),
         )
         .unwrap_err();
         assert!(error.contains("模型商店"));
         // 守卫 2 路径臂：权重位于任一商店根之下（别名躲过两个名字臂时仍被拦）。
-        let error = removal_boundary_error("qwen3", "qwen3", true, false, None, None).unwrap_err();
+        let error =
+            removal_boundary_error("qwen3", "qwen3", true, false, false, None, None).unwrap_err();
         assert!(error.contains("模型商店"));
-        // 四道全过 → Ok。
-        assert!(removal_boundary_error("qwen3", " qwen3 ", false, false, None, None).is_ok());
+        // 存量引用臂：与在册卡片引用路径相交（2026-11-04 评审 P2）。
+        let error =
+            removal_boundary_error("qwen3", "qwen3", false, true, false, None, None).unwrap_err();
+        assert!(error.contains("已安装商店模型引用"));
+        // 零痕迹旧根名字臂：目录名与在册约定同名（2026-11-04 评审 P2 zhuowp
+        // 场景），前四臂全空时仍被拦，且报错来自本臂而非前面的臂。
+        let error =
+            removal_boundary_error("qwen3", "qwen3", false, false, true, None, None).unwrap_err();
+        assert!(
+            error.contains("约定同名") && error.contains("不留痕"),
+            "rejection must come from the legacy-root name arm, got: {error}"
+        );
+        // 五道全过 → Ok。
+        assert!(
+            removal_boundary_error("qwen3", " qwen3 ", false, false, false, None, None).is_ok()
+        );
     }
 
     #[test]
@@ -3760,8 +3923,8 @@ mod tests {
         // 确认名回显限长（第九轮评审 P3）：record_name 来自手写文件，超长名字
         // 不逐字进错误与日志。
         let long_name = "长".repeat(100);
-        let error =
-            removal_boundary_error(&long_name, "mismatch", false, false, None, None).unwrap_err();
+        let error = removal_boundary_error(&long_name, "mismatch", false, false, false, None, None)
+            .unwrap_err();
         assert!(error.contains(&"长".repeat(32)));
         assert!(!error.contains(&"长".repeat(33)), "echo must be truncated");
     }

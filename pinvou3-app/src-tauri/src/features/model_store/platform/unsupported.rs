@@ -176,6 +176,11 @@ pub(crate) fn installed_weight_paths_checked() -> Result<Vec<std::path::PathBuf>
     Ok(Vec::new())
 }
 
+/// 非 Linux 没有商店：空约定名集合（设备守卫的零痕迹旧根名字臂恒不命中）。
+pub(crate) fn installed_weight_candidate_names_checked() -> Result<Vec<String>, String> {
+    Ok(Vec::new())
+}
+
 pub(crate) fn ollama_base_url() -> String {
     "http://127.0.0.1:11434".to_string()
 }

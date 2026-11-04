@@ -848,6 +848,47 @@ pub(crate) fn installed_weight_paths_checked() -> Result<Vec<std::path::PathBuf>
     Ok(out)
 }
 
+/// 设备管理删除守卫的「在册卡片权重目录约定名」集合（可失败版）。
+///
+/// 与 [`installed_weight_paths_checked`] 互补：后者按「已知根 × 约定名」恢复
+/// 引用路径，只能覆盖根集合枚举得到的位置——旧版本允许在保存存储设置时换根
+/// 并同时移除扫描目录且不留任何历史（2026-11-04 评审 P2），那样的旧自定义根
+/// 升级后不在任何历史/内置根中，**零痕迹**。本函数返回名字集合，只依赖在册
+/// 记录、不依赖任何根——这正是它能覆盖零痕迹旧根的原因：设备侧在删除目标
+/// 不在任何已知商店根之下时按名字比对，命中即拒绝（「无法确认归属时拦住
+/// 删除」，fail-closed）。
+///
+/// 两臂约定名（来源仓库名末段 + 用户模型名）与 [`installed_weight_paths_checked`]
+/// 及 `lifecycle::candidate_paths` 同一候选约定，都过 `safe_path_component`
+/// 防逃逸；去重后返回，顺序稳定（按记录顺序首现排列）。
+///
+/// fail-closed：DB 读不了 → Err（与 installed_weight_paths_checked 同口径，
+/// 破坏性移除路径不得当未命中放行）。宁可多拒：约定名只由在册卡片占用，
+/// 同名非商店目录被拒是可接受的误伤方向（与目录级保护超集同一取舍）。
+pub(crate) fn installed_weight_candidate_names_checked() -> Result<Vec<String>, String> {
+    let records = db::list_store_models().map_err(|e| format!("读取在册模型失败：{e}"))?;
+    let mut out: Vec<String> = Vec::new();
+    for rec in &records {
+        // 与 installed_weight_paths_checked / lifecycle::candidate_paths 同一
+        // 两臂候选约定：来源仓库名末段与用户模型名，都过 safe_path_component。
+        if let Some(repo) = rec.source_repo_id.as_deref() {
+            if let Some(base) = repo.rsplit('/').next() {
+                if let Ok(safe) = config::safe_path_component(base) {
+                    if !out.contains(&safe) {
+                        out.push(safe);
+                    }
+                }
+            }
+        }
+        if let Ok(safe) = config::safe_path_component(&rec.model_name) {
+            if !out.contains(&safe) {
+                out.push(safe);
+            }
+        }
+    }
+    Ok(out)
+}
+
 pub fn storage_settings() -> Result<Value, String> {
     let settings = config::load_settings();
     let models_dir = settings.models_path();
@@ -1360,6 +1401,102 @@ mod tests {
                 .any(|p| p.starts_with(ctx.path().join("custom-weights"))),
             "missing candidates under the new custom root must not appear, got {refs:?}"
         );
+    }
+
+    #[test]
+    fn installed_weight_candidate_names_derive_from_records_without_any_root() {
+        use crate::features::model_store::platform::linux::db;
+
+        let ctx = super::config::TempHome::new();
+        db::init_db().expect("init store db");
+        // 空库 → 空名字集合（设备守卫的名字臂恒不命中）。
+        let empty = crate::features::model_store::installed_weight_candidate_names_checked()
+            .expect("empty store enumerates");
+        assert!(empty.is_empty(), "got {empty:?}");
+
+        // 两臂约定名都派生：来源仓库名末段 + 用户模型名。**不依赖任何根、
+        // 不做存在性过滤**——这是它能覆盖零痕迹旧根的原因（与
+        // installed_weight_paths_checked 的 exists() 尺子方向相反）。
+        db::add_store_model(db::AddStoreModelParams {
+            card_id: "c-names-1",
+            model_name: "my-model",
+            card_name: "c-names-1",
+            org: None,
+            description: None,
+            engine_name: "e",
+            engine_version: None,
+            size_bytes: 0,
+            quantization: None,
+            source_repo_id: Some("org/qwen-weights"),
+            source_filename: None,
+            scripts: &std::collections::BTreeMap::new(),
+            status: "downloaded",
+            profiles: &[],
+            deploy_topology: crate::features::model_store::platform::linux::store_client::DeployTopology::default(),
+            card_source: "store",
+        })
+        .expect("insert downloaded model");
+        let names = crate::features::model_store::installed_weight_candidate_names_checked()
+            .expect("derive names");
+        assert_eq!(
+            names,
+            vec!["qwen-weights".to_string(), "my-model".to_string()]
+        );
+        // 盘上一个候选目录都不存在，名字集合照样返回（零痕迹语义）。
+        assert!(!ctx.path().join("qwen-weights").exists());
+
+        // 去重 + 防逃逸：第二条记录两臂同名（去重），第三条来源仓库名末段是
+        // `..`（safe_path_component 拒绝 → 该臂丢弃），模型名带非法字符
+        // （同拒）——名字集合不得出现任何可逃逸形状。
+        db::add_store_model(db::AddStoreModelParams {
+            card_id: "c-names-2",
+            model_name: "qwen-weights",
+            card_name: "c-names-2",
+            org: None,
+            description: None,
+            engine_name: "e",
+            engine_version: None,
+            size_bytes: 0,
+            quantization: None,
+            source_repo_id: Some("org/qwen-weights"),
+            source_filename: None,
+            scripts: &std::collections::BTreeMap::new(),
+            status: "downloaded",
+            profiles: &[],
+            deploy_topology: crate::features::model_store::platform::linux::store_client::DeployTopology::default(),
+            card_source: "store",
+        })
+        .expect("insert duplicate-name model");
+        db::add_store_model(db::AddStoreModelParams {
+            card_id: "c-names-3",
+            model_name: "../escape",
+            card_name: "c-names-3",
+            org: None,
+            description: None,
+            engine_name: "e",
+            engine_version: None,
+            size_bytes: 0,
+            quantization: None,
+            source_repo_id: Some("org/.."),
+            source_filename: None,
+            scripts: &std::collections::BTreeMap::new(),
+            status: "downloaded",
+            profiles: &[],
+            deploy_topology: crate::features::model_store::platform::linux::store_client::DeployTopology::default(),
+            card_source: "store",
+        })
+        .expect("insert escaping model");
+        let names = crate::features::model_store::installed_weight_candidate_names_checked()
+            .expect("derive names after dup and escape");
+        assert_eq!(
+            names,
+            vec!["qwen-weights".to_string(), "my-model".to_string()]
+        );
+        assert!(
+            !names.iter().any(|name| name.contains("..")),
+            "escape shapes must be filtered, got {names:?}"
+        );
+        let _ = ctx;
     }
 
     #[test]
