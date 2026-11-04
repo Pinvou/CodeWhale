@@ -523,12 +523,22 @@ fn event_stage(event: &BehaviorEvent) -> &'static str {
         Some("output") => "output",
         Some("shutdown") => "shutdown",
         _ => match event.event_name {
-            "task_submitted" | "task_rejected" => "submission",
+            "task_submitted"
+            | "task_rejected"
+            | "voice_entry_clicked"
+            | "voice_message_submitted" => "submission",
             "task_admitted" => "queue",
+            "voice_permission_result" => "permission",
+            "voice_started" => "recording",
             "model_used" | "model_fallback_occurred" => "model",
             "tool_call_started" | "tool_call_completed" => "tool",
             "task_first_output" | "artifact_created" => "output",
-            "voice_recognition_failed" => "recognition",
+            "voice_recognition_failed"
+                if field(event, "error_category") == Some("configuration_missing") =>
+            {
+                "submission"
+            }
+            "voice_recognition_failed" | "voice_recognition_completed" => "recognition",
             _ => "unknown",
         },
     }
@@ -655,14 +665,24 @@ pub(super) fn enrich(
     {
         return;
     }
-    let mut key = event
-        .diagnostic_remote
-        .as_ref()
-        .map(|(trace, _)| trace.as_str())
-        .or_else(|| field(event, "session_id"))
-        .or_else(|| field(event, "operation_id"))
-        .unwrap_or(&event.event_id)
-        .to_owned();
+    let mut key = if event.event_name.starts_with("voice_") {
+        // A recording is its own lifecycle, including before task admission or
+        // when its draft becomes a real session. Never borrow a task's context.
+        // Malformed/legacy observations without an operation stay event-local.
+        format!(
+            "voice|{}",
+            field(event, "operation_id").unwrap_or(&event.event_id)
+        )
+    } else {
+        event
+            .diagnostic_remote
+            .as_ref()
+            .map(|(trace, _)| trace.as_str())
+            .or_else(|| field(event, "session_id"))
+            .or_else(|| field(event, "operation_id"))
+            .unwrap_or(&event.event_id)
+            .to_owned()
+    };
     if event.event_name == "response_feedback_changed" {
         key = format!(
             "quality|{key}|{}",

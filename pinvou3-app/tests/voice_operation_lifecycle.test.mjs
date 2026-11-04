@@ -257,7 +257,8 @@ for (const [lane, source] of Object.entries(sources)) {
     Object.assign(operation, { rawText: 'private conversation', draftBeforeStart: 'private draft',
       diagnostic: { error: 'secret raw error' }, modelId: 'private-model', path: 'private-path' });
     h.api.completeVoiceSubmission(operation.operationId, 'native-session', true);
-    assert.deepEqual(Object.keys(h.events[0]).sort(), ['command', 'eventName', 'operationId', 'sessionId']);
+    assert.deepEqual(Object.keys(h.events[0]).sort(), ['command', 'eventName', 'inputType', 'operationId', 'sessionId']);
+    assert.equal(h.events[0].inputType, 'voice');
   });
 
   test(`${lane}: implementation publishes context before awaiting writeback and never resets terminal`, () => {
