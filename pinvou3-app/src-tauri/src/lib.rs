@@ -1625,8 +1625,8 @@ pub fn run() {
                             .set_artifact_scope(desktop_artifacts.clone());
                         handle.state::<ControlledDeviceManager>().register_cleanup_sink(desktop_attachments.cleanup_sink());
                         let desktop_history =
-                            commands::desktop_remote_journal::DesktopRemoteJournalRuntime::journal_only(
-                                format!("boot-{}", std::process::id()),
+                            commands::desktop_remote_journal::DesktopRemoteJournalRuntime::from_controlled_manager(
+                                &handle.state::<ControlledDeviceManager>(),
                             );
                         desktop_task_runtime
                             .hooks()
@@ -2161,6 +2161,7 @@ pub fn run() {
             commands::desktop_remote_proxy::desktop_remote_proxy_history_read,
             commands::desktop_remote_proxy::desktop_remote_proxy_history_delete,
             commands::desktop_remote_proxy::desktop_remote_proxy_archive,
+            commands::desktop_remote_proxy::desktop_remote_proxy_quarantine,
             commands::desktop_remote_proxy::desktop_remote_proxy_archive_list,
             commands::desktop_remote_proxy::desktop_remote_proxy_archive_candidates,
             commands::desktop_remote_proxy::desktop_remote_proxy_load_status,
@@ -2172,6 +2173,7 @@ pub fn run() {
             commands::remote_control::web_access_disable,
             commands::remote_control::web_access_status,
             commands::remote_control::web_access_rotate,
+            commands::remote_control::web_access_revoke_host_workspace,
             commands::remote_control::web_access_relay_settings,
             commands::remote_control::desktop_remote_endpoint_profiles,
             commands::remote_control::desktop_remote_set_endpoint_profile,

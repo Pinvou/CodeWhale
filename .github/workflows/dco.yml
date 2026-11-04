@@ -1,0 +1,94 @@
+name: DCO
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  merge_group:
+    types: [checks_requested]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+# Cancel superseded runs for the same ref to avoid queueing and wasted runner
+# minutes. Only PR runs may cancel each other: on merge_group and main pushes
+# github.ref is refs/heads/main, so an unconditional cancel would let
+# concurrent merge-queue entries kill each other's required-check context
+# (same failure class pr-check guards against).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  signoff:
+    name: Signed-off commits
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      # Checkout exists only so the shared memory setup script can run; DCO
+      # verification itself works purely through the API. Running
+      # ci-memory-setup here is a repo-wide convention for ubuntu jobs, not a
+      # memory need of this job.
+      - uses: actions/checkout@v7
+
+      - name: Set up zram and swap
+        # Best effort: timeouts or failures only warn and never block (falls back to stock runner memory).
+        run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM,RUNNER_ENVIRONMENT bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup did not finish; continuing with stock runner memory"
+
+      # 进入 Merge Queue 前，每个 PR 已通过本 required check。merge_group 中只包含
+      # GitHub 生成的组合提交，此处复用同名 check 上报成功，避免队列等待缺失上下文。
+      - name: 确认队列中的 PR 已通过 DCO
+        if: github.event_name == 'merge_group'
+        run: echo "DCO 已在各 PR 入队前验证"
+
+      - name: Verify DCO sign-offs
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const commits = await github.paginate(
+              github.rest.pulls.listCommits,
+              {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: context.issue.number,
+                per_page: 100,
+              },
+            );
+
+            // "List commits on a PR" silently caps at 250 even when paginated:
+            // a larger PR's tail commits would be unverified here. Compare the
+            // authoritative count from pulls.get and fail closed instead of
+            // passing a truncated list (the repo-wide validate-commit-msg.py
+            // gate stays as the stricter full-range check).
+            const pr = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.issue.number,
+            });
+            if (pr.data.commits > commits.length) {
+              core.setFailed(
+                `PR has ${pr.data.commits} commits but the REST API returns at most 250; ` +
+                "squash or split the PR so DCO coverage is complete.",
+              );
+            }
+
+            const signoff = /^Signed-off-by:\s+.+\s+<[^<>@\s]+@[^<>\s]+>$/im;
+            const trustedBots = new Set([
+              "dependabot[bot]",
+              "github-actions[bot]",
+            ]);
+            // merge commit(parents > 1,如同步 main 产生的 "Merge branch 'main' into ...")
+            // 天然不带 sign-off,按 probot/dco 惯例豁免;普通 commit 缺 sign-off 仍 fail。
+            const unsigned = commits.filter(({ author, committer, commit, parents }) => {
+              if ((parents?.length ?? 0) > 1) return false;
+              const login = author?.login ?? committer?.login;
+              return !trustedBots.has(login) && !signoff.test(commit.message);
+            });
+
+            if (unsigned.length > 0) {
+              const list = unsigned
+                .map(({ sha, commit }) => `- ${sha.slice(0, 12)} ${commit.message.split("\n", 1)[0]}`)
+                .join("\n");
+              core.setFailed(`The following commits are missing a valid Signed-off-by trailer:\n${list}`);
+            }

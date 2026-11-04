@@ -186,6 +186,9 @@ const monitorWithContextLimit = {
   },
 };
 invokeResponse = async command => command === 'get_monitor_snapshot' ? monitorWithContextLimit : {};
+// Re-polls immediately (not via the interval): the vm's setInterval stub
+// returns falsy 0, so startMonitorPolling's poller-dedupe guard never trips
+// and each call runs its one synchronous pollMonitor().
 api.monitor.startMonitorPolling();
 for (let attempt = 0; attempt < 20
   && !chatSnapshots.some(snapshot => snapshot.tokens?.max === 77777); attempt += 1) {

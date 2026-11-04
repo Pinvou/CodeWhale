@@ -2109,9 +2109,7 @@ mod tests {
                 )
                 .unwrap();
 
-                let manager = crate::features::marketplace::MarketplaceManager::with_store(
-                    crate::platform::credential_store::MemoryCredentialStore::default(),
-                );
+                let manager = test_marketplace_manager();
                 let bundle = super::Pinvou3Bundle::paths();
                 assert!(!bundle.mcp_json.exists(), "precondition: no mcp.json yet");
 
@@ -2170,9 +2168,7 @@ mod tests {
         crate::platform::test_support::with_temp_home(
             "pinvou3-bundle-startup_maintenance_preserves_corrupt_mcp_json_bytes",
             || {
-                let manager = crate::features::marketplace::MarketplaceManager::with_store(
-                    crate::platform::credential_store::MemoryCredentialStore::default(),
-                );
+                let manager = test_marketplace_manager();
                 let bundle = super::Pinvou3Bundle::paths();
                 std::fs::create_dir_all(bundle.mcp_json.parent().unwrap()).unwrap();
                 // Corrupt by truncation: two hand-added custom entries, no closing brace.
@@ -2278,9 +2274,7 @@ mod tests {
 
                 let bundle = super::Pinvou3Bundle::paths();
                 std::fs::create_dir_all(bundle.mcp_json.parent().unwrap()).unwrap();
-                let manager = crate::features::marketplace::MarketplaceManager::with_store(
-                    crate::platform::credential_store::MemoryCredentialStore::default(),
-                );
+                let manager = test_marketplace_manager();
                 bundle
                     .ensure_extracted_with_marketplace(&manager, |_manager| Ok(Vec::new()))
                     .unwrap();
@@ -2353,9 +2347,7 @@ mod tests {
                 // with an unchanged bundle takes).
                 std::fs::write(super::paths::bundle_version_file(), super::BUNDLE_VERSION).unwrap();
 
-                let manager = crate::features::marketplace::MarketplaceManager::with_store(
-                    crate::platform::credential_store::MemoryCredentialStore::default(),
-                );
+                let manager = test_marketplace_manager();
                 bundle
                     .ensure_extracted_with_marketplace(&manager, |_manager| Ok(Vec::new()))
                     .unwrap();
@@ -2412,6 +2404,78 @@ mod tests {
         unsafe { std::env::set_var("PINVOU3_HOME", &tmp) };
         f();
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// 测试统一 fixture：内存凭据存储构造 MarketplaceManager，规避真实钥匙串依赖。
+    /// 集中一处让守卫的 runtime_bundle→marketplace 引用计数不随测试数量增长
+    /// （baseline ratchet 不允许基线放宽，见 scripts/architecture-baseline.json）。
+    fn test_marketplace_manager() -> crate::features::marketplace::MarketplaceManager<
+        crate::platform::credential_store::MemoryCredentialStore,
+    > {
+        crate::features::marketplace::MarketplaceManager::with_store(
+            crate::platform::credential_store::MemoryCredentialStore::default(),
+        )
+    }
+
+    /// PR #808 回流回归:既有配置目录跨一次「仅技能树内容变化」的 bundle 升级时,
+    /// 连接器缓存完整可见(无 `dingtalk_disabled` 标记 + dws 目录已全部落盘)且
+    /// `bundle/VERSION` 仍是旧值。门是 `bundle_changed || !show` —— `bundle_changed`
+    /// 半边必须独立驱动技能重刷,因为技能树不参与 `BUNDLE_INSTRUCTIONS_HASH`,
+    /// 语义 BUNDLE_VERSION 升位是它们唯一的失效通道。砍掉该半边会让每次会话
+    /// 组装(含 windowless CLI host,它递归复制这份缓存)继续吃到升级前的旧
+    /// reference 字节。
+    #[test]
+    fn ensure_extracted_refreshes_visible_dingtalk_skills_on_version_change() {
+        crate::platform::test_support::with_temp_home(
+            "pinvou3-bundle-refreshes_visible_dingtalk_skills_on_version_change",
+            || {
+                let bundle = super::Pinvou3Bundle::paths();
+                // Existing home: materialize the cache so the boot-time cache
+                // probe reports visible — without a version change this boot
+                // would skip apply_dingtalk_skills entirely.
+                bundle.apply_dingtalk_skills(true).unwrap();
+                let delivered = super::Pinvou3Bundle::connector_package_skills_dir("dingtalk")
+                    .join("dws")
+                    .join("references")
+                    .join("products")
+                    .join("oa")
+                    .join("template")
+                    .join("nodes")
+                    .join("condition.md");
+                assert!(delivered.is_file(), "dws condition.md must be delivered");
+                let embedded = super::DINGTALK_SKILLS_DIR
+                    .get_file("dws/references/products/oa/template/nodes/condition.md")
+                    .expect("embedded dws condition.md")
+                    .contents()
+                    .to_vec();
+                // Simulate the pre-upgrade bytes the old bundle shipped.
+                std::fs::write(&delivered, b"stale pre-upgrade example bytes\n").unwrap();
+                // VERSION still names the old bundle: only bundle_changed can
+                // drive the refresh.
+                std::fs::create_dir_all(super::paths::bundle_version_file().parent().unwrap())
+                    .unwrap();
+                std::fs::write(super::paths::bundle_version_file(), "0.0.1-stale").unwrap();
+
+                let manager = test_marketplace_manager();
+                bundle
+                    .ensure_extracted_with_marketplace(&manager, |_manager| Ok(Vec::new()))
+                    .unwrap();
+
+                assert_eq!(
+                    std::fs::read(&delivered).unwrap(),
+                    embedded,
+                    "the version bump must refresh the delivered reference bytes \
+                     even though the cache was complete and visible"
+                );
+                assert_eq!(
+                    std::fs::read_to_string(super::paths::bundle_version_file())
+                        .unwrap()
+                        .trim(),
+                    super::BUNDLE_VERSION,
+                    "the boot must stamp the new bundle version"
+                );
+            },
+        );
     }
 
     /// #522 回归:禁用/隐藏残留可能只存在于 scope 收敛后的单一 disabled_bundles.json

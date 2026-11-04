@@ -712,6 +712,10 @@ lark-shared-identity-and-permissions.md 规定 agent 发起的增量授权必须
 1. **lark-shared/SKILL.md description「何时用」扩围**：原描述把本技能范围限为「仅在其他 lark-* 技能遇到认证/授权/身份/配置问题时,或首次使用 lark-cli 时」,但 lark-im/drive/wiki/sheets/task 五个技能正文以「CRITICAL — 开始前 MUST 先 read」要求在任何操作前前置读取本技能,`ok==true` 输出契约、`--as` 身份、exit 10 审批等规则也是每次调用都需要的。描述是触发/路由面,窄描述会诱导模型在常规操作中降权这些规则。改为「…遇到认证/授权/身份/配置问题、**被要求前置读取**,或首次使用 lark-cli 时」(272 字)。同时存在的 lark-doc「不预读」vs 其余五技能「MUST 预读」的三种前置策略分歧,属产品策略选择,本轮未统一,仅消除描述与实际用途的矛盾。
 2. **lark-doc/SKILL.md description 画板句更正**：原文「内嵌表格、多维表格、画板先提取 token 再切对应 skill」承诺画板有对应技能路由,但正文（与包内事实）是 lark-whiteboard 技能未随包收录、走 CLI 直连。改为「内嵌表格、多维表格先提取 token 切对应 skill;画板无技能,CLI 直连」(280 字,符合包内描述长度约定)。
 
+## 2026-10-30 本地修改（PR #808 文案清扫,下次 sync 需重放）
+
+1. **lark-sheets/references/lark-sheets-workbook.md 覆盖数更正**：「本 reference 覆盖 14 个 shortcut」→「16 个」。v1.0.98 上游重写 sheets 套件新增 shortcut 后,本文件的引用清单已含 16 项而总述句仍写旧值 14,自相矛盾（逐一清点与下方列表一致）。下次 sync 需重放。
+
 ### 同步记录(2026-10-18 → v1.0.98)
 
 - 基线:v1.0.95 → v1.0.98。合并方法:以 v1.0.95 上游 `skills/` 为 base、当前本地为 ours、
@@ -757,3 +761,8 @@ lark-shared-identity-and-permissions.md 规定 agent 发起的增量授权必须
   CLI 命令直给」既有口径(2026-07-25 复审补漏条、lark-task-get-my-tasks.md 同款)改写为
   「实际 open_id 用 `lark-cli contact +search-user` 查询(lark-contact 未随包收录)」,
   JSON 示例其余部分保持上游原样。
+
+## 模型向指引补缺（2026-11-02,2026-10-07 审计未交付项,下次 sync 需重放）
+
+1. **lark-calendar/SKILL.md `+meeting` 行路由纠正**：原行末「注意: 视频会议链接获取走+get命令」把视频会议链接/产物获取路由到 `+get`，但 `+meeting` reference 的输出字段表只含 `event_id`/`meeting_id`/`meeting_note`，`+get` 不返回视频会议链接；`+create` reference 明确「自动设置 `vchat: {"vc_type": "vc"}`，默认日程包含飞书视频会议」。改为：`+meeting` 只返回三字段、视频会议由 `+create` 默认携带、纪要/妙记等会中产物凭 `meeting_id` 走 `vc +detail`（reference「下游链路」），不经 `+get`。
+2. **lark-shared/SKILL.md 通用准则补第 5/6 条**：第 5 条 CLI 未安装/未登录指引——`lark-cli` 命令不存在时不要自行安装或升级（品悟应用代管，宿主 `feishu.rs` 按 lock 安装/替换锁定版本），提示用户在「插件中心 → 飞书（Lark）」卡片重新点「连接」；未登录/权限不足走 identity reference 的按需授权两段式，不因未登录断定技能不可用（对齐 wecomcli-shared「品悟代管」与 dws「未登录不断定不可用」口径）。第 6 条限流默认处理——错误命中 `rate_limit`/`99991400`/HTTP 429/`hint` 频率提示时不立即重试，按 `retry_after_seconds`/`hint` 指数退避、总尝试约 3 次内，批量/分页改小批次放慢翻页；个别接口专属口径（如 drive 导出的等待与续查）以对应 reference 为准（把此前散落在 wiki/drive/doc 各 reference 的限流句收拢为集中默认值，原 reference 细节不删；im 仅 `--page-delay` 分页节流括注，非错误处理句）。description 同步把「权限不足与 missing_scope 处理」改为「权限不足/未安装/限流默认处理」（265 字符 ≤280，契约规则 6）。规则 5 的两段式括注在 2026-11-02 复审中对齐 identity reference 口径：不在发起授权的同一轮跑阻塞式登录，后续轮按 reference 完成 `--device-code` 登录。

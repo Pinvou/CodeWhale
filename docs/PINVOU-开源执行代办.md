@@ -36,7 +36,7 @@
 
 - [x] 开源目标：做生态、提高知名度、为企业版引流。
 - [x] 社区版是完整可用的产品，不做阉割后的演示壳。
-- [x] 当前 Pinvou 除确实不能公开的 H3C/内部资产、凭证和无再分发授权内容外，其他功能和源代码全部开源。
+- [x] 当前 Pinvou 除确实不能公开的 H3C/内部资产、凭证、无再分发授权内容和 Official 私有独有能力（桌面双端远程控制、model_store 模型商店、MegaCube 入口等，见 M0 §11 与 fork-modifications §12）外，其他功能和源代码全部开源。
 - [x] 未来企业专属的组织管理、安全合规、私有化交付和企业服务可保持私有，但不因此阉割现有通用社区版。
 - [x] 不直接将当前私有仓库改为 Public，使用清理后的全新公开仓库。
 - [x] GitHub 公开入口英文优先，产品完整支持英文和简体中文。
@@ -50,8 +50,8 @@
 - [x] 公开主仓确认为 `Pinvou/pinvou-agent`，以 Pinvou 组织名义开源；现有 `Pinvou/pinvou3` 继续作为私有内部仓库。
 - [x] 底座公开 fork 确认为 `Pinvou/CodeWhale`，保留与上游 `Hmbown/CodeWhale` 的来源关系和授权说明。
 - [x] 英文产品定位确认为：“Pinvou is an open-source, local-first desktop AI workspace that turns conversations into finished work with files, knowledge, tools, and automations.”
-- [x] README 和首发宣传重点展示 7 项核心能力：Agentic desktop workspace、Deliverable-first artifacts、Local knowledge、MCP and Skills ecosystem、Workflows and automations、Bring your own model、Inspectable and controllable execution。其他现有通用功能仍全部开源。
-- [x] 列出必须从公开仓库剔除的内容，剩余现有功能默认全部开源。
+- [x] README 和首发宣传重点展示 7 项核心能力：Agentic desktop workspace、Deliverable-first artifacts、Local knowledge、MCP and Skills ecosystem、Workflows and automations、Bring your own model、Inspectable and controllable execution。其他现有通用功能仍全部开源（Official 私有独有能力除外，见 M0 §6.1 与 §11）。
+- [x] 列出必须从公开仓库剔除的内容，剩余现有功能默认全部开源（Official 私有独有能力除外）。
 
 ### 仓库搜索与品牌表达（已确认）
 
@@ -82,7 +82,8 @@
 - `pinvou3-app/resources/mcp-servers/iwencai/` 对应的 `lorek666/iwencai-mcp`（README 明确声明 MIT）：保留上游链接和 MIT 声明，锁定源码 revision，标注 Pinvou 修改；数据调用遵守同花顺问财服务条款，只支持用户自带 Key，不公开共享 Key。
 - `agency-agents.json` 对应的 `jnMetaCode/agency-agents-zh`（MIT）。
 - 三套桌宠 `spritesheet.webp`/`cover.webp`、`sansheng-banner.png`、7 张工具商店 `banner-*.jpg`、7 张 `skill-*.jpg` 和 `scheduled/` 下 3 张 JPG 为 Pinvou 自行生成的自有视觉素材，在公开仓库和社区版中保留。
-- MegaCube 为 Pinvou 自有能力；保留 `megacube-icon.png`、MegaCube 网页访问入口及相关通用集成代码，不归入 H3C/内部功能裁剪范围。
+- MegaCube 产品入口、图标与集成为 Official 私有能力（2026-10-25 确认），社区版不包含，不适用本节保留口径；真实访问地址与官方集成只存在于官方构建。
+- model_store 模型商店为 Official 私有能力（2026-10-25 确认），依赖官方模型分发服务与账号体系，社区版不包含，不适用本节保留口径；归属详见 M0 §11 与 fork-modifications §12 有意分歧登记第 9 条。
 - 56 个内置头像：50 个 CC BY 4.0、6 个 CC0 1.0；保留 SVG 内已有元数据，并在 `THIRD_PARTY_NOTICES.md` 汇总署名。
 - 可证明来自 `lobehub/lobe-icons` 的模型服务商图标（MIT）；改为锁定 npm 包版本或记录确切上游文件，同时保留品牌归属说明。
 - BGE-M3（MIT）和 SenseVoice.cpp（MIT）可保留集成；SenseVoice 模型权重另按 FunASR Model License 归因并保留模型名称。
@@ -121,12 +122,13 @@
 
 ### 运行服务器与远程控制处理口径（已确认）
 
-- 手机远程控制客户端、Web 页面、中继服务器、测试和通用部署能力全部开源，不裁掉功能。
+- 手机远程控制客户端、Web 页面、中继服务器、测试和通用部署能力全部开源，不裁掉功能（此处“中继”指手机/Web 一期设备中继；controller relay 面——`controller-*`、`enrollment-*`、`pairing-*`——已随桌面双端远程控制闭源，见下一条）。
+- 桌面双端远程控制（controller 协议、主控/受控生命周期、任务权限、文件传输、enrollment gateway、pairing、controller relay 面与 Windows 发布证据）为闭源独有，不开源（已确认 2026-10-25）；手机/QR 远程控制一期口径不变。
 - 公开源码默认不得连接 Pinvou 生产中继；社区用户通过配置使用本地或自建中继，官方发行版可在构建/发布环境中注入官方服务地址。
 - Pinvou 运行中的所有服务器信息均不得进入公开源码和 Git 历史，包括访问地址、域名/IP、端口组合、服务器账号、远程目录、SSH key 路径、代理/隧道拓扑、内部设备配置和管理凭证。
 - 公开 GitHub Release 可以同时提供由公开源码构建的社区包，以及包含私有功能和官方服务地址的 Pinvou 官方包；官方包必须明确标注其不能由公开源码完整复现。服务器地址允许存在于官方二进制，但可复用密钥、客户端 Secret、SSH 凭证和管理 Token 仍不得内置。
 - 部署、发布、OTA、Nginx、证书、CI/CD 和测试脚本必须逐项检查；真实值改为必填环境变量、命令行参数或明确占位符，并提供安全的 `.env.example` 与自建说明。
-- 社区公开快照完全移除 Pinvou 遥测能力；官方私有版维持现状。远程控制中继本身仍开源，只拆除设备统计、上报和统计管理后台。
+- 社区公开快照完全移除 Pinvou 遥测能力；官方私有版维持现状。远程控制中继（手机/Web 一期设备中继）本身仍开源，只拆除设备统计、上报和统计管理后台；controller relay 面不在此列，随桌面双端远程控制闭源（见上）。
 - Community 首版不提供应用内自动更新，只通过 `Pinvou/pinvou-agent` GitHub Releases 手动下载安装；Official 维持现有更新服务。公开快照不得包含 Pinvou OTA 地址、服务器配置或部署路径；后续如恢复 Community 自动更新，必须使用公开 Release 通道和独立更新签名验签。
 - 社区版知识库 BGE-M3 模型包改由 `Pinvou/pinvou-agent` GitHub Releases 分发，保留 SHA-256 校验与可复现的生成说明；SenseVoice 继续使用其官方上游 ModelScope/GitHub 下载源。官方私有版维持现有模型分发服务。
 
@@ -134,7 +136,7 @@
 
 - 社区版完整移除 H3C EIP、知道、Windows 域环境引导、SmartHub OTA，以及相关 Skills、源码、预编译二进制、Rust/前端接线、测试、文档、品牌和内部场景。
 - 已删除基于 `/opt/.h3c/...` 预装目录、固定模型路径和启动脚本的一键启用能力；通用本地推理能力保留为用户自行启动服务后，通过设置页发现或手动配置 vLLM、Ollama、LM Studio 端点。
-- MegaCube 属于 Pinvou 自有能力：名称、图标、产品入口、本地模型与通用集成全部保留；访问地址由官方构建/运行配置注入，社区源码不包含真实地址。
+- MegaCube 产品入口、图标和集成经组织复核确认为 Official 私有能力（2026-10-25）：社区版不包含，与 H3C 内容一同不进入公开仓库。
 - 官方私有版可继续保留其他 H3C 自动引导和 MegaCube 配置；预装本地模型自动启动能力不再由 Pinvou 应用提供。
 - 社区版删除 `feedback.rs` 中固定设备 SN、`H3cFeedbackUploader` 及相关 H3C 反馈上传接线；反馈入口改为打开 `Pinvou/pinvou-agent` 的 GitHub Issue，不自动上传日志、设备信息或附件。官方私有版反馈行为维持现状。
 
@@ -213,9 +215,9 @@
 - `pinvou3-app/run-dev.sh`：移除生产远控 HTTP/WebSocket 默认地址，开发环境默认使用本地服务或要求显式配置。
 - Rust/前端默认值：远控、OTA、知识库模型下载等模块中存在运行地址常量，必须统一改为构建/运行时配置；测试中的同值副本一并替换为 `.example` 域名和 RFC 保留测试 IP。
 - 社区遥测删除范围：`pinvou3-app/src-tauri/src/telemetry.rs` 及其初始化/事件接线、`remote-control-relay/telemetry-service.js`、统计管理页面、Nginx 配置、部署步骤和相关测试；同时确认公开文件树中不再出现生产地址、enrollment token、device pepper、管理员密码或硬件标识上报逻辑。
-- MegaCube：图标、入口和通用集成保留；真实访问地址从前端源码移除，由官方构建或运行配置注入，社区构建未配置时给出明确提示。
+- MegaCube：入口、图标和集成为 Official 私有能力（2026-10-25 确认），社区快照整体移除，不再采用地址注入方案。
 - `.github/workflows/` 继续纳入最终密钥与地址扫描；只允许 GitHub/上游公共地址和 secret 变量引用，不允许出现 Pinvou 服务器信息或真实 secret 值。
-- 全仓定向扫描已定位 24 个 Pinvou/MegaCube 运行 URL 候选文件，除上述脚本和源码外还包括远控架构/E2E 文档及多份测试；公开快照必须同步清理文档和测试副本，不能只改生产代码。
+- 全仓定向扫描已定位 24 个 Pinvou/MegaCube 运行 URL 候选文件，除上述脚本和源码外还包括远控架构/E2E 文档及多份测试；公开快照必须同步清理文档和测试副本，不能只改生产代码。`docs/Windows端功能清单与测试用例.md` 与 `docs/模型商店-框架与移植基线.md` 中仍有 MegaCube 环境/硬件语境表述，公开快照复核时一并纳入扫描。
 - `com.pinvou...` 一类应用包名、反向域名标识和品牌名称不是访问地址，可保留；判定标准是是否能实际定位或连接 Pinvou 运行基础设施。
 
 - [ ] 先轮换或吊销高德、问财、企查查及历史模型/API Key。

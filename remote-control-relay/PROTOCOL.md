@@ -43,6 +43,7 @@ and any active Web lease are unchanged.
   "type": "desktop_endpoint_registered",
   "endpoint_id": "endpoint_...",
   "web_client_connected": false,
+  "web_rejoining": false,
   "lease_id": null
 }
 ```
@@ -109,8 +110,14 @@ It accepts only these desktop-to-Web types:
 
 The original top-level fields are forwarded unchanged except that the Relay
 sets authoritative `v`, `endpoint_id`, and `lease_id` fields. Credential fields
-(`access_token`, `token`, `pairing_token`, `desktop_secret`) are additionally
-stripped from forwarded frames. A desktop message that explicitly targets a
+(`access_token`, `token`, `pairing_token`, `desktop_secret`) and the
+relay-authoritative `web_rejoining` flag are additionally
+stripped from forwarded frames — a desktop that echoes `web_rejoining`
+inside a forwarded frame silently loses it; the flag exists only on
+relay-generated `web_client_connected` / `desktop_endpoint_registered`
+notices. That strip is top-level only: nested objects
+such as `args` or `payload` are forwarded verbatim, so endpoints must never
+embed credentials inside them. A desktop message that explicitly targets a
 stale lease is dropped so a late response cannot leak into the replacement
 client.
 
@@ -126,6 +133,12 @@ journal. The Relay holds none of that business state.
 2. After the shared UI durably hydrates its local state, it sends
    `client_ready` with `state_ready: true`. Only then may the desktop replay the
    ready-window events after the negotiated cursor and begin live delivery.
+
+A missing or non-boolean `state_ready` defaults to phase one (fail-closed):
+the client receives the capability snapshot but no business events until a
+`state_ready: true` handshake arrives. Clients that predate the two-phase
+handshake and never send the field will therefore stall at phase one against
+a current desktop; they must update their bundled UI.
 
 Within the forwarded `event` envelope, the authoritative chat-turn allowlist
 includes both `chat:user_message` (including `base_transcript_revision`) and
@@ -148,7 +161,18 @@ When the desktop disconnects, the active Web client receives:
 
 The same message with `status: "connected"` is sent after desktop reconnection.
 The desktop receives `web_client_connected` and `web_client_disconnected` with
-the corresponding lease.
+the corresponding lease. The `web_client_connected` frame (and the
+`desktop_endpoint_registered` frame, for the incumbent client) carries
+`web_rejoining: true` when the join arrived after the previous web socket had
+already died (watchdog or network recovery by the same token holder) and
+`web_rejoining: false` on a first join or a live takeover (`endpoint_replaced`).
+The desktop uses the flag to keep lease-scoped state (staged attachments,
+in-flight uploads, session downloads) across a rejoin while still discarding it
+on a takeover. Limitation: the flag is derived from relay-observed socket
+death only. When the previous web socket is still OPEN server-side (a half-open
+connection the heartbeat has not reaped yet, or a fast reconnect racing the
+close event), the join classifies as a live takeover — an app-level rejoin
+token would be needed to close that window.
 
 The desktop invalidates a link with:
 
@@ -199,7 +223,7 @@ connection open.
 | `invalid_access_token` | Desktop re-registration whose access token hash does not match the endpoint. |
 | `invalid_desktop_secret` | Desktop re-registration or revoke whose desktop secret hash does not match the endpoint. |
 | `invalid_token` | `web_client_join` whose access token hash does not match the endpoint. |
-| `bad_web_client_join` | Malformed `web_client_join`: invalid `endpoint_id` or missing access token. |
+| `bad_web_client_join` | Malformed `web_client_join`: invalid `endpoint_id`, missing or oversized access token, or the socket already authenticated. |
 | `endpoint_not_found` | Join, revoke, or forwarded message referenced an endpoint that does not exist. |
 | `stale_lease` | A Web message arrived from a socket that no longer holds the active lease. |
 | `desktop_endpoint_replaced` | A desktop message arrived from a socket already replaced by a newer registration. |
@@ -210,6 +234,15 @@ connection open.
 | `revocation_in_progress` | A second revoke arrived while one is already in progress for the endpoint. |
 | `revoke_persistence_failed` | Persisting the revoke tombstone failed; the requester is closed and the endpoint remains usable. |
 | `revoke_failed` | An unexpected error occurred while processing a revoke. |
+
+Besides reject code 1008, clients observe these WebSocket close codes: `1000`
+when the revoke requester is acknowledged with a normal close ("endpoint
+revoked"), `4001` when a replaced desktop or Web client is closed ("desktop
+endpoint replaced" or "endpoint replaced"), and `4003` when revoke or TTL
+expiry tears down the affected client ("endpoint revoked" or "endpoint
+expired"). A client whose socket the Relay terminates abruptly (frame high-
+water mark, unserializable frame, hostile upgrade, heartbeat liveness kill)
+observes the implicit `1006` abnormal-closure code on its side.
 
 ## HTTP and operational behavior
 
@@ -700,7 +733,7 @@ outcomes and already-admitted requests are not refusal receipts. Both clients
 must support these fields; older strict decoders may reject such receipts.
 
 The contract digest is
-`63db457fd305cf8d758133fa8996b853bd3073892fa8bfe93aec7de8f873e242`.
+`5208650492c4e37286a7322d12ffc6c401724b8f261f8672d830146839db9f63`.
 It is SHA-256 over canonical JSON (object keys recursively sorted, array order
 preserved, compact JSON scalars) of `{contract,fixture}`. `contract` is the
 executable manifest containing every schema required/optional field, role
@@ -1113,13 +1146,19 @@ partial post-rotation hook installation.
 Controller error envelopes use only these codes: `pairing_code_invalid`,
 `pairing_code_generation_failed`, `controller_busy`, `version_incompatible`, `endpoint_offline`,
 `enrollment_required`, `invalid_message`, `unsupported_capability`,
-`permission_already_decided`, `permission_expired`, `result_unknown` and
-`capability_snapshot_unavailable`.
+`permission_already_decided`, `permission_expired`, `result_unknown`,
+`capability_snapshot_unavailable` and `pairing_registration_stale_relay_epoch`.
 Malformed schema errors are local parser failures and are mapped to the bounded
 `invalid_message` envelope before the later dispatcher closes the socket.
 Non-local pairing failures (missing, expired, consumed, revoked, wrong
 generation or a losing concurrent claim) all produce the same user-facing
 `pairing_code_invalid` message: “连接码无效或已失效”.
+
+A registration ID retained across Relay epochs remains rejected. Its correlated
+error preserves the closed `pairing_registration_stale_relay_epoch` code; B
+must start a new registration, never accept an old-epoch outcome. Older strict
+decoders may present a generic registration rejection for this new code; the
+successful registration shape and same-epoch idempotency remain unchanged.
 
 When a legacy WebUI v2 `web_client_join` conflicts with a desktop reservation
 or controller lease, compatibility requires the exact existing response and no

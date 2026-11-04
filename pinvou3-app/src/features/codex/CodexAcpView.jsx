@@ -2446,7 +2446,10 @@ export function CodexAcpView({
     if (!String(outgoing || '').trim()) return false;
     if (busy || working || activeRuntimeBusy || workspaceUnavailable || sessionSyncing) return false;
     if (!activeId && !draftWorkspacePath) return false;
-    if (attachments.some(attachment => attachment.status === 'parsing')) return false;
+    // Pending attachments (parsing — and uploading, which was never gated
+    // here) deliberately fall through: this gate has no failure feedback, so
+    // blocking would report a fake "task sent" success. send() rejects both
+    // statuses with the inline attachments error and fails the voice task for real.
     if (activeId && !sessionReady) return false;
     if (!isNativeAgent && !activeStatus?.authenticated) return false;
     return true;
@@ -4427,7 +4430,7 @@ export function CodexAcpView({
                   )}
                 </div>
                 {busy ? (
-                  <button onClick={cancel} aria-label={codexCopy.stop} title={codexCopy.stop} className="w-9 h-9 rounded-full flex items-center justify-center bg-red-500/10 text-red-500 hover:bg-red-500/15"><StopCircle size={18} /></button>
+                  <button type="button" onClick={cancel} aria-label={codexCopy.stop} title={codexCopy.stop} className="w-9 h-9 rounded-full flex items-center justify-center bg-red-500/10 text-red-500 hover:bg-red-500/15"><StopCircle size={18} /></button>
                 ) : (
                   <>
                     <VoiceComposerButton

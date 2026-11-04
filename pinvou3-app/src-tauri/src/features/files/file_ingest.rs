@@ -481,8 +481,9 @@ fn ingest_checked(path: &Path) -> Result<IngestResult, AttachmentLimitViolation>
 fn classify(ext: &str) -> &'static str {
     match ext {
         // 安全硬墙(优先级最高):私钥 / 密钥库类扩展名一律不读正文 —— 防止私钥被读进
-        // markdown、内联进 prompt、进而发给(可能的云端)LLM。validate_path 只挡 5 个
-        // 敏感目录,挡不住 ~/certs/server.key 这类文件,故在此补文件级拒绝。
+        // markdown、内联进 prompt、进而发给(可能的云端)LLM。validate_path 的路径组件
+        // 黑名单(path_policy::check_sensitive_components)挡不住 ~/certs/server.key 这
+        // 类文件,故在此补文件级拒绝。
         // The "secret" class goes to redacted_secret_placeholder (markdown
         // always None) and never reaches sniffing.
         // 注意:公钥证书(crt/cer/csr)本身可公开,仍归 text,方便用户问「证书 CN/到期日」。
@@ -629,7 +630,7 @@ fn sanitize_filename(raw: &str) -> String {
 }
 
 /// 校验上传路径：必须绝对 + 指向普通文件 + 满足当前系统的上传位置策略 + 不在敏感目录。
-/// 跟 commands::validate_user_path 同语义，单独抽出供前端 ingest 入口调用。
+/// 与 platform::path_policy::validate_user_path 同语义，单独抽出供前端 ingest 入口调用。
 pub fn validate_path(raw: &str) -> Result<PathBuf, String> {
     let canon = validate_browsable_path(raw)?;
     if !canon.is_file() {
@@ -646,17 +647,62 @@ pub fn validate_path(raw: &str) -> Result<PathBuf, String> {
 /// 现委托 `path_policy::check_sensitive_components` 挡完整的凭据组件/前缀
 /// 黑名单（含 id_rsa/.env/credentials.json/.password-store 等文件级凭据）。
 /// 上传位置约束（$HOME / 非 system-root）仍由 `validate_upload_location` 保留。
-pub(crate) fn validate_browsable_path(raw: &str) -> Result<PathBuf, String> {
+/// 此刻不可读,缓存会把注定成功的重试永远挡住。
+#[derive(Debug)]
+pub(crate) enum BrowsablePathViolation {
+    Deterministic(String),
+    Transient(String),
+}
+
+/// `validate_browsable_path` 的分类版,web RPC 门(web KB 路径)用它决定
+/// 缓存裁决;拒绝语义与 [`validate_browsable_path`] 完全一致,只是把
+/// 「触盘失败」与「策略裁决」分开。
+pub(crate) fn classify_browsable_path(raw: &str) -> Result<PathBuf, BrowsablePathViolation> {
     let p = PathBuf::from(raw);
     if !p.is_absolute() {
-        return Err(format!("path must be absolute: {raw}"));
+        return Err(BrowsablePathViolation::Deterministic(format!(
+            "path must be absolute: {raw}"
+        )));
     }
-    let canon = normalize_validated_path(&std::fs::canonicalize(&p).unwrap_or_else(|_| p.clone()));
-    std::fs::metadata(&canon)
-        .map_err(|e| format!("path {} is not readable: {e}", canon.display()))?;
-    crate::platform::os::validate_upload_location(&canon)?;
-    crate::platform::path_policy::check_sensitive_components(&canon)?;
+    let canon = {
+        // 与 path_policy::validate_user_path 的 fail-closed 同口径:
+        // canonicalize 失败(路径不存在/ELOOP 等)时的原始拼写回退不可信
+        // ——组件有界比对会把 ParentDir 当普通不匹配组件,含 `..` 的拼写
+        // 必须拒绝。纯参数拼写裁决,按确定性分类。
+        match std::fs::canonicalize(&p) {
+            Ok(resolved) => normalize_validated_path(&resolved),
+            Err(_) => {
+                if p.components()
+                    .any(|component| component == std::path::Component::ParentDir)
+                {
+                    return Err(BrowsablePathViolation::Deterministic(format!(
+                        "path must not contain '..' when it cannot be resolved: {raw}"
+                    )));
+                }
+                normalize_validated_path(&p)
+            }
+        }
+    };
+    if let Err(error) = std::fs::metadata(&canon) {
+        return Err(BrowsablePathViolation::Transient(format!(
+            "path {} is not readable: {error}",
+            canon.display()
+        )));
+    }
+    // metadata 已通过:下面的 home 前缀与组件黑名单是对已存在落点的
+    // 策略裁决,结论随参数稳定,按确定性分类。
+    crate::platform::os::validate_upload_location(&canon)
+        .map_err(BrowsablePathViolation::Deterministic)?;
+    crate::platform::path_policy::check_sensitive_components(&canon)
+        .map_err(BrowsablePathViolation::Deterministic)?;
     Ok(canon)
+}
+
+pub(crate) fn validate_browsable_path(raw: &str) -> Result<PathBuf, String> {
+    classify_browsable_path(raw).map_err(|violation| match violation {
+        BrowsablePathViolation::Deterministic(message)
+        | BrowsablePathViolation::Transient(message) => message,
+    })
 }
 
 fn normalize_validated_path(path: &Path) -> PathBuf {
