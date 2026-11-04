@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import http from 'node:http';
-import * as puppeteer from 'puppeteer-core';
+import http from './helpers/http-fixture.mjs';
+import * as puppeteer from './helpers/puppeteer-fixture.mjs';
 import { accountPlatformCopy, organizationCopy, adminRolePresentationCopy } from '../src/shared/i18n.js';
 
 const staticRoot = path.resolve(import.meta.dirname, '../../account-platform/internal/portal/static');

@@ -33,9 +33,10 @@ func (c *pendingExpiryFenceLossClient) FenceExpiredHold(ctx context.Context, ide
 	return c.service.recoverExpiredHold(ctx, identity)
 }
 
-func pendingExpiryObservation(t *testing.T, f modelExpiryObservationFixture, layout string, claim bool) (UsageRequest, uuid.UUID, *billing.ExpiredHoldRecoveryWorker) {
+func pendingExpiryObservation(t *testing.T, f modelExpiryObservationFixture, layout string, claim bool) (UsageRequest, uuid.UUID, EmergencyCancellationTarget, *billing.ExpiredHoldRecoveryWorker) {
 	t.Helper()
 	u, target := f.preparedExpiry(t, layout)
+	claimed := EmergencyCancellationTarget{ID: target}
 	if claim {
 		targets, err := f.r.claimEmergencyCancellations(f.ctx, 1)
 		// An original USER stop now owns recovery even before the expiry
@@ -47,6 +48,9 @@ func pendingExpiryObservation(t *testing.T, f modelExpiryObservationFixture, lay
 		} else if err != nil || len(targets) != 1 || targets[0].ID != target {
 			t.Fatal("claim before original expiry fence", targets, err)
 		}
+		if len(targets) == 1 {
+			claimed = targets[0]
+		}
 	}
 	proof := &pendingExpiryFenceLossClient{r: f.r, service: f.service}
 	expiry := billing.NewExpiredHoldRecoveryWorker(f.funds, proof, time.Minute)
@@ -57,7 +61,7 @@ func pendingExpiryObservation(t *testing.T, f modelExpiryObservationFixture, lay
 	if err != nil || !proof.fenced || fenced.ExecutionStatus != "HOLD_RESERVED" || fenced.CancelStatus != "CANCEL_REQUESTED" {
 		t.Fatal("real pending expiry fence not reached", err)
 	}
-	return fenced, target, expiry
+	return fenced, target, claimed, expiry
 }
 
 func TestPendingUnusedExpiryCancellationOwnerPostgres(t *testing.T) {
@@ -76,7 +80,7 @@ func TestPendingUnusedExpiryCancellationOwnerPostgres(t *testing.T) {
 	} {
 		t.Run(sample.name, func(t *testing.T) {
 			protected := sample.layout != "hold"
-			u, target, expiry := pendingExpiryObservation(t, f, sample.layout, sample.model && protected)
+			u, target, claim, expiry := pendingExpiryObservation(t, f, sample.layout, sample.model && protected)
 			worker := NewEmergencyModelCancellationWorker(f.r, f.service, time.Second)
 			facts := func() string {
 				t.Helper()
@@ -89,10 +93,10 @@ func TestPendingUnusedExpiryCancellationOwnerPostgres(t *testing.T) {
 			before := facts()
 			denyModel := func() {
 				t.Helper()
-				if _, _, err := f.r.requestEmergencyCancellation(f.ctx, target, ProviderCancelUnsupported, f.service.upstream.AdapterVersion()); !errors.Is(err, ErrForbidden) {
+				if _, _, err := f.r.requestEmergencyCancellation(f.ctx, claim, ProviderCancelUnsupported, f.service.upstream.AdapterVersion()); !errors.Is(err, ErrForbidden) {
 					t.Fatal("model overwrote the original pending proof", err)
 				}
-				if err := f.r.retryEmergencyCancellation(f.ctx, target, ErrForbidden); err != nil {
+				if err := f.r.retryEmergencyCancellation(f.ctx, claim, ErrForbidden); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -211,7 +215,7 @@ func TestPendingUnusedExpiryLegacyCancellationFallbackPostgres(t *testing.T) {
 	f := newModelExpiryObservationFixture(t)
 	for _, origin := range []string{"model-origin", "user-local-pre-dispatch"} {
 		t.Run(origin, func(t *testing.T) {
-			u, target, expiry := pendingExpiryObservation(t, f, "intent", false)
+			u, target, _, expiry := pendingExpiryObservation(t, f, "intent", false)
 			var proofBefore string
 			if err := f.r.pool.QueryRow(f.ctx, `SELECT sanitized_evidence::text FROM usage_cancellation_evidence WHERE usage_request_id=$1 AND adapter_version='hold-expiry-v1'`, u.ID).Scan(&proofBefore); err != nil {
 				t.Fatal(err)

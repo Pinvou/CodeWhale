@@ -125,33 +125,18 @@ func (f *forceCancelAccountFixture) repositoryWithInitialStage(t *testing.T, ini
 	t.Helper()
 	ctx := f.ctx
 	name := "f01_wallet_fence_" + strings.ReplaceAll(uuid.NewString(), "-", "")
+	var fixtureDatabase *cifixture.Database
 	quoted := pgx.Identifier{name}.Sanitize()
-	if _, err := f.admin.Exec(ctx, "CREATE DATABASE "+quoted+" OWNER account_service"); err != nil {
+	fixtureDatabaseCreated, creationError := cifixture.CreateDatabase(ctx, f.admin, name, "CREATE DATABASE "+quoted+" OWNER account_service")
+	fixtureDatabase = fixtureDatabaseCreated
+	if err := creationError; err != nil {
 		t.Fatal("owned database setup failed")
 	}
 	t.Logf("owned wallet fixture database=%s owner=account_service", name)
 	t.Cleanup(func() {
 		clean, stop := context.WithTimeout(context.Background(), 10*time.Second)
 		defer stop()
-		var owner string
-		var active int
-		deadline := time.Now().Add(5 * time.Second)
-		for {
-			err := f.admin.QueryRow(clean, `SELECT pg_get_userbyid(datdba),(SELECT count(*) FROM pg_stat_activity WHERE datname=$1) FROM pg_database WHERE datname=$1`, name).Scan(&owner, &active)
-			if err != nil || owner != "account_service" {
-				t.Error("own database identity guard failed")
-				return
-			}
-			if active == 0 {
-				break
-			}
-			if time.Now().After(deadline) {
-				t.Error("own database has live sessions; retained")
-				return
-			}
-			time.Sleep(10 * time.Millisecond)
-		}
-		if _, err := f.admin.Exec(clean, "DROP DATABASE "+quoted); err != nil {
+		if _, err := cifixture.DropDatabase(clean, f.admin, fixtureDatabase, "account_service"); err != nil {
 			t.Error("nonforce owned database cleanup failed")
 			return
 		}
@@ -355,33 +340,13 @@ func forceCancelTokenRepository(t *testing.T) (*PostgresRepository, context.Cont
 	}
 	created := []string{}
 	database := "f04_token_management_" + uuid.New().String()[:8] + fmt.Sprintf("%d", time.Now().UnixNano())
+	var fixtureDatabase *cifixture.Database
 	databaseCreated := false
 	t.Cleanup(func() {
 		cleanupCtx, done := context.WithTimeout(context.Background(), 10*time.Second)
 		defer done()
 		if databaseCreated {
-			var owner string
-			var active int
-			deadline := time.Now().Add(5 * time.Second)
-			for {
-				if err := admin.QueryRow(cleanupCtx, `SELECT pg_get_userbyid(datdba),(SELECT count(*) FROM pg_stat_activity WHERE datname=$1) FROM pg_database WHERE datname=$1`, database).Scan(&owner, &active); err != nil {
-					t.Error("owned database cleanup identity unavailable")
-					return
-				}
-				if owner != admin.Config().User {
-					t.Error("owned database owner changed; cleanup refused")
-					return
-				}
-				if active == 0 {
-					break
-				}
-				if time.Now().After(deadline) {
-					t.Error("owned database still active; cleanup refused")
-					return
-				}
-				time.Sleep(10 * time.Millisecond)
-			}
-			if _, err := admin.Exec(cleanupCtx, "DROP DATABASE "+pgx.Identifier{database}.Sanitize()); err != nil {
+			if _, err := cifixture.DropDatabase(cleanupCtx, admin, fixtureDatabase, admin.Config().User); err != nil {
 				t.Error("owned database cleanup failed; roles retained")
 				return
 			}
@@ -405,7 +370,9 @@ func forceCancelTokenRepository(t *testing.T) (*PostgresRepository, context.Cont
 	if _, err = admin.Exec(ctx, `GRANT token_gateway,token_schema_owner,token_cap_policy_deployer TO token_migrator`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = admin.Exec(ctx, "CREATE DATABASE "+pgx.Identifier{database}.Sanitize()); err != nil {
+	fixtureDatabaseCreated, creationError := cifixture.CreateDatabase(ctx, admin, database, "CREATE DATABASE "+pgx.Identifier{database}.Sanitize())
+	fixtureDatabase = fixtureDatabaseCreated
+	if err := creationError; err != nil {
 		t.Fatal(err)
 	}
 	databaseCreated = true

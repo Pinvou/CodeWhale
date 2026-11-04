@@ -4,8 +4,8 @@ import os from 'node:os';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import react from '@vitejs/plugin-react';
-import * as puppeteer from 'puppeteer-core';
-import {createServer} from 'vite';
+import * as puppeteer from './helpers/puppeteer-fixture.mjs';
+import {createServer} from './helpers/vite-fixture.mjs';
 
 const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
 const browserPath=process.env.CHROME||process.env.CHROMIUM||['C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe','/usr/bin/chromium'].find(fs.existsSync);

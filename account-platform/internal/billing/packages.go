@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"time"
 
 	"github.com/google/uuid"
@@ -281,8 +282,10 @@ func (r *PostgresRepository) expireDuePackageTx(ctx context.Context, tx pgx.Tx, 
 }
 
 type PackageExpiryWorker struct {
-	repository *PostgresRepository
-	interval   time.Duration
+	repository interface {
+		ExpirePackages(context.Context, int) (int, error)
+	}
+	interval time.Duration
 }
 
 func NewPackageExpiryWorker(repository *PostgresRepository, interval time.Duration) *PackageExpiryWorker {
@@ -292,8 +295,14 @@ func NewPackageExpiryWorker(repository *PostgresRepository, interval time.Durati
 	return &PackageExpiryWorker{repository: repository, interval: interval}
 }
 
+func (w *PackageExpiryWorker) scan(ctx context.Context, stage string) {
+	if _, err := w.repository.ExpirePackages(ctx, 100); err != nil && ctx.Err() == nil && !errors.Is(err, context.Canceled) {
+		slog.ErrorContext(ctx, "package expiry scan failed", "component", "package-expiry", "error_code", "PACKAGE_EXPIRY_SCAN_FAILED", "stage", stage)
+	}
+}
+
 func (w *PackageExpiryWorker) Run(ctx context.Context) {
-	_, _ = w.repository.ExpirePackages(ctx, 100)
+	w.scan(ctx, "startup")
 	ticker := time.NewTicker(w.interval)
 	defer ticker.Stop()
 	for {
@@ -301,7 +310,7 @@ func (w *PackageExpiryWorker) Run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			_, _ = w.repository.ExpirePackages(ctx, 100)
+			w.scan(ctx, "periodic")
 		}
 	}
 }

@@ -266,6 +266,11 @@ func (r *PostgresRepository) SaveAccountClosureRequestedBlockers(ctx context.Con
 	if _, err := tx.Exec(ctx, `INSERT INTO account_closure_audit(id,closure_request_id,event_type,from_stage,to_stage,redacted_details,occurred_at) VALUES($1,$2,'PRE_QUIET_BLOCKERS_EVALUATED','CLOSURE_REQUESTED','CLOSURE_REQUESTED',jsonb_build_object('blocker_codes',(SELECT COALESCE(jsonb_agg(value->>'code'),'[]'::jsonb) FROM jsonb_array_elements($3::jsonb) value)),$4)`, uuid.Must(uuid.NewV7()), item.ID, encoded, now); err != nil {
 		return err
 	}
+	if len(blockers) > 0 {
+		if err := recordAccountClosureBlockedSLAAlert(ctx, tx, item, encoded, "CLOSURE_REQUESTED", now); err != nil {
+			return err
+		}
+	}
 	return tx.Commit(ctx)
 }
 
@@ -357,7 +362,23 @@ func (r *PostgresRepository) SaveAccountClosureBlockers(ctx context.Context, ite
 	if _, err := tx.Exec(ctx, `INSERT INTO account_closure_audit(id,closure_request_id,event_type,from_stage,to_stage,redacted_details,occurred_at) VALUES($1,$2,'BLOCKERS_EVALUATED',$3,'FINANCIAL_CLEARANCE',jsonb_build_object('blocker_codes',(SELECT COALESCE(jsonb_agg(value->>'code'),'[]'::jsonb) FROM jsonb_array_elements($4::jsonb) value),'ready',$5::boolean),$6)`, uuid.Must(uuid.NewV7()), item.ID, item.Stage, encoded, len(blockers) == 0, now); err != nil {
 		return err
 	}
+	if status == "BLOCKED" {
+		if err := recordAccountClosureBlockedSLAAlert(ctx, tx, item, encoded, "FINANCIAL_CLEARANCE", now); err != nil {
+			return err
+		}
+	}
 	return tx.Commit(ctx)
+}
+
+func recordAccountClosureBlockedSLAAlert(ctx context.Context, tx pgx.Tx, item AccountClosureRequest, encoded []byte, toStage string, now time.Time) error {
+	if item.SLAExpiresAt.IsZero() || !now.After(item.SLAExpiresAt) {
+		return nil
+	}
+	digest := closureDigest(string(encoded))
+	_, err := tx.Exec(ctx, `INSERT INTO account_closure_audit(id,closure_request_id,event_type,from_stage,to_stage,redacted_details,occurred_at)
+SELECT $1,$2,'BLOCKED_SLA_ALERT',$3,$4,jsonb_build_object('blocker_digest',$5::text,'alert_after',$6::timestamptz),$7
+WHERE NOT EXISTS (SELECT 1 FROM account_closure_audit WHERE closure_request_id=$2 AND event_type='BLOCKED_SLA_ALERT' AND redacted_details->>'blocker_digest'=$5)`, uuid.Must(uuid.NewV7()), item.ID, item.Stage, toStage, digest, item.SLAExpiresAt, now)
+	return err
 }
 
 func (r *PostgresRepository) AdvanceAccountClosureToIdentityCleanup(ctx context.Context, item AccountClosureRequest) error {

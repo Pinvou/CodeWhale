@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"github.com/Pinvou/pinvou3/account-platform/internal/cifixture"
 	"os"
 	"strings"
 	"testing"
@@ -63,7 +64,10 @@ func TestF09EntitlementPolicyMigrationIdentityPostgres(t *testing.T) {
 		}
 		defer admin.Close(context.Background())
 		name := "f09_policy_identity_" + strings.ReplaceAll(uuid.NewString(), "-", "")
-		if _, err := admin.Exec(ctx, "CREATE DATABASE "+pgx.Identifier{name}.Sanitize()+" OWNER account_service"); err != nil {
+		var fixtureDatabase *cifixture.Database
+		fixtureDatabaseCreated, creationError := cifixture.CreateDatabase(ctx, admin, name, "CREATE DATABASE "+pgx.Identifier{name}.Sanitize()+" OWNER account_service")
+		fixtureDatabase = fixtureDatabaseCreated
+		if err := creationError; err != nil {
 			t.Fatal("create UUID-owned policy database")
 		}
 		t.Cleanup(func() {
@@ -75,21 +79,7 @@ func TestF09EntitlementPolicyMigrationIdentityPostgres(t *testing.T) {
 				return
 			}
 			defer control.Close(cleanup)
-			var owner string
-			var active int
-			deadline := time.Now().Add(5 * time.Second)
-			for {
-				err = control.QueryRow(cleanup, `SELECT pg_get_userbyid(datdba),(SELECT count(*) FROM pg_stat_activity WHERE datname=$1) FROM pg_database WHERE datname=$1`, name).Scan(&owner, &active)
-				if err != nil || owner != "account_service" || active == 0 || !time.Now().Before(deadline) {
-					break
-				}
-				time.Sleep(10 * time.Millisecond)
-			}
-			if err != nil || owner != "account_service" || active != 0 {
-				t.Error("UUID database identity/session cleanup guard failed")
-				return
-			}
-			if _, err := control.Exec(cleanup, "DROP DATABASE "+pgx.Identifier{name}.Sanitize()); err != nil {
+			if _, err := cifixture.DropDatabase(cleanup, control, fixtureDatabase, "account_service"); err != nil {
 				t.Error("normal owned policy database cleanup failed")
 			}
 		})

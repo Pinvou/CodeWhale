@@ -19,6 +19,8 @@ from urllib.parse import parse_qs, urlsplit
 ROOT = Path(__file__).resolve().parents[1]
 ACTORS = {"billing_migrator", "billing_schema_owner", "billing_service"}
 REQUIRED = {
+    "TestEmergencyCancellationClaimOwnershipPostgres",
+    "TestEmergencyCancellationRequestLocksClaimPostgres",
     "TestUserUnusedIntentCancellationOwnerPostgres",
     "TestPendingUnusedExpiryRejectsInvalidProofTimestampPostgres",
     "TestPendingUnusedExpiryCancellationOwnerPostgres",
@@ -117,6 +119,8 @@ ACCOUNT_LEAF_REQUIRED = {
 ACCOUNT_CHILD_REQUIRED = ACCOUNT_REQUIRED - ACCOUNT_LEAF_REQUIRED
 TOKEN_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/token"
 TOKEN_CHILD_REQUIRED = {
+    "TestEmergencyCancellationClaimOwnershipPostgres",
+    "TestEmergencyCancellationRequestLocksClaimPostgres",
     "TestUserUnusedIntentCancellationOwnerPostgres",
     "TestPendingUnusedExpiryRejectsInvalidProofTimestampPostgres",
     "TestPendingUnusedExpiryCancellationOwnerPostgres",
@@ -270,6 +274,8 @@ EXACT_REQUIRED_CHILDREN = {
         "stale-product-and-foreign-original-rejected",
         "retention-purges-submission-snapshot-and-review-reason",
     },
+    "TestEmergencyCancellationClaimOwnershipPostgres": {"before-request", "after-request", "pending", "zero-attempt"},
+    "TestEmergencyCancellationRequestLocksClaimPostgres": {"usage-lock-reclaim"},
     "TestPasswordPreparationAuthorizationPostgres": {
         "retention-redacts-expired-mobiles-without-changing-grant-facts/expired",
         "retention-redacts-expired-mobiles-without-changing-grant-facts/young",

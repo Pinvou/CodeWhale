@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+const finishFixtures = require('./helpers/fixture-exit.cjs');
 /**
  * Markdown artifact direct-edit smoke test.
  *
@@ -12,13 +13,13 @@ const path = require('path');
 const { startUiTestServer } = require('./ui_test_server');
 
 function loadPuppeteer() {
-  try { return require('puppeteer-core'); } catch (_) { /* fall through */ }
+  try { return require('./helpers/puppeteer-fixture.cjs'); } catch (_) { /* fall through */ }
   const npx = path.join(os.homedir(), '.npm', '_npx');
   if (fs.existsSync(npx)) {
     for (const d of fs.readdirSync(npx)) {
       const p = path.join(npx, d, 'node_modules', 'puppeteer-core');
       if (fs.existsSync(p)) {
-        try { return require(p); } catch (_) { /* next */ }
+        try { return require('./helpers/browser-fixture.cjs').wrapNative(require(p)); } catch (_) { /* next */ }
       }
     }
   }
@@ -262,7 +263,7 @@ async function rec(results, name, pass, detail) {
   await rec(results, 'opens markdown artifact in direct editable preview', opened.hasEditable && !opened.hasPreviewSwitch && opened.text.includes('会议纪要'), JSON.stringify(opened));
   if (!opened.hasEditable) {
     await browser.close();
-    process.exit(1);
+    finishFixtures(1);
   }
 
   await page.evaluate(() => {
@@ -508,8 +509,8 @@ async function rec(results, name, pass, detail) {
   await browser.close();
   const failed = results.filter((r) => !r.pass).length;
   console.log(failed ? `\\n${failed}/${results.length} FAILED` : `\\nALL ${results.length} PASS`);
-  process.exit(failed ? 1 : 0);
+  finishFixtures(failed ? 1 : 0);
 })().catch((e) => {
   console.error('FATAL', e && e.stack ? e.stack : e);
-  process.exit(1);
+  finishFixtures(1);
 });

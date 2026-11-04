@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createServer } from 'node:http';
+import { createServer } from './helpers/http-fixture.mjs';
 import { once } from 'node:events';
 import { AdminPlatformClient } from '../src/features/account-platform/admin-client.js';
 import { platformRoleGrantIntent, grantablePlatformRole, requirePlatformRoles, requirePlatformRoleBinding, platformRoleFreshAuthority, platformRolePending, platformRoleFailureState } from '../src/features/account-platform/platform-role-management.js';

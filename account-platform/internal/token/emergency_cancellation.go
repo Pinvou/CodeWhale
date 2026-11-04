@@ -14,6 +14,8 @@ type EmergencyCancellationTarget struct {
 	ID              uuid.UUID
 	UsageRequestID  uuid.UUID
 	ExecutionStatus string
+	// ClaimAttempt is the monotonically increasing ownership token returned by claim.
+	ClaimAttempt int
 }
 
 type EmergencyModelCancellationWorker struct {
@@ -56,9 +58,9 @@ func (w *EmergencyModelCancellationWorker) runOnce(ctx context.Context) error {
 	}
 	capability := w.service.cancellationAdapter.CancelCapability()
 	for _, target := range targets {
-		preDispatch, terminal, requestErr := w.repository.requestEmergencyCancellation(ctx, target.ID, capability, w.service.upstream.AdapterVersion())
+		preDispatch, terminal, requestErr := w.repository.requestEmergencyCancellation(ctx, target, capability, w.service.upstream.AdapterVersion())
 		if requestErr != nil {
-			_ = w.repository.retryEmergencyCancellation(ctx, target.ID, requestErr)
+			_ = w.repository.retryEmergencyCancellation(ctx, target, requestErr)
 			continue
 		}
 		aborted := false
@@ -70,11 +72,11 @@ func (w *EmergencyModelCancellationWorker) runOnce(ctx context.Context) error {
 			}
 		}
 		if requestErr != nil {
-			_ = w.repository.retryEmergencyCancellation(ctx, target.ID, requestErr)
+			_ = w.repository.retryEmergencyCancellation(ctx, target, requestErr)
 			continue
 		}
-		if err := w.repository.recordEmergencyCancellationAttempt(ctx, target.ID, capability, aborted, preDispatch, terminal); err != nil {
-			_ = w.repository.retryEmergencyCancellation(ctx, target.ID, err)
+		if err := w.repository.recordEmergencyCancellationAttempt(ctx, target, capability, aborted, preDispatch, terminal); err != nil {
+			_ = w.repository.retryEmergencyCancellation(ctx, target, err)
 		}
 	}
 	return w.repository.finalizeEmergencyCancellations(ctx, w.batchSize)
@@ -106,9 +108,9 @@ func (r *PostgresRepository) claimEmergencyCancellations(ctx context.Context, li
     ORDER BY cancellation.requested_at,cancellation.id FOR UPDATE SKIP LOCKED LIMIT $2
 ), claimed AS (
     UPDATE model_emergency_cancellations cancellation SET status='LEASED',lease_until=$1::timestamptz+interval '30 seconds',attempts=attempts+1,updated_at=$1::timestamptz
-    FROM candidates WHERE cancellation.id=candidates.id RETURNING cancellation.id,cancellation.usage_request_id
+    FROM candidates WHERE cancellation.id=candidates.id RETURNING cancellation.id,cancellation.usage_request_id,cancellation.attempts
 )
-SELECT claimed.id,claimed.usage_request_id,request.execution_status FROM claimed JOIN usage_requests request ON request.id=claimed.usage_request_id`, now, limit)
+SELECT claimed.id,claimed.usage_request_id,request.execution_status,claimed.attempts FROM claimed JOIN usage_requests request ON request.id=claimed.usage_request_id`, now, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -116,7 +118,7 @@ SELECT claimed.id,claimed.usage_request_id,request.execution_status FROM claimed
 	items := make([]EmergencyCancellationTarget, 0)
 	for rows.Next() {
 		var item EmergencyCancellationTarget
-		if err := rows.Scan(&item.ID, &item.UsageRequestID, &item.ExecutionStatus); err != nil {
+		if err := rows.Scan(&item.ID, &item.UsageRequestID, &item.ExecutionStatus, &item.ClaimAttempt); err != nil {
 			return nil, err
 		}
 		items = append(items, item)
@@ -124,15 +126,24 @@ SELECT claimed.id,claimed.usage_request_id,request.execution_status FROM claimed
 	return items, rows.Err()
 }
 
-func (r *PostgresRepository) requestEmergencyCancellation(ctx context.Context, cancellationID uuid.UUID, capability ProviderCancelCapability, adapterVersion string) (bool, bool, error) {
+func (r *PostgresRepository) requestEmergencyCancellation(ctx context.Context, target EmergencyCancellationTarget, capability ProviderCancelCapability, adapterVersion string) (bool, bool, error) {
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
 		return false, false, err
 	}
 	defer tx.Rollback(ctx)
+	// Lock the target before usage, matching record's lock order. Reclaim
+	// skips this locked target, and an older claim cannot write evidence.
+	var ownedID uuid.UUID
+	if err := tx.QueryRow(ctx, `SELECT usage_request_id FROM model_emergency_cancellations WHERE id=$1 AND status='LEASED' AND attempts=$2 AND attempts>0 FOR UPDATE`, target.ID, target.ClaimAttempt).Scan(&ownedID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return false, false, ErrForbidden
+		}
+		return false, false, err
+	}
 	var usage UsageRequest
 	qualifiedUsageColumns := "request." + strings.ReplaceAll(usageSelectColumns, ",", ",request.")
-	if err := scanUsage(tx.QueryRow(ctx, `SELECT `+qualifiedUsageColumns+` FROM usage_requests request JOIN model_emergency_cancellations cancellation ON cancellation.usage_request_id=request.id WHERE cancellation.id=$1 FOR UPDATE OF request`, cancellationID), &usage); err != nil {
+	if err := scanUsage(tx.QueryRow(ctx, `SELECT `+qualifiedUsageColumns+` FROM usage_requests request WHERE request.id=$1 FOR UPDATE OF request`, ownedID), &usage); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return false, false, ErrNotFound
 		}
@@ -140,7 +151,7 @@ func (r *PostgresRepository) requestEmergencyCancellation(ctx context.Context, c
 	}
 	var cancellationOrigin string
 	var requestAlreadyRecorded, expiryOwnsPending, userOwnsUnusedIntent bool
-	if err := tx.QueryRow(ctx, `SELECT request.cancellation_origin,EXISTS(SELECT 1 FROM model_emergency_cancellation_evidence evidence WHERE evidence.emergency_cancellation_id=$2 AND evidence.evidence_type='REQUESTED'),`+pendingUnusedExpiryFenceSQL+`,`+pendingUserUnusedIntentSQL+` FROM usage_requests request WHERE request.id=$1`, usage.ID, cancellationID).Scan(&cancellationOrigin, &requestAlreadyRecorded, &expiryOwnsPending, &userOwnsUnusedIntent); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT request.cancellation_origin,EXISTS(SELECT 1 FROM model_emergency_cancellation_evidence evidence WHERE evidence.emergency_cancellation_id=$2 AND evidence.evidence_type='REQUESTED'),`+pendingUnusedExpiryFenceSQL+`,`+pendingUserUnusedIntentSQL+` FROM usage_requests request WHERE request.id=$1`, usage.ID, target.ID).Scan(&cancellationOrigin, &requestAlreadyRecorded, &expiryOwnsPending, &userOwnsUnusedIntent); err != nil {
 		return false, false, err
 	}
 	// Claiming and cancellation are separate transactions. A USER stop or
@@ -156,7 +167,7 @@ func (r *PostgresRepository) requestEmergencyCancellation(ctx context.Context, c
 	}
 	if cancellationOrigin == "MODEL_EMERGENCY" && requestAlreadyRecorded {
 		if usage.ExecutionStatus == "REVIEW" && usage.HoldID != nil {
-			if err := r.restoreEmergencyPreDispatchReview(ctx, tx, usage, cancellationID); err != nil {
+			if err := r.restoreEmergencyPreDispatchReview(ctx, tx, usage, target.ID); err != nil {
 				return false, false, err
 			}
 		}
@@ -188,7 +199,7 @@ func (r *PostgresRepository) requestEmergencyCancellation(ctx context.Context, c
 	if err := appendUsageConvergenceEvidenceTx(ctx, tx, usage.ID, "CANCELLATION", "GATEWAY", "RECORDED", "model-emergency-requested", snapshot, now); err != nil {
 		return false, false, err
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO model_emergency_cancellation_evidence(id,emergency_cancellation_id,evidence_type,snapshot,created_at) VALUES($1,$2,'REQUESTED',$3,$4)`, uuid.Must(uuid.NewV7()), cancellationID, snapshot, now); err != nil {
+	if _, err := tx.Exec(ctx, `INSERT INTO model_emergency_cancellation_evidence(id,emergency_cancellation_id,evidence_type,snapshot,created_at) VALUES($1,$2,'REQUESTED',$3,$4)`, uuid.Must(uuid.NewV7()), target.ID, snapshot, now); err != nil {
 		return false, false, err
 	}
 	return preDispatch, terminal, tx.Commit(ctx)
@@ -248,14 +259,17 @@ func (r *PostgresRepository) restoreEmergencyPreDispatchReview(ctx context.Conte
 	return err
 }
 
-func (r *PostgresRepository) recordEmergencyCancellationAttempt(ctx context.Context, cancellationID uuid.UUID, capability ProviderCancelCapability, aborted, preDispatch, terminal bool) error {
+func (r *PostgresRepository) recordEmergencyCancellationAttempt(ctx context.Context, target EmergencyCancellationTarget, capability ProviderCancelCapability, aborted, preDispatch, terminal bool) error {
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback(ctx)
 	var usageID uuid.UUID
-	if err := tx.QueryRow(ctx, `SELECT usage_request_id FROM model_emergency_cancellations WHERE id=$1 FOR UPDATE`, cancellationID).Scan(&usageID); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT usage_request_id FROM model_emergency_cancellations WHERE id=$1 AND status='LEASED' AND attempts=$2 AND attempts>0 FOR UPDATE`, target.ID, target.ClaimAttempt).Scan(&usageID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrForbidden
+		}
 		return err
 	}
 	if preDispatch && !terminal {
@@ -285,10 +299,10 @@ func (r *PostgresRepository) recordEmergencyCancellationAttempt(ctx context.Cont
 		return err
 	}
 	snapshot := map[string]any{"capability": capability, "local_transport_aborted": aborted, "provider_cancel_result": providerResult, "provider_success_inferred": cancelStatus == "PROVIDER_CONFIRMED", "hold_released": preDispatch}
-	if _, err := tx.Exec(ctx, `UPDATE model_emergency_cancellations SET status='CONVERGING',lease_until=NULL,cancellation_capability=$2,local_transport_aborted=$3,provider_cancel_result=$4,attempted_at=$5,updated_at=$5 WHERE id=$1`, cancellationID, capability, aborted, providerResult, now); err != nil {
+	if _, err := tx.Exec(ctx, `UPDATE model_emergency_cancellations SET status='CONVERGING',lease_until=NULL,cancellation_capability=$2,local_transport_aborted=$3,provider_cancel_result=$4,attempted_at=$5,updated_at=$5 WHERE id=$1`, target.ID, capability, aborted, providerResult, now); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO model_emergency_cancellation_evidence(id,emergency_cancellation_id,evidence_type,snapshot,created_at) VALUES($1,$2,'ATTEMPTED',$3,$4)`, uuid.Must(uuid.NewV7()), cancellationID, snapshot, now); err != nil {
+	if _, err := tx.Exec(ctx, `INSERT INTO model_emergency_cancellation_evidence(id,emergency_cancellation_id,evidence_type,snapshot,created_at) VALUES($1,$2,'ATTEMPTED',$3,$4)`, uuid.Must(uuid.NewV7()), target.ID, snapshot, now); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(ctx, `INSERT INTO usage_cancellation_evidence(id,usage_request_id,evidence_type,adapter_version,sanitized_evidence,occurred_at) VALUES($1,$2,'MODEL_EMERGENCY_ATTEMPTED','gateway',$3,$4)`, uuid.Must(uuid.NewV7()), usageID, snapshot, now); err != nil {
@@ -297,8 +311,8 @@ func (r *PostgresRepository) recordEmergencyCancellationAttempt(ctx context.Cont
 	return tx.Commit(ctx)
 }
 
-func (r *PostgresRepository) retryEmergencyCancellation(ctx context.Context, cancellationID uuid.UUID, cause error) error {
-	_, err := r.pool.Exec(ctx, `UPDATE model_emergency_cancellations SET status='PENDING',lease_until=NULL,provider_cancel_result=$2,updated_at=$3 WHERE id=$1 AND status='LEASED'`, cancellationID, "ATTEMPT_ERROR:"+stableEmergencyError(cause), r.now())
+func (r *PostgresRepository) retryEmergencyCancellation(ctx context.Context, target EmergencyCancellationTarget, cause error) error {
+	_, err := r.pool.Exec(ctx, `UPDATE model_emergency_cancellations SET status='PENDING',lease_until=NULL,provider_cancel_result=$2,updated_at=$3 WHERE id=$1 AND status='LEASED' AND attempts=$4 AND attempts>0`, target.ID, "ATTEMPT_ERROR:"+stableEmergencyError(cause), r.now(), target.ClaimAttempt)
 	return err
 }
 

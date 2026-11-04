@@ -2,6 +2,7 @@ package tokenschema
 
 import (
 	"context"
+	"github.com/Pinvou/pinvou3/account-platform/internal/cifixture"
 	"os"
 	"path/filepath"
 	"testing"
@@ -40,12 +41,13 @@ func TestProductionTokenReplayAuditHistoryUpgrade(t *testing.T) {
 	roles := []string{"token_gateway", "token_cap_policy_deployer", "token_schema_owner", "token_migrator", "token_policy_operator"}
 	created := []string{}
 	database := "token_history_upgrade_" + uuid.NewString()[:8]
+	var fixtureDatabase *cifixture.Database
 	databaseCreated := false
 	defer func() {
 		cleanup, done := context.WithTimeout(context.Background(), 15*time.Second)
 		defer done()
 		if databaseCreated {
-			if _, err := admin.Exec(cleanup, "DROP DATABASE "+pgx.Identifier{database}.Sanitize()); err != nil {
+			if _, err := cifixture.DropDatabase(cleanup, admin, fixtureDatabase, admin.Config().User); err != nil {
 				t.Error("owned test database cleanup failed; roles retained", err)
 				return
 			}
@@ -69,7 +71,9 @@ func TestProductionTokenReplayAuditHistoryUpgrade(t *testing.T) {
 	if _, err := admin.Exec(ctx, `GRANT token_gateway,token_schema_owner,token_cap_policy_deployer TO token_migrator`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := admin.Exec(ctx, "CREATE DATABASE "+pgx.Identifier{database}.Sanitize()); err != nil {
+	fixtureDatabaseCreated, creationError := cifixture.CreateDatabase(ctx, admin, database, "CREATE DATABASE "+pgx.Identifier{database}.Sanitize())
+	fixtureDatabase = fixtureDatabaseCreated
+	if err := creationError; err != nil {
 		t.Fatal(err)
 	}
 	databaseCreated = true

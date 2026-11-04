@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import { createServer } from 'vite';
+import { createServer } from './helpers/vite-fixture.mjs';
 import react from '@vitejs/plugin-react';
-import * as puppeteer from 'puppeteer-core';
+import * as puppeteer from './helpers/puppeteer-fixture.mjs';
 const browserPath = [process.env.CHROME, '/usr/bin/google-chrome', '/usr/bin/chromium', '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', 'C:/Program Files/Microsoft/Edge/Application/msedge.exe', 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe'].find(value => value && fs.existsSync(value));
 assert.ok(browserPath, 'Chromium is required; set CHROME to its executable');
 const root=import.meta.dirname+'/..';

@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+const finishFixtures = require('./helpers/fixture-exit.cjs');
 /**
  * detached 启动冒烟：分别加载 session/codex-session/monitor 独立窗口，
  * 断言 ① 只渲染撕离面板 ② 普通与 Coding session 还原目标历史
@@ -9,11 +10,11 @@
 const fs = require('fs'), path = require('path'), os = require('os');
 const { startUiTestServer } = require('./ui_test_server');
 function loadPuppeteer() {
-  try { return require('puppeteer-core'); } catch (e) {}
+  try { return require('./helpers/puppeteer-fixture.cjs'); } catch (e) {}
   const npx = path.join(os.homedir(), '.npm', '_npx');
   if (fs.existsSync(npx)) for (const d of fs.readdirSync(npx)) {
     const p = path.join(npx, d, 'node_modules', 'puppeteer-core');
-    if (fs.existsSync(p)) { try { return require(p); } catch (e) {} }
+    if (fs.existsSync(p)) { try { return require('./helpers/browser-fixture.cjs').wrapNative(require(p)); } catch (e) {} }
   }
   console.error('SKIP: 找不到 puppeteer-core'); process.exit(2);
 }
@@ -166,6 +167,6 @@ function injectSource() {
   }
 
   await browser.close(); fs.rmSync(PROFILE, { recursive: true, force: true });
-  if (ok) { console.log('PASS: detached session/ACP及品悟Coding/monitor 启动与状态投影正常'); process.exit(0); }
-  process.exit(1);
+  if (ok) { console.log('PASS: detached session/ACP及品悟Coding/monitor 启动与状态投影正常'); finishFixtures(0); }
+  finishFixtures(1);
 })();

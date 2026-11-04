@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
-import { createServer } from 'node:http';
+import { createServer } from './helpers/http-fixture.mjs';
 import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
-import puppeteer from 'puppeteer-core';
+import puppeteer from './helpers/puppeteer-fixture.mjs';
 import { ledgerRepairCopy } from '../src/shared/ledger-repair-i18n.js';
 import { financeCopy } from '../src/shared/finance-i18n.js';
 import { encodeFinanceJSON } from '../src/features/account-platform/finance-contract.js';
