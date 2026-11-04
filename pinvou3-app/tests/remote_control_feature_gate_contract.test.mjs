@@ -86,7 +86,9 @@ test('the readiness helper includes the release switch and never supplies defaul
   assert.match(source.slice(start, end), /ensure_desktop_remote_control_enabled\(\)\?/u);
   assert.match(source.slice(start, end), /is_ready\(app\)/u);
   assert.match(source.slice(start, end), /UNAVAILABLE/u);
-  assert.match(source, /try_get::<DesktopRemoteReady>\(\)/u);
-  assert.match(source, /try_get::<T>\(\)/u);
+  // Tauri 2.12 deprecated InvokeMessage::state_ref; the readiness probe now
+  // goes through the webview's Manager::try_state on the same app-wide map.
+  assert.match(source, /try_state::<DesktopRemoteReady>\(\)/u);
+  assert.match(source, /try_state::<T>\(\)/u);
   assert.doesNotMatch(source.slice(0, source.indexOf('#[cfg(test)]')), /unwrap_or_default|\.manage\(/u);
 });
