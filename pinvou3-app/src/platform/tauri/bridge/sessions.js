@@ -501,6 +501,13 @@ async function createNewSession() { return pinvouSharedtauriSessions().createNew
         workspacePath: null,
         workspaceRoots: null,
         projectId: null,
+        // 后台诊断会话不得抢占后端活动会话（review P2，zhuowp）：前端工作集
+        // 已保持停在 B，但 create_session 的 set_active 后端缺省
+        // unwrap_or(true)，缺省调用会静默把 SessionStore.active 切到诊断会话
+        // ——按活动会话键控的后端操作（定时记忆压缩等）随之改道。显式
+        // setActive:false 与 Web 宿主 web_access_create_session（Some(false)）
+        // 契约对齐；前台物化路径保持缺省激活不变。
+        setActive: false,
       });
       sessionStates[meta.id] = freshBuffer();
       sessionStates[meta.id].loadedFromDisk = true;

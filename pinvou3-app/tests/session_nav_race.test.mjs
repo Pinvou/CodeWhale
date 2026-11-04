@@ -805,6 +805,54 @@ test('background materialization failure stays silent on the user session', asyn
   assert.equal(rt.state.composerDraft, '');
 });
 
+// ── 后台物化不得抢占后端活动会话（review P2，zhuowp：setActive 契约）──
+// 前端工作集停在 B 只是半边契约：create_session 的 set_active 后端缺省
+// unwrap_or(true)（src-tauri app/commands/sessions.rs），缺省调用会静默把
+// SessionStore.active 切到诊断会话——按活动会话键控的后端操作（定时记忆
+// 压缩等）随之改道。桌面桥必须显式 setActive:false，与 Web 宿主
+// web_access_create_session（Some(false)）同契；前台物化保持缺省激活不变。
+
+test('background materialization invokes create_session with setActive false', async () => {
+  const createCalls = [];
+  const rt = loadSessionsFeature({ invoke(name, args) {
+    if (name === 'create_session') {
+      createCalls.push(args);
+      return Promise.resolve({ id: 'created-bg' });
+    }
+    if (name === 'list_sessions') return Promise.resolve([{ id: 'local-b' }, { id: 'created-bg' }]);
+    if (name === 'list_archived_sessions') return Promise.resolve([]);
+    return Promise.resolve({});
+  } });
+  rt.state.activeSessionId = 'local-b';
+  assert.equal(await rt.api.materializeSession({ background: true }), 'created-bg');
+  assert.equal(createCalls.length, 1);
+  assert.equal(createCalls[0].setActive, false,
+    '后台创建必须显式 setActive:false（后端缺省 unwrap_or(true) 会抢占后端活动会话）');
+  // 逐键断言（invoke 参数对象产自 vm realm，不能与测试字面量 deepStrictEqual）：
+  // 与前台空草稿物化同参（无目录绑定），且键面无多余项。
+  assert.equal(createCalls[0].workspacePath, null);
+  assert.equal(createCalls[0].workspaceRoots, null);
+  assert.equal(createCalls[0].projectId, null);
+  assert.equal(Object.keys(createCalls[0]).length, 4, '参数面无多余键');
+  assert.equal(rt.state.activeSessionId, 'local-b', '前端活动目标仍停在 B');
+});
+
+test('foreground materialization keeps the backend activation default', async () => {
+  const createCalls = [];
+  const rt = loadSessionsFeature({ invoke(name, args) {
+    if (name === 'create_session') {
+      createCalls.push(args);
+      return Promise.resolve({ id: 'created-fg' });
+    }
+    if (name === 'list_sessions' || name === 'list_archived_sessions') return Promise.resolve([]);
+    return Promise.resolve({});
+  } });
+  assert.equal(await rt.api.materializeSession(), 'created-fg');
+  assert.equal(createCalls.length, 1);
+  assert.notEqual(createCalls[0].setActive, false,
+    '前台物化保持后端缺省激活，不得传 setActive:false（负向对照）');
+});
+
 test('direct scheduled-run navigation invalidates a previously captured controlled owner', async () => {
   const rt = loadSessionsFeature();
   rt.state.desktopRemoteControl = {

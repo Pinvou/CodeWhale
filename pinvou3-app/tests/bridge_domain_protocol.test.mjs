@@ -262,7 +262,11 @@ const expectedProtocolHashes = {
   // round-39 评审 P2 重算：sessions.js 新增 createBackgroundSession 的
   // create_session invoke（后台物化——切到既有会话后晚到的诊断动作改走
   // 不切工作集的创建/登记路径），复用既有 create_session 命令，命令面无增删。
-  sessions: '1330dea103640a6615c71032232f98962218f265f2950c8040dcba03bfad9f77',
+  // review P2 重算：createBackgroundSession 的 create_session invoke 显式
+  // 携带 setActive:false（后台诊断会话不得抢占后端 SessionStore.active，
+  // 与 Web 宿主 web_access_create_session 的 Some(false) 契约对齐），仍复用
+  // 既有 create_session 命令，命令面无增删。
+  sessions: 'c8e941ef800477dbd5eaf09482a946f8897429c29ddd3005ba76d658a4643069',
   // Recomputed for the builtin feature toggle hook: settings.js gains the
   // list_builtin_features / set_builtin_feature_enabled invoke wrappers (the
   // session-mention feature gate reads the list; the setter is the contract
