@@ -198,8 +198,13 @@ const formatMemoryTime = (item, copy) => {
       const remoteCopy = t.uiRemote;
       const statusColors = { idle:'#8A9097', starting:'#F9AB00', connecting_relay:'#F9AB00', waiting_web_client:'#F9AB00', web_client_connected:'#34A853', web_client_disconnected:'#F9AB00', revoked:'#EA4335', stopped:'#8A9097', error:'#EA4335' };
       const statusCopy = remoteCopy.status[statusKey];
+      // 注册终结码的稳定恢复码映射三语文案;缺码(非注册类错误)回退原文。
+      const registerHint = webAccess.last_error_code
+        ? remoteCopy.registerHints?.[webAccess.last_error_code]
+        : null;
+      const webAccessErrorText = registerHint || webAccess.last_error || null;
       const statusMeta = statusCopy
-        ? { label: statusCopy[0], detail: statusKey === 'error' ? (webAccess.last_error || statusCopy[1]) : statusCopy[1], color: statusColors[statusKey] }
+        ? { label: statusCopy[0], detail: statusKey === 'error' ? (webAccessErrorText || statusCopy[1]) : statusCopy[1], color: statusColors[statusKey] }
         : { label: String(statusKey), detail: remoteCopy.updated, color: '#8A9097' };
 
       async function handleRotateWebAccess() {
@@ -220,16 +225,36 @@ const formatMemoryTime = (item, copy) => {
         try {
           await bridge.remoteControl.stopRemoteControl();
           onClose();
-        } finally {
+        } catch { /* stop failure surfaced by the banner */ } finally {
           setActionBusy(false);
         }
       }
 
-      async function handleRetryWebAccess() {
+      // Enable only starts the link; granting host folders stays a separate explicit
+      // consent step, so a single Enable click can never latch folder authorization.
+      async function handleEnableWebAccess() {
+        if (!bridge.available) return;
+        setActionBusy(true);
+        try { await bridge.remoteControl.startRemoteControl({}); }
+        catch { /* start failure surfaced by the banner */ }
+        finally { setActionBusy(false); }
+      }
+
+      async function handleAllowHostWorkspace() {
         if (!bridge.available) return;
         setActionBusy(true);
         try { await bridge.remoteControl.startRemoteControl({ allowHostWorkspace: true }); }
-        catch (_) {}
+        catch { /* start failure surfaced by the banner */ }
+        finally { setActionBusy(false); }
+      }
+
+      // 撤销本机目录授权但保持链接：folder 授权的独立收回路径，不复用
+      // Stop（那会断开整条链接）。
+      async function handleRevokeHostWorkspace() {
+        if (!bridge.available) return;
+        setActionBusy(true);
+        try { await bridge.remoteControl.revokeRemoteHostWorkspace(); }
+        catch { /* revoke failure surfaced by the banner */ }
         finally { setActionBusy(false); }
       }
 
@@ -279,19 +304,32 @@ const formatMemoryTime = (item, copy) => {
               </div>
             ) : (
               <div className={`text-[13px] px-3 py-4 rounded-xl bg-[#F1F3F4] text-[#3C4043] dark:bg-white/5 dark:text-[#C4C7C5]`}>
-                {webAccess.starting ? remoteCopy.generating : (webAccess.last_error || remoteCopy.notStarted)}
+                {/* 错误文本已由状态行 detail 与红色横幅各渲染一次;占位盒退回
+                    「未开启」缺省,同一句恢复提示不再在弹窗里连排三遍。 */}
+                {webAccess.starting
+                  ? remoteCopy.generating
+                  : (statusKey === 'error' ? remoteCopy.notStarted : (webAccessErrorText || remoteCopy.notStarted))}
               </div>
             )}
-            {webAccess.last_error && <div className="mt-3 text-[12px] text-[#EA4335] break-all">{webAccess.last_error}</div>}
+            {webAccessErrorText && <div className="mt-3 text-[12px] text-[#EA4335] break-all">{webAccessErrorText}</div>}
+            {webAccessActive && hostWorkspaceAuthorized && (
+              // 授权状态 affirmative 可见 + 可单独撤销:旧版本「开启访问」顺带
+              // 写下的 allow_host_workspace 不再只能靠 Stop 整体清除。
+              <div className="mt-3 flex items-center justify-between gap-2 rounded-xl px-3 py-2 bg-[#E6F4EA] dark:bg-[#0D2B1A]">
+                <span className="text-[12px] text-[#137333] dark:text-[#81C995]">{remoteCopy.workspaceAllowed}</span>
+                <button type="button" disabled={actionBusy} onClick={handleRevokeHostWorkspace}
+                  className={`px-3 py-1.5 rounded-lg text-[12px] disabled:opacity-50 border border-[#137333]/30 text-[#137333] hover:bg-black/5 dark:border-[#81C995]/30 dark:text-[#81C995] dark:hover:bg-white/10`}>{remoteCopy.revokeWorkspace}</button>
+              </div>
+            )}
             <div className="mt-4 flex items-center justify-end gap-2">
               <button type="button" onClick={() => { if (webAccess.url) copyClipboardText(webAccess.url); }}
-                disabled={!webAccess.url}
+                disabled={actionBusy || !webAccess.url}
                 className={`px-3.5 py-2 rounded-full text-[13px] bg-black/5 hover:bg-black/10 disabled:opacity-40 dark:bg-white/10 dark:hover:bg-white/15 dark:disabled:opacity-40`}>{remoteCopy.copy}</button>
-              {webAccessActive && !hostWorkspaceAuthorized && <button type="button" disabled={actionBusy} onClick={handleRetryWebAccess}
+              {webAccessActive && !hostWorkspaceAuthorized && <button type="button" disabled={actionBusy} onClick={handleAllowHostWorkspace}
                 className="px-3.5 py-2 rounded-full text-[13px] bg-[#0B57D0] text-white hover:bg-[#0A4BB8] disabled:opacity-50 dark:bg-[#A8C7FA] dark:text-[#062E6F] dark:hover:bg-[#C2DBFF]">{remoteCopy.allowWorkspace}</button>}
               {webAccessActive ? <button type="button" disabled={actionBusy} onClick={() => setRefreshConfirmOpen(true)}
                 className={`px-3.5 py-2 rounded-full text-[13px] disabled:opacity-50 bg-black/5 hover:bg-black/10 dark:bg-white/10 dark:hover:bg-white/15`}>{remoteCopy.refresh}</button>
-                : <button type="button" disabled={actionBusy} onClick={handleRetryWebAccess}
+                : <button type="button" disabled={actionBusy} onClick={handleEnableWebAccess}
                   className="px-3.5 py-2 rounded-full text-[13px] bg-[#0B57D0] text-white hover:bg-[#0A4BB8] disabled:opacity-50 dark:bg-[#A8C7FA] dark:text-[#062E6F] dark:hover:bg-[#C2DBFF]">{remoteCopy.enable}</button>}
             </div>
             {refreshConfirmOpen && (

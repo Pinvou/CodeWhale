@@ -338,7 +338,7 @@ export const dictEn = {
         sysPerm: 'System Permissions', sudo: 'Advanced execution (Sudo)', sudoDesc: 'Allow the assistant to run advanced commands such as environment configuration',
         versionUpdate: 'Version & Update',
         uiRemote: {
-          title:'Mobile Remote Control', desc:'Once enabled, the remote link can browse local files and run a code Agent in selected folders. Share it only with people you trust.', browser:'Browser connection', stop:'Stop', qrAlt:'Remote control QR code', qrHint:'Scan with your phone or copy the link below', link:'Remote control link', linkHint:'The QR code and link are identical and remain valid after restart. Refreshing or stopping access revokes the old link immediately.', generating:'Generating remote control link…', notStarted:'Remote control is not enabled.', copy:'Copy Link', refresh:'Refresh QR Code', enable:'Enable Access', allowWorkspace:'Allow Local Folders', refreshTitle:'Refresh QR code?', refreshDesc:'The old QR code and link will become invalid immediately, and the current browser will disconnect. Scan the new QR code or copy the new link to reconnect.', refreshing:'Refreshing…', updated:'Remote control status updated.', unavailable:'Remote control is temporarily unavailable. Try again.',
+          title:'Mobile Remote Control', desc:'Enable Access starts the remote link; local folder access is a separate, individually revocable grant. Share the link only with people you trust.', browser:'Browser connection', stop:'Stop', close:'Close', qrAlt:'Remote control QR code', qrHint:'Scan with your phone or copy the link below', link:'Remote control link', linkHint:'The QR code and link are identical and remain valid after restart. Refreshing or stopping access revokes the old link immediately.', generating:'Generating remote control link…', notStarted:'Remote control is not enabled.', copy:'Copy Link', refresh:'Refresh QR Code', enable:'Enable Access', allowWorkspace:'Allow Local Folders', workspaceAllowed:'Local folder access is allowed for this link', revokeWorkspace:'Revoke Folder Access', registerHints:{ rotate_credentials:'Web access rejected this desktop’s credentials. Rotate Web access on the desktop to mint a fresh link.', rotate_recover_config:'The saved Web access configuration is unusable. Rotate Web access on the desktop to recover.', update_desktop:'The relay expects a newer protocol. Update this desktop app — and a self-hosted relay, if you run one — to the latest version to restore Web access.' }, refreshTitle:'Refresh QR code?', refreshDesc:'The old QR code and link will become invalid immediately, and the current browser will disconnect. Scan the new QR code or copy the new link to reconnect. Any local folder access already granted carries over to the new link.', refreshing:'Refreshing…', updated:'Remote control status updated.', unavailable:'Remote control is temporarily unavailable. Try again.',
           status:{ idle:['Not enabled','Enable access to create a persistent remote control link.'], starting:['Starting','Creating the remote control connection.'], connecting_relay:['Connecting','Connecting to the relay…'], waiting_web_client:['Waiting for browser','Paste the link into a browser on your phone or computer.'], web_client_connected:['Browser connected','A browser is connected to this desktop.'], web_client_disconnected:['Browser disconnected','The link remains valid and can reconnect at any time.'], revoked:['Link revoked','Enable remote control again.'], stopped:['Stopped','Open this panel to enable access again.'], error:['Connection error','Remote control is temporarily unavailable. Try again.'] },
         },
         uiMonitor: { bridgeNotReady:'Bridge not ready', readFailed:'Read failed', reading:'Loading', configError:'Configuration error', unverified:'Unverified', authFailed:'Authentication failed', bridgeError:'Monitor bridge is not ready. Open this page in the Tauri app window.', activity:'Activity' },
@@ -813,10 +813,12 @@ dictEn.uiToolDetails.flow = {
   openBrowser:'Open in browser ↗', connectionIncomplete:'Connection incomplete', close:'Close', retry:'Retry',
 };
 
-dictEn.uiToolDetails.actions = { connectedTmeet:'Tencent Meeting connected', enabled:'Connected. Tool switches are off by default; turn this on in the composer tools list', disconnectedTmeet:'Tencent Meeting disconnected', connectingIma:'Connecting Tencent ima', validatingIma:'Validating OpenAPI credentials…', connectedIma:'Tencent ima connected', imaEnabled:'IMA connected. Tool switches are off by default; turn this on in the composer tools list.', imaFailed:'IMA connection failed', imaSkillsFailed:err=>`IMA connection did not complete: the skills were installed but persisting their default-off consent state failed, so this connection was rolled back (reconnect required); after reconnecting, switch the skills off in the composer tools list if they come up enabled: ${err}`, disconnectedIma:'Tencent ima disconnected', operationFailed:'Operation failed. Please retry' };
+dictEn.uiToolDetails.actions = { connectedTmeet:'Tencent Meeting connected', enabled:'Connected. Tool switches are enabled by default; manage them in the composer tools list', disconnectedTmeet:'Tencent Meeting disconnected', connectingIma:'Connecting Tencent ima', validatingIma:'Validating OpenAPI credentials…', connectedIma:'Tencent ima connected', imaEnabled:'IMA connected. Tool switches are off by default; turn this on in the composer tools list.', imaFailed:'IMA connection failed', imaSkillsFailed:err=>`IMA connection did not complete: the skills were installed but persisting their default-off consent state failed, so this connection was rolled back (reconnect required); after reconnecting, switch the skills off in the composer tools list if they come up enabled: ${err}`, disconnectedIma:'Tencent ima disconnected', operationFailed:'Operation failed. Please retry' };
 
 dictEn.uiToolDetails.tmeetSteps = [{key:'runtime',label:'Prepare runtime',sub:'Use the app-provided Node runtime'},{key:'cli',label:'Install connector',sub:'tmeet · about 40 seconds on first use'},{key:'qr',label:'Sign in',sub:'Tencent Meeting authorization page'}];
 
+// Retained for parity with the private implementation this tree aligns with; it has
+// no consumer in the public tree (the flow card always renders localized copy).
 // Retained for parity with the private implementation this tree aligns with; it has
 // no consumer in the public tree (the flow card always renders localized copy).
 dictEn.uiToolDetails.showRawErrors = false;
@@ -1135,7 +1137,7 @@ desktopHint:'Install Obsidian on the desktop and create a vault first, then chec
   connectFailed:name=>`${name} connection failed`, connectTitle:name=>`Connect ${name}`,
   connectBusy:name=>`${name} is still finishing the previous sign-in`,
   connectBusyHint:'It may complete on its own. Wait a few seconds, then press Connect again.',
-  connectedBanner:name=>`${name} connected · tool switches are off by default; enable it in the composer tools list`,
+  connectedBanner:name=>`${name} connected · tool switches are enabled by default; manage them in the composer tools list`,
   connectedBannerIma:'Tencent ima connected · tool switches are off by default; enable it in the composer tools list',
   connectedTool:name=>`${name} connected`, disconnectedTool:name=>`${name} disconnected`,
   connectedQuoted:name=>`${name} connected`, installedQuoted:name=>`${name} installed`, uninstalledQuoted:name=>`${name} uninstalled`,
@@ -1182,6 +1184,8 @@ desktopHint:'Install Obsidian on the desktop and create a vault first, then chec
     registration_failed:'App registration was not completed. Reconnect and try again.',
     auth_failed:'Sign-in authorization was not completed. Reconnect and try again.',
     consent_persist_failed:'Authorization completed, but persisting the default-off consent failed. Turn the connector off in the composer tools list, then reconnect.',
+    connect_consent_persist_failed:'Authorization completed, but persisting the connector’s enabled state failed. Nothing was exposed — reconnect to try again.',
+    connect_consent_commit_incomplete:'Authorization completed, but finalizing the connector’s enabled state failed. It stays enabled, but a concurrent operation could still withdraw it — reconnect to secure it.',
     skills_enable_failed:'Authorization completed, but enabling the skill failed. Try again.',
     unknown:'Connection failed. Try again later.',
   },
@@ -2097,6 +2101,8 @@ dictEn["uiAccount"] = {
 };
 dictEn["uiToolStore"]["guide"]["types"] = ["Standard skill (SKILL.md folder)", "Single .md skill file", "MCP server", "Pinvou plugin package (recommended)"];
 dictEn["uiToolStore"]["connectorErrors"] = {
+    "connect_consent_persist_failed": "Authorization completed, but persisting the connector’s enabled state failed. Nothing was exposed — reconnect to try again.",
+    "connect_consent_commit_incomplete": "Authorization completed, but finalizing the connector’s enabled state failed. It stays enabled, but a concurrent operation could still withdraw it — reconnect to secure it.",
     "consent_persist_failed": "Authorization completed, but persisting the default-off consent failed. Turn the connector off in the composer tools list, then reconnect.",
   "runtime_prepare_failed": "Failed to prepare the connector runtime. Try again.",
   "cli_install_failed": "Failed to install the connector. Check your network and try again.",

@@ -2303,6 +2303,7 @@ function composePlanMarkdown(snapshots) { return pinvouSharedtauriMain().compose
   var startRemoteControl = remoteControlFeature.startRemoteControl;
   var stopRemoteControl = remoteControlFeature.stopRemoteControl;
   var refreshRemoteControlQr = remoteControlFeature.refreshRemoteControlQr;
+  var revokeRemoteHostWorkspace = remoteControlFeature.revokeRemoteHostWorkspace;
   var desktopRemoteControlFeature = installBridgeFeature("desktop-remote-control", {
     state: state,
     notify: notify,
@@ -2767,6 +2768,7 @@ function composePlanMarkdown(snapshots) { return pinvouSharedtauriMain().compose
       refreshRemoteControlStatus: refreshRemoteControlStatus,
       getWebRelaySettings: remoteControlFeature.getWebRelaySettings,
       setWebRelayAddress: remoteControlFeature.setWebRelayAddress,
+      revokeRemoteHostWorkspace: revokeRemoteHostWorkspace,
     },
     desktopRemoteControl: {
       controlledStart: desktopRemoteControlFeature.controlledStart,
