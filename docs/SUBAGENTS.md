@@ -187,6 +187,47 @@ A writer narrows its scope with at least one normalized repo-relative
 parent workspace root. Active overlapping shared claims fail before mutation;
 a real isolated worktree may proceed in parallel.
 
+A child that a worktree child spawns without its own `worktree`/`cwd` request
+runs inside that same worktree, and its claim is registered on the same
+isolated footing (worktree-relative roots) rather than against the shared
+coordination root. A `cwd`-narrowed child keys its claim on the containing
+worktree — the nearest ancestor claim that records that worktree, or, once
+the ledger row is swept or evicted, the launch manifest recorded at spawn —
+not on its own subdirectory, and a claim-less worktree parent confers the
+footing and records the key the same way. An interrupted child holds no live
+claim: its loop is gone and a resume runs under a new id with its own claim,
+so later writers — and the resume itself — are not gated by it.
+Within one worktree the ledger still serializes unrelated writers: a claim may
+overlap its ancestors' (the work was delegated downward), but two unrelated
+descendants — parallel siblings — with overlapping scope contend, exactly as
+they would in the shared root. The exemption runs along the new claimant's
+ancestor chain only: a parent that later registers or expands an overlapping
+claim of its own is refused by its live descendant. Shell work runs the same
+premise one gate deeper: a command the read-only classifier cannot prove
+bounded refuses while an unrelated live writer holds a claim in the same
+worktree, since it cannot prove it stays inside the claimant's share — the
+ancestor chain stays exempt, and a writer keyed on a different worktree is
+unaffected. That shell gate also holds a transient reservation for the
+command it admits, so the same frame stays occupied for as long as the
+command's writes could still land: an explicitly backgrounded shell keeps its
+owner's worktree (or the shared checkout) reserved after the owner is
+interrupted, cancelled, or completed — the loop abort never touches the job —
+and both the peer gate and claim admission refuse with an "unbounded shell
+work is still in flight" receipt naming the owner until the job actually
+exits or is cancelled (`exec_shell_cancel`). The shell manager is the truth
+source: a job that finished releases the frame without anyone assuming a
+writer is gone. Ancestors stay exempt, different worktrees are unaffected,
+and a resume waits the same way before its new claim registers.
+Records persisted before
+claims carried a worktree key keep a never-contending footing. A resumed loop
+is only serialized against writers still live at resume time; the ledger does
+not surface what completed while it was parked, so re-read the affected paths
+before writing. Scoped paths are compared in the claim ledger's frame (NFC
+per path component): a scoped, cwd-narrowed child whose worktree subdirectory
+the OS spelled in a different Unicode form (macOS records NFD) validates its
+natural in-scope spellings against the same folded frame instead of failing
+byte-equality; the on-disk spellings themselves are untouched.
+
 Optional fields:
 
 - `worktree_branch`: exact branch to create.
@@ -440,13 +481,30 @@ spawn. The held-name refusal says what the holder's status can actually do: a
 running child can be waited out or cancelled; an interrupted one is already
 terminal (its completion event has fired and `cancel` only touches Running
 children), so the advice is `action=followup` if its checkpoint still allows,
-or a different name. A ref that is no child's session name still reaches its
-record by exact `agent_id`; when the string is also a session name — unnamed
-children take `session_name = id`, and `name` accepts id-shaped strings —
-the name rules above win. A record hydrated from an older boot is history for
-resolution too — it never outranks the current boot's child — so the
-bare-name "ambiguous" refusal only guards state spawn cannot produce; use the
-`agent_id` if you ever meet it.
+or a different name.
+
+Target selectors distinguish stable identity from reusable names. `agent_id`
+(and the parse-accepted `id` alias) selects the exact issued id first, even
+when a newer child uses that string as its name. A foreign or missing issued
+id fails closed; `agent_` followed by exactly eight hexadecimal digits is the issued-id shape and never falls back to
+a name after cleanup. To select a reused name, use `name` (or `session_name`),
+including when the name looks like an id. An explicit id takes precedence if
+both selectors are supplied. Unambiguous ordinary names in the legacy id
+field remain accepted. Saved calls that used an id-shaped `agent_id` as a
+name must migrate to `name`; returned receipt ids and captured wait sets keep
+their original object and never follow a retry. For example, if B is named
+after A's returned id, `agent_id=A.id` still selects A while `name=A.id`
+selects B, subject to B's own session and hierarchy permissions.
+
+The continuation field `resume_from` accepts an issued id or an unambiguous
+ordinary session name. It has no explicit name selector: if a source's name
+looks like an issued id, pass that source's actual receipt id in `resume_from`.
+The `name` field on `action=start` names the new child, not the continuation
+source. A missing issued id never falls back to a same-named source.
+
+Records hydrated from an older boot remain history for name resolution: they
+never outrank the current boot's live child. Two live holders of one name are
+ambiguous; use the exact `agent_id` rather than guessing a holder.
 
 `type=general` and `type=implement` are write-capable and claim the whole
 parent workspace unless `write_roots` narrows them, so several started
