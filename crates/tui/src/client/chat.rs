@@ -17,9 +17,8 @@ use tokio::time::timeout as tokio_timeout;
 use crate::config::{
     TOGETHER_INKLING_MODEL, is_exact_direct_moonshot_k3_route, is_exact_kimi_code_k3_route,
     is_exact_xai_grok_4_6_route, is_exact_zai_chat_route, is_exact_zai_forced_thinking_route,
-    is_exact_zai_tiered_effort_route, is_kimi_code_membership_model,
-    minimax_m3_route_uses_max_completion_tokens, moonshot_base_url_is_exact_kimi_code,
-    wire_model_for_provider_route,
+    is_exact_zai_tiered_effort_route, minimax_m3_route_uses_max_completion_tokens,
+    moonshot_base_url_is_exact_kimi_code, wire_model_for_provider_route,
 };
 
 // The bounded response-header wait (`stream_open_timeout`) and its env
@@ -940,21 +939,24 @@ fn apply_direct_moonshot_k3_fixed_sampling(
     }
 }
 
-/// Kimi Code's documented membership models own their sampling behavior.
-/// Strip generic controls only on the exact first-party membership route;
-/// custom gateways and unknown model ids retain their own wire contract.
+/// Kimi Code's membership endpoint owns the sampling behavior of every model
+/// it serves. Strip generic controls from the exact first-party route
+/// regardless of model id; custom gateways and the direct platform route
+/// keep their own wire contract.
+///
+/// The strip is deliberately route-scoped, not roster-scoped: a 2026-11-04
+/// live probe of this endpoint (GET /models plus per-model requests) showed
+/// all six served ids — `k3`, `k3-256k`, `k3.1-pro`, `k3.1-pro-highspeed`,
+/// `kimi-for-coding`, `kimi-for-coding-highspeed` — reject anything but the
+/// fixed values with a 400 ("invalid temperature: only 1 is allowed for this
+/// model" / "invalid top_p: only 0.95 is allowed for this model"). The
+/// roster has already lagged behind this endpoint three times (`k3-256k`,
+/// `kimi-for-coding-highspeed`, then both `k3.1-pro` spellings), so any
+/// model id the endpoint serves next is covered without a code change.
 /// Source: <https://www.kimi.com/code/docs/en/third-party-tools/codex.html>
-/// (verified 2026-08-26).
-fn apply_kimi_code_fixed_sampling(
-    body: &mut Value,
-    provider: ApiProvider,
-    base_url: &str,
-    model: &str,
-) {
-    if provider != ApiProvider::Moonshot
-        || !moonshot_base_url_is_exact_kimi_code(base_url)
-        || !is_kimi_code_membership_model(model)
-    {
+/// (verified 2026-08-26; probe verified 2026-11-04).
+fn apply_kimi_code_fixed_sampling(body: &mut Value, provider: ApiProvider, base_url: &str) {
+    if provider != ApiProvider::Moonshot || !moonshot_base_url_is_exact_kimi_code(base_url) {
         return;
     }
     if let Some(object) = body.as_object_mut() {
@@ -1244,7 +1246,7 @@ pub(crate) fn build_chat_wire_body(
         request.reasoning_effort.as_deref(),
     );
     apply_direct_moonshot_k3_fixed_sampling(&mut body, provider, base_url, &model);
-    apply_kimi_code_fixed_sampling(&mut body, provider, base_url, &model);
+    apply_kimi_code_fixed_sampling(&mut body, provider, base_url);
 
     // Bulletproof final sanitizer: walk the wire payload and force
     // `reasoning_content` onto any assistant message that has tool_calls
@@ -6506,7 +6508,6 @@ mod alias_thinking_detection_tests {
             &mut body,
             ApiProvider::Moonshot,
             crate::config::DEFAULT_KIMI_CODE_BASE_URL,
-            crate::config::KIMI_CODE_K3_256K_MODEL,
         );
 
         assert_eq!(
@@ -6519,28 +6520,106 @@ mod alias_thinking_detection_tests {
     }
 
     #[test]
+    fn kimi_code_fixed_sampling_covers_every_model_id_on_the_route() {
+        // 2026-11-04 live probe (GET /models + per-model requests): all six
+        // ids served by https://api.kimi.com/coding/v1 answer
+        // "invalid temperature: only 1 is allowed for this model" /
+        // "invalid top_p: only 0.95 is allowed for this model" with a 400.
+        // The roster has lagged this endpoint three times already
+        // (`k3-256k`, `kimi-for-coding-highspeed`, both `k3.1-pro`
+        // spellings), so the strip must not consult it — an id the endpoint
+        // serves next is covered without a code change.
+        for model in [
+            "k3",
+            "k3-256k",
+            "k3.1-pro",
+            "k3.1-pro-highspeed",
+            "kimi-for-coding",
+            "kimi-for-coding-highspeed",
+            // An id the endpoint does not serve (yet) sits on the same route
+            // and inherits the same route contract.
+            "k3-next-unknown",
+        ] {
+            let request = sampling_probe_request(model);
+            let body = crate::client::chat::build_chat_wire_body(
+                &request,
+                ApiProvider::Moonshot,
+                crate::config::DEFAULT_KIMI_CODE_BASE_URL,
+                false,
+            )
+            .expect("Kimi Code wire body");
+            assert!(
+                body.body.get("temperature").is_none(),
+                "{model}: {}",
+                body.body
+            );
+            assert!(body.body.get("top_p").is_none(), "{model}: {}", body.body);
+            assert_eq!(body.body["model"], json!(model), "{model}");
+        }
+    }
+
+    fn sampling_probe_request(model: &str) -> crate::models::MessageRequest {
+        crate::models::MessageRequest {
+            model: model.to_string(),
+            messages: vec![crate::models::Message {
+                role: crate::models::Role::User,
+                content: vec![crate::models::ContentBlock::Text {
+                    text: "probe sampling".to_string(),
+                    cache_control: None,
+                }],
+            }],
+            max_tokens: 64,
+            system: None,
+            tools: None,
+            tool_choice: None,
+            metadata: None,
+            thinking: None,
+            reasoning_effort: None,
+            stream: None,
+            temperature: Some(0.3),
+            top_p: Some(0.8),
+        }
+    }
+
+    #[test]
     fn kimi_code_fixed_sampling_does_not_leak_to_neighbor_routes() {
         for (provider, base_url, model) in [
+            // The direct platform route keeps its own model-scoped strip
+            // (only `kimi-k3`), never the membership route's.
             (
                 ApiProvider::Moonshot,
                 crate::config::DEFAULT_MOONSHOT_BASE_URL,
                 crate::config::KIMI_CODE_K3_256K_MODEL,
             ),
+            // A compatible gateway on a non-first-party base_url keeps its
+            // own wire contract even when it claims a membership model id.
+            (
+                ApiProvider::Moonshot,
+                "https://gateway.example/v1",
+                crate::config::KIMI_CODE_K3_256K_MODEL,
+            ),
+            // A different provider identity never inherits Moonshot shaping,
+            // even on the exact membership host.
             (
                 ApiProvider::Openrouter,
                 crate::config::DEFAULT_KIMI_CODE_BASE_URL,
                 crate::config::KIMI_CODE_K3_256K_MODEL,
             ),
-            (
-                ApiProvider::Moonshot,
-                crate::config::DEFAULT_KIMI_CODE_BASE_URL,
-                "k3-256k-preview",
-            ),
         ] {
-            let mut body = json!({ "temperature": 0.3, "top_p": 0.8 });
-            apply_kimi_code_fixed_sampling(&mut body, provider, base_url, model);
-            assert_eq!(body["temperature"], json!(0.3));
-            assert_eq!(body["top_p"], json!(0.8));
+            let request = sampling_probe_request(model);
+            let body =
+                crate::client::chat::build_chat_wire_body(&request, provider, base_url, false)
+                    .expect("neighbor wire body");
+            assert!(
+                body.body.get("temperature").is_some(),
+                "{base_url} {model}: generic sampling must survive: {}",
+                body.body
+            );
+            assert!(
+                body.body.get("top_p").is_some(),
+                "{base_url} {model}: generic sampling must survive: {}",
+                body.body
+            );
         }
     }
 
