@@ -581,7 +581,33 @@ fn deleted_saved_workspace_reports_path_and_recovery_before_spawn() {
     let message = error.to_string();
     assert!(message.contains("saved session workspace is unavailable"));
     assert!(message.contains(&stale.display().to_string()));
-    assert!(message.contains("resume/fork"));
+    assert!(message.contains("Recreate the directory"));
+    assert!(message.contains("/workspace"));
+    assert!(
+        !message.contains("resume/fork"),
+        "resume re-anchors to the saved (missing) workspace and cannot recover"
+    );
+}
+
+#[test]
+fn explicit_non_directory_working_dir_gets_a_direct_fix_hint() {
+    let workspace = tempdir().expect("workspace");
+    let file = workspace.path().join("not-a-dir");
+    std::fs::write(&file, b"occupant").expect("write occupant file");
+    let mut manager = ShellManager::new(workspace.path().to_path_buf());
+
+    let error = execute_shell(
+        &mut manager,
+        "echo should-not-run",
+        file.to_str(),
+        1_000,
+        false,
+    )
+    .expect_err("non-directory explicit cwd must fail before shell spawn");
+    let message = error.to_string();
+    assert!(message.contains("requested working directory is not a directory"));
+    assert!(message.contains("Use a directory that exists"));
+    assert!(!message.contains("saved session workspace"));
 }
 
 #[test]

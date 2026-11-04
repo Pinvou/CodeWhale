@@ -124,24 +124,30 @@ pub(crate) fn abort_pending_persistent_process_groups_for_exit() {
 
 fn validate_shell_working_dir(path: &Path, inherited_session_workspace: bool) -> Result<()> {
     let metadata = std::fs::metadata(path).with_context(|| {
-        let source = if inherited_session_workspace {
-            "saved session workspace"
+        if inherited_session_workspace {
+            // Resume re-anchors to this same saved directory and a CLI fork
+            // copies it, so neither recovers a missing workspace; only
+            // recreating the directory or switching (in-app) does.
+            format!(
+                "saved session workspace is unavailable: {}. Recreate the directory to continue here, or continue the session from a different workspace (/workspace <path>, or /fork after switching)",
+                path.display()
+            )
         } else {
-            "requested working directory"
-        };
-        format!(
-            "{source} is unavailable: {}. Restore or remap that directory, or resume/fork the session from an existing workspace",
-            path.display()
-        )
+            format!(
+                "requested working directory is unavailable: {}. Recreate it, or use a directory that exists",
+                path.display()
+            )
+        }
     })?;
     if !metadata.is_dir() {
-        let source = if inherited_session_workspace {
-            "saved session workspace"
-        } else {
-            "requested working directory"
-        };
+        if inherited_session_workspace {
+            return Err(anyhow!(
+                "saved session workspace is not a directory: {}. Restore it as a directory to continue here, or continue the session from a different workspace (/workspace <path>, or /fork after switching)",
+                path.display()
+            ));
+        }
         return Err(anyhow!(
-            "{source} is not a directory: {}. Resume/fork the session from an existing workspace",
+            "requested working directory is not a directory: {}. Use a directory that exists",
             path.display()
         ));
     }
