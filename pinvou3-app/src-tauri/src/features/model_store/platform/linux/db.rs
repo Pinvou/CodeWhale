@@ -1641,6 +1641,17 @@ pub fn get_store_model_route_fields(
 /// 按模型名查商店记录。`case_insensitive` 供设备管理的 Ollama 有效删除名臂：
 /// daemon 标签按小写归一，BINARY 精确匹配会漏掉大小写变体别名（第四轮 P3）；
 /// name 臂保持精确匹配（显示名契约）。
+/// 全量列举在册模型（设备管理删除守卫用）：任意状态都算"安装引用"——
+/// failed 卡片的半成品权重同样不该被另一条登记记录连带删除（宁可多保护）。
+pub fn list_store_models() -> rusqlite::Result<Vec<StoreModelRecord>> {
+    let conn = connect()?;
+    let mut stmt = conn.prepare("SELECT * FROM store_models ORDER BY card_id")?;
+    let rows = stmt
+        .query_map([], StoreModelRecord::from_row)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
 pub fn get_store_model_by_name(
     model_name: &str,
     case_insensitive: bool,
