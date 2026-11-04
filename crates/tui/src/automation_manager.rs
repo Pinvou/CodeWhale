@@ -2388,6 +2388,7 @@ mod tests {
             allow_shell: true,
             trust_mode: true,
             execution_limits: crate::task_manager::TaskExecutionLimits::default(),
+            human_waits_answerable: false,
         }
     }
 
