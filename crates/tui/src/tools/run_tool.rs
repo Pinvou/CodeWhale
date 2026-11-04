@@ -121,7 +121,7 @@ impl ToolSpec for RunTool {
                 },
                 "background": {
                     "type": "boolean",
-                    "description": "Start verifier gates as background jobs and return immediately with each gate's task id (action=verifiers). Use for long build/test/lint gates; completion is tracked in task/status state, and task_shell_wait is only for early output, final output, or true dependency barriers."
+                    "description": "Start verifier gates as background jobs and return immediately with a task id per gate, null when a gate is skipped or fails to start (action=verifiers). Use for long build/test/lint gates; completion is tracked in task/status state, and task_shell_wait is only for early output, final output, or true dependency barriers."
                 }
             },
             "required": ["action"]
