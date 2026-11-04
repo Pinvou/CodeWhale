@@ -2260,21 +2260,6 @@ fn validate_mfjs_expanded_depth(
             )?;
         }
     }
-    // Nested allOf and tuple prefixItems (Kimi Code route): their branch
-    // schemas are ordinary schema positions the depth walker must visit.
-    for composition_key in ["allOf", "prefixItems"] {
-        if let Some(branches) = obj.get(composition_key).and_then(Value::as_array) {
-            for branch in branches {
-                validate_mfjs_expanded_depth(
-                    branch,
-                    document,
-                    property_depth,
-                    visiting_refs,
-                    structural_depth + 1,
-                )?;
-            }
-        }
-    }
     Ok(())
 }
 
