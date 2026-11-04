@@ -1220,6 +1220,69 @@ pub enum KimiParameterSchemaError {
     InvalidRange,
 }
 
+/// Which Moonshot wire contract a parameters schema is being normalized for.
+///
+/// The MFJS keyword whitelist is route-sensitive: the Kimi Code membership
+/// endpoint accepts a set of extra keywords that the platform endpoints have
+/// never been probed for, so platform traffic keeps the conservative
+/// whitelist while the exact coding route gets the live-verified additions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KimiParameterRoute {
+    /// Moonshot platform endpoints (`api.moonshot.cn` / `api.moonshot.ai`) and
+    /// every non-exact Moonshot route: the conservative MFJS keyword
+    /// whitelist, unchanged. The walle specification does not list the extra
+    /// keywords for these endpoints and no live probe backs them, so an
+    /// unsupported keyword there still risks a whole-request 400 — the
+    /// asymmetry that keeps this route strict.
+    ///
+    /// "Conservative whitelist, unchanged" refers to the MFJS keyword
+    /// allow-list, not to this route's whole normalization behavior. Relative
+    /// to the pre-2026-11 baseline (`f1eb10efc`) the platform route carries
+    /// two intentional behavior changes, both shipped for the Kimi Code route
+    /// first and applied here because they are route-independent in code:
+    ///
+    /// 1. Root-level object unions pass through: an `anyOf` (or a promoted
+    ///    `oneOf`) whose every branch declares `type: "object"` is no longer
+    ///    flattened into one merged object, so per-branch `required` groups
+    ///    survive. Backed by the walle MFJS specification listing `anyOf` as
+    ///    a first-class applicator (plus the 2026-11-04 live probe of the
+    ///    coding endpoint).
+    /// 2. Array termination without `items`: an array required to be
+    ///    non-empty (`minItems >= 1`) with `items` absent now counts as
+    ///    terminating instead of failing with `InvalidSchemaNode`, so the
+    ///    tool ships rather than being excluded. Ported from upstream
+    ///    codewhale-hq `e3e563204` (#7015 review follow-up).
+    ///
+    /// Everything else is baseline-consistent: the keyword whitelist itself,
+    /// nested `allOf` failing closed here (open only on [`KimiParameterRoute::KimiCode`]),
+    /// and per-tool degradation for schemas that cannot pass validation.
+    Platform,
+    /// The exact first-party Kimi Code endpoint
+    /// (`https://api.kimi.com/coding/v1`): the conservative whitelist plus the
+    /// keywords a 2026-11-04 live probe verified end to end (200, model
+    /// honors the constraints): `pattern`, `format`, `$schema`, `prefixItems`,
+    /// `exclusiveMinimum`, `exclusiveMaximum`, and nested `allOf` (accepted by
+    /// the server; the documented position is that unstated keywords are
+    /// simply not guaranteed stable, so their semantics stay the schema
+    /// author's responsibility).
+    ///
+    /// Route selection deliberately keeps matching only the China host
+    /// (`api.kimi.com`) even though the sampling strip also covers the
+    /// overseas `api.kimi.ai/coding/v1` spelling: the whitelist relaxation is
+    /// backed by a probe of the China endpoint only, and `.ai` has no probe
+    /// evidence of its own, so it stays on [`KimiParameterRoute::Platform`]'s
+    /// conservative tier until an independent probe or the predicate work in
+    /// in-flight PR #137 widens `is_exact_kimi_code_route`.
+    KimiCode,
+}
+
+impl KimiParameterRoute {
+    /// Whether this route admits the live-verified keyword extensions.
+    fn is_relaxed(self) -> bool {
+        matches!(self, KimiParameterRoute::KimiCode)
+    }
+}
+
 /// Normalize a complete Kimi / Moonshot `function.parameters` object.
 ///
 /// Function parameters have an additional MFJS constraint: the root must end
