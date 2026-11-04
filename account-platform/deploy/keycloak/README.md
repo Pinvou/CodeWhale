@@ -149,7 +149,7 @@ environments from privileged observers or constitute real realm acceptance.
 | `PORTAL_PUBLIC_URL` | Required external Portal URL; the sole callback is this URL plus `/auth/callback` |
 | `PORTAL_SESSION_HANDOFF` | `true` to provision the separate exchange client; default `false` |
 | `PORTAL_HANDOFF_OIDC_CLIENT_ID` | Confidential exchange client, default `pinvou-portal-handoff` |
-| `PORTAL_HANDOFF_OIDC_CLIENT_SECRET_FILE` | Required mounted single-value secret when handoff is enabled, 32–4096 printable bytes |
+| `PORTAL_HANDOFF_OIDC_CLIENT_SECRET_FILE` | Required mounted single-value printable ASCII secret when handoff is enabled, at most 4096 bytes before trimming and at least 32 bytes after removing leading/trailing ASCII spaces, matching Portal within this supported alphabet |
 
 The ordinary Portal uses authorization code and PKCE S256 with no direct grant,
 implicit grant, service account, offline access or token exchange. The desktop

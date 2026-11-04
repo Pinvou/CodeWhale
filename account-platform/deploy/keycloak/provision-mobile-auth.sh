@@ -69,7 +69,10 @@ if [ "$HANDOFF_ENABLED" = true ]; then
   : "${PORTAL_HANDOFF_OIDC_CLIENT_SECRET_FILE:?set the handoff secret file}"
   HANDOFF_SECRET=$(cat "$PORTAL_HANDOFF_OIDC_CLIENT_SECRET_FILE")
   count=$(printf '%s' "$HANDOFF_SECRET" | wc -c)
-  if [ "$count" -lt 32 ] || [ "$count" -gt 4096 ] || [ "$(printf '%s' "$HANDOFF_SECRET" | LC_ALL=C tr -d '[:print:]' | wc -c)" -ne 0 ]; then
+  non_printable_count=$(printf '%s' "$HANDOFF_SECRET" | LC_ALL=C tr -d '[:print:]' | wc -c)
+  # On printable ASCII input, trimming spaces matches Portal's TrimSpace.
+  HANDOFF_SECRET=$(printf '%s' "$HANDOFF_SECRET" | sed 's/^ *//; s/ *$//')
+  if [ "$count" -gt 4096 ] || [ "$(printf '%s' "$HANDOFF_SECRET" | wc -c)" -lt 32 ] || [ "$non_printable_count" -ne 0 ]; then
     printf 'Handoff secret must be one value of 32 to 4096 bytes\n' >&2; exit 1
   fi
 fi

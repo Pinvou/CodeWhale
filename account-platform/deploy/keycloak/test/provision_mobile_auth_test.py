@@ -77,7 +77,7 @@ if [ "$1" = get ]; then
     clients)
       printf 'desktop-id,%s\nrealm-management-id,realm-management\n' "${CONTROL_DESKTOP_CLIENT:-desktop-test}"
       if [ "${CONTROL_EXISTING:-false}" = true ]; then
-        printf 'provisioner-id,provisioner-test\nportal-id,%s\nhandoff-id,handoff-test\n' "${CONTROL_PORTAL_CLIENT:-portal-test}"
+        printf 'provisioner-id,provisioner-test\nportal-id,%s\nhandoff-id,%s\n' "${CONTROL_PORTAL_CLIENT:-portal-test}" "${CONTROL_HANDOFF_CLIENT:-handoff-test}"
       fi ;;
     */service-account-user) printf 'service-user-id\n' ;;
     authentication/flows) printf 'direct-flow-id,pinvou-mobile-direct-grant\nbrowser-flow-id,pinvou-browser\n' ;;
@@ -95,8 +95,8 @@ case " $* " in
     if [ "$1" = create ] && [ "$2" = clients ]; then
       case "$body" in
         *'"clientId":"provisioner-test"'*) printf 'provisioner-id\n' ;;
-        *'"clientId":"portal-test"'*) printf 'portal-id\n' ;;
-        *'"clientId":"handoff-test"'*) printf 'handoff-id\n' ;;
+        *"\"clientId\":\"${CONTROL_PORTAL_CLIENT:-portal-test}\""*) printf 'portal-id\n' ;;
+        *"\"clientId\":\"${CONTROL_HANDOFF_CLIENT:-handoff-test}\""*) printf 'handoff-id\n' ;;
         *'"publicClient":true'*) printf 'unexpected-public-client-id\n' ;;
         *) exit 1 ;;
       esac
@@ -107,7 +107,8 @@ esac
 
 @unittest.skipUnless(BASH, "A local POSIX shell is required")
 class ProvisioningContractTest(unittest.TestCase):
-    def run_producer(self, changes=None, *, existing=False, role_failure=False, truststore=False, trace=False):
+    def run_producer(self, changes=None, *, existing=False, role_failure=False, truststore=False, trace=False,
+                     handoff_secret="controlled-handoff-value-for-local-tests"):
         with tempfile.TemporaryDirectory(prefix="pinvou-keycloak-controls-") as directory:
             root = Path(directory)
             fake = root / "kcadm.sh"
@@ -121,7 +122,7 @@ class ProvisioningContractTest(unittest.TestCase):
             clone = root / "provision.sh"
             clone.write_text(source.replace(marker, f'KCADM_BINARY="{fake.as_posix()}"'), encoding="utf-8", newline="\n")
             handoff = root / "handoff-secret"
-            handoff.write_text("controlled-handoff-value-for-local-tests", encoding="utf-8")
+            handoff.write_text(handoff_secret, encoding="utf-8", newline="")
             env = dict(os.environ)
             for key in list(env):
                 if key.startswith(("KEYCLOAK_", "KC_BOOTSTRAP_", "PORTAL_", "PINVOU_OIDC_")):
@@ -281,6 +282,48 @@ class ProvisioningContractTest(unittest.TestCase):
         self.assertNotIn("create clients ", args)
         self.assertIn("update clients/portal-id ", args)
         self.assertIn("protocol-mappers/models/phone-id", args)
+
+    def test_handoff_secret_ascii_padding_matches_portal_for_create_and_update(self):
+        secret = 'controlled internal "quote" \\ value for handoff'
+        for existing in (False, True):
+            for client in ("handoff-test", ".Handoff_Release-V2"):
+                with self.subTest(existing=existing, client=client):
+                    result, args, bodies = self.run_producer(
+                        {"PORTAL_HANDOFF_OIDC_CLIENT_ID": client, "CONTROL_HANDOFF_CLIENT": client},
+                        existing=existing, trace=True, handoff_secret="  " + secret + "   ")
+                    self.assertEqual(0, result.returncode, result.stderr.decode())
+                    handoff = next(body for body in bodies if body.get("clientId") == client)
+                    self.assertEqual(secret, handoff["secret"])
+                    self.assertNotIn(secret, args)
+                    self.assertNotIn(secret.encode(), result.stdout + result.stderr)
+
+    def test_handoff_secret_nonprintable_input_is_rejected_before_trimming(self):
+        suffixes = ("\n  ", "\n \n ", "\r  ", "\t  ", "\u00a0  ")
+        for suffix in suffixes:
+            with self.subTest(suffix_codepoints=[ord(character) for character in suffix]):
+                result, args, bodies = self.run_producer(handoff_secret="x" * 32 + suffix)
+                self.assertNotEqual(0, result.returncode)
+                self.assertEqual("", args)
+                self.assertEqual([], bodies)
+                self.assertNotIn(("x" * 32).encode(), result.stdout + result.stderr)
+
+    def test_handoff_secret_normalized_length_and_raw_upper_bound(self):
+        accepted = ("x" * 32, "x" * 4096, " " + "x" * 32 + " ", " " + "x" * 4094 + " ")
+        for raw in accepted:
+            with self.subTest(raw_length=len(raw), normalized_length=len(raw.strip(" "))):
+                result, args, bodies = self.run_producer(handoff_secret=raw)
+                self.assertEqual(0, result.returncode, result.stderr.decode())
+                handoff = next(body for body in bodies if body.get("clientId") == "handoff-test")
+                self.assertEqual(raw.strip(" "), handoff["secret"])
+                self.assertNotIn(handoff["secret"], args)
+                self.assertNotIn(handoff["secret"].encode(), result.stdout + result.stderr)
+        for raw in (" " * 32, " " * 4096, " " + "x" * 31 + " ", "x" * 4097, " " + "x" * 4096 + " "):
+            with self.subTest(raw_length=len(raw), normalized_length=len(raw.strip(" "))):
+                result, args, bodies = self.run_producer(handoff_secret=raw)
+                self.assertNotEqual(0, result.returncode)
+                self.assertEqual("", args)
+                self.assertEqual([], bodies)
+                self.assertNotIn(raw.encode(), result.stdout + result.stderr)
 
     def test_handoff_disabled_does_not_provision_a_secret_client(self):
         result, args, bodies = self.run_producer({"PORTAL_SESSION_HANDOFF": "false"})
