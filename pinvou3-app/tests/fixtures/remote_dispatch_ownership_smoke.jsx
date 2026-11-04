@@ -23,7 +23,7 @@ function makeSession(id, leaseEpoch = 1, revision = 1, generation = 'generation-
     localSessionId: id, status: 'connected', sessionMode: 'chat', sessionRef: `ref-${id}`,
     connectionId: 'connection-1', controllerLeaseId: `lease-${leaseEpoch}`, leaseEpoch,
     relayEpoch: 'relay-1', generation, mappingConfirmed: true,
-    capabilityRevision: revision, capabilityStatus: 'ready', temporaryModelAvailable: false,
+    capabilityRevision: revision, capabilityStatus: 'ready', capabilityError: null, temporaryModelAvailable: false,
   };
   const previous = [...items.values()].find(item => item.id === id);
   const handle = previous?.handle || { taskId: `task-${id}-${leaseEpoch}`, clientRequestId: `request-${id}-${leaseEpoch}`,
@@ -125,6 +125,11 @@ function App() {
   });
   fixture.current = selected;
   fixture.select = (...args) => setSelected(session(...args));
+  fixture.selectExpired = (...args) => {
+    const expired = session(...args);
+    expired.capabilities.expiresAtMs = Date.now() - 1;
+    setSelected(expired);
+  };
   fixture.expire = () => {
     // Suspend the timer's scheduling while moving the wall clock past expiry.
     // The next user interaction rerenders the real ChatView with an old cache.

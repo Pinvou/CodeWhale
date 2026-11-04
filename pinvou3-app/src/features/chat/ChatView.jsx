@@ -3153,13 +3153,17 @@ const openChatExternalUrl = (url) => {
           .catch((failure) => setRemoteCapabilityError(String((failure && failure.code) || 'errorGeneric')))
           .finally(() => setRemoteCapabilityBusy(false));
       }, [remoteHandshakeBinding, remoteCapabilityBusy, remoteConnection]);
+      // A background handshake can remain ready/null throughout recovery.
+      // Clear its old read error only after a fresh projection matches the
+      // current complete owner/revision; a dropped or expired read is not recovery.
+      const remoteCapabilityRecoveryIdentity = remoteCapabilityFresh ? remoteSendIdentity : '';
       useEffect(() => {
         if (remoteConnection?.capabilityError) {
           setRemoteCapabilityError(String(remoteConnection.capabilityError));
-        } else if (remoteConnection?.capabilityStatus === 'ready') {
+        } else if (remoteConnection?.capabilityStatus === 'ready' && remoteCapabilityRecoveryIdentity) {
           setRemoteCapabilityError(null);
         }
-      }, [remoteConnection?.capabilityError, remoteConnection?.capabilityStatus]);
+      }, [remoteConnection?.capabilityError, remoteConnection?.capabilityStatus, remoteCapabilityRecoveryIdentity]);
       const remoteCapabilityMessage = !scopedRemoteConnection ? null
         : remoteCapabilityError === 'capability_snapshot_timeout'
           ? t.controllerConnection.remoteCapabilityTimeout
