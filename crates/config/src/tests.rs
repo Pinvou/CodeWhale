@@ -2521,6 +2521,80 @@ fn moonshot_kimi_code_smoke_config_set_then_resolve() -> Result<()> {
     Ok(())
 }
 
+/// The loose membership recognition (default-model fallback, official-host
+/// scoping) must stay a superset of the exact route gate: both membership
+/// hosts, case- and trailing-slash-insensitively, while lookalike hosts,
+/// neighboring paths, and scheme downgrades stay outside so they cannot
+/// inherit membership semantics.
+#[test]
+fn kimi_code_loose_route_recognition_covers_both_membership_hosts() {
+    // The exact membership endpoint on both hosts, recognized by the loose
+    // gate, official-host scoping, and the exact gate alike.
+    for base_url in [
+        DEFAULT_KIMI_CODE_BASE_URL,
+        "https://api.kimi.com/coding/v1/",
+        "https://api.kimi.ai/coding/v1",
+        "https://api.kimi.ai/coding/v1/",
+    ] {
+        assert!(
+            crate::moonshot_base_url_uses_kimi_code(base_url),
+            "{base_url} must be recognized as a Kimi Code membership route"
+        );
+        assert!(
+            crate::provider_base_url_is_official(ProviderKind::Moonshot, base_url),
+            "{base_url} must be an official Moonshot route"
+        );
+        assert!(
+            crate::provider::is_exact_kimi_code_route(ProviderKind::Moonshot, base_url),
+            "{base_url} must stay an exact Kimi Code membership route"
+        );
+    }
+    // Loose recognition and official-host scoping are case- and
+    // trailing-slash-insensitive over neighboring Kimi-hosted /coding
+    // paths, while the exact gate does not widen with it (an uppercase path
+    // is not the route identifier).
+    for base_url in [
+        "https://api.kimi.com/coding",
+        "https://api.kimi.com/coding/",
+        "https://api.kimi.ai/coding",
+        "HTTPS://API.KIMI.AI/CODING/V1",
+    ] {
+        assert!(
+            crate::moonshot_base_url_uses_kimi_code(base_url),
+            "{base_url} must stay inside the loose membership recognition"
+        );
+        assert!(
+            crate::provider_base_url_is_official(ProviderKind::Moonshot, base_url),
+            "{base_url} must stay an official Moonshot route"
+        );
+        assert!(
+            !crate::provider::is_exact_kimi_code_route(ProviderKind::Moonshot, base_url),
+            "{base_url} must not become an exact membership route"
+        );
+    }
+    for lookalike in [
+        "https://api.kimi.com/v1",
+        "https://api.kimi.ai/v1",
+        "https://kimi.com/coding/v1",
+        "http://api.kimi.ai/coding/v1",
+        "https://api.example.com/coding/v1",
+    ] {
+        assert!(
+            !crate::moonshot_base_url_uses_kimi_code(lookalike),
+            "{lookalike} must not be recognized as a Kimi Code membership route"
+        );
+    }
+    // The direct platform stays official while remaining outside the
+    // membership family.
+    assert!(crate::provider_base_url_is_official(
+        ProviderKind::Moonshot,
+        "https://api.moonshot.ai/v1"
+    ));
+    assert!(!crate::moonshot_base_url_uses_kimi_code(
+        "https://api.moonshot.ai/v1"
+    ));
+}
+
 #[test]
 fn moonshot_provider_config_values_round_trip() -> Result<()> {
     let mut config = ConfigToml::default();
