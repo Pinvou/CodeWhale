@@ -18,8 +18,8 @@ use crate::config::{
     TOGETHER_INKLING_MODEL, is_exact_direct_moonshot_k3_route, is_exact_kimi_code_k3_route,
     is_exact_xai_grok_4_6_route, is_exact_zai_chat_route, is_exact_zai_forced_thinking_route,
     is_exact_zai_tiered_effort_route, is_kimi_code_membership_model,
-    minimax_m3_route_uses_max_completion_tokens, moonshot_base_url_is_exact_kimi_code,
-    wire_model_for_provider_route,
+    minimax_m3_route_uses_max_completion_tokens, moonshot_base_url_is_exact_direct_platform,
+    moonshot_base_url_is_exact_kimi_code, wire_model_for_provider_route,
 };
 
 // The bounded response-header wait (`stream_open_timeout`) and its env
@@ -3482,12 +3482,26 @@ fn should_replay_reasoning_content_for_provider(
     should_replay_reasoning_content_for_provider_on_route(provider, "", model, effort)
 }
 
+/// Whether `model` is one of the K3.1 family spellings across the Kimi Code
+/// and direct-platform routes, case-insensitive with insignificant padding.
+fn is_kimi_k31_model_spelling(model: &str) -> bool {
+    matches!(
+        model.trim().to_ascii_lowercase().as_str(),
+        "kimi-k3.1-pro" | "kimi-k3.1-pro-highspeed" | "k3.1-pro" | "k3.1-pro-highspeed"
+    )
+}
+
 /// Route-aware reasoning replay policy.
 ///
 /// Keep the bare K3 identifier out of the global model catalog: direct
 /// Moonshot and arbitrary OpenAI-compatible routes can also expose a `k3`
 /// model name, but only Kimi Code's exact membership-plan endpoint has this
 /// replay contract.
+///
+/// The K3.1 family spellings (`kimi-k3.1-pro[-highspeed]` on the direct
+/// platform, `k3.1-pro[-highspeed]` on Kimi Code) inherit the K3 replay
+/// contract verbatim through their own arm below — always-reasoning, so
+/// like bare K3 the arm precedes the effort check.
 fn should_replay_reasoning_content_for_provider_on_route(
     provider: ApiProvider,
     base_url: &str,
@@ -3501,6 +3515,24 @@ fn should_replay_reasoning_content_for_provider_on_route(
         || is_exact_kimi_code_k3_route(provider, base_url, model)
         || (is_exact_mistral_chat_route(provider, base_url)
             && mistral_model_has_native_reasoning(model))
+    {
+        return true;
+    }
+
+    // The K3.1 spellings inherit the K3 contract verbatim (models-overview:
+    // "参数约束也与 kimi-k3 完全一致"), including the replay rule — the API
+    // requires the assistant reasoning field on later tool turns and answers
+    // HTTP 400 when it is missing (Kimi Code error reference,
+    // missing-reasoning-content-field). The exact-K3 matchers only learn the
+    // bare k3 ids, so the K3.1 spellings carry their own arm here. The gate
+    // is deliberately narrower than extending the shared matchers, whose
+    // other consumers (effort shaping, route validation, pickers) carry
+    // different K3-only contracts. On the vendor's own routes only — custom
+    // Moonshot-compatible gateways keep their own dialect.
+    if provider == ApiProvider::Moonshot
+        && is_kimi_k31_model_spelling(model)
+        && (moonshot_base_url_is_exact_kimi_code(base_url)
+            || moonshot_base_url_is_exact_direct_platform(base_url))
     {
         return true;
     }
