@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import { createServer } from 'vite';
+import { createServer } from './helpers/vite-fixture.mjs';
 import react from '@vitejs/plugin-react';
-import * as puppeteer from 'puppeteer-core';
+import * as puppeteer from './helpers/puppeteer-fixture.mjs';
 const executablePath = process.env.F17_BROWSER_EXECUTABLE || process.env.CHROME || [
   'C:/Program Files/Google/Chrome/Application/chrome.exe',
   'C:/Program Files (x86)/Google/Chrome/Application/chrome.exe',

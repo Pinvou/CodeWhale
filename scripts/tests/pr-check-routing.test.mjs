@@ -113,6 +113,27 @@ function stepRun(job, name) {
   return body.join("\n");
 }
 
+function assertAccountFailurePolicy(job) {
+  assert.doesNotMatch(job, /secrets\./);
+  let mandatory = job;
+  // Only these reviewed, bounded transport steps are advisory. Remove their
+  // complete named blocks before applying the original job-wide failure ban;
+  // a test, cleanup, unnamed sibling or job-level exception remains forbidden.
+  for (const [name, id] of [
+    ["Financial parallel diagnostics", "financial_diagnostics_upload"],
+    ["Account test resource lifecycle receipts", "account_receipts_upload"],
+  ]) {
+    const diagnostic = namedStep(job, name);
+    assert.match(diagnostic, new RegExp(`^ {8}id: ${id}$`, "m"));
+    assert.match(diagnostic, /^ {8}uses: actions\/upload-artifact@v7$/m);
+    assert.match(diagnostic, /^ {8}timeout-minutes: 3$/m);
+    assert.match(diagnostic, /^ {8}continue-on-error: true$/m);
+    assert.doesNotMatch(diagnostic, /^ {8}(?:run|env):/m);
+    mandatory = mandatory.replace(diagnostic, "");
+  }
+  assert.doesNotMatch(mandatory, /continue-on-error:/);
+}
+
 
 
 const goStepName = "Test and vet all Account Platform Go modules";
@@ -138,7 +159,7 @@ function assertFiniteAuditPGSetup(job) {
   assert.equal(service[0].trimEnd(), [
     "    services:",
     "      audit-export-postgres:",
-    "        image: postgres:16-alpine",
+    "        image: mirror.gcr.io/library/postgres@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea",
     "        env:",
     "          POSTGRES_HOST_AUTH_METHOD: trust",
     "          POSTGRES_USER: postgres",
@@ -187,7 +208,7 @@ function assertFiniteAuditPGSetup(job) {
     "          --health-retries 12",
     ]),
   ].join("\n"));
-  assert.doesNotMatch(job, /secrets\.|continue-on-error:/);
+  assertAccountFailurePolicy(job);
   // Admit only read-only verification of this job's actual service metadata.
   // Every database consumer must use its identity-checked outputs, never a
   // fixed port or another job's endpoint on the shared runner host.
@@ -420,7 +441,25 @@ test("Account Platform changes cannot bypass the Go gate at any PR or queue stag
     assert.equal(result.status, expectedStatus, result.stderr);
     assert.equal(result.stdout, expectedOutput);
   }
-  assert.doesNotMatch(job, /secrets\.|continue-on-error:/);
+  assertAccountFailurePolicy(job);
+});
+
+test("diagnostic delivery cannot make Account tests or resource retirement advisory", () => {
+  const job = jobBlock("account-platform-test").replaceAll("\r\n", "\n");
+  assertAccountFailurePolicy(job);
+  for (const name of [goStepName, "Confirm Account test resource retirement"]) {
+    assert.throws(() => assertAccountFailurePolicy(job.replace(
+      `      - name: ${name}\n`, `      - name: ${name}\n        continue-on-error: true\n`,
+    )));
+  }
+  for (const [before, after] of [
+    ["        timeout-minutes: 3\n", ""],
+    ["        uses: actions/upload-artifact@v7", "        uses: actions/upload-artifact@main"],
+    ["    name: account-platform-test\n", "    name: account-platform-test\n    continue-on-error: true\n"],
+  ]) {
+    assert.ok(job.includes(before));
+    assert.throws(() => assertAccountFailurePolicy(job.replace(before, after)));
+  }
 });
 
 test("restored operator unit gates reject zero, skipped, missing and failed evidence without operations", () => {
@@ -498,6 +537,44 @@ test("Account Platform Node gate executes its contracts and rejects empty, faile
   }
 });
 
+test("offline render gate pins tool downloads, hashes and exported binaries", () => {
+  const job = jobBlock("account-platform-test");
+  const install = namedStep(job, "Install pinned offline-render tools");
+  assert.match(install, /helm-v3\.16\.4-linux-amd64\.tar\.gz/);
+  assert.match(install, /docker\/compose\/releases\/download\/v5\.4\.0\/docker-compose-linux-x86_64/);
+  assert.match(install, /prometheus\/releases\/download\/v3\.13\.5\/prometheus-3\.13\.5\.linux-amd64\.tar\.gz/);
+  assert.equal((install.match(/sha256sum --check --strict/g) ?? []).length, 3);
+  for (const variable of [
+    "PINVOU_TEST_KMS_HELM_BINARY",
+    "PINVOU_TEST_KMS_COMPOSE_BINARY",
+    "PINVOU_TEST_PROMTOOL_BINARY",
+  ]) {
+    assert.match(install, new RegExp(`${variable}=`));
+    assert.match(install, /GITHUB_ENV/);
+  }
+  const render = namedStep(job, "Account Platform rendered Prometheus rule scenarios");
+  assert.match(render, /PINVOU_TEST_KMS_HELM_BINARY/);
+  assert.match(render, /PINVOU_TEST_PROMTOOL_BINARY/);
+  const assertPinned = candidate => {
+    const step = namedStep(candidate, "Install pinned offline-render tools");
+    assert.equal((step.match(/sha256sum --check --strict/g) ?? []).length, 3);
+    for (const variable of ["PINVOU_TEST_KMS_HELM_BINARY", "PINVOU_TEST_KMS_COMPOSE_BINARY", "PINVOU_TEST_PROMTOOL_BINARY"]) {
+      assert.match(step, new RegExp(`${variable}=`));
+      assert.match(step, /GITHUB_ENV/);
+    }
+  };
+  assertPinned(job);
+  for (const candidate of [
+    job.replace(install, "", 1),
+    job.replace(install, install.replace("sha256sum --check --strict", "sha256sum --check", 1), 1),
+    job.replace(install, install.replace("PINVOU_TEST_KMS_COMPOSE_BINARY", "PINVOU_TEST_KMS_COMPOSE_BINARY_REMOVED", 1), 1),
+  ]) {
+    assert.throws(() => {
+      assertPinned(candidate);
+    });
+  }
+});
+
 test("Go gate executes test and vet for root and future nested modules, and fails on errors", () => {
   const job = jobBlock("account-platform-test");
   const run = stepRun(job, goStepName);
@@ -551,7 +628,7 @@ test("finite audit PostgreSQL exception rejects unsafe or unrelated service and 
     ['"127.0.0.1::5432"', '"0.0.0.0::5432"'],
     ['"127.0.0.1::5432"', '"127.0.0.1:5432:5432"'],
     ["          --rm\n", ""],
-    ["postgres:16-alpine", "postgres:latest"],
+    ["mirror.gcr.io/library/postgres@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea", "mirror.gcr.io/library/postgres@sha256:0000000000000000000000000000000000000000000000000000000000000000"],
     ["      audit-export-postgres:", "      unrelated-postgres:"],
     ["    env:\n      GOTOOLCHAIN:", "      another-service:\n        image: postgres:16-alpine\n    env:\n      GOTOOLCHAIN:"],
     ["        ports:", "        volumes:\n          - shared-data:/var/lib/postgresql/data\n        ports:"],
@@ -1191,7 +1268,7 @@ test("credential origin browser matrix runs after browser preparation without ac
   const run = stepRun(job, name);
   assert.match(run, /^set -euo pipefail$/m);
   assert.match(run, /^test -x "\$\{CHROME:\?browser preparation must provide CHROME\}"$/m);
-  assert.match(run, /^node --test --test-reporter=tap tests\/credential_origin_scope_probe\.test\.mjs \| tee "\$report"$/m);
+  assert.match(run, /^python3 \.\.\/scripts\/ci-fixture-process\.py --receipt "\$PINVOU_CI_RESOURCE_LEDGER\/credential-origin\.json" -- node --test --test-reporter=tap tests\/credential_origin_scope_probe\.test\.mjs \| tee "\$report"$/m);
   assert.match(run, /^grep -Eq '\^# pass \[1-9\]\[0-9\]\*\$' "\$report"$/m);
   assert.match(run, /^grep -Fxq '# fail 0' "\$report"$/m);
   assert.match(run, /^grep -Fxq '# skipped 0' "\$report"$/m);
@@ -1208,10 +1285,15 @@ test("credential origin browser matrix shell rejects failed, empty or skipped re
       [2, 1, 0, 0, 1], [2, 0, 0, 7, 7], [2, 0, null, 0, 1],
     ]) {
       const summary = `# pass ${passed}\n# fail ${failed}\n${skipped === null ? "" : `# skipped ${skipped}\n`}`;
-      const prefix = `CHROME="$(command -v bash)"; node() { printf '%s' '${summary}'; return ${exit}; };\n`;
+      const prefix = `CHROME="$(command -v bash)";
+        python3() {
+          [[ "$1" == ../scripts/ci-fixture-process.py && "$2" == --receipt && "$3" == "$PINVOU_CI_RESOURCE_LEDGER/credential-origin.json" && "$4" == -- ]] || return 99;
+          shift 4; "$@";
+        }
+        node() { printf '%s' '${summary}'; return ${exit}; };\n`;
       const result = spawnSync(bash, ["-c", prefix + run], {
         cwd: directory, encoding: "utf8", timeout: 30_000, windowsHide: true,
-        env: { ...process.env, RUNNER_TEMP: directory.replaceAll("\\", "/") },
+        env: { ...process.env, RUNNER_TEMP: directory.replaceAll("\\", "/"), PINVOU_CI_RESOURCE_LEDGER: directory.replaceAll("\\", "/") },
       });
       assert.equal(result.status, expected, `${passed}/${failed}/${skipped}/${exit}: ${result.stderr}`);
     }

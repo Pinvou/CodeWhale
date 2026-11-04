@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict';
-import { createServer } from 'node:http';
+import { createServer } from './helpers/http-fixture.mjs';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { build } from 'vite';
-import * as puppeteer from 'puppeteer-core';
+import { build } from './helpers/vite-fixture.mjs';
+import * as puppeteer from './helpers/puppeteer-fixture.mjs';
 
 // The optional Vite plugins let an isolated reviewer compile a candidate without
 // writing repository sources. Normal CI uses the production files directly.

@@ -87,9 +87,17 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\prepare-windows-re
 若发布台尚未部署，可继续使用下面的命令行流程。两种入口必须共享同一发布窗口，不能并行
 修改 `latest.json`。
 
+> **双服务器拓扑**：`pinvou.com` 的 DNS 指向 nginx-edge（公网入口），与发布源站
+> （地址见私有运维资料）无自动同步，以下上传只落其中一台。下面的第 2 步走公网 URL
+> 校验，安装器必须先在 nginx-edge 上可达：步骤 1 直接上传到 edge；若签名产物先落在
+> 发布源站，必须先按[应用内升级-设计](应用内升级-设计.md)「服务端现状」把安装器镜像
+> 到 edge，再执行第 2 步，否则校验必 404。发布收尾后仍须把安装器与 `latest.json`
+> 镜像到另一台并做双端验证，否则另一端仍是旧版/404（2026-09-28 0.10.5 发版实测踩坑）。
+
 上传顺序不可颠倒：
 
-1. 上传签名安装器，文件名包含版本，不覆盖历史文件。
+1. 上传签名安装器到 nginx-edge（公网入口；先落源站时先把安装器镜像到 edge），文件名
+   包含版本，不覆盖历史文件。
 2. 用下面的工具从线上重新下载该安装器，核对大小和 SHA-256：
 
    ```powershell
@@ -99,8 +107,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\prepare-windows-re
      -ExpectedSize <release-info 中的字节数>
    ```
 
-3. 上传 `latest.json.new`。
-4. 在服务端将 `latest.json.new` 原子重命名为 `latest.json`。
+3. 上传 `latest.json.new` 到 nginx-edge（与步骤 1 同一台）。
+4. 在 nginx-edge 将 `latest.json.new` 原子重命名为 `latest.json`。
 5. 回读线上 `latest.json`，确认 Windows 版本、URL、大小和 SHA-256。
 6. 使用一台旧版本 Windows 设备完成检查、下载、取消、UAC、覆盖安装和新版拉起验证。
 

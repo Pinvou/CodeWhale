@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"github.com/Pinvou/pinvou3/account-platform/internal/cifixture"
 	"os"
 	"path/filepath"
 	"strings"
@@ -55,6 +56,8 @@ func testManagedRDSReleaseActualPostgres(t *testing.T, legacyUpgrade bool) {
 		t.Fatal("exclusive fixture roles/platform database must be absent")
 	}
 	database := "managed_token_" + strings.ReplaceAll(uuid.NewString(), "-", "")
+	var fixtureDatabase *cifixture.Database
+	var platformDatabase *cifixture.Database
 	var created []string
 	var databaseCreated, platformCreated bool
 	defer func() {
@@ -65,18 +68,13 @@ func testManagedRDSReleaseActualPostgres(t *testing.T, legacyUpgrade bool) {
 				t.Errorf("fixture database cleanup guard refused: %v", err)
 				return
 			}
-			if _, err := admin.Exec(clean, "DROP DATABASE "+pgx.Identifier{database}.Sanitize()); err != nil {
+			if _, err := cifixture.DropDatabase(clean, admin, fixtureDatabase, "token_gateway", "token_schema_owner"); err != nil {
 				t.Error("fixture database cleanup failed")
 				return
 			}
 		}
 		if platformCreated {
-			var owner string
-			if admin.QueryRow(clean, `SELECT pg_get_userbyid(datdba) FROM pg_database WHERE datname='rdsadmin'`).Scan(&owner) != nil || owner != "aurora" {
-				t.Error("platform fixture owner changed; cleanup refused")
-				return
-			}
-			if _, err := admin.Exec(clean, "DROP DATABASE rdsadmin"); err != nil {
+			if _, err := cifixture.DropDatabase(clean, admin, platformDatabase, "aurora"); err != nil {
 				t.Error("platform fixture cleanup failed")
 				return
 			}
@@ -95,7 +93,11 @@ func testManagedRDSReleaseActualPostgres(t *testing.T, legacyUpgrade bool) {
 	}
 	exec(admin, "CREATE ROLE token_gateway NOLOGIN INHERIT")
 	created = append(created, "token_gateway")
-	exec(admin, "CREATE DATABASE "+pgx.Identifier{database}.Sanitize()+" OWNER token_gateway")
+	fixtureDatabaseCreated, creationError := cifixture.CreateDatabase(ctx, admin, database, "CREATE DATABASE "+pgx.Identifier{database}.Sanitize()+" OWNER token_gateway")
+	fixtureDatabase = fixtureDatabaseCreated
+	if err := creationError; err != nil {
+		t.Fatal(err)
+	}
 	databaseCreated = true
 	tokenConfig := config.Copy()
 	tokenConfig.Database = database
@@ -189,7 +191,11 @@ func testManagedRDSReleaseActualPostgres(t *testing.T, legacyUpgrade bool) {
 	exec(admin, "GRANT pg_read_all_stats TO managed_dba_fixture WITH ADMIN OPTION")
 	exec(admin, "CREATE ROLE retired_fixture_writer LOGIN INHERIT; GRANT token_gateway TO retired_fixture_writer; GRANT retired_fixture_writer TO managed_dba_fixture WITH ADMIN OPTION")
 	created = append(created, "retired_fixture_writer")
-	exec(admin, "CREATE DATABASE rdsadmin OWNER aurora")
+	platformDatabaseCreated, creationError := cifixture.CreateDatabase(ctx, admin, "rdsadmin", "CREATE DATABASE "+pgx.Identifier{"rdsadmin"}.Sanitize()+" OWNER aurora")
+	platformDatabase = platformDatabaseCreated
+	if err := creationError; err != nil {
+		t.Fatal(err)
+	}
 	platformCreated = true
 	exec(admin, "REVOKE CONNECT ON DATABASE rdsadmin FROM PUBLIC")
 	native.Close(context.Background())

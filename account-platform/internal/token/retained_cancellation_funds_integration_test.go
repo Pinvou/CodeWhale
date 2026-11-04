@@ -44,33 +44,13 @@ func retainedManagementTokenRepository(t *testing.T) (*PostgresRepository, conte
 	}
 	created := []string{}
 	database := "f04_token_management_" + uuid.New().String()[:8] + fmt.Sprintf("%d", time.Now().UnixNano())
+	var fixtureDatabase *cifixture.Database
 	databaseCreated := false
 	t.Cleanup(func() {
 		cleanupCtx, done := context.WithTimeout(context.Background(), 10*time.Second)
 		defer done()
 		if databaseCreated {
-			var owner string
-			var active int
-			deadline := time.Now().Add(5 * time.Second)
-			for {
-				if err := admin.QueryRow(cleanupCtx, `SELECT pg_get_userbyid(datdba),(SELECT count(*) FROM pg_stat_activity WHERE datname=$1) FROM pg_database WHERE datname=$1`, database).Scan(&owner, &active); err != nil {
-					t.Error("owned database cleanup identity unavailable")
-					return
-				}
-				if owner != admin.Config().User {
-					t.Error("owned database owner changed; cleanup refused")
-					return
-				}
-				if active == 0 {
-					break
-				}
-				if time.Now().After(deadline) {
-					t.Error("owned database still active; cleanup refused")
-					return
-				}
-				time.Sleep(10 * time.Millisecond)
-			}
-			if _, err := admin.Exec(cleanupCtx, "DROP DATABASE "+pgx.Identifier{database}.Sanitize()); err != nil {
+			if _, err := cifixture.DropDatabase(cleanupCtx, admin, fixtureDatabase, admin.Config().User); err != nil {
 				t.Error("owned database cleanup failed; roles retained")
 				return
 			}
@@ -94,7 +74,9 @@ func retainedManagementTokenRepository(t *testing.T) (*PostgresRepository, conte
 	if _, err = admin.Exec(ctx, `GRANT token_gateway,token_schema_owner,token_cap_policy_deployer TO token_migrator`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = admin.Exec(ctx, "CREATE DATABASE "+pgx.Identifier{database}.Sanitize()); err != nil {
+	fixtureDatabaseCreated, creationError := cifixture.CreateDatabase(ctx, admin, database, "CREATE DATABASE "+pgx.Identifier{database}.Sanitize())
+	fixtureDatabase = fixtureDatabaseCreated
+	if err := creationError; err != nil {
 		t.Fatal(err)
 	}
 	databaseCreated = true
@@ -169,13 +151,16 @@ func retainedManagementBillingRepository(t *testing.T) (*billing.PostgresReposit
 		t.Fatal("cannot connect to fixture database")
 	}
 	database := "retained_finance_" + strings.ReplaceAll(uuid.NewString(), "-", "")
+	var fixtureDatabase *cifixture.Database
 	quoted := pgx.Identifier{database}.Sanitize()
 	var exists bool
 	if err = control.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pg_database WHERE datname=$1)`, database).Scan(&exists); err != nil || exists {
 		control.Close(context.Background())
 		t.Fatal("new UUID database must not already exist")
 	}
-	if _, err = control.Exec(ctx, "CREATE DATABASE "+quoted+" OWNER billing_schema_owner"); err != nil {
+	fixtureDatabaseCreated, creationError := cifixture.CreateDatabase(ctx, control, database, "CREATE DATABASE "+quoted+" OWNER billing_schema_owner")
+	fixtureDatabase = fixtureDatabaseCreated
+	if err := creationError; err != nil {
 		control.Close(context.Background())
 		t.Fatal(err)
 	}
@@ -185,25 +170,7 @@ func retainedManagementBillingRepository(t *testing.T) (*billing.PostgresReposit
 		// guards below; this budget applies only to this disposable fixture.
 		cleanup, done := context.WithTimeout(context.Background(), 30*time.Second)
 		defer done()
-		var owner string
-		var active int
-		// Closed client connections can remain visible until PostgreSQL finishes
-		// their backend shutdown. Wait only for this fixture's own database.
-		deadline := time.Now().Add(5 * time.Second)
-		var queryErr error
-		for {
-			queryErr = control.QueryRow(cleanup, `SELECT pg_get_userbyid(datdba),(SELECT count(*) FROM pg_stat_activity WHERE datname=$1) FROM pg_database WHERE datname=$1`, database).Scan(&owner, &active)
-			if queryErr != nil || owner != "billing_schema_owner" || active == 0 || !time.Now().Before(deadline) {
-				break
-			}
-			time.Sleep(10 * time.Millisecond)
-		}
-		if queryErr != nil || owner != "billing_schema_owner" || active != 0 {
-			control.Close(cleanup)
-			t.Error("own-database identity/connection cleanup guard failed")
-			return
-		}
-		if _, err := control.Exec(cleanup, "DROP DATABASE "+quoted); err != nil {
+		if _, err := cifixture.DropDatabase(cleanup, control, fixtureDatabase, "billing_schema_owner"); err != nil {
 			t.Error("own-database cleanup failed")
 		}
 		control.Close(cleanup)
@@ -549,8 +516,12 @@ func TestManagementEmergencyCancellationRecoversLostReserveACK(t *testing.T) {
 		t.Fatal(err)
 	}
 	// A request and a completed reservation do not themselves prove release.
-	if err = repository.recordEmergencyCancellationAttempt(ctx, cancellationID, ProviderCancelUnsupported, false, true, false); !errors.Is(err, ErrForbidden) {
+	claim := claimOneEmergencyCancellation(t, repository, ctx, cancellationID)
+	if err = repository.recordEmergencyCancellationAttempt(ctx, claim, ProviderCancelUnsupported, false, true, false); !errors.Is(err, ErrForbidden) {
 		t.Fatalf("unconfirmed attempt accepted: %v", err)
+	}
+	if err = repository.retryEmergencyCancellation(ctx, claim, ErrForbidden); err != nil {
+		t.Fatal(err)
 	}
 	var attempted int
 	if err = repository.pool.QueryRow(ctx, `SELECT count(*) FROM model_emergency_cancellation_evidence WHERE emergency_cancellation_id=$1 AND evidence_type='ATTEMPTED'`, cancellationID).Scan(&attempted); err != nil || attempted != 0 {

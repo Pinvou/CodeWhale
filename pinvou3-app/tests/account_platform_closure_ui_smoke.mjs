@@ -4,8 +4,8 @@ import path from 'node:path';
 import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import react from '@vitejs/plugin-react';
-import * as puppeteer from 'puppeteer-core';
-import { createServer } from 'vite';
+import * as puppeteer from './helpers/puppeteer-fixture.mjs';
+import { createServer } from './helpers/vite-fixture.mjs';
 const work = path.dirname(fileURLToPath(import.meta.url)); const root = path.resolve(work, '..');
 const modules = path.resolve(root, 'node_modules');
 const chrome = process.env.CHROME || ['C:/Program Files/Google/Chrome/Application/chrome.exe', 'C:/Program Files/Microsoft/Edge/Application/msedge.exe', 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe', '/usr/bin/chromium', '/usr/bin/google-chrome', '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'].find(fs.existsSync);
@@ -35,6 +35,32 @@ try {
     }
   };
   const run = async (name, fn) => { await fn(); assert.deepEqual(errors, []); console.log(`PASS ${name}`); count++; };
+  for (const language of ['zh', 'en', 'ja']) await run(`${language}: first serialization conflict retains an explicit same-key retry`, async () => {
+    await fresh({ language, serializationConflict: true });
+    await click('start');
+    await page.waitForSelector('[role="alert"]');
+    assert.equal(await page.evaluate(() => document.body.textContent.includes(window.closure.finance().closureSerializationConflict)), true,
+      'a confirmed serialization abort needs its own recovery message');
+    const retained = await page.evaluate(() => {
+      const c = window.closure;
+      return { posts: c.calls.filter(call => call.method === 'POST'),
+        intent: JSON.parse(document.defaultView.sessionStorage.getItem(`pinvou.closure.intent.v1:${c.owner}:account-closure`)),
+        unknown: document.body.textContent.includes(c.finance().unknown) };
+    });
+    assert.equal(retained.posts.length, 1, 'a serialization conflict must not retry automatically');
+    assert.equal(retained.unknown, false, 'a confirmed abort is not an unknown result');
+    assert.equal(retained.intent?.key, retained.posts[0].headers['Idempotency-Key']);
+    assert.deepEqual(retained.intent.facts, { confirmation: 'CLOSE_MY_ACCOUNT' });
+    await page.waitForFunction(() => [...document.querySelectorAll('button')].some(button => button.textContent === window.closure.finance().retry && !button.disabled));
+    await page.evaluate(() => [...document.querySelectorAll('button')].find(button => button.textContent === window.closure.finance().retry).click());
+    await page.waitForFunction(() => document.body.textContent.includes(window.closure.copy().requested));
+    const settled = await page.evaluate(() => ({ posts: window.closure.calls.filter(call => call.method === 'POST'),
+      intent: document.defaultView.sessionStorage.getItem(`pinvou.closure.intent.v1:${window.closure.owner}:account-closure`) }));
+    assert.equal(settled.posts.length, 2);
+    assert.equal(settled.posts[0].body, settled.posts[1].body);
+    assert.equal(settled.posts[0].headers['Idempotency-Key'], settled.posts[1].headers['Idempotency-Key']);
+    assert.equal(settled.intent, null, 'a confirmed receipt clears the original intent');
+  });
   for (const language of ['zh', 'en', 'ja']) await run(`${language}: real personal and repair views have localized labels`, async () => {
     await fresh({ language });
     assert.ok(await page.evaluate(() => document.body.textContent.includes(window.closure.copy().start) && !document.body.textContent.includes('undefined')));

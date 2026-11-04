@@ -862,7 +862,7 @@ test('开关 UI 挂在模型列表下方，经 interaction 桥调后端', () => 
   assert.ok(rollbackStart >= 0 && rollbackEnd > rollbackStart, '定位多智能体开关失败的物化回滚分支');
   const rollback = sessionsBridgeSource2.slice(rollbackStart, rollbackEnd);
   const cleanup = rollback.indexOf('await invoke("delete_session", { id: meta.id })');
-  const navigationGuard = rollback.indexOf('if (navToken !== sessionSwitchRequestToken || state.activeSessionId !== meta.id) return null;');
+  const navigationGuard = rollback.indexOf('if (draftOutcome.navToken !== sessionSwitchRequestToken || state.activeSessionId !== meta.id) return null;');
   const reenterDraft = rollback.indexOf('enterDraft();');
   const preserveIntent = rollback.indexOf('state.pendingDraftMultiAgent = true;');
   assert.ok(cleanup >= 0 && navigationGuard > cleanup && reenterDraft > navigationGuard && preserveIntent > reenterDraft,

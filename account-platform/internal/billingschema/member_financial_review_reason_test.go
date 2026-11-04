@@ -2,6 +2,7 @@ package billingschema
 
 import (
 	"context"
+	"github.com/Pinvou/pinvou3/account-platform/internal/cifixture"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/migrations"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -124,7 +125,10 @@ func memberMigrationDatabase(t *testing.T, ctx context.Context, raw string) *pgx
 		t.Fatal(err)
 	}
 	name := "f06_member_schema_" + strings.ReplaceAll(uuid.NewString(), "-", "")
-	if _, err = admin.Exec(ctx, "CREATE DATABASE "+pgx.Identifier{name}.Sanitize()+" OWNER billing_schema_owner"); err != nil {
+	var fixtureDatabase *cifixture.Database
+	fixtureDatabaseCreated, creationError := cifixture.CreateDatabase(ctx, admin, name, "CREATE DATABASE "+pgx.Identifier{name}.Sanitize()+" OWNER billing_schema_owner")
+	fixtureDatabase = fixtureDatabaseCreated
+	if err := creationError; err != nil {
 		admin.Close(context.Background())
 		t.Fatal(err)
 	}
@@ -132,13 +136,7 @@ func memberMigrationDatabase(t *testing.T, ctx context.Context, raw string) *pgx
 		clean, done := context.WithTimeout(context.Background(), 10*time.Second)
 		defer done()
 		defer admin.Close(clean)
-		var owner string
-		var active int
-		if e := admin.QueryRow(clean, `SELECT pg_get_userbyid(datdba),(SELECT count(*) FROM pg_stat_activity WHERE datname=$1) FROM pg_database WHERE datname=$1`, name).Scan(&owner, &active); e != nil || owner != "billing_schema_owner" || active != 0 {
-			t.Error("owned member migration cleanup refused", e)
-			return
-		}
-		if _, e := admin.Exec(clean, "DROP DATABASE "+pgx.Identifier{name}.Sanitize()); e != nil {
+		if _, e := cifixture.DropDatabase(clean, admin, fixtureDatabase, "billing_schema_owner"); e != nil {
 			t.Error(e)
 		}
 	})

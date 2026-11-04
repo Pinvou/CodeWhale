@@ -16,7 +16,7 @@ spec:
       securityContext: { runAsNonRoot: true, runAsUser: 999, seccompProfile: { type: RuntimeDefault } }
       containers:
         - name: redis
-          image: "{{ .Values.images.redis.repository }}:{{ .Values.images.redis.tag }}"
+          image: {{ include "pinvou.imageRef" (dict "image" .Values.images.redis) | quote }}
           args: ["redis-server", "--appendonly", "yes", "--save", "60", "1"]
           ports: [{ name: redis, containerPort: 6379 }]
           securityContext: { allowPrivilegeEscalation: false, capabilities: { drop: ["ALL"] } }
@@ -41,7 +41,7 @@ spec:
       securityContext: { runAsNonRoot: true, runAsUser: 1000, seccompProfile: { type: RuntimeDefault } }
       containers:
         - name: nats
-          image: "{{ .Values.images.nats.repository }}:{{ .Values.images.nats.tag }}"
+          image: {{ include "pinvou.imageRef" (dict "image" .Values.images.nats) | quote }}
           args: ["--jetstream", "--store_dir=/data", "--http_port=8222"]
           ports: [{ name: client, containerPort: 4222 }, { name: monitor, containerPort: 8222 }]
           securityContext: { allowPrivilegeEscalation: false, capabilities: { drop: ["ALL"] } }
@@ -68,7 +68,8 @@ spec:
       securityContext: { runAsNonRoot: true, {{ if .Values.keycloak.tlsSecretName }}runAsUser: 1000, fsGroup: 1000, {{ end }}seccompProfile: { type: RuntimeDefault } }
       containers:
         - name: keycloak
-          image: "{{ .Values.images.keycloak.repository }}:{{ .Values.images.keycloak.tag }}"
+          image: {{ include "pinvou.imageRef" (dict "image" .Values.images.keycloak) | quote }}
+          resources: {{ toYaml .Values.resources | nindent 12 }}
           args: ["start", "--health-enabled=true", "--http-enabled=true"]
           ports:
             - { name: http, containerPort: 8080 }
@@ -85,6 +86,11 @@ spec:
             httpGet: { path: /health/ready, port: management, scheme: HTTP }
             periodSeconds: 5
             timeoutSeconds: 2
+            failureThreshold: 3
+          livenessProbe:
+            httpGet: { path: /health/live, port: management, scheme: HTTP }
+            periodSeconds: 20
+            timeoutSeconds: 3
             failureThreshold: 3
           securityContext: { allowPrivilegeEscalation: false, capabilities: { drop: ["ALL"] } }
           env:

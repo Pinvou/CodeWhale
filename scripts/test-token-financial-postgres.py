@@ -19,6 +19,12 @@ from urllib.parse import parse_qs, urlsplit
 ROOT = Path(__file__).resolve().parents[1]
 ACTORS = {"billing_migrator", "billing_schema_owner", "billing_service"}
 REQUIRED = {
+    "TestEmergencyCancellationClaimOwnershipPostgres",
+    "TestEmergencyCancellationRequestLocksClaimPostgres",
+    "TestUserUnusedIntentCancellationOwnerPostgres",
+    "TestPendingUnusedExpiryRejectsInvalidProofTimestampPostgres",
+    "TestPendingUnusedExpiryCancellationOwnerPostgres",
+    "TestPendingUnusedExpiryLegacyCancellationFallbackPostgres",
     "TestPreparationFailurePreservesAcceptedUsagePostgres",
     "TestCircuitFailureBeforeDispatchPostgres",
     "TestCredentialRotationWindowReceiptPostgres",
@@ -27,6 +33,10 @@ REQUIRED = {
     "TestCredentialFailurePreparationFencePostgres",
     "TestCredentialFailureExistingEventsPostgres",
     "TestHoldAcknowledgementSurvivesDispatchPersistenceFailurePostgres",
+    "TestCancellationReceivedReadRechecksReservationPostgres",
+    "TestCancellationFirstUserPreservesConfirmedReceiptPostgres",
+    "TestModelTerminalObservationPreservesExpiryProofPostgres",
+    "TestModelTerminalObservationRejectsUntrustedEvidencePostgres",
     "TestPersonalZeroBudgetCancellationAndExpiryPostgres",
     "TestUsageWaiverCoordinatorRecoveryPostgres",
     "TestF05AdditionalReservationProjectionPublicPostgres",
@@ -90,9 +100,35 @@ ACCOUNT_REQUIRED = {
     "TestApprovalListPoolRuntimePostgres",
     "TestPasswordPreparationAuthorizationPostgres",
     "TestApprovalWithdrawalOriginalReceiptPostgres",
+    "TestRegistrationBonusEligibilityCheckpointPostgresIntegration",
+    "TestRegistrationBonusCheckpointGuardsPostgresIntegration",
+    "TestRegistrationBonusCheckpointMigrationPostgresIntegration",
+    "TestRegistrationBonusCheckpointForeignFactsPostgresIntegration",
+    "TestRegistrationBonusEligibilityReadyAndLifetimePostgresIntegration",
+    "TestRegistrationBonusEligibilityBlockedConsumesNewMobilesPostgresIntegration",
 }
+# These Account roots are real named leaf tests; all other required roots
+# still need completed child-case evidence. Root run/pass and no-skip stay mandatory.
+ACCOUNT_LEAF_REQUIRED = {
+    "TestRegistrationBonusEligibilityCheckpointPostgresIntegration",
+    "TestRegistrationBonusCheckpointGuardsPostgresIntegration",
+    "TestRegistrationBonusCheckpointMigrationPostgresIntegration",
+    "TestRegistrationBonusEligibilityReadyAndLifetimePostgresIntegration",
+    "TestRegistrationBonusEligibilityBlockedConsumesNewMobilesPostgresIntegration",
+}
+ACCOUNT_CHILD_REQUIRED = ACCOUNT_REQUIRED - ACCOUNT_LEAF_REQUIRED
 TOKEN_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/token"
 TOKEN_CHILD_REQUIRED = {
+    "TestEmergencyCancellationClaimOwnershipPostgres",
+    "TestEmergencyCancellationRequestLocksClaimPostgres",
+    "TestUserUnusedIntentCancellationOwnerPostgres",
+    "TestPendingUnusedExpiryRejectsInvalidProofTimestampPostgres",
+    "TestPendingUnusedExpiryCancellationOwnerPostgres",
+    "TestPendingUnusedExpiryLegacyCancellationFallbackPostgres",
+    "TestCancellationReceivedReadRechecksReservationPostgres",
+    "TestCancellationFirstUserPreservesConfirmedReceiptPostgres",
+    "TestModelTerminalObservationPreservesExpiryProofPostgres",
+    "TestModelTerminalObservationRejectsUntrustedEvidencePostgres",
     "TestLifecycleForceCancelApprovalPostgres",
     "TestLocalModelCancellationHandshakeHTTP",
     "TestRemoteModelCancellationOwnerLoopTransport",
@@ -106,6 +142,8 @@ TOKEN_CHILD_REQUIRED = {
 }
 BILLING_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/billing"
 SCHEMA_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/billingschema"
+TOKEN_SCHEMA_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/tokenschema"
+TOKEN_SCHEMA_REQUIRED = {"TestManagementPublicMigrationInstallation"}
 SCHEMA_REQUIRED = {"TestLatePaymentQueryRegisteredIdentity", "TestReconciliationFairRetryRegisteredIdentity", "TestF09EntitlementPackageIndexPublicMigration", "TestTokenWalletReceiptSchemaPostgres", "TestLegacyEntitlementUpgradeAdmissionPostgres", "TestUsageWaiverHistoricalSchemaPostgres", "TestBillingOrdinaryReplayOriginalMigrationPostgres", "TestUnknownProviderEntryPublicMigrationPostgres", "TestLegacyExpiry025UpgradePreservesOriginalLedgerPostgres", "TestF04PublicTokenUserOwnerAuthorityAndDirectory"}
 OWNER_REQUIRED = {
     "TestF06OrganizationWalletRequiresLifecycleEvidence",
@@ -144,6 +182,11 @@ REFUND_REQUIRED = {
     "TestRefundOriginalUnknownSuccessQueriesAndSettlesOrdinaryGrantsPostgres",
 }
 RETAINED_REQUIRED = {
+    "TestEscalatedForcedRefundRequiresSecondActorAndReplays",
+    "TestEscalatedForcedRefundAtomicRollbackPostgres",
+    "TestEscalatedForcedRefundEvidenceAndReceiptGuardsPostgres",
+    "TestOrdinaryForcedRefundAppliedReceiptRecoveryPostgres",
+    "TestReconciliationOrphanPaidOrderPostgres",
     "TestPaymentPersonalWalletAdmissionPostgres",
     "TestPaymentPersonalWalletAdmissionStatusRacePostgres",
     "TestReceivableSettlementGuardedWritesPostgres",
@@ -190,6 +233,8 @@ RETAINED_REQUIRED = {
 # These exact roots are named leaves. Every other retained root must still
 # produce completed child-case evidence, not just a parent PASS.
 BILLING_LEAF_REQUIRED = {
+    "TestEscalatedForcedRefundRequiresSecondActorAndReplays",
+    "TestOrdinaryForcedRefundAppliedReceiptRecoveryPostgres",
     "TestPaymentPersonalWalletAdmissionStatusRacePostgres",
     "TestPostgresManagedPricePagination",
     "TestLedgerRepairProofHistoricalUpgradePostgres",
@@ -212,6 +257,87 @@ BILLING_LEAF_REQUIRED = {
 }
 BILLING_CHILD_REQUIRED = RETAINED_REQUIRED - BILLING_LEAF_REQUIRED
 EXACT_REQUIRED_CHILDREN = {
+    "TestEmergencyCancellationClaimOwnershipPostgres": {"before-request", "after-request", "pending", "zero-attempt"},
+    "TestEmergencyCancellationRequestLocksClaimPostgres": {"usage-lock-reclaim"},
+    "TestPasswordPreparationAuthorizationPostgres": {
+        "retention-redacts-expired-mobiles-without-changing-grant-facts/expired",
+        "retention-redacts-expired-mobiles-without-changing-grant-facts/young",
+        "retention-redacts-expired-mobiles-without-changing-grant-facts/valid",
+        "retention-keeps-issued-grant-and-continues-later-artifact-cleanup",
+        "retention-skips-locked-expired-captcha-and-rejects-late-grant",
+        "retention-FK-protects-inflight-reference-and-subsequent-passes",
+    },
+    "TestManagementPublicMigrationInstallation": {
+        "fresh", "legacy-upgrade", "installed-29-upgrade", "installed-30-upgrade",
+        "installed-f05-34-upgrade", "retained-management-lifecycle-upgrade",
+        "installed-f07-36-upgrade", "installed-pre-runtime-37-upgrade",
+        "installed-pre-cleanup-39-upgrade",
+    },
+    "TestUserUnusedIntentCancellationOwnerPostgres": {
+        "before-claim", "after-claim", "waiting-owner-does-not-starve-later-target", "acquired-intent-control", "model-first-control",
+    },
+    "TestPendingUnusedExpiryRejectsInvalidProofTimestampPostgres": {
+        "infinity", "tomorrow", "zero-time", "invalid-calendar",
+        "bad-first-valid-later", "wrong-identity-first-valid-later", "valid-first-later-bad",
+    },
+    "TestPendingUnusedExpiryCancellationOwnerPostgres": {
+        "model-claim-race",
+        "user-first-and-retry",
+        "model-after-user-command",
+        "model-review-after-lost-release-ack",
+        "prior-user-stop",
+        "no-intent-control",
+        "waiting-owner-does-not-starve-later-target",
+    },
+    "TestPendingUnusedExpiryLegacyCancellationFallbackPostgres": {
+        "model-origin",
+        "user-local-pre-dispatch",
+    },
+    "TestModelTerminalObservationPreservesExpiryProofPostgres": {
+        "hold-attempted",
+        "hold-converged",
+        "hold-requested",
+        "intent-attempted",
+        "intent-converged",
+        "intent-requested",
+        "user-intent-attempted",
+        "user-intent-converged",
+        "user-intent-requested",
+    },
+    "TestModelTerminalObservationRejectsUntrustedEvidencePostgres": {
+        "attempt-aborts",
+        "attempt-provider-success",
+        "attempt-releases",
+        "converged-extra-field",
+        "convergence-wrong-source",
+        "extra-field",
+        "missing-field",
+        "not-terminal",
+        "orphan-request",
+        "pre-dispatch",
+        "provider-reference",
+        "provider-success",
+        "unknown-capability",
+        "upstream-reference",
+        "wrong-adapter",
+    },
+    "TestCancellationFirstUserPreservesConfirmedReceiptPostgres": {
+        "model-before-attempt", "expiry-proof-ack-replay",
+    },
+    "TestCancellationReceivedReadRechecksReservationPostgres": {
+        "not-started", "reserve-ack-pending", "reserve-ack-attached", "wrong-hold-then-original",
+    },
+    "TestRegistrationBonusCheckpointForeignFactsPostgresIntegration": {
+        "unbound-existing-facts", "foreign-key-before-finalize",
+    },
+    "TestEscalatedForcedRefundAtomicRollbackPostgres": {
+        "terminal-statement", "receipt-statement", "deferred-commit",
+    },
+    "TestEscalatedForcedRefundEvidenceAndReceiptGuardsPostgres": {
+        "manual-status", "manual-link", "order-link", "transaction-link",
+        "evidence-link", "receipt-identity-and-terminal-replay",
+    },
+    "TestReconciliationOrphanPaidOrderPostgres": {"fresh-install", "historical-upgrade"},
     "TestRemoteModelCancellationOwnerLoopTransport": {
         "remote_emergency", "remote_emergency_then_user", "user_only",
         "read_failure", "lease_failure", "natural_terminal",
@@ -392,6 +518,8 @@ def main(*, group="all"):
             env["PINVOU_TEST_ACCOUNT_DATABASE_URL"] = raw
         elif target == "./internal/billingschema":
             env["PINVOU_TEST_SCHEMA_DATABASE_URL"] = raw
+        elif target == "./internal/tokenschema":
+            env["PINVOU_TEST_TOKEN_DATABASE_URL"] = raw
         else:
             env["PINVOU_TEST_BILLING_DATABASE_URL"] = raw
         if target == "./internal/token":
@@ -403,7 +531,7 @@ def main(*, group="all"):
             # Never run the whole Account package in the Token/Billing phase.
             env["PINVOU_TEST_TOKEN_DATABASE_URL"] = raw
             env["PINVOU_TEST_BILLING_DATABASE_URL"] = raw
-        # The 59 retained Billing roots create about 250 isolated migration
+        # The retained Billing roots create hundreds of isolated migration
         # fixtures. Other phases retain their existing finite 20-minute bound.
         timeout = "75m" if label == "retained-billing" else "20m"
         command = [go, "test", "-p=1", "-race", "-tags=nomsgpack", "-mod=readonly", "-count=1", "-timeout=" + timeout, "-json"]
@@ -425,7 +553,7 @@ def main(*, group="all"):
             raise RuntimeError("Go financial phase failed: " + label)
         count = verify_results([json.loads(line) for line in result.stdout.splitlines() if line.startswith("{")],
                                required, package=package, require_children=scoped or label == "retained-token", exact_roots=scoped,
-                               children_required=TOKEN_CHILD_REQUIRED if label == "retained-token" else BILLING_CHILD_REQUIRED & required if label == "retained-billing" else None)
+                               children_required=ACCOUNT_CHILD_REQUIRED if label == "owner-account" else TOKEN_CHILD_REQUIRED if label == "retained-token" else BILLING_CHILD_REQUIRED & required if label == "retained-billing" else None)
         print(f"Financial phase {label}: {count} named passes; all {len(required)} required roots completed", flush=True)
 
     if group in ("all", "owners"):
@@ -441,6 +569,10 @@ def main(*, group="all"):
             assert_instance({user})
         try:
             run_phase("owner-schema", "./internal/billingschema", SCHEMA_PACKAGE, SCHEMA_REQUIRED, scoped=True)
+        finally:
+            assert_instance({user})
+        try:
+            run_phase("owner-token-schema", "./internal/tokenschema", TOKEN_SCHEMA_PACKAGE, TOKEN_SCHEMA_REQUIRED, scoped=True)
         finally:
             assert_instance({user})
         try:

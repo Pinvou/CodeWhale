@@ -24,7 +24,7 @@ spec:
       securityContext: { runAsNonRoot: true, runAsUser: 1000, seccompProfile: { type: RuntimeDefault } }
       containers:
         - name: realm-upgrade
-          image: "{{ .Values.images.keycloak.repository }}:{{ .Values.images.keycloak.tag }}"
+          image: {{ include "pinvou.imageRef" (dict "image" .Values.images.keycloak) | quote }}
           imagePullPolicy: {{ .Values.images.keycloak.pullPolicy }}
           command: ["/opt/keycloak/bin/pinvou-provision-mobile-auth.sh"]
           securityContext:

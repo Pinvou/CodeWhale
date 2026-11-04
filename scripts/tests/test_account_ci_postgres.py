@@ -20,7 +20,7 @@ class AccountCIAdmissionTests(unittest.TestCase):
     def fixture(self):
         meta = {'id': 'a'*64, 'ports': {'5432':'49173'}}
         item = {'Id': meta['id'], 'State': {'Running':True, 'Health': {'Status':'healthy'}},
-                'Config': {'Image':'postgres:16-alpine'},
+                'Config': {'Image':'mirror.gcr.io/library/postgres@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea'},
                 'NetworkSettings': {'Ports': {'5432/tcp':[{'HostIp':'127.0.0.1','HostPort':'49173'}]}},
                 'Mounts':[{'Type':'volume','Name':'b'*64,'Destination':'/var/lib/postgresql/data'}],
                 'HostConfig':{'AutoRemove':True}}
@@ -33,7 +33,7 @@ class AccountCIAdmissionTests(unittest.TestCase):
 
     def test_exact_docker_admission(self):
         meta,item=self.fixture()
-        self.assertEqual(PG.inspect_service(meta,item,'postgres:16-alpine'),('49173','b'*64))
+        self.assertEqual(PG.inspect_service(meta,item,'mirror.gcr.io/library/postgres@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea'),('49173','b'*64))
         mutations = [lambda x:x.update(Id='c'*64),lambda x:x['State'].update(Running=False),
                      lambda x:x['State']['Health'].update(Status='starting'),lambda x:x['Config'].update(Image='other'),
                      lambda x:x['NetworkSettings']['Ports']['5432/tcp'][0].update(HostIp='0.0.0.0'),
@@ -43,7 +43,7 @@ class AccountCIAdmissionTests(unittest.TestCase):
                      lambda x:x['HostConfig'].update(Binds=['x:y']),lambda x:x['HostConfig'].update(AutoRemove=False)]
         for mutation in mutations:
             changed=copy.deepcopy(item);mutation(changed)
-            with self.assertRaises(ValueError):PG.inspect_service(meta,changed,'postgres:16-alpine')
+            with self.assertRaises(ValueError):PG.inspect_service(meta,changed,'mirror.gcr.io/library/postgres@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea')
 
     def test_sql_identity(self):
         good='12345|/var/lib/postgresql/data|5432|postgres|postgres|postgres|t|160015'
@@ -62,7 +62,7 @@ class AccountCIAdmissionTests(unittest.TestCase):
             item['NetworkSettings']['Ports']['5432/tcp'][0]['HostPort'] = meta['ports']['5432']
             item['Mounts'][0].update(Name=str(index+4)*64, Destination='/var/lib/postgresql' if major=='18' else '/var/lib/postgresql/data')
             metadata[name] = meta; items[meta['id']] = item
-        for problem in ('none', 'unhealthy', 'gone', 'all-gone', 'image', 'bind', 'reused-volume', 'reused-id', 'logs-failed', 'stop-failed'):
+        for problem in ('none', 'unhealthy', 'gone', 'all-gone', 'image', 'bind', 'reused-volume', 'reused-id', 'logs-failed', 'stop-failed', 'remaining-container', 'remaining-volume', 'partial-registration'):
             current, actual = copy.deepcopy(metadata), copy.deepcopy(items)
             stops = []
             if problem == 'unhealthy': actual['2'*64]['State']['Health']['Status'] = 'unhealthy'
@@ -72,9 +72,14 @@ class AccountCIAdmissionTests(unittest.TestCase):
             if problem == 'bind': actual['2'*64]['HostConfig']['Binds'] = ['/business:/data']
             if problem == 'reused-volume': actual['2'*64]['Mounts'][0]['Name'] = '4'*64
             if problem == 'reused-id': current['existing-broker-postgres']['id'] = '1'*64
+            if problem == 'partial-registration': current.pop('existing-broker-postgres')
             def run(argv, **kwargs):
                 if argv[:2] == ['docker', 'ps']:
-                    return '\n'.join([*actual, 'c'*64])  # unrelated container must never be stopped
+                    remaining = set(actual) - set(stops)
+                    if problem == 'remaining-container': remaining.add('1'*64)
+                    return '\n'.join([*remaining, 'c'*64])  # unrelated container must never be stopped
+                if argv[:3] == ['docker', 'volume', 'ls']:
+                    return '4'*64 if problem == 'remaining-volume' else ''
                 if argv[:2] == ['docker', 'inspect']:
                     return json.dumps([actual[argv[2]]])
                 if argv[:2] == ['docker', 'logs']:
@@ -92,8 +97,9 @@ class AccountCIAdmissionTests(unittest.TestCase):
                 if problem in ('image', 'bind', 'reused-volume', 'reused-id'):
                     with self.assertRaises(ValueError): PG.stop_owned_services(current)
                     self.assertEqual(stops, [])
-                elif problem == 'stop-failed':
+                elif problem in ('stop-failed', 'remaining-container', 'remaining-volume', 'partial-registration'):
                     with self.assertRaises(RuntimeError): PG.stop_owned_services(current)
+                    if problem == 'partial-registration': self.assertNotIn('2'*64, stops)
                 else:
                     PG.stop_owned_services(current)
                     self.assertEqual(set(stops), set(actual))
@@ -101,6 +107,9 @@ class AccountCIAdmissionTests(unittest.TestCase):
                 if problem == 'logs-failed': self.assertIn('::warning::', output.getvalue())
         with patch.dict(os.environ, {'GITHUB_ACTIONS':''}), patch.object(PG, 'run') as run:
             with self.assertRaises(RuntimeError): PG.stop_owned_services(metadata)
+            run.assert_not_called()
+        with patch.dict(os.environ, {'GITHUB_ACTIONS':'true'}), patch.object(PG, 'run') as run:
+            with self.assertRaisesRegex(ValueError, 'registration unavailable'): PG.stop_owned_services(None)
             run.assert_not_called()
 
     def test_three_services_and_namespace_match(self):

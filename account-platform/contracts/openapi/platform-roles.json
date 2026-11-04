@@ -18,6 +18,21 @@
         "responses": {
           "200": {
             "description": "Installed platform role definitions and delivered atomic permissions"
+          },
+          "401": {
+            "$ref": "#/components/responses/AuthenticationRequired"
+          },
+          "403": {
+            "$ref": "#/components/responses/PermissionDenied"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/RoleManagementUnavailable"
           }
         }
       }
@@ -40,6 +55,44 @@
         "responses": {
           "200": {
             "description": "Platform-only association projection"
+          },
+          "401": {
+            "$ref": "#/components/responses/AuthenticationRequired"
+          },
+          "403": {
+            "$ref": "#/components/responses/PermissionDenied"
+          },
+          "409": {
+            "description": "ACCOUNT_CONFLICT: organization_id or unit_id query parameters are present, or a nonempty user_id is malformed or the nil UUID. A valid user_id without associations returns an empty successful list.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/ErrorResponse"
+                    },
+                    {
+                      "properties": {
+                        "code": {
+                          "enum": [
+                            "ACCOUNT_CONFLICT"
+                          ]
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/RoleManagementUnavailable"
           }
         }
       },
@@ -69,14 +122,90 @@
               }
             }
           },
+          "400": {
+            "description": "INVALID_JSON: malformed JSON, unknown fields, invalid field types or UUID/date-time values, multiple JSON values, or a body exceeding the decoder limit. Rejected before the role write is invoked.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/ErrorResponse"
+                    },
+                    {
+                      "properties": {
+                        "code": {
+                          "enum": [
+                            "INVALID_JSON"
+                          ]
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
           "401": {
-            "description": "RECENT_AUTHENTICATION_REQUIRED is an explicit no-write first invocation rejection"
+            "description": "AUTH_REQUIRED for a missing, malformed or invalid bearer token; RECENT_AUTHENTICATION_REQUIRED is an explicit no-write first invocation rejection for a temporary PII export grant without recent authentication.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/ErrorResponse"
+                    },
+                    {
+                      "properties": {
+                        "code": {
+                          "enum": [
+                            "AUTH_REQUIRED",
+                            "RECENT_AUTHENTICATION_REQUIRED"
+                          ]
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
           },
           "403": {
-            "description": "Current human authority denied"
+            "$ref": "#/components/responses/RoleWriteForbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/RoleBindingNotFound"
           },
           "409": {
-            "description": "ACCOUNT_CONFLICT for protected role, invalid scope/time or changed original intent"
+            "description": "ACCOUNT_CONFLICT: invalid grant fields, non-platform scope, inactive target, unknown or protected/unassignable role, invalid time/PII duration or reason, changed or ambiguous original grant intent, or a mapped insert constraint conflict.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/ErrorResponse"
+                    },
+                    {
+                      "properties": {
+                        "code": {
+                          "enum": [
+                            "ACCOUNT_CONFLICT"
+                          ]
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/RoleWriteUnavailable"
           }
         }
       }
@@ -109,11 +238,69 @@
               }
             }
           },
+          "400": {
+            "description": "INVALID_REQUEST: binding_id cannot be parsed as a UUID. A parseable but absent UUID instead returns NOT_FOUND.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/ErrorResponse"
+                    },
+                    {
+                      "properties": {
+                        "code": {
+                          "enum": [
+                            "INVALID_REQUEST"
+                          ]
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/AuthenticationRequired"
+          },
           "403": {
-            "description": "Current assign authority denied"
+            "$ref": "#/components/responses/RoleWriteForbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/RoleBindingNotFound"
           },
           "409": {
-            "description": "Dedicated high privilege lifecycle required"
+            "description": "ACCOUNT_CONFLICT: the role is protected or unassignable and requires its dedicated lifecycle.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/ErrorResponse"
+                    },
+                    {
+                      "properties": {
+                        "code": {
+                          "enum": [
+                            "ACCOUNT_CONFLICT"
+                          ]
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/RoleWriteUnavailable"
           }
         }
       }
@@ -228,6 +415,226 @@
           "revoked_by": {
             "type": "string",
             "format": "uuid"
+          }
+        }
+      },
+      "ErrorResponse": {
+        "type": "object",
+        "description": "Flat JSON error body with required code and message. api.WriteError (api.Error) omits request_id when no correlation ID is available and does not populate details on these routes. The HTTP host CLOCK_UNSAFE response always omits request_id.",
+        "required": [
+          "code",
+          "message"
+        ],
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "request_id": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "responses": {
+      "AuthenticationRequired": {
+        "description": "AUTH_REQUIRED: missing, malformed or invalid bearer token.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "allOf": [
+                {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                {
+                  "properties": {
+                    "code": {
+                      "enum": [
+                        "AUTH_REQUIRED"
+                      ]
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        }
+      },
+      "PermissionDenied": {
+        "description": "PERMISSION_DENIED: the current principal lacks the required platform permission.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "allOf": [
+                {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                {
+                  "properties": {
+                    "code": {
+                      "enum": [
+                        "PERMISSION_DENIED"
+                      ]
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        }
+      },
+      "RoleWriteForbidden": {
+        "description": "PERMISSION_DENIED at the route permission check, or ACCOUNT_FORBIDDEN if the live human actor or assign authority is no longer valid when the write transaction rechecks it.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "allOf": [
+                {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                {
+                  "properties": {
+                    "code": {
+                      "enum": [
+                        "PERMISSION_DENIED",
+                        "ACCOUNT_FORBIDDEN"
+                      ]
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        }
+      },
+      "RoleManagementUnavailable": {
+        "description": "AUTHORIZATION_UNAVAILABLE if the permission repository is missing or its check fails; ROLE_MANAGEMENT_UNAVAILABLE if the role management repository capability is missing after authorization succeeds.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "allOf": [
+                {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                {
+                  "properties": {
+                    "code": {
+                      "enum": [
+                        "AUTHORIZATION_UNAVAILABLE",
+                        "ROLE_MANAGEMENT_UNAVAILABLE"
+                      ]
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        }
+      },
+      "InternalError": {
+        "description": "INTERNAL_ERROR: an unclassified repository query, scan, transaction, audit or outbox failure. Serialization failures on these routes also use this response.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "allOf": [
+                {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                {
+                  "properties": {
+                    "code": {
+                      "enum": [
+                        "INTERNAL_ERROR"
+                      ]
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        }
+      },
+      "RoleBindingNotFound": {
+        "description": "NOT_FOUND: the target user (grant), or a platform association or its target user (revoke), does not exist. Non-platform associations are not exposed by revoke.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "allOf": [
+                {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                {
+                  "properties": {
+                    "code": {
+                      "enum": [
+                        "NOT_FOUND"
+                      ]
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        }
+      },
+      "RateLimited": {
+        "description": "RATE_LIMITED: the shared HTTP host admission budget is exhausted when rate limiting is enabled; this is not a role-specific quota. Retry-After is 1 second.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "allOf": [
+                {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                {
+                  "properties": {
+                    "code": {
+                      "enum": [
+                        "RATE_LIMITED"
+                      ]
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        },
+        "headers": {
+          "Retry-After": {
+            "description": "Seconds before retrying.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "const": "1"
+            }
+          }
+        }
+      },
+      "RoleWriteUnavailable": {
+        "description": "AUTHORIZATION_UNAVAILABLE if the permission repository is missing or its check fails; ROLE_MANAGEMENT_UNAVAILABLE if the role management repository capability is missing after authorization succeeds. CLOCK_UNSAFE if the production HTTP host trusted-clock check rejects this write before the Account handler; that response contains only code and message, without request_id.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "allOf": [
+                {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                {
+                  "properties": {
+                    "code": {
+                      "enum": [
+                        "AUTHORIZATION_UNAVAILABLE",
+                        "ROLE_MANAGEMENT_UNAVAILABLE",
+                        "CLOCK_UNSAFE"
+                      ]
+                    }
+                  }
+                }
+              ]
+            }
           }
         }
       }

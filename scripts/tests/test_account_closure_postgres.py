@@ -23,6 +23,14 @@ def stream(*events):
 
 
 class ClosurePostgresResults(unittest.TestCase):
+    def test_real_pagination_root_is_required_once_and_cannot_skip(self):
+        root = "TestAccountClosurePaginationPostgres"
+        selected = [row for row in runner.CONTRACTS if row[0] == "account-pagination"]
+        self.assertEqual(selected, [("account-pagination", "./internal/account", {root}, {})])
+        for events in [[], [{"Action": "skip", "Test": root}]]:
+            with self.subTest(events=events), self.assertRaises(RuntimeError):
+                runner.verify_results(stream(*events), {root})
+
     def setUp(self):
         # Mock local-fixture tests must not inherit the live consumer's CI binding.
         environment = mock.patch.dict(os.environ, {"GITHUB_ACTIONS": "",
@@ -241,11 +249,12 @@ class ClosurePostgresResults(unittest.TestCase):
         self.assertTrue(any(call[0] == "query" and "CREATE ROLE billing_schema_owner" in call[1] for call in calls))
         self.assertFalse(any(call[0] == "query" and call[1].startswith("BEGIN; DROP ROLE billing_migrator") for call in calls))
 
-    def test_anonymization_advance_failure_root_cannot_silently_drop(self):
+    def test_anonymization_and_blocked_alert_roots_cannot_silently_drop(self):
         expected = {"TestAccountClosureAnonymizesOwnedHistoricalContacts",
                     "TestAccountClosureRollbackPreservesEvidence",
                     "TestAccountClosureSelfServiceRecoveryPostgres",
-                    "TestF08ClosureAdvanceFailureIsScheduledPostgres"}
+                    "TestF08ClosureAdvanceFailureIsScheduledPostgres",
+                    "TestAccountClosureBlockedSLAAlertsPostgres"}
         contracts = [row for row in runner.CONTRACTS if row[0] == "account-anonymization"]
         self.assertEqual(contracts, [("account-anonymization", "./internal/account", expected, {})])
         for missing in expected:
