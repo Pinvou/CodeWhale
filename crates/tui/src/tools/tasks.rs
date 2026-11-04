@@ -195,7 +195,7 @@ impl ToolSpec for TasksTool {
             );
             properties.insert(
                 "allow_shell".to_string(),
-                json!({ "type": "boolean", "description": "Whether the task's session may run shell commands. Passing true or false is always honored; omitting falls back to the configured durable-task allow-shell setting, which is false unless shell execution is enabled in config. (action=create)" }),
+                json!({ "type": "boolean", "description": "Whether the task's session may run shell commands. Passing true or false is honored subject to the mode — plan keeps shell disabled even when this is true (see mode); omitting falls back to the configured durable-task allow-shell setting, which is false unless shell execution is enabled in config. (action=create)" }),
             );
             properties.insert(
                 "trust_mode".to_string(),
@@ -1471,6 +1471,14 @@ mod tests {
         );
         assert!(
             allow_shell.contains("which is false unless shell execution is enabled in config"),
+            "{allow_shell}"
+        );
+        assert!(
+            allow_shell.contains("honored subject to the mode"),
+            "{allow_shell}"
+        );
+        assert!(
+            allow_shell.contains("plan keeps shell disabled even when this is true"),
             "{allow_shell}"
         );
         let trust_mode = schema["properties"]["trust_mode"]["description"]
