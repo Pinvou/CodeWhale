@@ -4705,6 +4705,7 @@ mod tests {
     ) -> CachedWebAttachment {
         CachedWebAttachment {
             result: crate::features::files::file_ingest::IngestResult {
+                read_owner: None,
                 kind: "text".into(),
                 basename: "notes.txt".into(),
                 path: staging.join("notes.txt").to_string_lossy().into_owned(),

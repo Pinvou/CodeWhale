@@ -623,6 +623,7 @@ const jaBase = {
         depCheckTitle: '依存関係チェック', depChecking: '確認中…', depRecheck: '再チェック',
         depAllOk: 'すべての依存関係が準備済み', depMissingSuffix: ' 件の依存が不足（該当機能は利用不可）',
         depInstalling: 'インストール中…', depInstallBtn: 'インストール', depGoInstall: 'インストール', depInstallNote: '権限昇格して不足依存をインストール（ネットワークまたは apt ソースが必要）', depInstallNoteWindows: '不足モデルをダウンロードし、LibreOffice は winget で権限昇格してインストール（ネットワークが必要）', depInstallNoteMac: 'Homebrew で不足依存をインストール（ネットワークが必要、Homebrew 未導入なら brew.sh から先にインストール）',
+        dep_office_stream: 'リモート Office 添付の解析（python3-uno が必要・ここからインストール）',
         dep_pdf: 'PDF テキスト抽出', dep_office_modern: 'Office 文書（docx）', dep_office_legacy: '旧 Office / スライドと表計算',
         dep_ocr: '画像 / スキャン PDF の OCR', dep_archive: 'アーカイブ（zip/rar/7z）', dep_email: 'メール（.eml / .msg）', dep_voice_asr: 'ローカル音声認識',
         dep_voice_asr_model: '音声認識モデル（SenseVoice q8）', dep_knowledge_embedding_model: 'ナレッジ埋め込みモデル（bge-m3）',

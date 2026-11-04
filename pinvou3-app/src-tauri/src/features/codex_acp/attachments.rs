@@ -42,11 +42,53 @@ pub(super) fn prepare_codex_prompt(
     let mut embedded_tokens = 0_u32;
     let mut display_attachments = Vec::with_capacity(attachments.len());
     for attachment in attachments {
-        let path = file_ingest::validate_path(&attachment.path)
-            .map_err(anyhow::Error::msg)
-            .with_context(|| format!("读取附件 {} 失败", attachment.basename))?;
-        let uri = tauri::Url::from_file_path(&path)
-            .map_err(|_| anyhow::anyhow!("无法构造附件文件地址: {}", path.display()))?
+        let path = if attachment.read_owner.is_some() {
+            attachment.read_path().to_owned()
+        } else {
+            file_ingest::validate_path(&attachment.path)
+                .map_err(anyhow::Error::msg)
+                .with_context(|| format!("读取附件 {} 失败", attachment.basename))?
+        };
+        let format_path = if attachment.read_owner.is_some() {
+            Path::new(&attachment.basename)
+        } else {
+            &path
+        };
+        if attachment.read_owner.is_some()
+            && attachment.kind != "image"
+            && attachment.markdown.is_none()
+        {
+            display_attachments.push(CodexDisplayAttachment {
+                name: attachment.basename.clone(),
+                kind: attachment.kind.clone(),
+                size: attachment.byte_size,
+            });
+            // A resource link would let the agent bypass a rejected/failed
+            // ingestion result by reopening the original bytes.
+            blocks.push(ContentBlock::Text(TextContent::new(format!(
+                "{}: {}",
+                attachment.basename,
+                attachment
+                    .warning
+                    .as_deref()
+                    .unwrap_or("attachment_content_unavailable")
+            ))));
+            continue;
+        }
+        // The source fd is held only while this turn executes. URI strings
+        // survive in ACP/model history, so use the independent named reference.
+        let reference_path = if attachment.read_owner.is_some() {
+            Path::new(&attachment.path)
+        } else {
+            &path
+        };
+        let extracted_reference = attachment.kind != "image"
+            && attachment
+                .read_owner
+                .as_ref()
+                .is_some_and(|owner| owner.read_path() != owner.path());
+        let uri = tauri::Url::from_file_path(reference_path)
+            .map_err(|_| anyhow::anyhow!("无法构造附件文件地址: {}", reference_path.display()))?
             .to_string();
         display_attachments.push(CodexDisplayAttachment {
             name: attachment.basename.clone(),
@@ -66,7 +108,7 @@ pub(super) fn prepare_codex_prompt(
             blocks.push(ContentBlock::Image(
                 ImageContent::new(
                     base64::engine::general_purpose::STANDARD.encode(data),
-                    codex_image_mime_type(&path)?,
+                    codex_image_mime_type(format_path)?,
                 )
                 .uri(uri),
             ));
@@ -81,16 +123,25 @@ pub(super) fn prepare_codex_prompt(
             embedded_tokens = embedded_tokens.saturating_add(attachment.token_estimate);
             let resource =
                 TextResourceContents::new(attachment.markdown.as_deref().unwrap_or_default(), uri)
-                    .mime_type(text_mime_type(&path));
+                    .mime_type(text_mime_type(format_path));
             blocks.push(ContentBlock::Resource(EmbeddedResource::new(
                 EmbeddedResourceResource::TextResourceContents(resource),
             )));
         } else {
-            let size = i64::try_from(attachment.byte_size).unwrap_or(i64::MAX);
+            let (resource_path, resource_kind, size) = if extracted_reference {
+                (
+                    reference_path,
+                    "text",
+                    attachment.markdown.as_deref().unwrap_or_default().len() as u64,
+                )
+            } else {
+                (format_path, attachment.kind.as_str(), attachment.byte_size)
+            };
+            let size = i64::try_from(size).unwrap_or(i64::MAX);
             let resource = ResourceLink::new(&attachment.basename, uri)
                 .title(&attachment.basename)
                 .size(size)
-                .mime_type(resource_mime_type(&path, &attachment.kind));
+                .mime_type(resource_mime_type(resource_path, resource_kind));
             blocks.push(ContentBlock::ResourceLink(resource));
         }
     }
@@ -239,6 +290,7 @@ mod tests {
 
     fn attachment(path: &Path, kind: &str, markdown: Option<&str>, tokens: u32) -> IngestResult {
         IngestResult {
+            read_owner: None,
             kind: kind.to_string(),
             basename: path.file_name().unwrap().to_string_lossy().into_owned(),
             path: path.to_string_lossy().into_owned(),
@@ -301,7 +353,7 @@ mod tests {
             read_owner: Some(owner.clone()),
         };
         let ingested = file_ingest::ingest_staged_attachment(dir.path(), &descriptor).unwrap();
-        assert!(std::fs::write(owner.path(), b"replacement").is_err());
+        assert!(std::fs::write(owner.read_path(), b"replacement").is_err());
         let prepared =
             prepare_codex_prompt("", &[ingested], &[], &PromptCapabilities::new().image(true))
                 .unwrap();
@@ -312,10 +364,198 @@ mod tests {
             image.data,
             base64::engine::general_purpose::STANDARD.encode(&bytes)
         );
+        let image_reference = tauri::Url::parse(image.uri.as_deref().unwrap())
+            .unwrap()
+            .to_file_path()
+            .unwrap();
+        let independent_reference = owner.read_path() != owner.path();
+        assert!(
+            !serde_json::to_string(&prepared.blocks)
+                .unwrap()
+                .contains("/proc/")
+        );
         drop(descriptor);
         owner.request_cleanup();
         drop(owner);
         assert!(!folder.exists());
+        if independent_reference {
+            assert_eq!(std::fs::read(image_reference).unwrap(), bytes);
+        }
+    }
+
+    #[test]
+    fn published_large_text_links_keep_named_references_after_source_cleanup() {
+        if !crate::platform::filesystem::supports_private_read_path_publication() {
+            return;
+        }
+        use sha2::{Digest as _, Sha256};
+        let root = tempfile::tempdir().unwrap();
+        let body = "verified large text\n".repeat(10_000).into_bytes();
+        let owner = std::sync::Arc::new(
+            crate::platform::filesystem::publish_private_read_path(
+                crate::platform::filesystem::open_private_file_directory(
+                    &root.path().join("remote_uploads/ctr-up-large"),
+                )
+                .unwrap(),
+                std::ffi::OsStr::new("large.txt"),
+                &body,
+            )
+            .unwrap(),
+        );
+        let independent_reference = owner.read_path() != owner.path();
+        let descriptor = crate::features::files::file_ingest::PublishedAttachment {
+            handle_id: "ctr-up-large".into(),
+            path: owner.path().to_owned(),
+            display_name: "large.txt".into(),
+            mime_type: "text/plain".into(),
+            bytes: body.len() as u64,
+            sha256: crate::platform::encoding::hex_lower(&Sha256::digest(&body)),
+            read_owner: Some(owner.clone()),
+        };
+        let ingested = file_ingest::ingest_staged_attachment(root.path(), &descriptor).unwrap();
+        let reference = std::path::PathBuf::from(&ingested.path);
+        let prepared = prepare_codex_prompt(
+            "",
+            &[ingested],
+            &[],
+            &PromptCapabilities::new().embedded_context(true),
+        )
+        .unwrap();
+        let ContentBlock::ResourceLink(link) = &prepared.blocks[0] else {
+            panic!("large text must use a resource link");
+        };
+        assert_eq!(
+            tauri::Url::parse(&link.uri)
+                .unwrap()
+                .to_file_path()
+                .unwrap(),
+            reference
+        );
+        assert!(
+            !serde_json::to_string(&prepared.blocks)
+                .unwrap()
+                .contains("/proc/")
+        );
+        drop(descriptor);
+        owner.request_cleanup();
+        drop(owner);
+        if independent_reference {
+            assert_eq!(std::fs::read(reference).unwrap(), body);
+        }
+    }
+
+    #[test]
+    fn published_redacted_attachment_stays_warning_only_without_resource_uri() {
+        if !crate::platform::filesystem::supports_private_read_path_publication() {
+            return;
+        }
+        use sha2::{Digest as _, Sha256};
+        let root = tempfile::tempdir().unwrap();
+        let body = b"synthetic rejected fixture bytes";
+        let owner = std::sync::Arc::new(
+            crate::platform::filesystem::publish_private_read_path(
+                crate::platform::filesystem::open_private_file_directory(
+                    &root.path().join("remote_uploads/ctr-up-redacted"),
+                )
+                .unwrap(),
+                std::ffi::OsStr::new("redacted.key"),
+                body,
+            )
+            .unwrap(),
+        );
+        owner.request_cleanup();
+        let descriptor = crate::features::files::file_ingest::PublishedAttachment {
+            handle_id: "ctr-up-redacted".into(),
+            path: owner.path().to_owned(),
+            display_name: "redacted.key".into(),
+            mime_type: "application/octet-stream".into(),
+            bytes: body.len() as u64,
+            sha256: crate::platform::encoding::hex_lower(&Sha256::digest(body)),
+            read_owner: Some(owner.clone()),
+        };
+        let ingested = file_ingest::ingest_staged_attachment(root.path(), &descriptor).unwrap();
+        let warning = ingested.warning.clone().unwrap();
+        let prepared = prepare_codex_prompt(
+            "",
+            &[ingested],
+            &[],
+            &PromptCapabilities::new().embedded_context(true),
+        )
+        .unwrap();
+        assert_eq!(prepared.blocks.len(), 1);
+        let ContentBlock::Text(text) = &prepared.blocks[0] else {
+            panic!("rejected input must only send a warning");
+        };
+        assert!(text.text.contains(&warning));
+        let serialized = serde_json::to_string(&prepared.blocks).unwrap();
+        assert!(!serialized.contains("file:"));
+        assert!(!serialized.contains("/proc/"));
+        assert!(!serialized.contains(std::str::from_utf8(body).unwrap()));
+        assert!(!root.path().join("attachment_references").exists());
+        assert_eq!(prepared.display_attachments[0].name, "redacted.key");
+    }
+
+    #[test]
+    #[ignore = "requires local 7z; no network or model"]
+    fn published_archive_links_only_the_extracted_body_without_rejected_member_bytes() {
+        if !crate::platform::filesystem::supports_private_read_path_publication() {
+            return;
+        }
+        use sha2::{Digest as _, Sha256};
+        let root = tempfile::tempdir().unwrap();
+        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        zip.start_file("notes.txt", zip::write::SimpleFileOptions::default())
+            .unwrap();
+        zip.write_all(b"accepted archive notes").unwrap();
+        zip.start_file("redacted.key", zip::write::SimpleFileOptions::default())
+            .unwrap();
+        zip.write_all(b"synthetic rejected member bytes").unwrap();
+        let bytes = zip.finish().unwrap().into_inner();
+        let owner = std::sync::Arc::new(
+            crate::platform::filesystem::publish_private_read_path(
+                crate::platform::filesystem::open_private_file_directory(
+                    &root.path().join("remote_uploads/ctr-up-archive"),
+                )
+                .unwrap(),
+                std::ffi::OsStr::new("archive.zip"),
+                &bytes,
+            )
+            .unwrap(),
+        );
+        owner.request_cleanup();
+        // Named extracted references are the Linux adapter behavior. Windows
+        // retains its existing original-file sharing lease.
+        if owner.read_path() == owner.path() {
+            return;
+        }
+        let descriptor = crate::features::files::file_ingest::PublishedAttachment {
+            handle_id: "ctr-up-archive".into(),
+            path: owner.path().to_owned(),
+            display_name: "archive.zip".into(),
+            mime_type: "application/zip".into(),
+            bytes: bytes.len() as u64,
+            sha256: crate::platform::encoding::hex_lower(&Sha256::digest(&bytes)),
+            read_owner: Some(owner.clone()),
+        };
+        let ingested = file_ingest::ingest_staged_attachment(root.path(), &descriptor).unwrap();
+        let markdown = ingested.markdown.clone().unwrap();
+        assert!(markdown.contains("accepted archive notes"));
+        assert!(markdown.contains("redacted.key"));
+        assert!(!markdown.contains("synthetic rejected member bytes"));
+        let prepared =
+            prepare_codex_prompt("", &[ingested], &[], &PromptCapabilities::new()).unwrap();
+        let ContentBlock::ResourceLink(link) = &prepared.blocks[0] else {
+            panic!("disabled embedding must use the extracted reference");
+        };
+        let reference = tauri::Url::parse(&link.uri)
+            .unwrap()
+            .to_file_path()
+            .unwrap();
+        assert_eq!(reference.file_name().unwrap(), "content.md");
+        assert_eq!(fs::read_to_string(reference).unwrap(), markdown);
+        assert_eq!(link.mime_type.as_deref(), Some("text/markdown"));
+        assert_eq!(link.size, Some(markdown.len() as i64));
+        assert_eq!(prepared.display_attachments[0].name, "archive.zip");
     }
 
     #[test]

@@ -60,8 +60,8 @@ pub struct PlatformCapabilities {
     pub team_relay_supported: bool,
     pub browser_native_display: bool,
     pub voice_shortcut_native: bool,
-    /// Windows-only desktop dual-end remote control (A control / B controlled).
-    /// Every other target reports `false` and hides the entry points.
+    /// Desktop dual-end remote control on Windows and 64-bit Linux.
+    /// Unsupported or build-disabled hosts report `false` and hide the entry points.
     pub desktop_remote_control_supported: bool,
     pub failure_diagnostics_supported: bool,
     pub paste_image_clipboard_read: bool,
