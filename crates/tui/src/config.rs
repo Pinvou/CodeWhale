@@ -7072,7 +7072,7 @@ impl Config {
                     "Moonshot/Kimi API key not found. Get a key: {}. Run 'codewhale auth set --provider moonshot', \
                      set {}, or add [{}] api_key. \
                      For a Kimi Code plan key, set [providers.moonshot] base_url = \
-                     \"https://api.kimi.com/coding/v1\" and model = \"kimi-for-coding\".",
+                     \"https://api.kimi.com/coding/v1\" (or api.kimi.ai/coding/v1) and model = \"kimi-for-coding\".",
                     credential_help
                         .credential_url
                         .unwrap_or("https://platform.kimi.ai/console/api-keys"),
@@ -10224,7 +10224,7 @@ pub(crate) fn validate_kimi_code_api_model_id(
         for direct_id in MOONSHOT_DIRECT_PLATFORM_MODELS {
             if model.eq_ignore_ascii_case(direct_id) {
                 return Err(format!(
-                    "Kimi Code membership route (api.kimi.com/coding/v1) does not accept model = \"{model}\": it is a direct Moonshot platform id. Use a Kimi Code membership model (\"k3\", \"k3-256k\", \"kimi-for-coding\", or \"kimi-for-coding-highspeed\") for this base_url. Direct Moonshot pay-as-you-go uses base_url = \"https://api.moonshot.ai/v1\" with model = \"{direct_id}\"."
+                    "Kimi Code membership route (api.kimi.com/coding/v1 or api.kimi.ai/coding/v1) does not accept model = \"{model}\": it is a direct Moonshot platform id. Use a Kimi Code membership model (\"k3\", \"k3-256k\", \"kimi-for-coding\", or \"kimi-for-coding-highspeed\") for this base_url. Direct Moonshot pay-as-you-go uses base_url = \"https://api.moonshot.ai/v1\" with model = \"{direct_id}\"."
                 ));
             }
         }
@@ -10235,7 +10235,7 @@ pub(crate) fn validate_kimi_code_api_model_id(
         for membership_id in KIMI_CODE_MEMBERSHIP_MODELS {
             if model.eq_ignore_ascii_case(membership_id) {
                 return Err(format!(
-                    "Moonshot direct route (api.moonshot.ai/v1) does not accept model = \"{model}\": it is a Kimi Code membership model id, not a direct-platform catalog model. Kimi Code membership uses base_url = \"https://api.kimi.com/coding/v1\" with model = \"{membership_id}\"; direct Moonshot pay-as-you-go K3 uses model = \"kimi-k3\"."
+                    "Moonshot direct route (api.moonshot.ai/v1) does not accept model = \"{model}\": it is a Kimi Code membership model id, not a direct-platform catalog model. Kimi Code membership uses base_url = \"https://api.kimi.com/coding/v1\" (or api.kimi.ai/coding/v1) with model = \"{membership_id}\"; direct Moonshot pay-as-you-go K3 uses model = \"kimi-k3\"."
                 ));
             }
         }
