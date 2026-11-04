@@ -214,7 +214,7 @@ impl ToolSpec for ReadMediaTool {
     }
 
     fn description(&self) -> &'static str {
-        "Read an image file (PNG, JPEG, GIF, WebP) into context for multimodal/vision inspection, with optional crop region and detail level. Default reads (detail 'auto' or 'low') deliver about 256KB; 'high'/'original' and crop reads keep the full 5 MiB payload limit. Safe, bounded decode with pixel and byte guards."
+        "Read an image file (PNG, JPEG, GIF, WebP) into context for multimodal/vision inspection, with optional crop region and detail level. Default reads (detail 'auto' or 'low') fit a ~256KB delivery budget; 'high'/'original' and crop reads keep the full 5 MiB payload limit. Safe, bounded decode with pixel and byte guards."
     }
 
     fn input_schema(&self) -> Value {
@@ -251,7 +251,7 @@ impl ToolSpec for ReadMediaTool {
                 "detail": {
                     "type": "string",
                     "enum": ["auto", "low", "high", "original"],
-                    "description": "Resolution/detail preference. 'auto' (default) downscales large images to max 2048px and delivers about 256KB; 'low' to max 1024px with the same 256KB delivery budget; 'high' / 'original' preserves resolution up to max 4096px within the full 5 MiB payload limit."
+                    "description": "Resolution/detail preference. 'auto' (default) downscales large images to max 2048px and fits the same ~256KB delivery budget as 'low' (max 1024px); 'high' / 'original' preserves resolution up to max 4096px within the full 5 MiB payload limit."
                 }
             },
             "required": ["path"]
