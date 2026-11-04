@@ -249,11 +249,12 @@ class ClosurePostgresResults(unittest.TestCase):
         self.assertTrue(any(call[0] == "query" and "CREATE ROLE billing_schema_owner" in call[1] for call in calls))
         self.assertFalse(any(call[0] == "query" and call[1].startswith("BEGIN; DROP ROLE billing_migrator") for call in calls))
 
-    def test_anonymization_advance_failure_root_cannot_silently_drop(self):
+    def test_anonymization_and_blocked_alert_roots_cannot_silently_drop(self):
         expected = {"TestAccountClosureAnonymizesOwnedHistoricalContacts",
                     "TestAccountClosureRollbackPreservesEvidence",
                     "TestAccountClosureSelfServiceRecoveryPostgres",
-                    "TestF08ClosureAdvanceFailureIsScheduledPostgres"}
+                    "TestF08ClosureAdvanceFailureIsScheduledPostgres",
+                    "TestAccountClosureBlockedSLAAlertsPostgres"}
         contracts = [row for row in runner.CONTRACTS if row[0] == "account-anonymization"]
         self.assertEqual(contracts, [("account-anonymization", "./internal/account", expected, {})])
         for missing in expected:
