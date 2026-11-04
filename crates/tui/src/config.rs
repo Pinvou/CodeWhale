@@ -10162,6 +10162,14 @@ pub(crate) fn minimax_m3_route_uses_max_completion_tokens(
 /// model picker labels them as plan routes. Those sites previously kept
 /// independent literal lists and had already drifted (`kimi-for-coding` was
 /// missing from the picker label), so the roster lives here and nowhere else.
+///
+/// Deliberately NOT a member of this roster's consumer list: wire sampling
+/// stripping. A 2026-11-04 live probe showed the membership endpoint serves
+/// ids beyond these four (`k3.1-pro`, `k3.1-pro-highspeed`) and rejects
+/// sampling values on all of them, so
+/// `apply_kimi_code_fixed_sampling` is route-scoped and must not consult
+/// this roster — that roster has lagged this endpoint three times
+/// (`k3-256k`, `kimi-for-coding-highspeed`, both `k3.1-pro` spellings).
 pub(crate) const KIMI_CODE_MEMBERSHIP_MODELS: [&str; 4] = [
     KIMI_CODE_K3_MODEL,
     KIMI_CODE_K3_256K_MODEL,
