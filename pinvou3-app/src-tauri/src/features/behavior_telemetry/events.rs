@@ -983,10 +983,13 @@ pub fn begin_tool_install(
     let operation_id = token("install_", 16);
     let tool_key = tool_registry_key(tool_name);
     let tool_name = normalized_tool_name(tool_name, tool_key);
-    let lease = app
+    let telemetry = app
         .try_state::<BehaviorTelemetry>()
-        .and_then(|telemetry| telemetry.current_lease());
-    if let (Some(telemetry), Some(lease)) = (app.try_state::<BehaviorTelemetry>(), lease.as_ref()) {
+        .map(|state| state.inner().clone());
+    let lease = telemetry
+        .as_ref()
+        .and_then(BehaviorTelemetry::current_lease);
+    if let (Some(telemetry), Some(lease)) = (telemetry.as_ref(), lease.as_ref()) {
         telemetry.track_for_lease(
             BehaviorEvent::new("tool_install_started")
                 .tool(tool_key, &tool_name, tool_type)
@@ -996,7 +999,7 @@ pub fn begin_tool_install(
         );
     }
     ToolInstallGuard {
-        app: app.clone(),
+        telemetry,
         operation_id,
         started_at,
         tool_key,

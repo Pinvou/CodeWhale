@@ -7,6 +7,12 @@ use tokio::net::TcpListener;
 #[path = "behavior_telemetry/shell_producer_tests.rs"]
 pub(crate) mod shell_producer;
 
+#[path = "behavior_telemetry/install_tests.rs"]
+mod install;
+
+#[path = "behavior_telemetry/diagnostic_cleanup_tests.rs"]
+mod diagnostic_cleanup;
+
 struct TestHome {
     _lock: MutexGuard<'static, ()>,
     previous: Option<OsString>,
