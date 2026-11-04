@@ -883,11 +883,41 @@ pub fn set_storage_settings(
     if let Some(dirs) = import_scan_dirs {
         // 滤掉空白项：界面上多敲一次回车就会留一行空的，而空字符串进了搜索
         // 根列表只会白占一行。
-        settings.import_scan_dirs = dirs
+        let cleaned: Vec<String> = dirs
             .into_iter()
             .map(|d| d.trim().to_string())
             .filter(|d| !d.is_empty())
             .collect();
+        // 移除留痕（2026-11-04 评审 P2，与上方 models_dir_history 同一先例）：
+        // 卡片脚本会在扫描目录里就地复用既有权重，已安装卡片的权重可能仍留在
+        // 被移除的目录里，而实际落点宿主无从枚举——移除不等于脱管，被移除的
+        // 目录记进 import_scan_dirs_history，设备管理的移除守卫才知道旧根同样
+        // 是商店地盘（boundary.rs 的"全部权重根"）。trim 后比对：登记进设置时
+        // 允许首尾空白，历史与保护集合必须以 cleaned 后的形状为准，否则守卫
+        // 前缀匹配失配（第七轮评审 P3 同一把尺子）。
+        let mut removed: Vec<String> = settings
+            .import_scan_dirs
+            .iter()
+            .map(|d| d.trim().to_string())
+            .filter(|d| !d.is_empty() && !cleaned.contains(d))
+            .collect();
+        removed.sort();
+        removed.dedup();
+        for old in removed {
+            settings.import_scan_dirs_history.retain(|d| d != &old);
+            settings.import_scan_dirs_history.push(old);
+        }
+        // 重新挂回的目录由当前值覆盖，历史里不留第二份（与 models_dir 的
+        // 「换回旧目录清历史」同一口径）。
+        settings
+            .import_scan_dirs_history
+            .retain(|d| !cleaned.contains(d));
+        let keep = settings
+            .import_scan_dirs_history
+            .len()
+            .saturating_sub(config::MAX_IMPORT_SCAN_DIRS_HISTORY);
+        settings.import_scan_dirs_history.drain(..keep);
+        settings.import_scan_dirs = cleaned;
     }
     config::save_settings(&settings).map_err(|e| format!("保存设置失败：{e}"))?;
     storage_settings()
@@ -1056,6 +1086,90 @@ mod tests {
         let roots = crate::features::model_store::store_weights_roots();
         assert!(roots.contains(&std::path::PathBuf::from(dir(cap - 1))));
         assert!(!roots.contains(&std::path::PathBuf::from(dir(0))));
+    }
+
+    #[test]
+    fn removing_scan_dir_records_history_and_keeps_weights_protected() {
+        // 2026-11-04 评审 P2 的状态转换（settings 层）：卡片脚本会在扫描目录里
+        // 就地复用既有权重，从设置移除目录的那一刻起，若不留痕，目录立即脱出
+        // 商店权重根集合——设备管理「名称不同的外部模型记录 + 删除权重」就能
+        // 删掉仍被引用的唯一副本。钉住：移除 → 记入 import_scan_dirs_history →
+        // store_weights_roots 覆盖；重新挂回 → 由当前值接管、历史退掉。
+        let ctx = super::config::TempHome::new();
+        let kept = ctx.path().join("scan-kept");
+        let removed = ctx.path().join("scan-removed");
+        let path_of = |p: &std::path::Path| p.to_string_lossy().to_string();
+
+        set_storage_settings(None, Some(vec![path_of(&kept), path_of(&removed)]))
+            .expect("set scan dirs");
+        let settings = super::config::load_settings();
+        assert!(
+            settings.import_scan_dirs_history.is_empty(),
+            "首挂不该有历史，got: {:?}",
+            settings.import_scan_dirs_history
+        );
+
+        // 移除其一：被移除的目录入史，留下的不入。
+        set_storage_settings(None, Some(vec![path_of(&kept)])).expect("remove one scan dir");
+        let settings = super::config::load_settings();
+        assert_eq!(settings.import_scan_dirs, vec![path_of(&kept)]);
+        assert!(
+            settings
+                .import_scan_dirs_history
+                .contains(&path_of(&removed))
+        );
+        assert!(!settings.import_scan_dirs_history.contains(&path_of(&kept)));
+        // 保护集联动：被移除的目录仍在商店权重根集合里（守卫面的删除拒绝由
+        // device 侧 e2e 直打）。
+        let roots = crate::features::model_store::store_weights_roots();
+        assert!(roots.contains(&std::path::PathBuf::from(path_of(&removed))));
+
+        // 重新挂回：由当前值接管，历史里的同一目录退掉（不重复占位）。
+        set_storage_settings(None, Some(vec![path_of(&kept), path_of(&removed)]))
+            .expect("re-add scan dir");
+        let settings = super::config::load_settings();
+        assert!(
+            !settings
+                .import_scan_dirs_history
+                .contains(&path_of(&removed)),
+            "重新挂回的目录不该留在历史里，got: {:?}",
+            settings.import_scan_dirs_history
+        );
+
+        // trim 形状入史：设置里带首尾空白的登记，入史的是 cleaned 后的形状，
+        // 守卫前缀匹配才不失配（第七轮评审 P3 同一把尺子）。
+        let blank = ctx.path().join("scan-blank");
+        set_storage_settings(
+            None,
+            Some(vec![format!(" {} ", path_of(&blank)), path_of(&kept)]),
+        )
+        .expect("set with whitespace");
+        set_storage_settings(None, Some(vec![path_of(&kept)])).expect("remove it");
+        let settings = super::config::load_settings();
+        assert!(settings.import_scan_dirs_history.contains(&path_of(&blank)));
+    }
+
+    #[test]
+    fn import_scan_dirs_history_evicts_the_oldest_root_past_the_cap() {
+        // 与 models_dir_history 同一溢出语义：超过 MAX_IMPORT_SCAN_DIRS_HISTORY
+        // 后丢最老端，被挤出的根脱出保护集合。
+        let ctx = super::config::TempHome::new();
+        let path_of = |p: &std::path::Path| p.to_string_lossy().to_string();
+        let cap = super::config::MAX_IMPORT_SCAN_DIRS_HISTORY;
+        for index in 0..=(cap + 1) {
+            let dir = ctx.path().join(format!("scan-{index:03}"));
+            set_storage_settings(None, Some(vec![path_of(&dir)])).expect("swap scan dir");
+        }
+        let settings = super::config::load_settings();
+        assert_eq!(settings.import_scan_dirs_history.len(), cap);
+        let dir = |index: usize| path_of(&ctx.path().join(format!("scan-{index:03}")));
+        assert!(!settings.import_scan_dirs_history.contains(&dir(0)));
+        assert!(settings.import_scan_dirs_history.contains(&dir(1)));
+        assert!(settings.import_scan_dirs_history.contains(&(dir(cap))));
+        // 溢出即失去路径臂保护（既定容量取舍，钉住语义）。
+        let roots = crate::features::model_store::store_weights_roots();
+        assert!(!roots.contains(&std::path::PathBuf::from(dir(0))));
+        assert!(roots.contains(&std::path::PathBuf::from(dir(cap))));
     }
 
     #[test]

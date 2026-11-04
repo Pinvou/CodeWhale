@@ -98,13 +98,17 @@ fn collect_weights_roots(settings: &config::Settings) -> (Vec<std::path::PathBuf
     let mut relative: Vec<String> = Vec::new();
     // 当前 models_dir + 历史用过的 models_dir（换目录不搬权重，老根下仍是商店
     // 在册模型，第六轮评审 P2：只看当前值的话改过目录的机器旧根裸奔）+
-    // import_scan_dirs（下载脚本会在这些目录里**就地复用**已存在的权重——
-    // 复用不搬家，商店模型的权重可能就落在里面）+ staging_dir（下载暂存目录
-    // 可在设置里挪走，中断的下载会留下半成品权重；默认值在数据根之下，挪走后
-    // 只有这里能兜住，第八轮评审 P3）。空串/重复项无害但白占一行，滤掉。
+    // import_scan_dirs + 历史挂过的扫描目录（下载脚本会在这些目录里**就地
+    // 复用**已存在的权重——复用不搬家，商店模型的权重可能就落在里面；从设置
+    // 移除的目录记入 import_scan_dirs_history，2026-11-04 评审 P2：不留痕的话
+    // 移除一拍守卫立刻放行，仍被卡片引用的权重会被设备管理连目录删掉）+
+    // staging_dir（下载暂存目录可在设置里挪走，中断的下载会留下半成品权重；
+    // 默认值在数据根之下，挪走后只有这里能兜住，第八轮评审 P3）。空串/重复项
+    // 无害但白占一行，滤掉。
     for dir in std::iter::once(&settings.models_dir)
         .chain(settings.models_dir_history.iter())
         .chain(settings.import_scan_dirs.iter())
+        .chain(settings.import_scan_dirs_history.iter())
         .chain(std::iter::once(&settings.staging_dir))
     {
         let trimmed = dir.trim();
@@ -497,6 +501,25 @@ mod tests {
         ];
         expected.extend(super::super::import_scan::builtin_home_roots());
         assert_eq!(roots, expected);
+    }
+
+    #[test]
+    fn weights_roots_cover_removed_scan_dirs_history() {
+        let _ctx = TempHome::new();
+        // 2026-11-04 评审 P2：从设置移除的扫描目录经 import_scan_dirs_history
+        // 留在保护集合里——下载脚本会就地复用既有权重，被移除目录里的在册
+        // 权重仍可能被卡片以原路径引用；不留痕的话移除一拍守卫立刻放行。
+        // 空白项同轮滤掉。
+        write_config(
+            r#"{
+                "import_scan_dirs": ["/data/current-scan"],
+                "import_scan_dirs_history": ["/data/removed-scan", "  "]
+            }"#,
+        );
+        let roots = store_weights_roots();
+        assert!(roots.contains(&std::path::PathBuf::from("/data/removed-scan")));
+        assert!(roots.contains(&std::path::PathBuf::from("/data/current-scan")));
+        assert!(!roots.contains(&std::path::PathBuf::from("  ")));
     }
 
     #[test]

@@ -159,6 +159,25 @@ pub struct Settings {
     #[serde(default)]
     pub models_dir_history: Vec<String>,
 
+    /// 历史上挂过、后来从设置里移除的补充扫描目录。
+    ///
+    /// 为什么必须留痕：下载脚本会在扫描目录里**就地复用**已存在的权重（复用
+    /// 不搬家，商店在册权重可能就落在里面），而权重的实际落点由卡片脚本自己
+    /// 决定、宿主无从枚举「哪些文件仍被已安装卡片引用」——保护只能取保守
+    /// 超集。扫描目录一旦挂过，目录里的既有权重就可能被某张在册卡片以原路径
+    /// 引用；把它从设置里移除的那一刻起，若不留痕，目录立即脱出商店权重根
+    /// 集合（boundary.rs），设备管理「名称不同的外部模型记录 + 删除权重」
+    /// 就能把仍在使用的唯一副本连目录删掉（2026-11-04 评审 P2：评审者以隔离
+    /// 探针实证守卫在设置变更前拦截、变更后放行）。与 `models_dir_history`
+    /// 同一先例：移除不等于脱管，曾经扫过的目录永久留在保护集合里。
+    ///
+    /// 已知边界（与上方 `models_dir_history` 同一条披露）：留痕只发生在
+    /// `set_storage_settings`；手改配置文件移除扫描目录不触发留痕。另见
+    /// 容量取舍：超出 [`MAX_IMPORT_SCAN_DIRS_HISTORY`] 的最老根被挤出后
+    /// 脱出保护集合，在册模型只剩名字臂。
+    #[serde(default)]
+    pub import_scan_dirs_history: Vec<String>,
+
     /// 测试模型商店是否开着。
     ///
     /// 入口是隐藏的：在模型商店页面连点标题 7 次（相邻两次间隔不超过 1.5 秒）弹出
@@ -189,6 +208,7 @@ impl Default for Settings {
             gateway_port: 8090,
             max_concurrent_downloads: 1,
             import_scan_dirs: Vec::new(),
+            import_scan_dirs_history: Vec::new(),
             models_dir_history: Vec::new(),
             test_mode_enabled: false,
         }
@@ -200,6 +220,11 @@ pub const HF_ENDPOINT_PRESETS: &[&str] = &["https://huggingface.co", "https://hf
 /// `models_dir_history` 的保留上限。换权重目录不是高频操作，16 个足够覆盖
 /// "换盘—换回—再换"的正常弧线；超出后丢最老的。
 pub const MAX_MODELS_DIR_HISTORY: usize = 16;
+
+/// `import_scan_dirs_history` 的保留上限。与 [`MAX_MODELS_DIR_HISTORY`] 同一
+/// 量级：增删扫描目录同样是低频设置操作，16 个足够覆盖正常弧线；超出后丢
+/// 最老的（被挤出的根脱出权重保护集合，属既定容量取舍，见字段注释）。
+pub const MAX_IMPORT_SCAN_DIRS_HISTORY: usize = 16;
 
 impl Settings {
     /// 夹到 1..=3。配置文件可能被手改成 0（那样谁都下不了）或者 99，不能信。
