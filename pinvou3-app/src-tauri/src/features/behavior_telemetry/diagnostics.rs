@@ -7,6 +7,7 @@ use sha2::{Digest, Sha256};
 const NOTICE: &str = "failure-diagnostics-v1";
 const RETENTION: u64 = 14 * 24 * 60 * 60 * 1000;
 const MAX_STATE: usize = 16 * 1024 * 1024;
+const VOICE_CONTEXT_PREFIX: &str = "voice|";
 const MAX_REPORT_BYTES: usize = 2300 * 1024;
 
 fn report_request_body(device_id: &str, period: &str, payload: &Value) -> Result<Value> {
@@ -296,6 +297,8 @@ struct Context {
     environment: serde_json::Map<String, Value>,
     #[serde(default)]
     cancel_requested: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    voice_operation: bool,
 }
 #[derive(Clone, Serialize, Deserialize)]
 struct Incident {
@@ -523,12 +526,22 @@ fn event_stage(event: &BehaviorEvent) -> &'static str {
         Some("output") => "output",
         Some("shutdown") => "shutdown",
         _ => match event.event_name {
-            "task_submitted" | "task_rejected" => "submission",
+            "task_submitted"
+            | "task_rejected"
+            | "voice_entry_clicked"
+            | "voice_message_submitted" => "submission",
             "task_admitted" => "queue",
+            "voice_permission_result" => "permission",
+            "voice_started" => "recording",
             "model_used" | "model_fallback_occurred" => "model",
             "tool_call_started" | "tool_call_completed" => "tool",
             "task_first_output" | "artifact_created" => "output",
-            "voice_recognition_failed" => "recognition",
+            "voice_recognition_failed"
+                if field(event, "error_category") == Some("configuration_missing") =>
+            {
+                "submission"
+            }
+            "voice_recognition_failed" | "voice_recognition_completed" => "recognition",
             _ => "unknown",
         },
     }
@@ -620,6 +633,9 @@ pub(crate) fn capture_failure_context(
     error: &str,
     acp: bool,
 ) {
+    if session.starts_with(VOICE_CONTEXT_PREFIX) {
+        return;
+    }
     let Some(telemetry) = app.try_state::<BehaviorTelemetry>() else {
         return;
     };
@@ -705,14 +721,27 @@ pub(super) fn enrich(
     {
         return;
     }
-    let mut key = event
-        .diagnostic_remote
-        .as_ref()
-        .map(|(trace, _)| trace.as_str())
-        .or_else(|| field(event, "session_id"))
-        .or_else(|| field(event, "operation_id"))
-        .unwrap_or(&event.event_id)
-        .to_owned();
+    let voice_operation = event.event_name.starts_with("voice_");
+    let mut key = if voice_operation {
+        // A recording is its own lifecycle, including before task admission or
+        // when its draft becomes a real session. Never borrow a task's context.
+        // Malformed/legacy observations without an operation stay event-local.
+        match field(event, "operation_id") {
+            Some(operation) => format!("{VOICE_CONTEXT_PREFIX}op|{operation}"),
+            None => format!("{VOICE_CONTEXT_PREFIX}event|{}", event.event_id),
+        }
+    } else {
+        event
+            .diagnostic_remote
+            .as_ref()
+            .map(|(trace, _)| trace.as_str())
+            .or_else(|| field(event, "session_id"))
+            .or_else(|| field(event, "operation_id"))
+            // The observer can see caller-provided IDs before wire normalization.
+            .filter(|key| !key.starts_with(VOICE_CONTEXT_PREFIX))
+            .unwrap_or(&event.event_id)
+            .to_owned()
+    };
     if event.event_name == "response_feedback_changed" {
         key = format!(
             "quality|{key}|{}",
@@ -732,10 +761,16 @@ pub(super) fn enrich(
     #[cfg(test)]
     enrich_lock_probe::observe(enrich_lock_probe::Point::Locked);
     prune(&mut state);
-    if event.event_name == "task_submitted" || !state.contexts.contains_key(&key) {
+    if event.event_name == "task_submitted"
+        || state
+            .contexts
+            .get(&key)
+            .is_none_or(|context| context.voice_operation != voice_operation)
+    {
         let source = (event.event_name == "response_feedback_changed")
             .then(|| {
                 field(event, "session_id")
+                    .filter(|session| !session.starts_with(VOICE_CONTEXT_PREFIX))
                     .and_then(|session| state.contexts.get(session))
                     .filter(|context| {
                         context.lease == *lease
@@ -761,6 +796,7 @@ pub(super) fn enrich(
                 http: None,
                 environment: Default::default(),
                 cancel_requested: false,
+                voice_operation,
             }),
         );
     }

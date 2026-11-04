@@ -13,6 +13,9 @@ mod install;
 #[path = "behavior_telemetry/diagnostic_cleanup_tests.rs"]
 mod diagnostic_cleanup;
 
+#[path = "behavior_telemetry/voice_diagnostic_tests.rs"]
+mod voice_diagnostic;
+
 struct TestHome {
     _lock: MutexGuard<'static, ()>,
     previous: Option<OsString>,
