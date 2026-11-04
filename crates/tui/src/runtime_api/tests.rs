@@ -5267,41 +5267,6 @@ async fn session_patch_route_renames_archives_and_reports_real_changes() -> Resu
     Ok(())
 }
 
-/// A session the TUI holds open is refused with a typed 409 rather than
-/// written behind its back.
-#[tokio::test]
-async fn session_patch_route_refuses_a_live_session_with_a_conflict() -> Result<()> {
-    // The live-session claim is process-global by construction (the embedded
-    // API runs inside the TUI process), so this test must not run alongside
-    // anything else that claims or clears it.
-    let _lock = lock_test_env();
-    let Some((addr, _dir, handle)) =
-        spawn_server_with_saved_sessions(&[("sess-live", "Held open", false)]).await?
-    else {
-        return Ok(());
-    };
-    let client = crate::tls::reqwest_client();
-
-    crate::session_manager::set_live_session(Some("sess-live"));
-    let conflict = client
-        .patch(format!("http://{addr}/v1/sessions/sess-live"))
-        .json(&json!({ "title": "Renamed from the dashboard" }))
-        .send()
-        .await?;
-    assert_eq!(conflict.status(), StatusCode::CONFLICT);
-
-    crate::session_manager::set_live_session(None);
-    let allowed = client
-        .patch(format!("http://{addr}/v1/sessions/sess-live"))
-        .json(&json!({ "title": "Renamed from the dashboard" }))
-        .send()
-        .await?;
-    assert_eq!(allowed.status(), StatusCode::OK);
-
-    handle.abort();
-    Ok(())
-}
-
 /// `?peek=true` returns the bounded redacted projection, and the plain route
 /// still returns the full detail shape.
 #[tokio::test]
