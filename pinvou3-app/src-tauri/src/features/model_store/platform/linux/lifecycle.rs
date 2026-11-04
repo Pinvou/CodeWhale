@@ -2871,21 +2871,15 @@ impl ModelManager {
         // 与标记文件。用户选择“删除模型数据”后，这些文件也在删除范围内；不能让
         // 卡片脚本各自记得删，否则脚本升级/回滚一次就会留下看不见的部署包。
         //
-        // 注意：只在卡片脚本已经成功结束后处理，且路径由安全的 card id 生成。
-        // 不接收脚本输出的任意路径，也不碰共享的 engines/ 目录。
-        if purge_weights {
-            if let Ok(safe_id) = config::safe_path_component(&rec.card_id) {
-                let card_dir = config::data_dir().join("cards").join(safe_id);
-                if card_dir.exists() {
-                    on_progress("正在清理此模型的本地脚本与部署文件…");
-                    if let Err(error) = std::fs::remove_dir_all(&card_dir) {
-                        // 不提前返回：下面必须先重新扫描并把残留状态落库。否则一旦
-                        // 这里权限不足，卡片又会从列表消失，用户无从再点“继续清理”。
-                        on_progress(&format!("本地脚本与部署文件尚未清理：{error}"));
-                    }
-                }
-            }
-        }
+        // r23 P1-1：这里**不再提前删除**卡目录。旧序先删再判定，会把
+        // `vendor/.deploy-env` 消歧提示一起带走——首次 purge 失败进入
+        // 「需要继续清理」后，重试轮的 owned_candidate_paths 读不到提示，
+        // 猜测路径消歧不了同名后缀目录（…-unsloth 形态），残留被误判为空，
+        // 记录删除、真实权重孤儿化。新序：判定时豁免卡目录（它的清理由下方
+        // 成功分支强制执行、成败即结果）；失败路径不删卡目录，提示留给重试。
+        let own_card_dir = config::safe_path_component(&rec.card_id)
+            .ok()
+            .map(|safe_id| config::data_dir().join("cards").join(safe_id));
 
         let after = total_size(&candidates);
         let freed_bytes = before.saturating_sub(after);
@@ -2897,7 +2891,13 @@ impl ModelManager {
         let other_cards_paths = self.paths_owned_by_other_cards(card_id);
         let remaining_paths: Vec<String> = candidates
             .iter()
-            .filter(|p| p.exists() && !other_cards_paths.contains(p))
+            .filter(|p| {
+                p.exists()
+                    && !other_cards_paths.contains(p)
+                    // 卡目录自身不计入残留：它还在只说明"还没轮到删"，删除发生在
+                    // 下方成功分支，删失败会走「需要继续清理」而不是靠 exists 判定。
+                    && !own_card_dir.as_deref().is_some_and(|d| d == p.as_path())
+            })
             .map(|p| p.to_string_lossy().to_string())
             .collect();
 
@@ -2906,6 +2906,22 @@ impl ModelManager {
         // 模型库中，用户可重试、打开日志或明确选择“仅从列表移除”。
         if purge_weights {
             if remaining_paths.is_empty() {
+                // 提示的使命到此完成（消歧已用于上方判定），此刻删除卡目录；
+                // 删不掉本身也是残留——落「需要继续清理」而非删除记录。
+                if let Some(card_dir) = own_card_dir.as_ref() {
+                    if card_dir.exists() {
+                        on_progress("正在清理此模型的本地脚本与部署文件…");
+                        if let Err(error) = std::fs::remove_dir_all(card_dir) {
+                            on_progress(&format!("本地脚本与部署文件尚未清理：{error}"));
+                            db::mark_cleanup_required(card_id).map_err(|e| {
+                                ModelManagerError::new(format!("保留待清理模型记录失败：{e}"))
+                            })?;
+                            return Err(ModelManagerError::new(format!(
+                                "本地脚本与部署文件尚未清理：{error}。已保留在模型库中，请点击“继续清理”重试。"
+                            )));
+                        }
+                    }
+                }
                 db::delete_store_model(card_id)
                     .map_err(|e| ModelManagerError::new(format!("删除模型记录失败：{e}")))?;
             } else {
@@ -5985,6 +6001,65 @@ exit 0
         .into_iter()
         .collect();
         db::set_scripts_content(card_id, &blobs, &Default::default()).unwrap();
+    }
+
+    /// r23 P1-1 回归钉：purge 首轮失败进「需要继续清理」后，卡目录里的
+    /// `vendor/.deploy-env` 消歧提示必须仍在（重试轮靠它把同名后缀目录认成本卡
+    /// 产物）。旧序在残留判定前就删卡目录——首轮失败后提示被毁，重试轮只剩
+    /// 猜测路径，`…-unsloth` 目录不可见 → 残留误判为空 → 记录删除、权重孤儿化。
+    #[test]
+    fn failed_purge_keeps_disambiguation_hint_for_the_retry_round() {
+        let tmp = setup_temp_db();
+        let models_dir = tmp.path().join("models");
+        let sibling_weights = models_dir.join("Qwen3.8-27B-NVFP4");
+        make_fake_weights(&sibling_weights, 4096);
+        // 本卡权重在消歧后缀目录；脚本 rm 一个不存在的路径（成功但什么都没删），
+        // 模拟 mark_cleanup_required 针对的「脚本没删掉真实权重」失效类。
+        let own_weights = models_dir.join("Qwen3.8-27B-NVFP4-unsloth");
+        make_fake_weights(&own_weights, 4096);
+
+        add_record_with_uninstall_script_for_dir(
+            "card-stuck",
+            "unsloth/Qwen3.8-27B-NVFP4",
+            "definitely-not-created",
+        );
+        let vendor = config::data_dir()
+            .join("cards")
+            .join("card-stuck")
+            .join("vendor");
+        std::fs::create_dir_all(&vendor).unwrap();
+        std::fs::write(
+            vendor.join(".deploy-env"),
+            format!("MODEL_DIR=\"{}\"\n", own_weights.display()),
+        )
+        .unwrap();
+        add_stuck_record("card-kept", "RadixArk/Qwen3.8-27B-NVFP4", 21_000_000_000);
+
+        let mgr = manager_with_models_dir(&models_dir);
+        let first = mgr.uninstall("card-stuck", true, &mut |_| {}, Default::default());
+        assert!(first.is_err(), "脚本没删权重，首轮必须失败进「需要继续清理」");
+        assert!(
+            vendor.join(".deploy-env").exists(),
+            "失败路径必须保住消歧提示（重试轮靠它）"
+        );
+        assert!(
+            db::get_store_model("card-stuck").unwrap().is_some(),
+            "首轮失败后记录必须在（继续清理入口）"
+        );
+
+        // 重试轮：提示仍在 → 后缀目录仍被判为本卡残留 → 依旧如实失败，
+        // 绝不允许被洗成「删干净了」进而删记录孤儿化权重。
+        let second = mgr.uninstall("card-stuck", true, &mut |_| {}, Default::default());
+        let err_text = format!("{}", second.expect_err("重试轮同样没删权重，必须再次失败"));
+        assert!(
+            err_text.contains("尚未全部删除"),
+            "重试轮必须如实报残留：{err_text}"
+        );
+        assert!(own_weights.exists(), "本卡权重在两轮里都不许被误判清理");
+        assert!(
+            db::get_store_model("card-stuck").unwrap().is_some(),
+            "重试轮失败后记录必须仍在"
+        );
     }
 
     /// 2026-11-03 真机事故（cube-9fde）：下线卡 `unsloth/Qwen3.8-27B-NVFP4` 与
