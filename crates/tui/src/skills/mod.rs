@@ -6,7 +6,7 @@ pub mod audit;
 mod catalog_matrix;
 pub mod install;
 pub mod mutation;
-mod package_digest;
+pub(crate) mod package_digest;
 pub mod recommend;
 pub mod roots;
 mod system;
