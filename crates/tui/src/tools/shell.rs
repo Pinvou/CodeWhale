@@ -2330,6 +2330,8 @@ impl ShellManager {
                 stderr_cursor: 0,
                 completion_reported: false,
                 stdin: None,
+                stdin_closed_at_eof: false,
+                stdin_write_stalled: false,
                 child: None,
                 stop_unconfirmed: false,
                 #[cfg(windows)]
