@@ -1107,13 +1107,9 @@ fn mirror_minimax_reasoning_details_for_body(body: &mut Value, provider: ApiProv
 /// before transport. The tool name is safe to log — it is already visible in
 /// the UI — while the error's `Display` deliberately carries no schema values.
 ///
-/// The route selects the keyword whitelist: the exact Kimi Code endpoint
-/// (`moonshot_base_url_is_exact_kimi_code`, the China-only predicate) admits
-/// the keywords its 2026-11-04 live probe verified, while platform endpoints
-/// keep the conservative MFJS whitelist. This predicate is deliberately
-/// stricter than the fixed-sampling strip (`kimi_code_sampling_route`), whose
-/// overseas `.ai` host has no probe evidence of its own and therefore no
-/// whitelist relaxation either.
+/// The route selects the keyword whitelist (see [`KimiParameterRoute`]); the
+/// per-tool drop plus its projection warning stay the final safety net on
+/// every route.
 ///
 /// Returns the names of the dropped tools, in catalog order.
 fn sanitize_moonshot_chat_tools(
@@ -1243,12 +1239,12 @@ pub(crate) fn build_chat_wire_body(
             .iter()
             .map(|tool| tool_to_chat_for_base_url(tool, base_url))
             .collect();
-        // Moonshot function parameters must end at a plain object root or at
-        // the MFJS-legal root union of object branches (walle specification;
-        // 2026-11-04 live probe). Flatten remaining root composition,
-        // preserve valid nested anyOf, and drop only the tools whose
-        // parameters cannot pass MFJS validation so one incompatible tool
-        // never sinks the whole request.
+        // Moonshot function parameters must end at a plain object root (the
+        // Tool Use documentation; a root union is flattened on the strict
+        // face of the conflicting documents). Flatten remaining root
+        // composition, preserve valid nested anyOf, and drop only the tools
+        // whose parameters cannot pass MFJS validation so one incompatible
+        // tool never sinks the whole request.
         if matches!(provider, crate::config::ApiProvider::Moonshot) {
             let route = if moonshot_base_url_is_exact_kimi_code(base_url) {
                 crate::tools::schema_sanitize::KimiParameterRoute::KimiCode
@@ -8616,15 +8612,16 @@ mod image_block_wire_tests {
         );
     }
 
-    /// Moonshot's MFJS specification lists `anyOf` as a first-class
-    /// applicator, and a 2026-11-04 live probe of the Kimi Code endpoint
-    /// returned 200 for a root union of object branches with per-branch
-    /// `required` groups honored. The Moonshot lane must keep such a union —
-    /// with each branch's own required set — instead of folding it into one
-    /// merged object whose single required group starved k3's constrained
-    /// decoding into emitting only the required fields.
+    /// The Moonshot Tool Use documentation requires "The root of `parameters`
+    /// must be an `object`" (https://platform.kimi.ai/docs/api/tool-use,
+    /// fetched 2026-11-05). The MFJS specification lists `anyOf` as an
+    /// applicator but does not authorize it at a parameters root; on the
+    /// conflicting documents the strict face wins, so a root union of object
+    /// branches — even though a 2026-11-04 live probe observed the endpoint
+    /// returning 200 for one (probe facts are observations only and never a
+    /// shipping basis) — is flattened into one merged object on the wire.
     #[test]
-    fn kimi_chat_keeps_root_union_of_object_branches() {
+    fn kimi_chat_flattens_root_union_of_object_branches() {
         let union_schema = serde_json::json!({
             "anyOf": [
                 {
@@ -8689,33 +8686,28 @@ mod image_block_wire_tests {
 
         assert!(
             body.omitted_tool_names.is_empty(),
-            "the union root must not be dropped: {:?}",
+            "the flattenable union must not be dropped: {:?}",
             body.omitted_tool_names
         );
         let parameters = &body.body["tools"][0]["function"]["parameters"];
-        let branches = parameters["anyOf"]
-            .as_array()
-            .expect("root anyOf must survive");
-        assert_eq!(branches.len(), 2, "both object variants must survive");
         assert_eq!(
-            branches[0]["required"],
-            serde_json::json!(["kind", "outline"])
-        );
-        assert_eq!(
-            branches[1]["required"],
-            serde_json::json!(["kind", "content"])
+            parameters["type"], "object",
+            "the wire root must be a plain object schema: {parameters}"
         );
         assert!(
-            branches.iter().all(|branch| branch["type"] == "object"),
-            "MFJS requires the object type inside every branch: {parameters}"
+            parameters.get("anyOf").is_none(),
+            "no root union may survive on the wire: {parameters}"
         );
+        // The flatten merges the branch properties into one object; the
+        // per-branch required groups are gone, which is exactly the
+        // constraint loss the root composition note documents.
+        let properties = parameters["properties"].as_object().unwrap();
+        for name in ["kind", "outline", "content"] {
+            assert!(properties.contains_key(name), "{name} left the merge");
+        }
         assert!(
-            parameters.get("type").is_none(),
-            "type may not sit beside the union keyword: {parameters}"
-        );
-        assert!(
-            parameters.get("properties").is_none(),
-            "branch properties must not be merged into the root: {parameters}"
+            parameters.get("required").is_none(),
+            "no required set survives a union of disagreeing branches: {parameters}"
         );
     }
 
