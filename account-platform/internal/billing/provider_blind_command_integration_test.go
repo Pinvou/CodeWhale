@@ -233,7 +233,10 @@ func TestProviderBlindCommandReceiptPostgres(t *testing.T) {
 	})
 	t.Run("provider-prefix-down-preserves-key-proof-and-migration-ledger", func(t *testing.T) {
 		r, ctx := retainedFinanceRepository(t, 900028)
-		_, late, actor := providerBlindFixture(t, r, ctx)
+		// This prefix predates product admission materials. The immutable
+		// receipt/rollback contract needs a claimed case, not a recovery mapping.
+		_, order, _, _ := retainedFinanceOrder(t, r, ctx, 10000, false)
+		late, actor := providerBlindClaimedCase(t, r, ctx, order.ID)
 		key, reason := "blind-down-"+uuid.NewString(), "controlled retained immutable command"
 		original, err := r.EscalateProviderBlind(ctx, late.ID, actor, reason, key)
 		if err != nil {
@@ -342,18 +345,17 @@ func providerBlindFixture(t *testing.T, r *PostgresRepository, ctx context.Conte
 	if err != nil {
 		t.Fatal("create actual provider mapping", err)
 	}
-	verification, _, err := r.StartProductAdmissionVerification(ctx, item.CatalogItemID, uuid.New(), nil)
-	if err != nil {
-		t.Fatal("start actual mapping verification", err)
-	}
-	evidence, err := r.CompleteProductAdmissionVerification(ctx, verification.VerificationID, "controlled-verifier", "CONTROLLED", "controlled-blind-mapping", time.Now().Add(time.Hour))
-	if err != nil {
-		t.Fatal("complete controlled provider evidence", err)
-	}
+	evidence := completeManualAdmissionFixture(t, r, ctx, item, time.Now().Add(time.Hour))
 	if _, err := r.TransitionRechargeProduct(ctx, item.CatalogItemID, item.Version, "ON_SALE", &evidence); err != nil {
 		t.Fatal("publish verified mapping", err)
 	}
-	late, err := r.EscalateLatePaymentReview(ctx, order.ID, "CLOSED")
+	late, actor := providerBlindClaimedCase(t, r, ctx, order.ID)
+	return order, late, actor
+}
+
+func providerBlindClaimedCase(t *testing.T, r *PostgresRepository, ctx context.Context, orderID uuid.UUID) (LatePaymentReviewCase, uuid.UUID) {
+	t.Helper()
+	late, err := r.EscalateLatePaymentReview(ctx, orderID, "CLOSED")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -362,7 +364,7 @@ func providerBlindFixture(t *testing.T, r *PostgresRepository, ctx context.Conte
 	if err != nil {
 		t.Fatal(err)
 	}
-	return order, late, actor
+	return late, actor
 }
 
 func providerBlindResume(t *testing.T, r *PostgresRepository, ctx context.Context, order PaymentOrder, requester uuid.UUID) {
