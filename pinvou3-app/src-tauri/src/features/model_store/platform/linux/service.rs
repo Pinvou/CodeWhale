@@ -811,15 +811,13 @@ pub fn take_startup_cleanup(service: &Arc<ModelStoreService>) -> Result<Value, S
 /// 路径不得当未命中放行）。与 residual_paths 同一把 exists() 尺子但方向相反：
 /// 提示文案宁可漏报，保护集合宁可多报。
 pub(crate) fn installed_weight_paths_checked() -> Result<Vec<std::path::PathBuf>, String> {
-    let settings = config::try_load_settings()?;
     let records = db::list_store_models().map_err(|e| format!("读取在册模型失败：{e}"))?;
-    let mut roots: Vec<std::path::PathBuf> = vec![settings.models_path()];
-    for dir in &settings.models_dir_history {
-        let root = std::path::PathBuf::from(dir.trim());
-        if root.is_absolute() {
-            roots.push(root);
-        }
-    }
+    // 候选根取商店权重根全集（当前+历史 models_dir、导入目录及其历史、staging、
+    // 内置家目录根）：旧版本允许一次设置变更同时换权重目录并移除扫描目录且
+    // 不留任何历史（2026-11-04 评审 P2），此时旧默认根（~/models 等）上的
+    // 在册引用只有内置根能恢复；集合同源 collect_weights_roots，与守卫的
+    // 目录级保护同口径。
+    let roots = crate::features::model_store::store_weights_roots_checked()?;
     let mut out: Vec<std::path::PathBuf> = Vec::new();
     for rec in &records {
         // 与 lifecycle::candidate_paths 同一候选约定（权重两臂）：来源仓库名
@@ -1304,6 +1302,64 @@ mod tests {
             "candidates under the historical models_dir root must still be recovered, got {refs:?}"
         );
         let _ = old_models_dir;
+    }
+
+    #[test]
+    fn installed_weight_paths_cover_builtin_roots_for_legacy_migration() {
+        use crate::features::model_store::platform::linux::db;
+
+        // 旧版迁移组合（2026-11-04 评审 P2）：配置里换过权重目录、两类历史
+        // 均不存在，但安装记录仍在——旧默认根（内置家目录根 ~/models）上的
+        // 在册引用必须由内置根枚举恢复。
+        let ctx = super::config::TempHome::new();
+        db::init_db().expect("init store db");
+        std::fs::write(
+            super::config::config_dir().join("config.json"),
+            format!(
+                r#"{{"models_dir": "{}"}}"#,
+                ctx.path().join("custom-weights").to_string_lossy()
+            ),
+        )
+        .expect("write migrated config");
+        let settings = super::config::load_settings();
+        assert!(settings.models_dir_history.is_empty());
+        assert!(settings.import_scan_dirs_history.is_empty());
+        let legacy = crate::platform::paths::user_home_dir()
+            .join("models")
+            .join("qwen-weights");
+        std::fs::create_dir_all(&legacy).expect("create legacy weights");
+        db::add_store_model(db::AddStoreModelParams {
+            card_id: "c-legacy",
+            model_name: "legacy-model",
+            card_name: "c-legacy",
+            org: None,
+            description: None,
+            engine_name: "e",
+            engine_version: None,
+            size_bytes: 0,
+            quantization: None,
+            source_repo_id: Some("org/qwen-weights"),
+            source_filename: None,
+            scripts: &std::collections::BTreeMap::new(),
+            status: "downloaded",
+            profiles: &[],
+            deploy_topology: crate::features::model_store::platform::linux::store_client::DeployTopology::default(),
+            card_source: "store",
+        })
+        .expect("insert legacy model");
+        let refs = crate::features::model_store::installed_weight_paths_checked()
+            .expect("enumerate legacy refs");
+        assert!(
+            refs.contains(&legacy.canonicalize().expect("canonical legacy")),
+            "builtin-root legacy weights must be recovered without any history, got {refs:?}"
+        );
+        // 自定义新根下的同名候选不存在 → 不误报。
+        assert!(
+            !refs
+                .iter()
+                .any(|p| p.starts_with(ctx.path().join("custom-weights"))),
+            "missing candidates under the new custom root must not appear, got {refs:?}"
+        );
     }
 
     #[test]
