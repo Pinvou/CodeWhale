@@ -6,6 +6,37 @@ fn tool() -> FileTool {
     FileTool::with_patch("File")
 }
 
+#[test]
+fn read_description_pins_the_disclosed_boundaries() {
+    // Each clause was corrected by the model-facing-copy audit against
+    // file.rs / image_attach.rs; pin the exact claims so a revert cannot
+    // restate the old "text-only" description silently.
+    let description = ReadTool.description();
+    assert!(description.starts_with("Read a file."), "{description}");
+    assert!(
+        description.contains("PNG, JPEG, GIF, and WebP files up to 5 MiB are returned as images"),
+        "{description}"
+    );
+    assert!(
+        description.contains(
+            "BMP files and images above 5 MiB are detected but replaced with an omission note"
+        ),
+        "{description}"
+    );
+    assert!(
+        description.contains("bytes that are not valid UTF-8 become replacement characters"),
+        "{description}"
+    );
+    assert!(
+        description.contains("2000 complete lines or 50KB, whichever comes first"),
+        "{description}"
+    );
+    assert!(
+        !description.contains("Read a text file"),
+        "the read tool must not claim to be text-only: {description}"
+    );
+}
+
 #[tokio::test]
 async fn lowercase_read_returns_a_typed_image_block() {
     let tmp = tempdir().expect("tempdir");

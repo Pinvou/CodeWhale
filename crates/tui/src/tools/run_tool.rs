@@ -207,4 +207,42 @@ mod tests {
             .collect();
         assert_eq!(advertised, RunTool::ACTIONS);
     }
+
+    #[test]
+    fn run_verifier_copy_pins_the_per_path_semantics() {
+        // These sentences were corrected by review rounds against the actual
+        // spawn paths (foreground direct spawn vs. background shell render);
+        // pin them so a revert cannot restate a falsehood silently.
+        let schema = RunTool::new("Run").input_schema();
+        let commands = schema["properties"]["commands"]["description"]
+            .as_str()
+            .expect("commands description");
+        assert!(
+            commands.contains("Foreground gates run directly as program+args, not through a shell"),
+            "{commands}"
+        );
+        assert!(
+            commands
+                .contains("Background gates are rendered into a single command line and run through the detected platform shell"),
+            "{commands}"
+        );
+        assert!(
+            commands.contains("a POSIX-quoted path can fail under PowerShell"),
+            "{commands}"
+        );
+        let background = schema["properties"]["background"]["description"]
+            .as_str()
+            .expect("background description");
+        assert!(
+            background
+                .contains("a task id per gate, null when a gate is skipped or fails to start"),
+            "{background}"
+        );
+        assert!(
+            !background.contains("task_ids"),
+            "the visible payload carries per-gate jobs, not a task_ids array: {background}"
+        );
+        let items = &schema["properties"]["commands"]["items"];
+        assert_eq!(items["additionalProperties"], json!(false));
+    }
 }

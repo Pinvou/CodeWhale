@@ -42,6 +42,31 @@ fn lowercase_bash_schema_is_small_contract() {
 }
 
 #[test]
+fn lowercase_bash_description_pins_the_stream_and_persistence_claims() {
+    // These sentences were corrected by the model-facing-copy audit against
+    // the contract spawn path (shared_output_pipe + finish_contract_bash_result
+    // concatenation, one Command per call); pin them so a revert cannot
+    // restate separate-stream or persistent-shell semantics silently.
+    let description = LowercaseBashTool.description();
+    assert!(
+        description.contains("stdout and stderr arrive as one merged stream in arrival order"),
+        "{description}"
+    );
+    assert!(
+        description.contains("redirect a command's stderr to a file"),
+        "{description}"
+    );
+    assert!(
+        description.contains("Each call runs in a fresh shell"),
+        "{description}"
+    );
+    assert!(
+        !description.contains("return stdout and stderr"),
+        "the contract merges both streams; no separate-stream promise may return: {description}"
+    );
+}
+
+#[test]
 fn lowercase_bash_description_matches_the_timeout_it_actually_applies() {
     use super::{
         CONTRACT_BASH_FOREGROUND_DEFAULT_TIMEOUT_MS, contract_bash_legacy_input,
