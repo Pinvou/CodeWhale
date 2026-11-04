@@ -74,6 +74,55 @@ try {
       && document.querySelector('[data-testid="chat-remote-pending-dispatches"] button'));
   }
 
+  for (const scenario of ['idle', 'idle-failure', 'idle-switch', 'idle-unmount', 'idle-removed-skill']) {
+    await load(scenario);
+    await page.evaluate(() => window.dispatchFixture.expire());
+    await page.click('[data-testid="chat-remote-capabilities"] input[type="checkbox"]');
+    await page.type('textarea', 'Write a document after an idle connection');
+    assert.equal(await page.$eval('[data-testid="chat-composer-send"]', button => button.disabled), false,
+      'an expired display snapshot must allow the new-task preflight');
+    await page.click('[data-testid="chat-composer-send"]');
+    await page.waitForFunction(() => window.dispatchFixture.renewals.length === 1);
+    assert.equal(await page.evaluate(() => window.dispatchFixture.calls.length), 0,
+      'no reserve, upload or commit before B replies');
+    if (scenario === 'idle-failure') {
+      await page.evaluate(() => window.dispatchFixture.renewals[0].reject(
+        Object.assign(new Error('timeout'), { code: 'capability_snapshot_timeout' })));
+      await page.waitForFunction(() => document.querySelector('textarea').value.includes('idle connection'));
+      assert.equal(await page.evaluate(() => window.dispatchFixture.calls.length), 0);
+    } else if (scenario === 'idle-switch' || scenario === 'idle-unmount') {
+      await page.evaluate(shouldUnmount => {
+        if (shouldUnmount) window.dispatchFixture.unmount();
+        else window.dispatchFixture.select('remote-b');
+      }, scenario === 'idle-unmount');
+      await flush();
+      await page.evaluate(() => window.dispatchFixture.renewals[0].resolve());
+      await page.waitForFunction(() => window.dispatchFixture.restores.length === 1);
+      assert.equal(await page.evaluate(() => window.dispatchFixture.restores[0].sessionId), 'remote-a');
+      assert.equal(await page.evaluate(() => window.dispatchFixture.calls.length), 0,
+        'a retired preparation must not reserve in either session');
+    } else {
+      await page.evaluate(() => window.dispatchFixture.completeRenewal());
+      await page.waitForFunction(() => window.dispatchFixture.calls.some(call => call.kind === 'reserve'));
+      const reserve = await page.evaluate(() => window.dispatchFixture.calls.find(call => call.kind === 'reserve'));
+      assert.equal(reserve.revision, 2);
+      assert.deepEqual(reserve.intent.skillIds, ['skill-document'], 'retain the skill selected before renewal');
+      assert.equal(reserve.intent.text, 'Write a document after an idle connection');
+      if (scenario === 'idle-removed-skill') {
+        await page.waitForFunction(() => document.querySelector('textarea').value.includes('idle connection'));
+        assert.equal(await page.evaluate(() => window.dispatchFixture.commits.length), 0,
+          'native rejection cannot silently drop a removed skill and send');
+      } else {
+        await page.waitForFunction(() => window.dispatchFixture.commits.length === 1);
+        await settleCommit(0, 'outcome_unknown');
+        assert.equal(await page.evaluate(() => window.dispatchFixture.calls.filter(call => call.kind === 'reserve').length), 1);
+        assert.equal(await page.evaluate(() => window.dispatchFixture.commits.length), 1,
+          'an unknown commit is not automatically replayed');
+      }
+    }
+    assert.deepEqual(errors, []);
+  }
+
   for (const phase of ['commit', 'upload']) {
     await load(phase);
     if (phase === 'upload') {

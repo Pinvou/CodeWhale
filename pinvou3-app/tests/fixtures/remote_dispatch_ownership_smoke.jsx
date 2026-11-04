@@ -11,7 +11,7 @@ import { remoteProxyLeaseIdentity } from '../../src/features/remote-control/remo
 const parameters = new URLSearchParams(location.search);
 const copy = { zh: dictZh, en: dictEn, ja: dictJa }[parameters.get('lang') || 'zh'];
 const fixture = window.dispatchFixture = {
-  calls: [], commits: [], uploads: [], previews: [], controlledSnapshots: [], current: null,
+  calls: [], commits: [], uploads: [], previews: [], controlledSnapshots: [], renewals: [], restores: [], current: null,
   scenario: parameters.get('scenario') || 'commit', copy,
 };
 const platformCapabilities = { loaded: true, os: 'windows', desktopRemoteControl: true };
@@ -34,9 +34,11 @@ function makeSession(id, leaseEpoch = 1, revision = 1, generation = 'generation-
     connectionId: connection.connectionId, controllerLeaseId: connection.controllerLeaseId,
     leaseEpoch, relayEpoch: connection.relayEpoch, remoteControlGeneration: connection.generation,
     remoteSessionRef: connection.sessionRef, capabilityRevision: revision,
-    expiresAtMs: Date.now() + 3600000, modes: ['chat'], workspaces: [], skills: [], tools: [],
+    expiresAtMs: Date.now() + (fixture.scenario.startsWith('idle') ? 30_000 : 3600000), modes: ['chat'], workspaces: [],
+    skills: fixture.scenario.startsWith('idle')
+      ? [{ skillId: 'skill-document', displayName: '公文写作', scopes: ['chat'] }] : [], tools: [],
   };
-  if (!previous && (fixture.scenario !== 'upload' || id !== 'remote-a')) {
+  if (!previous && !fixture.scenario.startsWith('idle') && (fixture.scenario !== 'upload' || id !== 'remote-a')) {
     recordRemoteDispatch(id, connection.sessionRef, remoteProxyLeaseIdentity(id, connection),
       'Prepared retry text', { state: 'prepared_not_sent', retryHandle: handle }, history);
   } else if (!previous) {
@@ -57,15 +59,23 @@ function session(id, lease = 1, revision = 1, generation = 'generation-1') {
 window.TauriBridge = {
   available: true,
   state: {
-    getMany: () => ({ platformCapabilities }), get: () => ({}), subscribe: () => () => {},
+    getMany: () => ({ platformCapabilities }),
+    get: domain => domain === 'desktopRemoteControl'
+      ? { controllerConnection: fixture.current.connection, remoteCapabilities: fixture.current.capabilities } : {},
+    subscribe: () => () => {},
   },
-  chat: { getComposerDraft: () => composerDraft, setComposerDraft: text => { composerDraft = text; } },
+  chat: {
+    getComposerDraft: () => composerDraft, setComposerDraft: text => { composerDraft = text; },
+    restoreTaskDraft: (text, options) => fixture.restores.push({ text, ...options }),
+  },
   voice: {},
   models: { loadSessionModel: async () => {} },
   settings: { listBuiltinFeatures: async () => [] },
   desktopRemoteControl: {
     capabilitiesSnapshot: async () => fixture.current.capabilities,
-    controllerCapabilitySend: async () => {}, listExportableModels: async () => [],
+    controllerCapabilitySend: () => fixture.scenario.startsWith('idle')
+      ? new Promise((resolve, reject) => fixture.renewals.push({ resolve, reject })) : Promise.resolve(),
+    listExportableModels: async () => [],
     artifactIndex: async id => [{ artifactId: `artifact-${id}`, taskId: `completed-${id}`,
       displayName: `${id}.txt`, mimeType: 'text/plain', totalBytes: 4, previewKind: 'text' }],
     permissionList: async () => [],
@@ -73,8 +83,12 @@ window.TauriBridge = {
       return new Promise((resolve, reject) => fixture.previews.push({ id, resolve, reject }));
     },
     readRemoteProxyHistory: async id => session(id).history,
-    async reserveRemoteTask(id) {
-      fixture.calls.push({ kind: 'reserve', id });
+    async reserveRemoteTask(id, remoteRef, intent) {
+      fixture.calls.push({ kind: 'reserve', id, remoteRef, intent,
+        revision: fixture.current.connection.capabilityRevision });
+      if (fixture.scenario === 'idle-removed-skill') {
+        throw Object.assign(new Error('task_skill_invalid'), { code: 'task_skill_invalid' });
+      }
       return { state: 'prepared_not_sent', retryHandle: session(id).handle };
     },
     attachmentBegin(id, ref, taskId) {
@@ -111,8 +125,25 @@ function App() {
   });
   fixture.current = selected;
   fixture.select = (...args) => setSelected(session(...args));
+  fixture.expire = () => {
+    // Suspend the timer's scheduling while moving the wall clock past expiry.
+    // The next user interaction rerenders the real ChatView with an old cache.
+    const expiredNow = selected.capabilities.expiresAtMs + 1;
+    Date.now = () => expiredNow;
+  };
+  fixture.completeRenewal = () => {
+    const next = session(selected.id, selected.connection.leaseEpoch,
+      selected.connection.capabilityRevision + 1, selected.connection.generation);
+    if (fixture.scenario === 'idle-removed-skill') next.capabilities.skills = [];
+    fixture.current = next;
+    setSelected(next);
+    // Keep host state authoritative even before React processes setSelected.
+    fixture.renewals.at(-1).resolve();
+  };
   fixture.cases = id => remoteDispatchCases(id, session(id).history);
   return <ChatView theme="dark" t={copy} bs={selected.bs}
     remoteConnection={selected.connection} remoteModelSource="controlled_device" />;
 }
-createRoot(document.getElementById('root')).render(<App />);
+const appRoot = createRoot(document.getElementById('root'));
+fixture.unmount = () => appRoot.unmount();
+appRoot.render(<App />);
