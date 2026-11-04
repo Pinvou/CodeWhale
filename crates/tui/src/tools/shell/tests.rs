@@ -1,26 +1,20 @@
 use super::*;
-
 use crate::tools::spec::ToolContext;
 use serde_json::{Value, json};
 use tempfile::tempdir;
-
 #[cfg(windows)]
 use windows::Win32::Foundation::{DUPLICATE_HANDLE_OPTIONS, DuplicateHandle, HANDLE};
 #[cfg(windows)]
 use windows::Win32::System::Threading::GetCurrentProcess;
-
 // `env_lock` serializes tests that mutate the process environment.
 #[cfg(any(unix, windows))]
 use std::sync::{Mutex, OnceLock};
-
 #[cfg(any(unix, windows))]
 fn env_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
 }
-
 const BACKGROUND_COMPLETION_WAIT_MS: u64 = 30_000;
-
 #[test]
 fn lowercase_bash_schema_is_small_contract() {
     let schema = LowercaseBashTool.input_schema();
@@ -40,7 +34,6 @@ fn lowercase_bash_schema_is_small_contract() {
     );
     assert!(!BashTool::new("Bash").model_visible());
 }
-
 #[test]
 fn lowercase_bash_description_matches_the_timeout_it_actually_applies() {
     use super::{
@@ -89,7 +82,6 @@ fn lowercase_bash_description_matches_the_timeout_it_actually_applies() {
         "schema must name the default it applies: {timeout_doc}"
     );
 }
-
 #[test]
 fn contract_bash_foreground_without_a_timeout_is_bounded_not_endless() {
     use super::{
@@ -130,7 +122,6 @@ fn contract_bash_foreground_without_a_timeout_is_bounded_not_endless() {
         Some(120_000)
     );
 }
-
 #[cfg(all(unix, not(target_env = "ohos")))]
 #[test]
 fn inherited_interactive_terminal_fails_closed_before_spawn() {
@@ -147,7 +138,6 @@ fn inherited_interactive_terminal_fails_closed_before_spawn() {
     assert!(message.contains("terminal/run"), "{message}");
     assert!(message.contains("terminal/send"), "{message}");
 }
-
 #[cfg(all(unix, target_env = "ohos"))]
 #[test]
 fn inherited_interactive_terminal_offers_only_ohos_recovery_paths() {
@@ -163,7 +153,6 @@ fn inherited_interactive_terminal_offers_only_ohos_recovery_paths() {
     assert!(!message.contains("background: true"), "{message}");
     assert!(!message.contains("terminal/run"), "{message}");
 }
-
 #[test]
 fn contract_bash_nonzero_is_an_error_with_status_after_output() {
     let error = finish_contract_bash_result(
@@ -194,7 +183,6 @@ fn contract_bash_nonzero_is_an_error_with_status_after_output() {
             .ends_with("before\n\nCommand exited with code 7")
     );
 }
-
 #[cfg(unix)]
 #[tokio::test]
 async fn lowercase_bash_returns_one_ordered_stream() {
@@ -209,7 +197,6 @@ async fn lowercase_bash_returns_one_ordered_stream() {
         .expect("bash");
     assert_eq!(result.content, "out-1err-2out-3");
 }
-
 #[cfg(windows)]
 fn windows_python_stdio_fixture() -> (tempfile::TempDir, String) {
     assert!(
@@ -256,7 +243,6 @@ fn windows_python_stdio_fixture() -> (tempfile::TempDir, String) {
     );
     (workspace, command)
 }
-
 #[cfg(windows)]
 fn assert_windows_python_stdio(output: &str) {
     assert!(
@@ -276,7 +262,6 @@ fn assert_windows_python_stdio(output: &str) {
         "output contains replacement characters"
     );
 }
-
 #[cfg(windows)]
 #[tokio::test]
 #[ignore = "requires native Windows Python on PATH and PowerShell"]
@@ -293,7 +278,6 @@ async fn forkguard_windows_python_stdio_lowercase_bash() {
     assert!(result.success, "{}", result.content);
     assert_windows_python_stdio(&result.content);
 }
-
 #[cfg(windows)]
 #[test]
 #[ignore = "requires native Windows Python on PATH and PowerShell"]
@@ -316,7 +300,6 @@ fn forkguard_windows_python_stdio_background_shell() {
         assert_windows_python_stdio(&format!("{}\n{}", result.stdout, result.stderr));
     }
 }
-
 #[cfg(unix)]
 #[tokio::test]
 async fn lowercase_bash_keeps_raw_command_under_readonly_policy() {
@@ -337,7 +320,6 @@ async fn lowercase_bash_keeps_raw_command_under_readonly_policy() {
             .to_string()
     );
 }
-
 #[tokio::test]
 async fn lowercase_bash_readonly_refusal_names_work_mode() {
     let workspace = tempdir().expect("workspace");
@@ -353,7 +335,6 @@ async fn lowercase_bash_readonly_refusal_names_work_mode() {
     assert!(!result.content.contains("Act mode"));
     assert!(!workspace.path().join("blocked-by-plan").exists());
 }
-
 /// Regression for the wedge that took out the owner's own session under swap
 /// exhaustion: the lowercase `bash` spill file could not be created (full temp
 /// volume), every call — including `echo ok` — failed with the harness-internal
@@ -426,7 +407,6 @@ async fn lowercase_bash_survives_spill_file_failure_and_stays_usable() {
         "fail-soft must not create the dir"
     );
 }
-
 /// A spawn/stream failure caused by host exhaustion must reach the model as
 /// an actionable message (cause chain + likely reason + retry), never as a
 /// bare harness-internal context string.
@@ -463,7 +443,6 @@ fn shell_execution_failure_names_resource_exhaustion_and_says_retry() {
         "Shell execution failed: working directory does not exist"
     );
 }
-
 #[tokio::test]
 async fn lowercase_bash_timeout_uses_seconds_and_fails() {
     let workspace = tempdir().expect("workspace");
@@ -482,7 +461,6 @@ async fn lowercase_bash_timeout_uses_seconds_and_fails() {
         "{error}"
     );
 }
-
 fn execute_shell(
     manager: &mut ShellManager,
     command: &str,
@@ -502,7 +480,6 @@ fn execute_shell(
         "workspace",
     )
 }
-
 #[test]
 fn forkguard_shell_catalog_guidance_matches_execution() {
     let tool = BashTool::new("Bash");
@@ -552,7 +529,6 @@ fn forkguard_shell_catalog_guidance_matches_execution() {
     assert_eq!(catalog[0].name, LowercaseBashTool.name());
     assert_eq!(catalog[0].description, LowercaseBashTool.description());
 }
-
 #[test]
 #[ignore = "Exports model-visible shell fixtures for opt-in live model evaluation"]
 fn export_shell_guidance_eval_fixture() {
@@ -569,7 +545,6 @@ fn export_shell_guidance_eval_fixture() {
     });
     std::fs::write(path, serde_json::to_vec_pretty(&fixture).unwrap()).unwrap();
 }
-
 #[test]
 fn deleted_saved_workspace_reports_path_and_recovery_before_spawn() {
     let workspace = tempdir().expect("workspace");
@@ -584,7 +559,6 @@ fn deleted_saved_workspace_reports_path_and_recovery_before_spawn() {
     assert!(message.contains("working_dir") || message.contains("cwd"));
     assert!(message.contains("resume/fork"));
 }
-
 #[test]
 fn explicit_missing_working_dir_is_not_misreported_as_session_corruption() {
     let workspace = tempdir().expect("workspace");
@@ -604,7 +578,6 @@ fn explicit_missing_working_dir_is_not_misreported_as_session_corruption() {
     assert!(message.contains(&missing.display().to_string()));
     assert!(!message.contains("saved session workspace"));
 }
-
 #[cfg(not(target_env = "ohos"))]
 #[test]
 fn pty_exit_status_preserves_high_windows_code_losslessly() {
@@ -619,7 +592,6 @@ fn pty_exit_status_preserves_high_windows_code_losslessly() {
     );
     assert_eq!(exit_code_hex(status.code).as_deref(), Some("0xC0000005"));
 }
-
 #[cfg(not(target_env = "ohos"))]
 #[test]
 fn ordinary_pty_exit_status_keeps_concise_label() {
@@ -629,16 +601,13 @@ fn ordinary_pty_exit_status_keeps_concise_label() {
     assert_eq!(exit_code_label(status.code), "exit code 127");
     assert_eq!(exit_code_hex(status.code), None);
 }
-
 #[cfg(windows)]
 #[test]
 fn std_windows_exit_status_reinterprets_signed_dword() {
     assert_eq!(std_exit_code_i64(0xC000_0005_u32 as i32), 0xC000_0005);
 }
-
 #[cfg(windows)]
 const JOB_OBJECT_QUERY_ACCESS: u32 = 0x0004;
-
 #[cfg(windows)]
 fn duplicate_job_without_terminate_access(job: WindowsJob) -> WindowsJob {
     let process = unsafe { GetCurrentProcess() };
@@ -662,11 +631,9 @@ fn duplicate_job_without_terminate_access(job: WindowsJob) -> WindowsJob {
         handle: limited_handle,
     }
 }
-
 fn echo_command(message: &str) -> String {
     format!("echo {message}")
 }
-
 fn sleep_command(seconds: u64) -> String {
     let dispatcher = crate::shell_dispatcher::global_dispatcher();
     if dispatcher.kind().is_powershell() {
@@ -682,7 +649,6 @@ fn sleep_command(seconds: u64) -> String {
         format!("sleep {seconds}")
     }
 }
-
 fn sleep_then_echo_command(seconds: u64, message: &str) -> String {
     let dispatcher = crate::shell_dispatcher::global_dispatcher();
     if dispatcher.kind().is_powershell() {
@@ -698,7 +664,6 @@ fn sleep_then_echo_command(seconds: u64, message: &str) -> String {
         format!("sleep {seconds} && echo {message}")
     }
 }
-
 fn echo_stdin_command() -> String {
     let dispatcher = crate::shell_dispatcher::global_dispatcher();
     if dispatcher.kind().is_powershell() {
@@ -713,7 +678,6 @@ fn echo_stdin_command() -> String {
         "cat".to_string()
     }
 }
-
 fn network_restricted_context(tmp: &std::path::Path) -> ToolContext {
     ToolContext::new(tmp)
         .with_elevated_sandbox_policy(ExecutionSandboxPolicy::WorkspaceWrite {
@@ -726,7 +690,6 @@ fn network_restricted_context(tmp: &std::path::Path) -> ToolContext {
             "Shell command blocked: Plan mode runs shell commands in a network-restricted sandbox.",
         )
 }
-
 fn failed_network_shell_result(stdout: &str, stderr: &str) -> ShellResult {
     ShellResult {
         task_id: None,
@@ -746,12 +709,10 @@ fn failed_network_shell_result(stdout: &str, stderr: &str) -> ShellResult {
         sandbox_denied: false,
     }
 }
-
 #[cfg(unix)]
 const SHELL_DESCENDANT_HELPER_ENV: &str = "CODEWHALE_SHELL_DESCENDANT_HELPER";
 #[cfg(unix)]
 const SHELL_DESCENDANT_PID_FILE_ENV: &str = "CODEWHALE_SHELL_DESCENDANT_PID_FILE";
-
 #[cfg(unix)]
 #[test]
 fn shell_descendant_helper_process() {
@@ -768,7 +729,6 @@ fn shell_descendant_helper_process() {
     std::thread::sleep(Duration::from_secs(30));
     let _ = child.wait();
 }
-
 #[cfg(unix)]
 fn wait_for_shell_pid_file(path: &Path) -> libc::pid_t {
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -785,7 +745,6 @@ fn wait_for_shell_pid_file(path: &Path) -> libc::pid_t {
         std::thread::sleep(Duration::from_millis(25));
     }
 }
-
 #[cfg(unix)]
 fn wait_for_shell_pid_exit(pid: libc::pid_t) -> bool {
     let deadline = Instant::now() + Duration::from_secs(2);
@@ -801,7 +760,6 @@ fn wait_for_shell_pid_exit(pid: libc::pid_t) -> bool {
         std::thread::sleep(Duration::from_millis(25));
     }
 }
-
 fn wait_for_completed_shell(manager: &mut ShellManager, task_id: &str) -> ShellResult {
     let deadline = Instant::now() + Duration::from_millis(BACKGROUND_COMPLETION_WAIT_MS);
 
@@ -815,7 +773,6 @@ fn wait_for_completed_shell(manager: &mut ShellManager, task_id: &str) -> ShellR
         std::thread::sleep(Duration::from_millis(50));
     }
 }
-
 #[test]
 fn shell_owner_registers_before_spawn_and_silent_work_stays_live() {
     let work = crate::work_graph::new_shared_work_runtime(
@@ -878,7 +835,6 @@ fn shell_owner_registers_before_spawn_and_silent_work_stays_live() {
         Some(512)
     );
 }
-
 #[test]
 fn exec_shell_parallel_flags_are_input_aware() {
     let tool = BashTool::new("Bash");
@@ -971,7 +927,6 @@ fn exec_shell_parallel_flags_are_input_aware() {
         "interactive": true
     })));
 }
-
 #[tokio::test]
 async fn readonly_shell_refuses_raw_string_external_backend() {
     struct Backend(std::sync::atomic::AtomicBool);
@@ -1004,7 +959,6 @@ async fn readonly_shell_refuses_raw_string_external_backend() {
     assert!(error.contains("raw command string"), "{error}");
     assert!(!backend.0.load(std::sync::atomic::Ordering::SeqCst));
 }
-
 #[tokio::test]
 async fn lowercase_bash_refuses_non_streaming_external_backend() {
     struct Backend(std::sync::atomic::AtomicBool);
@@ -1031,7 +985,6 @@ async fn lowercase_bash_refuses_non_streaming_external_backend() {
     assert!(error.to_string().contains("combined streaming output"));
     assert!(!backend.0.load(std::sync::atomic::Ordering::SeqCst));
 }
-
 #[test]
 fn readonly_argv_is_shell_free_and_disables_git_helpers() {
     let (program, args) = hardened_readonly_argv("git show HEAD").expect("argv");
@@ -1118,7 +1071,6 @@ fn readonly_program_resolution_ignores_workspace_shadow_executables() {
         assert!(resolved.is_absolute() && !resolved.starts_with(workspace.path()));
     }
 }
-
 /// B14-1: an attached root is agent-writable, so an executable planted inside
 /// it must shadow nothing and its PATH entries must be stripped — exactly
 /// like the primary root. Judging only the primary here fails open.
@@ -1161,7 +1113,6 @@ fn forkguard_workspace_roots_readonly_shell_distrusts_attached_root_programs() {
     let kept: Vec<_> = std::env::split_paths(&sanitized).collect();
     assert_eq!(kept, vec![trusted.path().canonicalize().unwrap()]);
 }
-
 #[test]
 fn readonly_child_env_removes_git_and_github_redirects() {
     let mut command = std::process::Command::new("unused");
@@ -1194,7 +1145,6 @@ fn readonly_child_env_removes_git_and_github_redirects() {
             .any(|(name, value)| name == READONLY_ENV_MARKER && value.is_none())
     );
 }
-
 #[test]
 fn readonly_operands_are_workspace_bounded_and_symlink_aware() {
     let workspace = tempdir().expect("workspace");
@@ -1269,7 +1219,6 @@ fn readonly_operands_are_workspace_bounded_and_symlink_aware() {
             .expect_err("operands must resolve relative to the effective cwd");
     }
 }
-
 /// B14-1: the operand/cwd gate judges against the full declared root set.
 /// Operands and working directories under an attached root were already
 /// admitted by the roots-aware `resolve_path`; refusing them here would
@@ -1324,7 +1273,6 @@ fn forkguard_workspace_roots_readonly_shell_operands_span_attached_roots() {
     enforce_readonly_workspace_operands("cat shared.txt", &roots, outside.path())
         .expect_err("cwd outside every root must fail");
 }
-
 #[test]
 fn windows_verbatim_and_drive_operands_survive_posix_split() {
     // `shlex` splits with POSIX backslash-escaping, which silently eats
@@ -1348,7 +1296,6 @@ fn windows_verbatim_and_drive_operands_survive_posix_split() {
         );
     }
 }
-
 #[test]
 fn windows_path_protection_leaves_other_words_untouched() {
     // POSIX escapes, drive-relative spellings, and plain relative operands
@@ -1366,7 +1313,6 @@ fn windows_path_protection_leaves_other_words_untouched() {
         "cat inside.txt"
     );
 }
-
 #[test]
 fn readonly_github_shell_calls_obey_the_host_network_policy_before_spawn() {
     let tmp = tempdir().expect("tempdir");
@@ -1400,7 +1346,6 @@ fn readonly_github_shell_calls_obey_the_host_network_policy_before_spawn() {
         .to_string();
     assert!(prompted.contains("requires network approval"));
 }
-
 #[test]
 fn exec_shell_interact_requires_approval() {
     let tool = BashTool::alias("exec_shell_interact", "interact");
@@ -1410,7 +1355,6 @@ fn exec_shell_interact_requires_approval() {
             .contains(&ToolCapability::RequiresApproval)
     );
 }
-
 #[tokio::test]
 async fn read_only_shell_policy_blocks_non_readonly_commands() {
     let tmp = tempdir().expect("tempdir");
@@ -1451,7 +1395,6 @@ async fn read_only_shell_policy_blocks_non_readonly_commands() {
         );
     }
 }
-
 #[cfg(unix)]
 #[tokio::test]
 async fn read_only_shell_resolves_operands_from_the_effective_cwd() {
@@ -1474,7 +1417,6 @@ async fn read_only_shell_resolves_operands_from_the_effective_cwd() {
         .to_string();
     assert!(error.contains("resolves outside"), "{error}");
 }
-
 #[cfg(unix)]
 #[tokio::test]
 async fn read_only_shell_skips_shell_env_hooks() {
@@ -1503,7 +1445,6 @@ async fn read_only_shell_skips_shell_env_hooks() {
     assert!(result.success, "{}", result.content);
     assert!(!marker.exists(), "shell_env hook must not run for ReadOnly");
 }
-
 #[tokio::test]
 async fn read_only_shell_policy_allows_readonly_inspection() {
     let tmp = tempdir().expect("tempdir");
@@ -1529,7 +1470,6 @@ async fn read_only_shell_policy_allows_readonly_inspection() {
         Some("Completed")
     );
 }
-
 #[tokio::test]
 async fn exec_shell_multiline_block_explains_allow_shell_boundary() {
     let tmp = tempdir().expect("tempdir");
@@ -1565,7 +1505,6 @@ async fn exec_shell_multiline_block_explains_allow_shell_boundary() {
         result.content
     );
 }
-
 #[test]
 fn exec_shell_wait_schema_defaults_to_blocking() {
     let schema = BashTool::alias("exec_shell_wait", "wait").input_schema();
@@ -1580,7 +1519,6 @@ fn exec_shell_wait_schema_defaults_to_blocking() {
             .contains("wait")
     );
 }
-
 #[tokio::test]
 async fn exec_shell_wait_without_wait_arg_blocks_until_completion() {
     let tmp = tempdir().expect("tempdir");
@@ -1617,7 +1555,6 @@ async fn exec_shell_wait_without_wait_arg_blocks_until_completion() {
         Some("Completed")
     );
 }
-
 #[tokio::test]
 async fn exec_shell_wait_false_returns_nonblocking_snapshot() {
     let tmp = tempdir().expect("tempdir");
@@ -1659,7 +1596,6 @@ async fn exec_shell_wait_false_returns_nonblocking_snapshot() {
         Some("Running")
     );
 }
-
 #[tokio::test]
 async fn exec_shell_wait_without_wait_arg_returns_running_at_timeout() {
     let tmp = tempdir().expect("tempdir");
@@ -1703,7 +1639,6 @@ async fn exec_shell_wait_without_wait_arg_returns_running_at_timeout() {
         .await
         .expect("cancel background");
 }
-
 #[tokio::test]
 async fn exec_shell_wait_many_until_any_returns_when_the_first_task_settles() {
     let tmp = tempdir().expect("tempdir");
@@ -1772,7 +1707,6 @@ async fn exec_shell_wait_many_until_any_returns_when_the_first_task_settles() {
         Some(&json!(false))
     );
 }
-
 #[tokio::test]
 async fn exec_shell_wait_many_all_reports_timeout_and_still_running() {
     let tmp = tempdir().expect("tempdir");
@@ -1827,7 +1761,6 @@ async fn exec_shell_wait_many_all_reports_timeout_and_still_running() {
     assert_eq!(statuses[first_id.as_str()], "Running");
     assert_eq!(statuses[second_id.as_str()], "Running");
 }
-
 #[tokio::test]
 async fn exec_shell_wait_many_rejects_an_unknown_task_id() {
     let tmp = tempdir().expect("tempdir");
@@ -1841,7 +1774,6 @@ async fn exec_shell_wait_many_rejects_an_unknown_task_id() {
         .expect_err("unknown ids must fail the same way as the single-task path");
     assert!(err.to_string().contains("nope-1"), "{err}");
 }
-
 #[tokio::test]
 async fn background_start_advertises_task_status_completion() {
     let tmp = tempdir().expect("tempdir");
@@ -1871,7 +1803,6 @@ async fn background_start_advertises_task_status_completion() {
         Some("nonblocking")
     );
 }
-
 #[tokio::test]
 async fn background_shell_job_preserves_origin_identity() {
     let tmp = tempdir().expect("tempdir");
@@ -1948,7 +1879,6 @@ async fn background_shell_job_preserves_origin_identity() {
         .await
         .expect("cancel owned background shell");
 }
-
 #[tokio::test]
 async fn drain_finished_jobs_reports_once() {
     let tmp = tempdir().expect("tempdir");
@@ -2004,7 +1934,6 @@ async fn drain_finished_jobs_reports_once() {
     assert!(second.is_empty(), "completion should be reported only once");
     assert!(!manager.may_have_undelivered_completion());
 }
-
 #[tokio::test]
 async fn background_job_is_hidden_from_replacement_session_and_resumes_once_for_owner() {
     let tmp = tempdir().expect("tempdir");
@@ -2065,7 +1994,6 @@ async fn background_job_is_hidden_from_replacement_session_and_resumes_once_for_
         "A completion is delivered exactly once"
     );
 }
-
 #[test]
 fn completion_evidence_preserves_arbitrary_stream_bytes() {
     use base64::Engine as _;
@@ -2112,7 +2040,6 @@ fn completion_evidence_preserves_arbitrary_stream_bytes() {
     assert_eq!(decoded_stdout, stdout);
     assert_eq!(decoded_stderr, stderr);
 }
-
 #[test]
 #[cfg(unix)]
 fn shell_execution_scrubs_parent_env_and_keeps_explicit_env() {
@@ -2155,7 +2082,6 @@ fn shell_execution_scrubs_parent_env_and_keeps_explicit_env() {
     assert_eq!(result.status, ShellStatus::Completed);
     assert_eq!(result.stdout, "unset\nexplicit-value\n");
 }
-
 #[test]
 #[cfg(windows)]
 fn shell_execution_preserves_custom_windows_sdk_root_env() {
@@ -2205,7 +2131,6 @@ fn shell_execution_preserves_custom_windows_sdk_root_env() {
         result
     );
 }
-
 #[test]
 fn test_sync_execution() {
     let tmp = tempdir().expect("tempdir");
@@ -2218,7 +2143,6 @@ fn test_sync_execution() {
     assert!(result.stdout.contains("hello"));
     assert!(result.task_id.is_none());
 }
-
 #[test]
 fn test_background_execution() {
     let tmp = tempdir().expect("tempdir");
@@ -2245,7 +2169,6 @@ fn test_background_execution() {
     assert_eq!(final_result.status, ShellStatus::Completed);
     assert!(final_result.stdout.contains("done"));
 }
-
 #[test]
 fn test_timeout() {
     let tmp = tempdir().expect("tempdir");
@@ -2256,7 +2179,6 @@ fn test_timeout() {
 
     assert_eq!(result.status, ShellStatus::TimedOut);
 }
-
 #[test]
 fn test_kill() {
     let tmp = tempdir().expect("tempdir");
@@ -2273,7 +2195,6 @@ fn test_kill() {
     let killed = manager.kill(&task_id).expect("kill");
     assert_eq!(killed.status, ShellStatus::Killed);
 }
-
 #[test]
 fn test_write_stdin_streams_output() {
     let tmp = tempdir().expect("tempdir");
@@ -2311,7 +2232,6 @@ fn test_write_stdin_streams_output() {
         .expect("get_output_delta");
     assert!(delta2.result.stdout.is_empty());
 }
-
 #[test]
 #[cfg(all(unix, not(target_env = "ohos")))]
 fn background_tty_command_has_controlling_terminal() {
@@ -2346,7 +2266,6 @@ fn background_tty_command_has_controlling_terminal() {
         "tty output should confirm /dev/tty opened; got {done:?}"
     );
 }
-
 #[test]
 fn test_job_list_poll_cancel_and_stale_snapshot() {
     let tmp = tempdir().expect("tempdir");
@@ -2399,7 +2318,6 @@ fn test_job_list_poll_cancel_and_stale_snapshot() {
     assert!(stale.stale);
     assert_eq!(stale.linked_task_id.as_deref(), Some("task_old"));
 }
-
 #[test]
 fn running_job_snapshot_marks_no_output_stale_after_threshold() {
     let tmp = tempdir().expect("tempdir");
@@ -2428,7 +2346,6 @@ fn running_job_snapshot_marks_no_output_stale_after_threshold() {
         "elapsed no-output time should be exposed: {job:?}"
     );
 }
-
 #[test]
 fn running_job_snapshot_keeps_recent_no_output_fresh() {
     let tmp = tempdir().expect("tempdir");
@@ -2448,7 +2365,6 @@ fn running_job_snapshot_keeps_recent_no_output_fresh() {
     assert!(!job.stale, "fresh running job should not start stale");
     assert!(job.elapsed_since_output_ms.is_some());
 }
-
 #[test]
 fn test_job_cancel_updates_completion_state() {
     let tmp = tempdir().expect("tempdir");
@@ -2464,7 +2380,6 @@ fn test_job_cancel_updates_completion_state() {
     assert_eq!(job.snapshot.status, ShellStatus::Killed);
     assert!(!job.snapshot.stdin_available);
 }
-
 #[test]
 fn test_output_truncation() {
     let long_output = "x".repeat(50_000);
@@ -2473,7 +2388,6 @@ fn test_output_truncation() {
     assert!(truncated.len() < long_output.len());
     assert!(truncated.contains("truncated"));
 }
-
 #[test]
 fn test_truncate_with_meta_reports_omission_counts() {
     let long_output = format!("line1\nline2\n{}", "x".repeat(60_000));
@@ -2484,7 +2398,6 @@ fn test_truncate_with_meta_reports_omission_counts() {
     assert!(meta.omitted > 0);
     assert!(truncated.contains("bytes omitted"));
 }
-
 #[test]
 fn network_restricted_hint_detects_silent_curl_failure() {
     let tmp = tempdir().expect("tempdir");
@@ -2500,7 +2413,6 @@ fn network_restricted_hint_detects_silent_curl_failure() {
 
     assert!(hint.contains("Plan mode"));
 }
-
 #[test]
 fn sandbox_denied_hint_names_the_effective_posture() {
     // DGF-02: an approved write blocked by a read-only sandbox must come
@@ -2522,7 +2434,6 @@ fn sandbox_denied_hint_names_the_effective_posture() {
     );
     assert!(hint.contains("justification"), "{hint}");
 }
-
 #[test]
 fn contract_bash_denial_surfaces_the_escalation_shape() {
     let tmp = tempdir().expect("tempdir");
@@ -2541,7 +2452,6 @@ fn contract_bash_denial_surfaces_the_escalation_shape() {
         "{error}"
     );
 }
-
 #[test]
 fn sandbox_denied_hint_absent_without_denial_or_policy() {
     let tmp = tempdir().expect("tempdir");
@@ -2555,7 +2465,6 @@ fn sandbox_denied_hint_absent_without_denial_or_policy() {
     let no_policy_ctx = ToolContext::new(tmp.path());
     assert!(shell_sandbox_denied_hint(&no_policy_ctx, &denied).is_none());
 }
-
 #[test]
 fn shell_delta_result_surfaces_sandbox_denied_hint() {
     let tmp = tempdir().expect("tempdir");
@@ -2584,7 +2493,6 @@ fn shell_delta_result_surfaces_sandbox_denied_hint() {
     let metadata = tool_result.metadata.expect("metadata");
     assert!(metadata.get("sandbox_denied_hint").is_some());
 }
-
 #[test]
 fn network_restricted_hint_ignores_local_failures() {
     let tmp = tempdir().expect("tempdir");
@@ -2593,7 +2501,6 @@ fn network_restricted_hint_ignores_local_failures() {
 
     assert!(shell_network_restricted_hint(&ctx, "cat missing.txt", &result).is_none());
 }
-
 #[test]
 fn shell_delta_result_surfaces_network_restricted_hint() {
     let tmp = tempdir().expect("tempdir");
@@ -2620,7 +2527,6 @@ fn shell_delta_result_surfaces_network_restricted_hint() {
         Some(true)
     );
 }
-
 #[test]
 fn shell_delta_result_exposes_lossless_high_exit_code_and_hex() {
     let tmp = tempdir().expect("tempdir");
@@ -2649,7 +2555,6 @@ fn shell_delta_result_exposes_lossless_high_exit_code_and_hex() {
     assert_eq!(metadata["exit_code"], json!(3221225477_i64));
     assert_eq!(metadata["exit_code_hex"], json!("0xC0000005"));
 }
-
 #[test]
 fn shell_delta_result_surfaces_elapsed_time_in_content() {
     let tmp = tempdir().expect("tempdir");
@@ -2677,7 +2582,6 @@ fn shell_delta_result_surfaces_elapsed_time_in_content() {
         tool_result.content
     );
 }
-
 #[test]
 fn shell_delta_timing_line_omits_task_id_when_unknown() {
     let tmp = tempdir().expect("tempdir");
@@ -2701,7 +2605,6 @@ fn shell_delta_timing_line_omits_task_id_when_unknown() {
         tool_result.content
     );
 }
-
 #[test]
 fn shell_delta_timing_line_phrases_cover_terminal_statuses() {
     let tmp = tempdir().expect("tempdir");
@@ -2732,7 +2635,6 @@ fn shell_delta_timing_line_phrases_cover_terminal_statuses() {
         );
     }
 }
-
 #[test]
 fn shell_delta_timing_line_handles_zero_duration() {
     let tmp = tempdir().expect("tempdir");
@@ -2757,7 +2659,6 @@ fn shell_delta_timing_line_handles_zero_duration() {
         tool_result.content
     );
 }
-
 #[test]
 fn shell_delta_timing_line_sits_below_network_hint() {
     let tmp = tempdir().expect("tempdir");
@@ -2782,7 +2683,6 @@ fn shell_delta_timing_line_sits_below_network_hint() {
         "hint must precede timing line: {content}"
     );
 }
-
 #[test]
 fn shell_delta_result_includes_cargo_failure_summary() {
     let tmp = tempdir().expect("tempdir");
@@ -2833,7 +2733,6 @@ fn shell_delta_result_includes_cargo_failure_summary() {
             .contains("error: test failed")
     );
 }
-
 #[test]
 fn shell_delta_result_keeps_existing_summary_for_generic_cargo_failure() {
     let tmp = tempdir().expect("tempdir");
@@ -2873,7 +2772,6 @@ fn shell_delta_result_keeps_existing_summary_for_generic_cargo_failure() {
         json!("command failed without structured cargo diagnostics")
     );
 }
-
 #[test]
 fn shell_delta_result_surfaces_python_build_dependency_hint() {
     let tmp = tempdir().expect("tempdir");
@@ -2925,7 +2823,6 @@ fn shell_delta_result_surfaces_python_build_dependency_hint() {
             .contains("setuptools")
     );
 }
-
 #[test]
 fn test_summarize_output_strips_truncation_note() {
     let long_output = "x".repeat(60_000);
@@ -2933,7 +2830,6 @@ fn test_summarize_output_strips_truncation_note() {
     let summary = summarize_output(&truncated);
     assert!(!summary.contains("Output truncated at"));
 }
-
 #[tokio::test]
 async fn test_exec_shell_metadata_includes_summaries() {
     let tmp = tempdir().expect("tempdir");
@@ -2956,7 +2852,6 @@ async fn test_exec_shell_metadata_includes_summaries() {
     assert!(meta.get("stdout_len").is_some());
     assert!(meta.get("stdout_truncated").is_some());
 }
-
 #[cfg(not(windows))]
 #[tokio::test]
 async fn test_exec_shell_combined_output_uses_single_stream() {
@@ -2979,7 +2874,6 @@ async fn test_exec_shell_combined_output_uses_single_stream() {
         Some(true)
     );
 }
-
 #[tokio::test]
 async fn test_exec_shell_foreground_timeout_guides_background_rerun() {
     let tmp = tempdir().expect("tempdir");
@@ -3039,7 +2933,6 @@ async fn test_exec_shell_foreground_timeout_guides_background_rerun() {
     let recommended = recovery.to_string();
     assert!(!recommended.contains("exec_shell"), "{recommended}");
 }
-
 #[test]
 fn background_schema_distinguishes_temporary_jobs_from_persistent_services() {
     let schema = BashTool::new("Bash").input_schema();
@@ -3048,7 +2941,6 @@ fn background_schema_distinguishes_temporary_jobs_from_persistent_services() {
         .expect("background description");
     assert!(d.contains("killed") && d.contains("background:true") && d.contains("persist:true"));
 }
-
 #[tokio::test]
 async fn test_exec_shell_foreground_cancel_kills_process() {
     let tmp = tempdir().expect("tempdir");
@@ -3083,7 +2975,6 @@ async fn test_exec_shell_foreground_cancel_kills_process() {
     assert_eq!(meta.get("status").and_then(Value::as_str), Some("Killed"));
     assert_eq!(meta.get("canceled").and_then(Value::as_bool), Some(true));
 }
-
 #[tokio::test]
 async fn test_exec_shell_foreground_can_move_to_background() {
     let tmp = tempdir().expect("tempdir");
@@ -3150,7 +3041,6 @@ async fn test_exec_shell_foreground_can_move_to_background() {
     let killed = manager.kill(&task_id).expect("kill");
     assert_eq!(killed.status, ShellStatus::Killed);
 }
-
 #[tokio::test]
 async fn lowercase_bash_foreground_detach_is_a_successful_running_receipt() {
     let tmp = tempdir().expect("tempdir");
@@ -3194,7 +3084,6 @@ async fn lowercase_bash_foreground_detach_is_a_successful_running_receipt() {
     assert_eq!(job.snapshot.status, ShellStatus::Running);
     manager.kill(task_id).expect("kill test job");
 }
-
 #[tokio::test]
 async fn test_exec_shell_wait_cancel_leaves_background_process_running() {
     let tmp = tempdir().expect("tempdir");
@@ -3250,7 +3139,6 @@ async fn test_exec_shell_wait_cancel_leaves_background_process_running() {
     let killed = manager.kill(&task_id).expect("kill");
     assert_eq!(killed.status, ShellStatus::Killed);
 }
-
 #[tokio::test]
 async fn test_completed_background_shell_releases_process_handles() {
     let tmp = tempdir().expect("tempdir");
@@ -3290,7 +3178,6 @@ async fn test_completed_background_shell_releases_process_handles() {
     assert!(shell.stdout_thread.is_none());
     assert!(shell.stderr_thread.is_none());
 }
-
 #[cfg(unix)]
 #[tokio::test]
 async fn exec_shell_cancel_kills_descendant_process_group() {
@@ -3339,7 +3226,6 @@ async fn exec_shell_cancel_kills_descendant_process_group() {
         "descendant {descendant} survived shell process-group cancellation"
     );
 }
-
 #[tokio::test]
 async fn test_exec_shell_cancel_tool_kills_background_process() {
     let tmp = tempdir().expect("tempdir");
@@ -3373,7 +3259,6 @@ async fn test_exec_shell_cancel_tool_kills_background_process() {
     let job = manager.inspect_job(task_id).expect("inspect job");
     assert_eq!(job.snapshot.status, ShellStatus::Killed);
 }
-
 #[tokio::test]
 async fn test_exec_shell_cancel_tool_can_kill_all_running_processes() {
     let tmp = tempdir().expect("tempdir");
@@ -3416,7 +3301,6 @@ async fn test_exec_shell_cancel_tool_can_kill_all_running_processes() {
     assert_eq!(first_job.snapshot.status, ShellStatus::Killed);
     assert_eq!(second_job.snapshot.status, ShellStatus::Killed);
 }
-
 fn make_failed_result(stderr: &str) -> ShellResult {
     ShellResult {
         task_id: None,
@@ -3436,7 +3320,6 @@ fn make_failed_result(stderr: &str) -> ShellResult {
         stderr_truncated: false,
     }
 }
-
 #[test]
 fn test_macos_provenance_detected_by_activity_time_message() {
     let result = make_failed_result(
@@ -3445,7 +3328,6 @@ fn test_macos_provenance_detected_by_activity_time_message() {
     );
     assert!(looks_like_macos_provenance_failure(&result));
 }
-
 #[test]
 fn test_macos_provenance_detected_by_activity_path_and_eperm() {
     let result = make_failed_result(
@@ -3453,7 +3335,6 @@ fn test_macos_provenance_detected_by_activity_path_and_eperm() {
     );
     assert!(looks_like_macos_provenance_failure(&result));
 }
-
 #[test]
 fn test_macos_provenance_not_triggered_on_success() {
     let mut result = make_failed_result(
@@ -3464,13 +3345,11 @@ fn test_macos_provenance_not_triggered_on_success() {
     result.exit_code = Some(0);
     assert!(!looks_like_macos_provenance_failure(&result));
 }
-
 #[test]
 fn test_macos_provenance_not_triggered_on_unrelated_eperm() {
     let result = make_failed_result("open /some/other/path: operation not permitted");
     assert!(!looks_like_macos_provenance_failure(&result));
 }
-
 // Regression test for #828: shell spawns an orphaned background subprocess
 // (simulating `nohup curl`) that keeps the pipe write-end open after the shell
 // exits. collect_output() must not block indefinitely — it kills the whole
@@ -3493,7 +3372,6 @@ fn test_orphaned_subprocess_does_not_block_collect_output() {
         .expect("get_output must complete, not hang");
     assert_eq!(done.status, ShellStatus::Completed);
 }
-
 #[cfg(unix)]
 #[test]
 fn foreground_shell_does_not_block_on_orphaned_subprocess_pipe() {
@@ -3510,7 +3388,6 @@ fn foreground_shell_does_not_block_on_orphaned_subprocess_pipe() {
     );
     assert_eq!(result.status, ShellStatus::Completed);
 }
-
 // Windows equivalent of the orphaned pipe-handle regression. `cmd /c start /b`
 // launches a descendant process that inherits stdout/stderr and outlives the
 // shell. Job-object cleanup must terminate that descendant before reader-thread
@@ -3542,7 +3419,6 @@ fn background_collection_does_not_block_on_detached_descendant_pipe() {
     );
     assert_eq!(done.status, ShellStatus::Completed);
 }
-
 #[cfg(windows)]
 #[test]
 fn windows_job_terminate_denied_falls_back_to_child_kill() {
@@ -3573,7 +3449,6 @@ fn windows_job_terminate_denied_falls_back_to_child_kill() {
         "fallback child kill should terminate child"
     );
 }
-
 #[cfg(windows)]
 #[test]
 fn windows_job_close_releases_foreground_reader_threads_when_terminate_denied() {
@@ -3621,7 +3496,6 @@ fn windows_job_close_releases_foreground_reader_threads_when_terminate_denied() 
     );
     assert!(status.is_some(), "kill-on-close should terminate child");
 }
-
 #[cfg(windows)]
 #[test]
 fn windows_job_kill_on_close_releases_reader_threads_when_terminate_denied() {
@@ -3663,7 +3537,6 @@ fn windows_job_kill_on_close_releases_reader_threads_when_terminate_denied() {
     );
     assert_eq!(done.status, ShellStatus::Completed);
 }
-
 #[cfg(windows)]
 #[test]
 fn killed_shell_does_not_wait_for_blocked_reader_threads() {
@@ -3717,7 +3590,6 @@ fn killed_shell_does_not_wait_for_blocked_reader_threads() {
     );
     release_tx.send(()).expect("release detached reader");
 }
-
 #[test]
 fn test_list_jobs_cleans_up_completed_old_processes() {
     let tmp = tempdir().expect("tempdir");
@@ -3738,7 +3610,6 @@ fn test_list_jobs_cleans_up_completed_old_processes() {
         "completed processes should be evicted by cleanup"
     );
 }
-
 /// Regression for #1691: a `git commit -m "feat: complete sub-pages"` shell
 /// command must reach the OS shell with its quoted message intact (one argv
 /// slot), never split into `feat:` / `complete` / `sub-pages"`.
@@ -3783,7 +3654,6 @@ fn issue_1691_quoted_commit_message_round_trips() {
         .collect();
     assert_eq!(got, spec.args);
 }
-
 /// When no `cwd` is provided, the shell should run in `context.workspace`,
 /// not in the ShellManager's default_workspace. This ensures sub-agents in
 /// worktrees run commands in the worktree directory rather than the parent.
@@ -3836,14 +3706,12 @@ async fn default_cwd_uses_context_workspace_not_shell_manager_default() {
 // escaped descendant wedged the blocking reader-thread join inside kill()
 // until the descendant exited on its own (observed: ~180s past a 120s
 // timeout in the wild).
-
 #[cfg(unix)]
 const SHELL_SIGTERM_HELPER_ENV: &str = "CODEWHALE_SHELL_SIGTERM_HELPER";
 #[cfg(unix)]
 const SHELL_ESCAPE_HELPER_ENV: &str = "CODEWHALE_SHELL_ESCAPE_HELPER";
 #[cfg(unix)]
 const SHELL_ESCAPED_GRANDCHILD_ENV: &str = "CODEWHALE_SHELL_ESCAPED_GRANDCHILD";
-
 /// Helper role: ignore SIGTERM and idle. Runs as the shell's direct child
 /// (same process group), so only the SIGKILL escalation can stop it.
 #[cfg(unix)]
@@ -3863,7 +3731,6 @@ fn shell_sigterm_ignoring_helper_process() {
         std::thread::sleep(Duration::from_millis(10));
     }
 }
-
 /// Helper role: spawn a grandchild in its OWN process group (escaping the
 /// shell's group) that inherits the output pipe, then exit immediately. The
 /// wrapper shell keeps running (`sleep` after `&`), so the job stays Running
@@ -3892,7 +3759,6 @@ fn shell_group_escape_helper_process() {
     cmd.process_group(0);
     let _child = cmd.spawn().expect("spawn escaped grandchild");
 }
-
 /// Helper role: the escaped grandchild — ignores SIGTERM, reports its pid,
 /// then idles (holding the inherited output pipe open the whole time).
 #[cfg(unix)]
@@ -3909,7 +3775,6 @@ fn shell_escaped_grandchild_helper_process() {
     std::fs::write(pid_file, std::process::id().to_string()).expect("write grandchild pid");
     std::thread::sleep(Duration::from_secs(30));
 }
-
 /// Required regression: a foreground command that ignores SIGTERM must be
 /// dead and the tool must have returned within timeout + a small grace
 /// (2s timeout, assert wall < 10s).
@@ -3949,7 +3814,6 @@ async fn foreground_timeout_kills_sigterm_ignoring_command_within_grace() {
         "SIGTERM-ignoring helper {helper_pid} survived the timeout kill"
     );
 }
-
 /// Regression for the ~180s kill-path overshoot: a descendant that escaped
 /// the process group keeps the output pipe open after the group is killed.
 /// kill() must still return within a bounded grace instead of blocking on
@@ -3991,7 +3855,6 @@ async fn kill_returns_promptly_when_escaped_descendant_holds_pipe_open() {
     }
     assert!(wait_for_shell_pid_exit(grandchild));
 }
-
 /// `Bash` was the only action wrapper whose catch-all fell through to its most
 /// dangerous branch: an unrecognised action ran the command instead.
 #[tokio::test]
@@ -4020,7 +3883,6 @@ async fn unknown_bash_action_is_refused_instead_of_running_the_command() {
     );
     assert!(!marker.exists(), "the command must not have run");
 }
-
 /// The same hole one type down. `and_then(as_str).unwrap_or("run")` read a
 /// non-string `action` as absent and fell through to the branch that executes
 /// arbitrary code, so `Bash{action: 3, command: "…"}` ran the command. `File`,
@@ -4056,7 +3918,6 @@ async fn non_string_bash_action_is_refused_instead_of_running_the_command() {
         assert!(!marker.exists(), "the command must not have run: {action}");
     }
 }
-
 /// The same hole for the data fields (2026-08-04 review). A non-string
 /// `stdin` was silently dropped — the command ran with NO stdin and reported
 /// success, the silent-drop failure this lane exists to close. A non-string
@@ -4102,7 +3963,6 @@ async fn wrongly_typed_stdin_cwd_and_task_id_are_refused_not_dropped() {
         "a supplied-but-mistyped task_id must not read as missing: {message}"
     );
 }
-
 /// `null` is the wire spelling of absence, and `action` documents a `run`
 /// default — so the strictness above must not swallow the default.
 #[tokio::test]
@@ -4122,7 +3982,6 @@ async fn absent_or_null_bash_action_still_defaults_to_run() {
         assert!(result.content.contains("defaulted"), "{}", result.content);
     }
 }
-
 /// Negative case for the strictness above: every legitimate action still
 /// dispatches to its own handler rather than the action refusal. `wait`,
 /// `interact`, and `cancel` are checked by the error they raise *after*
@@ -4165,7 +4024,6 @@ async fn every_valid_bash_action_still_dispatches() {
         .expect("action=cancel all=true must dispatch");
     assert!(cancelled.success, "{}", cancelled.content);
 }
-
 /// The stdin aliases were real but undocumented: a model that wrote `input`
 /// or `data` got them honoured with nothing in the schema saying so, and a
 /// maintainer reading the schema would have removed them as dead. Advertise
@@ -4212,7 +4070,6 @@ async fn every_advertised_stdin_spelling_reaches_the_command() {
         "task_id must name its alias"
     );
 }
-
 /// The schema declared no `required` key at all, so `Bash{}` — no command, no
 /// task — was schema-valid for the tool that runs shell commands. What is
 /// required is per-action, so it is spelled as root `anyOf` required groups,
@@ -4251,7 +4108,6 @@ fn bash_schema_declares_what_each_action_requires() {
         }
     }
 }
-
 /// A root `anyOf` is not portable to every provider, so prove the fallback
 /// the sanitizer promises: Responses/xAI drop root composition, and the
 /// constraint has to survive as a description note rather than vanishing.
@@ -4269,7 +4125,6 @@ fn bash_required_groups_survive_a_provider_that_drops_root_composition() {
     assert!(schema.get("anyOf").is_none(), "root anyOf must be removed");
     assert!(schema["properties"]["command"].is_object());
 }
-
 /// Every hint in this file has to name a tool the model can actually call.
 /// `exec_shell` / `exec_shell_wait` were retired in v0.9.3.
 #[test]
@@ -4278,7 +4133,6 @@ fn shell_recovery_hints_name_only_dispatchable_tools() {
     assert!(FOREGROUND_TIMEOUT_RECOVERY_HINT.contains("Bash"));
     assert!(FOREGROUND_TIMEOUT_RECOVERY_HINT.contains("action=\"wait\""));
 }
-
 /// One documented default hid three real ones: `wait` uses 30s and
 /// `interact` 1s, so a model omitting `timeout_ms` on `wait` got a quarter of
 /// the timeout the schema promised.
@@ -4296,7 +4150,6 @@ fn timeout_ms_description_covers_every_action_default() {
         );
     }
 }
-
 #[cfg(unix)]
 fn authorized_persistent_service_context(workspace: &Path) -> ToolContext {
     let mut context = ToolContext::new(workspace.to_path_buf())
@@ -4307,13 +4160,11 @@ fn authorized_persistent_service_context(workspace: &Path) -> ToolContext {
     context.auto_approve = true;
     context
 }
-
 #[cfg(unix)]
 fn persistent_service_test_lock() -> &'static tokio::sync::Mutex<()> {
     static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
 }
-
 #[cfg(unix)]
 #[tokio::test]
 async fn persistent_service_requires_explicit_headless_exec_authority() {
@@ -4335,7 +4186,6 @@ async fn persistent_service_requires_explicit_headless_exec_authority() {
 
     assert!(error.to_string().contains("real headless `codewhale exec`"));
 }
-
 #[cfg(unix)]
 #[tokio::test]
 async fn committed_persistent_service_survives_manager_drop_and_reports_identity() {
@@ -4390,7 +4240,6 @@ async fn committed_persistent_service_survives_manager_drop_and_reports_identity
         "released service must survive Codewhale manager teardown"
     );
 }
-
 #[cfg(unix)]
 #[tokio::test]
 async fn signal_cleanup_kills_staged_persistent_service_group() {
@@ -4446,13 +4295,11 @@ async fn signal_cleanup_kills_staged_persistent_service_group() {
 }
 
 // === #5472: in-memory retention must be bounded ===
-
 /// ~1.1 MB on stdout, fast: 30,000 lines of 37 bytes.
 #[cfg(unix)]
 fn chatty_command() -> String {
     "yes 0123456789abcdefghijklmnopqrstuvwxyz | head -n 30000".to_string()
 }
-
 /// The finding-1 regression: before this bound, a single uppercase `Bash` call
 /// left its entire stdout resident in `ShellManager.processes` until the 1 h
 /// `cleanup`, and only if the user happened to open the jobs panel.
@@ -4482,7 +4329,6 @@ async fn foreground_bash_releases_its_output_once_the_result_is_returned() {
         RAW_STREAM_SETTLED_TAIL_BYTES * 2
     );
 }
-
 /// Releasing memory must not rewrite history: the job panel keeps reporting how
 /// much the command actually printed.
 #[cfg(unix)]
@@ -4508,7 +4354,6 @@ async fn released_output_still_reports_the_real_stream_length() {
         "a diagnostic tail must survive the release"
     );
 }
-
 /// A background job's bytes become a durable session artifact at drain time;
 /// keeping a second copy in the manager afterwards is the pure-waste term.
 #[cfg(unix)]
@@ -4558,7 +4403,6 @@ async fn draining_completion_evidence_releases_the_retained_copy() {
         "{retained} bytes still held after the evidence was published"
     );
 }
-
 /// Age was the only bound, and it only ran from `list_jobs()`. Hundreds of
 /// finished records inside one hour were all retained.
 #[test]
@@ -4591,7 +4435,6 @@ fn cleanup_bounds_finished_records_by_count() {
         "the newest record must survive"
     );
 }
-
 /// #5478 nit: `/jobs` reported `2m 07s` for a 12-second command, because
 /// elapsed was `started_at.elapsed()` even after the job finished. A completed
 /// job reports the duration it finished with.
@@ -4640,7 +4483,6 @@ fn a_finished_job_reports_its_duration_not_a_growing_elapsed() {
         "the frozen value must be the real duration, not the timeout: {second}ms"
     );
 }
-
 // The Windows execution-policy fallback: the temp `-File` script is refused
 // before any statement runs, so the tool re-runs the identical payload as an
 // inline `-EncodedCommand`. The predicate is what decides "refused by the
@@ -4750,7 +4592,6 @@ fn forkguard_powershell_execution_policy_rejection_is_locale_independent() {
     ));
     assert!(!powershell_execution_policy_rejection("", "", script));
 }
-
 // End-to-end: the encoded form really runs the payload the temp `-File` form
 // was written for (multiline + non-ASCII), with no file on disk.
 #[cfg(windows)]
@@ -4783,7 +4624,6 @@ fn forkguard_powershell_encoded_spec_runs_a_non_ascii_payload() {
     assert!(stdout.contains("编码-ok"), "stdout={stdout}");
     assert!(stdout.contains("line2"), "stdout={stdout}");
 }
-
 fn failed_result_with(status: ShellStatus, stderr: &str) -> ShellResult {
     ShellResult {
         task_id: None,
@@ -4803,7 +4643,6 @@ fn failed_result_with(status: ShellStatus, stderr: &str) -> ShellResult {
         sandbox_denied: false,
     }
 }
-
 fn temp_file_spec(script: &std::path::Path, cwd: &std::path::Path) -> CommandSpec {
     CommandSpec::program(
         "pwsh",
@@ -4820,7 +4659,6 @@ fn temp_file_spec(script: &std::path::Path, cwd: &std::path::Path) -> CommandSpe
         Duration::from_secs(5),
     )
 }
-
 // The retry gate: only a failed temp `-File` refusal may be retried, so a
 // cancellation or a timeout can never re-run a command the user stopped.
 #[test]
@@ -4882,7 +4720,6 @@ fn forkguard_powershell_inline_retry_only_for_a_failed_file_refusal() {
         )
     ));
 }
-
 // The glue: the retry helper re-runs the identical payload inline, annotates
 // the fallback, and accounts for both attempts.
 #[cfg(windows)]
@@ -4920,7 +4757,6 @@ fn forkguard_powershell_inline_retry_runs_the_command_and_notes_the_fallback() {
         retried.duration_ms
     );
 }
-
 // End-to-end: the normal temp `-File` form still carries the process-scoped
 // policy bypass, so a restricted machine runs the script this tool wrote.
 #[cfg(windows)]
@@ -4951,7 +4787,6 @@ fn forkguard_powershell_temp_script_form_runs_a_non_ascii_payload() {
     assert!(stdout.contains("编码-ok"), "stdout={stdout}");
     assert!(stdout.contains("line2"), "stdout={stdout}");
 }
-
 // A recovery path that cannot even start must not replace the refusal that
 // sent it there: the first attempt's evidence is what the user needs, so it is
 // kept and annotated with the retry failure.
@@ -5019,6 +4854,604 @@ fn bounded_reap_reports_grace_expiry_while_the_child_lives() {
     assert!(
         !wait_child_bounded(&mut child, Duration::from_millis(50)),
         "a live child must report the exit as unconfirmed within the grace"
+
+/// An inline stdin payload past one pipe buffer is refused before spawn:
+/// the payload is delivered with a blocking write while the shell-manager
+/// lock is held, and a non-reading child would wedge the executor past any
+/// watchdog. The boundary payload (exactly 64 KiB) still runs. The raw
+/// lane is the one that carries payloads — the read-only grammar rejects
+/// a `stdin` field outright.
+// Unix-only: the boundary leg executes `wc -c`, which the sanitized child
+// PATH does not resolve on Windows (and the deadline semantics the
+// boundary payload rides are unix — see `write_stdin_…` above).
+#[cfg(unix)]
+#[tokio::test]
+async fn inline_stdin_payload_over_the_cap_refuses() {
+    let workspace = tempdir().expect("workspace");
+    let context = ToolContext::new(workspace.path().to_path_buf());
+    let oversized = "x".repeat(super::MAX_INLINE_STDIN_BYTES + 1);
+    let output = BashTool::new("Bash")
+        .execute(json!({"command": "wc -c", "stdin": oversized}), &context)
+        .await
+        .expect("the refusal is a result, not an error");
+    assert!(!output.success, "{}", output.content);
+    assert!(
+        output.content.contains("action=interact"),
+        "the refusal must point at the streaming alternative: {}",
+        output.content
+    );
+
+    let boundary = "y".repeat(super::MAX_INLINE_STDIN_BYTES);
+    let output = BashTool::new("Bash")
+        .execute(json!({"command": "wc -c", "stdin": boundary}), &context)
+        .await
+        .expect("the boundary payload dispatches");
+    assert!(output.success, "{}", output.content);
+    // Exact equality: a `contains` anchor would stay green if the cap
+    // moved to a value whose spelling embeds this one (655360 contains
+    // "65536").
+    assert_eq!(
+        output.content.trim(),
+        super::MAX_INLINE_STDIN_BYTES.to_string(),
+        "the boundary payload must reach the command whole: {}",
+        output.content
+    );
+}
+/// The bounded stdin write: a command that never consumes its pipe fills
+/// it, and past [`STDIN_WRITE_DEADLINE`] the write errors and the task's
+/// stdin is marked stalled instead of holding the shell-manager lock (and
+/// with it every other shell in the session) forever. The stall flag then
+/// refuses further writes without another wait — two writers could
+/// interleave on one pipe.
+// Unix-only: the bounded write (worker + deadline) the test exercises is
+// `#[cfg(unix)]`; on Windows the write is deliberately blocking under the
+// per-call cap, so the non-reading child would wedge to this test's own
+// 30 s guard instead of erroring.
+#[cfg(unix)]
+#[test]
+fn write_stdin_to_a_child_that_stops_consuming_errors_instead_of_wedging() {
+    let (sender, receiver) = std::sync::mpsc::channel::<Result<(), String>>();
+    let handle = std::thread::spawn(move || {
+        let run = || -> Result<(), String> {
+            let tmp = tempdir().map_err(|error| error.to_string())?;
+            let mut manager = ShellManager::new(tmp.path().to_path_buf());
+            let result = manager
+                .execute_with_options_env(
+                    &sleep_command(60),
+                    None,
+                    60_000,
+                    true,
+                    None,
+                    false,
+                    None,
+                    HashMap::new(),
+                )
+                .map_err(|error| error.to_string())?;
+            let task_id = result
+                .task_id
+                .ok_or_else(|| "background execution should return task_id".to_string())?;
+            // Far past any pipe buffer on any platform: the write cannot
+            // complete unless the child reads, and it never does.
+            let payload = "x".repeat(200 * 1024);
+            let started = std::time::Instant::now();
+            let error = manager
+                .write_stdin(&task_id, &payload, false)
+                .err()
+                .ok_or_else(|| "the stalled write must error at the deadline".to_string())?
+                .to_string();
+            if !error.contains("did not complete within") {
+                return Err(error);
+            }
+            let elapsed = started.elapsed();
+            if elapsed < STDIN_WRITE_DEADLINE {
+                return Err(format!(
+                    "the write returned before the deadline: {elapsed:?}"
+                ));
+            }
+            // No upper bound on the elapsed time: the load-bearing assertions
+            // are that the deadline FIRED (elapsed ≥ deadline) and further
+            // writes are refused. A fixed upper bound is load-fragile at any
+            // multiple — under a saturated full-suite parallel run the
+            // deadline worker was observed starving past 30 s — while a
+            // broken-mechanism mutant (deadline removed) never returns and
+            // trips the outer hang guard instead.
+            // Further writes are refused by the stall flag without waiting.
+            let started = std::time::Instant::now();
+            let again = manager.write_stdin(&task_id, "y", false);
+            if again.is_ok() {
+                return Err("the stalled task must refuse further writes".to_string());
+            }
+            if started.elapsed() > std::time::Duration::from_millis(500) {
+                return Err("the stall refusal must not wait on another write".to_string());
+            }
+            // A close after the stall must not claim the end-of-file the
+            // abandoned writer never delivered: the post-close refusal must
+            // still name the stall (the `stdin_closed_at_eof` stall conjunct
+            // and the stall-first check order together keep the EOF claim
+            // off; a reorder or conjunct drop that surfaced the EOF message
+            // reddens here).
+            let _closed = manager.write_stdin(&task_id, "", true);
+            let after_close = manager
+                .write_stdin(&task_id, "z", false)
+                .err()
+                .ok_or_else(|| "the post-stall close must leave writes refused".to_string())?
+                .to_string();
+            if !after_close.contains("stalled") || after_close.contains("end-of-file") {
+                return Err(format!(
+                    "a close after a stall must not claim an EOF the abandoned writer has not delivered: {after_close}"
+                ));
+            }
+            manager.kill(&task_id).map_err(|error| error.to_string())?;
+            Ok(())
+        };
+        let verdict = run();
+        let _ = sender.send(verdict.clone());
+        verdict
+    });
+    let _ = receiver
+        .recv_timeout(std::time::Duration::from_secs(30))
+        .expect("the bounded-write pin hung: the STDIN_WRITE_DEADLINE regression is live");
+    handle
+        .join()
+        .expect("the bounded-write worker panicked")
+        .expect("bounded-write assertions");
+}
+/// The `interact` payload carries the same per-call bound as the inline
+/// spawn payload: one oversized call is refused with a pointer at chunking
+/// before any write is attempted.
+#[tokio::test]
+async fn interact_payload_over_the_cap_refuses() {
+    let workspace = tempdir().expect("workspace");
+    let context = ToolContext::new(workspace.path().to_path_buf());
+    let oversized = "x".repeat(super::MAX_INLINE_STDIN_BYTES + 1);
+    let output = BashTool::new("Bash")
+        .execute(
+            json!({"action": "interact", "command": "pwd", "task_id": "no-such-task", "stdin": oversized}),
+            &context,
+        )
+        .await
+        .expect("the refusal is a result, not an error");
+    assert!(!output.success, "{}", output.content);
+    assert!(
+        output.content.contains("per interact call"),
+        "the refusal must name the per-call bound: {}",
+        output.content
+    );
+    // The advertised bound stays in sync with the constant (the copy
+    // interpolates it; this asserts the value actually reaches the model).
+    assert!(
+        output
+            .content
+            .contains(&super::MAX_INLINE_STDIN_BYTES.to_string()),
+        "the refusal must carry the exact bound value: {}",
+        output.content
+    );
+}
+/// The tool description states the foreground stdin contract; the sentence is
+/// the model-facing contract for why stdin readers exit, so it is pinned.
+#[test]
+fn guidance_states_the_foreground_stdin_contract() {
+    let description = super::guidance::description();
+    assert!(
+        description.contains("Foreground commands without `interactive` or `combined_output` run without a terminal stdin"),
+        "guidance must state the bounded foreground stdin: {description}"
+    );
+    assert!(
+        description.contains("`tty` always selects a background terminal task"),
+        "guidance must state where tty commands actually run — the run path forces them background: {description}"
+    );
+    assert!(
+        description.contains(
+            "a terminal lane that nothing writes to unless a session member interacts with the task"
+        ),
+        "guidance must state the combined_output foreground stdin contract accurately: {description}"
+    );
+    assert!(
+        description.contains("action=\"interact\""),
+        "guidance must point at background interact for input-driven work: {description}"
+    );
+}
+/// A foreground command that reads stdin with NO stdin data used to wedge on
+/// a pipe whose write end the tool kept open: the live repro was `$SHELL`
+/// holding the turn until the foreground watchdog killed it at the full
+/// timeout (`cat` behaves identically). The foreground lane must deliver EOF
+/// at spawn instead. Background keeps the pipe open for deferred
+/// `interact` streaming — that contract is pinned by
+/// `test_write_stdin_streams_output` and must not regress.
+#[tokio::test]
+async fn foreground_without_stdin_data_gives_stdin_readers_eof() {
+    let workspace = tempdir().expect("workspace");
+    let context = ToolContext::new(workspace.path().to_path_buf());
+    // `cat` on Unix, `more` on cmd, `[Console]::In.ReadToEnd()` on PowerShell —
+    // each blocks until stdin reaches EOF.
+    let echo_stdin = echo_stdin_command();
+
+    let started = Instant::now();
+    let result = BashTool::new("Bash")
+        .execute(json!({"command": echo_stdin, "timeout_ms": 3000}), &context)
+        .await
+        .expect("foreground stdin-reader must spawn");
+    let elapsed = started.elapsed();
+
+    assert!(
+        result.success,
+        "a stdin-reading foreground command with no stdin data must see EOF \
+         and exit promptly, not run to the timeout; took {elapsed:?}: {}",
+        result.content
+    );
+    assert!(
+        elapsed < Duration::from_millis(2900),
+        "EOF must be delivered right after spawn, not discovered at the \
+         timeout; took {elapsed:?}: {}",
+        result.content
+    );
+}
+#[cfg(unix)]
+const SYNC_STDIN_EOF_HELPER_ENV: &str = "CODEWHALE_SYNC_STDIN_EOF_HELPER";
+#[cfg(unix)]
+const SYNC_STDIN_EOF_RESULT_FILE_ENV: &str = "CODEWHALE_SYNC_STDIN_EOF_RESULT_FILE";
+/// Helper half of
+/// `sync_lane_without_stdin_data_gets_eof_not_inherited_stdin`: runs one
+/// synchronous (background=false) stdin-reading command from a process whose
+/// own stdin is a pipe the driver deliberately holds open, and records the
+/// resulting status for the driver to judge.
+#[cfg(unix)]
+#[test]
+fn sync_lane_stdin_eof_helper_process() {
+    if std::env::var(SYNC_STDIN_EOF_HELPER_ENV).ok().as_deref() != Some("1") {
+        return;
+    }
+    let result = ShellManager::new(std::env::temp_dir())
+        .execute_with_options_env(
+            &echo_stdin_command(),
+            None,
+            10_000,
+            false,
+            None,
+            false,
+            None,
+            HashMap::new(),
+        )
+        .expect("sync execute in helper");
+    std::fs::write(
+        PathBuf::from(
+            std::env::var(SYNC_STDIN_EOF_RESULT_FILE_ENV).expect("sync stdin result file"),
+        ),
+        format!("{:?}", result.status),
+    )
+    .expect("write sync stdin result file");
+}
+/// The sync lane's old default left the child inheriting the host's stdin
+/// (std's `Stdio::inherit()`), so on a live TTY a stdin-reading command hung
+/// or drew SIGTTIN. Reproduce deterministically: re-exec this test binary as
+/// a helper whose own stdin is a pipe this process holds open, and run the
+/// sync lane inside it. An inherited pipe can never EOF; `Stdio::null()`
+/// gives the child an immediate end-of-file.
+#[cfg(unix)]
+#[test]
+fn sync_lane_without_stdin_data_gets_eof_not_inherited_stdin() {
+    let tmp = tempdir().expect("tempdir");
+    let result_file = tmp.path().join("sync-stdin-result");
+    let test_binary = std::env::current_exe().expect("current test binary");
+    let mut helper = Command::new(&test_binary)
+        .arg("--exact")
+        .arg("tools::shell::tests::sync_lane_stdin_eof_helper_process")
+        .arg("--nocapture")
+        .env(SYNC_STDIN_EOF_HELPER_ENV, "1")
+        .env(SYNC_STDIN_EOF_RESULT_FILE_ENV, &result_file)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn sync stdin helper");
+    // Hold the write end for the whole run: while it is open, an inherited
+    // stdin can never reach EOF, which is exactly the old hang.
+    let held_stdin = helper.stdin.take().expect("helper stdin pipe");
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let status = loop {
+        match helper.try_wait().expect("poll sync stdin helper") {
+            Some(status) => break status,
+            None => {
+                assert!(
+                    Instant::now() < deadline,
+                    "sync-lane helper never finished; the lane is inheriting \
+                     a never-EOF stdin"
+                );
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        }
+    };
+    drop(held_stdin);
+    assert!(status.success(), "sync stdin helper failed: {status}");
+    let outcome = std::fs::read_to_string(&result_file).expect("sync lane result file");
+    assert_eq!(
+        outcome, "Completed",
+        "a sync command reading stdin with no stdin data must get EOF, not \
+         inherited host stdin"
+    );
+}
+/// The foreground stdin contract survives a detach: the command keeps
+/// running in the background, but its stdin was put at end-of-file at spawn
+/// (so stdin readers exit instead of wedging), and a later `interact` says so
+/// and points at the background lane instead of failing opaquely.
+#[tokio::test]
+async fn detached_foreground_command_reports_its_closed_stdin_on_interact() {
+    let tmp = tempdir().expect("tempdir");
+    let ctx = ToolContext::new(tmp.path());
+    let shell_manager = ctx.shell_manager.clone();
+    let command = sleep_command(30);
+    let task_ctx = ctx.clone();
+
+    let task = tokio::spawn(async move {
+        BashTool::new("Bash")
+            .execute(
+                json!({"command": command, "timeout_ms": 600_000}),
+                &task_ctx,
+            )
+            .await
+            .expect("execute")
+    });
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    shell_manager
+        .lock()
+        .expect("shell manager lock")
+        .request_foreground_background();
+    let result = tokio::time::timeout(Duration::from_secs(5), task)
+        .await
+        .expect("foreground shell should detach")
+        .expect("task should not panic");
+    let task_id = result
+        .metadata
+        .as_ref()
+        .and_then(|meta| meta.get("task_id"))
+        .and_then(Value::as_str)
+        .expect("task id")
+        .to_string();
+
+    let mut manager = shell_manager.lock().expect("shell manager lock");
+    assert_eq!(
+        manager
+            .inspect_job(&task_id)
+            .expect("inspect job")
+            .snapshot
+            .status,
+        ShellStatus::Running,
+        "the detached command keeps running"
+    );
+    let error = manager
+        .write_stdin(&task_id, "hello\n", false)
+        .expect_err("stdin was closed at spawn by the foreground contract")
+        .to_string();
+    assert!(error.contains("end-of-file"), "{error}");
+    assert!(error.contains("background=true"), "{error}");
+    let killed = manager.kill(&task_id).expect("kill");
+    assert_eq!(killed.status, ShellStatus::Killed);
+}
+/// The foreground stdin-EOF close is deliberately pipe-only: a terminal
+/// (`combined_output`) foreground command keeps its PTY writer attached so
+/// a session member can interact with it while it runs — the base behavior
+/// on that lane, which an unconditional close silently destroyed (and the
+/// guidance sentence describes).
+#[tokio::test]
+#[cfg(all(unix, not(target_env = "ohos")))]
+async fn foreground_terminal_command_keeps_its_interact_surface() {
+    let tmp = tempdir().expect("tempdir");
+    let ctx = ToolContext::new(tmp.path());
+    let shell_manager = ctx.shell_manager.clone();
+    let command = echo_stdin_command();
+    let task_ctx = ctx.clone();
+
+    let task = tokio::spawn(async move {
+        BashTool::new("Bash")
+            .execute(
+                json!({"command": command, "combined_output": true, "timeout_ms": 600_000}),
+                &task_ctx,
+            )
+            .await
+            .expect("execute")
+    });
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    shell_manager
+        .lock()
+        .expect("shell manager lock")
+        .request_foreground_background();
+    let result = tokio::time::timeout(Duration::from_secs(5), task)
+        .await
+        .expect("foreground shell should detach")
+        .expect("task should not panic");
+    let task_id = result
+        .metadata
+        .as_ref()
+        .and_then(|meta| meta.get("task_id"))
+        .and_then(Value::as_str)
+        .expect("task id")
+        .to_string();
+
+    let mut manager = shell_manager.lock().expect("shell manager lock");
+    {
+        let snapshot = manager.inspect_job(&task_id).expect("inspect job").snapshot;
+        assert_eq!(
+            snapshot.status,
+            ShellStatus::Running,
+            "the terminal command keeps running (exit {:?}, out {:?}, err {:?})",
+            snapshot.exit_code,
+            snapshot.stdout_tail,
+            snapshot.stderr_tail
+        );
+    }
+    // The interact surface must still be attached: a session member writes
+    // to the running terminal command and the input reaches it (the tty
+    // echoes, and `cat` reads the line and writes it back).
+    manager
+        .write_stdin(&task_id, "hello-round14\n", false)
+        .expect("the terminal lane keeps a writable stdin while the command runs");
+    let mut delivered = false;
+    for _ in 0..40 {
+        std::thread::sleep(Duration::from_millis(150));
+        let snapshot = manager.inspect_job(&task_id).expect("inspect job").snapshot;
+        if snapshot.stdout_tail.contains("hello-round14")
+            || snapshot.stderr_tail.contains("hello-round14")
+        {
+            delivered = true;
+            break;
+        }
+    }
+    assert!(
+        delivered,
+        "the interact write must reach the terminal command: {:?}",
+        manager.inspect_job(&task_id).expect("inspect job").snapshot
+    );
+    manager.kill(&task_id).expect("kill");
+}
+/// The unix PTY interact write rides the same bounded worker as a pipe
+/// write: a tty command that stops consuming input fills its line-
+/// discipline buffer, the write hits the deadline, the payload is abandoned
+/// to a background writer, and further writes are refused by the stall
+/// flag — instead of blocking the session's shell-manager lock forever.
+#[test]
+#[cfg(all(unix, not(target_env = "ohos")))]
+fn interact_write_to_a_stalled_tty_command_is_bounded() {
+    let (sender, receiver) = std::sync::mpsc::channel::<Result<(), String>>();
+    let handle = std::thread::spawn(move || {
+        let run = || -> Result<(), String> {
+            let tmp = tempdir().map_err(|error| error.to_string())?;
+            let mut manager = ShellManager::new(tmp.path().to_path_buf());
+            let result = manager
+                // A RAW-mode tty is the shape whose full input queue
+                // backpressures the master write (canonical mode discards
+                // overflow instead): a raw `sleep` that never reads pins the
+                // writer until the deadline.
+                .execute_with_options_env(
+                    // The marker prints only after `stty` succeeds, so the
+                    // wait below also turns a stty failure into an honest
+                    // setup error instead of a misleading write success.
+                    "stty raw -echo 2>/dev/null && printf RAW-READY; sleep 60",
+                    None,
+                    60_000,
+                    true,
+                    None,
+                    true,
+                    None,
+                    HashMap::new(),
+                )
+                .map_err(|error| error.to_string())?;
+            let task_id = result
+                .task_id
+                .ok_or_else(|| "background execution should return task_id".to_string())?;
+            // Raw mode must be established before the write lands: on a fast
+            // or loaded host the background shell may not have run `stty`
+            // yet, and a payload written in canonical mode drains (overflow
+            // is discarded there) instead of backpressuring — the write then
+            // completes and the deadline pin never gets to fire. That race
+            // failed the first CI run of this pin.
+            let mut raw_ready = false;
+            for _ in 0..40 {
+                std::thread::sleep(Duration::from_millis(150));
+                let snapshot = manager.inspect_job(&task_id).expect("inspect job").snapshot;
+                if snapshot.stdout_tail.contains("RAW-READY") {
+                    raw_ready = true;
+                    break;
+                }
+            }
+            assert!(
+                raw_ready,
+                "raw mode must be established before the stalled write: {:?}",
+                manager.inspect_job(&task_id).expect("inspect job").snapshot
+            );
+            // Far past any line-discipline input buffer: the write cannot
+            // complete unless the child reads, and it never does.
+            let payload = "x".repeat(200 * 1024);
+            let started = std::time::Instant::now();
+            let error = manager
+                .write_stdin(&task_id, &payload, false)
+                .err()
+                .ok_or_else(|| "the stalled tty write must error at the deadline".to_string())?
+                .to_string();
+            if !error.contains("did not complete within") {
+                return Err(error);
+            }
+            let elapsed = started.elapsed();
+            if elapsed < STDIN_WRITE_DEADLINE {
+                return Err(format!(
+                    "the write returned before the deadline: {elapsed:?}"
+                ));
+            }
+            // No upper bound on the elapsed time: the load-bearing assertions
+            // are that the deadline FIRED (elapsed ≥ deadline) and further
+            // writes are refused. A fixed upper bound is load-fragile at any
+            // multiple — under a saturated full-suite parallel run the
+            // deadline worker was observed starving past 30 s — while a
+            // broken-mechanism mutant (deadline removed) never returns and
+            // trips the outer hang guard instead.
+            let started = std::time::Instant::now();
+            let again = manager.write_stdin(&task_id, "y", false);
+            if again.is_ok() {
+                return Err("the stalled tty task must refuse further writes".to_string());
+            }
+            if started.elapsed() > std::time::Duration::from_millis(500) {
+                return Err("the stall refusal must not wait on another write".to_string());
+            }
+            manager.kill(&task_id).map_err(|error| error.to_string())?;
+            Ok(())
+        };
+        let verdict = run();
+        let _ = sender.send(verdict.clone());
+        verdict
+    });
+    let verdict = receiver
+        .recv_timeout(Duration::from_secs(60))
+        .unwrap_or_else(|_| {
+            let _ = handle.join();
+            Err("the bounded tty-write test hung past its 60 s guard".to_string())
+        });
+    assert!(verdict.is_ok(), "{verdict:?}");
+}
+/// The owned-writer bounded stdin write (the Windows/ohos fallback path):
+/// a consuming child gets the payload and the writer handed back; a child
+/// that never reads fills its pipe buffer and past the deadline the helper
+/// reports TimedOut with the writer left to the abandoned worker — the
+/// caller's lock is never held across the deadline. Present on every
+/// target; production unix keeps the fd-clone path, so this exercise is
+/// test-only there.
+#[cfg(unix)]
+#[test]
+fn bounded_stdin_write_owned_returns_the_writer_and_times_out_clean() {
+    use std::process::{Command, Stdio};
+
+    let mut child = Command::new("cat")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .spawn()
+        .expect("cat spawns");
+    let stdin = child.stdin.take().expect("stdin piped");
+    let (returned, result) =
+        super::bounded_stdin_write_owned(super::StdinWriter::Pipe(stdin), b"hello\n".to_vec());
+    result.expect("a consuming child accepts the payload");
+    assert!(returned.is_some(), "the writer is handed back on success");
+    drop(returned);
+    child.wait().expect("cat exits after its stdin closes");
+
+    let mut child = Command::new("sleep")
+        .arg("120")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .spawn()
+        .expect("sleep spawns");
+    let stdin = child.stdin.take().expect("stdin piped");
+    let payload = vec![b'x'; 256 * 1024]; // well past the 64 KiB pipe buffer
+    let started = std::time::Instant::now();
+    let (returned, result) =
+        super::bounded_stdin_write_owned(super::StdinWriter::Pipe(stdin), payload);
+    let elapsed = started.elapsed();
+    let error = result.expect_err("a non-reading child must time the write out");
+    assert_eq!(error.kind(), std::io::ErrorKind::TimedOut, "{error}");
+    assert!(
+        returned.is_none(),
+        "a timed-out writer stays with the abandoned worker"
+    );
+    assert!(
+        elapsed >= super::STDIN_WRITE_DEADLINE,
+        "the timeout must honor the deadline, not fire early: {elapsed:?}"
     );
     let _ = child.kill();
     let _ = child.wait();
