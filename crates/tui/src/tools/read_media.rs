@@ -1725,6 +1725,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn read_media_crop_read_keeps_full_wire_budget_beyond_detail_budget() {
+        // Crop reads bypass the detail delivery budget entirely (the
+        // crop_applied arm picks MAX_WIRE_IMAGE_BYTES), so even at
+        // detail=auto a crop may deliver well past the ~256KB auto/low
+        // budget as long as it fits the full 5 MiB wire budget.
+        let dir = tempdir().unwrap();
+        let img_path = dir.path().join("photo.png");
+        let png_data = create_noise_png(1600, 1200);
+        assert!(
+            png_data.len() > READ_IMAGE_BYTE_BUDGET,
+            "test image must start over the auto/low delivery budget"
+        );
+        std::fs::write(&img_path, &png_data).unwrap();
+
+        let mut ctx = ToolContext::new(dir.path());
+        ctx.route_capabilities.image_input = CapabilityState::Supported;
+
+        let tool = ReadMediaTool;
+        let rich = tool
+            .execute_rich(
+                json!({
+                    "path": "photo.png",
+                    "detail": "auto",
+                    "crop": { "x": 0, "y": 0, "width": 800, "height": 1200 }
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        assert!(rich.success);
+        assert_eq!(rich.metadata.as_ref().unwrap()["cropped"], true);
+
+        let ToolResultContentBlock::Image { data, .. } = &rich.content_blocks[0];
+        let payload_len = BASE64.decode(data).unwrap().len();
+        assert!(
+            payload_len > READ_IMAGE_BYTE_BUDGET,
+            "a crop read must keep the full wire budget instead of the {}-byte detail budget (got {payload_len})",
+            READ_IMAGE_BYTE_BUDGET
+        );
+        assert!(
+            payload_len <= MAX_WIRE_IMAGE_BYTES,
+            "delivered payload {payload_len} must still fit the {}-byte wire budget",
+            MAX_WIRE_IMAGE_BYTES
+        );
+    }
+
+    #[tokio::test]
     async fn read_media_photo_over_budget_arrives_under_budget_as_jpeg() {
         let dir = tempdir().unwrap();
         let img_path = dir.path().join("photo.png");
