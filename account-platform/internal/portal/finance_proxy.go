@@ -28,6 +28,12 @@ func (s *Service) proxyAdminBilling(w http.ResponseWriter, r *http.Request) {
 // plus reconciliation reads/imports/case commands. Undelivered commands remain
 // excluded by the explicit allowlists below.
 func billingAdminPathAllowed(method, resource string) bool {
+	if manualProductAdmissionPathAllowed(method, resource) {
+		return true
+	}
+	if productAdmissionMaterialPathAllowed(method, resource) {
+		return true
+	}
 	if resource == "/admin/v1/registration-bonus-policy" {
 		return method == http.MethodGet || method == http.MethodHead || method == http.MethodPut
 	}
@@ -87,6 +93,10 @@ func billingAdminPathAllowed(method, resource string) bool {
 // Preflight the sole large upload against current Account facts before reading
 // its body. Billing repeats authorization at its own boundary after forwarding.
 func (s *Service) allowReconciliationImport(w http.ResponseWriter, r *http.Request, session Session) bool {
+	return s.allowFinanceUpload(w, r, session, "platform.billing.reconciliation.run", "financial reconciliation")
+}
+
+func (s *Service) allowFinanceUpload(w http.ResponseWriter, r *http.Request, session Session, requiredPermission, label string) bool {
 	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
 	defer cancel()
 	target := *s.config.AccountURL
@@ -109,7 +119,7 @@ func (s *Service) allowReconciliationImport(w http.ResponseWriter, r *http.Reque
 		return false
 	}
 	if response.StatusCode == http.StatusForbidden {
-		api.WriteError(w, http.StatusForbidden, "PERMISSION_DENIED", "financial reconciliation permission is required", httpserver.RequestID(r.Context()))
+		api.WriteError(w, http.StatusForbidden, "PERMISSION_DENIED", label+" permission is required", httpserver.RequestID(r.Context()))
 		return false
 	}
 	if response.StatusCode != http.StatusOK {
@@ -132,11 +142,11 @@ func (s *Service) allowReconciliationImport(w http.ResponseWriter, r *http.Reque
 		return false
 	}
 	for _, permission := range current.PlatformPermissions {
-		if permission == "platform.billing.reconciliation.run" {
+		if permission == requiredPermission {
 			return true
 		}
 	}
-	api.WriteError(w, http.StatusForbidden, "PERMISSION_DENIED", "financial reconciliation permission is required", httpserver.RequestID(r.Context()))
+	api.WriteError(w, http.StatusForbidden, "PERMISSION_DENIED", label+" permission is required", httpserver.RequestID(r.Context()))
 	return false
 }
 func reconciliationPreflightUnavailable(w http.ResponseWriter, r *http.Request) bool {

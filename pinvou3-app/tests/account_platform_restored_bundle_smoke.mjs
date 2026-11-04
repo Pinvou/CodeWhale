@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import http from 'node:http';
-import * as puppeteer from 'puppeteer-core';
+import http from './helpers/http-fixture.mjs';
+import * as puppeteer from './helpers/puppeteer-fixture.mjs';
 import { accountPlatformCopy, organizationCopy, adminRolePresentationCopy } from '../src/shared/i18n.js';
 
 const staticRoot = path.resolve(import.meta.dirname, '../../account-platform/internal/portal/static');
@@ -28,7 +28,7 @@ const server = http.createServer(async (request, response) => {
     if (['/api/token/v1/recharge/orders', '/api/token/v1/me/entitlement-packages', '/api/account/v1/me/organizations'].includes(url.pathname)) return send({ items: [] });
     if (url.pathname === '/api/admin/account/admin/v1/users') return send({ items: [{ user_id: id, username: 'sample-account', user_code: 'SAMPLE-001', status: 'ACTIVE' }], next_cursor: null });
     if (url.pathname === '/api/admin/account/admin/v1/roles') return send({ items: [{ code: 'PLATFORM_AUDITOR', scope: 'PLATFORM', assignable: true, permissions: ['platform.audit.read', 'platform.users.read', 'platform.models.read', 'platform.billing.ledger.read'] }, { code: 'PLATFORM_SUPER_ADMIN', scope: 'PLATFORM', assignable: false, permissions: ['platform.roles.assign'] }] });
-    if (url.pathname === '/api/admin/account/admin/v1/role-bindings') return send({ items: [] });
+    if (url.pathname === '/api/admin/account/admin/v1/role-bindings') return send({ items: [], truncated: false });
     if (url.pathname === `/api/admin/account/admin/v1/users/${id}`) return send({ user_id: id, username: 'sample-account', user_code: 'SAMPLE-001', status: 'ACTIVE', created_at: '2026-10-01T00:00:00Z' });
     if (url.pathname === `/api/admin/account/admin/v1/users/${id}/memberships`) return send({ items: [] });
     if (url.pathname === '/api/admin/account/admin/v1/organizations') return send({ items: [{ organization_id: orgID, name: 'Sample organization', status: 'ACTIVE', member_count: 1 }], next_cursor: null });

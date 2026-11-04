@@ -172,6 +172,10 @@ func proportionalCeiling(value, numerator, denominator int64) (int64, error) {
 // It never uses the ordinary refund state machine and only touches the source
 // transaction's package. Any unavailable cash-backed BASE becomes a receivable.
 func (r *PostgresRepository) ApplyReviewedForcedRefund(ctx context.Context, caseID uuid.UUID) (ForcedRefundCase, error) {
+	return r.applyReviewedForcedRefund(ctx, caseID, false)
+}
+
+func (r *PostgresRepository) applyReviewedForcedRefund(ctx context.Context, caseID uuid.UUID, allowEscalated bool) (ForcedRefundCase, error) {
 	if caseID == uuid.Nil {
 		return ForcedRefundCase{}, ErrConflict
 	}
@@ -180,6 +184,20 @@ func (r *PostgresRepository) ApplyReviewedForcedRefund(ctx context.Context, case
 		return ForcedRefundCase{}, err
 	}
 	defer tx.Rollback(ctx)
+	item, err := r.applyReviewedForcedRefundInTx(ctx, tx, caseID, allowEscalated)
+	if err != nil {
+		return ForcedRefundCase{}, err
+	}
+	return item, tx.Commit(ctx)
+}
+
+// applyReviewedForcedRefundInTx keeps the financial writer in the caller's
+// transaction. The escalation completion caller must hold its anomaly/manual
+// review locks until both the financial facts and terminal receipt are committed.
+func (r *PostgresRepository) applyReviewedForcedRefundInTx(ctx context.Context, tx pgx.Tx, caseID uuid.UUID, allowEscalated bool) (ForcedRefundCase, error) {
+	if caseID == uuid.Nil {
+		return ForcedRefundCase{}, ErrConflict
+	}
 	if err := lockTransactionKey(ctx, tx, "forced-refund.apply", caseID.String()); err != nil {
 		return ForcedRefundCase{}, err
 	}
@@ -194,7 +212,7 @@ func (r *PostgresRepository) ApplyReviewedForcedRefund(ctx context.Context, case
 	}
 	var item ForcedRefundCase
 	var transactionAmountFen int64
-	err = tx.QueryRow(ctx, `SELECT forced.id,forced.payment_evidence_id,forced.payment_order_id,forced.payment_transaction_id,forced.entitlement_package_id,forced.wallet_id,forced.provider_refund_id,forced.amount_fen,forced.status,forced.entitlement_snapshot,forced.created_at,forced.resolved_at,forced.manual_review_case_id,forced.resolution_code,forced.resolution_reason,forced.receivable_id,forced.revoked_base_microcredits,forced.revoked_bonus_microcredits,forced.version,transaction.amount_fen FROM forced_refund_cases forced JOIN payment_transactions transaction ON transaction.id=forced.payment_transaction_id WHERE forced.id=$1 FOR UPDATE OF forced FOR NO KEY UPDATE OF transaction`, caseID).Scan(&item.ID, &item.PaymentEvidenceID, &item.PaymentOrderID, &item.PaymentTransactionID, &item.EntitlementPackageID, &item.WalletID, &item.ProviderRefundID, &item.AmountFen, &item.Status, &item.EntitlementSnapshot, &item.CreatedAt, &item.ResolvedAt, &item.ManualReviewCaseID, &item.ResolutionCode, &item.ResolutionReason, &item.ReceivableID, &item.RevokedBase, &item.RevokedBonus, &item.Version, &transactionAmountFen)
+	err := tx.QueryRow(ctx, `SELECT forced.id,forced.payment_evidence_id,forced.payment_order_id,forced.payment_transaction_id,forced.entitlement_package_id,forced.wallet_id,forced.provider_refund_id,forced.amount_fen,forced.status,forced.entitlement_snapshot,forced.created_at,forced.resolved_at,forced.manual_review_case_id,forced.resolution_code,forced.resolution_reason,forced.receivable_id,forced.revoked_base_microcredits,forced.revoked_bonus_microcredits,forced.version,transaction.amount_fen FROM forced_refund_cases forced JOIN payment_transactions transaction ON transaction.id=forced.payment_transaction_id WHERE forced.id=$1 FOR UPDATE OF forced FOR NO KEY UPDATE OF transaction`, caseID).Scan(&item.ID, &item.PaymentEvidenceID, &item.PaymentOrderID, &item.PaymentTransactionID, &item.EntitlementPackageID, &item.WalletID, &item.ProviderRefundID, &item.AmountFen, &item.Status, &item.EntitlementSnapshot, &item.CreatedAt, &item.ResolvedAt, &item.ManualReviewCaseID, &item.ResolutionCode, &item.ResolutionReason, &item.ReceivableID, &item.RevokedBase, &item.RevokedBonus, &item.Version, &transactionAmountFen)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ForcedRefundCase{}, ErrNotFound
 	}
@@ -209,12 +227,14 @@ func (r *PostgresRepository) ApplyReviewedForcedRefund(ctx context.Context, case
 		return ForcedRefundCase{}, err
 	}
 	if applied {
-		if item.Version <= 1 || item.Status != "REVIEW_REQUIRED" && !(item.Status == "RESOLVED" && item.ResolutionCode != nil && *item.ResolutionCode == "CONFIRM_FORCED_REFUND") {
+		alreadyAccounted := item.Status == "REVIEW_REQUIRED" && (item.Version > 1 || item.RevokedBase > 0 || item.RevokedBonus > 0 || item.ReceivableID != nil)
+		if !alreadyAccounted && !(item.Status == "RESOLVED" && item.ResolutionCode != nil && *item.ResolutionCode == "CONFIRM_FORCED_REFUND") {
 			return ForcedRefundCase{}, ErrConflict
 		}
-		return item, tx.Commit(ctx)
+		return item, nil
 	}
-	if item.Status != "REVIEW_REQUIRED" || item.Version != 1 || item.ReceivableID != nil || item.RevokedBase != 0 || item.RevokedBonus != 0 {
+	escalatedReview := allowEscalated && item.Status == "REVIEW_REQUIRED" && item.ResolutionCode != nil && *item.ResolutionCode == "ESCALATE_FINANCIAL_REPAIR" && item.Version >= 2
+	if item.Status != "REVIEW_REQUIRED" || (!escalatedReview && item.Version != 1) || item.ReceivableID != nil || item.RevokedBase != 0 || item.RevokedBonus != 0 {
 		return ForcedRefundCase{}, ErrConflict
 	}
 	budget, err := readForcedRefundBudget(ctx, tx, source, packageID, orderID, walletID, item.ID, uuid.Nil)
@@ -416,5 +436,5 @@ func (r *PostgresRepository) ApplyReviewedForcedRefund(ctx context.Context, case
 	if err != nil {
 		return ForcedRefundCase{}, err
 	}
-	return item, tx.Commit(ctx)
+	return item, nil
 }

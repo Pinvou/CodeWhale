@@ -60,6 +60,13 @@ func retainedRollbackGuard(ctx context.Context, tx pgx.Tx, migration migrations.
 		if recorded {
 			return errors.New("payment anomaly rollback would delete immutable manual review events")
 		}
+	case 42:
+		// Frozen Down republishes constants, not the actual prior catalog.
+		return errors.New("single SKU rollback cannot restore the prior payment mappings and prices")
+	case 46:
+		// Frozen Down is a comment; removing its ledger would advertise a
+		// reversal without recovering the cleared external payment instructions.
+		return errors.New("terminal payment instruction cleanup is irreversible")
 	}
 	return nil
 }

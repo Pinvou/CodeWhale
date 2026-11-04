@@ -5,6 +5,7 @@ import { AdminFinanceFilters, useFinanceReadRoute, useFinanceRouteLoader } from 
 import { PortalDialog } from './PortalDialog.jsx';
 import { accountLayoutCopy } from '../../shared/i18n.js';
 import { useFinanceOperation } from './useFinanceOperation.js';
+import { ProductAdmissionWorkspace } from './ProductAdmissionWorkspace.jsx';
 
 const empty = { product_id: '', display_name_zh_cn: '', display_name_en: '', display_name_ja: '', display_order: '0', base_points: '', bonus_points: '0', validity_days: '', invoice_product_name: '', mapping: { provider_id: '', provider_version: '', sku_bom: '', amount_fen: '', currency: 'CNY', channels: [], admission_class: 'FORMAL' } };
 function safeInteger(value, minimum = 0) { const parsed = Number(value); if (!/^\d+$/.test(String(value)) || !Number.isSafeInteger(parsed) || parsed < minimum) throw new Error('INVALID_FINANCE_ACK'); return parsed; }
@@ -21,9 +22,11 @@ export function RechargeProductWorkspace({ client, me, copy, language, route }) 
   const [reason, setReason] = useState('');
   const [validationError, setValidationError] = useState('');
   const [verifications, setVerifications] = useState([]);
+  const [admissionLocked, setAdmissionLocked] = useState(false);
   const permissions = me.platform_permissions || [];
   const owner = `${me.user_id}:${me.platform_authorization_version || me.active_context?.platform_authorization_version || 0}`;
-  const operation = useFinanceOperation(owner, copy, client, 'product-catalog');
+  const catalogOperation = useFinanceOperation(owner, copy, client, 'product-catalog');
+  const operation = { ...catalogOperation, busy: catalogOperation.busy || admissionLocked };
   const list = useFinanceRouteLoader({ route, signature: filters.signature, client, owner, operation, load: () => load(filters.query.cursor), reset: () => setPage(null) });
   const canCreate = permissions.includes('platform.products.create');
   const canPublish = permissions.includes('platform.products.publish');
@@ -61,7 +64,7 @@ export function RechargeProductWorkspace({ client, me, copy, language, route }) 
       }
       if (action === 'display-names') Object.assign(body, { display_name_zh_cn: input.display_name_zh_cn.trim(), display_name_en: input.display_name_en.trim(), display_name_ja: input.display_name_ja.trim() });
       if (action === 'publish') {
-        const current = verifications.find(item => item.current && item.active && item.status === 'VERIFIED' && item.evidence_id);
+        const current = verifications.find(item => item.usable_for_publish && item.status === 'VERIFIED' && item.evidence_id);
         if (!current) return;
         body.evidence_id = current.evidence_id;
       }
@@ -88,9 +91,10 @@ export function RechargeProductWorkspace({ client, me, copy, language, route }) 
       {selected && <button type="button" disabled={operation.busy || operation.unknown} onClick={() => { setSelected(null); setInput(empty); setVerifications([]); }}>{copy.newInvocation}</button>}
     </form>}
     {selected && <article><h4>{copy.admission}</h4>{!canCreate && !canPublish && <label>{copy.reason}<textarea disabled={operation.busy || operation.unknown} value={reason} onChange={event => setReason(event.target.value)} /></label>}
-      {canPublish && <><button disabled={operation.busy || operation.unknown || !reason.trim()} onClick={() => void submit('verify')}>{copy.verify}</button><button disabled={operation.busy || operation.unknown || !reason.trim() || !verifications.some(item => item.current && item.active && item.status === 'VERIFIED' && item.evidence_id)} onClick={() => void submit('publish')}>{copy.publish}</button></>}
+      {canPublish && <>{selected.mapping.admission_class === 'TEST_ONLY' && <button disabled={operation.busy || operation.unknown || !reason.trim()} onClick={() => void submit('verify')}>{copy.verify}</button>}<button disabled={operation.busy || operation.unknown || !reason.trim() || !verifications.some(item => item.usable_for_publish && item.status === 'VERIFIED' && item.evidence_id)} onClick={() => void submit('publish')}>{copy.publish}</button></>}
+      {canPublish && selected.mapping.admission_class === 'FORMAL' && <ProductAdmissionWorkspace key={`${owner}:${selected.catalog_item_id}`} client={client} me={me} item={selected} verifications={verifications} copy={copy} language={language} onLocked={setAdmissionLocked} disabled={catalogOperation.busy || catalogOperation.unknown} onChanged={async () => { const result = await catalogOperation.read(() => client.productAdmissionVerifications(selected.catalog_item_id)); if (result) setVerifications(requireFinanceCollection(result)); }} />}
       {permissions.includes('platform.products.unpublish') && <button disabled={operation.busy || operation.unknown || !reason.trim()} onClick={() => void submit('unpublish')}>{copy.unpublish}</button>}{permissions.includes('platform.products.delete') && <button disabled={operation.busy || operation.unknown || !reason.trim()} onClick={() => void submit('delete')}>{copy.deleteProduct}</button>}
-      <ul>{verifications.map(value => <li key={value.verification_id}>{value.status} / {value.requested_at}{canPublish && value.status === 'FAILED' && <button disabled={operation.busy || operation.unknown || !reason.trim()} onClick={() => void submit('retry', value)}>{copy.retry}</button>}{canPublish && value.current && value.active && value.evidence_id && <button disabled={operation.busy || operation.unknown || !reason.trim()} onClick={() => void submit('revoke', value)}>{copy.revoke}</button>}</li>)}</ul>
+      <ul>{verifications.map(value => <li key={value.verification_id}>{value.status} / {value.requested_at}{canPublish && !value.manual_submission && selected.mapping.admission_class === 'TEST_ONLY' && value.status === 'FAILED' && <button disabled={operation.busy || operation.unknown || !reason.trim()} onClick={() => void submit('retry', value)}>{copy.retry}</button>}{canPublish && value.current && value.active && value.evidence_id && <button disabled={operation.busy || operation.unknown || !reason.trim()} onClick={() => void submit('revoke', value)}>{copy.revoke}</button>}</li>)}</ul>
     </article>}
   </>;
   return <section><h3>{copy.productAdmin}</h3>{route && <AdminFinanceFilters kind="products" language={language} value={filters.draft} onChange={filters.setDraft} disabled={operation.busy || operation.unknown} onSubmit={() => { setPrevious([]); filters.move({ ...filters.draft, cursor: '' }, null); }} />}<button disabled={operation.busy || operation.unknown} onClick={() => void load()}>{copy.refresh}</button>{validationError && <p role="alert">{copy[validationError]}</p>}{operation.error && <p role="alert">{operation.error}</p>}{operation.message && <p role="status">{operation.message}</p>}{operation.busy && <p role="status">{copy.loading}</p>}

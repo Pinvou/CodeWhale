@@ -47,7 +47,11 @@ globalThis.fetch=async(url,options={})=>{
   return result();
  }
  if(control.enumMode && path===`/api/account/v1/organizations/${org}/role-bindings`) {
-  if(method==='GET')return json({items:[{binding_id:unit,organization_id:org,user_id:user,role_code:control.grantedRole||'AUDITOR',unit_id:null,status:control.roleRevoked?'REVOKED':control.grantedRole&&!control.grantStarts?'ACTIVE':'SCHEDULED',starts_at:control.grantStarts||'2099-01-01T00:00:00.000Z'}]});
+  if(method==='GET') {
+   const binding={binding_id:unit,organization_id:org,user_id:user,role_code:control.grantedRole||'AUDITOR',unit_id:null,status:control.roleRevoked?'REVOKED':control.grantedRole&&!control.grantStarts?'ACTIVE':'SCHEDULED',starts_at:control.grantStarts||'2099-01-01T00:00:00.000Z'};
+   const items=control.roleBindingCount===undefined?[binding]:Array.from({length:Math.min(control.roleBindingCount,500)},(_,index)=>({...binding,binding_id:`77777777-7777-4777-8777-${String(index+1).padStart(12,'0')}`}));
+   return json({items,truncated:control.roleBindingCount>500});
+  }
   if(method==='POST'){const body=JSON.parse(options.body);control.grantedRole=body.role_code;control.grantStarts=body.starts_at;return json({binding_id:unit,organization_id:org,user_id:body.user_id,role_code:body.role_code,unit_id:body.unit_id,status:body.starts_at?'SCHEDULED':'ACTIVE',starts_at:body.starts_at},control.unknown?202:201);}
  }
  if(control.enumMode && method==='DELETE' && path===`/api/account/v1/organizations/${org}/role-bindings/${unit}`){control.roleRevoked=true;return json({binding_id:unit,organization_id:org,user_id:user,role_code:'AUDITOR',unit_id:null,status:'REVOKED'});}

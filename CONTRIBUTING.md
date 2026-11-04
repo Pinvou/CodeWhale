@@ -40,7 +40,7 @@ Every human-authored commit must include a valid `Signed-off-by`:
 git commit -s
 ```
 
-Use `--signoff` when amending or rebasing existing commits. See the [Developer Certificate of Origin](https://developercertificate.org/). CI rejects unsigned human commits; trusted Dependabot and GitHub Actions bot commits and merge commits (more than one parent) are exempt.
+Use `--signoff` when amending or rebasing existing commits. See the [Developer Certificate of Origin](https://developercertificate.org/) and [DCO.md](DCO.md) for what the trailer certifies and how CI enforces it. CI rejects unsigned human commits; trusted Dependabot and GitHub Actions bot commits and merge commits (more than one parent) are exempt.
 
 The fixed historical squash-commit registry documented in [the commit convention](docs/Git%20Commit%20信息规范文档.md#10-固定历史-squash-提交的签署登记) preserves the recorded original signers of 20 explicitly registered integration commits. It is not an identity alias or an exemption for new commits; titles and the registered signoffs remain checked.
 
@@ -86,6 +86,49 @@ rewrite — the libc serializer fix landed in npm 11.11.0, so every npm from 10
 up to 11.10 silently strips them and the same guard fails the strip.
 
 Tests requiring a live model, network service, credential, or large model asset must be ignored by default and provide an explicit opt-in command.
+
+### Test resource lifetime
+
+One-shot CI fixtures must create resources through the shared lifetime boundary:
+
+- Go PostgreSQL fixtures use `internal/cifixture.CreateDatabase` and retain the
+  returned opaque lease for `DropDatabase`. Close clients first. Cleanup observes
+  backend exit and checks cluster, database OID and the fixture's original owner
+  policy before ordinary DROP; it never disconnects another backend. Keep existing
+  role/dependency checks. Job-owned disposable PostgreSQL services contain roles
+  and interrupted database setup; no shared or production database is reclaimed.
+- Frontend fixtures use `tests/helpers/{vite,puppeteer,http,https,net}-fixture.mjs`
+  (CommonJS browser adapter: `puppeteer-fixture.cjs`). Servers bind independent
+  loopback ports; Vite optimizer output and browser profiles are private. Await
+  close acknowledgement before deleting directories. Legacy explicit exits use
+  `fixture-exit.cjs` so cleanup completes without replacing the original failure.
+- Run one-shot commands through `scripts/ci-fixture-process.py`. Its Linux
+  subreaper / Windows child Job Object contains detached descendants and assigns
+  a private temporary directory. A killed Linux controller can be recovered only
+  by the registered scope marker, UID, cgroup and pidfd identity. No PID/name
+  sweep or shared Runner Job Object is used.
+- Account CI installs `ci-fixture-docker.py` on **that job's PATH only**. Docker
+  writes a fresh cidfile for every CLI `run`/`create`; the always-run ledger step
+  validates all leases before stopping exact IDs and checks anonymous volumes.
+  Missing creation confirmation fails closed. Direct Docker API creation must
+  add equivalent ownership registration before use. Images, named cache volumes
+  and shared BuildKit builders are outside this disposable resource boundary.
+
+`ci-resource-ledger.py --init` starts fresh job receipts; the workflow always
+checks them and attempts to upload them with seven-day retention. Diagnostic
+uploads have a three-minute limit and warn on transport failure; original local
+receipts/logs remain available. Upload delivery does not replace or relax the
+mandatory tests and resource-retirement gate. `--recover` is restricted to the
+current GitHub job ledger. Unknown or unconfirmed cleanup fails the gate and
+never grants permission to retry another smoke. Existing business assertions,
+required roots, dependency skips and retries remain unchanged. Download/build
+caches are reusable resources and must not be deleted as fixture residue.
+
+Run `python3 scripts/ci-fixture-guard.py` plus its regression tests when adding
+fixtures. The guard covers test database DDL and JS/CommonJS resource imports;
+runtime identity checks remain authoritative. A new resource type needs a shared
+factory, failure/cancellation verification and a zero-resource postcondition,
+rather than another ad-hoc cleanup command in an individual test.
 
 ## CI and merge queue
 
@@ -145,11 +188,7 @@ layers: zram (on by default, sized to 2x RAM with a zstd compressor, pool
 capped at 70% of RAM), a mandatory 8 GiB `/mnt/swapfile` as the unbounded
 overflow (on the shared single disk this costs 8 GiB of build disk; it is
 skipped only when /mnt is RAM-backed or has too little free space), then
-zswap and the image swap as fallbacks. Only image-provided zram modules are
-loaded; if the module is missing or cannot load, the disk-swap target rises
-to 16 GiB (subject to the same free-space cap). Memory setup never installs
-kernel packages: its hard timeout must not interrupt dpkg and break later
-required system-dependency installation.
+zswap and the image swap as fallbacks.
 Self-hosted runners retain their administrator-provisioned memory and swap;
 the memory setup script leaves them unchanged, and apt cleanup is hosted-only.
 
@@ -205,15 +244,6 @@ keep large Rust compilations away from small policy runners.
 Hosts use Ubuntu 26.04 while runner containers use the Ubuntu 22.04 image in
 `scripts/ci/runner-image/`. This retains the existing release glibc compatibility
 baseline. Each runner has independent writable state and resource limits.
-CI restores CodeWhale to the indexed gitlink and cleans its disposable workspace
-with `scripts/ci-prepare-codewhale.sh`. The fingerprint gate also requests full
-history with `--history`; compilation-only jobs do not download missing history.
-The helper requires the parent metadata at `.git` and CodeWhale metadata at
-`CodeWhale/.git` or `.git/modules/CodeWhale` in that Actions workspace; redirected
-or shared writable repository metadata and mutable Git path overrides are refused.
-Read-only object alternates are permitted. It does not change the gitlink or
-replace the public-baseline and fork-guard checks.
-
 PostgreSQL allocates dynamic CI ports; release-console container tests use a
 job-specific Compose project, port, and temporary public directory instead of
 the host production directory. The image preinstalls Chrome and the verified
@@ -229,7 +259,10 @@ change, inspect the preparation step's free-space report instead of bypassing
 the capacity check or skipping either test harness.
 
 The merge queue runs the applicable product gates against the actual combined tree
-of the queued pull request and the latest `main`. Rust changes run formatting,
+of the queued pull request and the latest `main`. Lightweight metadata gates (DCO,
+secret-scan, dependency-review) instead validate on each pull request before
+enqueue and echo their pre-validated result in merge_group; that echo is sound
+only while the server-side required-check set includes them. Rust changes run formatting,
 Clippy, compile, and dependency-policy checks there. High-blast-radius Rust changes
 also run the full Linux behavior regression on the combined tree; Windows coverage
 already ran on the ready PR and is not repeated unless the fail-closed policy

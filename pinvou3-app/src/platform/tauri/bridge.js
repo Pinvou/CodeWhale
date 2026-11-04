@@ -1307,6 +1307,11 @@ function pinvouSceneForMessagePos(pos) { return pinvouSharedtauriMain().pinvouSc
   var mergeHydratedChatItems = sessionsFeature.mergeHydratedChatItems;
   var switchToSessionInternal = sessionsFeature.switchToSessionInternal;
   var switchToSession = sessionsFeature.switchToSession;
+  var switchToControlledSession = sessionsFeature.switchToControlledSession;
+  var captureControlledNavigationOwner = sessionsFeature.captureControlledNavigationOwner;
+  var beginLocalNavigationIntent = sessionsFeature.beginLocalNavigationIntent;
+  var isControlledNavigationOwnerCurrent = sessionsFeature.isControlledNavigationOwnerCurrent;
+  var exitControlledScheduledRunChat = sessionsFeature.exitControlledScheduledRunChat;
   var openScheduledRunChatOnce = sessionsFeature.openScheduledRunChatOnce;
   var openScheduledRunChat = sessionsFeature.openScheduledRunChat;
   var exitScheduledRunChat = sessionsFeature.exitScheduledRunChat;
@@ -2298,6 +2303,7 @@ function composePlanMarkdown(snapshots) { return pinvouSharedtauriMain().compose
   var startRemoteControl = remoteControlFeature.startRemoteControl;
   var stopRemoteControl = remoteControlFeature.stopRemoteControl;
   var refreshRemoteControlQr = remoteControlFeature.refreshRemoteControlQr;
+  var revokeRemoteHostWorkspace = remoteControlFeature.revokeRemoteHostWorkspace;
   var desktopRemoteControlFeature = installBridgeFeature("desktop-remote-control", {
     state: state,
     notify: notify,
@@ -2629,6 +2635,13 @@ function composePlanMarkdown(snapshots) { return pinvouSharedtauriMain().compose
       createNewSession: createNewSession,
       materializeSession: materializeSession,
       switchToSession: switchToSession,
+      switchToControlledSession: switchToControlledSession,
+      captureControlledNavigationOwner: captureControlledNavigationOwner,
+      beginLocalNavigationIntent: beginLocalNavigationIntent,
+      onLocalNavigation: sessionsFeature.onLocalNavigation,
+      getLocalNavigationEpoch: sessionsFeature.getLocalNavigationEpoch,
+      isControlledNavigationOwnerCurrent: isControlledNavigationOwnerCurrent,
+      exitControlledScheduledRunChat: exitControlledScheduledRunChat,
       deleteSession: deleteSession,
       renameSession: renameSession,
       toggleSessionPinned: toggleSessionPinned,
@@ -2755,6 +2768,7 @@ function composePlanMarkdown(snapshots) { return pinvouSharedtauriMain().compose
       refreshRemoteControlStatus: refreshRemoteControlStatus,
       getWebRelaySettings: remoteControlFeature.getWebRelaySettings,
       setWebRelayAddress: remoteControlFeature.setWebRelayAddress,
+      revokeRemoteHostWorkspace: revokeRemoteHostWorkspace,
     },
     desktopRemoteControl: {
       controlledStart: desktopRemoteControlFeature.controlledStart,
@@ -2781,6 +2795,7 @@ function composePlanMarkdown(snapshots) { return pinvouSharedtauriMain().compose
       readRemoteProxyHistory: desktopRemoteControlFeature.readRemoteProxyHistory,
       deleteRemoteProxyHistory: desktopRemoteControlFeature.deleteRemoteProxyHistory,
       archiveRemoteProxyHistory: desktopRemoteControlFeature.archiveRemoteProxyHistory,
+      quarantineRemoteProxyHistory: desktopRemoteControlFeature.quarantineRemoteProxyHistory,
       listRemoteProxyArchives: desktopRemoteControlFeature.listRemoteProxyArchives,
       listRemoteProxyArchiveCandidates: desktopRemoteControlFeature.listRemoteProxyArchiveCandidates,
       getRemoteProxyLoadStatus: desktopRemoteControlFeature.getRemoteProxyLoadStatus,

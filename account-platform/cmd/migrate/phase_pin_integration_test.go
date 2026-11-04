@@ -82,19 +82,16 @@ func TestPhaseMigrationCLIPinsBeforeDown(t *testing.T) {
 		t.Run(fixture.domain+"/"+fixture.alias, func(t *testing.T) {
 			domain := fixture.domain
 			name := "f02_cli_" + strings.ReplaceAll(uuid.NewString(), "-", "")
-			if _, err := control.Exec(ctx, "CREATE DATABASE "+pgx.Identifier{name}.Sanitize()); err != nil {
+			var fixtureDatabase *cifixture.Database
+			fixtureDatabaseCreated, creationError := cifixture.CreateDatabase(ctx, control, name, "CREATE DATABASE "+pgx.Identifier{name}.Sanitize())
+			fixtureDatabase = fixtureDatabaseCreated
+			if err := creationError; err != nil {
 				t.Fatal("create owned CLI database")
 			}
 			t.Cleanup(func() {
 				clean, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 				defer cancel()
-				var owner string
-				var active int
-				if err := control.QueryRow(clean, `SELECT pg_get_userbyid(datdba),(SELECT count(*) FROM pg_stat_activity WHERE datname=$1) FROM pg_database WHERE datname=$1`, name).Scan(&owner, &active); err != nil || owner != config.User || active != 0 {
-					t.Error("owned CLI database cleanup guard failed")
-					return
-				}
-				if _, err := control.Exec(clean, "DROP DATABASE "+pgx.Identifier{name}.Sanitize()); err != nil {
+				if _, err := cifixture.DropDatabase(clean, control, fixtureDatabase, config.User); err != nil {
 					t.Error("nonforce owned CLI database cleanup failed")
 				}
 			})

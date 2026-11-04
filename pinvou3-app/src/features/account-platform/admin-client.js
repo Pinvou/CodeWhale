@@ -12,6 +12,7 @@ import { responseRetryAfter } from './auth-error.js';
 import { beforeFinanceDispatch, financeNotDispatched } from './finance-operation-state.js';
 import { latePaymentQueryBody, requireLatePaymentQueryReceipt, isCurrentLatePaymentQueryAuthority } from './late-payment-query-contract.js';
 import { withdrawWithOriginalReceipt } from './approval-withdrawal-recovery.js';
+import { uploadAdmissionMaterial, downloadAdmissionMaterial, requireManualAdmission } from './product-admission-client.js';
 import { parseRegistrationBonusJSON, encodeRegistrationBonusJSON } from './registration-bonus-contract.js';
 function errorFromResponse(response, payload) {
   const error = new Error(payload?.message || `HTTP ${response.status}`);
@@ -212,7 +213,10 @@ export class AdminPlatformClient {
     entry.controller.abort();
   }
 
-  accountClosures(signal) { return this.request('account', '/admin/v1/account-closure-requests', signal); }
+  accountClosures(signal, cursor = '') {
+    const query = cursor ? `?cursor=${encodeURIComponent(cursor)}` : '';
+    return this.request('account', `/admin/v1/account-closure-requests${query}`, signal);
+  }
   retryAccountClosure(id, reason, key, signal) {
     requireFinanceID(id);
     return this.mutate('account', `/admin/v1/account-closure-requests/${id}/actions/retry`, 'POST', { reason }, key, signal, 200);
@@ -363,8 +367,10 @@ export class AdminPlatformClient {
     if (typeof userID === 'string') userID = userID.trim().toLowerCase();
     if (userID) requireFinanceID(userID);
     const payload = await this.request('account', '/admin/v1/role-bindings' + (userID ? `?user_id=${encodeURIComponent(userID)}` : ''), signal);
-    if (!Array.isArray(payload?.items)) throw new Error('INVALID_ROLE_BINDINGS');
-    return payload.items.map(item => requirePlatformRoleBinding(item));
+    if (!Array.isArray(payload?.items) || typeof payload.truncated !== 'boolean' || payload.items.length > 500 || payload.truncated && payload.items.length !== 500) throw new Error('INVALID_ROLE_BINDINGS');
+    const items = payload.items.map(item => requirePlatformRoleBinding(item));
+    Object.defineProperty(items, 'truncated', { value: payload.truncated, enumerable: false });
+    return items;
   }
   async grantPlatformRole(owner, body, signal) {
     requireFinanceID(owner);
@@ -814,6 +820,19 @@ export class AdminPlatformClient {
   async createRechargeProduct(body, key, signal) { const item = await this.mutate('billing', '/admin/v1/recharge-products', 'POST', body, key, signal, 201); requireFinanceID(item?.catalog_item_id); if (item.product_id !== body.product_id) throw new Error('INVALID_FINANCE_ACK'); return item; }
   async updateRechargeProduct(id, body, key, signal) { const item = await this.mutate('billing', `/admin/v1/recharge-products/${encodeURIComponent(id)}/draft`, 'PUT', body, key, signal, 200); if (item?.catalog_item_id !== id) throw new Error('INVALID_FINANCE_ACK'); return item; }
   productAdmissionVerifications(id, signal) { return this.request('billing', `/admin/v1/recharge-products/${encodeURIComponent(id)}/admission-verifications`, signal); }
+  uploadProductAdmissionMaterial(id, file, version, expiresAt, key, signal) { return uploadAdmissionMaterial(this, id, file, version, expiresAt, key, signal); }
+  downloadProductAdmissionMaterial(id, material, signal) { return downloadAdmissionMaterial(this, id, material, signal); }
+  productAdmissionMaterial(id, materialID, signal) { return this.request('billing', `/admin/v1/recharge-products/${requireFinanceID(id)}/admission-materials/${requireFinanceID(materialID)}`, signal); }
+  productAdmissionMaterialReceipt(id, key, signal) { return this.request('billing', `/admin/v1/recharge-products/${requireFinanceID(id)}/admission-material-receipts/${encodeURIComponent(key)}`, signal); }
+  async manualProductAdmission(id, verificationID, signal) {
+    return requireManualAdmission(await this.request('billing', `/admin/v1/recharge-products/${requireFinanceID(id)}/manual-admission-submissions/${requireFinanceID(verificationID)}`, signal), id, verificationID);
+  }
+  async submitManualProductAdmission(id, body, key, signal) {
+    return requireManualAdmission(await this.mutate('billing', `/admin/v1/recharge-products/${requireFinanceID(id)}/manual-admission-submissions`, 'POST', body, key, signal, 201), id);
+  }
+  async decideManualProductAdmission(id, verificationID, body, key, signal) {
+    return requireManualAdmission(await this.mutate('billing', `/admin/v1/recharge-products/${requireFinanceID(id)}/manual-admission-submissions/${requireFinanceID(verificationID)}/decisions`, 'POST', body, key, signal, 200), id, verificationID);
+  }
   async productAdmissionAction(id, action, body, key, verificationID = '', signal) {
     const resource = `/admin/v1/recharge-products/${encodeURIComponent(id)}/admission-verifications${verificationID ? `/${encodeURIComponent(verificationID)}/${action}` : ''}`;
     const result = await this.mutate('billing', resource, 'POST', body, key, signal, action === 'revoke' ? 200 : 202);

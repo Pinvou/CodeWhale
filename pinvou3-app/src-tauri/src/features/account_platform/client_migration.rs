@@ -308,8 +308,8 @@ pub(crate) fn runtime_ready() -> Result<(), String> {
         .join(REPORT_FILE);
     match load_completed_report(&report) {
         Ok(Some(_)) => Ok(()),
-        Ok(None) => Err("account_platform_migration_incomplete: the migration is still pending; restore access to the OS keyring, then retry the migration. Reinstalling alone cannot confirm cleanup".to_string()),
-        Err(_) => Err("account_platform_migration_invalid: the migration report is unreadable; restore access to the OS keyring and retry the migration. Reinstalling alone cannot confirm cleanup, and configuration backups do not restore deleted legacy credentials".to_string()),
+        Ok(None) => Err("account_platform_migration_incomplete: Migration cleanup has not been confirmed. If the OS keyring is unavailable, restore access to it, then restart Pinvou3 to retry. Reinstalling alone cannot confirm cleanup.".to_string()),
+        Err(_) => Err("account_platform_migration_invalid: Pinvou3 could not read the migration report. If it is locked or unreadable, restore read access and restart. If it is corrupt, move migrations/account-platform-model-v1.json out of the Pinvou3 data directory and restart to regenerate it. Reinstalling alone cannot confirm cleanup. Configuration backups cannot restore deleted legacy credentials.".to_string()),
     }
 }
 

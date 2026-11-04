@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+const finishFixtures = require('./helpers/fixture-exit.cjs');
 /**
  * ACP Provider（第三方中转）管理 UI smoke：加载真实 Vite dist，mock TauriBridge，
  * 点击真实 React UI。覆盖设置页 模型 →「ACP 管理」子页：标签页、新增/保存、
@@ -11,13 +12,13 @@ const assert = require('assert');
 const { startUiTestServer } = require('./ui_test_server');
 
 function loadPuppeteer() {
-  try { return require('puppeteer-core'); } catch (_) { /* fall through */ }
+  try { return require('./helpers/puppeteer-fixture.cjs'); } catch (_) { /* fall through */ }
   const npx = path.join(os.homedir(), '.npm', '_npx');
   if (fs.existsSync(npx)) {
     for (const directory of fs.readdirSync(npx)) {
       const candidate = path.join(npx, directory, 'node_modules', 'puppeteer-core');
       if (fs.existsSync(candidate)) {
-        try { return require(candidate); } catch (_) { /* try next */ }
+        try { return require('./helpers/browser-fixture.cjs').wrapNative(require(candidate)); } catch (_) { /* try next */ }
       }
     }
   }
@@ -697,11 +698,11 @@ async function clickSettingsSection(page, label) {
   const failed = results.filter(result => !result.pass);
   if (failed.length) {
     console.error(`ACP providers UI smoke FAILED: ${failed.length}/${results.length}`);
-    process.exit(1);
+    finishFixtures(1);
   }
   console.log('ACP providers UI smoke passed');
-  process.exit(0);
+  finishFixtures(0);
 })().catch(async error => {
   console.error('ACP providers UI smoke crashed:', error);
-  process.exit(1);
+  finishFixtures(1);
 });

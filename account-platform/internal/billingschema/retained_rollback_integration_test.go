@@ -34,6 +34,9 @@ func TestF02RetainedRollbackBoundariesPostgres(t *testing.T) {
 		return items
 	}
 	account, billing := load("account"), load("billing")
+	t.Run("billing042-and046-retain-data-and-ledger", func(t *testing.T) {
+		testRetainedDataRollbacks(t, ctx, f, billing)
+	})
 	legacy := func(domain string, through int64, loaded []migrations.Migration) *pgx.Conn {
 		t.Helper()
 		owner := "account_service"

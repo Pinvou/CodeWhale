@@ -1072,6 +1072,16 @@
         "file": "900013_model_lifecycle_force_cancel_policy.up.sql",
         "version": 900013,
         "sha256": "2518d6a465a8bd33175d334aa2914c0939ce4066f49f29f2925c2601b677238d"
+      },
+      {
+        "file": "900014_registration_bonus_backfill_progress.down.sql",
+        "version": 900014,
+        "sha256": "40b0b65c69eba618089f472b64f232e55d41855e80ed27d1068797d38498b908"
+      },
+      {
+        "file": "900014_registration_bonus_backfill_progress.up.sql",
+        "version": 900014,
+        "sha256": "275c8a43bbf3741806ffd9204b506b2730074878b5cd83ac2477e9e14df2fede"
       }
     ],
     "billing": [
@@ -2174,6 +2184,36 @@
         "file": "900032_ledger_repair_history_proof.up.sql",
         "version": 900032,
         "sha256": "74beb8e84a6bd58ac04c5cf2d628023a5a66fea6eb46d081e1b4c5ea7982f5d6"
+      },
+      {
+        "file": "900033_orphan_payment_order_case.down.sql",
+        "version": 900033,
+        "sha256": "9c8b34951a98278d748ecebfee78df23819d2201ff8121c25387e5c3a53f5a8f"
+      },
+      {
+        "file": "900033_orphan_payment_order_case.up.sql",
+        "version": 900033,
+        "sha256": "117014925dfa3a06bf0f6ca53ea4657eedf4321859faa799074796523a0a16db"
+      },
+      {
+        "file": "900037_product_admission_materials.down.sql",
+        "version": 900037,
+        "sha256": "59d82853b39a25167167c3ef6f8c37c0b2d613960584be0c1678e7b628600c2b"
+      },
+      {
+        "file": "900037_product_admission_materials.up.sql",
+        "version": 900037,
+        "sha256": "7b3ae6f7908de7fdd2e1fd227fb50e85416f3fa64f357133bd796e3465099c10"
+      },
+      {
+        "file": "900038_product_manual_admission.down.sql",
+        "version": 900038,
+        "sha256": "42f86b8e215847c398055a90a8f89d1a02c91fc93d95b2f86f3f03f0aa16cafe"
+      },
+      {
+        "file": "900038_product_manual_admission.up.sql",
+        "version": 900038,
+        "sha256": "458f58680bc1ff48ceb59ec274329e429d5806a07000e0aae3c9551136eaaa70"
       }
     ],
     "payment-simulator": [
@@ -2628,6 +2668,16 @@
         "file": "900005_usage_waiver_intents.up.sql",
         "version": 900005,
         "sha256": "110f4c6961fa6c213e270e1ee047ffc512233941f374c809474ea16a8eeef2fe"
+      },
+      {
+        "file": "900006_replay_cleanup_indexes.down.sql",
+        "version": 900006,
+        "sha256": "8e61b6454d78cc307b7d060699b9f8f0b936d4fc98aed1c0048536ed525cf17f"
+      },
+      {
+        "file": "900006_replay_cleanup_indexes.up.sql",
+        "version": 900006,
+        "sha256": "bf8521c04a898ba68675b828d09ad98afcc86c4b11115530520844dd9a2bae58"
       }
     ]
   }

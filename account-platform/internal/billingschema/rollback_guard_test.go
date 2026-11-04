@@ -3,6 +3,7 @@ package billingschema
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -44,6 +45,16 @@ func TestRetainedBillingRollbackGuard(t *testing.T) {
 			t.Fatal("incomplete original enum restoration allowed")
 		}
 	})
+	for version, reason := range map[int64]string{
+		42: "prior payment mappings and prices",
+		46: "payment instruction cleanup is irreversible",
+	} {
+		t.Run(fmt.Sprintf("irreversible-%d", version), func(t *testing.T) {
+			if err := retainedRollbackGuard(context.Background(), nil, migrations.Migration{Version: version}); err == nil || !strings.Contains(err.Error(), reason) {
+				t.Fatalf("irreversible migration %d did not reject explicitly: %v", version, err)
+			}
+		})
+	}
 	for _, version := range []int64{23, 29} {
 		name := map[int64]string{23: "catalog", 29: "anomaly"}[version]
 		t.Run(name, func(t *testing.T) {

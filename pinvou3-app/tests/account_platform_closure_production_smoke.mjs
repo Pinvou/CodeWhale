@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
-import { createServer } from 'node:http';
+import { createServer } from './helpers/http-fixture.mjs';
 import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
-import puppeteer from 'puppeteer-core';
+import puppeteer from './helpers/puppeteer-fixture.mjs';
 import { accountClosureCopy } from '../src/shared/account-closure-i18n.js';
 import { financeCopy } from '../src/shared/finance-i18n.js';
 import { accountClosedGrantCopy } from '../src/shared/account-closed-grants-i18n.js';
@@ -26,6 +26,7 @@ const grantID = '0199a100-0001-7000-8000-000000000401';
 let actor = actorA, csrf = 'csrf-initial', mode = 'personal', writes = [], effects = 0, auths = 0;
 let readOnly = false;
 let immediateReceipt = false;
+let personalSerializationConflict = false, conflictAfterUnknown = false;
 let unknownBatchItem = false;
 let grantExpiry = '2030-01-01T00:00:00Z';
 const closure = status => ({ closure_request_id: closureID, status, stage: status === 'COMPLETED' ? 'COMPLETED' : 'CLOSURE_REQUESTED', blockers: status === 'BLOCKED' ? [{ code: 'FORCED_REFUND_UNRESOLVED', domain: 'BILLING', resource_type: 'FORCED_REFUND', user_action: 'FINISH_REFUND' }] : [], sla_expires_at: '2026-10-12T00:00:00Z' });
@@ -81,6 +82,13 @@ const server = createServer(async (request, response) => {
     const facts = JSON.parse(Buffer.concat(body).toString('utf8'));
     const key = request.headers['idempotency-key'];
     assert.match(key, /^closure-/); writes.push({ actor, key, facts });
+    if (personal && personalSerializationConflict) {
+      if (writes.length === 1) return json(response, { code: 'ACCOUNT_CLOSURE_SERIALIZATION_CONFLICT' }, 409);
+      assert.equal(key, writes[0].key); assert.deepEqual(facts, writes[0].facts); assert.equal(actor, writes[0].actor);
+      effects++; personalSerializationConflict = false;
+      return json(response, closure('COMPLETED'), 202);
+    }
+    if (personal && conflictAfterUnknown && writes.length === 2) return json(response, { code: 'ACCOUNT_CLOSURE_SERIALIZATION_CONFLICT' }, 409);
     if (writes.length === 1) { effects++; return immediateReceipt ? json(response, closure('COMPLETED'), 202) : json(response, { code: 'COMMAND_RESULT_UNKNOWN' }, 503); }
     assert.equal(key, writes[0].key); assert.deepEqual(facts, writes[0].facts); assert.equal(actor, writes[0].actor);
     if (writes.length === 2) return json(response, { code: 'RECENT_AUTHENTICATION_REQUIRED' }, 401);
@@ -111,6 +119,45 @@ const click = async (page, label) => {
   }
 };
 try {
+  for (const locale of ['zh', 'en', 'ja']) {
+    mode = 'personal'; actor = actorA; readOnly = false; effects = 0; auths = 0; writes = []; csrf = 'csrf-initial';
+    personalSerializationConflict = true;
+    const page = await browser.newPage();
+    await page.evaluateOnNewDocument(language => localStorage.setItem('pinvou.account.language', language), locale);
+    await page.goto(accountURL(), { waitUntil: 'networkidle0' });
+    await click(page, accountClosureCopy[locale].start);
+    await page.waitForFunction(text => document.body.textContent.includes(text), {}, financeCopy[locale].closureSerializationConflict);
+    assert.equal(writes.length, 1); assert.equal(effects, 0); assert.equal(auths, 0);
+    assert.equal(await page.evaluate(text => document.body.textContent.includes(text), financeCopy[locale].unknown), false);
+    const retained = await page.evaluate(() => Object.entries(document.defaultView.sessionStorage).filter(([key]) => key.startsWith('pinvou.closure.intent.v1:')).map(([, value]) => JSON.parse(value)));
+    assert.equal(retained.length, 1); assert.equal(retained[0].key, writes[0].key); assert.deepEqual(retained[0].facts, writes[0].facts);
+    await click(page, financeCopy[locale].retry);
+    await page.waitForFunction(text => document.body.textContent.includes(text), {}, accountClosureCopy[locale].requested);
+    assert.equal(writes.length, 2); assert.equal(effects, 1);
+    assert.equal(await page.evaluate(() => Object.keys(document.defaultView.sessionStorage).some(key => key.startsWith('pinvou.closure.intent.v1:'))), false);
+    passed++; console.log(`PASS ${locale} compiled first serialization abort retains original facts/key for explicit retry`);
+    await page.close();
+  }
+  mode = 'personal'; actor = actorA; readOnly = false; effects = 0; auths = 0; writes = []; csrf = 'csrf-initial';
+  conflictAfterUnknown = true;
+  const unknownPage = await browser.newPage();
+  await unknownPage.evaluateOnNewDocument(() => localStorage.setItem('pinvou.account.language', 'en'));
+  await unknownPage.goto(accountURL(), { waitUntil: 'networkidle0' });
+  await click(unknownPage, accountClosureCopy.en.start);
+  await unknownPage.waitForFunction(text => document.body.textContent.includes(text), {}, financeCopy.en.unknown);
+  const abortedRetry = unknownPage.waitForResponse(response => response.status() === 409 && new URL(response.url()).pathname === '/api/account/v1/me/account-closure-requests');
+  await click(unknownPage, financeCopy.en.retry);
+  await abortedRetry;
+  await unknownPage.waitForFunction(({ unknown, retry }) => document.body.textContent.includes(unknown) && [...document.querySelectorAll('button')].some(button => button.textContent === retry && !button.disabled), {}, { unknown: financeCopy.en.unknown, retry: financeCopy.en.retry });
+  assert.equal(writes.length, 2); assert.equal(effects, 1); assert.equal(auths, 0);
+  assert.equal(await unknownPage.evaluate(text => document.body.textContent.includes(text), financeCopy.en.closureSerializationConflict), false);
+  await click(unknownPage, financeCopy.en.retry);
+  await unknownPage.waitForFunction(text => document.body.textContent.includes(text), {}, accountClosureCopy.en.requested);
+  assert.equal(writes.length, 3); assert.equal(effects, 1);
+  assert.equal(writes[0].key, writes[2].key); assert.deepEqual(writes[0].facts, writes[2].facts);
+  conflictAfterUnknown = false;
+  passed++; console.log('PASS compiled serialization abort cannot resolve an earlier unknown result or replace its key');
+  await unknownPage.close();
   for (const locale of ['zh', 'en', 'ja']) {
     mode = 'personal'; actor = actorA; readOnly = false; effects = 0; auths = 0; writes = []; csrf = 'csrf-initial';
     const page = await browser.newPage();

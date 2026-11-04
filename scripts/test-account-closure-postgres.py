@@ -57,6 +57,7 @@ CLOSED_GRANT_GROUPS = [
     }),
 ]
 CONTRACTS = [
+    ("account-pagination", "./internal/account", {"TestAccountClosurePaginationPostgres"}, {}),
     ("migration-cli", "./cmd/migrate",
      {"TestAccountClosureLegacyRollbackCLI", "TestPhaseMigrationCLIPinsBeforeDown"}, {}),
     ("closure-combination", "./internal/billingschema", {"TestClosurePrivatePublicCombination"},
@@ -70,7 +71,8 @@ CONTRACTS = [
     ("ledger-repair-approval-proof", "./internal/account", LEDGER_REPAIR_APPROVAL_ROOTS, {}),
     ("account-anonymization", "./internal/account",
      {"TestAccountClosureAnonymizesOwnedHistoricalContacts", "TestAccountClosureRollbackPreservesEvidence",
-      "TestAccountClosureSelfServiceRecoveryPostgres", "TestF08ClosureAdvanceFailureIsScheduledPostgres"}, {}),
+      "TestAccountClosureSelfServiceRecoveryPostgres", "TestF08ClosureAdvanceFailureIsScheduledPostgres",
+      "TestAccountClosureBlockedSLAAlertsPostgres"}, {}),
 ]
 
 

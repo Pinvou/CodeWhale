@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { createServer } from 'vite';
+import { createServer } from './helpers/vite-fixture.mjs';
 import react from '@vitejs/plugin-react';
-import * as puppeteer from 'puppeteer-core';
+import * as puppeteer from './helpers/puppeteer-fixture.mjs';
 
 const root = path.resolve(import.meta.dirname, '..');
 const chrome = [process.env.CHROME, 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe', 'C:/Program Files/Microsoft/Edge/Application/msedge.exe', '/usr/bin/chromium', '/usr/bin/google-chrome', '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'].find(value => value && fs.existsSync(value));
@@ -719,6 +719,33 @@ try {
     await click('.adm-role-workspace-head button', words.catalog);
     await click('.adm-role-workspace-head button', words.bindingManagement);
     assert.equal(await page.$eval('.adm-role-panel>div:not([hidden]) input[type=search]', node => node.value), 'PLATFORM_AUDITOR');
+    assert.equal(await page.evaluate(() => window.restored.calls.filter(call => call.method !== 'GET' && !call.url.endsWith('/account/bootstrap')).length), 0);
+  });
+  for (const language of ['zh', 'en', 'ja']) await run(`roles ${language}: the admin consumer shows the real 500-entry truncation boundary`, async () => {
+    await readyRoles();
+    await page.select('.adm-sidebar-foot select', language);
+    await page.waitForSelector('.adm-role-workspace-head');
+    const copy = await page.evaluate(() => window.restored.copy().roles);
+    const words = await roleWords();
+    await click('.adm-role-workspace-head button', words.bindingManagement);
+    for (const count of [500, 501]) {
+      await page.evaluate(count => {
+        const base = window.restored.roleBindings[0];
+        window.restored.roleBindings = Array.from({ length: count }, (_, i) => ({ ...base, binding_id: `66666666-6666-4666-8666-${String(i + 1).padStart(12, '0')}` }));
+      }, count);
+      await click('.adm-role-workspace-head button', copy.refresh);
+      await page.waitForFunction(({ refresh, message, truncated }) => {
+        const ready = [...document.querySelectorAll('.adm-role-workspace-head button')].some(node => node.textContent.trim() === refresh && !node.disabled);
+        const notice = [...document.querySelectorAll('.adm-inline-message[role=status]')].some(node => node.textContent === message);
+        return ready && notice === truncated && document.querySelectorAll('.adm-role-binding-table tbody tr').length === 20;
+      }, {}, { refresh: copy.refresh, message: copy.bindingsTruncated, truncated: count === 501 });
+      const notice = await page.$$eval('.adm-inline-message[role=status]', nodes => nodes.map(node => node.textContent));
+      assert.equal(notice.includes(copy.bindingsTruncated), count === 501);
+    }
+    await page.evaluate(() => { window.restored.roleBindings = []; });
+    await click('.adm-role-workspace-head button', copy.refresh);
+    await page.waitForFunction(refresh => document.querySelector('.adm-empty') && [...document.querySelectorAll('.adm-role-workspace-head button')].some(node => node.textContent.trim() === refresh && !node.disabled), {}, copy.refresh);
+    assert.equal((await page.$$eval('.adm-inline-message[role=status]', nodes => nodes.map(node => node.textContent))).includes(copy.bindingsTruncated), false);
     assert.equal(await page.evaluate(() => window.restored.calls.filter(call => call.method !== 'GET' && !call.url.endsWith('/account/bootstrap')).length), 0);
   });
   for (const kind of ['account', 'admin']) for (const language of ['zh', 'en', 'ja']) await run(`${kind} ${language}: responsive original frame, localized navigation`, async () => {

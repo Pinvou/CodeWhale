@@ -31,6 +31,10 @@ func TestRegistrationBonusEligibilityReadyAndLifetimePostgresIntegration(t *test
 	if err != nil || readiness.Status != "READY" || readiness.RecoverableRegistrationCount != 1 || readiness.UnrecoverableRegistrationCount != 0 {
 		t.Fatalf("readiness=%+v err=%v", readiness, err)
 	}
+	var cursorCleared bool
+	if err := repository.pool.QueryRow(ctx, `SELECT backfill_cursor_mobile_e164 IS NULL AND backfill_cursor_user_id IS NULL AND backfill_snapshot_at IS NULL FROM registration_bonus_eligibility_state WHERE singleton=TRUE`).Scan(&cursorCleared); err != nil || !cursorCleared {
+		t.Fatalf("completed backfill retained a progress cursor: cleared=%v err=%v", cursorCleared, err)
+	}
 	if _, err := repository.pool.Exec(ctx, `INSERT INTO users(id,user_code,status,username,display_name,mobile_e164,mobile_verified_at,created_at,updated_at) VALUES($1,generate_unique_user_code(),'PROVISIONING',$2,$2,$3,now(),now(),now())`, uuid.New(), "legacy_writer_after_ready", "+8613500135000"); err == nil || !strings.Contains(err.Error(), "registration-bonus-capable") {
 		t.Fatalf("legacy writer was not fenced after READY: %v", err)
 	}

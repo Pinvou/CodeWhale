@@ -315,6 +315,7 @@ jobs:
               - 'scripts/tests/token-management-phase-coverage.test.mjs'
               - 'scripts/check-account-platform-authorization-coverage.mjs'
               - 'scripts/tests/account-platform-authorization-coverage.test.mjs'
+              - 'scripts/tests/f18-hold-recovery-owned-fixture.test.mjs'
               - '.github/workflows/pr-check.yml'
               - 'scripts/tests/pr-check-routing.test.mjs'
             rust_code:
@@ -673,6 +674,12 @@ jobs:
               - 'pinvou3-app/src/**'
               - 'pinvou3-app/tests/**'
               - 'account-platform/internal/portal/static/**'
+              # connector_online_install_contract.test.js 读 scripts/ 下的
+              # smoke 脚本做版本下限钉扎(tauri/build.js 已由
+              # pinvou3-app/scripts/tauri/** 覆盖);不列出则 scripts-only PR
+              # 静默跳过该 node 门禁(test_ci_gate_policy 锁定此路由)。
+              - 'pinvou3-app/scripts/dingtalk-smoke.sh'
+              - 'pinvou3-app/scripts/wecom-smoke.sh'
               # multiagent_plan_normalize.test.mjs 读取下列 Rust 源做跨语言
               # 契约断言(蜂群契约/同快照不变式/编辑重发等);不列出则
               # Rust-only 改动会静默跳过该 node 门禁(同 resources/** 的
@@ -951,6 +958,14 @@ jobs:
         # 内存扩容为尽力而为:超时/失败只告警不阻断(回退 runner 默认内存)。
         run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM,RUNNER_ENVIRONMENT bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup 未完成,继续使用 runner 默认内存"
 
+      - name: Shared test fixture lifecycle guard
+        run: |
+          python3 scripts/ci-fixture-guard.py
+          python3 -m unittest discover -s scripts/tests -p test_ci_fixture_guard.py
+          python3 -m unittest discover -s scripts/tests -p test_ci_resource_ledger.py
+          python3 -m unittest discover -s scripts/tests -p test_ci_fixture_docker.py
+          python3 -m unittest discover -s scripts/tests -p test_ci_fixture_process.py
+
       - name: 架构边界门禁
         run: |
           base_ref="${{ github.event_name == 'merge_group' && github.event.merge_group.base_ref || github.base_ref }}"
@@ -1058,6 +1073,9 @@ jobs:
         # 本 job 只跑 ubuntu,无需 runner.os 门控;曾出现重复 step,已收敛为单个。
         run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM,RUNNER_ENVIRONMENT bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup 未完成,继续使用 runner 默认内存"
 
+      - name: Initialize owned test resource ledger
+        run: python3 ../scripts/ci-resource-ledger.py --init
+
       - uses: actions/setup-node@v7
         with:
           node-version: "24"
@@ -1135,7 +1153,7 @@ jobs:
         run: npm run audit:compat
 
       - name: 前端逻辑测试 (pet 全套 + diff parser + markdown)
-        run: npm test
+        run: python3 ../scripts/ci-fixture-process.py --receipt "$PINVOU_CI_RESOURCE_LEDGER/frontend-logic.json" -- npm test
 
       - name: Verify Account invocation environment contracts
         run: node --test ../scripts/tests/account-platform-invocation-environment.test.mjs
@@ -1156,7 +1174,7 @@ jobs:
           set -euo pipefail
           test -x "${CHROME:?browser preparation must provide CHROME}"
           report="$RUNNER_TEMP/credential-origin-scope.tap"
-          node --test --test-reporter=tap tests/credential_origin_scope_probe.test.mjs | tee "$report"
+          python3 ../scripts/ci-fixture-process.py --receipt "$PINVOU_CI_RESOURCE_LEDGER/credential-origin.json" -- node --test --test-reporter=tap tests/credential_origin_scope_probe.test.mjs | tee "$report"
           grep -Eq '^# pass [1-9][0-9]*$' "$report"
           grep -Fxq '# fail 0' "$report"
           grep -Fxq '# skipped 0' "$report"
@@ -1190,6 +1208,27 @@ jobs:
           git diff --name-only "$BASE_SHA" "$HEAD_SHA" \
             | node ../scripts/select-frontend-smokes.mjs \
             | node ../scripts/run-frontend-smokes.mjs --selected
+
+      - name: Confirm test resource retirement
+        if: ${{ always() && env.PINVOU_CI_RESOURCE_LEDGER != '' }}
+        run: python3 ../scripts/ci-resource-ledger.py --recover
+
+      - name: Test resource lifecycle receipts
+        id: frontend_receipts_upload
+        if: ${{ always() && env.PINVOU_CI_RESOURCE_LEDGER != '' }}
+        # Diagnostic transport must not stall always-run cleanup or change test results.
+        timeout-minutes: 3
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: frontend-resource-lifecycle-${{ github.run_attempt }}
+          path: ${{ env.PINVOU_CI_RESOURCE_LEDGER }}/
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Warn when frontend diagnostic delivery fails
+        if: ${{ always() && steps.frontend_receipts_upload.outcome == 'failure' }}
+        run: echo '::warning::Diagnostic upload failed or timed out; original receipts remain on the runner. Tests and resource retirement remain mandatory.'
 
   relay-test:
     name: relay-test
@@ -1242,7 +1281,7 @@ jobs:
     timeout-minutes: 180
     services:
       audit-export-postgres:
-        image: postgres:16-alpine
+        image: mirror.gcr.io/library/postgres@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea
         env:
           POSTGRES_HOST_AUTH_METHOD: trust
           POSTGRES_USER: postgres
@@ -1349,6 +1388,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
+      - name: Initialize owned test resource ledger
+        run: python3 scripts/ci-resource-ledger.py --init --docker
+
       - name: Set up zram and swap
         run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM,RUNNER_ENVIRONMENT bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup did not finish; continuing with runner default memory"
 
@@ -1427,6 +1469,9 @@ jobs:
       - name: Verify Account Platform task contracts
         run: |
           node --test scripts/check-account-platform-tasks.test.mjs
+
+      - name: Verify F18 owned fixture contract
+        run: node --test scripts/tests/f18-hold-recovery-owned-fixture.test.mjs
 
       - name: Verify Account Platform authorization contracts
         run: |
@@ -1644,7 +1689,12 @@ jobs:
           python3 scripts/test-account-closure-postgres.py
 
       - name: Financial parallel diagnostics
+        id: financial_diagnostics_upload
         if: ${{ always() }}
+        timeout-minutes: 3
+        # Diagnostic transport must not invalidate the completed test verdict.
+        # The preceding contract/test steps and required-gate remain strict.
+        continue-on-error: true
         uses: actions/upload-artifact@v7
         with:
           name: account-financial-parallel-${{ github.run_attempt }}
@@ -1658,6 +1708,35 @@ jobs:
           ACCOUNT_CI_SERVICES: ${{ toJSON(job.services) }}
         run: |
           python3 scripts/account-ci-postgres.py --stop-owned-services
+
+      - name: Confirm Account test resource retirement
+        if: ${{ always() && env.PINVOU_CI_RESOURCE_LEDGER != '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          args=(--directory "$PINVOU_CI_RESOURCE_LEDGER")
+          for output in "$RUNNER_TEMP"/account-platform-deployment-contracts-*; do
+            if [[ -d "$output/resources" ]]; then args+=(--directory "$output/resources"); fi
+          done
+          python3 scripts/ci-resource-ledger.py --recover "${args[@]}"
+
+      - name: Account test resource lifecycle receipts
+        id: account_receipts_upload
+        if: ${{ always() && env.PINVOU_CI_RESOURCE_LEDGER != '' }}
+        timeout-minutes: 3
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: account-resource-lifecycle-${{ github.run_attempt }}
+          path: |
+            ${{ env.PINVOU_CI_RESOURCE_LEDGER }}/
+            ${{ runner.temp }}/account-platform-deployment-contracts-*/resources/
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Warn when Account diagnostic delivery fails
+        if: ${{ always() && (steps.financial_diagnostics_upload.outcome == 'failure' || steps.account_receipts_upload.outcome == 'failure') }}
+        run: echo '::warning::Diagnostic upload failed or timed out; original logs and receipts remain on the runner. Tests and resource retirement remain mandatory.'
 
   windows-relay-dacl:
     name: windows-relay-dacl
@@ -3586,6 +3665,10 @@ jobs:
             'features::monitor::platform::windows_gpu::tests::' \
             'features::remote_control::platform::windows::tests::' \
             'app::commands::remote_control::reader_resume_tests::' \
+            'features::remote_control::controller::controlled::journal_owner_tests::' \
+            'app::commands::desktop_remote_journal::tests::' \
+            'app::commands::desktop_remote_task::journal_owner_tests::' \
+            'features::remote_control::controller::controlled::tests::resume_sequence_advances_the_gate_and_rotates_material' \
             'features::remote_control::controller::controlling_inbound::tests::' \
             'features::remote_control::controller::controlling_service::inbound_tests::' \
             'features::remote_control::controller::transfer::staging::tests::' \
@@ -3897,6 +3980,14 @@ jobs:
       - name: dev-profile memory guard (codewhale-tui O0, this job only)
         run: |
           config="${CARGO_HOME:-$HOME/.cargo}/config.toml"
+          # $CARGO_HOME is not guaranteed to exist: since 2026-11 the macos-15
+          # runner image ships Rust with rustup's home outside ~/.cargo, so
+          # dtolnay/rust-toolchain's "Install rustup if needed" skips and never
+          # creates ~/.cargo; a bare cat >> then exits 1 on the missing parent
+          # directory. Create the directory before appending; cat >> creates
+          # a missing file itself. (The rust-test / windows-rust-test siblings
+          # are covered by scripts/ci-cargo-dev-profile.py.)
+          mkdir -p "$(dirname "$config")"
           cat >> "$config" <<'EOF'
 
           [profile.dev.package.codewhale-tui]

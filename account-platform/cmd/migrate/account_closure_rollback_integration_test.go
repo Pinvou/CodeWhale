@@ -41,7 +41,10 @@ func TestAccountClosureLegacyRollbackCLI(t *testing.T) {
 	}
 	defer control.Close(context.Background())
 	name := "f08_closure_cli_" + strings.ReplaceAll(uuid.NewString(), "-", "")
-	if _, err := control.Exec(ctx, "CREATE DATABASE "+pgx.Identifier{name}.Sanitize()); err != nil {
+	var fixtureDatabase *cifixture.Database
+	fixtureDatabaseCreated, creationError := cifixture.CreateDatabase(ctx, control, name, "CREATE DATABASE "+pgx.Identifier{name}.Sanitize())
+	fixtureDatabase = fixtureDatabaseCreated
+	if err := creationError; err != nil {
 		t.Fatal("create owned account closure CLI database")
 	}
 	t.Cleanup(func() {
@@ -55,15 +58,7 @@ func TestAccountClosureLegacyRollbackCLI(t *testing.T) {
 			return
 		}
 		defer cleanupControl.Close(context.Background())
-		var owner string
-		var active int
-		if err := cleanupControl.QueryRow(clean, `SELECT pg_get_userbyid(datdba),
-			(SELECT count(*) FROM pg_stat_activity WHERE datname=$1)
-			FROM pg_database WHERE datname=$1`, name).Scan(&owner, &active); err != nil || owner != config.User || active != 0 {
-			t.Error("owned account closure CLI database cleanup guard failed")
-			return
-		}
-		if _, err := cleanupControl.Exec(clean, "DROP DATABASE "+pgx.Identifier{name}.Sanitize()); err != nil {
+		if _, err := cifixture.DropDatabase(clean, cleanupControl, fixtureDatabase, config.User); err != nil {
 			t.Error("nonforce owned account closure CLI database cleanup failed")
 		}
 	})

@@ -484,6 +484,7 @@ command_protocol!(
         "web_access_disable",
         "web_access_status",
         "web_access_rotate",
+        "web_access_revoke_host_workspace",
         "web_access_relay_settings",
         "desktop_remote_endpoint_profiles",
         "desktop_remote_set_endpoint_profile",

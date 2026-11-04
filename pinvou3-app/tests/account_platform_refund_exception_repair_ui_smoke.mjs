@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import { adminLayoutCopy } from '../src/shared/account-layout-i18n.js';
-import { createServer } from 'vite';
+import { createServer } from './helpers/vite-fixture.mjs';
 import react from '@vitejs/plugin-react';
-import * as puppeteer from 'puppeteer-core';
+import * as puppeteer from './helpers/puppeteer-fixture.mjs';
 const root = import.meta.dirname + '/..';
 const browserPath = [process.env.CHROME, process.env.EDGE_PATH, process.env.CHROMIUM,
   'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe', 'C:/Program Files/Google/Chrome/Application/chrome.exe',

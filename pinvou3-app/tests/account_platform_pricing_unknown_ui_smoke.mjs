@@ -1,12 +1,12 @@
 import assert from 'node:assert/strict';
-import { createServer } from 'node:http';
+import { createServer } from './helpers/http-fixture.mjs';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createInterface } from 'node:readline';
-import { build } from 'vite';
-import * as puppeteer from 'puppeteer-core';
+import { build } from './helpers/vite-fixture.mjs';
+import * as puppeteer from './helpers/puppeteer-fixture.mjs';
 export async function runPricingUnknownSmoke({ plugins = [], serveOnly = false } = {}) {
   const app = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
   const fixture = JSON.parse(

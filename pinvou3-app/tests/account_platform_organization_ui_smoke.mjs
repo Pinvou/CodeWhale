@@ -4,8 +4,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import react from '@vitejs/plugin-react';
-import * as puppeteer from 'puppeteer-core';
-import { createServer } from 'vite';
+import * as puppeteer from './helpers/puppeteer-fixture.mjs';
+import { createServer } from './helpers/vite-fixture.mjs';
 const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
 const chrome=process.env.CHROME||['C:/Program Files/Google/Chrome/Application/chrome.exe','C:/Program Files/Microsoft/Edge/Application/msedge.exe','C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe','/usr/bin/chromium','/usr/bin/chromium-browser','/usr/bin/google-chrome','/usr/bin/google-chrome-stable','/snap/bin/chromium','/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'].find(fs.existsSync);
 assert.ok(chrome,'Browser unavailable; no UI validation performed');
@@ -276,6 +276,31 @@ try{
    assert.equal(await page.evaluate(()=>Boolean(document.querySelector('.ap-org-model-policy form'))),false);
   }
   assert.ok(await page.evaluate(()=>window.f06.calls.every(c=>c.method==='GET')));
+ });
+ for(const language of ['zh','en','ja']) await run(`${language}: failed role refresh retires the previous truncated snapshot and recovers without writes`,async()=>{
+  await fresh(language);
+  await page.evaluate(()=>{window.f06.enumMode=true;window.f06.roleBindingCount=501;window.f06.authorizationVersion++;window.f06.render();});
+  const waitBindings=async(count,truncated,errorKey='')=>page.waitForFunction(({count,truncated,errorKey})=>{
+   const copy=window.f06.copy();
+   const workspace=[...document.querySelectorAll('section')].find(node=>node.querySelector(':scope>h2')?.textContent===copy.title);
+   const roles=workspace&&[...workspace.children].find(node=>node.tagName==='SECTION'&&node.querySelector(':scope>h3')?.textContent===copy.bindings);
+   return roles&&roles.querySelectorAll(':scope>ul>li').length===count&&Boolean(roles.querySelector('[role=status]'))===truncated&&
+    (workspace.querySelector(':scope>[role=alert]')?.textContent||'')===(errorKey?copy[errorKey]:'')&&!workspace.querySelector(':scope>button').disabled;
+  },{},{count,truncated,errorKey});
+  const refresh=async()=>page.evaluate(()=>{
+   const workspace=[...document.querySelectorAll('section')].find(node=>node.querySelector(':scope>h2')?.textContent===window.f06.copy().title);
+   workspace.querySelector(':scope>button').click();
+  });
+  for(const status of [503,403]){
+   await waitBindings(500,true);
+   await page.evaluate(status=>{window.f06.readError={path:'/role-bindings',status};},status);
+   await refresh();await waitBindings(0,false,status===403?'permissions':'unavailable');
+   assert.ok(await page.evaluate(()=>document.body.textContent.includes('Controlled Unit')),'unrelated unit facts are retained');
+   await page.evaluate(()=>{delete window.f06.readError;window.f06.roleBindingCount=1;});
+   await refresh();await waitBindings(1,false);
+   if(status===503){await page.evaluate(()=>{window.f06.roleBindingCount=501;});await refresh();}
+  }
+  assert.ok(await page.evaluate(()=>window.f06.calls.every(call=>call.method==='GET')),'failed reads and recovery never submit a role command');
  });
  console.log(`RESULT ${passed} PASS 0 FAIL 0 SKIP`);
 }catch(error){console.error(`FAIL after ${passed} PASS: ${error.stack || error.message}`);if(page)console.error(JSON.stringify(await page.evaluate(()=>({dialog:Boolean(document.querySelector('[role=alertdialog]')),alerts:[...document.querySelectorAll('[role=alert]')].map(a=>a.firstChild?.textContent),deletePaths:window.f06?.calls.filter(c=>c.method==='DELETE').map(c=>c.path),roleRevoked:window.f06?.roleRevoked,revokedLabelVisible:document.body.textContent.includes(window.f06?.copy().enumStatus_REVOKED)}))));process.exitCode=1;}

@@ -14,6 +14,7 @@ import (
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/api"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/approvalpolicy"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/authorization"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/evidenceenvelope"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/humandelegation"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/identity"
@@ -25,6 +26,10 @@ import (
 )
 
 type Service struct {
+	admissionMaterials           ProductAdmissionMaterialRepository
+	productAdmissionEnvironment  string
+	admissionMaterialKeys        evidenceenvelope.KeyWrapper
+	admissionMaterialValidator   productAdmissionOriginalValidator
 	usageWaiverClient            UsageWaiverTokenClient
 	closureStates                AccountClosureStateVerifier
 	impactPricing                impactPriceRepository
@@ -185,6 +190,18 @@ func (s *Service) Handler(serviceToken string, adminVerify ...identity.VerifyFun
 	if len(adminVerify) > 0 && adminVerify[0] != nil && s.authorizer != nil {
 		admin := router.Group("/admin/v1")
 		admin.Use(identity.GinMiddleware(adminVerify[0]))
+		if s.admissionMaterials != nil {
+			admin.POST("/recharge-products/:catalog_item_id/admission-materials", s.authorizer.Require("platform.products.publish"), s.requireRecentProductAuthentication(), httpserver.AdaptFunc(s.adminUploadProductAdmissionMaterial))
+			admin.GET("/recharge-products/:catalog_item_id/admission-materials/:material_id", s.authorizer.Require("platform.products.publish"), s.requireRecentProductAuthentication(), httpserver.AdaptFunc(s.adminGetProductAdmissionMaterial))
+			admin.GET("/recharge-products/:catalog_item_id/admission-materials/:material_id/content", s.authorizer.Require("platform.products.publish"), s.requireRecentProductAuthentication(), httpserver.AdaptFunc(s.adminDownloadProductAdmissionMaterial))
+			admin.GET("/recharge-products/:catalog_item_id/admission-material-receipts/:operation_key", s.authorizer.Require("platform.products.publish"), s.requireRecentProductAuthentication(), httpserver.AdaptFunc(s.adminProductAdmissionMaterialReceipt))
+			admin.POST("/recharge-products/:catalog_item_id/admission-materials/:material_id/legal-hold", s.authorizer.Require("platform.products.publish"), s.requireRecentProductAuthentication(), httpserver.AdaptFunc(s.adminHoldProductAdmissionMaterial))
+			if _, supported := s.catalog.(productManualAdmissionRepository); supported {
+				admin.POST("/recharge-products/:catalog_item_id/manual-admission-submissions", s.authorizer.Require("platform.products.publish"), s.requireRecentProductAuthentication(), httpserver.AdaptFunc(s.adminCreateManualProductAdmission))
+				admin.GET("/recharge-products/:catalog_item_id/manual-admission-submissions/:verification_id", s.authorizer.Require("platform.products.publish"), s.requireRecentProductAuthentication(), httpserver.AdaptFunc(s.adminGetManualProductAdmission))
+				admin.POST("/recharge-products/:catalog_item_id/manual-admission-submissions/:verification_id/decisions", s.authorizer.Require("platform.products.publish"), s.requireRecentProductAuthentication(), httpserver.AdaptFunc(s.adminDecideManualProductAdmission))
+			}
+		}
 		admin.PUT("/registration-bonus-policy", s.authorizer.Require("platform.registration-bonus.manage"), s.requireRecentProductAuthentication(), approvalpolicy.Require("BILLING_REGISTRATION_BONUS_POLICY_UPDATE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminUpdateRegistrationBonusPolicy))
 		admin.GET("/registration-bonus-policy", s.authorizer.Require("platform.registration-bonus.read"), httpserver.AdaptFunc(s.adminRegistrationBonusPolicy))
 		admin.POST("/usage-holds/:hold_id/release", s.authorizer.Require("platform.billing.holds.release"), approvalpolicy.Require("BILLING_USAGE_HOLD_SAFE_RELEASE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminUsageWaiver))

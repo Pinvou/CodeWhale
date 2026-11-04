@@ -16,7 +16,7 @@ import (
 
 type platformRoleAdminRepository interface {
 	PlatformRoleDefinitions(context.Context) ([]AdminRoleDefinition, error)
-	AdminPlatformRoleBindings(context.Context, *uuid.UUID) ([]RoleBinding, error)
+	AdminPlatformRoleBindings(context.Context, *uuid.UUID) (RoleBindingList, error)
 	AdminGrantPlatformRoleBinding(context.Context, identity.Principal, RoleBindingGrant) (RoleBinding, error)
 	AdminRevokePlatformRoleBinding(context.Context, identity.Principal, uuid.UUID) (RoleBinding, error)
 }
@@ -65,13 +65,13 @@ func (s *Service) adminPlatformRoleBindings(w http.ResponseWriter, r *http.Reque
 		}
 		userID = &id
 	}
-	items, err := repository.AdminPlatformRoleBindings(r.Context(), userID)
+	result, err := repository.AdminPlatformRoleBindings(r.Context(), userID)
 	if err != nil {
 		s.writeError(w, r, err)
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store")
-	api.WriteJSON(w, http.StatusOK, map[string]any{"items": items})
+	api.WriteJSON(w, http.StatusOK, result)
 }
 func (s *Service) adminGrantPlatformRoleBinding(w http.ResponseWriter, r *http.Request) {
 	repository, ok := s.platformRoleRepository(w, r)

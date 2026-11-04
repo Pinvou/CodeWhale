@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+const finishFixtures = require('./helpers/fixture-exit.cjs');
 /**
  * 设置页全局配置 smoke：加载真实 Vite dist，mock TauriBridge，点击真实 React UI。
  * 覆盖模型/搜索/权限/帮助反馈四个高风险设置面板：
@@ -146,13 +147,13 @@ for (const confirmTestId of [
 }
 
 function loadPuppeteer() {
-  try { return require('puppeteer-core'); } catch (_) { /* fall through */ }
+  try { return require('./helpers/puppeteer-fixture.cjs'); } catch (_) { /* fall through */ }
   const npx = path.join(os.homedir(), '.npm', '_npx');
   if (fs.existsSync(npx)) {
     for (const directory of fs.readdirSync(npx)) {
       const candidate = path.join(npx, directory, 'node_modules', 'puppeteer-core');
       if (fs.existsSync(candidate)) {
-        try { return require(candidate); } catch (_) { /* try next */ }
+        try { return require('./helpers/browser-fixture.cjs').wrapNative(require(candidate)); } catch (_) { /* try next */ }
       }
     }
   }
@@ -671,6 +672,15 @@ async function modalWidth(page, headingText) {
 
   // Exercise the Official App -> SettingsView callback and actual bridge payload.
   await page.emulateMediaFeatures([{ name: 'prefers-color-scheme', value: 'dark' }]);
+  // The .dark class is toggled from a passive useEffect on the media query,
+  // so an absence assertion needs the media change to be observed and one
+  // render committed first — otherwise the check can read the pre-effect DOM
+  // and vacuously pass exactly when explicit light wrongly follows the OS.
+  await page.waitForFunction(() => window.matchMedia('(prefers-color-scheme: dark)').matches);
+  await page.evaluate(() => new Promise(resolve => {
+    requestAnimationFrame(() => { requestAnimationFrame(resolve); });
+  }));
+  await sleep(200);
   rec('① 旧显式浅色偏好不随系统变深', await page.evaluate(() => !document.documentElement.classList.contains('dark')));
   await clickExact(page, '跟随系统');
   await page.waitForFunction(() => document.documentElement.classList.contains('dark')
@@ -687,6 +697,9 @@ async function modalWidth(page, headingText) {
   await clickExact(page, '浅色');
   await page.waitForFunction(() => !document.documentElement.classList.contains('dark')
     && window.__SETTINGS_TEST__.settings().color_scheme === 'light');
+  rec('① 显式浅色恢复初始偏好与旧主题镜像', await page.evaluate(() =>
+    window.__SETTINGS_TEST__.settings().color_scheme === 'light'
+      && window.__SETTINGS_TEST__.settings().theme === 'liquid-light'));
 
   const voiceShortcutRow = await page.evaluate(() => {
     const row = [...document.querySelectorAll('div')].filter(node => (node.textContent || '').includes('启用 Alt 唤醒语音') && node.querySelector('[role="switch"]')).pop();
@@ -2480,8 +2493,8 @@ async function modalWidth(page, headingText) {
 
   const failed = results.filter(result => !result.pass).length;
   console.log(failed ? `\n❌ ${failed}/${results.length} FAILED` : `\n✅ ALL ${results.length} PASS`);
-  process.exit(failed ? 1 : 0);
+  finishFixtures(failed ? 1 : 0);
 })().catch(error => {
   console.error('FATAL', error.stack || error.message);
-  process.exit(1);
+  finishFixtures(1);
 });

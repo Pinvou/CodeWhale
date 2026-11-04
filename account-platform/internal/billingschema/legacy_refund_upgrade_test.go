@@ -2,6 +2,7 @@ package billingschema
 
 import (
 	"context"
+	"github.com/Pinvou/pinvou3/account-platform/internal/cifixture"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/migrations"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -49,32 +50,16 @@ func TestLegacyPendingRefundBlocksTargetedMigration(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 			defer cancel()
 			name := "f02_legacy_refund_" + strings.ReplaceAll(uuid.NewString(), "-", "")
-			if _, err := admin.Exec(ctx, "CREATE DATABASE "+pgx.Identifier{name}.Sanitize()+" OWNER billing_schema_owner"); err != nil {
+			var fixtureDatabase *cifixture.Database
+			fixtureDatabaseCreated, creationError := cifixture.CreateDatabase(ctx, admin, name, "CREATE DATABASE "+pgx.Identifier{name}.Sanitize()+" OWNER billing_schema_owner")
+			fixtureDatabase = fixtureDatabaseCreated
+			if err := creationError; err != nil {
 				t.Fatal("create exclusively owned upgrade DB")
 			}
 			defer func() {
 				clean, stop := context.WithTimeout(context.Background(), 10*time.Second)
 				defer stop()
-				var owner string
-				var active int
-				// Connection Close can return before the backend disappears from
-				// pg_stat_activity. Wait boundedly; never force disconnect or drop.
-				deadline := time.Now().Add(5 * time.Second)
-				for {
-					if err := admin.QueryRow(clean, `SELECT pg_get_userbyid(datdba),(SELECT count(*) FROM pg_stat_activity WHERE datname=$1) FROM pg_database WHERE datname=$1`, name).Scan(&owner, &active); err != nil || owner != "billing_schema_owner" {
-						t.Error("owned upgrade DB cleanup identity guard failed", err)
-						return
-					}
-					if active == 0 {
-						break
-					}
-					if time.Now().After(deadline) {
-						t.Error("owned upgrade DB remains active; cleanup refused", active)
-						return
-					}
-					time.Sleep(10 * time.Millisecond)
-				}
-				if _, err := admin.Exec(clean, "DROP DATABASE "+pgx.Identifier{name}.Sanitize()); err != nil {
+				if _, err := cifixture.DropDatabase(clean, admin, fixtureDatabase, "billing_schema_owner"); err != nil {
 					t.Error("nonforce owned upgrade DB cleanup failed")
 				}
 			}()

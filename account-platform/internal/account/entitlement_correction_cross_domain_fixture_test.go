@@ -33,8 +33,11 @@ func newEntitlementCrossDomainBillingFixture(t *testing.T, ctx context.Context, 
 		t.Fatal(err)
 	}
 	database := "billing_entitlement_" + strings.ReplaceAll(uuid.NewString(), "-", "")
+	var fixtureDatabase *cifixture.Database
 	identifier := pgx.Identifier{database}.Sanitize()
-	if _, err := admin.Exec(ctx, `CREATE DATABASE `+identifier+` OWNER billing_schema_owner TEMPLATE template0 ENCODING 'UTF8'`); err != nil {
+	fixtureDatabaseCreated, creationError := cifixture.CreateDatabase(ctx, admin, database, `CREATE DATABASE `+identifier+` OWNER billing_schema_owner TEMPLATE template0 ENCODING 'UTF8'`)
+	fixtureDatabase = fixtureDatabaseCreated
+	if err := creationError; err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
@@ -42,7 +45,7 @@ func newEntitlementCrossDomainBillingFixture(t *testing.T, ctx context.Context, 
 		defer cancel()
 		if err := waitOwnedBillingFixtureSessionsClosed(cleanup, admin, database); err != nil {
 			t.Errorf("owned Billing cleanup guard failed: %s", err)
-		} else if _, err := admin.Exec(cleanup, `DROP DATABASE `+identifier); err != nil {
+		} else if _, err := cifixture.DropDatabase(cleanup, admin, fixtureDatabase, "billing_schema_owner"); err != nil {
 			t.Error("owned Billing cleanup failed")
 		}
 		if err := admin.Close(context.Background()); err != nil {

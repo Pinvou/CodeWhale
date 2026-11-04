@@ -648,18 +648,11 @@ func admissionRetirementResumeFixture(t *testing.T, r *PostgresRepository, ctx c
 	if err != nil {
 		t.Fatal(err)
 	}
-	verification, _, err := r.StartProductAdmissionVerification(ctx, item.CatalogItemID, uuid.New(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
 	lifetime := time.Hour
 	if len(validity) == 1 {
 		lifetime = validity[0]
 	}
-	evidence, err := r.CompleteProductAdmissionVerification(ctx, verification.VerificationID, "controlled-verifier", "CONTROLLED", "controlled-resume-lock", time.Now().Add(lifetime))
-	if err != nil {
-		t.Fatal(err)
-	}
+	evidence := completeManualAdmissionFixture(t, r, ctx, item, time.Now().Add(lifetime))
 	item, err = r.TransitionRechargeProduct(ctx, item.CatalogItemID, item.Version, "ON_SALE", &evidence)
 	if err != nil {
 		t.Fatal(err)
@@ -677,7 +670,11 @@ func admissionRetirementResumeFixture(t *testing.T, r *PostgresRepository, ctx c
 	if err != nil {
 		t.Fatal(err)
 	}
-	return item, verification.VerificationID, expected
+	var verificationID uuid.UUID
+	if err := r.pool.QueryRow(ctx, `SELECT verification_id FROM product_admission_evidence WHERE evidence_id=$1`, evidence).Scan(&verificationID); err != nil {
+		t.Fatal(err)
+	}
+	return item, verificationID, expected
 }
 
 func admissionRetirementRecoveryLockOrderCases(t *testing.T) {

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import http from 'node:http';
+import http from './helpers/http-fixture.mjs';
 import test from 'node:test';
 import { AdminPlatformClient } from '../src/features/account-platform/admin-client.js';
 import { entitlementCorrectionApprovalDraft } from '../src/features/account-platform/admin-entitlement-correction.js';

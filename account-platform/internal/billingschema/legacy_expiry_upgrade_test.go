@@ -44,8 +44,11 @@ func legacyExpiryDatabase(t *testing.T, ctx context.Context) *pgx.Conn {
 		t.Fatal("connect owned expiry fixture")
 	}
 	name := "legacy_expiry_" + strings.ReplaceAll(uuid.NewString(), "-", "")
+	var fixtureDatabase *cifixture.Database
 	quoted := pgx.Identifier{name}.Sanitize()
-	if _, err := admin.Exec(ctx, "CREATE DATABASE "+quoted+" OWNER billing_schema_owner"); err != nil {
+	fixtureDatabaseCreated, creationError := cifixture.CreateDatabase(ctx, admin, name, "CREATE DATABASE "+quoted+" OWNER billing_schema_owner")
+	fixtureDatabase = fixtureDatabaseCreated
+	if err := creationError; err != nil {
 		admin.Close(ctx)
 		t.Fatal(err)
 	}
@@ -57,24 +60,7 @@ func legacyExpiryDatabase(t *testing.T, ctx context.Context) *pgx.Conn {
 		if c != nil {
 			c.Close(clean)
 		}
-		var owner string
-		var active int
-		deadline := time.Now().Add(5 * time.Second)
-		for {
-			if err := admin.QueryRow(clean, `SELECT pg_get_userbyid(datdba),(SELECT count(*) FROM pg_stat_activity WHERE datname=$1) FROM pg_database WHERE datname=$1`, name).Scan(&owner, &active); err != nil || owner != "billing_schema_owner" {
-				t.Error("expiry fixture identity guard failed")
-				return
-			}
-			if active == 0 || time.Now().After(deadline) {
-				break
-			}
-			time.Sleep(10 * time.Millisecond)
-		}
-		if active != 0 {
-			t.Error("expiry fixture still active; cleanup refused")
-			return
-		}
-		if _, err := admin.Exec(clean, "DROP DATABASE "+quoted); err != nil {
+		if _, err := cifixture.DropDatabase(clean, admin, fixtureDatabase, "billing_schema_owner"); err != nil {
 			t.Error("expiry fixture cleanup failed", err)
 		}
 	})

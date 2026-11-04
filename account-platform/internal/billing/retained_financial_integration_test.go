@@ -48,38 +48,23 @@ func retainedFinanceRepository(t *testing.T, throughVersion ...int64) (*Postgres
 		t.Fatal("cannot connect to fixture database")
 	}
 	database := "retained_finance_" + strings.ReplaceAll(uuid.NewString(), "-", "")
+	var fixtureDatabase *cifixture.Database
 	quoted := pgx.Identifier{database}.Sanitize()
 	var exists bool
 	if err = control.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pg_database WHERE datname=$1)`, database).Scan(&exists); err != nil || exists {
 		control.Close(context.Background())
 		t.Fatal("new UUID database must not already exist")
 	}
-	if _, err = control.Exec(ctx, "CREATE DATABASE "+quoted+" OWNER billing_schema_owner"); err != nil {
+	fixtureDatabaseCreated, creationError := cifixture.CreateDatabase(ctx, control, database, "CREATE DATABASE "+quoted+" OWNER billing_schema_owner")
+	fixtureDatabase = fixtureDatabaseCreated
+	if err := creationError; err != nil {
 		control.Close(context.Background())
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
 		cleanup, done := context.WithTimeout(context.Background(), 10*time.Second)
 		defer done()
-		var owner string
-		var active int
-		// Closed client connections can remain visible until PostgreSQL finishes
-		// their backend shutdown. Wait only for this fixture's own database.
-		deadline := time.Now().Add(5 * time.Second)
-		var queryErr error
-		for {
-			queryErr = control.QueryRow(cleanup, `SELECT pg_get_userbyid(datdba),(SELECT count(*) FROM pg_stat_activity WHERE datname=$1) FROM pg_database WHERE datname=$1`, database).Scan(&owner, &active)
-			if queryErr != nil || owner != "billing_schema_owner" || active == 0 || !time.Now().Before(deadline) {
-				break
-			}
-			time.Sleep(10 * time.Millisecond)
-		}
-		if queryErr != nil || owner != "billing_schema_owner" || active != 0 {
-			control.Close(cleanup)
-			t.Error("own-database identity/connection cleanup guard failed")
-			return
-		}
-		if _, err := control.Exec(cleanup, "DROP DATABASE "+quoted); err != nil {
+		if _, err := cifixture.DropDatabase(cleanup, control, fixtureDatabase, "billing_schema_owner"); err != nil {
 			t.Error("own-database cleanup failed")
 		}
 		control.Close(cleanup)

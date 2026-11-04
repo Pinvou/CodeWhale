@@ -77,7 +77,7 @@ function ModelProgressIndicator({ downloading, percent, label }) {
     return (
       <div className="flex flex-col items-center gap-2.5" role="status" aria-live="polite">
         <div className="relative h-[76px] w-[76px]" aria-hidden="true">
-          <svg className="h-full w-full animate-spin motion-reduce:animate-none" viewBox="0 0 76 76">
+          <svg aria-hidden="true" className="h-full w-full animate-spin motion-reduce:animate-none" viewBox="0 0 76 76">
             <circle cx="38" cy="38" r={MODEL_PROGRESS_RADIUS} fill="none" stroke="currentColor" strokeWidth="6" className="text-[#edf0fa] dark:text-white/10" />
             <circle cx="38" cy="38" r={MODEL_PROGRESS_RADIUS} fill="none" stroke="currentColor" strokeWidth="6" strokeLinecap="round" strokeDasharray="48 147" className="text-[#5b6cf2]" />
           </svg>
@@ -1155,7 +1155,7 @@ const OutputLivePreview = ({ o, onOpen, outPreviewCache, runQueuedPreview, remem
                       disabled={!loaded}
                       className="w-full min-w-0 lg:max-w-[360px] lg:flex-1"
                     />
-                    <button onClick={startScan} disabled={scanning || !loaded} title={t.kbRescan}
+                    <button type="button" onClick={startScan} disabled={scanning || !loaded} title={t.kbRescan}
                       className={`inline-flex h-9 shrink-0 items-center rounded-full px-4 text-[13px] font-semibold shadow-sm transition-colors whitespace-nowrap ${scanning ? 'cursor-default' : ''} bg-[#E9E9EB] text-[#1D1D1F] hover:bg-[#DADADD] disabled:hover:bg-[#E9E9EB] dark:bg-[#2C2C2E] dark:text-white dark:hover:bg-[#3A3A3C] dark:disabled:hover:bg-[#2C2C2E]`}>
                       <RefreshCw size={14} className={`mr-2 opacity-70 ${scanning ? 'animate-spin' : ''}`} />
                       {scanning ? `${t.kbScanning} ${(scan.scanned || 0).toLocaleString()}` : t.kbRescan}
@@ -1193,7 +1193,7 @@ const OutputLivePreview = ({ o, onOpen, outPreviewCache, runQueuedPreview, remem
                 ) : neverScanned ? (
                   <div className={`text-center py-20 ${muted}`}>
                     <p className="text-[15px] mb-4">{t.kbEmptyHint}</p>
-                    <button onClick={startScan} className={`px-5 py-2.5 rounded-full text-[14px] font-medium ${accent}`}>{t.kbScanNow}</button>
+                    <button type="button" onClick={startScan} className={`px-5 py-2.5 rounded-full text-[14px] font-medium ${accent}`}>{t.kbScanNow}</button>
                   </div>
                 ) : (
                   <div>
@@ -1230,17 +1230,17 @@ const OutputLivePreview = ({ o, onOpen, outPreviewCache, runQueuedPreview, remem
                                   <span className={`hidden md:block text-right text-[12px] ${muted}`}>{fmtSize(f.size)}</span>
                                   <span className={`hidden md:block text-[12px] font-medium tabular-nums ${muted}`}>{fmtDate(f.mtime)}</span>
                                   <div className="flex shrink-0 items-center justify-end gap-1">
-                                    <button title={t.kbAddToKb} onClick={(e2) => { e2.stopPropagation(); setAddToKb(f.path); if (outputsOnly) loadColls(); }}
+                                    <button type="button" title={t.kbAddToKb} onClick={(e2) => { e2.stopPropagation(); setAddToKb(f.path); if (outputsOnly) loadColls(); }}
                                       className={`grid h-8 w-8 place-items-center rounded-[9px] transition-colors active:opacity-70 text-[#3A3A3C] hover:bg-[#F2F2F7] dark:text-[#C7C7CC] dark:hover:bg-white/[0.08]`}>
                                       <Plus size={15} />
                                     </button>
                                       {canOpenSystemFiles && (
                                         <>
-                                          <button onClick={(e2) => { e2.stopPropagation(); openFile(f.path); }}
+                                          <button type="button" onClick={(e2) => { e2.stopPropagation(); openFile(f.path); }}
                                             className={`h-8 rounded-[9px] px-2.5 text-[12px] font-medium whitespace-nowrap transition-colors active:opacity-70 text-[#007AFF] hover:bg-[#007AFF]/10 dark:text-[#0A84FF] dark:hover:bg-[#0A84FF]/10`}>
                                             {t.kbOpen}
                                           </button>
-                                          <button title={t.kbOpenFolder} onClick={(e2) => { e2.stopPropagation(); openFolder(f.path); }}
+                                          <button type="button" title={t.kbOpenFolder} onClick={(e2) => { e2.stopPropagation(); openFolder(f.path); }}
                                             className={`grid h-8 w-8 place-items-center rounded-[9px] transition-colors active:opacity-70 text-[#3A3A3C] hover:bg-[#F2F2F7] dark:text-[#C7C7CC] dark:hover:bg-white/[0.08]`}>
                                             <FolderOpen size={15} />
                                           </button>
@@ -1449,12 +1449,12 @@ const OutputLivePreview = ({ o, onOpen, outPreviewCache, runQueuedPreview, remem
                   <div className="mt-5">
                     {modelFailed ? (
                       <div className="flex items-center justify-center gap-3">
-                        <button onClick={() => startModelDownload(false)} className={`px-5 py-2.5 rounded-xl text-[14px] font-bold bg-[#eceef7] text-[#3f4250] dark:bg-white/10 dark:text-white`}>{t.kbModelRetryBtn}</button>
-                        <button onClick={() => startModelDownload(true)} className="px-5 py-2.5 rounded-xl text-[14px] font-bold text-white"
+                        <button type="button" onClick={() => startModelDownload(false)} className={`px-5 py-2.5 rounded-xl text-[14px] font-bold bg-[#eceef7] text-[#3f4250] dark:bg-white/10 dark:text-white`}>{t.kbModelRetryBtn}</button>
+                        <button type="button" onClick={() => startModelDownload(true)} className="px-5 py-2.5 rounded-xl text-[14px] font-bold text-white"
                           style={{ background: 'linear-gradient(135deg,#6f5cf0,#5b6cf2)', boxShadow: '0 6px 16px rgba(108,92,231,.32)' }}>{t.kbModelRepairBtn} →</button>
                       </div>
                     ) : (
-                      <button onClick={() => startModelDownload(false)}
+                      <button type="button" onClick={() => startModelDownload(false)}
                         className="px-5 py-2.5 rounded-xl text-[14px] font-bold text-white"
                         style={{ background: 'linear-gradient(135deg,#6f5cf0,#5b6cf2)', boxShadow: '0 6px 16px rgba(108,92,231,.32)' }}>
                         {t.kbModelDownloadBtn} →
@@ -1481,7 +1481,7 @@ const OutputLivePreview = ({ o, onOpen, outPreviewCache, runQueuedPreview, remem
                 <div className={`rounded-3xl p-7 mb-6 flex items-center gap-6 bg-gradient-to-br from-[#ece8fc] to-[#dcebfb] dark:bg-gradient-to-br dark:from-[#2A2440] dark:to-[#1E2438]`}>
                   <div className="flex-1 min-w-0">
                     <h2 className={`text-[20px] font-bold mb-3 text-[#211f33] dark:text-[#E3E3E3]`}>{t.kbBannerTitle}</h2>
-                    <button onClick={() => setNewColl({ name: '', category: '' })} className="px-5 py-2.5 rounded-xl text-[14px] font-bold text-white" style={{ background: 'linear-gradient(135deg,#6f5cf0,#5b6cf2)' }}>{t.kbNewColl} →</button>
+                    <button type="button" onClick={() => setNewColl({ name: '', category: '' })} className="px-5 py-2.5 rounded-xl text-[14px] font-bold text-white" style={{ background: 'linear-gradient(135deg,#6f5cf0,#5b6cf2)' }}>{t.kbNewColl} →</button>
                     <div className="flex gap-2 mt-4 flex-wrap">
                       {[t.kbStep1, t.kbStep2, t.kbStep3].map((s, i) => (
                         <span key={i} className={`text-[12px] px-3 py-1.5 rounded-full bg-white/70 text-[#54506b] dark:bg-white/10 dark:text-[#C4C7C5]`}><b className="text-[#6c5ce7]">{i + 1}</b> {s}</span>
@@ -1556,11 +1556,11 @@ const OutputLivePreview = ({ o, onOpen, outPreviewCache, runQueuedPreview, remem
                       </div>
                       <div className="flex shrink-0 items-center gap-2">
                         {idx.resumable && (
-                          <button onClick={resumeImport} disabled={failedFilesLoading}
+                          <button type="button" onClick={resumeImport} disabled={failedFilesLoading}
                             className={`rounded-full px-4 py-2 text-[13px] font-semibold ${accent} ${failedFilesLoading ? 'cursor-default opacity-50' : ''}`}>{t.kbResumeImport}</button>
                         )}
                         {(idx.running || idx.resumable) && (
-                          <button onClick={cancelImport} disabled={failedFilesLoading}
+                          <button type="button" onClick={cancelImport} disabled={failedFilesLoading}
                             className={`rounded-full px-4 py-2 text-[13px] ${card} ${muted} ${failedFilesLoading ? 'cursor-default opacity-50' : ''}`}>{t.kbCancelImport}</button>
                         )}
                       </div>
@@ -1575,7 +1575,7 @@ const OutputLivePreview = ({ o, onOpen, outPreviewCache, runQueuedPreview, remem
                                 <div className={`truncate font-medium ${ink}`} title={file.path}>{file.name}</div>
                                 <div className="truncate text-[#d63a3a] dark:text-[#ff8a80]" title={file.error}>{file.error}</div>
                               </div>
-                              <button onClick={() => retryImportFile(file.itemId)} disabled={indexing || failedFilesLoading}
+                              <button type="button" onClick={() => retryImportFile(file.itemId)} disabled={indexing || failedFilesLoading}
                                 className={`shrink-0 rounded-full px-3 py-1.5 font-medium ${soft} ${indexing || failedFilesLoading ? 'cursor-default opacity-50' : ''}`}>
                                 {t.kbRetryFile}
                               </button>
@@ -1585,7 +1585,7 @@ const OutputLivePreview = ({ o, onOpen, outPreviewCache, runQueuedPreview, remem
                         {((failedPaginationRef.current.jobId === idx.jobId && failedPaginationRef.current.initialized)
                           ? failedPaginationRef.current.nextOffset != null
                           : idx.failedFiles.length < idx.failed) && (
-                          <button onClick={loadMoreFailedFiles} disabled={failedFilesLoading}
+                          <button type="button" onClick={loadMoreFailedFiles} disabled={failedFilesLoading}
                             className={`mt-3 rounded-full px-3 py-1.5 text-[12px] font-medium ${soft} ${failedFilesLoading ? 'cursor-default opacity-50' : ''}`}>
                             {failedFilesLoading ? t.kbLoadingFailedFiles : t.kbLoadMoreFailedFiles}
                           </button>
@@ -1605,7 +1605,7 @@ const OutputLivePreview = ({ o, onOpen, outPreviewCache, runQueuedPreview, remem
                     {cats.length > 1 && (
                       <div className="flex items-center gap-2 flex-wrap mb-4">
                         {cats.map((ct) => (
-                          <button key={ct} onClick={() => setKbCat(ct)}
+                          <button type="button" key={ct} onClick={() => setKbCat(ct)}
                             className={`px-4 py-1.5 rounded-full text-[13px] font-medium transition-colors ${kbCat === ct ? accent : `${card} ${muted}`}`}>
                             {ct === 'all' ? t.kbCatAll : ct}
                           </button>
@@ -1659,17 +1659,17 @@ const OutputLivePreview = ({ o, onOpen, outPreviewCache, runQueuedPreview, remem
                         <div className={`text-[15px] font-bold ${ink}`}>{t.kbCollFiles}</div>
                         {activeColl && <>
                           <span className={`text-[14px] truncate ${muted}`}>· {activeColl.name}</span>
-                          <button onClick={() => setActiveColl(null)} className={`shrink-0 px-2.5 py-0.5 rounded-full text-[12px] ${card} ${muted}`}>{t.kbAllColls}</button>
+                          <button type="button" onClick={() => setActiveColl(null)} className={`shrink-0 px-2.5 py-0.5 rounded-full text-[12px] ${card} ${muted}`}>{t.kbAllColls}</button>
                         </>}
                       </div>
                       {activeColl && <div className="flex items-center gap-2 shrink-0">
-                            <button onClick={(e) => { e.stopPropagation(); openAddMenu('coll', e.currentTarget); }} disabled={indexing || !canPickHostFiles} className={`flex items-center gap-2 px-4 py-2 rounded-full text-[13px] font-medium ${(indexing || !canPickHostFiles) ? 'opacity-60 cursor-default' : ''} ${soft}`}>
+                            <button type="button" onClick={(e) => { e.stopPropagation(); openAddMenu('coll', e.currentTarget); }} disabled={indexing || !canPickHostFiles} className={`flex items-center gap-2 px-4 py-2 rounded-full text-[13px] font-medium ${(indexing || !canPickHostFiles) ? 'opacity-60 cursor-default' : ''} ${soft}`}>
                           {indexing ? <RefreshCw size={14} className="animate-spin" /> : <Plus size={14} />}
                           {!indexing && <ChevronDown size={13} className="opacity-70" />}
                           {indexing ? `${t.kbIndexing} ${idx.done}/${idx.total}` : t.kbAdd}
                         </button>
-                        <button title={t.kbEditColl} onClick={() => setNewColl({ id: activeColl.id, name: activeColl.name, category: activeColl.category || '', description: activeColl.description ?? null })} className={`p-2 rounded-full ${iconHover}`}><Edit2 size={15} /></button>
-                        <button title={t.kbDeleteColl} onClick={() => setDelColl(activeColl)} className={`p-2 rounded-full ${iconHover}`}><Trash2 size={15} /></button>
+                        <button type="button" title={t.kbEditColl} onClick={() => setNewColl({ id: activeColl.id, name: activeColl.name, category: activeColl.category || '', description: activeColl.description ?? null })} className={`p-2 rounded-full ${iconHover}`}><Edit2 size={15} /></button>
+                        <button type="button" title={t.kbDeleteColl} onClick={() => setDelColl(activeColl)} className={`p-2 rounded-full ${iconHover}`}><Trash2 size={15} /></button>
                       </div>}
                     </div>
                     {(() => {
@@ -1695,8 +1695,8 @@ const OutputLivePreview = ({ o, onOpen, outPreviewCache, runQueuedPreview, remem
                             </span>}
                             <span className={`w-24 text-right text-[12px] ${muted}`}>{docStatusLabel(d)}</span>
                             <div className="w-16 flex items-center justify-end gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                              {canOpenSystemFiles && <button title={t.kbOpen} onClick={() => openFile(d.path)} className={`p-1.5 rounded-full ${iconHover}`}><ExternalLink size={14} /></button>}
-                              <button data-testid="kb-remove-document" title={t.kbRemove} onClick={() => setConfirmDoc(d)} className={`p-1.5 rounded-full ${iconHover}`}><Trash2 size={14} /></button>
+                              {canOpenSystemFiles && <button type="button" title={t.kbOpen} onClick={() => openFile(d.path)} className={`p-1.5 rounded-full ${iconHover}`}><ExternalLink size={14} /></button>}
+                              <button type="button" data-testid="kb-remove-document" title={t.kbRemove} onClick={() => setConfirmDoc(d)} className={`p-1.5 rounded-full ${iconHover}`}><Trash2 size={14} /></button>
                             </div>
                           </div>
                         );})}
@@ -1789,8 +1789,8 @@ const OutputLivePreview = ({ o, onOpen, outPreviewCache, runQueuedPreview, remem
           {addMenu && typeof document !== 'undefined' && createPortal(
             <div ref={addMenuRef} onPointerDown={(e) => e.stopPropagation()} style={{ left: addMenu.left, top: addMenu.top, width: addMenu.width }}
               className={`fixed z-[1000] overflow-hidden rounded-xl py-1 shadow-xl ring-1 bg-white ring-black/10 dark:bg-[#202124] dark:ring-white/10`}>
-              <button data-testid="kb-add-files" onClick={() => chooseAdd('files')} className={`w-full h-9 px-3 flex items-center gap-2 text-left text-[14px] text-[#1F1F1F] hover:bg-[#F1F3F4] dark:text-[#E3E3E3] dark:hover:bg-[#303134]`}><FileText size={15} /><span>{t.kbAddFiles}</span></button>
-              <button data-testid="kb-add-folder" onClick={() => chooseAdd('folders')} disabled={!folderPickerAvailable} className={`w-full h-9 px-3 flex items-center gap-2 text-left text-[14px] ${folderPickerAvailable ? 'text-[#1F1F1F] hover:bg-[#F1F3F4] dark:text-[#E3E3E3] dark:hover:bg-[#303134]' : 'opacity-40 cursor-default'}`}><FolderOpen size={15} /><span>{t.kbAddFolder}</span></button>
+              <button type="button" data-testid="kb-add-files" onClick={() => chooseAdd('files')} className={`w-full h-9 px-3 flex items-center gap-2 text-left text-[14px] text-[#1F1F1F] hover:bg-[#F1F3F4] dark:text-[#E3E3E3] dark:hover:bg-[#303134]`}><FileText size={15} /><span>{t.kbAddFiles}</span></button>
+              <button type="button" data-testid="kb-add-folder" onClick={() => chooseAdd('folders')} disabled={!folderPickerAvailable} className={`w-full h-9 px-3 flex items-center gap-2 text-left text-[14px] ${folderPickerAvailable ? 'text-[#1F1F1F] hover:bg-[#F1F3F4] dark:text-[#E3E3E3] dark:hover:bg-[#303134]' : 'opacity-40 cursor-default'}`}><FolderOpen size={15} /><span>{t.kbAddFolder}</span></button>
             </div>, document.body)}
         </div>
       );

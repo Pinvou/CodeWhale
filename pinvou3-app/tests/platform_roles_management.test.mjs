@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createServer } from 'node:http';
+import { createServer } from './helpers/http-fixture.mjs';
 import { once } from 'node:events';
 import { AdminPlatformClient } from '../src/features/account-platform/admin-client.js';
 import { platformRoleGrantIntent, grantablePlatformRole, requirePlatformRoles, requirePlatformRoleBinding, platformRoleFreshAuthority, platformRolePending, platformRoleFailureState } from '../src/features/account-platform/platform-role-management.js';
@@ -38,7 +38,7 @@ test('actual Admin client HTTP preserves original grant command after unknown AC
       response.statusCode = 201; return response.end(JSON.stringify(stored));
     }
     if (request.method === 'DELETE') { stored = { ...stored, status: 'REVOKED', revoked_by: owner }; return response.end(JSON.stringify(stored)); }
-    response.end(JSON.stringify({ items: stored ? [stored] : [] }));
+    response.end(JSON.stringify({ items: stored ? [stored] : [], truncated: false }));
   });
   server.listen(0, '127.0.0.1'); await once(server, 'listening'); t.after(() => new Promise(resolve => server.close(resolve)));
   const client = new AdminPlatformClient(`http://127.0.0.1:${server.address().port}`); client.csrfToken = 'controlled-csrf';
@@ -57,6 +57,29 @@ test('actual Admin client HTTP preserves original grant command after unknown AC
   assert.equal((await client.revokePlatformRole(owner, result.binding_id)).status, 'REVOKED');
   assert.equal((await client.platformRoleBindings(user))[0].status, 'REVOKED');
   platformRolePending(client, owner, null); assert.equal(platformRolePending(client, owner), null);
+});
+
+test('admin binding lists require exact truncation facts and preserve the array consumer contract', async () => {
+  const client = new AdminPlatformClient();
+  const item = binding(intent().body);
+  for (const [count, truncated] of [[0, false], [1, false], [500, false], [500, true]]) {
+    const payload = { items: Array.from({ length: count }, () => ({ ...item })), truncated };
+    client.request = async () => payload;
+    const listed = await client.platformRoleBindings();
+    assert.equal(listed.length, count);
+    assert.equal(listed.truncated, truncated);
+    assert.equal(Object.keys(listed).includes('truncated'), false);
+    assert.deepEqual(JSON.parse(JSON.stringify(listed)), payload.items);
+  }
+  for (const payload of [{ items: [] }, { items: [], truncated: null }, { items: [], truncated: 'false' },
+    { items: [], truncated: 0 }, { items: [], truncated: true },
+    { items: Array.from({ length: 499 }, () => item), truncated: true },
+    { items: Array.from({ length: 501 }, () => item), truncated: false },
+    { items: Array.from({ length: 501 }, () => item), truncated: true },
+    { items: [null], truncated: false }]) {
+    client.request = async () => payload;
+    await assert.rejects(client.platformRoleBindings());
+  }
 });
 
 test('role form and ACK contracts preserve existing scope, expiry and source restrictions', async t => {

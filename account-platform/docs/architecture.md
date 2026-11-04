@@ -26,7 +26,7 @@
 - Token Portal 是个人中心和运营后台的 Web BFF，采用 OIDC Authorization Code + PKCE、Redis 服务端会话和 CSRF 防护。 刷新在请求取消或等待租约超时后不再准入；已获准的刷新使用原有 20 秒预算完成 IdP 单次令牌轮换及服务端保存，浏览器断开不取消该收尾。保存仍要求原会话、租约 owner 和注销围栏一致，不能复活已注销或已替换会话；暂时故障不自动重试轮换。
 - 桌面端的内置模型路径使用与登录相同的 OIDC Access Token；旧内置模型运行时路径已移除，并已有本地迁移代码和测试。 模型代理的读错误、交付丢弃、Engine 回收和会话退休仅停止本地交付；只有显式停止当前已登记调用才发送绑定原 usage ID、原操作键和取消键的 TOK-38 命令。异常交付只在当前 incarnation/generation 的既有 4096 总上限内保留原取消身份，同键透明重试接替该身份，显式停止可在重试间隙继续取消原资源；新轮次、回收与退休清理该内存身份，旧 generation 或 incarnation 不得取消新调用；断线不改变 Hold、结算或既有未知用量核对策略。
 
-当前代码尚未实现的关键目标包括账单逐行支付证据归并和完整关单中间态。独立模型目录、稳定模型身份、不可变能力/目录版本、托管路由 Provisioning、组织模型业务策略、资格管线、目录回滚联合依赖校验与运营修复已经在仓库闭环；客户端切换所需的无推理 Readiness、公开兼容范围、签名准入证明、桌面动态目录消费、下架后的会话分支、发布/安装/运行门禁以及 N/N-1/N-2 兼容淘汰闭环均已在仓库实现。用户级全局上下文、组成级组织授予、计量/公式/价格快照、目标普通退款领域实现及其默认关闭产品门禁、支付异常统一结案、独立应收/拒付会计链路、每日四方对账、晚到支付人工复核，以及注销资格、静默期、跨域阻断、Identity/资料/Commerce/邀请清理、组织授予隔离与标识墓碑已在仓库闭环。超级管理员安全恢复和客户端准入仍待生产等价演练。
+当前代码尚未实现的关键目标包括账单逐行支付证据归并和完整关单中间态。独立模型目录、稳定模型身份、不可变能力/目录版本、托管路由 Provisioning、组织模型业务策略、资格管线、目录回滚联合依赖校验与运营修复已经在仓库闭环；客户端切换所需的无推理 Readiness、公开兼容范围、签名准入证明、桌面动态目录消费、下架后的会话分支及发布/安装/运行门禁已有仓库实现；N/N-1/N-2 兼容策略库及通知窗口校验已实现，但四服务生产 HTTP wrapper 未装配，统一版本响应头和过期写请求 426 尚未闭环。用户级全局上下文、组成级组织授予、计量/公式/价格快照、目标普通退款领域实现及其默认关闭产品门禁、支付异常统一结案、独立应收/拒付会计链路、每日四方对账、晚到支付人工复核，以及注销资格、静默期、跨域阻断、Identity/资料/Commerce/邀请清理、组织授予隔离与标识墓碑已在仓库闭环。超级管理员安全恢复和客户端准入仍待生产等价演练。
 
 ## 2. 逻辑拓扑
 
@@ -103,7 +103,9 @@ flowchart LR
 | Event Relay ×2 | Account/Billing 事务 Outbox 投递、重试和死信 | Account/Billing Outbox/Inbox | Token 本地事件没有投递入口；现有消息不能替代缺失的跨域 Saga |
 | New API | OpenAI 兼容代理、供应商调用日志和用量证据 | 独立数据库 | 仍需通过 Adapter 契约补齐协议、取消和证据能力 |
 
-四个对外服务由同一客户端兼容策略包裹，所有响应声明 API 契约版本和当前最小支持版本。正式清单至少包含当前桌面小版本及前两个小版本，旧版的 `sunset_at` 必须晚于后继正式发布90天，普通弃用通知必须至少提前60天；严重安全例外可缩至7天，但清单必须携带审批号。桌面直连请求及经 CodeWhale 发出的平台模型请求都使用 `X-Pinvou-Client-Version` 标识真实制品版本。版本到期后仅远程写操作返回稳定 `426 CLIENT_UPGRADE_REQUIRED`、`Link: rel="latest-version"` 和 HTTPS 升级地址；只读远程数据、本地数据与本地独立模型不经过该淘汰门禁。
+当前 `clientcompat` 策略只将发布清单提供给 Token gateway readiness；`Policy.Wrap` / `Policy.WrapExcept` 未挂载到 Account、Billing、Token 或 Portal 的生产 HTTP 路由，不能据此宣称四服务已统一返回版本响应头或已启用全局 `426 CLIENT_UPGRADE_REQUIRED`。Account 的 `WithClientCompatibility` 另用于内部服务版本查询，也不安装这个 HTTP wrapper。实际入口、默认配置及验证边界见 [HTTP 客户端兼容层范围](client-compatibility-scope.md)；#1954 澄清当前装配范围，不代替未来改变装配的行为决策。
+
+策略库保留 N/N-1/N-2 清单、后继发布后至少90天支持、普通弃用提前60天及需审批号的7天安全例外校验；其 wrapper 单测覆盖过期远程写请求的 `426 CLIENT_UPGRADE_REQUIRED`、`Link: rel="latest-version"` 和 HTTPS 升级地址，以及读取豁免。这些库能力和桌面请求携带 `X-Pinvou-Client-Version`，不等于生产路由已经启用淘汰门禁。未来装配须单独明确路由、方法、豁免和旧客户端兼容承诺，不得以版本检查替代权限、幂等或资金事实校验。
 
 ### 3.1 仓库交付形态
 
@@ -246,7 +248,7 @@ Web 个人中心的信息架构固定为三个一级 Tab：“额度与用量”
 - 普通授权接口拒绝 `OWNER`、基础 `MEMBER` 和平台角色；运营通用接口拒绝 `PLATFORM_SUPER_ADMIN` 与 `OWNER`。超级管理员由专用安全生命周期维护：数据库同时保护最后一个有效超级管理员的角色绑定和用户状态，停用、删除及注销预检统一返回 `LAST_ACTIVE_SUPER_ADMIN`。旧管理员仍须按 `deploy/runbooks/account-rbac-migration.md` 明确映射，不能自动全部升级为超级管理员。
 - 首个 `admin` 身份由主机/集群受控的 `account-security` 离线命令幂等创建，业务用户在正式密码安全激活前保持 `BOOTSTRAP_PENDING`，Identity 身份保持禁用且没有超级管理员绑定。正式密码只进入 CLI 与 Identity Adapter；Account 数据库只保存一次性凭据的用途/部署代次绑定 SHA-256 校验值和生命周期事实。
 - Break-glass 与普通角色交接分离：仓库不提供公网恢复 API；离线命令必须记录“全部超级管理员异常失联”的显式确认，并从受信 OS/集群身份、mTLS 或签名恢复凭据派生操作者，禁止命令行参数或请求体自报身份；事故理由、证据摘要、目标和最长 60 分钟有效期立即进入不可变审计与 CRITICAL 告警。它不能绕过最后管理员主动注销门禁。
-- Break-glass 首次设密被受信 Keycloak 26.7.0 内置密码策略明确拒绝时，Adapter 仅对 HTTP 400 的完整结构化策略机器码出具本次 Identity 激活零变更证明，回滚 Account 事务并保留原 Identity；不解析本地化错误描述。依据为该版本 `PasswordCredentialProvider.createCredential` 先校验后写入、`ErrorResponseException.getResponse` 强制回滚。该约定限于部署的内置事务型凭据提供者，不覆盖有独立外部副作用的自定义 provider。普通 400、未知策略码、异常响应、断连或已完成设密后的失败仍走原有 fresh-lock / receipt / authority 补偿；普通用户设密和交互式 bootstrap 语义保持不变。
+- Break-glass 首次设密被受信 Keycloak 26.7.0 内置密码策略明确拒绝时，Adapter 仅对 HTTP 400 的完整结构化策略机器码出具本次 Identity 激活零变更证明，回滚 Account 事务并保留原 Identity；不解析本地化错误描述。依据为该版本 `PasswordCredentialProvider.createCredential` 先校验后写入、`ErrorResponseException.getResponse` 强制回滚。该约定限于部署的内置事务型凭据提供者，不覆盖有独立外部副作用的自定义 provider。普通 400、未知策略码、异常响应、断连或已完成设密后的失败仍走原有 fresh-lock / receipt / authority 补偿；普通用户设密和交互式 bootstrap 语义保持不变。 对不在上述白名单内的失败，不推断为零效果；若 fresh-lock、原操作持久回执及权限核验满足既有补偿条件，仍会禁用目标 Identity。该补偿路径不使用普通管理员停用入口的最后一名超级管理员保护，因此不能保证失败后仍有可登录的超级管理员；这是保留的安全补偿边界，不应将其表述为恢复成功。
 - 注销由 Account 持有唯一 `account_closure_requests` 聚合，并以 `CLOSURE_REQUESTED → QUIESCING → FINANCIAL_CLEARANCE → IDENTITY_CLEANUP → ANONYMIZED → COMPLETED` 表达只前进阶段；命令指纹、不可变审计、版本、租约、退避和 SLA 共同提供崩溃恢复。
 - 注销创建将确认文本/幂等键校验与近期认证校验分开：认证超过五分钟返回 `RECENT_AUTHENTICATION_REQUIRED`；Web 个人中心通过统一身份页重新认证，使用 `section=accountSettings&closure=confirm` 安全回跳并再次要求显式确认。组织所有权、最后超级管理员和余额等资格问题在 Saga 创建后保存为阻断快照并展示，不得被泛化成服务不可用。
 - 所有者或最后有效超级管理员先停在 `CLOSURE_REQUESTED`，用户保持 ACTIVE 以完成交接；门禁通过的同一事务才将用户改为 `CLOSING`。普通 Account 授权和 Token 新业务返回稳定 `ACCOUNT_CLOSING`，历史读取及既有订单关闭、支付申诉、用量取消使用服务端白名单，客户端不能自报修复模式。

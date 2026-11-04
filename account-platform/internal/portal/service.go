@@ -1,6 +1,7 @@
 package portal
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -913,6 +914,13 @@ func (s *Service) forward(w http.ResponseWriter, r *http.Request, upstream *url.
 		r = r.WithContext(download.Context())
 	}
 	limit := int64(4 << 20)
+	materialUpload := authenticated && upstream == s.config.BillingURL && productAdmissionMaterialUpload(r.Method, resource)
+	if materialUpload {
+		if !s.allowFinanceUpload(w, r, session, "platform.products.publish", "product publishing") {
+			return
+		}
+		limit = productAdmissionMaterialLimit
+	}
 	if authenticated && upstream == s.config.BillingURL && r.Method == http.MethodPost && resource == "/admin/v1/reconciliation-imports" {
 		if !s.allowReconciliationImport(w, r, session) {
 			return
@@ -920,6 +928,9 @@ func (s *Service) forward(w http.ResponseWriter, r *http.Request, upstream *url.
 		limit = reconciliationImportBodyLimit
 	}
 	body, err := io.ReadAll(io.LimitReader(r.Body, limit+1))
+	if materialUpload {
+		defer clear(body)
+	}
 	if err != nil || int64(len(body)) > limit {
 		api.WriteError(w, http.StatusRequestEntityTooLarge, "INVALID_REQUEST", "the request body is invalid or too large", httpserver.RequestID(r.Context()))
 		return
@@ -927,7 +938,13 @@ func (s *Service) forward(w http.ResponseWriter, r *http.Request, upstream *url.
 	target := *upstream
 	target.Path = strings.TrimRight(target.Path, "/") + resource
 	target.RawQuery = r.URL.RawQuery
-	request, err := http.NewRequestWithContext(r.Context(), r.Method, target.String(), strings.NewReader(string(body)))
+	var requestBody io.Reader
+	if materialUpload {
+		requestBody = bytes.NewReader(body)
+	} else {
+		requestBody = strings.NewReader(string(body))
+	}
+	request, err := http.NewRequestWithContext(r.Context(), r.Method, target.String(), requestBody)
 	if err != nil {
 		api.WriteError(w, http.StatusBadGateway, "UPSTREAM_UNAVAILABLE", "the account platform is unavailable", httpserver.RequestID(r.Context()))
 		return
@@ -1007,6 +1024,10 @@ func (s *Service) forward(w http.ResponseWriter, r *http.Request, upstream *url.
 		}
 	}
 	w.Header().Set("Cache-Control", "no-store")
+	if authenticated && upstream == s.config.BillingURL && productAdmissionMaterialContent(r.Method, resource) && response.StatusCode == http.StatusOK {
+		forwardProductAdmissionOriginal(w, r, response)
+		return
+	}
 	if auditDownload {
 		for _, name := range []string{"Content-Disposition", "Content-Length"} {
 			if value := response.Header.Get(name); value != "" {

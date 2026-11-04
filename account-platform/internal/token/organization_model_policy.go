@@ -136,7 +136,10 @@ func (r *PostgresRepository) SaveOrganizationModelPolicy(ctx context.Context, or
 		_, err = tx.Exec(ctx, `INSERT INTO organization_model_policy_commands(organization_id,idempotency_key,request_digest,result_version,actor_id,created_at) VALUES($1,$2,$3,$4,$5,$6)`, organizationID, key, digest, version, actor, now)
 	}
 	if err == nil {
-		snapshot, _ := json.Marshal(map[string]any{"mode": mode, "model_ids": modelIDs})
+		snapshot, marshalErr := json.Marshal(map[string]any{"mode": mode, "model_ids": modelIDs})
+		if marshalErr != nil {
+			return OrganizationModelPolicy{}, marshalErr
+		}
 		_, err = tx.Exec(ctx, `INSERT INTO organization_model_policy_audit(id,organization_id,policy_version,actor_id,authorization_version,reason,snapshot,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8)`, uuid.Must(uuid.NewV7()), organizationID, version, actor, authorizationVersion, reason, snapshot, now)
 	}
 	if err != nil {
