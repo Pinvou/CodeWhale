@@ -144,7 +144,7 @@ BILLING_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/billing"
 SCHEMA_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/billingschema"
 TOKEN_SCHEMA_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/tokenschema"
 TOKEN_SCHEMA_REQUIRED = {"TestManagementPublicMigrationInstallation"}
-SCHEMA_REQUIRED = {"TestLatePaymentQueryRegisteredIdentity", "TestReconciliationFairRetryRegisteredIdentity", "TestF09EntitlementPackageIndexPublicMigration", "TestTokenWalletReceiptSchemaPostgres", "TestLegacyEntitlementUpgradeAdmissionPostgres", "TestUsageWaiverHistoricalSchemaPostgres", "TestBillingOrdinaryReplayOriginalMigrationPostgres", "TestUnknownProviderEntryPublicMigrationPostgres", "TestLegacyExpiry025UpgradePreservesOriginalLedgerPostgres", "TestF04PublicTokenUserOwnerAuthorityAndDirectory"}
+SCHEMA_REQUIRED = {"TestLatePaymentQueryRegisteredIdentity", "TestReconciliationFairRetryRegisteredIdentity", "TestF09EntitlementPackageIndexPublicMigration", "TestTokenWalletReceiptSchemaPostgres", "TestLegacyEntitlementUpgradeAdmissionPostgres", "TestUsageWaiverHistoricalSchemaPostgres", "TestBillingOrdinaryReplayOriginalMigrationPostgres", "TestUnknownProviderEntryPublicMigrationPostgres", "TestLegacyExpiry025UpgradePreservesOriginalLedgerPostgres", "TestF04PublicTokenUserOwnerAuthorityAndDirectory", "TestManualRetentionHistoricalHardeningPostgres"}
 OWNER_REQUIRED = {
     "TestF06OrganizationWalletRequiresLifecycleEvidence",
     "TestTokenWalletReceiptSignedClientRecoveryPostgres",
@@ -210,6 +210,11 @@ RETAINED_REQUIRED = {
     "TestReconciliationFairRetryRuntimePostgres",
     "TestProductResumeDefaultProviderPostgres",
     "TestProductAdmissionRetirementBindingPostgres",
+    "TestProductManualAdmissionPostgres",
+    "TestExpirePendingManualProductAdmissionsReleasesFingerprintSlot",
+    "TestProductAdmissionMaterialStorePostgres",
+    "TestProductAdmissionMaterialPurgePostgres",
+    "TestProductAdmissionMaterialHTTPPostgres",
     "TestNegativeAdjustmentMemberBucketConservationPostgres",
     "TestRechargeProductCommandAtomicityPostgres",
     "TestOrganizationChargebackDeletionEvidencePostgres",
@@ -233,6 +238,10 @@ RETAINED_REQUIRED = {
 # These exact roots are named leaves. Every other retained root must still
 # produce completed child-case evidence, not just a parent PASS.
 BILLING_LEAF_REQUIRED = {
+    "TestExpirePendingManualProductAdmissionsReleasesFingerprintSlot",
+    "TestProductAdmissionMaterialStorePostgres",
+    "TestProductAdmissionMaterialPurgePostgres",
+    "TestProductAdmissionMaterialHTTPPostgres",
     "TestEscalatedForcedRefundRequiresSecondActorAndReplays",
     "TestOrdinaryForcedRefundAppliedReceiptRecoveryPostgres",
     "TestPaymentPersonalWalletAdmissionStatusRacePostgres",
@@ -257,6 +266,14 @@ BILLING_LEAF_REQUIRED = {
 }
 BILLING_CHILD_REQUIRED = RETAINED_REQUIRED - BILLING_LEAF_REQUIRED
 EXACT_REQUIRED_CHILDREN = {
+    "TestProductManualAdmissionPostgres": {
+        "two-explicit-humans-first-publish-and-immutable-replay",
+        "runtime-cannot-rewrite-frozen-manual-facts",
+        "concurrent-second-votes-issue-once-and-audit-failure-rolls-back",
+        "reject-retains-original-and-no-evidence",
+        "stale-product-and-foreign-original-rejected",
+        "retention-purges-submission-snapshot-and-review-reason",
+    },
     "TestEmergencyCancellationClaimOwnershipPostgres": {"before-request", "after-request", "pending", "zero-attempt"},
     "TestEmergencyCancellationRequestLocksClaimPostgres": {"usage-lock-reclaim"},
     "TestPasswordPreparationAuthorizationPostgres": {

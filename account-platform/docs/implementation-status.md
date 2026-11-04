@@ -156,7 +156,7 @@ APT-123-R2 最终状态（2026-09-06）：`DONE / REMEDIATION_REVIEW_PASS`，身
 | `REQUEST-ADMISSION` | 支付创建/查询/退款按付款人、受益组织、来源、订单、动作和 Provider 原子准入；模型新逻辑请求按用户、组织成员、组织、模型、路由和全局速率/在途数在 Hold 前准入；合法回调先验签持久化再异步归并 | Billing/Token Go 单测、OpenAPI、3 个准入合同测试和迁移不可修改门禁通过；真实 PostgreSQL 高并发、Provider 回调突发与生产容量调参待部署 |
 | `TENANT-ISOLATION-MATRIX` | 每次合同发布执行个人、组织、组织节点、角色/作用域、活动上下文、撤权/到期/移除/停用/注销、猜测ID、批量混入、搜索、缓存和伪造事件隔离矩阵；不存在租户导出接口时显式证明无公开导出面 | 15 个拒绝向量、授权行约束、无泄露错误和导出面合同检查通过；真实 PostgreSQL 组合数据与服务间缓存/事件故障注入待部署 |
 | `PROVIDER-CIRCUIT-CLOCK` | Provider/能力/路由独立60秒熔断、20样本50%或连续5失败、三次半开探测、指数重开、业务拒绝排除和高风险不重发；生产三源NTP中位偏差在250ms告警、1秒退出就绪并阻止新写操作 | Go 单测、Helm配置/NetworkPolicy和3个合同测试通过；真实Provider失败注入、告警投递、三独立授时源和生产偏差注入待外部验收 |
-| `CLIENT-COMPATIBILITY-LIFECYCLE` | Account、Billing、Gateway、Portal 共用显式客户端版本策略；N/N-1/N-2 发布时间线强制后继发布后至少90天支持、正常弃用提前60天，安全例外至少7天并要求审批号；桌面普通 API 和平台模型请求均携带精确版本，过期版本远程写操作稳定返回426和可信升级入口，本地读取与本地模型不受影响 | Go 策略/中间件单测、3个版本合同矩阵、OpenAPI、Compose/Helm 和桌面静态合同通过；实际淘汰日期由每次正式发布更新清单 |
+| `CLIENT-COMPATIBILITY-LIFECYCLE` | 部分实现：策略库保留 N/N-1/N-2、90天支持、60天通知及受审批7天安全例外，Token gateway readiness 消费 Manifest；`Policy.Wrap` / `Policy.WrapExcept` 尚未挂载四服务生产 HTTP 路由，不能宣称统一版本响应头或全局426已生效 | Go 策略/中间件单测与静态合同只证明各自范围；默认/显式/损坏清单回归及入口范围守卫见 [HTTP 客户端兼容层范围](client-compatibility-scope.md)。#1954 记录当前范围澄清；未来如改变装配，须另行确认路由验收，部署模板不证明运行时装配 |
 | `AUDIT-EXPORT-PROTECTION` | 服务端审计导出任务、15分钟近期认证、默认脱敏、最长24小时临时PII授权、31天/10万行/500MB及并发/日配额、加密签名水印封装和15分钟一次性下载 | Account/Portal Go 单测、OpenAPI lint、3个审计导出合同测试、三语 Portal 构建和静态门禁通过；真实 PostgreSQL 配额竞争、生产密钥托管和大规模导出待部署验收 |
 | `DESKTOP-41` | 在 `pinvou3-app/` 执行账号平台状态、三语覆盖、计划任务定向测试 | 41 个测试通过 |
 | `VERIFY-ALL` | `node scripts/account-platform.mjs verify` | Go 单测与 Vet、OpenAPI/158 个合同测试、任务覆盖、迁移/恢复/HA/性能/i18n/可观测发布门禁、架构守卫和差异检查全部通过 |
@@ -434,7 +434,7 @@ APT-123-R2 最终状态（2026-09-06）：`DONE / REMEDIATION_REVIEW_PASS`，身
 | NFR-55 | 已实现 | AUDIT_HEAD | GO-UNIT; ADMIN-FINANCE-PAYMENT-REDESIGN; FINANCE-PAYMENT-UAT-20260902 | 0.8.0@b56b71ae (CLOUD_UAT, 2026-09-02) | 11 类 Billing 管理资源已使用 15 分钟资源 ID 快照、确定性 HMAC cursor、规范化筛选和有界 limit；PR 门禁强制运行专用 PostgreSQL 集成测试并拒绝跳过，生产百万级翻页和并发变更证据仍由候选制品绑定的发布门禁验收，未在本地冒充执行。 |
 | NFR-56 | 已实现 | APT-120-DONE; APT-121-DONE | ADMIN-MODEL-TOKEN-REDESIGN; TOKEN-ADMIN-PAGINATION-BASE; TOKEN-ADMIN-QUERY-ADAPTERS | NOT_DEPLOYED | APT-120 已实现 Token 000023 快照/成员/墓碑/创建窗口、签名 cursor、TTL/墓碑、授权失效、容量/水位/限流/清理及三类绝对 deadline 基座，并通过身份 B 第三轮审核；APT-121 已实现九类确定性查询、独立 filter/cursor、owner 权威投影、evidence 三元排序及资源审计权限交集，并通过身份 B 第四轮审核。本地因缺少 `PINVOU_TEST_TOKEN_DATABASE_URL` 未执行 PostgreSQL 重型及九类适配用例，PR 隔离库逐项强制 PASS 且拒绝 SKIP；当前 `NOT_DEPLOYED`。 |
 | NFR-46 | 部分实现 | DOC_CURRENT | GO-UNIT; PROVIDER-CIRCUIT-CLOCK; CLOUD-UAT-20260824 | 0.8.0@9271c307 (CLOUD_UAT) | 云端UAT宿主机Chrony已同步并可见9源，当前样本偏差约-2.3ms至+2.9ms；应用仍为development Compose，缺三源中位配置、100ms连续证明、250ms/1s注入、readiness/写拒绝与告警投递验收 |
-| NFR-47 | 已实现 | DOC_CURRENT | GO-UNIT; CLIENT-COMPATIBILITY-LIFECYCLE | NOT_DEPLOYED | 四服务共用版本清单与响应头，三版合同矩阵、90天支持、60天通知、受审批安全例外及稳定426已闭环；每次正式发布必须更新真实发布日期与淘汰时间 |
+| NFR-47 | 部分实现 | DOC_CURRENT | GO-UNIT; CLIENT-COMPATIBILITY-LIFECYCLE | NOT_DEPLOYED | readiness 清单与策略库校验已实现；生产 HTTP wrapper 未装配，四服务响应头及稳定426未闭环。当前边界按 #1954 澄清，未来改变装配须单独确认并验证路由；每次正式发布仍须更新清单 |
 | NFR-48 | 已实现 | DOC_CURRENT | GO-UNIT; AUDIT-EXPORT-PROTECTION | NOT_DEPLOYED | 服务端任务要求 `platform.audit.export`、15分钟近期认证、明确范围和原因；默认不可逆主体标识及字段脱敏，未脱敏字段另需最长24小时临时 `platform.audit.pii.export`；执行31天/10万行/500MB、每用户2并发/10每日配额，加密签名水印文件只允许15分钟内单次成功下载；缺生产密钥托管、大规模及真实并发验收 |
 | UI-16 | 已实现 | DOC_CURRENT | DESKTOP-39; I18N-RELEASE-GATE | NOT_DEPLOYED | 桌面账号弹层、Web 个人中心和管理后台共用精确中/英/日词条形状，未知服务端错误只显示本地化安全兜底；缺键、空词条、回退、单语硬编码或构建制品缺词条会同时阻断 verify 和客户端发布 |
 | UI-17 | 已实现 | AUDIT_HEAD | ACCOUNT-PLATFORM-STATE; UI-LINT; ARCHITECTURE-GUARD | NOT_DEPLOYED | 桌面账号 Popover 已移除目录读取、平台模型状态和选择入口；登录、余额、充值、Web 个人中心和退出登录保持不变 |
@@ -1135,7 +1135,7 @@ APT-123-R2 最终状态（2026-09-06）：`DONE / REMEDIATION_REVIEW_PASS`，身
 | NFR-55 | Billing 高数据量稳定分页 | 已实现：11 类资源使用 15 分钟资源 ID 快照、确定性 HMAC cursor、确定排序、规范化筛选和默认 50/最大 200 的有界 limit；主体/全局速率、快照/成员/8GiB 容量、10 秒超时、过期墓碑、清理指标与 70%/85% 告警均失败关闭。PR 门禁使用专用 PostgreSQL 强制执行事务、并发、全局边界、11 类 SQL、过期及超时回滚测试并拒绝 skip；百万订单完整翻页、并发变更轨迹和候选制品摘要绑定仍作为生产发布证据强制校验，不冒充本地已执行。 |
 | NFR-56 | Token 管理高数据量稳定分页 | 已实现：APT-120、APT-121 已分别通过身份 B 第三轮、第四轮审核，交付统一 envelope/schema、签名 cursor、稳定快照/墓碑、全部容量水位与限流、事务回收/清理、三类不可重置 deadline，以及九类逐资源规范化筛选、确定全序、独立 cursor、owner 权威投影、资源审计与 evidence 三元 cursor。本地未运行 PG 重型及九类适配集成用例，CI 隔离库门禁强制 PASS 且拒绝 SKIP；当前未推送、未部署。 |
 | NFR-46 | 统一可信时钟 | 云端 UAT 宿主机 Chrony 已同步9源且当前偏差为毫秒级；生产三源中位配置、100ms连续证明、250ms/1s注入和告警/readiness/写拒绝证据仍缺失。 |
-| NFR-47 | 桌面 API 兼容与淘汰 | 已实现：N/N-1/N-2共用合同矩阵；清单启动校验90天支持和60天通知，四服务返回契约/最小版本/Sunset头，桌面直连与平台模型请求携带精确版本，过期远程写操作稳定返回426及HTTPS升级入口，不影响本地模型和本地读取。 |
+| NFR-47 | 桌面 API 兼容与淘汰 | 部分实现：readiness 消费客户端发布清单，策略库校验支持及通知窗口；按 #1954 澄清的当前状态，四服务生产路由未装配通用 HTTP wrapper，统一响应头和过期写请求426仍需未来单独确认装配范围并验证真实路由。库单测及客户端版本头不代表全局淘汰门禁已启用。 |
 | NFR-48 | 审计导出保护 | 已实现：服务端任务要求专用权限、15分钟近期认证、明确范围和原因，执行默认脱敏/临时PII授权、加密签名水印、31天/10万行/500MB、2并发/10每日及15分钟一次性下载。 |
 | NFR-49 | 模型结果重放载荷最小化 | 已实现：在线24小时/30天/90天硬上限、自动清除、主体正文即时删除内部入口、派发正文最小化及独立受限案件迁移/解除后30天清除已建立；生产备份生命周期证据随 APT-037 验收。 |
 | NFR-50 | 用户编码查询保护 | 已实现：编码不是认证/授权凭据；查询要求 `platform.users.read`，只做完整等值匹配，使用统一无泄露响应、多维摘要限流和全结果审计，不提供公开、前缀、模糊、自动补全或批量入口。 |

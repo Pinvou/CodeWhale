@@ -56,9 +56,9 @@ func (r *organizationProfileAssemblyRepository) ListOrganizations(context.Contex
 	r.organizationCalls++
 	return []account.Organization{}, nil
 }
-func (r *organizationProfileAssemblyRepository) ListMyRoleBindings(context.Context, identity.Principal) ([]account.RoleBinding, error) {
+func (r *organizationProfileAssemblyRepository) ListMyRoleBindings(context.Context, identity.Principal) (account.RoleBindingList, error) {
 	r.roleCalls++
-	return []account.RoleBinding{}, nil
+	return account.RoleBindingList{Items: []account.RoleBinding{}}, nil
 }
 func TestOrganizationProfileConfiguredHandler(t *testing.T) {
 	for _, profile := range []string{"personal", "models"} {

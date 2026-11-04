@@ -315,6 +315,7 @@ jobs:
               - 'scripts/tests/token-management-phase-coverage.test.mjs'
               - 'scripts/check-account-platform-authorization-coverage.mjs'
               - 'scripts/tests/account-platform-authorization-coverage.test.mjs'
+              - 'scripts/tests/f18-hold-recovery-owned-fixture.test.mjs'
               - '.github/workflows/pr-check.yml'
               - 'scripts/tests/pr-check-routing.test.mjs'
             rust_code:
@@ -673,6 +674,12 @@ jobs:
               - 'pinvou3-app/src/**'
               - 'pinvou3-app/tests/**'
               - 'account-platform/internal/portal/static/**'
+              # connector_online_install_contract.test.js 读 scripts/ 下的
+              # smoke 脚本做版本下限钉扎(tauri/build.js 已由
+              # pinvou3-app/scripts/tauri/** 覆盖);不列出则 scripts-only PR
+              # 静默跳过该 node 门禁(test_ci_gate_policy 锁定此路由)。
+              - 'pinvou3-app/scripts/dingtalk-smoke.sh'
+              - 'pinvou3-app/scripts/wecom-smoke.sh'
               # multiagent_plan_normalize.test.mjs 读取下列 Rust 源做跨语言
               # 契约断言(蜂群契约/同快照不变式/编辑重发等);不列出则
               # Rust-only 改动会静默跳过该 node 门禁(同 resources/** 的
@@ -1463,6 +1470,9 @@ jobs:
         run: |
           node --test scripts/check-account-platform-tasks.test.mjs
 
+      - name: Verify F18 owned fixture contract
+        run: node --test scripts/tests/f18-hold-recovery-owned-fixture.test.mjs
+
       - name: Verify Account Platform authorization contracts
         run: |
           node scripts/check-account-platform-authorization-coverage.mjs
@@ -1682,6 +1692,8 @@ jobs:
         id: financial_diagnostics_upload
         if: ${{ always() }}
         timeout-minutes: 3
+        # Diagnostic transport must not invalidate the completed test verdict.
+        # The preceding contract/test steps and required-gate remain strict.
         continue-on-error: true
         uses: actions/upload-artifact@v7
         with:

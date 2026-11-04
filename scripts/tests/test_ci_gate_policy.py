@@ -163,6 +163,64 @@ def _extract_consent_marker_read_targets(consent_test):
     return sorted(targets)
 
 
+def _extract_install_contract_script_reads(contract_test):
+    """从 connector_online_install_contract.test.js 源码派生 scripts/ 读取目标。
+
+    `read("scripts", "x.sh")` 与任意段数的 `read("scripts", "a", "b", …)` 字面量
+    (单双引号、跨行皆可)各成一个 pinvou3-app/scripts/ 读取目标;`read("scripts", …)`
+    调用里解析不出字符串字面量即红——与 _extract_contract_read_targets 同款
+    fail-closed:提取器看不见的读取,路由锁就拦不住删除路由的回归。
+    """
+    targets = []
+    for args in re.findall(
+        r"read\(\s*['\"]scripts['\"]\s*,?\s*([^)]*)\)", contract_test, re.S
+    ):
+        parts = re.findall(r"['\"]([^'\"]*)['\"]", args)
+        if not parts:
+            raise AssertionError(f"无法解析的 scripts 读取目标: {args}")
+        targets.append("pinvou3-app/scripts/" + "/".join(parts))
+    # 非字面量首参 fail-closed:变量/模板串/表达式首参的 read(…) 主正则看不见,
+    # 派生结果却因其他字面量读取仍非空——新增读取静默逃出路由锁(经变异验证
+    # fail-open)。枚举每个 read( 调用,首参必须是完整的引号字面量(整个表达式,
+    # 不只是开头引号):quote 打头的拼接首参(如 "scr"+"ipts")骗得过开头引号
+    # 检查,主正则却照旧看不见它,读取静默逃出路由锁(评审指出的残余 fail-open;
+    # 与下方其余参数的 fullmatch 同口径)。宁可误红也不 fail-open;注释里提及
+    # read( 形态时同样须保持字面量示例形态。
+    for call_head in re.findall(
+        r"(?<![A-Za-z0-9_$.])read\s*\(\s*([^,)]*)", contract_test, re.S
+    ):
+        first = call_head.strip()
+        if not re.fullmatch(r"'[^']*'|\"[^\"]*\"", first):
+            raise AssertionError(
+                "read() 首参必须是完整的字符串字面量(开头引号检查放得过拼接/"
+                "插值首参,读取会静默逃出路由锁,改为字面量或同步本提取器): "
+                f"{first}"
+            )
+    # scripts 首参调用的其余参数必须各自是完整的引号字面量(整个表达式,不只是
+    # 开头引号):拼接/插值/计算后参会被主正则切成错误目标,而派生结果因其他
+    # 字面量读取仍非空——`read("scripts", "a" + name + ".sh")` 会静默派生出
+    # 不存在的路径,真实读取逃出路由锁(fail-open)。逐参数 fullmatch 完整引号
+    # 形态,解析不出即红(宁可误红也不 fail-open;注释里提及 read( 形态时同样
+    # 须保持字面量示例形态)。空参数(尾逗号)跳过。
+    for rest in re.findall(
+        r"read\s*\(\s*['\"]scripts['\"]\s*,\s*([^)]*)\)", contract_test, re.S
+    ):
+        for arg in rest.split(","):
+            arg = arg.strip()
+            if arg and not re.fullmatch(r"'[^']*'|\"[^\"]*\"", arg):
+                raise AssertionError(
+                    "read(\"scripts\", …) 的每个参数都必须是完整的字符串字面量"
+                    "(拼接/插值/变量参数会派生出错误目标而静默逃出路由锁,"
+                    f"改为字面量或同步本提取器): read(\"scripts\", {rest})"
+                )
+    if not targets:
+        raise AssertionError(
+            "connector_online_install_contract.test.js 未派生出任何 scripts/ 读取目标"
+            "——读取形态变更须同步本提取器"
+        )
+    return sorted(set(targets))
+
+
 def _changes_block(workflow_text):
     """pr-check.yml 的 changes 块(去注释),各 filter 组提取的公共上游。"""
     return _without_yaml_comments(
@@ -1016,6 +1074,10 @@ class CiGatePolicyTests(unittest.TestCase):
                 "account-platform-test", "account_platform",
                 "Verify Account Platform authorization contracts",
             ),
+            "f18-hold-recovery-owned-fixture.test.mjs": (
+                "account-platform-test", "account_platform",
+                "Verify F18 owned fixture contract",
+            ),
             "account-platform-invocation-environment.test.mjs": (
                 "frontend-test", "frontend",
                 "Verify Account invocation environment contracts",
@@ -1308,6 +1370,104 @@ class CiGatePolicyTests(unittest.TestCase):
                 _is_covered_by_trigger(target, frontend_paths),
                 f"consent marker 契约测试读取的 {target} 未被 frontend filter 覆盖,"
                 "Rust-only 改动会静默跳过该 node 门禁",
+            )
+
+    def test_install_contract_script_reads_routed(self):
+        # connector_online_install_contract.test.js 读取 pinvou3-app/scripts/
+        # 下的 smoke 脚本做 floor 钉扎(tauri/build.js 的读取由
+        # pinvou3-app/scripts/tauri/** 路由)——scripts-only PR 若不在
+        # frontend filter 中,frontend-test 被静默跳过,smoke floor 漂移在该
+        # node 门禁不可见。从测试源码派生全部 scripts/ 读取目标逐一断言
+        # frontend filter 覆盖;新增读取而未路由会在这里失败(本套件在
+        # fast-gate 每个 PR 必跑)。
+        frontend_paths = _frontend_filter_entries(self.pr_workflow)
+        contract_test = (
+            ROOT / "pinvou3-app/tests/connector_online_install_contract.test.js"
+        ).read_text(encoding="utf-8")
+
+        targets = _extract_install_contract_script_reads(contract_test)
+
+        self.assertTrue(
+            targets,
+            "未能从 connector_online_install_contract.test.js 解析出 scripts/"
+            " 读取目标(read(\"scripts\", …) 形态变更须同步"
+            " _extract_install_contract_script_reads)",
+        )
+        for target in targets:
+            self.assertTrue(
+                _is_covered_by_trigger(target, frontend_paths),
+                f"install contract 测试读取的 {target}"
+                " 未被 frontend filter 覆盖,scripts-only 改动会静默跳过该"
+                " node 门禁",
+            )
+
+    def test_script_read_derivation_covers_quote_and_shape_variants(self):
+        # 回归锁:scripts 派生正则此前只认双引号、单行、恰好 1~2 段的
+        # `read("scripts", …)`;单引号 / 跨行 / 三段写法派生出零目标,路由锁
+        # 随之静默失效(经变异验证 fail-open)。喂最小 fixture:三种变体都必
+        # 须派生出来;字面量解析不出(变量参数)必须抛错而不是静默跳过。
+        fixture = (
+            "const a = read('scripts', 'future-smoke.sh');\n"
+            "const b = read(\n  \"scripts\",\n  \"tauri\",\n  \"build.js\",\n);\n"
+            "const c = read(\"scripts\", \"deep\", \"nested\", \"tool.mjs\");\n"
+        )
+        targets = _extract_install_contract_script_reads(fixture)
+        self.assertEqual(
+            targets,
+            [
+                "pinvou3-app/scripts/deep/nested/tool.mjs",
+                "pinvou3-app/scripts/future-smoke.sh",
+                "pinvou3-app/scripts/tauri/build.js",
+            ],
+        )
+        with self.assertRaises(AssertionError):
+            _extract_install_contract_script_reads("read(\"scripts\", scriptName)")
+        with self.assertRaises(AssertionError):
+            _extract_install_contract_script_reads("const x = 1;")
+        # 回归锁:参数表达式只查开头引号会放过 quote 打头的拼接/插值——主
+        # 正则把表达式切成错误目标而派生照常非空(fail-open)。逐参数完整字
+        # 面量检查下必须抛错;全字面量的多段读取照常派生(上方 fixture 已断言)。
+        with self.assertRaises(AssertionError):
+            _extract_install_contract_script_reads(
+                "const a = read(\"scripts\", \"future-\" + name + \".sh\");\n"
+                "const b = read(\"scripts\", \"tauri\", \"build.js\");\n"
+            )
+        with self.assertRaises(AssertionError):
+            _extract_install_contract_script_reads(
+                "const a = read(\"scripts\", `future-${name}.sh`);\n"
+            )
+        with self.assertRaises(AssertionError):
+            _extract_install_contract_script_reads(
+                "const a = read(\"scripts\", \"future-smoke.sh\" + suffix);\n"
+            )
+
+    def test_script_read_derivation_fails_closed_on_non_literal_first_arg(self):
+        # 回归锁:变量/模板串首参的 read(…) 主正则看不见,派生结果却因其他
+        # 字面量读取仍非空——新增读取静默逃出路由锁(经变异验证 fail-open)。
+        # 首参非引号字面量必须抛错;真实测试源(全部字面量首参)必须照常派生。
+        # quote 打头的拼接首参骗得过开头引号检查,同样必须抛错。
+        contract_test = (
+            ROOT
+            / "pinvou3-app/tests/connector_online_install_contract.test.js"
+        ).read_text(encoding="utf-8")
+        self.assertIn(
+            "pinvou3-app/scripts/dingtalk-smoke.sh",
+            _extract_install_contract_script_reads(contract_test),
+        )
+        with self.assertRaises(AssertionError):
+            _extract_install_contract_script_reads(
+                "const dir = 'scripts';\n"
+                "const a = read(dir, 'future-smoke.sh');\n"
+                "const b = read(\"scripts\", \"tauri\", \"build.js\");\n"
+            )
+        with self.assertRaises(AssertionError):
+            _extract_install_contract_script_reads(
+                "const a = read(`scripts`, \"future-smoke.sh\");\n"
+            )
+        with self.assertRaises(AssertionError):
+            _extract_install_contract_script_reads(
+                "const a = read(\"scr\" + \"ipts\", \"future-smoke.sh\");\n"
+                "const b = read(\"scripts\", \"tauri\", \"build.js\");\n"
             )
 
     def test_contract_target_derivation_covers_double_quoted_reads(self):
@@ -3296,6 +3456,141 @@ class CiGatePolicyTests(unittest.TestCase):
                 "continue-on-error belongs only to the reviewed diagnostic "
                 "step, not another step that moved under it",
             )
+        diagnostic_job = _extract_job_block(body, 'windows-rust-test')
+        matches = list(re.finditer(
+            r"(?ms)^      - name: Windows 测试二进制导入诊断\n.*?(?=^      - |\Z)", diagnostic_job
+        ))
+        self.assertEqual(len(matches), 1, "expected one reviewed diagnostic step")
+        self.assertEqual(
+            matches[0].group(0).rstrip(),
+            textwrap.indent(textwrap.dedent("""\
+                - name: Windows 测试二进制导入诊断
+                  if: ${{ matrix.phase == 'regression' }}
+                  continue-on-error: true
+                  shell: pwsh
+                  run: python scripts/ci-windows-imports-diagnose.py "$env:PINVOU3_TEST_EXE"
+            """).rstrip(), "      "),
+        )
+        diagnostic_job = _extract_job_block(body, 'frontend-test')
+        matches = list(re.finditer(
+            r"(?ms)^      - name: Test resource lifecycle receipts\n.*?(?=^      - |\Z)", diagnostic_job
+        ))
+        self.assertEqual(len(matches), 1, "expected one reviewed diagnostic step")
+        self.assertEqual(
+            matches[0].group(0).rstrip(),
+            textwrap.indent(textwrap.dedent("""\
+                - name: Test resource lifecycle receipts
+                  id: frontend_receipts_upload
+                  if: ${{ always() && env.PINVOU_CI_RESOURCE_LEDGER != '' }}
+                  timeout-minutes: 3
+                  continue-on-error: true
+                  uses: actions/upload-artifact@v7
+                  with:
+                    name: frontend-resource-lifecycle-${{ github.run_attempt }}
+                    path: ${{ env.PINVOU_CI_RESOURCE_LEDGER }}/
+                    if-no-files-found: error
+                    retention-days: 7
+            """).rstrip(), "      "),
+        )
+        diagnostic_job = _extract_job_block(body, 'account-platform-test')
+        matches = list(re.finditer(
+            r"(?ms)^      - name: Account test resource lifecycle receipts\n.*?(?=^      - |\Z)", diagnostic_job
+        ))
+        self.assertEqual(len(matches), 1, "expected one reviewed diagnostic step")
+        self.assertEqual(
+            matches[0].group(0).rstrip(),
+            textwrap.indent(textwrap.dedent("""\
+                - name: Account test resource lifecycle receipts
+                  id: account_receipts_upload
+                  if: ${{ always() && env.PINVOU_CI_RESOURCE_LEDGER != '' }}
+                  timeout-minutes: 3
+                  continue-on-error: true
+                  uses: actions/upload-artifact@v7
+                  with:
+                    name: account-resource-lifecycle-${{ github.run_attempt }}
+                    path: |
+                      ${{ env.PINVOU_CI_RESOURCE_LEDGER }}/
+                      ${{ runner.temp }}/account-platform-deployment-contracts-*/resources/
+                    if-no-files-found: error
+                    retention-days: 7
+            """).rstrip(), "      "),
+        )
+        diagnostic_job = _extract_job_block(body, 'account-platform-test')
+        matches = list(re.finditer(
+            r"(?ms)^      - name: Financial parallel diagnostics\n.*?(?=^      - |\Z)", diagnostic_job
+        ))
+        self.assertEqual(len(matches), 1, "expected one reviewed diagnostic step")
+        self.assertEqual(
+            matches[0].group(0).rstrip(),
+            textwrap.indent(textwrap.dedent("""\
+                - name: Financial parallel diagnostics
+                  id: financial_diagnostics_upload
+                  if: ${{ always() }}
+                  timeout-minutes: 3
+                  continue-on-error: true
+                  uses: actions/upload-artifact@v7
+                  with:
+                    name: account-financial-parallel-${{ github.run_attempt }}
+                    path: ${{ runner.temp }}/financial-parallel-*/
+                    if-no-files-found: ignore
+                    retention-days: 7
+            """).rstrip(), "      "),
+        )
+
+    def test_diagnostic_exemptions_cannot_move_to_business_tests_or_jobs(self):
+        original = self.pr_workflow
+        financial_start = "      - name: Financial parallel diagnostics\n"
+        financial_step = original.split(financial_start, maxsplit=1)[1].split(
+            "\n      - name:", maxsplit=1
+        )[0]
+        without_upload_exemption = original.replace(
+            financial_step,
+            financial_step.replace("        continue-on-error: true\n", "", 1),
+            1,
+        )
+        business = "      - name: Test and vet all Account Platform Go modules\n"
+        mutations = {
+            "advisory whole job": original.replace(
+                "  account-platform-test:\n",
+                "  account-platform-test:\n    continue-on-error: true\n",
+                1,
+            ),
+            "extra advisory business step": original.replace(
+                business, business + "        continue-on-error: true\n", 1
+            ),
+            "move upload exemption to business with same total": without_upload_exemption.replace(
+                business, business + "        continue-on-error: true\n", 1
+            ),
+            "upload label on a run command": original.replace(
+                financial_step,
+                financial_step.replace("uses: actions/upload-artifact@v7", "run: echo not-an-upload", 1),
+                1,
+            ),
+        }
+        for first_line, remaining in (
+            ("run: exit 37", "        name: Required business command\n"),
+            ("id: business_guard", '        name: Required business command\n        "run": exit 37\n'),
+            ("if: ${{ always() }}", "        run: exit 37\n"),
+            ("env:", "          FIXTURE: yes\n        run: exit 37\n"),
+        ):
+            # Moving the exception must fail even when the next valid YAML
+            # step starts with run/id/if/env and the total count stays four.
+            mutations[f"move exemption to {first_line} next step"] = without_upload_exemption.replace(
+                "      - name: Stop owned temporary PostgreSQL services\n",
+                f"      - {first_line}\n{remaining}        continue-on-error: true\n\n"
+                "      - name: Stop owned temporary PostgreSQL services\n",
+                1,
+            )
+        try:
+            self.test_no_job_level_continue_on_error_disarms_a_gate_job()
+            for label, mutant in mutations.items():
+                with self.subTest(label=label):
+                    self.assertNotEqual(mutant, original, "the negative control must change the workflow")
+                    self.pr_workflow = mutant
+                    with self.assertRaises(AssertionError):
+                        self.test_no_job_level_continue_on_error_disarms_a_gate_job()
+        finally:
+            self.pr_workflow = original
 
     def test_gate_jobs_do_not_swallow_their_exit_status(self):
         # The companion fail-open vector to continue-on-error: appending

@@ -339,7 +339,7 @@ export const dictZh = {
         sysPerm: '系统权限', sudo: '高级执行权限 (Sudo)', sudoDesc: '允许助手执行环境配置等高级指令',
         versionUpdate: '版本与更新',
         uiRemote: {
-          title:'手机远程控制', desc:'开启后，远程链接可浏览本机文件并在所选目录运行代码 Agent，请仅分享给可信的人。', browser:'浏览器连接', stop:'停止', qrAlt:'远程控制二维码', qrHint:'手机扫码，或在电脑浏览器中复制下方链接', link:'远程控制链接', linkHint:'二维码与链接完全相同，并会在桌面端重启后继续有效；刷新二维码或停止访问会立即撤销旧二维码和链接。', generating:'正在生成远程控制链接…', notStarted:'远程控制尚未开启。', copy:'复制链接', refresh:'刷新二维码', enable:'开启访问', allowWorkspace:'允许本机目录', refreshTitle:'刷新二维码？', refreshDesc:'刷新后，旧二维码和链接立即失效；当前浏览器连接也会断开，需要扫描新二维码或复制新链接重新打开。', refreshing:'正在刷新…', updated:'远程控制状态已更新。', unavailable:'远程控制暂时不可用，请重试。',
+          title:'手机远程控制', desc:'「开启访问」建立远程链接；本机目录访问是独立且可单独撤销的授权。请仅将链接分享给可信的人。', browser:'浏览器连接', stop:'停止', close:'关闭', qrAlt:'远程控制二维码', qrHint:'手机扫码，或在电脑浏览器中复制下方链接', link:'远程控制链接', linkHint:'二维码与链接完全相同，并会在桌面端重启后继续有效；刷新二维码或停止访问会立即撤销旧二维码和链接。', generating:'正在生成远程控制链接…', notStarted:'远程控制尚未开启。', copy:'复制链接', refresh:'刷新二维码', enable:'开启访问', allowWorkspace:'允许本机目录', workspaceAllowed:'此链接已获准访问本机目录', revokeWorkspace:'撤销目录授权', registerHints:{ rotate_credentials:'Web 访问拒绝了本桌面的凭据，请在桌面端轮换 Web 访问以生成新链接。', rotate_recover_config:'已保存的 Web 访问配置无法使用，请在桌面端轮换 Web 访问以恢复。', update_desktop:'中继要求更新的协议版本，请将桌面端（以及自建中继，如使用）升级到最新版本以恢复 Web 访问。' }, refreshTitle:'刷新二维码？', refreshDesc:'刷新后，旧二维码和链接立即失效；当前浏览器连接也会断开，需要扫描新二维码或复制新链接重新打开。已授予的本机目录访问会随新链接保留。', refreshing:'正在刷新…', updated:'远程控制状态已更新。', unavailable:'远程控制暂时不可用，请重试。',
           status:{ idle:['未开启','开启后会生成一个长期有效的远程控制链接。'], starting:['正在开启','正在创建远程控制连接。'], connecting_relay:['正在连接','正在连接云端中继，请稍候。'], waiting_web_client:['等待浏览器','在电脑或手机浏览器中粘贴下方链接即可。'], web_client_connected:['浏览器已连接','远程控制已连接这台桌面端。'], web_client_disconnected:['浏览器已断开','链接仍然有效，浏览器可随时重新连接。'], revoked:['链接已撤销','请重新开启远程控制。'], stopped:['已停止','再次打开此面板即可重新开启。'], error:['连接异常','远程控制暂时不可用，请重试。'] },
         },
         uiMonitor: { bridgeNotReady:'桥接未就绪', readFailed:'读取失败', reading:'正在读取', configError:'配置异常', unverified:'未验证', authFailed:'鉴权失败', bridgeError:'监控桥接未就绪：请确认打开的是 Tauri 应用窗口', activity:'运行活动' },
@@ -840,10 +840,12 @@ dictZh.uiToolDetails.flow = {
   openBrowser:'在浏览器打开 ↗', connectionIncomplete:'连接未完成', close:'关闭', retry:'重试',
 };
 
-dictZh.uiToolDetails.actions = { connectedTmeet:'已连接腾讯会议', enabled:'已连接。工具开关默认关闭，可在输入框工具列表中开启', disconnectedTmeet:'已断开腾讯会议', connectingIma:'正在连接「腾讯 ima」', validatingIma:'正在校验 OpenAPI 凭证…', connectedIma:'已连接「腾讯 ima」', imaEnabled:'IMA 已连接。工具开关默认关闭，可在输入框工具列表中开启。', imaFailed:'IMA 连接失败', imaSkillsFailed:err=>`IMA 连接未完成：技能已安装，但同意状态保存失败，本次连接已回滚（需重新连接）；重连后如技能默认开启，请在输入框工具列表中手动关闭：${err}`, disconnectedIma:'已断开「腾讯 ima」', operationFailed:'操作失败，请重试' };
+dictZh.uiToolDetails.actions = { connectedTmeet:'已连接腾讯会议', enabled:'已连接。工具开关默认开启，可在输入框工具列表中管理', disconnectedTmeet:'已断开腾讯会议', connectingIma:'正在连接「腾讯 ima」', validatingIma:'正在校验 OpenAPI 凭证…', connectedIma:'已连接「腾讯 ima」', imaEnabled:'IMA 已连接。工具开关默认关闭，可在输入框工具列表中开启。', imaFailed:'IMA 连接失败', imaSkillsFailed:err=>`IMA 连接未完成：技能已安装，但同意状态保存失败，本次连接已回滚（需重新连接）；重连后如技能默认开启，请在输入框工具列表中手动关闭：${err}`, disconnectedIma:'已断开「腾讯 ima」', operationFailed:'操作失败，请重试' };
 
 dictZh.uiToolDetails.tmeetSteps = [{key:'runtime',label:'准备运行时',sub:'使用应用自带 Node'},{key:'cli',label:'安装连接组件',sub:'tmeet · 首次约 40 秒'},{key:'qr',label:'扫码登录',sub:'腾讯会议授权页'}];
 
+// Retained for parity with the private implementation this tree aligns with; it has
+// no consumer in the public tree (the flow card always renders localized copy).
 // Retained for parity with the private implementation this tree aligns with; it has
 // no consumer in the public tree (the flow card always renders localized copy).
 dictZh.uiToolDetails.showRawErrors = true;
@@ -1195,7 +1197,7 @@ desktopHint:'请先在桌面端安装 Obsidian 并创建笔记库，然后在这
   connectFailed:name=>`${name}连接失败`, connectTitle:name=>`连接${name}`,
   connectBusy:name=>`${name}上一个登录流程还在收尾`,
   connectBusyHint:'它稍后会自己完成，请等几秒再点「连接」。',
-  connectedBanner:name=>`已连接${name} · 工具开关默认关闭，可在输入框工具列表中开启`,
+  connectedBanner:name=>`已连接${name} · 工具开关默认开启，可在输入框工具列表中管理`,
   connectedBannerIma:'已连接腾讯 ima · 工具开关默认关闭，可在输入框工具列表中开启',
   connectedTool:name=>`已连接${name}`, disconnectedTool:name=>`已断开${name}`,
   connectedQuoted:name=>`已连接「${name}」`, installedQuoted:name=>`已安装「${name}」`, uninstalledQuoted:name=>`已卸载「${name}」`,
@@ -1242,6 +1244,8 @@ desktopHint:'请先在桌面端安装 Obsidian 并创建笔记库，然后在这
     registration_failed:'应用注册未完成，请重新连接',
     auth_failed:'登录授权未完成，请重新连接',
     consent_persist_failed:'授权已完成，但默认关同意状态落盘失败。请在输入框工具列表中关闭该连接器后重新连接。',
+    connect_consent_persist_failed:'授权已完成，但连接器启用状态落盘失败。未对外暴露任何能力，请重新连接重试。',
+    connect_consent_commit_incomplete:'授权已完成，但固化连接器启用状态失败。连接器保持启用，但并发操作仍可能将其撤回——请重新连接以确认生效。',
     skills_enable_failed:'已完成授权，但启用技能失败，请重试',
     unknown:'连接失败，请稍后重试',
   },
@@ -2069,6 +2073,8 @@ dictZh["uiAccount"] = {
 };
 dictZh["uiToolStore"]["guide"]["types"] = ["标准 Skill（SKILL.md 目录）", "单个 .md 技能文件", "MCP 服务", "Pinvou 插件包（推荐）"];
 dictZh["uiToolStore"]["connectorErrors"] = {
+    "connect_consent_persist_failed": "授权已完成，但连接器启用状态落盘失败。未对外暴露任何能力，请重新连接重试。",
+    "connect_consent_commit_incomplete": "授权已完成，但固化连接器启用状态失败。连接器保持启用，但并发操作仍可能将其撤回——请重新连接以确认生效。",
     "consent_persist_failed": "授权已完成，但默认关同意状态落盘失败。请在输入框工具列表中关闭该连接器后重新连接。",
   "runtime_prepare_failed": "准备连接器运行环境失败，请重试",
   "cli_install_failed": "安装连接组件失败，请检查网络后重试",

@@ -17,7 +17,7 @@ export const desktopBridgeApi = {
   models: ['deleteModel', 'getEffectiveModelConfig', 'getImageInputCapability', 'loadModels', 'loadEffectiveModelConfig', 'loadSessionModel', 'probeLocalServerKind', 'revealModelApiKey', 'saveModel', 'setActiveModel', 'switchModel', 'switchModelRef', 'testImageInputCapability', 'testModelConnection'],
   interaction: ['acceptPlan', 'cancelUserInput', 'compactNow', 'confirmCodeYolo', 'discardPlan', 'dismissPinvouReview', 'editLastTurn', 'exitPlanToYolo', 'getCodePermissionPrefs', 'inspectPinvou', 'planStuckGo', 'planStuckReplan', 'refreshModeDefaults', 'resolvePinvouReview', 'setDraftMode', 'setModeLane', 'setMultiAgentMode', 'setPlanModeNext', 'submitUserInput', 'summonPinvou', 'syncModeState', 'toggleSuperPerm'],
   rendering: ['renderMarkdown'],
-  remoteControl: ['getWebRelaySettings', 'refreshRemoteControlQr', 'refreshRemoteControlStatus', 'setWebRelayAddress', 'startRemoteControl', 'stopRemoteControl'],
+  remoteControl: ['getWebRelaySettings', 'refreshRemoteControlQr', 'refreshRemoteControlStatus', 'revokeRemoteHostWorkspace', 'setWebRelayAddress', 'startRemoteControl', 'stopRemoteControl'],
   // Windows 双端远程控制（B 被控端 / A 主控端）。与 webAccess 完全不同域：
   // 只暴露 opaque ID、状态投影与任务编排，模型凭证、路径和密钥都留在 Rust。
   desktopRemoteControl: [
@@ -80,6 +80,10 @@ export const desktopOnlyBridgeApi = {
   // In a web relay session that is the remote desktop, not the browser user's
   // machine — pasting must stay on the browser's own clipboardData there.
   attachments: ['addPasteImageFromClipboard'],
+  // revokeRemoteHostWorkspace（community #802 同意分离）是桌面专属同意面：
+  // web_access_revoke_host_workspace 与 web_access_enable 一样 main-WebView
+  // 门控，且不进 Web access policy 白名单——手机/浏览器端永远不能翻转授权。
+  remoteControl: ['revokeRemoteHostWorkspace'],
   // Builtin feature toggles: the registry read (list_builtin_features) is
   // lane-agnostic and web-allowed (the session-mention gate in ChatView must
   // see the host's switch state from a browser too, upstream PR #586);

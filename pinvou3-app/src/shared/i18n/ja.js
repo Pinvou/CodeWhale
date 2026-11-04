@@ -337,7 +337,7 @@ const jaBase = {
         sysPerm: 'システム権限', sudo: '高度な実行権限 (Sudo)', sudoDesc: 'アシスタントによる環境設定などの高度なコマンド実行を許可',
         versionUpdate: 'バージョンと更新',
         uiRemote: {
-          title:'モバイル遠隔操作', desc:'有効にすると、遠隔操作リンクからローカルファイルを参照し、選択したフォルダーでコード Agent を実行できます。信頼できる相手とのみ共有してください。', browser:'ブラウザー接続', stop:'停止', qrAlt:'遠隔操作 QR コード', qrHint:'スマートフォンでスキャンするか、下のリンクをコピーしてください', link:'遠隔操作リンク', linkHint:'QR コードとリンクは同一で、再起動後も有効です。更新または停止すると古いリンクは直ちに無効になります。', generating:'遠隔操作リンクを生成中…', notStarted:'遠隔操作は有効になっていません。', copy:'リンクをコピー', refresh:'QR コードを更新', enable:'アクセスを有効化', allowWorkspace:'ローカルフォルダーを許可', refreshTitle:'QR コードを更新しますか？', refreshDesc:'古い QR コードとリンクは直ちに無効になり、現在のブラウザー接続も切断されます。新しい QR コードをスキャンするか、新しいリンクをコピーして再接続してください。', refreshing:'更新中…', updated:'遠隔操作の状態を更新しました。', unavailable:'遠隔操作は一時的に利用できません。再試行してください。',
+          title:'モバイル遠隔操作', desc:'「アクセスを有効化」で遠隔操作リンクを確立します。ローカルフォルダーへのアクセスは、個別に取り消せる別の許可です。リンクは信頼できる相手とのみ共有してください。', browser:'ブラウザー接続', stop:'停止', close:'閉じる', qrAlt:'遠隔操作 QR コード', qrHint:'スマートフォンでスキャンするか、下のリンクをコピーしてください', link:'遠隔操作リンク', linkHint:'QR コードとリンクは同一で、再起動後も有効です。更新または停止すると古いリンクは直ちに無効になります。', generating:'遠隔操作リンクを生成中…', notStarted:'遠隔操作は有効になっていません。', copy:'リンクをコピー', refresh:'QR コードを更新', enable:'アクセスを有効化', allowWorkspace:'ローカルフォルダーを許可', workspaceAllowed:'このリンクにはローカルフォルダーへのアクセスが許可されています', revokeWorkspace:'フォルダー許可を取り消す', registerHints:{ rotate_credentials:'Web アクセスがこのデスクトップの資格情報を拒否しました。デスクトップで Web アクセスをローテーションして新しいリンクを発行してください。', rotate_recover_config:'保存された Web アクセス設定が壊れています。デスクトップで Web アクセスをローテーションして復旧してください。', update_desktop:'リレーはより新しいプロトコルを要求しています。デスクトップアプリ（および自己ホストのリレーがあればそれも）を最新版に更新して Web アクセスを復元してください。' }, refreshTitle:'QR コードを更新しますか？', refreshDesc:'古い QR コードとリンクは直ちに無効になり、現在のブラウザー接続も切断されます。新しい QR コードをスキャンするか、新しいリンクをコピーして再接続してください。すでに許可されたローカルフォルダーのアクセスは新しいリンクにも引き継がれます。', refreshing:'更新中…', updated:'遠隔操作の状態を更新しました。', unavailable:'遠隔操作は一時的に利用できません。再試行してください。',
           status:{ idle:['未有効','有効にすると長期利用可能な遠隔操作リンクを作成します。'], starting:['開始中','遠隔操作接続を作成しています。'], connecting_relay:['接続中','リレーに接続しています…'], waiting_web_client:['ブラウザー待ち','スマートフォンまたはパソコンのブラウザーにリンクを貼り付けてください。'], web_client_connected:['ブラウザー接続済み','ブラウザーがこのデスクトップに接続しています。'], web_client_disconnected:['ブラウザー切断','リンクは引き続き有効で、いつでも再接続できます。'], revoked:['リンク無効','遠隔操作をもう一度有効にしてください。'], stopped:['停止済み','このパネルを開くと再度有効にできます。'], error:['接続エラー','遠隔操作は一時的に利用できません。再試行してください。'] },
         },
         uiMonitor: { bridgeNotReady:'ブリッジ未準備', readFailed:'読み込み失敗', reading:'読み込み中', configError:'設定エラー', unverified:'未確認', authFailed:'認証失敗', bridgeError:'モニターブリッジが未準備です。Tauri アプリのウィンドウで開いてください。', activity:'実行状況' },
@@ -811,10 +811,12 @@ dictJa.uiToolDetails.flow = {
   openBrowser:'ブラウザーで開く ↗', connectionIncomplete:'接続が完了していません', close:'閉じる', retry:'再試行',
 };
 
-dictJa.uiToolDetails.actions = { connectedTmeet:'Tencent Meeting に接続しました', enabled:'接続しました。ツールスイッチはデフォルトでオフです。入力欄のツールリストでオンにしてください', disconnectedTmeet:'Tencent Meeting から切断しました', connectingIma:'Tencent ima に接続中', validatingIma:'OpenAPI 認証情報を確認しています…', connectedIma:'Tencent ima に接続しました', imaEnabled:'IMA に接続しました。ツールスイッチはデフォルトでオフです。入力欄のツールリストでオンにしてください。', imaFailed:'IMA の接続に失敗しました', imaSkillsFailed:err=>`IMA の接続は完了しませんでした：スキルはインストールされましたが、同意状態の保存に失敗したため、今回の接続はロールバックされました（再接続が必要です）。再接続後にスキルが既定で有効になる場合は、入力欄のツールリストから手動でオフにしてください：${err}`, disconnectedIma:'Tencent ima から切断しました', operationFailed:'操作に失敗しました。再試行してください' };
+dictJa.uiToolDetails.actions = { connectedTmeet:'Tencent Meeting に接続しました', enabled:'接続しました。ツールスイッチはデフォルトでオンです。入力欄のツールリストで管理できます', disconnectedTmeet:'Tencent Meeting から切断しました', connectingIma:'Tencent ima に接続中', validatingIma:'OpenAPI 認証情報を確認しています…', connectedIma:'Tencent ima に接続しました', imaEnabled:'IMA に接続しました。ツールスイッチはデフォルトでオフです。入力欄のツールリストでオンにしてください。', imaFailed:'IMA の接続に失敗しました', imaSkillsFailed:err=>`IMA の接続は完了しませんでした：スキルはインストールされましたが、同意状態の保存に失敗したため、今回の接続はロールバックされました（再接続が必要です）。再接続後にスキルが既定で有効になる場合は、入力欄のツールリストから手動でオフにしてください：${err}`, disconnectedIma:'Tencent ima から切断しました', operationFailed:'操作に失敗しました。再試行してください' };
 
 dictJa.uiToolDetails.tmeetSteps = [{key:'runtime',label:'ランタイムを準備',sub:'アプリ同梱の Node を使用'},{key:'cli',label:'接続コンポーネントをインストール',sub:'tmeet · 初回は約 40 秒'},{key:'qr',label:'ログイン',sub:'Tencent Meeting 認証ページ'}];
 
+// Retained for parity with the private implementation this tree aligns with; it has
+// no consumer in the public tree (the flow card always renders localized copy).
 // Retained for parity with the private implementation this tree aligns with; it has
 // no consumer in the public tree (the flow card always renders localized copy).
 dictJa.uiToolDetails.showRawErrors = false;
@@ -1133,7 +1135,7 @@ desktopHint:'先にデスクトップで Obsidian をインストールして保
   connectFailed:name=>`${name} の接続に失敗しました`, connectTitle:name=>`${name} に接続`,
   connectBusy:name=>`${name} は前回のログインを処理中です`,
   connectBusyHint:'まもなく完了する場合があります。数秒待ってから再度「接続」を押してください。',
-  connectedBanner:name=>`${name} に接続済み · ツールスイッチはデフォルトでオフです。入力欄のツールリストでオンにできます`,
+  connectedBanner:name=>`${name} に接続済み · ツールスイッチはデフォルトでオンです。入力欄のツールリストで管理できます`,
   connectedBannerIma:'Tencent ima に接続済み · ツールスイッチはデフォルトでオフです。入力欄のツールリストでオンにできます',
   connectedTool:name=>`${name} に接続しました`, disconnectedTool:name=>`${name} から切断しました`,
   connectedQuoted:name=>`「${name}」に接続しました`, installedQuoted:name=>`「${name}」をインストールしました`, uninstalledQuoted:name=>`「${name}」をアンインストールしました`,
@@ -1180,6 +1182,8 @@ desktopHint:'先にデスクトップで Obsidian をインストールして保
     registration_failed:'アプリの登録が完了していません。再接続してください。',
     auth_failed:'ログイン認証が完了していません。再接続してください。',
     consent_persist_failed:'接続は完了しましたが、デフォルトOFFの同意状態の保存に失敗しました。入力欄のツールリストでコネクタをオフにしてから、再接続してください。',
+    connect_consent_persist_failed:'認証は完了しましたが、コネクタの有効状態の保存に失敗しました。外部には何も公開されていません。再接続して再試行してください。',
+    connect_consent_commit_incomplete:'認証は完了しましたが、コネクタの有効状態の確定に失敗しました。現在も有効ですが、並行して実行中の操作によって取り消される可能性があります。確定するには再接続してください。',
     skills_enable_failed:'認証は完了しましたが、スキルを有効化できませんでした。再試行してください。',
     unknown:'接続に失敗しました。後で再試行してください。',
   },
@@ -2097,6 +2101,8 @@ dictJa["uiAccount"] = {
 };
 dictJa["uiToolStore"]["guide"]["types"] = ["標準スキル（SKILL.md フォルダ）", "単一の .md スキルファイル", "MCP サービス", "Pinvou プラグインパッケージ（推奨）"];
 dictJa["uiToolStore"]["connectorErrors"] = {
+    "connect_consent_persist_failed": "認証は完了しましたが、コネクタの有効状態の保存に失敗しました。外部には何も公開されていません。再接続して再試行してください。",
+    "connect_consent_commit_incomplete": "認証は完了しましたが、コネクタの有効状態の確定に失敗しました。現在も有効ですが、並行して実行中の操作によって取り消される可能性があります。確定するには再接続してください。",
     "consent_persist_failed": "接続は完了しましたが、デフォルトOFFの同意状態の保存に失敗しました。入力欄のツールリストでコネクタをオフにしてから、再接続してください。",
   "runtime_prepare_failed": "コネクターの実行環境を準備できませんでした。再試行してください。",
   "cli_install_failed": "コネクターをインストールできませんでした。ネットワークを確認して再試行してください。",

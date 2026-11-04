@@ -33,11 +33,15 @@ func (r *PostgresRepository) PlatformRoleDefinitions(ctx context.Context) ([]Adm
 	return items, rows.Err()
 }
 
-func (r *PostgresRepository) AdminPlatformRoleBindings(ctx context.Context, userID *uuid.UUID) ([]RoleBinding, error) {
-	if userID == nil {
-		return r.queryRoleBindings(ctx, `ro.scope='PLATFORM' AND ra.organization_id IS NULL AND ra.unit_id IS NULL`)
+func (r *PostgresRepository) AdminPlatformRoleBindings(ctx context.Context, userID *uuid.UUID) (RoleBindingList, error) {
+	condition := `ro.scope='PLATFORM' AND ra.organization_id IS NULL AND ra.unit_id IS NULL`
+	var args []any
+	if userID != nil {
+		condition += ` AND ra.user_id=$1`
+		args = append(args, *userID)
 	}
-	return r.queryRoleBindings(ctx, `ro.scope='PLATFORM' AND ra.organization_id IS NULL AND ra.unit_id IS NULL AND ra.user_id=$1`, *userID)
+	items, truncated, err := r.queryRoleBindingsBounded(ctx, condition, args...)
+	return RoleBindingList{Items: items, Truncated: truncated}, err
 }
 
 // New platform HTTP writers revalidate live human authority in the same

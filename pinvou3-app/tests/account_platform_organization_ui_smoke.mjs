@@ -277,6 +277,31 @@ try{
   }
   assert.ok(await page.evaluate(()=>window.f06.calls.every(c=>c.method==='GET')));
  });
+ for(const language of ['zh','en','ja']) await run(`${language}: failed role refresh retires the previous truncated snapshot and recovers without writes`,async()=>{
+  await fresh(language);
+  await page.evaluate(()=>{window.f06.enumMode=true;window.f06.roleBindingCount=501;window.f06.authorizationVersion++;window.f06.render();});
+  const waitBindings=async(count,truncated,errorKey='')=>page.waitForFunction(({count,truncated,errorKey})=>{
+   const copy=window.f06.copy();
+   const workspace=[...document.querySelectorAll('section')].find(node=>node.querySelector(':scope>h2')?.textContent===copy.title);
+   const roles=workspace&&[...workspace.children].find(node=>node.tagName==='SECTION'&&node.querySelector(':scope>h3')?.textContent===copy.bindings);
+   return roles&&roles.querySelectorAll(':scope>ul>li').length===count&&Boolean(roles.querySelector('[role=status]'))===truncated&&
+    (workspace.querySelector(':scope>[role=alert]')?.textContent||'')===(errorKey?copy[errorKey]:'')&&!workspace.querySelector(':scope>button').disabled;
+  },{},{count,truncated,errorKey});
+  const refresh=async()=>page.evaluate(()=>{
+   const workspace=[...document.querySelectorAll('section')].find(node=>node.querySelector(':scope>h2')?.textContent===window.f06.copy().title);
+   workspace.querySelector(':scope>button').click();
+  });
+  for(const status of [503,403]){
+   await waitBindings(500,true);
+   await page.evaluate(status=>{window.f06.readError={path:'/role-bindings',status};},status);
+   await refresh();await waitBindings(0,false,status===403?'permissions':'unavailable');
+   assert.ok(await page.evaluate(()=>document.body.textContent.includes('Controlled Unit')),'unrelated unit facts are retained');
+   await page.evaluate(()=>{delete window.f06.readError;window.f06.roleBindingCount=1;});
+   await refresh();await waitBindings(1,false);
+   if(status===503){await page.evaluate(()=>{window.f06.roleBindingCount=501;});await refresh();}
+  }
+  assert.ok(await page.evaluate(()=>window.f06.calls.every(call=>call.method==='GET')),'failed reads and recovery never submit a role command');
+ });
  console.log(`RESULT ${passed} PASS 0 FAIL 0 SKIP`);
 }catch(error){console.error(`FAIL after ${passed} PASS: ${error.stack || error.message}`);if(page)console.error(JSON.stringify(await page.evaluate(()=>({dialog:Boolean(document.querySelector('[role=alertdialog]')),alerts:[...document.querySelectorAll('[role=alert]')].map(a=>a.firstChild?.textContent),deletePaths:window.f06?.calls.filter(c=>c.method==='DELETE').map(c=>c.path),roleRevoked:window.f06?.roleRevoked,revokedLabelVisible:document.body.textContent.includes(window.f06?.copy().enumStatus_REVOKED)}))));process.exitCode=1;}
 finally{if(browser)await browser.close();if(vite)await vite.close();fs.rmSync(profile,{recursive:true,force:true});}
