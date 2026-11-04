@@ -1,8 +1,9 @@
 #![allow(dead_code)]
 //! System prompt composition.
 //!
-//! Prompts are assembled from composable layers loaded at compile time from
-//! the single `text` module:
+//! Prompts are assembled from composable layers loaded at compile time —
+//! most from the `text` module, with the authority recap and the locale
+//! bookends defined here:
 //!   constitution (personality folded in) → `message[0]` (byte-stable).
 //!   approval policy → request-time runtime metadata.
 //! Tool availability comes only from the per-turn model catalog.
@@ -1104,8 +1105,9 @@ pub fn system_prompt_for_mode_with_context(
 ///   1. composed constitution prefix (compile-time constant, plus
 ///      workspace-static project context and the skills-dir-static skills
 ///      block)
-///   2. WorldState fragments (environment/memory/goal, permissions, route,
-///      handoff) that can `render_diff` mid-session
+///   2. WorldState fragments (environment/memory/goal, the interactive
+///      continual-harness block, permissions, route, handoff, and imported
+///      project instructions) that can `render_diff` mid-session
 ///   3. per-request trailers: authority recap, then locale closer
 ///
 /// The compaction relay is not a system block: automatic compaction owns its
