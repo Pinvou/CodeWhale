@@ -223,7 +223,7 @@ impl ToolSpec for TasksTool {
             );
             properties.insert(
                 "timeout_ms".to_string(),
-                json!({ "type": "integer", "minimum": 1000, "maximum": 600000, "description": "Kill deadline for the gate command in milliseconds. Defaults to 120000; out-of-range values are clamped, not rejected. On expiry the process group is killed, the result reports timed_out with no exit code, and any partial output is kept. (action=gate_run)" }),
+                json!({ "type": "integer", "minimum": 1000, "maximum": 600000, "description": "Kill deadline for the gate command in milliseconds. Defaults to 120000; values outside the declared range are clamped into it when the gate runs — negative or non-integer values are rejected as a type error before that. On expiry the process group is killed, the result reports timed_out with no exit code, and any partial output is kept. (action=gate_run)" }),
             );
             properties.insert(
                 "attempt_group_id".to_string(),
@@ -231,11 +231,11 @@ impl ToolSpec for TasksTool {
             );
             properties.insert(
                 "attempt_index".to_string(),
-                json!({ "type": "integer", "minimum": 1, "description": "This attempt's position within its group (1-based), shown as 'index/count' in the task timeline. Defaults to 1; out-of-range values are clamped, not rejected. (action=pr_attempt_record)" }),
+                json!({ "type": "integer", "minimum": 1, "description": "This attempt's position within its group (1-based), shown as 'index/count' in the task timeline. Defaults to 1; values below 1 are clamped to 1, and negative or non-integer values are rejected as a type error. (action=pr_attempt_record)" }),
             );
             properties.insert(
                 "attempt_count".to_string(),
-                json!({ "type": "integer", "minimum": 1, "description": "Total number of attempts intended for the group, shown as 'index/count' in the task timeline. Defaults to 1; out-of-range values are clamped, not rejected. (action=pr_attempt_record)" }),
+                json!({ "type": "integer", "minimum": 1, "description": "Total number of attempts intended for the group, shown as 'index/count' in the task timeline. Defaults to 1; values below 1 are clamped to 1, and negative or non-integer values are rejected as a type error. (action=pr_attempt_record)" }),
             );
             properties.insert(
                 "summary".to_string(),
@@ -256,7 +256,7 @@ impl ToolSpec for TasksTool {
         );
         properties.insert(
             "limit".to_string(),
-            json!({ "type": "integer", "minimum": 1, "maximum": 100, "default": 20, "description": "Maximum number of tasks returned, newest first. Out-of-range values are clamped, not rejected. (action=list)" }),
+            json!({ "type": "integer", "minimum": 1, "maximum": 100, "default": 20, "description": "Maximum number of tasks returned, newest first. Values outside the declared range are clamped into it, and negative or non-integer values are rejected as a type error. (action=list)" }),
         );
         json!({
             "type": "object",
@@ -1409,6 +1409,85 @@ mod tests {
             canonical["properties"]["mode"]["enum"],
             json!(["agent", "plan", "operate"])
         );
+    }
+
+    #[test]
+    fn task_range_clamps_describe_the_type_error_boundary() {
+        // Negative integers never reach the clamps (the u64 parser rejects
+        // them as a type mismatch), so a blanket "clamped, not rejected"
+        // would be false; each description must state the boundary instead.
+        let schema = TasksTool::new("tasks").input_schema();
+        let timeout = schema["properties"]["timeout_ms"]["description"]
+            .as_str()
+            .expect("timeout_ms description");
+        assert!(timeout.contains("clamped into it"), "{timeout}");
+        assert!(timeout.contains("rejected as a type error"), "{timeout}");
+        assert!(!timeout.contains("clamped, not rejected"), "{timeout}");
+        for field in ["attempt_index", "attempt_count"] {
+            let description = schema["properties"][field]["description"]
+                .as_str()
+                .expect("attempt field description");
+            assert!(
+                description.contains("values below 1 are clamped to 1"),
+                "{description}"
+            );
+            assert!(
+                description.contains("rejected as a type error"),
+                "{description}"
+            );
+            assert!(
+                !description.contains("clamped, not rejected"),
+                "{description}"
+            );
+        }
+        let limit = schema["properties"]["limit"]["description"]
+            .as_str()
+            .expect("limit description");
+        assert!(limit.contains("clamped into it"), "{limit}");
+        assert!(limit.contains("rejected as a type error"), "{limit}");
+        assert!(!limit.contains("clamped, not rejected"), "{limit}");
+    }
+
+    #[test]
+    fn task_authority_copy_pins_the_reviewed_semantics() {
+        // Each sentence below was corrected by a review round against the
+        // execution path; pin the exact claims so a revert cannot slip back
+        // into the schema silently.
+        let schema = TasksTool::new("tasks").input_schema();
+        let mode = schema["properties"]["mode"]["description"]
+            .as_str()
+            .expect("mode description");
+        assert!(
+            mode.contains("plan's read-only blocks are not lifted by auto_approve"),
+            "{mode}"
+        );
+        let allow_shell = schema["properties"]["allow_shell"]["description"]
+            .as_str()
+            .expect("allow_shell description");
+        assert!(
+            allow_shell
+                .contains("omitting falls back to the configured durable-task allow-shell setting"),
+            "{allow_shell}"
+        );
+        assert!(
+            allow_shell.contains("which is false unless shell execution is enabled in config"),
+            "{allow_shell}"
+        );
+        let trust_mode = schema["properties"]["trust_mode"]["description"]
+            .as_str()
+            .expect("trust_mode description");
+        assert!(
+            trust_mode.contains("retried with full access instead of being denied"),
+            "{trust_mode}"
+        );
+        let auto_approve = schema["properties"]["auto_approve"]["description"]
+            .as_str()
+            .expect("auto_approve description");
+        assert!(auto_approve.contains("Defaults to false"), "{auto_approve}");
+        let command = schema["properties"]["command"]["description"]
+            .as_str()
+            .expect("command description");
+        assert!(command.contains("refused with BLOCKED"), "{command}");
     }
 
     #[test]
