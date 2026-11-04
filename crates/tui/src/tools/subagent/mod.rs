@@ -16829,8 +16829,9 @@ impl SubAgentToolRegistry {
         if !self.posture_permits_tool(name, Some(&input)) {
             if self.allows_bounded_readonly_bash(name) {
                 return Err(anyhow!(
-                    "[shell.readonly.command] Tool {name} input did not match the bounded read-only shell grammar for Fleet role `{role}`. Admitted: a single read-only command or a pipe of them — git status/log/diff/show/ls-files/blame/grep, git rev-parse (bounded read-only flags), git branch (bare/flag-only, --show-current, --list with patterns, attached values like --sort=-committerdate), git worktree list (flags only), ls, pwd, cat, head, tail, wc, stat, file, du, df, which, grep, rg, fd, find (no -delete/-exec/-execdir/-ok/-okdir/-fprintf/-fls/-fprint), sed -n <range>p, sort, uniq, cut, tr, comm, npm view. Not admitted: cd, &&, ;, redirects, $(...), env prefixes, interpreters (python3/node/...), sleep, test. Do not retry variations of a refused shape; use `read`/`file_search` instead, or an `implement`/`general` role for mutation or arbitrary execution.",
-                    role = self.agent_type.as_str()
+                    "[shell.readonly.command] Tool {name} input was refused by the bounded read-only shell gates — the admission grammar, or the execution seam that judges what the shell would actually resolve — for Fleet role `{role}`. Admitted families: git status/log/diff/show/ls-files/blame/grep (with a literal -C dir / --no-pager), ls, pwd, cat, head, tail, wc, which, stat, file, du, df, grep, rg, fd, read-only od dumps (-b -c -d -o -s -x -h -v, -A d|o|x|n|none, numeric -j/-N, glued `-An`/`-j8`/`-N4k` spellings), sort, uniq, cut, tr, comm, find without mutating primaries, sed -n '<range>p', npm view/show/info, gh issue/pr/release/repo/run/workflow reads, and `cd <one relative path>` (workspace-confined, must be a directory the shell can enter). Value options also admit glued numerics (`head -n5`, `tail -c3`, `git log -5`), and the text filters admit clustered short options (`cut -d, -f1`, `comm -12`, `sort -rn`). These combine into compound probes separated by `;`, `&&`, `||`, or `|` — but every segment of a sequence must individually be admitted (an empty segment refuses; at most {max_segments} segments). Refused shapes: a bare `&`, redirects (`<`, `>`), `$` or backtick expansions, subshells, interpreters (`python3 -c ...`), mutation commands (`rm`, `touch`, `sed -i`, ...), `cd` inside a pipeline, joined by `&&`/`||` as a later segment (it may not run at all, so the gate will not fold onto it), or with a wildcard, `=`-prefixed, or `..` operand; and, refused at the execution seam when the shell would resolve them differently than judged: recursive `**/` globs, a glob whose expansion leaves the workspace, any glob on a `gh` stage, a `-C` value carrying a wildcard, a tilde, or a leading `=` (the shell would expand it while the gate judges the literal spelling), and any `cd` outside the workspace. Do not retry variations of a refused command; pick a different admitted probe, or use an `implement`/`general` role for mutation or arbitrary execution.",
+                    role = self.agent_type.as_str(),
+                    max_segments = crate::command_safety::MAX_READONLY_SEQUENCE_SEGMENTS
                 ));
             }
             return Err(anyhow!(
@@ -17306,11 +17307,15 @@ fn carries_network_url(input: &Value) -> bool {
 /// written. It fails closed and names the posture, so the refusal reads as a
 /// contract rather than a malfunction.
 fn reject_network_reaching_input(name: &str, input: &Value) -> Result<()> {
+    // Judged per stage with the same predicate the execution seam's network
+    // guard uses, so `pwd; gh repo view` and `gh pr list --search '*'` are
+    // refused here exactly like a bare `gh repo view`; the whole-command
+    // parallel classifier would see the compound or the `*` and pass them.
     let github_shell_read = matches!(name, "bash" | "Bash" | "exec_shell")
         && input
             .get("command")
             .and_then(Value::as_str)
-            .is_some_and(crate::command_safety::is_github_readonly_command);
+            .is_some_and(crate::command_safety::command_reaches_github_readonly);
     if !github_shell_read && !carries_network_url(input) {
         return Ok(());
     }
