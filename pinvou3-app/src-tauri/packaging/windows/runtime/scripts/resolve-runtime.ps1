@@ -196,6 +196,39 @@ function Remove-TreeLongPath {
   }
 }
 
+# Long-path-safe archive extraction for Windows PowerShell 5.1:
+# ZipFile.ExtractToDirectory normalizes every target path and throws
+# PathTooLongException past MAX_PATH (extraction targets are TEMP plus the
+# archive's relative depth — the node archive's npm tree sits close enough
+# to the 260 cliff that deep TEMP roots or fixtures cross it, proven by the
+# cache-behavior deep fixture). Walk the entries manually and materialize
+# each directory/file through the \\?\ namespace instead. Containment is
+# still enforced per entry: an entry escaping the destination fails the
+# Assert-ChildPath check.
+function Expand-ZipArchiveLongPath {
+  param([string]$ZipPath, [string]$Destination)
+  $archive = [System.IO.Compression.ZipFile]::OpenRead($ZipPath)
+  try {
+    foreach ($entry in $archive.Entries) {
+      $entryTargetPath = Join-Path $Destination ($entry.FullName.Replace('/', '\'))
+      Assert-ChildPath -Root $Destination -Path $entryTargetPath
+      if ([string]::IsNullOrEmpty($entry.Name)) {
+        # Directory entries carry an empty Name; file entries create their
+        # parent directories below, so this only materializes explicit ones.
+        [void][System.IO.Directory]::CreateDirectory((Get-ExtendedPath $entryTargetPath))
+        continue
+      }
+      $parentDirectory = [System.IO.Path]::GetDirectoryName($entryTargetPath)
+      if (-not [string]::IsNullOrEmpty($parentDirectory)) {
+        [void][System.IO.Directory]::CreateDirectory((Get-ExtendedPath $parentDirectory))
+      }
+      [System.IO.Compression.ZipFileExtensions]::ExtractToFile($entry, (Get-ExtendedPath $entryTargetPath), $true)
+    }
+  } finally {
+    $archive.Dispose()
+  }
+}
+
 function Assert-ChildPath {
   param([string]$Root, [string]$Path)
   if ([string]::IsNullOrWhiteSpace($Root) -or [string]::IsNullOrWhiteSpace($Path)) {
@@ -697,7 +730,7 @@ function Expand-FlattenedRuntime {
   )
   $temporary = Join-Path ([System.IO.Path]::GetTempPath()) ("pinvou3-runtime-expand-" + [System.Guid]::NewGuid().ToString("N"))
   try {
-    [System.IO.Compression.ZipFile]::ExtractToDirectory($ZipPath, $temporary)
+    Expand-ZipArchiveLongPath -ZipPath $ZipPath -Destination $temporary
     $requiredPath = Get-LongPathFiles -Root $temporary |
       Where-Object { [System.IO.Path]::GetFileName($_) -eq $RequiredFile } |
       Select-Object -First 1
@@ -738,7 +771,7 @@ function Expand-ComponentRuntime {
     [string]$RequiredFile
   )
   New-Item -ItemType Directory -Path $Destination -Force | Out-Null
-  [System.IO.Compression.ZipFile]::ExtractToDirectory($ZipPath, $Destination)
+  Expand-ZipArchiveLongPath -ZipPath $ZipPath -Destination $Destination
   $requiredPath = Join-Path $Destination $RequiredFile
   if (-not (Test-Path -LiteralPath $requiredPath -PathType Leaf)) {
     throw "Component archive is missing required runtime file '${RequiredFile}': $ZipPath"

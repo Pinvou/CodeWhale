@@ -152,6 +152,7 @@ for (const contract of [
   "Get-ExtendedPath",
   "Get-LongPathFiles",
   "Remove-TreeLongPath",
+  "Expand-ZipArchiveLongPath",
 ]) {
   assert.ok(runtimeScript.includes(contract), `runtime staging must retain ${contract}`);
 }
@@ -213,6 +214,16 @@ assert.match(
   runtimeScript,
   /Get-LongPathFiles -Root \$temporary \|/u,
   "the flattened runtime required-file search must enumerate past MAX_PATH",
+);
+assert.match(
+  runtimeScript,
+  /\[System\.IO\.Compression\.ZipFileExtensions\]::ExtractToFile\(\$entry, \(Get-ExtendedPath \$entryTargetPath\), \$true\)/u,
+  "archive extraction must materialize entries through the extended-length namespace",
+);
+assert.doesNotMatch(
+  runtimeScript,
+  /ExtractToDirectory\(/u,
+  "ZipFile.ExtractToDirectory normalizes target paths and fails past MAX_PATH; it must not come back",
 );
 for (const destination of [
   "runtime/poppler",
