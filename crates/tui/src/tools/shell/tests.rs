@@ -5108,11 +5108,19 @@ fn run_stdin_scenario_with_hang_guard(
 #[cfg(unix)]
 const SIGPIPE_GUARD_HELPER_ENV: &str = "CODEWHALE_SIGPIPE_GUARD_HELPER";
 
+/// Lets the driver verify the helper actually RAN: libtest exits 0 on an
+/// unmatched `--exact` filter, so a future rename of the helper test would
+/// otherwise leave the pin silently green while guarding nothing.
+#[cfg(unix)]
+const SIGPIPE_GUARD_HELPER_CANARY_ENV: &str = "CODEWHALE_SIGPIPE_GUARD_HELPER_CANARY";
+
 /// Helper half of `sigpipe_guard_survives_a_broken_pipe_restore`: runs in a
 /// process that re-armed SIGPIPE at SIG_DFL (what `run_with_args` does in
-/// production), takes the guard, writes into a readerless pipe, and only
-/// reaches the implicit test exit if the guard's mask restore did not
-/// deliver the pending signal.
+/// production), takes the guard, writes into a readerless pipe, checks that
+/// the drop restored the prior mask, and only then writes the ran-canary —
+/// so the driver fails on a helper that died at signal 13 (consume removed),
+/// panicked on a left-blocked mask (restore removed), or never ran (rename
+/// drift).
 #[cfg(unix)]
 #[test]
 fn sigpipe_guard_helper_process() {
@@ -5144,7 +5152,28 @@ fn sigpipe_guard_helper_process() {
             // consume-before-restore fix reaches it and exits 0.
             drop(guard);
         }
+        // The restore half is pinned too: after the drop, SIGPIPE must no
+        // longer be blocked on this thread. A no-op restore would leave
+        // every later SIGPIPE pending on this thread forever — invisible
+        // to the exit-status assertion above, so query the mask directly.
+        let mut now_blocked: libc::sigset_t = std::mem::zeroed();
+        assert_eq!(
+            libc::pthread_sigmask(libc::SIG_BLOCK, std::ptr::null(), &mut now_blocked),
+            0,
+            "query the signal mask"
+        );
+        assert_eq!(
+            libc::sigismember(&now_blocked, libc::SIGPIPE),
+            0,
+            "the guard drop must restore the prior mask (SIGPIPE must not stay blocked)"
+        );
         libc::close(fds[1]);
+    }
+    // Ran-canary for the driver: written only after every assertion above
+    // passed, so an unmatched filter (helper never ran) is distinguishable
+    // from a green run.
+    if let Some(canary) = std::env::var_os(SIGPIPE_GUARD_HELPER_CANARY_ENV) {
+        std::fs::write(&canary, b"ran").expect("write the ran-canary");
     }
 }
 
@@ -5161,10 +5190,16 @@ fn sigpipe_guard_helper_process() {
 #[test]
 fn sigpipe_guard_survives_a_broken_pipe_restore() {
     let test_binary = std::env::current_exe().expect("current test binary");
+    let canary = std::env::temp_dir().join(format!(
+        "codewhale-sigpipe-guard-canary-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&canary);
     let mut helper = Command::new(&test_binary)
         .arg("--exact")
         .arg("tools::shell::tests::sigpipe_guard_helper_process")
         .env(SIGPIPE_GUARD_HELPER_ENV, "1")
+        .env(SIGPIPE_GUARD_HELPER_CANARY_ENV, &canary)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -5175,6 +5210,11 @@ fn sigpipe_guard_survives_a_broken_pipe_restore() {
         status.success(),
         "the guard's mask restore must not deliver the pending SIGPIPE (a broken guard kills the helper at signal 13): {status}"
     );
+    assert!(
+        canary.exists(),
+        "the helper must actually run — libtest exits 0 on an unmatched --exact filter, so a green status without the canary means this pin guarded nothing (helper renamed?)"
+    );
+    let _ = std::fs::remove_file(&canary);
 }
 
 /// The bounded stdin write: a command that never consumes its pipe fills
@@ -5918,6 +5958,156 @@ fn bounded_stdin_eof_delivery_reports_stalled_failed_and_delivered() {
     // worker's write lands, its send fails on the dropped receiver, and the
     // thread exits instead of parking for the process lifetime. The drain
     // is bounded so the reader cannot hang once the pipe ends are closed.
+    let drainer = std::thread::spawn(move || {
+        let mut buf = [0u8; 4096];
+        let mut total = 0usize;
+        while total < 512 * 1024 {
+            let n = unsafe { libc::read(read_fd, buf.as_mut_ptr().cast(), buf.len()) };
+            if n <= 0 {
+                break;
+            }
+            total += n as usize;
+        }
+        unsafe { libc::close(read_fd) };
+    });
+    drainer.join().expect("drain the stalled pipe");
+}
+
+/// The FRESH-stall close arm — a terminal close whose own ^D delivery
+/// stalls with the stall flag still down (no prior write set it) — must
+/// wait the bounded deadline, return the close refusal that cites it,
+/// restore the handle under the stall flag, and refuse the follow-up write
+/// without another deadline wait. A mutant reporting this arm as Ok would
+/// read as the schema's delivered end-of-file while the bytes never
+/// landed; the not-applied pin next door only reaches the SKIP arm (its
+/// scenario stalls a write first), so this record-level pin is the only
+/// guard on the arm itself. Drives `write_stdin` on a record whose stdin
+/// is a `PtyFile` over a full pipe — exactly what a real PTY task hands
+/// the arm.
+#[cfg(all(unix, not(target_env = "ohos")))]
+#[test]
+fn close_stdin_that_stalls_on_fresh_delivery_refuses_and_stays_attached() {
+    use std::os::fd::FromRawFd;
+
+    // Fill a pipe to capacity without a consumer (O_NONBLOCK so the test
+    // thread never blocks), restore blocking mode for the worker: the
+    // two-byte ^D delivery cannot land until the deadline.
+    let mut fds = [0 as libc::c_int; 2];
+    assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0, "pipe");
+    let read_fd = fds[0];
+    let full = unsafe { std::fs::File::from_raw_fd(fds[1]) };
+    unsafe { libc::fcntl(fds[1], libc::F_SETFL, libc::O_NONBLOCK) };
+    let chunk = [b'x'; 4096];
+    loop {
+        let written = unsafe { libc::write(fds[1], chunk.as_ptr().cast(), chunk.len()) };
+        if written <= 0 {
+            break; // EAGAIN: the pipe is full
+        }
+    }
+    unsafe { libc::fcntl(fds[1], libc::F_SETFL, 0) };
+
+    let now = std::time::Instant::now();
+    let mut shell = BackgroundShell {
+        id: "fresh-stall-close".to_string(),
+        owner_session_id: "stdin-test-session".to_string(),
+        command: "cat".to_string(),
+        working_dir: std::path::PathBuf::from("."),
+        status: ShellStatus::Running,
+        exit_code: None,
+        started_at: now,
+        finished_at: None,
+        last_output_at: now,
+        last_observed_output_len: 0,
+        sandbox_type: SandboxType::None,
+        ownership: ShellOwnership::Managed,
+        linked_task_id: None,
+        owner_agent: None,
+        origin_tool_call_id: None,
+        origin_turn_id: None,
+        stdout_buffer: super::new_shared_raw_output(),
+        stderr_buffer: None,
+        bounded_output: None,
+        heavy_permit: None,
+        stdout_cursor: 0,
+        stderr_cursor: 0,
+        completion_reported: false,
+        stdin: Some(StdinWriter::PtyFile(full)),
+        stdin_closed_at_eof: false,
+        stdin_write_stalled: false,
+        child: None,
+        stop_unconfirmed: false,
+        stdout_thread: None,
+        stderr_thread: None,
+        work_lifecycle: None,
+        lifecycle_seq: 0,
+        last_lifecycle_status: None,
+        last_lifecycle_bytes: 0,
+    };
+
+    let started = std::time::Instant::now();
+    let close_err = shell
+        .write_stdin("", true)
+        .expect_err("a close whose own delivery stalls must be refused, not reported Ok");
+    assert!(
+        started.elapsed() >= super::STDIN_WRITE_DEADLINE,
+        "the fresh-stall close must attempt the bounded delivery first: {:?}",
+        started.elapsed()
+    );
+    let message = format!("{close_err:#}");
+    assert!(
+        message.starts_with("the stdin close for task fresh-stall-close"),
+        "the refusal must be the close refusal: {message}"
+    );
+    assert!(
+        message.contains("did not complete within"),
+        "the fresh-stall refusal must cite the deadline: {message}"
+    );
+    assert!(
+        !message.contains("no close can deliver it now"),
+        "a fresh stall must not take the not-applied skip arm: {message}"
+    );
+    assert!(
+        !message.contains("stdin writes to task"),
+        "the close refusal must not be the write-stall gate: {message}"
+    );
+    assert!(
+        shell.stdin.is_some(),
+        "the refused close must keep the interact surface attached"
+    );
+    assert!(
+        shell.stdin_write_stalled,
+        "the fresh-stall close must mark the stall for later refusals"
+    );
+    assert!(
+        !shell.stdin_closed_at_eof,
+        "a stalled delivery must not claim an end-of-file"
+    );
+
+    // The follow-up write is refused by the stall gate without another
+    // bounded wait.
+    let started = std::time::Instant::now();
+    let write_err = shell
+        .write_stdin("x", false)
+        .expect_err("a write after a stalled close must be refused");
+    assert!(
+        started.elapsed() < std::time::Duration::from_millis(500),
+        "the stall flag must refuse the follow-up write without another deadline wait: {:?}",
+        started.elapsed()
+    );
+    let message = format!("{write_err:#}");
+    assert!(
+        message.contains("stdin writes to task fresh-stall-close are refused"),
+        "the follow-up refusal must be the stall gate: {message}"
+    );
+
+    // Unblock the abandoned worker exactly like the classification pin: a
+    // bounded reader consumes the queued bytes, the worker's write lands,
+    // its send fails on the dropped receiver, and the thread exits. The
+    // record must drop first — it still holds the ORIGINAL pipe write end,
+    // and until every write end closes the drainer's read never sees EOF,
+    // so joining before the drop would hang the harness (the classification
+    // pin avoids this by dropping `full` before its call).
+    drop(shell);
     let drainer = std::thread::spawn(move || {
         let mut buf = [0u8; 4096];
         let mut total = 0usize;
