@@ -749,6 +749,37 @@ mod tests {
     }
 
     #[test]
+    fn dismissing_the_latest_failure_cannot_revive_an_older_retry() {
+        let _home = config::TempHome::new();
+        db::init_db().unwrap();
+        receipt(
+            "older",
+            "download",
+            "2026-10-18T00:00:00Z",
+            json!({"Err":"old"}),
+        );
+        receipt(
+            "latest",
+            "download",
+            "2026-10-18T00:00:01Z",
+            json!({"Err":"new"}),
+        );
+        let older_path = config::data_dir().join("runs/older.json");
+        let before = std::fs::read(&older_path).unwrap();
+        let service = ModelStoreService::new();
+        dismiss_incomplete_local(&service, "latest").unwrap();
+        assert!(summaries(&ActiveCardOps::default()).unwrap().is_empty());
+        assert!(
+            preview("older")
+                .err()
+                .unwrap()
+                .contains("installation_superseded")
+        );
+        assert!(read("latest").unwrap().dismissed);
+        assert_eq!(std::fs::read(older_path).unwrap(), before);
+    }
+
+    #[test]
     fn dismiss_rejects_running_and_non_install_records() {
         let _home = config::TempHome::new();
         db::init_db().unwrap();

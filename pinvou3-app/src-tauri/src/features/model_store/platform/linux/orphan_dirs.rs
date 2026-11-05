@@ -38,6 +38,21 @@ struct Blocked {
 }
 
 impl Blocked {
+    fn protect_library_path(
+        &mut self,
+        models_dir: &Path,
+        scan_root: Option<&Path>,
+        card_id: &str,
+        root: Option<&str>,
+    ) {
+        if !library_root_is_separate(root, scan_root) {
+            self.unresolved_library.push(card_id.to_owned());
+        }
+        if let Some(root) = root {
+            self.insert(models_dir, PathBuf::from(root));
+        }
+    }
+
     fn contains(&self, path: &Path) -> bool {
         if self.dirs.contains(path) {
             return true;
@@ -193,14 +208,14 @@ fn blocked_dirs(service: Option<&super::service::ModelStoreService>) -> Result<B
     let scan_root = models_dir.canonicalize().ok();
     let records = db::list_store_models().map_err(|error| error.to_string())?;
     for rec in &records {
-        if !library_root_is_separate(rec.models_root.as_deref(), scan_root.as_deref()) {
-            blocked.unresolved_library.push(rec.card_id.clone());
-        }
         // 普通下载只登记共享根，不能把名字猜测当成权重归属证明。上面的
         // 未核实记录会暂停整根清理；独立/版本化根继续完整保护其子树。
-        if let Some(root) = &rec.models_root {
-            blocked.insert(&models_dir, PathBuf::from(root));
-        }
+        blocked.protect_library_path(
+            &models_dir,
+            scan_root.as_deref(),
+            &rec.card_id,
+            rec.models_root.as_deref(),
+        );
         // 旧记录的权威实际目录：部署脚本写在卡片 .deploy-env 里的 MODEL_DIR，
         // 与 candidate_paths 同一份真相，不能在扫描里再猜一遍。
         if let Some(actual) = super::lifecycle::legacy_resource_dir_for_scan(rec, &models_dir) {
@@ -220,6 +235,28 @@ fn blocked_dirs(service: Option<&super::service::ModelStoreService>) -> Result<B
         }
         if let Ok(safe) = config::safe_path_component(&rec.model_name) {
             blocked.insert(&models_dir, models_dir.join(safe));
+        }
+    }
+
+    // Switching moves the store row to the new managed root, but the old
+    // rollback weights remain referenced only by model_versions. Protect every
+    // state, including incomplete/deleting rows, until version cleanup removes
+    // the reference. Neither resource_dir nor a saved deployment root may be
+    // replaced by naming heuristics. Unverifiable references pause cleanup.
+    for version in super::version_store::list(None)? {
+        for root in [
+            version.models_root.as_deref(),
+            version.resource_dir.as_deref(),
+        ] {
+            blocked.protect_library_path(&models_dir, scan_root.as_deref(), &version.card_id, root);
+        }
+        if let Some(record) = &version.record {
+            blocked.protect_library_path(
+                &models_dir,
+                scan_root.as_deref(),
+                &version.card_id,
+                record.models_root.as_deref(),
+            );
         }
     }
 
@@ -260,6 +297,8 @@ fn blocked_dirs(service: Option<&super::service::ModelStoreService>) -> Result<B
     // retain the same fail-closed exclusion as incomplete-install dismissal.
     let (pending, pending_error) = super::delegated_run::pending(None);
     blocked.unresolved += pending.len() + usize::from(pending_error.is_some());
+    blocked.unresolved_library.sort();
+    blocked.unresolved_library.dedup();
     Ok(blocked)
 }
 
@@ -415,6 +454,17 @@ fn remove_for_user(
     path_text: &str,
     owner_uid: u32,
 ) -> Result<Value, String> {
+    remove_for_user_with_recheck(service, path_text, owner_uid, || {})
+}
+
+// Private injection point for the directory-replacement regression. Production
+// always supplies a no-op; the same validation/removal path runs in both cases.
+fn remove_for_user_with_recheck(
+    service: Option<&super::service::ModelStoreService>,
+    path_text: &str,
+    owner_uid: u32,
+    before_recheck: impl FnOnce(),
+) -> Result<Value, String> {
     let settings = config::load_settings();
     let models_dir = settings.models_path();
     let target = PathBuf::from(path_text);
@@ -469,7 +519,12 @@ fn remove_for_user(
     //    回执已损坏/丢失，也不能跳过仍在写权重的脚本进程。
     super::orphans::ensure_host_quiet()?;
 
+    // Keep measurement inside the exclusion window: supported resource writers
+    // cannot change the tree between ownership validation and unlink. A cold
+    // tree with many small files can hold this lock for minutes or hours; other
+    // resource operations wait cancellably. This is an explicit safety cost.
     let bytes = super::disk::dir_size_bytes(&target);
+    before_recheck();
     // Size traversal may take time. Recheck ownership and directory identity
     // immediately before deletion, including changes by another profile.
     let current =
@@ -550,6 +605,190 @@ mod tests {
             db::add_store_model_with_root(params, &root.to_string_lossy()).unwrap();
         } else {
             db::add_store_model(params).unwrap();
+        }
+    }
+
+    fn seed_version(
+        root: Option<&Path>,
+        resource: Option<&Path>,
+    ) -> super::super::version_store::Version {
+        let version = super::super::version_store::Version {
+            card_id: "archived-card".into(),
+            version_id: "old-revision".into(),
+            state: "history".into(),
+            record: None,
+            models_root: root.map(|path| path.to_string_lossy().into_owned()),
+            runtime_card_id: "old-runtime".into(),
+            resource_dir: resource.map(|path| path.to_string_lossy().into_owned()),
+            managed: false,
+            created_at: "2026-10-18T00:00:00Z".into(),
+            error: None,
+            planned_bytes: 0,
+        };
+        super::super::version_store::put(&version).unwrap();
+        version
+    }
+
+    #[test]
+    fn every_version_state_protects_recorded_roots_resources_and_their_ancestors() {
+        let _home = config::TempHome::new();
+        let (orphan, _) = seed_models_dir();
+        seed_record("owned-model");
+        let models = config::load_settings().models_path();
+        let root = models.join("archived-root/nested");
+        let resource = models.join("Qwen-Custom-Old-Weights/nested");
+        for dir in [&root, &resource] {
+            std::fs::create_dir_all(dir).unwrap();
+            std::fs::write(dir.join("weights"), b"rollback weights").unwrap();
+        }
+        let mut version = seed_version(Some(&root), Some(&resource));
+        for state in [
+            "history",
+            "current",
+            "ready",
+            "downloading",
+            "failed",
+            "interrupted",
+            "deleting",
+            "future-state",
+        ] {
+            version.state = state.into();
+            super::super::version_store::put(&version).unwrap();
+            let report = scan(None).unwrap();
+            assert_eq!(report["unresolvedLibraryCards"], json!([]));
+            assert_eq!(
+                report["entries"].as_array().unwrap().len(),
+                1,
+                "{state}: {report}"
+            );
+            assert_eq!(
+                report["entries"][0]["path"],
+                orphan.to_string_lossy().as_ref()
+            );
+            for dir in [root.parent().unwrap(), resource.parent().unwrap()] {
+                assert_eq!(
+                    remove(None, dir.to_str().unwrap()).unwrap_err(),
+                    "orphan_directory_owned",
+                    "{state}"
+                );
+            }
+        }
+        remove(None, orphan.to_str().unwrap()).unwrap();
+        for dir in [&root, &resource] {
+            assert_eq!(
+                std::fs::read(dir.join("weights")).unwrap(),
+                b"rollback weights"
+            );
+        }
+    }
+
+    #[test]
+    fn unverified_version_paths_pause_cleanup_including_saved_record_roots() {
+        for field in ["models_root", "resource_dir", "record_root"] {
+            for invalid in ["missing", "shared", "relative", "absent", "file"] {
+                let _home = config::TempHome::new();
+                let (orphan, _) = seed_models_dir();
+                seed_record("owned-model");
+                let models = config::load_settings().models_path();
+                let valid = models.join("old-weights");
+                std::fs::create_dir_all(&valid).unwrap();
+                let file = models.join("not-a-directory");
+                std::fs::write(&file, b"keep").unwrap();
+                let bad = match invalid {
+                    "missing" => None,
+                    "shared" => Some(models.to_string_lossy().into_owned()),
+                    "relative" => Some("old-weights".to_owned()),
+                    "absent" => Some(models.join("absent").to_string_lossy().into_owned()),
+                    "file" => Some(file.to_string_lossy().into_owned()),
+                    _ => unreachable!(),
+                };
+                let mut version = seed_version(Some(&valid), Some(&valid));
+                match field {
+                    "models_root" => version.models_root = bad,
+                    "resource_dir" => version.resource_dir = bad,
+                    "record_root" => {
+                        let mut record = db::get_store_model("owned-card").unwrap().unwrap();
+                        record.models_root = bad;
+                        version.record = Some(record);
+                    }
+                    _ => unreachable!(),
+                }
+                super::super::version_store::put(&version).unwrap();
+                let report = scan(None).unwrap();
+                assert!(
+                    report["entries"].as_array().unwrap().is_empty(),
+                    "{field}/{invalid}"
+                );
+                assert_eq!(report["unresolvedLibraryCards"], json!(["archived-card"]));
+                assert!(
+                    remove(None, orphan.to_str().unwrap())
+                        .unwrap_err()
+                        .starts_with("orphan_library_ownership_unresolved:")
+                );
+                assert!(orphan.join("config.json").exists());
+            }
+        }
+    }
+
+    #[test]
+    fn version_references_added_after_scanning_block_removal_and_corruption_fails_closed() {
+        let _home = config::TempHome::new();
+        let (orphan, _) = seed_models_dir();
+        seed_record("owned-model");
+        assert_eq!(scan(None).unwrap()["entries"].as_array().unwrap().len(), 1);
+        let root = config::data_dir().join("old-independent-root");
+        std::fs::create_dir_all(&root).unwrap();
+        seed_version(Some(&root), Some(&orphan));
+        assert_eq!(
+            remove(None, orphan.to_str().unwrap()).unwrap_err(),
+            "orphan_directory_owned"
+        );
+        db::connect()
+            .unwrap()
+            .execute("UPDATE model_versions SET record_json='{'", [])
+            .unwrap();
+        assert!(scan(None).is_err());
+        assert!(remove(None, orphan.to_str().unwrap()).is_err());
+        assert!(orphan.join("config.json").exists());
+    }
+
+    #[test]
+    fn replacing_a_directory_during_measurement_cannot_delete_the_replacement() {
+        for symlink in [false, true] {
+            let _home = config::TempHome::new();
+            db::init_db().unwrap();
+            let (candidate, _) = seed_models_dir();
+            let retained = candidate.with_file_name("original-retained");
+            let unrelated = candidate.with_file_name("replacement-source");
+            std::fs::create_dir_all(&unrelated).unwrap();
+            std::fs::write(unrelated.join("sentinel"), b"unrelated files").unwrap();
+            let error = remove_for_user_with_recheck(
+                None,
+                candidate.to_str().unwrap(),
+                unsafe { libc::geteuid() },
+                || {
+                    std::fs::rename(&candidate, &retained).unwrap();
+                    if symlink {
+                        std::os::unix::fs::symlink(&unrelated, &candidate).unwrap();
+                    } else {
+                        std::fs::create_dir(&candidate).unwrap();
+                        std::fs::write(candidate.join("sentinel"), b"replacement files").unwrap();
+                    }
+                },
+            )
+            .unwrap_err();
+            assert_eq!(error, "orphan_path_unsafe");
+            assert_eq!(std::fs::read(retained.join("config.json")).unwrap(), b"{}");
+            assert_eq!(
+                std::fs::read(unrelated.join("sentinel")).unwrap(),
+                b"unrelated files"
+            );
+            if !symlink {
+                assert_eq!(
+                    std::fs::read(candidate.join("sentinel")).unwrap(),
+                    b"replacement files"
+                );
+            }
         }
     }
 
