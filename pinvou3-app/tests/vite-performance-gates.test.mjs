@@ -24,12 +24,11 @@ function buildPlugins(mode) {
 }
 
 test('startup gates remain active in desktop and web production builds', () => {
-  // The 2026-10-27 per-mode re-cut (see vite.config.mjs history) is measured
-  // per policy; a raise requires fresh desktop + web measurements on the
-  // merged tree per policy. The #773 backflow was measured under its ceiling
-  // and needed no raise (see the config comment).
-  assert.equal(MAIN_ENTRY_BUDGET_BYTES, 159_000);
-  assert.equal(WEB_MAIN_ENTRY_BUDGET_BYTES, 161_000);
+  // The 2026-10-28 account-platform merge uses explicitly approved, measured
+  // per-mode ceilings (see vite.config.mjs). Keep the gate and splitting
+  // checks below: accepting this baseline must not disable either budget.
+  assert.equal(MAIN_ENTRY_BUDGET_BYTES, 173_000);
+  assert.equal(WEB_MAIN_ENTRY_BUDGET_BYTES, 175_000);
   for (const mode of ['production', 'web']) {
     const pluginNames = new Set(buildPlugins(mode).map(plugin => plugin.name));
     assert.ok(pluginNames.has('pinvou-enforce-lazy-chunks'), `${mode} must enforce lazy chunks`);
@@ -119,7 +118,7 @@ test('rare global overlays stay out of the startup module graph', () => {
   assert.match(mainSource, /LazyPinvouSummonModal/u);
   assert.match(mainSource, /LazyUpdateNoticeButton/u);
   assert.match(mainSource, /LazySavedPersonaConfirmDialog/u);
-  assert.match(mainSource, /LazyApiKeyGateDialog/u);
+  assert.match(mainSource, /LazyModelAccessGate/u);
   assert.match(mainSource, /LazyArchiveConfirmDialog/u);
   assert.match(mainSource, /LazyArchiveToast/u);
 });
@@ -139,19 +138,19 @@ test('new lazy global mounts contain chunk failures without exposing protected c
   // it must cover chat not only while the chunk loads but also after a chunk
   // failure (React.lazy caches the rejection, so the boundary's in-flow error
   // card must not be able to expose chat either).
-  const gateMountAt = mainSource.indexOf('apiKeyGateOpen && browserOverlayPublicationReady && (');
-  assert.ok(gateMountAt >= 0, 'the API key gate mount must exist');
-  const gateMount = mainSource.slice(gateMountAt, gateMountAt + 900);
-  const backdropAt = gateMount.indexOf('fixed inset-0 z-[57]');
+  const gateMountAt = mainSource.indexOf('modelAccessGateOpen && browserOverlayPublicationReady && (');
+  assert.ok(gateMountAt >= 0, 'the model access gate mount must exist');
+  const gateMount = mainSource.slice(gateMountAt, mainSource.indexOf('<LazyModelAccessGate', gateMountAt));
+  const backdropAt = gateMount.indexOf('fixed inset-0 z-[2147483647]');
   const boundaryAt = gateMount.indexOf('<ViewErrorBoundary t={t}>');
-  const suspenseAt = gateMount.indexOf('<Suspense fallback={null}>');
+  const suspenseAt = gateMount.indexOf('<Suspense fallback={<div role="status"');
   assert.ok(
     backdropAt >= 0 && boundaryAt > backdropAt && suspenseAt > boundaryAt,
-    'the API key gate backdrop must wrap the error boundary and Suspense, so it survives chunk failures',
+    'the model access gate backdrop must wrap the error boundary and Suspense, so it survives chunk failures',
   );
   assert.ok(
-    gateMount.includes('aria-busy="true"'),
-    'the API key gate backdrop must announce its busy state',
+    gateMount.includes('role="dialog"') && gateMount.includes('aria-modal="true"'),
+    'the API key gate backdrop must remain an accessible blocking dialog during loading and chunk failure',
   );
 });
 

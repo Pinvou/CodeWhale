@@ -700,6 +700,33 @@ impl TurnLifecycle {
         }
     }
 
+    pub(crate) fn current_runtime_turn_generation(&self) -> Option<u64> {
+        let state = self.state.lock();
+        if state.active && !state.terminal_closing {
+            Some(state.turn_epoch)
+        } else {
+            None
+        }
+    }
+
+    /// Match and publish a bounded turn-local observation atomically. The
+    /// callback may take the timing-map lock but cannot re-enter this lifecycle.
+    pub(crate) fn with_current_turn_generation(
+        &self,
+        generation: u64,
+        callback: &mut dyn FnMut(),
+    ) -> bool {
+        let state = self.state.lock();
+        if generation == 0
+            || !(state.active || state.terminal_closing)
+            || state.turn_epoch != generation
+        {
+            return false;
+        }
+        callback();
+        true
+    }
+
     /// Run a synchronous side effect only for this still-active generation.
     /// The callback must not re-enter this lifecycle or await. Holding the
     /// state lock prevents a forwarder-created successor between validation
@@ -2513,11 +2540,8 @@ impl AppEngine {
         // engine through the hydration/align push either; all in-repo
         // writers are aux-guarded, this is the backstop the bridge comment
         // has claimed all along.
-        let roots = if crate::features::sessions::is_aux_session_id(&session_id) {
-            Vec::new()
-        } else {
-            self.bridge.session_workspace_roots(&session_id)
-        };
+        let roots =
+            sync_session_workspace_roots(&session_id, |id| self.bridge.session_workspace_roots(id));
         let op = Self::sync_session_op(
             &session_id,
             messages,
@@ -2540,16 +2564,17 @@ impl AppEngine {
         session_id: String,
         messages: Vec<Message>,
     ) -> Result<()> {
+        let roots =
+            sync_session_workspace_roots(&session_id, |id| self.bridge.session_workspace_roots(id));
         let op = Self::sync_session_op(
             &session_id,
             messages,
             self.bridge.model(),
             self.workspace.clone(),
-            // CodeWhale #54 normalizes this empty list to the existing single
-            // workspace; the spawn lane already delivers the full keychain via
-            // EngineConfig.workspace_roots (bridge roots resolver), so the
-            // pre-publication gate keeps the fork's empty-roots payload.
-            Vec::new(),
+            // SyncSession replaces the foundation's roots even immediately
+            // after spawn. Carry the same frozen keychain as the awaited sync;
+            // an empty legacy/aux snapshot still normalizes to the primary root.
+            roots,
         );
         self.handle.try_send(op)
     }
@@ -2577,6 +2602,17 @@ impl AppEngine {
             workspace_roots,
             mode: AppMode::Agent,
         }
+    }
+}
+
+fn sync_session_workspace_roots(
+    session_id: &str,
+    resolve: impl FnOnce(&str) -> Vec<std::path::PathBuf>,
+) -> Vec<std::path::PathBuf> {
+    if crate::features::sessions::is_aux_session_id(session_id) {
+        Vec::new()
+    } else {
+        resolve(session_id)
     }
 }
 
@@ -4601,6 +4637,44 @@ mod expert_turn_invariant_tests {
 }
 
 #[cfg(test)]
+mod runtime_turn_observation_tests {
+    use super::TurnLifecycle;
+    use std::sync::Arc;
+    #[test]
+    fn local_then_platform_turn_uses_lifecycle_epoch_and_rejects_retired_epoch() {
+        let lifecycle = Arc::new(TurnLifecycle::default());
+        assert!(lifecycle.current_runtime_turn_generation().is_none());
+        assert!(lifecycle.on_submitted(None));
+        let first = lifecycle.current_runtime_turn_generation().unwrap();
+        assert!(lifecycle.claim_terminal().is_some());
+        assert!(lifecycle.current_runtime_turn_generation().is_none());
+        let mut closing_notice = false;
+        assert!(lifecycle.with_current_turn_generation(first, &mut || closing_notice = true));
+        assert!(
+            closing_notice,
+            "already admitted response remains owned during terminal close"
+        );
+        lifecycle.finish_terminal_emission();
+        let reservation = lifecycle.reserve().unwrap();
+        let second = lifecycle.current_runtime_turn_generation().unwrap();
+        assert!(second > first);
+        assert!(
+            !lifecycle.with_current_turn_generation(first, &mut || panic!("retired local turn"))
+        );
+        let mut count = 0;
+        assert!(lifecycle.with_current_turn_generation(second, &mut || count += 1));
+        assert!(lifecycle.with_current_turn_generation(second, &mut || count += 1));
+        assert_eq!(count, 2, "tool loop and retry retain the active epoch");
+        drop(reservation);
+        assert!(lifecycle.current_runtime_turn_generation().is_none());
+        assert!(
+            !lifecycle.with_current_turn_generation(second, &mut || panic!("aborted reservation"))
+        );
+        assert!(!lifecycle.with_current_turn_generation(0, &mut || panic!("zero sentinel")));
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -4639,6 +4713,53 @@ mod tests {
             "the unattended spawn must disable subagents — the deterministic \
              delegation-disable leg of the recursion shield (round-34 M4)"
         );
+    }
+
+    #[test]
+    fn session_sync_root_selection_preserves_the_frozen_non_aux_keychain() {
+        let expected = vec![
+            std::path::PathBuf::from("/primary"),
+            std::path::PathBuf::from("/attached"),
+        ];
+        let roots = sync_session_workspace_roots("session-keyed", |id| {
+            assert_eq!(id, "session-keyed");
+            expected.clone()
+        });
+        let op = AppEngine::sync_session_op(
+            "session-keyed",
+            Vec::new(),
+            "model".into(),
+            std::path::PathBuf::from("/primary"),
+            roots,
+        );
+        match op {
+            Op::SyncSession {
+                workspace_roots, ..
+            } => assert_eq!(workspace_roots, expected),
+            other => panic!("unexpected op: {other:?}"),
+        }
+        assert!(sync_session_workspace_roots("legacy", |_| Vec::new()).is_empty());
+    }
+
+    #[test]
+    fn session_sync_root_selection_never_resolves_aux_keychains() {
+        for id in ["aux-session", "AUX-session", "aUx-session"] {
+            let roots =
+                sync_session_workspace_roots(id, |_| panic!("aux must not resolve attachments"));
+            let op = AppEngine::sync_session_op(
+                id,
+                Vec::new(),
+                "model".into(),
+                std::path::PathBuf::from("/primary"),
+                roots,
+            );
+            match op {
+                Op::SyncSession {
+                    workspace_roots, ..
+                } => assert!(workspace_roots.is_empty()),
+                other => panic!("unexpected op: {other:?}"),
+            }
+        }
     }
 
     #[test]

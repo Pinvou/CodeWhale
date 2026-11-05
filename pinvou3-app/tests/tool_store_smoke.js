@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+const finishFixtures = require('./helpers/fixture-exit.cjs');
 /**
  * 工具商店真实浏览器旅程：加载 Vite dist，mock Tauri 命令/事件，但点击真实 React UI。
  * 覆盖 MCP 装卸、Obsidian 前置探测、配套技能联动、独立技能和五类授权连接器。
@@ -7,11 +8,11 @@ const fs = require('fs'), path = require('path'), os = require('os');
 const { startUiTestServer } = require('./ui_test_server');
 
 function loadPuppeteer() {
-  try { return require('puppeteer-core'); } catch (_) { /* fall through */ }
+  try { return require('./helpers/puppeteer-fixture.cjs'); } catch (_) { /* fall through */ }
   const npx = path.join(os.homedir(), '.npm', '_npx');
   if (fs.existsSync(npx)) for (const d of fs.readdirSync(npx)) {
     const p = path.join(npx, d, 'node_modules', 'puppeteer-core');
-    if (fs.existsSync(p)) try { return require(p); } catch (_) { /* next */ }
+    if (fs.existsSync(p)) try { return require('./helpers/browser-fixture.cjs').wrapNative(require(p)); } catch (_) { /* next */ }
   }
   console.error('SKIP: 找不到 puppeteer-core');
   process.exit(2);
@@ -898,5 +899,5 @@ async function visibilityBox(page, cardText, modeLabel, click) {
   fs.rmSync(PROFILE,{recursive:true,force:true});
   const failed=results.filter(r=>!r.pass).length;
   console.log(failed?`\n❌ ${failed}/${results.length} FAILED`:`\n✅ ALL ${results.length} PASS`);
-  process.exit(failed?1:0);
-})().catch(e=>{console.error('FATAL',e.stack||e);process.exit(1);});
+  finishFixtures(failed?1:0);
+})().catch(e=>{console.error('FATAL',e.stack||e);finishFixtures(1);});

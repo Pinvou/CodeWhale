@@ -26,8 +26,8 @@
 // runtime scripts and the inline <script> blocks of the HTML entries (the
 // first code to execute on startup). Run via `npm run audit:compat` after a
 // build; tests/compat_audit.test.mjs gates this in CI.
-import { existsSync, readFileSync, readdirSync } from 'node:fs';
-import { extname, join, resolve } from 'node:path';
+import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
+import { dirname, extname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as acorn from 'acorn';
 import { staticRuntimeScripts, staticRuntimeScriptPrefixes } from '../vite.config.mjs';
@@ -36,6 +36,7 @@ const appRoot = resolve(fileURLToPath(import.meta.url), '../..');
 const sourceRoot = join(appRoot, 'src');
 const distRoot = join(appRoot, 'dist');
 const webDistRoot = resolve(appRoot, '../remote-control-relay/web/dist');
+const portalDistRoot = resolve(appRoot, '../account-platform/internal/portal/static');
 
 // APIs the startup polyfill (src/shared/legacy-polyfills.js) installs in every
 // HTML entry before any other script runs. Once the contract test pins that
@@ -298,6 +299,52 @@ function auditDistCss(assetsDir) {
   return violations;
 }
 
+// Portal uses separate HTML entries and no desktop startup bundles. Audit its
+// actual compiled assets rather than letting missing desktop outputs skip it.
+export function auditPortalAssets(portalDir = portalDistRoot) {
+  const violations = [];
+  const root = resolve(portalDir);
+  const checkReference = (filename, reference) => {
+    if (!reference.startsWith('.') && !reference.startsWith('/')) return;
+    const pathname = reference.split(/[?#]/, 1)[0];
+    const target = pathname.startsWith('/') ? resolve(root, `.${pathname}`) : resolve(dirname(filename), pathname);
+    if (!target.startsWith(`${root}${sep}`) || !existsSync(target) || !statSync(target).isFile()) violations.push(`portal:${filename.slice(root.length + 1)} missing local asset ${reference}`);
+  };
+  for (const entry of ['account.html', 'admin.html', 'portal-session-handoff.html']) {
+    const filename = join(root, entry);
+    if (!existsSync(filename)) violations.push(`portal/${entry} missing — run npm run build:account-portal first`);
+    else {
+      violations.push(...auditHtmlInlineScripts(filename, `portal:${entry}`));
+      const html = readFileSync(filename, 'utf8');
+      let scriptCount = 0;
+      for (const match of html.matchAll(/<(script|link)\b[^>]*\b(?:src|href)\s*=\s*(["'])(.*?)\2/gi)) {
+        checkReference(filename, match[3]);
+        if (match[1].toLowerCase() === 'script' && /\.js(?:[?#]|$)/.test(match[3])) scriptCount++;
+      }
+      if (!scriptCount) violations.push(`portal/${entry} has no JavaScript entry`);
+    }
+  }
+  const assets = join(root, 'assets');
+  if (!existsSync(assets)) return [...violations, 'portal/assets missing — run npm run build:account-portal first'];
+  const files = readdirSync(assets);
+  if (!files.some(name => name.endsWith('.js'))) violations.push('portal/assets has no JavaScript');
+  if (!files.some(name => name.endsWith('.css'))) violations.push('portal/assets has no CSS');
+  for (const name of files) {
+    if (!name.endsWith('.js')) continue;
+    const filename = join(assets, name), code = readFileSync(filename, 'utf8');
+    violations.push(...auditSource(`portal:${name}`, code));
+    let ast;
+    try { ast = acorn.parse(code, { ecmaVersion: 'latest', sourceType: 'module' }); }
+    catch { continue; } // The baseline parser above already reports syntax failures.
+    walk(ast, node => {
+      const source = ['ImportDeclaration', 'ExportNamedDeclaration', 'ExportAllDeclaration', 'ImportExpression'].includes(node.type) && node.source;
+      if (source?.type === 'Literal' && typeof source.value === 'string') checkReference(filename, source.value);
+    });
+  }
+  violations.push(...auditDistCss(assets).map(message => message.replace(/^dist:/, 'portal:')));
+  return violations;
+}
+
 export function runAudit({ distDir = distRoot, webDistDir = webDistRoot } = {}) {
   const violations = [];
 
@@ -412,8 +459,9 @@ export function auditDistPresenceProblems({
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  const violations = runAudit();
-  for (const problem of auditDistPresenceProblems()) {
+  const portalOnly = process.argv.includes('--portal-only');
+  const violations = [...(portalOnly ? [] : runAudit()), ...auditPortalAssets()];
+  for (const problem of portalOnly ? [] : auditDistPresenceProblems()) {
     console.error(problem);
     process.exitCode = 1;
   }

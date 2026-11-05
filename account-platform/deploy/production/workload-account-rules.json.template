@@ -1,0 +1,66 @@
+[
+  {
+    "subject": "__APPROVAL_RECOVERY_WORKLOAD_SUBJECT__",
+    "service": "account-approval-recovery",
+    "permissions": [
+      "internal.approval-recovery.plan",
+      "internal.approval-recovery.confirm",
+      "internal.approval-recovery.zero-effect"
+    ]
+  },
+  {
+    "subject": "__TOKEN_WORKLOAD_SUBJECT__",
+    "service": "token-gateway",
+    "permissions": [
+      "internal.authorization.check",
+      "internal.authorization.delegate",
+      "internal.account.token-owner-authority.check",
+      "internal.token-owner-candidates.read",
+      "internal.client-compatibility.read"
+    ]
+  },
+  {
+    "subject": "__BILLING_WORKLOAD_SUBJECT__",
+    "service": "billing-service",
+    "permissions": [
+      "internal.registration-bonus-eligibility.read",
+      "internal.authorization.check",
+      "internal.approval-execution.begin",
+      "internal.approval-execution.complete",
+      "internal.approval-authorization.consume",
+      "internal.account.ledger-repair-proof.read",
+      "internal.account.closure.read"
+    ]
+  },
+  {
+    "subject": "__KEYCLOAK_WORKLOAD_SUBJECT__",
+    "service": "keycloak-mobile-authenticator",
+    "permissions": [
+      "internal.authorization.check",
+      "internal.auth.sms.verify"
+    ]
+  },
+  {
+    "subject": "__CREDENTIAL_WORKLOAD_SUBJECT__",
+    "service": "token-credential-portal",
+    "permissions": [
+      "internal.authorization.check"
+    ]
+  },
+  {
+    "subject": "__TOKEN_EXECUTOR_WORKLOAD_SUBJECT__",
+    "service": "token-command-executor",
+    "permissions": [
+      "internal.approval-execution.begin",
+      "internal.approval-execution.complete",
+      "internal.approval-authorization.consume"
+    ]
+  },
+  {
+    "subject": "__IDENTITY_WORKLOAD_SUBJECT__",
+    "service": "identity-service",
+    "permissions": [
+      "internal.auth.password-preparation.claim"
+    ]
+  }
+]

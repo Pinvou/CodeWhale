@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+const finishFixtures = require('./helpers/fixture-exit.cjs');
 /**
  * 长按起手冒烟：主窗口展开侧边栏 → 分别长按「系统监控」和 Coding 会话 →
  * 断言以对应 kind 调了 begin_detach_drag(原生鬼影由此接管,headless 无法继续验,属手动验收)。
@@ -6,10 +7,10 @@
  */
 const fs = require('fs'), path = require('path'), os = require('os');
 const { startUiTestServer } = require('./ui_test_server');
-function loadPuppeteer(){ try{return require('puppeteer-core');}catch(e){}
+function loadPuppeteer(){ try{return require('./helpers/puppeteer-fixture.cjs');}catch(e){}
   const npx=path.join(os.homedir(),'.npm','_npx');
   if(fs.existsSync(npx))for(const d of fs.readdirSync(npx)){const p=path.join(npx,d,'node_modules','puppeteer-core');
-    if(fs.existsSync(p)){try{return require(p);}catch(e){}}}
+    if(fs.existsSync(p)){try{return require('./helpers/browser-fixture.cjs').wrapNative(require(p));}catch(e){}}}
   console.error('SKIP: 找不到 puppeteer-core');process.exit(2);}
 const puppeteer=loadPuppeteer();
 const CHROME=process.env.CHROME||[
@@ -98,5 +99,5 @@ function injectSource(){return `(function(){
     if(!calls.some(c=>c.args&&c.args.kind==='codex-session'&&c.args.id==='coding-detach-1')){console.error('FAIL: Coding 会话长按未携带固定 session id，实际:',JSON.stringify(calls));ok=false;}
   }
   await browser.close();fs.rmSync(PROFILE,{recursive:true,force:true});
-  if(ok){console.log('PASS: 系统监控与 Coding 会话长按均触发正确 begin_detach_drag');process.exit(0);} process.exit(1);
+  if(ok){console.log('PASS: 系统监控与 Coding 会话长按均触发正确 begin_detach_drag');finishFixtures(0);} finishFixtures(1);
 })();

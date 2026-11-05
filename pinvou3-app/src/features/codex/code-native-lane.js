@@ -38,6 +38,7 @@ export function createNativeLane() {
     streamText: '',
     toolMeta: {},
     planSnapshot: { plan: null, todos: null },
+    pendingBillingNotices: Object.create(null),
     // chat:memory 推送的本回合注入记忆快照（{ items, runtimePath, updatedAt }），
     // 未收到过事件时为 null；会话级状态，不随 hydration 落盘/清空。
     memory: null,
@@ -230,15 +231,20 @@ function openTimelineStart(lane, withinMs = 0) {
   return open;
 }
 
-function recordTurnStarted(lane, turnId) {
+function recordTurnStarted(lane, turnId, submittedAt = null) {
   // Two turns within the same millisecond (automation / rapid-fire)
   // collide on Date.now() ids: the second user_start would be mistaken by
   // openTimelineStart for an already-completed turn, breaking the terminal
   // record and the error card entirely. A per-lane turn sequence keeps ids
   // unique (same idea as the bridge side's turnIndex).
   lane.turnSeq = (lane.turnSeq || 0) + 1;
+  const localTurnId = turnId || `ui_native_${Date.now()}_${lane.turnSeq}`;
+  lane.timelineTurnAnchor = {
+    knownStartIds: lane.timeline.filter(event => event?.event === 'user_start').map(event => event.turn_id),
+    submittedAt, localTurnId,
+  };
   lane.timeline.push({
-    turn_id: turnId || `ui_native_${Date.now()}_${lane.turnSeq}`,
+    turn_id: localTurnId,
     event: 'user_start',
     timestamp: Date.now(),
     ui_turn_index: visibleUserTurnIndex(lane),
@@ -254,6 +260,8 @@ function recordTurnCompleted(lane, payload) {
     timestamp: Date.now(),
     status: payload && payload.status || (payload && payload.error ? 'Failed' : 'Completed'),
     error: payload && payload.error || null,
+    user_error: payload && (payload.user_error || payload.userError) || null,
+    billing_notice: payload && payload.billing_notice || null,
     ui_turn_index: open.ui_turn_index,
   };
   lane.timeline.push(record);
@@ -285,19 +293,28 @@ function finalizeReasoning(lane) {
 /// 发送前乐观插入用户气泡并记录 turn 起点；chat 命令同步失败时用
 /// removeLocalUserMessage 回滚。返回临时 item id。
 export function appendLocalUserMessage(lane, text) {
+  lane.timelineReadEpoch = (lane.timelineReadEpoch || 0) + 1;
   const id = nextId(lane);
   lane.items.push({ id, type: 'user', text: String(text || ''), time: timeStr(), localEchoTs: Date.now() });
-  recordTurnStarted(lane);
+  recordTurnStarted(lane, undefined, Date.now());
+  lane.timelineTurnAnchor.userItemId = id;
   lane.busy = true;
   lane.thinking = { active: true, startedAt: Date.now(), phase: 'thinking', toolName: null };
   return id;
 }
 
-export function removeLocalUserMessage(lane, id) {
+export function removeLocalUserMessage(lane, id, { preserveFailedTurn = false } = {}) {
   lane.items = lane.items.filter(item => item.id !== id);
-  // 该 turn 未被 engine 接纳（不会有 assistant_done），把乐观记录的 user_start 一并回滚。
+  // The default helper contract still rolls back an unaccepted optimistic turn.
+  // The IPC catch opts in to retaining UI-only failure timing, since prepare
+  // can already have written a real send_error despite no chat:turn_started.
+  const anchor = lane.timelineTurnAnchor;
+  if (preserveFailedTurn && (!anchor || anchor.userItemId !== id)) return;
   const open = openTimelineStart(lane);
-  if (open) lane.timeline = lane.timeline.filter(event => event !== open);
+  if (preserveFailedTurn && open && open.turn_id !== anchor.localTurnId) return;
+  if (open && preserveFailedTurn && open.turn_id === anchor.localTurnId) {
+    recordTurnCompleted(lane, { status: 'send_error' });
+  } else if (open) lane.timeline = lane.timeline.filter(event => event !== open);
   lane.busy = false;
   lane.thinking = null;
 }
@@ -307,6 +324,12 @@ export function removeLocalUserMessage(lane, id) {
 export function applyNativeChatEvent(lane, name, payload, options = {}) {
   const p = payload || {};
   switch (name) {
+    case 'chat:billing_notice': {
+      const notice = p.billing_notice;
+      if (!notice || (notice.code !== 'WALLET_INSUFFICIENT' && notice.code !== 'MEMBER_QUOTA_INSUFFICIENT')) return false;
+      lane.pendingBillingNotices[String(Number(p.turn_generation || 0))] = notice;
+      return false;
+    }
     case 'chat:user_message': {
       const content = String(p.content || '');
       if (!content) return false;
@@ -344,6 +367,7 @@ export function applyNativeChatEvent(lane, name, payload, options = {}) {
       return true;
     }
     case 'chat:turn_started': {
+      lane.timelineReadEpoch = (lane.timelineReadEpoch || 0) + 1;
       lane.busy = true;
       if (!lane.thinking || !lane.thinking.active) {
         lane.thinking = { active: true, startedAt: Date.now(), phase: 'thinking', toolName: null };
@@ -629,6 +653,37 @@ export function applyNativeChatEvent(lane, name, payload, options = {}) {
     case 'chat:done': {
       finalizeReasoning(lane);
       finalizeStream(lane);
+      const billingKey = String(Number(p.generation || 0));
+      const billingNotice = lane.pendingBillingNotices[billingKey];
+      if (billingNotice) {
+        delete lane.pendingBillingNotices[billingKey];
+        const completed = billingNotice.turn_outcome === 'COMPLETED';
+        const contextType = billingNotice.context_type || '';
+        const organizationId = String(billingNotice.organization_id || '').trim();
+        const action = contextType === 'PERSONAL' && billingNotice.action === 'OPEN_RECHARGE'
+          ? 'OPEN_RECHARGE'
+          : contextType === 'ORGANIZATION' && billingNotice.action === 'OPEN_ORGANIZATION_RECHARGE' && organizationId
+            ? 'OPEN_ORGANIZATION_RECHARGE'
+            : contextType === 'ORGANIZATION' && billingNotice.action === 'CONTACT_ORG_ADMIN' && organizationId
+              ? 'CONTACT_ORG_ADMIN'
+            : '';
+        p.billing_notice = billingNotice;
+        p.user_error = {
+          kind: 'wallet_insufficient',
+          severity: completed ? 'warning' : 'error',
+          stage: billingNotice.stage || '',
+          turnOutcome: billingNotice.turn_outcome || '',
+          settlementStatus: billingNotice.settlement_status || '',
+          action,
+          contextType,
+          organizationId,
+          errorCode: billingNotice.code,
+        };
+        p.userError = p.user_error;
+      }
+      Object.keys(lane.pendingBillingNotices).forEach(key => {
+        if (Number(key) <= Number(p.generation || 0)) delete lane.pendingBillingNotices[key];
+      });
       // Live-path terminal ratchet: a stop or an error mid-tool never
       // delivers chat:tool_end, so an unpaired tool card (typically an
       // in-flight `agent` spawn) would stay state "running" forever and the
@@ -737,6 +792,7 @@ function userMessageText(blocks) {
 /// 后端没有按会话查询待批方案快照的接口（mode_state 只有 pending_plan_id，work 侧也不读），
 /// 待批方案跨 remount 不再可点批准，用户让 AI 重出方案即可。
 export function hydrateNativeLane(lane, saved, timelineEvents = []) {
+  lane.timelineReadEpoch = (lane.timelineReadEpoch || 0) + 1;
   // 同窗口切回正在跑的会话时，lane 已被 chat:* 事件推进过：磁盘快照（只落已提交
   // 内容）会滞后于实时状态，hydration 后保留 busy，由后续事件继续推进；冷启动
   // 首次 hydration 时 lane 无任何 live 痕迹，未配对的 user_start 只能按中断展示。
@@ -938,4 +994,61 @@ export function projectNativeLane(lane, sessionId, options = {}) {
     language: options.language,
     modelServiceState: options.modelServiceState || null,
   });
+}
+
+// Completion/submit-failure refresh changes timeline only: live bubbles, composer
+// drafts, pending requests and control state remain owned by their original paths.
+function authoritativeTimelineCoversCurrentTurn(local, authoritative, turnAnchor) {
+  const localStarts = local.filter(event => event?.event === 'user_start');
+  const current = localStarts.at(-1);
+  if (!current && !turnAnchor) return true;
+  const incoming = authoritative.filter(event => event?.event === 'user_start').at(-1);
+  if (!incoming?.turn_id) return false;
+  const priorIds = new Set([...(turnAnchor?.knownStartIds || []), ...localStarts.slice(0, -1).map(event => event.turn_id)]);
+  if (priorIds.has(incoming.turn_id)) return false;
+  // submittedAt is captured before IPC. Event receipt time is deliberately not
+  // used: backend timing can precede a received native chat:turn_started event.
+  if (Number.isFinite(turnAnchor?.submittedAt)
+      && (!Number.isFinite(Number(incoming.timestamp)) || Number(incoming.timestamp) < turnAnchor.submittedAt)) return false;
+  const incomingTerminal = [...authoritative].reverse().find(event => event?.event === 'assistant_done' && event.turn_id === incoming.turn_id);
+  if (incomingTerminal?.model_rejection && (!current || current.turn_id !== incoming.turn_id)) {
+    // Local UI ids are generated here; persisted Rust ids are not ui_* ids.
+    // Unknown remote identity and a same-ms lower bound are insufficient.
+    const predecessors = [...priorIds].filter(id => id && !/^ui(?:_|-)/.test(String(id)));
+    const predecessor = predecessors.at(-1);
+    const starts = authoritative.filter(event => event?.event === 'user_start');
+    const positions = starts.map((event, index) => event.turn_id === predecessor ? index : -1).filter(index => index >= 0);
+    const orderedIdentity = Boolean(predecessor && positions.length === 1 && positions[0] < starts.length - 1);
+    const laterThanSubmission = Number.isFinite(turnAnchor?.submittedAt) && Number(incoming.timestamp) > turnAnchor.submittedAt;
+    if (!orderedIdentity && !laterThanSubmission) return false;
+  }
+  if (current && !priorIds.has(current.turn_id)
+      && local.some(event => event?.event === 'assistant_done' && event.turn_id === current.turn_id)
+      && !authoritative.some(event => event?.event === 'assistant_done' && event.turn_id === incoming.turn_id)) return false;
+  return true;
+}
+
+export async function refreshNativeTurnTimeline(lane, readTimeline, ownsLane) {
+  const token = lane.timelineReadToken = (lane.timelineReadToken || 0) + 1;
+  const epoch = lane.timelineReadEpoch || 0;
+  const latestStart = events => [...(events || [])].reverse().find(event => event?.event === 'user_start')?.turn_id || null;
+  const anchor = latestStart(lane.timeline);
+  let authoritative;
+  try { authoritative = await readTimeline(); } catch { return false; }
+  if (!ownsLane() || lane.timelineReadToken !== token || (lane.timelineReadEpoch || 0) !== epoch
+      || latestStart(lane.timeline) !== anchor || !Array.isArray(authoritative) || !authoritative.length) return false;
+  if (!authoritativeTimelineCoversCurrentTurn(lane.timeline, authoritative, lane.timelineTurnAnchor)) return false;
+  const terminals = new Map(authoritative.filter(event => event?.event === 'assistant_done').map(event => [event.turn_id, event]));
+  const starts = new Set(authoritative.filter(event => event?.event === 'user_start').map(event => event.turn_id));
+  if (lane.timeline.some(event => event?.event === 'assistant_done' && starts.has(event.turn_id) && !terminals.has(event.turn_id))) return false;
+  const latestCompletion = events => Math.max(0, ...events.filter(event => event?.event === 'assistant_done').map(event => Number(event.timestamp) || 0));
+  if (latestCompletion(lane.timeline) > latestCompletion(authoritative) + 5000) return false;
+  const local = new Map(lane.timeline.filter(event => event?.event === 'assistant_done').map(event => [event.turn_id, event]));
+  lane.timeline = authoritative.map(event => {
+    const previous = event?.event === 'assistant_done' && local.get(event.turn_id);
+    return previous ? { ...event, user_error: event.user_error || previous.user_error || null,
+      billing_notice: event.billing_notice || previous.billing_notice || null } : { ...event };
+  });
+  lane.timelineReadEpoch = (lane.timelineReadEpoch || 0) + 1;
+  return true;
 }

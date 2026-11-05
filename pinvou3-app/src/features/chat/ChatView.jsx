@@ -1,3 +1,5 @@
+import { platformModelSelectableForNewSession } from '../account-platform/model-catalog-selection.js';
+import { latestModelLifecycleRejection } from '../account-platform/model-lifecycle.js';
 import React, { useCallback, useEffect, useLayoutEffect, lazy as mentionLazy, useMemo, useRef, useState, Suspense as MentionSuspense, useSyncExternalStore } from 'react';
 import { createPortal } from 'react-dom';
 import {
@@ -140,6 +142,7 @@ import {
   taskStatusKey,
 } from '../remote-control/remote-control-logic.mjs';
 import { createCapabilityRequestLoop } from '../remote-control/capability-request-loop.mjs';
+import { prepareRemoteTaskCapabilities } from '../remote-control/remote-task-preflight.mjs';
 import { permissionOperationCopyKey, permissionRedactionCopyKey } from '../remote-control/controlled-device-panel-state.mjs';
 import {
   canUseControllerTemporaryModel,
@@ -940,7 +943,7 @@ const openChatExternalUrl = (url) => {
     };
 
     // eslint-disable-next-line sonarjs/cognitive-complexity -- legacy main view: session/mode/artifact/browser state is highly cohesive; split refactor tracked separately
-    const ChatView = ({ theme, t, bs, prefill, prefillAppend = false, focusComposerTick = 0, onPrefillConsumed, onOpenEditor, justInstalledTool, setJustInstalledTool, onGotoSettings, onGotoModelSettings, onGotoTools, onBackScheduledRun, codeModeAvailable = false, onSwitchHomeMode, onRemoteModelSourceChange, browserDockAvailable = false, browserDockOpen = false, rightDockActivePanelId = null, onRightDockPanelSelectionChange, onOpenBrowserDock, remoteConnection = null, remoteModelSource = 'controller_temporary', onOpenWorkspacePicker, onNotify, onSwitchSession = null }) => {
+    const ChatView = ({ theme, t, bs, prefill, prefillAppend = false, focusComposerTick = 0, onPrefillConsumed, onOpenEditor, justInstalledTool, setJustInstalledTool, onGotoSettings, onGotoModelSettings, onGotoTools, onBackScheduledRun, codeModeAvailable = false, onSwitchHomeMode, onRemoteModelSourceChange, browserDockAvailable = false, browserDockOpen = false, rightDockActivePanelId = null, onRightDockPanelSelectionChange, onOpenBrowserDock, remoteConnection = null, remoteModelSource = 'controller_temporary', accountPlatformClient, onOpenAccountRecharge, onOpenWorkspacePicker, onNotify, onSwitchSession = null }) => {
       const chatCopy = t.uiChat;
       const chatViewCopy = t.uiChatView;
       const sceneCopy = chatCopy.sceneModes;
@@ -1319,38 +1322,6 @@ const openChatExternalUrl = (url) => {
         return () => { cancelled = true; };
       }, [remoteModelBindingKey, scopedRemoteConnection?.capabilityRevision, scopedRemoteConnection?.sessionRef]);
       useEffect(() => {
-        if (!remoteCapabilities || !scopedRemoteConnection?.sessionRef || !bridge.available) return undefined;
-        const expiresAtMs = Number(remoteCapabilities.expiresAtMs);
-        if (!Number.isSafeInteger(expiresAtMs) || expiresAtMs <= 0) return undefined;
-        let cancelled = false;
-        const refreshDelayMs = Math.max(0, expiresAtMs - Date.now() - 5_000);
-        const timer = setTimeout(() => {
-          if (cancelled) return;
-          setRemoteCapabilityBusy(true);
-          setRemoteCapabilityError(null);
-          bridge.desktopRemoteControl.controllerCapabilitySend(scopedRemoteConnection.sessionRef)
-            .then(() => { if (!cancelled) setRemoteCapabilityError(null); })
-            .catch(failure => {
-              if (!cancelled) setRemoteCapabilityError(String(failure?.code || 'capability_snapshot_unavailable'));
-            })
-            .finally(() => { if (!cancelled) setRemoteCapabilityBusy(false); });
-        }, refreshDelayMs);
-        return () => {
-          cancelled = true;
-          clearTimeout(timer);
-        };
-      }, [
-        remoteCapabilities?.connectionId,
-        remoteCapabilities?.controllerLeaseId,
-        remoteCapabilities?.leaseEpoch,
-        remoteCapabilities?.relayEpoch,
-        remoteCapabilities?.remoteControlGeneration,
-        remoteCapabilities?.remoteSessionRef,
-        remoteCapabilities?.capabilityRevision,
-        remoteCapabilities?.expiresAtMs,
-        scopedRemoteConnection?.sessionRef,
-      ]);
-      useEffect(() => {
         if (!remoteCapabilities) return;
         setRemoteMode(current => remoteModes.includes(current) ? current : (remoteModes[0] || 'chat'));
         setRemoteWorkspaceId(current => remoteWorkspaces.some(item => item.workspaceId === current)
@@ -1374,9 +1345,12 @@ const openChatExternalUrl = (url) => {
         ));
       }, [remoteModelError, remoteSendIdentity]);
       const remoteDispatchReady = remoteTaskContextReady && !remoteModelError;
-      const remoteNewDispatchReady = remoteTaskContextReady
+      // An expired display snapshot can be renewed before a NEW reserve. Keep
+      // exact freshness/revision requirements for already prepared task actions.
+      const remoteNewDispatchReady = remoteLinkReady && !!remoteCapabilities && remoteModeReady
         && !pendingRemoteDispatches.some(item => item.state === 'prepared_not_sent');
       useEffect(() => {
+        remoteComposerIdentityRef.current = remoteComposerIdentity;
         setRemoteFiles([]);
         setRemoteMode('chat');
         setRemoteWorkspaceId('');
@@ -1388,6 +1362,10 @@ const openChatExternalUrl = (url) => {
         setRemoteArtifacts([]);
         setRemoteArtifactPreview(null);
         setRemoteActionError(null);
+        return () => {
+          remoteTransferGuard.invalidate();
+          remoteComposerIdentityRef.current = '';
+        };
       }, [remoteComposerIdentity, remoteTransferGuard]);
       useEffect(() => {
         if (!remoteArtifactPreview) return undefined;
@@ -2744,6 +2722,43 @@ const openChatExternalUrl = (url) => {
         && (remoteChatActive ? (hasDraftText || hasRemoteFile)
           : (controlledChatActive ? (hasDraftText || hasReadyAttachment || hasSessionRefs)
             : (hasDraftText || hasReadyAttachment || hasSessionRefs)));
+      const modelLifecycleRejection = !remoteTranscriptActive && activeSessionId
+        ? latestModelLifecycleRejection(turnTimeline) : null;
+      const modelContinuationBlocked = Boolean(modelLifecycleRejection);
+      const [replacementModels, setReplacementModels] = useState([]);
+      const [replacementModelId, setReplacementModelId] = useState('');
+      const [replacementBusy, setReplacementBusy] = useState(false);
+      const [replacementError, setReplacementError] = useState('');
+      useEffect(() => {
+        if (!modelContinuationBlocked || !bridge.available || !bridge.accountPlatform?.modelCatalog) return;
+        let active = true;
+        bridge.accountPlatform.modelCatalog().then(result => {
+          if (!active) return;
+          const items = (result?.items || []).filter(item => platformModelSelectableForNewSession(item));
+          setReplacementModels(items);
+          setReplacementModelId(current => items.some(item => item.model_id === current) ? current : (items[0]?.model_id || ''));
+        }).catch(() => { if (active) setReplacementError('modelSwitchFailed'); });
+        return () => { active = false; };
+      }, [modelContinuationBlocked, activeSessionId]);
+      const createReplacementBranch = useCallback(async () => {
+        if (remoteTranscriptActive || !activeSessionId || !modelLifecycleRejection || !replacementModelId || replacementBusy) return;
+        setReplacementBusy(true); setReplacementError('');
+        try {
+          const result = await bridge.accountPlatform.branchReplacementSession({
+            sourceConversationId: activeSessionId,
+            sourceTurnId: modelLifecycleRejection.turnId,
+            sourceMessageCount: 0,
+            replacementModelId,
+            replacementTitleSuffix: t.uiModelReplacement.branchTitleSuffix,
+            defaultChatTitle: t.newChat,
+          });
+          await bridge.sessions.switchToSession(result.session.id);
+        } catch {
+          setReplacementError('modelSwitchFailed');
+        } finally {
+          setReplacementBusy(false);
+        }
+      }, [activeSessionId, modelLifecycleRejection, remoteTranscriptActive, replacementBusy, replacementModelId, t.uiModelReplacement.branchTitleSuffix, t.newChat]);
       const sceneCapabilityPreparing = sceneCapabilityStatus && sceneCapabilityStatus.kind === 'preparing';
       // eslint-disable-next-line sonarjs/cognitive-complexity -- scene-capability preflight and send orchestration are cohesive in a single callback; split refactor tracked separately
       const dispatchChatMessage = useCallback(async (text, voiceMeta, voiceOwner) => {
@@ -2844,7 +2859,7 @@ const openChatExternalUrl = (url) => {
           // 构造 task intent。发送按钮、回车、语音与欢迎卡片最终都经过这里，
           // 因此必须在统一入口拦截，不能只依赖按钮 disabled。
           if (!remoteLinkReady) return false;
-          const sendIdentity = remoteSendIdentity;
+          let sendIdentity = remoteSendIdentity;
           if (!remoteBinding || !remoteNewDispatchReady) {
             setRemoteSendError({ identity: sendIdentity, code: 'remote_task_intent_invalid' });
             return false;
@@ -2853,8 +2868,19 @@ const openChatExternalUrl = (url) => {
             setRemoteSendError({ identity: sendIdentity, code: remoteModelError });
             return false;
           }
-          const transferAttempt = remoteTransferGuard.start(sendIdentity);
-          const currentTransfer = () => remoteTransferGuard.isCurrent(transferAttempt, remoteSendIdentityRef.current);
+          const composerIdentity = remoteComposerIdentity;
+          let transferAttempt = remoteTransferGuard.start(composerIdentity);
+          let contextPrepared = false;
+          const readRemoteState = () => bridge.state.get('desktopRemoteControl');
+          const preparingCurrent = () => remoteTransferGuard.isCurrent(transferAttempt, remoteComposerIdentityRef.current);
+          const currentTransfer = () => {
+            const connection = readRemoteState().controllerConnection;
+            return connection?.status === 'connected'
+              && remoteComposerIdentityRef.current === composerIdentity
+              && remoteTransferGuard.isCurrent(transferAttempt, remoteProxyLeaseIdentity(
+                activeSessionIdRef.current, connection,
+              ));
+          };
           try {
             const taskText = outgoing || t.remoteConversation.attachmentOnlyPrompt;
             const intent = newRemoteTaskIntent(
@@ -2866,6 +2892,21 @@ const openChatExternalUrl = (url) => {
               remoteSkillIds,
             );
             if (!intent) return false;
+            const connection = await prepareRemoteTaskCapabilities({
+              binding: remoteBinding,
+              ownerIdentity: composerIdentity,
+              readState: readRemoteState,
+              snapshot: bridge.desktopRemoteControl.capabilitiesSnapshot,
+              renew: bridge.desktopRemoteControl.controllerCapabilitySend,
+              isCurrent: preparingCurrent,
+            });
+            // Freeze operation ownership only after renewal. Read the host's
+            // published state so React batching cannot leave an old revision
+            // in the ref while a new authenticated snapshot is already applied.
+            sendIdentity = remoteProxyLeaseIdentity(remoteBinding.localSessionId, connection);
+            transferAttempt = remoteTransferGuard.start(sendIdentity);
+            contextPrepared = true;
+            if (!currentTransfer()) return false;
             const prepared = await bridge.desktopRemoteControl.reserveRemoteTask(
               remoteBinding.localSessionId, remoteBinding.remoteRef, intent,
             );
@@ -2905,8 +2946,10 @@ const openChatExternalUrl = (url) => {
             }
             if (outcome.state !== 'queued') return 'held';
           } catch (failure) {
-            if (remoteSendIdentityRef.current === sendIdentity) {
-              setRemoteSendError({ identity: sendIdentity, code: String(failure?.code || 'errorGeneric') });
+            if (contextPrepared ? currentTransfer() : preparingCurrent()) {
+              const errorIdentity = contextPrepared ? sendIdentity
+                : remoteProxyLeaseIdentity(remoteBinding.localSessionId, readRemoteState().controllerConnection);
+              setRemoteSendError({ identity: errorIdentity, code: String(failure?.code || 'errorGeneric') });
             }
             throw failure;
           } finally {
@@ -3087,7 +3130,7 @@ const openChatExternalUrl = (url) => {
         // as-is: the voice task lane needs to tell "restored" apart from
         // accepted, while ordinary sends treat both as not-false.
         return dispatchResult;
-      }, [activeSessionId, attachments, controlledCapabilityBound, controlledCapabilityBusy, controlledChatActive, controlledLinkReady, controlledSession.sessionId, controlledSkillIds, dataVisualizationSceneActive, documentWritingSceneActive, effectiveRemoteModelSource, hasReadyAttachment, personalWorkbenchSceneActive, pptDesignSceneActive, remoteBinding, remoteChatActive, remoteFiles, remoteMode, remoteModelError, remoteNewDispatchReady, remoteProxyHistory, remoteSendIdentity, remoteSkillIds, remoteTransferGuard, remoteWorkspaceId, selectedRemoteModelId, sessionMentionEnabled, t, visualPosterSceneActive]);
+      }, [activeSessionId, attachments, controlledCapabilityBound, controlledCapabilityBusy, controlledChatActive, controlledLinkReady, controlledSession.sessionId, controlledSkillIds, dataVisualizationSceneActive, documentWritingSceneActive, effectiveRemoteModelSource, hasReadyAttachment, personalWorkbenchSceneActive, pptDesignSceneActive, remoteBinding, remoteChatActive, remoteComposerIdentity, remoteFiles, remoteMode, remoteModelError, remoteNewDispatchReady, remoteProxyHistory, remoteSendIdentity, remoteSkillIds, remoteTransferGuard, remoteWorkspaceId, selectedRemoteModelId, sessionMentionEnabled, t, visualPosterSceneActive]);
 
       // SessionStore mapping/lease establishment is owned by the A-side
       // authenticated ensure/bind command, never by an implicit ChatView open.
@@ -3149,13 +3192,17 @@ const openChatExternalUrl = (url) => {
           .catch((failure) => setRemoteCapabilityError(String((failure && failure.code) || 'errorGeneric')))
           .finally(() => setRemoteCapabilityBusy(false));
       }, [remoteHandshakeBinding, remoteCapabilityBusy, remoteConnection]);
+      // A background handshake can remain ready/null throughout recovery.
+      // Clear its old read error only after a fresh projection matches the
+      // current complete owner/revision; a dropped or expired read is not recovery.
+      const remoteCapabilityRecoveryIdentity = remoteCapabilityFresh ? remoteSendIdentity : '';
       useEffect(() => {
         if (remoteConnection?.capabilityError) {
           setRemoteCapabilityError(String(remoteConnection.capabilityError));
-        } else if (remoteConnection?.capabilityStatus === 'ready') {
+        } else if (remoteConnection?.capabilityStatus === 'ready' && remoteCapabilityRecoveryIdentity) {
           setRemoteCapabilityError(null);
         }
-      }, [remoteConnection?.capabilityError, remoteConnection?.capabilityStatus]);
+      }, [remoteConnection?.capabilityError, remoteConnection?.capabilityStatus, remoteCapabilityRecoveryIdentity]);
       const remoteCapabilityMessage = !scopedRemoteConnection ? null
         : remoteCapabilityError === 'capability_snapshot_timeout'
           ? t.controllerConnection.remoteCapabilityTimeout
@@ -5032,6 +5079,7 @@ const openChatExternalUrl = (url) => {
                     renderItem={handleTimelineRenderItem}
                     renderToolItem={handleTimelineRenderToolItem}
                     onOpenExternal={openChatExternalUrl}
+                    onUserErrorAction={onOpenAccountRecharge}
                   />
                 {/* Selection quotes: select text in the main conversation
                     timeline → stage it as a quote of this task's aux chat and
@@ -5115,6 +5163,20 @@ const openChatExternalUrl = (url) => {
             style={responsiveGutterStyle}
           >
             <div className="max-w-[800px] w-full mx-auto" data-testid="chat-composer-box">
+              {modelContinuationBlocked && (
+                <div className="mb-3 rounded-2xl border border-amber-300/70 bg-amber-50/95 p-3 text-[12px] text-amber-950 shadow-lg backdrop-blur dark:border-amber-700/60 dark:bg-amber-950/90 dark:text-amber-100">
+                  <div className="font-semibold">{t.uiModelReplacement.title}</div>
+                  <div className="mt-1 leading-relaxed opacity-80">{t.uiModelReplacement.lead}</div>
+                  <div className="mt-2 flex gap-2">
+                    <select value={replacementModelId} onChange={event => setReplacementModelId(event.target.value)} disabled={replacementBusy || !replacementModels.length} className="h-9 min-w-0 flex-1 rounded-xl border border-amber-300 bg-white px-3 dark:border-amber-700 dark:bg-black/20">
+                      {replacementModels.map(item => <option key={item.model_id} value={item.model_id}>{item.display_name}</option>)}
+                    </select>
+                    <button type="button" onClick={() => void createReplacementBranch()} disabled={replacementBusy || !replacementModelId} className="h-9 rounded-xl bg-amber-600 px-3 font-semibold text-white disabled:opacity-50">{replacementBusy ? t.uiModelReplacement.creating : t.uiModelReplacement.create}</button>
+                  </div>
+                  {replacementError && <div role="alert" className="mt-2 break-words text-red-600 dark:text-red-300">{t.uiSettingsDetail.modelSwitchFailed}</div>}
+                </div>
+              )}
+
               {!remoteTranscriptActive && COMPUTER_USE_ENABLED && (
                 <ComputerUseBanner slice={computerUseSlice} copy={computerUseCopy} />
               )}
@@ -5592,7 +5654,7 @@ const openChatExternalUrl = (url) => {
                       the backend's swarm_mode_available excludes them (the
                       engine always assembles plain config there), so the
                       entry hides up front instead of erroring on click. */}
-                  <ComposerModelSelector t={t} bs={bs} onGotoSettings={onGotoModelSettings || onGotoSettings} compact={composerCompact} multiAgentAvailable={!scheduledRunContext} />
+                  <ComposerModelSelector t={t} bs={bs} accountPlatformClient={accountPlatformClient} onGotoSettings={onGotoModelSettings || onGotoSettings} compact={composerCompact} multiAgentAvailable={!scheduledRunContext} />
                   <ComposerToolMenu t={t} onGotoTools={onGotoTools} sessionId={bs && bs.activeSessionId} compact={composerCompact} activeSkill={bs && bs.activeSkill} />
                     <ComposerKbSelector t={t} bs={bs} compact={composerCompact} />
                   </>}

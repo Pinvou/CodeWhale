@@ -315,19 +315,46 @@ class RustDiskTests(unittest.TestCase):
     def test_workflow_prepares_disk_before_swap_and_rechecks_after_caches(self):
         workflow = (ROOT / ".github/workflows/pr-check.yml").read_text(encoding="utf-8")
         job = workflow.split("\n  rust-test:", 1)[1].split("\n  cli-test:", 1)[0]
-        preflight = job.index("- name: 在 swap 与缓存前准备 Rust 磁盘空间")
+        titles = (
+            "在 swap 与缓存前准备 Rust 磁盘空间",
+            "缓存恢复前准备 Rust 磁盘空间",
+            "在缓存后确认两轮 Rust 测试磁盘空间",
+        )
+        positions = []
+        for title, command in zip(titles, (
+            "python3 scripts/ci-rust-disk.py --min-free-gib 24",
+            "python3 scripts/ci-rust-disk.py",
+            "python3 scripts/ci-rust-disk.py",
+        )):
+            marker = "- name: " + title
+            self.assertEqual(job.count(marker), 1)
+            position = job.index(marker)
+            positions.append(position)
+            step = job[position:].split("\n      - name:", 1)[0]
+            commands = [line.strip() for line in step.splitlines()
+                        if line.strip().startswith("python3 scripts/ci-rust-disk.py")]
+            self.assertEqual(commands, [command])
+            self.assertIn('RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT"', step)
+            self.assertNotIn("||", step)
+            self.assertNotIn("set +e", step)
+        preflight, before_cache, recheck = positions
         swap = job.index("- name: Set up zram and swap")
+        dependencies = job.index("run: npm --prefix pinvou3-app ci")
+        lint_cache = job.index("- name: 恢复 Rust lint 暖缓存")
         cache = job.index("- name: Cargo test cache")
-        recheck = job.index("- name: 在缓存后确认两轮 Rust 测试磁盘空间")
 
+        # The earlier 24 GiB admission cannot replace the post-swap 12 GiB
+        # guard: zram failure can allocate 16 GiB of swap before dependencies.
+        self.assertEqual(DISK.DEFAULT_MIN_FREE_GIB, 12)
         self.assertEqual(job.count("python3 scripts/ci-rust-disk.py"), 6)
         self.assertLess(preflight, swap)
-        self.assertLess(swap, cache)
+        self.assertLess(swap, dependencies)
+        self.assertLess(dependencies, before_cache)
+        self.assertLess(before_cache, lint_cache)
+        self.assertLess(lint_cache, cache)
         self.assertLess(cache, recheck)
-        self.assertIn("--min-free-gib 24", job[preflight:swap])
         self.assertLess(recheck, job.index("- name: cargo test --lib --no-run"))
         self.assertLess(recheck, job.index("- name: cargo test --test behavior_telemetry"))
-        self.assertIn('RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT"', job)
         self.assertNotIn("continue-on-error", job)
 
     def test_workflow_prepares_disk_before_cache_restore_and_rechecks_after_it(self):

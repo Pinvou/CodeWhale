@@ -4,8 +4,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import react from '@vitejs/plugin-react';
-import * as puppeteer from 'puppeteer-core';
-import { createServer } from 'vite';
+import * as puppeteer from './helpers/puppeteer-fixture.mjs';
+import { createServer } from './helpers/vite-fixture.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const chrome = process.env.CHROME || [
@@ -72,6 +72,97 @@ try {
     await page.click('[data-testid="chat-composer-send"]');
     await page.waitForFunction(() => window.dispatchFixture.calls.some(call => call.kind === 'attachmentBegin')
       && document.querySelector('[data-testid="chat-remote-pending-dispatches"] button'));
+  }
+
+  const capabilityAlertVisible = () => page.evaluate(() => [...document.querySelectorAll('[role="alert"]')]
+    .some(element => element.textContent.includes(window.dispatchFixture.copy.controllerConnection.remoteCapabilityFailed)));
+  await load('idle-alert');
+  await page.evaluate(() => {
+    const fixture = window.dispatchFixture;
+    fixture.snapshotReads = [];
+    window.TauriBridge.desktopRemoteControl.capabilitiesSnapshot = async () => {
+      const current = fixture.current;
+      const revision = current.connection.capabilityRevision;
+      fixture.snapshotReads.push(revision);
+      if (revision === 2 || revision === 5 || current.id === 'remote-b') {
+        throw Object.assign(new Error('expired'), { code: 'capability_snapshot_expired' });
+      }
+      if (revision === 6) return new Promise(resolve => { fixture.oldSnapshotResolve = resolve; });
+      return current.capabilities;
+    };
+    fixture.select('remote-a', 1, 2);
+  });
+  await page.waitForFunction(() => [...document.querySelectorAll('[role="alert"]')].some(element =>
+    element.textContent.includes(window.dispatchFixture.copy.controllerConnection.remoteCapabilityFailed)));
+  // Same ready/null handshake state, but this projection is still expired.
+  await page.evaluate(() => window.dispatchFixture.selectExpired('remote-a', 1, 3));
+  await page.waitForFunction(() => window.dispatchFixture.snapshotReads.includes(3));
+  await flush();
+  assert.equal(await capabilityAlertVisible(), true, 'an expired projection cannot clear the read error');
+  await page.evaluate(() => window.dispatchFixture.select('remote-a', 1, 4));
+  await page.waitForFunction(() => window.dispatchFixture.snapshotReads.includes(4));
+  await page.waitForFunction(() => ![...document.querySelectorAll('[role="alert"]')].some(element =>
+    element.textContent.includes(window.dispatchFixture.copy.controllerConnection.remoteCapabilityFailed)));
+  await page.evaluate(() => window.dispatchFixture.select('remote-a', 1, 5));
+  await page.waitForFunction(() => [...document.querySelectorAll('[role="alert"]')].some(element =>
+    element.textContent.includes(window.dispatchFixture.copy.controllerConnection.remoteCapabilityFailed)));
+  await page.evaluate(() => window.dispatchFixture.select('remote-a', 1, 6));
+  await page.waitForFunction(() => !!window.dispatchFixture.oldSnapshotResolve);
+  await page.evaluate(() => window.dispatchFixture.select('remote-b'));
+  await page.waitForFunction(() => [...document.querySelectorAll('[role="alert"]')].some(element =>
+    element.textContent.includes(window.dispatchFixture.copy.controllerConnection.remoteCapabilityFailed)));
+  await page.evaluate(() => window.dispatchFixture.oldSnapshotResolve(null));
+  await flush();
+  assert.equal(await capabilityAlertVisible(), true, 'a dropped old-owner read cannot clear the new owner error');
+  assert.deepEqual(errors, []);
+
+  for (const scenario of ['idle', 'idle-failure', 'idle-switch', 'idle-unmount', 'idle-removed-skill']) {
+    await load(scenario);
+    await page.evaluate(() => window.dispatchFixture.expire());
+    await page.click('[data-testid="chat-remote-capabilities"] input[type="checkbox"]');
+    await page.type('textarea', 'Write a document after an idle connection');
+    assert.equal(await page.$eval('[data-testid="chat-composer-send"]', button => button.disabled), false,
+      'an expired display snapshot must allow the new-task preflight');
+    await page.click('[data-testid="chat-composer-send"]');
+    await page.waitForFunction(() => window.dispatchFixture.renewals.length === 1);
+    assert.equal(await page.evaluate(() => window.dispatchFixture.calls.length), 0,
+      'no reserve, upload or commit before B replies');
+    if (scenario === 'idle-failure') {
+      await page.evaluate(() => window.dispatchFixture.renewals[0].reject(
+        Object.assign(new Error('timeout'), { code: 'capability_snapshot_timeout' })));
+      await page.waitForFunction(() => document.querySelector('textarea').value.includes('idle connection'));
+      assert.equal(await page.evaluate(() => window.dispatchFixture.calls.length), 0);
+    } else if (scenario === 'idle-switch' || scenario === 'idle-unmount') {
+      await page.evaluate(shouldUnmount => {
+        if (shouldUnmount) window.dispatchFixture.unmount();
+        else window.dispatchFixture.select('remote-b');
+      }, scenario === 'idle-unmount');
+      await flush();
+      await page.evaluate(() => window.dispatchFixture.renewals[0].resolve());
+      await page.waitForFunction(() => window.dispatchFixture.restores.length === 1);
+      assert.equal(await page.evaluate(() => window.dispatchFixture.restores[0].sessionId), 'remote-a');
+      assert.equal(await page.evaluate(() => window.dispatchFixture.calls.length), 0,
+        'a retired preparation must not reserve in either session');
+    } else {
+      await page.evaluate(() => window.dispatchFixture.completeRenewal());
+      await page.waitForFunction(() => window.dispatchFixture.calls.some(call => call.kind === 'reserve'));
+      const reserve = await page.evaluate(() => window.dispatchFixture.calls.find(call => call.kind === 'reserve'));
+      assert.equal(reserve.revision, 2);
+      assert.deepEqual(reserve.intent.skillIds, ['skill-document'], 'retain the skill selected before renewal');
+      assert.equal(reserve.intent.text, 'Write a document after an idle connection');
+      if (scenario === 'idle-removed-skill') {
+        await page.waitForFunction(() => document.querySelector('textarea').value.includes('idle connection'));
+        assert.equal(await page.evaluate(() => window.dispatchFixture.commits.length), 0,
+          'native rejection cannot silently drop a removed skill and send');
+      } else {
+        await page.waitForFunction(() => window.dispatchFixture.commits.length === 1);
+        await settleCommit(0, 'outcome_unknown');
+        assert.equal(await page.evaluate(() => window.dispatchFixture.calls.filter(call => call.kind === 'reserve').length), 1);
+        assert.equal(await page.evaluate(() => window.dispatchFixture.commits.length), 1,
+          'an unknown commit is not automatically replayed');
+      }
+    }
+    assert.deepEqual(errors, []);
   }
 
   for (const phase of ['commit', 'upload']) {
