@@ -7,7 +7,7 @@
  *     面板渲染出真实数据（模型 id、引擎 sha8、容量数字、活跃标记）；
  *   ② 商店保留未绑定的存量用户路由，不按名字在前端自动改写；
  *   ④ switch 换胎进行中弹维护窗，完成后保留管理连接并给出终结确认卡；
- *   ⑤ 仅挪默认（无任务）时活跃指针变化被跟随，且不弹维护窗；
+ *   ⑤ 仅挪默认（无任务）时保留管理连接，且不弹维护窗；
  *   ⑥ 启停（enable/disable）任务不弹维护窗、不触发选择跟随——进度由发起方
  *     （商店 run 日志 / MCP 应答）各自呈现；
  *   ⑦ cmsd 侧装好但无接入行的健康模型：不自动建行或替换管理连接。
@@ -19,6 +19,7 @@
  * 用法:node tests/megacube_panel_smoke.js [截图路径]
  * （全 PASS → exit 0，任一 FAIL → exit 1，缺依赖 → 打印 SKIP: 行首说明并 exit 2）
  */
+const finishFixtures = require('./helpers/fixture-exit.cjs');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -26,12 +27,12 @@ const { execSync } = require('child_process');
 const { startUiTestServer } = require('./ui_test_server');
 
 function loadPuppeteer() {
-  try { return require('puppeteer-core'); } catch (_) { /* fall through */ }
+  try { return require('./helpers/puppeteer-fixture.cjs'); } catch (_) { /* fall through */ }
   const npx = path.join(os.homedir(), '.npm', '_npx');
   if (fs.existsSync(npx)) {
     for (const d of fs.readdirSync(npx)) {
       const p = path.join(npx, d, 'node_modules', 'puppeteer-core');
-      if (fs.existsSync(p)) { try { return require(p); } catch (_) { /* next */ } }
+      if (fs.existsSync(p)) { try { return require('./helpers/browser-fixture.cjs').wrapNative(require(p)); } catch (_) { /* next */ } }
     }
   }
   console.error('SKIP: 找不到 puppeteer-core');
@@ -46,7 +47,6 @@ const CHROME = process.env.CHROME || [
   '/snap/bin/chromium',
 ].find(p => fs.existsSync(p));
 if (!CHROME) { console.error('SKIP: 未找到 chromium/chrome'); process.exit(2); }
-const PROFILE = fs.mkdtempSync(path.join(os.tmpdir(), 'pinvou-megacube-'));
 const SCREENSHOT = process.argv[2] || '/tmp/megacube-panel.png';
 
 // ── 数据：默认真机验收样本；CMSD_SOCKET 可达时抓现场 ──────────
@@ -132,9 +132,11 @@ function injectSource(cmsData, opts = {}) {
     : '';
   const tasksCase = opts.withSwitchTask
     ? `case 'cms_tasks': {
-          // 前两次轮询 running，之后 succeeded（换胎任务从进行中到完成）
+          // The guidance panel may read tasks before the deferred observer.
+          // Hold backend state until the test has observed the running UI;
+          // read-only queries must never complete the operation themselves.
           window.__CMS_TEST__.switchPolls = (window.__CMS_TEST__.switchPolls || 0) + 1;
-          var running = window.__CMS_TEST__.switchPolls <= 2;
+          var running = window.__CMS_TEST__.completeSwitch !== true;
           return Promise.resolve({ available: true, data: { tasks: [{
             id: 't-sw-1', kind: 'switch', card: 'qwen38-27b-nvfp4-tachyon',
             status: running ? 'running' : 'succeeded',
@@ -174,7 +176,7 @@ function injectSource(cmsData, opts = {}) {
       preset: 'openai_compatible', provider_kind: 'custom',
       has_secret: true, credential_state: 'configured',
     }, {
-      // 真名接入行（换胎完成后自动切换的匹配目标；带卡片身份标记）
+      // 真名接入行（带卡片身份标记；设备换胎不会替换管理连接）
       id: 'm_qwen_real', name: '本地 · Qwen3.8-27B (NVFP4 · 驭光)',
       model: 'Qwen3.8-27B-NVFP4', base_url: 'http://127.0.0.1:8000/v1',
       preset: 'openai_compatible', provider_kind: 'custom',
@@ -311,12 +313,11 @@ async function openDeviceManagement(page) {
     console.log(`${pass ? '✅' : '❌'} ${name}${detail ? '  ' + detail : ''}`);
   };
 
-  const { url, close } = await startUiTestServer();
+  const { url } = await startUiTestServer();
   const browser = await puppeteer.launch({
     executablePath: CHROME,
     headless: 'new',
     args: ['--no-sandbox', '--disable-gpu', '--no-first-run', '--no-default-browser-check'],
-    userDataDir: PROFILE,
   });
 
   try {
@@ -387,14 +388,24 @@ async function openDeviceManagement(page) {
     rec('② 商店保留未绑定的用户路由，不按模型名自动改写', savedModelCalls.length === 0);
     await page2.close();
 
-    // 场景④：换胎维护窗 + 完成后自动切换模型选择
+    // 场景④：换胎维护窗 + 完成后保留管理对话连接
     const sw = await bootApp(browser, url, CMS_DATA, { withSwitchTask: true });
     const page4 = sw.page;
-    await page4.waitForFunction(() => {
-      const m = document.querySelector('[data-testid="cmsd-task-modal"]');
-      return m && m.innerText.includes('正在切换到');
-    }, { timeout: 15000 });
+    try {
+      await page4.waitForFunction(() => {
+        const m = document.querySelector('[data-testid="cmsd-task-modal"]');
+        return m && m.innerText.includes('正在切换到');
+      }, { timeout: 15000 });
+    } catch (error) {
+      console.error('换胎维护窗未出现：', JSON.stringify(await page4.evaluate(() => ({
+        taskPolls: window.__CMS_TEST__.switchPolls,
+        modal: document.querySelector('[data-testid="cmsd-task-modal"]')?.innerText,
+        body: document.body.innerText.slice(-1000),
+      }))), sw.errors);
+      throw error;
+    }
     rec('④ 换胎进行中弹维护窗', true);
+    await page4.evaluate(() => { window.__CMS_TEST__.completeSwitch = true; });
     await page4.waitForSelector('[data-testid="cmsd-task-modal-close"]', { timeout: 15000 });
     rec('④ 换胎完成保留管理对话连接', await page4.evaluate(() => window.__CMS_TEST__.setActiveCalls.length === 0));
     const settledText = await page4.evaluate(() =>
@@ -403,8 +414,7 @@ async function openDeviceManagement(page) {
     await page4.click('[data-testid="cmsd-task-modal-close"]');
     await page4.close();
 
-    // 场景⑤：仅挪默认（无任务）——活跃指针变化被跟随，模型选择自动切过去；
-    // 且无换胎任务时维护窗不出现
+    // 场景⑤：仅挪设备默认（无任务），保留管理连接且维护窗不出现
     const follow = await bootApp(browser, url, CMS_DATA, { flipActiveAfter: 3 });
     const page5 = follow.page;
     await page5.waitForFunction(() =>
@@ -427,8 +437,8 @@ async function openDeviceManagement(page) {
     rec('⑥ 页面无未捕获错误', en.errors.length === 0, en.errors.slice(0, 2).join(' | '));
     await page6.close();
 
-    // 场景⑦：cmsd 侧装好的模型（AI 对话内下载的路径）在品悟列表没有接入行，
-    // 活跃指针翻向它时自动建行（真名+网关+卡片标记）并把选择切过去
+    // 场景⑦：cmsd 侧装好的健康模型没有接入行，设备默认翻向它时
+    // 不自动建行或替换管理连接
     const orphanCard = {
       card: 'test9b-nvfp4-tachyon', model_id: 'Test-9B-NVFP4', status: 'running',
       healthy: true, port: 18082, restart_count: 0, weights_bytes: 1000000,
@@ -441,9 +451,8 @@ async function openDeviceManagement(page) {
     rec('⑦ 页面无未捕获错误', auto.errors.length === 0, auto.errors.slice(0, 2).join(' | '));
     await page7.close();
 
-    // 场景⑦b：引擎自报路径形 id（真机 mtp 卡实测报 /models/target）——
-    // 自动建行显示名回退到商店目录的卡片名，不拿路径当名字；wire 模型名
-    // 回退 megacube-default 别名（网关改写到活跃模型真实 id，20521e61c 起）
+    // 场景⑦b：引擎自报路径形 id（真机 mtp 卡实测报 /models/target），
+    // 同样不因设备默认变化而自动晋升为管理连接
     const mtpLike = {
       card: 'mtp-like-card', model_id: '/models/target', status: 'running',
       healthy: true, port: 30000, restart_count: 0, weights_bytes: 1000000,
@@ -467,14 +476,13 @@ async function openDeviceManagement(page) {
     await negative.page.close();
   } finally {
     await browser.close();
-    if (typeof close === 'function') await close();
   }
 
   const failed = results.filter((r) => !r.pass);
   console.log(failed.length === 0 ? `\n全部通过（${results.length} 项）` : `\n${failed.length} 项失败`);
-  process.exit(failed.length === 0 ? 0 : 1);
+  await finishFixtures(failed.length === 0 ? 0 : 1);
 })().catch((error) => {
   console.error('FAIL:', error.message);
   console.error(error.stack ? error.stack.split('\n').slice(0, 4).join('\n') : '');
-  process.exit(1);
+  void finishFixtures(1);
 });
