@@ -14,8 +14,11 @@ const packageJson = JSON.parse(
 );
 
 const helperFiles = new Set([
+  "account_platform_recharge_polling_server.mjs",
+  "account_platform_sms_conflict_cases.mjs",
   "behavior_telemetry_source.mjs",
   "bridge_domain_contract.mjs",
+  "organization_unit_scope_cases.mjs",
   "ui_test_server.js",
 ]);
 const platformRuntimeSmokes = new Set([
@@ -74,7 +77,7 @@ test("every JavaScript test file belongs to one explicit layer", () => {
 
 test("the default test command uses Node automatic discovery", () => {
   assert.equal(packageJson.scripts["test:node"], "node --test --test-concurrency=4");
-  assert.equal(packageJson.scripts.test, "npm run test:node && npm run validate:pet-assets");
+  assert.equal(packageJson.scripts.test, "npm run test:node && npm run test:account-platform-audit && npm run validate:pet-assets");
   assert.ok(nodeTests.length > 0);
 });
 

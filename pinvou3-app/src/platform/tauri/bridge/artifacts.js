@@ -114,6 +114,7 @@ function openScheduledTaskFolder(automationId) { return pinvouSharedtauriArtifac
   //（src-tauri/src/app/commands/artifacts.rs + lib.rs 注册），KnowledgeView 亦为
   // accept-both 双形状 —— lane 改委托共享核（helpers v2 协商版；桌面 webview
   // 与后端同包发布、version-locked，lane 不传 hasCommand 时按 v2 可用处理）。
+  // 共享合并核保留跳过记录，整体扫描失败如实上抛到 Knowledge 视图。
   async function listDeliverableIndex() { return pinvouSharedtauriArtifacts().listDeliverableIndex(); }
   // 外部打开产物：HTML 走 Tauri 独立窗口（绕沙箱），其他走系统应用。
   // sessionId = 卡片携带的产物所属 session。后端 resolve_artifact_path 用它(而非全局

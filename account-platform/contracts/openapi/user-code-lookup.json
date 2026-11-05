@@ -1,0 +1,110 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "Existing exact user-code lookup",
+    "version": "1.0.0"
+  },
+  "paths": {
+    "/admin/v1/user-code-lookups/{user_code}": {
+      "get": {
+        "operationId": "adminUserByCode",
+        "description": "Authenticated exact normalized permanent user-code lookup. Account owns platform.users.read authorization, digest-only all-result auditing and original multi-dimension minute limits. No public/prefix/fuzzy/batch alias. DELETED subjects remain identifiable.",
+        "parameters": [
+          {
+            "name": "user_code",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64,
+              "pattern": "^[A-Za-z0-9-]+$"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current user projection including DELETED, no email field",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserProjection"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required"
+          },
+          "404": {
+            "description": "Uniform denied, invalid or absent code: USER_NOT_FOUND"
+          },
+          "429": {
+            "description": "Original actor/source/device/target quota: LOOKUP_RATE_LIMITED"
+          },
+          "503": {
+            "description": "Unavailable owner/authorization; no fallback directory search"
+          }
+        },
+        "x-permission": "platform.users.read",
+        "x-authorization-owner": "PostgresRepository.LookupUserByCode",
+        "x-cache-control": "no-store",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer"
+      }
+    },
+    "schemas": {
+      "UserProjection": {
+        "type": "object",
+        "required": [
+          "user_id",
+          "user_code",
+          "status",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "user_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "user_code": {
+            "type": "string"
+          },
+          "username": {
+            "type": "string"
+          },
+          "display_name": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "last_seen_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      }
+    }
+  }
+}

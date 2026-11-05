@@ -1,0 +1,54 @@
+[
+  {
+    "wire": 1,
+    "ui_action": "APPROVE",
+    "body": {
+      "expected_version": 4,
+      "decision": "APPROVED",
+      "reason": " Controlled decision reason ",
+      "command_protocol": 1,
+      "observed_versions": {
+        "version": 3
+      }
+    },
+    "reason_digest": "adb9de9505c613a66bf8d40b8313cc7884f0243ea023e76b18ebccbe2758d838"
+  },
+  {
+    "wire": 1,
+    "ui_action": "REJECT",
+    "body": {
+      "expected_version": 4,
+      "decision": "REJECTED",
+      "reason": " Controlled decision reason ",
+      "command_protocol": 1,
+      "observed_versions": {
+        "version": 3
+      }
+    },
+    "reason_digest": "adb9de9505c613a66bf8d40b8313cc7884f0243ea023e76b18ebccbe2758d838"
+  },
+  {
+    "wire": 2,
+    "ui_action": "APPROVE",
+    "body": {
+      "expected_version": 4,
+      "decision": "APPROVED",
+      "reason": " Controlled decision reason ",
+      "command_protocol": 1,
+      "action_control_version": 1
+    },
+    "reason_digest": "adb9de9505c613a66bf8d40b8313cc7884f0243ea023e76b18ebccbe2758d838"
+  },
+  {
+    "wire": 2,
+    "ui_action": "REJECT",
+    "body": {
+      "expected_version": 4,
+      "decision": "REJECTED",
+      "reason": " 操作理由：请批准 😀 ",
+      "command_protocol": 1,
+      "action_control_version": 1
+    },
+    "reason_digest": "ea9704f0dc1500df04055192f7ed6bfe89e90bd48b79ba4d15b7277ecf6971ac"
+  }
+]

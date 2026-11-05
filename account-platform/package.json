@@ -1,0 +1,41 @@
+{
+  "name": "pinvou-account-platform-contracts",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "npm run test:contracts",
+    "test:contracts": "node --test test/contract/*.test.mjs",
+    "check:i18n-release": "node ../scripts/check-account-platform-i18n.mjs",
+    "check:observability-release": "node ../scripts/check-account-platform-observability.mjs",
+    "check:migration-immutability": "node ../scripts/account-platform-migration-manifest.mjs",
+    "check:recovery-policy": "node ../scripts/account-platform-recovery-gate.mjs",
+    "check:production-recovery": "node ../scripts/account-platform-recovery-gate.mjs --require-evidence",
+    "check:ha-policy": "node ../scripts/account-platform-ha-gate.mjs",
+    "check:production-ha": "node ../scripts/account-platform-ha-gate.mjs --require-evidence",
+    "check:performance-policy": "node ../scripts/account-platform-performance-gate.mjs",
+    "check:production-performance": "node ../scripts/account-platform-performance-gate.mjs --require-evidence",
+    "test:auth-business": "node test/integration/auth-business-acceptance.mjs",
+    "test:existing-broker": "python3 test/integration/existing-broker-acceptance.py",
+    "prepare:prometheus-fixtures": "node test/integration/prometheus-rule-fixtures.mjs",
+    "test:prometheus-rules": "node ../scripts/account-platform-prometheus-rules.mjs",
+    "test:closure-contracts": "node --test test/contract/account-closure-saga.test.mjs test/contract/account-closure-cleanup.test.mjs",
+    "security:production-readiness": "node ../scripts/account-platform-production-security-gate.mjs",
+    "security:prepare-native-rotation": "node ../scripts/account-platform-production-security-gate.mjs --prepare-native-rotation",
+    "test:postgres-backup-tools": "python3 -m unittest discover -s ../scripts/tests -p \"test_postgres_backup*.py\"",
+    "test:user-realm-tools": "python3 -m unittest discover -s ../scripts/tests -p \"test_user_realm.py\"",
+    "check:production-business": "node ../scripts/account-platform-business-compose-check.mjs",
+    "check:production-migrations": "node ../scripts/account-platform-business-migrations-check.mjs",
+    "check:production-keycloak": "node ../scripts/account-platform-keycloak-helm-check.mjs",
+    "test:browser-login-theme": "node --test test/browser/login-theme.test.mjs",
+    "test:browser-login-theme:windows": "node ../scripts/test-account-platform-login-theme-windows.mjs"
+  },
+  "devDependencies": {
+    "ajv": "8.17.1",
+    "ajv-formats": "3.0.1",
+    "yaml": "2.9.0"
+  }
+}

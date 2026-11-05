@@ -1,0 +1,21 @@
+# F07 overlay after the existing personal/finance/model/invocation overlays.
+# Secret HMAC and SMS values stay in existing private Account env_file.
+name: pinvou-personal
+services:
+  token-portal:
+    image: ${TOKEN_PORTAL_IMAGE:?set same-source F07 signup policy Portal image and canonical assets}
+  account-migrate:
+    image: ${MIGRATE_IMAGE:?set same-source F07 public migrations image}
+  billing-migrate:
+    image: ${MIGRATE_IMAGE:?set same-source F07 public migrations image}
+  account-service:
+    image: ${ACCOUNT_SERVICE_IMAGE:?set same-source F07 signup Account image}
+    environment:
+      MOBILE_AUTH_ENABLED: "true"
+      REGISTRATION_BONUS_FINGERPRINT_KEY_ID: registration-bonus-v1
+      WORKLOAD_IDENTITY_RULES_JSON: ${ACCOUNT_WORKLOAD_RULES_JSON:?set exact current Account incoming workload rules including Billing eligibility read}
+  billing-service:
+    image: ${BILLING_SERVICE_IMAGE:?set same-source F07 gift and policy Billing image}
+    environment:
+      ACCOUNT_HTTP_URL: http://account-service:8080
+      WORKLOAD_IDENTITY_RULES_JSON: ${BILLING_WORKLOAD_RULES_JSON:?set exact current Billing incoming workload rules including Account bonus provision}

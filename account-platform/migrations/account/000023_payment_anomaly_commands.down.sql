@@ -1,0 +1,6 @@
+DROP TRIGGER approval_command_policies_immutable ON approval_command_policies;
+DELETE FROM approval_command_policies WHERE command_type IN (
+    'BILLING_PAYMENT_ANOMALY_CLAIM','BILLING_PAYMENT_ANOMALY_RESOLVE','BILLING_RECONCILIATION_CASE_UPDATE',
+    'BILLING_CHARGEBACK_RECORD','BILLING_FORCED_REFUND_RECORD','BILLING_DAILY_RECONCILIATION'
+);
+CREATE TRIGGER approval_command_policies_immutable BEFORE UPDATE OR DELETE OR TRUNCATE ON approval_command_policies FOR EACH STATEMENT EXECUTE FUNCTION protect_approval_policy();

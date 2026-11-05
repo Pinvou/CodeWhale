@@ -1075,3 +1075,62 @@ test('archiveSession（scheduled run）：归档失败且无导航 → active/co
   assert.equal(rt.state.activeSessionId, 'sched-run-1', '无新导航时成对回滚');
   assert.deepEqual(rt.state.scheduledRunContext, { sessionId: 'sched-run-1' });
 });
+
+
+// Coalesced callers still own the same draft token; a later user navigation
+// owns a different one. Match the two existing native command response shapes.
+for (const [source, command, modelRef] of [
+  ['ACCOUNT_PLATFORM', 'account_platform_select_session_model', {
+    source: 'ACCOUNT_PLATFORM', model_id: '3e9e7ea8-c214-4f90-81d4-e72c89f2e683',
+  }],
+  ['LOCAL_CONFIG', 'set_session_model', {
+    source: 'LOCAL_CONFIG', saved_model_id: 'local-config',
+  }],
+]) {
+  for (const rejectSelection of [false, true]) {
+    for (const navigateAway of [false, true]) {
+      test(`coalesced typed selection keeps its renewed navigation owner: ${source}/${rejectSelection ? 'reject' : 'resolve'}/${navigateAway ? 'new-draft' : 'current'}`, async () => {
+        const rt = loadSessionsFeature();
+        rt.state.pendingDraftModelRef = modelRef;
+        rt.state.composerDraft = 'owned typed draft';
+        const originalEpoch = rt.state.draftEpoch;
+        const creation = rt.defer('create_session');
+        const selection = rt.defer(command);
+        const first = rt.api.ensureSession();
+        const second = rt.api.ensureSession();
+        assert.equal(rt.calls.invoke.filter(name => name === 'create_session').length, 1);
+        creation.resolve({ id: 'typed-created' });
+        await new Promise(resolve => setImmediate(resolve));
+        assert.equal(rt.calls.invoke.filter(name => name === command).length, 1);
+        assert.equal(rt.state.activeSessionId, 'typed-created');
+        if (navigateAway) {
+          await rt.api.createNewSession();
+          rt.state.composerDraft = 'later user draft';
+        }
+        const navigationEpoch = rt.state.draftEpoch;
+        if (rejectSelection) selection.reject(new Error('controlled model selection rejection'));
+        else selection.resolve(source === 'ACCOUNT_PLATFORM' ? {
+          session_id: 'typed-created', model_id: modelRef.model_id,
+          catalog_version: 1, lifecycle_status: 'PUBLISHED',
+        } : null);
+        const ids = await Promise.all([first, second]);
+        assert.deepEqual(ids, navigateAway || rejectSelection ? [null, null] : ['typed-created', 'typed-created']);
+        assert.equal(rt.calls.invoke.filter(name => name === 'delete_session').length, rejectSelection ? 1 : 0);
+        if (navigateAway) {
+          assert.equal(rt.state.activeSessionId, null);
+          assert.equal(rt.state.draftEpoch, navigationEpoch);
+          assert.equal(rt.state.composerDraft, 'later user draft');
+          assert.equal(rt.state.pendingDraftModelRef, null);
+        } else if (rejectSelection) {
+          assert.equal(rt.state.activeSessionId, null);
+          assert.equal(rt.state.draftEpoch, originalEpoch + 1);
+          assert.equal(rt.state.composerDraft, 'owned typed draft');
+          assert.deepEqual(rt.state.pendingDraftModelRef, modelRef);
+        } else {
+          assert.equal(rt.state.activeSessionId, 'typed-created');
+          assert.deepEqual(rt.state.currentSessionModelRef, modelRef);
+        }
+      });
+    }
+  }
+}
