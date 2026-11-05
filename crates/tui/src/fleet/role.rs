@@ -77,10 +77,12 @@ pub enum FleetRole {
     /// posture pushes hard on landing the change cleanly with the
     /// minimum surrounding edit (#404).
     Builder,
-    /// Verification — focused on running the test suite or other
-    /// validation gates and reporting pass/fail with evidence.
-    /// Distinct from `Reviewer` in that Reviewer reads code and grades it;
-    /// Verifier *runs* tests and reports the outcome (#404).
+    /// Verification — runs the built-in verification gates and reports
+    /// pass/fail with evidence; the gates are refused when a read-only-shell
+    /// parent clamps the child's shell authority. In-session delegations
+    /// also carry the bounded read-only probe lane. Distinct from `Reviewer`
+    /// in that Reviewer reads code and grades it; Verifier *runs* the gates
+    /// and reports the outcome (#404).
     Verifier,
     /// Advisory counsel — a strong-model second opinion the operator can ask
     /// for guidance, judgement calls, and design critique (#4752).
@@ -193,7 +195,7 @@ impl FleetRole {
                 "Lands focused code changes cleanly with the minimum surrounding edit."
             }
             Self::Verifier => {
-                "Runs the test suite and validation gates, reports pass/fail with evidence."
+                "Runs the built-in verification gates with test-selection arguments unless a read-only-shell parent clamped its shell authority (the clamped child keeps the bounded read-only probes and loses the gates), plus — for in-session delegations — a bounded read-only shell for evidence gathering; cannot execute custom commands — use a write-capable role for those."
             }
             Self::Consultant => {
                 "Read-only high-reasoning counsel for judgement calls and design critique."
@@ -350,9 +352,11 @@ pub(crate) const MUTATING_TOOL_DENYLIST: &[&str] = &[
 /// receipt says `write=false`. Denying the raw shell entries and leaving the
 /// bounded verification surface (`Run` / `run_tests` / `run_verifiers`) intact
 /// keeps the verifier able to do its job under a contract that is true.
-/// Scout/reviewer read-only inspection selectively removes only canonical `Bash` from this
-/// deny list after the role is known; its input-specific read-only classifier
-/// remains the authority for that narrow exception.
+/// Scout/reviewer/planner read-only inspection selectively removes only canonical `Bash` from this
+/// deny list after the role is known (`from_runtime_role`'s retain); a verifier's
+/// classifier-bounded `bash` is admitted separately by the subagent registry's
+/// probe lane (`allows_bounded_readonly_bash`), not by that retain; the
+/// input-specific read-only classifier remains the authority for both narrow exceptions.
 ///
 /// That surface is bounded only in its **default** form, and the distinction is
 /// load-bearing: `run_verifiers` accepts a `commands` array of arbitrary
@@ -514,8 +518,10 @@ impl ChildAuthority {
         // Raw shell requires the ceiling to *say* `shell = "full"`. Any narrower
         // shell posture — `none` or `read_only` — loses the raw command surface
         // outright. `from_runtime_role` may subsequently
-        // retain canonical `Bash` for a named scout/reviewer, whose concrete
-        // calls are bounded by the strict read-only classifier.
+        // retain canonical `Bash` for the Scout/Reviewer/Planner trio, whose concrete
+        // calls are bounded by the strict read-only classifier; a Verifier's probe
+        // `bash` is admitted by the registry lane instead, without touching this
+        // deny list.
         //
         // This is deliberately keyed on the shell field rather than only on
         // `write`, and that is the whole repair: the execution envelope reads
@@ -644,9 +650,13 @@ impl ChildAuthority {
             FleetRole::Scout | FleetRole::Reviewer | FleetRole::Planner
         ) && authority.ceiling.shell != ShellCeiling::None
         {
-            // Runtime's Scout/Reviewer policy permits classifier-bounded Bash
-            // inspection. Keep the canonical entry while all other shell and
-            // execution aliases remain denied.
+            // Runtime's Scout/Reviewer/Planner policy permits classifier-bounded
+            // Bash inspection. Keep the canonical entry while all other shell and
+            // execution aliases remain denied. This literal is the one role set
+            // that intentionally differs from `role_requires_read_only_shell`
+            // (which adds Verifier): a Verifier's probe `bash` is admitted over
+            // the deny by the registry lane, not by this retain, so changing
+            // either side means changing the member fingerprint or dropping a lane.
             authority
                 .disallowed_tools
                 .retain(|name| !name.eq_ignore_ascii_case("Bash"));
@@ -715,11 +725,20 @@ pub(crate) fn posture_role_for(ceiling: PermissionCeiling) -> &'static str {
 /// Whether a Fleet role is never allowed a mutating shell, whatever its
 /// requested runtime profile says. Spawn narrows the child to a read-only
 /// shell for these roles, and every receipt must report that same posture.
+///
+/// The narrowing downgrades only the raw-command policy: canonical `bash`
+/// becomes the classifier-bounded probe lane, while the bounded built-in
+/// verification surface keeps keying on the role's shell *ceiling* and the
+/// shell-authority sentinel — the `test` role keeps both, because running the
+/// workspace's own gates is its entire purpose. "Keeps both" describes the
+/// in-session registry path; the fleet executor envelope gives the Verifier
+/// only the bounded verification surface (`shell = none`, no probe lane) by
+/// design.
 #[must_use]
 pub(crate) fn role_requires_read_only_shell(role: &FleetRole) -> bool {
     matches!(
         role,
-        FleetRole::Scout | FleetRole::Reviewer | FleetRole::Planner
+        FleetRole::Scout | FleetRole::Reviewer | FleetRole::Planner | FleetRole::Verifier
     )
 }
 
