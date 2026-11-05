@@ -152,9 +152,20 @@ const connectorWorkflow = fs.readFileSync(
   path.join(repoRoot, ".github/workflows/connector-verify.yml"),
   "utf8",
 );
-const architectureGate = workflow.slice(
-  workflow.indexOf("- name: 架构边界门禁"),
-  workflow.indexOf("- name: 初始化公共底座 submodule"),
+// Other jobs also prepare CodeWhale. Keep both gate contracts inside the
+// actual fast-gate job, even when a preceding job has the same step name.
+const fastGateParts = workflow.split(/\r?\n  fast-gate:[ \t]*\r?\n/);
+assert.equal(fastGateParts.length, 2, "PR workflow must contain exactly one fast-gate job");
+const fastGate = fastGateParts[1].split(/\r?\n  [A-Za-z_][A-Za-z0-9_-]*:[ \t]*\r?\n/, 1)[0];
+function fastGateRange(firstStep, nextStep) {
+  const start = fastGate.indexOf(firstStep);
+  const end = fastGate.indexOf(nextStep, start + 1);
+  assert.ok(start >= 0 && end > start, "fast-gate must retain ordered steps: " + firstStep + " -> " + nextStep);
+  return fastGate.slice(start, end);
+}
+const architectureGate = fastGateRange(
+  "- name: 架构边界门禁",
+  "- name: 初始化公共底座 submodule",
 );
 // merge_group 事件上 github.base_ref 不可靠,必须用 merge_group.base_ref 兜底。
 // 契约锁住"两种事件都解析正确 base + 剥 refs/heads/ 前缀 + 传给守卫",防止改回 PR-only。
@@ -166,9 +177,9 @@ assert.match(architectureGate, /base_ref="\$\{base_ref#refs\/heads\/\}"/);
 assert.match(architectureGate, /architecture-guard\.py --base-ref "origin\/\$base_ref"/);
 
 // fork 合规联动步骤用同款 base_ref 解析:锁住不被改回 PR-only,避免队列里取错基线。
-const forkLinkGate = workflow.slice(
-  workflow.indexOf("- name: fork 合规联动"),
-  workflow.indexOf("- name: Setup Python"),
+const forkLinkGate = fastGateRange(
+  "- name: fork 合规联动",
+  "- name: Setup Python",
 );
 assert.match(
   forkLinkGate,

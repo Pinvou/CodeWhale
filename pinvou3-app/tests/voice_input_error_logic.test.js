@@ -1208,6 +1208,36 @@ assert.strictEqual(
   webBt("voiceContextMismatch"),
 );
 
+// PR#2138 review regression: the shared composer hook's pre-send gate
+// rejection (busy / workspace sync / session readiness / auth interleaving
+// between recording start and transcription completion) reuses the
+// sendTask-rejected send_failed error. Both lanes' finishVoiceInput catch must
+// normalize it onto the existing trilingual voiceInputFailed copy and land the
+// operation on failed — a task whose send never ran must never reach the
+// completed "voiceTaskSent" writeback.
+const gateSendError = new Error("");
+gateSendError.category = "send_failed";
+gateSendError.stage = "writeback";
+gateSendError.toString = () => "";
+for (const [laneName, laneNormalize, laneBt] of [
+  ["tauri", normalizeVoiceError, bt],
+  ["web", webNormalizeVoiceError, webBt],
+]) {
+  const gateNormalized = laneNormalize(gateSendError, "transcribing");
+  assert.strictEqual(gateNormalized.category, "send_failed", `${laneName} lane must keep the send_failed category`);
+  assert.strictEqual(gateNormalized.stage, "writeback", `${laneName} lane must keep the writeback stage`);
+  assert.strictEqual(
+    gateNormalized.message,
+    laneBt("voiceInputFailed"),
+    `${laneName} lane must map the send_failed gate error onto the existing trilingual copy`,
+  );
+}
+assert.match(
+  voiceHookSource,
+  /onTaskBlocked\('gate', outgoing, context\);[\s\S]*?throw createVoiceTaskSendError\(\);/,
+  "the pre-send gate rejection must throw the send_failed error to the bridge instead of silently returning into the fake 'task sent' completed writeback",
+);
+
 // (3) Drift guard: every Rust VoiceCommandError error code must appear in
 // both lanes' mapping tables, and the two key sets must stay identical —
 // adding a code without a mapping turns this red instead of silently falling

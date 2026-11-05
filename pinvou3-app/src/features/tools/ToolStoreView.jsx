@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { createPortal } from 'react-dom';
 import { BookOpen, Check, ChevronLeft, Download, Globe, Package, Server, Settings, Trash2, Upload, XIcon, Zap } from '../../components/icons.jsx';
 import { IosSearchField } from '../../components/IosControls.jsx';
@@ -11,7 +11,7 @@ import { isBuiltinPlugin } from './builtin-plugin-logic.js';
 import { MAX_SKILL_ZIP_BYTES, pickSkillDrop, fileToBase64 } from './skill-import-logic.js';
 import { invokeTauri, isTauriAvailable, tauriEvents } from '../../platform/tauri/client.js';
 import { can, isWeb } from '../../shared/platform.js';
-import { applyConnectorFailure, CONSENT_SYNC_FAILURE_MARKER, connectorErrorCopy, connectorFailure, connectorUiStep, localizeConnectorAlert, releaseBusy } from './connector-ui-state.js';
+import { applyConnectorFailure, CONNECT_CONSENT_SYNC_FAILURE_MARKER, CONNECT_GRANT_COMMIT_FAILURE_MARKER, CONSENT_SYNC_FAILURE_MARKER, connectorErrorCopy, connectorFailure, connectorUiStep, localizeConnectorAlert, releaseBusy } from './connector-ui-state.js';
 import { ConnectorSsoDialog } from './ConnectorSsoDialog.jsx';
 import { isImeComposing } from '../../shared/ime-guard.mjs';
 import { pathBasename } from '../../shared/path-utils.js';
@@ -213,7 +213,7 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
             <span className={`w-2 h-2 rounded-full ${isErr ? 'bg-rose-500' : 'bg-blue-500 animate-pulse'}`} />
             <span className="font-semibold text-[14px] text-slate-900 dark:text-slate-100">{isErr ? copy.incomplete(name) : (flow.phase === 'done' ? copy.connected(name) : copy.connecting(name))}</span>
             <span className="flex-1" />
-            {(flow.phase === 'running' || flow.phase === 'qr') && <button onClick={onCancel} className="text-[12px] text-slate-400 hover:text-slate-600 dark:hover:text-slate-200">{copy.cancel}</button>}
+            {(flow.phase === 'running' || flow.phase === 'qr') && <button type="button" onClick={onCancel} className="text-[12px] text-slate-400 hover:text-slate-600 dark:hover:text-slate-200">{copy.cancel}</button>}
           </div>
           <div className="px-5 pb-4 space-y-1">
             {steps.map(s => {
@@ -277,8 +277,8 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
                   {connectorErrorCopy(errors, flow.errorCode) || errors.unknown || copy.connectionIncomplete}
                 </div>
                 <div className="flex gap-2 mt-3 justify-end">
-                  <button onClick={onCancel} className="px-3 py-1.5 rounded-lg bg-slate-200 dark:bg-white/10 text-slate-700 dark:text-slate-100 text-[13px]">{copy.close}</button>
-                  <button onClick={onRetry} className="px-3 py-1.5 rounded-lg bg-blue-600 text-white text-[13px]">{copy.retry}</button>
+                  <button type="button" onClick={onCancel} className="px-3 py-1.5 rounded-lg bg-slate-200 dark:bg-white/10 text-slate-700 dark:text-slate-100 text-[13px]">{copy.close}</button>
+                  <button type="button" onClick={onRetry} className="px-3 py-1.5 rounded-lg bg-blue-600 text-white text-[13px]">{copy.retry}</button>
                 </div>
               </div>
             </div>
@@ -318,10 +318,22 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
     const createFlowStore = () => ({
       flow: null,
       tick: null,
+      // Latched while the LAST settled connect of this connector failed its consent persist or its
+      // post-auth skill write — the backend revokes the fresh grant (or never lands it) on either,
+      // so the connected banner must keep its title-only fallback (round-6 review P2).
+      // Lives on the module-level store, not the component: the failure can settle while the
+      // store view is unmounted, and the latch must survive remount AND card dismissal until
+      // a connect reaches done (review #741 P2 — a component-local latch restarted at false
+      // on remount, so the connected banner claimed enabled-by-default over a fail-closed backend).
+      consentSyncFailed: false,
       listenersReady: false,
       subs: new Set(),
       subscribe(fn) { this.subs.add(fn); return () => { this.subs.delete(fn); }; },
       setFlow(u) { this.flow = (typeof u === 'function') ? u(this.flow) : u; this.subs.forEach(fn => { try { fn(this.flow); } catch (_) {} }); },
+      // Same broadcast discipline as setFlow: subscribers re-mirror both fields, so a latch-only
+      // change (the failure can land after the card was closed, where the flow write null-guards
+      // to a no-op) still wakes mounted components.
+      setConsentSyncFailed(v) { this.consentSyncFailed = !!v; this.subs.forEach(fn => { try { fn(this.flow); } catch (_) {} }); },
       startTick() {
         this.stopTick();
         this.tick = setInterval(() => this.setFlow(f => {
@@ -373,23 +385,40 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
         });
         ev.listen(cfg.events.connected, cfg.connectedMode === 'apply' ? () => {
           conn.stopTick();
+          // A fresh connect reached done → an earlier consent-persist latch is stale. Store-level now
+          // (review #741 P2): on this fire-and-forget channel done precedes the consent settle, so if
+          // THIS connect's own persist fails, the classification below re-latches.
+          conn.setConsentSyncFailed(false);
           // Flow null = the card was closed (cancel) before the event landed;
           // writing would resurrect a zombie "done" card.
           conn.setFlow(f => (f ? { ...f, phase: 'done', steps: { ...f.steps, qr: 'done' } } : f));
-          // Connected → write skills per the rules (enabled by default) + broadcast refresh; view-independent, so it lives in the global listener.
+          // Connected → write skills per the rules (connect grants enable) + broadcast refresh; view-independent, so it lives in the global listener.
           // Round-33 MAJOR 2 + round-35 MAJOR 1 (review #455): the fire-and-forget write is consent-critical — a lost
-          // row leaves the connector live with zero consent until the next boot's ledger-gated backfill, silently. The
+          // grant leaves the connector off until the user reconnects, silently. The
           // failure is surfaced ON THE CARD via applyConnectorFailure (the console-only reportConnectorFailure call was
           // the round-35 review's finding — success toast + connected card while only the console saw the error): the
-          // backend message carries the shared consent marker (CONSENT_SYNC_FAILURE_MARKER, pinned on both sides —
-          // ima-pattern substring match) → the dedicated consent_persist_failed copy; anything else keeps the step's
-          // localized copy.
+          // backend message carries the connect consent marker (CONNECT_CONSENT_SYNC_FAILURE_MARKER, pinned on both
+          // sides — ima-pattern substring match) → the dedicated connect_consent_persist_failed copy; anything else
+          // keeps the step's localized copy. (feat/connector-connect-grants-enable: the connect channel records an
+          // ENABLE grant and is fail-closed on persist failure, hence its own marker/code — the install channels keep
+          // the original CONSENT_SYNC_FAILURE_MARKER and consent_persist_failed.)
           // Round-37 F2 (review #455): the collapse timer is armed only AFTER the write settles — arming it
           // synchronously let a failure resolving after 1.8s land on a nulled flow (the null guard no-op'ing),
           // re-creating the silent-failure state. A slow write keeps the done card up until it resolves; a failed
           // write swaps in the error card and stays (no auto-collapse on errors, same as the awaited branch).
+          // Round-38 (review #741): the composer tools-changed broadcast must ride the write's SETTLEMENT, not
+          // the done phase — done is written synchronously above while the consent grant settles later, so a
+          // done-phase broadcast lets a mounted composer refetch the pre-grant state and render the connector
+          // OFF until the next broadcast (and the round-3 review removed the shared done-phase broadcast for
+          // exactly that waste). Notify after the write settles instead, on BOTH paths: a failed write leaves
+          // abort/revoke state a refresh should still pick up (notifying when nothing changed is harmless).
+          // The awaited branch (dingtalk/tmeet) notifies in its own listener paths below — success included
+          // (round-3 review: the success notify previously lived only in the done phase of the mounted
+          // subscription, so an unmounted store view's composer never learned of a successful connect).
           invokeTauri(cfg.commands.applySkills).then(
             () => {
+              // Post-settle composer refresh (Round-38 above): the grant is now readable.
+              notifyComposerToolsChanged();
               // Auto-collapse the flow card later (the detail dialog's "Connected" state is now driven by derived
               // connection state). The collapse must only close a card that already reached 'done': a stale timer
               // from the previous round must not destroy a card the user re-opened within the window (and strand the
@@ -398,12 +427,30 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
             },
             (e) => {
               const msg = String(e && e.message ? e.message : e);
-              const failure = msg.includes(CONSENT_SYNC_FAILURE_MARKER)
-                ? { code: 'consent_persist_failed' }
-                : { code: 'skills_enable_failed' };
+              const failure = msg.includes(CONNECT_CONSENT_SYNC_FAILURE_MARKER)
+                ? { code: 'connect_consent_persist_failed' }
+                : msg.includes(CONNECT_GRANT_COMMIT_FAILURE_MARKER)
+                  ? { code: 'connect_consent_commit_incomplete' }
+                  : { code: 'skills_enable_failed' };
+              // Latch on the store BEFORE the flow write: the card may already be closed (the write
+              // below null-guards to a no-op) and the latch must survive that — plus any remount and
+              // dismissal — so the connected banner keeps the title-only copy (review #741 P2).
+              // EVERY rejection of this write is post-auth (round-6 review P2): a persist failure
+              // stays fail-closed, and an ordinary materialization failure REVOKES the fresh grant —
+              // either way the backend is not enabled-by-default, and the marker-only latch left the
+              // enabled-by-default banner showing over a disabled connector once the error card was
+              // dismissed.
+              // Round-9 review P2: the commit-incomplete class does NOT
+              // latch — its standing grant keeps the connector enabled, so
+              // the enabled banner stays truthful for it (unlike both
+              // fail-closed classes).
+              if (failure.code !== 'connect_consent_commit_incomplete') conn.setConsentSyncFailed(true);
               reportConnectorFailure(cfg.key, failure, 'cli');
               // Same null guard as the awaited branch: a failure landing after the card was closed must not fabricate one.
               conn.setFlow(f => (f ? applyConnectorFailure(f, failure, 'cli') : f));
+              // Round-38: notify on failure too — the write's abort/revoke paths still leave backend
+              // state a composer refresh should pick up (harmless when nothing changed).
+              notifyComposerToolsChanged();
             },
           );
         } : async () => {
@@ -419,6 +466,15 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
               }
             }
             await invokeTauri(cfg.commands.applySkills);
+            // A fresh connect reached done → an earlier consent-persist latch is stale. Store-level
+            // now (review #741 P2); on the awaited channel done only trails a successful apply, so
+            // nothing re-latches afterwards.
+            conn.setConsentSyncFailed(false);
+            // Round-38 + round-3 review: the success notify lives here (post-apply,
+            // view-independent) instead of the mounted subscription's done phase —
+            // an unmounted store view's composer must learn of the connector
+            // flipping enabled too (parity with the catch below).
+            notifyComposerToolsChanged();
             // Same null guard as above: the awaited apply gives cancel a wide window.
             conn.setFlow(f => (f ? { ...f, phase: 'done', steps: { ...f.steps, qr: 'done' } } : f));
             // Same done-only collapse guard as the apply-mode listener above: a
@@ -426,21 +482,36 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
             setTimeout(() => conn.setFlow(f => (f && f.phase === 'done' ? null : f)), 1800);
           } catch (e) {
             // readinessAwait (tmeet) passes the readiness re-check's auth_failed through; a consent-persist failure
-            // (the backend copy carries the shared marker) reports consent_persist_failed — "Try again" cannot fix a
-            // persist failure; every other failure after authorization completed (dingtalk's awaited apply, tmeet's
-            // own skill write) reports skills_enable_failed — the sign-in demonstrably succeeded on those paths.
+            // (the backend copy carries the connect marker) reports connect_consent_persist_failed — "Try again"
+            // cannot fix a persist failure; every other failure after authorization completed (dingtalk's awaited
+            // apply, tmeet's own skill write) reports skills_enable_failed — the sign-in demonstrably succeeded on
+            // those paths.
             // Round-35 MAJOR 1 (review #455): without this classification the consent_persist_failed catalog entry
             // was unreachable for every connector.
             const authIncomplete = cfg.connectedMode !== 'applyAwait' && e && e.code === 'auth_failed';
             const msg = String(e && e.message ? e.message : e);
             const failure = authIncomplete
               ? e
-              : msg.includes(CONSENT_SYNC_FAILURE_MARKER)
-                ? { code: 'consent_persist_failed' }
-                : { code: 'skills_enable_failed' };
+              : msg.includes(CONNECT_CONSENT_SYNC_FAILURE_MARKER)
+                ? { code: 'connect_consent_persist_failed' }
+                : msg.includes(CONNECT_GRANT_COMMIT_FAILURE_MARKER)
+                  ? { code: 'connect_consent_commit_incomplete' }
+                  : { code: 'skills_enable_failed' };
+            // Latch on the store BEFORE the flow write — same closed-card/remount reasoning as the
+            // fire-and-forget branch above (review #741 P2). Both post-auth classes latch (round-6
+            // review P2): an ordinary materialization failure revokes the fresh grant exactly like
+            // a persist failure, so the banner keeps the title-only copy for either. Only the
+            // pre-apply auth failures (authIncomplete, tmeet's readiness re-check) stay unlatched —
+            // no grant was attempted, the backend state is untouched.
+            if (failure.code !== 'auth_failed' && failure.code !== 'connect_consent_commit_incomplete')
+              conn.setConsentSyncFailed(true);
             reportConnectorFailure(cfg.key, failure, 'qr');
             // Same null guard: a failure landing after the card was closed must not fabricate one.
             conn.setFlow(f => (f ? applyConnectorFailure(f, failure, 'qr') : f));
+            // Round-38 parity with the fire-and-forget branch (round-2 review m7): the awaited
+            // apply's failure path also churns backend state (deny-first grant + revoke), so the
+            // composer must refetch here too instead of waiting for the next unrelated broadcast.
+            notifyComposerToolsChanged();
           }
         });
         ev.listen(cfg.events.error, (e) => {
@@ -495,6 +566,9 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
         }
       };
       // Cancel/close the flow card: mark cancelled + kill child processes + clear state.
+      // Deliberately does NOT clear conn.consentSyncFailed: the fail-closed backend outlives the
+      // dismissed error card, and the connected banner must keep its title-only fallback until a
+      // connect reaches done (review #741 P2 — clearing here re-armed the enabled-by-default claim).
       const resetFlow = ({ setBusyId, finishToolConfiguration: finishCfg }) => {
         if (finishCfg) finishCfg(cfg.key, false);
         conn.stopTick();
@@ -572,11 +646,29 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
     // mirrors store state into local rendering and finalizes on done/failure (alert dialog, connection-state
     // refresh). The real listeners/stopwatch live in the module-level conn singleton, surviving view switches.
     // tmeet's done toast uses a detailCopy phrase via doneTitle; others pass evaluated storeCopy.connectedTool(...).
-    const useConnectorFlowSubscription = ({ enabled, conn, ensureListeners, setFlow, detailCopy, setBusyId, loadBackendState, setAlert, doneTitle, toolId, finishToolConfiguration: finishCfg }) => {
+    // doneSettlesLater (the fire-and-forget 'apply' connectors): their done phase is written synchronously
+    // while the consent grant settles later, so the done toast stays title-only — the "enabled by default"
+    // subtitle would be a claim the write has not made yet (round-1 review), and the alert's installHint
+    // fallback must be suppressed along with it (round-3 review: the fallback copy still says "off by
+    // default", the exact claim this flow removes — a falsy subtitle alone renders it). The awaited
+    // branches' done already trails their apply, so their subtitle is accurate at done time.
+    // Returns consentSyncFailed: latched while the LAST settled connect of this connector failed its
+    // consent persist — the connected banner must not claim enabled-by-default over a fail-closed state,
+    // so it falls back to the title-only copy until the next connect reaches done (round-3 review).
+    // The latch itself lives on the module-level conn store (review #741 P2): the failure can settle
+    // while this view is unmounted, so owning it in component useState lost it on remount.
+    // useSyncExternalStore mirrors the store field into rendering — React re-reads the store on every
+    // mount, so a latch that landed while unmounted is picked up by hydration itself instead of a
+    // fresh useState(false) re-arming the enabled-by-default banner.
+    const useConnectorFlowSubscription = ({ enabled, conn, ensureListeners, setFlow, detailCopy, setBusyId, loadBackendState, setAlert, doneTitle, toolId, finishToolConfiguration: finishCfg, doneSettlesLater }) => {
       // The subscription effect runs once per enabled state; the toast copy goes
       // through a latest-ref so a "connected" toast raised after a mid-flow
       // language switch uses the current language, like the failure card does.
       const toastCopyRef = useRef(null);
+      const consentSyncFailed = useSyncExternalStore(
+        (onStoreChange) => conn.subscribe(onStoreChange),
+        () => conn.consentSyncFailed,
+      );
       useEffect(() => {
         toastCopyRef.current = { doneTitle, enabledSubtitle: detailCopy.actions.enabled };
       });
@@ -593,11 +685,23 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
               // 只释放自己的槽位(见 releaseBusy):完成事件可能晚到,彼时 busyId 已易主。
               setBusyId(busy => releaseBusy(busy, toolId));
               loadBackendState();
-              setAlert({ visible: true, loading: false, title: toastCopyRef.current && toastCopyRef.current.doneTitle, subtitle: toastCopyRef.current && toastCopyRef.current.enabledSubtitle, isInstall: true, isError: false, toolId });
-              notifyComposerToolsChanged();
+              setAlert({ visible: true, loading: false, title: toastCopyRef.current && toastCopyRef.current.doneTitle, subtitle: doneSettlesLater ? undefined : toastCopyRef.current && toastCopyRef.current.enabledSubtitle, suppressHint: !!doneSettlesLater, isInstall: true, isError: false, toolId });
+              // The latch's stale-on-done clear moved to the store's done WRITES (both listener
+              // branches) — a transition observed here may be the hydration of a done that landed
+              // while unmounted, and a mount-time clear would resurrect the P2 bug in reverse.
+              // No composer broadcast here: for the fire-and-forget connectors
+              // done is written synchronously, so this broadcast landed BEFORE
+              // their consent grant settled — a provably wasted pre-grant
+              // refresh (round-3 review). Their authoritative composer refresh
+              // is the post-settle notify in the apply-mode listener (Round-38);
+              // the awaited branches notify in their own listener paths too, so
+              // every notify is settle-ordered and view-independent.
             } else if (ph === 'error') {
               if (finishCfg) finishCfg(toolId, false);
               setBusyId(busy => releaseBusy(busy, toolId));
+              // The consent-persist latch is set at the store by the listener that CLASSIFIES the
+              // failure — the view may be unmounted here, and the error card may even never have
+              // been written (null-guarded). Latching in this mounted callback was the P2 bug.
             }
             prevPhase = ph;
           }
@@ -606,6 +710,7 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
         return unsub;
       // eslint-disable-next-line react-hooks/exhaustive-deps -- subscription mounts/unmounts only with externalAuthAvailable; failures are stored as error codes and localized at render time, so resubscribing on copy changes is unnecessary
       }, [enabled]);
+      return consentSyncFailed;
     };
 
     // z-[200] modal backdrop: translucent black + background blur; clicking closes the dialog when onClose is
@@ -653,7 +758,7 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
                 </div>
                 {alert.cancelable && (
                   <div className={`border-t border-slate-200 dark:border-white/10`}>
-                    <button
+                    <button type="button"
                       onClick={() => onCancelLoading && onCancelLoading(alert)}
                       className={`w-full py-3 text-[17px] font-normal text-center transition-colors text-[#007AFF] active:bg-slate-100 dark:text-[#0A84FF] dark:active:bg-white/5`}
                     >
@@ -672,14 +777,14 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
                     <div className={`text-[13px] leading-relaxed break-all text-slate-500 dark:text-slate-400`}>
                       {alert.subtitle}
                     </div>
-                  ) : !alert.isError && (
+                  ) : !alert.isError && !alert.suppressHint && (
                     <div className={`text-[13px] leading-relaxed text-slate-500 dark:text-slate-400`}>
                       {alert.isInstall ? copy.installHint : copy.removeHint}
                     </div>
                   )}
                 </div>
                 <div className={`border-t border-slate-200 dark:border-white/10`}>
-                  <button
+                  <button type="button"
                     onClick={onDismiss}
                     className="w-full py-3 text-[17px] font-normal text-center transition-colors text-[#007AFF] active:bg-slate-100 dark:text-[#0A84FF] dark:active:bg-white/5"
                   >
@@ -688,7 +793,7 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
                 </div>
                 {!alert.isError && !alert.suppressNewChat && (
                   <div className={`border-t border-slate-200 dark:border-white/10`}>
-                    <button
+                    <button type="button"
                       onClick={onNewChat}
                       className={`w-full py-3 text-[17px] font-semibold text-center transition-colors text-[#007AFF] active:bg-slate-100 dark:text-[#0A84FF] dark:active:bg-white/5`}
                     >
@@ -726,7 +831,7 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
                 </div>
               )}
               {config.configDocUrl && (
-                <button
+                <button type="button"
                   onClick={() => invokeTauri('open_external_url', { url: config.configDocUrl }).catch(onOpenError)}
                   className={`text-[13px] mb-4 inline-block text-[#007AFF] dark:text-[#0A84FF] hover:underline`}
                 >
@@ -756,7 +861,7 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
               ))}
             </div>
             <div className={`border-t border-slate-200 dark:border-white/10`}>
-              <button
+              <button type="button"
                 onClick={onCancel}
                 className={`w-full py-3 text-[17px] font-normal text-center transition-colors text-[#007AFF] active:bg-slate-100 dark:text-[#0A84FF] dark:active:bg-white/5`}
               >
@@ -764,7 +869,7 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
               </button>
             </div>
             <div className={`border-t border-slate-200 dark:border-white/10`}>
-              <button
+              <button type="button"
                 onClick={() => canSubmit && onConfirm(values)}
                 disabled={!canSubmit}
                 className={`w-full py-3 text-[17px] font-semibold text-center transition-colors ${
@@ -930,7 +1035,7 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
       const c = COPY[guide.state] || COPY.not_installed;
       const btn = (label, on, cls) => (
         <div className={`border-t border-slate-200 dark:border-white/10`}>
-          <button onClick={on} className={`w-full py-3 text-center transition-colors ${cls}`}>{label}</button>
+          <button type="button" onClick={on} className={`w-full py-3 text-center transition-colors ${cls}`}>{label}</button>
         </div>
       );
       return (
@@ -1432,16 +1537,19 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
 
       // 订阅跨视图 store：把 store 状态镜像进本组件渲染，并在完成/失败时做组件级收尾
       // (alert dialog, connection-state refresh). The real listeners/stopwatch live in the module-level conn singleton, surviving view switches.
-      useConnectorFlowSubscription({ enabled: externalAuthAvailable, conn: feishuConn, ensureListeners: ensureFeishuListeners, setFlow: setFeishuFlow, detailCopy, setBusyId, loadBackendState, setAlert, doneTitle: storeCopy.connectedTool(storeCopy.toolNames.feishu), toolId: 'feishu', finishToolConfiguration });
+      // consentSyncFailed latches a post-auth connect failure (consent persist OR skill enable —
+      // both leave the backend fail-closed) so the connected banner cannot claim
+      // enabled-by-default over it (round-3 review, round-6 review P2).
+      const feishuConsentSyncFailed = useConnectorFlowSubscription({ enabled: externalAuthAvailable, conn: feishuConn, ensureListeners: ensureFeishuListeners, setFlow: setFeishuFlow, detailCopy, setBusyId, loadBackendState, setAlert, doneTitle: storeCopy.connectedTool(storeCopy.toolNames.feishu), toolId: 'feishu', finishToolConfiguration, doneSettlesLater: true });
 
       // 订阅企业微信 store(镜像飞书):镜像进渲染 + 完成/失败收尾
-      useConnectorFlowSubscription({ enabled: externalAuthAvailable, conn: wecomConn, ensureListeners: ensureWecomListeners, setFlow: setWecomFlow, detailCopy, setBusyId, loadBackendState, setAlert, doneTitle: storeCopy.connectedTool(storeCopy.toolNames.wecom), toolId: 'wecom', finishToolConfiguration });
+      const wecomConsentSyncFailed = useConnectorFlowSubscription({ enabled: externalAuthAvailable, conn: wecomConn, ensureListeners: ensureWecomListeners, setFlow: setWecomFlow, detailCopy, setBusyId, loadBackendState, setAlert, doneTitle: storeCopy.connectedTool(storeCopy.toolNames.wecom), toolId: 'wecom', finishToolConfiguration, doneSettlesLater: true });
 
       // 订阅钉钉 store(镜像企微):镜像进渲染 + 完成/失败收尾
-      useConnectorFlowSubscription({ enabled: externalAuthAvailable, conn: dingtalkConn, ensureListeners: ensureDingtalkListeners, setFlow: setDingtalkFlow, detailCopy, setBusyId, loadBackendState, setAlert, doneTitle: storeCopy.connectedTool(storeCopy.toolNames.dingtalk), toolId: 'dingtalk', finishToolConfiguration });
+      const dingtalkConsentSyncFailed = useConnectorFlowSubscription({ enabled: externalAuthAvailable, conn: dingtalkConn, ensureListeners: ensureDingtalkListeners, setFlow: setDingtalkFlow, detailCopy, setBusyId, loadBackendState, setAlert, doneTitle: storeCopy.connectedTool(storeCopy.toolNames.dingtalk), toolId: 'dingtalk', finishToolConfiguration });
 
       // Subscribe to the tmeet store (mirrors the dingtalk one): mirror into rendering + done/failure finalization (done toast uses a dedicated phrase)
-      useConnectorFlowSubscription({ enabled: externalAuthAvailable, conn: tmeetConn, ensureListeners: ensureTmeetListeners, setFlow: setTmeetFlow, detailCopy, setBusyId, loadBackendState, setAlert, doneTitle: detailCopy.actions.connectedTmeet, toolId: 'tmeet', finishToolConfiguration });
+      const tmeetConsentSyncFailed = useConnectorFlowSubscription({ enabled: externalAuthAvailable, conn: tmeetConn, ensureListeners: ensureTmeetListeners, setFlow: setTmeetFlow, detailCopy, setBusyId, loadBackendState, setAlert, doneTitle: detailCopy.actions.connectedTmeet, toolId: 'tmeet', finishToolConfiguration });
 
       // EIP/知道 连接编排事件:后端推进度,前端驱动 UI(企微已收口 createConnectorFlow 流程卡)。
       useEffect(() => {
@@ -2573,11 +2681,21 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
         : null;
       // Detail page "Connected" banner (five connectors, one shared visual shell): CLI connectors need the connection
       // state ready and the flow card collapsed; ima has no flow card, connection state only. Mutually exclusive, at most one shows.
+      // Detail page "Connected" banner (five connectors, one shared visual shell): CLI connectors need the connection
+      // state ready and the flow card collapsed; ima has no flow card, connection state only. Mutually exclusive, at most one shows.
+      // Round-6 review: after a consent-persist or skill-enable failure the connection IS up but the
+      // connector is NOT enabled (fail-closed revoke) — the enabled-by-default banner copy would
+      // claim the opposite once the error card is dismissed, so a latched failure falls back to the
+      // title-only connected copy until the next connect reaches done.
+      const consentSyncFailedByTool = { feishu: feishuConsentSyncFailed, wecom: wecomConsentSyncFailed, dingtalk: dingtalkConsentSyncFailed, tmeet: tmeetConsentSyncFailed };
+      const connectedBannerText = (key) => (consentSyncFailedByTool[key]
+        ? storeCopy.connectedTool(storeCopy.toolNames[key])
+        : storeCopy.connectedBanner(storeCopy.toolNames[key]));
       const connectedBanners = [
-        { show: !!selectedTool?.feishuCli && feishuConnected && !feishuFlow, text: storeCopy.connectedBanner(storeCopy.toolNames.feishu) },
-        { show: !!selectedTool?.wecomCli && wecomConnected && !wecomFlow, text: storeCopy.connectedBanner(storeCopy.toolNames.wecom) },
-        { show: !!selectedTool?.dingtalkCli && dingtalkConnected && !dingtalkFlow, text: storeCopy.connectedBanner(storeCopy.toolNames.dingtalk) },
-        { show: !!selectedTool?.tmeetCli && tmeetConnected && !tmeetFlow, text: storeCopy.connectedBanner(storeCopy.toolNames.tmeet) },
+        { show: !!selectedTool?.feishuCli && feishuConnected && !feishuFlow, text: connectedBannerText('feishu') },
+        { show: !!selectedTool?.wecomCli && wecomConnected && !wecomFlow, text: connectedBannerText('wecom') },
+        { show: !!selectedTool?.dingtalkCli && dingtalkConnected && !dingtalkFlow, text: connectedBannerText('dingtalk') },
+        { show: !!selectedTool?.tmeetCli && tmeetConnected && !tmeetFlow, text: connectedBannerText('tmeet') },
         { show: !!selectedTool?.imaOpenapi && imaConnected, text: storeCopy.connectedBannerIma },
       ];
 
@@ -2840,20 +2958,20 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
                       className="min-w-0 basis-full flex-1 sm:basis-auto sm:max-w-[520px]"
                     />
                     <div className="flex shrink-0 items-center justify-end gap-3">
-                      <button data-testid="tool-store-guide" onClick={() => setShowGuide(true)} title={storeCopy.guide.title}
+                      <button type="button" data-testid="tool-store-guide" onClick={() => setShowGuide(true)} title={storeCopy.guide.title}
                         className="inline-flex h-9 items-center rounded-full bg-slate-100 px-4 text-[13px] font-semibold shadow-sm transition-colors hover:bg-slate-200 dark:bg-[#2C2C2E] dark:text-white dark:hover:bg-[#3A3A3C]">
                         <BookOpen size={14} className="mr-2 opacity-70" />
                         <span>{storeCopy.guide.title}</span>
                       </button>
                       {canMutateToolStore && (
-                        <button data-testid="tool-store-manage-visibility" onClick={() => setManagingVisibility(v => !v)} title={storeCopy.modeVisibilityHint}
+                        <button type="button" data-testid="tool-store-manage-visibility" onClick={() => setManagingVisibility(v => !v)} title={storeCopy.modeVisibilityHint}
                           className={`inline-flex h-9 items-center rounded-full px-4 text-[13px] font-semibold shadow-sm transition-colors ${managingVisibility ? 'bg-blue-600 text-white hover:bg-blue-700' : 'bg-slate-100 text-slate-700 hover:bg-slate-200 dark:bg-[#2C2C2E] dark:text-white dark:hover:bg-[#3A3A3C]'}`}>
                           <Settings size={14} className="mr-2 opacity-70" />
                           <span>{managingVisibility ? storeCopy.doneManagingVisibility : storeCopy.manageVisibility}</span>
                         </button>
                       )}
                       {canMutateToolStore && (
-                        <button data-testid="tool-store-upload-btn" onClick={handleUploadSkill} title={storeCopy.uploadSkillPackage} disabled={busyId === '__upload__'}
+                        <button type="button" data-testid="tool-store-upload-btn" onClick={handleUploadSkill} title={storeCopy.uploadSkillPackage} disabled={busyId === '__upload__'}
                           className="inline-flex h-9 items-center rounded-full bg-slate-100 px-4 text-[13px] font-semibold shadow-sm transition-colors hover:bg-slate-200 disabled:opacity-50 dark:bg-[#2C2C2E] dark:text-white dark:hover:bg-[#3A3A3C]">
                           <Upload size={14} className="mr-2 opacity-70" />
                           <span>{storeCopy.uploadSkillPackage}</span>
@@ -2874,7 +2992,7 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
                   <aside className="hidden lg:block w-40 shrink-0 sticky top-6">
                     <nav className="flex flex-col gap-1">
                       {navSections.map(s => (
-                        <button key={s.id} onClick={() => scrollToSection(s.id)}
+                        <button type="button" key={s.id} onClick={() => scrollToSection(s.id)}
                           className="flex items-center justify-between gap-2 w-full px-3 py-2 rounded-xl text-left text-[13px] font-medium text-slate-600 hover:bg-slate-100 hover:text-slate-900 dark:text-slate-300 dark:hover:bg-white/5 dark:hover:text-white transition-colors">
                           <span className="truncate">{s.label}</span>
                           <span className="text-[11px] text-slate-400 dark:text-slate-500 tabular-nums shrink-0">{s.items.length}</span>
@@ -2889,7 +3007,7 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
                   <div className={`flex flex-col gap-4 mb-6 pb-5 ${!searching ? '' : 'sm:flex-row sm:items-end justify-between'}`}>
                     {searching && (
                       <div className="flex items-center gap-3">
-                        <button onClick={() => setSearchQuery('')} title={storeCopy.back}
+                        <button type="button" onClick={() => setSearchQuery('')} title={storeCopy.back}
                           className="w-9 h-9 rounded-full bg-slate-100 dark:bg-white/10 hover:bg-slate-200 dark:hover:bg-white/20 flex items-center justify-center text-slate-600 dark:text-slate-300 transition-colors shrink-0">
                           <ChevronLeft size={20} />
                         </button>
@@ -2902,7 +3020,7 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
                         {/* 主维度切换:按类型 / 按业务,决定二级筛选集合;下方列表始终按另一维度分区 */}
                         <div className="flex h-9 shrink-0 items-center self-start rounded-full bg-slate-100 p-1 shadow-sm dark:bg-[#2C2C2E]">
                           {[{ key: 'type', label: storeCopy.groupByType }, { key: 'business', label: storeCopy.groupByBusiness }].map(seg => (
-                            <button key={seg.key} onClick={() => { setGroupBy(seg.key); setActiveCategory('all'); }}
+                            <button type="button" key={seg.key} onClick={() => { setGroupBy(seg.key); setActiveCategory('all'); }}
                               className={`inline-flex h-7 items-center rounded-full px-3 text-[13px] font-semibold transition-colors whitespace-nowrap ${
                                 groupBy === seg.key
                                   ? 'bg-white text-slate-900 shadow-sm dark:bg-[#3A3A3C] dark:text-white'
@@ -2916,7 +3034,7 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
                           {groupChips.map((chip) => {
                             const isActive = activeCategory === chip.id;
                             return (
-                              <button
+                              <button type="button"
                                 key={chip.id}
                                 onClick={() => { setActiveCategory(chip.id); }}
                                 className={`h-9 whitespace-nowrap shrink-0 text-[13px] px-3.5 rounded-full font-semibold transition-colors ${isActive
@@ -2927,7 +3045,7 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
                               </button>
                             );
                           })}
-                          <button data-testid="tool-store-installed-only" onClick={() => setInstalledOnly(v => !v)} title={storeCopy.installedOnly}
+                          <button type="button" data-testid="tool-store-installed-only" onClick={() => setInstalledOnly(v => !v)} title={storeCopy.installedOnly}
                             className={`ml-auto h-9 whitespace-nowrap shrink-0 inline-flex items-center rounded-full px-3.5 text-[13px] font-semibold transition-colors ${installedOnly
                               ? 'bg-blue-600 text-[#fff] hover:bg-blue-700'
                               : 'bg-[#F2F2F7] text-[#000] dark:bg-[#2C2C2E] dark:text-[#fff]'}`}>
@@ -2950,7 +3068,7 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
                           )}
                           <span className="hidden xl:flex min-w-0 items-center gap-1.5 text-[12px] text-slate-400 dark:text-slate-500 pl-1">
                             <span className="truncate">{storeCopy.guide.dragHintShort}</span>
-                            <button onClick={() => setShowGuide(true)} aria-label={storeCopy.guide.title} title={storeCopy.guide.title}
+                            <button type="button" onClick={() => setShowGuide(true)} aria-label={storeCopy.guide.title} title={storeCopy.guide.title}
                               className="shrink-0 w-[18px] h-[18px] rounded-full bg-slate-200 dark:bg-white/10 text-slate-500 dark:text-slate-400 hover:bg-slate-300 dark:hover:bg-white/20 flex items-center justify-center text-[11px] font-bold leading-none">?</button>
                           </span>
                         </div>
@@ -3083,7 +3201,7 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
               >
                 <div className="flex items-center justify-between px-6 py-4 border-b border-slate-200/50 dark:border-white/10">
                   <h2 className="text-[18px] font-semibold">{storeCopy.guide.title}</h2>
-                  <button onClick={() => setShowGuide(false)} aria-label={storeCopy.guide.close}
+                  <button type="button" onClick={() => setShowGuide(false)} aria-label={storeCopy.guide.close}
                     className="w-8 h-8 rounded-full hover:bg-slate-100 dark:hover:bg-white/10 flex items-center justify-center text-slate-500 dark:text-slate-400">
                     <XIcon size={16} />
                   </button>
@@ -3107,7 +3225,7 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
                   <section>
                     <h3 className="text-[14px] font-semibold mb-1.5">{storeCopy.guide.specTitle}</h3>
                     <p className="text-[13px] text-slate-600 dark:text-slate-300 leading-relaxed">{storeCopy.guide.specDesc}</p>
-                    <button onClick={downloadSpec} data-testid="tool-store-download-spec"
+                    <button type="button" onClick={downloadSpec} data-testid="tool-store-download-spec"
                       className="mt-3 inline-flex h-9 items-center rounded-full bg-blue-600 px-4 text-[13px] font-semibold text-white shadow-sm transition-colors hover:bg-blue-700">
                       <Download size={14} className="mr-2" />{storeCopy.guide.downloadSpec}
                     </button>
@@ -3130,7 +3248,7 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
                 onClick={(e) => e.stopPropagation()}
               >
                 <div className="absolute top-0 right-0 w-full px-6 py-5 flex items-center justify-end z-20 pointer-events-none">
-                  <button
+                  <button type="button"
                     onClick={() => setSelectedTool(null)}
                     className="pointer-events-auto w-8 h-8 flex items-center justify-center rounded-full bg-slate-100/80 dark:bg-black/50 backdrop-blur text-slate-500 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-black transition-colors"
                   >

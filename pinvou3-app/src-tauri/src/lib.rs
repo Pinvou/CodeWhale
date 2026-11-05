@@ -800,6 +800,7 @@ pub(crate) async fn harvest_child_processes(app: &tauri::AppHandle) {
 /// restore manifests and destroys native surfaces, then asynchronous children are
 /// harvested. The caller invokes the non-returning restart immediately afterward.
 pub(crate) async fn prepare_app_restart(app: &tauri::AppHandle) {
+    features::system_tray::before_restart(app).await;
     if let Some(browser) = app.try_state::<features::browser::BrowserManager>() {
         browser.shutdown_before_restart().await;
     }
@@ -1628,8 +1629,8 @@ pub fn run() {
                             .set_artifact_scope(desktop_artifacts.clone());
                         handle.state::<ControlledDeviceManager>().register_cleanup_sink(desktop_attachments.cleanup_sink());
                         let desktop_history =
-                            commands::desktop_remote_journal::DesktopRemoteJournalRuntime::journal_only(
-                                format!("boot-{}", std::process::id()),
+                            commands::desktop_remote_journal::DesktopRemoteJournalRuntime::from_controlled_manager(
+                                &handle.state::<ControlledDeviceManager>(),
                             );
                         desktop_task_runtime
                             .hooks()
@@ -1724,6 +1725,18 @@ pub fn run() {
                         pool.clone(),
                         acp_pool_for_capabilities.clone(),
                         store_for_engine.clone(),
+                    );
+                    // Session-creation request watcher
+                    // (features::session_creation): drains the spool written
+                    // by the session-reader MCP server (create_session),
+                    // creating each requested session through the store's
+                    // own pipeline (never stealing focus) and emitting
+                    // session:list_changed. Same app-lifetime form.
+                    features::session_creation::spawn_session_creation_watcher(
+                        pool.clone(),
+                        store_for_engine.clone(),
+                        projects_store.clone(),
+                        handle.clone(),
                     );
                     match remote_control_manager.resume() {
                         Ok(true) => eprintln!("[pinvou3-app] persistent Web access resumed"),
@@ -1842,6 +1855,7 @@ pub fn run() {
             // after the hook is installed. One shared load serves both this
             // and the global-shortcut replay below.
             let prefs = crate::platform::prefs::UserPrefs::load();
+            crate::features::system_tray::install(app.handle(), prefs.language);
             crate::features::voice_shortcut::set_enabled(prefs.voice_shortcut_enabled);
 
             // System-wide bring-to-front shortcut: same replay shape. A parse
@@ -1857,6 +1871,7 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
+            crate::features::system_tray::on_window_event(window, event);
             if let tauri::WindowEvent::Destroyed = event {
                 // When a recording window is closed outright, the frontend has
                 // no chance to deregister; leaving it registered would keep the
@@ -2171,6 +2186,7 @@ pub fn run() {
             commands::desktop_remote_proxy::desktop_remote_proxy_history_read,
             commands::desktop_remote_proxy::desktop_remote_proxy_history_delete,
             commands::desktop_remote_proxy::desktop_remote_proxy_archive,
+            commands::desktop_remote_proxy::desktop_remote_proxy_quarantine,
             commands::desktop_remote_proxy::desktop_remote_proxy_archive_list,
             commands::desktop_remote_proxy::desktop_remote_proxy_archive_candidates,
             commands::desktop_remote_proxy::desktop_remote_proxy_load_status,
@@ -2182,6 +2198,7 @@ pub fn run() {
             commands::remote_control::web_access_disable,
             commands::remote_control::web_access_status,
             commands::remote_control::web_access_rotate,
+            commands::remote_control::web_access_revoke_host_workspace,
             commands::remote_control::web_access_relay_settings,
             commands::remote_control::desktop_remote_endpoint_profiles,
             commands::remote_control::desktop_remote_set_endpoint_profile,
@@ -2472,6 +2489,7 @@ pub fn run() {
         }
         tauri::RunEvent::Exit => {
             startup::mark("tauri:event_loop:exit");
+            features::system_tray::on_exit();
             // On main-process exit, refresh browser URL restore manifests, destroy
             // in-app native WebViews, and clean runtime targets/endpoints. Preserve
             // restore manifests; there is no external Chrome process.

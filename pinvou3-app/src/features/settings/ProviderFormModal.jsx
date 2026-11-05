@@ -390,7 +390,7 @@ export function ProviderFormModal({ agent, copy, initial, onClose, onSaved }) {
           <h2 className="text-[17px] font-semibold">
             {initial ? `${copy.edit} · ${initial.name}` : copy.addProvider}
           </h2>
-          <button data-testid="acp-provider-form-close" onClick={onClose} aria-label={copy.cancel} className="h-8 w-8 rounded-full flex items-center justify-center hover:bg-black/[0.06] dark:hover:bg-white/[0.08]">
+          <button type="button" data-testid="acp-provider-form-close" onClick={onClose} aria-label={copy.cancel} className="h-8 w-8 rounded-full flex items-center justify-center hover:bg-black/[0.06] dark:hover:bg-white/[0.08]">
             <X size={16} />
           </button>
         </div>
@@ -597,14 +597,14 @@ export function ProviderFormModal({ agent, copy, initial, onClose, onSaved }) {
                 {confirmStep === 'emptyKey' ? copy.apiKeyEmptyConfirm : copy.deleteKeyConfirm}
               </p>
               <div className="mt-6 flex justify-end gap-2">
-                <button
+                <button type="button"
                   onClick={() => setConfirmStep(null)}
                   disabled={saving}
                   className="h-9 px-4 rounded-full text-[13px] font-semibold border border-black/[0.08] dark:border-white/[0.12] disabled:opacity-50"
                 >
                   {copy.cancel}
                 </button>
-                <button
+                <button type="button"
                   data-testid="acp-provider-form-confirm-ok"
                   onClick={() => {
                     const action = confirmStep === 'emptyKey' ? 'keep' : 'delete';
@@ -623,7 +623,7 @@ export function ProviderFormModal({ agent, copy, initial, onClose, onSaved }) {
         )}
 
         <div className="mt-6 flex justify-end gap-2">
-          <button
+          <button type="button"
             data-testid="acp-provider-form-cancel"
             onClick={onClose}
             disabled={saving}
@@ -631,7 +631,7 @@ export function ProviderFormModal({ agent, copy, initial, onClose, onSaved }) {
           >
             {copy.cancel}
           </button>
-          <button
+          <button type="button"
             data-testid="acp-provider-form-save"
             onClick={save}
             disabled={saving}
