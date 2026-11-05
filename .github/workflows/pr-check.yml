@@ -281,8 +281,13 @@ jobs:
         with:
           predicate-quantifier: some-with-excludes
           filters: |
+            # Desktop-only behavior notes and generated Portal assets are
+            # covered by their frontend checks, not the Go/PostgreSQL suite.
+            # All other platform paths stay included, including new ones.
             account_platform:
               - 'account-platform/**'
+              - '!account-platform/docs/draft-model-confirmation.md'
+              - '!account-platform/internal/portal/static/**'
               - 'pinvou3-app/src/features/account-platform/**'
               - 'pinvou3-app/src/app/account-main.jsx'
               - 'pinvou3-app/src/app/admin-main.jsx'
