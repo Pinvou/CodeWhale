@@ -3,7 +3,7 @@ import { after, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { createServer } from 'vite';
+import { createServer } from './helpers/vite-fixture.mjs';
 import react from '@vitejs/plugin-react';
 import { guidanceStorageKey, readGuidanceHistory, rememberGuidance, rememberGuidanceDefault, modelGuidanceState, hasLinkedGuidanceService, tryStartGuidanceDefault } from '../src/features/megacube/model-guidance-state.js';
 const vite = await createServer({configFile:false,root:fileURLToPath(new URL('..', import.meta.url)),logLevel:'error',server:{middlewareMode:true,watch:null,hmr:false,ws:false},optimizeDeps:{noDiscovery:true},plugins:[react()]});

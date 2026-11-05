@@ -4,7 +4,7 @@ import { cmsSettingsEntryState } from '../src/features/megacube/settings-entry.j
 import { INITIAL_DEVICE_MANAGEMENT, deviceManagementState, deviceManagementTitle } from '../src/features/megacube/device-management-state.js';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { createServer } from 'vite';
+import { createServer } from './helpers/vite-fixture.mjs';
 import react from '@vitejs/plugin-react';
 import { fileURLToPath } from 'node:url';
 import { dictZh } from '../src/shared/i18n/zh.js';

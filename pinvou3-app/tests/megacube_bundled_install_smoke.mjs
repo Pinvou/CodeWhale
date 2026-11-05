@@ -5,8 +5,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import react from '@vitejs/plugin-react';
-import puppeteer from 'puppeteer-core';
-import { createServer } from 'vite';
+import puppeteer from './helpers/puppeteer-fixture.mjs';
+import { createServer } from './helpers/vite-fixture.mjs';
 
 const app = fileURLToPath(new URL('..', import.meta.url));
 process.chdir(app);

@@ -6,8 +6,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import react from '@vitejs/plugin-react';
-import puppeteer from 'puppeteer-core';
-import { createServer } from 'vite';
+import puppeteer from './helpers/puppeteer-fixture.mjs';
+import { createServer } from './helpers/vite-fixture.mjs';
 import { mergeModels } from '../src/features/model-store/model-store-logic.js';
 
 if (process.argv.length > 2 && (process.argv[2] !== '--snapshot' || !process.argv[3])) throw new Error('Usage: model_store_ownership_smoke.mjs [--snapshot FILE]');
