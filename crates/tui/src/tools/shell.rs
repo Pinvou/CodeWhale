@@ -3542,6 +3542,18 @@ impl ShellManager {
             })
     }
 
+    /// Retirement must also protect agent-owned jobs and finished output not
+    /// yet delivered. Polling observes exit without consuming any completion.
+    pub(crate) fn has_live_or_unreported_work_for_session(&mut self, session_id: &str) -> bool {
+        self.processes.values_mut().any(|shell| {
+            if shell.owner_session_id != session_id {
+                return false;
+            }
+            shell.poll();
+            shell.status == ShellStatus::Running || !shell.completion_reported
+        })
+    }
+
     /// Return agent owners whose tracked shell work is still running. The
     /// engine uses this to keep a worker's heartbeat alive while its only
     /// pending work is an explicitly tracked background shell task.
