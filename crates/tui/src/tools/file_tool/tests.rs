@@ -24,7 +24,9 @@ fn read_description_pins_the_disclosed_boundaries() {
         "{description}"
     );
     assert!(
-        description.contains("bytes that are not valid UTF-8 become replacement characters"),
+        description.contains(
+            "bytes that are not valid UTF-8 become replacement characters instead of failing the read, except that a payload carrying a NUL byte in its first 8 KiB, or beginning with a UTF-16 byte-order mark, is refused as binary"
+        ),
         "{description}"
     );
     assert!(
@@ -34,6 +36,14 @@ fn read_description_pins_the_disclosed_boundaries() {
     assert!(
         !description.contains("Read a text file"),
         "the read tool must not claim to be text-only: {description}"
+    );
+    // The lossy-decode clause must stay scoped by the binary refusal (the
+    // contract reader refuses NUL-bearing heads and UTF-16 BOMs before
+    // decoding): an unscoped "instead of failing the read" sentence end is
+    // the pre-refusal absolute and must not come back.
+    assert!(
+        !description.contains("instead of failing the read."),
+        "the lossy-decode claim must keep the binary-refusal exception: {description}"
     );
 }
 
