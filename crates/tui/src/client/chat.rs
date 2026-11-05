@@ -6941,7 +6941,10 @@ mod alias_thinking_detection_tests {
         // Other providers keep the registry spelling on the wire: the
         // documented leading-character ban is Moonshot-only.
         let messages = build_chat_messages_for_request_and_provider(&request, ApiProvider::Openai);
-        assert_eq!(messages[0]["tool_calls"][0]["function"]["name"], json!("3d_render"));
+        assert_eq!(
+            messages[0]["tool_calls"][0]["function"]["name"],
+            json!("3d_render")
+        );
     }
 
     #[test]
