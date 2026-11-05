@@ -1612,18 +1612,29 @@ fn normalize_kimi_compatibility(
     }
 
     if let Some(constant) = obj.remove("const") {
-        if !is_mfjs_enum_literal(&constant) {
+        // Every scalar const translates through the same const→enum landing:
+        // a bool/null const becomes `enum: [v]`, which the downstream
+        // unsupported-enum-value strip then removes exactly as it removes a
+        // declared bool enum — so the node survives on its declared type
+        // instead of dropping the whole tool. Non-scalar consts (object,
+        // array) have no scalar-enum shape and keep failing closed.
+        if !is_mfjs_scalar_const(&constant) {
             return Err(KimiParameterSchemaError::UnsupportedConstLiteral);
         }
         if !obj.contains_key("type") {
-            let inferred = mfjs_literal_kind(&constant)
-                .ok_or(KimiParameterSchemaError::UnsupportedConstLiteral)?;
-            let schema_type = match inferred {
-                MfjsLiteralKind::Integer => "integer",
-                MfjsLiteralKind::Number => "number",
-                MfjsLiteralKind::String => "string",
-            };
-            obj.insert("type".to_string(), Value::String(schema_type.to_string()));
+            // Type inference stays limited to the MFJS-supported enum value
+            // kinds: the strip never invents a type the schema author did
+            // not declare, so an untyped bool/null const ends up with no
+            // type once its translated enum is stripped and fails
+            // MissingType in the validator.
+            if let Some(inferred) = mfjs_literal_kind(&constant) {
+                let schema_type = match inferred {
+                    MfjsLiteralKind::Integer => "integer",
+                    MfjsLiteralKind::Number => "number",
+                    MfjsLiteralKind::String => "string",
+                };
+                obj.insert("type".to_string(), Value::String(schema_type.to_string()));
+            }
         }
         if let Some(existing) = obj.get("enum") {
             let agrees = existing
@@ -1694,8 +1705,13 @@ fn normalize_kimi_child_schemas(schema: &mut Value) -> Result<(), KimiParameterS
     Ok(())
 }
 
-fn is_mfjs_enum_literal(value: &Value) -> bool {
-    value.is_string() || value.is_number()
+/// Whether a `const` value has a scalar-enum translation: strings and
+/// numbers map onto MFJS-supported enum values, while bool/null translate to
+/// an enum the unsupported-value strip then removes — the same landing a
+/// declared bool enum already gets. Object/array consts have no scalar shape
+/// and fail closed.
+fn is_mfjs_scalar_const(value: &Value) -> bool {
+    value.is_string() || value.is_number() || value.is_boolean() || value.is_null()
 }
 
 /// Validate one fully normalized MFJS function-parameters schema.
@@ -2616,10 +2632,12 @@ mod kimi_tests {
 
     #[test]
     fn kimi_parameters_rejects_unsafe_const_without_mutating_or_leaking() {
+        // Non-scalar consts have no scalar-enum translation, so they keep
+        // failing closed exactly as before.
         let mut schema = json!({
             "type": "object",
             "properties": {
-                "private-toggle-8172": {"type": "boolean", "const": true}
+                "private-shape-8172": {"type": "object", "const": {"nested": true}}
             }
         });
         let original = schema.clone();
@@ -2627,8 +2645,53 @@ mod kimi_tests {
         let error = sanitize_for_kimi_parameters(&mut schema).unwrap_err();
 
         assert_eq!(error, KimiParameterSchemaError::UnsupportedConstLiteral);
-        assert!(!error.to_string().contains("private-toggle-8172"));
+        assert!(!error.to_string().contains("private-shape-8172"));
         assert_eq!(schema, original, "a rejected schema must remain reusable");
+    }
+
+    #[test]
+    fn kimi_parameters_scalarizes_bool_and_null_const_through_the_enum_strip() {
+        // A scalar const translates to the same-shaped scalar enum, and the
+        // existing unsupported-enum-value strip then removes what MFJS does
+        // not support — the same landing a declared `enum: [true]` already
+        // gets, so a bool/null const no longer drops the whole tool while a
+        // bool enum survives. The typed node lives on through its declared
+        // type; an untyped node has no type to fall back on and fails
+        // MissingType once its translated enum is stripped (the strip never
+        // invents a type the schema author did not declare).
+        let mut typed = json!({
+            "type": "object",
+            "properties": {
+                "toggle": {"type": "boolean", "const": true},
+                "absent": {"type": "null", "const": null}
+            }
+        });
+        sanitize_for_kimi_parameters(&mut typed)
+            .expect("typed bool/null consts must scalarize instead of dropping the tool");
+        assert_eq!(typed["properties"]["toggle"], json!({"type": "boolean"}));
+        assert_eq!(typed["properties"]["absent"], json!({"type": "null"}));
+
+        let mut untyped = json!({
+            "type": "object",
+            "properties": {"flag": {"const": false}}
+        });
+        let error = sanitize_for_kimi_parameters(&mut untyped).unwrap_err();
+        assert!(
+            matches!(error, KimiParameterSchemaError::MissingType),
+            "an untyped bool const has no type to survive on: {error:?}"
+        );
+
+        // Scalar string/number consts keep their documented enum landing.
+        let mut scalars = json!({
+            "type": "object",
+            "properties": {
+                "kind": {"type": "string", "const": "var_handle"},
+                "level": {"type": "integer", "const": 2}
+            }
+        });
+        sanitize_for_kimi_parameters(&mut scalars).unwrap();
+        assert_eq!(scalars["properties"]["kind"]["enum"], json!(["var_handle"]));
+        assert_eq!(scalars["properties"]["level"]["enum"], json!([2]));
     }
 
     #[test]
