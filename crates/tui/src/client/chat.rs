@@ -1111,6 +1111,35 @@ fn mirror_minimax_reasoning_details_for_body(body: &mut Value, provider: ApiProv
 /// safety net.
 ///
 /// Returns the names of the dropped tools, in catalog order.
+/// Give digit-led API tool names the `_` prefix the Kimi wire requires.
+///
+/// Kimi's function-call `name` pattern is `^[a-zA-Z_][a-zA-Z0-9-_]{0,127}$`
+/// (platform.kimi.ai tool-use documents, fetched 2026-11-05): a leading
+/// digit sits outside the supported set, and `to_api_tool_name` only escapes
+/// characters the pattern cannot express at any position. Only the Moonshot
+/// path applies this — no other provider's documents carry the
+/// leading-character ban.
+fn prefix_digit_led_tool_names_for_moonshot(chat_tools: &mut [Value]) {
+    for tool in chat_tools.iter_mut() {
+        let Some(function) = tool.get_mut("function").and_then(Value::as_object_mut) else {
+            continue;
+        };
+        let digit_led = function
+            .get("name")
+            .and_then(Value::as_str)
+            .and_then(|name| name.as_bytes().first())
+            .is_some_and(u8::is_ascii_digit);
+        if digit_led
+            && let Some(name) = function
+                .get("name")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        {
+            function.insert("name".into(), json!(format!("_{name}")));
+        }
+    }
+}
+
 fn sanitize_moonshot_chat_tools(chat_tools: &mut Vec<Value>) -> Vec<String> {
     let mut dropped = Vec::new();
     chat_tools.retain_mut(|tool| {
@@ -1242,6 +1271,7 @@ pub(crate) fn build_chat_wire_body(
         // whose parameters cannot pass MFJS validation so one incompatible
         // tool never sinks the whole request.
         if matches!(provider, crate::config::ApiProvider::Moonshot) {
+            prefix_digit_led_tool_names_for_moonshot(&mut chat_tools);
             omitted_tool_names = sanitize_moonshot_chat_tools(&mut chat_tools);
         }
         // xAI rejects a parameters root that is not a plain object schema
@@ -1281,15 +1311,41 @@ pub(crate) fn build_chat_wire_body(
     }
     if should_send_tool_choice_for_chat(provider, request.reasoning_effort.as_deref())
         && let Some(choice) = request.tool_choice.as_ref()
-        && let Some(mapped) = map_tool_choice_for_chat(choice)
+        && let Some(mut mapped) = map_tool_choice_for_chat(choice)
     {
         if matches!(provider, crate::config::ApiProvider::Moonshot)
-            && let Some(name) = mapped.pointer("/function/name").and_then(Value::as_str)
-            && omitted_tool_names.iter().any(|omitted| omitted == name)
+            && let Some(forced) = mapped
+                .pointer("/function/name")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
         {
-            bail!(
-                "Moonshot cannot force tool '{name}' because its input schema is incompatible with this route"
-            );
+            // A forced call must name the same wire spelling the tools array
+            // carries (see `prefix_digit_led_tool_names_for_moonshot`), both
+            // so the documented pattern holds and so the dropped-tool check
+            // below compares like against like.
+            let digit_led = forced.as_bytes().first().is_some_and(u8::is_ascii_digit);
+            let wire_name = if digit_led {
+                format!("_{forced}")
+            } else {
+                forced
+            };
+            if wire_name
+                != *mapped
+                    .pointer("/function/name")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                && let Some(function) = mapped.get_mut("function").and_then(Value::as_object_mut)
+            {
+                function.insert("name".into(), json!(wire_name.clone()));
+            }
+            if omitted_tool_names
+                .iter()
+                .any(|omitted| omitted == &wire_name)
+            {
+                bail!(
+                    "Moonshot cannot force tool '{wire_name}' because its input schema is incompatible with this route"
+                );
+            }
         }
         if body.get("tools").is_some() {
             body["tool_choice"] = mapped;
@@ -6574,6 +6630,78 @@ mod alias_thinking_detection_tests {
         assert!(body.get("reasoning_effort").is_none());
         assert!(body.get("temperature").is_none());
         assert!(body.get("top_p").is_none());
+    }
+
+    fn digit_led_name_probe_tool(name: &str) -> crate::models::Tool {
+        crate::models::Tool {
+            tool_type: None,
+            name: name.to_string(),
+            description: "probe".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {"path": {"type": "string"}},
+                "required": ["path"]
+            }),
+            allowed_callers: None,
+            defer_loading: None,
+            input_examples: None,
+            strict: None,
+            cache_control: None,
+        }
+    }
+
+    #[test]
+    fn moonshot_wire_prefixes_digit_led_tool_names_to_the_documented_pattern() {
+        // Kimi's function-call name pattern is
+        // `^[a-zA-Z_][a-zA-Z0-9-_]{0,127}$` (platform.kimi.ai tool-use
+        // documents, fetched 2026-11-05): a leading digit sits outside the
+        // supported set and `to_api_tool_name` only escapes characters the
+        // pattern cannot express anywhere. The Moonshot path gives such a
+        // name a `_` prefix; every other provider keeps the name unmodified.
+        let mut request = sampling_probe_request(crate::config::DEFAULT_MOONSHOT_MODEL);
+        request.tools = Some(vec![
+            digit_led_name_probe_tool("3d_render"),
+            digit_led_name_probe_tool("mcp__server__tool"),
+        ]);
+        request.tool_choice = Some(json!({"type": "tool", "name": "3d_render"}));
+
+        let body = crate::client::chat::build_chat_wire_body(
+            &request,
+            ApiProvider::Moonshot,
+            crate::config::DEFAULT_MOONSHOT_BASE_URL,
+            false,
+        )
+        .expect("Moonshot wire body");
+
+        let tools = body.body["tools"].as_array().expect("tools on the wire");
+        assert_eq!(tools[0]["function"]["name"], json!("_3d_render"));
+        assert_eq!(
+            tools[1]["function"]["name"],
+            json!("mcp__server__tool"),
+            "names already inside the pattern stay untouched"
+        );
+        assert_eq!(
+            body.body["tool_choice"]["function"]["name"],
+            json!("_3d_render"),
+            "a forced call must name the same wire spelling the tools array carries"
+        );
+
+        // A non-Moonshot provider has no documented leading-character ban and
+        // keeps the raw name.
+        let mut request = sampling_probe_request(crate::config::DEFAULT_MOONSHOT_MODEL);
+        request.tools = Some(vec![digit_led_name_probe_tool("3d_render")]);
+        let body = crate::client::chat::build_chat_wire_body(
+            &request,
+            ApiProvider::Openai,
+            "https://api.openai.com/v1",
+            false,
+        )
+        .expect("OpenAI wire body");
+        assert_eq!(
+            body.body["tools"][0]["function"]["name"],
+            json!("3d_render"),
+            "other providers are not touched"
+        );
     }
 
     #[test]
