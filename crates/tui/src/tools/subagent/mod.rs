@@ -7232,6 +7232,23 @@ impl SubAgentManager {
         (agent_id, handle)
     }
 
+    /// Conservative retirement check, unlike UI/capacity counts: a timed-out
+    /// heartbeat does not establish that its task has stopped. Do not claim or
+    /// discard terminal delivery here; the actor checks its completion queue too.
+    pub(crate) fn has_live_work_for_session(&self, active_session_id: &str) -> bool {
+        self.agents.values().any(|agent| {
+            self.agent_is_owned_by_session(agent, active_session_id)
+                && (agent.status == SubAgentStatus::Running
+                    || agent
+                        .task_handle
+                        .as_ref()
+                        .is_some_and(|task| !task.is_finished()))
+        }) || self
+            .queued_follow_up_counts_for_session(active_session_id)
+            .values()
+            .any(|count| *count > 0)
+    }
+
     /// Count running agents.
     pub fn running_count(&self) -> usize {
         self.admitted_count()
