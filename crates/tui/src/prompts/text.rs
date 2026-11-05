@@ -4,10 +4,11 @@
 //!
 //! Each constant below used to live in its own `prompts/*.md` file, pulled in
 //! with `include_str!`. The per-layer file sprawl (17 files across 4
-//! directories) was consolidated into this one module so the whole prompt
-//! contract reads top-to-bottom in a single place, the way the runtime
-//! assembly composes it. The text moved **verbatim** — every constant is
-//! byte-identical to the file it replaced, trailing newline included — so
+//! directories) was consolidated into this module for the constants that
+//! moved; the authority recap and the locale bookends have always lived in
+//! `prompts.rs`, so the bulk — not the whole — of the prompt contract reads
+//! top-to-bottom in one place. The text moved **verbatim** — every constant
+//! is byte-identical to the file it replaced, trailing newline included — so
 //! rendered prompts do not change by a single byte.
 //!
 //! Organization follows the runtime assembly order, most-static →
@@ -30,7 +31,7 @@
 //! Edit prompt text here directly. Content and ordering invariants are
 //! guarded by the test suite in `../prompts.rs` (constitution structure,
 //! binding gates, prefix privacy, byte-stable prefix ordering) — run
-//! `cargo test -p codewhale-tui --bin codewhale-tui prompts` after edits.
+//! `cargo test -p codewhale-tui --lib prompts` after edits.
 //!
 //! The locale-tagged bookends (per-locale preambles/closers) remain in
 //! `../prompts.rs` next to the override cells that can replace them.
