@@ -1748,12 +1748,25 @@ pub fn validate_mfjs_parameters(parameters: &Value) -> Result<(), KimiParameterS
     Ok(())
 }
 
-const MFJS_MAX_ANY_OF_ITEMS: usize = 10;
-const MFJS_MAX_OBJECT_DEPTH: usize = 5;
-const MFJS_MAX_TOTAL_PROPERTIES: usize = 100;
-const MFJS_MAX_TOTAL_ENUM_VALUES: usize = 500;
+// Resource budgets mirror the walle validator's own defaults (source
+// comparison against `conf.go`, `DefaultValidatorConfig`, fetched from
+// <https://github.com/MoonshotAI/walle> on 2026-11-05 — a source-comparison
+// note, not a document clause: the MFJS specification sets no numeric
+// limits): MaxAnyOfItems=500, MaxTotalPropertiesKeysNum=3000,
+// MaxSchemaDepth=30, MaxEnumItems=1000, MaxEnumStringLength=75000.
+// MaxSchemaSize=120000 below already matches. The alignment exists so a
+// third-party schema the server's own validator would accept is not dropped
+// by an engine-local tightening. The enum-length check threshold stays
+// engine-local: applying the same MaxEnumStringLength budget from 250 values
+// up is a stricter checking cadence than walle's 2500-value threshold, never
+// a wider budget. MFJS_MAX_STRUCTURAL_DEPTH is engine-only — a recursion
+// guard for this walker, not a walle budget.
+const MFJS_MAX_ANY_OF_ITEMS: usize = 500;
+const MFJS_MAX_OBJECT_DEPTH: usize = 30;
+const MFJS_MAX_TOTAL_PROPERTIES: usize = 3_000;
+const MFJS_MAX_TOTAL_ENUM_VALUES: usize = 1_000;
 const MFJS_ENUM_LENGTH_CHECK_THRESHOLD: usize = 250;
-const MFJS_MAX_ENUM_STRING_LENGTH: usize = 7_500;
+const MFJS_MAX_ENUM_STRING_LENGTH: usize = 75_000;
 const MFJS_MAX_SCHEMA_BYTES: usize = 120_000;
 const MFJS_MAX_STRUCTURAL_DEPTH: usize = 64;
 const MFJS_MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
@@ -3417,40 +3430,57 @@ mod kimi_tests {
 
     #[test]
     fn kimi_parameters_enforces_anyof_and_aggregate_resource_limits() {
-        let mut too_many_branches = json!({
-            "type": "object",
-            "properties": {
-                "choice": {
-                    "anyOf": (0..11)
-                        .map(|_| json!({"type": "string"}))
-                        .collect::<Vec<_>>()
+        // Each boundary mirrors the walle validator's own default (the
+        // constant block cites `conf.go`, `DefaultValidatorConfig`, fetched
+        // 2026-11-05). The aligned value itself must ship — the limit exists
+        // to drop only what the server's own validator would also refuse, so
+        // an engine-local tightening cannot silently re-emerge here.
+        let branches_schema = |count: usize| {
+            json!({
+                "type": "object",
+                "properties": {
+                    "choice": {
+                        "anyOf": (0..count)
+                            .map(|_| json!({"type": "string"}))
+                            .collect::<Vec<_>>()
+                    }
                 }
-            }
-        });
+            })
+        };
+        let mut at_any_of_budget = branches_schema(500);
+        sanitize_for_kimi_parameters(&mut at_any_of_budget)
+            .expect("500 anyOf branches is the aligned budget and must ship");
+        let mut too_many_branches = branches_schema(501);
         assert_eq!(
             sanitize_for_kimi_parameters(&mut too_many_branches).unwrap_err(),
             KimiParameterSchemaError::ResourceLimitExceeded
         );
 
         let string_property = || json!({"type": "string"});
-        let mut root_properties = Map::new();
-        for index in 0..51 {
-            root_properties.insert(format!("root_{index}"), string_property());
-        }
-        let mut definition_properties = Map::new();
-        for index in 0..50 {
-            definition_properties.insert(format!("definition_{index}"), string_property());
-        }
-        let mut too_many_properties = json!({
-            "type": "object",
-            "properties": Value::Object(root_properties),
-            "$defs": {
-                "Holder": {
-                    "type": "object",
-                    "properties": Value::Object(definition_properties)
-                }
+        let properties_schema = |root_count: usize, definition_count: usize| {
+            let mut root_properties = Map::new();
+            for index in 0..root_count {
+                root_properties.insert(format!("root_{index}"), string_property());
             }
-        });
+            let mut definition_properties = Map::new();
+            for index in 0..definition_count {
+                definition_properties.insert(format!("definition_{index}"), string_property());
+            }
+            json!({
+                "type": "object",
+                "properties": Value::Object(root_properties),
+                "$defs": {
+                    "Holder": {
+                        "type": "object",
+                        "properties": Value::Object(definition_properties)
+                    }
+                }
+            })
+        };
+        let mut at_property_budget = properties_schema(3000, 0);
+        sanitize_for_kimi_parameters(&mut at_property_budget)
+            .expect("3000 total properties is the aligned budget and must ship");
+        let mut too_many_properties = properties_schema(1501, 1500);
         assert_eq!(
             sanitize_for_kimi_parameters(&mut too_many_properties).unwrap_err(),
             KimiParameterSchemaError::ResourceLimitExceeded
@@ -3459,13 +3489,18 @@ mod kimi_tests {
         let enum_values = |start: usize, count: usize| {
             Value::Array((start..start + count).map(|value| json!(value)).collect())
         };
-        let mut too_many_enum_values = json!({
-            "type": "object",
-            "properties": {
-                "first": {"type": "integer", "enum": enum_values(0, 250)},
-                "second": {"type": "integer", "enum": enum_values(250, 251)}
-            }
-        });
+        let enum_schema = |count: usize| {
+            json!({
+                "type": "object",
+                "properties": {
+                    "choice": {"type": "integer", "enum": enum_values(0, count)}
+                }
+            })
+        };
+        let mut at_enum_budget = enum_schema(1000);
+        sanitize_for_kimi_parameters(&mut at_enum_budget)
+            .expect("1000 enum values is the aligned budget and must ship");
+        let mut too_many_enum_values = enum_schema(1001);
         assert_eq!(
             sanitize_for_kimi_parameters(&mut too_many_enum_values).unwrap_err(),
             KimiParameterSchemaError::ResourceLimitExceeded
@@ -3474,30 +3509,49 @@ mod kimi_tests {
 
     #[test]
     fn kimi_parameters_enforces_depth_and_enum_text_limits() {
-        let mut too_deep = json!({"type": "string"});
-        for index in (0..6).rev() {
-            let mut properties = Map::new();
-            properties.insert(format!("level_{index}"), too_deep);
-            too_deep = json!({
-                "type": "object",
-                "properties": Value::Object(properties)
-            });
-        }
+        let nest_properties = |depth: usize| {
+            let mut nested = json!({"type": "string"});
+            for index in (0..depth).rev() {
+                let mut properties = Map::new();
+                properties.insert(format!("level_{index}"), nested);
+                nested = json!({
+                    "type": "object",
+                    "properties": Value::Object(properties)
+                });
+            }
+            nested
+        };
+        let mut at_depth_budget = nest_properties(30);
+        sanitize_for_kimi_parameters(&mut at_depth_budget)
+            .expect("30 property levels is the aligned budget and must ship");
+        let mut too_deep = nest_properties(31);
         assert_eq!(
             sanitize_for_kimi_parameters(&mut too_deep).unwrap_err(),
             KimiParameterSchemaError::ResourceLimitExceeded
         );
 
-        let long_values = Value::Array(
-            (0..251)
-                .map(|index| Value::String(format!("private-enum-{index:04}-xxxxxxxxxxxxxx")))
-                .collect(),
-        );
+        // The encoded-length budget only arms past the check threshold, so
+        // both probes below carry enough values to reach it: 1000 values of
+        // 74 encoded chars total just under the aligned 75000 budget and
+        // must ship; the same count at 88 chars oversteps it and must not.
+        let long_enum = |padding: usize| {
+            Value::Array(
+                (0..1000)
+                    .map(|index| {
+                        Value::String(format!("private-enum-{index:04}-{}", "x".repeat(padding)))
+                    })
+                    .collect(),
+            )
+        };
+        let mut at_enum_text_budget = json!({
+            "type": "object",
+            "properties": {"choice": {"type": "string", "enum": long_enum(56)}}
+        });
+        sanitize_for_kimi_parameters(&mut at_enum_text_budget)
+            .expect("74000 encoded enum chars sit inside the aligned budget");
         let mut too_much_enum_text = json!({
             "type": "object",
-            "properties": {
-                "choice": {"type": "string", "enum": long_values}
-            }
+            "properties": {"choice": {"type": "string", "enum": long_enum(70)}}
         });
         assert_eq!(
             sanitize_for_kimi_parameters(&mut too_much_enum_text).unwrap_err(),
@@ -3543,7 +3597,10 @@ mod kimi_tests {
             valid["properties"]["mismatched"]["default"],
             json!("private-default-value-3302")
         );
-        assert_eq!(valid["properties"]["object_valued"]["default"], json!({"a": "b"}));
+        assert_eq!(
+            valid["properties"]["object_valued"]["default"],
+            json!({"a": "b"})
+        );
         assert_eq!(valid["properties"]["array_valued"]["default"], json!(["x"]));
 
         // A node that only carries `default` still fails the type-absence
@@ -3869,6 +3926,15 @@ mod kimi_tests {
             10,
             "the shipped union has exactly one branch per layout"
         );
+        // The branch count is not the anyOf budget: the engine mirrors the
+        // walle validator's aligned default (500, see the constant block), so
+        // the sentinel only has to show the shipped union sits far below it
+        // and the whole pipeline still passes.
+        assert!(
+            shipped_branches.len() * 10 <= MFJS_MAX_ANY_OF_ITEMS,
+            "10 shipped branches must sit far below the anyOf budget {}",
+            MFJS_MAX_ANY_OF_ITEMS
+        );
         let expected = branch_contract(shipped_branches);
 
         let mut parameters = shipped.clone();
@@ -3897,7 +3963,7 @@ mod kimi_tests {
             .expect("the slides.items union must survive normalization");
         assert_eq!(
             branches.len(),
-            10,
+            shipped_branches.len(),
             "normalization must not change the branch count"
         );
         assert_eq!(branch_contract(branches), expected);
