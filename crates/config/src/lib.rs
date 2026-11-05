@@ -6,6 +6,7 @@ mod config_document;
 pub mod descriptors;
 pub mod device_code;
 pub mod external_credentials;
+pub mod local_reasoning;
 pub mod model_reference;
 pub mod models_dev;
 pub mod persistence;
