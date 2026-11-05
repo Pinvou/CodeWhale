@@ -5,6 +5,32 @@ import test from 'node:test';
 
 const sourceRoot = new URL('../src/', import.meta.url);
 
+test('app startup loads remote history from the loaded semantic capability on Linux', () => {
+  const source = fs.readFileSync(new URL('app/main.jsx', sourceRoot), 'utf8');
+  const wiring = source.match(/const remoteProxyHistoryAvailable =[\s\S]*?\}, \[remoteProxyHistoryAvailable\]\);/);
+  assert.ok(wiring, 'exercise the production availability expression and startup effect together');
+  for (const [label, platformCapabilities, available, expected] of [
+    ['Linux supported', { os: 'linux', loaded: true, desktopRemoteControl: true }, true, 1],
+    ['Windows supported', { os: 'windows', loaded: true, desktopRemoteControl: true }, true, 1],
+    ['future supported host', { os: 'future-host', loaded: true, desktopRemoteControl: true }, true, 1],
+    ['not loaded', { os: 'linux', loaded: false, desktopRemoteControl: true }, true, 0],
+    ['unsupported', { os: 'linux', loaded: true, desktopRemoteControl: false }, true, 0],
+    ['missing capabilities', undefined, true, 0],
+    ['bridge unavailable', { os: 'linux', loaded: true, desktopRemoteControl: true }, false, 0],
+  ]) {
+    let calls = 0;
+    vm.runInNewContext(wiring[0], {
+      bs: { platformCapabilities },
+      bridge: {
+        available,
+        desktopRemoteControl: { listRemoteProxyHistory() { calls += 1; return Promise.resolve([]); } },
+      },
+      useEffect(effect) { effect(); },
+    });
+    assert.equal(calls, expected, label);
+  }
+});
+
 function loadDesktopBridge() {
   const calls = [];
   let response = null;
@@ -71,13 +97,22 @@ test('the full desktop bridge and shared UI gate agree before load, after failur
   available(false);
   assert.throws(() => host.api.desktopRemoteControl.controllerStatus(), /desktop_remote_control_unsupported/);
   assert.equal(host.calls.includes('desktop_remote_controller_status'), false);
-  for (const os of ['linux', 'macos', 'windows']) {
-    host.setCapabilities({ os, desktopRemoteControlSupported: true });
+  for (const [os, supported] of [['linux', true], ['macos', false], ['windows', true], ['unknown', false]]) {
+    host.setCapabilities({ os, desktopRemoteControlSupported: supported });
     await host.api.platform.loadPlatformCapabilities();
     assert.equal(platformSnapshots.at(-1).platformCapabilities.os, os);
     assert.equal(platformSnapshots.at(-1).platformCapabilities.loaded, true);
-    available(os === 'windows');
+    available(supported);
+    if (supported) {
+      await host.api.desktopRemoteControl.controllerStatus();
+      await host.api.desktopRemoteControl.controlledStatus();
+      assert.ok(host.calls.includes('desktop_remote_controlled_status'));
+    }
   }
+  // The backend owns platform support; an adapter must not second-guess it.
+  host.setCapabilities({ os: 'future-host', desktopRemoteControlSupported: true });
+  await host.api.platform.loadPlatformCapabilities();
+  available(true);
   host.setCapabilities({ os: 'windows', desktopRemoteControlSupported: false });
   await host.api.platform.loadPlatformCapabilities();
   available(false);

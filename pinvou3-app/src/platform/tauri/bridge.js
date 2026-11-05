@@ -70,8 +70,7 @@ function pinvouSharedtauriMain() {
         detected,
         {
           loaded: true,
-          desktopRemoteControl: !!detected && detected.os === "windows" &&
-            detected.desktopRemoteControlSupported === true,
+          desktopRemoteControl: !!detected && detected.desktopRemoteControlSupported === true,
         }
       );
     } catch (error) {
@@ -2296,7 +2295,7 @@ function composePlanMarkdown(snapshots) { return pinvouSharedtauriMain().compose
     can: function (capability) {
       if (capability === "desktopRemoteControl") {
         var detected = state.platformCapabilities || {};
-        return detected.loaded === true && detected.os === "windows" && detected.desktopRemoteControl === true;
+        return detected.loaded === true && detected.desktopRemoteControl === true;
       }
       return !!(state.platformCapabilities && state.platformCapabilities[capability] === true);
     },

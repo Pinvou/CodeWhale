@@ -1434,6 +1434,28 @@ pub(super) fn dispatch_test_transport_frame_to_sink(
     dispatch_inbound(&config, sender, sink, &frame.to_string())
 }
 
+/// Capture actual reader delivery, including schema/context rejection and
+/// one-shot final authority. The reader's bool means "keep reading", so it must
+/// not be mistaken for admission (a valid terminal error can return false).
+#[cfg(test)]
+pub(super) fn read_test_transport_frame(
+    sender: &ControllerTransportSender,
+    frame: &Value,
+) -> Option<ControllerTransportEvent> {
+    let delivered = Arc::new(parking_lot::Mutex::new(None));
+    let captured = Arc::clone(&delivered);
+    let config =
+        ControllerTransportConfig::new("ws://127.0.0.1:1", sender.role, sender.generation());
+    dispatch_inbound(
+        &config,
+        sender,
+        &move |event| *captured.lock() = Some(event),
+        &frame.to_string(),
+    );
+    let event = delivered.lock().take();
+    event
+}
+
 /// 未绑定 generation 的 transport（A 端 claim 之前）只按类型准入，绑定之后
 /// 一律按 B 的 generation 硬门过滤；缺少 generation 字段的同生成期报文仍然
 /// 允许通过，最终由各状态机自行校验绑定。

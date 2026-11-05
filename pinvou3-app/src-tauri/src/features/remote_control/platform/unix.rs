@@ -25,14 +25,17 @@ pub(super) fn host_file_roots() -> Vec<(String, PathBuf)> {
 }
 
 pub(super) fn desktop_control_supported() -> bool {
-    false
+    cfg!(all(target_os = "linux", target_pointer_width = "64"))
 }
 
 #[cfg(test)]
 mod tests {
     #[test]
-    fn unix_does_not_claim_desktop_control_support() {
-        assert!(!super::desktop_control_supported());
+    fn only_shipped_linux_targets_support_both_desktop_roles() {
+        assert_eq!(
+            super::desktop_control_supported(),
+            cfg!(all(target_os = "linux", target_pointer_width = "64"))
+        );
     }
 }
 

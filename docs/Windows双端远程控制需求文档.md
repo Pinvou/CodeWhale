@@ -1,5 +1,7 @@
 # Pinvou Agent Windows 双端远程控制需求文档
 
+> Linux 扩展同时支持主控端和被控端，沿用本文的共享协议与业务约束；平台支持、附件安全和验收矩阵见 [Linux 双端远程控制](./linux-desktop-remote-control.md)。本文原始 Windows 发布记录仍按原范围保留。
+
 > 文档状态：需求确认稿
 >
 > 文档版本：1.11

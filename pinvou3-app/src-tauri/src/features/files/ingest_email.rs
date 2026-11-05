@@ -11,7 +11,8 @@ use std::path::Path;
 
 use super::IngestResult;
 use super::estimate_tokens;
-use super::ingest_deps::system_tools;
+use super::ingest_deps::{read_capped_text, system_tools};
+use super::ingest_diagnostics::safe_error;
 
 /// 邮件（.eml / .msg）：.eml 直接用 python 标准库 email 模块解出收发件人/主题/
 /// 日期/正文/附件名；.msg 在 Windows 走 Rust 原生解析，非 Windows 保留 msgconvert 转 .eml。
@@ -26,6 +27,7 @@ pub(super) fn ingest_email(
     let mk = |markdown: Option<String>, warning: Option<String>| {
         let token_estimate = markdown.as_deref().map(estimate_tokens).unwrap_or(0);
         IngestResult {
+            read_owner: None,
             kind: kind.into(),
             basename: basename.clone(),
             path: path_str.clone(),
@@ -60,14 +62,11 @@ pub(super) fn ingest_email(
             );
         }
         // msgconvert 把 .msg 转成 .eml（输出到 cwd），用临时目录承接再解析。
-        let ts = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
-        let tmpdir = std::env::temp_dir().join(format!("pinvou3-msg-{ts}"));
-        if let Err(e) = std::fs::create_dir_all(&tmpdir) {
-            return mk(None, Some(format!("创建临时目录失败: {e}")));
-        }
+        let temporary = match super::super::platform::private_conversion_directory("pinvou3-msg-") {
+            Ok(directory) => directory,
+            Err(e) => return mk(None, Some(safe_error(format!("创建临时目录失败: {e}")))),
+        };
+        let tmpdir = temporary.path().to_owned();
         // msgconvert 是 perl 脚本，网络/编码异常下会挂死，按超时 kill-tree。
         let conv = crate::platform::process::output_with_timeout_and_kill_tree(
             {
@@ -86,7 +85,7 @@ pub(super) fn ingest_email(
                 Ok(o) => String::from_utf8_lossy(&o.stderr).trim().to_string(),
                 Err(e) => e,
             };
-            Err(format!("msgconvert 转换失败: {detail}"))
+            Err(safe_error(format!("msgconvert 转换失败: {detail}")))
         };
         let _ = std::fs::remove_dir_all(&tmpdir);
         result
@@ -117,8 +116,8 @@ struct MsgMarkdownParts {
 /// The msg_parser-typed parsing helpers below compile on Windows only (same gating as the dependency section).
 #[cfg(target_os = "windows")]
 fn parse_msg_via_msg_parser(path: &Path) -> Result<String, String> {
-    let outlook =
-        msg_parser::Outlook::from_path(path).map_err(|e| format!(".msg 解析失败: {e}"))?;
+    let outlook = msg_parser::Outlook::from_path(path)
+        .map_err(|e| safe_error(format!(".msg 解析失败: {e}")))?;
     let body = decode_msg_body(&outlook);
     let parts = MsgMarkdownParts {
         sender: person_to_text(&outlook.sender),
@@ -425,7 +424,11 @@ fn collapse_text(value: &str) -> String {
 }
 
 /// 用 python 标准库 email 模块把 .eml 解析成可读文本（收发件人/主题/日期/正文/
-/// 附件名）。脚本走 stdin 之外的 argv[1] 取路径，正文优先纯文本、回退 HTML。
+/// 附件名）。脚本走 argv[1] 取邮件路径、argv[2] 取正文落盘路径、argv[3] 取
+/// 附件段落盘路径，正文优先纯文本、回退 HTML。正文单独落盘（可能涨到
+/// 20 MiB 输入量级，超 4 MiB 捕获上限）；附件段也走文件而非 stdout，让
+/// Rust 侧能按「表头 → 正文 → 附件」的原始顺序拼装——正文若直接拼在
+/// stdout 之后，附件名单会跑到正文前面（评审 Jensen P3）。
 fn parse_eml_via_python(path: &Path) -> Result<String, String> {
     const SCRIPT: &str = r#"
 import sys, email
@@ -445,30 +448,57 @@ try:
     body = msg.get_body(preferencelist=('plain', 'html'))
     if body is not None:
         print('\n正文:')
-        print(body.get_content())
+        with open(sys.argv[2], 'w', encoding='utf-8') as out:
+            out.write(body.get_content())
 except Exception as e:
-    print('\n(正文解析失败:', e, ')')
+    print('\n(正文解析失败:', sys.argv[4] or str(e), ')')
 atts = [p.get_filename() for p in msg.iter_attachments() if p.get_filename()]
 if atts:
-    print('\n附件:', ', '.join(atts))
+    with open(sys.argv[3], 'w', encoding='utf-8') as tail:
+        tail.write('\n附件: ' + ', '.join(atts) + '\n')
 "#;
     let program = crate::platform::paths::python_command();
     // 本地纯解析脚本，正常毫秒级返回；卡死（损坏的 .eml、杀软占用）按超时
     // kill-tree，避免上传永久转圈。
+    // 正文可随输入涨到 20 MiB 上限量级，超出 4 MiB 捕获上限，单独落盘回读
+    // （32 MiB 上限，同 pdftotext/pandoc），不走 stdout。
+    let body_dir = super::super::platform::private_conversion_directory("pinvou3-eml-")
+        .map_err(|e| safe_error(format!("创建临时目录失败: {e}")))?;
+    let body_path = body_dir.path().join("body.txt");
+    let tail_path = body_dir.path().join("tail.txt");
     let mut command = crate::platform::process::HiddenCommand::new(&program);
-    command.arg("-c").arg(SCRIPT).arg(path);
+    command
+        .arg("-c")
+        .arg(SCRIPT)
+        .arg(path)
+        .arg(&body_path)
+        .arg(&tail_path)
+        // Empty for local ingestion; private ingestion supplies only its stable
+        // error code, including warnings returned in an otherwise valid email.
+        .arg(safe_error(""));
     let out = crate::platform::process::output_with_timeout_and_kill_tree(
         command,
         std::time::Duration::from_secs(60),
     )
-    .map_err(|e| format!("Python 调用失败({program}): {e}"))?;
+    .map_err(|e| safe_error(format!("Python 调用失败({program}): {e}")))?;
     if out.status.success() {
-        Ok(String::from_utf8_lossy(&out.stdout).trim_end().to_string())
+        let mut markdown = String::from_utf8_lossy(&out.stdout).trim_end().to_string();
+        // 脚本仅在成功提取正文时写 argv[2]，仅有附件时写 argv[3]；解析
+        // 失败分支只留 stdout 提示。拼装顺序 = 原始 stdout 顺序。
+        if body_path.exists() {
+            markdown.push('\n');
+            markdown.push_str(&read_capped_text(&body_path)?);
+        }
+        if tail_path.exists() {
+            markdown.push('\n');
+            markdown.push_str(&read_capped_text(&tail_path)?);
+        }
+        Ok(markdown.trim_end().to_string())
     } else {
-        Err(format!(
+        Err(safe_error(format!(
             "邮件解析失败: {}",
             String::from_utf8_lossy(&out.stderr).trim()
-        ))
+        )))
     }
 }
 
@@ -573,5 +603,75 @@ mod tests {
         assert!(parsed.contains("Thu, 25 Jun 2026 10:00:00 +0800"));
         assert!(parsed.contains("This is email body"));
         assert!(parsed.contains("note.txt"));
+        // 顺序合同：表头 → 正文 → 附件名单。正文落盘后曾把整段正文追加在
+        // stdout 末尾，附件名单因此跑到正文前面（评审 Jensen P3）——拼装
+        // 必须还原原始顺序。
+        let label_at = parsed.find("正文:").unwrap();
+        let body_at = parsed.find("This is email body").unwrap();
+        let attachment_label_at = parsed.find("附件:").unwrap();
+        let attachment_name_at = parsed.find("note.txt").unwrap();
+        assert!(
+            label_at < body_at,
+            "body label must precede the body: {parsed}"
+        );
+        assert!(
+            body_at < attachment_label_at,
+            "the body must come before the attachment list: {parsed}"
+        );
+        assert!(
+            attachment_label_at < attachment_name_at,
+            "attachment names follow their label: {parsed}"
+        );
+    }
+
+    #[test]
+    fn eml_body_decode_warnings_keep_local_detail_but_redact_private_ingestion() {
+        if !crate::platform::os::command_exists(&crate::platform::paths::python_command()) {
+            eprintln!("skip: Python is not available");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let eml = dir.path().join("invalid-charset.eml");
+        std::fs::write(
+            &eml,
+            "From: alice@example.com\r\nContent-Type: text/plain; charset=pinvou_private_test_charset\r\n\r\nbody",
+        )
+        .unwrap();
+        let local = parse_eml_via_python(&eml).unwrap();
+        assert!(local.contains("pinvou_private_test_charset"));
+        let private =
+            super::super::ingest_diagnostics::with_private(|| parse_eml_via_python(&eml)).unwrap();
+        assert!(private.contains(super::super::ingest_diagnostics::CONVERSION_FAILED));
+        assert!(!private.contains("pinvou_private_test_charset"));
+        assert!(private.contains("alice@example.com"));
+    }
+
+    #[test]
+    fn eml_large_body_spills_to_file_instead_of_stdout_when_python_available() {
+        if !crate::platform::os::command_exists(&crate::platform::paths::python_command()) {
+            eprintln!("skip: Python is not available");
+            return;
+        }
+
+        let dir = std::env::temp_dir().join(format!("pinvou3-eml-bigbody-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let eml = dir.join("big.eml");
+        // ~5 MiB 纯文本正文：超过 4 MiB 捕获上限，旧实现整段走 stdout 会在
+        // 平台侧溢出；现在必须经临时文件回读并完整保留。
+        let line = "正文行内容用于撑大体积 0123456789\n";
+        let body = line.repeat(5 * 1024 * 1024 / line.len() + 1);
+        let raw = format!(
+            "From: alice@example.com\r\nTo: bob@example.com\r\nSubject: big body\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n{}",
+            body
+        );
+        std::fs::write(&eml, raw).unwrap();
+
+        let parsed = parse_eml_via_python(&eml).unwrap();
+
+        std::fs::remove_dir_all(&dir).ok();
+        assert!(parsed.contains("正文:"), "{parsed:.200}");
+        assert!(!parsed.contains("output exceeded"), "{parsed:.200}");
+        let marker = line.trim_end();
+        assert!(parsed.contains(marker), "{parsed:.200}");
     }
 }

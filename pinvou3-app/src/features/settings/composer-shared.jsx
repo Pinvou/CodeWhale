@@ -469,50 +469,57 @@ window.addEventListener('pinvou:chat-round-committed', (event) => {
       const [tmeetOn, setTmeetOn] = useState(false); // 腾讯会议是否已连接(CLI 路线)
       const [tmeetEnabled, setTmeetEnabled] = useState(true); // 腾讯会议技能是否启用(未手动停用)
       // 启动时加载已装工具 + 全局持久的禁用列表(持久语义:新窗口/新对话都继承)
+      // Round-38 刷新序号门（round-2 review m9）：连接/开关会在授权写入落定后
+      // 触发工具刷新，快速连续操作可能背靠背发起多次读取。桌面端 invoke 应答
+      // 有序，按 key 的 setState 本就按服务次序落盘；此序号门额外覆盖不保序
+      // 的传输（web 桥）：只允许最新一次刷新提交。
+      const refreshSeqRef = useRef(0);
       async function refreshToolsMenu(isAlive) {
+        const seq = ++refreshSeqRef.current;
+        const isCurrent = () => isAlive() && seq === refreshSeqRef.current;
         try {
           const list = await invokeTauri('list_marketplace_tools');
-          if (isAlive()) setMarketplaceTools(Array.isArray(list) ? list : []);
+          if (isCurrent()) setMarketplaceTools(Array.isArray(list) ? list : []);
         } catch (e) { /* ignore */ }
         try {
           const skills = await invokeTauri('list_marketplace_skills');
-          if (isAlive()) setMarketplaceSkills(Array.isArray(skills) ? skills : []);
+          if (isCurrent()) setMarketplaceSkills(Array.isArray(skills) ? skills : []);
         } catch (e) { /* ignore */ }
         try {
           const dis = await invokeTauri('get_disabled_connectors', { scope: toolScope });
-          if (isAlive()) setDisabled(new Set(dis || []));
+          if (isCurrent()) setDisabled(new Set(dis || []));
         } catch (e) { /* ignore */ }
         try {
           const hid = await invokeTauri('get_bundle_visibility', { scope: toolScope });
-          if (isAlive()) setHidden(new Set(hid || []));
+          if (isCurrent()) setHidden(new Set(hid || []));
         } catch (e) { /* ignore */ }
         try {
           const proj = await invokeTauri('get_project_skills_enabled');
-          if (isAlive()) setProjectSkillsEnabled(!!proj);
+          if (isCurrent()) setProjectSkillsEnabled(!!proj);
         } catch (e) { /* ignore */ }
         try {
           const fs = await invokeTauri('feishu_skills_state');
-          if (isAlive()) { setFeishuOn(!!(fs && fs.connected)); setFeishuEnabled(!fs || fs.enabled !== false); }
+          if (isCurrent()) { setFeishuOn(!!(fs && fs.connected)); setFeishuEnabled(!fs || fs.enabled !== false); }
         } catch (e) { /* ignore */ }
         try {
           const ws = await invokeTauri('wecom_skills_state');
-          if (isAlive()) { setWecomOn(!!(ws && ws.connected)); setWecomEnabled(!ws || ws.enabled !== false); }
+          if (isCurrent()) { setWecomOn(!!(ws && ws.connected)); setWecomEnabled(!ws || ws.enabled !== false); }
         } catch (e) { /* ignore */ }
         try {
           const ds = await invokeTauri('dingtalk_skills_state');
-          if (isAlive()) { setDingtalkOn(!!(ds && ds.connected)); setDingtalkEnabled(!ds || ds.enabled !== false); }
+          if (isCurrent()) { setDingtalkOn(!!(ds && ds.connected)); setDingtalkEnabled(!ds || ds.enabled !== false); }
         } catch (e) { /* ignore */ }
         try {
           const es = await invokeTauri('eip_status');
-          if (isAlive()) setEipOn(!!(es && es.connected));
+          if (isCurrent()) setEipOn(!!(es && es.connected));
         } catch (e) { /* ignore */ }
         try {
           const zs = await invokeTauri('zhidao_status');
-          if (isAlive()) setZhidaoOn(!!(zs && zs.connected));
+          if (isCurrent()) setZhidaoOn(!!(zs && zs.connected));
         } catch (e) { /* ignore */ }
         try {
           const ts = await invokeTauri('tmeet_skills_state');
-          if (isAlive()) { setTmeetOn(!!(ts && ts.connected)); setTmeetEnabled(!ts || ts.enabled !== false); }
+          if (isCurrent()) { setTmeetOn(!!(ts && ts.connected)); setTmeetEnabled(!ts || ts.enabled !== false); }
         } catch (e) { /* ignore */ }
       }
       useEffect(() => {
@@ -565,7 +572,7 @@ window.addEventListener('pinvou:chat-round-committed', (event) => {
         if (bridge.available) {
           const generation = writeGateRef.current.begin(id);
           invokeTauri('set_disabled_connectors',
-            { connectorIds: [...next], scope: toolScope })
+            { connectorIds: [...next], scope: toolScope, toggledIds: [id] })
             .catch((error) => {
               // Only the control's latest write may roll back or report: with rapid
               // toggles an earlier write can fail after a newer write succeeded
