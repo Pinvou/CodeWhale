@@ -989,10 +989,13 @@ pub fn requested_model_for_provider(provider: ApiProvider, model: &str) -> Optio
 /// Provider typing plus the official host keeps a misconfigured
 /// `provider`/`base_url` entry from receiving DeepSeek-only reshaping.
 ///
-/// Source: the DeepSeek strict function-calling/structured-output contract
-/// (<https://api-docs.deepseek.com/guides/structured_output>, fetched
-/// 2026-11-05); the official hosts also cover the family's
-/// `api.deepseeki.com` alias the rest of the codebase treats as official.
+/// Source: the DeepSeek strict function-calling contract, "`strict` Mode
+/// (Beta)" (<https://api-docs.deepseek.com/guides/tool_calls/>, fetched
+/// 2026-11-05). `api.deepseeki.com` is not an official host — the docs never
+/// mention it, and `docs/REBRAND.md` records it as a legacy typo kept only in
+/// URL heuristics for existing configs (#1079); it is accepted here to mirror
+/// the compat set the rest of the codebase already recognizes
+/// (`client.rs`, `client/chat.rs`, the doctor).
 pub fn route_is_official_deepseek_family(provider: ApiProvider, base_url: &str) -> bool {
     if !matches!(
         provider,
@@ -3093,11 +3096,15 @@ pub struct Config {
     pub memory_path: Option<String>,
     /// When true, set `tool_choice: "required"` and opt compatible function
     /// schemas into DeepSeek beta strict mode — effective only on official
-    /// DeepSeek-family routes (api.deepseek.com hosts), because the schema
-    /// reshaping follows DeepSeek's strict documents and would otherwise
-    /// strip keywords other providers document (e.g. OpenAI's
-    /// `minItems`/`maxItems`). Schemas with root alternatives stay non-strict
-    /// to avoid changing optional/one-of tool semantics.
+    /// DeepSeek-family routes (provider-typed DeepSeek on the
+    /// `api.deepseek.com` / legacy `api.deepseeki.com` hosts), because the
+    /// schema reshaping follows DeepSeek's strict documents and would
+    /// otherwise strip keywords other providers document (e.g. OpenAI's
+    /// `minItems`/`maxItems`). On those routes optional parameters are removed
+    /// from the schema (reported in the tool description) and non-numeric
+    /// `const` values land on `enum`, per the strict contract. Schemas with
+    /// root alternatives stay non-strict to avoid changing optional/one-of
+    /// tool semantics.
     pub strict_tool_mode: Option<bool>,
     /// Additional user-owned system-prompt sources concatenated in declared
     /// order (#454). Paths are expanded via `expand_path` so `~` and env vars
