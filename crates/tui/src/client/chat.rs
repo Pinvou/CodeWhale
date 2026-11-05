@@ -1111,35 +1111,6 @@ fn mirror_minimax_reasoning_details_for_body(body: &mut Value, provider: ApiProv
 /// safety net.
 ///
 /// Returns the names of the dropped tools, in catalog order.
-/// Give digit-led API tool names the `_` prefix the Kimi wire requires.
-///
-/// Kimi's function-call `name` pattern is `^[a-zA-Z_][a-zA-Z0-9-_]{0,127}$`
-/// (platform.kimi.ai tool-use documents, fetched 2026-11-05): a leading
-/// digit sits outside the supported set, and `to_api_tool_name` only escapes
-/// characters the pattern cannot express at any position. Only the Moonshot
-/// path applies this — no other provider's documents carry the
-/// leading-character ban.
-fn prefix_digit_led_tool_names_for_moonshot(chat_tools: &mut [Value]) {
-    for tool in chat_tools.iter_mut() {
-        let Some(function) = tool.get_mut("function").and_then(Value::as_object_mut) else {
-            continue;
-        };
-        let digit_led = function
-            .get("name")
-            .and_then(Value::as_str)
-            .and_then(|name| name.as_bytes().first())
-            .is_some_and(u8::is_ascii_digit);
-        if digit_led
-            && let Some(name) = function
-                .get("name")
-                .and_then(Value::as_str)
-                .map(str::to_owned)
-        {
-            function.insert("name".into(), json!(format!("_{name}")));
-        }
-    }
-}
-
 fn sanitize_moonshot_chat_tools(chat_tools: &mut Vec<Value>) -> Vec<String> {
     let mut dropped = Vec::new();
     chat_tools.retain_mut(|tool| {
@@ -1186,6 +1157,65 @@ fn sanitize_moonshot_chat_tools(chat_tools: &mut Vec<Value>) -> Vec<String> {
         }
     });
     dropped
+}
+
+/// Give digit-led API tool names the `_` prefix the Kimi wire requires.
+///
+/// Kimi's function-call `name` pattern is `^[a-zA-Z_][a-zA-Z0-9-_]{0,127}$`
+/// (platform.kimi.ai tool-use documents, fetched 2026-11-05): a leading
+/// digit sits outside the supported set, and `to_api_tool_name` only escapes
+/// characters the pattern cannot express at any position. Only the Moonshot
+/// path applies this — no other provider's documents carry the
+/// leading-character ban.
+fn prefix_digit_led_tool_names_for_moonshot(chat_tools: &mut [Value]) {
+    for tool in chat_tools.iter_mut() {
+        let Some(function) = tool.get_mut("function").and_then(Value::as_object_mut) else {
+            continue;
+        };
+        prefix_digit_led_function_name(function);
+    }
+}
+
+/// Prefix one `function` object's `name` in place when it starts with an
+/// ASCII digit. Shared by the tools array and the replayed assistant
+/// `tool_calls`, which must carry the same wire spelling; dispatch resolves
+/// the prefixed spelling back to the registry name (see the digit-led wire
+/// recovery in the engine's tool resolution).
+fn prefix_digit_led_function_name(function: &mut serde_json::Map<String, Value>) {
+    let digit_led = function
+        .get("name")
+        .and_then(Value::as_str)
+        .and_then(|name| name.as_bytes().first())
+        .is_some_and(u8::is_ascii_digit);
+    if digit_led
+        && let Some(name) = function
+            .get("name")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+    {
+        function.insert("name".into(), json!(format!("_{name}")));
+    }
+}
+
+/// Re-prefix digit-led names on replayed assistant `tool_calls` for Moonshot.
+///
+/// Assistant turns persist the registry spelling (dispatch resolves the
+/// digit-led wire prefix back before executing), so the history carries
+/// `3d_render` while the tools array advertises `_3d_render`. Re-applying
+/// the prefix here keeps the replayed turns consistent with the tools array
+/// and inside Kimi's documented `name` pattern. Idempotent: names already
+/// carrying the wire prefix are not digit-led and stay untouched.
+fn prefix_digit_led_tool_call_names_for_moonshot(messages: &mut [Value]) {
+    for message in messages.iter_mut() {
+        let Some(calls) = message.get_mut("tool_calls").and_then(Value::as_array_mut) else {
+            continue;
+        };
+        for call in calls.iter_mut() {
+            if let Some(function) = call.get_mut("function").and_then(Value::as_object_mut) {
+                prefix_digit_led_function_name(function);
+            }
+        }
+    }
 }
 
 /// The final Chat Completions wire payload for one request.
@@ -1961,6 +1991,9 @@ impl<'a> PromptBuilder<'a> {
         }
         if !is_exact_google_chat_route(provider, base_url) {
             strip_google_tool_call_extra_content(&mut messages);
+        }
+        if provider == ApiProvider::Moonshot {
+            prefix_digit_led_tool_call_names_for_moonshot(&mut messages);
         }
         messages
     }
@@ -6822,6 +6855,130 @@ mod alias_thinking_detection_tests {
                 body.body
             );
         }
+    }
+
+    #[test]
+    fn moonshot_replay_prefixes_digit_led_assistant_tool_call_names() {
+        use crate::client::chat::build_chat_messages_for_request_and_provider;
+        use crate::models::{ContentBlock, Message, MessageRequest, Role};
+
+        // Assistant turns persist the registry spelling: dispatch resolves
+        // the digit-led wire prefix back before executing (see the engine's
+        // digit-led wire recovery). The replay must re-apply the prefix so
+        // the history matches the tools array
+        // (`moonshot_wire_prefixes_digit_led_tool_names_to_the_documented_pattern`)
+        // and stays inside Kimi's documented `name` pattern.
+        let request = MessageRequest {
+            model: crate::config::DEFAULT_MOONSHOT_MODEL.to_string(),
+            messages: vec![
+                Message {
+                    role: Role::Assistant,
+                    content: vec![ContentBlock::ToolUse {
+                        id: "call-probe-1".to_string(),
+                        name: "3d_render".to_string(),
+                        input: json!({"path": "scene.glb"}),
+                        caller: None,
+                        thought_signature: None,
+                    }],
+                },
+                Message {
+                    role: Role::User,
+                    content: vec![ContentBlock::ToolResult {
+                        tool_use_id: "call-probe-1".to_string(),
+                        content: "rendered".to_string(),
+                        is_error: None,
+                        content_blocks: None,
+                    }],
+                },
+                Message {
+                    role: Role::Assistant,
+                    content: vec![ContentBlock::ToolUse {
+                        id: "call-probe-2".to_string(),
+                        // A history entry that already carries the wire
+                        // prefix (pre-fixture sessions) is not digit-led
+                        // and must pass through untouched — idempotence.
+                        name: "_3d_render".to_string(),
+                        input: json!({"path": "scene.glb"}),
+                        caller: None,
+                        thought_signature: None,
+                    }],
+                },
+                Message {
+                    role: Role::User,
+                    content: vec![ContentBlock::ToolResult {
+                        tool_use_id: "call-probe-2".to_string(),
+                        content: "rendered".to_string(),
+                        is_error: None,
+                        content_blocks: None,
+                    }],
+                },
+            ],
+            max_tokens: 16,
+            system: None,
+            tools: None,
+            tool_choice: None,
+            metadata: None,
+            thinking: None,
+            reasoning_effort: None,
+            stream: None,
+            temperature: None,
+            top_p: None,
+        };
+
+        let messages =
+            build_chat_messages_for_request_and_provider(&request, ApiProvider::Moonshot);
+        assert_eq!(
+            messages[0]["tool_calls"][0]["function"]["name"],
+            json!("_3d_render"),
+            "the registry spelling is re-prefixed on the wire"
+        );
+        assert_eq!(
+            messages[2]["tool_calls"][0]["function"]["name"],
+            json!("_3d_render"),
+            "a stored wire spelling passes through unchanged"
+        );
+
+        // Other providers keep the registry spelling on the wire: the
+        // documented leading-character ban is Moonshot-only.
+        let messages = build_chat_messages_for_request_and_provider(&request, ApiProvider::Openai);
+        assert_eq!(messages[0]["tool_calls"][0]["function"]["name"], json!("3d_render"));
+    }
+
+    #[test]
+    fn kimi_code_sampling_route_stays_in_sync_with_the_config_matcher_on_the_shared_host() {
+        use super::kimi_code_sampling_route;
+
+        // The sampling strip deliberately covers both membership hosts while
+        // the config-crate matcher is still .com-only (widening it belongs to
+        // in-flight PR #137). Until that lands, pin the twin's semantics to
+        // the reference on the shared host so a config-side change cannot
+        // silently diverge from the hand-copied matcher.
+        for url in [
+            "https://api.kimi.com/coding/v1",
+            "https://api.kimi.com/coding/v1/",
+            "HTTPS://API.KIMI.COM/coding/v1",
+            "https://api.kimi.com/CODING/V1",
+            "https://api.kimi.com/coding/v2",
+            "https://api.kimi.com/coding",
+            "http://api.kimi.com/coding/v1",
+            "https://api.kimi.com:8443/coding/v1",
+            "https://api.kimi.com/coding/v1//",
+            "https://api.kimi.io/coding/v1",
+            "https://example.com/coding/v1",
+        ] {
+            assert_eq!(
+                kimi_code_sampling_route(url),
+                crate::config::moonshot_base_url_is_exact_kimi_code(url),
+                "twin drift on {url}"
+            );
+        }
+        // The overseas host is the deliberate twin-only widening until the
+        // shared matcher catches up; this assertion is what flips when the
+        // widening lands.
+        assert!(kimi_code_sampling_route("https://api.kimi.ai/coding/v1"));
+        assert!(!crate::config::moonshot_base_url_is_exact_kimi_code(
+            "https://api.kimi.ai/coding/v1"
+        ));
     }
 
     #[test]
