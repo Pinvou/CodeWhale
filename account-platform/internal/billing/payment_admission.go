@@ -13,6 +13,21 @@ import (
 	"github.com/google/uuid"
 )
 
+const paymentActionAdmissionSQL = `SELECT
+count(*) FILTER (WHERE result='ACCEPTED' AND payer_user_id=$1 AND occurred_at>$4::timestamptz-interval '1 minute'), min(occurred_at) FILTER (WHERE result='ACCEPTED' AND payer_user_id=$1 AND occurred_at>$4::timestamptz-interval '1 minute'),
+count(*) FILTER (WHERE result='ACCEPTED' AND payer_user_id=$1 AND occurred_at>$4::timestamptz-interval '1 hour'), min(occurred_at) FILTER (WHERE result='ACCEPTED' AND payer_user_id=$1 AND occurred_at>$4::timestamptz-interval '1 hour'),
+count(*) FILTER (WHERE result='ACCEPTED' AND payer_user_id=$1 AND occurred_at>$4::timestamptz-interval '1 day'), min(occurred_at) FILTER (WHERE result='ACCEPTED' AND payer_user_id=$1 AND occurred_at>$4::timestamptz-interval '1 day'),
+count(*) FILTER (WHERE result='ACCEPTED' AND beneficiary_organization_id=$2 AND occurred_at>$4::timestamptz-interval '1 hour'), min(occurred_at) FILTER (WHERE result='ACCEPTED' AND beneficiary_organization_id=$2 AND occurred_at>$4::timestamptz-interval '1 hour'),
+count(*) FILTER (WHERE result='ACCEPTED' AND source_hash=$3 AND occurred_at>$4::timestamptz-interval '1 minute'), min(occurred_at) FILTER (WHERE result='ACCEPTED' AND source_hash=$3 AND occurred_at>$4::timestamptz-interval '1 minute'),
+count(*) FILTER (WHERE result='ACCEPTED' AND provider_id=$5 AND occurred_at>$4::timestamptz-interval '1 minute'), min(occurred_at) FILTER (WHERE result='ACCEPTED' AND provider_id=$5 AND occurred_at>$4::timestamptz-interval '1 minute')
+FROM payment_risk_attempts WHERE action=$6 AND occurred_at>$4::timestamptz-interval '1 day'
+AND result='ACCEPTED' AND (
+ payer_user_id=$1
+ OR (beneficiary_organization_id=$2 AND occurred_at>$4::timestamptz-interval '1 hour')
+ OR (source_hash=$3 AND occurred_at>$4::timestamptz-interval '1 minute')
+ OR (provider_id=$5 AND occurred_at>$4::timestamptz-interval '1 minute')
+)`
+
 func paymentRequestSource(r *http.Request) string {
 	if source := strings.TrimSpace(r.Header.Get("X-Pinvou-Client-Source")); net.ParseIP(source) != nil {
 		return source
@@ -61,14 +76,7 @@ func (p *PaymentCoordinator) admitPaymentAction(ctx context.Context, action stri
 	}
 	var payerMinute, payerHour, payerDay, organizationHour, sourceMinute, providerMinute int
 	var payerMinuteOldest, payerHourOldest, payerDayOldest, organizationOldest, sourceOldest, providerOldest *time.Time
-	if err := tx.QueryRow(ctx, `SELECT
-count(*) FILTER (WHERE result='ACCEPTED' AND payer_user_id=$1 AND occurred_at>$4::timestamptz-interval '1 minute'), min(occurred_at) FILTER (WHERE result='ACCEPTED' AND payer_user_id=$1 AND occurred_at>$4::timestamptz-interval '1 minute'),
-count(*) FILTER (WHERE result='ACCEPTED' AND payer_user_id=$1 AND occurred_at>$4::timestamptz-interval '1 hour'), min(occurred_at) FILTER (WHERE result='ACCEPTED' AND payer_user_id=$1 AND occurred_at>$4::timestamptz-interval '1 hour'),
-count(*) FILTER (WHERE result='ACCEPTED' AND payer_user_id=$1 AND occurred_at>$4::timestamptz-interval '1 day'), min(occurred_at) FILTER (WHERE result='ACCEPTED' AND payer_user_id=$1 AND occurred_at>$4::timestamptz-interval '1 day'),
-count(*) FILTER (WHERE result='ACCEPTED' AND beneficiary_organization_id=$2 AND occurred_at>$4::timestamptz-interval '1 hour'), min(occurred_at) FILTER (WHERE result='ACCEPTED' AND beneficiary_organization_id=$2 AND occurred_at>$4::timestamptz-interval '1 hour'),
-count(*) FILTER (WHERE result='ACCEPTED' AND source_hash=$3 AND occurred_at>$4::timestamptz-interval '1 minute'), min(occurred_at) FILTER (WHERE result='ACCEPTED' AND source_hash=$3 AND occurred_at>$4::timestamptz-interval '1 minute'),
-count(*) FILTER (WHERE result='ACCEPTED' AND provider_id=$5 AND occurred_at>$4::timestamptz-interval '1 minute'), min(occurred_at) FILTER (WHERE result='ACCEPTED' AND provider_id=$5 AND occurred_at>$4::timestamptz-interval '1 minute')
-FROM payment_risk_attempts WHERE action=$6 AND occurred_at>$4::timestamptz-interval '1 day'`, payer, organization, sourceHash[:], now, p.Capabilities().ProviderID, action).Scan(
+	if err := tx.QueryRow(ctx, paymentActionAdmissionSQL, payer, organization, sourceHash[:], now, p.Capabilities().ProviderID, action).Scan(
 		&payerMinute, &payerMinuteOldest, &payerHour, &payerHourOldest, &payerDay, &payerDayOldest, &organizationHour, &organizationOldest, &sourceMinute, &sourceOldest, &providerMinute, &providerOldest,
 	); err != nil {
 		return err
