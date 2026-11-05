@@ -23,7 +23,7 @@
 | Chrome fixture | 固定源码：实际 Chrome，**12 个 PASS 分组**，使用 JS IPC 桩 | [完整输出](current/chrome.stdout.txt) |
 | 生产 / 测试 Clippy | 固定源码：生产 `-D warnings` exit 0；测试目标按原 CI warn 策略 exit 0，lib test 有 **19018** 条 warning | [生产全文](current/clippy-production.stdout.txt)、[测试首尾节选](current/clippy-tests.excerpt.txt) |
 | 测试登记 | 固定源码：5422 个唯一用例，12 个必需用例齐全 | [完整输出](current/registry.stdout.txt) |
-| Connector 矩阵负控 | 实际完整 Node 单文件入口；60 个错误变体全部拒绝，两次正控通过 | [输出](current/connector-controls.stdout.txt)、[可复跑脚本](replay-connector-matrix-controls.py) |
+| Connector 矩阵负控 | 固定历史源码的完整 Node 单文件入口；60 个错误变体全部拒绝，两次正控通过 | [输出](current/connector-controls.stdout.txt)、[历史复跑脚本](replay-connector-matrix-controls.py) |
 | CodeWhale Engine loopback | **历史回执**：父仓 `948f9b60f`，同一 gitlink `f1eb10efc`，6 passed / 0 failed | [完整输出](historical/codewhale-f1-engine.stdout.txt) |
 
 完整 Linux lib 的 21 项忽略包含新加的显示环境用例；该用例另外显式运行通过，不能把默认忽略记为通过或重复相加。Linux 全文包含实际 OFD 存活后代、SIGKILL、第二进程/跨卡准入、配额、部分删除及恢复用例的准确名称和结果。桌面/Web Vite 构建、格式、架构、fork fast 与提交规范/DCO 也在固定源码通过，具体 argv、exit、时间、原始输出摘要均列在 manifest。
@@ -62,7 +62,7 @@ PY_HASH
 
 按 [CONTRIBUTING.md](../../../CONTRIBUTING.md) 准备系统依赖，初始化公共 CodeWhale submodule，并安装 npm 锁定依赖。这些准备会下载公开源码/依赖。以下入口从仓库根执行，使用临时夹具、受控本机进程及回环服务，不需要 GPU、真实权重或外部模型账号。保存输出时须保留真实 exit code，例如 Bash `set -o pipefail` 后使用 `tee`，筛选必须实际匹配非零用例。
 
-复现上表历史结果时，应在单独 checkout 固定到上述历史源码 SHA，并从历史回执提交取得本目录。更新后的工作树也可运行相同入口，但所得结果属于其实际 HEAD，需另记源码版本和输出。
+复现上表历史结果时，应在单独 checkout 固定到上述历史源码 SHA，并从历史回执提交取得证据目录；将本文同目录的现行复跑脚本复制到该 checkout 的相同位置。下面的历史矩阵脚本仅支持当时 `PINVOU_WINDOWS_MAC_ENABLED` 的二分支表达式；现行脚本会先核对固定源码的工作流和测试文件 SHA-256，拒绝把其它输入标作这 60 项历史复跑。两个摘要不证明其余依赖等价，仍须使用完整历史 checkout。
 
 ```sh
 git submodule update --init --recursive
@@ -77,6 +77,14 @@ npm --prefix pinvou3-app run build:web
 python3 scripts/architecture-guard.py
 ./scripts/fork-guard.sh --fast
 ```
+
+当前工作树已采用独立 Windows/macOS 开关的四分支矩阵。验证当前契约应直接运行现行测试入口，不使用上述历史负控脚本：
+
+```sh
+node pinvou3-app/tests/tauri_platform_layout.test.js
+```
+
+其它常规构建、测试入口也应以当前 `CONTRIBUTING.md` 和工作流为准。当前运行需另记实际 HEAD、输入摘要和输出；它不复现或改写本包的历史计数与 manifest。
 
 Linux Rust（cwd 为 `pinvou3-app/src-tauri`）：
 

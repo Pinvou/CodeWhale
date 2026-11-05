@@ -10,8 +10,9 @@ The matrix verifies all fourteen instances: non-administrator accounts, D-drive
 work/cache/temp paths, native Windows file locking and process-resource limits,
 authenticated checkout, Node 24 setup, version consistency, and existing
 application contracts. Each job records its actual runner, pool, commit, limits,
-and paths. Account isolation opens the other runner's existing `.env` in its
-declared installation directory without reading its contents; no manually
+and paths. Account isolation checks read-open denial for the other runner's
+`.env` and credential stores in its declared installation directory without
+reading their contents; no manually
 created probe file is required. The peer is selected through an explicit
 administrator-maintained identity/path
 mapping. A missing declaration or an unverifiable path fails the check.
@@ -22,7 +23,7 @@ host provisioning mechanism:
 | Variable | Required meaning |
 | --- | --- |
 | `CI_RUNNER_INSTANCE_ROOT` | This runner's absolute D-drive installation directory, directly containing `.runner` and `.env`. |
-| `CI_RUNNER_PEER_ROOT` | Another registered runner's absolute D-drive installation directory, directly containing its `.runner` and `.env`. |
+| `CI_RUNNER_PEER_ROOT` | Another registered runner's absolute D-drive installation directory, directly containing its `.runner`, `.env`, and at least one supported credential store. |
 | `CI_RUNNER_PEER_NAME` | The other runner's registered name from the administrator's mapping. It must differ from the current `RUNNER_NAME`. |
 
 For these variables, the installation directory is the directory holding the
@@ -40,19 +41,39 @@ do not pass that validation. The helper checks the current `.runner` JSON's
 `agentName` against the runner-provided `RUNNER_NAME`. It normalizes case,
 separators and dot segments, then rejects identical names, overlapping roots
 and physical aliases after strict native path resolution. Both real directories
-and the peer's existing regular `.runner`
-and `.env` files must have verifiable metadata; peer configuration reparse
-points are rejected. It then opens a read handle without reading any `.env`
-contents. Native `CreateFileW`/`CloseHandle` calls preserve the Windows error
-code; only `ERROR_ACCESS_DENIED` (5) from that open establishes the expected
-read-ACL denial.
+and the peer's existing regular `.runner` and `.env` files must have verifiable
+metadata. At least one of `.credentials` or `.credentials_migrated` must exist,
+matching the runner's
+[credential-presence contract](https://github.com/actions/runner/blob/cf65f3ec8100ee0046d735ac5d647e00f4b8e817/src/Runner.Common/ConfigurationStore.cs).
+Every existing credential store is checked, including both when both exist;
+a legitimate migrated-only runner is supported. `.credentials_rsaparams` is
+also checked whenever present. The Windows runner's
+[RSA file implementation](https://github.com/actions/runner/blob/cf65f3ec8100ee0046d735ac5d647e00f4b8e817/src/Runner.Listener/Configuration/RSAEncryptedFileKeyManager.cs)
+uses machine-scoped encryption, so its bytes must still be protected from peer
+reads. A non-required file is skipped only after an explicit missing-file
+metadata result. Permission denial, missing parent or an unknown metadata error
+cannot establish absence, and missing both credential stores fails validation.
+All existing files must be regular with verifiable metadata; peer configuration
+reparse points are rejected. The helper then opens a read handle for `.env` and
+each discovered credential/RSA store without reading any contents. Native
+`CreateFileW` requests only
+[`FILE_READ_DATA` (`0x0001`)](https://learn.microsoft.com/en-us/windows/win32/fileio/file-access-rights-constants),
+with `OPEN_EXISTING` and read/write/delete sharing. A denied `GENERIC_READ`
+request is insufficient: that bundle includes metadata and security-descriptor
+rights, so its denial can coexist with permission to read file data.
+[`CreateFileW`/`CloseHandle`](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-createfilew)
+preserve the Windows error code; only
+`ERROR_ACCESS_DENIED` (5) from every protected file's open establishes the
+expected read-ACL denial.
 A sharing violation, missing file, unexpected error or readable handle fails.
 If directory or file ACLs also hide the required metadata, validation remains
 blocked rather than treating that uncertainty as isolation evidence.
 
 The Python behavior tests also run on Linux with controlled Windows filesystem
 outcomes. They cover path normalization, identity checks, aliases, missing files,
-error handling and the absence of `.env` reads. They do not establish native
+error handling, both credential-store layouts, optional RSA presence, and the
+case where generic read is denied but data read is allowed. They also check the
+absence of peer configuration or credential content reads. They do not establish native
 Windows path resolution or ACL behavior; a successful native run of this manual
 workflow is still required. This change has not been tested on a native Windows
 runner.
