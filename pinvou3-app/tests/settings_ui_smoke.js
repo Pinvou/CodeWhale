@@ -671,6 +671,15 @@ async function modalWidth(page, headingText) {
 
   // Exercise the Official App -> SettingsView callback and actual bridge payload.
   await page.emulateMediaFeatures([{ name: 'prefers-color-scheme', value: 'dark' }]);
+  // The .dark class is toggled from a passive useEffect on the media query,
+  // so an absence assertion needs the media change to be observed and one
+  // render committed first — otherwise the check can read the pre-effect DOM
+  // and vacuously pass exactly when explicit light wrongly follows the OS.
+  await page.waitForFunction(() => window.matchMedia('(prefers-color-scheme: dark)').matches);
+  await page.evaluate(() => new Promise(resolve => {
+    requestAnimationFrame(() => { requestAnimationFrame(resolve); });
+  }));
+  await sleep(200);
   rec('① 旧显式浅色偏好不随系统变深', await page.evaluate(() => !document.documentElement.classList.contains('dark')));
   await clickExact(page, '跟随系统');
   await page.waitForFunction(() => document.documentElement.classList.contains('dark')
@@ -687,6 +696,9 @@ async function modalWidth(page, headingText) {
   await clickExact(page, '浅色');
   await page.waitForFunction(() => !document.documentElement.classList.contains('dark')
     && window.__SETTINGS_TEST__.settings().color_scheme === 'light');
+  rec('① 显式浅色恢复初始偏好与旧主题镜像', await page.evaluate(() =>
+    window.__SETTINGS_TEST__.settings().color_scheme === 'light'
+      && window.__SETTINGS_TEST__.settings().theme === 'liquid-light'));
 
   const voiceShortcutRow = await page.evaluate(() => {
     const row = [...document.querySelectorAll('div')].filter(node => (node.textContent || '').includes('启用 Alt 唤醒语音') && node.querySelector('[role="switch"]')).pop();

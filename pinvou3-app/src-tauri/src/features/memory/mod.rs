@@ -43,8 +43,8 @@ pub use self::types::profile_label_would_be_wiped;
 // pending_memory_path / never_memory_path）已在 io 内降为 pub(crate)，
 // 调用方经 `io::` 路径使用，无需 re-export。
 pub use self::io::{
-    current_focus_path, profile_path, recent_activity_path, recent_work_path, runtime_prompt_path,
-    snapshot_path, work_context_dir,
+    current_focus_path, display_redacted, profile_path, recent_activity_path, recent_work_path,
+    runtime_prompt_path, snapshot_path, work_context_dir,
 };
 
 // ---- 实体存储读写 pub 入口（io）----

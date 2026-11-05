@@ -12,11 +12,9 @@ const read = (...parts) => fs.readFileSync(path.join(root, ...parts), 'utf8');
 // 与 MonitorView.jsx 的 MonitorMetricCard(值为 — 时不渲染 unit)配套。
 // 防止某一侧单独回退成字面 "0 s"/"0 tok/s" 造成桌面/网页显示漂移。
 // #701 T0-a/C 壳化 + T4a web 大 C 面壳化：两侧 pollMonitor 均已委托
-// helpers（格式化本体在共享基座），两 lane 都钉共享基座（上游同形）。
-const bridges = {
-  tauri: read('src', 'shared', 'bridge-shared-helpers.js'),
-  web: read('src', 'shared', 'bridge-shared-helpers.js'),
-};
+// helpers（格式化本体在共享基座），两 lane 都钉共享基座（上游同形）——
+// 单次读取即可覆盖两 lane。
+const sharedBridgeSource = read('src', 'shared', 'bridge-shared-helpers.js');
 // T4a：web pollMonitor 壳必须保留（转发面结构钉）。
 assert.match(
   read('src', 'platform', 'web', 'bridge.js'),
@@ -64,33 +62,31 @@ const TTFT_FALLBACK_PATTERN =
 const TPS_FALLBACK_PATTERN =
   /vllmTps: sadj && sadj\.tps_time_s > 0\s*\?\s*\(sadj\.tps_tokens \/ sadj\.tps_time_s\)\.toFixed\(1\) \+ " tok\/s" : "—"/;
 
-for (const [name, source] of Object.entries(bridges)) {
-  assert.match(
-    source,
-    TTFT_FALLBACK_PATTERN,
-    `${name} bridge TTFT 无数据必须回退为 —`,
-  );
-  assert.match(
-    source,
-    TPS_FALLBACK_PATTERN,
-    `${name} bridge TPS 无数据必须回退为 —`,
-  );
-  assert.doesNotMatch(
-    source,
-    /vllmTtft:[\s\S]*?toFixed\(2\) \+ " s" : "0 s"/,
-    `${name} bridge TTFT 无数据不得回退为字面 "0 s"`,
-  );
-  assert.doesNotMatch(
-    source,
-    /vllmTps:[\s\S]*?toFixed\(1\) \+ " tok\/s" : "0 tok\/s"/,
-    `${name} bridge TPS 无数据不得回退为字面 "0 tok/s"`,
-  );
-}
+assert.match(
+  sharedBridgeSource,
+  TTFT_FALLBACK_PATTERN,
+  'bridge TTFT 无数据必须回退为 —',
+);
+assert.match(
+  sharedBridgeSource,
+  TPS_FALLBACK_PATTERN,
+  'bridge TPS 无数据必须回退为 —',
+);
+assert.doesNotMatch(
+  sharedBridgeSource,
+  /vllmTtft:[\s\S]*?toFixed\(2\) \+ " s" : "0 s"/,
+  'bridge TTFT 无数据不得回退为字面 "0 s"',
+);
+assert.doesNotMatch(
+  sharedBridgeSource,
+  /vllmTps:[\s\S]*?toFixed\(1\) \+ " tok\/s" : "0 tok\/s"/,
+  'bridge TPS 无数据不得回退为字面 "0 tok/s"',
+);
 
 // Exercise the shipped shared poller through both lane factories. Even a
 // stale/contradictory backend snapshot must not paint an invalid target online.
 const bridgeWindow = {};
-vm.runInNewContext(bridges.tauri, { window: bridgeWindow, console });
+vm.runInNewContext(sharedBridgeSource, { window: bridgeWindow, console });
 for (const lane of ['tauriMonitor', 'web']) {
   for (const kind of ['local', 'remote', 'invalid', 'unknown', undefined]) {
     for (const status of ['ready', 'busy', 'offline', 'mismatch']) {
@@ -127,4 +123,4 @@ for (const lane of ['tauriMonitor', 'web']) {
   }
 }
 
-console.log('monitor bridge 无数据 TTFT/TPS fallback 在 tauri/web 两份 bridge 中一致为 —');
+console.log('monitor bridge 无数据 TTFT/TPS fallback 断言通过(共享 bridge 源单次读取)');

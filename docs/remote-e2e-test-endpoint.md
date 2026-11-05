@@ -8,6 +8,8 @@
 
 脚本全权管理的 `relay-tunnel` 是生成的专用 nologin 账户，不是运维登录账号；其 key 只准指定 loopback 端口的 remote forwarding，禁止 shell、PTY、agent/X11 forwarding 与 local forwarding。服务布局是脚本管理的通用测试默认值，不能据此推断真实线上资产。
 
+若公网入口另有一层边缘代理，该层需将测试路由转发到配置的前端代理；脚本只管理配置的前端代理，不自动配置外层边缘代理。实际拓扑与路由验证记录由受控运维清单维护。反向隧道用于无法从代理直连测试端口、但 Relay 能向代理建立 SSH 连接的部署环境。
+
 ## 必填受控配置
 
 实际目标 `RELAY_SERVER` / `PROXY_SERVER` 和独立登记值 `EXPECTED_RELAY_SERVER` / `EXPECTED_PROXY_SERVER` 必须全部显式提供并逐项一致；格式为 `<ssh-user>@<literal-ipv4>`。从运维清单独立核对登记值，不能由实际目标派生。部署私钥路径由 `SSH_KEY` 显式提供，不再使用个人默认文件。

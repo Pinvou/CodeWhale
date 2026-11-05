@@ -618,38 +618,45 @@ pub async fn delete_model(id: String) -> Result<(), String> {
 }
 
 pub(super) fn delete_model_inner(id: &str, store: &dyn CredentialStore) -> Result<(), String> {
-    // The keyring delete runs after the prefs save has succeeded: deleting
-    // first would leave a configured-but-secretless model when the save then
-    // fails; after a successful save, a failed delete only leaves an orphaned
-    // credential (the benign direction).
-    let mut reference_to_delete: Option<CredentialReference> = None;
-    UserPrefs::update_transaction(|prefs| {
-        if prefs
-            .model_by_id(id)
-            .is_some_and(|model| model.is_builtin_llmapi())
-        {
-            return Err("内置模型不可删除".to_string());
-        }
-        if prefs.advanced.saved_models.len() <= 1 {
-            return Err("至少保留一个模型".to_string());
-        }
-        if let Some(reference) = prefs.model_by_id(id).and_then(|m| m.credential_ref.clone()) {
-            reference_to_delete = Some(reference);
-        }
-        prefs.remove_model(id);
-        Ok(())
-    })
+    // The keyring delete runs in the post-commit hook, still inside the
+    // prefs-lock critical section: deleting first would leave a
+    // configured-but-secretless model when the save then fails, and deleting
+    // after the lock was released would let a concurrent replacement of the
+    // same model credential commit a fresh secret that the stale delete then
+    // destroys. After a successful save, a failed delete only leaves an
+    // orphaned credential (the benign direction).
+    let reference_to_delete = std::cell::RefCell::new(None);
+    UserPrefs::update_transaction_with_post_commit(
+        |prefs| {
+            if prefs
+                .model_by_id(id)
+                .is_some_and(|model| model.is_builtin_llmapi())
+            {
+                return Err("内置模型不可删除".to_string());
+            }
+            if prefs.advanced.saved_models.len() <= 1 {
+                return Err("至少保留一个模型".to_string());
+            }
+            if let Some(reference) = prefs.model_by_id(id).and_then(|m| m.credential_ref.clone()) {
+                *reference_to_delete.borrow_mut() = Some(reference);
+            }
+            prefs.remove_model(id);
+            Ok(())
+        },
+        || {
+            if let Some(reference) = reference_to_delete.borrow_mut().take() {
+                if let Err(error) = store.delete(&reference) {
+                    log::warn!(
+                        "delete_model: model {id} removed, but its keyring secret could not \
+                         be deleted: {}",
+                        error.user_message()
+                    );
+                }
+            }
+        },
+    )
     .map(|_| ())
     .map_err(|e| sanitize_command_error("delete_model", e))?;
-    if let Some(reference) = reference_to_delete {
-        if let Err(error) = store.delete(&reference) {
-            log::warn!(
-                "delete_model: model {id} removed, but its keyring secret could not be \
-                 deleted: {}",
-                error.user_message()
-            );
-        }
-    }
     Ok(())
 }
 
@@ -1568,11 +1575,16 @@ pub struct WebSettingsPatch {
 ///
 /// Phase C 会做 in-place engine restart（处理 in-flight turn）。
 #[tauri::command]
-pub async fn update_settings(patch: GeneralSettingsPatch) -> Result<UserPrefs, String> {
+pub async fn update_settings(
+    app: tauri::AppHandle,
+    patch: GeneralSettingsPatch,
+) -> Result<UserPrefs, String> {
     // Round-51 review: the settings transaction holds the cross-process
     // settings.json.lock across keychain I/O — join the blocking body on a
     // spawn_blocking worker like the sibling model commands.
-    join_blocking("update_settings", move || persist_general_settings(patch)).await
+    let prefs = join_blocking("update_settings", move || persist_general_settings(patch)).await?;
+    crate::features::system_tray::refresh_language(&app, prefs.language);
+    Ok(prefs)
 }
 
 fn apply_general_settings_patch(current: &mut UserPrefs, patch: GeneralSettingsPatch) {

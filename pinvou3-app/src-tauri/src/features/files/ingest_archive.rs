@@ -14,6 +14,7 @@ use super::IngestResult;
 use super::classify;
 use super::ingest;
 use super::ingest_deps::{archive_tool_command, system_tools};
+use super::ingest_diagnostics::safe_error;
 use crate::features::files::platform::archive_entry::is_link_or_reparse_point;
 
 const MAX_ARCHIVE_ENTRIES: usize = 50;
@@ -49,17 +50,14 @@ pub(super) fn ingest_archive(
                 max_bytes: MAX_ARCHIVE_EXPANDED_BYTES,
             });
         }
-        Err(e) => return Ok(mk_err(format!("压缩包内容读取失败: {e}"))),
+        Err(e) => return Ok(mk_err(safe_error(format!("压缩包内容读取失败: {e}")))),
     }
 
-    let ts = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let tmpdir = std::env::temp_dir().join(format!("pinvou3-archive-{ts}"));
-    if let Err(e) = std::fs::create_dir_all(&tmpdir) {
-        return Ok(mk_err(format!("创建临时目录失败: {e}")));
-    }
+    let temporary = match super::super::platform::private_conversion_directory("pinvou3-archive-") {
+        Ok(directory) => directory,
+        Err(e) => return Ok(mk_err(safe_error(format!("创建临时目录失败: {e}")))),
+    };
+    let tmpdir = temporary.path().to_owned();
 
     // 解压上限 100 MiB，300s 预算覆盖慢盘上的解压；卡死的 7z（畸形包、
     // 杀软占用）按超时 kill-tree，上传不再永久转圈（同 pdftotext 的兜底）。
@@ -81,7 +79,7 @@ pub(super) fn ingest_archive(
             Err(e) => e,
         };
         let _ = std::fs::remove_dir_all(&tmpdir);
-        return Ok(mk_err(format!("7z 解压失败: {detail}")));
+        return Ok(mk_err(safe_error(format!("7z 解压失败: {detail}"))));
     }
 
     // 递归收集文件，对每个调主 ingest；嵌套压缩包不展开。
@@ -89,7 +87,7 @@ pub(super) fn ingest_archive(
         Ok(path) => path,
         Err(e) => {
             let _ = std::fs::remove_dir_all(&tmpdir);
-            return Ok(mk_err(format!("解析临时目录失败: {e}")));
+            return Ok(mk_err(safe_error(format!("解析临时目录失败: {e}"))));
         }
     };
     let mut files = Vec::new();
@@ -178,12 +176,40 @@ fn archive_list_stats(path: &Path) -> Result<(usize, u64), String> {
         command,
         std::time::Duration::from_secs(60),
     )
-    .map_err(|e| format!("7z 调用失败: {e}"))?;
+    .map_err(|e| safe_error(map_archive_list_error(e)))?;
     if !out.status.success() {
-        return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+        return Err(safe_error(String::from_utf8_lossy(&out.stderr).trim()));
     }
     let text = String::from_utf8_lossy(&out.stdout);
     parse_archive_list_stats(&text)
+}
+
+/// 把 `7z l` 的平台层错误映射成面向用户的拒绝原因。列表输出本身越过
+/// 4 MiB 捕获上限 ≈ 条目数多到无法枚举（每条目 ~400-500 字节）：按「条
+/// 目过多」报因，而不是把平台层溢出文案（含内嵌输出）透传给用户。条目
+/// 数上限本来就是 50，这里只是让拒绝原因可读。超时文案同样内嵌捕获输出
+/// （超时前已列出的部分列表），故同样只回固定文案、不透传 raw——两条
+/// 锚点路径都不让内嵌输出进拒绝原因。
+///
+/// 与 connector/pkexec 边界同规则：按锚点首次出现位置取先者——子进程自
+/// 己的输出恰好含另一条锚点文本（如超时 detail 里带 "output exceeded"）
+/// 时不得翻转归因；两条路都拒绝，错的只是拒绝原因。其余形态（spawn /
+/// wait / readback 失败）不含捕获输出，raw 透传保留诊断价值。
+fn map_archive_list_error(error: String) -> String {
+    let timeout = error.find(crate::platform::process::CAPTURE_TIMEOUT_ANCHOR);
+    let overflow = error.find(crate::platform::process::CAPTURE_OVERFLOW_ANCHOR);
+    let overflow_first = match (timeout, overflow) {
+        (None, Some(_)) => true,
+        (Some(t), Some(o)) => o < t,
+        _ => false,
+    };
+    if overflow_first {
+        String::from("7z 列表输出超出捕获上限：条目过多，已终止列举进程")
+    } else if timeout.is_some() {
+        String::from("7z 列表超时：已终止列举进程，请重试")
+    } else {
+        format!("7z 调用失败: {error}")
+    }
 }
 
 fn parse_archive_list_stats(text: &str) -> Result<(usize, u64), String> {
@@ -300,6 +326,61 @@ mod tests {
 
     fn is_symlink_permission_error(error: &std::io::Error) -> bool {
         error.kind() == std::io::ErrorKind::PermissionDenied || error.raw_os_error() == Some(1314)
+    }
+
+    /// 溢出错误必须映射成「条目过多」，且归因按锚点首次出现位置取先者：
+    /// 超时 detail 里恰好含溢出锚点文本时仍按超时报因（两条路都拒绝，
+    /// 错的只是拒绝原因）。platform 侧格式漂移由 connector/pkexec 同款
+    /// 常量引用兜住，这里钉的是本边界的归因规则本身。
+    #[test]
+    fn archive_list_error_maps_overflow_by_first_anchor_occurrence() {
+        let overflow = map_archive_list_error(String::from(
+            "7z output exceeded 4194304 bytes; subprocess tree termination requested: no subprocess output",
+        ));
+        assert!(
+            overflow.contains("条目过多"),
+            "an overflow must map to the entry-count rejection: {overflow}"
+        );
+        assert!(
+            !overflow.contains("7z output exceeded"),
+            "the platform message with embedded output must not pass through: {overflow}"
+        );
+
+        // 子进程输出里含 "output exceeded" 的超时错误：溢出锚点在后，按
+        // 超时归因（不得翻转）。超时 detail 内嵌已列出的部分列表，拒绝
+        // 原因只回固定超时文案，内嵌输出不得透传。
+        let spoofed_timeout = map_archive_list_error(String::from(
+            "7z timed out after 60s: stderr:\nlisting stopped: output exceeded quota",
+        ));
+        assert!(
+            !spoofed_timeout.contains("条目过多"),
+            "a timeout whose detail mentions the overflow anchor must not be misattributed: {spoofed_timeout}"
+        );
+        assert!(
+            spoofed_timeout.contains("7z 列表超时"),
+            "a timeout must map to the fixed timeout rejection: {spoofed_timeout}"
+        );
+        assert!(
+            !spoofed_timeout.contains("listing stopped"),
+            "the embedded capture must not pass through: {spoofed_timeout}"
+        );
+
+        // 超时 detail 内嵌真实列表内容（路径/大小行）时同样不得透传。
+        let timeout_with_listing = map_archive_list_error(String::from(
+            "7z timed out after 60s: stdout:\nPath = /private/var/secret/leaked.7z\nSize = 12345",
+        ));
+        assert!(
+            timeout_with_listing.contains("7z 列表超时"),
+            "{timeout_with_listing}"
+        );
+        assert!(
+            !timeout_with_listing.contains("leaked.7z") && !timeout_with_listing.contains("Path ="),
+            "the embedded partial listing must not pass through: {timeout_with_listing}"
+        );
+
+        // spawn/wait 等无锚点错误：原样透传包装。
+        let plain = map_archive_list_error(String::from("spawn 7z failed: program not found"));
+        assert_eq!(plain, "7z 调用失败: spawn 7z failed: program not found");
     }
 
     #[test]

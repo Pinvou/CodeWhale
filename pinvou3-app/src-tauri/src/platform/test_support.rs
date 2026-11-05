@@ -360,3 +360,20 @@ pub(crate) fn write_test_zip(prefix: &str, entries: &[(&str, Vec<u8>)]) -> std::
     std::fs::write(&tmp, zip_buf.into_inner()).unwrap();
     tmp
 }
+
+/// 测试把文件权限改成指定 mode(unix);非 unix 平台恒返 false(调用方按
+/// 「平台不支持即跳过」处理)。与 [`crate::platform::filesystem::permission_bits`]
+/// 读侧配对使用。
+#[cfg(test)]
+pub(crate) fn force_private_file_mode(path: &std::path::Path, mode: u32) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).is_ok()
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (path, mode);
+        false
+    }
+}

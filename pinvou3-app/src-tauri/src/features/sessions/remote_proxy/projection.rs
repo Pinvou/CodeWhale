@@ -287,9 +287,11 @@ impl SessionStore {
         let pending = &record.pending[index];
         if pending.request_fingerprint != fingerprint
             || pending.dispatch_state != PendingDispatchState::AttemptMayHaveOccurred
-            || record.retired_requests.len() >= MAX_RETIRED_REQUESTS
         {
             bail!("terminal correlation or capacity mismatch");
+        }
+        if record.retired_requests.len() >= MAX_RETIRED_REQUESTS {
+            return Err(super::schema::RemoteProxyCapacityError::RetirementBudget.into());
         }
         record.pending.remove(index);
         record.retired_requests.push(RetiredRemoteRequest {

@@ -65,7 +65,7 @@
   // APP_BRIDGE_STATE_DOMAINS 保持同步 —— tests/bridge_state_domains.test.mjs 锁定。
   const STATE_SLICE_FIELDS = {
     platform: ["appVersion", "backendOnline", "platformCapabilities"],
-    sessions: ["sessions", "archivedSessions", "activeSessionId", "sessionBusy", "draftEpoch", "draftWorkspacePath"],
+    sessions: ["sessions", "archivedSessions", "activeSessionId", "sessionBusy", "draftEpoch", "draftWorkspacePath", "controlledLocalNavigationEpoch"],
     chat: ["activeSkill", "artifacts", "artifactChange", "attachments", "busy", "chatItems", "composerDraft", "composerPrefill", "messages", "modeState", "planSnapshot", "queued", "remoteProxyDraftError", "thinking", "tokens", "turnDirtyArtifacts", "turnPresentedArtifacts", "turnTimeline"],
     voice: ["voiceInput", "voiceAsrSetup"],
     knowledge: ["kbModelSetup", "mountedCollection", "mountedCollections", "mountedRemoteCollections", "mountedCollectionsRevision"],
@@ -83,6 +83,8 @@
     // Windows 双端远程控制（DEV-20）：与 Web 分享完全独立的状态域（官方 F 面）。
     desktopRemoteControl: [
       "controlledDevice",
+      "controlledNavigationIntent",
+      "controlledNavigationPending",
       "controlledSession",
       "controllerConnection",
       "remoteCapabilities",

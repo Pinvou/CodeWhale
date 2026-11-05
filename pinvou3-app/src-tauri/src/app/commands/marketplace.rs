@@ -231,11 +231,15 @@ pub async fn install_marketplace_tool(
     let install_tool_id = tool_id.clone();
     // The sync write can block on the cross-process flock (#515): keep the
     // deny-first core off the executor.
-    tokio::task::spawn_blocking(move || {
+    let installed = tokio::task::spawn_blocking(move || {
         install_marketplace_tool_sync(&install_tool_id, &user_config)
     })
     .await
-    .map_err(|e| format!("任务执行失败: {e}"))??;
+    .map_err(|e| format!("任务执行失败: {e}"))
+    .and_then(std::convert::identity);
+    if let Err(error) = installed {
+        return telemetry_install.finish(Err(error));
+    }
 
     // Post-install may refuse (consent persist, divergent-companion gate)
     // AFTER the sync install above has committed the tool and its mcp.json
@@ -262,18 +266,7 @@ pub async fn install_marketplace_tool(
     // admission — a package's native tool stays denied, and a newly installed
     // connector's tools stay admitted — until respawn.
     hot_refresh(&pool, true).await;
-    match post_install {
-        Ok(()) => {
-            telemetry_install.success();
-            Ok(())
-        }
-        Err(err) => {
-            // Official behavior telemetry: a failed post-install leg (consent
-            // sync / validation rollback) is a failed install.
-            telemetry_install.failed(&err);
-            Err(err)
-        }
-    }
+    telemetry_install.finish(post_install)
 }
 
 /// 变更落盘后的统一热刷收尾（安装/卸载/更新/导入/恢复各命令共用，替代各自
@@ -791,9 +784,14 @@ pub async fn install_marketplace_skill(
     let telemetry_install =
         crate::features::behavior_telemetry::begin_tool_install(&app, &skill_id, "skill");
     let install_skill_id = skill_id.clone();
-    tokio::task::spawn_blocking(move || install_marketplace_skill_sync(&install_skill_id))
-        .await
-        .map_err(|e| format!("任务执行失败: {e}"))??;
+    let installed =
+        tokio::task::spawn_blocking(move || install_marketplace_skill_sync(&install_skill_id))
+            .await
+            .map_err(|e| format!("任务执行失败: {e}"))
+            .and_then(std::convert::identity);
+    if let Err(error) = installed {
+        return telemetry_install.finish(Err(error));
+    }
     // The install affects both scopes' enabled sets: an initialized DenyAll
     // scope (plain included) keeps a newly installed skill off by default
     // (synced into the scope disabled sets, see install_marketplace_skill_sync);
@@ -948,7 +946,7 @@ pub async fn update_bundle_display_meta(
     result
 }
 
-/// Unique temp zip path for the upload channels (pid + monotonic nanos).
+/// Unique temp zip path for the upload channels (pid + wall-clock nanos).
 fn temp_upload_zip_path(prefix: &str) -> std::path::PathBuf {
     std::env::temp_dir().join(format!(
         "{prefix}-{}-{}.zip",

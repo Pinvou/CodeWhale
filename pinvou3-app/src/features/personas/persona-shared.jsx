@@ -65,7 +65,7 @@ export const AppIcon = ({ card, cls = 'w-14 h-14 rounded-[14px]', fb = 26 }) => 
             <div onClick={onOpenPicker} title={t.cpLanyardSwap}
               className="relative rounded-[14px] p-3 w-[150px] cursor-pointer transition-transform hover:-translate-y-0.5 bg-[#fff] dark:bg-[#1C1C1E] border border-[rgba(0,0,0,.06)] dark:border-[#2c2c2e]"
               style={{ boxShadow:'0 8px 24px -8px rgba(0,0,0,.3)' }}>
-              <button onClick={(e)=>{ e.stopPropagation(); onRemove(); }} title={t.cpLanyardRemove}
+              <button type="button" onClick={(e)=>{ e.stopPropagation(); onRemove(); }} title={t.cpLanyardRemove}
                 className="absolute -top-2 -right-2 w-5 h-5 rounded-full flex items-center justify-center text-[11px] leading-none bg-[#fff] dark:bg-[#2C2C2E] border border-[rgba(0,0,0,.1)] dark:border-[#48484a]"
                 style={{ color:'#8E8E93', boxShadow:'0 2px 6px rgba(0,0,0,.15)' }}>✕</button>
               <div className="flex flex-col items-center text-center gap-2">

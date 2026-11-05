@@ -77,7 +77,7 @@ test('production sessions facade keeps navigation distinct from background and v
   assert.equal(sessionsPorts.isRemoteProxyReadCurrent(record), true);
 });
 
-test('real backend capability projection fails closed until Windows support is loaded', async () => {
+test('real backend capability projection follows loaded host support and fails closed on errors', async () => {
   const h = host();
   const { can } = await import('../src/shared/platform.js');
   const previous = globalThis.window;
@@ -85,11 +85,11 @@ test('real backend capability projection fails closed until Windows support is l
   try {
     assert.equal(h.api.desktopRemoteControl.isAvailable(), false);
     assert.equal(can('desktopRemoteControl'), false);
-    for (const os of ['windows', 'macos', 'linux', 'unknown']) {
-      h.respond(async () => ({ os, desktopRemoteControlSupported: true }));
+    for (const [os, supported] of [['windows', true], ['macos', false], ['linux', true], ['unknown', false]]) {
+      h.respond(async () => ({ os, desktopRemoteControlSupported: supported }));
       await h.api.platform.loadPlatformCapabilities();
-      assert.equal(h.api.desktopRemoteControl.isAvailable(), os === 'windows');
-      assert.equal(can('desktopRemoteControl'), os === 'windows');
+      assert.equal(h.api.desktopRemoteControl.isAvailable(), supported);
+      assert.equal(can('desktopRemoteControl'), supported);
     }
     h.respond(async () => ({ os: 'windows', desktopRemoteControlSupported: true }));
     await h.api.platform.loadPlatformCapabilities();
