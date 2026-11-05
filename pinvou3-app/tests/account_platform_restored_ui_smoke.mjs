@@ -191,6 +191,59 @@ try {
     await page.waitForSelector('.adm-organization-directory .adm-name-link');
     assert.equal(new URL(page.url()).searchParams.get('organization_q'), 'sample');
   });
+  await run('organization fieldless dialogs identify targets before confirmation and retain unknown writes', async () => {
+    const orgID = '33333333-3333-4333-8333-333333333333', unitID = '44444444-4444-4444-8444-444444444444';
+    for (const language of ['zh', 'en', 'ja']) for (const operation of ['deleteUnit', 'disable', 'enable']) {
+      const tab = operation === 'deleteUnit' ? 'units' : 'lifecycle';
+      await fresh(`?mode=admin&section=organizations&organization_id=${orgID}&organization_tab=${tab}`);
+      await page.evaluate(({ language, operation }) => {
+        window.restored.language = language;
+        window.restored.orgStatus = operation === 'enable' ? 'DISABLED' : 'ACTIVE';
+        window.restored.noUnitMembers = operation === 'deleteUnit';
+        window.restored.reload();
+      }, { language, operation });
+      const words = await page.evaluate(() => window.restored.copy().organization);
+      await page.waitForFunction(({ title }) => [...document.querySelectorAll('.adm-organization-directory button')].some(node => node.textContent.trim() === title && node.getClientRects().length), {}, { title: words[operation] });
+      const open = () => click('.adm-organization-directory button', words[operation]);
+      const writes = () => page.evaluate(() => window.restored.calls.filter(call => call.method !== 'GET' && !call.url.endsWith('/account/bootstrap')));
+      await open(); await page.waitForSelector('[role=dialog] .ap-org-action-target');
+      const target = await page.$eval('[role=dialog] .ap-org-action-target', node => node.textContent);
+      assert.ok(target.includes('Sample organization') && target.includes(orgID), 'first dialog identifies the organization');
+      if (operation === 'deleteUnit') assert.ok(target.includes('Sample unit') && target.includes(unitID), 'unit deletion identifies both parent and unit');
+      assert.equal(await page.$$eval('[role=dialog] fieldset', nodes => nodes.length), 0, 'fieldless actions must not show an empty fieldset');
+      const description = words[operation === 'deleteUnit' ? 'deleteUnitDescription' : operation === 'disable' ? 'disableOrganizationDescription' : 'enableOrganizationDescription'];
+      assert.equal(await page.$eval('[role=dialog] .ap-org-action-description', node => node.textContent), description);
+      if (process.env.UI_ARTIFACT_DIR && language === 'zh') {
+        fs.mkdirSync(process.env.UI_ARTIFACT_DIR, { recursive: true });
+        await page.screenshot({ path: path.join(process.env.UI_ARTIFACT_DIR, `admin-${operation}-target-dialog.png`), fullPage: true });
+      }
+      await page.keyboard.press('Escape'); await page.waitForFunction(() => !document.querySelector('[role=dialog]'));
+      assert.equal((await writes()).length, 0, 'opening and cancelling never mutates');
+      await open(); await page.click('[role=dialog] form>button[type=submit]');
+      await page.waitForSelector('[role=alertdialog]');
+      assert.ok((await page.$eval('[role=alertdialog]', node => node.textContent)).includes(description), 'final confirmation retains impact explanation');
+      assert.ok((await page.$eval('[role=alertdialog] dd', node => node.textContent)).includes('Sample organization'));
+      assert.equal((await writes()).length, 0, 'first submit still requires confirmation');
+      await page.keyboard.press('Escape'); await page.waitForSelector('[role=dialog] .ap-org-action-target');
+      assert.equal((await writes()).length, 0, 'cancelling final confirmation never mutates');
+      await page.click('[role=dialog] form>button[type=submit]'); await page.waitForSelector('[role=alertdialog]');
+      await page.evaluate(() => { window.restored.unknownOrgAction = true; });
+      await click('[role=alertdialog] button', words.confirmAction);
+      await page.waitForFunction(retry => [...document.querySelectorAll('[role=dialog] form>button')].some(node => node.textContent.trim() === retry && !node.disabled), {}, words.retry);
+      const original = await writes(); assert.equal(original.length, 1);
+      assert.equal(typeof original[0].key, 'string');
+      assert.ok(original[0].key.trim().length > 0, 'accepted write carries an idempotency key');
+      assert.equal(original[0].method, operation === 'deleteUnit' ? 'DELETE' : 'PATCH');
+      assert.equal(original[0].url, `/api/admin/account/admin/v1/organizations/${orgID}${operation === 'deleteUnit' ? `/units/${unitID}` : '/status'}`);
+      assert.deepEqual(JSON.parse(original[0].body), operation === 'deleteUnit' ? {} : { status: operation === 'disable' ? 'DISABLED' : 'ACTIVE' });
+      await page.keyboard.press('Escape'); assert.ok(await page.$('[role=dialog]'), 'unknown result stays recoverable');
+      await click('[role=dialog] form>button', words.retry);
+      await page.waitForFunction(() => !document.querySelector('[role=dialog]'));
+      const replay = await writes(); assert.equal(replay.length, 2);
+      assert.equal(replay[0].key, replay[1].key); assert.equal(replay[0].body, replay[1].body);
+      assert.equal(await page.evaluate(() => window.restored.effects.size), 1, 'controlled service retains one request identity');
+    }
+  });
   await run('organization deletion remains disabled for active or blocked resources and requires the name', async () => {
     const id = '33333333-3333-4333-8333-333333333333';
     await fresh(`?mode=admin&section=organizations&organization_id=${id}&organization_tab=lifecycle`);

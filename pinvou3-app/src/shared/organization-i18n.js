@@ -183,6 +183,22 @@ Object.assign(organizationCopy.en, { cancelConfirmation: 'Cancel', confirmAction
 Object.assign(organizationCopy.ja, { cancelConfirmation: 'キャンセル', confirmAction: '実行を確認', confirmationTarget: '操作対象' });
 
 Object.assign(organizationCopy.zh, {
+ deleteUnitDescription: '删除前会检查该单元的关联资源；存在阻断条件时不会删除。请核对所属组织和单元，继续后仍需确认执行。',
+ disableOrganizationDescription: '停用将暂停该组织的有效成员身份，并将当前组织会话切回个人身份。不会删除组织；之后可重新启用。',
+ enableOrganizationDescription: '重新启用将恢复该组织已暂停的成员身份。当前个人会话不会自动切换回组织，请核对操作对象后继续。',
+});
+Object.assign(organizationCopy.en, {
+ deleteUnitDescription: 'Linked resources are checked before deletion. Blocking conditions prevent deletion. Check the organization and unit; a final confirmation is still required.',
+ disableOrganizationDescription: 'Disabling suspends active organization memberships and switches current organization sessions to personal context. The organization is retained and can be enabled again.',
+ enableOrganizationDescription: 'Enabling restores suspended memberships in this organization. Current personal sessions are not switched back automatically. Check the target before continuing.',
+});
+Object.assign(organizationCopy.ja, {
+ deleteUnitDescription: '削除前に関連リソースを確認し、阻止条件がある場合は削除しません。組織と単位を確認してください。続行後も実行の最終確認が必要です。',
+ disableOrganizationDescription: '無効化すると、この組織の有効なメンバー資格が停止され、組織の現在のセッションが個人に切り替わります。組織は削除されず、再度有効化できます。',
+ enableOrganizationDescription: '有効化すると、この組織の停止中のメンバー資格が復元されます。現在の個人セッションは自動的に組織へ戻りません。対象を確認して続行してください。',
+});
+
+Object.assign(organizationCopy.zh, {
  unitScopeTitle: '节点授权工作区', unitScope: '授权节点子树', unitScopeRoot: '当前授权子树根节点',
  unitScopeHint: '节点授权仅用于所选子树。全组织读取与管理权限保持独立。',
  unitScopeMembersHint: '仅列出全部归属都在此子树内的成员；跨范围成员不能在此替换归属或移除。',
