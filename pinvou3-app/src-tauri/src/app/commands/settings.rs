@@ -1705,7 +1705,6 @@ mod tests {
     use super::*;
     use crate::platform::credential_store::MemoryCredentialStore;
 
-
     #[test]
     fn local_model_selection_rejects_platform_carrier() {
         let model = SavedModel::builtin_account_platform();
