@@ -1056,11 +1056,14 @@ jobs:
     # smokes from their actual base/head diff. Shared, unknown, test-infrastructure,
     # and empty diffs fail closed to the complete smoke set. Each selected smoke is
     # retried once to absorb transient hosted-runner flakes. The full selection
-    # can outlast 25 minutes without any retry; leave time for setup, a complete
-    # pass and one largest-smoke retry while retaining a bounded job lifetime.
+    # can outlast 35 minutes without any retry since the account-platform suite
+    # joined the complete set (measured 2026-11-05: ~19 min setup + ~34 min smoke,
+    # killed at the 45-minute budget before retirement); leave time for setup, a
+    # complete pass and one largest-smoke retry while retaining a bounded job
+    # lifetime.
     if: ${{ !cancelled() && github.event.action != 'closed' && needs.changes.outputs.pure_release_backflow != 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group') && (needs.changes.outputs.frontend == 'true' || needs.changes.outputs.pet == 'true') }}
     runs-on: ${{ fromJSON(vars.PINVOU_LINUX_MEDIUM_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
-    timeout-minutes: 45
+    timeout-minutes: 75
     defaults:
       run:
         working-directory: pinvou3-app
