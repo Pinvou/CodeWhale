@@ -105,9 +105,10 @@ pub fn sanitize_for_xai_parameters(parameters: &mut Value) -> Option<String> {
 /// Everything the relaxation does not cover stays on the protective
 /// flattening pass: sibling root `allOf`/`enum`/`not`, both union keywords at
 /// once (the doc names one union, not an intersection), a present-but-
-/// malformed (non-array) union value, and branches without an explicit object
-/// `type` — xAI's own 400 message for `apply_patch`'s bare required-groups
-/// called that union "an anyOf/oneOf union with a non-object branch".
+/// malformed (non-array) union value, an empty union, and branches without an
+/// explicit object `type` — xAI's own 400 message for `apply_patch`'s bare
+/// required-groups called that union "an anyOf/oneOf union with a non-object
+/// branch".
 fn root_union_is_all_object_branches(schema: &Value) -> bool {
     let Some(obj) = schema.as_object() else {
         return false;
