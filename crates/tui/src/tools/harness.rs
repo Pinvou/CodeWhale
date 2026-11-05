@@ -202,6 +202,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn harness_copy_names_only_the_visible_bounded_reread_surfaces() {
+        // The copy used to send large material to `rlm`, a hidden
+        // compatibility tool (`model_visible() == false`) whose own
+        // description says not to teach it to new model turns;
+        // allowlist-deriving hosts reject the very call it recommended. Both
+        // model-visible strings must keep naming the visible bounded-reread
+        // surfaces instead, and the phantom name must not return.
+        let description = HarnessTool.description();
+        assert!(
+            !description.contains("rlm"),
+            "harness description must not teach the hidden rlm surface: {description}"
+        );
+        assert!(
+            description.contains("read with offset/limit")
+                && description.contains("retrieve_tool_result"),
+            "the description must name the visible bounded-reread surfaces: {description}"
+        );
+
+        let tmp = tempdir().expect("tempdir");
+        let context = ToolContext::new(tmp.path());
+        let overview = HarnessTool
+            .execute(json!({"action": "overview"}), &context)
+            .await
+            .expect("overview result");
+        assert!(
+            !overview.content.contains("rlm"),
+            "overview runtime context must not name rlm: {}",
+            overview.content
+        );
+        assert!(
+            overview.content.contains("read with offset/limit")
+                && overview.content.contains("retrieve_tool_result"),
+            "{}",
+            overview.content
+        );
+    }
+
+    #[tokio::test]
     async fn refine_rejects_missing_evidence() {
         let tmp = tempdir().expect("tempdir");
         let context = ToolContext::new(tmp.path());
