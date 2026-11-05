@@ -2304,7 +2304,7 @@ mod tests {
             prefs
                 .advanced
                 .saved_models
-                .retain(|m| m.id == crate::platform::prefs::BUILTIN_LLMAPI_MODEL_ID);
+                .retain(|m| m.id == crate::platform::prefs::BUILTIN_ACCOUNT_PLATFORM_MODEL_ID);
             prefs.advanced.saved_models.push(SavedModel {
                 id: "m-recycle".to_string(),
                 name: "recycle".to_string(),
@@ -2496,7 +2496,7 @@ mod tests {
             // 同一条守卫、同一句错误文案）。期望身份取内置行自己的当前落盘值——
             // ensure_builtin_llmapi_model 每次加载都会把内置行归一回默认身份。
             let builtin = UserPrefs::load()
-                .model_by_id(crate::platform::prefs::BUILTIN_LLMAPI_MODEL_ID)
+                .model_by_id(crate::platform::prefs::BUILTIN_ACCOUNT_PLATFORM_MODEL_ID)
                 .cloned()
                 .expect("builtin row is auto-seeded on load");
             let store = MemoryCredentialStore::default();
@@ -2510,7 +2510,7 @@ mod tests {
             assert!(result.contains("内置模型不可删除"));
             assert!(
                 UserPrefs::load()
-                    .model_by_id(crate::platform::prefs::BUILTIN_LLMAPI_MODEL_ID)
+                    .model_by_id(crate::platform::prefs::BUILTIN_ACCOUNT_PLATFORM_MODEL_ID)
                     .is_some(),
                 "the builtin row must survive"
             );
@@ -2547,7 +2547,7 @@ mod tests {
                     .iter()
                     .map(|m| m.id.as_str())
                     .collect::<Vec<_>>(),
-                vec![crate::platform::prefs::BUILTIN_LLMAPI_MODEL_ID],
+                vec![crate::platform::prefs::BUILTIN_ACCOUNT_PLATFORM_MODEL_ID],
                 "only the auto-seeded builtin row remains",
             );
         });
