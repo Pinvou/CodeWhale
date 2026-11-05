@@ -92,6 +92,13 @@ pub struct PurgeResult {
     pub removed_count: usize,
     /// How many replace operations were applied.
     pub replaced_count: usize,
+    /// The pre-purge index of the message now at each output slot: purge
+    /// only removes whole messages and rewrites survivors in place, so
+    /// output slot `i` descends from input slot `survivor_origins[i]` and
+    /// every input slot appears at most once (ascending). The engine uses
+    /// this to re-anchor position-linked standing-baseline entries — see
+    /// `StandingPostureBaselineEntry::push_index`.
+    pub survivor_origins: Vec<usize>,
 }
 
 // ── Event emission helpers ──────────────────────────────────────────────────
@@ -349,6 +356,10 @@ pub fn parse_purge_operations(
 /// prevent orphaned blocks.
 pub fn execute_purge_operations(messages: &[Message], ops: &[PurgeOp]) -> PurgeResult {
     let mut msgs = messages.to_vec();
+    // `survivor_origins[i]` tracks which input slot the message now at
+    // output slot `i` came from; removals below keep the two lists in
+    // lockstep.
+    let mut survivor_origins: Vec<usize> = (0..messages.len()).collect();
     let mut msg_indices_to_remove: FastHashSet<usize> = FastHashSet::default();
     let mut replaced_count = 0usize;
 
@@ -391,12 +402,14 @@ pub fn execute_purge_operations(messages: &[Message], ops: &[PurgeOp]) -> PurgeR
     let removed_count = to_remove.len();
     for idx in to_remove {
         msgs.remove(idx);
+        survivor_origins.remove(idx);
     }
 
     PurgeResult {
         messages: msgs,
         removed_count,
         replaced_count,
+        survivor_origins,
     }
 }
 
@@ -705,6 +718,37 @@ mod tests {
         let result = execute_purge_operations(&msgs, &ops);
         assert_eq!(result.removed_count, 1);
         assert_eq!(result.messages.len(), 2);
+    }
+
+    #[test]
+    fn survivor_origins_track_removals_and_in_place_rewrites() {
+        // Removing the middle message shifts later survivors down; an
+        // in-place replace keeps its slot, so the origins stay exact for
+        // the engine's standing-baseline re-anchoring.
+        let msgs = vec![
+            msg_text("user", "first turn"),
+            msg_text("assistant", "remove me"),
+            msg_text("user", "second turn"),
+        ];
+        let pattern = Regex::new("turn").unwrap();
+        let ops = vec![
+            PurgeOp::Remove { msg_id: 2 },
+            PurgeOp::Replace {
+                msg_id: 3,
+                block_idx: 0,
+                pattern,
+                with: "block".to_string(),
+            },
+        ];
+        let result = execute_purge_operations(&msgs, &ops);
+        assert_eq!(result.removed_count, 1);
+        assert_eq!(result.replaced_count, 1);
+        assert_eq!(result.survivor_origins, vec![0, 2]);
+        if let ContentBlock::Text { text, .. } = &result.messages[1].content[0] {
+            assert_eq!(text, "second block");
+        } else {
+            panic!("expected text block");
+        }
     }
 
     #[test]

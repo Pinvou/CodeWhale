@@ -87,6 +87,14 @@ pub(super) fn app_auto_approve_enabled(app: &App) -> bool {
 ///
 /// Shell/trust bits do not affect disposition; mode + approval_mode + the
 /// full-access shape (Bypass) are what the shared resolver consults.
+///
+/// Pinvou tri-mode safety: this authority is deliberately built with
+/// `ask_on_guardrail = false` (the `from_effective_fields` default). The
+/// built-in TUI never arms a session — arming is a wire-host gesture, and
+/// armed hosts consume `Event::ApprovalRequired { approval_force_prompt }`
+/// themselves. If a UI-facing arming toggle ever ships, this constructor
+/// must carry the session's arming, or `resolve_approval_request_disposition`
+/// would auto-deny every armed forced hold the engine correctly raised.
 fn app_turn_authority_for_approvals(app: &App) -> crate::core::authority::TurnAuthority {
     crate::core::authority::TurnAuthority::from_effective_fields(
         app.mode,

@@ -5,6 +5,18 @@
 
 use super::*;
 
+/// Map an approval ack failure to its remote acknowledgement status.
+/// `unknown` is reserved for the unconfirmed-outcome error, whose decision
+/// may still be committed and executed; every other failure shape is a
+/// definite refusal and keeps the existing "failed" status.
+fn approval_ack_status(error: &anyhow::Error) -> &'static str {
+    if error.is::<crate::core::engine::ApprovalAckUnknownError>() {
+        "unknown"
+    } else {
+        "failed"
+    }
+}
+
 pub(crate) async fn drain_remote_control_events(
     app: &mut App,
     config: &Config,
@@ -283,13 +295,33 @@ pub(crate) async fn drain_remote_control_events(
                                 app.remote_control
                                     .acknowledge(&run_id, seq, &command, "applied", None);
                             }
-                            Err(error) => app.remote_control.acknowledge(
-                                &run_id,
-                                seq,
-                                &command,
-                                "failed",
-                                Some(error.to_string()),
-                            ),
+                            Err(error) => {
+                                // An ack that outlived both windows means the
+                                // outcome is unconfirmed, not refused: the
+                                // engine's commit has no deadline and the
+                                // decision may still be committed and executed.
+                                // Tell the controller the truth and keep the
+                                // card open while the engine converges.
+                                let status = approval_ack_status(&error);
+                                app.remote_control.acknowledge(
+                                    &run_id,
+                                    seq,
+                                    &command,
+                                    status,
+                                    Some(error.to_string()),
+                                );
+                                if status == "unknown" {
+                                    let notice = app
+                                        .tr(crate::localization::MessageId::RemoteApprovalOutcomeUnconfirmed)
+                                        .into_owned();
+                                    app.status_message = Some(notice.clone());
+                                    app.push_status_toast(
+                                        notice,
+                                        StatusToastLevel::Warning,
+                                        Some(8_000),
+                                    );
+                                }
+                            }
                         }
                     }
                     crate::remote_control::RemoteCommand::Control {
@@ -458,5 +490,23 @@ pub(crate) fn start_remote_control_session(app: &mut App, config: &Config) {
             app.status_message = Some(error.clone());
             app.push_status_toast(error, StatusToastLevel::Error, Some(12_000));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn approval_ack_status_separates_unknown_from_refusal() {
+        let unknown = anyhow::Error::new(crate::core::engine::ApprovalAckUnknownError::for_test(
+            std::time::Duration::from_secs(15),
+            std::time::Duration::from_secs(75),
+        ));
+        assert_eq!(approval_ack_status(&unknown), "unknown");
+
+        let refused =
+            anyhow::anyhow!("approval decision was not applied: the tool call id is stale");
+        assert_eq!(approval_ack_status(&refused), "failed");
     }
 }

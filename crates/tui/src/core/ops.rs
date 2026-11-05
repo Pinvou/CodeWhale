@@ -419,6 +419,18 @@ pub enum Op {
         auto_approve: bool,
         approval_mode: ApprovalMode,
         configured_sandbox_mode: Option<String>,
+        /// Host-armed interactive guardrail prompts (Pinvou tri-mode safety).
+        /// When `Some`, arms or disarms the guardrail sites that otherwise
+        /// fail closed under an autonomous posture (non-bypassable holds,
+        /// repo-law holds, typed ask rules, the execpolicy deny face,
+        /// sandbox escalation): armed, they raise an approval request with a
+        /// real person guaranteed on the other end instead of denying.
+        /// `None` leaves the session's current arming unchanged. The flag is
+        /// session-level state like `auto_approve`; the engine applies the
+        /// live published authority snapshot as ops drain (mid-turn drains
+        /// included), so it lands before subsequent tool planning either
+        /// way, and an arming-free op cannot erase a pending arming.
+        ask_on_guardrail: Option<bool>,
     },
 
     /// Replace the engine-level tool deny-list for subsequent turns.

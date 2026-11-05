@@ -12172,6 +12172,19 @@ async fn build_direct_workflow_tool(
         config.launch_concurrency_for_provider(provider),
         config.subagent_token_budget_for_provider(provider),
     );
+    // Coordination reservations validate in-flight shell jobs against the
+    // same manager the shells actually live in. The Engine wires its two
+    // construction handles; this standalone builder is the other production
+    // entry that dispatches shells in-process, and its children's jobs live
+    // in the workflow context's own shell manager. Without the binding,
+    // completion treated a missing source as zero running jobs and released
+    // a background dispatch's frame while its job still ran, admitting an
+    // overlapping writer into the same checkout once the owner went
+    // terminal.
+    {
+        let mut coordination = manager.write().await;
+        coordination.set_shell_job_source(Arc::clone(&context.shell_manager));
+    }
     let roster = Arc::new(crate::fleet::identity::load_effective_roster(
         &config.fleet_config(),
         workspace,
@@ -14769,6 +14782,58 @@ mod terminal_mode_tests {
         }
         assert!(event_types.iter().any(|kind| kind == "run_started"));
         assert!(event_types.iter().any(|kind| kind == "run_completed"));
+    }
+
+    /// The standalone headless builder constructs its coordination manager
+    /// and workflow context directly — never through the Engine — so the
+    /// construction-time shell-job binding must happen here. It shipped
+    /// without one once: reservations then had no shell source, completion
+    /// treated "no source" as zero running jobs, and a terminal owner's
+    /// background job released its frame while it still ran.
+    #[tokio::test]
+    async fn direct_workflow_builder_binds_its_context_shell_manager() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let config = Config {
+            provider: Some("vllm".to_string()),
+            mcp_config_path: Some(
+                workspace
+                    .path()
+                    .join("missing-mcp.json")
+                    .display()
+                    .to_string(),
+            ),
+            providers: Some(crate::config::ProvidersConfig {
+                vllm: crate::config::ProviderConfig {
+                    base_url: Some("http://127.0.0.1:9/v1".to_string()),
+                    model: Some("offline-test-model".to_string()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let route = CliAutoRoute {
+            provider: crate::config::ApiProvider::Vllm,
+            model: "offline-test-model".to_string(),
+            reasoning_effort: None,
+            auto_controls_reasoning: false,
+            auto_model: false,
+        };
+        let (event_tx, _event_rx) = tokio::sync::mpsc::channel(64);
+        let plugins = Arc::new(crate::plugins::PluginRegistry::empty(workspace.path()));
+        let (tool, context) =
+            build_direct_workflow_tool(&config, &route, workspace.path(), event_tx, plugins)
+                .await
+                .expect("build direct workflow runtime");
+
+        let wired = tool
+            .shell_job_source_for_test()
+            .await
+            .expect("the standalone builder binds a shell job source");
+        assert!(
+            Arc::ptr_eq(&wired, &context.execution.shell_manager),
+            "the bound source is the workflow context's own shell manager — where its children's jobs live"
+        );
     }
 
     #[tokio::test]

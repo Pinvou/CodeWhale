@@ -432,6 +432,23 @@ pub struct Session {
     /// Live UI approval policy used to steer the system prompt.
     pub approval_mode: ApprovalMode,
 
+    /// Host-armed interactive guardrail prompts (Pinvou tri-mode safety).
+    /// When set, the guardrail sites that fail closed under an autonomous
+    /// posture — non-bypassable holds, repo-law holds, typed ask rules, the
+    /// execpolicy deny face, sandbox escalation — raise an approval request
+    /// instead of denying, because the host has guaranteed a person can
+    /// answer. Auto-Review and Never keep every deny face unconditionally
+    /// (nobody can answer there even when armed), and the built-in
+    /// deterministic safety floor never converts. Session-level state like
+    /// `auto_approve`: flipped by `Op::ChangeMode`, unchanged by turn
+    /// installs, and it never widens what may execute without a decision.
+    /// Not persisted: a restored session starts disarmed and the host must
+    /// re-arm. With the flag unset, guard behavior is byte-identical to the
+    /// pre-flag doctrine; the only unarmed delta in protocol output is the
+    /// `<turn_meta>` authority-transition line, which appears whenever the
+    /// host changes mode, posture, or arming between turns.
+    pub ask_on_guardrail: bool,
+
     /// Notes file path
     pub notes_path: PathBuf,
 
@@ -536,6 +553,7 @@ impl Session {
             trust_mode,
             auto_approve: false,
             approval_mode: ApprovalMode::Suggest,
+            ask_on_guardrail: false,
             notes_path,
             mcp_config_path,
             id: uuid::Uuid::new_v4().to_string(),

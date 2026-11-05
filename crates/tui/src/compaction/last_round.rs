@@ -18,7 +18,7 @@ use crate::runtime_handoff::UserTurnPromptKind;
 
 use super::{
     COMPACT_RETAINED_USER_MESSAGE_MAX_TOKENS, compaction_checkpoint_message,
-    is_compaction_checkpoint_message, retained_user_messages, truncate_retained_block,
+    is_compaction_checkpoint_message, retained_user_messages_with_origins, truncate_retained_block,
     user_text_of,
 };
 
@@ -468,30 +468,59 @@ pub(super) fn measure_coverage(
     }
 }
 
+/// The local summary builder's replacement history plus where every slot
+/// came from: `origins[i]` is the index in the source history that
+/// `messages[i]` was carried from, or `None` for a message the builder
+/// authored itself (the appended checkpoint). The map is order-preserving
+/// and injective, so positional bookkeeping recorded against the source
+/// history — the standing-posture baseline entries — can follow a retained
+/// turn to its new slot instead of being vacated with the rest of the
+/// provider-unmappable layout.
+pub(super) struct ReplacementHistory {
+    pub(super) messages: Vec<Message>,
+    pub(super) origins: Vec<Option<usize>>,
+}
+
 pub(super) fn build_replacement_history(
     messages: &[Message],
     checkpoint_text: &str,
     anchors: Option<&str>,
-) -> Result<Vec<Message>> {
+) -> Result<ReplacementHistory> {
     let checkpoints = CheckpointEra::of_history(messages);
     let (start, end) = last_round_range(messages);
-    let mut retained = retained_user_messages(
+    let (mut retained, mut origins) = retained_user_messages_with_origins(
         checkpoints,
         &messages[..start],
         COMPACT_RETAINED_USER_MESSAGE_MAX_TOKENS,
     );
-    retained.extend(bound_last_round(checkpoints, &messages[start..end]));
+    let round = &messages[start..end];
+    // `bound_last_round` keeps every non-checkpoint slot of the round
+    // (rewriting oversized blocks in place), so each kept message's origin is
+    // its source index; the dropped checkpoints have no counterpart below.
+    for (offset, message) in round.iter().enumerate() {
+        if !checkpoints.is_checkpoint(message) {
+            origins.push(Some(start + offset));
+        }
+    }
+    retained.extend(bound_last_round(checkpoints, round));
     retained.push(compaction_checkpoint_message(&SystemPrompt::Text(
         checkpoint_text.to_string(),
     )));
+    origins.push(None);
+    debug_assert_eq!(retained.len(), origins.len());
     validate_survival_contract(messages, &retained, anchors)?;
-    Ok(retained)
+    Ok(ReplacementHistory {
+        messages: retained,
+        origins,
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compaction::{COMPACTION_SUMMARY_MARKER, compaction_checkpoint_message};
+    use crate::compaction::{
+        COMPACTION_SUMMARY_MARKER, compaction_checkpoint_message, retained_user_messages,
+    };
     use crate::models::{ContentBlock, Role};
     use serde_json::json;
 
@@ -674,7 +703,8 @@ mod tests {
 
         let next = crate::compaction::build_compaction_summary_block_text("second summary", "");
         let replacement = build_replacement_history(&messages, &next, None)
-            .expect("a pasted-header turn must not break or lose the round");
+            .expect("a pasted-header turn must not break or lose the round")
+            .messages;
 
         assert!(
             replacement
@@ -713,7 +743,8 @@ mod tests {
 
         let next = crate::compaction::build_compaction_summary_block_text("second summary", "");
         let replacement = build_replacement_history(&messages, &next, None)
-            .expect("legacy loose recognition still replaces the bare carrier");
+            .expect("legacy loose recognition still replaces the bare carrier")
+            .messages;
 
         assert!(
             replacement
@@ -830,7 +861,8 @@ mod tests {
 
         let next = crate::compaction::build_compaction_summary_block_text("second summary", "");
         let replacement = build_replacement_history(&messages, &next, None)
-            .expect("a quoting user turn must not break the round");
+            .expect("a quoting user turn must not break the round")
+            .messages;
 
         assert!(
             replacement
@@ -921,7 +953,9 @@ mod tests {
         let (start, end) = last_round_range(&messages);
         assert_eq!((start, end), (0, messages.len()));
         let next = crate::compaction::build_compaction_summary_block_text("new summary", "");
-        let replacement = build_replacement_history(&messages, &next, None).unwrap();
+        let replacement = build_replacement_history(&messages, &next, None)
+            .unwrap()
+            .messages;
         let texts: Vec<_> = replacement.iter().filter_map(user_text_of).collect();
         assert!(texts.iter().any(|text| text == "Run the suite now."));
         assert!(texts.iter().any(|text| text == "Explain the next step."));
@@ -957,7 +991,8 @@ mod tests {
         assert_eq!(last_round_start(&original), 0);
         let next = format!("{COMPACTION_SUMMARY_MARKER}: keep the failing test result");
         let replaced = build_replacement_history(&original, &next, None)
-            .expect("toolless tails must not drop the last tool result");
+            .expect("toolless tails must not drop the last tool result")
+            .messages;
         assert!(replaced.iter().any(|message| {
             message.content.iter().any(|block| {
                 matches!(
@@ -978,6 +1013,64 @@ mod tests {
             msg("assistant", "fine"),
         ];
         assert_eq!(last_round_start(&messages), 2);
+    }
+
+    #[test]
+    fn replacement_history_reports_where_every_retained_slot_came_from() {
+        // Ordinary no-tool rounds: the builder retains the early user turn
+        // (rebuilt), keeps the latest round verbatim, and appends a
+        // checkpoint it authored. The origin map is what lets positional
+        // records — the standing-baseline entries — follow a retained turn
+        // to its new slot instead of being vacated with the layout.
+        let messages = vec![
+            msg("user", "earlier question"),
+            msg("assistant", "earlier answer"),
+            msg("user", "latest question"),
+            msg("assistant", "latest answer"),
+        ];
+        let next = crate::compaction::build_compaction_summary_block_text("handoff", "");
+        let replacement = build_replacement_history(&messages, &next, None)
+            .expect("chat-only history must compact");
+        assert_eq!(replacement.messages.len(), replacement.origins.len());
+        assert_eq!(
+            replacement.origins,
+            vec![Some(0), Some(2), Some(3), None],
+            "retained prefix user, last-round slots, then the authored checkpoint"
+        );
+    }
+
+    #[test]
+    fn replacement_history_origins_skip_dropped_mid_history_checkpoints() {
+        // A second compaction: the history carries an old checkpoint inside
+        // the round range, which the builder drops. The origin map must have
+        // no slot for it, so records relocated through the map never land on
+        // a removed message.
+        let messages = vec![
+            msg("user", "Run the suite now."),
+            tool_use("live", "Bash", json!({"command": "cargo test"})),
+            tool_result("live", "ok"),
+            checkpoint("first handoff: suite still running"),
+            msg("user", "next question"),
+            msg("assistant", "done"),
+        ];
+        let next = crate::compaction::build_compaction_summary_block_text("second handoff", "");
+        let replacement = build_replacement_history(&messages, &next, None)
+            .expect("a mid-history checkpoint must not break the round");
+        assert_eq!(replacement.messages.len(), replacement.origins.len());
+        assert_eq!(
+            replacement.origins,
+            vec![Some(0), Some(1), Some(2), Some(4), Some(5), None],
+            "the dropped checkpoint (source index 3) has no slot in the map"
+        );
+        assert_eq!(
+            replacement
+                .messages
+                .iter()
+                .filter(|message| is_compaction_checkpoint_message(message))
+                .count(),
+            1,
+            "only the fresh checkpoint survives"
+        );
     }
 
     #[derive(serde::Deserialize)]
@@ -1047,7 +1140,8 @@ mod tests {
             "{COMPACTION_SUMMARY_MARKER}: second handoff with User-pinned anchors (verbatim):\nship 0.9.12"
         );
         let replaced = build_replacement_history(&first, &next, Some("ship 0.9.12"))
-            .expect("second compact must keep last round and one receipt");
+            .expect("second compact must keep last round and one receipt")
+            .messages;
         let checkpoints = replaced
             .iter()
             .filter(|message| is_compaction_checkpoint_message(message))

@@ -78,7 +78,8 @@ use crate::working_set::WorkingSet;
 #[cfg(test)]
 use super::authority::agent_approval_mode_for_turn;
 use super::authority::{
-    PolicyNarrowingEvent, TurnAuthority, effective_input_policy, shell_policy_for_mode,
+    PolicyNarrowingEvent, TurnAuthority, TurnMetaPosture, effective_input_policy,
+    shell_policy_for_mode,
 };
 use super::events::{Event, TurnOutcomeStatus, TurnRoute};
 use super::ops::{
@@ -975,6 +976,7 @@ impl Drop for ReservedSteer {
 /// Handle to communicate with the engine
 #[derive(Clone)]
 pub struct EngineHandle {
+    run_completion: Option<tokio::sync::watch::Receiver<Option<EngineRunCompletion>>>,
     /// Send operations to the engine
     pub tx_op: mpsc::Sender<Op>,
     /// Receive events from the engine
@@ -1010,6 +1012,10 @@ pub struct EngineHandle {
     /// be awaiting a provider while its bounded op mailbox is unable to drain,
     /// so cancellation cannot depend on processing a later mailbox entry.
     compaction_cancellation: Arc<StdMutex<CompactionCancellationState>>,
+    /// Fast ack deadline for approval decisions; see `engine/handle.rs`.
+    approval_ack_timeout: Duration,
+    /// Settle window after the ack deadline; see `engine/handle.rs`.
+    approval_ack_settle_timeout: Duration,
 }
 
 const MAX_PENDING_COMPACTION_CANCELLATIONS: usize = 64;
@@ -1099,6 +1105,79 @@ enum McpBootUpdate {
         authority_errors: Arc<HashMap<String, String>>,
         connection_errors: HashMap<String, String>,
     },
+}
+
+/// One entry of the engine's `standing_posture_baseline_history`: the
+/// standing baseline an authoritative turn build replaced, recorded with the
+/// history index its persisted user message was appended at.
+///
+/// Position is the linkage unit for `EditLastTurn`, not message value:
+/// `Message` equality is structural (role + content), so a committed steer
+/// carrying the same text as the turn it ran inside is value-equal to that
+/// turn's message, and a history rewrite moves values away from the messages
+/// an entry was recorded for. The engine appends every message itself, so it
+/// always knows the index an entry belongs to; `EditLastTurn` truncates a
+/// suffix at the selector's cut, and a suffix cut never moves prefix indices,
+/// so an entry is the edited message's exactly when its index equals the cut.
+/// Steer commits and step-budget notices persist selectable ExternalUser
+/// messages without pushing entries — no entry sits at their cut, so editing
+/// them pops nothing.
+#[derive(Debug, Clone)]
+struct StandingPostureBaselineEntry {
+    /// The baseline this turn's block replaced — restored when the turn is
+    /// edited away.
+    prior_posture: Option<crate::core::authority::TurnMetaPosture>,
+    /// History index the entry's message was appended at (the
+    /// `session.messages` length before its `add_message`). Invariant: the
+    /// index is only meaningful against the CURRENT retained history, and
+    /// every history mutation must restore that property before the next
+    /// `EditLastTurn` reads it:
+    /// - a suffix truncation (`EditLastTurn`) never moves prefix indices —
+    ///   its drain drops entries at or above the cut and restores the cut
+    ///   entry's `prior_posture`;
+    /// - a mechanical removal that keeps survivors in order (`/purge`,
+    ///   `trim_oldest_messages_to_budget`) remaps each surviving entry to
+    ///   its message's new slot and drops entries whose message is gone —
+    ///   a survived turn keeps restoring its prior posture even when its
+    ///   index shifted;
+    /// - a replacement the engine did not author slot-by-slot cannot be
+    ///   rebased, so it vacates the stack — except when the replacement is
+    ///   value-identical to the previous history (equal lists keep every
+    ///   slot exact) or when it is the local summary builder's output,
+    ///   which reports where every retained slot came from
+    ///   (`CompactionResult::summary_origins`): a retained turn's entry
+    ///   relocates to its message's new slot and a dropped turn's entry
+    ///   goes away with the turn (see
+    ///   `rebase_standing_baseline_after_compaction`; auto, manual, and
+    ///   emergency compaction all share it, and the emergency fallback can
+    ///   also re-carry history through the agent-topology checkpoint
+    ///   rewrite);
+    /// - a conversation replacement (`SyncSession`) clears the stack with
+    ///   the rest of the posture state.
+    push_index: usize,
+}
+
+/// True when a replacement history occupies the same slots as the history it
+/// replaces: equal length and equal role at every index.
+///
+/// Local mechanical rewrites (tool-result pruning, sanitization) rewrite
+/// ToolResult content in place and keep every slot, so recorded
+/// `push_index`es stay exact — a PruneOnly compaction that only pruned old
+/// tool output must keep the entries, or an edit of a surviving turn loses
+/// the snapshot its block still needs. The summary path shrinks the list,
+/// so this check is false there and the compaction sites fall through to
+/// the builder's origin map (`CompactionResult::summary_origins`): the
+/// local builder reports where every retained slot came from, so retained
+/// turns relocate instead of being vacated with the unmappable shapes (see
+/// `rebase_standing_baseline_after_compaction`).
+fn standing_baseline_layout_preserved(replacement: &[Message], replaced: &[Message]) -> bool {
+    replacement.len() == replaced.len()
+        && replacement
+            .iter()
+            .zip(replaced.iter())
+            .all(|(replacement_message, original_message)| {
+                replacement_message.role == original_message.role
+            })
 }
 
 /// The core engine that processes operations and emits events
@@ -1271,6 +1350,43 @@ pub struct Engine {
     /// so doctor and debug surfaces can answer "why is this tool unavailable"
     /// with the same record the user and the model already saw.
     last_policy_narrowing: Option<PolicyNarrowingEvent>,
+    /// The posture the last `<turn_meta>` block reported (Pinvou tri-mode
+    /// safety). Comparison unit for [`Self::pending_authority_transition`].
+    last_turn_meta_authority: Option<crate::core::authority::TurnMetaPosture>,
+    /// The last posture an authoritative-provenance turn reported — the
+    /// standing baseline a host flip is measured against. A
+    /// provenance-narrowed turn runs a per-turn reduction that neither emits
+    /// the host transition nor updates this baseline (the narrowing receipt
+    /// family reports the reduction), so a narrowed turn between two
+    /// authoritative turns can never be misread as a host flip — nor its
+    /// unwind on the next authoritative turn.
+    last_authoritative_turn_meta_posture: Option<crate::core::authority::TurnMetaPosture>,
+    /// Host-driven authority change computed when the turn's metadata block
+    /// is built, against the posture the previous block reported. Consumed
+    /// by that block only and cleared immediately, so a turn whose posture
+    /// did not change emits nothing, ordinary blocks stay byte-stable, and
+    /// steers or mid-turn runtime notices never re-render the same line.
+    pending_authority_transition: Option<crate::core::authority::AuthorityTransition>,
+    /// The standing posture baseline each authoritative (external-user) turn
+    /// replaced, one entry per such persisted turn in order, each linked to
+    /// the exact persisted user message it belongs to. Authoritative turn
+    /// builds are the turns `edit_last_turn_target` can select — every other
+    /// provenance renders the block's `(non-authoritative)` line, which the
+    /// selector reads as runtime-owned — but not every selectable message is
+    /// a turn build: a committed steer or step-budget notice persists an
+    /// ExternalUser message through `user_text_message_with_turn_metadata`
+    /// and is selectable too, while owning no entry of its own. The
+    /// message-identity linkage is what keeps the stack honest at edit time:
+    /// an edit pops only when the truncated target IS the message the top
+    /// entry was recorded with, so editing a steer or notice recomputes its
+    /// replacement against the unchanged standing baseline (same posture →
+    /// no transition line) while a real turn-build edit still pops exactly
+    /// the edited turn's snapshot and restores the baseline it replaced —
+    /// the replacement turn re-reports the authority transition its
+    /// predecessor carried instead of silently swallowing it (the truncated
+    /// block is gone from retained history, but the baseline it installed
+    /// would otherwise survive).
+    standing_posture_baseline_history: Vec<StandingPostureBaselineEntry>,
     /// The git snapshot line last emitted in a `<turn_meta>` block this
     /// session (#5187, k3-gap F3). The snapshot re-collects branch/dirty
     /// state every turn, so without change-detection the block's bytes drift
@@ -1301,9 +1417,21 @@ struct LiveRuntimeAuthority {
     auto_approve: bool,
     approval_mode: crate::tui::approval::ApprovalMode,
     configured_sandbox_mode: Option<String>,
+    /// Host-armed interactive guardrail prompts (Pinvou tri-mode safety).
+    /// `None` means "leave the session's current arming unchanged": turn
+    /// installs re-record the session's live value so an arming published
+    /// ahead of the queue is never rolled backward by a stale turn posture.
+    ask_on_guardrail: Option<bool>,
 }
 
 impl LiveRuntimeAuthority {
+    /// Store the op's fields as given. Unlike [`Self::from_turn_authority`]
+    /// this does not renormalize `approval_mode` through
+    /// `approval_mode_for_session`: every producer (`Op::ChangeMode`, the
+    /// UI sync, runtime threads) already sends the canonical shape, and a
+    /// non-canonical publish self-heals at the next
+    /// [`Self::record_applied_runtime_authority`], which re-records from
+    /// the session's normalized state.
     fn from_fields(
         mode: AppMode,
         allow_shell: bool,
@@ -1311,15 +1439,17 @@ impl LiveRuntimeAuthority {
         auto_approve: bool,
         approval_mode: crate::tui::approval::ApprovalMode,
         configured_sandbox_mode: Option<String>,
+        ask_on_guardrail: Option<bool>,
     ) -> Self {
-        let authority = TurnAuthority::from_effective_fields(
+        Self {
             mode,
             allow_shell,
             trust_mode,
             auto_approve,
             approval_mode,
-        );
-        Self::from_turn_authority(&authority, configured_sandbox_mode)
+            configured_sandbox_mode,
+            ask_on_guardrail,
+        }
     }
 
     fn from_turn_authority(
@@ -1335,6 +1465,9 @@ impl LiveRuntimeAuthority {
                 || approval_mode == crate::tui::approval::ApprovalMode::Bypass,
             approval_mode,
             configured_sandbox_mode,
+            // Turn installs never change the arming; the recorder patches the
+            // session's live value so re-recording never rolls it backward.
+            ask_on_guardrail: None,
         }
     }
 
@@ -1907,6 +2040,17 @@ impl Engine {
         // non-turn reader inherits cross-conversation state.
         self.session.tool_activation_cache.clear();
         self.session.pending_toolbox_eviction_notes.clear();
+        // The recorded turn_meta posture belongs to the previous
+        // conversation: its model saw that receipt, the installed one never
+        // did. Reset it so the installed conversation's first turn
+        // establishes a fresh baseline instead of rendering a transition
+        // whose "from" side it never reported. Arming itself
+        // (`session.ask_on_guardrail`) is host-owned and deliberately stays
+        // — the host did not disarm across this edge. The standing baseline
+        // resets with it: the next authoritative turn re-establishes it.
+        self.last_turn_meta_authority = None;
+        self.last_authoritative_turn_meta_posture = None;
+        self.standing_posture_baseline_history.clear();
         let plugin_workspace_changed = self.plugin_registry.workspace() != workspace.as_path();
         let previous_session_id = self.session.id.clone();
         let next_session_id = if let Some(session_id) = session_id {
@@ -2116,6 +2260,7 @@ impl Engine {
                 false,
                 crate::tui::approval::ApprovalMode::Suggest,
                 api_config.sandbox_mode.clone(),
+                None,
             ),
         )));
         let compaction_cancellation =
@@ -2273,6 +2418,14 @@ impl Engine {
                 manager.set_denied_read_subpaths(config.read_denylist.subtree_paths());
             }
         }
+        // Coordination reservations validate in-flight shell jobs against
+        // the same manager the shells live in, so an interrupted child's
+        // background job keeps its frame occupied exactly as long as it runs.
+        // Construction-time wiring: no other handle exists yet, so the
+        // try-lock cannot fail short of a poisoned construction path.
+        if let Ok(mut subagent_manager) = subagent_manager.try_write() {
+            subagent_manager.set_shell_job_source(Arc::clone(&shell_manager));
+        }
         let file_read_tracker = new_shared_file_read_tracker();
         let lsp_manager = Arc::new(match config.lsp_config.clone() {
             Some(cfg) => crate::lsp::LspManager::new(cfg, config.workspace.clone()),
@@ -2398,12 +2551,17 @@ impl Engine {
             current_mode: AppMode::Agent,
             turn_wall_clock: turn_budget::TurnWallClock::start(turn_wall_clock_budget),
             last_policy_narrowing: None,
+            last_turn_meta_authority: None,
+            last_authoritative_turn_meta_posture: None,
+            pending_authority_transition: None,
+            standing_posture_baseline_history: Vec::new(),
             last_turn_meta_git_snapshot: StdMutex::new(None),
             token_estimate_cache: TokenEstimateCache::new(),
             shared_paused: shared_paused.clone(),
             advisor_emission_guard: None,
         };
         let handle = EngineHandle {
+            run_completion: None,
             tx_op,
             rx_event: Arc::new(RwLock::new(rx_event)),
             cancel_token: shared_cancel_token,
@@ -2417,6 +2575,8 @@ impl Engine {
             live_runtime_authority,
             steer_control,
             compaction_cancellation,
+            approval_ack_timeout: handle::APPROVAL_ACK_TIMEOUT,
+            approval_ack_settle_timeout: handle::APPROVAL_ACK_SETTLE_TIMEOUT,
         };
 
         (engine, handle)
@@ -2536,7 +2696,11 @@ impl Engine {
             // just typed. Typed exec ask-rules still apply as hard Block
             // denies, and the sandbox/execpolicy layer stays the real safety
             // boundary. Model-issued shell calls keep the standard approval
-            // path; this branch is strictly composer provenance.
+            // path; this branch is strictly composer provenance. (Pinvou
+            // tri-mode safety: composer provenance keeps the hard deny face in
+            // every posture, armed or not — typing the command IS the approval
+            // (#5191), no modal can ask more than the user already did, and
+            // arming affects model-provenance calls only.)
             let ask_rule_decision = exec_shell_ask_rule_decision(
                 &self.config,
                 &tool_name,
@@ -2544,6 +2708,7 @@ impl Engine {
                 &self.session.workspace,
                 &self.session.workspace_roots,
                 self.session.approval_mode,
+                false,
             );
             if let Some(ToolAskRuleDecision::Block(reason)) = ask_rule_decision {
                 Err(ToolError::permission_denied(reason))
@@ -2645,6 +2810,9 @@ impl Engine {
     ///
     /// Single authority source for mode/permission state: both the run loop
     /// and the active turn's typed live-authority drain land here.
+    // Pinvou tri-mode safety added the ask-on-guardrail carrier; the
+    // parameter set mirrors the ChangeMode op it consumes.
+    #[allow(clippy::too_many_arguments)]
     async fn apply_change_mode(
         &mut self,
         mode: AppMode,
@@ -2653,6 +2821,7 @@ impl Engine {
         auto_approve: bool,
         approval_mode: crate::tui::approval::ApprovalMode,
         configured_sandbox_mode: Option<String>,
+        ask_on_guardrail: Option<bool>,
     ) {
         let authority = TurnAuthority::from_effective_fields(
             mode,
@@ -2662,7 +2831,7 @@ impl Engine {
             approval_mode,
         );
         let effective_approval = authority.approval_mode_for_session();
-        let changed = self.current_mode != authority.mode
+        let mut changed = self.current_mode != authority.mode
             || self.session.allow_shell != authority.allow_shell
             || self.session.trust_mode != authority.trust_mode
             || self.session.auto_approve
@@ -2671,19 +2840,39 @@ impl Engine {
             || self.session.approval_mode != effective_approval
             || self.api_config.sandbox_mode != configured_sandbox_mode;
         self.api_config.sandbox_mode = configured_sandbox_mode;
+        // The suffix below must key off an actual arming flip, not the mere
+        // presence of the carrier: production always delivers `Some` here
+        // (the op loop applies the snapshot that
+        // record_applied_runtime_authority backfilled with the session
+        // value), so a carrier echoing the unchanged session value would
+        // otherwise announce an arming change that never happened on every
+        // ordinary posture switch.
+        let mut arming_change: Option<bool> = None;
+        if let Some(armed) = ask_on_guardrail
+            && self.session.ask_on_guardrail != armed
+        {
+            self.session.ask_on_guardrail = armed;
+            arming_change = Some(armed);
+            changed = true;
+        }
         self.apply_runtime_mode_policy(&authority);
         if !changed {
             return;
         }
         self.emit_session_updated().await;
-        let _ = self
-            .tx_event
-            .send(Event::status(format!(
-                "Runtime policy changed to: {} / {}",
-                mode.description(),
-                effective_approval.permission_chip_label(),
-            )))
-            .await;
+        let mut status = format!(
+            "Runtime policy changed to: {} / {}",
+            mode.description(),
+            effective_approval.permission_chip_label(),
+        );
+        if let Some(armed) = arming_change {
+            status.push_str(if armed {
+                " (guardrail prompts armed)"
+            } else {
+                " (guardrail prompts disarmed)"
+            });
+        }
+        let _ = self.tx_event.send(Event::status(status)).await;
     }
 
     fn take_pending_runtime_authority(&self) -> Option<LiveRuntimeAuthority> {
@@ -2714,6 +2903,7 @@ impl Engine {
             authority.auto_approve,
             authority.approval_mode,
             authority.configured_sandbox_mode,
+            authority.ask_on_guardrail,
         )
         .await;
     }
@@ -2727,10 +2917,15 @@ impl Engine {
     }
 
     fn record_applied_runtime_authority(&self, authority: &TurnAuthority) {
-        let applied = LiveRuntimeAuthority::from_turn_authority(
+        let mut applied = LiveRuntimeAuthority::from_turn_authority(
             authority,
             self.api_config.sandbox_mode.clone(),
         );
+        // Turn installs never change the arming; re-record the session's live
+        // value so a re-record after a drain can never roll a published
+        // arming backward (the None from `from_turn_authority` would not
+        // compare equal to the applied `Some`).
+        applied.ask_on_guardrail = Some(self.session.ask_on_guardrail);
         let mut state = self
             .live_runtime_authority
             .lock()
@@ -3050,10 +3245,12 @@ impl Engine {
                     }
                     // A background child may be waiting on a person's answer
                     // while the parent turn is idle: route it. Any other
-                    // decision has no waiter and is dropped, as before.
+                    // decision has no waiter here, so its caller is nacked
+                    // instead of being left hanging on the ack.
                     decision = self.rx_approval.recv() => {
-                        if let Some(decision) = decision {
-                            self.route_child_approval_decision(decision).await;
+                        if let Some(mut decision) = decision {
+                            let routed = self.route_child_approval_decision(&decision).await;
+                            decision.resolve_ack(routed);
                         }
                     }
                     update = async {
@@ -3085,14 +3282,14 @@ impl Engine {
     /// a child took it; the parent's own awaiting call keeps every other id.
     async fn route_child_approval_decision(
         &self,
-        decision: super::engine::approval::ApprovalDecision,
+        decision: &super::engine::approval::ApprovalDecision,
     ) -> bool {
         use crate::tools::subagent::{ChildApprovalOutcome, SubAgentManager};
-        let (id, outcome) = match &decision {
-            super::engine::approval::ApprovalDecision::Approved { id } => {
+        let (id, outcome) = match decision {
+            super::engine::approval::ApprovalDecision::Approved { id, .. } => {
                 (id.clone(), ChildApprovalOutcome::Approved)
             }
-            super::engine::approval::ApprovalDecision::Denied { id } => {
+            super::engine::approval::ApprovalDecision::Denied { id, .. } => {
                 (id.clone(), ChildApprovalOutcome::Denied)
             }
             // A sandbox retry only exists for the parent's own tool call.
@@ -3921,6 +4118,39 @@ impl Engine {
                         };
                         self.session.messages.truncate_to(idx);
                         self.session.bump_messages_revision();
+                        // The truncated turn's `<turn_meta>` block — including
+                        // any authority transition it reported — is gone from
+                        // retained history, but the standing baseline it
+                        // installed would survive and make the replacement
+                        // turn omit that transition. Restore the baseline the
+                        // edited turn replaced (None included, e.g. when the
+                        // session's first turn is edited) — by position, not
+                        // message value. Message equality is structural, so a
+                        // committed steer carrying the same text as the turn
+                        // it ran inside is value-equal to that turn's message
+                        // and a value match would pop the surviving turn's
+                        // snapshot. The truncation removes exactly the suffix
+                        // at `idx` and never moves prefix indices, so the
+                        // edited message owns an entry exactly when the top
+                        // entry was appended at `idx` itself. The selector can
+                        // also target committed steer or step-budget notice
+                        // messages (ExternalUser provenance, no entry of
+                        // their own): no entry sits at their cut, the stack is
+                        // untouched, and the replacement recomputes against
+                        // the unchanged baseline (same posture → no
+                        // transition line).
+                        while let Some(entry) = self
+                            .standing_posture_baseline_history
+                            .pop_if(|entry| entry.push_index >= idx)
+                        {
+                            // The edit selector targets the last genuine user
+                            // prompt, so no entry can sit above the cut; an
+                            // entry at exactly `idx` is the edited turn's own,
+                            // and an entry below the cut ends the drain.
+                            if entry.push_index == idx {
+                                self.last_authoritative_turn_meta_posture = entry.prior_posture;
+                            }
+                        }
                         // Now dispatch the new message as a normal send,
                         // reusing the engine's stored mode/model config.
                         let mode = self.current_mode;
@@ -4280,6 +4510,11 @@ impl Engine {
         policy_narrowing: Option<&PolicyNarrowingEvent>,
     ) -> ContentBlock {
         let prompt_context = self.installed_next_turn_prompt_context();
+        // Pinvou tri-mode safety: production only ever observes `Some` here
+        // inside the synchronous turn-start window — the pending transition is
+        // set and consumed around the block build with no `.await` between
+        // them. Keep that stretch await-free: a yield inserted there would let
+        // a steer or runtime notice re-render the line this builder reads.
         self.turn_metadata_block_from_snapshot(
             routed_model,
             auto_model,
@@ -4293,6 +4528,7 @@ impl Engine {
                 approval_mode: self.session.approval_mode,
                 working_set: &self.session.working_set,
                 policy_narrowing,
+                authority_transition: self.pending_authority_transition,
             },
         )
     }
@@ -4324,6 +4560,7 @@ impl Engine {
             approval_mode,
             working_set,
             policy_narrowing,
+            authority_transition,
         } = snapshot;
         let today = chrono::Local::now().format("%Y-%m-%d").to_string();
         let working_set_summary = working_set
@@ -4418,6 +4655,15 @@ impl Engine {
                     .to_string(),
             );
         }
+        // Pinvou tri-mode safety: when the host changed the mode, permission
+        // posture, or guardrail arming since the last reported turn, say so
+        // explicitly — the standing posture lines above describe the state,
+        // this line describes the change (upstream #6470/#6321 keep the same
+        // receipt doctrine). Present only on a changed turn, so ordinary
+        // blocks stay byte-stable.
+        if let Some(transition) = authority_transition.as_ref() {
+            lines.push(transition.render());
+        }
         // On ordinary external turns the user's own message is authoritative by
         // construction, so provenance is redundant. On non-external turns
         // (sub-agent handoff, runtime events) the *reduced* authority is the
@@ -4433,6 +4679,10 @@ impl Engine {
         // Emitted only on a narrowed turn, so the ordinary turn's metadata
         // stays byte-stable.
         if let Some(event) = policy_narrowing {
+            // This narrowing receipt ("Authority transition: …") is a
+            // different line family from the host-armed
+            // `Authority transition (host): …` (AuthorityTransition::render);
+            // both may coexist in one block.
             lines.push(format!("Authority narrowing: {}", event.reason().as_str()));
             lines.push(format!("Authority transition: {}", event.transition()));
             lines.push(format!("Authority narrowing status: {}", event.message()));
@@ -4520,6 +4770,22 @@ impl Engine {
             content.push(notice);
         }
         content
+    }
+
+    /// The posture the turn built from `input_policy` reports in its
+    /// `<turn_meta>` block: the planned posture from the turn authority,
+    /// the live arming from the session. Single source for the live
+    /// compare (which runs after `apply_runtime_mode_policy` installs this
+    /// same authority, so `approval_mode_for_session()` is exactly the
+    /// installed session value) and the `/preview-request` recompute, so
+    /// the two surfaces cannot drift when preview inputs carry a
+    /// hypothetical posture (Pinvou tri-mode safety).
+    fn turn_meta_posture_for(&self, input_policy: &TurnAuthority) -> TurnMetaPosture {
+        TurnMetaPosture {
+            mode: input_policy.mode,
+            approval: input_policy.approval_mode_for_session(),
+            ask_on_guardrail: self.session.ask_on_guardrail,
+        }
     }
 
     /// The user message a turn would build, from an explicit state snapshot.
@@ -5371,6 +5637,7 @@ impl Engine {
                     Arc::clone(&self.shared_auto_review_policy),
                     self.config.terminal_chrome_enabled,
                 )
+                .with_ask_on_guardrail(self.session.ask_on_guardrail)
                 // Typed permission rules must bind delegated calls like they
                 // bind the parent's own; the handle shares the live rulesets,
                 // so mid-session updates stay effective.
@@ -5969,6 +6236,75 @@ impl Engine {
         // Add the user message through the same explicit snapshot constructor
         // preview uses. Route limits and mode in resource metadata therefore
         // belong to this turn even when the previous route was different.
+
+        // Pinvou tri-mode safety: a host-driven authority change between
+        // turns is never silent. Compare the installed posture against the
+        // posture the previous block reported; any number of mid-turn
+        // `ChangeMode` flips collapses into the one transition the next
+        // block reports. The `None` arm keeps the first turn (and restored
+        // sessions) transition-free, so this only ever adds a line when a
+        // change actually happened. Computed here — at the point the block
+        // that reports it is built — so a `NotStarted` failure above can
+        // never record a posture the model never saw; and consumed below,
+        // so steers and mid-turn runtime notices cannot re-render the same
+        // line. Residual boundary: the record precedes the provider send,
+        // so a mid-turn provider failure leaves the posture recorded — the
+        // block stays in append-only history and the next successful
+        // request still carries it, but an edit-last-turn truncation would
+        // drop it.
+        // `runtime_chat_isolated` builds no `<turn_meta>` block at all (see
+        // the block constructors), so a posture recorded on an isolated turn
+        // would be rendered nowhere: an isolated turn neither consumes nor
+        // records, and the next block-building turn compares against the
+        // last posture a block actually reported.
+        //
+        // A provenance-narrowed turn runs a per-turn authority reduction that
+        // the narrowing receipt family below already reports. It therefore
+        // neither emits the host transition (labeling the reduction a host
+        // flip would misattribute the cause) nor updates the standing
+        // baseline (otherwise its unwind on the next authoritative turn
+        // would render a reverse "host" line no host ever caused). Its
+        // reported posture still lands in `last_turn_meta_authority`, so the
+        // wire record stays faithful; only the host-flip measurement is
+        // scoped to authoritative turns. A genuine host flip that lands in
+        // the same window renders on the next authoritative turn, measured
+        // from the pre-narrowing standing posture.
+        let mut standing_baseline_entry: Option<Option<crate::core::authority::TurnMetaPosture>> =
+            None;
+        if !self.api_config.runtime_chat_isolated {
+            let current_posture = self.turn_meta_posture_for(&input_policy);
+            let narrowed_turn = input_policy.narrowing.is_some();
+            let prior_standing_posture = self.last_authoritative_turn_meta_posture;
+            self.pending_authority_transition = if narrowed_turn {
+                None
+            } else {
+                crate::core::authority::authority_transition_between(
+                    self.last_authoritative_turn_meta_posture,
+                    current_posture,
+                )
+            };
+            self.last_turn_meta_authority = Some(current_posture);
+            if !narrowed_turn {
+                self.last_authoritative_turn_meta_posture = Some(current_posture);
+            }
+            // Snapshot what this persisted turn replaced so an EditLastTurn
+            // truncation can restore the baseline its block carried away.
+            // Only authoritative turn builds record an entry, and each entry
+            // is linked to the exact persisted user message the record is
+            // taken for (identity, not stack position, decides the pop):
+            // `edit_last_turn_target` selects these builds — every other
+            // provenance renders the `(non-authoritative)` line its selector
+            // reads as runtime-owned — but it can also select committed
+            // steer / step-budget-notice messages, which persist an
+            // ExternalUser message without pushing any entry, so the stack
+            // stays aligned 1:1 with the turn-build messages an edit can
+            // drop even when non-authoritative runtime turns or steers
+            // complete between them (a truncation removes those messages
+            // without popping their entries, because they never pushed any).
+            if provenance.can_authorize_work() {
+                standing_baseline_entry = Some(prior_standing_posture);
+            }
+        }
         let user_msg = self.user_text_message_from_snapshot(
             content,
             &model,
@@ -5982,9 +6318,28 @@ impl Engine {
                 approval_mode: self.session.approval_mode,
                 working_set: &self.session.working_set,
                 policy_narrowing: self.last_policy_narrowing.as_ref(),
+                authority_transition: self.pending_authority_transition,
             },
         );
+        if let Some(prior_posture) = standing_baseline_entry {
+            // The message appends right after this line, so the current
+            // history length is the index its entry is linked to. The engine
+            // appends every history message itself, so the index stays exact
+            // across suffix truncations (EditLastTurn never moves prefix
+            // indices), and every other history mutation — purge and trim
+            // re-anchoring survivors, compaction replacements vacating the
+            // stack, session resume clearing it — restores that invariant
+            // before the next edit reads it (see `push_index`).
+            let push_index = self.session.messages.len();
+            self.standing_posture_baseline_history
+                .push(StandingPostureBaselineEntry {
+                    prior_posture,
+                    push_index,
+                });
+        }
         self.session.add_message(user_msg);
+        // The transition is reported by this block and only this block.
+        self.pending_authority_transition = None;
 
         self.emit_session_updated().await;
 
@@ -6392,7 +6747,19 @@ impl Engine {
         match compaction_result {
             Ok(mut result) => {
                 if !result.messages.is_empty() || self.session.messages.is_empty() {
-                    self.append_compaction_agent_topology(&mut result.messages)
+                    // Measured against the pre-topology replacement: the
+                    // checkpoint the topology step inserts below is
+                    // engine-authored slot bookkeeping whose shift is
+                    // rebased onto the entries at replace time. The
+                    // re-anchoring itself is shared with the auto and
+                    // emergency paths (see
+                    // `rebase_standing_baseline_after_compaction`).
+                    let layout_preserved = standing_baseline_layout_preserved(
+                        &result.messages,
+                        &self.session.messages,
+                    );
+                    let topology_rebase = self
+                        .append_compaction_agent_topology(&mut result.messages)
                         .await;
                     if cancel_token.is_cancelled() {
                         self.finish_compaction(&id);
@@ -6421,6 +6788,11 @@ impl Engine {
                     let messages_after = result.messages.len();
                     let retries_used = result.retries_used;
                     let coverage_clause = result.coverage.receipt_clause();
+                    self.rebase_standing_baseline_after_compaction(
+                        layout_preserved,
+                        result.summary_origins.as_deref(),
+                        &topology_rebase,
+                    );
                     self.session.replace_messages(result.messages);
                     if let Some(pm) = self.session.prefix_stability.as_mut() {
                         pm.note_history_reset("compaction");
@@ -6534,6 +6906,16 @@ impl Engine {
         {
             Ok(result) => {
                 let messages_after = result.messages.len();
+                // Purge keeps survivors in order and rewrites them in place,
+                // so `survivor_origins` maps every retained message back to
+                // its pre-purge slot. Re-anchor the standing baseline through
+                // that mapping before the history is replaced (see
+                // `StandingPostureBaselineEntry::push_index`): entries whose
+                // turn message the purge removed are dropped, survivors keep
+                // a corrected `push_index`, so an EditLastTurn cut still
+                // matches the retained turn's entry and a survived turn —
+                // even at a shifted index — restores its prior posture.
+                self.relocate_standing_baseline_entries(&result.survivor_origins);
                 self.session.replace_messages(result.messages);
                 self.emit_session_updated().await;
 
@@ -6627,6 +7009,25 @@ impl Engine {
         )
     }
 
+    /// Re-anchor standing-baseline entries after a mechanical history
+    /// removal that keeps survivors in order. `survivor_origins[i]` is the
+    /// previous-history index of the message now at index `i` (ascending,
+    /// each index at most once — `/purge`'s `PurgeResult::survivor_origins`
+    /// has exactly this shape). An entry is kept with `push_index` remapped
+    /// to its message's new slot, or dropped when the removal took its
+    /// message (see `StandingPostureBaselineEntry::push_index`).
+    fn relocate_standing_baseline_entries(&mut self, survivor_origins: &[usize]) {
+        self.standing_posture_baseline_history.retain_mut(|entry| {
+            match survivor_origins.binary_search(&entry.push_index) {
+                Ok(new_index) => {
+                    entry.push_index = new_index;
+                    true
+                }
+                Err(_) => false,
+            }
+        });
+    }
+
     fn trim_oldest_messages_to_budget(&mut self, target_input_budget: usize) -> usize {
         let mut removed = 0usize;
         while self.session.messages.len() > MIN_RECENT_MESSAGES_TO_KEEP
@@ -6635,6 +7036,22 @@ impl Engine {
             self.session.messages.trim_front(1);
             self.session.bump_messages_revision();
             removed = removed.saturating_add(1);
+        }
+        if removed > 0 {
+            // A front trim removes exactly the first `removed` messages and
+            // keeps the survivors in order, so re-anchor the standing
+            // baseline (see `StandingPostureBaselineEntry::push_index`):
+            // entries below the cut lost their message and are dropped,
+            // survivors shift down by `removed` and keep restoring their
+            // prior posture on an edit.
+            self.standing_posture_baseline_history.retain_mut(|entry| {
+                if entry.push_index < removed {
+                    false
+                } else {
+                    entry.push_index -= removed;
+                    true
+                }
+            });
         }
         removed
     }
@@ -6674,6 +7091,7 @@ impl Engine {
 
         let mut retries_used = 0u32;
         let mut summary_prompt = None;
+        let mut summary_origins = None;
         let mut compacted_messages: Vec<Message> = self.session.messages.clone().into();
 
         let mut forced_config = self.config.compaction.clone();
@@ -6712,6 +7130,7 @@ impl Engine {
                 retries_used = result.retries_used;
                 compacted_messages = result.messages;
                 summary_prompt = result.summary_prompt;
+                summary_origins = result.summary_origins;
             }
             Err(err) => {
                 let _ = self
@@ -6737,7 +7156,14 @@ impl Engine {
         }
 
         if !compacted_messages.is_empty() || self.session.messages.is_empty() {
-            self.append_compaction_agent_topology(&mut compacted_messages)
+            // Measured against the pre-topology replacement (see the manual
+            // compaction site): the checkpoint the topology step inserts
+            // below is engine-authored slot bookkeeping whose shift is
+            // rebased onto the entries at replace time.
+            let layout_preserved =
+                standing_baseline_layout_preserved(&compacted_messages, &self.session.messages);
+            let topology_rebase = self
+                .append_compaction_agent_topology(&mut compacted_messages)
                 .await;
             let turn_was_canceled = turn_cancel.is_cancelled();
             if turn_was_canceled || compaction_cancel.is_cancelled() {
@@ -6751,6 +7177,18 @@ impl Engine {
                 self.emit_compaction_cancelled(id, true, message).await;
                 return false;
             }
+            // Unified standing-baseline handling for history replacements
+            // (see `rebase_standing_baseline_after_compaction`): whether the
+            // API pass produced a summary replacement, a mechanical prune,
+            // or — after an API failure — the local fallback re-carried
+            // history through the agent-topology checkpoint rewrite, the
+            // shared rebase keeps the recorded indices meaningful before
+            // the next edit reads them.
+            self.rebase_standing_baseline_after_compaction(
+                layout_preserved,
+                summary_origins.as_deref(),
+                &topology_rebase,
+            );
             self.session.replace_messages(compacted_messages);
         }
         self.commit_compaction_checkpoint(summary_prompt);
@@ -6919,6 +7357,7 @@ impl Engine {
             Arc::clone(&self.shared_auto_review_policy),
             self.config.terminal_chrome_enabled,
         )
+        .with_ask_on_guardrail(self.session.ask_on_guardrail)
         // Typed permission rules must bind delegated calls like they bind the
         // parent's own; the handle shares the live rulesets, so mid-session
         // updates stay effective.
@@ -8169,12 +8608,76 @@ impl Engine {
     /// its world-state reference after standalone compaction so the next turn
     /// receives fresh environment/subagent context instead of trusting the
     /// narrative summary as live process state.
-    async fn append_compaction_agent_topology(&self, messages: &mut Vec<Message>) {
+    async fn append_compaction_agent_topology(
+        &self,
+        messages: &mut Vec<Message>,
+    ) -> crate::runtime_handoff::AgentTopologyCheckpointRebase {
         let snapshots = {
             let manager = self.subagent_manager.read().await;
             manager.list_for_session(&self.session.id)
         };
-        crate::runtime_handoff::replace_agent_topology_checkpoint(messages, &snapshots);
+        crate::runtime_handoff::replace_agent_topology_checkpoint(messages, &snapshots)
+    }
+
+    /// Re-anchor the standing-posture baseline entries onto a compaction
+    /// replacement (see `StandingPostureBaselineEntry::push_index`; the
+    /// manual, auto, and emergency paths all install replacements through
+    /// this). Branch precedence: an available origin graph always wins —
+    /// equal length and equal roles do not make a replacement
+    /// slot-preserving, because the local builder can move a retained
+    /// message across same-role slots, so a Summary replacement relocates
+    /// through its origin map even when it coincidentally matches the old
+    /// layout. The shapes, in precedence order:
+    /// - a summary-path replacement is authored by the LOCAL builder
+    ///   (`CompactionResult::summary_origins`), which reports where every
+    ///   slot came from: an entry whose user message the builder retained
+    ///   relocates to that message's new slot (then takes the topology
+    ///   shift), and an entry whose message the builder dropped goes away
+    ///   with its turn — no later edit can target it. Without the relocation
+    ///   the retained turns would lose their linkage even though the builder
+    ///   kept them deterministically: editing a retained turn would pop
+    ///   nothing and silently drop the transition its truncated block
+    ///   carried away;
+    /// - a layout-preserving replacement on an origin-less mechanical path —
+    ///   the PruneOnly prune rewrites ToolResult content in place, and the
+    ///   emergency fallback can re-carry the history verbatim — keeps every
+    ///   slot by construction, so each entry only takes the agent-topology
+    ///   shift;
+    /// - any other replacement (provider-authored content, or the emergency
+    ///   fallback rewritten through the agent-topology checkpoint) moves
+    ///   survivors to unknowable slots and vacates the stack —
+    ///   post-compaction turn builds re-establish their own entries.
+    ///
+    /// `layout_preserved` and `summary_origins` must both be measured against
+    /// the pre-topology replacement (the shift `topology_rebase` describes is
+    /// applied to the re-anchored indices here).
+    fn rebase_standing_baseline_after_compaction(
+        &mut self,
+        layout_preserved: bool,
+        summary_origins: Option<&[Option<usize>]>,
+        topology_rebase: &crate::runtime_handoff::AgentTopologyCheckpointRebase,
+    ) {
+        if let Some(origins) = summary_origins {
+            self.standing_posture_baseline_history = self
+                .standing_posture_baseline_history
+                .drain(..)
+                .filter_map(|entry| {
+                    origins
+                        .iter()
+                        .position(|origin| *origin == Some(entry.push_index))
+                        .map(|index| StandingPostureBaselineEntry {
+                            prior_posture: entry.prior_posture,
+                            push_index: topology_rebase.rebase_index(index),
+                        })
+                })
+                .collect();
+        } else if layout_preserved {
+            for entry in &mut self.standing_posture_baseline_history {
+                entry.push_index = topology_rebase.rebase_index(entry.push_index);
+            }
+        } else {
+            self.standing_posture_baseline_history.clear();
+        }
     }
 }
 
@@ -8385,6 +8888,7 @@ pub(super) fn exec_shell_ask_rule_decision(
     workspace: &Path,
     workspace_roots: &[PathBuf],
     approval_mode: crate::tui::approval::ApprovalMode,
+    ask_on_guardrail: bool,
 ) -> Option<ToolAskRuleDecision> {
     exec_shell_ask_rule_decision_for_policy(
         &config.exec_policy_engine,
@@ -8393,6 +8897,7 @@ pub(super) fn exec_shell_ask_rule_decision(
         workspace,
         workspace_roots,
         approval_mode,
+        ask_on_guardrail,
     )
 }
 
@@ -8406,6 +8911,7 @@ pub(crate) fn exec_shell_ask_rule_decision_for_policy(
     workspace: &Path,
     workspace_roots: &[PathBuf],
     approval_mode: crate::tui::approval::ApprovalMode,
+    ask_on_guardrail: bool,
 ) -> Option<ToolAskRuleDecision> {
     let policy_tool_name =
         crate::tools::canonical_action::canonical_action_alias(tool_name, tool_input);
@@ -8441,6 +8947,7 @@ pub(crate) fn exec_shell_ask_rule_decision_for_policy(
         workspace,
         workspace_roots,
         approval_mode,
+        ask_on_guardrail,
     )
 }
 
@@ -8451,6 +8958,7 @@ pub(super) fn file_tool_ask_rule_decision(
     workspace: &Path,
     workspace_roots: &[PathBuf],
     approval_mode: crate::tui::approval::ApprovalMode,
+    ask_on_guardrail: bool,
 ) -> Option<ToolAskRuleDecision> {
     file_tool_ask_rule_decision_for_policy(
         &config.exec_policy_engine,
@@ -8459,6 +8967,7 @@ pub(super) fn file_tool_ask_rule_decision(
         workspace,
         workspace_roots,
         approval_mode,
+        ask_on_guardrail,
     )
 }
 
@@ -8482,6 +8991,7 @@ pub(crate) fn file_tool_ask_rule_decision_for_policy(
     workspace: &Path,
     workspace_roots: &[PathBuf],
     approval_mode: crate::tui::approval::ApprovalMode,
+    ask_on_guardrail: bool,
 ) -> Option<ToolAskRuleDecision> {
     let policy_tool_name =
         crate::tools::canonical_action::canonical_action_alias(tool_name, tool_input);
@@ -8496,6 +9006,7 @@ pub(crate) fn file_tool_ask_rule_decision_for_policy(
             workspace,
             workspace_roots,
             approval_mode,
+            ask_on_guardrail,
         );
     }
 
@@ -8511,6 +9022,7 @@ pub(crate) fn file_tool_ask_rule_decision_for_policy(
             workspace,
             workspace_roots,
             approval_mode,
+            ask_on_guardrail,
         ) {
             Some(ToolAskRuleDecision::Block(reason)) => {
                 return Some(ToolAskRuleDecision::Block(reason));
@@ -8532,6 +9044,9 @@ pub(crate) fn file_tool_ask_rule_decision_for_policy(
     }
 }
 
+// Pinvou tri-mode safety added the ask-on-guardrail carrier alongside the
+// existing judgment context.
+#[allow(clippy::too_many_arguments)]
 fn tool_ask_rule_decision_for_context(
     exec_policy_engine: &codewhale_execpolicy::ExecPolicyEngine,
     tool_name: &str,
@@ -8541,6 +9056,7 @@ fn tool_ask_rule_decision_for_context(
     workspace: &Path,
     workspace_roots: &[PathBuf],
     approval_mode: crate::tui::approval::ApprovalMode,
+    ask_on_guardrail: bool,
 ) -> Option<ToolAskRuleDecision> {
     let judged_cwd = cwd.to_string_lossy();
     let ask_for_approval = match approval_mode {
@@ -8566,7 +9082,22 @@ fn tool_ask_rule_decision_for_context(
         })
         .ok()?;
     if !decision.allow {
-        Some(ToolAskRuleDecision::Block(decision.reason().to_string()))
+        // Pinvou tri-mode safety: when the host has armed interactive
+        // guardrail prompts, it has guaranteed a person can answer, so a
+        // denied-prefix / typed-deny face becomes an approval request with
+        // the full matching evidence instead of a hard block. Unarmed (the
+        // default) keeps the deny face byte-identical to the pre-flag
+        // doctrine; Auto-Review and Never postures keep it in every case —
+        // their denials stay unconditional because nobody can answer the
+        // card there even when armed.
+        if crate::core::authority::guardrail_prompts_answerable(approval_mode, ask_on_guardrail) {
+            Some(ToolAskRuleDecision::Prompt(format!(
+                "Guardrail approval requested (ask-on-guardrail is armed): {}",
+                decision.reason()
+            )))
+        } else {
+            Some(ToolAskRuleDecision::Block(decision.reason().to_string()))
+        }
     } else if decision.requires_approval {
         Some(ToolAskRuleDecision::Prompt(decision.reason().to_string()))
     } else if decision.matched_action == Some(codewhale_execpolicy::PermissionAction::Allow) {
@@ -8619,15 +9150,12 @@ fn apply_patch_permission_paths(input: &Value) -> Vec<String> {
 
 /// Spawn the engine in a background task
 pub fn spawn_engine(config: EngineConfig, api_config: &Config) -> EngineHandle {
-    let (engine, handle) = Engine::new(config, api_config);
+    let (engine, mut handle) = Engine::new(config, api_config);
 
-    spawn_supervised(
-        "engine-event-loop",
-        std::panic::Location::caller(),
-        async move {
-            engine.run().await;
-        },
-    );
+    // Keep the large run future boxed before entering the supervisor.
+    let (run, completion) = run_completion::observe(Box::pin(engine.run()));
+    handle.run_completion = Some(completion);
+    spawn_supervised("engine-event-loop", std::panic::Location::caller(), run);
 
     handle
 }
@@ -8639,16 +9167,13 @@ pub(crate) fn spawn_engine_with_authoritative_route_config(
     api_config: &Config,
     authoritative_route_config: Arc<parking_lot::RwLock<Config>>,
 ) -> EngineHandle {
-    let (mut engine, handle) = Engine::new(config, api_config);
+    let (mut engine, mut handle) = Engine::new(config, api_config);
     engine.authoritative_route_config = Some(authoritative_route_config);
 
-    spawn_supervised(
-        "engine-event-loop",
-        std::panic::Location::caller(),
-        async move {
-            engine.run().await;
-        },
-    );
+    // Keep the large run future boxed before entering the supervisor.
+    let (run, completion) = run_completion::observe(Box::pin(engine.run()));
+    handle.run_completion = Some(completion);
+    spawn_supervised("engine-event-loop", std::panic::Location::caller(), run);
 
     handle
 }
@@ -8681,11 +9206,23 @@ pub(crate) enum MockApprovalEvent {
 
 #[cfg(test)]
 impl MockEngineHandle {
+    pub(crate) fn observe_run_for_test<F>(
+        &mut self,
+        future: F,
+    ) -> impl Future<Output = ()> + Send + 'static + use<F>
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        let (run, completion) = run_completion::observe(Box::pin(future));
+        self.handle.run_completion = Some(completion);
+        run
+    }
+
     pub(crate) async fn recv_approval_event(&mut self) -> Option<MockApprovalEvent> {
         match self.rx_approval.recv().await? {
-            ApprovalDecision::Approved { id } => Some(MockApprovalEvent::Approved { id }),
-            ApprovalDecision::Denied { id } => Some(MockApprovalEvent::Denied { id }),
-            ApprovalDecision::RetryWithPolicy { id, policy } => {
+            ApprovalDecision::Approved { id, .. } => Some(MockApprovalEvent::Approved { id }),
+            ApprovalDecision::Denied { id, .. } => Some(MockApprovalEvent::Denied { id }),
+            ApprovalDecision::RetryWithPolicy { id, policy, .. } => {
                 Some(MockApprovalEvent::RetryWithPolicy { id, policy })
             }
         }
@@ -8719,7 +9256,28 @@ impl MockEngineHandle {
 pub(crate) fn mock_engine_handle() -> MockEngineHandle {
     let (tx_op, rx_op) = mpsc::channel(32);
     let (tx_event, rx_event) = mpsc::channel(256);
-    let (tx_approval, rx_approval) = mpsc::channel(64);
+    // Decisions sent through the mock handle carry the same ack the real
+    // engine contract expects, but no engine loop runs behind this handle.
+    // A small pump resolves each ack as consumed — a stand-in for the
+    // engine's wait or idle loop — and forwards the ack-stripped decision to
+    // the channel the test observes via `recv_approval_event`.
+    let (tx_approval, rx_approval) = if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+        let (tx_pump, mut rx_pump) = mpsc::channel::<ApprovalDecision>(64);
+        let (tx_forward, rx_forward) = mpsc::channel::<ApprovalDecision>(64);
+        runtime.spawn(async move {
+            while let Some(mut decision) = rx_pump.recv().await {
+                decision.resolve_ack(true);
+                if tx_forward.send(decision).await.is_err() {
+                    break;
+                }
+            }
+        });
+        (tx_pump, rx_forward)
+    } else {
+        // No tokio runtime (plain sync test): no decision can be awaited
+        // through this handle anyway.
+        mpsc::channel(64)
+    };
     let (tx_user_input, rx_user_input) = mpsc::channel(32);
     let (tx_steer, rx_steer) = mpsc::channel(64);
     let cancel_token = CancellationToken::new();
@@ -8737,12 +9295,14 @@ pub(crate) fn mock_engine_handle() -> MockEngineHandle {
             false,
             crate::tui::approval::ApprovalMode::Suggest,
             None,
+            None,
         ),
     )));
     let compaction_cancellation = Arc::new(StdMutex::new(CompactionCancellationState::default()));
     let mut steer_control_state = SteerControlState::default();
     steer_control_state.begin_turn();
     let handle = EngineHandle {
+        run_completion: None,
         tx_op,
         rx_event: Arc::new(RwLock::new(rx_event)),
         cancel_token: shared_cancel_token,
@@ -8756,6 +9316,8 @@ pub(crate) fn mock_engine_handle() -> MockEngineHandle {
         live_runtime_authority,
         steer_control: Arc::new(StdMutex::new(steer_control_state)),
         compaction_cancellation,
+        approval_ack_timeout: handle::APPROVAL_ACK_TIMEOUT,
+        approval_ack_settle_timeout: handle::APPROVAL_ACK_SETTLE_TIMEOUT,
     };
 
     MockEngineHandle {
@@ -8780,6 +9342,11 @@ pub(crate) struct TurnMetadataSnapshot<'a> {
     pub(crate) approval_mode: crate::tui::approval::ApprovalMode,
     pub(crate) working_set: &'a crate::working_set::WorkingSet,
     pub(crate) policy_narrowing: Option<&'a PolicyNarrowingEvent>,
+    /// Host-driven authority change since the last reported turn (Pinvou
+    /// tri-mode safety). `None` keeps the block byte-identical to the
+    /// pre-flag shape; both the real turn and `/preview-request` read the
+    /// same engine-computed value, so the preview stays byte-identical.
+    pub(crate) authority_transition: Option<crate::core::authority::AuthorityTransition>,
 }
 
 /// Immutable prompt facts for the next accepted turn.
@@ -9090,7 +9657,10 @@ impl SubAgentWiring {
 mod approval;
 mod context;
 mod handle;
+mod run_completion;
+pub use run_completion::EngineRunCompletion;
 pub mod preview;
+pub(crate) use self::handle::ApprovalAckUnknownError;
 use crate::compaction::estimate_input_tokens_conservative;
 #[cfg(test)]
 pub(crate) use context::compact_tool_result_for_context;
