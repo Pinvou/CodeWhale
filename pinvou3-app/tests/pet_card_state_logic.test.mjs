@@ -32,7 +32,7 @@ copyFileSync(path.join(here, '..', 'src', 'shared', 'reconciliation-i18n.js'), p
 copyFileSync(path.join(here, '..', 'src', 'shared', 'token-management-i18n.js'), path.join(dir, 'shared', 'token-management-i18n.js'));
 copyFileSync(path.join(here, '..', 'src', 'shared', 'ledger-repair-i18n.js'), path.join(dir, 'shared', 'ledger-repair-i18n.js'));
 // Include every current shared/i18n.js domain re-export in the isolated tree.
-for (const name of ['organization-i18n.js', 'model-usage-i18n.js', 'account-closure-i18n.js', 'entitlement-correction-i18n.js', 'account-closed-grants-i18n.js', 'audit-i18n.js', 'platform-role-i18n.js', 'registration-repair-i18n.js', 'account-layout-i18n.js', 'admin-role-presentation-i18n.js']) {
+for (const name of ['account-center-i18n.js', 'organization-i18n.js', 'model-usage-i18n.js', 'account-closure-i18n.js', 'entitlement-correction-i18n.js', 'account-closed-grants-i18n.js', 'audit-i18n.js', 'platform-role-i18n.js', 'registration-repair-i18n.js', 'account-layout-i18n.js', 'admin-role-presentation-i18n.js']) {
   copyFileSync(path.join(here, '..', 'src', 'shared', name), path.join(dir, 'shared', name));
 }
 // Preserve the locale modules' transitive imports as dictionaries evolve.
