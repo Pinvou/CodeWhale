@@ -1161,6 +1161,105 @@ struct FirstRequestGatedGoalModelClient {
     release_request: std::sync::Arc<tokio::sync::Notify>,
 }
 
+#[tokio::test]
+async fn forkguard_idle_shutdown_preserves_an_autonomous_turn_before_host_observation() {
+    let home = tempdir().unwrap();
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let client = Arc::new(FirstRequestGatedGoalModelClient {
+        calls: std::sync::atomic::AtomicUsize::new(0),
+        request_entered: entered.clone(),
+        release_request: release.clone(),
+    });
+    let config: Config = serde_json::from_value(json!({
+        "provider": "local-fixture",
+        "providers": {"local-fixture": {
+            "kind": "openai-compatible", "base_url": "http://127.0.0.1:9/v1",
+            "model": "local-model", "api_key": "unused-local-fixture"
+        }}
+    }))
+    .unwrap();
+    let mut engine_config = EngineConfig {
+        workspace: home.path().to_owned(),
+        model: "local-model".into(),
+        max_steps: 1,
+        snapshots_enabled: false,
+        terminal_chrome_enabled: false,
+        ..Default::default()
+    };
+    engine_config
+        .features
+        .disable(crate::features::Feature::Mcp);
+    let (engine, mut handle) = Engine::new_with_model_client(engine_config, &config, client);
+    engine
+        .tx_subagent_completion
+        .send(SubAgentCompletion {
+            owner_session_id: engine.session.id.clone(),
+            agent_id: "completed-child".into(),
+            payload: "child result ready for the autonomous followup".into(),
+        })
+        .unwrap();
+    let (run, completion) = run_completion::observe(Box::pin(engine.run()));
+    handle.run_completion = Some(completion);
+    let running = tokio::spawn(run);
+    tokio::time::timeout(Duration::from_secs(5), entered.notified())
+        .await
+        .unwrap();
+    // Do not read TurnStarted: reproduce the host's unobserved-active window.
+    let active_token = handle.cancel_token.lock().unwrap().token.clone();
+    let retirement_handle = handle.clone();
+    let retiring = tokio::spawn(async move { retirement_handle.shutdown_when_idle(|| true).await });
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while handle.idle_retirement.as_ref().unwrap().capacity() != 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(!retiring.is_finished());
+    assert!(!active_token.is_cancelled());
+    release.notify_one();
+    let snapshot = tokio::time::timeout(Duration::from_secs(5), handle.get_session_snapshot())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        !tokio::time::timeout(Duration::from_secs(5), retiring)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap()
+    );
+    assert!(!active_token.is_cancelled());
+    assert!(
+        serde_json::to_string(&snapshot.messages)
+            .unwrap()
+            .contains("still working")
+    );
+    let mut completed = false;
+    let mut text = String::new();
+    {
+        let mut events = handle.rx_event.write().await;
+        while let Ok(event) = events.try_recv() {
+            match event {
+                Event::MessageDelta { content, .. } => text.push_str(&content),
+                Event::TurnComplete { status, .. } => {
+                    assert_eq!(status, TurnOutcomeStatus::Completed);
+                    completed = true;
+                }
+                _ => {}
+            }
+        }
+    }
+    assert!(completed && text.contains("still working"));
+    assert!(handle.shutdown_when_idle(|| true).await.unwrap());
+    assert_eq!(
+        handle.wait_run_completion().await,
+        EngineRunCompletion::NormalReturn
+    );
+    running.await.unwrap();
+}
+
 struct IndexedGatedGoalModelClient {
     calls: std::sync::atomic::AtomicUsize,
     gates: HashMap<
@@ -29976,6 +30075,7 @@ fn engine_handle_try_send_does_not_block_when_op_channel_is_full() {
     let cancel_token = CancellationToken::new();
     let handle = EngineHandle {
         run_completion: None,
+        idle_retirement: None,
         tx_op,
         rx_event: Arc::new(RwLock::new(mpsc::channel::<Event>(1).1)),
         cancel_token: Arc::new(StdMutex::new(super::TurnCancelSlot {
@@ -30164,6 +30264,50 @@ async fn reload_mcp_op_recovers_from_invalid_initial_config_in_process() {
 
     handle.send(Op::Shutdown).await.expect("shutdown");
     task.await.expect("engine task");
+}
+
+#[tokio::test]
+async fn forkguard_shutdown_waits_for_pending_mcp_boot_without_emitting_events() {
+    let tmp = tempdir().expect("tempdir");
+    let (mut engine, _handle) = Engine::new(
+        EngineConfig {
+            workspace: tmp.path().to_path_buf(),
+            ..Default::default()
+        },
+        &Config::default(),
+    );
+    // A host reclaim may have stopped its event forwarder. Filling this queue
+    // also protects against using wait_for_mcp_boot's UI-emitting drain here.
+    while engine.tx_event.try_send(Event::status("queued")).is_ok() {}
+    let (done_tx, done_rx) = tokio::sync::watch::channel(false);
+    let (progress_tx, progress_rx) = mpsc::unbounded_channel();
+    engine.mcp_pool = Some(Arc::new(AsyncMutex::new(
+        McpPool::new(McpConfig::default()),
+    )));
+    engine.mcp_event_generation = 1;
+    engine.mcp_boot_in_flight = true;
+    engine.mcp_boot_done = Some(done_rx);
+    engine.mcp_boot_rx = Some(progress_rx);
+    engine.mcp_boot_generation = Some(1);
+    progress_tx
+        .send(McpBootUpdate::Progress {
+            generation: 1,
+            authority_errors: Arc::new(HashMap::new()),
+            connection_errors: HashMap::new(),
+            connecting: vec!["late-server".into()],
+        })
+        .unwrap();
+    let mut shutdown = Box::pin(engine.shutdown_mcp_pool());
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), &mut shutdown)
+            .await
+            .is_err(),
+        "shutdown must not finish while a boot worker can still insert a connection"
+    );
+    done_tx.send(true).unwrap();
+    tokio::time::timeout(Duration::from_secs(1), shutdown)
+        .await
+        .expect("shutdown must not depend on an event consumer");
 }
 
 #[tokio::test]
