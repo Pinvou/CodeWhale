@@ -976,6 +976,40 @@ pub fn requested_model_for_provider(provider: ApiProvider, model: &str) -> Optio
     }
 }
 
+/// Whether the route is an official DeepSeek-family endpoint — the only place
+/// the DeepSeek strict tool pipeline may act on the wire.
+///
+/// The pipeline (`prepare_tools_for_strict_mode` plus
+/// `tool_choice: "required"`) encodes DeepSeek's beta strict contract: every
+/// property required, `additionalProperties: false`, optional properties
+/// removed, `minItems`/`maxItems`/`minLength`/`maxLength` stripped. Applied
+/// anywhere else it would strip keywords the other provider's documents
+/// explicitly support (OpenAI, for one, documents `minItems`/`maxItems`) and
+/// remove optional properties no other provider's contract asks to remove.
+/// Provider typing plus the official host keeps a misconfigured
+/// `provider`/`base_url` entry from receiving DeepSeek-only reshaping.
+///
+/// Source: the DeepSeek strict function-calling/structured-output contract
+/// (<https://api-docs.deepseek.com/guides/structured_output>, fetched
+/// 2026-11-05); the official hosts also cover the family's
+/// `api.deepseeki.com` alias the rest of the codebase treats as official.
+pub fn route_is_official_deepseek_family(provider: ApiProvider, base_url: &str) -> bool {
+    if !matches!(
+        provider,
+        ApiProvider::Deepseek | ApiProvider::DeepseekCN | ApiProvider::DeepseekAnthropic
+    ) {
+        return false;
+    }
+    let normalized = base_url.trim().trim_end_matches('/').to_ascii_lowercase();
+    let official_host = |prefix: &str| {
+        normalized == prefix
+            || normalized
+                .strip_prefix(prefix)
+                .is_some_and(|rest| rest.starts_with('/'))
+    };
+    official_host("https://api.deepseek.com") || official_host("https://api.deepseeki.com")
+}
+
 /// Reject a provider/model tuple that we can be confident is invalid *before*
 /// it reaches the network (#3227).
 ///
@@ -3058,8 +3092,12 @@ pub struct Config {
     pub notes_path: Option<String>,
     pub memory_path: Option<String>,
     /// When true, set `tool_choice: "required"` and opt compatible function
-    /// schemas into DeepSeek beta strict mode. Schemas with root alternatives
-    /// stay non-strict to avoid changing optional/one-of tool semantics.
+    /// schemas into DeepSeek beta strict mode — effective only on official
+    /// DeepSeek-family routes (api.deepseek.com hosts), because the schema
+    /// reshaping follows DeepSeek's strict documents and would otherwise
+    /// strip keywords other providers document (e.g. OpenAI's
+    /// `minItems`/`maxItems`). Schemas with root alternatives stay non-strict
+    /// to avoid changing optional/one-of tool semantics.
     pub strict_tool_mode: Option<bool>,
     /// Additional user-owned system-prompt sources concatenated in declared
     /// order (#454). Paths are expanded via `expand_path` so `~` and env vars
