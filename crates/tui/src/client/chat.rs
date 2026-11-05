@@ -1188,7 +1188,8 @@ pub(crate) fn build_chat_wire_body(
         // xAI rejects a parameters root that is neither an object schema nor
         // a root-level union of object branches (e.g. apply_patch's root
         // `oneOf` required-groups) with a 400 naming the tool; a documented
-        // union of object schemas passes through with its branches intact.
+        // union of object schemas passes through with its branch structure
+        // preserved (normalization still applies inside the branches).
         if matches!(provider, crate::config::ApiProvider::Xai) {
             for t in &mut chat_tools {
                 let Some(function) = t
