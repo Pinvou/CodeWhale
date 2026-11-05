@@ -1,12 +1,26 @@
-"""Replay the actual connector Node contract with 60 derived negative controls.
+"""Replay the fixed historical connector contract with 60 negative controls.
 
 Uses a temporary fs.readFileSync override in fresh Node processes; repository
-workflows and tests remain unchanged. Requires Python 3 and Node.js.
+workflows and tests remain unchanged. Requires Python 3 and Node.js. The input
+fingerprints below belong to e768c60efdf52bbae38032bcb0565809aa8183ee, whose
+two-branch matrix differs from the current independent Windows/macOS switches.
+See README.md for the current matrix test entry.
 """
 import tempfile
 from pathlib import Path
 import subprocess,json,re,hashlib,datetime
 repo = Path(__file__).resolve().parents[3]
+historical_inputs = {
+    '.github/workflows/connector-verify.yml': '4db32bdb97980acbf235fa59f7eb6883f0e75d449b6dc83ba816372e4767b8c4',
+    'pinvou3-app/tests/tauri_platform_layout.test.js': '95a1f7dcf3a9e804a330e03d9986e942eee639c3bf4019fbb3f94024434f108a',
+}
+for relative, expected in historical_inputs.items():
+    if hashlib.sha256((repo / relative).read_bytes()).hexdigest() != expected:
+        raise SystemExit(
+            'Historical replay requires the fixed e768c60efdf52bbae38032bcb0565809aa8183ee '
+            f'inputs; fingerprint differs: {relative}. For the current matrix, run '
+            '`node pinvou3-app/tests/tauri_platform_layout.test.js`; see README.md.'
+        )
 with tempfile.TemporaryDirectory(prefix="pinvou-matrix-controls-") as directory:
     state = Path(directory)
     source=(repo/'.github/workflows/connector-verify.yml').read_text()
