@@ -1363,6 +1363,17 @@ fn sanitize_kimi_parameters_candidate(
 /// Remove the advisory keywords the MFJS specification does not support from
 /// every schema node of a Kimi parameters document.
 ///
+/// The strip/fail-closed boundary this function embodies is the module's
+/// degradation policy: keywords whose removal is lossless (annotations) or
+/// loses only a soft constraint (numeric bounds) are stripped so the wire
+/// still carries the document's supported set; form keywords with no
+/// document support that materially steer generation (`pattern`, `format`,
+/// `prefixItems`, …) keep the baseline whole-tool removal — better a missing
+/// tool than an unguaranteed shape. Source-comparison note (not a shipping
+/// basis): the walle implementation carries `pattern` and friends in its
+/// `FutureKeywords` set — future, i.e. not currently validated — which is
+/// consistent with, and only corroborates, keeping them off the wire.
+///
 /// The specification's supported keyword set is closed ("若官方规范中的某些
 /// 概念、关键字或特性在本文档中未被提及，则表示当前 MFJS 尚未提供官方支持",
 /// <https://github.com/MoonshotAI/walle/blob/main/docs/mfjs-spec.zh.md>,
@@ -1785,6 +1796,8 @@ const MFJS_ENUM_LENGTH_CHECK_THRESHOLD: usize = 250;
 const MFJS_MAX_ENUM_STRING_LENGTH: usize = 75_000;
 const MFJS_MAX_SCHEMA_BYTES: usize = 120_000;
 const MFJS_MAX_STRUCTURAL_DEPTH: usize = 64;
+// 2^53-1: the IEEE-754 double precision bound JSON numbers interoperate
+// through — an interop ceiling, not a document clause.
 const MFJS_MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
 
 struct MfjsValidationState<'a> {
@@ -3092,22 +3105,12 @@ mod kimi_tests {
     fn probe_observed_keywords_fail_closed_on_every_route() {
         // Probe facts are observations only. No route may admit keywords the
         // MFJS specification does not list: the whole tool degrades with a
-        // projection warning instead of shipping an unguaranteed shape.
+        // projection warning instead of shipping an unguaranteed shape. One
+        // pipeline serves every Moonshot route, so one run of the composed
+        // probe schema covers all of them.
         let mut schema = probe_observed_keyword_schema();
         let error = sanitize_for_kimi_parameters(&mut schema)
-            .expect_err("probe-observed keywords stay outside the platform whitelist");
-        assert!(
-            matches!(
-                error,
-                KimiParameterSchemaError::UnsupportedKeyword
-                    | KimiParameterSchemaError::UnsupportedNestedAllOf
-            ),
-            "the first out-of-document shape fails closed: {error:?}"
-        );
-
-        let mut schema = probe_observed_keyword_schema();
-        let error = sanitize_for_kimi_parameters(&mut schema)
-            .expect_err("probe-observed keywords stay outside the document whitelist");
+            .expect_err("probe-observed keywords stay outside every route's document whitelist");
         assert!(
             matches!(
                 error,
