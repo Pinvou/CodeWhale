@@ -4003,6 +4003,34 @@ mod kimi_tests {
         );
         let expected = branch_contract(shipped_branches);
 
+        // Per-branch required groups pinned to the parent-side server
+        // contract (2026-11-05 required audit, single standard: only an
+        // empty body group is a business exception). agenda renders the
+        // 「目录」 fallback and end the 「谢谢」 fallback, so their titles are
+        // optional; cover/section/image stay layout+title; the six body
+        // layouts keep layout+title plus their body group.
+        let required_of = |layout: &str| -> Vec<String> {
+            expected
+                .iter()
+                .find(|(name, _)| name == layout)
+                .map(|(_, required)| required.clone())
+                .unwrap_or_else(|| panic!("{layout} branch missing from the shipped union"))
+        };
+        assert_eq!(required_of("agenda"), vec!["layout", "items"]);
+        assert_eq!(required_of("end"), vec!["layout"]);
+        assert_eq!(required_of("cover"), vec!["layout", "title"]);
+        assert_eq!(required_of("section"), vec!["layout", "title"]);
+        assert_eq!(required_of("image"), vec!["layout", "title"]);
+        for layout in ["bullets", "two_col", "kpi", "chart", "table"] {
+            let required = required_of(layout);
+            assert!(
+                required.contains(&"layout".to_string())
+                    && required.contains(&"title".to_string())
+                    && required.len() >= 3,
+                "{layout} keeps layout+title plus its body group: {required:?}"
+            );
+        }
+
         let mut parameters = shipped.clone();
         let note = sanitize_for_kimi_parameters(&mut parameters)
             .expect("the shipped make_pptx schema must pass Moonshot normalization");
