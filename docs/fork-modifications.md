@@ -1,5 +1,12 @@
 # CodeWhale Fork 修改清单
 
+## 本地候选：终态错误来源（T1，2026-11-05）
+
+- 通用底座缺口：同一 `TurnComplete.error` 可来自模型请求/流，也可来自本地 REPL、预算或 panic；宿主不能从采集点、路由、advisory 错误或文字还原来源。已有 `new_with_model_client` 会替换 client 并改变预检/路由生命周期，不能透明观察既有内部 client。最小来源契约属于上游优先候选，本轮已形成本地提交 `a4fc2e914568da821c1776ad9918890481b99afb`，未推送或请求上游审核。
+- `run_turn` 内的选中错误与 `TurnErrorSource` 成对保留、清空和覆盖；只在终态失败选定时写入本轮 `TurnContext`，随同一 `TurnComplete` 交付。实际 client 请求/流错误为 Model，本地请求准备、REPL、预算等为 Runtime；其他终态及未知来源为 None。panic、取消、重试、错误文本和既有结果状态保持原契约，无跨轮错误缓存。
+- 仅内部 Engine 事件增加可选来源，不扩展 wire/遥测字段；现有 protocol projection 明确忽略它。宿主保留模型原错误后才合并本地持久化错误，ACP 只在当前 prompt 失败边界赋予来源，普通终态保守降级；诊断写入按任务→诊断锁顺序验证当前已接纳 attempt、turn、租约及同源上下文；历史消息观察不能为待接纳提交选择 turn，匹配 attempt 的接纳事件才建立或校正归属。新增私有 attempt 缓存字段缺省兼容旧缓存，不扩展遥测字段。本地受控模型 transport 经真实 Engine，验证初始请求错误、流读取错误、provider error frame、真实 Python REPL CSV EOF 及下一用户回合恢复；默认 bash 工具增加实际 shell 语法错误与非零退出事实，退出码由宿主 shell 决定（Windows 默认 PowerShell 不是 Bash）。测试边界不是 live provider/Linux 原事故或发布构建。
+- 父仓 gitlink 引用本地候选 `a4fc2e914568da821c1776ad9918890481b99afb`，其父为 `f1eb10efcfe2468fde42d1724d7f5f19d54b904c`，源码 tree 为 `db5b9d4b13da36e4058b9662d416cdec7f75bd7c`，与此前审核的底座源码一致；相对已登记基线新增 1 个已签署提交，共 87 个。已登记公开维护基线仍为 `f1eb10efcfe2468fde42d1724d7f5f19d54b904c`；本轮未查询远端、未推送，也未移动既有维护分支或标签，不声称候选公开可达。后续传播继续遵守公开维护流程，`verify-public-submodule.sh` 保持原门禁，不能凭本地快速指纹通过替代公开可达性。
+
 ## 本轮同步接线：冷启动所有权与有界拆除（2026-10-13）
 
 - 按用户最新确认，本轮为远控 v1 接入主模型 Responses（含原生图片输入），不扩视觉兜底协议。显式 openai_responses 与官方 OpenAI GPT 目录路线均导出正确 wire，B 与 Relay 独立复算；伪造 Chat/Responses 标签拒绝，不改写原 SavedModel 预设，不改 CodeWhale 源码。视觉兜底仅接受 Chat；远程 Responses 主模型不会被 Chat-only image_analyze 自动复用，原生图片路径不受影响。普通本地 Responses 行为保留。
@@ -69,9 +76,9 @@
 - 既有作者本地 Windows 验证：`cargo test -p codewhale-tui --lib --locked sandbox::tests -- --test-threads=1` 通过 23 项（19 项 `sandbox::tests::*` + 4 项 `repl::sandbox::tests::*`；Linux 因 cfg 差异选择 26 项）。两个显式工具测试分别用系统 Python 3.14 和捆绑 Python 3.13.14 通过（共四次），另一个 Git Bash 环境探测通过一次。此前恢复原构造器时，两个工具测试在两种解释器下均失败，表现为 Python 中文乱码而 PowerShell 中文正常。格式、架构和快速指纹检查通过。这些是既有作者证据，不代表后续文档修订重新执行了原生测试。
 - 父仓 Windows regression 步骤新增执行默认值合并、shell 默认值接线及大小写覆盖三个确定性筛选器；每个筛选器都要求至少执行一项测试。`91e262ba2` 的远端 [Windows regression job](https://github.com/Pinvou/pinvou-agent/actions/runs/39761405525/job/119767350755) 已实际执行并通过这三个筛选器；该证据对应这个旧头及不变的底座，不代替后续提交的 CI。两个需 Python 的显式测试仍为作者本地证据。`pinvou3-clean` CI 仅 Ubuntu，不运行 Windows 限定回归。Linux 上的 `windows_shell_default_env_forces_python_pipe_stdio_utf8` 只验证 helper 返回值，不验证构造器接线；Windows 大小写覆盖逻辑也需原生 Windows 回归。上游 codewhale-hq/Codewhale#7041 是未来上游 Windows CI 的贡献路径，不证明该 CI 已执行。未验证客户设备、PowerShell 7 或安装包发布。
 
-## 0. 当前状态（2026-10-29）
+## 0. 已登记公开维护基线（2026-10-29）
 
-- 当前公开维护头与父仓 gitlink：`f1eb10efcfe2468fde42d1724d7f5f19d54b904c`（2026-10-29）。在上一登记头 `6e1ee88ee` 之上消费已合入的 #114 `fe90f72f9`（流式工具参数解析复用）与 #125 `f1eb10efc`（Skill 与宿主发现指引对齐）；本轮仅更新父仓引用，没有推进维护分支。
+- 已登记公开维护基线：`f1eb10efcfe2468fde42d1724d7f5f19d54b904c`（2026-10-29）。在上一登记头 `6e1ee88ee` 之上消费已合入的 #114 `fe90f72f9`（流式工具参数解析复用）与 #125 `f1eb10efc`（Skill 与宿主发现指引对齐）；该次集成仅更新父仓引用，没有推进维护分支。
 - 实测历史：上游 v0.9.12 `dcd4c200f` 之上 86 个提交，r1 `1fafee7e2` 之上 71 个；84 个带 DCO sign-off。未签名的 squash 为 #107 `f27672935` 与 #116 `e9a7f48da1`，不能继续声称只有一个未签名提交。保留已发布历史，不改写维护分支。
 - 不可变 tag `pinvou-v0.9.12-r3` 仍在 `61cb769be5b33abc64f64da4272f5b39a8b6c1fd`；r1 仍在 `1fafee7e26b60a59457a43bce50c63aa2ad9dbaf`。公开门禁仍要求 gitlink 等于维护头并验证 r3 标签，未放宽任何条件。
 - 实测 drift：525 files, +91397/-39288，净增 52109；255 个独立 `forkguard_*` 行为名（登记下限仍为 64）。原生 Windows 证据仅适用于原记录的执行提交，不扩展为本次集成树已执行；当前父仓 CI 和最终集成树审核仍须独立确认。

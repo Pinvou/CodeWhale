@@ -1168,6 +1168,7 @@ pub(crate) fn spawn_event_forwarder(
                     usage,
                     status,
                     error,
+                    error_source,
                     tool_catalog,
                     turn_id: _,
                     submission_id: _,
@@ -1203,6 +1204,13 @@ pub(crate) fn spawn_event_forwarder(
                     // Error event's transient/fatal paths).
                     let mut terminal_error =
                         error.map(|error| crate::platform::credential_store::redact_secret(&error));
+                    // Keep the selected producer's error separate from local
+                    // persistence errors appended during settlement below.
+                    let model_diagnostic_error = (status == TurnOutcomeStatus::Failed
+                        && error_source
+                            == Some(deepseek_tui::core::events::TurnErrorSource::Model))
+                    .then(|| terminal_error.clone())
+                    .flatten();
                     if let Some(base_total_tokens) = scheduled_base_total_tokens {
                         scheduled_engine_total_tokens = scheduled_engine_total_tokens
                             .saturating_add(u64::from(usage.input_tokens))
@@ -1624,13 +1632,20 @@ pub(crate) fn spawn_event_forwarder(
                     if let Some(turn_id) = current_turn_id.as_deref() {
                         let status =
                             behavior_task_status(terminal_status, terminal_error.as_deref());
-                        if let Some(error) = terminal_error.as_deref() {
+                        if let Some(error) = model_diagnostic_error
+                            .as_deref()
+                            .or(terminal_error.as_deref())
+                        {
                             crate::features::behavior_telemetry::capture_failure_context(
                                 &app,
                                 &session_id,
                                 turn_id,
                                 error,
-                                false,
+                                if model_diagnostic_error.is_some() {
+                                    crate::features::behavior_telemetry::FailureSource::Model
+                                } else {
+                                    crate::features::behavior_telemetry::FailureSource::AssistantRuntime
+                                },
                             );
                         }
                         crate::features::behavior_telemetry::finish_task(

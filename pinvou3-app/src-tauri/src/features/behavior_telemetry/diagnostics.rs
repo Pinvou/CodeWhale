@@ -134,7 +134,7 @@ impl BehaviorEvent {
         self
     }
     pub(crate) fn diagnostic_error(mut self, error: &str, site: &'static str) -> Self {
-        let (code, http) = classify(error);
+        let (code, http) = classify(error, false);
         self.diagnostic_hint = Some(DiagnosticHint {
             code: code.into(),
             http,
@@ -553,7 +553,7 @@ fn failure(event: &BehaviorEvent) -> bool {
             && field(event, "feedback_action") == Some("set"))
 }
 /// All outputs are registered constants. Never retain an error or its hash.
-pub(super) fn classify(error: &str) -> (&'static str, Option<u16>) {
+pub(super) fn classify(error: &str, model_source: bool) -> (&'static str, Option<u16>) {
     let lower = error
         .chars()
         .take(8192)
@@ -572,6 +572,12 @@ pub(super) fn classify(error: &str) -> (&'static str, Option<u16>) {
         ("permission_changed", "permission_changed"),
         ("capability_snapshot", "capability_stale"),
     ] {
+        // Shell syntax and file/data parsers also report unexpected EOF.
+        // A collection site is not provenance: assistant/ACP settlement also
+        // receives local failures. Require the actual producer's source fact.
+        if code == "stream_unexpected_eof" && !model_source {
+            continue;
+        }
         if lower.contains(needle) {
             return (code, None);
         }
@@ -616,17 +622,40 @@ pub(super) fn classify(error: &str) -> (&'static str, Option<u16>) {
         None,
     )
 }
+#[derive(Clone, Copy)]
+pub(crate) enum FailureSource {
+    AssistantRuntime,
+    Model,
+    AcpRuntime,
+    AcpPrompt,
+}
+
+impl FailureSource {
+    pub(super) fn classify(self, error: &str) -> (&'static str, Option<u16>) {
+        classify(error, self.model_source())
+    }
+    fn site(self) -> &'static str {
+        match self {
+            Self::AssistantRuntime | Self::Model => "assistant_error",
+            Self::AcpRuntime | Self::AcpPrompt => "acp_error",
+        }
+    }
+    fn model_source(self) -> bool {
+        matches!(self, Self::Model | Self::AcpPrompt)
+    }
+}
+
 pub(crate) fn capture_failure_context(
     app: &tauri::AppHandle,
     session: &str,
     turn: &str,
     error: &str,
-    acp: bool,
+    source: FailureSource,
 ) {
     let Some(telemetry) = app.try_state::<BehaviorTelemetry>() else {
         return;
     };
-    telemetry.capture_failure_context(session, turn, error, acp);
+    telemetry.capture_failure_context(session, turn, error, source);
 }
 
 impl BehaviorTelemetry {
@@ -635,7 +664,7 @@ impl BehaviorTelemetry {
         session: &str,
         turn: &str,
         error: &str,
-        acp: bool,
+        source: FailureSource,
     ) {
         // Keep authoritative task ownership stable through the diagnostic
         // write. Task lifecycle writers release this lock before enrichment;
@@ -668,8 +697,8 @@ impl BehaviorTelemetry {
         {
             return;
         }
-        let site = if acp { "acp_error" } else { "assistant_error" };
-        let (code, http) = classify(error);
+        let site = source.site();
+        let (code, http) = source.classify(error);
         context.code = Some(code.into());
         context.http = http;
         context.site = site.into();
@@ -1615,16 +1644,16 @@ mod tests {
     #[test]
     fn classification_and_redaction_never_retain_raw_errors() {
         assert_eq!(
-            classify("HTTP 429 user-secret"),
+            classify("HTTP 429 user-secret", true),
             ("rate_limited", Some(429))
         );
         assert_eq!(
-            classify("context_length_exceeded private prompt"),
+            classify("context_length_exceeded private prompt", true),
             ("context_length_exceeded", None)
         );
-        assert_eq!(classify("status 5001 fixture"), ("unknown", None));
+        assert_eq!(classify("status 5001 fixture", true), ("unknown", None));
         assert_eq!(
-            classify("HTTP 500 fixture"),
+            classify("HTTP 500 fixture", true),
             ("provider_unavailable", Some(500))
         );
         let cleaned = super::super::diagnostic_redaction::Redactor::new("test-only-scope").redact(

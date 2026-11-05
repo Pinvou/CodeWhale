@@ -277,9 +277,17 @@ impl RemoteControlEvent {
             .reason(reason)
             .latency_ms(latency_ms);
         if let Err(error) = result {
-            event.diagnostic_code = Some(super::diagnostics::classify(error));
+            event.diagnostic_code = Some(super::diagnostics::classify(error, false));
         }
         event
+    }
+
+    fn diagnostic_site(&self) -> &'static str {
+        if self.stage == RemoteStage::TaskTerminal {
+            "remote_terminal"
+        } else {
+            "remote_admission"
+        }
     }
 
     pub(super) fn into_behavior(self) -> BehaviorEvent {
@@ -299,11 +307,7 @@ impl RemoteControlEvent {
                     code: code.into(),
                     http,
                     exit: None,
-                    site: if self.stage == RemoteStage::TaskTerminal {
-                        "remote_terminal"
-                    } else {
-                        "remote_admission"
-                    },
+                    site: self.diagnostic_site(),
                 });
             }
         }
@@ -563,6 +567,40 @@ mod tests {
     const _: fn(&tauri::AppHandle, RemoteControlEvent) = track_remote_control;
     const _: fn(&tauri::AppHandle, RemoteControlEvent, String) = track_remote_control_with_event_id;
     const _: fn(&tauri::AppHandle, RemoteControlEvent, &str) = super::super::track_remote_transfer;
+
+    #[test]
+    fn diagnostic_remote_eof_requires_model_error_provenance() {
+        for (stage, expected_site) in [
+            (RemoteStage::TaskSubmit, "remote_admission"),
+            (RemoteStage::TaskTerminal, "remote_terminal"),
+        ] {
+            let eof = RemoteControlEvent::from_result::<()>(
+                stage,
+                &Err("unexpected EOF PRIVATE_REMOTE_DETAIL".into()),
+                1,
+            )
+            .into_behavior();
+            assert!(eof.diagnostic_hint.is_none());
+            assert_eq!(eof.fields["remote_reason"], "unknown");
+            validate_event_fields(&eof).unwrap();
+            assert!(
+                !serde_json::to_string(&eof)
+                    .unwrap()
+                    .contains("PRIVATE_REMOTE_DETAIL")
+            );
+
+            let unavailable = RemoteControlEvent::from_result::<()>(
+                stage,
+                &Err("HTTP 503 PRIVATE_REMOTE_DETAIL".into()),
+                1,
+            )
+            .into_behavior();
+            let hint = unavailable.diagnostic_hint.as_ref().unwrap();
+            assert_eq!(hint.code, "provider_unavailable");
+            assert_eq!(hint.http, Some(503));
+            assert_eq!(hint.site, expected_site);
+        }
+    }
 
     #[test]
     fn missing_task_identity_keeps_independent_uncorrelated_diagnostics() {

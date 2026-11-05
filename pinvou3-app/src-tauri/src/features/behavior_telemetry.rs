@@ -1842,8 +1842,8 @@ mod diagnostics;
 // The standalone lifecycle harness compiles this module without app commands.
 #[cfg_attr(all(test, feature = "behavior-telemetry-test"), allow(unused_imports))]
 pub(crate) use diagnostics::{
-    DiagnosticPreviewRequest, capture_failure_context, confirm_diagnostic, diagnostic_error_code,
-    diagnostic_incidents, preview_diagnostic,
+    DiagnosticPreviewRequest, FailureSource, capture_failure_context, confirm_diagnostic,
+    diagnostic_error_code, diagnostic_incidents, preview_diagnostic,
 };
 
 #[path = "behavior_telemetry/remote_control.rs"]

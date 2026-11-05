@@ -144,6 +144,7 @@ pub(crate) async fn run_shell_producer_fixture(
         (1, "echo 'HTTP 429'; exit 7", None, Some(7)),
         (2, "exit 0", None, None),
         (3, "sleep 4", Some(1), None),
+        (4, "if true; then", None, None),
     ] {
         let folder = work.path().join(format!("case_{index}"));
         std::fs::create_dir_all(&folder).unwrap();
@@ -350,7 +351,16 @@ pub(crate) async fn run_shell_producer_fixture(
         telemetry.track(event);
         let outbox = telemetry.outbox.lock().unwrap();
         let event = &outbox.records[0].event;
-        if let Some(exit) = expected_exit {
+        if index == 4 {
+            // The tool name does not select a parser. Require the real host
+            // shell's nonzero syntax-error receipt without assuming a
+            // particular parser, error text or exit code.
+            let exit = metadata.as_ref().unwrap()["exit_code"].as_i64().unwrap();
+            assert!(exit > 0);
+            assert_eq!(statuses[0], deepseek_tui::tools::shell::ShellStatus::Failed);
+            assert_eq!(event["diagnostic_code"], "process_failed");
+            assert_eq!(event["diagnostic_exit_code"], exit);
+        } else if let Some(exit) = expected_exit {
             assert_eq!(statuses[0], deepseek_tui::tools::shell::ShellStatus::Failed);
             assert_eq!(metadata.as_ref().unwrap()["exit_code"], exit);
             assert_eq!(event["diagnostic_code"], "process_failed");

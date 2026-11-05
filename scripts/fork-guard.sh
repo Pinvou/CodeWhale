@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
-# CodeWhale v0.9.12 clean re-fork guard: 86 maintenance commits, ten maintained themes (r3 closed at pinvou-v0.9.12-r3; inside a transition window the head may lead the tag).
+# CodeWhale v0.9.12 clean re-fork guard: 87 registered review commits, ten maintained themes (r3 closed at pinvou-v0.9.12-r3; inside a transition window the head may lead the tag).
 set -uo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CODEWHALE="$REPO/CodeWhale"
 APP="$REPO/pinvou3-app/src-tauri"
 EXPECTED_UPSTREAM="dcd4c200f72f0c1ffd60d8e7f6850313db879fc5"
-# Public maintenance after CodeWhale#114 and #125 merged.
-EXPECTED_HEAD="f1eb10efcfe2468fde42d1724d7f5f19d54b904c"
-EXPECTED_COMMITS=86
+# Local review candidate; public maintenance alignment remains a separate gate.
+EXPECTED_HEAD="a4fc2e914568da821c1776ad9918890481b99afb"
+EXPECTED_COMMITS=87
 # Published maintenance base of this integration.
 MAINTENANCE_BASE="f1eb10efcfe2468fde42d1724d7f5f19d54b904c"
 # The immutable r1 closure must remain an ancestor of the registered head.
@@ -70,6 +70,9 @@ fi
 bold "── 第 1 层：登记主题与父仓适配指纹 ──"
 # 格式：主题|说明|文件（相对父仓根）|grep -F 固定串
 fingerprints=(
+  "T1|Terminal error producer is explicit|CodeWhale/crates/tui/src/core/events.rs|pub enum TurnErrorSource"
+  "T1|Chosen failure owns its provenance|CodeWhale/crates/tui/src/core/engine/turn_loop.rs|struct TurnFailure"
+  "T1|Model and real local REPL EOF recover independently|pinvou3-app/src-tauri/src/features/behavior_telemetry/model_producer_tests.rs|fn forkguard_model_terminal_provenance_excludes_repl_eof_and_recovers"
   # 2026-10-29: consume the existing #114/#125 behavior regressions.
   "T1|Partial input reuse preserves parser and mirror semantics|CodeWhale/crates/tui/src/core/engine/partial_input_differential_tests.rs|fn partial_input_differential_prefixes_preserve_parser_disposition_and_mirror"
   "T1|Partial input invalidation preserves final mutations|CodeWhale/crates/tui/src/core/engine/partial_input_differential_tests.rs|fn partial_input_differential_invalidation_preserves_terminal_mutations_and_late_delta"
