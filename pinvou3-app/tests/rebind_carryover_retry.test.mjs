@@ -49,21 +49,21 @@ assert.deepEqual(
   'the retry feeds the previous report post-busy ids back',
 );
 
-// 2. main.jsx wiring: the dialog state keeps the ids and confirmRebindWorkspace
-//    passes them to the bridge.
-const mainSource = read('app/main.jsx');
+// 2. The dialog-loaded action keeps the ids and passes them to the bridge.
+// Root-to-action render binding is pinned by rebind_lazy_action.test.mjs.
+const actionSource = read('features/projects/rebind-workspace-action.js');
 assert.match(
-  mainSource,
+  actionSource,
   /postBusyIds: \(report && report\.post_busy_session_ids\) \|\| \[\]/,
   'the partial draft must keep the post-busy ids for the next retry',
 );
 assert.match(
-  mainSource,
+  actionSource,
   /previousPostBusySessionIds = \(rebindDraft\.partial && rebindDraft\.partial\.postBusyIds\) \|\| \[\]/,
   'the retry must read the carryover ids from the draft',
 );
 assert.match(
-  mainSource,
+  actionSource,
   /rebindDraft\.from, rebindDraft\.to, confirmExisting, previousPostBusySessionIds\)/,
   'the retry must pass the carryover ids to the bridge',
 );
@@ -87,12 +87,12 @@ assert.match(
   assert.deepEqual(mergeRebindCarryoverIds(undefined, ['y']), ['y'], 'no previous list');
   // The dialog must route all three error arms through the union helper.
   assert.match(
-    mainSource,
+    actionSource,
     /mergeRebindCarryoverIds\(/,
-    'main.jsx must build the error carryover via the union helper',
+    'the actual dialog action must build the error carryover via the union helper',
   );
   assert.match(
-    mainSource,
+    actionSource,
     /mergeRebindCarryoverIds\([\s\S]{0,120}prev\.partial\.postBusyIds[\s\S]{0,80}classified\.reboundIds/,
     'the union must merge the previous carryover with the error suffix ids',
   );

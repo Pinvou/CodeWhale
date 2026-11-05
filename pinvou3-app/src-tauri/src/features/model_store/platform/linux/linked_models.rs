@@ -71,7 +71,7 @@ fn reconcile(models: &mut [SavedModel], routes: &[Route], card_id: Option<&str>)
     let mut changed = Vec::new();
     for row in models {
         if row.model_store_link_detached
-            || row.is_builtin_llmapi()
+            || row.is_builtin_account_platform()
             || !row.is_operator_owned_endpoint()
         {
             continue;
@@ -219,7 +219,7 @@ fn sync_inner(card_id: Option<&str>, repair_context: bool) -> Result<Vec<String>
 fn is_current_link(row: &SavedModel, card_id: &str) -> bool {
     row.model_store_card_id.as_deref() == Some(card_id)
         && !row.model_store_link_detached
-        && !row.is_builtin_llmapi()
+        && !row.is_builtin_account_platform()
         && row.is_operator_owned_endpoint()
         && matches_current_model_route(card_id, &row.base_url, &row.model)
 }

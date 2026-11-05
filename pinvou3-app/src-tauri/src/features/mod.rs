@@ -1,3 +1,4 @@
+pub(crate) mod account_platform;
 pub mod assistant;
 pub(crate) mod behavior_telemetry;
 pub(crate) mod browser;
@@ -53,7 +54,6 @@ pub mod feedback;
 pub mod files;
 pub(crate) mod global_shortcut;
 pub mod knowledge;
-pub mod llmapi_hub;
 pub mod marketplace;
 pub mod memory;
 pub mod messaging;

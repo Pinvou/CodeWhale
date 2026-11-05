@@ -81,6 +81,7 @@ import importlib.util
 import re
 import shlex
 import tempfile
+import textwrap
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -2725,6 +2726,130 @@ class Round20PackedWiringTests(GuardFixture):
         self.assertEqual(code, 0)
 
 
+def _ci_cargo_test_commands(job):
+    """Read executable run scalars, including reviewed process wrappers.
+
+    This is a narrow regression-test reader, not a general YAML/shell parser.
+    Unknown wrappers around Cargo fail visibly instead of silently dropping a
+    CI entry. Names, comments and echoed examples cannot supply an entry.
+    """
+    scripts = []
+    lines = job.splitlines()
+    for index, line in enumerate(lines):
+        match = re.fullmatch(r"( +)run: (.+)", line)
+        if not match:
+            continue
+        indent, value = len(match[1]), match[2]
+        if value in {"|", "|-", "|+"}:
+            body = []
+            for following in lines[index + 1:]:
+                if following.strip() and len(following) - len(following.lstrip()) <= indent:
+                    break
+                body.append(following)
+            scripts.append(textwrap.dedent("\n".join(body)))
+        else:
+            if value.startswith(("'", '"', ">")):
+                raise AssertionError("unreviewed CI run scalar spelling")
+            scripts.append(value)
+
+    commands = []
+    for script in scripts:
+        for line in script.replace("\\\n", " ").splitlines():
+            lexer = shlex.shlex(line, posix=True, punctuation_chars=";&|<>")
+            lexer.whitespace_split = True
+            tokens = list(lexer)
+            if not tokens or tokens[0] in {"echo", "printf"}:
+                continue
+            if tokens[0] == "exec":
+                tokens = tokens[1:]
+            if tokens[:2] == ["/usr/bin/time", "-v"]:
+                tokens = tokens[2:]
+            if (len(tokens) >= 2 and tokens[0] in {"python", "python3"}
+                    and Path(tokens[1]).name == "ci-fixture-process.py"):
+                if len(tokens) < 6 or tokens[2] != "--receipt" or tokens[4] != "--":
+                    raise AssertionError("unreviewed CI fixture supervisor arguments")
+                tokens = tokens[5:]
+                if tokens[:2] == ["/usr/bin/time", "-v"]:
+                    tokens = tokens[2:]
+            if not tokens:
+                raise AssertionError("empty supervised CI command")
+            if tokens[0] != "cargo":
+                if re.search(r"\bcargo\b", " ".join(tokens)):
+                    raise AssertionError("unreviewed wrapper around a CI Cargo command")
+                continue
+            # Shell redirects/pipelines are outside Cargo's argv, and libtest
+            # arguments after `--` cannot supply Cargo feature flags either.
+            shell_stop = next((i for i, token in enumerate(tokens)
+                               if re.fullmatch(r"[;&|<>]+", token)), len(tokens))
+            if any(token == "cargo" for token in tokens[shell_stop + 1:]):
+                raise AssertionError("multiple CI Cargo commands on one shell line need review")
+            stop = min(shell_stop, tokens.index("--") if "--" in tokens else len(tokens))
+            command = tokens[:stop]
+            index = 1
+            if index < len(command) and command[index].startswith("+"):
+                index += 1
+            while index < len(command) and command[index].startswith("--config"):
+                if command[index] == "--config":
+                    if index + 1 >= len(command):
+                        raise AssertionError("missing CI Cargo --config value")
+                    index += 2
+                elif command[index].startswith("--config="):
+                    index += 1
+                else:
+                    raise AssertionError("unreviewed CI Cargo global option")
+            if index >= len(command):
+                raise AssertionError("missing CI Cargo subcommand")
+            if command[index].startswith("-"):
+                raise AssertionError("unreviewed CI Cargo global option")
+            if command[index] == "test":
+                commands.append(command)
+    return commands
+
+
+class CiCargoCommandReaderTests(unittest.TestCase):
+    def test_real_run_commands_keep_all_plain_timed_and_supervised_entries(self):
+        cargo = "cargo --config 'profile.dev.package.codewhale-tui.opt-level=0' test --manifest-path pinvou3-app/src-tauri/Cargo.toml --lib --no-default-features --features benchmark-hooks --locked"
+        job = f'''      - name: cargo test is only a display name
+        run: /usr/bin/time -v {cargo} --no-run
+      - name: execute
+        run: |
+          # cargo test --lib --features decoy
+          echo "cargo test --lib --features decoy"
+          {cargo} -- --test-threads=1
+      - name: contained
+        run: |
+          python3 scripts/ci-fixture-process.py --receipt "$PINVOU_CI_RESOURCE_LEDGER/rust lib.json" -- /usr/bin/time -v {cargo} \\
+            --no-run
+'''
+        commands = _ci_cargo_test_commands(job)
+        self.assertEqual(len(commands), 3)
+        self.assertEqual(sum("--no-run" in command for command in commands), 2)
+        for command in commands:
+            self.assertEqual(command[0], "cargo")
+            self.assertIn("profile.dev.package.codewhale-tui.opt-level=0", command)
+            self.assertEqual(command[command.index("--features") + 1], "benchmark-hooks")
+            self.assertNotIn("decoy", command)
+            self.assertNotIn("--test-threads=1", command)
+
+    def test_unknown_wrappers_and_malformed_supervisors_cannot_hide_an_entry(self):
+        for command in [
+            "bash -c 'cargo test --lib'",
+            "env CARGO_TERM_COLOR=never cargo test --lib",
+            "python3 scripts/ci-fixture-process.py --receipt r.json cargo test --lib",
+            "python3 scripts/ci-fixture-process.py --receipt r.json --",
+            "cargo --config",
+            "cargo test --lib && cargo test --lib --all-features",
+        ]:
+            with self.subTest(command=command), self.assertRaises(AssertionError):
+                _ci_cargo_test_commands("        run: " + command)
+
+    def test_feature_flags_after_libtest_separator_do_not_masquerade_as_cargo_features(self):
+        commands = _ci_cargo_test_commands(
+            "        run: cargo test --lib --no-default-features -- --features benchmark-hooks"
+        )
+        self.assertEqual(commands, [["cargo", "test", "--lib", "--no-default-features"]])
+
+
 class Round21TerseParseContractTests(unittest.TestCase):
     """The registry half of the guard rides on two things no earlier test
     pinned (round-21 review mutations m9/m9b survived the whole suite):
@@ -2765,15 +2890,13 @@ class Round21TerseParseContractTests(unittest.TestCase):
         )
         job = re.search(r"(?ms)^  rust-test:\n(.*?)(?=^  [\w-]+:\n|\Z)", workflow)
         self.assertIsNotNone(job)
-        commands = [
-            shlex.split(line)
-            for line in re.findall(
-                r"cargo test --manifest-path pinvou3-app/src-tauri/Cargo.toml [^\n]+",
-                job.group(1),
-            )
-            if "--lib" in shlex.split(line)
-        ]
+        commands = [command for command in _ci_cargo_test_commands(job.group(1))
+                    if "--lib" in command]
         self.assertGreaterEqual(len(commands), 2)
+        for command in commands:
+            self.assertIn("--manifest-path", command)
+            self.assertEqual(command[command.index("--manifest-path") + 1],
+                             "pinvou3-app/src-tauri/Cargo.toml")
         _, listing = self._list("fixture::test: test\n")
 
         def feature_set(command):
@@ -2790,6 +2913,36 @@ class Round21TerseParseContractTests(unittest.TestCase):
         for command in commands:
             with self.subTest(command=command):
                 self.assertEqual(feature_set(listing), feature_set(command))
+
+    def test_feature_set_detects_drift_in_each_plain_timed_or_supervised_entry(self):
+        cargo = "cargo --config 'profile.dev.package.codewhale-tui.opt-level=0' test --manifest-path pinvou3-app/src-tauri/Cargo.toml --lib --no-default-features --features benchmark-hooks --locked"
+        commands = [
+            cargo + " --no-run",
+            "/usr/bin/time -v " + cargo + " -- --test-threads=1",
+            "python3 scripts/ci-fixture-process.py --receipt r.json -- " + cargo + " --no-run",
+        ]
+
+        def workflow(rows):
+            return "  rust-test:\n    steps:\n" + "".join(
+                f"      - name: case {index}\n        run: {command}\n"
+                for index, command in enumerate(rows)
+            )
+
+        probe = type(self)("test_feature_set_matches_all_ci_lib_build_and_run_steps")
+        with patch.object(Path, "read_text", return_value=workflow(commands)):
+            probe.test_feature_set_matches_all_ci_lib_build_and_run_steps()
+        for index in range(len(commands)):
+            for before, after in [
+                ("--features benchmark-hooks", "--features other-feature"),
+                ("--no-default-features ", ""),
+                ("--features benchmark-hooks", "--all-features"),
+            ]:
+                changed = commands.copy()
+                changed[index] = changed[index].replace(before, after)
+                with self.subTest(entry=index, mutation=after):
+                    with patch.object(Path, "read_text", return_value=workflow(changed)):
+                        with self.assertRaises(AssertionError):
+                            probe.test_feature_set_matches_all_ci_lib_build_and_run_steps()
 
     def test_parses_terse_test_lines_verbatim(self):
         paths, _ = self._list("alpha::beta::t1: test\nalpha::t2: test\n")

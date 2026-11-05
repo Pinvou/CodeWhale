@@ -9,6 +9,9 @@ name: PR Check
 # - changes:检测本 PR 有没有 Rust 代码、发布契约、L1 harness 或前端改动,给后续 job 做 paths filter。
 # - frontend-test:Draft 跑 lint/build/逻辑测试；Ready PR 与 Merge Queue 按实际
 #   base/head diff 选择浏览器 smoke；未知或共享路径保守执行全部 smoke。
+# - account-platform-test: path-aware tests/vet for all Go modules at every stage;
+#   isolated Token financial PostgreSQL contracts are mandatory; real external
+#   issuer/provider/NATS integration remains explicit opt-in.
 # - team-relay-hub-test:Hub 或迁移变化时使用隔离 PostgreSQL 跑完整测试与依赖审计。
 # - relay-test:Relay 变更在 Draft、Ready PR 与 Merge Queue 均运行 Ubuntu 回归。
 # - release-contract-test:发布链路改动只跑配置/脚本契约,不在 PR 构建安装包。
@@ -202,6 +205,7 @@ jobs:
           scripts/tests/windows-relay-dacl-routing.test.mjs
           scripts/tests/windows-relay-dacl-runner.test.mjs
           scripts/tests/run-webui-smoke.test.mjs
+          scripts/tests/account-platform-semver.test.mjs
 
       - name: 校验 VERSION 与各版本文件一致
         run: node scripts/sync-version.mjs --check
@@ -237,6 +241,7 @@ jobs:
       pet: ${{ steps.filter.outputs.pet }}
       frontend: ${{ steps.filter.outputs.frontend }}
       relay: ${{ steps.filter.outputs.relay }}
+      account_platform: ${{ steps.filter.outputs.account_platform }}
       team_relay_hub: ${{ steps.filter.outputs.team_relay_hub }}
       update_release_console: ${{ steps.filter.outputs.update_release_console }}
       acp_runtime: ${{ steps.filter.outputs.acp_runtime }}
@@ -276,6 +281,43 @@ jobs:
         with:
           predicate-quantifier: some-with-excludes
           filters: |
+            account_platform:
+              - 'account-platform/**'
+              - 'pinvou3-app/src/features/account-platform/**'
+              - 'pinvou3-app/src/app/account-main.jsx'
+              - 'pinvou3-app/src/app/admin-main.jsx'
+              - 'pinvou3-app/src/app/portal-session-handoff-main.js'
+              - 'pinvou3-app/src/portal-session-handoff.html'
+              - 'pinvou3-app/src/shared/account-platform-i18n.js'
+              - 'pinvou3-app/src/shared/account-layout-i18n.js'
+              - 'pinvou3-app/src/shared/admin-platform-i18n.js'
+              - 'pinvou3-app/src/shared/supported-locales.js'
+              - 'pinvou3-app/src/shared/account-closure-i18n.js'
+              - 'pinvou3-app/src/shared/i18n.js'
+              - 'scripts/account-platform*'
+              - 'scripts/check-account-platform*'
+              - 'scripts/build-credential-handoff.mjs'
+              - 'scripts/check-recharge-product-document-baseline.mjs'
+              - 'scripts/account-ci-postgres.py'
+              - 'scripts/tests/test_account_ci_postgres.py'
+              - 'scripts/test-financial-parallel.py'
+              - 'scripts/tests/test_financial_parallel.py'
+              - 'scripts/test-token-financial-postgres.py'
+              - 'scripts/tests/test_token_financial_postgres.py'
+              - 'scripts/test-account-closure-postgres.py'
+              - 'scripts/tests/test_account_closure_postgres.py'
+              - 'scripts/tests/test_postgres_backup.py'
+              - 'scripts/tests/test_postgres_backup_job.py'
+              - 'scripts/tests/test_user_realm.py'
+              - 'scripts/tests/test_auth_quota_lua_check.py'
+              - 'scripts/check-token-management-authorization-coverage.mjs'
+              - 'scripts/tests/token-management-authorization-coverage.test.mjs'
+              - 'scripts/tests/token-management-phase-coverage.test.mjs'
+              - 'scripts/check-account-platform-authorization-coverage.mjs'
+              - 'scripts/tests/account-platform-authorization-coverage.test.mjs'
+              - 'scripts/tests/f18-hold-recovery-owned-fixture.test.mjs'
+              - '.github/workflows/pr-check.yml'
+              - 'scripts/tests/pr-check-routing.test.mjs'
             rust_code:
               - '**/*.rs'
               - 'pinvou3-app/src-tauri/src/features/updater/platform/windows_handoff.cs'
@@ -613,8 +655,25 @@ jobs:
               - 'pinvou3-app/eslint.config.mjs'
               - '.github/workflows/pr-check.yml'
             frontend:
+              - 'scripts/tests/account-platform-invocation-environment.test.mjs'
+              - 'account-platform/deploy/production/compose.personal.yaml'
+              - 'account-platform/deploy/production/compose.models.yaml'
+              - 'account-platform/deploy/production/compose.invocation.yaml'
+              - 'account-platform/package.json'
+              - 'account-platform/package-lock.json'
+              - 'account-platform/contracts/deployment/model-token-release-plan.schema.json'
+              - 'account-platform/contracts/deployment/model-token-release-evidence.schema.json'
+              - 'account-platform/deploy/nginx/credential-edge.example.json'
+              - 'account-platform/internal/portal/credential-handoff.v1.js'
+              - 'account-platform/internal/portal/credential_handoff_hash_generated.go'
+              - 'scripts/build-credential-handoff.mjs'
+              - 'scripts/account-platform-credential-browser-scope.mjs'
+              - 'scripts/account-platform-credential-origin-probe.mjs'
+              - 'scripts/account-platform-credential-edge.mjs'
+              - 'scripts/account-platform-model-token-release-plan.mjs'
               - 'pinvou3-app/src/**'
               - 'pinvou3-app/tests/**'
+              - 'account-platform/internal/portal/static/**'
               # connector_online_install_contract.test.js 读 scripts/ 下的
               # smoke 脚本做版本下限钉扎(tauri/build.js 已由
               # pinvou3-app/scripts/tauri/** 覆盖);不列出则 scripts-only PR
@@ -705,6 +764,7 @@ jobs:
               - '.github/workflows/pr-check.yml'
             update_release_console:
               - 'update-release-console/**'
+              - 'scripts/ci-update-release-console-container.sh'
               - 'deploy/nginx-pinvou3-updates.conf'
               - 'docs/windows-static-update-release.md'
               - 'docs/windows-update-release-console.md'
@@ -901,6 +961,14 @@ jobs:
         # 内存扩容为尽力而为:超时/失败只告警不阻断(回退 runner 默认内存)。
         run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM,RUNNER_ENVIRONMENT bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup 未完成,继续使用 runner 默认内存"
 
+      - name: Shared test fixture lifecycle guard
+        run: |
+          python3 scripts/ci-fixture-guard.py
+          python3 -m unittest discover -s scripts/tests -p test_ci_fixture_guard.py
+          python3 -m unittest discover -s scripts/tests -p test_ci_resource_ledger.py
+          python3 -m unittest discover -s scripts/tests -p test_ci_fixture_docker.py
+          python3 -m unittest discover -s scripts/tests -p test_ci_fixture_process.py
+
       - name: 架构边界门禁
         run: |
           base_ref="${{ github.event_name == 'merge_group' && github.event.merge_group.base_ref || github.base_ref }}"
@@ -990,12 +1058,12 @@ jobs:
     # Draft runs lint/build/logic tests. Ready PRs and merge groups select browser
     # smokes from their actual base/head diff. Shared, unknown, test-infrastructure,
     # and empty diffs fail closed to the complete smoke set. Each selected smoke is
-    # retried once to absorb transient hosted-runner flakes; the 25-minute cap
-    # covers setup plus one full pass and a single rerun of the biggest smoke,
-    # while a run with several independent flakes hits the cap and fails.
+    # retried once to absorb transient hosted-runner flakes. The full selection
+    # can outlast 25 minutes without any retry; leave time for setup, a complete
+    # pass and one largest-smoke retry while retaining a bounded job lifetime.
     if: ${{ !cancelled() && github.event.action != 'closed' && needs.changes.outputs.pure_release_backflow != 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group') && (needs.changes.outputs.frontend == 'true' || needs.changes.outputs.pet == 'true') }}
     runs-on: ${{ fromJSON(vars.PINVOU_LINUX_MEDIUM_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
-    timeout-minutes: 25
+    timeout-minutes: 45
     defaults:
       run:
         working-directory: pinvou3-app
@@ -1008,6 +1076,9 @@ jobs:
         # 本 job 只跑 ubuntu,无需 runner.os 门控;曾出现重复 step,已收敛为单个。
         run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM,RUNNER_ENVIRONMENT bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup 未完成,继续使用 runner 默认内存"
 
+      - name: Initialize owned test resource ledger
+        run: python3 ../scripts/ci-resource-ledger.py --init
+
       - uses: actions/setup-node@v7
         with:
           node-version: "24"
@@ -1016,9 +1087,15 @@ jobs:
           cache-dependency-path: |
             pinvou3-app/package-lock.json
             remote-control-relay/package-lock.json
+            account-platform/package-lock.json
 
       - name: 安装前端依赖
         run: npm ci --prefer-offline --no-audit
+
+      # The Node probe imports AP schema tooling before any browser skip.
+      # Draft logic tests need the same locked dependencies as Ready tests.
+      - name: Install Account Platform probe dependencies
+        run: npm --prefix ../account-platform ci --ignore-scripts --prefer-offline --no-audit
 
       # test:webui smoke (本 job 末尾) 会 spawn remote-control-relay/server.js,
       # 其顶层 require('ws') 解析自 remote-control-relay/node_modules,故必须装 relay 依赖。
@@ -1051,6 +1128,18 @@ jobs:
       - name: Vite build
         run: npm run build:ui
 
+      - name: Verify embedded Account Portal assets are current
+        run: |
+          npm run build:account-portal
+          git diff --exit-code -- ../account-platform/internal/portal/static
+          test -z "$(git ls-files --others --exclude-standard -- ../account-platform/internal/portal/static)"
+
+      - name: Verify credential handoff built deployment boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          node ../scripts/build-credential-handoff.mjs --check-deployment
+
       # Web (relay) build: the startup-bundle layer and the web index contract
       # test (tests/vite_static_assets_contract.test.mjs) only cover the web
       # dist when it exists, so build it unconditionally here instead of
@@ -1067,7 +1156,10 @@ jobs:
         run: npm run audit:compat
 
       - name: 前端逻辑测试 (pet 全套 + diff parser + markdown)
-        run: npm test
+        run: python3 ../scripts/ci-fixture-process.py --receipt "$PINVOU_CI_RESOURCE_LEDGER/frontend-logic.json" -- npm test
+
+      - name: Verify Account invocation environment contracts
+        run: node --test ../scripts/tests/account-platform-invocation-environment.test.mjs
 
       - name: 准备浏览器
         if: ${{ github.event_name == 'merge_group' || github.event.pull_request.draft == false }}
@@ -1075,6 +1167,20 @@ jobs:
           chrome="$(command -v google-chrome || command -v chromium || command -v chromium-browser)"
           test -n "$chrome"
           echo "CHROME=$chrome" >> "$GITHUB_ENV"
+
+      # npm test precedes browser preparation; run this real-browser matrix
+      # explicitly after CHROME exists, only on the existing Ready/queue leg.
+      - name: Credential origin real browser scope matrix
+        if: ${{ github.event_name == 'merge_group' || github.event.pull_request.draft == false }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -x "${CHROME:?browser preparation must provide CHROME}"
+          report="$RUNNER_TEMP/credential-origin-scope.tap"
+          python3 ../scripts/ci-fixture-process.py --receipt "$PINVOU_CI_RESOURCE_LEDGER/credential-origin.json" -- node --test --test-reporter=tap tests/credential_origin_scope_probe.test.mjs | tee "$report"
+          grep -Eq '^# pass [1-9][0-9]*$' "$report"
+          grep -Fxq '# fail 0' "$report"
+          grep -Fxq '# skipped 0' "$report"
 
       # The runner retries each selected smoke once so a transient runner
       # flake (headless Chrome missing its 30 s DevTools-endpoint launch
@@ -1105,6 +1211,27 @@ jobs:
           git diff --name-only "$BASE_SHA" "$HEAD_SHA" \
             | node ../scripts/select-frontend-smokes.mjs \
             | node ../scripts/run-frontend-smokes.mjs --selected
+
+      - name: Confirm test resource retirement
+        if: ${{ always() && env.PINVOU_CI_RESOURCE_LEDGER != '' }}
+        run: python3 ../scripts/ci-resource-ledger.py --recover
+
+      - name: Test resource lifecycle receipts
+        id: frontend_receipts_upload
+        if: ${{ always() && env.PINVOU_CI_RESOURCE_LEDGER != '' }}
+        # Diagnostic transport must not stall always-run cleanup or change test results.
+        timeout-minutes: 3
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: frontend-resource-lifecycle-${{ github.run_attempt }}
+          path: ${{ env.PINVOU_CI_RESOURCE_LEDGER }}/
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Warn when frontend diagnostic delivery fails
+        if: ${{ always() && steps.frontend_receipts_upload.outcome == 'failure' }}
+        run: echo '::warning::Diagnostic upload failed or timed out; original receipts remain on the runner. Tests and resource retirement remain mandatory.'
 
   relay-test:
     name: relay-test
@@ -1159,6 +1286,475 @@ jobs:
           bash -n scripts/deploy-remote-relay-test.sh
           npm --prefix remote-control-relay test
 
+  account-platform-test:
+    name: account-platform-test
+    needs: changes
+    # Draft, Ready and the Merge Queue validate the same Go contracts. No
+    # backflow exemption may suppress this independently deployable module.
+    if: ${{ !cancelled() && github.event.action != 'closed' && needs.changes.outputs.account_platform == 'true' }}
+    runs-on: ${{ fromJSON(vars.PINVOU_LINUX_HEAVY_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
+    # Four independent financial workers can use the heavy runner's CPU.
+    # Preserve every worker's original limits and the finite overall budget.
+    timeout-minutes: 180
+    services:
+      audit-export-postgres:
+        image: mirror.gcr.io/library/postgres@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+          POSTGRES_USER: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - "127.0.0.1::5432"
+        options: >-
+          --rm
+          --health-cmd "pg_isready -U postgres -d postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      existing-broker-postgres:
+        # Dedicated disposable PG18.4, matching the supported production-history
+        # contract. The acceptance creates and removes only its own actors/DBs.
+        image: postgres:18.4-alpine@sha256:9a8afca54e7861fd90fab5fdf4c42477a6b1cb7d293595148e674e0a3181de15
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+          POSTGRES_DB: postgres
+        ports:
+          - "127.0.0.1::5432"
+        options: >-
+          --rm
+          --health-cmd "pg_isready -U postgres -d postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+      financial-postgres:
+        # Same immutable PostgreSQL image already used by team-relay-hub-test.
+        # Disposable runner only; trust is never a deployment configuration.
+        image: mirror.gcr.io/library/postgres@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+          POSTGRES_DB: postgres
+        ports:
+          - "127.0.0.1::5432"
+        options: >-
+          --rm
+          --cpus 2
+          --memory 1g
+          --memory-swap 1g
+          --health-cmd "pg_isready -U postgres -d postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+      financial-token-postgres:
+        # Same immutable PostgreSQL image already used by team-relay-hub-test.
+        # Disposable runner only; trust is never a deployment configuration.
+        image: mirror.gcr.io/library/postgres@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+          POSTGRES_DB: postgres
+        ports:
+          - "127.0.0.1::5432"
+        options: >-
+          --rm
+          --cpus 2
+          --memory 1g
+          --memory-swap 1g
+          --health-cmd "pg_isready -U postgres -d postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+      financial-billing-0-postgres:
+        # Same immutable PostgreSQL image already used by team-relay-hub-test.
+        # Disposable runner only; trust is never a deployment configuration.
+        image: mirror.gcr.io/library/postgres@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+          POSTGRES_DB: postgres
+        ports:
+          - "127.0.0.1::5432"
+        options: >-
+          --rm
+          --cpus 2
+          --memory 1g
+          --memory-swap 1g
+          --health-cmd "pg_isready -U postgres -d postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+      financial-billing-1-postgres:
+        # Same immutable PostgreSQL image already used by team-relay-hub-test.
+        # Disposable runner only; trust is never a deployment configuration.
+        image: mirror.gcr.io/library/postgres@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+          POSTGRES_DB: postgres
+        ports:
+          - "127.0.0.1::5432"
+        options: >-
+          --rm
+          --cpus 2
+          --memory 1g
+          --memory-swap 1g
+          --health-cmd "pg_isready -U postgres -d postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      GOTOOLCHAIN: local
+      CGO_ENABLED: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Initialize owned test resource ledger
+        run: python3 scripts/ci-resource-ledger.py --init --docker
+
+      - name: Set up zram and swap
+        run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM,RUNNER_ENVIRONMENT bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup did not finish; continuing with runner default memory"
+
+      - name: Go toolchain
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: account-platform/go.mod
+          cache-dependency-path: account-platform/**/go.sum
+          cache: ${{ runner.environment == 'github-hosted' }}
+
+      - name: Python for real PDF validator tests
+        id: evidence_pdf_python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.12.14'
+          update-environment: false
+
+      - name: Real PDF validator regression
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -s)" = Linux
+          base_python="${{ steps.evidence_pdf_python.outputs.python-path }}"
+          # Self-hosted RUNNER_TEMP may retain a previous job's files. Keep the
+          # venv, wheel audit and child launcher in one exclusively owned root.
+          pdf_root="$(mktemp -d "$RUNNER_TEMP/evidence-pdf.XXXXXX")"
+          trap 'rm -rf -- "$pdf_root"' EXIT
+          # Scope the shared-library interpreter to this PDF step. Later
+          # sanitized contracts must keep the runner's original Python PATH.
+          base_library="$(dirname "$(dirname "$base_python")")/lib"
+          export LD_LIBRARY_PATH="$base_library${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+          "$base_python" -m venv "$pdf_root/venv"
+          py="$pdf_root/venv/bin/python"
+          "$py" -m pip --isolated install --index-url https://pypi.org/simple --only-binary=:all: --require-hashes --no-deps -r account-platform/cmd/evidence-image-validator/pdf-requirements.lock
+          "$py" -m pip check
+          "$py" -I -B account-platform/cmd/evidence-image-validator/fetch_pdf_gate_wheels.py --output "$pdf_root/lxml-wheels"
+          pdf_child_python="$pdf_root/child-python"
+          # The production supervisor intentionally clears the child environment.
+          # Restore only the selected test interpreter's loader path in a launcher.
+          "$py" - "$pdf_child_python" <<'PY'
+          from pathlib import Path
+          import shlex
+          import sys
+          launcher = Path(sys.argv[1])
+          library = str(Path(sys.base_prefix) / "lib")
+          with launcher.open("x", encoding="utf-8") as output:
+              output.write("#!/bin/sh\nexport LD_LIBRARY_PATH=" + shlex.quote(library) + "\nexec " + shlex.quote(sys.executable) + ' "$@"\n')
+          launcher.chmod(0o700)
+          PY
+          EVIDENCE_PDF_TEST_PYTHON="$pdf_child_python" EVIDENCE_PDF_AUDIT_DIR="$pdf_root/lxml-wheels" EVIDENCE_PDF_REQUIRE_SYMLINK=1 "$py" -I -B account-platform/cmd/evidence-image-validator/run_pdf_gate.py --strict
+
+      - name: Node.js for Token authorization contracts
+        uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          package-manager-cache: ${{ runner.environment == 'github-hosted' }}
+
+      - name: Verify Account Platform generated inputs and document baseline
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/build-credential-handoff.mjs --check
+          node scripts/check-recharge-product-document-baseline.mjs
+
+      - name: Verify Token management authorization contracts
+        run: |
+          node scripts/check-token-management-authorization-coverage.mjs
+          node --test scripts/tests/token-management-authorization-coverage.test.mjs
+          node --test scripts/tests/token-management-phase-coverage.test.mjs
+
+      - name: Verify Account closure source and API contracts
+        run: |
+          npm --prefix account-platform ci --ignore-scripts --no-audit --fund=false
+          npm --prefix account-platform run test:closure-contracts
+
+      - name: Verify Account Platform task contracts
+        run: |
+          node --test scripts/check-account-platform-tasks.test.mjs
+
+      - name: Verify F18 owned fixture contract
+        run: node --test scripts/tests/f18-hold-recovery-owned-fixture.test.mjs
+
+      - name: Verify Account Platform authorization contracts
+        run: |
+          node scripts/check-account-platform-authorization-coverage.mjs
+          node --test scripts/tests/account-platform-authorization-coverage.test.mjs
+
+      - name: Keycloak provisioning and theme contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          PINVOU_TEST_BASH="$(command -v bash)" python3 account-platform/deploy/keycloak/test/provision_mobile_auth_test.py
+
+      - name: Install Account Platform contract dependencies
+        working-directory: account-platform
+        run: npm ci --ignore-scripts --prefer-offline --no-audit
+
+      - name: Install pinned offline-render tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          tools="$(mktemp -d "$RUNNER_TEMP/account-render.XXXXXX")"
+          curl --fail --location --proto '=https' --proto-redir '=https' --retry 3 --connect-timeout 15 --max-time 180 \
+            https://get.helm.sh/helm-v3.16.4-linux-amd64.tar.gz -o "$tools/helm.tar.gz"
+          printf '%s  %s\n' fc307327959aa38ed8f9f7e66d45492bb022a66c3e5da6063958254b9767d179 "$tools/helm.tar.gz" | sha256sum --check --strict
+          tar -xzf "$tools/helm.tar.gz" -C "$tools" linux-amd64/helm
+          curl --fail --location --proto '=https' --proto-redir '=https' --retry 3 --connect-timeout 15 --max-time 180 \
+            https://github.com/docker/compose/releases/download/v5.4.0/docker-compose-linux-x86_64 -o "$tools/docker-compose"
+          printf '%s  %s\n' 837fd1d35bf6a494f41b5b5988269a7be79de337cf1a1a6ff0e45ab51bb4e9be "$tools/docker-compose" | sha256sum --check --strict
+          chmod 0755 "$tools/docker-compose"
+          # Test-only promtool; does not start or upgrade a Prometheus server.
+          # SHA256 published at https://prometheus.io/download/ (3.13.5 LTS).
+          curl --fail --location --proto '=https' --proto-redir '=https' --retry 3 --connect-timeout 15 --max-time 180 \
+            https://github.com/prometheus/prometheus/releases/download/v3.13.5/prometheus-3.13.5.linux-amd64.tar.gz -o "$tools/prometheus.tar.gz"
+          printf '%s  %s\n' 0388822ace519c5a3a8ef556a541ce1b536e21d872f82deded465bd27a5a0699 "$tools/prometheus.tar.gz" | sha256sum --check --strict
+          tar -xzf "$tools/prometheus.tar.gz" -C "$tools" prometheus-3.13.5.linux-amd64/promtool
+          printf 'PINVOU_TEST_PROMTOOL_BINARY=%s\n' "$tools/prometheus-3.13.5.linux-amd64/promtool" >> "$GITHUB_ENV"
+          printf 'PINVOU_TEST_KMS_HELM_BINARY=%s\n' "$tools/linux-amd64/helm" >> "$GITHUB_ENV"
+          printf 'PINVOU_TEST_KMS_COMPOSE_BINARY=%s\n' "$tools/docker-compose" >> "$GITHUB_ENV"
+
+      - name: Account Platform rendered Prometheus rule scenarios
+        shell: bash
+        run: |
+          set -euo pipefail
+          fixture="$(mktemp -d "$RUNNER_TEMP/account-prometheus.XXXXXX")"
+          chart="$GITHUB_WORKSPACE/account-platform/deploy/helm/account-platform"
+          "$PINVOU_TEST_KMS_HELM_BINARY" template prometheus-ci "$chart" \
+            -f "$chart/values-model-token-test.yaml" \
+            --set observability.prometheusRulesEnabled=true --set availability.enabled=true > "$fixture/rendered.yaml"
+          npm --prefix account-platform run test:prometheus-rules -- \
+            --rendered "$fixture/rendered.yaml" --output "$fixture/cases" --promtool "$PINVOU_TEST_PROMTOOL_BINARY"
+
+      - name: Account Platform optional backup tool contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Unit contracts only; no Docker, backup job, timer or recovery is started.
+          npm --prefix account-platform run test:postgres-backup-tools 2>&1 | tee "$RUNNER_TEMP/account-backup-tools.log"
+          grep -Eq '^Ran [1-9][0-9]* tests? in ' "$RUNNER_TEMP/account-backup-tools.log"
+          grep -Eq '^OK$' "$RUNNER_TEMP/account-backup-tools.log"
+
+      - name: Account Platform offline user realm contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Offline generation only; no realm import, credentials or network access.
+          npm --prefix account-platform run test:user-realm-tools 2>&1 | tee "$RUNNER_TEMP/account-user-realm.log"
+          grep -Eq '^Ran [1-9][0-9]* tests? in ' "$RUNNER_TEMP/account-user-realm.log"
+          grep -Eq '^OK$' "$RUNNER_TEMP/account-user-realm.log"
+
+      - name: Account Platform Node contracts
+        env:
+          PINVOU_TEST_KMS_HELM: "1"
+          PINVOU_TEST_KMS_COMPOSE: "1"
+        working-directory: account-platform
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --test --test-reporter=tap test/contract/*.test.mjs | tee "$RUNNER_TEMP/f18-account-contracts.tap"
+          # A green process with no matched cases is not a contract validation.
+          grep -Eq '^# pass [1-9][0-9]*$' "$RUNNER_TEMP/f18-account-contracts.tap"
+          grep -Eq '^# fail 0$' "$RUNNER_TEMP/f18-account-contracts.tap"
+          grep -Eq '^# skipped 0$' "$RUNNER_TEMP/f18-account-contracts.tap"
+
+      - name: Prepare production authentication quota Go test binary
+        timeout-minutes: 10
+        working-directory: account-platform
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Downloads and race compilation are preparation, not Lua test proof.
+          # Keep them outside the runner's unchanged 180-second test deadline.
+          go test -race -p=2 -tags=nomsgpack -mod=readonly -c -o "$RUNNER_TEMP/auth-quota-prepared.test" ./internal/identityadapter
+
+      - name: Require production authentication quota Lua through Go consumers
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Test-only official Ubuntu Lua5.1 CLI; no product Lua dependency.
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends lua5.1 postgresql-client
+          command -v psql
+          python3 -m unittest discover -s scripts/tests -p test_auth_quota_lua_check.py
+          python3 scripts/account-platform-auth-quota-lua-check.py --race
+
+      - name: Verify account CI PostgreSQL service isolation
+        id: account-pg
+        env:
+          ACCOUNT_CI_SERVICES: ${{ toJSON(job.services) }}
+        run: |
+          python3 -m unittest discover -s scripts/tests -p test_account_ci_postgres.py
+          python3 scripts/account-ci-postgres.py
+
+      - name: Test and vet all Account Platform Go modules
+        shell: bash
+        run: |
+          set -euo pipefail
+          # ./... does not traverse nested modules. Discover their manifests
+          # explicitly so future tools cannot silently escape the Go gate.
+          test -f account-platform/go.mod
+          while IFS= read -r -d '' manifest; do
+            module_dir="$(dirname "$manifest")"
+            echo "Go contracts: $module_dir"
+            (
+              cd "$module_dir"
+              go test -race -tags=nomsgpack -mod=readonly -count=1 ./...
+              go vet -tags=nomsgpack -mod=readonly ./...
+            )
+          done < <(find account-platform -name vendor -prune -o -name go.mod -print0 | sort -z)
+
+      - name: Production history and managed PostgreSQL release contracts
+        shell: bash
+        env:
+          PINVOU_DEPLOYMENT_TEST_BUILD_CACHE: ${{ runner.temp }}/deployment-contracts-gobuild
+        run: |
+          set -euo pipefail
+          python3 -m unittest discover -s scripts/tests -p test_deployment_contracts.py
+          deployment_module_cache="$(mktemp -d "$RUNNER_TEMP/deployment-contracts-gomod.XXXXXX")"
+          export PINVOU_DEPLOYMENT_TEST_MODULE_CACHE="$deployment_module_cache"
+          for postgres_version in 17 18.4; do
+            env -u DOCKER_HOST python3 scripts/account-platform-deployment-contracts.py --postgres-version "$postgres_version" --artifacts "$RUNNER_TEMP/account-platform-deployment-contracts-$postgres_version-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          done
+
+      - name: Existing broker compatibility on owned PostgreSQL and TLS NATS
+        timeout-minutes: 12
+        shell: bash
+        env:
+          PINVOU_TEST_SCHEMA_DATABASE_URL: ${{ steps.account-pg.outputs.broker_url }}
+          PINVOU_ACCOUNT_CI_PG_PORT: ${{ steps.account-pg.outputs.broker_port }}
+          PINVOU_ACCOUNT_CI_PG_SYSTEM_ID: ${{ steps.account-pg.outputs.broker_system }}
+          PINVOU_ACCOUNT_CI_PG_DIRECTORY: ${{ steps.account-pg.outputs.broker_directory }}
+        run: |
+          set -euo pipefail
+          # Extract only the pinned public server executable. The test itself
+          # starts a private loopback broker with its own TLS keys and store.
+          fixture_container="$(docker create --network none nats@sha256:ad7a43eb7e3337c3c38ce5d784d1461791f95f730f252d2b25eee699752a0ca3)"
+          trap 'docker rm "$fixture_container" >/dev/null' EXIT
+          docker cp "$fixture_container:/nats-server" "$RUNNER_TEMP/pinvou-test-nats-server" 2>/dev/null || \
+            docker cp "$fixture_container:/usr/local/bin/nats-server" "$RUNNER_TEMP/pinvou-test-nats-server"
+          printf '%s  %s\n' 2d0dc83e0547185a6820377114215d6a7c645f607aeb31728fffaf3d84e77c10 "$RUNNER_TEMP/pinvou-test-nats-server" | sha256sum --check --strict
+          chmod 0700 "$RUNNER_TEMP/pinvou-test-nats-server"
+          export PINVOU_TEST_NATS_SERVER_BINARY="$RUNNER_TEMP/pinvou-test-nats-server"
+          npm --prefix account-platform run test:existing-broker
+
+      - name: Audit export finite PostgreSQL rollback and persisted boundaries
+        working-directory: account-platform
+        env:
+          F17_TEST_DATABASE_URL: ${{ steps.account-pg.outputs.audit_url }}
+          PINVOU_ACCOUNT_CI_PG_PORT: ${{ steps.account-pg.outputs.audit_port }}
+          PINVOU_ACCOUNT_CI_PG_SYSTEM_ID: ${{ steps.account-pg.outputs.audit_system }}
+          PINVOU_ACCOUNT_CI_PG_DIRECTORY: ${{ steps.account-pg.outputs.audit_directory }}
+          F17_TEST_DATABASE_PROFILE: github-actions-service
+          F17_TEST_SERVICE_PORT: ${{ steps.account-pg.outputs.audit_port }}
+        run: |
+          set -euo pipefail
+          # Fixed actor names are exclusive to this ephemeral service. Keep
+          # package execution serial and run only the bounded audit fixtures.
+          go test -race -json -tags=nomsgpack -mod=readonly -count=1 -parallel=1 ./internal/accountschema -run '^TestAuditExport(RollbackRoleStorageGuard|PublicDownRetainsOriginalHistory|GuardedRollbackTransactions)$' | tee "$RUNNER_TEMP/f17-audit-schema.jsonl"
+          go test -race -json -tags=nomsgpack -mod=readonly -count=1 -parallel=1 ./internal/account -run '^TestAuditExportPersistedBoundaries$' | tee "$RUNNER_TEMP/f17-audit-account.jsonl"
+          python3 - "$RUNNER_TEMP/f17-audit-schema.jsonl" "$RUNNER_TEMP/f17-audit-account.jsonl" <<'PY'
+          import json, pathlib, sys
+          expected = [
+              {"TestAuditExportRollbackRoleStorageGuard", "TestAuditExportPublicDownRetainsOriginalHistory", "TestAuditExportGuardedRollbackTransactions"},
+              {"TestAuditExportPersistedBoundaries"},
+          ]
+          for filename, required in zip(sys.argv[1:], expected, strict=True):
+              events = [json.loads(line) for line in pathlib.Path(filename).read_text().splitlines() if line.strip()]
+              terminal = [event for event in events if event.get("Test") and event.get("Action") in ("pass", "fail", "skip")]
+              assert terminal and len(terminal) > len(required), "finite PostgreSQL test cases did not execute"
+              assert all(event["Action"] == "pass" for event in terminal), "finite PostgreSQL tests failed or skipped"
+              roots = {event["Test"] for event in terminal if "/" not in event["Test"]}
+              assert roots == required, "required finite PostgreSQL test selection did not execute"
+          PY
+      - name: Token financial contracts on isolated PostgreSQL
+        shell: bash
+        env:
+          ACCOUNT_FINANCIAL_SERVICES: ${{ steps.account-pg.outputs.financial_services }}
+        run: |
+          set -euo pipefail
+          python3 -m unittest discover -s scripts/tests -p test_token_financial_postgres.py
+          python3 -m unittest discover -s scripts/tests -p test_financial_parallel.py
+          python3 scripts/test-financial-parallel.py
+
+      - name: Account closure contracts on isolated PostgreSQL
+        shell: bash
+        env:
+          PINVOU_ACCOUNT_CLOSURE_TEST_DATABASE_URL: ${{ steps.account-pg.outputs.financial_url }}
+          PINVOU_ACCOUNT_CI_PG_PORT: ${{ steps.account-pg.outputs.financial_port }}
+          PINVOU_ACCOUNT_CI_PG_SYSTEM_ID: ${{ steps.account-pg.outputs.financial_system }}
+          PINVOU_ACCOUNT_CI_PG_DIRECTORY: ${{ steps.account-pg.outputs.financial_directory }}
+          PINVOU_ACCOUNT_CLOSURE_TEST_ARTIFACT_DIR: ${{ runner.temp }}/account-closure-postgres
+        run: |
+          set -euo pipefail
+          python3 -m unittest discover -s scripts/tests -p test_account_closure_postgres.py
+          python3 scripts/test-account-closure-postgres.py
+
+      - name: Financial parallel diagnostics
+        id: financial_diagnostics_upload
+        if: ${{ always() }}
+        timeout-minutes: 3
+        # Diagnostic transport must not invalidate the completed test verdict.
+        # The preceding contract/test steps and required-gate remain strict.
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: account-financial-parallel-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/financial-parallel-*/
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Stop owned temporary PostgreSQL services
+        if: ${{ always() }}
+        env:
+          ACCOUNT_CI_SERVICES: ${{ toJSON(job.services) }}
+        run: |
+          python3 scripts/account-ci-postgres.py --stop-owned-services
+
+      - name: Confirm Account test resource retirement
+        if: ${{ always() && env.PINVOU_CI_RESOURCE_LEDGER != '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          args=(--directory "$PINVOU_CI_RESOURCE_LEDGER")
+          for output in "$RUNNER_TEMP"/account-platform-deployment-contracts-*; do
+            if [[ -d "$output/resources" ]]; then args+=(--directory "$output/resources"); fi
+          done
+          python3 scripts/ci-resource-ledger.py --recover "${args[@]}"
+
+      - name: Account test resource lifecycle receipts
+        id: account_receipts_upload
+        if: ${{ always() && env.PINVOU_CI_RESOURCE_LEDGER != '' }}
+        timeout-minutes: 3
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: account-resource-lifecycle-${{ github.run_attempt }}
+          path: |
+            ${{ env.PINVOU_CI_RESOURCE_LEDGER }}/
+            ${{ runner.temp }}/account-platform-deployment-contracts-*/resources/
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Warn when Account diagnostic delivery fails
+        if: ${{ always() && (steps.financial_diagnostics_upload.outcome == 'failure' || steps.account_receipts_upload.outcome == 'failure') }}
+        run: echo '::warning::Diagnostic upload failed or timed out; original logs and receipts remain on the runner. Tests and resource retirement remain mandatory.'
+
   windows-relay-dacl:
     name: windows-relay-dacl
     needs: changes
@@ -1205,7 +1801,7 @@ jobs:
     timeout-minutes: 10
     services:
       postgres:
-        image: postgres:16-alpine
+        image: mirror.gcr.io/library/postgres@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea
         env:
           POSTGRES_PASSWORD: team_relay_ci_only
           POSTGRES_DB: team_relay_ci_test
@@ -1280,12 +1876,14 @@ jobs:
         if: ${{ matrix.node-version == '20' }}
         env:
           PINVOU_UPDATE_ADMIN_TOKEN: ci-only-token-that-is-at-least-32-characters
+          PINVOU_UPDATE_NODE_IMAGE: mirror.gcr.io/library/node@sha256:2cf067cfed83d5ea958367df9f966191a942351a2df77d6f0193e162b5febfc0
         run: bash scripts/ci-update-release-console-container.sh
 
       - name: 清理发布台容器
         if: ${{ always() && matrix.node-version == '20' }}
         env:
           PINVOU_UPDATE_ADMIN_TOKEN: ci-only-token-that-is-at-least-32-characters
+          PINVOU_UPDATE_NODE_IMAGE: mirror.gcr.io/library/node@sha256:2cf067cfed83d5ea958367df9f966191a942351a2df77d6f0193e162b5febfc0
         run: bash scripts/ci-update-release-console-container.sh --cleanup
 
   release-contract-test:
@@ -1899,25 +2497,9 @@ jobs:
         working-directory: pinvou3-app/src-tauri
         run: rustup default "$(rustup show active-toolchain | awk '{print $1}')"
 
-      # v0.9.12 底座升级后,dev 对依赖开 O2 时 codewhale-tui 的 LLVM IR/bitcode
-      # 体量使本 job 的 thin LTO 在 7GB Linux runner 上越线:2026-09-12 起 main
-      # push 与 PR 的 rust-test 均在编译最终 crate(pinvou3-tauri lib test,单个
-      # rustc ~7GB)时被内存看门狗按可用内存阈值提前杀掉(连续 8+ 次实证)。
-      # 与 windows-rust-test job 同款缓解(见该 job 同名 step):仅在本 job 内把
-      # codewhale-tui 覆盖回 dev 默认 O0,写入 CARGO_HOME/config.toml(package 级
-      # profile 覆盖只能走 config,Cargo 无对应环境变量),不改动仓库 Cargo.toml,
-      # 本地开发与 release 产物不受影响;overflow-checks 等其余 dev 设置继承,
-      # 测试语义不变。
-      - name: dev profile 内存边界覆盖(codewhale-tui O0,仅本 job)
-        run: |
-          config="${CARGO_HOME:-$HOME/.cargo}/config.toml"
-          python3 scripts/ci-cargo-dev-profile.py "$config" <<'EOF'
-
-          [profile.dev.package.codewhale-tui]
-          opt-level = 0
-          EOF
-          echo "configured codewhale-tui dev O0 override in $config"
-          tail -n 4 "$config"
+      # Keep codewhale-tui dev O0 scoped to each test invocation below.
+      # Persistent self-hosted CARGO_HOME must retain the administrator config:
+      # a global append repeats tables on the next job and leaks the override.
 
       # remote_control 的真实 relay 下载 e2e 需要 node + relay 依赖,缺 node_modules/ws 时
       # 该 e2e 会自动 skip —— 装上依赖让 CI 真正执行它,而不是绿灯假过。
@@ -1929,7 +2511,7 @@ jobs:
           node-version: "24"
           cache: ${{ runner.environment == 'github-hosted' && 'npm' || '' }}
           package-manager-cache: ${{ runner.environment == 'github-hosted' }}
-          # Same two-lockfile key as frontend-test/windows-codex-runtime-test:
+          # Shared App/relay key; frontend additionally keys Account Platform tools:
           # one shared npm cache namespace instead of per-job keys fragmenting
           # the 10GB quota with duplicate 107MB entries.
           cache-dependency-path: |
@@ -2063,7 +2645,7 @@ jobs:
       # 只有下方超出单进程内存预算的 behavior-telemetry 测试使用独立目标。
       - name: cargo test --lib --no-run（编译链接测试二进制）
         if: ${{ github.event_name != 'push' }}
-        run: /usr/bin/time -v cargo test --manifest-path pinvou3-app/src-tauri/Cargo.toml --no-default-features --lib --features benchmark-hooks --locked --no-run
+        run: /usr/bin/time -v cargo --config 'profile.dev.package.codewhale-tui.opt-level=0' test --manifest-path pinvou3-app/src-tauri/Cargo.toml --no-default-features --lib --features benchmark-hooks --locked --no-run
 
       # Test registry guard: a duplicated #[test] registers one case twice and
       # swallows the adjacent case's attributes (happened twice on upstream PR
@@ -2077,6 +2659,8 @@ jobs:
       # consent-critical pin present (full libtest paths).
       - name: test-registry guard (duplicates + required pins)
         if: ${{ github.event_name != 'push' }}
+        env:
+          PINVOU_CI_CODEWHALE_DEV_O0: "1"
         run: python3 scripts/test-registry-guard.py
 
       - name: cargo test --lib（含 strict_mode 回归；真 bge-m3/vLLM 测试已 #[ignore]）
@@ -2085,7 +2669,7 @@ jobs:
           chrome="$(command -v google-chrome || command -v chromium || command -v chromium-browser)"
           export CHROME="$chrome"
           export PINVOU_REQUIRE_REMOTE_E2E=1
-          cargo test --manifest-path pinvou3-app/src-tauri/Cargo.toml --no-default-features --lib --features benchmark-hooks --locked -- --test-threads=1
+          cargo --config 'profile.dev.package.codewhale-tui.opt-level=0' test --manifest-path pinvou3-app/src-tauri/Cargo.toml --no-default-features --lib --features benchmark-hooks --locked -- --test-threads=1
 
       # The behavior-telemetry state-machine tests intentionally use a separate
       # harness. Linking their 2,300+ source lines into the already-large lib
@@ -2108,7 +2692,7 @@ jobs:
       - name: cargo test --test behavior_telemetry (standalone memory-bounded harness)
         if: ${{ github.event_name != 'push' }}
         run: |
-          /usr/bin/time -v cargo test \
+          /usr/bin/time -v cargo --config 'profile.dev.package.codewhale-tui.opt-level=0' test \
             --manifest-path pinvou3-app/src-tauri/Cargo.toml \
             --no-default-features \
             --test behavior_telemetry \
@@ -2132,7 +2716,7 @@ jobs:
       # 故恢复只编译设计;不要在 push 上重新打开测试执行。
       - name: cargo test --lib --no-run (push main 仅编译暖 cache)
         if: ${{ github.event_name == 'push' }}
-        run: /usr/bin/time -v cargo test --manifest-path pinvou3-app/src-tauri/Cargo.toml --no-default-features --lib --features benchmark-hooks --locked --no-run
+        run: /usr/bin/time -v cargo --config 'profile.dev.package.codewhale-tui.opt-level=0' test --manifest-path pinvou3-app/src-tauri/Cargo.toml --no-default-features --lib --features benchmark-hooks --locked --no-run
 
   # pinvou-cli contract tests: since PR #478 the product CLI surface (~20k
   # lines + ~340 contract tests) has no other automated execution leg (the
@@ -3805,7 +4389,7 @@ jobs:
           node-version: "24"
           cache: ${{ runner.environment == 'github-hosted' && 'npm' || '' }}
           package-manager-cache: ${{ runner.environment == 'github-hosted' }}
-          # Same two-lockfile key as frontend-test/rust-test: one shared npm
+          # Shared App/relay key with rust-test; frontend additionally keys AP tools:
           # cache namespace instead of per-job keys.
           cache-dependency-path: |
             pinvou3-app/package-lock.json
@@ -4231,6 +4815,7 @@ jobs:
       - merge-authored-audit
       - frontend-test
       - relay-test
+      - account-platform-test
       - windows-relay-dacl
       - windows-relay-tools-test
       - team-relay-hub-test
@@ -4271,6 +4856,8 @@ jobs:
           MERGE_AUTHORED_AUDIT_RESULT: ${{ needs.merge-authored-audit.result }}
           FRONTEND_RESULT: ${{ needs.frontend-test.result }}
           RELAY_RESULT: ${{ needs.relay-test.result }}
+          ACCOUNT_PLATFORM_RESULT: ${{ needs.account-platform-test.result }}
+          ACCOUNT_PLATFORM_REQUIRED: ${{ needs.changes.outputs.account_platform }}
           WINDOWS_RELAY_DACL_RESULT: ${{ needs.windows-relay-dacl.result }}
           WINDOWS_RELAY_RESULT: ${{ needs.windows-relay-tools-test.result }}
           WINDOWS_ENABLED: ${{ vars.PINVOU_WINDOWS_ENABLED != 'false' }}
@@ -4317,6 +4904,11 @@ jobs:
             exit 1
           fi
 
+          if [[ "$ACCOUNT_PLATFORM_REQUIRED" == "true" && "$ACCOUNT_PLATFORM_RESULT" != success ]]; then
+            echo "Required Account Platform Go gate did not pass: $ACCOUNT_PLATFORM_RESULT" >&2
+            exit 1
+          fi
+
           if [[ "$RELAY_REQUIRED_BY_POLICY" == "true" && "$RELAY_RESULT" != success ]]; then
             echo "Relay 变更要求 Linux 实际回归成功: relay=$RELAY_RESULT" >&2
             exit 1
@@ -4337,6 +4929,7 @@ jobs:
             "backflow-portability:$BACKFLOW_PORTABILITY_RESULT" \
             "frontend-test:$FRONTEND_RESULT" \
             "relay-test:$RELAY_RESULT" \
+            "account-platform-test:$ACCOUNT_PLATFORM_RESULT" \
             "windows-relay-dacl:$WINDOWS_RELAY_DACL_RESULT" \
             "windows-relay-tools-test:$WINDOWS_RELAY_RESULT" \
             "team-relay-hub-test:$TEAM_RELAY_HUB_RESULT" \

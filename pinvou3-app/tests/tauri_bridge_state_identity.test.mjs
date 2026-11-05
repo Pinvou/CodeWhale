@@ -315,32 +315,37 @@ assert.equal(await api.models.deleteModelIfStoreLink('m-repurposed', 'store-card
 assert.ok(!cleanupCalls.some(call => call.command === 'delete_model'),
   'uninstall cleanup must never fall back to unconditional deletion');
 
-// If the deleted store row was the default, publish the backend-selected
-// fallback and its effective config; the UI must not re-select the removed id.
+// If the deleted store row was the typed default, publish the authoritative
+// cleared selection without selecting another retained user configuration.
 let defaultRows = [{ id: 'store-default', model: 'store-wire' }, { id: 'user-fallback', model: 'user-wire' }];
 let defaultId = 'store-default';
+let defaultRef = { source: 'LOCAL_CONFIG', saved_model_id: defaultId };
+const unselectedConfig = { model: '', credential_state: 'missing', has_secret: false };
 const defaultCleanupCalls = [];
 invokeResponse = async (command, args) => {
   defaultCleanupCalls.push(command);
   if (command === 'delete_model_if_store_link') {
     assert.deepEqual(JSON.parse(JSON.stringify(args)), { id: 'store-default', cardId: 'store-card' });
     defaultRows = defaultRows.filter(row => row.id !== args.id);
-    defaultId = 'user-fallback';
+    defaultId = null;
+    defaultRef = null;
     return true;
   }
-  if (command === 'list_models') return { models: defaultRows, active_model_id: defaultId };
-  if (command === 'get_settings') return { advanced: { active_model_id: defaultId } };
-  if (command === 'get_effective_model_config') return { model: 'user-wire' };
+  if (command === 'list_models') return { models: defaultRows, active_model_id: defaultId, default_model_ref: defaultRef };
+  if (command === 'get_settings') return { advanced: { active_model_id: defaultId, default_model_ref: defaultRef } };
+  if (command === 'get_effective_model_config') return unselectedConfig;
   return {};
 };
 await api.models.loadModels();
 assert.equal(api.state.get('models').activeModelId, 'store-default');
+assert.equal(api.state.get('models').defaultModelRef.saved_model_id, 'store-default');
 assert.equal(await api.models.deleteModelIfStoreLink('store-default', 'store-card'), true);
 const afterDefaultCleanup = api.state.get('models');
-assert.equal(afterDefaultCleanup.activeModelId, 'user-fallback');
-assert.equal(afterDefaultCleanup.effectiveModelConfig.model, 'user-wire');
+assert.equal(afterDefaultCleanup.activeModelId, null);
+assert.equal(afterDefaultCleanup.defaultModelRef, null);
+assert.deepEqual(JSON.parse(JSON.stringify(afterDefaultCleanup.effectiveModelConfig)), unselectedConfig);
 assert.deepEqual(Array.from(afterDefaultCleanup.savedModels, row => row.id), ['user-fallback']);
 assert.ok(defaultCleanupCalls.includes('get_settings'));
 assert.ok(defaultCleanupCalls.includes('get_effective_model_config'));
-assert.ok(!defaultCleanupCalls.some(command => /set_active_model|save_model|delete_model$/.test(command)),
-  'cleanup must refresh the chosen fallback without selecting or recreating a model');
+assert.ok(!defaultCleanupCalls.some(command => /set_active_model|set_default_model_ref|set_session_model|account_platform_select|save_model|delete_model$/.test(command)),
+  'cleanup must publish the cleared default without selecting or recreating a model');

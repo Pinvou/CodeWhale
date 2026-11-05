@@ -33,7 +33,7 @@ const nativeState = readFileSync(
 const nativePlatform = readFileSync(
   path.join(projectRoot, 'src-tauri', 'src', 'features', 'browser', 'platform', 'mod.rs'),
   'utf8',
-);
+).replace(/\r\n/g, '\n');
 const linuxAutomation = readFileSync(
   path.join(
     projectRoot,
@@ -45,7 +45,7 @@ const linuxAutomation = readFileSync(
     'linux_automation.rs',
   ),
   'utf8',
-);
+).replace(/\r\n/g, '\n');
 const linuxSurface = readFileSync(
   path.join(
     projectRoot,
@@ -231,7 +231,7 @@ test('remote connection modal waits for its native surface hide publication', ()
   const intent = main.match(/const browserOverlayIntent = (\[[\s\S]*?\]\.filter\(Boolean\)\.join\('\|'\));/);
   assert.ok(intent, 'the real overlay intent expression must be available');
   const context = { archiveConfirm: false, searchOverlayOpen: false, personaEditor: false,
-    savedConfirm: false, webAccessOpen: false, apiKeyGateOpen: false, bs: {},
+    savedConfirm: false, webAccessOpen: false, modelAccessGateOpen: false, bs: {},
     isCompactShell: false, isSidebarOpen: false, mobileMoreOpen: false,
     moveToProjectSession: null, rebindDraft: null, remoteConversationOpen: true,
     can: (capability) => capability === 'desktopRemoteControl' };
@@ -264,7 +264,7 @@ test('native surface suspension is centrally derived for every occlusion path', 
     'personaEditor',
     'savedConfirm',
     'webAccessOpen',
-    'apiKeyGateOpen',
+    'modelAccessGateOpen',
     'bs.pinvouModal',
     'isCompactShell && isSidebarOpen',
     'isCompactShell && mobileMoreOpen',

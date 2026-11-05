@@ -1,6 +1,9 @@
 #!/usr/bin/env node
 
 import { spawn } from "node:child_process";
+import fs from "node:fs";
+import os from "node:os";
+import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -46,19 +49,40 @@ export function commandFor({ kind, target }) {
   throw new Error(`unsupported frontend smoke command kind: ${kind}`);
 }
 
-function runOnce(item) {
+export function runOnce(item) {
   const { executable, args } = commandFor(item);
   process.stdout.write(`\n== ${item.kind}:${item.target} ==\n`);
   return new Promise((resolve, reject) => {
-    const child = spawn(executable, args, {
+    const evidence = process.env.PINVOU_CI_RESOURCE_LEDGER
+      || fs.mkdtempSync(path.join(process.env.RUNNER_TEMP || os.tmpdir(), 'pinvou-process-receipts-'));
+    fs.mkdirSync(evidence, { recursive: true });
+    if (fs.lstatSync(evidence).isSymbolicLink()) throw new Error('fixture receipt directory is a symbolic link');
+    const receipt = path.join(evidence, `process-${randomUUID()}.json`);
+    const python = process.env.PINVOU_CI_PYTHON || (process.platform === 'win32' ? 'python' : 'python3');
+    const child = spawn(python, [path.join(repoRoot, 'scripts/ci-fixture-process.py'), '--receipt', receipt, '--', executable, ...args], {
       cwd: appRoot,
       env: process.env,
       stdio: "inherit",
     });
+    const cancel = () => child.kill('SIGTERM');
+    process.once('SIGINT', cancel);
+    process.once('SIGTERM', cancel);
+    const detach = () => { process.removeListener('SIGINT', cancel); process.removeListener('SIGTERM', cancel); };
     child.once("error", (error) => {
-      reject(new Error(`${item.kind}:${item.target} failed to start: ${error.message}`));
+      detach();
+      reject(Object.assign(new Error(`${item.kind}:${item.target} supervisor failed to start: ${error.message}`), { cleanupFailed: true }));
     });
-    child.once("exit", (code, signal) => {
+    // close also acknowledges inherited stdio retirement. The supervisor has
+    // already confirmed its entire owned tree, including detached browsers.
+    child.once("close", (code, signal) => {
+      detach();
+      let retired;
+      try { retired = JSON.parse(fs.readFileSync(receipt, 'utf8')); } catch {}
+      const clean = retired?.schema === 1 && retired?.state === 'released' && retired?.cleanup_failed === false;
+      if (!clean) {
+        reject(Object.assign(new Error(`${item.target} resource retirement was not clean; receipt: ${receipt}`), { cleanupFailed: true, exitCode: code }));
+        return;
+      }
       if (signal) {
         reject(new Error(`${item.target} terminated by ${signal}`));
       } else if (code !== 0) {
@@ -94,7 +118,7 @@ export async function runSelected(items, {
         await run(item);
         break;
       } catch (error) {
-        if (attempt >= attempts || error?.exitCode === 2) throw error;
+        if (attempt >= attempts || error?.exitCode === 2 || error?.cleanupFailed) throw error;
         warn(
           `${item.kind}:${item.target} failed on attempt ${attempt}/${attempts}`
             + ` (${error.message}); retrying once to absorb a transient runner flake`,

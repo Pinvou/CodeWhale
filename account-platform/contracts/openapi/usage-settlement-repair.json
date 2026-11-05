@@ -1,0 +1,378 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Usage settlement repair closed financial command",
+    "version": "1.0.0"
+  },
+  "paths": {
+    "/admin/v2/approval-command-prechecks": {
+      "post": {
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PrecheckRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Closed owner frozen projection; settled_microcredits equals settlement_microcredits and settled_microcredits plus overage_microcredits equals expected_microcredits.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PrecheckProjection"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Closed request invalid."
+          },
+          "403": {
+            "description": "Existing platform.billing.repairs.request permission required."
+          },
+          "503": {
+            "description": "Owner unavailable."
+          },
+          "422": {
+            "description": "Owner closed projection unavailable for this target."
+          },
+          "504": {
+            "description": "Read-only owner timeout."
+          },
+          "401": {
+            "description": "Authentication required; Account may require recent authentication."
+          }
+        },
+        "operationId": "accountUsageSettlementRepairPrecheck",
+        "description": "Current Account bearer actor with platform.billing.repairs.request and recent authentication. Read-only closed unique-key JSON, existing 65536-byte transport bound and 2-second owner deadline. Produces no approval, claim or financial effect; INACTIVE still permits preparing a read-only projection."
+      }
+    },
+    "/internal/v1/approval-command-prechecks": {
+      "post": {
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PrecheckRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Closed owner frozen projection; settled_microcredits equals settlement_microcredits and settled_microcredits plus overage_microcredits equals expected_microcredits.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PrecheckProjection"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Closed request invalid."
+          },
+          "403": {
+            "description": "Requires internal.billing.approval-proof.read and the Account service workload identity: actor_type SERVICE, service account-service and nonempty subject."
+          },
+          "503": {
+            "description": "Owner unavailable."
+          },
+          "422": {
+            "description": "Owner closed projection unavailable for this target."
+          },
+          "504": {
+            "description": "Read-only owner timeout."
+          },
+          "401": {
+            "description": "A valid workload bearer credential is required by the service authentication middleware."
+          }
+        },
+        "operationId": "billingUsageSettlementRepairPrecheck",
+        "description": "Account service workload bearer identity with internal.billing.approval-proof.read; actor_type SERVICE, service account-service and nonempty subject. Read-only closed unique-key JSON, existing 65536-byte transport bound and 2-second owner deadline. Produces no approval, claim or financial effect; INACTIVE still permits preparing a read-only projection."
+      }
+    },
+    "/api/admin/account/admin/v2/approval-command-prechecks": {
+      "post": {
+        "security": [
+          {
+            "PortalSession": [],
+            "PortalCSRF": []
+          },
+          {
+            "PortalDevelopmentSession": [],
+            "PortalCSRF": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PrecheckRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Closed owner frozen projection; settled_microcredits equals settlement_microcredits and settled_microcredits plus overage_microcredits equals expected_microcredits.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PrecheckProjection"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Closed request invalid."
+          },
+          "403": {
+            "description": "Existing platform.billing.repairs.request permission required."
+          },
+          "503": {
+            "description": "Owner unavailable."
+          },
+          "422": {
+            "description": "Owner closed projection unavailable for this target."
+          },
+          "504": {
+            "description": "Read-only owner timeout."
+          },
+          "401": {
+            "description": "Authentication required; Account may require recent authentication."
+          }
+        },
+        "operationId": "portalUsageSettlementRepairPrecheck",
+        "description": "Current Portal OIDC session and same-origin CSRF; forwards the authenticated Account actor, not a browser-supplied bearer credential. Secure deployments use __Host-portal_session; the existing development configuration uses portal_session. Read-only closed unique-key JSON, existing 65536-byte transport bound and 2-second owner deadline. Produces no approval, claim or financial effect; INACTIVE still permits preparing a read-only projection."
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "BearerAuth": {
+        "type": "http",
+        "scheme": "bearer"
+      },
+      "PortalSession": {
+        "type": "apiKey",
+        "in": "cookie",
+        "name": "__Host-portal_session",
+        "description": "Existing secure Portal session cookie; no access token is exposed in the JSON projection."
+      },
+      "PortalDevelopmentSession": {
+        "type": "apiKey",
+        "in": "cookie",
+        "name": "portal_session",
+        "description": "Existing development session-cookie name when SecureCookies is false; production requires the secure cookie configuration."
+      },
+      "PortalCSRF": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-CSRF-Token",
+        "description": "Existing session CSRF token; same-origin checks also apply."
+      }
+    },
+    "schemas": {
+      "NormalizedCommand": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "usage_request_id",
+          "hold_id",
+          "evidence_kind",
+          "loss_review_id",
+          "reason_code"
+        ],
+        "properties": {
+          "usage_request_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "hold_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "evidence_kind": {
+            "const": "LOSS_REVIEW"
+          },
+          "loss_review_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "reason_code": {
+            "const": "MISSING_USAGE_SETTLEMENT"
+          }
+        }
+      },
+      "CriticalResourceVersions": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "hold_updated_at",
+          "loss_review_updated_at",
+          "facts_digest",
+          "policy_version"
+        ],
+        "properties": {
+          "hold_updated_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "loss_review_updated_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "facts_digest": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "policy_version": {
+            "const": 1
+          }
+        }
+      },
+      "FinancialSnapshot": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "expected_microcredits",
+          "settled_microcredits",
+          "settlement_microcredits",
+          "overage_microcredits",
+          "wallet_id",
+          "wallet_version",
+          "allocations_digest"
+        ],
+        "properties": {
+          "expected_microcredits": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0,
+            "maximum": 9223372036854775807
+          },
+          "settled_microcredits": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0,
+            "maximum": 9223372036854775807
+          },
+          "settlement_microcredits": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0,
+            "maximum": 9223372036854775807
+          },
+          "overage_microcredits": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0,
+            "maximum": 9223372036854775807
+          },
+          "wallet_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "wallet_version": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 1,
+            "maximum": 9223372036854775807
+          },
+          "allocations_digest": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          }
+        }
+      },
+      "PrecheckRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "command_type",
+          "target_resource_id",
+          "usage_request_id",
+          "loss_review_id",
+          "reason_code"
+        ],
+        "properties": {
+          "command_type": {
+            "const": "USAGE_SETTLEMENT_REPAIR"
+          },
+          "target_resource_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "usage_request_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "loss_review_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "reason_code": {
+            "const": "MISSING_USAGE_SETTLEMENT"
+          }
+        }
+      },
+      "PrecheckProjection": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "command_type",
+          "policy_version",
+          "snapshot_schema_version",
+          "target_resource_type",
+          "target_resource_id",
+          "normalized_command",
+          "critical_resource_versions",
+          "financial_snapshot"
+        ],
+        "properties": {
+          "command_type": {
+            "const": "USAGE_SETTLEMENT_REPAIR"
+          },
+          "policy_version": {
+            "const": 1
+          },
+          "snapshot_schema_version": {
+            "const": 1
+          },
+          "target_resource_type": {
+            "const": "USAGE_HOLD"
+          },
+          "target_resource_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "normalized_command": {
+            "$ref": "#/components/schemas/NormalizedCommand"
+          },
+          "critical_resource_versions": {
+            "$ref": "#/components/schemas/CriticalResourceVersions"
+          },
+          "financial_snapshot": {
+            "$ref": "#/components/schemas/FinancialSnapshot"
+          }
+        }
+      }
+    }
+  }
+}

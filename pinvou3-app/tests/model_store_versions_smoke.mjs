@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import react from '@vitejs/plugin-react';
-import puppeteer from 'puppeteer-core';
-import { createServer } from 'vite';
+import puppeteer from './helpers/puppeteer-fixture.mjs';
+import { createServer } from './helpers/vite-fixture.mjs';
+import { fixtureScope } from './helpers/fixture-scope.mjs';
 import { matchesViteModule } from './helpers/vite-fixture-module.mjs';
 import { exerciseLatestLinkedCleanup } from './helpers/model-store-cleanup-smoke.mjs';
 
@@ -15,14 +15,14 @@ const chrome = process.env.CHROME || [
   '/snap/bin/chromium',
 ].find((candidate) => fs.existsSync(candidate));
 assert.ok(chrome, 'Set CHROME to run the model versions browser regression');
-const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'pinvou-model-versions-'));
 let browser;
 let vite;
+let primaryFailure;
+let hasPrimaryFailure = false;
 try {
   vite = await createServer({
     root: path.join(appRoot, 'src'), configFile: false, appType: 'mpa', logLevel: 'error',
-    // Worktrees can share node_modules; optimizer caches must stay fixture-local.
-    cacheDir: path.join(profile, 'vite-cache'),
+    // The shared factory owns an isolated optimizer cache and loopback listener.
     plugins: [{
       name: 'model-versions-regression',
       enforce: 'pre',
@@ -51,7 +51,7 @@ try {
   });
   await vite.listen();
   browser = await puppeteer.launch({
-    executablePath: chrome, headless: true, userDataDir: profile,
+    executablePath: chrome, headless: true,
     args: ['--no-sandbox', '--disable-gpu', '--no-first-run'],
   });
   const page = await browser.newPage();
@@ -1090,8 +1090,21 @@ try {
   console.log('PASS: force-remove results survive navigation; closing one result preserves other unread cleanup paths');
   console.log('PASS: late context/key/link results cannot refresh another card, overwrite its busy state, or show stale toasts');
   console.log('PASS: version stage/delete/switch expose Close only after cancellation; cancellation never reports success and normal completion retains results and refreshes the library');
-} finally {
-  await browser?.close();
-  await vite?.close();
-  fs.rmSync(profile, { recursive: true, force: true });
+} catch (error) {
+  hasPrimaryFailure = true;
+  primaryFailure = error;
 }
+try {
+  // Close every registered resource before retiring any owned directory.
+  await fixtureScope.close();
+} catch (cleanupError) {
+  if (hasPrimaryFailure) {
+    throw new AggregateError(
+      [primaryFailure, cleanupError],
+      'Model-store smoke failed and fixture retirement was not confirmed',
+      { cause: cleanupError },
+    );
+  }
+  throw cleanupError;
+}
+if (hasPrimaryFailure) throw primaryFailure;

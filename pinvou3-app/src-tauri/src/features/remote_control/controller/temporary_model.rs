@@ -851,7 +851,7 @@ impl ExportDecision {
 /// subscription login or a pending credential edit are refused, and the
 /// `credential_ref` itself is never transported.
 pub(crate) fn export_decision(model: &SavedModel) -> ExportDecision {
-    if model.is_builtin_llmapi() {
+    if model.is_builtin_account_platform() {
         return ExportDecision::refused("model_not_exportable_builtin");
     }
     if model
@@ -1715,7 +1715,7 @@ mod tests {
         assert_eq!(route.secret.expose(), "sk-a-secret-value");
 
         let mut builtin = saved_model();
-        builtin.id = crate::platform::prefs::BUILTIN_LLMAPI_MODEL_ID.to_owned();
+        builtin.id = crate::platform::prefs::BUILTIN_ACCOUNT_PLATFORM_MODEL_ID.to_owned();
         assert_eq!(
             export_decision(&builtin).reason,
             Some("model_not_exportable_builtin")

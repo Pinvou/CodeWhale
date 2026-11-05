@@ -31,7 +31,7 @@ async fn remote_send_joint_preparation_and_reserved_dispatch_freeze_credentials_
     // Pin the global route in this isolated home so the ordinary remote leg
     // cannot probe an unrelated service on the default localhost endpoint.
     let mut prefs = UserPrefs::default();
-    let mut model = SavedModel::builtin_llmapi();
+    let mut model = SavedModel::builtin_account_platform();
     model.id = "fixture-global-model".into();
     model.model = "fixture-global-wire".into();
     model.preset = crate::platform::prefs::ModelPreset::Deepseek;
@@ -48,7 +48,7 @@ async fn remote_send_joint_preparation_and_reserved_dispatch_freeze_credentials_
             ("remote-caller", false, true),
             ("aux-remote-joint", false, false),
         ] {
-            let mut model = SavedModel::builtin_llmapi();
+            let mut model = SavedModel::builtin_account_platform();
             model.preset = crate::platform::prefs::ModelPreset::Deepseek;
             model.id = "fixture-task-model".into();
             model.model = "fixture-task-wire".into();
@@ -98,10 +98,11 @@ async fn remote_send_joint_preparation_and_reserved_dispatch_freeze_credentials_
                         store_ref,
                         &JointRuntimeProvider,
                         &credentials,
-                        Pinvou3Bridge::test_fixture(Some(SavedModel::builtin_llmapi())),
+                        Pinvou3Bridge::test_fixture(Some(SavedModel::builtin_account_platform())),
                         session_id,
                         false,
                         RuntimeModelOverrides {
+                            auxiliary: None,
                             freeze_remote_credentials: options.policy.require_model_credentials,
                             explicit_model: options.model,
                             explicit_credential: options.credential,
@@ -283,7 +284,7 @@ impl TestHome {
         &self,
         snapshot: Arc<RemoteTurnSkills>,
     ) -> (AppEngine, tokio::sync::mpsc::Receiver<Op>) {
-        let mut bridge = Pinvou3Bridge::test_fixture(Some(SavedModel::builtin_llmapi()));
+        let mut bridge = Pinvou3Bridge::test_fixture(Some(SavedModel::builtin_account_platform()));
         bridge.workspace = self.directory.path().to_path_buf();
         bridge.runtime_model_credential_frozen = true;
         bridge.remote_turn_skills = Some(snapshot);
@@ -331,7 +332,7 @@ fn entry(engine: AppEngine, forwarder: JoinHandle<()>, owner: Arc<RemoteTurnOwne
         engine,
         forwarder,
         runtime_model: PreparedRuntimeState::new(
-            PreparedRuntimeModel::unchanged(SavedModel::builtin_llmapi()),
+            PreparedRuntimeModel::unchanged(SavedModel::builtin_account_platform()),
             true,
             0,
         ),
@@ -885,7 +886,7 @@ pub(in crate::features::assistant) mod panic_owner_fixture {
             // the actual lifecycle here and commit it through the production
             // AppEngine sender, so unwind cannot pass via unsubmitted Drop.
             let reservation = self.lifecycle.reserve().unwrap();
-            let mut model = SavedModel::builtin_llmapi();
+            let mut model = SavedModel::builtin_account_platform();
             model.preset = crate::platform::prefs::ModelPreset::Deepseek;
             model.id = "panic-owner-model".into();
             model.model = "panic-owner-wire".into();
@@ -919,10 +920,11 @@ pub(in crate::features::assistant) mod panic_owner_fixture {
                         &self.store,
                         &JointRuntimeProvider,
                         &credentials,
-                        Pinvou3Bridge::test_fixture(Some(SavedModel::builtin_llmapi())),
+                        Pinvou3Bridge::test_fixture(Some(SavedModel::builtin_account_platform())),
                         session_id,
                         false,
                         RuntimeModelOverrides {
+                            auxiliary: None,
                             freeze_remote_credentials: options.policy.require_model_credentials,
                             explicit_model: options.model,
                             explicit_credential: options.credential,

@@ -25,6 +25,7 @@ const read = (...parts) => fs.readFileSync(path.join(appRoot, ...parts), 'utf8')
 
 const DIALOG = read('src', 'features', 'projects', 'RebindFolderDialog.jsx');
 const MAIN = read('src', 'app', 'main.jsx');
+const ACTION = read('src', 'features', 'projects', 'rebind-workspace-action.js');
 const BRIDGE = read('src', 'platform', 'tauri', 'bridge', 'projects.js');
 
 test('rebind dialog participates in the browser-surface suspend protocol', () => {
@@ -110,7 +111,7 @@ test('backdrop close requires both halves of the press', () => {
 
 test('the retry feeds the previous post-busy ids back to the backend', () => {
   assert.match(
-    MAIN,
+    ACTION,
     /const previousPostBusySessionIds = \(rebindDraft\.partial && rebindDraft\.partial\.postBusyIds\) \|\| \[\]/,
     'the dialog must carry its previous report into the next run',
   );
@@ -175,7 +176,7 @@ test('the strong-confirm flag and the stay-open gate survive refactors', () => {
   // every later attempt.
   assert.match(
     DIALOG,
-    /onClick=\{\(\) => onConfirm\(!!warnExisting\)\}/,
+    /onClick=\{\(\) => onConfirm\(!!warnExisting, runRebindWorkspace\)\}/,
     'the confirm button must forward the strong-confirm flag, not a constant',
   );
   // review #463 round-17 SF-8: the former `!{0,2}` also matched
@@ -183,14 +184,14 @@ test('the strong-confirm flag and the stay-open gate survive refactors', () => {
   // strong-confirm handshake. Only the exact double-bang form is accepted.
   assert.doesNotMatch(
     DIALOG,
-    /onClick=\{\(\) => onConfirm\(!warnExisting\)\}/,
+    /onClick=\{\(\) => onConfirm\(!warnExisting, runRebindWorkspace\)\}/,
     'a single-bang forward silently inverts the strong-confirm handshake',
   );
   // round-17 SF-4: warnExisting is consumed only when the run proceeded past
   // the old-root check (post-fence copy kinds); pre-fence kinds and raw
   // errors keep the flag.
   assert.match(
-    MAIN,
+    ACTION,
     /warnExisting: classified\.passedFence \? false : prev\.warnExisting/,
     'a copy-kind failure must clear the strong-confirm flag only past the fence',
   );
@@ -199,21 +200,21 @@ test('the strong-confirm flag and the stay-open gate survive refactors', () => {
   // Deleting it breaks the handshake while the !!warnExisting pin above
   // stays green.
   assert.match(
-    MAIN,
+    ACTION,
     /\{ \.\.\.prev, warnExisting: true, error: null \}/,
     'an old-root-exists rejection must escalate to the strong-confirm flag',
   );
   // round-18 test-strength: ALL THREE error arms must route the roots-error
   // carryover through the union — deleting any single arm's spread passed
   // the suite before.
-  const unionArms = (MAIN.match(/carryoverPartial \? \{ partial: carryoverPartial\(prev\) \} : \{\}/g) || []).length;
+  const unionArms = (ACTION.match(/carryoverPartial \? \{ partial: carryoverPartial\(prev\) \} : \{\}/g) || []).length;
   assert.ok(
     unionArms >= 3,
     `the busy/copy/raw arms must all feed the carryover union (found ${unionArms})`,
   );
   assert.doesNotMatch(
     DIALOG,
-    /onClick=\{\(\) => onConfirm\(true\)\}/,
+    /onClick=\{\(\) => onConfirm\(true, runRebindWorkspace\)\}/,
     'the strong confirm must never degrade to an unconditional true',
   );
   // The dialog must stay open whenever the report still carries work — failed
@@ -221,7 +222,7 @@ test('the strong-confirm flag and the stay-open gate survive refactors', () => {
   // Dropping `postBusy > 0` closes the only retry entry while an old-cwd
   // runtime stays resident (round-8 MAJOR-2).
   assert.match(
-    MAIN,
+    ACTION,
     /if \(failed > 0 \|\| postBusy > 0\) \{/,
     'the stay-open gate must cover the post-busy state, not just failures',
   );
