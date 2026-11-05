@@ -50,6 +50,14 @@ pub fn sanitize(schema: &mut Value) {
 /// the tool description so the model knows not to send them. Returns `true`
 /// only when every tool in the set can use strict mode.
 ///
+/// Incompatible includes schemas the documented strict subset cannot
+/// represent faithfully: root alternatives, and required nullables (`nullable`
+/// or a null-type union branch — `sanitize` collapses the common `X | null`
+/// union into `nullable: true`, so the keyword is how a required nullable
+/// survives to the gate). Such a tool keeps its original schema and ships
+/// non-strict rather than carrying an undocumented keyword under a strict
+/// flag.
+///
 /// Callers gate this pipeline on official DeepSeek-family routes
 /// (`crate::config::route_is_official_deepseek_family`): the reshaping
 /// follows DeepSeek's strict-mode documents and would strip keywords other
@@ -164,10 +172,29 @@ fn has_strict_incompatible_composition(schema: &Value, is_root: bool) -> bool {
         if obj.contains_key("oneOf")
             || obj.contains_key("allOf")
             || obj.contains_key("dependentSchemas")
+            // `nullable` is outside the documented strict subset — the
+            // supported-type list has no null and the documents never
+            // mention the keyword. `sanitize` collapses the common
+            // `X | null` union into `nullable: true`, so by the time a
+            // schema reaches here the keyword is the surviving shape of a
+            // required nullable; such a tool falls back to non-strict
+            // instead of shipping an undocumented keyword under a strict
+            // flag.
+            || obj.contains_key("nullable")
         {
             return true;
         }
         if is_root && obj.contains_key("anyOf") {
+            return true;
+        }
+        // A union that still carries a null branch after the collapse pass
+        // (three or more alternatives) has the same undocumented-null
+        // problem.
+        if obj
+            .get("anyOf")
+            .and_then(Value::as_array)
+            .is_some_and(|branches| branches.iter().any(is_null_type))
+        {
             return true;
         }
         return obj
@@ -321,8 +348,27 @@ fn enforce_strict_subset(schema: &mut Value, removed_optionals: &mut Vec<String>
             obj.insert("additionalProperties".into(), Value::Bool(false));
         }
 
-        for value in obj.values_mut() {
-            enforce_strict_subset(value, removed_optionals);
+        // Recurse into sub-schemas, but never into the map-shaped values
+        // that hold named schemas or literal values. Walking those as if
+        // they were schemas applied the keyword strips and the object rules
+        // to property/definition NAMES: a tool with a property named
+        // `const`, `properties`, or `patternProperties` came out corrupted
+        // (renamed, erased, or dangling in `required`) while marked strict.
+        // Property and definition schemas are visited through their name
+        // maps, and the literal keywords are left alone — their members are
+        // values, not schemas.
+        for (key, value) in obj.iter_mut() {
+            match key.as_str() {
+                "properties" | "$defs" | "definitions" => {
+                    if let Some(named_schemas) = value.as_object_mut() {
+                        for named_schema in named_schemas.values_mut() {
+                            enforce_strict_subset(named_schema, removed_optionals);
+                        }
+                    }
+                }
+                "enum" | "const" | "default" | "examples" => {}
+                _ => enforce_strict_subset(value, removed_optionals),
+            }
         }
     } else if let Some(arr) = schema.as_array_mut() {
         for value in arr {
@@ -333,6 +379,9 @@ fn enforce_strict_subset(schema: &mut Value, removed_optionals: &mut Vec<String>
 
 fn strip_unsupported_strict_keywords(obj: &mut Map<String, Value>) {
     obj.remove("patternProperties");
+    // Conditional dependency tables are likewise outside the documented
+    // strict subset; dropping one only widens what the endpoint accepts.
+    obj.remove("dependentRequired");
     // The strict documents support `const` for number/integer schemas only.
     // A non-numeric const moves onto the documented `enum` keyword with its
     // value as the single member; a numeric const stays put, and a non-numeric
@@ -1082,6 +1131,223 @@ mod tests {
             "the note names the removed optional: {}",
             tools[0].description
         );
+    }
+
+    #[test]
+    fn strict_mode_fails_closed_on_required_nullable_unions() {
+        // `nullable` is outside the documented strict subset (the supported
+        // type list has no null and the documents never mention the keyword),
+        // and `sanitize` collapses the common `X | null` union into
+        // `nullable: true`. A schema that still carries the keyword after
+        // that collapse — i.e. a required nullable — cannot be represented
+        // faithfully under a strict flag, so the tool ships unchanged and
+        // non-strict instead of inviting the server 400 the pipeline exists
+        // to prevent.
+        let mut tools = vec![Tool {
+            tool_type: None,
+            name: "search".to_string(),
+            description: "Search".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string"},
+                    "mode": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+                    "limit": {
+                        "anyOf": [
+                            {"type": "integer"},
+                            {"type": "string"},
+                            {"type": "null"}
+                        ]
+                    }
+                },
+                "required": ["query", "mode", "limit"]
+            }),
+            allowed_callers: None,
+            defer_loading: None,
+            input_examples: None,
+            strict: None,
+            cache_control: None,
+        }];
+
+        assert!(!prepare_tools_for_strict_mode(&mut tools));
+        assert_eq!(tools[0].strict, None);
+        assert_eq!(tools[0].description, "Search");
+        assert_eq!(
+            tools[0].input_schema["properties"]["mode"]["anyOf"],
+            json!([{"type": "string"}, {"type": "null"}])
+        );
+        assert_eq!(
+            tools[0].input_schema["properties"]["limit"]["anyOf"],
+            json!([
+                {"type": "integer"},
+                {"type": "string"},
+                {"type": "null"}
+            ])
+        );
+        assert_eq!(
+            tools[0].input_schema["required"],
+            json!(["query", "mode", "limit"])
+        );
+    }
+
+    #[test]
+    fn strict_sanitize_keeps_properties_named_after_schema_keywords_intact() {
+        // The recursion must treat the `properties` value as a name map, not
+        // as a schema: walking it as a schema applied the keyword strips and
+        // the object rules to property NAMES, renaming a required `const`
+        // property to `enum`, erasing a `properties` property's schema, and
+        // dangling `patternProperties` in `required` — all while marking the
+        // tool strict. Required keyword-named properties survive intact; the
+        // strict object rules land on the tool schema and on each property's
+        // own sub-schema, never on the name map.
+        let mut schema = json!({
+            "type": "object",
+            "properties": {
+                "const": {"type": "string"},
+                "properties": {"type": "object"},
+                "patternProperties": {"type": "object"},
+                "type": {"type": "string"}
+            },
+            "required": ["const", "patternProperties", "properties", "type"]
+        });
+
+        let removed = sanitize_for_strict(&mut schema);
+
+        assert!(removed.is_empty());
+        assert_eq!(schema["properties"]["const"], json!({"type": "string"}));
+        assert_eq!(schema["properties"]["type"], json!({"type": "string"}));
+        assert_eq!(
+            schema["properties"]["properties"]["type"],
+            json!("object"),
+            "the property's own schema keeps its type keyword"
+        );
+        assert_eq!(
+            schema["properties"]["properties"]["additionalProperties"], false,
+            "the strict object rules apply to the property schema itself"
+        );
+        assert_eq!(
+            schema["properties"]["patternProperties"]["type"],
+            json!("object")
+        );
+        assert_eq!(
+            schema["required"],
+            json!(["const", "patternProperties", "properties", "type"])
+        );
+        assert_eq!(schema["additionalProperties"], false);
+        assert!(
+            schema["properties"].get("required").is_none()
+                && schema["properties"].get("additionalProperties").is_none(),
+            "the name map gains no spurious schema keys: {schema}"
+        );
+    }
+
+    #[test]
+    fn strict_sanitize_reports_an_optional_property_named_properties() {
+        // An optional keyword-named property is removed and reported like any
+        // other optional, and the name map stays clean.
+        let mut schema = json!({
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"},
+                "properties": {"type": "object"}
+            },
+            "required": ["query"]
+        });
+
+        let removed = sanitize_for_strict(&mut schema);
+
+        assert_eq!(removed, vec!["properties".to_string()]);
+        assert!(schema["properties"].get("properties").is_none());
+        assert_eq!(schema["properties"]["query"], json!({"type": "string"}));
+        assert_eq!(schema["required"], json!(["query"]));
+        assert!(schema["properties"].get("required").is_none());
+    }
+
+    #[test]
+    fn strict_sanitize_walks_schemas_but_never_name_maps_or_literals() {
+        // `$defs` entries are schemas and keep getting the strict rules, but
+        // a definition named after a keyword must not corrupt the map, and
+        // `enum`/`default` members are values, not schemas — they ship
+        // verbatim.
+        let mut schema = json!({
+            "type": "object",
+            "properties": {
+                "mode": {
+                    "type": "string",
+                    "enum": [
+                        {"type": "object", "properties": {"a": {"type": "string"}}}
+                    ],
+                    "default": {"const": 1}
+                }
+            },
+            "required": ["mode"],
+            "$defs": {
+                "properties": {"type": "string"},
+                "span": {
+                    "type": "object",
+                    "properties": {"b": {"type": "integer"}},
+                    "required": ["b"]
+                }
+            }
+        });
+
+        let removed = sanitize_for_strict(&mut schema);
+
+        assert!(removed.is_empty());
+        assert_eq!(
+            schema["properties"]["mode"]["enum"],
+            json!([{"type": "object", "properties": {"a": {"type": "string"}}}])
+        );
+        assert_eq!(schema["properties"]["mode"]["default"], json!({"const": 1}));
+        assert_eq!(schema["$defs"]["properties"], json!({"type": "string"}));
+        assert_eq!(schema["$defs"]["span"]["additionalProperties"], false);
+        assert_eq!(schema["$defs"]["span"]["required"], json!(["b"]));
+    }
+
+    #[test]
+    fn strict_sanitize_strips_dependent_required_tables() {
+        // Conditional dependency tables are outside the documented strict
+        // subset; stripping one only widens what the endpoint accepts, the
+        // same treatment as `patternProperties` and the length bounds.
+        let mut schema = json!({
+            "type": "object",
+            "properties": {
+                "a": {"type": "string"},
+                "b": {"type": "string"}
+            },
+            "required": ["a"],
+            "dependentRequired": {"a": ["b"]}
+        });
+
+        let removed = sanitize_for_strict(&mut schema);
+
+        assert_eq!(removed, vec!["b".to_string()]);
+        assert!(schema.get("dependentRequired").is_none());
+        assert_eq!(schema["required"], json!(["a"]));
+    }
+
+    #[test]
+    fn strict_sanitize_dedupes_optionals_shared_across_levels() {
+        // The same optional name at two levels is reported once.
+        let mut schema = json!({
+            "type": "object",
+            "properties": {
+                "trim": {"type": "boolean"},
+                "outer": {
+                    "type": "object",
+                    "properties": {
+                        "trim": {"type": "boolean"},
+                        "alpha": {"type": "string"}
+                    },
+                    "required": ["alpha"]
+                }
+            },
+            "required": ["outer"]
+        });
+
+        let removed = sanitize_for_strict(&mut schema);
+
+        assert_eq!(removed, vec!["trim".to_string()]);
     }
 
     #[test]
