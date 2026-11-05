@@ -375,9 +375,18 @@ test('production Helm requires explicit operator on-call users instead of inheri
     f.rerender();
     const result = checkProductionBusiness(f.render, f.inventory);
     assert.equal(result.decision, 'BUSINESS_CONFIG_VALID');
-    const configured = workloads(f.render, f.render.secrets)
-      .filter(w => w.environment.MANUAL_REVIEW_ON_CALL_USER_IDS !== undefined);
-    assert.ok(configured.length > 0);
-    for (const w of configured) assert.equal(w.environment.MANUAL_REVIEW_ON_CALL_USER_IDS, explicit.join(','));
+    const configured = workloads(f.render, f.render.secrets);
+    for (const [service, sourceFile] of [
+      ['account-service', 'account-service/approval_runtime.go'],
+      ['billing-service', 'billing-service/main.go'],
+      ['token-gateway', 'token-gateway/personal_execution.go'],
+    ]) {
+      const source = readFileSync(new URL(`../../cmd/${sourceFile}`, import.meta.url), 'utf8');
+      const consumers = [...source.matchAll(/^\s*\w+,\s*err\s*:=\s*manualreview\.ParseOnCallSchedule\(os\.Getenv\("([A-Z_]+)"\)/gm)];
+      assert.equal(consumers.length, 1, `${service} must retain its on-call schedule consumer`);
+      const workload = configured.find(w => w.service.name === service);
+      assert.ok(workload, `${service} must be rendered`);
+      assert.equal(workload.environment[consumers[0][1]], explicit.join(','), `${service} must receive the on-call variable it reads`);
+    }
   } finally { f.dispose(); }
 });
