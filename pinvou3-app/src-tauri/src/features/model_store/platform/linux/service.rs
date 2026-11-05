@@ -889,6 +889,57 @@ pub(crate) fn installed_weight_candidate_names_checked() -> Result<Vec<String>, 
     Ok(out)
 }
 
+/// 官方卡片下载脚本「就地发现」原始模型目录所用的标记文件名全集。
+///
+/// 证据（脚本正文以商店/仓库下发件为准）：
+/// - 正式 Z-Image-Turbo 卡 `download_model.sh`：在扫描根里
+///   `find … -maxdepth 4 -type f -name "model_index.json"` 发现原目录，
+///   校验完整性（vae 权重 + 两处分片索引的 weight_map 全存在）后
+///   `ln -s <原目录> $LMM_MODELS_DIR/Z-Image-Turbo`——原目录名是用户自取的，
+///   不必匹配任何约定名（2026-11-05 评审 P2 zhuowp 场景）。
+/// - 内置测试商店 ornith15-bf16 / qwen38-27b-nvfp4-mtp 的
+///   `download_model.sh`：同一套查找-链接写法，标记文件是
+///   `model.safetensors.index.json`。
+///
+/// 因此在册卡片可能通过软链引用任意名字的原始目录，设备侧删除守卫在
+/// 无法确认归属时按标记文件拦截（见
+/// [`installed_import_markers_checked`]）。新卡片引入新标记时必须回到这里
+/// 登记显式清单（external_models.rs 的拒绝文案也逐一列了标记名，需同步）——
+/// 不从脚本正文现解析（对任意卡片脚本做正则提取会漏，
+/// 漏掉就是静默盲区，恰是这轮要堵死的那类洞）。
+const INSTALL_IMPORT_DISCOVERY_MARKERS: [&str; 2] =
+    ["model_index.json", "model.safetensors.index.json"];
+
+/// 设备管理删除守卫的「在册卡片就地导入原目录标记文件」集合（可失败版）。
+///
+/// 前两臂（[`installed_weight_paths_checked`] 按「已知根 × 约定名」恢复引用、
+/// [`installed_weight_candidate_names_checked`] 按名字兜底零痕迹旧根）都依赖
+/// 原目录名可推导；zhuowp 场景（2026-11-05 评审 P2）里原目录名是用户自取的，
+/// 两臂都失明。本函数换一条腿：官方脚本是**按标记文件**发现原目录的，删除
+/// 目标（含一级子目录）出现标记文件即说明它可能是某张在册卡片的就地导入
+/// 原目录——归属无法确认，设备侧按 fail-closed 拦截。
+///
+/// 空库返回空集合（没有任何在册卡片就没有任何未跟踪引用的可能，该臂关闭）；
+/// 有在册卡片时返回 [`INSTALL_IMPORT_DISCOVERY_MARKERS`] 全集。
+///
+/// 误拦面（如实披露）：装有任意在册卡片期间，用户自备的 diffusers / 分片
+/// safetensors 目录（叶子或一级子目录含标记文件）同样会被拦——这类目录与
+/// 在册卡片的原目录无法区分。解除方式：卸载对应卡片后本臂自动关闭，或按
+/// 守卫提示手工删除注册表记录后径直处理目录。
+///
+/// fail-closed：DB 读不了 → Err（与 installed_weight_paths_checked 同口径，
+/// 破坏性移除路径不得当未命中放行）。
+pub(crate) fn installed_import_markers_checked() -> Result<Vec<String>, String> {
+    let records = db::list_store_models().map_err(|e| format!("读取在册模型失败：{e}"))?;
+    if records.is_empty() {
+        return Ok(Vec::new());
+    }
+    Ok(INSTALL_IMPORT_DISCOVERY_MARKERS
+        .iter()
+        .map(|m| (*m).to_string())
+        .collect())
+}
+
 pub fn storage_settings() -> Result<Value, String> {
     let settings = config::load_settings();
     let models_dir = settings.models_path();
@@ -1343,6 +1394,51 @@ mod tests {
             "candidates under the historical models_dir root must still be recovered, got {refs:?}"
         );
         let _ = old_models_dir;
+    }
+
+    // 2026-11-05 评审 P2 zhuowp 场景 II：官方卡片脚本按标记文件就地发现用户
+    // 自取名的原目录，删除守卫在「目标含标记 + 仍有在册卡片」时拦。标记集合
+    // 必须由在册卡片开闸：空库 → 空集合（本臂关闭），有在册卡片 → 全集。
+    #[test]
+    fn installed_import_markers_gate_on_registered_cards() {
+        use crate::features::model_store::platform::linux::db;
+
+        let ctx = super::config::TempHome::new();
+        db::init_db().expect("init store db");
+        // 空库 → 空集合：没有任何在册卡片就没有未跟踪原目录引用的可能。
+        let empty = crate::features::model_store::installed_import_markers_checked()
+            .expect("empty store enumerates");
+        assert!(empty.is_empty(), "got {empty:?}");
+
+        db::add_store_model(db::AddStoreModelParams {
+            card_id: "c-markers-1",
+            model_name: "m",
+            card_name: "c-markers-1",
+            org: None,
+            description: None,
+            engine_name: "e",
+            engine_version: None,
+            size_bytes: 0,
+            quantization: None,
+            source_repo_id: Some("Tongyi-MAI/Z-Image-Turbo"),
+            source_filename: None,
+            scripts: &std::collections::BTreeMap::new(),
+            status: "downloaded",
+            profiles: &[],
+            deploy_topology: crate::features::model_store::platform::linux::store_client::DeployTopology::default(),
+            card_source: "store",
+        })
+        .expect("insert downloaded model");
+        let markers = crate::features::model_store::installed_import_markers_checked()
+            .expect("markers with a registered card");
+        assert!(
+            markers.contains(&"model_index.json".to_string()),
+            "official z-image-turbo discovery marker must be listed, got {markers:?}"
+        );
+        assert!(
+            markers.contains(&"model.safetensors.index.json".to_string()),
+            "builtin ornith15/qwen38 discovery marker must be listed, got {markers:?}"
+        );
     }
 
     #[test]

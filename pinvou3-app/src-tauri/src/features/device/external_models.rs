@@ -1012,12 +1012,25 @@ pub async fn remove_external_model(
                 Some(weights) => target_matches_candidate_names(Path::new(weights), &candidate_names),
                 None => false,
             };
+            // 自取名原目录标记臂（2026-11-05 评审 P2 zhuowp 场景 II）：官方
+            // 下载脚本按标记文件（model_index.json 等）在扫描根里发现原始模型
+            // 目录再软链——原目录名是用户自取的，名字臂与路径臂都匹配不上。
+            // 目标（含一级子目录）出现标记文件 + 本机仍有在册卡片 = 无法确认
+            // 它不是在册卡片的就地导入原目录，fail-closed 拦截。误拦面与解除
+            // 方式见 installed_import_markers_checked 的文档。
+            let import_markers =
+                crate::features::model_store::installed_import_markers_checked()?;
+            let installed_marker_hit = match weights_path.as_deref() {
+                Some(weights) => target_contains_import_marker(Path::new(weights), &import_markers),
+                None => false,
+            };
             Ok((
                 name_hit,
                 ollama_model_hit,
                 weights_hit,
                 installed_weight_hit,
                 installed_name_hit,
+                installed_marker_hit,
             ))
         }
     })
@@ -1029,14 +1042,21 @@ pub async fn remove_external_model(
         // "稍后重试"是死路，记录会从 UI 永远删不掉。
         format!("{error}；为防误删商店管理的模型，本次移除已被拒绝，请稍后重试{STORE_BOUNDARY_ESCAPE_HINT}")
     })?;
-    let (name_hit, ollama_model_hit, weights_hit, installed_weight_hit, installed_name_hit) =
-        boundary;
+    let (
+        name_hit,
+        ollama_model_hit,
+        weights_hit,
+        installed_weight_hit,
+        installed_name_hit,
+        installed_marker_hit,
+    ) = boundary;
     removal_boundary_error(
         &record.name,
         &confirm_name,
         weights_hit,
         installed_weight_hit,
         installed_name_hit,
+        installed_marker_hit,
         name_hit.as_deref(),
         ollama_model_hit.as_deref(),
     )?;
@@ -1173,6 +1193,17 @@ pub async fn remove_external_model(
                                         )
                                     })?;
                             ensure_recheck_not_candidate_named(&recheck, &candidate_names)?;
+                            // 自取名原目录标记删除时刻复查（2026-11-05 评审 P2
+                            // zhuowp 场景 II）：与边界闭包的标记判定镜像同一
+                            // 口径，查询失败按拒绝（fail-closed 同口径）。
+                            let import_markers =
+                                crate::features::model_store::installed_import_markers_checked()
+                                    .map_err(|error| {
+                                        format!(
+                                            "拒绝删除：在册卡片导入标记读取失败（{error}），为防误删已拒绝"
+                                        )
+                                    })?;
+                            ensure_recheck_free_of_import_markers(&recheck, &import_markers)?;
                             // 并发移除兜底：另一窗口/通道已把目录删掉时
                             // remove_dir_all 报 NotFound——与存在性预检的
                             // Ok(None) 同口径按"已删除"收敛，不报误导性的
@@ -1260,14 +1291,16 @@ pub async fn remove_external_model(
 /// 守卫 1 + 守卫 2 的纯逻辑（测试矩阵直打）：确认名一致 → 名字未由商店管理 →
 /// Ollama 有效删除名未由商店管理（别名记录不许把商店模型从守护进程里删掉）→
 /// 权重不在任一商店权重根之下 → 与在册卡片引用路径不相交 → 目录名不在零痕迹
-/// 旧根名字臂命中。商店名单/权重根/引用路径/约定名的查询结果由调用方先在
-/// blocking 池算好传入，这里保持纯计算、可测试矩阵直打。
+/// 旧根名字臂命中 → 目录（含一级子目录）不含在册卡片就地导入标记文件。商店
+/// 名单/权重根/引用路径/约定名/标记文件的查询结果由调用方先在 blocking 池
+/// 算好传入，这里保持纯计算、可测试矩阵直打。
 fn removal_boundary_error(
     record_name: &str,
     confirm_name: &str,
     weights_in_store: bool,
     installed_weight_hit: bool,
     installed_name_hit: bool,
+    installed_marker_hit: bool,
     store_name_hit: Option<&str>,
     ollama_model_store_hit: Option<&str>,
 ) -> Result<(), String> {
@@ -1313,6 +1346,16 @@ fn removal_boundary_error(
         // 在册卡片约定同名时无法确认归属，拦住删除（宁可误拒，不误删）。
         return Err(format!(
             "该目录名与在册商店卡片的权重目录约定同名，且不在任何已知商店根之下，无法确认它不是仍被引用的原始权重（旧版本自定义权重根不留痕），删除可能破坏仍在使用的商店模型，请在模型商店中操作{STORE_BOUNDARY_ESCAPE_HINT}"
+        ));
+    }
+    if installed_marker_hit {
+        // 自取名原目录标记臂（2026-11-05 评审 P2 zhuowp 场景 II）：官方卡片
+        // 下载脚本按标记文件发现原始模型目录再软链，原目录名用户自取——上面
+        // 名字臂/路径臂对它失明。标记文件 + 在册卡片同时成立即说明归属无法
+        // 确认，宁可误拒不误删。误拦面（用户自备 diffusers 目录在装卡期间同
+        // 样命中）与解除方式（卸载卡片后本臂自动关闭）如实写进文案。
+        return Err(format!(
+            "该目录（或其一级子目录）含有商店卡片下载脚本就地发现模型所用的标记文件（model_index.json / model.safetensors.index.json），且本机仍有在册商店卡片——无法确认它不是在册卡片软链引用的原始权重目录（旧版本自定义权重根不留痕），删除可能破坏仍在使用的商店模型。请先在模型商店卸载对应卡片（本臂随之放行），或确认该目录与商店无关后移除本记录{STORE_BOUNDARY_ESCAPE_HINT}"
         ));
     }
     Ok(())
@@ -1668,6 +1711,47 @@ fn target_matches_candidate_names(target: &Path, names: &[String]) -> bool {
     }
     // 父删：目标是权重目录的父目录，其下一级就是约定名目录。
     names.iter().any(|name| target.join(name).exists())
+}
+
+/// 自取名原目录标记判定（存在性探测，测试直打）：目标本身或其一级子目录里
+/// 是否存在官方卡片下载脚本「就地发现」所用的标记文件。
+///
+/// 两级口径与 [`target_matches_candidate_names`] 的「叶删/父删」同一形状：
+/// - 叶删：目标就是原目录（官方脚本发现的正是含标记文件的那一层）；
+/// - 父删：目标是原目录的父目录（递归删除一级子目录同样毁掉原目录）。
+/// 更深的祖先不查：脚本在扫描根下最多 `find -maxdepth 4`，逐层外推会让拦截
+/// 半径失去边界（删 ~/Downloads 也要被拦）。
+///
+/// 标记按 `is_file()` 判定（与脚本的 `find -type f` 同口径），同名目录不算；
+/// 目标不存在/读不了（read_dir Err）按未命中放行——目录不存在时后续删除
+/// 路径本就会按"已删除"收敛，读不了时 remove_dir_all 也会失败，都不产生
+/// 破坏窗口。标记集合为空（没有在册卡片）恒不命中。
+fn target_contains_import_marker(target: &Path, markers: &[String]) -> bool {
+    if markers.is_empty() {
+        return false;
+    }
+    let has_marker = |dir: &Path| markers.iter().any(|m| dir.join(m).is_file());
+    if has_marker(target) {
+        return true;
+    }
+    let Ok(entries) = std::fs::read_dir(target) else {
+        return false;
+    };
+    entries.flatten().any(|entry| {
+        entry.file_type().map(|t| t.is_dir()).unwrap_or(false) && has_marker(&entry.path())
+    })
+}
+
+/// 删除时刻的自取名原目录标记复查（纯函数 + 存在性探测，测试直打）：与边界
+/// 闭包的标记判定镜像同一口径（[`target_contains_import_marker`]），收窄
+/// 「守卫时刻判断正确、删除时刻目录已被换成原目录形状」的窗口。
+fn ensure_recheck_free_of_import_markers(recheck: &Path, markers: &[String]) -> Result<(), String> {
+    if target_contains_import_marker(recheck, markers) {
+        return Err(
+            "拒绝删除：目标目录（或其一级子目录）含有商店卡片就地发现模型所用的标记文件，无法确认它不是在册卡片软链引用的原始权重目录，为防误删已拒绝".to_string(),
+        );
+    }
+    Ok(())
 }
 
 /// 删除时刻的零痕迹旧根名字复查（纯函数 + 存在性探测，测试直打）：与边界
@@ -2257,6 +2341,83 @@ mod tests {
         assert!(ensure_recheck_not_candidate_named(&unrelated, &names).is_ok());
     }
 
+    // 2026-11-05 评审 P2 zhuowp 场景 II：官方卡片下载脚本按标记文件
+    // （model_index.json / model.safetensors.index.json）就地发现用户自取名
+    // 的原始模型目录再软链——名字臂/路径臂对这种原目录失明。目标含标记文件
+    // 且仍有在册卡片时必须拦（归属无法确认），删光在册卡片后自动放行。
+    #[test]
+    fn import_marker_detection_matches_leaf_and_first_level_only() {
+        let dir = TempDir::new("import-markers");
+        let root = dir.path();
+
+        // 叶删：目标就是原目录（Z-Image-Turbo 官方脚本的发现层）。
+        let leaf = root.join("my-zimage-ckpt");
+        std::fs::create_dir_all(&leaf).unwrap();
+        std::fs::write(leaf.join("model_index.json"), "{}").unwrap();
+        let markers = [
+            "model_index.json".to_string(),
+            "model.safetensors.index.json".to_string(),
+        ];
+        assert!(target_contains_import_marker(&leaf, &markers));
+
+        // 叶删（第二个标记）：内置 ornith15/qwen38 卡的发现层。
+        let sharded = root.join("qwen-weights");
+        std::fs::create_dir_all(&sharded).unwrap();
+        std::fs::write(sharded.join("model.safetensors.index.json"), "{}").unwrap();
+        assert!(target_contains_import_marker(&sharded, &markers));
+
+        // 父删：目标是原目录的父目录，一级子目录含标记。
+        let parent = root.join("downloads-bundle");
+        std::fs::create_dir_all(parent.join("inside-model")).unwrap();
+        std::fs::write(parent.join("inside-model").join("model_index.json"), "{}").unwrap();
+        assert!(target_contains_import_marker(&parent, &markers));
+
+        // 两级以下不查：删 ~/Downloads 这种上层容器不该被标记臂拦（脚本
+        // find -maxdepth 4 的逐层外推没有边界）。
+        let deep = root.join("deep");
+        std::fs::create_dir_all(deep.join("a").join("b")).unwrap();
+        std::fs::write(deep.join("a").join("b").join("model_index.json"), "{}").unwrap();
+        assert!(!target_contains_import_marker(&deep, &markers));
+
+        // 标记必须是文件（与脚本 find -type f 同口径）：同名目录不算。
+        let dir_marker = root.join("dir-marker");
+        std::fs::create_dir_all(dir_marker.join("model_index.json")).unwrap();
+        assert!(!target_contains_import_marker(&dir_marker, &markers));
+
+        // 空集合（没有在册卡片）恒不命中——卸载卡片后本臂关闭。
+        assert!(!target_contains_import_marker(&leaf, &[]));
+        // 目标不存在 → 未命中（删除路径随后按"已删除"收敛）。
+        assert!(!target_contains_import_marker(
+            &root.join("absent"),
+            &markers
+        ));
+    }
+
+    #[test]
+    fn import_marker_recheck_mirrors_boundary_verdict() {
+        let dir = TempDir::new("import-marker-recheck");
+        let markers = ["model_index.json".to_string()];
+        // 叶删与父删形态在删除时刻复查同样拒绝，文案点名 fail-closed 语义。
+        let leaf = dir.path().join("orig");
+        std::fs::create_dir_all(&leaf).unwrap();
+        std::fs::write(leaf.join("model_index.json"), "{}").unwrap();
+        let error = ensure_recheck_free_of_import_markers(&leaf, &markers)
+            .expect_err("leaf marker must be refused at deletion time");
+        assert!(
+            error.contains("标记文件") && error.contains("为防误删已拒绝"),
+            "got: {error}"
+        );
+        let parent = dir.path().join("bundle");
+        std::fs::create_dir_all(parent.join("child")).unwrap();
+        std::fs::write(parent.join("child").join("model_index.json"), "{}").unwrap();
+        assert!(ensure_recheck_free_of_import_markers(&parent, &markers).is_err());
+        // 干净目录与空集合都放行。
+        let clean = dir.path().join("clean");
+        std::fs::create_dir_all(&clean).unwrap();
+        assert!(ensure_recheck_free_of_import_markers(&clean, &markers).is_ok());
+        assert!(ensure_recheck_free_of_import_markers(&leaf, &[]).is_ok());
+    }
+
     #[test]
     fn daemon_binding_refuses_missing_binding_instead_of_silent_passthrough() {
         // 旧调用方/存量行没带绑定：拒绝并要求刷新，绝不静默当"无绑定"放行
@@ -2817,16 +2978,19 @@ mod tests {
     fn removal_boundary_rejects_confirm_mismatch_store_names_and_store_weights() {
         // 双侧都 trim：存量记录名带空白时确认输入 trim 后仍应匹配（Ok 而非 Err）。
         assert!(
-            removal_boundary_error(" qwen3 ", "qwen3", false, false, false, None, None).is_ok(),
+            removal_boundary_error(" qwen3 ", "qwen3", false, false, false, false, None, None)
+                .is_ok(),
             "trailing-space record names must stay removable"
         );
-        let error = removal_boundary_error("qwen3", " qwen3x ", false, false, false, None, None)
-            .unwrap_err();
+        let error =
+            removal_boundary_error("qwen3", " qwen3x ", false, false, false, false, None, None)
+                .unwrap_err();
         assert!(error.contains("确认名"));
         // 守卫 2 名字臂：名字命中商店名单。
         let error = removal_boundary_error(
             "qwen3",
             "qwen3",
+            false,
             false,
             false,
             false,
@@ -2843,30 +3007,40 @@ mod tests {
             false,
             false,
             false,
+            false,
             None,
             Some("qwen3:30b"),
         )
         .unwrap_err();
         assert!(error.contains("模型商店"));
         // 守卫 2 路径臂：权重位于任一商店根之下（别名躲过两个名字臂时仍被拦）。
-        let error =
-            removal_boundary_error("qwen3", "qwen3", true, false, false, None, None).unwrap_err();
+        let error = removal_boundary_error("qwen3", "qwen3", true, false, false, false, None, None)
+            .unwrap_err();
         assert!(error.contains("模型商店"));
         // 存量引用臂：与在册卡片引用路径相交（2026-11-04 评审 P2）。
-        let error =
-            removal_boundary_error("qwen3", "qwen3", false, true, false, None, None).unwrap_err();
+        let error = removal_boundary_error("qwen3", "qwen3", false, true, false, false, None, None)
+            .unwrap_err();
         assert!(error.contains("已安装商店模型引用"));
         // 零痕迹旧根名字臂：目录名与在册约定同名（2026-11-04 评审 P2 zhuowp
         // 场景），前四臂全空时仍被拦，且报错来自本臂而非前面的臂。
-        let error =
-            removal_boundary_error("qwen3", "qwen3", false, false, true, None, None).unwrap_err();
+        let error = removal_boundary_error("qwen3", "qwen3", false, false, true, false, None, None)
+            .unwrap_err();
         assert!(
             error.contains("约定同名") && error.contains("不留痕"),
             "rejection must come from the legacy-root name arm, got: {error}"
         );
-        // 五道全过 → Ok。
+        // 自取名原目录标记臂（2026-11-05 评审 P2 zhuowp 场景 II）：前五臂全空、
+        // 目标含官方脚本就地发现的标记文件且仍有在册卡片 → 拦，且报错来自本臂。
+        let error = removal_boundary_error("qwen3", "qwen3", false, false, false, true, None, None)
+            .unwrap_err();
         assert!(
-            removal_boundary_error("qwen3", " qwen3 ", false, false, false, None, None).is_ok()
+            error.contains("标记文件") && error.contains("无法确认"),
+            "rejection must come from the import-marker arm, got: {error}"
+        );
+        // 六道全过 → Ok。
+        assert!(
+            removal_boundary_error(" qwen3 ", " qwen3 ", false, false, false, false, None, None)
+                .is_ok()
         );
     }
 
@@ -3923,8 +4097,10 @@ mod tests {
         // 确认名回显限长（第九轮评审 P3）：record_name 来自手写文件，超长名字
         // 不逐字进错误与日志。
         let long_name = "长".repeat(100);
-        let error = removal_boundary_error(&long_name, "mismatch", false, false, false, None, None)
-            .unwrap_err();
+        let error = removal_boundary_error(
+            &long_name, "mismatch", false, false, false, false, None, None,
+        )
+        .unwrap_err();
         assert!(error.contains(&"长".repeat(32)));
         assert!(!error.contains(&"长".repeat(33)), "echo must be truncated");
     }
