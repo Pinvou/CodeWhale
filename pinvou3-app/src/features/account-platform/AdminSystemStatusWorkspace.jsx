@@ -43,6 +43,7 @@ export function AdminSystemStatusWorkspace({
   language,
   permissions = NO_PERMISSIONS,
   compact = false,
+  showTitle = true,
 }) {
   const allowed = permissions.includes("platform.system.status.read");
   const [state, setState] = useState({ owner: null, status: null, loading: false, error: null });
@@ -95,7 +96,7 @@ export function AdminSystemStatusWorkspace({
   </section>;
   return (
     <section className="adm-system-workspace">
-      <h1>{copy.nav.system}</h1>
+      {showTitle && <h1>{copy.nav.system}</h1>}
       <button
         type="button"
         disabled={visible.loading}

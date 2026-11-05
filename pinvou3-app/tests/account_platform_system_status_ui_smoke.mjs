@@ -49,6 +49,8 @@ try {
   for (const language of ['zh', 'en', 'ja']) await run(`actual admin permission navigation, status, int64, readonly runbooks ${language}`, async page => {
     await open(page, `language=${language}`);
     await page.waitForSelector('.adm-system-workspace .adm-metrics');
+    assert.equal(await page.$$eval('.adm-page h1, .adm-page h2', (nodes, title) => nodes.filter(node => node.textContent.trim() === title).length, adminLayoutCopy[language].nav.system), 1, 'embedded system page has one page heading');
+    assert.equal(await page.$('.adm-system-workspace > h1'), null, 'embedded workspace reuses the layout title in every locale');
     assert.equal(await page.$eval('nav button[data-section="system"]', (button, label) => button.getAttribute('aria-current') === 'page' && button.textContent.includes(label), adminLayoutCopy[language].nav.system), true);
     const text = await page.evaluate(() => document.querySelector('.adm-system-workspace').textContent);
     assert.ok(text.includes('9,007,199,254,740,993'));
