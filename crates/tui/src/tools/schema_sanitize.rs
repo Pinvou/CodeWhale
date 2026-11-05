@@ -1248,8 +1248,6 @@ pub enum KimiParameterSchemaError {
     ResourceLimitExceeded,
     #[error("Moonshot function parameters contain a non-terminating MFJS reference")]
     NonTerminatingReference,
-    #[error("Moonshot function parameters contain an invalid MFJS default")]
-    InvalidDefault,
 }
 
 /// Normalize a complete Kimi / Moonshot `function.parameters` object.
@@ -1893,9 +1891,6 @@ impl<'a> MfjsValidationState<'a> {
         if let Some(values) = obj.get("enum") {
             validate_mfjs_enum(values, schema_type, self)?;
         }
-        if let Some(default) = obj.get("default") {
-            validate_mfjs_default(default, schema_type)?;
-        }
 
         if let Some(properties) = obj.get("properties") {
             let properties = properties
@@ -1981,18 +1976,25 @@ fn mfjs_keyword_allowed_for_type(keyword: &str, schema_type: &str, is_root: bool
     // and no longer appear anywhere on the wire (the sanitizer strips the
     // advisory ones); only a direct unsanitized validation call can see them
     // here, and they fail closed like any other unlisted keyword.
+    //
+    // `default` is the one keyword the specification deliberately keeps
+    // type-free: "default 字段为目标输出提供一个默认值……这儿不做类型检查，
+    // 需要调用者自行保证其值类型内容和所在位置期望的内容相匹配" (any value,
+    // any node; <https://github.com/MoonshotAI/walle/blob/main/docs/
+    // mfjs-spec.zh.md>, fetched 2026-11-05). The engine therefore neither
+    // restricts its placement by node type nor type-checks its value — the
+    // caller owns the value's correctness, exactly as the document says.
     if is_root && keyword == "$defs" {
         return true;
     }
-    if matches!(keyword, "type" | "description") {
+    if matches!(keyword, "type" | "description" | "default") {
         return true;
     }
     match schema_type {
         "object" => matches!(keyword, "properties" | "required" | "additionalProperties"),
         "array" => keyword == "items",
-        "string" => matches!(keyword, "enum" | "default"),
-        "number" | "integer" => matches!(keyword, "enum" | "default"),
-        "boolean" | "null" => keyword == "default",
+        "string" | "number" | "integer" => keyword == "enum",
+        "boolean" | "null" => false,
         _ => false,
     }
 }
@@ -2058,22 +2060,6 @@ fn validate_mfjs_enum(
         }
     }
     Ok(())
-}
-
-fn validate_mfjs_default(value: &Value, schema_type: &str) -> Result<(), KimiParameterSchemaError> {
-    let valid = match schema_type {
-        "boolean" => value.is_boolean(),
-        "number" => value.is_number(),
-        "integer" => mfjs_integer_value(value).is_some(),
-        "string" => value.is_string(),
-        "null" => value.is_null(),
-        _ => false,
-    };
-    if valid {
-        Ok(())
-    } else {
-        Err(KimiParameterSchemaError::InvalidDefault)
-    }
 }
 
 fn mfjs_integer_value(value: &Value) -> Option<f64> {
@@ -3520,7 +3506,14 @@ mod kimi_tests {
     }
 
     #[test]
-    fn kimi_parameters_validates_default_type_and_placement_without_leaks() {
+    fn kimi_parameters_ships_default_on_any_node_without_type_check() {
+        // The specification's `default` clause, verbatim: "default 字段为
+        // 目标输出提供一个默认值……这儿不做类型检查，需要调用者自行保证其值
+        // 类型内容和所在位置期望的内容相匹配" (any value, any node;
+        // https://github.com/MoonshotAI/walle/blob/main/docs/mfjs-spec.zh.md,
+        // fetched 2026-11-05). The wire therefore carries `default` verbatim:
+        // no per-type placement rejection and no value/type mismatch
+        // fail-closed — the caller owns the value's correctness.
         let mut valid = json!({
             "type": "object",
             "properties": {
@@ -3528,52 +3521,43 @@ mod kimi_tests {
                 "count": {"type": "integer", "default": 3},
                 "ratio": {"type": "number", "default": 1.5},
                 "label": {"type": "string", "default": "default-label"},
-                "empty": {"type": "null", "default": null}
+                "empty": {"type": "null", "default": null},
+                "mismatched": {
+                    "type": "integer",
+                    "default": "private-default-value-3302"
+                },
+                "object_valued": {
+                    "type": "object",
+                    "properties": {"a": {"type": "string"}},
+                    "default": {"a": "b"}
+                },
+                "array_valued": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "default": ["x"]
+                }
             }
         });
         sanitize_for_kimi_parameters(&mut valid).unwrap();
+        assert_eq!(
+            valid["properties"]["mismatched"]["default"],
+            json!("private-default-value-3302")
+        );
+        assert_eq!(valid["properties"]["object_valued"]["default"], json!({"a": "b"}));
+        assert_eq!(valid["properties"]["array_valued"]["default"], json!(["x"]));
 
-        for (mut invalid, expected) in [
-            (
-                json!({
-                    "type": "object",
-                    "properties": {
-                        "private-default-3301": {
-                            "type": "integer",
-                            "default": "private-default-value-3302"
-                        }
-                    }
-                }),
-                KimiParameterSchemaError::InvalidDefault,
-            ),
-            (
-                json!({
-                    "type": "object",
-                    "properties": {
-                        "private-untyped-default-3303": {"default": 1}
-                    }
-                }),
-                KimiParameterSchemaError::MissingType,
-            ),
-            (
-                json!({
-                    "type": "object",
-                    "properties": {
-                        "private-object-default-3304": {
-                            "type": "object",
-                            "default": {}
-                        }
-                    }
-                }),
-                KimiParameterSchemaError::InvalidKeywordValue,
-            ),
-        ] {
-            let original = invalid.clone();
-            let error = sanitize_for_kimi_parameters(&mut invalid).unwrap_err();
-            assert_eq!(error, expected);
-            assert!(!error.to_string().contains("private-default"));
-            assert_eq!(invalid, original);
-        }
+        // A node that only carries `default` still fails the type-absence
+        // rule (MissingType) — that rejection is about the node, not about
+        // the default keyword or its value.
+        let mut untyped = json!({
+            "type": "object",
+            "properties": {"private-untyped-default-3303": {"default": 1}}
+        });
+        let original = untyped.clone();
+        let error = sanitize_for_kimi_parameters(&mut untyped).unwrap_err();
+        assert_eq!(error, KimiParameterSchemaError::MissingType);
+        assert!(!error.to_string().contains("private-untyped-default"));
+        assert_eq!(untyped, original);
     }
 
     #[test]
