@@ -3738,9 +3738,8 @@ mod kimi_tests {
         // the scope caveat. This pins the accumulation itself: two 500-value
         // nodes ship at the 1000 total, and one extra value anywhere fails
         // the whole tool.
-        let enum_values = |count: usize| {
-            Value::Array((0..count).map(|value| json!(value)).collect())
-        };
+        let enum_values =
+            |count: usize| Value::Array((0..count).map(|value| json!(value)).collect());
         let schema = |left: usize, right: usize| {
             json!({
                 "type": "object",

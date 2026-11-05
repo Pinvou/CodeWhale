@@ -7591,7 +7591,10 @@ fn resolve_tool_definition<'a>(
         && tool_name.as_bytes()[1].is_ascii_digit()
     {
         let unprefixed = tool_name[1..].to_string();
-        if let Some(def) = tool_catalog.iter().find(|def| def.name.as_str() == unprefixed) {
+        if let Some(def) = tool_catalog
+            .iter()
+            .find(|def| def.name.as_str() == unprefixed)
+        {
             tool_def = Some(def);
             *tool_name = unprefixed;
         } else if tool_registry.is_some_and(|registry| registry.get(&unprefixed).is_some()) {
@@ -8676,9 +8679,7 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let context = crate::tools::spec::ToolContext::new(tmp.path().to_path_buf());
         let mut registry = crate::tools::ToolRegistry::new(context);
-        registry.register(std::sync::Arc::new(NamedProbeTool {
-            name: "3d_render",
-        }));
+        registry.register(std::sync::Arc::new(NamedProbeTool { name: "3d_render" }));
         let catalog = registry.to_api_tools();
 
         let mut name = "_3d_render".to_string();
@@ -8702,12 +8703,8 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let context = crate::tools::spec::ToolContext::new(tmp.path().to_path_buf());
         let mut registry = crate::tools::ToolRegistry::new(context);
-        registry.register(std::sync::Arc::new(NamedProbeTool {
-            name: "3d_render",
-        }));
-        registry.register(std::sync::Arc::new(NamedProbeTool {
-            name: "_3d_render",
-        }));
+        registry.register(std::sync::Arc::new(NamedProbeTool { name: "3d_render" }));
+        registry.register(std::sync::Arc::new(NamedProbeTool { name: "_3d_render" }));
         let catalog = registry.to_api_tools();
 
         let mut name = "_3d_render".to_string();
