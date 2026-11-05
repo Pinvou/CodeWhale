@@ -415,7 +415,11 @@ fn root_composition_constraint_note(obj: &Map<String, Value>) -> Option<String> 
         let mut groups: Vec<String> = items.iter().filter_map(required_group_label).collect();
         groups.sort();
         groups.dedup();
-        if groups.len() >= 2 {
+        // Every dropped group must be disclosed, including a single one:
+        // with one distinct label the flatten still relaxed the original
+        // constraint (e.g. only one of two branches required it), and
+        // suppressing the note there used to hide the loosening entirely.
+        if !groups.is_empty() {
             return Some(format!(
                 "{prefix} of these parameter groups must be provided: {}.",
                 groups.join(" | ")
@@ -1137,6 +1141,34 @@ mod tests {
             Some("Exactly one of these parameter groups must be provided: `a` + `b` | `c`.")
         );
     }
+
+    #[test]
+    fn responses_constraint_note_covers_a_single_dropped_group() {
+        // One distinct dropped group is still a dropped constraint: when
+        // only one of the branches carries a required group, the flatten
+        // relaxes that requirement and the note must fire — it used to be
+        // suppressed below the two-group gate, hiding the loosening
+        // entirely.
+        let mut schema = json!({
+            "anyOf": [
+                {
+                    "type": "object",
+                    "properties": {"path": {"type": "string"}},
+                    "required": ["path"]
+                },
+                {"type": "object"}
+            ]
+        });
+
+        let note = sanitize_for_responses(&mut schema);
+
+        assert_eq!(schema["type"], "object");
+        assert!(schema.get("anyOf").is_none());
+        assert_eq!(
+            note.as_deref(),
+            Some("At least one of these parameter groups must be provided: `path`.")
+        );
+    }
 }
 
 /// Normalize a tool's function schema for Kimi / Moonshot API compatibility.
@@ -1480,10 +1512,13 @@ fn strip_mfjs_unsupported_enum_values(value: &mut Value) {
     if let Some(values) = obj.get("enum").and_then(Value::as_array) {
         // `None` kinds (non-scalars) or differing kinds make the enum
         // unsupported; an empty array stays for the validator to fail
-        // closed, per the doc comment above.
+        // closed, per the doc comment above. The all() below is vacuously
+        // true for an empty array — `kinds[0]` is never evaluated — so an
+        // empty enum is kept and the validator's non-empty check rejects
+        // the whole tool instead of this strip silently widening an
+        // unsatisfiable constraint into "anything goes".
         let kinds: Option<Vec<MfjsLiteralKind>> = values.iter().map(mfjs_literal_kind).collect();
-        let homogeneous = kinds
-            .is_some_and(|kinds| !kinds.is_empty() && kinds.iter().all(|kind| kind == &kinds[0]));
+        let homogeneous = kinds.is_some_and(|kinds| kinds.iter().all(|kind| kind == &kinds[0]));
         if !homogeneous {
             obj.shift_remove("enum");
         }
@@ -1503,9 +1538,11 @@ fn strip_mfjs_unsupported_enum_values(value: &mut Value) {
 /// `patternProperties`, `not`, `if`/`then`/`else`, `propertyNames`,
 /// `unevaluatedProperties`, `unevaluatedItems`, nested `allOf`, tuple-form
 /// `items`) need no visit: the keyword itself fails closed —
-/// `UnsupportedKeyword`, `UnsupportedNestedAllOf` for a nested `allOf`, or
-/// `InvalidSchemaNode` for tuple-form `items` — before a stranded empty
-/// `items` node inside one could matter. `dependentSchemas` is the one
+/// `UnsupportedKeyword` at validation for the unlisted keywords,
+/// `UnsupportedNestedAllOf` for a nested `allOf` and `InvalidSchemaNode`
+/// for tuple-form `items` already in `normalize_kimi_compatibility` —
+/// before a stranded empty `items` node inside one could matter.
+/// `dependentSchemas` is the one
 /// exception in shape: `strip_dependent_keywords` removes it (with its
 /// subtree) rather than failing closed, so it cannot strand one either.
 ///
@@ -1786,8 +1823,12 @@ pub fn validate_mfjs_parameters(parameters: &Value) -> Result<(), KimiParameterS
 // by an engine-local tightening. The enum-length check threshold stays
 // engine-local: applying the same MaxEnumStringLength budget from 250 values
 // up is a stricter checking cadence than walle's 2500-value threshold, never
-// a wider budget. MFJS_MAX_STRUCTURAL_DEPTH is engine-only — a recursion
-// guard for this walker, not a walle budget.
+// a wider budget. Scope caveat, same spirit: walle's MaxEnumItems is
+// per-node (`len(enum) > MaxEnumItems` in keyword_validators.go) while
+// MFJS_MAX_TOTAL_ENUM_VALUES accumulates across the whole document, so a
+// multi-node document can be dropped here at a total the server would
+// accept node-by-node. MFJS_MAX_STRUCTURAL_DEPTH is engine-only — a
+// recursion guard for this walker, not a walle budget.
 const MFJS_MAX_ANY_OF_ITEMS: usize = 500;
 const MFJS_MAX_OBJECT_DEPTH: usize = 30;
 const MFJS_MAX_TOTAL_PROPERTIES: usize = 3_000;
@@ -3323,6 +3364,39 @@ mod kimi_tests {
     }
 
     #[test]
+    fn kimi_parameters_empty_enum_fails_closed_in_the_validator() {
+        // An empty enum accepts nothing, so stripping it would silently
+        // widen an unsatisfiable constraint into "anything goes". The strip
+        // keeps the keyword (the homogeneous check is vacuously true for an
+        // empty array) and the validator's non-empty rule fails the whole
+        // tool — the documented "malformed keyword is a schema bug" policy.
+        let mut schema = json!({
+            "type": "object",
+            "properties": {"choice": {"type": "string", "enum": []}},
+            "required": ["choice"]
+        });
+        let error = sanitize_for_kimi_parameters(&mut schema)
+            .expect_err("an empty enum is malformed and must fail closed");
+        assert!(
+            matches!(error, KimiParameterSchemaError::InvalidKeywordValue),
+            "empty enum drops via the validator: {error:?}"
+        );
+
+        // A non-array `enum` takes the same road: kept by the strip, then
+        // failed closed by the validator.
+        let mut malformed = json!({
+            "type": "object",
+            "properties": {"choice": {"type": "string", "enum": "fast"}}
+        });
+        let error = sanitize_for_kimi_parameters(&mut malformed)
+            .expect_err("a non-array enum is malformed and must fail closed");
+        assert!(
+            matches!(error, KimiParameterSchemaError::InvalidKeywordValue),
+            "non-array enum drops via the validator: {error:?}"
+        );
+    }
+
+    #[test]
     fn kimi_parameters_fail_closed_shapes_stay_dropped() {
         // The body's fail-closed enumeration, each pinned so a validator
         // change cannot silence the drop silently: empty `anyOf` branches
@@ -3621,6 +3695,121 @@ mod kimi_tests {
         });
         assert_eq!(
             sanitize_for_kimi_parameters(&mut too_much_enum_text).unwrap_err(),
+            KimiParameterSchemaError::ResourceLimitExceeded
+        );
+    }
+
+    #[test]
+    fn kimi_parameters_enum_text_budget_boundary_is_exact() {
+        // The probes above straddle the encoded-length budget (74000 under,
+        // 88000 over); this pins the exact boundary — 1000 values of exactly
+        // 75 encoded chars total 75000 and ship, one char more each totals
+        // 76000 and must not. A value edit that moves the budget silently
+        // fails here.
+        let long_enum = |padding: usize| {
+            Value::Array(
+                (0..1000)
+                    .map(|index| {
+                        Value::String(format!("private-enum-{index:04}-{}", "x".repeat(padding)))
+                    })
+                    .collect(),
+            )
+        };
+        let mut at_limit = json!({
+            "type": "object",
+            "properties": {"choice": {"type": "string", "enum": long_enum(57)}}
+        });
+        sanitize_for_kimi_parameters(&mut at_limit)
+            .expect("exactly 75000 encoded enum chars sit at the budget and ship");
+        let mut over = json!({
+            "type": "object",
+            "properties": {"choice": {"type": "string", "enum": long_enum(58)}}
+        });
+        assert_eq!(
+            sanitize_for_kimi_parameters(&mut over).unwrap_err(),
+            KimiParameterSchemaError::ResourceLimitExceeded
+        );
+    }
+
+    #[test]
+    fn kimi_parameters_total_enum_budget_accumulates_across_nodes() {
+        // The enum budget is document-wide (state.total_enum_values), while
+        // walle's MaxEnumItems counts per node — the constant block discloses
+        // the scope caveat. This pins the accumulation itself: two 500-value
+        // nodes ship at the 1000 total, and one extra value anywhere fails
+        // the whole tool.
+        let enum_values = |count: usize| {
+            Value::Array((0..count).map(|value| json!(value)).collect())
+        };
+        let schema = |left: usize, right: usize| {
+            json!({
+                "type": "object",
+                "properties": {
+                    "left": {"type": "integer", "enum": enum_values(left)},
+                    "right": {"type": "integer", "enum": enum_values(right)}
+                }
+            })
+        };
+        let mut at_total_budget = schema(500, 500);
+        sanitize_for_kimi_parameters(&mut at_total_budget)
+            .expect("1000 total enum values across two nodes ship");
+        let mut over_total_budget = schema(500, 501);
+        assert_eq!(
+            sanitize_for_kimi_parameters(&mut over_total_budget).unwrap_err(),
+            KimiParameterSchemaError::ResourceLimitExceeded
+        );
+    }
+
+    #[test]
+    fn kimi_parameters_whole_document_byte_budget_rejects_oversized_schemas() {
+        // MFJS_MAX_SCHEMA_BYTES bounds the whole serialized document after
+        // the strip; it has no probe anywhere else, so pin both faces here.
+        let blob_schema = |description_len: usize| {
+            json!({
+                "type": "object",
+                "properties": {
+                    "blob": {
+                        "type": "string",
+                        "description": "y".repeat(description_len)
+                    }
+                },
+                "required": ["blob"]
+            })
+        };
+        let mut over = blob_schema(130_000);
+        assert_eq!(
+            sanitize_for_kimi_parameters(&mut over).unwrap_err(),
+            KimiParameterSchemaError::ResourceLimitExceeded
+        );
+        let mut roomy = blob_schema(1_000);
+        sanitize_for_kimi_parameters(&mut roomy)
+            .expect("a small document sits far inside the byte budget");
+    }
+
+    #[test]
+    fn kimi_parameters_structural_depth_boundary_is_engine_local() {
+        // MFJS_MAX_STRUCTURAL_DEPTH=64 counts every node descent (items
+        // chains included) and is an engine-only recursion guard — walle has
+        // no counterpart budget. 63 wrapped item levels reach exactly 64
+        // structural entries from the root and ship; one more level exceeds
+        // the guard.
+        let nested_items = |levels: usize| {
+            let mut node = json!({"type": "string"});
+            for _ in 0..levels {
+                node = json!({"type": "array", "items": node});
+            }
+            json!({
+                "type": "object",
+                "properties": {"tree": node},
+                "required": ["tree"]
+            })
+        };
+        let mut at_guard = nested_items(63);
+        sanitize_for_kimi_parameters(&mut at_guard)
+            .expect("64 structural levels reach the engine guard exactly and ship");
+        let mut over = nested_items(64);
+        assert_eq!(
+            sanitize_for_kimi_parameters(&mut over).unwrap_err(),
             KimiParameterSchemaError::ResourceLimitExceeded
         );
     }
