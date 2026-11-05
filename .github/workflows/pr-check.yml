@@ -1918,11 +1918,13 @@ jobs:
         run: npm --prefix pinvou3-app ci --prefer-offline --no-audit
 
       - name: 安装 Relay 发布门禁依赖
-        if: ${{ runner.os == 'Windows' }}
         run: npm --prefix remote-control-relay ci --prefer-offline --no-audit --ignore-scripts
 
       - name: Rust（构建期开关的实际产物回归）
         uses: dtolnay/rust-toolchain@stable
+
+      - name: 桌面远控发布平台与构建期开关契约
+        run: node --test remote-control-relay/test/release-path-policy.test.js pinvou3-app/tests/remote_control_feature_gate_contract.test.mjs pinvou3-app/tests/desktop_remote_loaded_capability.test.mjs
 
       # 版本一致性校验(--check)由 version-consistency job 无路径门全事件覆盖,
       # 此处不重复;仅跑 Tauri overlay、各平台打包与知识宿主契约。
@@ -1941,8 +1943,8 @@ jobs:
           PINVOU_DESKTOP_CONTROLLER_ENABLED: '0'
         run: |
           npm --prefix remote-control-relay run release:gate
-          node --test --test-concurrency=1 remote-control-relay/test/controller-release-evidence.test.js remote-control-relay/test/controller-release-gates.test.js remote-control-relay/test/controller-release-telemetry-query.test.js remote-control-relay/test/github-workflow-run-identity.test.js remote-control-relay/test/installer-spdx.test.js remote-control-relay/test/release-path-policy.test.js remote-control-relay/test/windows-e2e-orchestrator-contract.test.js remote-control-relay/test/windows-e2e-orchestrator-helpers.test.js remote-control-relay/test/windows-e2e-path-guard.test.js
-          node --test pinvou3-app/tests/remote_control_feature_gate_contract.test.mjs pinvou3-app/tests/remote_control_real_ui_smoke_contract.test.mjs pinvou3-app/tests/nsis_resource_staging_contract.test.js
+          node --test --test-concurrency=1 remote-control-relay/test/controller-release-evidence.test.js remote-control-relay/test/controller-release-gates.test.js remote-control-relay/test/controller-release-telemetry-query.test.js remote-control-relay/test/github-workflow-run-identity.test.js remote-control-relay/test/installer-spdx.test.js remote-control-relay/test/windows-e2e-orchestrator-contract.test.js remote-control-relay/test/windows-e2e-orchestrator-helpers.test.js remote-control-relay/test/windows-e2e-path-guard.test.js
+          node --test pinvou3-app/tests/remote_control_real_ui_smoke_contract.test.mjs pinvou3-app/tests/nsis_resource_staging_contract.test.js
 
   # pinvou-knowledge 是可单独部署的 crate，必须直接验证自己的默认 feature 图、
   # 测试与部署入口，而不只依赖 Tauri 作为 client-only path dependency 的间接编译。

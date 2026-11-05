@@ -114,7 +114,9 @@ GitHub protected environment/self-hosted runner、runner OS 与同一 SID 进程
 
 构建与运行开关是两层独立约束：构建时 `PINVOU_DESKTOP_CONTROLLER_ENABLED=0`（以及未明确开启的 release/custom profile）将关闭状态固化到产物，运行时设为 `1` 或不设变量都不能重新开启。启用产物必须以构建值 `1` 生成并取得本节之外的全部发布验收证据；受保护的 installer 证据 workflow 固定构建值 `1`。debug 默认开启只用于本地开发，不提供发布资格。
 
-仅构建值为 `1` 的 Windows A/B 产物允许运行时未设变量或精确 `1` 开启；运行时 `0` 或其他值关闭。非 Windows 平台始终 unsupported。Relay 不使用桌面构建值，仍要求运行时精确 `1`、`self_hosted` 与 TOFU=false；当前 `official` 认证模式未接线，不能作为已支持的生产验收组合。普通 Windows 发布继续构建关闭远控的产物，不以“免验收”隐式开放功能。
+仅构建值为 `1` 的 Windows A/B 产物允许运行时未设变量或精确 `1` 开启；运行时 `0` 或其他值关闭。64 位 Linux 复用同一开关契约，范围与验收边界见 [Linux 双端远程控制](linux-desktop-remote-control.md)；macOS 与其他未适配目标始终 unsupported。Relay 不使用桌面构建值，仍要求运行时精确 `1`、`self_hosted` 与 TOFU=false；当前 `official` 认证模式未接线，不能作为已支持的生产验收组合。
+
+官方发布的平台策略固化在 workflow：Windows 的受保护构建、真实证据门禁与发布任务均为 `1`，Linux 三个架构打包任务为 `1`，macOS 为 `0`，不再读取 `vars.PINVOU_DESKTOP_CONTROLLER_ENABLED`。Windows 发布必须通过属于当前 commit 的证据门禁，并复用该证据绑定的安装包；缺失证据时停止发布，不回退为关闭远控的普通安装包。运行时紧急关闭开关及 Relay 的独立部署门禁保持有效；手工构建的 release/custom 默认仍关闭。
 
 遥测快照由受信生产聚合服务提供，并非独立的实际会话取证；门禁预期 commit、URL、token-file 和回滚输入来自受保护配置，部署环境文件不得覆盖这些预期值。真实双机与 Provider 验收仍单独必需。
 

@@ -29,6 +29,8 @@ name: release-packages
 # Windows 正式发布仍进入 windows-release Environment。运行时仓库已公开，
 # checkout 后不保留凭据，后续按锁定 gitlink 匿名拉取运行时和 Git LFS 对象。
 # Linux/macOS 同样零 secret 依赖；所有路径均零外部写入副作用。
+# 桌面远控发布策略由代码固定：Windows 与 64 位 Linux 开启，macOS 关闭；
+# 不读取同名仓库变量。Windows 开启产物仍须通过真实证据门禁并复用验收安装包。
 
 on:
   push:
@@ -324,7 +326,7 @@ jobs:
       evidence_artifact_id: ${{ steps.remote-evidence-identity.outputs.artifact-id }}
       evidence_run_id: ${{ steps.remote-evidence-identity.outputs.run-id }}
     env:
-      PINVOU_DESKTOP_CONTROLLER_ENABLED: ${{ vars.PINVOU_DESKTOP_CONTROLLER_ENABLED || '0' }}
+      PINVOU_DESKTOP_CONTROLLER_ENABLED: '1'
       PINVOU_RELEASE_COMMIT_SHA: ${{ github.sha }}
       PINVOU_REMOTE_RELEASE_EVIDENCE: ${{ github.workspace }}/remote-control-evidence/manifest.json
       PINVOU_REMOTE_LEGACY_ENDPOINT_INVENTORY: ${{ vars.PINVOU_REMOTE_LEGACY_ENDPOINT_INVENTORY }}
@@ -443,6 +445,7 @@ jobs:
     runs-on: ${{ fromJSON(vars.PINVOU_LINUX_HEAVY_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
     timeout-minutes: 90
     env:
+      PINVOU_DESKTOP_CONTROLLER_ENABLED: '1'
       VERSION: ${{ needs.check-version-bump.outputs.version }}
       # 托管 x86_64 runner 的冷 thin-LTO 构建也连续在约 30 分钟收到 shutdown
       # (exit 143)。与 ARM64 一致，仅对 CI artifact 关闭跨 crate LTO 并提高
@@ -654,6 +657,7 @@ jobs:
     # windows 150 与 macos 360 的余量比例更紧,见各自 job 注释观察。
     timeout-minutes: 120
     env:
+      PINVOU_DESKTOP_CONTROLLER_ENABLED: '1'
       VERSION: ${{ needs.check-version-bump.outputs.version }}
       # thin-LTO + codegen-units=1 的冷构建在托管 ARM runner 上连续于约 25 分钟
       # 收到 shutdown(exit 143),且 runner 终止会跳过 Rust cache 保存。仅在该 CI
@@ -833,6 +837,7 @@ jobs:
     runs-on: ${{ fromJSON(vars.PINVOU_LINUX_HEAVY_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
     timeout-minutes: 180
     env:
+      PINVOU_DESKTOP_CONTROLLER_ENABLED: '1'
       VERSION: ${{ needs.check-version-bump.outputs.version }}
       # 与 x64/arm64 同源风险:release(thin-LTO O3) 编译 codewhale-tui 的
       # rustc/LLVM 栈溢出(SIGBUS)。交叉构建的 rustc 仍是 x86_64 宿主进程,
@@ -1049,7 +1054,7 @@ jobs:
         shell: bash
     env:
       VERSION: ${{ needs.check-version-bump.outputs.version }}
-      PINVOU_DESKTOP_CONTROLLER_ENABLED: ${{ vars.PINVOU_DESKTOP_CONTROLLER_ENABLED || '0' }}
+      PINVOU_DESKTOP_CONTROLLER_ENABLED: '1'
       PINVOU_RELEASE_INSTALLER_SHA256: ${{ vars.PINVOU_RELEASE_INSTALLER_SHA256 }}
       AWS_LC_SYS_PREBUILT_NASM: "1"
       # release 编译 codewhale-tui 的 SIGBUS 同源风险防护(三端统一注入;
@@ -1251,6 +1256,7 @@ jobs:
     # linker.
     timeout-minutes: 360
     env:
+      PINVOU_DESKTOP_CONTROLLER_ENABLED: '0'
       MACOSX_DEPLOYMENT_TARGET: "11.0"
       VERSION: ${{ needs.check-version-bump.outputs.version }}
       # Normalizes build-machine absolute paths embedded in the artifact

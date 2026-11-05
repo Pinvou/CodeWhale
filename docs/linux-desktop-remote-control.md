@@ -7,7 +7,8 @@ Linux 桌面端复用 Windows 桌面远控的协议、Relay、配对、Session �
 - 支持项目的 64 位 Linux 目标，包括 x86_64、aarch64、loongarch64；不依赖 X11 按键抓取，Wayland 不另设入口限制。macOS 和其他未适配目标仍返回 `desktop_remote_control_unsupported`。
 - 构建与运行时共用 `PINVOU_DESKTOP_CONTROLLER_ENABLED` 的既有契约：debug 构建默认具备能力；release/custom 构建默认关闭。需要在构建时显式设置为 `1`，运行时才能使用；构建时关闭的产物不能通过运行时环境重新开启。运行时的 `0` 或非法值均关闭入口与命令。
 - 正式构建仍通过项目入口，例如 `PINVOU_DESKTOP_CONTROLLER_ENABLED=1 npm --prefix pinvou3-app run build`。这不代替既有发布资格、Relay enrollment 或双机验收。
-- 当前官方 Linux 发布流水线尚未传入上述构建开关，也没有 Linux 对应的远控构建证据任务，因此官方 Linux 安装包目前无法启用远控；须由独立发布工程变更接线后才具备该能力，本 PR 不修改发布流水线。
+- 官方 `release-packages.yml` 的 Linux x64、ARM64、LoongArch64 打包任务固定传入构建值 `1`；Windows 的受保护构建、证据门禁与安装包发布同样固定为 `1`，macOS 固定为 `0`。不再依赖 GitHub 仓库中的同名变量；删除或修改该仓库变量不会改变此平台策略。手工构建仍须显式传入开关，已生成的关闭产物必须重新构建。
+- 发布契约在 Linux 和 Windows 上执行平台配置检查、实际编译的开关与运行时禁用回归，以及入口能力加载检查；这些检查不代替 Linux 各架构安装包的真实双机验收。macOS 的 `0` 表示不提供此能力，不承诺从安装包排除全部共享远控代码。
 - 在设置的远程控制页选择主控端或被控端。B 手动开启、选择允许的工作区和远程任务权限后才接入 Relay；A 使用 B 的配对码连接。联网、模型请求及附件传输沿用现有用户操作与授权流程，不自动开启被控、上传文件或安装依赖。
 
 Linux 复用统一 ChatView、`RemoteProxy`、模型来源与临时模型、技能选择、审批、附件上传/产物下载和断线恢复。B 始终持有权威 Session、工作区及权限，A 不接收 B 的本地路径或凭据；配对与消息格式不增加平台分支。
