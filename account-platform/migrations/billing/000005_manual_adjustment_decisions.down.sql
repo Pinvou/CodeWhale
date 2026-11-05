@@ -1,0 +1,9 @@
+ALTER TABLE manual_adjustments
+    DROP CONSTRAINT manual_adjustments_pending_undecided,
+    DROP CONSTRAINT manual_adjustments_approval_audit,
+    DROP CONSTRAINT manual_adjustments_rejection_audit,
+    DROP CONSTRAINT manual_adjustments_rejector_separation,
+    DROP CONSTRAINT manual_adjustments_single_decision,
+    DROP COLUMN decided_at,
+    DROP COLUMN decision_reason,
+    DROP COLUMN rejected_by;

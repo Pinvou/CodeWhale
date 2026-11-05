@@ -48,8 +48,8 @@ use pinvou3_lib::platform::credential_store::{
 };
 use pinvou3_lib::platform::prefs::{
     ColorScheme, Language, MODEL_API_KEY_ENV_OVERRIDE, MODEL_PROVIDER_KIND_CODING_PLAN,
-    MODEL_PROVIDER_KIND_CUSTOM, MODEL_PROVIDER_KIND_OFFICIAL_API, ModelPreset, SavedModel,
-    SearchProvider, Theme, UserPrefs,
+    MODEL_PROVIDER_KIND_CUSTOM, MODEL_PROVIDER_KIND_OFFICIAL_API, ModelPreset, ModelSelectionRef,
+    SavedModel, SearchProvider, Theme, UserPrefs,
 };
 
 use crate::support::{
@@ -1273,7 +1273,7 @@ fn add<S: CredentialStore>(
         credential_written.store(true, std::sync::atomic::Ordering::Release);
         prefs.upsert_model(stored);
         if set_active {
-            prefs.advanced.active_model_id = Some(active_id.clone());
+            prefs.set_default_model_ref(ModelSelectionRef::local(&active_id))?;
         }
         Ok(())
     });
@@ -1558,7 +1558,7 @@ fn edit<S: CredentialStore>(
             updated.api_key = String::new();
             prefs.upsert_model(updated);
             if set_active {
-                prefs.advanced.active_model_id = Some(id.to_owned());
+                prefs.set_default_model_ref(ModelSelectionRef::local(&id))?;
             }
             Ok(())
         },
@@ -1636,10 +1636,10 @@ fn prefs_error(error: String) -> CliError {
 const REMOVE_LAST_MODEL_MESSAGE: &str =
     "cannot remove the last remaining model; add another model first";
 
-/// Official 差异：官方树在 `delete_model_inner` 里先于 min-1 规则拒绝删除内置
-/// llmapi 模型（“内置模型不可删除”），且 load 路径每次事务都会重新 ensure 它。
+/// Official 差异：`delete_model_inner` 先于 min-1 规则拒绝删除内置
+/// Account Platform 模型（“内置模型不可删除”），且 load 路径每次事务都会重新 ensure 它。
 /// CLI 的 remove 与 GUI 共享同一语义：内置模型受保护，与剩余数量无关。
-const REMOVE_BUILTIN_MODEL_MESSAGE: &str = "the builtin llmapi model cannot be deleted";
+const REMOVE_BUILTIN_MODEL_MESSAGE: &str = "the builtin Account Platform model cannot be deleted";
 
 fn remove<S: CredentialStore>(
     store: &S,
@@ -1662,7 +1662,7 @@ fn remove<S: CredentialStore>(
     let prefs = UserPrefs::load();
     if prefs
         .model_by_id(id)
-        .is_some_and(|model| model.is_builtin_llmapi())
+        .is_some_and(|model| model.is_builtin_account_platform())
     {
         return Err(CliError::usage(REMOVE_BUILTIN_MODEL_MESSAGE));
     }
@@ -1688,7 +1688,7 @@ fn remove<S: CredentialStore>(
             }
             if prefs
                 .model_by_id(id)
-                .is_some_and(|model| model.is_builtin_llmapi())
+                .is_some_and(|model| model.is_builtin_account_platform())
             {
                 return Err(REMOVE_BUILTIN_MODEL_MESSAGE.to_owned());
             }
@@ -1726,7 +1726,7 @@ fn use_model(id: &str, output: OutputMode) -> Result<CliOutcome, CliError> {
         if prefs.model_by_id(id).is_none() {
             return Err(format!("model not found: {id}"));
         }
-        prefs.advanced.active_model_id = Some(id.to_owned());
+        prefs.set_default_model_ref(ModelSelectionRef::local(id))?;
         Ok(())
     })
     .map_err(prefs_error)?;

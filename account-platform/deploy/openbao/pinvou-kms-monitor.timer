@@ -1,0 +1,11 @@
+[Unit]
+Description=Check KMS operations every five minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+AccuracySec=10s
+Unit=pinvou-kms-monitor.service
+
+[Install]
+WantedBy=timers.target

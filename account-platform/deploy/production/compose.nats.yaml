@@ -1,0 +1,52 @@
+# Standalone or combined with compose.dependencies.yaml; never development Compose.
+name: pinvou-production-dependencies
+services:
+  nats:
+    image: ${NATS_IMAGE:?set independently verified NATS image digest}
+    pull_policy: never
+    user: "65532:65532"
+    command: ["--config", "/etc/pinvou/nats/nats.conf"]
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 512m
+    cpus: 1.0
+    pids_limit: 64
+    ulimits:
+      core: {soft: 0, hard: 0}
+    logging:
+      driver: local
+      options: {max-size: "10m", max-file: "3"}
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=8m,uid=65532,gid=65532,mode=1700
+    volumes:
+      - type: bind
+        source: ${NATS_DATA_DIRECTORY:?set new private JetStream data directory}
+        target: /data
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${NATS_TLS_DIRECTORY:?set NATS-only leaf certificate directory}
+        target: /run/pinvou/nats-tls
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${NATS_AUTHORIZATION_FILE:?set verified public six-identity authorization file}
+        target: /etc/pinvou/nats/authorization.conf
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ./nats.conf
+        target: /etc/pinvou/nats/nats.conf
+        read_only: true
+        bind: {create_host_path: false}
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--output-document=-", "http://127.0.0.1:8222/healthz?js-enabled-only=true"]
+      interval: 10s
+      timeout: 3s
+      start_period: 5s
+      retries: 6
+    networks: [data]
+networks:
+  data:
+    internal: true

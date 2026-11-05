@@ -70,13 +70,14 @@ use crate::features::assistant::platform::bridge::{Pinvou3Bridge, base_url_uses_
 #[cfg(any(feature = "benchmark-hooks", test))]
 use crate::features::assistant::product_runtime::note_stderr;
 use crate::features::assistant::runtime_model::{
-    ModelCredentialMode, PassthroughRuntimeModelProvider, PreparedRuntimeModel,
-    RuntimeModelCredential, RuntimeModelProvider, RuntimeModelRequest,
+    AuxiliaryModelContext, AuxiliaryModelScope, ModelCredentialMode,
+    PassthroughRuntimeModelProvider, PreparedRuntimeModel, RuntimeModelCredential,
+    RuntimeModelProvider, RuntimeModelRequest,
 };
 use crate::features::assistant::turn_shell_tasks::{SessionShellManagers, SessionTurnShellTasks};
 use crate::features::sessions::{ScheduledRunProfile, SessionStore, transcript_revision};
 use crate::platform::credential_store::{CredentialStore, SystemCredentialStore};
-use crate::platform::prefs::{SavedModel, UserPrefs};
+use crate::platform::prefs::{ModelSelectionRef, SavedModel, UserPrefs};
 
 /// Fully isolated model override used by one controller task. Credentials are
 /// extracted immediately and the model copies retained by the bridge are
@@ -91,6 +92,7 @@ pub(crate) struct RemoteRuntimeModelBundle {
 /// Per-call preparation inputs, including the remote task's frozen route.
 #[derive(Default)]
 struct RuntimeModelOverrides {
+    auxiliary: Option<AuxiliaryModelContext>,
     freeze_remote_credentials: bool,
     explicit_model: Option<SavedModel>,
     explicit_credential: Option<RuntimeModelCredential>,
@@ -508,6 +510,36 @@ impl SessionTurnLifecycles {
 
     fn remove(&self, session_id: &str) {
         self.states.lock().remove(session_id);
+    }
+}
+
+// This handle owns no EnginePool/provider reference. Dropping the pool makes
+// proxy admissions unavailable instead of keeping the session registry alive.
+struct RuntimeTurnLifecycleAuthority {
+    states: std::sync::Weak<SyncMutex<HashMap<String, Arc<TurnLifecycle>>>>,
+}
+
+impl crate::features::assistant::runtime_model::RuntimeTurnAuthority
+    for RuntimeTurnLifecycleAuthority
+{
+    fn current_generation(&self, session_id: &str) -> Option<u64> {
+        let states = self.states.upgrade()?;
+        let lifecycle = { states.lock().get(session_id).cloned() }?;
+        lifecycle.current_runtime_turn_generation()
+    }
+    fn with_generation(
+        &self,
+        session_id: &str,
+        generation: u64,
+        callback: &mut dyn FnMut(),
+    ) -> bool {
+        let Some(states) = self.states.upgrade() else {
+            return false;
+        };
+        let Some(lifecycle) = ({ states.lock().get(session_id).cloned() }) else {
+            return false;
+        };
+        lifecycle.with_current_turn_generation(generation, callback)
     }
 }
 
@@ -2348,6 +2380,10 @@ impl EnginePool {
         runtime_credential_store: Arc<dyn CredentialStore>,
     ) -> Result<Self> {
         let bridge = Pinvou3Bridge::boot()?;
+        let turn_lifecycles = SessionTurnLifecycles::default();
+        runtime_model_provider.bind_turn_authority(Arc::new(RuntimeTurnLifecycleAuthority {
+            states: Arc::downgrade(&turn_lifecycles.states),
+        }))?;
         Ok(Self {
             entries: Arc::new(Mutex::new(HashMap::new())),
             runtime_model_locks: SessionTurnLocks::default(),
@@ -2356,7 +2392,7 @@ impl EnginePool {
             #[cfg(any(feature = "benchmark-hooks", test))]
             eval_model_snapshots: EvalModelSnapshots::default(),
             turn_locks: SessionTurnLocks::default(),
-            turn_lifecycles: SessionTurnLifecycles::default(),
+            turn_lifecycles,
             shell_managers: SessionShellManagers::default(),
             turn_shell_tasks: SessionTurnShellTasks::default(),
             app,
@@ -2571,32 +2607,73 @@ impl EnginePool {
         Ok(Self::finalize_runtime_bridge(bridge, &prepared, pins_scheduled_model).await)
     }
 
-    /// Prepare an unsent composer's model without borrowing the active chat session
-    /// or creating a synthetic session/task. Credentials follow the same provider as chat.
+    /// Voice owns a separate, invisible transport lifetime even when its model
+    /// comes from an existing session. It must not retire or cancel that chat.
+    pub(crate) async fn fresh_bridge_for_voice(
+        &self,
+        session_id: &str,
+    ) -> Result<(Pinvou3Bridge, AuxiliaryModelScope)> {
+        #[cfg(any(feature = "benchmark-hooks", test))]
+        let eval_model = self.eval_model_snapshots.for_session(session_id);
+        #[cfg(not(any(feature = "benchmark-hooks", test)))]
+        let eval_model = None;
+        let scope = AuxiliaryModelScope::new(self.runtime_model_provider.clone());
+        let (bridge, prepared, pins) = Self::prepare_runtime_model_with(
+            &self.store,
+            self.runtime_model_provider.as_ref(),
+            self.runtime_credential_store.as_ref(),
+            self.bridge.clone(),
+            session_id,
+            false,
+            RuntimeModelOverrides {
+                auxiliary: Some(scope.context(None)),
+                explicit_model: eval_model,
+                ..Default::default()
+            },
+        )
+        .await?;
+        Ok((
+            Self::finalize_runtime_bridge(bridge, &prepared, pins).await,
+            scope,
+        ))
+    }
+
+    /// Prepare an unsent composer without creating or borrowing a chat session.
     pub(crate) async fn fresh_bridge_for_draft(
         &self,
         model_id: Option<&str>,
-    ) -> Result<Pinvou3Bridge> {
+        model_ref: Option<&ModelSelectionRef>,
+    ) -> Result<(Pinvou3Bridge, AuxiliaryModelScope)> {
         let mut bridge = self.bridge.clone();
         bridge.prefs = UserPrefs::load();
-        let model = match model_id.filter(|id| !id.trim().is_empty()) {
-            Some(id) => bridge
+        let model = resolve_voice_draft_model(&bridge.prefs, model_id, model_ref)?;
+        let reference = model
+            .is_builtin_account_platform()
+            .then(|| model.model.clone());
+        let inherited_default_revision = (model_ref.is_none()
+            && model_id.filter(|id| !id.trim().is_empty()).is_none()
+            && model.is_builtin_account_platform()
+            && matches!(
+                bridge.prefs.advanced.default_model_ref.as_ref(),
+                Some(ModelSelectionRef::AccountPlatform { model_id }) if model_id == &model.model
+            ))
+        .then(|| {
+            bridge
                 .prefs
                 .advanced
-                .saved_models
-                .iter()
-                .find(|model| model.id == id)
-                .cloned()
-                .context("Draft model binding is unavailable; select a model again")?,
-            None => bridge
-                .prefs
-                .active_model()
-                .cloned()
-                .context("No effective model is available for draft preparation")?,
-        };
+                .default_model_selection_revision
+                .clone()
+        });
+        let scope = AuxiliaryModelScope::new(self.runtime_model_provider.clone());
+        let mut auxiliary = scope.context(reference);
+        auxiliary.inherited_default_revision = inherited_default_revision;
         let prepared =
-            prepare_draft_runtime_model(self.runtime_model_provider.as_ref(), model).await?;
-        Ok(Self::finalize_runtime_bridge(bridge, &prepared, false).await)
+            prepare_draft_runtime_model(self.runtime_model_provider.as_ref(), model, auxiliary)
+                .await?;
+        Ok((
+            Self::finalize_runtime_bridge(bridge, &prepared, false).await,
+            scope,
+        ))
     }
 
     async fn prepare_runtime_model(
@@ -2616,6 +2693,7 @@ impl EnginePool {
             session_id,
             scheduled_unattended,
             RuntimeModelOverrides {
+                auxiliary: None,
                 freeze_remote_credentials,
                 explicit_model: explicit_model_override,
                 explicit_credential,
@@ -2642,6 +2720,7 @@ impl EnginePool {
         bridge.prefs = UserPrefs::load();
         Self::install_session_affinity_key(&mut bridge, session_id);
         let RuntimeModelOverrides {
+            auxiliary,
             freeze_remote_credentials,
             explicit_model: explicit_model_override,
             explicit_credential,
@@ -2667,13 +2746,27 @@ impl EnginePool {
             }
             None => (explicit_model_override, explicit_credential),
         };
+        let mut scheduled_model_ref = None;
         bridge.session_model = resolve_runtime_model_override(explicit_model_override, || {
-            resolve_spawn_model(
+            // Explicit evaluation snapshots already select a model and must not
+            // depend on the interactive default. Only normal resolution needs it.
+            if scheduled_profile.is_none()
+                && interactive_model_override.is_none()
+                && bridge.prefs.model_selection_schema_version >= 1
+                && bridge.prefs.advanced.default_model_ref.is_none()
+            {
+                bail!("model_selection_required: choose a model before sending");
+            }
+            let model = resolve_spawn_model(
                 &bridge.prefs.advanced.saved_models,
                 scheduled_profile.as_ref(),
                 interactive_model_override.as_deref(),
                 scheduled_unattended,
-            )
+            )?;
+            scheduled_model_ref = model.as_ref().and_then(|selected| {
+                pinned_scheduled_catalog_reference(selected, pins_scheduled_model)
+            });
+            Ok(model)
         })?;
         // Community 默认准备路径固定 passthrough：模型原样保留，不注入运行时
         // 凭据/revision；凭据照常走环境变量与本地凭据库（bridge.api_key()）。
@@ -2686,6 +2779,8 @@ impl EnginePool {
             &mut bridge,
             RuntimeModelRequest {
                 session_id: session_id.to_string(),
+                scheduled_model_ref,
+                auxiliary,
                 model: selected,
                 scheduled_unattended,
             },
@@ -2784,15 +2879,19 @@ impl EnginePool {
         // family is identical (`/v1/models` listing, single-model rename),
         // so a configured name that misses the served list gets the same
         // rename/facts treatment instead of a hard model_not_found.
-        let is_vllm_route = matches!(bridge.provider().as_str(), "vllm" | "tachyon");
-        if let Some(model) = bridge.effective_model_owned() {
-            Self::adopt_probed_endpoint_facts(
-                &mut bridge,
-                model,
-                is_vllm_route,
-                pins_scheduled_model,
-            )
-            .await;
+        // A controller-supplied route already binds the model and limits.
+        // Local discovery must not rename it or replace those facts.
+        if !bridge.runtime_route_is_locked() {
+            let is_vllm_route = matches!(bridge.provider().as_str(), "vllm" | "tachyon");
+            if let Some(model) = bridge.effective_model_owned() {
+                Self::adopt_probed_endpoint_facts(
+                    &mut bridge,
+                    model,
+                    is_vllm_route,
+                    pins_scheduled_model,
+                )
+                .await;
+            }
         }
         bridge
     }
@@ -3833,6 +3932,15 @@ impl EnginePool {
     }
 
     async fn reclaim_engine_entry(&self, session_id: &str, entry: EngineEntry) {
+        let preserved_generation = self.turn_lifecycles.get(session_id).and_then(|lifecycle| {
+            if lifecycle.is_current_turn_submitted() {
+                None
+            } else {
+                lifecycle.current_runtime_turn_generation()
+            }
+        });
+        self.runtime_model_provider
+            .reclaim_model_session(session_id, preserved_generation);
         // Round-13 (#657) MINOR 6: the shield mark dies with the engine.
         // This is the shared teardown funnel — evict_locked's Some arm and
         // the idle-reclaim / rebind paths that remove the entry directly
@@ -4040,6 +4148,7 @@ impl EnginePool {
     }
 
     pub(crate) fn forget_session(&self, session_id: &str) {
+        self.runtime_model_provider.forget_model_session(session_id);
         #[cfg(any(feature = "benchmark-hooks", test))]
         self.eval_model_snapshots.forget_session(session_id);
         // Round-12 (#657) MINOR 11: a deleted session's shield mark must not
@@ -4086,8 +4195,21 @@ impl EnginePool {
     /// global active model. Read fresh from disk (the GUI may have just
     /// changed the default); falls back to the boot snapshot on failure.
     pub fn default_model_for_new_session(&self) -> (String, Option<String>) {
+        let (model, model_id, _) = self.default_model_for_new_session_with_origin();
+        (model, model_id)
+    }
+
+    pub(crate) fn default_model_for_new_session_with_origin(
+        &self,
+    ) -> (String, Option<String>, Option<String>) {
         let prefs = UserPrefs::load();
-        default_model_for_new_session_from(&prefs, &self.bridge)
+        let (model, model_id) = default_model_for_new_session_from(&prefs, &self.bridge);
+        let revision = matches!(
+            prefs.advanced.default_model_ref,
+            Some(crate::platform::prefs::ModelSelectionRef::AccountPlatform { .. })
+        )
+        .then(|| prefs.advanced.default_model_selection_revision.clone());
+        (model, model_id, revision)
     }
 
     #[cfg(any(feature = "benchmark-hooks", test))]
@@ -4205,6 +4327,16 @@ impl EnginePool {
         model_id: Option<String>,
     ) -> Result<()> {
         self.store.set_session_model_id(session_id, model_id)?;
+        self.evict(session_id).await;
+        Ok(())
+    }
+
+    pub async fn switch_session_model_ref(
+        &self,
+        session_id: &str,
+        model_ref: Option<ModelSelectionRef>,
+    ) -> Result<()> {
+        self.store.set_session_model_ref(session_id, model_ref)?;
         self.evict(session_id).await;
         Ok(())
     }
@@ -4685,8 +4817,11 @@ impl EnginePool {
                 reservation,
             )
             .await?;
-        self.get_or_spawn(session_id)
-            .await?
+        let engine = self.get_or_spawn(session_id).await?;
+        self.runtime_model_provider
+            .begin_logical_turn(session_id)
+            .await?;
+        engine
             .send_reserved_eval_message(content, policy, reservation)
             .await
     }
@@ -4803,16 +4938,22 @@ impl EnginePool {
                 bundle: remote_bundle,
                 skills: remote_skills,
             },
-            |options| {
-                self.get_or_spawn_with_policy(
-                    session_id,
-                    false,
-                    options.policy,
-                    options.model,
-                    options.credential,
-                    options.bundle,
-                    options.skills,
-                )
+            |options| async move {
+                let engine = self
+                    .get_or_spawn_with_policy(
+                        session_id,
+                        false,
+                        options.policy,
+                        options.model,
+                        options.credential,
+                        options.bundle,
+                        options.skills,
+                    )
+                    .await?;
+                self.runtime_model_provider
+                    .begin_logical_turn(session_id)
+                    .await?;
+                Ok(engine)
             },
         )
         .await
@@ -5313,6 +5454,9 @@ impl EnginePool {
                     cancel_requested: true,
                 });
             }
+            self.runtime_model_provider
+                .begin_logical_turn(session_id)
+                .await?;
             engine.send_scheduled_message(content, &profile).await?;
             wait_for_scheduled_terminal(
                 &mut turn_events,
@@ -5395,6 +5539,11 @@ impl EnginePool {
         keep_inbox: bool,
         requested_generation: Option<u64>,
     ) -> CancelOutcome {
+        // Reset can reuse a session ID and lifecycle epoch. Capture the
+        // provider incarnation before any asynchronous gate or handle lookup.
+        let model_cancel_scope = self
+            .runtime_model_provider
+            .capture_model_cancellation_scope(session_id);
         // r10 foundation: the steer disposition
         // (InterruptKeepInbox/StopDropInbox) and the cancel token are
         // published atomically by cancel_with_mode; a separate keepInbox
@@ -5473,6 +5622,15 @@ impl EnginePool {
                 // N's leftover subagents is the stop contract and N+1's
                 // just-spawned subagents are indistinguishable app-side; see
                 // the fork registration docs.
+                if let Some(identity) = identity.as_ref() {
+                    if !identity.closing {
+                        self.runtime_model_provider.cancel_logical_turn(
+                            session_id,
+                            identity.epoch,
+                            model_cancel_scope.as_deref(),
+                        );
+                    }
+                }
                 if requested_generation.is_some() {
                     dispatch_remote_turn_cancel(engine, identity.as_ref(), steer_mode);
                 } else {
@@ -5728,6 +5886,9 @@ impl EnginePool {
         // and are unchanged. Folding the merge into the dispatch seam keeps
         // the wiring itself pinned by an executing test (round-31 M9-rust).
         let engine = self.get_or_spawn(session_id).await?;
+        self.runtime_model_provider
+            .begin_logical_turn(session_id)
+            .await?;
         // Round-12 (#657) BLOCKER 1: edit-and-resend is an attended seam too
         // and bypasses send_reserved_user_message — restore here as well,
         // after the reservation is acquired (same reasoning as the send
@@ -5961,7 +6122,16 @@ fn default_model_for_new_session_from(
     prefs: &UserPrefs,
     bridge: &Pinvou3Bridge,
 ) -> (String, Option<String>) {
-    match prefs.active_model() {
+    if prefs.model_selection_schema_version >= 1 && prefs.advanced.default_model_ref.is_none() {
+        return (String::new(), None);
+    }
+    let selected = prefs
+        .advanced
+        .default_model_ref
+        .as_ref()
+        .and_then(|selection| prefs.resolve_model_ref(selection))
+        .or_else(|| prefs.active_model().cloned());
+    match selected {
         Some(model) => (model.model.clone(), Some(model.id.clone())),
         None => (bridge.model(), None),
     }
@@ -6116,6 +6286,13 @@ where
     }
 }
 
+fn pinned_scheduled_catalog_reference(
+    model: &SavedModel,
+    pins_scheduled_model: bool,
+) -> Option<String> {
+    (pins_scheduled_model && model.is_builtin_account_platform()).then(|| model.model.clone())
+}
+
 fn resolve_scheduled_model(
     models: &[SavedModel],
     profile: &ScheduledRunProfile,
@@ -6127,6 +6304,14 @@ fn resolve_scheduled_model(
             .with_context(|| {
                 format!("此任务绑定的 AI 模型配置已失效，请重新选择 AI 模型并保存任务。缺失配置：{model_id}")
             })?;
+        if selected.is_builtin_account_platform() {
+            // The built-in record is a mutable carrier for the global default.
+            // A scheduled run keeps its persisted catalog reference; the runtime
+            // provider still validates that reference against the current catalog.
+            let mut bound = selected.clone();
+            bound.model = profile.model.clone();
+            return Ok(bound);
+        }
         if selected.model != profile.model {
             bail!(
                 "此任务绑定的 AI 模型配置已变更，请重新选择 AI 模型并保存任务。配置 {model_id} 从 '{}' 变为 '{}'",
@@ -6220,9 +6405,54 @@ fn validate_prepared_runtime_route(
     Ok(())
 }
 
+fn resolve_voice_draft_model(
+    prefs: &UserPrefs,
+    model_id: Option<&str>,
+    selection: Option<&ModelSelectionRef>,
+) -> Result<SavedModel> {
+    let selection = selection.or_else(|| {
+        model_id
+            .filter(|id| !id.trim().is_empty())
+            .is_none()
+            .then_some(prefs.advanced.default_model_ref.as_ref())
+            .flatten()
+    });
+    let selected = match selection {
+        Some(selection) => prefs
+            .resolve_model_ref(selection)
+            .context("Draft model binding is unavailable; select a model again")?,
+        None => match model_id.filter(|id| !id.trim().is_empty()) {
+            Some(id) => prefs
+                .model_by_id(id)
+                .filter(|model| !model.is_builtin_account_platform())
+                .cloned()
+                .context("Draft model binding is unavailable; select a model again")?,
+            None => match prefs.advanced.default_model_ref.as_ref() {
+                Some(selection) => prefs.resolve_model_ref(selection),
+                None if prefs.model_selection_schema_version == 0 => prefs
+                    .active_model()
+                    .filter(|model| !model.is_builtin_account_platform())
+                    .cloned(),
+                None => None,
+            }
+            .context("model_selection_required: choose a model before voice postprocess")?,
+        },
+    };
+    if model_id
+        .filter(|id| !id.trim().is_empty())
+        .is_some_and(|id| id != selected.id)
+        || (selected.is_builtin_account_platform()
+            && matches!(selection, Some(ModelSelectionRef::LocalConfig { .. })))
+    {
+        bail!("Draft model binding is unavailable; select a model again");
+    }
+    Ok(selected)
+}
+
 async fn prepare_draft_runtime_model(
     provider: &dyn RuntimeModelProvider,
     model: SavedModel,
+    auxiliary: AuxiliaryModelContext,
 ) -> Result<PreparedRuntimeModel> {
     let selected_id = model.id.clone();
     let prepared = provider
@@ -6231,6 +6461,8 @@ async fn prepare_draft_runtime_model(
             session_id: String::new(),
             model,
             scheduled_unattended: false,
+            scheduled_model_ref: None,
+            auxiliary: Some(auxiliary),
         })
         .await?;
     if prepared.model.id != selected_id {
@@ -6246,6 +6478,35 @@ async fn prepare_draft_runtime_model(
 // so it cannot deadlock.
 #[allow(clippy::await_holding_lock)]
 mod scheduled_model_tests {
+    #[test]
+    fn voice_draft_typed_reference_never_guesses_an_unbound_carrier() {
+        let mut prefs = crate::platform::prefs::UserPrefs::default();
+        prefs.advanced.saved_models = vec![SavedModel::builtin_account_platform()];
+        let id = prefs.advanced.saved_models[0].id.clone();
+        prefs
+            .set_default_model_ref(crate::platform::prefs::ModelSelectionRef::account_platform(
+                "0199a100-0001-7000-8000-000000000106",
+            ))
+            .unwrap();
+        prefs.model_selection_schema_version = 1;
+        let resolved = super::resolve_voice_draft_model(&prefs, None, None).unwrap();
+        assert_eq!(resolved.model, "0199a100-0001-7000-8000-000000000106");
+        assert!(super::resolve_voice_draft_model(&prefs, Some(&id), None).is_err());
+        assert!(
+            super::resolve_voice_draft_model(
+                &prefs,
+                None,
+                Some(&crate::platform::prefs::ModelSelectionRef::local(&id))
+            )
+            .is_err()
+        );
+        prefs.advanced.default_model_ref =
+            Some(crate::platform::prefs::ModelSelectionRef::local(&id));
+        assert!(super::resolve_voice_draft_model(&prefs, None, None).is_err());
+        prefs.advanced.default_model_ref = None;
+        assert!(super::resolve_voice_draft_model(&prefs, None, None).is_err());
+    }
+
     struct DraftModelProvider {
         calls: AtomicUsize,
         fail: bool,
@@ -6280,13 +6541,21 @@ mod scheduled_model_tests {
             change_identity: false,
         };
         for selected in [
-            SavedModel::builtin_llmapi(),
+            SavedModel::builtin_account_platform(),
             model("custom-draft", "custom-wire"),
         ] {
             let expected_id = selected.id.clone();
-            let prepared = super::prepare_draft_runtime_model(&provider, selected)
-                .await
-                .unwrap();
+            let prepared = super::prepare_draft_runtime_model(
+                &provider,
+                selected,
+                super::AuxiliaryModelContext {
+                    scope_id: "voice-test".into(),
+                    draft_model_ref: None,
+                    inherited_default_revision: None,
+                },
+            )
+            .await
+            .unwrap();
             assert_eq!(prepared.model.id, expected_id);
         }
         assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
@@ -6301,9 +6570,17 @@ mod scheduled_model_tests {
                 change_identity,
             };
             assert!(
-                super::prepare_draft_runtime_model(&provider, SavedModel::builtin_llmapi())
-                    .await
-                    .is_err()
+                super::prepare_draft_runtime_model(
+                    &provider,
+                    SavedModel::builtin_account_platform(),
+                    super::AuxiliaryModelContext {
+                        scope_id: "voice-test".into(),
+                        draft_model_ref: None,
+                        inherited_default_revision: None,
+                    },
+                )
+                .await
+                .is_err()
             );
             assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
         }
@@ -7799,6 +8076,8 @@ mod scheduled_model_tests {
                 session_id: "session-managed".to_owned(),
                 model: selected,
                 scheduled_unattended: false,
+                scheduled_model_ref: None,
+                auxiliary: None,
             },
             None,
             false,
@@ -7844,6 +8123,8 @@ mod scheduled_model_tests {
                     session_id: session_id.to_owned(),
                     model: selected,
                     scheduled_unattended,
+                    scheduled_model_ref: None,
+                    auxiliary: None,
                 },
                 None,
                 false,
@@ -7867,6 +8148,8 @@ mod scheduled_model_tests {
                 session_id: "ordinary-failure".to_owned(),
                 model: selected,
                 scheduled_unattended: false,
+                scheduled_model_ref: None,
+                auxiliary: None,
             },
             None,
             false,
@@ -8104,6 +8387,113 @@ mod scheduled_model_tests {
         let selected = resolve_scheduled_model(&models, &profile(Some("wanted"), "wire-model"))
             .expect("configured model");
         assert_eq!(selected.id, "wanted");
+    }
+
+    #[test]
+    fn scheduled_catalog_reference_requires_a_pinned_builtin_carrier() {
+        let mut platform = SavedModel::builtin_account_platform();
+        platform.model = "0199a100-0001-7000-8000-000000000106".into();
+        assert_eq!(
+            super::pinned_scheduled_catalog_reference(&platform, true).as_deref(),
+            Some("0199a100-0001-7000-8000-000000000106")
+        );
+        assert_eq!(
+            super::pinned_scheduled_catalog_reference(&platform, false),
+            None
+        );
+        let mut local = model("local", &platform.model);
+        local.name = platform.name;
+        assert_eq!(
+            super::pinned_scheduled_catalog_reference(&local, true),
+            None
+        );
+    }
+
+    #[test]
+    fn scheduled_platform_binding_survives_changing_global_default() {
+        const ORIGINAL: &str = "0199a100-0001-7000-8000-000000000106";
+        const LATER_DEFAULT: &str = "0199a100-0001-7000-8000-000000000107";
+        let mut prefs = crate::platform::prefs::UserPrefs::default();
+        prefs.advanced.saved_models = vec![SavedModel::builtin_account_platform()];
+        prefs
+            .set_default_model_ref(crate::platform::prefs::ModelSelectionRef::account_platform(
+                ORIGINAL,
+            ))
+            .expect("original platform default");
+        let carrier_id = prefs.advanced.saved_models[0].id.clone();
+        let saved = serde_json::to_string(&profile(Some(&carrier_id), ORIGINAL))
+            .expect("persisted scheduled profile");
+        prefs
+            .set_default_model_ref(crate::platform::prefs::ModelSelectionRef::account_platform(
+                LATER_DEFAULT,
+            ))
+            .expect("new conversation default");
+        let restored: ScheduledRunProfile =
+            serde_json::from_str(&saved).expect("restore original task binding");
+        let selected =
+            resolve_spawn_model(&prefs.advanced.saved_models, Some(&restored), None, true)
+                .expect("the saved task is independent of the new default")
+                .expect("bound platform model");
+        assert!(selected.is_builtin_account_platform());
+        assert_eq!(selected.model, ORIGINAL);
+        assert_eq!(restored.model, ORIGINAL);
+        assert_eq!(prefs.advanced.saved_models[0].model, LATER_DEFAULT);
+        assert_eq!(
+            prefs.advanced.default_model_ref,
+            Some(crate::platform::prefs::ModelSelectionRef::account_platform(
+                LATER_DEFAULT
+            ))
+        );
+    }
+
+    #[test]
+    fn scheduled_platform_manual_continuation_keeps_profile_unless_reselected() {
+        let mut carrier = SavedModel::builtin_account_platform();
+        carrier.model = "0199a100-0001-7000-8000-000000000107".into();
+        let task = profile(Some(&carrier.id), "0199a100-0001-7000-8000-000000000106");
+        let models = vec![carrier.clone()];
+        let pinned = resolve_spawn_model(&models, Some(&task), None, false)
+            .expect("manual continuation")
+            .expect("task model");
+        assert_eq!(pinned.model, task.model);
+        let explicit = resolve_spawn_model(&models, Some(&task), Some(&carrier.id), false)
+            .expect("explicit manual reselect")
+            .expect("selected carrier");
+        assert_eq!(explicit.model, carrier.model);
+        assert_eq!(
+            super::pinned_scheduled_catalog_reference(&explicit, false),
+            None
+        );
+        let automatic = resolve_spawn_model(&models, Some(&task), Some(&carrier.id), true)
+            .expect("automatic run ignores manual reselect")
+            .expect("task model");
+        assert_eq!(automatic.model, task.model);
+    }
+
+    #[test]
+    fn scheduled_platform_binding_never_maps_a_legacy_name_to_the_default() {
+        let mut carrier = SavedModel::builtin_account_platform();
+        carrier.model = "0199a100-0001-7000-8000-000000000107".to_string();
+        let saved = profile(Some(&carrier.id), "deepseek-v4-flash");
+        let selected = resolve_scheduled_model(&[carrier], &saved)
+            .expect("retain the original reference for runtime catalog validation");
+        assert_eq!(selected.model, "deepseek-v4-flash");
+        assert_eq!(saved.model, "deepseek-v4-flash");
+        assert!(resolve_scheduled_model(&[], &saved).is_err());
+    }
+
+    #[test]
+    fn scheduled_local_configuration_cannot_claim_platform_binding_by_name() {
+        let mut local = model("saved-local", "changed-wire-model");
+        local.name = SavedModel::builtin_account_platform().name;
+        assert!(!local.is_builtin_account_platform());
+        assert!(
+            resolve_scheduled_model(
+                &[local],
+                &profile(Some("saved-local"), "original-wire-model")
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -11804,6 +12194,40 @@ mod probed_facts_wiring_tests {
     }
 
     #[tokio::test]
+    async fn finalize_runtime_bridge_preserves_locked_model_and_limits_without_probe() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _env = isolate_model_env();
+        for (preset, kind, served) in [
+            (ModelPreset::LocalVllm, None, "different-served-model"),
+            (
+                ModelPreset::OpenaiCompatible,
+                Some("custom"),
+                "controller-model",
+            ),
+        ] {
+            let mock = models_mock::spawn(&[("/v1/models", 200, single_entry_json(served))]);
+            let mut model = saved_model(preset, "controller-model", kind);
+            model.base_url = mock.base_url.clone();
+            model.context_window_tokens = Some(65_536);
+            model.max_output_tokens = Some(2_048);
+            let mut bridge = wiring_bridge(model.clone());
+            bridge.runtime_route_locked = true;
+            let prepared = PreparedRuntimeModel::unchanged(model.clone());
+            let bridge = EnginePool::finalize_runtime_bridge(bridge, &prepared, false).await;
+            let retained = bridge.session_model.as_ref().unwrap();
+            assert!(bridge.runtime_route_is_locked());
+            assert_eq!(retained.model, model.model);
+            assert_eq!(retained.base_url, model.base_url);
+            assert_eq!(retained.context_window_tokens, model.context_window_tokens);
+            assert_eq!(retained.max_output_tokens, model.max_output_tokens);
+            assert_eq!(bridge.probed_context_tokens, None);
+            assert_eq!(bridge.probed_output_tokens, None);
+            assert_eq!(bridge.probed_local_kind, None);
+            assert_eq!(mock.hits_for("/v1/models"), 0);
+        }
+    }
+
+    #[tokio::test]
     async fn non_vllm_operator_route_does_not_adopt_borrowed_single_entry() {
         let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let _env = isolate_model_env();
@@ -12970,5 +13394,31 @@ mod tests {
             "reuse must be CONJOINED with the run-engine class — the clause \
              that keeps interactive continuations off the run engine (round-35 M1)"
         );
+    }
+}
+
+#[cfg(test)]
+mod runtime_turn_authority_tests {
+    use super::{RuntimeTurnLifecycleAuthority, SessionTurnLifecycles};
+    use crate::features::assistant::runtime_model::RuntimeTurnAuthority;
+    use std::sync::Arc;
+    #[test]
+    fn authority_reads_real_reservation_and_cannot_extend_pool_registry_lifetime() {
+        let lifecycles = SessionTurnLifecycles::default();
+        let authority = RuntimeTurnLifecycleAuthority {
+            states: Arc::downgrade(&lifecycles.states),
+        };
+        assert_eq!(authority.current_generation("absent"), None);
+        assert!(!authority.with_generation("absent", 1, &mut || panic!("absent")));
+        let lifecycle = lifecycles.for_session("session");
+        let reservation = lifecycle.reserve().unwrap();
+        let generation = authority.current_generation("session").unwrap();
+        let mut calls = 0;
+        assert!(authority.with_generation("session", generation, &mut || calls += 1));
+        assert_eq!(calls, 1);
+        drop(lifecycles);
+        assert_eq!(authority.current_generation("session"), None);
+        assert!(!authority.with_generation("session", generation, &mut || panic!("expired owner")));
+        drop(reservation);
     }
 }

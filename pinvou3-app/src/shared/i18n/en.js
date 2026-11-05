@@ -31,7 +31,7 @@ const conversationEn = {
   attachment:'Attachment', operations:(count,failedCount)=>`${count} operations${failedCount?` · ${failedCount} failed`:''}`, copyReply:'Copy response', copyReplySuccess:'Copied', copyReplyFailed:'Copy failed',
   exportReply:'Export', exportReplyTitle:'Export response', exportMarkdown:'Markdown document', exportMarkdownHint:'Default; preserves source formatting', exportHtml:'HTML document', exportHtmlHint:'Best for viewing in a browser', exportSuccess:'Exported', exportFailed:'Export failed', exportTooLarge:'The response exceeds the export size limit',
   shareReply:'Share', shareReplyTitle:'Share response', shareSystem:'System share', shareSystemHint:'Choose an installed communication app', shareApps:'Copy content and open app', shareSuccess:'Shared', shareCopiedOpen:app=>`Content copied. Tried to open ${app}; paste there to send.`, shareCopiedWeb:app=>`Content copied. Open ${app} and paste to send.`, shareFailed:'Share failed', shareUnavailable:'System share is unavailable; content was copied', shareTargets:{wechat:'WeChat',wecom:'WeCom',feishu:'Feishu',dingtalk:'DingTalk',qq:'QQ'},
-  technicalDetails:'Technical details',
+  memberQuotaInsufficientTitle:"Insufficient member quota", memberQuotaInsufficientMessage:"Your quota in the current organization is too low to start this task. Contact your organization administrator.", organizationWalletInsufficientTitle:"Insufficient organization balance", organizationWalletInsufficientMessage:"The current organization has insufficient balance to start this task. Contact your organization administrator to add balance.", organizationInsufficientCompletedMessage:"This response is complete, but the organization balance or your member quota is insufficient. Contact your organization administrator before continuing.", technicalDetails:'Technical details', walletInsufficientTitle:'Insufficient balance', walletInsufficientMessage:'Your balance is too low to start this task.', walletInsufficientCompletedTitle:'Insufficient balance', walletInsufficientCompletedMessage:'This response is complete, but you need to recharge before continuing.', rechargeNow:'Recharge now',
 };
 
 const codexEn = {
@@ -312,7 +312,7 @@ export const dictEn = {
         modelContextWindow: 'Context Window (tokens)',
         modelMaxOutput: 'Max Output (tokens)',
         customApiKey: 'API Key',
-        credEnvOverride: 'Env override', credUnavailable: 'Credential unavailable', credConfigured: 'Configured', credNotConfigured: 'Not configured', credEnterNewKey: 'Enter new key to replace', credKeep: 'Keep', credReplace: 'Replace', credDeleteKey: 'Delete Key', clearSearch: 'Clear search', clearInput: 'Clear input', sendMsg: 'Send', apiKeyGateTitle: 'API Key required', apiKeyGateDesc: 'The current model is a cloud model. Configure an API Key to start chatting.', apiKeyGateBtn: 'Configure',
+        credEnvOverride: 'Env override', credUnavailable: 'Credential unavailable', credConfigured: 'Configured', credNotConfigured: 'Not configured', credEnterNewKey: 'Enter new key to replace', credKeep: 'Keep', credReplace: 'Replace', credDeleteKey: 'Delete Key', clearSearch: 'Clear search', clearInput: 'Clear input', sendMsg: 'Send',
         detectLocalVllm: 'Detect local model services',
         detectingLocalVllm: 'Detecting…',
         useVllmConfig: 'Use config',
@@ -2043,10 +2043,6 @@ dictEn["uiTeamRelay"] = {
   "lifecycleSyncPending": "The operation is complete, but team data has not synced yet. Sync again to load the latest state."
 };
 dictEn["kbOutWeekdays"] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-dictEn["builtinModelSelect"] = "Backend model";
-dictEn["builtinModelRefresh"] = "Refresh";
-dictEn["builtinModelLoading"] = "Syncing…";
-dictEn["builtinModelEmpty"] = "No backend models";
 dictEn["uiRemote"]["status"]["idle"] = ["Not enabled", "Enable access to create a persistent remote control link."];
 dictEn["uiRemote"]["status"]["starting"] = ["Starting", "Creating the remote control connection."];
 dictEn["uiRemote"]["status"]["connecting_relay"] = ["Connecting", "Connecting to the relay…"];
@@ -2056,7 +2052,6 @@ dictEn["uiRemote"]["status"]["web_client_disconnected"] = ["Browser disconnected
 dictEn["uiRemote"]["status"]["revoked"] = ["Link revoked", "Enable remote control again."];
 dictEn["uiRemote"]["status"]["stopped"] = ["Stopped", "Open this panel to enable access again."];
 dictEn["uiRemote"]["status"]["error"] = ["Connection error", "Remote control is temporarily unavailable. Try again."];
-dictEn["uiSettingsDetail"]["builtinModel"] = "Built-in model";
 dictEn["uiSettingsDetail"]["settingsLoadFailedDetail"] = "Settings cannot be displayed right now. Reopen the page and try again.";
 dictEn["uiScheduled"]["weekdays"] = [["Monday", "Mon"], ["Tuesday", "Tue"], ["Wednesday", "Wed"], ["Thursday", "Thu"], ["Friday", "Fri"], ["Saturday", "Sat"], ["Sunday", "Sun"]];
 dictEn["uiAccount"] = {
@@ -2665,3 +2660,22 @@ dictEn.controllerConnection.errorArchiveCapacity = dictEn.remoteArchive.byteBudg
 // restored: baseline catalog descriptions (referenced by the model catalog data)
 Object.assign(dictEn.uiSettingsDetail.modelDescriptions, { '本地服务默认模型': 'Default model for the local service', '高能力模型': 'High-capability model', '快速响应': 'Fast responses', '最新通用模型': 'Latest general-purpose model', '代码场景': 'Coding tasks', '高速代码场景': 'High-speed coding tasks', '稳定可用': 'Stable release', '高性价比': 'Cost-effective', '通用能力': 'General-purpose', '兼容保留': 'Compatibility option', '轻量模型': 'Lightweight model'
 });
+
+// F05 complete platform-model selection copy, supplied by shared i18n.
+dictEn.modelAccessTitle = 'Welcome to PINVOU';
+dictEn.modelAccessDesc = 'Sign in to use PINVOU platform models, or connect a local or third-party model.';
+dictEn.modelAccessLogin = 'Sign in';
+dictEn.modelAccessExternal = 'Use a local / third-party model';
+Object.assign(dictEn.uiSettingsDetail, {
+  platformModels:'Pinvou platform models',
+  platformModelsDesc:'Choose the default model for a new blank conversation. Existing conversations are unchanged.',
+  platformModelsLoading:'Loading platform models…',
+  platformModelsSignIn:'Sign in to your Pinvou account to choose a platform model.',
+  platformModelsUnavailable:'Platform models are temporarily unavailable. Try again later.',
+  platformModelsRetry:'Retry loading',
+  appliesToNewSessions:'New conversations',
+  modelDeprecated:'Retiring soon',
+  modelUnavailable:'Unavailable',
+  modelSwitchFailed:'Could not switch models. Try again.',
+});
+dictEn.uiModelReplacement = { title:'This model cannot continue the conversation', lead:'The original conversation and messages remain unchanged. Select a current model and continue in a traceable new branch.', create:'Create replacement branch', creating:'Creating…' , branchTitleSuffix:'Replacement model branch' };

@@ -1,0 +1,62 @@
+:root { color-scheme: light; font-family: Inter, "PingFang SC", "Microsoft YaHei", system-ui, -apple-system, sans-serif; background: #f7f8fa; color: #1a1d21; }
+* { box-sizing: border-box; }
+body { min-width: 320px; margin: 0; background: #f7f8fa; }
+button, input { font: inherit; }
+button, a { -webkit-tap-highlight-color: transparent; }
+.pv-auth-page { min-height: 100vh; display: grid; place-items: center; padding: 32px 16px; }
+.pv-auth-card { width: min(420px, 100%); padding: 40px; border: 1px solid #eceef2; border-radius: 12px; background: #fff; box-shadow: 0 16px 44px rgba(31, 35, 41, .06); }
+.pv-auth-header { margin-bottom: 24px; }
+.pv-auth-header .pv-brand { margin: 0 0 12px; color: #6b7280; font-size: 11px; font-weight: 650; letter-spacing: .14em; }
+.pv-auth-header h1 { margin: 0 0 8px; color: #1a1d21; font-size: 24px; line-height: 1.35; font-weight: 650; letter-spacing: -.02em; }
+.pv-auth-header > p:last-child { margin: 0; color: #6b7280; font-size: 13px; line-height: 1.65; }
+.pv-tabs { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; margin-bottom: 20px; padding: 4px; border-radius: 8px; background: #eceef2; }
+.pv-tabs button { height: 36px; border: 0; border-radius: 6px; background: transparent; color: #6b7280; cursor: pointer; font-size: 13px; }
+.pv-tabs button.active { background: #fff; color: #202124; font-weight: 600; box-shadow: 0 1px 4px rgba(31, 35, 41, .12); }
+.pv-message { margin: 0 0 16px; padding: 10px 12px; border: 1px solid #eceef2; border-radius: 8px; background: #f9fafb; color: #6b7280; font-size: 12px; line-height: 1.5; }
+.pv-message.error { border-color: rgba(217, 48, 37, .22); background: rgba(217, 48, 37, .06); color: #b3261e; }
+.pv-message.success, .pv-message.info { border-color: rgba(15, 157, 114, .2); background: rgba(15, 157, 114, .07); color: #087c5b; }
+.pv-form-fields { display: grid; gap: 16px; }
+.pv-field { display: grid; gap: 8px; }
+.pv-field > span:first-child { color: #3c4043; font-size: 12px; font-weight: 540; }
+.pv-field input { width: 100%; height: 44px; border: 1px solid #eceef2; border-radius: 8px; outline: none; background: #f9fafb; color: #202124; padding: 0 13px; font-size: 14px; transition: border-color .15s, box-shadow .15s, background .15s; }
+.pv-field input::placeholder { color: #9aa0a6; }
+.pv-field input:focus { border-color: #c8cdd4; background: #fff; box-shadow: 0 0 0 3px rgba(32, 33, 36, .04); }
+.pv-field input:invalid:not(:placeholder-shown) { border-color: #d93025; }
+.pv-password-wrap, .pv-inline-control { position: relative; display: flex; align-items: center; }
+.pv-password-wrap input { padding-right: 44px; }
+.pv-password-wrap input::-ms-reveal, .pv-password-wrap input::-ms-clear { display: none; }
+@keyframes pv-password-autofill-start { from { opacity: 1; } to { opacity: 1; } }
+.pv-password-wrap input:-webkit-autofill { animation: pv-password-autofill-start 1ms; }
+.pv-password-reveal-output { position: absolute; inset: 0; z-index: 1; height: 44px; overflow: hidden; border: 1px solid #c8cdd4; border-radius: 8px; background: #fff; color: #202124; padding: 0 44px 0 13px; font-size: 14px; line-height: 42px; white-space: pre; pointer-events: none; user-select: none; }
+.pv-password-reveal-output[hidden] { display: none; }
+.pv-eye { position: absolute; right: 4px; z-index: 2; width: 36px; height: 36px; display: grid; place-items: center; border: 0; background: transparent; color: #6b7280; cursor: pointer; }
+.pv-eye[hidden] { display: none; }
+.pv-eye svg { width: 18px; fill: none; stroke: currentColor; stroke-width: 1.7; }
+.pv-inline-control .pv-country { position: absolute; left: 13px; z-index: 1; color: #6b7280; font-size: 13px; }
+.pv-inline-control input { padding-left: 46px; padding-right: 108px; }
+.pv-code-button { position: absolute; right: 5px; height: 34px; min-width: 96px; padding: 0 10px; border: 1px solid #e1e4e8; border-radius: 6px; background: #fff; color: #202124; cursor: pointer; font-size: 12px; }
+.pv-code-button:disabled { cursor: not-allowed; color: #9aa0a6; background: #f5f6f7; }
+.pv-options { display: flex; align-items: center; justify-content: space-between; margin-top: 14px; color: #6b7280; font-size: 12px; }
+.pv-options label { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
+.pv-options input { width: 14px; height: 14px; accent-color: #202124; }
+.pv-options button, .pv-register-entry button { padding: 0; border: 0; background: transparent; color: #202124; text-decoration: none; cursor: pointer; }
+.pv-submit { width: 100%; height: 44px; margin-top: 20px; border: 0; border-radius: 8px; background: #ececec; color: #202124; cursor: pointer; font-weight: 600; font-size: 14px; transition: background .15s, transform .15s; }
+.pv-submit:hover { background: #e3e3e3; }
+.pv-submit:active { transform: translateY(1px); }
+.pv-register-entry { display: flex; justify-content: center; gap: 6px; margin-top: 20px; color: #6b7280; font-size: 12px; }
+.pv-register-entry button { padding: 0; border: 0; background: transparent; cursor: pointer; font-weight: 600; }
+.pv-password-accepted { padding: 10px 12px; border-radius: 8px; background: rgba(15, 157, 114, .07); color: #087c5b; font-size: 12px; }
+.pv-captcha-backdrop { position: fixed; inset: 0; z-index: 10; display: grid; place-items: center; padding: 16px; background: rgba(26, 29, 33, .28); backdrop-filter: blur(2px); }
+.pv-captcha { width: min(344px, 100%); padding: 24px; border: 1px solid #eceef2; border-radius: 12px; background: #fff; box-shadow: 0 18px 50px rgba(31, 35, 41, .18); }
+.pv-captcha h2 { margin: 0 0 6px; font-size: 17px; }
+.pv-captcha > p { margin: 0 0 16px; color: #6b7280; font-size: 12px; }
+.pv-captcha-stage { position: relative; width: min(var(--captcha-width), 100%); aspect-ratio: 7 / 3; overflow: hidden; border-radius: 8px; background: #eceef2; }
+.pv-captcha-stage > img:first-child { width: 100%; height: 100%; display: block; }
+.pv-captcha-piece { position: absolute; top: var(--piece-y); left: 0; transform: translateX(var(--piece-x, 0)); }
+.pv-captcha input[type="range"] { width: 100%; margin: 18px 0 0; accent-color: #6b7280; }
+.pv-captcha .pv-submit { margin-top: 12px; }
+@media (max-width: 480px) {
+  .pv-auth-page { align-items: start; padding: 16px; }
+  .pv-auth-card { padding: 28px 20px; }
+}
+@media (prefers-reduced-motion: reduce) { * { scroll-behavior: auto !important; transition: none !important; } }

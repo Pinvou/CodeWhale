@@ -16,7 +16,10 @@ use common::{
 use pinvou_cli::{ExitCode, parse_args};
 use pinvou3_lib::features::sessions::SerializableMode;
 use pinvou3_lib::platform::credential_store::CredentialState;
-use pinvou3_lib::platform::prefs::{ColorScheme, ModelPreset, SearchProvider, Theme, UserPrefs};
+use pinvou3_lib::platform::prefs::{
+    BUILTIN_ACCOUNT_PLATFORM_MODEL_ID, ColorScheme, ModelPreset, ModelSelectionRef, SearchProvider,
+    Theme, UserPrefs,
+};
 
 /// The models sandbox: the shared secrets-home preset
 /// ([`common::Isolation::SecretsHome`] — `PINVOU3_HOME` at the root, the file
@@ -48,11 +51,9 @@ fn clear_search_provider_keys() -> EnvGuard {
     EnvGuard::remove(&["METASO_API_KEY", "BAIDU_SEARCH_API_KEY"])
 }
 
-/// Official 适配：官方树的 load 路径每次事务都会 ensure 内置 llmapi 模型
-/// （`builtin_llmapi`，GUI 的 `delete_model_inner` 拒绝删除它），所以官方
-/// home 的模型基线是社区默认模型 + 内置模型两行。涉及行数/唯一性的契约
-/// 断言统一按这个基线展开。
-const OFFICIAL_BUILTIN_LLMAPI_ID: &str = "builtin_llmapi";
+/// Official 适配：load 路径每次事务都会 ensure 内置 Account Platform 模型，
+/// GUI 的 `delete_model_inner` 拒绝删除它。官方 home 的模型基线是社区默认模型
+/// + 内置模型两行；下列行数/唯一性断言使用 prefs 的同一公开身份。
 
 /// A command that COMPLETES with a non-success exit code (the probe families:
 /// the result is a payload on stdout and the exit code is the verdict), as
@@ -513,13 +514,13 @@ fn models_list_reports_fresh_default_model() {
     let json = run_ok(&["pinvou", "--output", "json", "models", "list"]);
     let value: serde_json::Value = serde_json::from_str(&json).expect("single-line json");
     let models = value["models"].as_array().expect("models array");
-    // Official 适配：全新 home 迁移社区默认模型之外还有内置 llmapi 模型一行。
-    let builtin = listed_model(&value, OFFICIAL_BUILTIN_LLMAPI_ID);
+    // Official 适配：全新 home 迁移社区默认模型之外还有内置 Account Platform 模型一行。
+    let builtin = listed_model(&value, BUILTIN_ACCOUNT_PLATFORM_MODEL_ID);
     assert_eq!(builtin["active"], false);
     assert_eq!(builtin["has_secret"], false);
     let community: Vec<&serde_json::Value> = models
         .iter()
-        .filter(|model| model["id"] != OFFICIAL_BUILTIN_LLMAPI_ID)
+        .filter(|model| model["id"] != BUILTIN_ACCOUNT_PLATFORM_MODEL_ID)
         .collect();
     assert_eq!(
         community.len(),
@@ -696,9 +697,15 @@ fn models_add_use_show_remove_round_trip_without_secrets() {
         run_ok(&["pinvou", "models", "use", &added_id]),
         format!("active: {added_id}")
     );
+    let selected = load_prefs();
     assert_eq!(
-        load_prefs().advanced.active_model_id.as_deref(),
+        selected.advanced.active_model_id.as_deref(),
         Some(added_id.as_str())
+    );
+    assert_eq!(
+        selected.advanced.default_model_ref,
+        Some(ModelSelectionRef::local(&added_id)),
+        "models use must update the authoritative selection, not only its legacy mirror"
     );
     let value = run_json(&["pinvou", "models", "list"]);
     let active_entry = listed_model(&value, &added_id);
@@ -740,7 +747,7 @@ fn models_add_use_show_remove_round_trip_without_secrets() {
     );
     assert!(load_prefs().model_by_id(&added_id).is_none());
 
-    // Official 适配：内置 llmapi 模型受保护且计入 min-1 计数，社区侧
+    // Official 适配：内置 Account Platform 模型受保护且计入 min-1 计数，社区侧
     // “移除 default 触发 last-remaining”的前提在 Official 不成立；改为钉住
     // 内置模型的保护性拒绝（GUI 的 `delete_model_inner` 同款语义）与
     // default 的存活。
@@ -748,35 +755,37 @@ fn models_add_use_show_remove_round_trip_without_secrets() {
         "pinvou",
         "models",
         "remove",
-        OFFICIAL_BUILTIN_LLMAPI_ID,
+        BUILTIN_ACCOUNT_PLATFORM_MODEL_ID,
         "--yes",
     ]);
     assert_eq!(code, ExitCode::Usage);
     assert!(
-        message.contains("builtin llmapi"),
+        message.contains("builtin Account Platform"),
         "the protected-builtin refusal must name the builtin: {message}"
     );
     assert!(
         load_prefs()
-            .model_by_id(OFFICIAL_BUILTIN_LLMAPI_ID)
+            .model_by_id(BUILTIN_ACCOUNT_PLATFORM_MODEL_ID)
             .is_some()
     );
     assert!(load_prefs().model_by_id("default").is_some());
 }
 
 /// The structural remove refusals are classified before the remove
-/// transaction: Official 的内置 llmapi 模型受保护（GUI 同款，先于 min-1 规则），
+/// transaction: Official 的内置 Account Platform 模型受保护（GUI 同款，先于 min-1 规则），
 /// 拒绝以 usage error 返回且不写任何状态。
 #[test]
 fn models_remove_refuses_the_protected_builtin_without_changes() {
     let _env = env_lock();
     let _home = sandbox_home("remove-protected-builtin");
+    // Establish load-time migrations before comparing a refused command's writes.
+    let _ = load_prefs();
     let before = read_settings();
     let (message, code) = run_err(&[
         "pinvou",
         "models",
         "remove",
-        OFFICIAL_BUILTIN_LLMAPI_ID,
+        BUILTIN_ACCOUNT_PLATFORM_MODEL_ID,
         "--yes",
     ]);
     assert_eq!(
@@ -785,12 +794,12 @@ fn models_remove_refuses_the_protected_builtin_without_changes() {
         "the protected-builtin rule must be a usage error"
     );
     assert!(
-        message.contains("builtin llmapi"),
+        message.contains("builtin Account Platform"),
         "the refusal must name the builtin: {message}"
     );
     assert!(
         load_prefs()
-            .model_by_id(OFFICIAL_BUILTIN_LLMAPI_ID)
+            .model_by_id(BUILTIN_ACCOUNT_PLATFORM_MODEL_ID)
             .is_some(),
         "the protected model must survive the refused removal"
     );
@@ -809,6 +818,10 @@ fn models_remove_refuses_the_protected_builtin_without_changes() {
 fn models_add_set_active_and_unknown_ids() {
     let _env = env_lock();
     let _home = sandbox_home("model-set-active");
+    UserPrefs::update_transaction(|prefs| {
+        prefs.set_default_model_ref(ModelSelectionRef::account_platform("catalog-before-cli"))
+    })
+    .expect("establish a source-aware catalog selection before the local CLI switch");
 
     let stdout = run_ok(&add_model(
         "kimi",
@@ -828,10 +841,41 @@ fn models_add_set_active_and_unknown_ids() {
     let id = added_model_id(&stdout);
     let prefs = load_prefs();
     assert_eq!(prefs.advanced.active_model_id.as_deref(), Some(id.as_str()));
+    assert_eq!(
+        prefs.advanced.default_model_ref,
+        Some(ModelSelectionRef::local(&id))
+    );
     let model = prefs.model_by_id(&id).unwrap();
     assert_eq!(model.context_window_tokens, Some(262_144));
     assert_eq!(model.max_output_tokens, Some(8_192));
     assert_eq!(model.reasoning_effort.as_deref(), Some("high"));
+
+    let before_refused_selection = read_settings();
+    for command in [
+        vec!["pinvou", "models", "use", BUILTIN_ACCOUNT_PLATFORM_MODEL_ID],
+        vec![
+            "pinvou",
+            "models",
+            "edit",
+            BUILTIN_ACCOUNT_PLATFORM_MODEL_ID,
+            "--name",
+            "must not persist",
+            "--set-active",
+        ],
+    ] {
+        let (message, code) = run_err(&command);
+        assert_eq!(code, ExitCode::Failed);
+        assert!(message.contains("concrete catalog model ID"), "{message}");
+        assert_eq!(
+            read_settings(),
+            before_refused_selection,
+            "a rejected carrier selection must roll back all model and selection edits"
+        );
+        assert_eq!(
+            load_prefs().advanced.default_model_ref,
+            Some(ModelSelectionRef::local(&id))
+        );
+    }
 
     for command in [
         vec!["pinvou", "models", "use", "missing-id"],
@@ -1486,7 +1530,7 @@ fn models_list_and_show_collapse_control_characters_in_human_rows() {
     let id = added_model_id(&stdout);
 
     let human = run_ok(&["pinvou", "models", "list"]);
-    // Official 适配：基线含内置 llmapi 一行（default + builtin + 新增）。
+    // Official 适配：基线含内置 Account Platform 一行（default + builtin + 新增）。
     assert_eq!(
         human.lines().count(),
         3,
@@ -1713,7 +1757,7 @@ fn models_edit_mutates_in_place_and_preserves_the_id() {
     );
 
     let prefs = load_prefs();
-    // Official 适配：基线为社区默认 + 内置 llmapi 两行，编辑后加新增一行。
+    // Official 适配：基线为社区默认 + 内置 Account Platform 两行，编辑后加新增一行。
     assert_eq!(
         prefs.advanced.saved_models.len(),
         3,
@@ -1733,7 +1777,12 @@ fn models_edit_mutates_in_place_and_preserves_the_id() {
 
     // --set-active works through edit too, still on the same id.
     run_ok(&["pinvou", "models", "edit", &id, "--set-active"]);
-    assert_eq!(load_prefs().advanced.active_model_id.as_deref(), Some(&*id));
+    let selected = load_prefs();
+    assert_eq!(selected.advanced.active_model_id.as_deref(), Some(&*id));
+    assert_eq!(
+        selected.advanced.default_model_ref,
+        Some(ModelSelectionRef::local(&id))
+    );
 }
 
 #[test]

@@ -45,11 +45,19 @@
 
 ## T9：Custom 路线的配置 wire 直达运行时（父仓 #625 × CodeWhale #79）
 
-- 状态：已随 2026-10-08/09 批次收口。底座侧 [Pinvou/CodeWhale#79](https://github.com/Pinvou/CodeWhale/pull/79) 以 squash `3035a022e`（`fix(route): honor custom table wire on runtime routes`，2026-10-08）合入 `pinvou3-clean`，并随该批次把登记头推进至 `0bc868ff0`（上游 v0.9.12 之上 57 个提交）；候选期结束——父仓 gitlink 即公开维护分支头，`scripts/fork-guard.sh` 的 `EXPECTED_HEAD`/`EXPECTED_COMMITS` 以第 0 节当前登记值为准，候选重钉义务解除。候选评审史：round-5 收口于 `86dd8e8d2`（方言别名单点解析、身份 scope 读取、app-server ingress 关门、preflight 按表方言校验、捕获/回放边角与 fixture/helper 整理，别名表共享与方言警告收窄）；round-6 十一路从零复审再收口于 `842c4a4bb`（authority-glued query URL 指纹碰撞闭合、wire 绑定客户端内部重解析钉、方言警告表名与发射钉、/provider 行协议钉、endpoint 指纹降级方向文档）；本节登记随父仓 #625 落地。
+- 状态：已随 2026-10-08/09 批次收口。底座侧 [Pinvou/CodeWhale#79](https://github.com/Pinvou/CodeWhale/pull/79) 以 squash `3035a022e`（`fix(route): honor custom table wire on runtime routes`，2026-10-08）合入 `pinvou3-clean`，并随该批次把登记头推进至 `0bc868ff0`（上游 v0.9.12 之上 57 个提交）；候选期结束——该批次父仓 gitlink 即公开维护分支头，当时 `scripts/fork-guard.sh` 的 `EXPECTED_HEAD`/`EXPECTED_COMMITS=57` 为该历史批次登记值，候选重钉义务解除。候选评审史：round-5 收口于 `86dd8e8d2`（方言别名单点解析、身份 scope 读取、app-server ingress 关门、preflight 按表方言校验、捕获/回放边角与 fixture/helper 整理，别名表共享与方言警告收窄）；round-6 十一路从零复审再收口于 `842c4a4bb`（authority-glued query URL 指纹碰撞闭合、wire 绑定客户端内部重解析钉、方言警告表名与发射钉、/provider 行协议钉、endpoint 指纹降级方向文档）；本节登记随父仓 #625 落地。
 - 问题：命名 `[providers.<name>]` 表的 `wire = "responses"` 从不到达真正服务轮次的客户端。`RouteRequest` 没有 wire 通道，`candidate.protocol()` 恒为 Custom 的向后兼容静态策略（`Fixed(ChatCompletions)`），而 #3384 宿主解析路线架构下每个 `Op::SendMessage` 都携带宿主解析的路线、`install_resolved_runtime_route` 经 `DeepSeekClient::from_candidate`（绑定 `candidate.protocol()`）重建客户端——配置写着 Responses、实际 POST `{base}/chat/completions`。认得该覆盖的只有环境性 spawn 客户端（`DeepSeekClient::new` 经 `provider_wire_format_for_config`）与 `provider_capability_with_wire`，二者都不在逐轮传输路径上。品悟父仓 PR #625 以命名表把 GPT 目录模型改走 Responses 线，三轮评审未察觉，正因运行时路径零测试钉（评审第四轮以可执行探针实证 `candidate.protocol() == ChatCompletions`）。
 - 修复：`RouteRequest.wire_override`（仅 `ProviderKind::Custom` 认，内建保持描述符策略）；tui 路线层 `custom_wire_override_for` 读活动表方言（与 `provider_wire_format_for_config` 同一 `provider_wire_dialect` 来源，三处构造性一致），客户端内 `rebound_for_model_protocol`/逐请求路由/限额查找钉传输自身 wire，端点域客户端不因引擎内换模型被降级。加密推理捕获从 Codex 专属放宽到所有发送 `include: ["reasoning.encrypted_content"]` 的 Responses 路线（Codex + Custom 表；DeepSeek 明文 `reasoning_text` 与 Concentrate 契约不变）；回放门按捕获 provider 串匹配，并收窄到提供方身份（命名表为 `custom/<table>`，一张表的加密推理不再回放到另一张表）；捕获随之放宽到所有发送该 include 的 Responses 路线（OpenCode Zen 花名册一并纳入，include 与捕获按构造覆盖同一路线集）。round-5 评审跟进收口剩余缝隙：方言别名表在 config crate 单点解析（`wire_dialect_override`；拼错的方言保持降级到旧 Chat 策略，已钉），运行时路线从身份 scope 后的配置读覆盖（非当前 custom 身份不再借用全局选中表的 wire），app-server `/v1/chat/completions` 入口线程同一方言使其 Chat-only 守卫对 `wire = "responses"` 表关门而非把 chat body 打向 Responses-only 端点，preflight（`route_is_valid_for_model`）按表自身方言校验，捕获/回放边角（Chat wire 不捕获；缺失或空 `encrypted_content` 跳过且流不断）均为突变验证过的钉。消费者普查：环境客户端、capability 报告、运行时候选三者对同一表方言构造性一致；config-free 的 `resolve_route_candidate*` 包装保持静态策略（仅校验/展示，不建客户端）。
 - 覆盖：config 侧 `custom_wire_override_mints_a_wire_true_candidate`、`wire_override_is_ignored_for_builtin_kinds`、`custom_wire_override_edges_stay_fail_closed`；tui 侧 `forkguard_named_table_wire_responses_reaches_the_runtime_candidate`、`forkguard_named_table_wire_anthropic_reaches_the_runtime_candidate`、`forkguard_named_table_without_wire_keeps_the_chat_default`、`forkguard_named_table_unrecognized_wire_keeps_the_chat_default`、`forkguard_identity_pinned_route_reads_the_pinned_tables_wire`、`forkguard_ambient_wire_override_does_not_leak_onto_pinned_chat_tables`、`forkguard_custom_responses_route_turn_client_posts_to_the_responses_endpoint`（wiremock 断言 POST 路径 `/v1/responses` 与 `store:false`/`include`/逐字模型）、`forkguard_custom_anthropic_route_turn_client_posts_to_the_messages_endpoint`、`forkguard_custom_responses_stream_captures_encrypted_reasoning_as_opaque_state`、`forkguard_custom_responses_captured_state_replays_on_the_next_turn`、`forkguard_custom_responses_replays_only_exact_model_opaque_reasoning_state`、`forkguard_fixed_endpoint_legacy_state_without_fingerprint_keeps_replaying`、`forkguard_repointed_builtin_legacy_state_without_fingerprint_fails_closed`、`forkguard_custom_chat_stream_does_not_capture_encrypted_reasoning`、`forkguard_custom_responses_capture_tolerates_missing_or_empty_encrypted_content`。guard 指纹 14 条（T9）。
 - 父仓配套（同 PR）：`uses_responses_wire` 增加 `DEEPSEEK_MODEL` 环境钉让位与官方 OpenAI 端点边界（非官方宿主保持 Chat，`openai_responses` 预设组是任意端点的显式 opt-in）；`findCloudProviderForModel` 自定义组仅匹配同 preset 记录（vm 实证回归钉）；`RESPONSES_ROUTE_PROVIDER` 注释改述真实引擎落点。round-5 评审收口 gate/落地劈叉：`provider()` 的 `OpenaiResponses` 臂施加与 wire 门相同的操作员压制（裸 `DEEPSEEK_MODEL` 钉把该组落回 vendor "openai" Chat 路线，gate 成为唯一裁决者，双向钉死）；官方宿主判定先小写再剥 `/v1` 后缀（`https://api.openai.com/V1` 计为官方）；新增测试钉 chat 时代存储的 `off` 仍逐字上线（引擎映射为 low）。app 侧无法直读候选协议（`ResolvedRuntimeRoute.candidate` 为 `pub(crate)`），wire 真值由底座测试与 guard 指纹承载。
+
+## 2026-10-15：引擎自起轮次保留同模型宿主限额（CodeWhale #108）
+
+- [Pinvou/CodeWhale#108](https://github.com/Pinvou/CodeWhale/pull/108) 已合入公开维护提交 `13ee4dfd2349f8ece3d2b7169031d09189cc9ec7`；候选 `d2ad2895497f898f5801b74acf85a24244aa2416` 与合入提交同树 `06f4b017cb9cff784268a30906a07aa31c9d1736`，不把候选 SHA 用作父仓 gitlink。
+- 在既有 #107 客户端修复之上，`current_runtime_route` 为 `/edit` 重发、subagent 完成恢复、空闲 shell 唤醒和 goal 续跑重新推导路由时保留已安装的宿主限额。仅当限额绑定当前 session model、重新解析的 wire model 相同且新旧限额确有差异时重申；模型漂移、wire 漂移与值相同路径保持原有解析。未新增 App 侧限额状态或替代底座能力。
+- `active_route_limits_model` 随每个限额写点同步；identity-keyed resolver 仅向 crate 内开放。该修复不改变 #54 的多根 `workspace_roots` 授权，也不替代 #107；既有能力与指纹全部保留。`Cargo.lock` 相对 `803e672bb` 同 blob `ea9bd73310d193445f6d7852b3b383e6f551b29b`，没有依赖升级。
+- 四条原结果测试：`current_runtime_route_carries_installed_host_limits`、`current_runtime_route_does_not_carry_limits_across_wire_drift`、`current_runtime_route_does_not_carry_limits_across_model_drift`、`current_runtime_route_leaves_matching_limits_unstamped`。父仓补充这些测试的源码指纹；源码存在、同树 CI 和本轮实际运行结果须分别披露，静态计数不能当作执行通过。
+- 合入前公开 review/inline 列表为空；PR 作者提供了测试与突变验证说明，后续评论同时披露既有全套并发 flaky。不能据此声称本轮重跑完整 Rust 或已获独立外审批准。当前适用门禁和父仓完整原生 CI 仍以对应精确 head 的实际结果为准。
 
 ## T10：Tachyon（驭光）本地引擎思考强度方言（CodeWhale #113，随 2026-10-20 批次收口）
 
@@ -62,25 +70,37 @@
 
 - 每次普通 shell 执行都会叠加 hook/task 环境（包括空映射）。旧 `CommandSpec::with_env` 会替换整个构造器映射，丢弃 `PYTHONIOENCODING=utf-8`，导致 Python 回退到 Windows 本地编码，而 PowerShell 和工具输出读取器仍期望 UTF-8。修复改为合并叠加值，并按 Windows 大小写不敏感规则处理显式覆盖；环境清理器、显式覆盖值及 Python 文件/默认文本编码策略不变。
 - 共用 shell 构造器覆盖前台、后台/PTY、交互式和编码 PowerShell 重试。既有直接 `CommandSpec::program` 消费方（只读命令的直接 argv 路径及 `codew sandbox run`）从未设置此 shell 默认值，不在本修复的覆盖声明内。
-- 已合入：2026-10-26 登记头 `6e1ee88ee` 已包含 #115–#122，当前 gitlink 见第 0 节；原候选提交的测试证据仍按下述执行边界保留。
+- 已合入：公开维护头 `11cba403d` 已包含 #115–#122、#114/#125 与 #123/#124/#129/#131/#133/#134/#135，当前 gitlink 见第 0 节；原候选提交的测试证据仍按下述执行边界保留。
 - 父仓祖先门禁回归同时隔离 fixture Git 命令与门禁子进程的继承 `GIT_*` 变量；污染环境指向独立临时仓库时，三种真实拓扑条件仍得到预期结果，外部仓库、工作区和索引逐字节不变。明确断言拓扑/指纹分界，避免静默跳过新插入的层。
 - 默认 Windows 子进程环境回归持有进程环境锁，在空/无关叠加测试前设置 GBK 哨兵，防止继承 UTF-8 设置而掩盖缺陷。探测使用实际 shell 语法，仅 PowerShell 执行编码命令，并强制 30 秒超时及子进程清理。此前作者在外层 `PYTHONIOENCODING=utf-8` 下恢复旧替换逻辑，强化回归失败（0 通过、1 失败），恢复最终源码后通过。
 - 原生端到端回归覆盖实际小写 `bash` 工具和后台 ShellManager，在 GBK 父环境下检查 Python stdout/stderr 及 64 KiB 前置输出。需 PATH 中的 Windows Python 和 PowerShell dispatcher；从 PowerShell 或 cmd 运行且取消 `SHELL` 设置。显式命令：`cargo test -p codewhale-tui --lib --locked forkguard_windows_python_stdio -- --ignored --test-threads=1`，可用 `CODEWHALE_TEST_PYTHON` 选择解释器。
 - 既有作者本地 Windows 验证：`cargo test -p codewhale-tui --lib --locked sandbox::tests -- --test-threads=1` 通过 23 项（19 项 `sandbox::tests::*` + 4 项 `repl::sandbox::tests::*`；Linux 因 cfg 差异选择 26 项）。两个显式工具测试分别用系统 Python 3.14 和捆绑 Python 3.13.14 通过（共四次），另一个 Git Bash 环境探测通过一次。此前恢复原构造器时，两个工具测试在两种解释器下均失败，表现为 Python 中文乱码而 PowerShell 中文正常。格式、架构和快速指纹检查通过。这些是既有作者证据，不代表后续文档修订重新执行了原生测试。
 - 父仓 Windows regression 步骤新增执行默认值合并、shell 默认值接线及大小写覆盖三个确定性筛选器；每个筛选器都要求至少执行一项测试。`91e262ba2` 的远端 [Windows regression job](https://github.com/Pinvou/pinvou-agent/actions/runs/39761405525/job/119767350755) 已实际执行并通过这三个筛选器；该证据对应这个旧头及不变的底座，不代替后续提交的 CI。两个需 Python 的显式测试仍为作者本地证据。`pinvou3-clean` CI 仅 Ubuntu，不运行 Windows 限定回归。Linux 上的 `windows_shell_default_env_forces_python_pipe_stdio_utf8` 只验证 helper 返回值，不验证构造器接线；Windows 大小写覆盖逻辑也需原生 Windows 回归。上游 codewhale-hq/Codewhale#7041 是未来上游 Windows CI 的贡献路径，不证明该 CI 已执行。未验证客户设备、PowerShell 7 或安装包发布。
 
-## 0. 当前状态（2026-10-29）
+## 0. 当前状态（2026-11-05）
 
-- 当前公开维护头与父仓 gitlink：`f1eb10efcfe2468fde42d1724d7f5f19d54b904c`（2026-10-29）。在上一登记头 `6e1ee88ee` 之上消费已合入的 #114 `fe90f72f9`（流式工具参数解析复用）与 #125 `f1eb10efc`（Skill 与宿主发现指引对齐）；本轮仅更新父仓引用，没有推进维护分支。
-- 实测历史：上游 v0.9.12 `dcd4c200f` 之上 86 个提交，r1 `1fafee7e2` 之上 71 个；84 个带 DCO sign-off。未签名的 squash 为 #107 `f27672935` 与 #116 `e9a7f48da1`，不能继续声称只有一个未签名提交。保留已发布历史，不改写维护分支。
+- 当前公开维护头与父仓 gitlink：`11cba403dc6bd6ca5c4dca55042785b03449ac8e`（2026-11-05）。#123 已合入为 `e5a8af221`，#124 为 `449edbf0b`，#129 为 `4e560354c`，#131 为 `e2a0e14fd`，#133 为 `4e75c6a07`，#134 为 `8a4719fd4`，#135 为 `11cba403d`；本轮仅更新父仓引用，没有推进维护分支。
+- 实测历史：上游 v0.9.12 `dcd4c200f` 之上 93 个提交，r1 `1fafee7e2` 之上 78 个；91 个带 DCO sign-off。未签名的 squash 为 #107 `f27672935` 与 #116 `e9a7f48da1`，不能继续声称只有一个未签名提交。保留已发布历史，不改写维护分支。
 - 不可变 tag `pinvou-v0.9.12-r3` 仍在 `61cb769be5b33abc64f64da4272f5b39a8b6c1fd`；r1 仍在 `1fafee7e26b60a59457a43bce50c63aa2ad9dbaf`。公开门禁仍要求 gitlink 等于维护头并验证 r3 标签，未放宽任何条件。
-- 实测 drift：525 files, +91397/-39288，净增 52109；255 个独立 `forkguard_*` 行为名（登记下限仍为 64）。原生 Windows 证据仅适用于原记录的执行提交，不扩展为本次集成树已执行；当前父仓 CI 和最终集成树审核仍须独立确认。
+- 实测 drift：540 files, +119210/-49666，净增 69544；301 个独立 `forkguard_*` 行为名（登记下限仍为 64）。原生 Windows 证据仅适用于原记录的执行提交，不扩展为本次集成树已执行；当前父仓 CI 和最终集成树审核仍须独立确认。
 
 ### 2026-10-29 公开维护头对齐（#114/#125）
 
 - #114 `fe90f72f9` 在 T1 内复用未变化的流式工具参数解析结果，保持 parser disposition、输入镜像、错误和终态失效语义；已有差分测试与真实引擎的交错、取消、网络失败和恢复回归随提交消费，不新增主题。
 - #125 `f1eb10efc` 在 T2/T3 内对齐 Skill、宿主工具发现与 deferred-tool 指引，升级内置 MCP discovery Skill 时仍保留用户修改；配置的 Skill 根保持稳定。已有 `forkguard_skill_upgrade_refreshes_shipped_mcp_discovery_and_preserves_user_edits` 与 `configured_skill_prompt_uses_a_stable_root_in_entries_and_warnings` 等结果式回归随提交消费。
 - 父仓同步 gitlink、guard 登记头/提交数及四条既有行为回归指纹，并将八条旧文案指纹更新为 #125 的等价契约：发现入口可用时优先使用、未被拒绝时仅按确切名称有界探测、schema 回执不代表执行或记录证据、不可用或拒绝时停止并披露限制。两个公开提交未修改 Cargo manifest 或锁文件，父仓无需重生成依赖锁；不修改底座源码、公开维护分支或不可变 r3 标签。
+- 验证按父仓门禁与原仓测试证据分开记录；原仓已合入和已有回归不代表本批次已重跑父仓 Rust 集成测试。
+
+### 2026-11-05 公开维护头对齐（#123/#124/#129/#131/#133/#134/#135）
+
+- #123 `e5a8af221` 在 T2 内释放被中断子任务永久滞留的写 claim（会话级写锁死锁根因），并让续接 spawn 继承 worktree 隔离路径规则；与 #119 六文件共享且 hunk 范围不相交，每项修复带红绿测试，F1 经变异验证。
+- #124 `449edbf0b` 在 T2 内固定子任务身份与完整输出恢复：精确及历史 ID 不回退同名任务，resume/mail/wait/inspect 保留捕获身份与真实结果并如实报告 gone；typed tool_call_id 与默认 artifact 命名空间分离。结构化摘要恢复 footer 收敛到共享 helper `model_context_recovery_footer`（指纹随迁至 truncate.rs）。
+- #129 `4e560354c` 在 T1/T2 内回移上游 run-completion API 与 Windows GNU LLVM bindings：两处 fork engine factory 暴露 cancel-safe 的精确 run 完成发布，exec 消费方在 Shutdown 投递与等待间共享两秒预算；rquickjs bindgen 仅对 Windows GNU LLVM 启用，无依赖版本或 lockfile 变更。
+- #131 `e2a0e14fd` 在 T3 内登记 tri-mode 安全模型引擎侧行为契约：host-armed guardrail prompts 与 authority-transition notice，含武装发布粘滞、preview 计划姿态、runtime pump 尊重 force_prompt、status 后缀只报真实翻转、窄化 provenance 轮次不误报 "(host)" 转换行等；`forkguard_*` 行为名随本批次显著净增。
+- #133 `4e75c6a07` 在 T3 内移除 fetch_url 工具描述失实的 "sandboxed" 声明，改写为注明 Bash 沙箱策略可能拒绝出站网络而 fetch_url 是进程内 HTTP 客户端；citation 与 login-wall 句保持不变。
+- #134 `8a4719fd4` 在 T3 内清扫 locale 包过时模式文案：补完 rail→workbar 改名的非英文一半，全部 value-only 替换，`en.json` 与基线逐字节一致。
+- #135 `11cba403d` 为 deps：undici 7.30.1 与 msal-node 7.1.2 的 CodeWhale 自带 npm lock 内刷新，父仓无依赖或锁文件变更。
+- 父仓同步 gitlink、guard 登记头/提交数（86→93），并按 #124 的真实迁移把 "Engine recovery names the complete returned result" 指纹从 `context.rs` 内联文案重钉到共享 helper `model_context_recovery_footer`（`truncate.rs`）；主题声明不变。两个依赖/本地化提交不触及 Cargo manifest 或锁文件，父仓无需重生成依赖锁；不修改底座源码、公开维护分支或不可变 r3 标签。
 - 验证按父仓门禁与原仓测试证据分开记录；原仓已合入和已有回归不代表本批次已重跑父仓 Rust 集成测试。
 
 ### 2026-10-23 批次维护集成（#115/#116/#117）
@@ -100,6 +120,11 @@
 - 底座候选半边（复审轮新增，封闭边界 ③）：`Op::SendMessage` / `Op::EditLastTurn` 增加宿主提交关联字段 `submission_id`，由该轮的 `TurnStarted` 逐字回显；全部运行时自启路径（idle 子代理完成、后台 shell 唤醒、goal 延续、composer shell 命令）恒回显 `None`；线协议 `EventMsg::TurnStarted` 携带同一增量字段（`serde(default)` 缺省缺席，向后兼容）。回归 `forkguard_turn_started_echoes_submission_id_self_starts_stay_none` 钉死回显契约：宿主提交轮的 `TurnStarted` 回显自身令牌、自启轮恒 `None`。该提交已随 #58 以 squash `f05b9acfa` 合入（2026-09-17），并随 2026-09-17 批次把公开 `pinvou3-clean` 推进至 `92427bd8d`。
 - 父仓配套（本 PR，与底座共同封闭 pinvou-agent#254）：`EnginePool::cancel` 的取消闭包在 `arm_pending_cancel_and_cancel` 的同一 state 锁临界区内领取 (epoch、已观察 turn_id、收口期) 同源身份快照，经 `turn_bound_cancel_action` 纯函数分派——绑定命中走 `cancel_turn_with_mode`（槽已切换时底座整体跳过、不发布处置）；目标轮尚未被 forwarder 观察到（submit→TurnStarted 窗口）与终态收口期收敛为仅 `publish_stop_disposition`、绝不开火——窗口内引擎槽可能已是延迟观察到的自主续跑轮活 token，无差别开火即 #254，真正在途的目标轮由同临界区内 arm 的 `pending_cancel` 在 TurnStarted 后按 turn 绑定重放取消（槽已切走则底座身份校验把重放整体丢弃）；forwarder 的 `pending_cancel` 重放改为 turn 绑定，且仅当事件回显的提交令牌与武装时记录的一致才消费重放：宿主提交路径（用户发送、多智能体、评测重放、编辑上一轮）经 `Pinvou3Bridge::next_submission_id` 统一铸造 `sub-<uuid>` 令牌并在武装时记入 lifecycle，超越自启轮的 `TurnStarted`（无令牌或异令牌）既不能消费重放、也不能把取消引到自身，宿主提交轮自身的回显到达时重放按 turn 绑定精确落地（app 回归 `overtaking_self_started_turn_started_cannot_consume_the_replay`）。消费闸门仅由提交令牌构成：武装时记录的 epoch 仅作溯源、不参与消费判定——窗口内无关自主轮可以完整跑完 start→terminal 生命周期，使目标轮自身的 `TurnStarted` 以 newly-active 身份推进 epoch，若以 epoch 为消费闸门会在回显精确匹配时误拒、静默丢失用户 stop（app 回归 `pending_stop_replay_survives_an_autonomous_lifecycle_before_the_target_starts` 按 started→terminal→目标 started 的 forwarder 顺序钉死该时序）。武装缺令牌今日不可达（全部宿主提交路径均铸造令牌），arm 站点会发出 `log::warn`，且无令牌重放与任何回显（包括 `None`）都不匹配、永不可消费（回归 `pending_cancel_armed_without_submission_id_is_never_consumed`），消费闸门因此不可能被静默重开。已知边界：① 级联取消（`Op::CancelSubAgents`）未随裁决收敛，绑定跳过时仍取消引擎当前全部子智能体（N 的遗留清理是停止契约，与 N+1 刚派生的子智能体在 app 侧不可区分）；② 入口即 idle 的 backstop（stop=clear 契约）刻意保留无绑定开火——该路径无目标轮可裁决，若引擎已自主续跑，命中其活 token 是 clear 契约的预期语义，瞄准已结束轮的 stop 入口快照为 Some、不会走到该分支；③ 原登记的追击超越窗口（自启后续轮的 `TurnStarted` 抢先消费重放并把取消引到自身、宿主 stop 静默丢失）已由本轮底座提交关联回显 + 父仓回显匹配消费闸门封闭（见上两条），该边界不再保留；④ 计划轮监督器（`wait_for_scheduled_terminal`）保留其先于 turn 绑定契约的无绑定 `cancel_with_reason(External)` 开火（自动化到期/停止权威，语义即整体叫停引擎当前活动）：开火点在观察到计划轮自身 `Started` 信号之后；先于该观察到达的取消请求会先闩锁，待 `Started` 观察到时才开火（等待超 30 秒则按 Timed out 放弃），落在该观察间隙内的自启续跑会承受这次无绑定命中——非本 PR 引入，保留原状；改走 turn 绑定 `cancel_turn` 属自动化契约变更，留作后续工作；⑤ 引擎回收（`reclaim_engine_entry` 经 `engine.cancel_current()`，删除/换模型/闲置收割）保留无绑定开火：回收即引擎拆除——条目已先行摘除、forwarder 随即中止并按需补发 Interrupted 终态、`Op::CancelSubAgents`+`Op::Shutdown` 按同通道 FIFO 收尾，轮次随引擎消亡，不存在「错误轮幸存」，若引擎已自主续跑而 forwarder 未观察，命中其活 token 属回收契约的预期语义。另一处已知有损角落：stop 武装后，若一条超越的自主续跑先跑完 start→terminal 重开 reserve 闸门、用户又在目标轮自身 `TurnStarted` 被处理前发送新消息，`reserve()` 的整体清理会丢弃该武装（重放无回显可匹配、静默失效）；窗口极窄且可恢复——目标轮真正开跑后再次 stop 即按 BoundTurn 精确命中。
 - 候选登记已回收：#58 落地后父仓 gitlink 随登记批次重钉（回收时为 `92427bd8d`，`EXPECTED_COMMITS` 相应推进），`CANDIDATE_HEAD`/`CANDIDATE_COMMITS=29` 机制移除；其后 #552 批次已把登记头推进至 `7fc36e587`（`EXPECTED_COMMITS` 36，见第 0 节表格）；指纹层保留底座回显契约回归与父仓超越序回归两条锚点；`verify-public-submodule.sh` 恢复绿（过渡期断言 gitlink = `pinvou3-clean` 分支头）。
+
+
+### 本轮维护头对齐
+
+固定维护提交 `803e672bb` 已包含 CodeWhale #92 的逻辑调用幂等身份契约：同一逻辑调用的重试复用 ID，不同工具循环调用生成独立 ID，沿现有 T1 宿主与模型调用边界登记。#92 最终 PR 树与维护合入 `0cb1aec47` 的树完全相同，25 个操作身份测试声明及已有指纹在当前维护头保留；这是源码保全证据，实际测试执行结果单独记录。主线 `3118c36b8` 尚无该能力，旧内容分支 `8b5a86390` 也不是维护头，不作为最终 gitlink。后续 #102 测试与未用 API 清理、#96 会话导出、#103 checkpoint 与 #104 toolbox 变更沿既有主题维护；不能仅以维护头身份代替回归验证。
 
 ## 1. 为什么本次使用 clean re-fork
 
@@ -200,6 +225,13 @@
 | `6e1ee88ee` | deps | CodeWhale 依赖 round-3：lock 刷新修 RUSTSEC-2026-0381/0382/0383 与 yanked clipboard-win；`codewhale-tui` 的 oauth2 改 `default-features = false`（HTTP 全走自带 reqwest，锁内 reqwest/rand 各收敛到单版本）；`codewhale-secrets` 从 keyring 3 迁移到 keyring 4.2（v1 `Entry`/`Error` API 不变；Linux 侧 keyring 4 无 keyutils-persistent 复合 store，内核 keyring 直写缓存随之取消，Secret Service 集合成为唯一持久权威 store，keyring 4 的 zbus Secret Service store 自带 secret-service crypto-rust feature，会话加密保持 RustCrypto，本 crate 无直接 secret-service 依赖）。crates 对父仓公开签名不变，父仓 `Cargo.lock` 随本 PR 重生成（#122） |
 | `fe90f72f9` | T1 性能 | 复用未变化的流式工具参数解析结果，保持解析 disposition、输入镜像与终态失效行为；差分测试及真实引擎交错、取消、网络失败和恢复回归随提交保留（#114） |
 | `f1eb10efc` | T2/T3 修复 | Skill 与宿主发现指引对齐真实能力，保留 deferred-tool probing、稳定 Skill 根和用户修改的内置 Skill；随提交消费对应结果式回归（#125） |
+| `e5a8af221` | T2 | 释放被中断子任务永久滞留的写 claim（会话级写锁死锁根因）并让续接 spawn 继承 worktree 隔离路径规则；与 #119 六文件共享且 hunk 范围不相交，每项修复带红绿测试，F1 经变异验证（#123） |
+| `449edbf0b` | T2 | 固定子任务身份与完整输出恢复：精确及历史 ID 不回退同名任务，resume/mail/wait/inspect 保留捕获身份与真实结果并如实报告 gone；typed tool_call_id 与默认 artifact 命名空间分离，classic session 输出复用不可变写入防规范化碰撞；partial FIFO 投递以仅测试编译的确定性钩子验证。结构化摘要恢复 footer 收敛到共享 helper `model_context_recovery_footer`（指纹随迁至 truncate.rs）（#124） |
+| `4e560354c` | T1/T2 | 回移上游 run-completion API 与 Windows GNU LLVM bindings：两处 fork engine factory 暴露 cancel-safe 的精确 run 完成发布（正常/异常完成在自有 run future drop 后发布，直接构造器报告 NotObserved），exec 消费方在 Shutdown 投递与等待间共享两秒预算，替代原无界 Shutdown send 并保留原任务结果；rquickjs bindgen 仅对 Windows GNU LLVM 启用。无依赖版本或 lockfile 变更（#129） |
+| `e2a0e14fd` | T3 底座登记批次 | tri-mode 安全模型（Plan/Auto/YOLO + 会话级 ask-on-guardrail 开关）引擎侧行为契约：host-armed guardrail prompts 与 authority-transition notice。武装发布粘滞、preview 计划姿态、runtime pump 尊重 force_prompt、status 后缀只报真实翻转、窄化 provenance 轮次不误报 "(host)" 转换行、Auto-Review 窄化降级结构化回执、协议 crate ChangeMode 载荷 serde 钉与隔离运行时诚实姿态回执等，经逐轮评审收敛；`forkguard_*` 行为名随本批次显著净增（#131） |
+| `4e75c6a07` | T3 | fetch_url 工具描述移除失实的 "sandboxed" 声明：改写为注明 Bash 工具的沙箱策略可能拒绝出站网络，fetch_url 本身是进程内 HTTP 客户端；citation 与 login-wall 句保持不变（#133） |
+| `8a4719fd4` | T3 本地化 | 清扫 locale 包过时模式文案：补完 rail→workbar 改名的非英文一半（11 个语言包 88 个 rail 词键），补齐多月未随英文发布的 must-translate 键并新增缺失门禁；全部 value-only 替换，`en.json` 与基线逐字节一致（#134） |
+| `11cba403d` | deps | undici 7.30.1 与 msal-node 7.1.2 的 npm lock 内刷新，关闭 `pinvou3-clean` 当时全部 4 条 open Dependabot 高危告警；仅 lockfile，无 manifest 或源码改动（#135） |
 
 除 #116 squash `e9a7f48da` 与 #107 squash `f27672935`（其合并提交信息未保留 sign-off 尾部，已留言知会上游维护者，见 CodeWhale#107）外，所有提交都含 DCO `Signed-off-by`。`b4c02616b` 包含大部分跨主题收口，历史粒度确实不利于 bisect；分支公开进入评审后没有为历史美化 force-push，而是追加带 sign-off 的提交修复评审和发布门禁问题，并用本表、指纹和行为测试弥补审计粒度。不可变 tag 已创建，后续不得重写。
 
@@ -208,6 +240,10 @@
 ### 保留内容
 
 - 对宿主公开 `AppMode`、`ApprovalMode`、Automation、Task、route 和 worker ledger API。当前兼容 facade 还包含 18 个 `pub mod`，父仓全部 Rust 源码中有 61 个文件、340 处直接引用；这些模块作为不稳定下游兼容桥刻意不进入生成 API 文档。这是已登记的收窄债务，不在本次热修中做破坏性改名。
+- F05 账户调用幂等（原固定补丁 `8b5a86390`，已通过 CodeWhale #92 纳入 2026-10-14 当时的维护提交 `803e672bb`）：模型逻辑调用幂等属于 T1 的执行期边界。宿主仅在账户 Gateway 路由的 `Config.request_idempotency_header` 显式启用 `Idempotency-Key`；字段不接受配置文件输入，普通模型保持原 HTTP 行为。`ModelClient` 与 `LlmClient` 的 operation-aware 默认方法兼容既有实现，具体 transport 按每个逻辑调用发送随机 UUID，而不是按 session、prompt 或静态 header 生成键。HTTP 重试、HTTP/1.1 后备及引擎内外层相同发送事实的流恢复复用该 ID；实际 prepared wire body、endpoint 或 provider 改变，或完整模型响应已经被接受后再继续推理、执行工具后跟进，均形成新模型调用和新 ID。新用户提交相同 prompt 也产生新 ID。Gateway 仍拒绝同键不同付款事实，不放宽其 fingerprint。此标识仅在 transport 生命周期内，不写入模型消息、session 历史、日志或 pinned prompt，KV-cache 前缀不变。回退是清除宿主 opt-in；原补丁以 `44921cf02` 为唯一父提交，父仓原 F05 提交历史继续保留；CodeWhale #92 的最终候选树与外部维护合入 `0cb1aec47` 完全相同，该批次曾以包含该能力的 `803e672bb` 为固定 gitlink；当前维护头以第 0 节为准。公开维护头严格校验、宿主 opt-in 回归和真实账户验收分别核验，源码包含性不替代门禁或验收。当前结果式回归名为 `forkguard_model_operation_http_retry_and_new_calls`、`forkguard_model_operation_opt_in_and_wire_identity`、`forkguard_model_operation_inner_and_outer_stream_retries`、`forkguard_model_operation_tool_followup_gets_new_id`；真实账户业务验收由父仓执行，loopback transport 与受控 Engine 回归不冒称模型或银行验收。通用接口可上游化，账户产品路由选择仍留在父仓。
+- A04 调用幂等的额外生产边界由 `forkguard_model_operation_http1_stream_keeps_id`、`forkguard_model_operation_child_retries_keep_id`、`forkguard_model_operation_vision_http_retry_keeps_id` 覆盖：子代理每个模型 round 的 timeout/transient 外层重试复用调用 ID，`image_analyze` 的独立 HTTP 重试从冻结路由 opt-in 传递同一调用 ID。不同工具调用或后继模型 round 仍分别生成新 ID；这些 loopback HTTP 回归不包含真实模型验收。
+- `forkguard_model_operation_preserved_partial_changes_call` 经真实引擎流恢复验证：交互模式已保留部分 assistant 输出并改变后续请求正文时，后续发送必须采用新的调用 ID。未产生内容且发送事实未变的恢复仍复用原 ID；不通过放宽 Gateway 指纹掩盖正文变化。
+- 显式启用调用幂等的路由绕过进程内非流式 response cache，避免同正文缓存跳过新调用或付款上下文的 Gateway 派发；普通模型保留既有确定性请求缓存。相同 HTTP 回归以 `temperature=0` 验证账户每次新调用实际发出不同 ID，同时普通路由的重复确定性请求仍命中本地缓存。
 - `resolve_runtime_route_with_limits` 保留 wire model、context/output 上限与 embedding alias。
 - #107 的 `client.rs` 保留同模型请求及同 wire model/protocol rebind 的冻结宿主额度；跨模型仍重解析，协议改变仍走既有重建路径。本轮随集成分支继承已合入的底座修复，gitlink 无独有增量，不修改底座源码、配置或依赖；保留已有下列两条结果式测试和对应指纹，不新增底座测试。
 - `EngineConfig.session_id` 在 Engine spawn 前绑定，所有子智能体/工作流事件带 owner session 并由宿主按 owner 过滤。
@@ -427,6 +463,27 @@
 - 教训登记（2026-09-23）：#65 原计划随父仓蜂群二期 PR 保持提交落位合入（不 squash），实际经 squash 合入——曾钉定的波次头 `4767c2816` 自公共 refs 悬空、fast-gate 可达性校验红，蜂群二期分支当日重钉到维护分支头恢复 gitlink=公开分支头相等。后续底座合入一律在合入后立即把 gitlink 重钉到公开分支头，不得钉定合入前的波次 SHA；r3 收口已恢复三方相等，公开可达性继续以 `scripts/verify-public-submodule.sh` 验证。
 - 后续发布仍不得降低公开校验或把本地 object 当成发布成功。
 
+### F05 成熟调用身份的宿主承接
+
+本节记录 2026-10-14 当时固定维护提交 `803e672bb87f5ee4e0ab56f1e23fa408ddbeeaa0` 的宿主承接；当前维护头以第 0 节为准。该批次沿用其逐调用身份（原 F05 补丁 `8b5a86390` 的能力已通过 CodeWhale #92 合入），不新增底座协议。账户运行时凭据向真实 `DtConfig.request_idempotency_header` 传递 `Idempotency-Key`；本地模型代理读取并原样转发底座的单次调用 ID，缺失或重复字段拒绝，不能按用户轮次和正文生成替代身份。同一用户轮次的不同模型调用各有身份，轮次统计的 `X-Pinvou-Logical-Turn-ID` 仍是独立分组字段。普通自配模型不启用该标记。该底座历史证据继承不等于新宿主或真实供应商验收通过。
+
+### F05 公开维护头 #107 的宿主限制修复
+
+消费已外部批准并合入的 `f276729350a501153969fc648986b6352ee438f2`（直接继承 `480bebf61`），沿既有 T1 宿主模型路由边界登记。同一 wire model/protocol 保留构造客户端时冻结的宿主上下文/输出限制，避免无宿主覆盖的静态目录重解析降级；跨模型仍重新解析身份和协议，不扩大任意模型的限制。公开提交已有 `model_aware_same_model_request_keeps_host_declared_route_limits`、`rebinding_the_same_model_keeps_host_declared_route_limits` 两条结果式测试；父仓新增指纹绑定这两条回归及真实生产条件，不重复实现底座修复。公开 PR #107 的最终审核头 `6e3c5c58b` 与维护合入提交内容相同；外部批准/公开 check 的结果归属原提交，不冒本机重跑或新父仓原生 CI。维护提交消息未含 DCO 行，因此当前总数表述为公开维护提交数，不声称全部带 sign-off；父仓本次提交仍遵守有效 DCO。不可变 r3 标签和严格 gitlink=公开维护分支头门禁保留。
+
+
+### F05 公开维护头 #54 的单执行根兼容与 Web 元数据边界
+
+本节记录 2026-10-14 批次：消费当时已外部批准并合入的 `803e672bb87f5ee4e0ab56f1e23fa408ddbeeaa0`（当前维护头以第 0 节为准），直接继承 #107 的 `f27672935`。#54 最终审核头 `be2cd01efd6fb606e19765c7e00c565191ebea56` 与维护合入提交树同为 `31a81e54a288045aca63786288601a98b94b1f8b`；外部 7 项成功 source checks 属于该原提交，不代表新父仓或本机编译已验证。新增能力沿既有 T1 宿主配置/Session 和 T2 工具权限登记，不增加主题。该底座批次实际为 100 个文件、+14904/-945；既包含 workspace-roots 生命周期，也改变单根 operand cwd、symlink 与缺失路径后 `..` 的判断，不能以“单根入口未变”声称底座行为不变。
+
+2026-10-14 当时的父仓适配：`build_engine_config` 的输入仅为 `EngineConfig::default()`，显式传空 `workspace_roots`；普通/项目绑定/计划和多智能体配置只用既有 execution 根，`SessionRoots.ledger` 仍仅提供 `subagent_state_root`。当时 `sync_session` 同样显式空附件，由底座替换为当前 primary 的单根集合，不继承上个 Session 的附件。六个既有 `ExecPolicyContext` 测试补齐空根字段，原 deny、wrapper 和 approval 断言保留；该批次未新增磁盘根登记、multi-root UI 或授权入口。
+
+2026-10-22 集成 main 工作区能力后的宿主接线：默认配置仍为空附件；实际非辅助会话的 spawn、普通同步和发布前冷同步都消费当前会话冻结的 keychain，不把 `SessionRoots.ledger` 当作工具授权。底座 `SyncSession` 会无条件替换根集合，因此冷同步不能再发送空附件清掉刚由 spawn 安装的 keychain。两同步入口共用 `sync_session_workspace_roots`，辅助会话不调用 resolver，旧无快照会话仍按空附件退化为 primary 单根。普通 `send`、冷同步 `try_send` 和公开 entry 的顺序不变；新增两个宿主 resolver/payload 回归，保留 main 的 keychain payload 与本分支轮次所有权回归。Web 逐根脱敏改用等价的完整 `std::path::PathBuf` 名称，并同步指纹；未改 CodeWhale 源码或 gitlink。这些指纹只登记覆盖，隔离函数测试不代替完整原生应用验收。
+
+持久化或导入的 `SessionMetadata.workspace_roots` 仍可能非空。普通 Web/Relay 元数据、Web saved session 和 native-code Web session list 已消费同一 `redact_session_metadata_for_web_in_place`；现在每项复用原 `redact_workspace_path_for_web`，仅传末级目录名。Native 元数据保留原始根集合。父仓行为测试 `forkguard_web_session_projection_redacts_attached_roots_and_keeps_native_metadata` 对 Unix/Windows 非空集合断言实际序列化 JSON、两个 Web 投影、Native 原值和旧空字段省略；`forkguard_engine_config_keeps_only_execution_root` 断言实际宿主配置不纳 ledger，底座原单根物化回归另由指纹绑定，原 scheduled 测试继续断言空附件。
+
+新增 guard 指纹绑定上述生产接线与父仓回归，以及底座 `normalize_workspace_roots_puts_cwd_first_and_dedups`、`normalize_workspace_roots_drops_empty_and_relative_entries`、`sync_session_workspace_roots_ride_the_wire_only_when_present`、`sync_session_replaces_workspace_roots_for_the_next_turn`、`tool_context_for_turn_materializes_session_workspace_roots`、`workspace_write_drops_a_root_that_canonicalizes_to_the_filesystem_root`、`exec_judged_cwd_resolves_absent_interior_behind_symlink`。这些名字及源码指纹是覆盖登记，实际执行结果另行记录；不可变 r3 标签、#92 幂等身份与 #107 三条指纹、严格公开维护头门禁均保留。
+
 ## 14. 2026-10-22 #701 桥接面对齐（T0）
 
 - T0-a（纯搬运，本批）：官方 `pinvou3-app/src/shared/bridge-shared-helpers.js` 以下游缺失的 community 合并面对齐。搬运基准取 community `ef98a715ee`（#746 `0baf7fa6c` 的父提交，即 #701 落定、#746/#749 未入的版本）；#746（tool 卡重放索引/toolMeta LRU）与 #749（artifact replay 查找快路径）对 helpers 的全部 hunk 本批不搬运，分别留待 T2/T3 行为 PR。共搬入 77 个共享函数（a1 清单 73 个 C1 + auxChat 簇依赖 + 4 个 C1 消费者强依赖的小函数：`upsertRecentRunRow`、`readDraftWorkspaceRecents`、`writeDraftWorkspaceRecents`、`sessionMentionSplitter`），新增 `auxChat` cluster、`STATE_SLICE_FIELDS` IIFE 静态导出，cluster 导出名单补齐至上游口径；sharedBridgeBase 作用域随搬运补入上游常量 `DRAFT_WORKSPACE_RECENTS_KEY`、`REBIND_RECONCILE_WINDOW_MS`、`PinvouFU`+`fmtMiB`/`fmtKiB`/`fmtDuration`/`fmtTok`。共享函数计数 238 → 315。官方 lane 文件与 index.html 本批零改动（内联残留壳化、lane deps 接线与 `STATE_SLICE_FIELDS` 消费方改指留待 T0-c/T0-d/T0-e）；`FORWARDER_DEP_NAMES` 补 9 个 lane 前向器名，官方 lane 传入的同名 deps 继续覆盖共享实现，运行时行为不因本批改变。
@@ -457,7 +514,22 @@
 - **X 残差收口**：helpers 7 个零消费导出面残差（isTmpPath/memoryWriteLabel/memoryWriteStatusLabel/normalizeMemoryCandidateText/refreshPersonas/stripInternalToolRuntimeSuffix/upsertPendingMemoryCandidate）从 web/tauriMain/tauriArtifactTracker/tauriMemory/tauriPersonas 五簇导出名单移除（基座定义与内部消费保留，与上游导出面一致）；`tests/helpers/native-tool-output-harness.mjs` 脚本清单正则补 `shared/tool-store-events.js`（index.html 载入序）。协议摘要与 expectedSharedBaseHash 为 invoke/listen 命令签名面，本批无命令增删，实测全量协议测试通过、无需重算。
 - 测试结果：全量 `npm run test:node` 1857 tests / 1840 pass / 0 fail / 17 skipped（较 T0-d 基线 1835 净增 5：voice_mode_parity +1、bridge_lane_deps +1、session_nav_race_web +3）；ui_smoke 58/58、kb_smoke 55/55（build:ui 后）；biome 改动文件 0 error；architecture-guard passed。
 
+### 2026-10-22 主线 #701 提取与 Account 桥接组合
+
+本次组合保留第 14 节的 shared helpers、独立 tool-store 事件与主线 hydration 修复。
+Account 的模型引用切片（当前、草稿、默认及目录完成标记）进入同一个共享注册表；
+terminal builder 继续保留同轮次 billing_notice，桌面原有错误转换先于共享记录写入。
+具备 Account 专用语义的目录读取、typed model selection 和 timeline ownership 保留在
+原 lane；草稿选择不写全局默认，传输失败不冒充权威空目录。当前公开的有效模型配置和
+compactNow 调用面继续保留，并未沿主线旧消费者清单静默退休。
+
+组合回归位于 `account_bridge_shared_composition.test.mjs`，执行实际共享实现和 Web
+domain adapter；桌面 terminal 测试提取实际生产函数并使用受控依赖。此类 Node 验证
+不等同完整原生构建、真实 Engine 或浏览器验收；先前现场与原生未验证边界保持。
+
 ### 14.4 T2（community#746 tool 卡重放索引回流，本批）
+
+下列 T2 说明与计数保留 main #2076 当时的历史语境，包括当时的 llmapi 启动桩差异；它们不是当前 Account 组合的新增验收，也不恢复已退休的旧模型权威。当前组合另见末尾 2026-10-23 记录。
 
 - 移植基准 community `0baf7fa6c`（#746 合并版）对 helpers 的全部 4 个 hunk，落到 T0 之后的树（helpers 簇即 #746 前夜 `ef98a715ee` 形态，逐字落位、零冲突）：① `updateToolItem` 的结果写入器抽为共享私有函数 `applyToolItemResult`（web+tauriTerminal 簇内）；② `rerenderFromMessagesCore` 重放期建 `firstToolItemById` Map 并经 `backfillToolItem` 回填——普通 string toolId 走 Map 首卡匹配（与 `updateToolItem` 语义一致，不再全量扫描 chatItems），legacy 非 string ID 委托 lane.updateToolItem 保留严格相等扫描；③ 重放工具卡 `addChatItem` 时登记首卡；④ careful 拦截与 load_skill 两处结果回填改走 `backfillToolItem`。官方挂起回流项 #2044（community#746）由此解锁。无 invoke/listen 命令面增删，`bridge_domain_protocol` 全量实测通过，expectedSharedBaseHash 无需重算。
 - 测试移植（3 文件 + 1 新文件）：`conversation_replay_tool_backfill.test.mjs` 上游逐字新文件（tauri/web ×7 共 14 tests，真实 helpers + host hooks vm 装载：完整卡保序/首重复卡/工具卡 meta 生命周期、legacy ID 严格相等、结构化输出身份、专用卡排除、重放/renderer 失败后索引重建、string 回填不回扫先序卡、host 特有未决 sweep）；`session_nav_race_web` +1（web 冷重放重复 ID 首卡匹配 + 缓存会话导航往返）；`tauri_bridge_state_identity` 追加重放段（桌面公开冷载路径 + 重复 ID + 不可变订阅 + 旧发布工具卡不被后续导航变异）。
@@ -497,6 +569,18 @@ Recount at this head:78 registered commits,76 with a signoff; #116's squash mess
 The public verifier advanced to `ea9fdc90f` (CodeWhale#117) between the parent and child pushes. The entire production delta from `e9a7f48da` is one Web `fields.description` string; execution, parsing, public signatures, dependencies and persisted schema are unchanged. The added resultful test drives advertised selectors through the real parser and verifies unsupported recursive descent/filters. The new fingerprint is under existing T2; no new fork patch/topic is introduced. Recount79 registered/77 signed commits; #107/#116 remain the only missing-footer exceptions.
 
 The preceding e9 execution regressions are retained as such. This help-only update is checked through current consumer compilation, Clippy and the current foundation schema/fork contracts; retained prior full-suite counts must not be presented as fresh runs at this documentation-only head.
+### 2026-10-23 主线 #2076 T2 与 Account 桥接组合
+
+本次组合同时保留上面的 Account 模型引用、权威目录快照、typed selection、草稿导航及 compactNow 公共面，与 14.4 的工具卡重放索引。共享顶层函数计数为 315（本分支 314 + 私有 applyToolItemResult；main 为 314），新结果写入器只依赖参数，Map 仅属于单次重放，不改变各 lane 的 deps/forwarders/导出。
+
+组合验证继续使用 conversation_replay_tool_backfill、session_nav_race_web、tauri_bridge_state_identity、account_bridge_shared_composition、bridge_lane_deps 和 bridge_domain_protocol 等实际生产实现回归。无 invoke/listen 命令面或 CodeWhale gitlink/Rust 改动，协议摘要、既有 fork 指纹和行为名保持；没有为计数变化伪造新命令摘要。作者证据及私有因果控制另存，不继承 14.4 的历史全量结果，也不冒称本组合完成真实原生、Engine、浏览器或现场验收。
+
+### 2026-10-23 复审对齐合并（main 3555d5567 → PR #2053，复审侧执行）
+
+- 对齐范围：#2027 失败诊断 feedback 面（4 命令 + web 平台拒绝桩）、T3/T4a/T4b 桥接壳化、#2081/#2083/#2084/#2085 回流与 0.10.14。冲突消解保全双方：feedback 诊断面并入 tauri facade 与 web domain-adapter；Account 侧 models/interaction 扩面（getEffectiveModelConfig、loadEffectiveModelConfig、switchModelRef、compactNow）保留。web lane create deps 沿用 main T4b 壳化形态（98 键）：lane 侧 freshBuffer 等同名函数已是委托壳，不得再作为 forwarder dep 传回共享核（否则 base 重绑定到壳造成自引用递归——freshBuffer 栈溢出被 ensureSession catch 吞掉、equipPersona 静默放弃，实测复现后按 main 形态消除）。
+- **F-B1 退役登记（覆盖 M6 两条钉子）**：旧 llmapi 闭源服务面 `prepareBackendManagedModel` / `modelAvailabilityError`（tauri settings lane）随 Account Platform 集成本PR整体退役——llmapi JS 面全部删除（facade 簇、启动刷新循环、web `llmapi: {}` 域、契约清单），模型权威改由 Account 模型门禁（getEffectiveModelConfig/loadEffectiveModelConfig）承担。fork-guard M6 对应两条 F-B1 钉子撤销，其余 F-A/F-B2/B3/B4/F-C1/裁决①钉全部保留且实测通过。Rust 侧 llmapi_hub 的 11 文件处置属本 PR 主体变更，其完整性由 PR 评审独立核验。
+- 组合实测：`sharedFnCount` = 314（main T4b 后 313 + Account 公共 compactNow；T2 期 315 口径已被 T4b 裁决③ clearVoiceInput 整删覆盖）；`bridge_domain_protocol` artifacts 域摘要维持 main T4b 值 `e4cd72cc…`（Account 组合未触碰 artifacts 域命令面）；web lane deps 按 main T4b 形态 98 键实测对齐；`bridge_lane_deps` / `bridge_domain_protocol` / `bridge_domain_contract` / pet 三件套实测通过。上文 2026-10-23 组合记录中"共享顶层函数计数为 315"为该次组合时的历史口径，非当前合并树数值。
+
 
 ## 2026-10-26 consumed baseline: tool-output recovery, subagent name lifecycle, deps round-3 (T2/T1)
 
@@ -532,6 +616,10 @@ Official 已有 `core::panic_hooks::chain` 互斥注册器本体与远控/comput
 - 后续边界分别由公开仓 pinvou-agent#769（可选检索摘要校验）、pinvou-agent#770（极小预算尾行、字符/字节及恢复后 route/wire）、pinvou-agent#771（artifact 配额、transcript 重复、保留/七天检索到期）、pinvou-agent#772（生产端上限、planner 可达性、上游差异，以及 composer-bang 保存失败、相对路径大小观测、旧行数回退和 /status 指标）跟踪；没有把这些后续项冒称已完成。native_memory、handle、lsp 和子代理协调在引擎前丢弃的尾部也不能恢复；完整首次 fetch 信封不保证后续路由缩小时所有 Web 信封重新发布引用。
 - 本节回流只在 Official main 已有指纹之外补充 24 项 T2 检查，均与当前 gitlink `6e1ee88ee` 匹配。它们覆盖结构化结果遗漏、恢复提示、真实 gate/子代理 DTO、完整 fetch 信封、不可变 artifact、检索激活及串行/并行/聚合派发合同；不改生产代码、gitlink、维护计数、已有谓词或执行层。既有底座原生测试/变异证据仍只属于其原提交；本轮指纹检查不等于重新执行这些原生测试，也不构成发布验证。
 - 历史变异验证工作流保留在 CodeWhale 的验证专用分支 `validation/returned-result-20261024`，提交为 `b4eb108335a99556429b11191b9a2dabadbd23c8`（六项指定测试 × 正常分支及三个反例）。它相对当时源码提交只改验证工作流，不属于已合入的生产 CI，也不在本 PR 引入；本次核实该公开分支仍指向此提交，不将旧执行回执扩展为当前底座重新执行。
+
+## 2026-10-26 账号平台分支同步 main
+
+本次以普通 merge 同步 main `c5e2e174e`，消费其公开 CodeWhale `6e1ee88ee`、工具结果恢复与子代理生命周期依赖登记，以及会话和定时任务修复。保留本分支已审核的 age `=0.11.5` 安全修复、账户宿主 opt-in 和现有交互协议登记；父仓证书锁图继续遵循原受控守卫。实际组合验证另行记录，不继承 main 的测试为本分支已运行结果。
 
 ## 2026-10-31 consumed baseline: controlled-session navigation ownership (T4c)
 
