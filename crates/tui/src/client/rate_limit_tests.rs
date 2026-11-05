@@ -1,6 +1,122 @@
 use super::*;
 
 #[tokio::test]
+async fn forkguard_rate_limit_native_and_raw_errors_reach_both_senders() {
+    use wiremock::matchers::method;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+    for isolated in [false, true] {
+        for escaped in [false, true] {
+            for (status, raw, expected) in [
+                (
+                    200,
+                    r#"{"base_resp":{"status_code":2045,"status_msg":"weekly plan quota exhausted fixture-config-secret"},"retry_after":7200}"#,
+                    "window",
+                ),
+                (
+                    429,
+                    r#"{"base_resp":{"status_code":1002,"status_msg":"retry in 7200s fixture-config-secret"}}"#,
+                    "window",
+                ),
+                (
+                    429,
+                    r#"{"error":{"message":"opaque fixture-config-secret"},"detail":"Billing quota has been exhausted"}"#,
+                    "billing",
+                ),
+            ] {
+                let server = MockServer::start().await;
+                let secret = format!("fixture-secret-{}", uuid::Uuid::new_v4());
+                let echoed = if escaped {
+                    secret
+                        .chars()
+                        .map(|ch| format!("\\u{:04x}", u32::from(ch)))
+                        .collect::<String>()
+                } else {
+                    secret.clone()
+                };
+                let raw = raw.replace("fixture-config-secret", &echoed);
+                Mock::given(method("POST"))
+                    .respond_with(
+                        ResponseTemplate::new(status).set_body_raw(raw, "application/json"),
+                    )
+                    .expect(1)
+                    .mount(&server)
+                    .await;
+                let mut client = DeepSeekClient::new(&Config {
+                    provider: Some("minimax".into()),
+                    providers: Some(crate::config::ProvidersConfig {
+                        minimax: crate::config::ProviderConfig {
+                            api_key: Some(secret.clone()),
+                            base_url: Some(server.uri()),
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                })
+                .unwrap();
+                client.isolated_request_state = isolated;
+                let error = client
+                    .for_operation(uuid::Uuid::new_v4())
+                    .send_json_with_retry(&server.uri(), &serde_json::json!({"fixture":true}))
+                    .await
+                    .unwrap_err();
+                let typed = error.downcast_ref::<LlmError>().unwrap();
+                assert!(!error.to_string().contains(&secret));
+                assert!(!error.to_string().contains(&echoed));
+                let diagnostic = if expected == "billing" {
+                    "opaque"
+                } else if status == 200 {
+                    "weekly plan quota"
+                } else {
+                    "retry in 7200s"
+                };
+                assert!(error.to_string().contains(diagnostic));
+                if expected == "window" {
+                    assert!(
+                        matches!(typed, LlmError::QuotaWindow { retry_after: Some(delay), .. } if *delay == Duration::from_secs(7200))
+                    );
+                    if !isolated {
+                        assert!(
+                            client.shared_quota.remaining().unwrap() > Duration::from_secs(7190)
+                        );
+                    }
+                } else {
+                    assert!(matches!(typed, LlmError::QuotaExhausted(_)));
+                }
+                assert_eq!(server.received_requests().await.unwrap().len(), 1);
+            }
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn forkguard_rate_limit_local_tokens_consume_active_budget() {
+    let client = DeepSeekClient::new(&Config {
+        provider: Some("custom".into()),
+        api_key: Some(uuid::Uuid::new_v4().to_string()),
+        base_url: Some("https://fixture.example.test/v1".into()),
+        ..Default::default()
+    })
+    .unwrap();
+    *client.rate_limiter.lock().await = TokenBucket {
+        enabled: true,
+        capacity: 1.0,
+        tokens: 0.0,
+        refill_per_sec: 0.0001,
+        normal_refill_per_sec: 0.0001,
+        last_refill: Instant::now(),
+    };
+    assert!(
+        crate::llm_client::rate_limit::active_timeout_total(
+            Duration::from_secs(2),
+            client.wait_for_rate_limit(),
+        )
+        .await
+        .is_err()
+    );
+}
+
+#[tokio::test]
 async fn forkguard_rate_limit_unknown_quota_sender_and_billing_boundary() {
     use wiremock::matchers::method;
     use wiremock::{Mock, MockServer, Request, ResponseTemplate};

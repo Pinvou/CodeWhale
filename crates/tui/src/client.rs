@@ -3284,7 +3284,7 @@ impl DeepSeekClient {
             limiter.delay_until_available(1.0)
         };
         if let Some(delay) = maybe_delay {
-            crate::llm_client::rate_limit::wait(delay).await;
+            tokio::time::sleep(delay).await;
         }
     }
 
@@ -3404,6 +3404,61 @@ impl DeepSeekClient {
                 })?;
         }
         Ok(())
+    }
+
+    fn disclose_http_error(&self, status: u16, raw: &str) -> String {
+        fn redact_strings(value: &mut serde_json::Value, secrets: &[String]) {
+            match value {
+                serde_json::Value::String(text) => *text = redact_model_bound_text(text, secrets),
+                serde_json::Value::Array(values) => {
+                    for value in values {
+                        redact_strings(value, secrets);
+                    }
+                }
+                serde_json::Value::Object(fields) => {
+                    for value in fields.values_mut() {
+                        redact_strings(value, secrets);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let raw = match serde_json::from_str::<serde_json::Value>(raw) {
+            Ok(mut value) => {
+                redact_strings(&mut value, &self.model_bound_secret_values);
+                value.to_string()
+            }
+            Err(_) => raw.to_owned(),
+        };
+        let raw = redact_model_bound_text(&raw, &self.model_bound_secret_values);
+        let safe = sanitize_http_error_body(Some(self.api_provider.display_name()), status, &raw);
+        redact_model_bound_text(&safe, &self.model_bound_secret_values)
+    }
+
+    fn classify_http_error(
+        &self,
+        status: u16,
+        raw: &str,
+        safe: &str,
+        hint: Option<Duration>,
+    ) -> LlmError {
+        let hint = hint
+            .max(crate::llm_client::rate_limit::body_delay(raw))
+            .max(crate::llm_client::retry_delay_from_error_body(raw));
+        let route = LlmError::from_http_response_with_retry_after(status, safe, hint);
+        match crate::llm_client::rate_limit::provider_error(
+            self.retry_provider_surface(),
+            status,
+            raw,
+            safe,
+            hint,
+        ) {
+            Some(LlmError::QuotaExhausted(_)) if matches!(route, LlmError::QuotaExhausted(_)) => {
+                route
+            }
+            Some(native) => native,
+            None => route,
+        }
     }
 
     fn retry_provider_surface(&self) -> &str {
@@ -3571,13 +3626,8 @@ impl DeepSeekClient {
                         match crate::llm_client::rate_limit::inspect_json_envelope_with_disclosure(
                             self.api_provider.as_str(),
                             response,
-                            |status, raw| {
-                                sanitize_http_error_body(
-                                    Some(self.api_provider.display_name()),
-                                    status,
-                                    &redact_model_bound_text(raw, &self.model_bound_secret_values),
-                                )
-                            },
+                            Some((stream_entry::stream_open_timeout(), self.stream_idle_timeout)),
+                            |status, raw| self.disclose_http_error(status, raw),
                         )
                         .await
                         {
@@ -3604,25 +3654,10 @@ impl DeepSeekClient {
                         record_provider_response(self.api_provider, status.as_u16());
                         let retry_after = extract_retry_after(response.headers());
                         let raw_body = bounded_error_text(response, ERROR_BODY_MAX_BYTES).await;
-                        let body = sanitize_http_error_body(
-                            Some(self.api_provider.display_name()),
+                        let body = self.disclose_http_error(status.as_u16(), &raw_body);
+                        let error = self.classify_http_error(
                             status.as_u16(),
                             &raw_body,
-                        );
-                        if let Some(error) = crate::llm_client::rate_limit::provider_error(
-                            self.retry_provider_surface(),
-                            status.as_u16(),
-                            &raw_body,
-                            &body,
-                            retry_after,
-                        ) {
-                            self.remember_retry_minimum(&error).await?;
-                            return Err(error);
-                        }
-                        let retry_after =
-                            retry_after.max(crate::llm_client::rate_limit::body_delay(&raw_body));
-                        let error = LlmError::from_http_response_with_retry_after(
-                            status.as_u16(),
                             &body,
                             retry_after,
                         );
@@ -3749,13 +3784,11 @@ impl DeepSeekClient {
                         crate::llm_client::rate_limit::inspect_json_envelope_with_disclosure(
                             self.api_provider.as_str(),
                             response,
-                            |status, raw| {
-                                sanitize_http_error_body(
-                                    Some(self.api_provider.display_name()),
-                                    status,
-                                    &redact_model_bound_text(raw, &self.model_bound_secret_values),
-                                )
-                            },
+                            Some((
+                                stream_entry::stream_open_timeout(),
+                                self.stream_idle_timeout,
+                            )),
+                            |status, raw| self.disclose_http_error(status, raw),
                         )
                         .await?;
                     let status = response.status();
@@ -3764,27 +3797,8 @@ impl DeepSeekClient {
                     }
                     let retry_after = extract_retry_after(response.headers());
                     let raw_body = bounded_error_text(response, ERROR_BODY_MAX_BYTES).await;
-                    let body = sanitize_http_error_body(
-                        Some(self.api_provider.display_name()),
-                        status.as_u16(),
-                        &raw_body,
-                    );
-                    if let Some(error) = crate::llm_client::rate_limit::provider_error(
-                        self.retry_provider_surface(),
-                        status.as_u16(),
-                        &raw_body,
-                        &body,
-                        retry_after,
-                    ) {
-                        return Err(error);
-                    }
-                    let retry_after =
-                        retry_after.max(crate::llm_client::rate_limit::body_delay(&raw_body));
-                    Err(LlmError::from_http_response_with_retry_after(
-                        status.as_u16(),
-                        &body,
-                        retry_after,
-                    ))
+                    let body = self.disclose_http_error(status.as_u16(), &raw_body);
+                    Err(self.classify_http_error(status.as_u16(), &raw_body, &body, retry_after))
                 }
             },
             Some(Box::new(|err, attempt, delay| {
@@ -3928,7 +3942,7 @@ fn retry_reason_label_and_human(err: &LlmError) -> (&'static str, String) {
             .bump_error(codewhale_telemetry::ErrorCounter::NetworkError);
     }
     match err {
-        LlmError::RateLimited { retry_after, .. } => {
+        LlmError::RateLimited { retry_after, .. } | LlmError::QuotaWindow { retry_after, .. } => {
             let human = if let Some(after) = retry_after {
                 format!("rate limited (Retry-After {}s)", after.as_secs())
             } else {

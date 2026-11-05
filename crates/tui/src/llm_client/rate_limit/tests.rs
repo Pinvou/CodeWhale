@@ -219,7 +219,7 @@ async fn successful_json_refusal_preserves_header_minimum_and_disclosure() {
         .header("content-type", "Application/JSON; charset=utf-8")
         .header("retry-after", "3600")
         .body(reqwest::Body::from(r#"{"base_resp":{"status_code":1002,"status_msg":"fixture-secret"},"retry_after":7200}"#)).unwrap());
-    let error = inspect_json_envelope_with_disclosure("minimax", response, |_, body| {
+    let error = inspect_json_envelope_with_disclosure("minimax", response, None, |_, body| {
         body.replace("fixture-secret", "[redacted]")
     })
     .await
@@ -323,7 +323,7 @@ async fn mixed_transport_failure_cannot_restart_expired_rate_recovery() {
     .await;
     assert!(matches!(
         result.unwrap_err().last_error,
-        LlmError::RateLimited { .. }
+        LlmError::ServerError { status: 503, ref message } if message == "fixture"
     ));
     assert_eq!(calls.load(Ordering::SeqCst), 2);
 }
@@ -510,4 +510,280 @@ fn unknown_rate_limit_quota_code_requires_independent_billing_evidence() {
         LlmError::QuotaExhausted(_)
     ));
     assert!(provider_error("custom", 401, raw, "safe", hint).is_none());
+}
+
+#[test]
+fn rate_limit_native_minima_and_billing_keep_safe_classification() {
+    for raw in [
+        r#"{"base_resp":{"status_code":1002,"status_msg":"retry in 7200s"}}"#,
+        r#"{"base_resp":{"status_code":1002},"error":{"details":[{"retryDelay":"7200s"}]}}"#,
+    ] {
+        let error =
+            provider_error("minimax", 429, raw, "safe", Some(Duration::from_secs(30))).unwrap();
+        assert_eq!(
+            error.suggested_retry_delay(),
+            Some(Duration::from_secs(7200))
+        );
+    }
+    let raw = r#"{"base_resp":{"status_code":2045,"status_msg":"weekly plan quota exhausted"},"retry_after":7200}"#;
+    assert!(matches!(provider_error("minimax", 200, raw, "safe", None),
+        Some(LlmError::QuotaWindow { retry_after: Some(delay), .. }) if delay == Duration::from_secs(7200)));
+    for status in [200, 429] {
+        let raw = r#"{"error":{"message":"opaque"},"detail":"Billing quota has been exhausted; fixture-secret"}"#;
+        let error = provider_error("custom", status, raw, "safe", None).unwrap();
+        assert!(matches!(error, LlmError::QuotaExhausted(_)));
+        assert!(!error.to_string().contains("fixture-secret"));
+    }
+    assert_eq!(
+        super::super::retry_delay_from_error_body("retry in 30s; retry in 7200s"),
+        Some(Duration::from_secs(7200))
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn rate_limit_long_minimum_is_terminal_with_retries_enabled_or_disabled() {
+    for enabled in [false, true] {
+        let config = RetryConfig {
+            enabled,
+            ..Default::default()
+        };
+        let calls = AtomicU32::new(0);
+        let result: RetryResult<()> = with_retry(
+            &config,
+            || async {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Err(refused(Some(Duration::from_secs(7200))))
+            },
+            None,
+        )
+        .await;
+        assert!(
+            matches!(result.unwrap_err().last_error, LlmError::QuotaWindow { retry_after: Some(delay), .. } if delay == Duration::from_secs(7200))
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn rate_limit_mixed_failure_preserves_last_transport_error() {
+    let mut config = RetryConfig::default();
+    config.rate_limit.initial_delay_secs = 1;
+    config.rate_limit.max_delay_secs = 1;
+    config.rate_limit.recovery_budget_secs = 3;
+    config.initial_delay = 5.0;
+    config.max_delay = 5.0;
+    config.jitter = false;
+    let calls = AtomicU32::new(0);
+    let result: RetryResult<()> = with_retry(
+        &config,
+        || async {
+            if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                Err(refused(Some(Duration::from_secs(2))))
+            } else {
+                Err(LlmError::ServerError {
+                    status: 503,
+                    message: "actual transport failure".into(),
+                })
+            }
+        },
+        None,
+    )
+    .await;
+    assert!(
+        matches!(result.unwrap_err().last_error, LlmError::ServerError { status: 503, ref message } if message == "actual transport failure")
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test(start_paused = true)]
+async fn rate_limit_receipts_cover_ordinary_recovery_and_jitter_above_minimum() {
+    let receipts = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let events = receipts.clone();
+    let observer: RecoveryObserver = Arc::new(move |receipt| {
+        let events = events.clone();
+        Box::pin(async move {
+            events.lock().unwrap().push(receipt);
+        })
+    });
+    let budget = Arc::new(std::sync::Mutex::new(OperationRecovery::default()));
+    let config = RetryConfig::default();
+    let calls = AtomicU32::new(0);
+    let result: RetryResult<()> = with_operation(
+        budget,
+        with_observer(
+            observer,
+            with_retry(
+                &config,
+                || async {
+                    if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                        Err(LlmError::ServerError {
+                            status: 503,
+                            message: "fixture".into(),
+                        })
+                    } else {
+                        Ok(())
+                    }
+                },
+                None,
+            ),
+        ),
+    )
+    .await;
+    result.unwrap();
+    {
+        let events = receipts.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].state, "recovered");
+        assert_eq!(events[0].attempt, 2);
+    }
+    let calls = AtomicU32::new(0);
+    let start = tokio::time::Instant::now();
+    let result: RetryResult<()> = with_retry(
+        &config,
+        || async {
+            if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                Err(refused(Some(Duration::from_secs(30))))
+            } else {
+                Ok(())
+            }
+        },
+        None,
+    )
+    .await;
+    result.unwrap();
+    assert!(start.elapsed() > Duration::from_secs(30));
+    assert!(start.elapsed() <= Duration::from_millis(32500));
+}
+
+#[tokio::test(start_paused = true)]
+async fn native_json_envelope_bounds_first_byte_idle_and_size() {
+    use futures_util::StreamExt;
+    for sent in [false, true] {
+        let prefix = futures_util::stream::iter(if sent {
+            vec![Ok::<_, std::io::Error>("{")]
+        } else {
+            vec![]
+        });
+        let body = reqwest::Body::wrap_stream(prefix.chain(futures_util::stream::pending()));
+        let response = reqwest::Response::from(
+            http::Response::builder()
+                .header("content-type", "application/json")
+                .body(body)
+                .unwrap(),
+        );
+        let error = inspect_json_envelope_with_disclosure(
+            "minimax",
+            response,
+            Some((Duration::from_secs(2), Duration::from_secs(3))),
+            |_, _| "safe".into(),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(error, LlmError::Timeout(delay) if delay == Duration::from_secs(if sent {3} else {2}))
+        );
+    }
+    for declared in [false, true] {
+        let body = reqwest::Body::wrap_stream(futures_util::stream::iter(
+            (0..33).map(|_| Ok::<_, std::io::Error>(vec![b' '; 1024 * 1024])),
+        ));
+        let mut response = http::Response::builder().header("content-type", "application/json");
+        if declared {
+            response = response.header("content-length", 33 * 1024 * 1024);
+        }
+        let response = reqwest::Response::from(response.body(body).unwrap());
+        let error = inspect_json_envelope("minimax", response)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, LlmError::ParseError(ref message) if message.contains("32 MiB")));
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn rate_limit_small_minimum_preserves_local_backoff_floor() {
+    let mut config = RetryConfig::default();
+    config.rate_limit.initial_delay_secs = 60;
+    config.rate_limit.max_delay_secs = 60;
+    let calls = AtomicU32::new(0);
+    let start = tokio::time::Instant::now();
+    let result: RetryResult<()> = with_retry(
+        &config,
+        || async {
+            if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                Err(refused(Some(Duration::from_secs(1))))
+            } else {
+                Ok(())
+            }
+        },
+        None,
+    )
+    .await;
+    result.unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert!(start.elapsed() >= Duration::from_secs(45));
+    assert!(start.elapsed() <= Duration::from_secs(90));
+}
+
+#[tokio::test(start_paused = true)]
+async fn rate_limit_ordinary_backoff_counts_toward_active_deadline() {
+    let config = RetryConfig::default()
+        .with_max_retries(1)
+        .with_initial_delay(5.0)
+        .with_jitter(false);
+    let calls = AtomicU32::new(0);
+    let result = active_timeout_total(
+        Duration::from_secs(2),
+        with_retry(
+            &config,
+            || async {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Err::<(), _>(LlmError::ServerError {
+                    status: 503,
+                    message: "fixture".into(),
+                })
+            },
+            None,
+        ),
+    )
+    .await;
+    assert!(result.is_err());
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn rate_limit_budget_expiring_during_sleep_preserves_actual_error() {
+    let mut config = RetryConfig::default();
+    config.rate_limit.initial_delay_secs = 1;
+    config.rate_limit.max_delay_secs = 1;
+    config.initial_delay = 1.0;
+    config.jitter = false;
+    let budget = Arc::new(std::sync::Mutex::new(OperationRecovery::default()));
+    let calls = AtomicU32::new(0);
+    let mut pending = Box::pin(with_operation(
+        budget,
+        with_retry(
+            &config,
+            || async {
+                if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                    Err(refused(None))
+                } else {
+                    Err::<(), _>(LlmError::ServerError {
+                        status: 503,
+                        message: "actual delayed failure".into(),
+                    })
+                }
+            },
+            None,
+        ),
+    ));
+    assert!(futures_util::poll!(pending.as_mut()).is_pending());
+    tokio::time::advance(Duration::from_secs(2)).await;
+    assert!(futures_util::poll!(pending.as_mut()).is_pending());
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    tokio::time::advance(Duration::from_secs(601)).await;
+    let result = pending.await;
+    assert!(
+        matches!(result.unwrap_err().last_error, LlmError::ServerError { status: 503, ref message } if message == "actual delayed failure")
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
 }

@@ -343,7 +343,7 @@ impl std::fmt::Display for LlmError {
                 retry_after,
             } => write!(
                 f,
-                "Rate limit exceeded: {message}; quota window reset in {retry_after:?}; checkpoint retained"
+                "Rate limit exceeded: {message}; quota window reset in {retry_after:?}"
             ),
             LlmError::RateLimited { message, .. } => write!(f, "Rate limit exceeded: {message}"),
             LlmError::QuotaExhausted(error) => {
@@ -373,6 +373,19 @@ impl std::fmt::Display for LlmError {
 impl std::error::Error for LlmError {}
 
 impl LlmError {
+    fn for_recovery_budget(self, remaining: Duration) -> Self {
+        match self {
+            Self::RateLimited {
+                message,
+                retry_after: Some(minimum),
+            } if minimum >= remaining => Self::QuotaWindow {
+                message,
+                retry_after: Some(minimum),
+            },
+            error => error,
+        }
+    }
+
     /// Determines if this error is potentially transient and worth retrying.
     ///
     /// Retryable errors:
@@ -1088,6 +1101,18 @@ where
         };
         let started = Instant::now();
         let result = operation().await;
+        let remaining = budget
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .started
+            .map_or(
+                Duration::from_secs(config.rate_limit.recovery_budget_secs),
+                |started| {
+                    Duration::from_secs(config.rate_limit.recovery_budget_secs)
+                        .saturating_sub(started.elapsed())
+                },
+            );
+        let result = result.map_err(|error| error.for_recovery_budget(remaining));
         match &result {
             Ok(_)
                 if budget
@@ -1138,6 +1163,7 @@ where
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .started;
+    let mut last_error = None;
     loop {
         let (attempts, exhausted) = {
             let mut budget = operation_budget
@@ -1163,10 +1189,10 @@ where
             )
             .await;
             return Err(RetryError {
-                last_error: LlmError::RateLimited {
+                last_error: last_error.take().unwrap_or_else(|| LlmError::QuotaWindow {
                     message: "Logical operation recovery budget exhausted".into(),
                     retry_after: None,
-                },
+                }),
                 attempts,
                 total_time: start_time.elapsed(),
             });
@@ -1174,7 +1200,8 @@ where
         rate_limit::new_attempt();
         match operation().await {
             Ok(result) => {
-                if recovery_started.is_some()
+                if attempts > 1
+                    || recovery_started.is_some()
                     || operation_budget
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -1191,6 +1218,18 @@ where
                 return Ok(result);
             }
             Err(err) => {
+                let remaining = operation_budget
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .started
+                    .map_or(
+                        Duration::from_secs(config.rate_limit.recovery_budget_secs),
+                        |started| {
+                            Duration::from_secs(config.rate_limit.recovery_budget_secs)
+                                .saturating_sub(started.elapsed())
+                        },
+                    );
+                let err = err.for_recovery_budget(remaining);
                 let rate_limited = matches!(
                     err,
                     LlmError::RateLimited { .. } | LlmError::QuotaWindow { .. }
@@ -1208,7 +1247,12 @@ where
                     };
                     recovery_started = Some(started);
                     let local = rate_limit::retry_delay(&config.rate_limit, retry);
-                    let delay = local.max(err.suggested_retry_delay().unwrap_or_default());
+                    let minimum = err.suggested_retry_delay().unwrap_or_default();
+                    let delay = if minimum.is_zero() {
+                        local
+                    } else {
+                        local.max(minimum).saturating_add(local.div_f64(2.0))
+                    };
                     let remaining = Duration::from_secs(config.rate_limit.recovery_budget_secs)
                         .saturating_sub(started.elapsed());
                     stop |= attempts >= config.rate_limit.max_attempts || delay >= remaining;
@@ -1223,29 +1267,11 @@ where
                         Duration::ZERO
                     })
                 };
-                if !stop
-                    && recovery_started.is_some_and(|started| {
-                        delay
-                            >= Duration::from_secs(config.rate_limit.recovery_budget_secs)
-                                .saturating_sub(started.elapsed())
-                    })
-                {
-                    rate_limit::observe(
-                        attempts,
-                        config.rate_limit.max_attempts,
-                        None,
-                        "interrupted",
-                    )
-                    .await;
-                    return Err(RetryError {
-                        last_error: LlmError::RateLimited {
-                            message: "Logical operation recovery time budget exhausted".into(),
-                            retry_after: None,
-                        },
-                        attempts,
-                        total_time: start_time.elapsed(),
-                    });
-                }
+                stop |= recovery_started.is_some_and(|started| {
+                    delay
+                        >= Duration::from_secs(config.rate_limit.recovery_budget_secs)
+                            .saturating_sub(started.elapsed())
+                });
                 stop |= recovery_started.is_some() && attempts >= config.rate_limit.max_attempts;
                 stop |= config.total_timeout > 0.0
                     && start_time.elapsed().saturating_add(delay).as_secs_f64()
@@ -1291,13 +1317,35 @@ where
                     cb(&err, attempts - 1, delay);
                 }
 
-                rate_limit::wait(delay).await;
+                last_error = Some(err);
+                if rate_limited {
+                    rate_limit::wait(delay).await;
+                } else {
+                    tokio::time::sleep(delay).await;
+                }
             }
         }
     }
 }
 
 // === Utility Functions ===
+
+pub fn retry_delay_from_error_body(body: &str) -> Option<Duration> {
+    static HINTS: std::sync::OnceLock<[regex::Regex; 2]> = std::sync::OnceLock::new();
+    let [structured, prose] = HINTS.get_or_init(|| {
+        [
+            regex::Regex::new(r#"retryDelay\\?"\s*:\s*\\?"\s*(\d+(?:\.\d+)?)\s*s"#).unwrap(),
+            regex::Regex::new(r"(?i)retry in\s+(\d+(?:\.\d+)?)\s*s").unwrap(),
+        ]
+    });
+    [structured, prose]
+        .into_iter()
+        .flat_map(|pattern| pattern.captures_iter(body))
+        .filter_map(|captures| captures.get(1))
+        .filter_map(|value| value.as_str().parse::<f64>().ok())
+        .filter_map(|seconds| Duration::try_from_secs_f64(seconds).ok())
+        .max()
+}
 
 /// Parse numeric seconds or an HTTP-date. Long server minima are preserved;
 /// the independent recovery budget parks the operation instead of retrying early.

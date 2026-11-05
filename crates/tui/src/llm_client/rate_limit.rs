@@ -313,7 +313,7 @@ async fn inspect_json_envelope(
     provider: &str,
     response: reqwest::Response,
 ) -> Result<reqwest::Response, LlmError> {
-    inspect_json_envelope_with_disclosure(provider, response, |status, raw| {
+    inspect_json_envelope_with_disclosure(provider, response, None, |status, raw| {
         super::sanitize_http_error_body(Some(provider), status, raw)
     })
     .await
@@ -321,7 +321,8 @@ async fn inspect_json_envelope(
 
 pub async fn inspect_json_envelope_with_disclosure<F>(
     provider: &str,
-    response: reqwest::Response,
+    mut response: reqwest::Response,
+    body_timeouts: Option<(Duration, Duration)>,
     disclose: F,
 ) -> Result<reqwest::Response, LlmError>
 where
@@ -346,10 +347,34 @@ where
     let version = response.version();
     let headers = response.headers().clone();
     let retry_after = super::extract_retry_after(&headers);
-    let bytes = response
-        .bytes()
-        .await
+    const MAX_ENVELOPE_BYTES: usize = 32 * 1024 * 1024;
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_ENVELOPE_BYTES as u64)
+    {
+        return Err(LlmError::ParseError(
+            "Provider JSON envelope exceeds 32 MiB".into(),
+        ));
+    }
+    let mut bytes = Vec::new();
+    loop {
+        let chunk = if let Some((first_byte, idle)) = body_timeouts {
+            let timeout = if bytes.is_empty() { first_byte } else { idle };
+            tokio::time::timeout(timeout, response.chunk())
+                .await
+                .map_err(|_| LlmError::Timeout(timeout))?
+        } else {
+            response.chunk().await
+        }
         .map_err(|error| LlmError::from_reqwest(&error))?;
+        let Some(chunk) = chunk else { break };
+        if chunk.len() > MAX_ENVELOPE_BYTES.saturating_sub(bytes.len()) {
+            return Err(LlmError::ParseError(
+                "Provider JSON envelope exceeds 32 MiB".into(),
+            ));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
     let raw = String::from_utf8_lossy(&bytes);
     if let Ok(body) = serde_json::from_str::<serde_json::Value>(&raw) {
         let failed = body
@@ -493,6 +518,9 @@ pub fn provider_error(
     safe: &str,
     hint: Option<Duration>,
 ) -> Option<LlmError> {
+    let hint = hint
+        .max(body_delay(raw))
+        .max(super::retry_delay_from_error_body(raw));
     let body: serde_json::Value = serde_json::from_str(raw).unwrap_or(serde_json::Value::Null);
     let code = [
         "/error/code",
@@ -527,8 +555,15 @@ pub fn provider_error(
     if window {
         return Some(LlmError::QuotaWindow {
             message: safe.to_owned(),
-            retry_after: hint.max(body_delay(raw)),
+            retry_after: hint,
         });
+    }
+    if (matches!(status, 400 | 402 | 403 | 429) || (200..300).contains(&status))
+        && independent_billing_evidence(&body, raw)
+    {
+        return Some(LlmError::QuotaExhausted(
+            super::QuotaExhaustionError::from_http_message(safe.to_owned()),
+        ));
     }
     // This code means billing on OpenAI, but RPM/TPM on other surfaces.
     // An unknown relay must not turn that ambiguous code alone into a
@@ -592,7 +627,7 @@ pub fn provider_error(
     if transient {
         return Some(LlmError::RateLimited {
             message: safe.to_owned(),
-            retry_after: hint.max(body_delay(raw)),
+            retry_after: hint,
         });
     }
     let user_action = match provider.as_str() {
@@ -616,7 +651,7 @@ pub fn provider_error(
     if ambiguous_quota {
         return Some(LlmError::RateLimited {
             message: safe.to_owned(),
-            retry_after: hint.max(body_delay(raw)),
+            retry_after: hint,
         });
     }
     None
