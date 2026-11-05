@@ -13701,3 +13701,65 @@ fn picker_and_request_path_disagree_when_the_secret_slot_marker_is_missing() -> 
     println!("CAPTURED first-fix: {:?}", resolution.first_fix());
     Ok(())
 }
+
+#[test]
+fn strict_pipeline_scope_is_official_deepseek_family_routes() {
+    // The DeepSeek strict pipeline reshapes schemas per DeepSeek's strict
+    // documents, so only provider-typed DeepSeek family routes on the
+    // official hosts may act on it — a misconfigured provider or a lookalike
+    // host must not receive the reshaping.
+    for provider in [
+        ApiProvider::Deepseek,
+        ApiProvider::DeepseekCN,
+        ApiProvider::DeepseekAnthropic,
+    ] {
+        for base_url in [
+            "https://api.deepseek.com",
+            "https://api.deepseek.com/",
+            "https://api.deepseek.com/v1",
+            "https://api.deepseek.com/beta",
+            "https://api.deepseek.com/anthropic",
+            "https://api.deepseeki.com",
+            "https://api.deepseeki.com/beta",
+            "  HTTPS://API.DEEPSEEK.COM/BETA  ",
+        ] {
+            assert!(
+                super::route_is_official_deepseek_family(provider, base_url),
+                "{provider:?} on {base_url} is an official family route"
+            );
+        }
+    }
+
+    for (provider, base_url, why) in [
+        (
+            ApiProvider::Openai,
+            "https://api.deepseek.com/beta",
+            "a DeepSeek URL under a non-DeepSeek provider stays out of scope",
+        ),
+        (
+            ApiProvider::Deepseek,
+            "https://llm.example.com/v1",
+            "a custom endpoint is not an official family route",
+        ),
+        (
+            ApiProvider::Deepseek,
+            "https://api.deepseek.com.evil.example/beta",
+            "a lookalike host must not pass the host-boundary check",
+        ),
+        (
+            ApiProvider::Deepseek,
+            "http://api.deepseek.com/beta",
+            "plaintext http is not the official endpoint",
+        ),
+        (
+            ApiProvider::Moonshot,
+            "https://api.moonshot.ai/v1",
+            "unrelated providers stay out of scope",
+        ),
+    ] {
+        assert!(
+            !super::route_is_official_deepseek_family(provider, base_url),
+            "{why}: {provider:?} on {base_url}"
+        );
+    }
+}

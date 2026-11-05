@@ -7535,8 +7535,10 @@ fn doctor_strict_tool_mode_status(config: &Config) -> DoctorStrictToolModeStatus
         None => DoctorStrictToolModeStatus {
             enabled: true,
             status: "custom_endpoint",
-            function_strict_sent: true,
-            message: "enabled; function.strict will be sent to this custom endpoint".to_string(),
+            function_strict_sent: false,
+            message: "enabled, but the strict tool pipeline only acts on official DeepSeek \
+                      routes; this custom endpoint keeps its tools unreshaped"
+                .to_string(),
             recommended_base_url: None,
         },
     }
@@ -14018,7 +14020,10 @@ mod doctor_endpoint_tests {
     }
 
     #[test]
-    fn strict_tool_mode_doctor_marks_custom_endpoint_as_forwarded() {
+    fn strict_tool_mode_doctor_marks_custom_endpoint_as_out_of_scope() {
+        // The strict pipeline reshapes schemas per DeepSeek's strict-mode
+        // documents; a custom (non-DeepSeek-family) endpoint keeps its tools
+        // unreshaped, and nothing is advertised as sent strict.
         let config = Config {
             provider: Some("vllm".to_string()),
             strict_tool_mode: Some(true),
@@ -14028,8 +14033,8 @@ mod doctor_endpoint_tests {
         let status = doctor_strict_tool_mode_status(&config);
 
         assert_eq!(status.status, "custom_endpoint");
-        assert!(status.function_strict_sent);
-        assert!(status.message.contains("custom endpoint"));
+        assert!(!status.function_strict_sent);
+        assert!(status.message.contains("official DeepSeek"));
     }
 
     #[test]

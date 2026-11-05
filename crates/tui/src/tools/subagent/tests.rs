@@ -6042,11 +6042,23 @@ fn provider_schema_sanitizers_preserve_the_closed_fleet_role_enum() {
         "chat completions sanitize must not erase or widen the role enum"
     );
 
-    // Strict-mode structured outputs pass.
+    // Strict-mode structured outputs pass. The strict contract removes
+    // optional properties outright (the Fleet role is optional), so the
+    // property — and with it the enum — leaves the schema, and
+    // `prepare_tools_for_strict_mode` reports the removal in the tool
+    // description. When the role is required, the property survives and its
+    // enum must be neither erased nor widened.
     let mut strict = agent_schema.clone();
     schema_sanitize::sanitize_for_strict(&mut strict);
+    assert!(
+        strict["properties"].get("type").is_none(),
+        "the strict contract removes the optional role property outright: {strict}"
+    );
+    let mut strict_required = agent_schema.clone();
+    strict_required["required"] = json!(["action", "type"]);
+    schema_sanitize::sanitize_for_strict(&mut strict_required);
     assert_eq!(
-        strict["properties"]["type"]["enum"], expected,
+        strict_required["properties"]["type"]["enum"], expected,
         "strict-mode sanitize must not erase or widen the role enum"
     );
 
