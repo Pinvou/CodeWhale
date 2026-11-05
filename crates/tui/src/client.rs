@@ -6105,9 +6105,10 @@ mod tests {
                 membership.get("max_completion_tokens").is_none(),
                 "{membership}"
             );
-            // Kimi Code's documented membership models own their sampling
-            // behavior: the exact first-party membership route strips generic
-            // controls (apply_kimi_code_fixed_sampling).
+            // Kimi Code's membership endpoint owns the sampling behavior of
+            // every model it serves: the exact first-party route strips
+            // generic controls regardless of model id
+            // (apply_kimi_code_fixed_sampling).
             assert!(membership.get("temperature").is_none(), "{membership}");
             assert!(membership.get("top_p").is_none(), "{membership}");
         }
@@ -6459,7 +6460,17 @@ mod tests {
 
     #[tokio::test]
     async fn kimi_code_compaction_shape_omits_sampling_parameters_on_wire() {
-        for model in crate::config::KIMI_CODE_MEMBERSHIP_MODELS {
+        // The strip is route-scoped, not roster-scoped: the 2026-11-04 live
+        // probe showed every id served by this endpoint (GET /models) rejects
+        // any sampling value other than temperature=1 / top_p=0.95 with a
+        // 400, so the two `k3.1-pro` spellings the roster does not list yet
+        // must be stripped the same way.
+        let models: Vec<&str> = crate::config::KIMI_CODE_MEMBERSHIP_MODELS
+            .iter()
+            .copied()
+            .chain(["k3.1-pro", "k3.1-pro-highspeed"])
+            .collect();
+        for model in models {
             let mut request = k3_request_fixture(model, None, /*stream*/ false);
             request.temperature = Some(0.3);
             request.top_p = Some(0.8);
@@ -6589,11 +6600,15 @@ mod tests {
                 k3_request_fixture(crate::config::KIMI_CODE_K3_MODEL, Some("low"), streaming);
             let good = test_tool("compatible_lookup");
             let mut bad = test_tool("mcp_pattern_tool");
+            // One MFJS whitelist serves every Moonshot route: any unlisted
+            // keyword fails closed on all of them (see
+            // `probe_observed_keywords_fail_closed_on_every_route`), so
+            // `patternProperties` is simply one unlisted keyword used as the
+            // incompatible shape here — no route admits `pattern` either.
             bad.input_schema = json!({
                 "type": "object",
-                "properties": {
-                    "query": {"type": "string", "pattern": "^private-regex-7701$"}
-                }
+                "properties": {"query": {"type": "string"}},
+                "patternProperties": {"^private-regex-7701$": {"type": "string"}}
             });
             request.tools = Some(vec![good, bad]);
             request.tool_choice = Some(json!("auto"));
@@ -6687,11 +6702,15 @@ mod tests {
                 k3_request_fixture(crate::config::KIMI_CODE_K3_MODEL, Some("low"), streaming);
             let good = test_tool("compatible_lookup");
             let mut bad = test_tool("mcp_pattern_tool");
+            // One MFJS whitelist serves every Moonshot route: any unlisted
+            // keyword fails closed on all of them (see
+            // `probe_observed_keywords_fail_closed_on_every_route`), so
+            // `patternProperties` is simply one unlisted keyword used as the
+            // incompatible shape here — no route admits `pattern` either.
             bad.input_schema = json!({
                 "type": "object",
-                "properties": {
-                    "query": {"type": "string", "pattern": "^private-regex-8801$"}
-                }
+                "properties": {"query": {"type": "string"}},
+                "patternProperties": {"^private-regex-8801$": {"type": "string"}}
             });
             request.tools = Some(vec![good, bad]);
             request.tool_choice = Some(json!({
@@ -6755,11 +6774,15 @@ mod tests {
         let mut request = k3_request_fixture(crate::config::KIMI_CODE_K3_MODEL, Some("low"), true);
         let good = test_tool("compatible_lookup");
         let mut bad = test_tool("mcp_pattern_tool");
+        // One MFJS whitelist serves every Moonshot route: any unlisted
+        // keyword fails closed on all of them (see
+        // `probe_observed_keywords_fail_closed_on_every_route`), so
+        // `patternProperties` is simply one unlisted keyword used as the
+        // incompatible shape here — no route admits `pattern` either.
         bad.input_schema = json!({
             "type": "object",
-            "properties": {
-                "query": {"type": "string", "pattern": "^private-regex-9901$"}
-            }
+            "properties": {"query": {"type": "string"}},
+            "patternProperties": {"^private-regex-9901$": {"type": "string"}}
         });
         request.tools = Some(vec![good, bad]);
         request.tool_choice = Some(json!("auto"));
