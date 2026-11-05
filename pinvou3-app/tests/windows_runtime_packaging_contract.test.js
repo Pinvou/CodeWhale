@@ -146,6 +146,12 @@ for (const contract of [
   "python_dependencies",
   "windows-x64",
   "files.pythonhosted.org",
+  // Long-path hardening: the staged node tree (npm's bundled node_modules)
+  // passes MAX_PATH on the self-hosted windows-heavy runners, so every
+  // staging operation must stay inside the \\?\ namespace or robocopy.
+  "Get-ExtendedPath",
+  "Get-LongPathFiles",
+  "Remove-TreeLongPath",
 ]) {
   assert.ok(runtimeScript.includes(contract), `runtime staging must retain ${contract}`);
 }
@@ -188,6 +194,26 @@ assert.match(runtimeScript, /System\.Diagnostics\.FileVersionInfo/u);
 assert.match(runtimeScript, /\$vcActualVersion -lt \$vcMinimumVersion/u);
 assert.match(runtimeScript, /HashSet\[string\]/u);
 assert.match(runtimeScript, /Remove-Item -LiteralPath \$bundledAsrModelPath/u);
+assert.match(
+  runtimeScript,
+  /& robocopy \$requiredDirectory \$Destination \/E /u,
+  "the flattened runtime copy arm must go through long-path-native robocopy",
+);
+assert.match(
+  runtimeScript,
+  /& robocopy \$emptyRoot \$Path \/MIR /u,
+  "runtime staging tree cleanup must go through long-path-native robocopy",
+);
+assert.match(
+  runtimeScript,
+  /\[System\.IO\.File\]::OpenRead\(\(Get-ExtendedPath \$Path\)\)/u,
+  "staged-file hashing must stream through the extended-length namespace",
+);
+assert.match(
+  runtimeScript,
+  /Get-LongPathFiles -Root \$temporary \|/u,
+  "the flattened runtime required-file search must enumerate past MAX_PATH",
+);
 for (const destination of [
   "runtime/poppler",
   "runtime/pandoc",

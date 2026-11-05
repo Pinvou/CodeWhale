@@ -117,13 +117,96 @@ function Write-Utf8Atomically {
   }
 }
 
+# Adds the Windows extended-length (\\?\) prefix so .NET Framework file APIs
+# skip path normalization: normalization caps paths at MAX_PATH (260) and
+# throws DirectoryNotFound/PathTooLong past it, which is exactly where the
+# staged node tree lands on the self-hosted windows-heavy runners (a 64-char
+# workspace root plus npm's bundled node_modules reaches ~263 chars; runs
+# 41809813991/41854498430/41977103388 all died on the same field_behavior.js
+# path). Idempotent; accepts only absolute drive/UNC paths — every staging
+# root in this script is absolute.
+function Get-ExtendedPath {
+  param([string]$Path)
+  if ([string]::IsNullOrWhiteSpace($Path)) {
+    throw "Cannot build an extended path from an empty value"
+  }
+  if ($Path.StartsWith('\\?\', [System.StringComparison]::OrdinalIgnoreCase)) {
+    return $Path
+  }
+  if ($Path.StartsWith('\\', [System.StringComparison]::Ordinal)) {
+    return '\\?\UNC\' + $Path.Substring(2)
+  }
+  if ($Path -match '^[A-Za-z]:[\\/]') {
+    return '\\?\' + $Path
+  }
+  throw "Get-ExtendedPath requires an absolute drive or UNC path: $Path"
+}
+
+# Depth-first file walk that enumerates through the \\?\ device namespace:
+# plain Get-ChildItem -Recurse materializes FileInfo objects through path
+# normalization and throws past MAX_PATH. Returns unprefixed absolute paths;
+# callers re-add the prefix via Get-ExtendedPath when handing paths to .NET
+# file APIs. Order is not sorted — callers that need deterministic output
+# sort the relative paths themselves.
+function Get-LongPathFiles {
+  param([string]$Root)
+  $files = [System.Collections.Generic.List[string]]::new()
+  $pendingDirectories = [System.Collections.Generic.Stack[string]]::new()
+  $pendingDirectories.Push((Get-ExtendedPath $Root))
+  while ($pendingDirectories.Count -gt 0) {
+    $directory = $pendingDirectories.Pop()
+    foreach ($entry in [System.IO.Directory]::EnumerateFiles($directory, '*')) {
+      $files.Add($entry.Substring(4))
+    }
+    foreach ($entry in [System.IO.Directory]::EnumerateDirectories($directory, '*')) {
+      $pendingDirectories.Push($entry)
+    }
+  }
+  return $files
+}
+
+# Long-path-safe tree removal for Windows PowerShell 5.1: robocopy is
+# long-path native, so mirroring an empty directory over the target deletes
+# even past-MAX_PATH content (a successful stage leaves the deep npm tree
+# behind, and plain Remove-Item -Recurse would fail on the next re-stage).
+# The emptied husk is a short path and goes through the normal cmdlet.
+function Remove-TreeLongPath {
+  param([string]$Path, [switch]$MissingOk)
+  if (-not (Test-Path -LiteralPath $Path -PathType Container)) {
+    if ($MissingOk) {
+      return
+    }
+    throw "Windows runtime staging cleanup target is missing: $Path"
+  }
+  $emptyRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("pinvou3-rm-" + [System.Guid]::NewGuid().ToString("N"))
+  try {
+    [void][System.IO.Directory]::CreateDirectory($emptyRoot)
+    $robocopyOutput = & robocopy $emptyRoot $Path /MIR /NFL /NDL /NJH /NJS /NP
+    $robocopyExitCode = $LASTEXITCODE
+    if ($robocopyExitCode -ge 8) {
+      $robocopyTail = (@($robocopyOutput) | Select-Object -Last 5) -join ' | '
+      throw ("Robocopy /MIR cleanup failed with exit code {0}: {1} (tail: {2})" -f $robocopyExitCode, $Path, $robocopyTail)
+    }
+    Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction SilentlyContinue
+    if (Test-Path -LiteralPath $Path) {
+      throw "Windows runtime staging cleanup could not remove: $Path"
+    }
+  } finally {
+    Remove-Item -LiteralPath $emptyRoot -Recurse -Force -ErrorAction SilentlyContinue
+  }
+}
+
 function Assert-ChildPath {
   param([string]$Root, [string]$Path)
   if ([string]::IsNullOrWhiteSpace($Root) -or [string]::IsNullOrWhiteSpace($Path)) {
     throw "Expected non-empty root and child paths. Root='$Root' Path='$Path'"
   }
   $rootFull = [System.IO.Path]::GetFullPath($Root).TrimEnd('\') + '\'
-  $pathFull = [System.IO.Path]::GetFullPath($Path)
+  # Canonicalize through the \\?\ namespace: GetFullPath on an unprefixed
+  # child past MAX_PATH throws instead of comparing, and device paths skip
+  # normalization, so strip the pass-through prefix before the containment
+  # comparison. Staging roots are short; children can exceed MAX_PATH.
+  $pathFull = [System.IO.Path]::GetFullPath((Get-ExtendedPath $Path)).Substring(4)
   if (-not $pathFull.StartsWith($rootFull, [System.StringComparison]::OrdinalIgnoreCase)) {
     throw "Refusing to use a path outside the expected root: $Path"
   }
@@ -141,7 +224,18 @@ function Get-RelativeStagePath {
 
 function Get-Sha256 {
   param([string]$Path)
-  return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+  # Get-FileHash resolves -LiteralPath through the PowerShell provider, which
+  # normalizes the path and fails past MAX_PATH; stream the file directly
+  # through the \\?\ device namespace instead (staged node trees exceed it on
+  # the self-hosted windows-heavy runners). Same digest, lowercase hex.
+  $stream = [System.IO.File]::OpenRead((Get-ExtendedPath $Path))
+  $sha256 = [System.Security.Cryptography.SHA256]::Create()
+  try {
+    return ([System.BitConverter]::ToString($sha256.ComputeHash($stream))).Replace('-', '').ToLowerInvariant()
+  } finally {
+    $stream.Dispose()
+    $sha256.Dispose()
+  }
 }
 
 function Get-StringSha256 {
@@ -410,11 +504,14 @@ function Get-StagedRelativePaths {
   $metadataPaths = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
   [void]$metadataPaths.Add(".verified-lock")
   [void]$metadataPaths.Add(".stage-manifest.json")
+  # Walk through the \\?\ namespace: Get-ChildItem -Recurse plus per-file
+  # GetFullPath both normalize and throw past MAX_PATH on the staged node
+  # tree (self-hosted windows-heavy runner roots push npm's bundled tree to
+  # ~263 chars).
   return @(
-    Get-ChildItem -LiteralPath $Root -Recurse -File -Force |
+    Get-LongPathFiles -Root $Root |
       ForEach-Object {
-        $fullPath = [System.IO.Path]::GetFullPath($_.FullName)
-        $relativePath = $fullPath.Substring($rootPrefix.Length).Replace('\', '/')
+        $relativePath = $_.Substring($rootPrefix.Length).Replace('\', '/')
         if (-not $metadataPaths.Contains($relativePath)) {
           $relativePath
         }
@@ -430,7 +527,9 @@ function Get-StagedRelativeFiles {
     Get-StagedRelativePaths -Root $Root | ForEach-Object {
       $relativePath = [string]$_
       $fullPath = Join-Path $Root $relativePath.Replace('/', '\')
-      $item = Get-Item -LiteralPath $fullPath
+      # FileInfo through the \\?\ namespace: Get-Item normalizes and throws
+      # past MAX_PATH (deep node tree on self-hosted runners).
+      $item = [System.IO.FileInfo]::new((Get-ExtendedPath $fullPath))
       [pscustomobject]@{
         path = $relativePath
         bytes = [long]$item.Length
@@ -471,9 +570,14 @@ function Test-StagedFilesAgainstTrustedManifest {
 
       $fullPath = Join-Path $Root $relativePath.Replace('/', '\')
       Assert-ChildPath -Root $Root -Path $fullPath
+      # Existence/size checks through the \\?\ namespace: Test-Path and
+      # Get-Item normalize their input and throw past MAX_PATH (deep staged
+      # node tree on self-hosted runners); the .NET device-path forms skip
+      # normalization instead.
+      $extendedPath = Get-ExtendedPath $fullPath
       if (
-        -not (Test-Path -LiteralPath $fullPath -PathType Leaf) -or
-        [long](Get-Item -LiteralPath $fullPath).Length -ne [long]$entry.bytes -or
+        -not [System.IO.File]::Exists($extendedPath) -or
+        [long]([System.IO.FileInfo]::new($extendedPath)).Length -ne [long]$entry.bytes -or
         (Get-Sha256 -Path $fullPath) -ne $sha256
       ) {
         return $false
@@ -594,24 +698,36 @@ function Expand-FlattenedRuntime {
   $temporary = Join-Path ([System.IO.Path]::GetTempPath()) ("pinvou3-runtime-expand-" + [System.Guid]::NewGuid().ToString("N"))
   try {
     [System.IO.Compression.ZipFile]::ExtractToDirectory($ZipPath, $temporary)
-    $required = Get-ChildItem -LiteralPath $temporary -File -Recurse -Filter $RequiredFile | Select-Object -First 1
-    if ($null -eq $required) {
+    $requiredPath = Get-LongPathFiles -Root $temporary |
+      Where-Object { [System.IO.Path]::GetFileName($_) -eq $RequiredFile } |
+      Select-Object -First 1
+    if ($null -eq $requiredPath) {
       throw "Runtime archive does not contain ${RequiredFile}: $ZipPath"
     }
     New-Item -ItemType Directory -Path $Destination -Force | Out-Null
     if ($OnnxOnly) {
-      Copy-Item -LiteralPath $required.FullName -Destination $Destination -Force
-      $shared = Join-Path $required.DirectoryName "onnxruntime_providers_shared.dll"
+      Copy-Item -LiteralPath $requiredPath -Destination $Destination -Force
+      $shared = Join-Path ([System.IO.Path]::GetDirectoryName($requiredPath)) "onnxruntime_providers_shared.dll"
       if (Test-Path -LiteralPath $shared -PathType Leaf) {
         Copy-Item -LiteralPath $shared -Destination $Destination -Force
       }
     } else {
-      Get-ChildItem -LiteralPath $required.DirectoryName -Force | ForEach-Object {
-        Copy-Item -LiteralPath $_.FullName -Destination $Destination -Recurse -Force
+      # Copy-Item -Recurse (and every PS 5.1 provider cmdlet) enforces the
+      # 260-char MAX_PATH limit: the node component ships npm's full bundled
+      # node_modules, whose deepest files exceed 260 chars under the
+      # self-hosted windows-heavy workspace roots. robocopy is long-path
+      # native; /E copies the whole subtree including hidden entries, and
+      # without /MIR it only adds (the destination was just created).
+      $requiredDirectory = [System.IO.Path]::GetDirectoryName($requiredPath)
+      $robocopyOutput = & robocopy $requiredDirectory $Destination /E /NFL /NDL /NJH /NJS /NP
+      $robocopyExitCode = $LASTEXITCODE
+      if ($robocopyExitCode -ge 8) {
+        $robocopyTail = (@($robocopyOutput) | Select-Object -Last 5) -join ' | '
+        throw ("Robocopy failed with exit code {0} while copying '{1}' to '{2}' (tail: {3})" -f $robocopyExitCode, $requiredDirectory, $Destination, $robocopyTail)
       }
     }
   } finally {
-    Remove-Item -LiteralPath $temporary -Recurse -Force -ErrorAction SilentlyContinue
+    Remove-TreeLongPath -Path $temporary -MissingOk
   }
 }
 
@@ -640,17 +756,21 @@ function Test-ManagedArchiveExpansion {
     throw "Managed component archive lock is missing or duplicated: $ArchiveManifestPath"
   }
   $archiveLock = $archiveLocks[0]
-  $actualFiles = @(Get-ChildItem -LiteralPath $Destination -File -Recurse -Force)
+  # Same long-path rules as the staged walk: count through the \\?\ namespace
+  # walk and verify each entry through the extended .NET forms, so a future
+  # archive that deepens its layout cannot reintroduce a MAX_PATH failure.
+  $actualFiles = @(Get-LongPathFiles -Root $Destination)
   if ($actualFiles.Count -ne [int]$archiveLock.files) {
     throw "Managed component archive file count mismatch after extraction: $ArchiveManifestPath"
   }
   foreach ($entry in $archiveLock.entries) {
     $entryPath = Join-Path $Destination ([string]$entry.path).Replace('/', '\')
     Assert-ChildPath -Root $Destination -Path $entryPath
-    if (-not (Test-Path -LiteralPath $entryPath -PathType Leaf)) {
+    $extendedEntryPath = Get-ExtendedPath $entryPath
+    if (-not [System.IO.File]::Exists($extendedEntryPath)) {
       throw "Managed component file is missing after extraction: $ArchiveManifestPath -> $($entry.path)"
     }
-    $item = Get-Item -LiteralPath $entryPath
+    $item = [System.IO.FileInfo]::new($extendedEntryPath)
     if ([long]$item.Length -ne [long]$entry.bytes -or (Get-Sha256 -Path $entryPath) -ne [string]$entry.sha256) {
       throw "Managed component file failed verification after extraction: $ArchiveManifestPath -> $($entry.path)"
     }
@@ -1049,11 +1169,11 @@ function Stage-Submodule {
       Write-Utf8WithoutBom -Path (Join-Path $temporaryRoot ".verified-lock") -Content (Get-VerificationMarkerContent -StageManifestSha256 $temporaryStageManifestSha256)
 
       if (Test-Path -LiteralPath $stagingRoot) {
-        Remove-Item -LiteralPath $stagingRoot -Recurse -Force
+        Remove-TreeLongPath -Path $stagingRoot
       }
       Move-Item -LiteralPath $stageContext.TemporaryRoot -Destination $stagingRoot
     } finally {
-      Remove-Item -LiteralPath $stageContext.TemporaryRoot -Recurse -Force -ErrorAction SilentlyContinue
+      Remove-TreeLongPath -Path $stageContext.TemporaryRoot -MissingOk
     }
   }
 
@@ -1114,13 +1234,13 @@ function Stage-OnnxRuntime {
       throw "ONNX Runtime staging did not produce onnxruntime.dll"
     }
     if (Test-Path -LiteralPath $onnxStageRoot) {
-      Remove-Item -LiteralPath $onnxStageRoot -Recurse -Force
+      Remove-TreeLongPath -Path $onnxStageRoot
     }
     Move-Item -LiteralPath $temporaryRoot -Destination $onnxStageRoot
     $finalDylib = Join-Path $onnxStageRoot "onnxruntime\onnxruntime.dll"
     Write-Utf8Atomically -Path $onnxDevDescriptorPath -Content (Get-OnnxDevDescriptorContent -StageId $stageId -DylibPath $finalDylib)
   } finally {
-    Remove-Item -LiteralPath $temporaryRoot -Recurse -Force -ErrorAction SilentlyContinue
+    Remove-TreeLongPath -Path $temporaryRoot -MissingOk
   }
   Write-Host ("Staged Windows ONNX Runtime for development: {0}" -f $onnxStageRoot)
   Write-Host ("Generated ONNX development descriptor: {0}" -f $onnxDevDescriptorPath)

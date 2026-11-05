@@ -176,6 +176,27 @@ try {
   Write-TestFile -Path $runtimeExecutablePath -Content "executable"
   Write-TestFile -Path $runtimeDependencyPath -Content "abc"
 
+  # Mirror the production regression: the node component's bundled npm
+  # node_modules tree exceeds MAX_PATH (260) under the self-hosted
+  # windows-heavy workspace roots. Fixture files must be created through the
+  # \\?\ namespace — the plain provider cmdlets cannot create past-MAX_PATH
+  # paths — and the deep file joins the fixture BEFORE the trusted manifest
+  # is captured, so every staging/reuse assertion below walks it for real.
+  $deepRelativeSegments = @(
+    "maxpath-depth-01-longest",
+    "maxpath-depth-02-longest",
+    "maxpath-depth-03-longest",
+    "maxpath-depth-04-longest",
+    "maxpath-depth-05-longest",
+    "maxpath-depth-06-longest",
+    "maxpath-depth-07-longest"
+  )
+  $deepRelativePath = (@("expanded", "node") + $deepRelativeSegments + @("deep.js")) -join "/"
+  $deepFilePath = Join-Path $stagingRoot ($deepRelativePath.Replace('/', '\'))
+  [void][System.IO.Directory]::CreateDirectory((Get-ExtendedPath (Split-Path -Parent $deepFilePath)))
+  [System.IO.File]::WriteAllText((Get-ExtendedPath $deepFilePath), "max-path deep content", [System.Text.Encoding]::UTF8)
+  Assert-True -Condition ($deepFilePath.Length -gt 260) -Message "max-path fixture must exceed MAX_PATH to be meaningful (was $($deepFilePath.Length) chars)"
+
   Write-TauriOverlay -StageId $stageId
 
   $trustedStagedFiles = @(Get-StagedRelativeFiles -Root $stagingRoot)
@@ -226,6 +247,7 @@ try {
   $stagedPaths = @(Get-StagedRelativePaths -Root $stagingRoot)
   Assert-True -Condition ($stagedPaths -contains "expanded/poppler/nested/.verified-lock") -Message "nested .verified-lock files must remain in the complete staged-file set"
   Assert-True -Condition ($stagedPaths -contains "expanded/poppler/nested/.stage-manifest.json") -Message "nested .stage-manifest.json files must remain in the complete staged-file set"
+  Assert-True -Condition ($stagedPaths -contains $deepRelativePath) -Message "the past-MAX_PATH staged file must be enumerated by the long-path walk"
   Assert-True -Condition (-not (Test-FixtureStageReusable -Manifest $manifest)) -Message "unexpected nested metadata-named files must invalidate the cache"
   Remove-Item -LiteralPath $nestedMarkerPath -Force
   Remove-Item -LiteralPath $nestedManifestPath -Force
@@ -234,6 +256,54 @@ try {
   Assert-True -Condition (-not (Test-StagedFilesAgainstTrustedManifest -Root $stagingRoot -TrustedEntries $duplicateTrustedEntries)) -Message "duplicate Windows-insensitive trusted paths must be rejected"
   $escapingEntry = [pscustomobject]@{ path = "../escape.dll"; bytes = 0; sha256 = ("0" * 64) }
   Assert-True -Condition (-not (Test-StagedFilesAgainstTrustedManifest -Root $stagingRoot -TrustedEntries @($escapingEntry))) -Message "trusted paths escaping the staging root must be rejected"
+
+  # Expand-FlattenedRuntime must survive destination trees past MAX_PATH:
+  # the flattened copy arm (robocopy) is what unbreaks the node component on
+  # the self-hosted windows-heavy runners. The zip carries node.exe plus a
+  # deep chain mirroring npm's bundled node_modules; extraction into TEMP
+  # stays shallow, the destination crosses MAX_PATH, so this exercises the
+  # exact production geometry.
+  Add-Type -AssemblyName System.IO.Compression
+  $flatRoot = Join-Path $testRoot "flatten"
+  $flatDestination = Join-Path $testRoot "flatten\expanded\node"
+  $flatDeepRelativePath = (@("node") + $deepRelativeSegments + @("deep.js")) -join "\"
+  $flatZipPath = Join-Path $flatRoot "node-runtime.zip"
+  [void][System.IO.Directory]::CreateDirectory((Get-ExtendedPath $flatRoot))
+  $zipStream = [System.IO.File]::Create($flatZipPath)
+  $zipArchive = [System.IO.Compression.ZipArchive]::new($zipStream, [System.IO.Compression.ZipArchiveMode]::Create)
+  try {
+    foreach ($zipEntry in @(
+      [pscustomobject]@{ path = "node/node.exe"; content = "node exe stub" },
+      [pscustomobject]@{ path = ($flatDeepRelativePath.Replace('\', '/')); content = "flattened deep payload" }
+    )) {
+      $entry = $zipArchive.CreateEntry($zipEntry.path)
+      $entryWriter = [System.IO.StreamWriter]::new($entry.Open())
+      try {
+        $entryWriter.Write($zipEntry.content)
+      } finally {
+        $entryWriter.Dispose()
+      }
+    }
+  } finally {
+    $zipArchive.Dispose()
+    $zipStream.Dispose()
+  }
+  Expand-FlattenedRuntime -ZipPath $flatZipPath -Destination $flatDestination -RequiredFile "node.exe"
+  $flatDeepPath = Join-Path $flatDestination $flatDeepRelativePath
+  Assert-True -Condition ($flatDeepPath.Length -gt 260) -Message "flattened expansion destination must exceed MAX_PATH to exercise robocopy (was $($flatDeepPath.Length) chars)"
+  Assert-True -Condition ([System.IO.File]::ReadAllText((Get-ExtendedPath $flatDeepPath)) -eq "flattened deep payload") -Message "flattened runtime expansion must carry past-MAX_PATH files through robocopy intact"
+  Assert-True -Condition (Test-Path -LiteralPath (Join-Path $flatDestination "node.exe") -PathType Leaf) -Message "flattened runtime expansion must stage the required file at the destination root"
+  Assert-True -Condition (@(Get-ChildItem -LiteralPath $flatDestination -Force).Count -eq 2) -Message "flattened runtime expansion must produce exactly the archive root entries"
+
+  # Remove-TreeLongPath must delete trees holding past-MAX_PATH files and
+  # tolerate a missing target under -MissingOk (the staging finally blocks).
+  $removalRoot = Join-Path $testRoot "removal"
+  $removalDeepPath = Join-Path $removalRoot ((@($deepRelativeSegments) -join '\') + '\deep.js')
+  [void][System.IO.Directory]::CreateDirectory((Get-ExtendedPath (Split-Path -Parent $removalDeepPath)))
+  [System.IO.File]::WriteAllText((Get-ExtendedPath $removalDeepPath), "removal payload", [System.Text.Encoding]::UTF8)
+  Remove-TreeLongPath -Path $removalRoot
+  Assert-True -Condition (-not (Test-Path -LiteralPath $removalRoot)) -Message "long-path cleanup must remove a tree holding past-MAX_PATH files"
+  Remove-TreeLongPath -Path $removalRoot -MissingOk
 
   # Write-Utf8Atomically keeps shared-visibility descriptors continuously
   # present for the unlocked readers in scripts/tauri/windows-runtime.js:
