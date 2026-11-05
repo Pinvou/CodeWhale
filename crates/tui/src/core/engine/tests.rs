@@ -36436,3 +36436,139 @@ fn run_completion_real_factories_observe_shutdown_and_direct_handles_do_not() {
         );
     });
 }
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn turn_surface_strict_tool_mode_follows_the_official_route_gate() {
+    // The turn surface must receive the strict flag only through the
+    // official-route gate. Dropping that gate would re-expose the pre-gate
+    // behavior where any provider with `strict_tool_mode` on received the
+    // DeepSeek reshaping and `tool_choice:"required"` on every route.
+    let _env_lock = lock_test_env();
+    let tmp = tempdir().expect("tempdir");
+    let home = tmp.path().join("home");
+    fs::create_dir_all(&home).expect("create isolated home");
+    let _home = EnvVarGuard::set("HOME", &home);
+    let _userprofile = EnvVarGuard::set("USERPROFILE", &home);
+    let _codewhale_home = EnvVarGuard::set("CODEWHALE_HOME", home.join(".codewhale"));
+    let workspace = tmp.path().join("workspace");
+    fs::create_dir_all(&workspace).expect("create workspace");
+
+    let strict_api_config = Config {
+        api_key: Some("strict-gate-fixture".to_string()),
+        default_text_model: Some(DEFAULT_TEXT_MODEL.to_string()),
+        strict_tool_mode: Some(true),
+        ..Config::default()
+    };
+    let (mut engine, _engine_handle) = Engine::new(
+        EngineConfig {
+            workspace,
+            allow_shell: true,
+            strict_tool_mode: true,
+            ..EngineConfig::default()
+        },
+        &strict_api_config,
+    );
+    engine.config.features.disable(Feature::Mcp);
+    let client = engine.deepseek_client.clone();
+    let locale_tag = engine.config.locale_tag.clone();
+    let role_models = engine.subagent_role_models();
+    let authority = crate::core::authority::TurnAuthority::from_effective_fields(
+        AppMode::Agent,
+        true,
+        false,
+        false,
+        crate::tui::approval::ApprovalMode::Suggest,
+    );
+    let route_with = |provider: ApiProvider, api_config: Config| TurnRouteContext {
+        provider,
+        model: DEFAULT_TEXT_MODEL.to_string(),
+        capabilities: codewhale_config::route::RouteCapabilities::default(),
+        limits: None,
+        client: client.clone(),
+        api_config: Box::new(api_config),
+        locale_tag: locale_tag.clone(),
+        role_models: role_models.clone(),
+        auto_model: false,
+        reasoning_effort: None,
+        reasoning_effort_auto: false,
+    };
+
+    // Family provider on the official endpoint: in scope.
+    let build = engine
+        .build_turn_tool_registry_and_catalog(
+            &authority,
+            &[],
+            None,
+            SubAgentWiring::Inert,
+            McpAccess::PassiveSnapshot,
+            route_with(ApiProvider::Deepseek, strict_api_config.clone()),
+            "",
+        )
+        .await;
+    assert!(
+        build.surface.strict_tool_mode,
+        "the official family route is in scope"
+    );
+
+    // The same family provider on a custom endpoint: the gate keeps the
+    // pipeline off — no reshaping, no `tool_choice:"required"`.
+    let custom = Config {
+        api_key: Some("strict-gate-fixture".to_string()),
+        default_text_model: Some(DEFAULT_TEXT_MODEL.to_string()),
+        strict_tool_mode: Some(true),
+        providers: Some(crate::config::ProvidersConfig {
+            deepseek: crate::config::ProviderConfig {
+                base_url: Some("https://llm.example.com/v1".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        }),
+        ..Config::default()
+    };
+    let build = engine
+        .build_turn_tool_registry_and_catalog(
+            &authority,
+            &[],
+            None,
+            SubAgentWiring::Inert,
+            McpAccess::PassiveSnapshot,
+            route_with(ApiProvider::Deepseek, custom),
+            "",
+        )
+        .await;
+    assert!(
+        !build.surface.strict_tool_mode,
+        "a family provider on a custom endpoint stays out of scope"
+    );
+
+    // An official DeepSeek URL under a non-family provider: out of scope.
+    let openai_on_official = Config {
+        api_key: Some("strict-gate-fixture".to_string()),
+        default_text_model: Some(DEFAULT_TEXT_MODEL.to_string()),
+        strict_tool_mode: Some(true),
+        providers: Some(crate::config::ProvidersConfig {
+            openai: crate::config::ProviderConfig {
+                base_url: Some("https://api.deepseek.com/beta".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        }),
+        ..Config::default()
+    };
+    let build = engine
+        .build_turn_tool_registry_and_catalog(
+            &authority,
+            &[],
+            None,
+            SubAgentWiring::Inert,
+            McpAccess::PassiveSnapshot,
+            route_with(ApiProvider::Openai, openai_on_official),
+            "",
+        )
+        .await;
+    assert!(
+        !build.surface.strict_tool_mode,
+        "a non-family provider on an official URL stays out of scope"
+    );
+}

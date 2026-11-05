@@ -12943,13 +12943,13 @@ async fn run_subagent(
 
         // Same gate as the parent path: the strict pipeline encodes DeepSeek's
         // strict-mode contract, so it acts only on official DeepSeek-family
-        // routes (crate::config::route_is_official_deepseek_family).
+        // routes (crate::config::strict_tool_mode_for_route).
         let strict_tool_mode = runtime.api_config.as_deref().is_some_and(|config| {
-            config.strict_tool_mode.unwrap_or(false)
-                && crate::config::route_is_official_deepseek_family(
-                    config.api_provider(),
-                    &config.deepseek_base_url(),
-                )
+            crate::config::strict_tool_mode_for_route(
+                config.strict_tool_mode.unwrap_or(false),
+                config.api_provider(),
+                &config.deepseek_base_url(),
+            )
         });
         let tools = tool_surface.request_tools(
             tool_registry.deferred_catalog_for_model(&agent_type),
