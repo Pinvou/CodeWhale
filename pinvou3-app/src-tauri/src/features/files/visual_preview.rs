@@ -15,6 +15,7 @@ use super::IngestResult;
 use super::ingest_deps::{
     add_ocr_tessdata_arg, ocr_lang_arg, ocr_tool_command, pdf_tool_command, system_tools,
 };
+use super::ingest_diagnostics::safe_error;
 // The LibreOffice primitives are only exercised directly by the cfg(test)
 // conversion tests below; production paths go through run_libreoffice_convert.
 #[cfg(test)]
@@ -24,7 +25,7 @@ use super::ingest_deps::{libreoffice_tool_command, libreoffice_user_installation
 
 /// 单个图片文件 → `data:image/...;base64,...`。
 pub fn image_file_to_data_uri(path: &Path) -> Result<String, String> {
-    let bytes = std::fs::read(path).map_err(|e| format!("读图失败: {e}"))?;
+    let bytes = std::fs::read(path).map_err(|e| safe_error(format!("读图失败: {e}")))?;
     let mime =
         crate::platform::filesystem::image_mime_type(path).unwrap_or("application/octet-stream");
     Ok(format!(
@@ -116,8 +117,8 @@ pub fn libreoffice_to_inline_html(path: &Path) -> Result<String, String> {
                 .find(|p| p.file_stem().and_then(|s| s.to_str()) == Some(stem))
                 .or_else(|| htmls.first())
                 .ok_or_else(|| "LibreOffice 未产出 HTML".to_string())?;
-            let html =
-                std::fs::read_to_string(pick).map_err(|e| format!("读取转换 HTML 失败: {e}"))?;
+            let html = std::fs::read_to_string(pick)
+                .map_err(|e| safe_error(format!("读取转换 HTML 失败: {e}")))?;
             Ok(inline_html_images(&html, tmpdir))
         },
     )
@@ -204,12 +205,12 @@ fn render_pdf_pages(
     match convert {
         Ok(o) if o.status.success() => {}
         Ok(o) => {
-            return Err(format!(
+            return Err(safe_error(format!(
                 "pdftoppm 转图失败: {}",
                 String::from_utf8_lossy(&o.stderr).trim()
-            ));
+            )));
         }
-        Err(e) => return Err(format!("pdftoppm 调用失败: {e}")),
+        Err(e) => return Err(safe_error(format!("pdftoppm 调用失败: {e}"))),
     }
     // Collect the generated pngs, sorted by file name to guarantee page order.
     let mut pages: Vec<PathBuf> = std::fs::read_dir(dir)
@@ -235,12 +236,9 @@ pub fn pdf_to_png_data_uris(path: &Path, max_pages: u32) -> Result<(Vec<String>,
     if !system_tools().pdftoppm {
         return Err(crate::platform::os::pdf_render_missing_message().into());
     }
-    let ts = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let tmpdir = std::env::temp_dir().join(format!("pinvou3-pdfpreview-{ts}"));
-    std::fs::create_dir_all(&tmpdir).map_err(|e| format!("创建临时目录失败: {e}"))?;
+    let temporary = super::super::platform::private_conversion_directory("pinvou3-pdfpreview-")
+        .map_err(|e| safe_error(format!("创建临时目录失败: {e}")))?;
+    let tmpdir = temporary.path().to_owned();
 
     let result = (|| -> Result<(Vec<String>, bool), String> {
         let pages = render_pdf_pages(path, &tmpdir, 110, max_pages)?;
@@ -278,15 +276,15 @@ fn ocr_image(path: &Path) -> Result<String, String> {
         command,
         std::time::Duration::from_secs(60),
     )
-    .map_err(|e| format!("tesseract 调用失败: {e}"))?;
+    .map_err(|e| safe_error(format!("tesseract 调用失败: {e}")))?;
     if out.status.success() {
         Ok(String::from_utf8_lossy(&out.stdout).trim_end().to_string())
     } else {
-        Err(format!(
+        Err(safe_error(format!(
             "tesseract 退出码 {:?}: {}",
             out.status.code(),
             String::from_utf8_lossy(&out.stderr).trim()
-        ))
+        )))
     }
 }
 
@@ -329,20 +327,19 @@ pub(super) fn ocr_pdf(
     }
 
     // 临时目录：每次唯一，避免并发冲突。
-    let ts = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let tmpdir = std::env::temp_dir().join(format!("pinvou3-pdfocr-{ts}"));
-    if let Err(e) = std::fs::create_dir_all(&tmpdir) {
-        return IngestResult::warning(
-            "pdf",
-            &basename,
-            result_path,
-            byte_size,
-            format!("创建临时目录失败: {e}"),
-        );
-    }
+    let temporary = match super::super::platform::private_conversion_directory("pinvou3-pdfocr-") {
+        Ok(directory) => directory,
+        Err(e) => {
+            return IngestResult::warning(
+                "pdf",
+                &basename,
+                result_path,
+                byte_size,
+                safe_error(format!("创建临时目录失败: {e}")),
+            );
+        }
+    };
+    let tmpdir = temporary.path().to_owned();
 
     let rendered = render_pdf_pages(path, &tmpdir, 150, PDF_OCR_MAX_PAGES);
     let result = match rendered {
@@ -395,6 +392,7 @@ pub(super) fn ocr_pdf(
                     // 保留字面量 —— 这是「正文 + 告警」的特例。
                     let tokens = super::estimate_tokens(&content);
                     IngestResult {
+                        read_owner: None,
                         kind: "pdf".into(),
                         basename,
                         path: path_str.clone(),

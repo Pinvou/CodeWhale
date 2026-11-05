@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+const finishFixtures = require('./helpers/fixture-exit.cjs');
 /**
  * 工具商店技能包上传冒烟:加载 Vite dist + mock Tauri(desktop,可写权限),
  * 验证 header「上传技能包」按钮触发导入、成功后打开预填默认名的展示信息编辑弹窗、
@@ -9,11 +10,11 @@ const fs = require('fs'), path = require('path'), os = require('os');
 const { startUiTestServer } = require('./ui_test_server');
 
 function loadPuppeteer() {
-  try { return require('puppeteer-core'); } catch (_) { /* fall through */ }
+  try { return require('./helpers/puppeteer-fixture.cjs'); } catch (_) { /* fall through */ }
   const npx = path.join(os.homedir(), '.npm', '_npx');
   if (fs.existsSync(npx)) for (const d of fs.readdirSync(npx)) {
     const p = path.join(npx, d, 'node_modules', 'puppeteer-core');
-    if (fs.existsSync(p)) try { return require(p); } catch (_) { /* next */ }
+    if (fs.existsSync(p)) try { return require('./helpers/browser-fixture.cjs').wrapNative(require(p)); } catch (_) { /* next */ }
   }
   console.error('SKIP: 找不到 puppeteer-core');
   process.exit(2);
@@ -215,5 +216,5 @@ async function clickExact(page, text) {
     await browser.close();
   }
   console.log(failures ? `\n❌ ${failures} FAIL` : '\n✅ ALL PASS');
-  process.exit(failures ? 1 : 0);
-})().catch(e => { console.error(e); process.exit(1); });
+  finishFixtures(failures ? 1 : 0);
+})().catch(e => { console.error(e); finishFixtures(1); });

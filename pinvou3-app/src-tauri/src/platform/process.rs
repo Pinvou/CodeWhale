@@ -1,11 +1,44 @@
 use std::ffi::OsStr;
-use std::io::{Read, Seek, SeekFrom};
+use std::io::Read as _;
 use std::path::Path;
 use std::process::{Child, Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
+/// Hard ceiling for captured stdout/stderr per stream. A child (or a
+/// descendant) writing past it gets its whole process tree terminated, so a
+/// runaway writer can neither exhaust memory nor outlive the caller. This
+/// is a memory bound, not a tunable: a consumer whose legitimate output can
+/// outgrow it must not capture that output at all but redirect it to a file
+/// it owns and read it from there (the checkpoint diff and change list go
+/// through `git diff --output` for exactly this reason), because no bound
+/// on bytes read back into memory can be made to cover an inventory whose
+/// size the consumer's own admission rules do not bound.
 const MAX_CAPTURE_BYTES: u64 = 4 * 1024 * 1024;
+/// Appended by [`marked_capture_bytes`] when a stream was clipped to
+/// [`MAX_CAPTURE_BYTES`], so a truncated capture is never mistaken for the
+/// child's complete output. The success path carries it only for a clip;
+/// a capture that could not be read back in full is an error there (see
+/// [`deliver_captures`]) and degrades to the marker alone only inside
+/// error-message detail.
 const CAPTURE_TRUNCATED_MARKER: &[u8] = b"\n[pinvou: subprocess output truncated]\n";
+
+/// Readback chunk for [`read_capture`]: large enough that any capture
+/// past one block exercises the multi-chunk path the cursor pins rely on.
+const CAPTURE_READ_CHUNK: usize = 64 * 1024;
+/// The timeout anchor clause inside this module's fixed error prefix
+/// (`{program} timed out after {n}s: {detail}`). The boundary consumers
+/// that classify or cut these messages — connectors' `ProbeError::classify`,
+/// the pkexec privileged-helper wrapper, and the 7z list precheck — must
+/// match on this constant instead of a private literal, so a wording change
+/// here fails their compile/refactor rather than silently unmatching at
+/// runtime (the formats themselves are additionally pinned end-to-end by
+/// the fixture tests on both sides).
+pub(crate) const CAPTURE_TIMEOUT_ANCHOR: &str = " timed out after ";
+/// The overflow anchor clause inside this module's fixed error prefix
+/// (`{program} output exceeded {limit} bytes; ...`, where `limit` is the
+/// call's capture bound). Same producer/consumer contract as
+/// [`CAPTURE_TIMEOUT_ANCHOR`].
+pub(crate) const CAPTURE_OVERFLOW_ANCHOR: &str = "output exceeded";
 #[cfg(windows)]
 const WINDOWS_TASKKILL_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -191,9 +224,19 @@ pub(crate) fn external_tokio_command(executable: &Path) -> tokio::process::Comma
 
 /// Capture a subprocess without pipe deadlocks and enforce a wall-clock timeout.
 ///
-/// Note: if captured stdout/stderr exceeds `MAX_CAPTURE_BYTES`, the whole process
-/// tree is terminated regardless of the kill-tree flag — a runaway writer is never
-/// allowed to outlive the caller.
+/// stdout/stderr are captured into temporary files instead of pipes: a
+/// completed child's output is returned in full even when a daemonized
+/// descendant inherited the capture handles, and the wall-clock timeout
+/// stays effective regardless of descendants (issue #536). Capture is
+/// bounded: if either stream exceeds [`MAX_CAPTURE_BYTES`] while this call
+/// is running, the whole process tree is terminated regardless of the
+/// kill-tree flag, and the error carries the truncated output. The bound is
+/// an in-call guarantee: a descendant that escapes the tree kill (e.g. it
+/// called setsid) can keep writing to the unlinked capture file after this
+/// call returns — the space is reclaimed when it exits, and this platform's
+/// managed process-tree ownership (the Windows Job Object) closes that
+/// residual gap. A capture that cannot be read back in full is an error,
+/// never partial `Output`.
 pub(crate) fn output_with_timeout(
     mut command: Command,
     timeout: Duration,
@@ -206,6 +249,8 @@ pub(crate) fn output_with_timeout(
 /// on timeout. Use this for helpers that can launch privileged descendants: killing
 /// only the wrapper can otherwise leave the real operation running with inherited
 /// stdout/stderr pipes after the caller has reported a timeout.
+///
+/// The capture bound documented on [`output_with_timeout`] applies here too.
 pub(crate) fn output_with_timeout_and_kill_tree(
     mut command: Command,
     timeout: Duration,
@@ -220,17 +265,29 @@ fn output_with_timeout_inner(
     kill_tree_on_timeout: bool,
 ) -> Result<Output, String> {
     let program = command.get_program().to_string_lossy().into_owned();
-    // Regular files cannot fill a pipe and block the child. They also let us read a
-    // completed parent's output without waiting for a descendant that inherited the
-    // same handles to exit, so the wall-clock timeout remains effective.
-    let mut stdout_file = tempfile::tempfile()
+    let limit = MAX_CAPTURE_BYTES;
+    // Regular files cannot fill up and block the child the way a pipe can.
+    // They also let a completed parent's output be read back without
+    // waiting for a descendant that inherited the same handles to exit, so
+    // the wall-clock timeout stays effective (issue #536).
+    // Named captures are required for the readback below: every clone of
+    // one capture handle — ours and every inherited stdout/stderr copy in
+    // the child tree — shares a single file position (`dup`/`try_clone`
+    // semantics on Unix, shared `CurrentByteOffset` on Windows), so the
+    // launcher must read through a freshly opened handle with a position
+    // of its own, which needs the file's name. A crash between spawn and
+    // cleanup can leak the name; bounded, like the rest of the temp dir's
+    // churn.
+    let stdout_file = tempfile::NamedTempFile::new()
         .map_err(|error| format!("create {program} stdout capture failed: {error}"))?;
-    let mut stderr_file = tempfile::tempfile()
+    let stderr_file = tempfile::NamedTempFile::new()
         .map_err(|error| format!("create {program} stderr capture failed: {error}"))?;
     let stdout_target = stdout_file
+        .as_file()
         .try_clone()
         .map_err(|error| format!("clone {program} stdout capture failed: {error}"))?;
     let stderr_target = stderr_file
+        .as_file()
         .try_clone()
         .map_err(|error| format!("clone {program} stderr capture failed: {error}"))?;
     command
@@ -242,15 +299,25 @@ fn output_with_timeout_inner(
 
     let started = Instant::now();
     let status = loop {
-        if capture_limit_exceeded(&stdout_file) || capture_limit_exceeded(&stderr_file) {
+        // Check the capture bound before the exit poll so a runaway writer
+        // is terminated mid-flight: with [`MAX_CAPTURE_BYTES`] crossed, the
+        // whole tree is killed regardless of the kill-tree flag — an
+        // overflowing writer never gets to outlive the caller. A
+        // burst-then-exit writer can cross the cap only after it already
+        // exited; the probe below sends that state down the same
+        // managed-tree termination path as the post-exit re-check instead
+        // of a doomed kill on a dead pid.
+        if capture_limit_exceeded(stdout_file.as_file(), limit)
+            || capture_limit_exceeded(stderr_file.as_file(), limit)
+        {
             let kill_note = kill_note_suffix(managed_tree.terminate());
             let _ = child.kill();
             let reap_note = reap_note_suffix(reap_killed_child(&mut child, REAP_GRACE));
-            let stdout = read_capture(&mut stdout_file);
-            let stderr = read_capture(&mut stderr_file);
+            let stdout = marked_capture_bytes(read_capture(&stdout_file, limit));
+            let stderr = marked_capture_bytes(read_capture(&stderr_file, limit));
             let detail = subprocess_output_detail(&stdout, &stderr);
             return Err(format!(
-                "{program} output exceeded {MAX_CAPTURE_BYTES} bytes; subprocess tree termination requested: {detail}{reap_note}{kill_note}"
+                "{program} {CAPTURE_OVERFLOW_ANCHOR} {limit} bytes; subprocess tree termination requested: {detail}{reap_note}{kill_note}"
             ));
         }
         match child.try_wait() {
@@ -266,11 +333,11 @@ fn output_with_timeout_inner(
                 };
                 let _ = child.kill();
                 let reap_note = reap_note_suffix(reap_killed_child(&mut child, REAP_GRACE));
-                let stdout = read_capture(&mut stdout_file);
-                let stderr = read_capture(&mut stderr_file);
+                let stdout = marked_capture_bytes(read_capture(&stdout_file, limit));
+                let stderr = marked_capture_bytes(read_capture(&stderr_file, limit));
                 let detail = subprocess_output_detail(&stdout, &stderr);
                 return Err(format!(
-                    "{program} timed out after {}s: {detail}{reap_note}{kill_note}",
+                    "{program}{CAPTURE_TIMEOUT_ANCHOR}{}s: {detail}{reap_note}{kill_note}",
                     timeout.as_secs()
                 ));
             }
@@ -282,7 +349,8 @@ fn output_with_timeout_inner(
                 };
                 let _ = child.kill();
                 // 等待错误本身已是调用方的诊断信息,回收结果按既有惯例丢弃;
-                // 有界回收保证这条路径同样不越过自身的时间预算。
+                // 有界回收保证这条路径同样不越过自身的时间预算。捕获输出
+                // 已写入临时文件,残余孙进程无法再把调用方拖过截止时间。
                 let _ = reap_killed_child(&mut child, REAP_GRACE);
                 return Err(format!("{program} wait error: {error}{kill_note}"));
             }
@@ -292,21 +360,28 @@ fn output_with_timeout_inner(
     // A fast writer can cross the limit and exit between the last size check
     // and `try_wait()`. Re-check after completion so overflow is never reported
     // as a silently truncated success.
-    if capture_limit_exceeded(&stdout_file) || capture_limit_exceeded(&stderr_file) {
+    if capture_limit_exceeded(stdout_file.as_file(), limit)
+        || capture_limit_exceeded(stderr_file.as_file(), limit)
+    {
         let kill_note = kill_note_suffix(managed_tree.terminate());
-        let stdout = read_capture(&mut stdout_file);
-        let stderr = read_capture(&mut stderr_file);
+        let stdout = marked_capture_bytes(read_capture(&stdout_file, limit));
+        let stderr = marked_capture_bytes(read_capture(&stderr_file, limit));
         let detail = subprocess_output_detail(&stdout, &stderr);
         return Err(format!(
-            "{program} output exceeded {MAX_CAPTURE_BYTES} bytes; subprocess tree termination requested: {detail}{kill_note}"
+            "{program} {CAPTURE_OVERFLOW_ANCHOR} {limit} bytes; subprocess tree termination requested: {detail}{kill_note}"
         ));
     }
 
-    Ok(Output {
-        status,
-        stdout: read_capture(&mut stdout_file),
-        stderr: read_capture(&mut stderr_file),
-    })
+    match deliver_captures(&stdout_file, &stderr_file) {
+        CaptureDelivery::Output { stdout, stderr } => Ok(Output {
+            status,
+            stdout,
+            stderr,
+        }),
+        CaptureDelivery::ReadbackFailed(error) => Err(format!(
+            "{program} subprocess capture readback failed: {error}"
+        )),
+    }
 }
 
 /// How long to keep reaping a child after a termination request. A
@@ -370,21 +445,116 @@ fn kill_note_suffix(result: std::io::Result<()>) -> String {
         .unwrap_or_default()
 }
 
-fn capture_limit_exceeded(file: &std::fs::File) -> bool {
-    file.metadata()
-        .is_ok_and(|metadata| metadata.len() > MAX_CAPTURE_BYTES)
+/// True once the capture file has grown past `limit`. The child's own file
+/// offset is irrelevant: the file length is observed, so the check works
+/// while the child is running and after it exited.
+fn capture_limit_exceeded(file: &std::fs::File, limit: u64) -> bool {
+    file.metadata().is_ok_and(|metadata| metadata.len() > limit)
 }
 
-fn read_capture(file: &mut std::fs::File) -> Vec<u8> {
+/// Outcome of reading a capture file back.
+#[derive(Debug)]
+enum CaptureReadback {
+    /// The whole capture, at most `limit` bytes.
+    Complete(Vec<u8>),
+    /// The capture grew past `limit`; these are its first `limit` bytes.
+    Clipped(Vec<u8>),
+    /// The capture could not be read back in full. Carried as the error,
+    /// never as bytes: whatever was read is not the child's output, and a
+    /// consumer parsing it as such would report partial content as the
+    /// whole (an empty change list for a capture that failed to reopen).
+    Failed(std::io::Error),
+}
+
+/// Read a capture file back, clipped to `limit`. The extra probe byte
+/// distinguishes "exactly at the limit" from "clipped".
+///
+/// The readback opens a fresh handle instead of using the capture handle:
+/// every clone of one capture handle — ours and every inherited
+/// stdout/stderr copy in the child tree — shares a single file position
+/// (`dup`/`try_clone` on Unix, duplicated handles on Windows), so reading
+/// through it would move the writers' position: backward at the first
+/// read, or forward to a mid-file frontier after a chunk lands. A
+/// surviving descendant's next write would then overwrite captured or
+/// still-unread bytes below the cap with every step succeeding and no
+/// truncation marker. A freshly opened handle has a position of its own
+/// on both platforms (new open file description / new file object), so
+/// writers keep appending and the capture stays an append log (pinned by
+/// [`read_capture_never_rewinds_the_shared_writer_cursor`] and
+/// [`read_capture_writer_writes_append_across_readback_blocks`]).
+fn read_capture(capture: &tempfile::NamedTempFile, limit: u64) -> CaptureReadback {
     let mut buffer = Vec::new();
-    if file.seek(SeekFrom::Start(0)).is_ok() {
-        let _ = file.take(MAX_CAPTURE_BYTES + 1).read_to_end(&mut buffer);
+    let mut chunk = [0u8; CAPTURE_READ_CHUNK];
+    let mut readback = match std::fs::File::open(capture.path()) {
+        Ok(readback) => readback,
+        Err(error) => return CaptureReadback::Failed(error),
+    };
+    // One chunk past the limit is enough to classify the capture: anything
+    // beyond it is clipped below anyway.
+    while buffer.len() as u64 <= limit {
+        match readback.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(read) => buffer.extend_from_slice(&chunk[..read]),
+            Err(error) => return CaptureReadback::Failed(error),
+        }
     }
-    if buffer.len() as u64 > MAX_CAPTURE_BYTES {
-        buffer.truncate(MAX_CAPTURE_BYTES as usize);
-        buffer.extend_from_slice(CAPTURE_TRUNCATED_MARKER);
+    if buffer.len() as u64 > limit {
+        buffer.truncate(limit as usize);
+        return CaptureReadback::Clipped(buffer);
     }
-    buffer
+    CaptureReadback::Complete(buffer)
+}
+
+/// The capture as bytes for the error-message detail and the success-path
+/// delivery: a clipped capture carries [`CAPTURE_TRUNCATED_MARKER`], and a
+/// capture that could not be read back in full degrades to the marker alone
+/// — on an error path the message is already the failure, so the detail
+/// stays best-effort (the success path never gets here with a failed
+/// readback, see [`deliver_captures`]).
+fn marked_capture_bytes(readback: CaptureReadback) -> Vec<u8> {
+    match readback {
+        CaptureReadback::Complete(bytes) => bytes,
+        CaptureReadback::Clipped(mut bytes) => {
+            bytes.extend_from_slice(CAPTURE_TRUNCATED_MARKER);
+            bytes
+        }
+        CaptureReadback::Failed(_) => CAPTURE_TRUNCATED_MARKER.to_vec(),
+    }
+}
+
+/// How a completed child's two captures reach the caller; see
+/// [`deliver_captures`].
+enum CaptureDelivery {
+    Output {
+        stdout: Vec<u8>,
+        stderr: Vec<u8>,
+    },
+    /// A capture could not be read back in full.
+    ReadbackFailed(std::io::Error),
+}
+
+/// Success-path delivery of the two captures. A capture that cannot be read
+/// back in full is a failure, never bytes: the caller parses `Output` as the
+/// child's complete output, and a marker in place of content is dropped by
+/// a line parser as noise (a list read from a capture that failed to reopen
+/// would come back empty and be reported as "no changes"). A clipped
+/// capture (a write landing between the post-exit re-check and the read) is
+/// delivered marked, as the boundary consumers expect.
+fn deliver_captures(
+    stdout_file: &tempfile::NamedTempFile,
+    stderr_file: &tempfile::NamedTempFile,
+) -> CaptureDelivery {
+    let stdout = read_capture(stdout_file, MAX_CAPTURE_BYTES);
+    let stderr = read_capture(stderr_file, MAX_CAPTURE_BYTES);
+    match (stdout, stderr) {
+        (CaptureReadback::Failed(error), _) | (_, CaptureReadback::Failed(error)) => {
+            CaptureDelivery::ReadbackFailed(error)
+        }
+        (stdout, stderr) => CaptureDelivery::Output {
+            stdout: marked_capture_bytes(stdout),
+            stderr: marked_capture_bytes(stderr),
+        },
+    }
 }
 
 fn subprocess_output_detail(stdout: &[u8], stderr: &[u8]) -> String {
@@ -945,7 +1115,7 @@ pub(crate) fn hide_tokio_console(_command: &mut tokio::process::Command) {}
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use std::io::Write as _;
+    use std::io::{Seek as _, Write as _};
 
     /// reap_killed_child collects an exited child promptly instead of
     /// waiting out the grace deadline. Soft-skips when no `sleep` binary
@@ -1132,6 +1302,32 @@ pub(crate) mod tests {
         marker.exists()
     }
 
+    /// Spawns a long-lived descendant copy with inherited capture handles
+    /// and waits for its running marker. Shared by the retention
+    /// ("descendant") and tree-kill ("overflow_tree") modes and by the
+    /// writing-descendant launcher fixture.
+    fn spawn_descendant_and_wait_for_running_marker(mode: &str) {
+        let mut descendant = output_fixture_command(mode);
+        descendant.stdout(Stdio::inherit()).stderr(Stdio::inherit());
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt as _;
+
+            // Give the successful descendant an independent console
+            // lifecycle so this fixture models a real helper that outlives
+            // its completed launcher while retaining the launcher's capture
+            // handles.
+            const DETACHED_PROCESS: u32 = 0x0000_0008;
+            const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+            descendant.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
+        }
+        let _child = descendant.spawn().unwrap();
+        assert!(wait_for_fixture_marker(
+            "running",
+            DESCENDANT_STARTUP_HANDSHAKE
+        ));
+    }
+
     #[test]
     fn command_output_fixture() {
         match std::env::var(OUTPUT_FIXTURE_ENV).as_deref() {
@@ -1153,26 +1349,47 @@ pub(crate) mod tests {
                 std::io::stderr().write_all(&payload).unwrap();
             }
             Ok("descendant") => {
-                let mut descendant = output_fixture_command("descendant_success");
-                descendant.stdout(Stdio::inherit()).stderr(Stdio::inherit());
-                #[cfg(windows)]
-                {
-                    use std::os::windows::process::CommandExt as _;
-
-                    // Give the successful descendant an independent console
-                    // lifecycle so this fixture models a real helper that
-                    // outlives its completed launcher while retaining the
-                    // launcher's capture handles.
-                    const DETACHED_PROCESS: u32 = 0x0000_0008;
-                    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
-                    descendant.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
-                }
-                let _child = descendant.spawn().unwrap();
-                assert!(wait_for_fixture_marker(
-                    "running",
-                    DESCENDANT_STARTUP_HANDSHAKE
-                ));
+                spawn_descendant_and_wait_for_running_marker("descendant_success");
                 println!("descendant-started");
+            }
+            Ok("writer_descendant") => {
+                // Like `descendant_success`, but it WRITES to the inherited
+                // capture handles for its whole lifetime, concurrent with
+                // the launcher's own output and the parent's readback.
+                if let Some(pid) = fixture_marker("pid") {
+                    std::fs::write(pid, std::process::id().to_string()).unwrap();
+                }
+                if let Some(running) = fixture_marker("running") {
+                    std::fs::write(running, b"running").unwrap();
+                }
+                let deadline = Instant::now() + Duration::from_secs(5);
+                while Instant::now() < deadline {
+                    let mut stdout = std::io::stdout().lock();
+                    let _ = stdout.write_all(b"late-write\n");
+                    let _ = stdout.flush();
+                    drop(stdout);
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+                if let Some(finished) = fixture_marker("finished") {
+                    std::fs::write(finished, b"finished").unwrap();
+                }
+            }
+            Ok("writer_launcher") => {
+                spawn_descendant_and_wait_for_running_marker("writer_descendant");
+                println!("parent-output");
+            }
+            Ok("overflow_tree") => {
+                // Overflow while a live descendant holds the inherited
+                // capture handles: the whole group must die with the
+                // launcher, so the tree-kill tests can pin actual
+                // descendant death instead of just the error text. The
+                // descendant records its pid in the pid marker before
+                // raising the running marker.
+                spawn_descendant_and_wait_for_running_marker("descendant_success");
+                let payload = vec![b'x'; 64 * 1024];
+                loop {
+                    std::io::stdout().write_all(&payload).unwrap();
+                }
             }
             Ok("descendant_wait") | Ok("overflow_descendant") => {
                 #[cfg(windows)]
@@ -1241,7 +1458,7 @@ pub(crate) mod tests {
             }
             #[cfg(windows)]
             Ok("root_timeout") => {
-                let _child = output_fixture_command("descendant_timeout")
+                let _child = output_fixture_command("root_timeout_descendant")
                     .stdout(Stdio::null())
                     .stderr(Stdio::null())
                     .spawn()
@@ -1289,6 +1506,21 @@ pub(crate) mod tests {
                 if let Some(finished) = fixture_marker("finished") {
                     std::fs::write(finished, b"finished").unwrap();
                 }
+            }
+            #[cfg(windows)]
+            Ok("root_timeout_descendant") => {
+                std::fs::write(
+                    fixture_marker("pid").unwrap(),
+                    std::process::id().to_string(),
+                )
+                .unwrap();
+                std::fs::write(fixture_marker("running").unwrap(), b"running").unwrap();
+                // Only the ordinary-timeout fixture exits cooperatively. Its
+                // parent first observes this exact process alive after timeout.
+                assert!(wait_for_fixture_marker(
+                    "cooperative-exit",
+                    Duration::from_secs(60)
+                ));
             }
             Ok("descendant_timeout") => {
                 if let Some(pid) = fixture_marker("pid") {
@@ -1677,6 +1909,50 @@ pub(crate) mod tests {
     }
 
     #[cfg(windows)]
+    struct RootTimeoutFixtureCleanup {
+        identity: WindowsProcessHandle,
+        cooperative_exit: std::path::PathBuf,
+        completed: bool,
+    }
+
+    #[cfg(windows)]
+    impl RootTimeoutFixtureCleanup {
+        fn finish(&mut self) {
+            std::fs::write(&self.cooperative_exit, b"exit")
+                .expect("request cooperative timeout-fixture exit");
+            assert_windows_process_exited(&self.identity, Duration::from_secs(3));
+            self.completed = true;
+        }
+    }
+
+    #[cfg(windows)]
+    impl Drop for RootTimeoutFixtureCleanup {
+        fn drop(&mut self) {
+            if self.completed {
+                return;
+            }
+            // A failed assertion must still clean up only the pinned fixture.
+            // TerminateProcess is asynchronous; this fallback retains its own
+            // bounded exit wait and never turns a cleanup failure into success.
+            let termination = terminate_windows_fixture_process(&self.identity);
+            // SAFETY: the cleanup guard still owns this bound process handle.
+            let wait = unsafe {
+                windows_sys::Win32::System::Threading::WaitForSingleObject(
+                    self.identity.handle,
+                    3_000,
+                )
+            };
+            eprintln!(
+                "timeout fixture {} fallback: terminate={termination:?}, wait={wait}",
+                self.identity.pid
+            );
+            if !std::thread::panicking() {
+                panic!("timeout fixture cleanup did not complete cooperatively");
+            }
+        }
+    }
+
+    #[cfg(windows)]
     #[test]
     fn ordinary_timeout_does_not_terminate_managed_descendants() {
         use windows_sys::Win32::Foundation::WAIT_TIMEOUT;
@@ -1685,6 +1961,7 @@ pub(crate) mod tests {
         let temporary = tempfile::tempdir().unwrap();
         let marker = temporary.path().join("root-only-timeout");
         let pid_file = marker.with_extension("pid");
+        let cooperative_exit = marker.with_extension("cooperative-exit");
         let mut command = output_fixture_command("root_timeout");
         command.env(OUTPUT_FIXTURE_MARKER_ENV, &marker);
         let (root_finished, root_result) = std::sync::mpsc::channel();
@@ -1696,12 +1973,18 @@ pub(crate) mod tests {
                 .parse()
                 .unwrap();
             let identity = WindowsProcessHandle::open(pid).unwrap().unwrap();
+            let mut cleanup = RootTimeoutFixtureCleanup {
+                identity,
+                cooperative_exit,
+                completed: false,
+            };
             root_result.recv_timeout(Duration::from_secs(35)).unwrap();
             // SAFETY: identity pins the exact descendant; zero wait only probes liveness.
-            let survived = unsafe { WaitForSingleObject(identity.handle, 0) } == WAIT_TIMEOUT;
-            terminate_windows_fixture_process(&identity)
-                .expect("terminate the deliberately surviving timeout fixture");
-            assert_windows_process_exited(&identity, Duration::from_secs(3));
+            let survived =
+                unsafe { WaitForSingleObject(cleanup.identity.handle, 0) } == WAIT_TIMEOUT;
+            // Observe the contract before cleanup. This test does not require
+            // asynchronous forced termination to complete within a wall-clock budget.
+            cleanup.finish();
             survived
         });
         let result = output_with_timeout(
@@ -1862,12 +2145,24 @@ pub(crate) mod tests {
         let _ = std::fs::remove_dir_all(&work);
     }
 
+    /// A large but bounded burst of output must be captured completely:
+    /// regular-file capture cannot fill up and stall the writer the way a
+    /// full pipe buffer would, so a chatty child neither deadlocks nor
+    /// loses output. Guarded by the fixture lock because it re-execs the
+    /// test binary.
     #[test]
     fn output_capture_does_not_deadlock_when_buffers_are_large() {
         let _fixture_lock = lock_process_fixture();
+        // The budget must absorb a cold re-exec of the test binary
+        // (multi-second on a loaded/AV-scanned Windows runner); on success
+        // paths the child exits on its own, so a larger ceiling costs
+        // nothing. 90s because the engine's single budget also covers
+        // fixture startup — under cargo-lock contention a 30s budget was
+        // observed firing a *correct* timeout before a slow-starting child
+        // ever reached its payload (round-3 review M3).
         let output = output_with_timeout_and_kill_tree(
             output_fixture_command("flood"),
-            Duration::from_secs(5),
+            Duration::from_secs(90),
         )
         .unwrap();
 
@@ -1876,30 +2171,121 @@ pub(crate) mod tests {
         assert!(output.stderr.len() >= 256 * 1024);
     }
 
+    /// A child that keeps writing past the capture limit must be stopped:
+    /// the poll loop notices the crossed bound mid-flight and terminates
+    /// the whole tree, reporting an overflow error instead of a truncated
+    /// success. The fixture holds a live descendant while overflowing, so
+    /// the descendant-death assertion below pins an actual tree kill, not
+    /// just the error text.
     #[test]
     fn output_capture_limit_terminates_process_tree() {
         let _fixture_lock = lock_process_fixture();
-        let error = output_with_timeout_and_kill_tree(
-            output_fixture_command("overflow"),
-            Duration::from_secs(5),
-        )
-        .unwrap_err();
+        let temporary = tempfile::tempdir().unwrap();
+        let marker = temporary.path().join("tree-overflow-marker");
+        let mut command = output_fixture_command("overflow_tree");
+        command.env(OUTPUT_FIXTURE_MARKER_ENV, &marker);
+        // 90s: the single budget covers the launcher's own re-exec, the
+        // descendant's up-to-20s startup handshake and the flood (M3).
+        let error =
+            output_with_timeout_and_kill_tree(command, Duration::from_secs(90)).unwrap_err();
 
         assert!(error.contains("output exceeded"), "{error}");
+        assert_descendant_fixture_died(&marker);
     }
 
+    /// Pins the load-bearing wiring for "the tree is terminated on overflow
+    /// regardless of the kill-tree flag": the plain variant must also make
+    /// its child a process-group leader, or the unconditional group kill
+    /// degenerates into a no-op (the leader's pid names no group) and the
+    /// descendant survives. Removing the `std_process_group_leader` call in
+    /// `output_with_timeout` fails the descendant-death assertion below.
+    #[test]
+    fn plain_output_limit_also_terminates_the_process_tree() {
+        let _fixture_lock = lock_process_fixture();
+        let temporary = tempfile::tempdir().unwrap();
+        let marker = temporary.path().join("plain-overflow-marker");
+        let mut command = output_fixture_command("overflow_tree");
+        command.env(OUTPUT_FIXTURE_MARKER_ENV, &marker);
+        let error = output_with_timeout(command, Duration::from_secs(90)).unwrap_err();
+
+        assert!(error.contains("output exceeded"), "{error}");
+        assert_descendant_fixture_died(&marker);
+    }
+
+    /// Asserts the overflow_tree fixture's descendant actually died. The
+    /// descendant records its pid before raising the running marker, so the
+    /// pid file is stable once the fixture started. The window must stay
+    /// below the descendant's 5s natural lifetime, so a surviving
+    /// descendant cannot pass the assertion by exiting on its own. Unix-only
+    /// because std has no portable liveness probe; on Windows the in-flight
+    /// tree kill rides on the managed Job Object and its outcome is reported
+    /// through the error message (real descendant-death pinning there is
+    /// covered by the job-based fixtures above).
+    #[cfg(unix)]
+    fn assert_descendant_fixture_died(marker: &std::path::Path) {
+        let pid: u32 = std::fs::read_to_string(marker.with_extension("pid"))
+            .expect("descendant pid marker")
+            .trim()
+            .parse()
+            .expect("descendant pid");
+        // SAFETY: libc::kill with sig=0 only probes liveness; no memory is touched.
+        let alive = |pid: u32| unsafe { libc::kill(pid as i32, 0) == 0 };
+        let started = Instant::now();
+        while alive(pid) && started.elapsed() < Duration::from_secs(3) {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(
+            !alive(pid),
+            "descendant {pid} survived the overflow tree kill"
+        );
+    }
+
+    /// Windows counterpart: the overflow error above is the pin here; see
+    /// the unix variant for why descendant death is not assertable.
+    #[cfg(not(unix))]
+    fn assert_descendant_fixture_died(_marker: &std::path::Path) {}
+
+    /// A writer that crosses the limit and exits cleanly must still be
+    /// errored, never given a silently truncated success. The in-flight
+    /// check catches a crossing seen before the exit poll; the post-exit
+    /// re-check covers a write landing inside the final iteration, after
+    /// the size check but before `try_wait` reports the exit. This test
+    /// pins the caller-visible contract, not which check fires.
     #[test]
     fn completed_process_cannot_bypass_output_capture_limit() {
         let _fixture_lock = lock_process_fixture();
         let error = output_with_timeout_and_kill_tree(
             output_fixture_command("overflow_exit"),
-            Duration::from_secs(5),
+            Duration::from_secs(90),
         )
         .unwrap_err();
 
         assert!(error.contains("output exceeded"), "{error}");
+        // Unix: the termination claim must be present on both sub-paths —
+        // the in-flight check kills a live-or-reaped root via the pgid
+        // (ESRCH is success), and the post-exit re-check kills the same
+        // way. This is the behavioral pin that the kill-honesty fix keeps
+        // reporting the request (round-1 M2; nothing asserted it before
+        // round-3 M4).
+        #[cfg(unix)]
+        assert!(
+            error.contains("subprocess tree termination requested"),
+            "{error}"
+        );
+        // Windows: the managed Job Object keeps orphaned descendants
+        // terminable even after the root was reaped, so the overflow paths
+        // always request termination through it — the claim in the message
+        // stays honest on both platforms (the job-based fixtures above pin
+        // the actual descendant death).
     }
 
+    /// The core output-retention regression: a launcher that exits on time
+    /// while a live descendant still holds the inherited capture handles
+    /// must have its own output returned IN FULL (the retired pipe handoff
+    /// reported empty/partial here), and the call must not wait out the
+    /// descendant. Timing is measured from the descendant's own running
+    /// marker so test-binary startup time cannot masquerade as waiting for
+    /// the capture handles to close.
     #[test]
     fn completed_parent_does_not_wait_for_descendant_capture_handles() {
         let _fixture_lock = lock_process_fixture();
@@ -1911,23 +2297,32 @@ pub(crate) mod tests {
         command.env(OUTPUT_FIXTURE_MARKER_ENV, &marker);
         // Starting another copy of the large test binary can take several
         // seconds on a cold Windows machine. Measure from the descendant's
-        // own running marker so startup time cannot masquerade as waiting for
-        // the inherited capture handles to close.
+        // own running marker so startup time cannot masquerade as waiting
+        // for the inherited capture handles to close.
         let (marker_sender, marker_receiver) = std::sync::mpsc::sync_channel(1);
         let marker_waiter = std::thread::spawn(move || {
+            // The launcher's own handshake starts after ITS startup, so this
+            // waiter's deadline must be strictly larger or a slow start
+            // lands in the gap: the launcher succeeds, but the channel
+            // already holds a miss and the expect below fails spuriously.
+            let deadline = DESCENDANT_STARTUP_HANDSHAKE + Duration::from_secs(15);
             let started = Instant::now();
-            while !running.exists() && started.elapsed() < DESCENDANT_STARTUP_HANDSHAKE {
+            while !running.exists() && started.elapsed() < deadline {
                 std::thread::sleep(Duration::from_millis(25));
             }
             let _ = marker_sender.send(running.exists().then(Instant::now));
         });
         // The outer launcher and the descendant are separate copies of the
         // large test binary. Give their explicit startup handshake enough
-        // room, while the assertion below still measures the real contract
-        // strictly from the descendant's running marker.
-        let output = output_with_timeout_and_kill_tree(command, Duration::from_secs(30)).unwrap();
+        // room (M3: 90s — the single budget covers both re-execs and the
+        // 20s handshake), while the assertion below still measures the real
+        // contract strictly from the descendant's running marker.
+        let output = output_with_timeout_and_kill_tree(command, Duration::from_secs(90)).unwrap();
+        // Upper-bounds the waiter thread's remaining wait (its deadline is
+        // launcher handshake + 15s, and the call itself gives the launcher
+        // 90s), so the recv cannot expire before the thread reports.
         let marker_seen_at = marker_receiver
-            .recv_timeout(Duration::from_secs(1))
+            .recv_timeout(Duration::from_secs(20))
             .unwrap()
             .expect("descendant did not start before launcher exit");
         marker_waiter.join().unwrap();
@@ -1950,6 +2345,278 @@ pub(crate) mod tests {
             "descendant fixture did not exit naturally"
         );
         std::thread::sleep(Duration::from_millis(100));
+    }
+
+    /// The stronger retention variant: the descendant WRITES to the
+    /// inherited capture handles for its whole lifetime, concurrent with
+    /// the launcher's own line and the parent's readback. Under a reader
+    /// that rewinds the shared cursor, such a write lands at the rewound
+    /// position — overwriting the captured prefix below the cap, where no
+    /// truncation marker would fire (the native Windows probe behind this
+    /// observed b'lete-response' from b'complete-response'). Positional
+    /// reads keep every writer appending, so lines from both producers
+    /// must come back intact. The corruption itself is a race, so this
+    /// test pins the caller-visible contract; the deterministic pin for
+    /// the mechanism is
+    /// [`read_capture_never_rewinds_the_shared_writer_cursor`].
+    #[test]
+    fn writing_descendant_cannot_corrupt_the_completed_parents_capture() {
+        let _fixture_lock = lock_process_fixture();
+        let temporary = tempfile::tempdir().unwrap();
+        let marker = temporary.path().join("writer-marker");
+        let mut command = output_fixture_command("writer_launcher");
+        command.env(OUTPUT_FIXTURE_MARKER_ENV, &marker);
+        // M3 budget: the launcher re-exec plus the descendant's up-to-20s
+        // startup handshake all run inside the engine's single budget.
+        let output = output_with_timeout_and_kill_tree(command, Duration::from_secs(90)).unwrap();
+
+        assert!(
+            output.status.success(),
+            "launcher fixture failed with {:?}: stdout={}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stdout)
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains("parent-output"),
+            "the launcher's own line must come back intact: {stdout}"
+        );
+        assert!(
+            stdout.contains("late-write"),
+            "the writing descendant's lines must be captured: {stdout}"
+        );
+        // Hygiene: the writer descendant exits on its own after ~5s.
+        let finished = marker.with_extension("finished");
+        let started = Instant::now();
+        while !finished.exists() && started.elapsed() < Duration::from_secs(8) {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(
+            finished.exists(),
+            "writer descendant did not exit naturally"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    /// The deterministic regression pin for cursor-independent capture
+    /// reads: the launcher's readback must leave the shared writer cursor
+    /// exactly where it was. The cursor is parked mid-file and the payload
+    /// spans several readback chunks so any movement is observable — with
+    /// the cursor parked at EOF and a single-chunk payload, a read's final
+    /// frontier coincides with EOF and the movement would hide (the blind
+    /// spot of the previous Windows strictness, which asserted only
+    /// "no rewind"). The child tree's inherited handles write at the
+    /// shared cursor, so a backward rewind turns their next write into an
+    /// overwrite of the captured prefix, and a mid-file frontier into an
+    /// overwrite of the still-unread tail — below the cap, with no marker
+    /// (reverting `read_capture` to a read through the shared handle
+    /// turns this test red on both platforms).
+    #[test]
+    fn read_capture_never_rewinds_the_shared_writer_cursor() {
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        let payload = capture_read_payload(3);
+        file.write_all(&payload).unwrap();
+        file.seek(std::io::SeekFrom::Start(4)).unwrap();
+
+        let captured = complete_capture(read_capture(&file, MAX_CAPTURE_BYTES));
+
+        assert_eq!(captured, payload);
+        assert_eq!(
+            file.stream_position().unwrap(),
+            4,
+            "read_capture moved the shared writer cursor; the child tree \
+             writes at that cursor and would overwrite captured or unread \
+             bytes"
+        );
+    }
+
+    /// Multi-block read/write interleaving pin, in the scheduling-stable
+    /// form production admits: the writer cursor sits at the append
+    /// frontier while a readback spanning several chunks completes, then a
+    /// write lands and the next readback must return the earlier payload
+    /// and the late write fully intact. Corruption DURING a readback is
+    /// inherently a race, so that side is covered by the mechanism pin
+    /// above plus the writing-descendant fixture
+    /// ([`writing_descendant_cannot_corrupt_the_completed_parents_capture`]).
+    #[test]
+    fn read_capture_writer_writes_append_across_readback_blocks() {
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        let payload = capture_read_payload(2);
+        file.write_all(&payload).unwrap();
+        file.seek(std::io::SeekFrom::End(0)).unwrap();
+
+        assert_eq!(
+            complete_capture(read_capture(&file, MAX_CAPTURE_BYTES)),
+            payload
+        );
+        assert_eq!(
+            file.stream_position().unwrap(),
+            payload.len() as u64,
+            "the readback must leave the writer cursor at the append frontier"
+        );
+
+        file.write_all(b"late-write").unwrap();
+        let mut expected = payload.clone();
+        expected.extend_from_slice(b"late-write");
+        assert_eq!(
+            complete_capture(read_capture(&file, MAX_CAPTURE_BYTES)),
+            expected
+        );
+    }
+
+    /// `blocks` chunks of [`CAPTURE_READ_CHUNK`] bytes with a distinct
+    /// byte per block, so per-block corruption is visible in the result.
+    fn capture_read_payload(blocks: usize) -> Vec<u8> {
+        (0..blocks)
+            .flat_map(|block| vec![b'A' + block as u8; CAPTURE_READ_CHUNK])
+            .collect()
+    }
+
+    fn complete_capture(readback: CaptureReadback) -> Vec<u8> {
+        match readback {
+            CaptureReadback::Complete(bytes) => bytes,
+            CaptureReadback::Clipped(_) => panic!("capture unexpectedly clipped"),
+            CaptureReadback::Failed(error) => panic!("capture readback failed: {error}"),
+        }
+    }
+
+    /// reap_note_suffix is the counterpart of kill_note_suffix: empty when
+    /// the child was reaped cleanly, an explicit lingering note on
+    /// abandon, and a named failure clause otherwise. Pure function, so
+    /// every branch runs on every platform.
+    #[test]
+    fn reap_note_suffix_covers_every_reap_outcome() {
+        assert_eq!(reap_note_suffix(Reap::Reaped), "");
+        let abandoned = reap_note_suffix(Reap::Abandoned);
+        assert!(
+            abandoned.starts_with("; termination requested"),
+            "the note must read as an appended clause, got: {abandoned}"
+        );
+        assert!(
+            abandoned.contains("may linger"),
+            "the note must disclose the lingering child, got: {abandoned}"
+        );
+        let failed = reap_note_suffix(Reap::Failed(std::io::Error::other("wait interrupted")));
+        assert!(
+            failed.starts_with("; reaping the child failed: "),
+            "the note must read as an appended failure clause, got: {failed}"
+        );
+        assert!(
+            failed.contains("wait interrupted"),
+            "the note must carry the underlying error, got: {failed}"
+        );
+    }
+
+    /// read_capture must clip at the limit with the truncation marker, and
+    /// treat exactly-at-limit as complete — the boundary the overflow
+    /// checks and the "never mistaken for complete output" contract lean
+    /// on.
+    #[test]
+    fn read_capture_clips_at_the_limit_and_marks_truncation() {
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        let payload = vec![b'a'; (MAX_CAPTURE_BYTES as usize) + 128];
+        file.write_all(&payload).unwrap();
+        let clipped = marked_capture_bytes(read_capture(&file, MAX_CAPTURE_BYTES));
+        assert_eq!(
+            clipped.len(),
+            MAX_CAPTURE_BYTES as usize + CAPTURE_TRUNCATED_MARKER.len()
+        );
+        assert!(
+            clipped.ends_with(CAPTURE_TRUNCATED_MARKER),
+            "a clipped capture must carry the truncation marker"
+        );
+        assert!(
+            clipped.starts_with(&payload[..MAX_CAPTURE_BYTES as usize]),
+            "the clipped capture must keep the first MAX_CAPTURE_BYTES bytes"
+        );
+
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        file.write_all(&vec![b'b'; MAX_CAPTURE_BYTES as usize])
+            .unwrap();
+        let exact = marked_capture_bytes(read_capture(&file, MAX_CAPTURE_BYTES));
+        assert_eq!(exact.len(), MAX_CAPTURE_BYTES as usize);
+        assert!(
+            !exact.ends_with(CAPTURE_TRUNCATED_MARKER),
+            "exactly-at-limit output is complete and must not be marked"
+        );
+    }
+
+    /// A capture that cannot be reopened must read back as a failure, never
+    /// as marker bytes that pass for the child's output: this is the
+    /// reopen-failure surface (the capture file vanishing before the
+    /// readback), and the delivery contract below pins what it becomes on
+    /// the success path. Deleting by path works on both platforms —
+    /// Windows marks the still-open file delete-pending, which makes any
+    /// later open-by-name fail exactly as this contract needs.
+    #[test]
+    fn read_capture_reports_a_failed_readback_for_a_vanished_capture() {
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        file.write_all(b"payload").unwrap();
+        std::fs::remove_file(file.path()).unwrap();
+
+        match read_capture(&file, MAX_CAPTURE_BYTES) {
+            CaptureReadback::Failed(_) => {}
+            other => panic!("a vanished capture must read back as Failed, got {other:?}"),
+        }
+    }
+
+    /// The false-success elimination, at the delivery level: with one
+    /// capture vanished, the completed child's output must be a
+    /// ReadbackFailed, never `Output` whose stdout is the truncation
+    /// marker — `git_ok` checks only the exit status and a line parser
+    /// drops the marker, so marker bytes here would surface as a
+    /// successful empty result.
+    #[test]
+    fn read_capture_delivery_fails_instead_of_passing_marker_bytes_as_output() {
+        let stderr_file = tempfile::NamedTempFile::new().unwrap();
+        let mut stdout_file = tempfile::NamedTempFile::new().unwrap();
+        stdout_file.write_all(b"record line\n").unwrap();
+        std::fs::remove_file(stdout_file.path()).unwrap();
+
+        match deliver_captures(&stdout_file, &stderr_file) {
+            CaptureDelivery::ReadbackFailed(_) => {}
+            CaptureDelivery::Output { stdout, .. } => panic!(
+                "a vanished capture must not deliver as output, got {} bytes",
+                stdout.len()
+            ),
+        }
+    }
+
+    /// The delivery keeps the documented marker semantics: a clipped
+    /// capture is delivered marked, exactly-at-limit delivered in full and
+    /// unmarked.
+    #[test]
+    fn read_capture_delivery_marks_a_clipped_capture() {
+        let stderr_file = tempfile::NamedTempFile::new().unwrap();
+
+        let mut stdout_file = tempfile::NamedTempFile::new().unwrap();
+        stdout_file
+            .write_all(&vec![b'a'; MAX_CAPTURE_BYTES as usize + 128])
+            .unwrap();
+        let CaptureDelivery::Output { stdout, stderr } =
+            deliver_captures(&stdout_file, &stderr_file)
+        else {
+            panic!("a clipped capture must deliver as output");
+        };
+        assert_eq!(stderr, b"");
+        assert_eq!(
+            stdout.len(),
+            MAX_CAPTURE_BYTES as usize + CAPTURE_TRUNCATED_MARKER.len()
+        );
+        assert!(stdout.ends_with(CAPTURE_TRUNCATED_MARKER));
+
+        let mut stdout_file = tempfile::NamedTempFile::new().unwrap();
+        stdout_file
+            .write_all(&vec![b'b'; MAX_CAPTURE_BYTES as usize])
+            .unwrap();
+        let CaptureDelivery::Output { stdout, stderr } =
+            deliver_captures(&stdout_file, &stderr_file)
+        else {
+            panic!("exactly-at-limit output must deliver in full");
+        };
+        assert_eq!(stdout.len(), MAX_CAPTURE_BYTES as usize);
+        assert!(!stdout.ends_with(CAPTURE_TRUNCATED_MARKER));
+        assert_eq!(stderr, b"");
     }
 
     /// kill_note_suffix is the platform-independent half of the tree-kill

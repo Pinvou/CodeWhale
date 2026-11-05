@@ -10,6 +10,18 @@ import {
 const labels = (items) => items.map(({ kind, target }) => `${kind}:${target}`);
 const fullLabels = labels(FULL_FRONTEND_SMOKES);
 
+test("quarantine confirmation smoke runs in full CI and for its real public facade", () => {
+  const smoke = "node:tests/remote_quarantine_smoke.mjs";
+  assert.ok(fullLabels.includes(smoke));
+  for (const entry of ["pinvou3-app/src/features/remote-control/RemoteProxyArchivePanel.jsx",
+    "pinvou3-app/src/platform/tauri/bridge.js", "pinvou3-app/tests/fixtures/remote_quarantine_smoke.jsx"]) {
+    assert.ok(labels(selectFrontendSmokes([entry])).includes(smoke));
+  }
+  const knip = JSON.parse(readFileSync(new URL("../../pinvou3-app/knip.json", import.meta.url), "utf8"));
+  assert.ok(knip.entry.includes("tests/remote_quarantine_smoke.mjs"));
+  assert.ok(!knip.ignore.includes("tests/remote_quarantine_smoke.mjs"));
+});
+
 test("remote operation ownership regression runs for its product and fixture paths", () => {
   const smoke = "node:tests/remote_dispatch_ownership_smoke.mjs";
   for (const path of ["pinvou3-app/src/features/chat/ChatView.jsx",
@@ -29,12 +41,45 @@ test("the real archive component smoke is included in the full CI suite", () => 
   ])).includes("node:tests/remote_archive_smoke.mjs"));
 });
 
+test("controlled recovery smoke is selected for the real application and feature paths", () => {
+  const smoke = "node:tests/controlled_open_ui_smoke.mjs";
+  for (const path of ["pinvou3-app/src/app/main.jsx", "pinvou3-app/src/features/remote-control/ControlledOpenRecovery.jsx", "pinvou3-app/tests/controlled_open_ui_smoke.mjs"]) {
+    assert.ok(labels(selectFrontendSmokes([path])).includes(smoke), path);
+  }
+  const knip = JSON.parse(readFileSync(new URL("../../pinvou3-app/knip.json", import.meta.url), "utf8"));
+  assert.ok(knip.entry.includes("tests/controlled_open_ui_smoke.mjs"));
+});
+
 test("the archive smoke is an executable Knip entry, not an ignored file", () => {
   const knip = JSON.parse(readFileSync(
     new URL("../../pinvou3-app/knip.json", import.meta.url), "utf8",
   ));
   assert.ok(knip.entry.includes("tests/remote_archive_smoke.mjs"));
   assert.ok(!knip.ignore.includes("tests/remote_archive_smoke.mjs"));
+});
+
+test("system status participates in full and feature-local Account Platform browser validation", () => {
+  const status = "npm:test:account-platform-system-status-ui";
+  assert.ok(fullLabels.includes(status));
+  assert.ok(labels(selectFrontendSmokes(["pinvou3-app/src/features/account-platform/AdminSystemStatusWorkspace.jsx"])).includes(status));
+});
+
+test("user-code lookup smoke runs once for its actual feature owner and shared inputs", () => {
+  const target = "npm:test:account-platform-user-code-ui";
+  const packageJson = JSON.parse(readFileSync(
+    new URL("../../pinvou3-app/package.json", import.meta.url), "utf8",
+  ));
+  assert.equal(packageJson.scripts["test:account-platform-user-code-ui"], "node tests/account_platform_user_code_lookup_smoke.mjs");
+  const feature = labels(selectFrontendSmokes([
+    "pinvou3-app/src/features/account-platform/AdminPlatformView.jsx",
+  ]));
+  assert.ok(feature.includes("npm:test:ui-smoke"), "exercise the feature branch rather than the full-suite fallback");
+  for (const selected of [
+    feature,
+    fullLabels,
+    labels(selectFrontendSmokes(["pinvou3-app/src/shared/i18n.js"])),
+    labels(selectFrontendSmokes(["pinvou3-app/tests/account_platform_user_code_lookup_smoke.mjs"])),
+  ]) assert.equal(selected.filter(label => label === target).length, 1);
 });
 
 test("diagnostics consent smoke is executable and selected for all entry points", () => {
@@ -61,6 +106,25 @@ test("diagnostics consent smoke is executable and selected for all entry points"
   ]) {
     assert.ok(labels(selectFrontendSmokes([changedPath])).includes(smoke), changedPath);
   }
+});
+
+test("offline abandonment smoke is selected for the real UI, bridge and fixtures", () => {
+  const smoke = "node:tests/remote_offline_abandon_smoke.mjs";
+  assert.ok(fullLabels.includes(smoke));
+  for (const changedPath of [
+    "pinvou3-app/src/features/chat/ChatView.jsx",
+    "pinvou3-app/src/platform/tauri/bridge/desktop-remote-control.js",
+    "pinvou3-app/tests/remote_offline_abandon_smoke.mjs",
+    "pinvou3-app/tests/helpers/offline-abandon-temp.mjs",
+    "pinvou3-app/tests/remote_offline_abandon_temp.test.mjs",
+    "pinvou3-app/tests/fixtures/remote_offline_abandon_smoke.jsx",
+    "pinvou3-app/tests/fixtures/remote_offline_abandon_smoke.html",
+  ]) assert.ok(labels(selectFrontendSmokes([changedPath])).includes(smoke), changedPath);
+  const knip = JSON.parse(readFileSync(
+    new URL("../../pinvou3-app/knip.json", import.meta.url), "utf8",
+  ));
+  assert.ok(knip.entry.includes("tests/remote_offline_abandon_smoke.mjs"));
+  assert.ok(!knip.ignore.includes("tests/remote_offline_abandon_smoke.mjs"));
 });
 
 const fullSuiteCases = [
@@ -122,6 +186,14 @@ test("feature-local changes select core and feature smokes", () => {
   );
 });
 
+test("account platform changes route all six concrete F05 browser smokes", () => {
+  const selected = labels(selectFrontendSmokes(["pinvou3-app/src/features/account-platform/PersonalUsageWorkspace.jsx"]));
+  for (const feature of ["model-selection", "model-lifecycle", "native-code", "billing-notice", "usage", "usage-governance"]) {
+    assert.ok(selected.includes(`npm:test:account-platform-${feature}-ui`), `${feature} browser smoke must run for account changes`);
+    assert.ok(labels(selectFrontendSmokes(["pinvou3-app/src/shared/i18n.js"])).includes(`npm:test:account-platform-${feature}-ui`), `${feature} browser smoke must run for shared changes`);
+  }
+});
+
 test("knowledge changes select the desktop knowledge smoke", () => {
   assert.deepEqual(
     labels(
@@ -155,4 +227,67 @@ test("wrapper-only changes select the web UI smoke plus the core smoke", () => {
     labels(selectFrontendSmokes(["pinvou3-app/scripts/run-webui-smoke.mjs"])),
     ["npm:test:ui-smoke", "npm:test:webui"],
   );
+});
+
+test("organization and member unit browsers run for feature and shared changes", () => {
+  for (const target of ["test:account-platform-organization-ui", "test:account-platform-member-units-ui"]) {
+    assert.ok(fullLabels.includes(`npm:${target}`));
+    assert.ok(labels(selectFrontendSmokes(["pinvou3-app/src/features/account-platform/ModelPolicyWorkspace.jsx"])).includes(`npm:${target}`));
+    assert.ok(labels(selectFrontendSmokes(["pinvou3-app/src/shared/i18n.js"])).includes(`npm:${target}`));
+  }
+});
+
+test("registration bonus compiled browsers run exactly once after full and feature expansion", () => {
+  const target = "npm:test:account-platform-registration-bonus-ui";
+  const { scripts } = JSON.parse(readFileSync(new URL("../../pinvou3-app/package.json", import.meta.url), "utf8"));
+  assert.equal(scripts["test:admin-registration-bonus-ui"], undefined);
+  for (const selected of [FULL_FRONTEND_SMOKES, selectFrontendSmokes(["pinvou3-app/src/features/account-platform/AdminOperationsWorkspace.jsx"]), selectFrontendSmokes(["pinvou3-app/src/shared/i18n.js"])]) {
+    assert.equal(labels(selected).filter(label => label === target).length, 1);
+    const expanded = selected.flatMap(({ kind, target }) => kind === "npm" ? scripts[target].split(" && ") : [`node ${target}`]);
+    for (const file of ["admin_registration_bonus_ui_smoke.mjs", "admin_registration_bonus_precision_ui_smoke.mjs"]) {
+      assert.equal(expanded.filter(command => command === `node tests/${file}`).length, 1);
+    }
+  }
+});
+
+test("closure production and recovery browser command is selected in full and feature suites", () => {
+  const target = "npm:test:account-platform-closure-ui";
+  assert.ok(fullLabels.includes(target));
+  assert.ok(labels(selectFrontendSmokes(["pinvou3-app/src/features/account-platform/AccountClosureWorkspace.jsx"])).includes(target));
+  assert.ok(labels(selectFrontendSmokes(["pinvou3-app/src/shared/i18n.js"])).includes(target));
+});
+
+
+test("native same-actor reauthentication browser runs once for full and account feature changes", () => {
+  const target = "npm:test:account-platform-desktop-reauthentication";
+  for (const selected of [fullLabels, labels(selectFrontendSmokes(["pinvou3-app/src/features/account-platform/desktop-reauthentication.js"])), labels(selectFrontendSmokes(["pinvou3-app/src/features/account-platform/PersonalFinanceWorkspace.jsx"])), labels(selectFrontendSmokes(["pinvou3-app/src/shared/i18n.js"]))]) {
+    assert.equal(selected.filter(label => label === target).length, 1);
+  }
+  assert.equal(labels(selectFrontendSmokes(["pinvou3-app/src/features/settings/SettingsView.jsx"])).includes(target), false);
+});
+
+test("installed hosts run once after full and account command expansion", () => {
+  const { scripts } = JSON.parse(readFileSync(new URL("../../pinvou3-app/package.json", import.meta.url), "utf8"));
+  for (const selected of [FULL_FRONTEND_SMOKES, selectFrontendSmokes(["pinvou3-app/src/features/account-platform/AdminOperationsWorkspace.jsx"])]) {
+    const expanded = selected.flatMap(({ kind, target }) => kind === "npm" ? scripts[target].split(" && ") : [`node ${target}`]);
+    assert.equal(expanded.filter(command => command === "node tests/account_platform_installed_hosts_ui_smoke.mjs").length, 1);
+    assert.ok(expanded.includes("node tests/account_platform_closure_ui_smoke.mjs"));
+    assert.ok(expanded.includes("node tests/account_platform_closure_production_smoke.mjs"));
+  }
+});
+
+
+test("personal and organization recharge presentation keeps the real browser gate selected", () => {
+  for (const path of ["pinvou3-app/src/features/account-platform/PersonalFinanceWorkspace.jsx", "pinvou3-app/src/features/account-platform/OrganizationFinanceWorkspace.jsx", "pinvou3-app/src/features/account-platform/useRechargePaymentDialog.js"]) {
+    assert.ok(labels(selectFrontendSmokes([path])).includes("npm:test:account-platform-recharge-ui"));
+  }
+  assert.ok(fullLabels.includes("npm:test:account-platform-recharge-ui"));
+});
+
+test("restored Account and Admin real-entry browsers run once for feature and shared inputs", () => {
+  const target = "npm:test:account-platform-restored-ui";
+  for (const paths of [["pinvou3-app/src/features/account-platform/AdminUsersWorkspace.jsx"], ["pinvou3-app/src/shared/account-layout-i18n.js"], ["pinvou3-app/tests/account_platform_restored_ui_smoke.mjs"]]) {
+    assert.equal(labels(selectFrontendSmokes(paths)).filter(value => value === target).length, 1);
+  }
+  assert.equal(fullLabels.filter(value => value === target).length, 1);
 });

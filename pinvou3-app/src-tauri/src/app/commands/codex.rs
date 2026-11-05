@@ -1522,6 +1522,99 @@ mod tests {
     }
 
     #[test]
+    fn forkguard_web_session_projection_redacts_attached_roots_and_keeps_native_metadata() {
+        for (workspace, roots) in [
+            (
+                "/fixture/private/main-project",
+                [
+                    "/fixture/private/shared-library",
+                    "/fixture/private/reference-docs",
+                ],
+            ),
+            (
+                r"C:\fixture\private\main-project",
+                [
+                    r"C:\fixture\private\shared-library",
+                    r"D:\fixture\private\reference-docs",
+                ],
+            ),
+        ] {
+            let mut native = metadata_with_workspace(workspace);
+            native.workspace_roots = roots.iter().map(|root| PathBuf::from(*root)).collect();
+            let native_before = serde_json::to_value(&native).expect("serialize native metadata");
+            assert_eq!(native_before["workspace"], workspace);
+            assert_eq!(native_before["workspace_roots"], serde_json::json!(roots));
+
+            // Ordinary Web/Relay sessions project the SDK metadata through this helper.
+            let projected = redact_session_metadata_for_web(native.clone());
+            let projected_json = serde_json::to_value(&projected).expect("serialize Web metadata");
+            assert_eq!(projected_json["workspace"], "main-project");
+            assert_eq!(
+                projected_json["workspace_roots"],
+                serde_json::json!(["shared-library", "reference-docs"])
+            );
+            assert_eq!(serde_json::to_value(&native).unwrap(), native_before);
+
+            // The existing native-code Web list consumer must use the same projection.
+            let mut item = CodexAcpSessionListItem {
+                metadata: native.clone(),
+                pinned: false,
+                pinned_at: None,
+                workspace: CodexAcpWorkspaceInfo {
+                    workspace_kind: CodexWorkspaceKind::Project,
+                    workspace_path: workspace.to_string(),
+                    workspace_available: true,
+                },
+                workspace_roots: roots.iter().map(|root| (*root).to_string()).collect(),
+                agent_id: "codex".to_string(),
+                agent_name: "Codex".to_string(),
+            };
+            redact_codex_session_list_item_for_web(&mut item);
+            let item_json = serde_json::to_value(&item).expect("serialize Web list item");
+            assert_eq!(item_json["workspace"], "main-project");
+            assert_eq!(item_json["workspace_path"], "main-project");
+            assert_eq!(
+                item_json["workspace_roots"],
+                projected_json["workspace_roots"]
+            );
+            for absolute in [workspace, roots[0], roots[1]] {
+                // Compare parsed strings as well as serialized JSON: Windows separators
+                // are escaped on the wire, so a raw substring check alone is insufficient.
+                let wire = serde_json::to_string(absolute).unwrap();
+                assert!(!projected_json.to_string().contains(&wire));
+                assert!(!item_json.to_string().contains(&wire));
+            }
+            assert_eq!(serde_json::to_value(&native).unwrap(), native_before);
+        }
+
+        // Legacy single-root metadata (no workspace_roots key): the field
+        // deserializes to an empty set and must stay empty after redaction,
+        // and serialization must omit it (skip_serializing_if) — the web wire
+        // carries no roots key for pre-multi-root sessions.
+        let legacy_input: SessionMetadata = serde_json::from_value(serde_json::json!({
+            "id": "session-web-projection-legacy",
+            "title": "Web projection legacy",
+            "created_at": "2026-08-17T00:00:00Z",
+            "updated_at": "2026-08-17T00:00:00Z",
+            "message_count": 0,
+            "total_tokens": 0,
+            "model": "test-model",
+            "workspace": "/fixture/main"
+        }))
+        .expect("valid legacy SessionMetadata fixture");
+        assert!(legacy_input.workspace_roots.is_empty());
+        let legacy = redact_session_metadata_for_web(legacy_input);
+        assert!(legacy.workspace_roots.is_empty());
+        assert!(
+            serde_json::to_value(&legacy)
+                .unwrap()
+                .get("workspace_roots")
+                .is_none(),
+            "serialized legacy metadata must omit the empty roots key"
+        );
+    }
+
+    #[test]
     fn project_workspace_is_not_created_implicitly() {
         let root = std::env::temp_dir().join(format!(
             "pinvou3-codex-workspace-test-{}-project",

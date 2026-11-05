@@ -48,10 +48,10 @@ use crate::features::sessions::{
 };
 use crate::features::sessions::{SerializableMode, SessionModeState};
 
-/// 定时任务无人值守首轮的唯一附加约束。任务 prompt 原文已作为用户消息传入，
-/// 这一句只防模型把目标改写成别的事，不再堆叠更长的提示词。
-const SCHEDULED_TURN_REMINDER: &str =
-    "本轮是定时任务的自动执行：直接执行用户消息里的任务，不要改写、替换或扩展任务目标。";
+/// Unattended turns must finish or report a blocker without waiting for a user.
+const SCHEDULED_TURN_REMINDER: &str = "本轮为无人值守自动执行，只完成用户给定的任务，不改写、替换或扩展任务目标。\n\
+有安全默认且在已有授权范围内时直接推进；不要发起等待用户回答或确认的操作。\n\
+缺少关键条件或授权时，说明阻塞、已完成部分和未执行事项，然后结束本轮；不猜测缺失事实或声称已经完成。";
 
 /// 单个 session 的 engine wrapper(handle + 该 session 绑定的 bridge)。
 ///
@@ -698,6 +698,33 @@ impl TurnLifecycle {
         } else {
             None
         }
+    }
+
+    pub(crate) fn current_runtime_turn_generation(&self) -> Option<u64> {
+        let state = self.state.lock();
+        if state.active && !state.terminal_closing {
+            Some(state.turn_epoch)
+        } else {
+            None
+        }
+    }
+
+    /// Match and publish a bounded turn-local observation atomically. The
+    /// callback may take the timing-map lock but cannot re-enter this lifecycle.
+    pub(crate) fn with_current_turn_generation(
+        &self,
+        generation: u64,
+        callback: &mut dyn FnMut(),
+    ) -> bool {
+        let state = self.state.lock();
+        if generation == 0
+            || !(state.active || state.terminal_closing)
+            || state.turn_epoch != generation
+        {
+            return false;
+        }
+        callback();
+        true
     }
 
     /// Run a synchronous side effect only for this still-active generation.
@@ -1768,13 +1795,19 @@ where
 /// the deterministic recursion shield: the engine consults ask rules for
 /// `exec_shell` and the file tools only, and mutating MCP tools resolve to
 /// silent Allow under the current full-auto approval (contract §9). Applied
-/// only to the unattended turn; a later interactive continuation gets a
-/// fresh engine with the ordinary catalog.
+/// only to the unattended turn. Lifetime differs by family (round-15
+/// wording): the scheduled family's pre/post-turn evict respawns a fresh
+/// engine with the ordinary catalog, while the session-creation delivery's
+/// engine keeps the list until the first send through the shared seams —
+/// the two attended seams and both relay tail-calls (messaging + the
+/// scheduled family's deliver_session_message; round-31 minor 3) —
+/// re-shapes the same engine (see `EnginePool::watcher_shielded_sessions`).
 pub(crate) fn unattended_disallowed_tools(disallowed: &[String]) -> Vec<String> {
     let mut list = disallowed.to_vec();
     for tool in [
         "create_goal",
         "update_goal",
+        "request_user_input",
         crate::features::assistant::platform::bridge::SCHEDULED_TASK_CREATE_TOOL,
         crate::features::assistant::platform::bridge::SCHEDULED_TASK_UPDATE_TOOL,
         crate::features::assistant::platform::bridge::SCHEDULED_TASK_DELETE_TOOL,
@@ -1796,6 +1829,16 @@ pub(crate) fn unattended_disallowed_tools(disallowed: &[String]) -> Vec<String> 
         // upstream per the fork boundary.
         "registry_sync",
         "start_registry_mcp_server",
+        crate::features::assistant::platform::bridge::SESSION_CREATE_TOOL,
+        // Round-21 M1 (#657): the delegation-shed closure. The `agent` tool
+        // takes a model-supplied `inherit_disallowed_tools=false` that sheds
+        // preference denies in the child — an injected opening instruction on
+        // a watcher-created (plain-id, subagents-default-on) session could
+        // delegate the shield away and recurse through this named tool. The
+        // scheduled family already disables subagents at spawn (round-8 M1),
+        // so the deny is redundant-but-harmless there; for the
+        // session-creation delivery it is the deterministic closure.
+        "agent",
     ] {
         if !list.iter().any(|blocked| blocked == tool) {
             list.push(tool.to_string());
@@ -1911,8 +1954,10 @@ impl AppEngine {
         // 该列表来自 compute_disallowed_tools；多智能体会话不改写它，
         // 工具面与普通会话保持一致。
         // One automation run owns exactly one engine turn. Apply the
-        // unattended deny list only to that turn; a later interactive
-        // continuation gets a fresh engine with the ordinary catalog.
+        // unattended deny list only to that turn; the scheduled family's
+        // pre/post-turn evict respawns a fresh engine with the ordinary
+        // catalog (the session-creation delivery instead re-shapes the
+        // same engine at the attended seams).
         let scheduled_disallowed_tools = unattended_disallowed_tools(&disallowed);
         engine_config.disallowed_tools = if disallowed.is_empty() {
             None
@@ -2194,6 +2239,34 @@ impl AppEngine {
         }
     }
 
+    /// Round-9 M6 (session-creation): a watcher-dispatched turn is
+    /// UNATTENDED — nobody is watching the session the tool created, so an
+    /// injected opening message must not be able to recursively create
+    /// sessions/goals/task-writes. Push the engine's shield list (the same
+    /// `unattended_disallowed_tools` composition the scheduled turn sends
+    /// below) BEFORE the delivered turn op reaches this engine. Lifetime
+    /// (round-13 wording, both relays named per round-31 minor 3): the
+    /// list persists on this engine until it is recycled OR the first
+    /// subsequent send through the shared seams — the two attended seams
+    /// (`send_reserved_user_message` / `edit_last_turn_reserved`) plus both
+    /// relay tail-calls — restores
+    /// the ordinary catalog — the pool marks the session when the delivered
+    /// turn's submission succeeds and those seams clear the mark and
+    /// re-shape the catalog (see `EnginePool::watcher_shielded_sessions`).
+    /// "The seams" includes the #627-disclosed cross-session relay
+    /// tail-call, whose sender is unauthenticated — the shield is
+    /// fail-closed against interactive silence, not against relays. Until
+    /// that first send, a user who opens the session inherits the shield —
+    /// disclosed in the session-creation design doc; the scheduled family
+    /// never goes interactive so persistence is exactly right there.
+    pub(crate) async fn apply_unattended_shield(&self) -> Result<()> {
+        self.handle
+            .send(Op::SetDisallowedTools {
+                tools: Some(self.scheduled_disallowed_tools.clone()),
+            })
+            .await
+    }
+
     /// Submit the initial prompt for one scheduled run using the immutable
     /// policy captured when its hidden session was created.
     pub(crate) async fn send_scheduled_message(
@@ -2467,11 +2540,8 @@ impl AppEngine {
         // engine through the hydration/align push either; all in-repo
         // writers are aux-guarded, this is the backstop the bridge comment
         // has claimed all along.
-        let roots = if crate::features::sessions::is_aux_session_id(&session_id) {
-            Vec::new()
-        } else {
-            self.bridge.session_workspace_roots(&session_id)
-        };
+        let roots =
+            sync_session_workspace_roots(&session_id, |id| self.bridge.session_workspace_roots(id));
         let op = Self::sync_session_op(
             &session_id,
             messages,
@@ -2494,16 +2564,17 @@ impl AppEngine {
         session_id: String,
         messages: Vec<Message>,
     ) -> Result<()> {
+        let roots =
+            sync_session_workspace_roots(&session_id, |id| self.bridge.session_workspace_roots(id));
         let op = Self::sync_session_op(
             &session_id,
             messages,
             self.bridge.model(),
             self.workspace.clone(),
-            // CodeWhale #54 normalizes this empty list to the existing single
-            // workspace; the spawn lane already delivers the full keychain via
-            // EngineConfig.workspace_roots (bridge roots resolver), so the
-            // pre-publication gate keeps the fork's empty-roots payload.
-            Vec::new(),
+            // SyncSession replaces the foundation's roots even immediately
+            // after spawn. Carry the same frozen keychain as the awaited sync;
+            // an empty legacy/aux snapshot still normalizes to the primary root.
+            roots,
         );
         self.handle.try_send(op)
     }
@@ -2534,6 +2605,17 @@ impl AppEngine {
     }
 }
 
+fn sync_session_workspace_roots(
+    session_id: &str,
+    resolve: impl FnOnce(&str) -> Vec<std::path::PathBuf>,
+) -> Vec<std::path::PathBuf> {
+    if crate::features::sessions::is_aux_session_id(session_id) {
+        Vec::new()
+    } else {
+        resolve(session_id)
+    }
+}
+
 fn format_instructions(sources: &[deepseek_tui::prompts::InstructionSource]) -> String {
     use deepseek_tui::prompts::InstructionSource;
     if sources.is_empty() {
@@ -2554,9 +2636,9 @@ fn format_instructions(sources: &[deepseek_tui::prompts::InstructionSource]) -> 
 /// 底座两层 plan 结构：
 ///   - `update_plan`         → strategy 层（`plan_snapshot`）
 ///   - `checklist_write` / `todo_write` → leaf task 层（`todos_snapshot`）
-/// 任一调过 + plan_phase=Planning → TurnComplete 时 emit `chat:plan_ready`。
-/// 参考底座 `tui/ui.rs:1072-1085` 的 `plan_tool_used_in_turn` 判据 +
-/// `prompts/modes/plan.md` "Use update_plan ... and checklist_write ..." 双工具引导。
+/// 任一调过 + 会话处于 Plan 模式（`SerializableMode::Plan`）→ TurnComplete 时
+/// emit `chat:plan_ready`（PlanPhase 已移除，触发判据为 forwarder 的
+/// `plan_used && state.mode == Plan`）。
 #[derive(Default)]
 struct TurnPlanTracker {
     plan_tool_used: bool,
@@ -4355,9 +4437,10 @@ mod live_tests {
     // 污染）由 `platform::test_support::EnvRestore` 承担（快照为 OsString，
     // 恢复语义与原 String 版一致），与 engine_pool / multiagent 回归测试共用。
 
-    /// 真机集成(#[ignore]):打真 vLLM 跑一轮,drain rx_event 时**照 forwarder 四臂
-    /// 原样喂 SelfMetrics**,证明真实事件流(TurnStarted→MessageDelta→TurnComplete+真
-    /// usage)累加出合理指标 + 事件顺序符合预期(TurnStarted 在首 MessageDelta 前)。
+    /// 真机集成(#[ignore]):打真 vLLM 跑一轮,drain rx_event 时**照 forwarder 五臂
+    /// 原样喂 SelfMetrics**,证明真实事件流(TurnStarted→MessageDelta→TurnUsage→
+    /// TurnComplete+真usage)累加出合理指标 + 事件顺序符合预期(TurnStarted 在首
+    /// MessageDelta 前)。
     ///
     ///   DEEPSEEK_ALLOW_INSECURE_HTTP=1 DEEPSEEK_FORCE_HTTP1=1 \
     ///   cargo test --manifest-path pinvou3-app/src-tauri/Cargo.toml \
@@ -4418,6 +4501,14 @@ mod live_tests {
                 }
                 Event::MessageDelta { content, .. } => {
                     m.on_message_delta(sid, content.chars().count());
+                }
+                Event::TurnUsage {
+                    usage,
+                    first_token_ms,
+                    request_ms,
+                    ..
+                } => {
+                    m.on_engine_usage(sid, first_token_ms, request_ms, usage.output_tokens);
                 }
                 Event::ToolCallStarted { .. } => {
                     seq.push(format!("t{turn}:ToolCallStarted"));
@@ -4546,6 +4637,44 @@ mod expert_turn_invariant_tests {
 }
 
 #[cfg(test)]
+mod runtime_turn_observation_tests {
+    use super::TurnLifecycle;
+    use std::sync::Arc;
+    #[test]
+    fn local_then_platform_turn_uses_lifecycle_epoch_and_rejects_retired_epoch() {
+        let lifecycle = Arc::new(TurnLifecycle::default());
+        assert!(lifecycle.current_runtime_turn_generation().is_none());
+        assert!(lifecycle.on_submitted(None));
+        let first = lifecycle.current_runtime_turn_generation().unwrap();
+        assert!(lifecycle.claim_terminal().is_some());
+        assert!(lifecycle.current_runtime_turn_generation().is_none());
+        let mut closing_notice = false;
+        assert!(lifecycle.with_current_turn_generation(first, &mut || closing_notice = true));
+        assert!(
+            closing_notice,
+            "already admitted response remains owned during terminal close"
+        );
+        lifecycle.finish_terminal_emission();
+        let reservation = lifecycle.reserve().unwrap();
+        let second = lifecycle.current_runtime_turn_generation().unwrap();
+        assert!(second > first);
+        assert!(
+            !lifecycle.with_current_turn_generation(first, &mut || panic!("retired local turn"))
+        );
+        let mut count = 0;
+        assert!(lifecycle.with_current_turn_generation(second, &mut || count += 1));
+        assert!(lifecycle.with_current_turn_generation(second, &mut || count += 1));
+        assert_eq!(count, 2, "tool loop and retry retain the active epoch");
+        drop(reservation);
+        assert!(lifecycle.current_runtime_turn_generation().is_none());
+        assert!(
+            !lifecycle.with_current_turn_generation(second, &mut || panic!("aborted reservation"))
+        );
+        assert!(!lifecycle.with_current_turn_generation(0, &mut || panic!("zero sentinel")));
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -4584,6 +4713,53 @@ mod tests {
             "the unattended spawn must disable subagents — the deterministic \
              delegation-disable leg of the recursion shield (round-34 M4)"
         );
+    }
+
+    #[test]
+    fn session_sync_root_selection_preserves_the_frozen_non_aux_keychain() {
+        let expected = vec![
+            std::path::PathBuf::from("/primary"),
+            std::path::PathBuf::from("/attached"),
+        ];
+        let roots = sync_session_workspace_roots("session-keyed", |id| {
+            assert_eq!(id, "session-keyed");
+            expected.clone()
+        });
+        let op = AppEngine::sync_session_op(
+            "session-keyed",
+            Vec::new(),
+            "model".into(),
+            std::path::PathBuf::from("/primary"),
+            roots,
+        );
+        match op {
+            Op::SyncSession {
+                workspace_roots, ..
+            } => assert_eq!(workspace_roots, expected),
+            other => panic!("unexpected op: {other:?}"),
+        }
+        assert!(sync_session_workspace_roots("legacy", |_| Vec::new()).is_empty());
+    }
+
+    #[test]
+    fn session_sync_root_selection_never_resolves_aux_keychains() {
+        for id in ["aux-session", "AUX-session", "aUx-session"] {
+            let roots =
+                sync_session_workspace_roots(id, |_| panic!("aux must not resolve attachments"));
+            let op = AppEngine::sync_session_op(
+                id,
+                Vec::new(),
+                "model".into(),
+                std::path::PathBuf::from("/primary"),
+                roots,
+            );
+            match op {
+                Op::SyncSession {
+                    workspace_roots, ..
+                } => assert!(workspace_roots.is_empty()),
+                other => panic!("unexpected op: {other:?}"),
+            }
+        }
     }
 
     #[test]
@@ -4810,9 +4986,11 @@ mod unattended_shield_tests {
     use super::unattended_disallowed_tools;
 
     /// The recursion shield (review R4-M1): an unattended automation turn
-    /// must deny the scheduled-task write family deterministically — the
-    /// engine-level tool list, not an Ask rule (which mutating MCP tools
-    /// never consult under the current full-auto approval).
+    /// must deny the mutating tool families deterministically — the
+    /// scheduled-task write family and session creation (this split PR's
+    /// addition) — via the engine-level tool list, not an Ask rule (which
+    /// mutating MCP tools never consult under the current full-auto
+    /// approval).
     #[test]
     fn unattended_turn_denies_scheduled_task_write_family() {
         let caller = vec![
@@ -4828,6 +5006,7 @@ mod unattended_shield_tests {
         for tool in [
             "create_goal",
             "update_goal",
+            "request_user_input",
             "mcp_app-automations_create_scheduled_task",
             "mcp_app-automations_update_scheduled_task",
             "mcp_app-automations_delete_scheduled_task",
@@ -4839,6 +5018,7 @@ mod unattended_shield_tests {
             // red.
             "registry_sync",
             "start_registry_mcp_server",
+            "mcp_session-reader_create_session",
         ] {
             assert!(
                 list.iter().any(|blocked| blocked == tool),
@@ -4910,6 +5090,69 @@ mod unattended_shield_tests {
                 "let scheduled_disallowed_tools = unattended_disallowed_tools(&disallowed);"
             ),
             "the engine's shield field must be composed through unattended_disallowed_tools"
+        );
+    }
+}
+
+#[cfg(test)]
+mod agent_shed_pin_tests {
+    use super::unattended_disallowed_tools;
+    use crate::features::assistant::platform::bridge::{
+        MESSAGING_SEND_TOOL, SCHEDULED_TASK_CREATE_TOOL, SCHEDULED_TASK_DELETE_TOOL,
+        SCHEDULED_TASK_UPDATE_TOOL, SESSION_CREATE_TOOL,
+    };
+
+    /// Round-21 M1 (#657): the unattended deny list carries all ELEVEN named
+    /// tools — the ten this PR pinned plus `request_user_input`, which main
+    /// #799 added to the shared unattended list (round-61 M-1 truthing) —
+    /// including the `agent` delegation shed (a model-supplied
+    /// `inherit_disallowed_tools=false` would otherwise spawn a child with a
+    /// clean catalog and recurse through the named tool the shield claims to
+    /// deny). Deleting any entry turns this red.
+    #[test]
+    fn unattended_list_carries_the_full_deny_set() {
+        let list = unattended_disallowed_tools(&[]);
+        for tool in [
+            SESSION_CREATE_TOOL,
+            "create_goal",
+            "update_goal",
+            SCHEDULED_TASK_CREATE_TOOL,
+            SCHEDULED_TASK_UPDATE_TOOL,
+            SCHEDULED_TASK_DELETE_TOOL,
+            MESSAGING_SEND_TOOL,
+            "agent",
+        ] {
+            assert!(
+                list.iter().any(|entry| entry == tool),
+                "the unattended deny list must carry {tool}"
+            );
+        }
+    }
+
+    /// Round-21 minor 4d: the toggle broadcast consults the mark set —
+    /// deleting the round-15 re-shield arm (a mid-window toggle otherwise
+    /// un-shields a watcher-marked session) turns this red.
+    #[test]
+    fn toggle_broadcast_re_shields_watcher_marked_sessions() {
+        let source = include_str!("engine_pool.rs");
+        let start = source
+            .find("pub async fn set_disallowed_all")
+            .expect("the broadcast fn must exist");
+        let fn_end = source[start..]
+            .find(
+                "
+    pub ",
+            )
+            .map(|offset| start + offset)
+            .unwrap_or(source.len());
+        let body = &source[start..fn_end];
+        // Round-29 M1: the needle is code-qualified (the `.lock().contains`
+        // chain) so a comment mentioning watcher_shielded_sessions cannot
+        // satisfy it (mutation-proven dead in the round-29 review).
+        let needle = "self.watcher_shielded_sessions.lock().contains(&sid)";
+        assert!(
+            body.contains(needle),
+            "the broadcast must re-shield watcher-marked sessions (code-qualified needle)"
         );
     }
 }

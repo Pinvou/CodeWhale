@@ -188,7 +188,9 @@
         state.webAccess = Object.assign({}, state.webAccess, status || {});
       } catch (error) {
         if (intentSeq !== webAccessIntentSeq || statusSeq !== webAccessStatusSeq) return;
-        state.webAccess = Object.assign({}, state.webAccess, { last_error: String(error) });
+        // 错误写入与码清理必须成对——刷新失败也要清掉旧恢复
+        // 码,否则 registerHint 优先级会让旧的三语提示盖住本次真实错误。
+        state.webAccess = Object.assign({}, state.webAccess, { last_error: String(error), last_error_code: null });
       }
       notify();
     }
@@ -196,7 +198,9 @@
     async function startRemoteControl(options) {
       var seq = ++webAccessIntentSeq;
       var wasActive = !!state.webAccess.active;
-      state.webAccess = Object.assign({}, state.webAccess, { starting: true, last_error: null });
+      // 乐观开始同样清掉旧恢复码(last_error 清理与码清理
+      // 成对),否则新尝试期间横幅仍显示上一轮的旧恢复提示。
+      state.webAccess = Object.assign({}, state.webAccess, { starting: true, last_error: null, last_error_code: null });
       notify();
       try {
         var info = await invoke("web_access_enable", {
@@ -205,7 +209,9 @@
         // A newer user action owns the state now; discard this stale result.
         if (seq !== webAccessIntentSeq) return info;
         state.webAccess = Object.assign({}, state.webAccess, info || {}, {
-          active: true, starting: false, last_error: null,
+          // 乐观合并同时清掉旧恢复码,避免状态刷新落地的
+          // 一个 IPC 窗口里,新近的成功动作之上仍显示旧的三语恢复横幅。
+          active: true, starting: false, last_error: null, last_error_code: null,
         });
         notify();
         await refreshRemoteControlStatus(seq);
@@ -214,7 +220,7 @@
         if (seq !== webAccessIntentSeq) throw error;
         state.webAccess = Object.assign({}, state.webAccess, {
           active: wasActive, web_client_connected: wasActive && !!state.webAccess.web_client_connected, starting: false,
-          status: "error", last_error: String(error),
+          status: "error", last_error: String(error), last_error_code: null,
         });
         notify();
         throw error;
@@ -227,7 +233,9 @@
         await invoke("web_access_disable");
       } catch (error) {
         if (seq !== webAccessIntentSeq) return; // 陈旧失败不向调用者抛错：已有更新的用户操作接管状态（审计补充）
-        state.webAccess = Object.assign({}, state.webAccess, { status: "error", last_error: String(error), starting: false });
+        // 停用失败的错误写入同样必须清掉旧恢复码,与
+        // start/rotate/revoke 的失败分支同口径。
+        state.webAccess = Object.assign({}, state.webAccess, { status: "error", last_error: String(error), last_error_code: null, starting: false });
         notify();
         throw error;
       }
@@ -235,6 +243,7 @@
       state.webAccess = Object.assign({}, state.webAccess, {
         active: false, endpoint_id: null, url: null, qr_data_url: null,
         web_client_connected: false, host_workspace_authorized: false, status: "stopped", starting: false,
+        last_error: null, last_error_code: null,
       });
       notify();
     }
@@ -245,14 +254,39 @@
         var info = await invoke("web_access_rotate");
         if (seq !== webAccessIntentSeq) return info;
         state.webAccess = Object.assign({}, state.webAccess, info || {}, {
-          active: true, web_client_connected: false, last_error: null, starting: false,
+          active: true, web_client_connected: false, last_error: null, last_error_code: null, starting: false,
         });
         notify();
         await refreshRemoteControlStatus(seq);
         return info;
       } catch (error) {
         if (seq !== webAccessIntentSeq) throw error;
-        state.webAccess = Object.assign({}, state.webAccess, { status: "error", last_error: String(error), starting: false });
+        state.webAccess = Object.assign({}, state.webAccess, { status: "error", last_error: String(error), last_error_code: null, starting: false });
+        notify();
+        throw error;
+      }
+    }
+
+    // 撤销本机目录授权但不断开链接：桌面专属同意面，手机侧永不可达
+    // （命令仅主 WebView 可调，且不在 Web 访问策略内）。
+    async function revokeRemoteHostWorkspace() {
+      var seq = ++webAccessIntentSeq;
+      try {
+        var info = await invoke("web_access_revoke_host_workspace");
+        if (seq !== webAccessIntentSeq) return info;
+        // endpoint 未激活时桌面端返回携带空 url 的非活跃
+        // 信息(撤权仍已持久化成功,不再按失败上报);乐观合并按 url
+        // 有无推导 active,不把非活跃状态标成在线。同时清掉旧恢复码。
+        state.webAccess = Object.assign({}, state.webAccess, info || {}, {
+          active: !!(info && info.url), starting: false,
+          host_workspace_authorized: false, last_error: null, last_error_code: null,
+        });
+        notify();
+        await refreshRemoteControlStatus(seq);
+        return info;
+      } catch (error) {
+        if (seq !== webAccessIntentSeq) throw error;
+        state.webAccess = Object.assign({}, state.webAccess, { last_error: String(error), last_error_code: null });
         notify();
         throw error;
       }
@@ -276,6 +310,7 @@
       startRemoteControl,
       stopRemoteControl,
       refreshRemoteControlQr,
+      revokeRemoteHostWorkspace,
       getWebRelaySettings,
       setWebRelayAddress,
     };

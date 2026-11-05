@@ -4,7 +4,7 @@ import { createPortal, flushSync } from 'react-dom';
 import { Check, ChevronDown, ChevronRight, ClipboardCheck, Clock, Database, FileChartLine, MessageCircle, Newspaper, Play, Plus, Trash2, X } from '../../components/icons.jsx';
 import { bridge, useBridgeState } from '../../hooks/useBridge.js';
 import { formatLocalDateTime } from '../../shared/date-utils.js';
-import { isBuiltInLlmApiAvailable, isBuiltInLlmApiModel, selectableModels } from '../../shared/model-options.js';
+import { isBuiltInAccountPlatformModel, selectableModels } from '../../shared/model-options.js';
 import { selectorMainLabel } from '../settings/model-catalog.js';
 import { useConversationSecondClock } from '../../hooks/useConversationSecondClock.js';
 import { can } from '../../shared/platform.js';
@@ -511,7 +511,7 @@ import memoryOrganizeImage from '../../assets/scheduled/memory-organize.jpg';
     // ScheduledTasksView 内的 MyTasksSection 分区（见组件内定义）直接闭包共享状态；
     // 原模块级 makeMyTasksSection 工厂只有一个调用点，已内联为普通渲染函数。
 
-    const ScheduledTasksView = ({ theme, t, onOpenChat, onGotoModelSettings }) => {
+    const ScheduledTasksView = ({ theme, t, onOpenChat, onOpenScheduledRun, onGotoModelSettings }) => {
       // The settings slice is required here: the memory-organize template card
       // is gated on bs.settings.memory_enabled; without the domain the field
       // is always undefined and the card can never render.
@@ -653,12 +653,11 @@ import memoryOrganizeImage from '../../assets/scheduled/memory-organize.jpg';
           </>
         );
       };
-      const builtinModelAvailable = isBuiltInLlmApiAvailable(appState.llmApiStatus);
-      const savedModels = selectableModels(appState.savedModels || [], appState.llmApiStatus);
+      const savedModels = selectableModels(appState.savedModels || []);
       const activeModel = savedModels.find(model => model.id === appState.activeModelId) || savedModels[0] || null;
       const modelIdForTask = (task) => {
         if (!task) return '';
-        if (task.modelId && (!isBuiltInLlmApiModel({ id: task.modelId }) || builtinModelAvailable)) return task.modelId;
+        if (task.modelId && (!isBuiltInAccountPlatformModel({ id: task.modelId }) || savedModels.some(model => model.id === task.modelId))) return task.modelId;
         if (!task.model) return activeModel && activeModel.id || '';
         const matches = savedModels.filter(model => model.model === task.model);
         return matches.length === 1 ? matches[0].id : '';
@@ -957,11 +956,9 @@ import memoryOrganizeImage from '../../assets/scheduled/memory-organize.jpg';
       }
 
       async function openRunChat(run) {
-        if (!run || !run.sessionId || !bridge || !bridge.scheduled.openScheduledRunChat) return;
+        if (!run || !run.sessionId || !onOpenScheduledRun) return;
         try {
-          if (!(await flushBeforeAction())) return;
-          const opened = await bridge.scheduled.openScheduledRunChat(run, detail || selected);
-          if (!opened) return;
+          await onOpenScheduledRun(run, detail || selected, flushBeforeAction);
         } catch (_) {}
       }
 
@@ -1080,10 +1077,14 @@ import memoryOrganizeImage from '../../assets/scheduled/memory-organize.jpg';
         }
         if (editor.repeat === 'hourly') {
           const interval = previousEditor.repeat === 'hourly' ? editor.interval : 1;
+          // BYDAY rule (full week or a subset of days) aligns with the Rust humanize "Mon、Tue every N hours";
+          // omitted when no day is selected (pure hourly), which reads the same as every day.
+          const days = normalizeScheduleDays(editor.days);
+          const byday = days.length ? `;BYDAY=${days.join(',')}` : '';
           const anchor = previousEditor.hasTimeAnchor
             ? `;BYHOUR=${Number(hour || 0)};BYMINUTE=${Number(minute || 0)}`
             : '';
-          return `FREQ=HOURLY;INTERVAL=${Math.max(1, interval || 1)}${anchor}`;
+          return `FREQ=HOURLY;INTERVAL=${Math.max(1, interval || 1)}${byday}${anchor}`;
         }
         if (key === 'repeat' && editor.repeat === 'weekly') {
           const previousDays = normalizeScheduleDays(previousEditor.days);
@@ -1131,10 +1132,7 @@ import memoryOrganizeImage from '../../assets/scheduled/memory-organize.jpg';
         label: selectorMainLabel(model, t),
         model: model.model,
       }));
-      const detailModelIsUnavailableBuiltin = detailForm &&
-        isBuiltInLlmApiModel({ id: detailForm.modelId }) &&
-        !builtinModelAvailable;
-      if (detailForm && detailForm.modelId && !detailModelIsUnavailableBuiltin && !modelOptions.some(option => option.value === detailForm.modelId)) {
+      if (detailForm && detailForm.modelId && !modelOptions.some(option => option.value === detailForm.modelId)) {
         modelOptions.unshift({ value: detailForm.modelId, label: detailForm.model || detailForm.modelId, model: detailForm.model });
       } else if (detailForm && !detailForm.modelId) {
         modelOptions.unshift({ value: '', label: detailForm.model ? scheduledCopy.reselectModel(detailForm.model) : scheduledCopy.currentModel });
@@ -1371,11 +1369,11 @@ import memoryOrganizeImage from '../../assets/scheduled/memory-organize.jpg';
                       {taskListStatusLabel(task.status)}
                     </span>
                     {task.isRunning && (
-                      <span data-testid="scheduled-task-running" aria-label={scheduledCopy.running}
+                      <span data-testid="scheduled-task-running" role="img" aria-label={scheduledCopy.running}
                         className="ml-2 h-3.5 w-3.5 shrink-0 animate-spin rounded-full border-2 border-[#007AFF] border-t-transparent dark:border-[#0A84FF]" />
                     )}
                     {task.hasUnreadRuns && (
-                      <span data-testid="scheduled-task-unread" aria-label={scheduledCopy.unread}
+                      <span data-testid="scheduled-task-unread" role="img" aria-label={scheduledCopy.unread}
                         className="ml-2 h-2.5 w-2.5 shrink-0 rounded-full bg-[#007AFF] dark:bg-[#0A84FF]" />
                     )}
                   </span>
@@ -1551,10 +1549,10 @@ import memoryOrganizeImage from '../../assets/scheduled/memory-organize.jpg';
                           aria-label={item.sessionId ? scheduledCopy.openRunLabel(runStatusLabel(item.status)) : scheduledCopy.noOpenRun}>
                           <span className="mt-1 flex h-5 w-5 shrink-0 items-center justify-center">
                             {['queued', 'running'].includes(item.status) ? (
-                              <span data-testid="scheduled-run-running" aria-label={scheduledCopy.runInProgress}
+                              <span data-testid="scheduled-run-running" aria-hidden="true"
                                 className="h-3 w-3 shrink-0 animate-spin rounded-full border-2 border-[#007AFF] border-t-transparent dark:border-[#0A84FF]" />
                             ) : item.unread ? (
-                              <span data-testid="scheduled-run-unread" aria-label={scheduledCopy.unread}
+                              <span data-testid="scheduled-run-unread" role="img" aria-label={scheduledCopy.unread}
                                 className="h-2.5 w-2.5 shrink-0 rounded-full bg-[#007AFF] dark:bg-[#0A84FF]" />
                             ) : (
                               <span className="h-2.5 w-2.5 shrink-0 rounded-full" style={{ background: item.status === 'failed' ? '#FF3B30' : '#8E8E93' }} />

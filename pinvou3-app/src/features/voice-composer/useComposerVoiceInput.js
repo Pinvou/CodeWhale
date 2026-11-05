@@ -37,9 +37,10 @@ function trimDraft(value) {
   return String(value || '').trim();
 }
 
-// Thrown to the bridge layer when direct task send is not accepted (blocked by a guard or
-// threw): the catch in bridge finishVoiceInput normalizes it into a failure notification
-// instead of leaving the fake "voice task sent" success showing.
+// Thrown to the bridge layer when the direct task send does not happen: either the pre-send
+// gate rejected (canSendTask false from busy/session/auth interleaving) or sendTask was not
+// accepted (returned false or threw). The catch in bridge finishVoiceInput normalizes it into
+// a failure notification instead of leaving the fake "voice task sent" success showing.
 // message is left empty and toString overridden so normalizeVoiceError lands on the existing
 // trilingual generic copy voiceInputFailed; the bridge can map dedicated copy for the
 // send_failed category later.
@@ -263,7 +264,13 @@ function useComposerVoiceInput(adapter) {
     }
     if (typeof current.canSendTask === 'function' && !current.canSendTask(outgoing, context)) {
       if (typeof current.onTaskBlocked === 'function') current.onTaskBlocked('gate', outgoing, context);
-      return;
+      // The send gate (busy / workspace sync / session readiness / auth) may flip to false
+      // between recording start and transcription completion. This attempt never reached
+      // sendTask, so it must fail the real submission chain like a rejected send (the draft
+      // stays for a manual retry): throwing the same send_failed error makes the bridge's
+      // catch land on the failure notice instead of the fake "voice task sent" completed
+      // writeback.
+      throw createVoiceTaskSendError();
     }
     if (typeof current.sendTask !== 'function' || taskSendInFlightRef.current) return;
     const accepted = await deliverVoiceTask(current, outgoing, context, taskSendInFlightRef);
@@ -358,6 +365,7 @@ function useComposerVoiceInput(adapter) {
         ownerKind: current.ownerKind || 'chat',
         sessionId: current.sessionId || null,
         modelId: current.modelId || null,
+        modelRef: current.modelRef || null,
       },
     );
     return true;

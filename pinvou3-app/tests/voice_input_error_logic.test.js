@@ -16,7 +16,7 @@ const voiceReasoningSource = rustVoiceSource + dialectSource;
 // already preserves B; voice must use that resolved name for both attempts,
 // never run the first-entry-only monitoring probe again.
 const postprocessCommand = rustVoiceSource.slice(rustVoiceSource.indexOf("pub async fn postprocess_voice_text("));
-assert.match(postprocessCommand, /let bridge = match voice_postprocess_bridge\([\s\S]*?let model_name = bridge\.model\(\);/);
+assert.match(postprocessCommand, /let \(bridge, _voice_scope\) = match voice_postprocess_bridge\([\s\S]*?let model_name = bridge\.model\(\);/);
 assert.doesNotMatch(rustVoiceSource, /probe_vllm_model_info/);
 assert.strictEqual((postprocessCommand.match(/&model_name,/g) || []).length, 2,
   "initial and retry requests must share the prepared user-selected model B, not server-first model A");
@@ -1206,6 +1206,36 @@ assert.strictEqual(webCodedTimeout.diagnostic, "识别超时（120 秒），请�
 assert.strictEqual(
   webNormalizeVoiceError({ code: "session_mismatch", message: "invalid Session id" }).message,
   webBt("voiceContextMismatch"),
+);
+
+// PR#2138 review regression: the shared composer hook's pre-send gate
+// rejection (busy / workspace sync / session readiness / auth interleaving
+// between recording start and transcription completion) reuses the
+// sendTask-rejected send_failed error. Both lanes' finishVoiceInput catch must
+// normalize it onto the existing trilingual voiceInputFailed copy and land the
+// operation on failed — a task whose send never ran must never reach the
+// completed "voiceTaskSent" writeback.
+const gateSendError = new Error("");
+gateSendError.category = "send_failed";
+gateSendError.stage = "writeback";
+gateSendError.toString = () => "";
+for (const [laneName, laneNormalize, laneBt] of [
+  ["tauri", normalizeVoiceError, bt],
+  ["web", webNormalizeVoiceError, webBt],
+]) {
+  const gateNormalized = laneNormalize(gateSendError, "transcribing");
+  assert.strictEqual(gateNormalized.category, "send_failed", `${laneName} lane must keep the send_failed category`);
+  assert.strictEqual(gateNormalized.stage, "writeback", `${laneName} lane must keep the writeback stage`);
+  assert.strictEqual(
+    gateNormalized.message,
+    laneBt("voiceInputFailed"),
+    `${laneName} lane must map the send_failed gate error onto the existing trilingual copy`,
+  );
+}
+assert.match(
+  voiceHookSource,
+  /onTaskBlocked\('gate', outgoing, context\);[\s\S]*?throw createVoiceTaskSendError\(\);/,
+  "the pre-send gate rejection must throw the send_failed error to the bridge instead of silently returning into the fake 'task sent' completed writeback",
 );
 
 // (3) Drift guard: every Rust VoiceCommandError error code must appear in

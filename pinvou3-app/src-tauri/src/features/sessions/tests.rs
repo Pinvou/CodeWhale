@@ -10,7 +10,7 @@ use super::*;
 use crate::core::mode_state::ModeLane;
 use crate::platform::paths;
 use crate::platform::paths::tests::{ENV_LOCK, EnvVarGuard};
-use crate::platform::prefs::UserPrefs;
+use crate::platform::prefs::{BUILTIN_ACCOUNT_PLATFORM_MODEL_ID, ModelSelectionRef, UserPrefs};
 use anyhow::Result;
 use chrono::Utc;
 use deepseek_tui::models::{ContentBlock, ImageUrlContent, Message, SystemPrompt};
@@ -114,6 +114,149 @@ fn record_session_deletions(store: &SessionStore) -> Arc<std::sync::Mutex<Vec<St
             .push(session_id.to_string());
     }));
     seen
+}
+
+#[test]
+fn replacement_branch_preserves_source_and_records_lineage() {
+    let (store, _guard) = isolated_store();
+    let source = store
+        .create_new("removed-model".into(), None, PathBuf::from("workspace"))
+        .unwrap();
+    let source_id = source.metadata.id.clone();
+    store
+        .update_messages(&source_id, vec![user_text("first"), user_text("second")])
+        .unwrap();
+    let (branch, lineage) = store
+        .create_replacement_branch(
+            &source_id,
+            1,
+            "message:0".into(),
+            "replacement-model".into(),
+            "Replacement model branch".into(),
+            "New chat".into(),
+        )
+        .unwrap();
+    assert_ne!(branch.metadata.id, source_id);
+    assert_eq!(branch.messages.len(), 1);
+    assert_eq!(store.load(&source_id).unwrap().messages.len(), 2);
+    assert_eq!(lineage.source_conversation_id, source_id);
+    assert_eq!(lineage.original_model_ref, "removed-model");
+    assert_eq!(lineage.replacement_model_ref, "replacement-model");
+    let lineage_path = store.manager.sessions_dir().join(format!(
+        "{}.account-platform-branch.json",
+        branch.metadata.id
+    ));
+    assert!(lineage_path.exists());
+    store.delete(&branch.metadata.id).unwrap();
+    assert!(!lineage_path.exists());
+    assert_eq!(store.load(&source_id).unwrap().messages.len(), 2);
+}
+
+#[test]
+fn replacement_branch_title_localizes_only_bare_markers_and_keeps_current_renames() {
+    let (store, _guard) = isolated_store();
+    let source = store
+        .create_new("removed-model".into(), None, PathBuf::from("workspace"))
+        .unwrap();
+    let id = source.metadata.id;
+    store
+        .update_messages(&id, vec![user_text("first"), user_text("second")])
+        .unwrap();
+    for (suffix, default_title) in [
+        ("替代模型分支", "新对话"),
+        ("Replacement model branch", "New chat"),
+        ("代替モデルの分岐", "新しいチャット"),
+    ] {
+        for marker in ["新对话", "New chat", "新しいチャット"] {
+            store.set_title(&id, marker.into()).unwrap();
+            let (branch, _) = store
+                .create_replacement_branch(
+                    &id,
+                    0,
+                    "message:1".into(),
+                    "replacement-model".into(),
+                    suffix.into(),
+                    default_title.into(),
+                )
+                .unwrap();
+            assert_eq!(branch.metadata.title, format!("{default_title} · {suffix}"));
+            assert_eq!(
+                branch.messages.len(),
+                2,
+                "zero count keeps the complete current snapshot"
+            );
+            assert_eq!(store.load(&id).unwrap().metadata.title, marker);
+        }
+        // A rename committed after the UI took its snapshot remains authoritative.
+        let renamed = "Renamed · 替代模型分支";
+        store.set_title(&id, renamed.into()).unwrap();
+        let (branch, _) = store
+            .create_replacement_branch(
+                &id,
+                0,
+                "message:1".into(),
+                "replacement-model".into(),
+                suffix.into(),
+                default_title.into(),
+            )
+            .unwrap();
+        assert_eq!(branch.metadata.title, format!("{renamed} · {suffix}"));
+        assert_eq!(store.load(&id).unwrap().metadata.title, renamed);
+    }
+}
+
+#[test]
+fn replacement_branch_invalid_ui_title_copy_creates_nothing() {
+    let (store, _guard) = isolated_store();
+    let source = store
+        .create_new("removed-model".into(), None, PathBuf::from("workspace"))
+        .unwrap();
+    let id = source.metadata.id;
+    store
+        .update_messages(&id, vec![user_text("first")])
+        .unwrap();
+    let count = store.list_sessions_cached().unwrap().len();
+    for (suffix, default_title) in [
+        ("", "New chat"),
+        ("bad\nlabel", "New chat"),
+        ("Branch", " "),
+        ("Branch", "bad\0title"),
+    ] {
+        assert!(
+            store
+                .create_replacement_branch(
+                    &id,
+                    0,
+                    "message:0".into(),
+                    "replacement-model".into(),
+                    suffix.into(),
+                    default_title.into()
+                )
+                .is_err()
+        );
+        assert_eq!(store.list_sessions_cached().unwrap().len(), count);
+        assert_eq!(store.load(&id).unwrap().messages.len(), 1);
+    }
+}
+
+#[test]
+fn session_model_ref_keeps_platform_catalog_id_distinct_from_runtime_carrier() {
+    let (store, _guard) = isolated_store();
+    store
+        .set_session_model_ref(
+            "typed-model-test",
+            Some(ModelSelectionRef::account_platform("catalog-model-v2")),
+        )
+        .expect("persist typed session model");
+
+    assert_eq!(
+        store.session_model_ref("typed-model-test"),
+        Some(ModelSelectionRef::account_platform("catalog-model-v2"))
+    );
+    assert_eq!(
+        store.session_model_id("typed-model-test").as_deref(),
+        Some(BUILTIN_ACCOUNT_PLATFORM_MODEL_ID)
+    );
 }
 
 fn user_text(text: &str) -> Message {
@@ -1089,6 +1232,63 @@ fn validate_workspace_roots_rejects_an_over_cap_declaration() {
     );
 }
 
+/// Round-23 M1 (#657): the pinvou3 home (settings.json, connector
+/// credentials, sessions/, spool roots) is refused as a project workspace —
+/// binding it would present privileged state as an unattended opening
+/// turn's project. Deleting the scope clause turns this red. Round-29
+/// hygiene: runs against a relocated PINVOU3_HOME under the env lock —
+/// the real ~/.pinvou3 used to be created and read as a side effect, and
+/// the env write raced parallel tests.
+#[test]
+fn validate_user_workspace_path_refuses_pinvou3_home() {
+    use super::validators::validate_user_workspace_path;
+
+    let (_lock, _env) = crate::platform::test_support::locked_env(&["PINVOU3_HOME"]);
+    let home = std::env::temp_dir().join(format!(
+        "pinvou3-home-refusal-{}-{}",
+        std::process::id(),
+        crate::platform::paths::tests::unique_suffix()
+    ));
+    let _ = std::fs::remove_dir_all(&home);
+    // SAFETY: platform::paths::tests::ENV_LOCK held; env writes are serialized.
+    unsafe { std::env::set_var("PINVOU3_HOME", &home) };
+    std::fs::create_dir_all(&home).expect("seed relocated home");
+    let validated = validate_user_workspace_path(home.to_str().expect("utf8"));
+    assert!(
+        validated.is_err(),
+        "the pinvou3 home must be refused: {:?}",
+        validated
+    );
+    let inside = home.join("sessions");
+    std::fs::create_dir_all(&inside).expect("seed sessions dir");
+    assert!(
+        validate_user_workspace_path(inside.to_str().expect("utf8")).is_err(),
+        "paths inside the pinvou3 home must also be refused"
+    );
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+/// Round-29 minor: the volume-root clause had no test, and the retired
+/// `len() <= 3` heuristic misclassified 1-2 character top-level
+/// directories as volume roots. Pins the refusal on the real root; the
+/// happy path for ordinary directories is pinned by the validator tests
+/// above.
+#[test]
+fn validate_user_workspace_path_refuses_volume_root() {
+    use super::validators::validate_user_workspace_path;
+
+    let root = if cfg!(windows) { r"C:\" } else { "/" };
+    let canonical_root = std::path::Path::new(root)
+        .canonicalize()
+        .expect("the volume root canonicalizes");
+    let error = validate_user_workspace_path(canonical_root.to_str().expect("utf8"))
+        .expect_err("the volume root must be refused");
+    assert!(
+        error.to_string().contains("volume root"),
+        "refusal must name the volume root: {error}"
+    );
+}
+
 fn text_message(role: &str, text: &str) -> Message {
     Message {
         role: role.into(),
@@ -1569,7 +1769,7 @@ fn scheduled_conversation_model_override_precedes_profile_fallback() {
     store
         .session_models
         .write()
-        .insert(id.clone(), "legacy-model-id".to_string());
+        .insert(id.clone(), ModelSelectionRef::local("legacy-model-id"));
 
     assert_eq!(
         store.session_model_id(&id).as_deref(),
@@ -2270,10 +2470,10 @@ fn scheduled_sessions_wait_for_coordinated_run_retention() {
             .mode_states
             .write()
             .insert(scheduled.metadata.id.clone(), SessionModeState::default());
-        store
-            .session_models
-            .write()
-            .insert(scheduled.metadata.id.clone(), "stale-model".to_string());
+        store.session_models.write().insert(
+            scheduled.metadata.id.clone(),
+            ModelSelectionRef::local("stale-model"),
+        );
         store
             .pinned_sessions
             .write()
@@ -2401,10 +2601,10 @@ fn retention_notifies_hook_when_record_commit_precedes_cleanup_error() {
             .save_session_atomic(&session)
             .expect("seed session without eager retention");
     }
-    store
-        .session_models
-        .write()
-        .insert(oldest_id.to_string(), "stale-model".to_string());
+    store.session_models.write().insert(
+        oldest_id.to_string(),
+        ModelSelectionRef::local("stale-model"),
+    );
     let deletions = record_session_deletions(&store);
     store
         .inject_post_record_delete_fault(oldest_id, ErrorKind::PermissionDenied)
@@ -2456,10 +2656,10 @@ fn boot_prunes_only_stale_scheduled_runtime_sidecars() {
         .metadata
         .id;
     for (id, suffix) in [(&live, "live"), (&stale, "stale")] {
-        store
-            .session_models
-            .write()
-            .insert(id.clone(), format!("{suffix}-model"));
+        store.session_models.write().insert(
+            id.clone(),
+            ModelSelectionRef::local(format!("{suffix}-model")),
+        );
         store
             .pinned_sessions
             .write()
@@ -3012,6 +3212,60 @@ fn delete_removes_session() {
         .expect("create");
     store.delete(&s.metadata.id).expect("delete");
     assert!(store.load(&s.metadata.id).is_err(), "load after delete");
+}
+
+#[test]
+fn delete_reclaims_remote_attachment_references_without_removing_the_user_workspace() {
+    if !crate::platform::filesystem::supports_private_read_path_publication() {
+        return;
+    }
+    with_isolated_store_restoring_home(|store| {
+        use sha2::{Digest as _, Sha256};
+        let workspace = tempfile::tempdir().unwrap();
+        let user_file = workspace.path().join("keep.txt");
+        std::fs::write(&user_file, b"user workspace file").unwrap();
+        let session = store
+            .create_new("/model".into(), None, workspace.path().to_owned())
+            .unwrap();
+        let ledger = store.session_roots(&session.metadata.id).unwrap().ledger;
+        let body = b"session attachment";
+        let owner = Arc::new(
+            crate::platform::filesystem::publish_private_read_path(
+                crate::platform::filesystem::open_private_file_directory(
+                    &ledger.join("remote_uploads/ctr-up-delete"),
+                )
+                .unwrap(),
+                std::ffi::OsStr::new("report.txt"),
+                body,
+            )
+            .unwrap(),
+        );
+        let independent_reference = owner.read_path() != owner.path();
+        let descriptor = crate::features::files::file_ingest::PublishedAttachment {
+            handle_id: "ctr-up-delete".into(),
+            path: owner.path().to_owned(),
+            display_name: "report.txt".into(),
+            mime_type: "text/plain".into(),
+            bytes: body.len() as u64,
+            sha256: crate::platform::encoding::hex_lower(&Sha256::digest(body)),
+            read_owner: Some(owner.clone()),
+        };
+        let ingested =
+            crate::features::files::file_ingest::ingest_staged_attachment(&ledger, &descriptor)
+                .unwrap();
+        let reference = PathBuf::from(&ingested.path);
+        drop(ingested);
+        drop(descriptor);
+        owner.request_cleanup();
+        drop(owner);
+        if independent_reference {
+            assert_eq!(std::fs::read(&reference).unwrap(), body);
+        }
+        store.delete(&session.metadata.id).unwrap();
+        assert!(!ledger.exists());
+        assert!(!reference.exists());
+        assert_eq!(std::fs::read(user_file).unwrap(), b"user workspace file");
+    });
 }
 
 #[test]
@@ -3863,44 +4117,6 @@ fn retention_purge_notifies_session_purged_hooks() {
         notified,
         vec![id],
         "the purge hook must receive the deleted session id"
-    );
-}
-
-/// The composition root's purge hook also removes the session's entry from
-/// the codex_acp agents index — durable, id-scoped IO performed WHILE the
-/// purge runs. The store's hook contract (store.rs) keeps the sidecar io
-/// mutexes released while hooks fire (`scheduled_mutation` stays held), so
-/// a hook may touch its own files without self-deadlock; this test cannot
-/// pin that lock contract itself — it pins that the hook fires with exactly
-/// the evicted id and can perform durable, id-keyed IO while the purge
-/// runs. Pinned with a file stand-in for the index: sessions must not
-/// depend on codex_acp here. The removal leg is unit-tested in lib.rs
-/// against a real agents store, and the run() capture is pinned textually
-/// by the startup-order contract test.
-#[test]
-fn retention_purge_runs_hooks_that_remove_durable_state_for_the_id() {
-    let (store, _guard) = isolated_store();
-    let chat = store
-        .create_new("m".into(), None, std::env::temp_dir())
-        .expect("create chat");
-    let id = chat.metadata.id.clone();
-
-    // Underscore-prefixed like the other scan-invisible sidecar files.
-    let entry = paths::sessions_root().join(format!("_{id}.purge-hook-stub"));
-    std::fs::write(&entry, b"index entry stand-in").expect("seed stub");
-    store.register_session_purged_hook(std::sync::Arc::new(move |sid: &str| {
-        // Stand-in for the agents-index removal: the file is keyed by the id
-        // the hook actually receives, so a wrong id keeps the stub and fails
-        // the assertion below.
-        let _ =
-            std::fs::remove_file(paths::sessions_root().join(format!("_{sid}.purge-hook-stub")));
-    }));
-
-    store.purge_session_side_maps(std::slice::from_ref(&id));
-
-    assert!(
-        !entry.exists(),
-        "the purge must run hooks that remove durable state for the evicted id"
     );
 }
 
@@ -5511,6 +5727,29 @@ fn aux_session_inherits_parent_model_override() {
         .create_aux_session(&main2.metadata.id)
         .expect("create aux 2");
     assert!(store.session_model_override(&aux2.id).is_none());
+}
+
+#[test]
+fn aux_session_inherits_parent_account_platform_model_ref() {
+    let (store, _g) = isolated_store();
+    let main = store
+        .create_new("/model".into(), None, std::env::temp_dir())
+        .expect("create main");
+    let selection = ModelSelectionRef::account_platform("catalog-model-x");
+    store
+        .set_session_model_ref(&main.metadata.id, Some(selection.clone()))
+        .expect("set parent Account Platform model");
+
+    let aux = store
+        .create_aux_session(&main.metadata.id)
+        .expect("create aux");
+    assert_eq!(
+        store.session_model_ref_override(&aux.id),
+        Some(selection.clone()),
+        "the aux binding must retain the catalog model and its source"
+    );
+    store.load_session_models();
+    assert_eq!(store.session_model_ref_override(&aux.id), Some(selection));
 }
 
 /// When the retention policy evicts a main session it cascade-evicts its
@@ -9523,14 +9762,17 @@ fn model_persist_keeps_entries_written_after_boot() {
     store
         .set_session_model_id("headless-c", Some("headless-model".to_string()))
         .expect("persist headless model");
-    let durable: std::collections::HashMap<String, String> =
+    let durable: std::collections::HashMap<String, ModelSelectionRef> =
         serde_json::from_str(&std::fs::read_to_string(&file).expect("read model file"))
             .expect("durable model file must stay valid JSON");
     assert_eq!(
         durable,
         std::collections::HashMap::from([
-            ("gui-a".to_string(), "gui-model".to_string()),
-            ("headless-c".to_string(), "headless-model".to_string()),
+            ("gui-a".to_string(), ModelSelectionRef::local("gui-model")),
+            (
+                "headless-c".to_string(),
+                ModelSelectionRef::local("headless-model"),
+            ),
         ]),
         "a model persist from this process must not revert entries persisted after boot"
     );
@@ -10290,4 +10532,88 @@ fn strip_session_message_block_impl_rejects_lookalikes_and_preserves_nesting() {
             "the matching twin must agree with the titling twin"
         );
     }
+}
+
+#[test]
+fn inherited_platform_default_provenance_survives_other_mutations_and_explicit_reselect_clears_it()
+{
+    with_isolated_store_restoring_home(|store| {
+        let revision = uuid::Uuid::new_v4().to_string();
+        let a = "0199a100-0001-7000-8000-000000000106";
+        let session = store
+            .create_new_inheriting_default(
+                a.into(),
+                Some(BUILTIN_ACCOUNT_PLATFORM_MODEL_ID.into()),
+                PathBuf::from("workspace"),
+                Some(revision.clone()),
+            )
+            .unwrap();
+        let id = session.metadata.id;
+        let source = || {
+            store
+                .with_inherited_platform_default(&id, a, |value| Ok(value.map(str::to_owned)))
+                .unwrap()
+        };
+        assert_eq!(source(), Some(revision.clone()));
+        store
+            .set_session_model_ref("unrelated", Some(ModelSelectionRef::local("local")))
+            .unwrap();
+        store.save_session_models();
+        store.load_session_models();
+        assert_eq!(source(), Some(revision));
+        store
+            .set_session_model_ref(&id, Some(ModelSelectionRef::account_platform(a)))
+            .unwrap();
+        assert_eq!(
+            source(),
+            None,
+            "same-ID explicit selection retires default provenance"
+        );
+        assert_eq!(
+            store.session_model_ref(&id),
+            Some(ModelSelectionRef::account_platform(a))
+        );
+    });
+}
+
+#[test]
+fn inherited_default_confirmation_is_exact_and_old_bindings_never_become_implicit() {
+    with_isolated_store_restoring_home(|store| {
+        let a = "0199a100-0001-7000-8000-000000000106";
+        let revision = uuid::Uuid::new_v4().to_string();
+        store
+            .set_inherited_session_model_ref(
+                "new",
+                ModelSelectionRef::account_platform(a),
+                revision.clone(),
+            )
+            .unwrap();
+        store
+            .confirm_inherited_platform_default("new", a, "obsolete")
+            .unwrap();
+        assert_eq!(
+            store
+                .with_inherited_platform_default("new", a, |r| Ok(r.map(str::to_owned)))
+                .unwrap(),
+            Some(revision.clone())
+        );
+        store
+            .confirm_inherited_platform_default("new", a, &revision)
+            .unwrap();
+        assert_eq!(
+            store
+                .with_inherited_platform_default("new", a, |r| Ok(r.map(str::to_owned)))
+                .unwrap(),
+            None
+        );
+        store
+            .set_session_model_ref("old", Some(ModelSelectionRef::account_platform(a)))
+            .unwrap();
+        assert_eq!(
+            store
+                .with_inherited_platform_default("old", a, |r| Ok(r.map(str::to_owned)))
+                .unwrap(),
+            None
+        );
+    });
 }

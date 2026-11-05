@@ -1,0 +1,495 @@
+{
+  "version": 1,
+  "source_commit": "f6441da6cd7db5a4085e743f31bcd2c33dbdb5e3",
+  "scope": "Original published up SQL; down scripts are not used by the forward-only history fixtures.",
+  "domains": {
+    "account": [
+      {
+        "file": "000001_foundation.up.sql",
+        "sha256": "4e62f96ea4686990053ee91745023af5cd57b1ddf7fa82ec25ab1b25fd9ef579"
+      },
+      {
+        "file": "000002_account_domain.up.sql",
+        "sha256": "3196789811ed1798b160a0bb0948d762fbecead4cc4ad7d07562179f56a1446c"
+      },
+      {
+        "file": "000003_event_delivery.up.sql",
+        "sha256": "e75bccd8da580606c7d4800f19267aa930ea08c97cc1b3b58a2d7806d6cea90b"
+      },
+      {
+        "file": "000004_admin_lifecycle.up.sql",
+        "sha256": "5d2a37eef79b42a7b9149f49c5e0e98b9966530aa02d67250f8eda28f9e7fd62"
+      },
+      {
+        "file": "000005_audit_search.up.sql",
+        "sha256": "a238129aa085e74884f21f118f1e65d302df17c2e934ac62f95e854d4f98881d"
+      },
+      {
+        "file": "000006_mobile_identity.up.sql",
+        "sha256": "84905a8260dcf8c1fca963bb819321869094bcfed068e2d84505f8d19e10d15f"
+      },
+      {
+        "file": "000007_username.up.sql",
+        "sha256": "00b533f915f32b5ca4e4ecdb57c08c995ce237aacbd54093e5d4b3407714d199"
+      },
+      {
+        "file": "000008_provider_sms_verification.up.sql",
+        "sha256": "d7757464329446a55787bc09436764bc961c9df5770a5c22854d1386b7681e2a"
+      },
+      {
+        "file": "000009_slider_captcha.up.sql",
+        "sha256": "7397a9b66cbac880ebae1f04bcf386e367a4badf59e98f521810f814b03a1767"
+      },
+      {
+        "file": "000010_authorization_rbac.up.sql",
+        "sha256": "c67a427e7153aa546606f5d6ce4037168d2122f8fc1034f96d6ba9cf71ab72ba"
+      },
+      {
+        "file": "000011_permanent_user_codes.up.sql",
+        "sha256": "f68a4b9b21354596d71dbfcb9f843f0a0ff0993d6462e0e3a53d3396ee7746f7"
+      },
+      {
+        "file": "000012_sms_risk_dimensions.up.sql",
+        "sha256": "3a4aae8c77eb2f4b2e12ece90d8e94a7729790e718ef921ab4be5fa535efa67f"
+      },
+      {
+        "file": "000013_registration_saga.up.sql",
+        "sha256": "eac3d4d4209d11d69cf128ca28135b31833c70d812c4ccd7e7b9969f9c6bc753"
+      },
+      {
+        "file": "000014_profile_change_saga.up.sql",
+        "sha256": "9bdd1adb908df99ece1e4506e25df1484b5765906741109316187af4d6ce37b7"
+      },
+      {
+        "file": "000015_commerce_customer_mapping.up.sql",
+        "sha256": "92d97005182e4dcbea1e9950ecf4a565aa8a61a50acba5b9bd410436d8659d49"
+      },
+      {
+        "file": "000016_role_binding_lifecycle.up.sql",
+        "sha256": "64b599f6512ebddc3874b2caf2251b915a2a60e7fe46da61c1af84b99f52d582"
+      },
+      {
+        "file": "000017_super_admin_recovery.up.sql",
+        "sha256": "8c142e730f3b0cd1e6d889da54471512599f96485243f7bb0fa0f64106371c26"
+      },
+      {
+        "file": "000018_approval_commands.up.sql",
+        "sha256": "5353eaad858a1c033ba4659b92dd16744d828c363eae6771437ef9b6b62de0cf"
+      },
+      {
+        "file": "000019_organization_lifecycle.up.sql",
+        "sha256": "3bb1dfee1f23ff84847f06624c13fbaa4f65a9628f8b7677fda85aed3a8eecd8"
+      },
+      {
+        "file": "000020_organization_unit_lifecycle.up.sql",
+        "sha256": "28dedb0b9cdb96a441edd81ab5796d2be1c74fe23e032b8cd514abb6d128fa6b"
+      },
+      {
+        "file": "000021_membership_governance.up.sql",
+        "sha256": "4190ea5063aa4b12bd94280e77128d4f7e068b608f21c7cafbdd7accecf6f58d"
+      },
+      {
+        "file": "000022_global_active_context.up.sql",
+        "sha256": "1f756028b785bd9e1b5b51c005ae68018acac6c3ed3c8107d5db4960fa04a354"
+      },
+      {
+        "file": "000023_payment_anomaly_commands.up.sql",
+        "sha256": "78781226e20aa52e0d7199679a6bb44ea68118af92e735e12dda474d93585709"
+      },
+      {
+        "file": "000024_model_catalog_commands.up.sql",
+        "sha256": "6516049314b81ce1d8921ff2ae225d968a478f82bfb2cd97c024040372b0d034"
+      },
+      {
+        "file": "000025_route_provisioning_commands.up.sql",
+        "sha256": "7cb56b00e7f0d4e72576f045fce9e24fa24501ad1c905579f7e244a11d429acf"
+      },
+      {
+        "file": "000026_token_account_operations.up.sql",
+        "sha256": "eb4063d7cfa9e349df4edec55c5cc12fb6578cbfbd54e393b20484998217de80"
+      },
+      {
+        "file": "000027_account_closure_saga.up.sql",
+        "sha256": "cfd14d187cd1c3fa3aab134de59cbfb88a44a7bbc88bc3e3406d8d6c7d2505db"
+      },
+      {
+        "file": "000028_account_closure_cleanup.up.sql",
+        "sha256": "05eec7870758d9eb29248236a389f7facfbc4025d1fa711d40775d3fe96855b9"
+      },
+      {
+        "file": "000029_authentication_risk_limits.up.sql",
+        "sha256": "c6f5ee5c40d7f28e5fae7519e683a792e0fa690f8f0b77685ccb6f8c280ba37d"
+      },
+      {
+        "file": "000030_event_replay_audit.up.sql",
+        "sha256": "733b1f380b9f4cc848c28fabefa4621e42db67466bcb2fba9b4fbbcf4d677a61"
+      },
+      {
+        "file": "000031_manual_review_sla.up.sql",
+        "sha256": "b1bca562d91ac6d18b2b68c4274d5fffbb7d1049b7ad303f0539772685ff2bee"
+      },
+      {
+        "file": "000032_audit_export_protection.up.sql",
+        "sha256": "d60a688ed9ee49014725543dbe458ac4386940033f09549877491f8f835be5ad"
+      },
+      {
+        "file": "000033_payment_provider_resume_policy.up.sql",
+        "sha256": "7c7e8d6e507d22b28e63ffabec95fd3ae375f9f686207d17af3b7bd24b624bf6"
+      },
+      {
+        "file": "000034_three_scope_authorization.up.sql",
+        "sha256": "658324df04b4e19fb98531c192f409fb68b82f5d0f027fe6b65527ebddca8637"
+      },
+      {
+        "file": "000035_break_glass_trusted_operator.up.sql",
+        "sha256": "2448b6477d0df139baede47e606e9916c933bd1fabcca0fccd3411a18b442102"
+      },
+      {
+        "file": "000036_password_security_authorization.up.sql",
+        "sha256": "f7425c5d861046478377ec62a4faafe0b098579e6ffd4ec9927554ba6773fa35"
+      },
+      {
+        "file": "000037_recharge_product_permissions.up.sql",
+        "sha256": "b4cda6b802a541f292414f0770de3ff781687179e2b766f998ebe1a2a85d4d53"
+      },
+      {
+        "file": "000038_payment_product_resume_policy.up.sql",
+        "sha256": "69b77f7346d0da582571eb90d22bed8c08a2c6a74312655dc01d47d64970dd34"
+      },
+      {
+        "file": "000039_organization_governance_permissions.up.sql",
+        "sha256": "47aa9cccf678caaba684ee9d6d2cc133bb98b8f4d20389ded3037e28c6f330e7"
+      },
+      {
+        "file": "000040_admin_organization_unit_move_policy.up.sql",
+        "sha256": "e981bc6c94e22fa34c5f4a6af12d5e6e7f7ce1eb674472523eba60b8d451daa7"
+      },
+      {
+        "file": "000041_pricing_metering_command_policies.up.sql",
+        "sha256": "e1dd382f59deb54d63b7378a279cc7a161758fdcdd5ca931ef629e78defacffa"
+      },
+      {
+        "file": "000042_super_admin_platform_permissions.up.sql",
+        "sha256": "38f5463c220cfc86e22cc3ecb61a1ffee709111a125dcffdd358b19ae25fa9cc"
+      },
+      {
+        "file": "000043_token_owner_candidates.up.sql",
+        "sha256": "35316888b6353d2eb30c398033218f242e48da32b45e74495acf60e523f9cad9"
+      },
+      {
+        "file": "000044_token_protocol_formula_command_policies.up.sql",
+        "sha256": "23f971c67d5a034d69271e520423582ba5ba99fc36eefe518a2105a4154fb3ef"
+      },
+      {
+        "file": "000045_token_command_governance.up.sql",
+        "sha256": "17c1dd0aa675b4d84fd558618c59e668220815930f489b03b092772adb01258c"
+      },
+      {
+        "file": "000046_approval_execution_financial_snapshot.up.sql",
+        "sha256": "f68b23040a0db09de25d31fe6699d0956fd0990c2fa90886f8af96e7317b3c93"
+      },
+      {
+        "file": "000047_token_approval_draft_invalidation.up.sql",
+        "sha256": "3d3a60704252cae47bc7c3042f2f901cd8c564345c89e8e16ca568f4dc486d21"
+      },
+      {
+        "file": "000048_token_account_create_policy_v3.up.sql",
+        "sha256": "d6c95119c448147a5e689c614bc9776932f4abeff5f97b90234902dd574019d5"
+      },
+      {
+        "file": "000049_token_route_upsert_policy_v3.up.sql",
+        "sha256": "3e85209b6455106814ac0783376c68a13c676a93a3b86e2a83dab28b079b66d2"
+      },
+      {
+        "file": "000050_admin_approval_control.up.sql",
+        "sha256": "c4a5f8617bca2278a30592930a6585343bc9902bf97e2a3e0ffa10a12c77fbd0"
+      },
+      {
+        "file": "000051_approval_authorization_outbox.up.sql",
+        "sha256": "7f948b3dcba4a382937f15c825b6d074f0fdba4b190e788a12c2c30159a60d06"
+      },
+      {
+        "file": "000052_approval_authorization_relay.up.sql",
+        "sha256": "50fbfc28846bfdbc03af403f7a42cbecae0c480c0d4ec7398d8bfa10f4756710"
+      },
+      {
+        "file": "000053_approval_consumer_delivery.up.sql",
+        "sha256": "493966cdca26e837e4144b4758e6478513766fde052385ba7b1b1222e551f791"
+      },
+      {
+        "file": "000054_approval_consumer_delivery_hardening.up.sql",
+        "sha256": "248f63c0b7f600df196e5a1b57b9b077c8b06bbe1eaef354eb2a6695ab29dbd7"
+      },
+      {
+        "file": "000055_approval_consumer_dlq_failure_gate.up.sql",
+        "sha256": "a0e943b74a40aec7fcecfe4db65835227ac7c1a94db5159291af552ac72ab72f"
+      },
+      {
+        "file": "000056_approval_consumer_delivery_state_read.up.sql",
+        "sha256": "e2b3be86d6888c08e0d3cdb678592d4d3edeeb26204554d82fefdd6f7b50e395"
+      },
+      {
+        "file": "000057_approval_consumer_serialization_binding.up.sql",
+        "sha256": "c75c9746bc8fc80adf77c14ecbd9c327a83f03ea3cd4066cab12b103cb597393"
+      },
+      {
+        "file": "000058_approval_consumer_route_binding.up.sql",
+        "sha256": "8ade04ba8119e531c631990543088193acd61ff3ab6a5207a3d513788740ce78"
+      },
+      {
+        "file": "000059_approval_authorization_exclusions.up.sql",
+        "sha256": "153691d04b05f5b869065658a9a44505c591feed10fc5a13d90d22335d117fa4"
+      },
+      {
+        "file": "000060_approval_exclusion_reason_binding.up.sql",
+        "sha256": "7a0ed6dfb8f706a06b82fe638a449da717eaf4af40eb75b805c75ef8e134c971"
+      },
+      {
+        "file": "000061_approval_pagination_snapshots.up.sql",
+        "sha256": "df826d50b0f95184f2dbba19bce4ef1a29dbb5eeaf7e154b069a1a8ed9a86777"
+      },
+      {
+        "file": "000062_approval_pagination_key_binding.up.sql",
+        "sha256": "a4c93607a8386df5799b88ee1bd93f2a99f5244e581178a608d670408f6a34ce"
+      },
+      {
+        "file": "000063_approval_pagination_rollback_fence.up.sql",
+        "sha256": "c958451bbc27b90d682ea762aa55db49f3b39a2eeb1915bdc37b880c1f9b2a67"
+      },
+      {
+        "file": "000064_approval_pagination_forward_only.up.sql",
+        "sha256": "83da5454f0b6495473ec04d9f7028f1a5150c1546f3f4a11a067c55a335530fe"
+      },
+      {
+        "file": "000065_approval_proof_failure_default_unknown.up.sql",
+        "sha256": "e904deea873fcbb552f679ba33f016d8c4920b29c2359152d4f82bdbae8861d9"
+      },
+      {
+        "file": "000066_approval_proof_retry_grant_fence.up.sql",
+        "sha256": "e0a1c084f8a0e8b19b42f4a90d4fa69b606dc4a7b6604c275dbb91434efa8c7b"
+      },
+      {
+        "file": "000067_approval_proof_single_attempt_fence.up.sql",
+        "sha256": "bbb2828f46746f0241f65287d059c49b61bbf0af4f4de82a93b59f17864230bb"
+      },
+      {
+        "file": "000068_approval_recovery_query_lease.up.sql",
+        "sha256": "ad8cca5a43d773368c69017c78938e06e3c3eb21757930a124f210c30e646fda"
+      },
+      {
+        "file": "000069_entitlement_component_adjustment_policy_v2.up.sql",
+        "sha256": "5dfcd5e1f9e3f41206e594653cc6b55c0e1c3c015033e8d59a294f966710dd6e"
+      },
+      {
+        "file": "000070_entitlement_correction_consumer_route.up.sql",
+        "sha256": "ffde14c97998cef51233599d6c18e4839049fe0ea30153c163a87e3849006380"
+      },
+      {
+        "file": "000071_ledger_repair_consumer_route.up.sql",
+        "sha256": "9fea6a910059d525adf410a414fcb868d3452e9d37d17be21110f4a71da18ecf"
+      },
+      {
+        "file": "000072_receivable_write_off_consumer_route.up.sql",
+        "sha256": "3ae1bb2d55aebc40bed95fc0dad748039fe0507a525609e2a4c36eb056debcb2"
+      },
+      {
+        "file": "000073_payment_financial_repair_consumer_route.up.sql",
+        "sha256": "11610566134efed99e91dd4eb3b75af2c2c2e06c70097c8eade29a79b759c21a"
+      },
+      {
+        "file": "000074_refund_exception_repair_consumer_route.up.sql",
+        "sha256": "7cdeb575ee80a95a75fe5818c39ea25e3ed38d1b68df4412499001b5b2a46f5f"
+      },
+      {
+        "file": "000075_chargeback_financial_repair_consumer_route.up.sql",
+        "sha256": "9f1b944e0a8a02c995dec46f0e132e34d8379df38749dcc34cbbddb46a6c4f40"
+      },
+      {
+        "file": "000076_reconciliation_financial_repair_consumer_route.up.sql",
+        "sha256": "d916cf34c616ba8ee3ebfd8bf9b6ecdfc9b176081751e737788046bbf43119d1"
+      },
+      {
+        "file": "000077_usage_settlement_repair_consumer_route.up.sql",
+        "sha256": "04abf54982185b6189ca4994f26d2ace66871634d8533f7a4ffbea0fd7b1fe00"
+      },
+      {
+        "file": "000078_expand_sms_send_attempt_purposes.up.sql",
+        "sha256": "9824b409efd7633cb4035e67ddd57f52dae299dc6442faebb4ae2210adc34808"
+      },
+      {
+        "file": "000079_validate_sms_send_attempt_purposes.up.sql",
+        "sha256": "cd272d189529ddb7e10a888e1b744230c19dea0492634af5ac155f7b7f93de46"
+      },
+      {
+        "file": "000080_activate_sms_send_attempt_purposes.up.sql",
+        "sha256": "10d0a5120b55d6d09a95c8a1309748e46d7cea7180e95a973e29cd867f6fab81"
+      },
+      {
+        "file": "000081_expand_profile_change_statuses.up.sql",
+        "sha256": "1cf8ced02f3592c6d02786984ff6d39d24ce1813c80eb22990dea661460adbf8"
+      },
+      {
+        "file": "000082_validate_profile_change_statuses.up.sql",
+        "sha256": "6282343740fbcccd2ba9d5cde75bfa0a5c44eb880c539c8b410d87426ec8fbf2"
+      },
+      {
+        "file": "000083_activate_profile_change_statuses.up.sql",
+        "sha256": "a86a2eaa78287e628948559fb344c43c37c9199c783a0b0b21a3ac452e1c6722"
+      },
+      {
+        "file": "000084_profile_sms_delivery_lease.up.sql",
+        "sha256": "36510fb1f63a24c0f7d368884647b87ca5cf002922fdfaf5c524c6b5bd07fe8a"
+      },
+      {
+        "file": "000085_password_reset_recovery.up.sql",
+        "sha256": "0208d0e94e4b232da9660994186978e118f6a4dd1bc16dc4c559918cc44cf437"
+      },
+      {
+        "file": "000086_admin_sms_configuration.up.sql",
+        "sha256": "a4051a8c700f1d6871787ec09cce6a7f5c9a4757527cd7d67aa7864fd0ae8aac"
+      },
+      {
+        "file": "000087_registration_bonus_fingerprint.up.sql",
+        "sha256": "1d76a6e9aa6b5fcee84e2eabe8912cbfb8fa53c79ba29ce2bb4c29852be070e1"
+      }
+    ],
+    "token": [
+      {
+        "file": "000001_foundation.up.sql",
+        "sha256": "8d9b0e0a9a025079fb0c3549b19fde8d15bba429199756c1fb3696427d5b6530"
+      },
+      {
+        "file": "000002_token_domain.up.sql",
+        "sha256": "ab5175d41e0627cc5d7a8227ccc055b93ec4cc4be09ed857dcdd7455dfaa1fb1"
+      },
+      {
+        "file": "000003_token_management_audit.up.sql",
+        "sha256": "0c785bf4c2f92f34e283e392b9a552ea34d2f7857975727d2416f5c3b6b4bf3c"
+      },
+      {
+        "file": "000004_event_delivery.up.sql",
+        "sha256": "e75bccd8da580606c7d4800f19267aa930ea08c97cc1b3b58a2d7806d6cea90b"
+      },
+      {
+        "file": "000005_platform_managed_routes.up.sql",
+        "sha256": "8f883d69bd354f3df610cbec935620147c10d2953a43b1306da9b912532e014c"
+      },
+      {
+        "file": "000006_usage_reconciliation.up.sql",
+        "sha256": "fbe6f72000c39b0eb730a28c297f8336655fa084f48ebf2309388cad96f4e52b"
+      },
+      {
+        "file": "000007_gateway_operations.up.sql",
+        "sha256": "edf07b129b426eaca42ff452c77b8f835754071c05263de89ba895fca89c66c0"
+      },
+      {
+        "file": "000008_organization_lifecycle.up.sql",
+        "sha256": "eb4fa4e06482ca9a29e8d9eb95d0b83a07e12d1c9771a0afed7174713b5268a5"
+      },
+      {
+        "file": "000009_organization_unit_blockers.up.sql",
+        "sha256": "ec8be96b67b071aeed1280a71c459465a935d0fddb5542edbf6f876935b8178f"
+      },
+      {
+        "file": "000010_protocol_formula_versions.up.sql",
+        "sha256": "40a37eb1ab122daa40b27ba2554c1dcfda0b066ed174705be1adfc2164fa3734"
+      },
+      {
+        "file": "000011_gateway_adapter_neutrality.up.sql",
+        "sha256": "368c439e88cc3aafd1a173d049f68522c1b83013cb6c3abd65308f141e62fc90"
+      },
+      {
+        "file": "000012_model_catalog_lifecycle.up.sql",
+        "sha256": "dda62680bc527e56036b3c8e7d1c05efea45da8aa1f667676708f41e4f3cffe4"
+      },
+      {
+        "file": "000013_route_provisioning.up.sql",
+        "sha256": "3a47b52f1258f67781cb123fafa86ec9dea4d2a03707ed57a14cc8f562d4996e"
+      },
+      {
+        "file": "000014_usage_execution_replay.up.sql",
+        "sha256": "50a85bb91fc6e15c9a0630d1b28f4effd54d8550492a30c8b1cc371f267fa69a"
+      },
+      {
+        "file": "000015_usage_cancellation_convergence.up.sql",
+        "sha256": "59c817da9f5f1a7acf8651008e6da260de1ec03fdce86a003cc53a516ed500ed"
+      },
+      {
+        "file": "000016_client_readiness.up.sql",
+        "sha256": "c87acabfbc2f0048d50c8d58af1b5a9ecf2ce0cbe9789df90c92192e60a692c5"
+      },
+      {
+        "file": "000017_usage_admission_indexes.up.sql",
+        "sha256": "fcd9960bf027d6daa6be4c02b109a520398a9515b142f73abd6b9ef5007d09dd"
+      },
+      {
+        "file": "000018_event_replay_audit.up.sql",
+        "sha256": "733b1f380b9f4cc848c28fabefa4621e42db67466bcb2fba9b4fbbcf4d677a61"
+      },
+      {
+        "file": "000019_usage_convergence_evidence.up.sql",
+        "sha256": "3844bfb85919334ce4a5a4ed50c9d6129d28ccccef640bc2ab0cafe0007af02f"
+      },
+      {
+        "file": "000020_manual_review_sla.up.sql",
+        "sha256": "fe03a8e88cb8047884f38bc5ebde9aa711c0cd976a0d344041b097d6b66dd773"
+      },
+      {
+        "file": "000021_model_emergency_cancellation.up.sql",
+        "sha256": "a6db7a849a5621d9c4b87caab044e8351a03a62240f6e5fc22f5d4c4a8e922f4"
+      },
+      {
+        "file": "000022_legacy_token_account_quarantine.up.sql",
+        "sha256": "aef0feb65341158062e86c85af27afde85aadc3d614f1e99a2b7862e57c894ef"
+      },
+      {
+        "file": "000023_admin_pagination_snapshots.up.sql",
+        "sha256": "3b7e7ba7e95372e419948ba16824c09813a88da7122874f910ca79ab266155e9"
+      },
+      {
+        "file": "000024_token_command_results.up.sql",
+        "sha256": "f79a7a12f69beb6ca360e09ebbec01f028266d7c610ff63b07f0e33f193c263b"
+      },
+      {
+        "file": "000025_stable_routes_health.up.sql",
+        "sha256": "ae91955051536c28168db0ccb0bf8f1c9cf527fd7f0753b949ce02239c8bc86d"
+      },
+      {
+        "file": "000026_credential_isolation.up.sql",
+        "sha256": "a0024f770eae00b2e4a6c20636289d3a3e3a66edf3ddf9fd3c4e213082e6b0cd"
+      },
+      {
+        "file": "000027_model_lifecycle_plans.up.sql",
+        "sha256": "f2d3ae85f7bd50d1599df649f1a51e667e43560ecc4076e3338571b9ab7480de"
+      },
+      {
+        "file": "000028_operations_overview_indexes.up.sql",
+        "sha256": "36020c29cdcac4f5893cfc0da0b8b12949d0d9b8f7a3cfa955cfb589681b59f9"
+      },
+      {
+        "file": "000029_token_account_owner_cap_policy.up.sql",
+        "sha256": "47f091b38bb1fbc78a014e45f51dc31464c791bc8d8de2d40f13c583f864d783"
+      },
+      {
+        "file": "000030_credential_probe_unknown_code.up.sql",
+        "sha256": "71374b59f5295e1a0007e1ca9501dcc840248d88afa12c7bbd18ed0c2543fdeb"
+      },
+      {
+        "file": "000031_token_command_governance_activation.up.sql",
+        "sha256": "d957f8cac9de3566b1e30ab286458f80e78acd2cc9d61917e3367a0c8280ee16"
+      },
+      {
+        "file": "000032_token_account_owner_cap_lock.up.sql",
+        "sha256": "cabd925dcab9b2f4e00e35281f807fd4cb2c25f550d84ae0d13da01368e19ca4"
+      },
+      {
+        "file": "000033_model_token_page_overview_indexes.up.sql",
+        "sha256": "a17e2fb2855c376b3a0b41961aa3ad0bc45f4193ebd445d6f4db31c430d3e0d6"
+      },
+      {
+        "file": "000034_usage_history_groups.up.sql",
+        "sha256": "8f25256da33ce045b00f5f96471dee1169f92047a82fefa42d5485add44a4948"
+      }
+    ]
+  }
+}

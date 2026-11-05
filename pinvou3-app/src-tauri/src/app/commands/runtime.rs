@@ -49,6 +49,7 @@ pub async fn cancel_generation(
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct PlatformCapabilities {
+    pub account_platform_supported: bool,
     pub os: &'static str,
     pub show_megacube_site: bool,
     pub show_super_permission_settings: bool,
@@ -60,8 +61,8 @@ pub struct PlatformCapabilities {
     pub team_relay_supported: bool,
     pub browser_native_display: bool,
     pub voice_shortcut_native: bool,
-    /// Windows-only desktop dual-end remote control (A control / B controlled).
-    /// Every other target reports `false` and hides the entry points.
+    /// Desktop dual-end remote control on Windows and 64-bit Linux.
+    /// Unsupported or build-disabled hosts report `false` and hide the entry points.
     pub desktop_remote_control_supported: bool,
     pub failure_diagnostics_supported: bool,
     pub paste_image_clipboard_read: bool,
@@ -87,6 +88,8 @@ impl PlatformCapabilities {
             && capabilities.browser_agent_automation
             && browser_runtime_ready;
         Self {
+            account_platform_supported: crate::features::account_platform::account_platform_enabled(
+            ),
             os: capabilities.os,
             show_megacube_site: capabilities.show_megacube_site,
             show_super_permission_settings: capabilities.show_super_permission_settings,

@@ -120,6 +120,49 @@ REQUIRED_PINS = [
     # plain fully-on.
     "features::marketplace::tests::corrupt_legacy_file_fails_closed_not_implicitly_all_on",
     "features::marketplace::tests::schema_invalid_legacy_file_fails_closed",
+    # feat/connector-connect-grants-enable (community PR pinvou-agent#741
+    # backflow), scope.rs consent pins: the boot verdict guard and its legacy
+    # cohort, the recovery hold (set + revoke re-arm), the in-lock ledger
+    # recheck, the global-grant toggle-off asymmetry, and the enable-reporting
+    # grant awareness.
+    "features::marketplace::scope::tests::connect_refresh_never_overrides_a_stored_verdict",
+    "features::marketplace::scope::tests::legacy_migrated_disable_survives_the_boot_refresh",
+    "features::marketplace::scope::tests::recovery_hold_keeps_the_boot_backfill_fail_closed",
+    "features::marketplace::scope::tests::revoke_rearms_a_recovery_hold_its_grant_cleared",
+    "features::marketplace::scope::tests::gesture_grant_rechecks_the_ledger_under_the_lock",
+    "features::marketplace::scope::tests::toggle_off_in_one_scope_removes_the_global_grant",
+    "features::marketplace::scope::tests::known_bundle_shortcut_captures_the_standing_reliance_token",
+    "features::marketplace::scope::tests::teardown_regrant_between_gate_and_tail_declines_an_empty_capture_completion",
+    "features::marketplace::scope::tests::completion_over_committed_tokenless_consent_validates_the_final_state",
+    "features::marketplace::scope::tests::fresh_completion_finalizes_its_own_grant",
+    "features::marketplace::scope::tests::completed_owner_supersedes_a_late_relied_completion",
+    "features::marketplace::scope::tests::gateless_refresh_tail_validates_the_standing_consent_it_observed",
+    "features::marketplace::scope::tests::welcome_enable_commits_the_pending_connect_grant_it_acknowledges",
+    "features::marketplace::scope::tests::connect_grant_enables_uninitialized_scope_and_user_off_stays_off",
+    "features::marketplace::scope::tests::enable_reporting_treats_a_connect_granted_id_as_applied",
+    # app/connector_consent_tests.rs: the connect-channel marker values, the
+    # boot verdict regression, and the compensating-revoke / relied-grant
+    # commit contract family (footprint restore, consumed grant, marker
+    # attribution, token ownership, replacement-pending and lost-reliance
+    # commit declines). The Official trait design hosts the community
+    # monolith's body-level pins at the scope layer they protect.
+    "app::connector_consent_tests::skill_gate_tests::skill_gate_consent_failure_message_keeps_the_frontend_marker",
+    "app::connector_consent_tests::skill_gate_tests::boot_refresh_never_reverts_a_verdict_after_a_failed_connect",
+    "app::connector_consent_tests::grant_revoke_commit_tests::revoke_restores_exactly_the_scopes_the_grant_lifted",
+    "app::connector_consent_tests::grant_revoke_commit_tests::revoke_restores_the_lifted_rows_in_initialized_scopes",
+    "app::connector_consent_tests::grant_revoke_commit_tests::revoke_restores_a_scope_that_materializes_mid_connect",
+    "app::connector_consent_tests::grant_revoke_commit_tests::revoke_leaves_a_consumed_grant_alone",
+    "app::connector_consent_tests::grant_revoke_commit_tests::revoke_restores_markers_only_where_the_lift_found_one",
+    "app::connector_consent_tests::grant_revoke_commit_tests::stale_revoke_leaves_a_replacement_grant_alone",
+    "app::connector_consent_tests::grant_revoke_commit_tests::committed_relied_grant_survives_the_in_flight_revoke",
+    "app::connector_consent_tests::grant_revoke_commit_tests::stale_commit_leaves_a_replacement_owner_alone",
+    "app::connector_consent_tests::grant_revoke_commit_tests::revoked_relied_grant_reports_lost_and_commits_nothing",
+    # The M4 compensation at the shared trait-helper level: a fresh gate grant
+    # whose materialization fails must be revoked (fail-closed failure card).
+    "features::connectors::skill_gate::tests::shared_apply_revokes_a_fresh_grant_when_materialization_fails",
+    # connector_cli.rs: the aggregate runs every gate and reports the first
+    # error only after all finished — the caller's wrap-up-on-error contract.
+    "features::connectors::connector_cli::tests::aggregate_keeps_successful_sibling_mutations_while_reporting_failure",
 ]
 
 
@@ -132,8 +175,15 @@ def list_tests():
     # that way; this fork's memory-constrained leg does not, and no
     # REQUIRED_PIN is feature-gated (two are #[cfg(unix)]-gated, which is
     # expected to resolve on the Linux CI where this guard is wired).
-    cmd = [
-        "cargo",
+    # Match the CI job's process-scoped memory override without modifying the
+    # persistent Cargo home. Unset retains ordinary local/other-job behavior.
+    override = os.environ.get("PINVOU_CI_CODEWHALE_DEV_O0")
+    if override not in (None, "1"):
+        raise SystemExit("test-registry-guard: PINVOU_CI_CODEWHALE_DEV_O0 must be 1 or unset")
+    cmd = ["cargo"]
+    if override == "1":
+        cmd += ["--config", "profile.dev.package.codewhale-tui.opt-level=0"]
+    cmd += [
         "test",
         "--manifest-path",
         MANIFEST,

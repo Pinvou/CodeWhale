@@ -1,4 +1,5 @@
 export const desktopBridgeApi = {
+  accountPlatform: ['session', 'openPortal', 'login', 'createSliderCaptcha', 'prepareRegistrationPassword', 'sendSms', 'registerMobile', 'registrationStatus', 'loginSms', 'resetPassword', 'logout', 'request', 'modelCatalog', 'selectCatalogModel', 'selectSessionCatalogModel', 'branchReplacementSession'],
   lifecycle: ['init'],
   state: ['get', 'getMany', 'subscribe', 'subscribeMany'],
   platform: ['loadPlatformCapabilities', 'refreshConnectorAuthGates'],
@@ -7,17 +8,16 @@ export const desktopBridgeApi = {
   voice: ['abandonVoiceResult', 'appendVoiceText', 'beginVoiceSubmission', 'cancelVoiceAsrSetup', 'cancelVoiceInput', 'clearVoiceInput', 'closeVoiceAsrSetup', 'completeVoiceSubmission', 'dismissVoiceInput', 'getVoiceOperationId', 'hasVoiceSubmissionPending', 'installVoiceAsr', 'setVoiceShortcutEnabled', 'startVoiceInput', 'syncVoiceShortcutRecording'],
   knowledge: ['downloadKbModel', 'kbModelStatus', 'listCollections', 'loadKnowledgeEmbedderAfterFirstFrame', 'mountCollection', 'mountRemoteCollection', 'removeCollection', 'removeRemoteCollection', 'setCollectionEnabled', 'setRemoteCollectionEnabled', 'unmountCollection'],
   scheduled: ['clearScheduledTaskSelection', 'createScheduledTask', 'deleteScheduledTask', 'dismissScheduledTaskError', 'exitScheduledRunChat', 'loadScheduledTaskRecentRuns', 'loadScheduledTaskRuns', 'loadScheduledTasks', 'openScheduledRunChat', 'pauseScheduledTask', 'readScheduledTask', 'refreshScheduledTaskData', 'resumeScheduledTask', 'runScheduledTaskNow', 'selectScheduledTask', 'startScheduledTaskChat', 'toggleScheduledTaskPinned', 'updateScheduledTask'],
-  sessions: ['archiveSession', 'createNewSession', 'deleteSession', 'exportSessionArchive', 'getSessionWorkspaceBinding', 'materializeSession', 'onSessionDeleted', 'boundDraftMode', 'pickDraftWorkspace', 'rememberDraftWorkspaceRecent', 'renameSession', 'restoreArchivedSession', 'setDraftWorkspace', 'switchToSession', 'toggleSessionPinned'],
+  sessions: ['archiveSession', 'beginLocalNavigationIntent', 'onLocalNavigation', 'getLocalNavigationEpoch', 'captureControlledNavigationOwner', 'createNewSession', 'deleteSession', 'exitControlledScheduledRunChat', 'exportSessionArchive', 'isControlledNavigationOwnerCurrent', 'getSessionWorkspaceBinding', 'materializeSession', 'onSessionDeleted', 'boundDraftMode', 'pickDraftWorkspace', 'rememberDraftWorkspaceRecent', 'renameSession', 'restoreArchivedSession', 'setDraftWorkspace', 'switchToControlledSession', 'switchToSession', 'toggleSessionPinned'],
   monitor: ['clearMonitorStats', 'startMonitorPolling', 'stopMonitorPolling'],
   settings: ['listBuiltinFeatures', 'loadBehaviorTelemetryStatus', 'saveSearchSettings', 'saveSearchSettingsAndRestart', 'saveSettings', 'saveSettingsAndRestart', 'setBehaviorTelemetryEnabled', 'setBuiltinFeatureEnabled', 'setGlobalShortcutConfig', 'setSelectedPet', 'testSearchProvider'],
   feedback: ['submitFeedback', 'listFailureDiagnostics', 'previewFailureDiagnostic', 'submitFailureDiagnostic', 'pickDiagnosticFiles'],
-  llmapi: ['ensureLlmApiBinding', 'getLlmApiAdminOverview', 'getLlmApiModels', 'getLlmApiStatus', 'loginLlmApiUser', 'refreshLlmApi', 'retryLlmApiProvisioning', 'saveLlmApiUserSession', 'setLlmApiDefaultModel', 'setLlmApiUserEnabled'],
   vllm: ['discoverLocalVllm'],
   multiAgent: ['listSubagentTranscripts', 'readSubagentTranscript'],
-  models: ['deleteModel', 'getImageInputCapability', 'loadModels', 'loadSessionModel', 'probeLocalServerKind', 'revealModelApiKey', 'saveModel', 'setActiveModel', 'switchModel', 'testImageInputCapability', 'testModelConnection'],
-  interaction: ['acceptPlan', 'cancelUserInput', 'confirmCodeYolo', 'discardPlan', 'dismissPinvouReview', 'editLastTurn', 'exitPlanToYolo', 'getCodePermissionPrefs', 'inspectPinvou', 'planStuckGo', 'planStuckReplan', 'refreshModeDefaults', 'resolvePinvouReview', 'setDraftMode', 'setModeLane', 'setMultiAgentMode', 'setPlanModeNext', 'submitUserInput', 'summonPinvou', 'syncModeState', 'toggleSuperPerm'],
+  models: ['deleteModel', 'getEffectiveModelConfig', 'getImageInputCapability', 'loadModels', 'loadEffectiveModelConfig', 'loadSessionModel', 'probeLocalServerKind', 'revealModelApiKey', 'saveModel', 'setActiveModel', 'switchModel', 'switchModelRef', 'testImageInputCapability', 'testModelConnection'],
+  interaction: ['acceptPlan', 'cancelUserInput', 'compactNow', 'confirmCodeYolo', 'discardPlan', 'dismissPinvouReview', 'editLastTurn', 'exitPlanToYolo', 'getCodePermissionPrefs', 'inspectPinvou', 'planStuckGo', 'planStuckReplan', 'refreshModeDefaults', 'resolvePinvouReview', 'setDraftMode', 'setModeLane', 'setMultiAgentMode', 'setPlanModeNext', 'submitUserInput', 'summonPinvou', 'syncModeState', 'toggleSuperPerm'],
   rendering: ['renderMarkdown'],
-  remoteControl: ['getWebRelaySettings', 'refreshRemoteControlQr', 'refreshRemoteControlStatus', 'setWebRelayAddress', 'startRemoteControl', 'stopRemoteControl'],
+  remoteControl: ['getWebRelaySettings', 'refreshRemoteControlQr', 'refreshRemoteControlStatus', 'revokeRemoteHostWorkspace', 'setWebRelayAddress', 'startRemoteControl', 'stopRemoteControl'],
   // Windows 双端远程控制（B 被控端 / A 主控端）。与 webAccess 完全不同域：
   // 只暴露 opaque ID、状态投影与任务编排，模型凭证、路径和密钥都留在 Rust。
   desktopRemoteControl: [
@@ -31,7 +31,7 @@ export const desktopBridgeApi = {
     'isAvailable',
     'listExportableModels',
     'listRemoteProxyHistory', 'readRemoteProxyHistory', 'deleteRemoteProxyHistory', 'openLiveRemoteProxy',
-    'archiveRemoteProxyHistory', 'listRemoteProxyArchiveCandidates', 'listRemoteProxyArchives', 'getRemoteProxyLoadStatus',
+    'archiveRemoteProxyHistory', 'quarantineRemoteProxyHistory', 'listRemoteProxyArchiveCandidates', 'listRemoteProxyArchives', 'getRemoteProxyLoadStatus',
     'permissionDecide', 'permissionDenyTask', 'permissionList', 'controlledPermissionList', 'setEndpointProfile',
     'reserveRemoteTask', 'commitRemoteTask', 'cancelRemoteTask', 'abandonRemoteTask',
   ],
@@ -56,7 +56,6 @@ export const desktopOnlyBridgeApi = {
   platform: ['loadPlatformCapabilities', 'refreshConnectorAuthGates'],
   voice: ['setVoiceShortcutEnabled', 'syncVoiceShortcutRecording'],
   knowledge: ['loadKnowledgeEmbedderAfterFirstFrame', 'mountRemoteCollection', 'removeRemoteCollection', 'setRemoteCollectionEnabled'],
-  llmapi: ['ensureLlmApiBinding', 'getLlmApiAdminOverview', 'getLlmApiModels', 'getLlmApiStatus', 'loginLlmApiUser', 'refreshLlmApi', 'retryLlmApiProvisioning', 'saveLlmApiUserSession', 'setLlmApiDefaultModel', 'setLlmApiUserEnabled'],
   // 多智能体开关是桌面专属操作（ADR-0006）：Web 端只读呈现。
   interaction: ['setMultiAgentMode'],
   // Draft workspace selection needs the system directory dialog (TAURI.dialog)
@@ -71,7 +70,8 @@ export const desktopOnlyBridgeApi = {
   // rememberDraftWorkspaceRecent (round-18 M3) records the single-entry
   // picker's pick into the recents list; without the desktop staging channel
   // there is nothing to record, so it rides the same desktop-only lane.
-  sessions: ['exportSessionArchive', 'pickDraftWorkspace', 'rememberDraftWorkspaceRecent', 'setDraftWorkspace', 'boundDraftMode'],
+  // Controlled-device navigation is exposed only by the desktop remote-control lane.
+  sessions: ['beginLocalNavigationIntent', 'onLocalNavigation', 'getLocalNavigationEpoch', 'captureControlledNavigationOwner', 'exitControlledScheduledRunChat', 'exportSessionArchive', 'isControlledNavigationOwnerCurrent', 'pickDraftWorkspace', 'rememberDraftWorkspaceRecent', 'setDraftWorkspace', 'switchToControlledSession', 'boundDraftMode'],
   // The steer channel (remote control / other hosts) and the queued chip's
   // zap-send go through the foundation EnginePool and need the Tauri command
   // channel; web has no such backend.
@@ -80,6 +80,10 @@ export const desktopOnlyBridgeApi = {
   // In a web relay session that is the remote desktop, not the browser user's
   // machine — pasting must stay on the browser's own clipboardData there.
   attachments: ['addPasteImageFromClipboard'],
+  // revokeRemoteHostWorkspace（community #802 同意分离）是桌面专属同意面：
+  // web_access_revoke_host_workspace 与 web_access_enable 一样 main-WebView
+  // 门控，且不进 Web access policy 白名单——手机/浏览器端永远不能翻转授权。
+  remoteControl: ['revokeRemoteHostWorkspace'],
   // Builtin feature toggles: the registry read (list_builtin_features) is
   // lane-agnostic and web-allowed (the session-mention gate in ChatView must
   // see the host's switch state from a browser too, upstream PR #586);
@@ -94,7 +98,7 @@ export const desktopOnlyBridgeApi = {
 // 整域桌面专属：Web 端连域都不存在（区别于 platform 这类"空域仍在"）。
 // 后端 remote_control 漏斗另有权威封禁。projects 是本地会话归档分组
 // （~/.pinvou3/projects/projects.json），Web 端没有对应后端。
-export const desktopOnlyBridgeDomains = ['multiAgent', 'projects', 'desktopRemoteControl'];
+export const desktopOnlyBridgeDomains = ['multiAgent', 'projects', 'accountPlatform', 'desktopRemoteControl'];
 
 export function expectedWebBridgeApi() {
   return Object.fromEntries(

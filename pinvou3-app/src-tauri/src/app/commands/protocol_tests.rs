@@ -77,6 +77,28 @@ macro_rules! command_protocol {
 }
 
 command_protocol!(
+    account_platform_protocol,
+    "account_platform.rs",
+    [
+        "account_platform_session",
+        "account_platform_open_portal",
+        "account_platform_reset_password",
+        "account_platform_login",
+        "account_platform_send_sms",
+        "account_platform_create_slider_captcha",
+        "account_platform_prepare_registration_password",
+        "account_platform_register_mobile",
+        "account_platform_registration_status",
+        "account_platform_login_sms",
+        "account_platform_logout",
+        "account_platform_request",
+        "account_platform_model_catalog",
+        "account_platform_select_catalog_model",
+        "account_platform_select_session_model",
+        "account_platform_branch_replacement_session",
+    ]
+);
+command_protocol!(
     artifacts_protocol,
     "artifacts.rs",
     [
@@ -270,10 +292,15 @@ command_protocol!(
         "kb_model_download"
     ]
 );
-command_protocol!(
-    llmapi_protocol,
-    "llmapi.rs",
-    [
+#[test]
+fn retired_llmapi_commands_are_not_registered() {
+    let command_modules = include_str!("mod.rs");
+    let app_entrypoint = include_str!("../../lib.rs");
+    assert!(
+        !command_modules.contains("mod llmapi"),
+        "retired llmapi command module is still installed"
+    );
+    for removed in [
         "ensure_llmapi_binding",
         "login_llmapi_user",
         "save_llmapi_user_session",
@@ -282,9 +309,18 @@ command_protocol!(
         "set_llmapi_default_model",
         "retry_llmapi_provisioning",
         "set_llmapi_user_enabled",
-        "get_llmapi_admin_overview"
-    ]
-);
+        "get_llmapi_admin_overview",
+    ] {
+        assert!(
+            !command_modules.contains(removed),
+            "retired llmapi command remains in the installed command modules: {removed}"
+        );
+        assert!(
+            !app_entrypoint.contains(removed),
+            "retired llmapi command is still registered: {removed}"
+        );
+    }
+}
 
 #[test]
 fn preinstalled_model_startup_commands_are_not_registered() {
@@ -448,6 +484,7 @@ command_protocol!(
         "web_access_disable",
         "web_access_status",
         "web_access_rotate",
+        "web_access_revoke_host_workspace",
         "web_access_relay_settings",
         "desktop_remote_endpoint_profiles",
         "desktop_remote_set_endpoint_profile",
@@ -564,6 +601,7 @@ command_protocol!(
         "set_active_model",
         "set_session_model",
         "get_session_model_id",
+        "get_session_model_ref",
         "get_image_input_capability",
         "test_search_provider",
         "test_model_connection",

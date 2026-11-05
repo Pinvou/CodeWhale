@@ -9,7 +9,8 @@ import { Check, ChevronDown, Cpu, Plus, Store, Users, Wrench, X } from '../../co
 import { ComposerPopover } from '../../components/ComposerPopover.jsx';
 import { Toggle } from '../../components/Toggle.jsx';
 import { bridge, useBridgeState } from '../../hooks/useBridge.js';
-import { selectableModels } from '../../shared/model-options.js';
+import { isBuiltInAccountPlatformModel, selectableModels } from '../../shared/model-options.js';
+import { ACCOUNT_PLATFORM_SOURCE, LOCAL_CONFIG_SOURCE, composerPlatformModels, platformModelSelectableForNewSession, sameModelSelectionRef } from '../account-platform/model-catalog-selection.js';
 import { can } from '../../shared/platform.js';
 import { buildComposerToolMenuState, createToggleWriteGate, TOGGLE_WRITE_KEY_PROJECT_SKILLS } from './composer-tool-menu-logic.js';
 import { invokeTauri } from '../../platform/tauri/client.js';
@@ -61,17 +62,27 @@ window.addEventListener('pinvou:chat-round-committed', (event) => {
       compact,
       sessionId: sessionIdProp,
       sessionModelId: sessionModelIdProp,
+      sessionModelRef: sessionModelRefProp,
       busy: busyProp,
       onSwitchModel,
+      onSwitchModelRef,
       multiAgentEnabled: multiAgentEnabledProp,
       multiAgentAvailable: multiAgentAvailableProp,
       onToggleMultiAgent,
+      accountPlatformClient,
       // eslint-disable-next-line sonarjs/cognitive-complexity -- the composer selector aggregates model/menu/multi-agent branches; splitting needs a dedicated design like the SettingsView suppression
     }) => {
       const [open, setOpen] = useState(false);
+      const [platformModels, setPlatformModels] = useState([]);
+      const [platformState, setPlatformState] = useState('idle');
+      const [modelSwitchError, setModelSwitchError] = useState(false);
+      const modelSwitchPending = useRef(false);
       const triggerRef = useRef(null);
       const canManageModels = can('modelManagement');
       const canSwitchModels = can('sessionModelSwitch');
+      const activeSessionId = sessionIdProp !== undefined ? sessionIdProp : (bs ? bs.activeSessionId : null);
+      const modelSelectionOwner = useRef(activeSessionId);
+      modelSelectionOwner.current = activeSessionId;
       // 多智能体模式 = 模型列表下方的会话级开关（ADR-0006）。状态权威在
       // 后端 mode_state，这里只读 bs 镜像；翻转后 bridge 回写权威状态。
       // 可用性由调用方以 multiAgentAvailable 显式传入（定时会话在后端被
@@ -93,6 +104,28 @@ window.addEventListener('pinvou:chat-round-committed', (event) => {
       useEffect(() => {
         if (!open) setMultiAgentRevealing(false);
       }, [open]);
+      useEffect(() => {
+        if (!open || !accountPlatformClient) return undefined;
+        const controller = new window.AbortController();
+        setPlatformModels([]);
+        setPlatformState('loading');
+        accountPlatformClient.session(controller.signal).then(session => {
+          if (controller.signal.aborted) return null;
+          if (!session?.authenticated) {
+            setPlatformModels([]);
+            setPlatformState('auth_required');
+            return null;
+          }
+          return accountPlatformClient.modelCatalog(controller.signal);
+        }).then(catalog => {
+          if (!catalog || controller.signal.aborted) return;
+          setPlatformModels(composerPlatformModels(catalog.items));
+          setPlatformState('ready');
+        }).catch(() => {
+          if (!controller.signal.aborted) setPlatformState('error');
+        });
+        return () => controller.abort();
+      }, [open, accountPlatformClient, activeSessionId]);
       async function toggleMultiAgent() {
         if (multiAgentBusy || busy) return;
         if (!onToggleMultiAgent
@@ -106,13 +139,25 @@ window.addEventListener('pinvou:chat-round-committed', (event) => {
           setMultiAgentBusy(false);
         }
       }
-      const savedModels = selectableModels((bs && bs.savedModels) || [], bs && bs.llmApiStatus);
-      const activeSessionId = sessionIdProp !== undefined ? sessionIdProp : (bs ? bs.activeSessionId : null);
+      const savedModels = selectableModels((bs && bs.savedModels) || [])
+        .filter(model => !isBuiltInAccountPlatformModel(model));
+
       const activeModelId = bs && bs.activeModelId;
       const currentSessionModelId = sessionModelIdProp !== undefined ? sessionModelIdProp : (bs && bs.currentSessionModelId);
       const busy = busyProp !== undefined ? busyProp : (bs ? bs.busy : false);
-      const effectiveId = currentSessionModelId || activeModelId;
-      const current = savedModels.find(m => m.id === effectiveId);
+      const legacyRef = { source: LOCAL_CONFIG_SOURCE, saved_model_id: currentSessionModelId || activeModelId };
+      // Explicit host bindings (e.g. Code mode) must not borrow the chat session's model.
+      const effectiveRef = sessionModelRefProp !== undefined
+        ? (sessionModelRefProp || legacyRef)
+        : ((sessionModelIdProp !== undefined ? legacyRef : null)
+          || (activeSessionId ? bs?.currentSessionModelRef : bs?.pendingDraftModelRef)
+          || bs?.defaultModelRef
+          || legacyRef);
+      const effectiveLocalId = effectiveRef?.source === LOCAL_CONFIG_SOURCE ? effectiveRef.saved_model_id : null;
+      const effectivePlatformId = effectiveRef?.source === ACCOUNT_PLATFORM_SOURCE ? effectiveRef.model_id : null;
+      const current = savedModels.find(m => m.id === effectiveLocalId);
+      const currentPlatform = platformModels.find(item => item.model_id === effectivePlatformId);
+      const currentLabel = currentPlatform?.display_name || effectivePlatformId || (current ? selectorMainLabel(current, t) : t.modelNonePick);
       // 本地/私网 openai_compatible 端点：探测服务类型，按探测结果下发真实档位
       // (vllm → four tiers, ollama → off/high, lmstudio/generic → unsupported hint). Credentials are saved values
       // that do not change per keystroke, so no debounce is needed (only the form entry needs 400ms, see the hook comment).
@@ -149,18 +194,32 @@ window.addEventListener('pinvou:chat-round-committed', (event) => {
             setEffortSaveError(message);
           });
       }
-      if (!savedModels.length) return null;
-      function pick(id) {
-        setOpen(false);
-        setEffortSaveError('');
-        if (id === effectiveId) return;
-        if (onSwitchModel) { onSwitchModel(activeSessionId, id); return; }
-        if (bridge.available) bridge.models.switchModel(activeSessionId, id);
+      async function pick(modelRef) {
+        if (busy || !canSwitchModels || modelSwitchPending.current) return;
+        const owner = activeSessionId;
+        setModelSwitchError(false);
+        const alreadySelected = sameModelSelectionRef(modelRef, effectiveRef);
+        if (alreadySelected) { setOpen(false); return; }
+        modelSwitchPending.current = true;
+        try {
+          if (onSwitchModelRef) {
+            await onSwitchModelRef(activeSessionId, modelRef);
+          } else if (onSwitchModel && modelRef.source === LOCAL_CONFIG_SOURCE) {
+            await onSwitchModel(activeSessionId, modelRef.saved_model_id);
+          } else if (bridge.available) {
+            await bridge.models.switchModelRef(activeSessionId, modelRef);
+          }
+          if (owner === modelSelectionOwner.current) setOpen(false);
+        } catch (_) {
+          if (owner === modelSelectionOwner.current) setModelSwitchError(true);
+        } finally {
+          modelSwitchPending.current = false;
+        }
       }
       return (
         <div className="relative min-w-0">
-          <button ref={triggerRef} onClick={() => { if (!busy && canSwitchModels) setOpen(o => !o); }} disabled={busy || !canSwitchModels}
-            title={(current ? selectorMainLabel(current, t) : t.modelNonePick) + (busy ? ' · ' + t.modelSwitchBusy : '')}
+          <button type="button" ref={triggerRef} onClick={() => { if (!busy && canSwitchModels) setOpen(o => !o); }} disabled={busy || !canSwitchModels}
+            title={currentLabel + (busy ? ' · ' + t.modelSwitchBusy : '')}
             className={`relative shrink-0 flex items-center justify-center ${multiAgentOn ? 'text-[#6d28d9] dark:text-[#c4b5fd]' : 'text-gray-700 dark:text-gray-200'} transition-colors border disabled:opacity-50 ${compact ? 'w-9 h-9 rounded-full bg-transparent hover:bg-black/5 dark:hover:bg-white/10 border-transparent' : 'h-8 gap-1.5 rounded-[12px] px-2.5 text-[12px] font-semibold min-w-0 max-w-full bg-black/[0.045] dark:bg-white/[0.055] hover:bg-black/[0.07] dark:hover:bg-white/[0.09] border-black/[0.045] dark:border-white/[0.06]'}`}>
             {compact ? (
               <>
@@ -170,7 +229,7 @@ window.addEventListener('pinvou:chat-round-committed', (event) => {
             ) : (
               <>
                 <span className="w-1.5 h-1.5 shrink-0 rounded-full bg-[#34C759]"></span>
-                <span className="max-w-[116px] truncate">{t.composerModelLabel(current ? selectorMainLabel(current, t) : t.modelNonePick)}</span>
+                <span className="max-w-[116px] truncate">{t.composerModelLabel(currentLabel)}</span>
                 <ChevronDown size={13} className="opacity-50 shrink-0" />
               </>
             )}
@@ -184,7 +243,7 @@ window.addEventListener('pinvou:chat-round-committed', (event) => {
                       {withDivider && <div className="h-px bg-black/5 dark:bg-white/10 my-1.5 mx-2" />}
                       <div className="px-3 pt-1.5 pb-1 text-[11px] font-semibold text-gray-400 dark:text-gray-500">{label}</div>
                       {items.map(m => (
-                        <button key={m.id} onClick={() => pick(m.id)}
+                        <button type="button" key={m.id} onClick={() => pick({ source: LOCAL_CONFIG_SOURCE, saved_model_id: m.id })}
                           className="w-full flex items-center justify-between gap-2 px-3 py-2 text-left rounded-xl transition-colors group hover:bg-[#007AFF] hover:text-white">
                           <span className="flex items-center gap-2.5 min-w-0">
                             <Cpu size={15} className="shrink-0 text-gray-400 group-hover:text-white/90" />
@@ -193,15 +252,40 @@ window.addEventListener('pinvou:chat-round-committed', (event) => {
                               <span className="block text-[11px] truncate text-gray-400 dark:text-gray-500 group-hover:text-white/80">{selectorSubLabel(m, t)}</span>
                             </span>
                           </span>
-                          {m.id === effectiveId && <Check size={15} className="shrink-0 text-[#007AFF] group-hover:text-white" />}
+                          {m.id === effectiveLocalId && <Check size={15} className="shrink-0 text-[#007AFF] group-hover:text-white" />}
                         </button>
                       ))}
                     </>
                   );
                   return (
                     <>
-                      {renderGroup(t.modelGroupPreset, preset, false)}
-                      {renderGroup(t.modelGroupCustom, custom, preset.length > 0)}
+                      {platformModels.length > 0 && (
+                        <>
+                          <div className="px-3 pt-1.5 pb-1 text-[11px] font-semibold text-gray-400 dark:text-gray-500">{t.uiSettingsDetail.platformModels}</div>
+                          {platformModels.map(item => {
+                            const selectable = platformModelSelectableForNewSession(item);
+                            return (
+                              <button key={item.model_id} disabled={!selectable} onClick={() => pick({ source: ACCOUNT_PLATFORM_SOURCE, model_id: item.model_id })}
+                                className="w-full flex items-center justify-between gap-2 px-3 py-2 text-left rounded-xl transition-colors group hover:bg-[#007AFF] hover:text-white disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-inherit">
+                                <span className="flex items-center gap-2.5 min-w-0">
+                                  <Cpu size={15} className="shrink-0 text-gray-400 group-hover:text-white/90" />
+                                  <span className="min-w-0">
+                                    <span className="block text-[13px] truncate text-gray-700 dark:text-gray-200 group-hover:text-white">{item.display_name || item.model_id}</span>
+                                    <span className="block text-[11px] truncate text-gray-400 dark:text-gray-500 group-hover:text-white/80">{item.model_id}</span>
+                                  </span>
+                                </span>
+                                {item.model_id === effectivePlatformId && <Check size={15} className="shrink-0 text-[#007AFF] group-hover:text-white" />}
+                              </button>
+                            );
+                          })}
+                        </>
+                      )}
+                      {platformState === 'loading' && <div className="px-3 py-2 text-[12px] text-gray-400">{t.uiSettingsDetail.platformModelsLoading}</div>}
+                      {platformState === 'auth_required' && <div className="px-3 py-2 text-[12px] text-gray-400">{t.uiSettingsDetail.platformModelsSignIn}</div>}
+                      {platformState === 'error' && <div className="px-3 py-2 text-[12px] text-[#FF3B30]">{t.uiSettingsDetail.platformModelsUnavailable}</div>}
+                      {renderGroup(t.modelGroupPreset, preset, platformModels.length > 0)}
+                      {renderGroup(t.modelGroupCustom, custom, preset.length > 0 || platformModels.length > 0)}
+                      {modelSwitchError && <div role="alert" className="px-3 py-2 text-[12px] text-[#FF3B30]">{t.uiSettingsDetail.modelSwitchFailed}</div>}
                     </>
                   );
                 })()}
@@ -252,7 +336,7 @@ window.addEventListener('pinvou:chat-round-committed', (event) => {
                 {canManageModels && (
                   <>
                     <div className="h-px bg-black/5 dark:bg-white/10 my-1.5 mx-2" />
-                    <button onClick={() => { setOpen(false); if (onGotoSettings) onGotoSettings(); }}
+                    <button type="button" onClick={() => { setOpen(false); if (onGotoSettings) onGotoSettings(); }}
                       className="w-full flex items-center gap-2.5 px-3 py-2.5 text-[13px] text-gray-700 dark:text-gray-200 hover:bg-[#007AFF] hover:text-white rounded-xl transition-colors group">
                       <Plus size={15} className="text-gray-400 group-hover:text-white/90" />
                       {t.manageModels}
@@ -469,50 +553,57 @@ window.addEventListener('pinvou:chat-round-committed', (event) => {
       const [tmeetOn, setTmeetOn] = useState(false); // 腾讯会议是否已连接(CLI 路线)
       const [tmeetEnabled, setTmeetEnabled] = useState(true); // 腾讯会议技能是否启用(未手动停用)
       // 启动时加载已装工具 + 全局持久的禁用列表(持久语义:新窗口/新对话都继承)
+      // Round-38 刷新序号门（round-2 review m9）：连接/开关会在授权写入落定后
+      // 触发工具刷新，快速连续操作可能背靠背发起多次读取。桌面端 invoke 应答
+      // 有序，按 key 的 setState 本就按服务次序落盘；此序号门额外覆盖不保序
+      // 的传输（web 桥）：只允许最新一次刷新提交。
+      const refreshSeqRef = useRef(0);
       async function refreshToolsMenu(isAlive) {
+        const seq = ++refreshSeqRef.current;
+        const isCurrent = () => isAlive() && seq === refreshSeqRef.current;
         try {
           const list = await invokeTauri('list_marketplace_tools');
-          if (isAlive()) setMarketplaceTools(Array.isArray(list) ? list : []);
+          if (isCurrent()) setMarketplaceTools(Array.isArray(list) ? list : []);
         } catch (e) { /* ignore */ }
         try {
           const skills = await invokeTauri('list_marketplace_skills');
-          if (isAlive()) setMarketplaceSkills(Array.isArray(skills) ? skills : []);
+          if (isCurrent()) setMarketplaceSkills(Array.isArray(skills) ? skills : []);
         } catch (e) { /* ignore */ }
         try {
           const dis = await invokeTauri('get_disabled_connectors', { scope: toolScope });
-          if (isAlive()) setDisabled(new Set(dis || []));
+          if (isCurrent()) setDisabled(new Set(dis || []));
         } catch (e) { /* ignore */ }
         try {
           const hid = await invokeTauri('get_bundle_visibility', { scope: toolScope });
-          if (isAlive()) setHidden(new Set(hid || []));
+          if (isCurrent()) setHidden(new Set(hid || []));
         } catch (e) { /* ignore */ }
         try {
           const proj = await invokeTauri('get_project_skills_enabled');
-          if (isAlive()) setProjectSkillsEnabled(!!proj);
+          if (isCurrent()) setProjectSkillsEnabled(!!proj);
         } catch (e) { /* ignore */ }
         try {
           const fs = await invokeTauri('feishu_skills_state');
-          if (isAlive()) { setFeishuOn(!!(fs && fs.connected)); setFeishuEnabled(!fs || fs.enabled !== false); }
+          if (isCurrent()) { setFeishuOn(!!(fs && fs.connected)); setFeishuEnabled(!fs || fs.enabled !== false); }
         } catch (e) { /* ignore */ }
         try {
           const ws = await invokeTauri('wecom_skills_state');
-          if (isAlive()) { setWecomOn(!!(ws && ws.connected)); setWecomEnabled(!ws || ws.enabled !== false); }
+          if (isCurrent()) { setWecomOn(!!(ws && ws.connected)); setWecomEnabled(!ws || ws.enabled !== false); }
         } catch (e) { /* ignore */ }
         try {
           const ds = await invokeTauri('dingtalk_skills_state');
-          if (isAlive()) { setDingtalkOn(!!(ds && ds.connected)); setDingtalkEnabled(!ds || ds.enabled !== false); }
+          if (isCurrent()) { setDingtalkOn(!!(ds && ds.connected)); setDingtalkEnabled(!ds || ds.enabled !== false); }
         } catch (e) { /* ignore */ }
         try {
           const es = await invokeTauri('eip_status');
-          if (isAlive()) setEipOn(!!(es && es.connected));
+          if (isCurrent()) setEipOn(!!(es && es.connected));
         } catch (e) { /* ignore */ }
         try {
           const zs = await invokeTauri('zhidao_status');
-          if (isAlive()) setZhidaoOn(!!(zs && zs.connected));
+          if (isCurrent()) setZhidaoOn(!!(zs && zs.connected));
         } catch (e) { /* ignore */ }
         try {
           const ts = await invokeTauri('tmeet_skills_state');
-          if (isAlive()) { setTmeetOn(!!(ts && ts.connected)); setTmeetEnabled(!ts || ts.enabled !== false); }
+          if (isCurrent()) { setTmeetOn(!!(ts && ts.connected)); setTmeetEnabled(!ts || ts.enabled !== false); }
         } catch (e) { /* ignore */ }
       }
       useEffect(() => {
@@ -565,7 +656,7 @@ window.addEventListener('pinvou:chat-round-committed', (event) => {
         if (bridge.available) {
           const generation = writeGateRef.current.begin(id);
           invokeTauri('set_disabled_connectors',
-            { connectorIds: [...next], scope: toolScope })
+            { connectorIds: [...next], scope: toolScope, toggledIds: [id] })
             .catch((error) => {
               // Only the control's latest write may roll back or report: with rapid
               // toggles an earlier write can fail after a newer write succeeded
@@ -659,7 +750,7 @@ window.addEventListener('pinvou:chat-round-committed', (event) => {
             <span className="block text-[13px] text-gray-700 dark:text-gray-200 truncate">{row.title}</span>
             {statusBadge(row.active ? t.composerSkillInUse : t.composerBuiltinAuto, row.active ? 'green' : 'blue')}
           </span>
-          <button disabled aria-label={row.id} title={t.composerReadonlySwitch}
+          <button type="button" disabled aria-label={row.id} title={t.composerReadonlySwitch}
             className={`relative inline-flex h-5 w-[34px] shrink-0 items-center rounded-full transition-colors cursor-not-allowed bg-[#34C759]/60`}>
             <span className="inline-block h-4 w-4 rounded-full bg-white shadow translate-x-[16px]" />
           </button>
@@ -690,7 +781,7 @@ window.addEventListener('pinvou:chat-round-committed', (event) => {
               />
             </button>
           ) : (
-          <button ref={triggerRef} data-testid={triggerTestId || 'composer-tool-menu-trigger'} onClick={() => setOpen(o => !o)} title={t.composerTools}
+          <button type="button" ref={triggerRef} data-testid={triggerTestId || 'composer-tool-menu-trigger'} onClick={() => setOpen(o => !o)} title={t.composerTools}
             className={`relative shrink-0 flex items-center justify-center text-gray-700 dark:text-gray-200 transition-colors border ${compact ? 'w-9 h-9 rounded-full bg-transparent hover:bg-black/5 dark:hover:bg-white/10 border-transparent' : 'h-8 gap-1.5 rounded-[12px] px-2.5 text-[12px] font-semibold whitespace-nowrap bg-black/[0.045] dark:bg-white/[0.055] hover:bg-black/[0.07] dark:hover:bg-white/[0.09] border-black/[0.045] dark:border-white/[0.06]'}`}>
             <Wrench size={compact ? 18 : 13} className="opacity-80" />
             {!compact && t.composerTools}
@@ -731,7 +822,7 @@ window.addEventListener('pinvou:chat-round-committed', (event) => {
                         <span className="min-w-0">
                           <span className="block text-[13px] text-gray-700 dark:text-gray-200 truncate">
                             {t.composerProjectSkills}
-                            <button onClick={() => setProjectSkillsHelp(true)} aria-label={t.composerProjectSkillsHelpTitle}
+                            <button type="button" onClick={() => setProjectSkillsHelp(true)} aria-label={t.composerProjectSkillsHelpTitle}
                               className="inline-flex items-center justify-center w-[15px] h-[15px] ml-1 rounded-full text-[10px] font-semibold leading-none text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-300 hover:bg-black/5 dark:hover:bg-white/10 align-middle">?</button>
                           </span>
                           <span className="block text-[10px] text-gray-400 dark:text-gray-500">{t.composerProjectSkillsDesc}</span>
@@ -745,7 +836,7 @@ window.addEventListener('pinvou:chat-round-committed', (event) => {
                   </>
                 )}
                 <div className="h-px bg-black/5 dark:bg-white/10 my-1.5 mx-2" />
-                <button onClick={() => { setOpen(false); if (onGotoTools) onGotoTools(); }}
+                <button type="button" onClick={() => { setOpen(false); if (onGotoTools) onGotoTools(); }}
                   className="w-full flex items-center gap-2.5 px-3 py-2.5 text-[13px] text-gray-700 dark:text-gray-200 hover:bg-[#007AFF] hover:text-white rounded-xl transition-colors group">
                   <Store size={15} className="text-gray-400 group-hover:text-white/90" />
                   {t.composerManageTools}
@@ -756,7 +847,7 @@ window.addEventListener('pinvou:chat-round-committed', (event) => {
               <div onClick={e => e.stopPropagation()} className="relative w-full max-w-[380px] rounded-[22px] shadow-2xl p-5 bg-white text-[#1F1F1F] dark:bg-[#1E1F20] dark:text-[#E3E3E3]">
                 <div className="flex items-start justify-between gap-3 mb-4">
                   <div className="text-[16px] font-semibold">{t.composerProjectSkillsHelpTitle}</div>
-                  <button onClick={() => setProjectSkillsHelp(false)} className="w-8 h-8 rounded-full flex items-center justify-center hover:bg-black/5 dark:hover:bg-white/10"><X size={17} /></button>
+                  <button type="button" onClick={() => setProjectSkillsHelp(false)} className="w-8 h-8 rounded-full flex items-center justify-center hover:bg-black/5 dark:hover:bg-white/10"><X size={17} /></button>
                 </div>
                 <div className="text-[12px] leading-relaxed text-[#5F6368] dark:text-[#AEB4BC]">{t.composerProjectSkillsHelpBody}</div>
                 <div className="mt-3 text-[12px] font-medium">{t.composerProjectSkillsHelpDirsLabel}</div>

@@ -1,5 +1,6 @@
 const DEFAULT_DESKTOP_CAPABILITIES = Object.freeze({
   desktopChrome: true,
+  accountPlatform: true,
   detachWindows: true,
   pet: true,
   oauth: true,
@@ -10,7 +11,7 @@ const DEFAULT_DESKTOP_CAPABILITIES = Object.freeze({
   localModelSetup: true,
   externalSystemOpen: true,
   webAccessAdmin: true,
-  // Fail closed until the Rust host's Windows capability has been projected.
+  // Fail closed until the Rust host's semantic capability has been projected.
   desktopRemoteControl: false,
   failureDiagnostics: false,
   desktopNotifications: true,
@@ -58,8 +59,7 @@ export function can(capability) {
     if (!bridge?.available || typeof bridge.state?.getMany !== 'function') return false;
     try {
       const detected = bridge.state.getMany(['platform'])?.platformCapabilities;
-      return detected?.loaded === true && detected.os === 'windows' &&
-        detected.desktopRemoteControl === true;
+      return detected?.loaded === true && detected.desktopRemoteControl === true;
     } catch {
       return false;
     }

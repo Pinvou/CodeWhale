@@ -4,8 +4,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import react from '@vitejs/plugin-react';
-import * as puppeteer from 'puppeteer-core';
-import { createServer } from 'vite';
+import * as puppeteer from './helpers/puppeteer-fixture.mjs';
+import { createServer } from './helpers/vite-fixture.mjs';
 
 const appRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const chrome = process.env.CHROME || [
@@ -28,6 +28,8 @@ if (!chrome) {
 const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'pinvou-diff-smoke-'));
 let browser;
 let vite;
+const pageErrors = [];
+const resourceFailures = [];
 
 function assert(condition, message, detail) {
   if (!condition) throw new Error(`${message}${detail ? `: ${JSON.stringify(detail)}` : ''}`);
@@ -55,8 +57,21 @@ try {
     args: ['--no-sandbox', '--disable-gpu', '--no-first-run', '--no-default-browser-check'],
   });
   const page = await browser.newPage();
-  const pageErrors = [];
   page.on('pageerror', (error) => pageErrors.push(error.message));
+  const fixtureUrl = new URL(url);
+  const recordResourceFailure = (request, detail) => {
+    if (resourceFailures.length >= 20
+      || !['document', 'script', 'stylesheet'].includes(request.resourceType())) return;
+    const resource = new URL(request.url());
+    if (resource.origin !== fixtureUrl.origin) return;
+    resourceFailures.push({ path: resource.pathname, ...detail });
+  };
+  page.on('requestfailed', (request) => {
+    recordResourceFailure(request, { error: request.failure()?.errorText });
+  });
+  page.on('response', (response) => {
+    if (response.status() >= 400) recordResourceFailure(response.request(), { status: response.status() });
+  });
   await page.setViewport({ width: 1200, height: 900, deviceScaleFactor: 1 });
   await page.goto(url, { waitUntil: 'networkidle0' });
   await page.waitForSelector('[data-testid="edit-output"] [data-testid="diff-view"]', { timeout: 10000 });
@@ -128,6 +143,10 @@ try {
   console.log('diff_viewer_ui_smoke: ok');
 } catch (error) {
   console.error('FAIL:', error?.stack || error);
+  console.error('Browser diagnostics:', JSON.stringify({
+    pageErrors: pageErrors.slice(0, 20),
+    resourceFailures,
+  }));
   process.exitCode = 1;
 } finally {
   if (browser) await browser.close();

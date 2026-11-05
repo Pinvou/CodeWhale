@@ -70,13 +70,14 @@ use crate::features::assistant::platform::bridge::{Pinvou3Bridge, base_url_uses_
 #[cfg(any(feature = "benchmark-hooks", test))]
 use crate::features::assistant::product_runtime::note_stderr;
 use crate::features::assistant::runtime_model::{
-    ModelCredentialMode, PassthroughRuntimeModelProvider, PreparedRuntimeModel,
-    RuntimeModelCredential, RuntimeModelProvider, RuntimeModelRequest,
+    AuxiliaryModelContext, AuxiliaryModelScope, ModelCredentialMode,
+    PassthroughRuntimeModelProvider, PreparedRuntimeModel, RuntimeModelCredential,
+    RuntimeModelProvider, RuntimeModelRequest,
 };
 use crate::features::assistant::turn_shell_tasks::{SessionShellManagers, SessionTurnShellTasks};
 use crate::features::sessions::{ScheduledRunProfile, SessionStore, transcript_revision};
 use crate::platform::credential_store::{CredentialStore, SystemCredentialStore};
-use crate::platform::prefs::{SavedModel, UserPrefs};
+use crate::platform::prefs::{ModelSelectionRef, SavedModel, UserPrefs};
 
 /// Fully isolated model override used by one controller task. Credentials are
 /// extracted immediately and the model copies retained by the bridge are
@@ -91,6 +92,7 @@ pub(crate) struct RemoteRuntimeModelBundle {
 /// Per-call preparation inputs, including the remote task's frozen route.
 #[derive(Default)]
 struct RuntimeModelOverrides {
+    auxiliary: Option<AuxiliaryModelContext>,
     freeze_remote_credentials: bool,
     explicit_model: Option<SavedModel>,
     explicit_credential: Option<RuntimeModelCredential>,
@@ -508,6 +510,36 @@ impl SessionTurnLifecycles {
 
     fn remove(&self, session_id: &str) {
         self.states.lock().remove(session_id);
+    }
+}
+
+// This handle owns no EnginePool/provider reference. Dropping the pool makes
+// proxy admissions unavailable instead of keeping the session registry alive.
+struct RuntimeTurnLifecycleAuthority {
+    states: std::sync::Weak<SyncMutex<HashMap<String, Arc<TurnLifecycle>>>>,
+}
+
+impl crate::features::assistant::runtime_model::RuntimeTurnAuthority
+    for RuntimeTurnLifecycleAuthority
+{
+    fn current_generation(&self, session_id: &str) -> Option<u64> {
+        let states = self.states.upgrade()?;
+        let lifecycle = { states.lock().get(session_id).cloned() }?;
+        lifecycle.current_runtime_turn_generation()
+    }
+    fn with_generation(
+        &self,
+        session_id: &str,
+        generation: u64,
+        callback: &mut dyn FnMut(),
+    ) -> bool {
+        let Some(states) = self.states.upgrade() else {
+            return false;
+        };
+        let Some(lifecycle) = ({ states.lock().get(session_id).cloned() }) else {
+            return false;
+        };
+        lifecycle.with_current_turn_generation(generation, callback)
     }
 }
 
@@ -2159,6 +2191,28 @@ pub struct EnginePool {
     /// arrives) no longer permanently blocks its own idle reap and rebind
     /// eviction; the worst case reverts to the pre-latch passive self-heal.
     compacting_sessions: Arc<SyncMutex<HashMap<String, std::time::Instant>>>,
+    /// Round-11 M1 (#657), round-12/13 reshaped: sessions whose opening
+    /// turn was delivered under the watcher shield
+    /// (unattended_disallowed_tools) and whose delivery's submission
+    /// succeeded. The first subsequent send through the attended seams —
+    /// `send_reserved_user_message` or `edit_last_turn_reserved`, after
+    /// the turn reservation is acquired — restores the ordinary catalog
+    /// and clears the mark: the shield must not outlive the unattended
+    /// opening turn into the user's interactive session (the scheduled
+    /// family's pre/post-turn evict closes the same invariant by
+    /// respawning; this is the delivery path's equivalent). Round-13
+    /// MINOR 7 wording truth (both relays named per round-31 minor 3):
+    /// "the seams" includes BOTH relay tail-calls — the messaging relay
+    /// and the scheduled family's `deliver_session_message` fallback into
+    /// `deliver_messaging_turn` (`unattended_shield=false`) — whose
+    /// senders are unauthenticated — a cross-session relay or a scheduled
+    /// fire can lift the shield without a human; that capability is inside
+    /// the #627-disclosed relay boundary, so the shield is fail-closed
+    /// against interactive silence, not against relays. The mark is recorded by `deliver_messaging_turn`
+    /// once the delivered turn's submission succeeds, is stripped again
+    /// when the delivery fails, and is cleared at reclaim/forget time so
+    /// it never outlives the engine it names.
+    watcher_shielded_sessions: Arc<SyncMutex<HashSet<String>>>,
     /// Steer-id engine-incarnation allocator: a process-monotonic AtomicU64
     /// sequence bumped on every engine spawn. Arc-shared so pool clones see
     /// one sequence (same idiom as every shared field here — EnginePool is a
@@ -2255,6 +2309,35 @@ fn delegate_steer_withdrawal(steer_id: &str, current_generation: u64) -> SteerWi
     }
 }
 
+/// Round-15 (#657) MAJOR 1: scoped guard over the watcher-shield's
+/// unmarked window (see `EnginePool::watcher_shield_drop_guard`).
+struct WatcherShieldDropGuard {
+    pool: EnginePool,
+    session_id: String,
+    armed: bool,
+}
+
+impl WatcherShieldDropGuard {
+    fn disarm(mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for WatcherShieldDropGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let pool = self.pool.clone();
+        let session_id = self.session_id.clone();
+        // Detached: Drop is sync, and the strip is a plain catalog
+        // re-shape on the live engine (a no-op if it already ran).
+        let _ = tauri::async_runtime::spawn(async move {
+            pool.send_ordinary_disallowed_tools(&session_id).await;
+        });
+    }
+}
+
 impl EnginePool {
     pub fn new_with_dependencies(
         app: AppHandle,
@@ -2297,6 +2380,10 @@ impl EnginePool {
         runtime_credential_store: Arc<dyn CredentialStore>,
     ) -> Result<Self> {
         let bridge = Pinvou3Bridge::boot()?;
+        let turn_lifecycles = SessionTurnLifecycles::default();
+        runtime_model_provider.bind_turn_authority(Arc::new(RuntimeTurnLifecycleAuthority {
+            states: Arc::downgrade(&turn_lifecycles.states),
+        }))?;
         Ok(Self {
             entries: Arc::new(Mutex::new(HashMap::new())),
             runtime_model_locks: SessionTurnLocks::default(),
@@ -2305,7 +2392,7 @@ impl EnginePool {
             #[cfg(any(feature = "benchmark-hooks", test))]
             eval_model_snapshots: EvalModelSnapshots::default(),
             turn_locks: SessionTurnLocks::default(),
-            turn_lifecycles: SessionTurnLifecycles::default(),
+            turn_lifecycles,
             shell_managers: SessionShellManagers::default(),
             turn_shell_tasks: SessionTurnShellTasks::default(),
             app,
@@ -2318,6 +2405,7 @@ impl EnginePool {
             idle_reaper: Arc::new(SyncMutex::new(None)),
             scheduled_running_sessions: Arc::new(SyncMutex::new(HashSet::new())),
             compacting_sessions: Arc::new(SyncMutex::new(HashMap::new())),
+            watcher_shielded_sessions: Arc::new(SyncMutex::new(HashSet::new())),
             steer_incarnation_seq: Arc::new(AtomicU64::new(0)),
             execution_root_rewind_flags: Arc::new(SyncMutex::new(HashMap::new())),
         })
@@ -2519,32 +2607,73 @@ impl EnginePool {
         Ok(Self::finalize_runtime_bridge(bridge, &prepared, pins_scheduled_model).await)
     }
 
-    /// Prepare an unsent composer's model without borrowing the active chat session
-    /// or creating a synthetic session/task. Credentials follow the same provider as chat.
+    /// Voice owns a separate, invisible transport lifetime even when its model
+    /// comes from an existing session. It must not retire or cancel that chat.
+    pub(crate) async fn fresh_bridge_for_voice(
+        &self,
+        session_id: &str,
+    ) -> Result<(Pinvou3Bridge, AuxiliaryModelScope)> {
+        #[cfg(any(feature = "benchmark-hooks", test))]
+        let eval_model = self.eval_model_snapshots.for_session(session_id);
+        #[cfg(not(any(feature = "benchmark-hooks", test)))]
+        let eval_model = None;
+        let scope = AuxiliaryModelScope::new(self.runtime_model_provider.clone());
+        let (bridge, prepared, pins) = Self::prepare_runtime_model_with(
+            &self.store,
+            self.runtime_model_provider.as_ref(),
+            self.runtime_credential_store.as_ref(),
+            self.bridge.clone(),
+            session_id,
+            false,
+            RuntimeModelOverrides {
+                auxiliary: Some(scope.context(None)),
+                explicit_model: eval_model,
+                ..Default::default()
+            },
+        )
+        .await?;
+        Ok((
+            Self::finalize_runtime_bridge(bridge, &prepared, pins).await,
+            scope,
+        ))
+    }
+
+    /// Prepare an unsent composer without creating or borrowing a chat session.
     pub(crate) async fn fresh_bridge_for_draft(
         &self,
         model_id: Option<&str>,
-    ) -> Result<Pinvou3Bridge> {
+        model_ref: Option<&ModelSelectionRef>,
+    ) -> Result<(Pinvou3Bridge, AuxiliaryModelScope)> {
         let mut bridge = self.bridge.clone();
         bridge.prefs = UserPrefs::load();
-        let model = match model_id.filter(|id| !id.trim().is_empty()) {
-            Some(id) => bridge
+        let model = resolve_voice_draft_model(&bridge.prefs, model_id, model_ref)?;
+        let reference = model
+            .is_builtin_account_platform()
+            .then(|| model.model.clone());
+        let inherited_default_revision = (model_ref.is_none()
+            && model_id.filter(|id| !id.trim().is_empty()).is_none()
+            && model.is_builtin_account_platform()
+            && matches!(
+                bridge.prefs.advanced.default_model_ref.as_ref(),
+                Some(ModelSelectionRef::AccountPlatform { model_id }) if model_id == &model.model
+            ))
+        .then(|| {
+            bridge
                 .prefs
                 .advanced
-                .saved_models
-                .iter()
-                .find(|model| model.id == id)
-                .cloned()
-                .context("Draft model binding is unavailable; select a model again")?,
-            None => bridge
-                .prefs
-                .active_model()
-                .cloned()
-                .context("No effective model is available for draft preparation")?,
-        };
+                .default_model_selection_revision
+                .clone()
+        });
+        let scope = AuxiliaryModelScope::new(self.runtime_model_provider.clone());
+        let mut auxiliary = scope.context(reference);
+        auxiliary.inherited_default_revision = inherited_default_revision;
         let prepared =
-            prepare_draft_runtime_model(self.runtime_model_provider.as_ref(), model).await?;
-        Ok(Self::finalize_runtime_bridge(bridge, &prepared, false).await)
+            prepare_draft_runtime_model(self.runtime_model_provider.as_ref(), model, auxiliary)
+                .await?;
+        Ok((
+            Self::finalize_runtime_bridge(bridge, &prepared, false).await,
+            scope,
+        ))
     }
 
     async fn prepare_runtime_model(
@@ -2564,6 +2693,7 @@ impl EnginePool {
             session_id,
             scheduled_unattended,
             RuntimeModelOverrides {
+                auxiliary: None,
                 freeze_remote_credentials,
                 explicit_model: explicit_model_override,
                 explicit_credential,
@@ -2590,6 +2720,7 @@ impl EnginePool {
         bridge.prefs = UserPrefs::load();
         Self::install_session_affinity_key(&mut bridge, session_id);
         let RuntimeModelOverrides {
+            auxiliary,
             freeze_remote_credentials,
             explicit_model: explicit_model_override,
             explicit_credential,
@@ -2615,13 +2746,27 @@ impl EnginePool {
             }
             None => (explicit_model_override, explicit_credential),
         };
+        let mut scheduled_model_ref = None;
         bridge.session_model = resolve_runtime_model_override(explicit_model_override, || {
-            resolve_spawn_model(
+            // Explicit evaluation snapshots already select a model and must not
+            // depend on the interactive default. Only normal resolution needs it.
+            if scheduled_profile.is_none()
+                && interactive_model_override.is_none()
+                && bridge.prefs.model_selection_schema_version >= 1
+                && bridge.prefs.advanced.default_model_ref.is_none()
+            {
+                bail!("model_selection_required: choose a model before sending");
+            }
+            let model = resolve_spawn_model(
                 &bridge.prefs.advanced.saved_models,
                 scheduled_profile.as_ref(),
                 interactive_model_override.as_deref(),
                 scheduled_unattended,
-            )
+            )?;
+            scheduled_model_ref = model.as_ref().and_then(|selected| {
+                pinned_scheduled_catalog_reference(selected, pins_scheduled_model)
+            });
+            Ok(model)
         })?;
         // Community 默认准备路径固定 passthrough：模型原样保留，不注入运行时
         // 凭据/revision；凭据照常走环境变量与本地凭据库（bridge.api_key()）。
@@ -2634,6 +2779,8 @@ impl EnginePool {
             &mut bridge,
             RuntimeModelRequest {
                 session_id: session_id.to_string(),
+                scheduled_model_ref,
+                auxiliary,
                 model: selected,
                 scheduled_unattended,
             },
@@ -2732,15 +2879,19 @@ impl EnginePool {
         // family is identical (`/v1/models` listing, single-model rename),
         // so a configured name that misses the served list gets the same
         // rename/facts treatment instead of a hard model_not_found.
-        let is_vllm_route = matches!(bridge.provider().as_str(), "vllm" | "tachyon");
-        if let Some(model) = bridge.effective_model_owned() {
-            Self::adopt_probed_endpoint_facts(
-                &mut bridge,
-                model,
-                is_vllm_route,
-                pins_scheduled_model,
-            )
-            .await;
+        // A controller-supplied route already binds the model and limits.
+        // Local discovery must not rename it or replace those facts.
+        if !bridge.runtime_route_is_locked() {
+            let is_vllm_route = matches!(bridge.provider().as_str(), "vllm" | "tachyon");
+            if let Some(model) = bridge.effective_model_owned() {
+                Self::adopt_probed_endpoint_facts(
+                    &mut bridge,
+                    model,
+                    is_vllm_route,
+                    pins_scheduled_model,
+                )
+                .await;
+            }
         }
         bridge
     }
@@ -3781,6 +3932,21 @@ impl EnginePool {
     }
 
     async fn reclaim_engine_entry(&self, session_id: &str, entry: EngineEntry) {
+        let preserved_generation = self.turn_lifecycles.get(session_id).and_then(|lifecycle| {
+            if lifecycle.is_current_turn_submitted() {
+                None
+            } else {
+                lifecycle.current_runtime_turn_generation()
+            }
+        });
+        self.runtime_model_provider
+            .reclaim_model_session(session_id, preserved_generation);
+        // Round-13 (#657) MINOR 6: the shield mark dies with the engine.
+        // This is the shared teardown funnel — evict_locked's Some arm and
+        // the idle-reclaim / rebind paths that remove the entry directly
+        // both land here — so the mark is cleared on every reclaim shape,
+        // not only the evict_locked callers.
+        self.watcher_shielded_sessions.lock().remove(session_id);
         // Stop the producer before admission fallback awaits disk I/O.
         // An in-flight SessionUpdated save is serialized with the fallback
         // by SessionStore's mutation gate; no later delta/tool event can
@@ -3953,6 +4119,13 @@ impl EnginePool {
     async fn evict_locked(&self, session_id: &str) {
         let runtime_lock = self.runtime_model_locks.for_session(session_id).await;
         let _runtime = runtime_lock.lock().await;
+        // Round-12 (#657) MINOR 11 / round-13 MINOR 6: the shield mark dies
+        // with the engine — the shield itself is an in-memory op, so a mark
+        // surviving reclaim is a leaked String plus a redundant spawn+op on
+        // the restore paths. Delete / model-switch funnel through here;
+        // idle reclaim / rebind clear the mark inside reclaim_engine_entry
+        // (their shared teardown funnel, which bypasses this fn).
+        self.watcher_shielded_sessions.lock().remove(session_id);
         // Take the entry out of the map before matching: a temporary guard in
         // the match scrutinee would live until the whole match ends, and
         // reclaiming inside an arm would then hold the pool-wide entries lock
@@ -3975,8 +4148,12 @@ impl EnginePool {
     }
 
     pub(crate) fn forget_session(&self, session_id: &str) {
+        self.runtime_model_provider.forget_model_session(session_id);
         #[cfg(any(feature = "benchmark-hooks", test))]
         self.eval_model_snapshots.forget_session(session_id);
+        // Round-12 (#657) MINOR 11: a deleted session's shield mark must not
+        // outlive it (a stale mark would spawn+op on the restore paths).
+        self.watcher_shielded_sessions.lock().remove(session_id);
         self.turn_lifecycles.remove(session_id);
         self.turn_shell_tasks.remove(session_id);
         self.shell_managers.remove(session_id);
@@ -4018,8 +4195,21 @@ impl EnginePool {
     /// global active model. Read fresh from disk (the GUI may have just
     /// changed the default); falls back to the boot snapshot on failure.
     pub fn default_model_for_new_session(&self) -> (String, Option<String>) {
+        let (model, model_id, _) = self.default_model_for_new_session_with_origin();
+        (model, model_id)
+    }
+
+    pub(crate) fn default_model_for_new_session_with_origin(
+        &self,
+    ) -> (String, Option<String>, Option<String>) {
         let prefs = UserPrefs::load();
-        default_model_for_new_session_from(&prefs, &self.bridge)
+        let (model, model_id) = default_model_for_new_session_from(&prefs, &self.bridge);
+        let revision = matches!(
+            prefs.advanced.default_model_ref,
+            Some(crate::platform::prefs::ModelSelectionRef::AccountPlatform { .. })
+        )
+        .then(|| prefs.advanced.default_model_selection_revision.clone());
+        (model, model_id, revision)
     }
 
     #[cfg(any(feature = "benchmark-hooks", test))]
@@ -4137,6 +4327,16 @@ impl EnginePool {
         model_id: Option<String>,
     ) -> Result<()> {
         self.store.set_session_model_id(session_id, model_id)?;
+        self.evict(session_id).await;
+        Ok(())
+    }
+
+    pub async fn switch_session_model_ref(
+        &self,
+        session_id: &str,
+        model_ref: Option<ModelSelectionRef>,
+    ) -> Result<()> {
+        self.store.set_session_model_ref(session_id, model_ref)?;
         self.evict(session_id).await;
         Ok(())
     }
@@ -4617,8 +4817,11 @@ impl EnginePool {
                 reservation,
             )
             .await?;
-        self.get_or_spawn(session_id)
-            .await?
+        let engine = self.get_or_spawn(session_id).await?;
+        self.runtime_model_provider
+            .begin_logical_turn(session_id)
+            .await?;
+        engine
             .send_reserved_eval_message(content, policy, reservation)
             .await
     }
@@ -4709,6 +4912,13 @@ impl EnginePool {
             .as_ref()
             .map(|model| RuntimeModelCredential::api_key(model.api_key.clone()))
             .transpose()?;
+        // Round-12 (#657) BLOCKER 1: this attended seam bypasses the
+        // watcher-delivery submission core (that path caller-acquires the
+        // engine and submits through submit_reserved_user_message), so the
+        // mark-gated watcher-shield restore lives here as well — after the
+        // reservation is acquired (ensure_active inside
+        // admit_reserved_turn), same reasoning as the edit-resend seam.
+        self.restore_watcher_shield_if_marked(session_id).await;
         submit_prepared_turn(
             session_id,
             ReservedTurnSubmission {
@@ -4728,19 +4938,239 @@ impl EnginePool {
                 bundle: remote_bundle,
                 skills: remote_skills,
             },
-            |options| {
-                self.get_or_spawn_with_policy(
-                    session_id,
-                    false,
-                    options.policy,
-                    options.model,
-                    options.credential,
-                    options.bundle,
-                    options.skills,
+            |options| async move {
+                let engine = self
+                    .get_or_spawn_with_policy(
+                        session_id,
+                        false,
+                        options.policy,
+                        options.model,
+                        options.credential,
+                        options.bundle,
+                        options.skills,
+                    )
+                    .await?;
+                self.runtime_model_provider
+                    .begin_logical_turn(session_id)
+                    .await?;
+                Ok(engine)
+            },
+        )
+        .await
+    }
+
+    /// The submission core of the watcher delivery. `engine` is
+    /// CALLER-ACQUIRED: the shield rebuild race (round-38) is closed by
+    /// construction — the watcher applies `apply_unattended_shield` to the
+    /// exact handle this core submits on, so an eviction between the shield
+    /// op and the submission fails the delivery loudly (dead handle) instead
+    /// of re-spawning an ordinary catalog and letting the opening turn run
+    /// unshielded. The attended send seam keeps the official
+    /// submit_prepared_turn shape (engine acquired after admission, remote
+    /// policy/model/credential plumbing, demotion-aware scoped-aux boot
+    /// wait) and carries its own mark-gated restore; the delivery and the
+    /// attended seams reconverge at forward_forced_turn_restrict.
+    #[allow(clippy::too_many_arguments)]
+    async fn submit_reserved_user_message(
+        &self,
+        session_id: &str,
+        content: String,
+        mode: AppMode,
+        restrict_tools_for_turn: bool,
+        expert_snapshot: Option<std::sync::Arc<ExpertRosterSnapshot>>,
+        expert_candidates: Vec<String>,
+        reservation: TurnReservation,
+        _turn_gate: tokio::sync::OwnedMutexGuard<()>,
+        engine: AppEngine,
+    ) -> Result<()> {
+        // Round-42 (#657) review M1: the reserve→admit window spans the
+        // seconds-long cold spawn, and an eviction landing there (model
+        // switch / multi-agent reconfigure) keeps the unsubmitted
+        // reservation valid ON PURPOSE (the attended seam re-acquires after
+        // admit — `rebuild_does_not_swallow_inflight_reservation`), so
+        // `ensure_active` cannot notice it. The held handle is dead though:
+        // ops enqueued after the reclaim's Shutdown are dropped by the run
+        // loop, the tail would then record the success mark, and the created
+        // session would wedge busy forever (no forwarder → no terminal).
+        // Re-validate the incarnation under the admission gate: the mailbox
+        // Arc is per-spawn (each engine owns a fresh event channel), so a
+        // reclaimed-then-respawned engine never matches. On mismatch, bail
+        // BEFORE any op is enqueued: the reservation releases on drop, the
+        // shield drop guard strips, no success mark is recorded, and the
+        // delivery fails loudly (`first_message_delivered: false` on the
+        // ok:true receipt — no auto-retry; the model re-sends manually)
+        // instead of lying. Residual window: an eviction landing strictly
+        // between this check and the send enqueue below is not caught —
+        // disclosed in the
+        // design doc's §4 window ledger (microseconds, user-action-timed).
+        let live = self.handle_for(session_id).await;
+        match live
+            .as_ref()
+            .map(|live| Arc::ptr_eq(&live.handle.rx_event, &engine.handle.rx_event))
+        {
+            Some(true) => {}
+            _ => anyhow::bail!(
+                "the session's engine was reclaimed mid-delivery (model switch or agent reconfigure); the opening turn was not delivered"
+            ),
+        }
+        // Side B card pool: when this session is wearing an expert mask,
+        // inject a light anchor (short) every turn to maintain the identity.
+        // The full body was injected once with the first equip message
+        // (commands::chat take_pending_turn_injections).
+        // Resolved at the pool layer, so all upper-level calls (chat /
+        // accept_plan) automatically carry the anchor.
+        // The same card derives two per-turn states: ① the light anchor
+        // (sticky identity) ② whether to empty the tool table (a
+        // pure-conversation meta card such as the card-crafting expert → zero
+        // tools this turn, preventing it from writing files by mistake). The
+        // active persona is read live every turn: put it on and it restricts,
+        // take it off and it recovers, switch cards and the new card applies —
+        // no persisted state, no equip/unequip sync needed.
+        let active_card = self
+            .store
+            .active_persona_id(session_id)
+            .and_then(|pid| crate::features::personas::get(&pid));
+        let persona_reminder = active_card
+            .as_ref()
+            .map(crate::features::personas::equip_anchor);
+        let persona_conversational = active_card.as_ref().is_some_and(|c| c.conversational_only);
+        // Round-9 MAJOR-1: the engine's MCP boot is async (the foundation
+        // snapshots ready-only tools so the first LLM call never serializes
+        // behind the slowest handshake) — but for a scoped aux engine the
+        // ONE MCP tool IS the feature, so a first turn built before the
+        // python handshake settles carries no `read_session` declaration at
+        // all and the model answers without the parent's history (recurring
+        // after every idle reclaim). Wait — bounded — for the boot to settle
+        // before this turn's submission; a warm engine returns instantly
+        // (boot not in flight). The bound keeps a wedged/missing python from
+        // stalling the send: on timeout the turn proceeds with the tool
+        // undeclared (fail-open, disclosed in the design doc §6), the next
+        // turn re-pins the catalog. The condition is demotion-aware
+        // (`aux_turn_allowed_tools`, the same per-aux-config-presence probe
+        // the chokepoint uses): a spawn that failed closed to ZeroTool runs
+        // with Feature::Mcp disabled, so there is no scoped boot to settle —
+        // skip the op instead of poking a pool that does not exist. The
+        // attended send seam carries the same wait inside
+        // submit_prepared_turn; the delivery path repeats it here because
+        // the caller-acquired engine never passes through that seam.
+        if !aux_turn_allowed_tools(session_id).is_empty() {
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                engine.handle.bootstrap_mcp(),
+            )
+            .await
+            {
+                Ok(Ok(_)) => {}
+                Ok(Err(error)) => log::warn!(
+                    "[engine_pool] scoped aux MCP boot failed before first turn: {error:#}"
+                ),
+                Err(_) => log::warn!(
+                    "[engine_pool] scoped aux MCP boot did not settle within 5s; proceeding with the tool undeclared on this turn"
+                ),
+            }
+        }
+        // Round-12 (#657) BLOCKER 1: the watcher-shield restore lives in the
+        // submission seams — here for the caller-acquired delivery path, and
+        // in the attended send/edit seams (which converge on
+        // submit_prepared_turn / forward_edit_resend_with_reminder) after
+        // their reservation is acquired — so a busy-loser attended send
+        // cannot strip the shield from a still-pending opening turn, and
+        // never from the delivery itself (the mark is recorded once the
+        // opening turn's submission succeeds — see deliver_messaging_turn; a
+        // reader "fixing" this comment back to completes would reintroduce
+        // the round-11 ordering bug).
+        self.restore_watcher_shield_if_marked(session_id).await;
+        forward_forced_turn_restrict(
+            session_id,
+            persona_conversational,
+            restrict_tools_for_turn,
+            persona_reminder,
+            |restrict_tools, reminder| {
+                engine.send_reserved_user_message(
+                    content,
+                    mode,
+                    reminder,
+                    restrict_tools,
+                    expert_snapshot,
+                    expert_candidates,
+                    reservation,
                 )
             },
         )
         .await
+    }
+
+    /// Push the session's ordinary per-session catalog — the global
+    /// tool-policy base shaped by the bridge, the same composition every
+    /// other catalog computation uses (spawn, toggle broadcast). The plain
+    /// scope's policy names (user-toggled-off connector tools, computer_use
+    /// when off, kb_search/kb_open_source when unindexed, automation /
+    /// send_later) come ONLY from the base argument, so an empty base here
+    /// would re-expose tool-policy-disabled tools for the engine's remaining
+    /// lifetime (round-12 #657 MAJOR 1).
+    ///
+    /// Round-43 (#657) review M2: the restore seam runs while the submission
+    /// core holds the session turn gate, and an unbounded send here parks on
+    /// a wedged engine's full mailbox — wedging evict/delete/model-switch
+    /// behind the same gate (the exact #525/#483 class). The send is bounded
+    /// like the turn submit: cancel-safe (a timed-out strip was never
+    /// enqueued), and failing OPEN by design — the engine keeps its current
+    /// list until the next attended send recomputes the ordinary catalog.
+    /// The detached drop-guard strip inherits the same bound (a timed-out
+    /// strip leaks no unbounded parked task). Round-47 review minor 2
+    /// truthing: on a timeout the engine keeps its CURRENT list until the
+    /// engine is respawned or an unrelated toggle broadcast runs — there
+    /// is no "next attended send recomputes it" recovery (this helper is
+    /// the only ordinary-catalog pusher, and it is mark-gated); the
+    /// design doc's §4 window (b) already carries that disclosure.
+    async fn send_ordinary_disallowed_tools(&self, session_id: &str) {
+        if let Some(engine) = self.handle_for(session_id).await {
+            let ordinary = self
+                .bridge
+                .shape_disallowed_tools(session_id, self.compute_disallowed_tools());
+            if tokio::time::timeout(
+                TURN_GATE_AWAIT_TIMEOUT,
+                engine.handle.send(Op::SetDisallowedTools {
+                    tools: (!ordinary.is_empty()).then_some(ordinary),
+                }),
+            )
+            .await
+            .err()
+            .is_some()
+            {
+                eprintln!(
+                    "[engine_pool] watcher-shield restore for {session_id} did not settle within {TURN_GATE_AWAIT_TIMEOUT:?}; the engine may be wedged — the shield list stays applied until the engine is respawned or an unrelated toggle broadcast restores the catalog (round-47 minor-2 / round-63 F-4 truthing; no attended-send recovery path)"
+                );
+            }
+        }
+    }
+
+    /// Clear the watcher-delivery shield: drop the mark and restore the
+    /// ordinary catalog on the live engine. The shield itself is an
+    /// in-memory op, so with no live engine there is nothing to restore — a
+    /// respawn already starts from the ordinary spawn catalog, and no
+    /// engine is spawned here just to clear a stale mark (round-12 #657
+    /// MINOR 11: evict/forget clear the mark at reclaim time).
+    async fn restore_watcher_shield_if_marked(&self, session_id: &str) {
+        if self.watcher_shielded_sessions.lock().remove(session_id) {
+            self.send_ordinary_disallowed_tools(session_id).await;
+        }
+    }
+
+    /// Round-15 (#657) MAJOR 1: armed after the watcher-shield op resolves,
+    /// disarmed by the delivery tail once it owns the disposition. If the
+    /// delivery future is DROPPED in between — the watcher's 30s delivery
+    /// timeout or its per-file panic guard — the drop strips the shield
+    /// again: an engine silenced with no mark and no restore duty is the
+    /// one state this feature must never persist. The strip is detached
+    /// (Drop is sync): the pool clone re-shapes the ordinary catalog, a
+    /// no-op when nothing was applied yet.
+    fn watcher_shield_drop_guard(&self, session_id: &str) -> WatcherShieldDropGuard {
+        WatcherShieldDropGuard {
+            pool: self.clone(),
+            session_id: session_id.to_string(),
+            armed: true,
+        }
     }
 
     /// Deliver a cross-session message as a new turn — the idle-wake path of
@@ -4755,8 +5185,68 @@ impl EnginePool {
         &self,
         session_id: &str,
         content: String,
+        unattended_shield: bool,
     ) -> Result<()> {
+        // Round-9 M6 (session-creation): the watcher-delivered opening
+        // turn is unattended — shield the engine before the turn op.
+        // Interactive senders (the messaging tool, called from an attended
+        // session) keep the session's ordinary catalog. The mark is NOT
+        // recorded here: the restore lives in the submission core
+        // (`submit_reserved_user_message`'s engine-taking body, whose own
+        // comment is the authority — round-65 R2-4 truthing: this fn calls
+        // `admit_reserved_turn` + that core, it does NOT tail-call
+        // `send_reserved_user_message`), so an insert-before would
+        // let the delivery's own send deterministically dequeue the shield
+        // it just applied — the mark is recorded once the turn submission
+        // succeeds (see the tail).
         let reservation = self.reserve_turn(session_id)?;
+        // Round-13 (#657) MAJOR 3: the shield op (and the cold spawn it
+        // needs) moves AFTER the reservation is acquired. Applied before,
+        // a reserve_turn failure (an attended send for the just-created
+        // session winning the reserve during the seconds-long cold spawn)
+        // early-returned BEFORE the tail's strip arm: the live engine kept
+        // the 11-tool deny list (incl. `request_user_input` via main #799,
+        // round-61 M-1) with no mark and no restore duty — fail-stuck
+        // for the engine's lifetime. The FIFO-ordering rationale survives:
+        // the reservation is held from here on, so no other turn can submit
+        // ops in between and the shield op still precedes this delivery's
+        // turn op on the channel.
+        // The engine is acquired ONCE here and passed into the submission
+        // core: the shield op lands on the exact handle the opening turn
+        // submits on (the round-38 rebuild race is the double acquisition —
+        // an eviction between the two get_or_spawn calls let a fresh,
+        // ordinary-catalog engine run the opening turn unshielded). The
+        // non-shield delivery path also acquires before prep now; the turn
+        // reservation is already held, so the only delta vs the old
+        // admit-inside-send order is which concurrent turn wins the gate
+        // after a cold spawn.
+        let engine = self.get_or_spawn(session_id).await?;
+        let mut shield_guard = None;
+        if unattended_shield {
+            engine.apply_unattended_shield().await?;
+            // Round-49 review minor 4: an unattended delivery's own turn is
+            // the one the shield guards, and a second unattended delivery
+            // into a still-marked session would otherwise enqueue shield →
+            // ordinary → turn and run unshielded. (Round-65 R2-4 truthing:
+            // the delivery DOES run the mark-gated restore through the
+            // submission core below — the reason a second unattended
+            // delivery cannot lift the shield is that the core's restore is
+            // mark-gated AND fresh ids carry no mark; nothing here pins a
+            // no-restore shape.)
+            // Round-15 (#657) MAJOR 1: the tail's mark/strip only runs if
+            // this future completes — the watcher's 30s delivery timeout
+            // and the per-file panic guard both DROP it, and a drop after
+            // the shield op resolved but before the tail leaves the engine
+            // silenced with no mark and no restore duty (the third entry
+            // into the hazard the last two rounds closed by pairs). The
+            // guard strips the shield on drop; the tail disarms it once it
+            // owns the disposition.
+            shield_guard = Some(self.watcher_shield_drop_guard(session_id));
+        }
+        // Round-7 Q2 (superseded shape: the base re-cut moved the body-only
+        // expert matching into assemble_delivery_turn below — the manual
+        // match_text definition this block used to carry is that helper's
+        // first tuple element now).
         // First-turn persona guard: the chat command prepends the full
         // persona card body once via take_pending_turn_injections (the
         // per-turn light anchor in send_reserved_user_message is not enough
@@ -4777,19 +5267,66 @@ impl EnginePool {
             .map(|snapshot| snapshot.available_role_lines(&match_text))
             .unwrap_or_default();
         let mode = self.store.mode_state(session_id).mode.to_app_mode();
-        match self
-            .send_reserved_user_message(
+        let (reservation, _turn_gate) = self
+            .admit_reserved_turn(
+                session_id,
+                TranscriptOperation::Append,
+                display_message,
+                "turn",
+                reservation,
+            )
+            .await?;
+        let delivered = self
+            .submit_reserved_user_message(
                 session_id,
                 engine_content,
-                display_message,
                 mode,
                 false,
                 expert_snapshot,
                 expert_candidates,
                 reservation,
+                _turn_gate,
+                engine,
             )
-            .await
-        {
+            .await;
+        // Round-12 (#657) BLOCKER 1 / round-13 wording: the mark is recorded
+        // once the opening turn's SUBMISSION succeeds — it means "the
+        // opening turn went out shielded; the next send through the seams
+        // must restore the ordinary catalog". (The round-11 form inserted
+        // before the turn; with the restore living in the shared send seam,
+        // that ordering would have the delivery dequeue its own shield.) A
+        // failed submission records no mark and strips the shield again: an
+        // opening turn that never went out must not leave the engine
+        // silenced with nobody holding the restore duty.
+        if unattended_shield {
+            match delivered {
+                Ok(()) => {
+                    // The tail owns the disposition: disarm (nothing to strip
+                    // — the mark insert below is sync) and record the mark.
+                    if let Some(guard) = shield_guard.take() {
+                        guard.disarm();
+                    }
+                    self.watcher_shielded_sessions
+                        .lock()
+                        .insert(session_id.to_string());
+                }
+                Err(_) => {
+                    // Round-19 (#657) MAJOR 1: the strip is left to the
+                    // ARMED guard's Drop — a detached, idempotent re-shape
+                    // that survives this future being dropped. The round-18
+                    // shape disarmed FIRST and then awaited the strip, so a
+                    // 30s timeout landing inside that await dropped the
+                    // disarmed guard and never enqueued the strip: the live
+                    // engine kept the 11-tool deny list (incl.
+                    // `request_user_input` via main #799, round-61 M-1)
+                    // with no mark and no restore duty — the strand,
+                    // re-entering through the
+                    // tail itself. No await sits in this arm.
+                    drop(shield_guard);
+                }
+            }
+        }
+        match delivered {
             Ok(()) => {
                 pending_injections.commit();
                 Ok(())
@@ -4917,6 +5454,9 @@ impl EnginePool {
                     cancel_requested: true,
                 });
             }
+            self.runtime_model_provider
+                .begin_logical_turn(session_id)
+                .await?;
             engine.send_scheduled_message(content, &profile).await?;
             wait_for_scheduled_terminal(
                 &mut turn_events,
@@ -4999,6 +5539,11 @@ impl EnginePool {
         keep_inbox: bool,
         requested_generation: Option<u64>,
     ) -> CancelOutcome {
+        // Reset can reuse a session ID and lifecycle epoch. Capture the
+        // provider incarnation before any asynchronous gate or handle lookup.
+        let model_cancel_scope = self
+            .runtime_model_provider
+            .capture_model_cancellation_scope(session_id);
         // r10 foundation: the steer disposition
         // (InterruptKeepInbox/StopDropInbox) and the cancel token are
         // published atomically by cancel_with_mode; a separate keepInbox
@@ -5077,6 +5622,15 @@ impl EnginePool {
                 // N's leftover subagents is the stop contract and N+1's
                 // just-spawned subagents are indistinguishable app-side; see
                 // the fork registration docs.
+                if let Some(identity) = identity.as_ref() {
+                    if !identity.closing {
+                        self.runtime_model_provider.cancel_logical_turn(
+                            session_id,
+                            identity.epoch,
+                            model_cancel_scope.as_deref(),
+                        );
+                    }
+                }
                 if requested_generation.is_some() {
                     dispatch_remote_turn_cancel(engine, identity.as_ref(), steer_mode);
                 } else {
@@ -5239,7 +5793,14 @@ impl EnginePool {
             // plain OVERWRITE of config.disallowed_tools, so the un-gated
             // broadcast replaced a live scheduled run's shield with the
             // ordinary catalog (turns after the toggle ran unshielded).
-            let shaped = if engine.scheduled_unattended.load(Ordering::Acquire) {
+            // Round-15 (#657) MINOR 10: the same overwrite semantics apply
+            // to a plain session currently carrying the watcher-delivery
+            // shield (the shield now outlives the turn until the seams
+            // restore it) — the broadcast consults watcher_shielded_sessions
+            // so a mid-window toggle re-shields instead of un-shielding.
+            let shaped = if engine.scheduled_unattended.load(Ordering::Acquire)
+                || self.watcher_shielded_sessions.lock().contains(&sid)
+            {
                 crate::features::assistant::engine::unattended_disallowed_tools(
                     &self.bridge.shape_disallowed_tools(&sid, tools.clone()),
                 )
@@ -5325,6 +5886,14 @@ impl EnginePool {
         // and are unchanged. Folding the merge into the dispatch seam keeps
         // the wiring itself pinned by an executing test (round-31 M9-rust).
         let engine = self.get_or_spawn(session_id).await?;
+        self.runtime_model_provider
+            .begin_logical_turn(session_id)
+            .await?;
+        // Round-12 (#657) BLOCKER 1: edit-and-resend is an attended seam too
+        // and bypasses send_reserved_user_message — restore here as well,
+        // after the reservation is acquired (same reasoning as the send
+        // seam above).
+        self.restore_watcher_shield_if_marked(session_id).await;
         forward_edit_resend_with_reminder(session_id, new_message, |message| {
             engine.edit_last_turn_reserved(message, reservation)
         })
@@ -5553,7 +6122,16 @@ fn default_model_for_new_session_from(
     prefs: &UserPrefs,
     bridge: &Pinvou3Bridge,
 ) -> (String, Option<String>) {
-    match prefs.active_model() {
+    if prefs.model_selection_schema_version >= 1 && prefs.advanced.default_model_ref.is_none() {
+        return (String::new(), None);
+    }
+    let selected = prefs
+        .advanced
+        .default_model_ref
+        .as_ref()
+        .and_then(|selection| prefs.resolve_model_ref(selection))
+        .or_else(|| prefs.active_model().cloned());
+    match selected {
         Some(model) => (model.model.clone(), Some(model.id.clone())),
         None => (bridge.model(), None),
     }
@@ -5708,6 +6286,13 @@ where
     }
 }
 
+fn pinned_scheduled_catalog_reference(
+    model: &SavedModel,
+    pins_scheduled_model: bool,
+) -> Option<String> {
+    (pins_scheduled_model && model.is_builtin_account_platform()).then(|| model.model.clone())
+}
+
 fn resolve_scheduled_model(
     models: &[SavedModel],
     profile: &ScheduledRunProfile,
@@ -5719,6 +6304,14 @@ fn resolve_scheduled_model(
             .with_context(|| {
                 format!("此任务绑定的 AI 模型配置已失效，请重新选择 AI 模型并保存任务。缺失配置：{model_id}")
             })?;
+        if selected.is_builtin_account_platform() {
+            // The built-in record is a mutable carrier for the global default.
+            // A scheduled run keeps its persisted catalog reference; the runtime
+            // provider still validates that reference against the current catalog.
+            let mut bound = selected.clone();
+            bound.model = profile.model.clone();
+            return Ok(bound);
+        }
         if selected.model != profile.model {
             bail!(
                 "此任务绑定的 AI 模型配置已变更，请重新选择 AI 模型并保存任务。配置 {model_id} 从 '{}' 变为 '{}'",
@@ -5812,9 +6405,54 @@ fn validate_prepared_runtime_route(
     Ok(())
 }
 
+fn resolve_voice_draft_model(
+    prefs: &UserPrefs,
+    model_id: Option<&str>,
+    selection: Option<&ModelSelectionRef>,
+) -> Result<SavedModel> {
+    let selection = selection.or_else(|| {
+        model_id
+            .filter(|id| !id.trim().is_empty())
+            .is_none()
+            .then_some(prefs.advanced.default_model_ref.as_ref())
+            .flatten()
+    });
+    let selected = match selection {
+        Some(selection) => prefs
+            .resolve_model_ref(selection)
+            .context("Draft model binding is unavailable; select a model again")?,
+        None => match model_id.filter(|id| !id.trim().is_empty()) {
+            Some(id) => prefs
+                .model_by_id(id)
+                .filter(|model| !model.is_builtin_account_platform())
+                .cloned()
+                .context("Draft model binding is unavailable; select a model again")?,
+            None => match prefs.advanced.default_model_ref.as_ref() {
+                Some(selection) => prefs.resolve_model_ref(selection),
+                None if prefs.model_selection_schema_version == 0 => prefs
+                    .active_model()
+                    .filter(|model| !model.is_builtin_account_platform())
+                    .cloned(),
+                None => None,
+            }
+            .context("model_selection_required: choose a model before voice postprocess")?,
+        },
+    };
+    if model_id
+        .filter(|id| !id.trim().is_empty())
+        .is_some_and(|id| id != selected.id)
+        || (selected.is_builtin_account_platform()
+            && matches!(selection, Some(ModelSelectionRef::LocalConfig { .. })))
+    {
+        bail!("Draft model binding is unavailable; select a model again");
+    }
+    Ok(selected)
+}
+
 async fn prepare_draft_runtime_model(
     provider: &dyn RuntimeModelProvider,
     model: SavedModel,
+    auxiliary: AuxiliaryModelContext,
 ) -> Result<PreparedRuntimeModel> {
     let selected_id = model.id.clone();
     let prepared = provider
@@ -5823,6 +6461,8 @@ async fn prepare_draft_runtime_model(
             session_id: String::new(),
             model,
             scheduled_unattended: false,
+            scheduled_model_ref: None,
+            auxiliary: Some(auxiliary),
         })
         .await?;
     if prepared.model.id != selected_id {
@@ -5838,6 +6478,35 @@ async fn prepare_draft_runtime_model(
 // so it cannot deadlock.
 #[allow(clippy::await_holding_lock)]
 mod scheduled_model_tests {
+    #[test]
+    fn voice_draft_typed_reference_never_guesses_an_unbound_carrier() {
+        let mut prefs = crate::platform::prefs::UserPrefs::default();
+        prefs.advanced.saved_models = vec![SavedModel::builtin_account_platform()];
+        let id = prefs.advanced.saved_models[0].id.clone();
+        prefs
+            .set_default_model_ref(crate::platform::prefs::ModelSelectionRef::account_platform(
+                "0199a100-0001-7000-8000-000000000106",
+            ))
+            .unwrap();
+        prefs.model_selection_schema_version = 1;
+        let resolved = super::resolve_voice_draft_model(&prefs, None, None).unwrap();
+        assert_eq!(resolved.model, "0199a100-0001-7000-8000-000000000106");
+        assert!(super::resolve_voice_draft_model(&prefs, Some(&id), None).is_err());
+        assert!(
+            super::resolve_voice_draft_model(
+                &prefs,
+                None,
+                Some(&crate::platform::prefs::ModelSelectionRef::local(&id))
+            )
+            .is_err()
+        );
+        prefs.advanced.default_model_ref =
+            Some(crate::platform::prefs::ModelSelectionRef::local(&id));
+        assert!(super::resolve_voice_draft_model(&prefs, None, None).is_err());
+        prefs.advanced.default_model_ref = None;
+        assert!(super::resolve_voice_draft_model(&prefs, None, None).is_err());
+    }
+
     struct DraftModelProvider {
         calls: AtomicUsize,
         fail: bool,
@@ -5872,13 +6541,21 @@ mod scheduled_model_tests {
             change_identity: false,
         };
         for selected in [
-            SavedModel::builtin_llmapi(),
+            SavedModel::builtin_account_platform(),
             model("custom-draft", "custom-wire"),
         ] {
             let expected_id = selected.id.clone();
-            let prepared = super::prepare_draft_runtime_model(&provider, selected)
-                .await
-                .unwrap();
+            let prepared = super::prepare_draft_runtime_model(
+                &provider,
+                selected,
+                super::AuxiliaryModelContext {
+                    scope_id: "voice-test".into(),
+                    draft_model_ref: None,
+                    inherited_default_revision: None,
+                },
+            )
+            .await
+            .unwrap();
             assert_eq!(prepared.model.id, expected_id);
         }
         assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
@@ -5893,9 +6570,17 @@ mod scheduled_model_tests {
                 change_identity,
             };
             assert!(
-                super::prepare_draft_runtime_model(&provider, SavedModel::builtin_llmapi())
-                    .await
-                    .is_err()
+                super::prepare_draft_runtime_model(
+                    &provider,
+                    SavedModel::builtin_account_platform(),
+                    super::AuxiliaryModelContext {
+                        scope_id: "voice-test".into(),
+                        draft_model_ref: None,
+                        inherited_default_revision: None,
+                    },
+                )
+                .await
+                .is_err()
             );
             assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
         }
@@ -7391,6 +8076,8 @@ mod scheduled_model_tests {
                 session_id: "session-managed".to_owned(),
                 model: selected,
                 scheduled_unattended: false,
+                scheduled_model_ref: None,
+                auxiliary: None,
             },
             None,
             false,
@@ -7436,6 +8123,8 @@ mod scheduled_model_tests {
                     session_id: session_id.to_owned(),
                     model: selected,
                     scheduled_unattended,
+                    scheduled_model_ref: None,
+                    auxiliary: None,
                 },
                 None,
                 false,
@@ -7459,6 +8148,8 @@ mod scheduled_model_tests {
                 session_id: "ordinary-failure".to_owned(),
                 model: selected,
                 scheduled_unattended: false,
+                scheduled_model_ref: None,
+                auxiliary: None,
             },
             None,
             false,
@@ -7699,6 +8390,113 @@ mod scheduled_model_tests {
     }
 
     #[test]
+    fn scheduled_catalog_reference_requires_a_pinned_builtin_carrier() {
+        let mut platform = SavedModel::builtin_account_platform();
+        platform.model = "0199a100-0001-7000-8000-000000000106".into();
+        assert_eq!(
+            super::pinned_scheduled_catalog_reference(&platform, true).as_deref(),
+            Some("0199a100-0001-7000-8000-000000000106")
+        );
+        assert_eq!(
+            super::pinned_scheduled_catalog_reference(&platform, false),
+            None
+        );
+        let mut local = model("local", &platform.model);
+        local.name = platform.name;
+        assert_eq!(
+            super::pinned_scheduled_catalog_reference(&local, true),
+            None
+        );
+    }
+
+    #[test]
+    fn scheduled_platform_binding_survives_changing_global_default() {
+        const ORIGINAL: &str = "0199a100-0001-7000-8000-000000000106";
+        const LATER_DEFAULT: &str = "0199a100-0001-7000-8000-000000000107";
+        let mut prefs = crate::platform::prefs::UserPrefs::default();
+        prefs.advanced.saved_models = vec![SavedModel::builtin_account_platform()];
+        prefs
+            .set_default_model_ref(crate::platform::prefs::ModelSelectionRef::account_platform(
+                ORIGINAL,
+            ))
+            .expect("original platform default");
+        let carrier_id = prefs.advanced.saved_models[0].id.clone();
+        let saved = serde_json::to_string(&profile(Some(&carrier_id), ORIGINAL))
+            .expect("persisted scheduled profile");
+        prefs
+            .set_default_model_ref(crate::platform::prefs::ModelSelectionRef::account_platform(
+                LATER_DEFAULT,
+            ))
+            .expect("new conversation default");
+        let restored: ScheduledRunProfile =
+            serde_json::from_str(&saved).expect("restore original task binding");
+        let selected =
+            resolve_spawn_model(&prefs.advanced.saved_models, Some(&restored), None, true)
+                .expect("the saved task is independent of the new default")
+                .expect("bound platform model");
+        assert!(selected.is_builtin_account_platform());
+        assert_eq!(selected.model, ORIGINAL);
+        assert_eq!(restored.model, ORIGINAL);
+        assert_eq!(prefs.advanced.saved_models[0].model, LATER_DEFAULT);
+        assert_eq!(
+            prefs.advanced.default_model_ref,
+            Some(crate::platform::prefs::ModelSelectionRef::account_platform(
+                LATER_DEFAULT
+            ))
+        );
+    }
+
+    #[test]
+    fn scheduled_platform_manual_continuation_keeps_profile_unless_reselected() {
+        let mut carrier = SavedModel::builtin_account_platform();
+        carrier.model = "0199a100-0001-7000-8000-000000000107".into();
+        let task = profile(Some(&carrier.id), "0199a100-0001-7000-8000-000000000106");
+        let models = vec![carrier.clone()];
+        let pinned = resolve_spawn_model(&models, Some(&task), None, false)
+            .expect("manual continuation")
+            .expect("task model");
+        assert_eq!(pinned.model, task.model);
+        let explicit = resolve_spawn_model(&models, Some(&task), Some(&carrier.id), false)
+            .expect("explicit manual reselect")
+            .expect("selected carrier");
+        assert_eq!(explicit.model, carrier.model);
+        assert_eq!(
+            super::pinned_scheduled_catalog_reference(&explicit, false),
+            None
+        );
+        let automatic = resolve_spawn_model(&models, Some(&task), Some(&carrier.id), true)
+            .expect("automatic run ignores manual reselect")
+            .expect("task model");
+        assert_eq!(automatic.model, task.model);
+    }
+
+    #[test]
+    fn scheduled_platform_binding_never_maps_a_legacy_name_to_the_default() {
+        let mut carrier = SavedModel::builtin_account_platform();
+        carrier.model = "0199a100-0001-7000-8000-000000000107".to_string();
+        let saved = profile(Some(&carrier.id), "deepseek-v4-flash");
+        let selected = resolve_scheduled_model(&[carrier], &saved)
+            .expect("retain the original reference for runtime catalog validation");
+        assert_eq!(selected.model, "deepseek-v4-flash");
+        assert_eq!(saved.model, "deepseek-v4-flash");
+        assert!(resolve_scheduled_model(&[], &saved).is_err());
+    }
+
+    #[test]
+    fn scheduled_local_configuration_cannot_claim_platform_binding_by_name() {
+        let mut local = model("saved-local", "changed-wire-model");
+        local.name = SavedModel::builtin_account_platform().name;
+        assert!(!local.is_builtin_account_platform());
+        assert!(
+            resolve_scheduled_model(
+                &[local],
+                &profile(Some("saved-local"), "original-wire-model")
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
     fn unattended_spawn_uses_task_model_despite_interactive_override() {
         let models = vec![
             model("task-model", "task-wire"),
@@ -7904,6 +8702,47 @@ mod scheduled_model_tests {
             .ensure_active()
             .expect("unsubmitted reservation must survive the model-update rebuild");
         assert!(lifecycle.reserve().is_err());
+    }
+
+    /// Round-42 M1 premise pin: the reclaim intentionally keeps an
+    /// unsubmitted reservation valid (the parent semantic the test above
+    /// pins), which means `ensure_active` CANNOT notice a model-switch /
+    /// reconfigure eviction inside the watcher delivery's reserve→admit
+    /// window — the submission core must catch it via mailbox identity
+    /// instead (the round-42 assertions in
+    /// `watcher_delivery_submits_on_the_shielded_engine`). Also pins the
+    /// corollary that a mismatch bail (which drops the reservation) frees
+    /// the single turn slot, so the retried delivery is not wedged busy.
+    #[test]
+    fn reclaim_keeps_unsubmitted_reservations_valid_so_mailbox_identity_guards_the_delivery() {
+        let lifecycles = SessionTurnLifecycles::default();
+        let sid = "session-watcher-eviction-window";
+        let lifecycle = lifecycles.for_session(sid);
+        let mut reservation = lifecycle.reserve().expect("reserve before the eviction");
+        reservation
+            .set_transcript(
+                TranscriptOperation::Append,
+                user_display_message("opening turn"),
+            )
+            .expect("display transcript");
+
+        // The eviction's reclaim runs to completion while the delivery sits
+        // between reserve and admit: no claim, no invalidation (the parent
+        // semantic `rebuild_does_not_swallow_inflight_reservation` pins).
+        assert!(
+            !lifecycle.claim_reclaimed_once(),
+            "the reclaim must not claim a turn that never reached the engine mailbox"
+        );
+        reservation
+            .ensure_active()
+            .expect("the window's reservation survives the eviction — hence the mailbox check");
+
+        // The mismatch bail path drops the reservation before submitting:
+        // the single turn slot must be freed for the retried delivery.
+        drop(reservation);
+        lifecycle
+            .reserve()
+            .expect("a bailed delivery must not wedge the session busy");
     }
 
     #[tokio::test]
@@ -11177,6 +12016,86 @@ mod scheduled_model_tests {
             "no direct unbounded forwarder join may remain in reclaim"
         );
     }
+
+    // Round-38 shield rebuild race: the watcher delivery must acquire the
+    // engine ONCE and submit on that exact handle — the submission core
+    // takes the caller's engine and never re-acquires. The pre-fix shape
+    // spawned inside the shield leg AND again inside the send seam; an
+    // eviction between the two acquisitions let a fresh, ordinary-catalog
+    // engine run the opening turn silently unshielded (the mutation the
+    // source-scrape pins could not see).
+    #[test]
+    fn watcher_delivery_submits_on_the_shielded_engine() {
+        let src = include_str!("engine_pool.rs");
+        let src = &src[..src
+            .find(
+                "#[allow(clippy::await_holding_lock)]
+mod scheduled_model_tests {",
+            )
+            .expect("the test module marker must exist")];
+        let core = production_body(src, "async fn submit_reserved_user_message(");
+        assert!(
+            !core.contains("get_or_spawn"),
+            "the submission core must not re-acquire the engine — a second get_or_spawn after the watcher's shield op re-opens the rebuild race"
+        );
+        let delivery = production_body(src, "pub(crate) async fn deliver_messaging_turn(");
+        // Count the acquisitions in the acquisition region only (fn start →
+        // the delivery's own admission): production_body's span can swallow
+        // the next private fn, whose own acquisitions are not this fn's.
+        let region = &delivery[..delivery
+            .find("admit_reserved_turn(")
+            .expect("the delivery admits before submission")];
+        assert_eq!(
+            region.matches("self.get_or_spawn(").count(),
+            1,
+            "the delivery must acquire the engine exactly once and shield THAT handle"
+        );
+        let shield_at = delivery
+            .find("apply_unattended_shield")
+            .expect("the delivery must apply the shield");
+        let submit_at = delivery
+            .find("submit_reserved_user_message(")
+            .expect("the delivery must submit through the engine-taking core");
+        assert!(
+            shield_at < submit_at,
+            "the shield op must precede the submission core call on the same engine"
+        );
+        // Round-42 M1: the submission core must re-validate the engine
+        // incarnation BEFORE its first op send. An eviction in the
+        // reserve→admit window (model switch / agent reconfigure) keeps the
+        // unsubmitted reservation valid on purpose, so mailbox identity is
+        // the only guard against submitting the opening turn into a dead
+        // engine's post-Shutdown channel (silent drop → false success mark
+        // → wedged-busy session). Deleting the check, replacing the mailbox
+        // identity with a constant, or moving it behind the send turns this
+        // red. Assertions run on comment-stripped code so the check's own
+        // explanatory comment cannot satisfy them (the round-34 M4 lesson).
+        let core_code = core
+            .lines()
+            .map(|line| line.split("//").next().unwrap_or(line))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let live_at = core_code
+            .find("self.handle_for(session_id)")
+            .expect("the core must re-resolve the live engine entry");
+        // Round-43 review N12: needle the FULL two-mailbox comparison — a
+        // self-comparison fold (`Arc::ptr_eq(&engine.handle.rx_event,
+        // &engine.handle.rx_event)`) preserves a bare `rx_event` needle
+        // while silently disabling the check.
+        let pair_at = core_code
+            .find("Arc::ptr_eq(&live.handle.rx_event, &engine.handle.rx_event)")
+            .expect("the incarnation check must compare the two DISTINCT mailboxes");
+        let bail_at = core_code
+            .find("was reclaimed mid-delivery")
+            .expect("the mismatch arm must fail the delivery transiently");
+        let engine_call = core_code
+            .find("engine.send_reserved_user_message(")
+            .expect("the core submits the turn through the engine handle");
+        assert!(
+            live_at < pair_at && pair_at < bail_at && bail_at < engine_call,
+            "the incarnation re-validation must run, compare mailboxes, and precede the core's engine submission"
+        );
+    }
 }
 
 /// Wiring tests for spawn-time probe adoption, in two layers:
@@ -11272,6 +12191,40 @@ mod probed_facts_wiring_tests {
         format!(
             r#"{{"data":[{{"id":"{id}","max_model_len":262144,"max_completion_tokens":4096}}]}}"#
         )
+    }
+
+    #[tokio::test]
+    async fn finalize_runtime_bridge_preserves_locked_model_and_limits_without_probe() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _env = isolate_model_env();
+        for (preset, kind, served) in [
+            (ModelPreset::LocalVllm, None, "different-served-model"),
+            (
+                ModelPreset::OpenaiCompatible,
+                Some("custom"),
+                "controller-model",
+            ),
+        ] {
+            let mock = models_mock::spawn(&[("/v1/models", 200, single_entry_json(served))]);
+            let mut model = saved_model(preset, "controller-model", kind);
+            model.base_url = mock.base_url.clone();
+            model.context_window_tokens = Some(65_536);
+            model.max_output_tokens = Some(2_048);
+            let mut bridge = wiring_bridge(model.clone());
+            bridge.runtime_route_locked = true;
+            let prepared = PreparedRuntimeModel::unchanged(model.clone());
+            let bridge = EnginePool::finalize_runtime_bridge(bridge, &prepared, false).await;
+            let retained = bridge.session_model.as_ref().unwrap();
+            assert!(bridge.runtime_route_is_locked());
+            assert_eq!(retained.model, model.model);
+            assert_eq!(retained.base_url, model.base_url);
+            assert_eq!(retained.context_window_tokens, model.context_window_tokens);
+            assert_eq!(retained.max_output_tokens, model.max_output_tokens);
+            assert_eq!(bridge.probed_context_tokens, None);
+            assert_eq!(bridge.probed_output_tokens, None);
+            assert_eq!(bridge.probed_local_kind, None);
+            assert_eq!(mock.hits_for("/v1/models"), 0);
+        }
     }
 
     #[tokio::test]
@@ -12366,7 +13319,14 @@ mod probed_facts_wiring_tests {
             .collect::<Vec<_>>()
             .join("\n");
         let compact: String = fn_body.chars().filter(|c| !c.is_whitespace()).collect();
-        assert!(compact.contains("letshaped=ifengine.scheduled_unattended.load(Ordering::Acquire){crate::features::assistant::engine::unattended_disallowed_tools("),
+        // Round-40: the compact needle pins the WHOLE composed gate — the
+        // scheduled_unattended leg, the watcher_shielded_sessions consult
+        // (Round-15 MINOR 10), and the unattended_disallowed_tools call.
+        // Deleting any of the three turns this red (the round-39 review
+        // showed the broadcast conjunct was deletable while the suite
+        // stayed green). The needle must match the composed shape, not the
+        // parent-only `if load(Acquire) {` shape.
+        assert!(compact.contains("letshaped=ifengine.scheduled_unattended.load(Ordering::Acquire)||self.watcher_shielded_sessions.lock().contains(&sid){crate::features::assistant::engine::unattended_disallowed_tools("),
             "the positive unattended branch must compose the shield, not merely mention it");
         let gate = fn_body
             .find("engine.scheduled_unattended.load(Ordering::Acquire)")
@@ -12434,5 +13394,31 @@ mod tests {
             "reuse must be CONJOINED with the run-engine class — the clause \
              that keeps interactive continuations off the run engine (round-35 M1)"
         );
+    }
+}
+
+#[cfg(test)]
+mod runtime_turn_authority_tests {
+    use super::{RuntimeTurnLifecycleAuthority, SessionTurnLifecycles};
+    use crate::features::assistant::runtime_model::RuntimeTurnAuthority;
+    use std::sync::Arc;
+    #[test]
+    fn authority_reads_real_reservation_and_cannot_extend_pool_registry_lifetime() {
+        let lifecycles = SessionTurnLifecycles::default();
+        let authority = RuntimeTurnLifecycleAuthority {
+            states: Arc::downgrade(&lifecycles.states),
+        };
+        assert_eq!(authority.current_generation("absent"), None);
+        assert!(!authority.with_generation("absent", 1, &mut || panic!("absent")));
+        let lifecycle = lifecycles.for_session("session");
+        let reservation = lifecycle.reserve().unwrap();
+        let generation = authority.current_generation("session").unwrap();
+        let mut calls = 0;
+        assert!(authority.with_generation("session", generation, &mut || calls += 1));
+        assert_eq!(calls, 1);
+        drop(lifecycles);
+        assert_eq!(authority.current_generation("session"), None);
+        assert!(!authority.with_generation("session", generation, &mut || panic!("expired owner")));
+        drop(reservation);
     }
 }

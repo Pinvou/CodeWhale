@@ -1,0 +1,2 @@
+DROP INDEX IF EXISTS manual_review_cases_token_usage_overview_created_idx;
+DROP INDEX IF EXISTS usage_requests_operations_overview_started_idx;

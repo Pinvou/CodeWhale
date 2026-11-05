@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 import postcss from 'postcss';
 import tailwindcss from 'tailwindcss';
 
-import { auditDistCss, auditDistPresenceProblems, runAudit } from '../scripts/audit-compat.mjs';
+import { auditDistCss, auditDistPresenceProblems, auditPortalAssets, runAudit } from '../scripts/audit-compat.mjs';
 import { staticRuntimeScripts } from '../vite.config.mjs';
 
 // WebView compatibility contract: the desktop minimum is macOS 11
@@ -754,5 +754,37 @@ test('a layer() token inside import supports() conditions is not a layer clause'
     }
   } finally {
     fs.rmSync(distDir, { recursive: true, force: true });
+  }
+});
+
+test('Portal compatibility audits actual entries, missing chunks and mixed-variable inset', () => {
+  const portal = fs.mkdtempSync(path.join(os.tmpdir(), 'compat-portal-'));
+  try {
+    assert.ok(auditPortalAssets(portal).some(message => message.includes('portal/account.html missing')));
+    assert.ok(auditPortalAssets(portal).some(message => message.includes('portal/assets missing')));
+    const html = '<script type="module" src="/assets/portal.js"></script><link rel="stylesheet" href="/assets/portal.css">';
+    for (const entry of ['account.html', 'admin.html', 'portal-session-handoff.html']) fs.writeFileSync(path.join(portal, entry), html);
+    fs.mkdirSync(path.join(portal, 'assets'));
+    assert.ok(auditPortalAssets(portal).some(message => message.includes('no JavaScript')));
+    assert.ok(auditPortalAssets(portal).some(message => message.includes('no CSS')));
+    fs.writeFileSync(path.join(portal, 'assets', 'portal.js'), 'import "./missing.js";');
+    fs.writeFileSync(path.join(portal, 'assets', 'portal.css'), '.topbar{position:fixed;inset:0 0 auto var(--sidebar)}');
+    let violations = auditPortalAssets(portal);
+    assert.ok(violations.some(message => message.includes('missing local asset ./missing.js')));
+    assert.ok(violations.some(message => message.includes('inset shorthand')));
+    fs.writeFileSync(path.join(portal, 'assets', 'portal.js'), 'structuredClone({});');
+    assert.ok(auditPortalAssets(portal).some(message => message.includes('structuredClone')));
+    fs.writeFileSync(path.join(portal, 'assets', 'portal.js'), 'void 0;');
+    fs.writeFileSync(path.join(portal, 'assets', 'portal.css'), '.topbar{position:fixed;top:0;right:0;bottom:auto;left:var(--sidebar)}');
+    assert.deepEqual(auditPortalAssets(portal), []);
+    fs.writeFileSync(path.join(portal, 'account.html'), html + '<script>/(?<=x)y/.test("xy");</script>');
+    assert.ok(auditPortalAssets(portal).some(message => message.includes('lookbehind')));
+    fs.writeFileSync(path.join(portal, 'account.html'), html);
+    fs.unlinkSync(path.join(portal, 'assets', 'portal.js'));
+    assert.ok(auditPortalAssets(portal).some(message => message.includes('missing local asset /assets/portal.js')));
+  } finally {
+    assert.equal(path.dirname(path.resolve(portal)), path.resolve(os.tmpdir()));
+    assert.ok(path.basename(portal).startsWith('compat-portal-'));
+    fs.rmSync(portal, { recursive: true, force: true });
   }
 });

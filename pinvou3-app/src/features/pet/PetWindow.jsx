@@ -1250,7 +1250,7 @@ export default function PetWindow({
                 <div className="pet-activity-main">
                   <div className="pet-activity-title-row">
                     <span className="pet-activity-title">{petCopy.scheduledDone}</span>
-                    <span className="pet-scheduled-status" aria-label={petCopy.done}>✓</span>
+                    <span className="pet-scheduled-status" role="img" aria-label={petCopy.done}>✓</span>
                   </div>
                   <div className="pet-activity-body-row">
                     <span className="pet-activity-body">
@@ -1293,6 +1293,7 @@ export default function PetWindow({
                       <span className="pet-activity-title">{activity.title}</span>
                       <span
                         className="pet-activity-status"
+                        role="img"
                         aria-label={petCopy[activity.status]}
                       >
                         {STATUS_SYMBOL[activity.status]}

@@ -281,17 +281,17 @@ fn persist_mcp_boot_receipt(
 /// 关键点：监听 `Event::ApprovalRequired` 并主动 `approve_tool_call`。
 /// 注意底座语义：`auto_approve = true` 时 `registered_tool_approval_required`
 /// 会直接**旁路**可绕过的 Required 审批、不发事件（turn_loop.rs，非绕过名单仅
-/// rlm_eval / start_mcp_server）。因此本臂对普通会话只在 auto_approve 关闭的
+/// rlm_eval / rlm / start_mcp_server）。因此本臂对普通会话只在 auto_approve 关闭的
 /// 场景（例如定时任务按 profile）收到事件；普通会话仍沿用既有批准策略。
 ///
 /// Plan ready 触发：监听 `update_plan` 工具结果 + TurnComplete，
 /// 若 active session mode=Plan + 本 turn 调过 update_plan + plan 非空 →
-/// 设 phase=Ready + emit `chat:plan_ready` 含 plan snapshot。
+/// 登记待决 plan（PlanPhase 已砍，不设 phase）+ emit `chat:plan_ready` 含 plan snapshot。
 ///
 /// **多引擎并发**:每个 session 一个独立 engine + 一个独立 forwarder,所以这里捕获
 /// 的 `session_id` 唯一标识本 forwarder 服务的 session。**所有 emit 的 payload 都带
 /// `session_id`**,前端按它把事件分流到对应 session 的缓冲;TurnComplete 里的 mode
-/// 判据(plan_ready / M2 / M3)也全部基于本 `session_id`,不再读全局 `store.active_id()`
+/// 判据(plan_ready)也全部基于本 `session_id`,不再读全局 `store.active_id()`
 /// (并发下 active 会变,读全局会把判据算到错误 session 上)。返回 forwarder 的
 /// `JoinHandle`,EnginePool 回收 session 时 `abort()` 它。
 pub(crate) fn spawn_event_forwarder(
@@ -1804,6 +1804,20 @@ pub(crate) fn spawn_event_forwarder(
                     request_ms,
                     ..
                 } => {
+                    // 常规构建也消费引擎计时字段。监控 TTFT/TPS 以引擎为权威源
+                    // (first_token_ms 从请求派发点起表,含真实网络首字节),并附
+                    // 该调用的 output_tokens:TPS 分子与生成窗口按调用严格配对,
+                    // 无工具多调用轮(续跑/reprompt)逐条累加。墙钟 Instant 重测
+                    // 含转发/分发延迟,仅作引擎未上报完整对时的回落。
+                    // benchmark-hooks 的 eval 里程碑照旧,与 self_metrics 互不影响。
+                    if let Some(m) = &self_metrics {
+                        m.on_engine_usage(
+                            &session_id,
+                            first_token_ms,
+                            request_ms,
+                            usage.output_tokens,
+                        );
+                    }
                     #[cfg(feature = "benchmark-hooks")]
                     if crate::features::assistant::timing::eval_observation_enabled(&session_id) {
                         // benchmark-core's stable product contract predates the
@@ -1826,7 +1840,7 @@ pub(crate) fn spawn_event_forwarder(
                         );
                     }
                     #[cfg(not(feature = "benchmark-hooks"))]
-                    let _ = (usage, duration_ms, first_token_ms, request_ms);
+                    let _ = duration_ms;
                 }
                 Event::ToolGateDecision {
                     agent_id,
@@ -2394,6 +2408,26 @@ mod transcript_persist_pins {
             !body.contains(".persist_admitted_chat_display(")
                 && !body.contains(".persist_chat_engine_state"),
             "the forwarder must not bypass the commit-callback helpers"
+        );
+    }
+
+    #[test]
+    fn engine_usage_wiring_feeds_self_metrics_once() {
+        // 监控 TTFT/TPS 的引擎计时接线只有这一处。self_metrics 的单元测试只覆盖
+        // 累加器本体——换位突变(request_ms 当 ttft)或删掉整行调用都让它们全绿,
+        // 故在此钉死调用形状(参数顺序 = 引擎字段顺序 + per-call 输出 tokens)。
+        // 去空白后匹配且不依赖尾逗号:rustfmt 把超宽调用折成多行,或将来折回
+        // 单行(尾逗号消失)都不影响判定。
+        let body = forwarder_body();
+        let flattened: String = body.chars().filter(|c| !c.is_whitespace()).collect();
+        assert_eq!(
+            flattened
+                .matches(
+                    "m.on_engine_usage(&session_id,first_token_ms,request_ms,usage.output_tokens"
+                )
+                .count(),
+            1,
+            "TurnUsage must feed SelfMetrics exactly once, args in engine field order + per-call output_tokens"
         );
     }
 }

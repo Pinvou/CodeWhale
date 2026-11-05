@@ -1299,6 +1299,8 @@ mod tests {
                     session_id: session_id.to_owned(),
                     model: selected,
                     scheduled_unattended: false,
+                    scheduled_model_ref: None,
+                    auxiliary: None,
                 },
                 None,
                 false,
@@ -1665,6 +1667,7 @@ mod tests {
             }
             let owner = Arc::new(publication.unwrap());
             let path = owner.path().to_owned();
+            let read_path = owner.read_path().to_owned();
             owner.request_cleanup();
             let descriptor = PublishedAttachment {
                 handle_id: "ctr-up-0001".to_owned(),
@@ -1684,7 +1687,7 @@ mod tests {
             }
             let fake = Arc::new(FakeEngine {
                 completes_after_first_poll: true,
-                protected_attachment: Some(path.clone()),
+                protected_attachment: Some(read_path.clone()),
                 fail_submission: outcome == "submission_failed",
                 cancel_after_submission: (outcome == "cancel_wait").then(|| cancel.clone()),
                 ..FakeEngine::default()

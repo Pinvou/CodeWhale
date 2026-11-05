@@ -22,15 +22,15 @@ ignore = [
     # RUSTSEC-2026-0194 (quick-xml quadratic complexity) and
     # RUSTSEC-2026-0195 (NsReader memory exhaustion) no longer match:
     # both advisories are fixed in quick-xml >=0.41.0, and the lockfile
-    # resolves 0.41.0 + 0.42.0（0.42 来自本仓直接依赖与 calamine 0.37；
+    # resolves 0.41.0 + 0.42.0（0.42 来自本仓直接依赖与 calamine 0.38；
     # 残留的 0.41.0 走 plist 1.10.0 与 wayland-scanner/xcb 的 Linux 构建
     # 链,同样在修复线上）。 Without an ignore entry, a future dependency
     # downgrade below 0.41 would trip the advisory and fail CI again —
     # reassess then.
     #
     # RUSTSEC-2026-0367/0368/0369 (zip 8.x extract-family) RETIRED:
-    # calamine 0.37 requires zip ^9, and all three workspaces now pin
-    # calamine = "0.37" — the graph converges on a single zip 9.0.5 and no
+    # calamine 0.38 requires zip ^9, and all three workspaces now pin
+    # calamine = "0.38" — the graph converges on a single zip 9.0.5 and no
     # longer contains a vulnerable zip. The reachability note (the
     # graph never calls the wholesale `ZipArchive::extract()` /
     # stream-extract APIs — every direct zip consumer iterates `by_index`
@@ -38,15 +38,6 @@ ignore = [
     # posture: if a future downgrade below zip 9 re-enters the tree, these
     # three advisories trip CI again.
     #
-    # RUSTSEC-2026-0387 (crypto-bigint constant-time timing variability,
-    # DB 刷新于 2026-10-23——community#761 移植当日,其线上 deny 全绿先于本通告):
-    # patched 仅 >= 0.7.6,而本图 crypto-bigint 0.5.5 由 elliptic-curve 0.13 →
-    # p256 0.13 / hpke 0.12 钉住,再往上由 age 0.12 锁定;升级到 0.7.x 需要
-    # RustCrypto elliptic-curve/p256 全生态大版本迁移,非本仓可单独完成。
-    # 影响面:age 0.12 的本地静态数据加密(会话/密钥落盘),不存在能观测
-    # EC 运算时序的远程攻击者;timing 侧信道在本威胁模型下不可实际利用。
-    # Reassess on any age/elliptic-curve/p256 bump.
-    "RUSTSEC-2026-0387",
 ]
 # unmaintained 保留 "workspace":父 crate 依赖图比子模块深
 # (子模块 + Tauri GTK3/glib + fastembed),实测 unmaintained="all" 会命中 gtk-rs GTK3、
@@ -61,13 +52,12 @@ unmaintained = "workspace"
 # unsound="all" 探针恰好只命中它。GTK hold 移动时在此重评。
 unsound = "workspace"
 # Restored to "deny": the supported non-yanked dependency update this block
-# waited for has landed — calamine 0.37 with a single zip 9.0.5 in the graph —
+# waited for has landed — calamine 0.38 with a single zip 9.0.5 in the graph —
 # so yanked releases are denied again. Reassess immediately if an advisory
 # affects the pinned version.
 yanked = "deny"
-# 被忽略条目不再命中任何 crate 时直接报错(默认 warn):上面按 id 的 advisory
-# 例外(现为 RUSTSEC-2026-0387)都是带重评条件的临时豁免——依赖升级使条目
-# 失效的同一提交里 CI 就会变红,摘除协议因此自强制,不依赖注释自觉。
+# 未命中的 advisory 例外仍须报错；当前无 ID 级豁免，避免旧例外在依赖
+# 退出漏洞链后继续残留。后续新增例外也必须随其依赖图重新评估。
 unused-ignored-advisory = "deny"
 
 [licenses]
@@ -103,12 +93,9 @@ multiple-versions = "allow"
 deny = [
     { name = "webpki-roots", version = ">=1.0.0, <1.0.10" },
     { name = "webpki-roots", version = ">=0.26.0, <0.26.11" },
-    # Round-22 review: 上面 [advisories] 的 RUSTSEC-2026-0387 id 级忽略没有
-    # 版本维度——半升级形态(age/p256 升到修复线,而新的第三方依赖把旧
-    # elliptic-curve 重新带进图、crypto-bigint 0.5.5 残留)不会触发任何
-    # 重评信号。这里独立封禁漏洞窗口(现图 0.5.5 恰在窗口外,bans 全绿);
-    # 与 id 忽略同一提交摘除时同步收窄为 "<0.7.6" 或删除本条。
-    { name = "crypto-bigint", version = ">0.5.5, <0.7.6" },
+    # age 0.11.5 的已审图已移除 crypto-bigint；禁止重新引入全部已知
+    # 受影响版本，包含此前例外覆盖的 0.5.5，独立于公告数据库判定。
+    { name = "crypto-bigint", version = "<0.7.6" },
 ]
 # wildcards 保留 "warn"(不能升 deny):本仓 3 个 CodeWhale 子模块依赖是
 # path = "../../CodeWhale/..." 形式(AGENTS.md §2 禁止给它们加版本约束),

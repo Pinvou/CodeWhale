@@ -1,6 +1,8 @@
+import json
 import re
 from ci_routing_test_support import default_ci_routing
 import os
+import shutil
 import subprocess
 import tempfile
 import textwrap
@@ -159,6 +161,64 @@ def _extract_consent_marker_read_targets(consent_test):
         else:
             targets.add("pinvou3-app/src-tauri/src/features/" + literal)
     return sorted(targets)
+
+
+def _extract_install_contract_script_reads(contract_test):
+    """从 connector_online_install_contract.test.js 源码派生 scripts/ 读取目标。
+
+    `read("scripts", "x.sh")` 与任意段数的 `read("scripts", "a", "b", …)` 字面量
+    (单双引号、跨行皆可)各成一个 pinvou3-app/scripts/ 读取目标;`read("scripts", …)`
+    调用里解析不出字符串字面量即红——与 _extract_contract_read_targets 同款
+    fail-closed:提取器看不见的读取,路由锁就拦不住删除路由的回归。
+    """
+    targets = []
+    for args in re.findall(
+        r"read\(\s*['\"]scripts['\"]\s*,?\s*([^)]*)\)", contract_test, re.S
+    ):
+        parts = re.findall(r"['\"]([^'\"]*)['\"]", args)
+        if not parts:
+            raise AssertionError(f"无法解析的 scripts 读取目标: {args}")
+        targets.append("pinvou3-app/scripts/" + "/".join(parts))
+    # 非字面量首参 fail-closed:变量/模板串/表达式首参的 read(…) 主正则看不见,
+    # 派生结果却因其他字面量读取仍非空——新增读取静默逃出路由锁(经变异验证
+    # fail-open)。枚举每个 read( 调用,首参必须是完整的引号字面量(整个表达式,
+    # 不只是开头引号):quote 打头的拼接首参(如 "scr"+"ipts")骗得过开头引号
+    # 检查,主正则却照旧看不见它,读取静默逃出路由锁(评审指出的残余 fail-open;
+    # 与下方其余参数的 fullmatch 同口径)。宁可误红也不 fail-open;注释里提及
+    # read( 形态时同样须保持字面量示例形态。
+    for call_head in re.findall(
+        r"(?<![A-Za-z0-9_$.])read\s*\(\s*([^,)]*)", contract_test, re.S
+    ):
+        first = call_head.strip()
+        if not re.fullmatch(r"'[^']*'|\"[^\"]*\"", first):
+            raise AssertionError(
+                "read() 首参必须是完整的字符串字面量(开头引号检查放得过拼接/"
+                "插值首参,读取会静默逃出路由锁,改为字面量或同步本提取器): "
+                f"{first}"
+            )
+    # scripts 首参调用的其余参数必须各自是完整的引号字面量(整个表达式,不只是
+    # 开头引号):拼接/插值/计算后参会被主正则切成错误目标,而派生结果因其他
+    # 字面量读取仍非空——`read("scripts", "a" + name + ".sh")` 会静默派生出
+    # 不存在的路径,真实读取逃出路由锁(fail-open)。逐参数 fullmatch 完整引号
+    # 形态,解析不出即红(宁可误红也不 fail-open;注释里提及 read( 形态时同样
+    # 须保持字面量示例形态)。空参数(尾逗号)跳过。
+    for rest in re.findall(
+        r"read\s*\(\s*['\"]scripts['\"]\s*,\s*([^)]*)\)", contract_test, re.S
+    ):
+        for arg in rest.split(","):
+            arg = arg.strip()
+            if arg and not re.fullmatch(r"'[^']*'|\"[^\"]*\"", arg):
+                raise AssertionError(
+                    "read(\"scripts\", …) 的每个参数都必须是完整的字符串字面量"
+                    "(拼接/插值/变量参数会派生出错误目标而静默逃出路由锁,"
+                    f"改为字面量或同步本提取器): read(\"scripts\", {rest})"
+                )
+    if not targets:
+        raise AssertionError(
+            "connector_online_install_contract.test.js 未派生出任何 scripts/ 读取目标"
+            "——读取形态变更须同步本提取器"
+        )
+    return sorted(set(targets))
 
 
 def _changes_block(workflow_text):
@@ -878,12 +938,14 @@ class CiGatePolicyTests(unittest.TestCase):
             required_gate,
         )
 
-    def test_pr_submodule_verifier_strictly_matches_the_published_tag(self):
+    def test_pr_verifier_checks_registered_history_and_keeps_release_closure(self):
         verifier = PUBLIC_SUBMODULE_VERIFIER.read_text(encoding="utf-8")
         verifier_gate = self.pr_workflow.split(
             "- name: 公开底座 gitlink 可达性", maxsplit=1
         )[1].split("- name: 初始化公共底座 submodule", maxsplit=1)[0]
-        self.assertIn("./scripts/verify-public-submodule.sh", verifier_gate)
+        self.assertRegex(verifier_gate, r"(?m)^\s+run: \./scripts/verify-public-submodule\.sh\s*$")
+        self.assertNotIn("--registered-snapshot", verifier_gate)
+        self.assertNotIn("registered_snapshot", verifier)
         self.assertNotIn("--allow-registered-candidate", verifier_gate)
         self.assertNotIn("LOCAL_SECURITY_HEAD", verifier)
         self.assertIn('[[ "$tag_target" != "$gitlink" ]]', verifier)
@@ -978,10 +1040,11 @@ class CiGatePolicyTests(unittest.TestCase):
         )
 
     def test_node_suites_under_scripts_tests_are_all_wired(self):
-        # Nothing auto-discovers scripts/tests/*.test.mjs:
-        # version-consistency's explicit node --test list is the only
-        # runner (the PR #745 round-2 review found a suite that only ever
-        # ran locally). Pin both directions so the class stays closed:
+        # Nothing auto-discovers scripts/tests/*.test.mjs. Most suites use
+        # version-consistency; the Account contracts also have dedicated
+        # jobs with their own runtime dependencies and path routing.
+        # Pin their live commands and filters before including those suites.
+        # Pin both directions so the class stays closed:
         # every suite on disk must be listed (a forgotten new suite
         # silently never runs), and every listed scripts/tests entry must
         # exist (a renamed suite must not leave a dead entry green).
@@ -998,6 +1061,56 @@ class CiGatePolicyTests(unittest.TestCase):
                 r"scripts/tests/[A-Za-z0-9_./-]+\.test\.mjs", version_consistency
             )
         )
+        dedicated = {
+            "token-management-authorization-coverage.test.mjs": (
+                "account-platform-test", "account_platform",
+                "Verify Token management authorization contracts",
+            ),
+            "token-management-phase-coverage.test.mjs": (
+                "account-platform-test", "account_platform",
+                "Verify Token management authorization contracts",
+            ),
+            "account-platform-authorization-coverage.test.mjs": (
+                "account-platform-test", "account_platform",
+                "Verify Account Platform authorization contracts",
+            ),
+            "f18-hold-recovery-owned-fixture.test.mjs": (
+                "account-platform-test", "account_platform",
+                "Verify F18 owned fixture contract",
+            ),
+            "account-platform-invocation-environment.test.mjs": (
+                "frontend-test", "frontend",
+                "Verify Account invocation environment contracts",
+            ),
+        }
+        changes = _changes_block(self.pr_workflow)
+        for filename, (job_name, group, step_name) in dedicated.items():
+            path = f"scripts/tests/{filename}"
+            job = _without_inline_comments(_extract_job_block(self.pr_workflow, job_name))
+            step = _step_named(job, step_name)
+            command_path = f"../{path}" if job_name == "frontend-test" else path
+            self.assertRegex(
+                step, rf"(?m)^\s+(?:run:\s*)?node --test {re.escape(command_path)}\s*$",
+                f"{path} must have a live node --test command in {job_name}",
+            )
+            self.assertNotRegex(step, r"(?m)^        (?:if|continue-on-error):")
+            entries = _extract_quoted_paths(_dorny_filter_group(changes, group))
+            self.assertIn(path, entries, f"{path} must trigger its {job_name} runner")
+            self.assertTrue(_matches_paths_filter(path, entries), f"{path} must not be excluded")
+            self.assertIn('node-version: "24"', job)
+            if job_name == "frontend-test":
+                self.assertIn("working-directory: pinvou3-app", job)
+                install = _step_named(job, "安装前端依赖")
+                self.assertIn("run: npm ci --prefer-offline --no-audit", install)
+                self.assertNotRegex(install, r"(?m)^        (?:if|continue-on-error):")
+                self.assertLess(job.index(install), job.index(step))
+                for name in ("personal", "models", "invocation"):
+                    source = f"account-platform/deploy/production/compose.{name}.yaml"
+                    self.assertIn(source, entries)
+
+                    self.assertTrue(_matches_paths_filter(source, entries))
+            self.assertNotIn(path, listed, f"{path} must not be redundantly run twice")
+            listed.add(path)
         on_disk = {
             f"scripts/tests/{path.name}"
             for path in (ROOT / "scripts" / "tests").glob("*.test.mjs")
@@ -1005,9 +1118,171 @@ class CiGatePolicyTests(unittest.TestCase):
         self.assertEqual(
             listed,
             on_disk,
-            "scripts/tests node 套件与 version-consistency 显式列表不一致"
+            "scripts/tests node 套件与已核验的 CI runner 集合不一致"
             "(缺失=永不执行;多余=死条目)",
         )
+
+    def test_account_closure_ci_steps_are_precisely_pinned(self):
+        """Keep the closure source and isolated-PG gates live and fail-closed."""
+        job = _without_inline_comments(_extract_job_block(self.pr_workflow, "account-platform-test"))
+
+        def assert_contract(text):
+            source = _step_named(text, "Verify Account closure source and API contracts")
+            self.assertIn("npm --prefix account-platform run test:closure-contracts", source)
+            self.assertNotRegex(source, r"(?m)^        (?:if|continue-on-error):")
+            postgres = _step_named(text, "Account closure contracts on isolated PostgreSQL")
+            self.assertIn("python3 -m unittest discover -s scripts/tests -p test_account_closure_postgres.py", postgres)
+            self.assertIn("python3 scripts/test-account-closure-postgres.py", postgres)
+            self.assertIn("PINVOU_ACCOUNT_CLOSURE_TEST_DATABASE_URL", postgres)
+            self.assertNotRegex(postgres, r"(?m)^        (?:if|continue-on-error):")
+
+        assert_contract(job)
+        source = _step_named(job, "Verify Account closure source and API contracts")
+        postgres = _step_named(job, "Account closure contracts on isolated PostgreSQL")
+        for mutated in (
+            job.replace(source, "", 1),
+            job.replace(postgres, "", 1),
+            job.replace("npm --prefix account-platform run test:closure-contracts", "true", 1),
+            job.replace("python3 scripts/test-account-closure-postgres.py", "true", 1),
+        ):
+            with self.assertRaises(AssertionError):
+                assert_contract(mutated)
+
+    def test_deployment_contract_artifacts_are_attempt_scoped(self):
+        job = _without_inline_comments(
+            _extract_job_block(self.pr_workflow, "account-platform-test")
+        )
+        step = _step_named(
+            job, "Production history and managed PostgreSQL release contracts"
+        )
+        self.assertRegex(
+            step,
+            r'--artifacts "\$RUNNER_TEMP/account-platform-deployment-contracts-\$postgres_version-\$\{GITHUB_RUN_ID\}-\$\{GITHUB_RUN_ATTEMPT\}"',
+        )
+        self.assertNotIn(
+            '--artifacts "$RUNNER_TEMP/account-platform-deployment-contracts-$postgres_version"',
+            step,
+        )
+
+    def test_dedicated_node_suite_wiring_rejects_missing_or_commented_commands(self):
+        original = self.pr_workflow
+        try:
+            for name in (
+                "token-management-authorization-coverage",
+                "token-management-phase-coverage",
+                "account-platform-authorization-coverage",
+                "account-platform-invocation-environment",
+            ):
+                path = f"scripts/tests/{name}.test.mjs"
+                command = f"node --test {'../' if 'invocation' in name else ''}{path}"
+                for replacement in ("echo controlled-command-removed", "# " + command):
+                    with self.subTest(suite=name, replacement=replacement):
+                        self.assertEqual(original.count(command), 1)
+                        self.pr_workflow = original.replace(command, replacement, 1)
+                        with self.assertRaises(AssertionError):
+                            self.test_node_suites_under_scripts_tests_are_all_wired()
+                with self.subTest(suite=name, missing_filter=True):
+                    entry = f"              - '{path}'\n"
+                    self.assertEqual(original.count(entry), 1)
+                    self.pr_workflow = original.replace(entry, "", 1)
+                    with self.assertRaises(AssertionError):
+                        self.test_node_suites_under_scripts_tests_are_all_wired()
+            for name in ("personal", "models", "invocation"):
+                with self.subTest(missing_compose_filter=name):
+                    entry = f"              - 'account-platform/deploy/production/compose.{name}.yaml'\n"
+                    self.assertEqual(original.count(entry), 1)
+                    self.pr_workflow = original.replace(entry, "", 1)
+                    with self.assertRaises(AssertionError):
+                        self.test_node_suites_under_scripts_tests_are_all_wired()
+        finally:
+            self.pr_workflow = original
+
+    def test_approval_center_browser_regression_is_registered(self):
+        package = json.loads((ROOT / "pinvou3-app/package.json").read_text(encoding="utf-8"))
+        finance = package["scripts"]["test:account-platform-finance-ui"]
+        self.assertIn("node tests/account_platform_approval_center_smoke.mjs", finance)
+        selector = (ROOT / "scripts/select-frontend-smokes.mjs").read_text(encoding="utf-8")
+        self.assertIn('command("npm", "test:account-platform-finance-ui")', selector)
+
+    def test_organization_member_smokes_resolve_to_real_browser_files(self):
+        package = json.loads((ROOT / "pinvou3-app/package.json").read_text(encoding="utf-8"))
+        selector = (ROOT / "scripts/select-frontend-smokes.mjs").read_text(encoding="utf-8")
+        for feature, filenames in (
+            ("organization", ("account_platform_organization_ui_smoke.mjs", "account_platform_member_units_ui_smoke.mjs", "account_platform_organization_boundaries_ui_smoke.mjs", "account_platform_organization_recharge_ui_smoke.mjs")),
+            ("member-units", ("account_platform_member_units_ui_smoke.mjs",)),
+        ):
+            command = f"test:account-platform-{feature}-ui"
+            self.assertEqual(package["scripts"][command], " && ".join(f"node tests/{filename}" for filename in filenames))
+            for filename in filenames:
+                self.assertTrue((ROOT / "pinvou3-app/tests" / filename).is_file())
+            self.assertGreaterEqual(selector.count(f'command("npm", "{command}")'), 2)
+
+    def test_entitlement_correction_production_smoke_is_registered_for_full_and_feature_runs(self):
+        package = json.loads((ROOT / "pinvou3-app/package.json").read_text(encoding="utf-8"))
+        command = "test:account-platform-entitlement-correction-ui"
+        self.assertEqual(package["scripts"][command], "node tests/account_platform_entitlement_production_smoke.mjs")
+        self.assertTrue((ROOT / "pinvou3-app/tests/account_platform_entitlement_production_smoke.mjs").is_file())
+        selector = (ROOT / "scripts/select-frontend-smokes.mjs").read_text(encoding="utf-8")
+        self.assertGreaterEqual(selector.count(f'command("npm", "{command}")'), 2)
+
+    def test_registration_bonus_smokes_resolve_to_both_compiled_browser_suites(self):
+        package = json.loads((ROOT / "pinvou3-app/package.json").read_text(encoding="utf-8"))
+        command = "test:account-platform-registration-bonus-ui"
+        files = ("admin_registration_bonus_ui_smoke.mjs", "admin_registration_bonus_precision_ui_smoke.mjs")
+        self.assertEqual(package["scripts"][command], " && ".join(f"node tests/{name}" for name in files))
+        for name in files:
+            self.assertTrue((ROOT / "pinvou3-app/tests" / name).is_file())
+        selector = (ROOT / "scripts/select-frontend-smokes.mjs").read_text(encoding="utf-8")
+        self.assertGreaterEqual(selector.count(f'command("npm", "{command}")'), 2)
+
+    def test_closure_smokes_include_production_recovery_and_original_contract(self):
+        package = json.loads((ROOT / "pinvou3-app/package.json").read_text(encoding="utf-8"))
+        command = "test:account-platform-closure-ui"
+        # The composite must retain the original and production suites and also
+        # execute the polling regression through the real frontend CI selector.
+        files = (
+            "account_platform_closure_ui_smoke.mjs",
+            "account_platform_closure_production_smoke.mjs",
+            "account_platform_closure_polling_smoke.mjs",
+        )
+        self.assertEqual(package["scripts"][command], " && ".join(f"node tests/{name}" for name in files))
+        for name in files:
+            self.assertTrue((ROOT / "pinvou3-app/tests" / name).is_file())
+        selector = (ROOT / "scripts/select-frontend-smokes.mjs").read_text(encoding="utf-8")
+        self.assertGreaterEqual(selector.count(f'command("npm", "{command}")'), 2)
+
+        # Installed-host coverage has its own full/account selector lane; it must
+        # remain present without running twice through the closure composite.
+        installed_command = "test:account-platform-installed-hosts-ui"
+        installed_file = "account_platform_installed_hosts_ui_smoke.mjs"
+        self.assertEqual(package["scripts"][installed_command], f"node tests/{installed_file}")
+        self.assertTrue((ROOT / "pinvou3-app/tests" / installed_file).is_file())
+        self.assertGreaterEqual(selector.count(f'command("npm", "{installed_command}")'), 2)
+
+    def test_embedded_account_portal_assets_are_rebuilt_and_checked(self):
+        changes = _without_yaml_comments(
+            self.pr_workflow.split("\n  changes:", maxsplit=1)[1].split(
+                "\n  fast-gate:", maxsplit=1
+            )[0]
+        )
+        paths = _extract_quoted_paths(
+            changes.split("            frontend:", maxsplit=1)[1].split(
+                "            relay:", maxsplit=1
+            )[0]
+        )
+        self.assertTrue(_matches_paths_filter("account-platform/internal/portal/static/admin.html", paths))
+        self.assertTrue(_matches_paths_filter("account-platform/internal/portal/static/assets/admin.js", paths))
+        frontend = self.pr_workflow.split("\n  frontend-test:", maxsplit=1)[1].split(
+            "\n  relay-test:", maxsplit=1
+        )[0]
+        gate = frontend.split("      - name: Verify embedded Account Portal assets are current", maxsplit=1)[1].split(
+            "      - name:", maxsplit=1
+        )[0]
+        self.assertNotIn("if:", gate)
+        self.assertIn("npm run build:account-portal", gate)
+        self.assertIn("git diff --exit-code -- ../account-platform/internal/portal/static", gate)
+        self.assertIn("git ls-files --others --exclude-standard", gate)
+        self.assertIn('test -z "$(git ls-files', gate)
 
     def test_cross_language_contract_rust_sources_route_to_frontend_test(self):
         # multiagent_plan_normalize.test.mjs reads the Rust sources below for
@@ -1095,6 +1370,104 @@ class CiGatePolicyTests(unittest.TestCase):
                 _is_covered_by_trigger(target, frontend_paths),
                 f"consent marker 契约测试读取的 {target} 未被 frontend filter 覆盖,"
                 "Rust-only 改动会静默跳过该 node 门禁",
+            )
+
+    def test_install_contract_script_reads_routed(self):
+        # connector_online_install_contract.test.js 读取 pinvou3-app/scripts/
+        # 下的 smoke 脚本做 floor 钉扎(tauri/build.js 的读取由
+        # pinvou3-app/scripts/tauri/** 路由)——scripts-only PR 若不在
+        # frontend filter 中,frontend-test 被静默跳过,smoke floor 漂移在该
+        # node 门禁不可见。从测试源码派生全部 scripts/ 读取目标逐一断言
+        # frontend filter 覆盖;新增读取而未路由会在这里失败(本套件在
+        # fast-gate 每个 PR 必跑)。
+        frontend_paths = _frontend_filter_entries(self.pr_workflow)
+        contract_test = (
+            ROOT / "pinvou3-app/tests/connector_online_install_contract.test.js"
+        ).read_text(encoding="utf-8")
+
+        targets = _extract_install_contract_script_reads(contract_test)
+
+        self.assertTrue(
+            targets,
+            "未能从 connector_online_install_contract.test.js 解析出 scripts/"
+            " 读取目标(read(\"scripts\", …) 形态变更须同步"
+            " _extract_install_contract_script_reads)",
+        )
+        for target in targets:
+            self.assertTrue(
+                _is_covered_by_trigger(target, frontend_paths),
+                f"install contract 测试读取的 {target}"
+                " 未被 frontend filter 覆盖,scripts-only 改动会静默跳过该"
+                " node 门禁",
+            )
+
+    def test_script_read_derivation_covers_quote_and_shape_variants(self):
+        # 回归锁:scripts 派生正则此前只认双引号、单行、恰好 1~2 段的
+        # `read("scripts", …)`;单引号 / 跨行 / 三段写法派生出零目标,路由锁
+        # 随之静默失效(经变异验证 fail-open)。喂最小 fixture:三种变体都必
+        # 须派生出来;字面量解析不出(变量参数)必须抛错而不是静默跳过。
+        fixture = (
+            "const a = read('scripts', 'future-smoke.sh');\n"
+            "const b = read(\n  \"scripts\",\n  \"tauri\",\n  \"build.js\",\n);\n"
+            "const c = read(\"scripts\", \"deep\", \"nested\", \"tool.mjs\");\n"
+        )
+        targets = _extract_install_contract_script_reads(fixture)
+        self.assertEqual(
+            targets,
+            [
+                "pinvou3-app/scripts/deep/nested/tool.mjs",
+                "pinvou3-app/scripts/future-smoke.sh",
+                "pinvou3-app/scripts/tauri/build.js",
+            ],
+        )
+        with self.assertRaises(AssertionError):
+            _extract_install_contract_script_reads("read(\"scripts\", scriptName)")
+        with self.assertRaises(AssertionError):
+            _extract_install_contract_script_reads("const x = 1;")
+        # 回归锁:参数表达式只查开头引号会放过 quote 打头的拼接/插值——主
+        # 正则把表达式切成错误目标而派生照常非空(fail-open)。逐参数完整字
+        # 面量检查下必须抛错;全字面量的多段读取照常派生(上方 fixture 已断言)。
+        with self.assertRaises(AssertionError):
+            _extract_install_contract_script_reads(
+                "const a = read(\"scripts\", \"future-\" + name + \".sh\");\n"
+                "const b = read(\"scripts\", \"tauri\", \"build.js\");\n"
+            )
+        with self.assertRaises(AssertionError):
+            _extract_install_contract_script_reads(
+                "const a = read(\"scripts\", `future-${name}.sh`);\n"
+            )
+        with self.assertRaises(AssertionError):
+            _extract_install_contract_script_reads(
+                "const a = read(\"scripts\", \"future-smoke.sh\" + suffix);\n"
+            )
+
+    def test_script_read_derivation_fails_closed_on_non_literal_first_arg(self):
+        # 回归锁:变量/模板串首参的 read(…) 主正则看不见,派生结果却因其他
+        # 字面量读取仍非空——新增读取静默逃出路由锁(经变异验证 fail-open)。
+        # 首参非引号字面量必须抛错;真实测试源(全部字面量首参)必须照常派生。
+        # quote 打头的拼接首参骗得过开头引号检查,同样必须抛错。
+        contract_test = (
+            ROOT
+            / "pinvou3-app/tests/connector_online_install_contract.test.js"
+        ).read_text(encoding="utf-8")
+        self.assertIn(
+            "pinvou3-app/scripts/dingtalk-smoke.sh",
+            _extract_install_contract_script_reads(contract_test),
+        )
+        with self.assertRaises(AssertionError):
+            _extract_install_contract_script_reads(
+                "const dir = 'scripts';\n"
+                "const a = read(dir, 'future-smoke.sh');\n"
+                "const b = read(\"scripts\", \"tauri\", \"build.js\");\n"
+            )
+        with self.assertRaises(AssertionError):
+            _extract_install_contract_script_reads(
+                "const a = read(`scripts`, \"future-smoke.sh\");\n"
+            )
+        with self.assertRaises(AssertionError):
+            _extract_install_contract_script_reads(
+                "const a = read(\"scr\" + \"ipts\", \"future-smoke.sh\");\n"
+                "const b = read(\"scripts\", \"tauri\", \"build.js\");\n"
             )
 
     def test_contract_target_derivation_covers_double_quoted_reads(self):
@@ -1421,7 +1794,7 @@ class CiGatePolicyTests(unittest.TestCase):
             "\n  team-relay-hub-test:", maxsplit=1
         )[1].split("\n  release-contract-test:", maxsplit=1)[0]
         self.assertIn("needs.changes.outputs.team_relay_hub == 'true'", hub_job)
-        self.assertIn("postgres:16-alpine", hub_job)
+        self.assertRegex(hub_job, r"image: mirror\.gcr\.io/library/postgres@sha256:[a-f0-9]{64}")
         self.assertIn("TEAM_RELAY_TEST_DATABASE_URL", hub_job)
         self.assertIn("npm --prefix team-relay-hub ci", hub_job)
         self.assertIn("npm --prefix team-relay-hub test", hub_job)
@@ -1453,7 +1826,9 @@ class CiGatePolicyTests(unittest.TestCase):
         script = (ROOT / "scripts/ci-update-release-console-container.sh").read_text(encoding="utf-8")
         for command in ("compose config --quiet", "compose up --detach --build", "compose down --volumes --remove-orphans"):
             self.assertIn(command, script)
-        self.assertIn("nginx:1.27-alpine nginx -t", script)
+        self.assertIn('docker build --build-arg NODE_IMAGE="$PINVOU_UPDATE_NODE_IMAGE" ', script)
+        self.assertIn("PINVOU_UPDATE_NODE_IMAGE: mirror.gcr.io/library/node@sha256:", console_job)
+        self.assertRegex(script, r"mirror\.gcr\.io/library/nginx@sha256:[a-f0-9]{64} nginx -t")
         self.assertIn("$base/healthz", script)
         self.assertIn("$base/api/status", script)
         self.assertNotIn("/var/www/pinvou3", script)
@@ -1874,30 +2249,42 @@ class CiGatePolicyTests(unittest.TestCase):
         )
 
     def test_deny_toml_bans_the_crypto_bigint_vulnerable_window(self):
-        # Round-22 review: the RUSTSEC-2026-0387 id ignore has no version
-        # dimension — a partial upgrade (age/p256 on the patched line while
-        # a new third-party dep re-introduces old elliptic-curve, leaving
-        # crypto-bigint 0.5.x in the graph) would stay silently green. The
-        # [bans] entry forbids the vulnerable window independently of the
-        # advisory database's classification; the current graph (0.5.5)
-        # sits outside it. Pin the executable line so dropping the
-        # tripwire while keeping the id ignore fails here.
-        deny_toml = (
-            ROOT / "pinvou3-app/src-tauri/deny.toml"
-        ).read_text(encoding="utf-8")
-        deny_code = "\n".join(
-            line
-            for line in deny_toml.splitlines()
-            if not line.lstrip().startswith("#")
+        # The retired exception must not leave 0.5.5 outside the independent
+        # ban: every affected version below the published fix stays denied.
+        policy = tomllib.loads(
+            (ROOT / "pinvou3-app/src-tauri/deny.toml").read_text(encoding="utf-8")
         )
-        self.assertIn(
-            '{ name = "crypto-bigint", version = ">0.5.5, <0.7.6" },',
-            deny_code,
-            "deny.toml must keep the crypto-bigint vulnerable-window ban on "
-            "an executable line — without it a partially upgraded graph can "
-            "carry a still-vulnerable crypto-bigint while the id ignore "
-            "keeps advisories green",
+        bans = [
+            entry for entry in policy["bans"]["deny"]
+            if entry.get("name") == "crypto-bigint"
+        ]
+        self.assertEqual(
+            [entry.get("version") for entry in bans], ["<0.7.6"],
+            "the complete vulnerable range, including 0.5.5, must stay banned",
         )
+
+    def test_retired_crypto_exception_matches_all_reviewed_lock_graphs(self):
+        policy = tomllib.loads(
+            (ROOT / "pinvou3-app/src-tauri/deny.toml").read_text(encoding="utf-8")
+        )
+        ignored = [
+            item if isinstance(item, str) else item.get("id")
+            for item in policy["advisories"].get("ignore", [])
+        ]
+        self.assertNotIn("RUSTSEC-2026-0387", ignored)
+        self.assertEqual(policy["advisories"]["unused-ignored-advisory"], "deny")
+        for lock in (
+            "pinvou3-app/src-tauri/Cargo.lock",
+            "pinvou-cli/Cargo.lock",
+            "pinvou-knowledge/Cargo.lock",
+        ):
+            with self.subTest(lock=lock):
+                packages = tomllib.loads((ROOT / lock).read_text(encoding="utf-8"))["package"]
+                self.assertFalse(
+                    {"crypto-bigint", "hpke", "p256", "elliptic-curve"}
+                    & {package["name"] for package in packages},
+                    "reintroduction requires a fresh security assessment",
+                )
 
     def test_zip_lockfiles_sit_inside_the_assessed_advisory_window(self):
         # Round-20 review, re-baselined in round-22: deny.toml retired the
@@ -3044,23 +3431,166 @@ class CiGatePolicyTests(unittest.TestCase):
             "'success' to required-gate, so the whole compile/test leg becomes "
             "advisory while the required check stays green",
         )
-        # Exactly one legitimate use, and it is a STEP whose entire purpose is
-        # to print an analysis it must not be able to fail the job with.
+        # These reviewed diagnostic-only steps cannot suppress a compiler,
+        # test or cleanup failure. Artifact transport is bounded separately;
+        # adding another advisory step still requires explicit review here.
+        reviewed_diagnostics = (
+            "Windows 测试二进制导入诊断",
+            "Test resource lifecycle receipts",
+            "Financial parallel diagnostics",
+            "Account test resource lifecycle receipts",
+        )
         self.assertEqual(
             len(step_level),
-            1,
-            "only the Windows PE import diagnostic may opt out of blocking; "
+            len(reviewed_diagnostics),
+            "only reviewed diagnostic steps may opt out of blocking; "
             f"found {len(step_level)} continue-on-error settings: {step_level}",
         )
-        diagnostic_step = body.split(
-            "- name: Windows 测试二进制导入诊断", maxsplit=1
-        )[1].split("\n      - name:", maxsplit=1)[0]
-        self.assertIn(
-            "continue-on-error: true",
-            diagnostic_step,
-            "the single permitted continue-on-error must be the Windows PE "
-            "import diagnostic step, not some other step that moved under it",
+        for name in reviewed_diagnostics:
+            diagnostic_step = body.split(
+                "- name: " + name + "\n", maxsplit=1
+            )[1].split("\n      - name:", maxsplit=1)[0]
+            self.assertIn(
+                "continue-on-error: true",
+                diagnostic_step,
+                "continue-on-error belongs only to the reviewed diagnostic "
+                "step, not another step that moved under it",
+            )
+        diagnostic_job = _extract_job_block(body, 'windows-rust-test')
+        matches = list(re.finditer(
+            r"(?ms)^      - name: Windows 测试二进制导入诊断\n.*?(?=^      - |\Z)", diagnostic_job
+        ))
+        self.assertEqual(len(matches), 1, "expected one reviewed diagnostic step")
+        self.assertEqual(
+            matches[0].group(0).rstrip(),
+            textwrap.indent(textwrap.dedent("""\
+                - name: Windows 测试二进制导入诊断
+                  if: ${{ matrix.phase == 'regression' }}
+                  continue-on-error: true
+                  shell: pwsh
+                  run: python scripts/ci-windows-imports-diagnose.py "$env:PINVOU3_TEST_EXE"
+            """).rstrip(), "      "),
         )
+        diagnostic_job = _extract_job_block(body, 'frontend-test')
+        matches = list(re.finditer(
+            r"(?ms)^      - name: Test resource lifecycle receipts\n.*?(?=^      - |\Z)", diagnostic_job
+        ))
+        self.assertEqual(len(matches), 1, "expected one reviewed diagnostic step")
+        self.assertEqual(
+            matches[0].group(0).rstrip(),
+            textwrap.indent(textwrap.dedent("""\
+                - name: Test resource lifecycle receipts
+                  id: frontend_receipts_upload
+                  if: ${{ always() && env.PINVOU_CI_RESOURCE_LEDGER != '' }}
+                  timeout-minutes: 3
+                  continue-on-error: true
+                  uses: actions/upload-artifact@v7
+                  with:
+                    name: frontend-resource-lifecycle-${{ github.run_attempt }}
+                    path: ${{ env.PINVOU_CI_RESOURCE_LEDGER }}/
+                    if-no-files-found: error
+                    retention-days: 7
+            """).rstrip(), "      "),
+        )
+        diagnostic_job = _extract_job_block(body, 'account-platform-test')
+        matches = list(re.finditer(
+            r"(?ms)^      - name: Account test resource lifecycle receipts\n.*?(?=^      - |\Z)", diagnostic_job
+        ))
+        self.assertEqual(len(matches), 1, "expected one reviewed diagnostic step")
+        self.assertEqual(
+            matches[0].group(0).rstrip(),
+            textwrap.indent(textwrap.dedent("""\
+                - name: Account test resource lifecycle receipts
+                  id: account_receipts_upload
+                  if: ${{ always() && env.PINVOU_CI_RESOURCE_LEDGER != '' }}
+                  timeout-minutes: 3
+                  continue-on-error: true
+                  uses: actions/upload-artifact@v7
+                  with:
+                    name: account-resource-lifecycle-${{ github.run_attempt }}
+                    path: |
+                      ${{ env.PINVOU_CI_RESOURCE_LEDGER }}/
+                      ${{ runner.temp }}/account-platform-deployment-contracts-*/resources/
+                    if-no-files-found: error
+                    retention-days: 7
+            """).rstrip(), "      "),
+        )
+        diagnostic_job = _extract_job_block(body, 'account-platform-test')
+        matches = list(re.finditer(
+            r"(?ms)^      - name: Financial parallel diagnostics\n.*?(?=^      - |\Z)", diagnostic_job
+        ))
+        self.assertEqual(len(matches), 1, "expected one reviewed diagnostic step")
+        self.assertEqual(
+            matches[0].group(0).rstrip(),
+            textwrap.indent(textwrap.dedent("""\
+                - name: Financial parallel diagnostics
+                  id: financial_diagnostics_upload
+                  if: ${{ always() }}
+                  timeout-minutes: 3
+                  continue-on-error: true
+                  uses: actions/upload-artifact@v7
+                  with:
+                    name: account-financial-parallel-${{ github.run_attempt }}
+                    path: ${{ runner.temp }}/financial-parallel-*/
+                    if-no-files-found: ignore
+                    retention-days: 7
+            """).rstrip(), "      "),
+        )
+
+    def test_diagnostic_exemptions_cannot_move_to_business_tests_or_jobs(self):
+        original = self.pr_workflow
+        financial_start = "      - name: Financial parallel diagnostics\n"
+        financial_step = original.split(financial_start, maxsplit=1)[1].split(
+            "\n      - name:", maxsplit=1
+        )[0]
+        without_upload_exemption = original.replace(
+            financial_step,
+            financial_step.replace("        continue-on-error: true\n", "", 1),
+            1,
+        )
+        business = "      - name: Test and vet all Account Platform Go modules\n"
+        mutations = {
+            "advisory whole job": original.replace(
+                "  account-platform-test:\n",
+                "  account-platform-test:\n    continue-on-error: true\n",
+                1,
+            ),
+            "extra advisory business step": original.replace(
+                business, business + "        continue-on-error: true\n", 1
+            ),
+            "move upload exemption to business with same total": without_upload_exemption.replace(
+                business, business + "        continue-on-error: true\n", 1
+            ),
+            "upload label on a run command": original.replace(
+                financial_step,
+                financial_step.replace("uses: actions/upload-artifact@v7", "run: echo not-an-upload", 1),
+                1,
+            ),
+        }
+        for first_line, remaining in (
+            ("run: exit 37", "        name: Required business command\n"),
+            ("id: business_guard", '        name: Required business command\n        "run": exit 37\n'),
+            ("if: ${{ always() }}", "        run: exit 37\n"),
+            ("env:", "          FIXTURE: yes\n        run: exit 37\n"),
+        ):
+            # Moving the exception must fail even when the next valid YAML
+            # step starts with run/id/if/env and the total count stays four.
+            mutations[f"move exemption to {first_line} next step"] = without_upload_exemption.replace(
+                "      - name: Stop owned temporary PostgreSQL services\n",
+                f"      - {first_line}\n{remaining}        continue-on-error: true\n\n"
+                "      - name: Stop owned temporary PostgreSQL services\n",
+                1,
+            )
+        try:
+            self.test_no_job_level_continue_on_error_disarms_a_gate_job()
+            for label, mutant in mutations.items():
+                with self.subTest(label=label):
+                    self.assertNotEqual(mutant, original, "the negative control must change the workflow")
+                    self.pr_workflow = mutant
+                    with self.assertRaises(AssertionError):
+                        self.test_no_job_level_continue_on_error_disarms_a_gate_job()
+        finally:
+            self.pr_workflow = original
 
     def test_gate_jobs_do_not_swallow_their_exit_status(self):
         # The companion fail-open vector to continue-on-error: appending
@@ -3485,7 +4015,7 @@ class CiGatePolicyTests(unittest.TestCase):
         # by GATE_JOB_LEVEL_IFS["rust-test"]; the asserts below keep the
         # step-level pins that `if:` cannot cover.
         self.assertIn(
-            "cargo test --manifest-path pinvou3-app/src-tauri/Cargo.toml --no-default-features --lib --features benchmark-hooks --locked -- --test-threads=1",
+            "cargo --config 'profile.dev.package.codewhale-tui.opt-level=0' test --manifest-path pinvou3-app/src-tauri/Cargo.toml --no-default-features --lib --features benchmark-hooks --locked -- --test-threads=1",
             rust_test,
         )
         # 开源侧同口径：Linux lib 腿显式开启 benchmark-hooks，headless-bridge
@@ -3702,15 +4232,34 @@ class CiGatePolicyTests(unittest.TestCase):
         self.assertIn('echo "::warning::[memory-setup] ${*//[', source)
         self.assertIn("${*//[$'\\r\\n']/ }", source)
         # 预期可恢复的慢路径(镜像 swap as-is 失败后的重试、全层失败后的
-        # 镜像 swapfile 兜底重试)只进日志,
-        # 不得注解化,否则每个 job 都会常驻黄标稀释真告警。函数体全文钉死:
-        # 改回 ::warning:: 注解即红。
+        # 镜像 swapfile 兜底重试)只进日志,不得注解化,否则每个 job 都会
+        # 常驻黄标稀释真告警。函数体全文钉死:改回 ::warning:: 注解即红。
+        # modprobe 失败不属于可恢复慢路径:2026-10 起脚本不再安装内核包,
+        # 该失败是终局降级,必须走 warn 注解让 zram 缺席可见。
         self.assertIn(
             'warn_recoverable() { echo "[memory-setup] WARNING: $*" >&2; }',
             source,
         )
         self.assertIn(
             'warn "modprobe zram failed${modprobe_err:+: ${modprobe_err}};',
+            source,
+        )
+        # 模块加载失败后不得出现任何包管理器安装路径:超时杀掉的 apt 事务
+        # 会留下 dpkg 中断状态,毒化同 job 后续必需的依赖安装(静态取代被
+        # 删除的行为级 PACKAGE_MANAGER_CALLED 断言)。钉法对齐主线 #2095
+        # 后的 no-install 合同:零 apt 安装、零等锁选项。repair_dpkg_state
+        # 的注释与 warn 文案合法提及 "later apt-get steps"(脚本零 apt
+        # 调用的合同不变),裸 "apt-get " 全文禁令会与该合同相撞
+        # (merge queue run 41619867285 即此红)。
+        self.assertNotIn("apt-get install", source)
+        self.assertNotIn("-o DPkg::Lock::Timeout", source)
+        self.assertIn(
+            "using fallback swap without installing kernel packages",
+            source,
+        )
+        self.assertIn(
+            'warn_recoverable "no active swap after all layers; trying the'
+            ' image-provided swapfile"',
             source,
         )
         self.assertIn(
@@ -3937,68 +4486,48 @@ class CiGatePolicyTests(unittest.TestCase):
             "swapon --show=NAME --noheadings 2>/dev/null | grep -q '/dev/zram'",
             source,
         )
+        # 2026-10-28 修订,2026-11-02 随主线 #2095 再修订:zram 层不再安装
+        # 内核包(modprobe 失败直接降级磁盘 swap/zswap,脚本自身零 apt 调用,
+        # 永不变更包管理器状态),同 job 的 dpkg 中断态改由本 PR 的
+        # repair_dpkg_state 在退出路径兜底(unattended-upgrades 等外部来源
+        # 仍可留下中断态)。合同钉住:脚本零 apt 安装/等锁选项(禁装政策)、
+        # 修复的按钟等锁重试(40s 预算、每次尝试仍 60s 上限、真实失败早停)
+        # 与 stderr 透传、updates 残留 journal 门、TERM 兜底,以及退出路径
+        # 上的修复兜底。
+        # 这些文本钉只是廉价漂移警报;生产行为由
+        # CiMemorySetupRepairBehaviorTests 端到端兜底(函数体清空/删调用
+        # 在那里必红)。
+        self.assertNotIn("apt-get install", source)
+        self.assertNotIn("-o DPkg::Lock::Timeout", source)
+        # 定义 + EXIT trap + 头注 journal 门说明,共 3 处;减少即说明
+        # 兜底被拆,行为测试会给出具体断层数据。
+        self.assertEqual(source.count("repair_dpkg_state"), 3)
+        self.assertIn("run_to 60 dpkg --configure -a", source)
+        self.assertIn("wait_deadline=$(( $(date +%s) + 40 ))", source)
+        self.assertIn(
+            "    if (( attempt_secs >= 2 )) || (( $(date +%s) >= wait_deadline )); then",
+            source,
+        )
+        self.assertIn("    sleep 5\n  done", source)
+        self.assertIn(
+            'warn "dpkg --configure -a (attempt ${attempt}) failed after ${attempt_secs}s, retrying${configure_err:+: ${configure_err}}"',
+            source,
+        )
+        self.assertIn('log "dpkg admin state repaired (configure attempt ${attempt})"', source)
+        self.assertIn(
+            'compgen -G "${PINVOU3_CI_DPKG_UPDATES_DIR:-/var/lib/dpkg/updates}/[0-9]*" >/dev/null',
+            source,
+        )
+        self.assertIn(
+            'warn "dpkg --configure -a did not succeed; later apt-get steps in this job may still fail until it is run manually${audit_out:+ (dpkg --audit still reports: ${audit_out})}"',
+            source,
+        )
+        self.assertIn("trap 'exit 143' TERM", source)
+        self.assertIn("trap repair_dpkg_state EXIT", source)
         self.assertIn(
             'log "provisioning the mandatory /mnt disk swap"\nsetup_disk_swap',
             source,
         )
-
-    def test_memory_setup_module_failure_does_not_poison_dependency_install(self):
-        source = (ROOT / "scripts" / "ci-memory-setup.sh").read_text(encoding="utf-8")
-        # Execute the real module loader and main fallback flow with host
-        # operations stubbed. Never change the test machine's swap or sysfs.
-        loader = source.split("setup_zram() {", 1)[1].split("# Mandatory disk swap:", 1)[0]
-        main = source[source.index("if [[ ${PINVOU3_CI_DISABLE_ZRAM:-0}"):]
-        cases = ((1, "0", 0), (124, "0", 0), (1, "1", 0), (1, "0", 1))
-        for status, disabled, swap_status in cases:
-            with self.subTest(modprobe_status=status, disabled=disabled, swap_status=swap_status):
-                harness = r'''
-set -uo pipefail
-log() { echo "$*"; }
-warn() { echo "$*" >&2; }
-warn_recoverable() { warn "$@"; }
-run_to() { shift; "$@"; }
-modprobe() { echo "module unavailable" >&2; return "$MODULE_STATUS"; }
-apt-get() { echo "PACKAGE_MANAGER_CALLED"; return 1; }
-dpkg() { echo "PACKAGE_MANAGER_CALLED"; return 1; }
-swapon() { return 0; }
-any_swap_active() { return "$SWAP_STATUS"; }
-setup_disk_swap() { echo "disk-swap-kib=$DISK_SWAP_SIZE_KIB"; }
-setup_zswap_fallback() { echo "zswap-fallback"; }
-activate_image_swap_fallback() { echo "image-swap-fallback"; }
-zramctl() { :; }
-df() { :; }
-'''
-                shell = (
-                    harness
-                    + f"\nMODULE_STATUS={status}\nPINVOU3_CI_DISABLE_ZRAM={disabled}\n"
-                    + f"SWAP_STATUS={swap_status}\n"
-                    + "setup_zram() {" + loader + main
-                )
-                result = subprocess.run(
-                    ["bash", "-c", shell], capture_output=True, text=True, timeout=10,
-                    encoding="utf-8",
-                )
-                output = result.stdout + result.stderr
-                self.assertEqual(result.returncode, 0, output)
-                self.assertNotIn("PACKAGE_MANAGER_CALLED", output)
-                self.assertIn("disk-swap-kib=16777216", output)
-                self.assertIn("zswap-fallback", output)
-                if swap_status:
-                    self.assertIn("image-swap-fallback", output)
-                if disabled == "0":
-                    self.assertIn("module unavailable", output)
-                    self.assertIn("without installing kernel packages", output)
-
-    def test_memory_setup_changes_select_native_linux_regression(self):
-        for name in ("rust_code", "rust_full", "cli_rust"):
-            with self.subTest(filter=name):
-                block = re.search(
-                    rf"(?ms)^            {name}:\n(.*?)(?=^            \w+:|\Z)",
-                    self.pr_workflow,
-                )
-                self.assertIsNotNone(block)
-                paths = _extract_quoted_paths(_without_yaml_comments(block.group(1)))
-                self.assertIn("scripts/ci-memory-setup.sh", paths)
 
     def test_fetch_connectors_verifies_checksums_with_loud_diagnostics(self):
         # #1155 复审跟进:fetch-connectors.sh 的 verify_file 在 set -e 下被
@@ -4261,6 +4790,45 @@ df() { :; }
             with self.subTest(mutation=old):
                 with self.assertRaises(AssertionError):
                     assert_reader_execution(regression.replace(old, new))
+
+    def test_windows_a_resume_projection_executes_with_nonzero_product_filters(self):
+        windows = _without_yaml_comments(
+            _extract_job_block(self.pr_workflow, "windows-rust-test")
+        )
+        regression = windows.split(
+            "- name: Windows 原子替换状态机回归", maxsplit=1
+        )[1].split("\n      - name:", maxsplit=1)[0]
+        required = (
+            "'features::remote_control::controller::controlling_service::resume_projection_tests::'",
+            "'features::remote_control::controller::controlling::tests::'",
+            "'features::remote_control::controller::controlling_service::tests::resume_sequence_reopens_business_only_after_controller_resumed'",
+        )
+
+        def assert_execution(block):
+            loop = block.split("for filter in ", maxsplit=1)[1].split("done", maxsplit=1)[0]
+            filters, commands = loop.split("; do", maxsplit=1)
+            for prefix in required:
+                self.assertEqual(filters.count(prefix), 1)
+            self.assertIn('"$test_exe" "$filter" --test-threads=1', commands)
+            self.assertIn("running [1-9][0-9]* tests?", commands)
+            self.assertRegex(commands, r"grep -qE[^\n]+\|\|\s*\{[^}]*exit 1")
+            self.assertIn("set -euo pipefail", block)
+            self.assertNotIn("continue-on-error", block)
+
+        assert_execution(regression)
+        # Deletion/rename, compile-only execution and a vacuous zero-test guard
+        # must each fail this policy; unrelated B filters cannot satisfy it.
+        mutations = [(prefix, change) for prefix in required
+                     for change in ("", "'renamed_no_matching_tests'")]
+        mutations += [
+            ('"$test_exe" "$filter" --test-threads=1', "echo compiled-only"),
+            ("running [1-9][0-9]* tests?", "running [0-9]+ tests?"),
+            ("exit 1", "exit 0"),
+        ]
+        for old, new in mutations:
+            with self.subTest(mutation=(old, new)):
+                with self.assertRaises(AssertionError):
+                    assert_execution(regression.replace(old, new))
 
     def test_windows_controller_inbound_runs_in_the_nonzero_regression_loop(self):
         windows_job = _without_yaml_comments(
@@ -4685,35 +5253,6 @@ df() { :; }
                 with self.assertRaises((AssertionError, IndexError)):
                     self._assert_macos_deployment_regression(self.workflow.replace(old, new))
 
-    def test_macos_scheduled_spool_step_rejects_zero_match_and_failed_command(self):
-        job = _extract_job_block(self.pr_workflow, "macos-rust-check")
-        step = job.split("- name: macOS scheduled spool filename regression", 1)[1].split(
-            "\n      - name:", 1
-        )[0]
-        body = step.split("        run: |\n", 1)[1]
-        lines = []
-        for line in body.splitlines():
-            if line and not line.startswith("          "):
-                break
-            lines.append(line[10:] if line else "")
-        shell = "\n".join(lines)
-        self.assertEqual(shell.count("/tmp/macos_scheduled_spool.log"), 2)
-        shell = shell.replace("/tmp/macos_scheduled_spool.log", '"$TEST_LOG"')
-        prelude = 'cargo() { printf "%s\\n" "$FAKE_OUTPUT"; return "$FAKE_EXIT"; }; cd() { :; };\n'
-        with tempfile.TemporaryDirectory() as tmp:
-            for output, code, expected in (
-                ("test result: ok. 1 passed; 0 failed;", "0", True),
-                ("test result: ok. 0 passed; 0 failed;", "0", False),
-                ("test result: ok. 1 passed; 0 failed;", "1", False),
-                ("test result: ok. 0 passed; 1 ignored;", "0", False),
-            ):
-                result = subprocess.run(
-                    ["bash", "-c", prelude + shell], capture_output=True, timeout=10,
-                    env={**os.environ, "FAKE_OUTPUT": output, "FAKE_EXIT": code,
-                         "TEST_LOG": os.path.join(tmp, "spool.log")},
-                )
-                self.assertEqual(result.returncode == 0, expected, (output, code, result.stderr))
-
     def test_mac_bundle_smoke_is_gated_on_bundle_chain_paths(self):
         # mac-build.yml's bundle_chain filter (before its 2026-10 fold into
         # pr-check's macos-rust-check) decided when to append the universal
@@ -5009,22 +5548,6 @@ df() { :; }
         )
         self.assertIn("github.event_name != 'push'", computer_use)
 
-        # The APFS-specific spool regression must execute on PR macOS, not
-        # only after main is updated; pin the actual case and no-match guard.
-        scheduled = _without_yaml_comments(
-            macos_job.split(
-                "- name: macOS scheduled spool filename regression", maxsplit=1
-            )[1].split("\n      - name:", maxsplit=1)[0]
-        )
-        self.assertIn("github.event_name == 'pull_request'", scheduled)
-        self.assertIn("set -euo pipefail", scheduled)
-        self.assertIn(
-            "features::scheduled::tasks::creation_requests::tests::non_utf8_squatters_do_not_starve_legitimate_records",
-            scheduled,
-        )
-        self.assertIn("--exact --test-threads=1", scheduled)
-        self.assertIn("test result: ok. 1 passed; 0 failed;", scheduled)
-
         # The bundle smoke consumes node_modules (build.js resolves
         # @tauri-apps/cli from it and the beforeBuildCommand runs vite), so the
         # push-gated Node.js setup + npm ci steps must survive alongside it.
@@ -5251,18 +5774,26 @@ df() { :; }
         # the decision record above mentions the old value historically.
         self.assertNotIn("cache-targets:", rust_test_cache)
 
+    def test_console_container_script_only_diff_selects_its_actual_job(self):
+        changes = _without_yaml_comments(
+            self.pr_workflow.split("            update_release_console:", 1)[1].split(
+                "            acp_runtime:", 1
+            )[0]
+        )
+        paths = _extract_quoted_paths(changes)
+        self.assertTrue(_matches_paths_filter("scripts/ci-update-release-console-container.sh", paths))
+        self.assertNotIn("scripts/**", paths)
+        console = _without_yaml_comments(_extract_job_block(self.pr_workflow, "update-release-console-test"))
+        self.assertEqual(
+            _extract_job_level_if(console),
+            "${{ !cancelled() && github.event.action != 'closed' && needs.changes.outputs.update_release_console == 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group') }}",
+        )
+        self.assertRegex(console, r"(?m)^        run: bash scripts/ci-update-release-console-container\.sh$")
+
     def test_dev_profile_o0_guard_stays_on_all_three_heavy_legs(self):
-        # rust-test's codewhale-tui dev-O0 memory guard defuses the
-        # documented ~7 GB single-rustc dev thin-LTO OOM; the 2026-10 audit
-        # followups (PR #745) ported it to the 7 GB no-swap macOS runner
-        # beside the existing Windows twin. The override is a silent policy
-        # knob — dropping a leg's step or gutting the TOML section
-        # resurfaces the cold-run OOM with no runtime error — so pin the
-        # shared payload in every leg. Windows speaks pwsh (Add-Content
-        # here-string), the others a bash heredoc; the TOML section is the
-        # contract they share. Judged on comment-stripped text: commenting
-        # the TOML section out is inert in the written config.toml and must
-        # red this pin exactly like deletion (round-3 review of PR #745).
+        # Linux may reuse a runner with a persistent Cargo home. Keep O0 on
+        # each actual invocation, without writing administrator configuration.
+        # Windows/macOS retain their existing hosted-runner payloads.
         for job_name, end_marker in (
             ("rust-test", "\n  cli-test:"),
             ("windows-rust-test", "\n  macos-rust-check:"),
@@ -5273,26 +5804,22 @@ df() { :; }
                     end_marker, maxsplit=1
                 )[0]
             )
-            self.assertIn("codewhale-tui O0", job, job_name)
-            self.assertIn("[profile.dev.package.codewhale-tui]", job, job_name)
-            self.assertIn("opt-level = 0", job, job_name)
-        # Preserve the cargo-home location. Persistent runners must update
-        # the Linux override idempotently; cache exclusion alone cannot stop
-        # duplicate TOML tables from accumulating between jobs.
-        for job_name, end_marker in (
-            ("rust-test", "\n  cli-test:"),
-            ("macos-rust-check", "\n  windows-codex-runtime-test:"),
-        ):
-            job = _without_yaml_comments(
-                self.pr_workflow.split(f"\n  {job_name}:", maxsplit=1)[1].split(
-                    end_marker, maxsplit=1
-                )[0]
-            )
-            self.assertIn(
-                'config="${CARGO_HOME:-$HOME/.cargo}/config.toml"',
-                job,
-                job_name,
-            )
+            if job_name == "rust-test":
+                executable = re.findall(
+                    r"(?m)^ +(?:run: )?(?:/usr/bin/time -v )?cargo (.+)$", job
+                )
+                test_commands = [line for line in executable if re.search(r"(?:^| )test(?: |$)", line)]
+                self.assertEqual(len(test_commands), 4)
+                for command in test_commands:
+                    self.assertTrue(command.startswith("--config 'profile.dev.package.codewhale-tui.opt-level=0' test"), command)
+                self.assertNotIn('config="${CARGO_HOME:-$HOME/.cargo}/config.toml"', job)
+                self.assertNotIn('cat >> "$config"', job)
+            else:
+                self.assertIn("codewhale-tui O0", job, job_name)
+                self.assertIn("[profile.dev.package.codewhale-tui]", job, job_name)
+                self.assertIn("opt-level = 0", job, job_name)
+                if job_name == "macos-rust-check":
+                    self.assertIn('config="${CARGO_HOME:-$HOME/.cargo}/config.toml"', job)
 
     def test_frontend_test_webui_smoke_reuses_the_prebuilt_dist(self):
         # frontend-test builds the web dist unconditionally (the web index
@@ -5558,6 +6085,319 @@ df() { :; }
 
 
 
+class DependencyReviewWarnOnlyGateTests(unittest.TestCase):
+    """dependency-review.yml 的能力缺失降级必须由仓库 variable 门控，不得无条件吞错。
+
+    Dependency graph 未开启时动作必然失败（能力缺失），降级为告警是合理的；
+    但降级必须由仓库 variable DEPENDENCY_REVIEW_WARN_ONLY 门控——无条件
+    continue-on-error 会在依赖图开启后把真实 high 级漏洞/许可证违规静默吞成
+    告警，且没有任何机制或测试保障恢复强制门禁。
+    """
+
+    def test_dependency_review_downgrade_is_variable_gated(self):
+        workflow = (ROOT / ".github/workflows/dependency-review.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIsNone(
+            re.search(r"continue-on-error:\s*['\"]?true['\"]?", workflow),
+            "dependency-review 不得无条件 continue-on-error（含引号形式 "
+            "`continue-on-error: 'true'`）：降级必须由 vars.DEPENDENCY_REVIEW_WARN_ONLY "
+            "门控，依赖图开启后把该 variable 设为 'false' 即恢复强制门禁",
+        )
+        self.assertIn(
+            "vars.DEPENDENCY_REVIEW_WARN_ONLY",
+            workflow,
+            "dependency-review 的降级必须由仓库 variable DEPENDENCY_REVIEW_WARN_ONLY 门控",
+        )
+        self.assertIn(
+            "fail-on-severity: high",
+            workflow,
+            "dependency-review 必须保留 fail-on-severity: high 强度阈值",
+        )
+
+
+class SecurityGateEnforcementPinsTests(unittest.TestCase):
+    """secret-scan / dco / .gitleaks.toml 的承重形态钉（round-2 评审收口）。
+
+    变异实证：把 dco 的 core.setFailed 降级为 core.warning、删除 secret-scan
+    的「commits scanned」防空扫守卫、甚至整文件删除 secret-scan.yml，原有
+    套件全部保持绿色——门禁的强制力此前没有任何测试保护。本类以存在性
+    断言钉住各承重点；改动这些形态时必须显式评估并同步更新对应断言。
+    """
+
+    def test_secret_scan_workflow_keeps_fail_closed_guard(self):
+        workflow = (ROOT / ".github/workflows/secret-scan.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(
+            'grep -Eq "[1-9][0-9]* commits scanned"',
+            workflow,
+            "secret-scan 的防空扫守卫不得删除：gitleaks 的 exit code 在坏 git "
+            "区间下不可信（可 exit 0 且打印 0 commits）",
+        )
+        self.assertIn(
+            "fetch-depth: 0",
+            workflow,
+            "全量历史扫描需要完整 checkout（fetch-depth: 0）",
+        )
+        self.assertIn(
+            "sha256sum -c -",
+            workflow,
+            "gitleaks 安装必须保留校验和验证",
+        )
+        self.assertIn(
+            "--diff-merges=first-parent",
+            workflow,
+            "git log -p 默认不输出 merge 补丁；扫描必须显式纳入 merge diff，"
+            "否则 evil merge / 绕队列手工 merge 引入的泄漏对本门禁不可见",
+        )
+
+    def test_secret_scan_cutoff_matches_commit_message_gate(self):
+        validator = (ROOT / "scripts/validate-commit-msg.py").read_text(
+            encoding="utf-8"
+        )
+        match = re.search(
+            r"LEGACY_HISTORY_CUTOFF\s*=\s*[\"']([0-9a-f]{40})[\"']", validator
+        )
+        self.assertIsNotNone(
+            match, "validate-commit-msg.py 必须定义 40 位 hex 的 LEGACY_HISTORY_CUTOFF"
+        )
+        workflow = (ROOT / ".github/workflows/secret-scan.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(
+            match.group(1),
+            workflow,
+            "secret-scan 的 --log-opts 扫描起点必须与 LEGACY_HISTORY_CUTOFF 一致，"
+            "两道门禁的信任边界不得漂移",
+        )
+
+    def test_dco_workflow_stays_enforcing(self):
+        workflow = (ROOT / ".github/workflows/dco.yml").read_text(encoding="utf-8")
+        self.assertIn(
+            "core.setFailed(",
+            workflow,
+            "dco 必须以 core.setFailed 强制失败；降级为 core.warning 会让门禁静默失效",
+        )
+        self.assertIn(
+            "/^Signed-off-by:",
+            workflow,
+            "dco 的签署存在性正则不得移除或弱化",
+        )
+        self.assertIn('"dependabot[bot]"', workflow)
+        self.assertIn('"github-actions[bot]"', workflow)
+
+    def test_dco_workflow_fails_closed_on_commit_list_truncation(self):
+        """DCO 检查必须对 PR 提交列表截断保持 fail-closed（2026-11-03 评审收口）。
+
+        `pulls.listCommits` 即使 paginate 也在 250 条静默封顶：更大 PR 的尾部
+        提交会在这道门禁里未经核验就放行。必须以 `pulls.get().commits` 的
+        权威计数比对并在截断时 core.setFailed，不得降级为 warning——与
+        secret-scan 空证据即失败的公约同因。
+        """
+        workflow = (ROOT / ".github/workflows/dco.yml").read_text(encoding="utf-8")
+        self.assertIn(
+            "github.rest.pulls.get(",
+            workflow,
+            "dco 必须取 pulls.get 的权威提交计数用于截断比对",
+        )
+        self.assertIn(
+            "pr.data.commits > commits.length",
+            workflow,
+            "dco 必须比对权威计数与 listCommits 返回数，缺失比对会让截断静默放行",
+        )
+        self.assertIn(
+            "squash or split the PR",
+            workflow,
+            "截断分支必须 core.setFailed 并给出 squash/split 指引，不得静默通过",
+        )
+
+    def test_gitleaks_config_keeps_default_rules_and_allowlist_surface(self):
+        config_path = ROOT / ".gitleaks.toml"
+        self.assertTrue(config_path.exists(), ".gitleaks.toml 不得删除")
+        config = tomllib.loads(config_path.read_text(encoding="utf-8"))
+        self.assertEqual(
+            config.get("extend", {}).get("useDefault"),
+            True,
+            "必须扩展 gitleaks 默认规则集（useDefault = true），不得整体替换",
+        )
+        allowlists = config.get("allowlists", [])
+        self.assertEqual(
+            len(allowlists),
+            18,
+            "allowlist 组数被钉死（cargo-deny 精确集合同款公约）：新增或删除豁免组"
+            "属于扫描面安全变化，必须显式更新本断言并逐组说明理由",
+        )
+
+    def test_gitleaks_allowlists_anchor_extracted_secret_full_value(self):
+        """豁免条件必须绑定提取 secret 的完整受审值（2026-11-02 评审收口）。
+
+        旧形态 regexTarget="line" 下，登记字面量只命中整行的已知前缀：登记
+        docKey 样例后追加不同字符，generic-api-key 提取的是完整未登记新值，
+        但允许正则仍在整行命中已知前缀，使路径 AND 正则条件一起成立，把
+        未登记的新值（含同行真实凭据样式的其它命中）一并吞掉。新形态要求
+        每组 regexTarget="secret" 且正则全值锚定（^…$），唯一例外是
+        private-key 标记组——其 secret 是从 BEGIN 标记开始的多行 blob，
+        只做起点锚定，且仅作用于 secret 按定义以 BEGIN 开头的 private-key
+        规则。gitleaks 二进制不进本套件，这里以合成 ASCII 谓词复现提取值
+        的匹配判定（提取=赋值右侧完整 token）。
+        """
+        import re as _re
+
+        config = tomllib.loads((ROOT / ".gitleaks.toml").read_text(encoding="utf-8"))
+        allowlists = config.get("allowlists", [])
+        self.assertTrue(allowlists, ".gitleaks.toml 必须定义 allowlist 组")
+
+        for group in allowlists:
+            label = group.get("description", "<无描述>")
+            self.assertEqual(
+                group.get("regexTarget"),
+                "secret",
+                f"豁免组「{label}」必须 regexTarget=\"secret\"；line 目标会把"
+                "登记前缀扩展出的未登记新值一并豁免",
+            )
+            self.assertEqual(
+                group.get("condition"),
+                "AND",
+                f"豁免组「{label}」必须保持路径 AND 正则的 AND 条件",
+            )
+            start_anchored_only = group.get("targetRules") == ["private-key"]
+            for pattern in group.get("regexes", []):
+                self.assertTrue(
+                    pattern.startswith("^"),
+                    f"豁免组「{label}」的正则必须从 secret 起点锚定: {pattern}",
+                )
+                if not start_anchored_only:
+                    self.assertTrue(
+                        pattern.endswith("$"),
+                        f"豁免组「{label}」的正则必须锚定到 secret 完整值结束"
+                        f"（private-key 标记组除外）: {pattern}",
+                    )
+
+        # 组 1（文档登记值）的合成谓词正负控：登记值豁免、前缀扩展/其它值/
+        # 48 字符长扩展不豁免。
+        doc_group = next(
+            (g for g in allowlists if "Pinned upstream connector" in g["description"]),
+            None,
+        )
+        self.assertIsNotNone(doc_group, "组 1（文档登记值）不得删除或改名")
+        compiled = [_re.compile(p) for p in doc_group["regexes"]]
+
+        def any_match(secret: str) -> bool:
+            return any(c.match(secret) is not None for c in compiled)
+
+        registered = [
+            "wo1g3x54FzVEJ5yE",
+            "rBGBr2r1HmwanAGW",
+            "Pd6l2Z7V8ZWydl7M",
+            "YhljsPiGfUgnVAg9urvRFd-BvSqRLxxxx",
+            "A2f5boKjfazMzesI9zKbmugTc4T",
+        ]
+        for value in registered:
+            self.assertTrue(
+                any_match(value),
+                f"登记值 {value!r} 必须仍被组 1 豁免（豁免面不得回退）",
+            )
+        for attack in (
+            "Pd6l2Z7V8ZWydl7MAPPENDED",
+            "A2f5boKjfazMzesI9zKbmugTc4T" + "x" * 24,
+            "Qq7Xk2Vb9NwRt5Yz",
+            "sk-live-realkeyshape0",
+        ):
+            self.assertFalse(
+                any_match(attack),
+                f"非登记值 {attack!r} 不得被组 1 豁免（前缀扩展/其它值必须照常报出）",
+            )
+
+    def test_gitleaks_protocol_fixture_group_enumerates_registered_vectors(self):
+        """协议夹具豁免组必须逐一枚举登记值，不得放行任意 64 位 hex（2026-11-02 评审收口）。
+
+        旧形态 `regexTarget="secret"` + `^[0-9a-f]{64}$` 只锚定了长度形状，
+        会把该夹具内任意字段提取到的任意 64 位 hex 一并豁免：向夹具追加一
+        个未登记的 api_key 赋值（任意合法 SHA-256 形状即可满足）会静默落
+        入本组——完整长度锚定本身不能证明它是已登记的确定性向量。新形态
+        要求每条正则都是 `^<64 位 hex 字面量>$` 的精确枚举，且每个字面量
+        必须真实存在于夹具文件中（夹具向量变更时登记必须同步复核）。合成
+        谓词正负控覆盖：登记值豁免、未登记 64-hex 与前缀扩展不豁免。
+        """
+        import re as _re
+
+        config = tomllib.loads((ROOT / ".gitleaks.toml").read_text(encoding="utf-8"))
+        allowlists = config.get("allowlists", [])
+        fixture = (
+            ROOT
+            / "remote-control-relay"
+            / "test"
+            / "fixtures"
+            / "controller-protocol-v1.json"
+        )
+        self.assertTrue(fixture.exists(), "协议夹具文件不得删除或改名")
+
+        group = next(
+            (
+                g
+                for g in allowlists
+                if "controller-protocol-v1" in (g.get("paths") or [""])[0]
+            ),
+            None,
+        )
+        self.assertIsNotNone(group, "协议夹具豁免组不得删除")
+        self.assertEqual(
+            group.get("targetRules"),
+            ["generic-api-key"],
+            "协议夹具豁免组的 targetRules 不得漂移",
+        )
+
+        hex_literal = _re.compile(r"^\^[0-9a-f]{64}\$$")
+        patterns = group.get("regexes", [])
+        self.assertTrue(patterns, "协议夹具豁免组必须逐一枚举登记值，不得为空")
+        registered = []
+        fixture_text = fixture.read_text(encoding="utf-8")
+        for pattern in patterns:
+            self.assertRegex(
+                pattern,
+                hex_literal,
+                "协议夹具豁免组的每条正则都必须是 ^<64 位 hex 字面量>$ 的"
+                f"精确枚举，不得放行任意长度形状: {pattern}",
+            )
+            value = pattern[1:-1]
+            self.assertIn(
+                value,
+                fixture_text,
+                f"豁免组登记值 {value} 必须真实存在于协议夹具文件中",
+            )
+            registered.append(value)
+        self.assertEqual(
+            len(registered),
+            len(set(registered)),
+            "协议夹具豁免组不得出现重复登记",
+        )
+
+        compiled = [_re.compile(p) for p in patterns]
+
+        def group_match(secret: str) -> bool:
+            return any(c.match(secret) is not None for c in compiled)
+
+        for value in registered:
+            self.assertTrue(
+                group_match(value),
+                f"登记值 {value} 必须仍被本组豁免（豁免面不得回退）",
+            )
+        # 同文件未登记 64-hex 凭据负例：任何不在这批枚举里的 64 位 hex
+        # （包括合法 SHA-256 形状的合成值）都不得落入本组豁免。
+        unregistered = [
+            "b3a9e2f14c8d7a0655e93f21c4b7d80669a2f5e18c7d4b309a6e1f25d8c4b7a9",
+            "0" * 64,
+            ("a" * 63) + "2",
+        ]
+        for attack in unregistered:
+            self.assertNotIn(attack, registered)
+            self.assertFalse(
+                group_match(attack),
+                f"未登记 64-hex 值 {attack} 不得被本组豁免（须照常报出）",
+            )
+
+
 class ReleaseDiskAndImagePolicyTests(unittest.TestCase):
     """Guard for release-build disk preparation and the single-image convention (backported from private-repo #1112 on 2026-09-16)."""
 
@@ -5677,6 +6517,233 @@ class ReleaseDiskAndImagePolicyTests(unittest.TestCase):
                     " must not be added back (pulled in transitively by"
                     " libwebkit2gtk-4.1-dev or not needed by the build)",
                 )
+
+
+@unittest.skipUnless(shutil.which("bash"), "bash is required to run the script")
+@unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0,
+                 "the host-touching script must not be exercised as root")
+class CiMemorySetupRepairBehaviorTests(unittest.TestCase):
+    """repair_dpkg_state 的行为级回归(2026-10-28 评审轮 3)。
+
+    合同断言只钉文本:把修复函数清成空实现、保留注释,静态钉仍可能全绿。
+    这里以桩替身端到端运行真实脚本(仅中和 root guard),用假时钟 + 假
+    sleep 把 40s 等锁预算压缩到毫秒级,覆盖:忙锁快败按钟重试、预算内
+    (>20s)释放原地恢复、预算外由 EXIT 再入兜住、真实失败早停不烧预算、
+    干净状态零 configure、journal-only 与 audit 不可用也进修复。生产修复
+    行为失效(函数体被清空等)时,本类必红。
+    """
+
+    # 假时钟基准:脚本启动到 repair 之间没有真实 sleep,桩时钟仍在此值。
+    BASE = 1000000000
+
+    @classmethod
+    def setUpClass(cls):
+        cls.src = (ROOT / "scripts" / "ci-memory-setup.sh").read_text(encoding="utf-8")
+        guard = "if [[ ${EUID} -ne 0 ]]; then"
+        if guard not in cls.src:
+            raise AssertionError("root guard drifted; the behavior harness must be updated")
+
+    def setUp(self):
+        tmp = Path(tempfile.mkdtemp(prefix="memory-setup-repair-"))
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        self.state = tmp / "state"
+        self.state.mkdir()
+        self.bin = tmp / "bin"
+        self.bin.mkdir()
+        self.updates = tmp / "updates"
+        self.updates.mkdir()
+        self.clock = self.state / "clock"
+        self.clock.write_text(str(self.BASE))
+        for name, body in self.STUBS.items():
+            stub = self.bin / name
+            stub.write_text(body)
+            stub.chmod(0o755)
+
+    # dpkg 桩的行为:--audit 按 state/audit-dirty、state/audit-fail 给出
+    # 脏/不可用;--configure -a 在 release-at 之前模拟忙锁毫秒级快败
+    # (rc 2),slow-fail 模拟真实失败(推进假时钟 30s 后 rc 1);成功即
+    # 清理脏标记与残留 journal,对应真实 dpkg 修复后的收敛状态。
+    STUBS = {
+        "date": """#!/usr/bin/env bash
+# Fake clock: the script only ever asks for +%s (epoch seconds).
+if [[ ${1:-} == "+%s" ]]; then
+  cat "$REPAIR_TEST_STATE/clock"
+  exit 0
+fi
+exit 0
+""",
+        "sleep": """#!/usr/bin/env bash
+# Fake sleep: advance the fake clock instead of really sleeping.
+case ${1:-} in
+  (*[!0-9]*|"") exit 0 ;;
+esac
+echo $(( $(cat "$REPAIR_TEST_STATE/clock") + $1 )) > "$REPAIR_TEST_STATE/clock"
+""",
+        "timeout": """#!/usr/bin/env bash
+# run_to invokes `timeout -k 15 SECS CMD...`; pass-through keeps the call
+# shape while the fake clock governs all timing.
+shift 3
+exec "$@"
+""",
+        "sysctl": """#!/usr/bin/env bash
+exit 0
+""",
+        "modprobe": """#!/usr/bin/env bash
+echo "modprobe: FATAL: Module zram not found in directory /lib/modules/$(uname -r)" >&2
+exit 1
+""",
+        "apt-get": """#!/usr/bin/env bash
+echo "E: could not get lock /var/lib/dpkg/lock-frontend - open" >&2
+exit 100
+""",
+        "swapon": """#!/usr/bin/env bash
+case ${1:-} in
+  (--show*) exit 0 ;;
+esac
+echo "swapon: ${1:-}: Invalid argument" >&2
+exit 1
+""",
+        "swapoff": """#!/usr/bin/env bash
+exit 1
+""",
+        "findmnt": """#!/usr/bin/env bash
+exit 1
+""",
+        "df": """#!/usr/bin/env bash
+exit 1
+""",
+        "fallocate": """#!/usr/bin/env bash
+exit 1
+""",
+        "mkswap": """#!/usr/bin/env bash
+exit 1
+""",
+        "dpkg": """#!/usr/bin/env bash
+state="${REPAIR_TEST_STATE:?}"
+echo "dpkg $* @$(cat "$state/clock")" >> "$state/dpkg-calls.log"
+if [[ ${1:-} == --audit ]]; then
+  if [[ -f "$state/audit-fail" ]]; then
+    exit 42
+  fi
+  if [[ -f "$state/audit-dirty" ]]; then
+    echo "The following packages have been kept back:"
+    echo "  linux-image-6.8.0-999-generic"
+  fi
+  exit 0
+fi
+if [[ ${1:-} == --configure ]]; then
+  if [[ -f "$state/release-at" ]]; then
+    now="$(cat "$state/clock")"
+    if (( now < $(cat "$state/release-at") )); then
+      echo "dpkg frontend lock was locked by another process with pid 2374" >&2
+      exit 2
+    fi
+  fi
+  if [[ -f "$state/slow-fail" ]]; then
+    now="$(cat "$state/clock")"
+    echo $(( now + 30 )) > "$state/clock"
+    echo "dpkg: error processing archive" >&2
+    exit 1
+  fi
+  rm -f "$state/audit-dirty" "$state/audit-fail"
+  if [[ -n ${PINVOU3_CI_DPKG_UPDATES_DIR:-} ]]; then
+    rm -f "${PINVOU3_CI_DPKG_UPDATES_DIR}"/[0-9]* 2>/dev/null
+  fi
+  exit 0
+fi
+exit 0
+""",
+    }
+
+    def _configure_calls(self):
+        log = self.state / "dpkg-calls.log"
+        if not log.exists():
+            return []
+        return [line for line in log.read_text().splitlines() if "--configure" in line]
+
+    def _run_script(self):
+        env = dict(os.environ)
+        env["PATH"] = f"{self.bin}{os.pathsep}{env.get('PATH', '')}"
+        env["REPAIR_TEST_STATE"] = str(self.state)
+        env["PINVOU3_CI_DPKG_UPDATES_DIR"] = str(self.updates)
+        env.pop("GITHUB_ACTIONS", None)
+        # 行为夹具必须走 hosted 主路径:生产脚本在 RUNNER_ENVIRONMENT=self-hosted
+        # 时于 repair/trap 安装前安全早退(保留管理员预置内存),该早退本身
+        # 不在本类回归范围。若继承外层 self-hosted 环境(fast-gate 的
+        # self-hosted runner 正是如此),五个行为测试将拿不到任何 configure
+        # 调用、断言空转。显式钉 hosted,保持生产早退分支不受影响。
+        env["RUNNER_ENVIRONMENT"] = "github-hosted"
+        script = self.state / "ci-memory-setup.sh"
+        script.write_text(self.src.replace(
+            "if [[ ${EUID} -ne 0 ]]; then", "if [[ 0 -ne 0 ]]; then"
+        ))
+        proc = subprocess.run(
+            ["bash", str(script)], capture_output=True, text=True, env=env, timeout=60,
+        )
+        self.assertEqual(proc.returncode, 0, f"script failed; stderr:\n{proc.stderr}")
+        return proc
+
+    def test_busy_lock_released_after_25s_is_repaired_in_exit_round(self):
+        # 评审轮 3 回归:忙锁在 ~25s 后释放,按钟重试必须等到释放点恢复,
+        # 而不是像 3 次×5s 固定重试那样 ~10s 就耗尽等锁窗口。主线 #2095
+        # 后脚本自身不再安装内核包,修复只经 EXIT trap 单轮执行。
+        (self.state / "audit-dirty").write_text("1")
+        (self.state / "release-at").write_text(str(self.BASE + 25))
+        proc = self._run_script()
+        calls = self._configure_calls()
+        # 尝试落在假时钟 0,5,10,15,20,25 —— 25s 那次锁已释放并成功。
+        self.assertEqual(len(calls), 6, calls)
+        self.assertIn("dpkg admin state repaired (configure attempt 6)", proc.stdout)
+        self.assertNotIn("did not succeed", proc.stderr)
+
+    def test_lock_held_past_budget_gives_up_loudly(self):
+        (self.state / "audit-dirty").write_text("1")
+        (self.state / "release-at").write_text(str(self.BASE + 45))
+        proc = self._run_script()
+        calls = self._configure_calls()
+        # 唯一一轮(EXIT 兜底)的尝试落在 0..40 共 9 次:40s 预算耗尽后
+        # 响亮放弃并上报仍脏的 audit;45s 才释放的锁不再有第二轮等待,
+        # 残留状态交给后续步骤与告警。
+        self.assertEqual(len(calls), 9, calls)
+        self.assertTrue(
+            all(int(c.rsplit("@", 1)[1]) <= self.BASE + 40 for c in calls), calls,
+        )
+        self.assertIn("dpkg --configure -a did not succeed", proc.stderr)
+        self.assertIn("dpkg --audit still reports", proc.stderr)
+        self.assertNotIn("dpkg admin state repaired", proc.stdout)
+
+    def test_real_configure_failure_stops_early_without_burning_the_budget(self):
+        (self.state / "audit-dirty").write_text("1")
+        (self.state / "slow-fail").write_text("1")
+        proc = self._run_script()
+        calls = self._configure_calls()
+        # 尝试本身跑了 30s 仍失败 = 真实错误,等待无益:单轮(EXIT 兜底)
+        # 1 次即早停,而不是把 40s 等锁预算烧满。
+        self.assertEqual(len(calls), 1, calls)
+        self.assertIn("failed after 30s", proc.stderr)
+        self.assertIn("did not succeed", proc.stderr)
+
+    def test_clean_state_never_invokes_configure(self):
+        proc = self._run_script()
+        self.assertEqual(self._configure_calls(), [])
+        self.assertNotIn("interrupted state", proc.stderr)
+        self.assertNotIn("repaired", proc.stdout)
+
+    def test_leftover_updates_journal_alone_triggers_repair(self):
+        # audit 静默但 updates/ 残留全数字 journal —— apt 判 interrupted 的
+        # 同款依据,必须进修复;成功后 journal 被真实收敛(桩同步清理)。
+        (self.updates / "12345").write_text("journal\n")
+        proc = self._run_script()
+        calls = self._configure_calls()
+        self.assertEqual(len(calls), 1, calls)
+        self.assertIn("dpkg admin state repaired (configure attempt 1)", proc.stdout)
+
+    def test_unrunnable_audit_falls_through_to_repair(self):
+        (self.state / "audit-fail").write_text("1")
+        proc = self._run_script()
+        calls = self._configure_calls()
+        self.assertEqual(len(calls), 1, calls)
+        self.assertIn("dpkg admin state repaired (configure attempt 1)", proc.stdout)
 
 
 if __name__ == "__main__":

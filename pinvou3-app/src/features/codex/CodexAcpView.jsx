@@ -59,6 +59,7 @@ import {
   appendNativeSystemItem,
   createNativeLane,
   hydrateNativeLane,
+  refreshNativeTurnTimeline,
   nativeModelServiceContext,
   projectNativeLane,
   removeLocalUserMessage,
@@ -74,6 +75,8 @@ import {
   claimNativeControlsRefreshId,
   finalizePreparedSessionCreation,
   resolveNativeModelId,
+  resolveNativeModelRef,
+  persistNativeSessionModelRef,
 } from './native-session-handoff.js';
 import {
   checkpointRefreshKey,
@@ -519,6 +522,7 @@ const NATIVE_CHAT_EVENTS = [
   'chat:compaction',
   'chat:tool_gate_decision',
   'chat:usage',
+  'chat:billing_notice',
   'chat:memory',
   'chat:user_input_required',
   'chat:plan_snapshot',
@@ -635,6 +639,8 @@ export function CodexAcpView({
   onGotoModelSettings,
   onGotoSettings,
   fixedSession = false,
+  accountPlatformClient,
+  onOpenAccountRecharge,
   // The "choose workspace" picker (§2) delivers its result through here:
   // { epoch, path, projectId, roots }; path=null = temporary session.
   // onOpenWorkspacePicker opens the picker (held by the host, main.jsx).
@@ -1014,6 +1020,28 @@ export function CodexAcpView({
   // session 缓存在 lane Map 里（后台会话的 turn 也能继续推进，切回不丢流式内容）。
   const isNativeAgent = activeAgentId === 'pinvou';
   const nativeLanesRef = useRef(new Map());
+  const nativeTimelineMountedRef = useRef(true);
+  useEffect(() => {
+    nativeTimelineMountedRef.current = true;
+    const unsubscribe = bridge.sessions?.onSessionDeleted?.(id => {
+      nativeSessionIdsRef.current.delete(id);
+      nativeLanesRef.current.delete(id);
+    });
+    return () => {
+      nativeTimelineMountedRef.current = false;
+      unsubscribe?.();
+      nativeLanesRef.current.clear();
+    };
+  }, []);
+
+  async function refreshNativeAuthoritativeTimeline(sessionId, lane) {
+    const changed = await refreshNativeTurnTimeline(lane,
+      () => invoke('get_session_timeline', { sessionId }),
+      () => nativeTimelineMountedRef.current && nativeSessionIdsRef.current.has(sessionId)
+        && nativeLanesRef.current.get(sessionId) === lane,
+    );
+    if (changed && sessionId === activeIdRef.current) setNativeLaneTick(tick => tick + 1);
+  }
   const [nativeLaneTick, setNativeLaneTick] = useState(0);
   const nativeSessionIdsRef = useRef(new Set());
   useEffect(() => {
@@ -1059,6 +1087,7 @@ export function CodexAcpView({
   // mode 由后端 get_mode_state 驱动（code 会话首次默认 Plan），不写死初值。
   const [nativeControls, setNativeControls] = useState({
     modelId: null,
+    modelRef: null,
     mountedId: null,
     mode: CODE_MODE_FALLBACK,
     multiAgent: false,
@@ -1215,6 +1244,13 @@ export function CodexAcpView({
     controlsModelId: nativeControls.modelId,
     draftModelId: nativeDraftControls.modelId,
     handoffModelId: nativeDraftControlsHandoff?.modelId,
+  });
+  const nativeSessionModelRef = resolveNativeModelRef({
+    activeId,
+    controlsSessionId: nativeControlsSessionRef.current,
+    controlsModelRef: nativeControls.modelRef,
+    draftModelRef: nativeDraftControls.modelRef,
+    handoffModelRef: nativeDraftControlsHandoff?.modelRef,
   });
   const nativeMountedId = activeId
     ? (nativeControlsSessionRef.current === activeId
@@ -1499,13 +1535,15 @@ export function CodexAcpView({
     });
     nativeControlsRequestRef.current = claimed.latestRequestId;
     const requestId = claimed.requestId;
-    const [modelId, mountedId, modeState] = await Promise.all([
+    const [modelId, modelRef, mountedId, modeState] = await Promise.all([
       invoke('get_session_model_id', { sessionId }).catch(() => null),
+      invoke('get_session_model_ref', { sessionId }).catch(() => null),
       invoke('session_mounted_collection', { sessionId }).catch(() => null),
       invoke('get_mode_state', { sessionId }).catch(() => null),
     ]);
     const controls = {
       modelId: modelId || null,
+      modelRef: modelRef || null,
       mountedId: mountedId ?? null,
       // 读取失败兜底走全局默认（首次使用 → Plan 只读），不回退写死 yolo。
       mode: (modeState && modeState.mode) || nativeModeFallback(codePermPrefs),
@@ -1552,10 +1590,12 @@ export function CodexAcpView({
 
   async function persistNativeDraftControls(sessionId, staged) {
     const hasMultiAgentSelection = Object.prototype.hasOwnProperty.call(staged, 'multiAgent');
-    const hasStaged = staged.modelId || staged.mountedId != null || staged.mode || hasMultiAgentSelection;
+    const hasStaged = staged.modelRef || staged.modelId || staged.mountedId != null || staged.mode || hasMultiAgentSelection;
     if (!hasStaged) return false;
     try {
-      if (staged.modelId) {
+      if (staged.modelRef) {
+        await persistNativeSessionModelRef(invoke, sessionId, staged.modelRef);
+      } else if (staged.modelId) {
         await invoke('set_session_model', { sessionId, modelId: staged.modelId });
       }
       if (staged.mountedId != null) {
@@ -1595,7 +1635,27 @@ export function CodexAcpView({
     try {
       await invoke(command, { sessionId, ...args });
       await refreshNativeControls(sessionId);
-    } catch (err) { showError(err); }
+    } catch (err) {
+      showError(err);
+    }
+  }
+
+  // Keep the selection target fixed to Code's session, including draft materialization.
+  async function switchNativeModelRef(sessionId, modelRef) {
+    if (busy || working || sessionId !== activeIdRef.current) return;
+    if (!sessionId) {
+      const modelId = modelRef.source === 'ACCOUNT_PLATFORM' ? 'builtin_account_platform' : modelRef.saved_model_id;
+      setNativeDraftControls(current => ({ ...current, modelId, modelRef: { ...modelRef } }));
+      return;
+    }
+    setError('');
+    try {
+      await persistNativeSessionModelRef(invoke, sessionId, modelRef);
+      await refreshNativeControls(sessionId);
+    } catch (err) {
+      showError(err);
+      throw err;
+    }
   }
 
   async function switchNativeModel(sessionId, modelId) {
@@ -1837,13 +1897,18 @@ export function CodexAcpView({
       // 原生（品悟）会话：历史与 turn timeline 来自 SavedSession / timing_events，
       // 不走 ACP 的 timeline / pending / session_info 命令。
       if (nativeSessionIdsRef.current.has(id)) {
+        const lane = getNativeLane(id);
+        const laneEpoch = lane.timelineReadEpoch || 0;
         const [saved, sessionTimeline] = await Promise.all([
           invoke('load_session', { id, setActive: false }),
           invoke('get_session_timeline', { sessionId: id }).catch(() => []),
         ]);
         if (sessionLoadRequestRef.current !== requestId) return null;
-        const lane = getNativeLane(id);
-        hydrateNativeLane(lane, saved, sessionTimeline || []);
+        if (!nativeTimelineMountedRef.current || !nativeSessionIdsRef.current.has(id)
+            || nativeLanesRef.current.get(id) !== lane) return null;
+        // A newer live turn/read keeps its timeline while the original SavedSession hydrate proceeds.
+        hydrateNativeLane(lane, saved, (lane.timelineReadEpoch || 0) === laneEpoch
+          ? sessionTimeline || [] : lane.timeline);
         // lane 随组件卸载销毁，chat:user_input_required 不重发：经后端 pending
         // 登记还原挂起的确认卡（applyNativeChatEvent 按 toolCallId 幂等去重），
         // 并顺带恢复 turn 进行中的 busy 展示。
@@ -2446,7 +2511,10 @@ export function CodexAcpView({
     if (!String(outgoing || '').trim()) return false;
     if (busy || working || activeRuntimeBusy || workspaceUnavailable || sessionSyncing) return false;
     if (!activeId && !draftWorkspacePath) return false;
-    if (attachments.some(attachment => attachment.status === 'parsing')) return false;
+    // Pending attachments (parsing — and uploading, which was never gated
+    // here) deliberately fall through: this gate has no failure feedback, so
+    // blocking would report a fake "task sent" success. send() rejects both
+    // statuses with the inline attachments error and fails the voice task for real.
     if (activeId && !sessionReady) return false;
     if (!isNativeAgent && !activeStatus?.authenticated) return false;
     return true;
@@ -2463,6 +2531,7 @@ export function CodexAcpView({
     modelId: isNativeAgent ? (activeId
       ? (nativeControlsSessionRef.current === activeId ? nativeControls.modelId : null)
       : nativeDraftControls.modelId) : null,
+    modelRef: isNativeAgent && !activeId ? nativeDraftControls.modelRef : null,
     getDraft: () => draft,
     setDraft,
     appendDraft: bridge.voice.appendVoiceText,
@@ -2676,6 +2745,7 @@ export function CodexAcpView({
         language: eventContext.language,
         modelServiceState: sessionId === activeIdRef.current ? eventContext.modelServiceState : null,
       });
+      if (name === 'chat:done') void refreshNativeAuthoritativeTimeline(sessionId, lane);
       if (name === 'chat:turn_started' || name === 'chat:done') {
         refreshSessions().catch(() => {});
       }
@@ -3162,8 +3232,9 @@ export function CodexAcpView({
           // 发送成功 = 新一轮已受理：code scope 未提交的「打开」转正锁死。
           notifyChatRoundCommitted('code');
         } catch (sendError) {
-          removeLocalUserMessage(lane, optimisticId);
+          removeLocalUserMessage(lane, optimisticId, { preserveFailedTurn: true });
           setNativeLaneTick(tick => tick + 1);
+          void refreshNativeAuthoritativeTimeline(targetId, lane);
           throw sendError;
         }
       },
@@ -3783,6 +3854,7 @@ export function CodexAcpView({
             {visibleTurns.length > 0 && (
                   <ConversationTimeline
                     turns={visibleTurns}
+                    onUserErrorAction={onOpenAccountRecharge}
                     sessionId={activeId}
                     scrollElementRef={scroller}
                     busy={busy}
@@ -4185,15 +4257,17 @@ export function CodexAcpView({
                         busy={busy || working}
                         onSwitch={switchNativeMode}
                       />
-                      {nativeModelChoices.length > 0 && (
+                      {(nativeModelChoices.length > 0 || accountPlatformClient) && (
                         <ComposerModelSelector
                           t={t}
                           bs={bs}
                           onGotoSettings={onGotoModelSettings}
                           sessionId={activeId}
                           sessionModelId={nativeSessionModelId}
+                          sessionModelRef={nativeSessionModelRef}
+                          accountPlatformClient={accountPlatformClient}
                           busy={busy || working}
-                          onSwitchModel={(sessionId, modelId) => switchNativeModel(sessionId, String(modelId))}
+                          onSwitchModelRef={switchNativeModelRef}
                           multiAgentEnabled={nativeMultiAgentEnabled}
                           multiAgentAvailable={nativeMultiAgentAvailable}
                           onToggleMultiAgent={switchNativeMultiAgent}
@@ -4427,7 +4501,7 @@ export function CodexAcpView({
                   )}
                 </div>
                 {busy ? (
-                  <button onClick={cancel} aria-label={codexCopy.stop} title={codexCopy.stop} className="w-9 h-9 rounded-full flex items-center justify-center bg-red-500/10 text-red-500 hover:bg-red-500/15"><StopCircle size={18} /></button>
+                  <button type="button" onClick={cancel} aria-label={codexCopy.stop} title={codexCopy.stop} className="w-9 h-9 rounded-full flex items-center justify-center bg-red-500/10 text-red-500 hover:bg-red-500/15"><StopCircle size={18} /></button>
                 ) : (
                   <>
                     <VoiceComposerButton

@@ -28,7 +28,7 @@ const {
 const BUILD_SCRIPT_SOURCE = fs.readFileSync(
   path.join(__dirname, "..", "scripts", "tauri", "build.js"),
   "utf8",
-);
+).replace(/\r\n/g, "\n");
 
 const LINUX_X64 = { platform: "linux", architecture: "x64", stageRuntime: () => null };
 

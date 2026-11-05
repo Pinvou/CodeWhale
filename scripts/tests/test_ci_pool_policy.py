@@ -59,7 +59,7 @@ export -f docker curl
             for run_id, status in [('1001', '0'), ('1002', '17')]:
                 with self.subTest(run_id=run_id, status=status):
                     log = Path(directory) / (run_id + '.log')
-                    env = dict(os.environ, RUNNER_TEMP=directory, GITHUB_RUN_ID=run_id, GITHUB_RUN_ATTEMPT='1', PINVOU_UPDATE_ADMIN_TOKEN='ci-fixture', COMMAND_LOG=str(log), UP_STATUS=status)
+                    env = dict(os.environ, RUNNER_TEMP=directory, GITHUB_RUN_ID=run_id, GITHUB_RUN_ATTEMPT='1', PINVOU_UPDATE_ADMIN_TOKEN='ci-fixture', COMMAND_LOG=str(log), UP_STATUS=status, PINVOU_UPDATE_NODE_IMAGE="ci-fixture-node-image")
                     result = subprocess.run(['bash', '-c', stub + '\nbash ' + shlex.quote(str(script))], env=env, cwd=ROOT, capture_output=True, text=True, timeout=30)
                     self.assertEqual(result.returncode, int(status), result.stderr)
                     commands = log.read_text()

@@ -20,11 +20,14 @@ const MobileTabBar = lazy(() =>
   import('../components/layout/MobileShell.jsx').then((m) => ({ default: m.MobileTabBar })));
 const MobileTopBar = lazy(() =>
   import('../components/layout/MobileShell.jsx').then((m) => ({ default: m.MobileTopBar })));
-import { bridge, useBridgeState, usePlatformCapability, activeModelIsLocal, shouldShowApiKeyGate } from '../hooks/useBridge.js';
+const ControlledOpenRecovery = lazy(() => import('../features/remote-control/ControlledOpenRecovery.jsx'));
+import { bridge, useBridgeState, usePlatformCapability, activeModelIsLocal, shouldShowModelAccessGate } from '../hooks/useBridge.js';
 import { useCompactViewport, useVisualViewportHeight } from '../hooks/useViewport.js';
 import { useSystemDarkMode } from '../hooks/useSystemDarkMode.js';
+import { useModalIsolation } from '../hooks/useModalIsolation.js';
+import { refreshModelAccessAfterAuthentication } from '../features/settings/model-access.js';
 import { COLOR_SCHEME_STORAGE_KEY, normalizeColorScheme, readStoredColorScheme, resolveTheme } from '../shared/color-scheme.js';
-import { DEFAULT_CHAT_TITLES, dict, createLatestLanguageGate, ensureLanguage, ensureLanguageWithZhFallback, LANG_TO_TAG, initialSystemLanguage, SEARCH_KEY_PROVIDERS, TAG_TO_LANG, zhDict } from '../shared/i18n.js';
+import { CHAT_RECOVERY_COPY, DEFAULT_CHAT_TITLES, dict, createLatestLanguageGate, ensureLanguage, ensureLanguageWithZhFallback, LANG_TO_TAG, initialSystemLanguage, SEARCH_KEY_PROVIDERS, TAG_TO_LANG, zhDict, accountPlatformCopy, organizationCopy } from '../shared/i18n.js';
 import { mountWhenLanguageReady } from '../shared/entry-boot.js';
 import { formatSessionDate, localDateKey, formatDateGroupLabel } from '../shared/date-utils.js';
 import { groupSessionsWithProjects, resolveSessionProjectId, needsAddFolderConfirm, WORKSPACE_KIND_BOUND } from '../features/projects/projectGrouping.js';
@@ -45,9 +48,11 @@ const ManageProjectFoldersDialog = lazy(() =>
 const SessionWorkspaceDialog = lazy(() =>
   import('../features/projects/SessionWorkspaceDialog.jsx').then(m => ({ default: m.SessionWorkspaceDialog })));
 import { classifyRebindError, mergeRebindCarryoverIds } from '../features/projects/rebindErrors.js';
-import { runSessionBatch } from '../shared/session-management.js';
 import { filterSessionsByTab, groupSessionsByLocalDate, sessionListComparator } from '../shared/session-list-pipeline.js';
-import { isLlmApiAccountVisible } from '../shared/model-options.js';
+const LazyAccountPlatformPopover = lazy(() => VIEW_LOADERS.accountPlatformPopover().then(module => ({ default: module.AccountPlatformPopover })));
+import { AccountPlatformDesktopClient } from '../features/account-platform/desktop-client.js';
+import { walletRechargeTarget } from '../features/conversation/billing-notice.js';
+import { organizationRechargeTargetAllowed, requirePersonalAccount } from '../features/account-platform/personal-contract.js';
 import { can, isWeb } from '../shared/platform.js';
 import { errorCode, localizedErrorMessage } from '../shared/user-facing-error.js';
 import { installGlobalMarkdownRenderer } from '../shared/markdown-renderer.js';
@@ -83,10 +88,9 @@ import { createPetActivationGuard } from '../features/pet/activation-guard.js';
 import { SessionAttachmentTitle } from '../features/attachments/SessionAttachmentTitle.jsx';
 import {
   isControlledSessionChatActive,
-  openControlledDeviceChatWithRetry,
 } from '../features/remote-control/remote-control-logic.mjs';
 import { modelSourceForLease } from '../features/remote-control/remote-model-source.mjs';
-import { mergeSessionStoreHistory } from '../features/remote-control/remote-session-adapter.mjs';
+import { mergeSessionStoreHistory, remoteProxyForSession } from '../features/remote-control/remote-session-adapter.mjs';
 import {
   sessionTitlePlainText,
   sessionTitlePresentation,
@@ -145,7 +149,7 @@ const LazyRebindFolderDialog = lazy(() => VIEW_LOADERS.rebindFolderDialog().then
 const LazyPinvouSummonModal = lazy(() => VIEW_LOADERS.pinvouSummon().then(m => ({ default: m.PinvouSummonModal })));
 const LazyUpdateNoticeButton = lazy(() => VIEW_LOADERS.updateNotice().then(m => ({ default: m.UpdateNoticeButton })));
 const LazySavedPersonaConfirmDialog = lazy(() => VIEW_LOADERS.savedPersonaConfirmDialog().then(m => ({ default: m.SavedPersonaConfirmDialog })));
-const LazyApiKeyGateDialog = lazy(() => VIEW_LOADERS.apiKeyGateDialog().then(m => ({ default: m.ApiKeyGateDialog })));
+const LazyModelAccessGate = lazy(() => VIEW_LOADERS.modelAccessGate().then(m => ({ default: m.ModelAccessGate })));
 const LazyArchiveConfirmDialog = lazy(() => VIEW_LOADERS.archiveConfirmDialog().then(m => ({ default: m.ArchiveConfirmDialog })));
 const LazyArchiveToast = lazy(() => VIEW_LOADERS.archiveConfirmDialog().then(m => ({ default: m.ArchiveToast })));
 const LazyPersonaEditorModal = lazy(() => VIEW_LOADERS.cardpool().then(m => ({ default: m.PersonaEditorModal })));
@@ -171,7 +175,7 @@ let appFirstRenderMarked = false;
 
 const APP_BRIDGE_STATE_DOMAINS = [
   'platform', 'sessions', 'chat', 'voice', 'knowledge', 'scheduled', 'monitor',
-  'settings', 'models', 'llmapi', 'vllm', 'interaction', 'personas',
+  'settings', 'models', 'vllm', 'interaction', 'personas',
   'memory', 'remoteControl', 'updater', 'dependencies', 'teamRelay',
   'projects', 'desktopRemoteControl', 'computerUse',
 ];
@@ -202,189 +206,6 @@ function workspaceDisplayName(path) {
   const parts = String(path || '').split(/[\\/]/).filter(Boolean);
   return parts[parts.length - 1] || String(path || '');
 }
-
-    const formatQuotaTokens = (value, language) => {
-      if (value == null || !Number.isFinite(Number(value))) return '—';
-      return `${Number(value).toLocaleString(language || 'en', { notation: 'compact', maximumFractionDigits: 2 })} tokens`;
-    };
-
-    const shortBackendUsername = (value, copy) => {
-      const name = String(value || '').trim();
-      if (!name) return copy.backendUser;
-      return name;
-    };
-
-    const llmStatusText = (status, error, copy) => {
-      if (error) return copy.status.unavailable;
-      return copy.status[status] || copy.status.unknown;
-    };
-
-    const AccountPopover = ({ open, theme, t, llmApiStatus, loading, accountErrorCode, onClose, onRefresh, onLogin, collapsed }) => {
-      const ref = useRef(null);
-      const [loginUsername, setLoginUsername] = useState('');
-      const [loginPassword, setLoginPassword] = useState('');
-      const [loginErrorCode, setLoginErrorCode] = useState(null);
-      const [loggingIn, setLoggingIn] = useState(false);
-      const isDark = theme === 'dark';
-      const accountCopy = t.uiAccount;
-      const backendUsername = (llmApiStatus && llmApiStatus.backend_username) || '';
-      const backendDisplayName = (llmApiStatus && llmApiStatus.backend_display_name) || '';
-      const displayName = shortBackendUsername(backendDisplayName || backendUsername, accountCopy);
-      const displayId = backendUsername || accountCopy.backendAccount;
-      const accountErrorMessage = accountErrorCode
-        ? localizedErrorMessage({ code: accountErrorCode }, accountCopy.errors, accountCopy.syncFailed)
-        : '';
-      const loginErrorMessage = loginErrorCode
-        ? localizedErrorMessage({ code: loginErrorCode }, accountCopy.errors, accountCopy.builtinLoginFailed)
-        : '';
-      useEffect(() => {
-        if (!open) return;
-        const onMouseDown = (e) => {
-          if (ref.current && !ref.current.contains(e.target)) onClose && onClose();
-        };
-        const onKey = (e) => { if (e.key === 'Escape') onClose && onClose(); };
-        window.addEventListener('mousedown', onMouseDown);
-        window.addEventListener('keydown', onKey);
-        return () => {
-          window.removeEventListener('mousedown', onMouseDown);
-          window.removeEventListener('keydown', onKey);
-        };
-      }, [open, onClose]);
-      useEffect(() => {
-        if (open && backendUsername) setLoginUsername(prev => prev || backendUsername);
-      }, [open, backendUsername]);
-      if (!open) return null;
-
-      const quota = llmApiStatus && llmApiStatus.quota;
-      const status = llmApiStatus && llmApiStatus.provisioning_status;
-      const remaining = quota ? quota.remaining_tokens : null;
-      const limit = quota ? quota.limit_tokens : null;
-      const used = quota ? quota.used_tokens : null;
-      const pct = limit ? Math.max(0, Math.min(100, Math.round((Number(remaining || 0) / Number(limit)) * 100))) : 0;
-      const panelPos = collapsed ? 'left-full bottom-0 ml-3' : 'left-0 bottom-full mb-2';
-      const needsLogin = !!(llmApiStatus && llmApiStatus.auto_login_failed && onLogin);
-      const submitLogin = async (e) => {
-        e.preventDefault();
-        if (!onLogin || loggingIn) return;
-        setLoginErrorCode(null);
-        setLoggingIn(true);
-        try {
-          await onLogin(loginUsername, loginPassword);
-          setLoginPassword('');
-        } catch (err) {
-          setLoginErrorCode(errorCode(err) || 'unknown');
-        } finally {
-          setLoggingIn(false);
-        }
-      };
-
-      return (
-        <div
-          ref={ref}
-          className={`absolute ${panelPos} w-[268px] rounded-[22px] p-3 shadow-2xl z-[80] border backdrop-blur-xl ${
-            isDark ? 'bg-[#202124]/95 border-white/10 text-[#E3E3E3]' : 'bg-white/95 border-black/10 text-[#1F1F1F]'
-          }`}
-        >
-          <div className="flex items-center gap-3 px-1.5 pb-3">
-            <div className="w-11 h-11 rounded-2xl bg-gradient-to-br from-[#19D3A2] to-[#0B57D0] flex items-center justify-center text-white shadow-lg shadow-emerald-500/20">
-              <User size={20} />
-            </div>
-            <div className="min-w-0 flex-1">
-              <div className="text-[15px] font-semibold truncate">{displayName}</div>
-              <div className={`text-[12px] truncate ${isDark ? 'text-[#9AA0A6]' : 'text-[#6F7378]'}`}>{displayId}</div>
-            </div>
-            <button
-              type="button"
-              onClick={onClose}
-              className={`w-8 h-8 rounded-full flex items-center justify-center transition-colors ${isDark ? 'hover:bg-white/10' : 'hover:bg-black/5'}`}
-              title={accountCopy.close}
-            >
-              <X size={16} />
-            </button>
-          </div>
-
-          <div className={`rounded-2xl border p-3 ${isDark ? 'bg-[#131314] border-white/10' : 'bg-[#F8FAFD] border-black/5'}`}>
-            <div className="flex items-center justify-between gap-3">
-              <div className="flex items-center gap-2 min-w-0">
-                <Sparkles size={17} className="text-[#10B981] shrink-0" />
-                <span className="text-[14px] font-medium truncate">{accountCopy.availableQuota}</span>
-              </div>
-              <button
-                type="button"
-                onClick={onRefresh}
-                disabled={loading}
-                className={`w-7 h-7 rounded-full flex items-center justify-center transition-colors ${isDark ? 'hover:bg-white/10 disabled:text-[#5F6368]' : 'hover:bg-black/5 disabled:text-[#C4C7C5]'}`}
-                title={accountCopy.refreshQuota}
-              >
-                <RefreshCw size={14} className={loading ? 'animate-spin' : ''} />
-              </button>
-            </div>
-            {quota ? (
-              <div className="mt-3 space-y-1.5 text-[13px]">
-                {[
-                  [accountCopy.monthlyQuota, formatQuotaTokens(limit, t.langTag)],
-                  [accountCopy.used, formatQuotaTokens(used, t.langTag)],
-                  [accountCopy.remaining, formatQuotaTokens(remaining, t.langTag)],
-                ].map(([label, value]) => (
-                  <div key={label} className="flex items-center justify-between gap-3">
-                    <span className={isDark ? 'text-[#9AA0A6]' : 'text-[#6F7378]'}>{label}</span>
-                    <span className="font-medium tabular-nums text-right">{value}</span>
-                  </div>
-                ))}
-              </div>
-            ) : (
-              <div className={`mt-3 text-[13px] ${isDark ? 'text-[#9AA0A6]' : 'text-[#6F7378]'}`}>
-                {loading ? accountCopy.syncing : llmStatusText(status, accountErrorCode, accountCopy)}
-              </div>
-            )}
-            {needsLogin && (
-              <form className="mt-3 space-y-2" onSubmit={submitLogin}>
-                <input
-                  value={loginUsername}
-                  onChange={(e) => setLoginUsername(e.target.value)}
-                  disabled={loading || loggingIn}
-                  placeholder={accountCopy.username}
-                  autoComplete="username"
-                  className={`w-full h-9 rounded-xl px-3 text-[13px] outline-none border ${
-                    isDark ? 'bg-[#202124] border-white/10 text-[#E3E3E3] placeholder:text-[#6F7378]' : 'bg-white border-black/10 text-[#1F1F1F] placeholder:text-[#9AA0A6]'
-                  }`}
-                />
-                <input
-                  value={loginPassword}
-                  onChange={(e) => setLoginPassword(e.target.value)}
-                  disabled={loading || loggingIn}
-                  placeholder={accountCopy.password}
-                  type="password"
-                  autoComplete="current-password"
-                  className={`w-full h-9 rounded-xl px-3 text-[13px] outline-none border ${
-                    isDark ? 'bg-[#202124] border-white/10 text-[#E3E3E3] placeholder:text-[#6F7378]' : 'bg-white border-black/10 text-[#1F1F1F] placeholder:text-[#9AA0A6]'
-                  }`}
-                />
-                {(accountErrorMessage || loginErrorMessage) && (
-                  <div className="text-[12px] leading-snug text-[#EA4335] break-words">
-                    {loginErrorMessage || accountErrorMessage}
-                  </div>
-                )}
-                <button
-                  type="submit"
-                  disabled={loading || loggingIn || !loginUsername.trim() || !loginPassword}
-                  className={`w-full h-9 rounded-xl text-[13px] font-semibold transition-colors ${
-                    isDark ? 'bg-[#10B981] text-white disabled:bg-white/10 disabled:text-[#6F7378]' : 'bg-[#10B981] text-white disabled:bg-black/5 disabled:text-[#9AA0A6]'
-                  }`}
-                >
-                  {loggingIn ? accountCopy.loggingIn : accountCopy.loginAndSync}
-                </button>
-              </form>
-            )}
-            {quota && (
-              <div className={`mt-3 h-2 rounded-full overflow-hidden ${isDark ? 'bg-white/10' : 'bg-black/10'}`}>
-                <div className="h-full rounded-full bg-[#10B981]" style={{ width: pct + '%' }} />
-              </div>
-            )}
-          </div>
-        </div>
-      );
-    };
 
 // Per-item callback cache behind the RecentItem memo: sidebar task items
 // (item) are derived by useMemo and keep stable references while the
@@ -547,9 +368,14 @@ const App = () => {
       // a boot cache.
       const [colorScheme, setColorScheme] = useState(readStoredColorScheme);
       const activeTheme = resolveTheme(colorScheme, systemDark);
-      const [accountPopoverOpen, setAccountPopoverOpen] = useState(false);
-      const [llmApiLoading, setLlmApiLoading] = useState(false);
-      const [llmApiErrorCode, setLlmApiErrorCode] = useState(null);
+      const [personalAccountOpen, setPersonalAccountOpen] = useState(false);
+      const [accountRechargeRequest, setAccountRechargeRequest] = useState(null);
+      const accountRechargeSequence = useRef(0);
+      const personalAccountClient = useMemo(() => bridge.available && bridge.accountPlatform
+        ? new AccountPlatformDesktopClient(bridge.accountPlatform) : null, []);
+      const [modelAccessLoginOpen, setModelAccessLoginOpen] = useState(false);
+      const modelAccessLayerRef = useRef(null);
+      const modelAccessSettingsFocusPendingRef = useRef(false);
       const [teamRelayEnabled, setTeamRelayEnabled] = useState(() => loadTeamRelayAccess());
       // Browser state is scoped to workspace sessions: switching chats only shows
       // that chat's WebView2. The login profile remains globally shared by the
@@ -668,6 +494,7 @@ const App = () => {
       const browserSessionId = activeChat || (bs && bs.activeSessionId) || null;
       const platformCapabilities = (bs && bs.platformCapabilities) || {};
       const browserNativeDisplayAvailable = !!platformCapabilities.browserNativeDisplay;
+      const personalAccountAvailable = can('accountPlatform') && platformCapabilities.accountPlatformSupported === true && personalAccountClient !== null;
       const browserSessionIdRef = useRef(browserSessionId);
       browserSessionIdRef.current = browserSessionId;
       const browserPaneState = browserPaneStateFor(browserPaneStates, browserSessionId);
@@ -685,8 +512,25 @@ const App = () => {
       const browserWorkspaceError = browserOpenState.status === 'failed'
         ? browserOpenState.error
         : '';
+      const localNavigationEpochRef = useRef(0);
+      const [localNavigationEpoch, setLocalNavigationEpoch] = useState(0);
+      const invalidateControlledNavigation = useCallback(() => {
+        const epoch = ++localNavigationEpochRef.current;
+        bridge.sessions?.beginLocalNavigationIntent?.();
+        setLocalNavigationEpoch(localNavigationEpochRef.current);
+        return epoch;
+      }, []);
+      const captureLocalNavigation = useCallback(() => {
+        const epoch = localNavigationEpochRef.current;
+        return { epoch, isCurrent: () => localNavigationEpochRef.current === epoch };
+      }, []);
       const runBrowserUiTransition = useCallback((publish, options) => {
         const tracksSession = options?.channel === 'session';
+        if (tracksSession && options?.sessionSource !== 'bridge'
+          && Object.keys(options).includes('sessionTarget') && !options?.controlledNavigation) {
+          const epoch = invalidateControlledNavigation();
+          if (epoch !== localNavigationEpochRef.current) return false;
+        }
         const tracksCommandEcho = tracksSession
           && options?.sessionSource !== 'bridge'
           && Object.keys(options).includes('sessionTarget');
@@ -749,7 +593,7 @@ const App = () => {
         }
         finishRequest();
         return result;
-      }, [browserSessionCommandEchoGuard, requestBrowserUiCommitAck]);
+      }, [browserSessionCommandEchoGuard, requestBrowserUiCommitAck, invalidateControlledNavigation]);
       const setCurrentView = useCallback((nextView) => {
         const resolvedView = typeof nextView === 'function'
           ? nextView(currentViewRef.current)
@@ -1490,10 +1334,6 @@ const App = () => {
       const remoteTemporaryModelAvailable = bs?.controllerConnection?.temporaryModelAvailable === true;
       const remoteModelLeaseKey = `${bs?.controllerConnection?.connectionId || ''}:${bs?.controllerConnection?.leaseEpoch || ''}:${remoteTemporaryModelAvailable ? 'temporary' : 'controlled'}`;
       const remoteModelLeaseKeyRef = useRef(remoteModelLeaseKey);
-      const controlledDeviceAutoOpenRef = useRef(null);
-      const controlledDeviceAutoOpenInFlightRef = useRef(null);
-      const controlledSessionAutoOpenRef = useRef(null);
-      const controlledSessionAutoOpenInFlightRef = useRef(null);
       const controlledDeviceStatus = bs?.controlledDevice?.status || null;
       const controlledDeviceGeneration = bs?.controlledDevice?.generation || null;
       const controlledTaskSessionId = (() => {
@@ -1506,7 +1346,6 @@ const App = () => {
       })();
       const remoteChatConnection = bs?.controllerConnection || REMOTE_DISCONNECTED_CONNECTION;
       const remoteProxyHistoryAvailable = bs?.platformCapabilities?.loaded === true
-        && bs?.platformCapabilities?.os === 'windows'
         && bs?.platformCapabilities?.desktopRemoteControl === true;
       useEffect(() => {
         if (!bridge.available || !remoteProxyHistoryAvailable) return;
@@ -1606,57 +1445,12 @@ const App = () => {
         window.PinvouWebClientStrings = misc.webClientErrors;
         // platform/tauri/bridge 下的非模块脚本通过同一入口读取当前语言。
         window.PinvouTauriBridgeStrings = misc.tauriBridge;
+        window.PinvouChatRecoveryCopy = CHAT_RECOVERY_COPY;
       }, [t]);
       // 有可用新版 → 侧边栏设置图标亮红点（不弹窗不打断）
       const hasUpdate = !!(bs && bs.updateInfo && bs.updateInfo.available);
       const updateNoticePreviewEnabled = !bridge.available
         && !!window.UpdateNoticeLogic?.previewEnabled?.(window.location);
-      const llmAccountStatus = bs && bs.llmApiStatus;
-      const llmAccountVisible = isLlmApiAccountVisible(llmAccountStatus);
-      const llmAccountUsername = llmAccountStatus && llmAccountStatus.backend_username;
-      const llmAccountDisplayName = llmAccountStatus && llmAccountStatus.backend_display_name;
-      const llmAccountName = shortBackendUsername(llmAccountDisplayName || llmAccountUsername, t.uiAccount);
-      const refreshLlmApiStatus = useCallback(async () => {
-        if (!bridge.available || !bridge.llmapi.getLlmApiStatus) return;
-        setLlmApiLoading(true);
-        setLlmApiErrorCode(null);
-        try {
-          await bridge.llmapi.getLlmApiStatus();
-        } catch (e) {
-          const code = errorCode(e) || 'unknown';
-          console.error('llm api quota refresh failed:', code);
-          setLlmApiErrorCode(code);
-        } finally {
-          setLlmApiLoading(false);
-        }
-      }, []);
-      const loginLlmApiUser = useCallback(async (username, password) => {
-        if (!bridge.available || !bridge.llmapi.loginLlmApiUser) {
-          const error = new Error('login_unavailable');
-          error.code = 'login_unavailable';
-          throw error;
-        }
-        setLlmApiLoading(true);
-        setLlmApiErrorCode(null);
-        try {
-          await bridge.llmapi.loginLlmApiUser(username, password);
-          if (bridge.llmapi.getLlmApiStatus) await bridge.llmapi.getLlmApiStatus();
-        } catch (e) {
-          console.error('llm api login failed:', errorCode(e) || 'unknown');
-          throw e;
-        } finally {
-          setLlmApiLoading(false);
-        }
-      }, []);
-
-      useEffect(() => {
-        if (accountPopoverOpen) refreshLlmApiStatus();
-      }, [accountPopoverOpen, refreshLlmApiStatus]);
-
-      useEffect(() => {
-        if (accountPopoverOpen && !llmAccountVisible) setAccountPopoverOpen(false);
-      }, [accountPopoverOpen, llmAccountVisible]);
-
       const isWebAccessConnected = !!(bs && bs.webAccess && bs.webAccess.web_client_connected);
       function handleOpenWebAccess() {
         if (!can('webAccessAdmin')) return;
@@ -2680,6 +2474,7 @@ const App = () => {
           // picked minutes earlier on another page. The chat page's own
           // handleNewChat always navigates; this entry now does too.
           if (bs && bs.activeSessionId && bridge.sessions.createNewSession) {
+            invalidateControlledNavigation();
             setCodeModeOn(false);
             await bridge.sessions.createNewSession();
           }
@@ -2909,7 +2704,7 @@ const App = () => {
       // Stable useCallback: the sidebar NavItem memo depends on this callback
       // identity. bs is read through a latest-ref — a click sees the most
       // recently rendered snapshot, matching closure-capture semantics.
-      const navigateFromScheduledRun = useCallback(async (nextView, beforeNavigate) => {
+      const navigateFromScheduledRun = useCallback(async (nextView, beforeNavigate, ownerIsCurrent, controlledOwner) => {
         NAV_PREFETCH[nextView]?.();
         const bs = bsRef.current;
         const context = browserSurfaceTransitionContextRef.current;
@@ -2918,10 +2713,14 @@ const App = () => {
           || (nextView === 'scheduled' && context.scheduledRunChat)
         );
         return runBrowserUiTransition(async ({ isCurrent }) => {
-          if (bs && bs.scheduledRunContext && bridge.available && bridge.scheduled.exitScheduledRunChat) {
-            const exited = await bridge.scheduled.exitScheduledRunChat();
-            if (!exited || !isCurrent()) return false;
+          if (bs && bs.scheduledRunContext && bridge.available && (controlledOwner || bridge.scheduled.exitScheduledRunChat)) {
+            if (controlledOwner && !bridge.sessions?.exitControlledScheduledRunChat) return false;
+            const exited = controlledOwner
+              ? await bridge.sessions.exitControlledScheduledRunChat(controlledOwner)
+              : await bridge.scheduled.exitScheduledRunChat();
+            if (!exited || !isCurrent() || (ownerIsCurrent && !ownerIsCurrent())) return false;
           }
+          if (!isCurrent() || (ownerIsCurrent && !ownerIsCurrent())) return false;
           if (beforeNavigate) beforeNavigate();
           if (nextView === 'chat') setCodeModeOn(false);
           setCurrentView(nextView);
@@ -2940,106 +2739,6 @@ const App = () => {
         });
       }, [closeMobileSidebar, runBrowserUiTransition, setCurrentView]);
 
-      // B 端建立连接后进入普通会话页，便于立即看到远程请求及执行过程。
-      // 以 remote-control generation 去重：liveness 更新和链路恢复不会反复抢走用户当前页面。
-      useEffect(() => {
-        if (controlledDeviceStatus !== 'connected') {
-          return;
-        }
-        if (!controlledDeviceGeneration) return;
-        const connectionKey = controlledDeviceGeneration;
-        if (
-          controlledDeviceAutoOpenRef.current === connectionKey
-          || controlledDeviceAutoOpenInFlightRef.current === connectionKey
-        ) return;
-        const originView = currentViewRef.current;
-        let cancelled = false;
-        controlledDeviceAutoOpenInFlightRef.current = connectionKey;
-        setRemoteConversationOpen(false);
-        void openControlledDeviceChatWithRetry({
-          navigate: () => navigateFromScheduledRun('chat'),
-          isCurrent: () => {
-            if (cancelled) return false;
-            const latest = bsRef.current && bsRef.current.controlledDevice;
-            const latestKey = latest && latest.generation;
-            const viewIsCurrent = currentViewRef.current === originView || currentViewRef.current === 'chat';
-            return !!(latest && latest.status === 'connected' && latestKey === connectionKey && viewIsCurrent);
-          },
-          onError: (error) => console.warn('[remote-control] B-side chat auto-open failed', error),
-        }).then((opened) => {
-          if (controlledDeviceAutoOpenInFlightRef.current === connectionKey) {
-            controlledDeviceAutoOpenInFlightRef.current = null;
-          }
-          if (opened) controlledDeviceAutoOpenRef.current = connectionKey;
-        });
-        return () => {
-          cancelled = true;
-          if (controlledDeviceAutoOpenInFlightRef.current === connectionKey) {
-            controlledDeviceAutoOpenInFlightRef.current = null;
-          }
-        };
-      }, [controlledDeviceGeneration, controlledDeviceStatus, navigateFromScheduledRun]);
-
-      // A remote session is provisioned only when B receives the first task.
-      // Connection-time navigation therefore cannot select it yet; once the
-      // admitted task publishes its authoritative session id, select that
-      // session exactly once so filtering never hides the received command.
-      useEffect(() => {
-        if (controlledDeviceStatus !== 'connected' || !controlledDeviceGeneration || !controlledTaskSessionId) return undefined;
-        const sessionKey = `${controlledDeviceGeneration}:${controlledTaskSessionId}`;
-        if (
-          controlledSessionAutoOpenRef.current === sessionKey
-          || controlledSessionAutoOpenInFlightRef.current === sessionKey
-        ) return undefined;
-        let cancelled = false;
-        controlledSessionAutoOpenInFlightRef.current = sessionKey;
-        void runBrowserUiTransition(async ({ isCurrent }) => {
-          const latest = bsRef.current;
-          if (latest?.scheduledRunContext && bridge.available && bridge.scheduled.exitScheduledRunChat) {
-            const exited = await bridge.scheduled.exitScheduledRunChat();
-            if (!exited || !isCurrent() || cancelled) return false;
-          }
-          if (!bridge.available || !bridge.sessions?.switchToSession || !isCurrent() || cancelled) {
-            return false;
-          }
-          setCodeModeOn(false);
-          setCurrentView('chat');
-          closeMobileSidebar();
-          const switched = await bridge.sessions.switchToSession(controlledTaskSessionId);
-          if (!switched || !isCurrent() || cancelled) return false;
-          setActiveChat(controlledTaskSessionId);
-          return true;
-        }, {
-          channel: 'session',
-          hideMode: 'workspace',
-          serialize: true,
-          sessionTarget: controlledTaskSessionId,
-        }).then((opened) => {
-          if (controlledSessionAutoOpenInFlightRef.current === sessionKey) {
-            controlledSessionAutoOpenInFlightRef.current = null;
-          }
-          if (opened) controlledSessionAutoOpenRef.current = sessionKey;
-        }).catch((error) => {
-          if (controlledSessionAutoOpenInFlightRef.current === sessionKey) {
-            controlledSessionAutoOpenInFlightRef.current = null;
-          }
-          console.warn('[remote-control] B-side session open failed', error);
-        });
-        return () => {
-          cancelled = true;
-          if (controlledSessionAutoOpenInFlightRef.current === sessionKey) {
-            controlledSessionAutoOpenInFlightRef.current = null;
-          }
-        };
-      }, [
-        controlledDeviceGeneration,
-        controlledDeviceStatus,
-        controlledTaskSessionId,
-        closeMobileSidebar,
-        runBrowserUiTransition,
-        setCurrentView,
-      ]);
-
       function openSettingsSection(section = 'general') {
         // 记录进入设置前的页面（代码页齿轮等深链入口），关闭设置时原路返回，
         // 而不是一律回工作页。
@@ -3051,7 +2750,7 @@ const App = () => {
       // Stable useCallbacks: the LazySearchView/RecentItem memos depend on
       // these callback identities; rebuilding them per render would defeat
       // the memo (the dependencies are the real semantic dependencies).
-      const handleOpenScheduledRunShortcut = useCallback(async (run) => {
+      const handleOpenScheduledRunShortcut = useCallback(async (run, selectedTask, beforeOpen) => {
         if (!run || !run.sessionId) return;
         // A scheduled-run session is a normal chat: both the fallback and the
         // successful-open branches land on the scheduled view, so each branch
@@ -3059,13 +2758,14 @@ const App = () => {
         // would also clear it when the open fails, leaving an active code
         // session behind the standard sidebar and New chat creating plain drafts.
         return runBrowserUiTransition(async ({ isCurrent }) => {
+          if (beforeOpen && (!(await beforeOpen()) || !isCurrent())) return false;
           if (!bridge.available || !bridge.scheduled.openScheduledRunChat) {
             setCodeModeOn(false);
             setCurrentView('scheduled');
             closeMobileSidebar();
             return true;
           }
-          const task = {
+          const task = selectedTask || {
             id: run.automationId,
             name: run.taskName || t.scheduledPlans,
             model: run.taskModel || null,
@@ -3152,6 +2852,7 @@ const App = () => {
           last_synced_sequence: linkedSequence,
         });
         if (existing?.kind === 'chat' && bridge.available && bridge.sessions.switchToSession) {
+          invalidateControlledNavigation();
           const switched = await bridge.sessions.switchToSession(existing.session_id);
           if (switched) {
             if (request.contextUpdate && bridge.attachments.addAttachmentByPath) {
@@ -3232,7 +2933,10 @@ const App = () => {
             ? createPinvouModeScopeKey(bs.activeSessionId)
             : undefined;
           savePinvouModeState({ mode: 'work' }, undefined, scopeKey);
-          if (bridge.available && !bs?.activeSessionId) bridge.sessions.createNewSession();
+          if (bridge.available && !bs?.activeSessionId) {
+            invalidateControlledNavigation();
+            bridge.sessions.createNewSession();
+          }
           // While on the code page the original work session's mode may have
           // changed (the code page has its own chain), so pull a fresh value
           // before switching back — ChatView must not mount with a stale
@@ -3961,7 +3665,8 @@ const App = () => {
       }
 
       // 对话管理页批量操作:按会话类型分流并等待全部结果,避免未执行完成就误报成功。
-      async function handleBatchArchiveSessions(ids) {
+      // 批量执行器由已加载的 SearchView 传入,不让低频操作进入启动模块图。
+      async function handleBatchArchiveSessions(ids, runSessionBatch) {
         if (!bridge.available || !ids || !ids.length) return;
         const result = await runSessionBatch(sessionRowsForIds(ids), 'archive', {
           archive: id => bridge.sessions.archiveSession(id),
@@ -3976,7 +3681,7 @@ const App = () => {
         return result;
       }
 
-      async function handleBatchDeleteSessions(ids) {
+      async function handleBatchDeleteSessions(ids, runSessionBatch) {
         if (!bridge.available || !ids || !ids.length) return;
         const result = await runSessionBatch(sessionRowsForIds(ids), 'delete', {
           delete: id => bridge.sessions.deleteSession(id),
@@ -3989,7 +3694,7 @@ const App = () => {
         return result;
       }
 
-      async function handleBatchRestoreArchived(ids) {
+      async function handleBatchRestoreArchived(ids, runSessionBatch) {
         if (!bridge.available || !ids || !ids.length) return;
         const result = await runSessionBatch(ids.map(id => ({ id })), 'restore', {
           restore: id => bridge.sessions.restoreArchivedSession(id),
@@ -4357,12 +4062,32 @@ const App = () => {
       const isControlledChatActive = isControlledSessionChatActive(
         bs?.controlledDevice, bs?.controlledSession, bs?.activeSessionId,
       );
-      const apiKeyGateOpen = shouldShowApiKeyGate(
+      const isRemoteChatActive = Boolean(remoteProxyForSession(bs?.activeSessionId, bs?.remoteProxyHistory));
+      const modelAccessGateOpen = shouldShowModelAccessGate(
         bs,
         currentView,
         bridge.available,
-        isControlledChatActive,
+        isControlledChatActive || isRemoteChatActive,
       );
+      const refreshModelAccess = useCallback(async () => {
+        await refreshModelAccessAfterAuthentication(bridge.models);
+        setModelAccessLoginOpen(false);
+        // Authentication does not invent a default model. The existing settings
+        // page loads the current catalog and persists an explicit selection.
+        modelAccessSettingsFocusPendingRef.current = true;
+        openSettingsSection('model');
+      }, [openSettingsSection]);
+      useEffect(() => { if (!modelAccessGateOpen) setModelAccessLoginOpen(false); }, [modelAccessGateOpen]);
+      useEffect(() => {
+        if (currentView !== 'settings' || !modelAccessSettingsFocusPendingRef.current) return undefined;
+        const focus = () => { const target = document.querySelector('[data-testid="settings-close"]');
+          if (!(target instanceof HTMLElement)) return false;
+          modelAccessSettingsFocusPendingRef.current = false; target.focus({ preventScroll: true }); return true; };
+        if (focus()) return undefined;
+        const observer = new MutationObserver(() => { if (focus()) observer.disconnect(); });
+        observer.observe(document.body, { childList: true, subtree: true });
+        return () => observer.disconnect();
+      }, [currentView]);
       const browserOverlayIntent = [
         archiveConfirm ? 'archive-confirm' : '',
         searchOverlayOpen ? 'search' : '',
@@ -4370,7 +4095,7 @@ const App = () => {
         savedConfirm ? 'saved-confirm' : '',
         can('webAccessAdmin') && webAccessOpen ? 'web-access' : '',
         can('desktopRemoteControl') && remoteConversationOpen ? 'remote-connection' : '',
-        apiKeyGateOpen ? 'api-key' : '',
+        modelAccessGateOpen ? 'model-access' : '',
         bs && bs.pinvouModal ? 'pinvou-review' : '',
         isCompactShell && isSidebarOpen ? 'mobile-sidebar' : '',
         isCompactShell && mobileMoreOpen ? 'mobile-more' : '',
@@ -4385,6 +4110,7 @@ const App = () => {
       // Keep the surface hidden while one already-published overlay hands off to
       // another. The replacement itself is still withheld until its own barrier
       // attempt has settled.
+      useModalIsolation(modelAccessGateOpen && browserOverlayPublicationReady, modelAccessLayerRef);
       const browserOverlayOpen = !!publishedBrowserOverlayIntent;
       const browserBlockingLayerOpen = !browserPaneAllowed || browserOverlayOpen;
       const browserSurfaceSuspended = browserResizeActive
@@ -4453,6 +4179,32 @@ const App = () => {
         setJustInstalledTool,
         onGotoSettings: () => openSettingsSection('general'),
         onGotoModelSettings: () => openSettingsSection('model'),
+        accountPlatformClient: personalAccountClient,
+        onOpenAccountRecharge: async userError => {
+          const target = walletRechargeTarget(userError);
+          if (!personalAccountAvailable || !target) return;
+          const requestId = ++accountRechargeSequence.current;
+          if (target.contextType === 'PERSONAL') {
+            setAccountRechargeRequest(null); setPersonalAccountOpen(true); return;
+          }
+          const client = personalAccountClient, sessionEpoch = client.financeSessionEpoch || 0;
+          try {
+            const session = await client.session();
+            const observationEpoch = client.versionObservationEpoch;
+            if (!session.authenticated) throw new Error('PERMISSION_DENIED');
+            const profile = requirePersonalAccount(await client.bootstrap());
+            if (requestId !== accountRechargeSequence.current) return;
+            if (sessionEpoch !== (client.financeSessionEpoch || 0) || observationEpoch !== client.versionObservationEpoch
+              || client.contextVersion > profile.active_context.context_version
+              || (client.authorizationVersions.organization_authorization_version || 0) > profile.active_context.organization_authorization_version) throw new Error('PERMISSION_DENIED');
+            if (!organizationRechargeTargetAllowed(profile, target)) throw new Error('PERMISSION_DENIED');
+            setAccountRechargeRequest({ ...target, requestId, client, sessionEpoch, actor: profile.user_id,
+              contextVersion: profile.active_context.context_version });
+            setPersonalAccountOpen(true);
+          } catch {
+            if (requestId === accountRechargeSequence.current) setSettingsToast(organizationCopy[language].permissions);
+          }
+        },
         onGotoTools: () => navigateFromScheduledRun('toolStore'),
         // Reference-card navigation (session mention): reuse the sidebar's session switch (with view routing and browser transition).
         onSwitchSession: handleSwitchSession,
@@ -4485,6 +4237,13 @@ const App = () => {
 
           <VoiceShortcutRouter />
           <WebConnectionStatus theme={activeTheme} t={t} />
+          <Suspense fallback={null}><ControlledOpenRecovery bs={bs} bsRef={bsRef} bridge={bridge}
+            currentView={currentView} currentViewRef={currentViewRef} controlledDeviceStatus={controlledDeviceStatus}
+            controlledDeviceGeneration={controlledDeviceGeneration} controlledTaskSessionId={controlledTaskSessionId}
+            localNavigationEpoch={localNavigationEpoch} captureLocalNavigation={captureLocalNavigation}
+            navigateFromScheduledRun={navigateFromScheduledRun} runBrowserUiTransition={runBrowserUiTransition}
+            setCodeModeOn={setCodeModeOn} setCurrentView={setCurrentView} setActiveChat={setActiveChat} setRemoteConversationOpen={setRemoteConversationOpen}
+            closeMobileSidebar={closeMobileSidebar} copy={t.remoteConversation} /></Suspense>
 
           {/* 撕离拖拽 avatar:被拎起的标签,跟随光标(DOM 实现,丝滑跟手、不选中文字) */}
           {dragAvatar && (
@@ -4743,7 +4502,7 @@ const App = () => {
 
             {/* Header / Logo */}
             <div className={`px-4 py-3 max-sm:px-3 max-sm:py-0 flex items-center ${isSidebarOpen ? 'gap-3' : 'justify-center'} overflow-hidden`}>
-              <button
+              <button type="button"
                 data-sidebar-toggle
                 onClick={() => setIsSidebarOpen(!isSidebarOpen)}
                 title={isSidebarOpen ? t.sidebarCollapse : t.sidebarExpand}
@@ -5151,44 +4910,21 @@ const App = () => {
 
             {/* Footer Profile */}
             <div className={`p-3 mt-auto ${isSidebarOpen ? 'space-y-2' : 'flex flex-col items-center gap-3 pb-6'}`}>
-              {llmAccountVisible && (
-              <div className={`relative ${isSidebarOpen ? 'w-full' : ''}`}>
-                <button
-                  type="button"
-                  data-testid="llmapi-account-button"
-                  onClick={() => setAccountPopoverOpen(v => !v)}
-                  title={llmAccountUsername || llmAccountName}
-                  className={`flex items-center rounded-xl transition-colors ${isSidebarOpen ? 'w-full px-2 py-1.5 gap-3 text-left' : 'justify-center w-10 h-10'} ${activeTheme === 'dark' ? 'hover:bg-[#333537] active:bg-[#3A3C3E]' : 'hover:bg-[#E1E5EA] active:bg-[#D8DCE1]'}`}
-                >
-                  <span className="w-8 h-8 shrink-0 rounded-lg bg-gradient-to-br from-[#19D3A2] to-[#0B57D0] flex items-center justify-center text-white">
-                    <User size={17} />
-                  </span>
-                  {isSidebarOpen && (
-                    <span className="min-w-0 flex-1">
-                      <span className="block text-[14px] font-medium leading-none truncate">{llmAccountName}</span>
-                      <span className={`block text-[11px] mt-1 truncate ${activeTheme === 'dark' ? 'text-[#9AA0A6]' : 'text-[#6F7378]'}`}>{t.uiAccount.viewQuota}</span>
-                    </span>
-                  )}
-                  {isSidebarOpen && <ChevronRight size={16} className="shrink-0 opacity-60" />}
+              {personalAccountAvailable && <div className="relative">
+                <button type="button" data-testid="personal-account-button"
+                  onClick={() => { accountRechargeSequence.current++; setAccountRechargeRequest(null); setPersonalAccountOpen(value => !value); }}
+                  title={accountPlatformCopy[language].title}
+                  className={`flex items-center rounded-xl px-2 py-1.5 gap-3 ${isSidebarOpen ? 'w-full' : 'justify-center w-10 h-10'}`}>
+                  <User size={18} />{isSidebarOpen && <span>{accountPlatformCopy[language].title}</span>}
                 </button>
-                <AccountPopover
-                  open={accountPopoverOpen}
-                  theme={activeTheme}
-                  t={t}
-                  llmApiStatus={bs && bs.llmApiStatus}
-                  loading={llmApiLoading}
-                  accountErrorCode={llmApiErrorCode}
-                  collapsed={!isSidebarOpen}
-                  onClose={() => setAccountPopoverOpen(false)}
-                  onRefresh={refreshLlmApiStatus}
-                  onLogin={loginLlmApiUser}
-                />
-              </div>
-              )}
+                <Suspense fallback={null}><LazyAccountPlatformPopover open={personalAccountOpen} client={personalAccountClient} rechargeRequest={accountRechargeRequest}
+                  copy={accountPlatformCopy[language]} language={language} onLanguageChange={handleSetLanguage}
+                  onClose={() => { accountRechargeSequence.current++; setAccountRechargeRequest(null); setPersonalAccountOpen(false); }} /></Suspense>
+              </div>}
               <div className={`${isSidebarOpen ? 'flex items-center justify-between gap-2' : 'flex flex-col items-center gap-3'}`}>
                 {!isSidebarOpen && (
                   <>
-                    {can('webAccessAdmin') && <button
+                    {can('webAccessAdmin') && <button type="button"
                       onClick={handleOpenWebAccess}
                       title={t.uiRemote.title}
                       className={`relative w-10 h-10 shrink-0 rounded-full flex items-center justify-center transition-colors ${activeTheme === 'dark' ? 'text-[#E3E3E3] hover:bg-[#333537]' : 'text-[#444746] hover:bg-[#E1E5EA]'}`}
@@ -5196,14 +4932,14 @@ const App = () => {
                       <Smartphone size={18} />
                       {isWebAccessConnected && <span className="absolute top-1 right-1 w-2 h-2 rounded-full bg-[#34A853]" />}
                     </button>}
-                    {can('pet') && <button
+                    {can('pet') && <button type="button"
                       onClick={() => handleSetPetEnabled(!(bs && bs.settings && bs.settings.pet && bs.settings.pet.enabled))}
                       title={(bs && bs.settings && bs.settings.pet && bs.settings.pet.enabled) ? t.uiPet.hide : t.uiMainApp.petSummon}
                       className={`relative w-10 h-10 shrink-0 rounded-full flex items-center justify-center transition-colors ${(bs && bs.settings && bs.settings.pet && bs.settings.pet.enabled) ? 'text-[#34A853]' : (activeTheme === 'dark' ? 'text-[#E3E3E3]' : 'text-[#444746]')} ${activeTheme === 'dark' ? 'hover:bg-[#333537]' : 'hover:bg-[#E1E5EA]'}`}
                     >
                       <PetPawIcon />
                     </button>}
-                    <button
+                    <button type="button"
                       data-testid="nav-settings"
                       onClick={() => openSettingsSection('general')}
                       title={t.settings}
@@ -5215,7 +4951,7 @@ const App = () => {
                   </>
                 )}
                 {showMegacubeSite && (
-                  <button
+                  <button type="button"
                     onClick={() => invokeTauri('open_external_url', { url: 'https://www.h3c.com/cn/pub/minisite/202606/MegaCube/megacube/index.html' })}
                     title={t.megacubeSite}
                     className={`flex items-center rounded-xl transition-colors ${isSidebarOpen ? 'flex-1 min-w-0 px-2 py-1.5 gap-3' : 'justify-center w-10 h-10'} ${activeTheme === 'dark' ? 'hover:bg-[#333537] active:bg-[#3A3C3E]' : 'hover:bg-[#E1E5EA] active:bg-[#D8DCE1]'}`}
@@ -5228,7 +4964,7 @@ const App = () => {
                 )}
                 {isSidebarOpen && (
                   <div className="flex items-center gap-1">
-                    {can('webAccessAdmin') && <button
+                    {can('webAccessAdmin') && <button type="button"
                       onClick={handleOpenWebAccess}
                       title={t.uiRemote.title}
                       className={`relative w-9 h-9 shrink-0 rounded-full flex items-center justify-center transition-colors ${activeTheme === 'dark' ? 'text-[#C4C7C5] hover:bg-[#333537]' : 'text-[#444746] hover:bg-[#E1E5EA]'}`}
@@ -5236,14 +4972,14 @@ const App = () => {
                       <Smartphone size={18} />
                       {isWebAccessConnected && <span className="absolute top-1 right-1 w-2 h-2 rounded-full bg-[#34A853]" />}
                     </button>}
-                    {can('pet') && <button
+                    {can('pet') && <button type="button"
                       onClick={() => handleSetPetEnabled(!(bs && bs.settings && bs.settings.pet && bs.settings.pet.enabled))}
                       title={(bs && bs.settings && bs.settings.pet && bs.settings.pet.enabled) ? t.uiPet.hide : t.uiMainApp.petSummon}
                       className={`relative w-9 h-9 shrink-0 rounded-full flex items-center justify-center transition-colors ${(bs && bs.settings && bs.settings.pet && bs.settings.pet.enabled) ? 'text-[#34A853]' : (activeTheme === 'dark' ? 'text-[#C4C7C5]' : 'text-[#444746]')} ${activeTheme === 'dark' ? 'hover:bg-[#333537]' : 'hover:bg-[#E1E5EA]'}`}
                     >
                       <PetPawIcon />
                     </button>}
-                    <button
+                    <button type="button"
                       data-testid="nav-settings"
                       onClick={() => navigateFromScheduledRun('settings')}
                       title={t.settings}
@@ -5322,6 +5058,8 @@ const App = () => {
                   setSearchApiKey={handleSetSearchApiKey}
                   savedModels={(bs && bs.savedModels) || []}
                   activeModelId={bs && bs.activeModelId}
+                  defaultModelRef={bs && bs.defaultModelRef}
+                  accountPlatformClient={personalAccountClient}
                   onSaveModel={(m) => bridge.available && bridge.models.saveModel(m)}
                   onDeleteModel={(m) => { if (bridge.available) bridge.models.deleteModel(m.id); }}
                   onSetActiveModel={(id) => bridge.available && bridge.models.setActiveModel(id)}
@@ -5393,6 +5131,7 @@ const App = () => {
                 theme={activeTheme}
                 t={t}
                 sessions={codexSessions}
+                accountPlatformClient={personalAccountClient}
                 activeId={activeCodexId}
                 draftEpoch={codexDraftEpoch}
                 relayLaunch={codexRelayLaunch}
@@ -5407,6 +5146,7 @@ const App = () => {
                 onLaneDeliveryChange={(limited) => { setCodexLaneDeliveryLimited(limited); setCodexLaneDeliveryReported(true); }}
                 bs={bs}
                 onGotoModelSettings={() => openSettingsSection('model')}
+                onOpenAccountRecharge={chatViewBaseProps.onOpenAccountRecharge}
                 onGotoSettings={() => openSettingsSection('general')}
                 onGotoTools={() => navigateFromScheduledRun('toolStore')}
                 onNotify={setSettingsToast}
@@ -5416,7 +5156,7 @@ const App = () => {
               bs && bs.scheduledRunContext ? (
                 <ChatView {...chatViewBaseProps} prefill="" onPrefillConsumed={() => {}} onBackScheduledRun={() => navigateFromScheduledRun('scheduled')} browserDockAvailable={browserDockAvailable} rightDockActivePanelId={browserDockSelectedPanelId} onRightDockPanelSelectionChange={selectRightDockPanel} />
               ) : (
-                <LazyScheduledTasksView theme={activeTheme} t={t} onOpenChat={() => { setCodeModeOn(false); setCurrentView('chat'); }} onGotoModelSettings={() => openSettingsSection('model')} />
+                <LazyScheduledTasksView theme={activeTheme} t={t} onOpenChat={() => { setCodeModeOn(false); setCurrentView('chat'); }} onOpenScheduledRun={handleOpenScheduledRunShortcut} onGotoModelSettings={() => openSettingsSection('model')} />
               )
             )}
             {/* 草稿态(无 session)也渲染挂件,但强制空态——让欢迎页保留「＋加持卡牌」入口。
@@ -5515,24 +5255,52 @@ const App = () => {
               </ViewErrorBoundary>
             )}
 
-            {apiKeyGateOpen && browserOverlayPublicationReady && (
-              // The gate must cover chat in every state of its lazy chunk:
-              // while loading (Suspense fallback) AND after a chunk failure
-              // (ViewErrorBoundary's in-flow error card). Both layers sit
-              // inside this outer backdrop, so React.lazy's cached rejection
-              // can never leave the composer interactable.
+            {modelAccessGateOpen && browserOverlayPublicationReady && (
+              // The opaque shell stays outside the lazy boundary: the chat
+              // surface remains fully covered while either the landing page or
+              // the in-window account screen loads, and also after a chunk error.
               <div
-                className="fixed inset-0 z-[57] flex items-center justify-center overflow-auto p-6"
-                style={{ background: 'rgba(0,0,0,.5)' }}
-                aria-busy="true"
+                ref={modelAccessLayerRef}
+                data-testid="model-access-layer"
+                className="fixed inset-0 z-[2147483647] flex items-center justify-center overflow-auto p-4 sm:p-6"
+                style={{ background: activeTheme === 'dark' ? '#111416' : '#F7FAF9' }}
+                role="dialog"
+                aria-modal="true"
+                aria-label={t.modelAccessTitle}
+                tabIndex={-1}
+                onKeyDown={(event) => event.stopPropagation()}
               >
                 <ViewErrorBoundary t={t}>
-                  <Suspense fallback={null}>
-                    <LazyApiKeyGateDialog
-                      theme={activeTheme}
-                      t={t}
-                      onOpenModelSettings={() => openSettingsSection('model')}
-                    />
+                  <Suspense fallback={<div role="status" className="text-[13px] opacity-60">{t.loading}</div>}>
+                    {modelAccessLoginOpen ? (
+                      personalAccountClient ? (
+                        <LazyAccountPlatformPopover
+                          open
+                          presentation="screen"
+                          client={personalAccountClient}
+                          copy={accountPlatformCopy[language]}
+                          language={language}
+                          onLanguageChange={handleSetLanguage}
+                          theme={activeTheme}
+                          requestedView={null}
+                          onAuthenticated={refreshModelAccess}
+                          onClose={() => setModelAccessLoginOpen(false)}
+                        />
+                      ) : (
+                        <div role="status" className="text-[13px] opacity-60">{accountPlatformCopy[language].loading}</div>
+                      )
+                    ) : (
+                      <LazyModelAccessGate
+                        theme={activeTheme}
+                        t={t}
+                        onLogin={() => setModelAccessLoginOpen(true)}
+                        onUseExternalModels={() => {
+                          setModelAccessLoginOpen(false);
+                          modelAccessSettingsFocusPendingRef.current = true;
+                          openSettingsSection('model');
+                        }}
+                      />
+                    )}
                   </Suspense>
                 </ViewErrorBoundary>
               </div>

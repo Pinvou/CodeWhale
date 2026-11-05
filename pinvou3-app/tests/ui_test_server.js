@@ -1,5 +1,4 @@
 const { createReadStream, existsSync, readdirSync, statSync } = require('fs');
-const { createServer } = require('http');
 const { extname, isAbsolute, join, relative, resolve } = require('path');
 
 // CI / local verification can point at an isolated Vite output when the normal
@@ -54,7 +53,7 @@ function startUiTestServer() {
     throw new Error('UI build not found; run `npm run build:ui` before browser smoke tests');
   }
   assertFreshBuild();
-  return new Promise((resolveReady, reject) => {
+  return import('./helpers/http-fixture.mjs').then(({ createServer }) => new Promise((resolveReady, reject) => {
     const server = createServer((req, res) => {
       const pathname = decodeURIComponent(new URL(req.url || '/', 'http://127.0.0.1').pathname);
       const candidate = resolve(root, `.${pathname === '/' ? '/index.html' : pathname}`);
@@ -76,7 +75,7 @@ function startUiTestServer() {
       const address = server.address();
       resolveReady({ server, url: `http://127.0.0.1:${address.port}` });
     });
-  });
+  }));
 }
 
 module.exports = { startUiTestServer };

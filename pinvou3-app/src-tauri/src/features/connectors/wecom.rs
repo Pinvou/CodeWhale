@@ -24,7 +24,9 @@ use serde_json::{Value, json};
 use tauri::{AppHandle, Manager};
 
 use crate::features::connectors::connector_cli::{self as cc, CliCtx, ConnectorConn};
-use crate::features::connectors::skill_gate::{ConnectorGate, ConnectorSkillGate};
+use crate::features::connectors::skill_gate::{
+    ConnectGrantOutcome, ConnectorGate, ConnectorSkillGate,
+};
 
 /// 连接器 id(事件前缀 + ConnectorConn 槽位键 + 停用标志名)。
 const ID: &str = "wecom";
@@ -426,54 +428,75 @@ pub(crate) static WECOM_GATE: ConnectorGate = ConnectorGate {
 
 /// 按当前"应否可见"状态写 / 删技能文件。前端在连接成功 / 断开 / 切开关后调。
 pub async fn wecom_apply_skills() -> Result<Value, String> {
-    let show = tokio::task::spawn_blocking(|| -> Result<bool, String> {
-        let show = wecom_skills_should_show();
-        // Deny-first transaction boundary (#517): register the connector
-        // in the initialized DenyAll scopes BEFORE materializing skill
-        // files, so a refused registration aborts before anything lands
-        // (the sync write can block on the cross-process flock, hence
-        // inside this spawn_blocking closure; the post-apply consent sync
-        // below stays as the fail-visible belt-and-braces leg).
-        GATE.apply_with_consent(show).map_err(|e| {
-            e.map_materialization(|e| {
-                // Keep the raw materialization cause when the card replaces it.
-                log::warn!("[wecom] apply skills failed: {e}");
-                e
-            })
-        })?;
-        Ok(show)
-    })
-    .await
-    .map_err(|e| {
-        // Same loss risk for the join failure itself.
-        log::warn!("[wecom] apply skills task failed: {e}");
-        format!("spawn_blocking: {e}")
-    })??;
-    // scope 门禁同步：见 feishu_apply_skills 同名注释（code 默认关语义对齐）。
+    let (show, grant) =
+        tokio::task::spawn_blocking(|| -> Result<(bool, ConnectGrantOutcome), String> {
+            let show = wecom_skills_should_show();
+            // Deny-first transaction boundary (#517): record the connector's
+            // connect consent BEFORE materializing skill files, so a refused
+            // gate write aborts before anything lands — the connector can never
+            // end up live without its consent recorded. The consent write can
+            // block on the cross-process flock, hence inside this spawn_blocking
+            // closure; the gate outcome is carried out for the tail grant and
+            // the completion below.
+            let grant = GATE.apply_with_consent(show).map_err(|e| {
+                e.map_materialization(|e| {
+                    // Keep the raw materialization cause when the card replaces it.
+                    log::warn!("[wecom] apply skills failed: {e}");
+                    e
+                })
+            })?;
+            Ok((show, grant))
+        })
+        .await
+        .map_err(|e| {
+            // Same loss risk for the join failure itself.
+            log::warn!("[wecom] apply skills task failed: {e}");
+            format!("spawn_blocking: {e}")
+        })??;
+    // 连接动作本身就是同意（feat/connector-connect-grants-enable）：见
+    // feishu_apply_skills 同名注释（授权尾腿 + 完成校验，fail-closed）。
     if show {
-        // Fail-visible persist (review #455 R13-B3): swallowing the error would
-        // let the connector go live with zero consent; the error text carries
-        // recovery guidance and the shared consent marker (pinned on both
-        // sides), and the raw cause is logged.
-        crate::features::connectors::skill_gate::apply_skills_consent_sync("wecom")?;
+        let tail =
+            crate::features::connectors::skill_gate::grant_connect_enable_tail("wecom", &grant)?;
+        crate::features::connectors::skill_gate::complete_grant_for_completion(
+            "wecom", &grant, &tail,
+        )?;
     }
     Ok(json!({ "visible": show }))
 }
 
 /// 给前端渲染开关态:`{connected, enabled(=未停用), visible}`。
 /// 启动期门控刷新的单连接器步骤（`refresh_connector_auth_gates` 调）：
-/// 实时探测应否可见，按结果写 / 删技能目录；转为可见时跑 LEDGER-GATED
-/// 同步（review #455 round-31 BLOCKER：只补写从未同步过的默认关行，
-/// 用户显式开启不会被开机刷新回退）。
+/// 实时探测应否可见，按结果写 / 删技能目录；转为可见时跑 LEDGER-GATED 且
+/// 尊重 stored 裁决的连接启用授权回填（feat/connector-connect-grants-enable：
+/// 连接即同意的 boot 形态——只对从未同意过的对授权，stored 行一律不碰），
+/// 并按完成时点实况校验所依赖的同意。
 pub(crate) fn wecom_gate_step() -> Result<bool, String> {
     let show = wecom_skills_should_show();
-    // Same deny-first boundary as the apply command (#517): the auth-gate
-    // refresh also materializes skill files, so a connector flipping
-    // visible here registers first; a refusal fails before exposure.
-    GATE.apply_with_consent(show)
+    // Same deny-first boundary as the apply command (#517), REFRESH variant:
+    // a boot refresh has no user gesture behind it, so its consent write is
+    // the ledger-gated, verdict-respecting grant — it never lifts a stored
+    // row (a composer toggle-off or a legacy-migrated disable survives).
+    let grant = GATE
+        .apply_with_consent_refresh(show)
         .map_err(|e| e.map_materialization(|e| format!("更新企业微信技能失败: {e}")))?;
     if show {
-        crate::features::connectors::skill_gate::refresh_gate_consent_sync("wecom", "企业微信")?;
+        let tail = crate::features::connectors::skill_gate::grant_connect_enable_refresh_tail(
+            "wecom",
+            "企业微信",
+            &grant,
+        )?;
+        crate::features::connectors::skill_gate::complete_grant_for_completion(
+            "wecom", &grant, &tail,
+        )
+        .map_err(|e| {
+            crate::platform::startup::mark_with_detail(
+                "rust",
+                "connector_consent_sync:failed",
+                &format!("wecom: {e}"),
+            );
+            e
+        })?;
     }
     Ok(show)
 }
@@ -485,6 +508,59 @@ pub async fn wecom_skills_state() -> Result<Value, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 最低版本门必须与平台 lock 表钉住的 wecom-cli 版本一致:lock 升级而门
+    /// 不升,冒烟脚本的下限 (`MIN_WECOM`,同样被 node 契约测试钉住) 与技能包
+    /// 教的命令面会在旧 CLI 上静默失配;门高于 lock 则触发安装/替换循环。
+    /// (与 feishu.rs 的 `lark_min_version_matches_platform_lock` 同款:node 侧
+    /// lockstep 断言在 rust-only 改动下不会运行——`**/*.rs` 不进 frontend
+    /// gate——Rust 门是 rust-only 改动唯一必经的执法点。)
+    #[test]
+    fn wecom_min_version_matches_platform_lock() {
+        // All five platforms' locks must agree with the gate: lock_json() is
+        // cfg-selected to the compile target and the full cargo test run only
+        // executes on a subset of platforms, so a partial lock bump touching
+        // another platform's wecom-cli entry could only be caught statically
+        // here (same rationale as native_installer's all-platform mirror test).
+        const ALL_PLATFORM_LOCKS: [&str; 5] = [
+            include_str!(
+                "../../../resources/platforms/linux/aarch64/bundle/connectors/connectors.lock.json"
+            ),
+            include_str!(
+                "../../../resources/platforms/linux/x86_64/bundle/connectors/connectors.lock.json"
+            ),
+            include_str!(
+                "../../../resources/platforms/macos/aarch64/bundle/connectors/connectors.lock.json"
+            ),
+            include_str!(
+                "../../../resources/platforms/macos/x86_64/bundle/connectors/connectors.lock.json"
+            ),
+            include_str!(
+                "../../../resources/platforms/windows/x86_64/bundle/connectors/connectors.lock.json"
+            ),
+        ];
+        for lock in ALL_PLATFORM_LOCKS {
+            assert!(!lock.is_empty(), "platform lock json must be embedded");
+            let parsed: Value = serde_json::from_str(lock).expect("lock json parses");
+            let entries = parsed
+                .pointer("/artifacts")
+                .and_then(|v| v.as_array())
+                .expect("lock json carries an artifacts list");
+            let wecom = entries
+                .iter()
+                .find(|e| e.get("name").and_then(|v| v.as_str()) == Some("wecom-cli"))
+                .expect("lock must pin wecom-cli");
+            let locked = wecom
+                .get("version")
+                .and_then(|v| v.as_str())
+                .expect("wecom-cli lock entry carries a version");
+            assert_eq!(
+                cc::parse_semver3(locked),
+                Some(WECOM_MIN_VERSION),
+                "WECOM_MIN_VERSION must equal every platform lock's wecom-cli version ({locked})"
+            );
+        }
+    }
 
     /// `--version` 输出 → 三段版本号。1.1.0 起输出带构建信息尾巴。
     /// 两段式按共享口径补 0(不因假想的「2.0」误判未装触发降级重装)。

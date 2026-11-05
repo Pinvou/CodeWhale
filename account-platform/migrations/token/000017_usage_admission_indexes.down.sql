@@ -1,0 +1,5 @@
+DROP INDEX usage_requests_inflight_admission_idx;
+DROP INDEX usage_requests_route_admission_idx;
+DROP INDEX usage_requests_model_admission_idx;
+DROP INDEX usage_requests_organization_admission_idx;
+DROP INDEX usage_requests_user_admission_idx;

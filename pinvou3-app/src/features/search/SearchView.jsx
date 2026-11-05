@@ -11,7 +11,7 @@ import {
   sessionTitlePresentation,
 } from '../attachments/attachment-message.js';
 import { formatDateGroupLabel, formatSessionDate, localDateKey } from '../../shared/date-utils.js';
-import { sessionRoute } from '../../shared/session-management.js';
+import { runSessionBatch, sessionRoute } from '../../shared/session-management.js';
 import { compareSessionsByRecentUpdate, filterSessionsByTab, groupSessionsByLocalDate, sessionListComparator } from '../../shared/session-list-pipeline.js';
 import { isDefaultChatTitle } from '../../shared/i18n.js';
 
@@ -135,9 +135,9 @@ export const SearchView = ({ theme, history, t, language, archived = EMPTY_ARCHI
   });
   const toggleSelectAll = () => setSelectedIds(allVisibleSelected ? new Set() : new Set(visibleIds));
   const switchPanel = (toArchived) => { setShowArchived(toArchived); exitBatch(); };
-  const runBatchArchive = () => { if (onArchiveMany) onArchiveMany(Array.from(selectedIds)); exitBatch(); };
-  const runBatchDelete = () => { if (onDeleteMany) onDeleteMany(Array.from(selectedIds)); exitBatch(); };
-  const runBatchRestore = () => { if (onRestoreMany) onRestoreMany(Array.from(selectedIds)); exitBatch(); };
+  const runBatchArchive = () => { if (onArchiveMany) onArchiveMany(Array.from(selectedIds), runSessionBatch); exitBatch(); };
+  const runBatchDelete = () => { if (onDeleteMany) onDeleteMany(Array.from(selectedIds), runSessionBatch); exitBatch(); };
+  const runBatchRestore = () => { if (onRestoreMany) onRestoreMany(Array.from(selectedIds), runSessionBatch); exitBatch(); };
 
   const handlePickDate = (key) => {
     setSelectedDate(key);
@@ -156,7 +156,19 @@ export const SearchView = ({ theme, history, t, language, archived = EMPTY_ARCHI
       return (
         <div
           key={chat.id}
+          role="button"
+          tabIndex={0}
+          aria-pressed={selected}
           onClick={() => toggleSelect(chat.id)}
+          onKeyDown={(event) => {
+            // 与 BrowserView 标签行/tool-renderers 先例同款守卫：行内未来若嵌
+            // 真控件，先判来源避免吞掉其原生 Enter/Space 激活；role=button 不
+            // 会从 keydown 合成 click，event.repeat 需显式拦截长按连发。
+            if (event.target !== event.currentTarget || event.repeat) return;
+            if (event.key !== 'Enter' && event.key !== ' ') return;
+            event.preventDefault();
+            toggleSelect(chat.id);
+          }}
           className="flex items-center gap-3 px-4 py-[10px] cursor-pointer rounded-[16px] transition-colors hover:bg-[#F0F4F9] dark:hover:bg-[#1E1F20]"
         >
           <CircleCheck checked={selected} />
