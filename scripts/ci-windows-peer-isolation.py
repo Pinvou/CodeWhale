@@ -8,6 +8,7 @@ tool directory. Their provisioning/identity mapping belongs to the caller.
 import argparse
 import ctypes
 from ctypes import wintypes
+import errno
 import json
 import ntpath
 import os
@@ -20,6 +21,7 @@ class IsolationError(RuntimeError):
 
 
 INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
+FILE_READ_DATA = 0x0001
 
 
 def _kernel32():
@@ -41,9 +43,11 @@ def _require_read_denied(configuration):
     # handle API so only ERROR_ACCESS_DENIED is positive ACL evidence.
     try:
         library = _kernel32()
-        # GENERIC_READ; share READ|WRITE|DELETE; OPEN_EXISTING;
-        # FILE_ATTRIBUTE_NORMAL. No content read, creation or write access.
-        handle = library.CreateFileW(configuration, 0x80000000, 7, None, 3, 0x80, None)
+        # Request only FILE_READ_DATA; GENERIC_READ also includes metadata and
+        # security-descriptor rights whose denial does not prove data is unreadable.
+        # Share READ|WRITE|DELETE; OPEN_EXISTING; FILE_ATTRIBUTE_NORMAL.
+        # No content read, creation or write access.
+        handle = library.CreateFileW(configuration, FILE_READ_DATA, 7, None, 3, 0x80, None)
     except OSError:
         raise IsolationError("windows_read_api_unavailable") from None
     if handle == INVALID_HANDLE_VALUE:
@@ -117,6 +121,24 @@ def _runner_identity(root):
         raise IsolationError("current_runner_metadata_unverifiable") from None
 
 
+def _configuration_metadata(configuration, *, optional=False):
+    try:
+        info = os.lstat(configuration)
+    except FileNotFoundError as error:
+        # Only a positively identified missing file may be optional. A missing
+        # parent (Windows error 3), hidden metadata or another error is not proof
+        # that an optional credential store is absent.
+        if (optional and error.errno == errno.ENOENT
+                and getattr(error, "winerror", None) in (None, 2)):
+            return False
+        raise IsolationError("peer_configuration_unverifiable") from None
+    except OSError:
+        raise IsolationError("peer_configuration_unverifiable") from None
+    if not stat.S_ISREG(info.st_mode) or getattr(info, "st_file_attributes", 0) & 0x400:
+        raise IsolationError("peer_configuration_not_regular")
+    return True
+
+
 def validate_peer_isolation(current_root, peer_root, runner_name, peer_runner_name):
     """Require a verifiable, distinct peer and an actual Windows ACL denial.
 
@@ -140,14 +162,22 @@ def validate_peer_isolation(current_root, peer_root, runner_name, peer_runner_na
     if _runner_identity(current).casefold() != runner_name.casefold():
         raise IsolationError("current_runner_identity_mismatch")
     for filename in (".runner", ".env"):
-        try:
-            info = os.lstat(ntpath.join(peer, filename))
-            if not stat.S_ISREG(info.st_mode) or getattr(info, "st_file_attributes", 0) & 0x400:
-                raise IsolationError("peer_configuration_not_regular")
-        except OSError:
-            raise IsolationError("peer_configuration_unverifiable") from None
-    configuration = ntpath.join(peer, ".env")
-    _require_read_denied(configuration)
+        _configuration_metadata(ntpath.join(peer, filename))
+    protected = [ntpath.join(peer, ".env")]
+    # Match runner ConfigurationStore.HasCredentials: either store can hold a
+    # registered identity, but every existing store must deny peer reads.
+    # https://github.com/actions/runner/blob/cf65f3ec8100ee0046d735ac5d647e00f4b8e817/src/Runner.Common/ConfigurationStore.cs
+    for filename in (".credentials", ".credentials_migrated"):
+        configuration = ntpath.join(peer, filename)
+        if _configuration_metadata(configuration, optional=True):
+            protected.append(configuration)
+    if len(protected) == 1:
+        raise IsolationError("peer_credentials_missing")
+    rsa = ntpath.join(peer, ".credentials_rsaparams")
+    if _configuration_metadata(rsa, optional=True):
+        protected.append(rsa)
+    for configuration in protected:
+        _require_read_denied(configuration)
 
 
 def main(argv=None):

@@ -5,6 +5,7 @@ GetFinalPathNameByHandle behavior; the manual Windows workflow must do that.
 """
 
 import contextlib
+import errno
 import importlib.util
 import io
 import json
@@ -30,6 +31,12 @@ def windows_error(code):
     return error
 
 
+def missing_file(code=2):
+    error = FileNotFoundError(errno.ENOENT, "private peer configuration path")
+    error.winerror = code
+    return error
+
+
 class WindowsPeerIsolationTests(unittest.TestCase):
     def setUp(self):
         self.enterContext(patch.object(PEER.sys, "platform", "win32"))
@@ -49,9 +56,17 @@ class WindowsPeerIsolationTests(unittest.TestCase):
 
     def test_explicit_arbitrary_peer_is_used_without_layout_guess_or_content_read(self):
         self.assertIsNone(self.verify(peer=r"D:\separate-root\custom-agent"))
-        self.open_handle.assert_called_once_with(r"D:\separate-root\custom-agent\.env", 0x80000000, 7, None, 3, 0x80, None)
+        protected = [".env", ".credentials", ".credentials_migrated", ".credentials_rsaparams"]
+        self.assertEqual(self.open_handle.call_count, len(protected))
+        self.assertEqual([call.args for call in self.open_handle.call_args_list], [
+            (r"D:\separate-root\custom-agent" + "\\" + name, 0x0001, 7, None, 3, 0x80, None)
+            for name in protected
+        ])
         self.assertEqual([call.args[0] for call in self.info.call_args_list], [
             r"D:\separate-root\custom-agent\.runner", r"D:\separate-root\custom-agent\.env",
+            r"D:\separate-root\custom-agent\.credentials",
+            r"D:\separate-root\custom-agent\.credentials_migrated",
+            r"D:\separate-root\custom-agent\.credentials_rsaparams",
         ])
         self.metadata.assert_called_once_with(CURRENT + r"\.runner", "rb")
         self.metadata().read.assert_called_once_with(64 * 1024 + 1)
@@ -64,6 +79,131 @@ class WindowsPeerIsolationTests(unittest.TestCase):
                 self.verify(peer=peer)
         self.resolve.assert_not_called()
         self.open_handle.assert_not_called()
+
+    def test_either_credential_store_can_establish_the_required_presence(self):
+        regular = SimpleNamespace(st_mode=stat.S_IFREG, st_file_attributes=0)
+        for present, absent in ((".credentials", ".credentials_migrated"),
+                                (".credentials_migrated", ".credentials")):
+            def metadata(path):
+                if path.endswith("\\" + absent) or path.endswith("\\.credentials_rsaparams"):
+                    raise missing_file()
+                return regular
+
+            with self.subTest(present=present):
+                self.info.side_effect = metadata
+                self.open_handle.reset_mock()
+                self.assertIsNone(self.verify())
+                self.assertEqual([call.args[0] for call in self.open_handle.call_args_list], [
+                    OTHER + r"\.env", OTHER + "\\" + present,
+                ])
+        self.metadata.assert_called_with(CURRENT + r"\.runner", "rb")
+        self.read.assert_not_called()
+
+    def test_both_missing_credential_stores_fail_before_any_read_open(self):
+        regular = SimpleNamespace(st_mode=stat.S_IFREG, st_file_attributes=0)
+
+        def metadata(path):
+            if path.endswith(("\\.credentials", "\\.credentials_migrated")):
+                raise missing_file()
+            return regular
+
+        self.info.side_effect = metadata
+        with self.assertRaisesRegex(PEER.IsolationError, "peer_credentials_missing"):
+            self.verify()
+        self.open_handle.assert_not_called()
+
+    def test_optional_rsa_absence_is_accepted_without_opening_a_missing_file(self):
+        regular = SimpleNamespace(st_mode=stat.S_IFREG, st_file_attributes=0)
+
+        def metadata(path):
+            if path.endswith("\\.credentials_rsaparams"):
+                raise missing_file()
+            return regular
+
+        self.info.side_effect = metadata
+        self.assertIsNone(self.verify())
+        self.assertEqual([call.args[0] for call in self.open_handle.call_args_list], [
+            OTHER + r"\.env", OTHER + r"\.credentials", OTHER + r"\.credentials_migrated",
+        ])
+        self.metadata.assert_called_once_with(CURRENT + r"\.runner", "rb")
+        self.read.assert_not_called()
+
+    def test_readable_credential_or_rsa_file_fails_even_when_env_is_denied(self):
+        for filename in (".credentials", ".credentials_migrated", ".credentials_rsaparams"):
+            with self.subTest(filename=filename):
+                self.open_handle.reset_mock()
+                self.close.reset_mock()
+                self.open_handle.side_effect = lambda path, *_, name=filename: (
+                    123 if path.endswith("\\" + name) else PEER.INVALID_HANDLE_VALUE)
+                with self.assertRaisesRegex(PEER.IsolationError, "configuration_readable"):
+                    self.verify()
+                self.assertEqual(self.open_handle.call_args_list[0].args[0], OTHER + r"\.env")
+                self.assertEqual(self.open_handle.call_args_list[-1].args[0], OTHER + "\\" + filename)
+                self.close.assert_called_once_with(123)
+        self.metadata.assert_called_with(CURRENT + r"\.runner", "rb")
+        self.read.assert_not_called()
+
+    def test_generic_read_denial_cannot_mask_permitted_file_data_access(self):
+        # Model an ACL that denies a right bundled into GENERIC_READ while
+        # allowing the minimal FILE_READ_DATA request on one protected file.
+        for filename in (".env", ".credentials", ".credentials_migrated", ".credentials_rsaparams"):
+            def acl(path, access, *_):
+                if path.endswith("\\" + filename) and access == 0x0001:
+                    return 123
+                return PEER.INVALID_HANDLE_VALUE
+
+            with self.subTest(filename=filename):
+                self.open_handle.reset_mock()
+                self.close.reset_mock()
+                self.open_handle.side_effect = acl
+                with self.assertRaisesRegex(PEER.IsolationError, "configuration_readable"):
+                    self.verify()
+                self.assertTrue(all(call.args[1] == 0x0001 for call in self.open_handle.call_args_list))
+                self.assertEqual(self.open_handle.call_args.args[0], OTHER + "\\" + filename)
+                self.close.assert_called_once_with(123)
+        self.read.assert_not_called()
+
+    def test_only_definite_optional_file_absence_is_accepted(self):
+        regular = SimpleNamespace(st_mode=stat.S_IFREG, st_file_attributes=0)
+        for filename in (".credentials", ".credentials_migrated", ".credentials_rsaparams"):
+            for failure in (windows_error(5), windows_error(32), missing_file(3),
+                            FileNotFoundError("unknown absence"), OSError("unknown metadata error")):
+                def metadata(path):
+                    if path.endswith("\\" + filename):
+                        raise failure
+                    return regular
+
+                with self.subTest(filename=filename, error=type(failure).__name__,
+                                  winerror=getattr(failure, "winerror", None)):
+                    self.info.side_effect = metadata
+                    with self.assertRaisesRegex(PEER.IsolationError, "configuration_unverifiable"):
+                        self.verify()
+        self.open_handle.assert_not_called()
+
+    def test_credential_and_rsa_metadata_cannot_be_directory_symlink_or_reparse(self):
+        regular = SimpleNamespace(st_mode=stat.S_IFREG, st_file_attributes=0)
+        for filename in (".credentials", ".credentials_migrated", ".credentials_rsaparams"):
+            for mode, attributes in ((stat.S_IFDIR, 0), (stat.S_IFLNK, 0), (stat.S_IFREG, 0x400)):
+                def metadata(path):
+                    if path.endswith("\\" + filename):
+                        return SimpleNamespace(st_mode=mode, st_file_attributes=attributes)
+                    return regular
+
+                with self.subTest(filename=filename, mode=mode, attributes=attributes):
+                    self.info.side_effect = metadata
+                    with self.assertRaisesRegex(PEER.IsolationError, "not_regular"):
+                        self.verify()
+        self.open_handle.assert_not_called()
+
+    def test_every_existing_secret_requires_native_access_denied(self):
+        for filename in (".credentials", ".credentials_migrated", ".credentials_rsaparams"):
+            for code in (2, 3, 32, 0, None):
+                self.last_error.side_effect = lambda name=filename, failure=code: (
+                    failure if self.open_handle.call_args.args[0].endswith("\\" + name) else 5)
+                with self.subTest(filename=filename, winerror=code):
+                    with self.assertRaisesRegex(PEER.IsolationError, "did_not_prove_acl_denial"):
+                        self.verify()
+        self.read.assert_not_called()
 
     def test_ancestor_or_descendant_is_not_an_independent_instance(self):
         for peer in (r"D:\workers\one", CURRENT + r"\nested"):
