@@ -90,8 +90,16 @@ globalThis.fetch = async (input, options = {}) => {
   if (url.includes('/admin/v1/organizations?')) return json({ items: [org], next_cursor: null });
   if (url.endsWith(`/admin/v1/organizations/${orgID}`)) return json(org);
   if (url.endsWith('/admin/v1/organizations') && method === 'POST') { c.effects.add(call.key); return c.unknownOrgCreate ? json({ code: 'COMMAND_RESULT_UNKNOWN' }, 503) : json(org, 201); }
-  if (url.endsWith(`/organizations/${orgID}/units`)) return json({ items: [{ organization_id: orgID, unit_id: unitID, name: 'Sample unit', parent_id: null, status: 'ACTIVE', version: 1 }], structure_version: 2 });
-  if (url.includes(`/organizations/${orgID}/members?`)) return json({ items: [{ organization_id: orgID, membership_id: '55555555-5555-4555-8555-555555555555', user_id: otherID, display_name: new URL(url, location.origin).searchParams.get('q') || 'Sample member', status: 'ACTIVE', version: 1, roles: ['MEMBER'], unit_ids: [unitID] }], next_cursor: null });
+  if (method === 'DELETE' && url.endsWith(`/organizations/${orgID}/units/${unitID}`) || method === 'PATCH' && url.endsWith(`/organizations/${orgID}/status`)) {
+    const replayed = c.effects.has(call.key);
+    c.effects.add(call.key);
+    if (method === 'DELETE') c.unitDeleted = true;
+    else c.orgStatus = JSON.parse(options.body).status;
+    if (c.unknownOrgAction) { c.unknownOrgAction = false; return json({ code: 'COMMAND_RESULT_UNKNOWN' }, 503); }
+    return method === 'DELETE' ? json({ unit: { organization_id: orgID, unit_id: unitID, parent_id: null, name: 'Sample unit', status: 'DELETED', version: 2 }, structure_version: 3, replayed }) : json(null, 204);
+  }
+  if (url.endsWith(`/organizations/${orgID}/units`)) return json({ items: c.unitDeleted ? [] : [{ organization_id: orgID, unit_id: unitID, name: 'Sample unit', parent_id: null, status: 'ACTIVE', version: 1 }], structure_version: c.unitDeleted ? 3 : 2 });
+  if (url.includes(`/organizations/${orgID}/members?`)) return json({ items: [{ organization_id: orgID, membership_id: '55555555-5555-4555-8555-555555555555', user_id: otherID, display_name: new URL(url, location.origin).searchParams.get('q') || 'Sample member', status: 'ACTIVE', version: 1, roles: ['MEMBER'], unit_ids: c.noUnitMembers ? [] : [unitID] }], next_cursor: null });
   if (url.endsWith(`/organizations/${orgID}/deletion-readiness`)) return json({ organization_id: orgID, current_status: c.orgStatus || 'ACTIVE', account_version: 3, ready: c.orgReady === true, blockers: c.orgReady ? [] : [{ code: 'ACTIVE_MEMBERS', resource_type: 'MEMBERSHIP', resource_id: otherID }] });
   if (url.includes('/admin/v1/finance-overviews/')) {
     const surface = url.split('/').at(-1);
