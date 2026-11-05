@@ -1458,7 +1458,7 @@ pub(crate) mod tests {
             }
             #[cfg(windows)]
             Ok("root_timeout") => {
-                let _child = output_fixture_command("descendant_timeout")
+                let _child = output_fixture_command("root_timeout_descendant")
                     .stdout(Stdio::null())
                     .stderr(Stdio::null())
                     .spawn()
@@ -1506,6 +1506,21 @@ pub(crate) mod tests {
                 if let Some(finished) = fixture_marker("finished") {
                     std::fs::write(finished, b"finished").unwrap();
                 }
+            }
+            #[cfg(windows)]
+            Ok("root_timeout_descendant") => {
+                std::fs::write(
+                    fixture_marker("pid").unwrap(),
+                    std::process::id().to_string(),
+                )
+                .unwrap();
+                std::fs::write(fixture_marker("running").unwrap(), b"running").unwrap();
+                // Only the ordinary-timeout fixture exits cooperatively. Its
+                // parent first observes this exact process alive after timeout.
+                assert!(wait_for_fixture_marker(
+                    "cooperative-exit",
+                    Duration::from_secs(60)
+                ));
             }
             Ok("descendant_timeout") => {
                 if let Some(pid) = fixture_marker("pid") {
@@ -1894,6 +1909,50 @@ pub(crate) mod tests {
     }
 
     #[cfg(windows)]
+    struct RootTimeoutFixtureCleanup {
+        identity: WindowsProcessHandle,
+        cooperative_exit: std::path::PathBuf,
+        completed: bool,
+    }
+
+    #[cfg(windows)]
+    impl RootTimeoutFixtureCleanup {
+        fn finish(&mut self) {
+            std::fs::write(&self.cooperative_exit, b"exit")
+                .expect("request cooperative timeout-fixture exit");
+            assert_windows_process_exited(&self.identity, Duration::from_secs(3));
+            self.completed = true;
+        }
+    }
+
+    #[cfg(windows)]
+    impl Drop for RootTimeoutFixtureCleanup {
+        fn drop(&mut self) {
+            if self.completed {
+                return;
+            }
+            // A failed assertion must still clean up only the pinned fixture.
+            // TerminateProcess is asynchronous; this fallback retains its own
+            // bounded exit wait and never turns a cleanup failure into success.
+            let termination = terminate_windows_fixture_process(&self.identity);
+            // SAFETY: the cleanup guard still owns this bound process handle.
+            let wait = unsafe {
+                windows_sys::Win32::System::Threading::WaitForSingleObject(
+                    self.identity.handle,
+                    3_000,
+                )
+            };
+            eprintln!(
+                "timeout fixture {} fallback: terminate={termination:?}, wait={wait}",
+                self.identity.pid
+            );
+            if !std::thread::panicking() {
+                panic!("timeout fixture cleanup did not complete cooperatively");
+            }
+        }
+    }
+
+    #[cfg(windows)]
     #[test]
     fn ordinary_timeout_does_not_terminate_managed_descendants() {
         use windows_sys::Win32::Foundation::WAIT_TIMEOUT;
@@ -1902,6 +1961,7 @@ pub(crate) mod tests {
         let temporary = tempfile::tempdir().unwrap();
         let marker = temporary.path().join("root-only-timeout");
         let pid_file = marker.with_extension("pid");
+        let cooperative_exit = marker.with_extension("cooperative-exit");
         let mut command = output_fixture_command("root_timeout");
         command.env(OUTPUT_FIXTURE_MARKER_ENV, &marker);
         let (root_finished, root_result) = std::sync::mpsc::channel();
@@ -1913,12 +1973,18 @@ pub(crate) mod tests {
                 .parse()
                 .unwrap();
             let identity = WindowsProcessHandle::open(pid).unwrap().unwrap();
+            let mut cleanup = RootTimeoutFixtureCleanup {
+                identity,
+                cooperative_exit,
+                completed: false,
+            };
             root_result.recv_timeout(Duration::from_secs(35)).unwrap();
             // SAFETY: identity pins the exact descendant; zero wait only probes liveness.
-            let survived = unsafe { WaitForSingleObject(identity.handle, 0) } == WAIT_TIMEOUT;
-            terminate_windows_fixture_process(&identity)
-                .expect("terminate the deliberately surviving timeout fixture");
-            assert_windows_process_exited(&identity, Duration::from_secs(3));
+            let survived =
+                unsafe { WaitForSingleObject(cleanup.identity.handle, 0) } == WAIT_TIMEOUT;
+            // Observe the contract before cleanup. This test does not require
+            // asynchronous forced termination to complete within a wall-clock budget.
+            cleanup.finish();
             survived
         });
         let result = output_with_timeout(

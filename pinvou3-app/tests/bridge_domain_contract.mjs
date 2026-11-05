@@ -1,4 +1,5 @@
 export const desktopBridgeApi = {
+  accountPlatform: ['session', 'openPortal', 'login', 'createSliderCaptcha', 'prepareRegistrationPassword', 'sendSms', 'registerMobile', 'registrationStatus', 'loginSms', 'resetPassword', 'logout', 'request', 'modelCatalog', 'selectCatalogModel', 'selectSessionCatalogModel', 'branchReplacementSession'],
   lifecycle: ['init'],
   state: ['get', 'getMany', 'subscribe', 'subscribeMany'],
   platform: ['loadPlatformCapabilities', 'refreshConnectorAuthGates'],
@@ -11,11 +12,10 @@ export const desktopBridgeApi = {
   monitor: ['clearMonitorStats', 'startMonitorPolling', 'stopMonitorPolling'],
   settings: ['listBuiltinFeatures', 'loadBehaviorTelemetryStatus', 'saveSearchSettings', 'saveSearchSettingsAndRestart', 'saveSettings', 'saveSettingsAndRestart', 'setBehaviorTelemetryEnabled', 'setBuiltinFeatureEnabled', 'setGlobalShortcutConfig', 'setSelectedPet', 'testSearchProvider'],
   feedback: ['submitFeedback', 'listFailureDiagnostics', 'previewFailureDiagnostic', 'submitFailureDiagnostic', 'pickDiagnosticFiles'],
-  llmapi: ['ensureLlmApiBinding', 'getLlmApiAdminOverview', 'getLlmApiModels', 'getLlmApiStatus', 'loginLlmApiUser', 'refreshLlmApi', 'retryLlmApiProvisioning', 'saveLlmApiUserSession', 'setLlmApiDefaultModel', 'setLlmApiUserEnabled'],
   vllm: ['discoverLocalVllm'],
   multiAgent: ['listSubagentTranscripts', 'readSubagentTranscript'],
-  models: ['deleteModel', 'getImageInputCapability', 'loadModels', 'loadSessionModel', 'probeLocalServerKind', 'revealModelApiKey', 'saveModel', 'setActiveModel', 'switchModel', 'testImageInputCapability', 'testModelConnection'],
-  interaction: ['acceptPlan', 'cancelUserInput', 'confirmCodeYolo', 'discardPlan', 'dismissPinvouReview', 'editLastTurn', 'exitPlanToYolo', 'getCodePermissionPrefs', 'inspectPinvou', 'planStuckGo', 'planStuckReplan', 'refreshModeDefaults', 'resolvePinvouReview', 'setDraftMode', 'setModeLane', 'setMultiAgentMode', 'setPlanModeNext', 'submitUserInput', 'summonPinvou', 'syncModeState', 'toggleSuperPerm'],
+  models: ['deleteModel', 'getEffectiveModelConfig', 'getImageInputCapability', 'loadModels', 'loadEffectiveModelConfig', 'loadSessionModel', 'probeLocalServerKind', 'revealModelApiKey', 'saveModel', 'setActiveModel', 'switchModel', 'switchModelRef', 'testImageInputCapability', 'testModelConnection'],
+  interaction: ['acceptPlan', 'cancelUserInput', 'compactNow', 'confirmCodeYolo', 'discardPlan', 'dismissPinvouReview', 'editLastTurn', 'exitPlanToYolo', 'getCodePermissionPrefs', 'inspectPinvou', 'planStuckGo', 'planStuckReplan', 'refreshModeDefaults', 'resolvePinvouReview', 'setDraftMode', 'setModeLane', 'setMultiAgentMode', 'setPlanModeNext', 'submitUserInput', 'summonPinvou', 'syncModeState', 'toggleSuperPerm'],
   rendering: ['renderMarkdown'],
   remoteControl: ['getWebRelaySettings', 'refreshRemoteControlQr', 'refreshRemoteControlStatus', 'revokeRemoteHostWorkspace', 'setWebRelayAddress', 'startRemoteControl', 'stopRemoteControl'],
   // Windows 双端远程控制（B 被控端 / A 主控端）。与 webAccess 完全不同域：
@@ -56,7 +56,6 @@ export const desktopOnlyBridgeApi = {
   platform: ['loadPlatformCapabilities', 'refreshConnectorAuthGates'],
   voice: ['setVoiceShortcutEnabled', 'syncVoiceShortcutRecording'],
   knowledge: ['loadKnowledgeEmbedderAfterFirstFrame', 'mountRemoteCollection', 'removeRemoteCollection', 'setRemoteCollectionEnabled'],
-  llmapi: ['ensureLlmApiBinding', 'getLlmApiAdminOverview', 'getLlmApiModels', 'getLlmApiStatus', 'loginLlmApiUser', 'refreshLlmApi', 'retryLlmApiProvisioning', 'saveLlmApiUserSession', 'setLlmApiDefaultModel', 'setLlmApiUserEnabled'],
   // 多智能体开关是桌面专属操作（ADR-0006）：Web 端只读呈现。
   interaction: ['setMultiAgentMode'],
   // Draft workspace selection needs the system directory dialog (TAURI.dialog)
@@ -99,7 +98,7 @@ export const desktopOnlyBridgeApi = {
 // 整域桌面专属：Web 端连域都不存在（区别于 platform 这类"空域仍在"）。
 // 后端 remote_control 漏斗另有权威封禁。projects 是本地会话归档分组
 // （~/.pinvou3/projects/projects.json），Web 端没有对应后端。
-export const desktopOnlyBridgeDomains = ['multiAgent', 'projects', 'desktopRemoteControl'];
+export const desktopOnlyBridgeDomains = ['multiAgent', 'projects', 'accountPlatform', 'desktopRemoteControl'];
 
 export function expectedWebBridgeApi() {
   return Object.fromEntries(

@@ -1,0 +1,933 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Current personal model invocation and funds contract",
+    "version": "F05",
+    "description": "Finite installed personal paths and actual required request facts. Unknown response projections are intentionally partial; this document does not claim exhaustive provider payload or deployment assurance. ORG producers absent; public HEAD retains GET authority."
+  },
+  "paths": {
+    "/v1/models": {
+      "get": {
+        "operationId": "token_listCatalogModels",
+        "x-go-handler": "listCatalogModels",
+        "x-service": "token",
+        "x-permission": "personal.models.read",
+        "security": [
+          {
+            "UserBearer": []
+          }
+        ],
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "Published catalog. Each item includes runtime_protocol bound to model_id and model_capability_version_id. Desktop invocation requires an explicit supported value; display_name and aliases never select a runtime protocol. Discovery and old rows may expose an empty profile until governed publication.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "additionalProperties": true,
+                        "properties": {
+                          "runtime_protocol": {
+                            "type": "string",
+                            "enum": [
+                              "",
+                              "OPENAI_CHAT_V1",
+                              "DEEPSEEK_V4_CHAT_V1"
+                            ]
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Stable error or explicit unavailable; no success/effect inference from missing ACK."
+          }
+        }
+      }
+    },
+    "/v1/model-protocols": {
+      "get": {
+        "operationId": "token_modelProtocols",
+        "x-go-handler": "modelProtocols",
+        "x-service": "token",
+        "x-permission": "personal.models.read",
+        "security": [
+          {
+            "UserBearer": []
+          }
+        ],
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "Actual current success projection.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Stable error or explicit unavailable; no success/effect inference from missing ACK."
+          }
+        }
+      }
+    },
+    "/v1/chat/completions": {
+      "post": {
+        "operationId": "token_chatCompletions",
+        "x-go-handler": "chatCompletions",
+        "x-service": "token",
+        "x-permission": "personal.model.invoke",
+        "security": [
+          {
+            "UserBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 16,
+              "maxLength": 128
+            }
+          },
+          {
+            "name": "X-Pinvou-Logical-Turn-ID",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_-]{16,128}$"
+            }
+          },
+          {
+            "name": "X-Pinvou-Client-Capabilities",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Pinvou-Conversation-Mode",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Last-Event-ID",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Pinvou-Delivery-ID",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Actual current success projection.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              },
+              "text/event-stream": {
+                "schema": {
+                  "type": "string",
+                  "description": "Stored SSE sequence replay includes original DONE event; unknown trusted usage remains pending settlement."
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Stable error or explicit unavailable; no success/effect inference from missing ACK."
+          },
+          "503": {
+            "description": "The proxy preserves upstream503 status, original media type and body, including arbitrary JSON or non-JSON; these are not constrained to gateway api.Error and do not prove no dispatch or no effect. Gateway-produced PROVIDER_CREDENTIAL_UNAVAILABLE and USAGE_STATE_UNCONFIRMED receipts have the separate precise component definitions CredentialUnavailableReceipt and UsageStateUnconfirmedReceipt. Only the former, atomically recorded under the original RECEIVED/v1 no-hold/no-preparation/no-dispatch/no-prior-result fence, carries FAILED/RELEASED meaning. It preserves the original usage identity and30-day result/90-day tombstone retention; expiry follows existing410. The latter means the accepted original usage could not be read and authorizes no terminal/no-effect inference. If another actor progressed, the credential-failure actor preserves its facts and returns the authoritative read-only state/result. A provider body containing a matching code is not by itself evidence of the gateway receipt or authority to replace an accepted identity, route or dispatch. A local PROVIDER_CIRCUIT_OPEN follows the same exact untouched acceptance fence and persists its503 receipt. A concurrently progressed usage returns its authoritative read-only state/result, never a locally inferred release. Retry-After describes the current circuit and is not authorization for a new usage identity or redispatch. A failed or unknown dispatch-preparation acknowledgement never releases the accepted request. The gateway reads its original usage identity and authoritative projection, including202 while pending; if that read also fails it returns USAGE_STATE_UNCONFIRMED. Failure handling does not resume dispatch, replace the route or create a new idempotency key.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              },
+              "*/*": {
+                "schema": {}
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "model"
+                ],
+                "properties": {
+                  "model": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "stream": {
+                    "type": "boolean"
+                  },
+                  "max_tokens": {
+                    "type": "integer",
+                    "format": "int64"
+                  },
+                  "max_completion_tokens": {
+                    "type": "integer",
+                    "format": "int64"
+                  }
+                },
+                "additionalProperties": true
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/usage-requests/by-idempotency-key": {
+      "get": {
+        "operationId": "token_getOwnedUsageByIdempotencyKey",
+        "x-go-handler": "getOwnedUsageByIdempotencyKey",
+        "x-service": "token",
+        "x-permission": "personal.usage.cancel",
+        "description": "Read-only recovery using the original invocation key. Current stable authenticated user must own the original personal or organizational invocation. Current context and membership changes do not change that ownership. Full list/detail remain context-scoped. A missing receipt never proves no effect or authorizes a new invocation.",
+        "security": [
+          {
+            "UserBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 16,
+              "maxLength": 128
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The original owned usage identity and current durable states; no dispatch, cancellation write or funds release.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "usage_request_id",
+                    "execution_status",
+                    "delivery_status",
+                    "cancel_status",
+                    "settlement_status"
+                  ],
+                  "properties": {
+                    "usage_request_id": {
+                      "type": "string",
+                      "format": "uuid"
+                    },
+                    "execution_status": {
+                      "type": "string"
+                    },
+                    "delivery_status": {
+                      "type": "string"
+                    },
+                    "cancel_status": {
+                      "type": "string"
+                    },
+                    "settlement_status": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No readable original-owner receipt found. The original outcome remains unknown; do not infer no effect or redispatch."
+          },
+          "default": {
+            "description": "Authorization, invalid-key or temporary failure; never a no-effect receipt."
+          }
+        }
+      }
+    },
+    "/v1/usage-requests/{usage_request_id}": {
+      "get": {
+        "operationId": "token_getUsageRequest",
+        "x-go-handler": "getUsageRequest",
+        "x-service": "token",
+        "x-permission": "personal.usage.read",
+        "security": [
+          {
+            "UserBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "usage_request_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Actual current success projection.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Stable error or explicit unavailable; no success/effect inference from missing ACK."
+          }
+        }
+      }
+    },
+    "/v1/usage-requests/{usage_request_id}/cancel": {
+      "post": {
+        "operationId": "token_cancelUsageRequest",
+        "x-go-handler": "cancelUsageRequest",
+        "x-service": "token",
+        "x-permission": "personal.usage.cancel",
+        "security": [
+          {
+            "UserBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "usage_request_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 16,
+              "maxLength": 128
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Actual current success projection.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Stable error or explicit unavailable; no success/effect inference from missing ACK."
+          },
+          "202": {
+            "description": "Cancellation remains unconfirmed; Location points to status. Not a no-effect or released-funds receipt."
+          }
+        }
+      }
+    },
+    "/v1/me/usage-requests": {
+      "get": {
+        "operationId": "token_listMyUsageRequests",
+        "x-go-handler": "listMyUsageRequests",
+        "x-service": "token",
+        "x-permission": "personal.usage.read",
+        "security": [
+          {
+            "UserBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 20
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Actual current success projection.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Stable error or explicit unavailable; no success/effect inference from missing ACK."
+          }
+        }
+      }
+    },
+    "/v1/me/usage-turns": {
+      "get": {
+        "operationId": "token_listMyUsageTurns",
+        "x-go-handler": "listMyUsageTurns",
+        "x-service": "token",
+        "x-permission": "personal.usage.read",
+        "security": [
+          {
+            "UserBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 20
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Actual current success projection.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Stable error or explicit unavailable; no success/effect inference from missing ACK."
+          }
+        }
+      }
+    },
+    "/v1/client-compatibility": {
+      "get": {
+        "operationId": "token_clientCompatibility",
+        "x-go-handler": "clientCompatibility",
+        "x-service": "token",
+        "x-permission": "PUBLIC",
+        "security": [],
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "Actual current success projection.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Stable error or explicit unavailable; no success/effect inference from missing ACK."
+          }
+        }
+      }
+    },
+    "/internal/v1/client-readiness": {
+      "get": {
+        "operationId": "token_clientReadinessStatus",
+        "x-go-handler": "clientReadinessStatus",
+        "x-service": "token",
+        "x-permission": "internal.token.client-readiness.read",
+        "security": [
+          {
+            "WorkloadBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "protocol",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Actual current success projection.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Stable error or explicit unavailable; no success/effect inference from missing ACK."
+          },
+          "503": {
+            "description": "Readiness false or unavailable; must not authorize GO."
+          }
+        }
+      }
+    },
+    "/internal/v1/client-readiness/attestations": {
+      "post": {
+        "operationId": "token_issueClientReadinessAttestation",
+        "x-go-handler": "issueClientReadinessAttestation",
+        "x-service": "token",
+        "x-permission": "internal.token.client-readiness.attest",
+        "security": [
+          {
+            "WorkloadBearer": []
+          }
+        ],
+        "parameters": [],
+        "responses": {
+          "201": {
+            "description": "Actual current success projection.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Stable error or explicit unavailable; no success/effect inference from missing ACK."
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "artifact_sha256",
+                  "client_version",
+                  "environment"
+                ],
+                "properties": {
+                  "artifact_sha256": {
+                    "type": "string",
+                    "pattern": "^[0-9a-fA-F]{64}$"
+                  },
+                  "client_version": {
+                    "type": "string"
+                  },
+                  "environment": {
+                    "type": "string"
+                  },
+                  "protocol_code": {
+                    "type": "string"
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      }
+    },
+    "/internal/v1/holds/extend": {
+      "post": {
+        "operationId": "billing_extendHold",
+        "x-go-handler": "extendHold",
+        "x-service": "billing",
+        "x-permission": "internal.billing.hold.extend",
+        "security": [
+          {
+            "WorkloadBearer": []
+          }
+        ],
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "Hold projection; a successful positive-extension replay returns the original operation snapshot, without a new reservation or lease renewal. This historical snapshot is not current hold-expiry or release evidence.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Stable error or explicit unavailable; no success/effect inference from missing ACK."
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "usage_request_id",
+                  "hold_id"
+                ],
+                "properties": {
+                  "usage_request_id": {
+                    "type": "string",
+                    "format": "uuid"
+                  },
+                  "hold_id": {
+                    "type": "string",
+                    "format": "uuid"
+                  },
+                  "lease_seconds": {
+                    "type": "integer",
+                    "description": "0/omitted defaults900; explicit range30..1800"
+                  },
+                  "additional_microcredits": {
+                    "type": "integer",
+                    "format": "int64",
+                    "minimum": 0
+                  },
+                  "operation_id": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "format": "uuid",
+                    "description": "Required nonzero stable logical-operation UUID for positive additional_microcredits. Reuse for retries; an independent addition uses a different ID even when the amount matches. Zero-only lease renewal omits this field or uses null/zero UUID."
+                  }
+                },
+                "additionalProperties": false,
+                "oneOf": [
+                  {
+                    "required": [
+                      "additional_microcredits",
+                      "operation_id"
+                    ],
+                    "properties": {
+                      "additional_microcredits": {
+                        "type": "integer",
+                        "format": "int64",
+                        "minimum": 1
+                      },
+                      "operation_id": {
+                        "type": "string",
+                        "format": "uuid",
+                        "not": {
+                          "enum": [
+                            "00000000-0000-0000-0000-000000000000"
+                          ]
+                        }
+                      }
+                    }
+                  },
+                  {
+                    "properties": {
+                      "additional_microcredits": {
+                        "type": "integer",
+                        "format": "int64",
+                        "enum": [
+                          0
+                        ]
+                      },
+                      "operation_id": {
+                        "type": [
+                          "string",
+                          "null"
+                        ],
+                        "format": "uuid",
+                        "enum": [
+                          null,
+                          "00000000-0000-0000-0000-000000000000"
+                        ]
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "/internal/v1/holds/commit": {
+      "post": {
+        "operationId": "billing_commit",
+        "x-go-handler": "commit",
+        "x-service": "billing",
+        "x-permission": "internal.billing.hold.commit",
+        "security": [
+          {
+            "WorkloadBearer": []
+          }
+        ],
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "Actual current success projection.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Stable error or explicit unavailable; no success/effect inference from missing ACK."
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "usage_request_id",
+                  "hold_id",
+                  "usage_snapshot"
+                ],
+                "properties": {
+                  "usage_request_id": {
+                    "type": "string",
+                    "format": "uuid"
+                  },
+                  "hold_id": {
+                    "type": "string",
+                    "format": "uuid"
+                  },
+                  "actual_microcredits": {
+                    "type": "integer",
+                    "format": "int64",
+                    "minimum": 0,
+                    "description": "Omitted retains original zero settlement contract."
+                  },
+                  "usage_snapshot": {
+                    "type": "object",
+                    "additionalProperties": true
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      }
+    },
+    "/internal/v1/client-compatibility": {
+      "get": {
+        "operationId": "account_internalClientCompatibility",
+        "x-go-handler": "internalClientCompatibility",
+        "x-service": "account",
+        "x-permission": "internal.client-compatibility.read",
+        "security": [
+          {
+            "WorkloadBearer": []
+          }
+        ],
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "Actual current success projection.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Stable error or explicit unavailable; no success/effect inference from missing ACK."
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "UserBearer": {
+        "type": "http",
+        "scheme": "bearer"
+      },
+      "WorkloadBearer": {
+        "type": "http",
+        "scheme": "bearer"
+      }
+    },
+    "schemas": {
+      "CredentialUnavailableReceipt": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "code",
+          "message",
+          "details"
+        ],
+        "properties": {
+          "code": {
+            "type": "string",
+            "const": "PROVIDER_CREDENTIAL_UNAVAILABLE"
+          },
+          "message": {
+            "type": "string"
+          },
+          "request_id": {
+            "type": "string"
+          },
+          "details": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "usage_request_id",
+              "status_url",
+              "execution_status",
+              "settlement_status"
+            ],
+            "properties": {
+              "usage_request_id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "status_url": {
+                "type": "string"
+              },
+              "execution_status": {
+                "type": "string",
+                "const": "FAILED"
+              },
+              "settlement_status": {
+                "type": "string",
+                "const": "RELEASED"
+              }
+            }
+          }
+        }
+      },
+      "UsageStateUnconfirmedReceipt": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "code",
+          "message",
+          "details"
+        ],
+        "properties": {
+          "code": {
+            "type": "string",
+            "const": "USAGE_STATE_UNCONFIRMED"
+          },
+          "message": {
+            "type": "string"
+          },
+          "request_id": {
+            "type": "string"
+          },
+          "details": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "usage_request_id",
+              "status_url"
+            ],
+            "properties": {
+              "usage_request_id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "status_url": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

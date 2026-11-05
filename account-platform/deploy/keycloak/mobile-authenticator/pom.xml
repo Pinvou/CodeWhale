@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>com.pinvou.identity</groupId>
+  <artifactId>pinvou-mobile-authenticator</artifactId>
+  <version>1.0.0</version>
+  <properties>
+    <maven.compiler.release>21</maven.compiler.release>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    <keycloak.version>26.7.0</keycloak.version>
+    <junit.version>5.12.2</junit.version>
+    <mockito.version>5.18.0</mockito.version>
+  </properties>
+  <dependencies>
+    <dependency><groupId>org.keycloak</groupId><artifactId>keycloak-core</artifactId><version>${keycloak.version}</version><scope>provided</scope></dependency>
+    <dependency><groupId>org.keycloak</groupId><artifactId>keycloak-server-spi</artifactId><version>${keycloak.version}</version><scope>provided</scope></dependency>
+    <dependency><groupId>org.keycloak</groupId><artifactId>keycloak-server-spi-private</artifactId><version>${keycloak.version}</version><scope>provided</scope></dependency>
+    <dependency><groupId>org.keycloak</groupId><artifactId>keycloak-services</artifactId><version>${keycloak.version}</version><scope>provided</scope></dependency>
+    <dependency>
+      <groupId>org.keycloak</groupId><artifactId>keycloak-model-jpa</artifactId><version>${keycloak.version}</version><scope>provided</scope>
+      <exclusions><exclusion><groupId>*</groupId><artifactId>*</artifactId></exclusion></exclusions>
+    </dependency>
+    <dependency><groupId>jakarta.persistence</groupId><artifactId>jakarta.persistence-api</artifactId><version>3.2.0</version><scope>provided</scope></dependency>
+    <dependency><groupId>org.junit.jupiter</groupId><artifactId>junit-jupiter</artifactId><version>${junit.version}</version><scope>test</scope></dependency>
+    <dependency><groupId>org.mockito</groupId><artifactId>mockito-core</artifactId><version>${mockito.version}</version><scope>test</scope></dependency>
+    <!-- Keycloak 26.7's RESTEasy implementation exercises real Response/flow semantics in tests only. -->
+    <dependency><groupId>org.jboss.resteasy</groupId><artifactId>resteasy-core</artifactId><version>6.2.16.Final</version><scope>test</scope></dependency>
+  </dependencies>
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId><artifactId>maven-compiler-plugin</artifactId><version>3.14.1</version>
+      </plugin>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId><artifactId>maven-surefire-plugin</artifactId><version>3.5.3</version>
+      </plugin>
+    </plugins>
+  </build>
+</project>

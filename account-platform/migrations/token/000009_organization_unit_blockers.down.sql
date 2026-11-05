@@ -1,0 +1,2 @@
+DROP TABLE organization_unit_lifecycle_states;
+DROP TABLE organization_unit_governance_blockers;

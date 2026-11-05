@@ -40,6 +40,8 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
-    "resources": {}
+    "resources": {
+      "resources/common/config/account-platform.json": "config/account-platform.json"
+    }
   }
 }
