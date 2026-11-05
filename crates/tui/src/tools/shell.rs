@@ -4553,7 +4553,8 @@ fn readonly_compound_refused_by_shell_kind(
 }
 
 /// The shell-lane command text for one admitted read-only compound: the
-/// `set -o pipefail` prefix is prepended only when a pipeline is present AND
+/// `set -o pipefail` prefix is prepended only when a `|` is present (a real
+/// pipeline, or harmlessly an `||` sequence, where the option is a no-op) AND
 /// the resolved shell binary is known to speak it. The decision is keyed on
 /// the binary, not the kind: `/bin/sh` is bash on macOS but dash on Debian
 /// and Ubuntu, and dash (like busybox ash) exits the whole `-c` payload on
