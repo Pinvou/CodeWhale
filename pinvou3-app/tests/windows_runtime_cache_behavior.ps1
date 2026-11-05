@@ -260,13 +260,18 @@ try {
   # Expand-FlattenedRuntime must survive destination trees past MAX_PATH:
   # the flattened copy arm (robocopy) is what unbreaks the node component on
   # the self-hosted windows-heavy runners. The zip carries node.exe plus a
-  # deep chain mirroring npm's bundled node_modules; extraction into TEMP
-  # stays shallow, the destination crosses MAX_PATH, so this exercises the
-  # exact production geometry.
+  # deep chain mirroring npm's bundled node_modules: the deep entry itself
+  # lands ~290 chars into TEMP, so extraction goes through the \\?\ long-path
+  # channel, and the flattened destination crosses MAX_PATH for the robocopy
+  # arm — together they exercise the exact production geometry.
   Add-Type -AssemblyName System.IO.Compression
   $flatRoot = Join-Path $testRoot "flatten"
   $flatDestination = Join-Path $testRoot "flatten\expanded\node"
-  $flatDeepRelativePath = (@("node") + $deepRelativeSegments + @("deep.js")) -join "\"
+  # The node-prefixed form is the ZIP ENTRY name only; Expand-FlattenedRuntime
+  # flattens the archive's top-level directory away (node.exe lands at the
+  # destination root), mirroring the production node zip's single top-level
+  # directory.
+  $flatZipEntryDeepPath = (@("node") + $deepRelativeSegments + @("deep.js")) -join "\"
   $flatZipPath = Join-Path $flatRoot "node-runtime.zip"
   [void][System.IO.Directory]::CreateDirectory((Get-ExtendedPath $flatRoot))
   $zipStream = [System.IO.File]::Create($flatZipPath)
@@ -274,7 +279,7 @@ try {
   try {
     foreach ($zipEntry in @(
       [pscustomobject]@{ path = "node/node.exe"; content = "node exe stub" },
-      [pscustomobject]@{ path = ($flatDeepRelativePath.Replace('\', '/')); content = "flattened deep payload" }
+      [pscustomobject]@{ path = ($flatZipEntryDeepPath.Replace('\', '/')); content = "flattened deep payload" }
     )) {
       $entry = $zipArchive.CreateEntry($zipEntry.path)
       $entryWriter = [System.IO.StreamWriter]::new($entry.Open())
@@ -289,11 +294,46 @@ try {
     $zipStream.Dispose()
   }
   Expand-FlattenedRuntime -ZipPath $flatZipPath -Destination $flatDestination -RequiredFile "node.exe"
-  $flatDeepPath = Join-Path $flatDestination $flatDeepRelativePath
+  # Destination-relative path WITHOUT the "node" prefix: the flatten semantics
+  # strip the archive's top-level directory (the same geometry as the real
+  # node-v*-win-x64.zip whose staged manifest puts node.exe at the destination
+  # root).
+  $flatDeepPath = Join-Path $flatDestination ((@($deepRelativeSegments) -join '\') + '\deep.js')
   Assert-True -Condition ($flatDeepPath.Length -gt 260) -Message "flattened expansion destination must exceed MAX_PATH to exercise robocopy (was $($flatDeepPath.Length) chars)"
   Assert-True -Condition ([System.IO.File]::ReadAllText((Get-ExtendedPath $flatDeepPath)) -eq "flattened deep payload") -Message "flattened runtime expansion must carry past-MAX_PATH files through robocopy intact"
   Assert-True -Condition (Test-Path -LiteralPath (Join-Path $flatDestination "node.exe") -PathType Leaf) -Message "flattened runtime expansion must stage the required file at the destination root"
   Assert-True -Condition (@(Get-ChildItem -LiteralPath $flatDestination -Force).Count -eq 2) -Message "flattened runtime expansion must produce exactly the archive root entries"
+
+  # Assert-ChildPath refuses '..' traversal segments outright (GetFullPath
+  # skips normalization on \\?\ device paths, so an interior '..' would not
+  # collapse before the containment comparison): an archive entry carrying
+  # traversal segments must fail the extraction instead of escaping the
+  # destination.
+  $slipRoot = Join-Path $testRoot "slip"
+  [void][System.IO.Directory]::CreateDirectory((Get-ExtendedPath $slipRoot))
+  $slipZipPath = Join-Path $slipRoot "slip.zip"
+  $zipStream = [System.IO.File]::Create($slipZipPath)
+  $zipArchive = [System.IO.Compression.ZipArchive]::new($zipStream, [System.IO.Compression.ZipArchiveMode]::Create)
+  try {
+    $slipEntry = $zipArchive.CreateEntry("node/../../slip-escape.txt")
+    $slipWriter = [System.IO.StreamWriter]::new($slipEntry.Open())
+    try {
+      $slipWriter.Write("slip payload")
+    } finally {
+      $slipWriter.Dispose()
+    }
+  } finally {
+    $zipArchive.Dispose()
+    $zipStream.Dispose()
+  }
+  $slipThrew = $false
+  try {
+    Expand-ZipArchiveLongPath -ZipPath $slipZipPath -Destination $slipRoot
+  } catch {
+    $slipThrew = $true
+  }
+  Assert-True -Condition $slipThrew -Message "an archive entry with traversal segments must fail extraction instead of escaping the destination"
+  Assert-True -Condition (-not (Test-Path -LiteralPath (Join-Path $testRoot "slip-escape.txt"))) -Message "traversal-entry extraction must not write outside the destination root"
 
   # Remove-TreeLongPath must delete trees holding past-MAX_PATH files and
   # tolerate a missing target under -MissingOk (the staging finally blocks).
@@ -346,5 +386,8 @@ try {
 
   Write-Host "Windows runtime cache behavior: ok"
 } finally {
-  Remove-Item -LiteralPath $testRoot -Recurse -Force -ErrorAction SilentlyContinue
+  # The fixture tree holds past-MAX_PATH files; plain Remove-Item -Recurse
+  # would silently leave deep litter behind on the runner (the resolver's own
+  # cleanup goes through the long-path channel).
+  Remove-TreeLongPath -Path $testRoot -MissingOk
 }

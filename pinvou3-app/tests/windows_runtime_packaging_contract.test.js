@@ -151,6 +151,7 @@ for (const contract of [
   // staging operation must stay inside the \\?\ namespace or robocopy.
   "Get-ExtendedPath",
   "Get-LongPathFiles",
+  "Get-PlainPath",
   "Remove-TreeLongPath",
   "Expand-ZipArchiveLongPath",
 ]) {
@@ -224,6 +225,26 @@ assert.doesNotMatch(
   runtimeScript,
   /ExtractToDirectory\(/u,
   "ZipFile.ExtractToDirectory normalizes target paths and fails past MAX_PATH; it must not come back",
+);
+assert.match(
+  runtimeScript,
+  /\(\$Path -split '\[\\\\\/\]'\) -contains '\.\.'/u,
+  "the staging containment guard must refuse traversal segments outright (GetFullPath skips normalization on \\\\?\\ device paths, so an interior '..' would not collapse before the comparison)",
+);
+assert.match(
+  runtimeScript,
+  /Assert-ChildPath -Root \$Destination -Path \$entryTargetPath/u,
+  "archive extraction must enforce per-entry containment inside the destination",
+);
+assert.doesNotMatch(
+  runtimeScript,
+  /Expand-Archive\(/u,
+  "Expand-Archive is provider-routed and MAX_PATH-bound; archive extraction must stay on the long-path channel",
+);
+assert.match(
+  runtimeScript,
+  /Get-PlainPath \(\[System\.IO\.Path\]::GetFullPath\(\(Get-ExtendedPath \(\$Path\.Replace\('\/', '\\'\)\)\)\)\)/u,
+  "the containment comparison must strip the device prefix by shape (Get-PlainPath), not by a fixed offset that corrupts UNC roots",
 );
 for (const destination of [
   "runtime/poppler",
@@ -849,9 +870,9 @@ assert.match(
 );
 
 // Windows PowerShell 5.1 spawned under a pwsh 7 parent (CI step shells, pwsh
-// terminals) inherits pwsh's PSModulePath: Get-FileHash then raises
-// CommandNotFound and Get-Acl resolves the unloadable PowerShell 7 module,
-// so the native harnesses die before their assertions while the aggregate
+// terminals) inherits pwsh's PSModulePath: built-in module autoload then
+// fails (Add-Type and module-dependent cmdlets raise CommandNotFound), so
+// the native harnesses die before their assertions while the aggregate
 // CI step still reports green. Each direct 5.1 entry point must restore the
 // host default module path before its first module-dependent cmdlet.
 const modulePathGuard =

@@ -11,10 +11,10 @@ $ErrorActionPreference = "Stop"
 
 # A Windows PowerShell 5.1 process spawned under a pwsh 7 parent (a CI step
 # shell or a pwsh terminal) inherits pwsh's PSModulePath and then cannot load
-# its own built-in modules: Get-FileHash raises CommandNotFound and Get-Acl
-# resolves the unloadable PowerShell 7 module. Rebuild the host default
-# module path before the first module-dependent cmdlet (Add-Type included);
-# plain 5.1 consoles already match and are left untouched.
+# its own built-in modules: Add-Type raises CommandNotFound and module
+# autoloading resolves the unloadable PowerShell 7 module. Rebuild the host
+# default module path before the first module-dependent cmdlet; plain 5.1
+# consoles already match and are left untouched.
 if ($PSVersionTable.PSVersion.Major -lt 6) {
   $systemModulePath = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\Modules"
   $modulePathEntries = @(
@@ -53,6 +53,10 @@ if ([string]::IsNullOrWhiteSpace($LockFile)) {
 if (-not (Test-Path -LiteralPath $LockFile -PathType Leaf)) {
   throw "Windows runtime lock manifest not found: $LockFile"
 }
+# Resolve against the process CWD (the historical Test-Path/Get-Content
+# semantics) into an absolute path: Get-Sha256 consumes the lock file through
+# the \\?\ namespace, which only accepts absolute drive/UNC forms.
+$LockFile = (Resolve-Path -LiteralPath $LockFile).ProviderPath
 $lock = Get-Content -LiteralPath $LockFile -Raw -Encoding UTF8 | ConvertFrom-Json
 if ([int]$lock.schemaVersion -ne 2 -or [string]$lock.source.type -ne "git-submodule") {
   throw "Unsupported Windows runtime lock schema or source type."
@@ -120,8 +124,8 @@ function Write-Utf8Atomically {
 # Adds the Windows extended-length (\\?\) prefix so .NET Framework file APIs
 # skip path normalization: normalization caps paths at MAX_PATH (260) and
 # throws DirectoryNotFound/PathTooLong past it, which is exactly where the
-# staged node tree lands on the self-hosted windows-heavy runners (a 64-char
-# workspace root plus npm's bundled node_modules reaches ~263 chars; runs
+# staged node tree lands on the self-hosted windows-heavy runners (a 63-char
+# workspace root plus npm's bundled node_modules reaches 263 chars; runs
 # 41809813991/41854498430/41977103388 all died on the same field_behavior.js
 # path). Idempotent; accepts only absolute drive/UNC paths — every staging
 # root in this script is absolute.
@@ -142,6 +146,22 @@ function Get-ExtendedPath {
   throw "Get-ExtendedPath requires an absolute drive or UNC path: $Path"
 }
 
+# Inverse of Get-ExtendedPath: maps a \\?\-prefixed path back to its plain
+# Win32 form. The prefix must be stripped by shape, not by a fixed offset:
+# \\?\UNC\server\share maps back to \\server\share while \\?\C:\ maps back
+# to C:\, and a blind Substring(4) would corrupt UNC results into an
+# invalid "UNC\server\share" form.
+function Get-PlainPath {
+  param([string]$Path)
+  if ($Path.StartsWith('\\?\UNC\', [System.StringComparison]::OrdinalIgnoreCase)) {
+    return '\\' + $Path.Substring(8)
+  }
+  if ($Path.StartsWith('\\?\', [System.StringComparison]::OrdinalIgnoreCase)) {
+    return $Path.Substring(4)
+  }
+  return $Path
+}
+
 # Depth-first file walk that enumerates through the \\?\ device namespace:
 # plain Get-ChildItem -Recurse materializes FileInfo objects through path
 # normalization and throws past MAX_PATH. Returns unprefixed absolute paths;
@@ -156,7 +176,7 @@ function Get-LongPathFiles {
   while ($pendingDirectories.Count -gt 0) {
     $directory = $pendingDirectories.Pop()
     foreach ($entry in [System.IO.Directory]::EnumerateFiles($directory, '*')) {
-      $files.Add($entry.Substring(4))
+      $files.Add((Get-PlainPath $entry))
     }
     foreach ($entry in [System.IO.Directory]::EnumerateDirectories($directory, '*')) {
       $pendingDirectories.Push($entry)
@@ -203,8 +223,9 @@ function Remove-TreeLongPath {
 # to the 260 cliff that deep TEMP roots or fixtures cross it, proven by the
 # cache-behavior deep fixture). Walk the entries manually and materialize
 # each directory/file through the \\?\ namespace instead. Containment is
-# still enforced per entry: an entry escaping the destination fails the
-# Assert-ChildPath check.
+# still enforced per entry: an entry escaping the destination — or carrying
+# '..' traversal segments, which GetFullPath no longer collapses on device
+# paths — fails the Assert-ChildPath check.
 function Expand-ZipArchiveLongPath {
   param([string]$ZipPath, [string]$Destination)
   $archive = [System.IO.Compression.ZipFile]::OpenRead($ZipPath)
@@ -234,12 +255,20 @@ function Assert-ChildPath {
   if ([string]::IsNullOrWhiteSpace($Root) -or [string]::IsNullOrWhiteSpace($Path)) {
     throw "Expected non-empty root and child paths. Root='$Root' Path='$Path'"
   }
+  # Traversal segments are refused outright: GetFullPath skips normalization
+  # on \\?\ device paths, so an interior '..' would no longer collapse before
+  # the containment comparison. Archive entry names and manifest-derived
+  # paths must never carry them.
+  if (($Path -split '[\\/]') -contains '..') {
+    throw "Refusing to use a path with traversal segments: $Path"
+  }
   $rootFull = [System.IO.Path]::GetFullPath($Root).TrimEnd('\') + '\'
   # Canonicalize through the \\?\ namespace: GetFullPath on an unprefixed
   # child past MAX_PATH throws instead of comparing, and device paths skip
-  # normalization, so strip the pass-through prefix before the containment
-  # comparison. Staging roots are short; children can exceed MAX_PATH.
-  $pathFull = [System.IO.Path]::GetFullPath((Get-ExtendedPath $Path)).Substring(4)
+  # normalization, so strip the pass-through prefix by shape (Get-PlainPath
+  # keeps UNC roots valid) before the containment comparison. Staging roots
+  # are short; children can exceed MAX_PATH.
+  $pathFull = Get-PlainPath ([System.IO.Path]::GetFullPath((Get-ExtendedPath ($Path.Replace('/', '\')))))
   if (-not $pathFull.StartsWith($rootFull, [System.StringComparison]::OrdinalIgnoreCase)) {
     throw "Refusing to use a path outside the expected root: $Path"
   }
@@ -760,7 +789,14 @@ function Expand-FlattenedRuntime {
       }
     }
   } finally {
-    Remove-TreeLongPath -Path $temporary -MissingOk
+    # A throw here would replace the in-flight extraction/copy exception and
+    # hide the root cause from the operator, so cleanup failures degrade to a
+    # loud warning (the same policy the staging finally blocks below use).
+    try {
+      Remove-TreeLongPath -Path $temporary -MissingOk
+    } catch {
+      Write-Warning ("Windows runtime expansion cleanup left a partial tree behind: {0} ({1})" -f $temporary, $_.Exception.Message)
+    }
   }
 }
 
@@ -1206,7 +1242,11 @@ function Stage-Submodule {
       }
       Move-Item -LiteralPath $stageContext.TemporaryRoot -Destination $stagingRoot
     } finally {
-      Remove-TreeLongPath -Path $stageContext.TemporaryRoot -MissingOk
+      try {
+        Remove-TreeLongPath -Path $stageContext.TemporaryRoot -MissingOk
+      } catch {
+        Write-Warning ("Windows runtime staging cleanup left a temporary tree behind: {0} ({1})" -f $stageContext.TemporaryRoot, $_.Exception.Message)
+      }
     }
   }
 
@@ -1273,7 +1313,11 @@ function Stage-OnnxRuntime {
     $finalDylib = Join-Path $onnxStageRoot "onnxruntime\onnxruntime.dll"
     Write-Utf8Atomically -Path $onnxDevDescriptorPath -Content (Get-OnnxDevDescriptorContent -StageId $stageId -DylibPath $finalDylib)
   } finally {
-    Remove-TreeLongPath -Path $temporaryRoot -MissingOk
+    try {
+      Remove-TreeLongPath -Path $temporaryRoot -MissingOk
+    } catch {
+      Write-Warning ("Windows ONNX staging cleanup left a temporary tree behind: {0} ({1})" -f $temporaryRoot, $_.Exception.Message)
+    }
   }
   Write-Host ("Staged Windows ONNX Runtime for development: {0}" -f $onnxStageRoot)
   Write-Host ("Generated ONNX development descriptor: {0}" -f $onnxDevDescriptorPath)
