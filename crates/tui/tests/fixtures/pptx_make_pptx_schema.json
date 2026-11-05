@@ -12,7 +12,7 @@
           },
           "slides": {
             "type": "array",
-            "description": "deck 的 slides 数组。每页一个对象,`layout` 选版式,并**必须按版式填正文字段**(只给 title 会得到空白页!)。每版式的必填字段已写进对应分支的 required:\n- cover: {title}(subtitle/date 可选)\n- agenda: {title, items}  章节条目数组\n- section: {title}  ← 章节分隔页\n- bullets: {title, bullets}  要点数组\n- two_col: {title, left, right}(leftTitle/rightTitle 可选)\n- kpi: {title, items}  最多4个大数字\n- chart: {title, chartType?, categories, series}\n- table: {title, headers, rows}\n- image: {title}(image/bullets/caption 可选)\n- end: {title}(subtitle 可选)  ← 结尾页\n正文要有真实内容/数据,不要只放标题。",
+            "description": "deck 的 slides 数组。每页一个对象,`layout` 选版式,并**按版式填该分支required 的正文字段**(agenda/bullets/two_col/kpi/chart/table 缺正文字段会得到空白正文页)。每版式的必填字段已写进对应分支的 required:\n- cover: {title}(subtitle/date 可选)\n- agenda: {items}  章节条目数组;title 可选,缺省「目录」\n- section: {title}  ← 章节分隔页\n- bullets: {title, bullets}  要点数组\n- two_col: {title, left, right}(leftTitle/rightTitle 可选)\n- kpi: {title, items}  最多4个大数字\n- chart: {title, chartType?, categories, series}\n- table: {title, headers, rows}\n- image: {title}(image/bullets/caption 可选)\n- end: layout 即完整(subtitle 可选;标题缺省「谢谢」)  ← 结尾页\n正文版式(agenda/bullets/two_col/kpi/chart/table)要有真实内容/数据,不要只放标题。",
             "items": {
               "description": "一页 = 一个版式分支:layout 的单值 enum 选中分支,各分支 required 列出该版式必填字段",
               "anyOf": [
@@ -47,7 +47,7 @@
                 },
                 {
                   "type": "object",
-                  "description": "目录页:必填 items(章节条目数组,最多 6 条)",
+                  "description": "目录页:必填 items(章节条目数组,最多 6 条);title 可选,缺省「目录」",
                   "properties": {
                     "layout": {
                       "type": "string",
@@ -87,7 +87,6 @@
                   },
                   "required": [
                     "layout",
-                    "title",
                     "items"
                   ]
                 },
@@ -372,7 +371,7 @@
                 },
                 {
                   "type": "object",
-                  "description": "结尾页:必填 title(如「谢谢」);subtitle 可选",
+                  "description": "结尾页:layout 即完整,标题缺省「谢谢」;subtitle 可选",
                   "properties": {
                     "layout": {
                       "type": "string",
@@ -391,8 +390,7 @@
                     }
                   },
                   "required": [
-                    "layout",
-                    "title"
+                    "layout"
                   ]
                 }
               ]
