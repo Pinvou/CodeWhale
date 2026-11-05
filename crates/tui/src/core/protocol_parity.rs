@@ -501,6 +501,8 @@ pub fn event_to_protocol(event: &Event, ids: &ProtocolIds) -> wire::EventMsg {
             error,
             tool_catalog,
             base_url,
+            // Internal producer evidence is not part of the wire protocol.
+            error_source: _,
         } => wire::EventMsg::TurnComplete {
             thread_id,
             session_id,
@@ -1225,6 +1227,7 @@ mod tests {
             compaction_id: Some("compact-1".into()),
             usage: Usage::default(),
             status: TurnOutcomeStatus::Failed,
+            error_source: None,
             error: Some("route rejected".into()),
             tool_catalog: None,
             base_url: None,
@@ -1283,6 +1286,7 @@ mod tests {
                 compaction_id: None,
                 usage: usage.clone(),
                 status: TurnOutcomeStatus::Interrupted,
+                error_source: None,
                 error: Some("stopped".into()),
                 tool_catalog: None,
                 base_url: Some("https://example.invalid".into()),

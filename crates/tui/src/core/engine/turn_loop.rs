@@ -23,6 +23,34 @@ use codewhale_core::request::{PrimaryTurnRequest, prepare_primary_turn_request};
 
 const MAX_APPROVAL_INTENT_SUMMARY_CHARS: usize = 2_000;
 
+/// Keep the chosen error and its producer together through first-error wins,
+/// retries, and local-error replacement. No source survives a cleared error.
+struct TurnFailure {
+    message: String,
+    source: crate::core::events::TurnErrorSource,
+}
+
+impl TurnFailure {
+    fn model(message: String) -> Self {
+        Self {
+            message,
+            source: crate::core::events::TurnErrorSource::Model,
+        }
+    }
+
+    fn runtime(message: String) -> Self {
+        Self {
+            message,
+            source: crate::core::events::TurnErrorSource::Runtime,
+        }
+    }
+
+    fn finish(self, turn: &mut TurnContext) -> (TurnOutcomeStatus, Option<String>) {
+        turn.terminal_error_source = Some(self.source);
+        (TurnOutcomeStatus::Failed, Some(self.message))
+    }
+}
+
 /// Monotonic counter for rewritten text-fallback tool-call ids. The wall-clock
 /// millis alone can repeat within one process, so the counter disambiguates
 /// incarnations; the millis keep ids unique across engine restarts within the
@@ -1543,7 +1571,7 @@ impl Engine {
             .clone()
             .expect("model client should be configured");
 
-        let mut turn_error: Option<String> = None;
+        let mut turn_error: Option<TurnFailure> = None;
         // While the spawn-time MCP boot is still settling, the pool fills
         // incrementally and a new turn's snapshot can differ from the pinned
         // prefix the moment any server stores its tools (#588). Declare the
@@ -1684,7 +1712,7 @@ impl Engine {
                     self.turn_wall_clock.budget().as_secs(),
                 );
                 let _ = self.tx_event.send(Event::status(error.clone())).await;
-                return (TurnOutcomeStatus::Failed, Some(error));
+                return TurnFailure::runtime(error).finish(turn);
             }
 
             if self.apply_pending_runtime_authority().await {
@@ -1805,7 +1833,7 @@ impl Engine {
                         self.config.max_steps
                     );
                     let _ = self.tx_event.send(Event::status(error.clone())).await;
-                    return (TurnOutcomeStatus::Failed, Some(error));
+                    return TurnFailure::runtime(error).finish(turn);
                 }
             }
 
@@ -2086,12 +2114,12 @@ impl Engine {
                             "Context remains above model limit after {MAX_CONTEXT_RECOVERY_ATTEMPTS} recovery attempts \
                              (~{estimated_input} token estimate, ~{input_budget} budget). Please run /compact or /clear."
                         );
-                        turn_error = Some(message.clone());
+                        turn_error = Some(TurnFailure::runtime(message.clone()));
                         let _ = self
                             .tx_event
                             .send(Event::error(ErrorEnvelope::context_overflow(message)))
                             .await;
-                        return (TurnOutcomeStatus::Failed, turn_error);
+                        return turn_error.expect("failure was assigned").finish(turn);
                     }
 
                     if self
@@ -2379,6 +2407,11 @@ impl Engine {
             // instant (connection setup included), and time-to-first-token is
             // the gap to the first content-bearing stream event.
             let request_dispatched_at = Instant::now();
+            let request_error_source = if preparation.is_ok() {
+                crate::core::events::TurnErrorSource::Model
+            } else {
+                crate::core::events::TurnErrorSource::Runtime
+            };
             let stream_result = tokio::select! {
                 biased;
                 () = self.cancel_token.cancelled() => {
@@ -2431,14 +2464,17 @@ impl Engine {
                         let _ = self.tx_event.send(Event::status(status)).await;
                         continue;
                     }
-                    turn_error = Some(message.clone());
+                    turn_error = Some(TurnFailure {
+                        message: message.clone(),
+                        source: request_error_source,
+                    });
                     let _ = self
                         .tx_event
                         .send(Event::error(crate::error_taxonomy::envelope_for_llm_error(
                             e, message,
                         )))
                         .await;
-                    return (TurnOutcomeStatus::Failed, turn_error);
+                    return turn_error.expect("failure was assigned").finish(turn);
                 }
             };
             let StreamOutcome {
@@ -2473,7 +2509,7 @@ impl Engine {
                     stream_retry_budget.spent(),
                 )
                 .await;
-            turn_error = turn_error.or(stream_error);
+            turn_error = turn_error.or_else(|| stream_error.map(TurnFailure::model));
             // These belong to post-stream response assembly, not stream
             // consumption: blocks are built from the completed stream state,
             // and truncation is derived from its terminal stop reason below.
@@ -2556,7 +2592,7 @@ impl Engine {
                         "Model response incomplete: provider stop reason `{reason}`; no complete response or tool call was accepted."
                     );
                     crate::logging::warn(&error);
-                    return (TurnOutcomeStatus::Failed, Some(error));
+                    return TurnFailure::model(error).finish(turn);
                 }
             }
 
@@ -2855,7 +2891,7 @@ impl Engine {
                             "benchmark final-only mode produced repeated tool-only responses"
                                 .to_string();
                         let _ = self.tx_event.send(Event::status(reason.clone())).await;
-                        return (TurnOutcomeStatus::Failed, Some(reason));
+                        return TurnFailure::runtime(reason).finish(turn);
                     }
                     self.add_session_message(self.runtime_text_message_with_turn_metadata(
                         "All tools are disabled. The previous tool markers were ignored. Respond now with only the requested final answer in the exact required format."
@@ -3048,7 +3084,8 @@ impl Engine {
                                     .tx_event
                                     .send(Event::status(format!("REPL init failed: {e}")))
                                     .await;
-                                turn_error = Some(format!("REPL init failed: {e}"));
+                                turn_error =
+                                    Some(TurnFailure::runtime(format!("REPL init failed: {e}")));
                                 break;
                             }
                         };
@@ -3071,7 +3108,9 @@ impl Engine {
                             .tx_event
                             .send(Event::status(format!("REPL context refresh failed: {e}")))
                             .await;
-                        turn_error = Some(format!("REPL context refresh failed: {e}"));
+                        turn_error = Some(TurnFailure::runtime(format!(
+                            "REPL context refresh failed: {e}"
+                        )));
                         break;
                     }
 
@@ -3480,7 +3519,7 @@ impl Engine {
                         "Model stream ended with no answer or tool call.".to_string()
                     };
                     crate::logging::warn(&message);
-                    turn_error = Some(message.clone());
+                    turn_error = Some(TurnFailure::model(message.clone()));
                     let _ = self
                         .tx_event
                         .send(Event::error(ErrorEnvelope::classify(message, true)))
@@ -3703,7 +3742,7 @@ impl Engine {
                     )))
                     .await;
             }
-            return (TurnOutcomeStatus::Failed, Some(err));
+            return err.finish(turn);
         }
         let running = foreground_children
             .as_ref()
