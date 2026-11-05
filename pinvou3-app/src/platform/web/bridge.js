@@ -208,8 +208,12 @@ function pinvouSharedweb() {
     },
     // 「添加模型」方案:已保存模型列表 + 全局默认 id + 当前会话绑定的模型 id
     savedModels: [],
+    modelsLoaded: false,
     activeModelId: null,
+    defaultModelRef: null,
     currentSessionModelId: null, // 当前 active session 显式绑定的模型;null=跟随全局默认
+    currentSessionModelRef: null,
+    pendingDraftModelRef: null,
     superPermEnabled: false,
     modeState: { mode: "yolo" },
     // 两个工作区 lane（work/code，design 并入 work）的全局默认 mode（null=该
@@ -1390,6 +1394,7 @@ function rollbackScheduledOpenActivation(snapshot) { return pinvouSharedweb().ro
   }
   // 把 active 工作集存好后切到 id 的 buffer(opts.fresh=新建空 buffer)。
   function switchActiveTo(id, opts) {
+    state.pendingDraftModelRef = null;
     // Set the new active id before touching the old buffer: the LRU prune
     // triggered by that touch protects the target via activeSessionId. Touching
     // the old buffer first (active id still old) could evict an idle target as
@@ -2195,6 +2200,9 @@ function timeStr() { return pinvouSharedweb().timeStr(); }
     state.scheduledRunContext = null;
     state.draftEpoch++; // 每次点击都自增——含下面提前返回的「已在草稿态」分支,让前端能重置 welcomeToolId
     state.scheduledTaskPendingGuide = null; // 换了对话,未发送的定时任务引导词作废
+    state.pendingDraftModelRef = null;
+    state.currentSessionModelId = null;
+    state.currentSessionModelRef = null;
 
     // 已在干净草稿态 → 只 notify(epoch 已自增)。注意要连 chatItems 一起判空:messages 与 chatItems
     // 会背离(persona 气泡 / ensureSession 失败的 system 报错卡只进 chatItems),否则残留卡顶掉「你好」。
@@ -2230,13 +2238,19 @@ async function createNewSession() { return pinvouSharedweb().createNewSession();
   var ensureSessionInFlight = null;
   var ensureSessionDraftOutcome = null;
   async function ensureSession(draftOwner) {
+    function applyDraftOutcome(outcome) {
+      if (!draftOwner || !outcome || draftOwner.draftEpoch !== outcome.epoch) return;
+      draftOwner.createdSessionId = outcome.createdSessionId;
+      if (outcome.rollbackEpoch !== undefined) {
+        draftOwner.rollbackFromDraftEpoch = outcome.epoch;
+        draftOwner.draftEpoch = outcome.rollbackEpoch;
+      }
+    }
     if (state.activeSessionId) return state.activeSessionId;
     if (ensureSessionInFlight) {
       var pendingOutcome = ensureSessionDraftOutcome;
       var pendingResult = await ensureSessionInFlight;
-      if (draftOwner && pendingOutcome && draftOwner.draftEpoch === pendingOutcome.epoch) {
-        draftOwner.createdSessionId = pendingOutcome.createdSessionId;
-      }
+      applyDraftOutcome(pendingOutcome);
       return pendingResult;
     }
     // 捕获导航 token：仅判 activeSessionId 覆盖不了「再进草稿」——enterDraft
@@ -2263,11 +2277,46 @@ async function createNewSession() { return pinvouSharedweb().createNewSession();
           draftOutcome.createdSessionId = meta.id;
           return null;
         }
+        var pendingModelRef = state.pendingDraftModelRef;
+        state.pendingDraftModelRef = null;
         switchActiveTo(meta.id, { fresh: true });
         draftOutcome.createdSessionId = meta.id;
         state.composerDraft = composerDraft;
         sessionStates[meta.id].composerDraft = composerDraft;
         getBuffer(meta.id).sessionRevision = String(meta.transcript_revision || meta.transcriptRevision || "");
+        if (pendingModelRef) {
+          try {
+            if (pendingModelRef.source === "ACCOUNT_PLATFORM") {
+              await invoke("account_platform_select_session_model", {
+                input: { sessionId: meta.id, modelId: pendingModelRef.model_id },
+              });
+            } else if (pendingModelRef.source === "LOCAL_CONFIG") {
+              await invoke("set_session_model", {
+                sessionId: meta.id,
+                modelId: pendingModelRef.saved_model_id,
+              });
+            } else {
+              throw new Error("unsupported model selection source");
+            }
+            if (state.activeSessionId === meta.id && navToken === sessionSwitchRequestToken) {
+              state.currentSessionModelRef = pendingModelRef;
+            }
+          } catch (modelError) {
+            try { await invoke("delete_session", { id: meta.id }); } catch (cleanupError) { /* keep primary failure */ }
+            draftOutcome.createdSessionId = null;
+            if (state.activeSessionId !== meta.id || navToken !== sessionSwitchRequestToken) return null;
+            var rollbackComposerDraft = state.composerDraft || "";
+            enterDraft();
+            state.composerDraft = rollbackComposerDraft;
+            state.pendingDraftModelRef = pendingModelRef;
+            draftOutcome.rollbackEpoch = Number(state.draftEpoch || 0);
+            addSystemItem(bt("newChatFailed"));
+            await refreshHistoryList();
+            notify();
+            return null;
+          }
+        }
+        if (state.activeSessionId !== meta.id || navToken !== sessionSwitchRequestToken) return null;
         await refreshHistoryList();
         await syncModeState();
         // 两分 lane 语义：后端 plain 缺省恒 Yolo、lane 只有 work/code；
@@ -2309,9 +2358,7 @@ async function createNewSession() { return pinvouSharedweb().createNewSession();
       function () { if (ensureSessionInFlight === p) ensureSessionInFlight = null; }
     );
     var result = await p;
-    if (draftOwner && draftOwner.draftEpoch === draftOutcome.epoch) {
-      draftOwner.createdSessionId = draftOutcome.createdSessionId;
-    }
+    applyDraftOutcome(draftOutcome);
     return result;
   }
 
@@ -3570,7 +3617,8 @@ function formatAttachmentDisplayText(text, attachments) { return pinvouSharedweb
         failedItem.deliveryState = submission.lastErrorCode === "outcome_unknown"
           ? "unknown"
           : "failed";
-        failedItem.deliveryError = submission.lastError;
+        failedItem.deliveryError = window.PinvouBridgeMessages?.migrationRecoveryText?.(submission.lastError, state)
+          ?? submission.lastError;
       }
       restoreFirstTurnUiState(submission);
       notify();
@@ -5230,13 +5278,15 @@ async function setSelectedPet(id) { return pinvouSharedweb().setSelectedPet(id);
     var read = window.PinvouBridgeShared.beginModelRead(state, requestedSessionId);
     try {
       var config = await invoke("get_effective_model_config", { sessionId: requestedSessionId });
-      if (!read.configIsCurrent()) return;
+      if (!read.configIsCurrent()) return false;
       state.effectiveModelConfig = config;
     } catch (e) {
-      if (!read.configIsCurrent()) return;
-      state.effectiveModelConfig = null;
+      if (!read.configIsCurrent()) return false;
+      // Preserve the last authoritative snapshot across transient failures.
+      return false;
     }
     notify();
+    return true;
   }
   let settingsWriteQueue = Promise.resolve();
 function enqueueSettingsWrite(write) { return pinvouSharedweb().enqueueSettingsWrite(write); }
@@ -5306,13 +5356,18 @@ function enqueueSettingsWrite(write) { return pinvouSharedweb().enqueueSettingsW
   async function discoverLocalVllm(request) { return pinvouSharedweb().discoverLocalVllm(request); }
 
   // 当前有效模型的图片输入能力(普通会话选图即时警告用);后端按会话模型绑定解析。
+  async function getEffectiveModelConfig(sessionId) {
+    return await invoke("get_effective_model_config", {
+      sessionId: arguments.length ? (sessionId || null) : (state.activeSessionId || null),
+    });
+  }
   async function getImageInputCapability(...args) { return pinvouSharedweb().getImageInputCapability(...args); }
 
   // ── 模型列表(「添加模型」方案)─────────────────────────────────
   // 整表覆盖加载：保存/删除/切换链式 loadModels 并发时旧列表不得覆盖新列表
   // （审计 b）。请求序号后发者胜（与 tauri settings 侧一致）。
-  let modelsLoadSeq = 0;
-async function loadModels() { return pinvouSharedweb().loadModels(); }
+  var modelsLoadSeq = 0;
+  async function loadModels() { return pinvouSharedweb().loadModels(); }
   // model 对象字段须是 snake_case(SavedModel serde):
   // {id,name,preset,context_window_tokens,max_output_tokens,model,base_url,api_key,credential_action,image_capability_override,vision_model_id}
  async function saveModel(model) {
@@ -5343,27 +5398,58 @@ async function revealModelApiKey(id) { return pinvouSharedweb().revealModelApiKe
     var requestedSessionId = sessionId || null;
     var read = window.PinvouBridgeShared.beginModelRead(state, requestedSessionId, true);
     var modelId = null;
-    var config = null;
+    var modelRef = null;
+    var configResult = { ok: false, value: null };
     try {
       var results = await Promise.all([
         requestedSessionId
           ? invoke("get_session_model_id", { sessionId: requestedSessionId }).catch(function () { return null; })
           : Promise.resolve(null),
-        invoke("get_effective_model_config", { sessionId: requestedSessionId }).catch(function () { return null; }),
+        requestedSessionId
+          ? invoke("get_session_model_ref", { sessionId: requestedSessionId }).catch(function () { return null; })
+          : Promise.resolve(null),
+        invoke("get_effective_model_config", { sessionId: requestedSessionId })
+          .then(function (value) { return { ok: true, value: value }; })
+          .catch(function () { return { ok: false, value: null }; }),
       ]);
       modelId = results[0];
-      config = results[1];
+      modelRef = results[1];
+      configResult = results[2];
     } catch (e) {
       modelId = null;
-      config = null;
+      modelRef = null;
+      configResult = { ok: false, value: null };
     }
-    if (!read.selectionIsCurrent()) return;
+    if (!read.selectionIsCurrent()) return false;
     state.currentSessionModelId = modelId;
-    if (read.configIsCurrent()) state.effectiveModelConfig = config;
+    state.currentSessionModelRef = modelRef;
+    var effectiveCurrent = read.configIsCurrent();
+    if (effectiveCurrent && configResult.ok) state.effectiveModelConfig = configResult.value;
     notify();
+    return effectiveCurrent && configResult.ok;
   }
-  // 切当前会话模型(chip 热切)。无 session(草稿态)时改全局默认。
-async function switchModel(sessionId, modelId) { return pinvouSharedweb().switchModel(sessionId, modelId); }
+  // 切当前会话模型；草稿态只寄存到首条消息物化，不改全局默认。
+  async function switchModelRef(sessionId, modelRef) {
+    if (!modelRef || !modelRef.source) throw new Error("model selection is required");
+    if (!sessionId) {
+      state.pendingDraftModelRef = modelRef;
+      notify();
+      return;
+    }
+    if (modelRef.source === "ACCOUNT_PLATFORM") {
+      await invoke("account_platform_select_session_model", {
+        input: { sessionId: sessionId, modelId: modelRef.model_id },
+      });
+    } else if (modelRef.source === "LOCAL_CONFIG") {
+      await invoke("set_session_model", { sessionId: sessionId, modelId: modelRef.saved_model_id });
+    } else {
+      throw new Error("unsupported model selection source");
+    }
+    await loadSessionModel(sessionId);
+  }
+  async function switchModel(sessionId, modelId) {
+    return switchModelRef(sessionId, { source: "LOCAL_CONFIG", saved_model_id: modelId });
+  }
 async function testModelConnection(baseUrl, apiKey, modelId) { return pinvouSharedweb().testModelConnection(baseUrl, apiKey, modelId); }
   // 测试图片输入能力(设计 §7.3):用当前表单的 model/base_url/key 发一张内置纯色图,
   // 仅由模型编辑弹窗主动点击触发,无任何启动/定时自动测试。
@@ -5861,6 +5947,8 @@ async function submitUserInput(itemId, toolCallId, answers, questions) { return 
   }
 
   // ── 产物面板 ─────────────────────────────────────────────────────
+  async function compactNow() { return pinvouSharedweb().compactNow(); }
+
   function invokeArtifact(nativeCommand, webCommand, path, sessionId, extra) {
     var args = Object.assign({ path: path }, extra || {});
     if (IS_WEB) {
@@ -5915,6 +6003,7 @@ function sessionTitleById(sid) { return pinvouSharedweb().sessionTitleById(sid);
 function currentMemoryArtifacts() { return pinvouSharedweb().currentMemoryArtifacts(); }
   // 跨会话产出物索引:磁盘 session JSON 为主,再合并当前内存工作集。
   // 新产物在 chat:done/save_session_artifacts 前也能立刻出现在「产出物」一级入口。
+
   async function listDeliverableIndex() { return pinvouSharedweb().listDeliverableIndex(); }
   // 外部打开产物：HTML 走 Tauri 独立窗口（绕沙箱），其他走系统应用。
   // sessionId = 卡片携带的产物所属 session。后端 resolve_artifact_path 用它(而非全局
@@ -7522,6 +7611,8 @@ function appendVoiceText(base, text) { return pinvouSharedweb().appendVoiceText(
     saveSearchSettingsAndRestart: saveSearchSettingsAndRestart,
     submitFeedback: submitFeedback,
     discoverLocalVllm: discoverLocalVllm,
+    getEffectiveModelConfig: getEffectiveModelConfig,
+    loadEffectiveModelConfig: loadEffectiveModelConfig,
    loadModels: loadModels,
    saveModel: saveModel,
    revealModelApiKey: revealModelApiKey,
@@ -7532,6 +7623,7 @@ function appendVoiceText(base, text) { return pinvouSharedweb().appendVoiceText(
     setActiveModel: setActiveModel,
     loadSessionModel: loadSessionModel,
     switchModel: switchModel,
+    switchModelRef: switchModelRef,
     testModelConnection: testModelConnection,
     probeLocalServerKind: probeLocalServerKind,
     testSearchProvider: testSearchProvider,
@@ -7568,6 +7660,7 @@ function appendVoiceText(base, text) { return pinvouSharedweb().appendVoiceText(
     dismissPinvouReview: dismissPinvouReview,
     // 编辑/压缩
     editLastTurn: editLastTurn,
+    compactNow: compactNow,
     // 产物
     artifactInfo: artifactInfo,
     readArtifactText: readArtifactText,

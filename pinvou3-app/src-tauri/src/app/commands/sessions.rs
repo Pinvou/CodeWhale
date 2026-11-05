@@ -722,10 +722,11 @@ pub(super) fn create_session_record(
     pool: &EnginePool,
     workspace: Option<PathBuf>,
 ) -> Result<SessionMetadata, String> {
-    let (model, model_id) = pool.default_model_for_new_session();
+    let (model, model_id, inherited_default_revision) =
+        pool.default_model_for_new_session_with_origin();
     let workspace = workspace.unwrap_or_else(|| pool.bridge.workspace.clone());
     let session = store
-        .create_new(model, model_id, workspace)
+        .create_new_inheriting_default(model, model_id, workspace, inherited_default_revision)
         .map_err(|e| format!("create_session: {e:#}"))?;
     if set_active {
         store.set_active(Some(session.metadata.id.clone()));

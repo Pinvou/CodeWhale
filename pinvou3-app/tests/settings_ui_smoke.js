@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+const finishFixtures = require('./helpers/fixture-exit.cjs');
 /**
  * 设置页全局配置 smoke：加载真实 Vite dist，mock TauriBridge，点击真实 React UI。
  * 覆盖模型/搜索/权限/帮助反馈四个高风险设置面板：
@@ -146,13 +147,13 @@ for (const confirmTestId of [
 }
 
 function loadPuppeteer() {
-  try { return require('puppeteer-core'); } catch (_) { /* fall through */ }
+  try { return require('./helpers/puppeteer-fixture.cjs'); } catch (_) { /* fall through */ }
   const npx = path.join(os.homedir(), '.npm', '_npx');
   if (fs.existsSync(npx)) {
     for (const directory of fs.readdirSync(npx)) {
       const candidate = path.join(npx, directory, 'node_modules', 'puppeteer-core');
       if (fs.existsSync(candidate)) {
-        try { return require(candidate); } catch (_) { /* try next */ }
+        try { return require('./helpers/browser-fixture.cjs').wrapNative(require(candidate)); } catch (_) { /* try next */ }
       }
     }
   }
@@ -2537,8 +2538,8 @@ async function modalWidth(page, headingText) {
 
   const failed = results.filter(result => !result.pass).length;
   console.log(failed ? `\n❌ ${failed}/${results.length} FAILED` : `\n✅ ALL ${results.length} PASS`);
-  process.exit(failed ? 1 : 0);
+  finishFixtures(failed ? 1 : 0);
 })().catch(error => {
   console.error('FATAL', error.stack || error.message);
-  process.exit(1);
+  finishFixtures(1);
 });

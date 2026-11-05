@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+const finishFixtures = require('./helpers/fixture-exit.cjs');
 /* eslint-disable no-promise-executor-return -- Browser-side waits adapt timer and animation callback APIs whose handles are intentionally ignored. */
 /**
  * pinvou3 前端 UI 冒烟回归测试 — headless chromium + mock TauriBridge,加载真 src/index.html。
@@ -17,12 +18,12 @@ const fs = require('fs'), path = require('path'), os = require('os');
 const { startUiTestServer } = require('./ui_test_server');
 
 function loadPuppeteer() {
-  try { return require('puppeteer-core'); } catch (e) { /* fall through */ }
+  try { return require('./helpers/puppeteer-fixture.cjs'); } catch (e) { /* fall through */ }
   const npx = path.join(os.homedir(), '.npm', '_npx');
   if (fs.existsSync(npx)) {
     for (const d of fs.readdirSync(npx)) {
       const p = path.join(npx, d, 'node_modules', 'puppeteer-core');
-      if (fs.existsSync(p)) { try { return require(p); } catch (e) { /* next */ } }
+      if (fs.existsSync(p)) { try { return require('./helpers/browser-fixture.cjs').wrapNative(require(p)); } catch (e) { /* next */ } }
     }
   }
   console.error('SKIP: 找不到 puppeteer-core。装一个再跑:  npm i -D puppeteer-core   (或  npx -y puppeteer-core)');
@@ -123,16 +124,7 @@ function injectSource() {
         // a missing key silently gates the knowledge download/repair UI.
         case 'get_platform_capabilities': return Promise.resolve({codexAcpSupported:true,browserNativeDisplay:true,localModelSetup:true,localEmbedSupported:true,dependencyInstall:true});
         case 'get_effective_model_config': return Promise.resolve({model:'qwen36_35b_256k',base_url:'http://127.0.0.1:8000/v1',api_key_set:false});
-        case 'get_llmapi_status': return window.__LLMAPI_STATUS_ERROR__
-          ? Promise.reject(new Error('temporary llmapi status failure'))
-          : Promise.resolve(window.__LLMAPI_STATUS__ || {
-              backend_user_exists:false,
-              backend_user_state:'not_exists',
-              stale:false
-            });
-        case 'get_llmapi_models': return window.__LLMAPI_MODELS_ERROR__
-          ? Promise.reject(new Error(window.__LLMAPI_MODELS_ERROR_MESSAGE__ || 'temporary llmapi models failure'))
-          : Promise.resolve(window.__LLMAPI_MODELS__ || {available_models:[],default_model:''});
+        case 'list_models': return window.__MODEL_LIST_ERROR__ ? Promise.reject(new Error('temporary model catalog failure')) : Promise.resolve(window.__MODEL_CATALOG__ || {models:[],active_model_id:null});
         case 'list_sessions': return Promise.resolve(SESSIONS);
         case 'list_codex_acp_sessions': return Promise.resolve(CODEX_SESSIONS);
         case 'get_acp_agent_status': return Promise.resolve({agent_id:args.agentId||'codex',installed:true,node_supported:true,authenticated:true});
@@ -1292,7 +1284,7 @@ async function expand(page) {
 
   // ① 启动落草稿页。
   const st = await page.evaluate(() => {
-    const s = window.TauriBridge.state.getMany(['chat', 'llmapi', 'vllm']);
+    const s = window.TauriBridge.state.getMany(['chat', 'models', 'vllm']);
     return { activeSessionId: s.activeSessionId };
   });
   rec('① 启动保持草稿页', st.activeSessionId == null, JSON.stringify(st));
@@ -1645,132 +1637,20 @@ async function expand(page) {
     JSON.stringify(codexBatchArchive));
   await page.evaluate(() => document.querySelector('button[aria-label="取消"]')?.click());
 
-  const coldStartStaleAccountHidden = await page.evaluate(() =>
-    !document.querySelector('[data-testid="llmapi-account-button"]'));
-  await page.evaluate(async () => {
-    window.__LLMAPI_STATUS__ = {
-      backend_user_exists: true,
-      backend_user_state: 'exists',
-      stale: false,
-      enabled: true,
-      provisioning_status: 'ready',
-    };
-    window.__LLMAPI_MODELS__ = {
-      available_models: ['deepseek-v4-flash'],
-      default_model: 'deepseek-v4-flash',
-    };
-    await window.TauriBridge.llmapi.getLlmApiStatus();
-    await window.TauriBridge.llmapi.getLlmApiModels();
+  const modelAuthorityRecovery = await page.evaluate(async () => {
+    const previousCatalog=window.__MODEL_CATALOG__;
+    window.__MODEL_CATALOG__={models:[{id:'builtin_account_platform',kind:'builtin_account_platform',name:'Managed carrier',model:''},{id:'local-test',name:'Local test model',preset:'local_vllm',model:'qwen36_35b_256k'}],active_model_id:'local-test'};
+    await window.TauriBridge.models.loadModels();
+    const before=window.TauriBridge.state.getMany(['models']);
+    window.__MODEL_LIST_ERROR__=true;
+    const refreshed=await window.TauriBridge.models.loadModels();
+    const after=window.TauriBridge.state.getMany(['models']);
+    window.__MODEL_LIST_ERROR__=false;
+    window.__MODEL_CATALOG__=previousCatalog;
+    await window.TauriBridge.models.loadModels();
+    return {loaded:before.modelsLoaded===true,localVisible:before.savedModels.some(model=>model.id==='local-test'),failedRefresh:refreshed===false,retained:JSON.stringify(before.savedModels)===JSON.stringify(after.savedModels),retiredAccountAbsent:!document.querySelector('[data-testid="llmapi-account-button"]'),noRetiredRequests:!window.__TAURI_INVOKES__.some(call=>call.cmd==='get_llmapi_status'||call.cmd==='get_llmapi_models')};
   });
-  await page.waitForSelector('[data-testid="llmapi-account-button"]');
-
-  const llmApiRecoveryEntry = await page.evaluate(async () => {
-    window.__LLMAPI_STATUS__ = {
-      backend_user_exists: true,
-      backend_user_state: 'exists',
-      stale: true,
-      auto_login_failed: true,
-      enabled: true,
-      provisioning_status: 'ready',
-      quota: null,
-    };
-    await window.TauriBridge.llmapi.getLlmApiStatus();
-    await new Promise(resolve => setTimeout(resolve, 100));
-    document.querySelector('[data-testid="llmapi-account-button"]')?.click();
-    await new Promise(resolve => setTimeout(resolve, 100));
-    const recoveryStatus = window.TauriBridge.state.getMany(['llmapi']).llmApiStatus;
-    const recoveryState = {
-      stale: recoveryStatus && recoveryStatus.stale,
-      autoLoginFailed: recoveryStatus && recoveryStatus.auto_login_failed,
-      backendUserState: recoveryStatus && recoveryStatus.backend_user_state,
-    };
-    const accountButtonVisible = !!document.querySelector('[data-testid="llmapi-account-button"]');
-    const hasRecoveryForm = !!document.querySelector('input[autocomplete="username"]')
-      && !!document.querySelector('input[autocomplete="current-password"]');
-    const hasLoginCopy = document.body.innerText.includes('登录并同步额度');
-    document.querySelector('[data-testid="llmapi-account-button"]')?.click();
-    window.__LLMAPI_STATUS__ = {
-      backend_user_exists: true,
-      backend_user_state: 'exists',
-      stale: false,
-      auto_login_failed: false,
-      enabled: true,
-      provisioning_status: 'ready',
-    };
-    await window.TauriBridge.llmapi.getLlmApiStatus();
-    return { hasRecoveryForm, accountButtonVisible, recoveryState, hasLoginCopy };
-  });
-  rec('LLM API 自动登录失败时保留手工登录恢复入口',
-    llmApiRecoveryEntry.hasRecoveryForm,
-    JSON.stringify(llmApiRecoveryEntry));
-
-  const llmApiCacheFallback = await page.evaluate(async () => {
-    window.__LLMAPI_STATUS__ = {
-      backend_user_exists: false,
-      backend_user_state: 'unknown',
-      stale: true,
-      provisioning_status: 'not_started',
-    };
-    await window.TauriBridge.llmapi.getLlmApiStatus();
-    const retainedAfterUnknown = window.TauriBridge.state.getMany(['chat', 'llmapi', 'vllm']);
-    const keptOnUnknown = retainedAfterUnknown.llmApiStatus
-      && retainedAfterUnknown.llmApiStatus.backend_user_state === 'exists';
-
-    window.__LLMAPI_STATUS_ERROR__ = true;
-    window.__LLMAPI_MODELS_ERROR__ = true;
-    await window.TauriBridge.llmapi.getLlmApiStatus().catch(() => {});
-    await window.TauriBridge.llmapi.getLlmApiModels().catch(() => {});
-    const retained = window.TauriBridge.state.getMany(['chat', 'llmapi', 'vllm']);
-    const keptExisting = retained.llmApiStatus && retained.llmApiStatus.backend_user_exists === true;
-    const keptModels = retained.llmApiModels && retained.llmApiModels.default_model === 'deepseek-v4-flash';
-
-    window.__LLMAPI_STATUS_ERROR__ = false;
-    window.__LLMAPI_MODELS_ERROR__ = true;
-    window.__LLMAPI_MODELS_ERROR_MESSAGE__ = 'send_user_message failed: service_disabled: user has been banned';
-    const accountUiVisibleBeforeDisabled = !!document.querySelector('[data-testid="llmapi-account-button"]');
-    try { await window.TauriBridge.llmapi.getLlmApiModels(); } catch (_) {}
-    const clearedWhenAuthoritative = window.TauriBridge.state.getMany(['chat', 'llmapi', 'vllm']).llmApiModels === null;
-    const runtimeStatus = window.TauriBridge.state.getMany(['chat', 'llmapi', 'vllm']).llmApiStatus;
-    window.__LLMAPI_MODELS_ERROR__ = false;
-    window.__LLMAPI_MODELS_ERROR_MESSAGE__ = '';
-    window.__LLMAPI_STATUS__ = {
-      backend_user_exists: false,
-      backend_user_state: 'not_exists',
-      stale: false,
-      enabled: false,
-      provisioning_status: 'not_started',
-      last_error_code: 'service_disabled',
-    };
-    const modelRefreshCallsBeforeDisabled = window.__TAURI_INVOKES__
-      .filter(call => call.cmd === 'get_llmapi_models').length;
-    await window.TauriBridge.llmapi.refreshLlmApi();
-    const modelRefreshSkippedWhenDisabled = window.__TAURI_INVOKES__
-      .filter(call => call.cmd === 'get_llmapi_models').length === modelRefreshCallsBeforeDisabled;
-    return {
-      keptOnUnknown,
-      keptExisting,
-      keptModels,
-      clearedWhenAuthoritative,
-      runtimeDisabledApplied: runtimeStatus && runtimeStatus.backend_user_state === 'not_exists'
-        && runtimeStatus.last_error_code === 'service_disabled',
-      modelRefreshSkippedWhenDisabled,
-      accountUiVisibleBeforeDisabled,
-    };
-  });
-  llmApiCacheFallback.coldStartStaleAccountHidden = coldStartStaleAccountHidden;
-  await page.waitForFunction(() => !document.querySelector('[data-testid="llmapi-account-button"]'));
-  llmApiCacheFallback.accountUiHiddenWhenDisabled = await page.evaluate(
-    () => !document.querySelector('[data-testid="llmapi-account-button"]')
-  );
-  rec('LLM API 冷启动不显示陈旧账户，运行时确认不存在或禁用后立即隐藏账户和模型',
-    llmApiCacheFallback.keptOnUnknown && llmApiCacheFallback.keptExisting
-      && llmApiCacheFallback.coldStartStaleAccountHidden
-      && llmApiCacheFallback.keptModels && llmApiCacheFallback.clearedWhenAuthoritative
-      && llmApiCacheFallback.runtimeDisabledApplied
-      && llmApiCacheFallback.modelRefreshSkippedWhenDisabled
-      && llmApiCacheFallback.accountUiVisibleBeforeDisabled
-      && llmApiCacheFallback.accountUiHiddenWhenDisabled,
-    JSON.stringify(llmApiCacheFallback));
+  rec('Account platform model catalog keeps authoritative selection on transport failure',Object.values(modelAuthorityRecovery).every(Boolean),JSON.stringify(modelAuthorityRecovery));
   // End of the codex block: opening a code session from the chat manager page enters
   // code mode (sidebar style and New chat behavior follow the mode; the primary-nav
   // collapse does not — it is a global manual toggle now).
@@ -1988,10 +1868,10 @@ async function expand(page) {
     .filter(o => o.t.includes('查错') || o.t.includes('发散') || /品|悟/.test(o.x)).length);
   const restored = await page.evaluate(() => {
     const text = document.body.innerText;
-    const artifactPaths = window.TauriBridge.state.getMany(['chat', 'llmapi', 'vllm']).chatItems
+    const artifactPaths = window.TauriBridge.state.getMany(['chat', 'models', 'vllm']).chatItems
       .filter(item => item.type === 'artifact_card')
       .map(item => item.path);
-    const restoredShellCards = window.TauriBridge.state.getMany(['chat', 'llmapi', 'vllm']).chatItems.filter(item =>
+    const restoredShellCards = window.TauriBridge.state.getMany(['chat', 'models', 'vllm']).chatItems.filter(item =>
       item.type === 'tool' && item.name === 'exec_shell' && item.args && item.args.command === 'history-shell');
     return {
       history: text.includes('整理纪要'),
@@ -2357,16 +2237,23 @@ async function expand(page) {
     await emit('chat:tool_start', { session_id:'s1', id:'live-shell', name:'exec_shell', args:{ command:'validator --json' } });
     await emit('chat:tool_delta', { session_id:'s1', id:'live-shell', stream:'stdout', content:'downloaded 42%\n' + Array.from({ length: 80 }, (_, i) => 'progress line ' + i).join('\n') + '\nlive progress tail' });
   });
-  await sleep(200);
-  const liveShell = await page.evaluate(() => {
-    const item = window.TauriBridge.state.getMany(['chat', 'llmapi', 'vllm']).chatItems.find(item => item.toolId === 'live-shell');
+  const liveShell = await page.evaluate(async () => {
+    // Tool output notification and live-card expansion are asynchronous. Wait
+    // for the same running state and visible output without emitting tool_end.
+    const ready = await window.__uiWait__(() => {
+      const item = window.TauriBridge.state.getMany(['chat', 'models', 'vllm']).chatItems.find(item => item.toolId === 'live-shell');
+      return item && item.state === 'running' && typeof item.output === 'string'
+        && item.output.includes('downloaded 42%') && document.body.innerText.includes('downloaded 42%');
+    });
+    const item = window.TauriBridge.state.getMany(['chat', 'models', 'vllm']).chatItems.find(item => item.toolId === 'live-shell');
     return {
+      ready,
       running: item && item.state === 'running',
       output: item && item.output,
       visible: document.body.innerText.includes('downloaded 42%'),
     };
   });
-  rec('live exec_shell output is visible before tool_end', liveShell.running && liveShell.output.includes('downloaded 42%') && liveShell.visible, JSON.stringify(liveShell));
+  rec('live exec_shell output is visible before tool_end', liveShell.ready && liveShell.running && liveShell.output.includes('downloaded 42%') && liveShell.visible, JSON.stringify(liveShell));
   await page.evaluate(async () => {
     async function emit(name, payload) {
       const handlers = window.__TAURI_EVENT_HANDLERS__[name] || [];
@@ -2375,16 +2262,23 @@ async function expand(page) {
     await emit('chat:tool_start', { session_id:'s1', id:'live-shell-wait', name:'exec_shell_wait', args:{ task_id:'shell-task-1', wait:true } });
     await emit('chat:tool_delta', { session_id:'s1', id:'live-shell-wait', stream:'stdout', content:'tick 42\n' });
   });
-  await sleep(100);
-  const liveShellWait = await page.evaluate(() => {
-    const item = window.TauriBridge.state.getMany(['chat', 'llmapi', 'vllm']).chatItems.find(item => item.toolId === 'live-shell-wait');
+  const liveShellWait = await page.evaluate(async () => {
+    // Tool output notification and live-card expansion are asynchronous. Wait
+    // for the same running state and visible output without emitting tool_end.
+    const ready = await window.__uiWait__(() => {
+      const item = window.TauriBridge.state.getMany(['chat', 'models', 'vllm']).chatItems.find(item => item.toolId === 'live-shell-wait');
+      return item && item.state === 'running' && typeof item.output === 'string'
+        && item.output.includes('tick 42') && document.body.innerText.includes('tick 42');
+    });
+    const item = window.TauriBridge.state.getMany(['chat', 'models', 'vllm']).chatItems.find(item => item.toolId === 'live-shell-wait');
     return {
+      ready,
       running: item && item.state === 'running',
       output: item && item.output,
       visible: document.body.innerText.includes('tick 42'),
     };
   });
-  rec('live exec_shell_wait output is visible before tool_end', liveShellWait.running && liveShellWait.output.includes('tick 42') && liveShellWait.visible, JSON.stringify(liveShellWait));
+  rec('live exec_shell_wait output is visible before tool_end', liveShellWait.ready && liveShellWait.running && liveShellWait.output.includes('tick 42') && liveShellWait.visible, JSON.stringify(liveShellWait));
   await page.evaluate(async () => {
     async function emit(name, payload) {
       const handlers = window.__TAURI_EVENT_HANDLERS__[name] || [];
@@ -2399,7 +2293,7 @@ async function expand(page) {
   });
   await sleep(100);
   const splitTerminal = await page.evaluate(() => {
-    const item = window.TauriBridge.state.getMany(['chat', 'llmapi', 'vllm']).chatItems.find(item => item.toolId === 'split-terminal');
+    const item = window.TauriBridge.state.getMany(['chat', 'models', 'vllm']).chatItems.find(item => item.toolId === 'split-terminal');
     return item && item.output;
   });
   rec('terminal parser preserves CRLF and ANSI state across live chunks',
@@ -2416,7 +2310,7 @@ async function expand(page) {
     await emit('chat:tool_delta', { session_id:'s1', id:'split-terminal-stderr', stream:'stderr', content:'m' });
   });
   const splitTerminalStderr = await page.evaluate(() => {
-    const item = window.TauriBridge.state.getMany(['chat', 'llmapi', 'vllm']).chatItems.find(item => item.toolId === 'split-terminal-stderr');
+    const item = window.TauriBridge.state.getMany(['chat', 'models', 'vllm']).chatItems.find(item => item.toolId === 'split-terminal-stderr');
     return item && item.output;
   });
   rec('terminal parser preserves stderr ANSI state across live chunks',
@@ -2437,7 +2331,7 @@ async function expand(page) {
   });
   await sleep(150);
   const backgroundShell = await page.evaluate(() => {
-    const item = window.TauriBridge.state.getMany(['chat', 'llmapi', 'vllm']).chatItems.find(item => item.toolId === 'background-shell');
+    const item = window.TauriBridge.state.getMany(['chat', 'models', 'vllm']).chatItems.find(item => item.toolId === 'background-shell');
     const button = document.querySelector('[data-testid="cancel-shell-task"][data-shell-task-id="shell-bg-1"]');
     if (button) button.click();
     return {
@@ -2464,7 +2358,7 @@ async function expand(page) {
     }});
   });
   const backgroundKilled = await page.evaluate(() => {
-    const item = window.TauriBridge.state.getMany(['chat', 'llmapi', 'vllm']).chatItems.find(item => item.toolId === 'background-shell');
+    const item = window.TauriBridge.state.getMany(['chat', 'models', 'vllm']).chatItems.find(item => item.toolId === 'background-shell');
     return {
       terminal: item && item.state === 'failed' && item.shellStatus === 'Killed' && item.background === false,
       output: item && item.output,
@@ -2484,7 +2378,7 @@ async function expand(page) {
     await emit('chat:tool_start', { session_id:'s1', id:'live-mcp', name:'mcp_gongwen_make_gongwen', args:{} });
     await emit('chat:tool_end', { session_id:'s1', id:'live-mcp', success:true, output:'{"path":"live-report.docx"}' });
   });
-  const liveArtifacts = await page.evaluate(() => window.TauriBridge.state.getMany(['chat', 'llmapi', 'vllm']).artifacts.map(item => item.path));
+  const liveArtifacts = await page.evaluate(() => window.TauriBridge.state.getMany(['chat', 'models', 'vllm']).artifacts.map(item => item.path));
   rec('③b 实时 tool_end 不跟踪 shell path、保留 MCP 产物', liveArtifacts.includes('live-report.docx') && !liveArtifacts.includes('live-validator-fake.html'), JSON.stringify(liveArtifacts));
 
   // ④ 后端 pending 事件必须直达 React 候选卡；三个决策按钮必须调用各自命令。
@@ -2538,13 +2432,13 @@ async function expand(page) {
   });
   await sleep(700);
   const shellRunning = await page.evaluate(() => {
-    const item=window.TauriBridge.state.getMany(['chat', 'llmapi', 'vllm']).chatItems.find(it=>it.taskId==='task-live-1');
+    const item=window.TauriBridge.state.getMany(['chat', 'models', 'vllm']).chatItems.find(it=>it.taskId==='task-live-1');
     return item && {state:item.state,taskId:item.taskId,output:item.output};
   });
   await page.evaluate(() => window.TauriBridge.chat.cancelShellTask('s1','task-live-1'));
   await sleep(700);
   const shellCancelled = await page.evaluate(() => {
-    const item=window.TauriBridge.state.getMany(['chat', 'llmapi', 'vllm']).chatItems.find(it=>it.taskId==='task-live-1');
+    const item=window.TauriBridge.state.getMany(['chat', 'models', 'vllm']).chatItems.find(it=>it.taskId==='task-live-1');
     return {item:item&&{state:item.state,exitCode:item.exitCode,output:item.output},args:window.__CANCEL_SHELL_ARGS__};
   });
   rec('③c Shell 实时 tail、省略标记、task_id 取消与退出码',
@@ -2571,7 +2465,7 @@ async function expand(page) {
   });
   await sleep(700);
   const ambiguousBeforeEnd = await page.evaluate(() => {
-    const items=window.TauriBridge.state.getMany(['chat', 'llmapi', 'vllm']).chatItems;
+    const items=window.TauriBridge.state.getMany(['chat', 'models', 'vllm']).chatItems;
     return ['dup-tool-a','dup-tool-b'].map(id => {
       const item=items.find(it=>it.toolId===id); return item && item.taskId;
     });
@@ -2585,7 +2479,7 @@ async function expand(page) {
   });
   await sleep(500);
   const shellIdentity = await page.evaluate(() => {
-    const items=window.TauriBridge.state.getMany(['chat', 'llmapi', 'vllm']).chatItems;
+    const items=window.TauriBridge.state.getMany(['chat', 'models', 'vllm']).chatItems;
     const a=items.filter(it=>it.taskId==='task-dup-a');
     const b=items.filter(it=>it.taskId==='task-dup-b');
     const done=items.find(it=>it.taskId==='task-detached-done');
@@ -2990,5 +2884,5 @@ async function expand(page) {
 
   const failed = results.filter(r => !r.pass).length;
   console.log(failed ? `\n❌ ${failed}/${results.length} FAILED` : `\n✅ ALL ${results.length} PASS`);
-  process.exit(failed ? 1 : 0);
-})().catch(e => { console.error('FATAL', e.message); process.exit(1); });
+  finishFixtures(failed ? 1 : 0);
+})().catch(e => { console.error('FATAL', e.message); finishFixtures(1); });

@@ -19,9 +19,22 @@ copyFileSync(
 );
 copyFileSync(path.join(here, '..', 'src', 'shared', 'i18n.js'), path.join(dir, 'shared', 'i18n.js'));
 copyFileSync(path.join(here, '..', 'src', 'shared', 'connector-i18n.js'), path.join(dir, 'shared', 'connector-i18n.js'));
+copyFileSync(path.join(here, '..', 'src', 'shared', 'account-platform-i18n.js'), path.join(dir, 'shared', 'account-platform-i18n.js')); copyFileSync(path.join(here, '..', 'src', 'shared', 'admin-platform-i18n.js'), path.join(dir, 'shared', 'admin-platform-i18n.js'));
+copyFileSync(path.join(here, '..', 'src', 'shared', 'product-admission-i18n.js'), path.join(dir, 'shared', 'product-admission-i18n.js'));
+copyFileSync(path.join(here, '..', 'src', 'shared', 'registration-bonus-i18n.js'), path.join(dir, 'shared', 'registration-bonus-i18n.js'));
+copyFileSync(path.join(here, '..', 'src', 'shared', 'account-closure-i18n.js'), path.join(dir, 'shared', 'account-closure-i18n.js'));
+copyFileSync(path.join(here, '..', 'src', 'shared', 'account-closed-grants-i18n.js'), path.join(dir, 'shared', 'account-closed-grants-i18n.js'));
+copyFileSync(path.join(here, '..', 'src', 'shared', 'entitlement-correction-i18n.js'), path.join(dir, 'shared', 'entitlement-correction-i18n.js'));
+copyFileSync(path.join(here, '..', 'src', 'shared', 'finance-i18n.js'), path.join(dir, 'shared', 'finance-i18n.js'));
+copyFileSync(path.join(here, '..', 'src', 'shared', 'reconciliation-i18n.js'), path.join(dir, 'shared', 'reconciliation-i18n.js'));
+copyFileSync(path.join(here, '..', 'src', 'shared', 'token-management-i18n.js'), path.join(dir, 'shared', 'token-management-i18n.js'));
+copyFileSync(path.join(here, '..', 'src', 'shared', 'ledger-repair-i18n.js'), path.join(dir, 'shared', 'ledger-repair-i18n.js'));
+// Include every current shared/i18n.js domain re-export in the isolated tree.
+for (const name of ['organization-i18n.js', 'model-usage-i18n.js', 'account-closure-i18n.js', 'entitlement-correction-i18n.js', 'account-closed-grants-i18n.js', 'audit-i18n.js', 'platform-role-i18n.js', 'registration-repair-i18n.js', 'account-layout-i18n.js', 'admin-role-presentation-i18n.js']) {
+  copyFileSync(path.join(here, '..', 'src', 'shared', name), path.join(dir, 'shared', name));
+}
 // Preserve the locale modules' transitive imports as dictionaries evolve.
-cpSync(path.join(here, '..', 'src', 'shared', 'i18n'), path.join(dir, 'shared', 'i18n'), { recursive: true });
-// zh moved behind i18n.js's lazy loader (startup budget): seed the staged
+  cpSync(path.join(here, '..', 'src', 'shared', 'i18n'), path.join(dir, 'shared', 'i18n'), { recursive: true });// zh moved behind i18n.js's lazy loader (startup budget): seed the staged
 // copy synchronously so the imported module reads a filled dict.zh.
 {
   const { readFileSync, writeFileSync } = await import('node:fs');

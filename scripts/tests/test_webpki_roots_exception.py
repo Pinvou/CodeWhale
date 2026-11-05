@@ -202,6 +202,10 @@ def cargo_deny_commands(workflow):
     lines = workflow.splitlines()
     commands = []
     scalar_lines = set()
+    # Account Platform uses the official Go toolchain action and the Node-based
+    # artifact client. Uploading existing diagnostic logs does not compile Rust
+    # or add another cargo-deny consumer. Review exact versions, not all tags.
+    reviewed_pinned_actions = {'actions/setup-go@v6', 'actions/upload-artifact@v7'}
     reviewed_actions = {'actions/checkout', 'actions/setup-node', 'actions/setup-python',
                         'actions/cache/restore', 'actions/cache/save', 'dorny/paths-filter',
                         'dtolnay/rust-toolchain', 'Swatinem/rust-cache', 'taiki-e/install-action'}
@@ -216,7 +220,8 @@ def cargo_deny_commands(workflow):
         if key and not re.match(r'^\s+(?:-\s+)?(?:run|uses):', line):
             raise AssertionError('unsupported run/uses mapping key; extend the entry contract')
         action = re.match(r'^\s+(?:-\s+)?uses:\s*(.*?)\s*$', line)
-        if action and action[1].split('@')[0] not in reviewed_actions:
+        if (action and action[1].split('@')[0] not in reviewed_actions
+                and action[1] not in reviewed_pinned_actions):
             raise AssertionError('unreviewed action or reusable workflow; inspect cargo-deny coverage')
         match = re.match(r'^(\s+)(?:-\s+)?run:\s*(.*?)\s*$', line)
         if not match:
@@ -311,6 +316,63 @@ class WebpkiCiContractTests(unittest.TestCase):
                 self.assertNotIn(f"- '!{path}'", block)
         fast = job_block(workflow, 'fast-gate')
         self.assertIn("python3 -m unittest discover -s scripts/tests -p 'test_*.py'", fast)
+
+    def test_existing_account_go_action_is_exactly_reviewed(self):
+        workflow = WORKFLOW.read_text(encoding='utf-8')
+        self.assertEqual(workflow.count('uses: actions/setup-go@v6'), 1)
+        self.verify_workflow(workflow)
+        for replacement in ['actions/setup-go@v7', 'actions/setup-go@main', 'actions/setup-go']:
+            with self.subTest(action=replacement), self.assertRaisesRegex(AssertionError, 'unreviewed action'):
+                self.verify_workflow(workflow.replace('actions/setup-go@v6', replacement))
+
+    def verify_diagnostic_uploads(self, workflow):
+        # Explicitly review each diagnostic-only entry. More uploads do not add
+        # a Rust policy consumer, but neither an unknown entry nor a new action
+        # version may silently inherit this review.
+        reviewed = [('frontend-test', 'Test resource lifecycle receipts'),
+                    ('account-platform-test', 'Financial parallel diagnostics'),
+                    ('account-platform-test', 'Account test resource lifecycle receipts')]
+        self.assertEqual(workflow.count('uses: actions/upload-artifact@v7'), len(reviewed))
+        for job, name in reviewed:
+            steps = job_block(workflow, job).split('\n      - ')
+            entries = [step for step in steps if step.startswith(f'name: {name}\n')]
+            self.assertEqual(len(entries), 1)
+            self.assertIn('uses: actions/upload-artifact@v7\n', entries[0])
+            self.assertIn('retention-days: 7\n', entries[0])
+            self.assertIn('        timeout-minutes: 3\n', entries[0])
+            self.assertIn('        continue-on-error: true\n', entries[0])
+        # Only diagnostic transport may be non-blocking. In particular, a
+        # failed test or an unconfirmed cleanup must still fail its job even
+        # when artifact storage is unavailable.
+        for job in {job for job, _ in reviewed}:
+            block = job_block(workflow, job)
+            self.assertNotRegex(block, r'(?m)^    continue-on-error:')
+            for step in block.split('\n      - ')[1:]:
+                if 'uses: actions/upload-artifact@v7\n' not in step:
+                    self.assertNotIn('\n        continue-on-error:', step)
+
+    def test_diagnostic_transport_never_relaxes_tests_or_resource_retirement(self):
+        workflow = WORKFLOW.read_text(encoding='utf-8')
+        for name in ['Confirm test resource retirement', 'Confirm Account test resource retirement',
+                     'Test and vet all Account Platform Go modules']:
+            with self.subTest(step=name), self.assertRaises(AssertionError):
+                self.verify_diagnostic_uploads(workflow.replace(
+                    f'      - name: {name}\n', f'      - name: {name}\n        continue-on-error: true\n'))
+        with self.assertRaises(AssertionError):
+            self.verify_diagnostic_uploads(workflow.replace(
+                '        timeout-minutes: 3\n        continue-on-error: true\n',
+                '        continue-on-error: true\n', 1))
+
+    def test_diagnostic_upload_actions_are_exactly_reviewed(self):
+        workflow = WORKFLOW.read_text(encoding='utf-8')
+        self.verify_diagnostic_uploads(workflow)
+        self.verify_workflow(workflow)
+        for replacement in ['actions/upload-artifact@v8', 'actions/upload-artifact@main',
+                            'actions/upload-artifact', 'unreviewed/upload-artifact@v7']:
+            with self.subTest(action=replacement), self.assertRaisesRegex(AssertionError, 'unreviewed action'):
+                self.verify_workflow(workflow.replace('actions/upload-artifact@v7', replacement))
+        with self.assertRaises(AssertionError):
+            self.verify_diagnostic_uploads(workflow + '\n      - uses: actions/upload-artifact@v7\n')
 
     def test_both_shared_policy_consumers_have_mandatory_locked_scan(self):
         self.verify_workflow(WORKFLOW.read_text(encoding='utf-8'))

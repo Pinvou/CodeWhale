@@ -1,0 +1,10 @@
+DROP FUNCTION IF EXISTS set_recharge_product_lifecycle(UUID,BIGINT,TEXT,TIMESTAMPTZ);
+DROP TRIGGER IF EXISTS recharge_product_projection_guard ON recharge_products;
+DROP FUNCTION IF EXISTS enforce_recharge_product_projection();
+ALTER TABLE payment_orders DROP COLUMN IF EXISTS provider_call_status;
+DROP TABLE IF EXISTS product_admission_revocations;
+DROP TABLE IF EXISTS product_admission_bindings;
+DROP TABLE IF EXISTS product_admission_evidence;
+DROP TABLE IF EXISTS product_admission_verifications;
+DROP TABLE IF EXISTS recharge_product_mapping_drafts;
+DROP TABLE IF EXISTS recharge_product_catalog_items;

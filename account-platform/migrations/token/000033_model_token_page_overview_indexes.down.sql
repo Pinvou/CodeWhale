@@ -1,0 +1,1 @@
+DROP INDEX IF EXISTS routing_policies_overview_health_idx;

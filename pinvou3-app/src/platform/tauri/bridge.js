@@ -2,7 +2,8 @@
  * tauri-bridge.js — Tauri 后端通信桥
  *
  * 封装所有 invoke/listen，维护前端状态，通过 pub/sub 推给 React。
- * window.__TAURI__ 由先加载的 platform/web/bootstrap.js 保证存在（桌面为原生注入，Web 为客户端 shim），不再保留无 Tauri 的降级桩。
+ * 桌面由原生注入 window.__TAURI__；Web 由 platform/web/bootstrap.js 和独立 web bridge 承担。
+ * 缺少原生注入的独立预览仅导出 available:false 和安全渲染器，不提供后端能力。
  */
 (function () {
   "use strict";
@@ -17,15 +18,37 @@ function pinvouSharedtauriMain() {
   if (window.PinvouPlatform && (window.PinvouPlatform.kind === "web" || window.PinvouPlatform.isWeb === true)) return;
 
   const TAURI = window.__TAURI__;
-  var invokeErrorObserver = function () {};
-  var modelAvailabilityError = function () { return null; };
-  const rawInvoke = TAURI.core.invoke;
-  const invoke = function (command, args) {
-    return rawInvoke(command, args).catch(function (error) {
-      invokeErrorObserver(error, command);
-      throw error;
-    });
-  };
+  if (!TAURI) {
+    console.warn("[TauriBridge] Tauri not available — browser preview mode");
+    // 独立预览不经共享核：壳化的 renderMarkdown 依赖 index.html 先载的
+    // PinvouBridgeShared，且早退分支之后声明的桥内常量处于 TDZ——本地保底
+    // 渲染链（权威渲染器 → 共享 fallback → 内联转义）保持预览自包含且安全。
+    function standaloneSafeRenderMarkdown(text) {
+      if (window.PinvouMarkdownRenderer && typeof window.PinvouMarkdownRenderer.renderMarkdown === "function") {
+        return window.PinvouMarkdownRenderer.renderMarkdown(text);
+      }
+      if (window.PinvouMarkdownBridgeFallback && typeof window.PinvouMarkdownBridgeFallback.renderMarkdown === "function") {
+        return window.PinvouMarkdownBridgeFallback.renderMarkdown(text);
+      }
+      return String(text == null ? "" : text).replace(/[&<>"']/g, function (c) {
+        return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
+      });
+    }
+    window.TauriBridge = {
+      available: false,
+      lifecycle: { init: function () { return Promise.resolve(); } },
+      state: {
+        get: function () { return {}; },
+        getMany: function () { return {}; },
+        subscribe: function () { return function () {}; },
+        subscribeMany: function () { return function () {}; },
+      },
+      rendering: { renderMarkdown: standaloneSafeRenderMarkdown },
+    };
+    return;
+  }
+
+  const invoke = TAURI.core.invoke;
   const { listen } = TAURI.event;
   const dialogOpen = TAURI.dialog?.open;
   const dialogSave = TAURI.dialog?.save;
@@ -254,12 +277,14 @@ function renderMarkdown(text) { return pinvouSharedtauriMain().renderMarkdown(te
       runtime: null,
       snapshot_path: "",
     },
-    llmApiStatus: null,
-    llmApiModels: null,
     // 「添加模型」方案:已保存模型列表 + 全局默认 id + 当前会话绑定的模型 id
     savedModels: [],
+    modelsLoaded: false,
     activeModelId: null,
+    defaultModelRef: null,
     currentSessionModelId: null, // 当前 active session 显式绑定的模型;null=跟随全局默认
+    currentSessionModelRef: null,
+    pendingDraftModelRef: null,
     superPermEnabled: false,
     // Computer use (screenshot + keyboard/mouse control) authorization state. enabled is
     // the global switch (off by default);
@@ -1047,6 +1072,9 @@ function pinvouSceneForMessagePos(pos) { return pinvouSharedtauriMain().pinvouSc
   var presentArtifactAbsPath = artifactTrackerFeature.presentArtifactAbsPath;
 
   var chatFeature = installBridgeFeature("chat", {
+    refreshAuthoritativeTurnTimeline: function (sid) {
+      return chatEventsFeature.refreshAuthoritativeTurnTimeline(sid);
+    },
     voice: function () { return voiceFeature; },
     state: state, invoke: invoke, TAURI: TAURI,
     sessionStates: sessionStates, remoteProxyDrafts: remoteProxyDrafts,
@@ -1085,7 +1113,6 @@ function pinvouSceneForMessagePos(pos) { return pinvouSharedtauriMain().pinvouSc
     fileMutationAction: fileMutationAction,
     parseScheduledTaskDraftFromText: function () { return parseScheduledTaskDraftFromText.apply(null, arguments); },
     autoCreateScheduledTaskDraft: function () { return autoCreateScheduledTaskDraft.apply(null, arguments); },
-    modelAvailabilityError: function () { return modelAvailabilityError.apply(null, arguments); },
     get currentStreamText() { return currentStreamText; },
     set currentStreamText(value) { currentStreamText = value; },
     get currentStreamId() { return currentStreamId; },
@@ -1193,7 +1220,7 @@ function pinvouSceneForMessagePos(pos) { return pinvouSharedtauriMain().pinvouSc
       // chatEventsFeature is initialized further down this file; purge only
       // happens at runtime, so there is no TDZ concern.
       if (id && chatEventsFeature && typeof chatEventsFeature.cancelStreamRenderTimers === "function") {
-        chatEventsFeature.cancelStreamRenderTimers(id);
+        chatEventsFeature.cancelStreamRenderTimers(id, reason);
       }
     },
     runSyncOnSession: runSyncOnSession, persistMessagesFor: persistMessagesFor,
@@ -2018,6 +2045,7 @@ function composePlanMarkdown(snapshots) { return pinvouSharedtauriMain().compose
   }
 
   const chatEventsFeature = installBridgeFeature("chat-events", {
+    onSessionDeleted: onSessionDeleted,
     state: state, listen: listen, invoke: invoke, turnUsageDirty: turnUsageDirty,
     sessionStates: sessionStates, renderMarkdown: renderMarkdown, bt: bt,
     notify: notify, onSessionEvent: onSessionEvent, runSyncOnSession: runSyncOnSession,
@@ -2108,27 +2136,15 @@ function composePlanMarkdown(snapshots) { return pinvouSharedtauriMain().compose
   var clearMonitorStats = monitorFeature.clearMonitorStats;
   var pollBackendStatus = monitorFeature.pollBackendStatus;
   var settingsFeature = installBridgeFeature("settings", { state: state, notify: notify, invoke: invoke, listen: listen });
-  invokeErrorObserver = settingsFeature.observeInvokeError;
-  modelAvailabilityError = settingsFeature.modelAvailabilityError;
   var loadSettings = settingsFeature.loadSettings;
   var loadBehaviorTelemetryStatus = settingsFeature.loadBehaviorTelemetryStatus;
   var setBehaviorTelemetryEnabled = settingsFeature.setBehaviorTelemetryEnabled;
   var loadSelectedPet = settingsFeature.loadSelectedPet;
   var setSelectedPet = settingsFeature.setSelectedPet;
+  var getEffectiveModelConfig = settingsFeature.getEffectiveModelConfig;
   var loadEffectiveModelConfig = settingsFeature.loadEffectiveModelConfig;
   var saveSettings = settingsFeature.saveSettings;
   var saveSettingsAndRestart = settingsFeature.saveSettingsAndRestart;
-  var refreshLlmApiOnStartup = settingsFeature.refreshLlmApiOnStartup;
-  var refreshLlmApi = settingsFeature.refreshLlmApi;
-  var getLlmApiStatus = settingsFeature.getLlmApiStatus;
-  var getLlmApiModels = settingsFeature.getLlmApiModels;
-  var setLlmApiDefaultModel = settingsFeature.setLlmApiDefaultModel;
-  var ensureLlmApiBinding = settingsFeature.ensureLlmApiBinding;
-  var loginLlmApiUser = settingsFeature.loginLlmApiUser;
-  var saveLlmApiUserSession = settingsFeature.saveLlmApiUserSession;
-  var retryLlmApiProvisioning = settingsFeature.retryLlmApiProvisioning;
-  var setLlmApiUserEnabled = settingsFeature.setLlmApiUserEnabled;
-  var getLlmApiAdminOverview = settingsFeature.getLlmApiAdminOverview;
   var saveSearchSettings = settingsFeature.saveSearchSettings;
   var saveSearchSettingsAndRestart = settingsFeature.saveSearchSettingsAndRestart;
   var submitFeedback = settingsFeature.submitFeedback;
@@ -2207,6 +2223,7 @@ function composePlanMarkdown(snapshots) { return pinvouSharedtauriMain().compose
   var submitUserInput = interactionFeature.submitUserInput;
   var cancelUserInput = interactionFeature.cancelUserInput;
   var editLastTurn = interactionFeature.editLastTurn;
+  var compactNow = interactionFeature.compactNow;
 
   var memoryFeature = installBridgeFeature("memory", { state: state, notify: notify, invoke: invoke, bt: bt, addSystemItem: addSystemItem, runSyncOnSession: runSyncOnSession, patchItemById: patchItemById, patchItemByIdFor: patchItemByIdFor, runOnSession: runOnSession, addChatItem: addChatItem, timeStr: timeStr , get itemIdSeq() { return itemIdSeq; }, set itemIdSeq(value) { itemIdSeq = value; } });
   var handleMemoryWrite = memoryFeature.handleMemoryWrite;
@@ -2475,9 +2492,6 @@ function composePlanMarkdown(snapshots) { return pinvouSharedtauriMain().compose
       parallelLoads.push(startupAwait("bridge:refresh_super_permission", refreshSuperPerm));
     }
     await Promise.all(parallelLoads);
-    refreshLlmApiOnStartup()
-      .catch(function (e) { console.warn("load llmapi account/models failed", e); });
-    startupMark("bridge:llmapi_refresh_started");
     // 分离会话必须在同一初始化链内绑定目标 id。此前 DetachedShell 的独立 effect
     // 会与这里的 enterDraft() 并发，慢初始化时已加载的原会话会被重置成空白草稿。
     if (isDetachedWindow && detachedWindowKind === "session" && detachedWindowSessionId) {
@@ -2527,9 +2541,12 @@ function composePlanMarkdown(snapshots) { return pinvouSharedtauriMain().compose
     return initPromise;
   }
 
+  const accountPlatformFeature = installBridgeFeature("account-platform", { invoke });
+
   // ── Expose API ───────────────────────────────────────────────────
   window.TauriBridge = {
     available: true,
+    accountPlatform: accountPlatformFeature,
     lifecycle: { init: init },
     state: {
       get: snapshotStateSlice,
@@ -2695,22 +2712,12 @@ function composePlanMarkdown(snapshots) { return pinvouSharedtauriMain().compose
         return selected ? (Array.isArray(selected) ? selected : [selected]) : [];
       },
     },
-    llmapi: {
-      refreshLlmApi: refreshLlmApi,
-      getLlmApiStatus: getLlmApiStatus,
-      getLlmApiModels: getLlmApiModels,
-      setLlmApiDefaultModel: setLlmApiDefaultModel,
-      ensureLlmApiBinding: ensureLlmApiBinding,
-      loginLlmApiUser: loginLlmApiUser,
-      saveLlmApiUserSession: saveLlmApiUserSession,
-      retryLlmApiProvisioning: retryLlmApiProvisioning,
-      setLlmApiUserEnabled: setLlmApiUserEnabled,
-      getLlmApiAdminOverview: getLlmApiAdminOverview,
-    },
     vllm: {
       discoverLocalVllm: discoverLocalVllm,
     },
     models: {
+      getEffectiveModelConfig: getEffectiveModelConfig,
+      loadEffectiveModelConfig: loadEffectiveModelConfig,
       loadModels: loadModels,
       saveModel: saveModel,
       revealModelApiKey: revealModelApiKey,
@@ -2719,6 +2726,7 @@ function composePlanMarkdown(snapshots) { return pinvouSharedtauriMain().compose
       setActiveModel: setActiveModel,
       loadSessionModel: loadSessionModel,
       switchModel: switchModel,
+      switchModelRef: settingsFeature.switchModelRef,
       testModelConnection: testModelConnection,
       getImageInputCapability: getImageInputCapability,
       testImageInputCapability: testImageInputCapability,
@@ -2751,6 +2759,7 @@ function composePlanMarkdown(snapshots) { return pinvouSharedtauriMain().compose
     dismissPinvouReview: dismissPinvouReview,
     // 编辑/压缩
     editLastTurn: editLastTurn,
+    compactNow: compactNow,
     },
     rendering: { renderMarkdown: renderMarkdown },
     remoteControl: {

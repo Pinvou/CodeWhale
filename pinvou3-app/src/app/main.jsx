@@ -22,11 +22,13 @@ const MobileTabBar = lazy(() =>
 const MobileTopBar = lazy(() =>
   import('../components/layout/MobileShell.jsx').then((m) => ({ default: m.MobileTopBar })));
 const ControlledOpenRecovery = lazy(() => import('../features/remote-control/ControlledOpenRecovery.jsx'));
-import { bridge, useBridgeState, usePlatformCapability, activeModelIsLocal, shouldShowApiKeyGate } from '../hooks/useBridge.js';
+import { bridge, useBridgeState, usePlatformCapability, activeModelIsLocal, shouldShowModelAccessGate } from '../hooks/useBridge.js';
 import { useCompactViewport, useVisualViewportHeight } from '../hooks/useViewport.js';
 import { useSystemDarkMode } from '../hooks/useSystemDarkMode.js';
+import { useModalIsolation } from '../hooks/useModalIsolation.js';
+import { refreshModelAccessAfterAuthentication } from '../features/settings/model-access.js';
 import { COLOR_SCHEME_STORAGE_KEY, normalizeColorScheme, readStoredColorScheme, resolveTheme } from '../shared/color-scheme.js';
-import { DEFAULT_CHAT_TITLES, dict, createLatestLanguageGate, ensureLanguage, ensureLanguageWithZhFallback, LANG_TO_TAG, initialSystemLanguage, SEARCH_KEY_PROVIDERS, TAG_TO_LANG, zhDict } from '../shared/i18n.js';
+import { CHAT_RECOVERY_COPY, DEFAULT_CHAT_TITLES, dict, createLatestLanguageGate, ensureLanguage, ensureLanguageWithZhFallback, LANG_TO_TAG, initialSystemLanguage, SEARCH_KEY_PROVIDERS, TAG_TO_LANG, zhDict, accountPlatformCopy, organizationCopy } from '../shared/i18n.js';
 import { mountWhenLanguageReady } from '../shared/entry-boot.js';
 import { formatSessionDate, localDateKey, formatDateGroupLabel } from '../shared/date-utils.js';
 import { groupSessionsWithProjects, resolveSessionProjectId, needsAddFolderConfirm, WORKSPACE_KIND_BOUND } from '../features/projects/projectGrouping.js';
@@ -46,10 +48,11 @@ const ManageProjectFoldersDialog = lazy(() =>
   import('../features/projects/ManageProjectFoldersDialog.jsx').then(m => ({ default: m.ManageProjectFoldersDialog })));
 const SessionWorkspaceDialog = lazy(() =>
   import('../features/projects/SessionWorkspaceDialog.jsx').then(m => ({ default: m.SessionWorkspaceDialog })));
-import { classifyRebindError, mergeRebindCarryoverIds } from '../features/projects/rebindErrors.js';
-import { runSessionBatch } from '../shared/session-management.js';
 import { filterSessionsByTab, groupSessionsByLocalDate, sessionListComparator } from '../shared/session-list-pipeline.js';
-import { isLlmApiAccountVisible } from '../shared/model-options.js';
+const LazyAccountPlatformPopover = lazy(() => VIEW_LOADERS.accountPlatformPopover().then(module => ({ default: module.AccountPlatformPopover })));
+import { AccountPlatformDesktopClient } from '../features/account-platform/desktop-client.js';
+import { walletRechargeTarget } from '../features/conversation/billing-notice.js';
+import { organizationRechargeTargetAllowed, requirePersonalAccount } from '../features/account-platform/personal-contract.js';
 import { can, isWeb } from '../shared/platform.js';
 import { errorCode, localizedErrorMessage } from '../shared/user-facing-error.js';
 import { installGlobalMarkdownRenderer } from '../shared/markdown-renderer.js';
@@ -87,7 +90,7 @@ import {
   isControlledSessionChatActive,
 } from '../features/remote-control/remote-control-logic.mjs';
 import { modelSourceForLease } from '../features/remote-control/remote-model-source.mjs';
-import { mergeSessionStoreHistory } from '../features/remote-control/remote-session-adapter.mjs';
+import { mergeSessionStoreHistory, remoteProxyForSession } from '../features/remote-control/remote-session-adapter.mjs';
 import {
   sessionTitlePlainText,
   sessionTitlePresentation,
@@ -146,7 +149,7 @@ const LazyRebindFolderDialog = lazy(() => VIEW_LOADERS.rebindFolderDialog().then
 const LazyPinvouSummonModal = lazy(() => VIEW_LOADERS.pinvouSummon().then(m => ({ default: m.PinvouSummonModal })));
 const LazyUpdateNoticeButton = lazy(() => VIEW_LOADERS.updateNotice().then(m => ({ default: m.UpdateNoticeButton })));
 const LazySavedPersonaConfirmDialog = lazy(() => VIEW_LOADERS.savedPersonaConfirmDialog().then(m => ({ default: m.SavedPersonaConfirmDialog })));
-const LazyApiKeyGateDialog = lazy(() => VIEW_LOADERS.apiKeyGateDialog().then(m => ({ default: m.ApiKeyGateDialog })));
+const LazyModelAccessGate = lazy(() => VIEW_LOADERS.modelAccessGate().then(m => ({ default: m.ModelAccessGate })));
 const LazyArchiveConfirmDialog = lazy(() => VIEW_LOADERS.archiveConfirmDialog().then(m => ({ default: m.ArchiveConfirmDialog })));
 const LazyArchiveToast = lazy(() => VIEW_LOADERS.archiveConfirmDialog().then(m => ({ default: m.ArchiveToast })));
 const LazyPersonaEditorModal = lazy(() => VIEW_LOADERS.cardpool().then(m => ({ default: m.PersonaEditorModal })));
@@ -172,7 +175,7 @@ let appFirstRenderMarked = false;
 
 const APP_BRIDGE_STATE_DOMAINS = [
   'platform', 'sessions', 'chat', 'voice', 'knowledge', 'scheduled', 'monitor',
-  'settings', 'models', 'llmapi', 'vllm', 'interaction', 'personas',
+  'settings', 'models', 'vllm', 'interaction', 'personas',
   'memory', 'remoteControl', 'updater', 'dependencies', 'teamRelay',
   'projects', 'desktopRemoteControl', 'computerUse',
 ];
@@ -203,189 +206,6 @@ function workspaceDisplayName(path) {
   const parts = String(path || '').split(/[\\/]/).filter(Boolean);
   return parts[parts.length - 1] || String(path || '');
 }
-
-    const formatQuotaTokens = (value, language) => {
-      if (value == null || !Number.isFinite(Number(value))) return '—';
-      return `${Number(value).toLocaleString(language || 'en', { notation: 'compact', maximumFractionDigits: 2 })} tokens`;
-    };
-
-    const shortBackendUsername = (value, copy) => {
-      const name = String(value || '').trim();
-      if (!name) return copy.backendUser;
-      return name;
-    };
-
-    const llmStatusText = (status, error, copy) => {
-      if (error) return copy.status.unavailable;
-      return copy.status[status] || copy.status.unknown;
-    };
-
-    const AccountPopover = ({ open, theme, t, llmApiStatus, loading, accountErrorCode, onClose, onRefresh, onLogin, collapsed }) => {
-      const ref = useRef(null);
-      const [loginUsername, setLoginUsername] = useState('');
-      const [loginPassword, setLoginPassword] = useState('');
-      const [loginErrorCode, setLoginErrorCode] = useState(null);
-      const [loggingIn, setLoggingIn] = useState(false);
-      const isDark = theme === 'dark';
-      const accountCopy = t.uiAccount;
-      const backendUsername = (llmApiStatus && llmApiStatus.backend_username) || '';
-      const backendDisplayName = (llmApiStatus && llmApiStatus.backend_display_name) || '';
-      const displayName = shortBackendUsername(backendDisplayName || backendUsername, accountCopy);
-      const displayId = backendUsername || accountCopy.backendAccount;
-      const accountErrorMessage = accountErrorCode
-        ? localizedErrorMessage({ code: accountErrorCode }, accountCopy.errors, accountCopy.syncFailed)
-        : '';
-      const loginErrorMessage = loginErrorCode
-        ? localizedErrorMessage({ code: loginErrorCode }, accountCopy.errors, accountCopy.builtinLoginFailed)
-        : '';
-      useEffect(() => {
-        if (!open) return;
-        const onMouseDown = (e) => {
-          if (ref.current && !ref.current.contains(e.target)) onClose && onClose();
-        };
-        const onKey = (e) => { if (e.key === 'Escape') onClose && onClose(); };
-        window.addEventListener('mousedown', onMouseDown);
-        window.addEventListener('keydown', onKey);
-        return () => {
-          window.removeEventListener('mousedown', onMouseDown);
-          window.removeEventListener('keydown', onKey);
-        };
-      }, [open, onClose]);
-      useEffect(() => {
-        if (open && backendUsername) setLoginUsername(prev => prev || backendUsername);
-      }, [open, backendUsername]);
-      if (!open) return null;
-
-      const quota = llmApiStatus && llmApiStatus.quota;
-      const status = llmApiStatus && llmApiStatus.provisioning_status;
-      const remaining = quota ? quota.remaining_tokens : null;
-      const limit = quota ? quota.limit_tokens : null;
-      const used = quota ? quota.used_tokens : null;
-      const pct = limit ? Math.max(0, Math.min(100, Math.round((Number(remaining || 0) / Number(limit)) * 100))) : 0;
-      const panelPos = collapsed ? 'left-full bottom-0 ml-3' : 'left-0 bottom-full mb-2';
-      const needsLogin = !!(llmApiStatus && llmApiStatus.auto_login_failed && onLogin);
-      const submitLogin = async (e) => {
-        e.preventDefault();
-        if (!onLogin || loggingIn) return;
-        setLoginErrorCode(null);
-        setLoggingIn(true);
-        try {
-          await onLogin(loginUsername, loginPassword);
-          setLoginPassword('');
-        } catch (err) {
-          setLoginErrorCode(errorCode(err) || 'unknown');
-        } finally {
-          setLoggingIn(false);
-        }
-      };
-
-      return (
-        <div
-          ref={ref}
-          className={`absolute ${panelPos} w-[268px] rounded-[22px] p-3 shadow-2xl z-[80] border backdrop-blur-xl ${
-            isDark ? 'bg-[#202124]/95 border-white/10 text-[#E3E3E3]' : 'bg-white/95 border-black/10 text-[#1F1F1F]'
-          }`}
-        >
-          <div className="flex items-center gap-3 px-1.5 pb-3">
-            <div className="w-11 h-11 rounded-2xl bg-gradient-to-br from-[#19D3A2] to-[#0B57D0] flex items-center justify-center text-white shadow-lg shadow-emerald-500/20">
-              <User size={20} />
-            </div>
-            <div className="min-w-0 flex-1">
-              <div className="text-[15px] font-semibold truncate">{displayName}</div>
-              <div className={`text-[12px] truncate ${isDark ? 'text-[#9AA0A6]' : 'text-[#6F7378]'}`}>{displayId}</div>
-            </div>
-            <button
-              type="button"
-              onClick={onClose}
-              className={`w-8 h-8 rounded-full flex items-center justify-center transition-colors ${isDark ? 'hover:bg-white/10' : 'hover:bg-black/5'}`}
-              title={accountCopy.close}
-            >
-              <X size={16} />
-            </button>
-          </div>
-
-          <div className={`rounded-2xl border p-3 ${isDark ? 'bg-[#131314] border-white/10' : 'bg-[#F8FAFD] border-black/5'}`}>
-            <div className="flex items-center justify-between gap-3">
-              <div className="flex items-center gap-2 min-w-0">
-                <Sparkles size={17} className="text-[#10B981] shrink-0" />
-                <span className="text-[14px] font-medium truncate">{accountCopy.availableQuota}</span>
-              </div>
-              <button
-                type="button"
-                onClick={onRefresh}
-                disabled={loading}
-                className={`w-7 h-7 rounded-full flex items-center justify-center transition-colors ${isDark ? 'hover:bg-white/10 disabled:text-[#5F6368]' : 'hover:bg-black/5 disabled:text-[#C4C7C5]'}`}
-                title={accountCopy.refreshQuota}
-              >
-                <RefreshCw size={14} className={loading ? 'animate-spin' : ''} />
-              </button>
-            </div>
-            {quota ? (
-              <div className="mt-3 space-y-1.5 text-[13px]">
-                {[
-                  [accountCopy.monthlyQuota, formatQuotaTokens(limit, t.langTag)],
-                  [accountCopy.used, formatQuotaTokens(used, t.langTag)],
-                  [accountCopy.remaining, formatQuotaTokens(remaining, t.langTag)],
-                ].map(([label, value]) => (
-                  <div key={label} className="flex items-center justify-between gap-3">
-                    <span className={isDark ? 'text-[#9AA0A6]' : 'text-[#6F7378]'}>{label}</span>
-                    <span className="font-medium tabular-nums text-right">{value}</span>
-                  </div>
-                ))}
-              </div>
-            ) : (
-              <div className={`mt-3 text-[13px] ${isDark ? 'text-[#9AA0A6]' : 'text-[#6F7378]'}`}>
-                {loading ? accountCopy.syncing : llmStatusText(status, accountErrorCode, accountCopy)}
-              </div>
-            )}
-            {needsLogin && (
-              <form className="mt-3 space-y-2" onSubmit={submitLogin}>
-                <input
-                  value={loginUsername}
-                  onChange={(e) => setLoginUsername(e.target.value)}
-                  disabled={loading || loggingIn}
-                  placeholder={accountCopy.username}
-                  autoComplete="username"
-                  className={`w-full h-9 rounded-xl px-3 text-[13px] outline-none border ${
-                    isDark ? 'bg-[#202124] border-white/10 text-[#E3E3E3] placeholder:text-[#6F7378]' : 'bg-white border-black/10 text-[#1F1F1F] placeholder:text-[#9AA0A6]'
-                  }`}
-                />
-                <input
-                  value={loginPassword}
-                  onChange={(e) => setLoginPassword(e.target.value)}
-                  disabled={loading || loggingIn}
-                  placeholder={accountCopy.password}
-                  type="password"
-                  autoComplete="current-password"
-                  className={`w-full h-9 rounded-xl px-3 text-[13px] outline-none border ${
-                    isDark ? 'bg-[#202124] border-white/10 text-[#E3E3E3] placeholder:text-[#6F7378]' : 'bg-white border-black/10 text-[#1F1F1F] placeholder:text-[#9AA0A6]'
-                  }`}
-                />
-                {(accountErrorMessage || loginErrorMessage) && (
-                  <div className="text-[12px] leading-snug text-[#EA4335] break-words">
-                    {loginErrorMessage || accountErrorMessage}
-                  </div>
-                )}
-                <button
-                  type="submit"
-                  disabled={loading || loggingIn || !loginUsername.trim() || !loginPassword}
-                  className={`w-full h-9 rounded-xl text-[13px] font-semibold transition-colors ${
-                    isDark ? 'bg-[#10B981] text-white disabled:bg-white/10 disabled:text-[#6F7378]' : 'bg-[#10B981] text-white disabled:bg-black/5 disabled:text-[#9AA0A6]'
-                  }`}
-                >
-                  {loggingIn ? accountCopy.loggingIn : accountCopy.loginAndSync}
-                </button>
-              </form>
-            )}
-            {quota && (
-              <div className={`mt-3 h-2 rounded-full overflow-hidden ${isDark ? 'bg-white/10' : 'bg-black/10'}`}>
-                <div className="h-full rounded-full bg-[#10B981]" style={{ width: pct + '%' }} />
-              </div>
-            )}
-          </div>
-        </div>
-      );
-    };
 
 // Per-item callback cache behind the RecentItem memo: sidebar task items
 // (item) are derived by useMemo and keep stable references while the
@@ -548,9 +368,14 @@ const App = () => {
       // a boot cache.
       const [colorScheme, setColorScheme] = useState(readStoredColorScheme);
       const activeTheme = resolveTheme(colorScheme, systemDark);
-      const [accountPopoverOpen, setAccountPopoverOpen] = useState(false);
-      const [llmApiLoading, setLlmApiLoading] = useState(false);
-      const [llmApiErrorCode, setLlmApiErrorCode] = useState(null);
+      const [personalAccountOpen, setPersonalAccountOpen] = useState(false);
+      const [accountRechargeRequest, setAccountRechargeRequest] = useState(null);
+      const accountRechargeSequence = useRef(0);
+      const personalAccountClient = useMemo(() => bridge.available && bridge.accountPlatform
+        ? new AccountPlatformDesktopClient(bridge.accountPlatform) : null, []);
+      const [modelAccessLoginOpen, setModelAccessLoginOpen] = useState(false);
+      const modelAccessLayerRef = useRef(null);
+      const modelAccessSettingsFocusPendingRef = useRef(false);
       const [teamRelayEnabled, setTeamRelayEnabled] = useState(() => loadTeamRelayAccess());
       // Browser state is scoped to workspace sessions: switching chats only shows
       // that chat's WebView2. The login profile remains globally shared by the
@@ -669,6 +494,7 @@ const App = () => {
       const browserSessionId = activeChat || (bs && bs.activeSessionId) || null;
       const platformCapabilities = (bs && bs.platformCapabilities) || {};
       const browserNativeDisplayAvailable = !!platformCapabilities.browserNativeDisplay;
+      const personalAccountAvailable = can('accountPlatform') && platformCapabilities.accountPlatformSupported === true && personalAccountClient !== null;
       const browserSessionIdRef = useRef(browserSessionId);
       browserSessionIdRef.current = browserSessionId;
       const browserPaneState = browserPaneStateFor(browserPaneStates, browserSessionId);
@@ -1620,57 +1446,12 @@ const App = () => {
         window.PinvouWebClientStrings = misc.webClientErrors;
         // platform/tauri/bridge 下的非模块脚本通过同一入口读取当前语言。
         window.PinvouTauriBridgeStrings = misc.tauriBridge;
+        window.PinvouChatRecoveryCopy = CHAT_RECOVERY_COPY;
       }, [t]);
       // 有可用新版 → 侧边栏设置图标亮红点（不弹窗不打断）
       const hasUpdate = !!(bs && bs.updateInfo && bs.updateInfo.available);
       const updateNoticePreviewEnabled = !bridge.available
         && !!window.UpdateNoticeLogic?.previewEnabled?.(window.location);
-      const llmAccountStatus = bs && bs.llmApiStatus;
-      const llmAccountVisible = isLlmApiAccountVisible(llmAccountStatus);
-      const llmAccountUsername = llmAccountStatus && llmAccountStatus.backend_username;
-      const llmAccountDisplayName = llmAccountStatus && llmAccountStatus.backend_display_name;
-      const llmAccountName = shortBackendUsername(llmAccountDisplayName || llmAccountUsername, t.uiAccount);
-      const refreshLlmApiStatus = useCallback(async () => {
-        if (!bridge.available || !bridge.llmapi.getLlmApiStatus) return;
-        setLlmApiLoading(true);
-        setLlmApiErrorCode(null);
-        try {
-          await bridge.llmapi.getLlmApiStatus();
-        } catch (e) {
-          const code = errorCode(e) || 'unknown';
-          console.error('llm api quota refresh failed:', code);
-          setLlmApiErrorCode(code);
-        } finally {
-          setLlmApiLoading(false);
-        }
-      }, []);
-      const loginLlmApiUser = useCallback(async (username, password) => {
-        if (!bridge.available || !bridge.llmapi.loginLlmApiUser) {
-          const error = new Error('login_unavailable');
-          error.code = 'login_unavailable';
-          throw error;
-        }
-        setLlmApiLoading(true);
-        setLlmApiErrorCode(null);
-        try {
-          await bridge.llmapi.loginLlmApiUser(username, password);
-          if (bridge.llmapi.getLlmApiStatus) await bridge.llmapi.getLlmApiStatus();
-        } catch (e) {
-          console.error('llm api login failed:', errorCode(e) || 'unknown');
-          throw e;
-        } finally {
-          setLlmApiLoading(false);
-        }
-      }, []);
-
-      useEffect(() => {
-        if (accountPopoverOpen) refreshLlmApiStatus();
-      }, [accountPopoverOpen, refreshLlmApiStatus]);
-
-      useEffect(() => {
-        if (accountPopoverOpen && !llmAccountVisible) setAccountPopoverOpen(false);
-      }, [accountPopoverOpen, llmAccountVisible]);
-
       const isWebAccessConnected = !!(bs && bs.webAccess && bs.webAccess.web_client_connected);
       function handleOpenWebAccess() {
         if (!can('webAccessAdmin')) return;
@@ -3698,182 +3479,10 @@ const App = () => {
           rebindPickingRef.current = false;
         }
       };
-      const confirmRebindWorkspace = async (confirmExisting) => {
-        if (!bridge.projects || !rebindDraft || projectOpsBusy) return;
-        setProjectOpsBusy(true);
-        // Clear the previous attempt's inline error/busy hint so it does
-        // not stack with this run's result.
-        setRebindDraft(prev => prev && { ...prev, error: null, busySessionIds: null });
-        // Feed the previous report's post-busy ids back (review #463
-        // F-Major): a session an earlier run moved and reported post-busy is
-        // routed by the backend into the same to-lane retry population as a
-        // healthy session, so without the feed-back a busy-refused carryover
-        // session would appear in NO report field and the dialog would close
-        // claiming full success while its old-cwd runtime stays resident.
-        // The backend honors only the intersection with its own retry
-        // population, so this list can never widen the eviction set.
-        const previousPostBusySessionIds = (rebindDraft.partial && rebindDraft.partial.postBusyIds) || [];
-        try {
-          const report = await bridge.projects.rebindWorkspaceRoot(
-            rebindDraft.from, rebindDraft.to, confirmExisting, previousPostBusySessionIds);
-          const rebound = (report && report.rebound_session_ids) ? report.rebound_session_ids.length : 0;
-          const failed = (report && report.failed_session_ids) ? report.failed_session_ids.length : 0;
-          const postBusy = (report && report.post_busy_session_ids) ? report.post_busy_session_ids.length : 0;
-          // The dialog stays open whenever the report still has something the
-          // user must act on — failed sessions to retry, or sessions whose
-          // runtime the idle gate refused (round-8 MAJOR-2: closing on the
-          // post-busy-only case left "retry once when idle" with no entry
-          // point, because the unavailable-root badge disappears once the root
-          // has moved — the badge renders strictly off the `available` wire
-          // field, the backend's per-root is_dir() stat; review #463 round-14
-          // B1 restored it after main #566 dropped it and badged every root).
-          // Rerunning the backend with the same from/to converges
-          // (the snapshot includes unsynced sessions; already-rebound ones are
-          // no-ops). The post-busy ids are kept for the next retry's
-          // feed-back (F-Major).
-          if (failed > 0 || postBusy > 0) {
-            setRebindDraft(prev => prev && {
-              ...prev,
-              // The run proceeded past the fence: the old-root warning is
-              // consumed (review #463 round-14 should-fix 3) — a later
-              // reappearance of the old root must re-arm the strong confirm.
-              warnExisting: false,
-              partial: {
-                rebound,
-                failed,
-                failedIds: (report && report.failed_session_ids) || [],
-                postBusy,
-                postBusyIds: (report && report.post_busy_session_ids) || [],
-              },
-            });
-          } else {
-            setRebindDraft(null);
-            if (rebound > 0) {
-              setSettingsToast(t.uiProjects.rebindSuccess(rebound));
-            } else {
-              // A retry after everything already converged (or a root with
-              // no sessions at all) returns an empty report; "Rebound 0"
-              // would read as a failure (review #463 minor).
-              setSettingsToast(t.uiProjects.rebindUpToDate);
-            }
-          }
-          await refreshCodexSessions().catch((error) => {
-            // Failure is not swallowed: the session list self-heals via the
-            // session:list_changed event, but a silent gap after an explicit
-            // failure must stay visible for troubleshooting
-            // (review #463 minor).
-            console.warn('refresh sessions after rebind failed', error);
-          });
-        } catch (error) {
-          // Typed-marker matching (finding 11 / Minor 7 / round-8 M4): the
-          // backend prefixes every user-reachable outcome with a stable ASCII
-          // marker and we match only that prefix, never human copy. The mapping
-          // lives in a pure helper so both halves of the contract are unit
-          // tested (review #463 round-8 minor 10).
-          const classified = classifyRebindError(error, t);
-          // Carryover honesty (review #463 round-14 should-fix 1): a
-          // roots-commit failure carries this run's moved ids as an error
-          // suffix — the session lanes were already durable at `to`. Feed
-          // them into the retry's post-busy carryover, or a refused eviction
-          // of an already-rebound session is dropped (untouched this run,
-          // carryover empty) and the dialog closes "up to date" with an
-          // old-cwd runtime still resident.
-          // The suffix ids UNION with the previous carryover (review #463
-          // round-15 Major 1): replacing would drop a still-busy carryover
-          // session from a prior run — it can never re-enter
-          // rebound_session_ids (a converged to-lane session routes to
-          // retry_evict_candidates only), so the next retry would close the
-          // dialog "up to date" while its old-cwd runtime stays resident.
-          // The backend honors only the intersection with its own retry
-          // population, so the union cannot widen the eviction set.
-          const carryoverPartial = (classified.reboundIds && classified.reboundIds.length > 0)
-            ? (prev) => {
-                // Full partial shape (the dialog reads failedIds.length
-                // unconditionally): the moved sessions are conservatively
-                // reported as post-busy — their runtime reclaim never ran on
-                // the error path, so "retry when idle" is the honest state.
-                const mergedIds = mergeRebindCarryoverIds(
-                  prev.partial && prev.partial.postBusyIds,
-                  classified.reboundIds,
-                );
-                // Spread first, counts after (review #463 round-17 SF-4): a
-                // trailing spread dragged the PREVIOUS run's rebound/failed
-                // counts into this error state — a mixed-run report where
-                // the same id could appear in two contradicting rows. This
-                // arm's only honest counts are the merged carryover. The
-                // spread tolerates a null partial natively (object spread
-                // ignores null/undefined; round-18 Blocker 1 — the explicit
-                // `|| {}` fallback trips unicorn/no-useless-fallback-in-spread).
-                return {
-                  ...prev.partial,
-                  rebound: 0,
-                  failed: 0,
-                  failedIds: [],
-                  postBusy: mergedIds.length,
-                  postBusyIds: mergedIds,
-                  // Round-18 minor 1: the post-busy recheck never ran on an
-                  // error path, so the "started a new turn during the rebind"
-                  // diagnosis would be fabricated — the dialog renders the
-                  // neutral carryover copy for this shape.
-                  carryover: true,
-                };
-              }
-            : null;
-          if (classified.kind === 'old-root-exists') {
-            setRebindDraft(prev => prev && { ...prev, warnExisting: true, error: null });
-          } else if (classified.kind === 'sessions-busy') {
-            // Busy rejection is the fence's high-frequency happy path
-            // (Minor 7): map it to i18n copy; only session ids follow the
-            // marker, and they are shown verbatim for troubleshooting.
-            // warnExisting is kept as-is out of deliberate conservatism
-            // (round-20 minor 14): both busy emission sites actually fire
-            // AFTER the old-root check, so the flag is already consumed —
-            // keeping it costs ZERO extra confirm round-trips (the comment
-            // previously claimed one; inverted per round-24 minor 18).
-            setRebindDraft(prev => prev && {
-              ...prev,
-              busySessionIds: classified.busySessionIds,
-              error: null,
-              ...(carryoverPartial ? { partial: carryoverPartial(prev) } : {}),
-            });
-          } else if (classified.kind === 'copy') {
-            // Consume the old-root warning ONLY when the run actually
-            // proceeded past the old-root check (round-17 SF-4): IN_PROGRESS
-            // / TO_ROOT / TO_NESTED / TO_UNUSABLE all classify as `copy` and
-            // all fire BEFORE require_confirm_existing, and clearing on them
-            // would let a re-appeared old root ride the stale flag silently.
-            // Clearing on a genuine post-fence failure (review #463 round-14
-            // should-fix 3) still re-arms the strong confirm on a later
-            // reappearance of the old root.
-            setRebindDraft(prev => prev && {
-              ...prev,
-              warnExisting: classified.passedFence ? false : prev.warnExisting,
-              error: classified.message,
-              ...(carryoverPartial ? { partial: carryoverPartial(prev) } : {}),
-            });
-          } else {
-            // Log hygiene (review #463 round-14 should-fix 5): the raw error
-            // chain embeds host paths; it is shown in the dialog verbatim by
-            // design, but stays out of the console. The classified kind is
-            // the path-free diagnostic.
-            console.warn('rebind workspace failed:', classified.kind);
-            // On failure keep the dialog open with the error inline
-            // (review #463 M7): in-place display persists and sits next to
-            // the retry; an unmapped backend error is shown verbatim as a
-            // diagnostic detail rather than guessed at. Its provenance is
-            // unknown (round-17 SF-4), so the strong-confirm flag is kept:
-            // an extra confirm round-trip at worst, never a skipped one.
-            setRebindDraft(prev => prev && {
-              ...prev,
-              warnExisting: prev.warnExisting,
-              error: classified.message,
-              ...(carryoverPartial ? { partial: carryoverPartial(prev) } : {}),
-            });
-          }
-        } finally {
-          setProjectOpsBusy(false);
-        }
-      };
+      const confirmRebindWorkspace = (confirmExisting, runRebindWorkspace) =>
+        runRebindWorkspace(confirmExisting, {
+          bridge, rebindDraft, projectOpsBusy, setProjectOpsBusy, setRebindDraft, setSettingsToast, t, refreshCodexSessions,
+        });
 
       function sessionRowsForIds(ids) {
         const byId = new Map(allSidebarTasks.map(item => [item.id, item]));
@@ -3885,7 +3494,8 @@ const App = () => {
       }
 
       // 对话管理页批量操作:按会话类型分流并等待全部结果,避免未执行完成就误报成功。
-      async function handleBatchArchiveSessions(ids) {
+      // 批量执行器由已加载的 SearchView 传入,不让低频操作进入启动模块图。
+      async function handleBatchArchiveSessions(ids, runSessionBatch) {
         if (!bridge.available || !ids || !ids.length) return;
         const result = await runSessionBatch(sessionRowsForIds(ids), 'archive', {
           archive: id => bridge.sessions.archiveSession(id),
@@ -3900,7 +3510,7 @@ const App = () => {
         return result;
       }
 
-      async function handleBatchDeleteSessions(ids) {
+      async function handleBatchDeleteSessions(ids, runSessionBatch) {
         if (!bridge.available || !ids || !ids.length) return;
         const result = await runSessionBatch(sessionRowsForIds(ids), 'delete', {
           delete: id => bridge.sessions.deleteSession(id),
@@ -3913,7 +3523,7 @@ const App = () => {
         return result;
       }
 
-      async function handleBatchRestoreArchived(ids) {
+      async function handleBatchRestoreArchived(ids, runSessionBatch) {
         if (!bridge.available || !ids || !ids.length) return;
         const result = await runSessionBatch(ids.map(id => ({ id })), 'restore', {
           restore: id => bridge.sessions.restoreArchivedSession(id),
@@ -4281,12 +3891,32 @@ const App = () => {
       const isControlledChatActive = isControlledSessionChatActive(
         bs?.controlledDevice, bs?.controlledSession, bs?.activeSessionId,
       );
-      const apiKeyGateOpen = shouldShowApiKeyGate(
+      const isRemoteChatActive = Boolean(remoteProxyForSession(bs?.activeSessionId, bs?.remoteProxyHistory));
+      const modelAccessGateOpen = shouldShowModelAccessGate(
         bs,
         currentView,
         bridge.available,
-        isControlledChatActive,
+        isControlledChatActive || isRemoteChatActive,
       );
+      const refreshModelAccess = useCallback(async () => {
+        await refreshModelAccessAfterAuthentication(bridge.models);
+        setModelAccessLoginOpen(false);
+        // Authentication does not invent a default model. The existing settings
+        // page loads the current catalog and persists an explicit selection.
+        modelAccessSettingsFocusPendingRef.current = true;
+        openSettingsSection('model');
+      }, [openSettingsSection]);
+      useEffect(() => { if (!modelAccessGateOpen) setModelAccessLoginOpen(false); }, [modelAccessGateOpen]);
+      useEffect(() => {
+        if (currentView !== 'settings' || !modelAccessSettingsFocusPendingRef.current) return undefined;
+        const focus = () => { const target = document.querySelector('[data-testid="settings-close"]');
+          if (!(target instanceof HTMLElement)) return false;
+          modelAccessSettingsFocusPendingRef.current = false; target.focus({ preventScroll: true }); return true; };
+        if (focus()) return undefined;
+        const observer = new MutationObserver(() => { if (focus()) observer.disconnect(); });
+        observer.observe(document.body, { childList: true, subtree: true });
+        return () => observer.disconnect();
+      }, [currentView]);
       const browserOverlayIntent = [
         archiveConfirm ? 'archive-confirm' : '',
         searchOverlayOpen ? 'search' : '',
@@ -4294,7 +3924,7 @@ const App = () => {
         savedConfirm ? 'saved-confirm' : '',
         can('webAccessAdmin') && webAccessOpen ? 'web-access' : '',
         can('desktopRemoteControl') && remoteConversationOpen ? 'remote-connection' : '',
-        apiKeyGateOpen ? 'api-key' : '',
+        modelAccessGateOpen ? 'model-access' : '',
         bs && bs.pinvouModal ? 'pinvou-review' : '',
         isCompactShell && isSidebarOpen ? 'mobile-sidebar' : '',
         isCompactShell && mobileMoreOpen ? 'mobile-more' : '',
@@ -4309,6 +3939,7 @@ const App = () => {
       // Keep the surface hidden while one already-published overlay hands off to
       // another. The replacement itself is still withheld until its own barrier
       // attempt has settled.
+      useModalIsolation(modelAccessGateOpen && browserOverlayPublicationReady, modelAccessLayerRef);
       const browserOverlayOpen = !!publishedBrowserOverlayIntent;
       const browserBlockingLayerOpen = !browserPaneAllowed || browserOverlayOpen;
       const browserSurfaceSuspended = browserResizeActive
@@ -4377,6 +4008,32 @@ const App = () => {
         setJustInstalledTool,
         onGotoSettings: () => openSettingsSection('general'),
         onGotoModelSettings: () => openSettingsSection('model'),
+        accountPlatformClient: personalAccountClient,
+        onOpenAccountRecharge: async userError => {
+          const target = walletRechargeTarget(userError);
+          if (!personalAccountAvailable || !target) return;
+          const requestId = ++accountRechargeSequence.current;
+          if (target.contextType === 'PERSONAL') {
+            setAccountRechargeRequest(null); setPersonalAccountOpen(true); return;
+          }
+          const client = personalAccountClient, sessionEpoch = client.financeSessionEpoch || 0;
+          try {
+            const session = await client.session();
+            const observationEpoch = client.versionObservationEpoch;
+            if (!session.authenticated) throw new Error('PERMISSION_DENIED');
+            const profile = requirePersonalAccount(await client.bootstrap());
+            if (requestId !== accountRechargeSequence.current) return;
+            if (sessionEpoch !== (client.financeSessionEpoch || 0) || observationEpoch !== client.versionObservationEpoch
+              || client.contextVersion > profile.active_context.context_version
+              || (client.authorizationVersions.organization_authorization_version || 0) > profile.active_context.organization_authorization_version) throw new Error('PERMISSION_DENIED');
+            if (!organizationRechargeTargetAllowed(profile, target)) throw new Error('PERMISSION_DENIED');
+            setAccountRechargeRequest({ ...target, requestId, client, sessionEpoch, actor: profile.user_id,
+              contextVersion: profile.active_context.context_version });
+            setPersonalAccountOpen(true);
+          } catch {
+            if (requestId === accountRechargeSequence.current) setSettingsToast(organizationCopy[language].permissions);
+          }
+        },
         onGotoTools: () => navigateFromScheduledRun('toolStore'),
         // Reference-card navigation (session mention): reuse the sidebar's session switch (with view routing and browser transition).
         onSwitchSession: handleSwitchSession,
@@ -5084,40 +4741,17 @@ const App = () => {
 
             {/* Footer Profile */}
             <div className={`p-3 mt-auto ${isSidebarOpen ? 'space-y-2' : 'flex flex-col items-center gap-3 pb-6'}`}>
-              {llmAccountVisible && (
-              <div className={`relative ${isSidebarOpen ? 'w-full' : ''}`}>
-                <button
-                  type="button"
-                  data-testid="llmapi-account-button"
-                  onClick={() => setAccountPopoverOpen(v => !v)}
-                  title={llmAccountUsername || llmAccountName}
-                  className={`flex items-center rounded-xl transition-colors ${isSidebarOpen ? 'w-full px-2 py-1.5 gap-3 text-left' : 'justify-center w-10 h-10'} ${activeTheme === 'dark' ? 'hover:bg-[#333537] active:bg-[#3A3C3E]' : 'hover:bg-[#E1E5EA] active:bg-[#D8DCE1]'}`}
-                >
-                  <span className="w-8 h-8 shrink-0 rounded-lg bg-gradient-to-br from-[#19D3A2] to-[#0B57D0] flex items-center justify-center text-white">
-                    <User size={17} />
-                  </span>
-                  {isSidebarOpen && (
-                    <span className="min-w-0 flex-1">
-                      <span className="block text-[14px] font-medium leading-none truncate">{llmAccountName}</span>
-                      <span className={`block text-[11px] mt-1 truncate ${activeTheme === 'dark' ? 'text-[#9AA0A6]' : 'text-[#6F7378]'}`}>{t.uiAccount.viewQuota}</span>
-                    </span>
-                  )}
-                  {isSidebarOpen && <ChevronRight size={16} className="shrink-0 opacity-60" />}
+              {personalAccountAvailable && <div className="relative">
+                <button type="button" data-testid="personal-account-button"
+                  onClick={() => { accountRechargeSequence.current++; setAccountRechargeRequest(null); setPersonalAccountOpen(value => !value); }}
+                  title={accountPlatformCopy[language].title}
+                  className={`flex items-center rounded-xl px-2 py-1.5 gap-3 ${isSidebarOpen ? 'w-full' : 'justify-center w-10 h-10'}`}>
+                  <User size={18} />{isSidebarOpen && <span>{accountPlatformCopy[language].title}</span>}
                 </button>
-                <AccountPopover
-                  open={accountPopoverOpen}
-                  theme={activeTheme}
-                  t={t}
-                  llmApiStatus={bs && bs.llmApiStatus}
-                  loading={llmApiLoading}
-                  accountErrorCode={llmApiErrorCode}
-                  collapsed={!isSidebarOpen}
-                  onClose={() => setAccountPopoverOpen(false)}
-                  onRefresh={refreshLlmApiStatus}
-                  onLogin={loginLlmApiUser}
-                />
-              </div>
-              )}
+                <Suspense fallback={null}><LazyAccountPlatformPopover open={personalAccountOpen} client={personalAccountClient} rechargeRequest={accountRechargeRequest}
+                  copy={accountPlatformCopy[language]} language={language} onLanguageChange={handleSetLanguage}
+                  onClose={() => { accountRechargeSequence.current++; setAccountRechargeRequest(null); setPersonalAccountOpen(false); }} /></Suspense>
+              </div>}
               <div className={`${isSidebarOpen ? 'flex items-center justify-between gap-2' : 'flex flex-col items-center gap-3'}`}>
                 {!isSidebarOpen && (
                   <>
@@ -5255,6 +4889,8 @@ const App = () => {
                   setSearchApiKey={handleSetSearchApiKey}
                   savedModels={(bs && bs.savedModels) || []}
                   activeModelId={bs && bs.activeModelId}
+                  defaultModelRef={bs && bs.defaultModelRef}
+                  accountPlatformClient={personalAccountClient}
                   onSaveModel={(m) => bridge.available && bridge.models.saveModel(m)}
                   onDeleteModel={(m) => { if (bridge.available) bridge.models.deleteModel(m.id); }}
                   onSetActiveModel={(id) => bridge.available && bridge.models.setActiveModel(id)}
@@ -5326,6 +4962,7 @@ const App = () => {
                 theme={activeTheme}
                 t={t}
                 sessions={codexSessions}
+                accountPlatformClient={personalAccountClient}
                 activeId={activeCodexId}
                 draftEpoch={codexDraftEpoch}
                 relayLaunch={codexRelayLaunch}
@@ -5340,6 +4977,7 @@ const App = () => {
                 onLaneDeliveryChange={(limited) => { setCodexLaneDeliveryLimited(limited); setCodexLaneDeliveryReported(true); }}
                 bs={bs}
                 onGotoModelSettings={() => openSettingsSection('model')}
+                onOpenAccountRecharge={chatViewBaseProps.onOpenAccountRecharge}
                 onGotoSettings={() => openSettingsSection('general')}
                 onGotoTools={() => navigateFromScheduledRun('toolStore')}
                 onNotify={setSettingsToast}
@@ -5448,24 +5086,52 @@ const App = () => {
               </ViewErrorBoundary>
             )}
 
-            {apiKeyGateOpen && browserOverlayPublicationReady && (
-              // The gate must cover chat in every state of its lazy chunk:
-              // while loading (Suspense fallback) AND after a chunk failure
-              // (ViewErrorBoundary's in-flow error card). Both layers sit
-              // inside this outer backdrop, so React.lazy's cached rejection
-              // can never leave the composer interactable.
+            {modelAccessGateOpen && browserOverlayPublicationReady && (
+              // The opaque shell stays outside the lazy boundary: the chat
+              // surface remains fully covered while either the landing page or
+              // the in-window account screen loads, and also after a chunk error.
               <div
-                className="fixed inset-0 z-[57] flex items-center justify-center overflow-auto p-6"
-                style={{ background: 'rgba(0,0,0,.5)' }}
-                aria-busy="true"
+                ref={modelAccessLayerRef}
+                data-testid="model-access-layer"
+                className="fixed inset-0 z-[2147483647] flex items-center justify-center overflow-auto p-4 sm:p-6"
+                style={{ background: activeTheme === 'dark' ? '#111416' : '#F7FAF9' }}
+                role="dialog"
+                aria-modal="true"
+                aria-label={t.modelAccessTitle}
+                tabIndex={-1}
+                onKeyDown={(event) => event.stopPropagation()}
               >
                 <ViewErrorBoundary t={t}>
-                  <Suspense fallback={null}>
-                    <LazyApiKeyGateDialog
-                      theme={activeTheme}
-                      t={t}
-                      onOpenModelSettings={() => openSettingsSection('model')}
-                    />
+                  <Suspense fallback={<div role="status" className="text-[13px] opacity-60">{t.loading}</div>}>
+                    {modelAccessLoginOpen ? (
+                      personalAccountClient ? (
+                        <LazyAccountPlatformPopover
+                          open
+                          presentation="screen"
+                          client={personalAccountClient}
+                          copy={accountPlatformCopy[language]}
+                          language={language}
+                          onLanguageChange={handleSetLanguage}
+                          theme={activeTheme}
+                          requestedView={null}
+                          onAuthenticated={refreshModelAccess}
+                          onClose={() => setModelAccessLoginOpen(false)}
+                        />
+                      ) : (
+                        <div role="status" className="text-[13px] opacity-60">{accountPlatformCopy[language].loading}</div>
+                      )
+                    ) : (
+                      <LazyModelAccessGate
+                        theme={activeTheme}
+                        t={t}
+                        onLogin={() => setModelAccessLoginOpen(true)}
+                        onUseExternalModels={() => {
+                          setModelAccessLoginOpen(false);
+                          modelAccessSettingsFocusPendingRef.current = true;
+                          openSettingsSection('model');
+                        }}
+                      />
+                    )}
                   </Suspense>
                 </ViewErrorBoundary>
               </div>

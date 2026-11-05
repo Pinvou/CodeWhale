@@ -2,7 +2,7 @@ use super::prelude::*;
 use crate::platform::credential_store::{
     CREDENTIAL_STORE_UNAVAILABLE_ERROR, CredentialReference, CredentialStore,
 };
-use crate::platform::prefs::MODEL_API_KEY_ENV_OVERRIDE;
+use crate::platform::prefs::{MODEL_API_KEY_ENV_OVERRIDE, ModelSelectionRef};
 
 /// Round-51 review: the settings transaction holds the cross-process
 /// settings.json.lock across keychain I/O (the CLI's models family writes
@@ -36,7 +36,7 @@ fn prepare_prefs_for_save(
     mut prefs: UserPrefs,
     store: &dyn CredentialStore,
 ) -> Result<(UserPrefs, Vec<CredentialReference>), String> {
-    prefs.ensure_builtin_llmapi_model();
+    prefs.ensure_builtin_account_platform_model();
     prefs.normalize_saved_model_metadata();
     let migration = prefs.migrate_plaintext_api_keys_with_store(store);
     if migration.has_failures() {
@@ -296,12 +296,12 @@ pub struct ModelListItem {
 
 impl From<SavedModel> for ModelListItem {
     fn from(model: SavedModel) -> Self {
-        let builtin_llmapi = model.is_builtin_llmapi();
+        let builtin_account_platform = model.is_builtin_account_platform();
         Self {
             model,
-            readonly: builtin_llmapi,
-            system: builtin_llmapi,
-            kind: builtin_llmapi.then(|| "builtin_llmapi".to_string()),
+            readonly: builtin_account_platform,
+            system: builtin_account_platform,
+            kind: builtin_account_platform.then(|| "builtin_account_platform".to_string()),
         }
     }
 }
@@ -310,6 +310,7 @@ impl From<SavedModel> for ModelListItem {
 pub struct ModelsView {
     pub models: Vec<ModelListItem>,
     pub active_model_id: Option<String>,
+    pub default_model_ref: Option<ModelSelectionRef>,
 }
 
 #[tauri::command]
@@ -331,6 +332,7 @@ pub async fn list_models(require_readable: Option<bool>) -> Result<ModelsView, S
             .map(ModelListItem::from)
             .collect(),
         active_model_id: prefs.advanced.active_model_id.clone(),
+        default_model_ref: prefs.advanced.default_model_ref.clone(),
     })
 }
 
@@ -416,7 +418,7 @@ pub async fn reveal_model_api_key(id: String) -> Result<Option<String>, String> 
 /// 需要确证时用户可在表单里手动「测试图片能力」。
 #[tauri::command]
 pub async fn save_model(model: SavedModel, pool: State<'_, EnginePool>) -> Result<(), String> {
-    if model.is_builtin_llmapi() {
+    if model.is_builtin_account_platform() {
         return Err("内置模型不可编辑".to_string());
     }
     let model_id = model.id.clone();
@@ -462,7 +464,7 @@ pub(super) fn save_model_inner(
                         && requested_card.is_some()
                         && latest.model_store_card_id.as_deref() == requested_card
                         && !latest.model_store_link_detached
-                        && !latest.is_builtin_llmapi()
+                        && !latest.is_builtin_account_platform()
                         && latest.is_operator_owned_endpoint()
                 });
                 let Some(latest) = latest else {
@@ -552,7 +554,7 @@ pub(super) fn save_model_inner(
             model.model_store_card_id = requested
                 .filter(|card| {
                     !model.model_store_link_detached
-                        && !model.is_builtin_llmapi()
+                        && !model.is_builtin_account_platform()
                         && model.is_operator_owned_endpoint()
                         && ((!explicit_store_link_requested
                             && same_route
@@ -608,7 +610,7 @@ pub(super) fn save_model_inner(
     Ok(())
 }
 
-/// 删一条模型。至少保留一条;删到当前 active 会自动回退列表首条。
+/// 删一条用户模型；内置 Account Platform 模型始终保留。
 #[tauri::command]
 pub async fn delete_model(id: String) -> Result<(), String> {
     // Round-51 review: same cross-process settings-lock rationale as
@@ -630,7 +632,7 @@ pub(super) fn delete_model_inner(id: &str, store: &dyn CredentialStore) -> Resul
         |prefs| {
             if prefs
                 .model_by_id(id)
-                .is_some_and(|model| model.is_builtin_llmapi())
+                .is_some_and(|model| model.is_builtin_account_platform())
             {
                 return Err("内置模型不可删除".to_string());
             }
@@ -675,7 +677,7 @@ fn is_store_link_cleanup_target(model: &SavedModel, card_id: &str) -> bool {
     if card_id.is_empty()
         || model.model_store_card_id.as_deref() != Some(card_id)
         || model.model_store_link_detached
-        || model.is_builtin_llmapi()
+        || model.is_builtin_account_platform()
         || !model.is_operator_owned_endpoint()
     {
         return false;
@@ -724,6 +726,19 @@ pub(super) fn delete_model_if_store_link_inner(
     Ok(removed.get())
 }
 
+// Local selections must name a user configuration, not the platform runtime
+// carrier. Catalog selections keep their separate, source-aware command path.
+fn require_local_model_selection<'a>(
+    model: Option<&'a SavedModel>,
+    id: &str,
+) -> Result<&'a SavedModel, String> {
+    let model = model.ok_or_else(|| format!("model not found: {id}"))?;
+    if model.is_builtin_account_platform() {
+        return Err("select a concrete Account Platform catalog model".to_string());
+    }
+    Ok(model)
+}
+
 /// 设全局默认模型(新建会话继承它)。不打断已在用的会话——它们各自保持 spawn
 /// 时的模型,想换在该会话的 chip 里切。
 #[tauri::command]
@@ -734,11 +749,8 @@ pub async fn set_active_model(id: String, app: AppHandle) -> Result<(), String> 
         let id = id.clone();
         move || {
             UserPrefs::update_transaction(|prefs| {
-                if prefs.model_by_id(&id).is_none() {
-                    return Err(format!("model not found: {id}"));
-                }
-                prefs.advanced.active_model_id = Some(id);
-                Ok(())
+                require_local_model_selection(prefs.model_by_id(&id), &id)?;
+                prefs.set_default_model_ref(ModelSelectionRef::local(&id))
             })
             .map(|_| ())
             .map_err(|e| sanitize_command_error("set_active_model", e))
@@ -778,9 +790,7 @@ pub async fn set_session_model(
     }
     let prefs = UserPrefs::load();
     if let Some(mid) = &model_id {
-        if prefs.model_by_id(mid).is_none() {
-            return Err(format!("model not found: {mid}"));
-        }
+        require_local_model_selection(prefs.model_by_id(mid), mid)?;
     }
     let selected_model = model_id
         .as_deref()
@@ -811,6 +821,16 @@ pub async fn get_session_model_id(
     store: State<'_, SessionStore>,
 ) -> Result<Option<String>, String> {
     Ok(store.session_model_id(&session_id))
+}
+
+/// Source-aware selection frozen for this session. Legacy callers can keep
+/// using `get_session_model_id`, which exposes the runtime SavedModel carrier.
+#[tauri::command]
+pub async fn get_session_model_ref(
+    session_id: String,
+    store: State<'_, SessionStore>,
+) -> Result<Option<ModelSelectionRef>, String> {
+    Ok(store.session_model_ref(&session_id))
 }
 
 /// 当前有效模型的图片输入能力(设计 §6.3/§9.2,阶段 G)。前端选图即时警告据此
@@ -1614,6 +1634,11 @@ fn apply_general_settings_patch(current: &mut UserPrefs, patch: GeneralSettingsP
         advanced.saved_models = current.advanced.saved_models.clone();
         advanced.active_model_id = current.advanced.active_model_id.clone();
         advanced.model_store_context_repairs = current.advanced.model_store_context_repairs.clone();
+        advanced.default_model_ref = current.advanced.default_model_ref.clone();
+        advanced.default_model_selection_revision =
+            current.advanced.default_model_selection_revision.clone();
+        advanced.account_platform_default_model =
+            current.advanced.account_platform_default_model.clone();
         current.advanced = advanced;
     }
 }
@@ -1779,6 +1804,34 @@ mod model_snapshot_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn local_model_selection_rejects_platform_carrier() {
+        let model = SavedModel::builtin_account_platform();
+        assert_eq!(
+            require_local_model_selection(Some(&model), &model.id).unwrap_err(),
+            "select a concrete Account Platform catalog model"
+        );
+    }
+
+    #[test]
+    fn local_model_selection_keeps_missing_id_error() {
+        assert_eq!(
+            require_local_model_selection(None, "missing").unwrap_err(),
+            "model not found: missing"
+        );
+    }
+
+    #[test]
+    fn local_model_selection_keeps_user_model() {
+        let mut model = SavedModel::builtin_account_platform();
+        model.id = "local-user-model".to_string();
+        assert!(std::ptr::eq(
+            require_local_model_selection(Some(&model), &model.id).unwrap(),
+            &model
+        ));
+    }
+
     use crate::platform::paths::tests::ENV_LOCK;
     // SearchProvider 已从 commands prelude 收窄（lib 侧仅测试仍引用）。
     use crate::platform::prefs::SearchProvider;
@@ -2324,6 +2377,23 @@ mod tests {
             current.advanced.model_store_context_repairs,
             context_repairs
         );
+    }
+
+    #[test]
+    fn general_settings_patch_cannot_replace_default_selection_revision() {
+        let mut current = UserPrefs::default();
+        let selection = ModelSelectionRef::account_platform("0199a100-0001-7000-8000-000000000106");
+        current.set_default_model_ref(selection.clone()).unwrap();
+        let revision = current.advanced.default_model_selection_revision.clone();
+        apply_general_settings_patch(
+            &mut current,
+            GeneralSettingsPatch {
+                advanced: Some(Default::default()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(current.advanced.default_model_selection_revision, revision);
+        assert_eq!(current.advanced.default_model_ref, Some(selection));
     }
 
     #[test]
