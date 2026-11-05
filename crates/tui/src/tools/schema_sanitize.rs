@@ -827,6 +827,34 @@ mod tests {
     }
 
     #[test]
+    fn strict_sanitize_non_numeric_const_yields_to_an_existing_enum() {
+        // A non-numeric const beside an existing enum yields to the enum: the
+        // const is dropped and the enum passes through verbatim, whether the
+        // const value agrees with the enum or contradicts it.
+        let mut schema = json!({
+            "type": "object",
+            "properties": {
+                "matching": {"type": "string", "const": "fast", "enum": ["fast", "slow"]},
+                "contradicting": {"type": "string", "const": "turbo", "enum": ["fast", "slow"]}
+            },
+            "required": ["matching", "contradicting"]
+        });
+
+        sanitize_for_strict(&mut schema);
+
+        assert!(schema["properties"]["matching"].get("const").is_none());
+        assert_eq!(
+            schema["properties"]["matching"]["enum"],
+            json!(["fast", "slow"])
+        );
+        assert!(schema["properties"]["contradicting"].get("const").is_none());
+        assert_eq!(
+            schema["properties"]["contradicting"]["enum"],
+            json!(["fast", "slow"])
+        );
+    }
+
+    #[test]
     fn strict_sanitize_removes_unsupported_string_and_array_bounds() {
         // Every property is required so the nodes survive the optional-removal
         // pass; this test pins the bound keyword strip specifically.
@@ -1015,6 +1043,42 @@ mod tests {
         assert_eq!(tools[0].input_schema["additionalProperties"], false);
         assert!(
             tools[0].description.contains("must not be sent: query"),
+            "the note names the removed optional: {}",
+            tools[0].description
+        );
+    }
+
+    #[test]
+    fn strict_mode_note_replaces_an_empty_tool_description() {
+        // A tool with no description gets the removal note as its whole
+        // description instead of an empty prefix.
+        let mut tools = vec![Tool {
+            tool_type: None,
+            name: "lookup".to_string(),
+            description: String::new(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string"}
+                },
+                "required": []
+            }),
+            allowed_callers: None,
+            defer_loading: None,
+            input_examples: None,
+            strict: None,
+            cache_control: None,
+        }];
+
+        assert!(prepare_tools_for_strict_mode(&mut tools));
+        assert_eq!(tools[0].strict, Some(true));
+        assert!(
+            tools[0].description.starts_with("Strict mode:"),
+            "the note must replace an empty description: {:?}",
+            tools[0].description
+        );
+        assert!(
+            tools[0].description.contains("query"),
             "the note names the removed optional: {}",
             tools[0].description
         );

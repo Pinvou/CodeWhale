@@ -4718,8 +4718,10 @@ async fn run_doctor(
     }
     let strict_tool_mode = doctor_strict_tool_mode_status(config);
     let strict_icon = match strict_tool_mode.status {
-        "ready" => "✓".truecolor(aqua_r, aqua_g, aqua_b),
-        "fallback_non_beta" | "custom_endpoint" => "!".truecolor(sky_r, sky_g, sky_b),
+        "ready" | "official_route" => "✓".truecolor(aqua_r, aqua_g, aqua_b),
+        "fallback_non_beta" | "custom_endpoint" | "provider_mismatch" => {
+            "!".truecolor(sky_r, sky_g, sky_b)
+        }
         _ => "·".dimmed(),
     };
     println!(
@@ -7512,6 +7514,35 @@ fn doctor_strict_tool_mode_status(config: &Config) -> DoctorStrictToolModeStatus
     }
 
     let target = doctor_api_target(config);
+    // Answer from the same predicate the engine gate uses
+    // (`route_is_official_deepseek_family`): provider typing plus the official
+    // host. Classifying the URL alone made the Beta arm claim strict was sent
+    // to a DeepSeek URL under a non-family provider, and made this arm claim
+    // "unreshaped" for official-host paths (e.g. the Anthropic-family
+    // endpoint) that the gate actually reshapes.
+    if !crate::config::route_is_official_deepseek_family(config.api_provider(), &target.base_url) {
+        if known_deepseek_base_url_kind(&target.base_url).is_some() {
+            return DoctorStrictToolModeStatus {
+                enabled: true,
+                status: "provider_mismatch",
+                function_strict_sent: false,
+                message: "enabled, but this route's provider is not the DeepSeek family, so \
+                          the strict tool pipeline stays off even though the base URL is an \
+                          official DeepSeek endpoint"
+                    .to_string(),
+                recommended_base_url: None,
+            };
+        }
+        return DoctorStrictToolModeStatus {
+            enabled: true,
+            status: "custom_endpoint",
+            function_strict_sent: false,
+            message: "enabled, but the strict tool pipeline only acts on official DeepSeek \
+                      routes; this custom endpoint keeps its tools unreshaped"
+                .to_string(),
+            recommended_base_url: None,
+        };
+    }
     match known_deepseek_base_url_kind(&target.base_url) {
         Some(DeepSeekBaseUrlKind::Beta) => DoctorStrictToolModeStatus {
             enabled: true,
@@ -7532,12 +7563,15 @@ fn doctor_strict_tool_mode_status(config: &Config) -> DoctorStrictToolModeStatus
                 recommended_base_url: Some(recommended.to_string()),
             }
         }
+        // Official host, non-canonical path (the Anthropic-family endpoint,
+        // /v2, ...): the gate acts here — schemas are reshaped and
+        // `tool_choice:"required"` is sent — and the client keeps the strict
+        // flag on official paths it does not canonicalize.
         None => DoctorStrictToolModeStatus {
             enabled: true,
-            status: "custom_endpoint",
-            function_strict_sent: false,
-            message: "enabled, but the strict tool pipeline only acts on official DeepSeek \
-                      routes; this custom endpoint keeps its tools unreshaped"
+            status: "official_route",
+            function_strict_sent: true,
+            message: "enabled; the strict tool pipeline acts on this official DeepSeek route"
                 .to_string(),
             recommended_base_url: None,
         },
@@ -14035,6 +14069,52 @@ mod doctor_endpoint_tests {
         assert_eq!(status.status, "custom_endpoint");
         assert!(!status.function_strict_sent);
         assert!(status.message.contains("official DeepSeek"));
+    }
+
+    #[test]
+    fn strict_tool_mode_doctor_keeps_official_deepseek_urls_out_of_scope_for_other_providers() {
+        // The engine gate requires DeepSeek-family provider typing, so an
+        // official DeepSeek URL under another provider stays out of scope and
+        // must not be reported as "ready".
+        let config = Config {
+            provider: Some("openai".to_string()),
+            strict_tool_mode: Some(true),
+            providers: Some(crate::config::ProvidersConfig {
+                openai: crate::config::ProviderConfig {
+                    base_url: Some("https://api.deepseek.com/beta".to_string()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let status = doctor_strict_tool_mode_status(&config);
+
+        assert_eq!(status.status, "provider_mismatch");
+        assert!(!status.function_strict_sent);
+        assert!(status.message.contains("not the DeepSeek family"));
+        assert!(status.recommended_base_url.is_none());
+    }
+
+    #[test]
+    fn strict_tool_mode_doctor_reports_official_custom_paths_as_in_scope() {
+        // Any path on the official host passes the engine gate, so the
+        // Anthropic-family default endpoint is in scope: schemas are reshaped
+        // and `tool_choice:"required"` is sent — the doctor must not claim the
+        // tools stay unreshaped there.
+        let config = Config {
+            provider: Some("deepseek-anthropic".to_string()),
+            strict_tool_mode: Some(true),
+            ..Default::default()
+        };
+
+        let status = doctor_strict_tool_mode_status(&config);
+
+        assert_eq!(status.status, "official_route");
+        assert!(status.function_strict_sent);
+        assert!(status.message.contains("official DeepSeek route"));
+        assert!(status.recommended_base_url.is_none());
     }
 
     #[test]
