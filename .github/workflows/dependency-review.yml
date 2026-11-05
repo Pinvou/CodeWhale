@@ -1,0 +1,64 @@
+name: dependency-review
+
+on:
+  pull_request:
+  merge_group:
+    types: [checks_requested]
+
+permissions:
+  contents: read
+
+# Cancel superseded runs for the same ref to avoid queueing and wasted runner
+# minutes. Only PR runs may cancel each other: on merge_group and main pushes
+# github.ref is refs/heads/main, so an unconditional cancel would let
+# concurrent merge-queue entries kill each other's required-check context
+# (same failure class pr-check guards against).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  dependency-review:
+    name: dependency-review
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      # Checkout exists only so the shared memory setup script can run; the
+      # dependency review itself works purely through the API. Running
+      # ci-memory-setup here is a repo-wide convention for ubuntu jobs, not a
+      # memory need of this job.
+      - uses: actions/checkout@v7
+
+      - name: Set up zram and swap
+        # Best effort: timeouts or failures only warn and never block (falls back to stock runner memory).
+        run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM,RUNNER_ENVIRONMENT bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup did not finish; continuing with stock runner memory"
+
+      # 运行期可见性：告警/强制的生效模式只取决于服务端 variable 值，在日志里
+      # 显式回显，防止设成 'False'/带空白等写法静默停留在告警模式。
+      - name: Report effective dependency-review mode
+        if: github.event_name == 'pull_request'
+        run: echo "DEPENDENCY_REVIEW_WARN_ONLY='${{ vars.DEPENDENCY_REVIEW_WARN_ONLY }}' — strict gate only when exactly 'false'"
+
+      - name: 确认队列中的 PR 已通过依赖审查
+        if: github.event_name == 'merge_group'
+        run: echo "依赖审查已在各 PR 入队前验证"
+
+      - name: Review dependency changes
+        if: github.event_name == 'pull_request'
+        # 依赖审查动作依赖仓库设置中的 Dependency graph（私有仓库还需 GitHub
+        # Advanced Security）。当前仓库未开启该设置时，动作会直接报
+        # "Dependency review is not supported on this repository" 并把整个
+        # job 打红——这是能力缺失而非依赖问题。降级由仓库 variable
+        # DEPENDENCY_REVIEW_WARN_ONLY 门控：未设置或非 'false' 时以告警模式
+        # 运行（动作自身仍会把扫描结论打印到日志）；组织开启
+        # Settings → Code security → Dependency graph 后，把该 variable 设为
+        # 'false' 即恢复强制门禁，无需改代码。禁止改回无条件
+        # continue-on-error：那会在依赖图开启后把真实 high 级漏洞静默吞成
+        # 告警（scripts/tests/test_ci_gate_policy.py 已钉住该门控形态）。
+        continue-on-error: ${{ vars.DEPENDENCY_REVIEW_WARN_ONLY != 'false' }}
+        uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
+        with:
+          fail-on-severity: high
+          vulnerability-check: true
+          license-check: true
+          retry-on-snapshot-warnings: true

@@ -69,6 +69,51 @@ test('remote bridge installation publishes the precise remote domain array', () 
   assert.deepEqual(host.notifications, [['desktopRemoteControl']]);
 });
 
+test('authenticated resume fixture reaches subscriptions before any status query', async () => {
+  // Shared shape is also compared to real Rust reconnect/resume serde output.
+  // invoke/listen are the controlled Tauri boundary; this is not a WebView E2E.
+  const host = makeBridge({ desktop_remote_controller_connect: fixtures.controllerConnected,
+    desktop_remote_controller_status: fixtures.controllerConnected });
+  await host.bridge.controllerConnect('2345678');
+  host.emit('desktop-remote-controller-status', fixtures.controllerReconnecting);
+  assert.equal(host.state.controllerConnection.status, 'reconnecting');
+  const before = host.notifications.length;
+  host.emit('desktop-remote-controller-status', fixtures.controllerConnected);
+  assert.equal(host.state.controllerConnection.status, 'connected', 'event itself must recover the view');
+  assert.equal(host.state.controllerConnection.claimRequestId, fixtures.controllerConnected.claimRequestId);
+  assert.equal(host.state.controllerConnection.generation, fixtures.controllerConnected.lease.remoteControlGeneration);
+  assert.ok(host.notifications.length > before);
+  assert.deepEqual(host.notifications.at(-1), ['desktopRemoteControl']);
+  const published = JSON.stringify(host.state.controllerConnection);
+  await host.bridge.controllerStatus();
+  assert.equal(JSON.stringify(host.state.controllerConnection), published, 'query agrees with the already-published event');
+  host.bridge.stop();
+  host.bridge.subscribe();
+  await Promise.resolve();
+  host.emit('desktop-remote-controller-status', fixtures.controllerReconnecting);
+  host.emit('desktop-remote-controller-status', fixtures.controllerConnected);
+  assert.equal(host.state.controllerConnection.status, 'connected');
+  host.emit('desktop-remote-controller-status', fixtures.controllerError);
+  host.emit('desktop-remote-controller-status', fixtures.controllerConnected);
+  assert.equal(host.state.controllerConnection.status, 'error', 'late success cannot revive terminal identity');
+  host.bridge.stop();
+});
+
+test('late reconnect query cannot undo the full resume subscription snapshot', async () => {
+  const delayed = Promise.withResolvers();
+  const host = makeBridge({ desktop_remote_controller_connect: fixtures.controllerConnected,
+    desktop_remote_controller_status: () => delayed.promise });
+  await host.bridge.controllerConnect('2345678');
+  host.emit('desktop-remote-controller-status', fixtures.controllerReconnecting);
+  const pending = host.bridge.controllerStatus();
+  host.emit('desktop-remote-controller-status', fixtures.controllerConnected);
+  delayed.resolve(fixtures.controllerReconnecting);
+  await pending;
+  assert.equal(host.state.controllerConnection.status, 'connected');
+  assert.equal(host.state.controllerConnection.claimRequestId, fixtures.controllerConnected.claimRequestId);
+  host.bridge.stop();
+});
+
 test('archive management enumerates hidden candidates without reviving ordinary history', async () => {
   const hidden = { localSessionId: 'remote-hidden', title: 'Hidden', pinned: false,
     lastOpenedAt: null, projectedEntryCount: 0, hidden: true };
@@ -869,7 +914,8 @@ test('bridge feature gates every desktop call behind the Windows capability', ()
     'desktop_remote_permission_deny_task', 'desktop_remote_permission_list_b',
     'desktop_remote_proxy_archive', 'desktop_remote_proxy_archive_candidates', 'desktop_remote_proxy_archive_list',
     'desktop_remote_proxy_history_delete', 'desktop_remote_proxy_history_list',
-    'desktop_remote_proxy_history_read', 'desktop_remote_proxy_load_status', 'desktop_remote_proxy_open_live', 'desktop_remote_set_endpoint_profile',
+    'desktop_remote_proxy_history_read', 'desktop_remote_proxy_load_status', 'desktop_remote_proxy_open_live', 'desktop_remote_proxy_quarantine',
+    'desktop_remote_set_endpoint_profile',
     'desktop_remote_task_abandon_prepared_a', 'desktop_remote_task_cancel_a',
     'desktop_remote_task_commit_a', 'desktop_remote_task_reserve_a',
   ];

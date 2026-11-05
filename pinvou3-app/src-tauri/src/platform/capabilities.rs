@@ -17,7 +17,7 @@ pub(crate) struct DesktopCapabilities {
     /// hook is required); on other platforms the native layer is a no-op and
     /// only the in-window Alt fallback is available.
     pub(crate) voice_shortcut_native: bool,
-    /// Windows-only desktop dual-end remote control backend.
+    /// Desktop dual-end remote control backend on Windows and 64-bit Linux.
     pub(crate) desktop_remote_control_supported: bool,
     /// The Linux WebView (WebKitGTK) carries no image data to the page in
     /// paste events (an image clipboard surfaces an empty clipboardData), so
@@ -90,16 +90,15 @@ fn supports_codex_acp(os: &str) -> bool {
     matches!(os, "linux" | "windows" | "macos")
 }
 
-/// Windows is the only target with the desktop dual-end remote-control backend
-/// (A control / B controlled). Other targets report `unsupported` instead of
-/// pretending to support the feature.
+/// Both roles share the protocol and execution stack on Windows and 64-bit
+/// Linux. Other targets remain explicitly unsupported.
 pub(crate) fn supports_desktop_remote_control(os: &str) -> bool {
-    matches!(os, "windows")
+    os == "windows" || (os == "linux" && cfg!(target_pointer_width = "64"))
 }
 
 /// One client-side release switch shared with the Relay deployment contract.
 ///
-/// Only build-qualified Windows clients expose the feature by default. A
+/// Only build-qualified supported desktop clients expose the feature by default. A
 /// build-time `0` is immutable and cannot be reopened by a runtime variable.
 /// Operators can still set the variable to `0` to hide UI and reject commands;
 /// malformed values fail closed. The Relay keeps its separate deployment gate
@@ -293,25 +292,23 @@ mod tests {
     }
 
     #[test]
-    fn desktop_remote_control_is_default_on_and_windows_only() {
-        assert!(desktop_remote_control_enabled_for(
-            "windows",
-            Some("1"),
-            None
-        ));
-        assert!(desktop_remote_control_enabled_for(
-            "windows",
-            Some("1"),
-            Some("1")
-        ));
-        for flag in [Some(""), Some("0"), Some("true"), Some("01")] {
-            assert!(!desktop_remote_control_enabled_for(
-                "windows",
-                Some("1"),
-                flag
-            ));
+    fn desktop_remote_control_supports_both_roles_on_windows_and_linux() {
+        for os in ["windows", "linux"] {
+            let supported = os == "windows" || cfg!(target_pointer_width = "64");
+            assert_eq!(supports_desktop_remote_control(os), supported);
+            assert_eq!(
+                desktop_remote_control_enabled_for(os, Some("1"), None),
+                supported
+            );
+            assert_eq!(
+                desktop_remote_control_enabled_for(os, Some("1"), Some("1")),
+                supported
+            );
+            for flag in [Some(""), Some("0"), Some("true"), Some("01")] {
+                assert!(!desktop_remote_control_enabled_for(os, Some("1"), flag));
+            }
         }
-        for os in ["linux", "macos"] {
+        for os in ["macos", "android", "freebsd", ""] {
             assert!(!desktop_remote_control_enabled_for(os, Some("1"), None));
             assert!(!desktop_remote_control_enabled_for(
                 os,
@@ -329,31 +326,38 @@ mod tests {
 
     #[test]
     fn build_disabled_artifact_cannot_be_reenabled_at_runtime() {
-        for build_flag in [None, Some("0"), Some(""), Some("true")] {
-            for runtime_flag in [None, Some("1"), Some("0"), Some("true")] {
-                assert!(!desktop_remote_control_enabled_for(
-                    "windows",
-                    build_flag,
-                    runtime_flag
-                ));
+        for os in ["windows", "linux"] {
+            for build_flag in [None, Some("0"), Some(""), Some("true")] {
+                for runtime_flag in [None, Some("1"), Some("0"), Some("true")] {
+                    assert!(!desktop_remote_control_enabled_for(
+                        os,
+                        build_flag,
+                        runtime_flag
+                    ));
+                }
             }
         }
     }
 
     #[test]
     fn non_unicode_runtime_flag_is_not_an_absent_flag() {
-        assert!(desktop_remote_control_enabled_from_env(
-            "windows",
-            Some("1"),
-            Err(std::env::VarError::NotPresent),
-        ));
-        assert!(!desktop_remote_control_enabled_from_env(
-            "windows",
-            Some("1"),
-            Err(std::env::VarError::NotUnicode(std::ffi::OsString::from(
-                "invalid"
-            ))),
-        ));
+        for os in ["windows", "linux"] {
+            assert_eq!(
+                desktop_remote_control_enabled_from_env(
+                    os,
+                    Some("1"),
+                    Err(std::env::VarError::NotPresent)
+                ),
+                supports_desktop_remote_control(os)
+            );
+            assert!(!desktop_remote_control_enabled_from_env(
+                os,
+                Some("1"),
+                Err(std::env::VarError::NotUnicode(std::ffi::OsString::from(
+                    "invalid"
+                )))
+            ));
+        }
     }
 
     /// Fake environment: a fixed key→value table over the injectable lookup.

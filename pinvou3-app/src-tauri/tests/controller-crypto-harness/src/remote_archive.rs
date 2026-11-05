@@ -5,6 +5,8 @@ pub(crate) mod binding {
 }
 #[path = "../../../src/features/sessions/remote_proxy/archive.rs"]
 mod archive;
+#[path = "../../../src/features/sessions/remote_proxy/archive_snapshot.rs"]
+mod archive_snapshot;
 #[path = "../../../src/features/sessions/remote_proxy/schema.rs"]
 pub(crate) mod schema;
 
