@@ -1488,12 +1488,16 @@ mod tests {
         ] {
             let disk = sanitize_for_disk(line);
             assert!(
-                !disk.contains("supersecret") && !disk.contains("ab12cd34ef56") && !disk.contains("plainsecret1234"),
+                !disk.contains("supersecret")
+                    && !disk.contains("ab12cd34ef56")
+                    && !disk.contains("plainsecret1234"),
                 "空格 JSON 机密键落盘泄漏：{line} -> {disk}"
             );
             let export = sanitize_for_export(line);
             assert!(
-                !export.contains("supersecret") && !export.contains("ab12cd34ef56") && !export.contains("plainsecret1234"),
+                !export.contains("supersecret")
+                    && !export.contains("ab12cd34ef56")
+                    && !export.contains("plainsecret1234"),
                 "空格 JSON 机密键导出泄漏：{line} -> {export}"
             );
         }
