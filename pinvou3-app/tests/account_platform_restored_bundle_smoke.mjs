@@ -52,7 +52,7 @@ try {
   await page.goto(base + '/?section=creditsUsage', { waitUntil: 'domcontentloaded' });
   await page.waitForSelector('.ap-product-picker label');
   await page.select('.ap-sidebar-foot select', 'zh');
-  assert.equal(await page.$eval('.ap-balance-hero>strong', node => node.textContent), '922,337,203,685,477');
+  assert.equal(await page.$eval('.ap-balance-hero > div:first-child strong', node => node.textContent), '922,337,203,685,477.5807');
   assert.equal(await page.$$eval('.ap-sidebar [role=tab]', nodes => nodes.length), 3);
   await page.click('.ap-sidebar [data-section=accountSettings]');
   await page.waitForSelector('.ap-profile-rows .ap-profile-row button');

@@ -115,10 +115,12 @@ export class OrganizationClient {
  async grants(org, signal) { return collection(await this.request('token', `${orgPath(org)}/quota-grants`, 'GET', undefined, '', [200], signal), item => requireQuotaGrant(item, org)); }
  async createOrder(org, body, key) { const value = requirePaymentOrder(await this.request('token', `${orgPath(org)}/recharge/orders`, 'POST', body, key, [201])); if (value.beneficiary_organization_id !== org || value.product_id !== body.product_id || value.channel !== body.channel) invalid(); return value; }
  async order(org, id, signal) { const value = requirePaymentOrder(await this.request('token', `${orgPath(org)}/recharge/orders/${organizationID(id)}`, 'GET', undefined, '', [200], signal), id); if (value.beneficiary_organization_id !== org) invalid(); return value; }
+ // Same-key replay returns the current grant projection. Object/amount facts
+ // remain exact; normal member lifecycle updates may advance its version.
  async allocate(org, body, key) {
   const items = collection(await this.request('token', `${orgPath(org)}/quota-grants:batch`, 'POST', body, key, [207]), item => item);
   if (items.length !== body.items.length) invalid();
-  items.forEach((item, index) => { if (item.index !== index || !['SUCCEEDED', 'FAILED', 'UNKNOWN'].includes(item.status)) invalid(); if (item.status === 'SUCCEEDED') { const grant = requireQuotaGrant(item.grant, org, body.items[index]); if (integerMoney(grant.original_microcredits) !== integerMoney(body.items[index].amount_microcredits) || grant.membership_version !== body.items[index].membership_version) invalid(); } else if (typeof item.code !== 'string' || !item.code) invalid(); });
+  items.forEach((item, index) => { if (item.index !== index || !['SUCCEEDED', 'FAILED', 'UNKNOWN'].includes(item.status)) invalid(); if (item.status === 'SUCCEEDED') { const grant = requireQuotaGrant(item.grant, org, body.items[index]); if (integerMoney(grant.original_microcredits) !== integerMoney(body.items[index].amount_microcredits) || grant.membership_version < organizationVersion(body.items[index].membership_version)) invalid(); } else if (typeof item.code !== 'string' || !item.code) invalid(); });
   if (items.some(item => item.status === 'UNKNOWN')) throw Object.assign(new Error('COMMAND_RESULT_UNKNOWN'), { code: 'COMMAND_RESULT_UNKNOWN', financeRequestState: 'WRITE_OBSERVED' });
   return { items };
  }

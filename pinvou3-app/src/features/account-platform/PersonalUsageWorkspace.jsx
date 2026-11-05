@@ -1,15 +1,16 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { accountPlatformCopy, modelUsageCopy } from '../../shared/i18n.js';
+import { accountPlatformCopy, modelUsageCopy, accountCenterCopy } from '../../shared/i18n.js';
 import { hasPermission } from './authorization-ui.js';
 import { secureRequestID } from './request-id.js';
 import { Usage } from './Usage.jsx';
+import { PortalUsage } from './PortalUsage.jsx';
 
 function requirePage(value) {
   if (!value || !Array.isArray(value.items) || (value.next_cursor != null && typeof value.next_cursor !== 'string')) throw new Error('INVALID_USAGE_PAGE');
   return value;
 }
 
-export function PersonalUsageWorkspace({ client, me, language }) {
+export function PersonalUsageWorkspace({ client, me, language, portalPresentation = false }) {
   const copy = { ...accountPlatformCopy[language], ...modelUsageCopy[language] };
   const [records, setRecords] = useState([]);
   const [cursors, setCursors] = useState(['']);
@@ -21,7 +22,7 @@ export function PersonalUsageWorkspace({ client, me, language }) {
   const generation = useRef(0);
   const cancelIntents = useRef(new Map());
   const organizational = me.active_context?.context_type === 'ORGANIZATION';
-  const owner = `${me.user_id}:${me.active_context?.context_version || 0}:${me.active_context?.organization_id || ''}:${me.active_context?.personal_authorization_version || 0}:${me.active_context?.organization_authorization_version || 0}`;
+  const owner = `${me.user_id}:${me.active_context?.context_version || 0}:${me.active_context?.organization_id || ''}:${me.personal_authorization_version || me.active_context?.personal_authorization_version || 0}:${me.active_context?.organization_authorization_version || 0}:${client.financeSessionEpoch || 0}`;
   const canRead = hasPermission(me, organizational ? 'org.usage.read.self' : 'personal.usage.read');
   const canCancel = !organizational && hasPermission(me, 'personal.usage.cancel');
   const load = async (cursor, targetPage, stamp, signal) => {
@@ -70,11 +71,12 @@ export function PersonalUsageWorkspace({ client, me, language }) {
     }
   });
   if (!canRead) return null;
+  const Presentation = portalPresentation ? PortalUsage : Usage;
   return <section className="ap-personal-usage">
-    <button disabled={busy} onClick={() => void run(stamp => load('', 1, stamp))}>{copy.refresh}</button>
+    <button disabled={busy} onClick={() => void run(stamp => load('', 1, stamp))}>{portalPresentation ? accountCenterCopy[language].refreshUsage : copy.refresh}</button>
     {busy && <p role="status">{copy.loading}</p>}
     {unavailable && records.length > 0 && <p role="alert">{readDenied ? copy.permissionDenied : copy.usageUnavailable}</p>}
-    <Usage copy={{ ...copy, usageUnavailable: readDenied ? copy.permissionDenied : copy.usageUnavailable }} language={language} records={records} unavailable={unavailable && records.length === 0} page={page} hasPrevious={page > 1} hasMore={Boolean(next)} busy={busy} canCancel={canCancel}
+    <Presentation key={owner} client={client} owner={owner} versions={{ session_epoch: client.financeSessionEpoch || 0, context_version: me.active_context?.context_version, personal_authorization_version: me.personal_authorization_version || me.active_context?.personal_authorization_version, organization_authorization_version: me.active_context?.organization_authorization_version }} copy={{ ...copy, usageUnavailable: readDenied ? copy.permissionDenied : copy.usageUnavailable }} language={language} records={records} unavailable={unavailable && records.length === 0} page={page} hasPrevious={page > 1} hasMore={Boolean(next)} busy={busy} canCancel={canCancel}
       onPrevious={() => void run(stamp => load(cursors[page - 2], page - 1, stamp))}
       onNext={() => void run(stamp => load(next, page + 1, stamp))} onCancel={id => void cancel(id)} />
   </section>;

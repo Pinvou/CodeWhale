@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { organizationCopy, accountClosedGrantCopy } from '../../shared/i18n.js';
+import { organizationCopy, accountClosedGrantCopy, accountCenterCopy } from '../../shared/i18n.js';
 import { OrganizationClient } from './organization-client.js';
 import { OrganizationActionForm } from './OrganizationActionForm.jsx';
 import { hasPermission } from './authorization-ui.js';
@@ -81,6 +81,7 @@ export function OrganizationClosedGrantsWorkspace({ client, me, language }) {
  return <section><h3>{copy.title}</h3><p>{copy.lead}</p>
   <button disabled={busy} onClick={() => void refresh()}>{copy.refresh}</button>
   {busy && <p role="status">{copy.loading}</p>}{error && <p role="alert">{copy.unavailable}</p>}
+  {!busy && !error && !candidates.length && <p className="ap-empty">{accountCenterCopy[language].noReclaim}</p>}
   {candidates.map(grant => <article key={`${owner}:${grant.grant_id}`}>
    <p>{grant.recovery_only ? copy.recoveryPending : `${grant.member_user_id} · ${formatBalance(grant.available_microcredits, language)}`} · {grant.grant_id}</p>
    <OrganizationActionForm useOperation={useClosedGrantOperation} client={client} owner={owner} copy={copy} scope={`closed-grant-reclaim:${grant.grant_id}`} title={copy.single} fields={[]} prepare={() => ({ grant: grant.grant_id, reason: 'ACCOUNT_CLOSED_FULL_RECLAIM' })} action={(facts, key) => reclaim(grant, facts, key)} onConfirmed={() => void refresh()} disabled={busy || error || !eligible.some(item => item.grant_id === grant.grant_id)} confirm />

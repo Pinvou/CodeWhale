@@ -106,6 +106,10 @@ const accountURL = () => `${origin}/account.html?section=${mode.startsWith('org'
 const browser = await puppeteer.launch({ executablePath: browserPath, headless: true, args: ['--no-sandbox'] });
 let passed = 0;
 const click = async (page, label) => {
+  if (mode.startsWith('org')) {
+    const billing = await page.$('[data-org-section=billing]');
+    if (billing) await billing.click();
+  }
   try { await page.waitForFunction(text => [...document.querySelectorAll('button')].some(button => button.textContent === text && !button.disabled), { timeout: 5000 }, label); }
   catch (error) { console.log('CONTROLLED_FIXTURE_PAGE', await page.evaluate(() => document.body.innerText)); throw error; }
   await page.evaluate(text => [...document.querySelectorAll('button')].find(button => button.textContent === text).click(), label);

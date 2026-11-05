@@ -491,7 +491,7 @@ assert.match(accountPlatformView, /localizedAccountPlatformError/);
 assert.doesNotMatch(accountPlatformPopover, /platformModel|selectPlatformModel|modelSelectionSaved/);
 assert.doesNotMatch(accountPlatformPopover, />可用余额</);
 assert.equal(accountPlatformCopy.zh.availableCredits, '可用积分');
-assert.equal(accountPlatformCopy.zh.reservedCredits, '使用中');
+assert.equal(accountPlatformCopy.zh.reservedCredits, '已预留积分');
 assert.match(accountPlatformView, /localizedAccountPlatformError\(copy, reason\)/);
 assert.match(accountPlatformView, /copy\.retry/);
 assert.doesNotMatch(main, /refreshLlmApiStatus/);

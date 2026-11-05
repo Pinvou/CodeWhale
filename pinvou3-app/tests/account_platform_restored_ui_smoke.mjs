@@ -6,6 +6,7 @@ import react from '@vitejs/plugin-react';
 import * as puppeteer from './helpers/puppeteer-fixture.mjs';
 
 const root = path.resolve(import.meta.dirname, '..');
+if (process.env.UI_ARTIFACT_DIR) fs.mkdirSync(process.env.UI_ARTIFACT_DIR, { recursive: true });
 const chrome = [process.env.CHROME, 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe', 'C:/Program Files/Microsoft/Edge/Application/msedge.exe', '/usr/bin/chromium', '/usr/bin/google-chrome', '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'].find(value => value && fs.existsSync(value));
 assert.ok(chrome, 'Chromium required; validation cannot be skipped');
 const server = await createServer({ root, configFile: false, logLevel: 'error', plugins: [react()], css: { postcss: { plugins: [] } }, server: { host: '127.0.0.1', port: 0 } });
@@ -43,7 +44,7 @@ try {
     try { await action(); assert.deepEqual(errors, [], 'uncaught UI error'); console.log(`PASS ${name}`); passed++; }
     catch (error) { console.error(JSON.stringify({ case: name, pageErrors: errors, dialog: await page.evaluate(() => document.querySelector('[role=dialog]')?.textContent.slice(0, 1200)) })); throw error; }
   };
-  await run('personal original visual semantics distinguish closure, query, cancel and recharge', async () => {
+  await run('personal action hierarchy distinguish closure, query, cancel and recharge', async () => {
     for (const language of ['zh', 'en', 'ja']) {
       await fresh();
       await page.evaluate(language => {
@@ -52,9 +53,9 @@ try {
         window.restored.reload();
       }, language);
       await page.waitForSelector('.ap-product-picker label.selected');
-      assert.equal(await page.$eval('.ap-balance-hero', node => getComputedStyle(node).marginTop), '36px');
+      assert.equal(await page.$eval('.ap-balance-hero', node => getComputedStyle(node).marginTop), '0px');
       const recharge = await page.$eval('.ap-recharge-controls > button', node => ({ color: getComputedStyle(node).color, background: getComputedStyle(node).backgroundColor }));
-      assert.deepEqual(recharge, { color: 'rgb(32, 33, 36)', background: 'rgb(236, 236, 236)' });
+      assert.deepEqual(recharge, { color: 'rgb(255, 255, 255)', background: 'rgb(19, 118, 71)' });
       await accountTab('accountSettings');
       await page.waitForSelector('.ap-danger-section button.ap-danger:not(:disabled)');
       const dangerStyle = async selector => page.$eval(selector, node => ({ color: getComputedStyle(node).color, border: getComputedStyle(node).borderTopColor, background: getComputedStyle(node).backgroundColor }));
@@ -90,7 +91,7 @@ try {
     await activeAccount('creditsUsage');
     assert.equal(await page.$$eval('.ap-sidebar [role=tab]', nodes => nodes.length), 3);
     assert.equal(await page.$$eval('#ap-panel-creditsUsage .ap-benefit-card', nodes => nodes.length), 5);
-    assert.equal(await page.$eval('.ap-balance-hero>strong', node => node.textContent), '922,337,203,685,477');
+    assert.equal(await page.$eval('.ap-balance-hero > div:first-child strong', node => node.textContent), '922,337,203,685,477.5807');
     await accountTab('ordersInvoices'); await activeAccount('ordersInvoices');
     assert.equal(await page.$$eval('.ap-order-history tbody tr', nodes => nodes.length), 6);
     await page.goBack(); await activeAccount('creditsUsage'); await page.goForward(); await activeAccount('ordersInvoices');
@@ -98,7 +99,7 @@ try {
   });
   await run('personal unknown recharge survives tab changes with the original key and facts', async () => {
     await fresh(); await page.evaluate(() => { window.restored.unknown = true; });
-    await click('.ap-recharge-form button', await page.evaluate(() => window.restored.copy().finance.create));
+    await page.click('.ap-recharge-controls > button');
     await page.waitForFunction(() => window.restored.calls.some(call => call.method === 'POST' && call.url.endsWith('/recharge/orders')) && document.querySelector('.ap-finance-feedback button'));
     await accountTab('ordersInvoices'); await accountTab('accountSettings'); await accountTab('creditsUsage');
     await click('.ap-finance-feedback button', await page.evaluate(() => window.restored.copy().finance.retry));
@@ -118,6 +119,243 @@ try {
     await page.waitForFunction(() => !document.querySelector('[role=dialog]'));
     await page.waitForFunction(() => document.activeElement.closest('.ap-profile-row'));
     assert.ok(await page.evaluate(() => Boolean(document.activeElement.closest('.ap-profile-row'))), `focus did not return to edit trigger: ${await page.evaluate(() => document.activeElement.outerHTML.slice(0, 300))}`);
+  });
+  await run('account center facts, invoice removal, page-scoped usage filters and profile rows', async () => {
+    await fresh();
+    await page.evaluate(() => {
+      window.restored.usage = [
+        { usage_request_id: 'usage-paid', model: 'Sample A', started_at: '2026-11-01T12:00:00Z', execution_status: 'SUCCEEDED', settlement_status: 'SETTLED', charged_microcredits: '10001', display_status: 'SETTLED', input_tokens: 10, output_tokens: 5, cached_input_tokens: 0 },
+        { usage_request_id: 'usage-failed', model: 'Sample B', started_at: '2026-11-02T12:00:00Z', execution_status: 'FAILED', settlement_status: 'RELEASED', charged_microcredits: '0', display_status: 'RELEASED' },
+        { usage_request_id: 'usage-pending', model: 'Sample A', started_at: '2026-11-03T12:00:00Z', execution_status: 'SETTLEMENT_PENDING', settlement_status: 'USAGE_PENDING', charged_microcredits: null, display_status: 'SETTLEMENT_PENDING' },
+      ]; window.restored.reload();
+    });
+    await page.waitForSelector('.ap-usage-table tbody tr');
+    assert.equal(await page.$$eval('.ap-usage-table tbody tr', nodes => nodes.length), 3);
+    assert.ok((await page.$eval('.ap-usage-summary', node => node.textContent)).includes('1.0001'));
+    assert.ok((await page.$eval('.ap-usage-workspace', node => node.textContent)).includes(await page.evaluate(() => window.restored.copy().center.usageScope)));
+    assert.equal(await page.$eval('.ap-product-picker dd', node => node.textContent), '110');
+    await page.type('.ap-usage-filters label:nth-child(3) input', 'Sample B');
+    assert.equal(await page.$$eval('.ap-usage-table tbody tr', nodes => nodes.length), 1);
+    const result = await page.$eval('.ap-usage-table tbody tr', node => node.textContent);
+    assert.equal(await page.$eval('.ap-usage-table .ap-status', node => node.textContent), await page.evaluate(() => window.restored.copy().center.callFailedNoCharge));
+    assert.ok(result.includes(await page.evaluate(() => window.restored.copy().usage.executionStatuses.FAILED || 'FAILED')));
+    assert.ok(!result.includes('usage-paid'));
+    await page.$eval('.ap-usage-filters label:nth-child(3) input', node => { Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(node, ''); node.dispatchEvent(new Event('input', { bubbles: true })); });
+    await page.$eval('.ap-usage-filters input[type=date]', node => { Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(node, '2026-11-03'); node.dispatchEvent(new Event('input', { bubbles: true })); });
+    await page.waitForFunction(() => document.querySelectorAll('.ap-usage-table tbody tr').length === 1);
+    if (process.env.UI_ARTIFACT_DIR) await page.screenshot({ path: path.join(process.env.UI_ARTIFACT_DIR, 'personal-credits-desktop.png'), fullPage: true });
+    await accountTab('ordersInvoices');
+    assert.equal(await page.$eval('.ap-order-history tbody tr:nth-child(2) td:nth-child(4)', node => node.textContent), '—', 'unpaid order must not borrow its created timestamp');
+    assert.equal(await page.$$eval('.ap-invoice-notice', nodes => nodes.length), 0);
+    assert.equal(await page.$eval('.ap-sidebar [data-section=ordersInvoices]', node => node.textContent), await page.evaluate(() => window.restored.copy().account.sections.ordersInvoices));
+    const id = await page.$eval('.ap-order-history tbody .ap-copy-identifier code', node => ({ title: node.title, text: node.textContent }));
+    assert.ok(id.title.length > id.text.length);
+    await page.evaluate(() => { window.copiedIdentifier = ''; Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: async value => { window.copiedIdentifier = value; } } }); });
+    await page.click('.ap-order-history tbody .ap-copy-identifier button');
+    await page.waitForFunction(id => window.copiedIdentifier === id, {}, id.title);
+    await accountTab('accountSettings');
+    assert.equal(await page.$$eval('.ap-account-information dl', nodes => nodes.length), 0, 'editable profile is the single field owner');
+    assert.equal(await page.$$eval('.ap-profile-rows > .ap-profile-row', nodes => nodes.length), 2);
+    assert.equal(await page.evaluate(() => window.restored.calls.filter(call => call.method !== 'GET' && !call.url.endsWith('/account/bootstrap')).length), 0);
+  });
+  await run('period totals cross pages, include older-only models and retire a delayed old session', async () => {
+    await fresh();
+    await page.evaluate(() => {
+      const row = index => ({ usage_request_id: `00000000-0000-4000-8000-${String(index).padStart(12, '0')}`, model: index === 21 ? 'Older model' : 'Current model', started_at: '2026-11-04T12:00:00Z', charged_microcredits: '10000', execution_status: 'SUCCEEDED', settlement_status: 'SETTLED', display_status: 'SETTLED' });
+      const cursor = 'turn-v1.' + btoa('2026-11-04T12:00:00Z|00000000-0000-4000-8000-000000000020').replaceAll('+', '-').replaceAll('/', '_').replaceAll('=', '');
+      window.restored.usagePages = [{ items: Array.from({ length: 20 }, (_, index) => row(index + 1)), next_cursor: cursor }, { items: [row(21)], next_cursor: null }];
+      window.restored.reload();
+    });
+    await page.waitForFunction(() => document.querySelectorAll('.ap-usage-table tbody tr').length === 20);
+    for (const [index, value] of [[1, '2026-11-01'], [2, '2026-11-07']]) await page.$eval(`.ap-usage-filters label:nth-child(${index}) input`, (node, value) => { Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(node, value); node.dispatchEvent(new Event('input', { bubbles: true })); }, value);
+    await page.click('.ap-period-summary > button.ap-primary');
+    await page.waitForSelector('[data-period-total]');
+    assert.equal(await page.$eval('[data-period-total]', node => node.textContent), await page.evaluate(() => window.restored.copy().center.periodTotal('21')));
+    await page.type('.ap-usage-filters label:nth-child(3) input', 'Older model');
+    assert.equal(await page.$('[data-period-total]'), null);
+    await page.click('.ap-period-summary > button.ap-primary');
+    await page.waitForSelector('[data-period-total]');
+    assert.equal(await page.$eval('[data-period-total]', node => node.textContent), await page.evaluate(() => window.restored.copy().center.periodTotal('1')));
+    await page.evaluate(() => { window.restored.holdUsage = true; });
+    await page.click('.ap-period-summary > button.ap-primary');
+    await page.waitForFunction(() => typeof window.restored.releaseUsage === 'function');
+    await page.evaluate(() => { window.restored.client.financeSessionEpoch++; window.restored.releaseUsage(); });
+    await page.waitForFunction(() => !document.querySelector('[data-period-total]') && !document.querySelector('.ap-period-summary [role=status]'));
+    const before = await page.evaluate(() => window.restored.calls.length);
+    await page.click('.ap-period-summary > button.ap-primary');
+    assert.equal(await page.evaluate(() => window.restored.calls.length), before, 'stale parent epoch cannot dispatch a new query');
+  });
+  await run('period bounded continuation and failed batches never present a partial or doubled total', async () => {
+    await fresh();
+    await page.evaluate(() => {
+      const pages = [], index = { '': 0 };
+      for (let page = 0; page < 21; page++) {
+        const items = Array.from({ length: 20 }, (_, row) => ({ usage_request_id: `00000000-0000-4000-8000-${String(1000 - page * 20 - row).padStart(12, '0')}`, model: 'A', started_at: '2026-11-04T12:00:00Z', charged_microcredits: '10000', execution_status: 'SUCCEEDED', settlement_status: 'SETTLED', display_status: 'SETTLED' }));
+        const cursor = 'turn-v1.' + btoa('2026-11-04T12:00:00Z|' + items.at(-1).usage_request_id).replaceAll('+', '-').replaceAll('/', '_').replaceAll('=', '');
+        pages.push({ items, next_cursor: page === 20 ? null : cursor }); index[cursor] = page + 1;
+      }
+      window.restored.usagePages = pages; window.restored.usageCursorPages = index; window.restored.reload();
+    });
+    await page.waitForSelector('.ap-usage-table tbody tr');
+    for (const [index, value] of [[1, '2026-11-01'], [2, '2026-11-07']]) await page.$eval(`.ap-usage-filters label:nth-child(${index}) input`, (node, value) => { Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(node, value); node.dispatchEvent(new Event('input', { bubbles: true })); }, value);
+    await page.evaluate(() => { window.restored.failUsageOnce = true; });
+    await page.click('.ap-period-summary > button.ap-primary');
+    await page.waitForSelector('.ap-period-summary[data-period-state=error]');
+    assert.equal(await page.$('[data-period-total]'), null);
+    await click('.ap-period-summary > button', await page.evaluate(() => window.restored.copy().account.retry));
+    await page.waitForSelector('.ap-period-summary[data-period-state=partial]');
+    assert.equal(await page.$('[data-period-total]'), null);
+    await page.evaluate(() => {
+      const node = [...document.querySelectorAll('.ap-period-summary > button')].find(node => node.textContent === window.restored.copy().center.periodContinue);
+      window.oldPeriodContinue = node[Object.keys(node).find(key => key.startsWith('__reactProps$'))].onClick;
+    });
+    await page.type('.ap-usage-filters label:nth-child(3) input', 'B');
+    const retiredReadCount = await page.evaluate(() => window.restored.calls.length);
+    await page.evaluate(() => window.oldPeriodContinue());
+    assert.equal(await page.evaluate(() => window.restored.calls.length), retiredReadCount, 'retired Continue cannot revive an old checkpoint under new filters');
+    assert.equal(await page.$('[data-period-total]'), null);
+    await page.$eval('.ap-usage-filters label:nth-child(3) input', node => { Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(node, ''); node.dispatchEvent(new Event('input', { bubbles: true })); });
+    await page.evaluate(() => { window.restored.holdUsage = true; });
+    await page.click('.ap-period-summary > button.ap-primary');
+    await page.waitForFunction(() => typeof window.restored.releaseUsage === 'function');
+    await page.evaluate(() => {
+      window.oldUsageRelease = window.restored.releaseUsage;
+      const node = [...document.querySelectorAll('.ap-period-summary > button')].find(node => node.textContent === window.restored.copy().center.periodCancel);
+      window.oldPeriodCancel = node[Object.keys(node).find(key => key.startsWith('__reactProps$'))].onClick;
+    });
+    await click('.ap-period-summary > button', await page.evaluate(() => window.restored.copy().center.periodCancel));
+    await page.click('.ap-period-summary > button.ap-primary');
+    await page.waitForFunction(() => window.restored.releaseUsage !== window.oldUsageRelease);
+    await page.evaluate(() => window.oldPeriodCancel());
+    assert.equal(await page.evaluate(() => window.restored.heldUsageSignal.aborted), false, 'retired Cancel cannot abort a newer query');
+    await page.evaluate(() => { window.restored.holdUsage = false; window.oldUsageRelease(); window.restored.releaseUsage(); });
+    await page.waitForSelector('.ap-period-summary[data-period-state=partial]');
+    await click('.ap-period-summary > button', await page.evaluate(() => window.restored.copy().center.periodContinue));
+    await page.waitForSelector('[data-period-total]');
+    assert.equal(await page.$eval('[data-period-total]', node => node.textContent), await page.evaluate(() => window.restored.copy().center.periodTotal('420')));
+  });
+  const organizationCenter = async language => {
+    await fresh();
+    await page.evaluate(language => {
+      window.restored.language = language; window.restored.centerOrganization = true;
+      window.restored.personal = ['personal.context.switch', 'personal.profile.update', 'personal.invitations.read', 'personal.invitations.accept'];
+      window.restored.context = { context_type: 'ORGANIZATION', organization_id: '33333333-3333-4333-8333-333333333333', context_version: 1, membership_version: 1, organization_authorization_version: 1, permissions: ['org.profile.read', 'org.units.read', 'org.units.manage', 'org.members.read', 'org.members.manage', 'org.roles.read', 'org.roles.assign', 'org.wallet.read', 'org.quota.read.self', 'org.quota.allocate'] };
+      window.restored.reload();
+    }, language);
+    await page.waitForFunction(() => document.querySelector('.ap-identity-card strong')?.textContent === 'Sample organization');
+    await accountTab('myOrganization');
+    await page.waitForSelector('.ap-org-tabs');
+  };
+  await run('organization directory refreshes same-context names and role changes', async () => {
+    await organizationCenter('en');
+    await page.evaluate(() => {
+      window.restored.organizationName = 'Renamed organization'; window.restored.organizationRoles = ['MEMBER'];
+      window.restored.context = { ...window.restored.context, organization_authorization_version: 2 };
+      dispatchEvent(new Event('focus'));
+    });
+    await page.waitForFunction(() => document.querySelector('.ap-identity-card strong')?.textContent === 'Renamed organization');
+    assert.ok(!(await page.$eval('.ap-identity-card', node => node.textContent)).includes(await page.evaluate(() => window.restored.copy().organization.enumRole_OWNER)));
+    await page.evaluate(() => { window.restored.organizationName = 'Renamed again'; });
+    await page.click('.ap-page-header > button');
+    await page.waitForFunction(() => document.querySelector('.ap-identity-card strong')?.textContent === 'Renamed again');
+    assert.equal(await page.evaluate(() => window.restored.context.context_version), 1);
+    await page.evaluate(() => { window.restored.organizationName = 'Renamed through organization refresh'; });
+    await page.click('.ap-organization-workspace > .ap-section-heading button');
+    await page.waitForFunction(() => document.querySelector('.ap-identity-card strong')?.textContent === 'Renamed through organization refresh');
+    await accountTab('accountSettings');
+    await click('.ap-invitations button', await page.evaluate(() => window.restored.copy().center.enterInvitation));
+    await page.waitForSelector('[role=dialog] input[type=password]');
+    await page.type('[role=dialog] input[type=password]', 'CONTROLLED_INVITATION_DRAFT');
+    const reads = await page.evaluate(() => window.restored.calls.filter(call => call.url.endsWith('/v1/me/organizations')).length);
+    await page.evaluate(() => dispatchEvent(new Event('focus')));
+    await page.waitForFunction(reads => window.restored.calls.filter(call => call.url.endsWith('/v1/me/organizations')).length > reads && !document.querySelector('[role=dialog] input[type=password]')?.disabled, {}, reads);
+    assert.equal(await page.$eval('[role=dialog] input[type=password]', node => node.value), 'CONTROLLED_INVITATION_DRAFT', 'ordinary focus refresh preserves the invitation intent');
+    await page.keyboard.press('Escape');
+    assert.equal(await page.evaluate(() => window.restored.calls.some(call => call.url.endsWith('/v1/invitations/accept'))), false);
+  });
+  await run('organization center tabs and member actions select the row and retain UNKNOWN after removal', async () => {
+    await organizationCenter('en');
+    await page.click('[data-org-section=members]');
+    await page.waitForSelector('.ap-org-row-actions');
+    await page.evaluate(() => { window.restored.unknown = true; });
+    await click('.ap-org-row-actions button', await page.evaluate(() => window.restored.copy().organization.remove));
+    await page.waitForSelector('[role=dialog] form[data-org-action=remove-member]');
+    assert.equal(await page.$eval('[data-org-action=remove-member] select', node => node.value), '22222222-2222-4222-8222-222222222222');
+    await page.$eval('[data-org-action=remove-member]', node => node.requestSubmit());
+    await page.waitForSelector('.ap-org-confirm-dialog');
+    assert.ok((await page.$eval('.ap-org-confirm-dialog', node => node.textContent)).includes('Sample member'));
+    assert.equal(await page.evaluate(() => window.restored.calls.some(call => call.method === 'DELETE')), false);
+    await page.click('.ap-org-confirm-dialog footer button:last-child');
+    await page.waitForFunction(() => document.querySelector('[data-org-action=remove-member] fieldset')?.disabled);
+    await page.evaluate(() => document.querySelector('.ap-organization-workspace .ap-section-heading button').click());
+    await page.waitForFunction(() => document.querySelectorAll('.ap-org-row-actions').length === 0);
+    await accountTab('creditsUsage'); await accountTab('myOrganization');
+    await page.evaluate(() => { window.restored.unknown = false; });
+    await click('[data-org-action=remove-member] > button', await page.evaluate(() => window.restored.copy().organization.retry));
+    await page.waitForFunction(() => window.restored.calls.filter(call => call.method === 'DELETE').length === 2);
+    const calls = await page.evaluate(() => window.restored.calls.filter(call => call.method === 'DELETE'));
+    assert.equal(calls[0].key, calls[1].key); assert.equal(calls[0].url, calls[1].url);
+    assert.ok(calls[0].url.endsWith('/members/22222222-2222-4222-8222-222222222222'));
+  });
+  await run('organization center point allocation derives sources, confirms decimals and preserves same-key retry', async () => {
+    await organizationCenter('en');
+    await page.click('[data-org-section=billing]');
+    const form = '[data-org-action=quota-allocation]'; await page.waitForSelector(form);
+    const fields = await page.$$(`${form} select`);
+    await fields[0].select('22222222-2222-4222-8222-222222222222');
+    await fields[1].select('44444444-4444-4444-8444-444444444444');
+    await page.type(`${form} input`, '1.2345');
+    await page.evaluate(() => { window.restored.unknown = true; });
+    await page.$eval(form, node => node.requestSubmit());
+    await page.waitForSelector('.ap-org-confirm-dialog');
+    assert.ok((await page.$eval('.ap-org-confirm-dialog', node => node.textContent)).includes('1.2345'));
+    await page.click('.ap-org-confirm-dialog footer button:last-child');
+    await page.waitForFunction(() => window.restored.calls.some(call => call.url.endsWith('/quota-grants:batch')));
+    await page.click('[data-org-section=members]'); await page.click('[data-org-section=billing]');
+    await page.evaluate(() => { window.restored.unknown = false; window.restored.noSources = true; });
+    await click(`${form} > button`, await page.evaluate(() => window.restored.copy().organization.retry));
+    await page.waitForFunction(() => window.restored.calls.filter(call => call.url.endsWith('/quota-grants:batch')).length === 2);
+    const calls = await page.evaluate(() => window.restored.calls.filter(call => call.url.endsWith('/quota-grants:batch')));
+    assert.equal(calls[0].key, calls[1].key); assert.equal(calls[0].body, calls[1].body);
+    const item = JSON.parse(calls[0].body).items[0];
+    assert.equal(item.amount_microcredits, 12345); assert.equal(item.component_type, 'BASE'); assert.equal(item.membership_version, 1);
+    await page.waitForFunction(() => document.querySelector('[data-org-action=quota-allocation]')?.textContent.includes(window.restored.copy().center.noSources));
+    assert.equal(await page.$eval(`${form} > button`, node => node.disabled), true);
+    assert.ok((await page.$eval(form, node => node.textContent)).includes(await page.evaluate(() => window.restored.copy().center.noSources)));
+  });
+  await run('allocation lifecycle replay closes UNKNOWN and permits the next versioned allocation', async () => {
+    await organizationCenter('en'); await page.click('[data-org-section=billing]');
+    const form = '[data-org-action=quota-allocation]'; await page.waitForSelector(form);
+    await page.select(`${form} label:nth-child(1) select`, '22222222-2222-4222-8222-222222222222');
+    await page.select(`${form} label:nth-child(2) select`, '44444444-4444-4444-8444-444444444444');
+    await page.type(`${form} input`, '1');
+    await page.evaluate(() => { window.restored.unknown = true; });
+    await page.$eval(form, node => node.requestSubmit()); await page.waitForSelector('.ap-org-confirm-dialog'); await page.click('.ap-org-confirm-dialog footer button:last-child');
+    await page.waitForFunction(() => [...document.querySelectorAll('[data-org-action=quota-allocation] > button')].some(node => node.textContent === window.restored.copy().organization.retry && !node.disabled));
+    await page.evaluate(() => { window.restored.unknown = false; window.restored.membershipVersion = 2; window.restored.replayVersion = 2; });
+    await click(`${form} > button`, await page.evaluate(() => window.restored.copy().organization.retry));
+    await page.waitForFunction(() => !document.querySelector('[data-org-action=quota-allocation] fieldset').disabled && document.querySelector('[data-org-action=quota-allocation]')?.textContent.includes(window.restored.copy().organization.saved));
+    await page.$eval(`${form} input`, node => { Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(node, '2'); node.dispatchEvent(new Event('input', { bubbles: true })); });
+    await page.$eval(form, node => node.requestSubmit()); await page.waitForSelector('.ap-org-confirm-dialog'); await page.click('.ap-org-confirm-dialog footer button:last-child');
+    await page.waitForFunction(() => window.restored.calls.filter(call => call.url.endsWith('/quota-grants:batch')).length === 3);
+    const calls = await page.evaluate(() => window.restored.calls.filter(call => call.url.endsWith('/quota-grants:batch')));
+    assert.equal(calls[0].key, calls[1].key); assert.equal(calls[0].body, calls[1].body); assert.notEqual(calls[1].key, calls[2].key);
+    assert.equal(JSON.parse(calls[2].body).items[0].membership_version, 2); assert.equal(JSON.parse(calls[2].body).items[0].amount_microcredits, 20000);
+  });
+  await run('organization center responsive hierarchy, keyboard tabs and three languages', async () => {
+    for (const language of ['zh', 'en', 'ja']) {
+      await organizationCenter(language);
+      for (const width of [1440, 768, 390]) {
+        await page.setViewport({ width, height: 1000 });
+        for (const section of ['overview', 'members', 'roles', 'billing']) {
+          await page.click(`[data-org-section=${section}]`); await noOverflow();
+          if (process.env.UI_ARTIFACT_DIR && language === 'zh' && width !== 768) await page.screenshot({ path: path.join(process.env.UI_ARTIFACT_DIR, `organization-${section}-${width}.png`), fullPage: true });
+        }
+      }
+      await page.focus('[data-org-section=overview]'); await page.keyboard.press('ArrowRight');
+      assert.equal(await page.$eval('[data-org-section=members]', node => node.getAttribute('aria-selected')), 'true');
+      assert.equal(await page.evaluate(() => window.restored.calls.some(call => call.method === 'DELETE' || call.url.endsWith('/quota-grants:batch'))), false);
+    }
   });
   await run('admin original groups, canonical aliases, and back/forward', async () => {
     await fresh('?mode=admin&section=users');
@@ -274,7 +512,7 @@ try {
   });
   await run('personal order modal keeps history in its originating tab and exposes read failures', async () => {
     await fresh('?section=creditsUsage'); await accountTab('ordersInvoices');
-    await page.waitForSelector('.ap-order-history tbody button'); await page.click('.ap-order-history tbody button');
+    await page.waitForSelector('.ap-order-history tbody td:last-child button'); await page.click('.ap-order-history tbody td:last-child button');
     await page.waitForSelector('[role=dialog]'); await page.goBack();
     await activeAccount('ordersInvoices'); assert.ok(await page.$('[role=dialog]'));
     await page.evaluate(() => { window.restored.orderReadFail = true; });
@@ -391,7 +629,7 @@ try {
   });
   await run('late accepted recharge stays with its origin tab and retains its one order', async () => {
     await fresh('?section=creditsUsage'); await page.evaluate(() => { window.restored.delayCreate = true; });
-    await click('.ap-recharge-form button', await page.evaluate(() => window.restored.copy().finance.create));
+    await page.click('.ap-recharge-controls > button');
     await page.waitForFunction(() => typeof window.restored.releaseCreate === 'function'); await accountTab('accountSettings');
     await page.evaluate(() => window.restored.releaseCreate()); await page.waitForFunction(() => !document.querySelector('.ap-recharge-form button').disabled);
     assert.equal(await page.$('.ap-payment-dialog'), null); await activeAccount('accountSettings');

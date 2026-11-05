@@ -62,7 +62,7 @@ test('switch ACK binds target and actual unchanged-or-advanced context version',
 });
 test('organization quota ACK requires scope, exact amount, member version and complete indexed results',async()=>{
  const client=new OrganizationClient({request:async()=>({items:[{index:0,status:'SUCCEEDED',grant}]})});assert.equal((await client.allocate(org,facts,'owned-quota-operation-key')).items[0].grant.original_microcredits,'9007199254740993');
- for(const result of [{items:[]},{items:[{index:1,status:'SUCCEEDED',grant}]},{items:[{index:0,status:'SUCCEEDED',grant:{...grant,organization_id:other}}]},{items:[{index:0,status:'SUCCEEDED',grant:{...grant,original_microcredits:'9007199254740992'}}]},{items:[{index:0,status:'SUCCEEDED',grant:{...grant,membership_version:3}}]},{items:[{index:0,status:'FAILED',code:''}]}]){client.client.request=async()=>result;await assert.rejects(client.allocate(org,facts,'owned-quota-operation-key'));}
+ for(const result of [{items:[]},{items:[{index:1,status:'SUCCEEDED',grant}]},{items:[{index:0,status:'SUCCEEDED',grant:{...grant,organization_id:other}}]},{items:[{index:0,status:'SUCCEEDED',grant:{...grant,original_microcredits:'9007199254740992'}}]},{items:[{index:0,status:'SUCCEEDED',grant:{...grant,membership_version:1}}]},{items:[{index:0,status:'FAILED',code:''}]}]){client.client.request=async()=>result;await assert.rejects(client.allocate(org,facts,'owned-quota-operation-key'));}
  client.client.request=async()=>({items:[{index:0,status:'FAILED',code:'INSUFFICIENT_COMPONENT_CAPACITY'}]});assert.equal((await client.allocate(org,facts,'owned-quota-operation-key')).items[0].status,'FAILED');
 });
 test('quota grant rejects rounded money and wrong expected target',()=>{assert.throws(()=>requireQuotaGrant({...grant,available_microcredits:9007199254740992},org));assert.throws(()=>requireQuotaGrant(grant,org,{grant_id:other}));});
@@ -183,4 +183,17 @@ test('member pagination works when Object.hasOwn is unavailable without installi
   assert.deepEqual((await client.quotaMembers(org)).items,[]);
   assert.equal(Object.hasOwn,undefined,'production must not install a replacement global API');
  } finally {Object.defineProperty(Object,'hasOwn',saved);}
+});
+
+
+test('allocation replay accepts an advanced current grant without weakening immutable or lower-version checks', async () => {
+ const client = new OrganizationClient({ request: async () => ({ items: [{ index: 0, status: 'SUCCEEDED', grant: { ...grant, membership_version: 3, allocation_version: 2 } }] }) });
+ assert.equal((await client.allocate(org, facts, 'same-original-key')).items[0].grant.membership_version, 3);
+ assert.equal(facts.items[0].membership_version, 2);
+ for (const change of [{ membership_version: 1 }, { member_user_id: other }, { package_id: other }, { component_id: org }, { original_microcredits: '1' }]) {
+  client.client.request = async () => ({ items: [{ index: 0, status: 'SUCCEEDED', grant: { ...grant, membership_version: 3, ...change } }] });
+  await assert.rejects(client.allocate(org, facts, 'same-original-key'));
+ }
+ client.client.request = async () => ({ items: [{ index: 0, status: 'SUCCEEDED', grant }] });
+ await assert.rejects(client.allocate(org, { items: [{ ...facts.items[0], membership_version: undefined }] }, 'invalid-version'));
 });

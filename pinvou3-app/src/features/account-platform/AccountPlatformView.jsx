@@ -10,7 +10,7 @@ import { capturePersonalRechargeReauthentication, authorizePersonalRechargeReaut
 import { createDesktopReauthenticationCoordinator } from './desktop-reauthentication.js';
 import { supportedLocales, localeNames } from '../../shared/supported-locales.js';
 import { hasPermission } from './authorization-ui.js';
-import { formatBalance, formatWholeBalance } from './balance-view.js';
+import { formatBalance } from './balance-view.js';
 import { accountDisplayLabel, maskedAccountMobile } from './account-display-label.js';
 import { localizedAccountPlatformError } from './error-localization.js';
 import { ProfileSettings } from './ProfileSettings.jsx';
@@ -18,7 +18,7 @@ import { AccountLogin } from './AccountLogin.jsx';
 import { AccountPortalLayout, AccountPortalPanel } from './AccountPortalLayout.jsx';
 import { usePortalSections } from './usePortalSections.js';
 import { portalLoginLocation } from './portal-sections.js';
-import { accountLayoutCopy, organizationCopy } from '../../shared/i18n.js';
+import { accountLayoutCopy, accountCenterCopy, organizationCopy } from '../../shared/i18n.js';
 import './account-platform.css';
 
 export function AccountPlatformView({ client, copy, language, onLanguageChange, portal = false, onClose, onAuthenticated, rechargeRequest }) {
@@ -34,6 +34,10 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
   const [ordersTarget, setOrdersTarget] = useState(null);
   const [financeFeedbackTarget, setFinanceFeedbackTarget] = useState(null);
   const [organizationFinanceTarget, setOrganizationFinanceTarget] = useState(null);
+  const [organizationDirectory, setOrganizationDirectory] = useState({ owner: '', items: [] });
+  const [directoryRefresh, setDirectoryRefresh] = useState(0);
+  const [switchRequest, setSwitchRequest] = useState({ owner: '', sequence: 0 });
+  const [organizationPage, setOrganizationPage] = useState({ owner: '', section: 'overview' });
   const navigation = usePortalSections({ enabled: portal, ready: auth === 'ready' && profileOwner === client, me });
   const coordinatorRef = useRef(null);
   const identity = useRef(null);
@@ -58,6 +62,7 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
     if (generation !== epoch.current) return;
     authorizePersonalRechargeReauthentication(client, profile);
     setMe(profile); setProfileOwner(client);
+    if (portal) setDirectoryRefresh(value => value + 1);
     setAuth('ready');
     if (profile.active_context?.context_type === 'ORGANIZATION' || !hasPermission(profile, 'personal.billing.read')) return profile;
     try {
@@ -184,30 +189,36 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
   if (!rechargeAllowed) return <main className="ap-shell ap-app"><p role="alert">{organizationCopy[language].permissions}</p>
     {onClose && <button onClick={onClose}>{copy.close}</button>}</main>;
   const renderedEpoch = epoch.current;
-  if (portal) return <AccountPortalLayout me={me} copy={copy} language={language} onLanguageChange={onLanguageChange} navigation={navigation} busy={busy} onRefresh={() => void refresh()} onLogout={logout}>
+  const contextOwner = `${me.user_id}:${me.active_context.context_version}:${client.financeSessionEpoch || 0}`;
+  const directoryOwner = `${contextOwner}:${me.personal_authorization_version || 0}:${me.active_context.organization_authorization_version || 0}:${directoryRefresh}`;
+  const activeOrganization = organizationDirectory.owner === directoryOwner ? organizationDirectory.items.find(item => item.organization_id === me.active_context.organization_id) : null;
+  const organizationName = activeOrganization?.name;
+  const organizationRoles = Array.isArray(activeOrganization?.roles) ? activeOrganization.roles.filter(role => typeof role === 'string') : [];
+  const organizationSection = organizationPage.owner === contextOwner ? organizationPage.section : 'overview';
+  const center = accountCenterCopy[language];
+  if (portal) return <AccountPortalLayout me={me} copy={copy} language={language} organizationName={organizationName} organizationRoles={organizationRoles} onSwitchIdentity={() => { navigation.navigate('accountSettings'); setSwitchRequest(previous => ({ owner: contextOwner, sequence: previous.sequence + 1 })); }} onLanguageChange={onLanguageChange} navigation={navigation} busy={busy} onRefresh={() => void refresh()} onLogout={logout}>
     {error && <div className="ap-alert error" role="alert">{error}</div>}
     {notice && <div className="ap-alert" role="status">{notice}</div>}
     <div className="ap-finance-feedback-target" ref={setFinanceFeedbackTarget} />
     <AccountPortalPanel section="creditsUsage" active={navigation.section === 'creditsUsage'}>
-      {me.active_context?.context_type !== 'ORGANIZATION' && hasPermission(me, 'personal.billing.read') && <section className="ap-balance-hero"><span>{copy.availableCredits}</span><strong>{formatWholeBalance(balance?.available_microcredits, language)}</strong><small>{copy.reservedCredits}: {formatBalance(balance?.reserved_microcredits, language)}</small></section>}
+      {me.active_context?.context_type !== 'ORGANIZATION' && hasPermission(me, 'personal.billing.read') && <section className="ap-balance-hero ap-balance-columns"><div><span>{center.personalBalance}</span><strong>{formatBalance(balance?.available_microcredits, language)}</strong><small>{copy.availableCredits}</small></div><div className="ap-reserved-summary"><span>{center.reserved}</span><strong>{formatBalance(balance?.reserved_microcredits, language)}</strong><p>{center.reservedHint}</p></div></section>}
       <div ref={setCreditTarget} />
-      <PersonalUsageWorkspace key={`portal-usage:${me.user_id}`} client={client} me={me} language={language} />
+      <PersonalUsageWorkspace key={`portal-usage:${me.user_id}`} client={client} me={me} language={language} portalPresentation />
     </AccountPortalPanel>
     <AccountPortalPanel section="ordersInvoices" active={navigation.section === 'ordersInvoices'}><div ref={setOrdersTarget} /></AccountPortalPanel>
     <AccountPortalPanel section="myOrganization" active={navigation.section === 'myOrganization'}>
-      {navigation.sections.includes('myOrganization') && <OrganizationWorkspace key={`${me.user_id}:${me.active_context.organization_id}:${me.active_context.context_version}`} client={client} me={me} language={language} includeFinance={false} includeUsage={false} dialogActions onChanged={() => refresh(false)} />}
-      <div ref={setOrganizationFinanceTarget} />
+      {navigation.sections.includes('myOrganization') && <OrganizationWorkspace key={`${me.user_id}:${me.active_context.organization_id}:${me.active_context.context_version}`} client={client} me={me} language={language} includeFinance={false} includeUsage={false} dialogActions organizationName={organizationName} organizationRoles={organizationRoles} section={organizationSection} onSectionChange={section => setOrganizationPage({ owner: contextOwner, section })} financeSlot={<div ref={setOrganizationFinanceTarget} />} onChanged={() => refresh(false)} />}
     </AccountPortalPanel>
     <AccountPortalPanel section="accountSettings" active={navigation.section === 'accountSettings'}>
-      <section className="ap-account-information"><h2>{accountDisplayLabel(me, copy.user)}</h2><dl><div><dt>{copy.username}</dt><dd>{me.username || '—'}</dd></div><div><dt>{copy.mobile}</dt><dd>{maskedAccountMobile(me.mobile)}</dd></div><div><dt>{copy.accountStatus}</dt><dd>{accountLayoutCopy[language].statuses[me.status] || me.status}</dd></div></dl></section>
-      <OrganizationDirectory key={`${me.user_id}:${client.financeSessionEpoch || 0}`} client={client} me={me} language={language} portalPresentation onChanged={() => refresh(false)} />
+      <section className="ap-account-information"><div className="ap-section-heading"><h2>{accountDisplayLabel(me, copy.user)}</h2><span className="ap-status" data-status={me.status}>{center.accountStatus}: {accountLayoutCopy[language].statuses[me.status] || me.status}</span></div><p className="ap-muted">{center.profileLead}</p>{!hasPermission(me, 'personal.profile.update') && <dl><div><dt>{copy.username}</dt><dd>{me.username || '—'}</dd></div><div><dt>{copy.mobile}</dt><dd>{maskedAccountMobile(me.mobile)}</dd></div></dl>}</section>
+      <OrganizationDirectory key={`${me.user_id}:${client.financeSessionEpoch || 0}`} client={client} me={me} language={language} portalPresentation switchRequest={switchRequest.owner === contextOwner ? switchRequest.sequence : 0} refreshVersion={directoryRefresh} onOrganizationsRead={items => setOrganizationDirectory({ owner: directoryOwner, items })} onChanged={() => refresh(false)} />
       {hasPermission(me, 'personal.profile.update') && <ProfileSettings key={me.user_id} copy={copy} me={me} client={client} portalPresentation portalError={error} portalNotice={notice} active={navigation.section === 'accountSettings'} language={language} onError={reason => { if (renderedEpoch === epoch.current) setError(localizedAccountPlatformError(copy, reason)); }} onChanged={result => changed(result, renderedEpoch)} onRecovering={() => { if (renderedEpoch === epoch.current) setNotice(copy.profileChangeRecovering); }} />}
       <AccountClosureWorkspace key={`${me.user_id}:${me.personal_authorization_version || me.active_context?.personal_authorization_version || 0}:${client.financeSessionEpoch || 0}`} client={client} me={me} language={language} />
-      {hasPermission(me, 'personal.security.manage') && <a href="/auth/login?reauthenticate=1&return_to=%2F%3Fsection%3DaccountSettings">{copy.reauthenticate}</a>}
+      {hasPermission(me, 'personal.security.manage') && <section className="ap-security-actions"><h3>{center.security}</h3><a className="ap-button" href="/auth/login?reauthenticate=1&return_to=%2F%3Fsection%3DaccountSettings">{center.reauthenticate}</a></section>}
       {me.platform_permissions?.some(permission => permission.startsWith('platform.')) && <a href="/admin.html">{copy.adminCenter}</a>}
     </AccountPortalPanel>
     {me.active_context?.context_type !== 'ORGANIZATION' && <PersonalFinanceWorkspace key={`portal-finance:${me.user_id}`} client={client} me={me} language={language} presentationTargets={{ section: navigation.section, credits: creditTarget, orders: ordersTarget, feedback: financeFeedbackTarget }} onPaid={() => { if (renderedEpoch === epoch.current) return refresh(false); }} />}
-    {me.active_context?.context_type === 'ORGANIZATION' && <OrganizationFinanceWorkspace key={`${me.user_id}:${me.active_context.organization_id}:${me.active_context.context_version}`} client={client} me={me} language={language} presentationTargets={{ section: navigation.section, credits: creditTarget, management: organizationFinanceTarget, feedback: financeFeedbackTarget }} />}
+    {me.active_context?.context_type === 'ORGANIZATION' && <OrganizationFinanceWorkspace key={`${me.user_id}:${me.active_context.organization_id}:${me.active_context.context_version}`} client={client} me={me} language={language} presentationTargets={{ section: navigation.section, organizationSection, organizationName, credits: creditTarget, management: organizationFinanceTarget, feedback: financeFeedbackTarget }} />}
   </AccountPortalLayout>;
   return <main className={`ap-shell ap-app ${portal ? 'ap-portal' : 'ap-desktop'}`}>
     <header><h1>{copy.title}</h1><select aria-label={copy.language} value={language} onChange={event => onLanguageChange(event.target.value)}>{supportedLocales.map(locale => <option key={locale} value={locale}>{localeNames[locale]}</option>)}</select><button disabled={busy} onClick={() => void refresh()}>{copy.refresh}</button><button disabled={busy} onClick={logout}>{copy.logout}</button></header>
