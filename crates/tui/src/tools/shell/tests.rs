@@ -3697,6 +3697,8 @@ fn killed_shell_does_not_wait_for_blocked_reader_threads() {
         completion_reported: false,
         bounded_output: None,
         stdin: None,
+        stdin_closed_at_eof: false,
+        stdin_write_stalled: false,
         child: None,
         stop_unconfirmed: false,
         windows_job: None,
@@ -5073,9 +5075,9 @@ async fn inline_stdin_payload_over_the_cap_refuses() {
 /// refuses further writes without another wait — two writers could
 /// interleave on one pipe.
 // Unix-only: the bounded write (worker + deadline) the test exercises is
-// `#[cfg(unix)]`; on Windows the write is deliberately blocking under the
-// per-call cap, so the non-reading child would wedge to this test's own
-// 30 s guard instead of erroring.
+// `#[cfg(unix)]`, as are the raw-mode tty semantics it pins; the
+// Windows/ohos owned path is bounded by the same deadline through
+// `bounded_stdin_write_owned` and covered by its own helper test.
 #[cfg(unix)]
 #[test]
 fn write_stdin_to_a_child_that_stops_consuming_errors_instead_of_wedging() {
@@ -5158,7 +5160,7 @@ fn write_stdin_to_a_child_that_stops_consuming_errors_instead_of_wedging() {
         verdict
     });
     let _ = receiver
-        .recv_timeout(std::time::Duration::from_secs(30))
+        .recv_timeout(std::time::Duration::from_secs(60))
         .expect("the bounded-write pin hung: the STDIN_WRITE_DEADLINE regression is live");
     handle
         .join()
@@ -5202,7 +5204,7 @@ async fn interact_payload_over_the_cap_refuses() {
 fn guidance_states_the_foreground_stdin_contract() {
     let description = super::guidance::description();
     assert!(
-        description.contains("Foreground commands without `interactive` or `combined_output` run without a terminal stdin"),
+        description.contains("Foreground commands without `interactive`, `tty`, or `combined_output` run without a terminal stdin"),
         "guidance must state the bounded foreground stdin: {description}"
     );
     assert!(
@@ -5248,6 +5250,10 @@ async fn foreground_without_stdin_data_gives_stdin_readers_eof() {
          and exit promptly, not run to the timeout; took {elapsed:?}: {}",
         result.content
     );
+    // The elapsed bound is a unix pin: on Windows a cold PowerShell startup
+    // can legitimately approach the 3000 ms watchdog under parallel load,
+    // while `success` above already fails if the watchdog killed the run.
+    #[cfg(unix)]
     assert!(
         elapsed < Duration::from_millis(2900),
         "EOF must be delivered right after spawn, not discovered at the \
@@ -5575,6 +5581,102 @@ fn interact_write_to_a_stalled_tty_command_is_bounded() {
         });
     assert!(verdict.is_ok(), "{verdict:?}");
 }
+/// An explicit `close_stdin` on a terminal task whose last write already
+/// STALLED must stay bounded and must not claim an end-of-file the
+/// abandoned worker never delivered: the stall conjunct skips the ^D
+/// delivery, the close releases the handle, and the tail refusal still
+/// names the stall. A mutation that claims EOF unconditionally on the
+/// terminal close (dropping the stall conjunct) reddens on the refusal
+/// text; a close that wedges on the full input queue trips the outer
+/// guard instead.
+#[cfg(all(unix, not(target_env = "ohos")))]
+#[test]
+fn close_stdin_on_a_stalled_terminal_task_is_bounded_and_claims_no_eof() {
+    let (sender, receiver) = std::sync::mpsc::channel::<Result<(), String>>();
+    let handle = std::thread::spawn(move || {
+        let run = || -> Result<(), String> {
+            let tmp = tempdir().map_err(|error| error.to_string())?;
+            let mut manager = ShellManager::new(tmp.path().to_path_buf());
+            let result = manager
+                // Same shape as the stalled-write pin above: a raw-mode
+                // tty whose command never reads backpressures the master
+                // write, and the marker only prints after `stty` succeeds.
+                .execute_with_options_env(
+                    "stty raw -echo 2>/dev/null && printf RAW-READY; sleep 60",
+                    None,
+                    60_000,
+                    true,
+                    None,
+                    true,
+                    None,
+                    HashMap::new(),
+                )
+                .map_err(|error| error.to_string())?;
+            let task_id = result
+                .task_id
+                .ok_or_else(|| "background execution should return task_id".to_string())?;
+            let mut raw_ready = false;
+            for _ in 0..40 {
+                std::thread::sleep(Duration::from_millis(150));
+                let snapshot = manager.inspect_job(&task_id).expect("inspect job").snapshot;
+                if snapshot.stdout_tail.contains("RAW-READY") {
+                    raw_ready = true;
+                    break;
+                }
+            }
+            assert!(
+                raw_ready,
+                "raw mode must be established before the stalled write: {:?}",
+                manager.inspect_job(&task_id).expect("inspect job").snapshot
+            );
+            let payload = "x".repeat(200 * 1024);
+            let error = manager
+                .write_stdin(&task_id, &payload, false)
+                .err()
+                .ok_or_else(|| "the stalled tty write must error at the deadline".to_string())?
+                .to_string();
+            if !error.contains("did not complete within") {
+                return Err(error);
+            }
+            // The close itself must return promptly (bounded path, stall
+            // guard) instead of wedging on the full input queue.
+            let started = std::time::Instant::now();
+            manager
+                .write_stdin(&task_id, "", true)
+                .map_err(|error| error.to_string())?;
+            if started.elapsed() > STDIN_WRITE_DEADLINE {
+                return Err(format!(
+                    "the close on a stalled terminal task must not wait on the queue: {:?}",
+                    started.elapsed()
+                ));
+            }
+            // And the tail refusal must still report the stall: no EOF was
+            // delivered, so claiming end-of-file here would be a lie.
+            let after_close = manager
+                .write_stdin(&task_id, "y", false)
+                .err()
+                .ok_or_else(|| "the post-close write must be refused".to_string())?
+                .to_string();
+            if !after_close.contains("stalled") || after_close.contains("end-of-file") {
+                return Err(format!(
+                    "a terminal close after a stall must not claim an EOF that never landed: {after_close}"
+                ));
+            }
+            manager.kill(&task_id).map_err(|error| error.to_string())?;
+            Ok(())
+        };
+        let verdict = run();
+        let _ = sender.send(verdict.clone());
+        verdict
+    });
+    let verdict = receiver
+        .recv_timeout(Duration::from_secs(60))
+        .unwrap_or_else(|_| {
+            let _ = handle.join();
+            Err("the stalled-terminal-close test hung past its 60 s guard".to_string())
+        });
+    assert!(verdict.is_ok(), "{verdict:?}");
+}
 /// The owned-writer bounded stdin write (the Windows/ohos fallback path):
 /// a consuming child gets the payload and the writer handed back; a child
 /// that never reads fills its pipe buffer and past the deadline the helper
@@ -5594,7 +5696,8 @@ fn bounded_stdin_write_owned_returns_the_writer_and_times_out_clean() {
         .expect("cat spawns");
     let stdin = child.stdin.take().expect("stdin piped");
     let (returned, result) =
-        super::bounded_stdin_write_owned(super::StdinWriter::Pipe(stdin), b"hello\n".to_vec());
+        super::bounded_stdin_write_owned(super::StdinWriter::Pipe(stdin), b"hello\n".to_vec())
+            .expect("the bounded-write worker thread must spawn");
     let Ok(result) = result else {
         panic!("a consuming child must complete the write, not lose the worker: {result:?}");
     };
@@ -5613,7 +5716,8 @@ fn bounded_stdin_write_owned_returns_the_writer_and_times_out_clean() {
     let payload = vec![b'x'; 256 * 1024]; // well past the 64 KiB pipe buffer
     let started = std::time::Instant::now();
     let (returned, result) =
-        super::bounded_stdin_write_owned(super::StdinWriter::Pipe(stdin), payload);
+        super::bounded_stdin_write_owned(super::StdinWriter::Pipe(stdin), payload)
+            .expect("the bounded-write worker thread must spawn");
     let elapsed = started.elapsed();
     assert!(
         matches!(result, Err(std::sync::mpsc::RecvTimeoutError::Timeout)),
@@ -5916,6 +6020,11 @@ fn bash_schema_stdin_max_length_matches_the_enforced_inline_cap() {
     }
 }
 
+// The ^D close delivery is compiled only for the unix PTY lane (the same
+// predicate as the `PtyFile` variant): Windows has no console EOF to
+// deliver and ohos has no tty lane at all, so both the exit and the
+// end-of-file refusal assertions below are meaningless there.
+#[cfg(all(unix, not(target_env = "ohos")))]
 #[tokio::test]
 async fn interact_close_stdin_delivers_eof_to_a_terminal_command() {
     // Base delivered end-of-file to a terminal task through the ownership
