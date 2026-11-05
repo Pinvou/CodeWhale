@@ -13763,3 +13763,30 @@ fn strict_pipeline_scope_is_official_deepseek_family_routes() {
         );
     }
 }
+
+#[test]
+fn strict_tool_mode_for_route_combines_the_flag_with_the_official_route_gate() {
+    // One composition answers for the engine turn surface, the child
+    // sub-agent surface, and the doctor — the user flag alone must never
+    // enable the pipeline, and an official URL alone must not either.
+    assert!(super::strict_tool_mode_for_route(
+        true,
+        ApiProvider::Deepseek,
+        "https://api.deepseek.com/beta"
+    ));
+    assert!(!super::strict_tool_mode_for_route(
+        false,
+        ApiProvider::Deepseek,
+        "https://api.deepseek.com/beta"
+    ));
+    assert!(!super::strict_tool_mode_for_route(
+        true,
+        ApiProvider::Openai,
+        "https://api.deepseek.com/beta"
+    ));
+    assert!(!super::strict_tool_mode_for_route(
+        true,
+        ApiProvider::Deepseek,
+        "https://llm.example.com/v1"
+    ));
+}

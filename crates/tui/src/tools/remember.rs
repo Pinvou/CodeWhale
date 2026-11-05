@@ -75,7 +75,12 @@ impl ToolSpec for RememberTool {
                     "description": "Native backend scope; defaults to global. workspace requires a git repository with an origin."
                 }
             },
-            "required": []
+            // `note` is required at runtime for every writing action
+            // (`execute` rejects its absence), so the schema says so. An
+            // all-optional schema would leave strict mode nothing to keep:
+            // DeepSeek's strict contract removes optional properties, which
+            // would leave this tool callable only with an empty object.
+            "required": ["note"]
         })
     }
 

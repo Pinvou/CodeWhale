@@ -982,7 +982,9 @@ pub fn requested_model_for_provider(provider: ApiProvider, model: &str) -> Optio
 /// The pipeline (`prepare_tools_for_strict_mode` plus
 /// `tool_choice: "required"`) encodes DeepSeek's beta strict contract: every
 /// property required, `additionalProperties: false`, optional properties
-/// removed, `minItems`/`maxItems`/`minLength`/`maxLength` stripped. Applied
+/// removed, `minItems`/`maxItems`/`minLength`/`maxLength`/`dependentRequired`
+/// stripped, and schemas carrying undocumented `nullable`/null-type union
+/// shapes left non-strict. Applied
 /// anywhere else it would strip keywords the other provider's documents
 /// explicitly support (OpenAI, for one, documents `minItems`/`maxItems`) and
 /// remove optional properties no other provider's contract asks to remove.
@@ -1011,6 +1013,15 @@ pub fn route_is_official_deepseek_family(provider: ApiProvider, base_url: &str) 
                 .is_some_and(|rest| rest.starts_with('/'))
     };
     official_host("https://api.deepseek.com") || official_host("https://api.deepseeki.com")
+}
+
+/// Whether the DeepSeek strict tool pipeline (schema reshaping plus
+/// `tool_choice: "required"`) acts on a route: the user flag AND the
+/// official-route gate. The engine turn-surface build, the child sub-agent
+/// surface, and the doctor all answer from this one composition so the
+/// surfaces can never disagree about where strict mode is in scope.
+pub fn strict_tool_mode_for_route(flag: bool, provider: ApiProvider, base_url: &str) -> bool {
+    flag && route_is_official_deepseek_family(provider, base_url)
 }
 
 /// Reject a provider/model tuple that we can be confident is invalid *before*
@@ -3101,10 +3112,12 @@ pub struct Config {
     /// schema reshaping follows DeepSeek's strict documents and would
     /// otherwise strip keywords other providers document (e.g. OpenAI's
     /// `minItems`/`maxItems`). On those routes optional parameters are removed
-    /// from the schema (reported in the tool description) and non-numeric
-    /// `const` values land on `enum`, per the strict contract. Schemas with
-    /// root alternatives stay non-strict to avoid changing optional/one-of
-    /// tool semantics.
+    /// from the schema (reported in the tool description), non-numeric
+    /// `const` values land on `enum`, and `dependentRequired` tables are
+    /// stripped, per the strict contract. Schemas the strict subset cannot
+    /// represent faithfully — root alternatives, or required nullables
+    /// (`nullable` / null-type union branches) — stay non-strict: they keep
+    /// their original schema and `tool_choice` falls back to `auto`.
     pub strict_tool_mode: Option<bool>,
     /// Additional user-owned system-prompt sources concatenated in declared
     /// order (#454). Paths are expanded via `expand_path` so `~` and env vars
