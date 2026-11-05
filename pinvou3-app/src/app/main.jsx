@@ -27,7 +27,7 @@ import { useSystemDarkMode } from '../hooks/useSystemDarkMode.js';
 import { useModalIsolation } from '../hooks/useModalIsolation.js';
 import { refreshModelAccessAfterAuthentication } from '../features/settings/model-access.js';
 import { COLOR_SCHEME_STORAGE_KEY, normalizeColorScheme, readStoredColorScheme, resolveTheme } from '../shared/color-scheme.js';
-import { DEFAULT_CHAT_TITLES, dict, createLatestLanguageGate, ensureLanguage, ensureLanguageWithZhFallback, LANG_TO_TAG, initialSystemLanguage, SEARCH_KEY_PROVIDERS, TAG_TO_LANG, zhDict, accountPlatformCopy, organizationCopy } from '../shared/i18n.js';
+import { CHAT_RECOVERY_COPY, DEFAULT_CHAT_TITLES, dict, createLatestLanguageGate, ensureLanguage, ensureLanguageWithZhFallback, LANG_TO_TAG, initialSystemLanguage, SEARCH_KEY_PROVIDERS, TAG_TO_LANG, zhDict, accountPlatformCopy, organizationCopy } from '../shared/i18n.js';
 import { mountWhenLanguageReady } from '../shared/entry-boot.js';
 import { formatSessionDate, localDateKey, formatDateGroupLabel } from '../shared/date-utils.js';
 import { groupSessionsWithProjects, resolveSessionProjectId, needsAddFolderConfirm, WORKSPACE_KIND_BOUND } from '../features/projects/projectGrouping.js';
@@ -1445,6 +1445,7 @@ const App = () => {
         window.PinvouWebClientStrings = misc.webClientErrors;
         // platform/tauri/bridge 下的非模块脚本通过同一入口读取当前语言。
         window.PinvouTauriBridgeStrings = misc.tauriBridge;
+        window.PinvouChatRecoveryCopy = CHAT_RECOVERY_COPY;
       }, [t]);
       // 有可用新版 → 侧边栏设置图标亮红点（不弹窗不打断）
       const hasUpdate = !!(bs && bs.updateInfo && bs.updateInfo.available);

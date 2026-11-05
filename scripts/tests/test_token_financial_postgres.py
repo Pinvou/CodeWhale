@@ -1723,6 +1723,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
 
     def test_wallet_receipt_roots_cannot_be_omitted_or_skipped(self):
         self.assertEqual(RUNNER.OWNER_REQUIRED, {
+            "TestPaymentActionAdmissionPostgres",
             "TestF06OrganizationWalletRequiresLifecycleEvidence",
             "TestTokenWalletReceiptSignedClientRecoveryPostgres",
             "TestTokenWalletReceiptConservationAndLifecyclePostgres",
