@@ -1177,6 +1177,138 @@ fn diagnostic_failed_stream_is_not_discarded_as_a_user_cancellation() {
 }
 
 #[test]
+fn diagnostic_late_terminal_cannot_write_a_successor_context() {
+    fn submit(t: &BehaviorTelemetry, lease: &CollectionLease, session: &str) -> TaskAttempt {
+        let attempt = TaskAttempt {
+            attempt_id: token("attempt_", 16),
+            submitted_at: now_ms(),
+            admitted_at: None,
+            turn_id: None,
+            mode: "assistant".into(),
+            initiator_type: "user".into(),
+            input_type: "text".into(),
+            has_attachment: false,
+            first_output_emitted: false,
+            generation: lease.generation,
+            collection_period_id: lease.collection_period_id.clone(),
+        };
+        t.tasks
+            .lock()
+            .unwrap()
+            .insert(session.into(), attempt.clone());
+        let mut event =
+            events::task_fields(BehaviorEvent::new("task_submitted"), session, &attempt);
+        diagnostics::enrich(t, &mut event, lease);
+        attempt
+    }
+    fn admit(
+        t: &BehaviorTelemetry,
+        lease: &CollectionLease,
+        session: &str,
+        attempt: &mut TaskAttempt,
+        turn: &str,
+    ) {
+        attempt.admitted_at = Some(now_ms());
+        attempt.turn_id = Some(turn.into());
+        t.tasks
+            .lock()
+            .unwrap()
+            .insert(session.into(), attempt.clone());
+        let mut event =
+            events::task_fields(BehaviorEvent::new("task_admitted"), session, attempt).turn(turn);
+        diagnostics::enrich(t, &mut event, lease);
+    }
+    fn model_failure(
+        t: &BehaviorTelemetry,
+        lease: &CollectionLease,
+        session: &str,
+        attempt: &TaskAttempt,
+        turn: &str,
+    ) {
+        let mut event = events::task_fields(BehaviorEvent::new("task_finished"), session, attempt)
+            .turn(turn)
+            .status("failed")
+            .integer("duration_ms", 1)
+            .string("error_category", "model_error");
+        diagnostics::enrich(t, &mut event, lease);
+        assert_eq!(event.fields["diagnostic_code"], "stream_unexpected_eof");
+    }
+    let _home = TestHome::new();
+    let runtime = test_runtime("http://localhost:1");
+    let telemetry = test_telemetry(runtime.clone(), heartbeat_state(&runtime));
+    let lease = telemetry.current_lease().unwrap();
+    for source in [false, true] {
+        for accepted in [false, true] {
+            let session = format!("successor_{}_{}", source as u8, accepted);
+            let mut old = submit(&telemetry, &lease, &session);
+            admit(&telemetry, &lease, &session, &mut old, "old_turn");
+            telemetry.capture_failure_context(&session, "old_turn", "unexpected EOF", source);
+            model_failure(&telemetry, &lease, &session, &old, "old_turn");
+
+            // Real task-state/field shapes, in the reachable race order:
+            // new submission -> history copy -> old terminal resumes.
+            let mut next = submit(&telemetry, &lease, &session);
+            let mut copied = BehaviorEvent::new("response_copied")
+                .session(&session)
+                .turn("old_turn")
+                .string("content_type", "text");
+            diagnostics::enrich(&telemetry, &mut copied, &lease);
+            let mut cached = serde_json::to_value(&*telemetry.diagnostics.lock().unwrap()).unwrap();
+            assert!(cached["contexts"][&session]["turn"].is_null());
+            // Cached/display turn data is not authoritative, even if it was
+            // opportunistically bound by an older writer. The actual task is
+            // still pending and must independently reject this old source.
+            cached["contexts"][&session]["turn"] = json!("old_turn");
+            *telemetry.diagnostics.lock().unwrap() = serde_json::from_value(cached).unwrap();
+            telemetry.capture_failure_context(&session, "old_turn", "unexpected EOF", source);
+            telemetry.capture_failure_context(&session, "", "unexpected EOF", source);
+            let cached = serde_json::to_value(&*telemetry.diagnostics.lock().unwrap()).unwrap();
+            assert!(cached["contexts"][&session]["code"].is_null());
+            if accepted {
+                // The SAME new submission must still admit and retain its
+                // own model EOF after an old copy, not just a clean third one.
+                admit(&telemetry, &lease, &session, &mut next, "new_turn");
+                let mut old_admission =
+                    events::task_fields(BehaviorEvent::new("task_admitted"), &session, &old)
+                        .turn("old_turn");
+                diagnostics::enrich(&telemetry, &mut old_admission, &lease);
+                telemetry.capture_failure_context(&session, "old_turn", "unexpected EOF", source);
+            } else {
+                // A guard rejection removes the pending authoritative record.
+                telemetry.tasks.lock().unwrap().remove(&session);
+                let mut rejected =
+                    events::task_fields(BehaviorEvent::new("task_rejected"), &session, &next)
+                        .string("error_category", "configuration_missing");
+                diagnostics::enrich(&telemetry, &mut rejected, &lease);
+                assert_eq!(rejected.fields["diagnostic_code"], "configuration_missing");
+                next = submit(&telemetry, &lease, &session);
+                admit(&telemetry, &lease, &session, &mut next, "new_turn");
+            }
+            telemetry.capture_failure_context(&session, "new_turn", "unexpected EOF", source);
+            model_failure(&telemetry, &lease, &session, &next, "new_turn");
+            // Real legacy-cache deserialization remains supported, but a
+            // missing submission marker cannot authorize a model source.
+            let mut saved = serde_json::to_value(&*telemetry.diagnostics.lock().unwrap()).unwrap();
+            saved["contexts"][&session]["code"] = Value::Null;
+            saved["contexts"][&session]["http"] = Value::Null;
+            let mut legacy = saved.clone();
+            legacy["contexts"][&session]
+                .as_object_mut()
+                .unwrap()
+                .remove("attempt");
+            legacy["contexts"][&session]["code"] = Value::Null;
+            *telemetry.diagnostics.lock().unwrap() = serde_json::from_value(legacy).unwrap();
+            telemetry.capture_failure_context(&session, "new_turn", "unexpected EOF", source);
+            let legacy = serde_json::to_value(&*telemetry.diagnostics.lock().unwrap()).unwrap();
+            assert!(legacy["contexts"][&session]["code"].is_null());
+            *telemetry.diagnostics.lock().unwrap() = serde_json::from_value(saved).unwrap();
+            telemetry.capture_failure_context(&session, "new_turn", "unexpected EOF", source);
+            model_failure(&telemetry, &lease, &session, &next, "new_turn");
+        }
+    }
+}
+
+#[test]
 fn diagnostic_tool_metadata_survives_enrichment_validation_and_persistence() {
     let _home = TestHome::new();
     let runtime = test_runtime("http://localhost:1");
