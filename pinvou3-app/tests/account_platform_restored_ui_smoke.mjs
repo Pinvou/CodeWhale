@@ -191,6 +191,23 @@ try {
     await page.waitForSelector('.adm-organization-directory .adm-name-link');
     assert.equal(new URL(page.url()).searchParams.get('organization_q'), 'sample');
   });
+  await run('organization member removal has a named action and cancellable target dialog in all locales', async () => {
+    for (const language of ['zh', 'en', 'ja']) {
+      await fresh('?mode=admin&section=organizations&organization_id=33333333-3333-4333-8333-333333333333&organization_tab=members');
+      await page.select('.adm-sidebar-foot select', language);
+      const words = await page.evaluate(() => window.restored.copy().organization);
+      await page.waitForFunction(label => [...document.querySelectorAll('[data-workspace=members] details button')].some(button => button.textContent.trim() === label), {}, words.remove);
+      await page.click('[data-workspace=members] details summary');
+      await click('[data-workspace=members] details button', words.remove);
+      await page.waitForSelector('[role=dialog] .ap-org-action-target');
+      assert.equal(await page.$eval('[role=dialog] h2', node => node.textContent), words.remove);
+      const target = await page.$eval('[role=dialog] .ap-org-action-target', node => node.textContent);
+      assert.ok(target.includes('Sample member') && target.includes('22222222-2222-4222-8222-222222222222'));
+      await page.keyboard.press('Escape');
+      await page.waitForFunction(() => !document.querySelector('[role=dialog]'));
+      assert.equal(await page.evaluate(() => window.restored.calls.filter(call => call.method !== 'GET' && !call.url.endsWith('/account/bootstrap')).length), 0);
+    }
+  });
   await run('organization fieldless dialogs identify targets before confirmation and retain unknown writes', async () => {
     const orgID = '33333333-3333-4333-8333-333333333333', unitID = '44444444-4444-4444-8444-444444444444';
     for (const language of ['zh', 'en', 'ja']) for (const operation of ['deleteUnit', 'disable', 'enable']) {
