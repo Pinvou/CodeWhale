@@ -506,7 +506,7 @@ const jsxStubFile = path.join(stubDir, 'jsx-stub.mjs');
 writeFileSync(reactStubFile, REACT_STUB_SOURCE);
 writeFileSync(jsxStubFile, JSX_STUB_SOURCE);
 
-const { createServer } = await import('vite');
+const { createServer } = await import('./helpers/vite-fixture.mjs');
 const vite = await createServer({
   configFile: false,
   root: path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..'),

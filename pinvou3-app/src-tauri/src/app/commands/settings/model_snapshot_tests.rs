@@ -92,6 +92,12 @@ fn readable_model_list_preserves_linked_default_without_credential_refresh_or_wr
             .unwrap()
             .model;
         assert_eq!(snapshot.active_model_id.as_deref(), Some("linked-default"));
+        assert_eq!(
+            snapshot.default_model_ref,
+            Some(crate::platform::prefs::ModelSelectionRef::local(
+                "linked-default"
+            ))
+        );
         assert_eq!(model.model_store_card_id.as_deref(), Some("cleanup-card"));
         assert!(!model.model_store_link_detached);
         assert_eq!(
@@ -169,7 +175,13 @@ fn write_cleanup_candidate() -> Vec<u8> {
             "model": "other-wire", "base_url": "https://example.test/v1", "provider_kind": "custom"
         })).unwrap(),
     ];
-    prefs.advanced.active_model_id = Some("cleanup-default".to_string());
+    prefs
+        .set_default_model_ref(crate::platform::prefs::ModelSelectionRef::local(
+            "cleanup-default",
+        ))
+        .unwrap();
+    prefs.record_explicit_model_context_selection("cleanup-default");
+    prefs.record_explicit_model_context_selection("user-fallback");
     let original = serde_json::to_vec(&prefs).unwrap();
     std::fs::write(crate::platform::paths::settings_path(), &original).unwrap();
     let snapshot = list(Some(true)).unwrap();
@@ -285,20 +297,42 @@ fn readable_store_cleanup_preserves_pending_credentials_after_candidate_read() {
 }
 
 #[test]
-fn readable_store_cleanup_removes_default_and_preserves_unrelated_preferences() {
+fn readable_store_cleanup_clears_typed_default_and_preserves_unrelated_preferences() {
     with_temp_home("readable-cleanup-default", || {
         write_cleanup_candidate();
+        let before = UserPrefs::load_read_only_model_snapshot().unwrap();
+        assert_eq!(
+            before.advanced.default_model_ref,
+            Some(crate::platform::prefs::ModelSelectionRef::local(
+                "cleanup-default"
+            ))
+        );
+        assert!(!before.advanced.default_model_selection_revision.is_empty());
         let store = crate::platform::credential_store::RecordingCredentialStore::new();
         assert!(
             delete_model_if_store_link_inner("cleanup-default", "cleanup-card", &store).unwrap()
         );
         let after = UserPrefs::load_read_only_model_snapshot().unwrap();
+        assert_strict_selection_round_trip(&after);
         assert!(after.model_by_id("cleanup-default").is_none());
         assert!(after.model_by_id("user-fallback").is_some());
+        assert!(after.advanced.default_model_ref.is_none());
+        assert!(after.advanced.active_model_id.is_none());
         assert_eq!(
-            after.advanced.active_model_id.as_deref(),
-            Some("user-fallback")
+            after.advanced.default_model_selection_revision,
+            before.advanced.default_model_selection_revision
         );
+        assert_eq!(
+            after.advanced.account_platform_default_model,
+            before.advanced.account_platform_default_model
+        );
+        assert!(
+            !after
+                .advanced
+                .model_store_context_repairs
+                .contains_key("cleanup-default")
+        );
+        assert!(after.has_explicit_model_context_selection("user-fallback"));
         assert!(!after.memory_enabled);
         assert_eq!(
             after.advanced.custom_model_name.as_deref(),
@@ -383,7 +417,7 @@ fn readable_store_transaction_rejects_invalid_state_before_any_callbacks() {
 #[test]
 fn readable_store_transaction_commits_before_callback_and_keeps_lock_held() {
     with_temp_home("readable-cleanup-transaction-barrier", || {
-        write_cleanup_candidate();
+        let before: UserPrefs = serde_json::from_slice(&write_cleanup_candidate()).unwrap();
         let path = crate::platform::paths::settings_path();
         let committed = std::cell::Cell::new(false);
         let returned = UserPrefs::update_readable_model_transaction_with_post_commit(
@@ -396,15 +430,34 @@ fn readable_store_transaction_commits_before_callback_and_keeps_lock_held() {
                 let persisted: UserPrefs =
                     serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
                 assert!(persisted.model_by_id("cleanup-default").is_none());
+                assert!(persisted.advanced.active_model_id.is_none());
+                assert!(persisted.advanced.default_model_ref.is_none());
                 assert_eq!(
-                    persisted.advanced.active_model_id.as_deref(),
-                    Some("user-fallback")
+                    persisted.advanced.default_model_selection_revision,
+                    before.advanced.default_model_selection_revision
                 );
+                assert_eq!(
+                    persisted.advanced.account_platform_default_model,
+                    before.advanced.account_platform_default_model
+                );
+                assert!(persisted.model_by_id("user-fallback").is_some());
+                assert!(!persisted.has_explicit_model_context_selection("cleanup-default"));
+                assert!(persisted.has_explicit_model_context_selection("user-fallback"));
                 committed.set(true);
             },
         )
         .unwrap();
         assert!(committed.get());
+        assert!(returned.advanced.active_model_id.is_none());
+        assert!(returned.advanced.default_model_ref.is_none());
+        assert_eq!(
+            returned.advanced.default_model_selection_revision,
+            before.advanced.default_model_selection_revision
+        );
+        assert_eq!(
+            returned.advanced.account_platform_default_model,
+            before.advanced.account_platform_default_model
+        );
         assert_eq!(
             serde_json::to_value(&returned).unwrap(),
             serde_json::from_slice::<serde_json::Value>(&std::fs::read(path).unwrap()).unwrap()
@@ -588,4 +641,209 @@ fn readable_store_legacy_cleanup_migrates_thinking_once_without_changing_readonl
             Some("off")
         );
     });
+}
+
+#[test]
+fn readable_store_cleanup_preserves_other_local_and_account_defaults() {
+    use crate::platform::prefs::{ModelSelectionRef, SavedModel};
+    let selections = [
+        ModelSelectionRef::local("user-fallback"),
+        ModelSelectionRef::account_platform(SavedModel::builtin_account_platform().model),
+    ];
+    for (index, selection) in selections.into_iter().enumerate() {
+        with_temp_home(&format!("readable-cleanup-other-default-{index}"), || {
+            write_cleanup_candidate();
+            let mut prefs = UserPrefs::load_read_only_model_snapshot().unwrap();
+            prefs.set_default_model_ref(selection.clone()).unwrap();
+            let before = prefs.clone();
+            std::fs::write(
+                crate::platform::paths::settings_path(),
+                serde_json::to_vec(&prefs).unwrap(),
+            )
+            .unwrap();
+            let store = crate::platform::credential_store::RecordingCredentialStore::new();
+            assert!(
+                delete_model_if_store_link_inner("cleanup-default", "cleanup-card", &store)
+                    .unwrap()
+            );
+            let after = UserPrefs::load_read_only_model_snapshot().unwrap();
+            assert_strict_selection_round_trip(&after);
+            assert!(after.model_by_id("cleanup-default").is_none());
+            assert_eq!(after.advanced.default_model_ref, Some(selection));
+            assert_eq!(
+                after.advanced.active_model_id,
+                before.advanced.active_model_id
+            );
+            assert_eq!(
+                after.advanced.default_model_selection_revision,
+                before.advanced.default_model_selection_revision
+            );
+            assert_eq!(
+                after.advanced.account_platform_default_model,
+                before.advanced.account_platform_default_model
+            );
+            assert_eq!(
+                after.model_by_id("user-fallback"),
+                before.model_by_id("user-fallback")
+            );
+            let account_id = SavedModel::builtin_account_platform().id;
+            assert_eq!(
+                after.model_by_id(&account_id),
+                before.model_by_id(&account_id)
+            );
+            assert!(
+                !after
+                    .advanced
+                    .model_store_context_repairs
+                    .contains_key("cleanup-default")
+            );
+            assert!(after.has_explicit_model_context_selection("user-fallback"));
+            assert!(!after.memory_enabled);
+            assert_eq!(
+                after.advanced.custom_model_name,
+                before.advanced.custom_model_name
+            );
+            assert_eq!(
+                store.ops(),
+                vec!["delete:pinvou3-model-api-key:model:cleanup-default".to_string()]
+            );
+        });
+    }
+}
+
+#[test]
+fn readable_model_list_migrates_legacy_account_reference_only_in_memory() {
+    use crate::platform::prefs::{ModelSelectionRef, SavedModel};
+    with_temp_home("readable-list-legacy-account", || {
+        let mut prefs = UserPrefs::default();
+        let mut legacy = SavedModel::builtin_account_platform();
+        let catalog = legacy.model.clone();
+        let current_id = legacy.id.clone();
+        legacy.id = "builtin_llmapi".to_string();
+        prefs.advanced.saved_models = vec![legacy];
+        prefs.advanced.active_model_id = Some("builtin_llmapi".to_string());
+        let path = crate::platform::paths::settings_path();
+        let original = serde_json::to_vec(&prefs).unwrap();
+        std::fs::write(&path, &original).unwrap();
+        let entries = home_entries();
+        let snapshot = list(Some(true)).unwrap();
+        assert_eq!(
+            snapshot.active_model_id.as_deref(),
+            Some(current_id.as_str())
+        );
+        assert_eq!(
+            snapshot.default_model_ref,
+            Some(ModelSelectionRef::account_platform(catalog))
+        );
+        assert!(snapshot.models.iter().any(|row| row.model.id == current_id));
+        assert!(
+            !snapshot
+                .models
+                .iter()
+                .any(|row| row.model.id == "builtin_llmapi")
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        assert_eq!(
+            home_entries(),
+            entries,
+            "strict projection creates no keyring artifacts"
+        );
+    });
+}
+
+#[test]
+fn readable_store_cleanup_last_user_keeps_builtin_without_selecting_it() {
+    use crate::platform::prefs::SavedModel;
+    with_temp_home("readable-cleanup-last-local-model", || {
+        write_cleanup_candidate();
+        let mut prefs = UserPrefs::load_read_only_model_snapshot().unwrap();
+        prefs.remove_model("user-fallback");
+        std::fs::write(
+            crate::platform::paths::settings_path(),
+            serde_json::to_vec(&prefs).unwrap(),
+        )
+        .unwrap();
+        let store = crate::platform::credential_store::RecordingCredentialStore::new();
+        assert!(
+            delete_model_if_store_link_inner("cleanup-default", "cleanup-card", &store).unwrap()
+        );
+        let after = UserPrefs::load_read_only_model_snapshot().unwrap();
+        assert_strict_selection_round_trip(&after);
+        let builtin_id = SavedModel::builtin_account_platform().id;
+        assert_eq!(after.advanced.saved_models.len(), 1);
+        assert_eq!(after.advanced.saved_models[0].id, builtin_id);
+        assert!(after.advanced.default_model_ref.is_none());
+        assert!(after.advanced.active_model_id.is_none());
+        assert!(
+            !after
+                .advanced
+                .model_store_context_repairs
+                .contains_key("cleanup-default")
+        );
+        assert_eq!(
+            store.ops(),
+            vec!["delete:pinvou3-model-api-key:model:cleanup-default".to_string()]
+        );
+    });
+}
+
+/// A cleanup commit must survive both independent strict readers and a later
+/// strict write transaction. None is intentional authority, not a migration hint.
+fn assert_strict_selection_round_trip(expected: &UserPrefs) {
+    let assert_selection = |actual: &UserPrefs| {
+        assert_eq!(
+            actual.advanced.default_model_ref,
+            expected.advanced.default_model_ref
+        );
+        assert_eq!(
+            actual.advanced.active_model_id,
+            expected.advanced.active_model_id
+        );
+        assert_eq!(
+            actual.advanced.default_model_selection_revision,
+            expected.advanced.default_model_selection_revision
+        );
+        assert_eq!(
+            actual.advanced.account_platform_default_model,
+            expected.advanced.account_platform_default_model
+        );
+        assert_eq!(actual.model_selection_schema_version, 1);
+        assert_eq!(actual.model_path_schema_version, 1);
+        assert_eq!(
+            actual.advanced.model_store_context_repairs,
+            expected.advanced.model_store_context_repairs
+        );
+    };
+    let path = crate::platform::paths::settings_path();
+    let committed = std::fs::read(&path).unwrap();
+    let disk: UserPrefs = serde_json::from_slice(&committed).unwrap();
+    assert_selection(&disk);
+    assert_selection(&UserPrefs::load_existing_read_only_model_snapshot().unwrap());
+    assert_selection(&UserPrefs::load_read_only_model_snapshot().unwrap());
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        committed,
+        "strict readers must not persist migrations"
+    );
+
+    let mutation_seen = std::cell::Cell::new(false);
+    let committed_seen = std::cell::Cell::new(false);
+    let writable = UserPrefs::update_readable_model_transaction_with_post_commit(
+        |prefs| {
+            assert_selection(prefs);
+            mutation_seen.set(true);
+            Ok(())
+        },
+        || committed_seen.set(true),
+    )
+    .unwrap();
+    assert!(mutation_seen.get());
+    assert!(committed_seen.get());
+    assert_selection(&writable); // Includes the production post-commit writable reload.
+    let recommitted = std::fs::read(&path).unwrap();
+    let disk: UserPrefs = serde_json::from_slice(&recommitted).unwrap();
+    assert_selection(&disk);
+    assert_selection(&UserPrefs::load_existing_read_only_model_snapshot().unwrap());
+    assert_selection(&UserPrefs::load_read_only_model_snapshot().unwrap());
+    assert_eq!(std::fs::read(&path).unwrap(), recommitted);
 }

@@ -153,10 +153,9 @@
         return [name, function () { return Promise.reject(new Error("diagnostic_platform_unsupported")); }];
       })
     )),
-    llmapi: {},
     vllm: domain(["discoverLocalVllm"]),
-    models: domain(["loadModels", "saveModel", "revealModelApiKey", "deleteModel", "deleteModelIfStoreLink", "setActiveModel", "loadSessionModel", "switchModel", "testModelConnection", "getImageInputCapability", "testImageInputCapability", "probeLocalServerKind"]),
-    interaction: domain(["toggleSuperPerm", "acceptPlan", "discardPlan", "exitPlanToYolo", "setPlanModeNext", "setDraftMode", "setModeLane", "refreshModeDefaults", "getCodePermissionPrefs", "confirmCodeYolo", "syncModeState", "planStuckReplan", "planStuckGo", "submitUserInput", "cancelUserInput", "summonPinvou", "inspectPinvou", "resolvePinvouReview", "dismissPinvouReview", "editLastTurn"]),
+    models: domain(["getEffectiveModelConfig", "loadEffectiveModelConfig", "loadModels", "saveModel", "revealModelApiKey", "deleteModel", "deleteModelIfStoreLink", "setActiveModel", "loadSessionModel", "switchModel", "switchModelRef", "testModelConnection", "getImageInputCapability", "testImageInputCapability", "probeLocalServerKind"]),
+    interaction: domain(["toggleSuperPerm", "acceptPlan", "discardPlan", "exitPlanToYolo", "setPlanModeNext", "setDraftMode", "setModeLane", "refreshModeDefaults", "getCodePermissionPrefs", "confirmCodeYolo", "syncModeState", "planStuckReplan", "planStuckGo", "submitUserInput", "cancelUserInput", "summonPinvou", "inspectPinvou", "resolvePinvouReview", "dismissPinvouReview", "editLastTurn", "compactNow"]),
     rendering: domain(["renderMarkdown"]),
     remoteControl: domain(["getWebRelaySettings", "setWebRelayAddress"], {
       startRemoteControl: "enableWebAccess",

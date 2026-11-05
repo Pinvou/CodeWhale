@@ -1,0 +1,100 @@
+# Standalone production dependency project. Do not merge development Compose.
+name: pinvou-production-dependencies
+services:
+  postgres:
+    # Immutable local image ID/digest, verified and imported before starting.
+    image: ${POSTGRES_IMAGE:?set verified PostgreSQL 17 image digest}
+    pull_policy: never
+    user: "999:999"
+    entrypoint: ["/bin/sh", "/opt/pinvou/production/postgres-entrypoint.sh"]
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 1g
+    cpus: 1.0
+    pids_limit: 192
+    ulimits:
+      core: {soft: 0, hard: 0}
+    logging:
+      driver: local
+      options: {max-size: "10m", max-file: "3"}
+    environment:
+      PGDATA: /var/lib/postgresql/data
+      POSTGRES_USER: account_platform_admin
+      POSTGRES_DB: postgres
+      POSTGRES_PASSWORD_FILE: /run/pinvou/postgres-admin/password
+      POSTGRES_INITDB_ARGS: --encoding=UTF8 --locale=C --auth-local=scram-sha-256 --auth-host=scram-sha-256
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=16m,uid=999,gid=999,mode=1700
+      - /var/run/postgresql:rw,noexec,nosuid,nodev,size=8m,uid=999,gid=999,mode=0700
+    volumes:
+      - type: bind
+        source: ${POSTGRES_DATA_DIRECTORY:?set new private PostgreSQL data directory}
+        target: /var/lib/postgresql/data
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${POSTGRES_TLS_DIRECTORY:?set PostgreSQL-only leaf certificate directory}
+        target: /run/pinvou/postgres-tls
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${POSTGRES_ADMIN_DIRECTORY:?set PostgreSQL-only administrator password directory}
+        target: /run/pinvou/postgres-admin
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${POSTGRES_BOOTSTRAP_DIRECTORY:?set one-time database bootstrap directory}
+        target: /run/pinvou/postgres-bootstrap
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ./postgres.conf
+        target: /etc/pinvou/postgres/postgres.conf
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ./pg_hba.conf
+        target: /etc/pinvou/postgres/pg_hba.conf
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ./postgres-init.sh
+        target: /docker-entrypoint-initdb.d/10-pinvou.sh
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ./postgres-common.sh
+        target: /opt/pinvou/production/postgres-common.sh
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ./postgres-entrypoint.sh
+        target: /opt/pinvou/production/postgres-entrypoint.sh
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ./postgres-health.sh
+        target: /opt/pinvou/production/postgres-health.sh
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ../compose/init-databases.sh
+        target: /opt/pinvou/init-databases.sh
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ../compose/validate-database-secrets.sh
+        target: /opt/pinvou/validate-database-secrets.sh
+        read_only: true
+        bind: {create_host_path: false}
+    healthcheck:
+      test: ["CMD", "/bin/sh", "/opt/pinvou/production/postgres-health.sh"]
+      interval: 10s
+      timeout: 5s
+      start_period: 20s
+      retries: 6
+    networks: [data]
+networks:
+  data:
+    internal: true

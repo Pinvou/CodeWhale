@@ -11,6 +11,16 @@ import { parseSelection, runSelected } from "../run-frontend-smokes.mjs";
 const item = (kind, target) => ({ kind, target });
 const label = ({ kind, target }) => `${kind}:${target}`;
 
+test('unconfirmed resource retirement stops without retrying or starting the next item', async () => {
+  const calls = [];
+  await assert.rejects(runSelected([item('node', 'first'), item('node', 'second')], {
+    attempts: 2,
+    settleMs: 0,
+    run: async current => { calls.push(current.target); throw Object.assign(new Error('owned tree still live'), { cleanupFailed: true }); },
+  }), /owned tree still live/);
+  assert.deepEqual(calls, ['first']);
+});
+
 const runnerCli = path.join(
   path.dirname(fileURLToPath(import.meta.url)),
   "..",

@@ -19,7 +19,7 @@
 //! - a poll watcher picks spool files up, re-validates them (server-side
 //!   checks are not trusted — the spool directory is user-writable), and
 //!   creates the session through the panel's own `create_session_record`
-//!   semantics (`SessionStore::create_new` with the app-default model and
+//!   semantics (`SessionStore::create_new_inheriting_default` with the app-default model and
 //!   workspace unless the request pins a saved model / binds an existing
 //!   directory; never `set_active` — a tool-created session must not steal
 //!   the user's focus, the one deliberate divergence from the Tauri
@@ -339,16 +339,16 @@ struct CreatedSession {
 /// engine pool). An explicit empty/blank id means "app default", matching
 /// the panel's creation path.
 fn resolve_creation_model(
-    default: (String, Option<String>),
+    default: (String, Option<String>, Option<String>),
     model_id: Option<&str>,
-) -> std::result::Result<(String, Option<String>), String> {
+) -> std::result::Result<(String, Option<String>, Option<String>), String> {
     match model_id.map(str::trim) {
         Some(id) if !id.is_empty() => {
             let prefs = UserPrefs::load();
             let Some(saved) = prefs.model_by_id(id) else {
                 return Err(format!("model_id '{id}' does not match a saved model"));
             };
-            Ok((saved.model.clone(), Some(saved.id.clone())))
+            Ok((saved.model.clone(), Some(saved.id.clone()), None))
         }
         _ => Ok(default),
     }
@@ -507,8 +507,8 @@ impl SessionCreator for PoolCreator<'_> {
             }
             _ => None,
         };
-        let (model, model_id) = resolve_creation_model(
-            self.pool.default_model_for_new_session(),
+        let (model, model_id, inherited_default_revision) = resolve_creation_model(
+            self.pool.default_model_for_new_session_with_origin(),
             input.model_id.as_deref(),
         )?;
         let workspace = binding
@@ -516,7 +516,7 @@ impl SessionCreator for PoolCreator<'_> {
             .unwrap_or_else(|| self.pool.bridge.workspace.clone());
         let session = self
             .store
-            .create_new(model, model_id, workspace)
+            .create_new_inheriting_default(model, model_id, workspace, inherited_default_revision)
             .map_err(|error| format!("create_new: {error:#}"))?;
         let id = session.metadata.id.clone();
         // Round-4 R2 / round-7 D: the work-lane default mirror (extracted
@@ -4941,10 +4941,16 @@ mod tests {
             Ok(())
         })
         .unwrap();
-        let default = ("app-default-model".to_string(), None);
-        let (model, model_id) = resolve_creation_model(default, Some("saved-model-1")).unwrap();
+        let default = (
+            "0199a100-0001-7000-8000-000000000106".to_string(),
+            Some(crate::platform::prefs::BUILTIN_ACCOUNT_PLATFORM_MODEL_ID.to_string()),
+            Some("0199a100-0001-7000-8000-000000000107".to_string()),
+        );
+        let (model, model_id, inherited_default_revision) =
+            resolve_creation_model(default, Some("saved-model-1")).unwrap();
         assert_eq!(model, "deepseek-v4-pro");
         assert_eq!(model_id.as_deref(), Some("saved-model-1"));
+        assert!(inherited_default_revision.is_none());
     }
 
     /// Review round-3 M4: the unknown-model rejection is the live creator's
@@ -4954,7 +4960,7 @@ mod tests {
     #[test]
     fn resolve_creation_model_rejects_unknown_ids_and_defaults_on_blank() {
         let _home = TempHome::new();
-        let default = ("app-default-model".to_string(), None);
+        let default = ("app-default-model".to_string(), None, None);
         // Unknown id under a fresh home (no saved models): rejected with the
         // named id, never silently defaulted.
         let error = resolve_creation_model(default.clone(), Some("no-such-model")).unwrap_err();
@@ -4964,9 +4970,45 @@ mod tests {
         );
         // Blank / whitespace / None all mean "app default".
         for blank in [Some("   "), Some(""), None] {
-            let (model, model_id) = resolve_creation_model(default.clone(), blank).unwrap();
+            let (model, model_id, inherited_default_revision) =
+                resolve_creation_model(default.clone(), blank).unwrap();
             assert_eq!(model, "app-default-model");
             assert!(model_id.is_none());
+            assert!(inherited_default_revision.is_none());
+        }
+    }
+
+    #[test]
+    fn resolve_creation_model_preserves_inherited_default_after_persistence() {
+        let _home = TempHome::new();
+        let store = store_with_requester();
+        let model_id = "0199a100-0001-7000-8000-000000000106";
+        let revision = "0199a100-0001-7000-8000-000000000107";
+        for requested in [None, Some(""), Some("   ")] {
+            let default = (
+                model_id.to_string(),
+                Some(crate::platform::prefs::BUILTIN_ACCOUNT_PLATFORM_MODEL_ID.to_string()),
+                Some(revision.to_string()),
+            );
+            let (model, carrier_id, inherited_default_revision) =
+                resolve_creation_model(default, requested).unwrap();
+            let session = store
+                .create_new_inheriting_default(
+                    model,
+                    carrier_id,
+                    std::env::temp_dir(),
+                    inherited_default_revision,
+                )
+                .unwrap();
+            assert_eq!(
+                store
+                    .with_inherited_platform_default(&session.metadata.id, model_id, |value| {
+                        Ok(value.map(str::to_owned))
+                    })
+                    .unwrap()
+                    .as_deref(),
+                Some(revision),
+            );
         }
     }
 
@@ -5607,7 +5649,18 @@ mod tests {
                 .find(needle)
                 .unwrap_or_else(|| panic!("the pipeline must {what}"))
         };
-        let create_new = locate(".create_new(", "create the session record");
+        let default_origin = locate(
+            ".default_model_for_new_session_with_origin(",
+            "capture the default selection origin",
+        );
+        let create_new = locate(
+            ".create_new_inheriting_default(",
+            "create the session record with its selection origin",
+        );
+        let compact: String = window.chars().filter(|c| !c.is_whitespace()).collect();
+        assert!(compact.contains(
+            ".create_new_inheriting_default(model,model_id,workspace,inherited_default_revision"
+        ));
         let mode_default = locate(
             "apply_work_lane_mode_default(self.store",
             "apply the work-lane mode default",
@@ -5619,7 +5672,11 @@ mod tests {
             "map the delivery outcome via the extracted fn's call site",
         );
         assert!(
-            create_new < mode_default && mode_default < bind && bind < title && title < outcome,
+            default_origin < create_new
+                && create_new < mode_default
+                && mode_default < bind
+                && bind < title
+                && title < outcome,
             "the pipeline order is load-bearing: create → mode-default → bind → title → outcome"
         );
     }

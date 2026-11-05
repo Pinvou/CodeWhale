@@ -360,6 +360,49 @@ pub fn cleanup_on_startup() -> OrphanCleanup {
 mod tests {
     use super::*;
     use std::process::Command;
+    use std::time::{Duration, Instant};
+
+    /// Own the exact fixture child through normal completion and assertion unwind.
+    /// Child caches its reaped exit status, so Drop cannot signal a reused PID.
+    struct FixtureSleeper(std::process::Child);
+
+    impl FixtureSleeper {
+        fn id(&self) -> u32 {
+            self.0.id()
+        }
+
+        fn wait(&mut self) -> std::io::Result<std::process::ExitStatus> {
+            self.0.wait()
+        }
+
+        fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
+            self.0.try_wait()
+        }
+    }
+
+    impl Drop for FixtureSleeper {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    fn fixture_exited(child: &mut FixtureSleeper, timeout: Duration) -> bool {
+        let started = Instant::now();
+        loop {
+            if child
+                .try_wait()
+                .expect("poll owned fixture child")
+                .is_some()
+            {
+                return true;
+            }
+            if started.elapsed() >= timeout {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
 
     /// 登记文件放在 data_dir 下，而 data_dir 由 HOME 决定——这是个
     /// 进程级的环境变量，db 的测试也在改它。必须用同一把跨模块的锁串行化，
@@ -378,17 +421,19 @@ mod tests {
     /// 是测试进程那一整棵树共用的），于是测试会拿着一个共用 pgid 去做清理，
     /// 顺手把同批跑的其它测试进程一起杀掉。setpgid 是子进程自己发的一条真
     /// 系统调用，模拟环境下同样可靠。
-    fn spawn_sleeper() -> std::process::Child {
+    fn spawn_sleeper() -> FixtureSleeper {
         use std::os::unix::process::CommandExt;
         let mut cmd = Command::new("sh");
-        cmd.arg("-c").arg("sleep 300");
+        // A shell-owned sleep survives a leader-only test cleanup. Replace the
+        // shell in place; explicit multi-process coverage uses the member below.
+        cmd.arg("-c").arg("exec sleep 300");
         unsafe {
             cmd.pre_exec(|| {
                 nix::unistd::setpgid(Pid::from_raw(0), Pid::from_raw(0))
                     .map_err(std::io::Error::from)
             });
         }
-        let child = cmd.spawn().unwrap();
+        let child = FixtureSleeper(cmd.spawn().unwrap());
         let pid = child.id() as i32;
         // 后面几个测试会照着记录里的 pgid 杀整个进程组。万一没建成独立进程组，
         // 那个 pgid 就是测试进程自己所在的组——宁可当场失败，也不能真的杀下去。
@@ -398,6 +443,50 @@ mod tests {
             "子进程必须自成进程组，否则清理测试会误杀同批进程"
         );
         child
+    }
+
+    fn spawn_group_member(leader: &FixtureSleeper) -> FixtureSleeper {
+        use std::os::unix::process::CommandExt;
+        let pgid = leader.id() as i32;
+        let mut command = Command::new("sleep");
+        command.arg("300");
+        unsafe {
+            command.pre_exec(move || {
+                nix::unistd::setpgid(Pid::from_raw(0), Pid::from_raw(pgid))
+                    .map_err(std::io::Error::from)
+            });
+        }
+        // Construct the guard before checking anything that may panic. Both
+        // members are direct owned children, independent of init/subreapers.
+        let member = FixtureSleeper(command.spawn().unwrap());
+        assert_ne!(member.id(), leader.id());
+        assert_eq!(proc_stat(member.id() as i32).unwrap().0, pgid);
+        member
+    }
+
+    #[test]
+    fn fixture_drop_retires_the_owned_child_after_an_assertion_unwind() {
+        let child = spawn_sleeper();
+        let pid = child.id() as i32;
+        let result = std::panic::catch_unwind(move || {
+            let _child = child;
+            panic!("controlled fixture unwind");
+        });
+        assert!(result.is_err());
+        assert!(proc_stat(pid).is_none(), "fixture Drop must kill and reap");
+    }
+
+    #[test]
+    fn fixture_member_survives_a_leader_only_kill() {
+        let mut leader = spawn_sleeper();
+        let mut member = spawn_group_member(&leader);
+        leader.0.kill().unwrap();
+        assert!(
+            !fixture_exited(&mut member, Duration::from_millis(100)),
+            "the real group member must distinguish kill(pid) from killpg"
+        );
+        // Reverse local drop order retires the member before reaping its group
+        // leader. No fixture signal can precede the liveness assertion above.
     }
 
     /// 校验 /proc/<pid>/stat 的字段位置有没有数错——数错一位就会拿着别人的
@@ -475,7 +564,9 @@ mod tests {
     fn cleanup_kills_orphan_process_group() {
         with_temp_data_dir(|| {
             let mut child = spawn_sleeper();
+            let mut member = spawn_group_member(&child);
             let pid = child.id() as i32;
+            let member_pid = member.id() as i32;
             // 模拟「应用被强杀、没来得及销号」：登记之后把 guard forget 掉
             std::mem::forget(RunGuard::register(pid, false, "下载测试模型"));
             assert_eq!(load_unlocked().len(), 1);
@@ -484,6 +575,14 @@ mod tests {
             assert_eq!(report.killed, vec!["下载测试模型".to_string()]);
             assert!(load_unlocked().is_empty(), "处理完必须清空登记文件");
 
+            // Keep the leader unreaped (and its PID pinned) until the actual
+            // production group cleanup has demonstrably retired the member.
+            // A leader-only kill must fail here; RAII runs only after failure.
+            assert!(
+                fixture_exited(&mut member, Duration::from_secs(3)),
+                "production group cleanup left the owned member alive"
+            );
+            assert!(proc_stat(member_pid).is_none(), "进程组成员应已收掉");
             let _ = child.wait();
             assert!(proc_stat(pid).is_none(), "残留进程应已被收掉");
         });

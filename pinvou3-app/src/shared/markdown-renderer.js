@@ -58,12 +58,18 @@ export function renderMarkdownMarkup(text) {
 }
 
 export function renderMarkdown(text) {
-  const html = renderMarkdownMarkup(text);
-  const domPurify = getPurifier();
-  if (!domPurify || typeof domPurify.sanitize !== 'function') {
-    return escapeCodeHtml(String(text || ''));
+  const source = String(text || '');
+  try {
+    const html = renderMarkdownMarkup(source);
+    const domPurify = getPurifier();
+    if (domPurify && typeof domPurify.sanitize === 'function') {
+      return domPurify.sanitize(html, SANITIZE_OPTIONS);
+    }
+  } catch {
+    // Rendering untrusted Markdown must not interrupt turn cleanup. Discard
+    // partial HTML and use the same escaped-text fallback as a missing purifier.
   }
-  return domPurify.sanitize(html, SANITIZE_OPTIONS);
+  return escapeCodeHtml(source);
 }
 
 export function installGlobalMarkdownRenderer(target = window) {

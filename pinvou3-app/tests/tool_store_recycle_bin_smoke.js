@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+const finishFixtures = require('./helpers/fixture-exit.cjs');
 /**
  * 插件中心回收站冒烟:加载 Vite dist + mock Tauri(desktop,可写权限),
  * 验证回收站入口(chips 行)、子页面切换(标题+返回按钮,主列表消失)、
@@ -14,11 +15,11 @@ const fs = require('fs'), path = require('path'), os = require('os');
 const { startUiTestServer } = require('./ui_test_server');
 
 function loadPuppeteer() {
-  try { return require('puppeteer-core'); } catch { /* fall through */ }
+  try { return require('./helpers/puppeteer-fixture.cjs'); } catch { /* fall through */ }
   const npx = path.join(os.homedir(), '.npm', '_npx');
   if (fs.existsSync(npx)) for (const d of fs.readdirSync(npx)) {
     const p = path.join(npx, d, 'node_modules', 'puppeteer-core');
-    if (fs.existsSync(p)) try { return require(p); } catch { /* next */ }
+    if (fs.existsSync(p)) try { return require('./helpers/browser-fixture.cjs').wrapNative(require(p)); } catch { /* next */ }
   }
   console.error('SKIP: 找不到 puppeteer-core');
   process.exit(2);
@@ -427,6 +428,6 @@ async function dismiss(page) {
     await browser.close();
   }
   console.log(failures ? `\n❌ ${failures} FAIL` : '\n✅ ALL PASS');
-  process.exit(failures ? 1 : 0);
+  finishFixtures(failures ? 1 : 0);
 // eslint-disable-next-line unicorn/prefer-top-level-await -- smoke script keeps its existing async main() structure
-})().catch(e => { console.error(e); process.exit(1); });
+})().catch(e => { console.error(e); finishFixtures(1); });

@@ -1,0 +1,13 @@
+DROP TRIGGER payment_stop_loss_evaluation_members_immutable ON payment_stop_loss_evaluation_members;
+DROP TRIGGER payment_stop_loss_evaluations_immutable ON payment_stop_loss_evaluations;
+DROP TRIGGER payment_provider_health_observations_immutable ON payment_provider_health_observations;
+DROP TRIGGER payment_stop_loss_policies_immutable ON payment_stop_loss_policies;
+DROP FUNCTION reject_payment_stop_loss_fact_mutation();
+ALTER TABLE payment_provider_controls DROP COLUMN reason_code;
+DROP TABLE payment_legacy_stop_loss_reviews;
+DROP TABLE payment_stop_loss_evaluation_members;
+DROP TABLE payment_stop_loss_evaluations;
+DROP VIEW payment_observation_gaps;
+DROP TABLE payment_provider_health_observations;
+DROP TABLE payment_provider_attempts;
+DROP TABLE payment_stop_loss_policies;

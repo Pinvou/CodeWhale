@@ -61,7 +61,7 @@ fn pending_route<'a>(
     card_id: Option<&str>,
 ) -> Option<&'a Route> {
     if row.model_store_link_detached
-        || row.is_builtin_llmapi()
+        || row.is_builtin_account_platform()
         || !row.is_operator_owned_endpoint()
         || prefs.has_explicit_model_context_selection(&row.id)
     {

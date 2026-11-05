@@ -11,7 +11,7 @@ const composerSource = readSource('features/settings/composer-shared.jsx');
 // Execute the actual non-JSX handler with its React closure inputs. Keep the
 // next JSX boundary explicit so source movement fails instead of testing a copy.
 const handlerStart = composerSource.indexOf('      function setReasoningEffortForCurrent(tier) {');
-const handlerEnd = composerSource.indexOf('\n      if (!savedModels.length) return null;', handlerStart);
+const handlerEnd = composerSource.indexOf('\n      async function pick(modelRef) {', handlerStart);
 assert.ok(handlerStart >= 0 && handlerEnd > handlerStart, 'the real composer handler boundaries must exist');
 const handlerSource = composerSource.slice(handlerStart, handlerEnd);
 

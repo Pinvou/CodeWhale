@@ -1,0 +1,45 @@
+[
+  {
+    "subject": "__APPROVAL_RECOVERY_WORKLOAD_SUBJECT__",
+    "service": "account-approval-recovery",
+    "permissions": [
+      "internal.token.approval-effect.read",
+      "internal.token.approval-result.read"
+    ]
+  },
+  {
+    "subject": "__BILLING_WORKLOAD_SUBJECT__",
+    "service": "billing-service",
+    "permissions": [
+      "internal.token.hold-expiry.prove",
+      "internal.token.usage.waive"
+    ]
+  },
+  {
+    "subject": "__ACCOUNT_WORKLOAD_SUBJECT__",
+    "service": "account-service",
+    "permissions": [
+      "internal.authorization.check",
+      "internal.token.approval-effect.read",
+      "internal.token.approval-result.read",
+      "internal.token.approval-snapshot.read",
+      "internal.token.approval-proof.read",
+      "internal.token.client-readiness.read",
+      "internal.token.client-readiness.attest",
+      "internal.token.organization.lifecycle",
+      "internal.token.organization-unit.lifecycle",
+      "internal.token.account-closure.assess",
+      "internal.token.account-closure.replay-clear"
+    ]
+  },
+  {
+    "subject": "__TOKEN_EXECUTOR_WORKLOAD_SUBJECT__",
+    "service": "token-command-executor",
+    "permissions": [
+      "internal.authorization.check",
+      "internal.token.model-lifecycle.execute",
+      "internal.token.catalog-rollback.execute",
+      "internal.token.credential-revoke.execute"
+    ]
+  }
+]
