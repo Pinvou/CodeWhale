@@ -8,7 +8,6 @@ use std::collections::HashSet;
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tempfile::{Builder as TempDirBuilder, tempdir};
-
 mod launch_receipt;
 mod operation_identity;
 fn built_in_whale_name_that_cannot_be_generated_for(agent_id: &str) -> &'static str {
@@ -5477,7 +5476,6 @@ fn subagent_tool_schemas_advertise_real_type_and_role_vocabulary() {
         "worktree description should teach isolated parallel edits: {worktree}"
     );
 }
-
 // The wait surfaces block the turn, so the model-facing text must disclose
 // the bounded block (default 30s, max 120s) and the timed_out receipt shape;
 // an undisclosed finite block reads as a hang when nothing settles.
@@ -5539,7 +5537,6 @@ fn wait_schema_text_discloses_timeout_bound_and_timed_out_receipt() {
          the timed_out receipt:\n{wait_description}"
     );
 }
-
 // The two wait faces advertise from two independent constant sets, so each
 // face's own pin can stay green while the surfaces drift numerically apart;
 // this cross-assertion closes that gap.
@@ -7555,7 +7552,6 @@ fn synthetic_deferred_tool(name: &str, description_bytes: usize) -> Tool {
         cache_control: None,
     }
 }
-
 // Pinvou fork: the toolbox size bounds are disabled (see the constant docs in
 // core/session.rs). Upstream tests that construct near-budget activations to
 // fire bounds eviction or oversize rejection are not carried here — those
@@ -8097,10 +8093,42 @@ fn verifier_roster_description_states_the_bounded_contract() {
         description.contains("unless a read-only-shell parent clamped its shell authority"),
         "roster description must condition the gates on shell authority — a clamped child keeps probes and loses gates: {description}"
     );
-    // The Agent-tool `type` description carries the same truth, briefly.
+    // The Agent-tool `type` description carries the same truth, briefly —
+    // including the two clauses the model needs before picking: the gates
+    // clamp under a read-only-shell parent, and custom commands are refused.
     assert!(
         SUBAGENT_TYPE_DESCRIPTION.contains("test: runs the built-in verification gates"),
         "type description must match the roster: {SUBAGENT_TYPE_DESCRIPTION}"
+    );
+    assert!(
+        SUBAGENT_TYPE_DESCRIPTION.contains("custom commands are refused"),
+        "type description must refuse custom commands: {SUBAGENT_TYPE_DESCRIPTION}"
+    );
+    assert!(
+        SUBAGENT_TYPE_DESCRIPTION
+            .contains("a read-only-shell parent clamps the gates (probes remain)"),
+        "type description must condition the gates on the parent shell: {SUBAGENT_TYPE_DESCRIPTION}"
+    );
+    // The fleet roster slot blurb is the third roster surface a model reads
+    // (built-in members feed `AgentProfile.description`); it must not
+    // advertise builds or a shell the fleet envelope never grants.
+    let fleet_blurb = FleetRoster::built_in_members()
+        .into_iter()
+        .find(|member| member.id == "verifier")
+        .unwrap_or_else(|| panic!("built-in roster must carry the verifier slot"))
+        .description
+        .unwrap_or_else(|| panic!("built-in verifier slot must carry a description"));
+    assert!(
+        fleet_blurb.contains("built-in verification gates"),
+        "fleet roster blurb must name the built-in gates: {fleet_blurb}"
+    );
+    assert!(
+        fleet_blurb.contains("holds no shell"),
+        "fleet roster blurb must disclaim the shell the fleet envelope refuses: {fleet_blurb}"
+    );
+    assert!(
+        !fleet_blurb.contains("builds and tests"),
+        "fleet roster blurb must not re-overclaim builds: {fleet_blurb}"
     );
 }
 /// Acceptance for the verifier lane, sibling of
@@ -12940,7 +12968,6 @@ async fn prompt_only_general_cannot_mutate_under_parent_auto_approve() {
     assert!(!tmp.path().join("forbidden.txt").exists());
     assert!(!tmp.path().join("shell.txt").exists());
 }
-
 const MCP_ACTION_TOOL: &str = "mcp_github_create_pull_request";
 fn subagent_registry_with_mcp_action(auto_approve: bool) -> SubAgentToolRegistry {
     let mut runtime = stub_runtime();
@@ -18959,7 +18986,6 @@ async fn shared_scope_budget_stops_admitted_children_mid_run() {
 /// Clears the process-wide rate-limit window on drop so a panicking test
 /// body cannot leak a live pause into concurrently running tests.
 struct ClearRateLimitOnDrop;
-
 impl Drop for ClearRateLimitOnDrop {
     fn drop(&mut self) {
         crate::retry_status::clear_rate_limit();
@@ -22883,7 +22909,6 @@ fn user_follow_up_to_completed_child_requires_a_runtime_to_resume() {
 }
 
 // === child permission gate: the session posture applied to a worker's calls ===
-
 mod child_permission_gate {
     use super::*;
     use crate::approval_log::{ApprovalOutcome, ApprovalReceipt, ApprovalReceiptStore};
@@ -23955,7 +23980,6 @@ async fn agent_claim_is_withheld_from_a_role_with_no_write_authority() {
         .to_string();
     assert!(refusal.contains("no write authority to widen"), "{refusal}");
 }
-
 // Regression (stopship scout repair): the workflow's read-only scout
 // activates `grep_files` with one `tool_search` call before searching. That
 // two-step path only works while the scout surface keeps a first-turn-active
@@ -24008,7 +24032,6 @@ async fn forkguard_scout_surface_keeps_tool_search_grep_files_activation_path() 
         "the hidden File alias must stay out of scout catalogs"
     );
 }
-
 // Regression (stopship scout repair, Pinvou #490 phantom-tool class): fleet
 // workflow briefs are model-facing text too. The scout brief must name tools
 // the child catalog can actually see (`tool_search`, `grep_files`) and never
@@ -24050,7 +24073,6 @@ fn forkguard_workflow_briefs_name_catalog_visible_tools() {
         "workflow briefs must not command calls a catalog can never return: {cited:?}"
     );
 }
-
 // Behavioral counterpart to the two composition guards above: on the scout's
 // live surface, one `tool_search` call must make the deferred `grep_files`
 // dispatchable through the same gate the child step loop uses, while the
@@ -24179,7 +24201,6 @@ fn forkguard_subagent_skill_catalog_uses_tool_search_discovery() {
     );
     assert!(!catalog.contains("try `load_skill` directly anyway"));
 }
-
 // Worker records, takeover targets, and transcript artifact descriptions all
 // point the parent at `handle_read`, which is deferred on stock hosts; every
 // prose site that names it must carry the `tool_search` activation hint so
