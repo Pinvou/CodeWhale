@@ -3617,7 +3617,8 @@ function formatAttachmentDisplayText(text, attachments) { return pinvouSharedweb
         failedItem.deliveryState = submission.lastErrorCode === "outcome_unknown"
           ? "unknown"
           : "failed";
-        failedItem.deliveryError = submission.lastError;
+        failedItem.deliveryError = window.PinvouBridgeMessages?.migrationRecoveryText?.(submission.lastError, state)
+          ?? submission.lastError;
       }
       restoreFirstTurnUiState(submission);
       notify();
