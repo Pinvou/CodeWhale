@@ -1403,7 +1403,10 @@ mod tests {
     fn installed_import_markers_gate_on_registered_cards() {
         use crate::features::model_store::platform::linux::db;
 
-        let ctx = super::config::TempHome::new();
+        // 生命周期守卫：临时 HOME 必须活到测试结束（`_ctx` 命名绑定保留
+        // 作用域内存活、同时让 deny(unused_variables) 不报——Linux CI
+        // 2026-11-05 评审 5783998563 P2）。
+        let _ctx = super::config::TempHome::new();
         db::init_db().expect("init store db");
         // 空库 → 空集合：没有任何在册卡片就没有未跟踪原目录引用的可能。
         let empty = crate::features::model_store::installed_import_markers_checked()

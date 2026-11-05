@@ -1015,10 +1015,9 @@ pub async fn remove_external_model(
             // 自取名原目录标记臂（2026-11-05 评审 P2 zhuowp 场景 II）：官方
             // 下载脚本按标记文件（model_index.json 等）在扫描根里发现原始模型
             // 目录再软链——原目录名是用户自取的，名字臂与路径臂都匹配不上。
-            // 目标（含 4 层子目录，与脚本 find -maxdepth 4 同界）出现标记文件
-            // + 本机仍有在册卡片 = 无法确认它不是在册卡片的就地导入原目录，
-            // fail-closed 拦截。误拦面与解除方式见
-            // installed_import_markers_checked 的文档。
+            // 目标子树内任意深度出现标记文件 + 本机仍有在册卡片 = 无法确认
+            // 它不是在册卡片的就地导入原目录，fail-closed 拦截。误拦面与解除
+            // 方式见 installed_import_markers_checked 的文档。
             let import_markers =
                 crate::features::model_store::installed_import_markers_checked()?;
             let installed_marker_hit = match weights_path.as_deref() {
@@ -1714,44 +1713,40 @@ fn target_matches_candidate_names(target: &Path, names: &[String]) -> bool {
     names.iter().any(|name| target.join(name).exists())
 }
 
-/// 自取名原目录标记判定（存在性探测，测试直打）：目标本身或其一级子目录里
-/// 是否存在官方卡片下载脚本「就地发现」所用的标记文件。
+/// 自取名原目录标记判定（存在性探测，测试直打）：目标子树内**任意深度**是否
+/// 存在官方卡片下载脚本「就地发现」所用的标记文件。
 ///
-/// 两级口径与 [`target_matches_candidate_names`] 的「叶删/父删」同一形状：
-/// - 叶删：目标就是原目录（官方脚本发现的正是含标记文件的那一层）；
-/// - 父删：目标是原目录的父目录（递归删除一级子目录同样毁掉原目录）。
-/// 走查深度与官方脚本同界：发现用 `find -maxdepth 4`（`-type f`），拦截
-/// 走查也到 4 层（目标自身算第 0 层）——脚本最多把这个深度内的任意名原
-/// 目录软链进约定路径，更深的位置不可能是链接源（2026-11-05 评审 P2：
-/// 一级-only 会漏 `releases/checkpoint/model_index.json` 这类深层专用容器，
-/// 而删除路径 `remove_dir_all` 是整树递归）。半径不是无界的：删除一个 4 层
-/// 内不含标记文件的目录（如普通 ~/Downloads）不会被拦。
+/// 深度不设上限（2026-11-05 评审两轮 P2 的结论）：脚本的
+/// `find -maxdepth 4` 是从**它当时配置的扫描根**起算的——扫描根列表可配置、
+/// 可能在旧版本被更换且不留历史，守卫无法知道那次发现的起算根在哪里；
+/// 待删目标相对那个根可以是任意深度（例如内层扫描根 `T/versions/release`、
+/// 外层删除目标 `T`，标记在 `T/versions/release/assets/models/checkpoint`）。
+/// 因此「目标子树内存在标记文件」= 无法确认它不是在册卡片的就地导入原目录
+/// → 拦截。删除路径 `remove_dir_all` 是整树递归，标记在子树任何深度都会被
+/// 一并毁掉。误拦面（装卡期间删除任何含 diffusers 标记的目录都会命中）与
+/// 解除方式（卸载在册卡片后本臂自动关闭）随拦截如实告知用户。
 ///
 /// 标记按 `is_file()` 判定（与脚本的 `find -type f` 同口径），同名目录不算；
 /// 单分支读不了（read_dir Err）按该分支未命中放行——目录不存在时后续删除
 /// 路径本就会按"已删除"收敛，读不了时 remove_dir_all 也会失败，都不产生
-/// 破坏窗口。标记集合为空（没有在册卡片）恒不命中。
+/// 破坏窗口。标记集合为空（没有在册卡片）恒不命中。走查半径以删除目标自身
+/// 的子树为界（删除的物理范围就是它），不是无界全盘扫描。
 fn target_contains_import_marker(target: &Path, markers: &[String]) -> bool {
     if markers.is_empty() {
         return false;
     }
-    // 与官方发现脚本的 `find -maxdepth 4` 同界（目标自身 = 第 0 层）。
-    const MAX_DISCOVERY_DEPTH: usize = 4;
     let has_marker = |dir: &Path| markers.iter().any(|m| dir.join(m).is_file());
-    let mut stack = vec![(target.to_path_buf(), 0_usize)];
-    while let Some((dir, depth)) = stack.pop() {
+    let mut stack = vec![target.to_path_buf()];
+    while let Some(dir) = stack.pop() {
         if has_marker(&dir) {
             return true;
-        }
-        if depth >= MAX_DISCOVERY_DEPTH {
-            continue;
         }
         let Ok(entries) = std::fs::read_dir(&dir) else {
             continue;
         };
         for entry in entries.flatten() {
             if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-                stack.push((entry.path(), depth + 1));
+                stack.push(entry.path());
             }
         }
     }
@@ -1764,7 +1759,7 @@ fn target_contains_import_marker(target: &Path, markers: &[String]) -> bool {
 fn ensure_recheck_free_of_import_markers(recheck: &Path, markers: &[String]) -> Result<(), String> {
     if target_contains_import_marker(recheck, markers) {
         return Err(
-            "拒绝删除：目标目录（或其 4 层子目录内，与官方脚本 find -maxdepth 4 同界）含有商店卡片就地发现模型所用的标记文件，无法确认它不是在册卡片软链引用的原始权重目录，为防误删已拒绝".to_string(),
+            "拒绝删除：目标目录子树内含有商店卡片就地发现模型所用的标记文件，无法确认它不是在册卡片软链引用的原始权重目录，为防误删已拒绝".to_string(),
         );
     }
     Ok(())
@@ -2362,7 +2357,7 @@ mod tests {
     // 的原始模型目录再软链——名字臂/路径臂对这种原目录失明。目标含标记文件
     // 且仍有在册卡片时必须拦（归属无法确认），删光在册卡片后自动放行。
     #[test]
-    fn import_marker_detection_bounded_at_script_depth() {
+    fn import_marker_detection_covers_whole_subtree() {
         let dir = TempDir::new("import-markers");
         let root = dir.path();
 
@@ -2388,38 +2383,35 @@ mod tests {
         std::fs::write(parent.join("inside-model").join("model_index.json"), "{}").unwrap();
         assert!(target_contains_import_marker(&parent, &markers));
 
-        // 2026-11-05 评审 P2（zhuowp 5783007585）的深层专用容器：脚本
-        // find -maxdepth 4 允许任意名原目录落在扫描根下 4 层——删除走查
-        // 与脚本同界（目标=第 0 层，最深查到第 4 层），整树递归删除不得
-        // 漏掉仍被软链引用的深层权重源。
+        // 2026-11-05 评审 P2（zhuowp 5783007585）的深层专用容器：任意名原
+        // 目录可落在删除目标的深层——整树递归删除不得漏掉仍被软链引用的
+        // 深层权重源。
         let container = root.join("assets").join("bundles").join("custom");
         let checkpoint = container.join("releases").join("checkpoint");
         std::fs::create_dir_all(&checkpoint).unwrap();
         std::fs::write(checkpoint.join("model_index.json"), "{}").unwrap();
         assert!(target_contains_import_marker(&container, &markers));
-        // 深度界以目标为第 0 层：标记文件所在目录最深第 4 层仍命中。
-        let deep4 = root.join("d1").join("d2").join("d3").join("d4");
-        std::fs::create_dir_all(&deep4).unwrap();
-        std::fs::write(deep4.join("model.safetensors.index.json"), "{}").unwrap();
-        assert!(target_contains_import_marker(&root.join("d1"), &markers));
 
-        // 深度界对照（两条独立链，不与上一断言共享浅层标记）：含标记的
-        // 目录恰在第 4 层 → 命中；第 5 层目录超出 find -maxdepth 4 的发现
-        // 半径，不可能成为链接源 → 不命中。
-        let chain5 = root.join("w1").join("w2").join("w3").join("w4").join("w5");
-        std::fs::create_dir_all(&chain5).unwrap();
-        std::fs::write(chain5.join("model_index.json"), "{}").unwrap();
-        assert!(target_contains_import_marker(&root.join("w1"), &markers));
-        let chain6 = root
-            .join("v1")
-            .join("v2")
-            .join("v3")
-            .join("v4")
-            .join("v5")
-            .join("v6");
-        std::fs::create_dir_all(&chain6).unwrap();
-        std::fs::write(chain6.join("model_index.json"), "{}").unwrap();
-        assert!(!target_contains_import_marker(&root.join("v1"), &markers));
+        // 2026-11-05 评审 P2（zhuowp 5783998563）起点谬误组合：内层扫描根
+        // R=T/versions/release（脚本 find -maxdepth 4 以 R 起算，S 相对 R
+        // 恰为第 4 层文件），外层删除目标 T——S 相对 T 是第 5 层，任何以
+        // 目标起算的深度上限都会漏。全子树走查必须命中。
+        let t = root.join("ai").join("private").join("bundle");
+        let s = t
+            .join("versions")
+            .join("release")
+            .join("assets")
+            .join("models")
+            .join("checkpoint");
+        std::fs::create_dir_all(&s).unwrap();
+        std::fs::write(s.join("model_index.json"), "{}").unwrap();
+        assert!(target_contains_import_marker(&t, &markers));
+
+        // 更深（第 6 层）同样命中：深度上限与脚本起点不同源，一并不设。
+        let deeper = s.join("sub").join("weights");
+        std::fs::create_dir_all(&deeper).unwrap();
+        std::fs::write(deeper.join("model_index.json"), "{}").unwrap();
+        assert!(target_contains_import_marker(&t, &markers));
 
         // 深层分支读不了：该分支按未命中放行（其余分支照常）。
         let unreadable = root.join("unreadable").join("sub");
