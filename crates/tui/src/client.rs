@@ -6600,9 +6600,11 @@ mod tests {
                 k3_request_fixture(crate::config::KIMI_CODE_K3_MODEL, Some("low"), streaming);
             let good = test_tool("compatible_lookup");
             let mut bad = test_tool("mcp_pattern_tool");
-            // `pattern` itself is live-verified legal on the Kimi Code route since
-            // 2026-11-04, so the incompatible-tool fixture uses `patternProperties`,
-            // which stays outside both route whitelists.
+            // One MFJS whitelist serves every Moonshot route: any unlisted
+            // keyword fails closed on all of them (see
+            // `probe_observed_keywords_fail_closed_on_every_route`), so
+            // `patternProperties` is simply one unlisted keyword used as the
+            // incompatible shape here — no route admits `pattern` either.
             bad.input_schema = json!({
                 "type": "object",
                 "properties": {"query": {"type": "string"}},
@@ -6700,9 +6702,11 @@ mod tests {
                 k3_request_fixture(crate::config::KIMI_CODE_K3_MODEL, Some("low"), streaming);
             let good = test_tool("compatible_lookup");
             let mut bad = test_tool("mcp_pattern_tool");
-            // `pattern` itself is live-verified legal on the Kimi Code route since
-            // 2026-11-04, so the incompatible-tool fixture uses `patternProperties`,
-            // which stays outside both route whitelists.
+            // One MFJS whitelist serves every Moonshot route: any unlisted
+            // keyword fails closed on all of them (see
+            // `probe_observed_keywords_fail_closed_on_every_route`), so
+            // `patternProperties` is simply one unlisted keyword used as the
+            // incompatible shape here — no route admits `pattern` either.
             bad.input_schema = json!({
                 "type": "object",
                 "properties": {"query": {"type": "string"}},
@@ -6770,9 +6774,11 @@ mod tests {
         let mut request = k3_request_fixture(crate::config::KIMI_CODE_K3_MODEL, Some("low"), true);
         let good = test_tool("compatible_lookup");
         let mut bad = test_tool("mcp_pattern_tool");
-        // `pattern` itself is live-verified legal on the Kimi Code route since
-        // 2026-11-04, so the incompatible-tool fixture uses `patternProperties`,
-        // which stays outside both route whitelists.
+        // One MFJS whitelist serves every Moonshot route: any unlisted
+        // keyword fails closed on all of them (see
+        // `probe_observed_keywords_fail_closed_on_every_route`), so
+        // `patternProperties` is simply one unlisted keyword used as the
+        // incompatible shape here — no route admits `pattern` either.
         bad.input_schema = json!({
             "type": "object",
             "properties": {"query": {"type": "string"}},
