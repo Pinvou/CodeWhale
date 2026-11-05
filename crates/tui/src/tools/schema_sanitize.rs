@@ -83,7 +83,8 @@ pub fn sanitize_for_strict(schema: &mut Value) {
 /// (https://docs.x.ai/developers/tools/function-calling) has since relaxed
 /// the rule — "A root `anyOf` or `oneOf` also works when every branch is
 /// itself an object" — so that documented-good shape now passes through with
-/// only semantics-preserving normalization and the dependent-keyword drop,
+/// only the shared normalization pass (its dangling-`required` prune
+/// included) and the dependent-keyword drop,
 /// while anything else (non-object roots, unions with a non-object branch,
 /// composite roots mixing a union with `allOf`/`enum`/`not`, both union
 /// keywords at once, malformed union values) still goes through the
@@ -102,13 +103,16 @@ pub fn sanitize_for_xai_parameters(parameters: &mut Value) -> Option<String> {
 /// for a parameters root ("A root `anyOf` or `oneOf` also works when every
 /// branch is itself an object").
 ///
-/// Everything the relaxation does not cover stays on the protective
-/// flattening pass: sibling root `allOf`/`enum`/`not`, both union keywords at
-/// once (the doc names one union, not an intersection), a present-but-
-/// malformed (non-array) union value, an empty union, and branches without an
-/// explicit object `type` — xAI's own 400 message for `apply_patch`'s bare
-/// required-groups called that union "an anyOf/oneOf union with a non-object
-/// branch".
+/// Any root whose composition is not a single documented-good union stays on
+/// the protective flattening pass: sibling root `allOf`/`enum`/`not`, both
+/// union keywords at once (the doc names one union, not an intersection), a
+/// present-but-malformed (non-array) union value, an empty union, and
+/// branches without an explicit object `type` — xAI's own 400 message for
+/// `apply_patch`'s bare required-groups called that union "an anyOf/oneOf
+/// union with a non-object branch". Other root-level keywords (annotations,
+/// `$defs`, `$ref`, `if`/`then`/`else`, …) are not root composition
+/// operators: they ride along beside the union exactly as they rode the
+/// flattening pass before.
 fn root_union_is_all_object_branches(schema: &Value) -> bool {
     let Some(obj) = schema.as_object() else {
         return false;
@@ -1521,6 +1525,81 @@ mod tests {
         assert_eq!(composite["type"], "object");
         assert!(composite.get("oneOf").is_none());
         assert!(composite.get("allOf").is_none());
+    }
+
+    #[test]
+    fn xai_sanitize_hoists_single_element_object_union() {
+        // A len-1 union of one object branch qualifies for the pass-through
+        // guard, and the shared pass collapses it to the equivalent plain
+        // object root — the one pass-through input whose output is not a
+        // union. Pin that collapse instead of an accidental union leak.
+        let mut schema = json!({
+            "oneOf": [
+                {
+                    "type": "object",
+                    "properties": {"path": {"type": "string"}},
+                    "required": ["path"]
+                }
+            ]
+        });
+
+        let note = sanitize_for_xai_parameters(&mut schema);
+
+        assert!(
+            schema.get("oneOf").is_none(),
+            "single-element union must collapse to the plain object: {schema}"
+        );
+        assert_eq!(schema["type"], "object");
+        assert_eq!(schema["required"], json!(["path"]));
+        assert!(schema["properties"].get("path").is_some());
+        assert_eq!(note, None);
+    }
+
+    #[test]
+    fn xai_sanitize_union_with_bare_required_branches_passes_through_pruned() {
+        // The disclosed registration-bypass edge (parent-engine MCP tools):
+        // object-typed branches whose only constraint is a bare `required`
+        // pass through with the dangling group pruned and no constraint note
+        // — the schema-level constraint is destroyed on both routes, and the
+        // flattening route's "parameter groups" note is not re-derived here.
+        // Pins the committed outcome the follow-up fix decision starts from.
+        let mut schema = json!({
+            "oneOf": [
+                {"type": "object", "required": ["patch"]},
+                {"type": "object", "required": ["changes"]}
+            ]
+        });
+
+        let note = sanitize_for_xai_parameters(&mut schema);
+
+        let branches = schema
+            .get("oneOf")
+            .and_then(Value::as_array)
+            .expect("the union must survive the pass-through route");
+        assert_eq!(branches.len(), 2);
+        for branch in branches {
+            assert_eq!(branch, &json!({"type": "object", "properties": {}}));
+        }
+        assert_eq!(
+            note, None,
+            "no parameter-groups note on the pass-through route"
+        );
+    }
+
+    #[test]
+    fn xai_sanitize_still_coerces_scalar_root_to_object() {
+        // The doc's 400 verdict names scalar/array roots, so they must stay on
+        // the protective flattening pass and its object coercion — a guard
+        // regression that admitted every root would ship the scalar verbatim.
+        let mut schema = json!({"type": "string"});
+
+        sanitize_for_xai_parameters(&mut schema);
+
+        assert_eq!(
+            schema,
+            json!({"type": "object", "properties": {}}),
+            "scalar root must take the flattening pass: {schema}"
+        );
     }
 
     #[test]
