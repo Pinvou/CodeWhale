@@ -5,6 +5,12 @@ use std::path::{Path, PathBuf};
 /// deterministic transfer tests can inject an owner without filesystem effects.
 pub(crate) trait AttachmentReadOwner: std::fmt::Debug + Send + Sync {
     fn path(&self) -> &Path;
+    fn read_path(&self) -> &Path {
+        self.path()
+    }
+    fn validate_scope(&self, root: &Path) -> std::io::Result<()> {
+        crate::platform::filesystem::validate_published_path_scope(self.path(), root)
+    }
     fn read_bounded(&self, maximum_bytes: u64) -> std::io::Result<Vec<u8>>;
     fn request_cleanup(&self);
 }
@@ -19,6 +25,12 @@ impl Eq for dyn AttachmentReadOwner {}
 impl AttachmentReadOwner for crate::platform::filesystem::PublishedPrivateFile {
     fn path(&self) -> &Path {
         self.path()
+    }
+    fn read_path(&self) -> &Path {
+        self.read_path()
+    }
+    fn validate_scope(&self, root: &Path) -> std::io::Result<()> {
+        self.validate_scope(root)
     }
     fn read_bounded(&self, maximum_bytes: u64) -> std::io::Result<Vec<u8>> {
         self.read_bounded(maximum_bytes)

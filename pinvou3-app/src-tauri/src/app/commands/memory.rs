@@ -1014,10 +1014,6 @@ pub async fn delete_timed_memory(
     })
 }
 
-/// 编辑/重发最后一轮 user 消息。
-/// engine 砍掉 session 末尾最近的 user+assistant 后，用 new_message 重发。
-/// 前端在调这个命令之前必须自己更新 state.messages（删最后一对，加新 user）。
-#[tauri::command]
 /// `edit_last_turn` 的乐观并发护栏：`expected` 与当前已落盘 transcript 的
 /// revision 不一致时拒绝编辑（不动 transcript、不消费 turn）。稳定错误码与
 /// store 的 `compare_and_swap_messages`（`session_revision_conflict`）同族；
@@ -1354,15 +1350,43 @@ mod tests {
             "delete timed memory: ",
         ];
         for marker in WEB_VISIBLE_ARM_MARKERS {
-            let pos = production
-                .find(marker)
-                .unwrap_or_else(|| panic!("web-visible arm {marker:?} must exist"));
-            let window = &production[pos..(pos + 260).min(production.len())];
+            let literal = format!("\"{marker}");
+            let positions: Vec<_> = production.match_indices(&literal).collect();
             assert!(
-                window.contains("redact_storage_prefix"),
-                "the web-visible memory error arm {marker:?} must fold the storage prefix \
-                 via redact_storage_prefix"
+                !positions.is_empty(),
+                "web-visible arm {marker:?} must exist"
             );
+            for (pos, _) in positions {
+                // Retain the complete error and both closing calls required by
+                // main, allowing only whitespace around the call boundaries.
+                let error_literal = format!("\"{marker}{{e}}\"");
+                assert!(
+                    production[pos..].starts_with(&error_literal),
+                    "the web-visible arm {marker:?} must retain its complete error text"
+                );
+                let call_end: String = production[pos + error_literal.len()..]
+                    .chars()
+                    .filter(|ch| !ch.is_whitespace())
+                    .take(2)
+                    .collect();
+                assert_eq!(
+                    call_end, "))",
+                    "the web-visible arm {marker:?} must close its format and redaction calls"
+                );
+                // The wrapper precedes its format string; a forward-sized
+                // window can miss it or accept an unrelated later wrapper.
+                // Check every arm's immediate call prefix, ignoring only the
+                // whitespace before the string so rustfmt cannot move the gate.
+                let prefix = production[..pos]
+                    .rsplit_once("redact_storage_prefix")
+                    .map(|(_, suffix)| suffix.split_whitespace().collect::<String>())
+                    .unwrap_or_default();
+                assert_eq!(
+                    prefix, "(&format!(",
+                    "the web-visible memory error arm {marker:?} must fold its own \
+                     storage prefix via redact_storage_prefix"
+                );
+            }
         }
         // `reserve edit_last_turn` 原始链按既定策略保持(桌面日志 only)。
         assert!(production.contains("reserve edit_last_turn: {e:#}"));

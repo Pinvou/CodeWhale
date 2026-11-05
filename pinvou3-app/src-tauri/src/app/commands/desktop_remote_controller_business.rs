@@ -4,7 +4,7 @@
 //! 任务接纳、任务取消）在这里落到既有的命令层实现上：三条路径都复用
 //! `desktop_remote_task` / `desktop_remote_capabilities` 的同一套逻辑，避免
 //! 「命令入口」与「wire 入口」两份实现漂移。
-// architecture-guard: allow-target-cfg -- Tests of anchored private publication require Windows sharing leases; the Windows Wry reader replay test also needs a test-only barrier at the real business port. Unsupported publication hosts get a separate fail-closed test, while runtime OS selection stays in platform::filesystem.
+// architecture-guard: allow-target-cfg -- Real upload route tests cover Windows sharing leases and Linux64 sealed sources; the Windows Wry reader replay test also needs a test-only barrier at the real business port. Unsupported publication hosts have a separate fail-closed test. Runtime OS selection stays in platform::filesystem.
 
 use crate::features::codex_acp::{AcpPool, RemotePermissionOwner};
 use serde_json::{Value, json};
@@ -1540,7 +1540,7 @@ mod dev19_replay_tests {
         assert!(local.is_empty());
     }
 
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, all(target_os = "linux", target_pointer_width = "64"))))]
     #[test]
     fn prepared_remote_input_rejects_unsupported_private_publication_without_accounting() {
         use crate::features::remote_control::controller::transfer::{
@@ -1578,7 +1578,7 @@ mod dev19_replay_tests {
         assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 0);
     }
 
-    #[cfg(windows)]
+    #[cfg(any(windows, all(target_os = "linux", target_pointer_width = "64")))]
     #[test]
     fn prepared_remote_input_consumes_real_completed_upload_and_local_empty_stays_local() {
         use crate::features::remote_control::controller::transfer::{
@@ -1673,7 +1673,7 @@ mod dev19_replay_tests {
         uploads.cleanup_for_task("task-1");
     }
 
-    #[cfg(windows)]
+    #[cfg(any(windows, all(target_os = "linux", target_pointer_width = "64")))]
     #[test]
     fn remote_admission_source_consumes_a_completed_receipt_exactly_once() {
         use crate::features::remote_control::controller::transfer::{

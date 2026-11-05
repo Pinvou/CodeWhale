@@ -1,5 +1,5 @@
 //! Anchored private upload staging and protected completed-file publication.
-// architecture-guard: allow-target-cfg -- Windows tests exercise mandatory sharing leases; runtime OS selection stays in platform::filesystem.
+// architecture-guard: allow-target-cfg -- Native Windows sharing-lease and Linux sealed-source tests verify OS guarantees; production OS selection stays in platform::filesystem.
 use super::core::{
     CompletedTransfer, TransferContext, TransferDirection, TransferHandle, TransferMetadata,
     is_safe_publication_file_name,
@@ -312,6 +312,75 @@ impl UploadStaging for SessionIsolationStaging {
     }
     fn abort(&self, id: &str) -> Result<(), String> {
         self.abort(id)
+    }
+}
+
+#[cfg(all(test, target_os = "linux", target_pointer_width = "64"))]
+mod linux_tests {
+    use super::super::core::TransferRegistry;
+    use super::super::upload::AttachmentUploads;
+    use super::*;
+    use crate::features::remote_control::controller::protocol::LeaseContext;
+
+    #[test]
+    fn real_upload_receipt_retains_sealed_source_until_consumers_release_it() {
+        use sha2::{Digest as _, Sha256};
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().to_owned();
+        let uploads = AttachmentUploads::new(
+            Arc::new(TransferRegistry::default()),
+            Arc::new(SessionIsolationStaging::new(Arc::new(move |_| {
+                Ok(path.clone())
+            }))),
+        );
+        let lease = LeaseContext {
+            connection_id: "connection-0001".into(),
+            controller_lease_id: "lease-0001".into(),
+            lease_epoch: "1".into(),
+            relay_epoch: "relay-epoch-0001".into(),
+            remote_control_generation: "generation-0001".into(),
+        };
+        let bytes = b"verified upload";
+        let begin = uploads
+            .begin(
+                TransferContext::new(
+                    &lease,
+                    "session-0001",
+                    "task-0001",
+                    TransferDirection::Upload,
+                )
+                .unwrap(),
+                TransferMetadata {
+                    file_name: "report.txt".into(),
+                    mime_type: "text/plain".into(),
+                    total_bytes: bytes.len() as u64,
+                    sha256: crate::platform::encoding::hex_lower(&Sha256::digest(bytes)),
+                },
+                1,
+            )
+            .unwrap();
+        uploads.accept_chunk(&begin.handle_id, 0, bytes, 2).unwrap();
+        let receipts = uploads
+            .consume_completed(
+                std::slice::from_ref(&begin.handle_id),
+                &lease,
+                "session-0001",
+                "task-0001",
+            )
+            .unwrap();
+        let owner = receipts[0].read_owner.as_ref().unwrap();
+        let read_path = owner.read_path().to_owned();
+        assert_eq!(std::fs::read(&read_path).unwrap(), bytes);
+        assert!(std::fs::write(&read_path, b"bad").is_err());
+        owner
+            .validate_scope(&root.path().join(STAGING_DIR))
+            .unwrap();
+        uploads.cleanup_for_task("task-0001");
+        assert_eq!(std::fs::read(&read_path).unwrap(), bytes);
+        drop(receipts);
+        uploads.expire(u64::MAX);
+        assert!(!read_path.exists());
+        assert!(!root.path().join(STAGING_DIR).join(begin.handle_id).exists());
     }
 }
 

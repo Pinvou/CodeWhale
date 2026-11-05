@@ -9,6 +9,7 @@
 
 use std::path::Path;
 
+use super::ingest_diagnostics::safe_error;
 use super::{IngestResult, binary_placeholder, estimate_tokens, redacted_secret_placeholder};
 
 /// 已知文本扩展名（txt/md/json/csv/...）的摄入：读字节 → 私钥内容兜底 → 统一解码。
@@ -29,7 +30,7 @@ pub(super) fn ingest_text(
                 &basename,
                 path,
                 byte_size,
-                format!("读取失败(可能不是文本): {e}"),
+                safe_error(format!("读取失败(可能不是文本): {e}")),
             );
         }
     };
@@ -41,6 +42,7 @@ pub(super) fn ingest_text(
     let (content, warning) = decode_text_bytes(&bytes);
     let tokens = content.as_ref().map(|c| estimate_tokens(c)).unwrap_or(0);
     IngestResult {
+        read_owner: None,
         kind: "text".into(),
         basename,
         path: path_str,
@@ -70,7 +72,7 @@ pub(super) fn sniff_text_or_binary(
                 &basename,
                 path,
                 byte_size,
-                format!("文件读取失败: {e}"),
+                safe_error(format!("文件读取失败: {e}")),
             );
         }
     };
@@ -87,6 +89,7 @@ pub(super) fn sniff_text_or_binary(
     let (content, encoding_warning) = decode_text_bytes(&bytes);
     let tokens = content.as_ref().map(|c| estimate_tokens(c)).unwrap_or(0);
     IngestResult {
+        read_owner: None,
         kind: "text".into(),
         basename,
         path: path_str,
