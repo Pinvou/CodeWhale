@@ -64,7 +64,8 @@ pub use service::{
 // 2026-11-04）。下游 platform/mod.rs 与 model_store/mod.rs 的 `pub(crate) use`
 // 两跳照常转发。
 pub(crate) use service::{
-    installed_weight_candidate_names_checked, installed_weight_paths_checked,
+    installed_import_markers_checked, installed_weight_candidate_names_checked,
+    installed_weight_paths_checked,
 };
 
 /// Linux 上模型商店总是可用的。
