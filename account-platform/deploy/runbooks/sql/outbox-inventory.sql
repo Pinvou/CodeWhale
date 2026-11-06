@@ -48,8 +48,10 @@ FROM partitions LEFT JOIN deliveries USING (partition)
 GROUP BY partitions.partition
 ORDER BY partitions.partition;
 
+-- The installed consumers persist receipt and completed effect in one
+-- transaction. A committed incomplete receipt can suppress redelivery.
 SELECT count(*) AS total, count(processed_at) AS processed,
-       count(*) FILTER (WHERE processed_at IS NULL) AS pending
+       count(*) FILTER (WHERE processed_at IS NULL) AS inconsistent_rows
 FROM public.inbox_messages;
 
 SELECT count(*) AS aggregate_versions FROM public.inbox_aggregate_versions;

@@ -45,7 +45,7 @@ audit_dir=account-platform/deploy/runbooks/sql
 PGSERVICE="$ACCOUNT_AUDIT_SERVICE" psql -X -v ON_ERROR_STOP=1 \
   -v audit_database="$ACCOUNT_AUDIT_DATABASE" -f "$audit_dir/account-restore-audit.sql"
 PGSERVICE="$BILLING_AUDIT_SERVICE" psql -X -v ON_ERROR_STOP=1 \
-  -f "$audit_dir/billing-ledger-audit.sql"
+  -v audit_database="$BILLING_AUDIT_DATABASE" -f "$audit_dir/billing-ledger-audit.sql"
 PGSERVICE="$TOKEN_AUDIT_SERVICE" psql -X -v ON_ERROR_STOP=1 \
   -v audit_database="$TOKEN_AUDIT_DATABASE" -f "$audit_dir/token-restore-audit.sql"
 
@@ -57,6 +57,6 @@ PGSERVICE="$TOKEN_AUDIT_SERVICE" psql -X -v ON_ERROR_STOP=1 \
   -v audit_database="$TOKEN_AUDIT_DATABASE" -v audit_domain=token -f "$audit_dir/outbox-inventory.sql"
 ```
 
-Account 核查主体、组织、权限范围和钱包供给状态；Billing 核查账本及资金守恒，详见[只读全账本核查](billing-ledger-audit.md)；Token 核查用量及结算状态。Outbox/Inbox 盘点按库运行，Account 授权分区单列。有效和已到期的租约按各次捕获时间计算，复核时结合恢复时间轴。结果只包含聚合状态、金额、计数和采集时间。
+Account 核查主体、组织、权限范围和钱包供给状态。Billing 核查账本及资金守恒，详见[只读全账本核查](billing-ledger-audit.md)。Token 核查用量及结算状态。Outbox/Inbox 盘点按库运行，Account 授权分区单列。有效和已到期的租约按各次捕获时间计算，复核时结合恢复时间轴。Inbox 中已经持久化却未标记处理完成的记录计入 `inconsistent_rows`，因为重投相同事件 ID 会被现有去重逻辑跳过。发现时核查原事实和消费记录，保留 Inbox 证据。结果包含聚合状态、金额、计数和采集上下文。
 
 退出码为零表示查询完成，复核人仍须检查所有 `violations` 和 `inconsistent_rows` 是否为零，核对目标库及恢复点，并对比恢复前的可信记录。空库也可返回零异常，需核对预期数量和已知业务事实。结合站点受控审计核实实际权限、Account 与 Billing 的钱包归属和余额、Token 与 Billing 的用量/结算以及 NATS 消费进度，再保留原始工件。数据库内部核查、跨域对账、真实恢复/部署演练和容量测量各自留证；缺少任何适用记录时保持对应验收未完成。
