@@ -91,8 +91,9 @@ export const ledgerRepairCopy = {
     "paymentRepairTitle": "支付财务修复",
     "refundRepairTitle": "退款例外修复",
     "chargebackRepairTitle": "拒付财务修复",
-    "reconciliationRepairTitle": "对账财务修复",
-    "ledgerEffectNone": "仅根据确认的渠道退款证据结案，账务效果为 NONE；不会补记账、增加钱包余额或发起渠道操作。"
+    "reconciliationRepairTitle": "对账证据确认",
+    "reconciliationLead": "适用于渠道有付款记录、平台无对应记录且渠道退款证据已确认的差异。加载证据并核对后提交审批；本申请需经审批并执行成功，才会据此结案匹配差异。",
+    "ledgerEffectNone": "执行会登记证据引用与结案结果，并结案关联的人工复核案件（如有）。不会补记账、增加钱包余额或发起渠道操作。"
   },
   "en": {
     "title": "Start a financial repair approval",
@@ -186,8 +187,9 @@ export const ledgerRepairCopy = {
     "paymentRepairTitle": "Payment financial repair",
     "refundRepairTitle": "Refund exception repair",
     "chargebackRepairTitle": "Chargeback financial repair",
-    "reconciliationRepairTitle": "Reconciliation financial repair",
-    "ledgerEffectNone": "Closes the case using confirmed provider refund evidence. Ledger effect is NONE: no ledger posting, wallet credit or provider action."
+    "reconciliationRepairTitle": "Reconciliation evidence review",
+    "reconciliationLead": "For a provider payment missing internally with confirmed provider refund evidence. Load and review the evidence, then submit for approval. This request closes the matched difference only after approval and successful execution.",
+    "ledgerEffectNone": "Execution records the evidence reference and closure result, including closure of any linked manual review case. It does not post ledger entries, credit wallets, or initiate provider operations."
   },
   "ja": {
     "title": "財務修復の承認を起動",
@@ -281,8 +283,9 @@ export const ledgerRepairCopy = {
     "paymentRepairTitle": "支払財務修復",
     "refundRepairTitle": "返金例外修復",
     "chargebackRepairTitle": "チャージバック財務修復",
-    "reconciliationRepairTitle": "照合財務修復",
-    "ledgerEffectNone": "確認済み決済返金証拠で案件を終了します。台帳への効果は NONE で、仕訳、ウォレット加算、決済操作は行いません。"
+    "reconciliationRepairTitle": "照合証拠の確認",
+    "reconciliationLead": "決済事業者に支払記録があり、内部記録がなく、事業者の返金証拠を確認できる差異が対象です。証拠を読み込んで照合し、承認申請します。この申請による差異の終了は、承認と実行の成功後に行われます。",
+    "ledgerEffectNone": "実行では返金証拠の参照と終了結果を記録し、関連する手動確認案件があれば併せて終了します。仕訳の追加、ウォレットへの加算、決済事業者の操作は行いません。"
   }
 };
 

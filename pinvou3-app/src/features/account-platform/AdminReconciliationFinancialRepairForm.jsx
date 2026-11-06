@@ -139,15 +139,17 @@ export function AdminReconciliationFinancialRepairForm({ client, copy, onCreated
 
   return <section className="adm-financial-repair" aria-label={copy.title}>
     <h3>{copy.title}</h3>
-    <p>{copy.lead}</p>
+    <p>{copy.reconciliationLead}</p>
     <p>{copy.ledgerEffectNone}</p>
+    {reconciliationRepair && <small className="adm-financial-repair-code">{copy.fields.ledger_effect}: <code>NONE</code></small>}
     {governed && operation.error && <p role="alert">{operation.error}</p>}
     {needsAuthentication && <div className="adm-reconciliation-repair-reauthentication"><p>{copy.writeOffRecentAuthenticationRequired}</p><button type="button" disabled={busy !== '' || operation.busy} onClick={() => client.reauthenticate('/admin.html')}>{copy.reauthenticate}</button></div>}
     <form className="adm-financial-repair-target" onSubmit={readFacts}>
       <label>{copy.command}
         <select disabled={governed && locked} value={commandType} onChange={(event) => changeCommand(event.target.value)}>
-          {commandTypes.map((command) => <option key={command} value={command}>{command}</option>)}
+          {commandTypes.map((command) => <option key={command} value={command}>{command === 'RECONCILIATION_FINANCIAL_REPAIR' ? copy.reconciliationRepairTitle : command}</option>)}
         </select>
+        {reconciliationRepair && <small className="adm-financial-repair-code"><code>{commandType}</code></small>}
       </label>
       {fields.map((field) => <label key={field.key}>{label(field)}
         <input disabled={governed && locked} required value={pending ? String(field.key === 'target_resource_id' ? pending.draft.target_resource_id : pending.draft.normalized_command[field.key]) : values[field.key] || ''} inputMode={field.kind === 'integer' ? 'numeric' : 'text'}
