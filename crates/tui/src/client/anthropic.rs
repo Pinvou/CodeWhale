@@ -88,21 +88,26 @@ impl DeepSeekClient {
             // declared it, with one recorded exception: the genuine Anthropic
             // endpoint has returned HTTP 400 "input_schema does not support
             // oneOf, allOf, or anyOf at the top level" since at least
-            // 2025-07 (f8e757322 quotes a live failure; CHANGELOG 0.9.1;
-            // anthropics/claude-code#4886/#30212), so that lane narrows just
-            // those three root keywords — merging branch properties and
-            // noting the dropped constraint — while root enum/not, dependent
-            // keywords, and the declared root type stay verbatim. The other
-            // lanes ship verbatim: DeepSeek's Anthropic-compatible line
-            // marks input_schema "Fully Supported"
+            // 2025-07 (f8e757322 quotes a live failure; CHANGELOG 0.9.0;
+            // anthropics/claude-code#4886/#30212), so the first-party lane —
+            // ApiProvider::Anthropic or a base URL on api.anthropic.com, the
+            // same endpoint predicate the thinking gates below use — narrows
+            // just those three root keywords, merging branch properties and
+            // noting the dropped constraint; root enum/not, dependent
+            // keywords, and the declared root type stay verbatim, and the
+            // shared registry normalization (nullable-union collapse,
+            // bare-object properties injection, dangling-required pruning)
+            // still applies there. The other lanes ship verbatim: DeepSeek's
+            // Anthropic-compatible line marks input_schema "Fully Supported"
             // (api-docs.deepseek.com/guides/anthropic_api, fetched
             // 2026-11-05), the Anthropic tool-use guide and its
             // structured-outputs restrictions list name no root-composition
             // ban, and MiniMax / Model Studio document none. MCP tool
             // schemas carry no registry sanitization upstream of this
-            // adapter, so on the Anthropic lane this pass is their only
+            // adapter, so on the narrowing lane this pass is their only
             // normalization; the native-registry sanitizer is unchanged.
-            let narrow_root_compositions = matches!(self.api_provider, ApiProvider::Anthropic);
+            let narrow_root_compositions = matches!(self.api_provider, ApiProvider::Anthropic)
+                || is_native_anthropic_base_url(&self.base_url);
             body["tools"] = json!(
                 tools
                     .iter()
@@ -1433,6 +1438,67 @@ mod tests {
                 "enum": ["compact", "full"]
             }),
             "a non-object root with enum ships byte-identically: {enum_schema}"
+        );
+    }
+
+    fn custom_wire_test_client(name: &str, base_url: &str) -> DeepSeekClient {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let mut providers = crate::config::ProvidersConfig::default();
+        providers.custom.insert(
+            name.to_string(),
+            crate::config::ProviderConfig {
+                api_key: Some("test-key".to_string()),
+                base_url: Some(base_url.to_string()),
+                wire: Some("anthropic".to_string()),
+                ..Default::default()
+            },
+        );
+        let config = crate::config::Config {
+            provider: Some(name.to_string()),
+            providers: Some(providers),
+            ..Default::default()
+        };
+        DeepSeekClient::new(&config).expect("custom anthropic-wire client constructs")
+    }
+
+    #[test]
+    fn custom_anthropic_wire_clients_narrow_by_first_party_endpoint() {
+        // The recorded 400 comes from the api.anthropic.com validator, not
+        // from a provider identity: a custom `wire = "anthropic"` provider
+        // pointed at a first-party base URL gets the same narrowing the
+        // thinking gates apply (is_native_anthropic_base_url), while one
+        // pointed at a third-party gateway ships the schema verbatim.
+        let native = custom_wire_test_client("byok-native", "https://api.anthropic.com");
+        let mut request = request_with("claude-sonnet-4-6", None, None, None);
+        request.tools = Some(vec![root_union_tool("apply_patch", "Patch files")]);
+
+        let body = native.build_anthropic_body(&request, true);
+
+        let schema = &body["tools"][0]["input_schema"];
+        assert!(
+            schema.get("oneOf").is_none(),
+            "a first-party base URL must narrow the recorded rejection: {schema}"
+        );
+        assert_eq!(
+            body["tools"][0]["description"],
+            "Patch files\n\nExactly one of these parameter groups must be provided: `changes` | `patch`.",
+            "the dropped constraint is surfaced on the first-party lane: {body}"
+        );
+
+        let gateway = custom_wire_test_client("byok-gateway", "https://relay.example.com/v1");
+        let mut request = request_with("claude-sonnet-4-6", None, None, None);
+        request.tools = Some(vec![root_union_tool("apply_patch", "Patch files")]);
+
+        let body = gateway.build_anthropic_body(&request, true);
+
+        let schema = &body["tools"][0]["input_schema"];
+        assert!(
+            schema.get("oneOf").is_some(),
+            "a third-party gateway with no record must ship the union verbatim: {schema}"
+        );
+        assert_eq!(
+            body["tools"][0]["description"], "Patch files",
+            "no note is synthesized on a verbatim lane: {body}"
         );
     }
 
