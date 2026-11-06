@@ -4,7 +4,7 @@ import { systemRelatedReconciliationRoute } from './admin-system-status.js';
 import { AuditWorkspace } from './AuditWorkspace.jsx';
 import { OrganizationAdminWorkspace } from './OrganizationAdminWorkspace.jsx';
 import { AdminManagementWorkspace } from './AdminManagementWorkspace.jsx';
-import { requirePersonalAccount } from './personal-contract.js';
+import { adminAuthorizationView, adminAuthorizationSnapshotIsCurrent, readAdminAuthorizationSnapshot } from './admin-authorization-snapshot.js';
 import React, { useEffect, useRef, useState } from 'react';
 import { SettingsWorkspace } from './SettingsWorkspace.jsx';
 import { AdminApprovalWorkspace } from './AdminApprovalWorkspace.jsx';
@@ -23,7 +23,8 @@ import { AdminProductsPage, AdminOperationsPage, AdminMyOrganizationPage } from 
 import { portalLoginLocation } from './portal-sections.js';
 
 export function AdminPlatformView({ client, copy, language, onLanguageChange }) {
-  const [authorization, setAuthorization] = useState(null);
+  const [authorizationSnapshot, setAuthorizationSnapshot] = useState(null);
+  const { authorization, sessionEpoch: acceptedSessionEpoch } = adminAuthorizationView(authorizationSnapshot, client);
   const [credentialOrigin, setCredentialOrigin] = useState('');
   const [overviewFlags, setOverviewFlags] = useState({});
   const [authorizationOwner, setAuthorizationOwner] = useState(client);
@@ -33,20 +34,19 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
   const authorizationReload = useRef(null);
   const authorizationRefreshRef = useRef({ active: false, generation: 0, settled: Promise.resolve() });
   const generation = useRef(0);
+  const currentClient = useRef(client); currentClient.current = client;
   const [authorizationRefreshing, setAuthorizationRefreshing] = useState(false);
   const load = async () => {
     const request = ++generation.current;
-    setAuthorizationOwner(client); setAuthorization(null); setState('loading'); setError('');
+    setAuthorizationOwner(client); setAuthorizationSnapshot(null); setState('loading'); setError('');
     try {
-      const session = await client.session();
-      if (request !== generation.current) return;
+      const snapshot = await readAdminAuthorizationSnapshot(client, () => request === generation.current && currentClient.current === client);
+      if (!snapshot || request !== generation.current || currentClient.current !== client || !adminAuthorizationSnapshotIsCurrent(snapshot, client)) return;
+      const { session } = snapshot;
       if (!session.authenticated) { setState('guest'); return; }
-      const result = requirePersonalAccount(await client.authorization());
-      if (request !== generation.current) return;
-      if (!result?.user_id || !Array.isArray(result.platform_permissions)) throw new Error('INVALID_AUTHORIZATION');
       setCredentialOrigin(typeof session.credential_origin === 'string' ? session.credential_origin : '');
       setOverviewFlags({ ...(session.feature_flags && typeof session.feature_flags === 'object' ? session.feature_flags : {}), page: session.feature_flags?.admin_model_token_page_overviews === true, aggregate: session.feature_flags?.admin_model_operations_overview === true });
-      setAuthorization(result); setState('ready');
+      setAuthorizationSnapshot(snapshot); setState('ready');
     } catch (reason) { if (request === generation.current) { setError(localizedAccountPlatformError(copy, reason)); setState('error'); } }
   };
   useEffect(() => { void load(); return () => { generation.current++; }; }, [client]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -61,15 +61,13 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
       setAuthorizationRefreshing(true);
       client.invalidateRead('billing', '/admin/v1/registration-bonus-policy');
       try {
-        const session = await client.session();
-        if (request !== generation.current) return;
-        if (!session.authenticated) { setAuthorization(null); setState('guest'); return; }
-        const result = requirePersonalAccount(await client.authorization());
-        if (request !== generation.current) return;
-        if (!result?.user_id || !Array.isArray(result.platform_permissions)) throw new Error('INVALID_AUTHORIZATION');
+        const snapshot = await readAdminAuthorizationSnapshot(client, () => request === generation.current && currentClient.current === client);
+        if (!snapshot || request !== generation.current || currentClient.current !== client || !adminAuthorizationSnapshotIsCurrent(snapshot, client)) return;
+        const { session } = snapshot;
+        if (!session.authenticated) { setAuthorizationSnapshot(null); setState('guest'); return; }
         setCredentialOrigin(typeof session.credential_origin === 'string' ? session.credential_origin : '');
         setOverviewFlags({ ...(session.feature_flags && typeof session.feature_flags === 'object' ? session.feature_flags : {}), page: session.feature_flags?.admin_model_token_page_overviews === true, aggregate: session.feature_flags?.admin_model_operations_overview === true });
-        setAuthorization(result); setState('ready');
+        setAuthorizationSnapshot(snapshot); setState('ready');
       } catch (reason) {
         if (request === generation.current) { setState('error'); setError(localizedAccountPlatformError(copy, reason)); }
       } finally {
@@ -95,16 +93,15 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
       authorizationRefreshRef.current = { active: true, generation: refreshGeneration, settled };
       setAuthorizationRefreshing(true);
       try {
-        const session = await client.session();
-        if (disposed) return;
-        if (!session.authenticated) { setAuthorization(null); setState('guest'); return; }
-        const next = requirePersonalAccount(await client.authorization());
-        if (disposed) return;
+        const snapshot = await readAdminAuthorizationSnapshot(client, () => !disposed && currentClient.current === client);
+        if (!snapshot || disposed || currentClient.current !== client || !adminAuthorizationSnapshotIsCurrent(snapshot, client)) return;
+        const { session } = snapshot;
+        if (!session.authenticated) { setAuthorizationSnapshot(null); setState('guest'); return; }
         setCredentialOrigin(typeof session.credential_origin === 'string' ? session.credential_origin : '');
         setOverviewFlags({ ...(session.feature_flags && typeof session.feature_flags === 'object' ? session.feature_flags : {}), page: session.feature_flags?.admin_model_token_page_overviews === true, aggregate: session.feature_flags?.admin_model_operations_overview === true });
-        setAuthorization(next);
+        setAuthorizationSnapshot(snapshot);
       } catch (reason) {
-        if (!disposed) { setAuthorization(null); setState('error'); setError(localizedAccountPlatformError(copy, reason)); }
+        if (!disposed) { setAuthorizationSnapshot(null); setState('error'); setError(localizedAccountPlatformError(copy, reason)); }
       } finally {
         if (authorizationRefreshRef.current.generation === refreshGeneration) {
           authorizationRefreshRef.current = { active: false, generation: refreshGeneration, settled: Promise.resolve() };
@@ -120,7 +117,7 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
   }, [client, copy, state, visibleSection]);
   const logout = async () => {
     const request = ++generation.current;
-    setAuthorizationOwner(client); setAuthorization(null); setState('loading'); setError('');
+    setAuthorizationOwner(client); setAuthorizationSnapshot(null); setState('loading'); setError('');
     try { await client.logout(); if (request === generation.current) setState('guest'); }
     catch (reason) { if (request === generation.current) { setState('error'); setError(localizedAccountPlatformError(copy, reason)); } }
   };
@@ -152,7 +149,7 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
         {view === 'system' && <AdminSystemStatusWorkspace {...{ client, copy, language, permissions }} showTitle={false} headerTarget={systemHeaderActive ? systemHeaderTarget : null} onOpenReconciliation={openSystemReconciliation} />}
         {view === 'audit' && <AuditWorkspace client={client} copy={{ ...copy, ...auditWorkspaceCopy[language] }} permissions={permissions} currentUserID={authorization.user_id} />}
         {view === 'management' && <AdminManagementWorkspace {...{ client, copy, language, permissions, credentialOrigin, overviewFlags }} owner={authorization.user_id} authorizationVersion={version} overviewAuthorizationVersion={version} controlledSection={['models', 'tokenResources', 'modelOperations'].includes(managementRoute.section) ? managementRoute.section : undefined} routeSearch={managementRoute.search} onNavigateSection={overviewFlags.admin_model_token_ia === true ? (target, updates) => navigation.navigate(target, updates) : undefined} onRouteChange={(updates, mode) => navigation.navigate(navigation.section, updates, mode)} onViewApproval={viewApproval} />}
-        {view === 'organizations' && <OrganizationAdminWorkspace client={client} me={authorization} language={language} route={organizationRoute} />}
+        {view === 'organizations' && <OrganizationAdminWorkspace client={client} me={authorization} language={language} route={organizationRoute} acceptedSessionEpoch={acceptedSessionEpoch} />}
         {view === 'myorg' && <AdminMyOrganizationPage client={client} me={authorization} language={language} onContextChanged={() => authorizationReload.current?.()} />}
         {view === 'approvals' && <AdminApprovalWorkspace {...{ client, copy, language }} me={authorization} routeSearch={visibleSection === 'approvals' ? navigation.search : undefined} onRouteChange={updates => navigation.navigate('approvals', updates, 'replace')} onNavigate={route => navigation.navigate(['orders', 'late', 'anomalies', 'controls'].includes(route.tab) ? 'payments' : 'billing', { finance_tab: route.tab })} />}
         {view === 'products' && <AdminProductsPage {...{ client, copy, language, permissions }} me={authorization} route={productsRoute} />}

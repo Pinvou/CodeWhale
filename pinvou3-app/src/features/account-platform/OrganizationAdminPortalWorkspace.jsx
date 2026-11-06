@@ -4,13 +4,15 @@ import { organizationID, organizationUnitIDs, organizationVersion } from './orga
 import { organizationLabel } from './organization-labels.js';
 import { RetainedWorkspace } from './RetainedWorkspace.jsx';
 import { OrganizationMemberMenu } from './OrganizationMemberMenu.jsx';
+import { AdminIdentifier } from './AdminIdentifier.jsx';
+import { adminRouteLocation } from './admin-sections.js';
 
 const text = value => { if (!value.trim()) throw new Error('INVALID_ORGANIZATION_INPUT'); return value.trim(); };
 const optionalID = value => value ? organizationID(value) : null;
 
-export function OrganizationAdminPortalWorkspace({ language, copy, route, page, query, setQuery, selected, current, detail, error, listBusy, detailBusy, roles, units, memberCursor, memberPrevious, setMemberPrevious, previous, setPrevious, can, action, memberQuery, memberRole, onRefresh, nameFeedback, nameFeedbackKind, renamedUnit, renamedUnitNode }) {
+export function OrganizationAdminPortalWorkspace({ client, me, acceptedSessionEpoch, language, copy, route, page, query, setQuery, selected, current, detail, error, listBusy, detailBusy, roles, units, memberCursor, memberPrevious, setMemberPrevious, previous, setPrevious, can, action, memberQuery, memberRole, onRefresh, nameFeedback, nameFeedbackKind, renamedUnit, renamedUnitNode }) {
   const words = adminLayoutCopy[language], labels = words.organization, params = new URLSearchParams(route.search);
-  const [memberSearch, setMemberSearch] = useState(memberQuery), [role, setRole] = useState(memberRole), [copyError, setCopyError] = useState(false);
+  const [memberSearch, setMemberSearch] = useState(memberQuery), [role, setRole] = useState(memberRole);
   useEffect(() => { setMemberSearch(memberQuery); setRole(memberRole); }, [memberQuery, memberRole]);
   const status = params.get('organization_status') || '';
   const navigate = updates => route.navigate('organizations', updates);
@@ -18,10 +20,22 @@ export function OrganizationAdminPortalWorkspace({ language, copy, route, page, 
   const tabs = ['overview', 'members', 'units', 'lifecycle'];
   const active = tabs.includes(params.get('organization_tab')) ? params.get('organization_tab') : 'overview';
   const busy = listBusy || detailBusy;
-  const copyID = async id => { try { await navigator.clipboard.writeText(id); setCopyError(false); } catch { setCopyError(true); } };
+  const identifierPlatformVersion = me.platform_authorization_version || me.active_context?.platform_authorization_version || me.authorization_version || 0;
+  const identifierSessionEpoch = acceptedSessionEpoch === undefined ? client.financeSessionEpoch || 0 : acceptedSessionEpoch;
+  const identifierOwner = `${me.user_id}:${identifierPlatformVersion}:${identifierSessionEpoch}`;
+  const organizationLink = id => {
+    const updates = { organization_id: id, organization_tab: 'overview', member_cursor: null };
+    return {
+      href: adminRouteLocation(globalThis.location?.search ?? route.search, 'organizations', updates, globalThis.location?.pathname),
+      onClick: event => {
+        if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+        event.preventDefault(); navigate(updates);
+      },
+    };
+  };
   const directory = <><div className="adm-organization-toolbar adm-section-toolbar"><form className="adm-filter-row" onSubmit={event => { event.preventDefault(); setPrevious([]); if ((params.get('organization_q') || '') === query.trim() && !params.get('organization_cursor')) onRefresh(); else navigate({ organization_q: query.trim() || null, organization_cursor: null, organization_id: null }); }}><label>{copy.search}<input value={query} onChange={event => setQuery(event.target.value)} /></label><label>{copy.status}<select value={status} onChange={event => { setPrevious([]); navigate({ organization_status: event.target.value || null, organization_cursor: null, organization_id: null }); }}><option value="">{labels.allStatuses}</option>{['ACTIVE', 'DISABLED', 'DELETED'].map(value => <option key={value} value={value}>{organizationLabel(copy, 'Status', value)}</option>)}</select></label><button type="submit" disabled={busy}>{copy.search}</button><button type="button" disabled={busy} onClick={() => { setQuery(''); setPrevious([]); if (!(params.get('organization_q') || '') && !status && !params.get('organization_cursor')) onRefresh(); else navigate({ organization_q: null, organization_status: null, organization_cursor: null, organization_id: null }); }}>{labels.resetFilters}</button></form>{can('create') && action('create', copy.create, [{ name: 'name' }, { name: 'owner', lookup: true }], values => ({ name: text(values.name), owner_user_id: organizationID(values.owner) }), 'create')}</div>
     {page && <p className="adm-organization-page-count">{labels.pageCount(page.items.length)}</p>}
-    {page && <div className="adm-table-wrap"><table className="adm-table"><thead><tr><th>{copy.name}</th><th>{copy.status}</th><th>{copy.members}</th><th>{labels.identifier}</th></tr></thead><tbody>{page.items.map(org => <tr key={org.organization_id}><td data-label={copy.name}><button className="adm-name-link" onClick={() => navigate({ organization_id: org.organization_id, organization_tab: 'overview', member_cursor: null })}>{org.name}</button></td><td data-label={copy.status}>{organizationLabel(copy, 'Status', org.status)}</td><td data-label={copy.members}>{org.member_count ?? '—'}</td><td data-label={labels.identifier}><code>{org.organization_id}</code><button aria-label={labels.copyIdentifier} onClick={() => void copyID(org.organization_id)}>{labels.copyIdentifier}</button></td></tr>)}</tbody></table></div>}
+    {page && <div className="adm-table-wrap"><table className="adm-table"><thead><tr><th>{copy.name}</th><th>{copy.status}</th><th>{copy.members}</th><th>{labels.identifier}</th></tr></thead><tbody>{page.items.map(org => <tr key={org.organization_id}><td data-label={copy.name}><a className="adm-name-link adm-organization-name-link" {...organizationLink(org.organization_id)}>{org.name}</a></td><td data-label={copy.status}>{organizationLabel(copy, 'Status', org.status)}</td><td data-label={copy.members}>{org.member_count ?? '—'}</td><td data-label={labels.identifier}><AdminIdentifier client={client} owner={identifierOwner} routeScope={globalThis.location?.href || route.search} value={org.organization_id} label={labels.identifier} targetLabel={org.name} language={language} sessionEpoch={identifierSessionEpoch} platformAuthorizationVersion={identifierPlatformVersion} /></td></tr>)}</tbody></table></div>}
     {page?.items.length === 0 && <p>{copy.empty}</p>}
     <nav><button disabled={busy || previous.length === 0} onClick={() => { const values = [...previous], cursor = values.pop(); setPrevious(values); navigate({ organization_cursor: cursor || null }); }}>{copy.previous}</button><button disabled={busy || !page?.next_cursor} onClick={() => { setPrevious(values => [...values, params.get('organization_cursor') || '']); navigate({ organization_cursor: page.next_cursor }); }}>{copy.next}</button></nav>
   </>;
@@ -30,7 +44,7 @@ export function OrganizationAdminPortalWorkspace({ language, copy, route, page, 
   const readiness = detail?.readiness;
   const mayDelete = current?.status === 'DISABLED' && readiness?.ready === true && readiness.current_status === 'DISABLED' && readiness.account_version === current.version && !detail?.readinessError;
   return <section className="adm-panel adm-organization-directory">
-    {error && <p role="alert">{error}<button disabled={busy} onClick={onRefresh}>{copy.refresh}</button></p>}{copyError && <p role="alert">{labels.copyFailed}</p>}{busy && <p role="status">{copy.loading}</p>}
+    {error && <p role="alert">{error}<button disabled={busy} onClick={onRefresh}>{copy.refresh}</button></p>}{busy && <p role="status">{copy.loading}</p>}
     {!requestedID ? directory : <><button className="adm-organization-back" onClick={() => navigate({ organization_id: null, organization_tab: null, member_cursor: null })}>{words.backToDirectory}</button>
       {(nameFeedbackKind === 'organization' || active === 'units') && nameFeedback}
       {available && <><header className="adm-organization-header"><div className="adm-organization-identity"><h3>{current.name}</h3><p><span>{organizationLabel(copy, 'Status', current.status)}</span><code>{current.organization_id}</code></p></div><div className="adm-organization-header-actions"><button type="button" disabled={busy} onClick={onRefresh}>{copy.refresh}</button>{can('profile.manage') && current.status !== 'DELETED' && action('rename', copy.rename, [{ name: 'name', initial: current.name }], values => ({ name: text(values.name) }), 'rename')}</div></header>
