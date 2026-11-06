@@ -19,6 +19,7 @@ import (
 // Identity decoding is controlled; catalogue operations, SQL failures and
 // transaction recovery use the public migrations and real billing_service.
 func TestRechargeProductCommandAtomicityPostgres(t *testing.T) {
+	t.Run("active-provider-admission-candidate-progress", testActiveProviderAdmissionCandidates)
 	for _, action := range []string{"publish", "unpublish", "delete-draft", "delete-published"} {
 		for _, failure := range []string{"receipt", "audit"} {
 			t.Run(action+"-"+failure+"-rollback-and-recovery", func(t *testing.T) {

@@ -268,6 +268,7 @@ BILLING_LEAF_REQUIRED = {
 }
 BILLING_CHILD_REQUIRED = RETAINED_REQUIRED - BILLING_LEAF_REQUIRED
 EXACT_REQUIRED_CHILDREN = {
+    "TestRechargeProductCommandAtomicityPostgres": {"active-provider-admission-candidate-progress"},
     "TestProductManualAdmissionPostgres": {
         "two-explicit-humans-first-publish-and-immutable-replay",
         "runtime-cannot-rewrite-frozen-manual-facts",
