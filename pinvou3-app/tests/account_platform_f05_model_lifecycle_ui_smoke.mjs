@@ -26,13 +26,15 @@ const ownedProfile = path.resolve(profile);
 assert.equal(path.dirname(ownedProfile), path.resolve(os.tmpdir()));
 assert.ok(path.basename(ownedProfile).startsWith('pinvou-f05-lifecycle-'));
 let vite, browser, page, passed = 0, launchAttempted = false, phase = "setup";
+const errors = [];
 try {
   vite = await createServer({ root, configFile: false, appType: 'mpa', logLevel: 'error', plugins: [react()], cacheDir: path.join(profile, 'vite-cache'), server: { host: '127.0.0.1', port: 0, watch: null } });
   await vite.listen();
   launchAttempted = true;
   browser = await puppeteer.launch({ executablePath: chrome, headless: 'new', userDataDir: profile, args: ['--no-sandbox', '--disable-gpu', '--no-first-run'] });
   page = await browser.newPage(); await page.setViewport({ width: 1280, height: 960 });
-  const errors = []; page.on('pageerror', error => errors.push(error.name));
+  page.on('pageerror', error => { errors.push(error.name); console.error('[f05][pageerror]', error.name, String(error.stack || error.message).split('\n').slice(0, 4).join(' | ').slice(0, 400)); });
+  page.on('response', response => { if (response.status() >= 400) console.error('[f05][http]', response.status(), response.url().slice(0, 140)); });
   // CI 引导挂死取证（2026-11-06 双头 TimeoutError，60s/150s 均不 ready）：
   // 页面报错与失败请求直通 smoke stderr，否则挂死点不可见。
   page.on('console', message => { if (message.type() === 'error') console.error('[f05][page]', message.text().slice(0, 200)); });
@@ -201,6 +203,17 @@ try {
   console.log(`RESULT ${passed} PASS 0 FAIL 0 SKIP`);
 } catch (error) {
   console.error(`FAIL model lifecycle browser at ${phase}: ${error.name} ${error instanceof assert.AssertionError ? error.message : ''}`);
+  try {
+    const state = await page.evaluate(() => ({
+      ready: window.f05Lifecycle?.ready ?? null,
+      readyState: document.readyState,
+      calls: (window.f05Lifecycle?.calls || []).map(c => c.command),
+    }));
+    fs.writeFileSync('/tmp/f05-hang-dump.json', JSON.stringify({ phase, errorName: String(error && error.name), state, pageerrors: errors }, null, 1));
+    console.error('[f05] hang dump written to /tmp/f05-hang-dump.json');
+  } catch (dumpError) {
+    console.error('[f05] hang dump unavailable:', String(dumpError && dumpError.name));
+  }
   process.exitCode = 1;
 } finally {
   let browserStopped = !launchAttempted;
