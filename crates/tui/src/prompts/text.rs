@@ -37,8 +37,9 @@
 //! `../prompts.rs` next to the override cells that can replace them.
 
 // ── Constitution — the binding core (#4032) ─────────────────────────
-/// Core: task execution, tool-use rules, output format, toolbox reference,
-/// "When NOT to use" guidance, sub-agent sentinel protocol.
+/// Core: ground truth, user intent and scope, truthful completion,
+/// guarantees-in-mechanism, and the default authority ranking
+/// ("Whose word wins").
 ///
 /// This text is the single hand-maintained source of the constitutional
 /// system prompt. The earlier YAML + Python-renderer generation pipeline

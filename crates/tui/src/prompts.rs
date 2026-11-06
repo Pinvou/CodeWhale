@@ -1013,10 +1013,10 @@ fn apply_model_template(
     prompt.replace("{model_id}", model_id)
 }
 
-/// Authority recap block — appended at the end of the system prompt,
-/// just before the user's first message. Uses recency bias constructively
-/// without restating ranks: `BASE_PROMPT` § Whose word wins states the
-/// default ranking (#4777).
+/// Authority recap block — appended as a per-request trailer after the
+/// WorldState fragments, just before the locale closer. Uses recency bias
+/// constructively without restating ranks: `BASE_PROMPT` § Whose word wins
+/// states the default ranking (#4777).
 const AUTHORITY_RECAP: &str = "\
 ## Authority Recap
 
