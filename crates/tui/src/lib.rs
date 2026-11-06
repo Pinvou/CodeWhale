@@ -1,6 +1,8 @@
 //! Codewhale TUI library — single-binary entry point.
 
 #![allow(clippy::uninlined_format_args)]
+// Scoped request/stream recovery futures exceed the default compiler query depth.
+#![recursion_limit = "256"]
 
 use std::collections::{BTreeSet, HashMap};
 use std::io::{self, IsTerminal, Read, Write};

@@ -1309,6 +1309,7 @@ pub struct Engine {
     /// delivery.
     delivered_subagent_completion_ids: HashSet<String>,
     cancel_token: CancellationToken,
+    model_recovery_interrupted: bool,
     shared_cancel_token: SharedCancelToken,
     /// Latched reason for the current cancellation, mirrored to
     /// `EngineHandle::cancel_reason`. Read by `approval.rs` when
@@ -2537,6 +2538,7 @@ impl Engine {
             rx_subagent_completion,
             delivered_subagent_completion_ids: HashSet::new(),
             cancel_token: cancel_token.clone(),
+            model_recovery_interrupted: false,
             shared_cancel_token: shared_cancel_token.clone(),
             cancel_reason: cancel_reason.clone(),
             tool_exec_lock,
@@ -6463,13 +6465,13 @@ impl Engine {
         // event can no longer arrive after `TurnComplete` and be mistaken for
         // the following turn (or lost by a runtime monitor that already
         // settled the record).
-        if let Some(barrier) = mailbox_for_runtime.take() {
-            if status == TurnOutcomeStatus::Completed {
-                barrier.park_and_flush().await;
-            } else {
-                barrier.cancel_and_flush().await;
-            }
-        }
+        settle_turn_mailbox(
+            mailbox_for_runtime.take(),
+            status,
+            std::mem::take(&mut self.model_recovery_interrupted),
+            self.cancel_token.is_cancelled(),
+        )
+        .await;
         if let Some(owner) = interactive_runtime_cost_owner.as_deref() {
             crate::cost_status::finish_runtime_usage_owner(owner);
         }
@@ -9452,6 +9454,25 @@ fn terminal_turn_status_at_settlement(
         TurnOutcomeStatus::Interrupted
     } else {
         status
+    }
+}
+
+async fn settle_turn_mailbox(
+    barrier: Option<TurnMailboxBarrier>,
+    status: TurnOutcomeStatus,
+    model_recovery_interrupted: bool,
+    cancelled: bool,
+) {
+    if let Some(barrier) = barrier {
+        if status == TurnOutcomeStatus::Completed
+            || (status == TurnOutcomeStatus::Interrupted
+                && model_recovery_interrupted
+                && !cancelled)
+        {
+            barrier.park_and_flush().await;
+        } else {
+            barrier.cancel_and_flush().await;
+        }
     }
 }
 
