@@ -194,10 +194,15 @@ try {
   await run('organization member removal has a named action and cancellable target dialog in all locales', async () => {
     for (const language of ['zh', 'en', 'ja']) for (const width of [1440, 390]) {
       await fresh('?mode=admin&section=organizations&organization_id=33333333-3333-4333-8333-333333333333&organization_tab=members');
+      await page.evaluate(empty => { window.restored.noUnitMembers = empty; window.restored.reload(); }, width === 390);
       await page.setViewport({ width, height: 1000 });
       await page.select('.adm-sidebar-foot select', language);
       const words = await page.evaluate(() => window.restored.copy().organization);
       await page.waitForFunction(label => [...document.querySelectorAll('.adm-member-action-menu button')].some(button => button.textContent.trim() === label && !button.disabled), {}, words.remove);
+      const expectedUnits = width === 390 ? words.unassignedUnits : 'Sample unit';
+      assert.equal(await page.$eval('[data-workspace=members] tbody tr td:nth-child(3)', node => node.textContent.trim()), expectedUnits, 'member rows show assignment data rather than a repeated rule');
+      assert.deepEqual(await page.$$eval('[data-workspace=members] th>.ap-member-units-help', nodes => nodes.map(node => node.textContent)), [words.unscopedUnits], 'scope rule is stated once in the column header');
+      assert.equal(await page.$eval('[data-workspace=members] tbody', (node, rule) => node.textContent.includes(rule), words.unscopedUnits), false);
       await page.$eval('[data-workspace=members] details summary', node => node.scrollIntoView({ block: 'center', inline: 'nearest' }));
       await page.evaluate(() => new Promise(resolve => requestAnimationFrame(resolve)));
       const height = await page.$eval('[data-workspace=members] tbody tr', row => row.getBoundingClientRect().height);
