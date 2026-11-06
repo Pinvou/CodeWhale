@@ -4,10 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
 	"log/slog"
 	"time"
+
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 )
 
 type ExpiredHoldRecoveryWorker struct {
@@ -27,7 +28,7 @@ func (w *ExpiredHoldRecoveryWorker) Run(ctx context.Context) {
 	defer ticker.Stop()
 	for {
 		bounded, cancel := context.WithTimeout(ctx, 45*time.Second)
-		err := w.RunOnce(bounded)
+		err := w.runOnceLimit(bounded, 100, true)
 		cancel()
 		if err != nil && !errors.Is(err, context.Canceled) {
 			slog.ErrorContext(ctx, "expired hold recovery failed", "component", "expired-hold-recovery", "error_code", "HOLD_RECOVERY_RETRY_PENDING")
@@ -46,6 +47,10 @@ func (w *ExpiredHoldRecoveryWorker) RunOnce(ctx context.Context) error {
 // RunOnceLimit is the bounded operator carrier of the same persistent intent
 // and trusted Token dispatch fence used by the background worker.
 func (w *ExpiredHoldRecoveryWorker) RunOnceLimit(ctx context.Context, limit int) error {
+	return w.runOnceLimit(ctx, limit, false)
+}
+
+func (w *ExpiredHoldRecoveryWorker) runOnceLimit(ctx context.Context, limit int, reportProofFailure bool) error {
 	if limit < 1 || limit > 1000 {
 		return errors.New("hold recovery limit must be between 1 and 1000")
 	}
@@ -73,7 +78,7 @@ func (w *ExpiredHoldRecoveryWorker) RunOnceLimit(ctx context.Context, limit int)
 			return ctx.Err()
 		}
 		bounded, cancel := context.WithTimeout(ctx, 5*time.Second)
-		err = w.recoverOne(bounded, id)
+		err = w.recoverOne(bounded, id, reportProofFailure)
 		cancel()
 		if err != nil && first == nil {
 			first = err
@@ -81,7 +86,15 @@ func (w *ExpiredHoldRecoveryWorker) RunOnceLimit(ctx context.Context, limit int)
 	}
 	return first
 }
-func (w *ExpiredHoldRecoveryWorker) recoverOne(ctx context.Context, usageID uuid.UUID) error {
+func (w *ExpiredHoldRecoveryWorker) recoverOne(ctx context.Context, usageID uuid.UUID, reportProofFailure bool) error {
+	// Emit after the deferred unlock and connection release. A slow log sink
+	// must not extend ownership of the hold or change the returned ctx.Err().
+	var proofRetryCode string
+	defer func() {
+		if proofRetryCode != "" {
+			slog.WarnContext(ctx, "expired hold proof retry scheduled", "component", "expired-hold-recovery", "error_code", proofRetryCode)
+		}
+	}()
 	conn, err := w.repository.pool.Acquire(ctx)
 	if err != nil {
 		return err
@@ -184,6 +197,18 @@ func (w *ExpiredHoldRecoveryWorker) recoverOne(ctx context.Context, usageID uuid
 	}
 	if err := tx.Commit(persistCtx); err != nil {
 		return err
+	}
+	if reportProofFailure && proofErr != nil {
+		switch {
+		case w.proof == nil:
+			proofRetryCode = "HOLD_PROOF_UNAVAILABLE"
+		case errors.Is(proofErr, context.DeadlineExceeded):
+			proofRetryCode = "HOLD_PROOF_TIMEOUT"
+		case errors.Is(proofErr, context.Canceled):
+			proofRetryCode = "HOLD_PROOF_CANCELED"
+		default:
+			proofRetryCode = "HOLD_PROOF_REQUEST_FAILED"
+		}
 	}
 	return ctx.Err()
 }

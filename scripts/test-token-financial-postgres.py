@@ -183,6 +183,7 @@ REFUND_REQUIRED = {
     "TestRefundOriginalUnknownSuccessQueriesAndSettlesOrdinaryGrantsPostgres",
 }
 RETAINED_REQUIRED = {
+    "TestExpiredHoldProofRetryDiagnosticsPostgres",
     "TestEscalatedForcedRefundRequiresSecondActorAndReplays",
     "TestEscalatedForcedRefundAtomicRollbackPostgres",
     "TestEscalatedForcedRefundEvidenceAndReceiptGuardsPostgres",
@@ -267,6 +268,10 @@ BILLING_LEAF_REQUIRED = {
 }
 BILLING_CHILD_REQUIRED = RETAINED_REQUIRED - BILLING_LEAF_REQUIRED
 EXACT_REQUIRED_CHILDREN = {
+    "TestExpiredHoldProofRetryDiagnosticsPostgres": {
+        "quick-failure", "timeout", "cancel", "unavailable", "invalid-proof",
+        "valid-proof", "persistence-failure", "operator",
+    },
     "TestProductManualAdmissionPostgres": {
         "two-explicit-humans-first-publish-and-immutable-replay",
         "runtime-cannot-rewrite-frozen-manual-facts",

@@ -12,6 +12,8 @@ import (
 )
 
 var safeLogEvents = map[string]string{
+	"expired hold proof retry scheduled": "expired_hold_proof_retry_scheduled",
+
 	"expired hold recovery failed":         "expired_hold_recovery_failed",
 	"model catalog synchronization failed": "model_catalog_sync_failed",
 	"application event":                    "application_event",
