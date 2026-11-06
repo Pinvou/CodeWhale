@@ -318,3 +318,10 @@
 .adm-restored-shell .adm-system-workspace-head{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:16px;margin-bottom:16px}
 .adm-restored-shell .adm-system-observation{display:grid;gap:3px;min-width:0;max-width:100%;color:var(--adm-muted);font-size:12px;line-height:1.5;overflow-wrap:anywhere}
 .adm-restored-shell .adm-system-refresh:disabled{opacity:.5;cursor:not-allowed}
+
+.adm-restored-shell .adm-system-workspace .adm-status{max-width:100%;font-size:13px;white-space:normal;overflow-wrap:anywhere}
+.adm-restored-shell .adm-system-workspace .adm-status code{margin-left:5px;font-size:12px;font-weight:400}
+.adm-restored-shell .adm-system-snapshot-help{margin:0 0 14px;color:var(--adm-muted);font-size:13px;line-height:1.6;overflow-wrap:anywhere}
+.adm-restored-shell .adm-system-reconciliation-detail{display:grid;gap:6px;margin-top:10px;min-width:0}
+.adm-restored-shell .adm-system-reconciliation-detail small{color:var(--adm-muted);font-size:12px;line-height:1.5;overflow-wrap:anywhere}
+.adm-restored-shell .adm-system-reconciliation-link{justify-self:start;max-width:100%;border:0;padding:3px 0;color:var(--adm-primary);background:transparent;text-align:start;white-space:normal;line-height:1.5}

@@ -1,5 +1,6 @@
 import { AdminRolesWorkspace } from './AdminRolesWorkspace.jsx';
 import { AdminSystemStatusWorkspace } from './AdminSystemStatusWorkspace.jsx';
+import { systemRelatedReconciliationRoute } from './admin-system-status.js';
 import { AuditWorkspace } from './AuditWorkspace.jsx';
 import { OrganizationAdminWorkspace } from './OrganizationAdminWorkspace.jsx';
 import { AdminManagementWorkspace } from './AdminManagementWorkspace.jsx';
@@ -136,6 +137,8 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
   const organizationRoute = useLastActiveRoute(navigation, active === 'organizations');
   const operationsRoute = useLastActiveRoute(navigation, active === 'operations');
   const viewApproval = (id, updates = {}) => navigation.navigate('approvals', { ...updates, approval_view: 'mine', approval_request_id: id || null });
+  const reconciliationRoute = systemRelatedReconciliationRoute(navigation.available, permissions);
+  const openSystemReconciliation = reconciliationRoute ? () => navigation.navigate(reconciliationRoute.section, reconciliationRoute.query) : undefined;
   const systemHeaderActive = renderedState === 'ready' && visibleSection === 'system' && navigation.available.includes('system');
   return <AdminPortalLayout {...{ copy, language, onLanguageChange, navigation }} ready={renderedState === 'ready'} onLogout={logout} pageActionsRef={systemHeaderActive ? setSystemHeaderTarget : undefined}>
     {renderedState === 'loading' && <p role="status">{copy.loading}</p>}
@@ -144,9 +147,9 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
     {renderedState === 'ready' && <>
       {!navigation.available.includes(visibleSection) && <p role="alert">{words.unauthorized}</p>}
       <RetainedWorkspace key={ownerKey} active={navigation.available.includes(visibleSection) ? active : ''} available={available}>{view => <>
-        {view === 'overview' && <AdminOverviewWorkspace {...{ client, copy, language, permissions, navigation }} />}
+        {view === 'overview' && <AdminOverviewWorkspace {...{ client, copy, language, permissions, navigation }} onOpenReconciliation={openSystemReconciliation} />}
         {view === 'operations' && <AdminOperationsPage {...{ client, copy, language, permissions }} me={authorization} route={operationsRoute} authorizationRefreshing={authorizationRefreshing} authorizationRefreshRef={authorizationRefreshRef} />}
-        {view === 'system' && <AdminSystemStatusWorkspace {...{ client, copy, language, permissions }} showTitle={false} headerTarget={systemHeaderActive ? systemHeaderTarget : null} />}
+        {view === 'system' && <AdminSystemStatusWorkspace {...{ client, copy, language, permissions }} showTitle={false} headerTarget={systemHeaderActive ? systemHeaderTarget : null} onOpenReconciliation={openSystemReconciliation} />}
         {view === 'audit' && <AuditWorkspace client={client} copy={{ ...copy, ...auditWorkspaceCopy[language] }} permissions={permissions} currentUserID={authorization.user_id} />}
         {view === 'management' && <AdminManagementWorkspace {...{ client, copy, language, permissions, credentialOrigin, overviewFlags }} owner={authorization.user_id} authorizationVersion={version} overviewAuthorizationVersion={version} controlledSection={['models', 'tokenResources', 'modelOperations'].includes(managementRoute.section) ? managementRoute.section : undefined} routeSearch={managementRoute.search} onNavigateSection={overviewFlags.admin_model_token_ia === true ? (target, updates) => navigation.navigate(target, updates) : undefined} onRouteChange={(updates, mode) => navigation.navigate(navigation.section, updates, mode)} onViewApproval={viewApproval} />}
         {view === 'organizations' && <OrganizationAdminWorkspace client={client} me={authorization} language={language} route={organizationRoute} />}
