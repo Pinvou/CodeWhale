@@ -91,7 +91,15 @@ export function PersonalFinanceWorkspace({ client, me, language, onPaid, present
     return latest;
   };
   const acceptCollection = incoming => {
+    const previous = incoming.map(item => knownOrders.current.find(old => old.order_id === item.order_id) || withdrawnOrders.current.get(item.order_id));
     const orders = incoming.map(rememberOrder);
+    const stateChanged = orders.some((item, index) => {
+      const prior = previous[index];
+      return !prior || ['status', 'fulfillment_status', 'close_status', 'expires_at'].some(field => prior[field] !== item[field]);
+    });
+    // Every accepted collection uses the same fence, including background load.
+    // Identical facts must not retire an otherwise valid slow detail read.
+    if (stateChanged) orderRevision.current++;
     knownOrders.current = orders.map(paymentOrderFacts);
     const selectedOrder = currentView.current.order;
     const selectedLatest = selectedOrder && orders.find(item => item.order_id === selectedOrder.order_id);
@@ -198,7 +206,16 @@ export function PersonalFinanceWorkspace({ client, me, language, onPaid, present
     return request;
   };
   const acceptOrderRead = async (latest, request, stamp, refreshList = false) => {
-    if (!ownsView(stamp) || (readVersions.current.get(request) !== orderRevision.current && !['PAID', 'PAID_LATE'].includes(latest.status))) return false;
+    if (!ownsView(stamp)) return false;
+    if (readVersions.current.get(request) !== orderRevision.current) {
+      const known = knownOrders.current.find(item => item.order_id === latest.order_id) || withdrawnOrders.current.get(latest.order_id);
+      const awaitingPayment = known && ['CREATED', 'PENDING'].includes(known.status) && known.close_status === 'OPEN';
+      // A late paid receipt may be the first payment proof while another order
+      // advanced the collection. It must not replace this order's newer review,
+      // fulfillment or closure facts, even outside the limited history window.
+      // A fresh same-ID read can recover details.
+      if (!['PAID', 'PAID_LATE'].includes(latest.status) || (known && !awaitingPayment)) return false;
+    }
     latest = rememberOrder(payment.boundOrder(latest, true));
     knownOrders.current = upsertPaymentOrderFacts(knownOrders.current, latest);
     orderRevision.current++; setOrder(paymentOrderFacts(latest));
@@ -284,7 +301,6 @@ export function PersonalFinanceWorkspace({ client, me, language, onPaid, present
         if (isCurrent() && revision === orderRevision.current) {
           const previous = knownOrders.current;
           const changed = orders.filter(item => !isPayablePaymentOrder(item, Date.now()) && previous.some(old => old.order_id === item.order_id && isPayablePaymentOrder(old, Date.now())));
-          if (changed.length) orderRevision.current++;
           const facts = acceptCollection(orders);
           setData(current => current ? { ...current, orders: facts } : current);
           const paid = changed.find(item => ['PAID', 'PAID_LATE'].includes(item.status));

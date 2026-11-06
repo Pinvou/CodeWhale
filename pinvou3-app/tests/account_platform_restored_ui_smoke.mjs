@@ -136,6 +136,88 @@ try {
       }
     }
   });
+  await run('late paid details preserve a newer review but still refresh a payable order', async () => {
+    for (const mode of ['paid-to-review', 'unchanged-paid', 'newer-review', 'removed-review', 'other-order-paid', 'removed-first-paid']) {
+      await fresh(); await accountTab('ordersInvoices');
+      await page.evaluate(mode => {
+        const originalFetch = globalThis.fetch, state = window.restored;
+        const review = mode.endsWith('review');
+        const initiallyPaid = mode === 'paid-to-review' || mode === 'unchanged-paid';
+        state.newProjection = false; state.oldDetailReleased = false;
+        const target = '00000000-0000-4000-8000-000000000001';
+        globalThis.fetch = async (input, options = {}) => {
+          const url = String(input);
+          if (url.endsWith('/v1/recharge/products') && state.rejectFollowupProducts) return new Response(JSON.stringify({ code: 'UPSTREAM_UNAVAILABLE' }), { status: 503 });
+          const response = await originalFetch(input, options);
+          if ((options.method || 'GET') !== 'GET') return response;
+          if (url.endsWith('/v1/recharge/orders')) {
+            const body = await response.json();
+            body.items = body.items.map((item, index) => {
+              if (index === 0) return { ...item, status: state.newProjection && review ? 'MANUAL_REVIEW' : initiallyPaid ? 'PAID' : 'PENDING', fulfillment_status: state.newProjection && review ? 'MANUAL_REVIEW' : initiallyPaid ? 'CREDITED' : 'PENDING', paid_at: initiallyPaid || state.newProjection && review ? '2026-11-06T00:00:00Z' : null };
+              if (index === 1 && mode !== 'newer-review') return { ...item, status: state.newProjection && !review && !initiallyPaid ? 'PAID' : 'PENDING', fulfillment_status: state.newProjection && !review && !initiallyPaid ? 'CREDITED' : 'PENDING', paid_at: state.newProjection && !review && !initiallyPaid ? '2026-11-06T00:00:00Z' : null };
+              return item;
+            });
+            if (state.dropTarget) body.items = body.items.filter(item => item.order_id !== target);
+            return new Response(JSON.stringify(body), { status: 200 });
+          }
+          if (url.endsWith(`/v1/recharge/orders/${target}`)) {
+            const body = await response.json();
+            // Valid producer sequence: a credited payment, then a distinct
+            // provider transaction moves the projection to MANUAL_REVIEW.
+            if (state.oldDetailReleased) return new Response(JSON.stringify({ ...body, status: 'MANUAL_REVIEW', fulfillment_status: 'MANUAL_REVIEW' }), { status: 200 });
+            return new Promise(resolve => {
+              state.releasePriorPaid = () => {
+                state.oldDetailReleased = true; state.rejectFollowupProducts = review;
+                resolve(new Response(JSON.stringify({ ...body, status: 'PAID', fulfillment_status: 'CREDITED', paid_at: '2026-11-06T00:00:00Z' }), { status: 200 }));
+              };
+            });
+          }
+          return response;
+        };
+        state.reload();
+      }, mode);
+      await page.waitForFunction(() => { const button = document.querySelector('.ap-order-history .ap-section-action'); return button && !button.disabled; });
+      await page.click('.ap-order-history tbody tr:has(code[title="00000000-0000-4000-8000-000000000001"]) td:last-child button');
+      await page.waitForFunction(() => typeof window.restored.releasePriorPaid === 'function');
+      const readsBeforeProjection = await page.evaluate(() => window.restored.calls.filter(c => c.url.includes('/v1/me/balance?')).length);
+      const collectionsBeforeProjection = await page.evaluate(() => window.restored.calls.filter(c => c.method === 'GET' && c.url.endsWith('/v1/recharge/orders')).length);
+      await page.evaluate(() => { window.restored.newProjection = true; });
+      const review = mode.endsWith('review');
+      const projected = review ? 'MANUAL_REVIEW' : 'COMPLETED';
+      const row = review ? 1 : 2;
+      if (mode === 'unchanged-paid') {
+        await page.waitForFunction(count => window.restored.calls.filter(c => c.method === 'GET' && c.url.endsWith('/v1/recharge/orders')).length >= count + 2, {}, collectionsBeforeProjection);
+      } else {
+        await page.waitForFunction(({ row, projected }) => document.querySelector(`.ap-order-history tbody tr:has(code[title="00000000-0000-4000-8000-${String(row).padStart(12, '0')}"]) .ap-status`)?.dataset.status === projected, {}, { row, projected });
+      }
+      if (!review && mode !== 'unchanged-paid') {
+        await page.waitForFunction(count => window.restored.calls.filter(c => c.url.includes('/v1/me/balance?')).length > count && !document.querySelector('.ap-account-information .ap-section-action').disabled, {}, readsBeforeProjection);
+      }
+      if (mode.startsWith('removed-')) {
+        await page.evaluate(() => { window.restored.dropTarget = true; });
+        await page.waitForFunction(() => !document.querySelector('.ap-order-history tr:has(code[title="00000000-0000-4000-8000-000000000001"])'));
+      }
+      const balances = await page.evaluate(() => window.restored.calls.filter(c => c.url.includes('/v1/me/balance?')).length);
+      await page.evaluate(() => window.restored.releasePriorPaid());
+      await page.waitForFunction(() => document.querySelector('.ap-order-details-body')?.getAttribute('aria-busy') === 'false');
+      if (review) {
+        if (mode === 'removed-review') {
+          assert.equal(await page.$$eval('.ap-order-history tr:has(code[title="00000000-0000-4000-8000-000000000001"])', nodes => nodes.length), 0, 'old paid cannot reinsert an evicted reviewed order');
+        } else {
+          assert.equal(await page.$eval('.ap-order-history tbody tr:has(code[title="00000000-0000-4000-8000-000000000001"]) .ap-status', n => n.dataset.status), 'MANUAL_REVIEW');
+          assert.ok((await page.$eval('.ap-order-details-body dl', n => n.textContent)).includes(await page.evaluate(() => window.restored.copy().center.orderStatuses.MANUAL_REVIEW || window.restored.copy().accountLayout.statuses.MANUAL_REVIEW)));
+        }
+        assert.equal(await page.$$eval('.ap-order-details-body .ap-dialog-actions', nodes => nodes.length), 0, 'stale paid read must not unlock detail actions');
+        await page.click('.ap-order-details-body > button');
+        await page.waitForSelector('.ap-order-details-body textarea');
+      } else {
+        assert.equal(await page.$$eval('.ap-order-details-body .ap-dialog-actions', nodes => nodes.length), 1, 'unchanged facts must still admit the authorized paid detail');
+        assert.ok((await page.$eval('.ap-order-details-body dl', n => n.textContent)).includes(await page.evaluate(() => window.restored.copy().center.orderStatuses.COMPLETED || window.restored.copy().accountLayout.statuses.COMPLETED)));
+        await page.waitForFunction(count => window.restored.calls.filter(c => c.url.includes('/v1/me/balance?')).length > count, {}, balances);
+      }
+      assert.equal(await page.evaluate(() => window.restored.calls.filter(c => c.method === 'POST' && c.url.includes('/recharge/orders')).length), 0);
+    }
+  });
   await run('order details keep the underlying list and dialog geometry stable through delayed reads', async () => {
     for (const viewport of [{ width: 1440, height: 700 }, { width: 390, height: 560 }]) {
     await fresh(); await accountTab('ordersInvoices'); await activeAccount('ordersInvoices');
