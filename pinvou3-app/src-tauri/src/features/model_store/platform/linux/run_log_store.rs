@@ -136,7 +136,7 @@ fn mask_literal_secrets(line: &str) -> String {
 }
 
 /// 一眼就是凭证的前缀。命中就把整个词换掉。
-const SECRET_PREFIXES: [&str; 8] = [
+const SECRET_PREFIXES: [&str; 9] = [
     "hf_",
     "sk-",
     "ghp_",
@@ -144,6 +144,8 @@ const SECRET_PREFIXES: [&str; 8] = [
     "github_pat_",
     "xoxb-",
     "AKIA",
+    // P2-14（r24）：AWS 临时凭证 ASIA 前缀与 AKIA 同族（导出侧已建模，落盘缺）。
+    "ASIA",
     "bce-v3/",
 ];
 
@@ -152,7 +154,7 @@ const SECRET_PREFIXES: [&str; 8] = [
 /// `credential_store::redact_secret` 按**空白**分词，所以
 /// `https://host/f?token=abc123` 对它是一个整词、而这个整词不长得像机密——
 /// 嵌在 query 里的 token 它一个都抓不到。这一档就是补这个洞。
-const SECRET_QUERY_KEYS: [&str; 10] = [
+const SECRET_QUERY_KEYS: [&str; 14] = [
     "token",
     "access_token",
     "accesstoken",
@@ -163,6 +165,13 @@ const SECRET_QUERY_KEYS: [&str; 10] = [
     "apikey",
     "api_key",
     "signature",
+    // P2-10（r24）：注释声称「已并入」但树里没有——`> x-api-key: abc` 双泄漏。
+    "x-api-key",
+    // P2-13（r24）：OAuth 常规参数双泄漏。
+    "refresh_token",
+    "client_secret",
+    // P2-10 同族：X-Auth-Token= 形态。
+    "x-auth-token",
 ];
 
 /// query 参数名带这些**前缀**的，取值也一律抹掉。SigV4 签名全家
@@ -300,7 +309,11 @@ fn value_looks_secret(value: &str) -> bool {
     let value = value.trim_matches(|c: char| {
         matches!(
             c,
-            '"' | '\'' | ',' | ';' | ')' | '(' | '{' | '}' | '[' | ']'
+            // P2-12（r24）：转义 JSON `\"api_key\": \"supersecret\"}` 的键值
+            // 片段带反斜杠前缀——trim 集并入 `\` 让 `\"api_key\` 化简为 api_key。
+            '"' | '\'' | ',' | ';' | ')' | '(' | '{' | '}' | '[' | ']' | '\\'
+            // P2-14（r24）：<AKIA…> 尖括号包裹的 AWS key 落盘+导出双泄漏。
+            | '<' | '>'
         )
     });
     // 前缀族短值（不足 8 字符的 sk-abc）也收：前缀本身就是形状声明。
@@ -315,8 +328,45 @@ fn value_looks_secret(value: &str) -> bool {
 /// 只动**取值**，保留参数名和主机路径——`?token=[REDACTED]` 比整条 URL 变成
 /// `[REDACTED]` 有用得多：排查的第一个问题往往是"它到底在连哪儿"。
 fn redact_url_secrets(word: &str) -> String {
-    if !word.contains("://") {
+    // P2-15（r24）：相对 URL（`/x?token=secret`）无 `://` 也可能带机密 query。
+    // 原门 `!word.contains("://")` 把这类词整体放行。改为：有 `://` 走完整
+    // URL 脱敏（userinfo+query），无 scheme 但含 `?key=value` 形态也走 query 脱敏。
+    let has_scheme = word.contains("://");
+    let has_query = !has_scheme && word.contains('?') && word.contains('=');
+    if !has_scheme && !has_query {
         return word.to_string();
+    }
+    if has_query {
+        // 相对路径：只处理 query 部分，路径原样保留。
+        let (path, query) = match word.split_once('?') {
+            Some(pair) => pair,
+            None => return word.to_string(),
+        };
+        let mut out = String::with_capacity(word.len());
+        out.push_str(path);
+        out.push('?');
+        let mut first = true;
+        for pair in query.split('&') {
+            if !first {
+                out.push('&');
+            }
+            first = false;
+            let (key, value) = match pair.split_once('=') {
+                Some(kv) => kv,
+                None => {
+                    out.push_str(pair);
+                    continue;
+                }
+            };
+            out.push_str(key);
+            out.push('=');
+            if query_key_is_secret(key) {
+                out.push_str(REDACTED);
+            } else {
+                out.push_str(value);
+            }
+        }
+        return out;
     }
     let mut out = String::with_capacity(word.len());
     // userinfo：`scheme://` 之后、第一个 `@` 之前的 `user:pass`。密码才是机密，
