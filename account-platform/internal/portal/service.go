@@ -57,14 +57,15 @@ type Config struct {
 	TrustedProxyIPs                     []netip.Addr
 }
 type Service struct {
-	probeClient     *http.Client
-	config          Config
-	store           Store
-	client          *http.Client
-	auditClient     *http.Client
-	now             func() time.Time
-	verifier        *oidc.IDTokenVerifier
-	trustedProxyIPs map[netip.Addr]struct{}
+	probeClient        *http.Client
+	config             Config
+	store              Store
+	client             *http.Client
+	auditClient        *http.Client
+	emptyCommandClient *http.Client
+	now                func() time.Time
+	verifier           *oidc.IDTokenVerifier
+	trustedProxyIPs    map[netip.Addr]struct{}
 }
 type oidcTokenEndpointError struct {
 	StatusCode int
@@ -150,6 +151,10 @@ func NewService(config Config, store Store) (*Service, error) {
 	if err != nil {
 		return nil, err
 	}
+	emptyCommandClient, err := newPortalEmptyCommandHTTPClient(config.PrivateCAFile)
+	if err != nil {
+		return nil, err
+	}
 	probeClient := client
 	if strings.TrimSpace(config.SystemProbeCAFile) != "" {
 		probeClient, err = newPortalHTTPClient(config.SystemProbeCAFile)
@@ -159,7 +164,7 @@ func NewService(config Config, store Store) (*Service, error) {
 	}
 	keyContext := oidc.ClientContext(context.Background(), client)
 	verifier := oidc.NewVerifier(strings.TrimRight(config.IssuerURL.String(), "/"), oidc.NewRemoteKeySet(keyContext, config.JWKSURL.String()), &oidc.Config{ClientID: config.ClientID})
-	return &Service{config: config, store: store, client: client, auditClient: auditClient, probeClient: probeClient, verifier: verifier, trustedProxyIPs: trustedProxies, now: func() time.Time { return time.Now().UTC() }}, nil
+	return &Service{config: config, store: store, client: client, auditClient: auditClient, emptyCommandClient: emptyCommandClient, probeClient: probeClient, verifier: verifier, trustedProxyIPs: trustedProxies, now: func() time.Time { return time.Now().UTC() }}, nil
 }
 func (s *Service) Handler(static http.Handler) http.Handler {
 	router := httpserver.NewRouter()
@@ -963,14 +968,6 @@ func (s *Service) forward(w http.ResponseWriter, r *http.Request, upstream *url.
 			request.Header.Set(name, value)
 		}
 	}
-	if r.Method != http.MethodGet && r.Method != http.MethodHead && request.Header.Get("Idempotency-Key") != "" {
-		// A lost response does not establish that the upstream missed a command.
-		// Keep its key but prevent the transport from replaying the command.
-		request.GetBody = nil
-		if request.Body == http.NoBody {
-			request.Body = io.NopCloser(http.NoBody)
-		}
-	}
 	if upstream == s.config.AccountURL {
 		for _, name := range []string{"X-Registration-Query-Token", "X-Device-ID", "X-Pinvou-Download-Token"} {
 			if accountProofHeaderAllowed(r.Method, resource, name) {
@@ -1011,6 +1008,15 @@ func (s *Service) forward(w http.ResponseWriter, r *http.Request, upstream *url.
 		}
 	}
 	client := s.client
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		// Keep the idempotency key without making a sent command replayable.
+		request.GetBody = nil
+		if request.Body == http.NoBody {
+			// Go considers an absent body replayable even without GetBody. Use a
+			// fresh connection and preserve empty-body framing for the receiver.
+			client = s.emptyCommandClient
+		}
+	}
 	var setup *time.Timer
 	if auditDownload {
 		client = s.auditClient

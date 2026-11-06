@@ -31,6 +31,10 @@ func TestAuditDownloadPrivateCAExtendsOnlyPortalClientAndRejectsRedirect(t *test
 	testPortalPrivateCAClient(t, newPortalAuditHTTPClient)
 }
 
+func TestEmptyCommandPrivateCAExtendsOnlyPortalClientAndRejectsRedirect(t *testing.T) {
+	testPortalPrivateCAClient(t, newPortalEmptyCommandHTTPClient)
+}
+
 func testPortalPrivateCAClient(t *testing.T, factory func(string) (*http.Client, error)) {
 	caKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {

@@ -7,7 +7,9 @@ import (
 	"encoding/pem"
 	"errors"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -23,20 +25,33 @@ var errPortalPrivateCA = errors.New("portal private CA configuration is invalid"
 // Portal client only. It lets server-side OIDC and health calls use private TLS
 // without changing trust for browser-facing/public HTTPS integrations.
 func newPortalHTTPClient(caFile string) (*http.Client, error) {
-	return newPortalHTTPClientPolicy(caFile, false)
+	return newPortalHTTPClientPolicy(caFile, portalOrdinaryHTTP)
 }
 
 func newPortalAuditHTTPClient(caFile string) (*http.Client, error) {
-	return newPortalHTTPClientPolicy(caFile, true)
+	return newPortalHTTPClientPolicy(caFile, portalAuditHTTP)
 }
 
-func newPortalHTTPClientPolicy(caFile string, auditDownload bool) (*http.Client, error) {
+func newPortalEmptyCommandHTTPClient(caFile string) (*http.Client, error) {
+	return newPortalHTTPClientPolicy(caFile, portalEmptyCommandHTTP)
+}
+
+type portalHTTPPolicy int
+
+const (
+	portalOrdinaryHTTP portalHTTPPolicy = iota
+	portalAuditHTTP
+	portalEmptyCommandHTTP
+)
+
+func newPortalHTTPClientPolicy(caFile string, policy portalHTTPPolicy) (*http.Client, error) {
 	caFile = strings.TrimSpace(caFile)
 	if caFile == "" {
-		if auditDownload {
-			return portalClientForTransport(http.DefaultTransport.(*http.Transport).Clone(), true), nil
+		if policy == portalOrdinaryHTTP {
+			return observability.NewHTTPClient(15 * time.Second), nil
 		}
-		return observability.NewHTTPClient(15 * time.Second), nil
+		transport := http.DefaultTransport.(*http.Transport).Clone()
+		return portalClientForPolicy(transport, policy), nil
 	}
 	body, err := readPortalCAFile(caFile)
 	if err != nil {
@@ -79,10 +94,17 @@ func newPortalHTTPClientPolicy(caFile string, auditDownload bool) (*http.Client,
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.Proxy = nil
 	transport.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: pool}
-	return portalClientForTransport(transport, auditDownload), nil
+	return portalClientForPolicy(transport, policy), nil
 }
 
-func portalClientForTransport(transport *http.Transport, auditDownload bool) *http.Client {
+func portalClientForPolicy(transport *http.Transport, policy portalHTTPPolicy) *http.Client {
+	if policy == portalEmptyCommandHTTP {
+		return portalClientForTransport(portalSingleRequestTransport{transport}, false)
+	}
+	return portalClientForTransport(transport, policy == portalAuditHTTP)
+}
+
+func portalClientForTransport(transport http.RoundTripper, auditDownload bool) *http.Client {
 	timeout := 15 * time.Second
 	if auditDownload {
 		// The caller retains the original finite setup budget through headers.
@@ -96,6 +118,45 @@ func portalClientForTransport(transport *http.Transport, auditDownload bool) *ht
 			return http.ErrUseLastResponse
 		},
 	}
+}
+
+type portalSingleRequestTransport struct{ transport *http.Transport }
+
+func (t portalSingleRequestTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	transport := t.transport
+	if transport.Proxy != nil {
+		// NewClientConn's proxy probe omits the port. Use the real request so
+		// port-specific proxy exclusions are evaluated as in the ordinary client.
+		proxyURL, err := transport.Proxy(request)
+		if err != nil {
+			return nil, err
+		}
+		transport = transport.Clone()
+		transport.Proxy = func(*http.Request) (*url.URL, error) { return proxyURL, nil }
+	}
+	address := net.JoinHostPort(request.URL.Hostname(), request.URL.Port())
+	conn, err := transport.NewClientConn(request.Context(), request.URL.Scheme, address)
+	if err != nil {
+		return nil, err
+	}
+	// Use the negotiated connection once, bypassing Transport's retry loop.
+	response, err := conn.RoundTrip(request)
+	if err != nil {
+		_ = conn.Close()
+		return nil, err
+	}
+	response.Body = &portalSingleRequestBody{ReadCloser: response.Body, conn: conn}
+	return response, nil
+}
+
+type portalSingleRequestBody struct {
+	io.ReadCloser
+	conn *http.ClientConn
+}
+
+func (b *portalSingleRequestBody) Close() error {
+	defer b.conn.Close()
+	return b.ReadCloser.Close()
 }
 
 func readPortalCAFile(filename string) ([]byte, error) {

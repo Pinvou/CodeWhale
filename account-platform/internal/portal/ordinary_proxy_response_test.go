@@ -203,6 +203,9 @@ func TestOrdinaryProxyDoesNotReplayCommandAfterLosingResponse(t *testing.T) {
 				if err != nil || string(body) != payload || r.Header.Get("Idempotency-Key") != idempotencyKey {
 					t.Errorf("upstream command changed: body=%q error=%v", body, err)
 				}
+				if payload == "" && r.ContentLength != 0 {
+					t.Errorf("empty command changed to content length %d", r.ContentLength)
+				}
 				if commands.Add(1) != 1 {
 					w.WriteHeader(http.StatusCreated)
 					return
@@ -236,9 +239,42 @@ func TestOrdinaryProxyDoesNotReplayCommandAfterLosingResponse(t *testing.T) {
 			request.Header.Set("Idempotency-Key", idempotencyKey)
 			response := httptest.NewRecorder()
 			handler.ServeHTTP(response, request)
-			if !reused.Load() || commands.Load() != 1 || response.Code != http.StatusBadGateway || !strings.Contains(response.Body.String(), `"UPSTREAM_UNAVAILABLE"`) {
+			if reused.Load() != (payload != "") || commands.Load() != 1 || response.Code != http.StatusBadGateway || !strings.Contains(response.Body.String(), `"UPSTREAM_UNAVAILABLE"`) {
 				t.Fatalf("reused=%v commands=%d status=%d body=%q", reused.Load(), commands.Load(), response.Code, response.Body.String())
 			}
 		})
+	}
+}
+
+func TestOrdinaryProxyPreservesEmptyKeyedDeleteOverHTTP2(t *testing.T) {
+	const key = "delete-organization"
+	path := "/admin/v1/organizations/" + uuid.NewString()
+	upstream := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.ProtoMajor != 2 || r.Method != http.MethodDelete || r.URL.Path != path || r.Header.Get("Idempotency-Key") != key || r.ContentLength != 0 {
+			t.Errorf("unexpected upstream request: %s %s %s, content length=%d", r.Proto, r.Method, r.URL.Path, r.ContentLength)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	upstream.EnableHTTP2 = true
+	upstream.StartTLS()
+	defer upstream.Close()
+	store := newMemoryStore()
+	service := testService(t, store)
+	service.config.AccountURL = parseTestURL(t, upstream.URL)
+	transport := upstream.Client().Transport.(*http.Transport).Clone()
+	service.emptyCommandClient = portalClientForPolicy(transport, portalEmptyCommandHTTP)
+	defer service.emptyCommandClient.CloseIdleConnections()
+	session := validSession(uuid.NewString())
+	if err := store.SaveSession(context.Background(), session); err != nil {
+		t.Fatal(err)
+	}
+	request := financeBrowserRequest(service, session, http.MethodDelete, "/api/admin/account"+path, "")
+	request.Header.Set("Idempotency-Key", key)
+	response := httptest.NewRecorder()
+	service.Handler(nil).ServeHTTP(response, request)
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("bodyless HTTP/2 command returned %d: %s", response.Code, response.Body.String())
 	}
 }
