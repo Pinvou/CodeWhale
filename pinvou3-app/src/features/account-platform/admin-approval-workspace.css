@@ -62,3 +62,6 @@
 .adm-approval-policy-risk{display:inline-block;max-width:100%;padding:2px 8px;border:1px solid var(--adm-line);border-radius:6px;color:var(--adm-text);background:var(--adm-soft);line-height:1.5;overflow-wrap:anywhere}
 
 .adm-financial-repair .adm-financial-repair-code{display:block;max-width:100%;color:var(--adm-muted);font-size:12px;line-height:1.5;overflow-wrap:anywhere}
+
+.adm-financial-repair .adm-reconciliation-date-mode{grid-column:1/-1;display:grid;justify-items:start;gap:6px;min-width:0}
+.adm-financial-repair .adm-reconciliation-date-mode button{min-height:32px;max-width:100%;padding:4px 0;border-color:transparent;color:var(--adm-primary);white-space:normal;text-align:start}

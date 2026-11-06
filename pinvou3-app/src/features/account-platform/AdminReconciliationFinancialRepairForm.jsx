@@ -1,6 +1,6 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useId, useRef, useState } from 'react';
 import {
-  financialRepairInputs, financialRepairPrecheckBody,
+  financialRepairInputs, financialRepairPrecheckBody, financialRepairDateCanUseCalendar,
   financialRepairProjectionRows, financialRepairDraftFromProjection,
 } from './admin-financial-repair-form.js';
 import { useFinanceOperation } from './useFinanceOperation.js';
@@ -15,6 +15,8 @@ const reconciliationRepairCommandTypes = ['RECONCILIATION_FINANCIAL_REPAIR'];
 export function AdminReconciliationFinancialRepairForm({ client, copy, onCreated, owner = '', operationCopy = copy, commandTypes = reconciliationRepairCommandTypes }) {
   const [commandType, setCommandType] = useState(commandTypes[0]);
   const [values, setValues] = useState({});
+  const [manualBusinessDate, setManualBusinessDate] = useState(false);
+  const dateHintID = useId();
   const [facts, setFacts] = useState(null);
   const [projection, setProjection] = useState(null);
   const [reason, setReason] = useState('');
@@ -33,6 +35,9 @@ export function AdminReconciliationFinancialRepairForm({ client, copy, onCreated
   const locked = busy !== '' || operation.busy || operation.unknown;
   const pending = operation.pendingFacts;
   const displayedFacts = pending ? financialRepairProjectionRows(pending.projection) : facts;
+  const displayedBusinessDate = pending ? String(pending.draft.normalized_command.business_date) : values.business_date || '';
+  const calendarAvailable = financialRepairDateCanUseCalendar(displayedBusinessDate);
+  const manualDateMode = manualBusinessDate || !calendarAvailable;
 
   useEffect(() => {
     mounted.current = true;
@@ -153,9 +158,18 @@ export function AdminReconciliationFinancialRepairForm({ client, copy, onCreated
       </label>
       {fields.map((field) => <label key={field.key}>{label(field)}
         <input disabled={governed && locked} required value={pending ? String(field.key === 'target_resource_id' ? pending.draft.target_resource_id : pending.draft.normalized_command[field.key]) : values[field.key] || ''} inputMode={field.kind === 'integer' ? 'numeric' : 'text'}
+          type={field.kind === 'date' ? manualDateMode ? 'text' : 'date' : undefined}
+          aria-describedby={field.kind === 'date' ? dateHintID : undefined}
           onChange={(event) => setValue(field.key, event.target.value)} />
+        {field.kind === 'date' && <small id={dateHintID}>{copy.businessDateHint}</small>}
       </label>)}
       <button type="submit" disabled={locked}>{busy === 'facts' ? copy.reading : copy.readFacts}</button>
+      {reconciliationRepair && <div className="adm-reconciliation-date-mode">
+        <button type="button" disabled={locked || Boolean(pending) || manualDateMode && !calendarAvailable}
+          aria-describedby={manualDateMode && !calendarAvailable ? `${dateHintID}-mode` : undefined}
+          onClick={() => setManualBusinessDate(!manualDateMode)}>{manualDateMode ? copy.dateUseCalendar : copy.dateManualEntry}</button>
+        {manualDateMode && !calendarAvailable && <small id={`${dateHintID}-mode`}>{copy.dateCalendarUnavailableHelp}</small>}
+      </div>}
     </form>
     {failure && <p role="alert">{failure}</p>}
     {created && <p role="status">{copy.createdHint} <code>{created}</code></p>}
