@@ -51,9 +51,57 @@ try {
       const userStatus = name === 'user status actions expose danger target and self guard' ? await page.evaluate(() => ({ buttons: [...document.querySelectorAll('[data-user-status-target],[data-user-status-confirm]')].map(node => ({ target: node.dataset.userStatusTarget, confirm: node.dataset.userStatusConfirm, disabled: node.disabled, text: node.textContent, label: node.getAttribute('aria-label'), color: getComputedStyle(node).color, background: getComputedStyle(node).backgroundColor })), writes: window.restored?.calls.filter(call => call.method === 'PATCH' && call.url.endsWith('/status')) })).catch(() => ({ unavailable: true })) : undefined;
       const userSearch = name === 'user searches refresh applied context and keep lookup kinds distinct' ? await page.evaluate(() => ({ location: location.search, inputs: [...document.querySelectorAll('.adm-user-search-toolbar input')].map(node => node.value), buttons: [...document.querySelectorAll('.adm-user-search-toolbar button')].map(node => ({ text: node.textContent, disabled: node.disabled })), error: document.querySelector('.adm-panel [role=alert]')?.textContent, calls: window.restored?.calls.filter(call => /\/admin\/v1\/(users\?|user-code-lookups\/)/.test(call.url)) })).catch(() => ({ unavailable: true })) : undefined;
       const userDetail = name === 'user detail heading keeps real identity and the applied directory context' ? await page.evaluate(() => ({ location: location.search, title: document.querySelector('.adm-page-head h2')?.textContent, identity: document.querySelector('.adm-user-detail-head')?.textContent, alert: document.querySelector('[data-workspace=users] [role=alert]')?.textContent, directory: document.querySelector('[data-user-directory-search] input')?.value, reads: window.restored?.calls.filter(call => call.method === 'GET' && call.url.includes('/admin/v1/users')) })).catch(() => ({ unavailable: true })) : undefined;
-      console.error(JSON.stringify({ case: name, pageErrors: errors, ledger, userStatus, userSearch, userDetail, dialog: await page.evaluate(() => document.querySelector('[role=dialog]')?.textContent.slice(0, 1200)) })); throw error;
+      const footer = name === 'admin footer link and language control preserve readable query context' ? await page.evaluate(() => ({ location: location.search, link: document.querySelector('.adm-sidebar-foot>a')?.textContent, href: document.querySelector('.adm-sidebar-foot>a')?.getAttribute('href'), language: document.querySelector('.adm-sidebar-foot select')?.value, draft: document.querySelector('[data-user-directory-search] input')?.value, controls: [...document.querySelectorAll('.adm-sidebar-foot>a,.adm-sidebar-foot select')].map(node => { const rect = node.getBoundingClientRect(); return { tag: node.tagName, width: rect.width, height: rect.height, left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom }; }) })).catch(() => ({ unavailable: true })) : undefined;
+      console.error(JSON.stringify({ case: name, pageErrors: errors, ledger, userStatus, userSearch, userDetail, footer, dialog: await page.evaluate(() => document.querySelector('[role=dialog]')?.textContent.slice(0, 1200)) })); throw error;
     }
   };
+  await run('admin footer link and language control preserve readable query context', async () => {
+    const linkSelector = '.adm-sidebar-foot > a', languageSelector = '.adm-sidebar-foot select';
+    const cursor = 'eyJ1cGRhdGVkX2F0IjoiMjAyNi0xMC0wMVQwMDowMDowMFoiLCJ1c2VyX2lkIjoiMzMzMzMzMzMtMzMzMy00MzMzLTgzMzMtMzMzMzMzMzMzMzMzIn0';
+    const userReads = () => page.evaluate(() => window.restored.calls.filter(call => call.method === 'GET' && new URL(call.url, location.origin).pathname === '/api/admin/account/admin/v1/users').length);
+    await fresh(`?mode=admin&userDetailHeader=1&section=users&user_q=${encodeURIComponent('验证')}&user_cursor=${cursor}`);
+    await page.waitForFunction(() => document.querySelector('[data-user-results-refresh]') && !document.querySelector('[data-user-results-refresh]').disabled);
+    await page.type('[data-user-directory-search] input', '未提交');
+    const before = await userReads();
+    if (process.env.UI_SCREENSHOT_DIR) fs.mkdirSync(process.env.UI_SCREENSHOT_DIR, { recursive: true });
+    for (const width of [1440, 390]) {
+      await page.setViewport({ width, height: 1000 }); await page.evaluate(() => scrollTo(0, 0));
+      for (const [language, home] of [['zh', '个人中心'], ['en', 'Personal center'], ['ja', '個人センター'], ['zh', '个人中心']]) {
+        await page.select(languageSelector, language);
+        await page.waitForFunction(({ language, home }) => document.querySelector('.adm-sidebar-foot select')?.value === language && document.querySelector('.adm-sidebar-foot > a')?.textContent === home, {}, { language, home });
+        await noOverflow();
+        assert.equal(await page.$eval(linkSelector, node => node.getAttribute('href')), '/');
+        assert.deepEqual(await page.$$eval('.adm-sidebar-foot select option', nodes => nodes.map(node => node.value)), ['zh', 'en', 'ja']);
+        assert.equal(await page.$eval('[data-user-directory-search] input', node => node.value), '验证未提交');
+        const url = new URL(page.url()); assert.equal(url.searchParams.get('user_q'), '验证'); assert.equal(url.searchParams.get('user_cursor'), cursor); assert.equal(url.searchParams.get('section'), 'users');
+        assert.equal(await userReads(), before, 'footer locale changes do not rerun or replace the current directory search');
+        const geometry = await page.$eval(linkSelector, node => {
+          const footer = node.parentElement, select = footer.querySelector('select'), clip = { left: 0, top: 0, right: innerWidth, bottom: innerHeight };
+          for (let ancestor = footer; ancestor; ancestor = ancestor.parentElement) {
+            const style = getComputedStyle(ancestor), rect = ancestor.getBoundingClientRect(), clips = value => ['auto', 'scroll', 'hidden', 'clip', 'overlay'].includes(value);
+            if (clips(style.overflowX)) { clip.left = Math.max(clip.left, rect.left + ancestor.clientLeft); clip.right = Math.min(clip.right, rect.left + ancestor.clientLeft + ancestor.clientWidth); }
+            if (clips(style.overflowY)) { clip.top = Math.max(clip.top, rect.top + ancestor.clientTop); clip.bottom = Math.min(clip.bottom, rect.top + ancestor.clientTop + ancestor.clientHeight); }
+          }
+          const box = element => { const rect = element.getBoundingClientRect(); return { left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom, width: rect.width, height: rect.height }; };
+          const range = document.createRange(); range.selectNodeContents(node);
+          const style = getComputedStyle(node);
+          return { clip, link: box(node), select: box(select), footer: box(footer), fragments: [...range.getClientRects()].map(rect => ({ left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom, width: rect.width, height: rect.height })), fontSize: style.fontSize, sidebarFont: getComputedStyle(node.closest('.adm-sidebar')).fontSize };
+        });
+        const inside = rect => Object.values(rect).every(Number.isFinite) && rect.width > 0 && rect.height > 0 && rect.left >= geometry.clip.left - 0.5 && rect.right <= geometry.clip.right + 0.5 && rect.top >= geometry.clip.top - 0.5 && rect.bottom <= geometry.clip.bottom + 0.5;
+        assert.ok(Object.values(geometry.clip).every(Number.isFinite) && geometry.clip.right > geometry.clip.left && geometry.clip.bottom > geometry.clip.top);
+        assert.equal(geometry.fragments.length, 1, `the home link must stay on a single readable line: ${JSON.stringify(geometry)}`);
+        assert.ok(geometry.fragments.every(rect => inside(rect) && rect.left >= geometry.link.left - 0.5 && rect.right <= geometry.link.right + 0.5 && rect.top >= geometry.link.top - 0.5 && rect.bottom <= geometry.link.bottom + 0.5) && inside(geometry.link) && inside(geometry.select), `footer text or controls are clipped: ${JSON.stringify(geometry)}`);
+        assert.ok(geometry.select.width >= 100, 'language control retains usable width on supported test viewports');
+        assert.ok(geometry.link.right <= geometry.select.left + 0.5 || geometry.select.right <= geometry.link.left + 0.5 || geometry.link.bottom <= geometry.select.top + 0.5 || geometry.select.bottom <= geometry.link.top + 0.5, 'home and language controls do not overlap');
+        assert.ok(Number.parseFloat(geometry.fontSize) >= Number.parseFloat(geometry.sidebarFont), 'readability is not achieved by shrinking the link font');
+        console.log(JSON.stringify({ case: 'admin-footer-visibility', width, language, ...geometry }));
+      }
+      await page.focus(linkSelector); await page.keyboard.press('Tab'); await page.keyboard.down('Shift'); await page.keyboard.press('Tab'); await page.keyboard.up('Shift');
+      assert.ok(await page.$eval(linkSelector, node => node.matches(':focus-visible') && Number.parseFloat(getComputedStyle(node).outlineWidth) > 0 && getComputedStyle(node).outlineStyle !== 'none'), 'native keyboard focus remains visible');
+      if (process.env.UI_SCREENSHOT_DIR) await page.screenshot({ path: path.join(process.env.UI_SCREENSHOT_DIR, `admin-footer-${width}.png`) });
+    }
+    assert.equal(await page.evaluate(() => window.restored.calls.filter(call => call.method !== 'GET' && !call.url.endsWith('/account/bootstrap')).length), 0);
+  });
   await run('user detail heading keeps real identity and the applied directory context', async () => {
     const target = '22222222-2222-4222-8222-222222222222', name = '用于验证用户详情标题和返回入口布局的测试用户名称';
     const cursor = 'eyJ1cGRhdGVkX2F0IjoiMjAyNi0xMC0wMVQwMDowMDowMFoiLCJ1c2VyX2lkIjoiMzMzMzMzMzMtMzMzMy00MzMzLTgzMzMtMzMzMzMzMzMzMzMzIn0';
