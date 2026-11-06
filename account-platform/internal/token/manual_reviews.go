@@ -26,10 +26,10 @@ type tokenManualReviewOverdue struct {
 }
 
 const tokenManualReviewEscalationEligible = `status='OPEN'
- AND ((claimed_at IS NULL AND claim_due_at<=$1) OR
-      (first_response_at IS NULL AND first_response_due_at<=$1) OR
-      (mitigation_at IS NULL AND mitigation_due_at<=$1) OR resolution_due_at<=$1)
- AND (last_escalated_at IS NULL OR last_escalated_at<$1::timestamptz-interval '1 hour')`
+ AND ((claimed_at IS NULL AND claim_due_at<=checked_at) OR
+      (first_response_at IS NULL AND first_response_due_at<=checked_at) OR
+      (mitigation_at IS NULL AND mitigation_due_at<=checked_at) OR resolution_due_at<=checked_at)
+ AND (last_escalated_at IS NULL OR last_escalated_at<checked_at-interval '1 hour')`
 
 func (r *PostgresRepository) SyncManualReviewCases(ctx context.Context, limit int) (int, error) {
 	if limit < 1 || limit > 500 {
@@ -105,9 +105,10 @@ func (r *PostgresRepository) EscalateOverdueManualReviews(ctx context.Context, s
 	if limit < 1 || limit > 500 {
 		limit = 100
 	}
-	now := r.now()
-	rows, err := r.pool.Query(ctx, `SELECT id FROM manual_review_cases WHERE `+tokenManualReviewEscalationEligible+`
- ORDER BY CASE severity WHEN 'P0' THEN 0 WHEN 'P1' THEN 1 ELSE 2 END,created_at,id LIMIT $2`, now, limit)
+	rows, err := r.pool.Query(ctx, `SELECT id FROM manual_review_cases
+ CROSS JOIN (SELECT statement_timestamp() AS checked_at) AS clock
+ WHERE `+tokenManualReviewEscalationEligible+`
+ ORDER BY CASE severity WHEN 'P0' THEN 0 WHEN 'P1' THEN 1 ELSE 2 END,created_at,id LIMIT $1`, limit)
 	if err != nil {
 		return 0, err
 	}
@@ -131,17 +132,25 @@ func (r *PostgresRepository) EscalateOverdueManualReviews(ctx context.Context, s
 			return count, err
 		}
 		item := tokenManualReviewOverdue{id: id}
+		var now time.Time
 		var level int
-		err = tx.QueryRow(ctx, `UPDATE manual_review_cases
- SET escalation_level=escalation_level+1,last_escalated_at=$1,updated_at=$1
- WHERE id=$2 AND `+tokenManualReviewEscalationEligible+`
- RETURNING escalation_level,severity,owner_id,case_type,resource_id,
-  CASE WHEN resolution_due_at<=$1 THEN 'RESOLUTION_OVERDUE'
-       WHEN mitigation_at IS NULL AND mitigation_due_at<=$1 THEN 'MITIGATION_OVERDUE'
-       WHEN first_response_at IS NULL AND first_response_due_at<=$1 THEN 'FIRST_RESPONSE_OVERDUE'
-       WHEN claimed_at IS NULL AND claim_due_at<=$1 THEN 'CLAIM_OVERDUE' END,
-  (severity IN ('P0','P1') AND mitigation_at IS NULL AND mitigation_due_at<=$1)`, now, id).
-			Scan(&level, &item.severity, &item.ownerID, &item.caseType, &item.resourceID, &item.stage, &item.stopLoss)
+		// Sample the database clock after locking this row, so lock or queue
+		// delays cannot shorten the next one-hour window.
+		var locked bool
+		err = tx.QueryRow(ctx, `SELECT true FROM manual_review_cases WHERE id=$1 FOR NO KEY UPDATE`, id).Scan(&locked)
+		if err == nil {
+			err = tx.QueryRow(ctx, `UPDATE manual_review_cases
+ SET escalation_level=escalation_level+1,last_escalated_at=checked_at,updated_at=checked_at
+ FROM (SELECT statement_timestamp() AS checked_at) AS clock
+ WHERE id=$1 AND `+tokenManualReviewEscalationEligible+`
+ RETURNING last_escalated_at,escalation_level,severity,owner_id,case_type,resource_id,
+  CASE WHEN resolution_due_at<=checked_at THEN 'RESOLUTION_OVERDUE'
+       WHEN mitigation_at IS NULL AND mitigation_due_at<=checked_at THEN 'MITIGATION_OVERDUE'
+       WHEN first_response_at IS NULL AND first_response_due_at<=checked_at THEN 'FIRST_RESPONSE_OVERDUE'
+       WHEN claimed_at IS NULL AND claim_due_at<=checked_at THEN 'CLAIM_OVERDUE' END,
+  (severity IN ('P0','P1') AND mitigation_at IS NULL AND mitigation_due_at<=checked_at)`, id).
+				Scan(&now, &level, &item.severity, &item.ownerID, &item.caseType, &item.resourceID, &item.stage, &item.stopLoss)
+		}
 		if err != nil {
 			tx.Rollback(ctx)
 			if errors.Is(err, pgx.ErrNoRows) {

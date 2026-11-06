@@ -73,8 +73,8 @@ func TestManualReviewSLAEscalationPostgres(t *testing.T) {
 	}
 
 	// Hold the case row while both workers pass the real candidate SELECT.
-	// pg_stat_activity proves they reached the UPDATE with that same candidate.
-	runBlocked := func(t *testing.T, f financialRouteFixture, id uuid.UUID, schedule manualreview.OnCallSchedule, workers int, beforeCommit func(pgx.Tx)) int {
+	// pg_stat_activity proves they are waiting to lock that same candidate.
+	runBlocked := func(t *testing.T, f financialRouteFixture, id uuid.UUID, schedule manualreview.OnCallSchedule, workers, limit int, beforeCommit func(pgx.Tx)) int {
 		t.Helper()
 		ctx, cancel := context.WithTimeout(f.ctx, 10*time.Second)
 		defer cancel()
@@ -93,7 +93,7 @@ func TestManualReviewSLAEscalationPostgres(t *testing.T) {
 		done := make(chan outcome, workers)
 		for range workers {
 			go func() {
-				count, err := f.r.EscalateOverdueManualReviews(ctx, schedule, 1)
+				count, err := f.r.EscalateOverdueManualReviews(ctx, schedule, limit)
 				done <- outcome{count, err}
 			}()
 		}
@@ -103,7 +103,7 @@ func TestManualReviewSLAEscalationPostgres(t *testing.T) {
 			var waiting int
 			if err := f.r.pool.QueryRow(ctx, `SELECT count(*) FROM pg_stat_activity
  WHERE datname=current_database() AND wait_event_type='Lock'
- AND query LIKE 'UPDATE manual_review_cases%SET escalation_level=%'`).Scan(&waiting); err != nil {
+				 AND query LIKE 'SELECT true FROM manual_review_cases%FOR NO KEY UPDATE'`).Scan(&waiting); err != nil {
 				t.Fatal(err)
 			}
 			if waiting == workers {
@@ -112,7 +112,7 @@ func TestManualReviewSLAEscalationPostgres(t *testing.T) {
 			select {
 			case <-ticker.C:
 			case <-ctx.Done():
-				t.Fatal("workers did not reach the blocked escalation UPDATE")
+				t.Fatal("workers did not reach the blocked escalation lock")
 			}
 		}
 		if beforeCommit != nil {
@@ -138,26 +138,88 @@ func TestManualReviewSLAEscalationPostgres(t *testing.T) {
 
 	t.Run("two_workers_and_strict_one_hour_boundary", func(t *testing.T) {
 		f, id, schedule, _, check := fixture(t)
-		now := f.r.now().Truncate(time.Microsecond)
-		f.r.now = func() time.Time { return now }
-		if n := runBlocked(t, f, id, schedule, 2, nil); n != 1 {
+		var stillLockedAt time.Time
+		if n := runBlocked(t, f, id, schedule, 2, 1, func(tx pgx.Tx) {
+			if err := tx.QueryRow(f.ctx, `SELECT clock_timestamp()`).Scan(&stillLockedAt); err != nil {
+				t.Fatal(err)
+			}
+		}); n != 1 {
 			t.Fatalf("concurrent escalations=%d, want 1", n)
 		}
 		check(1, 1)
-		first := now
+		var first time.Time
+		if err := f.r.pool.QueryRow(f.ctx, `SELECT last_escalated_at FROM manual_review_cases WHERE id=$1`, id).Scan(&first); err != nil {
+			t.Fatal(err)
+		}
+		if first.Before(stillLockedAt) {
+			t.Fatalf("escalation was stamped %v while the row was still locked at %v", first, stillLockedAt)
+		}
 		for _, window := range []struct {
 			elapsed time.Duration
-			count   int
+			allowed bool
 		}{
-			{time.Hour - time.Microsecond, 0},
-			{time.Hour, 0},
-			{time.Hour + time.Microsecond, 1},
+			{time.Hour - time.Microsecond, false},
+			{time.Hour, false},
+			{time.Hour + time.Microsecond, true},
 		} {
-			now = first.Add(window.elapsed)
-			if n, err := f.r.EscalateOverdueManualReviews(f.ctx, schedule, 1); err != nil || n != window.count {
-				t.Fatalf("elapsed %v: escalations=%d, err=%v, want %d", window.elapsed, n, err, window.count)
+			// Exercise the shared SQL predicate at a fixed time down to PostgreSQL's microsecond precision.
+			var eligible bool
+			err := f.r.pool.QueryRow(f.ctx, `SELECT EXISTS(SELECT 1 FROM manual_review_cases
+ CROSS JOIN (SELECT $2::timestamptz AS checked_at) AS clock
+ WHERE id=$1 AND `+tokenManualReviewEscalationEligible+`)`, id, first.Add(window.elapsed)).Scan(&eligible)
+			if err != nil || eligible != window.allowed {
+				t.Fatalf("elapsed %v: eligible=%v, err=%v, want %v", window.elapsed, eligible, err, window.allowed)
 			}
-			check(1+window.count, 1)
+		}
+		if _, err := f.r.pool.Exec(f.ctx, `UPDATE manual_review_cases SET last_escalated_at=statement_timestamp()-interval '61 minutes' WHERE id=$1`, id); err != nil {
+			t.Fatal(err)
+		}
+		if n, err := f.r.EscalateOverdueManualReviews(f.ctx, schedule, 1); err != nil || n != 1 {
+			t.Fatalf("next window: escalations=%d, err=%v, want 1", n, err)
+		}
+		check(2, 1)
+	})
+
+	t.Run("database_clock_controls_deadlines_and_cooldown", func(t *testing.T) {
+		f, id, schedule, _, check := fixture(t)
+		f.r.now = func() time.Time { return time.Now().Add(2 * time.Hour) }
+		if _, err := f.r.pool.Exec(f.ctx, `UPDATE manual_review_cases SET last_escalated_at=statement_timestamp()-interval '59 minutes' WHERE id=$1`, id); err != nil {
+			t.Fatal(err)
+		}
+		if n, err := f.r.EscalateOverdueManualReviews(f.ctx, schedule, 1); err != nil || n != 0 {
+			t.Fatalf("cooldown still active in database time: escalations=%d, err=%v", n, err)
+		}
+		if _, err := f.r.pool.Exec(f.ctx, `UPDATE manual_review_cases SET last_escalated_at=NULL,
+ claim_due_at=statement_timestamp()+interval '15 minutes',first_response_due_at=statement_timestamp()+interval '15 minutes',
+ mitigation_due_at=statement_timestamp()+interval '15 minutes',resolution_due_at=statement_timestamp()+interval '15 minutes' WHERE id=$1`, id); err != nil {
+			t.Fatal(err)
+		}
+		if n, err := f.r.EscalateOverdueManualReviews(f.ctx, schedule, 1); err != nil || n != 0 {
+			t.Fatalf("deadlines still in the future in database time: escalations=%d, err=%v", n, err)
+		}
+		check(0, 0)
+	})
+
+	t.Run("later_candidate_starts_a_fresh_cooldown", func(t *testing.T) {
+		f, first, schedule, _, _ := fixture(t)
+		secondUsage := f.review(t)
+		var releasedAt time.Time
+		if n := runBlocked(t, f, first, schedule, 1, 2, func(tx pgx.Tx) {
+			if err := tx.QueryRow(f.ctx, `UPDATE manual_review_cases SET status='RESOLVED',
+ resolved_at=clock_timestamp(),updated_at=clock_timestamp() WHERE id=$1 RETURNING resolved_at`, first).Scan(&releasedAt); err != nil {
+				t.Fatal(err)
+			}
+		}); n != 1 {
+			t.Fatalf("escalations=%d, want only the later candidate", n)
+		}
+		var secondAt time.Time
+		var level int
+		err := f.r.pool.QueryRow(f.ctx, `SELECT escalation_level,last_escalated_at FROM manual_review_cases WHERE resource_id=$1`, secondUsage.ID).Scan(&level, &secondAt)
+		if err != nil || level != 1 || secondAt.Before(releasedAt) {
+			t.Fatalf("later candidate level=%d written at %v, first still locked at %v, err=%v", level, secondAt, releasedAt, err)
+		}
+		if n, err := f.r.EscalateOverdueManualReviews(f.ctx, schedule, 2); err != nil || n != 0 {
+			t.Fatalf("fresh cooldown: escalations=%d, err=%v", n, err)
 		}
 	})
 
@@ -171,10 +233,13 @@ func TestManualReviewSLAEscalationPostgres(t *testing.T) {
 	} {
 		t.Run(change.name, func(t *testing.T) {
 			f, id, schedule, owners, check := fixture(t)
-			now, previousOwner := f.r.now(), uuid.New()
-			f.r.now = func() time.Time { return now }
-			n := runBlocked(t, f, id, schedule, 1, func(tx pgx.Tx) {
+			previousOwner := uuid.New()
+			n := runBlocked(t, f, id, schedule, 1, 1, func(tx pgx.Tx) {
 				t.Helper()
+				var now time.Time
+				if err := tx.QueryRow(f.ctx, `SELECT clock_timestamp()`).Scan(&now); err != nil {
+					t.Fatal(err)
+				}
 				if _, err := tx.Exec(f.ctx, `UPDATE manual_review_cases SET updated_at=$2,owner_id=$3,`+change.assignments+` WHERE id=$1`, id, now, previousOwner); err != nil {
 					t.Fatal(err)
 				}
