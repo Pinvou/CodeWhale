@@ -5,6 +5,7 @@ import { accountCenterCopy, organizationCopy } from '../../shared/i18n.js';
 import { organizationLabel } from './organization-labels.js';
 import { hasPermission } from './authorization-ui.js';
 import { supportedLocales, localeNames } from '../../shared/supported-locales.js';
+import { PortalActionIcon } from './PortalSectionAction.jsx';
 import pinvouBrand from './assets/brand-blue.png';
 import './account-portal-layout.css';
 
@@ -23,6 +24,8 @@ export function AccountPortalLayout({ me, copy, language, organizationName, orga
   const label = accountDisplayLabel(me, copy.user);
   const words = accountCenterCopy[language];
   const organizational = me.active_context?.context_type === 'ORGANIZATION';
+  const contextLabel = organizational ? organizationName || words.organization : words.personal;
+  const roleLabel = organizationRoles.length ? organizationRoles.map(role => organizationLabel(organizationCopy[language], 'Role', role)).join(', ') : words.roleUnavailable;
   const [vertical, setVertical] = useState(() => globalThis.matchMedia?.('(min-width: 851px)').matches ?? true);
   useEffect(() => {
     const media = globalThis.matchMedia('(min-width: 851px)'), update = () => setVertical(media.matches);
@@ -47,10 +50,10 @@ export function AccountPortalLayout({ me, copy, language, organizationName, orga
   return <div className="ap-shell ap-app ap-portal ap-restored-portal">
     <aside className="ap-sidebar">
       <div className="ap-sidebar-brand"><img className="ap-brand-mark" src={pinvouBrand} width="38" height="38" alt="" aria-hidden="true" /><div><p className="ap-eyebrow">PINVOU</p><h1>{copy.title}</h1></div></div>
-      <div className="ap-user-summary"><span className="ap-user-avatar" aria-hidden="true">{label.slice(0, 1).toUpperCase()}</span><div><strong>{label}</strong>{me.username && me.username !== label && <span>{me.username}</span>}</div></div>
-      <section className="ap-identity-card" aria-label={words.identity}><small>{words.identity}</small><strong>{organizational ? organizationName || words.organization : words.personal}</strong>
-        {organizational && <span>{organizationRoles.length ? organizationRoles.map(role => organizationLabel(organizationCopy[language], 'Role', role)).join(', ') : words.roleUnavailable}</span>}
-        {hasPermission(me, 'personal.context.switch') && <button type="button" className="ap-text-button" disabled={busy} onClick={onSwitchIdentity}>{words.switchIdentity}</button>}
+      <section className="ap-identity-card ap-sidebar-profile" aria-label={words.identity}>
+        <span className="ap-user-avatar" aria-hidden="true">{label.slice(0, 1).toUpperCase()}</span>
+        <div className="ap-sidebar-profile-text"><span className="ap-sidebar-user-name">{label}</span><span className="ap-sidebar-context" title={organizational ? `${contextLabel} · ${roleLabel}` : contextLabel}><NavIcon section={organizational ? 'myOrganization' : 'accountSettings'} /><strong>{contextLabel}</strong>{organizational && <span className="ap-sidebar-role"> · {roleLabel}</span>}</span></div>
+        {hasPermission(me, 'personal.context.switch') && <button type="button" className="ap-sidebar-switch" disabled={busy} onClick={onSwitchIdentity} aria-label={words.switchIdentity} title={words.switchIdentity} aria-haspopup="dialog"><PortalActionIcon kind="switch" /></button>}
       </section>
       <div className="ap-portal-tabs" role="tablist" aria-orientation={vertical ? 'vertical' : 'horizontal'} aria-label={copy.title} onKeyDown={keydown}>
         {navigation.sections.map(section => <button type="button" role="tab" id={`ap-tab-${section}`} aria-controls={`ap-panel-${section}`} aria-selected={navigation.section === section} tabIndex={navigation.section === section ? 0 : -1} className={navigation.section === section ? 'active' : ''} data-section={section} key={section} onClick={() => navigation.navigate(section)}><NavIcon section={section} /><span>{copy.sections[section]}</span></button>)}

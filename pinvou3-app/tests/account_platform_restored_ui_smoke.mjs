@@ -44,6 +44,83 @@ try {
     try { await action(); assert.deepEqual(errors, [], 'uncaught UI error'); console.log(`PASS ${name}`); passed++; }
     catch (error) { console.error(JSON.stringify({ case: name, pageErrors: errors, dialog: await page.evaluate(() => document.querySelector('[role=dialog]')?.textContent.slice(0, 1200)) })); throw error; }
   };
+  await run('approved merged identity keeps localized controls and one settings card across sizes', async () => {
+    for (const language of ['zh', 'en', 'ja']) {
+      await fresh();
+      await page.evaluate(language => {
+        window.restored.language = language;
+        window.restored.personal = ['personal.context.switch', 'personal.profile.update', 'personal.invitations.read', 'personal.invitations.accept'];
+        window.restored.reload();
+      }, language);
+      await accountTab('accountSettings'); await activeAccount('accountSettings');
+      await page.waitForSelector('.ap-current-context-row button:not(:disabled)');
+      assert.deepEqual(await page.$eval('.ap-sidebar-switch', node => ({ label: node.getAttribute('aria-label'), title: node.title, popup: node.getAttribute('aria-haspopup'), text: node.textContent.trim() })), { label: await page.evaluate(() => window.restored.copy().center.switchIdentity), title: await page.evaluate(() => window.restored.copy().center.switchIdentity), popup: 'dialog', text: '' });
+      assert.equal(await page.$$eval('.ap-sidebar .ap-identity-card', nodes => nodes.length), 1);
+      assert.equal(await page.$$eval('#ap-panel-accountSettings > .ap-account-overview', nodes => nodes.length), 1);
+      assert.equal(await page.$$eval('.ap-account-overview > .ap-account-information, .ap-account-overview > .ap-context-settings', nodes => nodes.length), 2);
+      assert.equal(await page.$eval('.ap-account-overview > .ap-context-settings', node => getComputedStyle(node).borderTopWidth), '1px');
+      assert.equal(await page.$eval('.ap-account-information', node => getComputedStyle(node).borderTopWidth), '0px');
+      assert.equal(await page.$eval('.ap-sidebar-context strong', node => node.textContent), await page.$eval('.ap-current-context-row strong', node => node.textContent));
+      for (const width of [1440, 390, 320]) {
+        await page.setViewport({ width, height: 1000 }); await noOverflow();
+        for (const selector of ['.ap-sidebar-switch', '.ap-current-context-row button', '.ap-invitations .ap-section-action']) {
+          assert.ok(await page.$eval(selector, node => { const r = node.getBoundingClientRect(); return r.width >= 36 && r.height >= 36 && node.scrollWidth <= node.clientWidth + 1; }), `control fits at ${width}: ${selector}`);
+        }
+        if (process.env.UI_ARTIFACT_DIR && language === 'zh') await page.screenshot({ path: path.join(process.env.UI_ARTIFACT_DIR, `merged-identity-${width}.png`), fullPage: true });
+      }
+      await page.focus('.ap-sidebar-switch'); await page.keyboard.press('Enter');
+      await page.waitForSelector('[role=dialog]'); await page.keyboard.press('Escape');
+      await page.waitForFunction(() => !document.querySelector('[role=dialog]') && document.activeElement?.classList.contains('ap-sidebar-switch'));
+      await page.click('.ap-current-context-row button'); await page.waitForSelector('[role=dialog]'); await page.keyboard.press('Escape');
+      await page.click('.ap-invitations .ap-section-action'); await page.waitForSelector('[role=dialog] input[type=password]');
+      await page.type('[role=dialog] input', 'controlled-draft'); await page.keyboard.press('Escape');
+      await page.click('.ap-invitations .ap-section-action');
+      assert.equal(await page.$eval('[role=dialog] input', node => node.value), 'controlled-draft');
+      await page.keyboard.press('Escape');
+    }
+  });
+  await run('approved merged identity switches through the real controller and preserves permission boundaries', async () => {
+    await fresh();
+    await page.evaluate(() => { window.restored.centerOrganization = true; window.restored.personal = ['personal.context.switch', 'personal.profile.update']; window.restored.reload(); });
+    await page.waitForSelector('.ap-sidebar-switch:not(:disabled)');
+    await page.click('.ap-sidebar-switch'); await page.waitForSelector('[role=dialog] option[value="33333333-3333-4333-8333-333333333333"]');
+    await page.select('[role=dialog] select', '33333333-3333-4333-8333-333333333333');
+    await page.click('[role=dialog] .ap-primary');
+    await page.waitForFunction(() => !document.querySelector('[role=dialog]') && document.querySelector('.ap-sidebar-context strong')?.textContent === 'Sample organization');
+    assert.equal(await page.$eval('.ap-current-context-row strong', node => node.textContent), 'Sample organization');
+    assert.deepEqual(await page.evaluate(() => JSON.parse(window.restored.calls.find(call => call.url.endsWith('/active-context')).body)), { context_type: 'ORGANIZATION', organization_id: '33333333-3333-4333-8333-333333333333', expected_context_version: 1 });
+    await page.click('.ap-current-context-row button'); await page.waitForSelector('[role=dialog] select'); await page.select('[role=dialog] select', '');
+    await page.evaluate(() => { window.restored.contextSwitchStatus = 403; }); await page.click('[role=dialog] .ap-primary');
+    await page.waitForSelector('[role=dialog] [role=alert]');
+    assert.equal(await page.$eval('.ap-sidebar-context strong', node => node.textContent), 'Sample organization', 'denied write cannot change the displayed owner');
+    await page.keyboard.press('Escape');
+    await page.evaluate(() => { window.restored.contextSwitchStatus = 0; });
+    await page.click('.ap-current-context-row button'); await page.waitForSelector('[role=dialog] select'); await page.select('[role=dialog] select', ''); await page.click('[role=dialog] .ap-primary');
+    await page.waitForFunction(() => !document.querySelector('[role=dialog]') && document.querySelector('.ap-sidebar-context strong')?.textContent === window.restored.copy().center.personal);
+    await page.evaluate(() => { window.restored.personal = []; window.restored.reload(); });
+    await page.waitForFunction(() => !document.querySelector('.ap-sidebar-switch'));
+    assert.equal(await page.$$eval('.ap-current-context-row button, .ap-invitations', nodes => nodes.length), 0);
+    assert.ok(await page.$('.ap-account-overview .ap-account-information dl'), 'read-only masked profile remains available');
+    assert.ok(!(await page.$eval('.ap-account-overview', node => node.textContent)).includes('+8613800000000'));
+  });
+  await run('approved merged identity contains long organization names and coarse pointer targets', async () => {
+    await fresh();
+    await page.setViewport({ width: 1440, height: 1000, hasTouch: true });
+    await page.waitForSelector('.ap-product-picker');
+    await page.evaluate(() => {
+      window.restored.centerOrganization = true; window.restored.organizationName = 'Long organization name '.repeat(16); window.restored.username = 'LongAccountName'.repeat(12);
+      window.restored.personal = ['personal.context.switch', 'personal.profile.update', 'personal.invitations.read', 'personal.invitations.accept'];
+      window.restored.context = { context_type: 'ORGANIZATION', organization_id: '33333333-3333-4333-8333-333333333333', context_version: 1, membership_version: 1, organization_authorization_version: 1, permissions: [] }; window.restored.reload();
+    });
+    await accountTab('accountSettings'); await page.waitForFunction(() => document.querySelector('.ap-sidebar-context')?.title.includes('Long organization name'));
+    for (const width of [1440, 390, 320]) {
+      await page.setViewport({ width, height: 1000, hasTouch: true }); await noOverflow();
+      assert.ok(await page.$eval('.ap-sidebar-switch', node => { const r = node.getBoundingClientRect(); return r.width >= 44 && r.height >= 44; }));
+      assert.equal(await page.$eval('.ap-sidebar-context strong', node => getComputedStyle(node).textOverflow), 'ellipsis');
+      assert.ok(await page.$eval('.ap-current-context-row strong', node => node.scrollWidth <= node.clientWidth + 1));
+      if (process.env.UI_ARTIFACT_DIR) await page.screenshot({ path: path.join(process.env.UI_ARTIFACT_DIR, `merged-long-identity-${width}.png`), fullPage: true });
+    }
+  });
   await run('refresh actions preserve section geometry during held HTTP reads', async () => {
     for (const viewport of [{ width: 1440, height: 850 }, { width: 390, height: 720 }]) {
       for (const target of [
@@ -313,7 +390,7 @@ try {
       await accountTab('ordersInvoices'); await activeAccount('ordersInvoices'); await noOverflow();
       assert.ok(await page.$$eval('.ap-order-table-wrap td:last-child button', nodes => nodes.every(node => node.getBoundingClientRect().width >= 60)));
       await accountTab('accountSettings'); await activeAccount('accountSettings');
-      for (const selector of ['.ap-account-information', '.ap-context-settings', '.ap-profile-rows', '.ap-security-actions']) {
+      for (const selector of ['.ap-account-overview', '.ap-profile-rows', '.ap-security-actions']) {
         assert.equal(await page.$eval('#ap-panel-accountSettings > ' + selector, node => getComputedStyle(node).backgroundColor), 'rgb(255, 255, 255)');
       }
       await noOverflow();

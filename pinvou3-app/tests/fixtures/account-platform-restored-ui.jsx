@@ -24,7 +24,7 @@ const roleProjection = binding => {
   const now = c.roleClockMs ?? Date.now();
   return { ...binding, status: binding.status === 'REVOKED' ? 'REVOKED' : binding.expires_at && Date.parse(binding.expires_at) <= now ? 'EXPIRED' : Date.parse(binding.starts_at) > now ? 'SCHEDULED' : 'ACTIVE' };
 };
-const account = () => ({ user_id: c.user, username: 'sample-account', mobile: '+8613800000000', status: 'ACTIVE', personal_authorization_version: 1, platform_authorization_version: 1,
+const account = () => ({ user_id: c.user, username: c.username || 'sample-account', mobile: '+8613800000000', status: 'ACTIVE', personal_authorization_version: 1, platform_authorization_version: 1,
   personal_permissions: c.personal || ['personal.billing.read', 'personal.recharge.create', 'personal.recharge.manage', 'personal.usage.read', 'personal.profile.update'],
   platform_permissions: c.permissions || ['platform.roles.read', 'platform.roles.assign', 'platform.users.read', 'platform.users.status.manage', 'platform.billing.wallets.read', 'platform.billing.ledger.read', 'platform.billing.repairs.request', 'platform.products.read', 'platform.models.read', 'platform.tokens.read', 'platform.pricing.read', 'platform.usage.read', 'platform.registrations.repair', 'platform.profile-changes.repair', 'platform.organizations.read', 'platform.organizations.create', 'platform.organizations.profile.manage', 'platform.organizations.status.manage', 'platform.organizations.units.manage', 'platform.organizations.members.manage', 'platform.organizations.delete'],
   active_context: c.context || { context_type: 'PERSONAL', context_version: 1, permissions: [] } });
@@ -98,7 +98,14 @@ globalThis.fetch = async (input, options = {}) => {
   }
   if (url.endsWith('/v1/models')) return json({ items: [{ model_id: unitID, display_name: 'Sample model' }] });
   if (url.endsWith('/v1/me/organizations')) return json({ items: c.centerOrganization ? [{ organization_id: orgID, name: c.organizationName || 'Sample organization', status: 'ACTIVE', version: 1, roles: c.organizationRoles || ['OWNER'] }] : [] });
-  if (url.endsWith('/v1/me/invitations')) return json({ items: [] });
+  if (url.endsWith('/v1/me/invitations')) return json({ items: c.invitations || [] });
+  if (url.endsWith('/v1/sessions/current/active-context') && method === 'POST') {
+    const body = JSON.parse(options.body), current = account().active_context;
+    if (body.expected_context_version !== current.context_version) return json({ code: 'CONTEXT_CHANGED' }, 409);
+    if (c.contextSwitchStatus) return json({ code: 'FORBIDDEN' }, c.contextSwitchStatus);
+    c.context = { context_type: body.context_type, organization_id: body.organization_id, context_version: current.context_version + 1, permissions: [], ...(body.context_type === 'ORGANIZATION' ? { membership_version: 1, organization_authorization_version: 1 } : {}) };
+    return json(c.context);
+  }
   if (url.includes('/v1/me/balance?')) return new Response('{"available_microcredits":9223372036854775807,"reserved_microcredits":10001}', { headers: { 'Content-Type': 'application/json' } });
   if (/\/v1\/me\/usage-(requests|turns)/.test(url)) {
     if (c.usagePages) {
