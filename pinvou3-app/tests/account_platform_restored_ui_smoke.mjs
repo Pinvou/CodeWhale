@@ -5,6 +5,7 @@ import { createServer } from './helpers/vite-fixture.mjs';
 import react from '@vitejs/plugin-react';
 import * as puppeteer from './helpers/puppeteer-fixture.mjs';
 import { fixtureScope } from './helpers/fixture-scope.mjs';
+import { assertStableLayoutHeight } from './helpers/layout-assertions.mjs';
 
 const root = path.resolve(import.meta.dirname, '..');
 const chrome = [process.env.CHROME, 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe', 'C:/Program Files/Microsoft/Edge/Application/msedge.exe', '/usr/bin/chromium', '/usr/bin/google-chrome', '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'].find(value => value && fs.existsSync(value));
@@ -212,7 +213,7 @@ try {
         const menu = document.querySelector('.adm-member-action-menu');
         return menu && getComputedStyle(menu).visibility !== 'hidden' && menu.getClientRects().length;
       });
-      assert.equal(await page.$eval('[data-workspace=members] tbody tr', row => row.getBoundingClientRect().height), height, 'opening member actions does not grow its table row');
+      assertStableLayoutHeight(height, await page.$eval('[data-workspace=members] tbody tr', row => row.getBoundingClientRect().height), 'opening member actions does not grow its table row');
       const geometry = await page.$eval('.adm-member-action-menu', menu => { const box = menu.getBoundingClientRect(); return { left: box.left, right: box.right, top: box.top, bottom: box.bottom, viewportWidth: innerWidth, viewportHeight: innerHeight, position: getComputedStyle(menu).position, pageTransform: getComputedStyle(document.querySelector('.adm-page')).transform }; });
       assert.ok(geometry.left >= 7 && geometry.right <= geometry.viewportWidth - 7 && geometry.top >= 7 && geometry.bottom <= geometry.viewportHeight - 7, `action overlay fits the viewport: ${JSON.stringify({ language, width, geometry })}`);
       assert.equal(await page.$eval('.adm-member-action-menu button', node => node === document.activeElement), true, 'opening the portal moves focus into its actions');
