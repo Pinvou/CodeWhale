@@ -451,4 +451,52 @@ mod tests {
         let err = tool.execute(json!({}), &ctx).await.unwrap_err();
         assert!(err.to_string().to_lowercase().contains("note"), "{err}");
     }
+
+    #[test]
+    fn strict_mode_keeps_remember_usable_with_its_note() {
+        // The schema declares `note` required so strict mode has something
+        // to keep: the pipeline marks the tool strict, `note` survives
+        // (append is the default action, so `{"note": ...}` stays callable),
+        // and the other parameters are removed with the description note.
+        // Reverting the schema to an all-optional shape must fail here —
+        // without this pin the schema and the strict pipeline could drift
+        // apart silently.
+        let tool = RememberTool;
+        let schema = tool.input_schema();
+        let mut tools = vec![crate::models::Tool {
+            tool_type: None,
+            name: tool.name().to_string(),
+            description: tool.description().to_string(),
+            input_schema: schema.clone(),
+            allowed_callers: None,
+            defer_loading: None,
+            input_examples: None,
+            strict: None,
+            cache_control: None,
+        }];
+
+        assert!(
+            crate::tools::schema_sanitize::prepare_tools_for_strict_mode(&mut tools),
+            "remember's schema is strict-representable: {}",
+            schema
+        );
+        assert_eq!(tools[0].strict, Some(true));
+        assert_eq!(tools[0].input_schema["required"], json!(["note"]));
+        let properties = tools[0].input_schema["properties"].as_object().unwrap();
+        assert_eq!(
+            properties.len(),
+            1,
+            "only `note` ships in strict mode: {properties:?}"
+        );
+        assert!(properties.contains_key("note"));
+        assert_eq!(
+            tools[0].input_schema["properties"]["note"]["type"],
+            schema["properties"]["note"]["type"]
+        );
+        assert!(
+            tools[0].description.contains("Strict mode:"),
+            "the removal note replaces nothing: {}",
+            tools[0].description
+        );
+    }
 }
