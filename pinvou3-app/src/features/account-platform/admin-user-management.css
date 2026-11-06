@@ -10,3 +10,10 @@
 .adm-restored-shell .adm-user-search-toolbar input{box-sizing:border-box;width:100%;min-width:0}
 .adm-restored-shell .adm-user-search-help{margin:0 0 20px;color:var(--adm-muted);font-size:12px;line-height:1.6}
 @media(max-width:1000px){.adm-restored-shell .adm-user-search-toolbar{grid-template-columns:minmax(0,1fr)}.adm-restored-shell .adm-user-search-toolbar>button{justify-self:start}}
+.adm-restored-shell .adm-user-memberships{padding:0;list-style:none}
+.adm-shell.adm-restored-shell .adm-user-memberships button.adm-name-link{max-width:100%;padding:0;border:0;background:transparent;color:var(--adm-primary);font-weight:600;text-align:left;white-space:normal;overflow-wrap:anywhere}
+.adm-restored-shell .adm-user-membership-label{display:inline-block;box-sizing:border-box;max-width:100%;margin:0 6px 4px 0;padding:2px 8px;border:1px solid var(--adm-line);border-radius:6px;overflow-wrap:anywhere}
+.adm-restored-shell .adm-user-membership-facts{display:flex;flex-wrap:wrap;gap:8px 24px;margin:8px 0 20px}
+.adm-restored-shell .adm-user-membership-facts>div{display:flex;align-items:baseline;flex-wrap:wrap;gap:6px;min-width:0;max-width:100%}
+.adm-restored-shell .adm-user-membership-facts dt{color:var(--adm-muted)}
+.adm-restored-shell .adm-user-membership-facts dd{min-width:0;max-width:100%;margin:0;overflow-wrap:anywhere}

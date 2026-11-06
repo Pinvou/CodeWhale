@@ -1221,7 +1221,7 @@ try {
     await page.waitForSelector('[data-workspace=users] tbody button');
     await click('[data-workspace=users] tbody button', 'sample-account');
     await page.waitForSelector('[data-workspace=users] .adm-user-details');
-    await click('[data-workspace=users] .adm-panel button', await page.evaluate(() => window.restored.copy().adminLayout.nav.roles));
+    await click('[data-workspace=users] .adm-panel button', await page.evaluate(() => window.restored.copy().adminLayout.viewUserPlatformGrants));
     await page.waitForFunction(() => new URL(location.href).searchParams.get('role_view') === 'bindings' && document.querySelector('.adm-role-toolbar input:not([type])')?.value === '11111111-1111-4111-8111-111111111111');
     assert.equal(new URL(page.url()).searchParams.get('role_user_id'), '11111111-1111-4111-8111-111111111111');
   });
