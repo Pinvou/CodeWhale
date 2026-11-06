@@ -3603,8 +3603,16 @@ impl ShellManager {
             })
     }
 
-    /// Retirement must also protect agent-owned jobs and finished output not
-    /// yet delivered. Polling observes exit without consuming any completion.
+    /// Retirement must protect agent-owned jobs while they run and finished
+    /// parent-owned output not yet delivered. Polling observes exit without
+    /// consuming any completion. Finished-unreported evidence gates only for
+    /// parent-owned jobs: the engine's boundary drain claims child-owned
+    /// completions but suppresses their delivery from the parent stream, and
+    /// once the owning child is terminal nothing will ever claim them — the
+    /// child's own liveness is gated on the sub-agent side. An unconfirmed
+    /// stop holds the frame like every other liveness predicate
+    /// (`holds_write_scope`) until the exit is observed; confirming here
+    /// keeps a seeded/reaped record from wedging retirement.
     pub(crate) fn has_live_or_unreported_work_for_session(
         &mut self,
         active_session_id: &str,
@@ -3615,8 +3623,33 @@ impl ShellManager {
                     return false;
                 }
                 shell.poll();
-                shell.status == ShellStatus::Running || !shell.completion_reported
+                shell.confirm_stop_when_reaped();
+                shell.status == ShellStatus::Running
+                    || shell.stop_unconfirmed
+                    || (shell.owner_agent.is_none() && !shell.completion_reported)
             })
+    }
+
+    /// Insert an agent-owned session record for retirement-check tests
+    /// without spawning: mirrors `seed_session_shell_for_test` with a
+    /// non-`None` `owner_agent`, the shape a nested child's background job
+    /// carries in production.
+    #[cfg(test)]
+    pub(crate) fn seed_agent_shell_for_test(
+        &mut self,
+        id: impl Into<String>,
+        owner_session_id: &str,
+        owner_agent_id: &str,
+        running: bool,
+    ) {
+        let id = id.into();
+        self.seed_session_shell_for_test(id.clone(), owner_session_id, running);
+        if let Some(shell) = self.processes.get_mut(&id) {
+            shell.owner_agent = Some(ShellJobOwner {
+                agent_id: owner_agent_id.to_string(),
+                agent_name: owner_agent_id.to_string(),
+            });
+        }
     }
 
     /// Return agent owners whose tracked shell work is still running. The
