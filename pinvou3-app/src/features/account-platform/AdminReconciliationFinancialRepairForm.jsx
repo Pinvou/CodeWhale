@@ -5,7 +5,7 @@ import {
 } from './admin-financial-repair-form.js';
 import { useFinanceOperation } from './useFinanceOperation.js';
 import { requireFinanceID } from './finance-contract.js';
-import { reconciliationRepairHost } from './reconciliation-repair-context.js';
+import { reconciliationRepairHost, reconciliationSourceBusinessDate } from './reconciliation-repair-context.js';
 import { createAndSubmitFreshGovernedApproval } from './admin-governed-approval-workflow.js';
 
 // The repair page never asks the operator for amounts the owner already knows:
@@ -31,6 +31,8 @@ export function AdminReconciliationFinancialRepairForm({ client, copy, onCreated
   const [created, setCreated] = useState('');
   const [needsAuthentication, setNeedsAuthentication] = useState(false);
   const factsRevision = useRef(0);
+  const businessDateEdited = useRef(false);
+  const automaticBusinessDate = useRef('');
   const mounted = useRef(false);
   const currentClient = useRef(client);
   currentClient.current = client;
@@ -65,6 +67,7 @@ export function AdminReconciliationFinancialRepairForm({ client, copy, onCreated
     setProjection(null);
     setCaseContext(null);
     setContextError('');
+    automaticBusinessDate.current = '';
     setBusy((current) => current === 'facts' || current === 'context' ? '' : current);
     return () => {
       mounted.current = false;
@@ -78,6 +81,7 @@ export function AdminReconciliationFinancialRepairForm({ client, copy, onCreated
     factsRevision.current += 1;
     setBusy((current) => current === 'facts' || current === 'context' ? '' : current);
     setValues((current) => ({ ...current, [key]: value }));
+    if (key === 'business_date') businessDateEdited.current = true;
     if (key === 'target_resource_id') { setCaseContext(null); setContextError(''); }
     setFacts(null);
     setProjection(null);
@@ -89,6 +93,7 @@ export function AdminReconciliationFinancialRepairForm({ client, copy, onCreated
     setBusy((current) => current === 'facts' || current === 'context' ? '' : current);
     setCommandType(next);
     setValues(host.initialValues);
+    businessDateEdited.current = false; automaticBusinessDate.current = '';
     setCaseContext(null);
     setContextError('');
     setFacts(null);
@@ -109,10 +114,24 @@ export function AdminReconciliationFinancialRepairForm({ client, copy, onCreated
     setFacts(null); setProjection(null); setFailure(''); setCreated('');
     try {
       const value = await client.reconciliationRepairContext(caseID);
-      if (live()) setCaseContext({ identity, client, value });
+      if (live()) {
+        setCaseContext({ identity, client, value });
+        const date = reconciliationSourceBusinessDate(values, value, businessDateEdited.current, automaticBusinessDate.current);
+        if (date !== null) {
+          setValues(current => ({ ...current, business_date: date }));
+          automaticBusinessDate.current = date;
+        }
+      }
     } catch (error) {
       if (live()) setContextError(error?.status === 403 ? copy.caseContextDenied : copy.caseContextUnavailable);
     } finally { if (live()) setBusy(''); }
+  };
+
+  const adoptCaseDate = () => {
+    if (!visibleContext || locked || pending) return;
+    setValue('business_date', visibleContext.business_date);
+    businessDateEdited.current = false;
+    automaticBusinessDate.current = visibleContext.business_date;
   };
 
   const readFacts = async (event) => {
@@ -178,7 +197,9 @@ export function AdminReconciliationFinancialRepairForm({ client, copy, onCreated
       if (result) {
         setCreated(result.approval_request_id); setProjection(null); setFacts(null);
         setValues(host.initialValues); setCaseContext(null); setContextError('');
-        setReason(''); setRequestKey(''); onCreated?.(result.approval_request_id);
+        setReason(''); setRequestKey('');
+        businessDateEdited.current = false; automaticBusinessDate.current = '';
+        onCreated?.(result.approval_request_id);
       }
       return;
     }
@@ -199,6 +220,8 @@ export function AdminReconciliationFinancialRepairForm({ client, copy, onCreated
         <div><dt>{copy.caseContextLabels.currency}</dt><dd><code>{visibleContext.currency || '—'}</code></dd></div>
         <div><dt>{copy.caseContextLabels.provider_transaction_id}</dt><dd><code>{visibleContext.provider_transaction_id || '—'}</code></dd></div>
       </dl>
+      <p>{copy.caseDateHelp}</p>
+      {displayedBusinessDate !== visibleContext.business_date && <button type="button" disabled={locked} onClick={adoptCaseDate}>{copy.caseDateUse}</button>}
     </section>}
     {contextError && <p role="alert">{contextError}</p>}
     {canReadCase && sourceCaseID && !pending && <>
