@@ -4,7 +4,8 @@ import { AccountPlatformView } from '../../src/features/account-platform/Account
 import { AdminPlatformView } from '../../src/features/account-platform/AdminPlatformView.jsx';
 import { AccountPlatformBffClient } from '../../src/features/account-platform/bff-client.js';
 import { AdminPlatformClient } from '../../src/features/account-platform/admin-client.js';
-import { accountPlatformCopy, adminPlatformCopy, financeCopy, accountLayoutCopy, adminLayoutCopy, organizationCopy, adminRolePresentationCopy, platformRoleCopy } from '../../src/shared/i18n.js';
+import { readClosureIntent, saveClosureIntent } from '../../src/features/account-platform/closure-intent.js';
+import { accountPlatformCopy, adminPlatformCopy, financeCopy, accountLayoutCopy, adminLayoutCopy, organizationCopy, adminRolePresentationCopy, platformRoleCopy, accountClosureCopy } from '../../src/shared/i18n.js';
 const id = '11111111-1111-4111-8111-111111111111';
 const orgID = '33333333-3333-4333-8333-333333333333', unitID = '44444444-4444-4444-8444-444444444444', otherID = '22222222-2222-4222-8222-222222222222';
 const root = createRoot(document.querySelector('#root'));
@@ -13,6 +14,16 @@ const gridOverview = new URLSearchParams(location.search).get('gridOverview') ==
 if (gridOverview) {
   c.flags = { admin_model_token_ia: true, admin_model_details: true, admin_token_details: true };
   c.permissions = ['platform.billing.wallets.read', 'platform.products.read', 'platform.models.read', 'platform.tokens.read'];
+}
+const closureFeedback = new URLSearchParams(location.search).get('closureFeedback') === '1';
+if (closureFeedback) {
+  c.permissions = ['platform.account-closures.read', 'platform.account-closures.repair'];
+  c.closurePlan = { deferred: true, body: { items: [], next_cursor: null }, status: 200 };
+  c.pendingClosureReads = [];
+  c.closureClients = [];
+  c.releaseClosureRead = () => c.pendingClosureReads.shift()?.();
+  c.seedClosureRecovery = () => saveClosureIntent({ actor: c.user, scope: `account-closure-retry:${otherID}`, key: 'closure-controlled-original-key', facts: { id: otherID, reason: 'Controlled original recovery' } });
+  c.readClosureRecovery = actor => readClosureIntent(actor || c.user, `account-closure-retry:${otherID}`);
 }
 // These opt-in DTOs match the real seven/six metric keys; emit int64 values as
 // exact JSON number tokens so the production finance parser handles them.
@@ -69,6 +80,11 @@ globalThis.fetch = async (input, options = {}) => {
 
   if (url === '/api/session') return json({ authenticated: true, csrf_token: 'CONTROL_SYNTHETIC_CSRF', feature_flags: c.flags, ...(gridOverview ? { credential_origin: 'https://credentials.example.invalid' } : {}) });
   if (url.endsWith('/account/bootstrap')) return json(account());
+  if (closureFeedback && method === 'GET' && new URL(url, location.origin).pathname === '/api/admin/account/admin/v1/account-closure-requests') {
+    const plan = c.closurePlan;
+    if (plan.deferred) return new Promise(resolve => c.pendingClosureReads.push(() => resolve(json(plan.body, plan.status))));
+    return json(plan.body, plan.status);
+  }
   if (gridOverview && method === 'GET') {
     const pathname = new URL(url, location.origin).pathname;
     if (pathname === '/api/admin/billing/admin/v1/finance-overviews/accounts') return gridFinanceOverview('accounts');
@@ -188,6 +204,6 @@ let client;
 function render() {
   root.render(c.kind === 'admin' ? <AdminPlatformView client={client} copy={adminPlatformCopy[c.language]} language={c.language} onLanguageChange={value => { c.language = value; render(); }} /> : <AccountPlatformView client={client} copy={accountPlatformCopy[c.language]} language={c.language} portal onLanguageChange={value => { c.language = value; render(); }} />);
 }
-c.reload = () => { client = c.kind === 'admin' ? new AdminPlatformClient() : new AccountPlatformBffClient(); render(); };
-c.copy = () => ({ account: accountPlatformCopy[c.language], admin: adminPlatformCopy[c.language], finance: financeCopy[c.language], accountLayout: accountLayoutCopy[c.language], adminLayout: adminLayoutCopy[c.language], organization: organizationCopy[c.language], rolePresentation: adminRolePresentationCopy[c.language], roles: platformRoleCopy[c.language] });
+c.reload = () => { client = c.kind === 'admin' ? new AdminPlatformClient() : new AccountPlatformBffClient(); if (closureFeedback) c.closureClients.push(client); render(); };
+c.copy = () => ({ account: accountPlatformCopy[c.language], admin: adminPlatformCopy[c.language], finance: financeCopy[c.language], accountLayout: accountLayoutCopy[c.language], adminLayout: adminLayoutCopy[c.language], organization: organizationCopy[c.language], rolePresentation: adminRolePresentationCopy[c.language], roles: platformRoleCopy[c.language], closure: accountClosureCopy[c.language] });
 c.reload();

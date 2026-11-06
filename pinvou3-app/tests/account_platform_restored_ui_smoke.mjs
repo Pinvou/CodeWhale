@@ -45,6 +45,97 @@ try {
     try { await action(); assert.deepEqual(errors, [], 'uncaught UI error'); console.log(`PASS ${name}`); passed++; }
     catch (error) { console.error(JSON.stringify({ case: name, pageErrors: errors, dialog: await page.evaluate(() => document.querySelector('[role=dialog]')?.textContent.slice(0, 1200)) })); throw error; }
   };
+  await run('closure directory feedback separates pending empty error permission and retained recovery', async () => {
+    const actor = '11111111-1111-4111-8111-111111111111', target = '22222222-2222-4222-8222-222222222222';
+    const directory = '.adm-closure-directory';
+    const row = { closure_request_id: target, status: 'REPAIR_REQUIRED', stage: 'FINANCIAL_CLEARANCE', blockers: [], sla_expires_at: '2030-01-01T00:00:00Z' };
+    const plan = async (body = { items: [], next_cursor: null }, status = 200, deferred = false) => page.evaluate(({ body, status, deferred }) => { window.restored.closurePlan = { body, status, deferred }; }, { body, status, deferred });
+    const settled = () => page.waitForFunction(selector => document.querySelector(selector)?.getAttribute('aria-busy') === 'false', {}, directory);
+    const text = () => page.$eval(directory, node => node.textContent);
+    const copy = () => page.evaluate(() => window.restored.copy());
+    const refresh = async () => click(`${directory} > button`, (await copy()).finance.refresh);
+    await fresh('?mode=admin&closureFeedback=1&section=operations&operations_page=closures');
+    await page.waitForFunction(() => window.restored.pendingClosureReads?.length === 1);
+    assert.ok((await text()).includes((await copy()).closure.listLoading), 'unresolved GET is visibly loading');
+    assert.ok(!(await text()).includes((await copy()).closure.listEmpty), 'unresolved GET cannot be successful empty');
+    await page.evaluate(() => window.restored.releaseClosureRead()); await settled();
+    assert.ok((await text()).includes((await copy()).closure.listEmpty), 'confirmed empty page is explained');
+    if (process.env.UI_SCREENSHOT_DIR) {
+      fs.mkdirSync(process.env.UI_SCREENSHOT_DIR, { recursive: true });
+      for (const width of [1440, 390]) {
+        await page.setViewport({ width, height: 900 }); await noOverflow();
+        await page.evaluate(async () => { await Promise.all(document.getAnimations().filter(animation => Number.isFinite(animation.effect?.getComputedTiming().endTime)).map(animation => animation.finished.catch(() => {}))); });
+        await page.screenshot({ path: path.join(process.env.UI_SCREENSHOT_DIR, `closure-empty-${width}.png`), fullPage: true });
+      }
+      await page.setViewport({ width: 1440, height: 1000 });
+    }
+    for (const language of ['en', 'ja', 'zh']) {
+      await plan();
+      await page.evaluate(language => { window.restored.language = language; window.restored.reload(); }, language);
+      await page.waitForFunction(selector => document.querySelector(selector)?.textContent.includes(window.restored.copy().closure.listEmpty), {}, directory);
+      assert.equal(await page.$eval(`${directory} [role=status]`, node => node.textContent), (await copy()).closure.listEmpty);
+    }
+    await plan({ code: 'ACCOUNT_CLOSURE_UNAVAILABLE' }, 503); await refresh(); await settled();
+    assert.ok((await text()).includes((await copy()).closure.listUnavailable));
+    assert.ok(!(await text()).includes((await copy()).closure.listEmpty));
+    assert.ok(!(await text()).includes((await copy()).finance.unavailable), 'directory error names its own context');
+    await plan(); await click(`${directory} > [role=alert] button`, (await copy()).finance.retry); await settled();
+    assert.ok((await text()).includes((await copy()).closure.listEmpty), 'explicit read retry recovers');
+    await plan({ code: 'PERMISSION_DENIED' }, 403); await refresh(); await settled();
+    assert.ok((await text()).includes((await copy()).closure.listPermissionDenied));
+    assert.ok(!(await text()).includes((await copy()).closure.listEmpty));
+    await plan({ items: [row], next_cursor: 'controlled-next' }); await refresh(); await settled();
+    assert.ok((await text()).includes(target)); assert.ok(!(await text()).includes((await copy()).closure.listEmpty));
+    await plan(); await click(`${directory} > button`, (await copy()).finance.next); await settled();
+    assert.ok((await text()).includes((await copy()).closure.listEmpty));
+    assert.equal(await page.evaluate(() => new URL(window.restored.calls.filter(call => call.method === 'GET' && call.url.includes('/account-closure-requests')).at(-1).url, location.origin).searchParams.get('cursor')), 'controlled-next');
+    const proof = await page.evaluate(() => window.restored.seedClosureRecovery());
+    await plan(undefined, 200, true); await refresh();
+    await page.waitForFunction(() => window.restored.pendingClosureReads.length === 1);
+    await page.waitForFunction(selector => document.querySelector(selector)?.textContent.includes(window.restored.copy().closure.recoveryPending), {}, directory);
+    assert.ok((await text()).includes((await copy()).closure.listLoading));
+    assert.ok(!(await text()).includes((await copy()).closure.listEmpty));
+    await page.evaluate(() => window.restored.releaseClosureRead()); await settled();
+    assert.ok((await text()).includes(target)); assert.ok(!(await text()).includes((await copy()).closure.listEmpty));
+    await page.waitForFunction(selector => { const textarea = document.querySelector(`${selector} textarea`); return textarea?.disabled && textarea.value === 'Controlled original recovery'; }, {}, directory);
+    assert.deepEqual(await page.evaluate(() => window.restored.readClosureRecovery()), proof);
+    await plan({ code: 'ACCOUNT_CLOSURE_UNAVAILABLE' }, 503); await refresh(); await settled();
+    assert.ok((await text()).includes((await copy()).closure.listUnavailable) && (await text()).includes((await copy()).closure.recoveryPending));
+    assert.deepEqual(await page.evaluate(() => window.restored.readClosureRecovery()), proof, 'read failure retains exact original facts/key');
+    const stored = await page.evaluate(proof => {
+      const entry = Object.entries(document.defaultView.sessionStorage).find(([, value]) => value === JSON.stringify(proof));
+      if (!entry) throw new Error('Original proof storage entry missing');
+      document.defaultView.sessionStorage.setItem(entry[0], '{'); return entry;
+    }, proof);
+    const beforeCorrupt = await page.evaluate(() => window.restored.calls.filter(call => call.url.includes('/account-closure-requests')).length);
+    await refresh(); await settled();
+    assert.ok((await text()).includes((await copy()).closure.recoveryUnavailable) && !(await text()).includes((await copy()).closure.listEmpty));
+    assert.equal(await page.evaluate(() => window.restored.calls.filter(call => call.url.includes('/account-closure-requests')).length), beforeCorrupt, 'unsafe recovery read stops before GET');
+    assert.equal(await page.evaluate(key => document.defaultView.sessionStorage.getItem(key), stored[0]), '{', 'failed recovery read never deletes evidence');
+    await page.evaluate(([key, value]) => document.defaultView.sessionStorage.setItem(key, value), stored);
+    await plan({ items: [row], next_cursor: null }); await refresh(); await settled();
+    assert.equal(await page.$$eval(`${directory} > article`, nodes => nodes.length), 1, 'server duplicate and local intent merge once');
+    assert.deepEqual(await page.evaluate(() => window.restored.readClosureRecovery()), proof);
+    await plan({ items: [row], next_cursor: null }, 200, true); await refresh();
+    await page.waitForFunction(() => window.restored.pendingClosureReads.length === 1);
+    const oldClient = await page.evaluate(() => window.restored.closureClients.length - 1);
+    await plan();
+    await page.evaluate(() => { window.restored.user = '33333333-3333-4333-8333-333333333333'; window.restored.reload(); });
+    await page.waitForFunction(selector => document.querySelector(selector)?.textContent.includes(window.restored.copy().closure.listEmpty), {}, directory);
+    await page.evaluate(() => window.restored.releaseClosureRead());
+    await page.waitForFunction(index => window.restored.closureClients[index].inflightReads.size === 0, {}, oldClient);
+    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(resolve)));
+    assert.ok(!(await text()).includes(target), 'retired actor result/recovery cannot enter current directory');
+    assert.deepEqual(await page.evaluate(actor => window.restored.readClosureRecovery(actor), actor), proof);
+    const beforeDenied = await page.evaluate(() => window.restored.calls.filter(call => call.url.includes('/account-closure-requests')).length);
+    await page.evaluate(() => { window.restored.permissions = ['platform.registration-bonus.read']; window.restored.reload(); });
+    await page.waitForFunction(() => [...document.querySelectorAll('[role=alert]')].some(node => node.textContent === window.restored.copy().closure.listPermissionDenied));
+    assert.equal(await page.$(directory), null, 'real parent permission gate does not mount unauthorized directory');
+    assert.equal(await page.evaluate(() => window.restored.calls.filter(call => call.url.includes('/account-closure-requests')).length), beforeDenied, 'no unauthorized list GET');
+    await page.setViewport({ width: 390, height: 900 }); await noOverflow();
+    assert.equal(await page.evaluate(() => window.restored.calls.filter(call => call.method !== 'GET' && !call.url.endsWith('/account/bootstrap')).length), 0, 'all feedback/retry paths are read-only');
+    if (process.env.UI_SCREENSHOT_DIR) { fs.mkdirSync(process.env.UI_SCREENSHOT_DIR, { recursive: true }); await page.screenshot({ path: path.join(process.env.UI_SCREENSHOT_DIR, 'closure-permission-390.png'), fullPage: true }); }
+  });
   await run('audit long operations stay inside their cells and retain canonical detail targets', async () => {
     errors.length = 0;
     await page.setViewport({ width: 1440, height: 1000 });
