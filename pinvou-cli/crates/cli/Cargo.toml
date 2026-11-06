@@ -34,11 +34,12 @@ pinvou3-lib = { package = "pinvou3-tauri", path = "../../../pinvou3-app/src-taur
 ] }
 # Connection probes (`models test` / `models probe-local` / `settings search
 # test`): standalone HTTP mirroring app/commands/settings.rs; blocking client
-# so the CLI needs no async runtime. TLS deliberately differs from the app:
-# the app moved to native-tls (OpenSSL; see the model-store TLS switch), but
-# the CLI is a self-contained probe binary — reqwest's "rustls" feature here
-# is rustls-platform-verifier (system root store), so both stacks trust the
-# same system certificates.
+# so the CLI needs no async runtime. TLS: r33 勘误的再勘误——此前两版注释都
+# 称 CLI 走 rustls-platform-verifier 与 app "deliberately differs"，实测
+# （cargo tree -e features + reqwest 0.13 源码）特征统一后 reqwest 默认后端
+# 仍是 NativeTLS/OpenSSL，且调用点未设 use_rustls_tls，"rustls" 特征在本
+# 依赖形态下不切换后端——CLI 与 app 实际同栈（OpenSSL、同一系统根库）。
+# 与 app 分家的原设计在依赖统一时已失效；如需真分家要显式 use_rustls_tls。
 url = "2"
 reqwest = { version = "0.13", default-features = false, features = [
     "blocking",
