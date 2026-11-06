@@ -72,7 +72,7 @@ done
     > SHA256SUMS && sha256sum -c SHA256SUMS)
 ```
 
-命令成功只证明文件可列目录和摘要一致，不等于已验证可恢复。必须在隔离 PostgreSQL 实例执行完整 restore、迁移校验和、三份领域审计 SQL 与跨域账实核对，才能把该子备份标记为 `VERIFIED`；只有其余恢复集组件也通过后，整个恢复集才能标记为 `RESTORABLE`。
+命令成功只证明文件可列目录和摘要一致。只有在隔离 PostgreSQL 实例完成 restore、迁移校验、领域审计、Outbox/Inbox 盘点和跨域账实核对，才能把该子备份标记为 `VERIFIED`；只有其余恢复集组件也通过后，整个恢复集才能标记为 `RESTORABLE`。
 
 ## 备份与迁移前门禁
 
@@ -99,7 +99,7 @@ node scripts/account-platform-migration-manifest.mjs check
 3. 恢复站点 Secret/override 的受控副本，核对版本引用和文件权限；恢复独立模型网关，但在 Token Gateway 就绪前不开放真实模型流量。
 4. 依次恢复 Keycloak、Billing、Account、Token。多库不是分布式快照；恢复后必须以支付渠道证据和不可变账本收敛。
 5. 对每库运行当前迁移器；已执行迁移校验和不同或文件缺失时立即停止，禁止修改历史脚本“适配”恢复库。
-6. 执行站点受控只读领域审计，完整核对 Account 权限/余额、Billing 账本/支付、Token 用量及 Outbox/Inbox；任一异常先调查。这四个历史审计 SQL 文件当前不在仓库，不能按虚构路径执行；缺实际审计载体或记录时保持恢复未完成，见 [运维证据](operational-evidence.md)。
+6. 执行 [运维证据中的数据库恢复核查](operational-evidence.md#数据库恢复核查)，保存 Account、Billing、Token 领域审计及三个数据库的 Outbox/Inbox 盘点。将结果与同一恢复点的可信记录、跨域资金/权限和 Broker 证据核对，任一异常先调查；缺少实际记录时保持恢复验收未完成。
 7. 恢复并核对 NATS stream、consumer、ack floor、pending 和 redelivery 后才启动 Account/Billing 两个普通 Relay。NATS 不可恢复时进入受审计事件核对流程，不得用空实例直接承接写流量。
 8. Redis 使用空实例启动，明确撤销全部旧 Session、验证码挑战和短期登录事务；不得尝试从日志恢复它们。
 9. 在业务 Deployment 与 Ingress 仍关闭时启动依赖和服务，检查 Readiness、Outbox、Inbox 与死信。Inbox 依赖 `event_id` 去重，不得清空后重放。
