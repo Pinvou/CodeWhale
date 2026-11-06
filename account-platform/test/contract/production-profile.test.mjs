@@ -82,7 +82,7 @@ test('finance requires explicit operator mode and never writes a personal fallba
 test('finance requires the specialist health check only for the Account Relay', () => {
   const ordinary = personal.services['account-event-relay'];
   const authorization = finance.services['account-event-relay'];
-  assert.deepEqual(ordinary.healthcheck.test, ['CMD', '/healthcheck']);
+  assert.match(readFileSync(new URL('../../Dockerfile', root), 'utf8'), /^HEALTHCHECK .* CMD \["\/healthcheck"\]/m);
   assert.equal(ordinary.environment.HEALTHCHECK_URL, 'http://127.0.0.1:9090/health/ready');
   assert.equal(ordinary.environment.APPROVAL_RELAY_HEALTHCHECK_URL, undefined);
   assert.equal(authorization.environment.HEALTHCHECK_URL, undefined, 'preserve the inherited ordinary probe');

@@ -24,7 +24,8 @@ function fixture({
     status: { conditions: [{ type: 'Ready', status: 'True' }], containerStatuses: [{ name: 'event-relay', containerID: `container-${index}` }] },
   });
   const executions = [];
-  let inventories = 0;
+  let deploymentReads = 0;
+  let restarted = false;
   const run = command => {
     assert.deepEqual(command.slice(0, 4), ['--context', args[0], '--namespace', args[1]]);
     const [action, object, ...rest] = command.slice(4);
@@ -34,11 +35,14 @@ function fixture({
       return '';
     }
     if (action === 'get') {
-      if (object === `deployment/${args[2]}`) return JSON.stringify(deployment);
+      if (object === `deployment/${args[2]}`) {
+        if (++deploymentReads > 1 && replaced) restarted = true;
+        return JSON.stringify(deployment);
+      }
       if (object === 'replicasets') return JSON.stringify({ items: [replicaSet] });
       assert.equal(object, 'pods');
       const items = [pod(1), ...(absent ? [] : [pod(2)])];
-      if (++inventories > 1 && replaced) items[0].status.containerStatuses[0].containerID = 'restarted';
+      if (restarted) items[0].status.containerStatuses[0].containerID = 'restarted';
       return JSON.stringify({ items });
     }
     assert.equal(action, 'exec');

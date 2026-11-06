@@ -65,7 +65,7 @@ func TestAuthorizationReadinessDoesNotChangeOrdinaryReadiness(t *testing.T) {
 			return nil
 		}
 		return errors.New("private dependency details")
-	}, "site/release")
+	}, approvalMonitor{scope: "site/release", replica: "site-replica"})
 	for _, tc := range []struct {
 		path   string
 		status int
@@ -81,7 +81,7 @@ func TestAuthorizationReadinessDoesNotChangeOrdinaryReadiness(t *testing.T) {
 		response := httptest.NewRecorder()
 		server.Handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/metrics", nil))
 		if response.Code != 200 || strings.Contains(response.Body.String(), "private dependency") ||
-			!strings.Contains(response.Body.String(), `pinvou_authorization_relay_ready{approval_scope="site/release",source="account"} `+want+"\n") {
+			!strings.Contains(response.Body.String(), `pinvou_authorization_relay_ready{approval_replica="site-replica",approval_scope="site/release",source="account"} `+want+"\n") {
 			t.Fatalf("metrics did not reflect the authorization check result %s", want)
 		}
 	}

@@ -107,19 +107,24 @@ func (metrics *relayMetrics) record(stats events.OutboxStats) {
 	metrics.oldestMillis.Store(stats.OldestPendingAge.Milliseconds())
 }
 
-func (metrics *relayMetrics) server(address string, ready func(context.Context) error) *http.Server {
-	return metrics.serverWithApproval(address, ready, nil, "")
+type approvalMonitor struct {
+	scope   string
+	replica string
 }
 
-func (metrics *relayMetrics) serverWithApproval(address string, ready, approvalReady func(context.Context) error, approvalMonitorScope string) *http.Server {
+func (metrics *relayMetrics) server(address string, ready func(context.Context) error) *http.Server {
+	return metrics.serverWithApproval(address, ready, nil, approvalMonitor{})
+}
+
+func (metrics *relayMetrics) serverWithApproval(address string, ready, approvalReady func(context.Context) error, monitor approvalMonitor) *http.Server {
 	router := httpserver.NewRouter()
 	var gatherer prometheus.Gatherer = metrics.registry
-	if approvalReady != nil && approvalMonitorScope != "" {
+	if approvalReady != nil && monitor.scope != "" && monitor.replica != "" {
 		approvalRegistry := prometheus.NewRegistry()
 		approvalRegistry.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
 			Name:        "pinvou_authorization_relay_ready",
 			Help:        "Whether the dedicated Account authorization readiness check passes at scrape time.",
-			ConstLabels: prometheus.Labels{"source": "account", "approval_scope": approvalMonitorScope},
+			ConstLabels: prometheus.Labels{"source": "account", "approval_scope": monitor.scope, "approval_replica": monitor.replica},
 		}, func() float64 {
 			if checkRelayReady(context.Background(), approvalReady) {
 				return 1

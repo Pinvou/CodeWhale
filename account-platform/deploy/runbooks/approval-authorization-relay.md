@@ -60,7 +60,19 @@
   node scripts/account-platform-approval-relay-gate.mjs "$KUBE_CONTEXT" "$RELEASE_NAMESPACE" "$ACCOUNT_RELAY_DEPLOYMENT"
   ```
 
-使用 `observability.prometheusRulesEnabled: true` 的 Helm 站点会渲染授权 Relay 的专项告警。Prometheus 必须逐副本抓取 `/metrics`，在当前集群内评估规则。监控范围 `approval_scope` 在 Helm 为 `namespace/release`，在 Compose 为实际项目名。Compose 由现有监控加载等价规则，使用相同 scope 及期望副本数。核对专项就绪、缺副本、持续积压且无发布进展、过期租约和未分类死信。首次启用前，在受控环境用真实身份、工件和接收端确认告警送达及恢复，同时记录普通探针仍成功。
+在受控发布窗口紧接激活前运行门禁。记录检查和激活时间；检查后发生部署、配置变更、容器重启或发布中断时重验。门禁读数是现场观察，不替代后续授权探针监控或 broker 撤权证据。
+
+使用 `observability.prometheusRulesEnabled: true` 的 Helm 站点会渲染授权 Relay 的专项告警。Prometheus 逐副本抓取 `/metrics`，在当前集群内评估规则。监控范围 `approval_scope` 在 Helm 为 `namespace/release`，在 Compose 为实际项目名。副本身份在 Helm 使用 Pod UID，在 Compose 使用容器主机名，Compose 站点保持每个副本主机名唯一。规则按副本身份去重。
+
+Compose 从仓库根目录安装锁定的 Account Platform Node 依赖，使用 Helm 3.16.4 离线生成现有 Prometheus 可读取的规则文件。项目名和期望副本数取自已核对的实际 Compose 配置。
+
+```sh
+npm --prefix account-platform ci --ignore-scripts
+node account-platform/deploy/compose/render-approval-relay-alerts.mjs "$COMPOSE_PROJECT" "$EXPECTED_ACCOUNT_RELAY_REPLICAS" > approval-relay-rules.yaml
+promtool check rules approval-relay-rules.yaml
+```
+
+把生成的规则文件加入现有 Prometheus 的 `rule_files`，核对专项就绪、缺副本、积压且无发布进展、过期租约和未分类死信。首次启用前，在受控环境用真实身份、工件和接收端确认带 `approval_scope` 的告警送达及恢复，同时记录普通探针仍成功。
 
 专项就绪每次重新读取公开制品，核验独立可信摘要及 v2/previous-v1 绑定；仍配置 previous 且重叠截止已到时返回 503。完成 broker 撤权验证后，成对移除 previous 配置并重建实例，current-v2 保留历史截止字段不阻止恢复就绪。此检查验证的是本地受信发布制品及期限，不证明 broker 已应用对应 ACL，也不会自动撤销旧 key；不能通过提前移除 previous 配置替代第 5 步的实际撤权证据。
 

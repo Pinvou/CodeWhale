@@ -60,12 +60,16 @@ export function checkApprovalRelay(args, run = kubectl) {
   };
   const expectedIdentities = pods.map(podIdentity).sort();
   for (const pod of pods) {
-    command('exec', pod.metadata.name, '-c', 'event-relay', '--', '/healthcheck');
+    try {
+      command('exec', pod.metadata.name, '-c', 'event-relay', '--', '/healthcheck');
+    } catch {
+      throw new Error(`specialized readiness failed for Pod ${pod.metadata.name}`);
+    }
   }
-  assert.deepEqual(readPods().map(podIdentity).sort(), expectedIdentities, 'Account Relay pods changed during validation');
   const current = readDeployment();
   assert.equal(current.metadata.uid, deployment.metadata.uid, 'Account Relay deployment was replaced');
   assert.equal(current.metadata.generation, deployment.metadata.generation, 'Account Relay rollout changed during validation');
+  assert.deepEqual(readPods().map(podIdentity).sort(), expectedIdentities, 'Account Relay pods changed during validation');
   return replicas;
 }
 

@@ -4,10 +4,12 @@ import assert from 'node:assert/strict';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import YAML from 'yaml';
+import { composeApprovalRules } from '../../deploy/compose/render-approval-relay-alerts.mjs';
 
 const [renderedFile, outputDirectory] = process.argv.slice(2);
 assert.ok(renderedFile && outputDirectory, 'provide Helm-rendered YAML and a new test output directory');
-const rendered = YAML.parseAllDocuments(await readFile(renderedFile, 'utf8'));
+const renderedText = await readFile(renderedFile, 'utf8');
+const rendered = YAML.parseAllDocuments(renderedText);
 assert.ok(rendered.every(document => document.errors.length === 0), 'rendered YAML must parse without errors');
 const resources = rendered.map(document => document.toJS()).filter(resource => resource?.kind === 'PrometheusRule');
 assert.equal(resources.length, 1, 'render exactly one chart PrometheusRule');
@@ -57,33 +59,38 @@ const relay = rendered.map(document => document.toJS()).find(resource => resourc
 const scope = relay?.spec.template.spec.containers[0].env.find(variable => variable.name === 'APPROVAL_RELAY_MONITOR_SCOPE')?.value;
 assert.match(scope, /^[a-z0-9.-]+\/[a-z0-9.-]+$/, 'render the enabled authorization profile');
 assert.equal(groups.find(group => group.name === 'account-platform.approval-authorization')?.rules.length, 4);
+const composeScope = 'acceptance_compose';
+const composeRules = YAML.parse(composeApprovalRules(renderedText, scope, composeScope));
+assert.ok(composeRules.groups[0].rules.every(rule => rule.labels.approval_scope === composeScope
+  && rule.expr.includes(`approval_scope="${composeScope}"`) && !rule.expr.includes(scope)));
 const readyName = 'PinvouApprovalAuthorizationRelayNotReady';
 const backlogName = 'PinvouApprovalAuthorizationOutboxBacklog';
 const claimName = 'PinvouApprovalAuthorizationExpiredClaims';
 const deadName = 'PinvouApprovalAuthorizationDeadLetters';
-const readiness = (instance, value, site = scope) => ({
-  series: `pinvou_authorization_relay_ready{source="account",approval_scope="${site}",instance="${instance}"}`,
+const readiness = (instance, value, site = scope, replica = instance) => ({
+  series: `pinvou_authorization_relay_ready{source="account",approval_scope="${site}",approval_replica="${replica}",instance="${instance}"}`,
   values: `${value}+0x8`,
 });
-const metric = (name, values, labels = '') => ({
-  series: `${name}{source="account",instance="a1"${labels}}`, values,
+const metric = (name, values, labels = '', instance = 'a1') => ({
+  series: `${name}{source="account",instance="${instance}"${labels}}`, values,
 });
 const alert = (name, labels, summary) => ({
   alertname: name, eval_time: '6m',
-  exp_alerts: summary ? [{ exp_labels: { severity: 'p1', ...labels }, exp_annotations: { summary } }] : [],
+  exp_alerts: summary ? [{ exp_labels: { severity: 'p1', approval_scope: scope, ...labels }, exp_annotations: { summary } }] : [],
 });
 const healthy = Array.from({ length: relay.spec.replicas }, (_, index) => readiness(`a${index + 1}`, 1));
-assert.ok(healthy.length > 0);
+assert.ok(healthy.length >= 2, 'verify replica counting against a genuinely replicated deployment');
 const readySummary = 'Account authorization relay readiness failed or is not being scraped';
 const backlogSummary = 'Account authorization outbox is pending without publication progress';
-const scopeLabels = { source: 'account', approval_scope: scope, instance: 'a1' };
+const scopeLabels = { source: 'account', approval_replica: 'a1', instance: 'a1' };
 const baseLabels = { source: 'account', instance: 'a1' };
 const pending = metric('pinvou_authorization_outbox_pending_events', '5+0x8');
 const published = values => metric('pinvou_authorization_relay_events_total', values, ',outcome="published"');
 const scenarios = [
   ['authorization-ready-scoped', [...healthy, readiness('other', 0, 'other/release')], [alert(readyName)]],
   ['authorization-unready', [readiness('a1', 0), ...healthy.slice(1)], [alert(readyName, scopeLabels, readySummary)]],
-  ['authorization-replica-missing', [...healthy.slice(1), readiness('other', 1, 'other/release')], [alert(readyName, {}, readySummary)]],
+  ['authorization-replica-missing-despite-duplicate-scrape', [...healthy.slice(1),
+    readiness('duplicate', 1, scope, 'a2'), readiness('other', 1, 'other/release')], [alert(readyName, {}, readySummary)]],
   ['authorization-backlog-stalled', [...healthy, pending, published('0+0x8')], [alert(backlogName, {}, backlogSummary)]],
   ['authorization-backlog-making-progress', [...healthy, pending, published('0+3x8')], [alert(backlogName)]],
   ['authorization-leases-and-dead-letters', [...healthy,
@@ -93,9 +100,32 @@ const scenarios = [
     alert(deadName, baseLabels, 'Account authorization relay has unclassified dead letters')]],
 ];
 cases.tests.push(...scenarios.map(([name, input_series, alert_rule_test]) => ({ name, interval: '1m', input_series, alert_rule_test })));
+
+const helmGroup = groups.find(group => group.name === 'account-platform.approval-authorization');
+const multiScopeGroups = [helmGroup, { ...composeRules.groups[0], name: `${helmGroup.name}.compose` }];
+const both = (name, summary) => {
+  const check = alert(name, {}, summary);
+  check.exp_alerts.push({ ...check.exp_alerts[0], exp_labels: { severity: 'p1', approval_scope: composeScope } });
+  return check;
+};
+const multiScopeCases = {
+  rule_files: ['approval-multi-scope-rules.yaml'],
+  evaluation_interval: '1m',
+  tests: [
+    { name: 'missing-in-both-scopes', interval: '1m', input_series: [], alert_rule_test: [both(readyName, readySummary)] },
+    {
+      name: 'backlog-in-both-scopes', interval: '1m',
+      input_series: [...healthy, readiness('c1', 1, composeScope), readiness('c2', 1, composeScope),
+        pending, metric('pinvou_authorization_outbox_pending_events', '4+0x8', '', 'c1')],
+      alert_rule_test: [both(backlogName, backlogSummary)],
+    },
+  ],
+};
 // Refuse an existing directory: never overwrite another run or user files.
 await mkdir(outputDirectory);
 await writeFile(path.join(outputDirectory, 'event-relay-rules.yaml'), YAML.stringify({ groups }), { flag: 'wx' });
 await writeFile(path.join(outputDirectory, 'event-relay-missing.test.yaml'), YAML.stringify(cases), { flag: 'wx' });
+await writeFile(path.join(outputDirectory, 'approval-multi-scope-rules.yaml'), YAML.stringify({ groups: multiScopeGroups }), { flag: 'wx' });
+await writeFile(path.join(outputDirectory, 'approval-multi-scope.test.yaml'), YAML.stringify(multiScopeCases), { flag: 'wx' });
 const alertingCount = cases.tests.filter(test => test.alert_rule_test.some(check => check.exp_alerts.length > 0)).length;
-console.log(`prepared actual rendered alert rules and ${cases.tests.length} isolated promtool cases (${alertingCount} alerting cases and ${cases.tests.length - alertingCount} non-alert controls)`);
+console.log(`prepared ${cases.tests.length} rendered-rule scenarios (${alertingCount} alerting cases and ${cases.tests.length - alertingCount} controls) and ${multiScopeCases.tests.length} multi-scope scenarios`);
