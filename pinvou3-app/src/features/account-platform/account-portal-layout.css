@@ -52,7 +52,7 @@
   min-height: 40px; padding: 8px 14px; border: 1px solid #dfe2e7; border-radius: 8px; background: #fff; color: #39434a; line-height: 22px;
 }
 .ap-section-action > svg { flex: 0 0 16px; width: 16px; height: 16px; }
-.ap-section-action-labels { display: grid; }
+.ap-section-action-labels { display: grid; text-align: start; }
 .ap-section-action-labels > span, .ap-section-action-labels::before, .ap-section-action-labels::after { grid-area: 1 / 1; }
 .ap-section-action-labels::before { content: attr(data-label); visibility: hidden; }
 .ap-section-action-labels::after { content: attr(data-loading-label); visibility: hidden; }
