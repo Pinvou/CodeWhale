@@ -14,7 +14,7 @@ psql -X --no-password --dbname="service=$APPROVED_ACCOUNT_AUDIT_SERVICE" \
   --file=account-platform/deploy/runbooks/sql/account-039-rollback-inventory.sql
 ```
 
-核查只读取 `public.schema_migrations` 的 `version`、`name`、`checksum` 和 `public.approval_requests` 的 `command_type`、`policy_version`。目标库不符、缺权限、行级安全影响可见性、查询超时或脚本失败时，记录为核查失败并停止评估。正常输出包括最高迁移、039 安装身份和全部状态下对 039 所涉 v2 策略的引用数。把脱敏结果、站点与发布标识、核查时间和脚本提交保存在受控证据中。
+核查先读取 `public.schema_migrations` 的 `version`、`name`、`checksum`。最高版本至少为 018 时，还需要读取 `public.approval_requests` 的 `command_type`、`policy_version`。空账本及早于 018 的版本尚无审批关系，仍可报告迁移状态。目标库不符、预期审批关系缺失、缺权限、行级安全影响可见性、查询超时或脚本失败时，记录为核查失败并停止评估。正常输出包括最高迁移、039 安装身份和全部状态下对 039 所涉 v2 策略的引用数。把脱敏结果、站点与发布标识、核查时间和脚本提交保存在受控证据中。
 
 | 核查结果 | 恢复路径 |
 | --- | --- |
