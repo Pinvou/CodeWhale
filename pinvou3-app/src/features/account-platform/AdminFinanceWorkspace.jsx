@@ -96,7 +96,7 @@ export function Approvals({ client, copy, permissions, owner, commandTypes = def
   const [previous, setPrevious] = useState([]);
   const [detail, setDetail] = useState(null);
   const [reason, setReason] = useState('');
-  const operation = useFinanceOperation(owner, copy, client, 'approvals');
+  const operation = useFinanceOperation(owner, { ...copy, unavailable: copy.approvalReadUnavailable || copy.unavailable }, client, 'approvals');
   const load = async (next = cursor) => { const result = await operation.read(() => loadFinancePage({ ...query, cursor: next }, filters => client.governedApprovalRequests(filters), () => { setCursor(''); setPrevious([]); })); if (result) { const value = result.value; setPage(value); setCursor(result.query.cursor); setItems(requireFinanceCollection(value).filter(item => commandTypes.includes(item.command_type) && (!pendingUserID || approvalRequester(item) !== pendingUserID))); } };
   const queryKey = JSON.stringify(query);
   useEffect(() => {
