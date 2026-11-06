@@ -951,6 +951,34 @@ pub(super) fn context_input_budget_for_provider(
     context_input_budget_for_route(provider, model, None, 0)
 }
 
+/// Public for the same reason as [`context_input_budget_for_route`]: hosts
+/// issuing their own one-shot requests (e.g. the Pinvou review summon) must
+/// put the *same* `max_tokens` on the wire as the main turn — the route-effective
+/// request cap after explicit overrides, the documented ceiling intersected with
+/// the automatic per-request output cap, compatibility/route ceilings, and the
+/// route window are intersected (a concrete route cap replaces only the generic
+/// uncatalogued guess) — instead of hard-coding a constant and silently
+/// drifting from the engine. The wire model is normalized exactly as
+/// the transport normalizes it (`wire_model_for_provider_route`).
+///
+/// Pass the same effective [`RouteLimits`] the engine session resolved for the
+/// route (host-declared facts included); `None` falls back to catalogue
+/// defaults and diverges wherever the route carries declared facts. Ambient
+/// `CODEWHALE_MAX_OUTPUT_TOKENS` / `DEEPSEEK_MAX_OUTPUT_TOKENS` overrides move
+/// this value exactly as they move the main turn's. Per-dialect field shape
+/// (the Codex Responses route omits the field; some OpenAI reasoning routes
+/// rename it `max_completion_tokens`) remains transport knowledge.
+pub fn route_effective_max_output_tokens(
+    provider: ApiProvider,
+    base_url: &str,
+    requested_model: &str,
+    route_limits: Option<RouteLimits>,
+) -> u32 {
+    let wire_model =
+        crate::config::wire_model_for_provider_route(provider, base_url, requested_model);
+    crate::route_budget::effective_max_output_tokens_for_route(provider, &wire_model, route_limits)
+}
+
 /// Public so external callers (e.g. a host/bridge deriving its own compaction
 /// trigger line) can reuse the *exact* same internal input-budget math — window
 /// minus the route-effective output reservation
@@ -1032,6 +1060,47 @@ mod tests {
         assert_eq!(emergency_trim_budget(10), 8);
         assert_eq!(emergency_trim_budget(4), 4);
         assert_eq!(emergency_trim_budget(0), 0);
+    }
+
+    #[test]
+    fn route_effective_max_output_tokens_matches_the_transport_composition() {
+        let _lock = crate::test_support::lock_test_env();
+        // The wrapper is the host-facing extract of the transport clamp
+        // (client.rs `effective_max_output_tokens_with_limits`): normalize the
+        // requested id exactly as the transport does, then intersect. The k3
+        // route is the hard-code drift incident that motivated the wrapper:
+        // documented 131_072 clamped by the 65_536 per-request API cap.
+        let provider = crate::config::ApiProvider::Moonshot;
+        let base_url = "https://api.moonshot.ai/v1";
+        let via_wrapper =
+            super::route_effective_max_output_tokens(provider, base_url, "kimi-k3", None);
+        assert_eq!(via_wrapper, 65_536);
+        assert_eq!(
+            via_wrapper,
+            crate::route_budget::effective_max_output_tokens_for_route(
+                provider,
+                &crate::config::wire_model_for_provider_route(provider, base_url, "kimi-k3"),
+                None,
+            )
+        );
+        // A compact DeepSeek alias must reach the same cap as its canonical
+        // spelling: hosts may hold either form.
+        let deepseek = crate::config::ApiProvider::Deepseek;
+        let deepseek_url = "https://api.deepseek.com/v1";
+        assert_eq!(
+            super::route_effective_max_output_tokens(
+                deepseek,
+                deepseek_url,
+                "deepseek-v4pro",
+                None
+            ),
+            super::route_effective_max_output_tokens(
+                deepseek,
+                deepseek_url,
+                "deepseek-v4-pro",
+                None,
+            )
+        );
     }
 
     #[test]

@@ -9649,6 +9649,9 @@ pub(crate) use context::compact_tool_result_for_route;
 pub use context::context_input_budget_for_route;
 #[cfg(test)]
 use context::route_context_budget_for_provider;
+/// Public for the same reason: hosts issuing one-shot requests put the same
+/// `max_tokens` on the wire as the main turn (see the wrapper's doc).
+pub use context::route_effective_max_output_tokens;
 use context::{
     MAX_CONTEXT_RECOVERY_ATTEMPTS, MIN_RECENT_MESSAGES_TO_KEEP,
     effective_max_output_tokens_for_route, emergency_trim_budget,
