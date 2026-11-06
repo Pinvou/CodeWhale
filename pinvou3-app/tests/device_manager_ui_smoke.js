@@ -1712,8 +1712,12 @@ async function clickTestId(page, testId) {
 
   const failed = results.filter(result => !result.pass).length;
   console.log(failed ? `\n❌ ${failed}/${results.length} FAILED` : `\n✅ ALL ${results.length} PASS`);
-  process.exit(failed ? 1 : 0);
+  // 自然退出（exitCode 而非 process.exit）：fixture-scope 的 beforeExit 钩子
+  // 负责 ui_test_server 的 owned-server 登记 release——硬退会把 http 凭据留在
+  // registered 态，frontend-test 的资源账本审计（retirement not clean）因此
+  // 整链红（2026-11-06 CI 实证，rebase 后首次以完整链跑 bridge-smoke 暴露）。
+  process.exitCode = failed ? 1 : 0;
 })().catch(error => {
   console.error('FATAL', error.stack || error.message);
-  process.exit(1);
+  process.exitCode = 1;
 });
