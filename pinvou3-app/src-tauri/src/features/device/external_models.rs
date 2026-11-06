@@ -2573,8 +2573,7 @@ mod tests {
         let dir_named = root.join("dir-named");
         std::fs::create_dir_all(dir_named.join("model-Q4_K_M.gguf")).unwrap();
         assert!(!target_contains_registered_weight_file(
-            &dir_named,
-            &filenames
+            &dir_named, &filenames
         ));
         let other = root.join("other");
         std::fs::create_dir_all(&other).unwrap();
@@ -3166,13 +3165,16 @@ mod tests {
     fn removal_boundary_rejects_confirm_mismatch_store_names_and_store_weights() {
         // 双侧都 trim：存量记录名带空白时确认输入 trim 后仍应匹配（Ok 而非 Err）。
         assert!(
-            removal_boundary_error(" qwen3 ", "qwen3", false, false, false, false, false, None, None)
-                .is_ok(),
+            removal_boundary_error(
+                " qwen3 ", "qwen3", false, false, false, false, false, None, None
+            )
+            .is_ok(),
             "trailing-space record names must stay removable"
         );
-        let error =
-            removal_boundary_error("qwen3", " qwen3x ", false, false, false, false, false, None, None)
-                .unwrap_err();
+        let error = removal_boundary_error(
+            "qwen3", " qwen3x ", false, false, false, false, false, None, None,
+        )
+        .unwrap_err();
         assert!(error.contains("确认名"));
         // 守卫 2 名字臂：名字命中商店名单。
         let error = removal_boundary_error(
@@ -3204,25 +3206,33 @@ mod tests {
         .unwrap_err();
         assert!(error.contains("模型商店"));
         // 守卫 2 路径臂：权重位于任一商店根之下（别名躲过两个名字臂时仍被拦）。
-        let error = removal_boundary_error("qwen3", "qwen3", true, false, false, false, false, None, None)
-            .unwrap_err();
+        let error = removal_boundary_error(
+            "qwen3", "qwen3", true, false, false, false, false, None, None,
+        )
+        .unwrap_err();
         assert!(error.contains("模型商店"));
         // 存量引用臂：与在册卡片引用路径相交（2026-11-04 评审 P2）。
-        let error = removal_boundary_error("qwen3", "qwen3", false, true, false, false, false, None, None)
-            .unwrap_err();
+        let error = removal_boundary_error(
+            "qwen3", "qwen3", false, true, false, false, false, None, None,
+        )
+        .unwrap_err();
         assert!(error.contains("已安装商店模型引用"));
         // 零痕迹旧根名字臂：目录名与在册约定同名（2026-11-04 评审 P2 zhuowp
         // 场景），前四臂全空时仍被拦，且报错来自本臂而非前面的臂。
-        let error = removal_boundary_error("qwen3", "qwen3", false, false, true, false, false, None, None)
-            .unwrap_err();
+        let error = removal_boundary_error(
+            "qwen3", "qwen3", false, false, true, false, false, None, None,
+        )
+        .unwrap_err();
         assert!(
             error.contains("约定同名") && error.contains("不留痕"),
             "rejection must come from the legacy-root name arm, got: {error}"
         );
         // 自取名原目录标记臂（2026-11-05 评审 P2 zhuowp 场景 II）：前五臂全空、
         // 目标含官方脚本就地发现的标记文件且仍有在册卡片 → 拦，且报错来自本臂。
-        let error = removal_boundary_error("qwen3", "qwen3", false, false, false, true, false, None, None)
-            .unwrap_err();
+        let error = removal_boundary_error(
+            "qwen3", "qwen3", false, false, false, true, false, None, None,
+        )
+        .unwrap_err();
         assert!(
             error.contains("标记文件") && error.contains("无法确认"),
             "rejection must come from the import-marker arm, got: {error}"
@@ -3230,15 +3240,7 @@ mod tests {
         // 登记权重文件名臂（2026-11-06 评审 P2 zhuowp 场景 III）：目录改名且
         // 无标记时记录里的权重文件名是唯一存活引用，第七臂命中即拒。
         let error = removal_boundary_error(
-            "qwen3",
-            "qwen3",
-            false,
-            false,
-            false,
-            false,
-            true,
-            None,
-            None,
+            "qwen3", "qwen3", false, false, false, false, true, None, None,
         )
         .unwrap_err();
         assert!(
@@ -3248,15 +3250,7 @@ mod tests {
         // 七道全过 → Ok。
         assert!(
             removal_boundary_error(
-                " qwen3 ",
-                " qwen3 ",
-                false,
-                false,
-                false,
-                false,
-                false,
-                None,
-                None
+                " qwen3 ", " qwen3 ", false, false, false, false, false, None, None
             )
             .is_ok()
         );
