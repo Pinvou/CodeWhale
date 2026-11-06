@@ -4,14 +4,15 @@ import path from 'node:path';
 import { createServer } from './helpers/vite-fixture.mjs';
 import react from '@vitejs/plugin-react';
 import * as puppeteer from './helpers/puppeteer-fixture.mjs';
+import { fixtureScope } from './helpers/fixture-scope.mjs';
 
 const root = path.resolve(import.meta.dirname, '..');
 const chrome = [process.env.CHROME, 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe', 'C:/Program Files/Microsoft/Edge/Application/msedge.exe', '/usr/bin/chromium', '/usr/bin/google-chrome', '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'].find(value => value && fs.existsSync(value));
 assert.ok(chrome, 'Chromium required; validation cannot be skipped');
 const server = await createServer({ root, configFile: false, logLevel: 'error', plugins: [react()], css: { postcss: { plugins: [] } }, server: { host: '127.0.0.1', port: 0 } });
-await server.listen();
 let browser, passed = 0, skipped = 0;
 try {
+  await server.listen();
   browser = await puppeteer.launch({ executablePath: chrome, headless: true, args: ['--no-sandbox', '--disable-gpu', '--no-first-run'] });
   const page = await browser.newPage(), errors = [];
   page.on('pageerror', error => errors.push(error.message));
@@ -933,4 +934,4 @@ try {
   });
   console.log(`RESULT ${passed} PASS 0 FAIL ${skipped} SKIP`);
 } catch (error) { console.error(error); process.exitCode = 1; }
-finally { if (browser) await browser.close(); await server.close(); }
+finally { await fixtureScope.close(); }
