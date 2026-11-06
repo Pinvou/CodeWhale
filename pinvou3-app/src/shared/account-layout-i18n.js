@@ -110,3 +110,7 @@ for (const language of ['zh', 'en', 'ja']) Object.assign(adminLayoutCopy[languag
 adminLayoutCopy.zh.userSearch = { submit: '搜索', refresh: '刷新当前结果', refreshHelp: '刷新仅更新当前结果；修改输入后，请点击搜索或精确查询。' };
 adminLayoutCopy.en.userSearch = { submit: 'Search', refresh: 'Refresh results', refreshHelp: 'Refresh updates the current results. Apply edited text with Search or Exact lookup.' };
 adminLayoutCopy.ja.userSearch = { submit: '検索', refresh: '検索結果を更新', refreshHelp: '更新は現在の結果に適用されます。入力を変更した後は、検索または完全一致で検索を実行してください。' };
+
+Object.assign(adminLayoutCopy.zh, { userMembershipStatus: '成员状态', viewUserPlatformGrants: '查看该用户的平台授权' });
+Object.assign(adminLayoutCopy.en, { userMembershipStatus: 'Membership status', viewUserPlatformGrants: "View this user's platform grants" });
+Object.assign(adminLayoutCopy.ja, { userMembershipStatus: 'メンバー状態', viewUserPlatformGrants: 'ユーザーのプラットフォーム権限を表示' });

@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { adminLayoutCopy, accountLayoutCopy } from '../../shared/i18n.js';
+import { adminLayoutCopy, accountLayoutCopy, organizationCopy } from '../../shared/i18n.js';
 import { localizedAccountPlatformError } from './error-localization.js';
 import { PortalDialog } from './PortalDialog.jsx';
 import './admin-user-management.css';
@@ -8,7 +8,7 @@ const userDisplayName = user => user.username || user.display_name || user.user_
 
 function UserDetails({ client, userID, copy, language, route }) {
   const [profile, setProfile] = useState(null), [memberships, setMemberships] = useState(null), [error, setError] = useState(null), [membershipError, setMembershipError] = useState(null), [revision, setRevision] = useState(0);
-  const words = adminLayoutCopy[language];
+  const words = adminLayoutCopy[language], organizationWords = organizationCopy[language];
   useEffect(() => {
     const controller = new AbortController(); setProfile(null); setMemberships(null); setError(null); setMembershipError(null);
     void client.userDetail(userID, controller.signal).then(user => { if (!controller.signal.aborted) setProfile(user); }).catch(reason => { if (!controller.signal.aborted) setError(reason); });
@@ -21,11 +21,17 @@ function UserDetails({ client, userID, copy, language, route }) {
     {error && <p role="alert">{localizedAccountPlatformError(copy, error)}<button onClick={() => setRevision(value => value + 1)}>{copy.retry}</button></p>}
     {!profile && !error && <p role="status">{copy.loading}</p>}
     {profile && <><h3>{profile.username || profile.display_name || profile.user_code}</h3><dl className="adm-user-details">{[[words.userID, profile.user_id], [copy.userManagement.exactCode, profile.user_code], [copy.accounts.status, accountLayoutCopy[language].statuses[profile.status] || profile.status], [words.createdAt, date(profile.created_at)], [words.lastSeen, date(profile.last_seen_at)]].map(([label, value]) => <React.Fragment key={label}><dt>{label}</dt><dd>{value || '—'}</dd></React.Fragment>)}</dl>
-      {route.available.includes('roles') && <button onClick={() => route.navigate('roles', { role_user_id: userID, role_view: 'bindings' })}>{words.nav.roles}</button>}
+      {route.available.includes('roles') && <button onClick={() => route.navigate('roles', { role_user_id: userID, role_view: 'bindings' })}>{words.viewUserPlatformGrants}</button>}
       <h4>{words.memberships}</h4>
       {membershipError && <p role="alert">{localizedAccountPlatformError(copy, membershipError)}<button onClick={() => setRevision(value => value + 1)}>{copy.retry}</button></p>}
       {!memberships && !membershipError && <p role="status">{copy.loading}</p>}
-      {memberships?.length === 0 && <p>{copy.noData}</p>}<ul>{memberships?.map(item => <li key={item.organization_id}>{route.available.includes('organizations') ? <button onClick={() => route.navigate('organizations', { organization_id: item.organization_id })}>{item.organization_name}</button> : item.organization_name}<span> · {item.membership_status} · {(item.roles || []).join(', ')}</span></li>)}</ul>
+      {memberships?.length === 0 && <p>{copy.noData}</p>}<ul className="adm-user-memberships">{memberships?.map(item => <li key={item.organization_id}>
+        {route.available.includes('organizations') ? <button className="adm-name-link" onClick={() => route.navigate('organizations', { organization_id: item.organization_id })}>{item.organization_name}</button> : item.organization_name}
+        <dl className="adm-user-membership-facts">
+          <div><dt>{words.userMembershipStatus}</dt><dd><span className="adm-user-membership-label">{organizationWords[`enumStatus_${item.membership_status}`] || item.membership_status}</span></dd></div>
+          <div><dt>{organizationWords.roles}</dt><dd>{item.roles?.length ? item.roles.map(role => <span className="adm-user-membership-label" key={role}>{organizationWords[`enumRole_${role}`] || role}</span>) : '—'}</dd></div>
+        </dl>
+      </li>)}</ul>
     </>}
   </section>;
 }
