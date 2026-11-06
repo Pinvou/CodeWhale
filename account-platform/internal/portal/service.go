@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/netip"
 	"net/url"
@@ -1012,8 +1013,9 @@ func (s *Service) forward(w http.ResponseWriter, r *http.Request, upstream *url.
 		// Keep the idempotency key without making a sent command replayable.
 		request.GetBody = nil
 		if request.Body == http.NoBody {
-			// Go considers an absent body replayable even without GetBody. Use a
-			// fresh connection and preserve empty-body framing for the receiver.
+			// An empty command carrying an idempotency key can be replayed
+			// even without GetBody. A fresh connection avoids that replay
+			// without changing empty-body framing.
 			client = s.emptyCommandClient
 		}
 	}
@@ -1033,22 +1035,15 @@ func (s *Service) forward(w http.ResponseWriter, r *http.Request, upstream *url.
 	}
 	defer response.Body.Close()
 	materialContent := authenticated && upstream == s.config.BillingURL && productAdmissionMaterialContent(r.Method, resource) && response.StatusCode == http.StatusOK
-	var responseBody []byte
+	var responseBody net.Buffers
 	if !auditDownload && !materialContent && r.Method != http.MethodHead && response.StatusCode != http.StatusNoContent && response.StatusCode != http.StatusNotModified {
 		// Validate the whole ordinary response before committing the upstream status.
 		const responseLimit = 32 << 20
+		var size int64
 		if response.ContentLength <= responseLimit {
-			limited := io.LimitReader(response.Body, responseLimit+1)
-			if response.ContentLength > 0 {
-				var buffered bytes.Buffer
-				buffered.Grow(int(response.ContentLength) + bytes.MinRead)
-				_, err = buffered.ReadFrom(limited)
-				responseBody = buffered.Bytes()
-			} else {
-				responseBody, err = io.ReadAll(limited)
-			}
+			responseBody, size, err = readOrdinaryProxyBody(response.Body, response.ContentLength, responseLimit)
 		}
-		if response.ContentLength > responseLimit || err != nil || len(responseBody) > responseLimit {
+		if response.ContentLength > responseLimit || err != nil || size > responseLimit {
 			api.WriteError(w, http.StatusBadGateway, "UPSTREAM_UNAVAILABLE", "the account platform is unavailable", httpserver.RequestID(r.Context()))
 			return
 		}
@@ -1082,8 +1077,36 @@ func (s *Service) forward(w http.ResponseWriter, r *http.Request, upstream *url.
 	}
 	w.WriteHeader(response.StatusCode)
 	if len(responseBody) != 0 {
-		_, _ = w.Write(responseBody)
+		_, _ = responseBody.WriteTo(w)
 	}
+}
+
+func readOrdinaryProxyBody(body io.Reader, contentLength, limit int64) (net.Buffers, int64, error) {
+	limited := &io.LimitedReader{R: body, N: limit + 1}
+	var buffers net.Buffers
+	chunkSize := int64(1024)
+	if contentLength >= 0 {
+		chunkSize = contentLength + 1
+	}
+	// Keep validated chunks instead of growing or flattening a large buffer.
+	// A known-length body fits one allocation, including its overflow probe.
+	for limited.N > 0 {
+		size := min(chunkSize, limited.N)
+		var chunk bytes.Buffer
+		chunk.Grow(int(size) + bytes.MinRead)
+		n, err := chunk.ReadFrom(io.LimitReader(limited, size))
+		if err != nil {
+			return nil, 0, err
+		}
+		if n > 0 {
+			buffers = append(buffers, chunk.Bytes())
+		}
+		if n < size {
+			break
+		}
+		chunkSize = min(chunkSize*2, 1<<20)
+	}
+	return buffers, limit + 1 - limited.N, nil
 }
 
 // This read has an Account-owned durable audit and quota outcome. HEAD is not

@@ -56,6 +56,26 @@ func TestOrdinaryProxyValidatesResponseBeforeForwarding(t *testing.T) {
 			status: http.StatusBadGateway,
 		},
 		{
+			name: "chunked exact limit",
+			write: func(w http.ResponseWriter) {
+				w.WriteHeader(http.StatusCreated)
+				w.(http.Flusher).Flush()
+				writePayload(w, limit)
+			},
+			status: http.StatusCreated,
+			size:   limit,
+		},
+		{
+			name: "small chunked response",
+			write: func(w http.ResponseWriter) {
+				w.WriteHeader(http.StatusCreated)
+				w.(http.Flusher).Flush()
+				writePayload(w, 3)
+			},
+			status: http.StatusCreated,
+			size:   3,
+		},
+		{
 			name: "chunked over limit",
 			write: func(w http.ResponseWriter) {
 				w.WriteHeader(http.StatusCreated)
