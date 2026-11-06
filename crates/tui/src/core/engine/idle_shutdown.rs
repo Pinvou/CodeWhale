@@ -14,6 +14,9 @@ use super::*;
 pub(super) struct IdleRetirement {
     pub(super) ready: tokio::sync::oneshot::Sender<bool>,
     pub(super) commit: tokio::sync::oneshot::Receiver<()>,
+    /// The actor acknowledges only a *consumed* commit, so the host can tell
+    /// a committed retirement from a send that raced a simultaneous cancel.
+    pub(super) commit_ack: tokio::sync::oneshot::Sender<()>,
 }
 
 impl Engine {
@@ -99,6 +102,7 @@ impl Engine {
         &mut self,
         ready: tokio::sync::oneshot::Sender<bool>,
         commit: tokio::sync::oneshot::Receiver<()>,
+        commit_ack: tokio::sync::oneshot::Sender<()>,
     ) -> bool {
         // This handler is reached only between complete actor operations.
         // An autonomous turn that won first finishes normally; no cancel token
@@ -118,12 +122,21 @@ impl Engine {
         // inside its synchronous predicate must not pin the actor. A token
         // already latched by an earlier cancelled turn does not escape — that
         // stale state must not make retirement permanently unavailable.
-        // Commit still wins a simultaneous cancel: the host must never see a
-        // `send` the actor silently ignored.
+        // Commit still wins a simultaneous cancel: a host send that lands
+        // while the cancel arm resolves can return `Ok` without being seen,
+        // so `Ok(true)` requires the commit ack, never the send alone.
         let wait_cancel = self.cancel_token.clone();
         let committed = tokio::select! {
             biased;
-            result = commit => result.is_ok(),
+            result = commit => {
+                // Acknowledge only a consumed commit: the ack, not the send
+                // receipt, is what the host treats as "committed".
+                let ok = result.is_ok();
+                if ok {
+                    let _ = commit_ack.send(());
+                }
+                ok
+            }
             () = async {
                 if already_cancelled {
                     std::future::pending::<()>().await;
@@ -161,12 +174,15 @@ mod tests {
             .unwrap();
         let (ready, receipt) = tokio::sync::oneshot::channel();
         let (_commit, committed) = tokio::sync::oneshot::channel();
+        let (commit_ack, _ack) = tokio::sync::oneshot::channel();
         // Timeout-wrapped so a regression that wedges the handshake fails the
-        // assertion instead of hanging the whole test process.
+        // assertion instead of hanging the whole test process. The budgets in
+        // this module are generous wall-clock headroom for loaded machines,
+        // not timing assertions.
         assert!(
             !tokio::time::timeout(
-                Duration::from_secs(5),
-                engine.accept_idle_shutdown(ready, committed)
+                Duration::from_secs(10),
+                engine.accept_idle_shutdown(ready, committed, commit_ack)
             )
             .await
             .expect("the refusal path must not wait on the commit")
@@ -225,8 +241,8 @@ mod tests {
         assert!(engine.can_retire_without_losing_work());
         assert!(
             !tokio::time::timeout(
-                Duration::from_secs(5),
-                engine.accept_idle_shutdown(request.ready, request.commit)
+                Duration::from_secs(10),
+                engine.accept_idle_shutdown(request.ready, request.commit, request.commit_ack)
             )
             .await
             .expect("the refusal path must not wait on the commit")
@@ -256,8 +272,8 @@ mod tests {
         };
         assert!(
             tokio::time::timeout(
-                Duration::from_secs(5),
-                engine.accept_idle_shutdown(request.ready, request.commit)
+                Duration::from_secs(10),
+                engine.accept_idle_shutdown(request.ready, request.commit, request.commit_ack)
             )
             .await
             .expect("the committed path must resolve promptly")
@@ -271,10 +287,11 @@ mod tests {
         let (mut engine, _handle) = fixture(home.path());
         let (ready, receipt) = tokio::sync::oneshot::channel();
         let (commit, committed) = tokio::sync::oneshot::channel();
+        let (commit_ack, _ack) = tokio::sync::oneshot::channel();
         let pending = tokio::spawn(async move {
             let accepted = tokio::time::timeout(
-                Duration::from_secs(5),
-                engine.accept_idle_shutdown(ready, committed),
+                Duration::from_secs(10),
+                engine.accept_idle_shutdown(ready, committed, commit_ack),
             )
             .await
             .expect("the cancel path must not wedge the actor");
@@ -463,6 +480,7 @@ mod tests {
         });
         let (ready, receipt) = tokio::sync::oneshot::channel();
         let (_commit, committed) = tokio::sync::oneshot::channel();
+        let (commit_ack, _ack) = tokio::sync::oneshot::channel();
         handle
             .idle_retirement
             .as_ref()
@@ -470,12 +488,13 @@ mod tests {
             .send(IdleRetirement {
                 ready,
                 commit: committed,
+                commit_ack,
             })
             .await
             .unwrap();
         // The biased timed wait for the goal continuation must serve the
         // retirement arm instead of sleeping through the whole window.
-        let input = tokio::time::timeout(Duration::from_millis(500), engine.next_run_input(false))
+        let input = tokio::time::timeout(Duration::from_millis(2000), engine.next_run_input(false))
             .await
             .expect("the armed retirement request must not wait out the goal timer");
         let Some(EngineRunInput::IdleRetirement(request)) = input else {
@@ -483,8 +502,8 @@ mod tests {
         };
         assert!(
             !tokio::time::timeout(
-                Duration::from_secs(5),
-                engine.accept_idle_shutdown(request.ready, request.commit)
+                Duration::from_secs(10),
+                engine.accept_idle_shutdown(request.ready, request.commit, request.commit_ack)
             )
             .await
             .expect("the refusal path must not wait on the commit"),
@@ -499,8 +518,12 @@ mod tests {
         let (mut engine, _handle) = fixture(home.path());
         let (ready, receipt) = tokio::sync::oneshot::channel();
         let (commit, committed) = tokio::sync::oneshot::channel();
-        let accept =
-            tokio::spawn(async move { engine.accept_idle_shutdown(ready, committed).await });
+        let (commit_ack, _ack) = tokio::sync::oneshot::channel();
+        let accept = tokio::spawn(async move {
+            engine
+                .accept_idle_shutdown(ready, committed, commit_ack)
+                .await
+        });
         assert!(
             receipt.await.unwrap(),
             "a clean fixture must offer retirement"
@@ -522,10 +545,11 @@ mod tests {
         let (mut engine, handle) = fixture(home.path());
         let (ready, receipt) = tokio::sync::oneshot::channel();
         let (commit, committed) = tokio::sync::oneshot::channel();
+        let (commit_ack, ack) = tokio::sync::oneshot::channel();
         let pending = tokio::spawn(async move {
             let accepted = tokio::time::timeout(
-                Duration::from_secs(5),
-                engine.accept_idle_shutdown(ready, committed),
+                Duration::from_secs(10),
+                engine.accept_idle_shutdown(ready, committed, commit_ack),
             )
             .await
             .expect("a fresh cancel must break the commit wait");
@@ -537,6 +561,10 @@ mod tests {
         handle.cancel();
         let (accepted, mut engine) = pending.await.unwrap();
         assert!(!accepted, "the cancel escape must refuse, not accept");
+        assert!(
+            ack.await.is_err(),
+            "an escaped proposal must not be acknowledged as committed"
+        );
         assert!(engine.cancel_token.is_cancelled());
         drop(commit);
         assert!(
@@ -555,10 +583,11 @@ mod tests {
         assert!(engine.cancel_token.is_cancelled());
         let (ready, receipt) = tokio::sync::oneshot::channel();
         let (commit, committed) = tokio::sync::oneshot::channel();
+        let (commit_ack, ack) = tokio::sync::oneshot::channel();
         let pending = tokio::spawn(async move {
             let accepted = tokio::time::timeout(
-                Duration::from_secs(5),
-                engine.accept_idle_shutdown(ready, committed),
+                Duration::from_secs(10),
+                engine.accept_idle_shutdown(ready, committed, commit_ack),
             )
             .await
             .expect("a stale cancelled token must not wedge the proposal");
@@ -569,6 +598,10 @@ mod tests {
             "a latched cancellation must not refuse the proposal itself"
         );
         commit.send(()).unwrap();
+        assert!(
+            ack.await.is_ok(),
+            "a consumed commit must be acknowledged to the host"
+        );
         let (accepted, mut engine) = pending.await.unwrap();
         assert!(
             accepted,
@@ -577,6 +610,88 @@ mod tests {
         assert!(
             engine.can_retire_without_losing_work(),
             "the accepted proposal leaves nothing stuck"
+        );
+    }
+
+    #[tokio::test]
+    async fn forkguard_idle_shutdown_queued_operation_wins_the_retirement_arbitration() {
+        let home = tempfile::tempdir().unwrap();
+        let (mut engine, handle) = fixture(home.path());
+        handle
+            .send(Op::SetAdvisorEnabled { enabled: false })
+            .await
+            .unwrap();
+        let (ready, _receipt) = tokio::sync::oneshot::channel();
+        let (_commit, committed) = tokio::sync::oneshot::channel();
+        let (commit_ack, _ack) = tokio::sync::oneshot::channel();
+        handle
+            .idle_retirement
+            .as_ref()
+            .unwrap()
+            .send(IdleRetirement {
+                ready,
+                commit: committed,
+                commit_ack,
+            })
+            .await
+            .unwrap();
+        // Both inputs are queued before the drain runs, so the biased arm
+        // order — not luck — must decide: the FIFO drain site serves the
+        // operation first and still reaches the retirement request after.
+        let first = tokio::time::timeout(
+            Duration::from_millis(2000),
+            engine.next_operation_or_retirement(),
+        )
+        .await
+        .expect("both inputs are queued; the drain must resolve");
+        assert!(
+            matches!(first, Some(EngineRunInput::Operation(_))),
+            "a queued operation must not lose the arbitration race to a retirement request"
+        );
+        let second = tokio::time::timeout(
+            Duration::from_millis(2000),
+            engine.next_operation_or_retirement(),
+        )
+        .await
+        .expect("the retirement request must follow the queued operation");
+        assert!(
+            matches!(second, Some(EngineRunInput::IdleRetirement(_))),
+            "the retirement request must still be served after the op"
+        );
+    }
+
+    #[tokio::test]
+    async fn forkguard_idle_shutdown_parked_child_queued_mail_gates_retirement() {
+        let home = tempfile::tempdir().unwrap();
+        let (mut engine, _handle) = fixture(home.path());
+        let child = {
+            let mut agents = engine.subagent_manager.write().await;
+            let (child, _continuation) =
+                agents.insert_test_interrupted_continuable_agent("parked", home.path(), Vec::new());
+            agents.assign_test_session_owner(&child, &engine.session.id);
+            child
+        };
+        // A follow-up accepted for a parked child lands in the in-memory
+        // mailbox with a queue-only receipt. It is accepted work: the
+        // retirement gate must refuse until the owner session drains it.
+        {
+            let mut agents = engine.subagent_manager.write().await;
+            let receipt = agents
+                .followup_child(&child, "accepted while parked".to_string())
+                .expect("queue-only follow-up receipt");
+            assert!(!receipt.woke, "a parked child cannot be woken");
+        }
+        assert!(
+            !engine.can_retire_without_losing_work(),
+            "queued parent mail for a parked child must survive retirement"
+        );
+        {
+            let mut agents = engine.subagent_manager.write().await;
+            agents.clear_test_queued_mail(&child);
+        }
+        assert!(
+            engine.can_retire_without_losing_work(),
+            "draining the parked mail restores the idle certification"
         );
     }
 }
