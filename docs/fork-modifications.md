@@ -2,10 +2,10 @@
 
 ## 本地候选：终态错误来源（T1，2026-11-05）
 
-- 通用底座缺口：同一 `TurnComplete.error` 可来自模型请求/流，也可来自本地 REPL、预算或 panic；宿主不能从采集点、路由、advisory 错误或文字还原来源。已有 `new_with_model_client` 会替换 client 并改变预检/路由生命周期，不能透明观察既有内部 client。最小来源契约属于上游优先候选，本轮已形成本地提交 `a4fc2e914568da821c1776ad9918890481b99afb`，未推送或请求上游审核。
+- 通用底座缺口：同一 `TurnComplete.error` 可来自模型请求/流，也可来自本地 REPL、预算或 panic；宿主不能从采集点、路由、advisory 错误或文字还原来源。已有 `new_with_model_client` 会替换 client 并改变预检/路由生命周期，不能透明观察既有内部 client。最小来源契约属于上游优先候选，本轮已形成本地提交 `a4fc2e914568da821c1776ad9918890481b99afb`，现已推送并开立 CodeWhale #142 请求上游审核（2026-11-06 刷新）。
 - `run_turn` 内的选中错误与 `TurnErrorSource` 成对保留、清空和覆盖；只在终态失败选定时写入本轮 `TurnContext`，随同一 `TurnComplete` 交付。实际 client 请求/流错误为 Model，本地请求准备、REPL、预算等为 Runtime；其他终态及未知来源为 None。panic、取消、重试、错误文本和既有结果状态保持原契约，无跨轮错误缓存。
 - 仅内部 Engine 事件增加可选来源，不扩展 wire/遥测字段；现有 protocol projection 明确忽略它。宿主保留模型原错误后才合并本地持久化错误，ACP 只在当前 prompt 失败边界赋予来源，普通终态保守降级；诊断写入按任务→诊断锁顺序验证当前已接纳 attempt、turn、租约及同源上下文；历史消息观察不能为待接纳提交选择 turn，匹配 attempt 的接纳事件才建立或校正归属。新增私有 attempt 缓存字段缺省兼容旧缓存，不扩展遥测字段。本地受控模型 transport 经真实 Engine，验证初始请求错误、流读取错误、provider error frame、真实 Python REPL CSV EOF 及下一用户回合恢复；默认 bash 工具增加实际 shell 语法错误与非零退出事实，退出码由宿主 shell 决定（Windows 默认 PowerShell 不是 Bash）。测试边界不是 live provider/Linux 原事故或发布构建。
-- 父仓 gitlink 引用本地候选 `a4fc2e914568da821c1776ad9918890481b99afb`，其父为 `f1eb10efcfe2468fde42d1724d7f5f19d54b904c`，源码 tree 为 `db5b9d4b13da36e4058b9662d416cdec7f75bd7c`，与此前审核的底座源码一致；相对已登记基线新增 1 个已签署提交，共 87 个。已登记公开维护基线仍为 `f1eb10efcfe2468fde42d1724d7f5f19d54b904c`；本轮未查询远端、未推送，也未移动既有维护分支或标签，不声称候选公开可达。后续传播继续遵守公开维护流程，`verify-public-submodule.sh` 保持原门禁，不能凭本地快速指纹通过替代公开可达性。
+- 父仓 gitlink 引用本地候选 `a4fc2e914568da821c1776ad9918890481b99afb`，其父为 `f1eb10efcfe2468fde42d1724d7f5f19d54b904c`，源码 tree 为 `db5b9d4b13da36e4058b9662d416cdec7f75bd7c`，与此前审核的底座源码一致；相对已登记基线新增 1 个已签署提交，共 87 个。已登记公开维护基线仍为 `f1eb10efcfe2468fde42d1724d7f5f19d54b904c`；候选已推送审核分支并开立 CodeWhale #142，但尚未并入维护头，也未移动既有维护分支或标签。后续传播继续遵守公开维护流程，`verify-public-submodule.sh` 保持原门禁，不能凭本地快速指纹通过替代公开可达性。
 
 ## 本轮同步接线：冷启动所有权与有界拆除（2026-10-13）
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# CodeWhale v0.9.12 clean re-fork guard: review candidate (87 commits) ahead of the 93-commit public maintenance head, ten maintained themes (r3 closed at pinvou-v0.9.12-r3; inside a transition window the head may lead the tag).
+# CodeWhale v0.9.12 clean re-fork guard: local review candidate (87 commits, forked at registered baseline f1eb10efc and currently behind the 93-commit public maintenance head), ten maintained themes (r3 closed at pinvou-v0.9.12-r3; inside a transition window the head may lead the tag).
 set -uo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -9,8 +9,11 @@ EXPECTED_UPSTREAM="dcd4c200f72f0c1ffd60d8e7f6850313db879fc5"
 # Local review candidate (CodeWhale#142); public maintenance alignment remains a separate gate.
 EXPECTED_HEAD="a4fc2e914568da821c1776ad9918890481b99afb"
 EXPECTED_COMMITS=87
-# Published maintenance base of this integration.
-MAINTENANCE_BASE="11cba403dc6bd6ca5c4dca55042785b03449ac8e"
+# Published maintenance base this integration is registered against. While the
+# gitlink pins the local review candidate (parent f1eb10efc, which predates
+# CodeWhale#123..#135), the base stays at that baseline; it returns to the
+# public maintenance head when CodeWhale#142 lands and the gitlink re-aligns.
+MAINTENANCE_BASE="f1eb10efcfe2468fde42d1724d7f5f19d54b904c"
 # The immutable r1 closure must remain an ancestor of the registered head.
 # A review candidate may lead public maintenance; this does not waive the
 # separate public-head gate or change the immutable r3 transition baseline.
@@ -133,7 +136,7 @@ fingerprints=(
   # 2026-11-05 批次：#124 把结构化摘要的恢复 footer 收敛到共享 helper
   # model_context_recovery_footer（truncate.rs），context.rs 的内联文案随之迁移——
   # 指纹钉同一文案的真实新位置，主题声明不变。
-  "T2|Engine recovery names the complete returned result|CodeWhale/crates/tui/src/tools/truncate.rs|complete returned tool result at"
+  "T2|Engine recovery names the complete returned result|CodeWhale/crates/tui/src/core/engine/context.rs|complete returned tool result at"
   "T2|Real interrupted child retains checkpoint recovery|CodeWhale/crates/tui/src/tools/subagent/tests.rs|fn forkguard_interrupted_snapshot_preserves_checkpoint_recovery"
   "T2|Complete structured output has no false recovery|CodeWhale/crates/tui/src/core/engine/tests.rs|fn forkguard_complete_structured_results_do_not_request_recovery"
   "T2|Structured field omissions retain recovery|CodeWhale/crates/tui/src/core/engine/tests.rs|fn forkguard_structured_field_cuts_still_request_recovery"
