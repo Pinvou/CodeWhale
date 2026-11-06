@@ -218,7 +218,6 @@ RETAINED_REQUIRED = {
     "TestProductAdmissionMaterialHTTPPostgres",
     "TestNegativeAdjustmentMemberBucketConservationPostgres",
     "TestRechargeProductCommandAtomicityPostgres",
-    "TestReceivableWriteOffRechargeLockOrderPostgres",
     "TestOrganizationChargebackDeletionEvidencePostgres",
     "TestPaymentInstructionProjectionPostgres",
     "TestPersonalZeroBudgetHoldReleasePostgres",
@@ -240,7 +239,6 @@ RETAINED_REQUIRED = {
 # These exact roots are named leaves. Every other retained root must still
 # produce completed child-case evidence, not just a parent PASS.
 BILLING_LEAF_REQUIRED = {
-    "TestReceivableWriteOffRechargeLockOrderPostgres",
     "TestExpirePendingManualProductAdmissionsReleasesFingerprintSlot",
     "TestProductAdmissionMaterialStorePostgres",
     "TestProductAdmissionMaterialPurgePostgres",
@@ -278,6 +276,7 @@ EXACT_REQUIRED_CHILDREN = {
         "retention-purges-submission-snapshot-and-review-reason",
     },
     "TestEmergencyCancellationClaimOwnershipPostgres": {"before-request", "after-request", "pending", "zero-attempt"},
+    "TestReceivableSettlementGuardedWritesPostgres": {"recharge-and-write-off-lock-order"},
     "TestEmergencyCancellationRequestLocksClaimPostgres": {"usage-lock-reclaim"},
     "TestPasswordPreparationAuthorizationPostgres": {
         "retention-redacts-expired-mobiles-without-changing-grant-facts/expired",

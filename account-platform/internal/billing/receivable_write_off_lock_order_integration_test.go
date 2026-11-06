@@ -2,15 +2,47 @@ package billing
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
 	"time"
 
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/approvalencoding"
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5/pgconn"
 )
 
-func TestReceivableWriteOffRechargeLockOrderPostgres(t *testing.T) {
+// The Account delivery API is the controlled boundary. The Billing consumer,
+// proof projection, domain handler, and database owner are the production code.
+type writeOffLockOrderAccount struct {
+	approvalAuthorizationAccount
+	command                     ApprovedCommand
+	grants, begins, completions int
+	failures                    int
+	status, failureCode         string
+}
+
+func (a *writeOffLockOrderAccount) GrantAuthorizationAttempt(context.Context, ApprovalAuthorizationBinding, int64) (ApprovalAuthorizationDeliveryState, error) {
+	a.grants++
+	return ApprovalAuthorizationDeliveryState{State: "DOMAIN_INFLIGHT", DomainAttemptCount: 1, Version: 2}, nil
+}
+
+func (a *writeOffLockOrderAccount) BeginAuthorized(context.Context, ApprovalAuthorizationBinding, string, json.RawMessage, json.RawMessage) (ApprovedCommand, error) {
+	a.begins++
+	return a.command, nil
+}
+
+func (a *writeOffLockOrderAccount) Complete(_ context.Context, _ uuid.UUID, _, status string, _, _ json.RawMessage, code string) error {
+	a.completions++
+	a.status, a.failureCode = status, code
+	return nil
+}
+
+func (a *writeOffLockOrderAccount) RecordAuthorizationFailure(context.Context, ApprovalAuthorizationBinding, int64, string) (ApprovalAuthorizationDeliveryState, error) {
+	a.failures++
+	return ApprovalAuthorizationDeliveryState{State: "DOMAIN_INFLIGHT", DomainAttemptCount: 1, Version: 3}, nil
+}
+
+func testReceivableWriteOffRechargeLockOrder(t *testing.T) {
 	r, ctx := retainedFinanceRepository(t)
 	coordinator, order, _, _ := retainedFinanceOrder(t, r, ctx, 1_000_000, false)
 	coordinator.provider = &callbackBoundProvider{coordinator.provider.(*retainedFinancialProvider), order.ProviderID, order.ProviderVersion}
@@ -25,7 +57,7 @@ func TestReceivableWriteOffRechargeLockOrderPostgres(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer seed.Rollback(ctx)
-	receivable, err := createReceivableWithinTransaction(ctx, seed, order.WalletID, "USAGE_OVERAGE", "lock-order:"+uuid.NewString(), 1_250_000, nil, nil, nil, nil, r.now())
+	receivable, err := createReceivableWithinTransaction(ctx, seed, order.WalletID, "USAGE_OVERAGE", "lock-order:"+uuid.NewString(), 1_250_000, &order.ID, nil, nil, nil, r.now())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -53,6 +85,50 @@ func TestReceivableWriteOffRechargeLockOrderPostgres(t *testing.T) {
 		}
 	}
 	input := approvedInput(receivable.Version)
+	legacy, err := r.ReceivableWriteOffProofInput(ctx, input.Command)
+	if err != nil {
+		t.Fatal(err)
+	}
+	artifacts, err := approvalencoding.ConvertLegacyProofInput(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var projection struct {
+		Normalized json.RawMessage `json:"normalized_command"`
+		Critical   json.RawMessage `json:"critical_resource_versions"`
+		Financial  json.RawMessage `json:"financial_snapshot"`
+	}
+	if err := json.Unmarshal(artifacts.ProofInputJSON, &projection); err != nil {
+		t.Fatal(err)
+	}
+	binding, event, command, _ := writeOffWireFixture()
+	binding.ApprovalRequestID, binding.EventID, binding.ApprovalEpoch = input.ApprovalRequestID, input.AuthorizationEventID, input.ApprovalEpoch
+	binding.ApprovedRequestVersion, binding.SerializationVersion = 7, approvalencoding.ApprovalSerializationVersion
+	binding.Durable, binding.Provenance = "billing-receivable-write-off-executor-p1-v1", "FROZEN_AT_APPROVAL"
+	event.ApprovalRequestID, event.EventID, event.ApprovalControlEpoch = binding.ApprovalRequestID, binding.EventID, binding.ApprovalEpoch
+	event.TargetResourceID, event.ProofSchemaVersion = legacy.TargetResourceID, approvalencoding.ProofSchemaVersion
+	event.NormalizedCommand, event.CriticalResourceVersions, event.FinancialSnapshot = projection.Normalized, projection.Critical, projection.Financial
+	event.CommandDigest, event.SnapshotDigest, event.DomainRevision = artifacts.CommandDigest, artifacts.SnapshotDigest, "write-off-lock-order-fixture"
+	command.ApprovalRequestID, command.TargetResourceID, command.ExecutionIdempotencyKey = binding.ApprovalRequestID, legacy.TargetResourceID, input.ExecutionKey
+	command.NormalizedCommand, command.CriticalResourceVersions, command.FinancialSnapshot = legacy.NormalizedCommand, legacy.CriticalResourceVersions, legacy.FinancialSnapshot
+	command.Status, command.AuthorizationEventID, command.AuthorizationDurable = "EXECUTING", &binding.EventID, binding.Durable
+	command.AuthorizationApprovedVersion, command.AuthorizationSerialization = binding.ApprovedRequestVersion, binding.SerializationVersion
+	command.AuthorizationProvenance, command.AuthorizationApprovalEpoch = binding.Provenance, binding.ApprovalEpoch
+	account := &writeOffLockOrderAccount{command: command}
+	proofs, claims := 0, 0
+	consumer := &AuthorizationCommandConsumer{account: account, domain: &billingAuthorizationDomain{
+		repository: r,
+		database:   r.pool,
+		priorClaim: func(context.Context, ApprovalAuthorizationBinding) (bool, error) { return claims != 0, nil },
+		proof: func(context.Context, approvalencoding.ProofRequest) (approvalencoding.ProofResponse, error) {
+			proofs++
+			return approvalencoding.ProofResponse{Verdict: "ALLOW", DomainRevision: event.DomainRevision, CommandDigest: event.CommandDigest, SnapshotDigest: event.SnapshotDigest}, nil
+		},
+		claim: func(context.Context, ApprovalAuthorizationBinding, approvalencoding.AuthorizationEvent) error {
+			claims++
+			return nil
+		},
+	}}
 
 	// The real callback has locked its order and wallet when it inserts the
 	// recharge journal, before it tries to lock any open receivables.
@@ -102,24 +178,22 @@ func TestReceivableWriteOffRechargeLockOrderPostgres(t *testing.T) {
 	go func() { paid <- coordinator.ProcessPersistedNotification(workerCtx, notification) }()
 	paidPID := findWaiter(gatePID)
 	writtenOff := make(chan error, 1)
-	go func() { _, err := r.ApplyReceivableWriteOff(workerCtx, input); writtenOff <- err }()
+	go func() {
+		writtenOff <- consumer.advance(workerCtx, nil, binding, event, ApprovalAuthorizationDeliveryState{State: "READY", Version: 1})
+	}()
 	findWaiter(paidPID)
 	if err := gate.Commit(ctx); err != nil {
 		t.Fatal(err)
 	}
 	paidErr, writeOffErr := <-paid, <-writtenOff
-	for _, err := range []error{paidErr, writeOffErr} {
-		var postgresError *pgconn.PgError
-		if errors.As(err, &postgresError) && postgresError.Code == "40P01" {
-			t.Fatalf("recharge and approved write-off deadlocked: recharge=%v write-off=%v", paidErr, writeOffErr)
-		}
-	}
 	if paidErr != nil {
 		t.Fatal(paidErr)
 	}
-	var serialization *pgconn.PgError
-	if !errors.As(writeOffErr, &serialization) || serialization.Code != "40001" {
-		t.Fatalf("concurrent frozen approval must lose its serializable snapshot: %v", writeOffErr)
+	if writeOffErr == nil || writeOffErr.Error() != "authorization attempt failed" || account.status != "FAILED" ||
+		account.failureCode != "DOMAIN_PRECONDITION_REJECTED" || proofs != 1 || claims != 1 ||
+		account.grants != 1 || account.begins != 1 || account.completions != 1 || account.failures != 1 {
+		t.Fatalf("single delivery did not record the stale approval: status=%q code=%q grants=%d begins=%d completions=%d failures=%d proofs=%d claims=%d err=%v",
+			account.status, account.failureCode, account.grants, account.begins, account.completions, account.failures, proofs, claims, writeOffErr)
 	}
 	if err := coordinator.ProcessPersistedNotification(ctx, notification); err != nil {
 		t.Fatal(err)
