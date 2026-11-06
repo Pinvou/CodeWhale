@@ -47,8 +47,8 @@ export function PersonalFinanceWorkspace({ client, me, language, onPaid, present
   const sessionEpoch = client.financeSessionEpoch || 0;
   const presentationScope = useRef(null);
   const priorPresentation = presentationScope.current;
-  if (!priorPresentation || priorPresentation.client !== client || priorPresentation.owner !== owner || priorPresentation.epoch !== sessionEpoch || priorPresentation.authorization !== me.personal_authorization_version) {
-    presentationScope.current = { client, owner, epoch: sessionEpoch, authorization: me.personal_authorization_version, key: (priorPresentation?.key || 0) + 1 };
+  if (!priorPresentation || priorPresentation.client !== client || priorPresentation.owner !== owner || priorPresentation.epoch !== sessionEpoch || priorPresentation.authorization !== me.personal_authorization_version || priorPresentation.denied !== readDenied.current) {
+    presentationScope.current = { client, owner, epoch: sessionEpoch, authorization: me.personal_authorization_version, denied: readDenied.current, key: (priorPresentation?.key || 0) + 1 };
   }
 
   // Render-time facts fence an old dialog even before identity cleanup effects.
@@ -135,7 +135,7 @@ export function PersonalFinanceWorkspace({ client, me, language, onPaid, present
     intent.current = recovered.intent; setRecoveryBlocked(recovered.blocked);
     setData(null); setOrder(null); setStatement(''); setUnknown(Boolean(recovered.intent)); setError(recovered.blocked ? 'reauthenticationRecoveryUnavailable' : recovered.intent ? 'unknown' : ''); setNotice(''); setBusy(true);
     if (!canRead) { operationBusy.current = false; setBusy(false); return retire; }
-    void load(stamp, controller.signal).catch(reason => { if (stamp === generation.current && reason.name !== 'AbortError') showFailure(reason); }).finally(() => { if (stamp === generation.current) { operationBusy.current = false; setBusy(false); } });
+    void load(stamp, controller.signal).catch(reason => { if (stamp === generation.current && reason.name !== 'AbortError') { setFeedbackSource('workspace'); showFailure(reason); } }).finally(() => { if (stamp === generation.current) { operationBusy.current = false; setBusy(false); } });
     return retire;
     // Identity/version changes invalidate all financial state and pending intent.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -145,7 +145,7 @@ export function PersonalFinanceWorkspace({ client, me, language, onPaid, present
   const selected = data?.products.find(item => item.product_id === productID) || data?.products[0];
   const selectedChannel = effectivePaymentChannel(selected?.channels, channel);
   const run = async (action, { reload = true, source = 'workspace' } = {}) => {
-    if (busy || operationBusy.current || !mounted.current) return;
+    if (busy || operationBusy.current || !mounted.current || readDenied.current) return;
     operationBusy.current = true; cancelClose();
     const stamp = generation.current;
     setBusy(true); setError(''); setNotice(''); setFeedbackSource(source);
@@ -153,7 +153,7 @@ export function PersonalFinanceWorkspace({ client, me, language, onPaid, present
       await action(stamp);
       if (reload && ownsView(stamp)) await load(stamp);
     } catch (reason) {
-      if (stamp === generation.current && reason.name !== 'AbortError') showFailure(reason);
+      if (stamp === generation.current && reason.name !== 'AbortError') { setFeedbackSource(source); showFailure(reason); }
     } finally { if (stamp === generation.current) { operationBusy.current = false; setBusy(false); } }
   };
   const refreshRecovery = () => {
@@ -266,7 +266,7 @@ export function PersonalFinanceWorkspace({ client, me, language, onPaid, present
       accept: async (latest, request) => {
         if (isCurrent() || ownsCompletedRead()) await acceptOrderRead(latest, request, stamp);
       },
-      onError: reason => { if (isCurrent()) readFailure(reason); },
+      onError: reason => { if (isCurrent()) { setFeedbackSource('workspace'); readFailure(reason); } },
     });
     // Only identity/status/window changes restart the original query cadence.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -296,7 +296,7 @@ export function PersonalFinanceWorkspace({ client, me, language, onPaid, present
           }
         }
       },
-      onError: reason => { if (isCurrent()) readFailure(reason); },
+      onError: reason => { if (isCurrent()) { setFeedbackSource('workspace'); readFailure(reason); } },
     });
     // Collection refresh never selects a detail or restarts its presentation.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -307,7 +307,7 @@ export function PersonalFinanceWorkspace({ client, me, language, onPaid, present
   if (presentationTargets) return <>
     {payment.order && <RechargePaymentDialog active={presentationTargets.section === 'creditsUsage'} error={error ? copy[error] : ''} notice={notice ? copy[notice] : ''} order={payment.order} copy={copy} language={language} now={now} busy={busy} onDismiss={payment.dismiss} onQuery={() => void queryPayment()} canRestoreFocus={payment.canRestoreFocus} returnFocus={payment.trigger} />}
     {closeConfirmation && closeIsCurrent(closeConfirmation) && <PersonalOrderCloseConfirmation active={presentationTargets.section === 'ordersInvoices'} copy={copy} orderID={closeConfirmation.orderID} amount={formatFen(closeConfirmation.order.amount_fen, language)} canRestoreFocus={() => closeIsCurrent(closeConfirmation)} onCancel={() => cancelClose(closeConfirmation)} onConfirm={() => void confirmClose(closeConfirmation)} />}
-    <PersonalFinancePortalSections key={presentationScope.current.key} language={language} targets={presentationTargets} view={{ copy, data, order, busy, error, notice, unknown, recoveryBlocked, canCreate, canManage, selected, selectedChannel, hasPending, now, payable, statement, paymentOpen: Boolean(payment.order),
+    <PersonalFinancePortalSections key={presentationScope.current.key} language={language} targets={presentationTargets} view={{ copy, data, order, busy, readDenied: readDenied.current, error, notice, unknown, recoveryBlocked, canCreate, canManage, selected, selectedChannel, hasPending, now, payable, statement, paymentOpen: Boolean(payment.order),
       onCreate: () => void create(), onRefresh: () => void run(async () => { refreshRecovery(); }),
       onProduct: id => { setProductID(id); setChannel(''); }, onChannel: setChannel,
       onSelectOrder: (id, showPayment) => void selectOrder(requireFinanceID(id), showPayment),

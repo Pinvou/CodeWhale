@@ -117,6 +117,14 @@ try {
     await page.waitForSelector('.ap-order-details-dialog [role=alert]');
     await page.keyboard.press('Escape'); await page.waitForFunction(() => !document.querySelector('[role=dialog]'));
     assert.deepEqual(await page.$eval('.ap-order-history', node => [node.getBoundingClientRect().x, node.getBoundingClientRect().y]), before);
+    for (const status of [401, 403]) {
+      await fresh(); await accountTab('ordersInvoices'); await activeAccount('ordersInvoices');
+      await page.evaluate(status => { window.restored.orderReadFail = true; window.restored.orderReadStatus = status; }, status);
+      await page.click('.ap-order-history tbody tr:nth-child(2) td:last-child button');
+      await page.waitForFunction(() => !document.querySelector('.ap-order-details-dialog') && document.querySelector('[role=alert]'));
+      assert.equal(await page.$eval('.ap-order-history > .ap-section-heading button', node => node.disabled), true);
+      assert.equal(await page.$$eval('.ap-order-details-dialog', nodes => nodes.length), 0);
+    }
     for (const change of ['epoch', 'client']) {
       await fresh(); await accountTab('ordersInvoices'); await activeAccount('ordersInvoices');
       await page.evaluate(() => { window.restored.holdOrderDetail = true; });
@@ -133,6 +141,13 @@ try {
       await page.waitForFunction(() => !document.querySelector('.ap-order-details-dialog'));
       assert.equal(await page.$$eval('.ap-order-details-dialog', nodes => nodes.length), 0);
     }
+  });
+  await run('personal startup read failure reports a workspace error without an uncaught exception', async () => {
+    await fresh();
+    await page.evaluate(() => { window.restored.failInitialProducts = true; window.restored.reload(); });
+    await page.waitForSelector('.ap-finance-feedback-target [role=alert]');
+    assert.equal(await page.$eval('.ap-finance-feedback-target [role=alert]', node => node.textContent), await page.evaluate(() => window.restored.copy().finance.unavailable));
+    assert.equal(await page.$$eval('.ap-order-details-dialog', nodes => nodes.length), 0);
   });
   await run('personal original tabs, five benefits, exact balance and history navigation', async () => {
     await fresh('?section=usage');

@@ -111,6 +111,7 @@ globalThis.fetch = async (input, options = {}) => {
     }
     return json({ items: c.usage || [], next_cursor: null });
   }
+  if (url.endsWith('/v1/recharge/products') && c.failInitialProducts) return json({ code: 'UPSTREAM_UNAVAILABLE' }, 503);
   if (url.endsWith('/v1/recharge/products')) return json({ items: [{ product_id: 'sample-points', current_plan_name_zh_cn: '标准积分包', current_plan_name_en: 'Standard points', current_plan_name_ja: '標準ポイント', amount_fen: '990', base_points: '100', bonus_points: '10', validity_days: 30, channels: ['ALIPAY'] }] });
   if (url.endsWith('/v1/payment-capabilities')) return json({});
   if (url.endsWith('/v1/me/entitlement-packages')) return json({ items: packages });

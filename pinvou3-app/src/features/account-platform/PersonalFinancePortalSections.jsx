@@ -39,7 +39,7 @@ export function PersonalFinancePortalSections({ view, targets, language }) {
     {view.unknown && <div className="ap-alert" role="status"><p>{words.recoveryPending}</p><button disabled={view.busy || view.recoveryBlocked || !view.canCreate} onClick={view.onCreate}>{copy.retry}</button></div>}
   </div>;
   const credits = <section className="ap-portal-finance" aria-label={copy.title}>
-    <div className="ap-section-heading"><h3>{copy.products}</h3><button type="button" disabled={view.busy} onClick={view.onRefresh}>{center.refreshCredits}</button></div>
+    <div className="ap-section-heading"><h3>{copy.products}</h3><button type="button" disabled={view.busy || view.readDenied} onClick={view.onRefresh}>{center.refreshCredits}</button></div>
     {data && <>
       {!data.products.length ? <p className="ap-empty">{center.noProducts}</p> : <form className="ap-recharge-form" onSubmit={event => { event.preventDefault(); view.onCreate(); }}>
         {data.capabilities?.test_only && <p className="ap-alert" role="status">{center.testPrice}</p>}
@@ -54,7 +54,7 @@ export function PersonalFinancePortalSections({ view, targets, language }) {
     </>}
   </section>;
   const orders = <section className="ap-order-history" aria-label={copy.orders}>
-    <div className="ap-section-heading"><h3>{copy.orders}</h3><button type="button" disabled={view.busy} onClick={view.onRefresh}>{center.refreshCredits}</button></div>
+    <div className="ap-section-heading"><h3>{copy.orders}</h3><button type="button" disabled={view.busy || view.readDenied} onClick={view.onRefresh}>{center.refreshCredits}</button></div>
     {data && !data.orders.length && <p>{copy.empty}</p>}
     {data && <div className="ap-order-table-wrap"><table><thead><tr><th>{copy.product}</th><th>{copy.amount}</th><th>{center.createdAt}</th><th>{center.paidAt}</th><th>{copy.status}</th><th>{copy.orderID}</th><th>{copy.details}</th></tr></thead><tbody>{paymentOrderHistory(data.orders).map(item => <tr key={item.order_id}>
       <td data-label={copy.product}>{localizedProductDisplayName(item, language, 'product_id')}</td><td data-label={copy.amount}>{formatRMB(item.amount_fen, language)}</td><td data-label={center.createdAt}>{date(item.created_at, language)}</td><td data-label={center.paidAt}>{date(item.paid_at, language)}</td><td data-label={copy.status}><span className="ap-status" data-status={orderSummaryStatus(item)}>{status(orderSummaryStatus(item))}</span>{item.status === 'MANUAL_REVIEW' && <small className="ap-order-review-hint">{center.reviewOrder}</small>}</td><td data-label={copy.orderID}><CopyIdentifier value={item.order_id} language={language} compact /></td><td data-label={copy.details}><button type="button" disabled={view.busy} onClick={() => { setDialog({ kind: 'order', id: item.order_id }); view.onSelectOrder(item.order_id); }}>{copy.details}</button></td>
