@@ -123,6 +123,42 @@ pub fn sanitize_for_responses(schema: &mut Value) -> Option<String> {
     combine_constraint_notes(constraint_note, dependent_note)
 }
 
+/// Narrow the root-composition keywords the Anthropic Messages validator is
+/// recorded rejecting, and leave every other keyword untouched.
+///
+/// The genuine Anthropic endpoint has returned HTTP 400 "input_schema does
+/// not support oneOf, allOf, or anyOf at the top level" for tool schemas
+/// carrying a root-level composition since at least 2025-07: commit
+/// `f8e757322` quotes a live failure, CHANGELOG 0.9.1 records the same
+/// rationale, and anthropics/claude-code#4886 / #30212 report the identical
+/// server-side error. Unlike [`sanitize_for_responses`], this pass strips
+/// only those three root keywords: root `enum`/`not`,
+/// `dependentRequired`/`dependentSchemas`, the declared root type, and
+/// non-object roots all ship verbatim because no record rejects them.
+/// Root composition branch properties are merged into the object and the
+/// dropped exactly-one / at-least-one constraint is surfaced as a
+/// description note so the model still knows which parameter groups apply.
+///
+/// Returns the same style of description note as [`sanitize_for_responses`].
+pub fn sanitize_for_anthropic_messages(schema: &mut Value) -> Option<String> {
+    let constraint_note = schema
+        .as_object()
+        .and_then(root_composition_constraint_note);
+
+    sanitize(schema);
+
+    let Some(obj) = schema.as_object_mut() else {
+        return constraint_note;
+    };
+
+    merge_root_composition_properties(obj);
+    obj.remove("oneOf");
+    obj.remove("anyOf");
+    obj.remove("allOf");
+    prune_dangling_required(schema);
+    constraint_note
+}
+
 fn strict_schema_supported(schema: &Value) -> bool {
     let mut normalized = schema.clone();
     sanitize(&mut normalized);
@@ -1031,6 +1067,93 @@ mod tests {
         assert!(schema.get("anyOf").is_none());
         assert!(schema["properties"]["value"].get("anyOf").is_some());
         assert_eq!(note, None);
+    }
+
+    #[test]
+    fn anthropic_messages_sanitize_strips_only_recorded_root_keywords() {
+        // The recorded 400 names only top-level oneOf/allOf/anyOf
+        // (f8e757322; CHANGELOG 0.9.1; anthropics/claude-code#4886/#30212).
+        // Root enum/not, dependent keywords, and the declared root type are
+        // not in any record, so the narrowed pass preserves all of them.
+        let mut schema = json!({
+            "type": "object",
+            "properties": {
+                "mode": {"type": "string"}
+            },
+            "not": {"type": "integer"},
+            "dependentRequired": {"mode": ["confirm"]},
+            "dependentSchemas": {"mode": {"required": ["confirm"]}},
+            "oneOf": [
+                {"required": ["patch"]},
+                {"required": ["changes"]}
+            ]
+        });
+
+        let note = sanitize_for_anthropic_messages(&mut schema);
+
+        assert_eq!(schema["type"], "object");
+        assert!(schema.get("oneOf").is_none());
+        assert!(schema.get("anyOf").is_none());
+        assert!(schema.get("allOf").is_none());
+        assert_eq!(schema["not"], json!({"type": "integer"}));
+        assert_eq!(schema["dependentRequired"], json!({"mode": ["confirm"]}));
+        assert!(schema.get("dependentSchemas").is_some());
+        assert_eq!(
+            note.as_deref(),
+            Some("Exactly one of these parameter groups must be provided: `changes` | `patch`.")
+        );
+    }
+
+    #[test]
+    fn anthropic_messages_sanitize_keeps_root_enum_and_non_object_roots() {
+        let mut enum_root = json!({
+            "type": "string",
+            "enum": ["compact", "full"]
+        });
+
+        let note = sanitize_for_anthropic_messages(&mut enum_root);
+
+        assert_eq!(
+            enum_root,
+            json!({
+                "type": "string",
+                "enum": ["compact", "full"]
+            })
+        );
+        assert_eq!(note, None);
+    }
+
+    #[test]
+    fn anthropic_messages_sanitize_merges_branch_properties_and_notes_groups() {
+        let mut schema = json!({
+            "anyOf": [
+                {
+                    "type": "object",
+                    "properties": {
+                        "patch": {"type": "string"}
+                    },
+                    "required": ["patch"]
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "changes": {"type": "array", "items": {"type": "string"}}
+                    },
+                    "required": ["changes"]
+                }
+            ]
+        });
+
+        let note = sanitize_for_anthropic_messages(&mut schema);
+
+        assert!(schema.get("anyOf").is_none());
+        assert!(schema["properties"].get("patch").is_some());
+        assert!(schema["properties"].get("changes").is_some());
+        assert!(schema.get("type").is_none());
+        assert_eq!(
+            note.as_deref(),
+            Some("At least one of these parameter groups must be provided: `changes` | `patch`.")
+        );
     }
 
     #[test]
