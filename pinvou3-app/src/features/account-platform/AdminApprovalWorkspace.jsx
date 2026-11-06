@@ -70,7 +70,14 @@ export function AdminApprovalWorkspace({ client, copy, language, me, onNavigate,
     {route.view === 'execution' && <p className="adm-approval-execution-scope">{c.executionScopeLabel}: <strong>{approvalLabel(c.statusLabels, query.status)}</strong><small>{c.executionDefaultHelp}</small></p>}
     {route.view === 'directory' ? <><button onClick={() => setRefresh(value => value + 1)}>{c.refresh}</button>
       {directoryState === 'loading' && <p role="status">{c.loading}</p>}{directoryState === 'error' && <p role="alert">{c.listUnavailable}</p>}
-      {directory && <table><thead><tr><th>{c.commandType}</th><th>{c.risk}</th><th>{c.requestable}</th></tr></thead><tbody>{directory.items.map(item => <tr key={`${item.command_type}:${item.policy_version}`}><td>{item.command_type} · v{item.policy_version}</td><td>{item.risk_class}</td><td>{item.requestable ? c.yes : c.no}</td></tr>)}</tbody></table>}
+      {directory && <div className="adm-table-wrap adm-approval-policy-wrap"><table className="adm-approval-policy-table"><thead><tr><th>{c.commandType}</th><th>{c.risk}</th><th>{c.requestable}</th></tr></thead><tbody>{directory.items.map(item => {
+        const commandLabel = approvalLabel(c.policyCommandLabels, item.command_type), riskLabel = approvalLabel(c.policyRiskLabels, item.risk_class);
+        return <tr key={`${item.command_type}:${item.policy_version}`}>
+          <td><strong>{commandLabel}</strong>{commandLabel !== item.command_type && <code>{item.command_type}</code>}<small>{financeCopy[language].version}: {item.policy_version}</small></td>
+          <td><span className="adm-approval-policy-risk">{riskLabel}</span>{riskLabel !== item.risk_class && <code>{item.risk_class}</code>}</td>
+          <td>{item.requestable ? c.yes : c.no}</td>
+        </tr>;
+      })}</tbody></table></div>}
     </> : <Approvals client={client} copy={financeCopy[language]} permissions={me.platform_permissions || []} owner={owner} requestID={route.requestID}
       query={query} pendingUserID={route.view === 'pending' ? me.user_id : null} onStateChange={setBlocked} onNavigate={onNavigate} centerCopy={c} />}
   </section>;
