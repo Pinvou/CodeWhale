@@ -17,6 +17,12 @@
 .ap-restored-dialog form.ap-org-action>fieldset{display:grid;min-width:0;gap:16px;margin:0;padding:0;border:0}
 .ap-restored-dialog .ap-org-action-footer{display:flex;justify-content:flex-end;flex-wrap:wrap;gap:12px;margin-top:8px}
 .ap-restored-dialog .ap-org-action-footer>button{width:auto;min-width:96px}
+.ap-admin-org-confirm{font:14px/1.5 'PingFang SC',system-ui,sans-serif}
+.ap-restored-dialog form.ap-admin-org-action .ap-org-action-footer>button[type=submit],.ap-admin-org-confirm footer>button:last-child{border-color:var(--adm-primary,#3159e8);background:var(--adm-primary,#3159e8);color:#fff}
+.ap-restored-dialog form.ap-admin-org-action-danger .ap-org-action-footer>button[type=submit],.ap-admin-org-confirm-danger footer>button:last-child{border-color:var(--adm-danger,#c33b46);background:var(--adm-danger,#c33b46);color:#fff}
+.ap-admin-org-confirm footer>button{min-width:96px;min-height:40px;padding:8px 12px;border:1px solid #dfe2e7;border-radius:8px;background:#fff;color:inherit;font:inherit;cursor:pointer}
+.ap-restored-dialog form.ap-admin-org-action button:focus-visible,.ap-admin-org-confirm button:focus-visible{outline:3px solid #3159e848;outline-offset:2px}
+.ap-restored-dialog form.ap-admin-org-action-danger .ap-org-action-footer>button[type=submit]:focus-visible,.ap-admin-org-confirm-danger footer>button:last-child:focus-visible{outline-color:#c33b4648}
 @media(max-width:560px){.ap-restored-dialog-backdrop{padding:12px}.ap-restored-dialog{padding:20px}.ap-restored-dialog dl{grid-template-columns:minmax(0,1fr)}}
 @media(pointer:coarse){.ap-restored-dialog button{min-height:44px}}
 .ap-restored-drawer-backdrop{display:flex;justify-content:flex-end;padding:0}

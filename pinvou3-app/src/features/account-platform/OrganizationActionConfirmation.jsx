@@ -3,7 +3,7 @@ import React, { useLayoutEffect, useId, useRef } from 'react';
 import { createPortal } from 'react-dom';
 
 // Feature-local confirmation does not depend on native dialog commands.
-export function OrganizationActionConfirmation({ copy, title, target, description = '', details, onCancel, onConfirm, canRestoreFocus }) {
+export function OrganizationActionConfirmation({ copy, title, target, description = '', details, onCancel, onConfirm, canRestoreFocus, appearance = 'default', dangerous = false }) {
  const visible = usePortalDialogScope();
  const titleID = useId(), descriptionID = useId(), dialog = useRef(null), cancelButton = useRef(null), restoreAllowed = useRef(canRestoreFocus);
  restoreAllowed.current = canRestoreFocus;
@@ -22,10 +22,10 @@ export function OrganizationActionConfirmation({ copy, title, target, descriptio
  };
  if (!visible) return null;
   return createPortal(<div className="ap-org-confirm-backdrop" onMouseDown={event => { if (event.target === event.currentTarget) onCancel(); }}>
-  <div className="ap-org-confirm-dialog" ref={dialog} role="alertdialog" aria-modal="true" aria-labelledby={titleID} aria-describedby={descriptionID} onKeyDown={keyDown}>
+  <div className={`ap-org-confirm-dialog${appearance === 'admin' ? ' ap-admin-org-confirm' : ''}${appearance === 'admin' && dangerous ? ' ap-admin-org-confirm-danger' : ''}`} ref={dialog} role="alertdialog" aria-modal="true" aria-labelledby={titleID} aria-describedby={descriptionID} onKeyDown={keyDown}>
    <h3 id={titleID}>{title}</h3><p id={descriptionID}>{copy.confirm}{description && <> {description}</>}</p>
    <dl>{target && <><dt>{copy.confirmationTarget}</dt><dd>{target}</dd></>}{details.map(item => <React.Fragment key={item.name}><dt>{item.label}</dt><dd>{item.value}</dd></React.Fragment>)}</dl>
-   <footer><button type="button" ref={cancelButton} onClick={onCancel}>{copy.cancelConfirmation}</button><button type="button" onClick={onConfirm}>{copy.confirmAction}</button></footer>
+   <footer><button type="button" ref={cancelButton} onClick={onCancel}>{copy.cancelConfirmation}</button><button type="button" onClick={onConfirm}>{appearance === 'admin' && copy.confirmActionTemplate ? copy.confirmActionTemplate.replace('{action}', () => title) : copy.confirmAction}</button></footer>
   </div>
  </div>, document.body);
 }

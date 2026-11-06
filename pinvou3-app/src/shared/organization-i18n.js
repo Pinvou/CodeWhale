@@ -178,9 +178,9 @@ export const organizationCopy = {
  },
 };
 
-Object.assign(organizationCopy.zh, { cancelConfirmation: '取消', confirmAction: '确认执行', confirmationTarget: '操作对象' });
-Object.assign(organizationCopy.en, { cancelConfirmation: 'Cancel', confirmAction: 'Confirm operation', confirmationTarget: 'Action target' });
-Object.assign(organizationCopy.ja, { cancelConfirmation: 'キャンセル', confirmAction: '実行を確認', confirmationTarget: '操作対象' });
+Object.assign(organizationCopy.zh, { saveChanges: '保存修改', confirmActionTemplate: '确认{action}', cancelConfirmation: '取消', confirmAction: '确认执行', confirmationTarget: '操作对象' });
+Object.assign(organizationCopy.en, { saveChanges: 'Save changes', confirmActionTemplate: 'Confirm: {action}', cancelConfirmation: 'Cancel', confirmAction: 'Confirm operation', confirmationTarget: 'Action target' });
+Object.assign(organizationCopy.ja, { saveChanges: '変更を保存', confirmActionTemplate: '{action}を確認', cancelConfirmation: 'キャンセル', confirmAction: '実行を確認', confirmationTarget: '操作対象' });
 
 Object.assign(organizationCopy.zh, {
  deleteUnitDescription: '删除前会检查该单元的关联资源；存在阻断条件时不会删除。请核对所属组织和单元，继续后仍需确认执行。',
