@@ -36,4 +36,27 @@ node scripts/account-platform-recovery-gate.mjs --local-only --deployment-id "$E
 
 证据路径也必须在导出根内。全本机业务恢复去掉 `--bootstrap`，仍需原完整恢复集、域审计和保留扫描，不以基础恢复替代。命令成功仅输出 `ARTIFACT_BINDINGS_VERIFIED`，明确 `exercise_verified=false`、`release_authorized=false`、`deployment_status=NOT_DEPLOYED`；本机原状态仅作为 `declared_status` 输出。摘要相同不证明收据中的测量真实，复核人必须核原始来源、目标集群/备份、实际执行及权限，另行批准发布。未经该独立审查的自造 JSON 和自造工件不能放行部署。
 
-本仓库没有通用现场备份/恢复采集器。Billing 现提供[手动只读全账本核查](billing-ledger-audit.md)及 `sql/billing-ledger-audit.sql`，必须以真实只读身份完整执行并独立复核；其存在和受控测试不代表现场恢复验收。`account-restore-audit.sql`、`token-restore-audit.sql`、`outbox-inventory.sql` 三个固定审计脚本仍未提供。站点必须使用已有受控只读审计程序完整核对原领域守恒、权限、Outbox/Inbox 和恢复点，并由独立复核人留原始工件；缺少可执行审计或真实记录时保持恢复验收未完成，不能用门禁单元测试替代。完整部署/E2E 当前延期，离线格式及绑定测试不代表现场验收通过。
+## 数据库恢复核查
+
+迁移校验通过后，在隔离恢复环境启用 Relay 和业务写入前，用站点已核对的服务配置连接 Account、Billing 和 Token。连接配置应绑定目标主机、数据库名、TLS 和只读身份，凭据通过站点 Secret 或受控 `PGPASSFILE` 提供。为审计身份只授予脚本查询所需的读取权限，确保行级安全不会隐藏被审计数据。使用 `psql -X`，每次执行都保存完整输出和退出码。
+
+```sh
+audit_dir=account-platform/deploy/runbooks/sql
+PGSERVICE="$ACCOUNT_AUDIT_SERVICE" psql -X -v ON_ERROR_STOP=1 \
+  -v audit_database="$ACCOUNT_AUDIT_DATABASE" -f "$audit_dir/account-restore-audit.sql"
+PGSERVICE="$BILLING_AUDIT_SERVICE" psql -X -v ON_ERROR_STOP=1 \
+  -f "$audit_dir/billing-ledger-audit.sql"
+PGSERVICE="$TOKEN_AUDIT_SERVICE" psql -X -v ON_ERROR_STOP=1 \
+  -v audit_database="$TOKEN_AUDIT_DATABASE" -f "$audit_dir/token-restore-audit.sql"
+
+PGSERVICE="$ACCOUNT_AUDIT_SERVICE" psql -X -v ON_ERROR_STOP=1 \
+  -v audit_database="$ACCOUNT_AUDIT_DATABASE" -v audit_domain=account -f "$audit_dir/outbox-inventory.sql"
+PGSERVICE="$BILLING_AUDIT_SERVICE" psql -X -v ON_ERROR_STOP=1 \
+  -v audit_database="$BILLING_AUDIT_DATABASE" -v audit_domain=billing -f "$audit_dir/outbox-inventory.sql"
+PGSERVICE="$TOKEN_AUDIT_SERVICE" psql -X -v ON_ERROR_STOP=1 \
+  -v audit_database="$TOKEN_AUDIT_DATABASE" -v audit_domain=token -f "$audit_dir/outbox-inventory.sql"
+```
+
+Account 核查主体、组织、权限范围和钱包供给状态；Billing 核查账本及资金守恒，详见[只读全账本核查](billing-ledger-audit.md)；Token 核查用量及结算状态。Outbox/Inbox 盘点按库运行，Account 授权分区单列。有效和已到期的租约按各次捕获时间计算，复核时结合恢复时间轴。结果只包含聚合状态、金额、计数和采集时间。
+
+退出码为零表示查询完成，复核人仍须检查所有 `violations` 和 `inconsistent_rows` 是否为零，核对目标库及恢复点，并对比恢复前的可信记录。空库也可返回零异常，需核对预期数量和已知业务事实。结合站点受控审计核实实际权限、Account 与 Billing 的钱包归属和余额、Token 与 Billing 的用量/结算以及 NATS 消费进度，再保留原始工件。数据库内部核查、跨域对账、真实恢复/部署演练和容量测量各自留证；缺少任何适用记录时保持对应验收未完成。
