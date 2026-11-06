@@ -971,6 +971,7 @@ pub async fn remove_external_model(
             .then(|| record.weights_path.clone())
             .flatten();
         let ollama_model_name = ollama_model_name.clone();
+        let record_id = record.id.clone();
         move || {
             let name_hit =
                 crate::features::model_store::store_model_name_checked(&record_name, false)?;
@@ -1035,6 +1036,14 @@ pub async fn remove_external_model(
                 }
                 None => false,
             };
+            // 同仓注册表交叉引用臂（2026-11-07 评审 P2 zhuowp，review
+            // 5801985394）：按其余登记记录的 weights_path 做归属兜底，读取失败
+            // 按 Err 上抛（与商店查询 fail-closed 同口径）。
+            let registry_weights = other_registry_weights_checked(&registry_dir(), &record_id)?;
+            let registry_weights_hit = match weights_path.as_deref() {
+                Some(weights) => paths_intersect_any(Path::new(weights), &registry_weights),
+                None => false,
+            };
             Ok((
                 name_hit,
                 ollama_model_hit,
@@ -1043,6 +1052,7 @@ pub async fn remove_external_model(
                 installed_name_hit,
                 installed_marker_hit,
                 installed_filename_hit,
+                registry_weights_hit,
             ))
         }
     })
@@ -1062,6 +1072,7 @@ pub async fn remove_external_model(
         installed_name_hit,
         installed_marker_hit,
         installed_filename_hit,
+        registry_weights_hit,
     ) = boundary;
     removal_boundary_error(
         &record.name,
@@ -1071,6 +1082,7 @@ pub async fn remove_external_model(
         installed_name_hit,
         installed_marker_hit,
         installed_filename_hit,
+        registry_weights_hit,
         name_hit.as_deref(),
         ollama_model_hit.as_deref(),
     )?;
@@ -1119,6 +1131,7 @@ pub async fn remove_external_model(
                     let protected = crate::platform::paths::pinvou3_home();
                     let weights = weights.to_string();
                     let weights_for_task = weights.clone();
+                    let record_id_for_task = record.id.clone();
                     let removed =
                         tokio::task::spawn_blocking(move || -> Result<Option<PathBuf>, String> {
                             // 存在性预检与守卫/删除同一池：stat 与 canonicalize
@@ -1232,6 +1245,18 @@ pub async fn remove_external_model(
                                 &recheck,
                                 &weight_filenames,
                             )?;
+                            // 同仓注册表交叉引用删除时刻复查（2026-11-07 评审 P2
+                            // zhuowp，review 5801985394）：与商店根复查同一模式
+                            // 重推导（守卫后到删除前注册表可能被并发改写），读取
+                            // 失败按拒绝（fail-closed 同口径）。
+                            let registry_weights =
+                                other_registry_weights_checked(&registry_dir(), &record_id_for_task)
+                                    .map_err(|error| {
+                                        format!(
+                                            "拒绝删除：注册表交叉引用读取失败（{error}），为防误删已拒绝"
+                                        )
+                                    })?;
+                            ensure_recheck_outside_registry_weights(&recheck, &registry_weights)?;
                             // 并发移除兜底：另一窗口/通道已把目录删掉时
                             // remove_dir_all 报 NotFound——与存在性预检的
                             // Ok(None) 同口径按"已删除"收敛，不报误导性的
@@ -1330,6 +1355,7 @@ fn removal_boundary_error(
     installed_name_hit: bool,
     installed_marker_hit: bool,
     installed_filename_hit: bool,
+    registry_weights_hit: bool,
     store_name_hit: Option<&str>,
     ollama_model_store_hit: Option<&str>,
 ) -> Result<(), String> {
@@ -1395,6 +1421,17 @@ fn removal_boundary_error(
         // 方式随文案如实告知（与标记臂同一取舍方向）。
         return Err(format!(
             "该目录子树内含有在册商店卡片登记的权重文件，无法确认它不是仍在使用的商店权重目录（权重目录名可被改名，文件名是卡片运行的必需组件），删除可能破坏仍在使用的商店模型。请先在模型商店卸载对应卡片（本臂随之放行），或确认该目录与商店无关后移除本记录{STORE_BOUNDARY_ESCAPE_HINT}"
+        ));
+    }
+    if registry_weights_hit {
+        // 同仓注册表交叉引用臂（2026-11-07 评审 P2 zhuowp，review
+        // 5801985394）：商店四臂的在册引用集合全部来自商店库——外部登记与
+        // 受支持历史迁移写进本仓注册表的其他记录从不被咨询，其余记录的
+        // weights_path 落在删除目标之内（例如以目标为权重父目录登记）时，
+        // 整树删除会连带毁掉它们而四臂全放行。按其余记录的登记权重路径做
+        // 归属兜底（自身记录排除），宁可误拒不误删；解除方式随文案告知。
+        return Err(format!(
+            "该模型的权重目录与其他外部登记模型引用的权重路径相交，删除会破坏仍被引用的外部登记权重。请先移除引用该目录的其他登记记录（本臂随之放行）{STORE_BOUNDARY_ESCAPE_HINT}"
         ));
     }
     Ok(())
@@ -1721,6 +1758,83 @@ fn ensure_recheck_outside_installed_refs(
     if paths_intersect_any(recheck, installed_refs) {
         return Err(
             "拒绝删除：目标目录与已安装商店模型引用的权重路径相交（就地复用），由模型商店管理，请在模型商店中操作".to_string(),
+        );
+    }
+    Ok(())
+}
+
+/// 其余外部注册表记录的登记权重路径集合（同仓交叉引用臂数据面，可失败版；
+/// 2026-11-07 评审 P2 zhuowp，review 5801985394）：商店四臂（引用路径/约定
+/// 名/导入标记/权重文件名）的在册引用集合全部来自商店库，本仓注册表的其他
+/// 记录——外部登记与受支持历史迁移写入的——从不被咨询；其 weights_path 落
+/// 在删除目标之内时，整树递归删除会连带毁掉它们而四臂全放行。目录读不了
+/// （权限/挂载异常）按 Err 上抛——删除守卫与商店查询同 fail-closed 口径，
+/// 不得沿 `read_registry` 的视图级降级静默放行；NotFound（还没有任何外部
+/// 登记）按空集合放行；坏邻居文件（坏 JSON/超限）沿既有容错跳过；自身记录
+/// 按**内容 id** 排除（删除自身的权重正是本次请求）。
+fn other_registry_weights_checked(dir: &Path, exclude_id: &str) -> Result<Vec<PathBuf>, String> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => {
+            return Err(format!(
+                "注册表目录无法读取（{}）：{error}",
+                truncate_path_echo(&dir.to_string_lossy())
+            ));
+        }
+    };
+    let mut paths: Vec<PathBuf> = entries
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("json"))
+        .collect();
+    paths.sort();
+    if paths.len() > MAX_REGISTRY_FILES {
+        paths.truncate(MAX_REGISTRY_FILES);
+    }
+    let mut out: Vec<PathBuf> = Vec::new();
+    for path in paths {
+        let Ok(Some(record)) = read_record(&path) else {
+            continue;
+        };
+        let id = if record.id.trim().is_empty() {
+            path.file_stem()
+                .and_then(|stem| stem.to_str())
+                .unwrap_or("m-unknown")
+                .to_string()
+        } else {
+            record.id.clone()
+        };
+        if id == exclude_id {
+            continue;
+        }
+        let Some(weights) = record.weights_path.as_deref() else {
+            continue;
+        };
+        if weights.trim().is_empty() {
+            continue;
+        }
+        let candidate = PathBuf::from(weights);
+        // canonical 解析软链对齐真实落点，失败回退原路径（与商店
+        // installed_weight_paths_checked 同一把尺）。
+        let resolved = candidate.canonicalize().unwrap_or(candidate);
+        if !out.contains(&resolved) {
+            out.push(resolved);
+        }
+    }
+    Ok(out)
+}
+
+/// 同仓注册表交叉引用删除时刻复查（纯函数，测试直打）：目标与任一**其他**
+/// 外部登记记录的登记权重路径相交即拒绝（相交两方向：目标在登记路径之内
+/// 连带毁掉该权重；目标包含登记路径则递归删除连根清掉）。
+fn ensure_recheck_outside_registry_weights(
+    recheck: &Path,
+    registry_weights: &[PathBuf],
+) -> Result<(), String> {
+    if paths_intersect_any(recheck, registry_weights) {
+        return Err(
+            "拒绝删除：目标目录与其他外部登记模型引用的权重路径相交，删除会破坏仍被引用的外部登记权重，请先移除引用该目录的登记记录".to_string(),
         );
     }
     Ok(())
@@ -3166,13 +3280,13 @@ mod tests {
         // 双侧都 trim：存量记录名带空白时确认输入 trim 后仍应匹配（Ok 而非 Err）。
         assert!(
             removal_boundary_error(
-                " qwen3 ", "qwen3", false, false, false, false, false, None, None
+                " qwen3 ", "qwen3", false, false, false, false, false, false, None, None
             )
             .is_ok(),
             "trailing-space record names must stay removable"
         );
         let error = removal_boundary_error(
-            "qwen3", " qwen3x ", false, false, false, false, false, None, None,
+            "qwen3", " qwen3x ", false, false, false, false, false, false, None, None,
         )
         .unwrap_err();
         assert!(error.contains("确认名"));
@@ -3180,6 +3294,7 @@ mod tests {
         let error = removal_boundary_error(
             "qwen3",
             "qwen3",
+            false,
             false,
             false,
             false,
@@ -3200,6 +3315,7 @@ mod tests {
             false,
             false,
             false,
+            false,
             None,
             Some("qwen3:30b"),
         )
@@ -3207,20 +3323,20 @@ mod tests {
         assert!(error.contains("模型商店"));
         // 守卫 2 路径臂：权重位于任一商店根之下（别名躲过两个名字臂时仍被拦）。
         let error = removal_boundary_error(
-            "qwen3", "qwen3", true, false, false, false, false, None, None,
+            "qwen3", "qwen3", true, false, false, false, false, false, None, None,
         )
         .unwrap_err();
         assert!(error.contains("模型商店"));
         // 存量引用臂：与在册卡片引用路径相交（2026-11-04 评审 P2）。
         let error = removal_boundary_error(
-            "qwen3", "qwen3", false, true, false, false, false, None, None,
+            "qwen3", "qwen3", false, true, false, false, false, false, None, None,
         )
         .unwrap_err();
         assert!(error.contains("已安装商店模型引用"));
         // 零痕迹旧根名字臂：目录名与在册约定同名（2026-11-04 评审 P2 zhuowp
         // 场景），前四臂全空时仍被拦，且报错来自本臂而非前面的臂。
         let error = removal_boundary_error(
-            "qwen3", "qwen3", false, false, true, false, false, None, None,
+            "qwen3", "qwen3", false, false, true, false, false, false, None, None,
         )
         .unwrap_err();
         assert!(
@@ -3230,7 +3346,7 @@ mod tests {
         // 自取名原目录标记臂（2026-11-05 评审 P2 zhuowp 场景 II）：前五臂全空、
         // 目标含官方脚本就地发现的标记文件且仍有在册卡片 → 拦，且报错来自本臂。
         let error = removal_boundary_error(
-            "qwen3", "qwen3", false, false, false, true, false, None, None,
+            "qwen3", "qwen3", false, false, false, true, false, false, None, None,
         )
         .unwrap_err();
         assert!(
@@ -3240,7 +3356,7 @@ mod tests {
         // 登记权重文件名臂（2026-11-06 评审 P2 zhuowp 场景 III）：目录改名且
         // 无标记时记录里的权重文件名是唯一存活引用，第七臂命中即拒。
         let error = removal_boundary_error(
-            "qwen3", "qwen3", false, false, false, false, true, None, None,
+            "qwen3", "qwen3", false, false, false, false, true, false, None, None,
         )
         .unwrap_err();
         assert!(
@@ -3250,9 +3366,92 @@ mod tests {
         // 七道全过 → Ok。
         assert!(
             removal_boundary_error(
-                " qwen3 ", " qwen3 ", false, false, false, false, false, None, None
+                " qwen3 ", " qwen3 ", false, false, false, false, false, false, None, None
             )
             .is_ok()
+        );
+    }
+
+    #[test]
+    fn removal_boundary_rejects_cross_referenced_registry_weights() {
+        // 同仓注册表交叉引用臂（2026-11-07 评审 P2 zhuowp，review 5801985394）：
+        // 商店四臂对**本仓注册表**其他记录的权重失明——其余记录的 weights_path
+        // 落在目标之内时必须由本臂拒绝，且报错来自本臂而非前面的臂。
+        let error = removal_boundary_error(
+            "qwen3", "qwen3", false, false, false, false, false, true, None, None,
+        )
+        .unwrap_err();
+        assert!(
+            error.contains("其他外部登记模型") && error.contains("先移除"),
+            "rejection must come from the registry cross-reference arm, got: {error}"
+        );
+        // 自身记录排除后不相交：本臂放行（其余臂不在此测试职责内）。
+        assert!(
+            removal_boundary_error(
+                "qwen3", "qwen3", false, false, false, false, false, false, None, None
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn ensure_recheck_outside_registry_weights_rejects_both_directions() {
+        // 交集两方向都拒：目标在登记路径之内（连带毁掉该权重）与目标包含登记
+        // 路径（递归删除连根清掉），与商店根复查同一口径。
+        let others = vec![PathBuf::from("/home/u/ai-weights/qwen3")];
+        assert!(
+            ensure_recheck_outside_registry_weights(Path::new("/home/u/ai-weights"), &others)
+                .is_err()
+        );
+        assert!(
+            ensure_recheck_outside_registry_weights(
+                Path::new("/home/u/ai-weights/qwen3"),
+                &[PathBuf::from("/home/u/ai-weights")]
+            )
+            .is_err()
+        );
+        // 不相交与空集合（没有其他登记）放行。
+        assert!(
+            ensure_recheck_outside_registry_weights(Path::new("/home/u/other"), &others).is_ok()
+        );
+        assert!(
+            ensure_recheck_outside_registry_weights(Path::new("/home/u/ai-weights"), &[]).is_ok()
+        );
+    }
+
+    #[test]
+    fn other_registry_weights_checked_excludes_self_and_unregistered() {
+        let dir = TempDir::new("registry-cross");
+        // 自身记录（被移除者）、未登记权重与空白权重的记录跳过；其余纳入。
+        std::fs::write(
+            dir.path().join("m-self.json"),
+            r#"{"id": "m-self", "name": "self", "kind": "other", "weights_path": "/home/u/ai-weights"}"#,
+        )
+        .expect("write self record");
+        std::fs::write(
+            dir.path().join("m-other.json"),
+            r#"{"id": "m-other", "name": "other", "kind": "other", "weights_path": "/home/u/ai-weights/qwen3"}"#,
+        )
+        .expect("write other record");
+        std::fs::write(
+            dir.path().join("m-bare.json"),
+            r#"{"id": "m-bare", "name": "bare", "kind": "other"}"#,
+        )
+        .expect("write bare record");
+        std::fs::write(dir.path().join("m-bad.json"), "{ broken").expect("write bad record");
+        let weights = other_registry_weights_checked(dir.path(), "m-self")
+            .expect("degraded neighbor files must not hard-fail the read");
+        assert_eq!(
+            weights,
+            vec![PathBuf::from("/home/u/ai-weights/qwen3")],
+            "only the other registered record's weights path must survive"
+        );
+        // 目录不存在（还没有任何外部登记）：空集合放行，不是失败。
+        let missing = TempDir::new("registry-cross-none").path().join("absent");
+        assert!(
+            other_registry_weights_checked(&missing, "m-self")
+                .expect("missing registry dir is an empty registry, not a failure")
+                .is_empty()
         );
     }
 
@@ -4310,7 +4509,7 @@ mod tests {
         // 不逐字进错误与日志。
         let long_name = "长".repeat(100);
         let error = removal_boundary_error(
-            &long_name, "mismatch", false, false, false, false, false, None, None,
+            &long_name, "mismatch", false, false, false, false, false, false, None, None,
         )
         .unwrap_err();
         assert!(error.contains(&"长".repeat(32)));
