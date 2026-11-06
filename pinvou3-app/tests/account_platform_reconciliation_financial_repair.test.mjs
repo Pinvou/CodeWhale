@@ -1,5 +1,5 @@
 import test from 'node:test'; import assert from 'node:assert/strict'; import fs from 'node:fs';
-import {financialRepairPrecheckBody,financialRepairCommandTypes} from '../src/features/account-platform/admin-financial-repair-form.js';
+import {financialRepairPrecheckBody,financialRepairCommandTypes,financialRepairDateCanUseCalendar} from '../src/features/account-platform/admin-financial-repair-form.js';
 import {financialRepairApprovalDraft,financialRepairPrecheck} from '../src/features/account-platform/admin-financial-repair-drafts.js';
 import {currentApprovalEditDraft} from '../src/features/account-platform/admin-finance.js';
 import {AdminPlatformClient} from '../src/features/account-platform/admin-client.js';
@@ -46,4 +46,10 @@ test('Recon fresh EDIT preserves original tuple/date and replaces only authorita
   const d=await currentApprovalEditDraft({approvalCommandPrecheck:async b=>{request=b;return fresh}},detail,'Controlled current original-intent EDIT');
   assert.deepEqual(request,{command_type:p.command_type,...values,reason_code:'PROVIDER_REFUND_CONFIRMED'});assert.equal(d.critical_resource_versions.facts_digest,'c'.repeat(64));assert.deepEqual(d.normalized_command,detail.command);
   for(const field of ['reconciliation_case_id','payment_evidence_id','business_date']){const changed=parseFinanceJSON(raw());changed.normalized_command[field]=field==='business_date'?'2026-10-08':id(5);await assert.rejects(currentApprovalEditDraft({approvalCommandPrecheck:async()=>changed},detail,'Controlled current original-intent EDIT'));}
+});
+
+test('Recon native calendar eligibility preserves legacy manual business dates',()=>{
+  for(const value of ['', '0001-01-01', '0099-10-07', '2000-02-29', '2026-10-07'])assert.equal(financialRepairDateCanUseCalendar(value),true);
+  for(const value of ['0000-02-29', '2026-02-30', '2026-10-07 ', '2026-1-07', null, true])assert.equal(financialRepairDateCanUseCalendar(value),false);
+  assert.equal(financialRepairPrecheckBody('RECONCILIATION_FINANCIAL_REPAIR',{...values,business_date:'0000-02-29'}).body.business_date,'0000-02-29');
 });

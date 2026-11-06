@@ -26,7 +26,6 @@ export const ledgerRepairCopy = {
       "allocations_digest": "分配摘要",
       "hold_updated_at": "冻结更新时间",
       "loss_review_updated_at": "损失复核更新时间",
-
       "receivable_id": "应收 ID",
       "write_off_microcredits": "核销金额（微积分）",
       "expected_version": "预期应收版本",
@@ -63,7 +62,7 @@ export const ledgerRepairCopy = {
       "component_digest": "组件摘要",
       "provider_chargeback_id": "支付渠道拒付引用",
       "reconciliation_case_id": "对账案件 ID",
-      "business_date": "业务日期",
+      "business_date": "上海业务日期（YYYY-MM-DD）",
       "run_id": "对账运行 ID",
       "provider_snapshot_digest": "渠道快照摘要",
       "currency": "币种",
@@ -93,7 +92,11 @@ export const ledgerRepairCopy = {
     "chargebackRepairTitle": "拒付财务修复",
     "reconciliationRepairTitle": "对账证据确认",
     "reconciliationLead": "适用于渠道有付款记录、平台无对应记录且渠道退款证据已确认的差异。加载证据并核对后提交审批；本申请需经审批并执行成功，才会据此结案匹配差异。",
-    "ledgerEffectNone": "执行会登记证据引用与结案结果，并结案关联的人工复核案件（如有）。不会补记账、增加钱包余额或发起渠道操作。"
+    "ledgerEffectNone": "执行会登记证据引用与结案结果，并结案关联的人工复核案件（如有）。不会补记账、增加钱包余额或发起渠道操作。",
+    "businessDateHint": "按对账运行的上海业务日期填写（UTC+08:00），不按浏览器时区换算。可选取日期，或手动输入 YYYY-MM-DD。",
+    "dateManualEntry": "手动输入日期",
+    "dateUseCalendar": "使用日期选择器",
+    "dateCalendarUnavailableHelp": "日期选择器不支持当前值；请手动填写，或清空日期后切换。"
   },
   "en": {
     "title": "Start a financial repair approval",
@@ -122,7 +125,6 @@ export const ledgerRepairCopy = {
       "allocations_digest": "Allocations digest",
       "hold_updated_at": "Hold updated at",
       "loss_review_updated_at": "Loss review updated at",
-
       "receivable_id": "Receivable ID",
       "write_off_microcredits": "Write-off amount (microcredits)",
       "expected_version": "Expected receivable version",
@@ -159,7 +161,7 @@ export const ledgerRepairCopy = {
       "component_digest": "Component digest",
       "provider_chargeback_id": "Provider chargeback reference",
       "reconciliation_case_id": "Reconciliation case ID",
-      "business_date": "Business date",
+      "business_date": "Shanghai business date (YYYY-MM-DD)",
       "run_id": "Reconciliation run ID",
       "provider_snapshot_digest": "Provider snapshot digest",
       "currency": "Currency",
@@ -189,7 +191,11 @@ export const ledgerRepairCopy = {
     "chargebackRepairTitle": "Chargeback financial repair",
     "reconciliationRepairTitle": "Reconciliation evidence review",
     "reconciliationLead": "For a provider payment missing internally with confirmed provider refund evidence. Load and review the evidence, then submit for approval. This request closes the matched difference only after approval and successful execution.",
-    "ledgerEffectNone": "Execution records the evidence reference and closure result, including closure of any linked manual review case. It does not post ledger entries, credit wallets, or initiate provider operations."
+    "ledgerEffectNone": "Execution records the evidence reference and closure result, including closure of any linked manual review case. It does not post ledger entries, credit wallets, or initiate provider operations.",
+    "businessDateHint": "Use the reconciliation run’s Shanghai business date (UTC+08:00), without browser time zone conversion. Pick a date or enter YYYY-MM-DD manually.",
+    "dateManualEntry": "Enter date manually",
+    "dateUseCalendar": "Use date picker",
+    "dateCalendarUnavailableHelp": "The date picker cannot represent this value. Enter it manually, or clear the date before switching."
   },
   "ja": {
     "title": "財務修復の承認を起動",
@@ -218,7 +224,6 @@ export const ledgerRepairCopy = {
       "allocations_digest": "配分ダイジェスト",
       "hold_updated_at": "保留更新日時",
       "loss_review_updated_at": "損失審査更新日時",
-
       "receivable_id": "売掛金 ID",
       "write_off_microcredits": "償却額（マイクロクレジット）",
       "expected_version": "予想売掛金版",
@@ -255,7 +260,7 @@ export const ledgerRepairCopy = {
       "component_digest": "構成要素ダイジェスト",
       "provider_chargeback_id": "決済チャージバック参照",
       "reconciliation_case_id": "照合案件 ID",
-      "business_date": "業務日",
+      "business_date": "上海の業務日（YYYY-MM-DD）",
       "run_id": "照合実行 ID",
       "provider_snapshot_digest": "決済スナップショットダイジェスト",
       "currency": "通貨",
@@ -285,7 +290,11 @@ export const ledgerRepairCopy = {
     "chargebackRepairTitle": "チャージバック財務修復",
     "reconciliationRepairTitle": "照合証拠の確認",
     "reconciliationLead": "決済事業者に支払記録があり、内部記録がなく、事業者の返金証拠を確認できる差異が対象です。証拠を読み込んで照合し、承認申請します。この申請による差異の終了は、承認と実行の成功後に行われます。",
-    "ledgerEffectNone": "実行では返金証拠の参照と終了結果を記録し、関連する手動確認案件があれば併せて終了します。仕訳の追加、ウォレットへの加算、決済事業者の操作は行いません。"
+    "ledgerEffectNone": "実行では返金証拠の参照と終了結果を記録し、関連する手動確認案件があれば併せて終了します。仕訳の追加、ウォレットへの加算、決済事業者の操作は行いません。",
+    "businessDateHint": "照合実行の上海業務日（UTC+08:00）を指定します。ブラウザーの時間帯では変換しません。日付を選ぶか、YYYY-MM-DD で手入力できます。",
+    "dateManualEntry": "日付を手入力",
+    "dateUseCalendar": "日付選択を使用",
+    "dateCalendarUnavailableHelp": "現在の値は日付選択で扱えません。手入力するか、日付を空にしてから切り替えてください。"
   }
 };
 

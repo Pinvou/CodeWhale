@@ -70,6 +70,12 @@ function closedValue(value, kind) {
   try { return integerMoney(text) > 0n; } catch { return false; }
 }
 
+// HTML calendar controls cannot represent year 0000. Keep the existing business
+// date contract intact and use manual input for values a calendar cannot hold.
+export function financialRepairDateCanUseCalendar(value) {
+  return value === '' || closedValue(value, 'date') && !value.startsWith('0000-');
+}
+
 // financialRepairPrecheckBody builds the closed read-only precheck input. Any
 // missing, padded or malformed field fails closed instead of being trimmed into
 // something the owner would then have to reject.
