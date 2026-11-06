@@ -66,7 +66,7 @@ function Table({ columns, items, copy }) {
           {items.map((item, index) => (
             <tr key={item.audit_id || index}>
               {columns.map((column) => (
-                <td key={column.key}>{column.render ? column.render(item) : (item[column.key] ?? '—')}</td>
+                <td key={column.key} className={column.className}>{column.render ? column.render(item) : (item[column.key] ?? '—')}</td>
               ))}
             </tr>
           ))}
@@ -358,8 +358,9 @@ function Audit({ copy, data, client, setData, permissions, currentUserID }) {
     {
       key: 'action',
       label: copy.audit.action,
+      className: 'adm-audit-action-cell',
       render: (item) => (
-        <button className="adm-name-link" onClick={() => showDetail(item)}>
+        <button className="adm-name-link adm-audit-action" onClick={() => showDetail(item)}>
           {item.action}
         </button>
       ),
