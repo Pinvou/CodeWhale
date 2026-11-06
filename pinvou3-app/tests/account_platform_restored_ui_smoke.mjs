@@ -201,6 +201,14 @@ try {
       await page.select('.adm-sidebar-foot select', language);
       const words = await page.evaluate(() => window.restored.copy().organization);
       await page.waitForFunction(label => [...document.querySelectorAll('.adm-member-action-menu button')].some(button => button.textContent.trim() === label && !button.disabled), {}, words.remove);
+      const toolbar = await page.$eval('[data-workspace=members] .adm-member-toolbar', node => {
+        const add = node.querySelector(':scope>button'), table = node.parentElement.querySelector('table');
+        const [name, role] = [...node.querySelectorAll('form>label')].map(item => item.getBoundingClientRect());
+        const query = node.querySelector('form>button').getBoundingClientRect(), bounds = node.getBoundingClientRect();
+        return { beforeTable: Boolean(add.compareDocumentPosition(table) & Node.DOCUMENT_POSITION_FOLLOWING), addBottom: add.getBoundingClientRect().bottom, tableTop: table.getBoundingClientRect().top, nameRoleGap: role.left - name.right, roleQueryGap: query.left - role.right, controlsFit: [...node.querySelectorAll('input,select,button')].every(item => { const box = item.getBoundingClientRect(); return box.left >= bounds.left - 1 && box.right <= bounds.right + 1; }) };
+      });
+      assert.ok(toolbar.beforeTable && toolbar.addBottom + 8 <= toolbar.tableTop && toolbar.controlsFit, `member toolbar precedes the table without control overflow: ${JSON.stringify({language,width,toolbar})}`);
+      if (width === 1440) assert.ok(toolbar.nameRoleGap >= 8 && toolbar.nameRoleGap <= 16 && toolbar.roleQueryGap >= 8 && toolbar.roleQueryGap <= 16, 'name, role and search remain adjacent');
       const expectedUnits = width === 390 ? words.unassignedUnits : 'Sample unit';
       assert.equal(await page.$eval('[data-workspace=members] tbody tr td:nth-child(3)', node => node.textContent.trim()), expectedUnits, 'member rows show assignment data rather than a repeated rule');
       assert.deepEqual(await page.$$eval('[data-workspace=members] th>.ap-member-units-help', nodes => nodes.map(node => node.textContent)), [words.unscopedUnits], 'scope rule is stated once in the column header');
@@ -220,7 +228,9 @@ try {
       assert.equal(await page.$eval('.adm-member-action-menu button:last-child', node => getComputedStyle(node).color), 'rgb(195, 59, 70)', 'member removal has danger styling');
       await page.keyboard.press('Tab'); await page.keyboard.press('Tab'); await page.keyboard.press('Tab');
       await page.waitForFunction(() => !document.querySelector('[data-workspace=members] details')?.open);
-      assert.equal(await page.evaluate(() => document.activeElement?.textContent.trim() === window.restored.copy().organization.addMember), true, 'Tab after the last action continues at the next page control');
+      assert.equal(await page.$eval('[data-workspace=members] details summary', node => node === document.activeElement), true, 'when the summary is the last page control, Tab closes its menu and returns to it');
+      await page.keyboard.press('Tab');
+      assert.equal(await page.$eval('[data-workspace=members] details summary', node => node === document.activeElement), false, 'the next Tab leaves the last summary rather than trapping focus');
       await page.$eval('[data-workspace=members] details summary', node => node.focus({ preventScroll: true }));
       await page.keyboard.press('Enter');
       await page.waitForFunction(() => document.querySelector('.adm-member-action-menu button') === document.activeElement);
@@ -257,6 +267,12 @@ try {
       await page.keyboard.press('Escape');
       await page.waitForFunction(() => !document.querySelector('[data-workspace=members] details')?.open);
       assert.equal(await page.$eval('[data-workspace=members] details summary', node => node === document.activeElement), true);
+      await click('[data-workspace=members] .adm-member-toolbar>button', words.addMember);
+      await page.waitForSelector('[role=dialog] .ap-org-action-target');
+      assert.equal(await page.$eval('[role=dialog] h2', node => node.textContent), words.addMember);
+      await page.keyboard.press('Escape'); await page.waitForFunction(() => !document.querySelector('[role=dialog]'));
+      assert.equal(await page.$eval('[data-workspace=members] .adm-member-toolbar>button', node => node === document.activeElement), true, 'cancelling returns focus to the toolbar action');
+      assert.equal(await page.evaluate(() => window.restored.calls.filter(call => call.method !== 'GET' && !call.url.endsWith('/account/bootstrap')).length), 0);
     }
   });
   await run('organization rename footer cancellation discards edits and reopens the current name', async () => {
