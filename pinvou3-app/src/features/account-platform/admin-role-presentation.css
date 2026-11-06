@@ -65,3 +65,6 @@
 .adm-shell.adm-restored-shell .adm-platform-roles .adm-visually-hidden{position:absolute;width:1px;height:1px;padding:0;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap}
 @media(max-width:1150px){.adm-shell.adm-restored-shell .adm-platform-roles .adm-role-catalog-layout{grid-template-columns:1fr}.adm-shell.adm-restored-shell .adm-platform-roles .adm-role-catalog-layout>.adm-table-wrap{border-right:0}.adm-shell.adm-restored-shell .adm-platform-roles .adm-role-detail{border-top:1px solid var(--adm-line)}}
 @media(max-width:760px){.adm-shell.adm-restored-shell .adm-platform-roles .adm-role-workspace-head{align-items:stretch}.adm-shell.adm-restored-shell .adm-platform-roles .adm-role-workspace-head>div:last-child{flex-wrap:wrap}.adm-role-grant .adm-role-preview{grid-template-columns:1fr}.adm-role-grant .adm-role-search{grid-template-columns:1fr}}
+
+.adm-role-grant .adm-role-steps li{min-width:0;font-size:14px;line-height:1.5;overflow-wrap:anywhere}
+.adm-role-grant .adm-role-next-help{margin:0;color:var(--adm-muted);font-size:12px;line-height:1.6;overflow-wrap:anywhere}

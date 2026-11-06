@@ -1,4 +1,4 @@
-import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import React, { useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
 import { PortalDialog } from './PortalDialog.jsx';
 import { requireFinanceID } from './finance-contract.js';
 import { looksLikeUserCode, platformRoleName } from './platform-role-presentation.js';
@@ -9,6 +9,7 @@ export function PlatformRoleGrantDialog({ words, copy, client, owner, canSearchU
   const [searched, setSearched] = useState(false);
   const generation = useRef(0), request = useRef(null), authority = useRef(null);
   const heading = useRef(null);
+  const nextHelpID = useId();
   // The button that advanced the wizard is removed. Keep focus inside the
   // dialog so Escape and keyboard navigation continue on the next step.
   useLayoutEffect(() => { heading.current?.focus(); }, [step]);
@@ -37,20 +38,21 @@ export function PlatformRoleGrantDialog({ words, copy, client, owner, canSearchU
   const userLabel = user => [user?.display_name, user?.username, user?.user_code, user?.user_id].find(value => typeof value === 'string' && value) || '';
   const continueFromUser = () => {
     try { requireFinanceID(target.trim().toLowerCase()); setStep(2); setSearchError(''); }
-    catch { setSearchError(copy.failed); }
+    catch { setSearchError(words.targetIDFormatHelp); }
   };
   const command = confirmation?.body;
   const date = value => value ? new Date(value).toLocaleString() : words.forever;
   return <PortalDialog title={words.newGrant} closeLabel={words.cancel} onClose={onClose} busy={busy} drawer>
     <div className="adm-role-grant">
-      <ol className="adm-role-steps">{[words.stepUser, words.stepRole, words.stepConfirm].map((label, index) => <li key={label} className={step === index + 1 ? 'active' : step > index + 1 ? 'done' : ''}><span>{index + 1}</span>{label}</li>)}</ol>
+      <ol className="adm-role-steps">{[words.stepUser, words.stepRole, words.stepConfirm].map((label, index) => <li key={label} aria-current={step === index + 1 ? 'step' : undefined} className={step === index + 1 ? 'active' : step > index + 1 ? 'done' : ''}><span>{index + 1}</span>{label}</li>)}</ol>
       {(error || searchError) && <p className="adm-inline-message error" role="alert">{error || searchError}</p>}
       {step === 1 && <section><h3 ref={heading} tabIndex={-1}>{words.chooseUser}</h3><p>{words.chooseUserLead}</p>
         {canSearchUsers && <><form className="adm-role-search" onSubmit={search}><label><span>{words.user}</span><input type="search" value={query} onChange={event => setQuery(event.target.value)} placeholder={words.userSearchPlaceholder} disabled={busy} /></label><button disabled={busy} aria-disabled={searching}>{searching ? copy.loading : words.searchAction}</button></form>
           {users.length > 0 && <label className="adm-role-field"><span>{words.chooseUser}</span><select disabled={busy} value={selectedUser ? target : ''} onChange={event => update('target', event.target.value)}><option value="">{words.chooseUser}</option>{users.map(user => <option key={user.user_id} value={user.user_id}>{userLabel(user)}{typeof user.user_code === 'string' && user.user_code !== userLabel(user) ? ` · ${user.user_code}` : ''}</option>)}</select></label>}{searched && users.length === 0 && <p role="status">{words.noUsers}</p>}<small className="adm-role-help">{words.noEmailSearch}</small></>}
         <label className="adm-role-field"><span>{copy.target}</span><input value={target} disabled={busy} onChange={event => update('target', event.target.value)} /></label>
         <div className="adm-role-reference"><span>{words.scope}</span><span className="adm-role-scope platform">{words.scopes.PLATFORM}</span></div>
-        <div className="adm-role-drawer-foot"><button type="button" onClick={onClose}>{words.cancel}</button><button type="button" className="adm-role-primary" disabled={busy || !target.trim()} onClick={continueFromUser}>{words.next}</button></div>
+        <p className="adm-role-next-help" id={nextHelpID}>{canSearchUsers ? words.userNextSearchHelp : words.userNextManualHelp}</p>
+        <div className="adm-role-drawer-foot"><button type="button" onClick={onClose}>{words.cancel}</button><button type="button" className="adm-role-primary" aria-describedby={nextHelpID} disabled={busy || !target.trim()} onClick={continueFromUser}>{words.next}</button></div>
       </section>}
       {step === 2 && <form onSubmit={event => { event.preventDefault(); if (onReview()) setStep(3); }}><h3 ref={heading} tabIndex={-1}>{words.chooseRoleAndValidity}</h3><p>{words.chooseRoleLead}</p>
         <label className="adm-role-field"><span>{copy.role}</span><select required value={roleCode} disabled={busy} onChange={event => update('roleCode', event.target.value)}><option value="">{words.chooseRole}</option>{roles.map(role => <option key={role.code} value={role.code}>{platformRoleName(words, role.code)}</option>)}</select></label>
