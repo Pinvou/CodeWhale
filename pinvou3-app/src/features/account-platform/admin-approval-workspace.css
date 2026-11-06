@@ -52,3 +52,5 @@
 @media(max-width:768px){.adm-approval-detail dl{grid-template-columns:1fr}}
 @media(max-width:768px){.adm-financial-repair{padding:16px}.adm-financial-repair form{grid-template-columns:1fr}}
 @media(max-width:360px){.adm-approval-toolbar label{min-width:100%}.adm-approval-tabs button{flex:1}}
+.adm-approval-execution-scope{margin:0;color:var(--adm-text);font-size:14px;line-height:1.6;overflow-wrap:anywhere}
+.adm-approval-execution-scope small,.adm-approval-workspace .adm-approval-status-code{display:block;margin-top:4px;color:var(--adm-muted);font-size:12px;line-height:1.5;overflow-wrap:anywhere}
