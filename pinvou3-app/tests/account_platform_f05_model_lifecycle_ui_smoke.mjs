@@ -88,8 +88,11 @@ try {
   });
   const fresh = async language => {
     errors.length = 0;
-    await page.goto(`http://127.0.0.1:${vite.httpServer.address().port}/tests/fixtures/account-platform-f05-model-lifecycle.html`);
-    await page.waitForFunction(() => window.f05Lifecycle?.ready && document.querySelector('textarea'));
+    // fixture 页经 vite dev 冷变换加载整条 app import 链：满载 runner 上首启
+    // 可超 puppeteer 默认 30s（2026-11-06 PR #1661 组合树实证，双 attempt 同
+    // 败），setup/ready 等待放宽到 60s。
+    await page.goto(`http://127.0.0.1:${vite.httpServer.address().port}/tests/fixtures/account-platform-f05-model-lifecycle.html`, { timeout: 60_000 });
+    await page.waitForFunction(() => window.f05Lifecycle?.ready && document.querySelector('textarea'), { timeout: 60_000 });
     await page.evaluate(async language => { window.f05Lifecycle.language = language; await window.f05Lifecycle.render(); }, language);
   };
   const shown = () => page.evaluate(() => document.body.textContent.includes(window.f05Lifecycle.copy().uiModelReplacement.title));
