@@ -17,10 +17,13 @@ function UserDetails({ client, userID, copy, language, route }) {
     return () => controller.abort();
   }, [client, userID, revision]);
   const date = value => value && Number.isFinite(Date.parse(value)) ? new Date(value).toLocaleString({ zh: 'zh-CN', en: 'en-US', ja: 'ja-JP' }[language]) : '—';
-  return <section className="adm-panel"><button onClick={() => route.navigate('users', { user_id: null })}>{words.backToDirectory}</button>
+  return <section className="adm-panel"><header className="adm-user-detail-head">
+    <button type="button" onClick={() => route.navigate('users', { user_id: null })}>{words.backToUserList}</button>
+    {profile && <h3>{profile.username || profile.display_name || profile.user_code}</h3>}
+  </header>
     {error && <p role="alert">{localizedAccountPlatformError(copy, error)}<button onClick={() => setRevision(value => value + 1)}>{copy.retry}</button></p>}
     {!profile && !error && <p role="status">{copy.loading}</p>}
-    {profile && <><h3>{profile.username || profile.display_name || profile.user_code}</h3><dl className="adm-user-details">{[[words.userID, profile.user_id], [copy.userManagement.exactCode, profile.user_code], [copy.accounts.status, accountLayoutCopy[language].statuses[profile.status] || profile.status], [words.createdAt, date(profile.created_at)], [words.lastSeen, date(profile.last_seen_at)]].map(([label, value]) => <React.Fragment key={label}><dt>{label}</dt><dd>{value || '—'}</dd></React.Fragment>)}</dl>
+    {profile && <><dl className="adm-user-details">{[[words.userID, profile.user_id], [copy.userManagement.exactCode, profile.user_code], [copy.accounts.status, accountLayoutCopy[language].statuses[profile.status] || profile.status], [words.createdAt, date(profile.created_at)], [words.lastSeen, date(profile.last_seen_at)]].map(([label, value]) => <React.Fragment key={label}><dt>{label}</dt><dd>{value || '—'}</dd></React.Fragment>)}</dl>
       {route.available.includes('roles') && <button onClick={() => route.navigate('roles', { role_user_id: userID, role_view: 'bindings' })}>{words.viewUserPlatformGrants}</button>}
       <h4>{words.memberships}</h4>
       {membershipError && <p role="alert">{localizedAccountPlatformError(copy, membershipError)}<button onClick={() => setRevision(value => value + 1)}>{copy.retry}</button></p>}

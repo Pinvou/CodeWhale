@@ -114,3 +114,7 @@ adminLayoutCopy.ja.userSearch = { submit: '検索', refresh: '検索結果を更
 Object.assign(adminLayoutCopy.zh, { userMembershipStatus: '成员状态', viewUserPlatformGrants: '查看该用户的平台授权' });
 Object.assign(adminLayoutCopy.en, { userMembershipStatus: 'Membership status', viewUserPlatformGrants: "View this user's platform grants" });
 Object.assign(adminLayoutCopy.ja, { userMembershipStatus: 'メンバー状態', viewUserPlatformGrants: 'ユーザーのプラットフォーム権限を表示' });
+
+Object.assign(adminLayoutCopy.zh, { userDetailsTitle: '用户详情', backToUserList: '返回用户列表' });
+Object.assign(adminLayoutCopy.en, { userDetailsTitle: 'User details', backToUserList: 'Back to user list' });
+Object.assign(adminLayoutCopy.ja, { userDetailsTitle: 'ユーザー詳細', backToUserList: 'ユーザー一覧に戻る' });

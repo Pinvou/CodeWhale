@@ -27,6 +27,12 @@ if (closureFeedback) {
   c.readClosureRecovery = actor => readClosureIntent(actor || c.user, `account-closure-retry:${otherID}`);
 }
 const userStatusRisk = new URLSearchParams(location.search).get('userStatusRisk') === '1';
+const userDetailHeader = new URLSearchParams(location.search).get('userDetailHeader') === '1';
+if (userDetailHeader) {
+  c.permissions = ['platform.users.read', 'platform.roles.read', 'platform.organizations.read'];
+  c.headerUser = { user_id: otherID, user_code: 'USR-1111-1111-1111-1111-DP', display_name: '用于验证用户详情标题和返回入口布局的测试用户名称', status: 'ACTIVE', created_at: '2026-10-01T00:00:00Z', updated_at: '2026-10-01T00:00:00Z' };
+  c.headerReadStatus = 200;
+}
 const userSearchTools = new URLSearchParams(location.search).get('userSearchTools') === '1';
 if (userSearchTools) {
   c.permissions = ['platform.users.read'];
@@ -179,6 +185,17 @@ globalThis.fetch = async (input, options = {}) => {
   if (url.endsWith('/v1/recharge/orders') && method === 'POST') { c.effects.add(call.key); const receipt = () => c.unknown ? json({ code: 'COMMAND_RESULT_UNKNOWN' }, 503) : json(order(), 201); if (c.delayCreate) return new Promise(resolve => { c.releaseCreate = () => resolve(receipt()); }); return receipt(); }
   if (url.endsWith('/v1/recharge/orders')) return json({ items: Array.from({ length: 6 }, (_, i) => order(i + 1)) });
   if (/\/v1\/recharge\/orders\/[^/?]+$/.test(url)) return json(order(Number(url.split('-').at(-1))));
+  if (userDetailHeader && method === 'GET') {
+    const requestURL = new URL(url, location.origin), pathname = requestURL.pathname;
+    if (pathname === `/api/admin/account/admin/v1/users/${otherID}`) return c.headerReadStatus === 200 ? json(c.headerUser) : json({ code: 'NOT_FOUND' }, c.headerReadStatus);
+    if (pathname === `/api/admin/account/admin/v1/users/${otherID}/memberships`) return json({ items: [{ organization_id: orgID, organization_name: '示例组织', membership_status: 'ACTIVE', roles: ['OWNER'], unit_admin_unit_ids: [] }] });
+    if (pathname === '/api/admin/account/admin/v1/users') {
+      const query = (requestURL.searchParams.get('q') || '').trim().toLowerCase();
+      const expectedCursor = 'eyJ1cGRhdGVkX2F0IjoiMjAyNi0xMC0wMVQwMDowMDowMFoiLCJ1c2VyX2lkIjoiMzMzMzMzMzMtMzMzMy00MzMzLTgzMzMtMzMzMzMzMzMzMzMzIn0';
+      if (requestURL.searchParams.get('cursor') && requestURL.searchParams.get('cursor') !== expectedCursor) return json({ code: 'INVALID_USER_FILTER' }, 400);
+      return json({ items: c.headerUser.display_name.includes(query) || c.headerUser.user_id === query ? [c.headerUser] : [], next_cursor: null });
+    }
+  }
   if (userSearchTools && method === 'GET' && new URL(url, location.origin).pathname === '/api/admin/account/admin/v1/users') {
     const query = (new URL(url, location.origin).searchParams.get('q') || '').trim().toLowerCase();
     const items = c.searchUsers.filter(user => user.username.includes(query) || user.user_id === query);
