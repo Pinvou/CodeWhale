@@ -62,7 +62,7 @@ export function AdminAccountClosureWorkspace({ client, me, language }) {
   const visible = state.client === client && state.userID === me.user_id && state.epoch === epoch ? state : { items: null, nextCursor: '', loading: true, error: null };
   const denied = visible.error?.status === 403 || visible.error?.code === 'PERMISSION_DENIED';
   const problem = denied ? closureCopy.listPermissionDenied : visible.error?.code === 'CLOSURE_RECOVERY_UNAVAILABLE' ? closureCopy.recoveryUnavailable : closureCopy.listUnavailable;
-  return <section className="adm-closure-directory" aria-busy={visible.loading}><h2>{closureCopy.title}</h2><button type="button" disabled={visible.loading} onClick={() => void load()}>{copy.refresh}</button>
+  return <section className="adm-closure-directory" aria-busy={visible.loading}><h2>{closureCopy.listTitle}</h2><p>{closureCopy.listLead}</p><button type="button" disabled={visible.loading} onClick={() => void load()}>{copy.refresh}</button>
     {visible.loading && <p role="status">{closureCopy.listLoading}</p>}
     {visible.error && <div className="adm-panel" role="alert"><p>{problem}</p><button type="button" onClick={() => void load()}>{copy.retry}</button></div>}
     {!visible.loading && !visible.error && visible.items?.length === 0 && <div className="adm-panel adm-empty" role="status">{closureCopy.listEmpty}</div>}

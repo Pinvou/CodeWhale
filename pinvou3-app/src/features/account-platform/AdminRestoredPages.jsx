@@ -31,7 +31,7 @@ export function AdminProductsPage({ client, me, copy, language, permissions, rou
 export function AdminOperationsPage({ client, me, copy, language, permissions, route, authorizationRefreshing, authorizationRefreshRef }) {
   const tabs = [
     ['policy', 'platform.registration-bonus.read', copy.operations.nav],
-    ['closures', 'platform.account-closures.read', accountClosureCopy[language].title],
+    ['closures', 'platform.account-closures.read', accountClosureCopy[language].listTitle],
     ['registration', 'platform.registrations.repair', copy.userManagement.registrationRepair],
     ['profile', 'platform.profile-changes.repair', copy.userManagement.profileRepair],
   ].filter(([, permission]) => permissions.includes(permission));

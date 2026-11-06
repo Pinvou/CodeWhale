@@ -158,6 +158,8 @@ export const accountClosureCopy = {
 };
 
 Object.assign(accountClosureCopy.zh, {
+  listTitle: '账号注销申请',
+  listLead: '查看注销申请的处理状态与阶段，包括账务结清和身份清理。',
   listLoading: '正在加载注销申请…',
   listEmpty: '当前页暂无注销申请',
   listUnavailable: '暂时无法加载注销申请，请重试。',
@@ -169,6 +171,8 @@ Object.assign(accountClosureCopy.zh, {
   stages: { CLOSURE_REQUESTED: '已申请注销', QUIESCING: '停止新业务', FINANCIAL_CLEARANCE: '账务结清', IDENTITY_CLEANUP: '身份清理', ANONYMIZED: '已匿名化', COMPLETED: '注销完成' },
 });
 Object.assign(accountClosureCopy.en, {
+  listTitle: 'Account closure requests',
+  listLead: 'View closure request status and stages, including financial clearance and identity cleanup.',
   listLoading: 'Loading account closure requests…',
   listEmpty: 'No account closure requests on this page',
   listUnavailable: 'Account closure requests could not be loaded. Please retry.',
@@ -180,6 +184,8 @@ Object.assign(accountClosureCopy.en, {
   stages: { CLOSURE_REQUESTED: 'Closure requested', QUIESCING: 'Stopping new activity', FINANCIAL_CLEARANCE: 'Financial clearance', IDENTITY_CLEANUP: 'Identity cleanup', ANONYMIZED: 'Anonymized', COMPLETED: 'Closure completed' },
 });
 Object.assign(accountClosureCopy.ja, {
+  listTitle: '退会申請',
+  listLead: '退会申請の処理状況と、会計精算や認証情報の削除などの段階を確認します。',
   listLoading: '退会申請を読み込んでいます…',
   listEmpty: 'このページに退会申請はありません',
   listUnavailable: '退会申請を読み込めませんでした。再試行してください。',
