@@ -952,9 +952,11 @@ impl BlockedSigpipeGuard {
         {
             // SAFETY: `zeroed` is valid for `sigset_t` (an array of
             // integer words) and both pointers below are local stack
-            // values; a failed `pthread_sigmask` simply leaves the
-            // process default disposition and the failure mode is the
-            // pre-guard one.
+            // values. A failed `pthread_sigmask` is not expected with
+            // these local sets; if it did fail, the write would run with
+            // the process default disposition (the pre-guard behavior)
+            // and the drop's restore would install the zeroed `previous`
+            // mask — an empty set, leaving this thread's signals unblocked.
             unsafe {
                 let mut blocked: libc::sigset_t = std::mem::zeroed();
                 let mut previous: libc::sigset_t = std::mem::zeroed();
@@ -3398,7 +3400,8 @@ impl ShellManager {
                 // a master-side description open — no EOF for the slave
                 // while the reader's clone is open too. A plain drop of the
                 // dup (the spawn-path close never touches this lane, and a
-                // stalled close releases it) still shows the child nothing;
+                // close whose delivery failed releases it) still shows the
+                // child nothing;
                 // an explicit `close_stdin` instead delivers the ^D bytes
                 // itself through the bounded worker and claims end-of-file
                 // only when that write really landed; the final master
