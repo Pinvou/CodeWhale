@@ -97,12 +97,44 @@ pub fn sanitize_for_strict(schema: &mut Value) {
 /// keywords at once, malformed union values), still go through the
 /// Responses-API flattening pass.
 pub fn sanitize_for_xai_parameters(parameters: &mut Value) -> Option<String> {
-    if root_union_is_all_object_branches(parameters) && union_branches_keep_required(parameters) {
+    if root_union_is_all_object_branches(parameters)
+        && union_branches_keep_required(parameters)
+        && oneof_branches_mutually_distinct(parameters)
+    {
         let dependent_note = drop_dependent_keywords(parameters);
         sanitize(parameters);
         return dependent_note;
     }
     sanitize_for_responses(parameters)
+}
+
+/// Exactly-one unions need pairwise-distinct object branches: two deep-equal
+/// branches make every matching instance match both (and every non-matching
+/// instance match neither), so the union cannot be satisfied by any argument.
+/// Branches can arrive already identical because an upstream pass has already
+/// pruned their `required` groups — the ToolRegistry registration path runs
+/// the general [`sanitize`] on every tool schema before the wire helpers see
+/// it (tools/registry.rs), and raw MCP payloads can ship the gutted shape
+/// directly too (review 5799828607: the keep-required guard then sees nothing
+/// left to prune and the identical bare branches pass through unsatisfiably).
+/// Only `oneOf` is affected; an `anyOf` with duplicate branches stays
+/// satisfiable ("at least one") and keeps the pass-through behavior. Distinct
+/// self-contained branches are unaffected.
+fn oneof_branches_mutually_distinct(schema: &Value) -> bool {
+    let Some(obj) = schema.as_object() else {
+        return true;
+    };
+    let Some(branches) = obj.get("oneOf").and_then(Value::as_array) else {
+        return true;
+    };
+    for (index, left) in branches.iter().enumerate() {
+        for right in branches.iter().skip(index + 1) {
+            if left == right {
+                return false;
+            }
+        }
+    }
+    true
 }
 
 /// Whether the schema's root is exactly a single `oneOf`/`anyOf` union whose
@@ -1697,6 +1729,65 @@ mod tests {
             validator.is_valid(&json!({"a": "x"})),
             "a valid instance of the original union must stay valid: {schema}"
         );
+    }
+
+    #[test]
+    fn xai_sanitize_flattens_oneof_whose_bare_branches_arrive_already_identical() {
+        // Registry-to-provider regression (review 5799828607): the ToolRegistry
+        // registration path runs the general sanitize on every tool schema
+        // BEFORE the wire helpers see it, so a shared-root-properties required
+        // union reaches this helper with the branch groups already pruned —
+        // the keep-required guard sees nothing left to prune, and two
+        // identical bare object branches passed through as an unsatisfiable
+        // exactly-one. Identical branches are unsatisfiable however they got
+        // that way, so the oneOf flattens; a satisfiable anyOf with duplicate
+        // branches keeps the pass-through behavior.
+        let mut registry_sanitized = json!({
+            "properties": {
+                "a": {"type": "string"},
+                "b": {"type": "string"}
+            },
+            "oneOf": [
+                {"type": "object", "properties": {}},
+                {"type": "object", "properties": {}}
+            ]
+        });
+        // Simulate the actual registry preprocessing, exactly as the
+        // registration path applies it (tools/registry.rs).
+        sanitize(&mut registry_sanitized);
+
+        let mut schema = registry_sanitized;
+        let note = sanitize_for_xai_parameters(&mut schema);
+
+        assert_eq!(schema["type"], "object");
+        assert!(
+            schema.get("oneOf").is_none() && schema.get("anyOf").is_none(),
+            "the identical-branch oneOf must not reach the wire: {schema}"
+        );
+        assert!(
+            schema["properties"].get("a").is_some() && schema["properties"].get("b").is_some(),
+            "the root's shared properties must stay usable after the fallback: {schema}"
+        );
+        assert_eq!(
+            note, None,
+            "bare branches carry no required groups, so the note is empty: {note:?}"
+        );
+
+        // The satisfiable twin: an anyOf with the same duplicate bare branches
+        // (nothing to prune, never exactly-one) still passes through.
+        let mut anyof_schema = json!({
+            "properties": {"a": {"type": "string"}},
+            "anyOf": [
+                {"type": "object", "properties": {}},
+                {"type": "object", "properties": {}}
+            ]
+        });
+        let anyof_note = sanitize_for_xai_parameters(&mut anyof_schema);
+        assert!(
+            anyof_schema.get("anyOf").is_some(),
+            "a satisfiable duplicate-branch anyOf keeps pass-through: {anyof_schema}"
+        );
+        assert_eq!(anyof_note, None);
     }
 
     #[test]
