@@ -1669,7 +1669,7 @@ pub(crate) fn subagent_thinking_label(thinking: SubAgentThinking) -> &'static st
 }
 
 #[derive(Debug, Clone)]
-struct SubAgentInput {
+pub(crate) struct SubAgentInput {
     text: String,
     interrupt: bool,
     /// Live "queued for the next round" counter shared with the manager.
@@ -6845,6 +6845,19 @@ impl SubAgentManager {
                 resumed.agent_id, resumed.model, agent_id
             ),
         };
+        // Mail accepted for the interrupted incarnation follows the resume:
+        // the queue-only receipt promised the owner session the mail survives
+        // a resume, but this re-dispatch runs under a NEW id and `followup` on
+        // the old id can only park further mail on the retained record — it
+        // can never deliver. Re-key the parked mailbox onto the resumed
+        // incarnation so the next followup drains it.
+        let parked = self.queued_mail.remove(&agent_id).unwrap_or_default();
+        if !parked.is_empty() {
+            self.queued_mail
+                .entry(resumed.agent_id.clone())
+                .or_default()
+                .extend(parked);
+        }
         self.resume_targets.insert(agent_id, resumed.agent_id);
         Ok(receipt)
     }
@@ -7112,10 +7125,39 @@ impl SubAgentManager {
         }
     }
 
+    /// Test helper: drop a child's parked mailbox so a scenario can verify the
+    /// retirement gate tracks the live queue instead of latching on history.
+    #[cfg(test)]
+    pub fn clear_test_queued_mail(&mut self, agent_id: &str) {
+        self.queued_mail.remove(agent_id);
+    }
+
+    /// Test helper: commit a terminal result through the production path
+    /// (`claim` → `finish_terminal_result`) so the counter and mailbox
+    /// bookkeeping behave exactly as a real completion would.
+    #[cfg(test)]
+    pub fn commit_test_terminal_result(&mut self, agent_id: &str, status: SubAgentStatus) {
+        let mut result = self.get_result(agent_id).expect("test agent");
+        result.status = status;
+        assert!(
+            self.finish_terminal_result(agent_id, result, true, false),
+            "test terminal commit must claim the running child"
+        );
+    }
+
+    /// Test helper: move an already-terminal child to a dead-end status,
+    /// modeling a terminal commit that no resume can undo.
+    #[cfg(test)]
+    pub fn mark_test_agent_failed(&mut self, agent_id: &str) {
+        let agent = self.agents.get_mut(agent_id).expect("test agent");
+        agent.status = SubAgentStatus::Failed("test dead end".to_string());
+        agent.input_tx = None;
+    }
+
     /// Test helper exposing the receiving side so delivery and provenance can
     /// be verified rather than inferred from a still-present sender handle.
     #[cfg(test)]
-    fn insert_test_running_agent_with_input(
+    pub(crate) fn insert_test_running_agent_with_input(
         &mut self,
         name: &str,
         workspace: &Path,
@@ -7230,6 +7272,54 @@ impl SubAgentManager {
             agent.task_handle = None;
         }
         (agent_id, handle)
+    }
+
+    /// Conservative retirement check, unlike UI/capacity counts: a timed-out
+    /// heartbeat does not establish that its task has stopped. Do not claim or
+    /// discard terminal delivery here; the actor checks its completion queue too.
+    /// Mail parked on non-running children (queue-only receipts) is accepted
+    /// work as well when a delivery path remains: it lives only in the
+    /// in-memory mailbox, so retirement must refuse until the owner session
+    /// drains it. Mail on a dead-end child (Completed/Failed/Cancelled/
+    /// BudgetExhausted) has no such path — `followup` refuses those statuses —
+    /// so it is undeliverable bookkeeping, not accepted work, and must not
+    /// refuse retirement forever.
+    pub(crate) fn has_live_work_for_session(&self, active_session_id: &str) -> bool {
+        self.agents.values().any(|agent| {
+            self.agent_is_owned_by_session(agent, active_session_id)
+                && (agent.status == SubAgentStatus::Running
+                    || agent
+                        .task_handle
+                        .as_ref()
+                        .is_some_and(|task| !task.is_finished()))
+        }) || self.has_queued_follow_ups_for_session(active_session_id)
+            || self.queued_mail.iter().any(|(agent_id, queue)| {
+                !queue.is_empty()
+                    && self.agent_id_is_owned_by_session(agent_id, active_session_id)
+                    && self
+                        .agents
+                        .get(agent_id)
+                        .is_some_and(|agent| self.can_still_deliver_mail(agent))
+            })
+    }
+
+    /// Whether any session-owned child still holds an unconsumed delivered
+    /// follow-up: the child is alive enough to consume it.
+    pub(crate) fn has_queued_follow_ups_for_session(&self, active_session_id: &str) -> bool {
+        self.pending_follow_ups.iter().any(|(agent_id, counter)| {
+            counter.load(std::sync::atomic::Ordering::Acquire) > 0
+                && self.agent_id_is_owned_by_session(agent_id, active_session_id)
+        })
+    }
+
+    /// Whether mail parked in the in-memory mailbox can still reach a child:
+    /// a running child drains it directly, and an interrupted child drains it
+    /// after a resume from a continuable checkpoint. A dead-end status has no
+    /// remaining delivery path.
+    fn can_still_deliver_mail(&self, agent: &SubAgent) -> bool {
+        agent.status == SubAgentStatus::Running
+            || matches!(&agent.status, SubAgentStatus::Interrupted(_)
+                if agent.checkpoint.as_ref().is_some_and(|cp| cp.continuable))
     }
 
     /// Count running agents.
@@ -8460,6 +8550,21 @@ impl SubAgentManager {
         agent.needs_input = result.needs_input.clone();
         if result.status != SubAgentStatus::Running {
             agent.input_tx = None;
+            // A terminal child can never consume delivered-but-unconsumed
+            // follow-ups: its input channel dies with the task. Drop the
+            // counter so the retirement gate does not refuse forever on
+            // bookkeeping no drain can ever clear.
+            if let Some(counter) = self.pending_follow_ups.remove(agent_id) {
+                let unconsumed = counter.load(std::sync::atomic::Ordering::Acquire);
+                if unconsumed > 0 {
+                    tracing::warn!(
+                        target: "subagent",
+                        agent_id = %agent_id,
+                        unconsumed,
+                        "sub-agent went terminal with delivered follow-ups it never consumed"
+                    );
+                }
+            }
         }
         agent.completion_claimed = false;
         agent.task_handle = None;

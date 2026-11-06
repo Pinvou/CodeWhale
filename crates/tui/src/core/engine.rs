@@ -977,6 +977,8 @@ impl Drop for ReservedSteer {
 #[derive(Clone)]
 pub struct EngineHandle {
     run_completion: Option<tokio::sync::watch::Receiver<Option<EngineRunCompletion>>>,
+    // Process-local cache retirement, not a model/user/wire operation.
+    idle_retirement: Option<mpsc::Sender<idle_shutdown::IdleRetirement>>,
     /// Send operations to the engine
     pub tx_op: mpsc::Sender<Op>,
     /// Receive events from the engine
@@ -1274,6 +1276,7 @@ pub struct Engine {
     active_route_declared_limits: Option<codewhale_config::route::RouteLimits>,
     active_route_capabilities: codewhale_config::route::RouteCapabilities,
     rx_op: mpsc::Receiver<Op>,
+    rx_idle_retirement: mpsc::Receiver<idle_shutdown::IdleRetirement>,
     live_runtime_authority: Arc<StdMutex<LiveRuntimeAuthorityState>>,
     compaction_cancellation: Arc<StdMutex<CompactionCancellationState>>,
     /// Clone of the op-channel sender, so the engine can self-dispatch ops
@@ -1574,6 +1577,7 @@ const SHELL_WAKE_POLL_MS: u64 = 750;
 
 enum EngineRunInput {
     Operation(Box<Op>),
+    IdleRetirement(idle_shutdown::IdleRetirement),
     SubAgentCompletion(SubAgentCompletion),
     /// A background shell job finished while the engine sat idle with an
     /// active goal. Shell completion is pull-only (no channel), so without
@@ -2238,6 +2242,10 @@ impl Engine {
         }
 
         let (tx_op, rx_op) = mpsc::channel(ENGINE_OP_CHANNEL_CAPACITY);
+        // Capacity 1 keeps at most one retirement proposal in flight: a second
+        // concurrent host blocks in `send` until this boundary dequeues the
+        // first, which is what serializes proposals. Do not raise it.
+        let (idle_retirement, rx_idle_retirement) = mpsc::channel(1);
         let (tx_event, rx_event) = mpsc::channel(256);
         let (tx_approval, rx_approval) = mpsc::channel(64);
         let (tx_user_input, rx_user_input) = mpsc::channel(32);
@@ -2517,6 +2525,7 @@ impl Engine {
             active_route_declared_limits,
             active_route_capabilities: codewhale_config::route::RouteCapabilities::default(),
             rx_op,
+            rx_idle_retirement,
             live_runtime_authority: Arc::clone(&live_runtime_authority),
             compaction_cancellation: Arc::clone(&compaction_cancellation),
             tx_op: tx_op.clone(),
@@ -2560,6 +2569,7 @@ impl Engine {
         };
         let handle = EngineHandle {
             run_completion: None,
+            idle_retirement: Some(idle_retirement),
             tx_op,
             rx_event: Arc::new(RwLock::new(rx_event)),
             cancel_token: shared_cancel_token,
@@ -3180,11 +3190,7 @@ impl Engine {
                     // The synthetic token sits behind every operation that was
                     // already queued when it was scheduled. Drain FIFO through
                     // that token before accepting an idle child completion.
-                    return self
-                        .rx_op
-                        .recv()
-                        .await
-                        .map(|op| EngineRunInput::Operation(Box::new(op)));
+                    return self.next_operation_or_retirement().await;
                 }
 
                 if let Some(ready_at) = ready_at {
@@ -3200,6 +3206,9 @@ impl Engine {
                         // cancels this exact record in its normal handler.
                         op = self.rx_op.recv() => {
                             return op.map(|op| EngineRunInput::Operation(Box::new(op)));
+                        }
+                        Some(request) = self.rx_idle_retirement.recv() => {
+                            return Some(EngineRunInput::IdleRetirement(request));
                         }
                         () = tokio::time::sleep(ready_at.saturating_duration_since(Instant::now())) => {
                             if let Some(scheduled) = self.scheduled_goal_continuation.as_mut()
@@ -3218,11 +3227,7 @@ impl Engine {
                 // A record that is ready but could not enter the full mailbox
                 // waits for one queued control. The next loop pass retries the
                 // same coalesced token, so there is no spin or duplicate turn.
-                return self
-                    .rx_op
-                    .recv()
-                    .await
-                    .map(|op| EngineRunInput::Operation(Box::new(op)));
+                return self.next_operation_or_retirement().await;
             } else {
                 // A per-message restriction is removed from
                 // `active_turn_tool_security` after the turn returns, while
@@ -3237,6 +3242,9 @@ impl Engine {
                 tokio::select! {
                     op = self.rx_op.recv() => {
                         return op.map(|op| EngineRunInput::Operation(Box::new(op)));
+                    }
+                    Some(request) = self.rx_idle_retirement.recv() => {
+                        return Some(EngineRunInput::IdleRetirement(request));
                     }
                     completion = self.rx_subagent_completion.recv(), if automatic_followups_allowed => {
                         return completion.map(EngineRunInput::SubAgentCompletion);
@@ -3433,6 +3441,31 @@ impl Engine {
             }
 
             match input {
+                EngineRunInput::IdleRetirement(request) => {
+                    if self.accept_idle_shutdown(request).await {
+                        // Committed. Anything arriving past the handshake is a
+                        // host contract violation: every send had already
+                        // returned `Ok`, and the engine drops these with it, so
+                        // surface the loss instead of dropping silently.
+                        // `reserve()` permits cannot be observed here — the
+                        // host contract must exclude them before this point.
+                        // The breakdown names which contract edge leaked.
+                        let residual = self.count_residual_inputs();
+                        if residual > 0 {
+                            tracing::warn!(
+                                residual,
+                                ops = self.rx_op.len(),
+                                subagent_completions = self.rx_subagent_completion.len(),
+                                steers = self.rx_steer.len(),
+                                pending_steers = self.pending_steers.len(),
+                                approvals = self.rx_approval.len(),
+                                user_inputs = self.rx_user_input.len(),
+                                "engine retired with residual inputs queued after the retirement commit"
+                            );
+                        }
+                        break;
+                    }
+                }
                 EngineRunInput::SubAgentCompletion(completion) => {
                     self.handle_idle_subagent_completion(completion).await;
                 }
@@ -4206,6 +4239,22 @@ impl Engine {
             manager.flush_pending_persist();
         }
 
+        self.shutdown_mcp_pool().await;
+    }
+
+    async fn shutdown_mcp_pool(&mut self) {
+        // Boot owns the same pool in a background task. Drain it before the
+        // shutdown pass so a late handshake cannot insert a live transport
+        // after shutdown_all (or outlive the engine's op-channel closure).
+        // Scope note: this covers the current-generation boot only. A boot
+        // already invalidated by a workspace change holds only the dropped
+        // pool — nothing it inserts later is reachable from here, and its
+        // transports die with that task.
+        if self.mcp_boot_in_flight {
+            // The host may already have stopped consuming UI events. Join
+            // the worker without draining/emitting its progress notifications.
+            self.join_mcp_boot().await;
+        }
         // #420: graceful MCP shutdown — send SIGTERM and give stdio servers
         // a brief window to exit before drop fires SIGKILL via kill_on_drop.
         // Best-effort: pool may not exist (no MCP configured) and the lock
@@ -8065,7 +8114,7 @@ impl Engine {
         }
     }
 
-    async fn wait_for_mcp_boot(&mut self) {
+    async fn join_mcp_boot(&mut self) {
         if let Some(rx) = self.mcp_boot_done.as_mut() {
             while !*rx.borrow() {
                 if rx.changed().await.is_err() {
@@ -8073,6 +8122,10 @@ impl Engine {
                 }
             }
         }
+    }
+
+    async fn wait_for_mcp_boot(&mut self) {
+        self.join_mcp_boot().await;
         self.drain_mcp_boot_updates().await;
     }
 
@@ -9301,6 +9354,7 @@ pub(crate) fn mock_engine_handle() -> MockEngineHandle {
     steer_control_state.begin_turn();
     let handle = EngineHandle {
         run_completion: None,
+        idle_retirement: None,
         tx_op,
         rx_event: Arc::new(RwLock::new(rx_event)),
         cancel_token: shared_cancel_token,
@@ -9636,6 +9690,7 @@ impl SubAgentWiring {
 mod approval;
 mod context;
 mod handle;
+mod idle_shutdown;
 mod run_completion;
 pub use run_completion::EngineRunCompletion;
 pub mod preview;
