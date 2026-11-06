@@ -9,7 +9,7 @@ import (
 	"github.com/google/uuid"
 )
 
-func TestProductTestAdmissionCandidatesPostgres(t *testing.T) {
+func testActiveProviderAdmissionCandidates(t *testing.T) {
 	r, ctx := retainedFinanceRepository(t)
 	actor := uuid.New()
 	capabilities := payment.Capabilities{ProviderID: "provider", Version: "v2", Channels: []string{" alipay "}}
@@ -64,27 +64,51 @@ func TestProductTestAdmissionCandidatesPostgres(t *testing.T) {
 		t.Fatalf("limit did not preserve FIFO: status=%q source=%q", status, source)
 	}
 
-	retainedFinanceOwnerExec(t, r, ctx, `CREATE FUNCTION fixture_fail_admission_evidence() RETURNS trigger LANGUAGE plpgsql AS $$
- BEGIN RAISE EXCEPTION 'controlled evidence write failure'; END $$;
+	if _, err := retainedFinanceOwnerExec(t, r, ctx, `CREATE SEQUENCE fixture_admission_evidence_attempts;
+ GRANT USAGE,SELECT ON SEQUENCE fixture_admission_evidence_attempts TO billing_service;
+ CREATE FUNCTION fixture_fail_admission_evidence() RETURNS trigger LANGUAGE plpgsql AS $$
+ BEGIN
+   PERFORM nextval('fixture_admission_evidence_attempts');
+   RAISE EXCEPTION 'controlled evidence write failure';
+ END $$;
  CREATE TRIGGER fixture_fail_admission_evidence BEFORE INSERT ON product_admission_evidence
- FOR EACH ROW EXECUTE FUNCTION fixture_fail_admission_evidence()`)
+ FOR EACH ROW EXECUTE FUNCTION fixture_fail_admission_evidence()`); err != nil {
+		t.Fatal(err)
+	}
 	if n, err := r.VerifyPendingTestProductAdmissions(ctx, capabilities, time.Hour, 20); err != nil || n != 0 {
 		t.Fatalf("failed completion reported success: completed=%d err=%v", n, err)
 	}
 	if status, source := state(second); status != "PENDING" || source != "" {
 		t.Fatalf("failed completion changed facts: status=%q source=%q", status, source)
 	}
-	retainedFinanceOwnerExec(t, r, ctx, `DROP TRIGGER fixture_fail_admission_evidence ON product_admission_evidence`)
-
 	workerCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		NewProductAdmissionVerificationWorker(r, capabilities, time.Hour, time.Hour).Run(workerCtx)
+		NewProductAdmissionVerificationWorker(r, capabilities, 20*time.Millisecond, time.Hour).Run(workerCtx)
 	}()
 	defer func() { cancel(); <-done }()
 	ticker := time.NewTicker(10 * time.Millisecond)
 	defer ticker.Stop()
+	// The fixture sequence survives rollback. Observe a failed attempt by the
+	// running worker before removing the fault and waiting for its next tick.
+	for {
+		var attempts int64
+		if err := r.pool.QueryRow(workerCtx, `SELECT last_value FROM fixture_admission_evidence_attempts`).Scan(&attempts); err != nil {
+			t.Fatal(err)
+		}
+		if attempts >= 2 {
+			break
+		}
+		select {
+		case <-ticker.C:
+		case <-workerCtx.Done():
+			t.Fatal("worker did not reach the controlled completion failure")
+		}
+	}
+	if _, err := retainedFinanceOwnerExec(t, r, ctx, `DROP TRIGGER fixture_fail_admission_evidence ON product_admission_evidence`); err != nil {
+		t.Fatal(err)
+	}
 	for {
 		if status, source := state(second); status == "VERIFIED" && source == "provider/v2" {
 			break

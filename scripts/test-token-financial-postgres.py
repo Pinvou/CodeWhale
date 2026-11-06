@@ -210,7 +210,6 @@ RETAINED_REQUIRED = {
     "TestLatePaymentScheduleCommandReplayPostgres",
     "TestReconciliationFairRetryRuntimePostgres",
     "TestProductResumeDefaultProviderPostgres",
-    "TestProductTestAdmissionCandidatesPostgres",
     "TestProductAdmissionRetirementBindingPostgres",
     "TestProductManualAdmissionPostgres",
     "TestExpirePendingManualProductAdmissionsReleasesFingerprintSlot",
@@ -240,7 +239,6 @@ RETAINED_REQUIRED = {
 # These exact roots are named leaves. Every other retained root must still
 # produce completed child-case evidence, not just a parent PASS.
 BILLING_LEAF_REQUIRED = {
-    "TestProductTestAdmissionCandidatesPostgres",
     "TestExpirePendingManualProductAdmissionsReleasesFingerprintSlot",
     "TestProductAdmissionMaterialStorePostgres",
     "TestProductAdmissionMaterialPurgePostgres",
@@ -269,6 +267,7 @@ BILLING_LEAF_REQUIRED = {
 }
 BILLING_CHILD_REQUIRED = RETAINED_REQUIRED - BILLING_LEAF_REQUIRED
 EXACT_REQUIRED_CHILDREN = {
+    "TestRechargeProductCommandAtomicityPostgres": {"active-provider-admission-candidate-progress"},
     "TestProductManualAdmissionPostgres": {
         "two-explicit-humans-first-publish-and-immutable-replay",
         "runtime-cannot-rewrite-frozen-manual-facts",
