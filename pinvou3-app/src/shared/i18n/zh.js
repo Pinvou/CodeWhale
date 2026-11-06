@@ -1499,6 +1499,7 @@ dictZh["uiTeamRelay"] = {
     "team_has_open_work": "团队仍有未结束的工作，全部结束后才能解散。",
     "revision_conflict": "这项工作刚刚发生变化，已刷新，请确认后重试。",
     "action_not_allowed": "当前接力状态不允许执行此操作。",
+    "self_service_enrollment_disabled": "团队接力服务尚未开放账号登录，请联系服务管理员启用后重试。",
     "attachment_too_large": "文件超过 20 MiB 限制。",
     "attachment_type_not_allowed": "不支持该文件类型。",
     "credential_store_failed": "无法安全访问本机凭据，请检查系统凭据存储。",
