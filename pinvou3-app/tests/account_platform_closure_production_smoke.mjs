@@ -6,6 +6,7 @@ import path from 'node:path';
 import puppeteer from './helpers/puppeteer-fixture.mjs';
 import { accountClosureCopy } from '../src/shared/account-closure-i18n.js';
 import { financeCopy } from '../src/shared/finance-i18n.js';
+import { accountCenterCopy } from '../src/shared/account-center-i18n.js';
 import { accountClosedGrantCopy } from '../src/shared/account-closed-grants-i18n.js';
 import { organizationCopy } from '../src/shared/organization-i18n.js';
 
@@ -105,11 +106,13 @@ const origin = `http://127.0.0.1:${server.address().port}`;
 const accountURL = () => `${origin}/account.html?section=${mode.startsWith('org') ? 'myOrganization' : 'accountSettings'}`;
 const browser = await puppeteer.launch({ executablePath: browserPath, headless: true, args: ['--no-sandbox'] });
 let passed = 0;
+const openBilling = async page => {
+  if (!mode.startsWith('org')) return;
+  await page.waitForSelector('[data-org-section=billing]');
+  if (await page.$eval('[data-org-section=billing]', node => node.getAttribute('aria-selected') !== 'true')) await page.click('[data-org-section=billing]');
+};
 const click = async (page, label) => {
-  if (mode.startsWith('org')) {
-    const billing = await page.$('[data-org-section=billing]');
-    if (billing) await billing.click();
-  }
+  await openBilling(page);
   try { await page.waitForFunction(text => [...document.querySelectorAll('button')].some(button => button.textContent === text && !button.disabled), { timeout: 5000 }, label); }
   catch (error) { console.log('CONTROLLED_FIXTURE_PAGE', await page.evaluate(() => document.body.innerText)); throw error; }
   await page.evaluate(text => [...document.querySelectorAll('button')].find(button => button.textContent === text).click(), label);
@@ -206,14 +209,14 @@ try {
     const orgPage = await browser.newPage();
     await orgPage.evaluateOnNewDocument(() => localStorage.setItem('pinvou.account.language', 'en'));
     orgPage.on('dialog', dialog => dialog.accept());
-    await orgPage.goto(accountURL(), { waitUntil: 'networkidle0' });
+    await orgPage.goto(accountURL(), { waitUntil: 'networkidle0' }); await openBilling(orgPage);
     if (orgMode !== 'org-single') {
       await orgPage.waitForSelector('select[multiple]');
       await orgPage.select('select[multiple]', grantID);
     }
     await click(orgPage, orgMode !== 'org-single' ? accountClosedGrantCopy.en.batch : accountClosedGrantCopy.en.single);
     await orgPage.waitForFunction(text => document.body.textContent.includes(text), {}, organizationCopy.en.unknown);
-    await orgPage.reload({ waitUntil: 'networkidle0' });
+    await orgPage.reload({ waitUntil: 'networkidle0' }); await openBilling(orgPage);
     assert.equal(writes.length, 1); assert.equal(effects, 1);
     // The list now has no eligible grants; the original pending operation remains usable.
     await click(orgPage, organizationCopy.en.retry);
@@ -229,7 +232,7 @@ try {
     mode = 'org-batch-items'; actor = actorA; readOnly = false; effects = 0; writes = []; csrf = 'csrf-initial';
     const mixedPage = await browser.newPage();
     await mixedPage.evaluateOnNewDocument(language => localStorage.setItem('pinvou.account.language', language), locale);
-    await mixedPage.goto(accountURL(), { waitUntil: 'networkidle0' });
+    await mixedPage.goto(accountURL(), { waitUntil: 'networkidle0' }); await openBilling(mixedPage);
     await mixedPage.waitForSelector('select[multiple]');
     await mixedPage.select('select[multiple]', grantID, actorB, closureID);
     await click(mixedPage, accountClosedGrantCopy[locale].batch);
@@ -238,7 +241,7 @@ try {
     assert.equal(originalProof.length, 1); assert.equal(writes.length, 1); assert.equal(effects, 1);
     const retained = JSON.parse(originalProof[0][1]);
     assert.deepEqual(retained.facts.grants, [grantID, actorB, closureID]); assert.equal(retained.key, writes[0].key);
-    await mixedPage.reload({ waitUntil: 'networkidle0' });
+    await mixedPage.reload({ waitUntil: 'networkidle0' }); await openBilling(mixedPage);
     assert.equal(writes.length, 1, 'reload does not replay a partially unconfirmed batch');
     assert.equal(await mixedPage.$$eval('select[multiple] option', nodes => nodes.length), 0, 'no current eligible target is needed to recover the original receipt');
     assert.deepEqual(await mixedPage.evaluate(() => Object.entries(document.defaultView.sessionStorage).filter(([key]) => key.startsWith('pinvou.closure.intent.v1:'))), originalProof);
@@ -334,7 +337,7 @@ try {
         return original.call(this, key, value);
       };
     });
-    await blockedPage.goto(accountURL(), { waitUntil: 'networkidle0' });
+    await blockedPage.goto(accountURL(), { waitUntil: 'networkidle0' }); await openBilling(blockedPage);
     if (orgMode === 'org-batch') { await blockedPage.waitForSelector('select[multiple]'); await blockedPage.select('select[multiple]', grantID); }
     const label = orgMode === 'org-batch' ? accountClosedGrantCopy.en.batch : accountClosedGrantCopy.en.single;
     await click(blockedPage, label);
@@ -350,15 +353,17 @@ try {
   mode = 'org-single'; actor = actorA; readOnly = false; effects = 0; writes = []; csrf = 'csrf-initial'; grantExpiry = '1970-01-01T00:00:00Z';
   const expiryPage = await browser.newPage();
   await expiryPage.evaluateOnNewDocument(() => localStorage.setItem('pinvou.account.language', 'en'));
-  await expiryPage.goto(accountURL(), { waitUntil: 'networkidle0' });
+  await expiryPage.goto(accountURL(), { waitUntil: 'networkidle0' }); await openBilling(expiryPage);
   assert.equal(await expiryPage.evaluate(text => [...document.querySelectorAll('button')].some(button => button.textContent === text), accountClosedGrantCopy.en.single), false);
-  assert.equal(await expiryPage.evaluate(text => [...document.querySelectorAll('button')].find(button => button.textContent === text)?.disabled, accountClosedGrantCopy.en.batch), true);
+  assert.equal(await expiryPage.evaluate(text => [...document.querySelectorAll('button')].filter(button => button.textContent === text).length, accountClosedGrantCopy.en.batch), 0);
+  assert.equal(await expiryPage.$eval('[data-org-action=closed-grant-reclaim-batch].ap-empty-state h4', node => node.textContent), accountClosedGrantCopy.en.batch);
+  assert.equal(await expiryPage.$eval('[data-org-action=closed-grant-reclaim-batch].ap-empty-state [role=status]', node => node.textContent), accountCenterCopy.en.noReclaim);
   assert.equal(writes.length, 0);
-  grantExpiry = '2030-01-01T00:00:00Z'; await expiryPage.reload({ waitUntil: 'networkidle0' });
+  grantExpiry = '2030-01-01T00:00:00Z'; await expiryPage.reload({ waitUntil: 'networkidle0' }); await openBilling(expiryPage);
   await click(expiryPage, accountClosedGrantCopy.en.single);
   await expiryPage.waitForFunction(text => document.body.textContent.includes(text), {}, organizationCopy.en.unknown);
   const retainedProof = await expiryPage.evaluate(() => Object.entries(document.defaultView.sessionStorage));
-  grantExpiry = '1970-01-01T00:00:00Z'; await expiryPage.reload({ waitUntil: 'networkidle0' });
+  grantExpiry = '1970-01-01T00:00:00Z'; await expiryPage.reload({ waitUntil: 'networkidle0' }); await openBilling(expiryPage);
   assert.equal(writes.length, 1); assert.deepEqual(await expiryPage.evaluate(() => Object.entries(document.defaultView.sessionStorage)), retainedProof);
   await click(expiryPage, organizationCopy.en.retry);
   await expiryPage.waitForFunction(text => document.body.textContent.includes(text), {}, organizationCopy.en.unknown);
