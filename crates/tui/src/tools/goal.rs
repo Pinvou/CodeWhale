@@ -1992,4 +1992,38 @@ mod tests {
         assert_eq!(state.time_used_seconds, 0);
         assert_eq!(state.continuation_count, 0);
     }
+
+    #[test]
+    fn strict_mode_fails_the_update_goal_tool_closed() {
+        // `update_goal` keeps only `status` in strict mode while every
+        // status value runtime-requires a sibling parameter the schema
+        // marks optional (`execute` demands `evidence`/`verification` for
+        // `complete`, `blocker` for `blocked`, `verification` for
+        // `not_achieved`, `advisory` for `advisory`). The strict pipeline
+        // fails the tool closed by name (`STRICT_UNUSABLE_TOOLS`) so it
+        // ships unchanged, non-strict, and usable. This census test feeds
+        // the real schema through the pipeline so the two cannot drift.
+        let tool = UpdateGoalTool::new(new_shared_goal_state());
+        let schema = tool.input_schema();
+        assert_eq!(schema["required"], json!(["status"]));
+        let mut tools = vec![crate::models::Tool {
+            tool_type: None,
+            name: tool.name().to_string(),
+            description: tool.description().to_string(),
+            input_schema: schema.clone(),
+            allowed_callers: None,
+            defer_loading: None,
+            input_examples: None,
+            strict: None,
+            cache_control: None,
+        }];
+
+        assert!(
+            !crate::tools::schema_sanitize::prepare_tools_for_strict_mode(&mut tools),
+            "update_goal must fail closed, not ship strict with only `status`"
+        );
+        assert_eq!(tools[0].strict, None);
+        assert_eq!(tools[0].input_schema, schema);
+        assert_eq!(tools[0].description, tool.description());
+    }
 }
