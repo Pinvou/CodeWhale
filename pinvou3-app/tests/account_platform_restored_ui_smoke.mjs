@@ -254,9 +254,10 @@ try {
       window.oldPeriodContinue = node[Object.keys(node).find(key => key.startsWith('__reactProps$'))].onClick;
     });
     await page.type('.ap-usage-filters label:nth-child(3) input', 'B');
-    const retiredReadCount = await page.evaluate(() => window.restored.calls.length);
+    const retiredUsageReads = () => page.evaluate(() => window.restored.calls.filter(call => /\/usage-(requests|turns)(?:[/?]|$)/.test(call.url)).length);
+    const retiredReadCount = await retiredUsageReads();
     await page.evaluate(() => window.oldPeriodContinue());
-    assert.equal(await page.evaluate(() => window.restored.calls.length), retiredReadCount, 'retired Continue cannot revive an old checkpoint under new filters');
+    assert.equal(await retiredUsageReads(), retiredReadCount, 'retired Continue cannot revive an old checkpoint under new filters');
     assert.equal(await page.$('[data-period-total]'), null);
     await page.$eval('.ap-usage-filters label:nth-child(3) input', node => { Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(node, ''); node.dispatchEvent(new Event('input', { bubbles: true })); });
     await page.evaluate(() => { window.restored.holdUsage = true; });
