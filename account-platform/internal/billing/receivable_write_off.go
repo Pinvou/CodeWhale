@@ -293,9 +293,21 @@ func (r *PostgresRepository) ApplyReceivableWriteOff(ctx context.Context, input 
 	if err := receivableWriteOffExecutionActivation(ctx, tx, input, r.now()); err != nil {
 		return ReceivableWriteOffResult{}, err
 	}
+	// Match recharge's wallet-first lock order before reading the frozen facts
+	// and taking the receivable write lock. Keep result-first replay above it.
+	var lockedWalletID uuid.UUID
+	err = tx.QueryRow(ctx, `SELECT wallet.id FROM receivables receivable
+ JOIN wallets wallet ON wallet.id=receivable.wallet_id WHERE receivable.id=$1 FOR UPDATE OF wallet`, input.Command.ReceivableID).
+		Scan(&lockedWalletID)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return ReceivableWriteOffResult{}, err
+	}
 	plan, err := receivableWriteOffPlanFrom(ctx, tx, input.Command, input.PolicyVersion, input.SchemaVersion, input.ActivationVersion)
 	if err != nil {
 		return ReceivableWriteOffResult{}, err
+	}
+	if plan.WalletID != lockedWalletID {
+		return ReceivableWriteOffResult{}, ErrApprovalSnapshotMismatch
 	}
 	if mismatch := receivableWriteOffFrozenMismatch(plan, input.Command, input.Frozen); mismatch != "" {
 		return ReceivableWriteOffResult{}, wrapSnapshotMismatch(mismatch)

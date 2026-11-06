@@ -218,6 +218,7 @@ RETAINED_REQUIRED = {
     "TestProductAdmissionMaterialHTTPPostgres",
     "TestNegativeAdjustmentMemberBucketConservationPostgres",
     "TestRechargeProductCommandAtomicityPostgres",
+    "TestReceivableWriteOffRechargeLockOrderPostgres",
     "TestOrganizationChargebackDeletionEvidencePostgres",
     "TestPaymentInstructionProjectionPostgres",
     "TestPersonalZeroBudgetHoldReleasePostgres",
@@ -239,6 +240,7 @@ RETAINED_REQUIRED = {
 # These exact roots are named leaves. Every other retained root must still
 # produce completed child-case evidence, not just a parent PASS.
 BILLING_LEAF_REQUIRED = {
+    "TestReceivableWriteOffRechargeLockOrderPostgres",
     "TestExpirePendingManualProductAdmissionsReleasesFingerprintSlot",
     "TestProductAdmissionMaterialStorePostgres",
     "TestProductAdmissionMaterialPurgePostgres",
