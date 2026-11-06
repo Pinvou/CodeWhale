@@ -61,7 +61,8 @@ globalThis.fetch = async (input, options = {}) => {
       if (c.holdHistory) return new Promise(resolve => { c.historySignal = options.signal; c.releaseHistory = () => resolve(result()); });
       return result();
     }
-    if (/\/recharge\/orders\/[^/?]+$/.test(url)) return json({ ...order(Number(url.split('-').at(-1))), created_at: undefined, beneficiary_organization_id: orgID, channel: 'ALIPAY', qr_data: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aNbQAAAAASUVORK5CYII=' });
+    if (/\/recharge\/orders\/[^/?]+$/.test(url) && c.orgOrderReadStatus) return json({ code: 'UPSTREAM_UNAVAILABLE' }, c.orgOrderReadStatus);
+    if (/\/recharge\/orders\/[^/?]+$/.test(url)) { const value = { ...order(Number(url.split('-').at(-1))), ...(c.detailPaid ? { status: 'PAID', fulfillment_status: 'CREDITED' } : {}), created_at: undefined, beneficiary_organization_id: orgID, channel: 'ALIPAY', qr_data: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aNbQAAAAASUVORK5CYII=' }; if (c.holdOrderDetail) return new Promise(resolve => { c.releaseOrderDetail = () => resolve(json(value)); }); return json(value); }
 
     if (url.endsWith('/model-policy')) return json({ organization_id: orgID, version: 1, authorization_version: 1, mode: 'ALLOW_ALL', model_ids: [] });
   }
@@ -114,10 +115,10 @@ globalThis.fetch = async (input, options = {}) => {
   if (url.endsWith('/v1/payment-capabilities')) return json({});
   if (url.endsWith('/v1/me/entitlement-packages')) return json({ items: packages });
   if (url.endsWith('/v1/me/profile-change-requests') && method === 'POST') return json({ code: 'USERNAME_ALREADY_REGISTERED' }, 409);
-  if (/\/v1\/recharge\/orders\/[^/?]+$/.test(url) && c.orderReadFail) return json({ code: 'UPSTREAM_UNAVAILABLE' }, 503);
+  if (/\/v1\/recharge\/orders\/[^/?]+$/.test(url) && c.orderReadFail) return json({ code: 'UPSTREAM_UNAVAILABLE' }, c.orderReadStatus || 503);
   if (url.endsWith('/v1/recharge/orders') && method === 'POST') { c.effects.add(call.key); const receipt = () => c.unknown ? json({ code: 'COMMAND_RESULT_UNKNOWN' }, 503) : json(order(), 201); if (c.delayCreate) return new Promise(resolve => { c.releaseCreate = () => resolve(receipt()); }); return receipt(); }
   if (url.endsWith('/v1/recharge/orders')) return json({ items: Array.from({ length: 6 }, (_, i) => order(i + 1)) });
-  if (/\/v1\/recharge\/orders\/[^/?]+$/.test(url)) return json(order(Number(url.split('-').at(-1))));
+  if (/\/v1\/recharge\/orders\/[^/?]+$/.test(url)) { const value = order(Number(url.split('-').at(-1))); if (c.holdOrderDetail) return new Promise(resolve => { c.releaseOrderDetail = () => resolve(json(value)); }); return json(value); }
   if (url.includes('/admin/v1/user-code-lookups/')) {
     const code = decodeURIComponent(url.split('/').at(-1)).replaceAll('-', '').toUpperCase();
     return code === 'USR0123456789ABCDEFMV' ? json({ user_id: otherID, username: 'coded-user', user_code: 'USR-0123-4567-89AB-CDEF-MV', status: 'ACTIVE' }) : json({ code: 'NOT_FOUND' }, 404);

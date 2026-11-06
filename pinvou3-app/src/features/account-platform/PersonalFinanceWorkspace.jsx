@@ -23,6 +23,7 @@ export function PersonalFinanceWorkspace({ client, me, language, onPaid, present
   const [statement, setStatement] = useState('');
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
+  const [feedbackSource, setFeedbackSource] = useState('workspace');
   const [busy, setBusy] = useState(false);
   const [unknown, setUnknown] = useState(false);
   const [recoveryBlocked, setRecoveryBlocked] = useState(false);
@@ -44,6 +45,12 @@ export function PersonalFinanceWorkspace({ client, me, language, onPaid, present
   const canManage = hasPermission(me, 'personal.recharge.manage');
   const owner = personalRechargeOwner(me);
   const sessionEpoch = client.financeSessionEpoch || 0;
+  const presentationScope = useRef(null);
+  const priorPresentation = presentationScope.current;
+  if (!priorPresentation || priorPresentation.client !== client || priorPresentation.owner !== owner || priorPresentation.epoch !== sessionEpoch || priorPresentation.authorization !== me.personal_authorization_version) {
+    presentationScope.current = { client, owner, epoch: sessionEpoch, authorization: me.personal_authorization_version, key: (priorPresentation?.key || 0) + 1 };
+  }
+
   // Render-time facts fence an old dialog even before identity cleanup effects.
   currentView.current = { client, owner, sessionEpoch, order, canRead, canManage, busy, unknown, onPaid, orders: data?.orders || [] };
   const cancelClose = useCallback(expected => {
@@ -137,11 +144,11 @@ export function PersonalFinanceWorkspace({ client, me, language, onPaid, present
   useEffect(() => { const timer = globalThis.setInterval(() => setNow(Date.now()), 1000); return () => globalThis.clearInterval(timer); }, []);
   const selected = data?.products.find(item => item.product_id === productID) || data?.products[0];
   const selectedChannel = effectivePaymentChannel(selected?.channels, channel);
-  const run = async (action, { reload = true } = {}) => {
+  const run = async (action, { reload = true, source = 'workspace' } = {}) => {
     if (busy || operationBusy.current || !mounted.current) return;
     operationBusy.current = true; cancelClose();
     const stamp = generation.current;
-    setBusy(true); setError(''); setNotice('');
+    setBusy(true); setError(''); setNotice(''); setFeedbackSource(source);
     try {
       await action(stamp);
       if (reload && ownsView(stamp)) await load(stamp);
@@ -217,7 +224,7 @@ export function PersonalFinanceWorkspace({ client, me, language, onPaid, present
     const accepted = await acceptOrderRead(latest, request, stamp);
     if (accepted && ownsView(stamp) && continuePayment) payment.accept(presentation, latest);
     if (ownsView(stamp) && !['PAID', 'PAID_LATE'].includes(latest.status)) await load(stamp);
-  }, { reload: false });
+  }, { reload: false, source: continuePayment ? 'workspace' : 'order-detail' });
   const query = () => order && selectOrder(order.order_id);
   const queryPayment = () => run(async stamp => {
     const ticket = payment.current(); if (!ticket?.order) return;
@@ -300,10 +307,11 @@ export function PersonalFinanceWorkspace({ client, me, language, onPaid, present
   if (presentationTargets) return <>
     {payment.order && <RechargePaymentDialog active={presentationTargets.section === 'creditsUsage'} error={error ? copy[error] : ''} notice={notice ? copy[notice] : ''} order={payment.order} copy={copy} language={language} now={now} busy={busy} onDismiss={payment.dismiss} onQuery={() => void queryPayment()} canRestoreFocus={payment.canRestoreFocus} returnFocus={payment.trigger} />}
     {closeConfirmation && closeIsCurrent(closeConfirmation) && <PersonalOrderCloseConfirmation active={presentationTargets.section === 'ordersInvoices'} copy={copy} orderID={closeConfirmation.orderID} amount={formatFen(closeConfirmation.order.amount_fen, language)} canRestoreFocus={() => closeIsCurrent(closeConfirmation)} onCancel={() => cancelClose(closeConfirmation)} onConfirm={() => void confirmClose(closeConfirmation)} />}
-    <PersonalFinancePortalSections language={language} targets={presentationTargets} view={{ copy, data, order, busy, error, notice, unknown, recoveryBlocked, canCreate, canManage, selected, selectedChannel, hasPending, now, payable, statement, paymentOpen: Boolean(payment.order),
+    <PersonalFinancePortalSections key={presentationScope.current.key} language={language} targets={presentationTargets} view={{ copy, data, order, busy, error, notice, unknown, recoveryBlocked, canCreate, canManage, selected, selectedChannel, hasPending, now, payable, statement, paymentOpen: Boolean(payment.order),
       onCreate: () => void create(), onRefresh: () => void run(async () => { refreshRecovery(); }),
       onProduct: id => { setProductID(id); setChannel(''); }, onChannel: setChannel,
       onSelectOrder: (id, showPayment) => void selectOrder(requireFinanceID(id), showPayment),
+      onDismissDetail: () => { if (feedbackSource === 'order-detail') { setError(''); setNotice(''); } },
       onQuery: () => void query(), onCloseOrder: close, onClaim: () => void claim(), onStatement: setStatement,
     }} />
   </>;

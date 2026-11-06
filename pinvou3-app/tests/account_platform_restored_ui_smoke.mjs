@@ -86,6 +86,54 @@ try {
       }
     }
   });
+  await run('order details keep the underlying list and dialog geometry stable through delayed reads', async () => {
+    for (const viewport of [{ width: 1440, height: 700 }, { width: 390, height: 560 }]) {
+    await fresh(); await accountTab('ordersInvoices'); await activeAccount('ordersInvoices');
+    await page.setViewport(viewport);
+    await page.$eval('.ap-order-history tbody tr:nth-child(2) td:last-child button', node => node.scrollIntoView({ block: 'center' }));
+    await page.evaluate(() => { window.restored.holdOrderDetail = true; });
+    const geometry = () => page.evaluate(() => {
+      const table = document.querySelector('.ap-order-history table').getBoundingClientRect();
+      const dialog = document.querySelector('.ap-order-details-dialog')?.getBoundingClientRect();
+      return { scroll: scrollY, table: [table.x, table.y, table.width], dialog: dialog && [dialog.x, dialog.y, dialog.width, dialog.height] };
+    });
+    const before = await geometry();
+    await page.click('.ap-order-history tbody tr:nth-child(2) td:last-child button');
+    await page.waitForFunction(() => typeof window.restored.releaseOrderDetail === 'function');
+    const loading = await geometry(); assert.deepEqual(loading.table, before.table); assert.equal(loading.scroll, before.scroll); assert.ok(loading.dialog);
+    await page.evaluate(() => { window.restored.holdOrderDetail = false; window.restored.releaseOrderDetail(); });
+    await page.waitForFunction(() => document.querySelector('.ap-order-details-dialog dd code'));
+    await page.waitForFunction(() => !document.querySelector('.ap-order-details-dialog [aria-busy=true]'));
+    const loaded = await geometry(); assert.deepEqual(loaded, loading);
+    await page.keyboard.press('Escape'); await page.waitForFunction(() => !document.querySelector('[role=dialog]'));
+    assert.deepEqual(await geometry(), before);
+    }
+  });
+  await run('order detail read errors close in place and retired sessions withdraw the old selection', async () => {
+    await fresh(); await accountTab('ordersInvoices'); await activeAccount('ordersInvoices');
+    await page.evaluate(() => { window.restored.orderReadFail = true; });
+    const before = await page.$eval('.ap-order-history', node => [node.getBoundingClientRect().x, node.getBoundingClientRect().y]);
+    await page.click('.ap-order-history tbody tr:nth-child(2) td:last-child button');
+    await page.waitForSelector('.ap-order-details-dialog [role=alert]');
+    await page.keyboard.press('Escape'); await page.waitForFunction(() => !document.querySelector('[role=dialog]'));
+    assert.deepEqual(await page.$eval('.ap-order-history', node => [node.getBoundingClientRect().x, node.getBoundingClientRect().y]), before);
+    for (const change of ['epoch', 'client']) {
+      await fresh(); await accountTab('ordersInvoices'); await activeAccount('ordersInvoices');
+      await page.evaluate(() => { window.restored.holdOrderDetail = true; });
+      await page.click('.ap-order-history tbody tr:nth-child(2) td:last-child button');
+      await page.waitForFunction(() => typeof window.restored.releaseOrderDetail === 'function');
+      await page.evaluate(change => {
+        window.restored.holdOrderDetail = false;
+        if (change === 'epoch') window.restored.client.financeSessionEpoch++;
+        else window.restored.reload();
+        window.restored.releaseOrderDetail();
+      }, change);
+      await page.waitForSelector('.ap-sidebar-foot select');
+      await page.select('.ap-sidebar-foot select', 'en');
+      await page.waitForFunction(() => !document.querySelector('.ap-order-details-dialog'));
+      assert.equal(await page.$$eval('.ap-order-details-dialog', nodes => nodes.length), 0);
+    }
+  });
   await run('personal original tabs, five benefits, exact balance and history navigation', async () => {
     await fresh('?section=usage');
     await activeAccount('creditsUsage');
@@ -105,6 +153,11 @@ try {
       await page.setViewport({ width, height: 1100 }); await accountTab('creditsUsage'); await activeAccount('creditsUsage');
       const box = await page.$eval('.ap-product-picker label', node => ({ height: node.getBoundingClientRect().height, text: node.textContent }));
       assert.ok(box.height < 200, 'purchase cards should stay compact without hiding facts');
+      const price = await page.$eval('.ap-product-price', node => ({ size: getComputedStyle(node).fontSize, weight: getComputedStyle(node).fontWeight }));
+      assert.deepEqual(price, { size: '18px', weight: '500' });
+      const borders = await page.$$eval('.ap-product-picker label', nodes => nodes.map(node => ({ border: getComputedStyle(node).borderWidth, shadow: getComputedStyle(node).boxShadow })));
+      assert.ok(borders.every(item => item.border === '1px' && item.shadow === 'none'));
+
       assert.ok(box.text.includes('110') && box.text.includes('30'));
       assert.ok(await page.$$eval('.ap-benefit-card p', nodes => nodes.every(node => node.scrollWidth <= node.clientWidth + 1)), 'exact large balances must fit inside benefit cards');
       await noOverflow();
@@ -291,6 +344,75 @@ try {
     await accountTab('myOrganization');
     await page.waitForSelector('.ap-org-tabs');
   };
+  await run('organization order details keep rows stable while a paid read refreshes history', async () => {
+    await organizationCenter('en');
+    await page.evaluate(() => { window.restored.context.permissions.push('org.entitlements.purchase'); window.restored.reload(); });
+    await page.waitForSelector('.ap-org-tabs'); await page.click('[data-org-section=billing]');
+    await page.waitForSelector('.ap-organization-orders tbody tr');
+    await page.setViewport({ width: 1440, height: 900 });
+    await page.$eval('.ap-organization-orders tbody tr:first-child td:last-child button', node => node.scrollIntoView({ block: 'center' }));
+    await page.evaluate(() => { window.restored.holdOrderDetail = true; window.restored.detailPaid = true; window.restored.historyPaid = true; });
+    const geometry = () => page.evaluate(() => {
+      const table = document.querySelector('.ap-organization-orders table').getBoundingClientRect();
+      const dialog = document.querySelector('.ap-order-details-dialog')?.getBoundingClientRect();
+      return { scroll: scrollY, table: [table.x, table.y, table.width], dialog: dialog && [dialog.x, dialog.y, dialog.width, dialog.height] };
+    });
+    const before = await geometry();
+    await page.click('.ap-organization-orders tbody tr:first-child td:last-child button');
+    await page.waitForFunction(() => typeof window.restored.releaseOrderDetail === 'function');
+    const loading = await geometry(); assert.deepEqual(loading.table, before.table); assert.equal(loading.scroll, before.scroll); assert.ok(loading.dialog);
+    await page.evaluate(() => { window.restored.holdOrderDetail = false; window.restored.releaseOrderDetail(); });
+    await page.waitForFunction(() => !document.querySelector('.ap-order-details-body[aria-busy=true]') && !document.querySelector('.ap-organization-orders[aria-busy=true]'));
+    assert.ok(await page.$eval('.ap-order-details-body dd code', node => node.textContent.length > 20));
+    assert.equal(await page.$eval('.ap-organization-orders tbody tr:first-child .ap-status', node => node.dataset.status), 'COMPLETED');
+    assert.deepEqual(await geometry(), loading);
+    await page.keyboard.press('Escape'); await page.waitForFunction(() => !document.querySelector('[role=dialog]'));
+    assert.deepEqual(await geometry(), before);
+  });
+  await run('organization detail retries preserve later pages and payment queries use the displayed order', async () => {
+    await organizationCenter('en');
+    await page.evaluate(() => { window.restored.context.permissions.push('org.entitlements.purchase'); window.restored.reload(); });
+    await page.waitForSelector('.ap-org-tabs'); await page.click('[data-org-section=billing]');
+    await page.waitForSelector('.ap-organization-orders tbody tr');
+    await page.click('.ap-organization-orders > .ap-action-group button');
+    await page.waitForFunction(() => document.querySelectorAll('.ap-organization-orders tbody tr').length === 3);
+    const rows = () => page.$$eval('.ap-organization-orders tbody .ap-copy-identifier code', nodes => nodes.map(node => node.title));
+    const ids = await rows();
+    await page.$eval('.ap-organization-orders tbody tr:last-child td:last-child button', node => node.scrollIntoView({ block: 'center' }));
+    const before = await page.$eval('.ap-organization-orders table', node => [node.getBoundingClientRect().x, node.getBoundingClientRect().y, node.getBoundingClientRect().height]);
+    await page.evaluate(() => { window.restored.orgOrderReadStatus = 503; });
+    await page.click('.ap-organization-orders tbody tr:last-child td:last-child button');
+    await page.waitForSelector('.ap-order-details-dialog [role=alert]');
+    await page.evaluate(() => { window.restored.orgOrderReadStatus = 0; window.restored.detailPaid = true; });
+    await page.click('.ap-order-details-body > button');
+    await page.waitForFunction(() => document.querySelector('.ap-organization-orders tbody tr:last-child .ap-status')?.dataset.status === 'COMPLETED');
+    assert.ok((await page.$eval('.ap-order-details-body', node => node.textContent)).includes(ids.at(-1)));
+    assert.deepEqual(await rows(), ids);
+    await page.keyboard.press('Escape'); await page.waitForFunction(() => !document.querySelector('[role=dialog]'));
+    assert.deepEqual(await page.$eval('.ap-organization-orders table', node => [node.getBoundingClientRect().x, node.getBoundingClientRect().y, node.getBoundingClientRect().height]), before);
+    await page.evaluate(() => { window.restored.detailPaid = false; });
+    await page.click('.ap-organization-orders tbody tr:first-child td:last-child button');
+    await page.waitForFunction(() => document.querySelector('.ap-order-details-body .ap-primary') && !document.querySelector('.ap-order-details-body[aria-busy=true]'));
+    await page.click('.ap-order-details-body .ap-primary'); await page.waitForSelector('.ap-payment-dialog');
+    await page.waitForFunction(() => !document.querySelector('.ap-payment-dialog footer button:disabled'));
+    await page.$eval('.ap-order-lookup input', node => { Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(node, '00000000-0000-4000-8000-000000000002'); node.dispatchEvent(new Event('input', { bubbles: true })); });
+    const count = await page.evaluate(() => window.restored.calls.length);
+    await page.click('.ap-payment-dialog footer button:last-child');
+    await page.waitForFunction(count => window.restored.calls.slice(count).some(call => call.method === 'GET' && call.url.endsWith('/recharge/orders/00000000-0000-4000-8000-000000000001')), {}, count);
+    assert.equal(await page.evaluate(count => window.restored.calls.slice(count).some(call => call.url.endsWith('/recharge/orders/00000000-0000-4000-8000-000000000002')), count), false);
+  });
+  await run('organization detail authorization denial withdraws its dialog and retires reads', async () => {
+    for (const status of [401, 403]) {
+      await organizationCenter('en');
+      await page.evaluate(status => { window.restored.context.permissions.push('org.entitlements.purchase'); window.restored.orgOrderReadStatus = status; window.restored.reload(); }, status);
+      await page.waitForSelector('.ap-org-tabs'); await page.click('[data-org-section=billing]');
+      await page.waitForSelector('.ap-organization-orders tbody tr');
+      await page.click('.ap-organization-orders tbody tr:first-child td:last-child button');
+      await page.waitForFunction(() => !document.querySelector('.ap-order-details-dialog') && document.querySelector('[role=alert]'));
+      assert.equal(await page.$$eval('.ap-order-details-dialog', nodes => nodes.length), 0);
+      assert.equal(await page.$eval('.ap-page-header button', node => node.disabled), false);
+    }
+  });
   await run('render review: model forms, owner removal and responsive control geometry', async () => {
     await organizationCenter('en');
     await page.evaluate(() => { window.restored.includeOwner = true; window.restored.context.permissions.push('org.owner.transfer'); window.restored.reload(); });

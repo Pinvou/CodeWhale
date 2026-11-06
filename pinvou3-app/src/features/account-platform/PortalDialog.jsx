@@ -3,19 +3,19 @@ import { createPortal } from 'react-dom';
 import './portal-dialog.css';
 import { usePortalDialogScope } from './portal-dialog-scope.jsx';
 
-export function PortalDialog({ title, closeLabel, onClose, children, busy = false, active = true, drawer = false }) {
+export function PortalDialog({ title, closeLabel, onClose, children, busy = false, active = true, drawer = false, className = '' }) {
   const scopeActive = usePortalDialogScope();
   const visible = scopeActive && active;
   const titleID = useId(), dialog = useRef(null), close = useRef(null);
   useLayoutEffect(() => {
     if (!visible) return undefined;
     const previous = document.activeElement;
-    (close.current?.disabled ? dialog.current : close.current)?.focus();
+    (close.current?.disabled ? dialog.current : close.current)?.focus({ preventScroll: true });
     return () => {
-      if (previous?.isConnected && !previous.closest('[hidden]')) previous.focus();
+      if (previous?.isConnected && !previous.closest('[hidden]')) previous.focus({ preventScroll: true });
     };
   }, [visible]);
-  useLayoutEffect(() => { if (visible && busy && dialog.current && (!dialog.current.contains(document.activeElement) || document.activeElement?.disabled)) dialog.current.focus(); });
+  useLayoutEffect(() => { if (visible && busy && dialog.current && (!dialog.current.contains(document.activeElement) || document.activeElement?.disabled)) dialog.current.focus({ preventScroll: true }); });
   const keydown = event => {
     if (event.isComposing || event.keyCode === 229) return;
     if (event.key === 'Escape') {
@@ -32,7 +32,7 @@ export function PortalDialog({ title, closeLabel, onClose, children, busy = fals
   };
   if (!visible) return null;
   return createPortal(<div className={`ap-restored-dialog-backdrop${drawer ? ' ap-restored-drawer-backdrop' : ''}`} onMouseDown={event => { if (!busy && event.currentTarget === event.target) onClose(); }}>
-    <div ref={dialog} className={`ap-restored-dialog${drawer ? ' ap-restored-drawer' : ''}`} role="dialog" data-portal-location={`${globalThis.location.pathname}${globalThis.location.search}${globalThis.location.hash}`} aria-modal="true" aria-labelledby={titleID} tabIndex={-1} onKeyDown={keydown}>
+    <div ref={dialog} className={`ap-restored-dialog${drawer ? ' ap-restored-drawer' : ''} ${className}`} role="dialog" data-portal-location={`${globalThis.location.pathname}${globalThis.location.search}${globalThis.location.hash}`} aria-modal="true" aria-labelledby={titleID} tabIndex={-1} onKeyDown={keydown}>
       <header><h2 id={titleID}>{title}</h2><button type="button" ref={close} disabled={busy} onClick={onClose} aria-label={closeLabel}>×</button></header>{children}
     </div>
   </div>, document.body);

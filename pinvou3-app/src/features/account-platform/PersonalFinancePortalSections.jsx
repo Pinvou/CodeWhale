@@ -20,6 +20,8 @@ export function PersonalFinancePortalSections({ view, targets, language }) {
   const words = accountLayoutCopy[language], { copy, data, order } = view;
   const center = accountCenterCopy[language];
   const [dialog, setDialog] = useState(null);
+  const orderDialogActive = dialog?.kind === 'order' && targets.section === 'ordersInvoices' && !view.paymentOpen;
+  const detailReady = dialog?.kind === 'order' && order?.order_id === dialog.id;
   const status = value => center.orderStatuses[value] || words.statuses[value] || value;
   const productCard = item => {
     const points = productPointFacts(item);
@@ -59,13 +61,17 @@ export function PersonalFinancePortalSections({ view, targets, language }) {
     </tr>)}</tbody></table></div>}
   </section>;
   return <>
-    {targets.feedback && createPortal(feedback, targets.feedback)}
+    {targets.feedback && createPortal(orderDialogActive ? null : feedback, targets.feedback)}
     {targets.credits && createPortal(<PortalDialogScope active={targets.section === 'creditsUsage'}>{credits}</PortalDialogScope>, targets.credits)}
     {targets.orders && createPortal(<PortalDialogScope active={targets.section === 'ordersInvoices'}>{orders}</PortalDialogScope>, targets.orders)}
-    {dialog?.kind === 'order' && order?.order_id === dialog.id && !view.paymentOpen && <PortalDialog active={targets.section === 'ordersInvoices'} title={copy.history} closeLabel={words.closeDialog} onClose={() => setDialog(null)} busy={view.busy}>
-      {feedback}<dl><dt>{copy.orderID}</dt><dd><CopyIdentifier value={order.order_id} language={language} /></dd><dt>{copy.amount}</dt><dd>{formatFen(order.amount_fen, language)}</dd><dt>{center.createdAt}</dt><dd>{date(order.created_at, language)}</dd><dt>{center.paidAt}</dt><dd>{date(order.paid_at, language)}</dd><dt>{copy.status}</dt><dd>{status(orderSummaryStatus(order))}</dd><dt>{copy.expires}</dt><dd>{date(order.expires_at, language)}</dd>{orderDurationDays(order) !== null && <><dt>{copy.validityDays}</dt><dd>{copy.durationDays(orderDurationDays(order))}</dd></>}</dl>
+    {dialog?.kind === 'order' && !view.paymentOpen && <PortalDialog className="ap-order-details-dialog" active={targets.section === 'ordersInvoices'} title={copy.history} closeLabel={words.closeDialog} onClose={() => { setDialog(null); view.onDismissDetail(); }} busy={view.busy}>
+      <div className="ap-order-details-body" aria-busy={view.busy}>
+      {feedback}{detailReady && <><dl><dt>{copy.orderID}</dt><dd><CopyIdentifier value={order.order_id} language={language} /></dd><dt>{copy.amount}</dt><dd>{formatFen(order.amount_fen, language)}</dd><dt>{center.createdAt}</dt><dd>{date(order.created_at, language)}</dd><dt>{center.paidAt}</dt><dd>{date(order.paid_at, language)}</dd><dt>{copy.status}</dt><dd>{status(orderSummaryStatus(order))}</dd><dt>{copy.expires}</dt><dd>{date(order.expires_at, language)}</dd>{orderDurationDays(order) !== null && <><dt>{copy.validityDays}</dt><dd>{copy.durationDays(orderDurationDays(order))}</dd></>}</dl>
       <div className="ap-dialog-actions"><button disabled={view.busy} onClick={view.onQuery}>{copy.query}</button>{view.payable && view.canManage && <button disabled={view.busy || view.unknown || view.recoveryBlocked} onClick={view.onCloseOrder}>{copy.close}</button>}</div>
       {['MANUAL_REVIEW', 'CLOSED', 'FAILED'].includes(order.status) && <form onSubmit={event => { event.preventDefault(); view.onClaim(); }}><label>{copy.statement}<textarea value={view.statement} maxLength={2000} onChange={event => view.onStatement(event.target.value)} /></label><button disabled={view.busy || !view.statement.trim()}>{copy.claim}</button></form>}
+      </>}
+      {!detailReady && !view.busy && <button type="button" onClick={() => view.onSelectOrder(dialog.id)}>{copy.retry}</button>}
+      </div>
     </PortalDialog>}
   </>;
 }

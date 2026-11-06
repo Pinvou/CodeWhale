@@ -58,3 +58,13 @@ History requires compatible Billing, Token and Portal versions. A future deploym
 - `node scripts/check-token-management-authorization-coverage.mjs`, its mutation tests, the financial runner tests and `python scripts/architecture-guard.py` cover route/inventory wiring and architectural boundaries.
 
 Browser/HTTP fixtures are not a live provider payment or production deployment. Review conclusions, exact commit identities, executed results, failures and resource receipts are retained in the task's local review evidence; they are not inferred from this checklist.
+
+## 本轮渲染反馈的追加修正
+
+- 管理后台入口统一放在侧栏退出登录上方，复用相同控件样式和原平台权限条件；窄屏可换行排列。
+- 充值金额改为 18px、500 字重，选中与未选中商品均保留 1px 边框，仅改变颜色和背景。
+- 个人与组织订单详情使用稳定尺寸的弹窗框架，详情读取提示归弹窗持有；进入、返回焦点不滚动背景，弹窗内部键盘导航仍可滚动到目标控件。
+- 关闭详情仅清除该次读取的反馈，不清除未知资金操作的事实或幂等键。客户端、身份、授权版本或会话换代立即撤回旧详情；读取被拒绝时撤回组织详情并退休读取入口。
+- 组织历史保留已展开页，由历史组件为每次详情读取及重试建立独立代次围栏；仅在同一读取所有者下更新原有行，后续集合读取优先。付款弹窗查询显式绑定其展示订单。
+
+验证包含延迟详情的列表和弹窗几何、窄屏短视口、错误关闭、客户端/会话换代、后页订单失败后重试成功、付款查询与后台输入隔离，以及 401/403 退出。编译产物的组织额度空态检查改为验证已批准的紧凑不可操作状态，保留零写入和 UNKNOWN 原事实/原幂等键恢复断言。
