@@ -633,6 +633,33 @@ fn explicit_non_directory_working_dir_gets_a_direct_fix_hint() {
     assert!(message.contains("requested working directory is not a directory"));
     assert!(message.contains("Use a directory that exists"));
     assert!(!message.contains("saved session workspace"));
+    // The requested-directory arm is the one model-reachable advice
+    // surface; resume re-anchors to the same directory and a fork copies
+    // it, so neither may be suggested here in any wording.
+    assert!(
+        !message.contains("resume"),
+        "requested-directory arm must not advise resume: {message}"
+    );
+    assert!(
+        !message.contains("fork"),
+        "requested-directory arm must not advise fork: {message}"
+    );
+}
+
+#[test]
+fn saved_workspace_that_is_a_file_gets_the_saved_workspace_advice() {
+    let parent = tempdir().expect("parent");
+    let file_workspace = parent.path().join("workspace-file");
+    std::fs::write(&file_workspace, b"occupant").expect("write occupant file");
+    let mut manager = ShellManager::new(file_workspace.clone());
+
+    let error = execute_shell(&mut manager, "echo should-not-run", None, 1_000, false)
+        .expect_err("saved workspace that is not a directory must fail before shell spawn");
+    let message = error.to_string();
+    assert!(message.contains("saved session workspace is not a directory"));
+    assert!(message.contains("Restore it as a directory"));
+    assert!(message.contains("/workspace"));
+    assert!(message.contains("/fork"));
 }
 
 #[test]
