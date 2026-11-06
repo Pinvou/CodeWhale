@@ -78,3 +78,5 @@
 
 .ap-payment-dialog { box-sizing: border-box; }
 .ap-payment-dialog footer { flex-wrap: wrap; }
+.ap-member-units-help { font-size: 12px; font-weight: 400; line-height: 1.5; white-space: normal; }
+th > .ap-member-units-help { display: block; max-width: 28ch; margin-top: 4px; }
