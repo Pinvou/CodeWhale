@@ -1,0 +1,189 @@
+package portal
+
+import (
+	"bytes"
+	"compress/gzip"
+	"context"
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strconv"
+	"strings"
+	"sync/atomic"
+	"testing"
+
+	"github.com/google/uuid"
+)
+
+func TestOrdinaryProxyValidatesResponseBeforeForwarding(t *testing.T) {
+	const limit = 32 << 20
+	const idempotencyKey = "register-once"
+	chunk := strings.Repeat("x", 64<<10)
+	writePayload := func(w io.Writer, size int) {
+		for size > 0 {
+			n, err := io.WriteString(w, chunk[:min(size, len(chunk))])
+			if err != nil {
+				return
+			}
+			size -= n
+		}
+	}
+	tests := []struct {
+		name   string
+		write  func(http.ResponseWriter)
+		status int
+		size   int
+	}{
+		{
+			name: "exact limit",
+			write: func(w http.ResponseWriter) {
+				w.Header().Set("Content-Length", strconv.Itoa(limit))
+				w.WriteHeader(http.StatusCreated)
+				writePayload(w, limit)
+			},
+			status: http.StatusCreated,
+			size:   limit,
+		},
+		{
+			name: "declared over limit",
+			write: func(w http.ResponseWriter) {
+				w.Header().Set("Content-Length", strconv.Itoa(limit+1))
+				w.WriteHeader(http.StatusCreated)
+				writePayload(w, limit+1)
+			},
+			status: http.StatusBadGateway,
+		},
+		{
+			name: "chunked over limit",
+			write: func(w http.ResponseWriter) {
+				w.WriteHeader(http.StatusCreated)
+				w.(http.Flusher).Flush()
+				writePayload(w, limit+1)
+			},
+			status: http.StatusBadGateway,
+		},
+		{
+			name: "decompressed over limit",
+			write: func(w http.ResponseWriter) {
+				w.Header().Set("Content-Encoding", "gzip")
+				w.WriteHeader(http.StatusCreated)
+				compressed := gzip.NewWriter(w)
+				writePayload(compressed, limit+1)
+				_ = compressed.Close()
+			},
+			status: http.StatusBadGateway,
+		},
+		{
+			name: "upstream closes before declared end",
+			write: func(w http.ResponseWriter) {
+				w.Header().Set("Content-Length", "30")
+				w.WriteHeader(http.StatusCreated)
+				_, _ = io.WriteString(w, `{"private":"partial"`)
+			},
+			status: http.StatusBadGateway,
+		},
+		{
+			name: "valid upstream error",
+			write: func(w http.ResponseWriter) {
+				w.WriteHeader(http.StatusConflict)
+				_, _ = io.WriteString(w, "conflict")
+			},
+			status: http.StatusConflict,
+			size:   len("conflict"),
+		},
+		{
+			name:   "no content",
+			write:  func(w http.ResponseWriter) { w.WriteHeader(http.StatusNoContent) },
+			status: http.StatusNoContent,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var calls atomic.Int32
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls.Add(1)
+				if r.Method != http.MethodPost || r.URL.Path != "/v1/auth/register" || r.Header.Get("Idempotency-Key") != idempotencyKey {
+					t.Error("upstream did not receive the original command and idempotency key")
+				}
+				w.Header().Set("Content-Type", "application/problem+json")
+				w.Header().Set("Retry-After", "3")
+				w.Header().Set("X-Context-Version", "7")
+				tc.write(w)
+			}))
+			defer upstream.Close()
+			service := testService(t, newMemoryStore())
+			service.config.AccountURL = parseTestURL(t, upstream.URL)
+			request := httptest.NewRequest(http.MethodPost, "/api/account/v1/auth/register", strings.NewReader(`{}`))
+			request.Header.Set("Origin", service.config.PublicURL.String())
+			request.Header.Set("Idempotency-Key", idempotencyKey)
+			response := httptest.NewRecorder()
+			service.Handler(nil).ServeHTTP(response, request)
+
+			if calls.Load() != 1 {
+				t.Fatalf("upstream dispatched %d times", calls.Load())
+			}
+			if response.Code != tc.status || response.Header().Get("Cache-Control") != "no-store" {
+				t.Fatalf("status = %d, cache control = %q, want status %d and no-store", response.Code, response.Header().Get("Cache-Control"), tc.status)
+			}
+			if tc.status == http.StatusBadGateway {
+				var failure map[string]any
+				if err := json.Unmarshal(response.Body.Bytes(), &failure); err != nil || failure["code"] != "UPSTREAM_UNAVAILABLE" || strings.Contains(response.Body.String(), "partial") {
+					t.Fatalf("invalid gateway error: %q", response.Body.String())
+				}
+				if response.Header().Get("Content-Type") != "application/json" || response.Header().Get("Retry-After") != "" || response.Header().Get("X-Context-Version") != "" {
+					t.Fatalf("upstream headers leaked into the gateway error: %v", response.Header())
+				}
+				return
+			}
+			if response.Header().Get("Content-Type") != "application/problem+json" || response.Header().Get("Retry-After") != "3" || response.Header().Get("X-Context-Version") != "7" {
+				t.Fatalf("response headers changed: %v", response.Header())
+			}
+			if response.Body.Len() != tc.size {
+				t.Fatalf("body length = %d, want %d", response.Body.Len(), tc.size)
+			}
+			if tc.size == limit && bytes.Count(response.Body.Bytes(), []byte{'x'}) != limit {
+				t.Fatal("body at the exact limit changed")
+			}
+			if tc.status == http.StatusConflict && response.Body.String() != "conflict" {
+				t.Fatal("upstream error body changed")
+			}
+		})
+	}
+}
+
+func TestOrdinaryProxyPreservesBodylessResponses(t *testing.T) {
+	for _, tc := range []struct {
+		method string
+		status int
+	}{
+		{http.MethodHead, http.StatusOK},
+		{http.MethodGet, http.StatusNotModified},
+	} {
+		t.Run(tc.method, func(t *testing.T) {
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != tc.method || r.URL.Path != "/v1/me/authorization-context" {
+					t.Errorf("unexpected upstream request: %s %s", r.Method, r.URL.Path)
+				}
+				w.Header().Set("Content-Length", strconv.Itoa(32<<20+1))
+				w.Header().Set("X-Context-Version", "7")
+				w.WriteHeader(tc.status)
+			}))
+			defer upstream.Close()
+			store := newMemoryStore()
+			service := testService(t, store)
+			service.config.AccountURL = parseTestURL(t, upstream.URL)
+			session := validSession(uuid.NewString())
+			if err := store.SaveSession(context.Background(), session); err != nil {
+				t.Fatal(err)
+			}
+			request := httptest.NewRequest(tc.method, "/api/account/v1/me/authorization-context", nil)
+			request.AddCookie(&http.Cookie{Name: service.sessionCookieName(), Value: session.ID})
+			response := httptest.NewRecorder()
+			service.Handler(nil).ServeHTTP(response, request)
+			if response.Code != tc.status || response.Body.Len() != 0 || response.Header().Get("X-Context-Version") != "7" {
+				t.Fatalf("bodyless response changed: status = %d, body size = %d, headers = %v", response.Code, response.Body.Len(), response.Header())
+			}
+		})
+	}
+}

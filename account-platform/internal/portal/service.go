@@ -1018,13 +1018,34 @@ func (s *Service) forward(w http.ResponseWriter, r *http.Request, upstream *url.
 		return
 	}
 	defer response.Body.Close()
+	materialContent := authenticated && upstream == s.config.BillingURL && productAdmissionMaterialContent(r.Method, resource) && response.StatusCode == http.StatusOK
+	var responseBody []byte
+	if !auditDownload && !materialContent && r.Method != http.MethodHead && response.StatusCode != http.StatusNoContent && response.StatusCode != http.StatusNotModified {
+		// Validate the whole ordinary response before committing the upstream status.
+		const responseLimit = 32 << 20
+		if response.ContentLength <= responseLimit {
+			limited := io.LimitReader(response.Body, responseLimit+1)
+			if response.ContentLength > 0 {
+				var buffered bytes.Buffer
+				buffered.Grow(int(response.ContentLength) + bytes.MinRead)
+				_, err = buffered.ReadFrom(limited)
+				responseBody = buffered.Bytes()
+			} else {
+				responseBody, err = io.ReadAll(limited)
+			}
+		}
+		if response.ContentLength > responseLimit || err != nil || len(responseBody) > responseLimit {
+			api.WriteError(w, http.StatusBadGateway, "UPSTREAM_UNAVAILABLE", "the account platform is unavailable", httpserver.RequestID(r.Context()))
+			return
+		}
+	}
 	for _, name := range []string{"Content-Type", "Retry-After", "X-Context-Version", "X-Authorization-Version", "X-Personal-Authorization-Version", "X-Platform-Authorization-Version", "X-Organization-Authorization-Version"} {
 		if value := response.Header.Get(name); value != "" {
 			w.Header().Set(name, value)
 		}
 	}
 	w.Header().Set("Cache-Control", "no-store")
-	if authenticated && upstream == s.config.BillingURL && productAdmissionMaterialContent(r.Method, resource) && response.StatusCode == http.StatusOK {
+	if materialContent {
 		forwardProductAdmissionOriginal(w, r, response)
 		return
 	}
@@ -1046,7 +1067,9 @@ func (s *Service) forward(w http.ResponseWriter, r *http.Request, upstream *url.
 		return
 	}
 	w.WriteHeader(response.StatusCode)
-	_, _ = io.Copy(w, io.LimitReader(response.Body, 32<<20))
+	if len(responseBody) != 0 {
+		_, _ = w.Write(responseBody)
+	}
 }
 
 // This read has an Account-owned durable audit and quota outcome. HEAD is not

@@ -116,11 +116,11 @@ func TestF17AuditDownloadStreamsBeyondOrdinaryAPILimit(t *testing.T) {
 			t.Fatal("one-use payload or download metadata was truncated")
 		}
 	})
-	t.Run("ordinary API limit unchanged", func(t *testing.T) {
+	t.Run("oversized ordinary API response rejected", func(t *testing.T) {
 		r := financeBrowserRequest(service, session, "GET", "/api/admin/account/admin/v1/users", "")
 		w := newAuditDeadlineRecorder()
 		service.Handler(nil).ServeHTTP(w, r)
-		if w.Code != http.StatusOK || w.Body.Len() != 32<<20 || w.Header().Get("Content-Disposition") != "" || w.Header().Get("Content-Length") != "" {
+		if w.Code != http.StatusBadGateway || !bytes.Contains(w.Body.Bytes(), []byte(`"code":"UPSTREAM_UNAVAILABLE"`)) || w.Header().Get("Content-Disposition") != "" || w.Header().Get("Content-Length") != "" {
 			t.Fatal("audit download exception escaped its exact route")
 		}
 	})
