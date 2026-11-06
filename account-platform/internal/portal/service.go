@@ -963,6 +963,14 @@ func (s *Service) forward(w http.ResponseWriter, r *http.Request, upstream *url.
 			request.Header.Set(name, value)
 		}
 	}
+	if r.Method != http.MethodGet && r.Method != http.MethodHead && request.Header.Get("Idempotency-Key") != "" {
+		// A lost response does not establish that the upstream missed a command.
+		// Keep its key but prevent the transport from replaying the command.
+		request.GetBody = nil
+		if request.Body == http.NoBody {
+			request.Body = io.NopCloser(http.NoBody)
+		}
+	}
 	if upstream == s.config.AccountURL {
 		for _, name := range []string{"X-Registration-Query-Token", "X-Device-ID", "X-Pinvou-Download-Token"} {
 			if accountProofHeaderAllowed(r.Method, resource, name) {

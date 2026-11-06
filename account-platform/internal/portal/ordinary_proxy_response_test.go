@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/http/httptrace"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -183,6 +184,60 @@ func TestOrdinaryProxyPreservesBodylessResponses(t *testing.T) {
 			service.Handler(nil).ServeHTTP(response, request)
 			if response.Code != tc.status || response.Body.Len() != 0 || response.Header().Get("X-Context-Version") != "7" {
 				t.Fatalf("bodyless response changed: status = %d, body size = %d, headers = %v", response.Code, response.Body.Len(), response.Header())
+			}
+		})
+	}
+}
+
+func TestOrdinaryProxyDoesNotReplayCommandAfterLosingResponse(t *testing.T) {
+	const idempotencyKey = "register-once"
+	for name, payload := range map[string]string{"json": `{}`, "empty": ""} {
+		t.Run(name, func(t *testing.T) {
+			var commands atomic.Int32
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodGet {
+					_, _ = io.WriteString(w, `{}`)
+					return
+				}
+				body, err := io.ReadAll(r.Body)
+				if err != nil || string(body) != payload || r.Header.Get("Idempotency-Key") != idempotencyKey {
+					t.Errorf("upstream command changed: body=%q error=%v", body, err)
+				}
+				if commands.Add(1) != 1 {
+					w.WriteHeader(http.StatusCreated)
+					return
+				}
+				conn, _, err := w.(http.Hijacker).Hijack()
+				if err != nil {
+					t.Error(err)
+					return
+				}
+				_ = conn.Close() // The command arrived; its response never started.
+			}))
+			defer upstream.Close()
+			service := testService(t, newMemoryStore())
+			service.config.AccountURL = parseTestURL(t, upstream.URL)
+			handler := service.Handler(nil)
+			warm := httptest.NewRecorder()
+			handler.ServeHTTP(warm, httptest.NewRequest(http.MethodGet, "/api/account/v1/auth/registration-operations/"+uuid.NewString(), nil))
+			if warm.Code != http.StatusOK {
+				t.Fatalf("failed to warm the upstream connection: %d", warm.Code)
+			}
+			var reused atomic.Bool
+			request := httptest.NewRequest(http.MethodPost, "/api/account/v1/auth/register", strings.NewReader(payload))
+			request = request.WithContext(httptrace.WithClientTrace(request.Context(), &httptrace.ClientTrace{
+				GotConn: func(info httptrace.GotConnInfo) {
+					if info.Reused {
+						reused.Store(true)
+					}
+				},
+			}))
+			request.Header.Set("Origin", service.config.PublicURL.String())
+			request.Header.Set("Idempotency-Key", idempotencyKey)
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+			if !reused.Load() || commands.Load() != 1 || response.Code != http.StatusBadGateway || !strings.Contains(response.Body.String(), `"UPSTREAM_UNAVAILABLE"`) {
+				t.Fatalf("reused=%v commands=%d status=%d body=%q", reused.Load(), commands.Load(), response.Code, response.Body.String())
 			}
 		})
 	}
