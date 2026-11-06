@@ -30296,7 +30296,10 @@ async fn forkguard_shutdown_waits_for_pending_mcp_boot_without_emitting_events()
         &Config::default(),
     );
     // A host reclaim may have stopped its event forwarder. Filling this queue
-    // also protects against using wait_for_mcp_boot's UI-emitting drain here.
+    // pins the join (not the UI-emitting drain) being used here: the queued
+    // Finished update carries a connection failure, so `wait_for_mcp_boot`'s
+    // drain would inject the boot briefing and block forever on this full
+    // queue, while the join must leave the update unconsumed.
     while engine.tx_event.try_send(Event::status("queued")).is_ok() {}
     let (done_tx, done_rx) = tokio::sync::watch::channel(false);
     let (progress_tx, progress_rx) = mpsc::unbounded_channel();
@@ -30309,11 +30312,13 @@ async fn forkguard_shutdown_waits_for_pending_mcp_boot_without_emitting_events()
     engine.mcp_boot_rx = Some(progress_rx);
     engine.mcp_boot_generation = Some(1);
     progress_tx
-        .send(McpBootUpdate::Progress {
+        .send(McpBootUpdate::Finished {
             generation: 1,
             authority_errors: Arc::new(HashMap::new()),
-            connection_errors: HashMap::new(),
-            connecting: vec!["late-server".into()],
+            connection_errors: HashMap::from([(
+                "late-server".to_string(),
+                "connection refused".to_string(),
+            )]),
         })
         .unwrap();
     let mut shutdown = Box::pin(engine.shutdown_mcp_pool());
