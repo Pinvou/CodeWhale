@@ -9,6 +9,34 @@ const id = '11111111-1111-4111-8111-111111111111';
 const orgID = '33333333-3333-4333-8333-333333333333', unitID = '44444444-4444-4444-8444-444444444444', otherID = '22222222-2222-4222-8222-222222222222';
 const root = createRoot(document.querySelector('#root'));
 const c = window.restored = { calls: [], effects: new Set(), user: id, language: 'zh', flags: {}, unknown: false, kind: new URLSearchParams(location.search).get('mode') || 'account' };
+const gridOverview = new URLSearchParams(location.search).get('gridOverview') === '1';
+if (gridOverview) {
+  c.flags = { admin_model_token_ia: true, admin_model_details: true, admin_token_details: true };
+  c.permissions = ['platform.billing.wallets.read', 'platform.products.read', 'platform.models.read', 'platform.tokens.read'];
+}
+// These opt-in DTOs match the real seven/six metric keys; emit int64 values as
+// exact JSON number tokens so the production finance parser handles them.
+const gridFinanceOverview = surface => {
+  const wallets = ['ACTIVE', 'FROZEN', 'CLOSED'];
+  const rows = surface === 'accounts' ? [
+    ['wallet_count', '2', 'COUNT', wallets],
+    ['posted_microcredits', '9223372036854775807', 'MICROCREDITS', wallets],
+    ['reserved_microcredits', '0', 'MICROCREDITS', wallets],
+    ['available_microcredits', '9223372036854775807', 'MICROCREDITS', wallets],
+    ['receivable_microcredits', '0', 'MICROCREDITS', wallets],
+    ['pending_adjustment_count', '0', 'COUNT', ['PENDING_APPROVAL']],
+    ['at_risk_hold_count', '0', 'COUNT', ['ACTIVE', 'REVIEW']],
+  ] : [
+    ['product_draft_count', '0', 'COUNT', ['DRAFT']],
+    ['product_on_sale_count', '0', 'COUNT', ['ON_SALE']],
+    ['product_off_sale_count', '0', 'COUNT', ['OFF_SALE']],
+    ['product_deleted_count', '0', 'COUNT', ['DELETED']],
+    ['admission_pending_count', '0', 'COUNT', ['PENDING']],
+    ['admission_blocked_count', '0', 'COUNT', ['MISSING', 'FAILED', 'EXPIRED', 'REVOKED']],
+  ];
+  const metrics = rows.map(([key, value, unit, included_statuses]) => `{"key":${JSON.stringify(key)},"value":${value},"unit":${JSON.stringify(unit)},"included_statuses":${JSON.stringify(included_statuses)}}`);
+  return new Response(`{"as_of":"2026-10-29T00:00:00Z","window":null,"metrics":[${metrics.join(',')}]}`, { headers: { 'Content-Type': 'application/json' } });
+};
 const json = (value, status = 200) => new Response(status === 204 ? null : JSON.stringify(value), { status, headers: { 'Content-Type': 'application/json' } });
 const roleCatalog = [
   { code: 'PLATFORM_AUDITOR', scope: 'PLATFORM', assignable: true, permissions: ['platform.audit.read', 'platform.audit.export', 'platform.billing.ledger.read', 'platform.billing.wallets.read', 'platform.models.read', 'platform.organizations.read', 'platform.roles.read', 'platform.system.status.read', 'platform.users.read', 'platform.usage.read'] },
@@ -39,8 +67,15 @@ globalThis.fetch = async (input, options = {}) => {
     for (const key of ['created_from', 'created_to', 'entered_from', 'entered_to', 'next_review_before']) if (params.get(key) && !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(params.get(key))) return json({ code: 'INVALID_TIME_WINDOW' }, 400);
   }
 
-  if (url === '/api/session') return json({ authenticated: true, csrf_token: 'CONTROL_SYNTHETIC_CSRF', feature_flags: c.flags });
+  if (url === '/api/session') return json({ authenticated: true, csrf_token: 'CONTROL_SYNTHETIC_CSRF', feature_flags: c.flags, ...(gridOverview ? { credential_origin: 'https://credentials.example.invalid' } : {}) });
   if (url.endsWith('/account/bootstrap')) return json(account());
+  if (gridOverview && method === 'GET') {
+    const pathname = new URL(url, location.origin).pathname;
+    if (pathname === '/api/admin/billing/admin/v1/finance-overviews/accounts') return gridFinanceOverview('accounts');
+    if (pathname === '/api/admin/billing/admin/v1/finance-overviews/products') return gridFinanceOverview('products');
+    if (pathname === `/api/admin/token/admin/v1/models/${id}`) return json({ model: { model_id: id, display_name: 'Controlled model', lifecycle_status: 'PUBLISHED', catalog_version: 1, capability_version: 1, protocol_code: 'CHAT', protocol_version: 1, context_length: 128000, maximum_output_tokens: 4096, supported_modalities: ['text'], tokenizer_version: 'CONTROLLED_V1', runtime_protocol: null, source_available: true }, draft: null, protocol: {}, formula: null, as_of: '2026-10-29T00:00:00Z' });
+    if (pathname === `/api/admin/token/admin/v2/token-accounts/${id}`) return json({ token_account_id: id, name: 'Controlled model account', status: 'ACTIVE', owner_type: 'USER', owner_id: id, share_scope: 'PRIVATE', account_version: 1, active_credential_count: 1, route_count: 1, updated_at: '2026-10-29T00:00:00Z' });
+  }
   if (url.endsWith('/admin/v1/roles') && method === 'GET') return json({ items: roleCatalog });
   if (url.includes('/admin/v1/role-bindings') && method === 'GET') {
     if (c.roleReadFail && c.roleReceipts.size) return json({ code: 'UPSTREAM_UNAVAILABLE' }, 503);
