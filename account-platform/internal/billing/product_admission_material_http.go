@@ -33,6 +33,11 @@ type productAdmissionOriginalValidator interface {
 	Validate(context.Context, string, []byte) error
 }
 
+// The validation slot is bounded at 45s and Transit at 10s. Retain a single
+// processing deadline that also bounds body ingress and persistence.
+const productAdmissionMaterialProcessTimeout = 60 * time.Second
+const productAdmissionMaterialWriteTimeout = 65 * time.Second
+
 // WithProductAdmissionMaterials enables only this bounded product facility.
 // The production constructor supplies the authenticated isolated validator;
 // callers cannot silently fall back to in-process parsing or plaintext storage.
@@ -118,6 +123,13 @@ func (s *Service) adminUploadProductAdmissionMaterial(w http.ResponseWriter, r *
 		s.writeError(w, r, ErrConflict)
 		return
 	}
+	if err := http.NewResponseController(w).SetWriteDeadline(time.Now().Add(productAdmissionMaterialWriteTimeout)); err != nil {
+		s.productAdmissionMaterialError(w, r, errImageValidatorUnavailable)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), productAdmissionMaterialProcessTimeout)
+	defer cancel()
+	r = r.WithContext(ctx)
 	// Read exactly one bounded original. Its digest is computed by Seal, never
 	// taken from a client header. Even a replay must match the original facts.
 	body, err := io.ReadAll(io.LimitReader(r.Body, evidenceenvelope.MaxPlaintextBytes+1))
