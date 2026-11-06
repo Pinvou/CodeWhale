@@ -4,8 +4,9 @@ import { AccountPlatformView } from '../../src/features/account-platform/Account
 import { AdminPlatformView } from '../../src/features/account-platform/AdminPlatformView.jsx';
 import { AccountPlatformBffClient } from '../../src/features/account-platform/bff-client.js';
 import { AdminPlatformClient } from '../../src/features/account-platform/admin-client.js';
+import { encodeFinanceJSON } from '../../src/features/account-platform/finance-contract.js';
 import { readClosureIntent, saveClosureIntent } from '../../src/features/account-platform/closure-intent.js';
-import { accountPlatformCopy, adminPlatformCopy, financeCopy, accountLayoutCopy, adminLayoutCopy, organizationCopy, adminRolePresentationCopy, platformRoleCopy, accountClosureCopy } from '../../src/shared/i18n.js';
+import { accountPlatformCopy, adminPlatformCopy, financeCopy, accountLayoutCopy, adminLayoutCopy, organizationCopy, adminRolePresentationCopy, platformRoleCopy, accountClosureCopy, ledgerRepairCopy } from '../../src/shared/i18n.js';
 const id = '11111111-1111-4111-8111-111111111111';
 const orgID = '33333333-3333-4333-8333-333333333333', unitID = '44444444-4444-4444-8444-444444444444', otherID = '22222222-2222-4222-8222-222222222222';
 const root = createRoot(document.querySelector('#root'));
@@ -25,6 +26,22 @@ if (closureFeedback) {
   c.seedClosureRecovery = () => saveClosureIntent({ actor: c.user, scope: `account-closure-retry:${otherID}`, key: 'closure-controlled-original-key', facts: { id: otherID, reason: 'Controlled original recovery' } });
   c.readClosureRecovery = actor => readClosureIntent(actor || c.user, `account-closure-retry:${otherID}`);
 }
+const ledgerPoints = new URLSearchParams(location.search).get('ledgerPoints') === '1';
+if (ledgerPoints) {
+  c.permissions = ['platform.billing.repairs.request', 'platform.billing.wallets.read'];
+  c.ledgerPlan = { amount: '9223372036854775807', deferred: false };
+  c.pendingLedgerReads = []; c.ledgerClients = []; c.loseLedgerDraft = true;
+  c.releaseLedgerRead = () => c.pendingLedgerReads.shift()?.();
+}
+// Closed owner projection: independent fixed response amounts are selected by
+// the test, never computed by echoing the submitted amount/conversion helper.
+const ledgerProjection = amount => ({
+  command_type: 'LEDGER_REPAIR', policy_version: 1, snapshot_schema_version: 1,
+  target_resource_type: 'LEDGER_POSTING', target_resource_id: id,
+  normalized_command: { target_posting_id: id, target_journal_entry_id: otherID, wrong_ledger_account_id: orgID, correct_ledger_account_id: unitID, amount_microcredits: amount, reason_code: 'ATTRIBUTION_TO_WRONG_PLATFORM_ACCOUNT' },
+  critical_resource_versions: { target_posting_id: id, target_journal_entry_id: otherID, posting_set_digest: 'a'.repeat(64), entry_type: 'USAGE', policy_version: 1 },
+  financial_snapshot: { amount_microcredits: amount, wrong_ledger_account_id: orgID, correct_ledger_account_id: unitID, wrong_account_type: 'ADJUSTMENT', correct_account_type: 'USAGE_REVENUE', wallet_id: null },
+});
 // These opt-in DTOs match the real seven/six metric keys; emit int64 values as
 // exact JSON number tokens so the production finance parser handles them.
 const gridFinanceOverview = surface => {
@@ -80,6 +97,23 @@ globalThis.fetch = async (input, options = {}) => {
 
   if (url === '/api/session') return json({ authenticated: true, csrf_token: 'CONTROL_SYNTHETIC_CSRF', feature_flags: c.flags, ...(gridOverview ? { credential_origin: 'https://credentials.example.invalid' } : {}) });
   if (url.endsWith('/account/bootstrap')) return json(account());
+  if (ledgerPoints) {
+    if (url === '/api/admin/account/admin/v2/approval-command-prechecks') {
+      const plan = { ...c.ledgerPlan };
+      const response = () => new Response(encodeFinanceJSON(ledgerProjection(plan.amount)), { headers: { 'Content-Type': 'application/json' } });
+      if (plan.deferred) return new Promise(resolve => c.pendingLedgerReads.push(() => resolve(response())));
+      return response();
+    }
+    if (url === '/api/admin/approvals/directory') return new Response(JSON.stringify({ schema_version: 1, platform_authorization_version: 1, items: [{ command_type: 'LEDGER_REPAIR', policy_version: 1, risk_class: 'FINANCIAL_FACT_CHANGE', requestable: true }] }), { headers: { 'Content-Type': 'application/json', 'X-Platform-Authorization-Version': '1' } });
+    if (url === '/api/admin/approvals/capability') return json({ session_approval_wire_version: 2, control: { version: 1, epoch: 1, authorization_relay_epoch: 1 } });
+    if (url === '/api/admin/approvals/requests' && method === 'POST') {
+      c.effects.add(JSON.parse(options.body).idempotency_key);
+      if (c.loseLedgerDraft) { c.loseLedgerDraft = false; throw new TypeError('Controlled lost draft acknowledgment'); }
+      return json({ approval_request_id: '55555555-5555-4555-8555-555555555555' }, 201);
+    }
+    if (url.startsWith('/api/admin/approvals/requests?')) return json({ items: [], has_more: false });
+    if (url === '/api/admin/approvals/requests/55555555-5555-4555-8555-555555555555') return json({ approval_request_id: '55555555-5555-4555-8555-555555555555', command_type: 'LEDGER_REPAIR', status: 'DRAFT', version: 1, action_control_version: 1, detail_availability: 'AVAILABLE', allowed_actions: ['EDIT', 'SUBMIT'], target: { resource_type: 'LEDGER_POSTING', resource_id: id }, command: ledgerProjection('9223372036854775807').normalized_command, reason: 'Controlled ledger correction justification' });
+  }
   if (closureFeedback && method === 'GET' && new URL(url, location.origin).pathname === '/api/admin/account/admin/v1/account-closure-requests') {
     const plan = c.closurePlan;
     if (plan.deferred) return new Promise(resolve => c.pendingClosureReads.push(() => resolve(json(plan.body, plan.status))));
@@ -204,6 +238,21 @@ let client;
 function render() {
   root.render(c.kind === 'admin' ? <AdminPlatformView client={client} copy={adminPlatformCopy[c.language]} language={c.language} onLanguageChange={value => { c.language = value; render(); }} /> : <AccountPlatformView client={client} copy={accountPlatformCopy[c.language]} language={c.language} portal onLanguageChange={value => { c.language = value; render(); }} />);
 }
-c.reload = () => { client = c.kind === 'admin' ? new AdminPlatformClient() : new AccountPlatformBffClient(); if (closureFeedback) c.closureClients.push(client); render(); };
-c.copy = () => ({ account: accountPlatformCopy[c.language], admin: adminPlatformCopy[c.language], finance: financeCopy[c.language], accountLayout: accountLayoutCopy[c.language], adminLayout: adminLayoutCopy[c.language], organization: organizationCopy[c.language], rolePresentation: adminRolePresentationCopy[c.language], roles: platformRoleCopy[c.language], closure: accountClosureCopy[c.language] });
+c.reload = () => {
+  client = c.kind === 'admin' ? new AdminPlatformClient() : new AccountPlatformBffClient();
+  if (closureFeedback) c.closureClients.push(client);
+  if (ledgerPoints) {
+    const observedClient = client, originalPrecheck = client.approvalCommandPrecheck.bind(client);
+    observedClient.ledgerReadsSettled = 0;
+    // Observe the actual client's decoded promise without replacing its result,
+    // errors, codec, dispatch, lineage or the form's acceptance decision.
+    observedClient.approvalCommandPrecheck = async (...args) => {
+      try { return await originalPrecheck(...args); }
+      finally { observedClient.ledgerReadsSettled++; }
+    };
+    c.ledgerClients.push(observedClient);
+  }
+  render();
+};
+c.copy = () => ({ account: accountPlatformCopy[c.language], admin: adminPlatformCopy[c.language], finance: financeCopy[c.language], accountLayout: accountLayoutCopy[c.language], adminLayout: adminLayoutCopy[c.language], organization: organizationCopy[c.language], rolePresentation: adminRolePresentationCopy[c.language], roles: platformRoleCopy[c.language], closure: accountClosureCopy[c.language], ledger: ledgerRepairCopy[c.language] });
 c.reload();

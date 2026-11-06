@@ -43,8 +43,123 @@ try {
   const run = async (name, action) => {
     if (process.env.UI_CASE && !name.includes(process.env.UI_CASE)) { skipped++; return; }
     try { await action(); assert.deepEqual(errors, [], 'uncaught UI error'); console.log(`PASS ${name}`); passed++; }
-    catch (error) { console.error(JSON.stringify({ case: name, pageErrors: errors, dialog: await page.evaluate(() => document.querySelector('[role=dialog]')?.textContent.slice(0, 1200)) })); throw error; }
+    catch (error) {
+      const ledger = name === 'ledger points preserve exact precheck and frozen replay' ? await page.evaluate(() => {
+        const form = document.querySelector('.adm-financial-repair'), amount = form?.querySelector('[data-ledger-amount]');
+        return { amount: amount && { value: amount.value, disabled: amount.disabled, invalid: amount.getAttribute('aria-invalid'), required: amount.required, valid: amount.validity.valid }, buttons: [...(form?.querySelectorAll('button') || [])].map(node => ({ text: node.textContent, disabled: node.disabled, laidOut: node.getClientRects().length > 0 })), prechecks: window.restored?.calls.filter(call => call.url === '/api/admin/account/admin/v2/approval-command-prechecks').length, drafts: window.restored?.calls.filter(call => call.method === 'POST' && call.url === '/api/admin/approvals/requests').length, text: form?.textContent.slice(0, 2400) };
+      }).catch(() => ({ unavailable: true })) : undefined;
+      console.error(JSON.stringify({ case: name, pageErrors: errors, ledger, dialog: await page.evaluate(() => document.querySelector('[role=dialog]')?.textContent.slice(0, 1200)) })); throw error;
+    }
   };
+  await run('ledger points preserve exact precheck and frozen replay', async () => {
+    const form = '.adm-financial-repair', amount = `${form} [data-ledger-amount]`;
+    const precheckURL = '/api/admin/account/admin/v2/approval-command-prechecks';
+    const draftURL = '/api/admin/approvals/requests';
+    const copy = async () => (await page.evaluate(() => window.restored.copy())).ledger;
+    const fill = async (selector, value) => {
+      const modifier = process.platform === 'darwin' ? 'Meta' : 'Control';
+      await page.focus(selector); await page.keyboard.down(modifier); await page.keyboard.press('KeyA'); await page.keyboard.up(modifier); await page.keyboard.press('Backspace');
+      assert.equal(await page.$eval(selector, node => node.value), '', 'keyboard replacement clears the complete prior input');
+      if (value) await page.type(selector, value);
+      assert.equal(await page.$eval(selector, node => node.value), value, 'actual input text equals the requested keyboard entry');
+    };
+    const read = async (expectedPoints, expectedMicrocredits) => {
+      const ready = await page.$eval(`${form} .adm-financial-repair-target`, node => ({ value: node.querySelector('[data-ledger-amount]').value, invalid: node.querySelector('[data-ledger-amount]').getAttribute('aria-invalid'), buttonText: node.querySelector('button').textContent, disabled: node.querySelector('button').disabled, hint: node.querySelector('small').textContent }));
+      assert.equal(ready.value, expectedPoints);
+      assert.equal(ready.invalid, null);
+      assert.equal(ready.buttonText, (await copy()).readFacts);
+      assert.ok(ready.hint.includes((await copy()).amountPointsEquivalent.replace('{amount}', expectedMicrocredits)));
+      assert.equal(ready.disabled, false, `valid read must be enabled: ${JSON.stringify(ready)}`);
+      await click(`${form} .adm-financial-repair-target button`, (await copy()).readFacts);
+    };
+    const calls = url => page.evaluate(url => window.restored.calls.filter(call => call.url === url && call.method === 'POST'), url);
+    const settleRead = () => page.waitForFunction(selector => { const node = document.querySelector(selector); return node && !node.disabled; }, {}, amount);
+    await fresh('?mode=admin&ledgerPoints=1&section=billing&finance_tab=ledger');
+    await page.waitForSelector(amount);
+    for (const language of ['zh', 'en', 'ja', 'zh']) {
+      await page.evaluate(language => { window.restored.language = language; window.restored.reload(); }, language);
+      await page.waitForFunction(({ selector, language }) => document.querySelector(selector)?.parentElement.textContent.includes(window.restored.copy().ledger.amountPointsLabel) && window.restored.language === language, {}, { selector: amount, language });
+      assert.ok(await page.$eval(form, (node, hint) => node.textContent.includes(hint), (await copy()).amountPointsHint));
+    }
+    const ids = ['11111111-1111-4111-8111-111111111111', '22222222-2222-4222-8222-222222222222', '33333333-3333-4333-8333-333333333333', '44444444-4444-4444-8444-444444444444'];
+    for (let index = 0; index < ids.length; index++) await fill(`${form} .adm-financial-repair-target label:nth-of-type(${index + 2}) input`, ids[index]);
+    await fill(amount, '1.2345');
+    await page.evaluate(() => { window.restored.ledgerPlan = { amount: '12345', deferred: false }; });
+    await read('1.2345', '12345'); await page.waitForSelector(`${form} .adm-financial-repair-draft`);
+    const first = (await calls(precheckURL)).at(-1);
+    assert.match(first.body, /"amount_microcredits":12345[,}]/, 'business points reach actual precise microcredit wire');
+    assert.equal(JSON.parse(first.body).target_resource_id, ids[0]);
+    assert.ok((await page.$eval(form, node => node.textContent)).includes((await copy()).amountPointsEquivalent.replace('{amount}', '12345')));
+    const beforeInvalid = (await calls(precheckURL)).length;
+    for (const invalid of ['1.23456', '0', '-1', '1e2', '922337203685477.5808', '']) {
+      await fill(amount, invalid); await page.keyboard.press('Tab');
+      assert.equal(await page.$(`${form} .adm-financial-repair-draft`), null, 'editing invalidates the previously accepted projection');
+      if (invalid) {
+        assert.equal(await page.$eval(amount, node => node.getAttribute('aria-invalid')), 'true');
+        assert.ok((await page.$eval(form, node => node.textContent)).includes((await copy()).amountPointsInvalid));
+        assert.equal(await page.$eval(`${form} .adm-financial-repair-target button`, node => node.disabled), true);
+      } else {
+        await page.$eval(`${form} .adm-financial-repair-target`, node => node.requestSubmit());
+      }
+      assert.equal((await calls(precheckURL)).length, beforeInvalid, 'invalid current amount cannot dispatch the previous amount');
+      assert.equal((await calls(draftURL)).length, 0);
+    }
+    await fill(amount, '1.2345');
+    await page.evaluate(() => { window.restored.ledgerPlan = { amount: '12344', deferred: false }; });
+    await read('1.2345', '12345'); await settleRead();
+    assert.equal(await page.$(`${form} .adm-financial-repair-draft`), null, 'one microcredit mismatch is rejected');
+    assert.ok((await page.$eval(form, node => node.textContent)).includes((await copy()).factsFailed));
+    await page.evaluate(() => { window.restored.ledgerPlan = { amount: '12345', deferred: true }; });
+    const heldClient = await page.evaluate(() => ({ index: window.restored.ledgerClients.length - 1, settled: window.restored.ledgerClients.at(-1).ledgerReadsSettled }));
+    await read('1.2345', '12345'); await page.waitForFunction(() => window.restored.pendingLedgerReads.length === 1);
+    assert.equal(await page.$$eval(`${form} .adm-financial-repair-target input`, nodes => nodes.every(node => node.disabled)), true, 'held read locks editable inputs');
+    await page.evaluate(() => window.restored.reload());
+    await settleRead();
+    await page.evaluate(() => window.restored.releaseLedgerRead());
+    await page.waitForFunction(({ index, settled }) => window.restored.ledgerClients[index].ledgerReadsSettled === settled + 1, {}, heldClient);
+    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(resolve)));
+    assert.equal(await page.$(`${form} .adm-financial-repair-draft`), null, 'retired client response cannot restore an accepted projection');
+    // Refreshing the real parent can remount its children. Re-enter references.
+    for (let index = 0; index < ids.length; index++) await fill(`${form} .adm-financial-repair-target label:nth-of-type(${index + 2}) input`, ids[index]);
+    await fill(amount, '922337203685477.5807');
+    await page.evaluate(() => { window.restored.ledgerPlan = { amount: '9223372036854775807', deferred: false }; });
+    await read('922337203685477.5807', '9223372036854775807'); await page.waitForSelector(`${form} .adm-financial-repair-draft`);
+    assert.match((await calls(precheckURL)).at(-1).body, /"amount_microcredits":9223372036854775807[,}]/);
+    await fill(`${form} .adm-financial-repair-draft textarea`, 'Controlled ledger correction justification');
+    await fill(`${form} .adm-financial-repair-draft input`, 'controlled-ledger-key');
+    if (process.env.UI_SCREENSHOT_DIR) {
+      fs.mkdirSync(process.env.UI_SCREENSHOT_DIR, { recursive: true });
+      for (const width of [1440, 390]) {
+        await page.setViewport({ width, height: 1000 }); await noOverflow();
+        await page.$eval(form, node => node.scrollIntoView({ block: 'start' }));
+        await page.screenshot({ path: path.join(process.env.UI_SCREENSHOT_DIR, `ledger-points-${width}.png`), fullPage: true });
+      }
+      await page.setViewport({ width: 1440, height: 1000 });
+    }
+    await click(`${form} .adm-financial-repair-draft button`, (await copy()).createDraft);
+    await page.waitForFunction(selector => document.querySelector(selector)?.textContent.includes(window.restored.copy().ledger.recoveryPending), {}, form);
+    const original = (await calls(draftURL))[0];
+    assert.match(original.body, /"amount_microcredits":9223372036854775807[,}]/);
+    assert.equal(JSON.parse(original.body).idempotency_key, 'approval:controlled-ledger-key');
+    const proof = await page.evaluate(() => {
+      const entry = Object.entries(document.defaultView.sessionStorage).find(([key]) => key.startsWith('pinvou.ledger-repair.intent.v1:'));
+      if (!entry) throw new Error('Original ledger proof missing'); return entry;
+    });
+    assert.equal(JSON.parse(proof[1]).facts.projection.normalized_command.amount_microcredits, '9223372036854775807');
+    await page.reload({ waitUntil: 'domcontentloaded', timeout: 60000 }); await page.waitForSelector(amount);
+    await page.waitForFunction(selector => document.querySelector(selector)?.value === '922337203685477.5807' && document.querySelector(selector).disabled, {}, amount);
+    assert.equal(await page.evaluate(key => document.defaultView.sessionStorage.getItem(key), proof[0]), proof[1], 'refresh retains exact original proof bytes');
+    assert.equal((await calls(precheckURL)).length, 0, 'restoring unknown does not derive new facts');
+    assert.equal((await calls(draftURL)).length, 0, 'refresh does not automatically repeat a write');
+    await page.evaluate(() => { window.restored.loseLedgerDraft = false; window.restored.ledgerPlan.amount = '1'; });
+    await click(`${form} .adm-financial-repair-draft button`, (await copy()).retry);
+    await page.waitForFunction(() => !Object.keys(document.defaultView.sessionStorage).some(key => key.startsWith('pinvou.ledger-repair.intent.v1:')));
+    const replay = (await calls(draftURL))[0];
+    assert.equal(replay.body, original.body, 'explicit replay retains original amount, complete frozen facts and key');
+    assert.equal((await calls(precheckURL)).length, 0, 'retry never re-prechecks with a different current amount');
+    assert.equal(await page.evaluate(() => window.restored.effects.size), 1);
+    assert.equal(await page.evaluate(() => window.restored.calls.filter(call => call.method !== 'GET' && !call.url.endsWith('/account/bootstrap') && call.url !== '/api/admin/approvals/requests').length), 0, 'no approval submit, ledger mutation or unrelated write');
+  });
   await run('closure directory feedback separates pending empty error permission and retained recovery', async () => {
     const actor = '11111111-1111-4111-8111-111111111111', target = '22222222-2222-4222-8222-222222222222';
     const directory = '.adm-closure-directory';
