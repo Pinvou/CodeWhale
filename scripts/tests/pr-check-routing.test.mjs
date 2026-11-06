@@ -586,6 +586,52 @@ test("each independently changed Account Platform translation input triggers its
   assert.match(releaseGate, /check-account-platform-i18n\.mjs/);
 });
 
+test("Account Go routing skips desktop notes and generated assets but retains mixed changes", () => {
+  const paths = filterPaths(workflow, "account_platform");
+  assert.match(workflow, /predicate-quantifier: some-with-excludes/);
+  const required = changed => changed.some(file =>
+    paths.some(pattern => !pattern.startsWith("!") && matchesGlob(file, pattern)) &&
+    !paths.some(pattern => pattern.startsWith("!") && matchesGlob(file, pattern.slice(1))));
+  const desktop = [
+    "account-platform/docs/draft-model-confirmation.md",
+    "pinvou3-app/src/platform/tauri/bridge/chat.js",
+    "pinvou3-app/src/platform/tauri/bridge/sessions.js",
+    "pinvou3-app/tests/session_nav_race.test.mjs",
+  ];
+  const assets = [
+    "account-platform/internal/portal/static/account.html",
+    "account-platform/internal/portal/static/assets/admin-old.js",
+    "account-platform/internal/portal/static/assets/admin-new.js",
+  ];
+  assert.equal(required(desktop), false);
+  assert.equal(required(assets), false);
+  for (const file of [
+    "account-platform/internal/billing/payment_admission.go",
+    "account-platform/internal/portal/static.go",
+    "account-platform/go.mod",
+    "account-platform/go.sum",
+    "account-platform/migrations/billing/new.sql",
+    "account-platform/deploy/helm/account-platform/values.yaml",
+    "account-platform/contracts/openapi/new.yaml",
+    "account-platform/test/contract/new.test.mjs",
+    "account-platform/docs/requirements.md",
+    "account-platform/docs/new-policy.md",
+    "scripts/test-token-financial-postgres.py",
+    ".github/workflows/pr-check.yml",
+    "scripts/tests/pr-check-routing.test.mjs",
+  ]) {
+    assert.equal(required([file]), true, file);
+    assert.equal(required([...desktop, ...assets, file]), true, `mixed ${file}`);
+  }
+  const frontend = filterPaths(workflow, "frontend");
+  for (const file of assets) {
+    assert.ok(frontend.some(pattern => !pattern.startsWith("!") && matchesGlob(file, pattern)), file);
+  }
+  const gate = jobBlock("required-gate");
+  assert.match(gate, /ACCOUNT_PLATFORM_REQUIRED: \$\{\{ needs\.changes\.outputs\.account_platform \}\}/);
+  assert.match(gate, /if \[\[ "\$ACCOUNT_PLATFORM_REQUIRED" == "true" && "\$ACCOUNT_PLATFORM_RESULT" != success \]\]/);
+});
+
 test("Account Platform changes cannot bypass the Go gate at any PR or queue stage", () => {
   const paths = filterPaths(workflow, "account_platform");
   for (const path of ["scripts/check-account-platform-authorization-coverage.mjs", "scripts/tests/account-platform-authorization-coverage.test.mjs", "scripts/tests/test_postgres_backup.py", "scripts/tests/test_postgres_backup_job.py", "scripts/tests/test_user_realm.py"]) {
