@@ -1005,7 +1005,12 @@ pub fn route_is_official_deepseek_family(provider: ApiProvider, base_url: &str) 
     ) {
         return false;
     }
-    let normalized = base_url.trim().trim_end_matches('/').to_ascii_lowercase();
+    // No whitespace trimming: the doctor's URL classifier and the client's
+    // strict-host sets string-match the same URL without trimming, so
+    // admitting a padded URL here alone would put the pipeline in scope on
+    // a route the wire does not canonicalize — the flag would leak past the
+    // non-beta strip. A padded URL degrades to out-of-scope instead.
+    let normalized = base_url.trim_end_matches('/').to_ascii_lowercase();
     let official_host = |prefix: &str| {
         normalized == prefix
             || normalized
