@@ -33,6 +33,10 @@ try {
   browser = await puppeteer.launch({ executablePath: chrome, headless: 'new', userDataDir: profile, args: ['--no-sandbox', '--disable-gpu', '--no-first-run'] });
   page = await browser.newPage(); await page.setViewport({ width: 1280, height: 960 });
   const errors = []; page.on('pageerror', error => errors.push(error.name));
+  // CI 引导挂死取证（2026-11-06 双头 TimeoutError，60s/150s 均不 ready）：
+  // 页面报错与失败请求直通 smoke stderr，否则挂死点不可见。
+  page.on('console', message => { if (message.type() === 'error') console.error('[f05][page]', message.text().slice(0, 200)); });
+  page.on('requestfailed', request => console.error('[f05][reqfail]', request.url().slice(0, 140), request.failure()?.errorText || ''));
   await page.evaluateOnNewDocument(existingProducer);
   await page.evaluateOnNewDocument(() => {
     const baseline = window.__TAURI__.core.invoke;
@@ -88,11 +92,14 @@ try {
   });
   const fresh = async language => {
     errors.length = 0;
-    // fixture 页经 vite dev 冷变换加载整条 app import 链：满载 runner 上首启
-    // 可超 puppeteer 默认 30s（2026-11-06 PR #1661 组合树实证，双 attempt 同
-    // 败），setup/ready 等待放宽到 60s。
-    await page.goto(`http://127.0.0.1:${vite.httpServer.address().port}/tests/fixtures/account-platform-f05-model-lifecycle.html`, { timeout: 60_000 });
-    await page.waitForFunction(() => window.f05Lifecycle?.ready && document.querySelector('textarea'), { timeout: 60_000 });
+    // fixture 页经 vite dev 冷变换加载整条 app import 链：CI runner 上首启
+    // 实测 60s 仍不 ready（2026-11-06 PR #1661，双头复现；每次运行 profile
+    // 均为全新 tmpdir，vite 缓存全冷）。放宽到 150s 并打印实际耗时，若仍超
+    // 限则为结构性问题（需预热/拆分 import 面），不再是等待时长问题。
+    const bootStarted = Date.now();
+    await page.goto(`http://127.0.0.1:${vite.httpServer.address().port}/tests/fixtures/account-platform-f05-model-lifecycle.html`, { timeout: 150_000 });
+    await page.waitForFunction(() => window.f05Lifecycle?.ready && document.querySelector('textarea'), { timeout: 150_000 });
+    console.error(`[f05] ${language} boot ready in ${Date.now() - bootStarted}ms`);
     await page.evaluate(async language => { window.f05Lifecycle.language = language; await window.f05Lifecycle.render(); }, language);
   };
   const shown = () => page.evaluate(() => document.body.textContent.includes(window.f05Lifecycle.copy().uiModelReplacement.title));
