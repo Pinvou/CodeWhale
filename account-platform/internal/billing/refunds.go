@@ -78,8 +78,19 @@ func (p *PaymentCoordinator) ListOrders(ctx context.Context, requesterID, wallet
 	if limit <= 0 || limit > 100 {
 		limit = 50
 	}
-	rows, err := p.repository.pool.Query(ctx, `SELECT po.id,po.merchant_order_no,po.product_id,COALESCE(po.product_snapshot->>'plan_name',po.product_id),COALESCE(catalog.display_name_zh_cn,''),COALESCE(catalog.display_name_en,''),COALESCE(catalog.display_name_ja,''),COALESCE(po.provider_sku,po.product_snapshot->>'sku_code',''),po.amount_fen,COALESCE((po.product_snapshot->>'display_points')::bigint,po.credit_microcredits/10000),po.channel,po.status,po.fulfillment_status,po.close_status,po.expires_at,po.paid_at,packages.credited_at,packages.valid_until,po.created_at
-		FROM payment_orders po LEFT JOIN recharge_product_catalog_items catalog ON catalog.product_id=po.product_id LEFT JOIN LATERAL (SELECT min(credited_at) credited_at,max(valid_until) valid_until FROM entitlement_packages WHERE payment_order_id=po.id) packages ON true WHERE po.requester_id=$1 AND po.wallet_id=$2 ORDER BY po.created_at DESC,po.id DESC LIMIT $3`, requesterID, walletID, limit)
+	return p.listOrderHistory(ctx, requesterID, walletID, limit, nil)
+}
+
+func (p *PaymentCoordinator) listOrderHistory(ctx context.Context, requesterID, walletID uuid.UUID, limit int, cursor *orderHistoryCursor) ([]PaymentOrderHistoryItem, error) {
+	query := `SELECT po.id,po.merchant_order_no,po.product_id,COALESCE(po.product_snapshot->>'plan_name',po.product_id),COALESCE(catalog.display_name_zh_cn,''),COALESCE(catalog.display_name_en,''),COALESCE(catalog.display_name_ja,''),COALESCE(po.provider_sku,po.product_snapshot->>'sku_code',''),po.amount_fen,COALESCE((po.product_snapshot->>'display_points')::bigint,po.credit_microcredits/10000),po.channel,po.status,po.fulfillment_status,po.close_status,po.expires_at,po.paid_at,packages.credited_at,packages.valid_until,po.created_at
+		FROM payment_orders po LEFT JOIN recharge_product_catalog_items catalog ON catalog.product_id=po.product_id LEFT JOIN LATERAL (SELECT min(credited_at) credited_at,max(valid_until) valid_until FROM entitlement_packages WHERE payment_order_id=po.id) packages ON true WHERE po.requester_id=$1 AND po.wallet_id=$2`
+	args := []any{requesterID, walletID, limit}
+	if cursor != nil {
+		query += ` AND (po.created_at,po.id)<($4,$5)`
+		args = append(args, cursor.CreatedAt, cursor.ID)
+	}
+	query += ` ORDER BY po.created_at DESC,po.id DESC LIMIT $3`
+	rows, err := p.repository.pool.Query(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}

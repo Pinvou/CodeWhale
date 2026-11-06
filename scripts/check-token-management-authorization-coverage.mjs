@@ -510,7 +510,7 @@ export function loadInputs(base = root) {
   return {
     routeSource: read('account-platform/internal/token/management_routes.go'),
     organizationFinanceSource: read('account-platform/internal/token/organization_finance_routes.go'),
-    organizationHandlerSource: read('account-platform/internal/token/organization_billing.go') + '\n' + read('account-platform/internal/token/organization_model_policy.go') + '\n' + read('account-platform/internal/token/account_closed_grants.go'),
+    organizationHandlerSource: read('account-platform/internal/token/organization_order_history.go') + '\n' + read('account-platform/internal/token/organization_billing.go') + '\n' + read('account-platform/internal/token/organization_model_policy.go') + '\n' + read('account-platform/internal/token/account_closed_grants.go'),
     organizationFinance: json('account-platform/contracts/openapi/organization-finance.yaml'),
     organizationAccountSource: read('account-platform/internal/account/organization_routes.go'),
     memberUnits: json('account-platform/contracts/openapi/organization-member-units.yaml'),

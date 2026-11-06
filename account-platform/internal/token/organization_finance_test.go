@@ -34,6 +34,14 @@ func TestOrganizationFinanceAuthorityAndWalletScope(t *testing.T) {
 		{"denied-products", "denied", "GET", "/recharge/products", "", 403},
 		{"denied-capabilities", "denied", "GET", "/payment-capabilities", "", 403},
 		{"order", "valid", "GET", "/recharge/orders/" + order.String(), "", 200},
+		{"history", "valid", "GET", "/recharge/orders?cursor=cGFnZQ", "", 200},
+		{"denied-history", "denied", "GET", "/recharge/orders", "", 403},
+		{"foreign-history-wallet", "foreign-history-wallet", "GET", "/recharge/orders", "", 502},
+		{"foreign-history-requester", "foreign-history-requester", "GET", "/recharge/orders", "", 502},
+		{"duplicate-history-orders", "duplicate-history-orders", "GET", "/recharge/orders", "", 502},
+		{"forged-history-wallet", "valid", "GET", "/recharge/orders?wallet_id=" + other.String(), "", 400},
+		{"duplicate-history-cursor", "valid", "GET", "/recharge/orders?cursor=a&cursor=b", "", 400},
+		{"invalid-history-cursor", "valid", "GET", "/recharge/orders?cursor=invalid%20cursor", "", 400},
 		{"foreign-order-org", "foreign-order-org", "GET", "/recharge/orders/" + order.String(), "", 404},
 		{"foreign-order-wallet", "foreign-order-wallet", "GET", "/recharge/orders/" + order.String(), "", 404},
 		{"create", "valid", "POST", "/recharge/orders", `{"product_id":"owned-product","channel":"alipay"}`, 201},
@@ -116,6 +124,27 @@ func TestOrganizationFinanceAuthorityAndWalletScope(t *testing.T) {
 					}
 					_, _ = fmt.Fprint(w, `{"channels":["ALIPAY"]}`)
 				case "/internal/v1/recharge/orders":
+					if r.Method == http.MethodGet {
+						if r.URL.Query().Get("requester_id") != user.String() || r.URL.Query().Get("wallet_id") != wallet.String() || r.URL.Query().Get("limit") != "50" {
+							t.Error("order history lost its resolved payer/wallet boundary")
+						}
+						if tc.name == "history" && r.URL.Query().Get("cursor") != "cGFnZQ" {
+							t.Error("history cursor was not forwarded")
+						}
+						requester, scopeWallet := user, wallet
+						if tc.kind == "foreign-history-requester" {
+							requester = other
+						}
+						if tc.kind == "foreign-history-wallet" {
+							scopeWallet = other
+						}
+						items := []map[string]any{{"order_id": order, "amount_fen": int64(9007199254740993)}}
+						if tc.kind == "duplicate-history-orders" {
+							items = append(items, items[0])
+						}
+						_ = json.NewEncoder(w).Encode(map[string]any{"requester_id": requester, "wallet_id": scopeWallet, "items": items, "next_cursor": nil})
+						return
+					}
 					create.Add(1)
 					var in struct {
 						Requester, Wallet, Org   uuid.UUID
@@ -179,6 +208,9 @@ func TestOrganizationFinanceAuthorityAndWalletScope(t *testing.T) {
 			}
 			if tc.name == "balance" && !strings.Contains(out.Body.String(), "9007199254740993") {
 				t.Error("organization amount lost exact int64 bytes")
+			}
+			if tc.name == "history" && (!strings.Contains(out.Body.String(), "9007199254740993") || out.Header().Get("Cache-Control") != "no-store" || !strings.Contains(out.Body.String(), org.String())) {
+				t.Error("organization history lost exact monetary bytes, owner binding or no-store policy")
 			}
 		})
 	}

@@ -183,6 +183,7 @@ REFUND_REQUIRED = {
     "TestRefundOriginalUnknownSuccessQueriesAndSettlesOrdinaryGrantsPostgres",
 }
 RETAINED_REQUIRED = {
+    "TestRetainedOrganizationOrderHistoryPagination",
     "TestEscalatedForcedRefundRequiresSecondActorAndReplays",
     "TestEscalatedForcedRefundAtomicRollbackPostgres",
     "TestEscalatedForcedRefundEvidenceAndReceiptGuardsPostgres",

@@ -1340,6 +1340,20 @@
       ]
     },
     {
+      "method": "get",
+      "path": "/v1/organizations/{organization_id}/recharge/orders",
+      "handler": "listOrganizationRechargeOrders",
+      "authority": {
+        "kind": "bearer_organization",
+        "all": [
+          "org.entitlements.purchase"
+        ]
+      },
+      "gates": [
+        "MANAGEMENT_ENABLED"
+      ]
+    },
+    {
       "method": "post",
       "path": "/v1/organizations/{organization_id}/recharge/orders",
       "handler": "createOrganizationRechargeOrder",

@@ -16,6 +16,18 @@ type OrganizationBillingClient interface {
 	RevokeOrganizationQuota(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, string, string) (json.RawMessage, error)
 }
 
+type OrganizationOrderHistoryClient interface {
+	OrganizationRechargeOrders(context.Context, uuid.UUID, uuid.UUID, string) (json.RawMessage, error)
+}
+
+func (c *HTTPBillingClient) OrganizationRechargeOrders(ctx context.Context, requesterID, walletID uuid.UUID, cursor string) (json.RawMessage, error) {
+	query := url.Values{"requester_id": {requesterID.String()}, "wallet_id": {walletID.String()}, "limit": {"50"}}
+	if cursor != "" {
+		query.Set("cursor", cursor)
+	}
+	return c.raw(ctx, http.MethodGet, "/internal/v1/recharge/orders?"+query.Encode(), nil, "")
+}
+
 func (c *HTTPBillingClient) CreateOrganizationRechargeOrder(ctx context.Context, requesterID, walletID, organizationID uuid.UUID, productID, channel, mobile, commerceCustomerStatus, idempotencyKey string) (json.RawMessage, error) {
 	return c.raw(ctx, http.MethodPost, "/internal/v1/recharge/orders", map[string]any{"requester_id": requesterID, "beneficiary_organization_id": organizationID, "wallet_id": walletID, "product_id": productID, "channel": channel, "mobile": mobile, "commerce_customer_status": commerceCustomerStatus}, idempotencyKey)
 }

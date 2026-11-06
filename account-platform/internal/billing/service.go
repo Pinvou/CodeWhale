@@ -453,6 +453,25 @@ func (s *Service) listRechargeOrders(w http.ResponseWriter, r *http.Request) {
 		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid recharge order list", httpserver.RequestID(r.Context()))
 		return
 	}
+	if r.URL.Query().Has("limit") || r.URL.Query().Has("cursor") {
+		limit, err := strconv.Atoi(r.URL.Query().Get("limit"))
+		if err != nil || limit < 1 || limit > 100 || len(r.URL.Query()["limit"]) != 1 || len(r.URL.Query()["cursor"]) > 1 {
+			api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid order history page", httpserver.RequestID(r.Context()))
+			return
+		}
+		if _, err := parseOrderHistoryCursor(r.URL.Query().Get("cursor")); err != nil {
+			api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid order history cursor", httpserver.RequestID(r.Context()))
+			return
+		}
+		page, err := s.payments.OrderHistoryPage(r.Context(), requesterID, walletID, limit, r.URL.Query().Get("cursor"))
+		if err != nil {
+			s.writeError(w, r, err)
+			return
+		}
+		w.Header().Set("Cache-Control", "no-store")
+		api.WriteJSON(w, http.StatusOK, page)
+		return
+	}
 	items, err := s.payments.ListOrders(r.Context(), requesterID, walletID, 50)
 	if err != nil {
 		s.writeError(w, r, err)

@@ -3,7 +3,7 @@
   "info": {
     "title": "Token organization finance and model policy",
     "version": "1.0.0",
-    "description": "Finite13 existing models-management assembly operations. Personal factory does not install these paths (404); bearer identity plus current Account organization permissions are independently verified. No new authority is introduced. Quota batches bind complete ordered parent facts before allocation and retain their original identity on unknown outcomes. Read Billing projections are explicitly partial, monetary JSON int64 must be decoded losslessly; signed readiness and personal invocation remain separate."
+    "description": "Finite14 existing models-management assembly operations. Personal factory does not install these paths (404); bearer identity plus current Account organization permissions are independently verified. No new authority is introduced. Quota batches bind complete ordered parent facts before allocation and retain their original identity on unknown outcomes. Read Billing projections are explicitly partial, monetary JSON int64 must be decoded losslessly; signed readiness and personal invocation remain separate."
   },
   "paths": {
     "/v1/organizations/{organization_id}/model-policy": {
@@ -366,6 +366,68 @@
             }
           }
         }
+      },
+      "get": {
+        "operationId": "listOrganizationRechargeOrdersGet",
+        "security": [
+          {
+            "UserBearer": []
+          }
+        ],
+        "x-go-handler": "listOrganizationRechargeOrders",
+        "x-authority": {
+          "kind": "bearer_organization",
+          "all": [
+            "org.entitlements.purchase"
+          ]
+        },
+        "x-governance-gates": [
+          "MANAGEMENT_ENABLED"
+        ],
+        "description": "Lists only the current requester’s orders for the wallet resolved from the authorized organization. Read-only keyset pagination; no provider query or payment instruction is returned.",
+        "parameters": [
+          {
+            "name": "organization_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 256,
+              "pattern": "^[A-Za-z0-9_-]+$"
+            },
+            "description": "Opaque position returned by next_cursor; requester, wallet and organization cannot be supplied by the caller."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Up to 50 owned historical orders; null next_cursor marks the final page.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrganizationOrderHistoryPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid cursor or query fields."
+          },
+          "403": {
+            "description": "Current organization purchase permission denied."
+          },
+          "503": {
+            "description": "History unavailable; not an empty result."
+          }
+        }
       }
     },
     "/v1/organizations/{organization_id}/recharge/orders/{order_id}": {
@@ -528,14 +590,14 @@
               }
             }
           },
-          "default": {
-            "description": "Existing bearer/organization authority and handler error mapping; no new response behavior is introduced."
-          },
           "409": {
             "description": "The parent key was already frozen with different actor or ordered request facts; no child allocation is attempted."
           },
           "503": {
             "description": "Parent persistence outcome is unknown. Retain the original key and complete ordered facts; do not create a new logical batch."
+          },
+          "default": {
+            "description": "Existing bearer/organization authority and handler error mapping; no new response behavior is introduced."
           }
         },
         "requestBody": {
@@ -1084,6 +1146,33 @@
           }
         },
         "description": "Each item commits independently. SUCCEEDED includes result; FAILED includes code. Retry retains the original batch key and stable indexed grant subkeys."
+      },
+      "OrganizationOrderHistoryPage": {
+        "type": "object",
+        "required": [
+          "organization_id",
+          "items",
+          "next_cursor"
+        ],
+        "properties": {
+          "organization_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "items": {
+            "type": "array",
+            "maxItems": 50,
+            "items": {
+              "$ref": "#/components/schemas/PartialProjection"
+            }
+          },
+          "next_cursor": {
+            "type": "string",
+            "nullable": true,
+            "maxLength": 256
+          }
+        },
+        "description": "Order summaries retain exact money encoding and snapshot product facts. Full order/payment details still use the existing requester-scoped endpoint."
       }
     }
   }

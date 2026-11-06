@@ -270,7 +270,7 @@ test('the installed Token Handler must still register the invocation routes', ()
 
 test('organization finance registration cannot disappear outside the management inventory', () => {
   const result = checkCoverage(inputs);
-  assert.equal(result.organizationFinanceRoutes, 13);
+  assert.equal(result.organizationFinanceRoutes, 14);
 });
 
 test('organization finance recognizes the path guard without weakening its middleware grammar', () => {
@@ -281,9 +281,9 @@ test('organization finance recognizes the path guard without weakening its middl
   const legacy = route.replace('httpserver.RequirePathSuffix("/quota-grants:batch"), ', '');
   const legacySource = inputs.organizationFinanceSource.replace(route, legacy);
   assert.ok(legacySource.includes(legacy));
-  assert.equal(checkCoverage({ ...inputs, organizationFinanceSource: legacySource }).organizationFinanceRoutes, 13);
+  assert.equal(checkCoverage({ ...inputs, organizationFinanceSource: legacySource }).organizationFinanceRoutes, 14);
   const guardedSource = legacySource.replace(legacy, route);
-  assert.equal(checkCoverage({ ...inputs, organizationFinanceSource: guardedSource }).organizationFinanceRoutes, 13);
+  assert.equal(checkCoverage({ ...inputs, organizationFinanceSource: guardedSource }).organizationFinanceRoutes, 14);
   for (const replacement of [
     route.replace('httpserver.RequirePathSuffix("/quota-grants:batch")', 'httpserver.RequirePathSuffix("/quota-grants:batchOther")'),
     route.replace('httpserver.RequirePathSuffix("/quota-grants:batch"), ', 'httpserver.RequirePathSuffix("/quota-grants:batch"), httpserver.RequirePathSuffix("/quota-grants:batch"), '),
@@ -447,7 +447,7 @@ const withReceiver = (handler, call, declaration, receiver) => organizationHandl
 });
 const ordinaryHandlers = inputs.manifest.organizationFinanceRoutes.filter(route =>
   !['organizationModelPolicy', 'reclaimClosedGrant', 'reclaimClosedGrantsBatch'].includes(route.handler));
-assert.equal(ordinaryHandlers.length, 9);
+assert.equal(ordinaryHandlers.length, 10);
 for (const route of ordinaryHandlers) {
   test(`ordinary ${route.handler} rejects a qualified field instead of its root receiver`, () => {
     const call = `s.resolveOrganizationBilling(w, r, "${route.authority.all[0]}")`;
