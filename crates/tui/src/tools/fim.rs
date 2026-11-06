@@ -424,4 +424,26 @@ mod tests {
             "empty suffix after an EOF-ending prefix must pass validation: {message}"
         );
     }
+
+    #[tokio::test]
+    async fn self_overlapping_prefix_is_counted_without_overlap() {
+        // "aa" overlaps itself inside "aaa": an overlapping counter would
+        // report 2 locations and refuse, but occurrences are counted
+        // without overlap — the rule the schema copy discloses — so the
+        // single site passes and the call reaches the API boundary.
+        let (_tmp, context) = workspace_with("aaa\nbbb\n");
+        let message = execution_error(
+            serde_json::json!({
+                "path": "sample.txt",
+                "prefix_anchor": "aa",
+                "suffix_anchor": "b\n",
+            }),
+            &context,
+        )
+        .await;
+        assert!(
+            message.contains("FIM API client not available"),
+            "a self-overlapping prefix with one non-overlapping site must pass validation: {message}"
+        );
+    }
 }
