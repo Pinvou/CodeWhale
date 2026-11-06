@@ -50,9 +50,70 @@ try {
       }).catch(() => ({ unavailable: true })) : undefined;
       const userStatus = name === 'user status actions expose danger target and self guard' ? await page.evaluate(() => ({ buttons: [...document.querySelectorAll('[data-user-status-target],[data-user-status-confirm]')].map(node => ({ target: node.dataset.userStatusTarget, confirm: node.dataset.userStatusConfirm, disabled: node.disabled, text: node.textContent, label: node.getAttribute('aria-label'), color: getComputedStyle(node).color, background: getComputedStyle(node).backgroundColor })), writes: window.restored?.calls.filter(call => call.method === 'PATCH' && call.url.endsWith('/status')) })).catch(() => ({ unavailable: true })) : undefined;
       const userSearch = name === 'user searches refresh applied context and keep lookup kinds distinct' ? await page.evaluate(() => ({ location: location.search, inputs: [...document.querySelectorAll('.adm-user-search-toolbar input')].map(node => node.value), buttons: [...document.querySelectorAll('.adm-user-search-toolbar button')].map(node => ({ text: node.textContent, disabled: node.disabled })), error: document.querySelector('.adm-panel [role=alert]')?.textContent, calls: window.restored?.calls.filter(call => /\/admin\/v1\/(users\?|user-code-lookups\/)/.test(call.url)) })).catch(() => ({ unavailable: true })) : undefined;
-      console.error(JSON.stringify({ case: name, pageErrors: errors, ledger, userStatus, userSearch, dialog: await page.evaluate(() => document.querySelector('[role=dialog]')?.textContent.slice(0, 1200)) })); throw error;
+      const userDetail = name === 'user detail heading keeps real identity and the applied directory context' ? await page.evaluate(() => ({ location: location.search, title: document.querySelector('.adm-page-head h2')?.textContent, identity: document.querySelector('.adm-user-detail-head')?.textContent, alert: document.querySelector('[data-workspace=users] [role=alert]')?.textContent, directory: document.querySelector('[data-user-directory-search] input')?.value, reads: window.restored?.calls.filter(call => call.method === 'GET' && call.url.includes('/admin/v1/users')) })).catch(() => ({ unavailable: true })) : undefined;
+      console.error(JSON.stringify({ case: name, pageErrors: errors, ledger, userStatus, userSearch, userDetail, dialog: await page.evaluate(() => document.querySelector('[role=dialog]')?.textContent.slice(0, 1200)) })); throw error;
     }
   };
+  await run('user detail heading keeps real identity and the applied directory context', async () => {
+    const target = '22222222-2222-4222-8222-222222222222', name = '用于验证用户详情标题和返回入口布局的测试用户名称';
+    const cursor = 'eyJ1cGRhdGVkX2F0IjoiMjAyNi0xMC0wMVQwMDowMDowMFoiLCJ1c2VyX2lkIjoiMzMzMzMzMzMtMzMzMy00MzMzLTgzMzMtMzMzMzMzMzMzMzMzIn0';
+    const directoryCalls = () => page.evaluate(() => window.restored.calls.filter(call => call.method === 'GET' && new URL(call.url, location.origin).pathname === '/api/admin/account/admin/v1/users'));
+    await fresh(`?mode=admin&userDetailHeader=1&section=users&user_q=${encodeURIComponent('验证')}&user_cursor=${cursor}`);
+    await page.waitForFunction(name => document.querySelector('[data-workspace=users] tbody button')?.textContent === name, {}, name);
+    assert.equal(await page.$eval('.adm-page-head h2', node => node.textContent), '用户管理');
+    const before = (await directoryCalls()).length;
+    await page.type('[data-user-directory-search] input', '未提交'); assert.equal((await directoryCalls()).length, before);
+    await page.click('[data-workspace=users] tbody button');
+    await page.waitForFunction(name => document.querySelector('.adm-user-detail-head h3')?.textContent === name, {}, name);
+    assert.equal(new URL(page.url()).searchParams.get('user_id'), target);
+    assert.ok((await page.$eval('.adm-user-details', node => node.textContent)).includes(target));
+    const profileReads = await page.evaluate(target => window.restored.calls.filter(call => call.method === 'GET' && call.url === `/api/admin/account/admin/v1/users/${target}`).length, target);
+    for (const [language, title, back] of [['zh', '用户详情', '返回用户列表'], ['en', 'User details', 'Back to user list'], ['ja', 'ユーザー詳細', 'ユーザー一覧に戻る'], ['zh', '用户详情', '返回用户列表']]) {
+      await page.select('.adm-sidebar-foot select', language);
+      await page.waitForFunction(({ title, back }) => document.querySelector('.adm-page-head h2')?.textContent === title && document.querySelector('.adm-user-detail-head > button')?.textContent === back, {}, { title, back });
+      assert.equal(await page.$eval('.adm-user-detail-head h3', node => node.textContent), name);
+      assert.equal(await page.$eval('.adm-breadcrumbs [aria-current=page]', node => node.textContent), title);
+    }
+    assert.equal(await page.evaluate(target => window.restored.calls.filter(call => call.method === 'GET' && call.url === `/api/admin/account/admin/v1/users/${target}`).length, target), profileReads, 'language changes do not duplicate profile reads');
+    assert.equal(await page.$eval('.adm-user-membership-facts', node => node.textContent), '成员状态有效角色所有者', 'the current membership presentation retains distinct localized facts');
+    if (process.env.UI_SCREENSHOT_DIR) fs.mkdirSync(process.env.UI_SCREENSHOT_DIR, { recursive: true });
+    for (const width of [1440, 390]) {
+      await page.setViewport({ width, height: 1000 }); await page.evaluate(() => scrollTo(0, 0)); await noOverflow();
+      const identity = await page.$eval('.adm-user-detail-head h3', node => {
+        const clip = { left: 0, top: 0, right: innerWidth, bottom: innerHeight };
+        for (let ancestor = node.parentElement; ancestor; ancestor = ancestor.parentElement) {
+          const style = getComputedStyle(ancestor), rect = ancestor.getBoundingClientRect(), clipping = value => ['auto', 'scroll', 'hidden', 'clip', 'overlay'].includes(value);
+          if (clipping(style.overflowX)) { clip.left = Math.max(clip.left, rect.left + ancestor.clientLeft); clip.right = Math.min(clip.right, rect.left + ancestor.clientLeft + ancestor.clientWidth); }
+          if (clipping(style.overflowY)) { clip.top = Math.max(clip.top, rect.top + ancestor.clientTop); clip.bottom = Math.min(clip.bottom, rect.top + ancestor.clientTop + ancestor.clientHeight); }
+        }
+        const range = document.createRange(); range.selectNodeContents(node);
+        const back = node.parentElement.querySelector('button').getBoundingClientRect(), heading = node.getBoundingClientRect();
+        return { clip, back: { left: back.left, right: back.right, top: back.top, bottom: back.bottom }, headingTop: heading.top, fontSize: getComputedStyle(node).fontSize, bodyFontSize: getComputedStyle(node.closest('.adm-panel')).fontSize, fragments: [...range.getClientRects()].map(rect => ({ left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom, width: rect.width, height: rect.height })) };
+      });
+      assert.ok(Number.parseFloat(identity.fontSize) > Number.parseFloat(identity.bodyFontSize), 'the real identity has a heading hierarchy above body text');
+      assert.ok(identity.headingTop - identity.back.bottom >= 7.5, 'return remains separated from the identity heading by at least the 8px spacing step');
+      assert.ok(Object.values(identity.clip).every(Number.isFinite) && identity.clip.right > identity.clip.left && identity.clip.bottom > identity.clip.top);
+      assert.ok(Object.values(identity.back).every(Number.isFinite) && identity.back.right > identity.back.left && identity.back.bottom > identity.back.top && identity.back.left >= identity.clip.left - 0.5 && identity.back.right <= identity.clip.right + 0.5 && identity.back.top >= identity.clip.top - 0.5 && identity.back.bottom <= identity.clip.bottom + 0.5, 'return control remains fully inside the same visible header area');
+      assert.ok(identity.fragments.length && identity.fragments.every(rect => Object.values(rect).every(Number.isFinite) && rect.width > 0 && rect.height > 0 && rect.left >= identity.clip.left - 0.5 && rect.right <= identity.clip.right + 0.5 && rect.top >= identity.clip.top - 0.5 && rect.bottom <= identity.clip.bottom + 0.5), `real identity text is clipped: ${JSON.stringify(identity)}`);
+      if (width === 390) assert.ok(identity.fragments.length >= 2, 'long real display name naturally wraps on the narrow screen');
+      console.log(JSON.stringify({ case: 'user-detail-identity-visibility', width, ...identity }));
+      if (process.env.UI_SCREENSHOT_DIR) await page.screenshot({ path: path.join(process.env.UI_SCREENSHOT_DIR, `user-detail-header-${width}.png`) });
+    }
+    await page.setViewport({ width: 1440, height: 1000 });
+    await click('[data-workspace=users] .adm-panel button', '查看该用户的平台授权');
+    await page.waitForFunction(target => new URL(location.href).searchParams.get('role_user_id') === target && new URL(location.href).searchParams.get('role_view') === 'bindings' && document.querySelector('.adm-role-toolbar input:not([type])')?.value === target, {}, target);
+    await page.goBack(); await page.waitForFunction(({ name, target }) => new URL(location.href).searchParams.get('user_id') === target && document.querySelector('.adm-page-head h2')?.textContent === '用户详情' && document.querySelector('.adm-user-detail-head h3')?.textContent === name, {}, { name, target });
+    await page.evaluate(() => { window.restored.headerReadStatus = 404; window.restored.reload(); });
+    await page.waitForSelector('.adm-user-detail-head + [role=alert]');
+    assert.equal(await page.$('.adm-user-detail-head h3'), null, 'a failed profile read does not leave the old identity heading');
+    assert.equal(await page.evaluate(name => document.querySelector('[data-workspace=users]').textContent.includes(name), name), false);
+    await page.click('.adm-user-detail-head > button');
+    await page.waitForFunction(() => !new URL(location.href).searchParams.has('user_id') && document.querySelector('[data-user-directory-search] input')?.value === '验证' && !document.querySelector('[data-user-results-refresh]')?.disabled);
+    const returned = new URL(page.url()); assert.equal(returned.searchParams.get('user_q'), '验证'); assert.equal(returned.searchParams.get('user_cursor'), cursor);
+    assert.equal(await page.$eval('.adm-page-head h2', node => node.textContent), '用户管理'); assert.equal(await page.$('.adm-user-detail-breadcrumbs'), null);
+    const last = new URL((await directoryCalls()).at(-1).url, 'https://fixture.invalid'); assert.equal(last.searchParams.get('q'), '验证'); assert.equal(last.searchParams.get('cursor'), cursor);
+    assert.equal(await page.evaluate(() => window.restored.calls.filter(call => call.method !== 'GET' && !call.url.endsWith('/account/bootstrap')).length), 0);
+  });
   await run('user searches refresh applied context and keep lookup kinds distinct', async () => {
     const general = '[data-user-directory-search] input', exact = '[data-user-code-search] input', refresh = '[data-user-results-refresh]';
     const alice = 'alice-slow', bob = 'bob-user', code = 'USR-1111-1111-1111-1111-DP';
@@ -596,7 +657,7 @@ try {
     assert.equal(new URL(page.url()).searchParams.get('user_id'), '11111111-1111-4111-8111-111111111111');
     await page.reload(); await page.waitForSelector('.adm-user-details');
     assert.ok(await page.$eval('.adm-user-details', node => !node.textContent.includes('@')));
-    await click('[data-workspace=users] button', await page.evaluate(() => window.restored.copy().adminLayout.backToDirectory));
+    await click('[data-workspace=users] button', await page.evaluate(() => window.restored.copy().adminLayout.backToUserList));
     await page.waitForSelector('[data-workspace=users] tbody tr');
     assert.equal(new URL(page.url()).searchParams.get('user_q'), 'sample');
   });

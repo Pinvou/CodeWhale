@@ -17,3 +17,7 @@
 .adm-restored-shell .adm-user-membership-facts>div{display:flex;align-items:baseline;flex-wrap:wrap;gap:6px;min-width:0;max-width:100%}
 .adm-restored-shell .adm-user-membership-facts dt{color:var(--adm-muted)}
 .adm-restored-shell .adm-user-membership-facts dd{min-width:0;max-width:100%;margin:0;overflow-wrap:anywhere}
+.adm-restored-shell .adm-user-detail-head{display:grid;gap:12px;margin-bottom:20px;min-width:0}
+.adm-restored-shell .adm-user-detail-head>button{justify-self:start;max-width:100%;white-space:normal}
+.adm-restored-shell .adm-user-detail-head>h3{margin:0;font-size:22px;line-height:1.4;overflow-wrap:anywhere}
+.adm-restored-shell .adm-user-detail-breadcrumbs{flex-wrap:wrap}
