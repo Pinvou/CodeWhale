@@ -7112,6 +7112,13 @@ impl SubAgentManager {
         }
     }
 
+    /// Test helper: drop a child's parked mailbox so a scenario can verify the
+    /// retirement gate tracks the live queue instead of latching on history.
+    #[cfg(test)]
+    pub fn clear_test_queued_mail(&mut self, agent_id: &str) {
+        self.queued_mail.remove(agent_id);
+    }
+
     /// Test helper exposing the receiving side so delivery and provenance can
     /// be verified rather than inferred from a still-present sender handle.
     #[cfg(test)]
@@ -7235,6 +7242,9 @@ impl SubAgentManager {
     /// Conservative retirement check, unlike UI/capacity counts: a timed-out
     /// heartbeat does not establish that its task has stopped. Do not claim or
     /// discard terminal delivery here; the actor checks its completion queue too.
+    /// Mail parked on non-running children (queue-only receipts) is accepted
+    /// work as well: it lives only in the in-memory mailbox, so retirement
+    /// must refuse until the owner session drains it.
     pub(crate) fn has_live_work_for_session(&self, active_session_id: &str) -> bool {
         self.agents.values().any(|agent| {
             self.agent_is_owned_by_session(agent, active_session_id)
@@ -7247,6 +7257,9 @@ impl SubAgentManager {
             .queued_follow_up_counts_for_session(active_session_id)
             .values()
             .any(|count| *count > 0)
+            || self.queued_mail.iter().any(|(agent_id, queue)| {
+                !queue.is_empty() && self.agent_id_is_owned_by_session(agent_id, active_session_id)
+            })
     }
 
     /// Count running agents.

@@ -3440,7 +3440,7 @@ impl Engine {
             match input {
                 EngineRunInput::IdleRetirement(request) => {
                     if self
-                        .accept_idle_shutdown(request.ready, request.commit)
+                        .accept_idle_shutdown(request.ready, request.commit, request.commit_ack)
                         .await
                     {
                         // Committed. Anything arriving past the handshake is a

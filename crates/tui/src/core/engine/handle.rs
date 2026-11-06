@@ -109,18 +109,23 @@ impl EngineHandle {
     /// persistence or terminal delivery finished. Refusing resumes the actor
     /// without shutdown; so does a cancel token firing for the first time
     /// during an uncommitted wait (a token already latched by an earlier
-    /// cancelled turn does not refuse). `true` means committed, not
+    /// cancelled turn does not refuse). `true` means the actor consumed the
+    /// commit — the send receipt alone is not proof, since a send racing a
+    /// simultaneous cancel can succeed on a proposal the actor abandons; a
+    /// lost commit ack therefore reports `false`. `true` means committed, not
     /// completed; wait_run_completion is still required before touching
     /// resources. Cancelling an uncommitted wait cannot cause a late shutdown.
     pub async fn shutdown_when_idle(&self, host_is_idle: impl FnOnce() -> bool) -> Result<bool> {
         let (ready, receipt) = oneshot::channel();
         let (commit, committed) = oneshot::channel();
+        let (commit_ack, ack) = oneshot::channel();
         self.idle_retirement
             .as_ref()
             .ok_or_else(|| anyhow!("engine idle retirement is unavailable"))?
             .send(super::idle_shutdown::IdleRetirement {
                 ready,
                 commit: committed,
+                commit_ack,
             })
             .await?;
         if !receipt
@@ -138,6 +143,11 @@ impl EngineHandle {
         commit
             .send(())
             .map_err(|_| anyhow!("engine idle-retirement proposal expired"))?;
+        // Only the actor's ack proves it consumed the commit; the send above
+        // can also succeed against a proposal the cancel arm just abandoned.
+        if ack.await.is_err() {
+            return Ok(false);
+        }
         Ok(true)
     }
 
