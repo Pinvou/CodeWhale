@@ -2242,6 +2242,9 @@ impl Engine {
         }
 
         let (tx_op, rx_op) = mpsc::channel(ENGINE_OP_CHANNEL_CAPACITY);
+        // Capacity 1 keeps at most one retirement proposal in flight: a second
+        // concurrent host blocks in `send` until this boundary dequeues the
+        // first, which is what serializes proposals. Do not raise it.
         let (idle_retirement, rx_idle_retirement) = mpsc::channel(1);
         let (tx_event, rx_event) = mpsc::channel(256);
         let (tx_approval, rx_approval) = mpsc::channel(64);
@@ -3440,20 +3443,24 @@ impl Engine {
 
             match input {
                 EngineRunInput::IdleRetirement(request) => {
-                    if self
-                        .accept_idle_shutdown(request.ready, request.commit, request.commit_ack)
-                        .await
-                    {
+                    if self.accept_idle_shutdown(request).await {
                         // Committed. Anything arriving past the handshake is a
                         // host contract violation: every send had already
                         // returned `Ok`, and the engine drops these with it, so
                         // surface the loss instead of dropping silently.
                         // `reserve()` permits cannot be observed here — the
                         // host contract must exclude them before this point.
+                        // The breakdown names which contract edge leaked.
                         let residual = self.count_residual_inputs();
                         if residual > 0 {
                             tracing::warn!(
                                 residual,
+                                ops = self.rx_op.len(),
+                                subagent_completions = self.rx_subagent_completion.len(),
+                                steers = self.rx_steer.len(),
+                                pending_steers = self.pending_steers.len(),
+                                approvals = self.rx_approval.len(),
+                                user_inputs = self.rx_user_input.len(),
                                 "engine retired with residual inputs queued after the retirement commit"
                             );
                         }
@@ -4240,6 +4247,10 @@ impl Engine {
         // Boot owns the same pool in a background task. Drain it before the
         // shutdown pass so a late handshake cannot insert a live transport
         // after shutdown_all (or outlive the engine's op-channel closure).
+        // Scope note: this covers the current-generation boot only. A boot
+        // already invalidated by a workspace change holds only the dropped
+        // pool — nothing it inserts later is reachable from here, and its
+        // transports die with that task.
         if self.mcp_boot_in_flight {
             // The host may already have stopped consuming UI events. Join
             // the worker without draining/emitting its progress notifications.
