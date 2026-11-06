@@ -97,13 +97,25 @@ pub fn sanitize_for_strict(schema: &mut Value) {
 /// keywords at once, malformed union values), still go through the
 /// Responses-API flattening pass.
 pub fn sanitize_for_xai_parameters(parameters: &mut Value) -> Option<String> {
-    if root_union_is_all_object_branches(parameters)
-        && union_branches_keep_required(parameters)
-        && oneof_branches_mutually_distinct(parameters)
-    {
-        let dependent_note = drop_dependent_keywords(parameters);
-        sanitize(parameters);
-        return dependent_note;
+    if root_union_is_all_object_branches(parameters) && union_branches_keep_required(parameters) {
+        // Decide on the EFFECTIVE post-normalization shape: the recursive
+        // cleanup below can manufacture branch equality that the raw input
+        // does not show (review 5800015446: branch `required` groups naming
+        // their own declared nested object get that nested object's groups
+        // pruned and empty properties injected, collapsing initially
+        // distinct alternatives into identical bare objects). Rehearse the
+        // exact transformation on a clone and only commit to pass-through
+        // when the normalized branches stay pairwise-distinct; otherwise the
+        // original (still unmutated) parameters take the flattening
+        // fallback, which keeps the shared root properties usable.
+        let mut normalized = parameters.clone();
+        drop_dependent_keywords(&mut normalized);
+        sanitize(&mut normalized);
+        if oneof_branches_mutually_distinct(&normalized) {
+            let dependent_note = drop_dependent_keywords(parameters);
+            sanitize(parameters);
+            return dependent_note;
+        }
     }
     sanitize_for_responses(parameters)
 }
@@ -111,15 +123,15 @@ pub fn sanitize_for_xai_parameters(parameters: &mut Value) -> Option<String> {
 /// Exactly-one unions need pairwise-distinct object branches: two deep-equal
 /// branches make every matching instance match both (and every non-matching
 /// instance match neither), so the union cannot be satisfied by any argument.
-/// Branches can arrive already identical because an upstream pass has already
-/// pruned their `required` groups — the ToolRegistry registration path runs
-/// the general [`sanitize`] on every tool schema before the wire helpers see
-/// it (tools/registry.rs), and raw MCP payloads can ship the gutted shape
-/// directly too (review 5799828607: the keep-required guard then sees nothing
-/// left to prune and the identical bare branches pass through unsatisfiably).
-/// Only `oneOf` is affected; an `anyOf` with duplicate branches stays
-/// satisfiable ("at least one") and keeps the pass-through behavior. Distinct
-/// self-contained branches are unaffected.
+/// The check runs on the already-normalized shape (see the rehearsal in
+/// [`sanitize_for_xai_parameters`]) because branch equality can be
+/// manufactured by the recursive cleanup itself — an upstream pass such as
+/// the ToolRegistry registration sanitize (tools/registry.rs) can deliver
+/// branches already gutted (review 5799828607), and raw MCP payloads can
+/// carry nested required groups that the recursive prune collapses
+/// (review 5800015446). Only `oneOf` is affected; an `anyOf` with duplicate
+/// branches stays satisfiable ("at least one") and keeps the pass-through
+/// behavior. Distinct self-contained branches are unaffected.
 fn oneof_branches_mutually_distinct(schema: &Value) -> bool {
     let Some(obj) = schema.as_object() else {
         return true;
@@ -1788,6 +1800,98 @@ mod tests {
             "a satisfiable duplicate-branch anyOf keeps pass-through: {anyof_schema}"
         );
         assert_eq!(anyof_note, None);
+    }
+
+    #[test]
+    fn xai_sanitize_flattens_oneof_distinct_only_before_recursive_normalization() {
+        // Review 5800015446: the raw input's branch `required` groups name
+        // their own declared nested object, so the input-level checks all
+        // pass — yet the recursive cleanup prunes each nested object's
+        // dangling group and injects empty properties, collapsing the two
+        // initially distinct alternatives into identical bare objects and an
+        // unsatisfiable exactly-one. The pass-through decision must be based
+        // on the effective normalized shape; the flattening fallback keeps
+        // the shared root `inner` property usable for a valid instance.
+        let mut schema = json!({
+            "type": "object",
+            "properties": {
+                "inner": {
+                    "type": "object",
+                    "properties": {
+                        "a": {"type": "string"},
+                        "b": {"type": "string"}
+                    }
+                }
+            },
+            "oneOf": [
+                {
+                    "type": "object",
+                    "properties": {"inner": {"type": "object", "required": ["a"]}},
+                    "required": ["inner"]
+                },
+                {
+                    "type": "object",
+                    "properties": {"inner": {"type": "object", "required": ["b"]}},
+                    "required": ["inner"]
+                }
+            ]
+        });
+
+        let note = sanitize_for_xai_parameters(&mut schema);
+
+        assert_eq!(schema["type"], "object");
+        assert!(
+            schema.get("oneOf").is_none() && schema.get("anyOf").is_none(),
+            "the normalized-identical union must not reach the wire: {schema}"
+        );
+        assert!(
+            schema["properties"].get("inner").is_some(),
+            "the shared root inner property must survive the fallback: {schema}"
+        );
+        assert_eq!(note, None);
+        let validator = jsonschema::options()
+            .with_draft(jsonschema::Draft::Draft202012)
+            .build(&schema)
+            .expect("the flattened schema must compile");
+        assert!(
+            validator.is_valid(&json!({"inner": {"a": "x"}})),
+            "a valid instance of the original union must stay valid: {schema}"
+        );
+
+        // The satisfiable control: branches whose nested groups are
+        // self-contained (required names live in the same nested object's own
+        // properties) stay distinct after normalization and keep the
+        // pass-through behavior.
+        let mut self_contained = json!({
+            "type": "object",
+            "properties": {
+                "inner": {
+                    "type": "object",
+                    "properties": {
+                        "a": {"type": "string"},
+                        "b": {"type": "string"}
+                    }
+                }
+            },
+            "oneOf": [
+                {
+                    "type": "object",
+                    "properties": {"inner": {"type": "object", "properties": {"a": {"type": "string"}}, "required": ["a"]}},
+                    "required": ["inner"]
+                },
+                {
+                    "type": "object",
+                    "properties": {"inner": {"type": "object", "properties": {"b": {"type": "string"}}, "required": ["b"]}},
+                    "required": ["inner"]
+                }
+            ]
+        });
+        let control_note = sanitize_for_xai_parameters(&mut self_contained);
+        assert!(
+            self_contained.get("oneOf").is_some(),
+            "a self-contained union that stays distinct after normalization keeps pass-through: {self_contained}"
+        );
+        assert_eq!(control_note, None);
     }
 
     #[test]
