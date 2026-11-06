@@ -207,6 +207,14 @@ function Remove-TreeLongPath {
       $robocopyTail = (@($robocopyOutput) | Select-Object -Last 5) -join ' | '
       throw ("Robocopy /MIR cleanup failed with exit code {0}: {1} (tail: {2})" -f $robocopyExitCode, $Path, $robocopyTail)
     }
+    # Robocopy reports success with exit codes 0-7 (1 = files copied, 2 =
+    # extraneous entries detected; a /MIR over a non-empty tree commonly
+    # returns 2 or 3), and nothing afterwards resets $LASTEXITCODE. The
+    # wrapper scripts forward it as the wrapper process exit code
+    # ("if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }"), so a verified
+    # staging would still fail the Windows dev/build chain. Clear the success
+    # boundary here; the >= 8 throw above keeps real failures fatal.
+    $global:LASTEXITCODE = 0
     Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction SilentlyContinue
     if (Test-Path -LiteralPath $Path) {
       throw "Windows runtime staging cleanup could not remove: $Path"
@@ -787,6 +795,13 @@ function Expand-FlattenedRuntime {
         $robocopyTail = (@($robocopyOutput) | Select-Object -Last 5) -join ' | '
         throw ("Robocopy failed with exit code {0} while copying '{1}' to '{2}' (tail: {3})" -f $robocopyExitCode, $requiredDirectory, $Destination, $robocopyTail)
       }
+      # Same success-boundary reset as Remove-TreeLongPath: robocopy /E
+      # completes with 0-7 (1 = files copied, 3 = copied plus extraneous
+      # destination entries), the staging finally blocks below still run
+      # robocopy-based cleanup afterwards, and the wrapper scripts forward
+      # $LASTEXITCODE as the process exit code — a leftover informational
+      # code would fail an otherwise verified staging.
+      $global:LASTEXITCODE = 0
     }
   } finally {
     # A throw here would replace the in-flight extraction/copy exception and

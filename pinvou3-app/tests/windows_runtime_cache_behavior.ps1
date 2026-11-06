@@ -294,6 +294,14 @@ try {
     $zipStream.Dispose()
   }
   Expand-FlattenedRuntime -ZipPath $flatZipPath -Destination $flatDestination -RequiredFile "node.exe"
+  # Success-boundary regression (review 5796830161): robocopy reports success
+  # with exit codes 0-7, and the resolver used to leave those codes in
+  # $LASTEXITCODE on the success path. stage-runtime.ps1 and
+  # stage-onnx-runtime.ps1 forward $LASTEXITCODE as their process exit code
+  # ("if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }"), so a verified staging
+  # still failed the Windows dev/build chain in scripts/tauri/windows-runtime.js.
+  # Every real robocopy arm exercised below must finish at zero.
+  Assert-True -Condition ($LASTEXITCODE -eq 0) -Message "successful flattened runtime expansion (robocopy /E) must leave the process-visible exit code at zero"
   # Destination-relative path WITHOUT the "node" prefix: the flatten semantics
   # strip the archive's top-level directory (the same geometry as the real
   # node-v*-win-x64.zip whose staged manifest puts node.exe at the destination
@@ -343,7 +351,59 @@ try {
   [System.IO.File]::WriteAllText((Get-ExtendedPath $removalDeepPath), "removal payload", [System.Text.Encoding]::UTF8)
   Remove-TreeLongPath -Path $removalRoot
   Assert-True -Condition (-not (Test-Path -LiteralPath $removalRoot)) -Message "long-path cleanup must remove a tree holding past-MAX_PATH files"
+  Assert-True -Condition ($LASTEXITCODE -eq 0) -Message "successful long-path cleanup (robocopy /MIR) must leave the process-visible exit code at zero"
   Remove-TreeLongPath -Path $removalRoot -MissingOk
+
+  # Robocopy exit codes >= 8 must stay fatal: a PATH-stubbed robocopy that
+  # reports 8 (the same stub technique as the Git failure fixtures above) has
+  # to fail both long-path arms through their real error messages, so the
+  # success-boundary reset cannot swallow genuine robocopy failures.
+  $robocopyStubDirectory = Join-Path $testRoot "robocopy-stub"
+  New-Item -ItemType Directory -Path $robocopyStubDirectory -Force | Out-Null
+  [System.IO.File]::WriteAllText(
+    (Join-Path $robocopyStubDirectory "robocopy.cmd"),
+    # The stub stays silent on stderr: Windows PowerShell 5.1 turns piped
+    # native stderr into ErrorRecord objects and $ErrorActionPreference Stop
+    # would raise NativeCommandError at the robocopy call itself, masking the
+    # exit-code classification this section has to exercise.
+    "@echo off`r`nexit /b 8`r`n",
+    [System.Text.Encoding]::ASCII
+  )
+  $expandRoot = [System.IO.Path]::GetTempPath()
+  $expandLitterBefore = @(Get-ChildItem -LiteralPath $expandRoot -Filter "pinvou3-runtime-expand-*" -Directory -ErrorAction SilentlyContinue | ForEach-Object { $_.Name })
+  $previousRobocopyPath = $env:PATH
+  try {
+    $env:PATH = "$robocopyStubDirectory;$previousRobocopyPath"
+    Assert-True -Condition ((@(Get-Command -Name "robocopy" -CommandType Application -ErrorAction Stop)[0]).Source -like "$robocopyStubDirectory*") -Message "the robocopy failure stub must shadow the real robocopy on PATH"
+    $removalStubRoot = Join-Path $testRoot "removal-stub"
+    New-Item -ItemType Directory -Path (Join-Path $removalStubRoot "payload") -Force | Out-Null
+    [System.IO.File]::WriteAllText((Join-Path $removalStubRoot "payload\payload.txt"), "stub payload", [System.Text.Encoding]::UTF8)
+    $mirCleanupThrew = $false
+    try {
+      Remove-TreeLongPath -Path $removalStubRoot
+    } catch {
+      $mirCleanupThrew = $_.Exception.Message -match "Robocopy /MIR cleanup failed with exit code 8"
+    }
+    Assert-True -Condition $mirCleanupThrew -Message "robocopy exit code 8 must fail the /MIR cleanup arm with its real error message"
+    $flattenedCopyThrew = $false
+    try {
+      Expand-FlattenedRuntime -ZipPath $flatZipPath -Destination (Join-Path $testRoot "flatten-stub\expanded\node") -RequiredFile "node.exe"
+    } catch {
+      $flattenedCopyThrew = $_.Exception.Message -match "Robocopy failed with exit code 8"
+    }
+    Assert-True -Condition $flattenedCopyThrew -Message "robocopy exit code 8 must fail the flattened copy arm with its real error message"
+  } finally {
+    $env:PATH = $previousRobocopyPath
+  }
+  # The stubbed flattened copy fails inside Expand-FlattenedRuntime, whose
+  # cleanup failures degrade to a loud warning: sweep only the extraction
+  # trees this stub run created (their deep entries again need the long-path
+  # arm, so plain Remove-Item would leave past-MAX_PATH litter behind).
+  foreach ($expandLitter in @(Get-ChildItem -LiteralPath $expandRoot -Filter "pinvou3-runtime-expand-*" -Directory -ErrorAction SilentlyContinue)) {
+    if ($expandLitterBefore -notcontains $expandLitter.Name) {
+      Remove-TreeLongPath -Path $expandLitter.FullName -MissingOk
+    }
+  }
 
   # Write-Utf8Atomically keeps shared-visibility descriptors continuously
   # present for the unlocked readers in scripts/tauri/windows-runtime.js:

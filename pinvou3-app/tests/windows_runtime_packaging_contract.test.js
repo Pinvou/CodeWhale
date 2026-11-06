@@ -57,6 +57,14 @@ const onnxRuntimeScript = readApp(
   "scripts",
   "stage-onnx-runtime.ps1",
 );
+const stageRuntimeWrapper = readApp(
+  "src-tauri",
+  "packaging",
+  "windows",
+  "runtime",
+  "scripts",
+  "stage-runtime.ps1",
+);
 const onnxRuntimeSmoke = readApp(
   "src-tauri",
   "packaging",
@@ -206,6 +214,47 @@ assert.match(
   /& robocopy \$emptyRoot \$Path \/MIR /u,
   "runtime staging tree cleanup must go through long-path-native robocopy",
 );
+// Review 5796830161: robocopy reports success with exit codes 0-7 (a /MIR
+// cleanup of a non-empty tree usually returns 2, an /E copy 1 or 3). Both
+// wrapper scripts forward $LASTEXITCODE as their process exit code after the
+// resolver returns, so a leftover informational code used to fail an otherwise
+// verified staging and break the Windows dev/build chain. Each robocopy arm
+// must therefore clear the success boundary itself — only AFTER the >= 8
+// throw, so real robocopy failures stay fatal.
+const removeTreeFnStart = runtimeScript.indexOf("function Remove-TreeLongPath");
+const removeTreeFnEnd = runtimeScript.indexOf("\nfunction ", removeTreeFnStart);
+assert.ok(removeTreeFnStart >= 0 && removeTreeFnEnd > removeTreeFnStart);
+const removeTreeFnBody = runtimeScript.slice(removeTreeFnStart, removeTreeFnEnd);
+const mirThrowIndex = removeTreeFnBody.indexOf('throw ("Robocopy /MIR cleanup failed');
+const mirResetIndex = removeTreeFnBody.indexOf("$global:LASTEXITCODE = 0");
+assert.ok(mirThrowIndex > 0, "the /MIR cleanup arm must keep its >= 8 failure throw");
+assert.ok(
+  mirResetIndex > mirThrowIndex,
+  "the /MIR cleanup arm must clear $LASTEXITCODE only after the >= 8 throw (robocopy >= 8 stays fatal)",
+);
+const flattenedFnStart = runtimeScript.indexOf("function Expand-FlattenedRuntime");
+const flattenedFnEnd = runtimeScript.indexOf("\nfunction ", flattenedFnStart);
+assert.ok(flattenedFnStart >= 0 && flattenedFnEnd > flattenedFnStart);
+const flattenedFnBody = runtimeScript.slice(flattenedFnStart, flattenedFnEnd);
+const copyThrowIndex = flattenedFnBody.indexOf('throw ("Robocopy failed with exit code');
+const copyResetIndex = flattenedFnBody.indexOf("$global:LASTEXITCODE = 0");
+assert.ok(copyThrowIndex > 0, "the flattened /E copy arm must keep its >= 8 failure throw");
+assert.ok(
+  copyResetIndex > copyThrowIndex,
+  "the flattened /E copy arm must clear $LASTEXITCODE only after the >= 8 throw (robocopy >= 8 stays fatal)",
+);
+assert.equal(
+  (runtimeScript.match(/\$global:LASTEXITCODE = 0/gu) || []).length,
+  2,
+  "exactly the two robocopy arms clear the success boundary; every other external command in the resolver (git, the python ABI probe) leaves $LASTEXITCODE at 0 on success and must be re-audited before this count grows",
+);
+for (const wrapperScript of [stageRuntimeWrapper, onnxRuntimeScript]) {
+  assert.match(
+    wrapperScript,
+    /if \(\$LASTEXITCODE -ne 0\) \{[\s\S]*?exit \$LASTEXITCODE/u,
+    "the wrapper must keep forwarding the resolver's $LASTEXITCODE as the process exit code — that propagation is the reason the resolver's success boundary must be cleared in the resolver itself",
+  );
+}
 assert.match(
   runtimeScript,
   /\[System\.IO\.File\]::OpenRead\(\(Get-ExtendedPath \$Path\)\)/u,
@@ -630,6 +679,30 @@ assert.match(
   /windows_runtime_installer_integration\.test\.js/u,
   "the staged runtime and NSIS installer adapter must have an integration test entry",
 );
+// The release lane is the only place the two wrapper scripts can run against
+// a fully staged runtime, and no other lane exercises the wrapper exit
+// contract at all (`runtime:windows:stage` invokes the resolver directly, so
+// its -File process code never sees the wrapper forwarding). Pin the tests'
+// presence so they cannot be silently dropped (review 5796830161).
+const runtimeInstallerIntegration = readApp(
+  "tests",
+  "windows_runtime_installer_integration.test.js",
+);
+assert.match(
+  runtimeInstallerIntegration,
+  /runRuntimeWrapper\("stage-runtime\.ps1"/u,
+  "the release-lane integration test must observe the stage wrapper's final process exit code through the unmodified script",
+);
+assert.match(
+  runtimeInstallerIntegration,
+  /runRuntimeWrapper\("stage-onnx-runtime\.ps1", \["-Force"\]\)/u,
+  "the release-lane integration test must observe the ONNX wrapper's rebuild path (robocopy /MIR cleanup) through the unmodified script",
+);
+assert.match(
+  runtimeInstallerIntegration,
+  /exit \/b 8/u,
+  "the release-lane integration test must prove a stubbed robocopy >= 8 keeps the wrapper process exit code non-zero",
+);
 assert.match(
   runtimeInitScript,
   /if \(\$CacheKeyOnly\)[\s\S]*?Write-Output \$cacheKey[\s\S]*?exit 0/u,
@@ -985,6 +1058,26 @@ assert.match(
   runtimeCacheBehaviorHarness,
   /atomic replace under a sharing reader must fail loudly/u,
   "the cache-behavior harness must prove a failed atomic replacement preserves the previous descriptor",
+);
+assert.match(
+  runtimeCacheBehaviorHarness,
+  /successful flattened runtime expansion \(robocopy \/E\) must leave the process-visible exit code at zero/u,
+  "the cache-behavior harness must prove the robocopy /E success arm finishes at $LASTEXITCODE 0 for the wrapper scripts",
+);
+assert.match(
+  runtimeCacheBehaviorHarness,
+  /successful long-path cleanup \(robocopy \/MIR\) must leave the process-visible exit code at zero/u,
+  "the cache-behavior harness must prove the robocopy /MIR success arm finishes at $LASTEXITCODE 0 for the wrapper scripts",
+);
+assert.match(
+  runtimeCacheBehaviorHarness,
+  /Robocopy \/MIR cleanup failed with exit code 8/u,
+  "the cache-behavior harness must prove a stubbed robocopy 8 keeps the /MIR cleanup arm fatal",
+);
+assert.match(
+  runtimeCacheBehaviorHarness,
+  /Robocopy failed with exit code 8/u,
+  "the cache-behavior harness must prove a stubbed robocopy 8 keeps the flattened copy arm fatal",
 );
 
 console.log("Windows runtime packaging contract: ok");
