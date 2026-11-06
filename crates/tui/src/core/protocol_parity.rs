@@ -1382,6 +1382,29 @@ mod tests {
     }
 
     #[test]
+    fn terminal_error_source_is_not_projected() {
+        for source in [
+            crate::core::events::TurnErrorSource::Model,
+            crate::core::events::TurnErrorSource::Runtime,
+        ] {
+            let event = Event::TurnComplete {
+                turn_id: Some("turn-1".into()),
+                submission_id: None,
+                compaction_id: None,
+                usage: Usage::default(),
+                status: TurnOutcomeStatus::Failed,
+                error_source: Some(source),
+                error: Some("terminal failure".into()),
+                tool_catalog: None,
+                base_url: None,
+            };
+            let terminal = serde_json::to_value(event.to_protocol(&ids())).unwrap();
+            assert_eq!(terminal["status"], "failed");
+            assert!(terminal.get("error_source").is_none());
+        }
+    }
+
+    #[test]
     fn protocol_covers_engine_ops() {
         let ops = vec![
             Op::SetGoalStatus {

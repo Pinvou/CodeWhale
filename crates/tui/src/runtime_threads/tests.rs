@@ -5291,6 +5291,7 @@ async fn thread_lifecycle_persists_across_restart() -> Result<()> {
                     },
                     status: TurnOutcomeStatus::Completed,
                     error: None,
+                    error_source: None,
                     tool_catalog: None,
                     base_url: None,
                 })
@@ -5433,6 +5434,7 @@ async fn monitor_separates_lifecycle_start_from_billing_dispatch_and_child_usage
             },
             status: TurnOutcomeStatus::Completed,
             error: None,
+            error_source: None,
             tool_catalog: None,
             // Completion-time endpoint evidence must be ignored.
             base_url: Some("https://api.stepfun.com/v1/coding".to_string()),
@@ -5589,6 +5591,7 @@ async fn completed_turn_without_engine_output_fails() -> Result<()> {
                     },
                     status: TurnOutcomeStatus::Completed,
                     error: None,
+                    error_source: None,
                     tool_catalog: None,
                     base_url: None,
                 })
@@ -7098,6 +7101,7 @@ async fn multi_turn_continuity_same_thread() -> Result<()> {
                     },
                     status: TurnOutcomeStatus::Completed,
                     error: None,
+                    error_source: None,
                     tool_catalog: None,
                     base_url: None,
                 })
@@ -7333,6 +7337,7 @@ async fn host_goal_loop_kickoff_arms_one_continuation_and_parks_at_engine_cap() 
                     },
                     status: TurnOutcomeStatus::Completed,
                     error: None,
+                    error_source: None,
                     tool_catalog: Some(vec![catalog_tool("update_goal")]),
                     base_url: None,
                 })
@@ -7449,6 +7454,7 @@ async fn host_goal_loop_skips_rearm_without_update_goal_and_after_failed_pass() 
                     },
                     status: TurnOutcomeStatus::Completed,
                     error: None,
+                    error_source: None,
                     tool_catalog: Some(vec![catalog_tool("read")]),
                     base_url: None,
                 })
@@ -7525,6 +7531,7 @@ async fn host_goal_loop_skips_rearm_without_update_goal_and_after_failed_pass() 
                     },
                     status: TurnOutcomeStatus::Failed,
                     error: Some("provider exploded".to_string()),
+                    error_source: None,
                     tool_catalog: Some(vec![catalog_tool("update_goal")]),
                     base_url: None,
                 })
@@ -7620,6 +7627,7 @@ async fn host_goal_loop_mirrors_terminal_snapshot_and_does_not_rearm() -> Result
                         },
                         status: TurnOutcomeStatus::Completed,
                         error: None,
+                        error_source: None,
                         tool_catalog: Some(vec![catalog_tool("update_goal")]),
                         base_url: None,
                     })
@@ -7908,6 +7916,7 @@ async fn approval_required_with_stale_active_turn_is_denied() -> Result<()> {
             },
             status: TurnOutcomeStatus::Completed,
             error: None,
+            error_source: None,
             tool_catalog: None,
             base_url: None,
         })
@@ -10565,6 +10574,7 @@ async fn forkguard_pump_never_auto_approves_a_force_prompt_hold() -> Result<()> 
             usage: Usage::default(),
             status: TurnOutcomeStatus::Completed,
             error: None,
+            error_source: None,
             tool_catalog: None,
             base_url: None,
         })
@@ -10644,6 +10654,7 @@ async fn forkguard_pump_never_auto_approves_a_force_prompt_hold() -> Result<()> 
             usage: Usage::default(),
             status: TurnOutcomeStatus::Completed,
             error: None,
+            error_source: None,
             tool_catalog: None,
             base_url: None,
         })
@@ -11443,6 +11454,7 @@ async fn elevation_required_with_stale_active_turn_is_denied() -> Result<()> {
             },
             status: TurnOutcomeStatus::Completed,
             error: None,
+            error_source: None,
             tool_catalog: None,
             base_url: None,
         })
@@ -11513,6 +11525,7 @@ async fn steer_turn_on_active_turn_records_item_and_event() -> Result<()> {
                     },
                     status: TurnOutcomeStatus::Completed,
                     error: None,
+                    error_source: None,
                     tool_catalog: None,
                     base_url: None,
                 })
@@ -12044,6 +12057,7 @@ async fn compaction_lifecycle_emits_item_events_with_compaction_counts() -> Resu
                             },
                             status: TurnOutcomeStatus::Completed,
                             error: None,
+                            error_source: None,
                             tool_catalog: None,
                             base_url: None,
                         })
@@ -12084,6 +12098,7 @@ async fn compaction_lifecycle_emits_item_events_with_compaction_counts() -> Resu
                             },
                             status: TurnOutcomeStatus::Completed,
                             error: None,
+                            error_source: None,
                             tool_catalog: None,
                             base_url: None,
                         })

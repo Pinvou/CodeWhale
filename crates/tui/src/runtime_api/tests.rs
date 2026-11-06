@@ -2587,6 +2587,7 @@ async fn compatibility_stream_closes_losslessly_across_replay_live_handoff() -> 
                 },
                 status: TurnOutcomeStatus::Completed,
                 error: None,
+                error_source: None,
                 tool_catalog: None,
                 base_url: None,
             })
@@ -3207,6 +3208,7 @@ async fn thread_endpoints_expose_lifecycle_contract() -> Result<()> {
                             },
                             status: TurnOutcomeStatus::Completed,
                             error: None,
+                            error_source: None,
                             tool_catalog: None,
                             base_url: None,
                         })
@@ -3225,6 +3227,7 @@ async fn thread_endpoints_expose_lifecycle_contract() -> Result<()> {
                             },
                             status: TurnOutcomeStatus::Completed,
                             error: None,
+                            error_source: None,
                             tool_catalog: None,
                             base_url: None,
                         })
@@ -3478,6 +3481,7 @@ async fn events_endpoint_respects_since_seq_cursor() -> Result<()> {
                 },
                 status: TurnOutcomeStatus::Completed,
                 error: None,
+                error_source: None,
                 tool_catalog: None,
                 base_url: None,
             })
@@ -3701,6 +3705,7 @@ async fn steer_and_interrupt_endpoints_work_on_active_turn() -> Result<()> {
                 },
                 status: TurnOutcomeStatus::Completed,
                 error: None,
+                error_source: None,
                 tool_catalog: None,
                 base_url: None,
             })
@@ -4125,6 +4130,7 @@ async fn stream_endpoint_remains_backward_compatible() -> Result<()> {
                 },
                 status: TurnOutcomeStatus::Completed,
                 error: None,
+                error_source: None,
                 tool_catalog: None,
                 base_url: None,
             })
@@ -5818,6 +5824,7 @@ async fn session_create_from_thread_rejects_active_turn() -> Result<()> {
                 },
                 status: TurnOutcomeStatus::Completed,
                 error: None,
+                error_source: None,
                 tool_catalog: None,
                 base_url: None,
             })

@@ -51,6 +51,16 @@ impl TurnFailure {
     }
 }
 
+fn split_stream_open_error(
+    error: anyhow::Error,
+    default_source: crate::core::events::TurnErrorSource,
+) -> (anyhow::Error, crate::core::events::TurnErrorSource) {
+    match error.downcast::<crate::llm_client::DeferredStreamPreparationError>() {
+        Ok(error) => (error.0, crate::core::events::TurnErrorSource::Runtime),
+        Err(error) => (error, default_source),
+    }
+}
+
 /// Monotonic counter for rewritten text-fallback tool-call ids. The wall-clock
 /// millis alone can repeat within one process, so the counter disambiguates
 /// incarnations; the millis keep ids unique across engine restarts within the
@@ -815,7 +825,7 @@ struct StreamOutcome {
     stream_start: Instant,
     first_token_at: Option<Instant>,
     request_dispatched_at: Instant,
-    stream_error: Option<String>,
+    stream_error: Option<TurnFailure>,
 }
 
 pub(super) fn initial_stream_error_user_message(
@@ -2430,6 +2440,8 @@ impl Engine {
                     s
                 }
                 Err(e) => {
+                    let (e, request_error_source) =
+                        split_stream_open_error(e, request_error_source);
                     let message = self.decorate_auth_error_message(
                         initial_stream_error_user_message(&self.config.locale_tag, &e),
                     );
@@ -2509,7 +2521,7 @@ impl Engine {
                     stream_retry_budget.spent(),
                 )
                 .await;
-            turn_error = turn_error.or_else(|| stream_error.map(TurnFailure::model));
+            turn_error = turn_error.or(stream_error);
             // These belong to post-stream response assembly, not stream
             // consumption: blocks are built from the completed stream state,
             // and truncation is derived from its terminal stop reason below.
@@ -5784,7 +5796,7 @@ impl Engine {
         // is `Unpin`, so we can rebind it on a transparent retry without
         // breaking the existing pin invariants.
         let mut stream = stream;
-        let mut stream_error: Option<String> = None;
+        let mut stream_error: Option<TurnFailure> = None;
 
         let mut current_text_raw = String::new();
         let mut current_text_visible = String::new();
@@ -5886,7 +5898,7 @@ impl Engine {
                             // fails the turn with the real reason instead
                             // of ending "Completed" over a frozen block.
                             stream_errors = stream_errors.saturating_add(1);
-                            stream_error.get_or_insert(envelope.message.clone());
+                            stream_error.get_or_insert_with(|| TurnFailure::model(envelope.message.clone()));
                             let _ = self.tx_event.send(Event::error(envelope)).await;
                             None
                         }
@@ -5911,7 +5923,7 @@ impl Engine {
                 }
                 .into_envelope();
                 crate::logging::warn(&envelope.message);
-                stream_error.get_or_insert(envelope.message.clone());
+                stream_error.get_or_insert_with(|| TurnFailure::runtime(envelope.message.clone()));
                 let _ = self.tx_event.send(Event::error(envelope)).await;
                 break;
             }
@@ -5923,7 +5935,7 @@ impl Engine {
                 }
                 .into_envelope();
                 crate::logging::warn(&envelope.message);
-                stream_error.get_or_insert(envelope.message.clone());
+                stream_error.get_or_insert_with(|| TurnFailure::runtime(envelope.message.clone()));
                 let _ = self.tx_event.send(Event::error(envelope)).await;
                 break;
             }
@@ -6002,10 +6014,17 @@ impl Engine {
                                 continue;
                             }
                             Err(retry_err) => {
+                                let (retry_err, source) = split_stream_open_error(
+                                    retry_err,
+                                    crate::core::events::TurnErrorSource::Model,
+                                );
                                 let retry_msg = self.decorate_auth_error_message(format!(
                                     "Stream retry failed: {retry_err}"
                                 ));
-                                stream_error.get_or_insert(retry_msg.clone());
+                                stream_error.get_or_insert_with(|| TurnFailure {
+                                    message: retry_msg.clone(),
+                                    source,
+                                });
                                 let _ = self
                                     .tx_event
                                     .send(Event::error(
@@ -6051,10 +6070,12 @@ impl Engine {
                         // outcome; the post-loop retry clears it, and if
                         // the turn still fails the last attempt surfaces
                         // it through the normal path below.
-                        stream_error.get_or_insert(stream_read_error_user_message(
-                            &message,
-                            any_content_received,
-                        ));
+                        stream_error.get_or_insert_with(|| {
+                            TurnFailure::model(stream_read_error_user_message(
+                                &message,
+                                any_content_received,
+                            ))
+                        });
                         pending_resume = Some(StreamResume::HeadlessNetworkDrop);
                         break;
                     }
@@ -6076,16 +6097,18 @@ impl Engine {
                         crate::logging::warn(format!(
                             "Interactive stream resume: network drop after partial content; scheduling typed resume: {message}"
                         ));
-                        stream_error.get_or_insert(stream_read_error_user_message(
-                            &message,
-                            any_content_received,
-                        ));
+                        stream_error.get_or_insert_with(|| {
+                            TurnFailure::model(stream_read_error_user_message(
+                                &message,
+                                any_content_received,
+                            ))
+                        });
                         pending_resume = Some(StreamResume::InteractiveNetworkDrop);
                         break;
                     }
                     let user_message =
                         stream_read_error_user_message(&message, any_content_received);
-                    stream_error.get_or_insert(user_message.clone());
+                    stream_error.get_or_insert_with(|| TurnFailure::model(user_message.clone()));
                     let envelope = crate::error_taxonomy::envelope_for_llm_error(e, user_message);
                     // A terminal (non-recoverable) stream failure must stop
                     // consumption immediately: re-issuing a wrong-model or
@@ -6528,7 +6551,7 @@ impl Engine {
                         crate::logging::warn(format!("Provider stream error event: {message}"));
                     }
                     let _ = self.tx_event.send(Event::error(envelope)).await;
-                    stream_error.get_or_insert(message.to_string());
+                    stream_error.get_or_insert_with(|| TurnFailure::model(message.to_string()));
                     break;
                 }
             }
