@@ -314,3 +314,7 @@
 .adm-restored-shell .adm-organization-directory .adm-organization-units .adm-row-actions{display:flex;flex-wrap:wrap;gap:8px;max-width:100%;min-width:0;margin-left:auto}
 .adm-restored-shell .adm-organization-directory .adm-organization-units .adm-row-actions>button{max-width:100%;white-space:normal}
 @media(max-width:760px){.adm-restored-shell .adm-organization-directory .adm-organization-units>li{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));align-items:start;gap:12px}.adm-restored-shell .adm-organization-directory .adm-organization-units>li>strong,.adm-restored-shell .adm-organization-directory .adm-organization-units .adm-row-actions{grid-column:1/-1}.adm-restored-shell .adm-organization-directory .adm-organization-units .adm-row-actions{margin-left:0;justify-content:flex-start}}
+
+.adm-restored-shell .adm-system-workspace-head{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:16px;margin-bottom:16px}
+.adm-restored-shell .adm-system-observation{display:grid;gap:3px;min-width:0;max-width:100%;color:var(--adm-muted);font-size:12px;line-height:1.5;overflow-wrap:anywhere}
+.adm-restored-shell .adm-system-refresh:disabled{opacity:.5;cursor:not-allowed}
