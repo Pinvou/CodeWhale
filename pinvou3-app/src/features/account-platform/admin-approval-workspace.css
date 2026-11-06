@@ -60,3 +60,5 @@
 .adm-approval-policy-table strong{font-size:14px;font-weight:600;overflow-wrap:anywhere}
 .adm-approval-policy-table code,.adm-approval-policy-table small{display:block;max-width:100%;margin-top:4px;color:var(--adm-muted);font-size:12px;line-height:1.5;overflow-wrap:anywhere}
 .adm-approval-policy-risk{display:inline-block;max-width:100%;padding:2px 8px;border:1px solid var(--adm-line);border-radius:6px;color:var(--adm-text);background:var(--adm-soft);line-height:1.5;overflow-wrap:anywhere}
+
+.adm-financial-repair .adm-financial-repair-code{display:block;max-width:100%;color:var(--adm-muted);font-size:12px;line-height:1.5;overflow-wrap:anywhere}
