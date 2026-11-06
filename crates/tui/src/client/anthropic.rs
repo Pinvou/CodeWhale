@@ -93,11 +93,18 @@ impl DeepSeekClient {
             // ApiProvider::Anthropic or a base URL on api.anthropic.com, the
             // same endpoint predicate the thinking gates below use — narrows
             // just those three root keywords, merging branch properties and
-            // noting the dropped constraint; root enum/not, dependent
-            // keywords, and the declared root type stay verbatim, and the
-            // shared registry normalization (nullable-union collapse,
-            // bare-object properties injection, dangling-required pruning)
-            // still applies there. The other lanes ship verbatim: DeepSeek's
+            // noting the dropped constraint; the object type is restored when
+            // the merge leaves a populated schema whose root declared none, a
+            // root that is not a JSON object at all is replaced by an empty
+            // object (the API defines input_schema as a JSON Schema object),
+            // and root enum/not, dependent keywords, and the declared root
+            // type stay verbatim, with the shared registry normalization
+            // (nullable-union collapse, bare-object properties injection,
+            // dangling-required pruning) still applied there. Provider
+            // identity stays in the gate beside the endpoint because
+            // ANTHROPIC_BASE_URL overrides commonly front the genuine
+            // validator through a proxy. The other lanes ship verbatim:
+            // DeepSeek's
             // Anthropic-compatible line marks input_schema "Fully Supported"
             // (api-docs.deepseek.com/guides/anthropic_api, fetched
             // 2026-11-05), the Anthropic tool-use guide and its
@@ -1297,7 +1304,7 @@ mod tests {
         // none either, and DeepSeek's Anthropic-compatible line documents
         // input_schema as fully supported. No record rejects root-level
         // enum/not anywhere. The recorded Anthropic 400 (f8e757322;
-        // CHANGELOG 0.9.1; anthropics/claude-code#4886/#30212) is specific
+        // CHANGELOG 0.9.0; anthropics/claude-code#4886/#30212) is specific
         // to the genuine Anthropic validator, so every other Messages lane
         // ships the schema exactly as declared — one shared builder serves
         // DeepSeek, MiniMax, and Model Studio, and this pins all three.
@@ -1333,7 +1340,7 @@ mod tests {
         // The genuine Anthropic endpoint is recorded rejecting root-level
         // oneOf/anyOf/allOf with HTTP 400 "input_schema does not support
         // oneOf, allOf, or anyOf at the top level" (f8e757322, 2026-07-11;
-        // CHANGELOG 0.9.1; anthropics/claude-code#4886/#30212), so this lane
+        // CHANGELOG 0.9.0; anthropics/claude-code#4886/#30212), so this lane
         // strips exactly those keywords, merges branch properties into the
         // root, and surfaces the dropped constraint as a description note.
         let client = test_client();
@@ -1387,7 +1394,12 @@ mod tests {
                 "properties": {"mode": {"type": "string"}},
                 "not": {"type": "integer"},
                 "dependentRequired": {"mode": ["confirm"]},
-                "dependentSchemas": {"mode": {"required": ["confirm"]}}
+                "dependentSchemas": {
+                    "mode": {
+                        "properties": {"confirm": {"type": "boolean"}},
+                        "required": ["confirm"]
+                    }
+                }
             }),
             allowed_callers: None,
             defer_loading: None,
@@ -1420,7 +1432,16 @@ mod tests {
             json!({"mode": ["confirm"]}),
             "dependent keywords are not in any record and stay verbatim: {schema}"
         );
-        assert!(schema.get("dependentSchemas").is_some());
+        assert_eq!(
+            schema["dependentSchemas"],
+            json!({
+                "mode": {
+                    "properties": {"confirm": {"type": "boolean"}},
+                    "required": ["confirm"]
+                }
+            }),
+            "a well-formed dependent schema ships byte-identically: {schema}"
+        );
         assert_eq!(
             schema["not"],
             json!({"type": "integer"}),
