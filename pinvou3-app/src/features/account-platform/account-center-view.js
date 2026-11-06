@@ -24,6 +24,13 @@ export function formatRMB(value, language) {
   return `¥${formatFen(value, language)}`;
 }
 
+export function formatAccountDate(value, language, fallback = '—') {
+  if (!value || !Number.isFinite(Date.parse(value))) return fallback;
+  return new Intl.DateTimeFormat({ zh: 'zh-CN', en: 'en-US', ja: 'ja-JP' }[language], {
+    year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', timeZoneName: 'short',
+  }).format(new Date(value));
+}
+
 export function packageAllocatedMicrocredits(item) {
   if (!Array.isArray(item.components)) return null;
   try {

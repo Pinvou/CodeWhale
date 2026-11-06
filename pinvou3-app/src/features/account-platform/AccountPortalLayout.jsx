@@ -1,5 +1,5 @@
 import { PortalDialogScope } from './portal-dialog-scope.jsx';
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import { accountDisplayLabel } from './account-display-label.js';
 import { accountCenterCopy, organizationCopy } from '../../shared/i18n.js';
 import { organizationLabel } from './organization-labels.js';
@@ -22,6 +22,12 @@ export function AccountPortalLayout({ me, copy, language, organizationName, orga
   const label = accountDisplayLabel(me, copy.user);
   const words = accountCenterCopy[language];
   const organizational = me.active_context?.context_type === 'ORGANIZATION';
+  const [vertical, setVertical] = useState(() => globalThis.matchMedia?.('(min-width: 851px)').matches ?? true);
+  useEffect(() => {
+    const media = globalThis.matchMedia('(min-width: 851px)'), update = () => setVertical(media.matches);
+    update(); media.addEventListener('change', update);
+    return () => media.removeEventListener('change', update);
+  }, []);
   const keydown = event => {
     if (event.isComposing || event.keyCode === 229) return;
     const tabs = [...event.currentTarget.querySelectorAll('[role="tab"]')];
@@ -45,7 +51,7 @@ export function AccountPortalLayout({ me, copy, language, organizationName, orga
         {organizational && <span>{organizationRoles.length ? organizationRoles.map(role => organizationLabel(organizationCopy[language], 'Role', role)).join(', ') : words.roleUnavailable}</span>}
         {hasPermission(me, 'personal.context.switch') && <button type="button" className="ap-text-button" disabled={busy} onClick={onSwitchIdentity}>{words.switchIdentity}</button>}
       </section>
-      <div className="ap-portal-tabs" role="tablist" aria-label={copy.title} onKeyDown={keydown}>
+      <div className="ap-portal-tabs" role="tablist" aria-orientation={vertical ? 'vertical' : 'horizontal'} aria-label={copy.title} onKeyDown={keydown}>
         {navigation.sections.map(section => <button type="button" role="tab" id={`ap-tab-${section}`} aria-controls={`ap-panel-${section}`} aria-selected={navigation.section === section} tabIndex={navigation.section === section ? 0 : -1} className={navigation.section === section ? 'active' : ''} data-section={section} key={section} onClick={() => navigation.navigate(section)}><NavIcon section={section} /><span>{copy.sections[section]}</span></button>)}
       </div>
       <div className="ap-sidebar-foot"><select aria-label={copy.language} value={language} onChange={event => onLanguageChange(event.target.value)}>{supportedLocales.map(locale => <option key={locale} value={locale}>{localeNames[locale]}</option>)}</select><button type="button" disabled={busy} onClick={onLogout}>{copy.logout}</button></div>

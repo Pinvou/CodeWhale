@@ -47,13 +47,13 @@ export function OrganizationModelPolicyWorkspace({ client, me, language }) {
   if (result !== undefined) { setPolicy(result); setMode(result.mode); setIDs(result.model_ids); setReason(''); }
  };
  if (!canRead) return null;
- return <section className="ap-org-model-policy"><h3>{copy.modelPolicy}</h3><button disabled={loading || operation.busy || operation.unknown} onClick={() => void refresh()}>{copy.refresh}</button>
+  return <section className="ap-org-model-policy"><div className="ap-section-heading"><h3>{copy.modelPolicy}</h3><button disabled={loading || operation.busy || operation.unknown} onClick={() => void refresh()}>{copy.refresh}</button></div>
   {loading && <p role="status">{copy.loading}</p>}{unavailable && <p role="alert">{readDenied ? copy.permissions : copy.unavailable}</p>}
-  {policy && <form onSubmit={event => void save(event)}><p>{copy.version}: {policy.version}</p><fieldset disabled={!canManage || loading || operation.busy || operation.unknown}>
+   {policy && <form className="ap-policy-form" onSubmit={event => void save(event)}><p className="ap-muted">{copy.version}: {policy.version}</p><fieldset className="ap-form-fields" disabled={!canManage || loading || operation.busy || operation.unknown}>
    <label>{copy.modelPolicyMode}<select value={mode} onChange={event => setMode(event.target.value)}>{['ALLOW_ALL', 'ALLOW_LIST', 'DENY_LIST'].map(value => <option key={value} value={value}>{copy[value]}</option>)}</select></label>
-   {mode !== 'ALLOW_ALL' && <fieldset><legend>{copy.models}</legend>{models.map(model => <label key={model.model_id}><input type="checkbox" checked={ids.includes(model.model_id)} onChange={event => setIDs(current => event.target.checked ? [...current, model.model_id] : current.filter(id => id !== model.model_id))} />{model.display_name || model.upstream_model_ref || model.model_id}</label>)}
+    {mode !== 'ALLOW_ALL' && <fieldset className="ap-model-checklist"><legend>{copy.models}</legend>{models.map(model => <label key={model.model_id}><input type="checkbox" checked={ids.includes(model.model_id)} onChange={event => setIDs(current => event.target.checked ? [...current, model.model_id] : current.filter(id => id !== model.model_id))} />{model.display_name || model.upstream_model_ref || model.model_id}</label>)}
     {ids.filter(id => !models.some(model => model.model_id === id)).map(id => <label key={id}><input type="checkbox" checked onChange={() => setIDs(current => current.filter(value => value !== id))} />{id}</label>)}</fieldset>}
-   <label>{copy.reason}<input value={reason} onChange={event => setReason(event.target.value)} maxLength={500} required autoComplete="off" /></label>
+    <label>{copy.reason}<input value={reason} onChange={event => setReason(event.target.value)} maxLength={500} required autoComplete="off" /></label>
   </fieldset>{operation.error && <p role="alert">{operation.error}</p>}{operation.message && <p role="status">{operation.message}</p>}
    {canManage && <button disabled={operation.busy || loading} type="submit">{operation.unknown ? copy.retry : copy.save}</button>}
   </form>}

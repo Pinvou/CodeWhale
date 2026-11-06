@@ -97,6 +97,28 @@ try {
     await page.goBack(); await activeAccount('creditsUsage'); await page.goForward(); await activeAccount('ordersInvoices');
     assert.equal(await page.evaluate(() => window.restored.calls.filter(call => call.method !== 'GET' && !call.url.endsWith('/account/bootstrap')).length), 0, 'URL navigation wrote business data');
   });
+  await run('render review: compact products and white settings cards at desktop and mobile widths', async () => {
+    await fresh();
+    await page.evaluate(() => { window.restored.personal = ['personal.billing.read', 'personal.recharge.create', 'personal.recharge.manage', 'personal.usage.read', 'personal.profile.update', 'personal.security.manage']; window.restored.reload(); });
+    await page.waitForSelector('.ap-product-picker');
+    for (const width of [1440, 390]) {
+      await page.setViewport({ width, height: 1100 }); await accountTab('creditsUsage'); await activeAccount('creditsUsage');
+      const box = await page.$eval('.ap-product-picker label', node => ({ height: node.getBoundingClientRect().height, text: node.textContent }));
+      assert.ok(box.height < 200, 'purchase cards should stay compact without hiding facts');
+      assert.ok(box.text.includes('110') && box.text.includes('30'));
+      assert.ok(await page.$$eval('.ap-benefit-card p', nodes => nodes.every(node => node.scrollWidth <= node.clientWidth + 1)), 'exact large balances must fit inside benefit cards');
+      await noOverflow();
+      if (process.env.UI_ARTIFACT_DIR) await page.screenshot({ path: path.join(process.env.UI_ARTIFACT_DIR, 'render-review-personal-' + width + '.png'), fullPage: true });
+      await accountTab('ordersInvoices'); await activeAccount('ordersInvoices'); await noOverflow();
+      assert.ok(await page.$$eval('.ap-order-table-wrap td:last-child button', nodes => nodes.every(node => node.getBoundingClientRect().width >= 60)));
+      await accountTab('accountSettings'); await activeAccount('accountSettings');
+      for (const selector of ['.ap-account-information', '.ap-context-settings', '.ap-profile-rows', '.ap-security-actions']) {
+        assert.equal(await page.$eval('#ap-panel-accountSettings > ' + selector, node => getComputedStyle(node).backgroundColor), 'rgb(255, 255, 255)');
+      }
+      await noOverflow();
+      if (process.env.UI_ARTIFACT_DIR) await page.screenshot({ path: path.join(process.env.UI_ARTIFACT_DIR, 'render-review-settings-' + width + '.png'), fullPage: true });
+    }
+  });
   await run('personal unknown recharge survives tab changes with the original key and facts', async () => {
     await fresh(); await page.evaluate(() => { window.restored.unknown = true; });
     await page.click('.ap-recharge-controls > button');
@@ -166,6 +188,9 @@ try {
     await page.evaluate(() => { window.copiedIdentifier = ''; Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: async value => { window.copiedIdentifier = value; } } }); });
     await page.click('.ap-order-history tbody .ap-copy-identifier button');
     await page.waitForFunction(id => window.copiedIdentifier === id, {}, id.title);
+    await page.evaluate(() => { Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: async () => { throw new Error('CONTROL_CLIPBOARD_DENIED'); } } }); });
+    await page.click('.ap-order-history tbody .ap-copy-identifier button');
+    assert.equal(await page.$eval('.ap-order-history tbody .ap-copy-identifier code', node => node.textContent), id.title, 'failed copying exposes the selectable full identifier');
     await accountTab('accountSettings');
     assert.equal(await page.$$eval('.ap-account-information dl', nodes => nodes.length), 0, 'editable profile is the single field owner');
     assert.equal(await page.$$eval('.ap-profile-rows > .ap-profile-row', nodes => nodes.length), 2);
@@ -252,13 +277,80 @@ try {
     await page.evaluate(language => {
       window.restored.language = language; window.restored.centerOrganization = true;
       window.restored.personal = ['personal.context.switch', 'personal.profile.update', 'personal.invitations.read', 'personal.invitations.accept'];
-      window.restored.context = { context_type: 'ORGANIZATION', organization_id: '33333333-3333-4333-8333-333333333333', context_version: 1, membership_version: 1, organization_authorization_version: 1, permissions: ['org.profile.read', 'org.units.read', 'org.units.manage', 'org.members.read', 'org.members.manage', 'org.roles.read', 'org.roles.assign', 'org.wallet.read', 'org.quota.read.self', 'org.quota.allocate'] };
+      window.restored.context = { context_type: 'ORGANIZATION', organization_id: '33333333-3333-4333-8333-333333333333', context_version: 1, membership_version: 1, organization_authorization_version: 1, permissions: ['org.profile.read', 'org.units.read', 'org.units.manage', 'org.members.read', 'org.members.manage', 'org.roles.read', 'org.roles.assign', 'org.wallet.read', 'org.quota.read.self', 'org.quota.allocate', 'org.models.read', 'org.models.manage'] };
       window.restored.reload();
     }, language);
     await page.waitForFunction(() => document.querySelector('.ap-identity-card strong')?.textContent === 'Sample organization');
     await accountTab('myOrganization');
     await page.waitForSelector('.ap-org-tabs');
   };
+  await run('render review: model forms, owner removal and responsive control geometry', async () => {
+    await organizationCenter('en');
+    await page.evaluate(() => { window.restored.includeOwner = true; window.restored.context.permissions.push('org.owner.transfer'); window.restored.reload(); });
+    await page.waitForSelector('.ap-sidebar [data-section=myOrganization]');
+    await accountTab('myOrganization'); await page.click('[data-org-section=members]');
+    await page.waitForFunction(() => document.querySelectorAll('.ap-member-table tbody tr').length === 2);
+    assert.equal(await page.$eval('.ap-member-table tbody tr:first-child button.ap-danger', node => node.disabled), true);
+    assert.ok((await page.$eval('.ap-member-table tbody tr:first-child', node => node.textContent)).includes(await page.evaluate(() => window.restored.copy().center.noDepartment)));
+    for (const width of [1908, 1440, 768, 390]) {
+      await page.setViewport({ width, height: 1000 });
+      await page.waitForFunction(vertical => document.querySelector('.ap-sidebar [role=tablist]').getAttribute('aria-orientation') === (vertical ? 'vertical' : 'horizontal'), {}, width > 850);
+      await page.click('[data-org-section=models]'); await page.waitForSelector('.ap-policy-form');
+      for (const mode of ['ALLOW_ALL', 'ALLOW_LIST', 'DENY_LIST']) {
+        await page.select('.ap-policy-form > fieldset > label select', mode);
+        const controls = await page.$$eval('.ap-policy-form > fieldset > label', nodes => nodes.map(node => { const r = node.getBoundingClientRect(); const control = node.querySelector('select,input'); return { left: r.left, right: r.right, top: r.top, bottom: r.bottom, controlHeight: control.getBoundingClientRect().height }; }));
+        assert.equal(controls.length, 2); assert.equal(controls[0].controlHeight, controls[1].controlHeight);
+        assert.ok(controls[0].right <= controls[1].left || controls[0].bottom <= controls[1].top, 'policy fields must never overlap');
+        if (mode !== 'ALLOW_ALL') assert.equal(await page.$$eval('.ap-model-checklist input[type=checkbox]', nodes => nodes.length), 1);
+        await noOverflow();
+      }
+      if (process.env.UI_ARTIFACT_DIR) await page.screenshot({ path: path.join(process.env.UI_ARTIFACT_DIR, `render-review-models-${width}.png`), fullPage: true });
+      await page.click('[data-org-section=roles]'); await page.waitForSelector('.ap-role-table tbody tr'); await noOverflow();
+      assert.ok((await page.$eval('.ap-role-table tbody tr', node => node.textContent)).includes(await page.evaluate(() => window.restored.copy().center.permanent)));
+      const actions = await page.$$eval('#ap-org-panel-roles > .ap-action-group > button', nodes => nodes.map(node => { const r = node.getBoundingClientRect(); return { left: r.left, right: r.right, top: r.top }; }));
+      assert.equal(actions.length, 2); assert.ok(actions[1].top > actions[0].top || actions[1].left - actions[0].right >= 8);
+    }
+    assert.equal(await page.evaluate(() => window.restored.calls.filter(call => ['POST', 'PUT', 'DELETE'].includes(call.method) && !call.url.endsWith('/account/bootstrap')).length), 0);
+  });
+  await run('render review: organization purchase facts, history pagination, details and stale reads', async () => {
+    await organizationCenter('en');
+    await page.evaluate(() => { window.restored.context.permissions.push('org.entitlements.purchase'); window.restored.reload(); });
+    await page.waitForSelector('.ap-sidebar [data-section=myOrganization]'); await accountTab('myOrganization'); await page.click('[data-org-section=billing]');
+    const purchase = '[data-org-action=organization-purchase]';
+    await page.waitForSelector(purchase + ' select');
+    assert.equal(await page.$eval(purchase + ' button[type=submit]', node => node.disabled), true);
+    await page.select(purchase + ' select:first-of-type', 'sample-points');
+    await page.waitForFunction(selector => document.querySelector(selector).textContent.includes('110'), {}, purchase);
+    assert.ok((await page.$eval(purchase, node => node.textContent)).includes('30'));
+    assert.equal(await page.$eval(purchase + ' button[type=submit]', node => node.disabled), true);
+    await page.select(purchase + ' label:nth-child(2) select', 'ALIPAY');
+    assert.equal(await page.$eval(purchase + ' button[type=submit]', node => node.disabled), false);
+    const history = '.ap-organization-orders';
+    await page.waitForFunction(selector => document.querySelector(selector)?.querySelectorAll('tbody tr').length === 2, {}, history);
+    await page.evaluate(() => { window.restored.historyFail = true; });
+    await page.click(history + ' > .ap-action-group button'); await page.waitForSelector(history + ' [role=alert]');
+    assert.equal(await page.$$eval(history + ' tbody tr', nodes => nodes.length), 2, 'failed continuation keeps loaded orders');
+    await page.evaluate(() => { window.restored.historyFail = false; });
+    await page.click(history + ' > .ap-action-group button');
+    await page.waitForFunction(selector => document.querySelector(selector)?.querySelectorAll('tbody tr').length === 3, {}, history);
+    assert.equal(await page.$(history + ' > .ap-action-group button'), null);
+    for (const width of [1440, 768, 390]) {
+      await page.setViewport({ width, height: 1100 }); await noOverflow();
+      assert.ok(await page.$$eval(history + ' tbody td:last-child button', nodes => nodes.every(node => node.getBoundingClientRect().width >= 60)));
+      if (process.env.UI_ARTIFACT_DIR) await page.screenshot({ path: path.join(process.env.UI_ARTIFACT_DIR, 'render-review-billing-' + width + '.png'), fullPage: true });
+    }
+    await page.click(history + ' tbody tr:first-child td:last-child button'); await page.waitForSelector('[role=dialog]');
+    assert.ok((await page.$eval('[role=dialog]', node => node.textContent)).includes('9.90'));
+    await click('[role=dialog] button', await page.evaluate(() => window.restored.copy().finance.continuePayment));
+    await page.waitForSelector('.ap-payment-dialog [data-qr-state=loaded]');
+    await page.keyboard.press('Escape'); await page.waitForFunction(() => !document.querySelector('[role=dialog]'));
+    await page.evaluate(() => { window.restored.holdHistory = true; });
+    await page.click(history + ' > .ap-section-heading button');
+    await page.waitForFunction(() => typeof window.restored.releaseHistory === 'function');
+    await page.evaluate(() => { window.restored.context = { context_type: 'PERSONAL', context_version: 2, permissions: [] }; window.restored.reload(); window.restored.releaseHistory(); });
+    await page.waitForFunction(() => !document.querySelector('.ap-organization-orders'));
+    assert.equal(await page.evaluate(() => window.restored.calls.filter(call => call.method === 'POST' && call.url.includes('/recharge/orders')).length), 0);
+  });
   await run('organization directory refreshes same-context names and role changes', async () => {
     await organizationCenter('en');
     await page.evaluate(() => {
@@ -333,7 +425,7 @@ try {
     const item = JSON.parse(calls[0].body).items[0];
     assert.equal(item.amount_microcredits, 12345); assert.equal(item.component_type, 'BASE'); assert.equal(item.membership_version, 1);
     await page.waitForFunction(() => document.querySelector('[data-org-action=quota-allocation]')?.textContent.includes(window.restored.copy().center.noSources));
-    assert.equal(await page.$eval(`${form} > button`, node => node.disabled), true);
+    assert.equal(await page.$(`${form} > button`), null, 'resolved empty allocation has no executable submit control');
     assert.ok((await page.$eval(form, node => node.textContent)).includes(await page.evaluate(() => window.restored.copy().center.noSources)));
   });
   await run('allocation lifecycle replay closes UNKNOWN and permits the next versioned allocation', async () => {
@@ -360,7 +452,7 @@ try {
       await organizationCenter(language);
       for (const width of [1440, 768, 390]) {
         await page.setViewport({ width, height: 1000 });
-        for (const section of ['overview', 'members', 'roles', 'billing']) {
+        for (const section of ['overview', 'members', 'roles', 'billing', 'models']) {
           await page.click(`[data-org-section=${section}]`); await noOverflow();
           if (process.env.UI_ARTIFACT_DIR && language === 'zh' && width !== 768) await page.screenshot({ path: path.join(process.env.UI_ARTIFACT_DIR, `organization-${section}-${width}.png`), fullPage: true });
         }
@@ -647,7 +739,7 @@ try {
     await page.evaluate(() => window.restored.releaseCreate()); await page.waitForFunction(() => !document.querySelector('.ap-recharge-form button').disabled);
     assert.equal(await page.$('.ap-payment-dialog'), null); await activeAccount('accountSettings');
     await accountTab('creditsUsage'); await page.waitForSelector('.ap-payment-dialog');
-    assert.equal(await page.$eval('.ap-payment-dialog [role=status]', node => node.textContent), await page.evaluate(() => window.restored.copy().finance.saved));
+    assert.equal(await page.$eval('.ap-payment-dialog [role=status]', node => node.textContent), await page.evaluate(() => window.restored.copy().finance.paymentOrderCreated));
     assert.equal(await page.evaluate(() => window.restored.calls.filter(call => call.method === 'POST' && call.url.endsWith('/recharge/orders')).length), 1);
   });
   await run('submitting displayed date filters sends timezone-bearing RFC3339', async () => {

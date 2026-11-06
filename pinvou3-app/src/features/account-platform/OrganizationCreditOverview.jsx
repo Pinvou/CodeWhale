@@ -5,7 +5,7 @@ import { formatBalance } from './balance-view.js';
 import { integerMoney } from './finance-contract.js';
 import { PortalBenefits } from './PortalBenefits.jsx';
 
-export function OrganizationCreditOverview({ me, data, language, ready, error, now }) {
+export function OrganizationCreditOverview({ me, data, language, ready, error, now, onPurchase }) {
   const copy = organizationCopy[language], account = accountPlatformCopy[language];
   const center = accountCenterCopy[language];
   const wallet = hasPermission(me, 'org.wallet.read');
@@ -16,6 +16,7 @@ export function OrganizationCreditOverview({ me, data, language, ready, error, n
   if (!ready) return error ? null : <p role="status">{copy.loading}</p>;
   return <>
     {(wallet || quota) && <section className="ap-balance-hero ap-balance-columns"><div><span>{wallet ? copy.balance : copy.quota}</span><strong>{formatBalance(available, language)}</strong><small>{center.available}</small></div><div className="ap-reserved-summary"><span>{account.reservedCredits}</span><strong>{formatBalance(reserved, language)}</strong><p>{center.reservedHint}</p></div></section>}
-    {wallet && <PortalBenefits items={data.packages} language={language} now={now} />}
+    {hasPermission(me, 'org.entitlements.purchase') && onPurchase && <div className="ap-action-group"><button type="button" className="ap-primary" onClick={onPurchase}>{center.buyOrganization}</button></div>}
+     {wallet && <PortalBenefits items={data.packages} language={language} now={now} />}
   </>;
 }

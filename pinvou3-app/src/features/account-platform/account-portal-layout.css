@@ -134,7 +134,6 @@
 .ap-restored-portal .ap-period-summary { padding: 16px; margin: 16px 0; border: 1px solid var(--ap-border); border-radius: 12px; background: #fff; }
 .ap-restored-portal .ap-period-summary h4 { margin-top: 0; }
 .ap-restored-portal .ap-usage-outcome, .ap-restored-portal .ap-order-review-hint { display: block; margin-top: 6px; color: var(--ap-secondary); line-height: 1.6; }
-.ap-restored-portal .ap-usage-table details[open] { min-width: 180px; max-width: 300px; }
 .ap-restored-portal summary { cursor: pointer; color: #116b40; }
 .ap-restored-portal .ap-closure-rules { margin: 20px 0; }
 .ap-restored-portal .ap-status[data-status=COMPLETED], .ap-restored-portal .ap-status[data-status=LATE_COMPLETED], .ap-restored-portal .ap-status[data-status=ACTIVE], .ap-restored-portal .ap-status[data-status=SETTLED] { color: #176139; background: #e6f4ea; }
@@ -192,3 +191,98 @@
 }
 @media (pointer: coarse) { .ap-restored-portal button, .ap-restored-dialog button { min-height: 44px; } }
 @media (prefers-reduced-motion: reduce) { .ap-restored-portal * { animation: none !important; transition: none !important; } }
+
+/* Portal sections have explicit visual roles. DOM nesting and createPortal
+ * targets must not decide whether the same business component is a card. */
+.ap-restored-portal section { margin: 0; padding: 0; border-radius: 0; background: transparent; }
+.ap-restored-portal .ap-usage-workspace,
+.ap-restored-portal .ap-order-history,
+.ap-restored-portal .ap-benefits {
+  margin: 24px 0; padding: 24px; border: 1px solid var(--ap-border); border-radius: 12px; background: var(--ap-card);
+}
+.ap-restored-portal .ap-portal-panel > section.ap-personal-usage { padding-top: 0; border-top: 0; }
+.ap-restored-portal .ap-portal-finance { margin-bottom: 24px; }
+.ap-restored-portal .ap-recharge-form { padding: 24px; border: 1px solid var(--ap-border); border-radius: 12px; background: var(--ap-card); }
+.ap-restored-portal .ap-org-finance { padding: 0; background: transparent; }
+.ap-restored-portal .ap-org-finance > section { padding: 24px; }
+.ap-restored-portal .ap-org-finance .ap-benefit-card { padding: 16px 0; border: 0; border-radius: 0; }
+.ap-restored-portal .ap-portal-panel > .ap-danger-section { padding: 24px; border-radius: 12px; }
+.ap-restored-portal .ap-history-group { margin-top: 20px; border-top: 1px solid var(--ap-border); padding-top: 16px; }
+.ap-restored-portal .ap-history-group > summary { padding: 8px 0; font-weight: 600; }
+.ap-restored-portal .ap-empty-state { padding: 12px 0; }
+.ap-restored-portal .ap-empty-state h4 { margin-top: 0; }
+.ap-restored-portal .ap-empty-state p { margin-bottom: 0; color: var(--ap-secondary); }
+.ap-restored-portal button { min-height: 40px; line-height: 20px; white-space: nowrap; }
+.ap-restored-portal .ap-sidebar .ap-portal-tabs button { white-space: normal; }
+.ap-restored-portal input:not([type=checkbox]):not([type=radio]):not([type=range]),
+.ap-restored-portal select:not([multiple]) { height: 40px; line-height: 20px; }
+.ap-restored-portal .ap-recharge-controls > button { padding: 8px 24px; }
+.ap-restored-portal .ap-action-group { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin: 16px 0; }
+.ap-restored-portal .ap-action-group .ap-danger { margin-left: 8px; }
+.ap-restored-portal .ap-inline-hint { flex-basis: 100%; color: var(--ap-secondary); }
+.ap-restored-portal .ap-department-list li { display: grid; grid-template-columns: minmax(140px, 1fr) minmax(0, 2fr); gap: 20px; }
+.ap-restored-portal .ap-table-wrap { overflow-x: auto; }
+.ap-restored-portal .ap-role-table { min-width: 700px; }
+.ap-restored-portal .ap-role-table td { vertical-align: top; }
+.ap-restored-portal .ap-order-table-wrap table { min-width: 900px; table-layout: fixed; }
+.ap-restored-portal .ap-order-table-wrap th:nth-child(1) { width: 19%; }
+.ap-restored-portal .ap-order-table-wrap th:nth-child(2) { width: 9%; }
+.ap-restored-portal .ap-order-table-wrap th:nth-child(3),
+.ap-restored-portal .ap-order-table-wrap th:nth-child(4) { width: 13%; }
+.ap-restored-portal .ap-order-table-wrap th:nth-child(5) { width: 24%; }
+.ap-restored-portal .ap-order-table-wrap th:nth-child(6) { width: 12%; }
+.ap-restored-portal .ap-order-table-wrap th:nth-child(7) { width: 10%; }
+.ap-restored-portal .ap-order-table-wrap td { vertical-align: top; }
+.ap-restored-portal .ap-order-table-wrap td:last-child button { white-space: nowrap; min-width: 60px; }
+.ap-restored-portal .ap-order-review-hint { font-size: 12px; max-width: 210px; }
+.ap-restored-portal .ap-disclosure { width: 100%; border: 0; padding: 0; text-align: left; font-weight: 600; color: #116b40; background: transparent; }
+.ap-restored-portal .ap-policy-form .ap-form-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px; padding: 0; margin: 16px 0 24px; border: 0; }
+.ap-restored-portal .ap-policy-form .ap-form-fields > label { display: grid; gap: 8px; min-width: 0; }
+.ap-restored-portal .ap-policy-form .ap-form-fields > label:last-child { grid-column: 2; grid-row: 1; }
+.ap-restored-portal .ap-policy-form input:not([type=checkbox]), .ap-restored-portal .ap-policy-form select { width: 100%; min-width: 0; }
+.ap-restored-portal .ap-model-checklist { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; max-height: 320px; overflow-y: auto; border: 1px solid var(--ap-border); border-radius: 8px; padding: 16px; margin: 0; }
+.ap-restored-portal .ap-model-checklist label { display: flex; align-items: flex-start; gap: 8px; overflow-wrap: anywhere; }
+.ap-restored-portal .ap-model-checklist input { width: 18px; height: 18px; flex: 0 0 18px; margin: 2px 0; padding: 0; }
+.ap-restored-portal .ap-order-lookup { display: flex; align-items: flex-end; flex-wrap: wrap; gap: 12px; margin-top: 20px; }
+.ap-restored-portal .ap-order-lookup label { display: grid; gap: 8px; flex: 1 1 280px; }
+.ap-restored-portal .ap-order-lookup input { width: 100%; min-width: 0; }
+.ap-restored-portal .ap-product-picker label { gap: 8px; padding: 14px; }
+.ap-restored-portal .ap-product-picker input { top: 14px; right: 14px; }
+.ap-restored-portal .ap-product-picker .ap-product-price { font-size: 22px; }
+.ap-restored-portal .ap-product-picker dl { gap: 4px; }
+.ap-restored-portal #ap-panel-accountSettings > section.ap-account-information,
+.ap-restored-portal #ap-panel-accountSettings > section.ap-context-settings,
+.ap-restored-portal #ap-panel-accountSettings > section.ap-profile-rows,
+.ap-restored-portal #ap-panel-accountSettings > section.ap-security-actions {
+  margin: 0 0 20px; padding: 24px; border: 1px solid var(--ap-border); border-radius: 12px; background: var(--ap-card);
+}
+.ap-restored-portal .ap-context-settings .ap-invitations { margin-top: 24px; padding-top: 20px; border-top: 1px solid var(--ap-border); }
+@media (max-width: 560px) {
+  .ap-restored-portal .ap-usage-workspace, .ap-restored-portal .ap-order-history, .ap-restored-portal .ap-benefits, .ap-restored-portal .ap-recharge-form { padding: 16px; }
+  .ap-restored-portal .ap-order-table-wrap table { min-width: 0; table-layout: auto; }
+  .ap-restored-portal .ap-order-table-wrap td { flex-wrap: wrap; }
+  .ap-restored-portal .ap-department-list li, .ap-restored-portal .ap-policy-form .ap-form-fields, .ap-restored-portal .ap-model-checklist { grid-template-columns: minmax(0, 1fr); }
+  .ap-restored-portal .ap-policy-form .ap-form-fields > label:last-child { grid-column: auto; grid-row: auto; }
+  .ap-restored-portal #ap-panel-accountSettings > section.ap-account-information,
+  .ap-restored-portal #ap-panel-accountSettings > section.ap-context-settings,
+  .ap-restored-portal #ap-panel-accountSettings > section.ap-profile-rows,
+  .ap-restored-portal #ap-panel-accountSettings > section.ap-security-actions { padding: 16px; }
+  .ap-restored-portal .ap-role-table, .ap-restored-portal .ap-role-table tbody, .ap-restored-portal .ap-role-table tr { display: block; min-width: 0; }
+  .ap-restored-portal .ap-role-table thead { display: none; }
+  .ap-restored-portal .ap-role-table tr { border-bottom: 1px solid var(--ap-border); padding: 12px 0; }
+  .ap-restored-portal .ap-role-table td { display: grid; grid-template-columns: 92px minmax(0, 1fr); gap: 12px; padding: 8px 0; border: 0; }
+  .ap-restored-portal .ap-role-table td::before { content: attr(data-label); color: var(--ap-secondary); }
+}
+@media (pointer: coarse) {
+  .ap-restored-portal button { min-height: 44px; }
+  .ap-restored-portal input:not([type=checkbox]):not([type=radio]):not([type=range]), .ap-restored-portal select:not([multiple]) { height: 44px; }
+}
+
+/* Shared credit cards must also contain exact, maximum-width monetary values. */
+.ap-restored-portal .ap-portal-panel > section.ap-portal-finance { padding: 0; border: 0; background: transparent; }
+.ap-restored-portal .ap-pending-order-section { margin: 24px 0; padding: 24px; border: 1px solid var(--ap-border); border-radius: 12px; background: var(--ap-card); }
+.ap-benefit-card, .ap-benefit-card > * { min-width: 0; overflow-wrap: anywhere; }
+.ap-benefit-card header, .ap-benefit-card footer { flex-wrap: wrap; }
+.ap-benefit-card footer small { flex: 1 1 140px; min-width: 0; }
+.ap-benefit-card footer button { flex: 0 0 auto; }
+@media (max-width: 560px) { .ap-restored-portal .ap-pending-order-section { padding: 16px; } }

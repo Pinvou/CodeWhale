@@ -7,12 +7,11 @@ import { PortalBenefits } from './PortalBenefits.jsx';
 import { formatFen } from './finance-contract.js';
 import { localizedProductDisplayName } from './localized-product-display-name.js';
 import { isPayablePaymentOrder, orderSummaryStatus, paymentOrderHistory, orderDurationDays } from './order-view.js';
-import { productPointFacts, formatRMB } from './account-center-view.js';
+import { productPointFacts, formatRMB, formatAccountDate } from './account-center-view.js';
 import { CopyIdentifier } from './CopyIdentifier.jsx';
 
 function date(value, language) {
-  const parsed = new Date(value);
-  return value && Number.isFinite(parsed.getTime()) ? parsed.toLocaleString({ zh: 'zh-CN', en: 'en-US', ja: 'ja-JP' }[language]) : '—';
+  return formatAccountDate(value, language);
 }
 
 // Presentation is split into stable DOM targets; the parent remains the one
@@ -28,7 +27,7 @@ export function PersonalFinancePortalSections({ view, targets, language }) {
       <input type="radio" name="portal-product" disabled={view.busy || view.unknown || view.recoveryBlocked} value={item.product_id} checked={item.product_id === view.selected?.product_id} onChange={() => view.onProduct(item.product_id)} />
       <strong>{localizedProductDisplayName(item, language, 'product_id')}</strong><span className="ap-product-price">{formatRMB(item.amount_fen, language)} <small>CNY</small></span>
       <dl><div><dt>{center.credited}</dt><dd>{points ? points.total.toLocaleString() : center.unspecified}</dd></div><div><dt>{center.validity}</dt><dd>{Number.isSafeInteger(item.validity_days) && item.validity_days > 0 ? center.days(item.validity_days) : center.unspecified}</dd></div></dl>
-      {points?.bonus > 0n && <small>{center.bonus}: {points.bonus.toLocaleString()}</small>}<small>{center.productScope}</small>
+      {points?.bonus > 0n && <small>{center.bonus}: {points.bonus.toLocaleString()}</small>}
     </label>;
   };
   const feedback = <div className="ap-finance-feedback">
@@ -43,12 +42,12 @@ export function PersonalFinancePortalSections({ view, targets, language }) {
       {!data.products.length ? <p className="ap-empty">{center.noProducts}</p> : <form className="ap-recharge-form" onSubmit={event => { event.preventDefault(); view.onCreate(); }}>
         {data.capabilities?.test_only && <p className="ap-alert" role="status">{center.testPrice}</p>}
         <div className="ap-product-picker">{data.products.map(productCard)}</div>
-        <p className="ap-muted">{center.priceNote}</p>
+        <p className="ap-muted">{center.productScope} · {center.priceNote}</p>
         <div className="ap-recharge-controls"><label>{copy.channel}<select disabled={view.busy || view.unknown || view.recoveryBlocked} value={view.selectedChannel} onChange={event => view.onChannel(event.target.value)}>{(view.selected?.channels || []).map(value => <option key={value} value={value}>{copy.channels?.[value] || value}</option>)}</select></label><button className="ap-primary" disabled={view.busy || view.unknown || view.recoveryBlocked || !view.canCreate || !view.selectedChannel}>{center.buy}</button></div>
         {!view.selectedChannel && <p>{copy.noChannel}</p>}
         {!view.canCreate && <p>{copy.permissions}</p>}
       </form>}
-      {view.hasPending && <section aria-label={copy.pendingOrders}><h3>{copy.pendingOrders}</h3><ul className="ap-pending-payments">{paymentOrderHistory(data.orders).filter(item => isPayablePaymentOrder(item, view.now)).map(item => <li key={item.order_id}><span>{localizedProductDisplayName(item, language, 'product_id')} · {formatFen(item.amount_fen, language)} · {copy.countdown(Math.max(0, Math.ceil((new Date(item.expires_at).getTime() - view.now) / 1000)))}</span><button disabled={view.busy || view.unknown || view.recoveryBlocked} onClick={() => view.onSelectOrder(item.order_id, true)}>{copy.continuePayment}</button></li>)}</ul></section>}
+      {view.hasPending && <section className="ap-pending-order-section" aria-label={copy.pendingOrders}><h3>{copy.pendingOrders}</h3><ul className="ap-pending-payments">{paymentOrderHistory(data.orders).filter(item => isPayablePaymentOrder(item, view.now)).map(item => <li key={item.order_id}><span>{localizedProductDisplayName(item, language, 'product_id')} · {formatFen(item.amount_fen, language)} · {copy.countdown(Math.max(0, Math.ceil((new Date(item.expires_at).getTime() - view.now) / 1000)))}</span><button disabled={view.busy || view.unknown || view.recoveryBlocked} onClick={() => view.onSelectOrder(item.order_id, true)}>{copy.continuePayment}</button></li>)}</ul></section>}
       <PortalBenefits items={data.packages} language={language} now={view.now} />
     </>}
   </section>;

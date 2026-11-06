@@ -39,7 +39,7 @@ globalThis.fetch = async (input, options = {}) => {
   if (c.centerOrganization && url.includes(`/organizations/${orgID}/`)) {
     const member = { organization_id: orgID, membership_id: unitID, user_id: otherID, display_name: 'Sample member', status: 'ACTIVE', version: c.membershipVersion || 1, roles: ['MEMBER'], unit_ids: [unitID] };
     if (url.includes('/quota-members?')) return json({ items: [member], next_cursor: null });
-    if (url.includes('/members?')) return json({ items: c.removedMember ? [] : [member], next_cursor: null });
+    if (url.includes('/members?')) return json({ items: c.removedMember ? [] : [...(c.includeOwner ? [{ ...member, user_id: id, membership_id: '88888888-8888-4888-8888-888888888888', display_name: 'Sample owner', roles: ['OWNER'], unit_ids: [] }] : []), member], next_cursor: null });
     if (url.endsWith(`/members/${otherID}`) && method === 'DELETE') {
       c.effects.add(call.key); c.removedMember = true;
       return c.unknown ? json({ code: 'COMMAND_RESULT_UNKNOWN' }, 503) : json({ organization_id: orgID, member: { ...member, status: 'REVOKED' } });
@@ -52,7 +52,17 @@ globalThis.fetch = async (input, options = {}) => {
       const input = JSON.parse(options.body).items[0];
       return c.unknown ? json({ code: 'COMMAND_RESULT_UNKNOWN' }, 503) : json({ items: [{ index: 0, status: 'SUCCEEDED', grant: { ...input, membership_version: c.replayVersion || input.membership_version, organization_id: orgID, grant_id: id, status: 'ACTIVE', allocation_version: 1, original_microcredits: input.amount_microcredits, available_microcredits: input.amount_microcredits, reserved_microcredits: '0', used_microcredits: '0', expired_microcredits: '0', revoked_microcredits: '0' } }] }, 207);
     }
-    if (url.endsWith('/role-bindings')) return json({ items: [], truncated: false });
+    if (url.endsWith('/role-bindings')) return json({ items: c.includeOwner ? [{ organization_id: orgID, binding_id: otherID, user_id: otherID, role_code: 'ADMIN', unit_id: null, status: 'ACTIVE', expires_at: null }] : [], truncated: false });
+    if (url.endsWith('/recharge/products')) return json({ items: [{ product_id: 'sample-points', availability_status: 'AVAILABLE', name: 'Sample points', amount_fen: '990', base_points: '100', bonus_points: '10', validity_days: 30, channels: ['ALIPAY'] }] });
+    if (url.endsWith('/payment-capabilities')) return json({ channels: ['ALIPAY'], test_only: true, formal_collection_admitted: false });
+    if (/\/recharge\/orders(?:\?|$)/.test(url) && method === 'GET') {
+      const cursor = new URL(url, location.origin).searchParams.get('cursor') || '';
+      const result = () => c.historyFail ? json({ code: 'UPSTREAM_UNAVAILABLE' }, 503) : json({ organization_id: orgID, items: cursor ? [order(3)] : [order(1), order(2)], next_cursor: cursor ? null : 'page_two' });
+      if (c.holdHistory) return new Promise(resolve => { c.historySignal = options.signal; c.releaseHistory = () => resolve(result()); });
+      return result();
+    }
+    if (/\/recharge\/orders\/[^/?]+$/.test(url)) return json({ ...order(Number(url.split('-').at(-1))), created_at: undefined, beneficiary_organization_id: orgID, channel: 'ALIPAY', qr_data: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aNbQAAAAASUVORK5CYII=' });
+
     if (url.endsWith('/model-policy')) return json({ organization_id: orgID, version: 1, authorization_version: 1, mode: 'ALLOW_ALL', model_ids: [] });
   }
   if (url.includes('/api/admin/billing/') && method === 'GET') {
@@ -85,6 +95,7 @@ globalThis.fetch = async (input, options = {}) => {
     binding.status = 'REVOKED'; binding.revoked_by = c.user;
     return json(binding);
   }
+  if (url.endsWith('/v1/models')) return json({ items: [{ model_id: unitID, display_name: 'Sample model' }] });
   if (url.endsWith('/v1/me/organizations')) return json({ items: c.centerOrganization ? [{ organization_id: orgID, name: c.organizationName || 'Sample organization', status: 'ACTIVE', version: 1, roles: c.organizationRoles || ['OWNER'] }] : [] });
   if (url.endsWith('/v1/me/invitations')) return json({ items: [] });
   if (url.includes('/v1/me/balance?')) return new Response('{"available_microcredits":9223372036854775807,"reserved_microcredits":10001}', { headers: { 'Content-Type': 'application/json' } });

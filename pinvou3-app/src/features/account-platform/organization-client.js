@@ -115,6 +115,14 @@ export class OrganizationClient {
  async grants(org, signal) { return collection(await this.request('token', `${orgPath(org)}/quota-grants`, 'GET', undefined, '', [200], signal), item => requireQuotaGrant(item, org)); }
  async createOrder(org, body, key) { const value = requirePaymentOrder(await this.request('token', `${orgPath(org)}/recharge/orders`, 'POST', body, key, [201])); if (value.beneficiary_organization_id !== org || value.product_id !== body.product_id || value.channel !== body.channel) invalid(); return value; }
  async order(org, id, signal) { const value = requirePaymentOrder(await this.request('token', `${orgPath(org)}/recharge/orders/${organizationID(id)}`, 'GET', undefined, '', [200], signal), id); if (value.beneficiary_organization_id !== org) invalid(); return value; }
+ async orders(org, cursor = '', signal) {
+  if (typeof cursor !== 'string' || cursor.length > 256 || cursor && !/^[A-Za-z0-9_-]+$/.test(cursor)) invalid();
+  const page = await this.request('token', `${orgPath(org)}/recharge/orders${cursor ? '?cursor=' + encodeURIComponent(cursor) : ''}`, 'GET', undefined, '', [200], signal);
+  owned(page, org);
+  const items = requireFinanceCollection(page).map(item => requirePaymentOrder(item));
+  if (items.length > 50 || new Set(items.map(item => item.order_id)).size !== items.length || !Object.prototype.hasOwnProperty.call(page, 'next_cursor') || page.next_cursor !== null && (typeof page.next_cursor !== 'string' || !/^[A-Za-z0-9_-]{1,256}$/.test(page.next_cursor) || page.next_cursor === cursor || !items.length)) invalid();
+  return { items, next_cursor: page.next_cursor };
+ }
  // Same-key replay returns the current grant projection. Object/amount facts
  // remain exact; normal member lifecycle updates may advance its version.
  async allocate(org, body, key) {
