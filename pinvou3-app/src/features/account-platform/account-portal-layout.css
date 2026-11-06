@@ -24,7 +24,9 @@
 .ap-restored-portal .ap-nav-icon { width: 19px; height: 19px; flex: 0 0 19px; }
 .ap-restored-portal .ap-sidebar-foot { display: grid; gap: 8px; margin-top: auto; padding-top: 16px; border-top: 1px solid var(--ap-border-soft); }
 .ap-restored-portal .ap-sidebar-foot select { width: 100%; color: var(--ap-primary); background: var(--ap-component); border-color: transparent; }
-.ap-restored-portal .ap-sidebar-foot button { border: 0; color: var(--ap-secondary); text-align: left; }
+.ap-restored-portal .ap-sidebar-actions { display: grid; gap: 8px; min-width: 0; }
+.ap-restored-portal .ap-sidebar-foot .ap-sidebar-action { display: flex; align-items: center; width: 100%; min-height: 40px; padding: 8px 14px; border: 0; border-radius: 8px; color: var(--ap-secondary); background: #fff; text-align: left; text-decoration: none; line-height: 20px; white-space: normal; overflow-wrap: anywhere; }
+.ap-restored-portal .ap-sidebar-foot .ap-sidebar-action:hover { background: #f7f7f7; }
 .ap-restored-portal .ap-main { min-width: 0; padding: 40px 24px 72px; }
 .ap-restored-portal .ap-page-header { display: flex; align-items: center; justify-content: space-between; gap: 16px; max-width: 1000px; margin: 0 auto 28px; }
 .ap-restored-portal .ap-page-header h2 { margin: 0; font-size: 32px; font-weight: 600; line-height: 40px; }
@@ -48,11 +50,11 @@
 .ap-restored-portal .ap-product-picker { display: grid; grid-template-columns: repeat(auto-fill, minmax(205px, 1fr)); gap: 12px; }
 .ap-restored-portal .ap-product-picker label { display: grid; position: relative; gap: 12px; min-width: 0; padding: 20px; border: 1px solid var(--ap-border); border-radius: 12px; background: #fff; cursor: pointer; overflow-wrap: anywhere; }
 .ap-restored-portal .ap-product-picker label:hover { border-color: var(--ap-border); }
-.ap-restored-portal .ap-product-picker label.selected { border-color: #137647; background: #f3faf6; box-shadow: 0 0 0 1px #137647; }
+.ap-restored-portal .ap-product-picker label.selected { border-color: #137647; background: #f3faf6; box-shadow: none; }
 .ap-restored-portal .ap-product-picker input { position: absolute; top: 20px; right: 16px; width: 18px; height: 18px; padding: 0; margin: 0; accent-color: #137647; }
 .ap-restored-portal .ap-product-picker label > strong { padding-right: 24px; }
 .ap-restored-portal .ap-product-picker span { color: var(--ap-secondary); font-size: 14px; }
-.ap-restored-portal .ap-product-picker .ap-product-price { color: #202124; font-size: 26px; font-weight: 650; }
+.ap-restored-portal .ap-product-picker .ap-product-price { color: #202124; font-size: 18px; font-weight: 500; font-variant-numeric: tabular-nums; }
 .ap-restored-portal .ap-recharge-controls { display: flex; align-items: flex-end; gap: 16px; flex-wrap: wrap; margin: 20px 0 28px; }
 .ap-restored-portal .ap-recharge-controls > label { display: grid; gap: 6px; }
 .ap-restored-portal .ap-recharge-controls > button { padding: 10px 24px; font-weight: 600; }
@@ -146,7 +148,8 @@
   .ap-restored-portal .ap-user-summary { display: none; }
   .ap-restored-portal .ap-sidebar .ap-portal-tabs { display: flex; flex-wrap: nowrap; overflow-x: auto; }
   .ap-restored-portal .ap-sidebar .ap-portal-tabs button { flex: 0 0 auto; }
-  .ap-restored-portal .ap-sidebar-foot { display: flex; align-items: center; margin: 0; padding-top: 12px; }
+  .ap-restored-portal .ap-sidebar-foot { display: flex; align-items: center; flex-wrap: wrap; margin: 0; padding-top: 12px; }
+  .ap-restored-portal .ap-sidebar-actions { flex: 1 1 160px; }
   .ap-restored-portal .ap-sidebar-foot select { width: auto; }
   .ap-restored-portal .ap-main { padding: 28px 20px 48px; }
   .ap-restored-portal .ap-product-picker { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -248,7 +251,7 @@
 .ap-restored-portal .ap-order-lookup input { width: 100%; min-width: 0; }
 .ap-restored-portal .ap-product-picker label { gap: 8px; padding: 14px; }
 .ap-restored-portal .ap-product-picker input { top: 14px; right: 14px; }
-.ap-restored-portal .ap-product-picker .ap-product-price { font-size: 22px; }
+
 .ap-restored-portal .ap-product-picker dl { gap: 4px; }
 .ap-restored-portal #ap-panel-accountSettings > section.ap-account-information,
 .ap-restored-portal #ap-panel-accountSettings > section.ap-context-settings,
@@ -274,7 +277,7 @@
   .ap-restored-portal .ap-role-table td::before { content: attr(data-label); color: var(--ap-secondary); }
 }
 @media (pointer: coarse) {
-  .ap-restored-portal button { min-height: 44px; }
+  .ap-restored-portal button, .ap-restored-portal .ap-sidebar-foot .ap-sidebar-action { min-height: 44px; }
   .ap-restored-portal input:not([type=checkbox]):not([type=radio]):not([type=range]), .ap-restored-portal select:not([multiple]) { height: 44px; }
 }
 

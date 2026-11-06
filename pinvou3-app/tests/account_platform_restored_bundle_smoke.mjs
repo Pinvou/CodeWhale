@@ -54,6 +54,33 @@ try {
   await page.select('.ap-sidebar-foot select', 'zh');
   assert.equal(await page.$eval('.ap-balance-hero > div:first-child strong', node => node.textContent), '922,337,203,685,477.5807');
   assert.equal(await page.$$eval('.ap-sidebar [role=tab]', nodes => nodes.length), 3);
+  await page.waitForSelector('.ap-sidebar-foot a[href="/admin.html"]', { timeout: 5000 });
+  for (const language of ['zh', 'en', 'ja']) {
+    await page.select('.ap-sidebar-foot select', language);
+    for (const width of [1440, 768, 390, 320]) {
+      await page.setViewport({ width, height: 1000 });
+      const footer = await page.evaluate(() => {
+        const link = document.querySelector('.ap-sidebar-foot a[href="/admin.html"]');
+        const logout = document.querySelector('.ap-sidebar-foot button');
+        const fields = ['color', 'backgroundColor', 'borderWidth', 'borderRadius', 'padding', 'fontSize', 'lineHeight', 'minHeight'];
+        const style = node => Object.fromEntries(fields.map(key => [key, getComputedStyle(node)[key]]));
+        return { link: style(link), logout: style(logout), preceding: link.nextElementSibling === logout,
+          visible: link.getClientRects().length > 0, mainLinks: document.querySelectorAll('.ap-main a[href="/admin.html"]').length,
+          overflow: document.documentElement.scrollWidth > innerWidth + 1 };
+      });
+      assert.deepEqual(footer.link, footer.logout); assert.equal(footer.preceding, true);
+      assert.equal(footer.visible, true); assert.equal(footer.mainLinks, 0); assert.equal(footer.overflow, false);
+    }
+  }
+  await page.focus('.ap-sidebar-foot a[href="/admin.html"]'); await page.keyboard.press('Tab');
+  assert.equal(await page.$eval('.ap-sidebar-foot button', node => node === document.activeElement), true);
+  const platformPermissions = me.platform_permissions; me.platform_permissions = [];
+  await page.reload({ waitUntil: 'domcontentloaded' }); await page.waitForSelector('.ap-product-picker');
+  assert.equal(await page.$$eval('a[href="/admin.html"]', nodes => nodes.length), 0);
+  me.platform_permissions = platformPermissions;
+  await page.reload({ waitUntil: 'domcontentloaded' }); await page.waitForSelector('.ap-sidebar-foot a[href="/admin.html"]');
+  await page.select('.ap-sidebar-foot select', 'zh');
+
   await page.click('.ap-sidebar [data-section=accountSettings]');
   await page.waitForSelector('.ap-profile-rows .ap-profile-row button');
   await page.click('.ap-profile-rows .ap-profile-row button');
