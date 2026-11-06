@@ -264,5 +264,11 @@
 .adm-restored-shell button.ap-admin-org-primary-trigger{border-color:var(--adm-primary);background:var(--adm-primary);color:#fff}
 .adm-restored-shell button.ap-admin-org-danger-trigger{border-color:#f0c8cc;background:var(--adm-surface);color:var(--adm-danger)}
 .adm-restored-shell button.ap-admin-org-danger-trigger:hover:not(:disabled){background:var(--adm-danger-soft)}
+.adm-restored-shell .adm-member-toolbar .adm-filter-row{justify-content:flex-start;flex:1 1 540px;margin:0;gap:12px}
+.adm-restored-shell .adm-member-toolbar .adm-filter-row>label{display:grid;gap:6px;min-width:0;flex:0 1 180px}
+.adm-restored-shell .adm-member-toolbar .adm-filter-row>label:first-child{flex:1 1 260px;max-width:280px}
+.adm-restored-shell .adm-member-toolbar input,.adm-restored-shell .adm-member-toolbar select{width:100%;min-width:0}
+.adm-restored-shell .adm-member-toolbar .adm-filter-row>button{flex:0 0 auto}
+@media(max-width:760px){.adm-restored-shell .adm-member-toolbar{align-items:stretch}.adm-restored-shell .adm-member-toolbar .adm-filter-row{display:grid;grid-template-columns:minmax(0,1fr);flex-basis:100%;width:100%}.adm-restored-shell .adm-member-toolbar .adm-filter-row>label,.adm-restored-shell .adm-member-toolbar .adm-filter-row>label:first-child{max-width:none}.adm-restored-shell .adm-member-toolbar .adm-filter-row>button{justify-self:start}.adm-restored-shell .adm-member-toolbar>button{margin-left:auto}}
 .adm-restored-shell code{overflow-wrap:anywhere}
 @media(max-width:560px){.adm-restored-shell .adm-user-details{grid-template-columns:1fr;gap:7px}.adm-restored-shell .adm-filter-row>*{max-width:100%}}
