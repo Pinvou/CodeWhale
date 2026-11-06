@@ -65,7 +65,7 @@ spec:
             # Used by the explicit release check. The ordinary Kubernetes probe is independent.
             - { name: HEALTHCHECK_URL, value: "http://127.0.0.1:9090/health/ready/approval-authorization" }
             - { name: APPROVAL_RELAY_MONITOR_SCOPE, value: {{ printf "%s/%s" $root.Release.Namespace $root.Release.Name | quote }} }
-            - { name: APPROVAL_RELAY_MONITOR_REPLICA, valueFrom: { fieldRef: { fieldPath: metadata.uid } } }
+            - { name: APPROVAL_RELAY_MONITOR_REPLICA, valueFrom: { fieldRef: { fieldPath: metadata.name } } }
             {{- end }}
             - name: APPROVAL_RELAY_DATABASE_URL
               valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: account-approval-relay-database-url } }

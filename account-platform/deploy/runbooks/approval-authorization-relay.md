@@ -62,13 +62,13 @@
 
 在受控发布窗口紧接激活前运行门禁。记录检查和激活时间；检查后发生部署、配置变更、容器重启或发布中断时重验。门禁读数是现场观察，不替代后续授权探针监控或 broker 撤权证据。
 
-使用 `observability.prometheusRulesEnabled: true` 的 Helm 站点会渲染授权 Relay 的专项告警。Prometheus 逐副本抓取 `/metrics`，在当前集群内评估规则。监控范围 `approval_scope` 在 Helm 为 `namespace/release`，在 Compose 为实际项目名。副本身份在 Helm 使用 Pod UID，在 Compose 使用容器主机名，Compose 站点保持每个副本主机名唯一。规则按副本身份去重。
+使用 `observability.prometheusRulesEnabled: true` 的 Helm 站点会渲染授权 Relay 的专项告警。Prometheus 逐副本抓取 `/metrics`，在当前集群内评估规则。Helm 的监控范围 `approval_scope` 是 `namespace/release`，model-token Compose 使用项目名。正式 finance Compose 默认使用 `pinvou-personal`，同一监控系统存在多个站点时，各站点用 `APPROVAL_RELAY_COMPOSE_MONITOR_SCOPE` 设置唯一范围，不更改 Compose 项目名。缺副本规则按副本身份去重，Helm 使用 Pod 名，Compose 使用各副本的唯一容器主机名。
 
-Compose 从仓库根目录安装锁定的 Account Platform Node 依赖，使用 Helm 3.16.4 离线生成现有 Prometheus 可读取的规则文件。项目名和期望副本数取自已核对的实际 Compose 配置。
+Compose 从仓库根目录安装锁定的 Account Platform Node 依赖，使用 Helm 3.16.4 离线生成现有 Prometheus 可读取的规则文件。生成器的范围名取 Account Relay 最终 `APPROVAL_RELAY_MONITOR_SCOPE`，期望副本数取核对后的站点配置。
 
 ```sh
 npm --prefix account-platform ci --ignore-scripts
-node account-platform/deploy/compose/render-approval-relay-alerts.mjs "$COMPOSE_PROJECT" "$EXPECTED_ACCOUNT_RELAY_REPLICAS" > approval-relay-rules.yaml
+node account-platform/deploy/compose/render-approval-relay-alerts.mjs "$APPROVAL_SCOPE" "$EXPECTED_ACCOUNT_RELAY_REPLICAS" > approval-relay-rules.yaml
 promtool check rules approval-relay-rules.yaml
 ```
 

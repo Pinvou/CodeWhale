@@ -9,7 +9,7 @@ const chart = new URL('../helm/account-platform/', import.meta.url);
 const templateScope = 'compose/approval-relay-rules';
 
 export function composeApprovalRules(rendered, inputScope, project) {
-  assert.match(project, /^[a-z0-9][a-z0-9_-]*$/, 'provide the resolved Compose project name');
+  assert.match(project, /^[a-z0-9][a-z0-9_-]*$/, 'provide the resolved Compose monitoring scope');
   const documents = YAML.parseAllDocuments(rendered);
   assert.ok(documents.every(document => document.errors.length === 0), 'Helm rules YAML could not be parsed');
   const groups = documents.flatMap(document => {
@@ -32,7 +32,7 @@ if (isMainModule(import.meta.url)) {
   try {
     const [project, replicas, ...extra] = process.argv.slice(2);
     assert.ok(!extra.length && typeof project === 'string' && /^[a-z0-9][a-z0-9_-]*$/.test(project)
-      && /^[1-9]\d*$/.test(replicas) && Number.isSafeInteger(Number(replicas)), 'provide the Compose project name and a positive replica count');
+      && /^[1-9]\d*$/.test(replicas) && Number.isSafeInteger(Number(replicas)), 'provide the Compose monitoring scope and a positive replica count');
     // Reuse the deployed Helm expressions. The test values are render-only
     // inputs and are never installed or included in the output.
     const result = spawnSync('helm', ['template', 'approval-relay-rules', fileURLToPath(chart),

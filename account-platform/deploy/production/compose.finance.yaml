@@ -56,7 +56,7 @@ services:
   account-event-relay:
     environment:
       APPROVAL_RELAY_HEALTHCHECK_URL: http://127.0.0.1:9090/health/ready/approval-authorization
-      APPROVAL_RELAY_MONITOR_SCOPE: ${COMPOSE_PROJECT_NAME}
+      APPROVAL_RELAY_MONITOR_SCOPE: ${APPROVAL_RELAY_COMPOSE_MONITOR_SCOPE:-pinvou-personal}
       APPROVAL_RELAY_NATS_NKEY_SEED_FILE: /run/pinvou/approval-nats/nkey.seed
       APPROVAL_RELAY_NATS_CURRENT_PUBLIC_KEYS_FILE: /run/pinvou/approval-identities/current.json
       APPROVAL_RELAY_NATS_CURRENT_PUBLIC_KEYS_SHA256: ${APPROVAL_PUBLIC_KEYS_SHA256:?set independently verified identity SHA256}
