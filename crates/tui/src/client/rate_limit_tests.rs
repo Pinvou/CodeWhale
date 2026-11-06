@@ -274,6 +274,461 @@ async fn forkguard_rate_limit_restores_default_capacity_and_durable_deadlines() 
     assert!(blocked.remaining().unwrap() > Duration::from_secs(3595));
 }
 
+async fn hold_http_response(
+    reply: &'static [u8],
+) -> (String, Arc<AtomicUsize>, tokio::task::JoinHandle<()>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let observed = attempts.clone();
+    let fixture = tokio::spawn(async move {
+        let mut connections = tokio::task::JoinSet::new();
+        while let Ok((mut socket, _)) = listener.accept().await {
+            let observed = observed.clone();
+            connections.spawn(async move {
+                let mut request = [0; 4096];
+                if socket.read(&mut request).await.unwrap_or(0) == 0 {
+                    return;
+                }
+                observed.fetch_add(1, Ordering::Relaxed);
+                let _ = socket.write_all(reply).await;
+                std::future::pending::<()>().await;
+                drop(socket);
+            });
+        }
+    });
+    (url, attempts, fixture)
+}
+
+#[tokio::test]
+async fn forkguard_rate_limit_stalled_error_body_preserves_the_retry_after() {
+    use super::stream_entry::{
+        StreamHttpPolicy, StreamOpenRequest, client_for_policy, open_sse_response,
+    };
+
+    let (url, attempts, fixture) = hold_http_response(
+        b"HTTP/1.1 429 Too Many Requests\r\nRetry-After: 7200\r\nContent-Length: 128\r\n\r\n",
+    )
+    .await;
+    let state = tempfile::tempdir().unwrap();
+    let mut client = DeepSeekClient::new(&Config {
+        api_key: Some(format!("owned-fixture-{}", uuid::Uuid::new_v4())),
+        base_url: Some(url.clone()),
+        ..Default::default()
+    })
+    .unwrap();
+    client.shared_quota = shared_quota(
+        uuid::Uuid::new_v4().to_string(),
+        None,
+        Some(state.path().to_owned()),
+    )
+    .unwrap();
+    client.retry.rate_limit.recovery_budget_secs = 1;
+    client.stream_idle_timeout = Duration::from_secs(3);
+    let open = StreamOpenRequest {
+        policy: StreamHttpPolicy::DualWithH1Fallback,
+        open_timeout: Duration::from_secs(1),
+        idle_timeout: client.stream_idle_timeout,
+    };
+    let body = serde_json::json!({"fixture": true});
+    let open_stream = |policy| {
+        let transport =
+            client_for_policy(&client.http_client, client.http1_fallback_client(), policy);
+        client.open_stream_json_with_retry(transport, &url, &body, policy)
+    };
+    let persisted = state
+        .path()
+        .join(format!("{}.json", client.shared_quota.key));
+    let peer = async {
+        tokio::time::timeout(Duration::from_millis(700), async {
+            while !persisted.is_file() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            open_stream(StreamHttpPolicy::DualWithH1Fallback).await
+        })
+        .await
+    };
+    let (result, peer_result) = tokio::join!(
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            open_sse_response(&open, open_stream)
+        ),
+        peer,
+    );
+    fixture.abort();
+
+    let error = result.expect("known status must finish").unwrap_err();
+    assert!(
+        matches!(error.downcast_ref::<LlmError>(), Some(LlmError::QuotaWindow { retry_after: Some(delay), .. }) if *delay == Duration::from_secs(7200))
+    );
+    let peer_error = peer_result
+        .expect("persist and share the header minimum before reading the stalled body")
+        .unwrap_err();
+    assert!(
+        matches!(peer_error.downcast_ref::<LlmError>(), Some(LlmError::QuotaWindow { retry_after: Some(delay), .. }) if *delay > Duration::from_secs(7195))
+    );
+    assert_eq!(attempts.load(Ordering::Relaxed), 1);
+}
+
+#[tokio::test]
+async fn forkguard_rate_limit_incomplete_native_success_body_never_reopens() {
+    use super::stream_entry::{
+        StreamHttpPolicy, StreamOpenRequest, client_for_policy, open_sse_response,
+    };
+    let (url, attempts, fixture) = hold_http_response(
+        b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 128\r\n\r\n{",
+    )
+    .await;
+    let mut client = DeepSeekClient::new(&Config {
+        provider: Some("minimax".into()),
+        providers: Some(crate::config::ProvidersConfig {
+            minimax: crate::config::ProviderConfig {
+                api_key: Some(format!("owned-fixture-{}", uuid::Uuid::new_v4())),
+                base_url: Some(url.clone()),
+                ..Default::default()
+            },
+            ..Default::default()
+        }),
+        ..Default::default()
+    })
+    .unwrap();
+    client.stream_idle_timeout = Duration::from_millis(600);
+    let open = StreamOpenRequest {
+        policy: StreamHttpPolicy::DualWithH1Fallback,
+        open_timeout: Duration::from_millis(350),
+        idle_timeout: client.stream_idle_timeout,
+    };
+    let body = serde_json::json!({"fixture": true});
+    let result = tokio::time::timeout(
+        Duration::from_secs(3),
+        open_sse_response(&open, |policy| {
+            let transport =
+                client_for_policy(&client.http_client, client.http1_fallback_client(), policy);
+            client.open_stream_json_with_retry(transport, &url, &body, policy)
+        }),
+    )
+    .await;
+    fixture.abort();
+
+    let error = result
+        .expect("native response inspection is bounded")
+        .unwrap_err();
+    assert!(
+        matches!(error.downcast_ref::<LlmError>(), Some(LlmError::ParseError(message)) if message.contains("provider JSON envelope"))
+    );
+    assert_eq!(attempts.load(Ordering::Relaxed), 1);
+}
+
+#[tokio::test]
+async fn forkguard_rate_limit_blocked_receipt_after_headers_never_reopens() {
+    use super::stream_entry::{
+        StreamHttpPolicy, StreamOpenRequest, client_for_policy, open_sse_response,
+    };
+    use wiremock::matchers::method;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("accepted"))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let url = server.uri();
+    let client = DeepSeekClient::new(&Config {
+        api_key: Some(format!("owned-fixture-{}", uuid::Uuid::new_v4())),
+        base_url: Some(url.clone()),
+        ..Default::default()
+    })
+    .unwrap();
+    let saw_recovered = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let observed = saw_recovered.clone();
+    let observer: crate::llm_client::rate_limit::RecoveryObserver = Arc::new(move |receipt| {
+        let observed = observed.clone();
+        Box::pin(async move {
+            if receipt.state == "recovered" {
+                observed.store(true, Ordering::Relaxed);
+                std::future::pending::<()>().await;
+            }
+        })
+    });
+    let open = StreamOpenRequest {
+        policy: StreamHttpPolicy::DualWithH1Fallback,
+        open_timeout: Duration::from_millis(500),
+        idle_timeout: client.stream_idle_timeout,
+    };
+    let body = serde_json::json!({"fixture": true});
+    client.shared_quota.pause(Duration::from_millis(250));
+    let result = crate::llm_client::rate_limit::with_observer(
+        observer,
+        open_sse_response(&open, |policy| {
+            let transport =
+                client_for_policy(&client.http_client, client.http1_fallback_client(), policy);
+            client.open_stream_json_with_retry(transport, &url, &body, policy)
+        }),
+    )
+    .await;
+
+    assert!(saw_recovered.load(Ordering::Relaxed));
+    assert!(
+        matches!(result.unwrap_err().downcast_ref::<LlmError>(), Some(LlmError::ParseError(message)) if message.contains("processing the response headers"))
+    );
+    server.verify().await;
+}
+
+#[tokio::test]
+async fn forkguard_rate_limit_blocked_terminal_receipt_preserves_quota_result() {
+    use super::stream_entry::{
+        StreamHttpPolicy, StreamOpenRequest, client_for_policy, open_sse_response,
+    };
+    use wiremock::matchers::method;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    for wire_request in [true, false] {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(429).insert_header("Retry-After", "7200"))
+            .expect(u64::from(wire_request))
+            .mount(&server)
+            .await;
+        let url = server.uri();
+        let client = DeepSeekClient::new(&Config {
+            api_key: Some(format!("owned-fixture-{}", uuid::Uuid::new_v4())),
+            base_url: Some(url.clone()),
+            ..Default::default()
+        })
+        .unwrap();
+        if !wire_request {
+            client.shared_quota.pause(Duration::from_secs(7200));
+        }
+        let saw_terminal = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let observed = saw_terminal.clone();
+        let observer: crate::llm_client::rate_limit::RecoveryObserver = Arc::new(move |receipt| {
+            let observed = observed.clone();
+            Box::pin(async move {
+                if receipt.state == "interrupted" {
+                    observed.store(true, Ordering::Relaxed);
+                    std::future::pending::<()>().await;
+                }
+            })
+        });
+        let open = StreamOpenRequest {
+            policy: StreamHttpPolicy::DualWithH1Fallback,
+            open_timeout: Duration::from_millis(500),
+            idle_timeout: client.stream_idle_timeout,
+        };
+        let body = serde_json::json!({"fixture": true});
+        let result = crate::llm_client::rate_limit::with_observer(
+            observer,
+            open_sse_response(&open, |policy| {
+                let transport =
+                    client_for_policy(&client.http_client, client.http1_fallback_client(), policy);
+                client.open_stream_json_with_retry(transport, &url, &body, policy)
+            }),
+        )
+        .await;
+
+        assert!(saw_terminal.load(Ordering::Relaxed));
+        assert!(
+            matches!(result.unwrap_err().downcast_ref::<LlmError>(), Some(LlmError::QuotaWindow { retry_after: Some(delay), .. }) if *delay > Duration::from_secs(7195))
+        );
+        server.verify().await;
+    }
+}
+
+#[tokio::test]
+async fn forkguard_rate_limit_blocked_persistence_respects_recovery_deadline() {
+    use super::stream_entry::{
+        StreamHttpPolicy, StreamOpenRequest, client_for_policy, open_sse_response,
+    };
+    use wiremock::matchers::method;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let native = ResponseTemplate::new(200).set_body_json(
+        serde_json::json!({"base_resp":{"status_code":1002,"status_msg":"rate limit"}}),
+    );
+    for (response, budget, open_timeout) in [
+        (ResponseTemplate::new(429), 1, Duration::from_secs(4)),
+        (ResponseTemplate::new(429), 600, Duration::from_millis(500)),
+        (native, 1, Duration::from_secs(4)),
+    ] {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(response.insert_header("Retry-After", "7200"))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let url = server.uri();
+        let state = tempfile::tempdir().unwrap();
+        let mut client = DeepSeekClient::new(&Config {
+            provider: Some("minimax".into()),
+            providers: Some(crate::config::ProvidersConfig {
+                minimax: crate::config::ProviderConfig {
+                    api_key: Some(format!("owned-fixture-{}", uuid::Uuid::new_v4())),
+                    base_url: Some(url.clone()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+            rate_limit_recovery_dir: Some(state.path().to_owned()),
+            ..Default::default()
+        })
+        .unwrap();
+        client.retry.rate_limit.recovery_budget_secs = budget;
+        let _blocked = client.shared_quota.persistence.lock().await;
+        let open = StreamOpenRequest {
+            policy: StreamHttpPolicy::DualWithH1Fallback,
+            open_timeout,
+            idle_timeout: client.stream_idle_timeout,
+        };
+        let body = serde_json::json!({"fixture": true});
+        let result = tokio::time::timeout(
+            Duration::from_secs(2),
+            open_sse_response(&open, |policy| {
+                let transport =
+                    client_for_policy(&client.http_client, client.http1_fallback_client(), policy);
+                client.open_stream_json_with_retry(transport, &url, &body, policy)
+            }),
+        )
+        .await
+        .expect("either deadline must bound a blocked quota store");
+        let error = result.unwrap_err();
+        assert!(
+            matches!(error.downcast_ref::<LlmError>(), Some(LlmError::QuotaWindow { retry_after: Some(delay), .. }) if *delay == Duration::from_secs(7200)),
+            "{error:#}"
+        );
+        assert!(client.shared_quota.remaining().unwrap() > Duration::from_secs(7195));
+        server.verify().await;
+    }
+}
+
+#[tokio::test]
+async fn forkguard_rate_limit_definitive_stream_status_does_not_probe_or_fallback() {
+    use super::stream_entry::{
+        StreamHttpPolicy, StreamOpenRequest, client_for_policy, open_sse_response,
+    };
+    use wiremock::matchers::method;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(401))
+        .expect(2)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(500).set_delay(Duration::from_secs(2)))
+        .expect(0)
+        .mount(&server)
+        .await;
+    let url = server.uri();
+    let client = DeepSeekClient::new(&Config {
+        api_key: Some(format!("owned-fixture-{}", uuid::Uuid::new_v4())),
+        base_url: Some(url.clone()),
+        ..Default::default()
+    })
+    .unwrap();
+    let open = StreamOpenRequest {
+        policy: StreamHttpPolicy::DualWithH1Fallback,
+        open_timeout: Duration::from_secs(1),
+        idle_timeout: client.stream_idle_timeout,
+    };
+    let body = serde_json::json!({"fixture": true});
+    for _ in 0..2 {
+        let error = open_sse_response(&open, |policy| {
+            let transport =
+                client_for_policy(&client.http_client, client.http1_fallback_client(), policy);
+            client.open_stream_json_with_retry(transport, &url, &body, policy)
+        })
+        .await
+        .unwrap_err();
+        assert!(matches!(
+            error.downcast_ref::<LlmError>(),
+            Some(LlmError::AuthenticationError(_))
+        ));
+    }
+    server.verify().await;
+}
+
+#[tokio::test]
+async fn forkguard_rate_limit_http1_does_not_retry_ordinary_server_errors() {
+    use super::stream_entry::StreamHttpPolicy;
+    use wiremock::matchers::method;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(503))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let client = DeepSeekClient::new(&Config {
+        api_key: Some(format!("owned-fixture-{}", uuid::Uuid::new_v4())),
+        base_url: Some(server.uri()),
+        ..Default::default()
+    })
+    .unwrap();
+    let result = client
+        .open_stream_json_with_retry(
+            client.http1_fallback_client(),
+            &server.uri(),
+            &serde_json::json!({"fixture": true}),
+            StreamHttpPolicy::Http1Only,
+        )
+        .await;
+    assert!(result.is_err());
+    assert_eq!(server.received_requests().await.unwrap().len(), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn forkguard_rate_limit_recovery_expires_while_queued_for_a_provider_slot() {
+    let state = tempfile::tempdir().unwrap();
+    let mut client = DeepSeekClient::new(&Config {
+        api_key: Some(format!("owned-fixture-{}", uuid::Uuid::new_v4())),
+        base_url: Some("http://127.0.0.1:1".into()),
+        ..Default::default()
+    })
+    .unwrap();
+    let quota = shared_quota(
+        uuid::Uuid::new_v4().to_string(),
+        Some(1),
+        Some(state.path().to_owned()),
+    )
+    .unwrap();
+    client.shared_quota = quota.clone();
+    client.request_concurrency = quota.concurrency.clone();
+    client.rate_limiter = quota.limiter.clone();
+    client.retry.rate_limit.recovery_budget_secs = 2;
+    quota.initialize().await.unwrap();
+    let blocker = ProviderRequestPermit {
+        lease: std::sync::Mutex::new(None),
+        limiter: quota.concurrency.as_ref().unwrap().clone(),
+    };
+    blocker.resume().await;
+
+    let operation_id = uuid::Uuid::new_v4();
+    let call = client.for_operation(operation_id);
+    let _lease = call.acquire_provider_request_permit().await;
+    let recovery = call.recovery_for_operation(operation_id).unwrap();
+    recovery.lock().unwrap().started = Some(tokio::time::Instant::now());
+    let result = tokio::time::timeout(
+        Duration::from_secs(3),
+        call.send_stream_open_with_retry(|| call.http_client.get("http://127.0.0.1:1")),
+    )
+    .await
+    .expect("recovery deadline must stop a queued stream open");
+    assert!(matches!(
+        result.unwrap_err().downcast_ref::<LlmError>(),
+        Some(LlmError::QuotaWindow {
+            retry_after: None,
+            ..
+        })
+    ));
+    assert_eq!(recovery.lock().unwrap().wire_attempts, Some(0));
+    assert_eq!(quota.concurrency.as_ref().unwrap().active(), 1);
+}
+
 #[tokio::test]
 async fn forkguard_rate_limit_rechecks_cooldown_after_admission_queues() {
     use wiremock::matchers::method;
@@ -307,7 +762,7 @@ async fn forkguard_rate_limit_rechecks_cooldown_after_admission_queues() {
             bucket.last_refill = Instant::now();
         }
         let blocker = ProviderRequestPermit {
-            lease: Arc::new(std::sync::Mutex::new(None)),
+            lease: std::sync::Mutex::new(None),
             limiter: quota.concurrency.as_ref().unwrap().clone(),
         };
         if !queued_on_tokens {
@@ -379,7 +834,7 @@ async fn forkguard_rate_limit_scope_admission_and_leases() {
     let limiter = first.concurrency.as_ref().unwrap();
     assert_eq!(limiter.limit(), 2);
     let lease = ProviderRequestPermit {
-        lease: Arc::new(std::sync::Mutex::new(None)),
+        lease: std::sync::Mutex::new(None),
         limiter: limiter.clone(),
     };
     lease.resume().await;
@@ -432,8 +887,9 @@ async fn forkguard_rate_limit_isolated_classifier_normalizes_native_json_refusal
     })
     .unwrap();
     client.retry.enabled = false;
+    client.isolated_request_state = true;
     let error = client
-        .send_with_isolated_retry(|| client.http_client.post(server.uri()))
+        .send_with_retry(|| client.http_client.post(server.uri()))
         .await
         .unwrap_err();
     assert!(matches!(
@@ -604,8 +1060,9 @@ async fn forkguard_rate_limit_isolated_unknown_quota_uses_route_classification()
     })
     .unwrap();
     client.retry.enabled = false;
+    client.isolated_request_state = true;
     let error = client
-        .send_with_isolated_retry(|| client.http_client.post(server.uri()))
+        .send_with_retry(|| client.http_client.post(server.uri()))
         .await
         .unwrap_err();
     assert!(matches!(

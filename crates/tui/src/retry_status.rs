@@ -99,16 +99,6 @@ fn with_state<R>(f: impl FnOnce(&mut RetryState) -> R) -> R {
     f(&mut state)
 }
 
-#[cfg(not(test))]
-fn with_rate_limit<R>(f: impl FnOnce(&mut Option<Instant>) -> R) -> R {
-    static STATE: OnceLock<Mutex<Option<Instant>>> = OnceLock::new();
-    let mut state = STATE
-        .get_or_init(|| Mutex::new(None))
-        .lock()
-        .unwrap_or_else(|error| error.into_inner());
-    f(&mut state)
-}
-
 /// Under test, this state is per-thread.
 ///
 /// Production has exactly one foreground engine per process, so a global is the
@@ -165,7 +155,8 @@ pub fn note_rate_limit(delay: Duration) {
     });
 }
 
-/// Remaining provider-wide rate-limit pause, if any.
+/// Remaining synthetic pause used by legacy retry-banner fixtures.
+#[cfg(test)]
 #[must_use]
 pub fn rate_limit_remaining() -> Option<Duration> {
     let now = Instant::now();

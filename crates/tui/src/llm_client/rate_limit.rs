@@ -1,8 +1,59 @@
 //! Recovery policy for a refused model operation. Generation time is not a retry budget.
 
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use super::{LlmError, RateLimitRetryPolicy};
+
+#[derive(Clone, Copy)]
+pub(crate) enum StreamOpenOutcome {
+    Pending,
+    Headers,
+    RecoverableQuota(Option<Duration>),
+}
+
+tokio::task_local! {
+    pub(crate) static STREAM_OPEN_OUTCOME: Arc<Mutex<StreamOpenOutcome>>;
+}
+
+fn set_stream_open_outcome(outcome: StreamOpenOutcome) {
+    let _ = STREAM_OPEN_OUTCOME.try_with(|state| {
+        *state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = outcome;
+    });
+}
+
+/// Record the header boundary of the current wire attempt, if opening a stream.
+pub(crate) fn set_response_headers_received(received: bool) {
+    set_stream_open_outcome(if received {
+        StreamOpenOutcome::Headers
+    } else {
+        StreamOpenOutcome::Pending
+    });
+}
+
+pub(crate) fn record_stream_open_quota(retry_after: Option<Duration>) {
+    set_stream_open_outcome(StreamOpenOutcome::RecoverableQuota(retry_after));
+}
+
+pub(crate) fn record_stream_response_error(error: &LlmError) {
+    match error {
+        LlmError::RateLimited { retry_after, .. } | LlmError::QuotaWindow { retry_after, .. } => {
+            record_stream_open_quota(*retry_after);
+        }
+        _ => set_stream_open_outcome(StreamOpenOutcome::Headers),
+    }
+}
+
+/// Preserve the classified result before an observer can block its delivery.
+pub(super) fn record_terminal_quota(error: &LlmError) {
+    if let LlmError::RateLimited { retry_after, .. } | LlmError::QuotaWindow { retry_after, .. } =
+        error
+    {
+        record_stream_open_quota(*retry_after);
+    }
+}
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct RecoveryReceipt {

@@ -1129,6 +1129,7 @@ where
                     LlmError::RateLimited { .. } | LlmError::QuotaWindow { .. }
                 ) =>
             {
+                rate_limit::record_terminal_quota(error);
                 rate_limit::observe(
                     attempts,
                     config.rate_limit.max_attempts,
@@ -1181,6 +1182,11 @@ where
             }
         };
         if exhausted {
+            let error = last_error.take().unwrap_or_else(|| LlmError::QuotaWindow {
+                message: "Logical operation recovery budget exhausted".into(),
+                retry_after: None,
+            });
+            rate_limit::record_terminal_quota(&error);
             rate_limit::observe(
                 attempts,
                 config.rate_limit.max_attempts,
@@ -1189,10 +1195,7 @@ where
             )
             .await;
             return Err(RetryError {
-                last_error: last_error.take().unwrap_or_else(|| LlmError::QuotaWindow {
-                    message: "Logical operation recovery budget exhausted".into(),
-                    retry_after: None,
-                }),
+                last_error: error,
                 attempts,
                 total_time: start_time.elapsed(),
             });
@@ -1278,6 +1281,7 @@ where
                         >= config.total_timeout;
                 if stop {
                     if rate_limited {
+                        rate_limit::record_terminal_quota(&err);
                         rate_limit::observe(
                             attempts,
                             config.rate_limit.max_attempts,

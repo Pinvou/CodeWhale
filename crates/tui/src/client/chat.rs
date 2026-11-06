@@ -1353,7 +1353,8 @@ impl DeepSeekClient {
                 self.http1_fallback_client(),
                 policy,
             );
-            self.open_stream_json_with_retry(client, url, body).await
+            self.open_stream_json_with_retry(client, url, body, policy)
+                .await
         })
         .await?;
         Ok((response, idle_timeout))

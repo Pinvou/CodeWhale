@@ -9,12 +9,16 @@
 //! `docs/notes/post-0.9.1-thin-tui-and-stream.md`.
 
 use std::future::Future;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::Result;
 use reqwest::Client;
 
-use crate::llm_client::LlmError;
+use crate::llm_client::{
+    LlmError,
+    rate_limit::{STREAM_OPEN_OUTCOME, StreamOpenOutcome},
+};
 
 /// Default bounded wait for SSE response headers. Intentionally shorter than
 /// the per-chunk idle timeout: it covers connection setup and upstream header
@@ -148,6 +152,30 @@ fn h1_fallback_error(err: anyhow::Error) -> anyhow::Error {
     )))
 }
 
+#[derive(Debug)]
+pub(super) struct HeaderDeadline;
+
+impl std::fmt::Display for HeaderDeadline {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("stream response header deadline elapsed")
+    }
+}
+
+impl std::error::Error for HeaderDeadline {}
+
+fn settled_open_deadline(response: StreamOpenOutcome) -> anyhow::Error {
+    anyhow::Error::new(match response {
+        StreamOpenOutcome::RecoverableQuota(retry_after) => LlmError::QuotaWindow {
+            message: "Stream open could not deliver the model quota result before its deadline"
+                .into(),
+            retry_after,
+        },
+        _ => LlmError::ParseError(
+            "Stream open did not finish processing the response headers".into(),
+        ),
+    })
+}
+
 /// Open an SSE response through the shared transport policy.
 ///
 /// `attempt` builds and sends one wire-specific request on the client
@@ -168,22 +196,36 @@ where
     F: Fn(StreamHttpPolicy) -> Fut,
     Fut: Future<Output = Result<reqwest::Response>>,
 {
-    let fallback_reason = match crate::llm_client::rate_limit::active_timeout(
-        open_req.open_timeout,
-        attempt(open_req.policy),
-    )
-    .await
-    {
+    let response = Arc::new(Mutex::new(StreamOpenOutcome::Pending));
+    let wire_response = || {
+        *response
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    };
+    let outcome_known = || !matches!(wire_response(), StreamOpenOutcome::Pending);
+    let run = |policy| {
+        *response
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = StreamOpenOutcome::Pending;
+        crate::llm_client::rate_limit::active_timeout(
+            open_req.open_timeout,
+            STREAM_OPEN_OUTCOME.scope(response.clone(), attempt(policy)),
+        )
+    };
+    let fallback_reason = match run(open_req.policy).await {
         Ok(Ok(response)) => return Ok(response),
         Ok(Err(err)) => {
-            if !should_retry_error_with_h1(open_req.policy, &err) {
+            if outcome_known() || !should_retry_error_with_h1(open_req.policy, &err) {
                 return Err(err);
             }
             "transport error before response headers"
         }
         Err(_elapsed) => {
+            if outcome_known() {
+                return Err(settled_open_deadline(wire_response()));
+            }
             if open_req.policy == StreamHttpPolicy::Http1Only {
-                return Err(anyhow::Error::new(LlmError::NetworkError(format!(
+                return Err(anyhow::Error::new(HeaderDeadline).context(LlmError::NetworkError(format!(
                     "SSE stream request did not receive response headers after {}s. \
                          `codewhale doctor` can still pass when non-streaming requests work; \
                          on Windows or proxy networks, try `CODEWHALE_FORCE_HTTP1=1` and rerun `codewhale`.",
@@ -200,22 +242,24 @@ where
     crate::logging::warn(format!(
         "SSE stream {fallback_reason}; retrying once with HTTP/1.1"
     ));
-    match crate::llm_client::rate_limit::active_timeout(h1_req.open_timeout, attempt(h1_req.policy))
-        .await
-    {
+    match run(h1_req.policy).await {
         Ok(Ok(response)) => Ok(response),
+        Ok(Err(err)) if outcome_known() => Err(err),
         Ok(Err(err)) => Err(h1_fallback_error(err)),
+        Err(_elapsed) if outcome_known() => Err(settled_open_deadline(wire_response())),
         // Typed, not a bare string: a header stall is a transport
         // failure, and `LlmError::NetworkError` is what the shared
         // retry layer recognizes as retryable. As an untyped anyhow
         // error this killed the whole turn outright.
-        Err(_elapsed) => Err(anyhow::Error::new(LlmError::NetworkError(format!(
-            "SSE stream request did not receive response headers after {}s \
+        Err(_elapsed) => Err(
+            anyhow::Error::new(HeaderDeadline).context(LlmError::NetworkError(format!(
+                "SSE stream request did not receive response headers after {}s \
              (HTTP/2 and HTTP/1.1). `codewhale doctor` can still pass when \
              non-streaming requests work; try `CODEWHALE_FORCE_HTTP1=1` and \
              rerun `codewhale`.",
-            open_req.open_timeout.as_secs()
-        )))),
+                open_req.open_timeout.as_secs()
+            ))),
+        ),
     }
 }
 
@@ -381,6 +425,7 @@ mod tests {
         assert_eq!(attempts.load(Ordering::SeqCst), 1, "no retry when pinned");
         let text = err.to_string();
         assert!(text.contains("did not receive response headers"), "{text}");
+        assert!(err.is::<HeaderDeadline>());
         // The whole point of the typed error: a header stall must reach the
         // shared retry layer as retryable. As an untyped anyhow error it
         // killed the turn outright, so a long root run lost all its work while

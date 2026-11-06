@@ -36,7 +36,7 @@ use crate::tools::schema_sanitize;
 use super::prepared::WireDialect;
 use super::role_placement::{RolePlacement, role_placement};
 use super::wire::{extract_sse_data_value, next_sse_line};
-use super::{DeepSeekClient, ERROR_BODY_MAX_BYTES, bounded_error_text};
+use super::{DeepSeekClient, LlmRetryConfig, non_streaming_request_envelope};
 
 /// Maximum `cache_control` breakpoints Anthropic accepts per request.
 const MAX_CACHE_BREAKPOINTS: usize = 4;
@@ -273,41 +273,23 @@ impl DeepSeekClient {
 
     async fn send_anthropic_request(&self, url: &str, body: &Value) -> Result<reqwest::Response> {
         let url = self.messages_transport_url(url);
-        let response = self
-            .send_with_retry(|| {
+        self.send_with_retry_policy(
+            || {
                 self.http_client
                     .post(&url)
                     .header("Accept", "text/event-stream")
                     .json(body)
-            })
-            .await?;
-        self.check_anthropic_response(response).await
+            },
+            Some(non_streaming_request_envelope()),
+            self.anthropic_retry_policy(),
+        )
+        .await
     }
 
-    /// Shared status/error-envelope handling for streaming and
-    /// non-streaming Messages responses.
-    async fn check_anthropic_response(
-        &self,
-        response: reqwest::Response,
-    ) -> Result<reqwest::Response> {
-        let status = response.status();
-        if !status.is_success() {
-            let raw = bounded_error_text(response, ERROR_BODY_MAX_BYTES).await;
-            let (error_type, message) = parse_anthropic_error_envelope(&raw);
-            // Same isolation contract as the transport-failure arm above: a
-            // status-level failure on the isolated classifier request must
-            // not write the shared connection health (the generic dialect's
-            // isolated dispatch path writes nothing either).
-            if !self.isolated_request_state {
-                self.mark_request_failure(&format!("anthropic status={status}"))
-                    .await;
-            }
-            anyhow::bail!("Anthropic API error (HTTP {status} {error_type}): {message}");
-        }
-        if !self.isolated_request_state {
-            self.mark_request_success().await;
-        }
-        Ok(response)
+    fn anthropic_retry_policy(&self) -> LlmRetryConfig {
+        // Keep Messages' existing transport attempt policy. Rate-limit
+        // recovery has its own budget and does not consume these retries.
+        LlmRetryConfig::from(self.retry.clone()).with_max_retries(0)
     }
 
     /// Open the streaming Messages request through the shared stream-entry
@@ -333,26 +315,30 @@ impl DeepSeekClient {
                     self.http1_fallback_client(),
                     policy,
                 );
-                self.send_stream_open_with_retry(|| {
-                    client
-                        .post(&url)
-                        .header("Accept", "text/event-stream")
-                        .json(body)
-                })
+                self.send_with_retry_policy(
+                    || {
+                        client
+                            .post(&url)
+                            .header("Accept", "text/event-stream")
+                            .json(body)
+                    },
+                    None,
+                    self.anthropic_retry_policy(),
+                )
                 .await
-                .context("Anthropic Messages API request failed")
             }
         })
         .await;
-        let response = match opened {
-            Ok(response) => response,
-            Err(err) => {
-                self.mark_request_failure(&format!("anthropic stream open: {err}"))
-                    .await;
-                return Err(err);
-            }
-        };
-        self.check_anthropic_response(response).await
+        // The shared deadline can cancel a send before it returns an error
+        // to the sender's health accounting. Other errors were handled there.
+        if let Err(error) = &opened
+            && !self.isolated_request_state
+            && error.is::<super::stream_entry::HeaderDeadline>()
+        {
+            self.mark_request_failure(&format!("anthropic stream open: {error}"))
+                .await;
+        }
+        opened
     }
 
     /// Handle a streaming Messages API request.
@@ -1064,7 +1050,7 @@ fn parse_anthropic_usage(usage: &Value) -> Usage {
 /// Extract `error.type` / `error.message` from an Anthropic error envelope
 /// (`{"type":"error","error":{"type":...,"message":...}}`), falling back to
 /// the raw body so nothing is swallowed.
-fn parse_anthropic_error_envelope(raw: &str) -> (String, String) {
+pub(super) fn parse_anthropic_error_envelope(raw: &str) -> (String, String) {
     let Ok(value) = serde_json::from_str::<Value>(raw) else {
         return ("unknown".to_string(), raw.to_string());
     };
@@ -2754,33 +2740,38 @@ mod tests {
 
         let server = MockServer::start().await;
         // A definitive provider error before any stream body must fail fast:
-        // exactly one request, no H1 fallback, envelope preserved.
+        // one request per call, no H1 fallback or probe, envelope preserved.
         Mock::given(method("POST"))
             .and(path("/v1/messages"))
             .respond_with(ResponseTemplate::new(401).set_body_string(
                 "{\"error\":{\"type\":\"authentication_error\",\"message\":\"bad key\"}}",
             ))
-            .expect(1)
+            .expect(2)
             .mount(&server)
             .await;
 
-        let client = deepseek_test_client(&server.uri());
-        let err = match client
-            .handle_anthropic_stream(
-                &client
-                    .prepare_outbound_request(request_with("deepseek-v4", None, None, None), true)
-                    .expect("anthropic request prepares"),
-            )
-            .await
-        {
-            Ok(_) => panic!("auth errors must fail fast"),
-            Err(err) => err,
-        };
-        let text = err.to_string();
-        assert!(
-            text.contains("HTTP 401") && text.contains("authentication_error"),
-            "error envelope should be preserved: {text}"
-        );
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(500))
+            .expect(0)
+            .mount(&server)
+            .await;
+
+        let client = anthropic_test_client(Some(&server.uri()));
+        for _ in 0..2 {
+            let prepared = client
+                .prepare_outbound_request(request_with("claude-opus-4-6", None, None, None), true)
+                .expect("anthropic request prepares");
+            let err = match client.handle_anthropic_stream(&prepared).await {
+                Ok(_) => panic!("auth errors must fail fast"),
+                Err(err) => err,
+            };
+            let text = err.to_string();
+            assert!(
+                text.contains("HTTP 401") && text.contains("authentication_error"),
+                "error envelope should be preserved: {text}"
+            );
+        }
+        server.verify().await;
     }
 
     /// A `system`-role history message — what a compaction summary, a branch

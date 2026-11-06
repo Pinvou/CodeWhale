@@ -10514,14 +10514,6 @@ async fn spawn_subagent_from_input(
         )));
     }
 
-    if let Some(remaining) = crate::retry_status::rate_limit_remaining() {
-        let seconds = remaining.as_secs() + u64::from(remaining.subsec_nanos() > 0);
-        return Err(ToolError::execution_failed(format!(
-            "Provider is rate-limiting; sub-agent spawning is paused for {seconds}s. \
-             Wait for the current backoff window before starting new agent work."
-        )));
-    }
-
     let mut child_runtime = if spawn_request.detached {
         runtime.background_runtime()
     } else {
@@ -10560,6 +10552,20 @@ async fn spawn_subagent_from_input(
         })?
     {
         child_runtime.client = rebound;
+    }
+    if let Some(remaining) = child_runtime
+        .client
+        .provider_quota_pause_remaining()
+        .await
+        .map_err(|err| ToolError::execution_failed(err.to_string()))?
+    {
+        let seconds = remaining
+            .as_secs()
+            .saturating_add(u64::from(remaining.subsec_nanos() > 0));
+        return Err(ToolError::execution_failed(format!(
+            "Provider is rate-limiting; sub-agent spawning is paused for {seconds}s. \
+             Wait for the current backoff window before starting new agent work."
+        )));
     }
     child_runtime.reasoning_effort = route.reasoning_effort.clone();
     child_runtime.reasoning_effort_auto = false;

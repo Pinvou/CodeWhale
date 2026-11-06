@@ -12551,19 +12551,32 @@ fn clamp_child_max_spawn_depth_enforces_absolute_ceiling() {
 }
 
 #[tokio::test]
-#[allow(clippy::await_holding_lock)]
 async fn rate_limit_pause_blocks_subagent_spawn() {
-    let _guard = crate::retry_status::test_guard();
-    // Drop-clear the window even if an assertion below panics: this state is
-    // process-global, and a leaked 30s pause strands every concurrently
-    // running test whose worker issues a model request.
-    let _clear = ClearRateLimitOnDrop;
-    crate::retry_status::clear();
-    crate::retry_status::clear_rate_limit();
-    crate::retry_status::note_rate_limit(Duration::from_secs(30));
-
     let tmp = tempdir().expect("tempdir");
+    let server = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .respond_with(wiremock::ResponseTemplate::new(429).insert_header("Retry-After", "7200"))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let config = crate::config::Config {
+        api_key: Some("test-key".to_string()),
+        base_url: Some(server.uri()),
+        rate_limit_recovery_dir: Some(tmp.path().join("quota")),
+        ..Default::default()
+    };
     let mut runtime = stub_runtime();
+    runtime.client = DeepSeekClient::new(&config).expect("fixture client");
+    runtime.api_config = Some(Arc::new(config));
+    let error = runtime
+        .client
+        .send_json_with_retry(&server.uri(), &json!({}))
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error.downcast_ref::<crate::llm_client::LlmError>(),
+        Some(crate::llm_client::LlmError::QuotaWindow { .. })
+    ));
     runtime.context = ToolContext::new(tmp.path().to_path_buf());
     let manager = new_shared_subagent_manager(tmp.path().to_path_buf(), 2);
 
@@ -19386,57 +19399,6 @@ async fn shared_scope_budget_stops_admitted_children_mid_run() {
         manager.read().await.budget_spent_for_scope(scope_id),
         200,
         "collective spend is accounted once per child"
-    );
-}
-
-/// Clears the process-wide rate-limit window on drop so a panicking test
-/// body cannot leak a live pause into concurrently running tests.
-struct ClearRateLimitOnDrop;
-
-impl Drop for ClearRateLimitOnDrop {
-    fn drop(&mut self) {
-        crate::retry_status::clear_rate_limit();
-    }
-}
-
-#[tokio::test]
-#[allow(clippy::await_holding_lock)]
-async fn worker_is_not_stranded_by_transient_global_rate_limit_window() {
-    // Regression for a parallel-suite flake: `rate_limit_pause_blocks_subagent_spawn`
-    // opens a 30s process-wide rate-limit window and closes it milliseconds
-    // later. A worker whose request reached `send_with_retry` inside that
-    // window used to commit to sleeping the FULL remaining window without
-    // re-checking, blowing the 5s timeouts in the budget tests above. The
-    // pause must be re-polled so an already-cleared window releases
-    // in-flight requests promptly.
-    let _guard = crate::retry_status::test_guard();
-    let _clear = ClearRateLimitOnDrop;
-    crate::retry_status::note_rate_limit(Duration::from_secs(30));
-
-    let tmp = tempdir().expect("tempdir");
-    let (manager, agent_id, _calls, task_handle) =
-        spawn_budget_capped_worker(tmp.path(), 60, 40, Some(50), 4, DEFAULT_CHILD_WALL_TIME).await;
-
-    // Simulate the concurrent test finishing: the window closes shortly
-    // after the worker's first request has already observed it.
-    tokio::spawn(async {
-        tokio::time::sleep(Duration::from_millis(250)).await;
-        crate::retry_status::clear_rate_limit();
-    });
-
-    tokio::time::timeout(Duration::from_secs(5), task_handle)
-        .await
-        .expect("worker must not be stranded by an already-cleared rate-limit window")
-        .expect("task should finish");
-
-    let result = {
-        let manager = manager.read().await;
-        manager.get_result(&agent_id).expect("agent registered")
-    };
-    assert!(
-        matches!(result.status, SubAgentStatus::BudgetExhausted),
-        "expected BudgetExhausted, got {:?}",
-        result.status
     );
 }
 
