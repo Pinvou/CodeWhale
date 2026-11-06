@@ -129,7 +129,7 @@ pub fn sanitize_for_responses(schema: &mut Value) -> Option<String> {
 /// The genuine Anthropic endpoint has returned HTTP 400 "input_schema does
 /// not support oneOf, allOf, or anyOf at the top level" for tool schemas
 /// carrying a root-level composition since at least 2025-07: commit
-/// `f8e757322` quotes a live failure, CHANGELOG 0.9.1 records the same
+/// `f8e757322` quotes a live failure, CHANGELOG 0.9.0 records the same
 /// rationale, and anthropics/claude-code#4886 / #30212 report the identical
 /// server-side error. Unlike [`sanitize_for_responses`], this pass strips
 /// only those three root keywords: root `enum`/`not`,
@@ -138,6 +138,11 @@ pub fn sanitize_for_responses(schema: &mut Value) -> Option<String> {
 /// Root composition branch properties are merged into the object and the
 /// dropped exactly-one / at-least-one constraint is surfaced as a
 /// description note so the model still knows which parameter groups apply.
+///
+/// The shared [`sanitize`] normalization still applies first, so a root
+/// nullable union can collapse (rewriting the root `type`), a bare object
+/// gains `properties`, and dangling `required` entries are pruned — only
+/// the composition-keyword scope is narrower than [`sanitize_for_responses`].
 ///
 /// Returns the same style of description note as [`sanitize_for_responses`].
 pub fn sanitize_for_anthropic_messages(schema: &mut Value) -> Option<String> {
@@ -1154,6 +1159,58 @@ mod tests {
             note.as_deref(),
             Some("At least one of these parameter groups must be provided: `changes` | `patch`.")
         );
+    }
+
+    #[test]
+    fn anthropic_messages_sanitize_keeps_the_shared_registry_normalization() {
+        // The narrowed pass still runs the shared registry normalization
+        // (sanitize): the previous release line collapsed root nullable
+        // unions through it, and without that anchor a root
+        // `anyOf:[X, null]` would ship the recorded-rejection union shape
+        // verbatim. Bare-object properties injection and dangling-required
+        // pruning ride the same call.
+        let mut nullable = json!({
+            "anyOf": [
+                {
+                    "type": "object",
+                    "properties": {"q": {"type": "string"}}
+                },
+                {"type": "null"}
+            ]
+        });
+        let note = sanitize_for_anthropic_messages(&mut nullable);
+        assert_eq!(
+            nullable,
+            json!({
+                "type": "object",
+                "properties": {"q": {"type": "string"}},
+                "nullable": true
+            }),
+            "a root nullable union must collapse instead of shipping the recorded shape: {nullable}"
+        );
+        assert_eq!(note, None);
+
+        let mut bare = json!({"type": "object"});
+        let note = sanitize_for_anthropic_messages(&mut bare);
+        assert_eq!(
+            bare,
+            json!({"type": "object", "properties": {}}),
+            "a bare object root keeps its properties injection: {bare}"
+        );
+        assert_eq!(note, None);
+
+        let mut dangling = json!({
+            "type": "object",
+            "properties": {"a": {"type": "string"}},
+            "required": ["a", "ghost"]
+        });
+        let note = sanitize_for_anthropic_messages(&mut dangling);
+        assert_eq!(
+            dangling["required"],
+            json!(["a"]),
+            "required naming absent properties is pruned on this lane too: {dangling}"
+        );
+        assert_eq!(note, None);
     }
 
     #[test]
