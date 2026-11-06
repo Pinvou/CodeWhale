@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { accountPlatformCopy, modelUsageCopy, accountCenterCopy } from '../../shared/i18n.js';
+import { accountPlatformCopy, modelUsageCopy } from '../../shared/i18n.js';
 import { hasPermission } from './authorization-ui.js';
 import { secureRequestID } from './request-id.js';
 import { Usage } from './Usage.jsx';
@@ -73,11 +73,11 @@ export function PersonalUsageWorkspace({ client, me, language, portalPresentatio
   if (!canRead) return null;
   const Presentation = portalPresentation ? PortalUsage : Usage;
   return <section className="ap-personal-usage">
-    <button disabled={busy} onClick={() => void run(stamp => load('', 1, stamp))}>{portalPresentation ? accountCenterCopy[language].refreshUsage : copy.refresh}</button>
-    {busy && <p role="status">{copy.loading}</p>}
+    {!portalPresentation && <button disabled={busy} onClick={() => void run(stamp => load('', 1, stamp))}>{copy.refresh}</button>}
+    {busy && !portalPresentation && <p role="status">{copy.loading}</p>}
     {unavailable && records.length > 0 && <p role="alert">{readDenied ? copy.permissionDenied : copy.usageUnavailable}</p>}
     <Presentation key={owner} client={client} owner={owner} versions={{ session_epoch: client.financeSessionEpoch || 0, context_version: me.active_context?.context_version, personal_authorization_version: me.personal_authorization_version || me.active_context?.personal_authorization_version, organization_authorization_version: me.active_context?.organization_authorization_version }} copy={{ ...copy, usageUnavailable: readDenied ? copy.permissionDenied : copy.usageUnavailable }} language={language} records={records} unavailable={unavailable && records.length === 0} page={page} hasPrevious={page > 1} hasMore={Boolean(next)} busy={busy} canCancel={canCancel}
-      onPrevious={() => void run(stamp => load(cursors[page - 2], page - 1, stamp))}
+      onRefresh={() => void run(stamp => load('', 1, stamp))} onPrevious={() => void run(stamp => load(cursors[page - 2], page - 1, stamp))}
       onNext={() => void run(stamp => load(next, page + 1, stamp))} onCancel={id => void cancel(id)} />
   </section>;
 }
