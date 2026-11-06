@@ -111,6 +111,14 @@ pub fn sanitize_for_xai_parameters(parameters: &mut Value) -> Option<String> {
         let mut normalized = parameters.clone();
         drop_dependent_keywords(&mut normalized);
         sanitize(&mut normalized);
+        // Annotation-only divergence (title/description/examples/…) keeps raw
+        // values unequal without making the validation constraints different
+        // (review 5800814557: gutted registry branches differing only in
+        // annotations passed the raw-equality check and still reached xAI as
+        // two validation-equivalent exactly-one alternatives). Compare
+        // validation-relevant shapes only; the real parameters keep their
+        // annotations either way.
+        strip_annotation_keywords(&mut normalized);
         if oneof_branches_mutually_distinct(&normalized) {
             let dependent_note = drop_dependent_keywords(parameters);
             sanitize(parameters);
@@ -118,6 +126,37 @@ pub fn sanitize_for_xai_parameters(parameters: &mut Value) -> Option<String> {
         }
     }
     sanitize_for_responses(parameters)
+}
+
+/// Recursively remove the JSON-Schema annotation keywords (spec §7: they
+/// carry no validation semantics) so branch comparison sees
+/// validation-relevant shape only.
+fn strip_annotation_keywords(value: &mut Value) {
+    match value {
+        Value::Object(obj) => {
+            for key in [
+                "title",
+                "description",
+                "default",
+                "examples",
+                "$comment",
+                "deprecated",
+                "readOnly",
+                "writeOnly",
+            ] {
+                obj.remove(key);
+            }
+            for (_key, child) in obj.iter_mut() {
+                strip_annotation_keywords(child);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                strip_annotation_keywords(item);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Exactly-one unions need pairwise-distinct object branches: two deep-equal
@@ -1892,6 +1931,55 @@ mod tests {
             "a self-contained union that stays distinct after normalization keeps pass-through: {self_contained}"
         );
         assert_eq!(control_note, None);
+    }
+
+    #[test]
+    fn xai_sanitize_flattens_oneof_gutted_branches_that_differ_only_in_annotations() {
+        // Review 5800814557: the registry sanitize/canonicalizer strips the
+        // branch requirements but keeps `title`/`description`, so raw-equality
+        // sees two distinct branches while validation sees two identical
+        // exactly-one alternatives. Annotation-only divergence must not
+        // rescue an unsatisfiable union; the flattening fallback keeps the
+        // shared root properties usable.
+        let mut registry_sanitized = json!({
+            "properties": {
+                "a": {"type": "string"},
+                "b": {"type": "string"}
+            },
+            "oneOf": [
+                {"type": "object", "title": "Group A", "description": "use a"},
+                {"type": "object", "title": "Group B", "description": "use b"}
+            ]
+        });
+        // Simulate the registry preprocessing exactly (tools/registry.rs):
+        // the gutting happens upstream, the annotations survive.
+        sanitize(&mut registry_sanitized);
+        assert!(
+            registry_sanitized["oneOf"][0].get("title").is_some(),
+            "fixture precondition: the registry pass keeps annotations: {registry_sanitized}"
+        );
+
+        let mut schema = registry_sanitized;
+        let note = sanitize_for_xai_parameters(&mut schema);
+
+        assert_eq!(schema["type"], "object");
+        assert!(
+            schema.get("oneOf").is_none() && schema.get("anyOf").is_none(),
+            "the annotation-only-distinct union must not reach the wire: {schema}"
+        );
+        assert!(
+            schema["properties"].get("a").is_some() && schema["properties"].get("b").is_some(),
+            "the root's shared properties must stay usable after the fallback: {schema}"
+        );
+        assert_eq!(note, None);
+        let validator = jsonschema::options()
+            .with_draft(jsonschema::Draft::Draft202012)
+            .build(&schema)
+            .expect("the flattened schema must compile");
+        assert!(
+            validator.is_valid(&json!({"a": "x"})),
+            "a valid instance of the original union must stay valid: {schema}"
+        );
     }
 
     #[test]
