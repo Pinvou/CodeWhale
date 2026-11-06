@@ -308,7 +308,7 @@ export function PersonalFinanceWorkspace({ client, me, language, onPaid, present
     }} />
   </>;
   return <section tabIndex={-1} className="ap-finance" aria-label={copy.title}>
-    {payment.order && <RechargePaymentDialog order={payment.order} copy={copy} language={language} now={now} busy={busy} onDismiss={payment.dismiss} onQuery={() => void queryPayment()} canRestoreFocus={payment.canRestoreFocus} returnFocus={payment.trigger} />}
+    {payment.order && <RechargePaymentDialog error={error ? copy[error] : ''} notice={notice ? copy[notice] : ''} order={payment.order} copy={copy} language={language} now={now} busy={busy} onDismiss={payment.dismiss} onQuery={() => void queryPayment()} canRestoreFocus={payment.canRestoreFocus} returnFocus={payment.trigger} />}
     {closeConfirmation && closeIsCurrent(closeConfirmation) && <PersonalOrderCloseConfirmation copy={copy} orderID={closeConfirmation.orderID} amount={formatFen(closeConfirmation.order.amount_fen, language)} canRestoreFocus={() => closeIsCurrent(closeConfirmation)} onCancel={() => cancelClose(closeConfirmation)} onConfirm={() => void confirmClose(closeConfirmation)} />}
     <header><h2>{copy.title}</h2><button disabled={busy} onClick={() => void run(async () => { refreshRecovery(); })}>{copy.refresh}</button></header>
     {busy && <p role="status">{copy.loading}</p>}

@@ -29,6 +29,41 @@ try {
     try { await fn(); assert.deepEqual(errors, []); passed++; console.log(`PASS ${name}`); }
     catch (error) { failed++; console.error(`FAIL ${name}: ${error.stack}`); }
   };
+  await run('QR loading, slow feedback and retry never create another order', async () => {
+    await fresh(); await control({ qrMode: 'remote' });
+    const heldImages = []; let imageMode = 'hold';
+    const intercept = request => {
+      if (request.url() !== 'https://example.com/public-fixture-qr.png') { request.continue(); return; }
+      if (imageMode === 'hold') heldImages.push(request);
+      else request.respond({ status: 200, contentType: 'image/png', body: Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aNbQAAAAASUVORK5CYII=', 'base64') });
+    };
+    await page.setRequestInterception(true); page.on('request', intercept);
+    try {
+      await click(financeCopy.en.create); await page.waitForSelector('[data-qr-state=loading]');
+      assert.ok((await page.$eval('[role=dialog]', node => node.textContent)).includes(financeCopy.en.paymentOrderCreated));
+      assert.ok((await page.$eval('[role=dialog]', node => node.textContent)).includes(financeCopy.en.qrLoading));
+      assert.equal(await page.$eval('[role=dialog] img', node => node.hidden), true);
+      await page.waitForFunction(text => document.querySelector('[role=dialog]')?.textContent.includes(text), { timeout: 20000 }, financeCopy.en.paymentSlow);
+      assert.equal(heldImages.length, 1); await heldImages.shift().abort('failed');
+      await page.waitForSelector('[data-qr-state=error]');
+      assert.ok((await page.$eval('[role=dialog]', node => node.textContent)).includes(financeCopy.en.qrLoadFailed));
+      imageMode = 'success'; await click(financeCopy.en.qrRetry); await page.waitForSelector('[data-qr-state=loaded]');
+      assert.equal(await page.$eval('[role=dialog] img', node => node.hidden), false);
+      assert.equal((await state()).productMutations, 1); assert.equal((await state()).createKeys.length, 1);
+      await click(financeCopy.en.dismissPayment); await noDialog();
+    } finally {
+      for (const request of heldImages) await request.abort('aborted').catch(() => {});
+      page.off('request', intercept); await page.setRequestInterception(false);
+    }
+  });
+  await run('missing payment instructions display preparation and still allow close and status query', async () => {
+    await fresh(); await control({ qrMode: 'missing' }); await click(financeCopy.en.create);
+    await page.waitForSelector('[data-qr-state=preparing]');
+    assert.ok((await page.$eval('[role=dialog]', node => node.textContent)).includes(financeCopy.en.paymentPreparing));
+    await control({ qrMode: 'inline' }); await click(financeCopy.en.query);
+    await page.waitForSelector('[data-qr-state=loaded]'); assert.equal((await state()).productMutations, 1);
+    await click(financeCopy.en.dismissPayment); await noDialog();
+  });
   await run('page reload only restores the pending list; history remains readonly', async () => {
     await fresh(); assert.equal(await page.$$eval(pending, nodes => nodes.length), 1, 'a separate payable-only list must exist'); assert.equal((await state()).detailReads, 0); assert.equal(await page.$('[role="dialog"]'), null); assert.equal(await page.$('.ap-finance img'), null);
     await click(financeCopy.en.details); await page.waitForSelector('article'); assert.equal((await state()).detailReads, 1); assert.equal(await page.$('[role="dialog"]'), null); assert.equal(await page.$('.ap-finance img'), null);
@@ -36,7 +71,7 @@ try {
   });
   for (const language of ['zh', 'en', 'ja']) await run(`${language}: create opens accessible provider-facts modal and Escape leaves order open`, async () => {
     await page.setViewport({ width: language === 'ja' ? 390 : 1100, height: 900 }); await fresh(); await page.select('[aria-label="Fixture language"]', language); const copy = financeCopy[language];
-    await click(copy.create); await page.waitForSelector('img'); assert.notEqual(await page.$('[role="dialog"] img'), null, 'provider QR must be inside a separate payment modal');
+    await click(copy.create); await page.waitForSelector('[data-qr-state=loaded]'); assert.notEqual(await page.$('[role="dialog"] img'), null, 'provider QR must be inside a separate payment modal');
     await page.waitForFunction(text => [...document.querySelectorAll('button')].some(node => node.textContent === text && !node.disabled), {}, copy.create);
     assert.equal(await page.$eval('.ap-order-close-backdrop', node => getComputedStyle(node).position), 'fixed');
     assert.equal(await page.$eval('[role=dialog]', node => node.getBoundingClientRect().width <= innerWidth - 32), true);
@@ -158,12 +193,12 @@ try {
     assert.equal((await state()).productMutations, 0);
   });
   await run('organization purchase uses same provider modal and withdrawal follows terminal proof', async () => {
-    await fresh(); await click('Organization surface'); await click('Remove organization wallet read permission'); await page.waitForFunction(() => [...document.querySelectorAll('button')].some(node => node.textContent === 'Purchase organization entitlements' && !node.disabled)); await page.select('.ap-org-action select', 'public-fixture-product'); await page.waitForFunction(() => document.querySelectorAll('.ap-org-action select')[1]?.options.length > 1); await page.$$eval('.ap-org-action select', nodes => { const node = nodes[1]; node.value = 'ALIPAY'; node.dispatchEvent(new Event('change', { bubbles: true })); }); await click('Purchase organization entitlements');
+    await fresh(); await click('Organization surface'); await click('Remove organization wallet read permission'); await page.waitForFunction(() => document.querySelector('.ap-org-action select')?.options.length > 1); await page.select('.ap-org-action select', 'public-fixture-product'); await page.waitForFunction(() => document.querySelectorAll('.ap-org-action select')[1]?.options.length > 1); await page.$$eval('.ap-org-action select', nodes => { const node = nodes[1]; node.value = 'ALIPAY'; node.dispatchEvent(new Event('change', { bubbles: true })); }); await click('Purchase organization entitlements');
     await page.waitForSelector('[role="dialog"] img'); await control({ status: 'PAID' }); await noDialog(); assert.equal(await page.$('img'), null);
   });
   const freshOrganizationOrder = async () => {
     await fresh(); await click('Organization surface');
-    await page.waitForFunction(() => [...document.querySelectorAll('button')].some(node => node.textContent === 'Purchase organization entitlements' && !node.disabled));
+    await page.waitForFunction(() => document.querySelector('.ap-org-action select')?.options.length > 1);
     await page.select('.ap-org-action select', 'public-fixture-product');
     await page.waitForFunction(() => document.querySelectorAll('.ap-org-action select')[1]?.options.length > 1);
     await page.$$eval('.ap-org-action select', nodes => { nodes[1].value = 'ALIPAY'; nodes[1].dispatchEvent(new Event('change', { bubbles: true })); });
