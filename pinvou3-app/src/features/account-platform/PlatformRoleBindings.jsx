@@ -27,7 +27,7 @@ export function PlatformRoleBindings({ words, copy, bindings, target, blocked, o
           <tbody>{items.map(item => <tr key={item.binding_id}>
             <td><code>{item.user_id}</code></td>
             <td><strong>{platformRoleName(words, item.role_code)}</strong><small>{item.role_code}</small></td>
-            <td>{date(item.starts_at)}<small>{date(item.expires_at)}</small></td>
+            <td>{words.validFrom}: {date(item.starts_at)}<small>{words.validUntil}: {item.expires_at == null ? words.noExpiry : date(item.expires_at)}</small></td>
             <td>{typeof words.sources[item.grant_source] === 'string' ? words.sources[item.grant_source] : item.grant_source}</td>
             <td><span className={`adm-status ${item.status === 'ACTIVE' ? 'ok' : item.status === 'SCHEDULED' ? 'warn' : 'neutral'}`}>{words.statuses[item.status]}</span></td>
             <td><div className="adm-row-actions"><button type="button" onClick={() => onView(item)}>{words.view}</button>{canRevoke(item) && <button type="button" disabled={blocked} onClick={() => onRevoke(item)}>{copy.revoke}</button>}</div></td>
