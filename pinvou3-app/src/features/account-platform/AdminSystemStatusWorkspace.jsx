@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { localizedAccountPlatformError } from "./error-localization.js";
 import { formatSystemCount, requireSystemStatus, systemDiagnosticMessage } from "./admin-system-status.js";
 const NO_PERMISSIONS = [];
@@ -44,6 +45,7 @@ export function AdminSystemStatusWorkspace({
   permissions = NO_PERMISSIONS,
   compact = false,
   showTitle = true,
+  headerTarget = null,
 }) {
   const allowed = permissions.includes("platform.system.status.read");
   const [state, setState] = useState({ owner: null, status: null, loading: false, error: null });
@@ -94,16 +96,20 @@ export function AdminSystemStatusWorkspace({
     {visible.error && <p role="alert">{localizedAccountPlatformError(copy, visible.error)}<button onClick={() => setRefresh(value => value + 1)}>{copy.retry}</button></p>}
     {status && <div className="adm-metrics">{[[labels.healthyServices, `${count(status.services.filter(item => item.status === 'HEALTHY').length)} / ${count(status.services.length)}`], [labels.pendingReconciliation, count(status.reconciliation.pending)], [labels.stoppedReconciliation, count(status.reconciliation.stopped)]].map(([label, value]) => <article key={label}><span>{label}</span><strong>{value}</strong></article>)}</div>}
   </section>;
+  const checkedAt = typeof status?.checked_at === "string" && Number.isFinite(Date.parse(status.checked_at)) ? status.checked_at : null;
+  const refreshContents = <>
+    <span className="adm-system-observation">{visible.loading ? labels.readingSnapshot : status ? <>
+      <span>{labels.checkStarted}</span>
+      {checkedAt ? <time dateTime={checkedAt}>{new Date(checkedAt).toLocaleString(language, { timeZoneName: "short" })}</time> : <span>{labels.checkTimeUnavailable}</span>}
+    </> : labels.noSnapshot}</span>
+    <button className="adm-system-refresh" type="button" disabled={visible.loading} onClick={() => setRefresh((value) => value + 1)}>{copy.refresh}</button>
+  </>;
   return (
     <section className="adm-system-workspace">
-      {showTitle && <h1>{copy.nav.system}</h1>}
-      <button
-        type="button"
-        disabled={visible.loading}
-        onClick={() => setRefresh((value) => value + 1)}
-      >
-        {copy.refresh}
-      </button>
+      {headerTarget ? createPortal(refreshContents, headerTarget) : <header className="adm-system-workspace-head">
+        {showTitle && <h1>{copy.nav.system}</h1>}
+        <div className="adm-page-head-actions">{refreshContents}</div>
+      </header>}
       {visible.loading && <p role="status">{copy.loading}</p>}
       {visible.error && (
         <div role="alert">

@@ -49,8 +49,11 @@ try {
   for (const language of ['zh', 'en', 'ja']) await run(`actual admin permission navigation, status, int64, readonly runbooks ${language}`, async page => {
     await open(page, `language=${language}`);
     await page.waitForSelector('.adm-system-workspace .adm-metrics');
+    await page.waitForSelector('.adm-page-head .adm-system-observation time');
     assert.equal(await page.$$eval('.adm-page h1, .adm-page h2', (nodes, title) => nodes.filter(node => node.textContent.trim() === title).length, adminLayoutCopy[language].nav.system), 1, 'embedded system page has one page heading');
     assert.equal(await page.$('.adm-system-workspace > h1'), null, 'embedded workspace reuses the layout title in every locale');
+    assert.equal(await page.$eval('.adm-page-head .adm-system-observation time', node => node.dateTime), '2026-10-09T01:02:03Z', 'header uses the accepted server check-start timestamp');
+    assert.equal(await page.$('.adm-system-workspace .adm-system-refresh'), null, 'refresh is in the actual layout heading area');
     assert.equal(await page.$eval('nav button[data-section="system"]', (button, label) => button.getAttribute('aria-current') === 'page' && button.textContent.includes(label), adminLayoutCopy[language].nav.system), true);
     const text = await page.evaluate(() => document.querySelector('.adm-system-workspace').textContent);
     assert.ok(text.includes('9,007,199,254,740,993'));
@@ -62,7 +65,7 @@ try {
     assert.deepEqual(await page.evaluate(() => window.statusFixture.calls.filter(call => call.url === '/api/admin/system/status').map(call => call.method)), ['GET']);
     assert.equal(await page.evaluate(() => document.querySelectorAll('.adm-runbook-panel button').length), 0);
     await page.evaluate(() => { window.statusFixture.mode = 'unhealthy'; });
-    await page.click('.adm-system-workspace > button');
+    await page.click('.adm-page-head .adm-system-refresh');
     await page.waitForFunction(() => document.querySelector('.adm-system-workspace')?.textContent.includes('controlled pending error'));
     const expectedUpdated = await page.evaluate(() => window.statusFixture.copy.system.updated);
     assert.equal(typeof expectedUpdated, 'string');
@@ -118,6 +121,7 @@ try {
     await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
     await page.waitForFunction(() => !document.querySelector('.adm-metrics') && !!document.querySelector('.adm-system-workspace [role=alert]'));
     assert.equal(await page.$('.adm-metrics'), null);
+    assert.equal(await page.$('.adm-page-head .adm-system-observation time'), null, 'late old-owner observation cannot populate the current error header');
   });
 } finally { await browser.close(); await server.close(); }
 const result = { pass: results.filter(row => row.pass).length, fail: results.filter(row => !row.pass).length, results, limits: ['Real AdminPlatformView, independent SystemStatusWorkspace and AdminPlatformClient with controlled HTTP. No real aggregator probes, deployment, canonical Portal build, full F18 parent, or E2E.'] };

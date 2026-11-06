@@ -5,7 +5,7 @@ import { adminSectionGroups } from './admin-sections.js';
 import './admin-portal-layout.css';
 
 const icons = { overview: '◫', users: '♙', roles: '⚿', organizations: '▦', myorg: '◇', billing: '▤', payments: '↔', products: '▣', tokens: '◈', models: '◈', tokenResources: '▧', modelOperations: '⌁', operations: '▥', approvals: '✓', audit: '≡', system: '⚙', settings: '⋯' };
-export function AdminPortalLayout({ copy, language, onLanguageChange, navigation, ready, onLogout, children }) {
+export function AdminPortalLayout({ copy, language, onLanguageChange, navigation, ready, onLogout, pageActionsRef, children }) {
   const words = adminLayoutCopy[language], group = adminSectionGroups.find(item => item.sections.includes(navigation.section));
   const userDetails = ready && navigation.section === 'users' && navigation.available.includes('users') && Boolean(new URLSearchParams(navigation.search).get('user_id'));
   const pageTitle = userDetails ? words.userDetailsTitle : words.nav[navigation.section] || words.unauthorized;
@@ -18,7 +18,7 @@ export function AdminPortalLayout({ copy, language, onLanguageChange, navigation
       })}</nav><div className="adm-sidebar-foot"><a href="/">{words.home}</a><select aria-label={copy.settings.language} value={language} onChange={event => onLanguageChange(event.target.value)}>{supportedLocales.map(locale => <option key={locale} value={locale}>{localeNames[locale]}</option>)}</select></div>
     </aside>
     <main className="adm-main" id="admin-content" tabIndex={-1}><header className="adm-topbar"><div><span className="adm-eyebrow">{words.product}</span><h1>{copy.title}</h1></div>{ready && <button type="button" onClick={onLogout}>{copy.logout}</button>}</header>
-      <div className="adm-page">{ready && <><nav className={`adm-breadcrumbs${userDetails ? ' adm-user-detail-breadcrumbs' : ''}`} aria-label={words.primaryNavigation}><button type="button" disabled={!navigation.available.includes('overview')} onClick={() => navigation.navigate('overview')}>{words.nav.overview}</button><span>/</span>{group && <span>{words.navGroups[group.key]}</span>}<span>/</span>{userDetails && <><button type="button" onClick={() => navigation.navigate('users', { user_id: null })}>{words.nav.users}</button><span>/</span></>}<strong aria-current={userDetails ? 'page' : undefined}>{pageTitle}</strong></nav><div className="adm-page-head"><div><span className="adm-eyebrow">{group && words.navGroups[group.key]}</span><h2>{pageTitle}</h2></div></div></>}{children}</div>
+      <div className="adm-page">{ready && <><nav className={`adm-breadcrumbs${userDetails ? ' adm-user-detail-breadcrumbs' : ''}`} aria-label={words.primaryNavigation}><button type="button" disabled={!navigation.available.includes('overview')} onClick={() => navigation.navigate('overview')}>{words.nav.overview}</button><span>/</span>{group && <span>{words.navGroups[group.key]}</span>}<span>/</span>{userDetails && <><button type="button" onClick={() => navigation.navigate('users', { user_id: null })}>{words.nav.users}</button><span>/</span></>}<strong aria-current={userDetails ? 'page' : undefined}>{pageTitle}</strong></nav><div className="adm-page-head"><div><span className="adm-eyebrow">{group && words.navGroups[group.key]}</span><h2>{pageTitle}</h2></div>{pageActionsRef && <div className="adm-page-head-actions" ref={pageActionsRef} />}</div></>}{children}</div>
     </main>
   </div>;
 }
