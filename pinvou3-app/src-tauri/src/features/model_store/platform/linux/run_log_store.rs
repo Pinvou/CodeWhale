@@ -713,7 +713,11 @@ fn colon_glued_secret(word: &str) -> Option<(&str, &str)> {
             hit = Some((trimmed_name, ""));
             break;
         }
-        if trimmed_value.len() < MIN_LITERAL_SECRET_LEN {
+        // P2-11（r24）：带引号的值绕过 8 字符门——键名已是 SECRET_QUERY_KEYS
+        // 的确定信号，引号表明这是字符串值而非 Python 注解（`password: str`）。
+        // `{"password":"hunter2"}`（7 字符）不再与空格形态同密不同命。
+        let is_quoted = value.starts_with('"') || value.starts_with('\'');
+        if !is_quoted && trimmed_value.len() < MIN_LITERAL_SECRET_LEN {
             continue;
         }
         hit = Some((trimmed_name, value));
