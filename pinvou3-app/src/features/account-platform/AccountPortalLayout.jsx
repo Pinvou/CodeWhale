@@ -5,6 +5,7 @@ import { accountCenterCopy, organizationCopy } from '../../shared/i18n.js';
 import { organizationLabel } from './organization-labels.js';
 import { hasPermission } from './authorization-ui.js';
 import { supportedLocales, localeNames } from '../../shared/supported-locales.js';
+import pinvouBrand from './assets/brand-blue.png';
 import './account-portal-layout.css';
 
 const noRoles = [];
@@ -45,7 +46,7 @@ export function AccountPortalLayout({ me, copy, language, organizationName, orga
   };
   return <div className="ap-shell ap-app ap-portal ap-restored-portal">
     <aside className="ap-sidebar">
-      <div className="ap-sidebar-brand"><span className="ap-brand-mark">P</span><div><p className="ap-eyebrow">PINVOU</p><h1>{copy.title}</h1></div></div>
+      <div className="ap-sidebar-brand"><img className="ap-brand-mark" src={pinvouBrand} width="38" height="38" alt="" aria-hidden="true" /><div><p className="ap-eyebrow">PINVOU</p><h1>{copy.title}</h1></div></div>
       <div className="ap-user-summary"><span className="ap-user-avatar" aria-hidden="true">{label.slice(0, 1).toUpperCase()}</span><div><strong>{label}</strong>{me.username && me.username !== label && <span>{me.username}</span>}</div></div>
       <section className="ap-identity-card" aria-label={words.identity}><small>{words.identity}</small><strong>{organizational ? organizationName || words.organization : words.personal}</strong>
         {organizational && <span>{organizationRoles.length ? organizationRoles.map(role => organizationLabel(organizationCopy[language], 'Role', role)).join(', ') : words.roleUnavailable}</span>}

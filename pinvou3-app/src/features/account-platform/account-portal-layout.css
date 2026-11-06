@@ -9,7 +9,7 @@
 }
 .ap-restored-portal .ap-sidebar { position: sticky; top: 0; display: flex; flex-direction: column; gap: 22px; height: 100vh; padding: 24px 18px; overflow-y: auto; border-right: 1px solid var(--ap-border-soft); background: #fff; }
 .ap-restored-portal .ap-sidebar-brand { display: flex; align-items: center; gap: 12px; padding: 0 6px 20px; border-bottom: 1px solid var(--ap-border-soft); }
-.ap-restored-portal .ap-brand-mark { display: grid; place-items: center; flex: 0 0 38px; height: 38px; border-radius: 11px; color: #fff; background: #0a0b0f; font-size: 17px; font-weight: 700; }
+.ap-restored-portal .ap-brand-mark { display: block; flex: 0 0 38px; width: 38px; height: 38px; object-fit: contain; }
 .ap-restored-portal .ap-sidebar h1 { margin: 2px 0 0; font-size: 18px; line-height: 1.35; }
 .ap-restored-portal .ap-eyebrow { margin: 0; color: var(--ap-secondary); letter-spacing: .12em; font-size: 10px; font-weight: 700; }
 .ap-restored-portal .ap-user-summary { display: flex; align-items: center; gap: 10px; min-width: 0; padding: 4px 6px 2px; }
