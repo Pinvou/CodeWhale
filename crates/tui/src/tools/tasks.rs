@@ -191,7 +191,7 @@ impl ToolSpec for TasksTool {
             );
             properties.insert(
                 "mode".to_string(),
-                json!({ "type": "string", "enum": ["agent", "plan", "operate"], "description": "Operating mode for the task's session. 'plan' runs read-only: shell is disabled even if allow_shell is true, and plan's read-only blocks are not lifted by auto_approve (which otherwise skips approval prompts). 'agent' (default) and 'operate' run with the task's allow_shell/trust_mode/auto_approve values. (action=create)" }),
+                json!({ "type": "string", "enum": ["agent", "plan", "operate"], "description": "Operating mode for the task's session. 'plan' runs read-only: shell is disabled even if allow_shell is true, and plan's read-only blocks are not lifted by auto_approve (which otherwise skips approval prompts; armed ask-on-guardrail guardrails still prompt). trust_mode's effects still apply in plan. 'agent' (default) and 'operate' run with the task's allow_shell/trust_mode/auto_approve values. (action=create)" }),
             );
             properties.insert(
                 "allow_shell".to_string(),
@@ -203,7 +203,7 @@ impl ToolSpec for TasksTool {
             );
             properties.insert(
                 "auto_approve".to_string(),
-                json!({ "type": "boolean", "description": "Run the task with tool calls auto-approved (full-access posture, no approval prompts). Defaults to false. (action=create)" }),
+                json!({ "type": "boolean", "description": "Run the task with tool calls auto-approved (full-access posture, no approval prompts — armed ask-on-guardrail guardrails still force a human approval for the calls they guard). Defaults to false. (action=create)" }),
             );
             properties.insert(
                 "gate".to_string(),
@@ -1461,6 +1461,14 @@ mod tests {
             mode.contains("plan's read-only blocks are not lifted by auto_approve"),
             "{mode}"
         );
+        assert!(
+            mode.contains("armed ask-on-guardrail guardrails still prompt"),
+            "the approval-skip parenthetical must carry the armed-guardrail exception: {mode}"
+        );
+        assert!(
+            mode.contains("trust_mode's effects still apply in plan"),
+            "the plan read-only lead-in must disclose trust_mode's in-plan effects: {mode}"
+        );
         let allow_shell = schema["properties"]["allow_shell"]["description"]
             .as_str()
             .expect("allow_shell description");
@@ -1492,6 +1500,16 @@ mod tests {
             .as_str()
             .expect("auto_approve description");
         assert!(auto_approve.contains("Defaults to false"), "{auto_approve}");
+        assert!(
+            auto_approve.contains(
+                "no approval prompts — armed ask-on-guardrail guardrails still force a human approval",
+            ),
+            "the auto-approve absolute must carry the armed-guardrail exception: {auto_approve}"
+        );
+        assert!(
+            !auto_approve.contains("no approval prompts)."),
+            "the unscoped no-prompts absolute must not return: {auto_approve}"
+        );
         let command = schema["properties"]["command"]["description"]
             .as_str()
             .expect("command description");
