@@ -3120,9 +3120,13 @@ pub struct Config {
     /// from the schema (reported in the tool description), non-numeric
     /// `const` values land on `enum`, and `dependentRequired` tables are
     /// stripped, per the strict contract. Schemas the strict subset cannot
-    /// represent faithfully — root alternatives, or required nullables
-    /// (`nullable` / null-type union branches) — stay non-strict: they keep
-    /// their original schema and `tool_choice` falls back to `auto`.
+    /// represent faithfully — root alternatives, required nullables
+    /// (`nullable` / null-type union branches), or tools whose runtime
+    /// demands schema-optional parameters (`update_goal`, `send_later`) —
+    /// stay non-strict: they keep their original schema. `tool_choice`
+    /// follows the route gate, not per-tool outcomes: it stays `required`
+    /// on an in-scope route even when some tools fail closed, and falls
+    /// back to `auto` only when the route itself is out of scope.
     pub strict_tool_mode: Option<bool>,
     /// Additional user-owned system-prompt sources concatenated in declared
     /// order (#454). Paths are expanded via `expand_path` so `~` and env vars
