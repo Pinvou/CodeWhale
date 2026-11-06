@@ -275,3 +275,7 @@
 .adm-restored-shell code{overflow-wrap:anywhere}
 @media(max-width:560px){.adm-restored-shell .adm-user-details{grid-template-columns:1fr;gap:7px}.adm-restored-shell .adm-filter-row>*{max-width:100%}}
 .adm-restored-shell .adm-closure-directory{display:grid;gap:16px}.adm-restored-shell .adm-closure-directory>h2,.adm-restored-shell .adm-closure-directory>p,.adm-restored-shell .adm-closure-directory>.adm-panel{margin:0}.adm-restored-shell .adm-closure-directory>button{justify-self:start}
+.adm-restored-shell .adm-sidebar-foot>a{display:inline-flex;align-items:center;justify-self:start;max-width:100%;color:var(--adm-primary);font-weight:500;text-decoration:none;white-space:nowrap}
+.adm-restored-shell .adm-sidebar-foot>a:hover{text-decoration:underline}
+.adm-restored-shell .adm-sidebar-foot select{min-width:0}
+@media(max-width:760px){.adm-shell.adm-restored-shell .adm-sidebar-foot{display:grid;grid-template-columns:auto minmax(0,1fr)}}
