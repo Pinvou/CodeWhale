@@ -300,3 +300,17 @@
 
 .adm-restored-shell .adm-unit-toolbar h4{margin:0;font-size:16px;line-height:1.5}
 .adm-restored-shell .adm-unit-toolbar>button{margin-left:auto;max-width:100%;white-space:normal}
+
+.adm-restored-shell .adm-organization-directory .adm-organization-units{gap:0;border:1px solid var(--adm-line);border-radius:12px}
+.adm-restored-shell .adm-organization-directory .adm-organization-units:empty{border:0}
+.adm-restored-shell .adm-organization-directory .adm-organization-units>li{display:flex;align-items:center;flex-wrap:wrap;gap:12px 24px;padding:12px 16px;border:0;border-bottom:1px solid var(--adm-line);border-radius:0}
+.adm-restored-shell .adm-organization-directory .adm-organization-units>li:last-child{border-bottom:0}
+.adm-restored-shell .adm-organization-directory .adm-organization-units>li>strong{flex:1 1 180px;min-width:0;font-size:14px;overflow-wrap:anywhere}
+.adm-restored-shell .adm-organization-directory .adm-unit-parent,.adm-restored-shell .adm-organization-directory .adm-unit-status{display:grid;gap:4px;min-width:0;overflow-wrap:anywhere}
+.adm-restored-shell .adm-organization-directory .adm-unit-parent{flex:1 1 180px}
+.adm-restored-shell .adm-organization-directory .adm-unit-status{flex:0 1 100px}
+.adm-restored-shell .adm-organization-directory .adm-unit-parent>small,.adm-restored-shell .adm-organization-directory .adm-unit-status>small{font-size:12px;line-height:1.5;color:var(--adm-muted)}
+.adm-restored-shell .adm-organization-directory .adm-unit-parent>span,.adm-restored-shell .adm-organization-directory .adm-unit-status>span{font-size:14px;line-height:1.5}
+.adm-restored-shell .adm-organization-directory .adm-organization-units .adm-row-actions{display:flex;flex-wrap:wrap;gap:8px;max-width:100%;min-width:0;margin-left:auto}
+.adm-restored-shell .adm-organization-directory .adm-organization-units .adm-row-actions>button{max-width:100%;white-space:normal}
+@media(max-width:760px){.adm-restored-shell .adm-organization-directory .adm-organization-units>li{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));align-items:start;gap:12px}.adm-restored-shell .adm-organization-directory .adm-organization-units>li>strong,.adm-restored-shell .adm-organization-directory .adm-organization-units .adm-row-actions{grid-column:1/-1}.adm-restored-shell .adm-organization-directory .adm-organization-units .adm-row-actions{margin-left:0;justify-content:flex-start}}
