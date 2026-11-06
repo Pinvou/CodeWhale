@@ -15,8 +15,10 @@ import (
 	"runtime"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/observability"
+	"golang.org/x/net/idna"
 )
 
 var errPortalPrivateCA = errors.New("portal private CA configuration is invalid")
@@ -134,7 +136,13 @@ func (t portalSingleRequestTransport) RoundTrip(request *http.Request) (*http.Re
 		transport = transport.Clone()
 		transport.Proxy = func(*http.Request) (*url.URL, error) { return proxyURL, nil }
 	}
-	address := net.JoinHostPort(request.URL.Hostname(), request.URL.Port())
+	host := request.URL.Hostname()
+	if strings.IndexFunc(host, func(r rune) bool { return r > unicode.MaxASCII }) >= 0 {
+		if asciiHost, err := idna.Lookup.ToASCII(host); err == nil {
+			host = asciiHost
+		}
+	}
+	address := net.JoinHostPort(host, request.URL.Port())
 	conn, err := transport.NewClientConn(request.Context(), request.URL.Scheme, address)
 	if err != nil {
 		return nil, err

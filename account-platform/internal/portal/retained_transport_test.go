@@ -9,6 +9,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"fmt"
 	"math/big"
 	"net"
 	"net/http"
@@ -33,6 +34,43 @@ func TestAuditDownloadPrivateCAExtendsOnlyPortalClientAndRejectsRedirect(t *test
 
 func TestEmptyCommandPrivateCAExtendsOnlyPortalClientAndRejectsRedirect(t *testing.T) {
 	testPortalPrivateCAClient(t, newPortalEmptyCommandHTTPClient)
+}
+
+func TestEmptyCommandConnectionNormalizesUnicodeHost(t *testing.T) {
+	const asciiHost = "xn--bcher-kva.test"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasPrefix(r.Host, asciiHost+":") {
+			t.Errorf("unexpected upstream authority %q", r.Host)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+	fixtureAddress := server.Listener.Addr().String()
+	_, port, err := net.SplitHostPort(fixtureAddress)
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.Proxy = nil
+	transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+		if address != net.JoinHostPort(asciiHost, port) {
+			return nil, fmt.Errorf("unexpected dial address %q", address)
+		}
+		return (&net.Dialer{}).DialContext(ctx, network, fixtureAddress)
+	}
+	client := portalClientForPolicy(transport, portalEmptyCommandHTTP)
+	request, err := http.NewRequest(http.MethodDelete, "http://bücher.test:"+port, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusNoContent {
+		t.Fatalf("empty command returned %d", response.StatusCode)
+	}
 }
 
 func testPortalPrivateCAClient(t *testing.T, factory func(string) (*http.Client, error)) {
