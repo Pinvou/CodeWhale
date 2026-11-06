@@ -583,3 +583,7 @@ const bindingValidityCopy = {
   ja: { validFrom: '開始日時', validUntil: '終了日時', noExpiry: '無期限' },
 };
 for (const language of ['zh', 'en', 'ja']) Object.assign(adminRolePresentationCopy[language], bindingValidityCopy[language]);
+
+Object.assign(adminRolePresentationCopy.zh, {"userNextSearchHelp":"请选择查询结果中的用户，或填写完整用户 ID。下一步仅校验 ID 格式。","userNextManualHelp":"请填写完整用户 ID。下一步仅校验 ID 格式，不查询用户资料。","targetIDFormatHelp":"用户 ID 格式无效，请核对完整的用户 UUID。"});
+Object.assign(adminRolePresentationCopy.en, {"userNextSearchHelp":"Select a search result or enter the full user ID. Next checks only the ID format.","userNextManualHelp":"Enter the full user ID. Next checks only the ID format and does not look up the profile.","targetIDFormatHelp":"The user ID format is invalid. Check the full user UUID."});
+Object.assign(adminRolePresentationCopy.ja, {"userNextSearchHelp":"検索結果からユーザーを選ぶか、完全なユーザー ID を入力してください。次へでは ID の形式のみを確認します。","userNextManualHelp":"完全なユーザー ID を入力してください。次へでは ID の形式のみを確認し、ユーザー情報は検索しません。","targetIDFormatHelp":"ユーザー ID の形式が無効です。完全なユーザー UUID を確認してください。"});
