@@ -337,3 +337,110 @@ for (const language of ['zh', 'en', 'ja']) Object.assign(ledgerRepairCopy[langua
 ledgerRepairCopy.zh.writeOffRecentAuthenticationRequired = '需要重新认证。当前页面保留原事实和请求键；门户跳转后，未知操作请到审批中心打开原草稿，用 EDIT 核验并继续，不要另建请求。';
 ledgerRepairCopy.en.writeOffRecentAuthenticationRequired = 'Authenticate again. This page retains the original facts and key. After portal navigation, open the original draft in the approval center and use EDIT to verify and continue an unconfirmed operation; do not create another request.';
 ledgerRepairCopy.ja.writeOffRecentAuthenticationRequired = '再認証が必要です。このページでは元の事実とキーを保持します。ポータル移動後、未確認の操作は承認センターで元のドラフトを開き、EDIT で確認して続行してください。別の要求を作成しないでください。';
+
+const reconciliationCaseContextCopy = {
+  "zh": {
+    "caseRepairStart": "核对此案件的支付证据",
+    "caseContextTitle": "案件来源（仅供核对）",
+    "caseContextHelp": "这是案件原始对账批次中的记录，不代表证据已匹配或可以结案。核对渠道、账期和金额后，继续读取服务端事实验证支付证据。",
+    "caseContextRead": "读取案件来源",
+    "caseContextReading": "正在读取案件来源…",
+    "caseContextDenied": "没有读取对账案件的权限；未加载案件来源。原有手填和审批前校验入口仍可使用。",
+    "caseContextUnavailable": "案件来源未能确认。请重试读取；不要把未加载信息当作匹配结果。",
+    "caseContextMissing": "来源金额缺失或无法解析",
+    "evidenceMatchTitle": "审批前证据匹配记录（已通过）",
+    "evidenceMatchHelp": "以下来自原服务端审批前校验及冻结投影。此校验记录不代表审批或结案执行已完成；执行时仍会重新核验。",
+    "caseContextLabels": {
+      "case_id": "对账案件 ID",
+      "reconciliation_case_id": "对账案件 ID",
+      "reconciliation_run_id": "案件原始对账批次 ID",
+      "run_id": "案件原始对账批次 ID",
+      "case_type": "差异类型",
+      "status": "案件状态",
+      "case_version": "案件版本",
+      "provider_id": "供应商",
+      "provider_version": "供应商版本",
+      "channel": "支付渠道",
+      "business_date": "案件原始批次业务日期",
+      "merchant_order_no": "商户订单号",
+      "amount_fen": "渠道记录金额（分）",
+      "currency": "币种",
+      "provider_transaction_id": "支付渠道交易 ID",
+      "payment_evidence_id": "已校验支付证据 ID"
+    }
+  },
+  "en": {
+    "caseRepairStart": "Check payment evidence for this case",
+    "caseContextTitle": "Case source (for review only)",
+    "caseContextHelp": "These records belong to the case’s original reconciliation run. They do not establish an evidence match or eligibility for closure. Review the channel, business date and amount, then read the owner facts to validate the payment evidence.",
+    "caseContextRead": "Read case source",
+    "caseContextReading": "Reading case source…",
+    "caseContextDenied": "You do not have permission to read reconciliation cases. Case source was not loaded. The existing manual input and approval precheck remain available.",
+    "caseContextUnavailable": "The case source could not be confirmed. Retry the read; unloaded information is not a matching result.",
+    "caseContextMissing": "Source amount is missing or unusable",
+    "evidenceMatchTitle": "Evidence precheck record (passed)",
+    "evidenceMatchHelp": "These facts come from the original server precheck and frozen projection. Passing this precheck does not establish that approval or closure execution is complete; execution revalidates the facts.",
+    "caseContextLabels": {
+      "case_id": "Reconciliation case ID",
+      "reconciliation_case_id": "Reconciliation case ID",
+      "reconciliation_run_id": "Case original reconciliation run ID",
+      "run_id": "Case original reconciliation run ID",
+      "case_type": "Difference type",
+      "status": "Case status",
+      "case_version": "Case version",
+      "provider_id": "Provider",
+      "provider_version": "Provider version",
+      "channel": "Payment channel",
+      "business_date": "Case original run business date",
+      "merchant_order_no": "Merchant order number",
+      "amount_fen": "Provider record amount (fen)",
+      "currency": "Currency",
+      "provider_transaction_id": "Provider payment transaction ID",
+      "payment_evidence_id": "Validated payment evidence ID"
+    }
+  },
+  "ja": {
+    "caseRepairStart": "この案件の支払証拠を確認",
+    "caseContextTitle": "案件の出所（照合用）",
+    "caseContextHelp": "案件の元の照合実行に属する記録です。証拠の一致や結案資格を示すものではありません。チャネル・業務日・金額を照合してから、サーバーの事前検証で支払証拠を確認してください。",
+    "caseContextRead": "案件の出所を読み込む",
+    "caseContextReading": "案件の出所を読み込み中…",
+    "caseContextDenied": "照合案件の読取権限がありません。出所は読み込まれていません。従来の手入力と承認前検証は引き続き利用できます。",
+    "caseContextUnavailable": "案件の出所を確認できませんでした。再読込してください。未取得の情報は一致結果ではありません。",
+    "caseContextMissing": "元の金額が未記録または解析不能です",
+    "evidenceMatchTitle": "証拠の事前検証記録（合格）",
+    "evidenceMatchHelp": "元のサーバー事前検証と凍結投影の記録です。この記録は承認や結案実行の完了を意味しません。実行時に事実が再検証されます。",
+    "caseContextLabels": {
+      "case_id": "照合案件 ID",
+      "reconciliation_case_id": "照合案件 ID",
+      "reconciliation_run_id": "案件の元の照合実行 ID",
+      "run_id": "案件の元の照合実行 ID",
+      "case_type": "差異の種類",
+      "status": "案件状態",
+      "case_version": "案件バージョン",
+      "provider_id": "プロバイダー",
+      "provider_version": "プロバイダーバージョン",
+      "channel": "支払チャネル",
+      "business_date": "案件の元の実行の業務日",
+      "merchant_order_no": "加盟店注文番号",
+      "amount_fen": "チャネル記録金額（分）",
+      "currency": "通貨",
+      "provider_transaction_id": "支払チャネル取引 ID",
+      "payment_evidence_id": "検証済み支払証拠 ID"
+    }
+  }
+};
+for (const language of ['zh', 'en', 'ja']) Object.assign(ledgerRepairCopy[language], reconciliationCaseContextCopy[language]);
+
+const reconciliationCaseHostCopy = {
+  "zh": {
+    "caseTargetLocked": "案件已固定。如需处理其他案件，请返回案件列表选择。"
+  },
+  "en": {
+    "caseTargetLocked": "This case is fixed. To work on another case, select it from the case list."
+  },
+  "ja": {
+    "caseTargetLocked": "対象案件は固定されています。別の案件を処理するには、案件一覧から選択してください。"
+  }
+};
+for (const language of ['zh', 'en', 'ja']) Object.assign(ledgerRepairCopy[language], reconciliationCaseHostCopy[language]);

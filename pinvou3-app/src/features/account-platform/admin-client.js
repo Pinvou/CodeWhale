@@ -8,6 +8,7 @@ import { requireSession } from './personal-contract.js';
 import { mergeObservedVersions } from './authorization-ui.js';
 import { secureRequestID } from './request-id.js';
 import { requireReconciliationDate, requireReconciliationRun } from './reconciliation-contract.js';
+import { requireReconciliationRepairContext } from './reconciliation-repair-context.js';
 import { responseRetryAfter } from './auth-error.js';
 import { beforeFinanceDispatch, financeNotDispatched } from './finance-operation-state.js';
 import { latePaymentQueryBody, requireLatePaymentQueryReceipt, isCurrentLatePaymentQueryAuthority } from './late-payment-query-contract.js';
@@ -859,6 +860,11 @@ export class AdminPlatformClient {
   async importReconciliation(facts, signal) {
     requireReconciliationDate(facts.business_date);
     return requireReconciliationRun(await this.mutate('billing', '/admin/v1/reconciliation-imports', 'POST', facts, '', signal, 201), facts);
+  }
+  async reconciliationRepairContext(id, signal) {
+    requireFinanceID(id);
+    const value = await this.request('billing', `/admin/v1/reconciliation-cases/${encodeURIComponent(id)}/repair-context`, signal);
+    return requireReconciliationRepairContext(value, id);
   }
   async reconciliationCaseCommand(id, facts, key, signal) {
     requireFinanceID(id);
