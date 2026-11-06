@@ -24,10 +24,13 @@ docker compose --env-file "$SITE_ENV_FILE" \
 | `PRODUCT_ADMISSION_ACCEPTANCE_SOCKET_DIRECTORY` | 专属已挂载的空 tmpfs 目录。用 `findmnt`、`stat` 和容器实际 UID/GID 映射核对挂载和所有者。容器内目录为 `65533:65533`、`0750`，祖先由 root 或 worker 拥有，组和其他用户不可写。只挂给 Billing 和校验器，Billing 侧只读。 |
 | `PRODUCT_ADMISSION_ACCEPTANCE_TRANSIT_TOKEN_DIRECTORY` | Billing 专属可轮换 sink 目录，含 `token`。只向 Billing 只读投递，校验器不挂载任何业务凭据。 |
 | `PRODUCT_ADMISSION_ACCEPTANCE_TRANSIT_URL`、`PRODUCT_ADMISSION_ACCEPTANCE_TRANSIT_KEY` | 真实 OpenBao Transit HTTPS origin 和独立原件 key 名。Billing 复用站点信任包 `/run/pinvou/trust/ca.crt`。授权限当前原件 key 加密及仍有保留期的原件 key 解密。 |
+| `OPENBAO_NETWORK` | 已按 [OpenBao 部署说明](../openbao/README.md)单独建立的内部网络。预检 `Internal` 和实际成员，确认与业务 `backend` 不同，且目标 OpenBao 在该网络。验收 overlay 仅为 Billing 增加这一网络，保留模型装配的原有成员和 TLS、token 校验。 |
 | `PRODUCT_ADMISSION_ACCEPTANCE_VALIDATOR_IMAGE` | 已核验且本地可用的不可变 Linux PDF 校验器镜像。 |
 | `PRODUCT_ADMISSION_ACCEPTANCE_VALIDATOR_MEMORY`、`PRODUCT_ADMISSION_ACCEPTANCE_VALIDATOR_CPUS`、`PRODUCT_ADMISSION_ACCEPTANCE_VALIDATOR_PIDS` | 本站点的内存、CPU 和进程限制。核对实际 cgroup 应用了限制，内存与内存加 swap 上限相同。 |
 
-先确认专用 Transit sink 可用和校验器 socket 已监听，再验证 Billing 上传。校验器以 `65533:65533` 运行且无网络，Billing 继续用 `65532:65532`，仅增加连接 socket 所需的组。验证正确及错误 UID 的两向 peer 校验、只读挂载和无凭据投递。校验器重启使用经验证的新空 tmpfs 目录，先确认旧容器及其子进程退出。按[重启边界](../../docs/evidence-validator-socket-restart-draft.md)演练遗留 socket、子进程超时和 OOM，确认拒绝上传、原件无部分写入，并在受控重建后恢复。记录实测资源预算和目标架构。
+先确认专用 Transit sink 可用和校验器 socket 已监听，再验证 Billing 上传。校验器以 `65533:65533` 运行且无网络，Billing 继续用 `65532:65532`，仅增加连接 socket 所需的组。验证正确及错误 UID 的两向 peer 校验、只读挂载和无凭据投递。替换 socket 目录前暂停验收上传，确认旧 Billing、校验器及其子进程退出。在站点私有配置指向经验证的新空 tmpfs 目录后，**重建 Billing 和校验器两个容器**，核对两侧绑定的是同一新目录，再恢复上传。容器原地 restart 会保留旧挂载。按[重启边界](../../docs/evidence-validator-socket-restart-draft.md)演练遗留 socket、子进程超时和 OOM，确认拒绝上传、原件无部分写入，并在受控重建后恢复。记录实测资源预算和目标架构。
+
+经实际 Portal/边缘路由验证 10 MiB 原始字节边界、多 1 字节拒绝以及超出普通请求时限但仍在原件处理预算内的成功上传。F01 NGINX 只为原件上传的精确路径配置 10 MiB 和 120 秒代理读间隔，并关闭该路径的请求缓冲。Billing 在接收原件、校验、加密和落库阶段设 60 秒总预算，Portal 对此上传的内部 Billing 请求设 70 秒预算。保留其他路由的限制。实际站点若使用其他 Ingress，验收相同的路径、容量、时限和原件不落代理临时文件条件。
 
 ## 操作与证据
 

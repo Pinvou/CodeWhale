@@ -102,6 +102,15 @@ http {
             client_max_body_size 64m;
             proxy_pass http://$portal_origin;
         }
+        # The authenticated original upload carries raw bytes. Avoid spooling
+        # them to a proxy temporary file and keep other admin requests bounded.
+        location ~ "^/api/admin/billing/admin/v1/recharge-products/(?!00000000-0000-0000-0000-000000000000/)[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/admission-materials$" {
+            limit_except POST { deny all; }
+            client_max_body_size 10m;
+            proxy_request_buffering off;
+            proxy_read_timeout 120s;
+            proxy_pass http://$portal_origin;
+        }
         location / { proxy_pass http://$portal_origin; }
     }
 }

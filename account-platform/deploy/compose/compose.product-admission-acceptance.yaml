@@ -10,6 +10,7 @@ x-validator-socket: &validator-socket
 services:
   billing-service:
     group_add: ["65533"]
+    networks: [backend, kms]
     environment:
       BILLING_PRODUCT_ADMISSION_MATERIALS_ENABLED: "true"
       BILLING_PRODUCT_ADMISSION_VALIDATOR_SOCKET: /run/pinvou/admission-validator/validator.sock
@@ -47,3 +48,7 @@ services:
       EVIDENCE_PDF_CANDIDATE_ENABLED: "true"
     volumes:
       - *validator-socket
+networks:
+  kms:
+    external: true
+    name: ${OPENBAO_NETWORK:?set separately provisioned isolated transit network}

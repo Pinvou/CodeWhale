@@ -56,6 +56,13 @@ test('isolated product admission Compose keeps the production baseline disabled 
     assert.equal(billing.user, billingBefore.user);
     assert.equal(billing.user, '65532:65532');
     assert.deepEqual(billing.group_add, ['65533']);
+    assert.deepEqual(Object.keys(billingBefore.networks), ['backend']);
+    assert.deepEqual(Object.keys(billing.networks).sort(), ['backend', 'kms']);
+    assert.deepEqual(after.networks, {
+      ...before.networks,
+      kms: { external: true, name: fixture.env.OPENBAO_NETWORK, ipam: {} },
+    });
+    assert.notEqual(after.networks.kms.name, after.networks.backend.name);
     assert.deepEqual(billing.depends_on, billingBefore.depends_on);
     assert.deepEqual(billing.healthcheck, billingBefore.healthcheck);
     assert.deepEqual(worker.environment, {
@@ -111,4 +118,11 @@ test('isolated product admission Compose keeps the production baseline disabled 
     assert.match(result.stderr, new RegExp(name));
     fixture.updateEnv(name, value);
   }
+  fixture.updateEnv('ACCOUNT_PLATFORM_PROFILE', 'personal');
+  fixture.updateEnv('OPENBAO_NETWORK', '');
+  const missingTransitNetwork = render([...composeCompositions.personal, 'finance'], true);
+  assert.ifError(missingTransitNetwork.error);
+  assert.notEqual(missingTransitNetwork.status, 0);
+  assert.equal(missingTransitNetwork.stdout, '');
+  assert.match(missingTransitNetwork.stderr, /OPENBAO_NETWORK/);
 });
