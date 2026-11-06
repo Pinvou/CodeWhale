@@ -297,3 +297,6 @@
 .adm-restored-shell .adm-organization-header-actions{display:flex;align-items:center;justify-content:flex-end;flex-wrap:wrap;gap:8px;min-width:0}
 .adm-restored-shell .adm-organization-header-actions>button{max-width:100%;white-space:normal}
 @media(max-width:760px){.adm-restored-shell .adm-organization-identity{flex-basis:100%}.adm-restored-shell .adm-organization-header-actions{justify-content:flex-start;width:100%}}
+
+.adm-restored-shell .adm-unit-toolbar h4{margin:0;font-size:16px;line-height:1.5}
+.adm-restored-shell .adm-unit-toolbar>button{margin-left:auto;max-width:100%;white-space:normal}
