@@ -31,3 +31,15 @@ export function reconciliationRepairHost(sourceCaseID = '') {
   requireFinanceID(sourceCaseID);
   return { scope: `${scope}:case:${sourceCaseID}`, initialValues: { target_resource_id: sourceCaseID }, targetLocked: true };
 }
+
+// Only an accepted same-case source may populate the raw calendar label. An
+// operator edit takes precedence, including clearing or re-entering that date.
+export function reconciliationSourceBusinessDate(values, source, manuallyEdited, previousAutomaticDate = '') {
+  if (manuallyEdited || typeof values?.target_resource_id !== 'string' || !source ||
+      values.target_resource_id.toLowerCase() !== source.case_id) return null;
+  try { requireReconciliationRepairContext(source, source.case_id); } catch { return null; }
+  const current = values.business_date === undefined ? '' : values.business_date;
+  if (typeof current !== 'string') return null;
+  if (current !== '' && current !== previousAutomaticDate) return null;
+  return source.business_date;
+}

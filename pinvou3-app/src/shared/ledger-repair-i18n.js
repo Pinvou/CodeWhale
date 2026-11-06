@@ -444,3 +444,19 @@ const reconciliationCaseHostCopy = {
   }
 };
 for (const language of ['zh', 'en', 'ja']) Object.assign(ledgerRepairCopy[language], reconciliationCaseHostCopy[language]);
+
+const reconciliationCaseDateCopy = {
+  "zh": {
+    "caseDateUse": "采用案件业务日期",
+    "caseDateHelp": "空白或上次自动带入的日期会随案件来源更新；手动填写的日期会保留。可主动采用此案件原始批次的业务日期。"
+  },
+  "en": {
+    "caseDateUse": "Use case business date",
+    "caseDateHelp": "An empty date or the previous automatic date follows the accepted case source. Manual edits are preserved. You can explicitly use the business date of this case’s original run."
+  },
+  "ja": {
+    "caseDateUse": "案件の業務日を使用",
+    "caseDateHelp": "空欄または前回自動入力した日付は、取得した案件の出所に合わせて更新されます。手動入力は保持されます。案件の元の実行の業務日を明示的に採用できます。"
+  }
+};
+for (const language of ['zh', 'en', 'ja']) Object.assign(ledgerRepairCopy[language], reconciliationCaseDateCopy[language]);
