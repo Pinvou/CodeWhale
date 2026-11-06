@@ -293,6 +293,28 @@ const recoveryCopy = {
 };
 for (const language of ['zh', 'en', 'ja']) Object.assign(ledgerRepairCopy[language], recoveryCopy[language]);
 
+const ledgerAmountCopy = {
+  zh: {
+    amountPointsLabel: '金额（积分）',
+    amountPointsHint: '1 积分 = 10,000 微积分。最多 4 位小数，使用小数点，不含空格或千位分隔符。',
+    amountPointsEquivalent: '内部记账值：{amount} 微积分。',
+    amountPointsInvalid: '请输入大于 0 且不超过 922337203685477.5807 的积分金额，最多 4 位小数；不支持正负号、空格、千位分隔符或科学计数法。',
+  },
+  en: {
+    amountPointsLabel: 'Amount (points)',
+    amountPointsHint: '1 point = 10,000 microcredits. Use a decimal point and up to 4 decimal places, without spaces or grouping separators.',
+    amountPointsEquivalent: 'Internal amount: {amount} microcredits.',
+    amountPointsInvalid: 'Enter points greater than 0 and no more than 922337203685477.5807, with up to 4 decimal places; signs, spaces, grouping separators and exponent notation are unsupported.',
+  },
+  ja: {
+    amountPointsLabel: '金額（ポイント）',
+    amountPointsHint: '1 ポイント = 10,000 マイクロクレジット。小数点を使用し、小数部は 4 桁以内で、空白や桁区切りを含めないでください。',
+    amountPointsEquivalent: '内部金額：{amount} マイクロクレジット。',
+    amountPointsInvalid: '0 より大きく 922337203685477.5807 以下のポイントを小数部 4 桁以内で入力してください。符号、空白、桁区切り、指数表記は使用できません。',
+  },
+};
+for (const language of ['zh', 'en', 'ja']) Object.assign(ledgerRepairCopy[language], ledgerAmountCopy[language]);
+
 const authenticationCopy = {
   zh: { recentAuthenticationRequired: '\u9700\u8981\u91cd\u65b0\u8ba4\u8bc1\u540e\u7ee7\u7eed\u539f\u8349\u7a3f\u8bf7\u6c42\u3002', reauthenticate: '\u91cd\u65b0\u8ba4\u8bc1' },
   en: { recentAuthenticationRequired: 'Authenticate again to continue the original draft request.', reauthenticate: 'Authenticate again' },

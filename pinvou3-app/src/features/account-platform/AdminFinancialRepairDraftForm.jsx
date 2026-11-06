@@ -1,6 +1,6 @@
 import { AdminUsageSettlementFinancialRepairForm } from './AdminUsageSettlementFinancialRepairForm.jsx';
 import { AdminReconciliationFinancialRepairForm } from './AdminReconciliationFinancialRepairForm.jsx';
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useId, useRef, useState } from 'react';
 import {
   financialRepairInputs, financialRepairPrecheckBody,
   financialRepairProjectionRows, financialRepairDraftFromProjection,
@@ -14,11 +14,10 @@ import { AdminReceivableWriteOffForm } from './AdminReceivableWriteOffForm.jsx';
 import { useClosureOperation } from './useClosureOperation.js';
 import { ledgerIntentStorage, readLedgerIntent } from './ledger-repair-intent.js';
 import { requireFinanceID } from './finance-contract.js';
+import { ledgerPointsToMicrocredits, ledgerMicrocreditsToPoints } from './ledger-amount-input.js';
 
-// The repair page never asks the operator for amounts the owner already knows:
-// the precheck returns the frozen projection and the draft copies it verbatim.
-// The only operator inputs are the target references, the free-text reason and
-// the request key.
+// Each command retains its closed operator-input contract. The owner precheck
+// returns the frozen projection and the draft copies it verbatim.
 export function AdminFinancialRepairDraftForm(props) {
   if (props.commandTypes?.length === 1 && props.commandTypes[0] === 'USAGE_SETTLEMENT_REPAIR') {
     return <AdminUsageSettlementFinancialRepairForm {...props} />;
@@ -47,6 +46,9 @@ export function AdminFinancialRepairDraftForm(props) {
 function LedgerRepairDraftForm({ client, copy, owner, onCreated }) {
   const [commandType, setCommandType] = useState('LEDGER_REPAIR');
   const [values, setValues] = useState({});
+  const [amountPoints, setAmountPoints] = useState('');
+  const [amountTouched, setAmountTouched] = useState(false);
+  const amountHintID = useId(), amountErrorID = useId();
   const [facts, setFacts] = useState(null);
   const [projection, setProjection] = useState(null);
   const [reason, setReason] = useState('');
@@ -56,6 +58,7 @@ function LedgerRepairDraftForm({ client, copy, owner, onCreated }) {
   const [created, setCreated] = useState('');
   const [needsAuthentication, setNeedsAuthentication] = useState(false);
   const factsRevision = useRef(0);
+  const acceptedRevision = useRef(null);
   const mounted = useRef(false);
   const currentClient = useRef(client);
   currentClient.current = client;
@@ -64,6 +67,7 @@ function LedgerRepairDraftForm({ client, copy, owner, onCreated }) {
     mounted.current = true;
     setFacts(null);
     setProjection(null);
+    acceptedRevision.current = null;
     setNeedsAuthentication(false);
     setBusy((current) => current === 'facts' ? '' : current);
     return () => {
@@ -78,9 +82,14 @@ function LedgerRepairDraftForm({ client, copy, owner, onCreated }) {
   const visibleFacts = pending ? financialRepairProjectionRows(pending.projection) : facts;
   const locked = busy !== '' || operation.busy || operation.unknown || operation.blocked;
   const fields = financialRepairInputs[commandType];
-  const label = (field) => (field.key === 'target_resource_id' ? copy.targets[commandType] : copy.fields[field.key]);
+  const frozenAmount = pending?.projection?.normalized_command?.amount_microcredits;
+  const displayedPoints = pending ? ledgerMicrocreditsToPoints(frozenAmount) : amountPoints;
+  const displayedMicrocredits = pending ? String(frozenAmount) : values.amount_microcredits || '';
+  const amountInvalid = !pending && amountPoints !== '' && !displayedMicrocredits;
+  const label = (field) => (field.key === 'amount_microcredits' ? copy.amountPointsLabel : field.key === 'target_resource_id' ? copy.targets[commandType] : copy.fields[field.key]);
   const setValue = (key, value) => {
     factsRevision.current += 1;
+    acceptedRevision.current = null;
     setBusy((current) => current === 'facts' ? '' : current);
     setValues((current) => ({ ...current, [key]: value }));
     setFacts(null);
@@ -88,11 +97,19 @@ function LedgerRepairDraftForm({ client, copy, owner, onCreated }) {
     setFailure('');
     setCreated('');
   };
+  const setAmount = (value) => {
+    let microcredits = '';
+    try { microcredits = ledgerPointsToMicrocredits(value); } catch { /* Invalid current text must never retain the prior wire value. */ }
+    setAmountPoints(value);
+    setValue('amount_microcredits', microcredits);
+  };
   const changeCommand = (next) => {
     factsRevision.current += 1;
+    acceptedRevision.current = null;
     setBusy((current) => current === 'facts' ? '' : current);
     setCommandType(next);
     setValues({});
+    setAmountPoints(''); setAmountTouched(false);
     setFacts(null);
     setProjection(null);
     setFailure('');
@@ -104,12 +121,15 @@ function LedgerRepairDraftForm({ client, copy, owner, onCreated }) {
     if (locked) return;
     const prepared = financialRepairPrecheckBody(commandType, values);
     if (prepared.error) {
+      acceptedRevision.current = null;
       setProjection(null);
       setFacts(null);
-      setFailure(copy.invalidInput);
+      setFailure(prepared.field === 'amount_microcredits' ? copy.amountPointsInvalid : copy.invalidInput);
+      if (prepared.field === 'amount_microcredits') setAmountTouched(true);
       return;
     }
     const revision = ++factsRevision.current;
+    acceptedRevision.current = null;
     const live = () => mounted.current && factsRevision.current === revision && currentClient.current === client;
     setBusy('facts');
     setNeedsAuthentication(false);
@@ -123,6 +143,7 @@ function LedgerRepairDraftForm({ client, copy, owner, onCreated }) {
       if (!ledgerRepairProjectionMatchesInput(answer, prepared.body)) {
         throw Object.assign(new Error('owner projection changed the ledger intent'), { code: 'FINANCIAL_REPAIR_PRECHECK_INVALID' });
       }
+      acceptedRevision.current = revision;
       setProjection(answer);
       setFacts(rendered);
     } catch (error) {
@@ -139,6 +160,13 @@ function LedgerRepairDraftForm({ client, copy, owner, onCreated }) {
   const createDraft = async (event) => {
     event.preventDefault();
     if (busy !== '' || operation.busy || operation.blocked) return;
+    if (!mounted.current || currentClient.current !== client) return;
+    if (!pending) {
+      const current = financialRepairPrecheckBody(commandType, values);
+      if (acceptedRevision.current !== factsRevision.current || current.error || !ledgerRepairProjectionMatchesInput(projection, current.body)) {
+        setFailure(copy.invalidDraft); return;
+      }
+    }
     const frozen = pending || { projection, reason, requestKey: requestKey.trim() };
     const prepared = financialRepairDraftFromProjection(frozen.projection, frozen.reason, frozen.requestKey);
     if (prepared.error) { setFailure(copy.invalidDraft); return; }
@@ -162,7 +190,8 @@ function LedgerRepairDraftForm({ client, copy, owner, onCreated }) {
       return id;
     });
     if (!id || !live()) return;
-    setCreated(id); setProjection(null); setFacts(null); setValues({}); setReason(''); setRequestKey('');
+    acceptedRevision.current = null;
+    setCreated(id); setProjection(null); setFacts(null); setValues({}); setAmountPoints(''); setAmountTouched(false); setReason(''); setRequestKey('');
     onCreated?.(id);
   };
 
@@ -176,10 +205,17 @@ function LedgerRepairDraftForm({ client, copy, owner, onCreated }) {
         </select>
       </label>
       {fields.map((field) => <label key={field.key}>{label(field)}
-        <input disabled={locked} required value={values[field.key] || ''} inputMode={field.kind === 'integer' ? 'numeric' : 'text'}
-          onChange={(event) => setValue(field.key, event.target.value)} />
+        <input disabled={locked} required value={field.key === 'amount_microcredits' ? displayedPoints : values[field.key] || ''}
+          inputMode={field.key === 'amount_microcredits' ? 'decimal' : field.kind === 'integer' ? 'numeric' : 'text'}
+          data-ledger-amount={field.key === 'amount_microcredits' ? '' : undefined}
+          aria-describedby={field.key === 'amount_microcredits' ? `${amountHintID}${amountTouched && amountInvalid ? ` ${amountErrorID}` : ''}` : undefined}
+          aria-invalid={field.key === 'amount_microcredits' && amountTouched && amountInvalid ? true : undefined}
+          onBlur={field.key === 'amount_microcredits' ? () => setAmountTouched(true) : undefined}
+          onChange={(event) => field.key === 'amount_microcredits' ? setAmount(event.target.value) : setValue(field.key, event.target.value)} />
       </label>)}
-      <button type="submit" disabled={locked}>{busy === 'facts' ? copy.reading : copy.readFacts}</button>
+      <small id={amountHintID}>{copy.amountPointsHint}{displayedMicrocredits && <> {copy.amountPointsEquivalent.replace('{amount}', displayedMicrocredits)}</>}</small>
+      {amountTouched && amountInvalid && <small id={amountErrorID} role="alert">{copy.amountPointsInvalid}</small>}
+      <button type="submit" disabled={locked || amountInvalid}>{busy === 'facts' ? copy.reading : copy.readFacts}</button>
     </form>
     {(failure || operation.error) && <p role="alert">{failure || operation.error}</p>}{operation.unknown && <p role="status">{copy.recoveryPending}</p>}
     {needsAuthentication && <><p>{copy.recentAuthenticationRequired}</p><button disabled={operation.busy} onClick={() => client.reauthenticate('/admin.html?section=finance&finance_tab=ledger')}>{copy.reauthenticate}</button></>}
