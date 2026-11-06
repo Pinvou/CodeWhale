@@ -1933,6 +1933,35 @@ mod tests {
         );
     }
 
+    #[test]
+    fn read_media_copy_pins_the_delivery_budget_sentences() {
+        // The budget disclosure is the direct item-5b fix; pin both
+        // surfaces so a silent revert (or a silently widened figure)
+        // fails the suite.
+        let tool = ReadMediaTool;
+        let description = tool.description();
+        assert!(
+            description.contains("fit a ~256KB delivery budget"),
+            "the auto/low delivery budget must stay disclosed: {description}"
+        );
+        assert!(
+            description.contains("keep the full 5 MiB payload limit"),
+            "the high/original/crop wire budget must stay disclosed: {description}"
+        );
+        let schema = tool.input_schema();
+        let detail = schema["properties"]["detail"]["description"]
+            .as_str()
+            .expect("detail description");
+        assert!(
+            detail.contains("same ~256KB delivery budget as 'low'"),
+            "detail must tie auto to low's budget: {detail}"
+        );
+        assert!(
+            detail.contains("full 5 MiB payload limit"),
+            "detail must keep the high/original wire budget: {detail}"
+        );
+    }
+
     #[tokio::test]
     async fn read_media_crop_after_downsample_pulls_full_res_stored_original() {
         let dir = tempdir().unwrap();
