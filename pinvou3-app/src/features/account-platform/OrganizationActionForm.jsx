@@ -102,6 +102,12 @@ export function OrganizationActionForm({ client, owner, copy, title, scope, fiel
   setValues(next);
  };
  const open = dialogOpen || operation.unknown || Boolean(operation.pendingFacts);
+ const closeDialog = () => {
+  const current = live.current, active = ready.current;
+  if (client !== current.client || owner !== current.owner || scope !== current.scope || epoch !== current.epoch || !active || !sameIdentity(active) || dispatching.current || current.operation.busy || current.operation.unknown || current.operation.pendingFacts) return;
+  if (current.editBeforeSubmit) changeEditing(false);
+  setDialogOpen(false);
+ };
  useLayoutEffect(() => { if (!open && wasOpen.current && !opener.current?.closest('[hidden]')) opener.current?.focus(); wasOpen.current = open; }, [open]);
  const trigger = dialog && <button ref={opener} type="button" aria-expanded={open} disabled={open || disabled || operation.blocked || !renderedReady || operation.busy} onClick={() => { if (editBeforeSubmit) changeEditing(true); setDialogOpen(true); }}>{title}</button>;
  if (dialog && !open) return <>{trigger}</>;
@@ -120,10 +126,10 @@ export function OrganizationActionForm({ client, owner, copy, title, scope, fiel
   {description && <p className="ap-org-action-description">{description}</p>}
   {fields.length > 0 && <fieldset disabled={operation.busy || operation.unknown || operation.blocked || disabled}>{fields.map(field => <label key={field.name}>{copy[field.labelKey || field.label || field.name]}{field.lookup ? <OrganizationUserPicker client={client} copy={copy} value={values[field.name]} disabled={operation.busy || operation.unknown || operation.blocked || disabled} onChange={value => changeValue(field.name, value)} /> : field.options ? <select multiple={field.multiple || false} value={editBeforeSubmit ? operation.pendingFacts?.[field.name] ?? values[field.name] : values[field.name]} onChange={event => { const value = field.multiple ? [...event.target.selectedOptions].map(option => option.value) : event.target.value; changeValue(field.name, value); }}>{!field.multiple && <option value="">{field.optional ? copy.root : '—'}</option>}{fieldOptions(field, values).map(option => <option key={option.value} value={option.value}>{option.label}</option>)}</select> : <input type={field.type || 'text'} autoComplete="off" value={editBeforeSubmit ? operation.pendingFacts?.[field.name] ?? values[field.name] : values[field.name]} onChange={event => changeValue(field.name, event.target.value)} required={!field.optional} />}{field.multiple && <small>{copy.unscopedUnits}</small>}</label>)}</fieldset>}
   {invalid && <p role="alert">{copy.invalid}</p>}{operation.error && <p role="alert">{operation.error}</p>}{operation.message && <p role="status">{operation.message}</p>}
-  <button disabled={operation.busy || operation.blocked || (disabled && !operation.unknown)} type="submit">{operation.unknown ? copy.retry : editBeforeSubmit ? copy.save : title}</button>
-  {editBeforeSubmit && <button type="button" disabled={operation.busy || operation.unknown || operation.blocked || Boolean(operation.pendingFacts) || disabled} onClick={() => changeEditing(false)}>{copy.cancelConfirmation}</button>}
+  {dialog ? <footer className="ap-org-action-footer"><button type="button" disabled={operation.busy || operation.unknown || Boolean(operation.pendingFacts)} onClick={closeDialog}>{copy.cancelConfirmation}</button><button disabled={operation.busy || operation.blocked || (disabled && !operation.unknown)} type="submit">{operation.unknown ? copy.retry : editBeforeSubmit ? copy.save : title}</button></footer> : <><button disabled={operation.busy || operation.blocked || (disabled && !operation.unknown)} type="submit">{operation.unknown ? copy.retry : editBeforeSubmit ? copy.save : title}</button>
+  {editBeforeSubmit && <button type="button" disabled={operation.busy || operation.unknown || operation.blocked || Boolean(operation.pendingFacts) || disabled} onClick={() => changeEditing(false)}>{copy.cancelConfirmation}</button>}</>}
  </form>;
  if (!dialog) return form;
  if (displayed) return <>{trigger}<div hidden>{form}</div></>;
- return <>{trigger}<PortalDialog title={title} closeLabel={copy.cancelConfirmation} busy={operation.busy || operation.unknown || Boolean(operation.pendingFacts)} onClose={() => { if (editBeforeSubmit) changeEditing(false); setDialogOpen(false); }}>{form}</PortalDialog></>;
+ return <>{trigger}<PortalDialog title={title} closeLabel={copy.cancelConfirmation} busy={operation.busy || operation.unknown || Boolean(operation.pendingFacts)} onClose={closeDialog}>{form}</PortalDialog></>;
 }
