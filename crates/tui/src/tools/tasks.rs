@@ -153,7 +153,7 @@ impl ToolSpec for TasksTool {
         if self.read_only {
             "Inspect durable tasks and their PR attempts. Actions: \"list\", \"read\", \"pr_attempt_list\", \"pr_attempt_read\"."
         } else {
-            "Manage durable background tasks through TaskManager. Durable tasks are restart-aware executable work, distinct from sub-agents. Actions: \"create\" (enqueue; approval), \"list\", \"read\", \"cancel\" (approval), \"gate_run\" (run an approved verification gate command and return structured evidence; approval), \"pr_attempt_record\" (approval), \"pr_attempt_list\", \"pr_attempt_read\", \"pr_attempt_preflight\" (approval). Use task_shell_start for long-running shell work."
+            "Manage durable background tasks through TaskManager. Durable tasks are restart-aware executable work, distinct from sub-agents. Actions: \"create\" (enqueue; approval), \"list\", \"read\", \"cancel\" (approval), \"gate_run\" (run an approved verification gate command and return structured evidence; approval), \"pr_attempt_record\" (approval), \"pr_attempt_list\", \"pr_attempt_read\", \"pr_attempt_preflight\" (approval). When shell execution is enabled for the task (allow_shell on, non-plan mode), use task_shell_start for long-running shell work."
         }
     }
 
@@ -252,7 +252,7 @@ impl ToolSpec for TasksTool {
         );
         properties.insert(
             "task_id".to_string(),
-            json!({ "type": "string", "description": "Full task id or unambiguous prefix (action=read/cancel); task id, defaults to active task (action=pr_attempt_*)." }),
+            json!({ "type": "string", "description": "Full task id or unambiguous prefix (action=cancel); omitted, it defaults to the active task (action=read/pr_attempt_*)." }),
         );
         properties.insert(
             "limit".to_string(),
@@ -1509,6 +1509,29 @@ mod tests {
         assert!(
             !auto_approve.contains("no approval prompts)."),
             "the unscoped no-prompts absolute must not return: {auto_approve}"
+        );
+        let tool = TasksTool::new("tasks");
+        let description = tool.description();
+        assert!(
+            description.contains(
+                "When shell execution is enabled for the task (allow_shell on, non-plan mode), use task_shell_start",
+            ),
+            "the shell-tool pointer must be scoped to surfaces that register it: {description}"
+        );
+        assert!(
+            !description.contains("Use task_shell_start for long-running shell work."),
+            "the unconditional shell-tool pointer must not return: {description}"
+        );
+        let task_id = schema["properties"]["task_id"]["description"]
+            .as_str()
+            .expect("task_id description");
+        assert!(
+            task_id.contains("defaults to the active task (action=read/pr_attempt_*)"),
+            "read and pr_attempt_* share the active-task default: {task_id}"
+        );
+        assert!(
+            !task_id.contains("(action=read/cancel)"),
+            "read must not be listed as requiring a task id: {task_id}"
         );
         let command = schema["properties"]["command"]["description"]
             .as_str()
