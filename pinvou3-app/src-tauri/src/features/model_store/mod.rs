@@ -108,6 +108,11 @@ pub(crate) use platform::installed_weight_candidate_names_checked;
 // fail-closed 拦截）。
 // 见 platform::installed_import_markers_checked 的说明。
 pub(crate) use platform::installed_import_markers_checked;
+// 在册卡片登记的权重文件名集合（可失败）：设备移除守卫的第四恢复臂——目录
+// 改名且无标记时，记录里的权重文件名是唯一存活的引用数据（2026-11-06 评审
+// P2，review 5797725367）。
+// 见 platform::installed_weight_filenames_checked 的说明。
+pub(crate) use platform::installed_weight_filenames_checked;
 // 本机 Ollama 守护进程基地址：设备管理的外部模型探测/标签/删除与商店生命周期
 // 对齐到同一实例。见 platform::ollama_base_url 的说明。
 pub(crate) use platform::ollama_base_url;

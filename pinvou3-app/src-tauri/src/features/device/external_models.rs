@@ -1024,6 +1024,17 @@ pub async fn remove_external_model(
                 Some(weights) => target_contains_import_marker(Path::new(weights), &import_markers),
                 None => false,
             };
+            // 登记权重文件名臂（2026-11-06 评审 P2 zhuowp 场景 III）：目录改名
+            // 且无标记时，记录里的权重文件名是唯一存活的引用数据，目标子树内
+            // 命中即 fail-closed（见 target_contains_registered_weight_file）。
+            let weight_filenames =
+                crate::features::model_store::installed_weight_filenames_checked()?;
+            let installed_filename_hit = match weights_path.as_deref() {
+                Some(weights) => {
+                    target_contains_registered_weight_file(Path::new(weights), &weight_filenames)
+                }
+                None => false,
+            };
             Ok((
                 name_hit,
                 ollama_model_hit,
@@ -1031,6 +1042,7 @@ pub async fn remove_external_model(
                 installed_weight_hit,
                 installed_name_hit,
                 installed_marker_hit,
+                installed_filename_hit,
             ))
         }
     })
@@ -1049,6 +1061,7 @@ pub async fn remove_external_model(
         installed_weight_hit,
         installed_name_hit,
         installed_marker_hit,
+        installed_filename_hit,
     ) = boundary;
     removal_boundary_error(
         &record.name,
@@ -1057,6 +1070,7 @@ pub async fn remove_external_model(
         installed_weight_hit,
         installed_name_hit,
         installed_marker_hit,
+        installed_filename_hit,
         name_hit.as_deref(),
         ollama_model_hit.as_deref(),
     )?;
@@ -1204,6 +1218,20 @@ pub async fn remove_external_model(
                                         )
                                     })?;
                             ensure_recheck_free_of_import_markers(&recheck, &import_markers)?;
+                            // 登记权重文件名删除时刻复查（2026-11-06 评审 P2
+                            // zhuowp 场景 III）：与标记复查镜像同一口径，查询
+                            // 失败按拒绝（fail-closed 同口径）。
+                            let weight_filenames =
+                                crate::features::model_store::installed_weight_filenames_checked()
+                                    .map_err(|error| {
+                                        format!(
+                                            "拒绝删除：在册卡片权重文件名读取失败（{error}），为防误删已拒绝"
+                                        )
+                                    })?;
+                            ensure_recheck_free_of_registered_weight_files(
+                                &recheck,
+                                &weight_filenames,
+                            )?;
                             // 并发移除兜底：另一窗口/通道已把目录删掉时
                             // remove_dir_all 报 NotFound——与存在性预检的
                             // Ok(None) 同口径按"已删除"收敛，不报误导性的
@@ -1301,6 +1329,7 @@ fn removal_boundary_error(
     installed_weight_hit: bool,
     installed_name_hit: bool,
     installed_marker_hit: bool,
+    installed_filename_hit: bool,
     store_name_hit: Option<&str>,
     ollama_model_store_hit: Option<&str>,
 ) -> Result<(), String> {
@@ -1356,6 +1385,16 @@ fn removal_boundary_error(
         // 样命中）与解除方式（卸载卡片后本臂自动关闭）如实写进文案。
         return Err(format!(
             "该目录（或其一级子目录）含有商店卡片下载脚本就地发现模型所用的标记文件（model_index.json / model.safetensors.index.json），且本机仍有在册商店卡片——无法确认它不是在册卡片软链引用的原始权重目录（旧版本自定义权重根不留痕），删除可能破坏仍在使用的商店模型。请先在模型商店卸载对应卡片（本臂随之放行），或确认该目录与商店无关后移除本记录{STORE_BOUNDARY_ESCAPE_HINT}"
+        ));
+    }
+    if installed_filename_hit {
+        // 登记权重文件名臂（2026-11-06 评审 P2 zhuowp 场景 III，review
+        // 5797725367）：目录改名且无标记时，记录里的权重文件名是唯一存活的
+        // 引用数据——目标子树内出现登记文件名即说明它可能是在册卡片的权重
+        // 目录（或其祖先），路径/名字/标记三臂对这类卡片失明。误拦面与解除
+        // 方式随文案如实告知（与标记臂同一取舍方向）。
+        return Err(format!(
+            "该目录子树内含有在册商店卡片登记的权重文件，无法确认它不是仍在使用的商店权重目录（权重目录名可被改名，文件名是卡片运行的必需组件），删除可能破坏仍在使用的商店模型。请先在模型商店卸载对应卡片（本臂随之放行），或确认该目录与商店无关后移除本记录{STORE_BOUNDARY_ESCAPE_HINT}"
         ));
     }
     Ok(())
@@ -1732,13 +1771,22 @@ fn target_matches_candidate_names(target: &Path, names: &[String]) -> bool {
 /// 破坏窗口。标记集合为空（没有在册卡片）恒不命中。走查半径以删除目标自身
 /// 的子树为界（删除的物理范围就是它），不是无界全盘扫描。
 fn target_contains_import_marker(target: &Path, markers: &[String]) -> bool {
-    if markers.is_empty() {
+    subtree_contains_any_named_file(target, markers)
+}
+
+/// 子树内文件名命中走查（[`target_contains_import_marker`] 与登记权重文件名
+/// 臂共用的半径与口径）：以删除目标的子树为界（删除的物理范围就是它），任意
+/// 深度出现名单内的**文件**即命中；read_dir 失败的分支按未命中放行（与标记
+/// 臂同一理由：目录不存在时删除路径本就按"已删除"收敛，读不了时
+/// remove_dir_all 同样失败，都不产生破坏窗口）。
+fn subtree_contains_any_named_file(target: &Path, names: &[String]) -> bool {
+    if names.is_empty() {
         return false;
     }
-    let has_marker = |dir: &Path| markers.iter().any(|m| dir.join(m).is_file());
+    let has_named = |dir: &Path| names.iter().any(|m| dir.join(m).is_file());
     let mut stack = vec![target.to_path_buf()];
     while let Some(dir) = stack.pop() {
-        if has_marker(&dir) {
+        if has_named(&dir) {
             return true;
         }
         let Ok(entries) = std::fs::read_dir(&dir) else {
@@ -1753,6 +1801,16 @@ fn target_contains_import_marker(target: &Path, markers: &[String]) -> bool {
     false
 }
 
+/// 登记权重文件名臂（2026-11-06 评审 P2 zhuowp 场景 III，review 5797725367）：
+/// 路径臂/名字臂/标记臂共同的盲区——权重目录名被改掉、目录内又没有标记文件，
+/// 但在册记录仍存有权重文件名（source_filename）。目录名可以改，权重文件名
+/// 是卡片运行的必需组件、不会跟着改：删除目标子树内出现登记文件名 = 无法
+/// 确认不是在册卡片的权重，fail-closed 拦截（与标记臂同一走查半径与误拦
+/// 方向；集合为空=没有可恢复文件名的在册卡片，恒不命中）。
+fn target_contains_registered_weight_file(target: &Path, filenames: &[String]) -> bool {
+    subtree_contains_any_named_file(target, filenames)
+}
+
 /// 删除时刻的自取名原目录标记复查（纯函数 + 存在性探测，测试直打）：与边界
 /// 闭包的标记判定镜像同一口径（[`target_contains_import_marker`]），收窄
 /// 「守卫时刻判断正确、删除时刻目录已被换成原目录形状」的窗口。
@@ -1760,6 +1818,21 @@ fn ensure_recheck_free_of_import_markers(recheck: &Path, markers: &[String]) -> 
     if target_contains_import_marker(recheck, markers) {
         return Err(
             "拒绝删除：目标目录子树内含有商店卡片就地发现模型所用的标记文件，无法确认它不是在册卡片软链引用的原始权重目录，为防误删已拒绝".to_string(),
+        );
+    }
+    Ok(())
+}
+
+/// 删除时刻的登记权重文件名复查（纯函数 + 存在性探测，测试直打）：与边界
+/// 闭包的文件名判定镜像同一口径（[`target_contains_registered_weight_file`]），
+/// 收窄「守卫时刻判断正确、删除时刻目录已被换成含登记权重文件的形状」的窗口。
+fn ensure_recheck_free_of_registered_weight_files(
+    recheck: &Path,
+    filenames: &[String],
+) -> Result<(), String> {
+    if target_contains_registered_weight_file(recheck, filenames) {
+        return Err(
+            "拒绝删除：目标目录子树内含有在册商店卡片登记的权重文件，无法确认它不是仍在使用的商店权重目录，为防误删已拒绝".to_string(),
         );
     }
     Ok(())
@@ -2471,6 +2544,69 @@ mod tests {
     }
 
     #[test]
+    fn registered_weight_file_detection_covers_whole_subtree() {
+        let dir = TempDir::new("weight-filenames");
+        let root = dir.path();
+        let filenames = ["model-Q4_K_M.gguf".to_string()];
+
+        // CR 5797725367 场景：权重目录被改名（my-ckpt 不匹配任何约定名）、
+        // 目录内无标记文件——登记的权重文件名是唯一存活引用数据。
+        let renamed = root.join("my-ckpt");
+        std::fs::create_dir_all(&renamed).unwrap();
+        std::fs::write(renamed.join("model-Q4_K_M.gguf"), "weights").unwrap();
+        assert!(target_contains_registered_weight_file(&renamed, &filenames));
+
+        // 祖先删：目标是改名目录的父目录，深层子树内的权重文件必须命中
+        // （与标记臂同一走查半径=删除物理范围，任意深度不设上限）。
+        let bundle = root.join("release-bundle");
+        let deep = bundle.join("versions").join("r1").join("weights");
+        std::fs::create_dir_all(&deep).unwrap();
+        std::fs::write(deep.join("model-Q4_K_M.gguf"), "weights").unwrap();
+        assert!(target_contains_registered_weight_file(&bundle, &filenames));
+
+        // 通用走查口径镜像标记臂：目标不存在不命中；同名目录不算（find -type f
+        // 同口径）；名单外文件不算；空集合恒不命中。
+        assert!(!target_contains_registered_weight_file(
+            &root.join("absent"),
+            &filenames
+        ));
+        let dir_named = root.join("dir-named");
+        std::fs::create_dir_all(dir_named.join("model-Q4_K_M.gguf")).unwrap();
+        assert!(!target_contains_registered_weight_file(
+            &dir_named,
+            &filenames
+        ));
+        let other = root.join("other");
+        std::fs::create_dir_all(&other).unwrap();
+        std::fs::write(other.join("unrelated.bin"), "x").unwrap();
+        assert!(!target_contains_registered_weight_file(&other, &filenames));
+        assert!(!target_contains_registered_weight_file(&renamed, &[]));
+    }
+
+    #[test]
+    fn registered_weight_file_recheck_mirrors_boundary_verdict() {
+        let dir = TempDir::new("weight-filename-recheck");
+        let filenames = ["model-Q4_K_M.gguf".to_string()];
+        let leaf = dir.path().join("renamed-ckpt");
+        std::fs::create_dir_all(&leaf).unwrap();
+        std::fs::write(leaf.join("model-Q4_K_M.gguf"), "weights").unwrap();
+        let error = ensure_recheck_free_of_registered_weight_files(&leaf, &filenames)
+            .expect_err("registered weight file must be refused at deletion time");
+        assert!(
+            error.contains("权重文件") && error.contains("为防误删已拒绝"),
+            "got: {error}"
+        );
+        let parent = dir.path().join("bundle");
+        std::fs::create_dir_all(parent.join("child")).unwrap();
+        std::fs::write(parent.join("child").join("model-Q4_K_M.gguf"), "w").unwrap();
+        assert!(ensure_recheck_free_of_registered_weight_files(&parent, &filenames).is_err());
+        let clean = dir.path().join("clean");
+        std::fs::create_dir_all(&clean).unwrap();
+        assert!(ensure_recheck_free_of_registered_weight_files(&clean, &filenames).is_ok());
+        assert!(ensure_recheck_free_of_registered_weight_files(&leaf, &[]).is_ok());
+    }
+
+    #[test]
     fn daemon_binding_refuses_missing_binding_instead_of_silent_passthrough() {
         // 旧调用方/存量行没带绑定：拒绝并要求刷新，绝不静默当"无绑定"放行
         // ——那正是评审洞的形状（删除时刻重新解析、改投他实例）。
@@ -3030,18 +3166,19 @@ mod tests {
     fn removal_boundary_rejects_confirm_mismatch_store_names_and_store_weights() {
         // 双侧都 trim：存量记录名带空白时确认输入 trim 后仍应匹配（Ok 而非 Err）。
         assert!(
-            removal_boundary_error(" qwen3 ", "qwen3", false, false, false, false, None, None)
+            removal_boundary_error(" qwen3 ", "qwen3", false, false, false, false, false, None, None)
                 .is_ok(),
             "trailing-space record names must stay removable"
         );
         let error =
-            removal_boundary_error("qwen3", " qwen3x ", false, false, false, false, None, None)
+            removal_boundary_error("qwen3", " qwen3x ", false, false, false, false, false, None, None)
                 .unwrap_err();
         assert!(error.contains("确认名"));
         // 守卫 2 名字臂：名字命中商店名单。
         let error = removal_boundary_error(
             "qwen3",
             "qwen3",
+            false,
             false,
             false,
             false,
@@ -3060,22 +3197,23 @@ mod tests {
             false,
             false,
             false,
+            false,
             None,
             Some("qwen3:30b"),
         )
         .unwrap_err();
         assert!(error.contains("模型商店"));
         // 守卫 2 路径臂：权重位于任一商店根之下（别名躲过两个名字臂时仍被拦）。
-        let error = removal_boundary_error("qwen3", "qwen3", true, false, false, false, None, None)
+        let error = removal_boundary_error("qwen3", "qwen3", true, false, false, false, false, None, None)
             .unwrap_err();
         assert!(error.contains("模型商店"));
         // 存量引用臂：与在册卡片引用路径相交（2026-11-04 评审 P2）。
-        let error = removal_boundary_error("qwen3", "qwen3", false, true, false, false, None, None)
+        let error = removal_boundary_error("qwen3", "qwen3", false, true, false, false, false, None, None)
             .unwrap_err();
         assert!(error.contains("已安装商店模型引用"));
         // 零痕迹旧根名字臂：目录名与在册约定同名（2026-11-04 评审 P2 zhuowp
         // 场景），前四臂全空时仍被拦，且报错来自本臂而非前面的臂。
-        let error = removal_boundary_error("qwen3", "qwen3", false, false, true, false, None, None)
+        let error = removal_boundary_error("qwen3", "qwen3", false, false, true, false, false, None, None)
             .unwrap_err();
         assert!(
             error.contains("约定同名") && error.contains("不留痕"),
@@ -3083,16 +3221,44 @@ mod tests {
         );
         // 自取名原目录标记臂（2026-11-05 评审 P2 zhuowp 场景 II）：前五臂全空、
         // 目标含官方脚本就地发现的标记文件且仍有在册卡片 → 拦，且报错来自本臂。
-        let error = removal_boundary_error("qwen3", "qwen3", false, false, false, true, None, None)
+        let error = removal_boundary_error("qwen3", "qwen3", false, false, false, true, false, None, None)
             .unwrap_err();
         assert!(
             error.contains("标记文件") && error.contains("无法确认"),
             "rejection must come from the import-marker arm, got: {error}"
         );
-        // 六道全过 → Ok。
+        // 登记权重文件名臂（2026-11-06 评审 P2 zhuowp 场景 III）：目录改名且
+        // 无标记时记录里的权重文件名是唯一存活引用，第七臂命中即拒。
+        let error = removal_boundary_error(
+            "qwen3",
+            "qwen3",
+            false,
+            false,
+            false,
+            false,
+            true,
+            None,
+            None,
+        )
+        .unwrap_err();
         assert!(
-            removal_boundary_error(" qwen3 ", " qwen3 ", false, false, false, false, None, None)
-                .is_ok()
+            error.contains("权重文件") && error.contains("无法确认"),
+            "rejection must come from the registered-filename arm, got: {error}"
+        );
+        // 七道全过 → Ok。
+        assert!(
+            removal_boundary_error(
+                " qwen3 ",
+                " qwen3 ",
+                false,
+                false,
+                false,
+                false,
+                false,
+                None,
+                None
+            )
+            .is_ok()
         );
     }
 
@@ -4150,7 +4316,7 @@ mod tests {
         // 不逐字进错误与日志。
         let long_name = "长".repeat(100);
         let error = removal_boundary_error(
-            &long_name, "mismatch", false, false, false, false, None, None,
+            &long_name, "mismatch", false, false, false, false, false, None, None,
         )
         .unwrap_err();
         assert!(error.contains(&"长".repeat(32)));

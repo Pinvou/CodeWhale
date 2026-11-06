@@ -940,6 +940,44 @@ pub(crate) fn installed_import_markers_checked() -> Result<Vec<String>, String> 
         .collect())
 }
 
+/// 设备管理删除守卫的「在册卡片登记的权重文件名」集合（可失败版）。
+///
+/// 第四条恢复腿（2026-11-06 评审 P2 zhuowp 场景 III，review 5797725367）：
+/// 路径臂（约定名 × 已知根）、名字臂（约定名叶/一级）、标记臂（就地导入标记）
+/// 共同的盲区是——权重目录名被用户改掉、目录内又没有标记文件，但记录里仍存有
+/// 权重文件名（`source_filename`）的在册卡片：三条腿都对它失明，删除其权重
+/// 目录的祖先时守卫会放行并连带毁掉它。目录名可以改，权重文件名是卡片运行
+/// 的必需组件、不会跟着改——把它作为实际引用数据并入恢复：集合非空时，设备
+/// 侧删除目标的子树内出现同名文件即「无法确认不是在册卡片的权重」，按
+/// fail-closed 拦截（与标记臂同一走查半径=删除物理范围、同一误拦方向）。
+///
+/// 集合按记录逐条取 `source_filename`（None/空串跳过，`safe_path_component`
+/// 防逃逸——存量记录可能带路径分量），去重后返回。记录连文件名都没存的卡片
+/// 在仓库数据里已无任何可恢复的引用痕迹，超出守卫可知边界（如实披露，不虚构
+/// 保护面）。空库返回空集合（该臂关闭）。
+///
+/// fail-closed：DB 读不了 → Err（与前两臂同口径，破坏性移除路径不得当未命中
+/// 放行）。
+pub(crate) fn installed_weight_filenames_checked() -> Result<Vec<String>, String> {
+    let records = db::list_store_models().map_err(|e| format!("读取在册模型失败：{e}"))?;
+    let mut out: Vec<String> = Vec::new();
+    for rec in &records {
+        let Some(filename) = rec.source_filename.as_deref() else {
+            continue;
+        };
+        let trimmed = filename.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if let Ok(safe) = config::safe_path_component(trimmed) {
+            if !out.contains(&safe) {
+                out.push(safe);
+            }
+        }
+    }
+    Ok(out)
+}
+
 pub fn storage_settings() -> Result<Value, String> {
     let settings = config::load_settings();
     let models_dir = settings.models_path();
@@ -1595,6 +1633,56 @@ mod tests {
             !names.iter().any(|name| name.contains("..")),
             "escape shapes must be filtered, got {names:?}"
         );
+        let _ = ctx;
+    }
+
+    #[test]
+    fn installed_weight_filenames_derive_from_records_without_paths() {
+        use crate::features::model_store::platform::linux::db;
+
+        let ctx = super::config::TempHome::new();
+        db::init_db().expect("init store db");
+        // 空库 → 空集合（设备守卫的第四恢复臂恒不命中）。
+        let empty = crate::features::model_store::installed_weight_filenames_checked()
+            .expect("empty store enumerates");
+        assert!(empty.is_empty(), "got {empty:?}");
+
+        // 记录里的 source_filename 是唯一输入：None 与空串跳过，合法名保留。
+        let insert = |card_id: &str, filename: Option<&str>| {
+            db::add_store_model(db::AddStoreModelParams {
+                card_id,
+                model_name: "renamed-model",
+                card_name: card_id,
+                org: None,
+                description: None,
+                engine_name: "e",
+                engine_version: None,
+                size_bytes: 0,
+                quantization: None,
+                source_repo_id: None,
+                source_filename: filename,
+                scripts: &std::collections::BTreeMap::new(),
+                status: "downloaded",
+                profiles: &[],
+                deploy_topology: crate::features::model_store::platform::linux::store_client::DeployTopology::default(),
+                card_source: "store",
+            })
+            .expect("insert model");
+        };
+        insert("c-fn-1", Some("model-Q4_K_M.gguf"));
+        insert("c-fn-2", None);
+        let names = crate::features::model_store::installed_weight_filenames_checked()
+            .expect("derive filenames");
+        assert_eq!(names, vec!["model-Q4_K_M.gguf".to_string()]);
+
+        // 去重 + 防逃逸 + 空串跳过：第二张卡同名（去重），第三张带路径分量
+        // （safe_path_component 拒绝 → 丢弃），第四张空白串（跳过）。
+        insert("c-fn-5", Some("model-Q4_K_M.gguf"));
+        insert("c-fn-6", Some("sub/model-Q4_K_M.gguf"));
+        insert("c-fn-7", Some("   "));
+        let names = crate::features::model_store::installed_weight_filenames_checked()
+            .expect("derive filenames after dup/escape/blank");
+        assert_eq!(names, vec!["model-Q4_K_M.gguf".to_string()]);
         let _ = ctx;
     }
 

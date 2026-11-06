@@ -65,7 +65,7 @@ pub use service::{
 // 两跳照常转发。
 pub(crate) use service::{
     installed_import_markers_checked, installed_weight_candidate_names_checked,
-    installed_weight_paths_checked,
+    installed_weight_filenames_checked, installed_weight_paths_checked,
 };
 
 /// Linux 上模型商店总是可用的。
