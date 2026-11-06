@@ -261,5 +261,8 @@
 .adm-restored-shell.adm-member-menu-portal[data-open=false]>.adm-member-action-menu{visibility:hidden}
 .adm-restored-shell .adm-member-action-menu{position:fixed;z-index:100;display:grid;gap:4px;box-sizing:border-box;max-height:calc(100vh - 16px);overflow:auto;padding:8px;border:1px solid var(--adm-line);border-radius:10px;background:var(--adm-surface);box-shadow:0 8px 24px #1d243326}
 .adm-restored-shell .adm-member-action-menu>button{width:100%;min-height:38px;text-align:left;white-space:normal}
+.adm-restored-shell button.ap-admin-org-primary-trigger{border-color:var(--adm-primary);background:var(--adm-primary);color:#fff}
+.adm-restored-shell button.ap-admin-org-danger-trigger{border-color:#f0c8cc;background:var(--adm-surface);color:var(--adm-danger)}
+.adm-restored-shell button.ap-admin-org-danger-trigger:hover:not(:disabled){background:var(--adm-danger-soft)}
 .adm-restored-shell code{overflow-wrap:anywhere}
 @media(max-width:560px){.adm-restored-shell .adm-user-details{grid-template-columns:1fr;gap:7px}.adm-restored-shell .adm-filter-row>*{max-width:100%}}

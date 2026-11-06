@@ -210,6 +210,7 @@ try {
       const geometry = await page.$eval('.adm-member-action-menu', menu => { const box = menu.getBoundingClientRect(); return { left: box.left, right: box.right, top: box.top, bottom: box.bottom, viewportWidth: innerWidth, viewportHeight: innerHeight, position: getComputedStyle(menu).position, pageTransform: getComputedStyle(document.querySelector('.adm-page')).transform }; });
       assert.ok(geometry.left >= 7 && geometry.right <= geometry.viewportWidth - 7 && geometry.top >= 7 && geometry.bottom <= geometry.viewportHeight - 7, `action overlay fits the viewport: ${JSON.stringify({ language, width, geometry })}`);
       assert.equal(await page.$eval('.adm-member-action-menu button', node => node === document.activeElement), true, 'opening the portal moves focus into its actions');
+      assert.equal(await page.$eval('.adm-member-action-menu button:last-child', node => getComputedStyle(node).color), 'rgb(195, 59, 70)', 'member removal has danger styling');
       await page.keyboard.press('Tab'); await page.keyboard.press('Tab'); await page.keyboard.press('Tab');
       await page.waitForFunction(() => !document.querySelector('[data-workspace=members] details')?.open);
       assert.equal(await page.evaluate(() => document.activeElement?.textContent.trim() === window.restored.copy().organization.addMember), true, 'Tab after the last action continues at the next page control');
@@ -252,8 +253,9 @@ try {
     }
   });
   await run('organization rename footer cancellation discards edits and reopens the current name', async () => {
-    for (const kind of ['organization', 'unit']) {
+    for (const kind of ['organization', 'unit']) for (const language of ['zh', 'en', 'ja']) {
       await fresh(`?mode=admin&section=organizations&organization_id=33333333-3333-4333-8333-333333333333&organization_tab=${kind === 'unit' ? 'units' : 'overview'}`);
+      await page.select('.adm-sidebar-foot select', language);
       const words = await page.evaluate(() => window.restored.copy().organization);
       const label = kind === 'unit' ? words.renameUnit : words.rename;
       const initial = kind === 'unit' ? 'Sample unit' : 'Sample organization';
@@ -261,6 +263,9 @@ try {
       await click('.adm-organization-directory button', label);
       await page.waitForSelector('[role=dialog] input');
       assert.equal(await page.$eval('[role=dialog] input', node => node.value), initial);
+      assert.equal(await page.$eval('[role=dialog] .ap-org-action-footer>button[type=submit]', node => node.textContent), words.saveChanges);
+      assert.equal(await page.$eval('[role=dialog] .ap-org-action-footer>button[type=submit]', node => getComputedStyle(node).backgroundColor), 'rgb(49, 89, 232)');
+      assert.equal(await page.$eval('[role=dialog] .ap-org-action-footer>button[type=button]', node => getComputedStyle(node).backgroundColor), 'rgb(255, 255, 255)');
       await page.type('[role=dialog] input', ' changed');
       await click('[role=dialog] .ap-org-action-footer>button', words.cancelConfirmation);
       await page.waitForFunction(() => !document.querySelector('[role=dialog]'));
@@ -294,6 +299,9 @@ try {
       const description = words[operation === 'deleteUnit' ? 'deleteUnitDescription' : operation === 'disable' ? 'disableOrganizationDescription' : 'enableOrganizationDescription'];
       assert.equal(await page.$eval('[role=dialog] .ap-org-action-description', node => node.textContent), description);
       assert.deepEqual(await page.$$eval('[role=dialog] .ap-org-action-footer>button', nodes => nodes.map(node => node.textContent)), [words.cancelConfirmation, words[operation]]);
+      const actionColor = operation === 'enable' ? 'rgb(49, 89, 232)' : 'rgb(195, 59, 70)';
+      assert.equal(await page.$eval('[role=dialog] .ap-org-action-footer>button[type=submit]', node => getComputedStyle(node).backgroundColor), actionColor);
+      assert.equal(await page.$eval('[role=dialog] .ap-org-action-footer>button[type=button]', node => getComputedStyle(node).backgroundColor), 'rgb(255, 255, 255)');
       if (process.env.UI_ARTIFACT_DIR && language === 'zh') {
         fs.mkdirSync(process.env.UI_ARTIFACT_DIR, { recursive: true });
         await page.screenshot({ path: path.join(process.env.UI_ARTIFACT_DIR, `admin-${operation}-target-dialog.png`), fullPage: true });
@@ -306,6 +314,12 @@ try {
       assert.equal((await writes()).length, 0, 'explicit footer cancellation never mutates');
       await open(); await page.click('[role=dialog] .ap-org-action-footer>button[type=submit]');
       await page.waitForSelector('[role=alertdialog]');
+      const confirmLabel = await page.evaluate(operation => { const copy = window.restored.copy().organization; return copy.confirmActionTemplate.replace('{action}', () => copy[operation]); }, operation);
+      assert.ok(confirmLabel.includes(words[operation]), 'final action label identifies the operation');
+      assert.equal(await page.$eval('[role=alertdialog] footer>button:last-child', node => node.textContent), confirmLabel);
+      assert.equal(await page.$eval('[role=alertdialog]', node => getComputedStyle(node).fontSize), '14px', 'body-portalled confirmation uses the standard dialog font');
+      assert.equal(await page.$eval('[role=alertdialog] footer>button:last-child', node => getComputedStyle(node).backgroundColor), actionColor);
+      assert.equal(await page.$eval('[role=alertdialog] footer>button:first-child', node => getComputedStyle(node).backgroundColor), 'rgb(255, 255, 255)');
       assert.ok((await page.$eval('[role=alertdialog]', node => node.textContent)).includes(description), 'final confirmation retains impact explanation');
       assert.ok((await page.$eval('[role=alertdialog] dd', node => node.textContent)).includes('Sample organization'));
       assert.equal((await writes()).length, 0, 'first submit still requires confirmation');
@@ -313,7 +327,7 @@ try {
       assert.equal((await writes()).length, 0, 'cancelling final confirmation never mutates');
       await page.click('[role=dialog] .ap-org-action-footer>button[type=submit]'); await page.waitForSelector('[role=alertdialog]');
       await page.evaluate(() => { window.restored.unknownOrgAction = true; });
-      await click('[role=alertdialog] button', words.confirmAction);
+      await click('[role=alertdialog] button', confirmLabel);
       await page.waitForFunction(retry => [...document.querySelectorAll('[role=dialog] .ap-org-action-footer>button')].some(node => node.textContent.trim() === retry && !node.disabled), {}, words.retry);
       const original = await writes(); assert.equal(original.length, 1);
       assert.equal(typeof original[0].key, 'string');
@@ -335,7 +349,7 @@ try {
         await page.waitForSelector('[role=dialog] .ap-org-action-footer');
         await page.click('[role=dialog] .ap-org-action-footer>button[type=submit]');
         await page.waitForSelector('[role=alertdialog]');
-        await click('[role=alertdialog] button', words.confirmAction);
+        await click('[role=alertdialog] button', await page.evaluate(title => window.restored.copy().organization.confirmActionTemplate.replace('{action}', () => title), next));
         await page.waitForFunction(() => !document.querySelector('[role=dialog], [role=alertdialog]'));
         const subsequent = await writes(); assert.equal(subsequent.length, 3);
         assert.equal(typeof subsequent[2].key, 'string'); assert.notEqual(subsequent[2].key, original[0].key);
@@ -373,6 +387,7 @@ try {
   await run('organization creation searches users and keeps the original unknown invocation in its modal', async () => {
     await fresh('?mode=admin&section=organizations');
     await page.evaluate(() => { window.restored.unknownOrgCreate = true; });
+    assert.equal(await page.$eval('.adm-organization-directory .ap-admin-org-primary-trigger', node => getComputedStyle(node).backgroundColor), 'rgb(49, 89, 232)', 'create uses the primary action style');
     await click('.adm-organization-directory button', await page.evaluate(() => window.restored.copy().organization.create));
     await page.waitForSelector('[role=dialog] .adm-user-picker');
     await page.type('[role=dialog] fieldset>label:first-child input', 'Controlled organization');
