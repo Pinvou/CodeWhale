@@ -13873,6 +13873,85 @@ async fn interrupted_child_stops_gating_later_writers() {
     );
 }
 
+/// Mail accepted while a child was parked must follow the resume: the
+/// queue-only receipt promised the owner session the mail survives a resume,
+/// but the resume re-dispatches under a NEW id and `followup` on the old id
+/// can only park further mail on the retained record — it can never deliver.
+/// The resume re-keys the parked mailbox onto the resumed incarnation so the
+/// next followup drains it.
+#[tokio::test]
+async fn resumed_child_inherits_the_parked_mail_of_its_interrupted_predecessor() {
+    let tmp = tempdir().expect("tempdir");
+    let manager = new_shared_subagent_manager(tmp.path().to_path_buf(), 4);
+    let mut runtime = stub_runtime();
+    runtime.manager = Arc::clone(&manager);
+    runtime.context = ToolContext::new(tmp.path());
+
+    let mut guard = manager.write().await;
+    let first = guard
+        .spawn_background_with_assignment_options(
+            Arc::clone(&manager),
+            runtime.clone(),
+            FleetRole::Builder,
+            "edit the workspace".into(),
+            make_assignment(),
+            Some(vec![]),
+            SubAgentSpawnOptions {
+                name: Some("writer-mail".into()),
+                ..Default::default()
+            },
+        )
+        .expect("writer admitted");
+    // Give the child a continuable checkpoint with content, as a real
+    // interrupted loop leaves behind, so the resume has something to seed.
+    guard
+        .agents
+        .get_mut(&first.agent_id)
+        .expect("agent")
+        .checkpoint = Some(build_subagent_checkpoint(
+        &first.agent_id,
+        "parent_interrupt",
+        &[Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: "prior work".to_string(),
+                cache_control: None,
+            }],
+        }],
+        1,
+        true,
+    ));
+    guard
+        .interrupt_child(&first.agent_id, None, "interrupted by parent".into())
+        .expect("interrupt");
+    guard
+        .followup_child(&first.agent_id, "accepted while parked".to_string())
+        .expect("queue-only follow-up receipt");
+    assert_eq!(
+        guard.queued_mail_depth(&first.agent_id),
+        Some(1),
+        "the parked mail sits on the interrupted predecessor"
+    );
+
+    let resumed = guard
+        .resume_from_checkpoint(Arc::clone(&manager), runtime, &first.agent_id, "continue")
+        .expect("resume re-dispatches the checkpoint");
+    assert_ne!(
+        resumed.agent_id, first.agent_id,
+        "resume runs under a new id"
+    );
+    assert_eq!(
+        guard.queued_mail_depth(&resumed.agent_id),
+        Some(1),
+        "the accepted mail must follow the resume onto the new incarnation"
+    );
+    assert_eq!(
+        guard.queued_mail_depth(&first.agent_id),
+        None,
+        "the predecessor's mailbox is emptied by the migration"
+    );
+}
+
 /// The resume path is the same scenario from the other side: `followup` on
 /// an interrupted child re-dispatches its checkpoint under a NEW id and
 /// restores the old claim for that id. With the predecessor counted live,

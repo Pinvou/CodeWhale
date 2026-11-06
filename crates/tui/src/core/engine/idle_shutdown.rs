@@ -46,10 +46,14 @@ impl Engine {
         {
             return false;
         }
+        // try_lock keeps this gate non-blocking like the sibling checks: the
+        // goal state is shared with the host, so a host holding it across
+        // this call must defer retirement instead of deadlocking the actor
+        // before the readiness receipt is even sent. Uncertain is refuse.
         if self
             .config
             .goal_state
-            .lock()
+            .try_lock()
             .map(|state| state.snapshot().is_active())
             .unwrap_or(true)
         {
@@ -98,12 +102,12 @@ impl Engine {
             + self.pending_steers.len()
     }
 
-    pub(super) async fn accept_idle_shutdown(
-        &mut self,
-        ready: tokio::sync::oneshot::Sender<bool>,
-        commit: tokio::sync::oneshot::Receiver<()>,
-        commit_ack: tokio::sync::oneshot::Sender<()>,
-    ) -> bool {
+    pub(super) async fn accept_idle_shutdown(&mut self, request: IdleRetirement) -> bool {
+        let IdleRetirement {
+            ready,
+            commit,
+            commit_ack,
+        } = request;
         // This handler is reached only between complete actor operations.
         // An autonomous turn that won first finishes normally; no cancel token
         // is fired to make it idle. No next_run_input runs during the proposal.
@@ -118,13 +122,16 @@ impl Engine {
             return false;
         }
         // Wait for the commit at the same sealed boundary, but let a cancel
-        // fired *during* the proposal break the wait: a host blocked forever
-        // inside its synchronous predicate must not pin the actor. A token
-        // already latched by an earlier cancelled turn does not escape — that
-        // stale state must not make retirement permanently unavailable.
-        // Commit still wins a simultaneous cancel: a host send that lands
-        // while the cancel arm resolves can return `Ok` without being seen,
-        // so `Ok(true)` requires the commit ack, never the send alone.
+        // fired *during* the proposal break the wait: on a fresh token, a host
+        // blocked forever inside its synchronous predicate must not pin the
+        // actor. A token already latched by an earlier cancelled turn does not
+        // escape — that stale state must not make retirement permanently
+        // unavailable, and here it deliberately trades actor liveness for it:
+        // with the escape disarmed, only the commit itself can break a
+        // blocked predicate. Commit still wins a simultaneous cancel: a host
+        // send that lands while the cancel arm resolves can return `Ok`
+        // without being seen, so `Ok(true)` requires the commit ack, never
+        // the send alone.
         let wait_cancel = self.cancel_token.clone();
         let committed = tokio::select! {
             biased;
@@ -182,7 +189,11 @@ mod tests {
         assert!(
             !tokio::time::timeout(
                 Duration::from_secs(10),
-                engine.accept_idle_shutdown(ready, committed, commit_ack)
+                engine.accept_idle_shutdown(IdleRetirement {
+                    ready,
+                    commit: committed,
+                    commit_ack,
+                })
             )
             .await
             .expect("the refusal path must not wait on the commit")
@@ -242,7 +253,7 @@ mod tests {
         assert!(
             !tokio::time::timeout(
                 Duration::from_secs(10),
-                engine.accept_idle_shutdown(request.ready, request.commit, request.commit_ack)
+                engine.accept_idle_shutdown(request)
             )
             .await
             .expect("the refusal path must not wait on the commit")
@@ -273,7 +284,7 @@ mod tests {
         assert!(
             tokio::time::timeout(
                 Duration::from_secs(10),
-                engine.accept_idle_shutdown(request.ready, request.commit, request.commit_ack)
+                engine.accept_idle_shutdown(request)
             )
             .await
             .expect("the committed path must resolve promptly")
@@ -291,7 +302,11 @@ mod tests {
         let pending = tokio::spawn(async move {
             let accepted = tokio::time::timeout(
                 Duration::from_secs(10),
-                engine.accept_idle_shutdown(ready, committed, commit_ack),
+                engine.accept_idle_shutdown(IdleRetirement {
+                    ready,
+                    commit: committed,
+                    commit_ack,
+                }),
             )
             .await
             .expect("the cancel path must not wedge the actor");
@@ -503,7 +518,7 @@ mod tests {
         assert!(
             !tokio::time::timeout(
                 Duration::from_secs(10),
-                engine.accept_idle_shutdown(request.ready, request.commit, request.commit_ack)
+                engine.accept_idle_shutdown(request)
             )
             .await
             .expect("the refusal path must not wait on the commit"),
@@ -521,7 +536,11 @@ mod tests {
         let (commit_ack, _ack) = tokio::sync::oneshot::channel();
         let accept = tokio::spawn(async move {
             engine
-                .accept_idle_shutdown(ready, committed, commit_ack)
+                .accept_idle_shutdown(IdleRetirement {
+                    ready,
+                    commit: committed,
+                    commit_ack,
+                })
                 .await
         });
         assert!(
@@ -549,7 +568,11 @@ mod tests {
         let pending = tokio::spawn(async move {
             let accepted = tokio::time::timeout(
                 Duration::from_secs(10),
-                engine.accept_idle_shutdown(ready, committed, commit_ack),
+                engine.accept_idle_shutdown(IdleRetirement {
+                    ready,
+                    commit: committed,
+                    commit_ack,
+                }),
             )
             .await
             .expect("a fresh cancel must break the commit wait");
@@ -587,7 +610,11 @@ mod tests {
         let pending = tokio::spawn(async move {
             let accepted = tokio::time::timeout(
                 Duration::from_secs(10),
-                engine.accept_idle_shutdown(ready, committed, commit_ack),
+                engine.accept_idle_shutdown(IdleRetirement {
+                    ready,
+                    commit: committed,
+                    commit_ack,
+                }),
             )
             .await
             .expect("a stale cancelled token must not wedge the proposal");
@@ -692,6 +719,140 @@ mod tests {
         assert!(
             engine.can_retire_without_losing_work(),
             "draining the parked mail restores the idle certification"
+        );
+    }
+
+    #[tokio::test]
+    async fn forkguard_idle_shutdown_delivered_follow_up_counter_tracks_live_children_only() {
+        let home = tempfile::tempdir().unwrap();
+        let (mut engine, _handle) = fixture(home.path());
+        // Hold the receiver for the whole test: dropping it would close the
+        // child's input channel and turn the wake delivery into a failure.
+        let (_child_rx, child) = {
+            let mut agents = engine.subagent_manager.write().await;
+            let (child, rx) = agents.insert_test_running_agent_with_input("countered", home.path());
+            agents.assign_test_session_owner(&child, &engine.session.id);
+            (rx, child)
+        };
+        {
+            let mut agents = engine.subagent_manager.write().await;
+            let receipt = agents
+                .followup_child(&child, "delivered to a live child".to_string())
+                .expect("wake receipt");
+            assert!(
+                receipt.woke,
+                "a running child with a live input channel wakes"
+            );
+        }
+        assert!(
+            !engine.can_retire_without_losing_work(),
+            "a delivered follow-up the child has not consumed is accepted work"
+        );
+        {
+            let mut agents = engine.subagent_manager.write().await;
+            agents.commit_test_terminal_result(
+                &child,
+                crate::tools::subagent::SubAgentStatus::Cancelled,
+            );
+        }
+        assert!(
+            engine.can_retire_without_losing_work(),
+            "a terminal child can never consume its counter: retirement must not refuse on bookkeeping no drain can clear"
+        );
+    }
+
+    #[tokio::test]
+    async fn forkguard_idle_shutdown_mail_on_a_dead_end_child_does_not_gate_retirement() {
+        let home = tempfile::tempdir().unwrap();
+        let (mut engine, _handle) = fixture(home.path());
+        let child = {
+            let mut agents = engine.subagent_manager.write().await;
+            let (child, _continuation) = agents.insert_test_interrupted_continuable_agent(
+                "dead-end",
+                home.path(),
+                Vec::new(),
+            );
+            agents.assign_test_session_owner(&child, &engine.session.id);
+            child
+        };
+        {
+            let mut agents = engine.subagent_manager.write().await;
+            agents
+                .followup_child(&child, "queued for a resumable child".to_string())
+                .expect("queue-only follow-up receipt");
+        }
+        assert!(
+            !engine.can_retire_without_losing_work(),
+            "mail a resume could still deliver is accepted work"
+        );
+        {
+            let mut agents = engine.subagent_manager.write().await;
+            agents.mark_test_agent_failed(&child);
+        }
+        assert!(
+            engine.can_retire_without_losing_work(),
+            "followup refuses a failed child, so its parked mail has no remaining delivery path and must not gate forever"
+        );
+    }
+
+    #[tokio::test]
+    async fn forkguard_idle_shutdown_child_owned_shell_evidence_does_not_block_retirement() {
+        let home = tempfile::tempdir().unwrap();
+        let (mut engine, _handle) = fixture(home.path());
+        let session = engine.session.id.clone();
+        {
+            let mut shells = engine.shell_manager.lock().unwrap();
+            shells.seed_agent_shell_for_test("child-job", &session, "agent_child", true);
+        }
+        assert!(
+            !engine.can_retire_without_losing_work(),
+            "a running agent-owned shell is live work regardless of owner"
+        );
+        {
+            let mut shells = engine.shell_manager.lock().unwrap();
+            shells.finish_seeded_shell_for_test("child-job");
+        }
+        assert!(
+            engine.can_retire_without_losing_work(),
+            "the parent stream suppresses child-owned completions and a terminal owner never claims them, so finished child-owned evidence must not gate"
+        );
+        {
+            let mut shells = engine.shell_manager.lock().unwrap();
+            shells.seed_session_shell_for_test("parent-job", &session, false);
+        }
+        assert!(
+            !engine.can_retire_without_losing_work(),
+            "parent-owned finished-unreported evidence must still gate retirement"
+        );
+    }
+
+    #[tokio::test]
+    async fn forkguard_idle_shutdown_active_goal_state_gates_retirement() {
+        let home = tempfile::tempdir().unwrap();
+        let (mut engine, _handle) = fixture(home.path());
+        {
+            let mut state = engine.config.goal_state.lock().expect("goal state");
+            state.sync_from_host_status(
+                Some("retirement-goal"),
+                None,
+                crate::tools::goal::GoalStatus::Active,
+            );
+        }
+        assert!(
+            !engine.can_retire_without_losing_work(),
+            "an active goal state is a continuation the host has not observed"
+        );
+        {
+            let mut state = engine.config.goal_state.lock().expect("goal state");
+            state.sync_from_host_status(
+                Some("retirement-goal"),
+                None,
+                crate::tools::goal::GoalStatus::Complete,
+            );
+        }
+        assert!(
+            engine.can_retire_without_losing_work(),
+            "a completed goal state no longer holds accepted work"
         );
     }
 }
