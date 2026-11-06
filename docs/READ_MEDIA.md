@@ -74,6 +74,7 @@ always_load = ["read_media"]
 - **Pixel Budget:** Maximum total pixel count is **33,554,432 pixels** (~33.5 megapixels, `MAX_IMAGE_PIXELS`).
 - **Memory Ceiling:** Safe memory allocation during decode is capped at **64 MiB** (`MAX_DECODE_ALLOC_BYTES`).
 - **Wire Payload Limit:** Re-encoded image payload is capped at **5 MiB** (`MAX_WIRE_IMAGE_BYTES`), matching provider constraints.
+- **Delivery Budget:** Default full reads (`detail` `"auto"`/`"low"`) are re-encoded through a quality/size ladder to fit a **256 KiB** delivery budget (`READ_IMAGE_BYTE_BUDGET`, roughly 350 KB on the wire after base64). `"high"` / `"original"` detail and `crop` reads keep the full **5 MiB** wire budget.
 
 ### 4.3. Active Route Vision Checks
 - Before reading an image, `read_media` inspects `context.route_capabilities.image_input`.

@@ -1,14 +1,15 @@
 #![allow(dead_code)]
 //! System prompt composition.
 //!
-//! Prompts are assembled from composable layers loaded at compile time from
-//! the single `text` module:
-//!   constitution + personality overlay → `message[0]` (byte-stable).
+//! Prompts are assembled from composable layers loaded at compile time —
+//! most from the `text` module, with the authority recap and the locale
+//! bookends defined here:
+//!   constitution (personality folded in) → `message[0]` (byte-stable).
 //!   approval policy → request-time runtime metadata.
 //! Tool availability comes only from the per-turn model catalog.
 //!
-//! Keeping every layer's text in one module makes prompt tuning a
-//! single-file operation.
+//! Every layer's text stays a compile-time constant — this module and
+//! `text`, per the split above.
 
 use crate::models::{SystemBlock, SystemPrompt};
 use crate::project_context::load_project_context_with_parents;
@@ -82,8 +83,9 @@ impl Default for PromptSessionContext<'_> {
 
 /// Conventional location for the structured session relay artifact (#32).
 /// A previous session writes it on exit / `/compact`; the next session reads
-/// it back on startup and prepends it to the system prompt so a fresh agent
-/// doesn't have to re-discover open blockers from scratch.
+/// it back on startup and routes it as the late WorldState token-budget /
+/// continuity fragment (`load_handoff_block`) so a fresh agent doesn't have
+/// to re-discover open blockers from scratch.
 pub const HANDOFF_RELATIVE_PATH: &str = ".codewhale/handoff.md";
 /// Legacy handoff path for reading from existing installs. `pub(crate)` so
 /// command surfaces that teach the fallback name it from the same constant
@@ -189,9 +191,10 @@ fn translation_target_language_for_tag(locale_tag: &str) -> &'static str {
 /// Render a `## Environment` block listing the resolved locale tag and the
 /// actionable host facts that affect command syntax.
 ///
-/// The block is appended to the workspace-static portion of the system
-/// prompt (after the shared constitution + project context, before configured
-/// instructions / skills). `locale_tag` is resolved by the caller from
+/// The block leads the workspace WorldState fragment (environment + memory /
+/// goal facts), which is assembled after the cache-stable constitution
+/// prefix so a change re-renders as a fragment diff instead of rebuilding
+/// the static prefix. `locale_tag` is resolved by the caller from
 /// `Settings` so this function stays I/O-free.
 ///
 /// `platform` and `shell` remain because they change how commands must be
@@ -401,10 +404,12 @@ fn user_constitution_disabled_by_setup_state() -> bool {
 
 // ── Prompt layers loaded at compile time ──────────────────────────────
 //
-// Every bundled prompt layer lives in `prompts/text.rs` as a compile-time
-// constant (consolidated from the retired per-layer `prompts/*.md` files;
-// each constant is byte-identical to the file it replaced, trailing newline
-// included). The constants are re-exported here so the existing
+// Every bundled prompt layer is a compile-time constant — most in
+// `prompts/text.rs`, with the authority recap and the locale bookends
+// defined in this file (consolidated from the retired per-layer
+// `prompts/*.md` files; each constant is byte-identical to the file it
+// replaced, trailing newline included). The constants are re-exported here
+// so the existing
 // `crate::prompts::NAME` paths used across the crate are unchanged. Edit
 // prompt text in `text.rs` directly; the test suite below guards content
 // and ordering invariants (constitution structure and binding gates #4032,
@@ -447,15 +452,16 @@ static PROMPT_OVERRIDE_NOTICES: LazyLock<Mutex<Vec<String>>> =
 pub struct StaticPromptCtx<'a> {
     /// Active model identifier after caller-side routing.
     pub model_id: &'a str,
-    /// Personality overlay requested for the base static prompt.
+    /// Personality requested for the base static prompt (retired: the runtime
+    /// folds the tone into the constitution rather than composing an overlay).
     pub personality: Personality,
-    /// Default base/personality prompt layers that would be used without an
-    /// override.
+    /// Default base prompt (personality already folded in) that would be used
+    /// without an override.
     pub default_layers: &'a str,
 }
 
-/// Embedder hook for replacing Codewhale's byte-stable base/personality prompt
-/// segment.
+/// Embedder hook for replacing Codewhale's byte-stable base prompt segment
+/// (personality folded in).
 pub type StaticPromptComposer = dyn Fn(&StaticPromptCtx<'_>) -> String + Send + Sync + 'static;
 
 /// Install an embedder composer that owns the complete static prompt prefix.
@@ -1007,10 +1013,10 @@ fn apply_model_template(
     prompt.replace("{model_id}", model_id)
 }
 
-/// Authority recap block — appended at the end of the system prompt,
-/// just before the user's first message. Uses recency bias constructively
-/// without restating ranks: `BASE_PROMPT` § Whose word wins states the
-/// default ranking (#4777).
+/// Authority recap block — appended as a per-request trailer after the
+/// WorldState fragments, just before the locale closer. Uses recency bias
+/// constructively without restating ranks: `BASE_PROMPT` § Whose word wins
+/// states the default ranking (#4777).
 const AUTHORITY_RECAP: &str = "\
 ## Authority Recap
 
@@ -1094,21 +1100,27 @@ pub fn system_prompt_for_mode_with_context(
 
 /// Get the system prompt for a specific mode with project and skills context.
 ///
-/// **Volatile-content-last invariant.** Blocks are appended in order from
-/// most-static to most-volatile so DeepSeek's KV prefix cache hits the
-/// longest possible byte prefix turn-over-turn:
+/// **Volatile-content-last invariant.** The cache-stable `Blocks[0]` prefix
+/// is the composed constitution — base prompt, project context, skills
+/// block, and `## Core Execution` discipline — and per-turn material follows
+/// it from most-static to most-volatile so DeepSeek's KV prefix cache hits
+/// the longest possible byte prefix turn-over-turn:
 ///
-///   1. shared constitution (compile-time constant)
-///   2. project context / fallback (workspace-static)
-///   3. skills block (skills-dir-static)
-///   4. `## Core Execution` (compile-time constant)
-///   5. compaction relay template (compile-time constant)
-///   6. relay block — file-backed; rewritten by `/compact` and on exit
+///   1. composed constitution prefix (compile-time constant, plus
+///      workspace-static project context and the skills-dir-static skills
+///      block)
+///   2. WorldState fragments (environment/memory/goal, the interactive
+///      continual-harness block, permissions, route, handoff, and imported
+///      project instructions) that can `render_diff` mid-session
+///   3. per-request trailers: authority recap, then locale closer
 ///
-/// Anything appended after a volatile block forfeits the cache for the rest
-/// of the request. New blocks belong above the relay boundary unless they
-/// themselves are turn-volatile. Working-set metadata is now injected into the
-/// latest user message as per-turn metadata instead of this system prompt.
+/// The compaction relay is not a system block: automatic compaction owns its
+/// structured successor brief and `/relay` appends `COMPACT_TEMPLATE` to that
+/// command's user message. Anything appended after a volatile block forfeits
+/// the cache for the rest of the request; new content belongs above the
+/// fragment boundary unless it is itself turn-volatile. Working-set metadata
+/// is injected into the latest user message as per-turn metadata instead of
+/// this system prompt.
 pub fn system_prompt_for_mode_with_context_and_skills(
     workspace: &Path,
     working_set_summary: Option<&str>,
@@ -3124,7 +3136,7 @@ mod tests {
     }
 
     #[test]
-    fn handoff_artifact_is_prepended_to_system_prompt_when_present() {
+    fn handoff_artifact_is_included_in_the_system_prompt_when_present() {
         let tmp = tempdir().expect("tempdir");
         let workspace = tmp.path();
         let handoff_dir = workspace.join(".deepseek");

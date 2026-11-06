@@ -42,6 +42,31 @@ fn lowercase_bash_schema_is_small_contract() {
 }
 
 #[test]
+fn lowercase_bash_description_pins_the_stream_and_persistence_claims() {
+    // These sentences were corrected by the model-facing-copy audit against
+    // the contract spawn path (shared_output_pipe + finish_contract_bash_result
+    // concatenation, one Command per call); pin them so a revert cannot
+    // restate separate-stream or persistent-shell semantics silently.
+    let description = LowercaseBashTool.description();
+    assert!(
+        description.contains("stdout and stderr arrive as one merged stream in arrival order"),
+        "{description}"
+    );
+    assert!(
+        description.contains("redirect a command's stderr to a file"),
+        "{description}"
+    );
+    assert!(
+        description.contains("Each call runs in a fresh shell"),
+        "{description}"
+    );
+    assert!(
+        !description.contains("return stdout and stderr"),
+        "the contract merges both streams; no separate-stream promise may return: {description}"
+    );
+}
+
+#[test]
 fn lowercase_bash_description_matches_the_timeout_it_actually_applies() {
     use super::{
         CONTRACT_BASH_FOREGROUND_DEFAULT_TIMEOUT_MS, contract_bash_legacy_input,
@@ -581,8 +606,60 @@ fn deleted_saved_workspace_reports_path_and_recovery_before_spawn() {
     let message = error.to_string();
     assert!(message.contains("saved session workspace is unavailable"));
     assert!(message.contains(&stale.display().to_string()));
-    assert!(message.contains("working_dir") || message.contains("cwd"));
-    assert!(message.contains("resume/fork"));
+    assert!(message.contains("Recreate the directory"));
+    assert!(message.contains("/workspace"));
+    assert!(
+        !message.contains("resume/fork"),
+        "resume re-anchors to the saved (missing) workspace and cannot recover"
+    );
+}
+
+#[test]
+fn explicit_non_directory_working_dir_gets_a_direct_fix_hint() {
+    let workspace = tempdir().expect("workspace");
+    let file = workspace.path().join("not-a-dir");
+    std::fs::write(&file, b"occupant").expect("write occupant file");
+    let mut manager = ShellManager::new(workspace.path().to_path_buf());
+
+    let error = execute_shell(
+        &mut manager,
+        "echo should-not-run",
+        file.to_str(),
+        1_000,
+        false,
+    )
+    .expect_err("non-directory explicit cwd must fail before shell spawn");
+    let message = error.to_string();
+    assert!(message.contains("requested working directory is not a directory"));
+    assert!(message.contains("Use a directory that exists"));
+    assert!(!message.contains("saved session workspace"));
+    // The requested-directory arm is the one model-reachable advice
+    // surface; resume re-anchors to the same directory and a fork copies
+    // it, so neither may be suggested here in any wording.
+    assert!(
+        !message.contains("resume"),
+        "requested-directory arm must not advise resume: {message}"
+    );
+    assert!(
+        !message.contains("fork"),
+        "requested-directory arm must not advise fork: {message}"
+    );
+}
+
+#[test]
+fn saved_workspace_that_is_a_file_gets_the_saved_workspace_advice() {
+    let parent = tempdir().expect("parent");
+    let file_workspace = parent.path().join("workspace-file");
+    std::fs::write(&file_workspace, b"occupant").expect("write occupant file");
+    let mut manager = ShellManager::new(file_workspace.clone());
+
+    let error = execute_shell(&mut manager, "echo should-not-run", None, 1_000, false)
+        .expect_err("saved workspace that is not a directory must fail before shell spawn");
+    let message = error.to_string();
+    assert!(message.contains("saved session workspace is not a directory"));
+    assert!(message.contains("Restore it as a directory"));
+    assert!(message.contains("/workspace"));
+    assert!(message.contains("/fork"));
 }
 
 #[test]

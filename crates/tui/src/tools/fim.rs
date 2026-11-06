@@ -53,6 +53,14 @@ enum FimError {
     PrefixNotFound(String),
     #[error("Suffix anchor not found after prefix anchor: '{0}'")]
     SuffixNotFound(String),
+    #[error(
+        "Prefix anchor matches {1} locations in the file: '{0}'. Use a longer anchor that appears exactly once."
+    )]
+    PrefixAmbiguous(String, usize),
+    #[error(
+        "Suffix anchor matches {1} locations after the prefix anchor: '{0}'. Use a longer anchor that appears exactly once."
+    )]
+    SuffixAmbiguous(String, usize),
     #[error("Prefix and suffix anchors overlap (suffix starts at {0}, prefix ends at {1})")]
     AnchorsOverlap(usize, usize),
     #[error("FIM API call failed: {0}")]
@@ -72,7 +80,10 @@ impl ToolSpec for FimEditTool {
          calls the active route's fill-in-the-middle completion endpoint to \
          generate replacement content; this requires the active provider to \
          expose a fill-in-the-middle completions endpoint, and the call fails \
-         otherwise."
+         otherwise. Each anchor must appear exactly once — the prefix anywhere \
+         in the file, the suffix after the prefix — and ambiguous anchors are \
+         refused with their match count (occurrences are counted without \
+         overlap)."
     }
 
     fn input_schema(&self) -> Value {
@@ -85,11 +96,11 @@ impl ToolSpec for FimEditTool {
                 },
                 "prefix_anchor": {
                     "type": "string",
-                    "description": "Text anchor marking the end of the prefix. Everything up to and including this anchor is kept as-is before the generated middle."
+                    "description": "Text anchor marking the end of the prefix. Everything up to and including this anchor is kept as-is before the generated middle. Must appear exactly once in the file (counted without overlap)."
                 },
                 "suffix_anchor": {
                     "type": "string",
-                    "description": "Text anchor marking the start of the suffix. Everything from this anchor onward is kept as-is after the generated middle."
+                    "description": "Text anchor marking the start of the suffix. Everything from this anchor onward is kept as-is after the generated middle. Must appear exactly once after the prefix anchor (counted without overlap)."
                 },
                 "max_tokens": {
                     "type": "integer",
@@ -129,14 +140,30 @@ impl ToolSpec for FimEditTool {
                 FimError::PrefixNotFound(prefix_anchor.to_string()).to_string(),
             )
         })?;
+        // Without this check an anchor that repeats would be matched only at
+        // its first occurrence and silently generate the middle at the wrong
+        // site, so ambiguity is refused instead of guessed.
+        let prefix_matches = content.matches(prefix_anchor).count();
+        if prefix_matches > 1 {
+            return Err(ToolError::execution_failed(
+                FimError::PrefixAmbiguous(prefix_anchor.to_string(), prefix_matches).to_string(),
+            ));
+        }
         let prefix_end = prefix_pos + prefix_anchor.len();
 
         // 3. Find suffix anchor (after prefix anchor)
-        let suffix_pos = content[prefix_end..].find(suffix_anchor).ok_or_else(|| {
+        let suffix_region = &content[prefix_end..];
+        let suffix_pos = suffix_region.find(suffix_anchor).ok_or_else(|| {
             ToolError::execution_failed(
                 FimError::SuffixNotFound(suffix_anchor.to_string()).to_string(),
             )
         })?;
+        let suffix_matches = suffix_region.matches(suffix_anchor).count();
+        if suffix_matches > 1 {
+            return Err(ToolError::execution_failed(
+                FimError::SuffixAmbiguous(suffix_anchor.to_string(), suffix_matches).to_string(),
+            ));
+        }
         let suffix_start = prefix_end + suffix_pos;
 
         // 4. Validate anchors don't overlap
@@ -199,5 +226,224 @@ mod tests {
         assert!(capabilities.contains(&ToolCapability::WritesFiles));
         assert!(!capabilities.contains(&ToolCapability::ReadOnly));
         assert!(!tool.is_read_only());
+    }
+
+    fn workspace_with(content: &str) -> (tempfile::TempDir, ToolContext) {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let context = ToolContext::new(tmp.path().to_path_buf());
+        std::fs::write(tmp.path().join("sample.txt"), content).expect("write fixture");
+        (tmp, context)
+    }
+
+    /// Run `execute` and return the error text; every caller asserts on the
+    /// specific error it expects.
+    async fn execution_error(input: serde_json::Value, context: &ToolContext) -> String {
+        FimEditTool::new(None, "fim-model".to_string())
+            .execute(input, context)
+            .await
+            .expect_err("expected the fim_edit call to fail")
+            .to_string()
+    }
+
+    #[tokio::test]
+    async fn ambiguous_prefix_anchor_is_refused_not_first_occurrence_edited() {
+        let (_tmp, context) = workspace_with("fn a() {}\nfn main() {}\nfn a() {}\nlet _ = a;\n");
+        let message = execution_error(
+            serde_json::json!({
+                "path": "sample.txt",
+                "prefix_anchor": "fn a() {}",
+                "suffix_anchor": "let _ = a;",
+            }),
+            &context,
+        )
+        .await;
+        assert!(message.contains("matches 2 locations"), "{message}");
+        assert!(message.contains("exactly once"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn ambiguous_suffix_anchor_is_refused() {
+        let (_tmp, context) = workspace_with("head\nreturn 1\nmid\nreturn 1\ntail\n");
+        let message = execution_error(
+            serde_json::json!({
+                "path": "sample.txt",
+                "prefix_anchor": "head",
+                "suffix_anchor": "return 1",
+            }),
+            &context,
+        )
+        .await;
+        assert!(
+            message.contains("Suffix anchor matches 2 locations"),
+            "{message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn unique_anchors_pass_validation_and_reach_the_fim_call() {
+        let (_tmp, context) = workspace_with("head\nmid\ntail\n");
+        // With no client configured the call fails at the API boundary; that
+        // error proves the anchor validation accepted the unique anchors.
+        let message = execution_error(
+            serde_json::json!({
+                "path": "sample.txt",
+                "prefix_anchor": "head",
+                "suffix_anchor": "tail",
+            }),
+            &context,
+        )
+        .await;
+        assert!(
+            message.contains("FIM API client not available"),
+            "unique anchors must reach the API boundary: {message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_prefix_anchor_is_refused_with_char_boundary_count() {
+        // An empty anchor matches at every char boundary including EOF, so
+        // the count is characters + 1 — not bytes + 1. The multi-byte
+        // fixture pins the char-boundary semantics against a byte-offset
+        // refactor ("hé\n" = 3 chars / 4 bytes → 4 locations, not 5).
+        let (_tmp, context) = workspace_with("hé\n");
+        let message = execution_error(
+            serde_json::json!({
+                "path": "sample.txt",
+                "prefix_anchor": "",
+                "suffix_anchor": "é",
+            }),
+            &context,
+        )
+        .await;
+        assert!(message.contains("matches 4 locations"), "{message}");
+        assert!(message.contains("exactly once"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn suffix_occurrences_before_the_prefix_do_not_count() {
+        // Only the region after the prefix participates in the uniqueness
+        // check: an earlier occurrence is invisible, and one suffix after
+        // the prefix passes validation.
+        let (_tmp, context) = workspace_with("return 1\nhead\nmid\nreturn 1\ntail\n");
+        let message = execution_error(
+            serde_json::json!({
+                "path": "sample.txt",
+                "prefix_anchor": "head",
+                "suffix_anchor": "return 1",
+            }),
+            &context,
+        )
+        .await;
+        assert!(
+            message.contains("FIM API client not available"),
+            "one suffix after the prefix must pass validation: {message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn suffix_only_before_the_prefix_is_not_found() {
+        let (_tmp, context) = workspace_with("return 1\nhead\nmid\ntail\n");
+        let message = execution_error(
+            serde_json::json!({
+                "path": "sample.txt",
+                "prefix_anchor": "head",
+                "suffix_anchor": "return 1",
+            }),
+            &context,
+        )
+        .await;
+        assert!(
+            message.contains("Suffix anchor not found after prefix anchor"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn fim_copy_pins_the_non_overlapping_counting_contract() {
+        // std matches() counts non-overlapping occurrences, so a
+        // self-similar anchor ("aa" in "aaa") passes with count 1. The
+        // copy must disclose that counting rule or "exactly once" reads
+        // as overlapping occurrences to the model.
+        let tool = FimEditTool::new(None, "fim-model".to_string());
+        let description = tool.description();
+        assert!(description.contains("exactly once"), "{description}");
+        assert!(
+            description.contains("counted without overlap"),
+            "{description}"
+        );
+        let schema = tool.input_schema();
+        let prefix = schema["properties"]["prefix_anchor"]["description"]
+            .as_str()
+            .expect("prefix_anchor description");
+        let suffix = schema["properties"]["suffix_anchor"]["description"]
+            .as_str()
+            .expect("suffix_anchor description");
+        assert!(prefix.contains("counted without overlap"), "{prefix}");
+        assert!(suffix.contains("counted without overlap"), "{suffix}");
+    }
+
+    #[tokio::test]
+    async fn empty_prefix_anchor_on_an_empty_file_passes_to_the_fim_call() {
+        // A non-empty file refuses an empty prefix because it matches at
+        // every char boundary. On an empty file the single boundary
+        // yields count 1, so validation passes and the call reaches the
+        // API boundary — the base behavior, not a refusal.
+        let (_tmp, context) = workspace_with("");
+        let message = execution_error(
+            serde_json::json!({
+                "path": "sample.txt",
+                "prefix_anchor": "",
+                "suffix_anchor": "",
+            }),
+            &context,
+        )
+        .await;
+        assert!(
+            message.contains("FIM API client not available"),
+            "empty prefix on an empty file must pass validation: {message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_suffix_after_an_eof_ending_prefix_passes_to_the_fim_call() {
+        // A prefix ending at EOF leaves an empty suffix region, where an
+        // empty suffix matches exactly once, so validation passes and the
+        // call reaches the API boundary — the base behavior, not a refusal.
+        let (_tmp, context) = workspace_with("tail anchor");
+        let message = execution_error(
+            serde_json::json!({
+                "path": "sample.txt",
+                "prefix_anchor": "tail anchor",
+                "suffix_anchor": "",
+            }),
+            &context,
+        )
+        .await;
+        assert!(
+            message.contains("FIM API client not available"),
+            "empty suffix after an EOF-ending prefix must pass validation: {message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn self_overlapping_prefix_is_counted_without_overlap() {
+        // "aa" overlaps itself inside "aaa": an overlapping counter would
+        // report 2 locations and refuse, but occurrences are counted
+        // without overlap — the rule the schema copy discloses — so the
+        // single site passes and the call reaches the API boundary.
+        let (_tmp, context) = workspace_with("aaa\nbbb\n");
+        let message = execution_error(
+            serde_json::json!({
+                "path": "sample.txt",
+                "prefix_anchor": "aa",
+                "suffix_anchor": "b\n",
+            }),
+            &context,
+        )
+        .await;
+        assert!(
+            message.contains("FIM API client not available"),
+            "a self-overlapping prefix with one non-overlapping site must pass validation: {message}"
+        );
     }
 }

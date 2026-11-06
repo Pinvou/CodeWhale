@@ -20,7 +20,9 @@ use std::path::Path;
 /// route, xlsx recalc caveat) and refreshes superseded shipped copies via
 /// [`SUPERSEDED_SHIPPED_BODY_DIGESTS`].
 /// Generation 12 respects host-provided built-in discovery entry points.
-const BUNDLED_SKILL_VERSION: &str = "12";
+/// Generation 13 refreshes bundled bodies stripped of dead short-description
+/// frontmatter.
+const BUNDLED_SKILL_VERSION: &str = "13";
 
 /// SHA-256 digests of bundled bodies shipped by the previous generation that
 /// this generation replaces. The non-destructive upgrade table (#4691) must
@@ -33,12 +35,24 @@ const BUNDLED_SKILL_VERSION: &str = "12";
 /// supported.
 const SUPERSEDED_SHIPPED_BODY_DIGESTS: &[(&str, &str)] = &[
     (
+        "best-of-n",
+        "b72d093fcbcf4e35185a2a6880cad24af03f764e279ba34ae47f7b449688213f",
+    ),
+    (
+        "delegate",
+        "169640cc236cf9eaae852843eb0f06c4f093f20e8fceb6b7a780ebf8f805d302",
+    ),
+    (
         "documents",
         "27ba3161ab9448245d6658efadccf955ee8f4ef2cda4f7b825a99c45b8bd66aa",
     ),
     (
         "docx",
         "fb2edb80df2119e42c1febcb5eae74c15092ba1e5dfbedf91ee45118ed9c7556",
+    ),
+    (
+        "fleet-manager",
+        "fa4369c7192553e986bb68644c7163a60e39fc6e530d4746d43830f2d369930a",
     ),
     (
         "mcp-builder",
@@ -63,6 +77,10 @@ const SUPERSEDED_SHIPPED_BODY_DIGESTS: &[(&str, &str)] = &[
     (
         "presentations",
         "ecddd5663a93bc1afca20ef2a5bdac26258a98557aa1a743797c0a5fa720a247",
+    ),
+    (
+        "skill-creator",
+        "6fb9e9212ad53b9ecc0e7bb8b6ee40e047a94b2b93f0bd6705d234cc082474d9",
     ),
     (
         "skill-installer",
@@ -136,8 +154,30 @@ const CONTRIBUTOR_ONBOARDING_BODY: &str =
 const FEISHU_BODY: &str = include_str!("../../assets/skills/feishu/SKILL.md");
 const MCP_DISCOVERY_BODY: &str = include_str!("../../assets/skills/mcp-discovery/SKILL.md");
 
-// Legacy v4 body retained solely for digest-based safe retirement (#4691).
+// v4-best-practices ships as a plain asset (not in BUNDLED_SKILLS); it is
+// kept for byte-exact safe retirement (#4691), never auto-installed.
 const V4_BEST_PRACTICES_BODY: &str = include_str!("../../assets/skills/v4-best-practices/SKILL.md");
+
+/// SHA-256 of the v4-best-practices body shipped before the tool-name fix;
+/// that body taught the retired `read_file`/`edit_file` names. Pinning the
+/// digest (not the bytes) lets [`retire_unchanged_v4_best_practices`] keep
+/// retiring unmodified legacy installs after the shipped asset moves on,
+/// without duplicating the historic text into the binary. The historical
+/// bytes live in the `system/tests.rs` fixture, which asserts on every run
+/// that they still hash to this digest, so drift on either side fails the
+/// suite.
+const V4_BEST_PRACTICES_LEGACY_BODY_SHA256: &str =
+    "cca76c3e988219304eb23cf86e07f9972d2f74480f37d1bcc78245927cd3f2a3";
+
+/// True when `body` hashes to the previously shipped v4-best-practices body
+/// (see [`V4_BEST_PRACTICES_LEGACY_BODY_SHA256`]).
+fn is_legacy_v4_best_practices_body(body: &str) -> bool {
+    let digest: String = Sha256::digest(body.as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    digest == V4_BEST_PRACTICES_LEGACY_BODY_SHA256
+}
 
 struct BundledSkill {
     name: &'static str,
@@ -385,7 +425,7 @@ pub fn bundled_skill_generation() -> &'static str {
     BUNDLED_SKILL_VERSION
 }
 
-/// Legacy v4-best-practices body digest helper (not in BUNDLED_SKILLS).
+/// Current v4-best-practices body (not in BUNDLED_SKILLS).
 fn v4_best_practices_body() -> &'static str {
     V4_BEST_PRACTICES_BODY
 }
@@ -522,9 +562,9 @@ pub fn install_system_skills(skills_dir: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Delete `v4-best-practices` only when the installed SKILL.md exactly matches
-/// the last shipped bundled body (byte-for-byte). Modified or user-owned copies
-/// are preserved.
+/// Delete `v4-best-practices` only when the installed SKILL.md is
+/// byte-identical to the current asset or hash-identical to the previously
+/// shipped body. Modified or user-owned copies are preserved.
 fn retire_unchanged_v4_best_practices(skills_dir: &Path) -> std::io::Result<bool> {
     let dir = skills_dir.join("v4-best-practices");
     let file = dir.join("SKILL.md");
@@ -532,7 +572,7 @@ fn retire_unchanged_v4_best_practices(skills_dir: &Path) -> std::io::Result<bool
         return Ok(false);
     }
     let existing = fs::read_to_string(&file)?;
-    if existing != v4_best_practices_body() {
+    if existing != v4_best_practices_body() && !is_legacy_v4_best_practices_body(&existing) {
         return Ok(false);
     }
     fs::remove_dir_all(&dir)?;
