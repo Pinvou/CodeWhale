@@ -5,7 +5,7 @@ import { organizationLabel } from './organization-labels.js';
 import { OrganizationAdminClient, organizationID, organizationUnitIDs, organizationVersion } from './organization-client.js';
 import { OrganizationActionForm } from './OrganizationActionForm.jsx';
 import { OrganizationNameFeedback } from './OrganizationNameFeedback.jsx';
-import { acceptedRenamedUnit } from './organization-name-feedback.js';
+import { acceptedRenamedUnit, acceptedRenamedOrganization } from './organization-name-feedback.js';
 import { hasPermission } from './authorization-ui.js';
 
 const text = value => { if (!value.trim()) throw new Error('INVALID_ORGANIZATION_INPUT'); return value.trim(); };
@@ -21,6 +21,7 @@ export function OrganizationAdminWorkspace({ client, me, language, route }) {
  const [error, setError] = useState(''), [listBusy, setListBusy] = useState(false), [detailBusy, setDetailBusy] = useState(false);
  const generation = useRef(0), selectionGeneration = useRef(0), confirmedRef = useRef(null);
  const [nameChange, setNameChange] = useState(null);
+ const [pageReadGeneration, setPageReadGeneration] = useState(0), [detailReadGeneration, setDetailReadGeneration] = useState(0);
  const renamedUnitNode = useRef(null);
  const busy = listBusy || detailBusy;
  const owner = `${me.user_id}:${me.active_context?.platform_authorization_version || 0}:${client.financeSessionEpoch || 0}`;
@@ -30,24 +31,24 @@ export function OrganizationAdminWorkspace({ client, me, language, route }) {
  // but never an actor, authority, client or selected-organization change.
  const nameDrafts = useMemo(() => new Map(), [api, owner, selected, canRenameOrganization, canRenameUnit]);
  useEffect(() => { setNameChange(null); }, [api, owner, selected]);
- const load = async (target = '', search = query) => { const stamp = ++generation.current; setListBusy(true); setError(''); try { const value = await api.list({ cursor: target, q: search, ...(route ? { status: routeStatus } : {}) }); if (stamp === generation.current) { setPage(value); setCursor(target); } } catch (reason) { if (stamp === generation.current) setError(reason.status === 403 ? copy.permissions : copy.unavailable); } finally { if (stamp === generation.current) setListBusy(false); } };
- const loadDetail = async (org = selected, target = '') => {
+ const load = async (target = '', search = query, { fresh = false } = {}) => { const stamp = ++generation.current; setListBusy(true); setError(''); try { const value = await api.list({ cursor: target, q: search, ...(route ? { status: routeStatus } : {}) }, undefined, { fresh }); if (stamp === generation.current) { setPage(value); setPageReadGeneration(stamp); setCursor(target); } } catch (reason) { if (stamp === generation.current) setError(reason.status === 403 ? copy.permissions : copy.unavailable); } finally { if (stamp === generation.current) setListBusy(false); } };
+ const loadDetail = async (org = selected, target = '', { fresh = false } = {}) => {
   if (!org) return;
   const stamp = ++selectionGeneration.current; setDetail(null); setError(''); setDetailBusy(true);
   if (route) {
    try {
-    const summary = await api.summary(org);
+    const summary = await api.summary(org, undefined, { fresh });
     if (stamp !== selectionGeneration.current) return;
-    if (summary.status === 'DELETED') { setDetail({ summary, units: { items: [], structure_version: 0 }, members: { items: [] }, readiness: null }); setMemberCursor(''); return; }
+    if (summary.status === 'DELETED') { setDetail({ summary, units: { items: [], structure_version: 0 }, members: { items: [] }, readiness: null }); setDetailReadGeneration(stamp); setMemberCursor(''); return; }
     const results = await Promise.allSettled([api.read(org, 'units'), api.members(org, target, undefined, { q: memberQuery, role: memberRole }), can('delete') && summary.status === 'DISABLED' ? api.read(org, 'deletion-readiness') : null]);
     if (stamp !== selectionGeneration.current) return;
     const [u,m,r] = results;
-    setDetail({ summary, units: u.status === 'fulfilled' ? u.value : { items: [], structure_version: 0 }, unitsError: u.status === 'rejected' ? u.reason : null, members: m.status === 'fulfilled' ? m.value : { items: [] }, membersError: m.status === 'rejected' ? m.reason : null, readiness: r.status === 'fulfilled' ? r.value : null, readinessError: r.status === 'rejected' ? r.reason : null }); setMemberCursor(target);
+    setDetail({ summary, units: u.status === 'fulfilled' ? u.value : { items: [], structure_version: 0 }, unitsError: u.status === 'rejected' ? u.reason : null, members: m.status === 'fulfilled' ? m.value : { items: [] }, membersError: m.status === 'rejected' ? m.reason : null, readiness: r.status === 'fulfilled' ? r.value : null, readinessError: r.status === 'rejected' ? r.reason : null }); setDetailReadGeneration(stamp); setMemberCursor(target);
    } catch (reason) { if (stamp === selectionGeneration.current) setError(reason.status === 403 ? copy.permissions : reason.status === 404 ? copy.notFound : reason.status === 409 ? copy.conflict : copy.unavailable); }
    finally { if (stamp === selectionGeneration.current) setDetailBusy(false); }
    return;
   }
-  try { const [units, members, readiness] = await Promise.all([api.read(org, 'units'), api.members(org, target), can('delete') ? api.read(org, 'deletion-readiness') : null]); if (stamp === selectionGeneration.current) { setDetail({ units, members, readiness }); setMemberCursor(target); } }
+  try { const [units, members, readiness] = await Promise.all([api.read(org, 'units'), api.members(org, target), can('delete') ? api.read(org, 'deletion-readiness') : null]); if (stamp === selectionGeneration.current) { setDetail({ units, members, readiness }); setDetailReadGeneration(stamp); setMemberCursor(target); } }
   catch (reason) { if (stamp === selectionGeneration.current) setError(reason.status === 403 ? copy.permissions : copy.unavailable); }
   finally { if (stamp === selectionGeneration.current) setDetailBusy(false); }
  };
@@ -59,9 +60,11 @@ export function OrganizationAdminWorkspace({ client, me, language, route }) {
  const confirmed = change => {
   if (change) {
    if (change.client !== client || change.owner !== owner || change.organizationID !== selected) return;
-   setNameChange(change);
+   setNameChange(change.operation === 'rename' ? { ...change, requiredReadGeneration: route ? selectionGeneration.current + 1 : generation.current + 1 } : change);
   }
-  void load(cursor); if (selected) void loadDetail(selected, memberCursor);
+  // Reuse the applied route, never an unsubmitted search or unaccepted cursor.
+  void load(route ? routeCursor : cursor, route ? routeQuery : query, { fresh: true });
+  if (selected) void loadDetail(selected, memberCursor, { fresh: true });
  };
  confirmedRef.current = confirmed;
  const action = (scope, title, fields, prepare, operation, target = '', confirm = false, presentation = {}) => {
@@ -71,15 +74,17 @@ export function OrganizationAdminWorkspace({ client, me, language, route }) {
   const targetName = unit?.name || member?.display_name || member?.user_code;
   const actionTarget = targetName ? `${targetName} (${target})` : target;
   const description = operation === 'deleteUnit' ? copy.deleteUnitDescription : operation === 'status' ? current?.status === 'ACTIVE' ? copy.disableOrganizationDescription : copy.enableOrganizationDescription : '';
-  return <OrganizationActionForm dialog={Boolean(route)} appearance={route ? 'admin' : 'default'} dangerous={['delete', 'deleteUnit', 'remove', 'transfer'].includes(operation) || operation === 'status' && current?.status === 'ACTIVE'} primaryTrigger={['create', 'unit', 'add'].includes(operation)} submitLabel={operation === 'rename' || operation === 'renameUnit' ? copy.saveChanges : ''} key={scope === 'create' ? scope : `${selected}:${scope}`} client={client} owner={scope === 'create' ? owner : `${owner}:${selected}`} copy={copy} scope={scope} editBeforeSubmit={operation === 'rename' || operation === 'renameUnit'} editDrafts={operation === 'rename' || operation === 'renameUnit' ? nameDrafts : undefined} confirmationTarget={scope === 'create' ? '' : [organization, actionTarget].filter(Boolean).join(' · ')} description={description} title={title} fields={fields.map(field => ({ ...field, ...(field.name === 'name' && ['unit', 'renameUnit'].includes(operation) ? { nameRule: 'unit' } : {}), lookup: Boolean(route && field.lookup && hasPermission(me, 'platform.users.read')) }))} prepare={prepare} action={(facts, key) => api.write(operation === 'create' ? '' : selected, operation, facts, key, target)} onConfirmed={operation === 'renameUnit' ? result => confirmedRef.current?.({ client, owner, organizationID: selected, operation, target, result }) : () => confirmedRef.current?.()} confirm={confirm} {...presentation} />;
+  return <OrganizationActionForm dialog={Boolean(route)} appearance={route ? 'admin' : 'default'} dangerous={['delete', 'deleteUnit', 'remove', 'transfer'].includes(operation) || operation === 'status' && current?.status === 'ACTIVE'} primaryTrigger={['create', 'unit', 'add'].includes(operation)} submitLabel={operation === 'rename' || operation === 'renameUnit' ? copy.saveChanges : ''} key={scope === 'create' ? scope : `${selected}:${scope}`} client={client} owner={scope === 'create' ? owner : `${owner}:${selected}`} copy={copy} scope={scope} editBeforeSubmit={operation === 'rename' || operation === 'renameUnit'} editDrafts={operation === 'rename' || operation === 'renameUnit' ? nameDrafts : undefined} confirmationTarget={scope === 'create' ? '' : [organization, actionTarget].filter(Boolean).join(' · ')} description={description} title={title} fields={fields.map(field => ({ ...field, ...(field.name === 'name' && ['unit', 'renameUnit'].includes(operation) ? { nameRule: 'unit' } : field.name === 'name' && ['create', 'rename'].includes(operation) ? { nameRule: 'organization' } : {}), lookup: Boolean(route && field.lookup && hasPermission(me, 'platform.users.read')) }))} prepare={prepare} action={(facts, key) => api.write(operation === 'create' ? '' : selected, operation, facts, key, target)} onConfirmed={['renameUnit', 'rename'].includes(operation) ? result => confirmedRef.current?.({ client, owner, organizationID: selected, operation, target, result }) : () => confirmedRef.current?.()} confirm={confirm} {...presentation} />;
  };
  const current = route && detail?.summary?.organization_id === selected ? detail.summary : page?.items.find(item => item.organization_id === selected);
  const visibleNameChange = nameChange?.client === client && nameChange.owner === owner && nameChange.organizationID === selected && (!route || routeID === selected) ? nameChange : null;
  const renamedUnit = acceptedRenamedUnit(visibleNameChange, !detailBusy && !detail?.unitsError ? detail?.units : undefined);
- const nameFeedback = visibleNameChange && <OrganizationNameFeedback copy={copy} unit={renamedUnit} refreshing={detailBusy} targetRef={renamedUnitNode} />;
+ const nameFeedbackKind = visibleNameChange?.operation === 'rename' ? 'organization' : 'unit';
+ const renamedOrganization = acceptedRenamedOrganization(visibleNameChange, route ? detail?.summary : current, route ? detailReadGeneration : pageReadGeneration, route ? selectionGeneration.current : generation.current);
+ const nameFeedback = visibleNameChange && <OrganizationNameFeedback copy={copy} kind={nameFeedbackKind} unit={renamedUnit} organization={renamedOrganization} refreshing={nameFeedbackKind === 'organization' ? route ? detailBusy : listBusy : detailBusy} targetRef={renamedUnitNode} />;
  const units = detail?.units.items.filter(item => item.status === 'ACTIVE').map(item => ({ value: item.unit_id, label: item.name })) || [];
- if (route) return <OrganizationAdminPortalWorkspace {...{ client, me, language, copy, route, page, query, setQuery, selected, current, detail, error, listBusy, detailBusy, roles, units, memberCursor, memberPrevious, setMemberPrevious, previous, setPrevious, can, action, memberQuery, memberRole, nameFeedback, renamedUnit, renamedUnitNode }} onRefresh={() => { if (route && detail?.membersError?.status === 410 && routeMemberCursor) route.navigate('organizations', { member_cursor: null }, 'replace'); else if (selected) void loadDetail(selected, memberCursor); else void load(route ? routeCursor : cursor, route ? routeQuery : query); }} />;
- return <section className="adm-panel"><h2>{copy.title}</h2><form onSubmit={event => { event.preventDefault(); setPrevious([]); void load('', query); }}><label>{copy.search}<input value={query} onChange={event => setQuery(event.target.value)} /></label><button disabled={busy}>{copy.refresh}</button></form>{error && <p role="alert">{error}</p>}{busy && <p role="status">{copy.loading}</p>}
+ if (route) return <OrganizationAdminPortalWorkspace {...{ client, me, language, copy, route, page, query, setQuery, selected, current, detail, error, listBusy, detailBusy, roles, units, memberCursor, memberPrevious, setMemberPrevious, previous, setPrevious, can, action, memberQuery, memberRole, nameFeedback, nameFeedbackKind, renamedUnit, renamedUnitNode }} onRefresh={() => { if (route && detail?.membersError?.status === 410 && routeMemberCursor) route.navigate('organizations', { member_cursor: null }, 'replace'); else if (selected) void loadDetail(selected, memberCursor, { fresh: true }); else void load(route ? routeCursor : cursor, route ? routeQuery : query, { fresh: true }); }} />;
+ return <section className="adm-panel"><h2>{copy.title}</h2><form onSubmit={event => { event.preventDefault(); setPrevious([]); void load('', query, { fresh: true }); }}><label>{copy.search}<input value={query} onChange={event => setQuery(event.target.value)} /></label><button disabled={busy}>{copy.refresh}</button></form>{error && <p role="alert">{error}</p>}{busy && <p role="status">{copy.loading}</p>}
   {page?.items.map(org => <button key={org.organization_id} disabled={busy} aria-pressed={org.organization_id === selected} onClick={() => setSelected(org.organization_id)}>{org.name} · {organizationLabel(copy, 'Status', org.status)}</button>)}
   <nav><button disabled={busy || !previous.length} onClick={() => { const next = [...previous], target = next.pop(); setPrevious(next); void load(target); }}>{copy.previous}</button><button disabled={busy || !page?.next_cursor} onClick={() => { setPrevious(value => [...value, cursor]); void load(page.next_cursor); }}>{copy.next}</button></nav>
   {can('create') && action('create', copy.create, [{ name: 'name' }, { name: 'owner' }], values => ({ name: text(values.name), owner_user_id: organizationID(values.owner) }), 'create')}

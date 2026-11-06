@@ -1,5 +1,10 @@
 export const organizationCopy = {
  zh: {
+  organizationNameRules: "必填，最多120个字符；组合字符按多个字符计算。系统会去除首尾空白。未删除组织的名称在全平台不能重复（不区分大小写）。",
+  organizationRenameConfirmed: "组织改名已确认。",
+  organizationNameRefreshing: "正在读取最新组织信息。",
+  organizationNameReadConfirmed: "最新读取的组织名称：",
+  organizationNameReadUnconfirmed: "最新组织信息尚未确认，请刷新核实。",
   unitNameRules: "必填，最多120个字符；组合字符按多个字符计算。系统会去除首尾空白。同一组织、同一上级下，未删除单元的名称不能重复（不区分大小写）。",
   nameRequired: "请输入名称，不能仅包含空白。",
   nameTooLong: "名称最多120个字符；组合字符按多个字符计算。",
@@ -68,6 +73,11 @@ export const organizationCopy = {
   create: '创建组织', rename: '修改组织名称', disable: '停用', enable: '启用', delete: '删除组织', readiness: '检查删除条件', blockers: '阻断条件', addMember: '添加成员', renameUnit: '修改单元名称', deleteUnit: '删除单元', previous: '上一页', next: '下一页', search: '搜索名称',
  },
  en: {
+  organizationNameRules: "Required, up to 120 characters; combining marks count separately. Leading and trailing whitespace is removed. Undeleted organizations must have distinct names across the platform, ignoring case.",
+  organizationRenameConfirmed: "Organization rename confirmed. ",
+  organizationNameRefreshing: "Reading the latest organization information.",
+  organizationNameReadConfirmed: "Latest confirmed organization name: ",
+  organizationNameReadUnconfirmed: "The latest organization information is unconfirmed. Refresh to verify.",
   unitNameRules: "Required, up to 120 characters; combining marks count separately. Leading and trailing whitespace is removed. Undeleted units in the same organization and under the same parent must have distinct names, ignoring case.",
   nameRequired: "Enter a name containing more than whitespace.",
   nameTooLong: "Use up to 120 characters; combining marks count separately.",
@@ -136,6 +146,11 @@ export const organizationCopy = {
   create: 'Create organization', rename: 'Rename organization', disable: 'Disable', enable: 'Enable', delete: 'Delete organization', readiness: 'Check deletion conditions', blockers: 'Blocking conditions', addMember: 'Add member', renameUnit: 'Rename unit', deleteUnit: 'Delete unit', previous: 'Previous page', next: 'Next page', search: 'Search names',
  },
  ja: {
+  organizationNameRules: "必須、120文字以内。結合文字は個別に数えます。前後の空白は除去されます。削除されていない組織名は、プラットフォーム全体で大文字と小文字を区別せず重複できません。",
+  organizationRenameConfirmed: "組織名の変更を確認しました。",
+  organizationNameRefreshing: "最新の組織情報を読み込み中です。",
+  organizationNameReadConfirmed: "最後に確認した組織名：",
+  organizationNameReadUnconfirmed: "最新の組織情報は未確認です。更新して確認してください。",
   unitNameRules: "必須、120文字以内。結合文字は個別に数えます。前後の空白は除去されます。同一組織・同一親の配下では、削除されていない単位名は大文字と小文字を区別せず重複できません。",
   nameRequired: "空白以外の文字を含む名称を入力してください。",
   nameTooLong: "120文字以内で入力してください。結合文字は個別に数えます。",
