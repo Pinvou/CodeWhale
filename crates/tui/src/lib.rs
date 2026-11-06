@@ -4729,10 +4729,13 @@ async fn run_doctor(
         strict_icon, strict_tool_mode.message
     );
     if let Some(recommended) = strict_tool_mode.recommended_base_url.as_deref() {
-        println!(
-            "    Use the {} endpoint for DeepSeek strict schemas.",
-            crate::doctor::structural_url_authority(recommended)
-        );
+        // The recommendation is a built-in constant, never a configured
+        // URL, so its path must survive verbatim: the authority-only
+        // redaction used for configured endpoints would render
+        // `https://api.deepseek.com/beta` as `https://api.deepseek.com`,
+        // and the bare host is exactly where the chat wire still strips
+        // `function.strict`.
+        println!("    Use the {recommended} endpoint for DeepSeek strict schemas.");
     }
     let capability = crate::config::provider_capability(config.api_provider(), &api_target.model);
     if let Some(alias) = capability.alias_deprecation.as_ref() {
@@ -7560,8 +7563,12 @@ fn doctor_strict_tool_mode_status(config: &Config) -> DoctorStrictToolModeStatus
             enabled: true,
             status: "official_route",
             function_strict_sent: true,
+            // "DeepSeek-family", not "official": the gate also accepts the
+            // legacy `api.deepseeki.com` compat host, which is not an
+            // official endpoint (docs/REBRAND.md) — the same wording the
+            // provider_mismatch arm uses ("recognized").
             message: "enabled; the Anthropic wire forwards function.strict \
-                      untranslated on this official DeepSeek endpoint"
+                      untranslated on this DeepSeek-family endpoint"
                 .to_string(),
             recommended_base_url: None,
         };
@@ -7594,7 +7601,10 @@ fn doctor_strict_tool_mode_status(config: &Config) -> DoctorStrictToolModeStatus
             enabled: true,
             status: "official_route",
             function_strict_sent: true,
-            message: "enabled; the strict tool pipeline acts on this official DeepSeek route"
+            // "DeepSeek-family": the arm also covers the legacy
+            // `api.deepseeki.com` compat host, which is recognized but not
+            // official (docs/REBRAND.md).
+            message: "enabled; the strict tool pipeline acts on this DeepSeek-family route"
                 .to_string(),
             recommended_base_url: None,
         },
@@ -7607,10 +7617,11 @@ fn doctor_strict_tool_mode_report_json(status: &DoctorStrictToolModeStatus) -> s
         "status": status.status,
         "function_strict_sent": status.function_strict_sent,
         "message": status.message,
-        "recommended_base_url": status
-            .recommended_base_url
-            .as_deref()
-            .map(crate::doctor::structural_url_authority),
+        // Verbatim, not authority-redacted: the recommendation is a
+        // built-in constant, and its `/beta` path is the whole point —
+        // the redacted `https://api.deepseek.com` is a URL where the
+        // chat wire still strips `function.strict`.
+        "recommended_base_url": status.recommended_base_url,
     })
 }
 
@@ -14054,9 +14065,13 @@ mod doctor_endpoint_tests {
             status.recommended_base_url.as_deref(),
             Some(crate::config::DEFAULT_DEEPSEEK_BASE_URL)
         );
+        // The recommendation ships with its `/beta` path intact — the
+        // bare `https://api.deepseek.com` authority is exactly where the
+        // chat wire still strips `function.strict`, so a path-stripped
+        // recommendation would send the user back into this same verdict.
         assert_eq!(
             doctor_strict_tool_mode_report_json(&status)["recommended_base_url"],
-            "https://api.deepseek.com"
+            "https://api.deepseek.com/beta"
         );
     }
 
@@ -14143,7 +14158,10 @@ mod doctor_endpoint_tests {
 
         assert_eq!(status.status, "official_route");
         assert!(status.function_strict_sent);
-        assert!(status.message.contains("official DeepSeek route"));
+        // "DeepSeek-family", not "official": the arm also covers the legacy
+        // api.deepseeki.com compat host, which is recognized but not
+        // official (docs/REBRAND.md).
+        assert!(status.message.contains("DeepSeek-family route"));
         assert!(status.recommended_base_url.is_none());
     }
 
