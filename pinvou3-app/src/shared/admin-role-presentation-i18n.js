@@ -574,3 +574,12 @@ export const adminRolePresentationCopy = {
     "expiredNotice": "この付与は期限切れです。"
   }
 };
+
+
+// Read-only validity labels are separate from grant-form blank-value guidance.
+const bindingValidityCopy = {
+  zh: { validFrom: '生效时间', validUntil: '到期时间', noExpiry: '无到期时间' },
+  en: { validFrom: 'Starts at', validUntil: 'Expires at', noExpiry: 'No expiry' },
+  ja: { validFrom: '開始日時', validUntil: '終了日時', noExpiry: '無期限' },
+};
+for (const language of ['zh', 'en', 'ja']) Object.assign(adminRolePresentationCopy[language], bindingValidityCopy[language]);

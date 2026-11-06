@@ -62,7 +62,7 @@ export function PlatformRoleGrantDialog({ words, copy, client, owner, canSearchU
         <div><dt>{words.user}</dt><dd>{userLabel(selectedUser) || command.user_id}<code>{command.user_id}</code></dd></div>
         <div><dt>{words.role}</dt><dd>{platformRoleName(words, command.role_code)}<code>{command.role_code}</code></dd></div>
         <div><dt>{words.permissionCount}</dt><dd>{roles.find(role => role.code === command.role_code)?.permissions.length ?? '—'}</dd></div>
-        <div><dt>{words.scope}</dt><dd>{words.scopes.PLATFORM}</dd></div><div><dt>{words.validity}</dt><dd>{date(command.starts_at)} → {date(command.expires_at)}</dd></div><div><dt>{copy.reason}</dt><dd>{command.reason || words.notProvided}</dd></div>
+        <div><dt>{words.scope}</dt><dd>{words.scopes.PLATFORM}</dd></div><div><dt>{words.validity}</dt><dd><div>{words.validFrom}: {date(command.starts_at)}</div><div>{words.validUntil}: {command.expires_at == null ? words.noExpiry : date(command.expires_at)}</div></dd></div><div><dt>{copy.reason}</dt><dd>{command.reason || words.notProvided}</dd></div>
       </dl><p className="adm-role-risk-note">{words.authorizationImpact}</p><div className="adm-role-drawer-foot"><button type="button" disabled={busy} onClick={() => setStep(2)}>{words.previous}</button><button type="button" className="adm-role-primary" disabled={busy} onClick={onConfirm}>{busy ? copy.loading : words.confirmAndGrant}</button></div></section>}
     </div>
   </PortalDialog>;
