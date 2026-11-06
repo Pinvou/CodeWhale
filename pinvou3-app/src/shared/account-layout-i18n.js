@@ -118,3 +118,9 @@ Object.assign(adminLayoutCopy.ja, { userMembershipStatus: 'メンバー状態', 
 Object.assign(adminLayoutCopy.zh, { userDetailsTitle: '用户详情', backToUserList: '返回用户列表' });
 Object.assign(adminLayoutCopy.en, { userDetailsTitle: 'User details', backToUserList: 'Back to user list' });
 Object.assign(adminLayoutCopy.ja, { userDetailsTitle: 'ユーザー詳細', backToUserList: 'ユーザー一覧に戻る' });
+
+Object.assign(adminLayoutCopy.zh, { identifierActions: { ...{"pending":"正在复制…","copied":"已复制完整值","failed":"复制失败，请展开完整值后手动复制。","unavailable":"当前无法使用剪贴板，请展开完整值后手动复制。","showFull":"展开完整值","collapse":"收起完整值"}, copy: label => `复制${label}` } });
+
+Object.assign(adminLayoutCopy.en, { identifierActions: { ...{"pending":"Copying…","copied":"Full value copied","failed":"Copy failed. Expand the full value and copy it manually.","unavailable":"Clipboard unavailable. Expand the full value and copy it manually.","showFull":"Show full value","collapse":"Collapse full value"}, copy: label => `Copy ${label}` } });
+
+Object.assign(adminLayoutCopy.ja, { identifierActions: { ...{"pending":"コピー中…","copied":"完全な値をコピーしました","failed":"コピーできません。完全な値を表示して手動でコピーしてください。","unavailable":"クリップボードを利用できません。完全な値を表示して手動でコピーしてください。","showFull":"完全な値を表示","collapse":"完全な値を折りたたむ"}, copy: label => `${label}をコピー` } });

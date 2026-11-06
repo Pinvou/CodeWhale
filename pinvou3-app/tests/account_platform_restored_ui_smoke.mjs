@@ -711,7 +711,12 @@ try {
   });
   await run('organization detail has four original URL sections, server member search and directory return', async () => {
     await fresh('?mode=admin&section=organizations&organization_q=sample');
-    await page.waitForSelector('.adm-organization-directory .adm-name-link'); await page.click('.adm-organization-directory .adm-name-link');
+    await page.waitForSelector('.adm-organization-directory .adm-name-link');
+    assert.deepEqual(await page.$eval('.adm-organization-directory .adm-name-link', node => {
+      const target = new URL(node.href);
+      return { tag: node.tagName, pathname: target.pathname, section: target.searchParams.get('section'), query: target.searchParams.get('organization_q'), idMatchesRow: target.searchParams.get('organization_id') === node.closest('tr').querySelector('.adm-identifier code').textContent, tab: target.searchParams.get('organization_tab'), memberCursor: target.searchParams.get('member_cursor') };
+    }), { tag: 'A', pathname: new URL(page.url()).pathname, section: 'organizations', query: 'sample', idMatchesRow: true, tab: 'overview', memberCursor: null });
+    await page.click('.adm-organization-directory .adm-name-link');
     await page.waitForSelector('.adm-organization-header');
     assert.equal(await page.$$eval('.adm-organization-directory .adm-tabs button', nodes => nodes.length), 4);
     await page.reload(); await page.waitForSelector('.adm-organization-header');

@@ -124,3 +124,9 @@ Account 的 `TestRestoredAdminReadsWithPublicMigrationsAndRuntimeActor` 使用�
 组织改名既有204回执没有profile，不能把草稿当已保存名称。显示已确认写后，继续原受权summary/directory刷新；只有同canonical organization ID、写确认后的且对应当前最新读取代次的已接受资料，才标为已确认名称。旧缓存、迟到读和后续刷新失败只显示读取未确认，不误称改名未执行；头部与既有目录仍使用权威读结果，不从草稿赋值。组织和单元共用相同反馈/字段样式，组织不添加单元定位按钮。
 
 UI041写后刷新在真实读取生产者 opt-in fresh：list/summary先按原完整资源（含已应用q/status/cursor或canonical组织ID）退休本client同URL的在途entry，再调用原request/DTO校验。默认读仍共享；预取消signal不退休其他健康读取，fresh能力不支持时不静默降级。所有confirmed写（含create）复用该边界；直接显式刷新亦使用它，410成员游标恢复保持原先replace导航分支，不新增写或许诺所有读取资源已fresh。旧entry迟到cleanup不能删除新entry，读取失败保留写确认并可继续新读，不重做原mutation。
+
+组织目录名称使用现有adminRouteLocation构造标准链接，普通点击仍经过原route.navigate保护，修改键/新标签使用真实href；应用中的查询、筛选、游标与语言参数沿原路由合同保留。标识缩略仅为CSS显示，展开读取与复制始终使用原完整字符串；复制控件以当前client、操作者/授权/会话、route和原值隔离回执，拒绝/能力不可用可就地恢复，不自动写剪贴板。系统已发出的写入无法撤销，旧回执会失效。沿用管理台颜色、字级和焦点样式；真实浏览器/剪贴板/窄屏视觉尚待独立验证。
+
+标识复制同时核对父层已接受的会话/平台授权代次和当前实际client围栏；会话退休或观察到高于已接受版本的平台授权时，即使父层尚未刷新也不再发起或接受旧复制回执。子控件自身重绘不收养新权限；父接受新版本后恢复显式复制。首次相同/较低平台版本及无关个人、组织或context推进不误禁，不比较全局金融查询代次，不自动重写系统剪贴板。
+
+实际管理台初次加载、focus/授权观察刷新及运营刷新统一从真实session→authorization生产同一冻结快照（client、已验证authorization、session完成后/authorization读取前的epoch），沿原generation/当前client或disposed围栏发布。guest/logout及原显式清空路径清除快照；普通focus/授权观察刷新失败时保留旧快照并进入error状态，工作区随ready门隐藏，下一次成功获取后整体替换。组织目录复制只接收该快照的epoch；搜索、语言、路由或Retained重挂即使完成新列表，也不能给旧身份重取live epoch。其它工作区原key与业务语义保留；完整Root/Portal、浏览器和真实剪贴板未作运行声明。
