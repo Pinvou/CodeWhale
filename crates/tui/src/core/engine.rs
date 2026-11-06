@@ -3444,6 +3444,19 @@ impl Engine {
                         .accept_idle_shutdown(request.ready, request.commit)
                         .await
                     {
+                        // Committed. Anything arriving past the handshake is a
+                        // host contract violation: every send had already
+                        // returned `Ok`, and the engine drops these with it, so
+                        // surface the loss instead of dropping silently.
+                        // `reserve()` permits cannot be observed here — the
+                        // host contract must exclude them before this point.
+                        let residual = self.count_residual_inputs();
+                        if residual > 0 {
+                            tracing::warn!(
+                                residual,
+                                "engine retired with residual inputs queued after the retirement commit"
+                            );
+                        }
                         break;
                     }
                 }

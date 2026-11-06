@@ -2071,6 +2071,73 @@ impl ShellManager {
         }
     }
 
+    /// Insert a session-owned record for retirement-check tests without
+    /// spawning: `running` selects the live vs finished shape. The record is
+    /// finished-but-unreported when not running, exactly the state the
+    /// retirement boundary must refuse on.
+    #[cfg(test)]
+    pub(crate) fn seed_session_shell_for_test(
+        &mut self,
+        id: impl Into<String>,
+        owner_session_id: &str,
+        running: bool,
+    ) {
+        let now = Instant::now();
+        let id = id.into();
+        self.processes.insert(
+            id.clone(),
+            BackgroundShell {
+                id,
+                command: String::new(),
+                working_dir: self.default_workspace.clone(),
+                status: if running {
+                    ShellStatus::Running
+                } else {
+                    ShellStatus::Completed
+                },
+                exit_code: (!running).then_some(0),
+                started_at: now,
+                finished_at: (!running).then_some(now),
+                last_output_at: now,
+                last_observed_output_len: 0,
+                sandbox_type: SandboxType::None,
+                linked_task_id: None,
+                owner_agent: None,
+                owner_session_id: owner_session_id.to_string(),
+                origin_tool_call_id: None,
+                origin_turn_id: None,
+                ownership: ShellOwnership::Managed,
+                stdout_buffer: new_shared_raw_output(),
+                stderr_buffer: Some(new_shared_raw_output()),
+                bounded_output: None,
+                heavy_permit: None,
+                stdout_cursor: 0,
+                stderr_cursor: 0,
+                completion_reported: false,
+                stdin: None,
+                child: None,
+                stop_unconfirmed: false,
+                #[cfg(windows)]
+                windows_job: None,
+                stdout_thread: None,
+                stderr_thread: None,
+                work_lifecycle: None,
+                lifecycle_seq: 0,
+                last_lifecycle_status: None,
+                last_lifecycle_bytes: 0,
+            },
+        );
+    }
+
+    /// Flip a seeded record's completion to reported, modeling the engine's
+    /// claim of the finished job's evidence.
+    #[cfg(test)]
+    pub(crate) fn mark_seeded_completion_reported_for_test(&mut self, id: &str) {
+        if let Some(shell) = self.processes.get_mut(id) {
+            shell.completion_reported = true;
+        }
+    }
+
     /// Model the state only an un-reaped stopped child can produce (see
     /// `stop_unconfirmed`): no portable test can spawn a child that survives
     /// SIGKILL, so tests set the flag — and the terminal status — the kill
@@ -3544,14 +3611,18 @@ impl ShellManager {
 
     /// Retirement must also protect agent-owned jobs and finished output not
     /// yet delivered. Polling observes exit without consuming any completion.
-    pub(crate) fn has_live_or_unreported_work_for_session(&mut self, session_id: &str) -> bool {
-        self.processes.values_mut().any(|shell| {
-            if shell.owner_session_id != session_id {
-                return false;
-            }
-            shell.poll();
-            shell.status == ShellStatus::Running || !shell.completion_reported
-        })
+    pub(crate) fn has_live_or_unreported_work_for_session(
+        &mut self,
+        active_session_id: &str,
+    ) -> bool {
+        !active_session_id.is_empty()
+            && self.processes.values_mut().any(|shell| {
+                if shell.owner_session_id != active_session_id {
+                    return false;
+                }
+                shell.poll();
+                shell.status == ShellStatus::Running || !shell.completion_reported
+            })
     }
 
     /// Return agent owners whose tracked shell work is still running. The

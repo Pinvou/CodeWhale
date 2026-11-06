@@ -100,13 +100,18 @@ impl EngineHandle {
     /// `false` also covers states whose safe retirement cannot be certified,
     /// including an outstanding advisor watcher. It does not
     /// promise that waiting alone will eventually make retirement available.
-    /// The embedding host must exclude new external work until retirement is
-    /// complete. `host_is_idle` checks its own consumers synchronously while the
-    /// actor is sealed: dequeuing an event does not prove host persistence or
-    /// terminal delivery finished. Refusing resumes the actor without shutdown.
-    /// `true` means committed, not completed; wait_run_completion is
-    /// still required before touching resources. Cancelling an uncommitted wait
-    /// cannot cause a late shutdown.
+    /// The call blocks until the actor reaches its next input boundary, so
+    /// retry loops must back off instead of spinning. The embedding host must
+    /// exclude new external work until retirement is complete — including
+    /// work still held by an in-flight `reserve()` permit, which the actor
+    /// cannot observe. `host_is_idle` checks its own consumers synchronously
+    /// while the actor is sealed: dequeuing an event does not prove host
+    /// persistence or terminal delivery finished. Refusing resumes the actor
+    /// without shutdown; so does a cancel token firing for the first time
+    /// during an uncommitted wait (a token already latched by an earlier
+    /// cancelled turn does not refuse). `true` means committed, not
+    /// completed; wait_run_completion is still required before touching
+    /// resources. Cancelling an uncommitted wait cannot cause a late shutdown.
     pub async fn shutdown_when_idle(&self, host_is_idle: impl FnOnce() -> bool) -> Result<bool> {
         let (ready, receipt) = oneshot::channel();
         let (commit, committed) = oneshot::channel();
