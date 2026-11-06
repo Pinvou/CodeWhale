@@ -209,6 +209,11 @@ try {
     await page.click('.ap-period-summary .ap-primary');
     await page.waitForSelector('[data-period-total]');
     assert.equal(await page.$eval('[data-period-total]', node => node.textContent), await page.evaluate(() => window.restored.copy().center.periodTotal('21')));
+    await page.click('.ap-period-summary .ap-disclosure');
+    assert.equal(await page.$eval('.ap-period-body', node => node.hidden), true);
+    assert.equal(await page.$eval('.ap-period-summary', node => node.dataset.periodState), 'complete');
+    await page.click('.ap-period-summary .ap-disclosure');
+    assert.equal(await page.$eval('[data-period-total]', node => node.textContent), await page.evaluate(() => window.restored.copy().center.periodTotal('21')));
     await page.type('.ap-usage-filters label:nth-child(3) input', 'Older model');
     assert.equal(await page.$('[data-period-total]'), null);
     await page.click('.ap-period-summary .ap-primary');
@@ -219,9 +224,10 @@ try {
     await page.waitForFunction(() => typeof window.restored.releaseUsage === 'function');
     await page.evaluate(() => { window.restored.client.financeSessionEpoch++; window.restored.releaseUsage(); });
     await page.waitForFunction(() => !document.querySelector('[data-period-total]') && !document.querySelector('.ap-period-summary [role=status]'));
-    const before = await page.evaluate(() => window.restored.calls.length);
+    const usageReads = () => page.evaluate(() => window.restored.calls.filter(call => /\/usage-(requests|turns)(?:[/?]|$)/.test(call.url)).length);
+    const before = await usageReads();
     await page.click('.ap-period-summary .ap-primary');
-    assert.equal(await page.evaluate(() => window.restored.calls.length), before, 'stale parent epoch cannot dispatch a new query');
+    assert.equal(await usageReads(), before, 'stale parent epoch cannot dispatch a new usage query');
   });
   await run('period bounded continuation and failed batches never present a partial or doubled total', async () => {
     await fresh();
@@ -307,15 +313,23 @@ try {
       if (process.env.UI_ARTIFACT_DIR) await page.screenshot({ path: path.join(process.env.UI_ARTIFACT_DIR, `render-review-models-${width}.png`), fullPage: true });
       await page.click('[data-org-section=roles]'); await page.waitForSelector('.ap-role-table tbody tr'); await noOverflow();
       assert.ok((await page.$eval('.ap-role-table tbody tr', node => node.textContent)).includes(await page.evaluate(() => window.restored.copy().center.permanent)));
+      assert.ok((await page.$eval('.ap-role-table tbody tr', node => node.textContent)).includes(await page.evaluate(() => window.restored.copy().center.roleDescriptions.ORG_ADMIN)));
       const actions = await page.$$eval('#ap-org-panel-roles > .ap-action-group > button', nodes => nodes.map(node => { const r = node.getBoundingClientRect(); return { left: r.left, right: r.right, top: r.top }; }));
       assert.equal(actions.length, 2); assert.ok(actions[1].top > actions[0].top || actions[1].left - actions[0].right >= 8);
     }
+    await click('#ap-org-panel-roles button', await page.evaluate(() => window.restored.copy().organization.grantRole));
+    await page.waitForSelector('[role=dialog] select');
+    await page.select('[role=dialog] label:nth-child(2) select', 'ORG_MODEL_ADMIN');
+    assert.ok((await page.$eval('[role=dialog]', node => node.textContent)).includes(await page.evaluate(() => window.restored.copy().center.roleDescriptions.ORG_MODEL_ADMIN)));
+    await page.keyboard.press('Escape');
     assert.equal(await page.evaluate(() => window.restored.calls.filter(call => ['POST', 'PUT', 'DELETE'].includes(call.method) && !call.url.endsWith('/account/bootstrap')).length), 0);
   });
   await run('render review: organization purchase facts, history pagination, details and stale reads', async () => {
     await organizationCenter('en');
-    await page.evaluate(() => { window.restored.context.permissions.push('org.entitlements.purchase'); window.restored.reload(); });
-    await page.waitForSelector('.ap-sidebar [data-section=myOrganization]'); await accountTab('myOrganization'); await page.click('[data-org-section=billing]');
+    await page.evaluate(() => { window.restored.zeroBalance = true; window.restored.context.permissions.push('org.entitlements.purchase'); window.restored.reload(); });
+    await page.waitForSelector('.ap-sidebar [data-section=creditsUsage]'); await accountTab('creditsUsage');
+    await click('#ap-panel-creditsUsage button', await page.evaluate(() => window.restored.copy().center.buyOrganization));
+    await page.waitForFunction(() => document.activeElement?.hasAttribute('data-organization-purchase'));
     const purchase = '[data-org-action=organization-purchase]';
     await page.waitForSelector(purchase + ' select');
     assert.equal(await page.$eval(purchase + ' button[type=submit]', node => node.disabled), true);
@@ -344,12 +358,24 @@ try {
     await click('[role=dialog] button', await page.evaluate(() => window.restored.copy().finance.continuePayment));
     await page.waitForSelector('.ap-payment-dialog [data-qr-state=loaded]');
     await page.keyboard.press('Escape'); await page.waitForFunction(() => !document.querySelector('[role=dialog]'));
+    await page.evaluate(() => { window.restored.historyPaid = true; });
+    await page.click(history + ' > .ap-section-heading button');
+    await page.waitForFunction(text => document.querySelector('.ap-organization-orders tbody tr:first-child')?.textContent.includes(text), {}, await page.evaluate(() => window.restored.copy().accountLayout.statuses.COMPLETED));
     await page.evaluate(() => { window.restored.holdHistory = true; });
     await page.click(history + ' > .ap-section-heading button');
     await page.waitForFunction(() => typeof window.restored.releaseHistory === 'function');
     await page.evaluate(() => { window.restored.context = { context_type: 'PERSONAL', context_version: 2, permissions: [] }; window.restored.reload(); window.restored.releaseHistory(); });
     await page.waitForFunction(() => !document.querySelector('.ap-organization-orders'));
     assert.equal(await page.evaluate(() => window.restored.calls.filter(call => call.method === 'POST' && call.url.includes('/recharge/orders')).length), 0);
+  });
+  await run('render review: zero quota members receive administrator guidance without a purchase action', async () => {
+    for (const language of ['zh', 'en', 'ja']) {
+      await organizationCenter(language);
+      await page.evaluate(() => { window.restored.organizationRoles = ['MEMBER']; window.restored.context.permissions = ['org.profile.read', 'org.quota.read.self']; window.restored.reload(); });
+      await page.waitForSelector('.ap-sidebar [data-section=creditsUsage]'); await accountTab('creditsUsage');
+      await page.waitForFunction(text => document.querySelector('#ap-panel-creditsUsage')?.textContent.includes(text), {}, await page.evaluate(() => window.restored.copy().center.contactOrganizationAdmin));
+      assert.equal(await page.evaluate(() => [...document.querySelectorAll('#ap-panel-creditsUsage button')].some(button => button.textContent === window.restored.copy().center.buyOrganization)), false);
+    }
   });
   await run('organization directory refreshes same-context names and role changes', async () => {
     await organizationCenter('en');

@@ -1231,6 +1231,17 @@
     {
       "source": "account-platform/internal/token/organization_finance_routes.go",
       "receiver": "routes",
+      "method": "GET",
+      "path": "/organizations/:organization_id/recharge/orders",
+      "scope": "organization",
+      "permissions": [
+        "org.entitlements.purchase"
+      ],
+      "strategy": "domain.organization-scoped-handler-and-transaction-authorization"
+    },
+    {
+      "source": "account-platform/internal/token/organization_finance_routes.go",
+      "receiver": "routes",
       "method": "POST",
       "path": "/organizations/:organization_id/recharge/orders",
       "scope": "organization",

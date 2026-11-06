@@ -1,5 +1,8 @@
 export const accountCenterCopy = {
   zh: {
+    contactOrganizationAdmin: "当前额度为零，请联系组织所有者、组织管理员或财务管理员购买组织权益或分配成员配额。",
+    roleHelp: "选择角色可查看权限说明；实际权限还受授权范围和其他角色影响。",
+    roleDescriptions: {"OWNER":"管理组织、成员、角色、模型及财务，并可转让所有权或申请删除组织。","ORG_ADMIN":"管理组织资料、部门、成员、角色、模型策略、权益购买及成员配额。","BILLING_ADMIN":"查看组织账务与用量，购买权益，分配或回收成员配额。","ORG_MODEL_ADMIN":"管理组织模型策略；不授予 Token Account 或凭证管理权限。","UNIT_ADMIN":"管理已授权部门及其子部门内的部门和成员。","AUDITOR":"只读查看组织、成员、角色、账务、用量和审计，并可导出审计。","MEMBER":"在分配的配额内调用获准模型，并查看自己的配额和用量。"},
     noDepartment: "未分配部门",
     ownerProtected: "请先转让所有权，再移除此成员。",
     roleGrants: "角色授权",
@@ -53,6 +56,9 @@ export const accountCenterCopy = {
     usageTime: '调用时间', usageCost: '消耗积分', usageResult: '调用与扣费结果', usageDetails: '明细', callFailedNoCharge: '调用失败 · 未扣费', callSucceeded: '调用成功', noCharge: '未扣费',
   },
   en: {
+    contactOrganizationAdmin: "No credits are available. Contact an organization owner, organization administrator or billing administrator to buy benefits or allocate member quota.",
+    roleHelp: "Select a role to review its permissions. Effective access also depends on scope and other roles.",
+    roleDescriptions: {"OWNER":"Manage the organization, members, roles, models and finances; transfer ownership or request organization deletion.","ORG_ADMIN":"Manage organization details, departments, members, roles, model policy, benefit purchases and member quotas.","BILLING_ADMIN":"View organization finances and usage, purchase benefits, and allocate or reclaim member quotas.","ORG_MODEL_ADMIN":"Manage organization model policy without Token Account or credential administration.","UNIT_ADMIN":"Manage departments and members within the granted department subtree.","AUDITOR":"Read organization, member, role, financial, usage and audit information; export audit records.","MEMBER":"Invoke permitted models within allocated quota and view personal quota and usage."},
     noDepartment: "No department assigned",
     ownerProtected: "Transfer ownership before removing this member.",
     roleGrants: "Role grants",
@@ -106,6 +112,9 @@ export const accountCenterCopy = {
     usageTime: 'Call time', usageCost: 'Points charged', usageResult: 'Call & billing result', usageDetails: 'Details', callFailedNoCharge: 'Call failed · No charge', callSucceeded: 'Call succeeded', noCharge: 'No charge',
   },
   ja: {
+    contactOrganizationAdmin: "利用可能な残高がありません。組織の所有者、組織管理者、または財務管理者に、特典の購入やメンバー利用枠の割り当てをご依頼ください。",
+    roleHelp: "ロールを選ぶと権限の説明を確認できます。実際の権限は適用範囲と他のロールにも依存します。",
+    roleDescriptions: {"OWNER":"組織、メンバー、ロール、モデル、財務を管理し、所有権の移管や組織削除を申請できます。","ORG_ADMIN":"組織情報、部門、メンバー、ロール、モデルポリシー、特典購入、利用枠を管理します。","BILLING_ADMIN":"組織の財務と使用状況を確認し、特典購入とメンバー利用枠の割り当て・回収を行います。","ORG_MODEL_ADMIN":"組織のモデルポリシーを管理します。Token Account や認証情報の管理権限は付与しません。","UNIT_ADMIN":"権限を付与された部門とその配下の部門・メンバーを管理します。","AUDITOR":"組織、メンバー、ロール、財務、使用状況、監査情報を閲覧し、監査記録をエクスポートします。","MEMBER":"割り当てられた利用枠内で許可されたモデルを呼び出し、自分の利用枠と使用状況を確認します。"},
     noDepartment: "部署未割り当て",
     ownerProtected: "このメンバーを削除する前に所有権を譲渡してください。",
     roleGrants: "ロール付与",

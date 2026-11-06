@@ -7,13 +7,15 @@ import { orderSummaryStatus } from './order-view.js';
 
 // One read owner per organization/session. Pagination cannot carry a previous
 // identity's orders into a new wallet, or turn a failed page into an empty one.
-export function OrganizationOrderHistory({ api, org, owner, language, version, enabled, onSelect, busy, latestOrder }) {
+export function OrganizationOrderHistory({ api, org, owner, language, version, enabled, onSelect, busy }) {
   const words = accountCenterCopy[language], copy = financeCopy[language], layout = accountLayoutCopy[language];
   const epoch = api.client.financeSessionEpoch || 0;
   const [stored, setPage] = useState({ owner, api, epoch, items: [], cursor: null }), [loading, setLoading] = useState(false), [error, setError] = useState(false);
   const generation = useRef(0), pending = useRef(null), current = useRef(null);
   const page = stored.owner === owner && stored.api === api && stored.epoch === epoch ? stored : { items: [], cursor: null };
-  const rows = page.items.map(item => latestOrder?.order_id === item.order_id ? { ...item, ...latestOrder } : item);
+  // A successful history read is authoritative for its own rows. A previously
+  // selected detail must never overwrite a later PAID/CREDITED collection.
+  const rows = page.items;
   current.current = { owner, api, enabled, epoch };
   const load = async (cursor = '') => {
     if (!enabled || pending.current || current.current.owner !== owner || current.current.api !== api || !current.current.enabled || (api.client.financeSessionEpoch || 0) !== epoch) return;

@@ -17,6 +17,7 @@ export function OrganizationCreditOverview({ me, data, language, ready, error, n
   return <>
     {(wallet || quota) && <section className="ap-balance-hero ap-balance-columns"><div><span>{wallet ? copy.balance : copy.quota}</span><strong>{formatBalance(available, language)}</strong><small>{center.available}</small></div><div className="ap-reserved-summary"><span>{account.reservedCredits}</span><strong>{formatBalance(reserved, language)}</strong><p>{center.reservedHint}</p></div></section>}
     {hasPermission(me, 'org.entitlements.purchase') && onPurchase && <div className="ap-action-group"><button type="button" className="ap-primary" onClick={onPurchase}>{center.buyOrganization}</button></div>}
+    {!error && (wallet || quota) && available != null && integerMoney(available) === 0n && !hasPermission(me, 'org.entitlements.purchase') && <p className="ap-empty-state" role="status">{center.contactOrganizationAdmin}</p>}
      {wallet && <PortalBenefits items={data.packages} language={language} now={now} />}
   </>;
 }

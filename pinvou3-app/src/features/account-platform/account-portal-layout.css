@@ -286,3 +286,5 @@
 .ap-benefit-card footer small { flex: 1 1 140px; min-width: 0; }
 .ap-benefit-card footer button { flex: 0 0 auto; }
 @media (max-width: 560px) { .ap-restored-portal .ap-pending-order-section { padding: 16px; } }
+
+.ap-restored-portal .ap-role-description { display: block; margin-top: 8px; color: var(--ap-secondary); font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }

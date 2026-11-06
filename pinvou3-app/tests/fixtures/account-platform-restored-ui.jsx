@@ -44,7 +44,7 @@ globalThis.fetch = async (input, options = {}) => {
       c.effects.add(call.key); c.removedMember = true;
       return c.unknown ? json({ code: 'COMMAND_RESULT_UNKNOWN' }, 503) : json({ organization_id: orgID, member: { ...member, status: 'REVOKED' } });
     }
-    if (url.endsWith('/balance')) return json({ owner_type: 'ORGANIZATION', owner_id: orgID, wallet_id: id, posted_microcredits: '1000000', available_microcredits: '999999', reserved_microcredits: '1' });
+    if (url.endsWith('/balance')) return json({ owner_type: 'ORGANIZATION', owner_id: orgID, wallet_id: id, posted_microcredits: c.zeroBalance ? '0' : '1000000', available_microcredits: c.zeroBalance ? '0' : '999999', reserved_microcredits: c.zeroBalance ? '0' : '1' });
     if (url.endsWith('/entitlement-packages')) return json({ items: c.noSources ? [] : [{ ...packages[0], points_remaining_microcredits: '999999', components: [{ component_id: unitID, component_type: 'BASE', status: 'ACTIVE', available_microcredits: '999999', expires_at: '2099-01-01T00:00:00Z' }] }] });
     if (url.endsWith('/quota-grants')) return json({ items: [] });
     if (url.endsWith('/quota-grants:batch') && method === 'POST') {
@@ -52,12 +52,12 @@ globalThis.fetch = async (input, options = {}) => {
       const input = JSON.parse(options.body).items[0];
       return c.unknown ? json({ code: 'COMMAND_RESULT_UNKNOWN' }, 503) : json({ items: [{ index: 0, status: 'SUCCEEDED', grant: { ...input, membership_version: c.replayVersion || input.membership_version, organization_id: orgID, grant_id: id, status: 'ACTIVE', allocation_version: 1, original_microcredits: input.amount_microcredits, available_microcredits: input.amount_microcredits, reserved_microcredits: '0', used_microcredits: '0', expired_microcredits: '0', revoked_microcredits: '0' } }] }, 207);
     }
-    if (url.endsWith('/role-bindings')) return json({ items: c.includeOwner ? [{ organization_id: orgID, binding_id: otherID, user_id: otherID, role_code: 'ADMIN', unit_id: null, status: 'ACTIVE', expires_at: null }] : [], truncated: false });
+    if (url.endsWith('/role-bindings')) return json({ items: c.includeOwner ? [{ organization_id: orgID, binding_id: otherID, user_id: otherID, role_code: 'ORG_ADMIN', unit_id: null, status: 'ACTIVE', expires_at: null }] : [], truncated: false });
     if (url.endsWith('/recharge/products')) return json({ items: [{ product_id: 'sample-points', availability_status: 'AVAILABLE', name: 'Sample points', amount_fen: '990', base_points: '100', bonus_points: '10', validity_days: 30, channels: ['ALIPAY'] }] });
     if (url.endsWith('/payment-capabilities')) return json({ channels: ['ALIPAY'], test_only: true, formal_collection_admitted: false });
     if (/\/recharge\/orders(?:\?|$)/.test(url) && method === 'GET') {
       const cursor = new URL(url, location.origin).searchParams.get('cursor') || '';
-      const result = () => c.historyFail ? json({ code: 'UPSTREAM_UNAVAILABLE' }, 503) : json({ organization_id: orgID, items: cursor ? [order(3)] : [order(1), order(2)], next_cursor: cursor ? null : 'page_two' });
+      const result = () => c.historyFail ? json({ code: 'UPSTREAM_UNAVAILABLE' }, 503) : json({ organization_id: orgID, items: (cursor ? [order(3)] : [order(1), order(2)]).map(row => c.historyPaid && row.order_id === order(1).order_id ? { ...row, status: 'PAID', fulfillment_status: 'CREDITED', paid_at: '2026-11-06T00:00:00Z' } : row), next_cursor: cursor ? null : 'page_two' });
       if (c.holdHistory) return new Promise(resolve => { c.historySignal = options.signal; c.releaseHistory = () => resolve(result()); });
       return result();
     }

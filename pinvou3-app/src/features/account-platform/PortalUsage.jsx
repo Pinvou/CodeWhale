@@ -31,6 +31,7 @@ export function PortalUsage({ client, owner, versions, copy, language, records, 
   });
   const total = filtered.reduce((sum, record) => record.charged_microcredits == null ? sum : sum + BigInt(record.charged_microcredits), 0n);
   const change = name => event => { period.invalidate(); setDetail(null); if (name === 'from' || name === 'to') setPeriodOpen(true); setFilters(value => ({ ...value, [name]: event.target.value })); };
+  const periodExpanded = periodOpen || Boolean(period.state && period.state.status !== 'complete');
   const selected = filtered.find(record => (record.logical_turn_id || record.usage_request_id) === detail);
   const resultLabel = record => {
     if (record.usage_request_count === 1) {
@@ -52,8 +53,8 @@ export function PortalUsage({ client, owner, versions, copy, language, records, 
       <p className="ap-muted">{words.usageScope}</p>
       {invalidDates && <p role="alert">{words.invalidDates}</p>}
       <section className="ap-period-summary" data-period-state={period.state?.status || 'idle'} aria-label={words.periodTitle}>
-        <button type="button" className="ap-disclosure" aria-expanded={periodOpen || Boolean(period.state)} onClick={() => setPeriodOpen(value => !value)}>{words.periodTitle}</button>
-        <div className="ap-period-body" hidden={!periodOpen && !period.state}><p className="ap-muted">{words.periodLead}</p>
+        <button type="button" className="ap-disclosure" aria-expanded={periodExpanded} onClick={() => setPeriodOpen(!periodExpanded)}>{words.periodTitle}</button>
+        <div className="ap-period-body" hidden={!periodExpanded}><p className="ap-muted">{words.periodLead}</p>
         <button className="ap-primary" disabled={period.state?.status === 'loading' || !filters.from || !filters.to || invalidDates} onClick={() => void period.run(filters)}>{words.periodStart}</button>
         {!filters.from || !filters.to ? <p className="ap-muted">{words.periodDates}</p> : null}
         {period.state?.status === 'loading' && <><p role="status">{words.periodLoading}</p><button onClick={period.reset}>{words.periodCancel}</button></>}
