@@ -61,6 +61,7 @@ REQUIRED = {
     "TestManagementCancellationFundsRemainTruthful",
     "TestManagementEmergencyCancellationRecoversLostReserveACK",
     "TestLifecycleForceCancelApprovalPostgres",
+    "TestManualReviewSLAEscalationPostgres",
     "TestLocalModelCancellationHandshakeHTTP",
     "TestRemoteModelCancellationOwnerLoopTransport",
     "TestManagementCancellationHoldRecoveryRequiresRecordedProof",
@@ -377,6 +378,15 @@ EXACT_REQUIRED_CHILDREN = {
         "v2-false-compatibility", "v3-false", "v3-true-removed",
         "v3-true-removed/emergency-then-user-origin-retains-authority",
         "v3-true-removed/emergency-then-user-origin-retains-authority/owner-heartbeat-observes-remote-request",
+    },
+    "TestManualReviewSLAEscalationPostgres": {
+        "two_workers_and_strict_one_hour_boundary",
+        "database_clock_controls_deadlines_and_cooldown",
+        "later_candidate_starts_a_fresh_cooldown",
+        "closed_before_write",
+        "deadlines_completed_before_write",
+        "current_owner_and_stage_after_lock",
+        "outbox_failure_rolls_back_and_retries",
     },
     "TestRegistrationCompensationDatabaseErrorIdentityPostgres": {
         "operation-read",
