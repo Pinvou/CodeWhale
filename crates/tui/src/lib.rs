@@ -7531,8 +7531,8 @@ fn doctor_strict_tool_mode_status(config: &Config) -> DoctorStrictToolModeStatus
                 status: "provider_mismatch",
                 function_strict_sent: false,
                 message: "enabled, but this route's provider is not the DeepSeek family, so \
-                          the strict tool pipeline stays off even though the base URL is an \
-                          official DeepSeek endpoint; tools keep their schemas and \
+                          the strict tool pipeline stays off even though the base URL is a \
+                          recognized DeepSeek endpoint URL; tools keep their schemas and \
                           `tool_choice` falls back to `auto`"
                     .to_string(),
                 recommended_base_url: None,
@@ -7543,8 +7543,25 @@ fn doctor_strict_tool_mode_status(config: &Config) -> DoctorStrictToolModeStatus
             status: "custom_endpoint",
             function_strict_sent: false,
             message: "enabled, but the strict tool pipeline only acts on official DeepSeek \
-                      routes; this custom endpoint keeps its tools unreshaped and \
+                      https endpoints; this custom endpoint keeps its tools unreshaped and \
                       `tool_choice` falls back to `auto`"
+                .to_string(),
+            recommended_base_url: None,
+        };
+    }
+    // The Anthropic Messages wire forwards `function.strict` untranslated on
+    // every official path — the chat-completions strip does not apply there —
+    // while the beta message below describes a chat-completions surface an
+    // Anthropic-dialect route must not be pointed at. Answer that provider
+    // from the wire, not from the URL kind: the flag IS sent, and the
+    // beta/non-beta recommendation is withheld for the dialect.
+    if config.api_provider() == crate::config::ApiProvider::DeepseekAnthropic {
+        return DoctorStrictToolModeStatus {
+            enabled: true,
+            status: "official_route",
+            function_strict_sent: true,
+            message: "enabled; the Anthropic wire forwards function.strict \
+                      untranslated on this official DeepSeek endpoint"
                 .to_string(),
             recommended_base_url: None,
         };
@@ -7558,24 +7575,6 @@ fn doctor_strict_tool_mode_status(config: &Config) -> DoctorStrictToolModeStatus
             recommended_base_url: None,
         },
         Some(DeepSeekBaseUrlKind::NonBeta) => {
-            // The chat-completions wire strips the strict flag on the
-            // canonical non-beta endpoints, but the Anthropic Messages wire
-            // has no such strip — `client/anthropic.rs` forwards
-            // `function.strict` untranslated — so for the Anthropic-family
-            // provider the flag IS sent, and the beta-endpoint
-            // recommendation would point an Anthropic-dialect route at a
-            // chat-completions surface it must not use.
-            if config.api_provider() == crate::config::ApiProvider::DeepseekAnthropic {
-                return DoctorStrictToolModeStatus {
-                    enabled: true,
-                    status: "official_route",
-                    function_strict_sent: true,
-                    message: "enabled; the Anthropic wire forwards function.strict \
-                              untranslated on this official DeepSeek endpoint"
-                        .to_string(),
-                    recommended_base_url: None,
-                };
-            }
             let recommended = recommended_strict_base_url(config, &target.base_url);
             DoctorStrictToolModeStatus {
                 enabled: true,
@@ -14123,13 +14122,20 @@ mod doctor_endpoint_tests {
 
     #[test]
     fn strict_tool_mode_doctor_reports_official_custom_paths_as_in_scope() {
-        // Any path on the official host passes the engine gate, so the
-        // Anthropic-family default endpoint is in scope: schemas are reshaped
-        // and `tool_choice:"required"` is sent — the doctor must not claim the
-        // tools stay unreshaped there.
+        // Any path on the official host passes the engine gate, so a chat
+        // dialect on a non-canonical official path is in scope: schemas are
+        // reshaped and `tool_choice:"required"` is sent — the doctor must
+        // not claim the tools stay unreshaped there.
         let config = Config {
-            provider: Some("deepseek-anthropic".to_string()),
+            provider: Some("deepseek".to_string()),
             strict_tool_mode: Some(true),
+            providers: Some(crate::config::ProvidersConfig {
+                deepseek: crate::config::ProviderConfig {
+                    base_url: Some("https://api.deepseek.com/v2".to_string()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
             ..Default::default()
         };
 
@@ -14138,6 +14144,34 @@ mod doctor_endpoint_tests {
         assert_eq!(status.status, "official_route");
         assert!(status.function_strict_sent);
         assert!(status.message.contains("official DeepSeek route"));
+        assert!(status.recommended_base_url.is_none());
+    }
+
+    #[test]
+    fn strict_tool_mode_doctor_answers_the_anthropic_provider_from_the_wire_on_beta() {
+        // The gate passes for the Anthropic-family provider on the official
+        // beta host, but the beta verdict describes a chat-completions
+        // surface; the Anthropic Messages wire forwards the flag on its own
+        // dialect, so the doctor answers from the wire (`official_route`)
+        // and never shows the chat-dialect `ready` message for it.
+        let config = Config {
+            provider: Some("deepseek-anthropic".to_string()),
+            strict_tool_mode: Some(true),
+            providers: Some(crate::config::ProvidersConfig {
+                deepseek_anthropic: crate::config::ProviderConfig {
+                    base_url: Some("https://api.deepseek.com/beta".to_string()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let status = doctor_strict_tool_mode_status(&config);
+
+        assert_eq!(status.status, "official_route");
+        assert!(status.function_strict_sent);
+        assert!(status.message.contains("Anthropic wire forwards"));
         assert!(status.recommended_base_url.is_none());
     }
 

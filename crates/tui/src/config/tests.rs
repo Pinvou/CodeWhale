@@ -13721,7 +13721,6 @@ fn strict_pipeline_scope_is_official_deepseek_family_routes() {
             "https://api.deepseek.com/anthropic",
             "https://api.deepseeki.com",
             "https://api.deepseeki.com/beta",
-            "  HTTPS://API.DEEPSEEK.COM/BETA  ",
         ] {
             assert!(
                 super::route_is_official_deepseek_family(provider, base_url),
@@ -13755,6 +13754,13 @@ fn strict_pipeline_scope_is_official_deepseek_family_routes() {
             ApiProvider::Moonshot,
             "https://api.moonshot.ai/v1",
             "unrelated providers stay out of scope",
+        ),
+        (
+            ApiProvider::Deepseek,
+            "  HTTPS://API.DEEPSEEK.COM/BETA  ",
+            "a whitespace-padded URL matches no surface that string-compares the base URL \
+             (this gate, the doctor classifier, the wire strip set), so admitting it here \
+             alone would leak the strict flag past the non-beta strip; it stays out of scope",
         ),
     ] {
         assert!(
