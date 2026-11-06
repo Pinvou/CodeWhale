@@ -1,0 +1,4 @@
+DROP INDEX usage_replay_results_cleanup_created_idx;
+DROP INDEX usage_replay_results_cleanup_expiry_idx;
+DROP INDEX usage_stream_events_cleanup_created_idx;
+DROP INDEX usage_stream_events_cleanup_expiry_idx;

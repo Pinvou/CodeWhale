@@ -4,6 +4,8 @@ import path from 'node:path';
 import test from 'node:test';
 import vm from 'node:vm';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { prepareRemoteTaskCapabilities } from '../src/features/remote-control/remote-task-preflight.mjs';
+import { remoteProxyComposerIdentity } from '../src/features/remote-control/remote-session-adapter.mjs';
 
 const app = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const read = (relative) => fs.readFileSync(path.join(app, 'src', relative), 'utf8');
@@ -12,11 +14,20 @@ const remoteTaskCommandSource = fs.readFileSync(
   'utf8',
 );
 
-function installFeature(onInvoke, timers = { setTimeout, clearTimeout }) {
+function installFeature(onInvoke, withUploadLimit = true, timers = { setTimeout, clearTimeout }) {
+  // Union of two test-helper extensions: this branch passes `false` to skip the
+  // shared upload-limit sandbox, while main's capability-retry tests pass the
+  // timers object positionally.
+  if (withUploadLimit && typeof withUploadLimit === 'object') {
+    timers = withUploadLimit;
+    withUploadLimit = true;
+  }
   const root = { __PINVOU_TAURI_BRIDGE_FEATURES__: {} };
-  const sandbox = { window: root, TextEncoder, setTimeout: timers.setTimeout, clearTimeout: timers.clearTimeout };
+  const sandbox = { window: root, TextEncoder, Date: timers.Date || Date,
+    setTimeout: timers.setTimeout, clearTimeout: timers.clearTimeout };
   vm.createContext(sandbox);
   vm.runInContext(read('features/remote-control/remote-control-state.js'), sandbox);
+  if (withUploadLimit) vm.runInContext(read('shared/chunked-file-upload.js'), sandbox);
   vm.runInContext(read('platform/tauri/bridge/desktop-remote-control.js'), sandbox);
   const calls = [];
   const listeners = new Map();
@@ -42,6 +53,21 @@ function installFeature(onInvoke, timers = { setTimeout, clearTimeout }) {
   return { feature, calls, state, listeners, logic: root.__PINVOU_REMOTE_CONTROL_STATE__ };
 }
 
+test('attachment bridge uses the shared boundary and fails closed without it', async () => {
+  const onInvoke = command => command === 'desktop_remote_action_a'
+    ? Promise.resolve({ transfer_id: 't', chunk_bytes: 1, total_bytes: 20 * 1024 * 1024 }) : undefined;
+  const { feature, calls } = installFeature(onInvoke);
+  const args = ['remote-1', 'ref-1', 'task-1', 'a.bin', 'application/octet-stream'];
+  const digest = 'a'.repeat(64);
+  await feature.attachmentBegin(...args, 20 * 1024 * 1024, digest);
+  assert.equal(calls.filter(call => call.command === 'desktop_remote_action_a').length, 1);
+  await assert.rejects(feature.attachmentBegin(...args, 32 * 1024 * 1024, digest), { code: 'remote_attachment_size_invalid' });
+  assert.equal(calls.filter(call => call.command === 'desktop_remote_action_a').length, 1);
+  const missing = installFeature(onInvoke, false);
+  await assert.rejects(missing.feature.attachmentBegin(...args, 1, digest), { code: 'remote_attachment_size_invalid' });
+  assert.equal(missing.calls.filter(call => call.command === 'desktop_remote_action_a').length, 0);
+});
+
 function bindProxy(logic, state, remoteRef, sessionId) {
   const live = state.controllerConnection;
   return logic.applyRemoteProxyBinding(state, {
@@ -52,6 +78,104 @@ function bindProxy(logic, state, remoteRef, sessionId) {
     mappingConfirmed: false,
   });
 }
+
+test('idle new-task preflight joins renewal and waits for the authenticated reply before reserve', async () => {
+  const ack = Promise.withResolvers();
+  let reads = 0;
+  const { feature, state, listeners, logic, calls } = installFeature(command => {
+    if (command === 'desktop_remote_controller_capability_send') return ack.promise;
+    if (command === 'desktop_remote_controller_capability_snapshot') {
+      if (++reads === 1) return Promise.reject(Object.assign(new Error('expired'), { code: 'capability_snapshot_expired' }));
+      return Promise.resolve({ ...projection, capabilityRevision: 2, expiresAtMs: Date.now() + 30_000 });
+    }
+    return undefined;
+  }, { setTimeout: () => 1, clearTimeout() {} });
+  state.desktopRemoteControl = logic.applyControllerStatus(state.desktopRemoteControl, {
+    status: 'connected', connectionId: 'conn-1', controllerLeaseId: 'lease-1',
+    leaseEpoch: '1', relayEpoch: 'relay-1', generation: 'gen-1',
+  });
+  state.desktopRemoteControl = bindProxy(logic, state.desktopRemoteControl, 'ref-1', 'session-1');
+  const reply = {
+    localSessionId: 'remote-ref-1', remoteSessionRef: 'ref-1', sessionId: 'session-1',
+    connectionId: 'conn-1', controllerLeaseId: 'lease-1', leaseEpoch: '1',
+    relayEpoch: 'relay-1', remoteControlGeneration: 'gen-1',
+    capabilityRequestId: 'request-old', capabilityRevision: 1,
+    mappingConfirmed: true, capabilityValidForMs: 30_000,
+  };
+  const projection = { ...reply, modes: ['chat'], skills: [], workspaces: [], tools: [],
+    expiresAtMs: Date.now() - 1 };
+  state.desktopRemoteControl = logic.applyRemoteProxyCapabilityResult(state.desktopRemoteControl, reply);
+  state.desktopRemoteControl = logic.applyCapabilities(state.desktopRemoteControl, projection);
+  let ready = false;
+  const pending = prepareRemoteTaskCapabilities({
+    binding: { localSessionId: 'remote-ref-1', remoteRef: 'ref-1' },
+    ownerIdentity: remoteProxyComposerIdentity('remote-ref-1', state.desktopRemoteControl.controllerConnection),
+    readState: () => state.desktopRemoteControl,
+    snapshot: feature.capabilitiesSnapshot, renew: feature.controllerCapabilitySend,
+    isCurrent: () => true,
+  }).then(result => { ready = true; return result; });
+  await new Promise(resolve => { setImmediate(resolve); });
+  const background = feature.controllerCapabilitySend('ref-1');
+  assert.equal(calls.filter(call => call.command === 'desktop_remote_controller_capability_send').length, 1);
+  ack.resolve({ requestId: 'request-new', sessionId: 'session-1' });
+  await new Promise(resolve => { setImmediate(resolve); });
+  assert.equal(ready, false, 'transport acknowledgement does not refresh capabilities');
+  assert.equal(calls.some(call => call.command === 'desktop_remote_task_reserve_a'), false);
+  listeners.get('desktop-remote-proxy-capability')({ payload: {
+    ...reply, capabilityRequestId: 'request-new', capabilityRevision: 2,
+  } });
+  assert.equal((await pending).capabilityRevision, 2);
+  await background;
+  await feature.reserveRemoteTask('remote-ref-1', 'ref-1', {
+    kind: 'new', text: 'document', mode: 'chat', workspaceId: null,
+    skillIds: ['skill-document'], modelSource: 'controlled_device',
+  });
+  assert.equal(calls.filter(call => call.command === 'desktop_remote_task_reserve_a').length, 1);
+  assert.equal(calls.some(call => call.command === 'desktop_remote_task_commit_a'), false);
+  feature.stop();
+});
+
+test('cached capability reads schedule one renewal at the original expiry and fence retired leases', async () => {
+  let now = 10_000;
+  let sequence = 0;
+  const timers = new Map();
+  const { feature, state, logic, calls } = installFeature(command => {
+    if (command === 'desktop_remote_controller_capability_snapshot') return Promise.resolve(projection);
+    return undefined;
+  }, {
+    Date: { now: () => now },
+    setTimeout(fn, delay) { const id = ++sequence; timers.set(id, { fn, delay }); return id; },
+    clearTimeout(id) { timers.delete(id); },
+  });
+  state.desktopRemoteControl = logic.applyControllerStatus(state.desktopRemoteControl, {
+    status: 'connected', connectionId: 'conn-1', controllerLeaseId: 'lease-1',
+    leaseEpoch: '1', relayEpoch: 'relay-1', generation: 'gen-1',
+  });
+  state.desktopRemoteControl = bindProxy(logic, state.desktopRemoteControl, 'ref-1', 'session-1');
+  state.desktopRemoteControl.controllerConnection.capabilityRevision = 1;
+  const projection = {
+    remoteSessionRef: 'ref-1', connectionId: 'conn-1', controllerLeaseId: 'lease-1',
+    leaseEpoch: '1', relayEpoch: 'relay-1', remoteControlGeneration: 'gen-1',
+    capabilityRevision: 1, expiresAtMs: 30_000, modes: ['chat'], skills: [], tools: [], workspaces: [],
+  };
+  const first = feature.capabilitiesSnapshot('ref-1');
+  const concurrent = feature.capabilitiesSnapshot('ref-1');
+  assert.equal(first, concurrent, 'view refresh and preflight share the same owner-bound read');
+  await Promise.all([first, concurrent]);
+  assert.equal(calls.filter(call => call.command === 'desktop_remote_controller_capability_snapshot').length, 1);
+  assert.deepEqual([...timers.values()].map(timer => timer.delay), [15_000]);
+  now += 5_000;
+  await feature.capabilitiesSnapshot('ref-1');
+  assert.deepEqual([...timers.values()].map(timer => timer.delay), [10_000],
+    'same-revision cache reads neither add a second timer nor extend the deadline');
+  const timer = [...timers.values()][0];
+  state.desktopRemoteControl = { ...state.desktopRemoteControl,
+    controllerConnection: { ...state.desktopRemoteControl.controllerConnection, controllerLeaseId: 'lease-2' } };
+  timer.fn();
+  assert.equal(calls.some(call => call.command === 'desktop_remote_controller_capability_send'), false,
+    'the same session reference cannot let an old timer renew a new lease');
+  feature.stop();
+});
 
 test('B permission settings round-trip independently of controller task intent', async () => {
   const policy = { chat: 'plan', code: 'yolo' };
@@ -662,6 +786,105 @@ test('remote attachment, permission and artifact facades use only desktop_remote
   assert.equal(artifacts[0].artifactId, 'artifact-1');
   assert.deepEqual([...new Set(calls.slice(-3).map(call => call.command))], ['desktop_remote_action_a']);
   assert.equal(JSON.stringify(calls).includes('connectionId'), false);
+});
+
+test('unknown attachment actions are fenced rather than replayed as new uploads', async () => {
+  const { feature, calls } = installFeature(command => {
+    if (command === 'desktop_remote_action_a') return Promise.reject(new Error('result_unknown'));
+    return undefined;
+  });
+  const digest = 'a'.repeat(64);
+  const actions = [
+    () => feature.attachmentBegin('remote-1', 'ref-1', 'task-1', 'a.txt', 'text/plain', 1, digest),
+    () => feature.attachmentChunk('remote-1', 'ref-1', 'task-1', 'transfer-1', 0, 'YQ==', 1),
+    () => feature.attachmentAbort('remote-1', 'ref-1', 'task-1', 'transfer-1'),
+  ];
+  for (const action of actions) {
+    const before = calls.filter(call => call.command === 'desktop_remote_action_a').length;
+    await assert.rejects(action(), { code: 'result_unknown' });
+    await assert.rejects(action(), { code: 'result_unknown' });
+    assert.equal(calls.filter(call => call.command === 'desktop_remote_action_a').length, before + 1);
+  }
+  const before = calls.length;
+  await assert.rejects(feature.attachmentBegin('remote-1', 'ref-1', 'task-2', 'big.bin', 'application/octet-stream', 20 * 1024 * 1024 + 1, digest), { code: 'remote_attachment_size_invalid' });
+  assert.equal(calls.length, before);
+});
+
+test('unconfirmed begin IPC result fences the upload batch across task identities', async () => {
+  const { uploadRemoteFiles } = await import('../src/features/remote-control/remote-file-transfer.mjs');
+  const { feature, calls, state } = installFeature(command => {
+    // Tauri IPC rejects with strings; keep that error-normalization contract covered.
+    // eslint-disable-next-line prefer-promise-reject-errors
+    if (command === 'desktop_remote_action_a') return Promise.reject('result_unknown');
+    return undefined;
+  });
+  await new Promise(resolve => setTimeout(resolve, 0));
+  state.desktopRemoteControl.controllerConnection = { connectionId: 'ipc-begin', controllerLeaseId: 'lease', leaseEpoch: '1', relayEpoch: 'relay', generation: 'generation' };
+  const bytes = new TextEncoder().encode('x');
+  const file = { name: 'a.txt', type: 'text/plain', size: 1, arrayBuffer: async () => bytes.buffer.slice(0) };
+  const binding = { localSessionId: 'ipc-local', remoteRef: 'ipc-ref' };
+  const options = { ownerIdentity: 'owner', leaseIdentity: 'ipc-begin-lease', isCurrent: () => true };
+  await assert.rejects(uploadRemoteFiles(feature, binding, 'task-1', [file], () => {}, options), { code: 'result_unknown' });
+  await assert.rejects(uploadRemoteFiles(feature, binding, 'task-2', [file], () => {}, options), { code: 'remote_attachment_fenced' });
+  assert.equal(calls.filter(call => call.command === 'desktop_remote_action_a').length, 1);
+});
+
+test('attachment action saturation blocks the same lease and resets on a new lease', async () => {
+  let succeed = false;
+  const { feature, calls, state } = installFeature(command => {
+    if (command !== 'desktop_remote_action_a') return undefined;
+    return succeed ? Promise.resolve({ transfer_id: 'fresh', chunk_bytes: 1, total_bytes: 1 }) : Promise.reject(new Error('result_unknown'));
+  });
+  await new Promise(resolve => setTimeout(resolve, 0));
+  const lease = id => ({ connectionId: id, controllerLeaseId: 'lease', leaseEpoch: '1', relayEpoch: 'relay', generation: id });
+  state.desktopRemoteControl.controllerConnection = lease('saturated-old');
+  for (let i = 0; i < 130; i += 1) {
+    await assert.rejects(feature.attachmentBegin('remote-1', 'ref-1', 'task-' + i, 'a.txt', 'text/plain', 1, 'a'.repeat(64)), { code: 'result_unknown' });
+  }
+  assert.equal(calls.filter(call => call.command === 'desktop_remote_action_a').length, 129);
+  state.desktopRemoteControl.controllerConnection = lease('saturated-new');
+  succeed = true;
+  assert.equal((await feature.attachmentBegin('remote-1', 'ref-1', 'new-task', 'a.txt', 'text/plain', 1, 'a'.repeat(64))).transferId, 'fresh');
+});
+
+test('attachment uncertainty is retired only when the actual lease changes', async () => {
+  let succeed = false;
+  const { feature, calls, state } = installFeature(command => {
+    if (command !== 'desktop_remote_action_a') return undefined;
+    return succeed ? Promise.resolve({ transfer_id: 'new-transfer', chunk_bytes: 1, total_bytes: 1 }) : Promise.reject(new Error('result_unknown'));
+  });
+  await new Promise(resolve => setTimeout(resolve, 0));
+  const lease = id => ({ connectionId: id, controllerLeaseId: 'lease', leaseEpoch: '1', relayEpoch: 'relay', generation: id });
+  state.desktopRemoteControl.controllerConnection = lease('old-connection');
+  const begin = () => feature.attachmentBegin('remote-1', 'ref-1', 'task-1', 'a.txt', 'text/plain', 1, 'a'.repeat(64));
+  await assert.rejects(begin(), { code: 'result_unknown' });
+  assert.equal(state.desktopRemoteControl.controllerConnection.connectionId, 'old-connection');
+  await assert.rejects(begin(), { code: 'result_unknown' });
+  assert.equal(calls.filter(call => call.command === 'desktop_remote_action_a').length, 1);
+  state.desktopRemoteControl.controllerConnection = lease('new-connection');
+  succeed = true;
+  assert.equal((await begin()).transferId, 'new-transfer');
+  assert.equal(calls.filter(call => call.command === 'desktop_remote_action_a').length, 2);
+});
+
+test('a late unknown reply from a retired lease cannot fence the new lease', async () => {
+  const old = Promise.withResolvers();
+  let first = true;
+  const { feature, state } = installFeature(command => {
+    if (command !== 'desktop_remote_action_a') return undefined;
+    if (first) { first = false; return old.promise; }
+    return Promise.resolve({ transfer_id: 'new-transfer', chunk_bytes: 1, total_bytes: 1 });
+  });
+  await new Promise(resolve => setTimeout(resolve, 0));
+  const lease = id => ({ connectionId: id, controllerLeaseId: 'lease', leaseEpoch: '1', relayEpoch: 'relay', generation: id });
+  state.desktopRemoteControl.controllerConnection = lease('old-connection');
+  const begin = () => feature.attachmentBegin('remote-1', 'ref-1', 'task-1', 'a.txt', 'text/plain', 1, 'a'.repeat(64));
+  const pending = begin();
+  state.desktopRemoteControl.controllerConnection = lease('new-connection');
+  assert.equal((await begin()).transferId, 'new-transfer');
+  old.reject('result_unknown');
+  await assert.rejects(pending, { code: 'result_unknown' });
+  assert.equal((await begin()).transferId, 'new-transfer');
 });
 
 test('remote actions reuse one request id across uncertain retry and later reconciliation', async () => {

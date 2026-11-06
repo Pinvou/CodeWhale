@@ -119,10 +119,18 @@ pub(super) fn xlsx_structure_annotations(bytes: &[u8]) -> Result<Option<String>,
 /// `_rels/.rels` 的 officeDocument Target），非 `xl/` 布局无法绕过守卫。
 pub(super) fn xlsx_formula_span_limits(bytes: &[u8]) -> Option<HashMap<String, (u64, u64)>> {
     let mut archive = zip::ZipArchive::new(Cursor::new(bytes)).ok()?;
-    let base = workbook_base_folder(&mut archive).ok()?;
-    let workbook = read_zip_text(&mut archive, &format!("{base}workbook.xml")).ok()??;
+    let mut paths = HashMap::with_capacity(archive.len());
+    for path in archive.file_names() {
+        let path = path.ok()?;
+        paths.insert(
+            path.replace('\\', "/").to_ascii_lowercase(),
+            path.to_string(),
+        );
+    }
+    let (base, name) = workbook_location(&mut archive, &paths).ok()?;
+    let workbook = read_formula_zip_text(&mut archive, &paths, &format!("{base}{name}")).ok()??;
     let relationships =
-        read_zip_text(&mut archive, &format!("{base}_rels/workbook.xml.rels")).ok()??;
+        read_formula_zip_text(&mut archive, &paths, &format!("{base}_rels/{name}.rels")).ok()??;
     let relationship_targets = parse_relationship_targets(&relationships).ok()?;
     let mut limits = HashMap::new();
     for (sheet_name, relationship_id) in parse_sheets(&workbook).ok()? {
@@ -134,45 +142,116 @@ pub(super) fn xlsx_formula_span_limits(bytes: &[u8]) -> Option<HashMap<String, (
         } else {
             format!("{base}{target}")
         };
-        let Ok(Some(xml)) = read_zip_text(&mut archive, &path) else {
+        let Ok(Some(xml)) = read_formula_zip_text(&mut archive, &paths, &path) else {
             continue;
         };
         let (rows, cols) = formula_cell_span(&xml);
-        limits.insert(flatten_text(&sheet_name), (rows, cols));
+        limits.insert(sheet_name, (rows, cols));
     }
     Some(limits)
 }
 
-/// calamine `Xlsx::read_package_relationships` 的镜像：workbook 基目录取自根
-/// `_rels/.rels` 中 officeDocument 关系 Target 的目录前缀（剥离开头 `/`）。
-fn workbook_base_folder<R: Read + Seek>(
+fn read_formula_zip_text<R: Read + Seek>(
     archive: &mut zip::ZipArchive<R>,
-) -> Result<String, String> {
-    let root_rels = read_zip_text(archive, "_rels/.rels")?.ok_or("_rels/.rels 缺失")?;
+    paths: &HashMap<String, String>,
+    path: &str,
+) -> Result<Option<String>, String> {
+    let key = path.to_ascii_lowercase();
+    let path = paths.get(&key).map(String::as_str).unwrap_or(path);
+    read_zip_text(archive, path)
+}
+
+/// 镜像 calamine `Xlsx::read_package_relationships` 对根 officeDocument
+/// Target 的目录和文件名解析，让预检与读取器定位同一工作簿。
+fn workbook_location<R: Read + Seek>(
+    archive: &mut zip::ZipArchive<R>,
+    paths: &HashMap<String, String>,
+) -> Result<(String, String), String> {
+    let root_rels =
+        read_formula_zip_text(archive, paths, "_rels/.rels")?.ok_or("_rels/.rels 缺失")?;
     let mut reader = Reader::from_str(&root_rels);
-    reader.config_mut().trim_text(true);
+    let config = reader.config_mut();
+    config.check_end_names = false;
+    config.expand_empty_elements = true;
+    let mut in_relationships = false;
     let mut target = None;
     loop {
         match reader.read_event() {
-            Ok(Event::Start(element) | Event::Empty(element))
-                if element.local_name().as_ref() == "Relationship" =>
+            Ok(Event::Start(element)) if element.local_name().as_ref() == "Relationships" => {
+                in_relationships = true;
+            }
+            Ok(Event::Start(element))
+                if in_relationships && element.local_name().as_ref() == "Relationship" =>
             {
-                let is_office_document = attr(&element, "Type")
-                    .is_some_and(|relationship_type| relationship_type.ends_with("officeDocument"));
-                if is_office_document {
-                    target = attr(&element, "Target");
+                if let Some(document_target) = office_document_target(&element)? {
+                    target = Some(document_target);
                 }
             }
-            Ok(Event::Eof) => break,
+            // The reader uses only the first Relationships block.
+            Ok(Event::End(element))
+                if in_relationships && element.local_name().as_ref() == "Relationships" =>
+            {
+                break;
+            }
+            Ok(Event::Eof) => return Err("XLSX 根 relationships 未闭合".to_string()),
             Err(error) => return Err(format!("解析 XLSX 根 relationships 失败: {error}")),
             _ => {}
         }
     }
-    let directory = target
-        .as_deref()
-        .and_then(|target| target.rfind('/').map(|end| &target[..=end]))
-        .map(|directory| directory.strip_prefix('/').unwrap_or(directory));
-    Ok(directory.unwrap_or("").to_string())
+    let target = target.as_deref().ok_or("XLSX 根主文档关系缺失")?;
+    let (directory, name) = target
+        .rfind('/')
+        .map_or(("", target), |end| target.split_at(end + 1));
+    Ok((
+        directory.strip_prefix('/').unwrap_or(directory).to_string(),
+        if name.is_empty() {
+            "workbook.xml"
+        } else {
+            name
+        }
+        .to_string(),
+    ))
+}
+
+// calamine 0.38 scans raw attributes through the next equals sign. Mirror that
+// selection so accepted malformed attributes cannot make the preflight miss a workbook.
+fn office_document_target(element: &BytesStart<'_>) -> Result<Option<String>, String> {
+    let mut remaining = element.attributes_raw().trim_ascii_start();
+    let mut relationship_type = None;
+    let mut target = None;
+    let mut recognized = 0;
+    while !remaining.is_empty() {
+        let (key, value) = remaining.split_once('=').ok_or("XLSX 根关系属性缺少等号")?;
+        let value = value.trim_ascii_start();
+        let quote = match value.as_bytes().first() {
+            Some(b'"') => '"',
+            Some(b'\'') => '\'',
+            _ => return Err("XLSX 根关系属性缺少引号".to_string()),
+        };
+        let value = &value[1..];
+        let (value, tail) = value.split_once(quote).unwrap_or((value, ""));
+        remaining = tail.trim_ascii_start();
+        match key.trim_ascii_end() {
+            "Type" => relationship_type = Some(value),
+            "Target" => target = Some(value),
+            _ => continue,
+        }
+        recognized += 1;
+        if recognized == 2 {
+            break;
+        }
+    }
+    if relationship_type.is_some_and(|value| value.ends_with("/relationships/officeDocument")) {
+        target
+            .map(|value| {
+                quick_xml::escape::unescape(value)
+                    .map(|path| path.into_owned())
+                    .map_err(|error| format!("解析 XLSX 根主文档路径失败: {error}"))
+            })
+            .transpose()
+    } else {
+        Ok(None)
+    }
 }
 
 /// 工作表内公式格的跨度 `(rows, cols)`，取自带 `r` 属性且含 `<f>` 子元素的
@@ -671,6 +750,179 @@ mod tests {
     }
 
     #[test]
+    fn formula_span_limits_preserve_reader_sheet_names() {
+        use calamine::Reader;
+
+        let bytes = folded_formula_fixture();
+        let limits = xlsx_formula_span_limits(&bytes).unwrap();
+        let mut workbook = calamine::open_workbook_auto_from_rs(Cursor::new(bytes)).unwrap();
+        let name = workbook.sheet_names()[0].clone();
+        assert_eq!(name, "Fold\nX");
+        assert_eq!(limits.get(&name), Some(&(1, 1)));
+        let values = workbook.worksheet_range(&name).unwrap();
+        assert!(!values.is_empty());
+        assert_eq!(values.get_value((0, 0)).unwrap().to_string(), "3");
+        let formulas = workbook.worksheet_formula(&name).unwrap();
+        assert_eq!(
+            formulas.get_value((0, 0)).map(String::as_str),
+            Some("SUM(1)\n+ 2")
+        );
+    }
+
+    #[test]
+    fn formula_guard_follows_reader_zip_path_cache() {
+        use calamine::Reader;
+
+        for layout in [
+            "uppercase",
+            "backslashes",
+            "uppercase_backslashes",
+            "duplicate",
+        ] {
+            let mut archive = zip::ZipArchive::new(Cursor::new(folded_formula_fixture())).unwrap();
+            let mut entries = Vec::new();
+            for index in 0..archive.len() {
+                let mut file = archive.by_index(index).unwrap();
+                let mut name = file.name().unwrap().into_owned();
+                if matches!(layout, "uppercase" | "uppercase_backslashes") {
+                    name = name.to_ascii_uppercase();
+                }
+                if matches!(layout, "backslashes" | "uppercase_backslashes") {
+                    name = name.replace('/', "\\");
+                }
+                let mut xml = String::new();
+                file.read_to_string(&mut xml).unwrap();
+                entries.push((name, xml));
+            }
+            if layout == "duplicate" {
+                let xml = entries.last().unwrap().1.replace("r=\"1\"", "r=\"2\"");
+                let xml = xml.replace("r=\"A1\"", "r=\"B2\"");
+                entries.push(("XL/WORKSHEETS/SHEET1.XML".to_string(), xml));
+            }
+            let files: Vec<_> = entries
+                .iter()
+                .map(|(name, xml)| (name.as_str(), xml.as_str()))
+                .collect();
+            let bytes = xlsx_fixture(&files);
+            let limits = xlsx_formula_span_limits(&bytes).unwrap();
+            let mut workbook = calamine::open_workbook_auto_from_rs(Cursor::new(bytes)).unwrap();
+            let name = workbook.sheet_names()[0].clone();
+            let position = if layout == "duplicate" {
+                (1, 1)
+            } else {
+                (0, 0)
+            };
+            let span = (u64::from(position.0 + 1), u64::from(position.1 + 1));
+            assert_eq!(limits.get(&name), Some(&span));
+            let values = workbook.worksheet_range(&name).unwrap();
+            assert!(!values.is_empty());
+            assert_eq!(values.get_value(position).unwrap().to_string(), "3");
+            let formulas = workbook.worksheet_formula(&name).unwrap();
+            assert_eq!(
+                formulas.get_value(position).map(String::as_str),
+                Some("SUM(1)\n+ 2")
+            );
+        }
+    }
+
+    #[test]
+    fn formula_guard_matches_reader_office_document_type() {
+        use calamine::Reader;
+
+        let mut archive = zip::ZipArchive::new(Cursor::new(folded_formula_fixture())).unwrap();
+        let mut entries = Vec::new();
+        for index in 0..archive.len() {
+            let mut file = archive.by_index(index).unwrap();
+            let name = file.name().unwrap().into_owned();
+            let mut xml = String::new();
+            file.read_to_string(&mut xml).unwrap();
+            if name == "_rels/.rels" {
+                xml = xml.replace(
+                    "</Relationships>",
+                    r#"<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/fakeofficeDocument" Target="xl/other.xml"/><Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument"/></Relationships>"#,
+                );
+            }
+            entries.push((name, xml));
+        }
+        let files: Vec<_> = entries
+            .iter()
+            .map(|(name, xml)| (name.as_str(), xml.as_str()))
+            .collect();
+        let bytes = xlsx_fixture(&files);
+        let limits = xlsx_formula_span_limits(&bytes).unwrap();
+        let mut workbook = calamine::open_workbook_auto_from_rs(Cursor::new(bytes)).unwrap();
+        let name = workbook.sheet_names()[0].clone();
+        assert_eq!(limits.get(&name), Some(&(1, 1)));
+        let values = workbook.worksheet_range(&name).unwrap();
+        assert!(!values.is_empty());
+        assert_eq!(values.get_value((0, 0)).unwrap().to_string(), "3");
+        let formulas = workbook.worksheet_formula(&name).unwrap();
+        assert_eq!(
+            formulas.get_value((0, 0)).map(String::as_str),
+            Some("SUM(1)\n+ 2")
+        );
+    }
+
+    #[test]
+    fn formula_guard_uses_the_readers_package_relationship() {
+        assert_package_relationship_keeps_distant_span(|xml| {
+            xml.push_str(r#"<Relationship Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/other.xml"/>"#);
+        });
+        assert_package_relationship_keeps_distant_span(|xml| {
+            assert!(xml.contains(r#"Target="xl/workbook.xml""#));
+            *xml = xml.replace(
+                r#"Target="xl/workbook.xml""#,
+                r#"xmlns:extra="urn:extra" extra:Target="xl/other.xml" Target="xl/workbook&#46;xml""#,
+            );
+        });
+        assert_package_relationship_keeps_distant_span(|xml| {
+            assert!(xml.contains("</Relationships>"));
+            *xml = xml.replace(
+                "</Relationships>",
+                r#"<Relationship Junk Type="urn:ignored" Target="xl/other.xml"/></Relationships>"#,
+            );
+        });
+    }
+
+    fn assert_package_relationship_keeps_distant_span(change_root: impl Fn(&mut String)) {
+        let mut archive = zip::ZipArchive::new(Cursor::new(distant_formula_fixture())).unwrap();
+        let mut entries = Vec::new();
+        for index in 0..archive.len() {
+            let mut file = archive.by_index(index).unwrap();
+            let name = file.name().unwrap().into_owned();
+            let mut xml = String::new();
+            file.read_to_string(&mut xml).unwrap();
+            if name == "_rels/.rels" {
+                change_root(&mut xml);
+            }
+            entries.push((name, xml));
+        }
+        let files: Vec<_> = entries
+            .iter()
+            .map(|(name, xml)| (name.as_str(), xml.as_str()))
+            .collect();
+        let bytes = xlsx_fixture(&files);
+        let limits = xlsx_formula_span_limits(&bytes).unwrap();
+        let (rows, cols) = limits["Map"];
+        assert!(rows.saturating_mul(cols) > MAX_FORMULA_SPAN_CELLS);
+
+        let calamine::Sheets::Xlsx(mut workbook) =
+            calamine::open_workbook_auto_from_rs(Cursor::new(bytes)).unwrap()
+        else {
+            panic!("expected XLSX");
+        };
+        let mut cells = workbook.worksheet_cells_reader("Map").unwrap();
+        assert_eq!(
+            cells.next_formula().unwrap().unwrap().get_position(),
+            (0, 0)
+        );
+        assert_eq!(
+            cells.next_formula().unwrap().unwrap().get_position(),
+            (4_294_967_294, 16_383)
+        );
+    }
+
+    #[test]
     fn non_ooxml_bytes_have_no_formula_span_limits() {
         assert!(xlsx_formula_span_limits(b"not a zip").is_none());
     }
@@ -685,27 +937,47 @@ mod tests {
 
     #[test]
     fn guard_resolves_nonstandard_base_folder() {
+        assert_workbook_location("deep/workbook.xml");
+    }
+
+    #[test]
+    fn guard_follows_workbook_filename_from_package_relationship() {
+        for target in ["deep/book.xml", "/deep/book.xml", "book.xml"] {
+            assert_workbook_location(target);
+        }
+    }
+
+    fn assert_workbook_location(target: &str) {
+        let workbook = target.strip_prefix('/').unwrap_or(target);
+        let (base, name) = workbook
+            .rfind('/')
+            .map_or(("", workbook), |end| workbook.split_at(end + 1));
+        let root_relationships = format!(
+            r#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="{target}"/></Relationships>"#
+        );
+        let relationships = format!("{base}_rels/{name}.rels");
+        let sheet = format!("{base}worksheets/sheet1.xml");
         let bytes = xlsx_fixture(&[
             ("[Content_Types].xml", TEST_CONTENT_TYPES),
+            ("_rels/.rels", &root_relationships),
             (
-                "_rels/.rels",
-                r#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="deep/workbook.xml"/></Relationships>"#,
-            ),
-            (
-                "deep/workbook.xml",
+                workbook,
                 r#"<?xml version="1.0"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Base" sheetId="1" r:id="rId1"/></sheets></workbook>"#,
             ),
             (
-                "deep/_rels/workbook.xml.rels",
+                &relationships,
                 r#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>"#,
             ),
             (
-                "deep/worksheets/sheet1.xml",
+                &sheet,
                 r#"<?xml version="1.0"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="2"><c r="B2"><f>A1</f></c></row></sheetData></worksheet>"#,
             ),
         ]);
         let limits = xlsx_formula_span_limits(&bytes).unwrap();
         assert_eq!(limits.get("Base"), Some(&(2, 2)));
+        let mut workbook = calamine::open_workbook_auto_from_rs(Cursor::new(bytes)).unwrap();
+        let formulas = calamine::Reader::worksheet_formula(&mut workbook, "Base").unwrap();
+        assert_eq!(formulas.get_value((1, 1)).map(String::as_str), Some("A1"));
     }
 
     #[test]

@@ -7,7 +7,8 @@ import * as sessionMention from '../src/features/chat/session-mention.js';
 import { prepareSceneCapabilities, requiredCapabilitiesForMeta } from '../src/features/chat/scene-capabilities.js';
 
 const root = path.resolve(import.meta.dirname, '..');
-const read = file => fs.readFileSync(path.join(root, file), 'utf8');
+// Source slices use LF anchors regardless of the checkout's line endings.
+const read = file => fs.readFileSync(path.join(root, file), 'utf8').replace(/\r\n/g, '\n');
 const sources = {
   desktop: read('src/platform/tauri/bridge/voice.js'),
   web: read('src/platform/web/bridge.js'),
@@ -257,7 +258,8 @@ for (const [lane, source] of Object.entries(sources)) {
     Object.assign(operation, { rawText: 'private conversation', draftBeforeStart: 'private draft',
       diagnostic: { error: 'secret raw error' }, modelId: 'private-model', path: 'private-path' });
     h.api.completeVoiceSubmission(operation.operationId, 'native-session', true);
-    assert.deepEqual(Object.keys(h.events[0]).sort(), ['command', 'eventName', 'operationId', 'sessionId']);
+    assert.deepEqual(Object.keys(h.events[0]).sort(), ['command', 'eventName', 'inputType', 'operationId', 'sessionId']);
+    assert.equal(h.events[0].inputType, 'voice');
   });
 
   test(`${lane}: implementation publishes context before awaiting writeback and never resets terminal`, () => {
@@ -283,11 +285,34 @@ test('composer adapters preserve explicit metadata and authoritative native owne
   assert.match(chat, /sendChatMessage\(outgoingText, \{ \.\.\.context, draftOwner: owner \}\)/);
   assert.match(native, /sendTask: async \(outgoing, context\) => send\(outgoing, \{ voiceOperationId: context\?\.operationId \}\)/);
   assert.match(native, /nativeControlsSessionRef\.current === activeId \? nativeControls\.modelId : null/);
+  assert.match(native, /modelRef: isNativeAgent && !activeId \? nativeDraftControls\.modelRef : null/);
+  assert.match(hook, /modelRef: current\.modelRef \|\| null/);
   assert.match(native, /completeVoiceSubmission\(voiceOperationId, targetId, true\)/);
   assert.match(native, /ownerKind: isNativeAgent \? 'native' : 'acp'/);
   const web = sources.web;
   assert.match(web, /completeVoiceSubmission\(submission\.voiceOperationId, metadata\.id, true\)/);
   assert.doesNotMatch(web, /error: "session_required"/);
+});
+
+test('desktop voice HTTP invoke preserves the draft typed model reference', async () => {
+  const source = sources.desktop;
+  const start = source.indexOf('  async function postprocessVoiceText(');
+  const end = source.indexOf('  async function finishVoiceInput(', start);
+  assert.ok(start >= 0 && end > start);
+  const calls = [];
+  const fn = vm.runInNewContext(`(function () { ${source.slice(start, end)}; return postprocessVoiceText; })()`, {
+    invoke: async (command, args) => { calls.push({ command, args }); return { text: 'output', source: 'llm' }; },
+    normalizeVoiceMode: value => value, voiceNow: () => 0, roundedMs: () => 0,
+    stripVoicePostprocessFences: text => text, voicePostprocessTimeoutMs: () => 500,
+    setTimeout, clearTimeout, console,
+  });
+  const reference = { source: 'account_platform', model_id: '0199a100-0001-7000-8000-000000000106' };
+  assert.equal((await fn('input', 'dictation', '', null, 500, 'raw', 'builtin-account-platform', reference)).text, 'output');
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].command, 'postprocess_voice_text');
+  assert.equal(calls[0].args.request.session_id, null);
+  assert.deepEqual(calls[0].args.request.model_ref, reference);
+  assert.equal(calls[0].args.request.model_id, 'builtin-account-platform');
 });
 
 for (const code of ['permission_denied', 'outcome_unknown']) {
@@ -760,8 +785,9 @@ for (const lane of ['desktop', 'web']) {
           controlledCapabilityBound: false, controlledCapabilityBusy: false, controlledSkillIds: [],
           controlledSession: { sessionId: null },
           remoteChatActive: false, remoteConnection: null, remoteLinkReady: false,
-          remoteSessionBusy: false,
-          remoteSendIdentity: null, remoteTransferGuard: null, effectiveRemoteModelSource: null, remoteBinding: null,
+          remoteSessionBusy: false, remoteTranscriptActive: false,
+          remoteSendIdentity: '', remoteComposerIdentity: '', remoteUploadLeaseIdentity: null,
+          remoteTransferGuard: null, effectiveRemoteModelSource: null, remoteBinding: null,
           remoteFiles: [], remoteNewDispatchReady: false, remoteProxyHistory: null,
           remoteModelError: null, remoteModelSource: 'controlled_device',
           remoteMode: 'chat', remoteSkillIds: [], remoteWorkspaceId: '',
@@ -927,9 +953,12 @@ for (const lane of ['desktop', 'web']) {
           ctx.prefill = h.state.composerPrefill.text;
           ctx.prefillAppend = h.state.composerPrefill.append;
           const prefillCondition = chat.indexOf('        if (prefill)');
+          assert.ok(prefillCondition >= 0, 'the actual ChatView prefill condition must be present');
           const effectStart = chat.lastIndexOf('      useEffect(() => {', prefillCondition);
-          const effectEnd = chat.indexOf('}, [prefill, prefillAppend]);', effectStart) + '}, [prefill, prefillAppend]);'.length;
-          vm.runInContext(chat.slice(effectStart, effectEnd), ctx);
+          const effectEndMarker = '}, [prefill, prefillAppend]);';
+          const effectEnd = chat.indexOf(effectEndMarker, effectStart);
+          assert.ok(effectStart >= 0 && effectEnd > effectStart, 'the actual ChatView prefill effect must be present');
+          vm.runInContext(chat.slice(effectStart, effectEnd + effectEndMarker.length), ctx);
         } else if (draftSyncPending) {
           ctx.setInput(h.state.composerDraft);
         }

@@ -1,3 +1,4 @@
+import { trayLabels } from './tray/zh.js';
 // 中文 UI 词典。自启动预算拆分(round-41)起 zh 与 en/ja 一致走惰性装载
 // (ensureLanguage('zh'));各入口经 ensureLanguageWithZhFallback 在首选语言
 // 装载失败时以 zh 兜底。en/ja 对 zh 全部叶子 key 的覆盖由
@@ -31,7 +32,7 @@ const conversationZh = {
   attachment:'附件', operations:(count,failedCount)=>`执行 ${count} 项${failedCount?` · ${failedCount} 项失败`:''}`, copyReply:'复制回复', copyReplySuccess:'已复制', copyReplyFailed:'复制失败',
   exportReply:'导出', exportReplyTitle:'导出回复', exportMarkdown:'Markdown 文档', exportMarkdownHint:'默认，保留原始排版', exportHtml:'HTML 文档', exportHtmlHint:'适合在浏览器中查看', exportSuccess:'导出成功', exportFailed:'导出失败', exportTooLarge:'回复内容超出导出大小限制',
   shareReply:'分享', shareReplyTitle:'分享回复', shareSystem:'系统分享', shareSystemHint:'选择系统中已安装的通信应用', shareApps:'复制内容并打开应用', shareSuccess:'已分享', shareCopiedOpen:app=>`内容已复制，已尝试打开${app}，请粘贴发送`, shareCopiedWeb:app=>`内容已复制，请打开${app}粘贴发送`, shareFailed:'分享失败', shareUnavailable:'系统分享不可用，内容已复制', shareTargets:{wechat:'微信',wecom:'企业微信',feishu:'飞书',dingtalk:'钉钉',qq:'QQ'},
-  technicalDetails:'技术详情',
+  memberQuotaInsufficientTitle:"成员额度不足", memberQuotaInsufficientMessage:"当前组织的成员额度不足，无法开始本次任务。请联系组织管理员。", organizationWalletInsufficientTitle:"组织余额不足", organizationWalletInsufficientMessage:"当前组织余额不足，无法开始本次任务。请联系组织管理员补充余额。", organizationInsufficientCompletedMessage:"本次回答已完成，但组织余额或成员额度不足。继续使用前请联系组织管理员。", technicalDetails:'技术详情', walletInsufficientTitle:'余额不足', walletInsufficientMessage:'当前余额不足，无法开始本次任务。', walletInsufficientCompletedTitle:'余额不足', walletInsufficientCompletedMessage:'本次回答已完成，但账户余额不足，继续使用前请充值。', rechargeNow:'立即充值',
 };
 
 const codexZh = {
@@ -189,6 +190,7 @@ const acpProvidersZh = {
 export const dictZh = {
   diagnostics: failureDiagnosticsZh,
   steerFailedLost: CHAT_RECOVERY_COPY.zh.steerFailedLost,
+  tray: trayLabels,
   ...browserZh,
         langTag: 'zh',
         acpAgent: 'ACP Agent',
@@ -311,7 +313,7 @@ export const dictZh = {
         modelContextWindow: '上下文窗口（tokens）',
         modelMaxOutput: '最大输出（tokens）',
         customApiKey: 'API Key',
-        credEnvOverride: '环境变量覆盖', credUnavailable: '凭证不可用', credConfigured: '已配置', credNotConfigured: '未配置', credEnterNewKey: '输入新 Key 替换', credKeep: '保留', credReplace: '替换', credDeleteKey: '删除 Key', clearSearch: '清除搜索', clearInput: '清除输入', sendMsg: '发送', apiKeyGateTitle: '需要配置 API Key', apiKeyGateDesc: '当前模型为云端模型，需要先配置 API Key 才能开始对话。', apiKeyGateBtn: '去配置',
+        credEnvOverride: '环境变量覆盖', credUnavailable: '凭证不可用', credConfigured: '已配置', credNotConfigured: '未配置', credEnterNewKey: '输入新 Key 替换', credKeep: '保留', credReplace: '替换', credDeleteKey: '删除 Key', clearSearch: '清除搜索', clearInput: '清除输入', sendMsg: '发送',
         detectLocalVllm: '检测本机模型服务',
         detectingLocalVllm: '检测中…',
         useVllmConfig: '使用此配置',
@@ -2013,10 +2015,6 @@ dictZh["uiTeamRelay"] = {
   "lifecycleSyncPending": "操作已完成，但团队数据尚未同步。请重新同步以获取最新状态。"
 };
 dictZh["kbOutWeekdays"] = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"];
-dictZh["builtinModelSelect"] = "后台模型";
-dictZh["builtinModelRefresh"] = "刷新";
-dictZh["builtinModelLoading"] = "同步中…";
-dictZh["builtinModelEmpty"] = "暂无后台模型";
 dictZh["uiRemote"]["status"]["idle"] = ["未开启", "开启后会生成一个长期有效的远程控制链接。"];
 dictZh["uiRemote"]["status"]["starting"] = ["正在开启", "正在创建远程控制连接。"];
 dictZh["uiRemote"]["status"]["connecting_relay"] = ["正在连接", "正在连接云端中继，请稍候。"];
@@ -2026,7 +2024,6 @@ dictZh["uiRemote"]["status"]["web_client_disconnected"] = ["浏览器已断开",
 dictZh["uiRemote"]["status"]["revoked"] = ["链接已撤销", "请重新开启远程控制。"];
 dictZh["uiRemote"]["status"]["stopped"] = ["已停止", "再次打开此面板即可重新开启。"];
 dictZh["uiRemote"]["status"]["error"] = ["连接异常", "远程控制暂时不可用，请重试。"];
-dictZh["uiSettingsDetail"]["builtinModel"] = "内置模型";
 dictZh["uiSettingsDetail"]["settingsLoadFailedDetail"] = "设置页面暂时无法显示，请重新打开后重试。";
 dictZh["uiScheduled"]["weekdays"] = [["星期一", "周一"], ["星期二", "周二"], ["星期三", "周三"], ["星期四", "周四"], ["星期五", "周五"], ["星期六", "周六"], ["星期日", "周日"]];
 dictZh["uiAccount"] = {
@@ -2289,6 +2286,24 @@ Object.assign(dictZh.uiChat, {
   bgTasksRunning: n => `${n} 个后台任务运行中`,
 });
 
+// F05 complete platform-model selection copy, supplied by shared i18n.
+dictZh.modelAccessTitle = '欢迎使用 PINVOU';
+dictZh.modelAccessDesc = '登录品悟账号即可使用平台模型，或连接你自己的本地与第三方模型。';
+dictZh.modelAccessLogin = '登录';
+dictZh.modelAccessExternal = '使用本地/第三方模型';
+Object.assign(dictZh.uiSettingsDetail, {
+  platformModels:'品悟平台模型',
+  platformModelsDesc:'选择空白新会话的默认模型，不会更改已有会话。',
+  platformModelsLoading:'正在加载平台模型…',
+  platformModelsSignIn:'登录品悟账号后可选择平台模型。',
+  platformModelsUnavailable:'暂时无法加载平台模型，请稍后重试。',
+  platformModelsRetry:'重试加载',
+  appliesToNewSessions:'应用于新会话',
+  modelDeprecated:'即将下架',
+  modelUnavailable:'当前不可用',
+  modelSwitchFailed:'模型切换失败，请重试。',
+});
+dictZh.uiModelReplacement = { title:'当前模型不能继续此历史会话', lead:'原会话与消息保持不变。请选择当前可用模型，创建带来源记录的新分支后继续。', create:'创建替代分支', creating:'创建中…' , branchTitleSuffix:'替代模型分支' };
 // Windows 双端远程控制：B 被控端面板（DEV-21）。
 dictZh["controlledDevice"] = {
   taskPermissionTitle: "远程任务权限",
@@ -2548,7 +2563,7 @@ dictZh["remoteConversation"] = {
   journalResync: "已重新同步会话状态。",
   resultUnknownHint: "连接中断，无法确认该任务是否执行完成。",
   preparedNotSent: "任务尚未提交。可继续提交同一任务；放弃后才可作为新消息发送。",
-  preparedPayloadLost: "任务尚未发送，但重启后原负载已不可恢复。请先安全放弃，再重新输入。",
+  preparedPayloadLost: "任务尚未发送，但原负载已不可恢复。请先安全放弃，再重新输入。",
   outcomeUnknownNoResend: "任务结果未知，不能自动重发，以免重复执行。请先核对被控端结果。",
   commitPreparedTask: "继续提交",
   abandonPreparedTask: "安全放弃",
@@ -2574,7 +2589,9 @@ dictZh["remoteConversation"] = {
   attachmentOnlyPrompt: "请处理随任务提交的附件。",
   addAttachment: "添加远程附件",
   attachmentCountInvalid: "请选择 1–8 个远程附件。",
-  attachmentSizeInvalid: "每个附件必须非空且不超过 32 MiB。",
+  attachmentSizeInvalid: "每个附件必须非空且不超过 20 MiB。",
+  attachmentFenced: "此会话的附件上传结果尚未确认，新上传未开始。请先在被控端核对，再断开并建立新连接后重试。",
+  attachmentCapacity: "附件上传记录已达上限，本次上传未开始。请先核对之前的上传，再重新连接。",
   chatOpenFailed: "无法自动打开远程会话页面。",
   sessionOpenFailed: "无法自动打开收到任务的会话。",
   openAgain: "重新打开",

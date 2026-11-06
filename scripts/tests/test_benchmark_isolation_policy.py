@@ -121,7 +121,8 @@ class BenchmarkIsolationPolicyTests(unittest.TestCase):
             "\n  windows-rust-test:", 1
         )[0]
         self.assertIn(
-            "cargo test --manifest-path pinvou3-app/src-tauri/Cargo.toml "
+            "cargo --config 'profile.dev.package.codewhale-tui.opt-level=0' test "
+            "--manifest-path pinvou3-app/src-tauri/Cargo.toml "
             "--no-default-features --lib --features benchmark-hooks --locked "
             "-- --test-threads=1",
             rust_test,

@@ -1,0 +1,2 @@
+user default reset off
+user newapi reset on #NEWAPI_PASSWORD_SHA256 ~* +ping +hello +client|setname +client|setinfo +get +getset +mget +set +del +unlink +exists +ttl +pttl +expire +pexpire +pexpireat +incr +incrby +hget +hgetall +hmget +hset +hmset +hincrby +hexists +multi +exec +discard +eval +evalsha +script|load +scan +llen +lindex +lpush +ltrim +time

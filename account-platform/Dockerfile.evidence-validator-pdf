@@ -1,0 +1,27 @@
+# Candidate only: historical amd64 CI built/basic-tested it; arm64 and production isolation remain unverified (see cmd/evidence-image-validator/README.md).
+FROM --platform=$BUILDPLATFORM golang:1.26.6-alpine@sha256:3889b425f035be855a72fb4755265311293b6d414521f0a519d819df32222d83 AS go-build
+ARG TARGETOS
+ARG TARGETARCH
+ENV GOTOOLCHAIN=local GOPROXY=https://proxy.golang.org GOSUMDB=sum.golang.org
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download golang.org/x/sys
+COPY cmd/evidence-image-validator ./cmd/evidence-image-validator
+RUN --network=none CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} GOPROXY=off go build -mod=readonly -trimpath -ldflags="-s -w" -o /out/validator ./cmd/evidence-image-validator
+
+FROM python:3.12.14-slim-bookworm@sha256:392307d22300de8b5986851a12d9176dfc0fc073e65bf6523ebd7dcbeb23564e AS pdf-deps
+COPY --from=pdf-wheels / /wheelhouse/
+COPY cmd/evidence-image-validator/pdf-requirements.lock /pdf-requirements.lock
+COPY cmd/evidence-image-validator/prune_pdf_lxml.py /prune_pdf_lxml.py
+COPY cmd/evidence-image-validator/pdf_pruned_smoke.py /pdf_pruned_smoke.py
+COPY cmd/evidence-image-validator/pdf_validator.py /pdf_validator.py
+COPY cmd/evidence-image-validator/testdata/pdf/ /pdf-fixtures/
+RUN --network=none python3 -m venv /opt/pinvou/pdf && /opt/pinvou/pdf/bin/python3 -I -B -m pip install --no-index --find-links=/wheelhouse --only-binary=:all: --require-hashes --no-deps --no-cache-dir --no-compile -r /pdf-requirements.lock && /opt/pinvou/pdf/bin/python3 -I -B /prune_pdf_lxml.py /wheelhouse /opt/pinvou/pdf/share/pinvou/lxml-pruning && /opt/pinvou/pdf/bin/python3 -I -B -m pip check && /opt/pinvou/pdf/bin/python3 -I -B -c 'import pikepdf; assert pikepdf.__version__ == "10.17.0" and pikepdf.__libqpdf_version__ == "12.4.2"' && /opt/pinvou/pdf/bin/python3 -I -B /pdf_pruned_smoke.py /pdf_validator.py /pdf-fixtures
+
+FROM python:3.12.14-slim-bookworm@sha256:392307d22300de8b5986851a12d9176dfc0fc073e65bf6523ebd7dcbeb23564e
+COPY --from=go-build /out/validator /validator
+COPY --from=pdf-deps /opt/pinvou/pdf /opt/pinvou/pdf
+COPY cmd/evidence-image-validator/pdf_validator.py /opt/pinvou/pdf/pdf_validator.py
+USER 65533:65533
+HEALTHCHECK NONE
+ENTRYPOINT ["/validator"]

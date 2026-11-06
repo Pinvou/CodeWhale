@@ -1,0 +1,9 @@
+# Account closure workload routes
+
+Account closure consumers use the existing authenticated Billing and Token production routers. The exported test-only alternate `PrivateClosureHTTPHandler` factories were removed from both packages; no production listener had mounted these bare routers. Their only cross-domain fixture now uses `billing.NewService(...).Handler(...)` and Token's existing management route assembly, retaining all original lost-ACK/order/claim/idempotency assertions. No new route or permission is introduced.
+
+Token's actual route requirements remain `internal.token.account-closure.assess` and `internal.token.account-closure.replay-clear`. The retained model Compose and Helm receiver rules now replace only the ineffective historical `internal.token.account-closure-assessment.read` and `internal.token.replay.delete` names with those existing exact scopes. Existing wallet, lifecycle, approval, executor and waiver permissions remain. Current modular production workload JSON already used the correct names.
+
+`go test -tags=nomsgpack ./internal/billingschema -run '^TestClosureRegisteredWorkloadScopes$' -count=1` exercises actual routers with loopback TLS/JWT: anonymous401, unregistered/wrong workload/wrong scope and retired scopes403, accepted exact workload reaches the dependency-unavailable handler503. This proves authentication/permission dispatch, not a successful funds or closure operation.
+
+`TestClosureClaimACKOrder` requires explicit disposable `F08_ACCOUNT_URL`, `F08_BILLING_URL`, `F08_TOKEN_URL`, public migrations and isolated runtime actors. It exercises real Account/Billing/Token storage and HTTP routers; only identity deletion and lost response timing are controlled. `test/contract/closure-workload-render.test.mjs` checks both actual pinned Compose/Helm model renders plus the retained model receiver rules; renderer opt-ins follow existing config-only fixture flags. Neither test deploys a site.

@@ -1,0 +1,11 @@
+# Product admission retirement and renewal
+
+PAY-49/PAY-53 distinguish an immutable revocation fact from its current runtime effect. Revoking historical or never-bound evidence appends its original evidence/source/actor/reason/sequence fact without changing the current binding, admission version or product control. A human command keeps its receipt and audit in the same transaction; original-key replay stays read-only.
+
+When the revoked evidence still owns the current binding, retirement closes that exact binding, advances admission version and pauses only the provider/version/product from its immutable mapping. Editable draft metadata cannot redirect the pause. This does not change the business catalogue lifecycle, old evidence, published mappings or existing orders.
+
+Renewal, human/provider revocation and expiry use the same catalogue admission lock before catalogue and binding row locks. Expiry treats discovery as a candidate, checks the same binding is still current and expired under those locks, and skips busy catalogues. Bounded keyset pages preserve the requested retirement limit without allowing one busy early candidate to hide later expired products.
+
+A renewal of an unexpired, unrevoked binding remains seamless. If the current proof has expired or been revoked, renewal checks that fact under the catalogue lock using the database wall clock and persists its pause before installing the new binding. It cannot silently restore sale merely because the expiry worker has not run yet. An existing pause remains closed; reopening still requires the original PAY-46 two-person control process. No validity duration, grace period, permission, migration identity or financial policy changes.
+
+Product recovery joins that same admission lock and locks the current catalogue before taking provider and product controls. Human revocation therefore cannot wait on a control held by a recovery that is itself waiting on the catalogue. Existing two-person approval, frozen catalogue/control versions, fresh provider probe and blocking-case checks remain mandatory in the same serializable execution transaction. No deadlock error is silently accepted and no financial outcome is inferred from a lock wait.

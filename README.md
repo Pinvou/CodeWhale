@@ -57,6 +57,7 @@ PINVOU 不只是一个聊天界面。它把通用工作、视觉设计和软件�
 
 ### 面向实际运行
 
+- **Windows 系统托盘** — 关闭主窗口后应用驻留系统托盘继续运行；单击托盘图标回到前台，右键 → 退出 可真正退出（[详情](docs/windows-system-tray.md)）
 - 全局呼出快捷键（默认关闭，`Ctrl/Cmd+Alt+P`，可在 设置 → 通用 中开启）：后台运行时按键即可把窗口带到前台
 - 本地语音输入，语音模型按需下载
 - GPU、内存、磁盘、模型服务与上下文使用情况集中监控
@@ -164,6 +165,8 @@ git submodule update --init --recursive
 # 以下命令均从仓库根目录执行
 (cd pinvou3-app && npm run lint:ui)
 (cd pinvou3-app && npm run build:ui)
+# 前端测试也会加载账户平台的协议校验器，须安装该目录的锁定依赖
+npm --prefix account-platform ci
 (cd pinvou3-app && npm test)
 
 (cd pinvou3-app/src-tauri && cargo test --lib -- --test-threads=1)

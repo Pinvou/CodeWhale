@@ -134,7 +134,9 @@ test('controlled-side send failures are visible in the shared remote transcript 
   assert.ok(chat.includes('remoteSendError?.identity === remoteSendIdentity'));
   assert.match(chat, /current && current\.identity !== remoteSendIdentity \? null : current/);
   assert.ok(chat.includes('remoteProxyLeaseIdentity(activeSessionId, remoteConnection)'));
-  assert.ok(chat.includes('remoteSendIdentityRef.current === sendIdentity'));
+  assert.match(chat, /if \(contextPrepared \? currentTransfer\(\) : preparingCurrent\(\)\)/);
+  assert.match(chat, /const currentTransfer = \(\) => \{[\s\S]*?connection\?\.status === 'connected'[\s\S]*?remoteTransferGuard\.isCurrent\(transferAttempt, remoteProxyLeaseIdentity\(/,
+    'after renewal, errors must remain bound to the live host revision rather than a batched React ref');
   assert.ok(chat.includes('sameRemoteComposerOwner('));
   assert.ok(chat.includes('if (!accepted && mayRestore())'));
   assert.ok(chat.includes('if (mayRestore()) {'));

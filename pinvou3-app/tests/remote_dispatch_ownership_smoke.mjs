@@ -1,11 +1,10 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import react from '@vitejs/plugin-react';
-import * as puppeteer from 'puppeteer-core';
-import { createServer } from 'vite';
+import * as puppeteer from './helpers/puppeteer-fixture.mjs';
+import { createServer } from './helpers/vite-fixture.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const chrome = process.env.CHROME || [
@@ -14,7 +13,8 @@ const chrome = process.env.CHROME || [
   '/usr/bin/chromium', '/usr/bin/google-chrome',
 ].find(candidate => fs.existsSync(candidate));
 if (!chrome) { console.error('SKIP: Chrome/Edge unavailable'); process.exit(2); }
-const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'pinvou-remote-dispatch-'));
+const profileRoot = fs.realpathSync(process.cwd());
+const profile = fs.mkdtempSync(path.join(profileRoot, '.pinvou-remote-dispatch-'));
 let browser, vite;
 try {
   vite = await createServer({ root, configFile: false, appType: 'mpa', logLevel: 'error',
@@ -43,6 +43,10 @@ try {
       if (!button || button.disabled) throw new Error(`Unavailable retry: ${taskId}`);
       button.click();
     }, id);
+  }
+  async function sendText() {
+    await page.type('textarea', 'Prepare a text task');
+    await page.click('[data-testid="chat-composer-send"]');
   }
   const attachmentBusy = () => page.$eval('[data-testid="chat-remote-attachment-input"]', input => input.nextElementSibling.disabled);
   async function preview() {
@@ -74,30 +78,132 @@ try {
       && document.querySelector('[data-testid="chat-remote-pending-dispatches"] button'));
   }
 
+  const capabilityAlertVisible = () => page.evaluate(() => [...document.querySelectorAll('[role="alert"]')]
+    .some(element => element.textContent.includes(window.dispatchFixture.copy.controllerConnection.remoteCapabilityFailed)));
+  await load('idle-alert');
+  await page.evaluate(() => {
+    const fixture = window.dispatchFixture;
+    fixture.snapshotReads = [];
+    window.TauriBridge.desktopRemoteControl.capabilitiesSnapshot = async () => {
+      const current = fixture.current;
+      const revision = current.connection.capabilityRevision;
+      fixture.snapshotReads.push(revision);
+      if (revision === 2 || revision === 5 || current.id === 'remote-b') {
+        throw Object.assign(new Error('expired'), { code: 'capability_snapshot_expired' });
+      }
+      if (revision === 6) return new Promise(resolve => { fixture.oldSnapshotResolve = resolve; });
+      return current.capabilities;
+    };
+    fixture.select('remote-a', 1, 2);
+  });
+  await page.waitForFunction(() => [...document.querySelectorAll('[role="alert"]')].some(element =>
+    element.textContent.includes(window.dispatchFixture.copy.controllerConnection.remoteCapabilityFailed)));
+  // Same ready/null handshake state, but this projection is still expired.
+  await page.evaluate(() => window.dispatchFixture.selectExpired('remote-a', 1, 3));
+  await page.waitForFunction(() => window.dispatchFixture.snapshotReads.includes(3));
+  await flush();
+  assert.equal(await capabilityAlertVisible(), true, 'an expired projection cannot clear the read error');
+  await page.evaluate(() => window.dispatchFixture.select('remote-a', 1, 4));
+  await page.waitForFunction(() => window.dispatchFixture.snapshotReads.includes(4));
+  await page.waitForFunction(() => ![...document.querySelectorAll('[role="alert"]')].some(element =>
+    element.textContent.includes(window.dispatchFixture.copy.controllerConnection.remoteCapabilityFailed)));
+  await page.evaluate(() => window.dispatchFixture.select('remote-a', 1, 5));
+  await page.waitForFunction(() => [...document.querySelectorAll('[role="alert"]')].some(element =>
+    element.textContent.includes(window.dispatchFixture.copy.controllerConnection.remoteCapabilityFailed)));
+  await page.evaluate(() => window.dispatchFixture.select('remote-a', 1, 6));
+  await page.waitForFunction(() => !!window.dispatchFixture.oldSnapshotResolve);
+  await page.evaluate(() => window.dispatchFixture.select('remote-b'));
+  await page.waitForFunction(() => [...document.querySelectorAll('[role="alert"]')].some(element =>
+    element.textContent.includes(window.dispatchFixture.copy.controllerConnection.remoteCapabilityFailed)));
+  await page.evaluate(() => window.dispatchFixture.oldSnapshotResolve(null));
+  await flush();
+  assert.equal(await capabilityAlertVisible(), true, 'a dropped old-owner read cannot clear the new owner error');
+  assert.deepEqual(errors, []);
+
+  for (const scenario of ['idle', 'idle-failure', 'idle-switch', 'idle-unmount', 'idle-removed-skill']) {
+    await load(scenario);
+    await page.evaluate(() => window.dispatchFixture.expire());
+    await page.click('[data-testid="chat-remote-capabilities"] input[type="checkbox"]');
+    await page.type('textarea', 'Write a document after an idle connection');
+    assert.equal(await page.$eval('[data-testid="chat-composer-send"]', button => button.disabled), false,
+      'an expired display snapshot must allow the new-task preflight');
+    await page.click('[data-testid="chat-composer-send"]');
+    await page.waitForFunction(() => window.dispatchFixture.renewals.length === 1);
+    assert.equal(await page.evaluate(() => window.dispatchFixture.calls.length), 0,
+      'no reserve, upload or commit before B replies');
+    if (scenario === 'idle-failure') {
+      await page.evaluate(() => window.dispatchFixture.renewals[0].reject(
+        Object.assign(new Error('timeout'), { code: 'capability_snapshot_timeout' })));
+      await page.waitForFunction(() => document.querySelector('textarea').value.includes('idle connection'));
+      assert.equal(await page.evaluate(() => window.dispatchFixture.calls.length), 0);
+    } else if (scenario === 'idle-switch' || scenario === 'idle-unmount') {
+      await page.evaluate(shouldUnmount => {
+        if (shouldUnmount) window.dispatchFixture.unmount();
+        else window.dispatchFixture.select('remote-b');
+      }, scenario === 'idle-unmount');
+      await flush();
+      await page.evaluate(() => window.dispatchFixture.renewals[0].resolve());
+      await page.waitForFunction(() => window.dispatchFixture.restores.length === 1);
+      assert.equal(await page.evaluate(() => window.dispatchFixture.restores[0].sessionId), 'remote-a');
+      assert.equal(await page.evaluate(() => window.dispatchFixture.calls.length), 0,
+        'a retired preparation must not reserve in either session');
+    } else {
+      await page.evaluate(() => window.dispatchFixture.completeRenewal());
+      await page.waitForFunction(() => window.dispatchFixture.calls.some(call => call.kind === 'reserve'));
+      const reserve = await page.evaluate(() => window.dispatchFixture.calls.find(call => call.kind === 'reserve'));
+      assert.equal(reserve.revision, 2);
+      assert.deepEqual(reserve.intent.skillIds, ['skill-document'], 'retain the skill selected before renewal');
+      assert.equal(reserve.intent.text, 'Write a document after an idle connection');
+      if (scenario === 'idle-removed-skill') {
+        await page.waitForFunction(() => document.querySelector('textarea').value.includes('idle connection'));
+        assert.equal(await page.evaluate(() => window.dispatchFixture.commits.length), 0,
+          'native rejection cannot silently drop a removed skill and send');
+      } else {
+        await page.waitForFunction(() => window.dispatchFixture.commits.length === 1);
+        await settleCommit(0, 'outcome_unknown');
+        assert.equal(await page.evaluate(() => window.dispatchFixture.calls.filter(call => call.kind === 'reserve').length), 1);
+        assert.equal(await page.evaluate(() => window.dispatchFixture.commits.length), 1,
+          'an unknown commit is not automatically replayed');
+      }
+    }
+    assert.deepEqual(errors, []);
+  }
+
   for (const phase of ['commit', 'upload']) {
     await load(phase);
     if (phase === 'upload') {
       await prepareUploadRetry();
     }
-    await retry('task-remote-a-1');
-    await page.waitForFunction(phase => (phase === 'upload'
-      ? window.dispatchFixture.uploads.length : window.dispatchFixture.commits.length) === 1, {}, phase);
+    if (phase === 'upload') {
+      await retry('task-remote-a-1');
+      await page.waitForFunction(() => window.dispatchFixture.uploads.length === 1);
+    } else {
+      await sendText();
+      await page.waitForFunction(() => window.dispatchFixture.commits.length === 1);
+      await settleCommit(0, 'prepared_not_sent');
+      await retry('task-remote-a-1');
+      await page.waitForFunction(() => window.dispatchFixture.commits.length === 2);
+    }
     await page.evaluate(() => window.dispatchFixture.select('remote-b'));
-    await page.waitForFunction(() => document.querySelector('[data-testid="chat-remote-pending-dispatches"]')
-      ?.textContent.includes('task-remote-b'));
+    await page.waitForFunction(() => window.dispatchFixture.current.id === 'remote-b');
     assert.equal(await attachmentBusy(), false, `${phase}: retired UI owner does not block another session`);
+    await sendText();
+    const preparation = phase === 'upload' ? 0 : 2;
+    await page.waitForFunction(count => window.dispatchFixture.commits.length === count, {}, preparation + 1);
+    await settleCommit(preparation, 'prepared_not_sent');
     await retry('task-remote-b-1');
-    const successor = phase === 'upload' ? 0 : 1;
+    const successor = preparation + 1;
     await page.waitForFunction(count => window.dispatchFixture.commits.length === count, {}, successor + 1);
     if (phase === 'upload') {
       await page.evaluate(() => window.dispatchFixture.uploads[0].resolve({ transferId: 'old-transfer', chunkBytes: 64 }));
-      await page.waitForFunction(() => window.dispatchFixture.calls.some(call => call.kind === 'chunk'));
       await flush();
+      await flush();
+      assert.equal(await page.evaluate(() => window.dispatchFixture.calls.filter(call => call.kind === 'chunk').length), 0, 'retired upload cannot send chunks');
       assert.equal(await page.evaluate(() => window.dispatchFixture.calls
         .filter(call => call.kind === 'commit' && call.id === 'remote-a').length), 0,
       'retired prepared upload cannot proceed to commit');
     } else {
-      await settleCommit(0, 'outcome_unknown');
+      await settleCommit(1, 'outcome_unknown');
     }
     assert.equal(await attachmentBusy(), true, `${phase}: old finally cannot clear successor busy`);
     assert.equal(await page.evaluate(() => window.dispatchFixture.cases('remote-a')[0]?.state),
@@ -105,7 +211,7 @@ try {
     await settleCommit(successor, 'queued');
     assert.equal(await attachmentBusy(), false, 'successor releases its own slot');
     assert.equal(await page.evaluate(() => window.dispatchFixture.calls.filter(call => call.kind === 'commit').length),
-      phase === 'upload' ? 1 : 2, 'no automatic resend');
+      phase === 'upload' ? 2 : 4, 'only explicit initial send and retry calls occur');
     assert.deepEqual(errors, []);
   }
 
@@ -129,8 +235,9 @@ try {
   await preview();
   await page.waitForFunction(() => window.dispatchFixture.previews.length === 1);
   await page.evaluate(() => window.dispatchFixture.uploads[0].resolve({ transferId: 'retired-transfer', chunkBytes: 64 }));
-  await page.waitForFunction(() => window.dispatchFixture.calls.some(call => call.kind === 'chunk'));
   await flush();
+  await flush();
+  assert.equal(await page.evaluate(() => window.dispatchFixture.calls.filter(call => call.kind === 'chunk').length), 0, 'retired upload cannot send chunks');
   assert.equal(await attachmentBusy(), true, 'retired upload finally cannot clear successor preview');
   assert.equal(await page.evaluate(() => window.dispatchFixture.commits.length), 0, 'retired upload never commits');
   assert.equal(await page.evaluate(() => window.dispatchFixture.cases('remote-a')
@@ -143,8 +250,11 @@ try {
 
   for (const identity of [['remote-a', 2], ['remote-a', 1, 1, 'generation-2'], ['remote-a', 1, 2]]) {
     await load();
-    await retry('task-remote-a-1');
+    await sendText();
     await page.waitForFunction(() => window.dispatchFixture.commits.length === 1);
+    await settleCommit(0, 'prepared_not_sent');
+    await retry('task-remote-a-1');
+    await page.waitForFunction(() => window.dispatchFixture.commits.length === 2);
     await page.evaluate(args => window.dispatchFixture.select(...args), identity);
     await page.waitForFunction(({ lease, revision, generation }) => {
       const current = window.dispatchFixture.current.connection;
@@ -153,13 +263,46 @@ try {
     assert.equal(await attachmentBusy(), false, 'lease/generation/revision retires old UI ownership');
     await preview();
     await page.waitForFunction(() => window.dispatchFixture.previews.length === 1);
-    await settleCommit(0, 'outcome_unknown');
+    await settleCommit(1, 'outcome_unknown');
     assert.equal(await attachmentBusy(), true, 'old lease completion cannot release a new preview operation');
     await page.evaluate(() => window.dispatchFixture.previews[0].resolve({ text: 'Current preview' }));
     await flush();
     assert.equal(await attachmentBusy(), false);
     assert.deepEqual(errors, []);
   }
+
+  // Real mounted UI: switching sessions discards the local file snapshot.
+  // The old task must never commit empty, and safe abandon must clean its
+  // completed transfer using the preserved session binding.
+  await load('loss');
+  await page.$eval('[data-testid="chat-remote-attachment-input"]', input => {
+    const transfer = new DataTransfer();
+    transfer.items.add(new File(['a'], 'a.txt', { type: 'text/plain' }));
+    input.files = transfer.files;
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+  });
+  await page.type('textarea', 'Keep this prepared text');
+  await page.click('[data-testid="chat-composer-send"]');
+  await page.waitForFunction(() => window.dispatchFixture.commits.length === 1);
+  await settleCommit(0, 'prepared_not_sent');
+  await page.evaluate(() => window.dispatchFixture.select('remote-b'));
+  await page.waitForFunction(() => window.dispatchFixture.current.id === 'remote-b');
+  await page.evaluate(() => window.dispatchFixture.select('remote-a'));
+  await page.waitForFunction(() => window.dispatchFixture.current.id === 'remote-a');
+  await retry('task-remote-a-1');
+  await page.waitForFunction(() => window.dispatchFixture.cases('remote-a')[0]?.origin === 'history');
+  assert.equal(await page.evaluate(() => window.dispatchFixture.commits.length), 1, 'lost snapshot must not cause empty commit');
+  await page.evaluate(() => {
+    const row = document.querySelector('[data-testid="chat-remote-pending-dispatches"] [role="status"]');
+    const button = [...row.querySelectorAll('button')].find(item => item.textContent === window.dispatchFixture.copy.remoteConversation.abandonPreparedTask);
+    if (!button) throw new Error('safe abandon unavailable');
+    button.click();
+  });
+  await page.waitForFunction(() => window.dispatchFixture.calls.some(call => call.kind === 'abandon'));
+  assert.deepEqual(await page.evaluate(() => window.dispatchFixture.calls.filter(call => call.kind === 'abort')),
+    [{ kind: 'abort', id: 'remote-a', ref: 'ref-remote-a', taskId: 'task-remote-a-1', transferId: 'loss-transfer' }]);
+  assert.equal(await page.evaluate(() => window.dispatchFixture.restoredText), 'Keep this prepared text');
+  assert.deepEqual(errors, []);
 
   await load();
   await page.waitForSelector('[data-testid="chat-remote-artifact-preview"]');
@@ -186,7 +329,7 @@ try {
         const transfer = new DataTransfer();
         const files = kind === 'count' ? Array.from({ length: 9 }, (_, index) => new File(['a'], `${index}.txt`))
           : kind === 'size' ? [new File([], 'empty.txt')]
-            : kind === 'total' ? Array.from({ length: 3 }, (_, index) => new File([new Uint8Array(25 * 1024 * 1024)], `${index}.txt`))
+            : kind === 'total' ? [20, 20, 20, 5].map((size, index) => new File([new Uint8Array(size * 1024 * 1024)], `${index}.txt`))
               : [new File(['a'], 'x'.repeat(201))];
         for (const file of files) transfer.items.add(file);
         input.files = transfer.files;
@@ -220,6 +363,9 @@ try {
 } finally {
   if (browser) await browser.close();
   if (vite) await vite.close();
-  // This exact disposable profile is owned by this test.
-  fs.rmSync(profile, { recursive: true, force: true });
+  const resolved = fs.realpathSync(profile);
+  if (path.dirname(resolved) !== profileRoot || !path.basename(resolved).startsWith('.pinvou-remote-dispatch-')) {
+    console.error('refusing to remove a profile outside the test workspace');
+    process.exitCode = 1;
+  } else fs.rmSync(resolved, { recursive: true, force: true });
 }

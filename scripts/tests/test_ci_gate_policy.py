@@ -1,3 +1,4 @@
+import json
 import re
 from ci_routing_test_support import default_ci_routing
 import os
@@ -937,12 +938,14 @@ class CiGatePolicyTests(unittest.TestCase):
             required_gate,
         )
 
-    def test_pr_submodule_verifier_strictly_matches_the_published_tag(self):
+    def test_pr_verifier_checks_registered_history_and_keeps_release_closure(self):
         verifier = PUBLIC_SUBMODULE_VERIFIER.read_text(encoding="utf-8")
         verifier_gate = self.pr_workflow.split(
             "- name: 公开底座 gitlink 可达性", maxsplit=1
         )[1].split("- name: 初始化公共底座 submodule", maxsplit=1)[0]
-        self.assertIn("./scripts/verify-public-submodule.sh", verifier_gate)
+        self.assertRegex(verifier_gate, r"(?m)^\s+run: \./scripts/verify-public-submodule\.sh\s*$")
+        self.assertNotIn("--registered-snapshot", verifier_gate)
+        self.assertNotIn("registered_snapshot", verifier)
         self.assertNotIn("--allow-registered-candidate", verifier_gate)
         self.assertNotIn("LOCAL_SECURITY_HEAD", verifier)
         self.assertIn('[[ "$tag_target" != "$gitlink" ]]', verifier)
@@ -1037,10 +1040,11 @@ class CiGatePolicyTests(unittest.TestCase):
         )
 
     def test_node_suites_under_scripts_tests_are_all_wired(self):
-        # Nothing auto-discovers scripts/tests/*.test.mjs:
-        # version-consistency's explicit node --test list is the only
-        # runner (the PR #745 round-2 review found a suite that only ever
-        # ran locally). Pin both directions so the class stays closed:
+        # Nothing auto-discovers scripts/tests/*.test.mjs. Most suites use
+        # version-consistency; the Account contracts also have dedicated
+        # jobs with their own runtime dependencies and path routing.
+        # Pin their live commands and filters before including those suites.
+        # Pin both directions so the class stays closed:
         # every suite on disk must be listed (a forgotten new suite
         # silently never runs), and every listed scripts/tests entry must
         # exist (a renamed suite must not leave a dead entry green).
@@ -1057,6 +1061,56 @@ class CiGatePolicyTests(unittest.TestCase):
                 r"scripts/tests/[A-Za-z0-9_./-]+\.test\.mjs", version_consistency
             )
         )
+        dedicated = {
+            "token-management-authorization-coverage.test.mjs": (
+                "account-platform-test", "account_platform",
+                "Verify Token management authorization contracts",
+            ),
+            "token-management-phase-coverage.test.mjs": (
+                "account-platform-test", "account_platform",
+                "Verify Token management authorization contracts",
+            ),
+            "account-platform-authorization-coverage.test.mjs": (
+                "account-platform-test", "account_platform",
+                "Verify Account Platform authorization contracts",
+            ),
+            "f18-hold-recovery-owned-fixture.test.mjs": (
+                "account-platform-test", "account_platform",
+                "Verify F18 owned fixture contract",
+            ),
+            "account-platform-invocation-environment.test.mjs": (
+                "frontend-test", "frontend",
+                "Verify Account invocation environment contracts",
+            ),
+        }
+        changes = _changes_block(self.pr_workflow)
+        for filename, (job_name, group, step_name) in dedicated.items():
+            path = f"scripts/tests/{filename}"
+            job = _without_inline_comments(_extract_job_block(self.pr_workflow, job_name))
+            step = _step_named(job, step_name)
+            command_path = f"../{path}" if job_name == "frontend-test" else path
+            self.assertRegex(
+                step, rf"(?m)^\s+(?:run:\s*)?node --test {re.escape(command_path)}\s*$",
+                f"{path} must have a live node --test command in {job_name}",
+            )
+            self.assertNotRegex(step, r"(?m)^        (?:if|continue-on-error):")
+            entries = _extract_quoted_paths(_dorny_filter_group(changes, group))
+            self.assertIn(path, entries, f"{path} must trigger its {job_name} runner")
+            self.assertTrue(_matches_paths_filter(path, entries), f"{path} must not be excluded")
+            self.assertIn('node-version: "24"', job)
+            if job_name == "frontend-test":
+                self.assertIn("working-directory: pinvou3-app", job)
+                install = _step_named(job, "安装前端依赖")
+                self.assertIn("run: npm ci --prefer-offline --no-audit", install)
+                self.assertNotRegex(install, r"(?m)^        (?:if|continue-on-error):")
+                self.assertLess(job.index(install), job.index(step))
+                for name in ("personal", "models", "invocation"):
+                    source = f"account-platform/deploy/production/compose.{name}.yaml"
+                    self.assertIn(source, entries)
+
+                    self.assertTrue(_matches_paths_filter(source, entries))
+            self.assertNotIn(path, listed, f"{path} must not be redundantly run twice")
+            listed.add(path)
         on_disk = {
             f"scripts/tests/{path.name}"
             for path in (ROOT / "scripts" / "tests").glob("*.test.mjs")
@@ -1064,9 +1118,171 @@ class CiGatePolicyTests(unittest.TestCase):
         self.assertEqual(
             listed,
             on_disk,
-            "scripts/tests node 套件与 version-consistency 显式列表不一致"
+            "scripts/tests node 套件与已核验的 CI runner 集合不一致"
             "(缺失=永不执行;多余=死条目)",
         )
+
+    def test_account_closure_ci_steps_are_precisely_pinned(self):
+        """Keep the closure source and isolated-PG gates live and fail-closed."""
+        job = _without_inline_comments(_extract_job_block(self.pr_workflow, "account-platform-test"))
+
+        def assert_contract(text):
+            source = _step_named(text, "Verify Account closure source and API contracts")
+            self.assertIn("npm --prefix account-platform run test:closure-contracts", source)
+            self.assertNotRegex(source, r"(?m)^        (?:if|continue-on-error):")
+            postgres = _step_named(text, "Account closure contracts on isolated PostgreSQL")
+            self.assertIn("python3 -m unittest discover -s scripts/tests -p test_account_closure_postgres.py", postgres)
+            self.assertIn("python3 scripts/test-account-closure-postgres.py", postgres)
+            self.assertIn("PINVOU_ACCOUNT_CLOSURE_TEST_DATABASE_URL", postgres)
+            self.assertNotRegex(postgres, r"(?m)^        (?:if|continue-on-error):")
+
+        assert_contract(job)
+        source = _step_named(job, "Verify Account closure source and API contracts")
+        postgres = _step_named(job, "Account closure contracts on isolated PostgreSQL")
+        for mutated in (
+            job.replace(source, "", 1),
+            job.replace(postgres, "", 1),
+            job.replace("npm --prefix account-platform run test:closure-contracts", "true", 1),
+            job.replace("python3 scripts/test-account-closure-postgres.py", "true", 1),
+        ):
+            with self.assertRaises(AssertionError):
+                assert_contract(mutated)
+
+    def test_deployment_contract_artifacts_are_attempt_scoped(self):
+        job = _without_inline_comments(
+            _extract_job_block(self.pr_workflow, "account-platform-test")
+        )
+        step = _step_named(
+            job, "Production history and managed PostgreSQL release contracts"
+        )
+        self.assertRegex(
+            step,
+            r'--artifacts "\$RUNNER_TEMP/account-platform-deployment-contracts-\$postgres_version-\$\{GITHUB_RUN_ID\}-\$\{GITHUB_RUN_ATTEMPT\}"',
+        )
+        self.assertNotIn(
+            '--artifacts "$RUNNER_TEMP/account-platform-deployment-contracts-$postgres_version"',
+            step,
+        )
+
+    def test_dedicated_node_suite_wiring_rejects_missing_or_commented_commands(self):
+        original = self.pr_workflow
+        try:
+            for name in (
+                "token-management-authorization-coverage",
+                "token-management-phase-coverage",
+                "account-platform-authorization-coverage",
+                "account-platform-invocation-environment",
+            ):
+                path = f"scripts/tests/{name}.test.mjs"
+                command = f"node --test {'../' if 'invocation' in name else ''}{path}"
+                for replacement in ("echo controlled-command-removed", "# " + command):
+                    with self.subTest(suite=name, replacement=replacement):
+                        self.assertEqual(original.count(command), 1)
+                        self.pr_workflow = original.replace(command, replacement, 1)
+                        with self.assertRaises(AssertionError):
+                            self.test_node_suites_under_scripts_tests_are_all_wired()
+                with self.subTest(suite=name, missing_filter=True):
+                    entry = f"              - '{path}'\n"
+                    self.assertEqual(original.count(entry), 1)
+                    self.pr_workflow = original.replace(entry, "", 1)
+                    with self.assertRaises(AssertionError):
+                        self.test_node_suites_under_scripts_tests_are_all_wired()
+            for name in ("personal", "models", "invocation"):
+                with self.subTest(missing_compose_filter=name):
+                    entry = f"              - 'account-platform/deploy/production/compose.{name}.yaml'\n"
+                    self.assertEqual(original.count(entry), 1)
+                    self.pr_workflow = original.replace(entry, "", 1)
+                    with self.assertRaises(AssertionError):
+                        self.test_node_suites_under_scripts_tests_are_all_wired()
+        finally:
+            self.pr_workflow = original
+
+    def test_approval_center_browser_regression_is_registered(self):
+        package = json.loads((ROOT / "pinvou3-app/package.json").read_text(encoding="utf-8"))
+        finance = package["scripts"]["test:account-platform-finance-ui"]
+        self.assertIn("node tests/account_platform_approval_center_smoke.mjs", finance)
+        selector = (ROOT / "scripts/select-frontend-smokes.mjs").read_text(encoding="utf-8")
+        self.assertIn('command("npm", "test:account-platform-finance-ui")', selector)
+
+    def test_organization_member_smokes_resolve_to_real_browser_files(self):
+        package = json.loads((ROOT / "pinvou3-app/package.json").read_text(encoding="utf-8"))
+        selector = (ROOT / "scripts/select-frontend-smokes.mjs").read_text(encoding="utf-8")
+        for feature, filenames in (
+            ("organization", ("account_platform_organization_ui_smoke.mjs", "account_platform_member_units_ui_smoke.mjs", "account_platform_organization_boundaries_ui_smoke.mjs", "account_platform_organization_recharge_ui_smoke.mjs")),
+            ("member-units", ("account_platform_member_units_ui_smoke.mjs",)),
+        ):
+            command = f"test:account-platform-{feature}-ui"
+            self.assertEqual(package["scripts"][command], " && ".join(f"node tests/{filename}" for filename in filenames))
+            for filename in filenames:
+                self.assertTrue((ROOT / "pinvou3-app/tests" / filename).is_file())
+            self.assertGreaterEqual(selector.count(f'command("npm", "{command}")'), 2)
+
+    def test_entitlement_correction_production_smoke_is_registered_for_full_and_feature_runs(self):
+        package = json.loads((ROOT / "pinvou3-app/package.json").read_text(encoding="utf-8"))
+        command = "test:account-platform-entitlement-correction-ui"
+        self.assertEqual(package["scripts"][command], "node tests/account_platform_entitlement_production_smoke.mjs")
+        self.assertTrue((ROOT / "pinvou3-app/tests/account_platform_entitlement_production_smoke.mjs").is_file())
+        selector = (ROOT / "scripts/select-frontend-smokes.mjs").read_text(encoding="utf-8")
+        self.assertGreaterEqual(selector.count(f'command("npm", "{command}")'), 2)
+
+    def test_registration_bonus_smokes_resolve_to_both_compiled_browser_suites(self):
+        package = json.loads((ROOT / "pinvou3-app/package.json").read_text(encoding="utf-8"))
+        command = "test:account-platform-registration-bonus-ui"
+        files = ("admin_registration_bonus_ui_smoke.mjs", "admin_registration_bonus_precision_ui_smoke.mjs")
+        self.assertEqual(package["scripts"][command], " && ".join(f"node tests/{name}" for name in files))
+        for name in files:
+            self.assertTrue((ROOT / "pinvou3-app/tests" / name).is_file())
+        selector = (ROOT / "scripts/select-frontend-smokes.mjs").read_text(encoding="utf-8")
+        self.assertGreaterEqual(selector.count(f'command("npm", "{command}")'), 2)
+
+    def test_closure_smokes_include_production_recovery_and_original_contract(self):
+        package = json.loads((ROOT / "pinvou3-app/package.json").read_text(encoding="utf-8"))
+        command = "test:account-platform-closure-ui"
+        # The composite must retain the original and production suites and also
+        # execute the polling regression through the real frontend CI selector.
+        files = (
+            "account_platform_closure_ui_smoke.mjs",
+            "account_platform_closure_production_smoke.mjs",
+            "account_platform_closure_polling_smoke.mjs",
+        )
+        self.assertEqual(package["scripts"][command], " && ".join(f"node tests/{name}" for name in files))
+        for name in files:
+            self.assertTrue((ROOT / "pinvou3-app/tests" / name).is_file())
+        selector = (ROOT / "scripts/select-frontend-smokes.mjs").read_text(encoding="utf-8")
+        self.assertGreaterEqual(selector.count(f'command("npm", "{command}")'), 2)
+
+        # Installed-host coverage has its own full/account selector lane; it must
+        # remain present without running twice through the closure composite.
+        installed_command = "test:account-platform-installed-hosts-ui"
+        installed_file = "account_platform_installed_hosts_ui_smoke.mjs"
+        self.assertEqual(package["scripts"][installed_command], f"node tests/{installed_file}")
+        self.assertTrue((ROOT / "pinvou3-app/tests" / installed_file).is_file())
+        self.assertGreaterEqual(selector.count(f'command("npm", "{installed_command}")'), 2)
+
+    def test_embedded_account_portal_assets_are_rebuilt_and_checked(self):
+        changes = _without_yaml_comments(
+            self.pr_workflow.split("\n  changes:", maxsplit=1)[1].split(
+                "\n  fast-gate:", maxsplit=1
+            )[0]
+        )
+        paths = _extract_quoted_paths(
+            changes.split("            frontend:", maxsplit=1)[1].split(
+                "            relay:", maxsplit=1
+            )[0]
+        )
+        self.assertTrue(_matches_paths_filter("account-platform/internal/portal/static/admin.html", paths))
+        self.assertTrue(_matches_paths_filter("account-platform/internal/portal/static/assets/admin.js", paths))
+        frontend = self.pr_workflow.split("\n  frontend-test:", maxsplit=1)[1].split(
+            "\n  relay-test:", maxsplit=1
+        )[0]
+        gate = frontend.split("      - name: Verify embedded Account Portal assets are current", maxsplit=1)[1].split(
+            "      - name:", maxsplit=1
+        )[0]
+        self.assertNotIn("if:", gate)
+        self.assertIn("npm run build:account-portal", gate)
+        self.assertIn("git diff --exit-code -- ../account-platform/internal/portal/static", gate)
+        self.assertIn("git ls-files --others --exclude-standard", gate)
+        self.assertIn('test -z "$(git ls-files', gate)
 
     def test_cross_language_contract_rust_sources_route_to_frontend_test(self):
         # multiagent_plan_normalize.test.mjs reads the Rust sources below for
@@ -1578,7 +1794,7 @@ class CiGatePolicyTests(unittest.TestCase):
             "\n  team-relay-hub-test:", maxsplit=1
         )[1].split("\n  release-contract-test:", maxsplit=1)[0]
         self.assertIn("needs.changes.outputs.team_relay_hub == 'true'", hub_job)
-        self.assertIn("postgres:16-alpine", hub_job)
+        self.assertRegex(hub_job, r"image: mirror\.gcr\.io/library/postgres@sha256:[a-f0-9]{64}")
         self.assertIn("TEAM_RELAY_TEST_DATABASE_URL", hub_job)
         self.assertIn("npm --prefix team-relay-hub ci", hub_job)
         self.assertIn("npm --prefix team-relay-hub test", hub_job)
@@ -1610,7 +1826,9 @@ class CiGatePolicyTests(unittest.TestCase):
         script = (ROOT / "scripts/ci-update-release-console-container.sh").read_text(encoding="utf-8")
         for command in ("compose config --quiet", "compose up --detach --build", "compose down --volumes --remove-orphans"):
             self.assertIn(command, script)
-        self.assertIn("nginx:1.27-alpine nginx -t", script)
+        self.assertIn('docker build --build-arg NODE_IMAGE="$PINVOU_UPDATE_NODE_IMAGE" ', script)
+        self.assertIn("PINVOU_UPDATE_NODE_IMAGE: mirror.gcr.io/library/node@sha256:", console_job)
+        self.assertRegex(script, r"mirror\.gcr\.io/library/nginx@sha256:[a-f0-9]{64} nginx -t")
         self.assertIn("$base/healthz", script)
         self.assertIn("$base/api/status", script)
         self.assertNotIn("/var/www/pinvou3", script)
@@ -2031,30 +2249,42 @@ class CiGatePolicyTests(unittest.TestCase):
         )
 
     def test_deny_toml_bans_the_crypto_bigint_vulnerable_window(self):
-        # Round-22 review: the RUSTSEC-2026-0387 id ignore has no version
-        # dimension — a partial upgrade (age/p256 on the patched line while
-        # a new third-party dep re-introduces old elliptic-curve, leaving
-        # crypto-bigint 0.5.x in the graph) would stay silently green. The
-        # [bans] entry forbids the vulnerable window independently of the
-        # advisory database's classification; the current graph (0.5.5)
-        # sits outside it. Pin the executable line so dropping the
-        # tripwire while keeping the id ignore fails here.
-        deny_toml = (
-            ROOT / "pinvou3-app/src-tauri/deny.toml"
-        ).read_text(encoding="utf-8")
-        deny_code = "\n".join(
-            line
-            for line in deny_toml.splitlines()
-            if not line.lstrip().startswith("#")
+        # The retired exception must not leave 0.5.5 outside the independent
+        # ban: every affected version below the published fix stays denied.
+        policy = tomllib.loads(
+            (ROOT / "pinvou3-app/src-tauri/deny.toml").read_text(encoding="utf-8")
         )
-        self.assertIn(
-            '{ name = "crypto-bigint", version = ">0.5.5, <0.7.6" },',
-            deny_code,
-            "deny.toml must keep the crypto-bigint vulnerable-window ban on "
-            "an executable line — without it a partially upgraded graph can "
-            "carry a still-vulnerable crypto-bigint while the id ignore "
-            "keeps advisories green",
+        bans = [
+            entry for entry in policy["bans"]["deny"]
+            if entry.get("name") == "crypto-bigint"
+        ]
+        self.assertEqual(
+            [entry.get("version") for entry in bans], ["<0.7.6"],
+            "the complete vulnerable range, including 0.5.5, must stay banned",
         )
+
+    def test_retired_crypto_exception_matches_all_reviewed_lock_graphs(self):
+        policy = tomllib.loads(
+            (ROOT / "pinvou3-app/src-tauri/deny.toml").read_text(encoding="utf-8")
+        )
+        ignored = [
+            item if isinstance(item, str) else item.get("id")
+            for item in policy["advisories"].get("ignore", [])
+        ]
+        self.assertNotIn("RUSTSEC-2026-0387", ignored)
+        self.assertEqual(policy["advisories"]["unused-ignored-advisory"], "deny")
+        for lock in (
+            "pinvou3-app/src-tauri/Cargo.lock",
+            "pinvou-cli/Cargo.lock",
+            "pinvou-knowledge/Cargo.lock",
+        ):
+            with self.subTest(lock=lock):
+                packages = tomllib.loads((ROOT / lock).read_text(encoding="utf-8"))["package"]
+                self.assertFalse(
+                    {"crypto-bigint", "hpke", "p256", "elliptic-curve"}
+                    & {package["name"] for package in packages},
+                    "reintroduction requires a fresh security assessment",
+                )
 
     def test_zip_lockfiles_sit_inside_the_assessed_advisory_window(self):
         # Round-20 review, re-baselined in round-22: deny.toml retired the
@@ -3201,23 +3431,166 @@ class CiGatePolicyTests(unittest.TestCase):
             "'success' to required-gate, so the whole compile/test leg becomes "
             "advisory while the required check stays green",
         )
-        # Exactly one legitimate use, and it is a STEP whose entire purpose is
-        # to print an analysis it must not be able to fail the job with.
+        # These reviewed diagnostic-only steps cannot suppress a compiler,
+        # test or cleanup failure. Artifact transport is bounded separately;
+        # adding another advisory step still requires explicit review here.
+        reviewed_diagnostics = (
+            "Windows 测试二进制导入诊断",
+            "Test resource lifecycle receipts",
+            "Financial parallel diagnostics",
+            "Account test resource lifecycle receipts",
+        )
         self.assertEqual(
             len(step_level),
-            1,
-            "only the Windows PE import diagnostic may opt out of blocking; "
+            len(reviewed_diagnostics),
+            "only reviewed diagnostic steps may opt out of blocking; "
             f"found {len(step_level)} continue-on-error settings: {step_level}",
         )
-        diagnostic_step = body.split(
-            "- name: Windows 测试二进制导入诊断", maxsplit=1
-        )[1].split("\n      - name:", maxsplit=1)[0]
-        self.assertIn(
-            "continue-on-error: true",
-            diagnostic_step,
-            "the single permitted continue-on-error must be the Windows PE "
-            "import diagnostic step, not some other step that moved under it",
+        for name in reviewed_diagnostics:
+            diagnostic_step = body.split(
+                "- name: " + name + "\n", maxsplit=1
+            )[1].split("\n      - name:", maxsplit=1)[0]
+            self.assertIn(
+                "continue-on-error: true",
+                diagnostic_step,
+                "continue-on-error belongs only to the reviewed diagnostic "
+                "step, not another step that moved under it",
+            )
+        diagnostic_job = _extract_job_block(body, 'windows-rust-test')
+        matches = list(re.finditer(
+            r"(?ms)^      - name: Windows 测试二进制导入诊断\n.*?(?=^      - |\Z)", diagnostic_job
+        ))
+        self.assertEqual(len(matches), 1, "expected one reviewed diagnostic step")
+        self.assertEqual(
+            matches[0].group(0).rstrip(),
+            textwrap.indent(textwrap.dedent("""\
+                - name: Windows 测试二进制导入诊断
+                  if: ${{ matrix.phase == 'regression' }}
+                  continue-on-error: true
+                  shell: pwsh
+                  run: python scripts/ci-windows-imports-diagnose.py "$env:PINVOU3_TEST_EXE"
+            """).rstrip(), "      "),
         )
+        diagnostic_job = _extract_job_block(body, 'frontend-test')
+        matches = list(re.finditer(
+            r"(?ms)^      - name: Test resource lifecycle receipts\n.*?(?=^      - |\Z)", diagnostic_job
+        ))
+        self.assertEqual(len(matches), 1, "expected one reviewed diagnostic step")
+        self.assertEqual(
+            matches[0].group(0).rstrip(),
+            textwrap.indent(textwrap.dedent("""\
+                - name: Test resource lifecycle receipts
+                  id: frontend_receipts_upload
+                  if: ${{ always() && env.PINVOU_CI_RESOURCE_LEDGER != '' }}
+                  timeout-minutes: 3
+                  continue-on-error: true
+                  uses: actions/upload-artifact@v7
+                  with:
+                    name: frontend-resource-lifecycle-${{ github.run_attempt }}
+                    path: ${{ env.PINVOU_CI_RESOURCE_LEDGER }}/
+                    if-no-files-found: error
+                    retention-days: 7
+            """).rstrip(), "      "),
+        )
+        diagnostic_job = _extract_job_block(body, 'account-platform-test')
+        matches = list(re.finditer(
+            r"(?ms)^      - name: Account test resource lifecycle receipts\n.*?(?=^      - |\Z)", diagnostic_job
+        ))
+        self.assertEqual(len(matches), 1, "expected one reviewed diagnostic step")
+        self.assertEqual(
+            matches[0].group(0).rstrip(),
+            textwrap.indent(textwrap.dedent("""\
+                - name: Account test resource lifecycle receipts
+                  id: account_receipts_upload
+                  if: ${{ always() && env.PINVOU_CI_RESOURCE_LEDGER != '' }}
+                  timeout-minutes: 3
+                  continue-on-error: true
+                  uses: actions/upload-artifact@v7
+                  with:
+                    name: account-resource-lifecycle-${{ github.run_attempt }}
+                    path: |
+                      ${{ env.PINVOU_CI_RESOURCE_LEDGER }}/
+                      ${{ runner.temp }}/account-platform-deployment-contracts-*/resources/
+                    if-no-files-found: error
+                    retention-days: 7
+            """).rstrip(), "      "),
+        )
+        diagnostic_job = _extract_job_block(body, 'account-platform-test')
+        matches = list(re.finditer(
+            r"(?ms)^      - name: Financial parallel diagnostics\n.*?(?=^      - |\Z)", diagnostic_job
+        ))
+        self.assertEqual(len(matches), 1, "expected one reviewed diagnostic step")
+        self.assertEqual(
+            matches[0].group(0).rstrip(),
+            textwrap.indent(textwrap.dedent("""\
+                - name: Financial parallel diagnostics
+                  id: financial_diagnostics_upload
+                  if: ${{ always() }}
+                  timeout-minutes: 3
+                  continue-on-error: true
+                  uses: actions/upload-artifact@v7
+                  with:
+                    name: account-financial-parallel-${{ github.run_attempt }}
+                    path: ${{ runner.temp }}/financial-parallel-*/
+                    if-no-files-found: ignore
+                    retention-days: 7
+            """).rstrip(), "      "),
+        )
+
+    def test_diagnostic_exemptions_cannot_move_to_business_tests_or_jobs(self):
+        original = self.pr_workflow
+        financial_start = "      - name: Financial parallel diagnostics\n"
+        financial_step = original.split(financial_start, maxsplit=1)[1].split(
+            "\n      - name:", maxsplit=1
+        )[0]
+        without_upload_exemption = original.replace(
+            financial_step,
+            financial_step.replace("        continue-on-error: true\n", "", 1),
+            1,
+        )
+        business = "      - name: Test and vet all Account Platform Go modules\n"
+        mutations = {
+            "advisory whole job": original.replace(
+                "  account-platform-test:\n",
+                "  account-platform-test:\n    continue-on-error: true\n",
+                1,
+            ),
+            "extra advisory business step": original.replace(
+                business, business + "        continue-on-error: true\n", 1
+            ),
+            "move upload exemption to business with same total": without_upload_exemption.replace(
+                business, business + "        continue-on-error: true\n", 1
+            ),
+            "upload label on a run command": original.replace(
+                financial_step,
+                financial_step.replace("uses: actions/upload-artifact@v7", "run: echo not-an-upload", 1),
+                1,
+            ),
+        }
+        for first_line, remaining in (
+            ("run: exit 37", "        name: Required business command\n"),
+            ("id: business_guard", '        name: Required business command\n        "run": exit 37\n'),
+            ("if: ${{ always() }}", "        run: exit 37\n"),
+            ("env:", "          FIXTURE: yes\n        run: exit 37\n"),
+        ):
+            # Moving the exception must fail even when the next valid YAML
+            # step starts with run/id/if/env and the total count stays four.
+            mutations[f"move exemption to {first_line} next step"] = without_upload_exemption.replace(
+                "      - name: Stop owned temporary PostgreSQL services\n",
+                f"      - {first_line}\n{remaining}        continue-on-error: true\n\n"
+                "      - name: Stop owned temporary PostgreSQL services\n",
+                1,
+            )
+        try:
+            self.test_no_job_level_continue_on_error_disarms_a_gate_job()
+            for label, mutant in mutations.items():
+                with self.subTest(label=label):
+                    self.assertNotEqual(mutant, original, "the negative control must change the workflow")
+                    self.pr_workflow = mutant
+                    with self.assertRaises(AssertionError):
+                        self.test_no_job_level_continue_on_error_disarms_a_gate_job()
+        finally:
+            self.pr_workflow = original
 
     def test_gate_jobs_do_not_swallow_their_exit_status(self):
         # The companion fail-open vector to continue-on-error: appending
@@ -3642,7 +4015,7 @@ class CiGatePolicyTests(unittest.TestCase):
         # by GATE_JOB_LEVEL_IFS["rust-test"]; the asserts below keep the
         # step-level pins that `if:` cannot cover.
         self.assertIn(
-            "cargo test --manifest-path pinvou3-app/src-tauri/Cargo.toml --no-default-features --lib --features benchmark-hooks --locked -- --test-threads=1",
+            "cargo --config 'profile.dev.package.codewhale-tui.opt-level=0' test --manifest-path pinvou3-app/src-tauri/Cargo.toml --no-default-features --lib --features benchmark-hooks --locked -- --test-threads=1",
             rust_test,
         )
         # 开源侧同口径：Linux lib 腿显式开启 benchmark-hooks，headless-bridge
@@ -4417,6 +4790,89 @@ class CiGatePolicyTests(unittest.TestCase):
             with self.subTest(mutation=old):
                 with self.assertRaises(AssertionError):
                     assert_reader_execution(regression.replace(old, new))
+
+    def test_windows_a_resume_projection_executes_with_nonzero_product_filters(self):
+        windows = _without_yaml_comments(
+            _extract_job_block(self.pr_workflow, "windows-rust-test")
+        )
+        regression = windows.split(
+            "- name: Windows 原子替换状态机回归", maxsplit=1
+        )[1].split("\n      - name:", maxsplit=1)[0]
+        required = (
+            "'features::remote_control::controller::controlling_service::resume_projection_tests::'",
+            "'features::remote_control::controller::controlling::tests::'",
+            "'features::remote_control::controller::controlling_service::tests::resume_sequence_reopens_business_only_after_controller_resumed'",
+        )
+
+        def assert_execution(block):
+            loop = block.split("for filter in ", maxsplit=1)[1].split("done", maxsplit=1)[0]
+            filters, commands = loop.split("; do", maxsplit=1)
+            for prefix in required:
+                self.assertEqual(filters.count(prefix), 1)
+            self.assertIn('"$test_exe" "$filter" --test-threads=1', commands)
+            self.assertIn("running [1-9][0-9]* tests?", commands)
+            self.assertRegex(commands, r"grep -qE[^\n]+\|\|\s*\{[^}]*exit 1")
+            self.assertIn("set -euo pipefail", block)
+            self.assertNotIn("continue-on-error", block)
+
+        assert_execution(regression)
+        # Deletion/rename, compile-only execution and a vacuous zero-test guard
+        # must each fail this policy; unrelated B filters cannot satisfy it.
+        mutations = [(prefix, change) for prefix in required
+                     for change in ("", "'renamed_no_matching_tests'")]
+        mutations += [
+            ('"$test_exe" "$filter" --test-threads=1', "echo compiled-only"),
+            ("running [1-9][0-9]* tests?", "running [0-9]+ tests?"),
+            ("exit 1", "exit 0"),
+        ]
+        for old, new in mutations:
+            with self.subTest(mutation=(old, new)):
+                with self.assertRaises(AssertionError):
+                    assert_execution(regression.replace(old, new))
+
+    def test_windows_controller_inbound_runs_in_the_nonzero_regression_loop(self):
+        windows_job = _without_yaml_comments(
+            self.pr_workflow.split("\n  windows-rust-test:", maxsplit=1)[1].split(
+                "\n  windows-rustup-repair-test:", maxsplit=1
+            )[0]
+        )
+        regression = windows_job.split(
+            "- name: Windows 原子替换状态机回归", maxsplit=1
+        )[1]
+        required_filters = (
+            "'features::remote_control::controller::controlling_inbound::tests::'",
+            "'features::remote_control::controller::controlling_service::inbound_tests::'",
+        )
+
+        def assert_inbound_execution(block):
+            loop = block.split("for filter in ", maxsplit=1)[1].split(
+                "done", maxsplit=1
+            )[0]
+            filters, commands = loop.split("; do", maxsplit=1)
+            for required in required_filters:
+                self.assertEqual(filters.count(required), 1)
+            self.assertIn('"$test_exe" "$filter" --test-threads=1', commands)
+            self.assertIn("running [1-9][0-9]* tests?", commands)
+            self.assertRegex(commands, r"grep -qE[^\n]+\|\|\s*\{[^}]*exit 1")
+            self.assertIn("set -euo pipefail", block)
+            self.assertNotIn("continue-on-error", block)
+
+        assert_inbound_execution(regression)
+        # These mutations protect actual behavior selection, not just linking
+        # or the presence of an unrelated filter elsewhere in the job.
+        mutations = [
+            (required, replacement)
+            for required in required_filters
+            for replacement in ("", "'features::remote_control::'")
+        ] + [
+            ('"$test_exe" "$filter" --test-threads=1', "echo compile-only"),
+            ("running [1-9][0-9]* tests?", "running [0-9]+ tests?"),
+            ("exit 1", "exit 0"),
+        ]
+        for old, new in mutations:
+            with self.subTest(mutation=(old, new)):
+                with self.assertRaises(AssertionError):
+                    assert_inbound_execution(regression.replace(old, new))
 
     def test_windows_rust_split_matches_the_declared_feature_graph(self):
         with TAURI_MANIFEST.open("rb") as manifest_file:
@@ -5318,18 +5774,26 @@ class CiGatePolicyTests(unittest.TestCase):
         # the decision record above mentions the old value historically.
         self.assertNotIn("cache-targets:", rust_test_cache)
 
+    def test_console_container_script_only_diff_selects_its_actual_job(self):
+        changes = _without_yaml_comments(
+            self.pr_workflow.split("            update_release_console:", 1)[1].split(
+                "            acp_runtime:", 1
+            )[0]
+        )
+        paths = _extract_quoted_paths(changes)
+        self.assertTrue(_matches_paths_filter("scripts/ci-update-release-console-container.sh", paths))
+        self.assertNotIn("scripts/**", paths)
+        console = _without_yaml_comments(_extract_job_block(self.pr_workflow, "update-release-console-test"))
+        self.assertEqual(
+            _extract_job_level_if(console),
+            "${{ !cancelled() && github.event.action != 'closed' && needs.changes.outputs.update_release_console == 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group') }}",
+        )
+        self.assertRegex(console, r"(?m)^        run: bash scripts/ci-update-release-console-container\.sh$")
+
     def test_dev_profile_o0_guard_stays_on_all_three_heavy_legs(self):
-        # rust-test's codewhale-tui dev-O0 memory guard defuses the
-        # documented ~7 GB single-rustc dev thin-LTO OOM; the 2026-10 audit
-        # followups (PR #745) ported it to the 7 GB no-swap macOS runner
-        # beside the existing Windows twin. The override is a silent policy
-        # knob — dropping a leg's step or gutting the TOML section
-        # resurfaces the cold-run OOM with no runtime error — so pin the
-        # shared payload in every leg. Windows speaks pwsh (Add-Content
-        # here-string), the others a bash heredoc; the TOML section is the
-        # contract they share. Judged on comment-stripped text: commenting
-        # the TOML section out is inert in the written config.toml and must
-        # red this pin exactly like deletion (round-3 review of PR #745).
+        # Linux may reuse a runner with a persistent Cargo home. Keep O0 on
+        # each actual invocation, without writing administrator configuration.
+        # Windows/macOS retain their existing hosted-runner payloads.
         for job_name, end_marker in (
             ("rust-test", "\n  cli-test:"),
             ("windows-rust-test", "\n  macos-rust-check:"),
@@ -5340,26 +5804,22 @@ class CiGatePolicyTests(unittest.TestCase):
                     end_marker, maxsplit=1
                 )[0]
             )
-            self.assertIn("codewhale-tui O0", job, job_name)
-            self.assertIn("[profile.dev.package.codewhale-tui]", job, job_name)
-            self.assertIn("opt-level = 0", job, job_name)
-        # Preserve the cargo-home location. Persistent runners must update
-        # the Linux override idempotently; cache exclusion alone cannot stop
-        # duplicate TOML tables from accumulating between jobs.
-        for job_name, end_marker in (
-            ("rust-test", "\n  cli-test:"),
-            ("macos-rust-check", "\n  windows-codex-runtime-test:"),
-        ):
-            job = _without_yaml_comments(
-                self.pr_workflow.split(f"\n  {job_name}:", maxsplit=1)[1].split(
-                    end_marker, maxsplit=1
-                )[0]
-            )
-            self.assertIn(
-                'config="${CARGO_HOME:-$HOME/.cargo}/config.toml"',
-                job,
-                job_name,
-            )
+            if job_name == "rust-test":
+                executable = re.findall(
+                    r"(?m)^ +(?:run: )?(?:/usr/bin/time -v )?cargo (.+)$", job
+                )
+                test_commands = [line for line in executable if re.search(r"(?:^| )test(?: |$)", line)]
+                self.assertEqual(len(test_commands), 4)
+                for command in test_commands:
+                    self.assertTrue(command.startswith("--config 'profile.dev.package.codewhale-tui.opt-level=0' test"), command)
+                self.assertNotIn('config="${CARGO_HOME:-$HOME/.cargo}/config.toml"', job)
+                self.assertNotIn('cat >> "$config"', job)
+            else:
+                self.assertIn("codewhale-tui O0", job, job_name)
+                self.assertIn("[profile.dev.package.codewhale-tui]", job, job_name)
+                self.assertIn("opt-level = 0", job, job_name)
+                if job_name == "macos-rust-check":
+                    self.assertIn('config="${CARGO_HOME:-$HOME/.cargo}/config.toml"', job)
 
     def test_frontend_test_webui_smoke_reuses_the_prebuilt_dist(self):
         # frontend-test builds the web dist unconditionally (the web index

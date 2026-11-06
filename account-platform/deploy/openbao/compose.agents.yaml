@@ -1,0 +1,90 @@
+name: pinvou-kms-agents
+
+x-agent: &agent
+  image: quay.io/openbao/openbao@sha256:11fd73a2102cda9c55d5d881a8c3210303146a7ec1e8ac76f526e175c6d24641
+  entrypoint: ["/usr/bin/bao"]
+  command: ["agent", "-config=/bao/config/agent.hcl"]
+  user: "65532:65532"
+  read_only: true
+  cap_drop: ["ALL"]
+  security_opt: ["no-new-privileges:true"]
+  restart: unless-stopped
+  stop_grace_period: 20s
+  mem_limit: 128m
+  cpus: 0.5
+  pids_limit: 64
+  ulimits:
+    core: {soft: 0, hard: 0}
+  tmpfs:
+    - /tmp:rw,nosuid,nodev,noexec,size=8m,mode=1777
+    - /openbao/file:rw,nosuid,nodev,noexec,size=1m,mode=0700,uid=65532,gid=65532
+    - /openbao/logs:rw,nosuid,nodev,noexec,size=1m,mode=0700,uid=65532,gid=65532
+  logging:
+    driver: local
+    options: {max-size: 5m, max-file: "2"}
+  networks: [kms]
+
+x-config: &config
+  type: bind
+  source: ${OPENBAO_AGENT_DIRECTORY:?required}/config
+  target: /bao/config
+  read_only: true
+  bind: {create_host_path: false}
+x-trust: &trust
+  type: bind
+  source: ${OPENBAO_TRUST_DIRECTORY:?required}
+  target: /bao/trust
+  read_only: true
+  bind: {create_host_path: false}
+
+services:
+  gateway:
+    <<: *agent
+    container_name: pinvou-kms-agent-gateway
+    volumes:
+      - *config
+      - *trust
+      - type: bind
+        source: ${OPENBAO_AGENT_DIRECTORY:?required}/bootstrap/pinvou-token-gateway
+        target: /bao/bootstrap
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${TOKEN_KMS_TOKEN_DIRECTORY:?set only Gateway transient sink directory}
+        target: /bao/token
+        bind: {create_host_path: false}
+  credentials:
+    <<: *agent
+    container_name: pinvou-kms-agent-credentials
+    volumes:
+      - *config
+      - *trust
+      - type: bind
+        source: ${OPENBAO_AGENT_DIRECTORY:?required}/bootstrap/pinvou-credential-portal
+        target: /bao/bootstrap
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${CREDENTIAL_KMS_TOKEN_DIRECTORY:?set only Credential transient sink directory}
+        target: /bao/token
+        bind: {create_host_path: false}
+  backup:
+    <<: *agent
+    container_name: pinvou-kms-agent-backup
+    volumes:
+      - *config
+      - *trust
+      - type: bind
+        source: ${OPENBAO_AGENT_DIRECTORY:?required}/bootstrap/pinvou-kms-backup
+        target: /bao/bootstrap
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${BACKUP_KMS_TOKEN_DIRECTORY:?set only backup transient sink directory}
+        target: /bao/token
+        bind: {create_host_path: false}
+
+networks:
+  kms:
+    name: ${OPENBAO_NETWORK:?required}
+    external: true
