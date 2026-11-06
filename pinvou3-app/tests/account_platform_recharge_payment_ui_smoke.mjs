@@ -49,6 +49,7 @@ try {
       assert.ok((await page.$eval('[role=dialog]', node => node.textContent)).includes(financeCopy.en.qrLoadFailed));
       imageMode = 'success'; await click(financeCopy.en.qrRetry); await page.waitForSelector('[data-qr-state=loaded]');
       assert.equal(await page.$eval('[role=dialog] img', node => node.hidden), false);
+      assert.equal(await page.evaluate(() => Boolean(document.activeElement?.closest('[role=dialog]'))), true, 'QR retry retains keyboard focus inside the modal');
       assert.equal((await state()).productMutations, 1); assert.equal((await state()).createKeys.length, 1);
       await click(financeCopy.en.dismissPayment); await noDialog();
     } finally {
