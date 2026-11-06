@@ -56,7 +56,7 @@ export const organizationCopy = {
   createUnit: '创建单元', moveUnit: '移动单元', invite: '创建邀请', grantRole: '授予角色', replaceRoles: '替换成员角色', confirm: '确认执行此操作？',
   balance: '组织余额', available: '可用额度', reserved: '已预留额度', packages: '权益包', package: '权益包标识', component: '权益组件标识', componentType: '组件类型', quota: '成员配额', amount: '微积分整数', allocate: '分配配额', partial: '批次已确认，包含失败项。请核实每项结果。',
   purchase: '购买组织权益', product: '商品', channel: '支付渠道', order: '订单标识', queryOrder: '查询订单', pay: '打开付款页面',
-  create: '创建组织', rename: '修改名称', disable: '停用', enable: '启用', delete: '删除组织', readiness: '检查删除条件', blockers: '阻断条件', addMember: '添加成员', renameUnit: '修改单元名称', deleteUnit: '删除单元', previous: '上一页', next: '下一页', search: '搜索名称',
+  create: '创建组织', rename: '修改组织名称', disable: '停用', enable: '启用', delete: '删除组织', readiness: '检查删除条件', blockers: '阻断条件', addMember: '添加成员', renameUnit: '修改单元名称', deleteUnit: '删除单元', previous: '上一页', next: '下一页', search: '搜索名称',
  },
  en: {
   loadMoreMembers: 'Load more members', membersPageHint: 'Only loaded members are shown. Load subsequent pages before selecting or allocating to other members.',
@@ -115,7 +115,7 @@ export const organizationCopy = {
   createUnit: 'Create unit', moveUnit: 'Move unit', invite: 'Create invitation', grantRole: 'Grant role', replaceRoles: 'Replace member roles', confirm: 'Confirm this operation?',
   balance: 'Organization balance', available: 'Available quota', reserved: 'Reserved quota', packages: 'Entitlement packages', package: 'Package ID', component: 'Component ID', componentType: 'Component type', quota: 'Member quota', amount: 'Integer microcredits', allocate: 'Allocate quota', partial: 'The batch is confirmed with failed items. Verify each result.',
   purchase: 'Purchase organization entitlements', product: 'Product', channel: 'Payment channel', order: 'Order ID', queryOrder: 'Query order', pay: 'Open payment page',
-  create: 'Create organization', rename: 'Rename', disable: 'Disable', enable: 'Enable', delete: 'Delete organization', readiness: 'Check deletion conditions', blockers: 'Blocking conditions', addMember: 'Add member', renameUnit: 'Rename unit', deleteUnit: 'Delete unit', previous: 'Previous page', next: 'Next page', search: 'Search names',
+  create: 'Create organization', rename: 'Rename organization', disable: 'Disable', enable: 'Enable', delete: 'Delete organization', readiness: 'Check deletion conditions', blockers: 'Blocking conditions', addMember: 'Add member', renameUnit: 'Rename unit', deleteUnit: 'Delete unit', previous: 'Previous page', next: 'Next page', search: 'Search names',
  },
  ja: {
   loadMoreMembers: 'メンバーをさらに読み込む', membersPageHint: '読み込み済みのメンバーのみ表示しています。ほかのメンバーを選択・割り当てる前に続きのページを読み込んでください。',
@@ -174,7 +174,7 @@ export const organizationCopy = {
   createUnit: '単位を作成', moveUnit: '単位を移動', invite: '招待を作成', grantRole: 'ロールを付与', replaceRoles: 'メンバーロールを置換', confirm: 'この操作を実行しますか？',
   balance: '組織残高', available: '利用可能枠', reserved: '予約済み枠', packages: '利用権パッケージ', package: 'パッケージ識別子', component: 'コンポーネント識別子', componentType: 'コンポーネントの種類', quota: 'メンバー利用枠', amount: '整数マイクロクレジット', allocate: '利用枠を割り当て', partial: 'バッチは確認済みですが失敗項目があります。各結果を確認してください。',
   purchase: '組織の利用権を購入', product: '商品', channel: '決済手段', order: '注文識別子', queryOrder: '注文を照会', pay: '決済ページを開く',
-  create: '組織を作成', rename: '名称を変更', disable: '無効化', enable: '有効化', delete: '組織を削除', readiness: '削除条件を確認', blockers: '阻止条件', addMember: 'メンバーを追加', renameUnit: '単位名を変更', deleteUnit: '単位を削除', previous: '前のページ', next: '次のページ', search: '名称を検索',
+  create: '組織を作成', rename: '組織名を変更', disable: '無効化', enable: '有効化', delete: '組織を削除', readiness: '削除条件を確認', blockers: '阻止条件', addMember: 'メンバーを追加', renameUnit: '単位名を変更', deleteUnit: '単位を削除', previous: '前のページ', next: '次のページ', search: '名称を検索',
  },
 };
 
