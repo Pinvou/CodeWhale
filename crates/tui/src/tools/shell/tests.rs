@@ -5290,3 +5290,36 @@ fn dropping_the_manager_stops_a_child_with_an_unconfirmed_stop() {
         std::thread::sleep(Duration::from_millis(20));
     }
 }
+
+#[test]
+fn forkguard_idle_shutdown_shell_predicate_gates_on_live_and_unreported_work() {
+    let workspace = tempdir().expect("tempdir");
+    let mut manager = ShellManager::new(workspace.path().to_path_buf());
+    assert!(
+        !manager.has_live_or_unreported_work_for_session("session-a"),
+        "an empty manager has no session work"
+    );
+    assert!(
+        !manager.has_live_or_unreported_work_for_session(""),
+        "an empty session id matches nothing, like the sibling helpers"
+    );
+    manager.seed_session_shell_for_test("live-job", "session-a", true);
+    assert!(
+        manager.has_live_or_unreported_work_for_session("session-a"),
+        "a running session shell is live work"
+    );
+    assert!(
+        !manager.has_live_or_unreported_work_for_session("session-b"),
+        "another session's shell is not this engine's work"
+    );
+    manager.finish_seeded_shell_for_test("live-job");
+    assert!(
+        manager.has_live_or_unreported_work_for_session("session-a"),
+        "finished output not yet delivered must survive retirement"
+    );
+    manager.mark_seeded_completion_reported_for_test("live-job");
+    assert!(
+        !manager.has_live_or_unreported_work_for_session("session-a"),
+        "delivered shell evidence no longer blocks retirement"
+    );
+}
