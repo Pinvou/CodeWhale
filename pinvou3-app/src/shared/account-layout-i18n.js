@@ -98,3 +98,11 @@ adminLayoutCopy.en.financeLists.overdue = "Overdue";
 adminLayoutCopy.en.financeLists.include_deleted = "Include deleted products";
 adminLayoutCopy.ja.financeLists.overdue = "期限超過";
 adminLayoutCopy.ja.financeLists.include_deleted = "削除済み商品を含む";
+
+
+const userStatusCopy = {
+  zh: { userStatusTitle: action => `${action}用户`, confirmUserStatus: action => `确认${action}` },
+  en: { userStatusTitle: action => `${action} user`, confirmUserStatus: action => `Confirm ${action.toLowerCase()}` },
+  ja: { userStatusTitle: action => `ユーザーを${action}`, confirmUserStatus: action => `${action}を確認` },
+};
+for (const language of ['zh', 'en', 'ja']) Object.assign(adminLayoutCopy[language], userStatusCopy[language]);

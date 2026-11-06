@@ -26,6 +26,15 @@ if (closureFeedback) {
   c.seedClosureRecovery = () => saveClosureIntent({ actor: c.user, scope: `account-closure-retry:${otherID}`, key: 'closure-controlled-original-key', facts: { id: otherID, reason: 'Controlled original recovery' } });
   c.readClosureRecovery = actor => readClosureIntent(actor || c.user, `account-closure-retry:${otherID}`);
 }
+const userStatusRisk = new URLSearchParams(location.search).get('userStatusRisk') === '1';
+if (userStatusRisk) {
+  c.permissions = ['platform.users.read', 'platform.users.status.manage'];
+  // Legal AdminUser fields: optional username/display_name, distinct checksum-
+  // valid formatted codes, canonical IDs and required creation/update times.
+  c.statusUsers = [{"user_id": "11111111-1111-4111-8111-111111111111", "user_code": "USR-0000-0000-0000-0000-Q3", "username": "sample-account", "status": "ACTIVE", "created_at": "2026-10-01T00:00:00Z", "updated_at": "2026-10-01T00:00:00Z"}, {"user_id": "22222222-2222-4222-8222-222222222222", "user_code": "USR-1111-1111-1111-1111-DP", "display_name": "Status target", "status": "ACTIVE", "created_at": "2026-10-01T00:00:00Z", "updated_at": "2026-10-01T00:00:00Z"}, {"user_id": "33333333-3333-4333-8333-333333333333", "user_code": "USR-2222-2222-2222-2222-8X", "display_name": "Status target", "status": "DISABLED", "created_at": "2026-10-01T00:00:00Z", "updated_at": "2026-10-01T00:00:00Z"}];
+  c.pendingUserStatusWrites = [];
+  c.releaseUserStatusWrite = () => c.pendingUserStatusWrites.shift()?.();
+}
 const ledgerPoints = new URLSearchParams(location.search).get('ledgerPoints') === '1';
 if (ledgerPoints) {
   c.permissions = ['platform.billing.repairs.request', 'platform.billing.wallets.read'];
@@ -163,6 +172,16 @@ globalThis.fetch = async (input, options = {}) => {
   if (url.includes('/admin/v1/user-code-lookups/')) {
     const code = decodeURIComponent(url.split('/').at(-1)).replaceAll('-', '').toUpperCase();
     return code === 'USR0123456789ABCDEFMV' ? json({ user_id: otherID, username: 'coded-user', user_code: 'USR-0123-4567-89AB-CDEF-MV', status: 'ACTIVE' }) : json({ code: 'NOT_FOUND' }, 404);
+  }
+  if (userStatusRisk && method === 'GET' && new URL(url, location.origin).pathname === '/api/admin/account/admin/v1/users') return json({ items: c.statusUsers, next_cursor: null });
+  if (userStatusRisk && method === 'PATCH' && /^\/api\/admin\/account\/admin\/v1\/users\/[a-f0-9-]+\/status$/.test(url)) {
+    if (!c.permissions.includes('platform.users.status.manage')) return json({ code: 'PERMISSION_DENIED' }, 403);
+    const body = JSON.parse(options.body), target = c.statusUsers.find(user => user.user_id === url.split('/').at(-2));
+    if (!target) return json({ code: 'NOT_FOUND' }, 404);
+    if (Object.keys(body).join(',') !== 'status' || !['ACTIVE', 'DISABLED'].includes(body.status)) return json({ code: 'INVALID_USER_STATUS' }, 400);
+    const response = () => { target.status = body.status; target.updated_at = '2026-11-06T00:00:00Z'; return json(null, 204); };
+    if (c.holdUserStatusWrite) return new Promise(resolve => c.pendingUserStatusWrites.push(() => resolve(response())));
+    return response();
   }
   if (url.includes('/admin/v1/users?')) {
     const query = new URL(url, location.origin).searchParams.get('q') || '';

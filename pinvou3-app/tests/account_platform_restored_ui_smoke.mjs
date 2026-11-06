@@ -48,9 +48,111 @@ try {
         const form = document.querySelector('.adm-financial-repair'), amount = form?.querySelector('[data-ledger-amount]');
         return { amount: amount && { value: amount.value, disabled: amount.disabled, invalid: amount.getAttribute('aria-invalid'), required: amount.required, valid: amount.validity.valid }, buttons: [...(form?.querySelectorAll('button') || [])].map(node => ({ text: node.textContent, disabled: node.disabled, laidOut: node.getClientRects().length > 0 })), prechecks: window.restored?.calls.filter(call => call.url === '/api/admin/account/admin/v2/approval-command-prechecks').length, drafts: window.restored?.calls.filter(call => call.method === 'POST' && call.url === '/api/admin/approvals/requests').length, text: form?.textContent.slice(0, 2400) };
       }).catch(() => ({ unavailable: true })) : undefined;
-      console.error(JSON.stringify({ case: name, pageErrors: errors, ledger, dialog: await page.evaluate(() => document.querySelector('[role=dialog]')?.textContent.slice(0, 1200)) })); throw error;
+      const userStatus = name === 'user status actions expose danger target and self guard' ? await page.evaluate(() => ({ buttons: [...document.querySelectorAll('[data-user-status-target],[data-user-status-confirm]')].map(node => ({ target: node.dataset.userStatusTarget, confirm: node.dataset.userStatusConfirm, disabled: node.disabled, text: node.textContent, label: node.getAttribute('aria-label'), color: getComputedStyle(node).color, background: getComputedStyle(node).backgroundColor })), writes: window.restored?.calls.filter(call => call.method === 'PATCH' && call.url.endsWith('/status')) })).catch(() => ({ unavailable: true })) : undefined;
+      console.error(JSON.stringify({ case: name, pageErrors: errors, ledger, userStatus, dialog: await page.evaluate(() => document.querySelector('[role=dialog]')?.textContent.slice(0, 1200)) })); throw error;
     }
   };
+  await run('user status actions expose danger target and self guard', async () => {
+    const actor = '11111111-1111-4111-8111-111111111111', target = '22222222-2222-4222-8222-222222222222', other = '33333333-3333-4333-8333-333333333333';
+    const targetCode = 'USR-1111-1111-1111-1111-DP', otherCode = 'USR-2222-2222-2222-2222-8X';
+    const selector = id => `[data-user-status-target="${id}"]`, confirm = '[data-user-status-confirm]';
+    const writes = () => page.evaluate(() => window.restored.calls.filter(call => call.method === 'PATCH' && call.url.endsWith('/status')));
+    const colors = selector => page.$eval(selector, node => { const style = getComputedStyle(node); return { color: style.color, background: style.backgroundColor, outline: style.outlineColor, outlineWidth: style.outlineWidth, focused: node.matches(':focus-visible') }; });
+    const settledAnimations = selector => page.$eval(selector, async node => { await Promise.all(node.getAnimations().filter(animation => animation.playState === 'running' && Number.isFinite(animation.effect?.getComputedTiming().endTime)).map(animation => animation.finished.catch(() => {}))); });
+    await fresh('?mode=admin&userStatusRisk=1&section=users'); await page.waitForSelector(selector(target));
+    for (const [language, title, reason] of [
+      ['zh', '禁用用户', '不能停用当前登录的管理员。'],
+      ['en', 'Disable user', 'You cannot disable the signed-in administrator.'],
+      ['ja', 'ユーザーを無効化', 'ログイン中の管理者は無効にできません。'],
+      ['zh', '禁用用户', '不能停用当前登录的管理员。'],
+    ]) {
+      await page.evaluate(language => { window.restored.language = language; window.restored.reload(); }, language);
+      await page.waitForFunction(({ selector, title }) => { const node = document.querySelector(selector); return node?.getAttribute('aria-label')?.startsWith(title) && !node.disabled; }, {}, { selector: selector(target), title });
+      assert.ok((await page.$eval(selector(target), node => node.getAttribute('aria-label'))).includes(targetCode), 'accessible action disambiguates equal display names with the canonical code');
+      assert.equal(await page.$eval(selector(actor), node => node.disabled), true);
+      assert.equal(await page.$eval('.adm-user-status-blocked', node => node.textContent), reason);
+      assert.ok(await page.$eval('.adm-user-status-blocked', node => { const style = getComputedStyle(node); return node.getClientRects().length > 0 && style.display !== 'none' && style.visibility !== 'hidden'; }), 'self reason is rendered, not title-only');
+      await page.click(selector(actor)); assert.equal(await page.$('[role=dialog]'), null, 'native self guard cannot open confirmation');
+      assert.equal((await writes()).length, 0);
+    }
+    const normal = await colors(selector(target)); assert.equal(normal.color, 'rgb(195, 59, 70)');
+    await page.hover(selector(target)); await settledAnimations(selector(target));
+    assert.equal((await colors(selector(target))).background, 'rgb(255, 240, 241)');
+    await page.focus(selector(target)); await page.keyboard.press('Tab'); await page.keyboard.down('Shift'); await page.keyboard.press('Tab'); await page.keyboard.up('Shift');
+    const focused = await colors(selector(target)); assert.equal(focused.focused, true); assert.equal(focused.outlineWidth, '3px'); assert.ok(focused.outline.startsWith('rgba(195, 59, 70,'));
+    if (process.env.UI_SCREENSHOT_DIR) fs.mkdirSync(process.env.UI_SCREENSHOT_DIR, { recursive: true });
+    for (const width of [1440, 390]) {
+      await page.setViewport({ width, height: 1000 }); await noOverflow();
+      await page.$eval(selector(actor), node => node.scrollIntoView({ block: 'center', inline: 'nearest' }));
+      await page.$eval(selector(actor), node => { const wrap = node.closest('.adm-table-wrap'); wrap.scrollLeft = wrap.scrollWidth - wrap.clientWidth; });
+      await page.waitForFunction(selector => { const wrap = document.querySelector(selector)?.closest('.adm-table-wrap'); return wrap && Math.abs(wrap.scrollLeft - (wrap.scrollWidth - wrap.clientWidth)) <= 0.5; }, {}, selector(actor));
+      await page.evaluate(() => new Promise(resolve => requestAnimationFrame(resolve)));
+      const visibility = await page.$eval('.adm-user-status-blocked', node => {
+        const clip = { left: 0, top: 0, right: innerWidth, bottom: innerHeight };
+        const clipping = new Set(['auto', 'scroll', 'hidden', 'clip', 'overlay']);
+        for (let ancestor = node.parentElement; ancestor; ancestor = ancestor.parentElement) {
+          const style = getComputedStyle(ancestor), rect = ancestor.getBoundingClientRect();
+          const left = rect.left + ancestor.clientLeft, top = rect.top + ancestor.clientTop;
+          if (clipping.has(style.overflowX)) { clip.left = Math.max(clip.left, left); clip.right = Math.min(clip.right, left + ancestor.clientWidth); }
+          if (clipping.has(style.overflowY)) { clip.top = Math.max(clip.top, top); clip.bottom = Math.min(clip.bottom, top + ancestor.clientHeight); }
+        }
+        const range = document.createRange(); range.selectNodeContents(node);
+        const fragments = [...range.getClientRects()].map(rect => ({ left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom, width: rect.width, height: rect.height }));
+        const wrap = node.closest('.adm-table-wrap');
+        return { text: node.textContent, clip, fragments, scrollLeft: wrap.scrollLeft, maxScroll: wrap.scrollWidth - wrap.clientWidth };
+      });
+      assert.equal(visibility.text, '不能停用当前登录的管理员。');
+      assert.ok(Object.values(visibility.clip).every(Number.isFinite) && visibility.clip.right > visibility.clip.left && visibility.clip.bottom > visibility.clip.top);
+      assert.ok(visibility.fragments.length > 0 && visibility.fragments.every(rect => Object.values(rect).every(Number.isFinite) && rect.width > 0 && rect.height > 0 && rect.left >= visibility.clip.left - 0.5 && rect.right <= visibility.clip.right + 0.5 && rect.top >= visibility.clip.top - 0.5 && rect.bottom <= visibility.clip.bottom + 0.5), `complete reason is clipped after maximum native scroll: ${JSON.stringify(visibility)}`);
+      console.log(JSON.stringify({ case: 'user-status-reason-visibility', width, ...visibility }));
+      if (process.env.UI_SCREENSHOT_DIR) await page.screenshot({ path: path.join(process.env.UI_SCREENSHOT_DIR, `user-status-actions-${width}.png`) });
+    }
+    await page.setViewport({ width: 1440, height: 1000 });
+    await page.click(selector(target)); await page.waitForSelector('[role=dialog]');
+    assert.equal(await page.$eval('[role=dialog]', node => node.closest('.adm-restored-shell') === null), true, 'real body portal is outside the admin shell');
+    let dialog = await page.$eval('[role=dialog]', node => node.textContent);
+    assert.ok(dialog.includes('禁用用户') && dialog.includes('Status target') && dialog.includes(targetCode) && dialog.includes(target));
+    assert.ok(!dialog.includes(otherCode) && !dialog.includes(other), 'confirmation does not confuse the other equal display name');
+    assert.equal((await writes()).length, 0, 'opening a confirmation is not a write');
+    const danger = await colors(confirm); assert.equal(danger.background, 'rgb(195, 59, 70)'); assert.equal(danger.color, 'rgb(255, 255, 255)');
+    await page.keyboard.press('Tab'); const dialogFocus = await colors(confirm); assert.equal(dialogFocus.focused, true); assert.equal(dialogFocus.outlineWidth, '3px'); assert.ok(dialogFocus.outline.startsWith('rgba(195, 59, 70,'));
+    await page.hover(confirm); assert.equal(await page.$eval(confirm, node => getComputedStyle(node).filter), 'brightness(0.95)');
+    await page.keyboard.press('Escape'); await page.waitForFunction(() => !document.querySelector('[role=dialog]'));
+    assert.equal((await writes()).length, 0, 'cancel is zero-write');
+    assert.equal(await page.evaluate(id => document.activeElement?.dataset.userStatusTarget === id, target), true, 'cancel restores opener focus');
+    await page.click(selector(target)); await page.waitForSelector('[role=dialog]');
+    if (process.env.UI_SCREENSHOT_DIR) {
+      for (const width of [1440, 390]) {
+        await page.setViewport({ width, height: 1000 }); await noOverflow();
+        await page.screenshot({ path: path.join(process.env.UI_SCREENSHOT_DIR, `user-status-confirm-${width}.png`) });
+      }
+      await page.setViewport({ width: 1440, height: 1000 });
+    }
+    await page.evaluate(() => { window.restored.holdUserStatusWrite = true; });
+    await page.click(confirm); await page.waitForFunction(() => window.restored.pendingUserStatusWrites.length === 1);
+    await page.waitForFunction(() => document.querySelector('[data-user-status-confirm]')?.disabled && document.querySelector('[role=dialog] > header button')?.disabled);
+    await page.click(confirm); await page.keyboard.press('Escape');
+    assert.equal((await writes()).length, 1, 'busy native controls and mutation guard prevent a duplicate write');
+    assert.ok(await page.$('[role=dialog]'), 'busy confirmation cannot close as if cancelled');
+    await page.evaluate(() => window.restored.releaseUserStatusWrite());
+    await page.waitForFunction(({ selector }) => !document.querySelector('[role=dialog]') && document.querySelector(selector)?.textContent === window.restored.copy().admin.accounts.enable && !document.querySelector(selector).disabled, {}, { selector: selector(target) });
+    const first = (await writes())[0]; assert.equal(first.url, `/api/admin/account/admin/v1/users/${target}/status`); assert.deepEqual(JSON.parse(first.body), { status: 'DISABLED' });
+    assert.notEqual((await colors(selector(target))).color, 'rgb(195, 59, 70)', 'enable trigger remains neutral');
+    await page.click(selector(other)); await page.waitForSelector('[role=dialog]');
+    dialog = await page.$eval('[role=dialog]', node => node.textContent);
+    assert.ok(dialog.includes('启用用户') && dialog.includes(otherCode) && dialog.includes(other));
+    assert.ok(!dialog.includes(targetCode) && !dialog.includes(target), 'equal display names keep distinct canonical targets');
+    assert.equal(await page.$(`${confirm}.adm-user-disable-action`), null, 'enable confirmation is not a danger action');
+    assert.notEqual((await colors(confirm)).background, 'rgb(195, 59, 70)');
+    await page.evaluate(() => { window.restored.holdUserStatusWrite = false; });
+    await page.click(confirm);
+    await page.waitForFunction(selector => !document.querySelector('[role=dialog]') && document.querySelector(selector)?.textContent === window.restored.copy().admin.accounts.disable && !document.querySelector(selector).disabled, {}, selector(other));
+    const second = (await writes())[1]; assert.equal(second.url, `/api/admin/account/admin/v1/users/${other}/status`); assert.deepEqual(JSON.parse(second.body), { status: 'ACTIVE' });
+    await page.evaluate(() => { window.restored.permissions = ['platform.users.read']; window.restored.reload(); });
+    await page.waitForFunction(() => !document.querySelector('[data-user-status-target]') && document.querySelectorAll('.adm-table tbody tr').length === 3);
+    assert.equal(await page.$('[role=dialog]'), null); assert.equal((await writes()).length, 2, 'read-only role has no status action or extra write');
+    assert.equal(await page.evaluate(() => window.restored.calls.filter(call => call.method !== 'GET' && !call.url.endsWith('/account/bootstrap')).length), 2, 'only two explicitly confirmed status writes occurred');
+  });
   await run('ledger points preserve exact precheck and frozen replay', async () => {
     const form = '.adm-financial-repair', amount = `${form} [data-ledger-amount]`;
     const precheckURL = '/api/admin/account/admin/v2/approval-command-prechecks';
