@@ -75,6 +75,8 @@ availability:
 
 dependencies:
   redisUrl: ""
+  # Optional ConfigMap with ca.crt for clients of the shared rediss:// endpoint.
+  redisCAConfigMap: ""
   newApiRedisUrl: ""
   natsUrl: ""
   natsMonitorUrl: ""
@@ -116,8 +118,6 @@ security:
     token-gateway: []
     token-portal: []
   authRiskEnabled: false
-  # Optional ConfigMap containing ca.crt for Identity's rediss:// connection.
-  authRiskRedisCAConfigMap: ""
   # Exact immediate edge/Keycloak peers only; never CIDRs or a private-network wildcard.
   passwordPreparationTrustedProxyIPs: []
 

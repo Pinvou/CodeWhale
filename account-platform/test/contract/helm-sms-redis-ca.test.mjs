@@ -6,8 +6,8 @@ import YAML from 'yaml';
 
 const chart = path.resolve(import.meta.dirname, '../../deploy/helm/account-platform');
 const enabled = { skip: process.env.PINVOU_TEST_KMS_HELM !== '1' };
-const caVolume = 'auth-risk-redis-ca';
-const caPath = '/run/pinvou/auth-risk-redis-ca/ca.crt';
+const caVolume = 'redis-ca';
+const caPath = '/run/pinvou/redis-trust/ca.crt';
 const caConfigMap = 'redis-fixture-issuer';
 const redisURL = 'rediss://redis.fixture.invalid:6379/0';
 
@@ -58,20 +58,27 @@ for (const enabledSMS of [false, true]) {
       const pods = deployments('--set', `sms.enabled=${enabledSMS}`, '--set-string', `sms.provider=${provider}`,
         '--set-string', 'sms.httpEndpoint=https://sms.fixture.invalid/send');
       assertSMSRefs(pods.get('account-service'), enabledSMS, provider);
+      const identity = new Map(pods.get('identity-service').containers[0].env.map(item => [item.name, item]));
+      assert.equal(identity.get('MOBILE_AUTH_ENABLED').value, String(enabledSMS));
+      assert.deepEqual(identity.get('IDENTITY_PASSWORD_HMAC_KEY_BASE64').valueFrom.secretKeyRef, {
+        name: identity.get('KEYCLOAK_PROVISIONER_CLIENT_ID').valueFrom.secretKeyRef.name,
+        key: 'identity-password-hmac-key-base64', optional: !enabledSMS,
+      });
     });
   }
 }
 
-function assertRiskCA(pods, authRiskEnabled, expectedMount) {
+function assertRedisCA(pods, authRiskEnabled, expectedComponents) {
   const identity = pods.get('identity-service');
   assert.ok(identity);
   for (const [component, pod] of pods) {
     const container = pod.containers[0];
-    const entries = (container.env || []).filter(item => item.name === 'AUTH_RISK_REDIS_CA_FILE');
+    const entries = (container.env || []).filter(item => ['AUTH_RISK_REDIS_CA_FILE', 'REDIS_CA_FILE'].includes(item.name));
     const mounts = (container.volumeMounts || []).filter(item => item.name === caVolume);
     const volumes = (pod.volumes || []).filter(item => item.name === caVolume);
-    if (component === 'identity-service' && expectedMount) {
-      assert.deepEqual(entries, [{ name: 'AUTH_RISK_REDIS_CA_FILE', value: caPath }]);
+    if (expectedComponents.includes(component)) {
+      const envName = component === 'identity-service' ? 'AUTH_RISK_REDIS_CA_FILE' : 'REDIS_CA_FILE';
+      assert.deepEqual(entries, [{ name: envName, value: caPath }]);
       assert.deepEqual(mounts, [{ name: caVolume, mountPath: caPath, subPath: 'ca.crt', readOnly: true }]);
       assert.deepEqual(volumes, [{ name: caVolume, configMap: {
         name: caConfigMap, defaultMode: 292, items: [{ key: 'ca.crt', path: 'ca.crt' }],
@@ -84,16 +91,19 @@ function assertRiskCA(pods, authRiskEnabled, expectedMount) {
   }
   const riskURL = identity.containers[0].env.find(item => item.name === 'AUTH_RISK_REDIS_URL');
   assert.equal(riskURL?.value, authRiskEnabled ? redisURL : undefined);
+  assert.equal(pods.get('token-portal').containers[0].env.find(item => item.name === 'REDIS_URL')?.value, redisURL);
 }
 
-test('Helm scopes the configured Redis CA file to Identity auth risk', enabled, () => {
+test('Helm scopes the configured Redis CA to clients of the shared endpoint', enabled, () => {
   const site = ['--set-string', `dependencies.redisUrl=${redisURL}`];
-  const ca = ['--set-string', `security.authRiskRedisCAConfigMap=${caConfigMap}`];
-  assertRiskCA(deployments(...site, '--set', 'security.authRiskEnabled=false', ...ca), false, false);
-  assertRiskCA(deployments(...site, '--set', 'security.authRiskEnabled=true'), true, false);
-  assertRiskCA(deployments(...site, '--set', 'security.authRiskEnabled=true', ...ca), true, true);
-  const plaintext = render('--set', 'security.authRiskEnabled=true', ...ca,
+  const ca = ['--set-string', `dependencies.redisCAConfigMap=${caConfigMap}`];
+  const risk = ['--set', 'sms.enabled=true,security.authRiskEnabled=true'];
+  assertRedisCA(deployments(...site, '--set', 'security.authRiskEnabled=false', ...ca), false, ['token-portal']);
+  assertRedisCA(deployments(...site, '--set', 'sms.enabled=false,security.authRiskEnabled=true', ...ca), true, ['token-portal']);
+  assertRedisCA(deployments(...site, ...risk), true, []);
+  assertRedisCA(deployments(...site, ...risk, ...ca), true, ['identity-service', 'token-portal']);
+  const plaintext = render(...ca,
     '--set-string', 'dependencies.redisUrl=redis://redis.fixture.invalid:6379/0');
   assert.notEqual(plaintext.status, 0);
-  assert.match(plaintext.stderr, /authRiskRedisCAConfigMap requires a rediss:\/\/ Redis URL/);
+  assert.match(plaintext.stderr, /redisCAConfigMap requires a rediss:\/\/ Redis URL/);
 });
