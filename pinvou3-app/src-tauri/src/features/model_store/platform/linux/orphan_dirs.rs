@@ -196,9 +196,12 @@ fn library_root_is_separate(root: Option<&str>, scan_root: Option<&Path>) -> boo
 
 /// 汇总「不准碰」的目录。库记录来自 sqlite；进行中下载来自盘上未终结的安装
 /// 回执（下载成功才写库，进行中的下载只有回执）和内存里的活跃运行登记。
-fn blocked_dirs(service: Option<&super::service::ModelStoreService>) -> Result<Blocked, String> {
-    let settings = config::load_settings();
-    let models_dir = settings.models_path();
+/// 根目录沿用调用方固定的快照；设置可并发保存，不能把旧根的扫描/删除目标
+/// 与新根推导的归属排除集混用。缺少库记录根时仍整根暂停。
+fn blocked_dirs(
+    service: Option<&super::service::ModelStoreService>,
+    models_dir: &Path,
+) -> Result<Blocked, String> {
     let mut blocked = Blocked {
         dirs: HashSet::new(),
         unresolved: 0,
@@ -211,15 +214,15 @@ fn blocked_dirs(service: Option<&super::service::ModelStoreService>) -> Result<B
         // 普通下载只登记共享根，不能把名字猜测当成权重归属证明。上面的
         // 未核实记录会暂停整根清理；独立/版本化根继续完整保护其子树。
         blocked.protect_library_path(
-            &models_dir,
+            models_dir,
             scan_root.as_deref(),
             &rec.card_id,
             rec.models_root.as_deref(),
         );
         // 旧记录的权威实际目录：部署脚本写在卡片 .deploy-env 里的 MODEL_DIR，
         // 与 candidate_paths 同一份真相，不能在扫描里再猜一遍。
-        if let Some(actual) = super::lifecycle::legacy_resource_dir_for_scan(rec, &models_dir) {
-            blocked.insert(&models_dir, actual);
+        if let Some(actual) = super::lifecycle::legacy_resource_dir_for_scan(rec, models_dir) {
+            blocked.insert(models_dir, actual);
         }
         // 名字和仓库名只是额外保守排除，不能证明脚本的实际输出目录。
         // 末段必须过 safe_path_component——"x/.." 的末段就是 ".."（
@@ -230,11 +233,11 @@ fn blocked_dirs(service: Option<&super::service::ModelStoreService>) -> Result<B
             .and_then(|repo| repo.rsplit('/').next())
         {
             if let Ok(safe) = config::safe_path_component(repo) {
-                blocked.insert(&models_dir, models_dir.join(safe));
+                blocked.insert(models_dir, models_dir.join(safe));
             }
         }
         if let Ok(safe) = config::safe_path_component(&rec.model_name) {
-            blocked.insert(&models_dir, models_dir.join(safe));
+            blocked.insert(models_dir, models_dir.join(safe));
         }
     }
 
@@ -248,11 +251,11 @@ fn blocked_dirs(service: Option<&super::service::ModelStoreService>) -> Result<B
             version.models_root.as_deref(),
             version.resource_dir.as_deref(),
         ] {
-            blocked.protect_library_path(&models_dir, scan_root.as_deref(), &version.card_id, root);
+            blocked.protect_library_path(models_dir, scan_root.as_deref(), &version.card_id, root);
         }
         if let Some(record) = &version.record {
             blocked.protect_library_path(
-                &models_dir,
+                models_dir,
                 scan_root.as_deref(),
                 &version.card_id,
                 record.models_root.as_deref(),
@@ -279,12 +282,12 @@ fn blocked_dirs(service: Option<&super::service::ModelStoreService>) -> Result<B
                 .ok()
                 .map(|safe| vec![models_dir.join(".versions").join(safe)])
         } else {
-            card_weight_dirs(card, &models_dir)
+            card_weight_dirs(card, models_dir)
         };
         match dirs {
             Some(dirs) => {
                 for dir in dirs {
-                    blocked.insert(&models_dir, dir);
+                    blocked.insert(models_dir, dir);
                 }
             }
             // 推导不出目标目录就不能假装它不存在：扫描里少排一个目录是漏报，
@@ -368,7 +371,7 @@ fn scan_for_user(
 ) -> Result<Value, String> {
     let settings = config::load_settings();
     let models_dir = settings.models_path();
-    let blocked = blocked_dirs(service)?;
+    let blocked = blocked_dirs(service, &models_dir)?;
     if !blocked.unresolved_library.is_empty() {
         // Do not label unproven library weights as leftovers, even read-only.
         // remove() independently repeats this check under the resource lock.
@@ -501,7 +504,7 @@ fn remove_for_user_with_recheck(
 
     // 3) 不是库记录的目录、不是进行中下载的目标目录。进行中下载有推导失败的
     //    情形时整题拒绝：删错不可逆，等它结束再删只是晚几分钟。
-    let blocked = blocked_dirs(service)?;
+    let blocked = blocked_dirs(service, &models_dir)?;
     if !blocked.unresolved_library.is_empty() {
         return Err(format!(
             "orphan_library_ownership_unresolved: {}",
@@ -793,6 +796,60 @@ mod tests {
     }
 
     #[test]
+    fn root_snapshot_keeps_ownership_and_active_paths_stable_after_settings_change() {
+        for recorded_root in ["shared", "missing", "separate"] {
+            let _home = config::TempHome::new();
+            let (orphan, owned) = seed_models_dir();
+            let models = config::load_settings().models_path();
+            let root = match recorded_root {
+                "shared" => Some(models.as_path()),
+                "missing" => None,
+                _ => Some(owned.as_path()),
+            };
+            seed_record_at_root("owned-model", root);
+            let card = config::data_dir().join("cards/active-card");
+            std::fs::create_dir_all(&card).unwrap();
+            std::fs::write(
+                card.join("card.json"),
+                r#"{"name":"Active Model","source_repo_id":"org/active-repo"}"#,
+            )
+            .unwrap();
+            write_receipt(
+                "run-before-storage-change",
+                &json!({"card_id":"active-card","kind":"download","outcome":null}),
+            );
+
+            // Simulate a settings save after scan/remove has fixed its root,
+            // before the exclusion set reads library and activity metadata.
+            let next_root = config::data_dir().join("new-models");
+            super::super::service::set_storage_settings(
+                Some(next_root.to_str().unwrap().to_owned()),
+                None,
+                None,
+            )
+            .unwrap();
+            let blocked = blocked_dirs(None, &models).unwrap();
+            assert_eq!(
+                blocked.unresolved_library,
+                if recorded_root == "separate" {
+                    Vec::<String>::new()
+                } else {
+                    vec!["owned-card".to_string()]
+                }
+            );
+            assert!(blocked.contains(&owned));
+            assert!(blocked.contains(&models.join("active-repo")));
+            assert!(blocked.contains(&models.join("active-model")));
+            assert!(!blocked.contains(&next_root.join("active-repo")));
+            assert!(orphan.join("config.json").exists());
+            assert_eq!(
+                std::fs::read(owned.join("weights.safetensors")).unwrap(),
+                b"weights"
+            );
+        }
+    }
+
+    #[test]
     fn shared_download_root_pauses_cleanup_for_real_card_directory_mismatches() {
         for linked_root in [false, true] {
             let _home = config::TempHome::new();
@@ -892,7 +949,7 @@ mod tests {
         assert!(report["entries"].as_array().unwrap().is_empty());
         assert_eq!(report["unresolvedLibraryCards"], json!(["owned-card"]));
         assert!(
-            blocked_dirs(None)
+            blocked_dirs(None, &models)
                 .unwrap()
                 .contains(&models.join("custom-legacy-root"))
         );
@@ -1509,7 +1566,7 @@ mod tests {
         // 暂存目标精确进禁删集合（它自身的删除先被点开头规则拦下）。
         let staging_dir = models.join(".versions").join("versioned-card");
         std::fs::create_dir_all(&staging_dir).unwrap();
-        assert!(blocked_dirs(None).unwrap().contains(&staging_dir));
+        assert!(blocked_dirs(None, &models).unwrap().contains(&staging_dir));
         // 无关残留不牵连：版本任务进行中照样可以删别的残留。
         remove(None, &orphan.to_string_lossy()).unwrap();
         assert!(!orphan.exists(), "无关残留应可正常删除");
