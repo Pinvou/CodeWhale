@@ -3,6 +3,7 @@ package token
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"time"
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/events"
@@ -23,6 +24,12 @@ type tokenManualReviewOverdue struct {
 	ownerID                   *uuid.UUID
 	stopLoss                  bool
 }
+
+const tokenManualReviewEscalationEligible = `status='OPEN'
+ AND ((claimed_at IS NULL AND claim_due_at<=$1) OR
+      (first_response_at IS NULL AND first_response_due_at<=$1) OR
+      (mitigation_at IS NULL AND mitigation_due_at<=$1) OR resolution_due_at<=$1)
+ AND (last_escalated_at IS NULL OR last_escalated_at<$1::timestamptz-interval '1 hour')`
 
 func (r *PostgresRepository) SyncManualReviewCases(ctx context.Context, limit int) (int, error) {
 	if limit < 1 || limit > 500 {
@@ -98,31 +105,52 @@ func (r *PostgresRepository) EscalateOverdueManualReviews(ctx context.Context, s
 	if limit < 1 || limit > 500 {
 		limit = 100
 	}
-	rows, err := r.pool.Query(ctx, `SELECT id,severity,owner_id,case_type,resource_id,CASE WHEN resolution_due_at<=now() THEN 'RESOLUTION_OVERDUE' WHEN mitigation_at IS NULL AND mitigation_due_at<=now() THEN 'MITIGATION_OVERDUE' WHEN first_response_at IS NULL AND first_response_due_at<=now() THEN 'FIRST_RESPONSE_OVERDUE' WHEN claimed_at IS NULL AND claim_due_at<=now() THEN 'CLAIM_OVERDUE' END,(severity IN ('P0','P1') AND mitigation_at IS NULL AND mitigation_due_at<=now()) FROM manual_review_cases WHERE status='OPEN' AND ((claimed_at IS NULL AND claim_due_at<=now()) OR (first_response_at IS NULL AND first_response_due_at<=now()) OR (mitigation_at IS NULL AND mitigation_due_at<=now()) OR resolution_due_at<=now()) AND (last_escalated_at IS NULL OR last_escalated_at<now()-interval '1 hour') ORDER BY CASE severity WHEN 'P0' THEN 0 WHEN 'P1' THEN 1 ELSE 2 END,created_at,id LIMIT $1`, limit)
+	now := r.now()
+	rows, err := r.pool.Query(ctx, `SELECT id FROM manual_review_cases WHERE `+tokenManualReviewEscalationEligible+`
+ ORDER BY CASE severity WHEN 'P0' THEN 0 WHEN 'P1' THEN 1 ELSE 2 END,created_at,id LIMIT $2`, now, limit)
 	if err != nil {
 		return 0, err
 	}
-	items := []tokenManualReviewOverdue{}
+	ids := []uuid.UUID{}
 	for rows.Next() {
-		var item tokenManualReviewOverdue
-		if err := rows.Scan(&item.id, &item.severity, &item.ownerID, &item.caseType, &item.resourceID, &item.stage, &item.stopLoss); err != nil {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
 			rows.Close()
 			return 0, err
 		}
-		items = append(items, item)
+		ids = append(ids, id)
 	}
 	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
 	count := 0
-	for _, item := range items {
+	for _, id := range ids {
 		tx, err := r.pool.Begin(ctx)
 		if err != nil {
 			return count, err
 		}
-		now := r.now()
+		item := tokenManualReviewOverdue{id: id}
 		var level int
-		err = tx.QueryRow(ctx, `UPDATE manual_review_cases SET escalation_level=escalation_level+1,last_escalated_at=$2,updated_at=$2 WHERE id=$1 AND status='OPEN' RETURNING escalation_level`, item.id, now).Scan(&level)
+		err = tx.QueryRow(ctx, `UPDATE manual_review_cases
+ SET escalation_level=escalation_level+1,last_escalated_at=$1,updated_at=$1
+ WHERE id=$2 AND `+tokenManualReviewEscalationEligible+`
+ RETURNING escalation_level,severity,owner_id,case_type,resource_id,
+  CASE WHEN resolution_due_at<=$1 THEN 'RESOLUTION_OVERDUE'
+       WHEN mitigation_at IS NULL AND mitigation_due_at<=$1 THEN 'MITIGATION_OVERDUE'
+       WHEN first_response_at IS NULL AND first_response_due_at<=$1 THEN 'FIRST_RESPONSE_OVERDUE'
+       WHEN claimed_at IS NULL AND claim_due_at<=$1 THEN 'CLAIM_OVERDUE' END,
+  (severity IN ('P0','P1') AND mitigation_at IS NULL AND mitigation_due_at<=$1)`, now, id).
+			Scan(&level, &item.severity, &item.ownerID, &item.caseType, &item.resourceID, &item.stage, &item.stopLoss)
+		if err != nil {
+			tx.Rollback(ctx)
+			if errors.Is(err, pgx.ErrNoRows) {
+				continue
+			}
+			return count, err
+		}
 		owner, assigned := schedule.Next(level - 1)
-		if err == nil && assigned {
+		if assigned {
 			_, err = tx.Exec(ctx, `UPDATE manual_review_cases SET owner_id=$2,last_assigned_at=$3,assignment_revision=assignment_revision+1,updated_at=$3 WHERE id=$1`, item.id, owner, now)
 		}
 		if err == nil && assigned {
