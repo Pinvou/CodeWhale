@@ -16,3 +16,10 @@ export function acceptedRenamedUnit(change, units) {
   const unit = units.items?.find(item => item.organization_id === change.organizationID && item.unit_id === change.target);
   return unit && Number.isSafeInteger(unit.version) && unit.version >= acknowledged.version && typeof unit.name === 'string' ? unit : undefined;
 }
+
+// Organization rename acknowledges204 without a profile. Display an actual
+// canonical read only after the write, and only for the latest read attempt.
+export function acceptedRenamedOrganization(change, organization, acceptedGeneration, currentGeneration) {
+  if (change?.operation !== 'rename' || !Number.isSafeInteger(change.requiredReadGeneration) || change.requiredReadGeneration < 1 || !Number.isSafeInteger(acceptedGeneration) || acceptedGeneration < change.requiredReadGeneration || acceptedGeneration !== currentGeneration) return undefined;
+  return typeof organization?.name === 'string' && organization.organization_id === change.organizationID ? organization : undefined;
+}

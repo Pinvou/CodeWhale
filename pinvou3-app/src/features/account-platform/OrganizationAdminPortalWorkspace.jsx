@@ -8,7 +8,7 @@ import { OrganizationMemberMenu } from './OrganizationMemberMenu.jsx';
 const text = value => { if (!value.trim()) throw new Error('INVALID_ORGANIZATION_INPUT'); return value.trim(); };
 const optionalID = value => value ? organizationID(value) : null;
 
-export function OrganizationAdminPortalWorkspace({ language, copy, route, page, query, setQuery, selected, current, detail, error, listBusy, detailBusy, roles, units, memberCursor, memberPrevious, setMemberPrevious, previous, setPrevious, can, action, memberQuery, memberRole, onRefresh, nameFeedback, renamedUnit, renamedUnitNode }) {
+export function OrganizationAdminPortalWorkspace({ language, copy, route, page, query, setQuery, selected, current, detail, error, listBusy, detailBusy, roles, units, memberCursor, memberPrevious, setMemberPrevious, previous, setPrevious, can, action, memberQuery, memberRole, onRefresh, nameFeedback, nameFeedbackKind, renamedUnit, renamedUnitNode }) {
   const words = adminLayoutCopy[language], labels = words.organization, params = new URLSearchParams(route.search);
   const [memberSearch, setMemberSearch] = useState(memberQuery), [role, setRole] = useState(memberRole), [copyError, setCopyError] = useState(false);
   useEffect(() => { setMemberSearch(memberQuery); setRole(memberRole); }, [memberQuery, memberRole]);
@@ -32,7 +32,7 @@ export function OrganizationAdminPortalWorkspace({ language, copy, route, page, 
   return <section className="adm-panel adm-organization-directory">
     {error && <p role="alert">{error}<button disabled={busy} onClick={onRefresh}>{copy.refresh}</button></p>}{copyError && <p role="alert">{labels.copyFailed}</p>}{busy && <p role="status">{copy.loading}</p>}
     {!requestedID ? directory : <><button className="adm-organization-back" onClick={() => navigate({ organization_id: null, organization_tab: null, member_cursor: null })}>{words.backToDirectory}</button>
-      {active === 'units' && nameFeedback}
+      {(nameFeedbackKind === 'organization' || active === 'units') && nameFeedback}
       {available && <><header className="adm-organization-header"><div className="adm-organization-identity"><h3>{current.name}</h3><p><span>{organizationLabel(copy, 'Status', current.status)}</span><code>{current.organization_id}</code></p></div><div className="adm-organization-header-actions"><button type="button" disabled={busy} onClick={onRefresh}>{copy.refresh}</button>{can('profile.manage') && current.status !== 'DELETED' && action('rename', copy.rename, [{ name: 'name', initial: current.name }], values => ({ name: text(values.name) }), 'rename')}</div></header>
         <nav className="adm-tabs">{tabs.map(key => <button key={key} aria-pressed={active === key} onClick={() => navigate({ organization_tab: key })}>{labels[key]}</button>)}</nav>
         <RetainedWorkspace key={selected} active={active} available={tabs}>{view => <>
