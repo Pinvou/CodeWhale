@@ -79,6 +79,17 @@ test('finance requires explicit operator mode and never writes a personal fallba
   assert.deepEqual(finance.services['approval-resources'].profiles, ['approval-operations']);
 });
 
+test('finance requires the specialist health check only for the Account Relay', () => {
+  const ordinary = personal.services['account-event-relay'];
+  const authorization = finance.services['account-event-relay'];
+  assert.deepEqual(ordinary.healthcheck.test, ['CMD', '/healthcheck']);
+  assert.equal(ordinary.environment.HEALTHCHECK_URL, 'http://127.0.0.1:9090/health/ready');
+  assert.equal(ordinary.environment.APPROVAL_RELAY_HEALTHCHECK_URL, undefined);
+  assert.equal(authorization.environment.HEALTHCHECK_URL, undefined, 'preserve the inherited ordinary probe');
+  assert.equal(authorization.environment.APPROVAL_RELAY_HEALTHCHECK_URL, 'http://127.0.0.1:9090/health/ready/approval-authorization');
+  assert.equal(finance.services['billing-event-relay'].environment.APPROVAL_RELAY_HEALTHCHECK_URL, undefined);
+});
+
 test('personal finance composition keeps all three services personal', () => {
   expectModes([personal, finance], 'personal');
 });

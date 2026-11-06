@@ -35,6 +35,31 @@ spec:
           for: 1m
           labels: { severity: p1 }
           annotations: { summary: "Account Platform has dead-lettered domain events" }
+    {{- if .Values.approvalRelay.requireReady }}
+    {{- $ready := printf "pinvou_authorization_relay_ready{source=\"account\",approval_scope=%s}" (printf "%s/%s" .Release.Namespace .Release.Name | quote) }}
+    - name: account-platform.approval-authorization
+      rules:
+        - alert: PinvouApprovalAuthorizationRelayNotReady
+          expr: ({{ $ready }} == 0) or ((count({{ $ready }}) or vector(0)) < {{ .Values.replicas.eventRelay }})
+          for: 2m
+          labels: { severity: p1 }
+          annotations: { summary: "Account authorization relay readiness failed or is not being scraped" }
+        - alert: PinvouApprovalAuthorizationOutboxBacklog
+          expr: max(pinvou_authorization_outbox_pending_events{source="account"} and ignoring(approval_scope) {{ $ready }}) > 0 unless sum(increase(pinvou_authorization_relay_events_total{source="account",outcome="published"}[5m]) and ignoring(outcome,approval_scope) {{ $ready }}) > 0
+          for: 2m
+          labels: { severity: p1 }
+          annotations: { summary: "Account authorization outbox is pending without publication progress" }
+        - alert: PinvouApprovalAuthorizationExpiredClaims
+          expr: (pinvou_authorization_outbox_reclaimable_claims{source="account"} > 0) and ignoring(approval_scope) {{ $ready }}
+          for: 2m
+          labels: { severity: p1 }
+          annotations: { summary: "Account authorization relay has claims with expired leases" }
+        - alert: PinvouApprovalAuthorizationDeadLetters
+          expr: (pinvou_authorization_outbox_unclassified_dead_letters{source="account"} > 0) and ignoring(approval_scope) {{ $ready }}
+          for: 1m
+          labels: { severity: p1 }
+          annotations: { summary: "Account authorization relay has unclassified dead letters" }
+    {{- end }}
     - name: account-platform.admin-pagination
       rules:
         - alert: PinvouAdminPaginationMemberWatermarkWarning

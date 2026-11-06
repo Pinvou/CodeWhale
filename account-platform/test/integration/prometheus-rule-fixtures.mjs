@@ -51,9 +51,51 @@ for (const [index, test] of cases.tests.entries()) {
   assert.equal(check.eval_time, index === 7 ? '4m' : '6m', name);
   assert.equal(check.exp_alerts.length, alerting ? 1 : 0, `${name}: preserve alert/control expectation`);
 }
+
+const relay = rendered.map(document => document.toJS()).find(resource => resource?.kind === 'Deployment'
+  && resource.metadata.labels['app.kubernetes.io/component'] === 'account-event-relay');
+const scope = relay?.spec.template.spec.containers[0].env.find(variable => variable.name === 'APPROVAL_RELAY_MONITOR_SCOPE')?.value;
+assert.match(scope, /^[a-z0-9.-]+\/[a-z0-9.-]+$/, 'render the enabled authorization profile');
+assert.equal(groups.find(group => group.name === 'account-platform.approval-authorization')?.rules.length, 4);
+const readyName = 'PinvouApprovalAuthorizationRelayNotReady';
+const backlogName = 'PinvouApprovalAuthorizationOutboxBacklog';
+const claimName = 'PinvouApprovalAuthorizationExpiredClaims';
+const deadName = 'PinvouApprovalAuthorizationDeadLetters';
+const readiness = (instance, value, site = scope) => ({
+  series: `pinvou_authorization_relay_ready{source="account",approval_scope="${site}",instance="${instance}"}`,
+  values: `${value}+0x8`,
+});
+const metric = (name, values, labels = '') => ({
+  series: `${name}{source="account",instance="a1"${labels}}`, values,
+});
+const alert = (name, labels, summary) => ({
+  alertname: name, eval_time: '6m',
+  exp_alerts: summary ? [{ exp_labels: { severity: 'p1', ...labels }, exp_annotations: { summary } }] : [],
+});
+const healthy = Array.from({ length: relay.spec.replicas }, (_, index) => readiness(`a${index + 1}`, 1));
+assert.ok(healthy.length > 0);
+const readySummary = 'Account authorization relay readiness failed or is not being scraped';
+const backlogSummary = 'Account authorization outbox is pending without publication progress';
+const scopeLabels = { source: 'account', approval_scope: scope, instance: 'a1' };
+const baseLabels = { source: 'account', instance: 'a1' };
+const pending = metric('pinvou_authorization_outbox_pending_events', '5+0x8');
+const published = values => metric('pinvou_authorization_relay_events_total', values, ',outcome="published"');
+const scenarios = [
+  ['authorization-ready-scoped', [...healthy, readiness('other', 0, 'other/release')], [alert(readyName)]],
+  ['authorization-unready', [readiness('a1', 0), ...healthy.slice(1)], [alert(readyName, scopeLabels, readySummary)]],
+  ['authorization-replica-missing', [...healthy.slice(1), readiness('other', 1, 'other/release')], [alert(readyName, {}, readySummary)]],
+  ['authorization-backlog-stalled', [...healthy, pending, published('0+0x8')], [alert(backlogName, {}, backlogSummary)]],
+  ['authorization-backlog-making-progress', [...healthy, pending, published('0+3x8')], [alert(backlogName)]],
+  ['authorization-leases-and-dead-letters', [...healthy,
+    metric('pinvou_authorization_outbox_reclaimable_claims', '1+0x8'),
+    metric('pinvou_authorization_outbox_unclassified_dead_letters', '2+0x8')],
+  [alert(claimName, baseLabels, 'Account authorization relay has claims with expired leases'),
+    alert(deadName, baseLabels, 'Account authorization relay has unclassified dead letters')]],
+];
+cases.tests.push(...scenarios.map(([name, input_series, alert_rule_test]) => ({ name, interval: '1m', input_series, alert_rule_test })));
 // Refuse an existing directory: never overwrite another run or user files.
 await mkdir(outputDirectory);
 await writeFile(path.join(outputDirectory, 'event-relay-rules.yaml'), YAML.stringify({ groups }), { flag: 'wx' });
-await writeFile(path.join(outputDirectory, 'event-relay-missing.test.yaml'), fixture, { flag: 'wx' });
-const alertingCount = cases.tests.filter(test => test.alert_rule_test[0].exp_alerts.length > 0).length;
+await writeFile(path.join(outputDirectory, 'event-relay-missing.test.yaml'), YAML.stringify(cases), { flag: 'wx' });
+const alertingCount = cases.tests.filter(test => test.alert_rule_test.some(check => check.exp_alerts.length > 0)).length;
 console.log(`prepared actual rendered alert rules and ${cases.tests.length} isolated promtool cases (${alertingCount} alerting cases and ${cases.tests.length - alertingCount} non-alert controls)`);
