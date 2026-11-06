@@ -100,6 +100,7 @@
         "rateLimitRPS": { "type": "number", "exclusiveMinimum": 0, "maximum": 100000 },
         "rateLimitBurst": { "type": "integer", "minimum": 1, "maximum": 1000000 },
         "authRiskEnabled": { "type": "boolean" },
+        "authRiskRedisCAConfigMap": { "type": "string", "maxLength": 253, "pattern": "^$|^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$" },
         "httpTrustedProxyIPs": {"type":"object","additionalProperties":false,"properties":{"account-service":{"type":"array","uniqueItems":true,"items":{"type":"string","anyOf":[{"format":"ipv4"},{"format":"ipv6"}]}},"identity-service":{"type":"array","uniqueItems":true,"items":{"type":"string","anyOf":[{"format":"ipv4"},{"format":"ipv6"}]}},"billing-service":{"type":"array","uniqueItems":true,"items":{"type":"string","anyOf":[{"format":"ipv4"},{"format":"ipv6"}]}},"token-gateway":{"type":"array","uniqueItems":true,"items":{"type":"string","anyOf":[{"format":"ipv4"},{"format":"ipv6"}]}},"token-portal":{"type":"array","uniqueItems":true,"items":{"type":"string","anyOf":[{"format":"ipv4"},{"format":"ipv6"}]}}}},
         "passwordPreparationTrustedProxyIPs": { "type": "array", "uniqueItems": true, "items": { "type": "string", "minLength": 3, "maxLength": 45, "not": { "pattern": "[/,]" } } }
       }

@@ -2,6 +2,11 @@
 {{- include "pinvou.requireNewApiTLS" . -}}
 {{- include "pinvou.validateIdentityKeycloak" . -}}
 {{- $identityFiles := include "pinvou.identityKeycloakFiles" . -}}
+{{- $riskRedisCA := .Values.security.authRiskRedisCAConfigMap -}}
+{{- $riskRedisCAPath := "/run/pinvou/auth-risk-redis-ca/ca.crt" -}}
+{{- if and .Values.security.authRiskEnabled $riskRedisCA (not (hasPrefix "rediss://" (trim (include "pinvou.redisUrl" .)))) -}}
+{{- fail "security.authRiskRedisCAConfigMap requires a rediss:// Redis URL" -}}
+{{- end -}}
 {{- $fullname := include "pinvou.fullname" . -}}
 {{- $jwksURL := .Values.oidc.jwksUrl -}}
 {{- $oidcTokenURL := .Values.oidc.tokenUrl -}}
@@ -190,12 +195,18 @@ spec:
             - name: {{ $item.env }}
               valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: {{ $item.key }}, optional: true } }
             {{- end }}
-            {{- range $item := list (dict "env" "ALIYUN_SMS_ACCESS_KEY_ID" "key" "aliyun-sms-access-key-id") (dict "env" "ALIYUN_SMS_ACCESS_KEY_SECRET" "key" "aliyun-sms-access-key-secret") (dict "env" "ALIYUN_SMS_SIGN_NAME" "key" "aliyun-sms-sign-name") (dict "env" "ALIYUN_SMS_REGISTER_TEMPLATE" "key" "aliyun-sms-register-template") (dict "env" "ALIYUN_SMS_LOGIN_TEMPLATE" "key" "aliyun-sms-login-template") (dict "env" "SMS_VERIFICATION_HMAC_KEY_BASE64" "key" "sms-verification-hmac-key-base64") (dict "env" "SMS_HTTP_BEARER_TOKEN" "key" "sms-http-bearer-token") }}
+            {{- $aliyunRequired := and $root.Values.sms.enabled (eq $root.Values.sms.provider "aliyun-managed") }}
+            {{- $httpRequired := and $root.Values.sms.enabled (eq $root.Values.sms.provider "http-generated") }}
+            {{- range $item := list (dict "env" "ALIYUN_SMS_ACCESS_KEY_ID" "key" "aliyun-sms-access-key-id") (dict "env" "ALIYUN_SMS_ACCESS_KEY_SECRET" "key" "aliyun-sms-access-key-secret") (dict "env" "ALIYUN_SMS_SIGN_NAME" "key" "aliyun-sms-sign-name") (dict "env" "ALIYUN_SMS_REGISTER_TEMPLATE" "key" "aliyun-sms-register-template") (dict "env" "ALIYUN_SMS_LOGIN_TEMPLATE" "key" "aliyun-sms-login-template") }}
             - name: {{ $item.env }}
-              valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: {{ $item.key }}, optional: true } }
+              valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: {{ $item.key }}, optional: {{ not $aliyunRequired }} } }
             {{- end }}
+            - name: SMS_VERIFICATION_HMAC_KEY_BASE64
+              valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: sms-verification-hmac-key-base64, optional: {{ not $httpRequired }} } }
+            - name: SMS_HTTP_BEARER_TOKEN
+              valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: sms-http-bearer-token, optional: true } }
             - name: REGISTRATION_QUERY_HMAC_KEY_BASE64
-              valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: registration-query-hmac-key-base64, optional: true } }
+              valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: registration-query-hmac-key-base64, optional: {{ not $root.Values.sms.enabled }} } }
             - { name: REGISTRATION_BONUS_FINGERPRINT_KEY_ID, value: "registration-bonus-v1" }
             - name: REGISTRATION_BONUS_FINGERPRINT_HMAC_KEY_BASE64
               valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: registration-bonus-fingerprint-hmac-key-base64, optional: {{ not $root.Values.sms.enabled }} } }
@@ -227,6 +238,9 @@ spec:
               valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: identity-password-hmac-key-base64, optional: true } }
             {{- if $root.Values.security.authRiskEnabled }}
             - { name: AUTH_RISK_REDIS_URL, value: {{ include "pinvou.redisUrl" $root | quote }} }
+            {{- if $riskRedisCA }}
+            - { name: AUTH_RISK_REDIS_CA_FILE, value: {{ $riskRedisCAPath | quote }} }
+            {{- end }}
             - name: AUTH_RISK_HMAC_KEY_BASE64
               valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: auth-risk-hmac-key-base64 } }
             {{- end }}
@@ -340,6 +354,9 @@ spec:
           livenessProbe: { httpGet: { path: /health/live, port: http }, periodSeconds: 20, timeoutSeconds: 3 }
           volumeMounts:
             - { name: tmp, mountPath: /tmp }
+            {{- if and (eq $app.name "identity-service") $root.Values.security.authRiskEnabled $riskRedisCA }}
+            - { name: auth-risk-redis-ca, mountPath: {{ $riskRedisCAPath | quote }}, subPath: ca.crt, readOnly: true }
+            {{- end }}
             {{- if and (eq $app.name "identity-service") $identityFiles }}
             - { name: keycloak-private, mountPath: /run/pinvou/keycloak-private, readOnly: true }
             - { name: keycloak-identity-ca, mountPath: /run/pinvou/keycloak-trust/ca.crt, subPath: ca.crt, readOnly: true }
@@ -370,6 +387,10 @@ spec:
         {{- include "pinvou.nativeKmsAgent" $root | nindent 8 }}
         {{- end }}
       volumes:
+        {{- if and (eq $app.name "identity-service") $root.Values.security.authRiskEnabled $riskRedisCA }}
+        - name: auth-risk-redis-ca
+          configMap: { name: {{ $riskRedisCA | quote }}, defaultMode: 292, items: [{ key: ca.crt, path: ca.crt }] }
+        {{- end }}
         {{- if and (eq $app.name "identity-service") $identityFiles }}
         - name: keycloak-provisioner-source
           secret: { secretName: {{ $root.Values.global.runtimeSecret }}, defaultMode: 288, items: [{ key: keycloak-provisioner-client-secret, path: client-secret }] }
