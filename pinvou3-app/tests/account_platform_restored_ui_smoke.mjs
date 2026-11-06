@@ -208,6 +208,26 @@ try {
       assert.equal(await page.evaluate(() => window.restored.calls.filter(call => call.method !== 'GET' && !call.url.endsWith('/account/bootstrap')).length), 0);
     }
   });
+  await run('organization rename footer cancellation discards edits and reopens the current name', async () => {
+    for (const kind of ['organization', 'unit']) {
+      await fresh(`?mode=admin&section=organizations&organization_id=33333333-3333-4333-8333-333333333333&organization_tab=${kind === 'unit' ? 'units' : 'overview'}`);
+      const words = await page.evaluate(() => window.restored.copy().organization);
+      const label = kind === 'unit' ? words.renameUnit : words.rename;
+      const initial = kind === 'unit' ? 'Sample unit' : 'Sample organization';
+      await page.waitForFunction(label => [...document.querySelectorAll('.adm-organization-directory button')].some(node => node.textContent.trim() === label && !node.disabled), {}, label);
+      await click('.adm-organization-directory button', label);
+      await page.waitForSelector('[role=dialog] input');
+      assert.equal(await page.$eval('[role=dialog] input', node => node.value), initial);
+      await page.type('[role=dialog] input', ' changed');
+      await click('[role=dialog] .ap-org-action-footer>button', words.cancelConfirmation);
+      await page.waitForFunction(() => !document.querySelector('[role=dialog]'));
+      assert.equal(await page.evaluate(() => window.restored.calls.filter(call => call.method !== 'GET' && !call.url.endsWith('/account/bootstrap')).length), 0);
+      await click('.adm-organization-directory button', label);
+      await page.waitForSelector('[role=dialog] input');
+      assert.equal(await page.$eval('[role=dialog] input', node => node.value), initial, 'reopening starts from the current server name');
+      await page.keyboard.press('Escape');
+    }
+  });
   await run('organization fieldless dialogs identify targets before confirmation and retain unknown writes', async () => {
     const orgID = '33333333-3333-4333-8333-333333333333', unitID = '44444444-4444-4444-8444-444444444444';
     for (const language of ['zh', 'en', 'ja']) for (const operation of ['deleteUnit', 'disable', 'enable']) {
@@ -230,23 +250,28 @@ try {
       assert.equal(await page.$$eval('[role=dialog] fieldset', nodes => nodes.length), 0, 'fieldless actions must not show an empty fieldset');
       const description = words[operation === 'deleteUnit' ? 'deleteUnitDescription' : operation === 'disable' ? 'disableOrganizationDescription' : 'enableOrganizationDescription'];
       assert.equal(await page.$eval('[role=dialog] .ap-org-action-description', node => node.textContent), description);
+      assert.deepEqual(await page.$$eval('[role=dialog] .ap-org-action-footer>button', nodes => nodes.map(node => node.textContent)), [words.cancelConfirmation, words[operation]]);
       if (process.env.UI_ARTIFACT_DIR && language === 'zh') {
         fs.mkdirSync(process.env.UI_ARTIFACT_DIR, { recursive: true });
         await page.screenshot({ path: path.join(process.env.UI_ARTIFACT_DIR, `admin-${operation}-target-dialog.png`), fullPage: true });
       }
       await page.keyboard.press('Escape'); await page.waitForFunction(() => !document.querySelector('[role=dialog]'));
       assert.equal((await writes()).length, 0, 'opening and cancelling never mutates');
-      await open(); await page.click('[role=dialog] form>button[type=submit]');
+      await open(); await page.waitForSelector('[role=dialog] .ap-org-action-footer');
+      await click('[role=dialog] .ap-org-action-footer>button', words.cancelConfirmation);
+      await page.waitForFunction(() => !document.querySelector('[role=dialog]'));
+      assert.equal((await writes()).length, 0, 'explicit footer cancellation never mutates');
+      await open(); await page.click('[role=dialog] .ap-org-action-footer>button[type=submit]');
       await page.waitForSelector('[role=alertdialog]');
       assert.ok((await page.$eval('[role=alertdialog]', node => node.textContent)).includes(description), 'final confirmation retains impact explanation');
       assert.ok((await page.$eval('[role=alertdialog] dd', node => node.textContent)).includes('Sample organization'));
       assert.equal((await writes()).length, 0, 'first submit still requires confirmation');
       await page.keyboard.press('Escape'); await page.waitForSelector('[role=dialog] .ap-org-action-target');
       assert.equal((await writes()).length, 0, 'cancelling final confirmation never mutates');
-      await page.click('[role=dialog] form>button[type=submit]'); await page.waitForSelector('[role=alertdialog]');
+      await page.click('[role=dialog] .ap-org-action-footer>button[type=submit]'); await page.waitForSelector('[role=alertdialog]');
       await page.evaluate(() => { window.restored.unknownOrgAction = true; });
       await click('[role=alertdialog] button', words.confirmAction);
-      await page.waitForFunction(retry => [...document.querySelectorAll('[role=dialog] form>button')].some(node => node.textContent.trim() === retry && !node.disabled), {}, words.retry);
+      await page.waitForFunction(retry => [...document.querySelectorAll('[role=dialog] .ap-org-action-footer>button')].some(node => node.textContent.trim() === retry && !node.disabled), {}, words.retry);
       const original = await writes(); assert.equal(original.length, 1);
       assert.equal(typeof original[0].key, 'string');
       assert.ok(original[0].key.trim().length > 0, 'accepted write carries an idempotency key');
@@ -254,11 +279,25 @@ try {
       assert.equal(original[0].url, `/api/admin/account/admin/v1/organizations/${orgID}${operation === 'deleteUnit' ? `/units/${unitID}` : '/status'}`);
       assert.deepEqual(JSON.parse(original[0].body), operation === 'deleteUnit' ? {} : { status: operation === 'disable' ? 'DISABLED' : 'ACTIVE' });
       await page.keyboard.press('Escape'); assert.ok(await page.$('[role=dialog]'), 'unknown result stays recoverable');
-      await click('[role=dialog] form>button', words.retry);
+      assert.equal(await page.$eval('[role=dialog] .ap-org-action-footer>button[type=button]', button => button.disabled), true, 'accepted unknown writes cannot be cancelled');
+      await click('[role=dialog] .ap-org-action-footer>button', words.retry);
       await page.waitForFunction(() => !document.querySelector('[role=dialog]'));
       const replay = await writes(); assert.equal(replay.length, 2);
       assert.equal(replay[0].key, replay[1].key); assert.equal(replay[0].body, replay[1].body);
       assert.equal(await page.evaluate(() => window.restored.effects.size), 1, 'controlled service retains one request identity');
+      if (operation !== 'deleteUnit') {
+        const next = operation === 'disable' ? words.enable : words.disable;
+        await page.waitForFunction(label => [...document.querySelectorAll('.adm-organization-directory button')].some(node => node.textContent.trim() === label && !node.disabled), {}, next);
+        await click('.adm-organization-directory button', next);
+        await page.waitForSelector('[role=dialog] .ap-org-action-footer');
+        await page.click('[role=dialog] .ap-org-action-footer>button[type=submit]');
+        await page.waitForSelector('[role=alertdialog]');
+        await click('[role=alertdialog] button', words.confirmAction);
+        await page.waitForFunction(() => !document.querySelector('[role=dialog], [role=alertdialog]'));
+        const subsequent = await writes(); assert.equal(subsequent.length, 3);
+        assert.equal(typeof subsequent[2].key, 'string'); assert.notEqual(subsequent[2].key, original[0].key);
+        assert.deepEqual(JSON.parse(subsequent[2].body), { status: operation === 'disable' ? 'ACTIVE' : 'DISABLED' });
+      }
     }
   });
   await run('organization deletion remains disabled for active or blocked resources and requires the name', async () => {
@@ -276,12 +315,12 @@ try {
     await page.waitForSelector('[role=dialog] form.ap-org-action');
     const fields = await page.$$('[role=dialog] fieldset input');
     await fields[0].type('wrong name'); await fields[1].type('Controlled deletion reason');
-    await page.click('[role=dialog] form>button[type=submit]');
+    await page.click('[role=dialog] .ap-org-action-footer>button[type=submit]');
     await page.waitForSelector('[role=dialog] form [role=alert]');
     assert.ok(await page.evaluate(() => !window.restored.calls.some(call => call.method === 'DELETE')));
     await fields[0].focus(); await page.keyboard.down('Control'); await page.keyboard.press('A'); await page.keyboard.up('Control'); await page.keyboard.press('Backspace'); await fields[0].type('Sample organization');
     assert.deepEqual(await page.$$eval('[role=dialog] fieldset input', nodes => nodes.map(node => node.value)), ['Sample organization', 'Controlled deletion reason']);
-    await page.click('[role=dialog] form>button[type=submit]');
+    await page.click('[role=dialog] .ap-org-action-footer>button[type=submit]');
     await page.waitForSelector('[role=alertdialog]');
     await page.keyboard.press('Escape');
     await page.waitForSelector('[role=dialog] form.ap-org-action');
@@ -298,12 +337,12 @@ try {
     await click('.adm-user-picker button', await page.evaluate(() => window.restored.copy().organization.search));
     await page.waitForFunction(() => document.querySelector('.adm-user-picker select option[value="22222222-2222-4222-8222-222222222222"]'));
     await page.select('.adm-user-picker select', '22222222-2222-4222-8222-222222222222');
-    await page.click('[role=dialog] form>button[type=submit]');
-    await page.waitForFunction(() => window.restored.calls.some(call => call.method === 'POST' && call.url.endsWith('/admin/v1/organizations')) && [...document.querySelectorAll('[role=dialog] form>button')].some(node => node.textContent.trim() === window.restored.copy().organization.retry && !node.disabled));
+    await page.click('[role=dialog] .ap-org-action-footer>button[type=submit]');
+    await page.waitForFunction(() => window.restored.calls.some(call => call.method === 'POST' && call.url.endsWith('/admin/v1/organizations')) && [...document.querySelectorAll('[role=dialog] .ap-org-action-footer>button')].some(node => node.textContent.trim() === window.restored.copy().organization.retry && !node.disabled));
     await page.keyboard.press('Escape'); assert.ok(await page.$('[role=dialog]'));
     await page.evaluate(() => document.querySelector('.adm-sidebar [data-section=users]').click());
     assert.equal(new URL(page.url()).searchParams.get('section'), 'organizations');
-    await click('[role=dialog] form>button', await page.evaluate(() => window.restored.copy().organization.retry));
+    await click('[role=dialog] .ap-org-action-footer>button', await page.evaluate(() => window.restored.copy().organization.retry));
     await page.waitForFunction(() => window.restored.calls.filter(call => call.method === 'POST' && call.url.endsWith('/admin/v1/organizations')).length === 2);
     const values = await page.evaluate(() => ({ calls: window.restored.calls.filter(call => call.method === 'POST' && call.url.endsWith('/admin/v1/organizations')), effects: window.restored.effects.size }));
     assert.equal(values.calls[0].key, values.calls[1].key); assert.equal(values.calls[0].body, values.calls[1].body); assert.equal(values.effects, 1);
