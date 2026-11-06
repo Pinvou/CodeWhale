@@ -3587,30 +3587,36 @@ impl LlmClient for DeepSeekClient {
         call: crate::llm_client::PreparedStreamCall,
         operation_id: uuid::Uuid,
     ) -> Result<crate::llm_client::StreamEventBox> {
-        if self.request_idempotency_header.is_none() {
+        let payload = if self.request_idempotency_header.is_none() {
             anyhow::ensure!(
                 call.operation_identity.is_none(),
                 "Prepared operation belongs to another route"
             );
-            return self
-                .create_message_stream_for_operation(call.request, operation_id)
-                .await;
-        }
-        let payload = call
-            .transport::<PreparedOperationStream>()
-            .context("Missing prepared operation transport")?;
-        anyhow::ensure!(
-            payload.route_identity == self.operation_route_identity
-                && payload.wire_format == self.wire_format
-                && payload.auth_disabled == self.auth_disabled
-                && payload.path_suffix == self.path_suffix,
-            "Prepared operation belongs to another route"
-        );
+            None
+        } else {
+            let payload = call
+                .transport::<PreparedOperationStream>()
+                .context("Missing prepared operation transport")?;
+            anyhow::ensure!(
+                payload.route_identity == self.operation_route_identity
+                    && payload.wire_format == self.wire_format
+                    && payload.auth_disabled == self.auth_disabled
+                    && payload.path_suffix == self.path_suffix,
+                "Prepared operation belongs to another route"
+            );
+            Some(payload)
+        };
         let client = self.for_operation(operation_id);
         let inference = client.acquire_remote_control_inference_permit().await;
         let permit = client.acquire_provider_request_permit().await;
+        let prepared = match payload {
+            Some(payload) => payload.prepared.clone(),
+            None => client
+                .prepare_outbound_request(call.request, true)
+                .map_err(crate::llm_client::DeferredStreamPreparationError)?,
+        };
         client
-            .finish_prepared_stream(payload.prepared.clone(), inference, permit)
+            .finish_prepared_stream(prepared, inference, permit)
             .await
     }
 }
