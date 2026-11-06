@@ -32,13 +32,14 @@ function UserDetails({ client, userID, copy, language, route }) {
 
 export function AdminUsersWorkspace({ client, copy, language, canManage, currentUserID, route }) {
   const params = new URLSearchParams(route.search), detailID = params.get('user_id') || '';
+  const appliedQuery = params.get('user_q') || '', appliedCursor = params.get('user_cursor') || '';
   const [query, setQuery] = useState(params.get('user_q') || ''), [userCode, setUserCode] = useState('');
   const [page, setPage] = useState(null), [cursor, setCursor] = useState(''), [previous, setPrevious] = useState([]);
   const [error, setError] = useState(''), [busy, setBusy] = useState(false), [queryKind, setQueryKind] = useState('directory'), [confirmation, setConfirmation] = useState(null);
-  const mutationBusy = useRef(false), generation = useRef(0), live = useRef(null);
+  const mutationBusy = useRef(false), generation = useRef(0), live = useRef(null), appliedCode = useRef('');
   const words = adminLayoutCopy[language];
   live.current = { client, canManage, currentUserID };
-  const read = async (nextCursor = cursor, search = query) => {
+  const read = async (nextCursor = cursor, search = appliedQuery) => {
     const request = ++generation.current; setBusy(true); setError(''); setQueryKind('directory');
     try {
       const result = await client.users({ q: search, cursor: nextCursor });
@@ -55,17 +56,22 @@ export function AdminUsersWorkspace({ client, copy, language, canManage, current
     return () => { generation.current++; };
   }, [client, route.search]); // the route is the directory's query/cursor authority.
   useEffect(() => () => { generation.current++; }, []);
-  const load = (nextCursor = '', search = query) => {
+  const load = (nextCursor = '', search = appliedQuery) => {
     const current = new URLSearchParams(route.search);
     if ((current.get('user_q') || '') === search.trim() && (current.get('user_cursor') || '') === nextCursor) void read(nextCursor, search);
     else route.navigate('users', { user_q: search.trim() || null, user_cursor: nextCursor || null, user_id: null });
   };
-  const lookupCode = async () => {
+  const lookupCode = async (code = userCode) => {
     if (mutationBusy.current) return;
+    const searchCode = code.trim(); appliedCode.current = searchCode;
     const request = ++generation.current; setBusy(true); setError(''); setPage(null); setPrevious([]); setCursor(''); setQueryKind('code');
-    try { const item = await client.userByCode(userCode); if (request === generation.current) setPage({ items: [item] }); }
+    try { const item = await client.userByCode(searchCode); if (request === generation.current) setPage({ items: [item] }); }
     catch { if (request === generation.current) setError(copy.userManagement.codeLookupFailed); }
     finally { if (request === generation.current) setBusy(false); }
+  };
+  const refreshResults = () => {
+    if (busy || mutationBusy.current) return;
+    void (queryKind === 'code' ? lookupCode(appliedCode.current) : read(appliedCursor, appliedQuery));
   };
   const changeStatus = async target => {
     const current = live.current;
@@ -81,10 +87,11 @@ export function AdminUsersWorkspace({ client, copy, language, canManage, current
     finally { if (mutationBusy.current === mutation) mutationBusy.current = false; if (request === generation.current) setBusy(false); }
   };
   if (detailID) return <UserDetails key={detailID} {...{ client, userID: detailID, copy, language, route }} />;
-  return <section className="adm-panel"><div className="adm-filter-row">
-    <form onSubmit={event => { event.preventDefault(); setPrevious([]); load('', query); }}><label>{copy.search}<input value={query} onChange={event => setQuery(event.target.value)} /></label><button disabled={busy}>{copy.refresh}</button></form>
-    <form onSubmit={event => { event.preventDefault(); void lookupCode(); }}><label>{copy.userManagement.exactCode}<input disabled={Boolean(busy && mutationBusy.current)} maxLength={64} value={userCode} onChange={event => { if (mutationBusy.current) return; generation.current++; setBusy(false); setPage(null); setError(''); setUserCode(event.target.value); }} placeholder={copy.userManagement.codePlaceholder} /></label><button disabled={busy || !userCode.trim()}>{copy.userManagement.lookup}</button></form>
-  </div>{error && <p role="alert">{error}<button disabled={busy} onClick={() => void (queryKind === 'code' ? lookupCode() : read())}>{copy.retry}</button></p>}{busy && <p role="status">{copy.loading}</p>}
+  return <section className="adm-panel"><div className="adm-user-search-toolbar">
+    <form data-user-directory-search onSubmit={event => { event.preventDefault(); if (mutationBusy.current) return; setPrevious([]); load('', query.trim()); }}><label>{copy.search}<input disabled={Boolean(busy && mutationBusy.current)} value={query} onChange={event => setQuery(event.target.value)} /></label><button type="submit" disabled={busy}>{words.userSearch.submit}</button></form>
+    <form data-user-code-search onSubmit={event => { event.preventDefault(); void lookupCode(); }}><label>{copy.userManagement.exactCode}<input disabled={Boolean(busy && mutationBusy.current)} maxLength={64} value={userCode} onChange={event => { if (mutationBusy.current) return; generation.current++; setBusy(false); setPage(null); setError(''); setUserCode(event.target.value); }} placeholder={copy.userManagement.codePlaceholder} /></label><button type="submit" disabled={busy || !userCode.trim()}>{copy.userManagement.lookup}</button></form>
+    <button type="button" data-user-results-refresh disabled={busy || !page} onClick={refreshResults}>{words.userSearch.refresh}</button>
+  </div><p className="adm-user-search-help">{words.userSearch.refreshHelp}</p>{error && <p role="alert">{error}<button disabled={busy} onClick={() => void (queryKind === 'code' ? lookupCode(appliedCode.current) : read(appliedCursor, appliedQuery))}>{copy.retry}</button></p>}{busy && <p role="status">{copy.loading}</p>}
     {page && <div className="adm-table-wrap"><table className="adm-table"><thead><tr>{[copy.userManagement.account, copy.userManagement.exactCode, copy.accounts.status, copy.accounts.actions].map(label => <th key={label}>{label}</th>)}</tr></thead><tbody>{page.items.map(user => {
       const label = userDisplayName(user), self = user.user_id === currentUserID;
       const action = user.status === 'ACTIVE' ? copy.accounts.disable : copy.accounts.enable;

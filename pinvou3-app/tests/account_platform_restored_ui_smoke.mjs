@@ -49,9 +49,75 @@ try {
         return { amount: amount && { value: amount.value, disabled: amount.disabled, invalid: amount.getAttribute('aria-invalid'), required: amount.required, valid: amount.validity.valid }, buttons: [...(form?.querySelectorAll('button') || [])].map(node => ({ text: node.textContent, disabled: node.disabled, laidOut: node.getClientRects().length > 0 })), prechecks: window.restored?.calls.filter(call => call.url === '/api/admin/account/admin/v2/approval-command-prechecks').length, drafts: window.restored?.calls.filter(call => call.method === 'POST' && call.url === '/api/admin/approvals/requests').length, text: form?.textContent.slice(0, 2400) };
       }).catch(() => ({ unavailable: true })) : undefined;
       const userStatus = name === 'user status actions expose danger target and self guard' ? await page.evaluate(() => ({ buttons: [...document.querySelectorAll('[data-user-status-target],[data-user-status-confirm]')].map(node => ({ target: node.dataset.userStatusTarget, confirm: node.dataset.userStatusConfirm, disabled: node.disabled, text: node.textContent, label: node.getAttribute('aria-label'), color: getComputedStyle(node).color, background: getComputedStyle(node).backgroundColor })), writes: window.restored?.calls.filter(call => call.method === 'PATCH' && call.url.endsWith('/status')) })).catch(() => ({ unavailable: true })) : undefined;
-      console.error(JSON.stringify({ case: name, pageErrors: errors, ledger, userStatus, dialog: await page.evaluate(() => document.querySelector('[role=dialog]')?.textContent.slice(0, 1200)) })); throw error;
+      const userSearch = name === 'user searches refresh applied context and keep lookup kinds distinct' ? await page.evaluate(() => ({ location: location.search, inputs: [...document.querySelectorAll('.adm-user-search-toolbar input')].map(node => node.value), buttons: [...document.querySelectorAll('.adm-user-search-toolbar button')].map(node => ({ text: node.textContent, disabled: node.disabled })), error: document.querySelector('.adm-panel [role=alert]')?.textContent, calls: window.restored?.calls.filter(call => /\/admin\/v1\/(users\?|user-code-lookups\/)/.test(call.url)) })).catch(() => ({ unavailable: true })) : undefined;
+      console.error(JSON.stringify({ case: name, pageErrors: errors, ledger, userStatus, userSearch, dialog: await page.evaluate(() => document.querySelector('[role=dialog]')?.textContent.slice(0, 1200)) })); throw error;
     }
   };
+  await run('user searches refresh applied context and keep lookup kinds distinct', async () => {
+    const general = '[data-user-directory-search] input', exact = '[data-user-code-search] input', refresh = '[data-user-results-refresh]';
+    const alice = 'alice-slow', bob = 'bob-user', code = 'USR-1111-1111-1111-1111-DP';
+    const queries = () => page.evaluate(() => window.restored.calls.filter(call => call.method === 'GET' && /\/admin\/v1\/(users\?|user-code-lookups\/)/.test(call.url)).map(call => call.url));
+    const codeSettled = () => page.evaluate(() => ({ index: window.restored.userSearchClients.length - 1, count: window.restored.userSearchClients.at(-1).userCodeReadsSettled }));
+    const waitCodeSettled = snapshot => page.waitForFunction(({ index, count }) => window.restored.userSearchClients[index].userCodeReadsSettled === count + 1 && !document.querySelector('.adm-panel [role=alert] button')?.disabled, {}, snapshot);
+    const replace = async (selector, value) => {
+      await page.focus(selector); const modifier = process.platform === 'darwin' ? 'Meta' : 'Control';
+      await page.keyboard.down(modifier); await page.keyboard.press('KeyA'); await page.keyboard.up(modifier); await page.keyboard.press('Backspace');
+      if (value) await page.type(selector, value);
+      assert.equal(await page.$eval(selector, node => node.value), value);
+    };
+    const result = name => page.waitForFunction(name => document.querySelector('.adm-table tbody tr td')?.textContent === name && !document.querySelector('[data-user-results-refresh]')?.disabled, {}, name);
+    const assertDirectory = (url, q) => { const parsed = new URL(url, 'https://fixture.invalid'); assert.equal(parsed.pathname, '/api/admin/account/admin/v1/users'); assert.equal(parsed.searchParams.get('q'), q); assert.equal(parsed.searchParams.get('limit'), '25'); assert.equal(parsed.searchParams.get('cursor'), null); };
+    await fresh('?mode=admin&userSearchTools=1&section=users&user_q=alice'); await result(alice);
+    for (const [language, search, update, lookup] of [['zh', '搜索', '刷新当前结果', '精确查询'], ['en', 'Search', 'Refresh results', 'Exact lookup'], ['ja', '検索', '検索結果を更新', '完全一致で検索'], ['zh', '搜索', '刷新当前结果', '精确查询']]) {
+      await page.select('.adm-sidebar-foot select', language);
+      await page.waitForFunction(({ search, update, lookup }) => document.querySelector('[data-user-directory-search] button')?.textContent === search && document.querySelector('[data-user-results-refresh]')?.textContent === update && document.querySelector('[data-user-code-search] button')?.textContent === lookup, {}, { search, update, lookup });
+    }
+    let before = (await queries()).length;
+    await replace(general, 'bob'); assert.equal((await queries()).length, before, 'typing is not a search');
+    await page.click(refresh); await result(alice);
+    let urls = await queries(); assert.equal(urls.length, before + 1); assertDirectory(urls.at(-1), 'alice'); assert.equal(await page.$eval(general, node => node.value), 'bob');
+    before = urls.length; await page.focus(general); await page.keyboard.press('Enter'); await result(bob);
+    urls = await queries(); assert.equal(urls.length, before + 1); assertDirectory(urls.at(-1), 'bob');
+    assert.equal(await page.evaluate(() => new URLSearchParams(location.search).get('user_q')), 'bob');
+    await page.goBack(); await result(alice); assert.equal(await page.$eval(general, node => node.value), 'alice');
+    await page.goForward(); await result(bob); assert.equal(await page.$eval(general, node => node.value), 'bob');
+    before = (await queries()).length;
+    await replace(exact, code.toLowerCase()); assert.equal((await queries()).length, before);
+    assert.equal(await page.$eval(refresh, node => node.disabled), true, 'editing a code clears the old result and disables refresh');
+    await page.keyboard.press('Enter'); await result(bob); urls = await queries();
+    assert.equal(urls.length, before + 1); assert.equal(urls.at(-1), `/api/admin/account/admin/v1/user-code-lookups/${code.toLowerCase()}`);
+    await replace(general, 'alice'); before = (await queries()).length;
+    await page.click(refresh); await result(bob); urls = await queries();
+    assert.equal(urls.length, before + 1); assert.equal(urls.at(-1), `/api/admin/account/admin/v1/user-code-lookups/${code.toLowerCase()}`, 'dirty general draft cannot turn an exact refresh into directory search');
+    before = urls.length; await replace(exact, 'bad code!'); await page.keyboard.press('Enter');
+    await page.waitForSelector('.adm-panel [role=alert]'); assert.equal((await queries()).length, before, 'invalid code is rejected by the actual client without a broad fallback');
+    let codeRead = await codeSettled(); await page.click('.adm-panel [role=alert] button'); await waitCodeSettled(codeRead);
+    assert.equal((await queries()).length, before, 'retry keeps the rejected exact lookup kind');
+    const missing = 'USR-2222-2222-2222-2222-8X'; await replace(exact, missing); await page.keyboard.press('Enter');
+    await page.waitForSelector('.adm-panel [role=alert]'); urls = await queries(); assert.equal(urls.length, before + 1); assert.equal(urls.at(-1), `/api/admin/account/admin/v1/user-code-lookups/${missing}`);
+    codeRead = await codeSettled(); await page.click('.adm-panel [role=alert] button'); await waitCodeSettled(codeRead);
+    urls = await queries(); assert.equal(urls.length, before + 2); assert.equal(urls.at(-1), `/api/admin/account/admin/v1/user-code-lookups/${missing}`);
+    await page.evaluate(() => { window.restored.holdUserSearchRead = true; });
+    const held = await page.evaluate(() => ({ index: window.restored.userSearchClients.length - 1, settled: window.restored.userSearchClients.at(-1).userReadsSettled }));
+    await replace(general, 'slow'); await page.keyboard.press('Enter'); await page.waitForFunction(() => window.restored.pendingUserSearchReads.length === 1);
+    await replace(exact, code); await page.keyboard.press('Enter'); await result(bob);
+    await page.evaluate(() => window.restored.releaseUserSearchRead());
+    await page.waitForFunction(({ index, settled }) => window.restored.userSearchClients[index].userReadsSettled === settled + 1, {}, held);
+    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(resolve))); await result(bob);
+    assert.equal((await queries()).at(-1), `/api/admin/account/admin/v1/user-code-lookups/${code}`, 'late directory reply cannot overwrite the accepted exact result');
+    before = (await queries()).length; await replace(general, ''); assert.equal((await queries()).length, before);
+    await page.keyboard.press('Enter'); await page.waitForFunction(() => document.querySelectorAll('.adm-table tbody tr').length === 2 && !document.querySelector('[data-user-results-refresh]').disabled);
+    assertDirectory((await queries()).at(-1), null); assert.equal(await page.evaluate(() => new URLSearchParams(location.search).get('user_q')), null, 'explicit empty search returns to the unfiltered directory');
+    await replace(general, 'bob'); await page.keyboard.press('Enter'); await result(bob);
+    if (process.env.UI_SCREENSHOT_DIR) fs.mkdirSync(process.env.UI_SCREENSHOT_DIR, { recursive: true });
+    for (const width of [1440, 390]) {
+      await page.setViewport({ width, height: 1000 }); await page.evaluate(() => scrollTo(0, 0)); await noOverflow();
+      const controls = await page.$eval('.adm-user-search-toolbar', node => ({ box: { left: node.getBoundingClientRect().left, right: node.getBoundingClientRect().right }, children: [...node.querySelectorAll('input,button')].map(child => { const rect = child.getBoundingClientRect(); return { left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom, width: rect.width, height: rect.height }; }) }));
+      assert.ok(controls.children.every(rect => Object.values(rect).every(Number.isFinite) && rect.width > 0 && rect.height > 0 && rect.left >= controls.box.left - 0.5 && rect.right <= controls.box.right + 0.5), `search control outside coherent toolbar: ${JSON.stringify(controls)}`);
+      if (process.env.UI_SCREENSHOT_DIR) await page.screenshot({ path: path.join(process.env.UI_SCREENSHOT_DIR, `user-search-toolbar-${width}.png`) });
+    }
+    assert.equal(await page.evaluate(() => window.restored.calls.filter(call => call.method !== 'GET' && !call.url.endsWith('/account/bootstrap')).length), 0, 'search and refresh never write');
+  });
   await run('user status actions expose danger target and self guard', async () => {
     const actor = '11111111-1111-4111-8111-111111111111', target = '22222222-2222-4222-8222-222222222222', other = '33333333-3333-4333-8333-333333333333';
     const targetCode = 'USR-1111-1111-1111-1111-DP', otherCode = 'USR-2222-2222-2222-2222-8X';

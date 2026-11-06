@@ -27,6 +27,16 @@ if (closureFeedback) {
   c.readClosureRecovery = actor => readClosureIntent(actor || c.user, `account-closure-retry:${otherID}`);
 }
 const userStatusRisk = new URLSearchParams(location.search).get('userStatusRisk') === '1';
+const userSearchTools = new URLSearchParams(location.search).get('userSearchTools') === '1';
+if (userSearchTools) {
+  c.permissions = ['platform.users.read'];
+  c.searchUsers = [
+    { user_id: id, user_code: 'USR-0000-0000-0000-0000-Q3', username: 'alice-slow', status: 'ACTIVE', created_at: '2026-10-01T00:00:00Z', updated_at: '2026-10-01T00:00:00Z' },
+    { user_id: otherID, user_code: 'USR-1111-1111-1111-1111-DP', username: 'bob-user', status: 'ACTIVE', created_at: '2026-10-01T00:00:00Z', updated_at: '2026-10-01T00:00:00Z' },
+  ];
+  c.pendingUserSearchReads = []; c.userSearchClients = [];
+  c.releaseUserSearchRead = () => c.pendingUserSearchReads.shift()?.();
+}
 if (userStatusRisk) {
   c.permissions = ['platform.users.read', 'platform.users.status.manage'];
   // Legal AdminUser fields: optional username/display_name, distinct checksum-
@@ -169,6 +179,18 @@ globalThis.fetch = async (input, options = {}) => {
   if (url.endsWith('/v1/recharge/orders') && method === 'POST') { c.effects.add(call.key); const receipt = () => c.unknown ? json({ code: 'COMMAND_RESULT_UNKNOWN' }, 503) : json(order(), 201); if (c.delayCreate) return new Promise(resolve => { c.releaseCreate = () => resolve(receipt()); }); return receipt(); }
   if (url.endsWith('/v1/recharge/orders')) return json({ items: Array.from({ length: 6 }, (_, i) => order(i + 1)) });
   if (/\/v1\/recharge\/orders\/[^/?]+$/.test(url)) return json(order(Number(url.split('-').at(-1))));
+  if (userSearchTools && method === 'GET' && new URL(url, location.origin).pathname === '/api/admin/account/admin/v1/users') {
+    const query = (new URL(url, location.origin).searchParams.get('q') || '').trim().toLowerCase();
+    const items = c.searchUsers.filter(user => user.username.includes(query) || user.user_id === query);
+    const response = () => json({ items, next_cursor: null });
+    if (query === 'slow' && c.holdUserSearchRead) return new Promise(resolve => c.pendingUserSearchReads.push(() => resolve(response())));
+    return response();
+  }
+  if (userSearchTools && method === 'GET' && url.includes('/admin/v1/user-code-lookups/')) {
+    const code = decodeURIComponent(url.split('/').at(-1)).replaceAll('-', '').toUpperCase();
+    const user = c.searchUsers.find(item => item.user_code.replaceAll('-', '') === code);
+    return user ? json(user) : json({ code: 'NOT_FOUND' }, 404);
+  }
   if (url.includes('/admin/v1/user-code-lookups/')) {
     const code = decodeURIComponent(url.split('/').at(-1)).replaceAll('-', '').toUpperCase();
     return code === 'USR0123456789ABCDEFMV' ? json({ user_id: otherID, username: 'coded-user', user_code: 'USR-0123-4567-89AB-CDEF-MV', status: 'ACTIVE' }) : json({ code: 'NOT_FOUND' }, 404);
@@ -260,6 +282,19 @@ function render() {
 c.reload = () => {
   client = c.kind === 'admin' ? new AdminPlatformClient() : new AccountPlatformBffClient();
   if (closureFeedback) c.closureClients.push(client);
+  if (userSearchTools) {
+    const observedClient = client, originalUsers = client.users.bind(client), originalByCode = client.userByCode.bind(client);
+    observedClient.userReadsSettled = 0; observedClient.userCodeReadsSettled = 0;
+    observedClient.users = async (...args) => {
+      try { return await originalUsers(...args); }
+      finally { observedClient.userReadsSettled++; }
+    };
+    observedClient.userByCode = async (...args) => {
+      try { return await originalByCode(...args); }
+      finally { observedClient.userCodeReadsSettled++; }
+    };
+    c.userSearchClients.push(observedClient);
+  }
   if (ledgerPoints) {
     const observedClient = client, originalPrecheck = client.approvalCommandPrecheck.bind(client);
     observedClient.ledgerReadsSettled = 0;
