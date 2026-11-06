@@ -6243,12 +6243,24 @@ function conversationAttachmentArgs(reference) { return pinvouSharedweb().conver
     if (bytes <= 100 * 1024 * 1024) return "10_100mib";
     return "100mib_plus";
   }
-  function beginAttachmentTelemetry(att, size, entryPoint) {
+  function attachmentErrorCategory(error) {
+    return window.PinvouAttachmentTelemetry
+      ? window.PinvouAttachmentTelemetry.errorCategory(error) : "internal_error";
+  }
+  function attachmentPhase(att, phase) {
+    var attempt = att && att.telemetryAttempt;
+    if (attempt && !attempt.finished && window.PinvouAttachmentTelemetry) {
+      attempt.step = window.PinvouAttachmentTelemetry.step(phase);
+    }
+  }
+  function beginAttachmentTelemetry(att, size, entryPoint, phase) {
     var attempt = { attachmentId: attachmentTelemetryToken("attachment_"), operationId: attachmentTelemetryToken("attachment_op_"), fileTypeBucket: attachmentFileType(att.basename), startedAt: Date.now(), finished: false };
     att.telemetryAttempt = attempt;
+    attempt.step = phase === "ingest" ? "attachment_ingest" : "attachment_validation";
     invoke(IS_WEB ? "web_access_track_behavior_event" : "track_behavior_event", { request: {
       eventName: "attachment_added", attachmentId: attempt.attachmentId, operationId: attempt.operationId,
       attemptIndex: 1, fileTypeBucket: attempt.fileTypeBucket, sizeBucket: attachmentSizeBucket(size), entryPoint: entryPoint,
+      stage: "submission", step: attempt.step, inputType: "attachment",
     } }).catch(function () {});
   }
   function finishAttachmentTelemetry(att, success, errorCategory) {
@@ -6259,7 +6271,8 @@ function conversationAttachmentArgs(reference) { return pinvouSharedweb().conver
       eventName: "attachment_processing_completed", attachmentId: attempt.attachmentId,
       operationId: attempt.operationId, attemptIndex: 1, fileTypeBucket: attempt.fileTypeBucket,
       success: !!success, durationMs: Math.max(0, Date.now() - attempt.startedAt),
-      errorCategory: success ? undefined : (errorCategory || "validation_failed"),
+      errorCategory: success ? undefined : (errorCategory || "internal_error"),
+      stage: "submission", step: attempt.step, inputType: "attachment",
     } }).catch(function () {});
   }
 
@@ -6267,12 +6280,12 @@ function conversationAttachmentArgs(reference) { return pinvouSharedweb().conver
     var id = ++attachIdSeq;
     var att = { id: id, basename: basename(path), status: "parsing", result: null, error: null };
     state.attachments.push(att); notify();
-    beginAttachmentTelemetry(att, 0, "composer");
+    beginAttachmentTelemetry(att, 0, "composer", "ingest");
     try {
       var result = await invoke(IS_WEB ? "web_access_ingest_file" : "ingest_file", { path: path });
       att.status = "ready"; att.result = result;
       finishAttachmentTelemetry(att, true);
-    } catch (e) { att.status = "error"; att.error = String(e); finishAttachmentTelemetry(att, false, "validation_failed"); }
+    } catch (e) { att.status = "error"; att.error = String(e); finishAttachmentTelemetry(att, false, attachmentErrorCategory(e)); }
     notify();
   }
 
@@ -6360,12 +6373,13 @@ async function pickAndAttach() { return pinvouSharedweb().pickAndAttach(); }
     beginAttachmentTelemetry(att, file.size, "composer");
     try {
       if (!uploader || typeof uploader.uploadFile !== "function") {
-        throw new Error("chunked attachment uploader is unavailable");
+        throw Object.assign(new Error("chunked attachment uploader is unavailable"), { code: "attachment_uploader_unavailable" });
       }
       var completed = await uploader.uploadFile({
         file: file,
         uploadId: uploadId,
         isCancelled: function () { return state.attachments.indexOf(att) < 0; },
+        onPhase: function (phase) { attachmentPhase(att, phase); },
         sendChunk: function (chunk) {
           return invoke("web_access_upload_attachment_chunk", {
             uploadId: chunk.uploadId,
@@ -6400,7 +6414,7 @@ async function pickAndAttach() { return pinvouSharedweb().pickAndAttach(); }
         att.error = displayError.code;
         addSystemItem(bt("deviceUploadFailed") + displayError.message);
       }
-      finishAttachmentTelemetry(att, false, e && e.code === "device_upload_cancelled" ? "user_cancelled" : "validation_failed");
+      finishAttachmentTelemetry(att, false, attachmentErrorCategory(e));
     }
     notify();
   }
