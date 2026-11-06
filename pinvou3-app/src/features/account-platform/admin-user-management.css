@@ -4,3 +4,9 @@
 .ap-restored-dialog button.adm-user-disable-action:hover:not(:disabled){filter:brightness(.95)}
 .adm-shell.adm-restored-shell .adm-panel button.adm-user-disable-action:focus-visible,.ap-restored-dialog button.adm-user-disable-action:focus-visible{outline:3px solid #c33b4648;outline-offset:2px}
 .adm-restored-shell .adm-user-status-blocked{display:block;max-width:24em;margin-top:6px;color:var(--adm-muted);font-size:12px;line-height:1.5;white-space:normal}
+.adm-restored-shell .adm-user-search-toolbar{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.2fr) auto;align-items:end;gap:16px;margin-bottom:8px}
+.adm-restored-shell .adm-user-search-toolbar form{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:end;gap:8px;min-width:0}
+.adm-restored-shell .adm-user-search-toolbar label{display:grid;gap:6px;min-width:0}
+.adm-restored-shell .adm-user-search-toolbar input{box-sizing:border-box;width:100%;min-width:0}
+.adm-restored-shell .adm-user-search-help{margin:0 0 20px;color:var(--adm-muted);font-size:12px;line-height:1.6}
+@media(max-width:1000px){.adm-restored-shell .adm-user-search-toolbar{grid-template-columns:minmax(0,1fr)}.adm-restored-shell .adm-user-search-toolbar>button{justify-self:start}}

@@ -106,3 +106,7 @@ const userStatusCopy = {
   ja: { userStatusTitle: action => `ユーザーを${action}`, confirmUserStatus: action => `${action}を確認` },
 };
 for (const language of ['zh', 'en', 'ja']) Object.assign(adminLayoutCopy[language], userStatusCopy[language]);
+
+adminLayoutCopy.zh.userSearch = { submit: '搜索', refresh: '刷新当前结果', refreshHelp: '刷新仅更新当前结果；修改输入后，请点击搜索或精确查询。' };
+adminLayoutCopy.en.userSearch = { submit: 'Search', refresh: 'Refresh results', refreshHelp: 'Refresh updates the current results. Apply edited text with Search or Exact lookup.' };
+adminLayoutCopy.ja.userSearch = { submit: '検索', refresh: '検索結果を更新', refreshHelp: '更新は現在の結果に適用されます。入力を変更した後は、検索または完全一致で検索を実行してください。' };
