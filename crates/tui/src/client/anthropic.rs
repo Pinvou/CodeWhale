@@ -84,22 +84,55 @@ impl DeepSeekClient {
         if let Some(tools) = request.tools.as_ref()
             && !tools.is_empty()
         {
+            // Every Messages lane ships input_schema exactly as the tool
+            // declared it, with one recorded exception: the genuine Anthropic
+            // endpoint has returned HTTP 400 "input_schema does not support
+            // oneOf, allOf, or anyOf at the top level" since at least
+            // 2025-07 (f8e757322 quotes a live failure; CHANGELOG 0.9.0;
+            // anthropics/claude-code#4886/#30212), so the first-party lane —
+            // ApiProvider::Anthropic or a base URL on api.anthropic.com, the
+            // same endpoint predicate the thinking gates below use — narrows
+            // just those three root keywords, merging branch properties and
+            // noting the dropped constraint; the object type is restored when
+            // the merge leaves a populated schema whose root declared none, a
+            // root that is not a JSON object at all is replaced by an empty
+            // object (the API defines input_schema as a JSON Schema object),
+            // and root enum/not, dependent keywords, and the declared root
+            // type stay verbatim, with the shared registry normalization
+            // (nullable-union collapse, bare-object properties injection,
+            // dangling-required pruning) still applied there. Provider
+            // identity stays in the gate beside the endpoint because
+            // ANTHROPIC_BASE_URL overrides commonly front the genuine
+            // validator through a proxy. The other lanes ship verbatim:
+            // DeepSeek's
+            // Anthropic-compatible line marks input_schema "Fully Supported"
+            // (api-docs.deepseek.com/guides/anthropic_api, fetched
+            // 2026-11-05), the Anthropic tool-use guide and its
+            // structured-outputs restrictions list name no root-composition
+            // ban, and MiniMax / Model Studio document none. MCP tool
+            // schemas carry no registry sanitization upstream of this
+            // adapter, so on the narrowing lane this pass is their only
+            // normalization; the native-registry sanitizer is unchanged.
+            let narrow_root_compositions = matches!(self.api_provider, ApiProvider::Anthropic)
+                || is_native_anthropic_base_url(&self.base_url);
             body["tools"] = json!(
                 tools
                     .iter()
                     .map(|tool| {
-                        // Sanitize the tool's input_schema the same way the
-                        // OpenAI Responses adapter does: strip top-level
-                        // oneOf/anyOf/allOf (which Anthropic rejects), merge
-                        // alternative properties into the root, and surface
-                        // the dropped constraint as a description note so the
-                        // model still knows which parameters are expected.
-                        let mut schema = tool.input_schema.clone();
-                        let constraint_note = schema_sanitize::sanitize_for_responses(&mut schema);
-                        let description = match constraint_note {
-                            Some(note) if tool.description.trim().is_empty() => note,
-                            Some(note) => format!("{}\n\n{}", tool.description.trim(), note),
-                            None => tool.description.clone(),
+                        let (description, schema) = if narrow_root_compositions {
+                            let mut schema = tool.input_schema.clone();
+                            let constraint_note =
+                                schema_sanitize::sanitize_for_anthropic_messages(&mut schema);
+                            let description = match constraint_note {
+                                Some(note) if tool.description.trim().is_empty() => note,
+                                Some(note) => {
+                                    format!("{}\n\n{}", tool.description.trim(), note)
+                                }
+                                None => tool.description.clone(),
+                            };
+                            (description, schema)
+                        } else {
+                            (tool.description.clone(), tool.input_schema.clone())
                         };
                         let mut value = json!({
                             "name": tool.name,
@@ -1230,6 +1263,264 @@ mod tests {
             ..Default::default()
         };
         DeepSeekClient::new(&config).expect("Model Studio Messages client constructs")
+    }
+
+    fn root_union_tool(name: &str, description: &str) -> Tool {
+        Tool {
+            tool_type: None,
+            name: name.to_string(),
+            description: description.to_string(),
+            input_schema: json!({
+                "oneOf": [
+                    {
+                        "type": "object",
+                        "properties": {"patch": {"type": "string"}},
+                        "required": ["patch"]
+                    },
+                    {
+                        "type": "object",
+                        "properties": {
+                            "changes": {"type": "array", "items": {"type": "string"}}
+                        },
+                        "required": ["changes"]
+                    }
+                ]
+            }),
+            allowed_callers: None,
+            defer_loading: None,
+            input_examples: None,
+            strict: None,
+            cache_control: None,
+        }
+    }
+
+    #[test]
+    fn non_anthropic_messages_lanes_ship_input_schema_verbatim_without_root_flattening() {
+        // The tool-use documents define input_schema simply as "A JSON Schema
+        // object defining the expected parameters for the tool"
+        // (platform.claude.com/docs/en/agents-and-tools/tool-use/
+        // implement-tool-use, fetched 2026-11-05) with no root-composition
+        // restriction; the structured-outputs strict-restrictions list names
+        // none either, and DeepSeek's Anthropic-compatible line documents
+        // input_schema as fully supported. No record rejects root-level
+        // enum/not anywhere. The recorded Anthropic 400 (f8e757322;
+        // CHANGELOG 0.9.0; anthropics/claude-code#4886/#30212) is specific
+        // to the genuine Anthropic validator, so every other Messages lane
+        // ships the schema exactly as declared — one shared builder serves
+        // DeepSeek, MiniMax, and Model Studio, and this pins all three.
+        for client in [
+            deepseek_test_client(crate::config::DEFAULT_DEEPSEEK_ANTHROPIC_BASE_URL),
+            minimax_test_client(),
+            modelstudio_test_client(crate::config::MODELSTUDIO_TOKEN_PLAN_ANTHROPIC_BASE_URL),
+        ] {
+            let mut request = request_with("claude-sonnet-4-6", None, None, None);
+            request.tools = Some(vec![root_union_tool("apply_patch", "Patch files")]);
+
+            let body = client.build_anthropic_body(&request, true);
+
+            let schema = &body["tools"][0]["input_schema"];
+            assert!(
+                schema.get("oneOf").is_some(),
+                "a root union no record forbids must reach the wire verbatim: {schema}"
+            );
+            assert_eq!(
+                schema["oneOf"][0]["required"],
+                json!(["patch"]),
+                "branches keep their own required groups: {schema}"
+            );
+            assert_eq!(
+                body["tools"][0]["description"], "Patch files",
+                "no constraint note is synthesized for a schema that ships as declared: {body}"
+            );
+        }
+    }
+
+    #[test]
+    fn anthropic_lane_narrows_the_recorded_root_composition_keywords() {
+        // The genuine Anthropic endpoint is recorded rejecting root-level
+        // oneOf/anyOf/allOf with HTTP 400 "input_schema does not support
+        // oneOf, allOf, or anyOf at the top level" (f8e757322, 2026-07-11;
+        // CHANGELOG 0.9.0; anthropics/claude-code#4886/#30212), so this lane
+        // strips exactly those keywords, merges branch properties into the
+        // root, and surfaces the dropped constraint as a description note.
+        let client = test_client();
+        let mut request = request_with("claude-sonnet-4-6", None, None, None);
+        request.tools = Some(vec![
+            root_union_tool("apply_patch", "Patch files"),
+            root_union_tool("apply_changes", ""),
+        ]);
+
+        let body = client.build_anthropic_body(&request, true);
+
+        let schema = &body["tools"][0]["input_schema"];
+        assert!(
+            schema.get("oneOf").is_none(),
+            "the recorded rejection bars a root oneOf on this lane: {schema}"
+        );
+        assert!(
+            schema["properties"].get("patch").is_some()
+                && schema["properties"].get("changes").is_some(),
+            "branch properties are merged into the root so the model keeps its vocabulary: {schema}"
+        );
+        assert!(
+            body["tools"][0]["description"]
+                .as_str()
+                .unwrap()
+                .starts_with("Patch files\n\nExactly one of these parameter groups"),
+            "the dropped exactly-one constraint is surfaced as a note: {}",
+            body["tools"][0]["description"]
+        );
+        assert_eq!(
+            body["tools"][1]["description"],
+            "Exactly one of these parameter groups must be provided: `changes` | `patch`.",
+            "an empty description is replaced by the note alone: {body}"
+        );
+    }
+
+    #[test]
+    fn anthropic_lane_keeps_unrecorded_keywords_verbatim() {
+        // The recorded 400 names only top-level oneOf/allOf/anyOf. The old
+        // Responses-style flatten also stripped root enum/not, dependent
+        // keywords, and non-object roots with no record behind them; this
+        // pins that the narrowed pass preserves all of them.
+        let client = test_client();
+        let mut request = request_with("claude-sonnet-4-6", None, None, None);
+        request.tools = Some(vec![Tool {
+            tool_type: None,
+            name: "pick_mode".to_string(),
+            description: "Pick a mode".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {"mode": {"type": "string"}},
+                "not": {"type": "integer"},
+                "dependentRequired": {"mode": ["confirm"]},
+                "dependentSchemas": {
+                    "mode": {
+                        "properties": {"confirm": {"type": "boolean"}},
+                        "required": ["confirm"]
+                    }
+                }
+            }),
+            allowed_callers: None,
+            defer_loading: None,
+            input_examples: None,
+            strict: None,
+            cache_control: None,
+        }]);
+        let enum_root = Tool {
+            tool_type: None,
+            name: "style".to_string(),
+            description: "Style".to_string(),
+            input_schema: json!({
+                "type": "string",
+                "enum": ["compact", "full"]
+            }),
+            allowed_callers: None,
+            defer_loading: None,
+            input_examples: None,
+            strict: None,
+            cache_control: None,
+        };
+        request.tools.as_mut().unwrap().push(enum_root);
+
+        let body = client.build_anthropic_body(&request, true);
+
+        let schema = &body["tools"][0]["input_schema"];
+        assert_eq!(schema["type"], "object", "root type stays as declared");
+        assert_eq!(
+            schema["dependentRequired"],
+            json!({"mode": ["confirm"]}),
+            "dependent keywords are not in any record and stay verbatim: {schema}"
+        );
+        assert_eq!(
+            schema["dependentSchemas"],
+            json!({
+                "mode": {
+                    "properties": {"confirm": {"type": "boolean"}},
+                    "required": ["confirm"]
+                }
+            }),
+            "a well-formed dependent schema ships byte-identically: {schema}"
+        );
+        assert_eq!(
+            schema["not"],
+            json!({"type": "integer"}),
+            "root not is not in any record and stays verbatim: {schema}"
+        );
+        assert_eq!(
+            body["tools"][0]["description"], "Pick a mode",
+            "no note is synthesized without a dropped root composition: {body}"
+        );
+        let enum_schema = &body["tools"][1]["input_schema"];
+        assert_eq!(
+            enum_schema,
+            &json!({
+                "type": "string",
+                "enum": ["compact", "full"]
+            }),
+            "a non-object root with enum ships byte-identically: {enum_schema}"
+        );
+    }
+
+    fn custom_wire_test_client(name: &str, base_url: &str) -> DeepSeekClient {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let mut providers = crate::config::ProvidersConfig::default();
+        providers.custom.insert(
+            name.to_string(),
+            crate::config::ProviderConfig {
+                api_key: Some("test-key".to_string()),
+                base_url: Some(base_url.to_string()),
+                wire: Some("anthropic".to_string()),
+                ..Default::default()
+            },
+        );
+        let config = crate::config::Config {
+            provider: Some(name.to_string()),
+            providers: Some(providers),
+            ..Default::default()
+        };
+        DeepSeekClient::new(&config).expect("custom anthropic-wire client constructs")
+    }
+
+    #[test]
+    fn custom_anthropic_wire_clients_narrow_by_first_party_endpoint() {
+        // The recorded 400 comes from the api.anthropic.com validator, not
+        // from a provider identity: a custom `wire = "anthropic"` provider
+        // pointed at a first-party base URL gets the same narrowing the
+        // thinking gates apply (is_native_anthropic_base_url), while one
+        // pointed at a third-party gateway ships the schema verbatim.
+        let native = custom_wire_test_client("byok-native", "https://api.anthropic.com");
+        let mut request = request_with("claude-sonnet-4-6", None, None, None);
+        request.tools = Some(vec![root_union_tool("apply_patch", "Patch files")]);
+
+        let body = native.build_anthropic_body(&request, true);
+
+        let schema = &body["tools"][0]["input_schema"];
+        assert!(
+            schema.get("oneOf").is_none(),
+            "a first-party base URL must narrow the recorded rejection: {schema}"
+        );
+        assert_eq!(
+            body["tools"][0]["description"],
+            "Patch files\n\nExactly one of these parameter groups must be provided: `changes` | `patch`.",
+            "the dropped constraint is surfaced on the first-party lane: {body}"
+        );
+
+        let gateway = custom_wire_test_client("byok-gateway", "https://relay.example.com/v1");
+        let mut request = request_with("claude-sonnet-4-6", None, None, None);
+        request.tools = Some(vec![root_union_tool("apply_patch", "Patch files")]);
+
+        let body = gateway.build_anthropic_body(&request, true);
+
+        let schema = &body["tools"][0]["input_schema"];
+        assert!(
+            schema.get("oneOf").is_some(),
+            "a third-party gateway with no record must ship the union verbatim: {schema}"
+        );
+        assert_eq!(
+            body["tools"][0]["description"], "Patch files",
+            "no note is synthesized on a verbatim lane: {body}"
+        );
     }
 
     #[test]

@@ -9,7 +9,9 @@
 //! The default sanitizer runs in-place on every schema returned by
 //! `ToolRegistry::tools_for_api()` before the registry hands them off.
 //! Provider-specific helpers below add stricter DeepSeek and OpenAI Responses
-//! compatibility passes where their request shapes need it.
+//! compatibility passes where their request shapes need it, and a narrower
+//! Anthropic Messages pass that strips only the root composition keywords
+//! that validator is recorded rejecting.
 
 use std::collections::HashSet;
 
@@ -121,6 +123,68 @@ pub fn sanitize_for_responses(schema: &mut Value) -> Option<String> {
     ensure_properties_object(obj);
     prune_dangling_required(schema);
     combine_constraint_notes(constraint_note, dependent_note)
+}
+
+/// Narrow the root-composition keywords the Anthropic Messages validator is
+/// recorded rejecting, and leave every other keyword untouched.
+///
+/// The genuine Anthropic endpoint has returned HTTP 400 "input_schema does
+/// not support oneOf, allOf, or anyOf at the top level" for tool schemas
+/// carrying a root-level composition since at least 2025-07: commit
+/// `f8e757322` quotes a live failure, CHANGELOG 0.9.0 records the same
+/// rationale, and anthropics/claude-code#4886 / #30212 report the identical
+/// server-side error. Unlike [`sanitize_for_responses`], this pass strips
+/// only those three root keywords: root `enum`/`not`,
+/// `dependentRequired`/`dependentSchemas`, and the declared root type ship
+/// verbatim because no record rejects them. Root composition branch
+/// properties are merged into the object and the dropped exactly-one /
+/// at-least-one constraint is surfaced as a description note so the model
+/// still knows which parameter groups apply; where that merge leaves a
+/// populated object schema whose root declared no `type`, the object type
+/// is restored — the previous release line always forced it, and the
+/// model-facing contract otherwise loses its object shape.
+///
+/// The shared [`sanitize`] normalization still applies first, so a root
+/// nullable union can collapse (rewriting the root `type`), a bare object
+/// gains `properties`, and dangling `required` entries are pruned — only
+/// the composition-keyword scope is narrower than [`sanitize_for_responses`].
+/// A root that is not a JSON object at all (malformed server or MCP output)
+/// is replaced by an empty object exactly as in [`sanitize_for_responses`]:
+/// the API defines `input_schema` as a JSON Schema object, and a declared
+/// non-object schema such as a string-enum root still ships verbatim.
+///
+/// Returns the same style of description note as [`sanitize_for_responses`].
+pub fn sanitize_for_anthropic_messages(schema: &mut Value) -> Option<String> {
+    let constraint_note = schema
+        .as_object()
+        .and_then(root_composition_constraint_note);
+
+    sanitize(schema);
+
+    if !schema.is_object() {
+        *schema = Value::Object(Map::new());
+    }
+
+    let Some(obj) = schema.as_object_mut() else {
+        return constraint_note;
+    };
+
+    let strips_composition = ["oneOf", "anyOf", "allOf"]
+        .iter()
+        .any(|key| obj.contains_key(*key));
+    merge_root_composition_properties(obj);
+    obj.remove("oneOf");
+    obj.remove("anyOf");
+    obj.remove("allOf");
+    let merged_properties = obj
+        .get("properties")
+        .and_then(Value::as_object)
+        .is_some_and(|properties| !properties.is_empty());
+    if strips_composition && !obj.contains_key("type") && merged_properties {
+        obj.insert("type".into(), Value::String("object".to_string()));
+    }
+    prune_dangling_required(schema);
+    constraint_note
 }
 
 fn strict_schema_supported(schema: &Value) -> bool {
@@ -1030,6 +1094,265 @@ mod tests {
         assert_eq!(schema["type"], "object");
         assert!(schema.get("anyOf").is_none());
         assert!(schema["properties"]["value"].get("anyOf").is_some());
+        assert_eq!(note, None);
+    }
+
+    #[test]
+    fn anthropic_messages_sanitize_strips_only_recorded_root_keywords() {
+        // The recorded 400 names only top-level oneOf/allOf/anyOf
+        // (f8e757322; CHANGELOG 0.9.0; anthropics/claude-code#4886/#30212).
+        // Root enum/not, dependent keywords, and the declared root type are
+        // not in any record, so the narrowed pass preserves all of them.
+        let mut schema = json!({
+            "type": "object",
+            "properties": {
+                "mode": {"type": "string"}
+            },
+            "not": {"type": "integer"},
+            "dependentRequired": {"mode": ["confirm"]},
+            "dependentSchemas": {
+                "mode": {
+                    "properties": {"confirm": {"type": "boolean"}},
+                    "required": ["confirm"]
+                }
+            },
+            "oneOf": [
+                {"required": ["patch"]},
+                {"required": ["changes"]}
+            ]
+        });
+
+        let note = sanitize_for_anthropic_messages(&mut schema);
+
+        assert_eq!(schema["type"], "object");
+        assert!(schema.get("oneOf").is_none());
+        assert!(schema.get("anyOf").is_none());
+        assert!(schema.get("allOf").is_none());
+        assert_eq!(schema["not"], json!({"type": "integer"}));
+        assert_eq!(schema["dependentRequired"], json!({"mode": ["confirm"]}));
+        assert_eq!(
+            schema["dependentSchemas"],
+            json!({
+                "mode": {
+                    "properties": {"confirm": {"type": "boolean"}},
+                    "required": ["confirm"]
+                }
+            }),
+            "a well-formed dependent schema ships byte-identically: {schema}"
+        );
+        assert_eq!(
+            note.as_deref(),
+            Some("Exactly one of these parameter groups must be provided: `changes` | `patch`.")
+        );
+    }
+
+    #[test]
+    fn anthropic_messages_sanitize_keeps_root_enum_and_non_object_roots() {
+        let mut enum_root = json!({
+            "type": "string",
+            "enum": ["compact", "full"]
+        });
+
+        let note = sanitize_for_anthropic_messages(&mut enum_root);
+
+        assert_eq!(
+            enum_root,
+            json!({
+                "type": "string",
+                "enum": ["compact", "full"]
+            })
+        );
+        assert_eq!(note, None);
+    }
+
+    #[test]
+    fn anthropic_messages_sanitize_merges_branch_properties_and_notes_groups() {
+        let mut schema = json!({
+            "anyOf": [
+                {
+                    "type": "object",
+                    "properties": {
+                        "patch": {"type": "string"}
+                    },
+                    "required": ["patch"]
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "changes": {"type": "array", "items": {"type": "string"}}
+                    },
+                    "required": ["changes"]
+                }
+            ]
+        });
+
+        let note = sanitize_for_anthropic_messages(&mut schema);
+
+        assert!(schema.get("anyOf").is_none());
+        assert!(schema["properties"].get("patch").is_some());
+        assert!(schema["properties"].get("changes").is_some());
+        assert_eq!(
+            schema["type"], "object",
+            "the merge leaves a populated object schema whose root declared no type, so the object type is restored: {schema}"
+        );
+        assert_eq!(
+            note.as_deref(),
+            Some("At least one of these parameter groups must be provided: `changes` | `patch`.")
+        );
+    }
+
+    #[test]
+    fn anthropic_messages_sanitize_does_not_inject_type_without_a_root_composition() {
+        // Type restoration is scoped to stripped compositions: a declared
+        // typeless root with nothing to strip ships exactly as declared.
+        let mut schema = json!({"properties": {"x": {"type": "string"}}});
+
+        let note = sanitize_for_anthropic_messages(&mut schema);
+
+        assert_eq!(
+            schema,
+            json!({"properties": {"x": {"type": "string"}}}),
+            "a typeless root without a composition must not gain a type: {schema}"
+        );
+        assert_eq!(note, None);
+    }
+
+    #[test]
+    fn anthropic_messages_sanitize_replaces_non_schema_roots_with_empty_objects() {
+        // The API defines input_schema as a JSON Schema object; a root that
+        // is an array or scalar (malformed server or MCP output) cannot be
+        // one, so the pass replaces it with an empty object exactly as the
+        // Responses pass does instead of shipping the raw value to the
+        // validator. A DECLARED non-object schema (string-enum root) is an
+        // object and keeps shipping verbatim.
+        let mut array_root = json!([{"type": "string"}]);
+
+        let note = sanitize_for_anthropic_messages(&mut array_root);
+
+        assert_eq!(
+            array_root,
+            json!({}),
+            "an array root is replaced, not shipped verbatim: {array_root}"
+        );
+        assert_eq!(note, None);
+
+        let mut scalar_root = json!("browse");
+
+        let note = sanitize_for_anthropic_messages(&mut scalar_root);
+
+        assert_eq!(
+            scalar_root,
+            json!({}),
+            "a scalar root is replaced, not shipped verbatim: {scalar_root}"
+        );
+        assert_eq!(note, None);
+    }
+
+    #[test]
+    fn anthropic_messages_sanitize_pins_the_post_merge_required_prune() {
+        // A single-branch oneOf collapses inside sanitize(), which spreads
+        // the branch required groups to the root AFTER sanitize's own
+        // dangling-required prune has run; only the explicit post-merge
+        // prune removes the ghost entry.
+        let mut schema = json!({
+            "oneOf": [{
+                "type": "object",
+                "properties": {"a": {"type": "string"}},
+                "required": ["a", "ghost"]
+            }]
+        });
+
+        let note = sanitize_for_anthropic_messages(&mut schema);
+
+        assert_eq!(
+            schema["required"],
+            json!(["a"]),
+            "the explicit post-merge prune removes required entries spread after sanitize's prune: {schema}"
+        );
+        assert_eq!(note, None);
+    }
+
+    #[test]
+    fn anthropic_messages_sanitize_strips_root_all_of_and_notes_groups() {
+        // The recorded 400 names allOf alongside oneOf/anyOf; this pins the
+        // strip, the merge, and the All-prefix note for a root allOf.
+        let mut schema = json!({
+            "allOf": [
+                {
+                    "type": "object",
+                    "properties": {"path": {"type": "string"}},
+                    "required": ["path"]
+                },
+                {
+                    "type": "object",
+                    "properties": {"url": {"type": "string"}},
+                    "required": ["url"]
+                }
+            ]
+        });
+
+        let note = sanitize_for_anthropic_messages(&mut schema);
+
+        assert!(schema.get("allOf").is_none());
+        assert_eq!(schema["type"], "object");
+        assert!(
+            schema["properties"].get("path").is_some() && schema["properties"].get("url").is_some()
+        );
+        assert_eq!(
+            note.as_deref(),
+            Some("All of these parameter groups must be provided: `path` | `url`.")
+        );
+    }
+
+    #[test]
+    fn anthropic_messages_sanitize_keeps_the_shared_registry_normalization() {
+        // The narrowed pass still runs the shared registry normalization
+        // (sanitize): the previous release line collapsed root nullable
+        // unions through it, and without that anchor a root
+        // `anyOf:[X, null]` would ship the recorded-rejection union shape
+        // verbatim. Bare-object properties injection and dangling-required
+        // pruning ride the same call.
+        let mut nullable = json!({
+            "anyOf": [
+                {
+                    "type": "object",
+                    "properties": {"q": {"type": "string"}}
+                },
+                {"type": "null"}
+            ]
+        });
+        let note = sanitize_for_anthropic_messages(&mut nullable);
+        assert_eq!(
+            nullable,
+            json!({
+                "type": "object",
+                "properties": {"q": {"type": "string"}},
+                "nullable": true
+            }),
+            "a root nullable union must collapse instead of shipping the recorded shape: {nullable}"
+        );
+        assert_eq!(note, None);
+
+        let mut bare = json!({"type": "object"});
+        let note = sanitize_for_anthropic_messages(&mut bare);
+        assert_eq!(
+            bare,
+            json!({"type": "object", "properties": {}}),
+            "a bare object root keeps its properties injection: {bare}"
+        );
+        assert_eq!(note, None);
+
+        let mut dangling = json!({
+            "type": "object",
+            "properties": {"a": {"type": "string"}},
+            "required": ["a", "ghost"]
+        });
+        let note = sanitize_for_anthropic_messages(&mut dangling);
+        assert_eq!(
+            dangling["required"],
+            json!(["a"]),
+            "required naming absent properties is pruned on this lane too: {dangling}"
+        );
         assert_eq!(note, None);
     }
 
