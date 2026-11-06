@@ -497,3 +497,7 @@ for (const language of ['zh', 'en', 'ja']) {
   const copy = adminPlatformCopy[language];
   copy.errors.PERMISSION_DENIED = copy.permissionDenied;
 }
+
+Object.assign(adminPlatformCopy.zh.approvalCenter, {"executionScopeLabel":"当前执行筛选条件","executionDefaultHelp":"默认只显示执行失败，可通过状态切换查看其他支持的执行阶段。","statusLabels":{"DRAFT":"草稿","SUBMITTED":"已提交","APPROVED":"已批准","EXECUTING":"执行中","EXECUTION_FAILED":"执行失败","EXECUTED":"已执行","REJECTED":"已拒绝","WITHDRAWN":"已撤回","EXPIRED":"已过期","INVALIDATED":"已失效"}});
+Object.assign(adminPlatformCopy.en.approvalCenter, {"executionScopeLabel":"Current execution filter","executionDefaultHelp":"Execution failures are selected by default. Change Status to view another supported execution stage.","statusLabels":{"DRAFT":"Draft","SUBMITTED":"Submitted","APPROVED":"Approved","EXECUTING":"Executing","EXECUTION_FAILED":"Execution failed","EXECUTED":"Executed","REJECTED":"Rejected","WITHDRAWN":"Withdrawn","EXPIRED":"Expired","INVALIDATED":"Invalidated"}});
+Object.assign(adminPlatformCopy.ja.approvalCenter, {"executionScopeLabel":"現在の実行絞り込み条件","executionDefaultHelp":"既定では実行失敗のみを表示します。状態を切り替えると、対応する他の実行段階を確認できます。","statusLabels":{"DRAFT":"下書き","SUBMITTED":"提出済み","APPROVED":"承認済み","EXECUTING":"実行中","EXECUTION_FAILED":"実行失敗","EXECUTED":"実行済み","REJECTED":"却下済み","WITHDRAWN":"取り下げ済み","EXPIRED":"期限切れ","INVALIDATED":"無効化済み"}});
