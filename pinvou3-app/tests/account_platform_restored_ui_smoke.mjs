@@ -192,20 +192,63 @@ try {
     assert.equal(new URL(page.url()).searchParams.get('organization_q'), 'sample');
   });
   await run('organization member removal has a named action and cancellable target dialog in all locales', async () => {
-    for (const language of ['zh', 'en', 'ja']) {
+    for (const language of ['zh', 'en', 'ja']) for (const width of [1440, 390]) {
       await fresh('?mode=admin&section=organizations&organization_id=33333333-3333-4333-8333-333333333333&organization_tab=members');
+      await page.setViewport({ width, height: 1000 });
       await page.select('.adm-sidebar-foot select', language);
       const words = await page.evaluate(() => window.restored.copy().organization);
-      await page.waitForFunction(label => [...document.querySelectorAll('[data-workspace=members] details button')].some(button => button.textContent.trim() === label), {}, words.remove);
+      await page.waitForFunction(label => [...document.querySelectorAll('.adm-member-action-menu button')].some(button => button.textContent.trim() === label && !button.disabled), {}, words.remove);
+      await page.$eval('[data-workspace=members] details summary', node => node.scrollIntoView({ block: 'center', inline: 'nearest' }));
+      await page.evaluate(() => new Promise(resolve => requestAnimationFrame(resolve)));
+      const height = await page.$eval('[data-workspace=members] tbody tr', row => row.getBoundingClientRect().height);
       await page.click('[data-workspace=members] details summary');
-      await click('[data-workspace=members] details button', words.remove);
+      await page.waitForFunction(() => {
+        const menu = document.querySelector('.adm-member-action-menu');
+        return menu && getComputedStyle(menu).visibility !== 'hidden' && menu.getClientRects().length;
+      });
+      assert.equal(await page.$eval('[data-workspace=members] tbody tr', row => row.getBoundingClientRect().height), height, 'opening member actions does not grow its table row');
+      const geometry = await page.$eval('.adm-member-action-menu', menu => { const box = menu.getBoundingClientRect(); return { left: box.left, right: box.right, top: box.top, bottom: box.bottom, viewportWidth: innerWidth, viewportHeight: innerHeight, position: getComputedStyle(menu).position, pageTransform: getComputedStyle(document.querySelector('.adm-page')).transform }; });
+      assert.ok(geometry.left >= 7 && geometry.right <= geometry.viewportWidth - 7 && geometry.top >= 7 && geometry.bottom <= geometry.viewportHeight - 7, `action overlay fits the viewport: ${JSON.stringify({ language, width, geometry })}`);
+      assert.equal(await page.$eval('.adm-member-action-menu button', node => node === document.activeElement), true, 'opening the portal moves focus into its actions');
+      await page.keyboard.press('Tab'); await page.keyboard.press('Tab'); await page.keyboard.press('Tab');
+      await page.waitForFunction(() => !document.querySelector('[data-workspace=members] details')?.open);
+      assert.equal(await page.evaluate(() => document.activeElement?.textContent.trim() === window.restored.copy().organization.addMember), true, 'Tab after the last action continues at the next page control');
+      await page.$eval('[data-workspace=members] details summary', node => node.focus({ preventScroll: true }));
+      await page.keyboard.press('Enter');
+      await page.waitForFunction(() => document.querySelector('.adm-member-action-menu button') === document.activeElement);
+      await page.keyboard.down('Shift'); await page.keyboard.press('Tab'); await page.keyboard.up('Shift');
+      await page.waitForFunction(() => !document.querySelector('[data-workspace=members] details')?.open);
+      assert.equal(await page.$eval('[data-workspace=members] details summary', node => node === document.activeElement), true, 'Shift-Tab from the first action returns to the summary');
+      await page.keyboard.press('Enter');
+      await page.waitForFunction(() => document.querySelector('.adm-member-action-menu button') === document.activeElement);
+      if (process.env.UI_ARTIFACT_DIR && language === 'zh') {
+        fs.mkdirSync(process.env.UI_ARTIFACT_DIR, { recursive: true });
+        await page.screenshot({ path: path.join(process.env.UI_ARTIFACT_DIR, `admin-member-menu-${width}.png`), fullPage: false });
+      }
+      await click('.adm-member-action-menu button', words.remove);
       await page.waitForSelector('[role=dialog] .ap-org-action-target');
       assert.equal(await page.$eval('[role=dialog] h2', node => node.textContent), words.remove);
       const target = await page.$eval('[role=dialog] .ap-org-action-target', node => node.textContent);
       assert.ok(target.includes('Sample member') && target.includes('22222222-2222-4222-8222-222222222222'));
+      const resizingDialog = language === 'zh' && width === 1440;
+      if (resizingDialog) {
+        await page.setViewport({ width, height: 500 });
+        await page.waitForFunction(() => {
+          const box = document.querySelector('.adm-member-action-menu').getBoundingClientRect();
+          return box.top >= 7 && box.bottom <= innerHeight - 7;
+        });
+        assert.equal(await page.$eval('[role=dialog]', node => node.contains(document.activeElement)), true, 'resizing preserves the active dialog and its focus');
+      }
       await page.keyboard.press('Escape');
       await page.waitForFunction(() => !document.querySelector('[role=dialog]'));
+      if (resizingDialog) {
+        const bounds = await page.$eval('.adm-member-action-menu', node => { const box = node.getBoundingClientRect(); return { top: box.top, bottom: box.bottom, viewport: innerHeight, open: node.closest('.adm-member-menu-portal').dataset.open, focused: node.contains(document.activeElement) }; });
+        assert.ok(bounds.top >= 7 && bounds.bottom <= bounds.viewport - 7 && bounds.open === 'true' && bounds.focused, `cancel returns focus to the visible menu after resize: ${JSON.stringify(bounds)}`);
+      }
       assert.equal(await page.evaluate(() => window.restored.calls.filter(call => call.method !== 'GET' && !call.url.endsWith('/account/bootstrap')).length), 0);
+      await page.keyboard.press('Escape');
+      await page.waitForFunction(() => !document.querySelector('[data-workspace=members] details')?.open);
+      assert.equal(await page.$eval('[data-workspace=members] details summary', node => node === document.activeElement), true);
     }
   });
   await run('organization rename footer cancellation discards edits and reopens the current name', async () => {
