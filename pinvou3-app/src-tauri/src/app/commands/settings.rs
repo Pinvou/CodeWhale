@@ -521,7 +521,7 @@ pub(super) fn delete_model_inner(id: &str, store: &dyn CredentialStore) -> Resul
 
 // Local selections must name a user configuration, not the platform runtime
 // carrier. Catalog selections keep their separate, source-aware command path.
-fn require_local_model_selection<'a>(
+pub(super) fn require_local_model_selection<'a>(
     model: Option<&'a SavedModel>,
     id: &str,
 ) -> Result<&'a SavedModel, String> {
