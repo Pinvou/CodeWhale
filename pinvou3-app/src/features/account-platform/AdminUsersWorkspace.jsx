@@ -2,6 +2,9 @@ import React, { useEffect, useRef, useState } from 'react';
 import { adminLayoutCopy, accountLayoutCopy } from '../../shared/i18n.js';
 import { localizedAccountPlatformError } from './error-localization.js';
 import { PortalDialog } from './PortalDialog.jsx';
+import './admin-user-management.css';
+
+const userDisplayName = user => user.username || user.display_name || user.user_code || user.user_id;
 
 function UserDetails({ client, userID, copy, language, route }) {
   const [profile, setProfile] = useState(null), [memberships, setMemberships] = useState(null), [error, setError] = useState(null), [membershipError, setMembershipError] = useState(null), [revision, setRevision] = useState(0);
@@ -82,9 +85,32 @@ export function AdminUsersWorkspace({ client, copy, language, canManage, current
     <form onSubmit={event => { event.preventDefault(); setPrevious([]); load('', query); }}><label>{copy.search}<input value={query} onChange={event => setQuery(event.target.value)} /></label><button disabled={busy}>{copy.refresh}</button></form>
     <form onSubmit={event => { event.preventDefault(); void lookupCode(); }}><label>{copy.userManagement.exactCode}<input disabled={Boolean(busy && mutationBusy.current)} maxLength={64} value={userCode} onChange={event => { if (mutationBusy.current) return; generation.current++; setBusy(false); setPage(null); setError(''); setUserCode(event.target.value); }} placeholder={copy.userManagement.codePlaceholder} /></label><button disabled={busy || !userCode.trim()}>{copy.userManagement.lookup}</button></form>
   </div>{error && <p role="alert">{error}<button disabled={busy} onClick={() => void (queryKind === 'code' ? lookupCode() : read())}>{copy.retry}</button></p>}{busy && <p role="status">{copy.loading}</p>}
-    {page && <div className="adm-table-wrap"><table className="adm-table"><thead><tr>{[copy.userManagement.account, copy.userManagement.exactCode, copy.accounts.status, copy.accounts.actions].map(label => <th key={label}>{label}</th>)}</tr></thead><tbody>{page.items.map(user => <tr key={user.user_id}><td data-label={copy.userManagement.account}>{user.status === 'DELETED' ? <span>{user.username || user.display_name || user.user_code || user.user_id}</span> : <button className="adm-name-link" onClick={() => route.navigate('users', { user_id: user.user_id })}>{user.username || user.display_name || user.user_code || user.user_id}</button>}</td><td data-label={copy.userManagement.exactCode}><code>{user.user_code || '—'}</code></td><td data-label={copy.accounts.status}>{accountLayoutCopy[language].statuses[user.status] || user.status}</td><td data-label={copy.accounts.actions}>{canManage && ['ACTIVE', 'DISABLED'].includes(user.status) && <button disabled={busy || user.user_id === currentUserID} title={user.user_id === currentUserID ? words.selfStatusBlocked : undefined} onClick={() => setConfirmation({ user, status: user.status === 'ACTIVE' ? 'DISABLED' : 'ACTIVE' })}>{user.status === 'ACTIVE' ? copy.accounts.disable : copy.accounts.enable}</button>}</td></tr>)}</tbody></table></div>}
+    {page && <div className="adm-table-wrap"><table className="adm-table"><thead><tr>{[copy.userManagement.account, copy.userManagement.exactCode, copy.accounts.status, copy.accounts.actions].map(label => <th key={label}>{label}</th>)}</tr></thead><tbody>{page.items.map(user => {
+      const label = userDisplayName(user), self = user.user_id === currentUserID;
+      const action = user.status === 'ACTIVE' ? copy.accounts.disable : copy.accounts.enable;
+      return <tr key={user.user_id}>
+        <td data-label={copy.userManagement.account}>{user.status === 'DELETED' ? <span>{label}</span> : <button className="adm-name-link" onClick={() => route.navigate('users', { user_id: user.user_id })}>{label}</button>}</td>
+        <td data-label={copy.userManagement.exactCode}><code>{user.user_code || '—'}</code></td>
+        <td data-label={copy.accounts.status}>{accountLayoutCopy[language].statuses[user.status] || user.status}</td>
+        <td data-label={copy.accounts.actions}>{canManage && ['ACTIVE', 'DISABLED'].includes(user.status) && <>
+          <button type="button" className={user.status === 'ACTIVE' ? 'adm-user-disable-action' : undefined} data-user-status-target={user.user_id}
+            aria-label={`${words.userStatusTitle(action)}: ${label} (${user.user_code || user.user_id})`}
+            disabled={busy || self} title={self ? words.selfStatusBlocked : undefined}
+            onClick={() => setConfirmation({ user, status: user.status === 'ACTIVE' ? 'DISABLED' : 'ACTIVE' })}>{action}</button>
+          {self && <small className="adm-user-status-blocked">{words.selfStatusBlocked}</small>}
+        </>}</td>
+      </tr>;
+    })}</tbody></table></div>}
     {page?.items.length === 0 && <p>{copy.noData}</p>}
     <nav><button disabled={busy || previous.length === 0} onClick={() => { const values = [...previous], target = values.pop(); setPrevious(values); load(target); }}>{copy.userManagement.previous}</button><button disabled={busy || !page?.next_cursor} onClick={() => { setPrevious(values => [...values, cursor]); load(page.next_cursor); }}>{copy.userManagement.next}</button></nav>
-    {confirmation && canManage && confirmation.user.user_id !== currentUserID && <PortalDialog title={confirmation.status === 'DISABLED' ? copy.accounts.disable : copy.accounts.enable} closeLabel={accountLayoutCopy[language].closeDialog} busy={busy} onClose={() => setConfirmation(null)}><p>{confirmation.user.username || confirmation.user.user_code}</p>{confirmation.status === 'DISABLED' && <p>{words.disableSessionsWarning}</p>}<button disabled={busy} onClick={() => void changeStatus(confirmation)}>{words.confirmAction}</button></PortalDialog>}
+    {confirmation && canManage && confirmation.user.user_id !== currentUserID && <PortalDialog title={words.userStatusTitle(confirmation.status === 'DISABLED' ? copy.accounts.disable : copy.accounts.enable)} closeLabel={accountLayoutCopy[language].closeDialog} busy={busy} onClose={() => setConfirmation(null)}>
+      <dl className="adm-user-status-target">
+        <dt>{copy.userManagement.account}</dt><dd>{userDisplayName(confirmation.user)}</dd>
+        <dt>{copy.userManagement.exactCode}</dt><dd><code>{confirmation.user.user_code || '—'}</code></dd>
+        <dt>{words.userID}</dt><dd><code>{confirmation.user.user_id}</code></dd>
+      </dl>
+      {confirmation.status === 'DISABLED' && <p>{words.disableSessionsWarning}</p>}
+      <div className="ap-dialog-actions"><button type="button" data-user-status-confirm={confirmation.status} className={confirmation.status === 'DISABLED' ? 'adm-user-disable-action' : undefined} disabled={busy} onClick={() => void changeStatus(confirmation)}>{words.confirmUserStatus(confirmation.status === 'DISABLED' ? copy.accounts.disable : copy.accounts.enable)}</button></div>
+    </PortalDialog>}
   </section>;
 }

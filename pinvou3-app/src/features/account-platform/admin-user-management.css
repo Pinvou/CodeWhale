@@ -1,0 +1,6 @@
+.adm-shell.adm-restored-shell .adm-panel button.adm-user-disable-action{border-color:#f0c8cc;background:var(--adm-surface);color:var(--adm-danger)}
+.adm-shell.adm-restored-shell .adm-panel button.adm-user-disable-action:hover:not(:disabled){background:var(--adm-danger-soft)}
+.ap-restored-dialog button.adm-user-disable-action{border-color:var(--adm-danger,#c33b46);background:var(--adm-danger,#c33b46);color:#fff}
+.ap-restored-dialog button.adm-user-disable-action:hover:not(:disabled){filter:brightness(.95)}
+.adm-shell.adm-restored-shell .adm-panel button.adm-user-disable-action:focus-visible,.ap-restored-dialog button.adm-user-disable-action:focus-visible{outline:3px solid #c33b4648;outline-offset:2px}
+.adm-restored-shell .adm-user-status-blocked{display:block;max-width:24em;margin-top:6px;color:var(--adm-muted);font-size:12px;line-height:1.5;white-space:normal}
