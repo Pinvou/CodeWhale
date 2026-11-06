@@ -873,7 +873,23 @@ impl ShellChild {
 
 enum StdinWriter {
     Pipe(ChildStdin),
-    #[cfg(not(target_env = "ohos"))]
+    /// Unix PTY lane: a dup of the portable-pty master fd, so interact
+    /// writes can run on the bounded worker thread exactly like pipe
+    /// writes. The reader thread holds its own clone of the master fd for
+    /// the task's whole lifetime, so this dup is NOT the last master-side
+    /// handle: dropping it delivers nothing to the slave on its own. An
+    /// explicit `close_stdin` therefore delivers the ^D bytes itself,
+    /// through the same bounded worker as a payload write (see
+    /// [`bounded_stdin_eof_delivery`]), and a delivery that fails or
+    /// stalls claims no end-of-file.
+    /// The cfg mirrors the only constructor (the unix arm inside the
+    /// `not(target_env = "ohos")` PTY block — ohos returns from tty mode
+    /// before PTY setup): keeping the variant off ohos avoids a
+    /// never-constructed `dead_code` variant there, which `deny(warnings)`
+    /// makes fatal, and every referencing site carries the same predicate.
+    #[cfg(all(unix, not(target_env = "ohos")))]
+    PtyFile(std::fs::File),
+    #[cfg(all(not(target_env = "ohos"), not(unix)))]
     Pty(Box<dyn Write + Send>),
 }
 
@@ -881,7 +897,9 @@ impl StdinWriter {
     fn write_all(&mut self, data: &[u8]) -> std::io::Result<()> {
         match self {
             StdinWriter::Pipe(stdin) => stdin.write_all(data),
-            #[cfg(not(target_env = "ohos"))]
+            #[cfg(all(unix, not(target_env = "ohos")))]
+            StdinWriter::PtyFile(file) => file.write_all(data),
+            #[cfg(all(not(target_env = "ohos"), not(unix)))]
             StdinWriter::Pty(writer) => writer.write_all(data),
         }
     }
@@ -889,9 +907,207 @@ impl StdinWriter {
     fn flush(&mut self) -> std::io::Result<()> {
         match self {
             StdinWriter::Pipe(stdin) => stdin.flush(),
-            #[cfg(not(target_env = "ohos"))]
+            #[cfg(all(unix, not(target_env = "ohos")))]
+            StdinWriter::PtyFile(file) => file.flush(),
+            #[cfg(all(not(target_env = "ohos"), not(unix)))]
             StdinWriter::Pty(writer) => writer.flush(),
         }
+    }
+}
+
+/// Blocks SIGPIPE for the guarded region on unix, restoring it on drop.
+/// The process deliberately runs with SIGPIPE at SIG_DFL (`run_with_args`
+/// re-arms it so delegated children see conventional pipe semantics), which
+/// arms it for in-process threads too. A bounded stdin write that times out
+/// deliberately leaves its worker blocked mid-write on the handle, and the
+/// documented stall recovery — killing the task, or the stalled command
+/// simply exiting later — closes the read end: the resumed write would
+/// otherwise kill the whole host process with SIGPIPE instead of failing
+/// with EPIPE like every handled write error.
+///
+/// Blocking alone is not sufficient: a SIGPIPE generated while blocked is
+/// not discarded — it stays PENDING on the worker thread, and unblocking
+/// delivers a pending unblocked signal before `pthread_sigmask` returns.
+/// With SIGPIPE at SIG_DFL that would kill the process one instruction
+/// after the "handled" EPIPE, exactly where the guard ends. The drop
+/// therefore checks this thread's pending set and consumes a pending
+/// SIGPIPE with `sigwait` BEFORE restoring the mask. A write-failure
+/// SIGPIPE is thread-directed, so a pending SIGPIPE inside a guarded
+/// region is one this region's write generated; `sigpending` also reports
+/// process-directed signals, but nothing in this process raises SIGPIPE
+/// that way, and consuming such a signal under SIG_DFL would only spare
+/// the process. Test binaries run with std's SIG_IGN, under
+/// which a generated SIGPIPE is discarded at generation and never becomes
+/// pending — which is why the suite cannot catch a block-and-restore guard;
+/// the consume path is pinned by re-arming SIG_DFL inside a helper process
+/// (see `sigpipe_guard_survives_a_broken_pipe_restore`).
+struct BlockedSigpipeGuard {
+    #[cfg(unix)]
+    previous: libc::sigset_t,
+}
+
+impl BlockedSigpipeGuard {
+    fn new() -> Self {
+        #[cfg(unix)]
+        {
+            // SAFETY: `zeroed` is valid for `sigset_t` (an array of
+            // integer words) and both pointers below are local stack
+            // values. A failed `pthread_sigmask` is not expected with
+            // these local sets; if it did fail, the write would run with
+            // the process default disposition (the pre-guard behavior)
+            // and the drop's restore would install the zeroed `previous`
+            // mask — an empty set, leaving this thread's signals unblocked.
+            unsafe {
+                let mut blocked: libc::sigset_t = std::mem::zeroed();
+                let mut previous: libc::sigset_t = std::mem::zeroed();
+                libc::sigemptyset(&mut blocked);
+                libc::sigaddset(&mut blocked, libc::SIGPIPE);
+                // Best-effort: if the mask cannot be set, the write runs
+                // with the process default and the failure mode is simply
+                // the pre-guard one.
+                libc::pthread_sigmask(libc::SIG_BLOCK, &blocked, &mut previous);
+                Self { previous }
+            }
+        }
+        #[cfg(not(unix))]
+        Self {}
+    }
+}
+
+#[cfg(unix)]
+impl Drop for BlockedSigpipeGuard {
+    fn drop(&mut self) {
+        unsafe {
+            // A write that ended in EPIPE raised SIGPIPE while it was
+            // blocked here. Consume it before the restore — otherwise the
+            // unblock delivers the pending signal at the process
+            // disposition (SIG_DFL in production) and the guard's own Drop
+            // kills the process it exists to protect (see the struct doc).
+            let mut pending: libc::sigset_t = std::mem::zeroed();
+            libc::sigpending(&mut pending);
+            if libc::sigismember(&pending, libc::SIGPIPE) == 1 {
+                let mut blocked: libc::sigset_t = std::mem::zeroed();
+                libc::sigemptyset(&mut blocked);
+                libc::sigaddset(&mut blocked, libc::SIGPIPE);
+                let mut delivered: i32 = 0;
+                // SAFETY: the signal is pending on this thread, so the
+                // wait returns immediately; the sets are local stack
+                // values.
+                libc::sigwait(&blocked, &mut delivered);
+            }
+            libc::pthread_sigmask(libc::SIG_SETMASK, &self.previous, std::ptr::null_mut());
+        }
+    }
+}
+
+#[cfg(not(unix))]
+impl Drop for BlockedSigpipeGuard {
+    fn drop(&mut self) {}
+}
+
+/// Outcome of the bounded end-of-file delivery behind an explicit
+/// `close_stdin` on a unix terminal task: `Delivered` means the ^D bytes
+/// landed, `Failed` means the write errored without landing (typically the
+/// child was already gone and the master write failed), and `Stalled` means
+/// the tty input queue was still full at the deadline.
+#[cfg(all(unix, not(target_env = "ohos")))]
+#[derive(Debug)]
+enum BoundedEofDelivery {
+    Delivered,
+    Failed,
+    Stalled,
+}
+
+/// Deliver `\n` + VEOF through the given master fd on the same bounded
+/// worker a payload write uses ([`bounded_stdin_write_owned`]). The leading
+/// newline flushes any pending partial line, because canonical mode only
+/// turns VEOF into a read of length zero from an EMPTY line buffer — the
+/// same two bytes the old ownership box injected on drop. In raw mode both
+/// bytes are ordinary input, exactly like that box drop; the caller records
+/// a delivery only when the write really completed, so the flag never
+/// claims an end-of-file that did not land. The EOF byte is written
+/// literally (`0x04`) rather than read from `c_cc[VEOF]`: portable-pty's
+/// unix writer reads the live byte at drop and writes nothing at all when
+/// VEOF is disabled (`_POSIX_VDISABLE`), so the two behaviors differ in
+/// that state — this close sends the two bytes as ordinary input, exactly
+/// like raw mode, and no end-of-file ever arrives. The `close_stdin`
+/// schema discloses that; the old box delivered nothing in the same
+/// state, so the close still reports honestly what it did.
+#[cfg(all(unix, not(target_env = "ohos")))]
+fn bounded_stdin_eof_delivery(file: &std::fs::File) -> BoundedEofDelivery {
+    use std::os::fd::AsFd;
+    let dup_fd = match file.as_fd().try_clone_to_owned() {
+        Ok(fd) => fd,
+        // No clone means no worker can attempt the delivery; report it as
+        // a failed delivery — a clone failure is a process-fd problem, not
+        // a queue-full condition, and the flag must stay down either way.
+        Err(_) => return BoundedEofDelivery::Failed,
+    };
+    match bounded_stdin_write_owned(
+        StdinWriter::Pipe(std::process::ChildStdin::from(dup_fd)),
+        b"\n\x04".to_vec(),
+    ) {
+        // The clone is dropped on every arm: the dup this function was
+        // given stays with the task, and only the write's outcome decides
+        // what the close may claim.
+        Err(_) => BoundedEofDelivery::Failed,
+        Ok((_, Ok(Ok(())))) => BoundedEofDelivery::Delivered,
+        Ok((_, Ok(Err(_)))) => BoundedEofDelivery::Failed,
+        Ok((_, Err(std::sync::mpsc::RecvTimeoutError::Timeout))) => BoundedEofDelivery::Stalled,
+        Ok((_, Err(std::sync::mpsc::RecvTimeoutError::Disconnected))) => BoundedEofDelivery::Failed,
+    }
+}
+
+/// The single bounded stdin write every platform uses: the worker thread
+/// takes the writer by value, writes and flushes the payload, and hands the
+/// writer back through the channel. Unix reaches it with a clone of the
+/// task's handle — pipes clone the `ChildStdin` fd and the PTY lane clones
+/// the dup'd master fd (see [`BackgroundShell::write_stdin`] and
+/// [`bounded_stdin_eof_delivery`]); Windows and ohos cannot clone an fd out
+/// of their handle, so the handoff moves the real writer.
+/// `Ok((Some(writer), Ok(io_result)))` returns the writer to the caller.
+/// `Ok((None, Err(RecvTimeoutError::Timeout)))` means the deadline hit
+/// first: the writer stays with the abandoned worker, the bytes still land
+/// if the command resumes reading, and the caller marks the stall.
+/// `Err(RecvTimeoutError::Disconnected)` means the worker died before
+/// completing (a panic in the write path): the writer is gone, and the
+/// caller must NOT mark a stall — a writer failure is not the command's
+/// fault. An `Err` from the function itself means the worker thread could
+/// not be spawned at all: nothing was written, and the writer is gone with
+/// the failed closure (ownership was already handed over), so the caller
+/// must report the task as having no writable stdin. A plain
+/// `thread::spawn` panic here would unwind through the shell-manager lock
+/// and poison it for the rest of the process.
+type OwnedBoundedWriteOutcome = (
+    Option<StdinWriter>,
+    Result<std::io::Result<()>, std::sync::mpsc::RecvTimeoutError>,
+);
+
+fn bounded_stdin_write_owned(
+    writer: StdinWriter,
+    payload: Vec<u8>,
+) -> anyhow::Result<OwnedBoundedWriteOutcome> {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let worker = std::thread::Builder::new()
+        .name("stdin-bounded-write".to_string())
+        .spawn(move || {
+            let _sigpipe = BlockedSigpipeGuard::new();
+            let mut writer = writer;
+            let result = writer.write_all(&payload).and_then(|_| writer.flush());
+            // The writer moves back out only on the send path; a send failure
+            // (receiver gone) drops it, which is fine — the caller already
+            // gave up on the handle at that point.
+            let _ = sender.send((writer, result));
+        });
+    let receiver = match worker {
+        Ok(_) => receiver,
+        Err(error) => {
+            return Err(anyhow!(error).context("Failed to spawn the bounded stdin writer thread"));
+        }
+    };
+    match receiver.recv_timeout(STDIN_WRITE_DEADLINE) {
+        Ok((writer, result)) => Ok((Some(writer), Ok(result))),
+        Err(error) => Ok((None, Err(error))),
     }
 }
 
@@ -1079,6 +1295,22 @@ pub struct BackgroundShell {
     stderr_cursor: usize,
     completion_reported: bool,
     stdin: Option<StdinWriter>,
+    /// Set when the child has really been handed end-of-file: either its
+    /// stdin pipe was closed through `write_stdin`, or an explicit unix
+    /// terminal close delivered the ^D bytes through the bounded worker.
+    /// Stays false when the task never exposed a writable stdin (persistent
+    /// services spawn with a null stdin, PTY lanes keep the slave open
+    /// through the reader), when the handle was simply released after
+    /// completion, and when a close delivery failed or stalled — so
+    /// `interact` can state the true reason stdin is unavailable.
+    stdin_closed_at_eof: bool,
+    /// Set when a stdin write outlived [`STDIN_WRITE_DEADLINE`] because the
+    /// command stopped consuming its pipe, or when a terminal close's own
+    /// ^D delivery stalled the same way (same deadline, same refusal
+    /// family). The abandoned bytes keep flowing from the background writer
+    /// if the child resumes, so further writes are refused (two writers
+    /// could interleave) instead of queued behind an unknown pipe state.
+    stdin_write_stalled: bool,
     child: Option<ShellChild>,
     /// A stop was delivered but the direct child's exit was never observed:
     /// the bounded reap grace elapsed first (e.g. uninterruptible sleep), so
@@ -1411,16 +1643,287 @@ impl BackgroundShell {
         }
     }
 
+    /// Close the stdin pipe of this task, keeping a PTY writer attached —
+    /// the foreground close: pipe readers get end-of-file at once, while a
+    /// terminal command keeps the interact surface a session member can
+    /// write to while it runs. Only an unstalled PIPE is claimed as
+    /// end-of-file: after a stalled write the abandoned worker still holds
+    /// a clone of the handle and the bytes have not finished landing, so
+    /// the flag stays down and refusals report the stall instead — the
+    /// same conjunct the `write_stdin` close applies.
+    fn close_stdin_pipe(&mut self) {
+        if matches!(self.stdin, Some(StdinWriter::Pipe(_))) {
+            self.stdin_closed_at_eof = !self.stdin_write_stalled;
+            self.stdin = None;
+        }
+    }
+
     fn write_stdin(&mut self, input: &str, close: bool) -> Result<()> {
-        if let Some(stdin) = self.stdin.as_mut() {
+        // Taken owned so the Windows/ohos fallback can move the writer into
+        // its bounded worker and hand it back. Every unix exit restores the
+        // slot first, keeping the stall/eof refusal ordering identical with
+        // the pinned unix behavior; on the ownership-fallback cfgs the
+        // Timeout, Disconnected, and spawn-failure arms deliberately leave
+        // the slot empty — the writer is gone with the worker, and the stall
+        // flag or the returned refusal reports that.
+        // `mut` is real only on the ownership-fallback cfgs (they re-take and
+        // reassign the slot); the unix fd-clone path only moves it, so the
+        // same predicate that strips the fallback also silences `unused_mut`.
+        #[cfg_attr(all(unix, not(target_env = "ohos")), allow(unused_mut))]
+        let mut slot = self.stdin.take();
+        if slot.is_some() {
             if !input.is_empty() {
-                stdin
-                    .write_all(input.as_bytes())
-                    .context("Failed to write to stdin")?;
-                stdin.flush().ok();
+                if self.stdin_write_stalled {
+                    self.stdin = slot;
+                    return Err(anyhow!(
+                        "stdin writes to task {} are refused: an earlier write did not complete within {STDIN_WRITE_DEADLINE:?} because the command stopped consuming its stdin; the abandoned bytes still land if it resumes. Kill the task and start a new one instead of feeding it further.",
+                        self.id
+                    ));
+                }
+                // A blocking write under the shell-manager lock wedges the
+                // executor thread and every other shell in the session when
+                // the stdin handle's buffer is full and the command never
+                // reads (the exact stall the inline-payload cap exists to
+                // close on the run boundary — interact chunks and
+                // small-buffer platforms hit the same wall one chunk later).
+                // Every platform bounds the write now, by what its handle
+                // offers: on unix the write is bounded for BOTH handle kinds
+                // by fd clone — pipes clone the `ChildStdin` fd, and the PTY
+                // lane clones the dup'd master fd it spawned with — a worker
+                // thread owns the clone and finishes the payload in the
+                // background (it still lands if the child resumes), the
+                // caller learns about the stall at the deadline, and the
+                // stall flag refuses any further write so two writers can
+                // never interleave on one handle.
+                // The same predicate as the `PtyFile` variant. ohos strips
+                // this whole statement (the attribute gates the if-else), so
+                // ohos takes the owned-writer fallback below — that
+                // predicate is what keeps ohos compiling with a live write
+                // and no dead binding, field, or methods under the workspace
+                // deny(warnings).
+                #[cfg(all(unix, not(target_env = "ohos")))]
+                if let Some(writer) = slot.as_ref() {
+                    // Exhaustive by construction: on this cfg `StdinWriter`
+                    // has exactly `Pipe` and `PtyFile`, so a future third
+                    // unix variant fails to COMPILE at the match below
+                    // instead of silently falling into an unbounded blocking
+                    // write under the session lock. The `else` arm only
+                    // covers the `None` slot the take site already ruled
+                    // out.
+                    use std::os::fd::AsFd;
+                    let dup_fd = match writer {
+                        StdinWriter::Pipe(pipe) => pipe.as_fd().try_clone_to_owned(),
+                        StdinWriter::PtyFile(file) => file.as_fd().try_clone_to_owned(),
+                    };
+                    let dup_fd = match dup_fd {
+                        Ok(fd) => fd,
+                        Err(error) => {
+                            // The clone failed without consuming the
+                            // handle: restore it so the task keeps its
+                            // interact surface instead of later refusals
+                            // misreporting a live task as "a finished
+                            // command has released its stdin".
+                            self.stdin = slot;
+                            return Err(anyhow!(error).context(
+                                "Failed to clone the stdin handle for the bounded write",
+                            ));
+                        }
+                    };
+                    // The bounded write is the shared helper (the same one
+                    // the owned platforms and the ^D close delivery use):
+                    // the clone rides it by value, so only the ORIGINAL
+                    // slot decides what is restored below — a returned
+                    // clone is dropped, never reattached.
+                    match bounded_stdin_write_owned(
+                        StdinWriter::Pipe(std::process::ChildStdin::from(dup_fd)),
+                        input.as_bytes().to_vec(),
+                    ) {
+                        // The clone came back with a completed write: drop
+                        // it and keep the original attached.
+                        Ok((_, Ok(Ok(())))) => {}
+                        Ok((_, Ok(Err(error)))) => {
+                            // The worker completed: restore the ORIGINAL
+                            // handle so a write error does not silently
+                            // strip the task's interact surface (the base
+                            // behavior kept the handle attached after a
+                            // write error too).
+                            self.stdin = slot;
+                            return Err(anyhow!(error).context("Failed to write to stdin"));
+                        }
+                        // A channel close without a send means the worker
+                        // died before completing (a panic in the write
+                        // path): that is a writer failure, not a stall, so
+                        // the task is not marked stalled — a healthy write
+                        // after this must not be refused by the flag.
+                        Ok((_, Err(std::sync::mpsc::RecvTimeoutError::Disconnected))) => {
+                            self.stdin = slot;
+                            return Err(anyhow!(stdin_writer_failed_refusal(&self.id)));
+                        }
+                        Ok((_, Err(std::sync::mpsc::RecvTimeoutError::Timeout))) => {
+                            // The clone stays with the abandoned worker;
+                            // the original handle is restored, and the
+                            // stall flag refuses any further write so two
+                            // writers can never interleave on one handle.
+                            self.stdin_write_stalled = true;
+                            self.stdin = slot;
+                            return Err(anyhow!(stdin_stalled_write_refusal(&self.id)));
+                        }
+                        Err(error) => {
+                            // The spawn failed before any byte was written
+                            // and the worker holds nothing: restore the
+                            // handle and fail like a plain write error. A
+                            // bare `thread::spawn` panic here would unwind
+                            // through the shell-manager mutex and poison it
+                            // for the rest of the process.
+                            self.stdin = slot;
+                            return Err(anyhow!(error)
+                                .context("Failed to spawn the bounded stdin writer thread"));
+                        }
+                    }
+                } else {
+                    // The `None` slot the take site already ruled out:
+                    // no handle to write through, nothing to restore.
+                }
+                // Windows and ohos cannot clone an fd out of their handle
+                // (Windows strips the statement above because `unix` is
+                // false, ohos by the `not(target_env = "ohos")` half — the
+                // portable-pty writer box exposes no cloneable handle at
+                // all). They bound by ownership instead: the worker takes
+                // the writer, finishes the payload, and hands the writer
+                // back through the channel; a deadline timeout leaves the
+                // writer with the abandoned worker (the bytes still land if
+                // the command resumes), marks the stall, and the caller
+                // returns with the session's shell lock released — cancel,
+                // kill, and wait all stay live. This is the same wedge the
+                // unix comment above describes, closed here too.
+                #[cfg(any(target_env = "ohos", not(unix)))]
+                {
+                    let writer = slot.take().expect("slot held above");
+                    let (returned, result) = bounded_stdin_write_owned(
+                        writer,
+                        input.as_bytes().to_vec(),
+                    )
+                    .map_err(|error| {
+                        // The worker could not be spawned and the writer
+                        // went with the failed closure: `slot` stays None,
+                        // so the task honestly reports no writable stdin
+                        // from here on.
+                        anyhow!(error).context("Failed to spawn the bounded stdin writer thread")
+                    })?;
+                    match result {
+                        Ok(Ok(())) => {
+                            slot = returned;
+                        }
+                        Ok(Err(error)) => {
+                            // The worker completed and handed the writer
+                            // back: keep it attached so a write error does
+                            // not silently strip the task's interact
+                            // surface (same as the unix path above).
+                            self.stdin = returned;
+                            return Err(anyhow!(error).context("Failed to write to stdin"));
+                        }
+                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                            self.stdin_write_stalled = true;
+                            // `slot` stays None: the abandoned worker owns
+                            // the handle, so the close below cannot claim
+                            // EOF and further writes hit the stall refusal.
+                            return Err(anyhow!(stdin_stalled_write_refusal(&self.id)));
+                        }
+                        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                            // The worker died before completing (a panic in
+                            // the write path): that is a writer failure, not
+                            // a stall — the task is not marked stalled so a
+                            // healthy write after this is not refused, and
+                            // the writer is gone with the worker (nothing
+                            // to restore).
+                            return Err(anyhow!(stdin_writer_failed_refusal(&self.id)));
+                        }
+                    }
+                }
             }
             if close {
+                // Only a dropped PIPE delivers end-of-file. An explicit
+                // close on a unix PTY writer must DELIVER it instead: the
+                // old ownership box injected `\n` + VEOF on drop (a `cat`
+                // on a pty exited 0 the instant it dropped), and the dup
+                // the terminal lane now holds delivers nothing on its own
+                // because the reader holds the master — so write the same
+                // ^D semantics through the dup, then drop it. The delivery
+                // runs on the same kind of bounded worker as a payload
+                // write: two bytes into a tty whose input queue is already
+                // full (the earlier payload completed inside the deadline,
+                // so the stall flag is still down) block just as forever
+                // as a large payload would, and inline under the manager
+                // lock they wedge every shell in the session.
+                #[cfg(all(unix, not(target_env = "ohos")))]
+                if let Some(StdinWriter::PtyFile(file)) = slot.as_ref() {
+                    if !self.stdin_write_stalled {
+                        match bounded_stdin_eof_delivery(file) {
+                            BoundedEofDelivery::Delivered => {
+                                self.stdin = None;
+                                self.stdin_closed_at_eof = true;
+                                return Ok(());
+                            }
+                            // The close consumed the handle as requested,
+                            // but the bytes did not land (typically the
+                            // child was already gone and the master write
+                            // failed): keep the flag down so later refusals
+                            // do not claim readers saw end-of-file. Ok is
+                            // honest here — the release the caller asked
+                            // for happened, and no delivery is possible
+                            // once the child is gone.
+                            BoundedEofDelivery::Failed => {
+                                self.stdin = None;
+                                return Ok(());
+                            }
+                            // Queue still full at the deadline: restore the
+                            // handle under the stall flag and report the
+                            // close as FAILED. The schema's close promises a
+                            // delivered end-of-file, so a close that neither
+                            // delivered nor released must not read as
+                            // success — the same disposition the
+                            // payload-timeout arm applies.
+                            BoundedEofDelivery::Stalled => {
+                                self.stdin_write_stalled = true;
+                                self.stdin = slot;
+                                return Err(anyhow!(stdin_stalled_close_refusal(&self.id)));
+                            }
+                        }
+                    }
+                    // A task whose last write stalled gets no delivery
+                    // attempt at all: the queue that stalled the payload
+                    // would stall the two bytes too, so the close is
+                    // refused without waiting and without destroying the
+                    // interact surface — the model is told the close was
+                    // not applied instead of reading a success that
+                    // delivered nothing.
+                    self.stdin = slot;
+                    return Err(anyhow!(stdin_stalled_close_not_applied_refusal(&self.id)));
+                }
+                // Windows cannot deliver end-of-file to a console child at
+                // all (portable-pty's ConPTY writer has no EOF-on-drop —
+                // that exists only in its unix writer), so an explicit
+                // close here only releases the handle. Say so instead of
+                // returning a silent success that the schema's "Close
+                // stdin" would read as a delivered end-of-file.
+                #[cfg(all(not(unix), not(target_env = "ohos")))]
+                if matches!(slot, Some(StdinWriter::Pty(_))) {
+                    self.stdin = None;
+                    return Err(anyhow!(
+                        "stdin close for task {} released the terminal's stdin handle, but this platform cannot deliver end-of-file to a console child; the command keeps running until it finishes or its timeout ends it.",
+                        self.id
+                    ));
+                }
+                // A task whose last write STALLED must not claim EOF: the
+                // abandoned worker still holds a clone of the handle and
+                // the bytes have not finished landing, so the flag stays
+                // down and the tail refusal reports the stall instead.
+                if let Some(StdinWriter::Pipe(_)) = slot {
+                    self.stdin_closed_at_eof = !self.stdin_write_stalled;
+                }
                 self.stdin = None;
+            } else {
+                self.stdin = slot;
             }
             return Ok(());
         }
@@ -1429,7 +1932,23 @@ impl BackgroundShell {
             return Ok(());
         }
 
-        Err(anyhow!("stdin is not available for task {}", self.id))
+        if self.stdin_write_stalled {
+            return Err(anyhow!(
+                "stdin is not available for task {}: its last write stalled because the command stopped consuming stdin, and the abandoned writer may still hold the handle; kill it and start a new one.",
+                self.id
+            ));
+        }
+
+        if self.stdin_closed_at_eof {
+            return Err(anyhow!(
+                "stdin is not available for task {}: its stdin was closed, so stdin readers have seen end-of-file (a program that put its terminal into raw mode — or disabled or remapped VEOF — consumes those bytes as ordinary input instead); start input-driven work with background=true and feed it with action=\"interact\"",
+                self.id
+            ));
+        }
+        Err(anyhow!(
+            "stdin is not available for task {}: no writable stdin handle is attached to it (a finished command has released its stdin, a persistent command never exposes one, a terminal command exposes one only while it runs and only until its stdin is closed, and a bounded stdin writer that failed to spawn or panicked takes its handle with it); start input-driven work with background=true and feed it with action=\"interact\"",
+            self.id
+        ))
     }
 
     fn full_output(&self) -> (String, String, usize, usize) {
@@ -1986,6 +2505,8 @@ impl ShellManager {
                 stderr_cursor: 0,
                 completion_reported: false,
                 stdin: None,
+                stdin_closed_at_eof: false,
+                stdin_write_stalled: false,
                 child: None,
                 stop_unconfirmed: false,
                 #[cfg(windows)]
@@ -2041,6 +2562,8 @@ impl ShellManager {
                 stderr_cursor: 0,
                 completion_reported: false,
                 stdin: None,
+                stdin_closed_at_eof: false,
+                stdin_write_stalled: false,
                 child: None,
                 stop_unconfirmed: false,
                 #[cfg(windows)]
@@ -2491,6 +3014,13 @@ impl ShellManager {
 
         if stdin_data.is_some() {
             cmd.stdin(Stdio::piped());
+        } else {
+            // std defaults to `Stdio::inherit()`, which on a hosted (non-PTY)
+            // run hands the child the parent's TTY or an arbitrary pipe it can
+            // never see EOF on. This lane has no stdin payload and no operator:
+            // a deterministic null stdin gives stdin-readers an immediate
+            // end-of-file instead of a hang or a SIGTTIN stop.
+            cmd.stdin(Stdio::null());
         }
 
         child_env::apply_to_command(&mut cmd, child_env::string_map_env(&exec_env.env));
@@ -2525,6 +3055,17 @@ impl ShellManager {
         if let Some(input) = stdin_data
             && let Some(mut stdin) = child.stdin.take()
         {
+            // Same SIGPIPE discipline as the bounded stdin workers (see
+            // [`BlockedSigpipeGuard`]): the child dying mid-write must
+            // surface as a handled write error, not kill a process that
+            // runs with SIGPIPE at its default disposition. Unlike the
+            // tool surface this manager-API lane has neither
+            // [`MAX_INLINE_STDIN_BYTES`] nor the bounded writer's
+            // deadline — every production payload goes through the
+            // background lane's bounded writer (see
+            // [`STDIN_WRITE_DEADLINE`]), so a direct caller passing a
+            // payload here must keep it within what the child reads.
+            let _sigpipe = BlockedSigpipeGuard::new();
             stdin
                 .write_all(input.as_bytes())
                 .context("Failed to write to stdin")?;
@@ -2842,22 +3383,73 @@ impl ShellManager {
                         return Err(err).context("Failed to clone PTY reader");
                     }
                 };
-                let writer = match pair.master.take_writer() {
+                // The interact writer is acquired BEFORE the reader thread
+                // spawns, so a writer-acquisition failure aborts with only
+                // the child to clean up (kill + wait) instead of orphaning
+                // an already-spawned reader thread. Nothing observes the
+                // order: `pair.master` is alive across the whole block, so
+                // the slave sees no end-of-file in either arrangement.
+                //
+                // Unix: the interact writer is a dup of the master fd, and
+                // `take_writer` is NOT called — its box's Drop injects a
+                // newline plus `VEOF` into the master (that is how "dropping
+                // the writer sends EOF" is implemented there), which a
+                // terminal command that never receives an interact would read
+                // as an immediate end-of-file (probe-pinned: `cat` on a pty
+                // exited 0 the instant the box was dropped). The dup keeps
+                // a master-side description open — no EOF for the slave
+                // while the reader's clone is open too. A plain drop of the
+                // dup (the spawn-path close never touches this lane, and a
+                // close whose delivery failed releases it) still shows the
+                // child nothing;
+                // an explicit `close_stdin` instead delivers the ^D bytes
+                // itself through the bounded worker and claims end-of-file
+                // only when that write really landed; the final master
+                // handle closes at teardown, after the child can no longer
+                // observe it.
+                #[cfg(unix)]
+                let stdin_writer = {
+                    use std::os::fd::FromRawFd;
+                    match pair.master.as_raw_fd() {
+                        Some(fd) => {
+                            let dup_fd = unsafe { libc::dup(fd) };
+                            if dup_fd < 0 {
+                                let _ = child.kill();
+                                let _ = child.wait();
+                                return Err(std::io::Error::last_os_error())
+                                    .context("Failed to dup the PTY master for the stdin writer");
+                            }
+                            // SAFETY: `dup_fd` is a freshly duplicated fd owned
+                            // by this call; `File::from_raw_fd` takes ownership.
+                            Some(StdinWriter::PtyFile(unsafe {
+                                std::fs::File::from_raw_fd(dup_fd)
+                            }))
+                        }
+                        None => {
+                            let _ = child.kill();
+                            let _ = child.wait();
+                            return Err(anyhow!(
+                                "Failed to obtain the PTY master fd for the stdin writer"
+                            ));
+                        }
+                    }
+                };
+                // Windows has no dup'd master fd to hand out (the
+                // portable-pty writer box is not fd-exposed there), so the
+                // lane keeps the box and its blocking write, per the
+                // interact comment.
+                #[cfg(not(unix))]
+                let stdin_writer = Some(StdinWriter::Pty(match pair.master.take_writer() {
                     Ok(writer) => writer,
                     Err(err) => {
                         let _ = child.kill();
                         let _ = child.wait();
                         return Err(err).context("Failed to take PTY writer");
                     }
-                };
+                }));
                 let stdout_thread = Some(spawn_reader_thread(reader, Arc::clone(&stdout_buffer)));
 
-                (
-                    ShellChild::Pty(child),
-                    Some(StdinWriter::Pty(writer)),
-                    stdout_thread,
-                    None,
-                )
+                (ShellChild::Pty(child), stdin_writer, stdout_thread, None)
             }
         } else if persist_pending {
             let mut cmd = Command::new(program);
@@ -2980,6 +3572,8 @@ impl ShellManager {
             stderr_cursor: 0,
             completion_reported: false,
             stdin,
+            stdin_closed_at_eof: false,
+            stdin_write_stalled: false,
             child: Some(child),
             stop_unconfirmed: false,
             #[cfg(windows)]
@@ -3005,8 +3599,14 @@ impl ShellManager {
         if let Some(input) = stdin_data
             && let Err(err) = bg_shell.write_stdin(input, false)
         {
+            // No task id exists yet — the record is only registered below —
+            // so `write_stdin`'s "kill it and start a new one" recovery copy
+            // has no target here. The spawn aborts instead: the child is
+            // killed and the caller learns the run never started.
             let _ = bg_shell.kill();
-            return Err(err);
+            return Err(err.context(
+                "the run never started: delivering the inline stdin payload failed, so the command was killed and NO task was created (the task id the error above mentions was never registered — do not try to cancel or kill it)",
+            ));
         }
 
         if let Err(err) = bg_shell.publish_lifecycle() {
@@ -3103,6 +3703,22 @@ impl ShellManager {
             .ok_or_else(|| anyhow!("Task {task_id} not found"))?;
         shell.write_stdin(input, close)?;
         Ok(())
+    }
+
+    /// Close a foreground command's stdin PIPE so pipe readers get their
+    /// end-of-file at once, keeping any PTY writer attached: dropping the
+    /// PTY writer is invisible to the child (the reader holds the master)
+    /// but destroys the interact surface a session member can still use
+    /// while a terminal command runs — the foreground terminal lane's
+    /// contract. A missing record is a no-op, not an error: only eviction
+    /// removes a record, and eviction drops the stdin handle with it, so
+    /// the pipe cannot still be open — and the close runs between spawn
+    /// and the first caller-visible step, where an error would abort a run
+    /// whose result is already determined.
+    fn close_stdin_pipe(&mut self, task_id: &str) {
+        if let Some(shell) = self.processes.get_mut(task_id) {
+            shell.close_stdin_pipe();
+        }
     }
 
     pub fn write_stdin_for_session(
@@ -4573,20 +5189,50 @@ async fn execute_foreground_via_background(
     let task_id = spawned
         .task_id
         .ok_or_else(|| anyhow!("foreground shell did not return a process id"))?;
+    // The stdin write end must close BEFORE any fallible step between spawn
+    // and close: a future step that can fail here (the heavy-permit attach
+    // below) would otherwise return early and leak an open write end,
+    // wedging stdin-reading commands until the foreground watchdog killed
+    // them. The task-id extraction above is the one step between spawn and
+    // close, and `spawn_background_sandboxed` always returns an id on `Ok`,
+    // so the close reaches the shell layer without a fallible step in
+    // between (the manager-level `close_stdin_pipe` wrapper treats an
+    // already-evicted record as success — eviction drops the stdin
+    // handle with the record, so the invariant that matters holds: no
+    // later failure can leave the pipe open).
+    //
+    // Foreground has no operator at the keyboard, so whatever the command
+    // will ever read from stdin must be bounded now. With stdin data the
+    // payload was delivered at spawn and closing the write end turns the
+    // pipe into a normal end-of-file; with no data, closing immediately
+    // delivers that EOF at once. Leaving the write end open wedged any
+    // stdin-reading command (`cat`, a bare `$SHELL`) on a pipe that never
+    // EOFs until the foreground watchdog killed it. This is the foreground
+    // stdin contract the tool description states: a command detached to the
+    // background later (`request_foreground_background`) keeps running, but
+    // its stdin stays at EOF — `interact` reports the closed stdin and points
+    // at background=true, which is the lane for input-driven work. The close
+    // is deliberately pipe-only: a terminal (`combined_output`) foreground
+    // command's PTY writer must stay attached, because dropping it would
+    // destroy the interact surface a session member can still write to
+    // while the terminal command runs (the child sees no difference — the
+    // reader holds the master — and the terminal lane's blocking is bounded
+    // by the foreground watchdog, not by a never-EOFing pipe). The
+    // manager-side close is idempotent-safe after natural completion and on
+    // lanes where the handle is absent (persistent).
+    {
+        let mut manager = context
+            .shell_manager
+            .lock()
+            .map_err(|_| anyhow!("shell manager lock poisoned"))?;
+        manager.close_stdin_pipe(&task_id);
+    }
     if let Some(permit) = heavy_permit {
         let mut manager = context
             .shell_manager
             .lock()
             .map_err(|_| anyhow!("shell manager lock poisoned"))?;
         manager.attach_heavy_permit(&task_id, permit)?;
-    }
-
-    if stdin_data.is_some() {
-        let mut manager = context
-            .shell_manager
-            .lock()
-            .map_err(|_| anyhow!("shell manager lock poisoned"))?;
-        manager.write_stdin(&task_id, "", true)?;
     }
 
     let deadline = timeout_ms.map(|timeout| Instant::now() + Duration::from_millis(timeout));
@@ -4656,6 +5302,66 @@ async fn execute_foreground_via_background(
 }
 
 const BASH_MAX_TIMEOUT_MS: u64 = i32::MAX as u64;
+
+/// Upper bound for one inline `stdin` payload (counted in UTF-8 bytes).
+/// Every payload the tool surface accepts is delivered through the bounded
+/// stdin writer (see [`STDIN_WRITE_DEADLINE`]), so a command that stops
+/// reading surfaces as a deadline stall rather than a wedged executor; the
+/// cap additionally keeps oversized payloads from ever reaching the
+/// writer, and on Linux's default 64 KiB pipe buffer a cap-sized payload
+/// completes into an empty pipe without a reader, so the common
+/// payload-then-close foreground shape delivers without stalling there.
+/// Platforms with smaller default pipe buffers lean on the deadline
+/// instead. Anything larger is refused with a pointer at background
+/// `interact` streaming instead of hanging the session.
+const MAX_INLINE_STDIN_BYTES: usize = 64 * 1024;
+
+/// Wall-clock bound on one stdin write. At the bound an `interact` write is
+/// abandoned to its background worker (the bytes still land if the child
+/// resumes reading), the task's stdin is marked stalled, and the manager
+/// lock is released — so each stalled write costs one bounded wait under
+/// the lock, and n stalled tasks serialize into n such waits. A stalled
+/// SPAWN payload is different: no task id exists yet, so the spawn aborts
+/// and the child is killed instead of running task-less. The abandoned
+/// worker is SIGPIPE-blocked (see [`BlockedSigpipeGuard`]): when the task
+/// is later killed — the documented stall recovery — the worker observes
+/// EPIPE instead of taking the process down.
+const STDIN_WRITE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// One shared copy per stdin refusal shape so the unix fd-clone path and
+/// the owned-writer path cannot drift apart — the pins assert substrings
+/// of these. They are functions rather than consts so the deadline
+/// interpolation stays a real format capture.
+fn stdin_stalled_write_refusal(task_id: &str) -> String {
+    format!(
+        "the write to task {task_id} did not complete within {STDIN_WRITE_DEADLINE:?}: the command stopped consuming its stdin, so its input buffer filled and the rest of the payload was abandoned to a background writer (it still lands if the command resumes reading). Further stdin writes to this task are refused; kill it and start a new one."
+    )
+}
+
+fn stdin_writer_failed_refusal(task_id: &str) -> String {
+    format!(
+        "the stdin writer for task {task_id} failed: the background write ended without completing or reporting (the writer task panicked); the payload's delivery is unknown. Kill the task and start a new one."
+    )
+}
+
+/// Serves only the unix PTY close arm (the Windows/ohos close arm has its
+/// own inline copy and never takes the unix delivery path). Same
+/// predicate as the `PtyFile` variant, so `deny(warnings)`' fatal
+/// `dead_code` cannot fire on platforms where the arm is compiled out.
+#[cfg(all(unix, not(target_env = "ohos")))]
+fn stdin_stalled_close_refusal(task_id: &str) -> String {
+    format!(
+        "the stdin close for task {task_id} did not complete within {STDIN_WRITE_DEADLINE:?}: the terminal's input queue stayed full because the command stopped consuming input, so the end-of-file bytes were not delivered; the close was not applied and the interact surface stays attached. Further stdin writes to this task are refused; kill it and start a new one."
+    )
+}
+
+/// See [`stdin_stalled_close_refusal`]: unix-PTY-only, same cfg predicate.
+#[cfg(all(unix, not(target_env = "ohos")))]
+fn stdin_stalled_close_not_applied_refusal(task_id: &str) -> String {
+    format!(
+        "the stdin close for task {task_id} was not applied: its last stdin write stalled because the command stopped consuming input, so the end-of-file was never delivered and no close can deliver it now; the interact surface stays attached and further stdin writes are refused; kill it and start a new one."
+    )
+}
 
 /// Initial cadence for foreground-via-background completion polling. Fast
 /// commands dominate real agent traffic; detection latency on `true`-class
@@ -4775,7 +5481,7 @@ impl ToolSpec for LowercaseBashTool {
     }
 
     fn description(&self) -> &'static str {
-        "Execute a shell command in the workspace and return stdout and stderr. The command runs in the detected platform shell — `$SHELL` on Unix (any shell it names, falling back to `/bin/sh`); on Windows, bash when the session provides one, otherwise PowerShell (pwsh 7 or Windows PowerShell 5.1) or cmd.exe. Windows PowerShell 5.1 lacks `&&`; prefer forms the detected shell supports. In read-only shell sessions a single approved command runs directly as argv instead (only pipelines still go through the shell); with an external sandbox backend configured this tool is unavailable (use the backend-specific shell tool instead). Output keeps the last 2000 lines or 50KB. An optional timeout is expressed in seconds; when omitted the command is killed after 120 seconds, so pass an explicit timeout for work expected to take longer. In Ask, after a sandbox denial, retry the exact command once with sandbox_permissions (the narrowest wider mode that suffices) and a one-sentence justification; the approval prompt asks the user."
+        "Execute a shell command in the workspace and return stdout and stderr. The command runs in the detected platform shell — `$SHELL` on Unix (any shell it names, falling back to `/bin/sh`); on Windows, bash when the session provides one, otherwise PowerShell (pwsh 7 or Windows PowerShell 5.1) or cmd.exe. Windows PowerShell 5.1 lacks `&&`; prefer forms the detected shell supports. In read-only shell sessions a single approved command runs directly as argv instead (only pipelines still go through the shell). This foreground surface runs without a terminal stdin: interactive programs and a bare `$SHELL` receive end-of-file and exit. With an external sandbox backend configured this tool is unavailable (use the backend-specific shell tool instead). Output keeps the last 2000 lines or 50KB. An optional timeout is expressed in seconds; when omitted the command is killed after 120 seconds, so pass an explicit timeout for work expected to take longer. In Ask, after a sandbox denial, retry the exact command once with sandbox_permissions (the narrowest wider mode that suffices) and a one-sentence justification; the approval prompt asks the user."
     }
 
     fn input_schema(&self) -> serde_json::Value {
@@ -4990,14 +5696,17 @@ impl ToolSpec for BashTool {
                 },
                 "stdin": {
                     "type": "string",
-                    "description": "Stdin data to send (action=run: before waiting; action=interact: to the background task). Also accepted as `input` or `data` — send only one."
+                    "maxLength": 65536,
+                    "description": "Stdin data to send (action=run: before waiting; action=interact: to the background task). Also accepted as `input` or `data` — send only one. Inline payloads are capped at 64 KiB, counted as UTF-8 bytes (maxLength mirrors the same number): a write to a command that is not reading ends as a bounded deadline-stall refusal instead of blocking the session; for bigger payloads run the command in the background and feed it through `action=interact` in chunks."
                 },
                 "input": {
                     "type": "string",
+                    "maxLength": 65536,
                     "description": "Alias for `stdin`."
                 },
                 "data": {
                     "type": "string",
+                    "maxLength": 65536,
                     "description": "Alias for `stdin`."
                 },
                 "cwd": {
@@ -5036,7 +5745,7 @@ impl ToolSpec for BashTool {
                 },
                 "close_stdin": {
                     "type": "boolean",
-                    "description": "Close stdin after sending (action=interact)"
+                    "description": "Close stdin after sending (action=interact); on a terminal task the close delivers end-of-file, sent as a literal newline followed by the EOF byte — a program that put its terminal into raw mode, or disabled or remapped VEOF, receives those bytes as ordinary input instead, and on Windows the close only releases the terminal handle (a console child has no end-of-file to deliver)"
                 },
                 "all": {
                     "type": "boolean",
@@ -5190,12 +5899,30 @@ impl ToolSpec for BashTool {
         // for misspelled names. A wrong type is an error, never a no-op.
         let stdin_data = match first_present_field(&input, &["stdin", "input", "data"]) {
             None => None,
-            Some((name, value)) => Some(
-                value
+            Some((name, value)) => {
+                let payload = value
                     .as_str()
                     .ok_or_else(|| type_mismatch(name, value, "a string"))?
-                    .to_string(),
-            ),
+                    .to_string();
+                // The tool surface's inline cap keeps an oversized payload
+                // from ever reaching the writer; the spawn delivers the
+                // payload through the bounded stdin writer, so a command
+                // that never reads surfaces as the writer's 5-second
+                // deadline stall refusal rather than a wedged executor. On
+                // Linux the cap equals the default pipe buffer, so a
+                // cap-sized write into an empty pipe completes without a
+                // reader there; smaller default buffers lean on the same
+                // deadline on the bounded lanes. Bigger payloads belong on
+                // the background lane, fed through `action=interact` in
+                // chunks.
+                if payload.len() > MAX_INLINE_STDIN_BYTES {
+                    return Ok(ToolResult::error(format!(
+                        "The inline stdin payload is {} bytes; the shell tool accepts at most {MAX_INLINE_STDIN_BYTES} inline — run the command with background=true and feed it through action=interact in chunks.",
+                        payload.len()
+                    )));
+                }
+                Some(payload)
+            }
         };
 
         if interactive && background {
@@ -6086,9 +6813,24 @@ impl BashTool {
         // place whichever spelling the model uses.
         let interaction_input = match first_present_field(input, &["stdin", "input", "data"]) {
             None => "",
-            Some((name, value)) => value
-                .as_str()
-                .ok_or_else(|| type_mismatch(name, value, "a string"))?,
+            Some((name, value)) => {
+                let payload = value
+                    .as_str()
+                    .ok_or_else(|| type_mismatch(name, value, "a string"))?;
+                // The same bound the inline spawn payload carries: one
+                // oversized `interact` payload would push megabytes through
+                // a bounded write for no benefit — feed ≥64 KiB of input as
+                // several interact calls (or generate it in the command).
+                // The deadline below is what actually bounds the stall; this
+                // keeps each write bounded too.
+                if payload.len() > MAX_INLINE_STDIN_BYTES {
+                    return Ok(ToolResult::error(format!(
+                        "The interact stdin payload is {} bytes; the shell tool accepts at most {MAX_INLINE_STDIN_BYTES} per interact call — split the feed across interact calls.",
+                        payload.len()
+                    )));
+                }
+                payload
+            }
         };
 
         {
