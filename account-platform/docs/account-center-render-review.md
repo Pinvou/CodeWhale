@@ -28,7 +28,7 @@ Paths below are under `pinvou3-app/src/features/account-platform/` unless specif
 | 18 | Shared benefits use explicit card styles and contain exact large balances | PortalBenefits.jsx, account-portal-layout.css |
 | 19 | Usage refresh belongs to the usage heading | PortalUsage.jsx, PersonalUsageWorkspace.jsx |
 | 20 | Period statistics start compact and retain continuation/error recovery | PortalUsage.jsx |
-| 21 | Visible account-center dates include seconds and a time-zone indicator | account-center-view.js and its account-center consumers |
+| 21 | Order, benefit-validity and role-expiry timestamps include seconds and a time-zone indicator | account-center-view.js and its account-center consumers |
 | 22 | Account closure follows ordinary profile/security operations | AccountPlatformView.jsx |
 | 23 | Admin navigation is labeled as an admin entry | AccountPlatformView.jsx |
 | 24 | Failed compact copying reveals the complete selectable identifier | CopyIdentifier.jsx |
