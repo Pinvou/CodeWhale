@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { accountLayoutCopy, accountCenterCopy, financeCopy } from '../../shared/i18n.js';
 import { PortalDialog } from './PortalDialog.jsx';
+import { PortalSectionAction } from './PortalSectionAction.jsx';
 import { formatBalance } from './balance-view.js';
 import { integerMoney } from './finance-contract.js';
 import { localizedProductDisplayName } from './localized-product-display-name.js';
@@ -25,7 +26,7 @@ export function PortalBenefits({ items, language, now }) {
     </article>;
   };
   const selected = items.find(item => item.package_id === dialog);
-  return <section className="ap-benefits"><div className="ap-section-heading"><h3>{copy.packages}</h3><button type="button" onClick={() => setDialog('all')}>{words.allPackages}</button></div><p className="ap-muted">{words.packagesSummary(active.length, formatBalance(remaining.toString(), language))}</p>
+  return <section className="ap-benefits"><div className="ap-section-heading"><h3>{copy.packages}</h3><PortalSectionAction icon="view" onClick={() => setDialog('all')}>{words.allPackages}</PortalSectionAction></div><p className="ap-muted">{words.packagesSummary(active.length, formatBalance(remaining.toString(), language))}</p>
     {!active.length && <p>{copy.empty}</p>}<div className="ap-benefit-grid">{active.slice(0, 5).map(card)}</div>
     {dialog === 'all' && <PortalDialog title={copy.packages} closeLabel={words.closeDialog} onClose={() => setDialog(null)}><div className="ap-benefit-grid">{items.map(card)}</div>{!items.length && <p>{copy.empty}</p>}</PortalDialog>}
     {selected && <PortalDialog title={words.packageDetails} closeLabel={words.closeDialog} onClose={() => setDialog(null)}><h3>{localizedProductDisplayName(selected, language, 'plan_id')}</h3><dl><dt>{copy.remaining}</dt><dd>{formatBalance(selected.points_remaining_microcredits, language)}</dd><dt>{copy.used}</dt><dd>{formatBalance(selected.points_used_microcredits, language)}</dd><dt>{copy.validUntil}</dt><dd>{date(selected.valid_until || selected.expires_at)}</dd><dt>{copy.status}</dt><dd>{status(selected.status)}</dd></dl></PortalDialog>}

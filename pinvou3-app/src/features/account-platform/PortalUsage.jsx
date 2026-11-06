@@ -6,6 +6,7 @@ import { formatBalance } from './balance-view.js';
 import { CopyIdentifier } from './CopyIdentifier.jsx';
 import { useUsagePeriodSummary } from './useUsagePeriodSummary.js';
 import { PortalDialog } from './PortalDialog.jsx';
+import { PortalSectionAction } from './PortalSectionAction.jsx';
 import { usePortalDialogScope } from './portal-dialog-scope.jsx';
 
 // The history endpoint is cursor-paginated. Never present this page's subtotal
@@ -41,8 +42,7 @@ export function PortalUsage({ client, owner, versions, copy, language, records, 
     return copy.usageStatuses[record.display_status] || record.display_status;
   };
   return <section className="ap-usage-workspace">
-    <div className="ap-section-heading"><h3>{copy.usageTitle}</h3><button type="button" disabled={busy} onClick={onRefresh}>{words.refreshUsage}</button></div>
-    {busy && <p role="status">{copy.loading}</p>}
+    <div className="ap-section-heading"><h3>{copy.usageTitle}</h3><PortalSectionAction busy={busy} loadingLabel={copy.loading} onClick={onRefresh}>{words.refreshUsage}</PortalSectionAction></div>
     {unavailable ? <p role="alert">{copy.usageUnavailable}</p> : <>
       <div className="ap-usage-filters">
         <label>{words.usageFrom}<input type="date" value={filters.from} onChange={change('from')} /></label>

@@ -22,4 +22,7 @@
 /* Order reads keep one centered frame while their status and facts arrive. */
 .ap-restored-dialog.ap-order-details-dialog { display: flex; flex-direction: column; height: min(640px, calc(100vh - 48px)); overflow: hidden; }
 .ap-order-details-dialog > header { flex: 0 0 auto; }
-.ap-order-details-body { flex: 1 1 auto; min-height: 0; overflow: auto; overscroll-behavior: contain; }
+.ap-order-details-body { flex: 1 1 auto; min-height: 0; overflow: auto; overscroll-behavior: contain; scrollbar-gutter: stable; }
+
+.ap-order-read-status { min-height: 28px; }
+.ap-order-read-status > p, .ap-order-read-status .ap-finance-feedback p { margin: 0; }

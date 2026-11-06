@@ -46,7 +46,22 @@
 .ap-restored-portal .ap-finance > header { margin-bottom: 20px; }
 .ap-restored-portal .ap-section-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 16px; }
 .ap-restored-portal .ap-section-heading h3 { margin: 0; }
-.ap-restored-portal .ap-section-heading button { border: 0; background: transparent; }
+/* Section controls have the same visible boundary inside every card. */
+.ap-restored-portal .ap-section-heading .ap-section-action {
+  position: relative; display: inline-flex; flex: 0 0 auto; align-items: center; justify-content: center; gap: 8px;
+  min-height: 40px; padding: 8px 14px; border: 1px solid #dfe2e7; border-radius: 8px; background: #fff; color: #39434a; line-height: 22px;
+}
+.ap-section-action > svg { flex: 0 0 16px; width: 16px; height: 16px; }
+.ap-section-action-labels { display: grid; }
+.ap-section-action-labels > span, .ap-section-action-labels::before, .ap-section-action-labels::after { grid-area: 1 / 1; }
+.ap-section-action-labels::before { content: attr(data-label); visibility: hidden; }
+.ap-section-action-labels::after { content: attr(data-loading-label); visibility: hidden; }
+.ap-restored-portal .ap-section-heading .ap-section-action:hover:not(:disabled) { background: #f5f9f6; border-color: #9ab9a6; color: #16633f; }
+.ap-restored-portal .ap-section-heading .ap-section-action[aria-busy="true"] { opacity: 1; color: #5f6f64; background: #f5f7f6; cursor: wait; }
+.ap-section-action[aria-busy="true"] > svg { animation: ap-section-refresh 1s linear infinite; }
+.ap-account-information-actions { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 12px; }
+@keyframes ap-section-refresh { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .ap-section-action > svg { animation: none !important; } }
 .ap-restored-portal .ap-product-picker { display: grid; grid-template-columns: repeat(auto-fill, minmax(205px, 1fr)); gap: 12px; }
 .ap-restored-portal .ap-product-picker label { display: grid; position: relative; gap: 12px; min-width: 0; padding: 20px; border: 1px solid var(--ap-border); border-radius: 12px; background: #fff; cursor: pointer; overflow-wrap: anywhere; }
 .ap-restored-portal .ap-product-picker label:hover { border-color: var(--ap-border); }
@@ -204,8 +219,9 @@
   margin: 24px 0; padding: 24px; border: 1px solid var(--ap-border); border-radius: 12px; background: var(--ap-card);
 }
 .ap-restored-portal .ap-portal-panel > section.ap-personal-usage { padding-top: 0; border-top: 0; }
-.ap-restored-portal .ap-portal-finance { margin-bottom: 24px; }
-.ap-restored-portal .ap-recharge-form { padding: 24px; border: 1px solid var(--ap-border); border-radius: 12px; background: var(--ap-card); }
+.ap-restored-portal .ap-portal-finance { margin: 0 0 24px; padding: 0; border: 0; background: transparent; }
+.ap-restored-portal .ap-recharge-card { margin: 0; padding: 24px; border: 1px solid var(--ap-border); border-radius: 12px; background: var(--ap-card); }
+.ap-restored-portal .ap-recharge-form { margin: 0; padding: 0; border: 0; background: transparent; }
 .ap-restored-portal .ap-org-finance { padding: 0; background: transparent; }
 .ap-restored-portal .ap-org-finance > section { padding: 24px; }
 .ap-restored-portal .ap-org-finance .ap-benefit-card { padding: 16px 0; border: 0; border-radius: 0; }
@@ -261,7 +277,7 @@
 }
 .ap-restored-portal .ap-context-settings .ap-invitations { margin-top: 24px; padding-top: 20px; border-top: 1px solid var(--ap-border); }
 @media (max-width: 560px) {
-  .ap-restored-portal .ap-usage-workspace, .ap-restored-portal .ap-order-history, .ap-restored-portal .ap-benefits, .ap-restored-portal .ap-recharge-form { padding: 16px; }
+  .ap-restored-portal .ap-usage-workspace, .ap-restored-portal .ap-order-history, .ap-restored-portal .ap-benefits, .ap-restored-portal .ap-recharge-card { padding: 16px; }
   .ap-restored-portal .ap-order-table-wrap table { min-width: 0; table-layout: auto; }
   .ap-restored-portal .ap-order-table-wrap td { flex-wrap: wrap; }
   .ap-restored-portal .ap-department-list li, .ap-restored-portal .ap-policy-form .ap-form-fields, .ap-restored-portal .ap-model-checklist { grid-template-columns: minmax(0, 1fr); }
@@ -291,3 +307,7 @@
 @media (max-width: 560px) { .ap-restored-portal .ap-pending-order-section { padding: 16px; } }
 
 .ap-restored-portal .ap-role-description { display: block; margin-top: 8px; color: var(--ap-secondary); font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
+
+@media (max-width: 560px) { .ap-restored-portal .ap-section-heading { flex-wrap: wrap; } .ap-restored-portal .ap-section-heading > .ap-section-action { margin-left: auto; } }
+
+@media (pointer: coarse) { .ap-restored-portal .ap-section-heading .ap-section-action { min-height: 44px; } }

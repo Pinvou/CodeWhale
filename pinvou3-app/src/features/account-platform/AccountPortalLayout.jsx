@@ -18,7 +18,7 @@ function NavIcon({ section }) {
   </svg>;
 }
 
-export function AccountPortalLayout({ me, copy, language, organizationName, organizationRoles = noRoles, onSwitchIdentity, onLanguageChange, navigation, busy, onRefresh, onLogout, children }) {
+export function AccountPortalLayout({ me, copy, language, organizationName, organizationRoles = noRoles, onSwitchIdentity, onLanguageChange, navigation, busy, onLogout, children }) {
   const label = accountDisplayLabel(me, copy.user);
   const words = accountCenterCopy[language];
   const organizational = me.active_context?.context_type === 'ORGANIZATION';
@@ -56,7 +56,7 @@ export function AccountPortalLayout({ me, copy, language, organizationName, orga
       </div>
       <div className="ap-sidebar-foot"><select aria-label={copy.language} value={language} onChange={event => onLanguageChange(event.target.value)}>{supportedLocales.map(locale => <option key={locale} value={locale}>{localeNames[locale]}</option>)}</select><div className="ap-sidebar-actions">{me.platform_permissions?.some(permission => permission.startsWith('platform.')) && <a className="ap-sidebar-action" href="/admin.html">{words.adminEntry}</a>}<button className="ap-sidebar-action" type="button" disabled={busy} onClick={onLogout}>{copy.logout}</button></div></div>
     </aside>
-    <main className="ap-main"><header className="ap-page-header"><div><h2>{copy.sections[navigation.section]}</h2><p>{words.refreshLead}</p></div><button type="button" disabled={busy} onClick={onRefresh}>{words.refreshAccount}</button></header>{children}</main>
+    <main className="ap-main"><header className="ap-page-header"><div><h2>{copy.sections[navigation.section]}</h2><p>{words.refreshLead}</p></div></header>{children}</main>
   </div>;
 }
 

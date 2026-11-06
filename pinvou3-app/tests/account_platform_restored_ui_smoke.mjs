@@ -44,6 +44,56 @@ try {
     try { await action(); assert.deepEqual(errors, [], 'uncaught UI error'); console.log(`PASS ${name}`); passed++; }
     catch (error) { console.error(JSON.stringify({ case: name, pageErrors: errors, dialog: await page.evaluate(() => document.querySelector('[role=dialog]')?.textContent.slice(0, 1200)) })); throw error; }
   };
+  await run('refresh actions preserve section geometry during held HTTP reads', async () => {
+    for (const viewport of [{ width: 1440, height: 850 }, { width: 390, height: 720 }]) {
+      for (const target of [
+        { section: 'creditsUsage', button: '.ap-portal-finance .ap-section-heading button', content: '.ap-recharge-form', endpoint: '/v1/recharge/products' },
+        { section: 'ordersInvoices', button: '.ap-order-history > .ap-section-heading button', content: '.ap-order-history table', endpoint: '/v1/recharge/products' },
+        { section: 'creditsUsage', button: '.ap-usage-workspace > .ap-section-heading button', content: '.ap-usage-filters', endpoint: '/v1/me/usage-' },
+      ]) {
+        await fresh(); await page.setViewport(viewport); await accountTab(target.section);
+        await page.waitForFunction(selector => !document.querySelector(selector)?.disabled, {}, target.button);
+        await page.$eval(target.button, node => node.scrollIntoView({ block: 'center' }));
+        await page.evaluate(endpoint => {
+          const fetch = globalThis.fetch;
+          globalThis.fetch = async (...args) => {
+            if (String(args[0]).includes(endpoint)) await new Promise(resolve => { window.restored.releaseSectionRefresh = resolve; });
+            return fetch(...args);
+          };
+        }, target.endpoint);
+        const geometry = () => page.evaluate(({ button, content }) => {
+          const box = selector => { const r = document.querySelector(selector).getBoundingClientRect(); return [r.x, r.y, r.width, r.height]; };
+          return { scroll: scrollY, button: box(button), content: box(content) };
+        }, target);
+        const before = await geometry(); await page.click(target.button);
+        await page.waitForFunction(() => typeof window.restored.releaseSectionRefresh === 'function');
+        assert.deepEqual(await geometry(), before, `loading must not move ${target.content}`);
+        assert.equal(await page.$eval(target.button, b => b.getAttribute('aria-busy')), 'true');
+        await page.evaluate(() => window.restored.releaseSectionRefresh());
+        await page.waitForFunction(selector => !document.querySelector(selector).disabled, {}, target.button);
+        assert.deepEqual(await geometry(), before, `completion must not move ${target.content}`);
+      }
+    }
+  });
+  await run('approved section actions are card-local and profile refresh belongs only to settings', async () => {
+    for (const language of ['zh', 'en', 'ja']) {
+      await fresh(); await page.select('.ap-sidebar-foot select', language);
+      await page.waitForFunction(() => !document.querySelector('.ap-portal-finance .ap-section-heading button')?.disabled);
+      assert.equal(await page.$$eval('.ap-page-header button', nodes => nodes.length), 0);
+      assert.deepEqual(await page.$eval('.ap-portal-finance', node => { const style = getComputedStyle(node); return [style.paddingTop, style.paddingLeft, style.backgroundColor]; }), ['0px', '0px', 'rgba(0, 0, 0, 0)']);
+      assert.ok(await page.$eval('.ap-recharge-form', node => Boolean(node.closest('.ap-recharge-card')?.querySelector('.ap-section-heading h3'))));
+      for (const selector of ['.ap-recharge-card', '.ap-benefits', '.ap-usage-workspace']) {
+        const style = await page.$eval(`${selector} > .ap-section-heading button`, node => { const s = getComputedStyle(node); return { border: s.borderTopWidth, height: node.getBoundingClientRect().height, radius: s.borderRadius, icon: Boolean(node.querySelector('svg')) }; });
+        assert.deepEqual(style, { border: '1px', height: 40, radius: '8px', icon: true });
+      }
+      await accountTab('ordersInvoices'); assert.equal(await page.$$eval('.ap-page-header button', nodes => nodes.length), 0);
+      await accountTab('accountSettings'); assert.equal(await page.$$eval('#ap-panel-accountSettings .ap-account-information .ap-section-action', nodes => nodes.length), 1);
+      if (process.env.UI_ARTIFACT_DIR && language === 'zh') {
+        await page.screenshot({ path: path.join(process.env.UI_ARTIFACT_DIR, 'approved-settings-actions.png'), fullPage: true });
+        await accountTab('creditsUsage'); await activeAccount('creditsUsage'); await page.waitForFunction(() => document.querySelector('[data-section=creditsUsage]').getAttribute('aria-selected') === 'true'); await page.screenshot({ path: path.join(process.env.UI_ARTIFACT_DIR, 'approved-credit-actions.png'), fullPage: true });
+      }
+    }
+  });
   await run('personal action hierarchy distinguish closure, query, cancel and recharge', async () => {
     for (const language of ['zh', 'en', 'ja']) {
       await fresh();
@@ -95,12 +145,13 @@ try {
     const geometry = () => page.evaluate(() => {
       const table = document.querySelector('.ap-order-history table').getBoundingClientRect();
       const dialog = document.querySelector('.ap-order-details-dialog')?.getBoundingClientRect();
-      return { scroll: scrollY, table: [table.x, table.y, table.width], dialog: dialog && [dialog.x, dialog.y, dialog.width, dialog.height] };
+      const facts = document.querySelector('.ap-order-details-dialog dl')?.getBoundingClientRect();
+      return { scroll: scrollY, table: [table.x, table.y, table.width], dialog: dialog && [dialog.x, dialog.y, dialog.width, dialog.height], facts: facts && [facts.x, facts.y, facts.width] };
     });
     const before = await geometry();
     await page.click('.ap-order-history tbody tr:nth-child(2) td:last-child button');
     await page.waitForFunction(() => typeof window.restored.releaseOrderDetail === 'function');
-    const loading = await geometry(); assert.deepEqual(loading.table, before.table); assert.equal(loading.scroll, before.scroll); assert.ok(loading.dialog);
+    const loading = await geometry(); assert.deepEqual(loading.table, before.table); assert.equal(loading.scroll, before.scroll); assert.ok(loading.dialog); assert.ok(loading.facts, 'known order facts must be present while the read is pending');
     await page.evaluate(() => { window.restored.holdOrderDetail = false; window.restored.releaseOrderDetail(); });
     await page.waitForFunction(() => document.querySelector('.ap-order-details-dialog dd code'));
     await page.waitForFunction(() => !document.querySelector('.ap-order-details-dialog [aria-busy=true]'));
@@ -425,7 +476,8 @@ try {
       await page.click('.ap-organization-orders tbody tr:first-child td:last-child button');
       await page.waitForFunction(() => !document.querySelector('.ap-order-details-dialog') && document.querySelector('[role=alert]'));
       assert.equal(await page.$$eval('.ap-order-details-dialog', nodes => nodes.length), 0);
-      assert.equal(await page.$eval('.ap-page-header button', node => node.disabled), false);
+      await accountTab('accountSettings');
+      assert.equal(await page.$eval('.ap-account-information .ap-section-action', node => node.disabled), false);
     }
   });
   await run('render review: model forms, owner removal and responsive control geometry', async () => {
@@ -525,9 +577,10 @@ try {
     await page.waitForFunction(() => document.querySelector('.ap-identity-card strong')?.textContent === 'Renamed organization');
     assert.ok(!(await page.$eval('.ap-identity-card', node => node.textContent)).includes(await page.evaluate(() => window.restored.copy().organization.enumRole_OWNER)));
     await page.evaluate(() => { window.restored.organizationName = 'Renamed again'; });
-    await page.click('.ap-page-header > button');
+    await accountTab('accountSettings'); await page.click('.ap-account-information .ap-section-action');
     await page.waitForFunction(() => document.querySelector('.ap-identity-card strong')?.textContent === 'Renamed again');
     assert.equal(await page.evaluate(() => window.restored.context.context_version), 1);
+    await accountTab('myOrganization');
     await page.evaluate(() => { window.restored.organizationName = 'Renamed through organization refresh'; });
     await page.click('.ap-organization-workspace > .ap-section-heading button');
     await page.waitForFunction(() => document.querySelector('.ap-identity-card strong')?.textContent === 'Renamed through organization refresh');
