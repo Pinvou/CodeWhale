@@ -51,15 +51,15 @@ func TestF18HoldRecoveryUsesTrustedFence(t *testing.T) {
 		t.Fatal("owned identity/absence guard")
 	}
 	roles := []string{"billing_schema_owner", "billing_service", "billing_migrator"}
+	var created []f18RoleLease
+	coordinator := f18Coordinator{user: expectedUser, directory: expectedDirectory, port: expectedPort, localOwned: localOwned}
 	t.Cleanup(func() {
 		cleanup, done := context.WithTimeout(context.Background(), 10*time.Second)
 		defer done()
-		for _, role := range []string{"billing_migrator", "billing_service", "billing_schema_owner"} {
-			if _, e := admin.Exec(cleanup, "DROP ROLE "+pgx.Identifier{role}.Sanitize()); e != nil {
-				t.Error("owned actor cleanup failed")
-			}
+		defer admin.Close(cleanup)
+		if err := coordinator.cleanupRoles(cleanup, admin, created); err != nil {
+			t.Error("owned actor cleanup unconfirmed", err)
 		}
-		admin.Close(cleanup)
 	})
 	for _, role := range roles {
 		login, inherit := "LOGIN", "NOINHERIT"
@@ -71,6 +71,10 @@ func TestF18HoldRecoveryUsesTrustedFence(t *testing.T) {
 		}
 		if _, e = admin.Exec(ctx, "CREATE ROLE "+pgx.Identifier{role}.Sanitize()+" "+login+" "+inherit+" NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS"); e != nil {
 			t.Fatal("owned actor creation failed")
+		}
+		created = append(created, f18RoleLease{name: role})
+		if err := admin.QueryRow(ctx, `SELECT oid FROM pg_roles WHERE rolname=$1`, role).Scan(&created[len(created)-1].oid); err != nil {
+			t.Fatal("owned actor identity recording failed")
 		}
 	}
 	if _, e = admin.Exec(ctx, "GRANT billing_schema_owner,billing_service TO billing_migrator; GRANT billing_service TO billing_schema_owner WITH INHERIT TRUE,SET TRUE"); e != nil {
