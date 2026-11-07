@@ -115,3 +115,11 @@
 .adm-restored-shell .adm-binding-applied-query code{margin-left:6px;font-size:12px;color:var(--adm-text);white-space:normal;overflow-wrap:break-word}
 .adm-restored-shell .adm-binding-invalid-query{color:var(--adm-danger,#b42318)}
 @media(max-width:760px){.adm-restored-shell .adm-binding-filter-heading{padding:14px 14px 0}.adm-restored-shell .adm-binding-applied-query,.adm-restored-shell .adm-binding-filter-summary{padding-right:14px;padding-left:14px}.adm-restored-shell .adm-binding-query .adm-role-toolbar{grid-template-columns:minmax(0,1fr) minmax(0,1fr)}.adm-restored-shell .adm-binding-query .adm-role-toolbar label{grid-column:1/-1}.adm-restored-shell .adm-binding-local-filters .adm-role-toolbar{grid-template-columns:minmax(0,1fr)}}
+
+.adm-grant-target-summary-ui .adm-grant-target-readback{display:grid;gap:5px;min-width:0;margin:14px 0;padding:10px 12px;border:1px solid var(--adm-line);border-radius:9px;background:var(--adm-soft)}
+.adm-grant-target-summary-ui .adm-grant-target-readback small{color:var(--adm-muted)}
+.adm-grant-target-summary-ui .adm-grant-target-readback code,.adm-grant-target-summary-ui .adm-grant-target-readback strong{white-space:normal;overflow-wrap:anywhere}
+.adm-grant-target-summary-ui .adm-grant-manual-target{min-width:0;margin:12px 0}
+.adm-grant-target-summary-ui .adm-grant-manual-target summary{cursor:pointer;color:var(--adm-primary);overflow-wrap:anywhere}
+
+.adm-grant-target-summary-ui .adm-grant-query-context{margin:8px 0;color:var(--adm-muted);overflow-wrap:anywhere}
