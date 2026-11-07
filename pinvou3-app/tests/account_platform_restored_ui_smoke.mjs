@@ -1213,6 +1213,13 @@ try {
       const words = await roleWords();
       assert.equal(await page.$eval('.adm-role-detail h3', node => node.textContent), words.names.PLATFORM_AUDITOR);
       assert.equal(await page.$$eval('.adm-role-permission-groups details', nodes => nodes.length), 4);
+      assert.deepEqual(await page.$$eval('.adm-role-permission code', nodes => nodes.map(node => node.textContent).sort()), ['platform.audit.export', 'platform.audit.read', 'platform.billing.ledger.read', 'platform.billing.wallets.read', 'platform.models.read', 'platform.organizations.read', 'platform.roles.read', 'platform.system.status.read', 'platform.usage.read', 'platform.users.read'].sort());
+      assert.deepEqual(await page.$$eval('.adm-role-permission-groups summary > span:last-child', nodes => nodes.map(node => Number(node.textContent))), [3, 3, 1, 3]);
+      assert.equal(await page.$$eval('.adm-role-permission .adm-identifier-copy', nodes => nodes.length), 10);
+      assert.equal(await page.$$eval('.adm-role-permission .adm-identifier-toggle', nodes => nodes.length), 0, 'full permission codes need no expansion action');
+      const firstGroup = await page.$('.adm-role-permission-groups summary'); await firstGroup.focus();
+      await page.keyboard.press('Enter'); assert.equal(await page.$eval('.adm-role-permission-groups details', node => node.open), false);
+      await page.keyboard.press('Enter'); assert.equal(await page.$eval('.adm-role-permission-groups details', node => node.open), true); await firstGroup.dispose();
       await click('.adm-role-table button', words.names.PLATFORM_SUPER_ADMIN);
       assert.equal(await page.$('.adm-role-detail>.adm-role-primary'), null, 'protected superadmin gained a grant control');
       await click('.adm-role-table button', words.names.PLATFORM_AUDITOR);
@@ -1225,6 +1232,8 @@ try {
           return { inputHeight: input.height, tableWidth: table.width, wrapWidth: wrap.width };
         });
         assert.ok(measured.inputHeight <= 48 && measured.tableWidth <= measured.wrapWidth + 1, JSON.stringify(measured));
+        assert.ok(await page.$$eval('.adm-role-permission > strong', nodes => nodes.every(node => Number.parseFloat(getComputedStyle(node).fontSize) >= 14)));
+        assert.ok(await page.$$eval('.adm-role-permission .adm-identifier code', nodes => nodes.every(node => Number.parseFloat(getComputedStyle(node).fontSize) >= 12 && getComputedStyle(node).whiteSpace === 'normal')));
         if (process.env.UI_ARTIFACT_DIR && language === 'zh' && [1300, 390].includes(width)) {
           fs.mkdirSync(process.env.UI_ARTIFACT_DIR, { recursive: true });
           await page.screenshot({ path: path.join(process.env.UI_ARTIFACT_DIR, `roles-${width === 1300 ? 'desktop' : 'mobile'}.png`) });
