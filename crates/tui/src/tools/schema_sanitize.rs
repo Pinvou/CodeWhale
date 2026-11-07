@@ -73,16 +73,389 @@ pub fn sanitize_for_strict(schema: &mut Value) {
 
 /// Sanitize a tool `parameters` schema for xAI chat completions.
 ///
-/// xAI validates that the parameters root is an object schema and rejects a
-/// root-level `anyOf`/`oneOf` union with any non-object branch
-/// ("tool parameter root must be an object type"). The built-in `apply_patch`
-/// schema's `oneOf: [{required:["patch"]}, {required:["changes"]}]` trips this
-/// with a 400 on the first tool-bearing request. The Responses-API pass
-/// performs exactly the required normalization — merge root composition
-/// properties, force `type: object`, drop root-only composition keywords —
-/// so reuse it and surface the dropped constraint as a description note.
+/// xAI rejects a parameters root that is neither an object schema nor a
+/// root-level `anyOf`/`oneOf` union whose every branch is itself an object
+/// schema ("tool parameter root must be an object type"), naming the tool in
+/// the 400. The live incident recorded in upstream fix `ab6c68a4d`
+/// (2026-07-19, grok-4.5's first tool-bearing request) died on `apply_patch`'s
+/// `oneOf` required-groups (`patch` | `replace` | `changes`). xAI's 2026-10-10
+/// function-calling documentation
+/// (https://docs.x.ai/developers/tools/function-calling) has since relaxed
+/// the rule — "A root `anyOf` or `oneOf` also works when every branch is
+/// itself an object" — so that documented-good shape now passes through with
+/// only the shared normalization pass (its dangling-`required` prune
+/// included) and the dependent-keyword drop — but only when that shared pass
+/// would keep every branch's `required` group. An object branch that
+/// declares its group as a bare `required` (the names living in the root's
+/// shared `properties`, as raw MCP servers commonly ship) would be pruned
+/// into a constraint-free `{type:"object",properties:{}}`; two identically
+/// gutted branches make an exactly-one `oneOf` unsatisfiable for every
+/// instance, a worse fate than the flattening pass's disclosed
+/// note-only degradation. Such unions, and everything else that never
+/// qualified (non-object roots, unions with a non-object branch,
+/// composite roots mixing a union with `allOf`/`enum`/`not`, both union
+/// keywords at once, malformed union values), still go through the
+/// Responses-API flattening pass.
+///
+/// Pass-through is granted on semantic usability, not structural
+/// distinctness: pairwise-distinct projected branches can still serve no
+/// instance (review 5802378120: the registry pre-prune of cross-branch
+/// `required` groups leaves two required-free object branches that both
+/// match `{}`; review 5802577370: a nested `oneOf` the recursive cleanup
+/// collapses into identical branches kills its whole parent branch). The
+/// rehearsal clone is therefore judged by [`oneof_semantic_defect`], and
+/// only a union it cannot kill passes through; a killed union takes the
+/// flattening fallback, which keeps the shared root properties usable.
+/// The kill reason is emitted at debug level; the user-facing note stays
+/// the flattening pass's own.
 pub fn sanitize_for_xai_parameters(parameters: &mut Value) -> Option<String> {
+    if root_union_is_all_object_branches(parameters) && union_branches_keep_required(parameters) {
+        // Decide on the EFFECTIVE post-normalization shape: the recursive
+        // cleanup below can manufacture branch equality that the raw input
+        // does not show (review 5800015446: branch `required` groups naming
+        // their own declared nested object get that nested object's groups
+        // pruned and empty properties injected, collapsing initially
+        // distinct alternatives into identical bare objects). Rehearse the
+        // exact transformation on a clone and only commit to pass-through
+        // when the normalized union stays semantically usable; otherwise the
+        // original (still unmutated) parameters take the flattening
+        // fallback, which keeps the shared root properties usable.
+        let mut normalized = parameters.clone();
+        drop_dependent_keywords(&mut normalized);
+        sanitize(&mut normalized);
+        // Annotation-only divergence (title/description/examples/…) keeps raw
+        // values unequal without making the validation constraints different
+        // (review 5800814557: gutted registry branches differing only in
+        // annotations passed the raw-equality check and still reached xAI as
+        // two validation-equivalent exactly-one alternatives). Compare
+        // validation-relevant shapes only; the real parameters keep their
+        // annotations either way.
+        strip_annotation_keywords(&mut normalized);
+        if let Some(reason) = oneof_semantic_defect(&normalized) {
+            tracing::debug!("xAI union takes the flattening pass: {reason}");
+        } else {
+            let dependent_note = drop_dependent_keywords(parameters);
+            sanitize(parameters);
+            return dependent_note;
+        }
+    }
     sanitize_for_responses(parameters)
+}
+
+/// Recursively remove the JSON-Schema annotation keywords (spec §7: they
+/// carry no validation semantics) so branch comparison sees
+/// validation-relevant shape only.
+///
+/// The walk distinguishes schema positions from data positions (review
+/// 5802577370, inline P3): the values of `properties` / `$defs` /
+/// `patternProperties` / `dependentSchemas` are schemas keyed by *field
+/// names*, so the map itself is never stripped — a real property named
+/// `title` is validation surface, not an annotation — and only each
+/// value is visited as a schema. The values of `const` / `enum` are
+/// *instance data*, so they are skipped wholesale instead of having
+/// their `title`-shaped keys rewritten. Annotation keywords themselves
+/// are still removed only at schema nodes.
+fn strip_annotation_keywords(value: &mut Value) {
+    match value {
+        Value::Object(obj) => {
+            for key in [
+                "title",
+                "description",
+                "default",
+                "examples",
+                "$comment",
+                "deprecated",
+                "readOnly",
+                "writeOnly",
+            ] {
+                obj.remove(key);
+            }
+            for (key, child) in obj.iter_mut() {
+                match key.as_str() {
+                    // Name → schema maps: the keys are field names, never
+                    // schema keywords; only the values are schemas.
+                    "properties" | "$defs" | "patternProperties" | "dependentSchemas" => {
+                        if let Some(map) = child.as_object_mut() {
+                            for subschema in map.values_mut() {
+                                strip_annotation_keywords(subschema);
+                            }
+                        } else {
+                            // Malformed keyword value: keep the historical
+                            // walk instead of guessing its shape.
+                            strip_annotation_keywords(child);
+                        }
+                    }
+                    // Instance data: stripping inside it would corrupt the
+                    // very constraint the value expresses.
+                    "const" | "enum" => {}
+                    _ => strip_annotation_keywords(child),
+                }
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                strip_annotation_keywords(item);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Semantic usability judgment for an exactly-one union, run on the
+/// already-normalized, annotation-stripped rehearsal clone (see
+/// [`sanitize_for_xai_parameters`]).
+///
+/// Structural pairwise-distinctness (reviews 5799828607, 5800814557,
+/// 5802378120) reached its boundary: two more Registry→xAI forms pass it
+/// while the union still serves no instance. Review 5802378120 (form A):
+/// the registry pre-prune of branch `required` groups naming *cross-branch*
+/// shared fields leaves two required-free object branches — pairwise
+/// distinct, yet both match `{}`, so the exactly-one contract already
+/// fails there. Review 5802577370 (form B): a nested `oneOf` the
+/// recursive cleanup collapses into identical branches is unsatisfiable,
+/// which kills its whole parent branch and with it the union's payload.
+/// The judgment therefore walks every `oneOf` node (root or nested) and
+/// fires — without becoming a general JSON-Schema solver — when:
+///
+/// - R1: two projected branches are deep-equal (every matching instance
+///   matches both, every other matches neither — the union accepts
+///   nothing),
+/// - R2: at least two branches are required-free object branches — the
+///   `required` group was the branch's only cross-branch discriminator,
+///   and neither an optional property map nor any `minProperties` floor
+///   restores the distinction (floors 0, 1 and 2 all leave every
+///   shared-root-valid instance clearing them matching both alternatives;
+///   reviews 5802378120, 5808313704, 5811366579),
+/// - R3: a branch's subtree contains a dead inner `oneOf` (the branch
+///   cannot match, so the union loses that alternative's payload).
+///
+/// The walk distinguishes schema positions from instance data exactly
+/// like [`strip_annotation_keywords`] (a property named `oneOf`, or
+/// object data under `const`/`enum`, must never be read as a union), and
+/// needs no artificial depth bound: the document is finite and `$ref`
+/// values are strings that are never followed.
+///
+/// Returns `Some(reason)` naming the rule and structural path that
+/// killed the union (paths carry keyword names and indices only, never
+/// field names or instance values, so the string is safe to log), or
+/// `None` when pass-through stays safe.
+fn oneof_semantic_defect(schema: &Value) -> Option<String> {
+    oneof_semantic_defect_at(schema, "root")
+}
+
+fn oneof_semantic_defect_at(schema: &Value, path: &str) -> Option<String> {
+    match schema {
+        Value::Object(obj) => {
+            if let Some(branches) = obj.get("oneOf").and_then(Value::as_array)
+                && let Some(reason) = oneof_node_defect(branches, path)
+            {
+                return Some(reason);
+            }
+            for (key, child) in obj {
+                match key.as_str() {
+                    // Name → schema maps: field names are not schemas, so
+                    // the map is never read as a union-bearing node.
+                    "properties" | "$defs" | "patternProperties" | "dependentSchemas" => {
+                        if let Some(map) = child.as_object() {
+                            for subschema in map.values() {
+                                if let Some(reason) =
+                                    oneof_semantic_defect_at(subschema, &format!("{path}.{key}.*"))
+                                {
+                                    return Some(reason);
+                                }
+                            }
+                        }
+                    }
+                    // Instance data is never a union.
+                    "const" | "enum" => {}
+                    _ => {
+                        if let Some(reason) =
+                            oneof_semantic_defect_at(child, &format!("{path}.{key}"))
+                        {
+                            return Some(reason);
+                        }
+                    }
+                }
+            }
+            None
+        }
+        Value::Array(items) => {
+            for (index, item) in items.iter().enumerate() {
+                if let Some(reason) = oneof_semantic_defect_at(item, &format!("{path}[{index}]")) {
+                    return Some(reason);
+                }
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+/// Judge one `oneOf` node's branches by R1/R2/R3; `path` is the path of
+/// the object holding the `oneOf` keyword.
+fn oneof_node_defect(branches: &[Value], path: &str) -> Option<String> {
+    // R1: identical branches.
+    for (left, left_branch) in branches.iter().enumerate() {
+        for (right, right_branch) in branches.iter().enumerate().skip(left + 1) {
+            if left_branch == right_branch {
+                return Some(format!(
+                    "R1 identical branches {left} and {right} at {path}"
+                ));
+            }
+        }
+    }
+    // R2: two required-free object branches break the exactly-one contract.
+    // A branch without a surviving `required` group constrains instances
+    // only through its optional property map and any `minProperties`
+    // floor; two such branches admit a common instance set (everything
+    // clearing both floors whose fields lie in the union of their maps —
+    // which the shared root's own fields already are) and reject the rest
+    // together, so exactly-one holds for no instance. Floors cannot
+    // restore the distinction (review 5811366579: floors 0, 1 and 2 on
+    // the erased cross-required shape all leave every admitted instance
+    // matching both alternatives), and whether a group was never declared
+    // or erased by the registry/rehearsal pruning is indistinguishable at
+    // this layer — the xAI pass sees the schema after the registry's own
+    // sanitize has already dropped cross-branch groups (reviews
+    // 5802378120, 5808313704). Required-free shapes take the compatible
+    // flattening fallback.
+    let non_discriminating = branches
+        .iter()
+        .filter(|branch| empty_matching_object_branch(branch))
+        .count();
+    if non_discriminating >= 2 {
+        return Some(format!(
+            "R2 {non_discriminating} non-discriminating branches at {path}"
+        ));
+    }
+    // R3: a branch carrying a dead inner union cannot match.
+    for (index, branch) in branches.iter().enumerate() {
+        if let Some(inner) = oneof_semantic_defect_at(branch, &format!("{path}.oneOf[{index}]")) {
+            return Some(format!(
+                "R3 branch {index} at {path} carries a dead inner union: {inner}"
+            ));
+        }
+    }
+    None
+}
+
+/// R2 trigger: an object branch with no surviving `required` group. The
+/// group was the branch's only cross-branch discriminator; whatever
+/// remains (an optional property map, any `minProperties` floor) admits a
+/// common tail of the shared root's instances with every sibling
+/// required-free branch. Floors are deliberately NOT consulted: they
+/// cannot restore an erased group, and a floor's only sound role
+/// (excluding `{}` for a never-required branch — review 5811366579
+/// corrected the earlier reading that floor 1 admits the empty object; it
+/// excludes it) still leaves the pair matching each other on every
+/// shared-root-valid instance above the floors.
+fn empty_matching_object_branch(branch: &Value) -> bool {
+    branch.get("type").and_then(Value::as_str) == Some("object")
+        && branch
+            .get("required")
+            .and_then(Value::as_array)
+            .is_none_or(|required| required.is_empty())
+}
+
+/// Whether the schema's root is exactly a single `oneOf`/`anyOf` union whose
+/// every branch declares `type: "object"` — the shape xAI documents as valid
+/// for a parameters root ("A root `anyOf` or `oneOf` also works when every
+/// branch is itself an object").
+///
+/// Any root whose composition is not a single documented-good union stays on
+/// the protective flattening pass: sibling root `allOf`/`enum`/`not`, both
+/// union keywords at once (the doc names one union, not an intersection), a
+/// present-but-malformed (non-array) union value, an empty union, and
+/// branches without an explicit object `type` — xAI's own 400 message for
+/// `apply_patch`'s bare required-groups called that union "an anyOf/oneOf
+/// union with a non-object branch". Other root-level keywords (annotations,
+/// `$defs`, `$ref`, `if`/`then`/`else`, …) are not root composition
+/// operators: they ride along beside the union exactly as they rode the
+/// flattening pass before.
+fn root_union_is_all_object_branches(schema: &Value) -> bool {
+    let Some(obj) = schema.as_object() else {
+        return false;
+    };
+    if obj.contains_key("allOf") || obj.contains_key("enum") || obj.contains_key("not") {
+        return false;
+    }
+    let mut unions = 0;
+    for key in ["oneOf", "anyOf"] {
+        let Some(branches) = obj.get(key).and_then(Value::as_array) else {
+            if obj.contains_key(key) {
+                // Present but not an array: the flattening pass removes the
+                // malformed key instead of shipping it to the wire.
+                return false;
+            }
+            continue;
+        };
+        if branches.is_empty() || branches.iter().any(|branch| !is_object_branch(branch)) {
+            return false;
+        }
+        unions += 1;
+    }
+    unions == 1
+}
+
+fn is_object_branch(branch: &Value) -> bool {
+    branch.get("type").and_then(Value::as_str) == Some("object")
+}
+
+/// Whether the shared normalization pass keeps every branch `required` of the
+/// root union intact.
+///
+/// `prune_dangling_required` drops `required` entries the branch's own
+/// `properties` does not declare, and `inject_properties_on_bare_objects`
+/// gives a bare object branch an empty `properties` first — so a branch whose
+/// group constraint is a bare `required` over the root's shared `properties`
+/// reaches the wire constraint-free. In an exactly-one `oneOf`, identically
+/// gutted branches accept the same instances, so the union admits no
+/// instance at all; such a union must fall back to the flattening pass,
+/// which re-derives the parameter-groups note from the pristine schema
+/// before the prune runs.
+fn union_branches_keep_required(schema: &Value) -> bool {
+    let Some(obj) = schema.as_object() else {
+        return true;
+    };
+    for key in ["oneOf", "anyOf"] {
+        let branches_keep_required = obj
+            .get(key)
+            .and_then(Value::as_array)
+            .map(|branches| {
+                branches
+                    .iter()
+                    .all(|branch| !branch_required_would_be_pruned(branch))
+            })
+            // A present-but-malformed union value never reaches here (the
+            // shape guard already routed it to the flattening pass).
+            .unwrap_or(true);
+        if !branches_keep_required {
+            return false;
+        }
+    }
+    true
+}
+
+/// Mirror `prune_dangling_required`: `true` when at least one `required`
+/// entry of this schema node would be pruned because it is not a key of the
+/// node's own `properties`.
+fn branch_required_would_be_pruned(branch: &Value) -> bool {
+    let Some(obj) = branch.as_object() else {
+        return false;
+    };
+    let Some(required) = obj.get("required").and_then(Value::as_array) else {
+        return false;
+    };
+    let known_keys: Vec<&String> = obj
+        .get("properties")
+        .and_then(Value::as_object)
+        .map(|props| props.keys().collect())
+        .unwrap_or_default();
+    required.iter().any(|entry| {
+        !entry
+            .as_str()
+            .is_some_and(|name| known_keys.iter().any(|known| *known == name))
+    })
 }
 
 /// Sanitize a schema for OpenAI Responses function tools.
@@ -1037,7 +1410,9 @@ mod tests {
     fn xai_sanitize_flattens_apply_patch_root_one_of() {
         // The exact shape that produced the live 400:
         // "apply_patch: tool parameter root must be an object type (root
-        // schema is an anyOf/oneOf union with a non-object branch)".
+        // schema is an anyOf/oneOf union with a non-object branch)". The
+        // branches carry no explicit `type`, so xAI counts them as
+        // non-object branches even after its 2026-10-10 relaxation.
         use crate::tools::spec::ToolSpec as _;
         let mut schema = crate::tools::apply_patch::ApplyPatchTool.input_schema();
         assert!(schema.get("oneOf").is_some(), "fixture must match the tool");
@@ -1055,6 +1430,1264 @@ mod tests {
                 "Exactly one of these parameter groups must be provided: `changes` | `patch` | `replace`."
             )
         );
+    }
+
+    #[test]
+    fn xai_sanitize_passes_root_union_of_object_branches_through() {
+        // The documented-good shape from xAI's 2026-10-10 function-calling
+        // page: "A root `anyOf` or `oneOf` also works when every branch is
+        // itself an object". Folding it into one merged object would erase
+        // the variant contract the tool documented.
+        let mut schema = json!({
+            "oneOf": [
+                {
+                    "type": "object",
+                    "properties": {
+                        "kind": {"const": "email"},
+                        "address": {"type": "string"}
+                    },
+                    "required": ["kind", "address"]
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "kind": {"const": "sms"},
+                        "phone": {"type": "string"}
+                    },
+                    "required": ["kind", "phone"]
+                }
+            ]
+        });
+
+        let note = sanitize_for_xai_parameters(&mut schema);
+
+        let branches = schema
+            .get("oneOf")
+            .and_then(Value::as_array)
+            .expect("root oneOf must survive");
+        assert_eq!(branches.len(), 2, "both object variants must survive");
+        assert_eq!(branches[0]["required"], json!(["kind", "address"]));
+        assert_eq!(branches[1]["required"], json!(["kind", "phone"]));
+        assert!(
+            schema.get("type").is_none(),
+            "the root must not gain a forced object type: {schema}"
+        );
+        assert!(
+            schema.get("properties").is_none(),
+            "branch properties must not be merged into the root: {schema}"
+        );
+        assert_eq!(note, None);
+    }
+
+    #[test]
+    fn xai_sanitize_still_flattens_root_union_with_non_object_branch() {
+        // A union with any non-object branch still "cannot be compiled into
+        // a tool-call grammar" per the 2026-10-10 doc, so the flattening
+        // pass must stay for it.
+        let mut schema = json!({
+            "anyOf": [
+                {
+                    "type": "object",
+                    "properties": {"path": {"type": "string"}},
+                    "required": ["path"]
+                },
+                {"type": "string"}
+            ]
+        });
+
+        let note = sanitize_for_xai_parameters(&mut schema);
+
+        assert_eq!(schema["type"], "object");
+        assert!(schema.get("anyOf").is_none());
+        assert!(schema["properties"].get("path").is_some());
+        assert_eq!(note, None);
+    }
+
+    #[test]
+    fn xai_sanitize_passes_root_anyof_of_object_branches_through() {
+        // The relaxation names `anyOf` alongside `oneOf`; pin that the anyOf
+        // spelling of the documented-good shape takes the same pass-through
+        // route instead of being folded.
+        let mut schema = json!({
+            "anyOf": [
+                {
+                    "type": "object",
+                    "properties": {"path": {"type": "string"}},
+                    "required": ["path"]
+                },
+                {
+                    "type": "object",
+                    "properties": {"content": {"type": "string"}},
+                    "required": ["content"]
+                }
+            ]
+        });
+
+        let note = sanitize_for_xai_parameters(&mut schema);
+
+        let branches = schema
+            .get("anyOf")
+            .and_then(Value::as_array)
+            .expect("root anyOf must survive");
+        assert_eq!(branches.len(), 2, "both object variants must survive");
+        assert!(
+            schema.get("type").is_none(),
+            "no forced root type: {schema}"
+        );
+        assert_eq!(note, None);
+    }
+
+    #[test]
+    fn xai_sanitize_flattens_object_union_with_root_all_of_sibling() {
+        // The doc blesses "a root anyOf or oneOf", not a union crossed with
+        // other root composition keywords. A sibling `allOf` is undocumented,
+        // so the protective flattening pass must stay and strip it exactly as
+        // before the relaxation.
+        let mut schema = json!({
+            "oneOf": [
+                {
+                    "type": "object",
+                    "properties": {"mode": {"const": "fast"}},
+                    "required": ["mode"]
+                },
+                {
+                    "type": "object",
+                    "properties": {"mode": {"const": "slow"}},
+                    "required": ["mode"]
+                }
+            ],
+            "allOf": [
+                {"properties": {"extra": {"type": "string"}}},
+                {"required": ["extra"]}
+            ]
+        });
+
+        let note = sanitize_for_xai_parameters(&mut schema);
+
+        assert_eq!(schema["type"], "object");
+        assert!(
+            schema.get("oneOf").is_none(),
+            "union must be flattened: {schema}"
+        );
+        assert!(
+            schema.get("allOf").is_none(),
+            "root allOf must be stripped: {schema}"
+        );
+        assert!(schema["properties"].get("mode").is_some());
+        assert_eq!(note, None);
+    }
+
+    #[test]
+    fn xai_sanitize_flattens_object_union_with_root_enum_and_not_siblings() {
+        // Same composite-root rule for `enum` and `not`: outside the relaxed
+        // rule, so the flattening pass removes them as it always did.
+        let mut schema = json!({
+            "anyOf": [
+                {
+                    "type": "object",
+                    "properties": {"kind": {"const": "a"}},
+                    "required": ["kind"]
+                },
+                {
+                    "type": "object",
+                    "properties": {"kind": {"const": "b"}},
+                    "required": ["kind"]
+                }
+            ],
+            "enum": [{"kind": "a"}, {"kind": "b"}],
+            "not": {"type": "string"}
+        });
+
+        let note = sanitize_for_xai_parameters(&mut schema);
+
+        assert_eq!(schema["type"], "object");
+        assert!(
+            schema.get("anyOf").is_none(),
+            "union must be flattened: {schema}"
+        );
+        assert!(
+            schema.get("enum").is_none(),
+            "root enum must be stripped: {schema}"
+        );
+        assert!(
+            schema.get("not").is_none(),
+            "root not must be stripped: {schema}"
+        );
+        assert_eq!(note, None);
+    }
+
+    #[test]
+    fn xai_sanitize_flattens_when_both_union_keywords_are_present() {
+        // {"oneOf": [...], "anyOf": [...]} is an intersection of two unions,
+        // not the single documented "root anyOf or oneOf". Keep it on the
+        // protective flattening pass instead of shipping an undocumented
+        // composite grammar shape.
+        let mut schema = json!({
+            "oneOf": [
+                {
+                    "type": "object",
+                    "properties": {"a": {"type": "string"}},
+                    "required": ["a"]
+                },
+                {
+                    "type": "object",
+                    "properties": {"b": {"type": "string"}},
+                    "required": ["b"]
+                }
+            ],
+            "anyOf": [
+                {
+                    "type": "object",
+                    "properties": {"c": {"type": "string"}},
+                    "required": ["c"]
+                },
+                {
+                    "type": "object",
+                    "properties": {"d": {"type": "string"}},
+                    "required": ["d"]
+                }
+            ]
+        });
+
+        let note = sanitize_for_xai_parameters(&mut schema);
+
+        assert_eq!(schema["type"], "object");
+        assert!(
+            schema.get("oneOf").is_none(),
+            "oneOf must be flattened: {schema}"
+        );
+        assert!(
+            schema.get("anyOf").is_none(),
+            "anyOf must be flattened: {schema}"
+        );
+        for name in ["a", "b", "c", "d"] {
+            assert!(
+                schema["properties"].get(name).is_some(),
+                "branch property {name} must merge into the root: {schema}"
+            );
+        }
+        assert!(
+            note.as_deref()
+                .is_some_and(|note| note.contains("parameter groups")),
+            "the merged union's required groups must surface as a note: {note:?}"
+        );
+    }
+
+    #[test]
+    fn xai_sanitize_flattens_malformed_union_values() {
+        // A present-but-non-array union value is garbage the flattening pass
+        // removes; it must not ride along a qualifying sibling union to the
+        // wire. A lone malformed union is equally non-documentable.
+        let mut with_sibling = json!({
+            "oneOf": [
+                {
+                    "type": "object",
+                    "properties": {"a": {"type": "string"}},
+                    "required": ["a"]
+                },
+                {
+                    "type": "object",
+                    "properties": {"b": {"type": "string"}},
+                    "required": ["b"]
+                }
+            ],
+            "anyOf": null
+        });
+        let note = sanitize_for_xai_parameters(&mut with_sibling);
+        assert_eq!(with_sibling["type"], "object");
+        assert!(
+            with_sibling.get("anyOf").is_none(),
+            "malformed anyOf must not survive: {with_sibling}"
+        );
+        assert!(
+            note.as_deref()
+                .is_some_and(|note| note.contains("parameter groups")),
+            "the surviving union's required groups must surface as a note: {note:?}"
+        );
+
+        let mut lone = json!({"oneOf": null});
+        let note = sanitize_for_xai_parameters(&mut lone);
+        assert_eq!(lone["type"], "object");
+        assert!(
+            lone.get("oneOf").is_none(),
+            "malformed oneOf must be removed: {lone}"
+        );
+        assert_eq!(note, None);
+    }
+
+    #[test]
+    fn xai_sanitize_flattens_empty_root_union() {
+        // An empty union describes nothing; the flattening pass turns the
+        // root into a plain object schema as before.
+        let mut schema = json!({"oneOf": []});
+
+        let note = sanitize_for_xai_parameters(&mut schema);
+
+        assert_eq!(schema["type"], "object");
+        assert!(
+            schema.get("oneOf").is_none(),
+            "empty union must be removed: {schema}"
+        );
+        assert_eq!(note, None);
+    }
+
+    #[test]
+    fn xai_sanitize_union_passes_through_with_dependent_keyword_note() {
+        // The pass-through route keeps the dependent-keyword drop: the union
+        // survives AND the dropped conditional requirements surface as the
+        // constraint note appended to the tool description.
+        let mut schema = json!({
+            "oneOf": [
+                {
+                    "type": "object",
+                    "properties": {"kind": {"const": "email"}, "address": {"type": "string"}},
+                    "required": ["kind", "address"]
+                },
+                {
+                    "type": "object",
+                    "properties": {"kind": {"const": "sms"}, "phone": {"type": "string"}},
+                    "required": ["kind", "phone"]
+                }
+            ],
+            "dependentRequired": {"kind": ["address"]}
+        });
+
+        let note = sanitize_for_xai_parameters(&mut schema);
+
+        assert!(
+            schema.get("oneOf").is_some(),
+            "the union must still pass through: {schema}"
+        );
+        assert!(
+            schema.get("dependentRequired").is_none(),
+            "dependent keywords must be dropped on the pass-through route: {schema}"
+        );
+        assert_eq!(
+            note.as_deref(),
+            Some(
+                "This provider cannot express conditional requirements from the original \
+                 schema. Honor any such requirements documented by the tool when calling it."
+            )
+        );
+    }
+
+    /// Fork-distinct behavior pin (parent-repo fork register): the xAI
+    /// parameters lane keeps xAI's documented-good root union of object
+    /// branches intact while every composite or non-conforming root shape
+    /// stays on the flattening pass, exactly as before the 2026-10-10
+    /// relaxation. If either half drifts, the fork's xAI wire contract has
+    /// changed and the parent register entry must be revisited.
+    #[test]
+    fn forkguard_xai_root_union_contract_passes_documented_and_flattens_composites() {
+        // Documented-good: survives with branches intact.
+        let mut good = json!({
+            "anyOf": [
+                {
+                    "type": "object",
+                    "properties": {"kind": {"const": "email"}},
+                    "required": ["kind"]
+                },
+                {
+                    "type": "object",
+                    "properties": {"kind": {"const": "sms"}},
+                    "required": ["kind"]
+                }
+            ]
+        });
+        let good_note = sanitize_for_xai_parameters(&mut good);
+        assert!(
+            good.get("anyOf").is_some(),
+            "documented union must survive: {good}"
+        );
+        assert_eq!(good_note, None);
+
+        // Incident fixture: bare required-groups still flatten (protective).
+        use crate::tools::spec::ToolSpec as _;
+        let mut incident = crate::tools::apply_patch::ApplyPatchTool.input_schema();
+        assert!(
+            incident.get("oneOf").is_some(),
+            "fixture must match the tool"
+        );
+        let incident_note = sanitize_for_xai_parameters(&mut incident);
+        assert_eq!(incident["type"], "object");
+        assert!(
+            incident.get("oneOf").is_none(),
+            "incident union must flatten"
+        );
+        assert!(
+            incident_note
+                .as_deref()
+                .is_some_and(|note| note.contains("parameter groups")),
+            "incident fixture must keep its required-group note: {incident_note:?}"
+        );
+
+        // Composite: union + sibling allOf still flattens (undocumented).
+        let mut composite = json!({
+            "oneOf": [
+                {
+                    "type": "object",
+                    "properties": {"mode": {"const": "fast"}},
+                    "required": ["mode"]
+                },
+                {
+                    "type": "object",
+                    "properties": {"mode": {"const": "slow"}},
+                    "required": ["mode"]
+                }
+            ],
+            "allOf": [{"required": ["mode"]}]
+        });
+        sanitize_for_xai_parameters(&mut composite);
+        assert_eq!(composite["type"], "object");
+        assert!(composite.get("oneOf").is_none());
+        assert!(composite.get("allOf").is_none());
+    }
+
+    #[test]
+    fn xai_sanitize_hoists_single_element_object_union() {
+        // A len-1 union of one object branch qualifies for the pass-through
+        // guard, and the shared pass collapses it to the equivalent plain
+        // object root — the one pass-through input whose output is not a
+        // union. Pin that collapse instead of an accidental union leak.
+        let mut schema = json!({
+            "oneOf": [
+                {
+                    "type": "object",
+                    "properties": {"path": {"type": "string"}},
+                    "required": ["path"]
+                }
+            ]
+        });
+
+        let note = sanitize_for_xai_parameters(&mut schema);
+
+        assert!(
+            schema.get("oneOf").is_none(),
+            "single-element union must collapse to the plain object: {schema}"
+        );
+        assert_eq!(schema["type"], "object");
+        assert_eq!(schema["required"], json!(["path"]));
+        assert!(schema["properties"].get("path").is_some());
+        assert_eq!(note, None);
+    }
+
+    #[test]
+    fn xai_sanitize_flattens_union_with_bare_required_branches() {
+        // Object-typed branches whose only constraint is a bare `required`
+        // (the property names live in the root's shared `properties`) used to
+        // take the pass-through route, where the shared pass pruned each
+        // branch into an identical `{type:"object",properties:{}}` — an
+        // exactly-one `oneOf` no instance can satisfy. Such unions now stay
+        // on the protective flattening pass: the union is dropped, the
+        // constraint survives as the parameter-groups note, and the output
+        // stays satisfiable.
+        let mut schema = json!({
+            "oneOf": [
+                {"type": "object", "required": ["patch"]},
+                {"type": "object", "required": ["changes"]}
+            ]
+        });
+
+        let note = sanitize_for_xai_parameters(&mut schema);
+
+        assert_eq!(schema["type"], "object");
+        assert!(
+            schema.get("oneOf").is_none(),
+            "the gutted union must not reach the wire: {schema}"
+        );
+        assert_eq!(
+            note.as_deref(),
+            Some("Exactly one of these parameter groups must be provided: `changes` | `patch`.")
+        );
+    }
+
+    #[test]
+    fn xai_sanitize_flattens_union_whose_bare_required_groups_live_in_root_properties() {
+        // Raw-MCP regression (reviews 5788075613 / 5790040245 / 5796658406):
+        // `McpPool::to_api_tools` registers the server schema verbatim, and
+        // servers commonly declare the union groups against the root's
+        // shared `properties`. Pass-through let the shared pass prune both
+        // bare-required branches into identical empty objects, making the
+        // exactly-one `oneOf` unsatisfiable for every instance — a valid
+        // `{"a":"x"}` that originally matched exactly one branch matched both
+        // gutted branches and validated against nothing. The flattening pass
+        // keeps the root's shared `properties`, re-derives the constraint
+        // note, and keeps valid instances valid.
+        let mut schema = json!({
+            "properties": {
+                "a": {"type": "string"},
+                "b": {"type": "string"}
+            },
+            "oneOf": [
+                {"type": "object", "required": ["a"]},
+                {"type": "object", "required": ["b"]}
+            ]
+        });
+
+        let note = sanitize_for_xai_parameters(&mut schema);
+
+        assert_eq!(schema["type"], "object");
+        assert!(
+            schema.get("oneOf").is_none() && schema.get("anyOf").is_none(),
+            "the gutted union must not reach the wire: {schema}"
+        );
+        assert!(
+            schema["properties"].get("a").is_some() && schema["properties"].get("b").is_some(),
+            "the root's shared properties must survive the flattening: {schema}"
+        );
+        assert_eq!(
+            note.as_deref(),
+            Some("Exactly one of these parameter groups must be provided: `a` | `b`.")
+        );
+        // JSON-Schema semantics: the flattened root must keep accepting an
+        // instance the original union accepted through exactly one branch.
+        let validator = jsonschema::options()
+            .with_draft(jsonschema::Draft::Draft202012)
+            .build(&schema)
+            .expect("the flattened schema must compile");
+        assert!(
+            validator.is_valid(&json!({"a": "x"})),
+            "a valid instance of the original union must stay valid: {schema}"
+        );
+    }
+
+    #[test]
+    fn xai_sanitize_flattens_oneof_whose_bare_branches_arrive_already_identical() {
+        // Registry-to-provider regression (review 5799828607): the ToolRegistry
+        // registration path runs the general sanitize on every tool schema
+        // BEFORE the wire helpers see it, so a shared-root-properties required
+        // union reaches this helper with the branch groups already pruned —
+        // the keep-required guard sees nothing left to prune, and two
+        // identical bare object branches passed through as an unsatisfiable
+        // exactly-one. Identical branches are unsatisfiable however they got
+        // that way, so the oneOf flattens; a satisfiable anyOf with duplicate
+        // branches keeps the pass-through behavior.
+        let mut registry_sanitized = json!({
+            "properties": {
+                "a": {"type": "string"},
+                "b": {"type": "string"}
+            },
+            "oneOf": [
+                {"type": "object", "properties": {}},
+                {"type": "object", "properties": {}}
+            ]
+        });
+        // Simulate the actual registry preprocessing, exactly as the
+        // registration path applies it (tools/registry.rs).
+        sanitize(&mut registry_sanitized);
+
+        let mut schema = registry_sanitized;
+        let note = sanitize_for_xai_parameters(&mut schema);
+
+        assert_eq!(schema["type"], "object");
+        assert!(
+            schema.get("oneOf").is_none() && schema.get("anyOf").is_none(),
+            "the identical-branch oneOf must not reach the wire: {schema}"
+        );
+        assert!(
+            schema["properties"].get("a").is_some() && schema["properties"].get("b").is_some(),
+            "the root's shared properties must stay usable after the fallback: {schema}"
+        );
+        assert_eq!(
+            note, None,
+            "bare branches carry no required groups, so the note is empty: {note:?}"
+        );
+
+        // The satisfiable twin: an anyOf with the same duplicate bare branches
+        // (nothing to prune, never exactly-one) still passes through.
+        let mut anyof_schema = json!({
+            "properties": {"a": {"type": "string"}},
+            "anyOf": [
+                {"type": "object", "properties": {}},
+                {"type": "object", "properties": {}}
+            ]
+        });
+        let anyof_note = sanitize_for_xai_parameters(&mut anyof_schema);
+        assert!(
+            anyof_schema.get("anyOf").is_some(),
+            "a satisfiable duplicate-branch anyOf keeps pass-through: {anyof_schema}"
+        );
+        assert_eq!(anyof_note, None);
+    }
+
+    #[test]
+    fn xai_sanitize_flattens_oneof_distinct_only_before_recursive_normalization() {
+        // Review 5800015446: the raw input's branch `required` groups name
+        // their own declared nested object, so the input-level checks all
+        // pass — yet the recursive cleanup prunes each nested object's
+        // dangling group and injects empty properties, collapsing the two
+        // initially distinct alternatives into identical bare objects and an
+        // unsatisfiable exactly-one. The pass-through decision must be based
+        // on the effective normalized shape; the flattening fallback keeps
+        // the shared root `inner` property usable for a valid instance.
+        let mut schema = json!({
+            "type": "object",
+            "properties": {
+                "inner": {
+                    "type": "object",
+                    "properties": {
+                        "a": {"type": "string"},
+                        "b": {"type": "string"}
+                    }
+                }
+            },
+            "oneOf": [
+                {
+                    "type": "object",
+                    "properties": {"inner": {"type": "object", "required": ["a"]}},
+                    "required": ["inner"]
+                },
+                {
+                    "type": "object",
+                    "properties": {"inner": {"type": "object", "required": ["b"]}},
+                    "required": ["inner"]
+                }
+            ]
+        });
+
+        let note = sanitize_for_xai_parameters(&mut schema);
+
+        assert_eq!(schema["type"], "object");
+        assert!(
+            schema.get("oneOf").is_none() && schema.get("anyOf").is_none(),
+            "the normalized-identical union must not reach the wire: {schema}"
+        );
+        assert!(
+            schema["properties"].get("inner").is_some(),
+            "the shared root inner property must survive the fallback: {schema}"
+        );
+        assert_eq!(note, None);
+        let validator = jsonschema::options()
+            .with_draft(jsonschema::Draft::Draft202012)
+            .build(&schema)
+            .expect("the flattened schema must compile");
+        assert!(
+            validator.is_valid(&json!({"inner": {"a": "x"}})),
+            "a valid instance of the original union must stay valid: {schema}"
+        );
+
+        // The satisfiable control: branches whose nested groups are
+        // self-contained (required names live in the same nested object's own
+        // properties) stay distinct after normalization and keep the
+        // pass-through behavior.
+        let mut self_contained = json!({
+            "type": "object",
+            "properties": {
+                "inner": {
+                    "type": "object",
+                    "properties": {
+                        "a": {"type": "string"},
+                        "b": {"type": "string"}
+                    }
+                }
+            },
+            "oneOf": [
+                {
+                    "type": "object",
+                    "properties": {"inner": {"type": "object", "properties": {"a": {"type": "string"}}, "required": ["a"]}},
+                    "required": ["inner"]
+                },
+                {
+                    "type": "object",
+                    "properties": {"inner": {"type": "object", "properties": {"b": {"type": "string"}}, "required": ["b"]}},
+                    "required": ["inner"]
+                }
+            ]
+        });
+        let control_note = sanitize_for_xai_parameters(&mut self_contained);
+        assert!(
+            self_contained.get("oneOf").is_some(),
+            "a self-contained union that stays distinct after normalization keeps pass-through: {self_contained}"
+        );
+        assert_eq!(control_note, None);
+    }
+
+    #[test]
+    fn xai_sanitize_flattens_oneof_gutted_branches_that_differ_only_in_annotations() {
+        // Review 5800814557: the registry sanitize/canonicalizer strips the
+        // branch requirements but keeps `title`/`description`, so raw-equality
+        // sees two distinct branches while validation sees two identical
+        // exactly-one alternatives. Annotation-only divergence must not
+        // rescue an unsatisfiable union; the flattening fallback keeps the
+        // shared root properties usable.
+        let mut registry_sanitized = json!({
+            "properties": {
+                "a": {"type": "string"},
+                "b": {"type": "string"}
+            },
+            "oneOf": [
+                {"type": "object", "title": "Group A", "description": "use a"},
+                {"type": "object", "title": "Group B", "description": "use b"}
+            ]
+        });
+        // Simulate the registry preprocessing exactly (tools/registry.rs):
+        // the gutting happens upstream, the annotations survive.
+        sanitize(&mut registry_sanitized);
+        assert!(
+            registry_sanitized["oneOf"][0].get("title").is_some(),
+            "fixture precondition: the registry pass keeps annotations: {registry_sanitized}"
+        );
+
+        let mut schema = registry_sanitized;
+        let note = sanitize_for_xai_parameters(&mut schema);
+
+        assert_eq!(schema["type"], "object");
+        assert!(
+            schema.get("oneOf").is_none() && schema.get("anyOf").is_none(),
+            "the annotation-only-distinct union must not reach the wire: {schema}"
+        );
+        assert!(
+            schema["properties"].get("a").is_some() && schema["properties"].get("b").is_some(),
+            "the root's shared properties must stay usable after the fallback: {schema}"
+        );
+        assert_eq!(note, None);
+        let validator = jsonschema::options()
+            .with_draft(jsonschema::Draft::Draft202012)
+            .build(&schema)
+            .expect("the flattened schema must compile");
+        assert!(
+            validator.is_valid(&json!({"a": "x"})),
+            "a valid instance of the original union must stay valid: {schema}"
+        );
+    }
+
+    #[test]
+    fn xai_sanitize_still_coerces_scalar_root_to_object() {
+        // The doc's 400 verdict names scalar/array roots, so they must stay on
+        // the protective flattening pass and its object coercion — a guard
+        // regression that admitted every root would ship the scalar verbatim.
+        let mut schema = json!({"type": "string"});
+
+        sanitize_for_xai_parameters(&mut schema);
+
+        assert_eq!(
+            schema,
+            json!({"type": "object", "properties": {}}),
+            "scalar root must take the flattening pass: {schema}"
+        );
+    }
+
+    #[test]
+    fn xai_sanitize_flattens_cross_branch_required_union_via_keep_required_belt() {
+        // Review 5802378120 form A, raw: each branch's `required` group
+        // names a field the OTHER branch declares, under the root's shared
+        // `properties`. The keep-required belt sees both groups as prunable
+        // and routes the raw shape straight to the flattening pass —
+        // nothing below the belt even runs.
+        let mut schema = json!({
+            "properties": {
+                "a": {"type": "string"},
+                "b": {"type": "string"}
+            },
+            "oneOf": [
+                {
+                    "type": "object",
+                    "properties": {"a": {"type": "string"}},
+                    "required": ["b"]
+                },
+                {
+                    "type": "object",
+                    "properties": {"b": {"type": "string"}},
+                    "required": ["a"]
+                }
+            ]
+        });
+
+        let note = sanitize_for_xai_parameters(&mut schema);
+
+        assert_eq!(schema["type"], "object");
+        assert!(
+            schema.get("oneOf").is_none() && schema.get("anyOf").is_none(),
+            "the raw cross-branch union must flatten via the keep-required belt: {schema}"
+        );
+        assert!(
+            schema["properties"].get("a").is_some() && schema["properties"].get("b").is_some(),
+            "the root's shared properties must survive the flattening: {schema}"
+        );
+        assert_eq!(
+            note.as_deref(),
+            Some("Exactly one of these parameter groups must be provided: `a` | `b`.")
+        );
+        let validator = jsonschema::options()
+            .with_draft(jsonschema::Draft::Draft202012)
+            .build(&schema)
+            .expect("the flattened schema must compile");
+        assert!(
+            validator.is_valid(&json!({"a": "x"})),
+            "an instance the original union accepted through exactly one branch must stay valid: {schema}"
+        );
+    }
+
+    #[test]
+    fn xai_sanitize_flattens_registry_pruned_cross_branch_required_union() {
+        // Review 5802378120 form A through the real Registry→xAI
+        // preprocessing (tools/registry.rs applies sanitize + canonicalize
+        // before the wire helpers): the cross-branch groups are already
+        // pruned, so the keep-required belt sees nothing left to prune, and
+        // the projected branches stay pairwise-distinct — the exact hole
+        // the pairwise check could not close. The semantic judgment kills
+        // the union by R2 (two required-free object branches both match the
+        // empty object, so the exactly-one contract fails there) and the
+        // flattening fallback keeps the originally valid a-only argument
+        // valid.
+        let mut registry_processed = json!({
+            "properties": {
+                "a": {"type": "string"},
+                "b": {"type": "string"}
+            },
+            "oneOf": [
+                {
+                    "type": "object",
+                    "properties": {"a": {"type": "string"}},
+                    "required": ["b"]
+                },
+                {
+                    "type": "object",
+                    "properties": {"b": {"type": "string"}},
+                    "required": ["a"]
+                }
+            ]
+        });
+        // Simulate the actual registry preprocessing sequence
+        // (tools/registry.rs): the provider-neutral sanitize, then the
+        // byte-level canonicalizer.
+        sanitize(&mut registry_processed);
+        crate::tools::schema_canonicalize::canonicalize_schema(&mut registry_processed);
+        assert!(
+            registry_processed["oneOf"][0].get("required").is_none()
+                && registry_processed["oneOf"][1].get("required").is_none(),
+            "fixture precondition: the registry pre-prune gutted both groups: {registry_processed}"
+        );
+        assert_ne!(
+            registry_processed["oneOf"][0], registry_processed["oneOf"][1],
+            "fixture precondition: the gutted branches stay pairwise-distinct"
+        );
+
+        let mut schema = registry_processed;
+        let note = sanitize_for_xai_parameters(&mut schema);
+
+        assert_eq!(schema["type"], "object");
+        assert!(
+            schema.get("oneOf").is_none() && schema.get("anyOf").is_none(),
+            "the empty-matching branch pair must not reach the wire: {schema}"
+        );
+        assert!(
+            schema["properties"].get("a").is_some() && schema["properties"].get("b").is_some(),
+            "the root's shared properties must stay usable after the fallback: {schema}"
+        );
+        assert_eq!(
+            note, None,
+            "the pruned branches carry no required groups, so the note is empty: {note:?}"
+        );
+        let validator = jsonschema::options()
+            .with_draft(jsonschema::Draft::Draft202012)
+            .build(&schema)
+            .expect("the flattened schema must compile");
+        assert!(
+            validator.is_valid(&json!({"a": "x"})),
+            "the original a-only argument must stay valid on the flattened schema: {schema}"
+        );
+    }
+
+    #[test]
+    fn xai_sanitize_flattens_union_whose_branch_carries_dead_inner_oneof() {
+        // Review 5802577370 form B: the patch/noop union's branches are
+        // kept apart by `kind.const`, but the patch branch carries an inner
+        // required-group oneOf. The recursive cleanup prunes both inner
+        // groups into identical bare objects, the inner exactly-one dies
+        // (R1), and R3 propagates the death to the whole patch branch and
+        // then to the root union — pass-through would lose the valid
+        // patch-branch arguments. The flattening fallback keeps them valid.
+        let mut schema = json!({
+            "oneOf": [
+                {
+                    "type": "object",
+                    "properties": {
+                        "kind": {"const": "patch"},
+                        "a": {"type": "string"},
+                        "b": {"type": "string"}
+                    },
+                    "required": ["kind"],
+                    "oneOf": [
+                        {"type": "object", "required": ["a"]},
+                        {"type": "object", "required": ["b"]}
+                    ]
+                },
+                {
+                    "type": "object",
+                    "properties": {"kind": {"const": "noop"}},
+                    "required": ["kind"]
+                }
+            ]
+        });
+
+        let note = sanitize_for_xai_parameters(&mut schema);
+
+        assert_eq!(schema["type"], "object");
+        assert!(
+            schema.get("oneOf").is_none() && schema.get("anyOf").is_none(),
+            "a union with a branch-killing inner oneOf must flatten: {schema}"
+        );
+        for name in ["kind", "a", "b"] {
+            assert!(
+                schema["properties"].get(name).is_some(),
+                "branch property {name} must merge into the flattened root: {schema}"
+            );
+        }
+        assert_eq!(note, None);
+        let validator = jsonschema::options()
+            .with_draft(jsonschema::Draft::Draft202012)
+            .build(&schema)
+            .expect("the flattened schema must compile");
+        assert!(
+            validator.is_valid(&json!({"kind": "patch", "a": "x"})),
+            "the patch-branch argument must stay valid on the flattened schema: {schema}"
+        );
+    }
+
+    #[test]
+    fn xai_sanitize_passes_union_with_title_named_field_through() {
+        // Review 5802577370 inline P3: the annotation strip used to
+        // recurse into `properties` maps as if their keys were schema
+        // keywords, deleting a real field named `title` from the projected
+        // branch. The projection must keep the field (the branches stay
+        // validation-distinct) and the union must keep its pass-through
+        // contract.
+        let mut schema = json!({
+            "oneOf": [
+                {
+                    "type": "object",
+                    "properties": {"title": {"type": "string"}},
+                    "required": ["title"]
+                },
+                {
+                    "type": "object",
+                    "properties": {"name": {"type": "string"}},
+                    "required": ["name"]
+                }
+            ]
+        });
+        let mut projected = schema.clone();
+        strip_annotation_keywords(&mut projected);
+        assert!(
+            projected["oneOf"][0]["properties"].get("title").is_some(),
+            "a field named title is validation surface, not an annotation: {projected}"
+        );
+
+        let note = sanitize_for_xai_parameters(&mut schema);
+
+        let branches = schema
+            .get("oneOf")
+            .and_then(Value::as_array)
+            .expect("the title-named-field union must keep pass-through");
+        assert_eq!(branches[0]["required"], json!(["title"]));
+        assert_eq!(branches[1]["required"], json!(["name"]));
+        assert_eq!(note, None);
+    }
+
+    #[test]
+    fn xai_sanitize_passes_const_differentiated_union_through_without_touching_consts() {
+        // The sharp P3 pass-through pin: the branches differ only in
+        // `const` values whose keys collide with annotation names. The old
+        // strip rewrote both consts into empty objects, made the branches
+        // compare equal, and wrongly flattened a genuinely differentiated
+        // union; with instance data off limits, the union keeps
+        // pass-through and its const values verbatim.
+        let mut schema = json!({
+            "oneOf": [
+                {
+                    "type": "object",
+                    "properties": {"config": {"const": {"title": "A"}}},
+                    "required": ["config"]
+                },
+                {
+                    "type": "object",
+                    "properties": {"config": {"const": {"title": "B"}}},
+                    "required": ["config"]
+                }
+            ]
+        });
+
+        let note = sanitize_for_xai_parameters(&mut schema);
+
+        let branches = schema
+            .get("oneOf")
+            .and_then(Value::as_array)
+            .expect("a const-differentiated union must keep pass-through");
+        assert_eq!(
+            branches[0]["properties"]["config"]["const"],
+            json!({"title": "A"}),
+            "const values are instance data and must reach the wire verbatim: {schema}"
+        );
+        assert_eq!(
+            branches[1]["properties"]["config"]["const"],
+            json!({"title": "B"}),
+            "const values are instance data and must reach the wire verbatim: {schema}"
+        );
+        assert_eq!(note, None);
+    }
+
+    #[test]
+    fn strip_annotation_keywords_keeps_field_names_and_instance_data() {
+        // P3 pins: name→schema maps carry field names (a `$defs` entry
+        // named `title` survives), `const`/`enum` values are instance data
+        // (zero touch), while genuine schema-level annotations — including
+        // on nested property schemas — still go.
+        let mut schema = json!({
+            "title": "outer",
+            "description": "outer description",
+            "properties": {
+                "title": {
+                    "type": "string",
+                    "description": "kept field, stripped annotation"
+                },
+                "config": {"const": {"title": "T", "description": "D"}},
+                "mode": {"enum": [{"title": "A"}, {"title": "B"}]}
+            },
+            "$defs": {
+                "title": {"type": "string"}
+            }
+        });
+        strip_annotation_keywords(&mut schema);
+        assert!(
+            schema.get("title").is_none() && schema.get("description").is_none(),
+            "schema-level annotations still go: {schema}"
+        );
+        let title_field = &schema["properties"]["title"];
+        assert_eq!(
+            title_field["type"], "string",
+            "the field named title must survive the strip: {schema}"
+        );
+        assert!(
+            title_field.get("description").is_none(),
+            "the property schema's own annotation is still an annotation: {schema}"
+        );
+        assert_eq!(
+            schema["properties"]["config"]["const"],
+            json!({"title": "T", "description": "D"}),
+            "const values are instance data: zero touch: {schema}"
+        );
+        assert_eq!(
+            schema["properties"]["mode"]["enum"],
+            json!([{"title": "A"}, {"title": "B"}]),
+            "enum values are instance data: zero touch: {schema}"
+        );
+        assert_eq!(
+            schema["$defs"]["title"],
+            json!({"type": "string"}),
+            "a $defs entry named title is a definition, not an annotation: {schema}"
+        );
+    }
+
+    #[test]
+    fn oneof_semantic_defect_names_rule_and_position() {
+        // R1: identical projected branches.
+        let r1 = json!({
+            "oneOf": [
+                {"type": "object", "properties": {}},
+                {"type": "object", "properties": {}}
+            ]
+        });
+        let reason = oneof_semantic_defect(&r1).expect("R1 must fire");
+        assert!(
+            reason.starts_with("R1 identical branches 0 and 1 at root"),
+            "unexpected R1 reason: {reason}"
+        );
+
+        // R2: two required-free object branches both match the empty
+        // object.
+        let r2 = json!({
+            "oneOf": [
+                {"type": "object", "properties": {"a": {"type": "string"}}},
+                {"type": "object", "properties": {"b": {"type": "string"}}}
+            ]
+        });
+        let reason = oneof_semantic_defect(&r2).expect("R2 must fire");
+        assert!(
+            reason.starts_with("R2 2 non-discriminating branches at root"),
+            "unexpected R2 reason: {reason}"
+        );
+
+        // R2 floor semantics (review 5811366579): floors cannot restore an
+        // erased or absent cross-branch discriminator. `minProperties: 0`
+        // is equivalent to omitting the keyword (JSON Schema §6.5.2); a
+        // floor of 1 or more excludes `{}` but still leaves the pair
+        // matching each other on every shared-root-valid instance above
+        // the floors — required-free shapes flatten regardless of floor.
+        let reason = oneof_semantic_defect(&r2).expect("R2 must fire");
+        assert!(
+            reason.starts_with("R2 2 non-discriminating branches at root"),
+            "unexpected R2 reason: {reason}"
+        );
+        for floor in [0, 1, 2] {
+            let r2_floored = json!({
+                "oneOf": [
+                    {
+                        "type": "object",
+                        "properties": {"a": {"type": "string"}},
+                        "minProperties": floor
+                    },
+                    {
+                        "type": "object",
+                        "properties": {"b": {"type": "string"}},
+                        "minProperties": floor
+                    }
+                ]
+            });
+            assert!(
+                oneof_semantic_defect(&r2_floored).is_some(),
+                "required-free branches are non-discriminating at floor {floor}"
+            );
+        }
+
+        // R3: a dead inner oneOf kills its branch and propagates to the
+        // root. The death is manufactured by the same normalization the
+        // rehearsal runs, so the fixture is normalized first.
+        let r3 = json!({
+            "oneOf": [
+                {
+                    "type": "object",
+                    "properties": {
+                        "kind": {"const": "patch"},
+                        "a": {"type": "string"},
+                        "b": {"type": "string"}
+                    },
+                    "required": ["kind"],
+                    "oneOf": [
+                        {"type": "object", "required": ["a"]},
+                        {"type": "object", "required": ["b"]}
+                    ]
+                },
+                {
+                    "type": "object",
+                    "properties": {"kind": {"const": "noop"}},
+                    "required": ["kind"]
+                }
+            ]
+        });
+        let mut normalized = r3;
+        sanitize(&mut normalized);
+        strip_annotation_keywords(&mut normalized);
+        let reason = oneof_semantic_defect(&normalized).expect("R3 must fire");
+        assert!(
+            reason.starts_with("R3 branch 0 at root carries a dead inner union: R1"),
+            "unexpected R3 reason: {reason}"
+        );
+
+        // A dead inner oneOf under a nested property propagates too, while
+        // a property named `oneOf` is never misread as a union.
+        let nested = json!({
+            "type": "object",
+            "properties": {
+                "oneOf": {"type": "string"},
+                "config": {
+                    "oneOf": [
+                        {"type": "object", "properties": {}},
+                        {"type": "object", "properties": {}}
+                    ]
+                }
+            }
+        });
+        let reason = oneof_semantic_defect(&nested).expect("the nested dead union must be found");
+        assert!(
+            reason.starts_with("R1 identical branches 0 and 1 at root.properties.*"),
+            "unexpected nested reason: {reason}"
+        );
+
+        // Healthy unions and non-exactly-one composition stay usable.
+        let healthy = json!({
+            "oneOf": [
+                {
+                    "type": "object",
+                    "properties": {"kind": {"const": "a"}},
+                    "required": ["kind"]
+                },
+                {
+                    "type": "object",
+                    "properties": {"kind": {"const": "b"}},
+                    "required": ["kind"]
+                }
+            ]
+        });
+        assert_eq!(oneof_semantic_defect(&healthy), None);
+        let anyof_duplicates = json!({
+            "anyOf": [
+                {"type": "object", "properties": {}},
+                {"type": "object", "properties": {}}
+            ]
+        });
+        assert_eq!(
+            oneof_semantic_defect(&anyof_duplicates),
+            None,
+            "exactly-one rules do not apply to anyOf"
+        );
+    }
+
+    #[test]
+    fn xai_sanitize_registry_path_flattens_minproperties_floored_cross_required_union() {
+        // Reviews 5808313704 and 5811366579: the registry's preprocessing
+        // (sanitize THEN canonicalize_schema, the exact production order of
+        // tools/registry.rs:278-279) prunes both cross-branch required
+        // groups; the surviving optional-property maps differ, R1 stays
+        // silent, and no `minProperties` floor restores the erased
+        // distinction — with floors 1 and 2 alike, every shared-root-valid
+        // instance clearing the floors matches both alternatives and the
+        // rest match neither, so exactly-one holds for no instance. The
+        // full registry path must land on the flattening fallback, keeping
+        // each original union's valid witness valid.
+        for floor in [1, 2] {
+            let mut schema = json!({
+                "type": "object",
+                "properties": {
+                    "a": {"type": "string"},
+                    "b": {"type": "string"}
+                },
+                "oneOf": [
+                    {
+                        "type": "object",
+                        "properties": {"a": {"type": "string"}},
+                        "required": ["b"],
+                        "minProperties": floor
+                    },
+                    {
+                        "type": "object",
+                        "properties": {"b": {"type": "string"}},
+                        "required": ["a"],
+                        "minProperties": floor
+                    }
+                ]
+            });
+            sanitize(&mut schema);
+            crate::tools::schema_canonicalize::canonicalize_schema(&mut schema);
+
+            let note = sanitize_for_xai_parameters(&mut schema);
+
+            assert_eq!(schema["type"], "object");
+            assert!(
+                schema.get("oneOf").is_none() && schema.get("anyOf").is_none(),
+                "the floored (floor {floor}) cross-required union must not reach the wire: {schema}"
+            );
+            assert!(
+                schema["properties"].get("a").is_some() && schema["properties"].get("b").is_some(),
+                "the root's shared properties must survive: {schema}"
+            );
+            assert_eq!(note, None);
+            let validator = jsonschema::options()
+                .with_draft(jsonschema::Draft::Draft202012)
+                .build(&schema)
+                .expect("the flattened schema must compile");
+            // Floor 1's original witness needs one property; floor 2's needs
+            // two — the second mirrors review 5811366579's {"a":"x","extra":"y"}.
+            let witness = if floor == 1 {
+                json!({"a": "x"})
+            } else {
+                json!({"a": "x", "extra": "y"})
+            };
+            assert!(
+                validator.is_valid(&witness),
+                "a valid instance of the original union must stay valid at floor {floor}: {schema}"
+            );
+        }
     }
 
     #[test]
