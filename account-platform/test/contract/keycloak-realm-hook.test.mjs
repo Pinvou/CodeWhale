@@ -77,6 +77,7 @@ function helmResult(release, { hookEnabled = true, keycloakEnabled = true } = {}
       ...(release.handoff === undefined ? {} : { portalHandoffClientId: release.handoff }) }, public: { portalUrl: release.origin } }));
   try {
     const args = ['template', 'hook-contract', chart, '-f', path.join(chart, 'values-production-new.yaml'),
+      '-f', path.resolve(import.meta.dirname, '../fixtures/production-site-network.yaml'),
       '-f', valuesFile, '--set-json', 'global.manualReviewOnCallUserIds=["00000000-0000-4000-8000-000000000707"]',
       ...productionImageDigestArgs, ...[
         'newApi.tlsSecretName=fixture-only-newapi', 'newApi.caConfigMap=fixture-only-newapi-ca',
