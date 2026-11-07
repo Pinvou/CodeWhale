@@ -441,6 +441,10 @@ func (s *Service) dispatchUsage(w http.ResponseWriter, r *http.Request, usageReq
 		api.WriteError(w, http.StatusAccepted, "USAGE_REVIEW", "the model request requires reconciliation", httpserver.RequestID(r.Context()))
 		return
 	}
+	// AcquireDispatch already consumed the one-shot envelope. Preserve that
+	// authorization; its result may not close or change a later circuit episode.
+	permit := s.breaker.TrackAccepted(resilience.Key(envelope.Provider, "MODEL_DISPATCH", envelope.BaseURL))
+	defer permit.Cancel()
 	holdID := *usageRequest.HoldID
 	r = r.WithContext(withDispatchLeaseOwner(r.Context(), envelope.leaseOwner))
 	dispatchContext, cancelDispatch := context.WithCancel(context.WithoutCancel(r.Context()))
@@ -482,7 +486,7 @@ func (s *Service) dispatchUsage(w http.ResponseWriter, r *http.Request, usageReq
 		response, err = s.executionUpstream.Do(upstreamContext, envelope.BaseURL, envelope.Credential, envelope.RequestBody, usageRequest.ID)
 	}
 	if err != nil {
-		s.breaker.Record(resilience.Key(envelope.Provider, "MODEL_DISPATCH", envelope.BaseURL), resilience.UncertainResult)
+		permit.Record(resilience.UncertainResult)
 		select {
 		case <-renewalFailed:
 			_ = s.repository.MarkReview(context.WithoutCancel(r.Context()), usageRequest.ID, "hold_renewal_failed", map[string]any{"upstream_cancelled": true})
@@ -496,11 +500,11 @@ func (s *Service) dispatchUsage(w http.ResponseWriter, r *http.Request, usageReq
 	}
 	defer response.Body.Close()
 	if response.StatusCode >= 200 && response.StatusCode < 300 {
-		s.breaker.Record(resilience.Key(envelope.Provider, "MODEL_DISPATCH", envelope.BaseURL), resilience.Success)
+		permit.Record(resilience.Success)
 	} else if response.StatusCode >= 500 || response.StatusCode == http.StatusTooManyRequests {
-		s.breaker.Record(resilience.Key(envelope.Provider, "MODEL_DISPATCH", envelope.BaseURL), resilience.InfrastructureFailure)
+		permit.Record(resilience.InfrastructureFailure)
 	} else {
-		s.breaker.Record(resilience.Key(envelope.Provider, "MODEL_DISPATCH", envelope.BaseURL), resilience.BusinessRejection)
+		permit.Record(resilience.BusinessRejection)
 	}
 	if upstreamRequestID := s.executionUpstream.UpstreamRequestID(response); upstreamRequestID != "" {
 		_ = s.repository.RecordUpstreamRequest(context.WithoutCancel(r.Context()), usageRequest.ID, UpstreamRequestEvidence{ProviderID: envelope.Provider, AdapterVersion: s.executionUpstream.AdapterVersion(), RequestID: upstreamRequestID})

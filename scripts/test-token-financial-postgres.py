@@ -28,6 +28,8 @@ REQUIRED = {
     "TestPendingUnusedExpiryLegacyCancellationFallbackPostgres",
     "TestPreparationFailurePreservesAcceptedUsagePostgres",
     "TestCircuitFailureBeforeDispatchPostgres",
+    "TestDispatchCircuitReadOnlyRecoveryPublicPostgres",
+    "TestDispatchCircuitOpenAfterAdmissionNeverBecomesProbePostgres",
     "TestCredentialRotationWindowReceiptPostgres",
     "TestCredentialRotationOtherActorEffectPostgres",
     "TestCredentialFailurePersistenceBoundariesPostgres",

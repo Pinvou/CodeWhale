@@ -111,6 +111,7 @@ type credentialWindowFixture struct {
 	providerCalls             atomic.Int64
 	providerEntered           chan struct{}
 	providerContinue          chan struct{}
+	providerHandler           atomic.Pointer[http.HandlerFunc]
 }
 
 func newCredentialWindowFixture(t *testing.T, base *PostgresRepository, ctx context.Context) *credentialWindowFixture {
@@ -118,6 +119,10 @@ func newCredentialWindowFixture(t *testing.T, base *PostgresRepository, ctx cont
 	f := &credentialWindowFixture{ctx: ctx, key: "credential-window-" + uuid.NewString(), user: uuid.New(), account: uuid.New(), credential: uuid.New()}
 	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, q *http.Request) {
 		f.providerCalls.Add(1)
+		if handler := f.providerHandler.Load(); handler != nil {
+			(*handler)(w, q)
+			return
+		}
 		if f.providerEntered != nil {
 			close(f.providerEntered)
 			<-f.providerContinue

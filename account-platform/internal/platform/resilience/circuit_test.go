@@ -42,13 +42,15 @@ func TestConcurrentHalfOpenAdmissionAndOutcomes(t *testing.T) {
 		}
 		now = now.Add(30 * time.Second)
 		var admitted atomic.Int32
+		permits := make(chan *Permit, 3)
 		var group sync.WaitGroup
 		start := make(chan struct{})
 		for range 32 {
 			group.Go(func() {
 				<-start
-				if err := b.Before(key); err == nil {
+				if permit, err := b.AdmitReadOnly(key); err == nil {
 					admitted.Add(1)
+					permits <- permit
 				} else if !errors.Is(err, ErrCircuitOpen) {
 					t.Errorf("admission error: %v", err)
 				}
@@ -60,12 +62,13 @@ func TestConcurrentHalfOpenAdmissionAndOutcomes(t *testing.T) {
 			t.Fatalf("admitted=%d, want 3", admitted.Load())
 		}
 		for index := range 3 {
+			permit := <-permits
 			group.Go(func() {
 				outcome := BusinessRejection
 				if failure && index == 0 {
 					outcome = InfrastructureFailure
 				}
-				b.Record(key, outcome)
+				permit.Record(outcome)
 			})
 		}
 		group.Wait()
@@ -89,10 +92,11 @@ func TestCircuitUsesThreeHalfOpenProbesAndExponentialReopen(t *testing.T) {
 	}
 	now = now.Add(30 * time.Second)
 	for range 3 {
-		if err := b.Before(key); err != nil {
+		permit, err := b.AdmitReadOnly(key)
+		if err != nil {
 			t.Fatal(err)
 		}
-		b.Record(key, Success)
+		permit.Record(Success)
 	}
 	if err := b.Before(key); err != nil {
 		t.Fatal("three successful probes must close the circuit")
@@ -101,10 +105,11 @@ func TestCircuitUsesThreeHalfOpenProbesAndExponentialReopen(t *testing.T) {
 		b.Record(key, InfrastructureFailure)
 	}
 	now = now.Add(30 * time.Second)
-	if err := b.Before(key); err != nil {
+	permit, err := b.AdmitReadOnly(key)
+	if err != nil {
 		t.Fatal(err)
 	}
-	b.Record(key, InfrastructureFailure)
+	permit.Record(InfrastructureFailure)
 	var open *CircuitOpenError
 	if err := b.Before(key); !errors.As(err, &open) || open.RetryAfter < time.Minute-time.Second {
 		t.Fatalf("expected exponential reopen, got %v", err)
@@ -135,10 +140,11 @@ func TestHalfOpenBusinessRejectionsCompleteHealthyProbes(t *testing.T) {
 	}
 	now = now.Add(30 * time.Second)
 	for range 3 {
-		if err := b.Before(key); err != nil {
+		permit, err := b.AdmitReadOnly(key)
+		if err != nil {
 			t.Fatal(err)
 		}
-		b.Record(key, BusinessRejection)
+		permit.Record(BusinessRejection)
 	}
 	if err := b.BeforeHighRisk(key); err != nil {
 		t.Fatalf("healthy business responses left circuit stuck: %v", err)
@@ -198,7 +204,11 @@ func TestReadAdmissionCancellationIsGenerationBound(t *testing.T) {
 				old()
 			}
 			if name == "stale generation" {
-				b.Record(key, InfrastructureFailure)
+				failed, err := b.AdmitReadOnly(key)
+				if err != nil {
+					t.Fatal(err)
+				}
+				failed.Record(InfrastructureFailure)
 				now = now.Add(time.Minute)
 				if _, err = testReadAdmission(b, key); err != nil {
 					t.Fatal(err)

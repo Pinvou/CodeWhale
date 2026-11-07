@@ -22,25 +22,26 @@ const (
 	BusinessRejection
 	UncertainResult
 )
+const probeLease = 30 * time.Second
+const windowBuckets = 61
 
-type sample struct {
-	at      time.Time
-	outcome Outcome
+type outcomeBucket struct {
+	second             int64
+	eligible, failures uint64
 }
-
 type circuit struct {
-	samples             []sample
+	window              [windowBuckets]outcomeBucket
 	consecutiveFailures int
 	openUntil           time.Time
 	reopenCount         int
-	halfOpenProbes      int
 	halfOpenSuccesses   int
 	generation          uint64
-	pendingProbes       map[uint64]struct{}
+	pendingProbes       map[uint64]time.Time
 }
 
-// Breaker isolates state by provider + capability/action + route. Business
-// rejections remain observable samples but never contribute to failures.
+// Breaker isolates provider + capability/action + route. The minute window
+// uses fixed one-second buckets, including its partially elapsed oldest second.
+// Business rejections do not enter the failure ratio or reset consecutive errors.
 type Breaker struct {
 	mu         sync.Mutex
 	now        func() time.Time
@@ -48,41 +49,64 @@ type Breaker struct {
 	nextPermit uint64
 }
 
-func NewBreaker() *Breaker {
-	return &Breaker{now: func() time.Time { return time.Now().UTC() }, items: map[string]*circuit{}}
+// Permit belongs to exactly one admission and circuit episode. Complete an
+// actual provider outcome with Record; Cancel is for pre-dispatch local failure.
+// Read-only half-open permits expire after 30s even if their caller disappears.
+type Permit struct {
+	breaker        *Breaker
+	item           *circuit
+	generation, id uint64
+	probe, done    bool
 }
 
+func NewBreaker() *Breaker { return &Breaker{now: time.Now, items: map[string]*circuit{}} }
 func Key(provider, capability, route string) string {
 	return fmt.Sprintf("%s\x00%s\x00%s", provider, capability, route)
 }
+func (b *Breaker) AdmitHighRisk(key string) (*Permit, error) { return b.admit(key, false, false) }
+func (b *Breaker) AdmitReadOnly(key string) (*Permit, error) { return b.admit(key, true, false) }
 
-func (b *Breaker) Before(key string) error {
-	_, err := b.admit(key, true, false)
-	return err
-}
-
-// BeforeHighRisk never turns an original payment, refund, or model dispatch
-// into a half-open probe after an uncertain result. Recovery must use a
-// separate read-only capability probe or explicit review workflow.
-func (b *Breaker) BeforeHighRisk(key string) error {
-	_, err := b.admit(key, false, false)
-	return err
-}
-
-// BeforeReadOnly reserves a query probe. Cancel is only for an error before
-// provider dispatch; it is idempotent and cannot release a newer generation.
-// A dispatched call must use Record for its actual provider outcome instead.
-func (b *Breaker) BeforeReadOnly(key string) (func(), error) {
+// AdmitReadOnlyRecovery attaches an already trusted read-only health check to
+// recovery only. A closed/unknown circuit returns nil without adding samples.
+func (b *Breaker) AdmitReadOnlyRecovery(key string) (*Permit, error) {
 	return b.admit(key, true, true)
 }
 
-func (b *Breaker) admit(key string, allowHalfOpen, tracked bool) (func(), error) {
+// TrackAccepted binds the result of already admitted, one-shot work. It grants
+// no admission or half-open authority. In-flight work must not lose its consumed
+// authorization merely because another call opened the circuit meanwhile.
+func (b *Breaker) TrackAccepted(key string) *Permit {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	item := b.item(key)
+	return &Permit{breaker: b, item: item, generation: item.generation}
+}
+
+// Before and BeforeReadOnly retain local admission compatibility. New callers
+// must retain an Admit* permit: an unbound Record cannot complete a probe.
+func (b *Breaker) Before(key string) error         { _, err := b.AdmitReadOnly(key); return err }
+func (b *Breaker) BeforeHighRisk(key string) error { _, err := b.AdmitHighRisk(key); return err }
+func (b *Breaker) BeforeReadOnly(key string) (func(), error) {
+	p, err := b.AdmitReadOnly(key)
+	if err != nil {
+		return nil, err
+	}
+	return p.Cancel, nil
+}
+func (b *Breaker) admit(key string, allowHalfOpen, recoveryOnly bool) (*Permit, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	now := b.now()
-	item := b.item(key)
+	item := b.items[key]
+	if recoveryOnly && (item == nil || item.openUntil.IsZero()) {
+		return nil, nil
+	}
+	if item == nil {
+		item = b.item(key)
+	}
+	p := &Permit{breaker: b, item: item, generation: item.generation}
 	if item.openUntil.IsZero() {
-		return func() {}, nil
+		return p, nil
 	}
 	if now.Before(item.openUntil) {
 		return nil, &CircuitOpenError{RetryAfter: item.openUntil.Sub(now)}
@@ -90,80 +114,101 @@ func (b *Breaker) admit(key string, allowHalfOpen, tracked bool) (func(), error)
 	if !allowHalfOpen {
 		return nil, &CircuitOpenError{RetryAfter: time.Second}
 	}
-	if item.halfOpenProbes >= 3 {
+	for id, until := range item.pendingProbes {
+		if !now.Before(until) {
+			delete(item.pendingProbes, id)
+		}
+	}
+	if len(item.pendingProbes) >= 3 {
 		return nil, &CircuitOpenError{RetryAfter: time.Second}
 	}
-	item.halfOpenProbes++
-	if !tracked {
-		return func() {}, nil
-	}
 	b.nextPermit++
-	permit, generation := b.nextPermit, item.generation
+	p.id, p.probe = b.nextPermit, true
 	if item.pendingProbes == nil {
-		item.pendingProbes = map[uint64]struct{}{}
+		item.pendingProbes = map[uint64]time.Time{}
 	}
-	item.pendingProbes[permit] = struct{}{}
-	return func() {
-		b.mu.Lock()
-		defer b.mu.Unlock()
-		if item.generation != generation {
-			return
-		}
-		if _, exists := item.pendingProbes[permit]; !exists {
-			return
-		}
-		delete(item.pendingProbes, permit)
-		item.halfOpenProbes--
-	}, nil
+	item.pendingProbes[p.id] = now.Add(probeLease)
+	return p, nil
 }
-
-func (b *Breaker) Record(key string, outcome Outcome) {
+func (p *Permit) Cancel()                { p.finish(Success, true) }
+func (p *Permit) Record(outcome Outcome) { p.finish(outcome, false) }
+func (p *Permit) finish(outcome Outcome, cancel bool) {
+	if p == nil || p.breaker == nil || p.item == nil {
+		return
+	}
+	b := p.breaker
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if p.done {
+		return
+	}
+	p.done = true
+	item := p.item
+	if item.generation != p.generation {
+		return
+	}
 	now := b.now()
-	item := b.item(key)
-	if !item.openUntil.IsZero() && !now.Before(item.openUntil) {
-		// A definite business rejection also proves the provider responded.
-		// It must complete the probe rather than exhaust its admission budget.
+	if p.probe {
+		until, exists := item.pendingProbes[p.id]
+		delete(item.pendingProbes, p.id)
+		if !exists || !now.Before(until) || cancel {
+			return
+		}
 		if outcome == Success || outcome == BusinessRejection {
 			item.halfOpenSuccesses++
 			if item.halfOpenSuccesses >= 3 {
 				*item = circuit{generation: item.generation + 1}
 			}
-			return
-		}
-		if outcome == InfrastructureFailure || outcome == UncertainResult {
+		} else if outcome == InfrastructureFailure || outcome == UncertainResult {
 			b.open(item, now)
 		}
 		return
 	}
+	if !cancel && item.openUntil.IsZero() {
+		b.observeClosed(item, now, outcome)
+	}
+}
+
+// Record accepts legacy unattributed closed-state observations only. It never
+// closes half-open state or escalates an open episode. Production calls retain
+// Admit* permits so a late result cannot enter a later closed episode either.
+func (b *Breaker) Record(key string, outcome Outcome) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	item := b.item(key)
+	if item.openUntil.IsZero() {
+		b.observeClosed(item, b.now(), outcome)
+	}
+}
+func (b *Breaker) observeClosed(item *circuit, now time.Time, outcome Outcome) {
 	if outcome == InfrastructureFailure || outcome == UncertainResult {
 		item.consecutiveFailures++
 	} else if outcome == Success {
 		item.consecutiveFailures = 0
 	}
-	item.samples = append(item.samples, sample{at: now, outcome: outcome})
-	cutoff := now.Add(-time.Minute)
-	first := 0
-	for first < len(item.samples) && item.samples[first].at.Before(cutoff) {
-		first++
+	second := now.Unix()
+	index := (second%windowBuckets + windowBuckets) % windowBuckets
+	bucket := &item.window[index]
+	if bucket.second != second {
+		*bucket = outcomeBucket{second: second}
 	}
-	item.samples = item.samples[first:]
-	eligible, failures := 0, 0
-	for _, value := range item.samples {
-		if value.outcome == BusinessRejection {
-			continue
-		}
-		eligible++
-		if value.outcome == InfrastructureFailure || value.outcome == UncertainResult {
-			failures++
+	if outcome != BusinessRejection {
+		bucket.eligible++
+		if outcome == InfrastructureFailure || outcome == UncertainResult {
+			bucket.failures++
 		}
 	}
-	if item.consecutiveFailures >= 5 || eligible >= 20 && failures*2 >= eligible {
+	var eligible, failures uint64
+	for _, v := range item.window {
+		if v.second >= second-60 && v.second <= second {
+			eligible += v.eligible
+			failures += v.failures
+		}
+	}
+	if item.consecutiveFailures >= 5 || eligible >= 20 && failures >= eligible-failures {
 		b.open(item, now)
 	}
 }
-
 func (b *Breaker) item(key string) *circuit {
 	item := b.items[key]
 	if item == nil {
@@ -172,13 +217,11 @@ func (b *Breaker) item(key string) *circuit {
 	}
 	return item
 }
-
 func (b *Breaker) open(item *circuit, now time.Time) {
 	backoff := 30 * time.Second * time.Duration(1<<min(item.reopenCount, 5))
 	item.reopenCount++
 	item.openUntil = now.Add(min(backoff, 15*time.Minute))
 	item.generation++
 	item.pendingProbes = nil
-	item.halfOpenProbes = 0
 	item.halfOpenSuccesses = 0
 }
