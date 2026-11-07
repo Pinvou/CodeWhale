@@ -97,7 +97,13 @@ def query_function(raw):
     identity = "SELECT jsonb_build_array(session_user,current_user,pg_catalog.current_database(),pg_catalog.current_setting('port'),pg_catalog.current_setting('data_directory'),(SELECT system_identifier::text FROM pg_catalog.pg_control_system()))::text"
 
     def execute(sql, guard=()):
-        result = subprocess.run([psql, raw, "-X", "-q", "-A", "-t", "-v", "ON_ERROR_STOP=1", *FIN["ci_identity_guard"](raw), *guard, "-c", sql], capture_output=True, text=True, encoding="utf-8", check=False, timeout=30)
+        statements = (sql,) if isinstance(sql, str) else sql
+        if not isinstance(statements, tuple) or not statements or any(not isinstance(statement, str) or not statement.strip() for statement in statements):
+            raise ValueError("owned PostgreSQL operation requires explicit SQL commands")
+        command = [psql, raw, "-X", "-q", "-A", "-t", "-v", "ON_ERROR_STOP=1", *FIN["ci_identity_guard"](raw), *guard]
+        for statement in statements:
+            command.extend(("-c", statement))
+        result = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", check=False, timeout=30)
         if result.returncode:
             raise RuntimeError("owned family PostgreSQL operation failed")
         return result.stdout.strip()
@@ -160,8 +166,11 @@ class OwnedInstance:
         self.assert_restored()
         # Capture OIDs in the creation transaction, before a same-name role can
         # be substituted after commit. Do not adopt unrelated actors in a scan.
-        capture = "SELECT jsonb_build_object('roles',(" + ROLE_FACTS + ")::jsonb,'members',(" + MEMBER_FACTS + ")::jsonb)::text; COMMIT;"
-        captured = json.loads(self.query(BILLING_SETUP.replace("COMMIT;", capture)))
+        capture = "SELECT jsonb_build_object('roles',(" + ROLE_FACTS + ")::jsonb,'members',(" + MEMBER_FACTS + ")::jsonb)::text;"
+        # Older psql prints only the last result of each -c command. Keep the
+        # capture as its own command before COMMIT on this same guarded backend;
+        # it must not disappear behind COMMIT or move outside the transaction.
+        captured = json.loads(self.query((BILLING_SETUP.removesuffix("COMMIT;"), capture, "COMMIT;")))
         rows, members = captured["roles"], captured["members"]
         baseline = self.roles
         if (not isinstance(rows, list) or len(rows) != 4 or len(baseline) != 1

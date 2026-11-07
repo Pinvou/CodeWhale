@@ -25,8 +25,12 @@ class FakeInstance:
         self.created = self.dropped = 0
         self.clients, self.objects, self.dependencies = "0", "0", "f"
         self.extra_at_creation = False
+        self.command_groups = []
 
     def __call__(self, sql):
+        if isinstance(sql, tuple):
+            self.command_groups.append(sql)
+            sql = "\n".join(sql)
         if "CREATE ROLE" in sql:
             self.created += 1
             self.rows = copy.deepcopy(self.base) + [[str(20001+i), role, False, role == "billing_service", False, False, role != "billing_schema_owner", False, False, -1] for i, role in enumerate(sorted(RUNNER.FIN["ACTORS"]))]
@@ -71,6 +75,12 @@ class FinancialFamiliesTests(unittest.TestCase):
         query = FakeInstance()
         owner = RUNNER.OwnedInstance(query)
         owner.create_billing()
+        setup, capture, commit = query.command_groups[0]
+        self.assertTrue(setup.startswith("BEGIN;"))
+        self.assertNotIn("COMMIT", setup)
+        self.assertTrue(capture.startswith("SELECT jsonb_build_object("))
+        self.assertNotIn("COMMIT", capture)
+        self.assertEqual(commit, "COMMIT;")
         self.assertEqual(query.created, 1)
         self.assertIsNotNone(owner.retained_roles)
         owner.retire_billing()
@@ -78,6 +88,38 @@ class FinancialFamiliesTests(unittest.TestCase):
         self.assertEqual(query.dropped, 1)
         self.assertEqual(query.rows, query.base)
         self.assertEqual(query.members, query.base_members)
+
+    def test_query_keeps_transaction_capture_in_separate_commands_on_one_backend(self):
+        identity = ["postgres", "postgres", "postgres", "5432", "/declared/owned", "12345"]
+        calls = []
+        def run(argv, **options):
+            calls.append(argv)
+            return SimpleNamespace(returncode=0, stdout=json.dumps(identity) if len(calls) == 1 else '{"captured":true}', stderr="")
+        with patch.dict(os.environ, {}, clear=True), patch.object(RUNNER.subprocess, "run", side_effect=run):
+            query = RUNNER.query_function("owned-url")
+            self.assertEqual(query(("BEGIN; CREATE ROLE controlled;", "SELECT 'capture';", "COMMIT;")), '{"captured":true}')
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[1][-6:], ["-c", "BEGIN; CREATE ROLE controlled;", "-c", "SELECT 'capture';", "-c", "COMMIT;"])
+        self.assertIn("owned coordinator identity changed", calls[1][-7])
+        self.assertIn("ON_ERROR_STOP=1", calls[1])
+
+    def test_missing_capture_or_failed_commit_never_authorizes_role_cleanup(self):
+        for mode in ("missing", "failed-commit"):
+            query = FakeInstance()
+            owner = RUNNER.OwnedInstance(query)
+            def transaction(sql):
+                result = query(sql)
+                if isinstance(sql, tuple):
+                    if mode == "failed-commit":
+                        raise RuntimeError("owned family PostgreSQL operation failed")
+                    return ""
+                return result
+            owner.query = transaction
+            with self.subTest(mode=mode), self.assertRaises((RuntimeError, json.JSONDecodeError)):
+                owner.create_billing()
+            self.assertIsNone(owner.retained_roles)
+            owner.retire_billing()
+            self.assertEqual(query.dropped, 0)
 
     def test_dirty_admission_and_changed_resources_never_authorize_drop(self):
         for kind in ("clients", "objects", "role"):
