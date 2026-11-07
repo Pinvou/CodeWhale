@@ -112,7 +112,7 @@ func TestHijackedResponseHasExplicitOutcomeWithoutInventedSuccess(t *testing.T) 
 	if requests["GET /handover:hijacked"] != 1 || requests["GET /handover:200"] != 0 || requests["GET /normal:200"] != 1 || requests["GET /written-handover:201"] != 1 || requests["GET /unsupported:502"] != 1 || hijacks["GET /handover"] != 1 || hijacks["GET /written-handover"] != 1 || hijacks["GET /unsupported"] != 0 {
 		t.Fatal("handover outcome or following request was misclassified", requests, hijacks)
 	}
-	if !strings.Contains(logs.String(), `"error_code":"HTTP_RESPONSE_HIJACKED"`) {
+	if !strings.Contains(logs.String(), `"error_code":"HTTP_RESPONSE_HIJACKED"`) || !strings.Contains(logs.String(), `"status":"hijacked"`) {
 		t.Fatal("connection handover was not observable")
 	}
 }

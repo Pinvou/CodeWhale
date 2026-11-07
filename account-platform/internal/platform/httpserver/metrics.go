@@ -79,6 +79,10 @@ func (metrics *httpMetrics) middleware(next http.Handler, logger *slog.Logger) h
 			if wrapped.hijacked {
 				metrics.hijacks.WithLabelValues(method, route).Inc()
 			}
+			var loggedStatus any = wrapped.status
+			if !wrapped.wroteHeader && (aborted || wrapped.hijacked) {
+				loggedStatus = status
+			}
 			requestCounter := metrics.requests.WithLabelValues(method, route, status)
 			durationObserver := metrics.duration.WithLabelValues(method, route)
 			elapsed := time.Since(start)
@@ -91,11 +95,11 @@ func (metrics *httpMetrics) middleware(next http.Handler, logger *slog.Logger) h
 				durationObserver.Observe(elapsed.Seconds())
 			}
 			if aborted {
-				logger.ErrorContext(r.Context(), "http request completed", "method", r.Method, "route", route, "status", wrapped.status, "duration_ms", elapsed.Milliseconds(), "error_code", "HTTP_RESPONSE_ABORTED")
+				logger.ErrorContext(r.Context(), "http request completed", "method", r.Method, "route", route, "status", loggedStatus, "duration_ms", elapsed.Milliseconds(), "error_code", "HTTP_RESPONSE_ABORTED")
 			} else if wrapped.hijacked {
-				logger.InfoContext(r.Context(), "http request completed", "method", r.Method, "route", route, "status", wrapped.status, "duration_ms", elapsed.Milliseconds(), "error_code", "HTTP_RESPONSE_HIJACKED")
+				logger.InfoContext(r.Context(), "http request completed", "method", r.Method, "route", route, "status", loggedStatus, "duration_ms", elapsed.Milliseconds(), "error_code", "HTTP_RESPONSE_HIJACKED")
 			} else {
-				logger.InfoContext(r.Context(), "http request completed", "method", r.Method, "route", route, "status", wrapped.status, "duration_ms", elapsed.Milliseconds())
+				logger.InfoContext(r.Context(), "http request completed", "method", r.Method, "route", route, "status", loggedStatus, "duration_ms", elapsed.Milliseconds())
 			}
 			if recovered != nil {
 				panic(recovered)
