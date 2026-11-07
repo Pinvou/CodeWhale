@@ -50,7 +50,9 @@ type Breaker struct {
 }
 
 // Permit belongs to exactly one admission and circuit episode. Complete an
-// actual provider outcome with Record; Cancel is for pre-dispatch local failure.
+// actual provider outcome with Record. Cancel discards an unused admission or
+// an observation withheld by local cancellation/trust checks; it asserts no
+// provider outcome. It must not replace a confirmed current provider failure.
 // Read-only half-open permits expire after 30s even if their caller disappears.
 type Permit struct {
 	breaker        *Breaker

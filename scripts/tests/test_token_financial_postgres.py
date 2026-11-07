@@ -1100,6 +1100,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
             "TestReconciliationEvidenceMatchesPublicSchema",
             "TestDispatchCircuitReadOnlyRecoveryPublicPostgres",
             "TestDispatchCircuitOpenAfterAdmissionNeverBecomesProbePostgres",
+            "TestDispatchCircuitRecoveryDoesNotRequireSharedHealthClaimPostgres",
             "TestF06OrganizationAdmissionBoundariesPublicPostgres",
         }
         self.assertTrue(required <= RUNNER.REQUIRED)

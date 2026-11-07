@@ -30,6 +30,7 @@ REQUIRED = {
     "TestCircuitFailureBeforeDispatchPostgres",
     "TestDispatchCircuitReadOnlyRecoveryPublicPostgres",
     "TestDispatchCircuitOpenAfterAdmissionNeverBecomesProbePostgres",
+    "TestDispatchCircuitRecoveryDoesNotRequireSharedHealthClaimPostgres",
     "TestCredentialRotationWindowReceiptPostgres",
     "TestCredentialRotationOtherActorEffectPostgres",
     "TestCredentialFailurePersistenceBoundariesPostgres",
