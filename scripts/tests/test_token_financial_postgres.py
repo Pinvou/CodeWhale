@@ -1447,12 +1447,12 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
 
     def test_account_phase_requires_real_cas_lifecycle_and_review_governance_roots(self):
         self.assertEqual(RUNNER.ACCOUNT_REQUIRED, {
-            "TestOrganizationEvidenceTruncatePublicPostgres",
             "TestRestoredAdminReadsWithPublicMigrationsAndRuntimeActor",
             "TestMemberUnitsReceiptSurvivesLegalUnitDeletion",
             "TestF06OrganizationStatusProjectionVersionPublicPostgres",
             "TestF06OrganizationDeletionVersionAndTerminalScope",
             "TestF06Review5566377593PublicPostgres",
+            "TestOrganizationEvidenceTruncatePublicPostgres",
             "TestOrdinaryDeadLetterReplayRuntimePostgres",
             "TestIdentityRecoveryClaimsRuntimePostgres",
             "TestProfileSessionRevocationRecoveryRuntimePostgres",

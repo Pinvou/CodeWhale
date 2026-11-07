@@ -72,7 +72,6 @@ REQUIRED = {
 ACCOUNT_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/account"
 LIFECYCLE_RECONCILIATION_REQUIRED = {"TestLifecycleV3ApprovalReconciliationPostgres"}
 ACCOUNT_REQUIRED = {
-    "TestOrganizationEvidenceTruncatePublicPostgres",
     "TestRestoredAdminReadsWithPublicMigrationsAndRuntimeActor",
     "TestApprovalDecisionOriginalReceiptPostgres",
     "TestApprovalDecisionLegacyConcurrentReceiptPostgres",
@@ -80,6 +79,7 @@ ACCOUNT_REQUIRED = {
     "TestF06OrganizationStatusProjectionVersionPublicPostgres",
     "TestF06OrganizationDeletionVersionAndTerminalScope",
     "TestF06Review5566377593PublicPostgres",
+    "TestOrganizationEvidenceTruncatePublicPostgres",
     "TestOrdinaryDeadLetterReplayRuntimePostgres",
     "TestIdentityRecoveryClaimsRuntimePostgres",
     "TestProfileSessionRevocationRecoveryRuntimePostgres",
@@ -274,15 +274,6 @@ BILLING_LEAF_REQUIRED = {
 }
 BILLING_CHILD_REQUIRED = RETAINED_REQUIRED - BILLING_LEAF_REQUIRED
 EXACT_REQUIRED_CHILDREN = {
-    "TestOrganizationEvidenceTruncatePublicPostgres": {
-        scenario + suffix
-        for scenario in ("fresh-install", "retained-upgrade")
-        for suffix in ("", "/organization_creation_requests", "/organization_unit_commands",
-                       "/membership_commands", "/legal-replay-after-rejection", "/forward-only-public-down")
-    },
-    "TestClosedGrantEvidenceCurrentRoleGuardsPostgres": {
-        "account_closure_grant_isolations", "account_closed_grant_reclaim_commands",
-    },
     "TestRechargeProductCommandAtomicityPostgres": {"active-provider-admission-candidate-progress"},
     "TestProductManualAdmissionPostgres": {
         "two-explicit-humans-first-publish-and-immutable-replay",
@@ -302,6 +293,15 @@ EXACT_REQUIRED_CHILDREN = {
         "retention-keeps-issued-grant-and-continues-later-artifact-cleanup",
         "retention-skips-locked-expired-captcha-and-rejects-late-grant",
         "retention-FK-protects-inflight-reference-and-subsequent-passes",
+    },
+    "TestOrganizationEvidenceTruncatePublicPostgres": {
+        scenario + suffix
+        for scenario in ("fresh-install", "retained-upgrade")
+        for suffix in ("", "/organization_creation_requests", "/organization_unit_commands",
+                       "/membership_commands", "/legal-replay-after-rejection", "/forward-only-public-down")
+    },
+    "TestClosedGrantEvidenceCurrentRoleGuardsPostgres": {
+        "account_closure_grant_isolations", "account_closed_grant_reclaim_commands",
     },
     "TestManagementPublicMigrationInstallation": {
         "fresh", "legacy-upgrade", "installed-29-upgrade", "installed-30-upgrade",
