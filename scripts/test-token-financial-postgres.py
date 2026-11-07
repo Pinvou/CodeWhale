@@ -147,6 +147,8 @@ BILLING_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/billing"
 SCHEMA_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/billingschema"
 TOKEN_SCHEMA_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/tokenschema"
 TOKEN_SCHEMA_REQUIRED = {"TestManagementPublicMigrationInstallation"}
+MIGRATIONS_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/platform/migrations"
+MIGRATIONS_REQUIRED = {"TestPinnedMigrationLedgerPostgresIntegration", "TestRestrictedMigrationLedgerPostgresIntegration"}
 SCHEMA_REQUIRED = {"TestLatePaymentQueryRegisteredIdentity", "TestReconciliationFairRetryRegisteredIdentity", "TestF09EntitlementPackageIndexPublicMigration", "TestTokenWalletReceiptSchemaPostgres", "TestLegacyEntitlementUpgradeAdmissionPostgres", "TestUsageWaiverHistoricalSchemaPostgres", "TestBillingOrdinaryReplayOriginalMigrationPostgres", "TestUnknownProviderEntryPublicMigrationPostgres", "TestLegacyExpiry025UpgradePreservesOriginalLedgerPostgres", "TestF04PublicTokenUserOwnerAuthorityAndDirectory", "TestManualRetentionHistoricalHardeningPostgres"}
 OWNER_REQUIRED = {
     "TestPaymentActionAdmissionPostgres",
@@ -270,6 +272,15 @@ BILLING_LEAF_REQUIRED = {
 }
 BILLING_CHILD_REQUIRED = RETAINED_REQUIRED - BILLING_LEAF_REQUIRED
 EXACT_REQUIRED_CHILDREN = {
+    "TestPinnedMigrationLedgerPostgresIntegration": {
+        "up-path-change-keeps-original-ledger",
+        "verify-rejects-original-drift-despite-shadow",
+        "down-path-change-removes-only-original-row",
+        "actual-cli-retains-bound-namespace",
+        "binding-cannot-cross-connections",
+        "missing-search-path-schema-rejects-before-preparation",
+        "another-workflow-selects-its-own-visible-ledger",
+    },
     "TestRechargeProductCommandAtomicityPostgres": {"active-provider-admission-candidate-progress"},
     "TestProductManualAdmissionPostgres": {
         "two-explicit-humans-first-publish-and-immutable-replay",
@@ -550,7 +561,7 @@ def main(*, group="all"):
             env["PINVOU_TEST_ACCOUNT_DATABASE_URL"] = raw
         elif target == "./internal/billingschema":
             env["PINVOU_TEST_SCHEMA_DATABASE_URL"] = raw
-        elif target == "./internal/tokenschema":
+        elif target in ("./internal/tokenschema", "./internal/platform/migrations"):
             env["PINVOU_TEST_TOKEN_DATABASE_URL"] = raw
         else:
             env["PINVOU_TEST_BILLING_DATABASE_URL"] = raw
@@ -591,6 +602,10 @@ def main(*, group="all"):
     if group in ("all", "owners"):
         # Each existing owner fixture requires its own absent actors. Restoration
         # is checked between every phase, before any next fixture can write.
+        try:
+            run_phase("owner-ledger", "./internal/platform/migrations", MIGRATIONS_PACKAGE, MIGRATIONS_REQUIRED, scoped=True)
+        finally:
+            assert_instance({user})
         try:
             run_phase("owner-account", "./internal/account", ACCOUNT_PACKAGE, ACCOUNT_REQUIRED, scoped=True)
         finally:
