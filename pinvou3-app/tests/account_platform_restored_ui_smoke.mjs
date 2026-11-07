@@ -186,6 +186,12 @@ try {
     for (const [language, search, update, lookup] of [['zh', '搜索', '刷新当前结果', '精确查询'], ['en', 'Search', 'Refresh results', 'Exact lookup'], ['ja', '検索', '検索結果を更新', '完全一致で検索'], ['zh', '搜索', '刷新当前结果', '精确查询']]) {
       await page.select('.adm-sidebar-foot select', language);
       await page.waitForFunction(({ search, update, lookup }) => document.querySelector('[data-user-directory-search] button')?.textContent === search && document.querySelector('[data-user-results-refresh]')?.textContent === update && document.querySelector('[data-user-code-search] button')?.textContent === lookup, {}, { search, update, lookup });
+      const acceptedSummary = await page.$eval('.adm-user-result-summary', node => node.textContent);
+      const batchLabels = await page.evaluate(() => { const words = window.restored.copy().adminLayout.userResults; return [words.directory, words.returned(1), words.condition('alice'), words.capacity]; });
+      assert.ok(batchLabels.every(label => acceptedSummary.includes(label)), 'batch information describes accepted URL conditions, never draft or invented totals');
+      assert.equal(await page.$eval('.adm-user-list tbody .adm-identifier-value code', node => node.textContent), 'USR-0000-0000-0000-0000-Q3', 'the current row keeps its exact complete code');
+      const codeSizes = await page.$$eval('.adm-user-list tbody .adm-identifier-value code', nodes => nodes.map(node => Number.parseFloat(getComputedStyle(node).fontSize)));
+      assert.ok(codeSizes.length > 0 && codeSizes.every(size => size >= 12), 'list codes use the shared readable size');
     }
     let before = (await queries()).length;
     await replace(general, 'bob'); assert.equal((await queries()).length, before, 'typing is not a search');
