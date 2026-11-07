@@ -258,7 +258,7 @@ fn word_is_secret(word: &str) -> bool {
     // `sk-` 不在词首——把常见值定界符（冒号/逗号/引号）后的段也按前缀查一遍。
     // 只切这几个 ASCII 定界符，不切 CJK（前缀表全是 ASCII 开头，切中文白费）。
     for segment in trimmed.split([':', ',', '"']) {
-        let segment = segment.trim_matches(['\'', '{', '}', '[', ']']);
+        let segment = segment.trim_matches(['\'', '{', '}', '[', ']', '<', '>']); // r28 P2-14: <> 并入 segment trim
         if segment.len() >= MIN_LITERAL_SECRET_LEN
             && SECRET_PREFIXES
                 .iter()
