@@ -1,5 +1,5 @@
 import { decideWithOriginalReceipt } from './approval-decision-recovery.js';
-import { requirePlatformRoles, requirePlatformRoleBinding } from './platform-role-management.js';
+import { platformRoleBindingUserID, requirePlatformRoles, requirePlatformRoleBinding } from './platform-role-management.js';
 import { parseSystemStatusJSON } from './admin-system-status.js';
 import { parseUsageJSON, encodeUsageJSON } from './admin-usage-governance.js';
 import { parseFinanceJSON, encodeFinanceJSON, requireFinanceID, requirePaymentOrder, integerMoney } from './finance-contract.js';
@@ -365,9 +365,8 @@ export class AdminPlatformClient {
     return requirePlatformRoles(await this.request('account', '/admin/v1/roles', signal));
   }
   async platformRoleBindings(userID = '', signal) {
-    if (typeof userID === 'string') userID = userID.trim().toLowerCase();
-    if (userID) requireFinanceID(userID);
-    const payload = await this.request('account', '/admin/v1/role-bindings' + (userID ? `?user_id=${encodeURIComponent(userID)}` : ''), signal);
+    const target = platformRoleBindingUserID(userID);
+    const payload = await this.request('account', '/admin/v1/role-bindings' + (target ? `?user_id=${encodeURIComponent(target)}` : ''), signal);
     if (!Array.isArray(payload?.items) || typeof payload.truncated !== 'boolean' || payload.items.length > 500 || payload.truncated && payload.items.length !== 500) throw new Error('INVALID_ROLE_BINDINGS');
     const items = payload.items.map(item => requirePlatformRoleBinding(item));
     Object.defineProperty(items, 'truncated', { value: payload.truncated, enumerable: false });

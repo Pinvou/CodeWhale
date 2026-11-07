@@ -4,11 +4,12 @@ import { PlatformRoleBindingIdentity } from './PlatformRoleBindingIdentity.jsx';
 import { usePlatformBindingUsers } from './platform-binding-users.js';
 import { usePortalDialogScope } from './portal-dialog-scope.jsx';
 
-export function PlatformRoleBindings({ words, copy, bindings, target, blocked, onApplyTarget, canRevoke, onRevoke, onView, client, me, acceptedSessionEpoch, routeScope, active }) {
+export function PlatformRoleBindings({ words, copy, bindings, target, draftTarget = target, hasUserCondition = Boolean(target), blocked, onApplyTarget, canRevoke, onRevoke, onView, client, me, acceptedSessionEpoch, routeScope, active }) {
   const scopeActive = usePortalDialogScope();
   const [query, setQuery] = useState(''), [status, setStatus] = useState(''), [pageNumber, setPageNumber] = useState(1);
-  const [targetDraft, setTargetDraft] = useState(target);
-  useEffect(() => { setTargetDraft(target); setPageNumber(1); setQuery(''); setStatus(''); }, [target]);
+  const [targetDraft, setTargetDraft] = useState(draftTarget);
+  useEffect(() => { setTargetDraft(draftTarget); }, [draftTarget]);
+  useEffect(() => { setPageNumber(1); setQuery(''); setStatus(''); }, [target]);
   const search = query.trim().toLowerCase();
   const visible = bindings?.filter(item => (!status || item.status === status) && [item.user_id, item.role_code, platformRoleName(words, item.role_code)].some(value => value.toLowerCase().includes(search))) || [];
   const pageCount = Math.max(1, Math.ceil(visible.length / 20)), page = Math.min(pageNumber, pageCount);
@@ -17,13 +18,25 @@ export function PlatformRoleBindings({ words, copy, bindings, target, blocked, o
   const failedNames = items.some(item => users.lookup(item.user_id).status === 'unavailable');
   const date = value => value ? new Date(value).toLocaleString() : words.forever;
   return <>
-    <form className="adm-role-toolbar" onSubmit={event => { event.preventDefault(); if (!blocked) onApplyTarget(targetDraft); }}>
-      <label>{copy.target}<input value={targetDraft} disabled={blocked} onChange={event => setTargetDraft(event.target.value)} /></label><button disabled={blocked}>{copy.refresh}</button>
-    </form>
-    <div className="adm-role-toolbar">
-      <label><span className="adm-visually-hidden">{words.bindingSearchPlaceholder}</span><input type="search" value={query} onChange={event => { setQuery(event.target.value); setPageNumber(1); }} placeholder={words.bindingSearchPlaceholder} /></label>
-      <select aria-label={copy.status} value={status} onChange={event => { setStatus(event.target.value); setPageNumber(1); }}><option value="">{words.allStatuses}</option>{['ACTIVE', 'SCHEDULED', 'EXPIRED', 'REVOKED'].map(value => <option key={value} value={value}>{words.statuses[value]}</option>)}</select>
-    </div>
+    <section className="adm-binding-query" aria-label={words.bindingFilters.serverTitle}>
+      <div className="adm-binding-filter-heading"><h3>{words.bindingFilters.serverTitle}</h3><p>{words.bindingFilters.serverHelp}</p></div>
+      <form className="adm-role-toolbar adm-binding-server-query" onSubmit={event => { event.preventDefault(); if (!blocked) onApplyTarget(targetDraft); }}>
+        <label>{words.bindingFilters.userID}<input value={targetDraft} disabled={blocked} onChange={event => setTargetDraft(event.target.value)} /></label>
+        <button type="submit" disabled={blocked}>{words.bindingFilters.query}</button>
+        <button type="button" disabled={blocked || !hasUserCondition && !targetDraft} onClick={() => { if (blocked) return; setTargetDraft(''); onApplyTarget(''); }}>{words.bindingFilters.clearUser}</button>
+      </form>
+      {target === null ? <p className="adm-binding-applied-query adm-binding-invalid-query" role="alert">{words.bindingFilters.invalidURL}</p>
+        : <p className="adm-binding-applied-query">{words.bindingFilters.applied}<code>{target || words.bindingFilters.allUsers}</code></p>}
+    </section>
+    <section className="adm-binding-local-filters" aria-label={words.bindingFilters.localTitle}>
+      <div className="adm-binding-filter-heading"><h3>{words.bindingFilters.localTitle}</h3><p>{words.bindingFilters.localHelp}</p></div>
+      <div className="adm-role-toolbar">
+        <label>{words.bindingFilters.keyword}<input type="search" value={query} onChange={event => { setQuery(event.target.value); setPageNumber(1); }} placeholder={words.bindingSearchPlaceholder} /></label>
+        <label className="adm-binding-status-filter">{copy.status}<select value={status} onChange={event => { setStatus(event.target.value); setPageNumber(1); }}><option value="">{words.allStatuses}</option>{['ACTIVE', 'SCHEDULED', 'EXPIRED', 'REVOKED'].map(value => <option key={value} value={value}>{words.statuses[value]}</option>)}</select></label>
+        <button type="button" disabled={!query && !status} onClick={() => { setQuery(''); setStatus(''); setPageNumber(1); }}>{words.bindingFilters.resetLocal}</button>
+      </div>
+      {bindings && <p className="adm-binding-filter-summary" role="status">{words.bindingFilters.loaded(visible.length, bindings.length)}</p>}
+    </section>
     {failedNames && <p className="adm-binding-lookup-note">{words.bindingUserUnavailable} <button type="button" onClick={users.retry}>{words.reloadBindingUsers}</button></p>}
     {bindings && <>
       {bindings.truncated && <p className="adm-inline-message" role="status">{copy.bindingsTruncated}</p>}
@@ -41,7 +54,7 @@ export function PlatformRoleBindings({ words, copy, bindings, target, blocked, o
           </tr>)}</tbody>
         </table>{!items.length && <p className="adm-empty">{words.noBindings}</p>}
       </div>
-      <footer className="adm-pagination"><span>{words.pageSummary(page, pageCount, visible.length)}</span><div><button type="button" disabled={page <= 1} onClick={() => setPageNumber(page - 1)}>{words.previousPage}</button><button type="button" disabled={page >= pageCount} onClick={() => setPageNumber(page + 1)}>{words.nextPage}</button></div></footer>
+      <footer className="adm-pagination"><span>{words.bindingFilters.localPages(page, pageCount)}</span><div><button type="button" disabled={page <= 1} onClick={() => setPageNumber(page - 1)}>{words.previousPage}</button><button type="button" disabled={page >= pageCount} onClick={() => setPageNumber(page + 1)}>{words.nextPage}</button></div></footer>
     </>}
   </>;
 }
