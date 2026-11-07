@@ -325,3 +325,20 @@
 .adm-restored-shell .adm-system-reconciliation-detail{display:grid;gap:6px;margin-top:10px;min-width:0}
 .adm-restored-shell .adm-system-reconciliation-detail small{color:var(--adm-muted);font-size:12px;line-height:1.5;overflow-wrap:anywhere}
 .adm-restored-shell .adm-system-reconciliation-link{justify-self:start;max-width:100%;border:0;padding:3px 0;color:var(--adm-primary);background:transparent;text-align:start;white-space:normal;line-height:1.5}
+
+/* The manual is a real read-only guide with a controlled-source locator. */
+.adm-runbook-panel summary{display:flex;align-items:center;gap:10px;min-height:44px;cursor:pointer;list-style:none}
+.adm-runbook-panel summary::-webkit-details-marker{display:none}
+.adm-runbook-panel summary:focus-visible{outline:3px solid var(--adm-primary);outline-offset:3px;border-radius:6px}
+.adm-runbook-panel summary>.adm-status{margin-left:auto;flex:none}
+.adm-runbook-chevron{display:inline-block;flex:none;font-size:24px;line-height:1;transform:rotate(0)}
+.adm-runbook-panel details[open]>summary .adm-runbook-chevron{transform:rotate(90deg)}
+.adm-runbook-guide{padding:8px 0 4px;font-size:14px;line-height:1.7}
+.adm-runbook-guide h3{margin:18px 0 8px;font-size:14px}
+.adm-runbook-guide ol{padding-left:24px;margin:8px 0}
+.adm-runbook-guide li+li{margin-top:8px}
+.adm-runbook-guide>code{display:block;padding:12px;border-radius:9px;background:var(--adm-soft);font-size:12px;white-space:normal;overflow-wrap:anywhere}
+.adm-runbook-boundary{padding-top:12px;border-top:1px solid var(--adm-line);color:var(--adm-muted)}
+@media(max-width:560px){.adm-runbook-panel summary{flex-wrap:wrap}.adm-runbook-panel summary>.adm-status{margin-left:0}}
+
+.adm-restored-shell .adm-system-source-limit{padding:12px 14px;border:1px solid var(--adm-line);border-radius:9px;background:var(--adm-soft);font-size:13px;line-height:1.6;overflow-wrap:anywhere}
