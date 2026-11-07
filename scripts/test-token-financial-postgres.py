@@ -272,6 +272,13 @@ BILLING_CHILD_REQUIRED = RETAINED_REQUIRED - BILLING_LEAF_REQUIRED
 EXACT_REQUIRED_CHILDREN = {
     "TestPublishedRollbackPackageIntegrityPostgres": {
         "published-down-legacy-crlf-no-create", "recorded-up-identity-before-down", "unrelated-custom-history",
+        "published-ledger-cannot-become-custom/LF", "published-ledger-cannot-become-custom/CRLF",
+    },
+    "TestUsageWaiverHistoricalSchemaPostgres": {
+        "fresh-exact-history-append-only-runtime-and-forward-only",
+        "old-LF/changed-current-down-before-up", "old-LF/changed-current-down-before-verify",
+        "old-CRLF/changed-current-down-before-up", "old-CRLF/changed-current-down-before-verify",
+        "unknown-checksum", "wrong-legacy-shape",
     },
     "TestRechargeProductCommandAtomicityPostgres": {"active-provider-admission-candidate-progress"},
     "TestProductManualAdmissionPostgres": {

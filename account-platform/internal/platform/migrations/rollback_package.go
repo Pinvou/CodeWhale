@@ -65,6 +65,13 @@ func rollbackChecksums(raw string) (map[rollbackIdentity]string, error) {
 	return result, nil
 }
 
+// VerifyPublishedRollbackPackage validates the supplied published identity
+// before a trusted domain wrapper substitutes historical compatibility SQL.
+// It does not certify unknown custom or retained SQL outside the inventory.
+func VerifyPublishedRollbackPackage(loaded []Migration) error {
+	return verifyPublishedRollbacks(loaded)
+}
+
 func verifyPublishedRollbacks(loaded []Migration) error {
 	if publishedRollbackError != nil {
 		return publishedRollbackError

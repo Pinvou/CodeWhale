@@ -99,6 +99,45 @@ func TestPublishedRollbackPackageIntegrityPostgres(t *testing.T) {
 			t.Fatal("successful rollback did not remove original ledger row", err)
 		}
 	})
+	for _, representation := range []string{"LF", "CRLF"} {
+		t.Run("published-ledger-cannot-become-custom/"+representation, func(t *testing.T) {
+			c := f.database(t, ctx, "billing", "billing_schema_owner")
+			original := append([]migrations.Migration(nil), first...)
+			if representation == "CRLF" {
+				original[0].UpSQL = strings.ReplaceAll(strings.ReplaceAll(original[0].UpSQL, "\r\n", "\n"), "\n", "\r\n")
+				digest := sha256.Sum256([]byte(original[0].UpSQL))
+				original[0].Checksum = hex.EncodeToString(digest[:])
+			}
+			if err := migrations.Up(ctx, c, original); err != nil {
+				t.Fatal("original published writer", err)
+			}
+			defer migrations.Unlock(context.Background(), c)
+			if _, err := c.Exec(ctx, `INSERT INTO inbox_messages(event_id,event_type,aggregate_version) VALUES('22222222-2222-4222-8222-222222222222','retained.fact',9)`); err != nil {
+				t.Fatal(err)
+			}
+			facts := func() string {
+				return stageValue(t, ctx, c, `SELECT jsonb_build_object('ledger',(SELECT jsonb_agg(to_jsonb(x) ORDER BY version) FROM schema_migrations x),'inbox',(SELECT jsonb_agg(to_jsonb(x) ORDER BY event_id) FROM inbox_messages x),'outbox',(SELECT count(*) FROM outbox_events))::text`)
+			}
+			before := facts()
+			changed := append([]migrations.Migration(nil), original...)
+			changed[0].UpSQL += "\n-- edited candidate cannot redefine applied history\n"
+			digest := sha256.Sum256([]byte(strings.ReplaceAll(changed[0].UpSQL, "\r\n", "\n")))
+			changed[0].Checksum = hex.EncodeToString(digest[:])
+			changed[0].DownSQL = "DELETE FROM inbox_messages;"
+			if err := migrations.DownOne(ctx, c, changed); err == nil || !strings.Contains(err.Error(), "checksum changed before rollback") {
+				t.Fatal("known applied history was downgraded to custom by supplied Up", err)
+			}
+			if before != facts() {
+				t.Fatal("rejected candidate changed published facts or ledger")
+			}
+			if _, err := migrations.VerifyApplied(ctx, c, original); err != nil {
+				t.Fatal("original history no longer verifies after refusal", err)
+			}
+			if err := migrations.DownOne(ctx, c, original); err != nil {
+				t.Fatal("original reversible operation could not continue", err)
+			}
+		})
+	}
 	t.Run("unrelated-custom-history", func(t *testing.T) {
 		c := f.database(t, ctx, "billing", "billing_schema_owner")
 		custom := []migrations.Migration{{Version: 1, Name: "custom_business", UpSQL: "CREATE TABLE custom_rollback_probe(id integer)", DownSQL: "DROP TABLE custom_rollback_probe"}}
@@ -111,6 +150,14 @@ func TestPublishedRollbackPackageIntegrityPostgres(t *testing.T) {
 		}
 		if stageValue(t, ctx, c, `SELECT (to_regclass('custom_rollback_probe') IS NULL AND NOT EXISTS(SELECT 1 FROM schema_migrations))::text`) != "true" {
 			t.Fatal("custom rollback effects not preserved")
+		}
+		digest := sha256.Sum256([]byte(custom[0].UpSQL))
+		custom[0].Checksum = hex.EncodeToString(digest[:])
+		if err := migrations.Up(ctx, c, custom); err != nil {
+			t.Fatal("custom populated-checksum writer", err)
+		}
+		if err := migrations.DownOne(ctx, c, custom); err != nil {
+			t.Fatal("valid custom populated-checksum rollback lost compatibility", err)
 		}
 	})
 }

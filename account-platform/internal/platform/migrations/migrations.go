@@ -281,11 +281,11 @@ func DownOneWithHooks(ctx context.Context, connection *pgx.Conn, migrations []Mi
 		if migration.Version != version {
 			continue
 		}
-		// Published package identity must match the applied forward history before
-		// a trusted rollback is used. Unrelated custom ledgers may predate checksum
-		// population, and keep their original generic rollback contract.
+		// Recorded forward history is authoritative even if editing supplied Up
+		// bytes makes the candidate fall outside the published inventory. Genuine
+		// old custom ledgers with no checksum retain their original contract.
 		_, published := publishedRollbackChecksums[rollbackIdentity{version: migration.Version, up: normalizedChecksum(migration.UpSQL)}]
-		if published && !checksumMatches(appliedChecksum, migration.UpSQL) {
+		if (published || appliedChecksum != "") && !checksumMatches(appliedChecksum, migration.UpSQL) {
 			return fmt.Errorf("migration %d checksum changed before rollback", version)
 		}
 		if strings.TrimSpace(migration.DownSQL) == "" {

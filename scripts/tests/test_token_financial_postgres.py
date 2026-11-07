@@ -33,7 +33,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
         self.run_main_fixture()
         command = self.fixture_commands[self.fixture_phases.index("owner-schema")]
         self.assertIn(root, command[command.index("-run") + 1])
-        required = {"published-down-legacy-crlf-no-create", "recorded-up-identity-before-down", "unrelated-custom-history"}
+        required = {"published-down-legacy-crlf-no-create", "recorded-up-identity-before-down", "unrelated-custom-history", "published-ledger-cannot-become-custom/LF", "published-ledger-cannot-become-custom/CRLF"}
         self.assertEqual(RUNNER.EXACT_REQUIRED_CHILDREN[root], required)
         events = self.events({root}, RUNNER.SCHEMA_PACKAGE, children=True)
         options = {"package": RUNNER.SCHEMA_PACKAGE, "require_children": True, "exact_roots": True}
@@ -41,6 +41,22 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
         for child in required:
             for invalid in (
                 [event for event in events if event.get("Test", "").split("/", 1)[0] != root],
+                [event for event in events if event.get("Test") != root + "/" + child],
+                events + [{"Action": "skip", "Package": RUNNER.SCHEMA_PACKAGE, "Test": root + "/" + child}],
+            ):
+                with self.subTest(child=child), self.assertRaises(RuntimeError):
+                    RUNNER.verify_results(invalid, {root}, **options)
+
+    def test_historical_waiver_conversion_requires_current_rollback_boundaries(self):
+        root = "TestUsageWaiverHistoricalSchemaPostgres"
+        self.assertIn(root, RUNNER.SCHEMA_REQUIRED)
+        required = {"fresh-exact-history-append-only-runtime-and-forward-only", "old-LF/changed-current-down-before-up", "old-LF/changed-current-down-before-verify", "old-CRLF/changed-current-down-before-up", "old-CRLF/changed-current-down-before-verify", "unknown-checksum", "wrong-legacy-shape"}
+        self.assertEqual(RUNNER.EXACT_REQUIRED_CHILDREN[root], required)
+        events = self.events({root}, RUNNER.SCHEMA_PACKAGE, children=True)
+        options = {"package": RUNNER.SCHEMA_PACKAGE, "require_children": True, "exact_roots": True}
+        RUNNER.verify_results(events, {root}, **options)
+        for child in required:
+            for invalid in (
                 [event for event in events if event.get("Test") != root + "/" + child],
                 events + [{"Action": "skip", "Package": RUNNER.SCHEMA_PACKAGE, "Test": root + "/" + child}],
             ):
