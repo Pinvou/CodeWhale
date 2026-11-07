@@ -23,6 +23,7 @@ INPUTS = {"account": "PINVOU_TEST_ACCOUNT_DATABASE_URL", "billing": "PINVOU_TEST
 STREAMS = {"F11_CHILD_LOG": "F11_GO_BINARY", "F12_CHILD_LOG": "F12_GO_BINARY", "F13_CHILD_LOG": "F13_GO_BINARY", "PINVOU_F09_CHILD_STREAM": "PINVOU_PRIVATE_GO"}
 TARGETS = {"./internal/" + name: "github.com/Pinvou/pinvou3/account-platform/internal/" + name for name in ("account", "billing", "billingschema", "f09fixture")}
 LAYOUTS = {("./internal/account", "owner"): {"account"}, ("./internal/account", "retained"): {"account", "billing"}, ("./internal/billing", "retained"): {"billing"}, ("./internal/billingschema", "owner"): {"schema"}, ("./internal/f09fixture", "owner"): {"schema"}}
+LAYOUTS[("./internal/billing", "owner")] = {"billing"}
 BILLING_SETUP = """BEGIN;
 CREATE ROLE billing_schema_owner NOLOGIN NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
 CREATE ROLE billing_migrator LOGIN NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
@@ -192,6 +193,16 @@ def phase_environment(raw, go, phase, directory):
     env["GOFLAGS"] = " ".join(filter(None, (env.get("GOFLAGS", ""), "-race -tags=nomsgpack -mod=readonly")))
     for domain in phase["inputs"]:
         env[INPUTS[domain]] = raw
+    if phase["id"] == "f18-hold-recovery":
+        if os.environ.get("GITHUB_ACTIONS") == "true":
+            # Admission and every privileged Go connection independently bind
+            # this worker's verified service metadata, never the native profile.
+            env["F18_TEST_DATABASE_PROFILE"] = "ci-owned"
+        else:
+            if os.environ.get("F18_TEST_DATABASE_PROFILE") != "local-owned":
+                raise ValueError("native F18 execution requires the declared local-owned harness")
+            for key in ("F18_TEST_DATABASE_PROFILE", "F18_TEST_DATABASE_USER", "F18_TEST_DATABASE_PORT", "F18_TEST_DATA_DIRECTORY"):
+                env[key] = os.environ.get(key, "")
     for child in phase["children"]:
         env[child["stream_env"]] = str(directory / (child["id"] + ".jsonl"))
         env[child["go_env"]] = go

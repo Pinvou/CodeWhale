@@ -24,6 +24,8 @@
     "TestF16ReleasedMemberFrozenFactsRejectDriftPostgres",
     "TestF16ReleasedMemberMalformedFactsRejectWithoutEffectsPostgres",
     "TestF16ReleasedMemberUsageRepairActualPublicChainPostgres",
+    "TestF18HoldRecoveryUsesTrustedFence",
+    "TestF18OwnedRoleCleanupPostgres",
     "TestLedgerRepairPostgresIntegration",
     "TestMemberQuotaBatchPersistedFactsAndFinancialReplay",
     "TestOrganizationUnitFinancialDeletionBoundaries",
@@ -409,6 +411,34 @@
           }
         }
       ]
+    },
+    {
+      "id": "f18-hold-recovery",
+      "target": "./internal/billing",
+      "package": "github.com/Pinvou/pinvou3/account-platform/internal/billing",
+      "roots": {
+        "TestF18HoldRecoveryUsesTrustedFence": [
+          "nil-proof",
+          "unproven",
+          "timeout",
+          "controlled-trusted"
+        ],
+        "TestF18OwnedRoleCleanupPostgres": [
+          "normal",
+          "partial-creation",
+          "active-client",
+          "external-membership",
+          "replacement-role",
+          "wrong-directory",
+          "cancelled-context",
+          "expired-context"
+        ]
+      },
+      "inputs": [
+        "billing"
+      ],
+      "mode": "owner",
+      "children": []
     },
     {
       "id": "cross-domain-families",

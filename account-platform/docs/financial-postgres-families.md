@@ -1,8 +1,9 @@
 # Continuous financial PostgreSQL families
 
 Issue #1958 names 54 original test roots, including coordinator parents and
-their child-process roots. They are test identities, not 54 independent
-business scenarios. `scripts/account-financial-families.json` records their
+their child-process roots, and retains the F18 continuous-PG requirement.
+The manifest therefore also includes F18's financial and role-cleanup roots:
+56 test identities, not independent business scenarios. `scripts/account-financial-families.json` records their
 reviewed case names and actual packages; the runner never learns a passing
 contract from its own output at runtime.
 
@@ -18,13 +19,14 @@ service. The four existing workers and separate service identities remain;
 the owners worker cannot succeed if either entry fails. The workflow contains
 the complete process tree with `ci-fixture-process.py` and retains its receipt.
 
-The additional entry has nine sequential phases:
+The additional entry has ten sequential phases:
 
 | Phase | Original inputs and ownership |
 | --- | --- |
 | Account F06/F07 | Three roots create and retire their own absent Account actors. |
 | Schema F07/F11/F12/F13 | Five parents own their absent actors; F11/F12/F13 invoke the original complete Billing package and keep three separate child logs. |
 | F09 policy, prepare, replay, expiry, financial | Five separate coordinator invocations keep unique child streams. The original explicit test files remain; production files come from the declared Go toolchain's platform/tag selection. Child package identity is `command-line-arguments`. |
+| F18 hold recovery | Both original financial and role-cleanup roots require absent Billing actors; four financial and eight cleanup cases remain mandatory. CI uses the same admitted owners service, with `ci-owned` and same-backend identity verification. |
 | Cross-domain repairs | Five Account roots receive both Account and Billing URLs. The runner supplies the three original Billing actors; Account actors remain owned by each root. |
 | Retained Billing | Fifteen roots use the same three Billing actors and fresh leased UUID databases. |
 
@@ -53,6 +55,12 @@ databases, no user objects and no other clients. Set
 `PINVOU_ACCOUNT_FINANCIAL_TEST_DATABASE_URL` to a password-free
 `postgres://<owned-user>@127.0.0.1:<port>/postgres?sslmode=disable`, and declare
 absolute `PINVOU_ACCOUNT_TEST_GO` and `PINVOU_ACCOUNT_TEST_PSQL` executables.
+The native harness must also declare the `local-owned` F18 user, port and
+fresh temporary UUID data directory described in the
+[F18 fixture runbook](../deploy/runbooks/f18-hold-recovery-owned-fixture.md).
+The runner forwards those explicit native fields only to the F18 phase;
+CI instead uses the worker's verified service metadata and never adopts
+native F18 identity fields.
 Do not set GitHub service metadata to pretend that a local instance is CI-owned.
 From the repository checkout, run:
 

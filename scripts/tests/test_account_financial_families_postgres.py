@@ -175,10 +175,15 @@ class FinancialFamiliesTests(unittest.TestCase):
 
     def test_real_manifest_keeps_complete_issue_scope_and_original_packages(self):
         manifest = RUNNER.load_manifest()
-        self.assertEqual(len(manifest["issue_roots"]), 54)
-        self.assertEqual(len(manifest["phases"]), 9)
+        self.assertEqual(len(manifest["issue_roots"]), 56)
+        self.assertEqual(len(manifest["phases"]), 10)
         self.assertEqual(set(manifest["existing_roots"]), {"TestF06Review5566377593PublicPostgres", "TestMemberQuotaBatchPersistedFactsAndFinancialReplay", "TestF06MemberQuotaRestoreUsesOrdinaryPackageExpiry", "TestRegistrationBonusEligibilityReadyAndLifetimePostgresIntegration", "TestRegistrationBonusEligibilityBlockedConsumesNewMobilesPostgresIntegration"})
         phases = {phase["id"]: phase for phase in manifest["phases"]}
+        self.assertEqual(phases["f18-hold-recovery"]["mode"], "owner")
+        self.assertEqual(phases["f18-hold-recovery"]["roots"], {
+            "TestF18HoldRecoveryUsesTrustedFence": ["nil-proof", "unproven", "timeout", "controlled-trusted"],
+            "TestF18OwnedRoleCleanupPostgres": ["normal", "partial-creation", "active-client", "external-membership", "replacement-role", "wrong-directory", "cancelled-context", "expired-context"],
+        })
         self.assertEqual(set(phases["cross-domain-families"]["inputs"]), {"account", "billing"})
         self.assertEqual(phases["cross-domain-families"]["mode"], "retained")
         for child in phases["schema-families"]["children"]:
@@ -190,6 +195,25 @@ class FinancialFamiliesTests(unittest.TestCase):
         self.assertEqual(set(bonus), {table + "/" + operation for table in ("registration_bonus_policy_versions", "registration_bonus_policy_commands", "registration_bonus_policy_audit", "registration_bonus_claims", "registration_bonus_receipts") for operation in ("UPDATE", "DELETE")})
         chargeback = phases["billing-families"]["roots"]["TestChargebackFrozenExecutionPostgres"]
         self.assertIn("actual-payment-origin-two-leg-reconciliation", chargeback)
+
+    def test_f18_profiles_use_explicit_native_or_verified_ci_inputs(self):
+        phase = next(item for item in RUNNER.load_manifest()["phases"] if item["id"] == "f18-hold-recovery")
+        native = {"F18_TEST_DATABASE_PROFILE": "local-owned", "F18_TEST_DATABASE_USER": "owned", "F18_TEST_DATABASE_PORT": "49173", "F18_TEST_DATA_DIRECTORY": "declared-owned-directory"}
+        with patch.dict(os.environ, native, clear=True):
+            env = RUNNER.phase_environment("owned-url", "/declared/go", phase, Path("unused"))
+            for key, value in native.items():
+                self.assertEqual(env[key], value)
+        ci = {**native, "GITHUB_ACTIONS": "true", "PINVOU_ACCOUNT_CI_PG_PORT": "49173", "PINVOU_ACCOUNT_CI_PG_SYSTEM_ID": "1234567", "PINVOU_ACCOUNT_CI_PG_DIRECTORY": "/var/lib/postgresql/data"}
+        with patch.dict(os.environ, ci, clear=True):
+            env = RUNNER.phase_environment("owned-url", "/declared/go", phase, Path("unused"))
+            self.assertEqual(env["F18_TEST_DATABASE_PROFILE"], "ci-owned")
+            self.assertFalse(set(native).difference({"F18_TEST_DATABASE_PROFILE"}).intersection(env))
+            for key, value in ci.items():
+                if key.startswith("PINVOU_ACCOUNT_CI_PG_"):
+                    self.assertEqual(env[key], value)
+        for profile in ("", "unknown"):
+            with patch.dict(os.environ, {"F18_TEST_DATABASE_PROFILE": profile}, clear=True), self.assertRaises(ValueError):
+                RUNNER.phase_environment("owned-url", "/declared/go", phase, Path("unused"))
 
     def test_manifest_omission_duplicate_and_actor_order_fail_before_execution(self):
         manifest = RUNNER.load_manifest()

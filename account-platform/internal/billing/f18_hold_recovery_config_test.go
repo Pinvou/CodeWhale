@@ -11,15 +11,25 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Pinvou/pinvou3/account-platform/internal/cifixture"
 	"github.com/Pinvou/pinvou3/account-platform/internal/f17fixture"
 	"github.com/jackc/pgx/v5"
 )
 
-// f18OwnedConnectionConfig admits only an explicitly declared, loopback-owned
-// disposable PostgreSQL instance for the explicit local-owned profile. The
-// integration root retains its existing default dedicated-instance guard.
+// f18OwnedConnectionConfig admits an explicitly declared native disposable
+// instance or this job's already admitted CI service. The integration root
+// retains its existing default dedicated-instance guard.
 func f18OwnedConnectionConfig(t *testing.T, raw string) (*pgx.ConnConfig, string, int) {
 	t.Helper()
+	if os.Getenv("F18_TEST_DATABASE_PROFILE") == "ci-owned" {
+		config, err := pgx.ParseConfig(raw)
+		port, system, directory := os.Getenv("PINVOU_ACCOUNT_CI_PG_PORT"), os.Getenv("PINVOU_ACCOUNT_CI_PG_SYSTEM_ID"), os.Getenv("PINVOU_ACCOUNT_CI_PG_DIRECTORY")
+		if err != nil || !f18CIConfigurationAllowed(config, port, system, directory, os.Getenv("GITHUB_ACTIONS") == "true") {
+			t.Fatal("F18 PostgreSQL URL is not the admitted CI coordinator")
+		}
+		// The admitted client port is mapped to the container's server port.
+		return config, directory, 5432
+	}
 	if os.Getenv("F18_TEST_DATABASE_PROFILE") != f17fixture.OwnedProfile {
 		t.Fatal("unknown F18_TEST_DATABASE_PROFILE")
 	}
@@ -32,6 +42,46 @@ func f18OwnedConnectionConfig(t *testing.T, raw string) (*pgx.ConnConfig, string
 		t.Fatal("F18 PostgreSQL URL is not the declared local-owned instance")
 	}
 	return config, expectedDirectory, int(config.Port)
+}
+
+func f18CIConfigurationAllowed(config *pgx.ConnConfig, port, system, directory string, githubActions bool) bool {
+	return githubActions && cifixture.ConfigurationAllowed(config, port, system, directory) && config.Database == "postgres" && directory == "/var/lib/postgresql/data"
+}
+
+func f18ConnectOwned(ctx context.Context, config *pgx.ConnConfig) (*pgx.Conn, error) {
+	if os.Getenv("F18_TEST_DATABASE_PROFILE") == "ci-owned" {
+		// Verify system identifier, server directory/port and both principals on
+		// this very backend before the integration root can create any actor.
+		return cifixture.ConnectConfig(ctx, config)
+	}
+	return pgx.ConnectConfig(ctx, config)
+}
+
+func TestF18CIConfigurationBindsAdmittedService(t *testing.T) {
+	raw := "postgres://postgres@127.0.0.1:49173/postgres?sslmode=disable"
+	config, err := pgx.ParseConfig(raw)
+	if err != nil || !f18CIConfigurationAllowed(config, "49173", "1234567", "/var/lib/postgresql/data", true) {
+		t.Fatal("admitted PostgreSQL16 client configuration rejected", err)
+	}
+	for _, candidate := range []string{
+		strings.Replace(raw, "127.0.0.1", "localhost", 1), strings.Replace(raw, "49173", "49174", 1),
+		strings.Replace(raw, "postgres@", "other@", 1), strings.Replace(raw, "postgres@", "postgres:secret@", 1),
+		strings.Replace(raw, "/postgres?", "/deployment?", 1), strings.Replace(raw, "disable", "require", 1),
+		raw + "&application_name=extra", raw + "&host=192.0.2.1",
+	} {
+		parsed, err := pgx.ParseConfig(candidate)
+		if err == nil && f18CIConfigurationAllowed(parsed, "49173", "1234567", "/var/lib/postgresql/data", true) {
+			t.Fatal("unadmitted CI client configuration accepted")
+		}
+	}
+	for _, fields := range [][3]string{{"49174", "1234567", "/var/lib/postgresql/data"}, {"49173", "0", "/var/lib/postgresql/data"}, {"49173", "", "/var/lib/postgresql/data"}, {"49173", "1234567", "/other/data"}} {
+		if f18CIConfigurationAllowed(config, fields[0], fields[1], fields[2], true) {
+			t.Fatal("incomplete or wrong CI identity accepted")
+		}
+	}
+	if f18CIConfigurationAllowed(config, "49173", "1234567", "/var/lib/postgresql/data", false) {
+		t.Fatal("CI profile accepted outside GitHub Actions")
+	}
 }
 
 func f18OwnedDirectoryMatches(actual, expected string) bool {
