@@ -8,6 +8,21 @@ import (
 	"github.com/google/uuid"
 )
 
+// Observes completion without replacing any PostgreSQL cleanup decision.
+type observedReplayCleanupRepository struct {
+	*PostgresRepository
+	completed chan error
+}
+
+func (r *observedReplayCleanupRepository) cleanupReplayRetentionBatch(ctx context.Context) (bool, error) {
+	more, err := r.PostgresRepository.cleanupReplayRetentionBatch(ctx)
+	select {
+	case r.completed <- err:
+	case <-ctx.Done():
+	}
+	return more, err
+}
+
 func TestReplayRetentionBoundedCleanupPublicPostgres(t *testing.T) {
 	r, ctx := retainedManagementTokenRepository(t)
 	base := time.Now().UTC().Truncate(time.Microsecond)
@@ -328,7 +343,7 @@ func TestReplayRetentionBoundedCleanupPublicPostgres(t *testing.T) {
 			t.Fatal("sample cleanup exceeded/failed row bound", n)
 		}
 	})
-	t.Run("content-lock-timeout-rolls-back-and-next-call-recovers", func(t *testing.T) {
+	t.Run("content-lock-timeout-rolls-back-and-next-worker-tick-recovers", func(t *testing.T) {
 		// Existing sample content is due too; lock every live event row so the
 		// first selected update must wait even if the planner chooses another ID.
 		clock = base.Add(31 * 24 * time.Hour)
@@ -344,9 +359,27 @@ func TestReplayRetentionBoundedCleanupPublicPostgres(t *testing.T) {
 		if err = r.pool.QueryRow(ctx, `SELECT count(*) FROM usage_stream_events WHERE octet_length(encrypted_payload)>0`).Scan(&before); err != nil {
 			t.Fatal(err)
 		}
+		observed := &observedReplayCleanupRepository{PostgresRepository: r, completed: make(chan error, 4)}
+		worker := NewReplayRetentionWorker(observed, 15*time.Second)
+		workerCtx, cancel := context.WithCancel(ctx)
+		done := make(chan struct{})
 		started := time.Now()
-		if err = r.CleanupReplayRetention(ctx); err == nil {
-			t.Fatal("blocked content update did not exhaust bounded transaction")
+		go func() { defer close(done); worker.Run(workerCtx) }()
+		defer func() {
+			cancel()
+			select {
+			case <-done:
+			case <-time.After(2 * time.Second):
+				t.Error("timeout recovery worker did not retire")
+			}
+		}()
+		select {
+		case firstErr := <-observed.completed:
+			if firstErr == nil {
+				t.Fatal("blocked update did not exhaust bounded transaction")
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("cleanup did not return bounded failure")
 		}
 		t.Log("controlled content-lock timeout elapsed", time.Since(started))
 		if err = r.pool.QueryRow(ctx, `SELECT count(*) FROM usage_stream_events WHERE octet_length(encrypted_payload)>0`).Scan(&after); err != nil || after != before {
@@ -355,11 +388,46 @@ func TestReplayRetentionBoundedCleanupPublicPostgres(t *testing.T) {
 		if err = tx.Rollback(ctx); err != nil {
 			t.Fatal(err)
 		}
-		if err = r.CleanupReplayRetention(ctx); err != nil {
-			t.Fatal("next call did not recover after lock release", err)
+		// pgx cancels/closes timed-out connections asynchronously. SKIP LOCKED
+		// may correctly see the failed backend's parent lock briefly; observe
+		// retirement in this owned database rather than assume it is immediate.
+		ackCtx, ackCancel := context.WithTimeout(ctx, 5*time.Second)
+		defer ackCancel()
+		for {
+			var pending bool
+			if err = r.pool.QueryRow(ackCtx, `SELECT EXISTS(SELECT 1 FROM pg_locks WHERE database=(SELECT oid FROM pg_database WHERE datname=current_database()) AND relation='usage_requests'::regclass AND mode='RowShareLock' AND granted)`).Scan(&pending); err != nil {
+				t.Fatal("failed backend retirement observation", err)
+			}
+			if !pending {
+				break
+			}
+			select {
+			case <-ackCtx.Done():
+				t.Fatal(ackCtx.Err())
+			case <-time.After(time.Millisecond):
+			}
 		}
-		if err = r.pool.QueryRow(ctx, `SELECT count(*) FROM usage_stream_events WHERE octet_length(encrypted_payload)>0`).Scan(&after); err != nil || after != before-replayCleanupBatchSize {
-			t.Fatal("recovered call failed bounded progress", before, after, err)
+		if err = r.pool.QueryRow(ctx, `SELECT count(*) FROM usage_stream_events WHERE octet_length(encrypted_payload)>0`).Scan(&after); err != nil || after != before {
+			t.Fatal("failed transaction changed facts after backend retirement", before, after, err)
+		}
+		// Keep the actual production 15s interval. A failure must not stop Run;
+		// this is the next normal tick, not a direct private-method invocation.
+		select {
+		case nextErr := <-observed.completed:
+			if nextErr != nil {
+				t.Fatal("next worker tick did not recover", nextErr)
+			}
+		case <-time.After(20 * time.Second):
+			t.Fatal("normal worker tick did not resume after failure")
+		}
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Fatal("recovered worker did not stop")
+		}
+		if err = r.pool.QueryRow(ctx, `SELECT count(*) FROM usage_stream_events WHERE octet_length(encrypted_payload)>0`).Scan(&after); err != nil || after > before-replayCleanupBatchSize {
+			t.Fatal("next worker tick failed real bounded-batch progress", before, after, err)
 		}
 	})
 }

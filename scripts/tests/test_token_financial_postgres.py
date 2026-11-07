@@ -1121,7 +1121,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
             "tombstone-key-clear-is-atomic-bounded-and-protected-rows-do-not-starve",
             "case-delete-and-payload-cascade-are-bounded",
             "capacity-sample-10000-live-frames-plan-and-single-batch",
-            "content-lock-timeout-rolls-back-and-next-call-recovers",
+            "content-lock-timeout-rolls-back-and-next-worker-tick-recovers",
         }
         self.assertEqual(RUNNER.EXACT_REQUIRED_CHILDREN[root], names)
         for name in names:
