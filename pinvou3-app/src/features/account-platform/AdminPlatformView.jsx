@@ -155,7 +155,7 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
         {view === 'products' && <AdminProductsPage {...{ client, copy, language, permissions }} me={authorization} route={productsRoute} />}
         {view === 'finance' && <AdminFinanceWorkspace {...{ client, language }} me={authorization} surface={financeRoute.section === 'payments' ? 'payments' : 'billing'} initialTab={financeRoute.tab || (financeRoute.section === 'billing' ? 'wallets' : 'orders')} route={financeRoute} onTabChange={tab => navigation.navigate(financeRoute.section, { finance_tab: tab })} onViewApproval={viewApproval} />}
         {view === 'roles' && <AdminRolesWorkspace client={client} me={authorization} language={language} route={navigation} initialTarget={new URLSearchParams(navigation.search).get('role_user_id') || ''} onAuthorizationChange={load} />}
-        {view === 'users' && <AdminUsersWorkspace {...{ client, copy, language }} currentUserID={authorization.user_id} route={navigation} canManage={permissions.includes('platform.users.status.manage')} />}
+        {view === 'users' && <AdminUsersWorkspace {...{ client, copy, language }} currentUserID={authorization.user_id} acceptedSessionEpoch={acceptedSessionEpoch} acceptedPlatformAuthorizationVersion={version} route={navigation} canManage={permissions.includes('platform.users.status.manage')} />}
         {view === 'settings' && <SettingsWorkspace {...{ client, copy, language, onLanguageChange, permissions }} />}
       </>}</RetainedWorkspace>
     </>}

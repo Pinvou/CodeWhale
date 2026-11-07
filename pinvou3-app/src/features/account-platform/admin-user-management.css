@@ -21,3 +21,13 @@
 .adm-restored-shell .adm-user-detail-head>button{justify-self:start;max-width:100%;white-space:normal}
 .adm-restored-shell .adm-user-detail-head>h3{margin:0;font-size:22px;line-height:1.4;overflow-wrap:anywhere}
 .adm-restored-shell .adm-user-detail-breadcrumbs{flex-wrap:wrap}
+
+.adm-restored-shell .adm-user-profile-identity{display:flex;align-items:center;flex-wrap:wrap;gap:10px 14px;min-width:0}
+.adm-restored-shell .adm-user-profile-identity h3{margin:0;font-size:22px;line-height:1.4;overflow-wrap:anywhere}
+.adm-restored-shell .adm-user-profile-status{padding:3px 9px;border:1px solid var(--adm-line);border-radius:6px;background:var(--adm-soft);font-size:12px;line-height:1.5;overflow-wrap:anywhere}
+.adm-restored-shell .adm-user-details.adm-user-profile-facts{display:grid;grid-template-columns:minmax(0,1fr);gap:0;margin:0 0 20px}
+.adm-restored-shell .adm-user-profile-facts>div{display:grid;grid-template-columns:minmax(96px,136px) minmax(0,1fr);align-items:start;gap:12px 20px;padding:14px 0;border-bottom:1px solid var(--adm-line);min-width:0}
+.adm-restored-shell .adm-user-profile-facts dt{color:var(--adm-muted);font-size:13px;line-height:1.6;overflow-wrap:anywhere}
+.adm-restored-shell .adm-user-profile-facts dd{min-width:0;margin:0;overflow-wrap:anywhere}
+.adm-restored-shell .adm-user-identifier-help{margin:0 0 8px;font-size:12px;line-height:1.6;color:var(--adm-muted)}
+@media(max-width:560px){.adm-restored-shell .adm-user-profile-facts>div{grid-template-columns:minmax(0,1fr);gap:6px}}
