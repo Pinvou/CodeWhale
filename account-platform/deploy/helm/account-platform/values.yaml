@@ -75,6 +75,8 @@ availability:
 
 dependencies:
   redisUrl: ""
+  # Optional ConfigMap with ca.crt for clients of the shared rediss:// endpoint.
+  redisCAConfigMap: ""
   newApiRedisUrl: ""
   natsUrl: ""
   natsMonitorUrl: ""

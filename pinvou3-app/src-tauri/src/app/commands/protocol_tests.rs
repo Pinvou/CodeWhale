@@ -506,6 +506,7 @@ command_protocol!(
         "web_access_discard_attachment",
         "web_access_read_conversation_attachment_chunk",
         "web_access_create_session_and_chat",
+        "web_access_create_session_and_chat_with_model",
         "web_access_chat",
         "web_access_create_codex_acp_session",
         "web_access_list_codex_workspace",

@@ -82,7 +82,7 @@
 - 应收三元组：写入后仍满足 `settled+outstanding=original`；`outstanding=0` 时 `status='WRITTEN_OFF'`（本命令路径）并有 `settled_at`；否则 `status='PARTIALLY_SETTLED'`。不新增列、不替换既有 CHECK，避免第二份真相。
 - 钱包投影一致：`wallets.receivable_microcredits` 必须等于该钱包所有 `outstanding_microcredits>0` 应收之和（本命令只按 A 等量回落）；`financial_status`/`financial_freeze_reason` 与清零状态一致。
 - 分配与账本一致：`sum(receivable_allocations.amount_microcredits)=settled_microcredits`；每条 allocation 的 `journal_entry_id` 指向的 journal 必须平衡且 `sum(ledger_postings.delta)=0`。
-- 实际并发边界：Billing 在 Serializable 事务内读取应收与钱包事实并核对冻结版本/摘要，再写 journal/posting、allocation，并使用带版本/金额条件的 UPDATE 推进应收与钱包，最后更新 `attention_summary`。本命令没有 `SELECT ... FOR UPDATE`；条件更新冲突或序列化失败会回滚整笔事务，不得把文档中的锁描述当作已实现的保证。
+- 实际并发边界：Billing 在 Serializable 事务内先读取已提交的原审批结果。新执行固定 activation 后，按充值路径的顺序先锁钱包，再核对应收与钱包的冻结版本和摘要。账本、核销分配和两项投影在同一事务中写入。若 PostgreSQL 在锁钱包时因旧快照中止事务，本次已授权执行用原审批和幂等键在新事务中重验一次。后续写入或提交故障沿现有结果恢复流程处理。
 - 并发 CAS 与序列化约束：相同冻结版本的同一应收两次并发核销至多一次成功（第二次 `version`/`outstanding` 校验失败或 allocation 唯一冲突）；钱包并发入账抵扣与核销都不得使 `receivable_microcredits` 与应收事实偏离。
 
 ## 7. 幂等、result-first 与未知结果

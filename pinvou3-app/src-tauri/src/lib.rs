@@ -979,7 +979,7 @@ pub fn run() {
                 .build()
         })
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
-            if let Some(window) = app.get_webview_window("main") {
+            if let Some(window) = app.get_window("main") {
                 crate::platform::window_startup::activate_main_window(window, "single_instance");
             }
         }))
@@ -2243,6 +2243,7 @@ pub fn run() {
             commands::remote_control::web_access_list_archived_sessions,
             commands::remote_control::web_access_create_session,
             commands::remote_control::web_access_create_session_and_chat,
+            commands::remote_control::web_access_create_session_and_chat_with_model,
             commands::remote_control::web_access_cancel_session_download,
             commands::remote_control::web_access_load_session_chunk,
             commands::remote_control::web_access_ingest_file,
