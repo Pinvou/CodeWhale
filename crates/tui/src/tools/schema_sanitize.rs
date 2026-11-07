@@ -220,9 +220,12 @@ fn strip_annotation_keywords(value: &mut Value) {
 /// - R1: two projected branches are deep-equal (every matching instance
 ///   matches both, every other matches neither — the union accepts
 ///   nothing),
-/// - R2: at least two branches are object branches with no `required`
-///   group and no `minProperties` floor (both match `{}`, so the
-///   exactly-one contract fails for `{}` and every instance both accept),
+/// - R2: at least two branches are required-free object branches — the
+///   `required` group was the branch's only cross-branch discriminator,
+///   and neither an optional property map nor any `minProperties` floor
+///   restores the distinction (floors 0, 1 and 2 all leave every
+///   shared-root-valid instance clearing them matching both alternatives;
+///   reviews 5802378120, 5808313704, 5811366579),
 /// - R3: a branch's subtree contains a dead inner `oneOf` (the branch
 ///   cannot match, so the union loses that alternative's payload).
 ///
@@ -301,14 +304,28 @@ fn oneof_node_defect(branches: &[Value], path: &str) -> Option<String> {
             }
         }
     }
-    // R2: an empty-matching branch pair breaks exactly-one at `{}`.
-    let empty_matching = branches
+    // R2: two required-free object branches break the exactly-one contract.
+    // A branch without a surviving `required` group constrains instances
+    // only through its optional property map and any `minProperties`
+    // floor; two such branches admit a common instance set (everything
+    // clearing both floors whose fields lie in the union of their maps —
+    // which the shared root's own fields already are) and reject the rest
+    // together, so exactly-one holds for no instance. Floors cannot
+    // restore the distinction (review 5811366579: floors 0, 1 and 2 on
+    // the erased cross-required shape all leave every admitted instance
+    // matching both alternatives), and whether a group was never declared
+    // or erased by the registry/rehearsal pruning is indistinguishable at
+    // this layer — the xAI pass sees the schema after the registry's own
+    // sanitize has already dropped cross-branch groups (reviews
+    // 5802378120, 5808313704). Required-free shapes take the compatible
+    // flattening fallback.
+    let non_discriminating = branches
         .iter()
         .filter(|branch| empty_matching_object_branch(branch))
         .count();
-    if empty_matching >= 2 {
+    if non_discriminating >= 2 {
         return Some(format!(
-            "R2 {empty_matching} branches match the empty object at {path}"
+            "R2 {non_discriminating} non-discriminating branches at {path}"
         ));
     }
     // R3: a branch carrying a dead inner union cannot match.
@@ -322,25 +339,22 @@ fn oneof_node_defect(branches: &[Value], path: &str) -> Option<String> {
     None
 }
 
-/// R2 predicate: an object branch that matches every object — it declares no
-/// `required` group (the shared pass removes emptied groups, so absence
-/// is the post-normalization shape) and no binding `minProperties` floor:
-/// per JSON Schema §6.5.2 `minProperties: 0` is equivalent to omitting the
-/// keyword, and any other non-binding value (non-numeric, negative) imposes
-/// nothing either — only a numeric floor ≥ 2 actually excludes single-field
-/// arguments (review 5808313704: the presence-only check let two
-/// minProperties-floored required-less branches pass and every non-empty
-/// shared-root argument matched both alternatives).
+/// R2 trigger: an object branch with no surviving `required` group. The
+/// group was the branch's only cross-branch discriminator; whatever
+/// remains (an optional property map, any `minProperties` floor) admits a
+/// common tail of the shared root's instances with every sibling
+/// required-free branch. Floors are deliberately NOT consulted: they
+/// cannot restore an erased group, and a floor's only sound role
+/// (excluding `{}` for a never-required branch — review 5811366579
+/// corrected the earlier reading that floor 1 admits the empty object; it
+/// excludes it) still leaves the pair matching each other on every
+/// shared-root-valid instance above the floors.
 fn empty_matching_object_branch(branch: &Value) -> bool {
     branch.get("type").and_then(Value::as_str) == Some("object")
         && branch
             .get("required")
             .and_then(Value::as_array)
             .is_none_or(|required| required.is_empty())
-        && branch
-            .get("minProperties")
-            .and_then(Value::as_u64)
-            .is_none_or(|floor| floor < 2)
 }
 
 /// Whether the schema's root is exactly a single `oneOf`/`anyOf` union whose
@@ -2490,45 +2504,39 @@ mod tests {
         });
         let reason = oneof_semantic_defect(&r2).expect("R2 must fire");
         assert!(
-            reason.starts_with("R2 2 branches match the empty object at root"),
+            reason.starts_with("R2 2 non-discriminating branches at root"),
             "unexpected R2 reason: {reason}"
         );
 
-        // R2 exceptions: only a numeric floor >= 2 actually excludes
-        // single-field arguments. `minProperties: 0` is equivalent to
-        // omitting the keyword (JSON Schema §6.5.2), `1` still matches
-        // every non-empty shared-root argument, and non-numeric values
-        // impose nothing — all three keep both branches in the
-        // empty/everything-matching pair (review 5808313704).
-        let r2_exempt = json!({
-            "oneOf": [
-                {
-                    "type": "object",
-                    "properties": {"a": {"type": "string"}},
-                    "minProperties": 2
-                },
-                {"type": "object", "properties": {"b": {"type": "string"}}}
-            ]
-        });
-        assert_eq!(
-            oneof_semantic_defect(&r2_exempt),
-            None,
-            "a minProperties floor >= 2 keeps the branch out of the R2 pair"
+        // R2 floor semantics (review 5811366579): floors cannot restore an
+        // erased or absent cross-branch discriminator. `minProperties: 0`
+        // is equivalent to omitting the keyword (JSON Schema §6.5.2); a
+        // floor of 1 or more excludes `{}` but still leaves the pair
+        // matching each other on every shared-root-valid instance above
+        // the floors — required-free shapes flatten regardless of floor.
+        let reason = oneof_semantic_defect(&r2).expect("R2 must fire");
+        assert!(
+            reason.starts_with("R2 2 non-discriminating branches at root"),
+            "unexpected R2 reason: {reason}"
         );
-        for floor in [0, 1] {
-            let r2_zero = json!({
+        for floor in [0, 1, 2] {
+            let r2_floored = json!({
                 "oneOf": [
                     {
                         "type": "object",
                         "properties": {"a": {"type": "string"}},
                         "minProperties": floor
                     },
-                    {"type": "object", "properties": {"b": {"type": "string"}}}
+                    {
+                        "type": "object",
+                        "properties": {"b": {"type": "string"}},
+                        "minProperties": floor
+                    }
                 ]
             });
             assert!(
-                oneof_semantic_defect(&r2_zero).is_some(),
-                "minProperties {floor} is non-discriminating and must stay in the R2 pair"
+                oneof_semantic_defect(&r2_floored).is_some(),
+                "required-free branches are non-discriminating at floor {floor}"
             );
         }
 
@@ -2617,57 +2625,69 @@ mod tests {
 
     #[test]
     fn xai_sanitize_registry_path_flattens_minproperties_floored_cross_required_union() {
-        // Review 5808313704: the registry's sanitize/canonicalize prunes
-        // both cross-branch required groups; the surviving optional-property
-        // maps differ, R1 stays silent, and minProperties-floored branches
-        // skip the empty-matching pair — while every non-empty shared-root
-        // argument matches both alternatives. The full registry rehearsal
-        // (sanitize + canonicalize_schema, tools/registry.rs:278-279) must
-        // land on the flattening fallback, keeping {"a":"x"} valid.
-        let mut schema = json!({
-            "type": "object",
-            "properties": {
-                "a": {"type": "string"},
-                "b": {"type": "string"}
-            },
-            "oneOf": [
-                {
-                    "type": "object",
-                    "properties": {"a": {"type": "string"}},
-                    "required": ["b"],
-                    "minProperties": 1
+        // Reviews 5808313704 and 5811366579: the registry's preprocessing
+        // (sanitize THEN canonicalize_schema, the exact production order of
+        // tools/registry.rs:278-279) prunes both cross-branch required
+        // groups; the surviving optional-property maps differ, R1 stays
+        // silent, and no `minProperties` floor restores the erased
+        // distinction — with floors 1 and 2 alike, every shared-root-valid
+        // instance clearing the floors matches both alternatives and the
+        // rest match neither, so exactly-one holds for no instance. The
+        // full registry path must land on the flattening fallback, keeping
+        // each original union's valid witness valid.
+        for floor in [1, 2] {
+            let mut schema = json!({
+                "type": "object",
+                "properties": {
+                    "a": {"type": "string"},
+                    "b": {"type": "string"}
                 },
-                {
-                    "type": "object",
-                    "properties": {"b": {"type": "string"}},
-                    "required": ["a"],
-                    "minProperties": 1
-                }
-            ]
-        });
-        crate::tools::schema_canonicalize::canonicalize_schema(&mut schema);
-        sanitize(&mut schema);
+                "oneOf": [
+                    {
+                        "type": "object",
+                        "properties": {"a": {"type": "string"}},
+                        "required": ["b"],
+                        "minProperties": floor
+                    },
+                    {
+                        "type": "object",
+                        "properties": {"b": {"type": "string"}},
+                        "required": ["a"],
+                        "minProperties": floor
+                    }
+                ]
+            });
+            sanitize(&mut schema);
+            crate::tools::schema_canonicalize::canonicalize_schema(&mut schema);
 
-        let note = sanitize_for_xai_parameters(&mut schema);
+            let note = sanitize_for_xai_parameters(&mut schema);
 
-        assert_eq!(schema["type"], "object");
-        assert!(
-            schema.get("oneOf").is_none() && schema.get("anyOf").is_none(),
-            "the floored cross-required union must not reach the wire: {schema}"
-        );
-        assert!(
-            schema["properties"].get("a").is_some() && schema["properties"].get("b").is_some(),
-            "the root's shared properties must survive: {schema}"
-        );
-        assert_eq!(note, None);
-        let validator = jsonschema::options()
-            .with_draft(jsonschema::Draft::Draft202012)
-            .build(&schema)
-            .expect("the flattened schema must compile");
-        assert!(
-            validator.is_valid(&json!({"a": "x"})),
-            "a valid instance of the original union must stay valid: {schema}"
-        );
+            assert_eq!(schema["type"], "object");
+            assert!(
+                schema.get("oneOf").is_none() && schema.get("anyOf").is_none(),
+                "the floored (floor {floor}) cross-required union must not reach the wire: {schema}"
+            );
+            assert!(
+                schema["properties"].get("a").is_some() && schema["properties"].get("b").is_some(),
+                "the root's shared properties must survive: {schema}"
+            );
+            assert_eq!(note, None);
+            let validator = jsonschema::options()
+                .with_draft(jsonschema::Draft::Draft202012)
+                .build(&schema)
+                .expect("the flattened schema must compile");
+            // Floor 1's original witness needs one property; floor 2's needs
+            // two — the second mirrors review 5811366579's {"a":"x","extra":"y"}.
+            let witness = if floor == 1 {
+                json!({"a": "x"})
+            } else {
+                json!({"a": "x", "extra": "y"})
+            };
+            assert!(
+                validator.is_valid(&witness),
+                "a valid instance of the original union must stay valid at floor {floor}: {schema}"
+            );
+        }
     }
 
     #[test]
