@@ -186,6 +186,7 @@ REFUND_REQUIRED = {
 }
 RETAINED_REQUIRED = {
     "TestEscalatedForcedRefundRequiresSecondActorAndReplays",
+    "TestEscalatedForcedRefundWalletLockOrderPostgres",
     "TestEscalatedForcedRefundAtomicRollbackPostgres",
     "TestEscalatedForcedRefundEvidenceAndReceiptGuardsPostgres",
     "TestOrdinaryForcedRefundAppliedReceiptRecoveryPostgres",
@@ -246,6 +247,7 @@ BILLING_LEAF_REQUIRED = {
     "TestProductAdmissionMaterialPurgePostgres",
     "TestProductAdmissionMaterialHTTPPostgres",
     "TestEscalatedForcedRefundRequiresSecondActorAndReplays",
+    "TestEscalatedForcedRefundWalletLockOrderPostgres",
     "TestOrdinaryForcedRefundAppliedReceiptRecoveryPostgres",
     "TestPaymentPersonalWalletAdmissionStatusRacePostgres",
     "TestPostgresManagedPricePagination",
