@@ -22,7 +22,7 @@ type replayCleanupCandidate struct {
 
 // Each category gets one bounded transaction per cycle. A backlog is continued
 // on the next cycle; already committed categories are safe to retry after error.
-func (r *PostgresRepository) cleanupReplayContentBatch(ctx context.Context, table string, unsettled bool, now time.Time) error {
+func (r *PostgresRepository) cleanupReplayContentBatch(ctx context.Context, table string, unsettled bool, now time.Time, more *bool) error {
 	ctx, cancel := context.WithTimeout(ctx, replayCleanupTransactionBudget)
 	defer cancel()
 	tx, err := r.pool.Begin(ctx)
@@ -59,6 +59,7 @@ func (r *PostgresRepository) cleanupReplayContentBatch(ctx context.Context, tabl
 	if err = rows.Err(); err != nil {
 		return err
 	}
+	var processed int64
 	for _, item := range candidates {
 		// Anonymization holds the exclusive user lock before touching content.
 		// Never wait for it while holding parent rows in the opposite order.
@@ -77,14 +78,20 @@ func (r *PostgresRepository) cleanupReplayContentBatch(ctx context.Context, tabl
 		// This new statement observes cases committed before the parent lock.
 		// A new case cannot pass the parent lock until this transaction ends.
 		mutation += `request.id=content.usage_request_id AND content.usage_request_id=@usage` + key + ` AND ` + due + ` AND ` + guard
-		if _, err = tx.Exec(ctx, mutation, pgx.NamedArgs{"now": now, "cutoff": now.Add(-720 * time.Hour), "usage": item.usageID, "sequence": item.sequence}); err != nil {
+		command, err := tx.Exec(ctx, mutation, pgx.NamedArgs{"now": now, "cutoff": now.Add(-720 * time.Hour), "usage": item.usageID, "sequence": item.sequence})
+		if err != nil {
 			return err
 		}
+		processed += command.RowsAffected()
 	}
-	return tx.Commit(ctx)
+	if err = tx.Commit(ctx); err != nil {
+		return err
+	}
+	*more = *more || processed == replayCleanupBatchSize
+	return nil
 }
 
-func (r *PostgresRepository) cleanupReplayTombstoneBatch(ctx context.Context, now time.Time) error {
+func (r *PostgresRepository) cleanupReplayTombstoneBatch(ctx context.Context, now time.Time, more *bool) error {
 	ctx, cancel := context.WithTimeout(ctx, replayCleanupTransactionBudget)
 	defer cancel()
 	tx, err := r.pool.Begin(ctx)
@@ -112,21 +119,30 @@ func (r *PostgresRepository) cleanupReplayTombstoneBatch(ctx context.Context, no
 	if err = rows.Err(); err != nil {
 		return err
 	}
+	var processed int64
 	if len(ids) > 0 {
 		// DELETE and key clearing share one statement and transaction. The fresh
 		// case check is protected by the already held parent locks.
-		_, err = tx.Exec(ctx, `WITH removed AS (DELETE FROM usage_idempotency_tombstones content WHERE content.usage_request_id=ANY($2::uuid[]) AND content.expires_at<=$1 AND `+replayCleanupCaseGuard+` RETURNING usage_request_id) UPDATE usage_requests request SET idempotency_key_digest=NULL,updated_at=$1 FROM removed WHERE request.id=removed.usage_request_id`, now, ids)
+		command, err := tx.Exec(ctx, `WITH removed AS (DELETE FROM usage_idempotency_tombstones content WHERE content.usage_request_id=ANY($2::uuid[]) AND content.expires_at<=$1 AND `+replayCleanupCaseGuard+` RETURNING usage_request_id) UPDATE usage_requests request SET idempotency_key_digest=NULL,updated_at=$1 FROM removed WHERE request.id=removed.usage_request_id`, now, ids)
 		if err != nil {
 			return err
 		}
+		processed = command.RowsAffected()
 	}
-	return tx.Commit(ctx)
+	if err = tx.Commit(ctx); err != nil {
+		return err
+	}
+	*more = *more || processed == replayCleanupBatchSize
+	return nil
 }
 
-func (r *PostgresRepository) cleanupReplayCaseBatch(ctx context.Context, now time.Time) error {
+func (r *PostgresRepository) cleanupReplayCaseBatch(ctx context.Context, now time.Time, more *bool) error {
 	ctx, cancel := context.WithTimeout(ctx, replayCleanupTransactionBudget)
 	defer cancel()
 	// One payload row per case cascades atomically with the bounded case rows.
-	_, err := r.pool.Exec(ctx, fmt.Sprintf(`WITH due AS (SELECT id FROM usage_replay_retention_cases WHERE (released_at IS NOT NULL AND clear_by<=$1) OR expires_at<=$1 ORDER BY expires_at,id LIMIT %d FOR UPDATE SKIP LOCKED) DELETE FROM usage_replay_retention_cases retention USING due WHERE retention.id=due.id`, replayCleanupBatchSize), now)
+	command, err := r.pool.Exec(ctx, fmt.Sprintf(`WITH due AS (SELECT id FROM usage_replay_retention_cases WHERE (released_at IS NOT NULL AND clear_by<=$1) OR expires_at<=$1 ORDER BY expires_at,id LIMIT %d FOR UPDATE SKIP LOCKED) DELETE FROM usage_replay_retention_cases retention USING due WHERE retention.id=due.id`, replayCleanupBatchSize), now)
+	if err == nil {
+		*more = *more || command.RowsAffected() == replayCleanupBatchSize
+	}
 	return err
 }
