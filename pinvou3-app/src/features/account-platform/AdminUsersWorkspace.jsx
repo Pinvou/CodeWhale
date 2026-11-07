@@ -2,11 +2,12 @@ import React, { useEffect, useRef, useState } from 'react';
 import { adminLayoutCopy, accountLayoutCopy, organizationCopy } from '../../shared/i18n.js';
 import { localizedAccountPlatformError } from './error-localization.js';
 import { PortalDialog } from './PortalDialog.jsx';
+import { AdminIdentifier } from './AdminIdentifier.jsx';
 import './admin-user-management.css';
 
 const userDisplayName = user => user.username || user.display_name || user.user_code || user.user_id;
 
-function UserDetails({ client, userID, copy, language, route }) {
+function UserDetails({ client, userID, copy, language, route, currentUserID, acceptedSessionEpoch, acceptedPlatformAuthorizationVersion }) {
   const [profile, setProfile] = useState(null), [memberships, setMemberships] = useState(null), [error, setError] = useState(null), [membershipError, setMembershipError] = useState(null), [revision, setRevision] = useState(0);
   const words = adminLayoutCopy[language], organizationWords = organizationCopy[language];
   useEffect(() => {
@@ -16,14 +17,21 @@ function UserDetails({ client, userID, copy, language, route }) {
     void client.userMemberships(userID, controller.signal).then(value => { if (!controller.signal.aborted) setMemberships(value.items); }).catch(reason => { if (!controller.signal.aborted) setMembershipError(reason); });
     return () => controller.abort();
   }, [client, userID, revision]);
+  const identifierSessionEpoch = acceptedSessionEpoch === undefined ? client.financeSessionEpoch || 0 : acceptedSessionEpoch;
+  const identifierPlatformVersion = acceptedPlatformAuthorizationVersion || 0;
+  const identifierOwner = `${currentUserID}:${identifierPlatformVersion}:${identifierSessionEpoch}`;
   const date = value => value && Number.isFinite(Date.parse(value)) ? new Date(value).toLocaleString({ zh: 'zh-CN', en: 'en-US', ja: 'ja-JP' }[language]) : '—';
   return <section className="adm-panel"><header className="adm-user-detail-head">
     <button type="button" onClick={() => route.navigate('users', { user_id: null })}>{words.backToUserList}</button>
-    {profile && <h3>{profile.username || profile.display_name || profile.user_code}</h3>}
+    {profile && <div className="adm-user-profile-identity"><h3>{userDisplayName(profile)}</h3><span className="adm-user-profile-status">{accountLayoutCopy[language].statuses[profile.status] || profile.status}</span></div>}
   </header>
     {error && <p role="alert">{localizedAccountPlatformError(copy, error)}<button onClick={() => setRevision(value => value + 1)}>{copy.retry}</button></p>}
     {!profile && !error && <p role="status">{copy.loading}</p>}
-    {profile && <><dl className="adm-user-details">{[[words.userID, profile.user_id], [copy.userManagement.exactCode, profile.user_code], [copy.accounts.status, accountLayoutCopy[language].statuses[profile.status] || profile.status], [words.createdAt, date(profile.created_at)], [words.lastSeen, date(profile.last_seen_at)]].map(([label, value]) => <React.Fragment key={label}><dt>{label}</dt><dd>{value || '—'}</dd></React.Fragment>)}</dl>
+    {profile && <><dl className="adm-user-details adm-user-profile-facts">
+      <div><dt>{words.userID}</dt><dd><p className="adm-user-identifier-help">{words.userIdentifierHelp.id}</p><AdminIdentifier client={client} owner={identifierOwner} sessionEpoch={identifierSessionEpoch} platformAuthorizationVersion={identifierPlatformVersion} routeScope={globalThis.location?.href || route.search} value={profile.user_id} label={words.userID} language={language} /></dd></div>
+      <div><dt>{copy.userManagement.exactCode}</dt><dd><p className="adm-user-identifier-help">{words.userIdentifierHelp.code}</p><AdminIdentifier client={client} owner={identifierOwner} sessionEpoch={identifierSessionEpoch} platformAuthorizationVersion={identifierPlatformVersion} routeScope={globalThis.location?.href || route.search} value={profile.user_code} label={copy.userManagement.exactCode} language={language} /></dd></div>
+      {[[words.createdAt, date(profile.created_at)], [words.lastSeen, date(profile.last_seen_at)]].map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{value}</dd></div>)}
+    </dl>
       {route.available.includes('roles') && <button onClick={() => route.navigate('roles', { role_user_id: userID, role_view: 'bindings' })}>{words.viewUserPlatformGrants}</button>}
       <h4>{words.memberships}</h4>
       {membershipError && <p role="alert">{localizedAccountPlatformError(copy, membershipError)}<button onClick={() => setRevision(value => value + 1)}>{copy.retry}</button></p>}
@@ -39,7 +47,7 @@ function UserDetails({ client, userID, copy, language, route }) {
   </section>;
 }
 
-export function AdminUsersWorkspace({ client, copy, language, canManage, currentUserID, route }) {
+export function AdminUsersWorkspace({ client, copy, language, canManage, currentUserID, route, acceptedSessionEpoch, acceptedPlatformAuthorizationVersion }) {
   const params = new URLSearchParams(route.search), detailID = params.get('user_id') || '';
   const appliedQuery = params.get('user_q') || '', appliedCursor = params.get('user_cursor') || '';
   const [query, setQuery] = useState(params.get('user_q') || ''), [userCode, setUserCode] = useState('');
@@ -95,7 +103,7 @@ export function AdminUsersWorkspace({ client, copy, language, canManage, current
     } catch (reason) { if (request === generation.current) setError(localizedAccountPlatformError(copy, reason)); }
     finally { if (mutationBusy.current === mutation) mutationBusy.current = false; if (request === generation.current) setBusy(false); }
   };
-  if (detailID) return <UserDetails key={detailID} {...{ client, userID: detailID, copy, language, route }} />;
+  if (detailID) return <UserDetails key={detailID} {...{ client, userID: detailID, copy, language, route, currentUserID, acceptedSessionEpoch, acceptedPlatformAuthorizationVersion }} />;
   return <section className="adm-panel"><div className="adm-user-search-toolbar">
     <form data-user-directory-search onSubmit={event => { event.preventDefault(); if (mutationBusy.current) return; setPrevious([]); load('', query.trim()); }}><label>{copy.search}<input disabled={Boolean(busy && mutationBusy.current)} value={query} onChange={event => setQuery(event.target.value)} /></label><button type="submit" disabled={busy}>{words.userSearch.submit}</button></form>
     <form data-user-code-search onSubmit={event => { event.preventDefault(); void lookupCode(); }}><label>{copy.userManagement.exactCode}<input disabled={Boolean(busy && mutationBusy.current)} maxLength={64} value={userCode} onChange={event => { if (mutationBusy.current) return; generation.current++; setBusy(false); setPage(null); setError(''); setUserCode(event.target.value); }} placeholder={copy.userManagement.codePlaceholder} /></label><button type="submit" disabled={busy || !userCode.trim()}>{copy.userManagement.lookup}</button></form>

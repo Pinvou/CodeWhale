@@ -124,3 +124,9 @@ Object.assign(adminLayoutCopy.zh, { identifierActions: { ...{"pending":"正在�
 Object.assign(adminLayoutCopy.en, { identifierActions: { ...{"pending":"Copying…","copied":"Full value copied","failed":"Copy failed. Expand the full value and copy it manually.","unavailable":"Clipboard unavailable. Expand the full value and copy it manually.","showFull":"Show full value","collapse":"Collapse full value"}, copy: label => `Copy ${label}` } });
 
 Object.assign(adminLayoutCopy.ja, { identifierActions: { ...{"pending":"コピー中…","copied":"完全な値をコピーしました","failed":"コピーできません。完全な値を表示して手動でコピーしてください。","unavailable":"クリップボードを利用できません。完全な値を表示して手動でコピーしてください。","showFull":"完全な値を表示","collapse":"完全な値を折りたたむ"}, copy: label => `${label}をコピー` } });
+
+Object.assign(adminLayoutCopy.zh, { userIdentifierHelp: {"id":"系统内定位该用户的唯一标识，用于用户详情与角色关联。","code":"用于管理后台按完整用户编码精确查找该用户。"} });
+
+Object.assign(adminLayoutCopy.en, { userIdentifierHelp: {"id":"Unique internal identifier for this user, used for user details and role assignments.","code":"Use the full user code to find this user with the admin exact-code lookup."} });
+
+Object.assign(adminLayoutCopy.ja, { userIdentifierHelp: {"id":"ユーザー詳細とロールの関連付けに使う、このユーザー固有の内部識別子です。","code":"管理画面の完全一致検索でこのユーザーを探すためのユーザーコードです。"} });

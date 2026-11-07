@@ -120,13 +120,19 @@ try {
       await page.select('.adm-sidebar-foot select', language);
       await page.waitForFunction(({ title, back }) => document.querySelector('.adm-page-head h2')?.textContent === title && document.querySelector('.adm-user-detail-head > button')?.textContent === back, {}, { title, back });
       assert.equal(await page.$eval('.adm-user-detail-head h3', node => node.textContent), name);
+      assert.deepEqual(await page.$$eval('.adm-user-profile-facts .adm-identifier code', nodes => nodes.map(node => node.textContent)), [target, 'USR-1111-1111-1111-1111-DP']);
+      assert.deepEqual(await page.$$eval('.adm-user-profile-facts .adm-identifier-copy', nodes => nodes.map(node => node.getAttribute('aria-label'))), await page.evaluate(() => { const words = window.restored.copy(); return [words.adminLayout.identifierActions.copy(words.adminLayout.userID), words.adminLayout.identifierActions.copy(words.admin.userManagement.exactCode)]; }));
+      assert.equal(await page.$eval('.adm-user-profile-status', node => node.textContent), await page.evaluate(() => window.restored.copy().accountLayout.statuses.ACTIVE));
       assert.equal(await page.$eval('.adm-breadcrumbs [aria-current=page]', node => node.textContent), title);
     }
     assert.equal(await page.evaluate(target => window.restored.calls.filter(call => call.method === 'GET' && call.url === `/api/admin/account/admin/v1/users/${target}`).length, target), profileReads, 'language changes do not duplicate profile reads');
     assert.equal(await page.$eval('.adm-user-membership-facts', node => node.textContent), '成员状态有效角色所有者', 'the current membership presentation retains distinct localized facts');
     if (process.env.UI_SCREENSHOT_DIR) fs.mkdirSync(process.env.UI_SCREENSHOT_DIR, { recursive: true });
     for (const width of [1440, 390]) {
-      await page.setViewport({ width, height: 1000 }); await page.evaluate(() => scrollTo(0, 0)); await noOverflow();
+      await page.setViewport({ width, height: 1000 }); await page.evaluate(() => scrollTo(0, 0));
+      for (const toggle of await page.$$('.adm-user-profile-facts .adm-identifier-toggle[aria-expanded=false]')) await toggle.click();
+      await noOverflow();
+      assert.equal(await page.$$eval('.adm-user-profile-facts .adm-identifier-toggle', nodes => nodes.every(node => node.getAttribute('aria-expanded') === 'true')), true);
       const identity = await page.$eval('.adm-user-detail-head h3', node => {
         const clip = { left: 0, top: 0, right: innerWidth, bottom: innerHeight };
         for (let ancestor = node.parentElement; ancestor; ancestor = ancestor.parentElement) {
@@ -135,7 +141,7 @@ try {
           if (clipping(style.overflowY)) { clip.top = Math.max(clip.top, rect.top + ancestor.clientTop); clip.bottom = Math.min(clip.bottom, rect.top + ancestor.clientTop + ancestor.clientHeight); }
         }
         const range = document.createRange(); range.selectNodeContents(node);
-        const back = node.parentElement.querySelector('button').getBoundingClientRect(), heading = node.getBoundingClientRect();
+        const back = node.closest('.adm-user-detail-head').querySelector(':scope > button').getBoundingClientRect(), heading = node.getBoundingClientRect();
         return { clip, back: { left: back.left, right: back.right, top: back.top, bottom: back.bottom }, headingTop: heading.top, fontSize: getComputedStyle(node).fontSize, bodyFontSize: getComputedStyle(node.closest('.adm-panel')).fontSize, fragments: [...range.getClientRects()].map(rect => ({ left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom, width: rect.width, height: rect.height })) };
       });
       assert.ok(Number.parseFloat(identity.fontSize) > Number.parseFloat(identity.bodyFontSize), 'the real identity has a heading hierarchy above body text');
