@@ -4,12 +4,14 @@ import { localizedAccountPlatformError } from "./error-localization.js";
 import { formatSystemCount, requireSystemStatus, systemDiagnosticMessage } from "./admin-system-status.js";
 const NO_PERMISSIONS = [];
 
-function ReadTable({ title, columns, items, copy }) {
+function ReadTable({ title, columns, items, copy, description, limitation, emptyLabel }) {
   return (
     <article className="adm-panel">
       <h2>{title}</h2>
+      {description && <p className="adm-system-snapshot-help">{description}</p>}
+      {limitation && <p className="adm-system-snapshot-help adm-system-source-limit">{limitation}</p>}
       {items.length === 0 ? (
-        <p>{copy.noData}</p>
+        <p>{emptyLabel || copy.noData}</p>
       ) : (
         <div className="adm-table-wrap">
           <table className="adm-table">
@@ -170,6 +172,9 @@ export function AdminSystemStatusWorkspace({
             />
             <ReadTable
               title={labels.recentErrors}
+              description={labels.recentErrorsScope}
+              limitation={labels.reconciliationErrorsScope}
+              emptyLabel={labels.recentErrorsEmpty}
               copy={copy}
               items={status.recent_errors}
               columns={[
@@ -188,11 +193,19 @@ export function AdminSystemStatusWorkspace({
         {["bootstrap", "idp"].map((key) => (
           <details key={key}>
             <summary>
+              <span aria-hidden="true" className="adm-runbook-chevron">›</span>
               <strong>{copy.runbooks[key]}</strong>
-              <span className="adm-status neutral">OUT_OF_BAND</span>
+              <span className="adm-status neutral">{copy.runbooks.readGuide}</span>
             </summary>
-            <p>{copy.runbooks[`${key}Help`]}</p>
-            <p>{copy.runbooks.noExecution}</p>
+            <div className="adm-runbook-guide">
+              <p>{copy.runbooks[key + 'Help']}</p>
+              <h3>{copy.runbooks.preflight}</h3>
+              <ol>{copy.runbooks.guides[key].checks.map(check => <li key={check}>{check}</li>)}</ol>
+              <h3>{copy.runbooks.sourceLabel}</h3>
+              <p>{copy.runbooks.manualLocatorHelp}</p>
+              <code>{key === 'bootstrap' ? 'account-platform/deploy/runbooks/full-redeployment.md' : 'account-platform/deploy/runbooks/keycloak-admin-access.md'}</code>
+              <p className="adm-runbook-boundary">{copy.runbooks.noExecution}</p>
+            </div>
           </details>
         ))}
       </section>

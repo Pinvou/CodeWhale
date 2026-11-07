@@ -61,7 +61,19 @@ try {
     assert.ok(text.includes('9,223,372,036,854,775,807'));
     for (const key of ['services', 'relays', 'recentErrors']) assert.ok(text.includes(await page.evaluate(key => window.statusFixture.copy.system[key], key)));
     assert.ok(text.includes('HEALTHY'));
+    const recent = await page.evaluate(() => {
+      const title = window.statusFixture.copy.system.recentErrors;
+      return [...document.querySelectorAll('.adm-system-sections article')].find(node => node.querySelector('h2')?.textContent === title)?.textContent || '';
+    });
+    assert.ok(recent.includes(await page.evaluate(() => window.statusFixture.copy.system.recentErrorsScope)));
+    assert.ok(recent.includes(await page.evaluate(() => window.statusFixture.copy.system.recentErrorsEmpty)));
+    assert.ok(recent.includes(await page.evaluate(() => window.statusFixture.copy.system.reconciliationErrorsScope)));
     await page.click('.adm-runbook-panel summary');
+    const guide = await page.$eval('.adm-runbook-panel details:first-of-type', node => node.textContent);
+    assert.ok(guide.includes('account-platform/deploy/runbooks/full-redeployment.md'));
+    assert.ok(guide.includes(await page.evaluate(() => window.statusFixture.copy.runbooks.preflight)));
+    assert.equal(await page.$$eval('.adm-runbook-panel details:first-of-type ol>li', nodes => nodes.length), 3);
+    assert.equal(await page.$$eval('.adm-runbook-panel a', nodes => nodes.length), 0, 'no invented online manual URL');
     assert.ok(text.includes(await page.evaluate(() => window.statusFixture.copy.runbooks.noExecution)));
     assert.deepEqual(await page.evaluate(() => window.statusFixture.calls.filter(call => call.url === '/api/admin/system/status').map(call => call.method)), ['GET']);
     assert.equal(await page.evaluate(() => document.querySelectorAll('.adm-runbook-panel button').length), 0);
