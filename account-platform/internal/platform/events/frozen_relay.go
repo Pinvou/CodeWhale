@@ -59,8 +59,21 @@ type FrozenPublishObserver interface {
 
 // FrozenOutboxStore owns the database transaction and locks which surround
 // publisher. Process must not expose the body before the claim is revalidated.
+// Implementations have an explicit subject scope fixed by their construction;
+// ClaimFrozen must filter that scope before leasing, rather than claim unrelated
+// events for the relay to discard. The approval implementation is restricted to
+// account.approval-command.authorized.v1, not the ordinary outbox partition.
 type FrozenOutboxStore interface {
 	ClaimFrozen(context.Context, string, int, time.Duration) ([]FrozenClaim, error)
+	// ProcessFrozen must re-lock persisted delivery and control state, validate
+	// worker ownership, the live lease, ClaimToken, RelayControlEpoch, subject,
+	// trace identity and frozen body integrity before calling publisher. Keep
+	// those locks through publish and atomically fence the result by the same
+	// claim; an old, expired, wrong-owner or out-of-scope claim must neither
+	// publish nor mutate delivery/attempt facts. FrozenUnknown must not become
+	// a confirmed publish, retry-attempt increment or dead-letter decision.
+	// A commit with an unknown result needs exact persisted outcome recovery,
+	// not a fresh claim or an invented acknowledgement.
 	ProcessFrozen(context.Context, string, FrozenClaim, int, time.Time, FrozenPublisher) (FrozenDisposition, error)
 }
 
