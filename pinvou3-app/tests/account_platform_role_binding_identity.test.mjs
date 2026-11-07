@@ -52,11 +52,14 @@ async function withWorkspace(action, configuration = {}) {
   const window = domino.createWindow('<!doctype html><html><body></body></html>');
   // Domino already supplies a no-op, non-writable focus implementation.
   // These tests validate command/identity state, never focus or accessibility.
-  const location = { pathname: '/admin.html', search: '?section=roles&role_view=bindings', hash: '', href: '/admin.html?section=roles&role_view=bindings' };
+  // Advertise input-event delivery for controlled React onChange, not native editing.
+  window.document.oninput = null;
+  const initialSearch = configuration.initialSearch || '?section=roles&role_view=bindings';
+  const location = { pathname: '/admin.html', search: initialSearch, hash: '', href: '/admin.html' + initialSearch };
   const replacements = { window, document: window.document, navigator: window.navigator, HTMLElement: window.HTMLElement, Node: window.Node, location, fetch: globalThis.fetch, IS_REACT_ACT_ENVIRONMENT: true };
   const previous = new Map(Object.keys(replacements).map(name => [name, Object.getOwnPropertyDescriptor(globalThis, name)]));
   const client = new AdminPlatformClient(), calls = [], gates = [], fetchTasks = [];
-  const server = { csrf: 'controlled-A', permissions: ['platform.roles.read', 'platform.roles.assign', 'platform.users.read'], rows: bindings.map(item => ({ ...item })), failUsers: new Set(), heldUsers: new Map(), loseDelete: false, ...configuration };
+  const server = { csrf: 'controlled-A', permissions: ['platform.roles.read', 'platform.roles.assign', 'platform.users.read'], rows: bindings.map(item => ({ ...item })), failUsers: new Set(), heldUsers: new Map(), failBindings: new Map(), heldBindings: new Map(), loseDelete: false, ...configuration };
   let root, container, snapshot, language = 'en';
   const route = { section: 'roles', search: location.search, navigate(section, updates) { const next = new URLSearchParams(route.search); next.set('section', section); for (const [key, value] of Object.entries(updates)) value == null ? next.delete(key) : next.set(key, value); route.section = section; route.search = location.search = '?' + next; location.href = location.pathname + location.search; } };
   try {
@@ -70,7 +73,10 @@ async function withWorkspace(action, configuration = {}) {
         else if (url === '/api/account/v1/account/bootstrap') { assert.equal(method, 'POST'); assert.equal(init.body, '{}'); assert.equal(init.headers['X-CSRF-Token'], server.csrf); body = profile(server.permissions); }
         else if (url === '/api/admin/account/admin/v1/roles') { assert.equal(method, 'GET'); body = { items: [role, protectedRole] }; }
         else if (url.startsWith('/api/admin/account/admin/v1/role-bindings') && method === 'GET') {
-          const filter = new URL(url, 'http://controlled.invalid').searchParams.get('user_id'); body = { items: server.rows.filter(item => !filter || item.user_id === filter), truncated: false };
+          const filter = new URL(url, 'http://controlled.invalid').searchParams.get('user_id');
+          gate = server.heldBindings.get(filter); server.heldBindings.delete(filter);
+          status = server.failBindings.get(filter) || 200;
+          body = status === 200 ? { items: server.rows.filter(item => !filter || item.user_id === filter), truncated: false } : { code: 'CONTROLLED_LIST_FAILURE', message: 'controlled failure' };
         } else if (url.startsWith('/api/admin/account/admin/v1/users/')) {
           assert.equal(method, 'GET'); const userID = decodeURIComponent(url.split('/').at(-1));
           assert.ok(server.permissions.includes('platform.users.read'), 'no unauthorized profile lookup');
@@ -95,15 +101,33 @@ async function withWorkspace(action, configuration = {}) {
     let typedBindings;
     snapshot = await readAdminAuthorizationSnapshot(client);
     const { createRoot } = await import('react-dom/client'); container = window.document.createElement('main'); window.document.body.appendChild(container); root = createRoot(container);
-    const render = async (locale = language) => { language = locale; await act(async () => root.render(React.createElement(AdminRolesWorkspace, { client, me: snapshot.authorization, acceptedSessionEpoch: snapshot.sessionEpoch, language, route, initialTarget: new URLSearchParams(route.search).get('role_user_id') || '', onAuthorizationChange() {} }))); };
+    function CommitProbe({ properties, beforePassive }) {
+      React.useLayoutEffect(() => { beforePassive?.(); }, [beforePassive]);
+      return React.createElement(AdminRolesWorkspace, properties);
+    }
+    const render = async (locale = language, beforePassive) => {
+      language = locale;
+      const properties = { client, me: snapshot.authorization, acceptedSessionEpoch: snapshot.sessionEpoch, language, route, initialTarget: new URLSearchParams(route.search).get('role_user_id') || '', onAuthorizationChange() {} };
+      await act(async () => root.render(React.createElement(CommitProbe, { properties, beforePassive })));
+    };
     const renderBindings = async (locale = language) => {
       language = locale; typedBindings ||= await client.platformRoleBindings();
       await act(async () => root.render(React.createElement(PlatformRoleBindings, { client, me: snapshot.authorization, acceptedSessionEpoch: snapshot.sessionEpoch, words: adminRolePresentationCopy[language], copy: platformRoleCopy[language], bindings: typedBindings, target: '', blocked: false, routeScope: route.section + ':' + route.search, active: true, canRevoke: () => false, onApplyTarget() {}, onView() {}, onRevoke() {} })));
     };
     const click = async node => { assert.ok(node, 'real production control'); await act(async () => node.dispatchEvent(new window.Event('click', { bubbles: true, cancelable: true }))); };
     const button = (selector, label) => [...document.querySelectorAll(selector)].find(node => node.textContent === label);
-    const holdUser = userID => { const gate = { ...deferred(), started: deferred() }; gates.push(gate); server.heldUsers.set(userID, gate); return gate; };
-    await action({ server, client, calls, route, location, render, renderBindings, click, button, holdUser, container, words: locale => adminRolePresentationCopy[locale], copy: locale => platformRoleCopy[locale], async settle(gate) { await act(async () => gate.resolve()); }, async accept() { snapshot = await readAdminAuthorizationSnapshot(client); }, snapshot: () => snapshot, deletes: () => calls.filter(call => call.method === 'DELETE'), row: id => [...container.querySelectorAll('.adm-role-binding-table tbody tr')].find(node => node.textContent.includes(id)) });
+    const edit = async (node, value) => {
+      assert.ok(node, 'actual filter control');
+      await act(async () => {
+        if (node.tagName === 'SELECT') { node.value = value; node.dispatchEvent(new window.Event('change', { bubbles: true })); }
+        else { Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set.call(node, value); node.dispatchEvent(new window.Event('input', { bubbles: true })); }
+      });
+    };
+    const submit = async form => { assert.ok(form); await act(async () => form.dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }))); };
+    const hold = (map, id) => { const gate = { ...deferred(), started: deferred() }; gates.push(gate); map.set(id, gate); return gate; };
+    const holdUser = userID => hold(server.heldUsers, userID);
+    const holdBinding = userID => hold(server.heldBindings, userID);
+    await action({ server, client, calls, route, location, render, renderBindings, click, button, edit, submit, holdUser, holdBinding, container, words: locale => adminRolePresentationCopy[locale], copy: locale => platformRoleCopy[locale], async settle(gate) { await act(async () => gate.resolve()); }, async accept() { snapshot = await readAdminAuthorizationSnapshot(client); }, snapshot: () => snapshot, deletes: () => calls.filter(call => call.method === 'DELETE'), row: id => [...container.querySelectorAll('.adm-role-binding-table tbody tr')].find(node => node.textContent.includes(id)) });
   } finally {
     try { const retire = async () => { for (const gate of gates) gate.resolve(); client.retireSession(); await Promise.allSettled(fetchTasks); root?.unmount(); platformRolePending(client, owner, null); }; if (root) await act(retire); else await retire(); }
     finally {
@@ -216,6 +240,8 @@ test('Unknown revoke recovery retains its original minimal command across naviga
     h.route.section = 'users'; h.route.search = h.location.search = '?section=users'; await h.render();
     h.route.section = 'roles'; h.route.search = h.location.search = '?section=roles&role_view=bindings&role_user_id=' + userIDs[0]; await h.render();
     assert.equal(platformRolePending(h.client, owner), pending);
+    const queryControls = [...h.container.querySelectorAll('.adm-binding-server-query button')];
+    assert.equal(queryControls.length, 2); assert.ok(queryControls.every(button => button.disabled), 'unknown command keeps both server target changes blocked');
     await h.click(h.button('.adm-role-risk-note button', h.copy('en').retry));
     assert.equal(h.deletes().length, 2);
     assert.deepEqual(h.deletes()[0], h.deletes()[1], 'recovery replays the exact original DELETE protocol');
@@ -242,4 +268,122 @@ test('Optional profile reads are limited to deduplicated visible-page targets an
     assert.equal(profileCalls().length, 2);
     assert.equal(h.deletes().length, 0);
   });
+});
+
+// Real Workspace/client and controlled server response. This exercises
+// actual handlers, not native default key actions, focus or browser layout.
+test('Applied user query, header refresh and local grant filters preserve their distinct request boundaries', options, async () => {
+  for (const language of ['zh', 'en', 'ja']) await withWorkspace(async h => {
+    // The real producer derives EXPIRED when expires_at <= now. This row
+    // ended after its start and long before the controlled review date.
+    Object.assign(h.server.rows[1], { expires_at: '2026-10-02T00:00:00Z', status: 'EXPIRED' });
+    await h.render(language); const words = h.words(language), filters = words.bindingFilters;
+    const form = () => h.container.querySelector('.adm-binding-server-query');
+    const target = () => form().querySelector('input');
+    const keyword = () => h.container.querySelector('.adm-binding-local-filters input');
+    const status = () => h.container.querySelector('.adm-binding-local-filters select');
+    const matches = () => h.container.querySelector('.adm-binding-filter-summary').textContent;
+    const condition = () => h.container.querySelector('.adm-binding-applied-query code').textContent;
+    const queries = () => h.calls.filter(call => call.method === 'GET' && call.url.includes('/admin/v1/role-bindings')).map(call => new URL(call.url, 'http://controlled.invalid').searchParams.get('user_id'));
+    const reset = () => h.button('.adm-binding-local-filters button', filters.resetLocal);
+    assert.equal(form().querySelector('button[type=submit]').textContent, filters.query);
+    assert.equal(condition(), filters.allUsers); assert.equal(matches(), filters.loaded(2, 2));
+    const originalQueries = queries();
+    await h.edit(keyword(), 'Same display name'); assert.equal(matches(), filters.loaded(0, 2), 'local role filter does not invent user name search');
+    await h.click(reset()); await h.edit(status(), 'EXPIRED');
+    assert.equal(matches(), filters.loaded(1, 2)); assert.ok(h.row(userIDs[1])); assert.equal(h.row(userIDs[0]), undefined);
+    await h.click(reset()); assert.equal(matches(), filters.loaded(2, 2)); assert.deepEqual(queries(), originalQueries);
+    await h.edit(target(), ' ' + userIDs[0].toUpperCase() + ' ');
+    assert.deepEqual(queries(), originalQueries); assert.equal(condition(), filters.allUsers, 'a typed draft is not yet applied');
+    const firstCommit = [];
+    await h.submit(form());
+    await h.render(language, () => firstCommit.push({ condition: condition(), rows: h.container.querySelectorAll('.adm-role-binding-table tbody tr').length, counts: h.container.querySelectorAll('.adm-binding-filter-summary').length }));
+    assert.deepEqual(firstCommit, [{ condition: userIDs[0], rows: 0, counts: 0 }], 'new route condition never renders the old result before passive read cleanup');
+    assert.equal(queries().at(-1), userIDs[0]); assert.equal(condition(), userIDs[0]); assert.equal(matches(), filters.loaded(1, 1));
+    await h.edit(target(), userIDs[1]); const beforeRefresh = queries().length;
+    await h.click(h.button('.adm-role-workspace-head button', h.copy(language).refresh));
+    assert.equal(queries().length, beforeRefresh + 1); assert.equal(queries().at(-1), userIDs[0]);
+    assert.equal(target().value, userIDs[1]); assert.equal(condition(), userIDs[0]);
+    await h.edit(status(), 'ACTIVE');
+    await h.click(h.button('.adm-binding-server-query button', filters.clearUser)); await h.render(language);
+    assert.equal(queries().at(-1), null); assert.equal(new URLSearchParams(h.route.search).has('role_user_id'), false);
+    assert.ok(reset().disabled, 'clearing the applied user also resets the local status');
+    assert.equal(condition(), filters.allUsers); assert.equal(matches(), filters.loaded(2, 2));
+    await h.edit(status(), 'EXPIRED'); await h.edit(target(), userIDs[0]);
+    await h.click(h.button('.adm-binding-server-query button', filters.clearUser));
+    assert.ok(!reset().disabled, 'clearing only an unsubmitted draft keeps the local filter');
+    assert.equal(matches(), filters.loaded(1, 2));
+    const beforeInvalid = queries(); await h.edit(target(), 'not-a-user-id'); await h.submit(form());
+    assert.deepEqual(queries(), beforeInvalid); assert.equal(condition(), filters.allUsers);
+    assert.ok(h.container.querySelector('[role=alert]')); assert.equal(h.deletes().length, 0);
+  });
+});
+
+const bindingQueries = calls => calls.filter(call => call.method === 'GET' && call.url.includes('/admin/v1/role-bindings')).map(call => new URL(call.url, 'http://controlled.invalid').searchParams.get('user_id'));
+const rawBindingRoute = (...ids) => '?' + new URLSearchParams([['section', 'roles'], ['role_view', 'bindings'], ...ids.map(id => ['role_user_id', id])]);
+const appliedQuery = container => container.querySelector('.adm-binding-applied-query code')?.textContent;
+const bindingCount = container => container.querySelector('.adm-role-summary article:last-child small')?.textContent;
+
+test('Binding deep links report the condition actually sent and let an invalid link recover without widening it', options, async () => {
+  for (const language of ['zh', 'en', 'ja']) {
+    await withWorkspace(async h => {
+      await h.render(language);
+      assert.deepEqual(bindingQueries(h.calls), [null]);
+      assert.equal(appliedQuery(h.container), h.words(language).bindingFilters.allUsers, 'a whitespace deep link reads all users and must say so');
+      assert.equal(bindingCount(h.container), h.words(language).scopes.PLATFORM);
+      assert.ok(h.row(userIDs[0]) && h.row(userIDs[1]));
+      await h.click(h.button('.adm-binding-server-query button', h.words(language).bindingFilters.clearUser));
+      await h.render(language);
+      assert.equal(new URLSearchParams(h.route.search).has('role_user_id'), false);
+    }, { initialSearch: rawBindingRoute('  ', userIDs[1]) });
+
+    await withWorkspace(async h => {
+      await h.render(language);
+      assert.deepEqual(bindingQueries(h.calls), [userIDs[0]], 'only the first URL value is canonicalized and sent');
+      assert.equal(appliedQuery(h.container), userIDs[0]);
+      assert.equal(bindingCount(h.container), userIDs[0]);
+      assert.ok(h.row(userIDs[0])); assert.equal(h.row(userIDs[1]), undefined);
+    }, { initialSearch: rawBindingRoute(' ' + userIDs[0].toUpperCase() + ' ', userIDs[1]) });
+
+    await withWorkspace(async h => {
+      const bad = 'not-a-user-id'.repeat(24), filters = h.words(language).bindingFilters;
+      await h.render(language);
+      assert.deepEqual(bindingQueries(h.calls), [], 'an invalid deep link never requests an unrestricted list');
+      const warning = h.container.querySelector('.adm-binding-invalid-query');
+      assert.ok(warning); assert.equal(warning.getAttribute('role'), 'alert'); assert.equal(warning.textContent, filters.invalidURL);
+      assert.equal(appliedQuery(h.container), undefined);
+      assert.equal(bindingCount(h.container), filters.notApplied);
+      assert.equal(h.container.querySelector('.adm-binding-server-query input').value, bad, 'the user can correct or clear the draft');
+      assert.equal(h.container.querySelectorAll('.adm-binding-filter-summary').length, 0);
+      await h.click(h.button('.adm-binding-server-query button', filters.clearUser)); await h.render(language);
+      assert.deepEqual(bindingQueries(h.calls), [null]); assert.equal(appliedQuery(h.container), filters.allUsers);
+      assert.equal(h.container.querySelectorAll('.adm-binding-invalid-query').length, 0);
+      assert.equal(h.deletes().length, 0);
+    }, { initialSearch: rawBindingRoute('not-a-user-id'.repeat(24), userIDs[0]) });
+  }
+});
+
+test('A completed list read error is absent on the new user’s first commit while its own failure still appears', options, async () => {
+  await withWorkspace(async h => {
+    const language = 'en', messages = () => [...h.container.querySelectorAll('[role=alert]')].map(node => node.textContent);
+    h.server.failBindings.set(userIDs[0], 503);
+    await h.render(language);
+    assert.deepEqual(messages(), [h.copy(language).loadFailed]);
+    const incoming = h.holdBinding(userIDs[1]), firstCommit = [];
+    h.route.navigate('roles', { role_user_id: userIDs[1] });
+    await h.render(language, () => firstCommit.push({ condition: appliedQuery(h.container), alerts: messages() }));
+    assert.deepEqual(firstCommit, [{ condition: userIDs[1], alerts: [] }], 'the previous user’s failure cannot be announced for the new user');
+    await incoming.started.promise;
+    assert.equal(h.container.querySelectorAll('.adm-binding-filter-summary').length, 0);
+    await h.settle(incoming);
+    assert.deepEqual(messages(), []); assert.ok(h.row(userIDs[1]));
+    h.server.failBindings.set(userIDs[1], 403);
+    const refresh = () => h.button('.adm-role-workspace-head button', h.copy(language).refresh);
+    await h.click(refresh());
+    assert.deepEqual(messages(), [h.copy(language).denied]); assert.equal(h.row(userIDs[1]), undefined);
+    h.server.failBindings.delete(userIDs[1]); await h.click(refresh());
+    assert.deepEqual(messages(), []); assert.ok(h.row(userIDs[1]));
+    assert.deepEqual(bindingQueries(h.calls), [userIDs[0], userIDs[1], userIDs[1], userIDs[1]]);
+    assert.equal(h.deletes().length, 0);
+  }, { initialSearch: rawBindingRoute(userIDs[0]) });
 });

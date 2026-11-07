@@ -101,3 +101,17 @@
 .adm-restored-shell .adm-platform-roles .adm-role-detail h3:focus{outline:3px solid var(--adm-primary);outline-offset:4px;border-radius:3px}
 .adm-restored-shell .adm-platform-roles .adm-role-catalog-layout>.adm-table-wrap:focus-visible{outline-offset:-3px}
 @media(pointer:coarse){.adm-shell.adm-restored-shell .adm-platform-roles .adm-role-catalog-back{min-height:44px}}
+
+.adm-restored-shell .adm-binding-filter-heading{padding:16px 20px 0;min-width:0}
+.adm-restored-shell .adm-binding-filter-heading h3{margin:0 0 6px;font-size:14px;line-height:1.5}
+.adm-restored-shell .adm-binding-filter-heading p,.adm-restored-shell .adm-binding-applied-query,.adm-restored-shell .adm-binding-filter-summary{margin:0;color:var(--adm-muted);font-size:12px;line-height:1.6;overflow-wrap:break-word}
+.adm-restored-shell .adm-binding-query .adm-role-toolbar,.adm-restored-shell .adm-binding-local-filters .adm-role-toolbar{display:grid;gap:9px;border-bottom:0;align-items:end}
+.adm-restored-shell .adm-binding-query .adm-role-toolbar{grid-template-columns:minmax(0,1fr) auto auto}
+.adm-restored-shell .adm-binding-local-filters .adm-role-toolbar{grid-template-columns:minmax(0,1fr) minmax(0,180px) auto}
+.adm-restored-shell .adm-binding-query .adm-role-toolbar label,.adm-restored-shell .adm-binding-local-filters .adm-role-toolbar label{display:grid;gap:6px;min-width:0}
+.adm-restored-shell .adm-binding-local-filters .adm-role-toolbar select{box-sizing:border-box;width:100%;min-width:0}
+.adm-restored-shell .adm-binding-query .adm-role-toolbar button,.adm-restored-shell .adm-binding-local-filters .adm-role-toolbar button{max-width:100%;white-space:normal}
+.adm-restored-shell .adm-binding-applied-query,.adm-restored-shell .adm-binding-filter-summary{padding:0 20px 14px;border-bottom:1px solid var(--adm-line)}
+.adm-restored-shell .adm-binding-applied-query code{margin-left:6px;font-size:12px;color:var(--adm-text);white-space:normal;overflow-wrap:break-word}
+.adm-restored-shell .adm-binding-invalid-query{color:var(--adm-danger,#b42318)}
+@media(max-width:760px){.adm-restored-shell .adm-binding-filter-heading{padding:14px 14px 0}.adm-restored-shell .adm-binding-applied-query,.adm-restored-shell .adm-binding-filter-summary{padding-right:14px;padding-left:14px}.adm-restored-shell .adm-binding-query .adm-role-toolbar{grid-template-columns:minmax(0,1fr) minmax(0,1fr)}.adm-restored-shell .adm-binding-query .adm-role-toolbar label{grid-column:1/-1}.adm-restored-shell .adm-binding-local-filters .adm-role-toolbar{grid-template-columns:minmax(0,1fr)}}

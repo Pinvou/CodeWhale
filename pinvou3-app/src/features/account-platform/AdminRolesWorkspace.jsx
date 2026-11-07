@@ -1,15 +1,19 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { adminRolePresentationCopy, platformRoleCopy } from '../../shared/i18n.js';
-import { grantablePlatformRole, platformRoleGrantIntent, platformRolePending, platformRoleFreshAuthority, platformRoleFailureState } from './platform-role-management.js';
+import { grantablePlatformRole, platformRoleBindingUserID, platformRoleGrantIntent, platformRolePending, platformRoleFreshAuthority, platformRoleFailureState } from './platform-role-management.js';
 import { PlatformRoleCatalog } from './PlatformRoleCatalog.jsx';
 import { PlatformRoleGrantDialog } from './PlatformRoleGrantDialog.jsx';
 import { PlatformRoleBindingDetail } from './PlatformRoleBindingDetail.jsx';
 import { PlatformRoleBindings } from './PlatformRoleBindings.jsx';
 import { PlatformRoleRevokeDialog } from './PlatformRoleRevokeDialog.jsx';
 import { platformBindingContext, platformBindingContextIsCurrent } from './platform-binding-users.js';
-import { requireFinanceID } from './finance-contract.js';
 import { platformRoleName } from './platform-role-presentation.js';
 import './admin-role-presentation.css';
+
+// Keep the raw route for history and draft repair. Null is invalid, not "all users".
+function bindingUserCondition(value) {
+  try { return platformRoleBindingUserID(value); } catch { return null; }
+}
 
 export function AdminRolesWorkspace({ client, me, language, onAuthorizationChange, initialTarget = '', route, acceptedSessionEpoch }) {
   const copy = platformRoleCopy[language];
@@ -18,8 +22,13 @@ export function AdminRolesWorkspace({ client, me, language, onAuthorizationChang
   const canRead = me?.platform_permissions?.includes('platform.roles.read');
   const canAssign = me?.platform_permissions?.includes('platform.roles.assign');
   const [roles, setRoles] = useState(null);
-  const [bindings, setBindings] = useState(null);
+  const [bindingRead, setBindingRead] = useState(null);
+  const [bindingReadFailure, setBindingReadFailure] = useState(null);
   const [target, setTarget] = useState(initialTarget);
+  const requestedTarget = route ? initialTarget : target;
+  const routeParams = route ? new URLSearchParams(route.search) : null;
+  const hasUserCondition = routeParams ? routeParams.has('role_user_id') : Boolean(requestedTarget);
+  const userCondition = bindingUserCondition(requestedTarget);
   const [grantTarget, setGrantTarget] = useState(initialTarget);
   const [roleCode, setRoleCode] = useState('');
   const [starts, setStarts] = useState('');
@@ -37,6 +46,10 @@ export function AdminRolesWorkspace({ client, me, language, onAuthorizationChang
   const [revokeReview, setRevokeReview] = useState(null);
   const bindingRouteScope = `${route?.section || 'roles'}:${route?.search || ''}`;
   const platformVersion = me?.platform_authorization_version || me?.active_context?.platform_authorization_version || me?.authorization_version || 0;
+  const liveEpoch = client.financeSessionEpoch || 0, bindingEpoch = acceptedSessionEpoch === undefined ? liveEpoch : acceptedSessionEpoch;
+  const ownsBindingRead = receipt => canRead && receipt?.client === client && receipt.owner === owner && receipt.platformVersion === platformVersion && receipt.epoch === bindingEpoch && receipt.epoch === liveEpoch && receipt.target === userCondition;
+  const bindings = ownsBindingRead(bindingRead) ? bindingRead.items : null;
+  const readError = ownsBindingRead(bindingReadFailure) ? copy[bindingReadFailure.kind] : '';
   const recovery = useRef(null);
   const dialogContext = useRef(null);
   const generation = useRef(0);
@@ -44,7 +57,7 @@ export function AdminRolesWorkspace({ client, me, language, onAuthorizationChang
   const currentOwner = useRef(owner);
   currentOwner.current = owner;
   const currentClient = useRef(client), appliedTarget = useRef(target);
-  currentClient.current = client; appliedTarget.current = route ? initialTarget : target;
+  currentClient.current = client; appliedTarget.current = requestedTarget;
   const reads = useRef(null);
   const actionInFlight = useRef(false);
   const snapshot = () => ({ generation: generation.current, owner, epoch: client.financeSessionEpoch || 0 });
@@ -53,18 +66,27 @@ export function AdminRolesWorkspace({ client, me, language, onAuthorizationChang
   // receipt. Identity/authority changes still retire both independent fences.
   const commandCurrent = token => commandGeneration.current === token.generation && currentOwner.current === token.owner && currentClient.current === client && (client.financeSessionEpoch || 0) === token.epoch;
   const message = failure => failure?.code === 'RECENT_AUTHENTICATION_REQUIRED' ? copy.reauth : failure?.status === 403 || failure?.message === 'ROLE_AUTHORITY_CHANGED' ? copy.denied : copy.failed;
-  const load = async (selected = target) => {
+  const load = async (selected = requestedTarget) => {
     generation.current++; reads.current?.abort(); const controller = new AbortController(); reads.current = controller;
-    const token = snapshot(); setBusy(true); setError('');
+    const token = snapshot(); setBusy(true); setError(''); setBindingReadFailure(null);
+    const ownsRead = () => current(token) && (!route || appliedTarget.current === selected);
+    const scope = { target: bindingUserCondition(selected), client, owner, platformVersion, epoch: token.epoch };
     try {
-      const [catalog, items] = await Promise.all([client.platformRoles(controller.signal), client.platformRoleBindings(selected, controller.signal)]);
-      if (!current(token)) return;
-      setRoles(catalog); setBindings(items);
-    } catch (failure) { if (current(token) && failure.name !== 'AbortError') { setRoles(null); setBindings(null); setError(failure?.status === 403 ? copy.denied : copy.loadFailed); } }
-    finally { if (current(token)) setBusy(false); }
+      const [catalog, items] = await Promise.all([
+        client.platformRoles(controller.signal),
+        scope.target === null ? null : client.platformRoleBindings(scope.target, controller.signal),
+      ]);
+      if (!ownsRead()) return;
+      setRoles(catalog); setBindingRead(items ? { ...scope, items } : null);
+    } catch (failure) {
+      if (ownsRead() && failure.name !== 'AbortError') {
+        setRoles(null); setBindingRead(null);
+        setBindingReadFailure({ ...scope, kind: failure?.status === 403 ? 'denied' : 'loadFailed' });
+      }
+    } finally { if (ownsRead()) setBusy(false); }
   };
   useEffect(() => {
-    generation.current++; commandGeneration.current++; setRoles(null); setBindings(null); setPending(platformRolePending(client, owner));
+    generation.current++; commandGeneration.current++; setRoles(null); setBindingRead(null); setBindingReadFailure(null); setPending(platformRolePending(client, owner));
     setGrantOpen(false); setConfirmation(null); setCompletedGrant(null); setSelectedBinding(null); setRevokeReview(null); setNotice(''); setGrantTarget(initialTarget);
     setTarget(initialTarget); setRoleCode(''); setStarts(''); setExpires(''); setReason('');
     if (canRead) void load(initialTarget);
@@ -73,12 +95,12 @@ export function AdminRolesWorkspace({ client, me, language, onAuthorizationChang
   useEffect(() => client.onAuthorizationVersion?.(() => {
     // Retire synchronously: the old response must not win before React renders
     // the parent's current-authority refresh. An uncertain command keeps its key.
-    generation.current++; commandGeneration.current++; reads.current?.abort(); setRoles(null); setBindings(null);
+    generation.current++; commandGeneration.current++; reads.current?.abort(); setRoles(null); setBindingRead(null); setBindingReadFailure(null);
     setGrantOpen(false); setConfirmation(null); setSelectedBinding(null); setRevokeReview(null); setNotice('');
     setBusy(false); onAuthorizationChange?.();
   }), [client, onAuthorizationChange]);
   useEffect(() => {
-    if (initialTarget !== target) { setTarget(initialTarget); setBindings(null); if (canRead) void load(initialTarget); }
+    if (initialTarget !== target) { setTarget(initialTarget); setBindingRead(null); if (canRead) void load(initialTarget); }
   }, [initialTarget]); // URL reads retire old read receipts, never replace an accepted command.
   const execute = async command => {
     if (actionInFlight.current || busy || !canAssign || command.owner !== owner) return;
@@ -148,8 +170,8 @@ export function AdminRolesWorkspace({ client, me, language, onAuthorizationChang
     void execute(command);
   };
   useEffect(() => { setRevokeReview(null); }, [client, owner, acceptedSessionEpoch, platformVersion, bindingRouteScope]);
-  const blocked = busy || Boolean(pending) || Boolean(revokeReview);
-  const tab = route ? new URLSearchParams(route.search).get('role_view') === 'bindings' || !new URLSearchParams(route.search).has('role_view') && initialTarget ? 'bindings' : 'catalog' : view;
+  const blocked = busy || Boolean(route && requestedTarget !== target) || Boolean(pending) || Boolean(revokeReview);
+  const tab = routeParams ? routeParams.get('role_view') === 'bindings' || !routeParams.has('role_view') && initialTarget ? 'bindings' : 'catalog' : view;
   const changeView = next => { setView(next); route?.navigate('roles', { role_view: next }); };
   const update = (field, value) => {
     if (blocked) return;
@@ -159,13 +181,13 @@ export function AdminRolesWorkspace({ client, me, language, onAuthorizationChang
   };
   const applyBindingTarget = value => {
     if (blocked) return;
-    const selected = value.trim().toLowerCase();
-    try { if (selected) requireFinanceID(selected); } catch { setError(copy.failed); return; }
-    if (route && (new URLSearchParams(route.search).get('role_user_id') || '') !== selected) {
+    const selected = bindingUserCondition(value);
+    if (selected === null) { setError(copy.failed); return; }
+    if (routeParams && (requestedTarget !== selected || !selected && hasUserCondition)) {
       route.navigate('roles', { role_user_id: selected || null, role_view: 'bindings' });
-    } else { setTarget(selected); setBindings(null); void load(selected); }
+    } else { setTarget(selected); setBindingRead(null); void load(selected); }
   };
-  const openGrant = (code = '') => { if (!blocked && canAssign) { dialogContext.current = { owner, client }; setRoleCode(code); setGrantTarget(target); setStarts(''); setExpires(''); setReason(''); setConfirmation(null); setError(''); setNotice(''); setGrantOpen(true); } };
+  const openGrant = (code = '') => { if (!blocked && canAssign) { dialogContext.current = { owner, client }; setRoleCode(code); setGrantTarget(userCondition ?? ''); setStarts(''); setExpires(''); setReason(''); setConfirmation(null); setError(''); setNotice(''); setGrantOpen(true); } };
   const openBinding = item => { if (revokeReview) return; dialogContext.current = { owner, client }; setSelectedBinding(item); };
   const ownsDialog = dialogContext.current?.owner === owner && dialogContext.current?.client === client;
   const ownsPending = pending && platformRolePending(client, owner) === pending;
@@ -180,13 +202,13 @@ export function AdminRolesWorkspace({ client, me, language, onAuthorizationChang
   return <div className="adm-role-workspace adm-platform-roles">
     <p className="adm-muted">{copy.lead}</p>
     {!canRead ? <p role="alert">{copy.denied}</p> : <>
-      {roles && <div className="adm-role-summary"><article><span>{words.catalog}</span><strong>{roles.length}</strong><small>{words.scopes.PLATFORM}</small></article><article><span>{words.permissionCount}</span><strong>{new Set(roles.flatMap(role => role.permissions)).size}</strong><small>{words.includedPermissions}</small></article><article><span>{words.bindingManagement}</span><strong>{bindings ? bindings.length : '—'}</strong><small title={target || undefined}>{target || words.scopes.PLATFORM}</small></article></div>}
+      {roles && <div className="adm-role-summary"><article><span>{words.catalog}</span><strong>{roles.length}</strong><small>{words.scopes.PLATFORM}</small></article><article><span>{words.permissionCount}</span><strong>{new Set(roles.flatMap(role => role.permissions)).size}</strong><small>{words.includedPermissions}</small></article><article><span>{words.bindingManagement}</span><strong>{bindings ? bindings.length : '—'}</strong><small title={userCondition || undefined}>{userCondition === null ? words.bindingFilters.notApplied : userCondition || words.scopes.PLATFORM}</small></article></div>}
       {notice?.owner === owner && notice?.client === client && <p className="adm-inline-message ok" role="status">{notice.status === 'REVOKED' ? words.revokedNotice : notice.status === 'EXPIRED' ? words.expiredNotice : words.grantedNotice}</p>}
-      {!canAssign && <p className="adm-inline-message">{copy.readOnly}</p>}{busy && <p role="status">{copy.loading}</p>}{!grantOpen && error && <p className="adm-inline-message error" role="alert">{error}</p>}{reauthRequired && !pending && <button disabled={busy} onClick={() => client.reauthenticate('/admin.html?section=roles')}>{copy.reauthAction}</button>}
+      {!canAssign && <p className="adm-inline-message">{copy.readOnly}</p>}{busy && <p role="status">{copy.loading}</p>}{readError && <p className="adm-inline-message error" role="alert">{readError}</p>}{!grantOpen && error && <p className="adm-inline-message error" role="alert">{error}</p>}{reauthRequired && !pending && <button disabled={busy} onClick={() => client.reauthenticate('/admin.html?section=roles')}>{copy.reauthAction}</button>}
       {ownsPending && <aside className="adm-role-risk-note" role="status"><p>{copy.unknown}</p><p>{pending.kind === 'grant' ? `${words.user}: ${pending.body.user_id} · ${words.role}: ${platformRoleName(words, pending.body.role_code)}` : `${words.bindingID}: ${pending.bindingID}`}</p><p>{copy.reloadBoundary}</p><details><summary>{words.bindingDetail}</summary><pre>{JSON.stringify(pending.kind === 'grant' ? pending.body : { binding_id: pending.bindingID }, null, 2)}</pre></details><button ref={recovery} disabled={busy || !canAssign} onClick={() => void execute(pending)}>{copy.retry}</button></aside>}
       <section className="adm-panel adm-role-panel"><div className="adm-role-workspace-head"><div className="adm-tabs" role="group" aria-label={copy.title}><button type="button" aria-pressed={tab === 'catalog'} onClick={() => changeView('catalog')}>{words.catalog}</button><button type="button" aria-pressed={tab === 'bindings'} onClick={() => changeView('bindings')}>{words.bindingManagement}</button></div><div><button type="button" disabled={busy} onClick={() => void load()}>{copy.refresh}</button>{canAssign && <button type="button" className="adm-role-primary" disabled={blocked || !roles} onClick={() => openGrant()}>{words.newGrant}</button>}</div></div>
         <div hidden={tab !== 'catalog'}>{roles && <PlatformRoleCatalog key={owner} {...{ client, me, language, acceptedSessionEpoch }} roles={roles} words={words} authorityCopy={copy} canGrant={grantablePlatformRole} onGrant={canAssign && !blocked ? openGrant : null} />}</div>
-        <div hidden={tab !== 'bindings'}><PlatformRoleBindings key={owner} {...{ words, copy, bindings, target, blocked, client, me, acceptedSessionEpoch }} routeScope={bindingRouteScope} active={tab === 'bindings'} onApplyTarget={applyBindingTarget} onView={openBinding} onRevoke={revoke} canRevoke={item => canAssign && grantablePlatformRole(roles?.find(role => role.code === item.role_code)) && ['ACTIVE', 'SCHEDULED'].includes(item.status)} /></div>
+        <div hidden={tab !== 'bindings'}><PlatformRoleBindings key={owner} {...{ words, copy, bindings, blocked, client, me, acceptedSessionEpoch }} target={userCondition} draftTarget={userCondition ?? requestedTarget} hasUserCondition={hasUserCondition} routeScope={bindingRouteScope} active={tab === 'bindings'} onApplyTarget={applyBindingTarget} onView={openBinding} onRevoke={revoke} canRevoke={item => canAssign && grantablePlatformRole(roles?.find(role => role.code === item.role_code)) && ['ACTIVE', 'SCHEDULED'].includes(item.status)} /></div>
       </section>
       {ownsDialog && grantOpen && roles && canAssign && (!pending || busy) && <PlatformRoleGrantDialog key={owner} {...{ words, copy, client, owner, roleCode, starts, expires, reason, update, error, confirmation }} target={grantTarget} canSearchUsers={me?.platform_permissions?.includes('platform.users.read')} roles={roles.filter(grantablePlatformRole)} busy={busy} onReview={reviewGrant} onConfirm={() => { if (confirmation && !pending) void execute(confirmation); }} onClose={() => setGrantOpen(false)} />}
       {reviewCurrent(revokeReview) && <PlatformRoleRevokeDialog review={revokeReview} {...{ words, copy, client, me, acceptedSessionEpoch, busy }} routeScope={bindingRouteScope} onCancel={cancelRevoke} onConfirm={confirmRevoke} />}

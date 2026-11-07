@@ -2,6 +2,12 @@ import { secureRequestID } from './request-id.js';
 import { requireFinanceID } from './finance-contract.js';
 const id = value => typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value) && value !== '00000000-0000-0000-0000-000000000000';
 const protectedCodes = new Set(['PLATFORM_SUPER_ADMIN', 'OWNER', 'PERSONAL_USER']);
+// An empty string is an intentional platform-wide query; an invalid ID must never become one.
+export function platformRoleBindingUserID(value = '') {
+  const normalized = typeof value === 'string' ? value.trim().toLowerCase() : value;
+  return normalized ? requireFinanceID(normalized) : '';
+}
+
 export function grantablePlatformRole(role) { return role?.scope === 'PLATFORM' && role.assignable === true && !protectedCodes.has(role.code); }
 export function requirePlatformRoles(payload) {
   if (!Array.isArray(payload?.items) || payload.items.some(role => typeof role.code !== 'string' || !role.code || role.scope !== 'PLATFORM' || typeof role.assignable !== 'boolean' || !Array.isArray(role.permissions) || role.permissions.some(value => typeof value !== 'string' || !value))) throw new Error('INVALID_ROLE_CATALOG');
