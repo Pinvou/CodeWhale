@@ -1010,10 +1010,18 @@ test("Token financial PostgreSQL gate is required and cannot swallow a failed ru
   assert.deepEqual([...services.matchAll(/^ {10}- (.+)\r?$/gm)].map(match => match[1]), Array(6).fill('"127.0.0.1::5432"'));
   assertFiniteAuditPGSetup(job);
   const run = stepRun(job, "Token financial contracts on isolated PostgreSQL");
-  for (const failedPhase of ["guard", "postgres"]) {
-    const mock = `python3() { case "$*" in *unittest*) ${failedPhase === "guard" ? "return 7" : "return 0"};; *) ${failedPhase === "postgres" ? "return 7" : "return 0"};; esac; }; export -f python3;\n`;
-    const result = spawnSync(bash, ["-c", mock + run], { encoding: "utf8", timeout: 30_000, windowsHide: true });
-    assert.equal(result.status, 7, `${failedPhase} failure must fail the gate: ${result.stderr}`);
+  const directory = mkdtempSync(join(tmpdir(), "pinvou-financial-routing-"));
+  try {
+    // The version job has no Account service ledger. This mock owns its
+    // receipt directory rather than borrowing a supervisor's ambient value.
+    const env = { ...process.env, PINVOU_CI_RESOURCE_LEDGER: directory.replaceAll("\\", "/") };
+    for (const failedPhase of ["guard", "postgres", null]) {
+      const mock = `python3() { case "$*" in *unittest*) ${failedPhase === "guard" ? "return 7" : "return 0"};; *) ${failedPhase === "postgres" ? "return 7" : "return 0"};; esac; }; export -f python3;\n`;
+      const result = spawnSync(bash, ["-c", mock + run], { encoding: "utf8", timeout: 30_000, windowsHide: true, env });
+      assert.equal(result.status, failedPhase ? 7 : 0, `${failedPhase || "successful"} mock must preserve the gate result: ${result.stderr}`);
+    }
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
   }
 });
 
