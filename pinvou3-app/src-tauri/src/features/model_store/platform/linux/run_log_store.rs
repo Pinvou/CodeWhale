@@ -243,7 +243,8 @@ const SECRET_ENV_KEYS: [&str; 7] = [
 /// 这个词是不是该整体抹掉。
 fn word_is_secret(word: &str) -> bool {
     let trimmed =
-        word.trim_matches(|c: char| matches!(c, '"' | '\'' | ',' | ';' | ')' | '(' | '`'));
+        // r27 P2-14: `<>` 进 trim——`<AKIA…>` 尖括号包裹的 AWS key 此前不剥离
+        word.trim_matches(|c: char| matches!(c, '"' | '\'' | ',' | ';' | ')' | '(' | '`' | '<' | '>'));
     if trimmed.len() < MIN_LITERAL_SECRET_LEN {
         return false;
     }
@@ -294,7 +295,9 @@ fn key_is_secret(key: &str) -> bool {
 /// 「这个名字是不是机密键名」的统一判据（r21 P2-8② 冒号黏连形态用）：
 /// 环境变量名、URL query 参数名（含前缀族）、Azure SAS 键，全部大小写不敏感。
 fn secret_key_name(name: &str) -> bool {
-    let name = name.trim_matches(|c: char| matches!(c, '"' | '\'' | '$' | '{' | '}' | '[' | ']'));
+    // r27 P2-12: `\\` 进名字侧 trim——转义 JSON 的 `\"api_key\` 依赖此 trim 化简
+    let name =
+        name.trim_matches(|c: char| matches!(c, '"' | '\'' | '$' | '{' | '}' | '[' | ']' | '\\'));
     !name.is_empty()
         && (SECRET_ENV_KEYS
             .iter()
@@ -602,7 +605,8 @@ pub fn sanitize_for_disk(line: &str) -> String {
         let bare = word.trim_matches(|c: char| {
             matches!(
                 c,
-                '"' | '\'' | ',' | ';' | ':' | '{' | '}' | '[' | ']' | '(' | ')'
+                // r27 P2-12: `\\` 同步进名字侧 trim（与 colon_glued/secret_key_name 对齐）
+                '"' | '\'' | ',' | ';' | ':' | '{' | '}' | '[' | ']' | '(' | ')' | '\\'
             )
         });
         // `--TOKEN x`（空格形态）此前大小写敏感漏网——`=` 形态早已不敏感，两处对齐。
@@ -693,7 +697,8 @@ fn colon_glued_secret(word: &str) -> Option<(&str, &str)> {
         let trimmed_name = name.trim_matches(|c: char| {
             matches!(
                 c,
-                '"' | '\'' | '{' | '}' | '[' | ']' | ',' | ';' | '(' | ')'
+                // r27 P2-12: `\\` 进名字侧——转义 JSON 的 `\"api_key\` 化简依赖此 trim
+                '"' | '\'' | '{' | '}' | '[' | ']' | ',' | ';' | '(' | ')' | '\\'
             )
         });
         if !secret_key_name(trimmed_name) {
