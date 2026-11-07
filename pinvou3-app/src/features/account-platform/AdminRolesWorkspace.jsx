@@ -5,6 +5,8 @@ import { PlatformRoleCatalog } from './PlatformRoleCatalog.jsx';
 import { PlatformRoleGrantDialog } from './PlatformRoleGrantDialog.jsx';
 import { PlatformRoleBindingDetail } from './PlatformRoleBindingDetail.jsx';
 import { PlatformRoleBindings } from './PlatformRoleBindings.jsx';
+import { PlatformRoleRevokeDialog } from './PlatformRoleRevokeDialog.jsx';
+import { platformBindingContext, platformBindingContextIsCurrent } from './platform-binding-users.js';
 import { requireFinanceID } from './finance-contract.js';
 import { platformRoleName } from './platform-role-presentation.js';
 import './admin-role-presentation.css';
@@ -32,6 +34,9 @@ export function AdminRolesWorkspace({ client, me, language, onAuthorizationChang
   const [grantOpen, setGrantOpen] = useState(false), [confirmation, setConfirmation] = useState(null);
   const [completedGrant, setCompletedGrant] = useState(null);
   const [selectedBinding, setSelectedBinding] = useState(null);
+  const [revokeReview, setRevokeReview] = useState(null);
+  const bindingRouteScope = `${route?.section || 'roles'}:${route?.search || ''}`;
+  const platformVersion = me?.platform_authorization_version || me?.active_context?.platform_authorization_version || me?.authorization_version || 0;
   const recovery = useRef(null);
   const dialogContext = useRef(null);
   const generation = useRef(0);
@@ -60,7 +65,7 @@ export function AdminRolesWorkspace({ client, me, language, onAuthorizationChang
   };
   useEffect(() => {
     generation.current++; commandGeneration.current++; setRoles(null); setBindings(null); setPending(platformRolePending(client, owner));
-    setGrantOpen(false); setConfirmation(null); setCompletedGrant(null); setSelectedBinding(null); setNotice(''); setGrantTarget(initialTarget);
+    setGrantOpen(false); setConfirmation(null); setCompletedGrant(null); setSelectedBinding(null); setRevokeReview(null); setNotice(''); setGrantTarget(initialTarget);
     setTarget(initialTarget); setRoleCode(''); setStarts(''); setExpires(''); setReason('');
     if (canRead) void load(initialTarget);
     return () => { generation.current++; commandGeneration.current++; reads.current?.abort(); };
@@ -69,7 +74,7 @@ export function AdminRolesWorkspace({ client, me, language, onAuthorizationChang
     // Retire synchronously: the old response must not win before React renders
     // the parent's current-authority refresh. An uncertain command keeps its key.
     generation.current++; commandGeneration.current++; reads.current?.abort(); setRoles(null); setBindings(null);
-    setGrantOpen(false); setConfirmation(null); setSelectedBinding(null); setNotice('');
+    setGrantOpen(false); setConfirmation(null); setSelectedBinding(null); setRevokeReview(null); setNotice('');
     setBusy(false); onAuthorizationChange?.();
   }), [client, onAuthorizationChange]);
   useEffect(() => {
@@ -119,11 +124,31 @@ export function AdminRolesWorkspace({ client, me, language, onAuthorizationChang
       setConfirmation(Object.freeze({ ...intent, kind: 'grant', unknown: false })); setError(''); return true;
     } catch { setError(copy.failed); return false; }
   };
+  const revokeEligible = item => canAssign && grantablePlatformRole(roles?.find(role => role.code === item.role_code)) && ['ACTIVE', 'SCHEDULED'].includes(item.status);
+  const reviewCurrent = review => review && platformBindingContextIsCurrent(review.context, client, me, acceptedSessionEpoch, bindingRouteScope);
   const revoke = item => {
-    if (pending || busy || !canAssign || !grantablePlatformRole(roles?.find(role => role.code === item.role_code)) || !['ACTIVE', 'SCHEDULED'].includes(item.status)) return;
-    if (globalThis.confirm(copy.confirm)) void execute(Object.freeze({ owner, kind: 'revoke', bindingID: item.binding_id, unknown: false }));
+    if (pending || busy || revokeReview || !revokeEligible(item)) return;
+    const context = platformBindingContext(client, me, acceptedSessionEpoch, bindingRouteScope);
+    if (!platformBindingContextIsCurrent(context, client, me, acceptedSessionEpoch, bindingRouteScope)) return;
+    setRevokeReview(Object.freeze({ context, binding: Object.freeze({ ...item }), returnToDetail: selectedBinding?.binding_id === item.binding_id,
+      command: Object.freeze({ owner, kind: 'revoke', bindingID: item.binding_id, unknown: false }) }));
+    setSelectedBinding(null);
   };
-  const blocked = busy || Boolean(pending);
+  const cancelRevoke = () => {
+    if (busy) return;
+    if (reviewCurrent(revokeReview) && revokeReview.returnToDetail) setSelectedBinding(revokeReview.binding);
+    setRevokeReview(null);
+  };
+  const confirmRevoke = () => {
+    if (!reviewCurrent(revokeReview) || pending || busy) return;
+    const item = bindings?.find(value => value.binding_id === revokeReview.command.bindingID);
+    if (!item || item.user_id !== revokeReview.binding.user_id || item.role_code !== revokeReview.binding.role_code || !revokeEligible(item)) { setRevokeReview(null); return; }
+    const command = revokeReview.command;
+    setRevokeReview(null);
+    void execute(command);
+  };
+  useEffect(() => { setRevokeReview(null); }, [client, owner, acceptedSessionEpoch, platformVersion, bindingRouteScope]);
+  const blocked = busy || Boolean(pending) || Boolean(revokeReview);
   const tab = route ? new URLSearchParams(route.search).get('role_view') === 'bindings' || !new URLSearchParams(route.search).has('role_view') && initialTarget ? 'bindings' : 'catalog' : view;
   const changeView = next => { setView(next); route?.navigate('roles', { role_view: next }); };
   const update = (field, value) => {
@@ -141,7 +166,7 @@ export function AdminRolesWorkspace({ client, me, language, onAuthorizationChang
     } else { setTarget(selected); setBindings(null); void load(selected); }
   };
   const openGrant = (code = '') => { if (!blocked && canAssign) { dialogContext.current = { owner, client }; setRoleCode(code); setGrantTarget(target); setStarts(''); setExpires(''); setReason(''); setConfirmation(null); setError(''); setNotice(''); setGrantOpen(true); } };
-  const openBinding = item => { dialogContext.current = { owner, client }; setSelectedBinding(item); };
+  const openBinding = item => { if (revokeReview) return; dialogContext.current = { owner, client }; setSelectedBinding(item); };
   const ownsDialog = dialogContext.current?.owner === owner && dialogContext.current?.client === client;
   const ownsPending = pending && platformRolePending(client, owner) === pending;
   useEffect(() => {
@@ -161,10 +186,11 @@ export function AdminRolesWorkspace({ client, me, language, onAuthorizationChang
       {ownsPending && <aside className="adm-role-risk-note" role="status"><p>{copy.unknown}</p><p>{pending.kind === 'grant' ? `${words.user}: ${pending.body.user_id} · ${words.role}: ${platformRoleName(words, pending.body.role_code)}` : `${words.bindingID}: ${pending.bindingID}`}</p><p>{copy.reloadBoundary}</p><details><summary>{words.bindingDetail}</summary><pre>{JSON.stringify(pending.kind === 'grant' ? pending.body : { binding_id: pending.bindingID }, null, 2)}</pre></details><button ref={recovery} disabled={busy || !canAssign} onClick={() => void execute(pending)}>{copy.retry}</button></aside>}
       <section className="adm-panel adm-role-panel"><div className="adm-role-workspace-head"><div className="adm-tabs" role="group" aria-label={copy.title}><button type="button" aria-pressed={tab === 'catalog'} onClick={() => changeView('catalog')}>{words.catalog}</button><button type="button" aria-pressed={tab === 'bindings'} onClick={() => changeView('bindings')}>{words.bindingManagement}</button></div><div><button type="button" disabled={busy} onClick={() => void load()}>{copy.refresh}</button>{canAssign && <button type="button" className="adm-role-primary" disabled={blocked || !roles} onClick={() => openGrant()}>{words.newGrant}</button>}</div></div>
         <div hidden={tab !== 'catalog'}>{roles && <PlatformRoleCatalog key={owner} {...{ client, me, language, acceptedSessionEpoch }} roles={roles} words={words} authorityCopy={copy} canGrant={grantablePlatformRole} onGrant={canAssign && !blocked ? openGrant : null} />}</div>
-        <div hidden={tab !== 'bindings'}><PlatformRoleBindings key={owner} {...{ words, copy, bindings, target, blocked }} onApplyTarget={applyBindingTarget} onView={openBinding} onRevoke={revoke} canRevoke={item => canAssign && grantablePlatformRole(roles?.find(role => role.code === item.role_code)) && ['ACTIVE', 'SCHEDULED'].includes(item.status)} /></div>
+        <div hidden={tab !== 'bindings'}><PlatformRoleBindings key={owner} {...{ words, copy, bindings, target, blocked, client, me, acceptedSessionEpoch }} routeScope={bindingRouteScope} active={tab === 'bindings'} onApplyTarget={applyBindingTarget} onView={openBinding} onRevoke={revoke} canRevoke={item => canAssign && grantablePlatformRole(roles?.find(role => role.code === item.role_code)) && ['ACTIVE', 'SCHEDULED'].includes(item.status)} /></div>
       </section>
       {ownsDialog && grantOpen && roles && canAssign && (!pending || busy) && <PlatformRoleGrantDialog key={owner} {...{ words, copy, client, owner, roleCode, starts, expires, reason, update, error, confirmation }} target={grantTarget} canSearchUsers={me?.platform_permissions?.includes('platform.users.read')} roles={roles.filter(grantablePlatformRole)} busy={busy} onReview={reviewGrant} onConfirm={() => { if (confirmation && !pending) void execute(confirmation); }} onClose={() => setGrantOpen(false)} />}
-      {ownsDialog && selectedBinding && <PlatformRoleBindingDetail binding={selectedBinding} {...{ words, copy, busy }} onClose={() => setSelectedBinding(null)} onRevoke={!pending && canAssign && grantablePlatformRole(roles?.find(role => role.code === selectedBinding.role_code)) && ['ACTIVE', 'SCHEDULED'].includes(selectedBinding.status) ? () => revoke(selectedBinding) : null} />}
+      {reviewCurrent(revokeReview) && <PlatformRoleRevokeDialog review={revokeReview} {...{ words, copy, client, me, acceptedSessionEpoch, busy }} routeScope={bindingRouteScope} onCancel={cancelRevoke} onConfirm={confirmRevoke} />}
+      {ownsDialog && selectedBinding && <PlatformRoleBindingDetail binding={selectedBinding} {...{ words, copy, busy, client, me, acceptedSessionEpoch }} routeScope={bindingRouteScope} onClose={() => setSelectedBinding(null)} onRevoke={!pending && canAssign && grantablePlatformRole(roles?.find(role => role.code === selectedBinding.role_code)) && ['ACTIVE', 'SCHEDULED'].includes(selectedBinding.status) ? () => revoke(selectedBinding) : null} />}
     </>}
   </div>;
 }
