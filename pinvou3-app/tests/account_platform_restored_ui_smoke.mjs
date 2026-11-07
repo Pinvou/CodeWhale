@@ -1240,6 +1240,17 @@ try {
         assert.ok(measured.inputHeight <= 48 && measured.tableWidth <= measured.wrapWidth + 1, JSON.stringify(measured));
         assert.ok(await page.$$eval('.adm-role-permission > strong', nodes => nodes.every(node => Number.parseFloat(getComputedStyle(node).fontSize) >= 14)));
         assert.ok(await page.$$eval('.adm-role-permission .adm-identifier code', nodes => nodes.every(node => Number.parseFloat(getComputedStyle(node).fontSize) >= 12 && getComputedStyle(node).whiteSpace === 'normal')));
+        const catalogScroll = await page.$$eval('.adm-role-catalog-layout>.adm-table-wrap,.adm-role-catalog-layout>.adm-role-detail', nodes => nodes.map(node => ({ height: node.clientHeight, innerVerticalScroll: ['auto', 'scroll'].includes(getComputedStyle(node).overflowY) && node.scrollHeight > node.clientHeight + 1 })));
+        assert.equal(catalogScroll.length, 2); assert.ok(catalogScroll.every(item => item.height > 0 && !item.innerVerticalScroll), 'catalog and detail use the main page for vertical reading');
+        await page.$eval('.adm-role-table button[aria-pressed=true]', node => node.focus());
+        await page.keyboard.press('Enter');
+        assert.ok(await page.evaluate(() => { const heading = document.querySelector('.adm-role-detail h3'); return Boolean(heading && document.activeElement === heading); }), 'explicit selection focuses the current detail heading');
+        assert.equal(await page.$eval('.adm-role-detail h3', node => node.textContent), words.names.PLATFORM_AUDITOR);
+        await page.keyboard.press('Tab');
+        assert.ok(await page.evaluate(() => document.activeElement?.classList.contains('adm-role-catalog-back')), 'return is next in the detail keyboard order');
+        await page.keyboard.press('Enter');
+        assert.ok(await page.evaluate(() => { const selected = document.querySelector('.adm-role-table button[aria-pressed=true]'); return Boolean(selected && document.activeElement === selected); }), 'return focuses the actual current role control');
+
         if (process.env.UI_ARTIFACT_DIR && language === 'zh' && [1300, 390].includes(width)) {
           fs.mkdirSync(process.env.UI_ARTIFACT_DIR, { recursive: true });
           await page.screenshot({ path: path.join(process.env.UI_ARTIFACT_DIR, `roles-${width === 1300 ? 'desktop' : 'mobile'}.png`) });
@@ -1249,6 +1260,52 @@ try {
     await page.type('.adm-role-toolbar input[type=search]', 'billing.ledger');
     assert.equal(await page.$$eval('.adm-role-table tbody tr', nodes => nodes.length), 2);
     assert.equal(await page.evaluate(() => window.restored.calls.filter(call => call.method !== 'GET' && !call.url.endsWith('/account/bootstrap')).length), 0);
+  });
+  await run('roles: untranslated long role heading stays readable with its scope badge', async () => {
+    await fresh('?mode=admin&section=roles&longCatalogRole=1');
+    const code = `PLATFORM_EXTENSION_${'X'.repeat(160)}_TAIL`;
+    await page.waitForSelector('.adm-role-table tbody tr:nth-child(5)');
+    const buttons = await page.$$('.adm-role-table tbody button');
+    try {
+      const text = await Promise.all(buttons.map(button => button.evaluate(node => node.textContent)));
+      const target = buttons[text.indexOf(code)];
+      assert.ok(target, 'the unlocalized production-shaped role appears in the real list');
+      await target.focus(); await page.keyboard.press('Enter');
+      await page.waitForFunction(code => {
+        const heading = document.querySelector('.adm-role-detail h3');
+        return heading?.textContent === code && document.activeElement === heading;
+      }, {}, code);
+    } finally { await Promise.all(buttons.map(button => button.dispose())); }
+    for (const width of [1300, 390]) {
+      await page.setViewport({ width, height: 907 });
+      await noOverflow();
+      const layout = await page.$eval('.adm-role-detail h3', heading => {
+        const header = heading.closest('header'), panel = heading.closest('.adm-role-panel');
+        const textColumn = heading.parentElement, scope = header.querySelector('.adm-role-scope');
+        const id = textColumn.querySelector('code');
+        const description = heading.closest('.adm-role-detail').querySelector(':scope > p');
+        const box = node => {
+          const rect = node.getBoundingClientRect();
+          return { left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom, width: rect.width, height: rect.height };
+        };
+        const fragmentsFor = node => {
+          const range = document.createRange(); range.selectNodeContents(node);
+          return [...range.getClientRects()].map(rect => ({ left: rect.left, right: rect.right, width: rect.width, top: rect.top }));
+        };
+        const fragments = fragmentsFor(heading);
+        const lines = [];
+        for (const fragment of fragments) if (!lines.some(top => Math.abs(top - fragment.top) < 0.5)) lines.push(fragment.top);
+        return { text: heading.textContent, fragments, lines: lines.length, column: box(textColumn), badge: box(scope), panel: box(panel), id: { text: id.textContent, fragments: fragmentsFor(id) }, description: { text: description.textContent, box: box(description), fragments: fragmentsFor(description) } };
+      });
+      const fits = (inner, outer) => inner.width > 0 && inner.left >= outer.left - 0.5 && inner.right <= outer.right + 0.5;
+      assert.equal(layout.text, code); assert.equal(layout.id.text, code);
+      assert.ok(layout.id.fragments.length > 1 && layout.id.fragments.every(rect => fits(rect, layout.column) && fits(rect, layout.panel)), JSON.stringify(layout));
+      assert.ok(layout.lines > 1 && layout.fragments.every(rect => fits(rect, layout.column) && fits(rect, layout.panel)), JSON.stringify(layout));
+      const separated = (first, second) => first.right <= second.left + 0.5 || second.right <= first.left + 0.5 || first.bottom <= second.top + 0.5 || second.bottom <= first.top + 0.5;
+      assert.ok(fits(layout.badge, layout.panel) && layout.badge.height > 0 && fits(layout.column, layout.panel) && separated(layout.column, layout.badge), JSON.stringify(layout));
+      assert.equal(layout.description.text, `Extension${'W'.repeat(160)}Description`);
+      assert.ok(layout.description.fragments.length > 1 && layout.description.fragments.every(rect => fits(rect, layout.description.box) && fits(rect, layout.panel)), JSON.stringify(layout));
+    }
   });
   await run('roles: long workspace navigation resets the heading below the fixed top bar', async () => {
     await readyRoles();

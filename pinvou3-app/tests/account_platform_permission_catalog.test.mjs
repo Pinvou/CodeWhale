@@ -60,6 +60,19 @@ async function loadComponents() {
 
 async function withCatalog(action) {
   const window = domino.createWindow('<!doctype html><html><body></body></html>');
+  // Controlled React input delivery and programmatic focus-target spy only.
+  // This DOM has no browser scroll, default keyboard focus or layout engine.
+  window.document.oninput = null;
+  const focusCalls = [], fixtureDocument = window.document;
+  const previousCreate = Object.getOwnPropertyDescriptor(fixtureDocument, 'createElement');
+  const createElement = fixtureDocument.createElement.bind(fixtureDocument);
+  // Domino's inherited focus is a fixed no-op. Observe actual HTML targets
+  // with own methods on real fixture nodes instead of changing a prototype.
+  Object.defineProperty(fixtureDocument, 'createElement', { configurable: true, value(...args) {
+    const node = createElement(...args);
+    if (node instanceof window.HTMLElement) Object.defineProperty(node, 'focus', { configurable: true, value() { focusCalls.push(this); } });
+    return node;
+  } });
   const replacements = { window, document: window.document, navigator: window.navigator, HTMLElement: window.HTMLElement, Node: window.Node, location: undefined, fetch: globalThis.fetch, IS_REACT_ACT_ENVIRONMENT: true };
   const previous = new Map(Object.keys(replacements).map(name => [name, Object.getOwnPropertyDescriptor(globalThis, name)]));
   const calls = [], copies = [], gates = [], tasks = [];
@@ -97,7 +110,8 @@ async function withCatalog(action) {
     const row = () => [...container.querySelectorAll('.adm-role-permission .adm-identifier code')].find(node => node.textContent === permission)?.parentElement.parentElement;
     const click = async node => { assert.ok(node, 'actual production control exists'); await act(async () => node.dispatchEvent(new window.Event('click', { bubbles: true, cancelable: true }))); };
     const api = {
-      server, calls, copies, client, render, container, clipboard, row, click, hold,
+      server, calls, copies, client, render, container, clipboard, row, click, hold, focusCalls,
+      async search(value) { const input = container.querySelector('.adm-role-toolbar input'); const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set; await act(async () => { setter.call(input, value); input.dispatchEvent(new window.Event('input', { bubbles: true })); }); },
       words: language => adminLayoutCopy[language].identifierActions,
       copyButton: () => row()?.querySelector('.adm-identifier-copy'),
       feedback: () => row()?.querySelector('[role=status],[role=alert]')?.textContent || '',
@@ -113,7 +127,10 @@ async function withCatalog(action) {
       const release = async () => { for (const gate of gates) gate.resolve(); client.retireSession(); await Promise.allSettled(tasks); root?.unmount(); };
       if (root) await act(release); else await release();
     }
-    finally { for (const [name, descriptor] of previous) { if (descriptor) Object.defineProperty(globalThis, name, descriptor); else delete globalThis[name]; } }
+    finally {
+      if (previousCreate) Object.defineProperty(fixtureDocument, 'createElement', previousCreate); else delete fixtureDocument.createElement;
+      for (const [name, descriptor] of previous) { if (descriptor) Object.defineProperty(globalThis, name, descriptor); else delete globalThis[name]; }
+    }
   }
 }
 
@@ -173,5 +190,54 @@ test('Actual catalog rerenders cannot pair old accepted authorization with a new
     assert.equal(h.copyButton().disabled, false); assert.deepEqual(h.copies, [permission]);
     h.clipboard(() => Promise.resolve()); await h.click(h.copyButton());
     assert.equal(h.feedback(), h.words('ja').copied); assert.deepEqual(h.copies, [permission, permission]);
+  });
+});
+
+// These assertions observe actual component .focus() target selection; they do
+// not prove native activeElement, visibility, scroll positions or keyboard.
+test('Explicit catalog selection targets the current detail heading and return targets the actual current role in three languages', options, async () => {
+  for (const language of ['zh', 'en', 'ja']) await withCatalog(async h => {
+    await h.render(language); assert.deepEqual(h.focusCalls, [], 'mount does not steal focus');
+    await h.chooseRole(language);
+    const heading = h.container.querySelector('.adm-role-detail h3');
+    const selected = h.container.querySelector('.adm-role-table button[aria-pressed=true]');
+    assert.equal(heading.textContent, adminRolePresentationCopy[language].names.PLATFORM_BILLING_APPROVER);
+    assert.equal(selected.getAttribute('aria-controls'), heading.id); assert.equal(heading.tabIndex, -1);
+    assert.deepEqual(h.focusCalls, [heading], 'button propagation does not cause duplicate focus');
+    await h.click(selected); assert.deepEqual(h.focusCalls, [heading, heading]);
+    const back = h.container.querySelector('.adm-role-catalog-back');
+    assert.equal(back.textContent, adminRolePresentationCopy[language].returnToRoleList);
+    await h.click(back); assert.equal(h.focusCalls.at(-1), selected);
+    assert.equal(selected.getAttribute('aria-pressed'), 'true');
+    assert.deepEqual([...h.container.querySelectorAll('.adm-role-permission code')].map(node => node.textContent).sort(), [...roleRows[1].permissions].sort());
+    assert.deepEqual(h.copies, []); assert.equal(h.calls.filter(call => call.url.includes('/admin/v1/roles')).length, 1, 'browsing does not request the catalog again');
+  });
+});
+
+test('Search fallback never steals focus, explicit fallback choice survives clearing, and return ignores removed or hidden targets', options, async () => {
+  await withCatalog(async h => {
+    await h.render(); await h.chooseRole('en'); h.focusCalls.length = 0;
+    await h.search('PLATFORM_BILLING_OPERATOR');
+    assert.equal(h.container.querySelector('.adm-role-detail h3').textContent, adminRolePresentationCopy.en.names.PLATFORM_BILLING_OPERATOR);
+    assert.deepEqual(h.focusCalls, []);
+    const fallback = h.container.querySelector('.adm-role-table button');
+    await h.click(h.container.querySelector('.adm-role-catalog-back')); assert.equal(h.focusCalls.at(-1), fallback);
+    h.focusCalls.length = 0; await h.click(fallback);
+    assert.equal(h.focusCalls.at(-1), h.container.querySelector('.adm-role-detail h3'));
+    h.focusCalls.length = 0; await h.search('');
+    assert.equal(h.container.querySelector('.adm-role-detail h3').textContent, adminRolePresentationCopy.en.names.PLATFORM_BILLING_OPERATOR, 'explicit choice replaces an older hidden selected code');
+    assert.deepEqual(h.focusCalls, []);
+    await h.render('ja'); assert.deepEqual(h.focusCalls, [], 'locale update does not steal focus');
+    await h.search('not-a-catalog-role');
+    assert.equal(h.container.querySelectorAll('.adm-role-detail').length, 0);
+    assert.equal(h.container.querySelectorAll('.adm-role-catalog-back').length, 0);
+    assert.deepEqual(h.focusCalls, []);
+    await h.search(''); const current = h.container.querySelector('.adm-role-table button[aria-pressed=true]');
+    await h.click(h.container.querySelector('.adm-role-catalog-back')); assert.equal(h.focusCalls.at(-1), current); assert.equal(current.isConnected, true);
+    h.focusCalls.length = 0; h.container.hidden = true;
+    await h.click(current); await h.click(h.container.querySelector('.adm-role-catalog-back'));
+    assert.deepEqual(h.focusCalls, [], 'neither selection nor return focuses controls in a retained hidden host');
+    h.container.hidden = false; await h.click(h.container.querySelector('.adm-role-catalog-back')); assert.equal(h.focusCalls.at(-1), current);
+    assert.deepEqual(h.copies, []);
   });
 });
