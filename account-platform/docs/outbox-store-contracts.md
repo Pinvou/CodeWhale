@@ -14,9 +14,9 @@
 
 `events.FrozenOutboxStore` 的 subject 范围由具体实现明确固定。当前 `account.ApprovalRelayStore` 只处理 `account.approval-command.authorized.v1`，经专属数据库函数领取，不能把普通事件或其他 subject 当作冻结授权事件。
 
-`ProcessFrozen` 必须先在同一事务内锁定并复验存储中的 worker、有效 lease、claim token、relay control epoch、event type、trace identity 和冻结内容完整性，再将持久字节交给 publisher。保持相关锁至发布及结果登记；旧 claim、越域或过期租约不能发布，也不能推进 attempt 或终态。
+`ProcessFrozen` 必须先在同一事务内锁定并复验存储中的 worker、有效 lease、claim token、relay control epoch、event type、trace identity 和冻结内容完整性，再将持久字节交给 publisher。复验时已旧、越域或过期的 claim 不能发布，也不能推进 attempt 或终态。有效复验后保持相关锁至发布及结果登记，并以同一 claim 围栏关闭；该阶段不会再以墙钟 lease 到期拒绝迟到结果，期间其他 claimant 也不能越过这些锁替换 claim。
 
-主发布和必要的 dead-letter 发布共用原绝对 lease 边界。broker 结果未知时保留未知，不凭超时推断成功、递增重试或进入 dead-letter。数据库提交结果未知时仅以原 claim 的精确持久结果恢复，不创建新授权或推断资金完成。
+主发布和必要的 dead-letter 发布的 context 预算从同一原绝对 lease 截止计算；context 预算不等于结果登记时的墙钟 lease 检查。broker 结果未知时保留未知，不凭超时推断成功、递增重试或进入 dead-letter。数据库提交结果未知时仅以原 claim 的精确持久结果恢复，不创建新授权或推断资金完成。
 
 ## 验证边界
 

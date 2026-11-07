@@ -69,8 +69,11 @@ type FrozenOutboxStore interface {
 	// worker ownership, the live lease, ClaimToken, RelayControlEpoch, subject,
 	// trace identity and frozen body integrity before calling publisher. Keep
 	// those locks through publish and atomically fence the result by the same
-	// claim; an old, expired, wrong-owner or out-of-scope claim must neither
-	// publish nor mutate delivery/attempt facts. FrozenUnknown must not become
+	// claim. A claim found stale, expired, wrong-owner or out-of-scope during
+	// that pre-publish revalidation must neither publish nor mutate facts.
+	// After valid revalidation, the held locks and same claim fence closure;
+	// publication context deadlines do not add a wall-clock lease check at close.
+	// FrozenUnknown must not become
 	// a confirmed publish, retry-attempt increment or dead-letter decision.
 	// A commit with an unknown result needs exact persisted outcome recovery,
 	// not a fresh claim or an invented acknowledgement.
