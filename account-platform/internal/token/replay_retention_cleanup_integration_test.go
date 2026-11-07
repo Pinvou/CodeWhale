@@ -40,11 +40,14 @@ func TestReplayRetentionBoundedCleanupPublicPostgres(t *testing.T) {
 		before := f05CancellationRecoveryFacts(t, r, ctx, id)
 		clock = base.Add(31 * 24 * time.Hour)
 		more, err := r.cleanupReplayRetentionBatch(ctx)
-		if err != nil || !more {
+		if err != nil {
 			t.Fatal(err)
 		}
 		if n := count(id, true); n != 5 {
 			t.Fatal("cleanup was not bounded by content rows", n)
+		}
+		if !more {
+			t.Fatal("full committed batch did not request catchup")
 		}
 		more, err = r.cleanupReplayRetentionBatch(ctx)
 		if err != nil || more {
