@@ -328,6 +328,70 @@ fn oneof_node_defect(branches: &[Value], path: &str) -> Option<String> {
             "R2 {non_discriminating} non-discriminating branches at {path}"
         ));
     }
+    // R2 (shared surviving group, review 5811598796): object branches whose
+    // surviving `required` groups are EQUAL are non-discriminating when
+    // they also constrain the shared fields identically. Partially pruned
+    // groups keep exactly this shape: the cross-branch discriminators
+    // (`b` / `a`) are dropped because the branch's own `properties` does
+    // not declare them, while the locally declared common requirement
+    // (`c`) survives on both branches — and both branches describe `c`
+    // the same way (`{type:"string"}`). Every root-valid instance then
+    // matches both alternatives: it always carries the shared group, each
+    // branch's property map admits the sibling's fields as additional,
+    // and the identical shared-field constraints accept the same values —
+    // so no instance matches exactly one. Branches whose constraints on
+    // the shared fields DIVERGE stay untouched: a const/enum pin
+    // (`xai_sanitize_passes_const_differentiated_union_through_without_touching_consts`)
+    // or a nested subconstraint
+    // (`xai_sanitize_flattens_oneof_distinct_only_before_recursive_normalization`)
+    // keeps exactly-one meaningful for the instances it differentiates,
+    // and comparing subschema equivalence beyond deep-equality would be a
+    // general solver. Branches with different groups are likewise
+    // untouched: an instance carrying one group but not the other still
+    // matches exactly one, and instances carrying both were already
+    // ambiguous in the original (the union's own semantics, not a
+    // preprocessing loss).
+    let mut group_shapes: std::collections::BTreeMap<(String, String), usize> =
+        std::collections::BTreeMap::new();
+    for branch in branches {
+        if branch.get("type").and_then(Value::as_str) != Some("object") {
+            continue;
+        }
+        let Some(required) = branch.get("required").and_then(Value::as_array) else {
+            continue;
+        };
+        if required.is_empty() {
+            continue;
+        }
+        let mut names: Vec<&str> = required.iter().filter_map(Value::as_str).collect();
+        names.sort_unstable();
+        names.dedup();
+        if names.is_empty() {
+            continue;
+        }
+        // Constraint signature for the shared fields only: the branch's
+        // own property entries for those names (absent = unconstrained
+        // here). Equal groups with diverging signatures may still
+        // discriminate; identical signatures cannot.
+        let signature = match branch.get("properties").and_then(Value::as_object) {
+            Some(props) => {
+                let shared: serde_json::Map<String, Value> = props
+                    .iter()
+                    .filter(|(key, _)| names.contains(&key.as_str()))
+                    .map(|(key, value)| (key.clone(), value.clone()))
+                    .collect();
+                Value::Object(shared)
+            }
+            None => Value::Object(serde_json::Map::new()),
+        };
+        let group_key = (names.join("\u{1}"), signature.to_string());
+        *group_shapes.entry(group_key).or_default() += 1;
+    }
+    if let Some(((group, _), count)) = group_shapes.iter().find(|(_, count)| **count >= 2) {
+        return Some(format!(
+            "R2 {count} branches share the required group {group:?} at {path}"
+        ));
+    }
     // R3: a branch carrying a dead inner union cannot match.
     for (index, branch) in branches.iter().enumerate() {
         if let Some(inner) = oneof_semantic_defect_at(branch, &format!("{path}.oneOf[{index}]")) {
@@ -2540,6 +2604,52 @@ mod tests {
             );
         }
 
+        // R2 shared surviving group (review 5811598796): two object
+        // branches whose surviving `required` groups are EQUAL lose
+        // exactly-one for every instance — partially pruned groups keep
+        // this shape (cross-branch discriminators dropped, the locally
+        // shared requirement survives on both).
+        let r2_shared = json!({
+            "oneOf": [
+                {
+                    "type": "object",
+                    "properties": {"a": {"type": "string"}, "c": {"type": "string"}},
+                    "required": ["c"]
+                },
+                {
+                    "type": "object",
+                    "properties": {"b": {"type": "string"}, "c": {"type": "string"}},
+                    "required": ["c"]
+                }
+            ]
+        });
+        let reason = oneof_semantic_defect(&r2_shared).expect("R2 shared group must fire");
+        assert!(
+            reason.starts_with("R2 2 branches share the required group"),
+            "unexpected shared-group reason: {reason}"
+        );
+        // Different groups stay untouched: an instance carrying one group
+        // but not the other still matches exactly one.
+        let r2_distinct = json!({
+            "oneOf": [
+                {
+                    "type": "object",
+                    "properties": {"a": {"type": "string"}},
+                    "required": ["a"]
+                },
+                {
+                    "type": "object",
+                    "properties": {"b": {"type": "string"}},
+                    "required": ["b"]
+                }
+            ]
+        });
+        assert_eq!(
+            oneof_semantic_defect(&r2_distinct),
+            None,
+            "branches with different required groups must stay discriminating"
+        );
+
         // R3: a dead inner oneOf kills its branch and propagates to the
         // root. The death is manufactured by the same normalization the
         // rehearsal runs, so the fixture is normalized first.
@@ -2688,6 +2798,65 @@ mod tests {
                 "a valid instance of the original union must stay valid at floor {floor}: {schema}"
             );
         }
+    }
+
+    #[test]
+    fn xai_sanitize_registry_path_flattens_shared_required_cross_branch_union() {
+        // Review 5811598796: the registry preprocess drops the cross-branch
+        // discriminators (b / a — not declared in the branch's own
+        // properties) while the locally declared common requirement (c)
+        // survives on BOTH branches. R1 is silent (the optional property
+        // maps differ), the required-free R2 is silent, R3 is silent, and
+        // the keep-required belt sees only the retained c — yet every
+        // root-valid instance carries c and matches both alternatives, so
+        // exactly-one holds for no instance. The full production order
+        // (sanitize THEN canonicalize_schema, registry.rs:278-279) must
+        // land on the flattening fallback, keeping {"a":"x","c":"z"} valid.
+        let mut schema = json!({
+            "type": "object",
+            "properties": {
+                "a": {"type": "string"},
+                "b": {"type": "string"},
+                "c": {"type": "string"}
+            },
+            "required": ["c"],
+            "oneOf": [
+                {
+                    "type": "object",
+                    "properties": {"a": {"type": "string"}, "c": {"type": "string"}},
+                    "required": ["b", "c"]
+                },
+                {
+                    "type": "object",
+                    "properties": {"b": {"type": "string"}, "c": {"type": "string"}},
+                    "required": ["a", "c"]
+                }
+            ]
+        });
+        sanitize(&mut schema);
+        crate::tools::schema_canonicalize::canonicalize_schema(&mut schema);
+
+        let note = sanitize_for_xai_parameters(&mut schema);
+
+        assert_eq!(schema["type"], "object");
+        assert!(
+            schema.get("oneOf").is_none() && schema.get("anyOf").is_none(),
+            "the shared-required union must not reach the wire: {schema}"
+        );
+        assert_eq!(
+            schema["required"],
+            json!(["c"]),
+            "the root's own requirement must survive"
+        );
+        assert_eq!(note, None);
+        let validator = jsonschema::options()
+            .with_draft(jsonschema::Draft::Draft202012)
+            .build(&schema)
+            .expect("the flattened schema must compile");
+        assert!(
+            validator.is_valid(&json!({"a": "x", "c": "z"})),
+            "a valid instance of the original union must stay valid: {schema}"
+        );
     }
 
     #[test]
