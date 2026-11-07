@@ -1526,6 +1526,7 @@ dictJa["uiTeamRelay"] = {
     "team_has_open_work": "チームに未完了の仕事があります。すべて完了してから解散してください。",
     "revision_conflict": "仕事が直前に更新されました。再同期した内容を確認して再試行してください。",
     "action_not_allowed": "現在のリレー状態ではこの操作を実行できません。",
+    "self_service_enrollment_disabled": "チームリレーサービスでアカウントのログインが有効になっていません。サービス管理者に連絡し、有効化後に再試行してください。",
     "attachment_too_large": "ファイルが 20 MiB の上限を超えています。",
     "attachment_type_not_allowed": "このファイル形式には対応していません。",
     "credential_store_failed": "端末の資格情報ストアへ安全にアクセスできません。OS の資格情報ストアを確認してください。",

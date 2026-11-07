@@ -1,6 +1,6 @@
 # 商品准入原件保管
 
-本前置能力只保管商品准入的一份原始 PNG、JPEG 或 PDF。它不会签发正式商品准入，不新增强退、通用附件、OCR 或自动渠道验真。人工核验与正式准入由独立后继 PR 提供。
+原件保管支持商品准入的一份原始 PNG、JPEG 或 PDF。保管入口只负责校验格式、加密留存和访问审计。正式证据由[商品人工准入](product-manual-admission.md)在两名用户完成核验后签发。
 
 ## 启用边界
 
@@ -19,7 +19,7 @@
 
 校验器接受 1 byte–10 MiB 的原始文件、最多 4000 万像素的静态图片，拒绝 APNG、无法解析、需要密码或检查有警告的 PDF。可用空密码直接读取且通过完整检查的 PDF 不因加密标记而被拒绝。校验成功仅证明格式可读取，不证明渠道真实性。
 
-在 Linux 真实 UID、socket 重启、cgroup/OOM 隔离、PDF 容器及实际资源预算完成部署验收之前保持关闭。Windows 的受控 HTTP、数据库与加密测试不能替代这些验收。本变更不自动修改 Compose/Helm 或投递任何生产凭据。
+在 Linux 真实 UID、socket 重启、cgroup/OOM 隔离、PDF 容器及实际资源预算完成部署验收之前保持关闭。[现场验收手册](../deploy/runbooks/formal-product-admission-acceptance.md)提供显式隔离 Compose 装配，生产装配与凭据沿站点批准流程交付。
 
 ## 访问与幂等
 

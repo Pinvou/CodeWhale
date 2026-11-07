@@ -19,6 +19,7 @@ from urllib.parse import parse_qs, urlsplit
 ROOT = Path(__file__).resolve().parents[1]
 ACTORS = {"billing_migrator", "billing_schema_owner", "billing_service"}
 REQUIRED = {
+    "TestEmergencyCancellationWorkerDiagnosticsPostgres",
     "TestEmergencyCancellationClaimOwnershipPostgres",
     "TestEmergencyCancellationRequestLocksClaimPostgres",
     "TestUserUnusedIntentCancellationOwnerPostgres",
@@ -61,6 +62,7 @@ REQUIRED = {
     "TestManagementCancellationFundsRemainTruthful",
     "TestManagementEmergencyCancellationRecoversLostReserveACK",
     "TestLifecycleForceCancelApprovalPostgres",
+    "TestManualReviewSLAEscalationPostgres",
     "TestLocalModelCancellationHandshakeHTTP",
     "TestRemoteModelCancellationOwnerLoopTransport",
     "TestManagementCancellationHoldRecoveryRequiresRecordedProof",
@@ -272,6 +274,7 @@ EXACT_REQUIRED_CHILDREN = {
         "quick-failure", "timeout", "cancel", "unavailable", "invalid-proof",
         "valid-proof", "persistence-failure", "operator",
     },
+    "TestRechargeProductCommandAtomicityPostgres": {"active-provider-admission-candidate-progress"},
     "TestProductManualAdmissionPostgres": {
         "two-explicit-humans-first-publish-and-immutable-replay",
         "runtime-cannot-rewrite-frozen-manual-facts",
@@ -281,6 +284,7 @@ EXACT_REQUIRED_CHILDREN = {
         "retention-purges-submission-snapshot-and-review-reason",
     },
     "TestEmergencyCancellationClaimOwnershipPostgres": {"before-request", "after-request", "pending", "zero-attempt"},
+    "TestReceivableSettlementGuardedWritesPostgres": {"recharge-and-write-off-lock-order"},
     "TestEmergencyCancellationRequestLocksClaimPostgres": {"usage-lock-reclaim"},
     "TestPasswordPreparationAuthorizationPostgres": {
         "retention-redacts-expired-mobiles-without-changing-grant-facts/expired",
@@ -382,6 +386,15 @@ EXACT_REQUIRED_CHILDREN = {
         "v2-false-compatibility", "v3-false", "v3-true-removed",
         "v3-true-removed/emergency-then-user-origin-retains-authority",
         "v3-true-removed/emergency-then-user-origin-retains-authority/owner-heartbeat-observes-remote-request",
+    },
+    "TestManualReviewSLAEscalationPostgres": {
+        "two_workers_and_strict_one_hour_boundary",
+        "database_clock_controls_deadlines_and_cooldown",
+        "later_candidate_starts_a_fresh_cooldown",
+        "closed_before_write",
+        "deadlines_completed_before_write",
+        "current_owner_and_stage_after_lock",
+        "outbox_failure_rolls_back_and_retries",
     },
     "TestRegistrationCompensationDatabaseErrorIdentityPostgres": {
         "operation-read",

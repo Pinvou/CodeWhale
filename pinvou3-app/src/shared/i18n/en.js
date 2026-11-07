@@ -1527,6 +1527,7 @@ dictEn["uiTeamRelay"] = {
     "team_has_open_work": "The team still has open work. Finish all of it before dissolving the team.",
     "revision_conflict": "This work changed moments ago. It has been refreshed; review and retry.",
     "action_not_allowed": "This action is not allowed in the current relay state.",
+    "self_service_enrollment_disabled": "Account sign-in is not enabled on the Team Relay service. Contact the service administrator and try again once it is enabled.",
     "attachment_too_large": "The file exceeds the 20 MiB limit.",
     "attachment_type_not_allowed": "This file type is not supported.",
     "credential_store_failed": "The local credential store could not be accessed securely. Check the system credential store.",

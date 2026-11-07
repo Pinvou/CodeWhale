@@ -171,6 +171,7 @@
       "additionalProperties": false,
       "properties": {
         "redisUrl": { "type": "string" },
+        "redisCAConfigMap": { "type": "string", "maxLength": 253, "pattern": "^$|^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$" },
         "newApiRedisUrl": { "type": "string" },
         "natsUrl": { "type": "string" },
         "natsMonitorUrl": { "type": "string" }

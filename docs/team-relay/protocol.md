@@ -22,6 +22,7 @@ team owner 和 WorkThread owner 是两个独立概念。例如演示链路中 A 
 
 1. 桌面端显示内测入口前不内置体验密码或其摘要；用户提交的体验密码通过 HTTPS 发送到 `POST /v1/beta-access/verify`，由 Hub 使用仅存在于服务器 Secret 中的 `TEAM_RELAY_BETA_ACCESS_PASSWORD_HASH` 校验。失败尝试按客户端地址限流，成功后客户端只在本机保存已开启标记。
 2. 团队接力服务显式启用 `TEAM_RELAY_ALLOW_SELF_SERVICE_ENROLLMENT=true` 时，桌面端先调用 `POST /v1/enrollments/account`，只提交邮箱、名字和自动生成的设备名。新邮箱创建 Principal 和 Device；已有邮箱复用原 Principal、更新名字并为当前安装创建新的 Device。该能力默认关闭。
+   若 Hub 以 `403 action_not_allowed` 返回 `Self-service account enrollment is disabled on this Hub.`（旧版创建团队登记为 `Self-service team enrollment is disabled on this Hub.`），客户端显示账号登录未开放、联系服务管理员启用后重试的提示，不将其显示为接力状态限制。若 Hub 提供 `details.reason=self_service_enrollment_disabled`，客户端也支持识别；普通 `action_not_allowed` 仍使用原接力状态提示。此处只调整显示，不改变登记开关、认证或重试行为。
 3. 当前无验证码的邮箱复用仅用于受控内测，并不证明邮箱所有权；扩大开放范围前必须替换为可验证的身份流程。邮箱一旦绑定不能通过个人资料修改。
 4. 兼容部署仍可由服务器管理员通过本地命令创建 Team 和一次性 owner 初始化码，再由旧加入流程领取。
 5. 邮箱在当前服务内唯一，比较前去除首尾空格并转为小写。不同账户可以使用相同 `display_name`；一个账户只有一个当前名字，调用 `PATCH /v1/me` 修改后对该账户加入的所有团队生效。成员接口不返回完整邮箱，只在重名时允许客户端使用脱敏 `email_hint` 区分。

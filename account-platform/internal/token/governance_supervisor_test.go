@@ -47,6 +47,7 @@ func (r *supervisorActivation) set(state string, epoch int64, err error) {
 }
 
 func TestGovernanceSupervisorEpochReadyAndCancellation(t *testing.T) {
+	records := captureWorkerDiagnostics(t)
 	reader := &supervisorActivation{}
 	reader.set("PRE_ACTIVATION", 0, nil)
 	defaultRoutes := &PostgresDefaultRouteProvisioner{}
@@ -132,7 +133,8 @@ func TestGovernanceSupervisorEpochReadyAndCancellation(t *testing.T) {
 	third.ready()
 	fourth.ready()
 	waitReady(true)
-	reader.set("ACTIVE", 3, errors.New("unavailable"))
+	reader.set("ACTIVE", 3, errors.New("private diagnostic test value"))
+	records.expect(t, "token_governance_supervisor_failed", "poll_activation", "WORKER_OPERATION_FAILED")
 	waitReady(false)
 	waitStopped(third)
 	waitStopped(fourth)
@@ -148,10 +150,12 @@ func TestGovernanceSupervisorEpochReadyAndCancellation(t *testing.T) {
 }
 
 func TestGovernanceSupervisorWorkerExitClosesReady(t *testing.T) {
+	records := captureWorkerDiagnostics(t)
 	reader := &supervisorActivation{}
 	reader.set("ACTIVE", 1, nil)
 	service := &Service{}
 	exit := make(chan struct{})
+	allowReplacement := make(chan struct{})
 	var mu sync.Mutex
 	generations := 0
 	supervisor := &TokenGovernanceSupervisor{service: service, reader: reader, interval: time.Millisecond}
@@ -161,14 +165,20 @@ func TestGovernanceSupervisorWorkerExitClosesReady(t *testing.T) {
 		generation := generations
 		mu.Unlock()
 		if generation > 1 {
-			return nil, errors.New("dependency unavailable")
+			select {
+			case <-allowReplacement:
+				run := func(ctx context.Context, ready func()) error { ready(); <-ctx.Done(); return ctx.Err() }
+				return []governedWorkerRun{run, run}, nil
+			default:
+				return nil, errors.New("private diagnostic test value")
+			}
 		}
 		return []governedWorkerRun{
 			func(ctx context.Context, ready func()) error {
 				ready()
 				select {
 				case <-exit:
-					return errors.New("worker failed")
+					return context.DeadlineExceeded
 				case <-ctx.Done():
 					return ctx.Err()
 				}
@@ -188,10 +198,20 @@ func TestGovernanceSupervisorWorkerExitClosesReady(t *testing.T) {
 		time.Sleep(time.Millisecond)
 	}
 	close(exit)
+	records.expect(t, "token_governance_supervisor_failed", "account_worker_exit", "WORKER_TIMEOUT")
 	deadline = time.Now().Add(time.Second)
 	for service.tokenAccountCreateReady.Load() {
 		if time.Now().After(deadline) {
 			t.Fatal("worker exit left create ready")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	records.expect(t, "token_governance_supervisor_failed", "build_workers", "WORKER_OPERATION_FAILED")
+	close(allowReplacement)
+	deadline = time.Now().Add(time.Second)
+	for !service.tokenAccountCreateReady.Load() {
+		if time.Now().After(deadline) {
+			t.Fatal("replacement workers did not restore readiness")
 		}
 		time.Sleep(time.Millisecond)
 	}

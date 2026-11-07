@@ -47,6 +47,10 @@ var safeLogEvents = map[string]string{
 	"background task started":                                         "background_task_started",
 	"background task stopped":                                         "background_task_stopped",
 	"legacy standard log":                                             "legacy_standard_log",
+
+	"model emergency cancellation failed": "model_emergency_cancellation_failed",
+	"token governance supervisor failed":  "token_governance_supervisor_failed",
+	"usage history projection failed":     "usage_history_projection_failed",
 }
 
 var safeLogText = regexp.MustCompile(`^[A-Za-z0-9_./:@{} -]{1,256}$`)
