@@ -360,6 +360,39 @@ test('服务端空的 script_sha256 不产生「有可用更新」徽标', async
   );
 });
 
+// r26 P2-1a（P2-16 回归闸门）：服务端大写 digest 不触发假更新。
+// 此前 ModelStoreView 用严格 !== 比对——服务端下发大写十六进制时，同版脚本
+// 被误判为「有可用更新」→ 确认更新先停运行中模型再拉零变化。
+test('服务端大写 digest 不产生「有可用更新」徽标（P2-16 回归）', async (t) => {
+  // 本地 enable 哈希为小写 'abc123'，服务端同一值以大写 'ABC123' 下发——
+  // 修复后 toLowerCase 归一化比对应判「无差异」，不挂更新徽标。
+  const ui = await fixture(t, { scriptSha256: { enable: 'OLD' } }); // 本地 'old'，服务端大写 'OLD'——同值不同大小写
+  await ui.render(React.createElement(ModelStoreView, { theme: 'light', t: dict.zh, bs: {} }));
+  assert.equal(
+    ui.container.querySelectorAll('[data-testid="model-store-script-update-badge"]').length,
+    0,
+    '同版哈希大小写不同不得挂「有可用更新」徽标'
+  );
+});
+
+// r26 P2-1b（P2-17 回归闸门）：cleanup_required + hasUpdate 组合态下
+// 「继续清理」必须可达。此前 hasUpdate 先于 cleanup 分支，清理入口被遮蔽。
+test('cleanup_required 且有更新时主按钮是「继续清理」而非「更新脚本」（P2-17 回归）', async (t) => {
+  // 本地 'old' vs 服务端 'different' → 有更新；记录 status=cleanup_required → 清理优先
+  const ui = await fixture(t, { status: 'cleanup_required', scriptSha256: { enable: 'different' } });
+  await ui.render(React.createElement(ModelStoreView, { theme: 'light', t: dict.zh, bs: {} }));
+  await ui.click('[data-testid="model-store-open-detail"]');
+  // 主按钮必须是「继续清理」（cleanup 优先），不得是「更新脚本」
+  const cleanupBtn = ui.container.querySelector('[data-testid="model-store-detail-action-cleanup"]');
+  assert.ok(cleanupBtn, 'cleanup_required + hasUpdate 组合态：主按钮必须是「继续清理」');
+  assert.equal(
+    ui.container.querySelectorAll('[data-testid="model-store-detail-action-update"]').length, 0,
+    '组合态主按钮不得是「更新脚本」（清理优先于更新）');
+  // 更新脚本应作为次要按钮仍可达
+  const updateSecondary = ui.container.querySelector('[data-testid="model-store-detail-secondary-update"]');
+  assert.ok(updateSecondary, '组合态「更新脚本」作为次要按钮仍可达');
+});
+
 // 评审 P2-6：deployed 但 weights_ready_at 缺失的记录（升级前的老库、部署时发现
 // 权重缺失被清掉凭据），列表行卡按 libraryStateOf 判成 incomplete 显示「需继续
 // 下载」，详情弹窗却曾按 raw status==='deployed' 摆出「卸载部署」+「重新部署」；
