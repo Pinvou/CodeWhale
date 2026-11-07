@@ -31,7 +31,9 @@ func (w *ReplayRetentionWorker) runCycle(ctx context.Context) {
 		// code rather than the raw error, request IDs or encrypted payload data.
 		w.logger.ErrorContext(ctx, "uncertain dispatch recovery failed", "error_code", "UNCERTAIN_DISPATCH_RECOVERY_RETRY_PENDING")
 	}
-	_ = w.repository.CleanupReplayRetention(ctx)
+	if err := w.repository.CleanupReplayRetention(ctx); err != nil && ctx.Err() == nil {
+		w.logger.ErrorContext(ctx, "replay retention cleanup failed", "error_code", "REPLAY_RETENTION_CLEANUP_RETRY_PENDING")
+	}
 }
 
 func (w *ReplayRetentionWorker) Run(ctx context.Context) {

@@ -52,6 +52,7 @@ REQUIRED = {
     "TestF05CancellationRecoveryClosurePublicPostgres",
     "TestF05RotationRetainedContentBoundaries",
     "TestF05UnsettledContentRetention",
+    "TestReplayRetentionBoundedCleanupPublicPostgres",
     "TestF05ExpiredUnacquiredDispatchRecovery",
     "TestF05PersonalHistoryAndCancellationPersistedOwnerScope",
     "TestOrganizationOriginalOwnerCancellationPublicPostgres",
@@ -269,6 +270,16 @@ BILLING_LEAF_REQUIRED = {
 }
 BILLING_CHILD_REQUIRED = RETAINED_REQUIRED - BILLING_LEAF_REQUIRED
 EXACT_REQUIRED_CHILDREN = {
+    "TestReplayRetentionBoundedCleanupPublicPostgres": {
+        "one-large-unsettled-stream-is-row-bounded-and-retryable",
+        "locked-oldest-is-skipped-and-next-cycle-resumes",
+        "settled-stream-delete-is-bounded",
+        "active-case-parent-lock-serializes-copy-with-cleanup",
+        "tombstone-key-clear-is-atomic-bounded-and-protected-rows-do-not-starve",
+        "case-delete-and-payload-cascade-are-bounded",
+        "capacity-sample-10000-live-frames-plan-and-single-batch",
+        "content-lock-timeout-rolls-back-and-next-call-recovers",
+    },
     "TestRechargeProductCommandAtomicityPostgres": {"active-provider-admission-candidate-progress"},
     "TestProductManualAdmissionPostgres": {
         "two-explicit-humans-first-publish-and-immutable-replay",
