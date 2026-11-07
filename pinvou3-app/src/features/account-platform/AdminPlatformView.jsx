@@ -2,7 +2,7 @@ import { AdminRolesWorkspace } from './AdminRolesWorkspace.jsx';
 import { AdminSystemStatusWorkspace } from './AdminSystemStatusWorkspace.jsx';
 import { systemRelatedReconciliationRoute } from './admin-system-status.js';
 import { AuditWorkspace } from './AuditWorkspace.jsx';
-import { OrganizationAdminWorkspace } from './OrganizationAdminWorkspace.jsx';
+import { OrganizationAdminWorkspace, useOrganizationOverviewReadFeedback } from './OrganizationAdminWorkspace.jsx';
 import { AdminManagementWorkspace } from './AdminManagementWorkspace.jsx';
 import { adminAuthorizationView, adminAuthorizationSnapshotIsCurrent, readAdminAuthorizationSnapshot } from './admin-authorization-snapshot.js';
 import React, { useEffect, useRef, useState } from 'react';
@@ -24,6 +24,7 @@ import { portalLoginLocation } from './portal-sections.js';
 
 export function AdminPlatformView({ client, copy, language, onLanguageChange }) {
   const [authorizationSnapshot, setAuthorizationSnapshot] = useState(null);
+  const overviewSnapshotGenerations = useRef(new WeakMap());
   const { authorization, sessionEpoch: acceptedSessionEpoch } = adminAuthorizationView(authorizationSnapshot, client);
   const [credentialOrigin, setCredentialOrigin] = useState('');
   const [overviewFlags, setOverviewFlags] = useState({});
@@ -33,11 +34,17 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
   const [systemHeaderTarget, setSystemHeaderTarget] = useState(null);
   const authorizationReload = useRef(null);
   const authorizationRefreshRef = useRef({ active: false, generation: 0, settled: Promise.resolve() });
+  const organizationOverviewFeedback = useOrganizationOverviewReadFeedback(client, authorization, acceptedSessionEpoch, () => authorizationRefreshRef.current, overviewSnapshotGenerations.current.get(authorizationSnapshot) ?? 0);
+  const publishAuthorizationSnapshot = (snapshot, overviewCheckGeneration) => {
+    overviewSnapshotGenerations.current.set(snapshot, overviewCheckGeneration);
+    setAuthorizationSnapshot(snapshot);
+  };
   const generation = useRef(0);
   const currentClient = useRef(client); currentClient.current = client;
   const [authorizationRefreshing, setAuthorizationRefreshing] = useState(false);
   const load = async () => {
     const request = ++generation.current;
+    const overviewCheckGeneration = authorizationRefreshRef.current.generation;
     setAuthorizationOwner(client); setAuthorizationSnapshot(null); setState('loading'); setError('');
     try {
       const snapshot = await readAdminAuthorizationSnapshot(client, () => request === generation.current && currentClient.current === client);
@@ -46,7 +53,7 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
       if (!session.authenticated) { setState('guest'); return; }
       setCredentialOrigin(typeof session.credential_origin === 'string' ? session.credential_origin : '');
       setOverviewFlags({ ...(session.feature_flags && typeof session.feature_flags === 'object' ? session.feature_flags : {}), page: session.feature_flags?.admin_model_token_page_overviews === true, aggregate: session.feature_flags?.admin_model_operations_overview === true });
-      setAuthorizationSnapshot(snapshot); setState('ready');
+      publishAuthorizationSnapshot(snapshot, overviewCheckGeneration); setState('ready');
     } catch (reason) { if (request === generation.current) { setError(localizedAccountPlatformError(copy, reason)); setState('error'); } }
   };
   useEffect(() => { void load(); return () => { generation.current++; }; }, [client]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -67,7 +74,7 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
         if (!session.authenticated) { setAuthorizationSnapshot(null); setState('guest'); return; }
         setCredentialOrigin(typeof session.credential_origin === 'string' ? session.credential_origin : '');
         setOverviewFlags({ ...(session.feature_flags && typeof session.feature_flags === 'object' ? session.feature_flags : {}), page: session.feature_flags?.admin_model_token_page_overviews === true, aggregate: session.feature_flags?.admin_model_operations_overview === true });
-        setAuthorizationSnapshot(snapshot); setState('ready');
+        publishAuthorizationSnapshot(snapshot, guard.generation); setState('ready');
       } catch (reason) {
         if (request === generation.current) { setState('error'); setError(localizedAccountPlatformError(copy, reason)); }
       } finally {
@@ -99,7 +106,7 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
         if (!session.authenticated) { setAuthorizationSnapshot(null); setState('guest'); return; }
         setCredentialOrigin(typeof session.credential_origin === 'string' ? session.credential_origin : '');
         setOverviewFlags({ ...(session.feature_flags && typeof session.feature_flags === 'object' ? session.feature_flags : {}), page: session.feature_flags?.admin_model_token_page_overviews === true, aggregate: session.feature_flags?.admin_model_operations_overview === true });
-        setAuthorizationSnapshot(snapshot);
+        publishAuthorizationSnapshot(snapshot, refreshGeneration);
       } catch (reason) {
         if (!disposed) { setAuthorizationSnapshot(null); setState('error'); setError(localizedAccountPlatformError(copy, reason)); }
       } finally {
@@ -149,7 +156,7 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
         {view === 'system' && <AdminSystemStatusWorkspace {...{ client, copy, language, permissions }} showTitle={false} headerTarget={systemHeaderActive ? systemHeaderTarget : null} onOpenReconciliation={openSystemReconciliation} />}
         {view === 'audit' && <AuditWorkspace client={client} copy={{ ...copy, ...auditWorkspaceCopy[language] }} permissions={permissions} currentUserID={authorization.user_id} />}
         {view === 'management' && <AdminManagementWorkspace {...{ client, copy, language, permissions, credentialOrigin, overviewFlags }} owner={authorization.user_id} authorizationVersion={version} overviewAuthorizationVersion={version} controlledSection={['models', 'tokenResources', 'modelOperations'].includes(managementRoute.section) ? managementRoute.section : undefined} routeSearch={managementRoute.search} onNavigateSection={overviewFlags.admin_model_token_ia === true ? (target, updates) => navigation.navigate(target, updates) : undefined} onRouteChange={(updates, mode) => navigation.navigate(navigation.section, updates, mode)} onViewApproval={viewApproval} />}
-        {view === 'organizations' && <OrganizationAdminWorkspace client={client} me={authorization} language={language} route={organizationRoute} acceptedSessionEpoch={acceptedSessionEpoch} />}
+        {view === 'organizations' && <OrganizationAdminWorkspace client={client} me={authorization} language={language} route={organizationRoute} acceptedSessionEpoch={acceptedSessionEpoch} overviewReadFeedback={organizationOverviewFeedback} />}
         {view === 'myorg' && <AdminMyOrganizationPage client={client} me={authorization} language={language} onContextChanged={() => authorizationReload.current?.()} />}
         {view === 'approvals' && <AdminApprovalWorkspace {...{ client, copy, language }} me={authorization} routeSearch={visibleSection === 'approvals' ? navigation.search : undefined} onRouteChange={updates => navigation.navigate('approvals', updates, 'replace')} onNavigate={route => navigation.navigate(['orders', 'late', 'anomalies', 'controls'].includes(route.tab) ? 'payments' : 'billing', { finance_tab: route.tab })} />}
         {view === 'products' && <AdminProductsPage {...{ client, copy, language, permissions }} me={authorization} route={productsRoute} />}

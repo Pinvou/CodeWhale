@@ -93,6 +93,8 @@ export class AdminPlatformClient {
     this.baseURL = String(baseURL || '').replace(/\/$/, '');
     this.csrfToken = '';
     this.financeSessionEpoch = 0;
+    this.sessionTransportUnavailable = false;
+    this.sessionTransportListeners = new Set();
     this.authorizationVersions = {};
     this.financeQueryAuthorizationGeneration = 0;
     this.authorizationVersionListeners = new Set();
@@ -101,6 +103,11 @@ export class AdminPlatformClient {
     this.approvalControl = null;
     this.approvalControllers = new Set();
     this.approvalControlGeneration = 0;
+  }
+
+  onSessionTransportChange(listener) {
+    this.sessionTransportListeners.add(listener);
+    return () => this.sessionTransportListeners.delete(listener);
   }
 
   onAuthorizationVersion(listener) {
@@ -132,14 +139,17 @@ export class AdminPlatformClient {
     for (const listener of this.authorizationVersionListeners) listener({ ...next });
   }
 
-  retireSession(csrfToken = '') {
+  retireSession(csrfToken = '', authenticated = null) {
     this.financeSessionEpoch++;
+    this.sessionTransportUnavailable = authenticated === false;
     this.csrfToken = csrfToken;
     this.authorizationVersions = {};
     const retired = [...this.inflightReads.values()];
     this.inflightReads.clear();
     for (const entry of retired) entry.controller.abort();
     this.invalidateApprovalControl();
+    // Notify read-only consumers of an already established transport change.
+    for (const listener of this.sessionTransportListeners) listener();
   }
 
   requireCurrentSession(sessionEpoch, signal) {
@@ -154,13 +164,13 @@ export class AdminPlatformClient {
       signal,
     });
     this.requireCurrentSession(sessionEpoch, signal);
-    if (response.status === 401) { this.retireSession(); return { authenticated: false }; }
+    if (response.status === 401) { this.retireSession('', false); return { authenticated: false }; }
     if (!response.ok) throw errorFromResponse(response, await response.json().catch(() => ({})));
     const payload = await response.json();
     const current = requireSession(payload);
     this.requireCurrentSession(sessionEpoch, signal);
     const csrfToken = current.authenticated ? current.csrf_token : '';
-    if (!current.authenticated || this.csrfToken !== csrfToken) this.retireSession(csrfToken);
+    if (!current.authenticated || this.csrfToken !== csrfToken) this.retireSession(csrfToken, current.authenticated);
     return current;
   }
 
@@ -189,7 +199,12 @@ export class AdminPlatformClient {
         const payload = response.ok && decode ? decode(await response.text()) : area === 'billing' && response.ok ? parseFinanceJSON(await response.text()) : await response.json().catch(() => ({}));
         this.requireCurrentSession(sessionEpoch, entry.controller.signal);
         this.observeAuthorizationVersions(response.headers, sessionEpoch);
-        if (!response.ok) throw errorFromResponse(response, payload);
+        if (!response.ok) {
+          const error = errorFromResponse(response, payload);
+          const version = Number(response.headers.get('X-Platform-Authorization-Version'));
+          if (Number.isSafeInteger(version) && version > 0) error.platformAuthorizationVersion = version;
+          throw error;
+        }
         return payload;
       })();
       this.inflightReads.set(url, entry);
@@ -289,7 +304,15 @@ export class AdminPlatformClient {
     const payload = await response.json().catch(() => ({}));
     this.requireCurrentSession(sessionEpoch, signal);
     this.observeAuthorizationVersions(response.headers, sessionEpoch);
-    if (!response.ok) throw errorFromResponse(response, payload);
+    if (!response.ok) {
+      // Portal's explicit session rejection is presentation evidence for this
+      // current transport. Keep the original exception and lifecycle intact.
+      if (response.status === 401 && payload?.code === 'LOGIN_REQUIRED' && !this.sessionTransportUnavailable) {
+        this.sessionTransportUnavailable = true;
+        for (const listener of this.sessionTransportListeners) listener();
+      }
+      throw errorFromResponse(response, payload);
+    }
     return payload;
   }
 

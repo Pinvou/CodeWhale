@@ -346,3 +346,13 @@
 @media(max-width:560px){.adm-runbook-panel summary{flex-wrap:wrap}.adm-runbook-panel summary>.adm-status{margin-left:0}}
 
 .adm-restored-shell .adm-system-source-limit{padding:12px 14px;border:1px solid var(--adm-line);border-radius:9px;background:var(--adm-soft);font-size:13px;line-height:1.6;overflow-wrap:anywhere}
+
+.adm-restored-shell .adm-organization-overview{display:grid;gap:16px;justify-items:start}
+.adm-restored-shell .adm-organization-overview-facts{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));width:100%;gap:12px;margin:0}
+.adm-restored-shell .adm-organization-overview-facts>div{min-width:0;padding:15px 16px;border:1px solid var(--adm-line);border-radius:12px;background:var(--adm-soft);overflow-wrap:break-word}
+.adm-restored-shell .adm-organization-overview-facts dt,.adm-restored-shell .adm-organization-overview-facts small{color:var(--adm-muted);font-size:12px}
+.adm-restored-shell .adm-organization-overview-facts dd{display:grid;gap:5px;margin:5px 0 0}
+.adm-restored-shell .adm-organization-overview-facts dd>strong{font-size:20px;font-weight:650}
+.adm-restored-shell .adm-organization-overview-reference{width:100%;padding:12px 0;border-top:1px solid var(--adm-line)}
+.adm-restored-shell .adm-organization-overview-reference summary{cursor:pointer;color:var(--adm-muted);font-weight:650}
+@media(max-width:560px){.adm-restored-shell .adm-organization-overview-facts{grid-template-columns:minmax(0,1fr)}}
