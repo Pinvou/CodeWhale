@@ -24,6 +24,10 @@ func TestPublishedRollbackPackagePins(t *testing.T) {
 				if err := verifyPublishedRollbacks([]Migration{changed}); err == nil {
 					t.Fatalf("changed published rollback accepted: %s/%d", domain, migration.Version)
 				}
+				changed.DownSQL = ""
+				if !changed.HasDownScript || verifyPublishedRollbacks([]Migration{changed}) == nil {
+					t.Fatalf("supplied empty published rollback accepted: %s/%d", domain, migration.Version)
+				}
 				crlf := migration
 				crlf.UpSQL = strings.ReplaceAll(normalizeLineEndings(crlf.UpSQL), "\n", "\r\n")
 				crlf.DownSQL = strings.ReplaceAll(normalizeLineEndings(crlf.DownSQL), "\n", "\r\n")
@@ -46,7 +50,32 @@ func TestPublishedRollbackPackagePins(t *testing.T) {
 			if _, err := Load(copyDir); err == nil {
 				t.Fatal("changed copied rollback accepted")
 			}
+			if err := os.WriteFile(filepath.Join(copyDir, "000001_copied.down.sql"), nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Load(copyDir); err == nil {
+				t.Fatal("present empty copied rollback accepted")
+			}
 		})
+	}
+}
+
+func TestLoadPublishedForwardOnlyHistory(t *testing.T) {
+	loaded, err := Load(filepath.Join("..", "..", "..", "migrations", "billing"))
+	if err != nil || len(loaded) == 0 {
+		t.Fatal("actual published source required", err)
+	}
+	directory := t.TempDir()
+	writeMigration(t, directory, "000001_foundation.up.sql", loaded[0].UpSQL)
+	forwardOnly, err := Load(directory)
+	if err != nil {
+		t.Fatal("supported Up-only published history rejected", err)
+	}
+	if len(forwardOnly) != 1 || forwardOnly[0].HasDownScript || forwardOnly[0].DownSQL != "" || forwardOnly[0].Checksum != loaded[0].Checksum {
+		t.Fatal("forward-only descriptor acquired rollback content or changed identity")
+	}
+	if err := verifyPublishedRollbacks(forwardOnly); err != nil {
+		t.Fatal("forward-only descriptor rejected at shared entry", err)
 	}
 }
 

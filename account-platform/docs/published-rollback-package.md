@@ -2,7 +2,9 @@
 
 迁移二进制嵌入现有 `migrations/manifest.json`。该不可变清单同时固定公开 Account、Billing、Token、payment-simulator 的 UpSQL 与 DownSQL；更新仍走原 `account-platform-migration-manifest.mjs append/check` 及发布审核。
 
-当版本号与规范化 UpSQL 摘要匹配清单内的发布身份时，Load、Up、VerifyApplied 和 DownOne 都要求同一身份的原 DownSQL。即使迁移目录被重命名、SQL 被挂载到其他目录或调用方直接构造 Migration，也不能接受变化的 DownSQL。领域历史兼容转换在替换 SQL 前先校验原发布包，不能让旧库适配丢失当前输入的回滚身份。
+提供回滚脚本且版本号与规范化 UpSQL 摘要匹配清单内的发布身份时，Load、Up、VerifyApplied 和 DownOne 都要求同一身份的原 DownSQL。即使迁移目录被重命名、SQL 被挂载到其他目录或调用方直接构造非空 DownSQL，也不能接受变化的回滚内容。领域历史兼容转换在替换 SQL 前先校验原发布包，不能让旧库适配丢失当前输入的回滚身份。
+
+既有生产历史工厂只提供 UpSQL，这类正向描述继续允许 Load、Up 和前向账本验证，不认证缺失的回滚内容。DownOne 仍以不可逆拒绝，不能执行回滚或删除账本。Load 保留是否实际提供 Down 文件的元数据，所以“没有回滚文件”与“提供空回滚文件”不同；对已提供的空脚本和已加载脚本改空仍会拒绝。
 
 执行回滚前还核对账本中已有的非空前向摘要，不以传入 UpSQL 是否命中清单决定该义务。给待执行 UpSQL 增加注释或伪造其 Checksum，不能将原已应用的发布历史降为自定义历史。LF 与旧 CRLF 摘要均按原内容核对；真正没有摘要的旧自定义账本保留原行为。
 

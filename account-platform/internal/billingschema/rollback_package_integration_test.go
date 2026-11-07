@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -138,6 +139,43 @@ func TestPublishedRollbackPackageIntegrityPostgres(t *testing.T) {
 			}
 		})
 	}
+	t.Run("forward-only-history-cannot-authorize-rollback", func(t *testing.T) {
+		c := f.database(t, ctx, "billing", "billing_schema_owner")
+		directory := t.TempDir()
+		if err := os.WriteFile(filepath.Join(directory, "000001_foundation.up.sql"), []byte(first[0].UpSQL), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		forwardOnly, err := migrations.Load(directory)
+		if err != nil {
+			t.Fatal("original forward-only package rejected", err)
+		}
+		if err := migrations.Up(ctx, c, forwardOnly); err != nil {
+			t.Fatal("original forward-only Up failed", err)
+		}
+		defer migrations.Unlock(context.Background(), c)
+		if _, err := c.Exec(ctx, `INSERT INTO inbox_messages(event_id,event_type,aggregate_version) VALUES('33333333-3333-4333-8333-333333333333','retained.forward.fact',11)`); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := migrations.VerifyApplied(ctx, c, forwardOnly); err != nil {
+			t.Fatal("original forward-only verification failed", err)
+		}
+		facts := func() string {
+			return stageValue(t, ctx, c, `SELECT jsonb_build_object('ledger',(SELECT jsonb_agg(to_jsonb(x) ORDER BY version) FROM schema_migrations x),'inbox',(SELECT jsonb_agg(to_jsonb(x) ORDER BY event_id) FROM inbox_messages x))::text`)
+		}
+		before := facts()
+		if err := migrations.DownOne(ctx, c, forwardOnly); err == nil || !strings.Contains(err.Error(), "irreversible") {
+			t.Fatal("forward-only history invented rollback authority", err)
+		}
+		if before != facts() {
+			t.Fatal("refused missing rollback changed facts or ledger")
+		}
+		if _, err := migrations.VerifyApplied(ctx, c, first); err != nil {
+			t.Fatal("complete original package could not verify after forward-only use", err)
+		}
+		if err := migrations.DownOne(ctx, c, first); err != nil {
+			t.Fatal("original complete reversible package could not continue", err)
+		}
+	})
 	t.Run("unrelated-custom-history", func(t *testing.T) {
 		c := f.database(t, ctx, "billing", "billing_schema_owner")
 		custom := []migrations.Migration{{Version: 1, Name: "custom_business", UpSQL: "CREATE TABLE custom_rollback_probe(id integer)", DownSQL: "DROP TABLE custom_rollback_probe"}}

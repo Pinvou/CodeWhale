@@ -273,6 +273,7 @@ EXACT_REQUIRED_CHILDREN = {
     "TestPublishedRollbackPackageIntegrityPostgres": {
         "published-down-legacy-crlf-no-create", "recorded-up-identity-before-down", "unrelated-custom-history",
         "published-ledger-cannot-become-custom/LF", "published-ledger-cannot-become-custom/CRLF",
+        "forward-only-history-cannot-authorize-rollback",
     },
     "TestUsageWaiverHistoricalSchemaPostgres": {
         "fresh-exact-history-append-only-runtime-and-forward-only",

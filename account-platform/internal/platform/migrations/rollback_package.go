@@ -77,6 +77,12 @@ func verifyPublishedRollbacks(loaded []Migration) error {
 		return publishedRollbackError
 	}
 	for _, migration := range loaded {
+		// Published production-history fixtures intentionally supply Up only.
+		// They attest forward history, not rollback bytes; DownOne still refuses
+		// them as irreversible. A present-but-empty script is different.
+		if !migration.HasDownScript && migration.DownSQL == "" {
+			continue
+		}
 		identity := rollbackIdentity{version: migration.Version, up: normalizedChecksum(migration.UpSQL)}
 		if expected, known := publishedRollbackChecksums[identity]; known && normalizedChecksum(migration.DownSQL) != expected {
 			return fmt.Errorf("migration %d rollback differs from published package", migration.Version)

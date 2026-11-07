@@ -33,7 +33,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
         self.run_main_fixture()
         command = self.fixture_commands[self.fixture_phases.index("owner-schema")]
         self.assertIn(root, command[command.index("-run") + 1])
-        required = {"published-down-legacy-crlf-no-create", "recorded-up-identity-before-down", "unrelated-custom-history", "published-ledger-cannot-become-custom/LF", "published-ledger-cannot-become-custom/CRLF"}
+        required = {"published-down-legacy-crlf-no-create", "recorded-up-identity-before-down", "unrelated-custom-history", "published-ledger-cannot-become-custom/LF", "published-ledger-cannot-become-custom/CRLF", "forward-only-history-cannot-authorize-rollback"}
         self.assertEqual(RUNNER.EXACT_REQUIRED_CHILDREN[root], required)
         events = self.events({root}, RUNNER.SCHEMA_PACKAGE, children=True)
         options = {"package": RUNNER.SCHEMA_PACKAGE, "require_children": True, "exact_roots": True}

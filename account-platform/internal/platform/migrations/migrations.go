@@ -24,6 +24,9 @@ type Migration struct {
 	UpSQL    string
 	DownSQL  string
 	Checksum string
+	// HasDownScript distinguishes an absent, forward-only rollback descriptor
+	// from a supplied empty script. Nonempty DownSQL is checked either way.
+	HasDownScript bool
 }
 
 // UpHooks let a trusted domain wrapper lend and revoke narrowly scoped DDL
@@ -77,10 +80,11 @@ func Load(directory string) ([]Migration, error) {
 			}
 			migration.UpSQL = string(body)
 		} else {
-			if migration.DownSQL != "" {
+			if migration.HasDownScript {
 				return nil, fmt.Errorf("migration version %d has duplicate down script", version)
 			}
 			migration.DownSQL = string(body)
+			migration.HasDownScript = true
 		}
 	}
 
