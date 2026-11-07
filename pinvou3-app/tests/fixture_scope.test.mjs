@@ -6,7 +6,7 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { FixtureScope, ownedDirectory } from './helpers/fixture-scope.mjs';
 
-async function signalProbe(t, { failure = false, primary = 0, signal = 'SIGTERM', blockedVerification = false } = {}) {
+async function signalProbe(t, { failure = false, primary = 0, signal = 'SIGTERM', blockedVerification = false, earlierFailure = false } = {}) {
   const directory = ownedDirectory('signal-probe');
   t.after(() => directory.remove());
   const ledger = path.join(directory.path, 'receipts');
@@ -21,6 +21,7 @@ async function signalProbe(t, { failure = false, primary = 0, signal = 'SIGTERM'
       verify: ${blockedVerification ? '() => new Promise(() => {})' : '() => true'},
       remove() { fs.writeFileSync(path.join(process.env.PINVOU_CI_RESOURCE_LEDGER, 'removed'), 'confirmed'); },
     });
+    ${earlierFailure ? `fixtureScope.register({kind:'probe', id:'earlier-failure', close(){throw new Error('earlier close diagnostic');}});` : ''}
     process.exitCode = ${primary};
     setInterval(() => {}, 1000);
     if (process.platform === 'win32') process.emit(${JSON.stringify(signal)});
@@ -42,7 +43,9 @@ async function signalProbe(t, { failure = false, primary = 0, signal = 'SIGTERM'
       else resolve({ code, exitSignal, output });
     });
   });
-  return { ...result, receipt: JSON.parse(fs.readFileSync(path.join(ledger, 'signal.json'))), removed: fs.existsSync(path.join(ledger, 'removed')) };
+  return { ...result, receipt: JSON.parse(fs.readFileSync(path.join(ledger, 'signal.json'))),
+    earlierReceipt: earlierFailure ? JSON.parse(fs.readFileSync(path.join(ledger, 'earlier-failure.json'))) : undefined,
+    removed: fs.existsSync(path.join(ledger, 'removed')) };
 }
 
 test('successful SIGTERM and SIGINT cleanup exits even with another active handle', async t => {
@@ -70,6 +73,16 @@ test('signal watchdog bounds a blocked verification without authorizing removal'
   assert.equal(result.code, 1);
   assert.match(result.output, /fixture signal cleanup deadline exceeded/);
   assert.equal(result.receipt.state, 'registered');
+  assert.equal(result.removed, false);
+});
+
+test('watchdog preserves an earlier close diagnostic when a later resource stalls', async t => {
+  const result = await signalProbe(t, { blockedVerification: true, earlierFailure: true, primary: 7 });
+  assert.equal(result.code, 7);
+  assert.match(result.output, /earlier close diagnostic/);
+  assert.match(result.output, /fixture signal cleanup deadline exceeded/);
+  assert.equal(result.receipt.state, 'registered');
+  assert.equal(result.earlierReceipt.state, 'unconfirmed');
   assert.equal(result.removed, false);
 });
 

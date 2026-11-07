@@ -83,3 +83,36 @@ test('native setup failure preserves its primary error and containment retires t
     assert.equal(fs.existsSync(retired.workspace.path), false);
   } finally { fs.rmSync(directory, { recursive: true }); }
 });
+
+test('native Vite SIGTERM waits for shared peer cleanup and keeps the signal failure', () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'pinvou-vite-signal-probe-'));
+  try {
+    const ledger = path.join(directory, 'resources');
+    fs.mkdirSync(ledger);
+    const scope = new URL('./helpers/fixture-scope.mjs', import.meta.url).href;
+    const vite = new URL('./helpers/vite-fixture.mjs', import.meta.url).href;
+    const source = `
+      import {fixtureScope} from ${JSON.stringify(scope)};
+      import {createServer} from ${JSON.stringify(vite)};
+      fixtureScope.register({kind:'probe',id:'peer',
+        async close(){await new Promise(resolve=>setImmediate(resolve));console.log('PEER_CLOSED');},
+        remove(){console.log('PEER_REMOVED');}});
+      const servers=[];
+      for(let i=0;i<2;i++){
+        const server=await createServer(${JSON.stringify(config)});
+        await server.listen();servers.push(server);
+      }
+      if(process.platform==='win32')process.emit('SIGTERM');
+      else process.kill(process.pid,'SIGTERM');
+    `;
+    const result = spawnSync(process.execPath, ['--input-type=module', '-e', source], {
+      env: { ...process.env, PINVOU_CI_RESOURCE_LEDGER: ledger }, encoding: 'utf8', timeout: 30_000, windowsHide: true,
+    });
+    assert.equal(result.status, 143, result.stderr);
+    assert.match(result.stdout, /PEER_CLOSED/);
+    assert.match(result.stdout, /PEER_REMOVED/);
+    const receipts = fs.readdirSync(ledger).map(file => JSON.parse(fs.readFileSync(path.join(ledger, file))));
+    assert.equal(receipts.length, 3);
+    assert.ok(receipts.every(receipt => receipt.state === 'released'));
+  } finally { fs.rmSync(directory, { recursive: true }); }
+});

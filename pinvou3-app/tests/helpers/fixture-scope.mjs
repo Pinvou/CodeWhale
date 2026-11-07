@@ -69,11 +69,19 @@ export class FixtureScope {
     return this.#closing ||= (async () => {
       const failures = [];
       for (const resource of [...this.#resources].reverse()) {
-        try { await resource.closeOnly(); } catch (error) { failures.push(error); }
+        try { await resource.closeOnly(); } catch (error) {
+          // A later resource can stall until the signal watchdog exits. Keep
+          // this failure visible now, before the final aggregate is available.
+          console.error(error);
+          failures.push(error);
+        }
       }
       if (failures.length) throw new AggregateError(failures, 'fixture scope did not become clean');
       for (const resource of [...this.#resources].reverse()) {
-        try { await resource.destroy(); } catch (error) { failures.push(error); }
+        try { await resource.destroy(); } catch (error) {
+          console.error(error);
+          failures.push(error);
+        }
       }
       if (failures.length) throw new AggregateError(failures, 'fixture files could not be retired');
     })();
@@ -102,6 +110,9 @@ export function ownedDirectory(label) {
 // cancellation and ordinary completion without replacing the primary failure.
 let stopping;
 let signalDeadline;
+// Vite's own SIGTERM callback awaits server.close() before calling process.exit.
+// During shared shutdown it must join the whole scope, not only its own lease.
+export function pendingFixtureShutdown() { return stopping; }
 async function stop(signal) {
   if (signal && !signalDeadline) {
     signalDeadline = setTimeout(() => {
