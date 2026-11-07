@@ -1098,6 +1098,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
             "TestOrganizationOriginalOwnerCancellationPublicPostgres",
     "TestRuntimeProtocolPublicationPublicPostgres",
             "TestReconciliationEvidenceMatchesPublicSchema",
+            "TestReplayRetentionBoundedCleanupPublicPostgres",
             "TestF06OrganizationAdmissionBoundariesPublicPostgres",
         }
         self.assertTrue(required <= RUNNER.REQUIRED)
@@ -1108,6 +1109,28 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
     def test_zero_cases_is_not_success(self):
         with self.assertRaises(RuntimeError):
             RUNNER.verify_results([{"Action": "pass", "Package": "token"}])
+
+    def test_retention_batch_lock_and_atomic_retirement_children_are_required(self):
+        root = "TestReplayRetentionBoundedCleanupPublicPostgres"
+        names = {
+            "one-large-unsettled-stream-is-row-bounded-and-retryable",
+            "locked-oldest-is-skipped-and-next-cycle-resumes",
+            "settled-stream-delete-is-bounded",
+            "active-case-parent-lock-serializes-copy-with-cleanup",
+            "tombstone-key-clear-is-atomic-bounded-and-protected-rows-do-not-starve",
+            "case-delete-and-payload-cascade-are-bounded",
+            "capacity-sample-10000-live-frames-plan-and-single-batch",
+            "content-lock-timeout-rolls-back-and-next-call-recovers",
+        }
+        self.assertEqual(RUNNER.EXACT_REQUIRED_CHILDREN[root], names)
+        for name in names:
+            full = root + "/" + name
+            for bad in (None, "skip", "fail"):
+                events = [event for event in self.events() if event.get("Test") != full]
+                if bad:
+                    events.append({"Action": bad, "Test": full})
+                with self.subTest(child=name, bad=bad), self.assertRaises(RuntimeError):
+                    RUNNER.verify_results(events)
 
     def test_missing_suite_is_not_success(self):
         with self.assertRaises(RuntimeError):

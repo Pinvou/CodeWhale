@@ -632,35 +632,17 @@ func (r *PostgresRepository) RecordDeliveryConfirmation(ctx context.Context, usa
 
 func (r *PostgresRepository) CleanupReplayRetention(ctx context.Context) error {
 	now := r.now()
-	tx, err := r.pool.Begin(ctx)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback(ctx)
-	caseGuard := `NOT EXISTS(SELECT 1 FROM usage_replay_retention_cases retention WHERE retention.usage_request_id=%s AND retention.released_at IS NULL AND retention.expires_at>$1)`
-	// Unsettled rows retain their original content identity/clock but not their
-	// ciphertext. That prevents sequence reuse and result lifetime renewal.
 	for _, table := range []string{"usage_stream_events", "usage_replay_results"} {
-		if _, err := tx.Exec(ctx, `UPDATE `+table+` content SET encrypted_payload='\x'::bytea,expires_at=LEAST(COALESCE(expires_at,created_at+interval '720 hours'),created_at+interval '720 hours') WHERE octet_length(encrypted_payload)>0 AND (expires_at<=$1 OR created_at<=$2) AND EXISTS(SELECT 1 FROM usage_requests request WHERE request.id=content.usage_request_id AND request.status NOT IN ('COMMITTED','RELEASED')) AND `+fmt.Sprintf(caseGuard, "content.usage_request_id"), now, now.Add(-720*time.Hour)); err != nil {
-			return err
+		for _, unsettled := range []bool{true, false} {
+			if err := r.cleanupReplayContentBatch(ctx, table, unsettled, now); err != nil {
+				return err
+			}
 		}
 	}
-	if _, err := tx.Exec(ctx, `DELETE FROM usage_stream_events event WHERE expires_at<=$1 AND EXISTS(SELECT 1 FROM usage_requests request WHERE request.id=event.usage_request_id AND request.status IN ('COMMITTED','RELEASED')) AND `+fmt.Sprintf(caseGuard, "event.usage_request_id"), now); err != nil {
+	if err := r.cleanupReplayTombstoneBatch(ctx, now); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(ctx, `DELETE FROM usage_replay_results result WHERE expires_at<=$1 AND EXISTS(SELECT 1 FROM usage_requests request WHERE request.id=result.usage_request_id AND request.status IN ('COMMITTED','RELEASED')) AND `+fmt.Sprintf(caseGuard, "result.usage_request_id"), now); err != nil {
-		return err
-	}
-	if _, err := tx.Exec(ctx, `UPDATE usage_requests request SET idempotency_key_digest=NULL,updated_at=$1 FROM usage_idempotency_tombstones tombstone WHERE tombstone.usage_request_id=request.id AND tombstone.expires_at<=$1 AND `+fmt.Sprintf(caseGuard, "request.id"), now); err != nil {
-		return err
-	}
-	if _, err := tx.Exec(ctx, `DELETE FROM usage_idempotency_tombstones tombstone WHERE expires_at<=$1 AND `+fmt.Sprintf(caseGuard, "tombstone.usage_request_id"), now); err != nil {
-		return err
-	}
-	if _, err := tx.Exec(ctx, `DELETE FROM usage_replay_retention_cases WHERE (released_at IS NOT NULL AND clear_by<=$1) OR expires_at<=$1`, now); err != nil {
-		return err
-	}
-	return tx.Commit(ctx)
+	return r.cleanupReplayCaseBatch(ctx, now)
 }
 
 func (r *PostgresRepository) CreateReplayRetentionCase(ctx context.Context, usageID, ownerID uuid.UUID, reason, scope string, reviewAt, expiresAt time.Time) (uuid.UUID, error) {
@@ -675,6 +657,13 @@ func (r *PostgresRepository) CreateReplayRetentionCase(ctx context.Context, usag
 	}
 	defer tx.Rollback(ctx)
 	if err := lockReplayUsageTx(ctx, tx, usageID); err != nil {
+		return uuid.Nil, err
+	}
+	// Cleanup takes this same parent lock before rechecking case protection.
+	// Serialize the copy with deletion without changing the shared user-lock
+	// ordering used by anonymization and ordinary replay writers.
+	var lockedID uuid.UUID
+	if err := tx.QueryRow(ctx, `SELECT id FROM usage_requests WHERE id=$1 FOR UPDATE`, usageID).Scan(&lockedID); err != nil {
 		return uuid.Nil, err
 	}
 	caseID := uuid.Must(uuid.NewV7())

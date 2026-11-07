@@ -13,8 +13,9 @@ import (
 )
 
 type recoveryReportingStore struct {
-	err   error
-	steps []string
+	err        error
+	cleanupErr error
+	steps      []string
 }
 
 func (s *recoveryReportingStore) RecoverUncertainDispatches(context.Context) error {
@@ -24,7 +25,7 @@ func (s *recoveryReportingStore) RecoverUncertainDispatches(context.Context) err
 
 func (s *recoveryReportingStore) CleanupReplayRetention(context.Context) error {
 	s.steps = append(s.steps, "cleanup")
-	return nil
+	return s.cleanupErr
 }
 
 func TestReplayRetentionRecoveryErrorIsVisibleWithoutPrivateCause(t *testing.T) {
@@ -61,5 +62,33 @@ func TestReplayRetentionDoesNotLogSuccessfulOrCanceledRecovery(t *testing.T) {
 		if logs.Len() != 0 || !reflect.DeepEqual(store.steps, []string{"recover", "cleanup"}) {
 			t.Fatalf("success/cancellation produced an error or changed order: canceled=%t logs=%s", canceled, logs.String())
 		}
+	}
+}
+
+func TestReplayRetentionCleanupFailureIsPrivateAndNextCycleContinues(t *testing.T) {
+	store := &recoveryReportingStore{cleanupErr: errors.New("controlled-private-retention-value")}
+	worker := NewReplayRetentionWorker(store, time.Hour)
+	var logs bytes.Buffer
+	worker.logger = slog.New(slog.NewJSONHandler(&logs, nil))
+	worker.runCycle(context.Background())
+	var event map[string]any
+	if err := json.Unmarshal(logs.Bytes(), &event); err != nil {
+		t.Fatal("expected one structured retention failure", err)
+	}
+	if event["error_code"] != "REPLAY_RETENTION_CLEANUP_RETRY_PENDING" || strings.Contains(logs.String(), store.cleanupErr.Error()) {
+		t.Fatal("retention failure hidden or private error exposed", logs.String())
+	}
+	store.cleanupErr = nil
+	logs.Reset()
+	worker.runCycle(context.Background())
+	if logs.Len() != 0 || !reflect.DeepEqual(store.steps, []string{"recover", "cleanup", "recover", "cleanup"}) {
+		t.Fatal("healthy next cycle did not continue normally", store.steps, logs.String())
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	store.cleanupErr = context.Canceled
+	worker.runCycle(ctx)
+	if logs.Len() != 0 {
+		t.Fatal("shutdown cancellation reported as retention error", logs.String())
 	}
 }
