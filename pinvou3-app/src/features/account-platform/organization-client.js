@@ -163,6 +163,8 @@ function prepareOrganizationRead(client, resource, signal, fresh) {
  client.invalidateRead('account', resource);
 }
 
+export const adminOrganizationPageLimit = 25;
+
 export class OrganizationAdminClient {
  constructor(client) { this.client = client; }
  async summary(org, signal, { fresh = false } = {}) {
@@ -171,7 +173,7 @@ export class OrganizationAdminClient {
   return requireOrganization(await this.client.request('account', resource, signal), org);
  }
  async list(filters = {}, signal, { fresh = false } = {}) {
-  const query = new URLSearchParams({ limit: '25' });
+  const query = new URLSearchParams({ limit: String(adminOrganizationPageLimit) });
   for (const name of ['q', 'status', 'cursor']) if (filters[name]) query.set(name, filters[name]);
   const resource = `/admin/v1/organizations?${query}`;
   prepareOrganizationRead(this.client, resource, signal, fresh);
