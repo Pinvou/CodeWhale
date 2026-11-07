@@ -93,8 +93,9 @@ impl DeepSeekClient {
             // ApiProvider::Anthropic or a base URL on api.anthropic.com, the
             // same endpoint predicate the thinking gates below use — narrows
             // just those three root keywords, merging branch properties and
-            // noting the dropped constraint; the object type is restored when
-            // the merge leaves a populated schema whose root declared none, a
+            // noting the dropped constraint (a generic note when the branches
+            // carry no properties); the object type is restored whenever a
+            // stripped composition leaves a typeless root, a
             // root that is not a JSON object at all is replaced by an empty
             // object (the API defines input_schema as a JSON Schema object),
             // and root enum/not, dependent keywords, and the declared root
@@ -1265,6 +1266,23 @@ mod tests {
         DeepSeekClient::new(&config).expect("Model Studio Messages client constructs")
     }
 
+    fn openmodel_test_client() -> DeepSeekClient {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let config = crate::config::Config {
+            provider: Some("openmodel".to_string()),
+            providers: Some(crate::config::ProvidersConfig {
+                openmodel: crate::config::ProviderConfig {
+                    api_key: Some("test-key".to_string()),
+                    base_url: Some("https://api.openmodel.ai".to_string()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        DeepSeekClient::new(&config).expect("Openmodel Messages client constructs")
+    }
+
     fn root_union_tool(name: &str, description: &str) -> Tool {
         Tool {
             tool_type: None,
@@ -1307,11 +1325,13 @@ mod tests {
         // CHANGELOG 0.9.0; anthropics/claude-code#4886/#30212) is specific
         // to the genuine Anthropic validator, so every other Messages lane
         // ships the schema exactly as declared — one shared builder serves
-        // DeepSeek, MiniMax, and Model Studio, and this pins all three.
+        // DeepSeek, MiniMax, Model Studio, and Openmodel, and this pins all
+        // four.
         for client in [
             deepseek_test_client(crate::config::DEFAULT_DEEPSEEK_ANTHROPIC_BASE_URL),
             minimax_test_client(),
             modelstudio_test_client(crate::config::MODELSTUDIO_TOKEN_PLAN_ANTHROPIC_BASE_URL),
+            openmodel_test_client(),
         ] {
             let mut request = request_with("claude-sonnet-4-6", None, None, None);
             request.tools = Some(vec![root_union_tool("apply_patch", "Patch files")]);
@@ -1333,6 +1353,53 @@ mod tests {
                 "no constraint note is synthesized for a schema that ships as declared: {body}"
             );
         }
+    }
+
+    #[test]
+    fn non_anthropic_messages_lane_ships_a_schema_the_registry_would_normalize() {
+        // "Verbatim" means exactly as declared, not merely un-flattened: a
+        // bare object is a shape the shared sanitize() normalization would
+        // mutate (bare-object properties injection), so byte identity here
+        // proves the verbatim branch runs no normalization at all.
+        let client = deepseek_test_client(crate::config::DEFAULT_DEEPSEEK_ANTHROPIC_BASE_URL);
+        let mut tool = root_union_tool("mcp_bare", "MCP tool");
+        tool.input_schema = json!({"type": "object"});
+        let mut request = request_with("claude-sonnet-4-6", None, None, None);
+        request.tools = Some(vec![tool]);
+
+        let body = client.build_anthropic_body(&request, true);
+
+        assert_eq!(
+            body["tools"][0]["input_schema"],
+            json!({"type": "object"}),
+            "the bare object must ship without the properties injection: {body}"
+        );
+    }
+
+    #[test]
+    fn anthropic_identity_narrows_even_on_a_proxy_base_url() {
+        // Provider identity stays in the gate because ANTHROPIC_BASE_URL-style
+        // overrides commonly front the genuine validator through a proxy: a
+        // native-identity client at a non-anthropic.com base URL must still
+        // narrow, which is the only behavior that distinguishes the identity
+        // disjunct from the endpoint clause.
+        let client = anthropic_test_client(Some("https://proxy.example.org"));
+        let mut request = request_with("claude-sonnet-4-6", None, None, None);
+        request.tools = Some(vec![root_union_tool("apply_patch", "Patch files")]);
+
+        let body = client.build_anthropic_body(&request, true);
+
+        let schema = &body["tools"][0]["input_schema"];
+        assert!(
+            schema.get("oneOf").is_none(),
+            "the Anthropic identity alone must narrow on a proxy base URL: {schema}"
+        );
+        assert_eq!(
+            body["tools"][0]["description"],
+            "Patch files\n\nExactly one of these parameter groups must be provided: `changes` | `patch`.",
+            "the dropped constraint is still surfaced through the proxy: {}",
+            body["tools"][0]["description"]
+        );
     }
 
     #[test]
