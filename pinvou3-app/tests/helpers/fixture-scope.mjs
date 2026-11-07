@@ -101,14 +101,26 @@ export function ownedDirectory(label) {
 // The supervisor handles killed processes. These hooks cover cooperative
 // cancellation and ordinary completion without replacing the primary failure.
 let stopping;
+let signalDeadline;
 async function stop(signal) {
-  if (stopping) return stopping;
-  stopping = fixtureScope.close().catch(error => {
+  if (signal && !signalDeadline) {
+    signalDeadline = setTimeout(() => {
+      console.error('fixture signal cleanup deadline exceeded; unfinished resource receipts retained');
+      process.exit(process.exitCode || 1);
+    }, 30_000);
+  }
+  stopping ||= fixtureScope.close().catch(error => {
     console.error(error);
     process.exitCode = process.exitCode || 1;
   });
   await stopping;
-  if (signal) process.exitCode = process.exitCode || (signal === 'SIGINT' ? 130 : 143);
+  if (signal) {
+    clearTimeout(signalDeadline);
+    // exitCode alone cannot stop a listener left alive by a failed close.
+    // A nonzero primary failure and unfinished receipts remain authoritative;
+    // only the owning supervisor may retire any surviving child processes.
+    process.exit(process.exitCode || (signal === 'SIGINT' ? 130 : 143));
+  }
 }
 process.once('beforeExit', () => stop());
 process.once('SIGINT', () => stop('SIGINT'));
