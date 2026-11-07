@@ -1114,6 +1114,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
         root = "TestReplayRetentionBoundedCleanupPublicPostgres"
         names = {
             "one-large-unsettled-stream-is-row-bounded-and-retryable",
+            "actual-worker-drains-full-batch-without-hourly-wait",
             "locked-oldest-is-skipped-and-next-cycle-resumes",
             "settled-stream-delete-is-bounded",
             "active-case-parent-lock-serializes-copy-with-cleanup",

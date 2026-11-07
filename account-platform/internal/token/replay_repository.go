@@ -631,18 +631,27 @@ func (r *PostgresRepository) RecordDeliveryConfirmation(ctx context.Context, usa
 }
 
 func (r *PostgresRepository) CleanupReplayRetention(ctx context.Context) error {
+	_, err := r.cleanupReplayRetentionBatch(ctx)
+	return err
+}
+
+func (r *PostgresRepository) cleanupReplayRetentionBatch(ctx context.Context) (bool, error) {
 	now := r.now()
+	more := false
 	for _, table := range []string{"usage_stream_events", "usage_replay_results"} {
 		for _, unsettled := range []bool{true, false} {
-			if err := r.cleanupReplayContentBatch(ctx, table, unsettled, now); err != nil {
-				return err
+			if err := r.cleanupReplayContentBatch(ctx, table, unsettled, now, &more); err != nil {
+				return false, err
 			}
 		}
 	}
-	if err := r.cleanupReplayTombstoneBatch(ctx, now); err != nil {
-		return err
+	if err := r.cleanupReplayTombstoneBatch(ctx, now, &more); err != nil {
+		return false, err
 	}
-	return r.cleanupReplayCaseBatch(ctx, now)
+	if err := r.cleanupReplayCaseBatch(ctx, now, &more); err != nil {
+		return false, err
+	}
+	return more, nil
 }
 
 func (r *PostgresRepository) CreateReplayRetentionCase(ctx context.Context, usageID, ownerID uuid.UUID, reason, scope string, reviewAt, expiresAt time.Time) (uuid.UUID, error) {

@@ -39,13 +39,15 @@ func TestReplayRetentionBoundedCleanupPublicPostgres(t *testing.T) {
 		id := newStream()
 		before := f05CancellationRecoveryFacts(t, r, ctx, id)
 		clock = base.Add(31 * 24 * time.Hour)
-		if err := r.CleanupReplayRetention(ctx); err != nil {
+		more, err := r.cleanupReplayRetentionBatch(ctx)
+		if err != nil || !more {
 			t.Fatal(err)
 		}
 		if n := count(id, true); n != 5 {
 			t.Fatal("cleanup was not bounded by content rows", n)
 		}
-		if err := r.CleanupReplayRetention(ctx); err != nil {
+		more, err = r.cleanupReplayRetentionBatch(ctx)
+		if err != nil || more {
 			t.Fatal(err)
 		}
 		if n := count(id, true); n != 0 || count(id, false) != replayCleanupBatchSize+5 {
@@ -53,6 +55,42 @@ func TestReplayRetentionBoundedCleanupPublicPostgres(t *testing.T) {
 		}
 		if after := f05CancellationRecoveryFacts(t, r, ctx, id); after != before {
 			t.Fatal("cleanup changed financial/identity/audit facts")
+		}
+	})
+	t.Run("actual-worker-drains-full-batch-without-hourly-wait", func(t *testing.T) {
+		id := newStream()
+		clock = base.Add(31 * 24 * time.Hour)
+		worker := NewReplayRetentionWorker(r, time.Hour)
+		workerCtx, cancel := context.WithCancel(ctx)
+		done := make(chan struct{})
+		go func() { defer close(done); worker.Run(workerCtx) }()
+		defer func() {
+			cancel()
+			select {
+			case <-done:
+			case <-time.After(2 * time.Second):
+				t.Error("actual retention worker did not retire")
+			}
+		}()
+		deadline := time.NewTimer(4 * time.Second)
+		defer deadline.Stop()
+		for count(id, true) != 0 {
+			select {
+			case <-deadline.C:
+				t.Fatal("actual worker postponed five remaining frames to hourly tick")
+			case <-ctx.Done():
+				t.Fatal(ctx.Err())
+			case <-time.After(10 * time.Millisecond):
+			}
+		}
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Fatal("actual worker remained after cancellation")
+		}
+		if count(id, false) != replayCleanupBatchSize+5 {
+			t.Fatal("worker catchup removed unresolved metadata")
 		}
 	})
 	t.Run("locked-oldest-is-skipped-and-next-cycle-resumes", func(t *testing.T) {
