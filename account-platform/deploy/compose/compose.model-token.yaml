@@ -130,6 +130,8 @@ services:
     environment:
       NATS_URL: ${MODEL_TOKEN_NATS_URL:?set the single authenticated event cluster}
       NATS_CREDENTIALS_FILE: /var/run/secrets/pinvou/nats/client.creds
+      APPROVAL_RELAY_HEALTHCHECK_URL: http://127.0.0.1:9090/health/ready/approval-authorization
+      APPROVAL_RELAY_MONITOR_SCOPE: ${COMPOSE_PROJECT_NAME}
       APPROVAL_RELAY_NATS_CREDENTIALS_FILE: /var/run/secrets/pinvou/approval-nats/client.creds
       APPROVAL_RELAY_NATS_CURRENT_PUBLIC_KEYS_FILE: /var/run/public/pinvou/nats-authorization/current-v2.json
       APPROVAL_RELAY_NATS_CURRENT_PUBLIC_KEYS_SHA256: ${APPROVAL_RELAY_NATS_CURRENT_PUBLIC_KEYS_SHA256:?set independently trusted current v2 public artifact digest}

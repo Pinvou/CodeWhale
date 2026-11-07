@@ -1527,7 +1527,8 @@ jobs:
           chart="$GITHUB_WORKSPACE/account-platform/deploy/helm/account-platform"
           "$PINVOU_TEST_KMS_HELM_BINARY" template prometheus-ci "$chart" \
             -f "$chart/values-model-token-test.yaml" \
-            --set observability.prometheusRulesEnabled=true --set availability.enabled=true > "$fixture/rendered.yaml"
+            --set observability.prometheusRulesEnabled=true --set availability.enabled=true \
+            --set approvalRelay.requireReady=true --set replicas.eventRelay=2 > "$fixture/rendered.yaml"
           npm --prefix account-platform run test:prometheus-rules -- \
             --rendered "$fixture/rendered.yaml" --output "$fixture/cases" --promtool "$PINVOU_TEST_PROMTOOL_BINARY"
 
