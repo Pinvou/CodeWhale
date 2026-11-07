@@ -22,7 +22,7 @@ use rand::Rng as _;
 use reqwest::{Method, StatusCode, Url};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, OwnedMutexGuard};
 
 use crate::platform::credential_store::{
     CredentialReference, CredentialStore, SystemCredentialStore,
@@ -590,14 +590,14 @@ pub struct ApiResponse {
 }
 
 pub struct AccountPlatformState {
-    session: Mutex<Option<RuntimeSession>>,
+    session: Arc<Mutex<Option<RuntimeSession>>>,
     login_guard: Mutex<()>,
-    refresh_guard: Mutex<()>,
-    registration_guard: std::sync::Mutex<()>,
+    refresh_guard: Arc<Mutex<()>>,
+    registration_guard: Arc<Mutex<()>>,
     client: reqwest::Client,
     credentials: Arc<dyn CredentialStore + Send + Sync>,
-    session_generation: AtomicU64,
-    restore_suppressed: AtomicBool,
+    session_generation: Arc<AtomicU64>,
+    restore_suppressed: Arc<AtomicBool>,
     device_id: String,
 }
 
@@ -610,14 +610,14 @@ impl AccountPlatformState {
             .build()
             .map_err(|error| format!("account_platform_http_client_unavailable: {error}"))?;
         Ok(Self {
-            session: Mutex::new(None),
+            session: Arc::new(Mutex::new(None)),
             login_guard: Mutex::new(()),
-            refresh_guard: Mutex::new(()),
-            registration_guard: std::sync::Mutex::new(()),
+            refresh_guard: Arc::default(),
+            registration_guard: Arc::default(),
             client,
             credentials: Arc::new(SystemCredentialStore::new()),
-            session_generation: AtomicU64::new(0),
-            restore_suppressed: AtomicBool::new(false),
+            session_generation: Arc::default(),
+            restore_suppressed: Arc::default(),
             device_id: random_urlsafe(24),
         })
     }
@@ -669,17 +669,17 @@ impl AccountPlatformState {
     pub async fn login(&self, credentials: LoginCredentials) -> Result<SessionStatus, String> {
         let _login = self.login_guard.lock().await;
         let config = AccountPlatformConfig::current()?;
-        let _refresh = self.refresh_guard.lock().await;
+        let refresh = self.refresh_guard.clone().lock_owned().await;
         let account = credentials.account.trim();
         if account.is_empty()
             || account.len() > 320
             || credentials.password.is_empty()
             || credentials.password.len() > 4096
         {
-            self.clear_authentication().await?;
+            drop(self.clear_authentication(refresh).await?);
             return Err("oidc_credentials_invalid: account or password is invalid".to_string());
         }
-        self.clear_authentication().await?;
+        let refresh = self.clear_authentication(refresh).await?;
         let form = [
             ("grant_type", "password"),
             ("client_id", config.client_id.as_str()),
@@ -690,8 +690,7 @@ impl AccountPlatformState {
         let tokens = self
             .token_request(&config, &form, TokenFlow::Password)
             .await?;
-        self.install_tokens(tokens, None).await?;
-        drop(_refresh);
+        self.install_tokens(refresh, tokens, None).await?;
         Ok(self.status().await)
     }
 
@@ -741,17 +740,19 @@ impl AccountPlatformState {
                 "mobile_auth_response_invalid: registration recovery credential is invalid"
                     .to_string()
             })?;
-            let _registration = self.registration_guard.lock().map_err(|_| {
-                "registration_recovery_unavailable: credential lock failed".to_string()
-            })?;
-            if self
-                .credentials
-                .set(
-                    &CredentialReference::for_account_platform_registration(),
-                    &encoded,
-                )
-                .is_ok()
-            {
+            let registration = self.registration_guard.clone().lock_owned().await;
+            let credentials = self.credentials.clone();
+            let persisted = run_credential_io(move || {
+                let _registration = registration;
+                Ok(credentials
+                    .set(
+                        &CredentialReference::for_account_platform_registration(),
+                        &encoded,
+                    )
+                    .is_ok())
+            })
+            .await?;
+            if persisted {
                 if let Some(object) = result.as_object_mut() {
                     object.remove("registration_query_token");
                     object.insert("recovery_persisted".to_string(), Value::Bool(true));
@@ -847,7 +848,7 @@ impl AccountPlatformState {
     pub async fn register_mobile(&self, input: MobileRegistration) -> Result<Value, String> {
         let config = AccountPlatformConfig::current()?;
         let query_token = if input.registration_query_token.trim().is_empty() {
-            let pending = self.pending_registration()?.ok_or_else(|| {
+            let pending = self.pending_registration().await?.ok_or_else(|| {
                 "registration_recovery_missing: pending registration credential is unavailable"
                     .to_string()
             })?;
@@ -890,7 +891,7 @@ impl AccountPlatformState {
     }
 
     pub async fn registration_status(&self) -> Result<Value, String> {
-        let Some(pending) = self.pending_registration()? else {
+        let Some(pending) = self.pending_registration().await? else {
             return Ok(Value::Null);
         };
         let config = AccountPlatformConfig::current()?;
@@ -904,7 +905,7 @@ impl AccountPlatformState {
         {
             Ok(result) => result,
             Err(error) if error.starts_with("registration_recovery_not_found:") => {
-                self.clear_pending_registration(&pending)?;
+                self.clear_pending_registration(pending).await?;
                 return Err(
                     "registration_recovery_unavailable: registration operation cannot be queried"
                         .to_string(),
@@ -922,38 +923,32 @@ impl AccountPlatformState {
             result.get("status").and_then(Value::as_str),
             Some("ACTIVE" | "COMPENSATED" | "EXPIRED")
         ) {
-            self.clear_pending_registration(&pending)?;
+            self.clear_pending_registration(pending).await?;
         }
         Ok(result)
     }
 
-    fn clear_pending_registration(
+    async fn clear_pending_registration(
         &self,
-        expected: &PendingRegistrationCredential,
+        expected: PendingRegistrationCredential,
     ) -> Result<(), String> {
-        let _registration = self
-            .registration_guard
-            .lock()
-            .map_err(|_| "registration_recovery_unavailable: credential lock failed".to_string())?;
-        if self.pending_registration()?.as_ref() == Some(expected) {
-            self.credentials
-                .delete(&CredentialReference::for_account_platform_registration())
-                .map_err(credential_store_error)?;
-        }
-        Ok(())
+        let registration = self.registration_guard.clone().lock_owned().await;
+        let credentials = self.credentials.clone();
+        run_credential_io(move || {
+            let _registration = registration;
+            if read_pending_registration(credentials.as_ref())? == Some(expected) {
+                credentials
+                    .delete(&CredentialReference::for_account_platform_registration())
+                    .map_err(credential_store_error)?;
+            }
+            Ok(())
+        })
+        .await
     }
 
-    fn pending_registration(&self) -> Result<Option<PendingRegistrationCredential>, String> {
-        let Some(encoded) = self
-            .credentials
-            .get(&CredentialReference::for_account_platform_registration())
-            .map_err(credential_store_error)?
-        else {
-            return Ok(None);
-        };
-        serde_json::from_str(&encoded).map(Some).map_err(|_| {
-            "registration_recovery_invalid: stored registration credential is invalid".to_string()
-        })
+    async fn pending_registration(&self) -> Result<Option<PendingRegistrationCredential>, String> {
+        let credentials = self.credentials.clone();
+        run_credential_io(move || read_pending_registration(credentials.as_ref())).await
     }
 
     pub async fn login_sms(
@@ -962,8 +957,8 @@ impl AccountPlatformState {
     ) -> Result<SessionStatus, String> {
         let _login = self.login_guard.lock().await;
         let config = AccountPlatformConfig::current()?;
-        let _refresh = self.refresh_guard.lock().await;
-        self.clear_authentication().await?;
+        let refresh = self.refresh_guard.clone().lock_owned().await;
+        let refresh = self.clear_authentication(refresh).await?;
         let form = [
             ("grant_type", "password"),
             ("client_id", config.client_id.as_str()),
@@ -973,15 +968,13 @@ impl AccountPlatformState {
             ("scope", "openid profile email offline_access"),
         ];
         let tokens = self.token_request(&config, &form, TokenFlow::Sms).await?;
-        self.install_tokens(tokens, None).await?;
-        drop(_refresh);
+        self.install_tokens(refresh, tokens, None).await?;
         Ok(self.status().await)
     }
 
     pub async fn logout(&self) -> Result<SessionStatus, String> {
-        let _refresh = self.refresh_guard.lock().await;
-        self.clear_authentication().await?;
-        drop(_refresh);
+        let refresh = self.refresh_guard.clone().lock_owned().await;
+        drop(self.clear_authentication(refresh).await?);
         Ok(self.status().await)
     }
 
@@ -1222,6 +1215,7 @@ impl AccountPlatformState {
 
     async fn install_tokens(
         &self,
+        refresh: OwnedMutexGuard<()>,
         tokens: TokenResponse,
         previous_refresh_token: Option<&str>,
     ) -> Result<String, String> {
@@ -1250,31 +1244,43 @@ impl AccountPlatformState {
                 .fetch_add(1, Ordering::Relaxed)
                 .saturating_add(1)
         };
-        self.credentials
-            .set(
-                &CredentialReference::for_account_platform_refresh_token(),
-                &refresh_token,
-            )
-            .map_err(credential_store_error)?;
-        let account_user_id = self
-            .session
-            .lock()
-            .await
-            .as_ref()
-            .and_then(|session| session.account_user_id.clone());
-        *self.session.lock().await = Some(RuntimeSession {
-            access_token: access_token.clone(),
-            refresh_token,
-            expires_at,
-            generation,
-            account_user_id,
-        });
-        // Only a newly persisted explicit login can reverse local sign-out.
-        // A refresh of an earlier session must never undo that boundary.
-        if previous_refresh_token.is_none() {
-            self.restore_suppressed.store(false, Ordering::SeqCst);
-        }
-        Ok(access_token)
+        let credentials = self.credentials.clone();
+        let session = self.session.clone();
+        let restore_suppressed = self.restore_suppressed.clone();
+        let explicit_login = previous_refresh_token.is_none();
+        // The caller can stop waiting after the blocking write has begun.
+        // Keep the refresh guard through persistence and in-memory publication.
+        tokio::spawn(async move {
+            let _refresh = refresh;
+            let refresh_token = run_credential_io(move || {
+                credentials
+                    .set(
+                        &CredentialReference::for_account_platform_refresh_token(),
+                        &refresh_token,
+                    )
+                    .map_err(credential_store_error)?;
+                Ok(refresh_token)
+            })
+            .await?;
+            let mut session = session.lock().await;
+            let account_user_id = session
+                .as_ref()
+                .and_then(|session| session.account_user_id.clone());
+            *session = Some(RuntimeSession {
+                access_token: access_token.clone(),
+                refresh_token,
+                expires_at,
+                generation,
+                account_user_id,
+            });
+            // Only a newly persisted explicit login can reverse local sign-out.
+            if explicit_login {
+                restore_suppressed.store(false, Ordering::SeqCst);
+            }
+            Ok(access_token)
+        })
+        .await
+        .map_err(|_| credential_store_error("session credential task failed"))?
     }
 
     async fn access_token(
@@ -1327,7 +1333,7 @@ impl AccountPlatformState {
                 return Ok(session.access_token.clone());
             }
         }
-        let _refresh = self.refresh_guard.lock().await;
+        let refresh = self.refresh_guard.clone().lock_owned().await;
         if let Some(generation) = expected {
             self.require_generation(generation).await?;
         }
@@ -1342,7 +1348,8 @@ impl AccountPlatformState {
         let refresh_token = match self.runtime_refresh_token().await {
             Some(token) => token,
             None => self
-                .persisted_refresh_token()?
+                .persisted_refresh_token()
+                .await?
                 .ok_or_else(|| "authentication_required: sign in to Pinvou first".to_string())?,
         };
         let form = [
@@ -1354,23 +1361,24 @@ impl AccountPlatformState {
             Ok(tokens) => tokens,
             Err(error) => {
                 if refresh_failure_invalidates_authentication(&error) {
-                    self.clear_authentication().await?;
+                    drop(self.clear_authentication(refresh).await?);
                 }
                 return Err(error);
             }
         };
-        self.install_tokens(tokens, Some(&refresh_token)).await
+        self.install_tokens(refresh, tokens, Some(&refresh_token))
+            .await
     }
 
     async fn ensure_restored(&self, config: &AccountPlatformConfig) -> Result<bool, String> {
         if self.session.lock().await.is_some() {
             return Ok(true);
         }
-        let _refresh = self.refresh_guard.lock().await;
+        let refresh = self.refresh_guard.clone().lock_owned().await;
         if self.session.lock().await.is_some() {
             return Ok(true);
         }
-        let Some(refresh_token) = self.persisted_refresh_token()? else {
+        let Some(refresh_token) = self.persisted_refresh_token().await? else {
             return Ok(false);
         };
         let form = [
@@ -1382,12 +1390,13 @@ impl AccountPlatformState {
             Ok(tokens) => tokens,
             Err(error) => {
                 if refresh_failure_invalidates_authentication(&error) {
-                    self.clear_authentication().await?;
+                    drop(self.clear_authentication(refresh).await?);
                 }
                 return Err(error);
             }
         };
-        self.install_tokens(tokens, Some(&refresh_token)).await?;
+        self.install_tokens(refresh, tokens, Some(&refresh_token))
+            .await?;
         Ok(true)
     }
 
@@ -1400,25 +1409,45 @@ impl AccountPlatformState {
             .filter(|token| !token.is_empty())
     }
 
-    fn persisted_refresh_token(&self) -> Result<Option<String>, String> {
+    async fn persisted_refresh_token(&self) -> Result<Option<String>, String> {
         if self.restore_suppressed.load(Ordering::SeqCst) {
             return Ok(None);
         }
-        self.credentials
-            .get(&CredentialReference::for_account_platform_refresh_token())
-            .map(|value| value.filter(|token| !token.trim().is_empty()))
-            .map_err(credential_store_error)
+        let credentials = self.credentials.clone();
+        run_credential_io(move || {
+            credentials
+                .get(&CredentialReference::for_account_platform_refresh_token())
+                .map(|value| value.filter(|token| !token.trim().is_empty()))
+                .map_err(credential_store_error)
+        })
+        .await
     }
 
-    async fn clear_authentication(&self) -> Result<(), String> {
-        // Deleting from the OS store can fail. Keep this process signed out
-        // even if that store (or its cache) still returns the old refresh token.
-        self.restore_suppressed.store(true, Ordering::SeqCst);
-        self.session_generation.fetch_add(1, Ordering::Relaxed);
-        *self.session.lock().await = None;
-        self.credentials
-            .delete(&CredentialReference::for_account_platform_refresh_token())
-            .map_err(credential_store_error)
+    async fn clear_authentication(
+        &self,
+        refresh: OwnedMutexGuard<()>,
+    ) -> Result<OwnedMutexGuard<()>, String> {
+        let credentials = self.credentials.clone();
+        let session = self.session.clone();
+        let generation = self.session_generation.clone();
+        let restore_suppressed = self.restore_suppressed.clone();
+        tokio::spawn(async move {
+            // Keep this process signed out even if the OS store cannot delete
+            // the old credential. The guard also fences a new login from the
+            // old delete if the caller stops waiting.
+            restore_suppressed.store(true, Ordering::SeqCst);
+            generation.fetch_add(1, Ordering::Relaxed);
+            *session.lock().await = None;
+            run_credential_io(move || {
+                credentials
+                    .delete(&CredentialReference::for_account_platform_refresh_token())
+                    .map_err(credential_store_error)
+            })
+            .await?;
+            Ok(refresh)
+        })
+        .await
+        .map_err(|_| credential_store_error("session credential task failed"))?
     }
 
     async fn send(
@@ -1677,6 +1706,28 @@ fn session_error_code(error: &str) -> &'static str {
 
 fn credential_store_error(error: impl std::fmt::Display) -> String {
     format!("credential_store_unavailable: {error}")
+}
+
+async fn run_credential_io<T: Send + 'static>(
+    operation: impl FnOnce() -> Result<T, String> + Send + 'static,
+) -> Result<T, String> {
+    tokio::task::spawn_blocking(operation)
+        .await
+        .map_err(|_| credential_store_error("blocking credential task failed"))?
+}
+
+fn read_pending_registration(
+    credentials: &dyn CredentialStore,
+) -> Result<Option<PendingRegistrationCredential>, String> {
+    let Some(encoded) = credentials
+        .get(&CredentialReference::for_account_platform_registration())
+        .map_err(credential_store_error)?
+    else {
+        return Ok(None);
+    };
+    serde_json::from_str(&encoded).map(Some).map_err(|_| {
+        "registration_recovery_invalid: stored registration credential is invalid".to_string()
+    })
 }
 
 fn account_public_operation(path: &str) -> &'static str {
@@ -2415,7 +2466,23 @@ mod tests {
     #[derive(Default)]
     struct MemoryCredentialStore {
         values: StdMutex<HashMap<(String, String), String>>,
+        fail_read: AtomicBool,
+        fail_write: AtomicBool,
         fail_delete: std::sync::atomic::AtomicBool,
+        blocked: StdMutex<Option<BlockedCredentialOperation>>,
+    }
+
+    #[derive(PartialEq, Eq)]
+    enum CredentialOperation {
+        Read,
+        Write,
+        Delete,
+    }
+
+    struct BlockedCredentialOperation {
+        operation: CredentialOperation,
+        started: tokio::sync::oneshot::Sender<()>,
+        release: std::sync::mpsc::Receiver<()>,
     }
 
     impl MemoryCredentialStore {
@@ -2434,6 +2501,37 @@ mod tests {
             self.get(&CredentialReference::for_account_platform_refresh_token())
                 .unwrap()
         }
+
+        fn block_next(
+            &self,
+            operation: CredentialOperation,
+        ) -> (
+            tokio::sync::oneshot::Receiver<()>,
+            std::sync::mpsc::Sender<()>,
+        ) {
+            let (started, wait_for_start) = tokio::sync::oneshot::channel();
+            let (unblock, release) = std::sync::mpsc::channel();
+            *self.blocked.lock().unwrap() = Some(BlockedCredentialOperation {
+                operation,
+                started,
+                release,
+            });
+            (wait_for_start, unblock)
+        }
+
+        fn pause(&self, operation: CredentialOperation) {
+            let blocked = self
+                .blocked
+                .lock()
+                .unwrap()
+                .take_if(|gate| gate.operation == operation);
+            if let Some(gate) = blocked {
+                gate.started.send(()).unwrap();
+                gate.release
+                    .recv_timeout(Duration::from_secs(5))
+                    .expect("async caller could not release the credential operation");
+            }
+        }
     }
 
     impl CredentialStore for MemoryCredentialStore {
@@ -2441,6 +2539,12 @@ mod tests {
             &self,
             reference: &CredentialReference,
         ) -> Result<Option<String>, crate::platform::credential_store::CredentialError> {
+            self.pause(CredentialOperation::Read);
+            if self.fail_read.load(Ordering::SeqCst) {
+                return Err(crate::platform::credential_store::CredentialError::new(
+                    "controlled read failure".to_string(),
+                ));
+            }
             Ok(self
                 .values
                 .lock()
@@ -2454,6 +2558,12 @@ mod tests {
             reference: &CredentialReference,
             value: &str,
         ) -> Result<(), crate::platform::credential_store::CredentialError> {
+            self.pause(CredentialOperation::Write);
+            if self.fail_write.load(Ordering::SeqCst) {
+                return Err(crate::platform::credential_store::CredentialError::new(
+                    "controlled write failure".to_string(),
+                ));
+            }
             self.values.lock().unwrap().insert(
                 (reference.service.clone(), reference.account.clone()),
                 value.to_string(),
@@ -2465,6 +2575,7 @@ mod tests {
             &self,
             reference: &CredentialReference,
         ) -> Result<(), crate::platform::credential_store::CredentialError> {
+            self.pause(CredentialOperation::Delete);
             if self.fail_delete.load(Ordering::SeqCst) {
                 return Err(crate::platform::credential_store::CredentialError::new(
                     "controlled delete failure".to_string(),
@@ -2547,21 +2658,21 @@ mod tests {
     }
 
     fn portal_test_state(
-        credentials: Arc<MemoryCredentialStore>,
+        credentials: Arc<dyn CredentialStore + Send + Sync>,
         session: Option<RuntimeSession>,
     ) -> AccountPlatformState {
         AccountPlatformState {
-            session: Mutex::new(session),
+            session: Arc::new(Mutex::new(session)),
             login_guard: Mutex::new(()),
-            refresh_guard: Mutex::new(()),
-            registration_guard: std::sync::Mutex::new(()),
+            refresh_guard: Arc::default(),
+            registration_guard: Arc::default(),
             client: reqwest::Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
                 .build()
                 .unwrap(),
             credentials,
-            session_generation: AtomicU64::new(0),
-            restore_suppressed: AtomicBool::new(false),
+            session_generation: Arc::default(),
+            restore_suppressed: Arc::default(),
             device_id: "fixture-device".to_string(),
         }
     }
@@ -3536,7 +3647,9 @@ mod tests {
         ));
         let s = state.clone();
         let result = tokio::spawn(async move {
+            let refresh = s.refresh_guard.clone().lock_owned().await;
             s.install_tokens(
+                refresh,
                 TokenResponse {
                     access_token: "public-access".into(),
                     refresh_token: Some("public-refresh".into()),
@@ -3606,7 +3719,7 @@ mod tests {
         finish_tx.send(()).unwrap();
         first.await.unwrap().unwrap();
         thread.join().unwrap();
-        let pending = state.pending_registration().unwrap();
+        let pending = state.pending_registration().await.unwrap();
         assert!(
             pending.is_some_and(|p| p.operation_id == "22222222-2222-4222-8222-222222222222"),
             "old terminal registration query deleted newly persisted recovery credential"
@@ -4221,6 +4334,155 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn slow_credential_read_leaves_account_runtime_responsive() {
+        let credentials = Arc::new(MemoryCredentialStore::default());
+        let (started, release) = credentials.block_next(CredentialOperation::Read);
+        let state = portal_test_state(credentials, None);
+        let restore = tokio::spawn(async move { state.ensure_restored(&config()).await });
+        tokio::time::timeout(Duration::from_secs(10), started)
+            .await
+            .expect("credential read did not start")
+            .unwrap();
+        release.send(()).unwrap();
+        assert!(!restore.await.unwrap().unwrap());
+    }
+
+    #[tokio::test]
+    async fn cancelled_refresh_write_cannot_restore_after_logout() {
+        let credentials = MemoryCredentialStore::with_refresh_token("old-refresh");
+        let (started, release) = credentials.block_next(CredentialOperation::Write);
+        let state = Arc::new(portal_test_state(
+            credentials.clone(),
+            Some(portal_runtime_session("old-access", "old-refresh")),
+        ));
+        let (url, server) = spawn_portal_fixture(1, |request| {
+            assert!(request.contains("refresh_token=old-refresh"));
+            (
+                200,
+                r#"{"access_token":"rotated-access","refresh_token":"rotated-refresh","expires_in":300}"#,
+            )
+        });
+        let mut config = config();
+        config.token_url = url;
+        let refreshing = state.clone();
+        let refresh =
+            tokio::spawn(async move { refreshing.access_token(&config, Some("old-access")).await });
+        tokio::time::timeout(Duration::from_secs(10), started)
+            .await
+            .expect("credential write did not start")
+            .unwrap();
+        refresh.abort();
+        assert!(refresh.await.unwrap_err().is_cancelled());
+        assert!(state.refresh_guard.try_lock().is_err());
+        let logout = state.logout();
+        tokio::pin!(logout);
+        tokio::select! {
+            biased;
+            result = &mut logout => panic!("logout overtook a credential write: {result:?}"),
+            _ = std::future::ready(()) => {}
+        }
+        release.send(()).unwrap();
+        assert!(!logout.await.unwrap().authenticated);
+        server.join().unwrap();
+        assert!(state.session.lock().await.is_none());
+        assert!(credentials.refresh_token().is_none());
+        assert!(state.restore_suppressed.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn cancelled_logout_delete_cannot_remove_new_login_credential() {
+        let _env = crate::platform::paths::tests::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _snapshot = AccountEnvSnapshot::take();
+        let credentials = MemoryCredentialStore::with_refresh_token("old-refresh");
+        let (started, release) = credentials.block_next(CredentialOperation::Delete);
+        let state = Arc::new(portal_test_state(
+            credentials.clone(),
+            Some(portal_runtime_session("old-access", "old-refresh")),
+        ));
+        let (url, server) = spawn_portal_fixture(1, |request| {
+            assert!(request.contains("grant_type=password"));
+            (
+                200,
+                r#"{"access_token":"new-access","refresh_token":"new-refresh","expires_in":300}"#,
+            )
+        });
+        independent_env_config(&url);
+        let signing_out = state.clone();
+        let logout = tokio::spawn(async move { signing_out.logout().await });
+        tokio::time::timeout(Duration::from_secs(10), started)
+            .await
+            .expect("credential delete did not start")
+            .unwrap();
+        logout.abort();
+        assert!(logout.await.unwrap_err().is_cancelled());
+        assert!(state.refresh_guard.try_lock().is_err());
+        assert!(state.session.lock().await.is_none());
+        let login = state.login(LoginCredentials {
+            account: "controlled-user".into(),
+            password: "controlled-password".into(),
+        });
+        tokio::pin!(login);
+        tokio::select! {
+            biased;
+            result = &mut login => panic!("login overtook a credential delete: {result:?}"),
+            _ = std::future::ready(()) => {}
+        }
+        release.send(()).unwrap();
+        assert!(login.await.unwrap().authenticated);
+        server.join().unwrap();
+        assert_eq!(
+            state.runtime_refresh_token().await.as_deref(),
+            Some("new-refresh")
+        );
+        assert_eq!(credentials.refresh_token().as_deref(), Some("new-refresh"));
+    }
+
+    #[tokio::test]
+    async fn credential_read_and_write_errors_keep_session_state_consistent() {
+        let credentials = MemoryCredentialStore::with_refresh_token("old-refresh");
+        let state = portal_test_state(credentials.clone(), None);
+        credentials.fail_read.store(true, Ordering::SeqCst);
+        let error = state.ensure_restored(&config()).await.unwrap_err();
+        assert_eq!(
+            error,
+            "credential_store_unavailable: controlled read failure"
+        );
+        assert!(state.session.lock().await.is_none());
+        credentials.fail_read.store(false, Ordering::SeqCst);
+
+        let state = portal_test_state(
+            credentials.clone(),
+            Some(portal_runtime_session("old-access", "old-refresh")),
+        );
+        credentials.fail_write.store(true, Ordering::SeqCst);
+        let (url, server) = spawn_portal_fixture(1, |request| {
+            assert!(request.contains("refresh_token=old-refresh"));
+            (
+                200,
+                r#"{"access_token":"rotated-access","refresh_token":"rotated-refresh","expires_in":300}"#,
+            )
+        });
+        let mut config = config();
+        config.token_url = url;
+        let error = state
+            .access_token(&config, Some("old-access"))
+            .await
+            .unwrap_err();
+        server.join().unwrap();
+        assert_eq!(
+            error,
+            "credential_store_unavailable: controlled write failure"
+        );
+        assert_eq!(
+            state.runtime_refresh_token().await.as_deref(),
+            Some("old-refresh")
+        );
+        assert_eq!(credentials.refresh_token().as_deref(), Some("old-refresh"));
+    }
+
+    #[tokio::test]
     async fn logout_delete_failure_blocks_ensure_restored() {
         let credentials = MemoryCredentialStore::with_refresh_token("obsolete-refresh");
         credentials.fail_delete.store(true, Ordering::SeqCst);
@@ -4320,7 +4582,7 @@ mod tests {
         assert!(result.unwrap().authenticated);
         assert_eq!(credentials.refresh_token().as_deref(), Some("new-refresh"));
         assert_eq!(
-            state.persisted_refresh_token().unwrap().as_deref(),
+            state.persisted_refresh_token().await.unwrap().as_deref(),
             Some("new-refresh")
         );
     }
