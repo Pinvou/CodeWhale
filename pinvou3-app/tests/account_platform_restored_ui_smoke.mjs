@@ -815,7 +815,7 @@ try {
     await page.waitForFunction(() => [...document.querySelectorAll('[data-org-action=quota-allocation] > button')].some(node => node.textContent === window.restored.copy().organization.retry && !node.disabled));
     await page.evaluate(() => { window.restored.unknown = false; window.restored.membershipVersion = 2; window.restored.replayVersion = 2; });
     await click(`${form} > button`, await page.evaluate(() => window.restored.copy().organization.retry));
-    await page.waitForFunction(() => !document.querySelector('[data-org-action=quota-allocation] fieldset').disabled && document.querySelector('[data-org-action=quota-allocation]')?.textContent.includes(window.restored.copy().organization.saved));
+    await page.waitForFunction(() => document.querySelector('[data-org-action=quota-allocation] fieldset')?.disabled === false && document.querySelector('[data-org-action=quota-allocation]')?.textContent.includes(window.restored.copy().organization.saved));
     await page.$eval(`${form} input`, node => { Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(node, '2'); node.dispatchEvent(new Event('input', { bubbles: true })); });
     await page.$eval(form, node => node.requestSubmit()); await page.waitForSelector('.ap-org-confirm-dialog'); await page.click('.ap-org-confirm-dialog footer button:last-child');
     await page.waitForFunction(() => window.restored.calls.filter(call => call.url.endsWith('/quota-grants:batch')).length === 3);
