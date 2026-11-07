@@ -79,3 +79,16 @@
 .adm-restored-shell .adm-platform-roles .adm-role-permission .adm-identifier-value code{font-size:12px;margin:0}
 
 @media(pointer:coarse){.adm-restored-shell .adm-platform-roles .adm-role-permission-groups summary{box-sizing:border-box;min-height:44px}}
+
+/* Keep optional profile labels subordinate to the canonical binding target. */
+.adm-restored-shell .adm-platform-roles .adm-binding-identity{display:block;min-width:0;max-width:310px;margin:0}
+.adm-binding-identity>strong{display:block;font-size:14px;line-height:1.5;overflow-wrap:anywhere}
+.adm-binding-identity>small{display:block;margin-top:5px;color:var(--adm-muted);font-size:12px;line-height:1.6;overflow-wrap:anywhere}
+.adm-binding-identity code,.adm-role-grant .adm-role-preview .adm-binding-identity code,.adm-restored-shell .adm-platform-roles .adm-role-binding-table .adm-binding-identity code{font-size:12px;overflow-wrap:anywhere;white-space:normal}
+.adm-binding-lookup-note{margin:12px 20px;font-size:12px;line-height:1.6;color:var(--adm-muted)}
+.adm-binding-danger{color:#b42318!important;background:#fff!important;border:1px solid #e7b7b3!important;border-radius:9px;font-weight:650}
+.adm-binding-danger:hover{background:#fff0ee!important;border-color:#b42318!important}
+.adm-binding-danger:focus-visible{outline:3px solid #b42318;outline-offset:3px}
+.adm-role-revoke-review .adm-role-preview code{font-size:12px}
+.adm-role-revoke-review .adm-role-drawer-foot .adm-binding-danger{padding:0 14px}
+@media(pointer:coarse){.adm-binding-danger{min-height:44px}}
