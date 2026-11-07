@@ -247,7 +247,7 @@ fn oneof_semantic_defect_at(schema: &Value, path: &str) -> Option<String> {
     match schema {
         Value::Object(obj) => {
             if let Some(branches) = obj.get("oneOf").and_then(Value::as_array)
-                && let Some(reason) = oneof_node_defect(branches, path)
+                && let Some(reason) = oneof_node_defect(branches, obj.get("properties"), path)
             {
                 return Some(reason);
             }
@@ -292,8 +292,10 @@ fn oneof_semantic_defect_at(schema: &Value, path: &str) -> Option<String> {
 }
 
 /// Judge one `oneOf` node's branches by R1/R2/R3; `path` is the path of
-/// the object holding the `oneOf` keyword.
-fn oneof_node_defect(branches: &[Value], path: &str) -> Option<String> {
+/// the object holding the `oneOf` keyword, whose `properties` (when
+/// present) is the root-level constraint set the shared-group arm
+/// normalizes branch-local entries against.
+fn oneof_node_defect(branches: &[Value], root_props: Option<&Value>, path: &str) -> Option<String> {
     // R1: identical branches.
     for (left, left_branch) in branches.iter().enumerate() {
         for (right, right_branch) in branches.iter().enumerate().skip(left + 1) {
@@ -339,8 +341,13 @@ fn oneof_node_defect(branches: &[Value], path: &str) -> Option<String> {
     // matches both alternatives: it always carries the shared group, each
     // branch's property map admits the sibling's fields as additional,
     // and the identical shared-field constraints accept the same values —
-    // so no instance matches exactly one. Branches whose constraints on
-    // the shared fields DIVERGE stay untouched: a const/enum pin
+    // so no instance matches exactly one. Branch-local shared-field
+    // entries that the containing root already implies (vacuous `{}`, or
+    // identical to the root's own schema for that field) normalize to
+    // absent, so root-implied variants of the same surviving group
+    // compare equal (review 5812238335). Branches whose constraints on
+    // the shared fields still DIVERGE after that normalization stay
+    // untouched: a const/enum pin
     // (`xai_sanitize_passes_const_differentiated_union_through_without_touching_consts`)
     // or a nested subconstraint
     // (`xai_sanitize_flattens_oneof_distinct_only_before_recursive_normalization`)
@@ -351,6 +358,7 @@ fn oneof_node_defect(branches: &[Value], path: &str) -> Option<String> {
     // matches exactly one, and instances carrying both were already
     // ambiguous in the original (the union's own semantics, not a
     // preprocessing loss).
+    let root_props = root_props.and_then(Value::as_object);
     let mut group_shapes: std::collections::BTreeMap<(String, String), usize> =
         std::collections::BTreeMap::new();
     for branch in branches {
@@ -370,16 +378,31 @@ fn oneof_node_defect(branches: &[Value], path: &str) -> Option<String> {
             continue;
         }
         // Constraint signature for the shared fields only: the branch's
-        // own property entries for those names (absent = unconstrained
-        // here). Equal groups with diverging signatures may still
-        // discriminate; identical signatures cannot.
+        // own property entries for those names, with two normalizations
+        // for constraints the containing root already implies for every
+        // root-valid instance (review 5812238335): a vacuous `{}` entry
+        // constrains nothing, and an entry identical to the root's own
+        // schema for that field adds nothing the root has not already
+        // required. Both normalize to absent so root-implied variants
+        // compare equal; any other divergence keeps its verbatim shape
+        // and the branch stays untouched (conservative pass-through on
+        // that bounded fail-open remainder, disclosed in review
+        // 5811598796's reply — deeper subset relations are a solver).
         let signature = match branch.get("properties").and_then(Value::as_object) {
             Some(props) => {
-                let shared: serde_json::Map<String, Value> = props
-                    .iter()
-                    .filter(|(key, _)| names.contains(&key.as_str()))
-                    .map(|(key, value)| (key.clone(), value.clone()))
-                    .collect();
+                let mut shared: serde_json::Map<String, Value> = serde_json::Map::new();
+                for (key, value) in props {
+                    if !names.contains(&key.as_str()) {
+                        continue;
+                    }
+                    let vacuous = value.as_object().is_some_and(|entry| entry.is_empty());
+                    let root_identical = root_props
+                        .and_then(|rp| rp.get(key.as_str()))
+                        .is_some_and(|root_entry| root_entry == value);
+                    if !vacuous && !root_identical {
+                        shared.insert(key.clone(), value.clone());
+                    }
+                }
                 Value::Object(shared)
             }
             None => Value::Object(serde_json::Map::new()),
@@ -2650,6 +2673,32 @@ mod tests {
             "branches with different required groups must stay discriminating"
         );
 
+        // R2 root-implied shared entries (review 5812238335): a vacuous
+        // `{}` entry and an entry identical to the containing root's own
+        // schema for the field both constrain nothing beyond the root for
+        // root-valid instances — they normalize to absent and the equal
+        // groups fire.
+        let r2_root_implied = json!({
+            "type": "object",
+            "properties": {"c": {"type": "string"}},
+            "oneOf": [
+                {
+                    "type": "object",
+                    "properties": {"a": {"type": "string"}, "c": {}},
+                    "required": ["c"]
+                },
+                {
+                    "type": "object",
+                    "properties": {"b": {"type": "string"}, "c": {"type": "string"}},
+                    "required": ["c"]
+                }
+            ]
+        });
+        assert!(
+            oneof_semantic_defect(&r2_root_implied).is_some(),
+            "root-implied shared entries must compare equal"
+        );
+
         // R3: a dead inner oneOf kills its branch and propagates to the
         // root. The death is manufactured by the same normalization the
         // rehearsal runs, so the fixture is normalized first.
@@ -2842,6 +2891,63 @@ mod tests {
         assert!(
             schema.get("oneOf").is_none() && schema.get("anyOf").is_none(),
             "the shared-required union must not reach the wire: {schema}"
+        );
+        assert_eq!(
+            schema["required"],
+            json!(["c"]),
+            "the root's own requirement must survive"
+        );
+        assert_eq!(note, None);
+        let validator = jsonschema::options()
+            .with_draft(jsonschema::Draft::Draft202012)
+            .build(&schema)
+            .expect("the flattened schema must compile");
+        assert!(
+            validator.is_valid(&json!({"a": "x", "c": "z"})),
+            "a valid instance of the original union must stay valid: {schema}"
+        );
+    }
+
+    #[test]
+    fn xai_sanitize_registry_path_flattens_root_implied_shared_required_union() {
+        // Review 5812238335: the branch-local shared-field signatures
+        // diverge (`c:{}` versus `c:{{"type":"string"}}`), but the
+        // containing root itself requires `c` and declares it a string —
+        // both constraints are implied by the root for every root-valid
+        // instance, so the unequal signatures are equivalent and the
+        // shared-group arm must fire. The full production order
+        // (sanitize THEN canonicalize_schema, registry.rs:278-279) lands
+        // on the flattening fallback, keeping {"a":"x","c":"z"} valid.
+        let mut schema = json!({
+            "type": "object",
+            "properties": {
+                "a": {"type": "string"},
+                "b": {"type": "string"},
+                "c": {"type": "string"}
+            },
+            "required": ["c"],
+            "oneOf": [
+                {
+                    "type": "object",
+                    "properties": {"a": {"type": "string"}, "c": {}},
+                    "required": ["b", "c"]
+                },
+                {
+                    "type": "object",
+                    "properties": {"b": {"type": "string"}, "c": {"type": "string"}},
+                    "required": ["a", "c"]
+                }
+            ]
+        });
+        sanitize(&mut schema);
+        crate::tools::schema_canonicalize::canonicalize_schema(&mut schema);
+
+        let note = sanitize_for_xai_parameters(&mut schema);
+
+        assert_eq!(schema["type"], "object");
+        assert!(
+            schema.get("oneOf").is_none() && schema.get("anyOf").is_none(),
+            "the root-implied shared-required union must not reach the wire: {schema}"
         );
         assert_eq!(
             schema["required"],
