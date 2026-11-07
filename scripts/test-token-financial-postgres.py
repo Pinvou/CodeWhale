@@ -33,6 +33,7 @@ REQUIRED = {
     "TestCredentialFailurePersistenceBoundariesPostgres",
     "TestCredentialFailurePreparationFencePostgres",
     "TestCredentialFailureExistingEventsPostgres",
+    "TestCredentialWindowRevocationOwnerPostgres",
     "TestHoldAcknowledgementSurvivesDispatchPersistenceFailurePostgres",
     "TestCancellationReceivedReadRechecksReservationPostgres",
     "TestCancellationFirstUserPreservesConfirmedReceiptPostgres",
