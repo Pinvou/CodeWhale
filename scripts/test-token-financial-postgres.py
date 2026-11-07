@@ -149,7 +149,7 @@ TOKEN_SCHEMA_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/toke
 TOKEN_SCHEMA_REQUIRED = {"TestManagementPublicMigrationInstallation"}
 MIGRATIONS_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/platform/migrations"
 MIGRATIONS_REQUIRED = {"TestPinnedMigrationLedgerPostgresIntegration", "TestRestrictedMigrationLedgerPostgresIntegration"}
-SCHEMA_REQUIRED = {"TestLatePaymentQueryRegisteredIdentity", "TestReconciliationFairRetryRegisteredIdentity", "TestF09EntitlementPackageIndexPublicMigration", "TestTokenWalletReceiptSchemaPostgres", "TestLegacyEntitlementUpgradeAdmissionPostgres", "TestUsageWaiverHistoricalSchemaPostgres", "TestBillingOrdinaryReplayOriginalMigrationPostgres", "TestUnknownProviderEntryPublicMigrationPostgres", "TestLegacyExpiry025UpgradePreservesOriginalLedgerPostgres", "TestF04PublicTokenUserOwnerAuthorityAndDirectory", "TestManualRetentionHistoricalHardeningPostgres"}
+SCHEMA_REQUIRED = {"TestPublishedRollbackPackageIntegrityPostgres", "TestLatePaymentQueryRegisteredIdentity", "TestReconciliationFairRetryRegisteredIdentity", "TestF09EntitlementPackageIndexPublicMigration", "TestTokenWalletReceiptSchemaPostgres", "TestLegacyEntitlementUpgradeAdmissionPostgres", "TestUsageWaiverHistoricalSchemaPostgres", "TestBillingOrdinaryReplayOriginalMigrationPostgres", "TestUnknownProviderEntryPublicMigrationPostgres", "TestLegacyExpiry025UpgradePreservesOriginalLedgerPostgres", "TestF04PublicTokenUserOwnerAuthorityAndDirectory", "TestManualRetentionHistoricalHardeningPostgres"}
 OWNER_REQUIRED = {
     "TestPaymentActionAdmissionPostgres",
     "TestF06OrganizationWalletRequiresLifecycleEvidence",
@@ -280,6 +280,17 @@ EXACT_REQUIRED_CHILDREN = {
         "binding-cannot-cross-connections",
         "missing-search-path-schema-rejects-before-preparation",
         "another-workflow-selects-its-own-visible-ledger",
+    },
+    "TestPublishedRollbackPackageIntegrityPostgres": {
+        "published-down-legacy-crlf-no-create", "recorded-up-identity-before-down", "unrelated-custom-history",
+        "published-ledger-cannot-become-custom/LF", "published-ledger-cannot-become-custom/CRLF",
+        "forward-only-history-cannot-authorize-rollback",
+    },
+    "TestUsageWaiverHistoricalSchemaPostgres": {
+        "fresh-exact-history-append-only-runtime-and-forward-only",
+        "old-LF/changed-current-down-before-up", "old-LF/changed-current-down-before-verify",
+        "old-CRLF/changed-current-down-before-up", "old-CRLF/changed-current-down-before-verify",
+        "unknown-checksum", "wrong-legacy-shape",
     },
     "TestRechargeProductCommandAtomicityPostgres": {"active-provider-admission-candidate-progress"},
     "TestProductManualAdmissionPostgres": {
