@@ -134,5 +134,8 @@ async function stop(signal) {
   }
 }
 process.once('beforeExit', () => stop());
-process.once('SIGINT', () => stop('SIGINT'));
-process.once('SIGTERM', () => stop('SIGTERM'));
+// Keep listeners present throughout async cleanup. Dependencies such as
+// signal-exit re-send the OS signal if they appear to be its sole listener.
+// stop() still shares one close promise and never resets the deadline.
+process.on('SIGINT', () => stop('SIGINT'));
+process.on('SIGTERM', () => stop('SIGTERM'));
