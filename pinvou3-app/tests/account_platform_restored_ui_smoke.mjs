@@ -1195,11 +1195,18 @@ try {
   });
   const roleWords = () => page.evaluate(() => window.restored.copy().rolePresentation);
   const readyRoles = async () => { await fresh('?mode=admin&section=roles'); await page.waitForSelector('.adm-role-table tbody tr'); };
+  const typeGrantTarget = async target => {
+    const closedAdvanced = '[role=dialog] details.adm-grant-manual-target:not([open]) > summary';
+    if (await page.$(closedAdvanced)) await page.click(closedAdvanced);
+    const input = '[role=dialog] .adm-role-field input';
+    await page.waitForSelector(input, { visible: true });
+    await page.type(input, target);
+  };
   const openRoleReview = async (target = '22222222-2222-4222-8222-222222222222', role = 'PLATFORM_BILLING_OPERATOR', expires = '') => {
     const words = await roleWords();
     await click('.adm-role-workspace-head button', words.newGrant);
     await page.waitForSelector('[role=dialog] .adm-role-grant');
-    await page.type('[role=dialog] .adm-role-field input', target);
+    await typeGrantTarget(target);
     await click('[role=dialog] button', words.next);
     await page.select('[role=dialog] select', role);
     if (expires) await page.$$eval('[role=dialog] input[type=datetime-local]', (nodes, value) => {
@@ -1384,7 +1391,7 @@ try {
     await click('[role=dialog] button', words.searchAction);
     await page.waitForFunction(() => [...document.querySelectorAll('[role=dialog] option')].some(node => node.textContent.startsWith('coded-user')));
     await page.select('[role=dialog] select', '22222222-2222-4222-8222-222222222222');
-    assert.equal(await page.$eval('[role=dialog] .adm-role-field input', node => node.value), '22222222-2222-4222-8222-222222222222');
+    assert.equal(await page.$eval('[role=dialog] .adm-grant-target-readback code', node => node.textContent), '22222222-2222-4222-8222-222222222222');
     const lookups = await page.evaluate(() => window.restored.calls.filter(call => call.url.includes('/user-code-lookups/')));
     assert.equal(lookups.length, 1); assert.ok(decodeURIComponent(lookups[0].url).endsWith('/USR-0123-4567-89AB-CDEF-MV'));
     await page.keyboard.press('Escape'); await page.waitForFunction(() => !document.querySelector('[role=dialog]'));
@@ -1516,7 +1523,7 @@ try {
   await run('roles: temporary sensitive export cannot bypass expiry and reason validation in the wizard', async () => {
     await readyRoles(); const words = await roleWords();
     await click('.adm-role-workspace-head button', words.newGrant);
-    await page.type('[role=dialog] .adm-role-field input', '22222222-2222-4222-8222-222222222222');
+    await typeGrantTarget('22222222-2222-4222-8222-222222222222');
     await click('[role=dialog] button', words.next);
     await page.select('[role=dialog] select', 'PLATFORM_AUDIT_PII_EXPORT');
     await click('[role=dialog] button', words.next);
