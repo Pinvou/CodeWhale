@@ -46,6 +46,10 @@ type ownedStopReconciliationStore interface {
 	StopReconciliationOwned(context.Context, uuid.UUID, int, string) error
 }
 
+type sequentialReconciliationStore interface {
+	ClaimReconciliationExcluding(context.Context, int, time.Duration, []uuid.UUID) ([]ReconciliationItem, error)
+}
+
 func legacyResponseStateSplit(request UsageRequest) bool {
 	return request.Status == "UPSTREAM_ACTIVE" && request.ExecutionStatus == "SETTLEMENT_PENDING"
 }
@@ -102,8 +106,30 @@ func (r *PostgresRepository) RecoverLegacyResponseStateSplits(ctx context.Contex
 }
 
 func (r *PostgresRepository) ClaimReconciliation(ctx context.Context, limit int, lease time.Duration) ([]ReconciliationItem, error) {
+	return r.claimReconciliation(ctx, limit, lease, nil)
+}
+
+// ClaimReconciliationExcluding lets a serial worker take a fresh lease only
+// when it is ready to process the item. The bounded exclusion set prevents an
+// immediately-due, unresolved item from consuming the same cycle repeatedly.
+func (r *PostgresRepository) ClaimReconciliationExcluding(ctx context.Context, limit int, lease time.Duration, excluded []uuid.UUID) ([]ReconciliationItem, error) {
+	if len(excluded) > 100 {
+		return nil, ErrForbidden
+	}
+	for _, id := range excluded {
+		if id == uuid.Nil {
+			return nil, ErrForbidden
+		}
+	}
+	return r.claimReconciliation(ctx, limit, lease, excluded)
+}
+
+func (r *PostgresRepository) claimReconciliation(ctx context.Context, limit int, lease time.Duration, excluded []uuid.UUID) ([]ReconciliationItem, error) {
 	if limit < 1 || limit > 100 || lease < 10*time.Second || lease > 10*time.Minute {
 		return nil, ErrForbidden
+	}
+	if excluded == nil {
+		excluded = []uuid.UUID{}
 	}
 	now := r.now()
 	rows, err := r.pool.Query(ctx, `
@@ -112,6 +138,7 @@ WITH candidates AS (
     FROM usage_requests request
     LEFT JOIN usage_attempts attempt ON attempt.usage_request_id = request.id
     WHERE request.status IN ('SETTLEMENT_PENDING','REVIEW')
+	  AND NOT(request.id=ANY($4::uuid[]))
       -- Cancellation owns recovery of a possibly committed pre-dispatch hold.
       -- It must retain the exact facts used by the existing release proof.
       AND request.error_class IS DISTINCT FROM 'cancel_hold_recovery_unconfirmed'
@@ -133,7 +160,7 @@ RETURNING request.id,request.idempotency_key_digest,request.user_id,request.sess
           request.token_account_id,request.credential_id,request.wallet_id,request.price_version_id,request.hold_id,
           request.model,request.status,request.maximum_microcredits,request.actual_microcredits,request.error_class,
 		  request.started_at,request.updated_at,request.usage_snapshot,request.request_snapshot,
-		  candidates.provider_id,candidates.adapter_version,candidates.upstream_request_id,request.reconciliation_attempts`, now, limit, now.Add(lease))
+		  candidates.provider_id,candidates.adapter_version,candidates.upstream_request_id,request.reconciliation_attempts`, now, limit, now.Add(lease), excluded)
 	if err != nil {
 		return nil, err
 	}
@@ -507,11 +534,46 @@ func (r *UsageReconciler) runOnce(ctx context.Context) {
 	if _, err := r.store.RecoverLegacyResponseStateSplits(ctx, r.batchSize); err != nil {
 		r.logger.Error("legacy response-state recovery failed", "error", err)
 	}
+	if store, ok := r.store.(sequentialReconciliationStore); ok {
+		seen := make([]uuid.UUID, 0, r.batchSize)
+		for len(seen) < r.batchSize {
+			if ctx.Err() != nil {
+				return
+			}
+			items, err := store.ClaimReconciliationExcluding(ctx, 1, r.lease, seen)
+			if err != nil {
+				r.logger.Error("claim failed", "error", err)
+				return
+			}
+			if len(items) == 0 {
+				return
+			}
+			if len(items) != 1 || items[0].ID == uuid.Nil {
+				r.logger.Error("reconciliation claim violated bounded selection", "error_code", "RECONCILIATION_CLAIM_INVALID")
+				return
+			}
+			for _, id := range seen {
+				if id == items[0].ID {
+					r.logger.Error("reconciliation claim repeated an excluded item", "error_code", "RECONCILIATION_CLAIM_INVALID")
+					return
+				}
+			}
+			seen = append(seen, items[0].ID)
+			r.processClaimed(ctx, items)
+		}
+		return
+	}
+	// Stores without sequential claiming retain the existing bounded bulk contract.
+	// The production PostgreSQL store implements the sequential contract above.
 	items, err := r.store.ClaimReconciliation(ctx, r.batchSize, r.lease)
 	if err != nil {
 		r.logger.Error("claim failed", "error", err)
 		return
 	}
+	r.processClaimed(ctx, items)
+}
+
+func (r *UsageReconciler) processClaimed(ctx context.Context, items []ReconciliationItem) {
 	for _, item := range items {
 		if handled, err := r.reconcileCapturedReferenceDeadline(ctx, item, "", false); handled {
 			if err != nil {
