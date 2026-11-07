@@ -446,7 +446,6 @@ const fn platform_supported() -> bool {
     platform::desktop_oidc_supported()
 }
 
-#[derive(Debug)]
 struct RuntimeSession {
     access_token: String,
     refresh_token: String,
