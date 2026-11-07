@@ -34,9 +34,12 @@
 .adm-shell.adm-restored-shell .adm-platform-roles .adm-role-panel{margin:0;padding:0;overflow:hidden}
 .adm-shell.adm-restored-shell .adm-platform-roles .adm-role-panel .adm-table-wrap{max-width:100%;margin:0}
 .adm-shell.adm-restored-shell .adm-platform-roles .adm-role-panel .adm-pagination{padding:13px 20px;border-top:1px solid var(--adm-line)}
-.adm-shell.adm-restored-shell .adm-platform-roles .adm-role-catalog-layout{grid-template-columns:minmax(0,1fr) minmax(300px,.9fr);min-height:520px}
-.adm-shell.adm-restored-shell .adm-platform-roles .adm-role-catalog-layout>.adm-table-wrap{min-width:0;max-height:580px;margin:0;overflow:auto}
-.adm-shell.adm-restored-shell .adm-platform-roles .adm-role-detail{max-height:580px;overflow:auto}
+.adm-shell.adm-restored-shell .adm-platform-roles .adm-role-catalog-layout{grid-template-columns:minmax(0,1fr) minmax(300px,.9fr);align-items:start;min-height:0}
+.adm-shell.adm-restored-shell .adm-platform-roles .adm-role-catalog-layout>.adm-table-wrap{min-width:0;margin:0;overflow:auto}
+.adm-shell.adm-restored-shell .adm-platform-roles .adm-role-detail{overflow:visible}
+.adm-restored-shell .adm-role-catalog-layout>.adm-role-detail>header>div{flex:1 1 0;min-width:0}
+/* Safari 14 supports break-word. The explicit flex size lets the text shrink without anywhere. */
+.adm-restored-shell .adm-role-catalog-layout>.adm-role-detail>header h3,.adm-restored-shell .adm-role-catalog-layout>.adm-role-detail>header code,.adm-restored-shell .adm-role-catalog-layout>.adm-role-detail>p{overflow-wrap:break-word;white-space:normal}
 .adm-shell.adm-restored-shell .adm-platform-roles .adm-role-table{min-width:0;width:100%;margin:0}
 .adm-shell.adm-restored-shell .adm-platform-roles .adm-role-table td{vertical-align:top}
 .adm-shell.adm-restored-shell .adm-platform-roles .adm-role-table td:first-child{width:78%;overflow-wrap:anywhere}
@@ -92,3 +95,9 @@
 .adm-role-revoke-review .adm-role-preview code{font-size:12px}
 .adm-role-revoke-review .adm-role-drawer-foot .adm-binding-danger{padding:0 14px}
 @media(pointer:coarse){.adm-binding-danger{min-height:44px}}
+
+.adm-shell.adm-restored-shell .adm-platform-roles .adm-role-catalog-back{max-width:100%;min-height:40px;margin:12px 0 0;padding:0 12px;border:1px solid var(--adm-line);border-radius:9px;background:var(--adm-surface);color:var(--adm-primary);text-align:left;white-space:normal}
+.adm-restored-shell .adm-platform-roles .adm-role-detail h3,.adm-restored-shell .adm-platform-roles .adm-role-table .adm-name-link{scroll-margin-top:calc(var(--adm-topbar,72px) + 24px)}
+.adm-restored-shell .adm-platform-roles .adm-role-detail h3:focus{outline:3px solid var(--adm-primary);outline-offset:4px;border-radius:3px}
+.adm-restored-shell .adm-platform-roles .adm-role-catalog-layout>.adm-table-wrap:focus-visible{outline-offset:-3px}
+@media(pointer:coarse){.adm-shell.adm-restored-shell .adm-platform-roles .adm-role-catalog-back{min-height:44px}}

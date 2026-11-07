@@ -97,6 +97,9 @@ const roleCatalog = [
   { code: 'PLATFORM_AUDIT_PII_EXPORT', scope: 'PLATFORM', assignable: true, permissions: ['platform.audit.pii.export'] },
   { code: 'PLATFORM_SUPER_ADMIN', scope: 'PLATFORM', assignable: false, permissions: ['platform.roles.read', 'platform.roles.assign'] },
 ];
+const longCatalogRole = new URLSearchParams(location.search).has('longCatalogRole') ? {
+  code: `PLATFORM_EXTENSION_${'X'.repeat(160)}_TAIL`, scope: 'PLATFORM', assignable: false, description: `Extension${'W'.repeat(160)}Description`, permissions: ['platform.roles.read'],
+} : null;
 c.roleBindings = [{ binding_id: '66666666-6666-4666-8666-666666666666', user_id: otherID, role_code: 'PLATFORM_AUDITOR', scope: 'PLATFORM', grant_source: 'ADMIN', status: 'ACTIVE', starts_at: '2026-10-01T00:00:00Z', expires_at: null }];
 c.roleReceipts = new Map();
 // The service computes the current projection on each read/replay. A controlled
@@ -151,7 +154,7 @@ globalThis.fetch = async (input, options = {}) => {
     if (pathname === `/api/admin/token/admin/v1/models/${id}`) return json({ model: { model_id: id, display_name: 'Controlled model', lifecycle_status: 'PUBLISHED', catalog_version: 1, capability_version: 1, protocol_code: 'CHAT', protocol_version: 1, context_length: 128000, maximum_output_tokens: 4096, supported_modalities: ['text'], tokenizer_version: 'CONTROLLED_V1', runtime_protocol: null, source_available: true }, draft: null, protocol: {}, formula: null, as_of: '2026-10-29T00:00:00Z' });
     if (pathname === `/api/admin/token/admin/v2/token-accounts/${id}`) return json({ token_account_id: id, name: 'Controlled model account', status: 'ACTIVE', owner_type: 'USER', owner_id: id, share_scope: 'PRIVATE', account_version: 1, active_credential_count: 1, route_count: 1, updated_at: '2026-10-29T00:00:00Z' });
   }
-  if (url.endsWith('/admin/v1/roles') && method === 'GET') return json({ items: roleCatalog });
+  if (url.endsWith('/admin/v1/roles') && method === 'GET') return json({ items: longCatalogRole ? [...roleCatalog, longCatalogRole] : roleCatalog });
   if (url.includes('/admin/v1/role-bindings') && method === 'GET') {
     if (c.roleReadFail && c.roleReceipts.size) return json({ code: 'UPSTREAM_UNAVAILABLE' }, 503);
     const target = new URL(url, location.origin).searchParams.get('user_id');
