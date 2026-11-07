@@ -1,6 +1,6 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useId, useState } from 'react';
 import { adminLayoutCopy } from '../../shared/i18n.js';
-import { organizationID, organizationUnitIDs, organizationVersion } from './organization-client.js';
+import { adminOrganizationPageLimit, organizationID, organizationUnitIDs, organizationVersion } from './organization-client.js';
 import { organizationLabel } from './organization-labels.js';
 import { RetainedWorkspace } from './RetainedWorkspace.jsx';
 import { OrganizationMemberMenu } from './OrganizationMemberMenu.jsx';
@@ -10,13 +10,33 @@ import { adminRouteLocation } from './admin-sections.js';
 const text = value => { if (!value.trim()) throw new Error('INVALID_ORGANIZATION_INPUT'); return value.trim(); };
 const optionalID = value => value ? organizationID(value) : null;
 
-export function OrganizationAdminPortalWorkspace({ client, me, acceptedSessionEpoch, language, copy, route, page, query, setQuery, selected, current, detail, error, listBusy, detailBusy, roles, units, memberCursor, memberPrevious, setMemberPrevious, previous, setPrevious, can, action, memberQuery, memberRole, onRefresh, nameFeedback, nameFeedbackKind, renamedUnit, renamedUnitNode }) {
+// Match the Account directory filter whitespace when presenting accepted data.
+// This does not rewrite any request, URL, or history entry.
+const trimDirectoryValue = value => value.replace(/^\p{White_Space}+|\p{White_Space}+$/gu, '');
+const directoryStatusLabelValue = value => trimDirectoryValue(value).toUpperCase();
+
+export function OrganizationAdminPortalWorkspace({ client, me, acceptedSessionEpoch, language, copy, route, page, directoryCursor, directoryResultScope, query, setQuery, selected, current, detail, directoryReadError, detailReadError, listBusy, detailBusy, roles, units, memberCursor, memberPrevious, setMemberPrevious, previous, setPrevious, can, action, memberQuery, memberRole, onRefresh, nameFeedback, nameFeedbackKind, renamedUnit, renamedUnitNode }) {
   const words = adminLayoutCopy[language], labels = words.organization, params = new URLSearchParams(route.search);
+  const directoryPaginationNote = useId();
   const [memberSearch, setMemberSearch] = useState(memberQuery), [role, setRole] = useState(memberRole);
   useEffect(() => { setMemberSearch(memberQuery); setRole(memberRole); }, [memberQuery, memberRole]);
   const status = params.get('organization_status') || '';
+  const acceptedCursor = trimDirectoryValue(directoryCursor || '');
+  const appliedQuery = directoryResultScope ? trimDirectoryValue(directoryResultScope.query) : '';
+  const appliedStatus = directoryResultScope ? directoryStatusLabelValue(directoryResultScope.status) : '';
+  const directoryScope = directoryResultScope ? JSON.stringify([appliedQuery, appliedStatus]) : null;
+  const requestedScope = JSON.stringify([trimDirectoryValue(params.get('organization_q') || ''), directoryStatusLabelValue(status)]);
+  const requestedCursor = trimDirectoryValue(params.get('organization_cursor') || '');
+  const previousFrom = page ? acceptedCursor : directoryReadError && directoryScope === requestedScope ? requestedCursor : '';
+  const [knownPredecessors, setKnownPredecessors] = useState({ scope: '', cursors: new Map() });
+  const previousTarget = previous.at(-1);
+  // The existing stack can survive a browser history change. Do not offer
+  // its top entry as the previous batch without a known adjacent transition.
+  const canShowPrevious = Boolean(directoryScope && previousFrom && previousTarget !== undefined && knownPredecessors.scope === directoryScope
+    && knownPredecessors.cursors.has(previousFrom) && knownPredecessors.cursors.get(previousFrom) === trimDirectoryValue(previousTarget));
   const navigate = updates => route.navigate('organizations', updates);
   const requestedID = params.get('organization_id') || '';
+  const error = requestedID ? detailReadError : directoryReadError;
   const tabs = ['overview', 'members', 'units', 'lifecycle'];
   const active = tabs.includes(params.get('organization_tab')) ? params.get('organization_tab') : 'overview';
   const busy = listBusy || detailBusy;
@@ -33,11 +53,27 @@ export function OrganizationAdminPortalWorkspace({ client, me, acceptedSessionEp
       },
     };
   };
-  const directory = <><div className="adm-organization-toolbar adm-section-toolbar"><form className="adm-filter-row" onSubmit={event => { event.preventDefault(); setPrevious([]); if ((params.get('organization_q') || '') === query.trim() && !params.get('organization_cursor')) onRefresh(); else navigate({ organization_q: query.trim() || null, organization_cursor: null, organization_id: null }); }}><label>{copy.search}<input value={query} onChange={event => setQuery(event.target.value)} /></label><label>{copy.status}<select value={status} onChange={event => { setPrevious([]); navigate({ organization_status: event.target.value || null, organization_cursor: null, organization_id: null }); }}><option value="">{labels.allStatuses}</option>{['ACTIVE', 'DISABLED', 'DELETED'].map(value => <option key={value} value={value}>{organizationLabel(copy, 'Status', value)}</option>)}</select></label><button type="submit" disabled={busy}>{copy.search}</button><button type="button" disabled={busy} onClick={() => { setQuery(''); setPrevious([]); if (!(params.get('organization_q') || '') && !status && !params.get('organization_cursor')) onRefresh(); else navigate({ organization_q: null, organization_status: null, organization_cursor: null, organization_id: null }); }}>{labels.resetFilters}</button></form>{can('create') && action('create', copy.create, [{ name: 'name' }, { name: 'owner', lookup: true }], values => ({ name: text(values.name), owner_user_id: organizationID(values.owner) }), 'create')}</div>
-    {page && <p className="adm-organization-page-count">{labels.pageCount(page.items.length)}</p>}
+  const directory = <><div className="adm-organization-toolbar adm-section-toolbar"><form className="adm-filter-row" onSubmit={event => { event.preventDefault(); setPrevious([]); if ((params.get('organization_q') || '') === query.trim() && !params.get('organization_cursor')) onRefresh(); else navigate({ organization_q: query.trim() || null, organization_cursor: null, organization_id: null }); }}><label>{copy.search}<input value={query} onChange={event => setQuery(event.target.value)} /></label><label>{copy.status}<select value={directoryStatusLabelValue(status)} onChange={event => { setPrevious([]); navigate({ organization_status: event.target.value || null, organization_cursor: null, organization_id: null }); }}><option value="">{labels.allStatuses}</option>{['ACTIVE', 'DISABLED', 'DELETED'].map(value => <option key={value} value={value}>{organizationLabel(copy, 'Status', value)}</option>)}</select></label><button type="submit" disabled={busy}>{copy.search}</button><button type="button" disabled={busy} onClick={() => { setQuery(''); setPrevious([]); if (!(params.get('organization_q') || '') && !status && !params.get('organization_cursor')) onRefresh(); else navigate({ organization_q: null, organization_status: null, organization_cursor: null, organization_id: null }); }}>{labels.resetFilters}</button></form>{can('create') && action('create', copy.create, [{ name: 'name' }, { name: 'owner', lookup: true }], values => ({ name: text(values.name), owner_user_id: organizationID(values.owner) }), 'create')}</div>
+    <div className="adm-organization-page-summary">
+      {page && <p className="adm-organization-page-count"><strong>{labels.pageCount(page.items.length)}</strong><span>{acceptedCursor ? labels.directoryPagination.later : labels.directoryPagination.first}</span></p>}
+      {page && directoryReadError && !listBusy && <p>{labels.directoryPagination.previousResult}</p>}
+      {page && directoryResultScope && <p><strong>{labels.directoryPagination.appliedFilters}</strong>{!appliedQuery && !appliedStatus && <span>{labels.directoryPagination.noFilters}</span>}
+        {appliedQuery && <span>{labels.directoryPagination.appliedQuery(appliedQuery)}</span>}
+        {appliedQuery && appliedStatus && ' · '}{appliedStatus && <span>{labels.directoryPagination.appliedStatus(organizationLabel(copy, 'Status', appliedStatus))}</span>}</p>}
+      <p id={directoryPaginationNote}>{labels.directoryPagination.limits(adminOrganizationPageLimit)}</p>
+      {(page ? acceptedCursor : directoryReadError && requestedCursor) && !busy && !canShowPrevious && <p>{labels.directoryPagination.previousUnavailable}</p>}
+    </div>
     {page && <div className="adm-table-wrap"><table className="adm-table"><thead><tr><th>{copy.name}</th><th>{copy.status}</th><th>{copy.members}</th><th>{labels.identifier}</th></tr></thead><tbody>{page.items.map(org => <tr key={org.organization_id}><td data-label={copy.name}><a className="adm-name-link adm-organization-name-link" {...organizationLink(org.organization_id)}>{org.name}</a></td><td data-label={copy.status}>{organizationLabel(copy, 'Status', org.status)}</td><td data-label={copy.members}>{org.member_count ?? '—'}</td><td data-label={labels.identifier}><AdminIdentifier client={client} owner={identifierOwner} routeScope={globalThis.location?.href || route.search} value={org.organization_id} label={labels.identifier} targetLabel={org.name} language={language} sessionEpoch={identifierSessionEpoch} platformAuthorizationVersion={identifierPlatformVersion} /></td></tr>)}</tbody></table></div>}
     {page?.items.length === 0 && <p>{copy.empty}</p>}
-    <nav><button disabled={busy || previous.length === 0} onClick={() => { const values = [...previous], cursor = values.pop(); setPrevious(values); navigate({ organization_cursor: cursor || null }); }}>{copy.previous}</button><button disabled={busy || !page?.next_cursor} onClick={() => { setPrevious(values => [...values, params.get('organization_cursor') || '']); navigate({ organization_cursor: page.next_cursor }); }}>{copy.next}</button></nav>
+    <nav className="adm-organization-directory-pagination" aria-label={labels.directoryPagination.label} aria-describedby={directoryPaginationNote}><button disabled={busy || !canShowPrevious} onClick={() => { const values = [...previous], cursor = values.pop(); setPrevious(values); navigate({ organization_cursor: cursor || null }); }}>{labels.directoryPagination.previous}</button><button disabled={busy || !page?.next_cursor} onClick={() => {
+      const nextCursor = page.next_cursor;
+      if (directoryScope) setKnownPredecessors(previousKnown => {
+        const cursors = previousKnown.scope === directoryScope ? new Map(previousKnown.cursors) : new Map();
+        cursors.set(nextCursor, acceptedCursor);
+        return { scope: directoryScope, cursors };
+      });
+      setPrevious(values => [...values, params.get('organization_cursor') || '']); navigate({ organization_cursor: nextCursor });
+    }}>{labels.directoryPagination.next}</button></nav>
   </>;
   const available = current?.organization_id === requestedID && detail?.summary?.organization_id === requestedID;
   const unitNames = new Map((detail?.units.items || []).map(unit => [unit.unit_id, unit.name]));
