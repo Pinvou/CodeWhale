@@ -1,13 +1,17 @@
 import React, { useId, useState } from 'react';
 
+import { AdminIdentifier } from './AdminIdentifier.jsx';
 import { platformRoleName, platformRoleDescription, platformPermissionGroups } from './platform-role-presentation.js';
 
-export function PlatformRoleCatalog({ roles, words, authorityCopy, canGrant, onGrant }) {
+export function PlatformRoleCatalog({ client, me, language, acceptedSessionEpoch, roles, words, authorityCopy, canGrant, onGrant }) {
   const [query, setQuery] = useState(''), [selectedCode, setSelectedCode] = useState('');
   const heading = useId();
   const search = query.trim().toLowerCase();
   const visible = roles.filter(role => [role.code, platformRoleName(words, role.code), platformRoleDescription(words, role), ...role.permissions].some(text => text.toLowerCase().includes(search)));
   const selected = visible.find(role => role.code === selectedCode) || visible[0];
+  const sessionEpoch = acceptedSessionEpoch === undefined ? client?.financeSessionEpoch || 0 : acceptedSessionEpoch;
+  const platformVersion = me?.platform_authorization_version || me?.active_context?.platform_authorization_version || me?.authorization_version || 0;
+  const identifierOwner = `${me?.user_id || ''}:${platformVersion}:${sessionEpoch}:${selected?.code || ''}`;
   return <>
     <div className="adm-role-toolbar"><label><span className="adm-visually-hidden">{words.roleSearchPlaceholder}</span><input type="search" value={query} onChange={event => setQuery(event.target.value)} placeholder={words.roleSearchPlaceholder} /></label><span>{visible.length} / {roles.length}</span></div>
     <div className="adm-role-catalog-layout">
@@ -20,7 +24,7 @@ export function PlatformRoleCatalog({ roles, words, authorityCopy, canGrant, onG
         <p>{platformRoleDescription(words, selected)}</p>
         <dl className="adm-role-facts"><div><dt>{words.type}</dt><dd>{words.builtIn}</dd></div><div><dt>{words.permissionCount}</dt><dd>{selected.permissions.length}</dd></div></dl>
         <div className="adm-role-permission-title"><strong>{words.includedPermissions}</strong><span>{words.groupedByDomain}</span></div>
-        <div className="adm-role-permission-groups">{platformPermissionGroups(words, selected.permissions).map(group => <details key={group.domain} open><summary>{group.label}<span>{group.items.length}</span></summary>{group.items.map(permission => <div className="adm-role-permission" key={permission.code}><strong>{permission.label}</strong><code>{permission.code}</code></div>)}</details>)}</div>
+        <div className="adm-role-permission-groups">{platformPermissionGroups(words, selected.permissions).map(group => <details key={group.domain} open><summary><svg className="adm-role-permission-chevron" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden="true"><path d="m9 5 7 7-7 7" /></svg><span className="adm-role-permission-group-name">{group.label}</span><span>{group.items.length}</span></summary>{group.items.map(permission => <div className="adm-role-permission" key={permission.code}><strong>{permission.label}</strong><AdminIdentifier client={client} owner={identifierOwner} routeScope={`${globalThis.location?.href || 'roles'}:${selected.code}`} value={permission.code} label={words.permissionCodeLabel} targetLabel={`${platformRoleName(words, selected.code)} · ${permission.label}`} language={language} sessionEpoch={sessionEpoch} platformAuthorizationVersion={platformVersion} alwaysExpanded /></div>)}</details>)}</div>
         {canGrant(selected) ? onGrant && <button type="button" className="adm-role-primary" onClick={() => onGrant(selected.code)}>{words.grantThisRole}</button> : <p className="adm-role-lifecycle-note">{authorityCopy.protected}</p>}
       </aside> : <div className="adm-role-detail-empty">{words.chooseRole}</div>}
     </div>

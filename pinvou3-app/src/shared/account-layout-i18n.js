@@ -130,3 +130,9 @@ Object.assign(adminLayoutCopy.zh, { userIdentifierHelp: {"id":"系统内定位�
 Object.assign(adminLayoutCopy.en, { userIdentifierHelp: {"id":"Unique internal identifier for this user, used for user details and role assignments.","code":"Use the full user code to find this user with the admin exact-code lookup."} });
 
 Object.assign(adminLayoutCopy.ja, { userIdentifierHelp: {"id":"ユーザー詳細とロールの関連付けに使う、このユーザー固有の内部識別子です。","code":"管理画面の完全一致検索でこのユーザーを探すためのユーザーコードです。"} });
+
+Object.assign(adminLayoutCopy.zh.identifierActions, {"failedExpanded":"复制失败，请选中完整值后手动复制。","unavailableExpanded":"当前无法使用剪贴板，请选中完整值后手动复制。"});
+
+Object.assign(adminLayoutCopy.en.identifierActions, {"failedExpanded":"Copy failed. Select the full value and copy it manually.","unavailableExpanded":"Clipboard unavailable. Select the full value and copy it manually."});
+
+Object.assign(adminLayoutCopy.ja.identifierActions, {"failedExpanded":"コピーできません。完全な値を選択して手動でコピーしてください。","unavailableExpanded":"クリップボードを利用できません。完全な値を選択して手動でコピーしてください。"});

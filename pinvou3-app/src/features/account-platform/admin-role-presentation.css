@@ -68,3 +68,14 @@
 
 .adm-role-grant .adm-role-steps li{min-width:0;font-size:14px;line-height:1.5;overflow-wrap:anywhere}
 .adm-role-grant .adm-role-next-help{margin:0;color:var(--adm-muted);font-size:12px;line-height:1.6;overflow-wrap:anywhere}
+
+.adm-restored-shell .adm-platform-roles .adm-role-permission-groups summary{justify-content:flex-start;gap:8px;padding:12px;font-size:13px;line-height:1.5}
+.adm-restored-shell .adm-platform-roles .adm-role-permission-groups summary>span:last-child{margin-left:auto;font-variant-numeric:tabular-nums}
+.adm-restored-shell .adm-platform-roles .adm-role-permission-chevron{flex:none;transform:rotate(0)}
+.adm-restored-shell .adm-platform-roles .adm-role-permission-groups details[open]>summary .adm-role-permission-chevron{transform:rotate(90deg)}
+.adm-restored-shell .adm-platform-roles .adm-role-permission-groups summary:focus-visible{outline:3px solid var(--adm-primary);outline-offset:-3px}
+.adm-restored-shell .adm-platform-roles .adm-role-permission{padding:12px}
+.adm-restored-shell .adm-platform-roles .adm-role-permission>strong{margin-bottom:6px;font-size:14px;line-height:1.6;overflow-wrap:anywhere}
+.adm-restored-shell .adm-platform-roles .adm-role-permission .adm-identifier-value code{font-size:12px;margin:0}
+
+@media(pointer:coarse){.adm-restored-shell .adm-platform-roles .adm-role-permission-groups summary{box-sizing:border-box;min-height:44px}}
