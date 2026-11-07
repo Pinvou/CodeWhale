@@ -139,10 +139,14 @@ pub fn sanitize_for_responses(schema: &mut Value) -> Option<String> {
 /// verbatim because no record rejects them. Root composition branch
 /// properties are merged into the object and the dropped exactly-one /
 /// at-least-one constraint is surfaced as a description note so the model
-/// still knows which parameter groups apply; where that merge leaves a
-/// populated object schema whose root declared no `type`, the object type
-/// is restored — the previous release line always forced it, and the
-/// model-facing contract otherwise loses its object shape.
+/// still knows which parameter groups apply. Where the stripped composition
+/// leaves a root with no declared `type`, the object type is restored — the
+/// previous release line always forced it, and the model-facing contract
+/// otherwise loses its object shape even when the branches carried no
+/// properties to merge (an `allOf` of `$ref`s, required-only or boolean
+/// branches). When the merge contributes no properties at all, the dropped
+/// composition is surfaced as a generic note so the model is not left
+/// without any compensating guidance.
 ///
 /// The shared [`sanitize`] normalization still applies first, so a root
 /// nullable union can collapse (rewriting the root `type`), a bare object
@@ -169,9 +173,10 @@ pub fn sanitize_for_anthropic_messages(schema: &mut Value) -> Option<String> {
         return constraint_note;
     };
 
-    let strips_composition = ["oneOf", "anyOf", "allOf"]
+    let stripped_composition = ["oneOf", "anyOf", "allOf"]
         .iter()
-        .any(|key| obj.contains_key(*key));
+        .find(|key| obj.contains_key(**key))
+        .copied();
     merge_root_composition_properties(obj);
     obj.remove("oneOf");
     obj.remove("anyOf");
@@ -180,11 +185,33 @@ pub fn sanitize_for_anthropic_messages(schema: &mut Value) -> Option<String> {
         .get("properties")
         .and_then(Value::as_object)
         .is_some_and(|properties| !properties.is_empty());
-    if strips_composition && !obj.contains_key("type") && merged_properties {
+    if stripped_composition.is_some() && !obj.contains_key("type") {
         obj.insert("type".into(), Value::String("object".to_string()));
     }
     prune_dangling_required(schema);
-    constraint_note
+    constraint_note.or_else(|| {
+        // A composition whose branches carry no properties (an allOf of
+        // $refs, required-only or boolean branches) merges nothing, so the
+        // argument contract is erased without any required-group note to
+        // compensate; surface a generic note instead of leaving the model
+        // without guidance about the dropped constraint.
+        stripped_composition
+            .filter(|_| !merged_properties)
+            .map(|key| match key {
+                "oneOf" => {
+                    "Exactly one of the original argument alternatives must be provided (top-level `oneOf` is not supported by this API and was removed)."
+                        .to_string()
+                }
+                "anyOf" => {
+                    "At least one of the original argument alternatives must be provided (top-level `anyOf` is not supported by this API and was removed)."
+                        .to_string()
+                }
+                _ => {
+                    "All of the original argument alternatives must be satisfied (top-level `allOf` is not supported by this API and was removed)."
+                        .to_string()
+                }
+            })
+    })
 }
 
 fn strict_schema_supported(schema: &Value) -> bool {
@@ -1354,6 +1381,216 @@ mod tests {
             "required naming absent properties is pruned on this lane too: {dangling}"
         );
         assert_eq!(note, None);
+    }
+
+    #[test]
+    fn anthropic_messages_sanitize_restores_the_object_floor_for_property_less_compositions() {
+        // A composition whose branches carry no properties — an allOf of
+        // $refs (the classic OpenAPI-to-MCP shape), required-only or boolean
+        // branches — merges nothing, and without the type floor the wire
+        // would carry a constraint-free typeless schema with no note. The
+        // previous release line always forced type:"object"; keep that floor
+        // for every stripped composition and surface a generic note when the
+        // merge contributed nothing.
+        let mut refs = json!({
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "$defs": {
+                "patch": {"type": "object", "properties": {"patch": {"type": "string"}}}
+            },
+            "allOf": [
+                {"$ref": "#/$defs/patch"},
+                {"$ref": "#/$defs/missing"}
+            ]
+        });
+
+        let note = sanitize_for_anthropic_messages(&mut refs);
+
+        assert_eq!(
+            refs["type"], "object",
+            "a stripped composition must not ship a typeless root even when no properties merged: {refs}"
+        );
+        assert!(
+            refs.get("allOf").is_none(),
+            "the recorded keyword is still stripped: {refs}"
+        );
+        assert!(
+            refs.get("properties").is_none(),
+            "no properties are invented when the branches reference $defs: {refs}"
+        );
+        assert_eq!(
+            note.as_deref(),
+            Some(
+                "All of the original argument alternatives must be satisfied (top-level `allOf` is not supported by this API and was removed)."
+            ),
+            "the erased argument contract is surfaced as a note: {note:?}"
+        );
+
+        let mut booleans = json!({"oneOf": [true, false]});
+
+        let note = sanitize_for_anthropic_messages(&mut booleans);
+
+        assert_eq!(
+            booleans,
+            json!({"type": "object"}),
+            "boolean branches merge nothing but keep the object floor: {booleans}"
+        );
+        assert_eq!(
+            note.as_deref(),
+            Some(
+                "Exactly one of the original argument alternatives must be provided (top-level `oneOf` is not supported by this API and was removed)."
+            ),
+            "the note names the dropped exactly-one constraint: {note:?}"
+        );
+    }
+
+    #[test]
+    fn anthropic_messages_sanitize_preserves_nested_compositions() {
+        // The recorded 400 names only top-level composition keywords, so the
+        // strip is root-only exactly like the Responses pass; a nested oneOf
+        // inside a property must reach the wire untouched. Without this pin
+        // a mutation widening the strip tree-wide stays green.
+        let mut nested = json!({
+            "oneOf": [
+                {"type": "object", "properties": {"a": {"type": "string"}}},
+                {"type": "object", "properties": {"b": {"type": "integer"}}}
+            ],
+            "properties": {
+                "payload": {
+                    "oneOf": [
+                        {"type": "object", "properties": {"x": {"type": "string"}}, "required": ["x"]},
+                        {"type": "object", "properties": {"y": {"type": "integer"}}, "required": ["y"]}
+                    ]
+                }
+            }
+        });
+
+        let note = sanitize_for_anthropic_messages(&mut nested);
+
+        assert!(
+            nested.get("oneOf").is_none(),
+            "the root oneOf is stripped: {nested}"
+        );
+        assert_eq!(
+            nested["properties"]["payload"]["oneOf"][0]["required"],
+            json!(["x"]),
+            "a nested composition is outside the recorded root-only scope: {nested}"
+        );
+        assert_eq!(note, None);
+    }
+
+    #[test]
+    fn anthropic_messages_sanitize_keeps_root_properties_over_same_named_branch_properties() {
+        // merge_root_composition_properties resolves a same-named property
+        // first-wins: a property declared at the root keeps its own
+        // definition over a branch's redeclaration. Pin the precedence so a
+        // silent flip to last-wins cannot narrow the declared contract.
+        let mut precedence = json!({
+            "type": "object",
+            "properties": {"mode": {"type": "string"}},
+            "oneOf": [
+                {"type": "object", "properties": {"mode": {"type": "integer"}}},
+                {"type": "object", "properties": {"extra": {"type": "string"}}}
+            ]
+        });
+
+        let note = sanitize_for_anthropic_messages(&mut precedence);
+
+        assert_eq!(
+            precedence["properties"]["mode"],
+            json!({"type": "string"}),
+            "the root-declared property wins over a same-named branch property: {precedence}"
+        );
+        assert_eq!(
+            precedence["properties"]["extra"],
+            json!({"type": "string"}),
+            "branch properties without a root collision still merge: {precedence}"
+        );
+        assert_eq!(note, None);
+    }
+
+    #[test]
+    fn anthropic_messages_sanitize_notes_only_the_first_composition_keyword() {
+        // A root carrying two compositions strips both, but the note
+        // machinery surfaces only the first keyword's constraint (oneOf
+        // before anyOf before allOf, the recorded-keyword order); pin the
+        // precedence so a reordering cannot silently change model-facing
+        // copy.
+        let mut both = json!({
+            "oneOf": [
+                {"type": "object", "properties": {"a": {"type": "string"}}, "required": ["a"]},
+                {"type": "object", "properties": {"b": {"type": "string"}}, "required": ["b"]}
+            ],
+            "anyOf": [
+                {"type": "object", "properties": {"c": {"type": "string"}}, "required": ["c"]},
+                {"type": "object", "properties": {"d": {"type": "string"}}, "required": ["d"]}
+            ]
+        });
+
+        let note = sanitize_for_anthropic_messages(&mut both);
+
+        assert_eq!(
+            note.as_deref(),
+            Some("Exactly one of these parameter groups must be provided: `a` | `b`."),
+            "the oneOf note wins the fixed keyword precedence: {note:?}"
+        );
+        assert!(
+            both.get("anyOf").is_none(),
+            "both compositions are stripped: {both}"
+        );
+    }
+
+    #[test]
+    fn anthropic_messages_pass_matches_the_previous_release_line_on_the_recorded_tools() {
+        // The PR's headline behavior claim: apply_patch and finance — the
+        // two model-visible built-ins whose root compositions produced the
+        // recorded Anthropic 400 — ship byte-identically to the previous
+        // release line, which ran sanitize_for_responses on every lane. The
+        // registry pre-pass (registry.rs) both lines share runs first.
+        use crate::tools::apply_patch::ApplyPatchTool;
+        use crate::tools::finance::FinanceTool;
+        use crate::tools::schema_canonicalize::canonicalize_schema;
+        use crate::tools::spec::ToolSpec as _;
+
+        fn previous_line_pipeline(mut schema: Value) -> (Value, Option<String>) {
+            sanitize(&mut schema);
+            canonicalize_schema(&mut schema);
+            let note = sanitize_for_responses(&mut schema);
+            (schema, note)
+        }
+
+        fn current_line_pipeline(mut schema: Value) -> (Value, Option<String>) {
+            sanitize(&mut schema);
+            canonicalize_schema(&mut schema);
+            let note = sanitize_for_anthropic_messages(&mut schema);
+            (schema, note)
+        }
+
+        for (name, previous_input, current_input) in [
+            (
+                "apply_patch",
+                ApplyPatchTool.input_schema(),
+                ApplyPatchTool.input_schema(),
+            ),
+            (
+                "finance",
+                FinanceTool::new().input_schema(),
+                FinanceTool::new().input_schema(),
+            ),
+        ] {
+            let (previous, previous_note) = previous_line_pipeline(previous_input);
+            let (current, current_note) = current_line_pipeline(current_input);
+
+            assert_eq!(
+                previous, current,
+                "{name}: the narrowed pass must match the previous release line"
+            );
+            assert_eq!(
+                previous.to_string(),
+                current.to_string(),
+                "{name}: key order must match too (prompt-cache stability)"
+            );
+            assert_eq!(previous_note, current_note, "{name}: notes must match");
+        }
     }
 
     #[test]
