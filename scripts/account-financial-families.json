@@ -1,0 +1,545 @@
+{
+  "schema": 1,
+  "issue_roots": [
+    "TestChargebackFinancialRepairCrossDomainActivationPostgresIntegration",
+    "TestChargebackFinancialRepairPostgresIntegration",
+    "TestChargebackFrozenExecutionPostgres",
+    "TestEntitlementComponentCorrectionPreparePostgresIntegration",
+    "TestEntitlementCorrectionExecuteAndConsumerReadPostgresIntegration",
+    "TestF06MemberQuotaRestoreUsesOrdinaryPackageExpiry",
+    "TestF06OrganizationReviewGovernancePublicPostgres",
+    "TestF06Review5566377593PublicPostgres",
+    "TestF07SignupWorkerDurableGift",
+    "TestF09CorrectedChargebackDoesNotCreatePhantomDebt",
+    "TestF09CorrectedFinancialPublicCoordinator",
+    "TestF09CorrectedForcedRefundCumulativeAndReplay",
+    "TestF09CorrectedOrdinaryFullSourceRefund",
+    "TestF09CorrectedOrdinaryRefundKeepsExistingEligibility",
+    "TestF09EntitlementPolicyMigrationIdentityPostgres",
+    "TestF09ExpiryAfterComponentLockPostgres",
+    "TestF09ExpiryPublicCoordinator",
+    "TestF09PolicyIdentityPublicCoordinator",
+    "TestF09PreparePublicCoordinator",
+    "TestF09UnexpiredReplayPublicCoordinator",
+    "TestF16ReleasedMemberFrozenFactsRejectDriftPostgres",
+    "TestF16ReleasedMemberMalformedFactsRejectWithoutEffectsPostgres",
+    "TestF16ReleasedMemberUsageRepairActualPublicChainPostgres",
+    "TestLedgerRepairPostgresIntegration",
+    "TestMemberQuotaBatchPersistedFactsAndFinancialReplay",
+    "TestOrganizationUnitFinancialDeletionBoundaries",
+    "TestPaymentFinancialRepairCrossDomainActivationPostgresIntegration",
+    "TestPaymentFinancialRepairFrozenExecutionPostgres",
+    "TestPaymentFinancialRepairPostgresIntegration",
+    "TestPrivateF11OwnerFrozenFailureAndRollback",
+    "TestPrivateF11PublicOwnerIntegration",
+    "TestPrivateF12PublicOwnerIntegration",
+    "TestPrivateF13OwnerIntegration",
+    "TestReceivableWriteOffActivationTransactionFence",
+    "TestReceivableWriteOffPostgresIntegration",
+    "TestReconciliationFinancialRepairCrossDomainActivationPostgresIntegration",
+    "TestReconciliationFinancialRepairPostgresIntegration",
+    "TestReconciliationFinancialRepairRelatedFactsPostgres",
+    "TestReconciliationFrozenExecutionPostgres",
+    "TestRefundExceptionFrozenExecutionPostgres",
+    "TestRefundExceptionRepairCrossDomainActivationPostgresIntegration",
+    "TestRefundExceptionRepairPostgresIntegration",
+    "TestRefundSuccessConflictEvidencePostgres",
+    "TestRegistrationBonusApplied87UpgradesToRequiredFactsGuard",
+    "TestRegistrationBonusEligibilityBlockedConsumesNewMobilesPostgresIntegration",
+    "TestRegistrationBonusEligibilityReadyAndLifetimePostgresIntegration",
+    "TestRegistrationBonusLifetimeEligibilityPostgresIntegration",
+    "TestRegistrationBonusPolicyConflictPostgresIntegration",
+    "TestRegistrationBonusPublicSchemaAndInputFacts",
+    "TestRegistrationBonusWorkerRetainsFactsAfterLostAcknowledgement",
+    "TestRetainedPaymentRepairProviderFacts",
+    "TestUsageRepairFrozenExecutionPostgres",
+    "TestUsageSettlementRepairCrossDomainActivationPostgresIntegration",
+    "TestUsageSettlementRepairPostgresIntegration"
+  ],
+  "existing_roots": {
+    "TestF06Review5566377593PublicPostgres": [
+      "active-role-grant-and-original-default-start-replay",
+      "concurrent-disable-fences-admin-replace",
+      "concurrent-disable-fences-grant",
+      "concurrent-disable-fences-units-org",
+      "concurrent-disable-fences-units-platform",
+      "failed-admin-batch-rolls-back-revocation-and-inserts",
+      "failed-bulk-insert-rolls-back-original-attachments",
+      "invalid-and-missing-units-atomically-reject",
+      "large-admin-scope-rejection-is-atomic",
+      "large-and-duplicate-sets-use-fixed-sql-round-trips",
+      "large-replacement-and-normalized-replay-remain-complete",
+      "large-unit-admin-batch-preserves-author-time-order-and-effects",
+      "member-units-first-fences-disable-organization",
+      "member-units-first-fences-disable-platform",
+      "missing-admin-actor-never-becomes-target-created-by",
+      "non-active-targets-reject-both-role-entrypoints-without-effects",
+      "non-active-targets-reject-both-role-entrypoints-without-effects/BOOTSTRAP_PENDING",
+      "non-active-targets-reject-both-role-entrypoints-without-effects/DELETED",
+      "non-active-targets-reject-both-role-entrypoints-without-effects/DISABLED",
+      "non-active-targets-reject-both-role-entrypoints-without-effects/PROVISIONING",
+      "non-active-targets-reject-both-role-entrypoints-without-effects/REPAIR_REQUIRED",
+      "ordinary-and-admin-scope-may-overlap",
+      "unit-admin-helper-round-trips-are-independent-of-unit-count",
+      "unit-existence-is-hidden-before-authority"
+    ],
+    "TestMemberQuotaBatchPersistedFactsAndFinancialReplay": [
+      "append",
+      "concurrent-conflicting-facts",
+      "concurrent-identical-facts",
+      "different-actor",
+      "different-amount",
+      "original-key-length-contract-counts-utf8-bytes",
+      "reorder",
+      "subset"
+    ],
+    "TestF06MemberQuotaRestoreUsesOrdinaryPackageExpiry": [
+      "active-hold",
+      "base-bonus",
+      "concurrent",
+      "legacy-consumed",
+      "legacy-partial-expiry",
+      "package-frozen",
+      "package-not-due",
+      "restore-first",
+      "review-all",
+      "review-mixed",
+      "review-queue",
+      "terminal-suspended-diagnostic-ACTIVE",
+      "terminal-suspended-diagnostic-CONSUMED",
+      "terminal-suspended-diagnostic-EXPIRED",
+      "worker-first",
+      "zero-restore",
+      "zero-worker"
+    ],
+    "TestRegistrationBonusEligibilityReadyAndLifetimePostgresIntegration": [],
+    "TestRegistrationBonusEligibilityBlockedConsumesNewMobilesPostgresIntegration": []
+  },
+  "phases": [
+    {
+      "id": "account-families",
+      "target": "./internal/account",
+      "package": "github.com/Pinvou/pinvou3/account-platform/internal/account",
+      "roots": {
+        "TestF06OrganizationReviewGovernancePublicPostgres": [
+          "complete-bounded-pages-with-name-ties",
+          "disabled-target-role-replacement-is-zero-effect",
+          "missing-admin-targets-are-not-found",
+          "missing-admin-targets-are-not-found/add-org",
+          "missing-admin-targets-are-not-found/add-user",
+          "missing-admin-targets-are-not-found/transfer-org",
+          "old-removal-replay-does-not-remove-readded-member",
+          "registered-model-admin-and-safe-down",
+          "removal-checks-authority-before-target"
+        ],
+        "TestRegistrationBonusWorkerRetainsFactsAfterLostAcknowledgement": [],
+        "TestRegistrationBonusApplied87UpgradesToRequiredFactsGuard": []
+      },
+      "inputs": [
+        "account"
+      ],
+      "mode": "owner",
+      "children": []
+    },
+    {
+      "id": "schema-families",
+      "target": "./internal/billingschema",
+      "package": "github.com/Pinvou/pinvou3/account-platform/internal/billingschema",
+      "roots": {
+        "TestRegistrationBonusPublicSchemaAndInputFacts": [
+          "account-public-down-preserves-facts",
+          "billing-public-down-preserves-facts",
+          "both-null",
+          "complete",
+          "historical-900006-down-900005-guard-and-restore",
+          "invalid-utf8-reason",
+          "null-fingerprint",
+          "null-key",
+          "public-prior-delivery-data-upgrade",
+          "short-unicode-key",
+          "short-unicode-reason",
+          "too-many-reason-characters",
+          "unicode-sql-upper-bounds-and-replay"
+        ],
+        "TestF07SignupWorkerDurableGift": [
+          "committed-gift-response-lost-keeps-job-and-same-operation",
+          "default-disabled-signup-worker-completes-real-zero-wallet",
+          "enabled-zero-signup-worker-completes",
+          "granted-signup-worker-exact-package-ledger",
+          "ordinary-bootstrap-nonbonus-job-still-completes",
+          "wrong-wallet-owner-ack-cannot-complete"
+        ],
+        "TestPrivateF11PublicOwnerIntegration": [
+          "original-owner-contract-child",
+          "public-account-original072-policy"
+        ],
+        "TestPrivateF12PublicOwnerIntegration": [
+          "fresh-and-parent079-upgrade-acl",
+          "original-owner-contract-child",
+          "original079-loan-rollback-and-pins",
+          "public-account-original073-policy"
+        ],
+        "TestPrivateF13OwnerIntegration": [
+          "original-owner-contract-child"
+        ]
+      },
+      "inputs": [
+        "schema"
+      ],
+      "mode": "owner",
+      "children": [
+        {
+          "id": "f11",
+          "stream_env": "F11_CHILD_LOG",
+          "go_env": "F11_GO_BINARY",
+          "package": "github.com/Pinvou/pinvou3/account-platform/internal/billing",
+          "roots": {
+            "TestReceivableWriteOffPostgresIntegration": [
+              "ActualAbortedTransactionUniqueRecovery",
+              "ActualAbortedTransactionUniqueRecovery/matching",
+              "ActualAbortedTransactionUniqueRecovery/mismatched-event",
+              "ActualAbortedTransactionUniqueRecovery/missing-approval",
+              "PartialOutstandingOverCapPlanAndExecuteZeroEffects"
+            ],
+            "TestPrivateF11OwnerFrozenFailureAndRollback": [
+              "chargeback-source-cannot-writeoff",
+              "empty-frozen-digest",
+              "proof-claim-wallet-version-drift-zero-effect",
+              "stale-target-version",
+              "valid-effect-and-samekey-conflict-rollback",
+              "wrong-frozen-wallet",
+              "wrong-owner-digest"
+            ]
+          }
+        },
+        {
+          "id": "f12",
+          "stream_env": "F12_CHILD_LOG",
+          "go_env": "F12_GO_BINARY",
+          "package": "github.com/Pinvou/pinvou3/account-platform/internal/billing",
+          "roots": {
+            "TestPaymentFinancialRepairPostgresIntegration": [
+              "BoundApprovalIdentity/another-eligible-order",
+              "BoundApprovalIdentity/approval-epoch",
+              "BoundApprovalIdentity/approver",
+              "BoundApprovalIdentity/authorization-event",
+              "BoundApprovalIdentity/evidence",
+              "BoundApprovalIdentity/exact-receipt-after-deactivation",
+              "BoundApprovalIdentity/execution-key",
+              "BoundApprovalIdentity/order",
+              "BoundApprovalIdentity/requester",
+              "SaturatedReceivableBudget/BASE40_credit100_BONUS60",
+              "SaturatedReceivableBudget/BASE40_credit40_noBonus"
+            ],
+            "TestRetainedPaymentRepairProviderFacts": [
+              "correct",
+              "customer-null",
+              "customer-number",
+              "foreign-customer",
+              "foreign-sku",
+              "missing-customer",
+              "missing-sku"
+            ],
+            "TestPaymentFinancialRepairFrozenExecutionPostgres": [
+              "empty-frozen-digest-zero-effect",
+              "full-product-same-amount-drift-zero-effect",
+              "live-state-version-and-committed-replay",
+              "primary-transaction-matching-and-foreign",
+              "proof-claim-same-amount-receivable-drift-zero-effect"
+            ]
+          }
+        },
+        {
+          "id": "f13",
+          "stream_env": "F13_CHILD_LOG",
+          "go_env": "F13_GO_BINARY",
+          "package": "github.com/Pinvou/pinvou3/account-platform/internal/billing",
+          "roots": {
+            "TestRefundExceptionRepairPostgresIntegration": [],
+            "TestRefundExceptionFrozenExecutionPostgres": [
+              "empty-digest-zero-effect",
+              "fresh-state-version-and-receipt-first",
+              "nullable-evidence-definite-deny",
+              "proof-claim-same-amount-anomaly-version-drift",
+              "proof-claim-same-amount-grant-version-drift"
+            ],
+            "TestRefundSuccessConflictEvidencePostgres": [
+              "full-reclaim",
+              "with-shortfall"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "f09-policy",
+      "target": "./internal/f09fixture",
+      "package": "github.com/Pinvou/pinvou3/account-platform/internal/f09fixture",
+      "roots": {
+        "TestF09PolicyIdentityPublicCoordinator": []
+      },
+      "inputs": [
+        "schema"
+      ],
+      "mode": "owner",
+      "children": [
+        {
+          "id": "f09-policy",
+          "stream_env": "PINVOU_F09_CHILD_STREAM",
+          "go_env": "PINVOU_PRIVATE_GO",
+          "package": "command-line-arguments",
+          "roots": {
+            "TestF09EntitlementPolicyMigrationIdentityPostgres": [
+              "qualified-original-public-up",
+              "renamed-original-runtime-cannot-install-policy",
+              "runtime-cannot-install-policy",
+              "superuser-session-is-not-contract",
+              "unrelated-custom69-runtime-remains-generic",
+              "wrong-current-role-fails-closed"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "f09-prepare",
+      "target": "./internal/f09fixture",
+      "package": "github.com/Pinvou/pinvou3/account-platform/internal/f09fixture",
+      "roots": {
+        "TestF09PreparePublicCoordinator": []
+      },
+      "inputs": [
+        "schema"
+      ],
+      "mode": "owner",
+      "children": [
+        {
+          "id": "f09-prepare",
+          "stream_env": "PINVOU_F09_CHILD_STREAM",
+          "go_env": "PINVOU_PRIVATE_GO",
+          "package": "command-line-arguments",
+          "roots": {
+            "TestEntitlementComponentCorrectionPreparePostgresIntegration": []
+          }
+        }
+      ]
+    },
+    {
+      "id": "f09-replay",
+      "target": "./internal/f09fixture",
+      "package": "github.com/Pinvou/pinvou3/account-platform/internal/f09fixture",
+      "roots": {
+        "TestF09UnexpiredReplayPublicCoordinator": []
+      },
+      "inputs": [
+        "schema"
+      ],
+      "mode": "owner",
+      "children": [
+        {
+          "id": "f09-replay",
+          "stream_env": "PINVOU_F09_CHILD_STREAM",
+          "go_env": "PINVOU_PRIVATE_GO",
+          "package": "command-line-arguments",
+          "roots": {
+            "TestEntitlementCorrectionExecuteAndConsumerReadPostgresIntegration": [
+              "approved-monetary-facts-drift-has-no-effects",
+              "controlled-empty-source-projection-remains-definite",
+              "plan-query-cancellation-remains-unknown",
+              "runbook-accepts-real-reclassification-without-financial-writes",
+              "wallet-lock-cancellation-remains-unknown"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "f09-expiry",
+      "target": "./internal/f09fixture",
+      "package": "github.com/Pinvou/pinvou3/account-platform/internal/f09fixture",
+      "roots": {
+        "TestF09ExpiryPublicCoordinator": []
+      },
+      "inputs": [
+        "schema"
+      ],
+      "mode": "owner",
+      "children": [
+        {
+          "id": "f09-expiry",
+          "stream_env": "PINVOU_F09_CHILD_STREAM",
+          "go_env": "PINVOU_PRIVATE_GO",
+          "package": "command-line-arguments",
+          "roots": {
+            "TestF09ExpiryAfterComponentLockPostgres": []
+          }
+        }
+      ]
+    },
+    {
+      "id": "f09-financial",
+      "target": "./internal/f09fixture",
+      "package": "github.com/Pinvou/pinvou3/account-platform/internal/f09fixture",
+      "roots": {
+        "TestF09CorrectedFinancialPublicCoordinator": []
+      },
+      "inputs": [
+        "schema"
+      ],
+      "mode": "owner",
+      "children": [
+        {
+          "id": "f09-financial",
+          "stream_env": "PINVOU_F09_CHILD_STREAM",
+          "go_env": "PINVOU_PRIVATE_GO",
+          "package": "command-line-arguments",
+          "roots": {
+            "TestF09CorrectedForcedRefundCumulativeAndReplay": [],
+            "TestF09CorrectedChargebackDoesNotCreatePhantomDebt": [],
+            "TestF09CorrectedOrdinaryFullSourceRefund": [
+              "FAILED",
+              "SUCCESS"
+            ],
+            "TestF09CorrectedOrdinaryRefundKeepsExistingEligibility": [
+              "active-hold",
+              "consumed",
+              "expired",
+              "zero-effective-base"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "cross-domain-families",
+      "target": "./internal/account",
+      "package": "github.com/Pinvou/pinvou3/account-platform/internal/account",
+      "roots": {
+        "TestPaymentFinancialRepairCrossDomainActivationPostgresIntegration": [],
+        "TestRefundExceptionRepairCrossDomainActivationPostgresIntegration": [],
+        "TestChargebackFinancialRepairCrossDomainActivationPostgresIntegration": [],
+        "TestReconciliationFinancialRepairCrossDomainActivationPostgresIntegration": [],
+        "TestUsageSettlementRepairCrossDomainActivationPostgresIntegration": []
+      },
+      "inputs": [
+        "account",
+        "billing"
+      ],
+      "mode": "retained",
+      "children": []
+    },
+    {
+      "id": "billing-families",
+      "target": "./internal/billing",
+      "package": "github.com/Pinvou/pinvou3/account-platform/internal/billing",
+      "roots": {
+        "TestOrganizationUnitFinancialDeletionBoundaries": [
+          "actual-posted-funds-and-entitlements-prevent-deletion",
+          "concurrent-pending-adjustment-and-terminal-transition",
+          "pending-adjustment-prevents-deletion-with-zero-posted-balance",
+          "terminal-unit-cannot-acquire-a-new-wallet",
+          "zero-wallet-closes-atomically-and-never-accepts-fresh-funds"
+        ],
+        "TestRegistrationBonusLifetimeEligibilityPostgresIntegration": [
+          "registration_bonus_claims/DELETE",
+          "registration_bonus_claims/UPDATE",
+          "registration_bonus_policy_audit/DELETE",
+          "registration_bonus_policy_audit/UPDATE",
+          "registration_bonus_policy_commands/DELETE",
+          "registration_bonus_policy_commands/UPDATE",
+          "registration_bonus_policy_versions/DELETE",
+          "registration_bonus_policy_versions/UPDATE",
+          "registration_bonus_receipts/DELETE",
+          "registration_bonus_receipts/UPDATE"
+        ],
+        "TestRegistrationBonusPolicyConflictPostgresIntegration": [
+          "changed-amount",
+          "changed-enabled",
+          "changed-expected-revision",
+          "changed-reason",
+          "changed-validity",
+          "fresh-key-stale-revision",
+          "matching-replay-keeps-frozen-policy"
+        ],
+        "TestLedgerRepairPostgresIntegration": [
+          "real-unique-violation-rejects-and-rolls-back-all-new-facts"
+        ],
+        "TestReceivableWriteOffActivationTransactionFence": [
+          "inactive-zero-write",
+          "operator-version-change-zero-write",
+          "operator-waits-for-real-financial-commit-and-receipt-replays"
+        ],
+        "TestChargebackFinancialRepairPostgresIntegration": [],
+        "TestChargebackFrozenExecutionPostgres": [
+          "activation-version-receipt-and-order-summary",
+          "actual-payment-origin-two-leg-reconciliation",
+          "empty-digest-zero-effect",
+          "proof-claim-same-effective-component-tuple-drift",
+          "wallet-source-lock-before-final-recompute"
+        ],
+        "TestReconciliationFinancialRepairPostgresIntegration": [],
+        "TestReconciliationFinancialRepairRelatedFactsPostgres": [
+          "related-case-version",
+          "related-manual-review-row",
+          "unrelated-successful-payment",
+          "unrelated-wallet-version"
+        ],
+        "TestReconciliationFrozenExecutionPostgres": [
+          "activation-version-receipt-manual-and-case-version",
+          "both-real-bill-writers-refund-reference-and-no-provider-call",
+          "empty-digest-zero-effect",
+          "evidence-provider-version-and-success-vocabulary",
+          "legacy-null-bill-evidence",
+          "legacy-null-bill-evidence/reject-amount",
+          "legacy-null-bill-evidence/reject-currency",
+          "legacy-null-bill-evidence/reject-merchant",
+          "legacy-null-bill-evidence/reject-nonnull-padded-reference",
+          "legacy-null-bill-evidence/reject-nonnull-reference",
+          "legacy-null-bill-evidence/reject-payload",
+          "legacy-null-bill-evidence/reject-provider",
+          "legacy-null-bill-evidence/reject-status",
+          "legacy-null-bill-evidence/reject-transaction",
+          "legacy-null-bill-evidence/reject-version",
+          "legacy-null-bill-evidence/valid-null-column-fallback-false",
+          "legacy-null-bill-evidence/valid-null-column-fallback-true",
+          "proof-claim-same-amount-case-version-drift",
+          "repaired-difference-new-run-keeps-terminal-case",
+          "same-channel-date-cross-run-recheck"
+        ],
+        "TestUsageSettlementRepairPostgresIntegration": [
+          "receipt-canonical-evidence-whitespace",
+          "receipt-changed-evidence",
+          "receipt-changed-hold",
+          "receipt-changed-review"
+        ],
+        "TestUsageRepairFrozenExecutionPostgres": [
+          "actual-proof-claim-same-amount-facts-drift",
+          "empty-live-version-and-receipt-first",
+          "insufficient-wallet-proof-and-execution-zero-effect",
+          "preserve-EXPIRED",
+          "preserve-FROZEN",
+          "preserve-REVOKED",
+          "pricing-identity-and-claimed"
+        ],
+        "TestF16ReleasedMemberUsageRepairActualPublicChainPostgres": [
+          "expired-capacity-zero-is-real-overage",
+          "fully-granted-surviving-bucket",
+          "multiple-original-grants-one-component",
+          "new-hold-reservation-must-survive",
+          "personal-remainder-is-not-member-funding",
+          "suspended-current-membership-remains-suspended"
+        ],
+        "TestF16ReleasedMemberFrozenFactsRejectDriftPostgres": [],
+        "TestF16ReleasedMemberMalformedFactsRejectWithoutEffectsPostgres": [
+          "partial-original-release",
+          "wrong-member-identity"
+        ]
+      },
+      "inputs": [
+        "billing"
+      ],
+      "mode": "retained",
+      "children": []
+    }
+  ]
+}

@@ -222,6 +222,16 @@ ORDER BY role.code LIMIT 1`, uuid.New(), ownerID, canonicalPermissionCode(Permis
 			name = "platform"
 		}
 		t.Run("member-units-first-fences-disable-"+name, func(t *testing.T) {
+			t.Cleanup(func() {
+				// Restore the controlled status even after a failed assertion.
+				// Function defers cancel workers and release the barrier first;
+				// this update then waits for their user-row transactions to end.
+				clean, done := context.WithTimeout(context.Background(), 5*time.Second)
+				defer done()
+				if _, err := r.pool.Exec(clean, `UPDATE users SET status='ACTIVE' WHERE id=$1`, target); err != nil {
+					t.Error("restore controlled user status", err)
+				}
+			})
 			var targetVersion int64
 			var auditBefore, outboxBefore, commandsBefore int
 			if err := r.pool.QueryRow(ctx, `SELECT version,(SELECT count(*) FROM audit_logs),(SELECT count(*) FROM outbox_events),(SELECT count(*) FROM membership_commands) FROM memberships WHERE id=$1`, member.Member.MembershipID).Scan(&targetVersion, &auditBefore, &outboxBefore, &commandsBefore); err != nil {
@@ -287,7 +297,7 @@ ORDER BY role.code LIMIT 1`, uuid.New(), ownerID, canonicalPermissionCode(Permis
 				}
 			}
 			if replacementPID == 0 {
-				t.Fatal("replacement did not reach its actual audit write while holding target admission")
+				t.Fatal("replacement did not reach its actual audit write after the target user update")
 			}
 			disabled := make(chan error, 1)
 			go func() { disabled <- r.AdminSetUserStatus(workerCtx, owner, target, "DISABLED") }()
@@ -336,11 +346,9 @@ ORDER BY role.code LIMIT 1`, uuid.New(), ownerID, canonicalPermissionCode(Permis
 				t.Fatal("serial order changed replacement/disable audit, event or receipt counts", err)
 			}
 			member = changed.result
-			// Restore only the controlled status for subsequent independent cases;
-			// retain all real version/audit/receipt facts from both operations.
-			if _, err := r.pool.Exec(ctx, `UPDATE users SET status='ACTIVE' WHERE id=$1`, target); err != nil {
-				t.Fatal(err)
-			}
+			// Cleanup restores only status; preserve real version/audit/receipt
+			// facts. This reverse ordering test is not a pre-write lock mutation
+			// probe: the replacement already updated users at the audit barrier.
 		})
 	}
 	t.Run("ordinary-and-admin-scope-may-overlap", func(t *testing.T) {

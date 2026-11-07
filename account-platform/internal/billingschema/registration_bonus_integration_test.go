@@ -80,7 +80,38 @@ func TestRegistrationBonusPublicSchemaAndInputFacts(t *testing.T) {
 		})
 	}
 	t.Run("account-public-down-preserves-facts", func(t *testing.T) {
-		assertCurrentAccount900013Down(t, ctx, ac, account)
+		// Current 900014 permits rollback only before readiness/backfill facts
+		// exist. Exercise that published boundary before the inherited 900013
+		// refusal, then restore the complete current chain and compare all facts.
+		if stageValue(t, ctx, ac, `SELECT version::text||':'||name FROM schema_migrations ORDER BY version DESC LIMIT 1`) != "900014:registration_bonus_backfill_progress" ||
+			stageValue(t, ctx, ac, `SELECT (status='PENDING' AND fingerprint_key_id IS NULL AND NOT EXISTS(SELECT 1 FROM registration_bonus_mobile_eligibility))::text FROM registration_bonus_eligibility_state`) != "true" {
+			t.Fatal("explicit empty-readiness rollback boundary changed")
+		}
+		// Reapplying the allowed 900014 rollback legitimately records a new
+		// applied_at for that row. Every retained prefix ledger row stays exact.
+		prefixLedger := func() string {
+			return stageValue(t, ctx, ac, `SELECT jsonb_agg(to_jsonb(m) ORDER BY version)::text FROM schema_migrations m WHERE version<>900014`)
+		}
+		ledger, facts, shape := prefixLedger(), accountRollbackFacts(t, ctx, ac), stageShape(t, ctx, ac)
+		if err := accountschema.DownOne(ctx, ac, account); err != nil {
+			t.Fatal("empty current backfill migration rollback", err)
+		}
+		var beforeBackfill []migrations.Migration
+		for _, migration := range account {
+			if migration.Version <= 900013 {
+				beforeBackfill = append(beforeBackfill, migration)
+			}
+		}
+		assertCurrentAccount900013Down(t, ctx, ac, beforeBackfill)
+		if err := accountschema.Up(ctx, ac, account); err != nil {
+			t.Fatal("restore complete current account schema", err)
+		}
+		if _, err := migrations.VerifyApplied(ctx, ac, account); err != nil {
+			t.Fatal(err)
+		}
+		if prefixLedger() != ledger || accountRollbackFacts(t, ctx, ac) != facts || stageShape(t, ctx, ac) != shape {
+			t.Fatal("current rollback, historical refusal or restore changed original facts")
+		}
 	})
 	t.Run("historical-900006-down-900005-guard-and-restore", func(t *testing.T) {
 		assertHistoricalAccount900006Down(t, ctx, f, account)
@@ -89,7 +120,9 @@ func TestRegistrationBonusPublicSchemaAndInputFacts(t *testing.T) {
 		t.Run("public-prior-delivery-data-upgrade", func(t *testing.T) {
 			prior := make([]migrations.Migration, 0, len(account))
 			for _, item := range account {
-				if item.Version != 87 && item.Version != 900004 {
+				// 900014 extends the eligibility table introduced by original 87;
+				// it cannot belong to a genuine pre-registration-bonus schema.
+				if item.Version != 87 && item.Version != 900004 && item.Version != 900014 {
 					prior = append(prior, item)
 				}
 			}

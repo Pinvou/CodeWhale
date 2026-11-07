@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import tempfile
 import threading
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -83,6 +84,25 @@ class FinancialParallelTests(unittest.TestCase):
             for key, value in binding.items():
                 self.assertEqual(kwargs["env"][key], value)
             self.assertFalse(kwargs["check"])
+            self.assertEqual(run.call_count, 1)
+
+    def test_owners_success_requires_original_and_remaining_family_entrypoints(self):
+        binding = RUNNER.service_bindings(json.dumps(self.services()))["owners"]
+        for original, family in ((0, 0), (0, 7), (23, 0)):
+            with self.subTest(original=original, family=family), tempfile.TemporaryDirectory() as directory:
+                with patch.object(RUNNER.subprocess, "run", side_effect=[SimpleNamespace(returncode=original), SimpleNamespace(returncode=family)]) as run:
+                    result = RUNNER.run_group("owners", binding, Path(directory))
+                self.assertEqual(result["exit_code"], original or family)
+                self.assertEqual(run.call_count, 1 if original else 2)
+                first = run.call_args_list[0]
+                self.assertEqual(first.args[0][-2:], ["--group", "owners"])
+                if original == 0:
+                    second = run.call_args_list[1]
+                    self.assertEqual(Path(second.args[0][1]).name, "test-account-financial-families-postgres.py")
+                    for key, value in binding.items():
+                        self.assertEqual(second.kwargs["env"][key], value)
+                    self.assertEqual(second.kwargs["env"]["PINVOU_FINANCIAL_CHILD_ARTIFACTS"], str(Path(directory) / "owners-families"))
+                    self.assertFalse(second.kwargs["check"])
 
 
 if __name__ == "__main__":

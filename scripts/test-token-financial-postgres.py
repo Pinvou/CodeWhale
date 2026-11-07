@@ -12,6 +12,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import runpy
 import subprocess
 import sys
 from urllib.parse import parse_qs, urlsplit
@@ -407,6 +408,14 @@ EXACT_REQUIRED_CHILDREN = {
 }
 
 
+FAMILY_GO_CONTRACT = runpy.run_path(str(ROOT / "scripts/go-test-contract.py"))
+EXISTING_FAMILY_ROOTS = json.loads((ROOT / "scripts/account-financial-families.json").read_text(encoding="utf-8"))["existing_roots"]
+for family_root, family_children in EXISTING_FAMILY_ROOTS.items():
+    # Preserve all previously required subcases; the original issue roots now
+    # also retain their complete reviewed case-name contract.
+    EXACT_REQUIRED_CHILDREN.setdefault(family_root, set()).update(family_children)
+
+
 def local_database_url(raw):
     url = urlsplit(raw)
     query = parse_qs(url.query, keep_blank_values=True)
@@ -425,6 +434,7 @@ def local_database_url(raw):
 
 
 def verify_results(events, required=None, *, package=None, require_children=False, exact_roots=False, children_required=None):
+    events = list(events)
     required = REQUIRED if required is None else required
     started, passed = set(), set()
     children = set()
@@ -466,6 +476,9 @@ def verify_results(events, required=None, *, package=None, require_children=Fals
                 raise RuntimeError("required financial contract subcases did not complete: " + ", ".join(sorted(missing)))
     if package is not None and not package_passed:
         raise RuntimeError("financial package did not complete successfully")
+    family_roots = {root: children for root, children in EXISTING_FAMILY_ROOTS.items() if root in required}
+    if family_roots:
+        FAMILY_GO_CONTRACT["verify_lifecycles"](events, family_roots, package, allow_other_roots=True, allow_extra_children=True)
     return count
 
 

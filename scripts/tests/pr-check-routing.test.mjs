@@ -460,7 +460,7 @@ function assertFiniteAuditPGSetup(job) {
   for (const [name, environment, commands] of [
     ["Token financial contracts on isolated PostgreSQL", [
       "ACCOUNT_FINANCIAL_SERVICES: ${{ steps.account-pg.outputs.financial_services }}",
-    ], ["set -euo pipefail", "python3 -m unittest discover -s scripts/tests -p test_token_financial_postgres.py", "python3 -m unittest discover -s scripts/tests -p test_financial_parallel.py", "python3 scripts/test-financial-parallel.py"]],
+    ], ["set -euo pipefail", "python3 -m unittest discover -s scripts/tests -p test_token_financial_postgres.py", "python3 -m unittest discover -s scripts/tests -p test_financial_parallel.py", "python3 -m unittest discover -s scripts/tests -p test_account_financial_families_postgres.py", "python3 -m unittest discover -s scripts/tests -p test_go_test_contract.py", 'python3 scripts/ci-fixture-process.py --receipt "$PINVOU_CI_RESOURCE_LEDGER/financial-contracts.json" -- python3 scripts/test-financial-parallel.py']],
     ["Account closure contracts on isolated PostgreSQL", [
       "PINVOU_ACCOUNT_CLOSURE_TEST_DATABASE_URL: ${{ steps.account-pg.outputs.financial_url }}",
       ...pgIdentityEnvironment("financial"),
@@ -871,6 +871,9 @@ test("finite audit PostgreSQL exception rejects unsafe or unrelated service and 
     ["python3 scripts/account-ci-postgres.py", "python3 scripts/account-ci-postgres.py || true"],
     ["python3 -m unittest discover -s scripts/tests -p test_account_ci_postgres.py", "true"],
     ["python3 scripts/test-financial-parallel.py", "python3 scripts/test-financial-parallel.py || true"],
+    ['python3 scripts/ci-fixture-process.py --receipt "$PINVOU_CI_RESOURCE_LEDGER/financial-contracts.json" -- ', ""],
+    ["          python3 -m unittest discover -s scripts/tests -p test_account_financial_families_postgres.py\n", ""],
+    ["          python3 -m unittest discover -s scripts/tests -p test_go_test_contract.py\n", ""],
     ["python3 scripts/test-account-closure-postgres.py", "python3 scripts/test-account-closure-postgres.py || true"],
     ["      GOTOOLCHAIN: local", "      F17_TEST_DATABASE_URL: postgres://postgres@127.0.0.1:5432/postgres\n      GOTOOLCHAIN: local"],
     ["        shell: bash", "        env:\n          F17_TEST_DATABASE_PROFILE: github-actions-service\n        shell: bash"],

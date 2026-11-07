@@ -5,7 +5,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 )
@@ -19,16 +18,8 @@ func TestF09PreparePublicCoordinator(t *testing.T) {
 	defer cancel()
 	_ = newStageFixture(t, ctx, raw)
 	dir := filepath.Join("..", "billing")
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
 	args := []string{"test", "-race", "-json", "-count=1", "-mod=readonly", "-run", "^TestEntitlementComponentCorrectionPreparePostgresIntegration$"}
-	for _, e := range entries {
-		if strings.HasSuffix(e.Name(), ".go") && !strings.HasSuffix(e.Name(), "_test.go") {
-			args = append(args, filepath.Join(dir, e.Name()))
-		}
-	}
+	args = append(args, stageProductionSources(t, ctx, dir)...)
 	args = append(args, filepath.Join(dir, "retained_financial_integration_test.go"), filepath.Join(dir, "finance_refund_reconcile_integration_test.go"), filepath.Join(dir, "entitlement_correction_execute_integration_test.go"), filepath.Join(dir, "entitlement_component_correction_prepare_integration_test.go"))
 	child := exec.CommandContext(ctx, os.Getenv("PINVOU_PRIVATE_GO"), args...)
 	child.Env = append(os.Environ(), "PINVOU_TEST_BILLING_DATABASE_URL="+raw)

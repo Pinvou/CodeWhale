@@ -1075,7 +1075,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
             RUNNER.verify_results(skipped, roots, **options)
 
     def events(self, required=None, package=None, children=False):
-        result = []
+        result = [{"Action": "start", "Package": package}] if package is not None else []
         for name in RUNNER.REQUIRED if required is None else required:
             result += [{"Action": "run", "Package": package, "Test": name}]
             if children:

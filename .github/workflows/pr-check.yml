@@ -307,6 +307,11 @@ jobs:
               - 'scripts/tests/test_account_ci_postgres.py'
               - 'scripts/test-financial-parallel.py'
               - 'scripts/tests/test_financial_parallel.py'
+              - 'scripts/test-account-financial-families-postgres.py'
+              - 'scripts/account-financial-families.json'
+              - 'scripts/tests/test_account_financial_families_postgres.py'
+              - 'scripts/go-test-contract.py'
+              - 'scripts/tests/test_go_test_contract.py'
               - 'scripts/test-token-financial-postgres.py'
               - 'scripts/tests/test_token_financial_postgres.py'
               - 'scripts/test-account-closure-postgres.py'
@@ -1682,7 +1687,9 @@ jobs:
           set -euo pipefail
           python3 -m unittest discover -s scripts/tests -p test_token_financial_postgres.py
           python3 -m unittest discover -s scripts/tests -p test_financial_parallel.py
-          python3 scripts/test-financial-parallel.py
+          python3 -m unittest discover -s scripts/tests -p test_account_financial_families_postgres.py
+          python3 -m unittest discover -s scripts/tests -p test_go_test_contract.py
+          python3 scripts/ci-fixture-process.py --receipt "$PINVOU_CI_RESOURCE_LEDGER/financial-contracts.json" -- python3 scripts/test-financial-parallel.py
 
       - name: Account closure contracts on isolated PostgreSQL
         shell: bash
