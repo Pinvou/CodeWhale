@@ -22,6 +22,13 @@ LEDGER_REPAIR_APPROVAL_ROOT = "TestLedgerRepairCrossDomainActivationPostgresInte
 LEDGER_REPAIR_PAYMENT_E2E_ROOT = "TestLedgerRepairPaymentAuthorityE2EPostgresIntegration"
 LEDGER_REPAIR_APPROVAL_ROOTS = {LEDGER_REPAIR_APPROVAL_ROOT, LEDGER_REPAIR_PAYMENT_E2E_ROOT}
 BILLING_ACTORS = {"billing_migrator", "billing_schema_owner", "billing_service"}
+MIGRATION_CLI_ROOTS = {"TestAccountClosureLegacyRollbackCLI", "TestPhaseMigrationCLIPinsBeforeDown", "TestAccountClosureSagaIdentityDispatchPostgres"}
+MIGRATION_IDENTITY_ROOT = "TestAccountClosureSagaIdentityDispatchPostgres"
+MIGRATION_IDENTITY_CASES = {
+    "source-only-name-and-checksum", "ledger-only-renamed-directory",
+    "ledger-checksum-only-from-original-writer", "actual-cli-rejects-mutated-down-without-effects",
+    "mixed-domains-reject-before-writes", "unknown-custom027-keeps-generic-cli",
+}
 BILLING_ROOTS = {
     "TestClosedGrantPublishedOwnerEffects",
     "TestAccountClosureIsolationPreservesPriorAuditFacts",
@@ -59,7 +66,7 @@ CLOSED_GRANT_GROUPS = [
 CONTRACTS = [
     ("account-pagination", "./internal/account", {"TestAccountClosurePaginationPostgres"}, {}),
     ("migration-cli", "./cmd/migrate",
-     {"TestAccountClosureLegacyRollbackCLI", "TestPhaseMigrationCLIPinsBeforeDown"}, {}),
+     MIGRATION_CLI_ROOTS, {}),
     ("closure-combination", "./internal/billingschema", {"TestClosurePrivatePublicCombination"},
      {"": {"TestClosureClaimACKOrder"}}),
     ("membership-closure-event", "./internal/billingschema",
@@ -77,6 +84,9 @@ CONTRACTS = [
 
 
 def validate_closed_grant_contracts(contracts):
+    migration = ("migration-cli", "./cmd/migrate", MIGRATION_CLI_ROOTS, {})
+    if [row for row in contracts if row[0] == migration[0]] != [migration]:
+        raise RuntimeError("all original migration CLI and Account027 identity roots are required exactly once")
     ledger = ("ledger-repair-approval-proof", "./internal/account", LEDGER_REPAIR_APPROVAL_ROOTS, {})
     if [row for row in contracts if row[0] == ledger[0]] != [ledger]:
         raise RuntimeError("ledger repair approval proof phase is required exactly once")
@@ -149,6 +159,29 @@ def verify_results(raw, required):
                            + ", ".join(sorted(required - passed)) + "; unexpected="
                            + ", ".join(sorted(passed - required)))
     return count
+
+
+def verify_migration_identity_results(raw):
+    """Bind the027 contract to its actual package and complete named cases."""
+    wanted = {MIGRATION_IDENTITY_ROOT, *(MIGRATION_IDENTITY_ROOT + "/" + case for case in MIGRATION_IDENTITY_CASES)}
+    observed = {name: [] for name in wanted}
+    for index, line in enumerate(raw.splitlines()):
+        if not line.startswith("{"):
+            continue
+        event = json.loads(line)
+        name = event.get("Test", "")
+        if name != MIGRATION_IDENTITY_ROOT and not name.startswith(MIGRATION_IDENTITY_ROOT + "/"):
+            continue
+        if name not in wanted or event.get("Package") != "github.com/Pinvou/pinvou3/account-platform/cmd/migrate":
+            raise RuntimeError("unreviewed027 case or wrong migration CLI package")
+        if event.get("Action") != "output":
+            observed[name].append((event.get("Action"), index))
+    for events in observed.values():
+        if [action for action, _ in events] != ["run", "pass"]:
+            raise RuntimeError("original027 identity root/case must run and pass exactly once")
+    start, end = [index for _, index in observed[MIGRATION_IDENTITY_ROOT]]
+    if any(not start < events[0][1] < events[1][1] < end for name, events in observed.items() if name != MIGRATION_IDENTITY_ROOT):
+        raise RuntimeError("027 child cases escaped their root lifecycle")
 
 
 def main():
@@ -242,6 +275,8 @@ COMMIT;""")
             if result.returncode:
                 raise RuntimeError("closure PostgreSQL parent fixture failed; logs retained at " + str(artifacts))
             parent_count = verify_results(result.stdout, roots)
+            if name == "migration-cli":
+                verify_migration_identity_results(result.stdout)
             child_counts = {}
             for suffix, required in children.items():
                 if suffix not in child_logs:
