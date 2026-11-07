@@ -495,6 +495,25 @@ def _step_run_lines(step_body):
     return body
 
 
+def _account_closure_source_shell_arguments(workflow, job):
+    """Pin the existing implicit shell, including both defaults scopes.
+
+    This template has no workflow/Account job defaults. Adding either needs
+    explicit review instead of silently changing the source step's shell or
+    working directory while the execution probe assumes Bash errexit.
+    """
+    if re.search(r'''(?m)^(?:defaults|'defaults'|"defaults")\s*:''', workflow):
+        raise AssertionError("closure source must not inherit workflow defaults")
+    header = job.split("\n    steps:", 1)[0]
+    if re.search(r'''(?m)^    (?:defaults|'defaults'|"defaults")\s*:''', header):
+        raise AssertionError("closure source must not inherit Account job defaults")
+    source = _step_named(job, "Verify Account closure source and API contracts")
+    if re.search(r'''(?m)^        (?:shell|'shell'|"shell")\s*:''', source):
+        raise AssertionError("closure source must retain its implicit Bash shell")
+    # The Account job is pinned to ubuntu-latest by the existing job contract.
+    return ["-e", "-c"]
+
+
 def _step_if_tokens(step_body):
     """Normalize a step-level `if:` value into a token stream.
 
@@ -1151,6 +1170,7 @@ class CiGatePolicyTests(unittest.TestCase):
         job = _without_inline_comments(_extract_job_block(self.pr_workflow, "account-platform-test"))
 
         def assert_contract(text):
+            _account_closure_source_shell_arguments(self.pr_workflow, text)
             header = text.split("\n    steps:", 1)[0]
             self.assertRegex(header, r"(?m)^    needs: changes$")
             self.assertRegex(header, r"(?m)^    if:")
@@ -1207,6 +1227,21 @@ class CiGatePolicyTests(unittest.TestCase):
             with self.subTest(mutation=index), self.assertRaises(AssertionError):
                 assert_contract(mutated)
 
+        # Both YAML defaults scopes affect an otherwise unchanged source step.
+        # Include block/flow and quoted-key forms; do not infer the shell from
+        # just the two run commands, or from an independently forced mock flag.
+        for key in ("defaults", "'defaults'", '"defaults"'):
+            for value in ("\n  run:\n    shell: bash -c {0}",
+                          " {run: {shell: 'echo {0}'}}"):
+                defaults = key + ":" + value
+                workflow = defaults + "\n" + self.pr_workflow
+                with self.subTest(scope="workflow", defaults=defaults), self.assertRaises(AssertionError):
+                    _account_closure_source_shell_arguments(workflow, job)
+                inherited = job.replace("\n    steps:", "\n" + textwrap.indent(defaults, "    ") + "\n    steps:", 1)
+                self.assertNotEqual(inherited, job)
+                with self.subTest(scope="job", defaults=defaults), self.assertRaises(AssertionError):
+                    assert_contract(inherited)
+
     def test_account_required_gate_member_triple_is_pinned(self):
         original = self.pr_workflow
         wires = ("      - account-platform-test\n",
@@ -1258,9 +1293,12 @@ python3() { fixture_mock python3 "$@"; }
 """
         for name in ("Verify Account closure source and API contracts", "Account closure contracts on isolated PostgreSQL"):
             script = "\n".join(_step_run_lines(_step_named(job, name)))
+            switches = (_account_closure_source_shell_arguments(self.pr_workflow, job)
+                        if name == "Verify Account closure source and API contracts"
+                        else ["--noprofile", "--norc", "-e", "-o", "pipefail", "-c"])
             for failure in (0, 1, 2):
                 with self.subTest(step=name, failure=failure), tempfile.TemporaryDirectory(prefix="account-closure-wiring-") as directory:
-                    result = subprocess.run([bash, "-e", "-c", prefix + script], cwd=directory,
+                    result = subprocess.run([bash, *switches, prefix + script], cwd=directory,
                         env={**os.environ, "CI_FIXTURE_FAIL_AT": str(failure)}, capture_output=True, text=True, timeout=30, check=False)
                     self.assertEqual(result.returncode, 7 if failure else 0, result.stderr)
                     self.assertEqual(len(result.stdout.splitlines()), failure or 2, result.stdout)
