@@ -461,3 +461,13 @@
 .adm-restored-shell .adm-ledger-target-field>small{color:var(--adm-muted);font-size:12px;line-height:1.45;overflow-wrap:break-word}
 .adm-restored-shell .adm-financial-repair .adm-ledger-target-form input:focus,
 .adm-restored-shell .adm-financial-repair .adm-ledger-target-form>button:focus{outline:3px solid var(--adm-primary);outline-offset:2px}
+
+.adm-restored-shell .adm-ledger-impact{display:grid;gap:10px;margin:12px 0;padding:12px;border-radius:10px;background:var(--adm-soft)}
+.adm-restored-shell .adm-ledger-impact h5,.adm-restored-shell .adm-ledger-impact p{margin:0}
+.adm-restored-shell .adm-ledger-impact-accounts{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+.adm-restored-shell .adm-ledger-impact-accounts dl{display:grid;grid-template-columns:minmax(0,1fr);gap:7px;margin:0;padding:10px;border:1px solid var(--adm-line);border-radius:8px;background:var(--adm-surface)}
+.adm-restored-shell .adm-ledger-impact-accounts dd{margin:2px 0 0;overflow-wrap:anywhere}
+.adm-restored-shell .adm-ledger-impact .adm-ledger-impact-limit{color:var(--adm-muted);font-size:12px}
+@media(max-width:560px){.adm-restored-shell .adm-ledger-impact-accounts{grid-template-columns:minmax(0,1fr)}}
+
+.adm-restored-shell .adm-financial-repair .adm-ledger-impact-refresh{padding:10px 12px;border:1px solid var(--adm-line);border-radius:8px;background:var(--adm-soft);color:var(--adm-muted);font-size:12px;line-height:1.45}

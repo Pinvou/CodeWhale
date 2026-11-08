@@ -43,6 +43,26 @@ export function AdminFinancialRepairDraftForm(props) {
   return <section role="alert">{props.copy.invalidInput}</section>;
 }
 
+function LedgerRepairImpact({ projection, words, titleID }) {
+  const normalized = projection.normalized_command;
+  const financial = projection.financial_snapshot;
+  const roles = [
+    [words.original, normalized.wrong_ledger_account_id, financial.wrong_ledger_account_id, financial.wrong_account_type],
+    [words.intended, normalized.correct_ledger_account_id, financial.correct_ledger_account_id, financial.correct_account_type],
+  ];
+  const points = ledgerMicrocreditsToPoints(normalized.amount_microcredits);
+  return <section className="adm-ledger-impact" aria-labelledby={titleID}>
+    <h5 id={titleID}>{words.title}</h5>
+    <div className="adm-ledger-impact-accounts">{roles.map(([role, id, snapshotID, type]) => {
+      const matching = id === snapshotID && typeof type === 'string' && type.length > 0;
+      const accountType = matching ? (Object.prototype.hasOwnProperty.call(words.types, type) ? words.types[type] : type) : words.notProvided;
+      return <dl key={role}><div><dt>{role}</dt><dd><code>{id}</code></dd></div><div><dt>{words.accountType}</dt><dd>{accountType}</dd></div></dl>;
+    })}</div>
+    <p className="adm-ledger-impact-amount">{words.requested}: <strong>{points ? words.points(points) : words.notProvided}</strong></p>
+    <p className="adm-ledger-impact-limit">{words.limit}</p>
+  </section>;
+}
+
 function LedgerRepairDraftForm({ client, copy, owner, onCreated }) {
   const commandType = 'LEDGER_REPAIR';
   const entry = copy.ledgerTargetEntry;
@@ -85,6 +105,7 @@ function LedgerRepairDraftForm({ client, copy, owner, onCreated }) {
   const locked = busy !== '' || operation.busy || operation.unknown || operation.blocked;
   const fields = financialRepairInputs[commandType];
   const frozenAmount = pending?.projection?.normalized_command?.amount_microcredits;
+  const refreshingPreview = busy === 'facts' && Boolean(visibleFacts);
   const displayedPoints = pending ? ledgerMicrocreditsToPoints(frozenAmount) : amountPoints;
   const displayedMicrocredits = pending ? String(frozenAmount) : values.amount_microcredits || '';
   const amountInvalid = !pending && amountPoints !== '' && !displayedMicrocredits;
@@ -219,13 +240,17 @@ function LedgerRepairDraftForm({ client, copy, owner, onCreated }) {
     {(failure || operation.error) && <p role="alert">{failure || operation.error}</p>}{operation.unknown && <p role="status">{copy.recoveryPending}</p>}
     {needsAuthentication && <><p>{copy.recentAuthenticationRequired}</p><button disabled={operation.busy} onClick={() => client.reauthenticate('/admin.html?section=finance&finance_tab=ledger')}>{copy.reauthenticate}</button></>}
     {created && <p role="status">{copy.createdHint} <code>{created}</code></p>}
-    {visibleFacts && <div className="adm-financial-repair-facts">
+    {refreshingPreview && <p className="adm-ledger-impact-refresh" role="status">{copy.ledgerImpact.refreshing}</p>}
+    {visibleFacts && !refreshingPreview && <div className="adm-financial-repair-facts">
       <h4>{copy.frozenFacts}</h4>
-      <dl>{visibleFacts.rows.map((row) => <div key={row.key}><dt>{copy.fields[row.key] || row.key}</dt><dd><code>{row.value}</code></dd></div>)}</dl>
+      {visibleProjection && <LedgerRepairImpact projection={visibleProjection} words={copy.ledgerImpact} titleID={targetEntryID + '-impact'} />}
+      <details><summary>{copy.ledgerImpact.identifiers}</summary>
+        <dl>{visibleFacts.rows.map((row) => <div key={row.key}><dt>{copy.fields[row.key] || row.key}</dt><dd><code>{row.value}</code></dd></div>)}</dl>
+      </details>
       <details><summary>{copy.criticalFacts}</summary><pre>{visibleFacts.critical}</pre></details>
       <details><summary>{copy.financialFacts}</summary><pre>{visibleFacts.financial}</pre></details>
     </div>}
-    {visibleProjection && <form className="adm-financial-repair-draft" onSubmit={createDraft}>
+    {visibleProjection && !refreshingPreview && <form className="adm-financial-repair-draft" onSubmit={createDraft}>
       <label>{copy.reason}<textarea disabled={locked} required minLength="10" maxLength="2000" value={pending?.reason || reason} onChange={(event) => setReason(event.target.value)} /></label>
       <small>{copy.reasonHint}</small>
       <label>{copy.requestKey}<input disabled={locked} required maxLength="111" value={pending?.requestKey || requestKey} onChange={(event) => setRequestKey(event.target.value)} /></label>
