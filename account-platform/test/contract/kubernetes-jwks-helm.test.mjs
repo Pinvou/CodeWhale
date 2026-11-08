@@ -16,9 +16,11 @@ const ports = [443, 6443];
 const publicEnvironment = () => Object.fromEntries(Object.entries(process.env).filter(([key]) =>
   ['PATH', 'HOME', 'USERPROFILE', 'SYSTEMROOT', 'TEMP', 'TMP'].includes(key.toUpperCase())));
 const enabled = { skip: process.env.PINVOU_TEST_KMS_HELM !== '1' };
-function render(profile = 'base', changes = []) {
+const siteNetwork = path.resolve(import.meta.dirname, '../fixtures/production-site-network.yaml');
+function render(profile = 'base', changes = [], useSiteNetwork = true) {
   const args = ['template', 'kube-contract', chart, '--namespace', 'kube-test',
     ...(profile === 'base' ? [] : ['-f', path.join(chart, 'values-' + profile + '.yaml')]),
+    ...(profile === 'production-new' && useSiteNetwork ? ['-f', siteNetwork] : []),
     ...(profile === 'production-new' ? ['--set-string', 'newApi.tlsSecretName=fixture-newapi', '--set-string', 'newApi.caConfigMap=fixture-newapi-ca', '--set-string', 'images.newApiTLS.repository=registry.example.invalid/fixture', '--set-string', 'images.newApiTLS.digest=sha256:' + '0'.repeat(64)] : ['--set', 'newApi.enabled=false']), '--set', 'nats.enabled=false', '--set-string', 'dependencies.natsUrl=tls://nats.fixture.invalid:4222',
     '--set-json', 'external.workloadJwksCidrs=' + JSON.stringify(cidrs),
     '--set-json', 'workloadIdentity.kubernetesApiServerPorts=' + JSON.stringify(ports),
@@ -32,6 +34,42 @@ function resources(result) {
   assert.equal(result.error, undefined); assert.equal(result.status, 0, result.stderr);
   return YAML.parseAllDocuments(result.stdout).map(document => { assert.deepEqual(document.errors, []); return document.toJSON(); }).filter(Boolean);
 }
+test('repository Helm profiles delegate dependency CIDRs to site values', enabled, () => {
+  for (const profile of ['staging', 'production-new']) {
+    const values = YAML.parse(readFileSync(path.join(chart, `values-${profile}.yaml`), 'utf8'));
+    assert.ok(Object.values(values.external ?? {}).every(value => Array.isArray(value) && value.length === 0));
+  }
+  const missing = render('production-new', [], false);
+  assert.equal(missing.error, undefined);
+  assert.notEqual(missing.status, 0);
+  assert.equal(missing.stdout, '');
+  assert.match(missing.stderr, /external\.postgresCidrs: Array must have at least 1 items/);
+  assert.match(missing.stderr, /external\.natsCidrs: Array must have at least 1 items/);
+  const incomplete = render('production-new', ['--set-json', 'external.natsCidrs=[]']);
+  assert.notEqual(incomplete.status, 0);
+  assert.equal(incomplete.stdout, '');
+  assert.match(incomplete.stderr, /external\.natsCidrs: Array must have at least 1 items/);
+
+  const config = YAML.parse(readFileSync(siteNetwork, 'utf8')).external;
+  const policies = resources(render('production-new')).filter(item => item.kind === 'NetworkPolicy');
+  const policy = suffix => policies.find(item => item.metadata.name.endsWith(`-${suffix}`));
+  const ipRules = suffix => policy(suffix).spec.egress.filter(rule => rule.to.some(peer => peer.ipBlock));
+  const rule = (cidr, port, protocol = 'TCP') => ({ to: [{ ipBlock: { cidr } }], ports: [{ protocol, port }] });
+  const deny = policy('default-deny').spec;
+  assert.deepEqual(deny.policyTypes, ['Ingress', 'Egress']);
+  assert.equal(deny.ingress, undefined);
+  assert.equal(deny.egress, undefined);
+  assert.deepEqual(ipRules('internal-and-approved-egress'), [
+    ...config.postgresCidrs.map(value => rule(value, 5432)),
+    ...['paymentProviderCidrs', 'secretProviderCidrs', 'modelProviderCidrs', 'telemetryCollectorCidrs']
+      .flatMap(key => config[key].map(value => rule(value, 443))),
+    ...config.timeSourceCidrs.map(value => rule(value, 123, 'UDP')),
+  ]);
+  for (const [suffix, key, port] of [
+    ['redis-clients', 'redisCidrs', 6379], ['event-clients', 'natsCidrs', 4222],
+    ['portal-oidc', 'oidcCidrs', 443], ['portal-nats-monitor', 'natsMonitorCidrs', 443],
+  ]) assert.deepEqual(ipRules(suffix), config[key].map(value => rule(value, port)));
+});
 const environment = container => Object.fromEntries(container.env.filter(item => Object.hasOwn(item, 'value')).map(item => [item.name, item.value]));
 function assertNative(items, expectedPorts = ports) {
   const deployments = items.filter(item => item.kind === 'Deployment');
