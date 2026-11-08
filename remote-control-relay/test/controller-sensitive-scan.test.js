@@ -322,6 +322,28 @@ test("scanner rejects arbitrary surface names instead of widening evidence scope
 
 const cleanSurfaces = () => Object.fromEntries(CONTROLLER_SCAN_SURFACES.map((name) => [name, "collected-safe-data"]));
 
+test("reflection and byte-conversion failures never expose proxy exceptions", () => {
+  const scanner = new ControllerSensitiveScanner(SENTINELS);
+  const secret = "canary-must-not-escape-from-proxy";
+  const fail = () => { throw new Error(secret); };
+  const revoked = Proxy.revocable({}, {});
+  revoked.revoke();
+  const cases = [
+    [new Proxy(cleanSurfaces(), { ownKeys: fail }), "controller_scan_surfaces_invalid"],
+    [new Proxy(cleanSurfaces(), { getOwnPropertyDescriptor: fail }), "controller_scan_surface_invalid"],
+    [revoked.proxy, "controller_scan_surfaces_invalid"],
+    [{ ...cleanSurfaces(), logs: new Proxy({}, { getPrototypeOf: fail }) }, "controller_scan_surface_invalid"],
+    [{ ...cleanSurfaces(), logs: new Proxy(Buffer.from("safe"), { get: fail }) }, "controller_scan_surface_invalid"],
+    [{ ...cleanSurfaces(), logs: revoked.proxy }, "controller_scan_surface_invalid"],
+  ];
+  for (const [surfaces, code] of cases) {
+    for (const scan of [() => scanner.scan(surfaces), () => scanner.assertClean(surfaces)]) {
+      assert.throws(scan, error => error.code === code && error.message === code && !error.stack.includes(secret));
+    }
+  }
+  assert.equal(scanner.assertClean(cleanSurfaces()).clean, true);
+});
+
 test("every scan requires all four owned evidence surfaces", () => {
   const scanner = new ControllerSensitiveScanner(SENTINELS);
   for (let mask = 0; mask < 15; mask += 1) {

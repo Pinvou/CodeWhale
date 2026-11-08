@@ -14,11 +14,11 @@ function fail(code) {
 }
 
 function surfaceBytes(value) {
-  if (Buffer.isBuffer(value)) return value;
-  if (value instanceof Uint8Array) return Buffer.from(value);
-  if (typeof value === "string") return Buffer.from(value, "utf8");
-  if (!value || typeof value !== "object") fail("controller_scan_surface_invalid");
   try {
+    if (Buffer.isBuffer(value)) return Buffer.from(value);
+    if (value instanceof Uint8Array) return Buffer.from(value);
+    if (typeof value === "string") return Buffer.from(value, "utf8");
+    if (!value || typeof value !== "object") fail("controller_scan_surface_invalid");
     const serialized = JSON.stringify(value);
     if (typeof serialized !== "string") fail("controller_scan_surface_invalid");
     return Buffer.from(serialized, "utf8");
@@ -62,20 +62,25 @@ export class ControllerSensitiveScanner {
   }
 
   scan(surfaces) {
-    if (!surfaces || typeof surfaces !== "object" || Array.isArray(surfaces)) {
+    let isArray;
+    try { isArray = Array.isArray(surfaces); } catch { fail("controller_scan_surfaces_invalid"); }
+    if (!surfaces || typeof surfaces !== "object" || isArray) {
       fail("controller_scan_surfaces_invalid");
     }
-    for (const name of Reflect.ownKeys(surfaces)) {
+    let names;
+    try { names = Reflect.ownKeys(surfaces); } catch { fail("controller_scan_surfaces_invalid"); }
+    for (const name of names) {
       if (!CONTROLLER_SCAN_SURFACES.includes(name)) {
         fail("controller_scan_surface_unknown");
       }
     }
-    if (CONTROLLER_SCAN_SURFACES.some((name) => !Object.hasOwn(surfaces, name))) {
+    if (CONTROLLER_SCAN_SURFACES.some((name) => !names.includes(name))) {
       fail("controller_scan_surfaces_incomplete");
     }
     const matches = [];
     for (const name of CONTROLLER_SCAN_SURFACES) {
-      const property = Object.getOwnPropertyDescriptor(surfaces, name);
+      let property;
+      try { property = Object.getOwnPropertyDescriptor(surfaces, name); } catch { fail("controller_scan_surface_invalid"); }
       if (!property || !Object.hasOwn(property, "value")) fail("controller_scan_surface_invalid");
       const haystack = surfaceBytes(property.value);
       if (this.needles.some((variants) => variants.some((needle) => haystack.indexOf(needle) !== -1))) {
