@@ -55,6 +55,10 @@ const activeKeys = new Set();
 const cancelWanted = new Set();
 /** 已经有轮询循环挂着的 run_id。再附着时靠它去重,不会给同一次运行建两张卡。 */
 const attachedRuns = new Set();
+/** 用户在本会话内主动关掉的任务卡对应的 run_id——reattach 不得复活它们
+ * （r29 P2：关掉=不要了）。只在内存里，页面刷新后自动清空（全新会话
+ * 重新接回所有活跃运行是正确行为）。 */
+const dismissedRuns = new Set();
 
 let nextTaskId = 1;
 
@@ -380,6 +384,8 @@ function reattachRuns(runs, describe) {
   for (const run of runs || []) {
     const runId = run?.run_id;
     if (!runId || attachedRuns.has(runId)) continue;
+    // r29 P2：用户本会话关掉的任务卡不再接回（关掉=不要了）。
+    if (dismissedRuns.has(runId)) continue;
     const meta = describe(run);
     // 认不出的操作不接:宁可不显示,也不要一张说不清自己在干什么、却点得了取消
     // 的任务卡。
@@ -498,6 +504,9 @@ function answerTask(id, value) {
  * @returns {void} 无返回。
  */
 function dismissTask(id) {
+  // r29 P2：记下 run_id，reattach 不再复活这张已关掉的卡。
+  const runId = runIds.get(id);
+  if (runId) dismissedRuns.add(runId);
   dropTask(id);
 }
 
