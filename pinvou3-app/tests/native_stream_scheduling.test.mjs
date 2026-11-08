@@ -470,6 +470,34 @@ test('后台终态取消 pending 合并帧后补节流标记（r9 P1-C 行为锁
   );
 });
 
+// r12 P2-1 行为锁（上一测试的对照臂）：**前台**终态不得打节流标记——
+// cancelPendingStreamNotify 虽杀掉合并帧，但终态冲刷链（flushPendingStreamRender
+// → notify）会真实发布并对活跃会话补 markDispatched；无 sid 门打标记会让
+// throttledOrigin 否决补章后的 finalize，用户看着会话完成时的真实主线程
+// 冻结零上报。删掉 `sid !== state.activeSessionId` 门此测试必红。
+test('前台终态不打节流标记，终态冲刷链照常补章（r12 P2-1 行为锁）', () => {
+  const stamps = [];
+  const h = createNativeStreamHarness({
+    count: 2,
+    probe: {
+      begin(sid) { stamps.push(['begin', sid]); },
+      markScheduled(sid) { stamps.push(['markScheduled', sid]); },
+      markThrottled(sid) { stamps.push(['markThrottled', sid]); },
+      markDispatched(sid) { stamps.push(['markDispatched', sid]); },
+    },
+  });
+  h.emit('s0', 'chat:delta', { text: 'tail' }); // 活跃会话 delta
+  h.emit('s0', 'chat:done', { status: 'completed' }); // 前台终态（s0 活跃）
+  assert.ok(
+    !stamps.some(([kind, sid]) => kind === 'markThrottled' && sid === 's0'),
+    '前台终态的补章发布真实存在，节流标会否决会话完成时刻的真实冻结上报',
+  );
+  assert.ok(
+    stamps.some(([kind, sid]) => kind === 'markDispatched' && sid === 's0'),
+    '终态冲刷链经 notify 对活跃会话补章',
+  );
+});
+
 // r8 P1 行为锁：跨会话 publish 的 cancel-all 置换活跃会话的武装条目时，
 // **当场补章**——活跃条目补 markDispatched（其内容确随本次发布上屏），
 // 后台条目补 markThrottled。不补章的后果（受控时钟亲证）：活跃条目滞留，
