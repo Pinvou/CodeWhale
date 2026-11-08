@@ -298,3 +298,6 @@ adminLayoutCopy.ja.billingTasks = { title: 'アカウントと請求のタスク
 adminLayoutCopy.zh.billingTasks.showOverview = '账户与计费概览';
 adminLayoutCopy.en.billingTasks.showOverview = 'Accounts and billing overview';
 adminLayoutCopy.ja.billingTasks.showOverview = 'アカウントと請求の概要';
+adminLayoutCopy.zh.organization.unitDeleteStage = {"ready":"请核对删除对象。下一步会再次确认，此时尚未发送删除请求。","processing":"正在处理已确认的删除请求…","uncertain":"删除结果尚未确认。重试会继续同一条请求。","rejected":"此次删除请求未成功。请查看提示，核对后再确认。"};
+adminLayoutCopy.en.organization.unitDeleteStage = {"ready":"Review the unit to delete. The next step asks for final confirmation before sending a request.","processing":"Processing the confirmed deletion request…","uncertain":"The deletion result is unconfirmed. Retry continues the same request.","rejected":"This deletion request did not succeed. Review the message before confirming again."};
+adminLayoutCopy.ja.organization.unitDeleteStage = {"ready":"削除対象を確認してください。次の手順で最終確認するまで、削除リクエストは送信されません。","processing":"確定した削除リクエストを処理中です…","uncertain":"削除結果を確認できていません。再試行では同じリクエストを続行します。","rejected":"今回の削除リクエストは成功しませんでした。メッセージを確認してから再度確定してください。"};

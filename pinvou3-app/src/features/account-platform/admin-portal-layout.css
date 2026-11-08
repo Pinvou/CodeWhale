@@ -506,3 +506,5 @@
 .adm-restored-shell .adm-writeoff-fixed-command{grid-column:1/-1;margin:0;padding:8px 10px;border-radius:8px;background:var(--adm-soft)}
 .adm-restored-shell .adm-writeoff-fixed-command dt{color:var(--adm-muted);font-size:12px}
 .adm-restored-shell .adm-writeoff-fixed-command dd{margin:2px 0 0;font-weight:650}
+
+.ap-admin-org-action .ap-admin-org-action-stage{margin:0;padding:10px 12px;border:1px solid var(--adm-line,#e3e7ee);border-radius:10px;background:var(--adm-soft,#f8f9fc);color:var(--adm-muted,#687083);line-height:1.5;overflow-wrap:anywhere}
