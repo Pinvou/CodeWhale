@@ -3444,24 +3444,22 @@ impl Engine {
             match input {
                 EngineRunInput::IdleRetirement(request) => {
                     if self.accept_idle_shutdown(request).await {
-                        // Committed. Anything arriving past the handshake is a
-                        // host contract violation: every send had already
-                        // returned `Ok`, and the engine drops these with it, so
-                        // surface the loss instead of dropping silently.
-                        // `reserve()` permits cannot be observed here — the
-                        // host contract must exclude them before this point.
-                        // The breakdown names which contract edge leaked.
-                        let residual = self.count_residual_inputs();
-                        if residual > 0 {
+                        // Committed: report both external inputs and autonomous
+                        // work observed after the sealed wait. Pending event
+                        // slots also include reserved permits, not just sends.
+                        let (residual, event_slots, shell_work) = self.retirement_residuals();
+                        if residual > 0 || event_slots > 0 || shell_work {
                             tracing::warn!(
                                 residual,
+                                event_slots,
+                                shell_work,
                                 ops = self.rx_op.len(),
                                 subagent_completions = self.rx_subagent_completion.len(),
                                 steers = self.rx_steer.len(),
                                 pending_steers = self.pending_steers.len(),
                                 approvals = self.rx_approval.len(),
                                 user_inputs = self.rx_user_input.len(),
-                                "engine retired with residual inputs queued after the retirement commit"
+                                "engine retired with residual work observed after the retirement commit"
                             );
                         }
                         break;

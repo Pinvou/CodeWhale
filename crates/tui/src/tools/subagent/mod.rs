@@ -6330,7 +6330,13 @@ impl SubAgentManager {
     }
 
     fn followup_child_by_id(&mut self, agent_id: &str, text: String) -> Result<ParentMailReceipt> {
-        let agent_id = agent_id.to_owned();
+        // Terminal receipt ids stay immutable, but new follow-ups belong to
+        // their latest resumed incarnation. Otherwise accepted mail parks on
+        // a predecessor that will never drain again and prevents retirement.
+        let mut agent_id = agent_id.to_owned();
+        while let Some(target) = self.resume_targets.get(&agent_id) {
+            agent_id = target.clone();
+        }
         let status = self
             .agents
             .get(&agent_id)
@@ -6847,10 +6853,8 @@ impl SubAgentManager {
         };
         // Mail accepted for the interrupted incarnation follows the resume:
         // the queue-only receipt promised the owner session the mail survives
-        // a resume, but this re-dispatch runs under a NEW id and `followup` on
-        // the old id can only park further mail on the retained record — it
-        // can never deliver. Re-key the parked mailbox onto the resumed
-        // incarnation so the next followup drains it.
+        // a resume. Re-key mail accepted before this re-dispatch; subsequent
+        // follow-ups resolve the retained receipt id to its latest successor.
         let parked = self.queued_mail.remove(&agent_id).unwrap_or_default();
         if !parked.is_empty() {
             self.queued_mail
