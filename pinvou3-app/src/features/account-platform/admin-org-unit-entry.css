@@ -1,0 +1,6 @@
+.adm-restored-shell .adm-unit-parent .adm-unit-entry-context{display:grid;grid-template-columns:minmax(0,1fr);gap:3px;margin-top:4px;min-width:0;color:var(--adm-muted);line-height:1.5;overflow-wrap:break-word;overflow-wrap:anywhere}
+.adm-unit-entry-context small{min-width:0;font-size:12px}.adm-unit-entry-context code{font-size:12px;font-variant-numeric:tabular-nums;white-space:normal;overflow-wrap:break-word;overflow-wrap:anywhere}
+.adm-restored-shell .adm-organization-directory .adm-organization-units{grid-template-columns:minmax(0,1fr);min-width:0}
+.adm-restored-shell .adm-organization-directory .adm-organization-units>li{min-width:0}
+.adm-restored-shell .adm-organization-directory .adm-organization-units>li>.adm-unit-parent{grid-template-columns:minmax(0,1fr)}
+.adm-restored-shell .adm-organization-directory .adm-organization-units>li>strong,.adm-restored-shell .adm-organization-directory .adm-organization-units>li>.adm-unit-parent>span{min-width:0;overflow-wrap:break-word;overflow-wrap:anywhere}
