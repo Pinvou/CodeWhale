@@ -15,11 +15,13 @@ function fail(code) {
 
 function surfaceBytes(value) {
   try {
-    if (Buffer.isBuffer(value) || value instanceof Uint8Array) {
+    if (ArrayBuffer.isView(value) || Buffer.isBuffer(value) || value instanceof Uint8Array) {
       // Read typed-array slots directly. Buffer.from(value) consults valueOf,
       // which could replace contaminated bytes with a clean string. These
       // intrinsics also reject a Proxy rather than invoking its byte hooks.
       const typedArray = Object.getPrototypeOf(Uint8Array.prototype);
+      const kind = Object.getOwnPropertyDescriptor(typedArray, Symbol.toStringTag).get.call(value);
+      if (kind !== "Uint8Array") fail("controller_scan_surface_invalid");
       const length = Object.getOwnPropertyDescriptor(typedArray, "length").get.call(value);
       const bytes = Buffer.alloc(length);
       Uint8Array.prototype.set.call(bytes, value);
@@ -40,7 +42,7 @@ function sentinelNeedles(value) {
   // Pairing codes are seven characters, so the scanner must accept the real
   // shortest secret rather than replacing it with a longer synthetic value.
   if (typeof value !== "string" || value.length < 7 || Buffer.byteLength(value) > 4096) {
-    throw new Error("controller_scan_sentinel_invalid");
+    fail("controller_scan_sentinel_invalid");
   }
   const raw = Buffer.from(value, "utf8");
   let uri;
@@ -62,11 +64,25 @@ function sentinelNeedles(value) {
  * prompts, paths and content before collecting each fixed surface.
  */
 export class ControllerSensitiveScanner {
+  #needles;
+
   constructor(sentinels) {
-    if (!Array.isArray(sentinels) || sentinels.length === 0 || sentinels.length > 32) {
-      throw new Error("controller_scan_sentinels_invalid");
+    let count;
+    try {
+      if (Array.isArray(sentinels)) count = Object.getOwnPropertyDescriptor(sentinels, "length").value;
+    } catch { fail("controller_scan_sentinels_invalid"); }
+    if (!Number.isInteger(count) || count < 1 || count > 32) {
+      fail("controller_scan_sentinels_invalid");
     }
-    this.needles = sentinels.map(sentinelNeedles);
+    const needles = [];
+    for (let index = 0; index < count; index += 1) {
+      let property;
+      try { property = Object.getOwnPropertyDescriptor(sentinels, String(index)); }
+      catch { fail("controller_scan_sentinel_invalid"); }
+      if (!property || !Object.hasOwn(property, "value")) fail("controller_scan_sentinel_invalid");
+      needles.push(sentinelNeedles(property.value));
+    }
+    this.#needles = needles;
   }
 
   scan(surfaces) {
@@ -91,7 +107,7 @@ export class ControllerSensitiveScanner {
       try { property = Object.getOwnPropertyDescriptor(surfaces, name); } catch { fail("controller_scan_surface_invalid"); }
       if (!property || !Object.hasOwn(property, "value")) fail("controller_scan_surface_invalid");
       const haystack = surfaceBytes(property.value);
-      if (this.needles.some((variants) => variants.some((needle) => haystack.indexOf(needle) !== -1))) {
+      if (this.#needles.some((variants) => variants.some((needle) => haystack.indexOf(needle) !== -1))) {
         matches.push(name);
       }
     }

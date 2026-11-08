@@ -5,6 +5,10 @@
 `undefined/null` 等非法值均以固定 `controller_scan_*` 错误拒绝，不能得到 clean 回执。
 数据支持 UTF-8 字符串、Buffer/Uint8Array 和可序列化的 JSON 对象/数组；序列化失败
 不回显错误、属性名、凭据或 canary。显式空内容可扫描，但不能单独证明收集确实执行。
+Buffer/Uint8Array 按内槽读取实际视图范围，跨 realm 或替换原型不会改变字节来源；
+DataView 及其他元素类型的视图显式拒绝，不回退为 JSON。普通 JSON 对象的 `toJSON`
+按实际序列化结果扫描；该结果不代表对象序列化前的全部内存。已登记检测规则由实例私有保存。
+canary 列表必须为逐项有效的非空自有数据列表，稀疏项或访问器不能注册为空规则后返回 clean。
 
 固定 canary 的检测范围包括完整值的原文、标准 Base64/Base64URL（带/不带 padding）、
 大小写 hex、JSON 字符转义、全 UTF-16 `\uXXXX` 转义（大小写 hex）及 URI 百分号编码

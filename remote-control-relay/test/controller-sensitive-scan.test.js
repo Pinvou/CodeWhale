@@ -8,6 +8,7 @@ import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { runInNewContext } from "node:vm";
 import test from "node:test";
 import WebSocket from "ws";
 
@@ -357,6 +358,99 @@ test("typed-array conversion scans actual bytes without replacement hooks", () =
       assert.throws(() => scanner.assertClean({ ...cleanSurfaces(), [name]: value }), { code: "controller_sensitive_sentinel_detected" });
     }
   }
+});
+
+test("unsupported binary views fail closed instead of becoming JSON evidence", () => {
+  const scanner = new ControllerSensitiveScanner(SENTINELS);
+  const buffer = Uint8Array.from(Buffer.from(SENTINELS[0].padEnd(16, " "))).buffer;
+  for (const value of [new DataView(buffer), new Int8Array(buffer), new Uint16Array(buffer), new Float64Array(buffer)]) {
+    for (const name of CONTROLLER_SCAN_SURFACES) {
+      for (const scan of [() => scanner.scan({ ...cleanSurfaces(), [name]: value }),
+        () => scanner.assertClean({ ...cleanSurfaces(), [name]: value })]) {
+        assert.throws(scan, error => error.code === "controller_scan_surface_invalid"
+          && error.message === error.code && !error.stack.includes(SENTINELS[0]));
+      }
+    }
+  }
+  assert.equal(scanner.assertClean(cleanSurfaces()).clean, true);
+});
+
+test("Uint8Array slots remain authoritative across realms and replaced prototypes", () => {
+  const scanner = new ControllerSensitiveScanner(SENTINELS);
+  const foreign = runInNewContext("new Uint8Array(bytes)", { bytes: [...Buffer.from(SENTINELS[0])] });
+  const unprototyped = Object.setPrototypeOf(Buffer.from(SENTINELS[0]), null);
+  for (const value of [foreign, unprototyped]) {
+    for (const name of CONTROLLER_SCAN_SURFACES) {
+      assert.deepEqual(scanner.scan({ ...cleanSurfaces(), [name]: value }).matched_surfaces, [name]);
+      assert.throws(() => scanner.assertClean({ ...cleanSurfaces(), [name]: value }),
+        { code: "controller_sensitive_sentinel_detected" });
+    }
+  }
+});
+
+test("offset byte views scan exactly their owned range", () => {
+  const scanner = new ControllerSensitiveScanner(SENTINELS);
+  const bytes = Buffer.from(`${SENTINELS[0]}safe${SENTINELS[0]}`);
+  const offset = SENTINELS[0].length;
+  for (const make of [() => bytes.subarray(offset, offset + 4),
+    () => new Uint8Array(bytes.buffer, bytes.byteOffset + offset, 4),
+    () => runInNewContext("new Uint8Array(buffer, offset, 4)",
+      { buffer: bytes.buffer, offset: bytes.byteOffset + offset })]) {
+    const value = make();
+    for (const name of CONTROLLER_SCAN_SURFACES) {
+      assert.equal(scanner.assertClean({ ...cleanSurfaces(), [name]: value }).clean, true);
+    }
+  }
+  const contaminated = new Uint8Array(bytes.buffer, bytes.byteOffset + offset + 4, SENTINELS[0].length);
+  assert.deepEqual(scanner.scan({ ...cleanSurfaces(), logs: contaminated }).matched_surfaces, ["logs"]);
+});
+
+test("phantom surface descriptors and malformed sentinels retain fixed error codes", () => {
+  const scanner = new ControllerSensitiveScanner(SENTINELS);
+  const phantom = new Proxy(cleanSurfaces(), {
+    getOwnPropertyDescriptor(target, name) {
+      return name === "logs" ? undefined : Reflect.getOwnPropertyDescriptor(target, name);
+    },
+  });
+  assert.throws(() => scanner.scan(phantom), { code: "controller_scan_surface_invalid" });
+  assert.throws(() => scanner.assertClean(phantom), { code: "controller_scan_surface_invalid" });
+  for (const values of [null, [], Array(33).fill("valid-sentinel")]) {
+    assert.throws(() => new ControllerSensitiveScanner(values), { code: "controller_scan_sentinels_invalid" });
+  }
+  for (const value of [null, "short", "a".repeat(4097), "invalid\ud800"]) {
+    assert.throws(() => new ControllerSensitiveScanner([value]),
+      error => error.code === "controller_scan_sentinel_invalid" && error.message === error.code);
+  }
+  assert.equal(scanner.assertClean(cleanSurfaces()).clean, true);
+});
+
+test("assigning public lookalike state cannot replace registered detection needles", () => {
+  const scanner = new ControllerSensitiveScanner(SENTINELS);
+  scanner.needles = [];
+  assert.throws(() => scanner.assertClean({ ...cleanSurfaces(), logs: SENTINELS[0] }),
+    { code: "controller_sensitive_sentinel_detected" });
+  assert.equal(scanner.assertClean(cleanSurfaces()).clean, true);
+});
+
+test("sparse or accessor canary lists cannot register an empty detection rule set", () => {
+  const inherited = Array(1);
+  Object.setPrototypeOf(inherited, { 0: SENTINELS[0] });
+  let accessed = false;
+  const accessor = Array(1);
+  Object.defineProperty(accessor, "0", { get() { accessed = true; throw new Error(SENTINELS[0]); } });
+  for (const values of [Array(1), [SENTINELS[0], , SENTINELS[1]], inherited, accessor]) {
+    assert.throws(() => new ControllerSensitiveScanner(values),
+      error => error.code === "controller_scan_sentinel_invalid"
+        && error.message === error.code && !error.stack.includes(SENTINELS[0]));
+  }
+  assert.equal(accessed, false);
+  const values = [...SENTINELS];
+  values.map = () => [];
+  values[Symbol.iterator] = function* () {};
+  const scanner = new ControllerSensitiveScanner(values);
+  assert.throws(() => scanner.assertClean({ ...cleanSurfaces(), logs: SENTINELS[0] }),
+    { code: "controller_sensitive_sentinel_detected" });
+  assert.equal(scanner.assertClean(cleanSurfaces()).clean, true);
 });
 
 test("every scan requires all four owned evidence surfaces", () => {
