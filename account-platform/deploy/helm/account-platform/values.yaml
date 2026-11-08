@@ -7,6 +7,8 @@ global:
   manualReviewOnCallUserIds: ["00000000-0000-0000-0000-000000000101", "00000000-0000-0000-0000-000000000102"]
 
 approvalRelay:
+  # Enable when the release requires frozen authorization delivery.
+  requireReady: false
   # Public JSON only. Never point this at the Secret containing NKey seeds or
   # credentials. Trusted SHA-256 values stay in global.runtimeSecret.
   natsPublicArtifactConfigMap: pinvou-account-platform-nats-public-artifacts
