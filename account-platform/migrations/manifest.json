@@ -1082,6 +1082,16 @@
         "file": "900014_registration_bonus_backfill_progress.up.sql",
         "version": 900014,
         "sha256": "275c8a43bbf3741806ffd9204b506b2730074878b5cd83ac2477e9e14df2fede"
+      },
+      {
+        "file": "900015_approval_delivery_terminal_recovery.down.sql",
+        "version": 900015,
+        "sha256": "6c27277197eea78b54e959bbf48793cf0dad004f6b1f19336076481b8475660c"
+      },
+      {
+        "file": "900015_approval_delivery_terminal_recovery.up.sql",
+        "version": 900015,
+        "sha256": "aa4dd01995ecc0fe9bcc8ede004404e83ebca986d527131d914663eb189d3860"
       }
     ],
     "billing": [
