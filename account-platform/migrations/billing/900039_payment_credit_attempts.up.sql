@@ -10,10 +10,13 @@ CREATE TABLE payment_credit_attempts (
     created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
     resolved_at TIMESTAMPTZ,
 		account_acknowledged_at TIMESTAMPTZ,
+        next_retention_check_at TIMESTAMPTZ,
 		retained_until TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()+interval '3 years',
 		legal_hold BOOLEAN NOT NULL DEFAULT false,
 		hold_review_at TIMESTAMPTZ,
-		CHECK (NOT legal_hold OR hold_review_at IS NOT NULL),
+		CHECK ((account_acknowledged_at IS NULL)=(next_retention_check_at IS NULL)),
+        CHECK (next_retention_check_at IS NULL OR next_retention_check_at>=retained_until),
+        CHECK (NOT legal_hold OR hold_review_at IS NOT NULL),
 		CHECK (retained_until>=GREATEST(created_at,COALESCE(resolved_at,created_at),COALESCE(account_acknowledged_at,created_at))+interval '3 years'),
 		CHECK (state<>'PREPARED' OR account_acknowledged_at IS NULL),
     CHECK ((state='PREPARED')=(resolved_at IS NULL)),
@@ -21,7 +24,7 @@ CREATE TABLE payment_credit_attempts (
 );
 CREATE INDEX payment_credit_attempt_order_idx ON payment_credit_attempts(payment_order_id,id);
 CREATE INDEX payment_credit_attempt_transaction_idx ON payment_credit_attempts(payment_transaction_id) WHERE state IN ('PREPARED','APPLIED');
-CREATE INDEX payment_credit_attempt_retention_idx ON payment_credit_attempts(retained_until,id) WHERE state<>'PREPARED' AND account_acknowledged_at IS NOT NULL AND legal_hold=false;
+CREATE INDEX payment_credit_attempt_retention_idx ON payment_credit_attempts(next_retention_check_at,retained_until,id) WHERE state<>'PREPARED' AND account_acknowledged_at IS NOT NULL AND legal_hold=false;
 REVOKE ALL ON payment_credit_attempts FROM PUBLIC;
 GRANT SELECT,INSERT,UPDATE,DELETE ON payment_credit_attempts TO billing_service;
 COMMENT ON TABLE payment_credit_attempts IS 'Financial evidence and effect tombstones; unresolved attempts never expire. Apply financial retention and legal holds, never ordinary event cleanup.';
@@ -43,6 +46,13 @@ BEGIN
         RAISE EXCEPTION 'payment credit with financial effects cannot be aborted' USING ERRCODE='55000';
     END IF;
 		NEW.retained_until:=GREATEST(OLD.retained_until,COALESCE(NEW.resolved_at,OLD.created_at)+interval '3 years',COALESCE(NEW.account_acknowledged_at,OLD.created_at)+interval '3 years');
+        IF NEW.account_acknowledged_at IS NOT NULL THEN
+            IF OLD.account_acknowledged_at IS NULL OR NEW.next_retention_check_at IS NULL THEN
+                NEW.next_retention_check_at:=NEW.retained_until;
+            ELSE
+                NEW.next_retention_check_at:=GREATEST(NEW.next_retention_check_at,NEW.retained_until);
+            END IF;
+        END IF;
     RETURN NEW;
 END $$;
 CREATE TRIGGER payment_credit_attempt_facts BEFORE UPDATE ON payment_credit_attempts
@@ -127,3 +137,12 @@ BEGIN
 END $$;
 CREATE TRIGGER payment_credit_clearance_facts BEFORE UPDATE OR DELETE ON payment_credit_retention_batches FOR EACH ROW EXECUTE FUNCTION guard_payment_credit_retention_batches();
 CREATE TRIGGER payment_credit_clearance_no_truncate BEFORE TRUNCATE ON payment_credit_retention_batches FOR EACH STATEMENT EXECUTE FUNCTION guard_payment_credit_retention_batches();
+
+-- Future evidence becomes due at its financial retention floor, not on every
+-- worker tick. Historical acknowledged inserts follow the same schedule.
+CREATE FUNCTION initialize_payment_credit_retention_check() RETURNS trigger LANGUAGE plpgsql SET search_path=pg_catalog AS $$
+BEGIN
+    NEW.next_retention_check_at:=CASE WHEN NEW.account_acknowledged_at IS NULL THEN NULL ELSE NEW.retained_until END;
+    RETURN NEW;
+END $$;
+CREATE TRIGGER payment_credit_retention_schedule BEFORE INSERT ON payment_credit_attempts FOR EACH ROW EXECUTE FUNCTION initialize_payment_credit_retention_check();

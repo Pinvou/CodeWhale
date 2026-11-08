@@ -57,14 +57,14 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
         retention = "TestPaymentCreditRetentionPublicPostgres"
         self.assertTrue({boundary, retention} <= RUNNER.SCHEMA_REQUIRED)
         self.assertIn(boundary, RUNNER.SCHEMA_CHILD_REQUIRED)
-        self.assertNotIn(retention, RUNNER.SCHEMA_CHILD_REQUIRED)
+        self.assertIn(retention, RUNNER.SCHEMA_CHILD_REQUIRED)
         self.run_main_fixture()
         command = self.fixture_commands[self.fixture_phases.index("owner-schema")]
         for root in (boundary,retention):
             self.assertIn(root,command[command.index("-run")+1])
         roots = {boundary,retention}
         events = self.events(roots,RUNNER.SCHEMA_PACKAGE,children=True)
-        options = {"package":RUNNER.SCHEMA_PACKAGE,"exact_roots":True,"require_children":True,"children_required":{boundary}}
+        options = {"package":RUNNER.SCHEMA_PACKAGE,"exact_roots":True,"require_children":True,"children_required":{boundary,retention}}
         RUNNER.verify_results(events,roots,**options)
         for root in roots:
             for invalid in ([event for event in events if event.get("Test","").split("/",1)[0]!=root],events+[{"Action":"skip","Package":RUNNER.SCHEMA_PACKAGE,"Test":root}]):
@@ -797,7 +797,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
 
     def test_reconciliation_retry_identity_root_is_selected_and_cannot_be_faked(self):
         root = "TestReconciliationFairRetryRegisteredIdentity"
-        self.assertEqual(len(RUNNER.SCHEMA_REQUIRED), 12)
+        self.assertEqual(len(RUNNER.SCHEMA_REQUIRED), 14)
         self.assertIn(root, RUNNER.SCHEMA_REQUIRED)
         self.run_main_fixture()
         command = self.fixture_commands[self.fixture_phases.index("owner-schema")]
@@ -1416,7 +1416,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
     def test_package_index_schema_contract_is_selected_and_cannot_skip(self):
         self.run_main_fixture()
         roots, package = RUNNER.SCHEMA_REQUIRED, RUNNER.SCHEMA_PACKAGE
-        self.assertEqual(roots, {"TestLatePaymentQueryRegisteredIdentity", "TestReconciliationFairRetryRegisteredIdentity", "TestF09EntitlementPackageIndexPublicMigration", "TestTokenWalletReceiptSchemaPostgres", "TestLegacyEntitlementUpgradeAdmissionPostgres", "TestUsageWaiverHistoricalSchemaPostgres", "TestBillingOrdinaryReplayOriginalMigrationPostgres", "TestUnknownProviderEntryPublicMigrationPostgres", "TestLegacyExpiry025UpgradePreservesOriginalLedgerPostgres", "TestF04PublicTokenUserOwnerAuthorityAndDirectory", "TestManualRetentionHistoricalHardeningPostgres", "TestBillingHistoricalCatalogRollbackPostgres"})
+        self.assertEqual(roots, {"TestLatePaymentQueryRegisteredIdentity", "TestReconciliationFairRetryRegisteredIdentity", "TestF09EntitlementPackageIndexPublicMigration", "TestTokenWalletReceiptSchemaPostgres", "TestLegacyEntitlementUpgradeAdmissionPostgres", "TestUsageWaiverHistoricalSchemaPostgres", "TestBillingOrdinaryReplayOriginalMigrationPostgres", "TestUnknownProviderEntryPublicMigrationPostgres", "TestLegacyExpiry025UpgradePreservesOriginalLedgerPostgres", "TestF04PublicTokenUserOwnerAuthorityAndDirectory", "TestManualRetentionHistoricalHardeningPostgres", "TestBillingHistoricalCatalogRollbackPostgres", "TestPaymentCreditClosureBoundaryPostgres", "TestPaymentCreditRetentionPublicPostgres"})
         command = self.fixture_commands[self.fixture_phases.index("owner-schema")]
         selection = command[command.index("-run") + 1]
         self.assertIn("TestF09EntitlementPackageIndexPublicMigration", selection)

@@ -69,3 +69,11 @@ type Acknowledgement struct {
 	Request Request `json:"request"`
 	State   string  `json:"state"`
 }
+
+// RetentionAuthority confirms only the final acknowledgement of an outcome
+// already known by both domains. Its decision never authorizes money or resolves
+// a pending attempt. Billing must independently require terminal, acknowledged,
+// expired, unheld evidence before using it for deletion.
+type RetentionAuthority interface {
+	CheckPaymentCreditRetention(context.Context, Request) (Decision, error)
+}

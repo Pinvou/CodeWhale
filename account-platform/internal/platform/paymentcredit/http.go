@@ -68,6 +68,17 @@ func (c *HTTPClient) Acknowledge(ctx context.Context, input Request, state strin
 	return decision, nil
 }
 
+func (c *HTTPClient) CheckPaymentCreditRetention(ctx context.Context, input Request) (Decision, error) {
+	decision, err := c.call(ctx, "/internal/v1/payment-credit-admissions/retention-check", input)
+	if err != nil {
+		return Decision{}, err
+	}
+	if decision.State != "RETENTION_RELEASE" && decision.State != "RETENTION_RETAIN" {
+		return Decision{}, ErrProtocol
+	}
+	return decision, nil
+}
+
 func (c *HTTPClient) call(ctx context.Context, path string, input Request) (Decision, error) {
 	return c.send(ctx, path, input, input)
 }

@@ -2233,7 +2233,7 @@
       {
         "file": "900039_payment_credit_attempts.up.sql",
         "version": 900039,
-        "sha256": "f446d512d7b1b7d47b59d3e78801d2b82c8e81d6d5c3b732fb8afbf805b0d76e"
+        "sha256": "722e0334e4072c841704015f1f0a5b40e412f6b4a82a7c8477c4b1f6600df7e9"
       }
     ],
     "payment-simulator": [

@@ -1593,6 +1593,16 @@
       "source": "account-platform/cmd/account-service/main.go",
       "name": "audit-export",
       "permission": "internal.job.audit-export"
+    },
+    {
+      "source": "account-platform/cmd/account-service/main.go",
+      "name": "payment-credit-recovery",
+      "permission": "internal.job.payment-credit-recovery"
+    },
+    {
+      "source": "account-platform/cmd/billing-service/main.go",
+      "name": "payment-credit-retention",
+      "permission": "internal.job.payment-credit-retention"
     }
   ],
   "events": [

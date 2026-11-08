@@ -21,7 +21,8 @@
       "internal.billing.organization-unit.lifecycle",
       "internal.billing.organization-member.lifecycle",
       "internal.billing.account-closure.assess",
-      "internal.billing.account-closure.isolate"
+      "internal.billing.account-closure.isolate",
+      "internal.billing.payment-credit.resolve"
     ]
   },
   {

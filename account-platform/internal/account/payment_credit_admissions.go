@@ -213,3 +213,31 @@ func (r *PostgresRepository) PurgeExpiredPaymentCreditAdmissions(ctx context.Con
     FROM batch CROSS JOIN completed WHERE batch.records+batch.proofs>0`, uuid.New())
 	return err
 }
+
+// CheckPaymentCreditRetention is a pure metadata check for Billing's expired,
+// locally acknowledged terminal records. A missing Account row may already
+// have retired under its acknowledgement/retention guards. It says nothing
+// about payment success and must never resolve unknown money or grant credit.
+func (r *PostgresRepository) CheckPaymentCreditRetention(ctx context.Context, input paymentcredit.Request) (paymentcredit.Decision, error) {
+	decision := paymentcredit.Decision{ID: input.ID, Fingerprint: input.Fingerprint(), State: "RETENTION_RETAIN"}
+	if !input.Valid() {
+		return paymentcredit.Decision{}, ErrConflict
+	}
+	var fingerprint string
+	var acknowledged bool
+	err := r.pool.QueryRow(ctx, `SELECT fingerprint,billing_acknowledged_at IS NOT NULL AND state IN ('APPLIED','ABORTED') FROM account_payment_credit_admissions WHERE id=$1`, input.ID).Scan(&fingerprint, &acknowledged)
+	if errors.Is(err, pgx.ErrNoRows) {
+		decision.State = "RETENTION_RELEASE"
+		return decision, nil
+	}
+	if err != nil {
+		return paymentcredit.Decision{}, err
+	}
+	if fingerprint != input.Fingerprint() {
+		return paymentcredit.Decision{}, ErrConflict
+	}
+	if acknowledged {
+		decision.State = "RETENTION_RELEASE"
+	}
+	return decision, nil
+}

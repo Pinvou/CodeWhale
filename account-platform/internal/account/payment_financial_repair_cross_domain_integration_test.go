@@ -359,6 +359,9 @@ WHERE o.aggregate_id=$1 AND o.event_type='account.approval-command.authorized.v1
 		if _, err = unauthorized.Admit(ctx, input); err == nil {
 			t.Fatal("workload without admit permission created a money grant")
 		}
+		if _, err = unauthorized.CheckPaymentCreditRetention(ctx, input); err == nil {
+			t.Fatal("workload without retention-read permission queried a credit receipt")
+		}
 		var count int
 		if err = repository.pool.QueryRow(ctx, `SELECT count(*) FROM account_payment_credit_admissions WHERE id=$1`, input.ID).Scan(&count); err != nil || count != 0 {
 			t.Fatal("denied workload left an admission", count, err)
@@ -477,12 +480,22 @@ JOIN account_approval_authorization.approval_delivery_states d ON d.approval_req
 	if err != nil {
 		t.Fatal(err)
 	}
+	var retentionInput paymentcredit.Request
+	if err = repository.pool.QueryRow(ctx, `SELECT id,user_id,payment_order_id,transaction_digest,facts_digest FROM account_payment_credit_admissions WHERE payment_order_id=$1 ORDER BY created_at LIMIT 1`, repair.OrderID).Scan(&retentionInput.ID, &retentionInput.UserID, &retentionInput.OrderID, &retentionInput.TransactionDigest, &retentionInput.FactsDigest); err != nil {
+		t.Fatal(err)
+	}
+	if d, err := creditAdmission.CheckPaymentCreditRetention(ctx, retentionInput); err != nil || d.State != "RETENTION_RETAIN" {
+		t.Fatal("authenticated retention check released an unconfirmed Account outcome", d.State, err)
+	}
 	if err = repository.ReconcilePaymentCredits(ctx, resolver); err != nil {
 		t.Fatal("authenticated credit outcome/ack", err)
 	}
 	var pending int
 	if err = repository.pool.QueryRow(ctx, `SELECT count(*) FROM account_payment_credit_admissions WHERE user_id=$1 AND (state='PENDING' OR billing_acknowledged_at IS NULL)`, paymentSubject).Scan(&pending); err != nil || pending != 0 {
 		t.Fatal("credit outcome did not durably converge", pending, err)
+	}
+	if d, err := creditAdmission.CheckPaymentCreditRetention(ctx, retentionInput); err != nil || d.State != "RETENTION_RELEASE" {
+		t.Fatal("authenticated retention check did not observe final Account ACK", d.State, err)
 	}
 	// Preserve a committed pre-fix receipt even in the old closed-user layout.
 	// This deliberately seeds the legacy subject marker, not a new valid

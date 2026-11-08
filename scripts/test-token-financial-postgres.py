@@ -148,7 +148,7 @@ SCHEMA_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/billingsch
 TOKEN_SCHEMA_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/tokenschema"
 TOKEN_SCHEMA_REQUIRED = {"TestManagementPublicMigrationInstallation"}
 SCHEMA_REQUIRED = {"TestLatePaymentQueryRegisteredIdentity", "TestReconciliationFairRetryRegisteredIdentity", "TestF09EntitlementPackageIndexPublicMigration", "TestTokenWalletReceiptSchemaPostgres", "TestLegacyEntitlementUpgradeAdmissionPostgres", "TestUsageWaiverHistoricalSchemaPostgres", "TestBillingOrdinaryReplayOriginalMigrationPostgres", "TestUnknownProviderEntryPublicMigrationPostgres", "TestLegacyExpiry025UpgradePreservesOriginalLedgerPostgres", "TestF04PublicTokenUserOwnerAuthorityAndDirectory", "TestManualRetentionHistoricalHardeningPostgres", "TestBillingHistoricalCatalogRollbackPostgres", "TestPaymentCreditClosureBoundaryPostgres", "TestPaymentCreditRetentionPublicPostgres"}
-SCHEMA_CHILD_REQUIRED = SCHEMA_REQUIRED - {"TestPaymentCreditRetentionPublicPostgres"}
+SCHEMA_CHILD_REQUIRED = set(SCHEMA_REQUIRED)
 OWNER_REQUIRED = {
     "TestPaymentActionAdmissionPostgres",
     "TestF06OrganizationWalletRequiresLifecycleEvidence",
@@ -279,6 +279,7 @@ EXACT_REQUIRED_CHILDREN = {
         for seeded in ("false", "true")
         for suffix in ("", "/actual-cli")
     },
+    "TestPaymentCreditRetentionPublicPostgres": {"late-acknowledgement-survives-billing-retention", "waiting-old-ack-batch-does-not-starve-later-clearance"},
     "TestPaymentCreditClosureBoundaryPostgres": {
         "cleanup-wins-retains-evidence-without-credit",
         "cleanup-commit-during-admission-lock-wait",

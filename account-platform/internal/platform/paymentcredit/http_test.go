@@ -84,3 +84,27 @@ func TestPaymentCreditHTTPDoesNotForwardCredentialOnRedirect(t *testing.T) {
 		t.Fatal("credential-bearing request reached redirect target")
 	}
 }
+
+func TestPaymentCreditRetentionDecisionCannotBecomeFinancialOutcome(t *testing.T) {
+	input := Request{ID: uuid.New(), UserID: uuid.New(), OrderID: uuid.New(), TransactionDigest: Digest([]byte("retention-transaction")), FactsDigest: Digest([]byte("retention-facts"))}
+	for _, state := range []string{"RETENTION_RETAIN", "RETENTION_RELEASE", "APPLIED", "ABORTED", "ADMITTED"} {
+		t.Run(state, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/internal/v1/payment-credit-admissions/retention-check" {
+					t.Error("wrong retention route")
+				}
+				_ = json.NewEncoder(w).Encode(Decision{ID: input.ID, Fingerprint: input.Fingerprint(), State: state})
+			}))
+			defer server.Close()
+			client, err := NewHTTPClient(server.URL, "test-credential")
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = client.CheckPaymentCreditRetention(context.Background(), input)
+			accepted := state == "RETENTION_RETAIN" || state == "RETENTION_RELEASE"
+			if (err == nil) != accepted {
+				t.Fatal("financial/retention response states were mixed", state, err)
+			}
+		})
+	}
+}

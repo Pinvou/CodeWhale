@@ -153,7 +153,11 @@ func TestPaymentCreditRetentionPublicPostgres(t *testing.T) {
 			anchor = *ack
 		}
 		until := anchor.AddDate(3, 0, 0)
-		if _, err := ac.Exec(ctx, `INSERT INTO account_payment_credit_admissions(id,user_id,payment_order_id,transaction_digest,facts_digest,fingerprint,state,created_at,resolved_at,billing_acknowledged_at,retained_until,legal_hold,hold_review_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`, id, user, order, input.TransactionDigest, input.FactsDigest, input.Fingerprint(), accountState, created, resolved, ack, until, hold, review); err != nil {
+		accountAck := ack
+		if kind == "ack-reply-lost" {
+			accountAck = nil
+		}
+		if _, err := ac.Exec(ctx, `INSERT INTO account_payment_credit_admissions(id,user_id,payment_order_id,transaction_digest,facts_digest,fingerprint,state,created_at,resolved_at,billing_acknowledged_at,retained_until,legal_hold,hold_review_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`, id, user, order, input.TransactionDigest, input.FactsDigest, input.Fingerprint(), accountState, created, resolved, accountAck, until, hold, review); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := bc.Exec(ctx, `INSERT INTO payment_credit_attempts(id,payer_user_id,payment_order_id,transaction_digest,facts_digest,fingerprint,state,created_at,resolved_at,account_acknowledged_at,retained_until,legal_hold,hold_review_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`, id, user, order, input.TransactionDigest, input.FactsDigest, input.Fingerprint(), billingState, created, resolved, ack, until, hold, review); err != nil {
@@ -223,7 +227,7 @@ func TestPaymentCreditRetentionPublicPostgres(t *testing.T) {
 		if err := ar.PurgeExpiredPaymentCreditAdmissions(ctx); err != nil {
 			t.Fatal(err)
 		}
-		if err := br.PurgeExpiredPaymentCreditAttempts(ctx); err != nil {
+		if err := br.PurgeExpiredPaymentCreditAttempts(ctx, ar); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -322,6 +326,97 @@ func TestPaymentCreditRetentionPublicPostgres(t *testing.T) {
 	if count(ac, "account_payment_credit_admissions") != 4 || count(bc, "payment_credit_attempts") != 4 {
 		t.Fatal("refused rollback changed evidence")
 	}
+
+	t.Run("late-acknowledgement-survives-billing-retention", func(t *testing.T) {
+		id := seed("ack-reply-lost")
+		var input paymentcredit.Request
+		if err := ac.QueryRow(ctx, `SELECT id,user_id,payment_order_id,transaction_digest,facts_digest FROM account_payment_credit_admissions WHERE id=$1`, id).Scan(&input.ID, &input.UserID, &input.OrderID, &input.TransactionDigest, &input.FactsDigest); err != nil {
+			t.Fatal(err)
+		}
+		decision, err := ar.CheckPaymentCreditRetention(ctx, input)
+		if err != nil || decision.State != "RETENTION_RETAIN" {
+			t.Fatal("lost final ACK must keep the existing remote receipt", decision.State, err)
+		}
+		wrong := input
+		wrong.FactsDigest = paymentcredit.Digest([]byte("foreign-retention-facts"))
+		if _, err = ar.CheckPaymentCreditRetention(ctx, wrong); !errors.Is(err, account.ErrConflict) {
+			t.Fatal("retention check ignored original fact binding", err)
+		}
+		if err = br.PurgeExpiredPaymentCreditAttempts(ctx, nil); err == nil {
+			t.Fatal("missing retention authority was an implicit purge permit")
+		}
+		due := func() {
+			t.Helper()
+			if _, err := bc.Exec(ctx, `UPDATE payment_credit_attempts SET next_retention_check_at=clock_timestamp() WHERE id=$1`, id); err != nil {
+				t.Fatal(err)
+			}
+		}
+		due()
+		if err = br.PurgeExpiredPaymentCreditAttempts(ctx, ar); err != nil {
+			t.Fatal(err)
+		}
+		var remaining int
+		if err = bc.QueryRow(ctx, `SELECT count(*) FROM payment_credit_attempts WHERE id=$1`, id).Scan(&remaining); err != nil || remaining != 1 {
+			t.Fatal("remote evidence vanished before the lost ACK recovered", remaining, err)
+		}
+		// Park only other owned scheduler rows so this tick proves that the
+		// already-known terminal result resumes ACK, not funds resolution.
+		if _, err = ac.Exec(ctx, `UPDATE account_payment_credit_admissions SET next_attempt_at=clock_timestamp()+interval '1 hour' WHERE id<>$1`, id); err != nil {
+			t.Fatal(err)
+		}
+		resolver := &creditBoundaryResolver{repository: br}
+		if err = ar.ReconcilePaymentCredits(ctx, resolver); err != nil {
+			t.Fatal(err)
+		}
+		var acknowledged bool
+		if err = ac.QueryRow(ctx, `SELECT state='ABORTED' AND billing_acknowledged_at IS NOT NULL FROM account_payment_credit_admissions WHERE id=$1`, id).Scan(&acknowledged); err != nil || !acknowledged || resolver.resolveCalls != 0 || resolver.ackCalls != 1 {
+			t.Fatal("known outcome did not finish metadata-only ACK recovery", acknowledged, resolver.resolveCalls, resolver.ackCalls, err)
+		}
+		decision, err = ar.CheckPaymentCreditRetention(ctx, input)
+		if err != nil || decision.State != "RETENTION_RELEASE" {
+			t.Fatal("confirmed final ACK did not release expired remote audit evidence", decision.State, err)
+		}
+		due()
+		if err = br.PurgeExpiredPaymentCreditAttempts(ctx, ar); err != nil {
+			t.Fatal(err)
+		}
+		if err = bc.QueryRow(ctx, `SELECT count(*) FROM payment_credit_attempts WHERE id=$1`, id).Scan(&remaining); err != nil || remaining != 0 {
+			t.Fatal("confirmed old remote evidence did not retire", remaining, err)
+		}
+		if err = ar.ReconcilePaymentCredits(ctx, resolver); err != nil || resolver.resolveCalls != 0 || resolver.ackCalls != 1 {
+			t.Fatal("next tick revived a retired ACK", err)
+		}
+		var balance int64
+		var journals, packages int
+		if err = bc.QueryRow(ctx, `SELECT posted_microcredits,(SELECT count(*) FROM journal_entries),(SELECT count(*) FROM entitlement_packages) FROM wallets WHERE id=$1`, wallet.ID).Scan(&balance, &journals, &packages); err != nil || balance != 0 || journals != 0 || packages != 0 {
+			t.Fatal("retention/ACK recovery created financial effects", balance, journals, packages, err)
+		}
+	})
+	t.Run("waiting-old-ack-batch-does-not-starve-later-clearance", func(t *testing.T) {
+		waiting := make([]uuid.UUID, 0, 101)
+		for i := 0; i < 101; i++ {
+			waiting = append(waiting, seed("ack-reply-lost"))
+		}
+		ready := seed("expired")
+		if _, err := bc.Exec(ctx, `UPDATE payment_credit_attempts SET next_retention_check_at=clock_timestamp()-interval '2 seconds' WHERE id=ANY($1::uuid[])`, waiting); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := bc.Exec(ctx, `UPDATE payment_credit_attempts SET next_retention_check_at=clock_timestamp()-interval '1 second' WHERE id=$1`, ready); err != nil {
+			t.Fatal(err)
+		}
+		for tick := 0; tick < 2; tick++ {
+			if err := br.PurgeExpiredPaymentCreditAttempts(ctx, ar); err != nil {
+				t.Fatal(err)
+			}
+		}
+		var n int
+		if err := bc.QueryRow(ctx, `SELECT count(*) FROM payment_credit_attempts WHERE id=$1`, ready).Scan(&n); err != nil || n != 0 {
+			t.Fatal("old waiting batch starved later eligible evidence", n, err)
+		}
+		if err := bc.QueryRow(ctx, `SELECT count(*) FROM payment_credit_attempts WHERE id=ANY($1::uuid[])`, waiting).Scan(&n); err != nil || n != 101 {
+			t.Fatal("waiting financial acknowledgements were discarded", n, err)
+		}
+	})
 }
 
 func errorsAsPaymentCreditGuard(err error, result **pgconn.PgError) bool {

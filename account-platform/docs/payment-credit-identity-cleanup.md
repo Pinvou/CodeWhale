@@ -9,15 +9,15 @@
 | 准入 | Billing 持有原订单锁，Account 锁用户并核查身份清理阶段；获准后保存 `PENDING` 并更新用户版本 | 清理阶段的数据库守卫拒绝未决准入；原财务评估捕获的旧用户版本也不能继续推进 |
 | 资金事务 | Billing 在同一原事务保存 `PREPARED`、原充值/修复资金效果及 `APPLIED` | journal 触发器要求本交易存在准入；旧 writer 缺少准入时拒绝新增入账 |
 | 结果核实 | Account 在事务外请求 Billing；Billing 取得原订单锁后读取原资金结果，或在确认本次无效果后保存 `ABORTED` 凭据 | 未知、冲突或依赖不可达继续持久退避，保留准入和全部原付款事实；`ABORTED` 只描述本次本地 attempt |
-| 两端确认 | Account 持久保存结果并再次更新用户版本，再通知 Billing、记录确认 | 确认响应丢失只重试确认元数据，不重发资金动作 |
+| 两端确认 | Account 持久保存结果并再次更新用户版本，再通知 Billing、记录确认 | 确认响应丢失只重试确认元数据，不重发资金动作；Billing 到期清理前核对 Account 已保存最终确认，不能因自身已确认就先删掉恢复所需凭据 |
 
 Account 的事务和用户锁不跨 Billing 结果核实 RPC。实际新增入账仍在原 Billing 事务内，保留原订单/钱包锁、资金归属、审批、事实摘要、审计与回执。用户版本更新用于作废已过时的注销评估；授权版本仍由原 `authorization_versions` 持有。早期 `QUIESCING` 的合法付款可以按原路径收敛。
 
 未获准、准入不可用或响应无法确认时保留付款与人工案件，使用固定原因 `PAYMENT_CREDIT_ADMISSION_UNCONFIRMED`。重试、超时或本地没有资金结果不代表提供方未付款。人工处置继续使用已有的受控财务合同；此机制不新增退款、支付终态、管理员豁免或强行结案入口。
 
-新增准入与核实凭据按资金审计三年留存，覆盖最终结果和首次两端确认的完整期限。保全、未决或未完成两端确认的记录继续保留；普通运行日志按原九十天规则。到期的允许清理记录由有界任务在三十天窗口内处理，每批最多一百条并跳过被锁记录。每次非空清理在同一数据库语句内保存汇总证明（策略版本、时间范围、数量、结果），不保存主体、订单、外部引用或被清除正文；证明写入失败则删除也回滚。证明自身三年留存并受相同保全和有界清理约束，空批次不新增证明。重放不会刷新审计期限。清理不会删除不可变主体 ID、改写原账本或把未决付款变成失败。所有备份、保全审批及相关原始财务证据继续遵守 NFR-13/NFR-38；本批不等于完整隐私销毁或现场恢复验收。
+新增准入与核实凭据按资金审计三年留存，覆盖最终结果和首次两端确认的完整期限。保全、未决或未完成两端确认的记录继续保留；普通运行日志按原九十天规则。到期的允许清理记录由有界任务在三十天窗口内处理，每批最多一百条并跳过被锁记录。Billing 每批先对最多一百条本地已知终态、已确认、到期且无保全的候选做 Account 最终确认核对；Account 无最终确认或依赖未知时继续保留并持久延后五分钟，后续到期记录可继续处理。查询结束并释放本地数据库锁后才调用 Account；再次删除仍检查本地期限和保全。Account 返回的 `RETENTION_RETAIN/RETENTION_RELEASE` 只用于该清理步骤，不能授予资金或推断未知付款终态。Account 记录若已按本地完整确认守卫到期清理，Billing 可完成自己的已知终态清理。每次非空清理在同一数据库语句内保存汇总证明（策略版本、时间范围、数量、结果），不保存主体、订单、外部引用或被清除正文；证明写入失败则删除也回滚。证明自身三年留存并受相同保全和有界清理约束，空批次不新增证明。重放不会刷新审计期限。清理不会删除不可变主体 ID、改写原账本或把未决付款变成失败。所有备份、保全审批及相关原始财务证据继续遵守 NFR-13/NFR-38；本批不等于完整隐私销毁或现场恢复验收。
 
-装配需在 Account 侧仅向 Billing 的真实 workload 授予 `internal.account.payment-credit.admit`；Billing 侧仅向 Account 授予 `internal.billing.payment-credit.resolve`，该权限覆盖结果核实与确认。沿用已有 workload 身份凭证、网络边界及 `ACCOUNT_HTTP_URL` / `BILLING_HTTP_URL`。Compose model-token 和 Helm 的对应规则随代码更新。生产 compose.signup 的 ACCOUNT_WORKLOAD_RULES_JSON / BILLING_WORKLOAD_RULES_JSON 是运维提供的完整规则覆盖，部署前必须同步上述调用方专属权限；不能只更新基础模板。
+装配需在 Account 侧仅向 Billing 的真实 workload 授予 `internal.account.payment-credit.admit`（准入及只读最终确认核对）；Billing 侧仅向 Account 授予 `internal.billing.payment-credit.resolve`，该权限覆盖结果核实与确认。沿用已有 workload 身份凭证、网络边界及 `ACCOUNT_HTTP_URL` / `BILLING_HTTP_URL`。Compose model-token 和 Helm 的对应规则随代码更新。生产 compose.signup 的 ACCOUNT_WORKLOAD_RULES_JSON / BILLING_WORKLOAD_RULES_JSON 是运维提供的完整规则覆盖，部署前必须同步上述调用方专属权限；不能只更新基础模板。
 
 滚动升级先安装 Billing `900039` 数据库资金守卫，再安装 Account `000095` 及其准入/恢复入口，最后启用新 Billing writer。新旧代码并存时，保留数据库围栏；旧 writer 的新资金写入会拒绝，应通过原订单和回执核实恢复。应用回退也保留两份 forward-only 数据库迁移，不能通过回滚、删除未决准入或手改 `APPLIED` 解除资金围栏。首次安装使用相同固定版本的代码与完整原迁移包。
 

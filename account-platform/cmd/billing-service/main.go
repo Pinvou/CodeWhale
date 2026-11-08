@@ -208,7 +208,7 @@ func main() {
 		log.Fatal("BILLING_TEST_ADMISSION_TTL_INVALID")
 	}
 	go observability.RunBackground(ctx, "package-expiry", billing.NewPackageExpiryWorker(repository, time.Minute).Run)
-	go observability.RunBackground(ctx, "payment-credit-retention", repository.RunPaymentCreditRetention)
+	go observability.RunBackground(ctx, "payment-credit-retention", func(ctx context.Context) { repository.RunPaymentCreditRetention(ctx, creditAdmission) })
 	go observability.RunBackground(ctx, "expired-hold-recovery", billing.NewExpiredHoldRecoveryWorker(repository, expiredHoldClient, time.Minute).Run)
 	go observability.RunBackground(ctx, "product-admission-expiry", billing.NewProductAdmissionExpiryWorker(repository, time.Minute).Run)
 	go observability.RunBackground(ctx, "product-admission-verification", billing.NewProductAdmissionVerificationWorker(repository, payments.Capabilities(), 5*time.Second, admissionTTL).Run)
