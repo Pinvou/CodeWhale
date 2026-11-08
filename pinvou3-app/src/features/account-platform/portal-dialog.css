@@ -51,3 +51,33 @@
 @media (max-width:560px) {
   .ap-restored-dialog .ap-admin-owner-transfer-summary { grid-template-columns: minmax(0,1fr); }
 }
+
+.ap-restored-dialog .ap-org-action-footer-feedback { flex: 1 1 100%; margin: 0; color: #5f6368; }
+.ap-restored-dialog .ap-org-action-footer-feedback:empty { position: absolute; }
+
+/* Use Grid gaps for the ownership footer, including Safari 14.0. */
+.ap-restored-dialog .ap-org-action-footer.ap-admin-owner-transfer-footer,
+.ap-org-confirm-dialog.ap-admin-owner-transfer-confirm footer {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) repeat(2, minmax(96px, max-content));
+  align-items: start;
+  gap: 12px;
+}
+.ap-restored-dialog .ap-admin-owner-transfer-footer > .ap-org-action-footer-feedback { grid-column: 1 / -1; }
+.ap-restored-dialog .ap-admin-owner-transfer-footer > button:first-of-type,
+.ap-org-confirm-dialog.ap-admin-owner-transfer-confirm footer > button:first-of-type { grid-column: 2; }
+.ap-restored-dialog .ap-admin-owner-transfer-footer > button:last-of-type,
+.ap-org-confirm-dialog.ap-admin-owner-transfer-confirm footer > button:last-of-type { grid-column: 3; }
+.ap-restored-dialog form.ap-admin-org-action.ap-admin-org-action-danger .ap-org-action-footer.ap-admin-owner-transfer-footer > button:focus,
+.ap-admin-org-confirm.ap-admin-org-confirm-danger.ap-admin-owner-transfer-confirm footer > button:focus {
+  outline: 3px solid #243b80;
+  outline-offset: 2px;
+}
+@media (max-width: 420px) {
+  .ap-restored-dialog .ap-org-action-footer.ap-admin-owner-transfer-footer,
+  .ap-org-confirm-dialog.ap-admin-owner-transfer-confirm footer { grid-template-columns: minmax(0, 1fr); }
+  .ap-restored-dialog .ap-admin-owner-transfer-footer > button:first-of-type,
+  .ap-restored-dialog .ap-admin-owner-transfer-footer > button:last-of-type,
+  .ap-org-confirm-dialog.ap-admin-owner-transfer-confirm footer > button:first-of-type,
+  .ap-org-confirm-dialog.ap-admin-owner-transfer-confirm footer > button:last-of-type { grid-column: 1; justify-self: end; width: auto; min-width: 0; max-width: 100%; white-space: normal; overflow-wrap: break-word; }
+}

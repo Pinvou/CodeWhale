@@ -57,7 +57,7 @@ export function OrganizationAdminLifecycle({ current, ownerMember, ownerReadFail
         </dl>
         {canTransfer && status !== 'DELETED' && <div className="adm-organization-lifecycle-action">
           {/* The existing form stays mounted for recovery even when a new transfer is unavailable. */}
-          {action('transfer', copy.transfer, [{ name: 'newOwner', lookup: true, pickerPresentation }], values => ({ new_owner_user_id: organizationID(values.newOwner) }), 'transfer', '', true, { disabled: !active, confirmationContext: transferRows, description: [words.transferRoleChanges, words.transferRecovery].join(' ') })}
+          {action('transfer', copy.transfer, [{ name: 'newOwner', lookup: true, pickerPresentation }], values => ({ new_owner_user_id: organizationID(values.newOwner) }), 'transfer', '', true, { disabled: !active, confirmationContext: transferRows, submitTargetHint: words.transferSelectToContinue, submitManualTargetHint: words.transferIDToContinue, submitWaitingHint: words.transferWaiting, submitLabel: words.transferReview, description: [words.transferRoleChanges, words.transferRecovery].join(' ') })}
         </div>}
       </section>
     </div>
