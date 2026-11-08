@@ -2612,6 +2612,11 @@ dictZh["remoteConversation"] = {
   downloadArtifact: "下载",
   previewUnavailable: "此成果没有可显示的文本预览。",
   actionFailed: "远程操作失败",
+  artifactIntegrityFailed: "下载内容校验失败，文件未保存。请重新下载。",
+  artifactTransferInvalid: "下载数据不完整或格式错误，文件未保存。请重试。",
+  artifactSizeLimit: "此产物超过 32 MiB 下载上限。",
+  artifactUnavailable: "远程产物已不可用，请刷新产物列表后重试。",
+  transferCapacity: "远程传输容量已满，请等待当前传输结束后重试。",
   actionResultUnknown: "远程操作结果未知。请先在被控端核对结果，不要作为新请求盲目重试，以免重复执行。",
 };
 

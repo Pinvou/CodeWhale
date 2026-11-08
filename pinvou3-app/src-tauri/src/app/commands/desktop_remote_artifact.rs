@@ -449,6 +449,7 @@ impl DesktopRemoteArtifactRuntime {
                             &stamp.sha256,
                             path,
                             task_sequence,
+                            false,
                         )
                     })();
                     match result {
@@ -459,6 +460,16 @@ impl DesktopRemoteArtifactRuntime {
                         }
                     }
                 }
+                // Snapshot I/O and hashing may consume the remaining frozen
+                // budget. Keep every candidate hidden until the final check,
+                // then publish the admission as one visible transition.
+                if let Err(error) = publication_allowed() {
+                    self.downloads.index().clear_admission(task_sequence);
+                    return Err(error);
+                }
+                self.downloads
+                    .index()
+                    .publish_admission(session_id, task_id, lease, task_sequence);
                 Ok(registered)
             })
             .map_err(|error| error.code.to_owned())?
@@ -1445,6 +1456,7 @@ fn index_artifact(
         sha256,
         path,
         sequence,
+        true,
     )
 }
 
@@ -1459,6 +1471,7 @@ fn index_artifact_owned(
     sha256: &str,
     path: std::path::PathBuf,
     sequence: u64,
+    published: bool,
 ) -> Result<ArtifactDescriptor, String> {
     runtime
         .tasks
@@ -1482,7 +1495,7 @@ fn index_artifact_owned(
                     sha256,
                 )?),
                 sequence,
-                true,
+                published,
             )
         })
         .map_err(|error| error.code.to_owned())?
@@ -2308,6 +2321,7 @@ mod tests {
                 &sha256_file(&old_file, 12).unwrap(),
                 old_file,
                 old_sequence,
+                true,
             )
             .unwrap();
             let old = runtime
@@ -2551,6 +2565,121 @@ mod tests {
                 std::fs::read_to_string(output).unwrap(),
                 "completed chat output"
             );
+        });
+    }
+
+    #[test]
+    fn chat_snapshot_stays_hidden_until_post_copy_budget_check_and_next_task_recovers() {
+        crate::platform::test_support::with_temp_home("pinvou3-chat-snapshot-budget", || {
+            let project = tempfile::tempdir().unwrap();
+            let store =
+                SessionStore::boot_at_test_dir(&crate::platform::paths::pinvou3_home()).unwrap();
+            let session = store
+                .create_new("model".into(), None, project.path().into())
+                .unwrap()
+                .metadata
+                .id;
+            let runtime = bound_runtime(&session);
+            let task = "task-copy-deadline";
+            admit_task(&runtime, &session, task);
+            let sequence = runtime.tasks.status(task).unwrap().sequence;
+            runtime
+                .begin_task_capture(&store, &test_lease(), &session, task, sequence, &|| Ok(()))
+                .unwrap();
+            let ledger = store.session_roots(&session).unwrap().ledger;
+            std::fs::create_dir_all(&ledger).unwrap();
+            let output = ledger.join("result.md");
+            std::fs::write(&output, b"completed output").unwrap();
+            runtime
+                .tasks
+                .complete(task, RemoteTaskTerminal::Succeeded, None, 1100)
+                .unwrap();
+            let clock = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .start_paused(true)
+                .build()
+                .unwrap();
+            let _clock_context = clock.enter();
+            let budget =
+                crate::features::remote_control::controller::turn_budget::TurnBudget::for_test(
+                    std::time::Duration::from_secs(1),
+                );
+            let checkpoints = AtomicU64::new(0);
+            let publication = || {
+                if checkpoints.fetch_add(1, Ordering::SeqCst) == 2 {
+                    // Real snapshot bytes are already retained by the pending
+                    // index, but no reader can discover/download them yet.
+                    assert_eq!(runtime.downloads.index().len(), 1);
+                    assert!(
+                        runtime
+                            .downloads
+                            .index()
+                            .list_for_binding(&session, &test_lease())
+                            .is_empty()
+                    );
+                    clock.block_on(tokio::time::advance(std::time::Duration::from_secs(2)));
+                }
+                budget.checkpoint(&tokio_util::sync::CancellationToken::new())
+            };
+            assert_eq!(
+                runtime
+                    .finish_task_capture(
+                        &store,
+                        &test_lease(),
+                        &session,
+                        task,
+                        sequence,
+                        &publication
+                    )
+                    .unwrap_err(),
+                "task_turn_timeout"
+            );
+            assert_eq!(checkpoints.load(Ordering::SeqCst), 3);
+            assert!(runtime.captures.lock().is_empty());
+            assert_eq!(runtime.downloads.index().len(), 0);
+            assert!(
+                runtime
+                    .artifact_index(&test_lease(), &session)
+                    .unwrap()
+                    .is_empty()
+            );
+            assert_eq!(std::fs::read(&output).unwrap(), b"completed output");
+
+            // Failure retires only that capture; the next admitted task may
+            // publish and download its own immutable result normally.
+            let next = "task-after-copy-deadline";
+            admit_task(&runtime, &session, next);
+            let sequence = runtime.tasks.status(next).unwrap().sequence;
+            runtime
+                .begin_task_capture(&store, &test_lease(), &session, next, sequence, &|| Ok(()))
+                .unwrap();
+            std::fs::write(&output, b"next output").unwrap();
+            runtime
+                .tasks
+                .complete(next, RemoteTaskTerminal::Succeeded, None, 1200)
+                .unwrap();
+            let artifacts = runtime
+                .finish_task_capture(&store, &test_lease(), &session, next, sequence, &|| Ok(()))
+                .unwrap();
+            assert_eq!(artifacts.len(), 1);
+            let artifact = &artifacts[0].artifact_id;
+            let transfer = runtime
+                .artifact_download_begin(&test_lease(), &session, next, artifact, 1300)
+                .unwrap();
+            let chunk = runtime
+                .artifact_download_chunk(
+                    &test_lease(),
+                    &session,
+                    next,
+                    artifact,
+                    &transfer.handle_id,
+                    0,
+                    1400,
+                )
+                .unwrap()
+                .unwrap();
+            assert_eq!(chunk.bytes, b"next output");
+            assert!(chunk.completed.is_some());
         });
     }
 

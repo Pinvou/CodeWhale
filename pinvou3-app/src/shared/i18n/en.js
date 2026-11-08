@@ -2668,6 +2668,11 @@ dictEn["remoteConversation"] = {
   downloadArtifact: "Download",
   previewUnavailable: "No text preview is available for this artifact.",
   actionFailed: "Remote action failed",
+  artifactIntegrityFailed: "The download failed its integrity check and was not saved. Download it again.",
+  artifactTransferInvalid: "The download is incomplete or malformed and was not saved. Try again.",
+  artifactSizeLimit: "This artifact exceeds the 32 MiB download limit.",
+  artifactUnavailable: "The remote artifact is unavailable. Refresh the artifact list and try again.",
+  transferCapacity: "Remote transfer capacity is full. Wait for current transfers to finish and try again.",
   actionResultUnknown: "The remote action outcome is unknown. Check the controlled device first; do not retry it as a new request, because that could run the action twice.",
 };
 

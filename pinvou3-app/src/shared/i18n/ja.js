@@ -2667,6 +2667,11 @@ dictJa["remoteConversation"] = {
   downloadArtifact: "ダウンロード",
   previewUnavailable: "表示できるテキストプレビューはありません。",
   actionFailed: "リモート操作に失敗しました",
+  artifactIntegrityFailed: "ダウンロード内容の検証に失敗したため、保存しませんでした。再度ダウンロードしてください。",
+  artifactTransferInvalid: "ダウンロードデータが不完全か形式が不正なため、保存しませんでした。再試行してください。",
+  artifactSizeLimit: "この成果物は 32 MiB のダウンロード上限を超えています。",
+  artifactUnavailable: "リモート成果物を利用できません。一覧を更新して再試行してください。",
+  transferCapacity: "リモート転送の容量が上限に達しています。現在の転送が完了してから再試行してください。",
   actionResultUnknown: "リモート操作の結果を確認できません。まず被操作端末で結果を確認し、重複実行を避けるため新しいリクエストとして安易に再試行しないでください。",
 };
 

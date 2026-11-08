@@ -340,6 +340,34 @@ test('remote artifact preview is a keyboard-contained dialog and restores its tr
     'unsupported preview state must be visible, not screen-reader-only');
 });
 
+test('download failures retain bounded diagnostic categories in every language', () => {
+  const helpers = sourceSection(chat, 'function remoteActionFailureCode', 'function constrainDialogFocus');
+  const { remoteActionFailureCode, remoteActionFailureCopyKey } = new Function(`${helpers};
+    return {remoteActionFailureCode, remoteActionFailureCopyKey};`)();
+  for (const [code, key] of [
+    ['remote_artifact_checksum_mismatch', 'artifactIntegrityFailed'],
+    ['transfer_digest_mismatch', 'artifactIntegrityFailed'],
+    ['remote_artifact_size_mismatch', 'artifactTransferInvalid'],
+    ['remote_artifact_chunk_invalid', 'artifactTransferInvalid'],
+    ['remote_artifact_size_limit', 'artifactSizeLimit'],
+    ['artifact_unavailable', 'artifactUnavailable'],
+    ['artifact_changed', 'artifactUnavailable'],
+    ['transfer_capacity', 'transferCapacity'],
+  ]) {
+    for (const failure of [code, { code }, new Error(code)]) {
+      assert.equal(remoteActionFailureCode(failure), code);
+      assert.equal(remoteActionFailureCopyKey(code), key);
+      for (const language of ['zh', 'en', 'ja']) {
+        const copy = dict[language].remoteConversation;
+        assert.equal(typeof copy[key], 'string');
+        assert.ok(copy[key].trim());
+        assert.notEqual(copy[key], copy.actionFailed);
+      }
+    }
+  }
+  assert.equal(remoteActionFailureCode(new Error('private/path/canary')), 'errorGeneric');
+});
+
 test('an uncertain remote action uses dedicated non-retry safety guidance', () => {
   const helpers = sourceSection(chat, 'function remoteActionFailureCode', 'function constrainDialogFocus');
   const { remoteActionFailureCode, remoteActionFailureCopyKey } = new Function(`${helpers};
