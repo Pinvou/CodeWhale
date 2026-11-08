@@ -508,3 +508,12 @@
 .adm-restored-shell .adm-writeoff-fixed-command dd{margin:2px 0 0;font-weight:650}
 
 .ap-admin-org-action .ap-admin-org-action-stage{margin:0;padding:10px 12px;border:1px solid var(--adm-line,#e3e7ee);border-radius:10px;background:var(--adm-soft,#f8f9fc);color:var(--adm-muted,#687083);line-height:1.5;overflow-wrap:anywhere}
+
+.ap-admin-unit-delete-subject{display:grid;gap:6px;min-width:0}
+.ap-admin-unit-delete-subject .ap-org-move-subject-row{display:flex;align-items:baseline;flex-wrap:wrap;min-width:0;margin:-4px -4px 0;overflow-wrap:break-word}
+.ap-admin-unit-delete-subject .ap-org-move-subject-row>*{min-width:0;margin:4px 4px 0}
+.ap-admin-unit-delete-subject small{color:var(--adm-muted,#687083);font-weight:650}
+.ap-admin-unit-delete-facts{padding:10px 12px;border:1px solid var(--adm-line,#e3e7ee);border-radius:10px;background:var(--adm-soft,#f8f9fc);overflow-wrap:anywhere}
+.ap-admin-unit-delete-facts>p,.ap-admin-unit-delete-facts ul{margin:0}
+.ap-admin-unit-delete-facts>p+p,.ap-admin-unit-delete-facts ul{margin-top:6px}
+.ap-admin-unit-delete-blockers{border-color:#f0c8cc;background:var(--adm-danger-soft,#fff5f5)}

@@ -16,9 +16,10 @@ const currentSelections = (fields, values) => fields.every(field => {
 
 // Each displayed action owns one immutable invocation. Unknown outcomes retain
 // the original hook facts/key; only fresh invocations require user confirmation.
-export function OrganizationActionForm({ client, owner, copy, title, scope, fields, prepare, action, onConfirmed, confirm = false, disabled = false, confirmationTarget = '', confirmationContext = [], submitTargetHint = '', submitManualTargetHint = '', submitWaitingHint = '', description = '', editBeforeSubmit = false, editDrafts, draftContext, useOperation = useFinanceOperation, dialog = false, appearance = 'default', dangerous = false, actionStage, primaryTrigger = false, submitLabel = '' }) {
+export function OrganizationActionForm({ client, owner, copy, title, scope, fields, prepare, action, onConfirmed, confirm = false, disabled = false, confirmationTarget = '', confirmationContext = [], submitTargetHint = '', submitManualTargetHint = '', submitWaitingHint = '', description = '', editBeforeSubmit = false, editDrafts, draftContext, useOperation = useFinanceOperation, dialog = false, appearance = 'default', dangerous = false, actionStage, knownRejectionPresentation, targetPresentation, impactPresentation, finalConfirmationDescription, primaryTrigger = false, submitLabel = '' }) {
  const [dialogOpen, setDialogOpen] = useState(false);
  const [stageAttempt, setStageAttempt] = useState(null);
+ const [knownRejection, setKnownRejection] = useState(null);
  const opener = useRef(null), wasOpen = useRef(false);
  const draftIdentity = `${owner}:${scope}`;
  const [values, setValues] = useState(() => editDrafts?.get(draftIdentity) || initialValues(fields));
@@ -71,7 +72,7 @@ export function OrganizationActionForm({ client, owner, copy, title, scope, fiel
  // Render-time identity checks reject callbacks during the preceding effect gap.
  useEffect(() => {
   const active = { client, owner, scope, epoch, generation: ++generation.current };
-  ready.current = active; setRenderedReady(active); dispatching.current = null; cancel(); setFieldErrors({}); setStageAttempt(null);
+  ready.current = active; setRenderedReady(active); dispatching.current = null; cancel(); setFieldErrors({}); setStageAttempt(null); setKnownRejection(null);
   if (editBeforeSubmit) { const draft = editDrafts?.get(draftIdentity); setEditing(Boolean(draft)); if (draft) setValues(draft); }
   return () => { generation.current++; ready.current = null; pending.current = null; };
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -89,8 +90,11 @@ export function OrganizationActionForm({ client, owner, copy, title, scope, fiel
   const marker = {}; dispatching.current = marker;
   if (actionStage) setStageAttempt(snapshot.generation);
   try {
+   const reject = knownRejectionPresentation && (reason => { if (sameIdentity(snapshot)) setKnownRejection({ generation: snapshot.generation, groups: knownRejectionPresentation.normalize(reason) }); });
+   if (reject) setKnownRejection(null);
    const onDraftRejection = live.current.onDraftRejection;
-   const result = await live.current.operation.mutate(facts, live.current.action, onDraftRejection && (reason => { if (sameIdentity(snapshot)) onDraftRejection(reason); }));
+   const reportRejection = reject || onDraftRejection && (reason => { if (sameIdentity(snapshot)) onDraftRejection(reason); });
+   const result = await live.current.operation.mutate(facts, live.current.action, reportRejection);
    if (result !== undefined && sameIdentity(snapshot)) { if (live.current.editBeforeSubmit) { live.current.editDrafts?.delete(live.current.draftIdentity); setEditing(false); } live.current.onConfirmed?.(result); if (actionStage) setStageAttempt(null); setDialogOpen(false); }
   } finally { if (dispatching.current === marker) dispatching.current = null; }
  };
@@ -146,6 +150,7 @@ export function OrganizationActionForm({ client, owner, copy, title, scope, fiel
   if (client !== current.client || owner !== current.owner || scope !== current.scope || epoch !== current.epoch || !active || !sameIdentity(active) || dispatching.current || current.operation.busy || current.operation.unknown || current.operation.pendingFacts) return;
   if (current.editBeforeSubmit) changeEditing(false);
   if (actionStage) setStageAttempt(null);
+  if (knownRejectionPresentation) setKnownRejection(null);
   setDialogOpen(false);
  };
  useLayoutEffect(() => { if (!open && wasOpen.current && !opener.current?.closest('[hidden]')) opener.current?.focus(); wasOpen.current = open; }, [open]);
@@ -193,19 +198,24 @@ export function OrganizationActionForm({ client, owner, copy, title, scope, fiel
  const hasStageAttempt = stageAttempt !== null && stageAttempt === renderedReady?.generation;
  const stageError = actionStage && !hasStageAttempt && !operation.unknown ? null : operation.error;
  const stageText = !actionStage ? null : operation.busy ? actionStage.processing : operation.unknown ? actionStage.uncertain : stageError ? actionStage.rejected : actionStage.ready;
+ const impact = impactPresentation?.();
+ const confirmedRejection = knownRejection?.generation === renderedReady?.generation && knownRejection?.groups && !operation.busy && !operation.unknown
+  ? knownRejectionPresentation?.render(knownRejection.groups) : null;
  const form = <form className={`ap-org-action${adminAppearance ? ' ap-admin-org-action' : ''}${adminAppearance && dangerous ? ' ap-admin-org-action-danger' : ''}${draftContext ? ' ap-admin-unit-move' : ''}`} onSubmit={submit}><h4>{title}</h4>
-  {displayed && <OrganizationActionConfirmation copy={copy} title={title} target={confirmation.confirmationTarget} description={description} details={details} className={ownerTransferSummary ? 'ap-admin-owner-transfer-confirm' : ''} appearance={appearance} dangerous={dangerous} onCancel={() => cancel(confirmation)} onConfirm={() => void accept(confirmation)} canRestoreFocus={() => freshCurrent(confirmation)} />}
+  {displayed && <OrganizationActionConfirmation copy={copy} title={title} target={targetPresentation?.() ?? confirmation.confirmationTarget} description={finalConfirmationDescription ?? description} context={impact} details={details} className={ownerTransferSummary ? 'ap-admin-owner-transfer-confirm' : ''} appearance={appearance} dangerous={dangerous} onCancel={() => cancel(confirmation)} onConfirm={() => void accept(confirmation)} canRestoreFocus={() => freshCurrent(confirmation)} />}
   {dialog && (confirmationTarget || confirmationRows.length > 0) && <dl className={ownerTransferSummary ? "ap-org-action-target ap-admin-owner-transfer-summary" : "ap-org-action-target"}>
-   {confirmationTarget && <><dt>{copy.confirmationTarget}</dt><dd>{draftContext?.targetSummary?.() ?? confirmationTarget}</dd></>}
+   {confirmationTarget && <><dt>{copy.confirmationTarget}</dt><dd>{draftContext?.targetSummary?.() ?? targetPresentation?.() ?? confirmationTarget}</dd></>}
    {confirmationRows.map(item => <React.Fragment key={item.name}><dt>{item.label}</dt><dd>{item.value}</dd></React.Fragment>)}
   </dl>}
   {description && <p className="ap-org-action-description">{description}</p>}
+  {!displayed && impact}
   {pendingSummary || (!operation.unknown && !operation.pendingFacts && draftContext?.summary?.())}
   {fields.length > 0 && !pendingSummary && <fieldset disabled={operation.busy || operation.unknown || operation.blocked || disabled} aria-describedby={targetMissing ? targetHintID : undefined}>{fields.map(field => field.pickerPresentation?.words ? renderOwnerField(field) : <label key={field.name}>{copy[field.labelKey || field.label || field.name]}{field.lookup ? <OrganizationUserPicker client={client} copy={copy} value={values[field.name]} disabled={operation.busy || operation.unknown || operation.blocked || disabled} onChange={value => changeValue(field.name, value)} /> : field.options ? <select multiple={field.multiple || false} value={editBeforeSubmit ? operation.pendingFacts?.[field.name] ?? values[field.name] : values[field.name]} onChange={event => { const value = field.multiple ? [...event.target.selectedOptions].map(option => option.value) : event.target.value; changeValue(field.name, value); }}>{!field.multiple && <option value="">{field.emptyLabel ?? (field.optional ? copy.root : '—')}</option>}{fieldOptions(field, values).map(option => <option key={option.value} value={option.value}>{option.label}</option>)}</select> : <input type={field.type || 'text'} autoComplete="off" value={editBeforeSubmit ? operation.pendingFacts?.[field.name] ?? values[field.name] : values[field.name]} onChange={event => changeValue(field.name, event.target.value)} required={!field.optional && !field.nameRule} aria-required={field.nameRule ? true : undefined} aria-invalid={fieldErrors[field.name] ? true : undefined} aria-describedby={field.nameRule ? [`${fieldPrefix}-${field.name}-hint`, fieldErrors[field.name] ? `${fieldPrefix}-${field.name}-error` : '', operation.error ? `${fieldPrefix}-operation-error` : ''].filter(Boolean).join(' ') : undefined} />}{field.nameRule && <small className="ap-org-name-hint" id={`${fieldPrefix}-${field.name}-hint`}>{field.nameRule === 'unit' ? copy.unitNameRules : copy.organizationNameRules}</small>}{fieldErrors[field.name] && <small className="ap-org-name-error" id={`${fieldPrefix}-${field.name}-error`} role="alert">{copy[fieldErrors[field.name]]}</small>}{field.multiple && <small>{copy.unscopedUnits}</small>}</label>)}</fieldset>}
   {dialogOpen && !operation.unknown && !operation.pendingFacts && draftContext?.preview?.(values, openedDraft === draftContext.revision && previewIdentity === renderedReady && previewIdentity?.client === client && previewIdentity.owner === owner && previewIdentity.scope === scope && previewIdentity.epoch === epoch)}
   {draftIssue && !operation.unknown && !operation.pendingFacts && <p className="ap-org-move-draft-help" role="status">{draftIssue}</p>}
+  {confirmedRejection}
   {stageText && <p className="ap-admin-org-action-stage" id={fieldPrefix + "-action-stage"} role="status" aria-atomic="true">{stageText}</p>}
-  {invalid && <p role="alert">{copy.invalid}</p>}{stageError && <p id={`${fieldPrefix}-operation-error`} role="alert">{stageError}</p>}{operation.message && <p role="status">{operation.message}</p>}
+  {invalid && <p role="alert">{copy.invalid}</p>}{stageError && !confirmedRejection && <p id={`${fieldPrefix}-operation-error`} role="alert">{stageError}</p>}{operation.message && <p role="status">{operation.message}</p>}
   {dialog ? <footer className={ownerTransferSummary && submitTargetHint ? "ap-org-action-footer ap-admin-owner-transfer-footer" : "ap-org-action-footer"}>{submitTargetHint && <p className="ap-org-action-footer-feedback" role="status" id={targetHintID}>{targetFeedback}</p>}<button type="button" disabled={operation.busy || operation.unknown || Boolean(operation.pendingFacts)} onClick={closeDialog}>{copy.cancelConfirmation}</button><button disabled={operation.busy || operation.blocked || (disabled && !operation.unknown) || (Boolean(draftIssue) && !operation.pendingFacts && !operation.unknown) || targetMissing} aria-describedby={targetFeedback ? targetHintID : undefined} type="submit">{operation.busy && submitWaitingHint ? copy.loading : operation.unknown ? copy.retry : submitLabel || (editBeforeSubmit ? copy.save : title)}</button></footer> : <><button disabled={operation.busy || operation.blocked || (disabled && !operation.unknown)} type="submit">{operation.unknown ? copy.retry : editBeforeSubmit ? copy.save : title}</button>
   {editBeforeSubmit && <button type="button" disabled={operation.busy || operation.unknown || operation.blocked || Boolean(operation.pendingFacts) || disabled} onClick={() => changeEditing(false)}>{copy.cancelConfirmation}</button>}</>}
  </form>;

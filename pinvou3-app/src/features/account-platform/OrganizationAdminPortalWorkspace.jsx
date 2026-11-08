@@ -7,6 +7,7 @@ import { OrganizationMemberMenu } from './OrganizationMemberMenu.jsx';
 import { OrganizationOverviewSummary } from './OrganizationOverviewSummary.jsx';
 import { OrganizationAdminLifecycle } from './OrganizationAdminLifecycle.jsx';
 import { organizationUnitMovePlan } from './organization-unit-move-plan.js';
+import { confirmedUnitDeleteBlockers, currentDirectUnitCount } from './organization-unit-delete-presentation.js';
 import { AdminIdentifier } from './AdminIdentifier.jsx';
 import { adminRouteLocation } from './admin-sections.js';
 
@@ -103,6 +104,30 @@ export function OrganizationAdminPortalWorkspace({ client, me, acceptedSessionEp
       ? name.replace(/\p{Bidi_Control}/gu, char => '\\u' + char.charCodeAt(0).toString(16).padStart(4, '0')) : '';
     return <span className="ap-org-move-subject-row"><small>{label}</small>{displayName && <bdi>{displayName}</bdi>}<bdi dir="ltr"><code>{id}</code></bdi></span>;
   };
+  const deleteUnit = unit => {
+    const words = labels.unitDeleteImpact;
+    return action('delete-unit:' + unit.unit_id, copy.deleteUnit, [], () => ({}), 'deleteUnit', unit.unit_id, true, {
+      actionStage: labels.unitDeleteStage,
+      finalConfirmationDescription: words.confirmRequest,
+      targetPresentation: () => <span className="ap-org-move-subject ap-admin-unit-delete-subject">
+        {moveSubject(words.organization, current.name, current.organization_id)}
+        {moveSubject(words.unit, unit.name, unit.unit_id)}
+      </span>,
+      impactPresentation: () => {
+        const count = detailBusy ? null : currentDirectUnitCount(current, detail, unit.unit_id);
+        return <div className="ap-admin-unit-delete-facts">
+          <p><strong>{words.children}</strong> {count === null ? words.unavailable : count}</p>
+          <p>{words.scope}</p>
+        </div>;
+      },
+      knownRejectionPresentation: {
+        normalize: reason => confirmedUnitDeleteBlockers(reason, current.organization_id, unit.unit_id),
+        render: groups => <div className="ap-admin-unit-delete-facts ap-admin-unit-delete-blockers" role="alert">
+          <strong>{words.blocked}</strong><ul>{groups.map(group => <li key={group}>{words[group]}</li>)}</ul>
+        </div>,
+      },
+    });
+  };
   const moveUnit = unit => {
     const words = labels.unitMove;
     let plan;
@@ -159,7 +184,7 @@ export function OrganizationAdminPortalWorkspace({ client, me, acceptedSessionEp
               <nav><button disabled={busy || !memberPrevious.length} onClick={() => { const values = [...memberPrevious], cursor = values.pop(); setMemberPrevious(values); navigate({ member_cursor: cursor || null }); }}>{copy.previous}</button><button disabled={busy || !detail.members.next_cursor} onClick={() => { setMemberPrevious(values => [...values, memberCursor]); navigate({ member_cursor: detail.members.next_cursor }); }}>{copy.next}</button></nav>
             </>}
           </section>}
-          {view === 'units' && current.status !== 'DELETED' && <section>{detail.unitsError ? <p role="alert">{copy.unavailable}<button disabled={busy} onClick={onRefresh}>{copy.refresh}</button></p> : <><div className="adm-unit-toolbar adm-section-toolbar"><h4>{labels.units}</h4>{can('units.manage') && action('create-unit', copy.createUnit, [{ name: 'name' }, { name: 'parent', optional: true, options: units }], values => ({ name: text(values.name), parent_id: optionalID(values.parent) }), 'unit')}</div><ul className="adm-organization-units">{detail.units.items.map(unit => <li key={unit.unit_id} ref={renamedUnit?.unit_id === unit.unit_id ? renamedUnitNode : undefined} tabIndex={renamedUnit?.unit_id === unit.unit_id ? -1 : undefined} className={renamedUnit?.unit_id === unit.unit_id ? 'ap-unit-renamed' : undefined}><strong>{unit.name}</strong><span className="adm-unit-parent"><small>{copy.parent}: </small><span>{unit.parent_id ? unitNames.get(unit.parent_id) || unit.parent_id : copy.root}</span></span><span className="adm-unit-status"><small>{copy.status}: </small><span>{organizationLabel(copy, 'Status', unit.status)}</span></span>{can('units.manage') && <div className="adm-row-actions">{action(`rename-unit:${unit.unit_id}`, copy.renameUnit, [{ name: 'name', initial: unit.name }], values => ({ name: text(values.name) }), 'renameUnit', unit.unit_id)}{moveUnit(unit)}{action(`delete-unit:${unit.unit_id}`, copy.deleteUnit, [], () => ({}), 'deleteUnit', unit.unit_id, true, { actionStage: labels.unitDeleteStage })}</div>}</li>)}</ul>{!detail.units.items.length && <p>{copy.empty}</p>}</>}</section>}
+          {view === 'units' && current.status !== 'DELETED' && <section>{detail.unitsError ? <p role="alert">{copy.unavailable}<button disabled={busy} onClick={onRefresh}>{copy.refresh}</button></p> : <><div className="adm-unit-toolbar adm-section-toolbar"><h4>{labels.units}</h4>{can('units.manage') && action('create-unit', copy.createUnit, [{ name: 'name' }, { name: 'parent', optional: true, options: units }], values => ({ name: text(values.name), parent_id: optionalID(values.parent) }), 'unit')}</div><ul className="adm-organization-units">{detail.units.items.map(unit => <li key={unit.unit_id} ref={renamedUnit?.unit_id === unit.unit_id ? renamedUnitNode : undefined} tabIndex={renamedUnit?.unit_id === unit.unit_id ? -1 : undefined} className={renamedUnit?.unit_id === unit.unit_id ? 'ap-unit-renamed' : undefined}><strong>{unit.name}</strong><span className="adm-unit-parent"><small>{copy.parent}: </small><span>{unit.parent_id ? unitNames.get(unit.parent_id) || unit.parent_id : copy.root}</span></span><span className="adm-unit-status"><small>{copy.status}: </small><span>{organizationLabel(copy, 'Status', unit.status)}</span></span>{can('units.manage') && <div className="adm-row-actions">{action(`rename-unit:${unit.unit_id}`, copy.renameUnit, [{ name: 'name', initial: unit.name }], values => ({ name: text(values.name) }), 'renameUnit', unit.unit_id)}{moveUnit(unit)}{deleteUnit(unit)}</div>}</li>)}</ul>{!detail.units.items.length && <p>{copy.empty}</p>}</>}</section>}
           {view === 'lifecycle' && (lifecycleDetailCurrent ? <section><OrganizationAdminLifecycle current={current} ownerMember={lifecycleOwner} ownerReadFailed={lifecycleOwnerReadFailed} can={can} action={action} copy={copy} words={labels.lifecycleTasks} pickerPresentation={{ words: labels.lifecycleTasks.ownerPicker, members: detail.membersError ? [] : detail.members?.items }} />
             {can('delete') && current.status === 'DISABLED' && <section><h4>{copy.readiness}</h4><button disabled={busy} onClick={onRefresh}>{copy.refresh}</button>{detail.readinessError && <p role="alert">{copy.unavailable}</p>}{readiness && <ul>{readiness.blockers?.map((item, index) => <li key={index}>{typeof item === 'string' ? item : item.code || item.resource_type}</li>)}</ul>}{mayDelete && action('delete', copy.delete, [{ name: 'confirmationName' }, { name: 'reason' }], values => { if (values.confirmationName !== current.name) throw new Error('INVALID_ORGANIZATION_INPUT'); return { reason: text(values.reason) }; }, 'delete', '', true, { confirmationTarget: `${current.name} · ${current.organization_id}` })}</section>}
           </section> : <p role="status">{copy.loading}</p>)}
