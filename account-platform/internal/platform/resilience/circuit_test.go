@@ -151,6 +151,53 @@ func TestHalfOpenBusinessRejectionsCompleteHealthyProbes(t *testing.T) {
 	}
 }
 
+func TestHalfOpenAbandonedPermitsReleaseSlotsWithoutCompletingRecovery(t *testing.T) {
+	now := time.Date(2026, 11, 8, 0, 0, 0, 0, time.UTC)
+	b := NewBreaker()
+	b.now = func() time.Time { return now }
+	key := Key("provider", "READ_STATUS", "route")
+	for range 5 {
+		b.Record(key, InfrastructureFailure)
+	}
+	now = now.Add(30 * time.Second)
+	// These callers disappear: none of their permits is completed or cancelled.
+	for range 3 {
+		if _, err := b.AdmitReadOnly(key); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := b.AdmitReadOnly(key); !errors.Is(err, ErrCircuitOpen) {
+		t.Fatalf("three abandoned callers did not occupy all slots: %v", err)
+	}
+	item := b.items[key]
+	generation, openUntil := item.generation, item.openUntil
+	now = now.Add(30 * time.Second)
+	var replacements []*Permit
+	for range 3 {
+		permit, err := b.AdmitReadOnly(key)
+		if err != nil {
+			t.Fatalf("expired abandoned callers retained a probe slot: %v", err)
+		}
+		replacements = append(replacements, permit)
+	}
+	if item.generation != generation || !item.openUntil.Equal(openUntil) || item.halfOpenSuccesses != 0 {
+		t.Fatal("reclaiming abandoned slots changed the episode or counted a successful probe")
+	}
+	if _, err := b.AdmitReadOnly(key); !errors.Is(err, ErrCircuitOpen) {
+		t.Fatalf("replacement probes did not retain the three-slot limit: %v", err)
+	}
+	for _, permit := range replacements[:2] {
+		permit.Record(Success)
+		if err := b.BeforeHighRisk(key); !errors.Is(err, ErrCircuitOpen) {
+			t.Fatalf("recovery completed before three actual successful probes: %v", err)
+		}
+	}
+	replacements[2].Record(Success)
+	if err := b.BeforeHighRisk(key); err != nil {
+		t.Fatalf("three replacement successes did not finish recovery: %v", err)
+	}
+}
+
 // The fallback exercises the unchanged a483 breaker in the counterfactual
 // private copy. Production uses BeforeReadOnly directly, never this adapter.
 func testReadAdmission(b *Breaker, key string) (func(), error) {
