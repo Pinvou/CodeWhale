@@ -523,6 +523,7 @@ jobs:
               - 'scripts/release-macos.sh'
               - 'scripts/build-windows-ota.ps1'
               - 'scripts/tests/sync-version.test.mjs'
+              - 'remote-control-relay/test/windows-release-exit-code.test.js'
               - 'scripts/tests/test_ci_gate_policy.py'
               - 'scripts/tests/test_release_arm64_policy.py'
               - 'scripts/tests/test_release_cache_policy.py'
@@ -1935,14 +1936,21 @@ jobs:
           npm --prefix pinvou3-app run test:knowledge-host-packaging
           npm --prefix pinvou3-app run test:linux-asr-runtime
 
+      - name: Windows 原生命令退出码回归
+        if: ${{ runner.os == 'Windows' }}
+        run: python scripts/ci-fixture-process.py --receipt "${{ runner.temp }}/remote-native-exit-${{ github.run_id }}-${{ github.run_attempt }}.json" -- node --test remote-control-relay/test/windows-release-exit-code.test.js
+
       - name: Windows 远控发布与安全契约
         if: ${{ runner.os == 'Windows' }}
         env:
           PINVOU_DESKTOP_CONTROLLER_ENABLED: '0'
         run: |
           npm --prefix remote-control-relay run release:gate
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node --test --test-concurrency=1 remote-control-relay/test/controller-release-evidence.test.js remote-control-relay/test/controller-release-gates.test.js remote-control-relay/test/controller-release-telemetry-query.test.js remote-control-relay/test/github-workflow-run-identity.test.js remote-control-relay/test/installer-spdx.test.js remote-control-relay/test/release-path-policy.test.js remote-control-relay/test/windows-e2e-orchestrator-contract.test.js remote-control-relay/test/windows-e2e-orchestrator-helpers.test.js remote-control-relay/test/windows-e2e-path-guard.test.js
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node --test pinvou3-app/tests/remote_control_feature_gate_contract.test.mjs pinvou3-app/tests/remote_control_real_ui_smoke_contract.test.mjs pinvou3-app/tests/nsis_resource_staging_contract.test.js
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
   # pinvou-knowledge 是可单独部署的 crate，必须直接验证自己的默认 feature 图、
   # 测试与部署入口，而不只依赖 Tauri 作为 client-only path dependency 的间接编译。
@@ -4399,6 +4407,9 @@ jobs:
             pinvou3-app/package-lock.json
             remote-control-relay/package-lock.json
 
+      - name: Python for owned browser fixture supervision
+        run: python --version
+
       # Ubuntu npm tests skip these suites outside win32. They use only Node
       # built-ins and fake MCP/host fixtures to exercise the real wrapper
       # subprocess, protocol, heartbeat, tombstone, and commit-unknown paths.
@@ -4407,12 +4418,25 @@ jobs:
       - name: Windows browser wrapper lifecycle regression
         env:
           PINVOU3_TEST_BROWSER_NO_HOST: "1"
-        run: node --test pinvou3-app/tests/browser_wrapper_windows_lifecycle.test.mjs
+        run: python scripts/ci-fixture-process.py --receipt "${{ runner.temp }}/windows-browser-lifecycle-${{ github.run_id }}-${{ github.run_attempt }}.json" -- node --test pinvou3-app/tests/browser_wrapper_windows_lifecycle.test.mjs
 
       - name: Windows browser wrapper lazy regression
         env:
           PINVOU3_TEST_BROWSER_NO_HOST: "1"
-        run: node pinvou3-app/tests/browser_wrapper_lazy.test.mjs
+        run: python scripts/ci-fixture-process.py --receipt "${{ runner.temp }}/windows-browser-lazy-${{ github.run_id }}-${{ github.run_attempt }}.json" -- node pinvou3-app/tests/browser_wrapper_lazy.test.mjs
+
+      - name: Preserve browser fixture exit receipts
+        if: always()
+        timeout-minutes: 3
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-browser-exit-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 7
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}/windows-browser-*-${{ github.run_id }}-${{ github.run_attempt }}.json
+            ${{ runner.temp }}/windows-browser-*-${{ github.run_id }}-${{ github.run_attempt }}-resources/*.json
 
       - name: 安装构建依赖
         run: npm --prefix pinvou3-app ci --prefer-offline --no-audit

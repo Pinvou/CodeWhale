@@ -256,6 +256,24 @@ function assertWorkflowFailurePolicy(workflowText) {
     remainder = remainder.replace(receipt, "");
   }
   {
+    const receipt = namedStep(jobBlock("windows-codex-runtime-test", text), "Preserve browser fixture exit receipts");
+    assert.equal(receipt.trimEnd(), [
+      "      - name: Preserve browser fixture exit receipts",
+      "        if: always()",
+      "        timeout-minutes: 3",
+      "        continue-on-error: true",
+      "        uses: actions/upload-artifact@v7",
+      "        with:",
+      "          name: windows-browser-exit-${{ github.run_id }}-${{ github.run_attempt }}",
+      "          retention-days: 7",
+      "          if-no-files-found: warn",
+      "          path: |",
+      "            ${{ runner.temp }}/windows-browser-*-${{ github.run_id }}-${{ github.run_attempt }}.json",
+      "            ${{ runner.temp }}/windows-browser-*-${{ github.run_id }}-${{ github.run_attempt }}-resources/*.json",
+    ].join("\n"));
+    remainder = remainder.replace(receipt, "");
+  }
+  {
     const receipt = namedStep(jobBlock("account-platform-test", text), "Account test resource lifecycle receipts");
     assert.equal(receipt.trimEnd(), [
       "      - name: Account test resource lifecycle receipts",
@@ -277,7 +295,7 @@ function assertWorkflowFailurePolicy(workflowText) {
   // Explicit YAML keys may put comments/newlines before their value indicator.
   const keySeparator = String.raw`(?:\s|#[^\n]*(?:\n|$))*:`;
   assert.doesNotMatch(remainder, new RegExp(String.raw`\bcontinue-on-error\s*['"]?` + keySeparator),
-    "only the four exact reviewed diagnostic steps may be advisory in any job");
+    "only the five exact reviewed diagnostic steps may be advisory in any job");
   // YAML double-quoted keys decode numeric escapes and escaped line breaks.
   // Inspect each possible quoted key, including inside flow mappings. A
   // lookahead avoids a quote in unrelated shell text hiding a later real key.
@@ -328,6 +346,7 @@ test("all workflow legs reject unreviewed job and step failure exemptions", () =
   for (const [jobName, stepName] of [
     ["frontend-test", "Test resource lifecycle receipts"],
     ["account-platform-test", "Account test resource lifecycle receipts"],
+    ["windows-codex-runtime-test", "Preserve browser fixture exit receipts"],
   ]) {
     const receipt = namedStep(jobBlock(jobName, original), stepName);
     const withoutReceiptExemption = original.replace(receipt,
