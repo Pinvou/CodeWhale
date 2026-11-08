@@ -17,7 +17,7 @@ use serde_json::{Map, Value, json};
 
 use super::crypto::SensitiveString;
 use super::protocol::{LeaseContext, validate_controller_base_url};
-use super::task::RemoteTaskModelScope;
+use super::task::{RemoteTaskModelScope, TaskLeaseBinding};
 use crate::core::model_wire::model_route_wire_api;
 use crate::platform::credential_store::CredentialState;
 use crate::platform::prefs::{
@@ -106,6 +106,8 @@ pub(crate) struct TemporaryModelBinding {
     pub(crate) connection_id: String,
     pub(crate) controller_lease_id: String,
     pub(crate) lease_epoch: u64,
+    pub(crate) relay_epoch: String,
+    pub(crate) remote_control_generation: String,
     pub(crate) task_id: String,
 }
 
@@ -116,6 +118,8 @@ impl fmt::Debug for TemporaryModelBinding {
             .field("connection_id", &self.connection_id)
             .field("controller_lease_id", &self.controller_lease_id)
             .field("lease_epoch", &self.lease_epoch)
+            .field("relay_epoch", &self.relay_epoch)
+            .field("remote_control_generation", &self.remote_control_generation)
             .field("task_id", &self.task_id)
             .finish()
     }
@@ -126,6 +130,8 @@ impl TemporaryModelBinding {
         for value in [
             &self.connection_id,
             &self.controller_lease_id,
+            &self.relay_epoch,
+            &self.remote_control_generation,
             &self.task_id,
         ] {
             if value.is_empty()
@@ -144,6 +150,8 @@ impl TemporaryModelBinding {
         self.connection_id == live.connection_id
             && self.controller_lease_id == live.controller_lease_id
             && self.lease_epoch.to_string() == live.lease_epoch
+            && self.relay_epoch == live.relay_epoch
+            && self.remote_control_generation == live.remote_control_generation
             && self.task_id == task_id
     }
 }
@@ -433,6 +441,8 @@ impl TemporaryModelPackageV1 {
                 "connection_id": self.binding.connection_id,
                 "controller_lease_id": self.binding.controller_lease_id,
                 "lease_epoch": self.binding.lease_epoch.to_string(),
+                "relay_epoch": self.binding.relay_epoch,
+                "remote_control_generation": self.binding.remote_control_generation,
                 "task_id": self.binding.task_id,
             }),
         );
@@ -462,6 +472,8 @@ impl TemporaryModelPackageV1 {
                 "connection_id": self.binding.connection_id,
                 "controller_lease_id": self.binding.controller_lease_id,
                 "lease_epoch": self.binding.lease_epoch.to_string(),
+                "relay_epoch": self.binding.relay_epoch,
+                "remote_control_generation": self.binding.remote_control_generation,
                 "task_id": self.binding.task_id,
             },
             "primary": self.primary.to_redacted_value(),
@@ -499,6 +511,8 @@ impl TemporaryModelPackageV1 {
                 "connection_id",
                 "controller_lease_id",
                 "lease_epoch",
+                "relay_epoch",
+                "remote_control_generation",
                 "task_id",
             ],
             &[],
@@ -510,6 +524,12 @@ impl TemporaryModelPackageV1 {
             connection_id: required_string(binding, "connection_id", MAX_ID_CHARS)?,
             controller_lease_id: required_string(binding, "controller_lease_id", MAX_ID_CHARS)?,
             lease_epoch,
+            relay_epoch: required_string(binding, "relay_epoch", MAX_ID_CHARS)?,
+            remote_control_generation: required_string(
+                binding,
+                "remote_control_generation",
+                MAX_ID_CHARS,
+            )?,
             task_id: required_string(binding, "task_id", MAX_ID_CHARS)?,
         };
         let primary = ExportRoute::from_wire_value(
@@ -1024,8 +1044,22 @@ impl TemporaryModelStore {
     }
 
     /// Idempotent release; returns `true` when a package was actually dropped.
-    pub(crate) fn clear_task(&self, task_id: &str) -> bool {
-        self.installed.lock().remove(task_id).is_some()
+    pub(crate) fn clear_task(&self, task_id: &str, lease: &TaskLeaseBinding) -> bool {
+        let mut installed = self.installed.lock();
+        let Some(package) = installed.get(task_id).map(|entry| &entry.package) else {
+            return false;
+        };
+        let binding = &package.binding;
+        if binding.connection_id != lease.connection_id
+            || binding.controller_lease_id != lease.controller_lease_id
+            || binding.lease_epoch.to_string() != lease.lease_epoch
+            || binding.relay_epoch != lease.relay_epoch
+            || binding.remote_control_generation != lease.remote_control_generation
+            || binding.task_id != task_id
+        {
+            return false;
+        }
+        installed.remove(task_id).is_some()
     }
 
     pub(crate) fn clear_for_connection(&self, connection_id: &str) -> bool {
@@ -1045,8 +1079,8 @@ impl TemporaryModelStore {
 }
 
 impl RemoteTaskModelScope for TemporaryModelStore {
-    fn release_task_credentials(&self, task_id: &str) {
-        self.clear_task(task_id);
+    fn release_task_credentials(&self, task_id: &str, lease: &TaskLeaseBinding) {
+        self.clear_task(task_id, lease);
     }
 }
 
@@ -1109,6 +1143,8 @@ mod tests {
                 connection_id: "connection-0001".into(),
                 controller_lease_id: "lease-0001".into(),
                 lease_epoch: 7,
+                relay_epoch: "relay-epoch-0001".into(),
+                remote_control_generation: "generation-0001".into(),
                 task_id: "task-0001".into(),
             },
             primary: route("https://api.deepseek.com/v1", "deepseek", key),
@@ -1395,6 +1431,130 @@ mod tests {
                 .code,
             "model_binding_stale"
         );
+    }
+
+    #[tokio::test]
+    async fn every_lease_component_fences_lookup_and_terminal_cleanup() {
+        for field in [
+            "connection_id",
+            "controller_lease_id",
+            "lease_epoch",
+            "relay_epoch",
+            "remote_control_generation",
+        ] {
+            let original = lease();
+            let mut successor = lease();
+            match field {
+                "connection_id" => successor.connection_id = "connection-next".into(),
+                "controller_lease_id" => successor.controller_lease_id = "lease-next".into(),
+                "lease_epoch" => successor.lease_epoch = "8".into(),
+                "relay_epoch" => successor.relay_epoch = "relay-next".into(),
+                "remote_control_generation" => {
+                    successor.remote_control_generation = "generation-next".into()
+                }
+                _ => unreachable!(),
+            }
+            let store = TemporaryModelStore::default();
+            let mut first = package("fixture-first-key");
+            first.primary.base_url = "https://8.8.8.8/v1".into();
+            store.install(first, &original, "task-0001", 1).unwrap();
+            assert_eq!(
+                store
+                    .redacted_route("task-0001", &successor)
+                    .unwrap_err()
+                    .code,
+                "model_binding_stale"
+            );
+            assert_eq!(
+                store
+                    .with_credentials("task-0001", &successor, |_, _| panic!(
+                        "stale credentials must not be exposed"
+                    ))
+                    .unwrap_err()
+                    .code,
+                "model_binding_stale"
+            );
+            assert_eq!(
+                store
+                    .runtime_models_for_task("task-0001", &successor)
+                    .await
+                    .err()
+                    .unwrap()
+                    .code,
+                "model_binding_stale"
+            );
+            assert!(!store.clear_task("task-0001", &TaskLeaseBinding::from_context(&successor)));
+            assert!(store.contains_task("task-0001"));
+
+            // A replacement with the same task label still belongs to its
+            // complete new lease. A late old terminal callback cannot clear it.
+            let mut replacement = package("fixture-successor-key");
+            replacement.primary.base_url = "https://8.8.8.8/v1".into();
+            replacement.binding.connection_id = successor.connection_id.clone();
+            replacement.binding.controller_lease_id = successor.controller_lease_id.clone();
+            replacement.binding.lease_epoch = successor.lease_epoch.parse().unwrap();
+            replacement.binding.relay_epoch = successor.relay_epoch.clone();
+            replacement.binding.remote_control_generation =
+                successor.remote_control_generation.clone();
+            store
+                .install(replacement, &successor, "task-0001", 2)
+                .unwrap();
+            store.release_task_credentials("task-0001", &TaskLeaseBinding::from_context(&original));
+            assert_eq!(
+                store
+                    .runtime_models_for_task("task-0001", &successor)
+                    .await
+                    .unwrap()
+                    .primary
+                    .api_key,
+                "fixture-successor-key"
+            );
+            store
+                .release_task_credentials("task-0001", &TaskLeaseBinding::from_context(&successor));
+            assert!(store.is_empty());
+            store
+                .install(package("fixture-next-call"), &original, "task-0001", 3)
+                .unwrap();
+            store.release_task_credentials("task-0001", &TaskLeaseBinding::from_context(&original));
+            assert!(store.is_empty());
+        }
+    }
+
+    #[test]
+    fn wire_binding_requires_epochs_and_matches_the_actual_task_envelope() {
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../../../../../remote-control-relay/test/fixtures/controller-protocol-v1.json"
+        ))
+        .unwrap();
+        let original = fixture["task_submit_vectors"]["temporary"].clone();
+        validate_controller_payload_json(&original.to_string(), SenderRole::ControllerA).unwrap();
+        for field in ["relay_epoch", "remote_control_generation"] {
+            let mut missing = original.clone();
+            missing["temporary_model_package"]["binding"]
+                .as_object_mut()
+                .unwrap()
+                .remove(field);
+            assert!(
+                TemporaryModelPackageV1::from_wire_value(&missing["temporary_model_package"])
+                    .is_err()
+            );
+            assert!(
+                validate_controller_payload_json(&missing.to_string(), SenderRole::ControllerA)
+                    .is_err()
+            );
+            let mut stale = original.clone();
+            stale["temporary_model_package"]["binding"][field] = json!("old-context");
+            assert!(
+                validate_controller_payload_json(&stale.to_string(), SenderRole::ControllerA)
+                    .is_err()
+            );
+            let mut invalid = original.clone();
+            invalid["temporary_model_package"]["binding"][field] = json!("");
+            assert!(
+                TemporaryModelPackageV1::from_wire_value(&invalid["temporary_model_package"])
+                    .is_err()
+            );
+        }
     }
 
     #[test]
@@ -1754,6 +1914,8 @@ mod tests {
                 connection_id: "connection-0001".into(),
                 controller_lease_id: "lease-0001".into(),
                 lease_epoch: 7,
+                relay_epoch: "relay-epoch-0001".into(),
+                remote_control_generation: "generation-0001".into(),
                 task_id: "task-0001".into(),
             },
             primary: route("https://api.deepseek.com/v1", "deepseek", "sk-primary"),
@@ -1918,8 +2080,8 @@ mod tests {
         assert!(store.contains_task("task-0001"));
         assert!(store.contains_task("task-0002"));
 
-        assert!(store.clear_task("task-0001"));
-        assert!(!store.clear_task("task-0001"));
+        assert!(store.clear_task("task-0001", &TaskLeaseBinding::from_context(&lease())));
+        assert!(!store.clear_task("task-0001", &TaskLeaseBinding::from_context(&lease())));
         assert!(!store.is_empty());
         assert_eq!(
             store
@@ -1928,7 +2090,7 @@ mod tests {
                 .code,
             "model_package_missing"
         );
-        assert!(store.clear_task("task-0002"));
+        assert!(store.clear_task("task-0002", &TaskLeaseBinding::from_context(&lease())));
         assert!(store.is_empty());
     }
 
@@ -1940,7 +2102,7 @@ mod tests {
             .unwrap();
         assert_eq!(store.installed_at_ms(), Some(1_000));
         let scope: Arc<dyn RemoteTaskModelScope> = store.clone();
-        scope.release_task_credentials("task-0001");
+        scope.release_task_credentials("task-0001", &TaskLeaseBinding::from_context(&lease()));
         assert!(store.is_empty());
         assert!(!store.clear_for_connection("connection-0001"));
     }

@@ -120,7 +120,7 @@ export const TASK_REJECTION_CODES = [
   "task_payload_replay",
 ];
 
-export const CONTROLLER_CONTRACT_SHA256 = "5208650492c4e37286a7322d12ffc6c401724b8f261f8672d830146839db9f63";
+export const CONTROLLER_CONTRACT_SHA256 = "98e97089e09533376d4e0df65a93d6434ab4ead2dc4dc6f403edfce3214748c1";
 
 export const CONTROLLER_CAPABILITIES = Object.freeze([
   "pairing_v1", "encrypted_frames_v1", "finished_receipt_v1", "role_liveness_v1", "resume_v1",
@@ -256,7 +256,7 @@ const PARSED_TRANSCRIPT_TOKEN = Symbol("parsed-controller-transcript");
 const NESTED_SCHEMAS = Object.freeze({
   task_input: schema(["text", "attachment_ids", "skill_ids"], ["workspace_id"], []),
   temporary_model_package_v1: schema(["schema", "package_id", "binding", "primary", "primary_credential"], ["vision_fallback"], []),
-  temporary_model_binding: schema(["connection_id", "controller_lease_id", "lease_epoch", "task_id"], [], []),
+  temporary_model_binding: schema(["connection_id", "controller_lease_id", "lease_epoch", "relay_epoch", "remote_control_generation", "task_id"], [], []),
   vision_fallback: schema(["route", "credential"], [], []),
   route: schema(ROUTE_REQUIRED, ROUTE_OPTIONAL, []),
   credential: schema(["kind", "secret"], [], []),
@@ -1000,9 +1000,9 @@ function validateTemporaryModelPackage(value, task) {
   if (object.schema !== "temporary_model_package/v1") fail("unsupported_version", "temporary_model_package.schema");
   identifier(object.package_id, "temporary_model_package.package_id");
   const binding = exactObject(object.binding, NESTED_SCHEMAS.temporary_model_binding.required, NESTED_SCHEMAS.temporary_model_binding.optional, "temporary_model_package.binding");
-  for (const field of ["connection_id", "controller_lease_id", "task_id"]) identifier(binding[field], `temporary_model_package.binding.${field}`);
+  for (const field of ["connection_id", "controller_lease_id", "relay_epoch", "remote_control_generation", "task_id"]) identifier(binding[field], `temporary_model_package.binding.${field}`);
   decimal(binding.lease_epoch, "temporary_model_package.binding.lease_epoch");
-  for (const field of ["connection_id", "controller_lease_id", "lease_epoch", "task_id"]) if (binding[field] !== task[field]) fail("stale_context", `temporary_model_package.binding.${field}`);
+  for (const field of ["connection_id", "controller_lease_id", "lease_epoch", "relay_epoch", "remote_control_generation", "task_id"]) if (binding[field] !== task[field]) fail("stale_context", `temporary_model_package.binding.${field}`);
   validateRoute(object.primary, "temporary_model_package.primary");
   validateCredential(object.primary_credential, "temporary_model_package.primary_credential");
   if (object.vision_fallback !== undefined) {

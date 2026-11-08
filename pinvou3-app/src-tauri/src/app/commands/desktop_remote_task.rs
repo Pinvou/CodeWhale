@@ -3615,7 +3615,11 @@ mod tests {
         };
         struct PanicOnce(AtomicUsize);
         impl RemoteTaskModelScope for PanicOnce {
-            fn release_task_credentials(&self, _: &str) {
+            fn release_task_credentials(
+                &self,
+                _: &str,
+                _lease: &crate::features::remote_control::controller::task::TaskLeaseBinding,
+            ) {
                 if self.0.fetch_add(1, Ordering::SeqCst) == 0 {
                     panic!("test cleanup panic once");
                 }
@@ -3678,7 +3682,11 @@ mod tests {
         };
         struct PanicOnce(AtomicUsize);
         impl RemoteTaskModelScope for PanicOnce {
-            fn release_task_credentials(&self, _: &str) {
+            fn release_task_credentials(
+                &self,
+                _: &str,
+                _lease: &crate::features::remote_control::controller::task::TaskLeaseBinding,
+            ) {
                 if self.0.fetch_add(1, Ordering::SeqCst) == 0 {
                     panic!("test owned terminal cleanup panic once");
                 }
@@ -4516,6 +4524,8 @@ mod tests {
                 connection_id: lease.connection_id.clone(),
                 controller_lease_id: lease.controller_lease_id.clone(),
                 lease_epoch: 1,
+                relay_epoch: lease.relay_epoch.clone(),
+                remote_control_generation: lease.remote_control_generation.clone(),
                 task_id: "task-0001".into(),
             },
             primary: ExportRoute {
