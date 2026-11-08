@@ -233,3 +233,7 @@ Object.assign(adminLayoutCopy.ja.organization.lifecycleTasks, {"transferSelectTo
 Object.assign(adminLayoutCopy.zh.organization.lifecycleTasks, {"transferWaiting":"正在提交转让请求，请稍候。"});
 Object.assign(adminLayoutCopy.en.organization.lifecycleTasks, {"transferWaiting":"Submitting the transfer request. Please wait."});
 Object.assign(adminLayoutCopy.ja.organization.lifecycleTasks, {"transferWaiting":"譲渡リクエストを送信しています。しばらくお待ちください。"});
+
+Object.assign(adminLayoutCopy.zh.financeOverview, { metricScope: '查看指标口径' });
+Object.assign(adminLayoutCopy.en.financeOverview, { metricScope: 'View metric scope' });
+Object.assign(adminLayoutCopy.ja.financeOverview, { metricScope: '集計対象を確認' });

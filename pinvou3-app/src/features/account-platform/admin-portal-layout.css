@@ -396,3 +396,10 @@
 .adm-restored-shell .adm-organization-lifecycle-context dd code{white-space:normal;overflow-wrap:anywhere}
 @media(max-width:940px){.adm-restored-shell .adm-organization-lifecycle-context{grid-template-columns:minmax(0,1fr)}}
 .adm-restored-shell .adm-organization-lifecycle-context dt,.adm-restored-shell .adm-organization-lifecycle-context p{color:var(--adm-muted)}
+
+.adm-finance-overview-scope>summary{width:fit-content;color:var(--adm-primary);font-size:12px;font-weight:650;cursor:pointer}
+.adm-finance-overview-scope>summary:focus-visible{outline:2px solid var(--adm-primary);outline-offset:3px}
+.adm-finance-overview-scope dl{display:grid;grid-template-columns:fit-content(42%) minmax(0,1fr);gap:8px 16px;margin:12px 0 0;overflow-wrap:anywhere}
+.adm-finance-overview-scope dt{color:var(--adm-text);font-weight:650}
+.adm-finance-overview-scope dd{margin:0}
+@media(max-width:560px){.adm-finance-overview-scope dl{grid-template-columns:1fr;gap:4px}.adm-finance-overview-scope dd:not(:last-child){margin-bottom:8px}}
