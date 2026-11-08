@@ -4403,9 +4403,7 @@ jobs:
             remote-control-relay/package-lock.json
 
       - name: Python for owned browser fixture supervision
-        uses: actions/setup-python@v7
-        with:
-          python-version: '3.13'
+        run: python --version
 
       # Ubuntu npm tests skip these suites outside win32. They use only Node
       # built-ins and fake MCP/host fixtures to exercise the real wrapper
