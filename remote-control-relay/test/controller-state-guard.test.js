@@ -73,6 +73,84 @@ function OwnerClass([string]$sid) {
   assert.equal(typeof metadata.protected, "boolean");
   return metadata;
 }
+async function openGuardStore(t, options, open = value => RelayStateStore.open(value)) {
+  try {
+    return await open(options);
+  } catch (error) {
+    // TAP retains the store error but omits its native subprocess cause. Emit
+    // only closed classifications, never PowerShell arguments, ACLs or stderr.
+    let cause;
+    try { cause = error?.cause; } catch { /* Preserve the original failure. */ }
+    const read = field => {
+      try { return cause?.[field]; } catch { return undefined; }
+    };
+    const code = read("code"), errno = read("errno");
+    const killed = read("killed"), signal = read("signal");
+    const diagnostic = { stage: "store_open", code: "unknown" };
+    if (["ETIMEDOUT", "EACCES", "EPERM", "ENOENT", "ENOTDIR", "EINVAL",
+      "ERR_CHILD_PROCESS_STDIO_MAXBUFFER"].includes(code)) diagnostic.code = code;
+    if (Number.isSafeInteger(code) && code >= -2147483648 && code <= 4294967295) diagnostic.exit_code = code;
+    if (Number.isSafeInteger(errno) && errno >= -2147483648 && errno <= 2147483647) diagnostic.errno = errno;
+    if (typeof killed === "boolean") diagnostic.killed = killed;
+    if (["SIGTERM", "SIGKILL", "SIGABRT", "SIGINT"].includes(signal)) diagnostic.signal = signal;
+    try { t.diagnostic(`controller_guard_store_open_failure ${JSON.stringify(diagnostic)}`); }
+    catch { /* Diagnostics cannot replace the original open failure. */ }
+    throw error;
+  }
+}
+
+test("controller guard open diagnostics preserve the native cause and expose only cached closed fields", async () => {
+  for (const mode of ["changing", "throwing", "boxed", "observer_throw", "exit_code", "unknown"]) {
+    const reads = { cause: 0, code: 0, errno: 0, killed: 0, signal: 0 };
+    const forbidden = { message: 0, stack: 0, stdout: 0, stderr: 0, cmd: 0, path: 0, owner: 0, sddl: 0 };
+    const values = { code: mode === "exit_code" ? 1 : mode === "unknown" ? "SECRET_SENTINEL" : "ETIMEDOUT",
+      errno: -1, killed: true, signal: "SIGTERM" };
+    const cause = {}, original = {}, options = {}, messages = [];
+    Object.defineProperty(original, "cause", { get() { reads.cause++; return cause; } });
+    for (const [field, value] of Object.entries(values)) {
+      Object.defineProperty(cause, field, { get() {
+        reads[field]++;
+        if (mode === "throwing") throw new Error("SECRET_SENTINEL");
+        if (mode === "boxed") return Object(value);
+        return reads[field] === 1 ? value : "SECRET_SENTINEL";
+      } });
+    }
+    for (const object of [original, cause]) {
+      for (const field of Object.keys(forbidden)) {
+        Object.defineProperty(object, field, { get() { forbidden[field]++; throw new Error("SECRET_SENTINEL"); } });
+      }
+    }
+    await assert.rejects(openGuardStore({ diagnostic(message) {
+      messages.push(message);
+      if (mode === "observer_throw") throw new Error("SECRET_SENTINEL");
+    } }, options, async actual => { assert.equal(actual, options); throw original; }), actual => actual === original);
+    for (const count of Object.values(reads)) assert.equal(count, 1);
+    for (const count of Object.values(forbidden)) assert.equal(count, 0);
+    assert.equal(messages.length, 1);
+    assert.equal(messages[0].includes("SECRET"), false);
+    const expected = { stage: "store_open", code: "unknown" };
+    if (!["throwing", "boxed"].includes(mode)) {
+      Object.assign(expected, { errno: -1, killed: true, signal: "SIGTERM" });
+      if (mode === "exit_code") expected.exit_code = 1;
+      else if (mode !== "unknown") expected.code = "ETIMEDOUT";
+    }
+    assert.deepEqual(JSON.parse(messages[0].slice("controller_guard_store_open_failure ".length)), expected);
+  }
+});
+
+test("controller guard open diagnostics retain successful results and tolerate an unavailable cause", async () => {
+  const options = {}, result = {};
+  assert.equal(await openGuardStore({ diagnostic() { assert.fail("success must not emit failure diagnostics"); } },
+    options, async actual => { assert.equal(actual, options); return result; }), result);
+  for (const mode of ["missing", "throwing"]) {
+    const original = {}, messages = [];
+    if (mode === "throwing") Object.defineProperty(original, "cause", { get() { throw new Error("SECRET_SENTINEL"); } });
+    await assert.rejects(openGuardStore({ diagnostic(message) { messages.push(message); } }, options,
+      async () => { throw original; }), actual => actual === original);
+    assert.deepEqual(messages, ['controller_guard_store_open_failure {"stage":"store_open","code":"unknown"}']);
+  }
+});
+
 async function fixture(t) {
   const directory = await fs.realpath(await fs.mkdtemp(join(tmpdir(), "pinvou-guard-test-")));
   const statePath = join(directory, "controller", "state.json");
@@ -93,7 +171,7 @@ async function fixture(t) {
       return `guard-test-process:${pid}`;
     }, ...security };
   async function open(overrides = {}) {
-    const store = await RelayStateStore.open({ ...options, ...overrides });
+    const store = await openGuardStore(t, { ...options, ...overrides });
     stores.push(store);
     return store;
   }
