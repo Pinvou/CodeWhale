@@ -504,13 +504,12 @@ def _account_closure_source_shell_arguments(workflow, job):
     """
     if re.search(r'''(?m)^(?:defaults|'defaults'|"defaults")\s*:''', workflow):
         raise AssertionError("closure source must not inherit workflow defaults")
-    header = job.split("\n    steps:", 1)[0]
-    if re.search(r'''(?m)^    (?:defaults|'defaults'|"defaults")\s*:''', header):
+    if re.search(r'''(?m)^    (?:defaults|'defaults'|"defaults")\s*:''', job):
         raise AssertionError("closure source must not inherit Account job defaults")
     source = _step_named(job, "Verify Account closure source and API contracts")
     if re.search(r'''(?m)^        (?:shell|'shell'|"shell")\s*:''', source):
         raise AssertionError("closure source must retain its implicit Bash shell")
-    # The Account job is pinned to ubuntu-latest by the existing job contract.
+    # The Account job is pinned to ubuntu-22.04 by the existing job contract.
     return ["-e", "-c"]
 
 
@@ -1241,6 +1240,10 @@ class CiGatePolicyTests(unittest.TestCase):
                 self.assertNotEqual(inherited, job)
                 with self.subTest(scope="job", defaults=defaults), self.assertRaises(AssertionError):
                     assert_contract(inherited)
+                # YAML mapping key order does not affect the effective defaults.
+                after_steps = job + "\n" + textwrap.indent(defaults, "    ") + "\n"
+                with self.subTest(scope="job-after-steps", defaults=defaults), self.assertRaises(AssertionError):
+                    assert_contract(after_steps)
 
     def test_account_required_gate_member_triple_is_pinned(self):
         original = self.pr_workflow
