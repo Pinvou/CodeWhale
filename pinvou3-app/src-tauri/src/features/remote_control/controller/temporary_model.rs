@@ -682,10 +682,9 @@ fn credential_secret(value: &Value, label: &'static str) -> Result<SensitiveStri
 }
 
 /// Rejects endpoints B must never call on behalf of A: loopback, private,
-/// link-local (including the cloud metadata address) and unresolved local
-/// names. The app cannot bind this validation to CodeWhale's final transport;
-/// DNS rebinding, process proxies and redirect target drift remain documented
-/// residual risks for the first release.
+/// link-local (including the cloud metadata address) and local names. This
+/// export-time check validates syntax and numeric hosts; the receiving turn's
+/// runtime_models_for_task prepares domain snapshots and transport constraints.
 pub(crate) fn validate_export_target(base_url: &str) -> Result<()> {
     if base_url.len() > MAX_URL_CHARS {
         return Err(error("model_endpoint_invalid"));
