@@ -145,6 +145,32 @@ async fn start_controlled_worker<T>(
     }
 }
 
+/// A registration task can disappear without sending its normal result. Retire
+/// only the operation captured by this command, including its relay lane; a
+/// concurrent stop or replacement must retain its own state and projection.
+pub(crate) async fn wait_controlled_registration(
+    manager: &ControlledDeviceManager,
+    operation: ControlledOperation,
+    done: impl std::future::Future<
+        Output = Result<Result<ControlledStatus, String>, tokio::sync::oneshot::error::RecvError>,
+    >,
+    retire: impl FnOnce(&str),
+    emit: impl FnOnce(&ControlledStatus),
+) -> Result<ControlledStatus, String> {
+    match done.await {
+        Ok(result) => result,
+        Err(_) => {
+            const ERROR: &str = "pairing_registration_failed";
+            retire(operation.generation());
+            if let Ok(status) = manager.fail_operation(operation, ERROR.to_owned()) {
+                emit(&status);
+            }
+            log_controlled_event("registration_failed", ERROR);
+            Err(ERROR.to_owned())
+        }
+    }
+}
+
 /// Frontend projection diagnostics accept only semantic categories. The UI
 /// cannot submit a code, generation, endpoint, device name or free text.
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -283,15 +309,19 @@ pub async fn desktop_remote_controlled_start(
             |status| emit_status(&app, status),
         )
         .await?;
-        match done.await {
-            Ok(Ok(status)) => Ok(status),
-            Ok(Err(error)) => {
+        match wait_controlled_registration(
+            &manager,
+            operation,
+            done.wait(),
+            |generation| relay.stop_controller_relay(generation),
+            |status| emit_status(&app, status),
+        )
+        .await
+        {
+            Ok(status) => Ok(status),
+            Err(error) => {
                 log_controlled_event("start_failed", &error);
                 Err(error)
-            }
-            Err(_) => {
-                log_controlled_event("start_failed", "pairing_registration_failed");
-                Err("pairing_registration_failed".to_owned())
             }
         }
     }
@@ -357,7 +387,7 @@ pub async fn desktop_remote_controlled_refresh(
             ControlledRelayWorker::start(
                 app.clone(),
                 relay.inner().clone(),
-                operation,
+                operation.clone(),
                 std::sync::Arc::new(
                     super::desktop_remote_controller_business::DesktopControlledBusiness {
                         app: app.clone(),
@@ -369,19 +399,23 @@ pub async fn desktop_remote_controlled_refresh(
         .await?;
         checkpoint("refresh_worker_start_done");
         checkpoint("refresh_registration_wait_begin");
-        match done.await {
-            Ok(Ok(status)) => {
+        match wait_controlled_registration(
+            &manager,
+            operation,
+            done.wait(),
+            |generation| relay.stop_controller_relay(generation),
+            |status| emit_status(&app, status),
+        )
+        .await
+        {
+            Ok(status) => {
                 checkpoint("refresh_registration_wait_done");
                 emit_status(&app, &status);
                 Ok(status)
             }
-            Ok(Err(error)) => {
+            Err(error) => {
                 checkpoint("refresh_registration_wait_failed");
                 Err(error)
-            }
-            Err(_) => {
-                checkpoint("refresh_registration_wait_failed");
-                Err("pairing_registration_failed".to_owned())
             }
         }
     }
@@ -519,6 +553,113 @@ pub fn desktop_remote_controlled_list_workspaces(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn closed_registration_retires_start_and_refresh_and_allows_next_start() {
+        use crate::features::remote_control::controller::controlled::ControlledStatusKind;
+        for refresh in [false, true] {
+            for while_waiting in [false, true] {
+                let manager = ControlledDeviceManager::default();
+                let initial = manager.start(Some("B"), Vec::new()).unwrap();
+                let operation = if refresh {
+                    let retiring = manager.begin_refresh().unwrap();
+                    manager.complete_refresh_revoked(retiring).unwrap()
+                } else {
+                    initial
+                };
+                let (sender, done) = tokio::sync::oneshot::channel();
+                let mut retired = None;
+                let mut emitted = None;
+                {
+                    let wait = wait_controlled_registration(
+                        &manager,
+                        operation.clone(),
+                        done,
+                        |generation| retired = Some(generation.to_owned()),
+                        |status| emitted = Some(status.clone()),
+                    );
+                    tokio::pin!(wait);
+                    if while_waiting {
+                        // Establish an actual pending receiver without sleeping.
+                        std::future::poll_fn(|cx| {
+                            assert!(std::future::Future::poll(wait.as_mut(), cx).is_pending());
+                            std::task::Poll::Ready(())
+                        })
+                        .await;
+                    }
+                    drop(sender);
+                    assert_eq!(wait.await.unwrap_err(), "pairing_registration_failed");
+                }
+                assert_eq!(retired.as_deref(), Some(operation.generation()));
+                let status = emitted.unwrap();
+                assert_eq!(status.kind(), ControlledStatusKind::Error);
+                assert_eq!(
+                    serde_json::to_value(status).unwrap()["generation"],
+                    operation.generation()
+                );
+                assert!(!manager.is_pending_handshake(operation));
+                assert!(manager.start(Some("next"), Vec::new()).is_ok());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn closed_old_registration_preserves_stop_and_replacement() {
+        use crate::features::remote_control::controller::controlled::ControlledStatusKind;
+        for replacement in [false, true] {
+            let manager = ControlledDeviceManager::default();
+            let old = manager.start(None, Vec::new()).unwrap();
+            let (sender, done) = tokio::sync::oneshot::channel();
+            manager.stop();
+            let next = replacement.then(|| manager.start(None, Vec::new()).unwrap());
+            let before = serde_json::to_value(manager.status()).unwrap();
+            drop(sender);
+            assert_eq!(
+                wait_controlled_registration(
+                    &manager,
+                    old.clone(),
+                    done,
+                    |generation| assert_eq!(generation, old.generation()),
+                    |_| panic!("an obsolete registration must not publish over its successor"),
+                )
+                .await
+                .unwrap_err(),
+                "pairing_registration_failed"
+            );
+            assert_eq!(serde_json::to_value(manager.status()).unwrap(), before);
+            assert_eq!(
+                manager.status().kind(),
+                if replacement {
+                    ControlledStatusKind::Registering
+                } else {
+                    ControlledStatusKind::Stopped
+                }
+            );
+            if let Some(next) = next {
+                assert!(manager.is_pending_handshake(next));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn normal_registration_results_do_not_enter_abnormal_cleanup() {
+        let manager = ControlledDeviceManager::default();
+        let operation = manager.start(None, Vec::new()).unwrap();
+        for result in [Ok(manager.status()), Err("endpoint_offline".to_owned())] {
+            let expected = serde_json::to_value(&result).unwrap();
+            let (sender, done) = tokio::sync::oneshot::channel();
+            sender.send(result).unwrap();
+            let actual = wait_controlled_registration(
+                &manager,
+                operation.clone(),
+                done,
+                |_| panic!("normal results retain the existing worker lifecycle"),
+                |_| panic!("normal results are already projected by their owner"),
+            )
+            .await;
+            assert_eq!(serde_json::to_value(actual).unwrap(), expected);
+        }
+    }
 
     #[tokio::test]
     async fn start_entry_retains_its_original_operation_across_a_concurrent_restart() {
