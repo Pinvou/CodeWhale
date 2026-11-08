@@ -6,10 +6,11 @@ import { localFinanceDate } from './AdminFinanceFilters.jsx';
 import { financeReadDefinition, financeReadIdentity, financeListRouteUpdates, readFinanceListRoute } from './admin-finance-read-route.js';
 
 const receivableSources = ['USAGE_OVERAGE', 'CHARGEBACK', 'FORCED_REFUND'];
-function receivableSourceDisplayKey(raw) {
+const receivableFilterTrim = raw => raw.replace(/^\p{White_Space}+|\p{White_Space}+$/gu, '');
+function receivableEnumDisplayKey(raw) {
   // The Billing filter trims Unicode White_Space (not BOM) and uppercases
   // each rune. This is for labels only: the route and GET keep the raw value.
-  return Array.from(raw.replace(/^\p{White_Space}+|\p{White_Space}+$/gu, ''), rune => {
+  return Array.from(receivableFilterTrim(raw), rune => {
     const upper = rune.toUpperCase();
     return upper.length === 1 ? upper : rune;
   }).join('');
@@ -32,9 +33,10 @@ export function AdminFinanceReadWorkspace({ kind, client, language, route, onVie
   const walletHelpID = useId();
   const receivableFilters = kind === 'receivables' ? words.receivableFilter : null;
   const timeWords = kind === 'receivables' ? words.receivableTime : null;
+  const resultWords = kind === 'receivables' ? words.receivableResults : null;
   const timeHelpID = useId();
   const [draft, setDraft] = useState(current.query), [state, setState] = useState({ owner: null, signature: '', data: null, error: null }), [revision, setRevision] = useState(0), [previous, setPrevious] = useState([]);
-  const sourceDisplayKey = receivableFilters ? receivableSourceDisplayKey(draft.source_type || '') : '';
+  const sourceDisplayKey = receivableFilters ? receivableEnumDisplayKey(draft.source_type || '') : '';
   const unsupportedSource = Boolean(sourceDisplayKey) && !receivableSources.includes(sourceDisplayKey);
   const filterSignature = JSON.stringify(Object.fromEntries(Object.entries(current.query).filter(([key]) => key !== 'cursor')));
   useEffect(() => { setDraft(Object.fromEntries(Object.entries(current.query).map(([key, value]) => [key, key.startsWith('created_') ? localFinanceDate(value) : value]))); }, [signature]);
@@ -58,7 +60,7 @@ export function AdminFinanceReadWorkspace({ kind, client, language, route, onVie
         selected = requireFinanceCollection(matching).find(item => financeReadIdentity(kind, item) === current.selectedID);
       }
       const allocations = current.selectedID && kind === 'receivables' ? requireFinanceCollection(await client.receivableAllocations(current.selectedID, controller.signal)) : null;
-      if (!controller.signal.aborted) setState({ owner: client, signature, data: { page, items, selected, allocations }, error: null });
+      if (!controller.signal.aborted) setState({ owner: client, signature, data: { page, items, selected, allocations, query }, error: null });
     })().catch(error => { if (!controller.signal.aborted) setState({ owner: client, signature, data: null, error }); });
     return () => controller.abort();
   }, [client, kind, signature, revision]);
@@ -87,6 +89,16 @@ export function AdminFinanceReadWorkspace({ kind, client, language, route, onVie
     </div>
   </fieldset>;
   const refresh = () => { if (visible.error?.status === 410 || visible.error?.status === 400 && current.query.cursor) move({ ...current.query, cursor: '' }, current.selectedID || null, 'replace'); else setRevision(value => value + 1); };
+  // Describe the successful GET: its date values may have been resolved from a legacy local URL.
+  const appliedQuery = resultWords ? visible.data?.query : null;
+  const appliedSourceDisplayKey = receivableEnumDisplayKey(appliedQuery?.source_type || '');
+  const appliedStatusDisplayKey = receivableEnumDisplayKey(appliedQuery?.status || '');
+  const appliedCursor = receivableFilterTrim(appliedQuery?.cursor || '');
+  const applied = appliedQuery ? fields.filter(key => key === 'source_type' ? appliedSourceDisplayKey : key === 'status' ? appliedStatusDisplayKey : appliedQuery[key]) : [];
+  const appliedValue = key => key === 'status' ? labelStatus(appliedStatusDisplayKey) :
+    key === 'source_type' ? receivableSources.includes(appliedSourceDisplayKey) ? receivableFilters.types[appliedSourceDisplayKey] : receivableFilters.unsupported : appliedQuery[key];
+  const appliedLabel = key => key === 'created_from' ? timeWords.from : key === 'created_to' ? timeWords.to : words[key];
+  const emptyReceivables = appliedCursor ? resultWords?.emptyPage : applied.length ? resultWords?.noMatches : resultWords?.noRecords;
   const table = (items, columns, identify) => <div className="adm-table-wrap"><table className="adm-table"><thead><tr>{columns.map(key => <th key={key}>{words[key] || copy[key]}</th>)}{identify && <th>{copy.details}</th>}</tr></thead><tbody>{items.map((item, index) => <tr key={identify ? financeReadIdentity(kind, item) : index}>{columns.map(key => <td key={key} data-label={words[key] || copy[key]}>{cell(key, item[key])}</td>)}{identify && <td><button onClick={() => move(current.query, financeReadIdentity(kind, item))}>{copy.details}</button></td>}</tr>)}</tbody></table></div>;
   return <section className="adm-finance-read-view" aria-label={words[kind]}><header><h3>{words[kind]}</h3><button onClick={refresh}>{copy.refresh}</button></header>
     {visible.error && <p role="alert">{visible.error.status === 403 ? copy.permissions : visible.error.status === 410 ? words.cursorExpired : copy.unavailable}<button onClick={refresh}>{copy.retry}</button></p>}
@@ -104,6 +116,16 @@ export function AdminFinanceReadWorkspace({ kind, client, language, route, onVie
           {receivableSources.map(source => <option key={source} value={source}>{receivableFilters.types[source]}</option>)}
         </select> : key === 'status' ? <select value={draft[key] || ''} onChange={event => setDraft(value => ({ ...value, [key]: event.target.value }))}><option value="">{words.allStatuses}</option>{statuses[kind].map(value => <option key={value} value={value}>{labelStatus(value)}</option>)}</select> : <input maxLength={200} step={key.startsWith('created_') ? '0.001' : undefined} type={key.startsWith('created_') ? 'datetime-local' : 'text'} value={draft[key] || ''} onChange={event => setDraft(value => ({ ...value, [key]: event.target.value }))} />}</label>)}
       <label>{words.limit}<select value={draft.limit} onChange={event => setDraft(value => ({ ...value, limit: event.target.value }))}>{['25', '50', '100', '200'].map(value => <option key={value}>{value}</option>)}</select></label><button>{words.search}</button>
-    </form>{visible.data && <><p>{words.pageCount(visible.data.items.length)}</p>{table(visible.data.items, config.columns, config.id)}{visible.data.items.length === 0 && <p>{copy.empty}</p>}<nav><button disabled={!previous.length} onClick={() => { const values = [...previous], cursor = values.pop(); setPrevious(values); move({ ...current.query, cursor }); }}>{copy.previous}</button><button disabled={!visible.data.page.next_cursor} onClick={() => { setPrevious(value => [...value, current.query.cursor]); move({ ...current.query, cursor: visible.data.page.next_cursor }); }}>{copy.next}</button></nav></>}</>}
+    </form>{visible.data && <>
+      {resultWords && applied.length > 0 && <section className="adm-receivable-applied" aria-label={resultWords.applied}>
+        <h4>{resultWords.applied}</h4>
+        <dl>{applied.map(key => <div key={key}><dt>{appliedLabel(key)}</dt><dd>{key.startsWith('created_') || key === 'wallet_id' ? <code>{appliedValue(key)}</code> : appliedValue(key)}</dd></div>)}</dl>
+        <button type="button" onClick={() => move({ limit: current.query.limit, cursor: '' })}>{resultWords.clear}</button>
+      </section>}
+      {resultWords && visible.data.items.length === 0 ? <div className="adm-receivable-empty">
+        <p role="status">{emptyReceivables}</p>
+        {appliedCursor && <button type="button" onClick={() => { setPrevious([]); move({ ...current.query, cursor: '' }); }}>{resultWords.first}</button>}
+      </div> : <><p>{words.pageCount(visible.data.items.length)}</p>{table(visible.data.items, config.columns, config.id)}{visible.data.items.length === 0 && <p>{copy.empty}</p>}</>}
+      <nav><button disabled={!previous.length} onClick={() => { const values = [...previous], cursor = values.pop(); setPrevious(values); move({ ...current.query, cursor }); }}>{copy.previous}</button><button disabled={!visible.data.page.next_cursor} onClick={() => { setPrevious(value => [...value, current.query.cursor]); move({ ...current.query, cursor: visible.data.page.next_cursor }); }}>{copy.next}</button></nav></>}</>}
   </section>;
 }
