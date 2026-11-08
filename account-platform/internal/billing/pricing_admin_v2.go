@@ -320,17 +320,12 @@ ORDER BY created_at DESC,id DESC LIMIT $1`, limit+1, boundary.timeParameter(), b
 		ids = ids[:limit]
 		next = encodeManagedPriceCursor(times[limit-1], ids[limit-1], limit)
 	}
-	items := make([]ManagedPriceVersion, 0, len(ids))
-	for _, id := range ids {
-		item, scopeKey, err := loadManagedPrice(ctx, tx, id, false)
-		if err != nil {
-			return ManagedPricePage{}, err
-		}
-		if err := tx.QueryRow(ctx, `SELECT etag FROM pricing_space_versions WHERE scope_type=$1 AND scope_key=$2 AND protocol_code=$3 AND formula_version_id=$4 AND credit_unit=$5`, item.ScopeType, scopeKey, item.ProtocolCode, item.FormulaVersionID, item.CreditUnit).Scan(&item.CurrentSpaceETag); err != nil {
-			return ManagedPricePage{}, err
-		}
-		item.DerivedStatus = derivePriceStatus(item, r.now())
-		items = append(items, item)
+	items, err := loadManagedPriceBatch(ctx, tx, ids)
+	if err != nil {
+		return ManagedPricePage{}, err
+	}
+	for index := range items {
+		items[index].DerivedStatus = derivePriceStatus(items[index], r.now())
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return ManagedPricePage{}, err
@@ -423,15 +418,13 @@ func (r *PostgresRepository) ReadManagedPriceSpace(ctx context.Context, raw Mana
 	if hasMore {
 		ids = ids[:limit]
 	}
-	items := make([]ManagedPriceVersion, 0, len(ids))
-	for _, id := range ids {
-		item, _, err := loadManagedPrice(ctx, tx, id, false)
-		if err != nil {
-			return 0, nil, false, err
-		}
-		item.CurrentSpaceETag = etag
-		item.DerivedStatus = derivePriceStatus(item, r.now())
-		items = append(items, item)
+	items, err := loadManagedPriceBatch(ctx, tx, ids)
+	if err != nil {
+		return 0, nil, false, err
+	}
+	for index := range items {
+		items[index].CurrentSpaceETag = etag
+		items[index].DerivedStatus = derivePriceStatus(items[index], r.now())
 	}
 	return etag, items, hasMore, tx.Commit(ctx)
 }
