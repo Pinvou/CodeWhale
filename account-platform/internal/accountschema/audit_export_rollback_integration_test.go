@@ -8,8 +8,10 @@ import (
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/migrations"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"net"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -269,11 +271,22 @@ func (f *auditExportGuardFixture) database(t *testing.T, ctx context.Context, do
 
 func (f *auditExportGuardFixture) serviceURL(t *testing.T, c *pgx.Conn, user string) string {
 	t.Helper()
-	parsed, err := url.Parse(f.config.ConnString())
-	if err != nil || (parsed.Scheme != "postgres" && parsed.Scheme != "postgresql") {
-		t.Fatal("schema fixture requires a PostgreSQL URL")
+	// Bind libpq to the live coordinator's peer. Replaying the original URI
+	// would allow client-specific parsing or credentials to change the target.
+	peer, ok := f.admin.PgConn().Conn().RemoteAddr().(*net.TCPAddr)
+	if !ok || !peer.IP.IsLoopback() {
+		t.Fatal("schema fixture requires a loopback PostgreSQL peer")
 	}
-	parsed.User = url.User(user)
-	parsed.Path = "/" + c.Config().Database
-	return parsed.String()
+	params := url.Values{
+		"sslmode":  {"disable"},
+		"passfile": {filepath.Join(t.TempDir(), "unused.pgpass")},
+	}
+	target := url.URL{
+		Scheme:   "postgresql",
+		Host:     peer.String(),
+		User:     url.User(user),
+		Path:     "/" + c.Config().Database,
+		RawQuery: params.Encode(),
+	}
+	return target.String()
 }
