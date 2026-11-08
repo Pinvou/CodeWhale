@@ -58,6 +58,7 @@ function installFeature(onInvoke, withUploadLimit = true, timers = { setTimeout,
 test('128 unresolved actions fail closed before send and survive bridge stop and rebuild', async () => {
   let succeed = false;
   const { feature, calls, rebuild } = installFeature(command => command === 'desktop_remote_action_a'
+    // eslint-disable-next-line prefer-promise-reject-errors -- Tauri IPC preserves string rejection payloads.
     ? (succeed ? Promise.resolve({ transfer_id: 'download-1', chunk_bytes: 5, total_bytes: 5 }) : Promise.reject('result_unknown')) : undefined);
   for (let i = 0; i < 128; i++) {
     await assert.rejects(feature.artifactDownloadBegin('local', 'remote', 'task-' + i, 'artifact'), { code: 'result_unknown' });
@@ -84,7 +85,9 @@ test('concurrent duplicate actions share one flight and preserve unknown identit
   const { feature, calls } = installFeature(command => {
     if (command !== 'desktop_remote_action_a') return undefined;
     if (mode === 'pending') return pending.promise;
+    // eslint-disable-next-line prefer-promise-reject-errors -- Exercise the native IPC string error contract.
     if (mode === 'local') return Promise.reject('remote_action_capacity');
+    // eslint-disable-next-line prefer-promise-reject-errors -- Exercise the native IPC structured error contract.
     if (mode === 'terminal') return Promise.reject({ code: 'permission_denied', authoritative: true });
     return Promise.resolve({ transfer_id: 'fresh', chunk_bytes: 1, total_bytes: 1 });
   });
@@ -126,6 +129,7 @@ test('late unknown generic action never retries into the next lease', async () =
 test('native canonical request identity survives a fresh renderer candidate', async () => {
   const { feature, calls } = installFeature((command, args) => {
     if (command !== 'desktop_remote_action_a') return undefined;
+    // eslint-disable-next-line prefer-promise-reject-errors -- Keep native request identity on the actual IPC payload shape.
     if (args.requestId !== 'native-original') return Promise.reject({ code: 'result_unknown', requestId: 'native-original', authoritative: false });
     return Promise.resolve({ transfer_id: 'download', chunk_bytes: 1, total_bytes: 1 });
   });
@@ -896,6 +900,7 @@ test('unknown attachment actions are fenced rather than replayed as new uploads'
 test('explicit unknown attachment cleanup retries its original id after bridge rebuild', async () => {
   let first = true;
   const { feature, calls, rebuild } = installFeature(command => command === 'desktop_remote_action_a'
+    // eslint-disable-next-line prefer-promise-reject-errors -- A native unknown-result string must retain the original abort identity.
     ? (first ? (first = false, Promise.reject('result_unknown')) : Promise.resolve({ aborted: false, already_absent: true })) : undefined);
   const abort = api => api.attachmentAbort('local', 'remote', 'task', 'transfer');
   await assert.rejects(abort(feature), { code: 'result_unknown' });
