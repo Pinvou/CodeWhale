@@ -527,3 +527,9 @@
 .adm-restored-shell .adm-receivable-time-presets{display:flex;flex-wrap:wrap;margin:-6px 0 0 -6px}
 .adm-restored-shell .adm-receivable-time-presets>button{margin:6px 0 0 6px}
 @media(max-width:560px){.adm-restored-shell .adm-receivable-time-fields{grid-template-columns:minmax(0,1fr)}}
+
+.adm-restored-shell .adm-receivable-applied,.adm-restored-shell .adm-receivable-empty{display:grid;grid-template-columns:minmax(0,1fr);gap:10px;justify-items:start;margin:12px 0;padding:12px;border:1px solid var(--adm-line);border-radius:10px;background:var(--adm-soft);overflow-wrap:break-word}
+.adm-restored-shell .adm-receivable-applied h4,.adm-restored-shell .adm-receivable-applied dl,.adm-restored-shell .adm-receivable-applied dd,.adm-restored-shell .adm-receivable-empty p{margin:0;min-width:0}
+.adm-restored-shell .adm-receivable-applied dl{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,180px),1fr));gap:10px;width:100%}
+.adm-restored-shell .adm-receivable-applied dl>div{min-width:0}
+.adm-restored-shell .adm-receivable-applied dt{color:var(--adm-muted);font-size:12px}
