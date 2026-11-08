@@ -1091,7 +1091,9 @@ async fn finish_controlled_registration<W, S, F>(
 /// still leaves the existing serving task running independently.
 pub(crate) struct ControlledRegistrationTask {
     done: oneshot::Receiver<Result<ControlledStatus, String>>,
-    task: tauri::async_runtime::JoinHandle<()>,
+    task: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>,
+    #[cfg(test)]
+    abort: tokio::task::AbortHandle,
 }
 
 impl ControlledRegistrationTask {
@@ -1102,14 +1104,14 @@ impl ControlledRegistrationTask {
         if result.is_err() {
             // The JoinError can contain a panic payload. It is deliberately
             // neither formatted nor exposed through diagnostics or IPC.
-            let _ = self.task.await;
+            self.task.await;
         }
         result
     }
 
     #[cfg(test)]
     pub(crate) fn abort_handle_for_test(&self) -> tokio::task::AbortHandle {
-        self.task.inner().abort_handle()
+        self.abort.clone()
     }
 }
 
@@ -1156,9 +1158,17 @@ impl ControlledRelayWorker {
             )
             .await;
         });
+        #[cfg(test)]
+        let abort = task.inner().abort_handle();
         Ok(ControlledRegistrationTask {
             done: done_rx,
-            task,
+            // The lifecycle owns a completion future rather than exporting a
+            // host runtime handle through its interface. Join errors stay private.
+            task: Box::pin(async move {
+                let _ = task.await;
+            }),
+            #[cfg(test)]
+            abort,
         })
     }
 
