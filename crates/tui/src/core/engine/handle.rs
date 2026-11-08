@@ -110,6 +110,9 @@ impl EngineHandle {
     /// cannot observe. `host_is_idle` checks its own consumers synchronously
     /// while the actor is sealed: dequeuing an event does not prove host
     /// persistence or terminal delivery finished.
+    /// The synchronous predicate must return promptly: an already-latched
+    /// cancel token deliberately cannot interrupt this sealed wait. Residual
+    /// work observed after commit is diagnosed, not a reopened handshake.
     ///
     /// Refusing resumes the actor without shutdown; so does a cancel token
     /// firing for the first time during an uncommitted wait (a token already
@@ -117,7 +120,9 @@ impl EngineHandle {
     /// proposal is answerable — the request channel or a oneshot counterpart
     /// was dropped — not that the engine is unhealthy; the cancel-beats-commit
     /// race also surfaces as `Err("idle-retirement proposal expired")`, so
-    /// treat every `Err` as "not retired" and retry. `true` means the actor
+    /// an `Err` is not proof that another proposer did not commit. Observe
+    /// `wait_run_completion` to distinguish a stopped incarnation, and retry
+    /// only while it is still running. `true` means the actor
     /// consumed the commit — the send receipt alone is not proof, since a
     /// send racing a simultaneous cancel can succeed on a proposal the actor
     /// abandons; a lost commit ack therefore reports `false`. `true` means

@@ -88,18 +88,23 @@ impl Engine {
             && self.tx_event.capacity() == self.tx_event.max_capacity()
     }
 
-    /// Count inputs that arrived after the retirement commit crossed the
-    /// boundary. The host contract excludes new external work from the moment
-    /// retirement starts; anything seen here violated it, and every send had
-    /// already returned `Ok`, so the caller surfaces the count instead of
-    /// letting the engine drop it silently.
-    pub(super) fn count_residual_inputs(&mut self) -> usize {
-        self.rx_op.len()
+    /// Snapshot work visible after the sealed commit wait. Autonomous shell
+    /// evidence and events can arrive there too, without an external send.
+    /// Event slots include reserved permits; shell lock contention is unknown
+    /// work, so report it conservatively. This does not observe arbitrary host
+    /// shared-state writes or arrivals after the snapshot.
+    pub(super) fn retirement_residuals(&mut self) -> (usize, usize, bool) {
+        let inputs = self.rx_op.len()
             + self.rx_subagent_completion.len()
             + self.rx_steer.len()
             + self.rx_approval.len()
             + self.rx_user_input.len()
-            + self.pending_steers.len()
+            + self.pending_steers.len();
+        let event_slots = self.tx_event.max_capacity() - self.tx_event.capacity();
+        let shell_work = self.shell_manager.try_lock().map_or(true, |mut shells| {
+            shells.has_live_or_unreported_work_for_session(&self.session.id)
+        });
+        (inputs, event_slots, shell_work)
     }
 
     pub(super) async fn accept_idle_shutdown(&mut self, request: IdleRetirement) -> bool {
@@ -169,6 +174,60 @@ mod tests {
             },
             &Config::default(),
         )
+    }
+
+    #[tokio::test]
+    async fn forkguard_idle_shutdown_sealed_wait_reports_autonomous_work() {
+        let home = tempfile::tempdir().unwrap();
+        let (mut engine, _handle) = fixture(home.path());
+        assert_eq!(engine.retirement_residuals(), (0, 0, false));
+        let shells = Arc::clone(&engine.shell_manager);
+        let completion = engine.tx_subagent_completion.clone();
+        let events = engine.tx_event.clone();
+        let session = engine.session.id.clone();
+        let (ready, receipt) = tokio::sync::oneshot::channel();
+        let (commit, committed) = tokio::sync::oneshot::channel();
+        let (commit_ack, ack) = tokio::sync::oneshot::channel();
+        let pending = tokio::spawn(async move {
+            let accepted = engine
+                .accept_idle_shutdown(IdleRetirement {
+                    ready,
+                    commit: committed,
+                    commit_ack,
+                })
+                .await;
+            (accepted, engine)
+        });
+        assert!(receipt.await.unwrap());
+        // The actor is sealed between ready and commit, not draining wakes.
+        shells
+            .lock()
+            .unwrap()
+            .seed_session_shell_for_test("late-shell", &session, false);
+        completion
+            .send(SubAgentCompletion {
+                owner_session_id: session,
+                agent_id: "late-child".into(),
+                payload: "late completion".into(),
+            })
+            .unwrap();
+        events
+            .try_send(Event::SteerDropped {
+                steer_id: "late-event".into(),
+            })
+            .unwrap();
+        commit.send(()).unwrap();
+        ack.await.unwrap();
+        let (accepted, mut engine) = tokio::time::timeout(Duration::from_secs(10), pending)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(accepted);
+        assert_eq!(engine.retirement_residuals(), (1, 1, true));
+        assert_eq!(
+            engine.rx_subagent_completion.try_recv().unwrap().payload,
+            "late completion"
+        );
     }
 
     #[tokio::test]
