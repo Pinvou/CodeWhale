@@ -591,4 +591,69 @@ func TestPaymentCreditClosureBoundaryPostgres(t *testing.T) {
 			t.Fatal(err)
 		}
 	})
+	// Keep this deliberately unresolved admission after all recovery scenarios:
+	// their resolver call counts must not include an unrelated pending subject.
+	t.Run("pending-subject-dml-and-closed-admission-boundaries", func(t *testing.T) {
+		runtime, err := pgx.Connect(ctx, f.serviceURL(t, ac, "account_service"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer runtime.Close(ctx)
+		var actor string
+		var super bool
+		if err := runtime.QueryRow(ctx, `SELECT current_user,(SELECT rolsuper FROM pg_roles WHERE rolname=current_user)`).Scan(&actor, &super); err != nil || actor != "account_service" || super {
+			t.Fatal("subject guard requires the real non-superuser runtime", err)
+		}
+		request := func(s scenario) paymentcredit.Request {
+			return paymentcredit.Request{ID: uuid.New(), UserID: s.user, OrderID: s.order, TransactionDigest: paymentcredit.Digest([]byte(s.order.String())), FactsDigest: paymentcredit.Digest([]byte(s.user.String() + "|" + s.order.String()))}
+		}
+		facts := func(user uuid.UUID) string {
+			var value string
+			if err := runtime.QueryRow(ctx, `SELECT jsonb_build_object('subject',(SELECT to_jsonb(u) FROM users u WHERE id=$1),'admissions',(SELECT COALESCE(jsonb_agg(to_jsonb(a) ORDER BY id),'[]'::jsonb) FROM account_payment_credit_admissions a WHERE user_id=$1))::text`, user).Scan(&value); err != nil {
+				t.Fatal(err)
+			}
+			return value
+		}
+		pending := seed(t)
+		input := request(pending)
+		decision, err := ar.AdmitPaymentCredit(ctx, input)
+		if err != nil || !decision.Matches(input) || decision.State != "ADMITTED" {
+			t.Fatal("real Account admission did not establish the pending fence", decision.State, err)
+		}
+		transitions := []struct{ name, sql string }{
+			{"deleted", `UPDATE users SET status='DELETED' WHERE id=$1`},
+			{"anonymized", `UPDATE users SET anonymized_at=clock_timestamp() WHERE id=$1`},
+		}
+		before := facts(pending.user)
+		for _, transition := range transitions {
+			_, err := runtime.Exec(ctx, transition.sql, pending.user)
+			var rejected *pgconn.PgError
+			if !errors.As(err, &rejected) || rejected.Code != "55000" || rejected.Message != "PAYMENT_CREDIT_OUTCOME_PENDING" {
+				t.Fatalf("pending %s transition was not rejected by its actual guard: %v", transition.name, err)
+			}
+			if facts(pending.user) != before {
+				t.Fatal("rejected subject cleanup changed subject or admission facts")
+			}
+		}
+		if replay, err := ar.AdmitPaymentCredit(ctx, input); err != nil || !replay.Matches(input) || replay.State != "ADMITTED" || facts(pending.user) != before {
+			t.Fatal("pending admission could not replay unchanged after both refusals", err)
+		}
+		assertEffects(t, pending, 0)
+		for _, transition := range transitions {
+			closed := seed(t)
+			if command, err := runtime.Exec(ctx, transition.sql, closed.user); err != nil || command.RowsAffected() != 1 {
+				t.Fatalf("unencumbered %s transition failed: %v", transition.name, err)
+			}
+			before := facts(closed.user)
+			input := request(closed)
+			decision, err := ar.AdmitPaymentCredit(ctx, input)
+			if err != nil || !decision.Matches(input) || decision.State != "CLOSED" {
+				t.Fatalf("%s subject received a new admission: %s %v", transition.name, decision.State, err)
+			}
+			if facts(closed.user) != before {
+				t.Fatal("closed admission changed subject or created an admission")
+			}
+			assertEffects(t, closed, 0)
+		}
+	})
 }

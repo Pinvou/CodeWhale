@@ -208,6 +208,8 @@ RETAINED_REQUIRED = {
     "TestReconciliationLedgerRepairPublicPostgres",
     "TestCallbackHTTPAdmissionPersistsPostgres",
     "TestDirectPaymentRepairCommandReceiptPostgres",
+    "TestPaymentCreditJournalAdmissionGuardPostgres",
+    "TestPaymentCreditResolverIntegrityPostgres",
     "TestLatePaymentQueryCommandPostgres",
     "TestLatePaymentQueryClientHTTPPostgres",
     "TestLatePaymentArchiveCommandReplayPostgres",
@@ -273,6 +275,15 @@ BILLING_LEAF_REQUIRED = {
 }
 BILLING_CHILD_REQUIRED = RETAINED_REQUIRED - BILLING_LEAF_REQUIRED
 EXACT_REQUIRED_CHILDREN = {
+    "TestPaymentCreditJournalAdmissionGuardPostgres": {
+        f"{entry}-{mode}"
+        for entry in ("RECHARGE", "REPAIR_CREDIT")
+        for mode in ("missing", "wrong-order", "wrong-payer", "already-applied")
+    },
+    "TestPaymentCreditResolverIntegrityPostgres": {
+        "applied-without-effects", "prepared-with-effects",
+        "missing-transaction", "fingerprint-mismatch",
+    },
     "TestDirectPaymentRepairCommandReceiptPostgres": {
         "pre-admission-fixture-rejects-current-schema",
         "runtime-immutable-command-and-exact-prefix-down",
@@ -293,6 +304,7 @@ EXACT_REQUIRED_CHILDREN = {
         "lost-ack-reply-resumes-metadata-without-repeating-money",
         "wrong-resolution-identity-retains-pending-then-valid-tick-recovers",
         "unconfigured-authority-retains-manual-payment-without-bypass",
+        "pending-subject-dml-and-closed-admission-boundaries",
     },
     "TestRechargeProductCommandAtomicityPostgres": {"active-provider-admission-candidate-progress"},
     "TestProductManualAdmissionPostgres": {

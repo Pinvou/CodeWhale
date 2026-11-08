@@ -27,6 +27,37 @@ CHECKPOINT_FOREIGN_CHILDREN = {"unbound-existing-facts", "foreign-key-before-fin
 
 
 class FinancialPostgresRunnerTests(unittest.TestCase):
+    def test_payment_credit_direct_guards_and_resolver_cases_are_mandatory(self):
+        required = {
+            "TestPaymentCreditJournalAdmissionGuardPostgres": {
+                f"{entry}-{mode}"
+                for entry in ("RECHARGE", "REPAIR_CREDIT")
+                for mode in ("missing", "wrong-order", "wrong-payer", "already-applied")
+            },
+            "TestPaymentCreditResolverIntegrityPostgres": {
+                "applied-without-effects", "prepared-with-effects",
+                "missing-transaction", "fingerprint-mismatch",
+            },
+        }
+        self.run_main_fixture()
+        command = self.fixture_commands[self.fixture_phases.index("retained-billing")]
+        options = {"package": RUNNER.BILLING_PACKAGE, "require_children": True, "exact_roots": True}
+        for root, children in required.items():
+            self.assertIn(root, RUNNER.RETAINED_REQUIRED)
+            self.assertIn(root, RUNNER.BILLING_CHILD_REQUIRED)
+            self.assertEqual(RUNNER.EXACT_REQUIRED_CHILDREN[root], children)
+            self.assertIsNotNone(re.fullmatch(command[command.index("-run") + 1], root))
+            events = self.events({root}, RUNNER.BILLING_PACKAGE, children=True)
+            RUNNER.verify_results(events, {root}, **options)
+            for child in children:
+                for invalid in (
+                    [event for event in events if event.get("Test") != root + "/" + child],
+                    events + [{"Action": "skip", "Package": RUNNER.BILLING_PACKAGE, "Test": root + "/" + child}],
+                ):
+                    with self.subTest(root=root, child=child), self.assertRaises(RuntimeError):
+                        RUNNER.verify_results(invalid, {root}, **options)
+        self.assertIn("pending-subject-dml-and-closed-admission-boundaries", RUNNER.EXACT_REQUIRED_CHILDREN["TestPaymentCreditClosureBoundaryPostgres"])
+
     def test_direct_repair_requires_historical_model_isolation_and_exact_prefix_down(self):
         root = "TestDirectPaymentRepairCommandReceiptPostgres"
         children = {"pre-admission-fixture-rejects-current-schema", "runtime-immutable-command-and-exact-prefix-down"}
@@ -683,7 +714,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
         self.assertEqual(billing[-1], "./internal/billing")
         self.assertEqual(billing[billing.index("-run") + 1],
                          "^(" + "|".join(sorted(RUNNER.RETAINED_REQUIRED)) + ")$")
-        self.assertEqual(len(RUNNER.RETAINED_REQUIRED), 74)
+        self.assertEqual(len(RUNNER.RETAINED_REQUIRED), 76)
         self.assertEqual(self.fixture_writes, ["create", "drop"])
         self.assertEqual(self.fixture_trace, [
             "owner-account", "owner-wallet", "owner-schema", "owner-token-schema", "owner-provisioning",
@@ -1919,7 +1950,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
         }
         self.assertEqual(RUNNER.REFUND_REQUIRED, expected)
         self.assertTrue(expected <= RUNNER.RETAINED_REQUIRED)
-        self.assertEqual(len(RUNNER.RETAINED_REQUIRED), 74)
+        self.assertEqual(len(RUNNER.RETAINED_REQUIRED), 76)
         valid = self.events(RUNNER.RETAINED_REQUIRED, RUNNER.BILLING_PACKAGE, children=True)
         options = {"package": RUNNER.BILLING_PACKAGE, "require_children": True, "exact_roots": True,
                    "children_required": RUNNER.BILLING_CHILD_REQUIRED}
