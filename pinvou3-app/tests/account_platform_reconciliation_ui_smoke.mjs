@@ -22,7 +22,7 @@ try {
   const url = `http://127.0.0.1:${vite.httpServer.address().port}/tests/fixtures/account-platform-reconciliation.html`;
   const fresh = async language => { errors.length = 0; await page.goto(url); await page.waitForFunction(() => window.f03); await page.evaluate(language => { window.f03.language = language; window.f03.render(); }, language); await page.waitForSelector('tbody tr'); };
   const click = async key => { assert.ok(await page.evaluate(key => { const text = window.f03.copy()[key]; const button = [...document.querySelectorAll('button')].find(value => value.textContent === text && !value.disabled); if (!button) return false; button.click(); return true; }, key), `Missing action ${key}`); };
-  const selectCase = async () => { await click('cases'); await page.waitForFunction(() => document.querySelector('tbody')?.textContent.includes('controlled-merchant')); await page.evaluate(() => document.querySelector('tbody button').click()); await page.waitForSelector('details'); };
+  const selectCase = async () => { await click('cases'); await page.waitForFunction(() => document.querySelector('tbody')?.textContent.includes(window.f03.orphanCase?.merchant_order_no || 'controlled-merchant')); await page.evaluate(() => document.querySelector('tbody button').click()); await page.waitForSelector('details'); };
   const caseRun = async (name, action) => { await action(); assert.deepEqual(errors, []); passed++; console.log(`PASS ${name}`); };
   for (const language of ['zh', 'en', 'ja']) {
     await caseRun(`${language}: orphan review displays producer evidence and binds the refreshed observation`, async () => {

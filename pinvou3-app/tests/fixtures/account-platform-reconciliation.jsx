@@ -28,7 +28,7 @@ globalThis.fetch = async (url, options = {}) => {
     if (control.orphanCase && JSON.parse(options.body).action === 'IGNORE' && JSON.parse(options.body).observed_observation_id !== row().latest_observation.observation_id) return json({ code: 'BILLING_CONFLICT' }, 409);
     if (control.commandStatus) return json({ code: control.commandCode }, control.commandStatus);
     if (control.delayed) return new Promise(resolve => { control.release = () => resolve(json({ ...row(), status: 'IN_REVIEW' })); });
-    return control.unknown ? json({ code: 'CONTROLLED_UNAVAILABLE' }, 503) : json({ ...row(), case_id: control.wrong ? other : id, status: 'IN_REVIEW' });
+    return control.unknown ? json({ code: 'CONTROLLED_UNAVAILABLE' }, 503) : json({ ...row(), case_id: control.wrong ? other : row().case_id, status: 'IN_REVIEW' });
   }
   if (String(url).endsWith('/reconciliation-runs') || String(url).endsWith('/reconciliation-imports')) { if (control.writeStatus) return json({ code: control.writeCode }, control.writeStatus); return control.unknownRun ? json({ code: 'CONTROLLED_UNAVAILABLE' }, 503) : json({ reconciliation_run_id: id, ...JSON.parse(options.body), status: 'COMPLETED' }, String(url).endsWith('/reconciliation-imports') ? 201 : 200); }
   return json({ code: 'UNEXPECTED_FIXTURE_ROUTE' }, 404);
