@@ -9,7 +9,7 @@
 | 成功及重复投递 | `TestTokenAuthorizationRegisteredConsumerSafety/success_duplicate`：领域写入、complete、result、terminal 各一次，两次投递均 ACK |
 | 领域响应丢失 | 原 `TestTokenAuthorizationRawConsumerCrashRecoveryAndUnlimitedNAK` 的 `execute-response-lost`、`execute-unknown`：查询原结果或保持未确认，不重发副作用 |
 | Begin 响应丢失 | 同一原回归的 `begin-response-lost`：保持原领取事实，不再次派发领域操作 |
-| SAFE | 新回归 `safe`：可进行只读路由/绑定/投递状态核查，不读取 Token 领域结果、不 Begin、不执行；未决消息 NAK |
+| SAFE | 新回归 `safe`：可只读核查路由和绑定，并可登记或读取 READY 投递元数据；不读取 Token 领域结果、不 Begin、不执行，未决消息 NAK |
 | 非法 lease | 新回归 `invalid_lease`：不执行、不完成、不 ACK；补充核对稳定且脱敏的内部诊断 |
 | JSONB 编码及冻结字节 | 新回归 `jsonb_whitespace`：受控格式变体与紧凑 HTTP 事实语义相同，消费过程保留所有实际交给消费者的原始字节副本 |
 | 大整数版本差异 | 新回归 `large_integer_equal` / `large_integer_lease_mismatch`：精确保留相等或相邻的 int64 事实；原 JSON 比较及严格传输回归继续保留 |
