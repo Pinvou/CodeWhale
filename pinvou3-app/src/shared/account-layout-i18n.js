@@ -319,3 +319,6 @@ adminLayoutCopy.en.organization.unitEntryID = "Unit ID";
 adminLayoutCopy.ja.organization.unitEntryPath = "所属階層";
 adminLayoutCopy.ja.organization.unitEntryPathUnavailable = "確認できません";
 adminLayoutCopy.ja.organization.unitEntryID = "単位 ID";
+adminLayoutCopy.zh.financeLists.receivableFilter = {"help":"填写钱包详情中的完整钱包 ID；留空可查询当前权限范围。","all":"全部来源","unsupported":"当前来源值不受支持","types":{"USAGE_OVERAGE":"用量超额","CHARGEBACK":"渠道拒付","FORCED_REFUND":"强制退款"}};
+adminLayoutCopy.en.financeLists.receivableFilter = {"help":"Use the full wallet ID from its details. Leave blank to search your available scope.","all":"All sources","unsupported":"Current source value is unsupported","types":{"USAGE_OVERAGE":"Usage overage","CHARGEBACK":"Chargeback","FORCED_REFUND":"Forced refund"}};
+adminLayoutCopy.ja.financeLists.receivableFilter = {"help":"ウォレット詳細の完全な ID を入力してください。空欄の場合は権限範囲内を検索します。","all":"すべての発生元","unsupported":"現在の発生元の値は未対応です","types":{"USAGE_OVERAGE":"利用量超過","CHARGEBACK":"チャージバック","FORCED_REFUND":"強制返金"}};

@@ -1,10 +1,19 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useId, useState } from 'react';
 import { accountLayoutCopy, adminLayoutCopy, financeCopy } from '../../shared/i18n.js';
 import { formatBalance } from './balance-view.js';
 import { formatFen, requireFinanceCollection, requireFinanceID } from './finance-contract.js';
 import { localFinanceDate } from './AdminFinanceFilters.jsx';
 import { financeReadDefinition, financeReadIdentity, financeListRouteUpdates, readFinanceListRoute } from './admin-finance-read-route.js';
 
+const receivableSources = ['USAGE_OVERAGE', 'CHARGEBACK', 'FORCED_REFUND'];
+function receivableSourceDisplayKey(raw) {
+  // The Billing filter trims Unicode White_Space (not BOM) and uppercases
+  // each rune. This is for labels only: the route and GET keep the raw value.
+  return Array.from(raw.replace(/^\p{White_Space}+|\p{White_Space}+$/gu, ''), rune => {
+    const upper = rune.toUpperCase();
+    return upper.length === 1 ? upper : rune;
+  }).join('');
+}
 const definitions = {
   receivables: { id: 'receivable_id', columns: ['receivable_id', 'wallet_id', 'original_microcredits', 'settled_microcredits', 'outstanding_microcredits', 'status'] },
   refunds: { id: 'operation_id', columns: ['operation_id', 'operation_type', 'payment_order_id', 'amount_fen', 'status', 'created_at'] },
@@ -20,7 +29,11 @@ const statuses = {
 export function AdminFinanceReadWorkspace({ kind, client, language, route, onViewApproval }) {
   const copy = financeCopy[language], words = adminLayoutCopy[language].financeLists, config = definitions[kind], fields = financeReadDefinition(kind).fields;
   const current = readFinanceListRoute(kind, route.search), signature = JSON.stringify(current);
+  const walletHelpID = useId();
+  const receivableFilters = kind === 'receivables' ? words.receivableFilter : null;
   const [draft, setDraft] = useState(current.query), [state, setState] = useState({ owner: null, signature: '', data: null, error: null }), [revision, setRevision] = useState(0), [previous, setPrevious] = useState([]);
+  const sourceDisplayKey = receivableFilters ? receivableSourceDisplayKey(draft.source_type || '') : '';
+  const unsupportedSource = Boolean(sourceDisplayKey) && !receivableSources.includes(sourceDisplayKey);
   const filterSignature = JSON.stringify(Object.fromEntries(Object.entries(current.query).filter(([key]) => key !== 'cursor')));
   useEffect(() => { setDraft(Object.fromEntries(Object.entries(current.query).map(([key, value]) => [key, key.startsWith('created_') ? localFinanceDate(value) : value]))); }, [signature]);
   useEffect(() => { setPrevious([]); }, [filterSignature]);
@@ -61,7 +74,13 @@ export function AdminFinanceReadWorkspace({ kind, client, language, route, onVie
       {visible.data.allocations && table(visible.data.allocations, ['amount_microcredits', 'created_at'])}
       {kind === 'adjustments' && onViewApproval && route.available.includes('approvals') && <button onClick={() => onViewApproval(null, { approval_command_type: 'WALLET_ADJUSTMENT', approval_target: current.selectedID })}>{copy.approvals}</button>}
     </>}</> : <><form className="adm-filter-row" onSubmit={event => { event.preventDefault(); move({ ...draft, cursor: '' }); }}>
-      {fields.map(key => <label key={key}>{words[key]}{key === 'status' ? <select value={draft[key] || ''} onChange={event => setDraft(value => ({ ...value, [key]: event.target.value }))}><option value="">{words.allStatuses}</option>{statuses[kind].map(value => <option key={value} value={value}>{labelStatus(value)}</option>)}</select> : <input maxLength={200} step={key.startsWith('created_') ? '0.001' : undefined} type={key.startsWith('created_') ? 'datetime-local' : 'text'} value={draft[key] || ''} onChange={event => setDraft(value => ({ ...value, [key]: event.target.value }))} />}</label>)}
+      {fields.map(key => <label key={key}>{receivableFilters && key === 'wallet_id' ? <span id={walletHelpID + '-label'}>{words[key]}</span> : words[key]}{receivableFilters && key === 'wallet_id' ?
+        <><input maxLength={200} value={draft[key] || ''} aria-labelledby={walletHelpID + '-label'} aria-describedby={walletHelpID} onChange={event => setDraft(value => ({ ...value, [key]: event.target.value }))} /><small id={walletHelpID}>{receivableFilters.help}</small></>
+        : receivableFilters && key === 'source_type' ? <select value={unsupportedSource ? draft[key] : sourceDisplayKey} onChange={event => setDraft(value => ({ ...value, [key]: event.target.value }))}>
+          <option value="">{receivableFilters.all}</option>
+          {unsupportedSource && <option disabled value={draft[key]}>{receivableFilters.unsupported}</option>}
+          {receivableSources.map(source => <option key={source} value={source}>{receivableFilters.types[source]}</option>)}
+        </select> : key === 'status' ? <select value={draft[key] || ''} onChange={event => setDraft(value => ({ ...value, [key]: event.target.value }))}><option value="">{words.allStatuses}</option>{statuses[kind].map(value => <option key={value} value={value}>{labelStatus(value)}</option>)}</select> : <input maxLength={200} step={key.startsWith('created_') ? '0.001' : undefined} type={key.startsWith('created_') ? 'datetime-local' : 'text'} value={draft[key] || ''} onChange={event => setDraft(value => ({ ...value, [key]: event.target.value }))} />}</label>)}
       <label>{words.limit}<select value={draft.limit} onChange={event => setDraft(value => ({ ...value, limit: event.target.value }))}>{['25', '50', '100', '200'].map(value => <option key={value}>{value}</option>)}</select></label><button>{words.search}</button>
     </form>{visible.data && <><p>{words.pageCount(visible.data.items.length)}</p>{table(visible.data.items, config.columns, config.id)}{visible.data.items.length === 0 && <p>{copy.empty}</p>}<nav><button disabled={!previous.length} onClick={() => { const values = [...previous], cursor = values.pop(); setPrevious(values); move({ ...current.query, cursor }); }}>{copy.previous}</button><button disabled={!visible.data.page.next_cursor} onClick={() => { setPrevious(value => [...value, current.query.cursor]); move({ ...current.query, cursor: visible.data.page.next_cursor }); }}>{copy.next}</button></nav></>}</>}
   </section>;
