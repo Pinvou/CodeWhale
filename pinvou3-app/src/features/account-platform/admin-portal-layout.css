@@ -377,3 +377,12 @@
 .ap-admin-unit-move .ap-org-move-preview code{white-space:normal;overflow-wrap:anywhere}
 .ap-admin-unit-move fieldset,.ap-admin-unit-move fieldset label{min-width:0}
 .ap-admin-unit-move fieldset select{width:100%;min-width:0;max-width:100%}
+
+.adm-restored-shell .adm-organization-lifecycle-tasks{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;margin:0 0 20px}
+.adm-restored-shell .adm-organization-lifecycle-task{display:grid;align-content:start;gap:12px;min-width:0;padding:16px;border:1px solid var(--adm-line);border-radius:12px;background:var(--adm-surface)}
+.adm-restored-shell .adm-organization-lifecycle-task h4,.adm-restored-shell .adm-organization-lifecycle-task p,.adm-restored-shell .adm-organization-lifecycle-task dl{margin:0;overflow-wrap:break-word}
+.adm-restored-shell .adm-organization-lifecycle-task dt{margin-top:10px;color:var(--adm-muted);font-size:12px}
+.adm-restored-shell .adm-organization-lifecycle-task dt:first-child{margin-top:0}
+.adm-restored-shell .adm-organization-lifecycle-task dd{margin:3px 0 0;line-height:1.55}
+.adm-restored-shell .adm-organization-lifecycle-action{justify-self:start;max-width:100%}
+@media(max-width:940px){.adm-restored-shell .adm-organization-lifecycle-tasks{grid-template-columns:minmax(0,1fr)}}
