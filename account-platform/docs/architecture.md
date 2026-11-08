@@ -11,7 +11,7 @@
 >
 > 文档版本：以本文件所在 Git 提交为准
 >
-> 目标需求：`requirements.md`、`role-system-design.md`
+> 目标需求：`requirements.md`、[role-system-design.md（历史原文）](https://github.com/Pinvou/pinvou3/blob/828242031c42911099792ec78c1f746ed8620c49/account-platform/docs/role-system-design.md)
 
 ## 1. 架构结论
 
@@ -110,7 +110,7 @@ flowchart LR
 ### 3.1 仓库交付形态
 
 - 仓库同时提供 Docker Compose 和 Helm Chart；它们是可部署模板，不证明任何环境已经部署，也不证明高可用、备份、RPO 或 RTO。
-- `mock-newapi` 和 `payment-simulator` 是 Compose 中的非生产测试支撑组件，不属于产品服务边界或生产逻辑拓扑；其隔离和替换决策见 `adr/ADR-007-payment-simulator.md`。
+- `mock-newapi` 和 `payment-simulator` 是 Compose 中的非生产测试支撑组件，不属于产品服务边界或生产逻辑拓扑；其隔离和替换决策见 [adr/ADR-007-payment-simulator.md（历史原文）](https://github.com/Pinvou/pinvou3/blob/828242031c42911099792ec78c1f746ed8620c49/account-platform/docs/adr/ADR-007-payment-simulator.md)。
 - Compose 包含上述测试支撑组件和可选真实 New API profile，供本地开发、合同测试、端到端验证和故障注入；生产 Helm 不部署这些工作负载。
 - 当前真实支付 Adapter 是新华三商城；其代码能力包括支付宝下单、查询/同步、支付回调和人工修复，不包含退款、主动关单或账单。非生产测试 Provider 提供的退款和账单能力不得归入新华三或生产能力。
 - 远程 Compose 把 `payment-simulator`、对应迁移和数据库初始化统一置于 `development-simulator` 显式开关后；Billing 对测试 Provider 只允许 `development/test` 环境，生产 Helm 仅配置正式 Adapter，且不包含 Simulator 工作负载或模拟器命名变量。
@@ -417,7 +417,7 @@ Token 仍有本地事件新增。例如，`MarkCommitted` 仍在结算事务中�
 |---|---|---|
 | 部署 | Helm 已具备多故障域调度、PDB、零不可用滚动、外部HA Redis/NATS边界及机器化故障验收；Compose仍是单机 | 未取得真实集群容量、选主及Pod/节点/区域故障证据，不得宣称生产HA或RPO/RTO完成 |
 | 注册 | 唯一值预约、持久恢复、Identity 关联查询、异步钱包任务、SLA、`REPAIR_REQUIRED` 和证明门禁补偿已闭环 | Identity 短期密码材料仍为单副本内存能力；生产运行和故障注入证据待部署补齐 |
-| 权限与审批 | 三类人类权限、角色真值表、对象作用域、独立授权版本、策略驱动审批、短期人类委托与精确工作负载权限以 `role-system-design.md` 为约束；APT-069–APT-082 的全部 CODE 任务已落地三类作用域、入口原子权限、可信恢复、签名委托消费、双主体审计、精确 `internal.*` 路由权限、权限/版本驱动界面及全 HTTP/任务/事件/回调/CLI 自动发布门禁；最后超级管理员保护、完整注销 Saga 和版本化审批聚合已有仓库实现 | 补生产等价安全恢复、撤权传播、工作负载轮换和审批故障演练 |
+| 权限与审批 | 三类人类权限、角色真值表、对象作用域、独立授权版本、策略驱动审批、短期人类委托与精确工作负载权限以 [role-system-design.md（历史原文）](https://github.com/Pinvou/pinvou3/blob/828242031c42911099792ec78c1f746ed8620c49/account-platform/docs/role-system-design.md) 为约束；APT-069–APT-082 的全部 CODE 任务已落地三类作用域、入口原子权限、可信恢复、签名委托消费、双主体审计、精确 `internal.*` 路由权限、权限/版本驱动界面及全 HTTP/任务/事件/回调/CLI 自动发布门禁；最后超级管理员保护、完整注销 Saga 和版本化审批聚合已有仓库实现 | 补生产等价安全恢复、撤权传播、工作负载轮换和审批故障演练 |
 | 模型调用 | 独立目录、稳定身份、不可变能力/目录版本、托管 Provisioning、上下文资格、版本化公式/价格、持久派发/重放/取消，以及用户、组织成员、组织、模型、路由和全局的 Hold 前原子准入均已闭环 | 补更多数据面协议和生产等价并发/故障注入证据 |
 | 权益 | BASE/BONUS 组成、组织购买、精确成员授予、生命周期、确定消费/到期、目标退款与拒付定向撤销、注销隔离/整笔剩余回收和守恒约束已实现；普通退款实现当前保持休眠 | 补普通退款产品级默认关闭门禁和生产等价并发压力证据 |
 | 支付 | 新华三声明下单、查询、支付回调与人工修复并采用查询降级对账；专用短期 Token 授权和回调公网适配层先持久化再异步归并，订单支持多支付流水，回调/查询/修复证据不可变归并，每笔成功流水独立履约或复核；`FAILED` 保守进入复核，当前 H3C 退款入口因 capability 不支持而隐藏 | 补独立于 Provider capability 的退款产品门禁、Provider 账单逐行证据归并和完整关单中间态；在生产等价环境验证真实商城回调突发、并发查询补偿与财务故障恢复 |
