@@ -7,7 +7,7 @@
 - **数据库策略元数据先行**：Account `approval_command_policies` 登记 `policy_version=1 / snapshot_schema_version=1 / APPROVAL_REQUIRED`，请求权限 `platform.billing.repairs.request`、审批权限 `platform.billing.repairs.approve`、风险类 `FINANCIAL_FACT_CHANGE`、一名非申请人审批、critical 字段 `target_id/resource_version/financial_snapshot/policy_version`、24 小时申请有效期、5 分钟执行窗口、执行身份 `billing-command-executor`（`migrations/account/000018_approval_commands.up.sql`）。Go `internal/platform/approvalpolicy/registry.go` 的可执行注册属于当前 F11 交付，不能算作设计冻结时已完成。
 - **静态不可执行**：不在 `executableApprovalCommands` 内，create/update/submit/APPROVE/Begin 均在领域调用前失败关闭。
 - **Billing 侧只有未激活行**：`('RECEIVABLE_WRITE_OFF',1,1,'INACTIVE',1)`（`migrations/billing/000054_approval_command_activations.up.sql`）；没有该命令的 handler、proof、executor、consumer durable 或恢复分类。
-- **当前交付与历史基线的区别**：当前合同位于 `contracts/openapi/receivable-write-off.json`；`internal/platform/approvalpolicy/registry.go` 与 `internal/account/approval_command_manifest.go` 注册本命令；Billing 投影及 `internal/platform/billinggovernance/client.go` 仅允许本命令 v1/s1 为 ACTIVE，其余尚未交付命令继续失败关闭。新增迁移仍默认 INACTIVE，代码具备能力不等于已生产激活。
+- **当前交付与历史基线的区别**：当前合同位于[应收核销 OpenAPI](../contracts/openapi/receivable-write-off.json)；[策略注册表](../internal/platform/approvalpolicy/registry.go)定义本命令，[闭合政策集校验](../internal/platform/approvalpolicy/manifest.go)绑定 Account 数据库政策，[Account 预检](../internal/account/approval_precheck.go)校验资源类型及 v1/s1 命令证明；Billing 投影及 `internal/platform/billinggovernance/client.go` 仅允许本命令 v1/s1 为 ACTIVE，其余尚未交付命令继续失败关闭。新增迁移仍默认 INACTIVE，代码具备能力不等于已生产激活。
 
 ## 2. 应收现状与不变量（事实）
 

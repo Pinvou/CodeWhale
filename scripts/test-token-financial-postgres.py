@@ -147,7 +147,7 @@ BILLING_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/billing"
 SCHEMA_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/billingschema"
 TOKEN_SCHEMA_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/tokenschema"
 TOKEN_SCHEMA_REQUIRED = {"TestManagementPublicMigrationInstallation"}
-SCHEMA_REQUIRED = {"TestLatePaymentQueryRegisteredIdentity", "TestReconciliationFairRetryRegisteredIdentity", "TestF09EntitlementPackageIndexPublicMigration", "TestTokenWalletReceiptSchemaPostgres", "TestLegacyEntitlementUpgradeAdmissionPostgres", "TestUsageWaiverHistoricalSchemaPostgres", "TestBillingOrdinaryReplayOriginalMigrationPostgres", "TestUnknownProviderEntryPublicMigrationPostgres", "TestLegacyExpiry025UpgradePreservesOriginalLedgerPostgres", "TestF04PublicTokenUserOwnerAuthorityAndDirectory", "TestManualRetentionHistoricalHardeningPostgres"}
+SCHEMA_REQUIRED = {"TestLatePaymentQueryRegisteredIdentity", "TestReconciliationFairRetryRegisteredIdentity", "TestF09EntitlementPackageIndexPublicMigration", "TestTokenWalletReceiptSchemaPostgres", "TestLegacyEntitlementUpgradeAdmissionPostgres", "TestUsageWaiverHistoricalSchemaPostgres", "TestBillingOrdinaryReplayOriginalMigrationPostgres", "TestUnknownProviderEntryPublicMigrationPostgres", "TestLegacyExpiry025UpgradePreservesOriginalLedgerPostgres", "TestF04PublicTokenUserOwnerAuthorityAndDirectory", "TestManualRetentionHistoricalHardeningPostgres", "TestBillingHistoricalCatalogRollbackPostgres"}
 OWNER_REQUIRED = {
     "TestPaymentActionAdmissionPostgres",
     "TestF06OrganizationWalletRequiresLifecycleEvidence",
@@ -273,6 +273,12 @@ BILLING_LEAF_REQUIRED = {
 }
 BILLING_CHILD_REQUIRED = RETAINED_REQUIRED - BILLING_LEAF_REQUIRED
 EXACT_REQUIRED_CHILDREN = {
+    "TestBillingHistoricalCatalogRollbackPostgres": {
+        f"version{version}/seeded={seeded}{suffix}"
+        for version in (35, 36, 37, 51)
+        for seeded in ("false", "true")
+        for suffix in ("", "/actual-cli")
+    },
     "TestExpiredHoldProofRetryDiagnosticsPostgres": {
         "quick-failure", "timeout", "cancel", "unavailable", "invalid-proof",
         "valid-proof", "persistence-failure", "operator",
