@@ -441,3 +441,15 @@
 .adm-restored-shell .adm-wallet-adjustment-snapshot dd{margin:2px 0 0;font-weight:650;overflow-wrap:break-word;overflow-wrap:anywhere}
 .adm-restored-shell .adm-wallet-adjustment-direction{font-weight:650;overflow-wrap:break-word;overflow-wrap:anywhere}
 .adm-shell.adm-restored-shell .adm-wallet-adjustment-form input:focus,.adm-shell.adm-restored-shell .adm-wallet-adjustment-form textarea:focus,.adm-shell.adm-restored-shell .adm-wallet-adjustment-form button:focus{outline:3px solid var(--adm-primary);outline-offset:2px}
+
+.adm-restored-shell .adm-billing-tasks{display:grid;gap:10px;margin:0 0 16px}
+.adm-restored-shell .adm-billing-task-group{display:grid;gap:5px;min-width:0;padding:10px 12px;border:1px solid var(--adm-line);border-radius:10px;background:var(--adm-surface)}
+.adm-restored-shell .adm-billing-task-group h4{margin:0;font-size:12px;font-weight:650;color:var(--adm-muted)}
+.adm-restored-shell .adm-billing-task-group .adm-tabs{width:auto;gap:0;margin:0;padding:3px;border:0;border-radius:0;box-shadow:none;overflow:visible;flex-wrap:wrap}
+.adm-restored-shell .adm-billing-task-group .adm-tabs button{min-width:0;max-width:calc(100% - 6px);margin:3px;white-space:normal;overflow-wrap:break-word;overflow-wrap:anywhere;text-align:start}
+.adm-shell.adm-restored-shell .adm-billing-task-group .adm-tabs button:focus{outline:3px solid var(--adm-primary);outline-offset:2px}
+@media(max-width:480px){
+  .adm-restored-shell .adm-billing-task-group .adm-tabs{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px}
+  .adm-restored-shell .adm-billing-task-group .adm-tabs button{width:100%;max-width:100%;margin:0}
+}
+@media(max-width:360px){.adm-restored-shell .adm-billing-task-group .adm-tabs{grid-template-columns:minmax(0,1fr)}}

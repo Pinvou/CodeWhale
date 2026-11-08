@@ -290,3 +290,7 @@ adminLayoutCopy.ja.walletAdjustmentForm = {
   submissionConfirmed: '調整の承認申請が確認されました。処理状況は承認センターで確認してください。', recoveryWallet: '元の申請のウォレット：',
   reasonHelp: '10 文字以上で入力してください。', send: '調整の承認を申請',
 };
+
+adminLayoutCopy.zh.billingTasks = { title: '账户与计费任务', accounts: '账户与记录', ledger: '账务处理', exceptions: '异常与修复', other: '其他任务' };
+adminLayoutCopy.en.billingTasks = { title: 'Billing tasks', accounts: 'Accounts and records', ledger: 'Ledger operations', exceptions: 'Exceptions and repairs', other: 'Other tasks' };
+adminLayoutCopy.ja.billingTasks = { title: 'アカウントと請求のタスク', accounts: '口座と記録', ledger: '台帳処理', exceptions: '例外と修復', other: 'その他のタスク' };
