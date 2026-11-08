@@ -5,10 +5,10 @@ import (
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/migrations"
 )
 
-const paymentCreditClosureFenceVersion int64 = 900015
+const paymentCreditClosureFenceVersion int64 = 900016
 const paymentCreditClosureFenceName = "payment_credit_closure_fence"
-const paymentCreditClosureFenceUpChecksum = "bcad7dc0e37298b45f4bd16cd356f1cd385a4500db867eb8016c7fbe9e33ac13"
-const paymentCreditClosureFenceDownChecksum = "f60abcb676fdeeba7e45553783a0fac99190b664fa8b208a6759ec7b6c6d0c39"
+const paymentCreditClosureFenceUpChecksum = "92b600b81e4fe589645fed6a0dbe4f4f857a1dc5b99d3de6be918caa742a5f90"
+const paymentCreditClosureFenceDownChecksum = "ad5a114ce0cf45145fdea4fedd0d2ca8bb151f876ba6061a1783b4b84aabccda"
 
 func validatePaymentCreditClosureFence(input []migrations.Migration) error {
 	found := false

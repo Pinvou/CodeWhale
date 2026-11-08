@@ -1,6 +1,6 @@
 DO $$ BEGIN
     IF session_user <> 'account_migrator' OR current_user <> 'account_service' THEN
-        RAISE EXCEPTION '900015 requires account_migrator with MIGRATION_ROLE account_service' USING ERRCODE='42501';
+        RAISE EXCEPTION '900016 requires account_migrator with MIGRATION_ROLE account_service' USING ERRCODE='42501';
     END IF;
 END $$;
 

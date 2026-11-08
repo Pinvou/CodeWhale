@@ -73,7 +73,7 @@ BEGIN
     END IF;
     RETURN NEW;
 END $$;
--- Install the closure-table trigger in 900015, after the optional historical
+-- Install the closure-table trigger in 900016, after the optional historical
 -- closure lineage. This ordinary migration must also upgrade databases that
 -- have never installed account_closure_requests.
 
@@ -87,7 +87,7 @@ BEGIN
 		RETURN NEW;
 END $$;
 -- The anonymized_at column is also introduced by the closure lineage. Its
--- subject cleanup trigger is installed together with the stage fence in 900015.
+-- subject cleanup trigger is installed together with the stage fence in 900016.
 
 -- Content-free clearance evidence is committed atomically with each purge.
 CREATE TABLE account_payment_credit_retention_batches (

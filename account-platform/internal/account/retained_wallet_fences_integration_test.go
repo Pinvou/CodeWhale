@@ -101,7 +101,6 @@ func (f *retainedWalletFenceFixture) repository(t *testing.T) *PostgresRepositor
 }
 
 func (f *retainedWalletFenceFixture) repositoryWithInitialStage(t *testing.T, initial func(context.Context, *pgx.Conn, []migrations.Migration) error) *PostgresRepository {
-	t.Helper()
 	return f.repositoryThroughVersion(t, 0, initial)
 }
 

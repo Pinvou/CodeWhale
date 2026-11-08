@@ -7,7 +7,7 @@ import (
 )
 
 const paymentCreditAdmissionVersion int64 = 95
-const paymentCreditAdmissionUpChecksum = "8be7d1c2b358612035707dbfd6c72ed5b174de716c64acd8b6866255bb954743"
+const paymentCreditAdmissionUpChecksum = "e86c64509388bb4257fc36d0d6acaed70627270c167409ffded4a8ec1f08bdb7"
 const paymentCreditAdmissionDownChecksum = "d75574c134ac440670ca70c90b38b379864717b1a484a5158798f5f146190e87"
 
 func validatePaymentCreditAdmissions(input []migrations.Migration) error {

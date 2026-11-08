@@ -103,7 +103,7 @@ func TestClosurePrivatePublicCombination(t *testing.T) {
 		for _, x := range am {
 			// The payment-credit closure trigger belongs to the optional closure
 			// lineage; its ordinary 000095 admission schema remains a predecessor.
-			if x.Version != 27 && x.Version != 28 && x.Version != 900005 && x.Version != 900015 {
+			if x.Version != 27 && x.Version != 28 && x.Version != 900005 && x.Version != 900016 {
 				oldAccount = append(oldAccount, x)
 			}
 		}
