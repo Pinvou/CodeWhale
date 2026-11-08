@@ -2,8 +2,9 @@
 
 Issue #1958 names 54 original test roots, including coordinator parents and
 their child-process roots, and retains the F18 continuous-PG requirement.
-The manifest therefore also includes F18's financial and role-cleanup roots:
-56 test identities, not independent business scenarios. `scripts/account-financial-families.json` records their
+The manifest also includes F18's financial and role-cleanup roots and the
+chargeback source-budget regression identified during review: 57 test identities,
+not independent business scenarios. `scripts/account-financial-families.json` records their
 reviewed case names and actual packages; the runner never learns a passing
 contract from its own output at runtime.
 
@@ -28,7 +29,7 @@ The additional entry has ten sequential phases:
 | F09 policy, prepare, replay, expiry, financial | Five separate coordinator invocations keep unique child streams. The original explicit test files remain; production files come from the declared Go toolchain's platform/tag selection. Child package identity is `command-line-arguments`. |
 | F18 hold recovery | Both original financial and role-cleanup roots require absent Billing actors; four financial and eight cleanup cases remain mandatory. CI uses the same admitted owners service, with `ci-owned` and same-backend identity verification. |
 | Cross-domain repairs | Five Account roots receive both Account and Billing URLs. The runner supplies the three original Billing actors; Account actors remain owned by each root. |
-| Retained Billing | Fifteen roots use the same three Billing actors and fresh leased UUID databases. |
+| Retained Billing | Sixteen roots use the same three Billing actors and fresh leased UUID databases, including all three chargeback source-budget outcomes (financial repair, confirmed chargeback and zero-effect dismissal). |
 
 Owner-only phases run before Billing actor creation. Creation records role OIDs
 and memberships inside its transaction; subsequent checks bind the same

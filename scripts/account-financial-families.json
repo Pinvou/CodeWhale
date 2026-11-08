@@ -3,6 +3,7 @@
   "issue_roots": [
     "TestChargebackFinancialRepairCrossDomainActivationPostgresIntegration",
     "TestChargebackFinancialRepairPostgresIntegration",
+    "TestChargebackFinancialRepairSourceBudgetPostgres",
     "TestChargebackFrozenExecutionPostgres",
     "TestEntitlementComponentCorrectionPreparePostgresIntegration",
     "TestEntitlementCorrectionExecuteAndConsumerReadPostgresIntegration",
@@ -500,6 +501,11 @@
           "operator-waits-for-real-financial-commit-and-receipt-replays"
         ],
         "TestChargebackFinancialRepairPostgresIntegration": [],
+        "TestChargebackFinancialRepairSourceBudgetPostgres": [
+          "financial-repair",
+          "confirmed-chargeback",
+          "dismissed-no-effect"
+        ],
         "TestChargebackFrozenExecutionPostgres": [
           "activation-version-receipt-and-order-summary",
           "actual-payment-origin-two-leg-reconciliation",

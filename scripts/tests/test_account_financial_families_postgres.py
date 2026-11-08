@@ -217,7 +217,7 @@ class FinancialFamiliesTests(unittest.TestCase):
 
     def test_real_manifest_keeps_complete_issue_scope_and_original_packages(self):
         manifest = RUNNER.load_manifest()
-        self.assertEqual(len(manifest["issue_roots"]), 56)
+        self.assertEqual(len(manifest["issue_roots"]), 57)
         self.assertEqual(len(manifest["phases"]), 10)
         self.assertEqual(set(manifest["existing_roots"]), {"TestF06Review5566377593PublicPostgres", "TestMemberQuotaBatchPersistedFactsAndFinancialReplay", "TestF06MemberQuotaRestoreUsesOrdinaryPackageExpiry", "TestRegistrationBonusEligibilityReadyAndLifetimePostgresIntegration", "TestRegistrationBonusEligibilityBlockedConsumesNewMobilesPostgresIntegration"})
         phases = {phase["id"]: phase for phase in manifest["phases"]}
@@ -237,6 +237,41 @@ class FinancialFamiliesTests(unittest.TestCase):
         self.assertEqual(set(bonus), {table + "/" + operation for table in ("registration_bonus_policy_versions", "registration_bonus_policy_commands", "registration_bonus_policy_audit", "registration_bonus_claims", "registration_bonus_receipts") for operation in ("UPDATE", "DELETE")})
         chargeback = phases["billing-families"]["roots"]["TestChargebackFrozenExecutionPostgres"]
         self.assertIn("actual-payment-origin-two-leg-reconciliation", chargeback)
+
+    def test_chargeback_source_budget_requires_selection_and_all_outcomes(self):
+        manifest = RUNNER.load_manifest()
+        root = "TestChargebackFinancialRepairSourceBudgetPostgres"
+        children = ["financial-repair", "confirmed-chargeback", "dismissed-no-effect"]
+        self.assertIn(root, manifest["issue_roots"])
+        phase = next(item for item in manifest["phases"] if item["id"] == "billing-families")
+        self.assertEqual(phase["roots"][root], children)
+        self.assertEqual(phase["target"], "./internal/billing")
+        self.assertEqual(phase["mode"], "retained")
+        self.assertEqual(phase["inputs"], ["billing"])
+        stream = self.stream(phase["roots"], phase["package"])
+        events = [json.loads(line) for line in stream.splitlines()]
+        variants = [("valid", events)]
+        for child in children:
+            name = root + "/" + child
+            variants.append(("missing-" + child, [event for event in events if event.get("Test") != name]))
+            for action in ("skip", "fail"):
+                variants.append((action + "-" + child, [
+                    {**event, "Action": action} if event.get("Test") == name and event["Action"] == "pass" else event
+                    for event in events
+                ]))
+        variants.append(("missing-root", [event for event in events if event.get("Test", "").split("/", 1)[0] != root]))
+        for kind, candidate in variants:
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as temporary:
+                def run(argv, **options):
+                    self.assertIn(root, argv[argv.index("-run") + 1])
+                    self.assertEqual(argv[-1], "./internal/billing")
+                    return SimpleNamespace(returncode=0, stdout="\n".join(json.dumps(event) for event in candidate), stderr="")
+                with patch.object(RUNNER.subprocess, "run", side_effect=run), contextlib.redirect_stdout(io.StringIO()):
+                    if kind == "valid":
+                        RUNNER.run_phase("owned-url", "/declared/go", phase, Path(temporary))
+                    else:
+                        with self.assertRaises(RuntimeError):
+                            RUNNER.run_phase("owned-url", "/declared/go", phase, Path(temporary))
 
     def test_f18_profiles_use_explicit_native_or_verified_ci_inputs(self):
         phase = next(item for item in RUNNER.load_manifest()["phases"] if item["id"] == "f18-hold-recovery")
