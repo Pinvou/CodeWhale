@@ -100,7 +100,9 @@ func (f *retainedWalletFenceFixture) repository(t *testing.T) *PostgresRepositor
 	return f.repositoryWithInitialStage(t, nil)
 }
 
-func (f *retainedWalletFenceFixture) repositoryWithInitialStage(t *testing.T, initial func(context.Context, *pgx.Conn, []migrations.Migration) error) *PostgresRepository {
+// Ordinary callers retain the complete current schema. Only an explicit
+// historical migration contract may pin the original public prefix.
+func (f *retainedWalletFenceFixture) repositoryWithInitialStage(t *testing.T, initial func(context.Context, *pgx.Conn, []migrations.Migration) error, throughVersion ...int64) *PostgresRepository {
 	t.Helper()
 	ctx := f.ctx
 	name := "f01_wallet_fence_" + strings.ReplaceAll(uuid.NewString(), "-", "")
@@ -147,6 +149,22 @@ func (f *retainedWalletFenceFixture) repositoryWithInitialStage(t *testing.T, in
 	installed, err := migrations.Load("../../migrations/account")
 	if err != nil {
 		t.Fatal(err)
+	}
+	if len(throughVersion) > 1 {
+		t.Fatal("one exact historical migration boundary is required")
+	}
+	if len(throughVersion) == 1 {
+		boundary := -1
+		for index, migration := range installed {
+			if migration.Version == throughVersion[0] {
+				boundary = index
+				break
+			}
+		}
+		if boundary < 0 {
+			t.Fatal("historical migration boundary is not installed input")
+		}
+		installed = installed[:boundary+1]
 	}
 	if initial != nil {
 		if err = initial(ctx, connection, installed); err != nil {

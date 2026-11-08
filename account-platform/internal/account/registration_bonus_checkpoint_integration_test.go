@@ -16,11 +16,28 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// The first page commits through the real public schema and account_service.
+const registrationBonusCheckpointMigrationVersion int64 = 900014
+
+// These cases test the published 900014 backfill and rollback contract. Later
+// unrelated migrations must not silently replace that historical DownOne target.
+func registrationBonusCheckpointMigrations() ([]migrations.Migration, error) {
+	loaded, err := migrations.Load("../../migrations/account")
+	if err != nil {
+		return nil, err
+	}
+	for index, migration := range loaded {
+		if migration.Version == registrationBonusCheckpointMigrationVersion {
+			return loaded[:index+1], nil
+		}
+	}
+	return nil, errors.New("registration bonus checkpoint migration 900014 is required")
+}
+
+// The first page commits through the real public prefix and account_service.
 // A fixture trigger interrupts the next page, without guessing a timing window.
 func registrationBonusCheckpoint(t *testing.T) (*PostgresRepository, time.Time) {
 	t.Helper()
-	r := retainedWalletFenceActors(t).repository(t)
+	r := retainedWalletFenceActors(t).repositoryWithInitialStage(t, nil, registrationBonusCheckpointMigrationVersion)
 	ctx := context.Background()
 	now := time.Now().UTC().Truncate(time.Microsecond)
 	r.now = func() time.Time { return now }
@@ -172,7 +189,7 @@ func TestRegistrationBonusCheckpointForeignFactsPostgresIntegration(t *testing.T
 			if bound {
 				r, _ = registrationBonusCheckpoint(t)
 			} else {
-				r = retainedWalletFenceActors(t).repository(t)
+				r = retainedWalletFenceActors(t).repositoryWithInitialStage(t, nil, registrationBonusCheckpointMigrationVersion)
 				if err := r.ConfigureRegistrationBonusFingerprint("checkpoint-key", bytes.Repeat([]byte{0x51}, 32)); err != nil {
 					t.Fatal(err)
 				}
@@ -232,7 +249,7 @@ func TestRegistrationBonusCheckpointGuardsPostgresIntegration(t *testing.T) {
 		}
 	}
 	connection := registrationBonusCheckpointMigrator(t, r)
-	loaded, err := migrations.Load("../../migrations/account")
+	loaded, err := registrationBonusCheckpointMigrations()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -267,7 +284,7 @@ func TestRegistrationBonusCheckpointMigrationPostgresIntegration(t *testing.T) {
 	r := f.repositoryWithInitialStage(t, func(ctx context.Context, connection *pgx.Conn, input []migrations.Migration) error {
 		var previous []migrations.Migration
 		for _, migration := range input {
-			if migration.Version != 900014 {
+			if migration.Version != registrationBonusCheckpointMigrationVersion {
 				previous = append(previous, migration)
 			}
 		}
@@ -282,10 +299,10 @@ func TestRegistrationBonusCheckpointMigrationPostgresIntegration(t *testing.T) {
 			t.Fatal("published migration87 identity changed")
 		}
 		return nil
-	})
+	}, registrationBonusCheckpointMigrationVersion)
 	ctx := context.Background()
 	connection := registrationBonusCheckpointMigrator(t, r)
-	input, err := migrations.Load("../../migrations/account")
+	input, err := registrationBonusCheckpointMigrations()
 	if err != nil {
 		t.Fatal(err)
 	}
