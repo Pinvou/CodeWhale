@@ -31,6 +31,8 @@ export function AdminFinanceReadWorkspace({ kind, client, language, route, onVie
   const current = readFinanceListRoute(kind, route.search), signature = JSON.stringify(current);
   const walletHelpID = useId();
   const receivableFilters = kind === 'receivables' ? words.receivableFilter : null;
+  const timeWords = kind === 'receivables' ? words.receivableTime : null;
+  const timeHelpID = useId();
   const [draft, setDraft] = useState(current.query), [state, setState] = useState({ owner: null, signature: '', data: null, error: null }), [revision, setRevision] = useState(0), [previous, setPrevious] = useState([]);
   const sourceDisplayKey = receivableFilters ? receivableSourceDisplayKey(draft.source_type || '') : '';
   const unsupportedSource = Boolean(sourceDisplayKey) && !receivableSources.includes(sourceDisplayKey);
@@ -64,6 +66,26 @@ export function AdminFinanceReadWorkspace({ kind, client, language, route, onVie
   const labelStatus = value => words[value] || accountLayoutCopy[language].statuses[value] || value;
   const cell = (key, value) => value == null ? '—' : key.endsWith('_microcredits') ? formatBalance(value, language) : key === 'amount_fen' ? formatFen(value, language) : key.endsWith('_at') ? Number.isFinite(Date.parse(value)) ? new Date(value).toLocaleString({ zh: 'zh-CN', en: 'en-US', ja: 'ja-JP' }[language]) : '—' : ['status', 'operation_type'].includes(key) ? labelStatus(value) : String(value);
   const move = (query, selectedID = null, mode = 'push') => { setRevision(value => value + 1); route.navigate(route.section, financeListRouteUpdates(kind, query, selectedID, current.query), mode); };
+  const dateInputValue = value => value?.endsWith('Z') ? localFinanceDate(value) : value || '';
+  const fillDay = offset => {
+    const now = new Date();
+    const day = shift => new Date(now.getFullYear(), now.getMonth(), now.getDate() + offset + shift);
+    // An explicit preset replaces the old instant even if both display the same local time.
+    setDraft(value => ({ ...value, created_from: day(0).toISOString(), created_to: day(1).toISOString() }));
+  };
+  const timeRange = timeWords && <fieldset className="adm-receivable-time-range" aria-describedby={timeHelpID}>
+    <legend>{timeWords.legend}</legend>
+    <small id={timeHelpID}>{timeWords.zone.replace('{zone}', () => Intl.DateTimeFormat().resolvedOptions().timeZone || timeWords.local)}</small>
+    <div className="adm-receivable-time-fields">
+      {['created_from', 'created_to'].map(key => <label key={key}>{key === 'created_from' ? timeWords.from : timeWords.to}
+        <input maxLength={200} step="0.001" type="datetime-local" value={dateInputValue(draft[key])} onChange={event => setDraft(value => ({ ...value, [key]: event.target.value }))} />
+      </label>)}
+    </div>
+    <div className="adm-receivable-time-presets">
+      <button type="button" onClick={() => fillDay(0)}>{timeWords.today}</button>
+      <button type="button" onClick={() => fillDay(-1)}>{timeWords.yesterday}</button>
+    </div>
+  </fieldset>;
   const refresh = () => { if (visible.error?.status === 410 || visible.error?.status === 400 && current.query.cursor) move({ ...current.query, cursor: '' }, current.selectedID || null, 'replace'); else setRevision(value => value + 1); };
   const table = (items, columns, identify) => <div className="adm-table-wrap"><table className="adm-table"><thead><tr>{columns.map(key => <th key={key}>{words[key] || copy[key]}</th>)}{identify && <th>{copy.details}</th>}</tr></thead><tbody>{items.map((item, index) => <tr key={identify ? financeReadIdentity(kind, item) : index}>{columns.map(key => <td key={key} data-label={words[key] || copy[key]}>{cell(key, item[key])}</td>)}{identify && <td><button onClick={() => move(current.query, financeReadIdentity(kind, item))}>{copy.details}</button></td>}</tr>)}</tbody></table></div>;
   return <section className="adm-finance-read-view" aria-label={words[kind]}><header><h3>{words[kind]}</h3><button onClick={refresh}>{copy.refresh}</button></header>
@@ -74,7 +96,7 @@ export function AdminFinanceReadWorkspace({ kind, client, language, route, onVie
       {visible.data.allocations && table(visible.data.allocations, ['amount_microcredits', 'created_at'])}
       {kind === 'adjustments' && onViewApproval && route.available.includes('approvals') && <button onClick={() => onViewApproval(null, { approval_command_type: 'WALLET_ADJUSTMENT', approval_target: current.selectedID })}>{copy.approvals}</button>}
     </>}</> : <><form className="adm-filter-row" onSubmit={event => { event.preventDefault(); move({ ...draft, cursor: '' }); }}>
-      {fields.map(key => <label key={key}>{receivableFilters && key === 'wallet_id' ? <span id={walletHelpID + '-label'}>{words[key]}</span> : words[key]}{receivableFilters && key === 'wallet_id' ?
+      {fields.map(key => timeWords && key === 'created_to' ? null : timeWords && key === 'created_from' ? <React.Fragment key={key}>{timeRange}</React.Fragment> : <label key={key}>{receivableFilters && key === 'wallet_id' ? <span id={walletHelpID + '-label'}>{words[key]}</span> : words[key]}{receivableFilters && key === 'wallet_id' ?
         <><input maxLength={200} value={draft[key] || ''} aria-labelledby={walletHelpID + '-label'} aria-describedby={walletHelpID} onChange={event => setDraft(value => ({ ...value, [key]: event.target.value }))} /><small id={walletHelpID}>{receivableFilters.help}</small></>
         : receivableFilters && key === 'source_type' ? <select value={unsupportedSource ? draft[key] : sourceDisplayKey} onChange={event => setDraft(value => ({ ...value, [key]: event.target.value }))}>
           <option value="">{receivableFilters.all}</option>
