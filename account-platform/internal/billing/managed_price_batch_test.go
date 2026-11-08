@@ -80,7 +80,10 @@ func testManagedPriceBatchReadContract(t *testing.T) {
 	for index := range 201 {
 		command.Units = nil
 		for unit := 1; unit <= 3; unit++ {
-			value := int64(index * unit) // Includes explicit zero; not nil/inheritance.
+			value := int64(index * unit)
+			if unit == 2 {
+				value = 0
+			} // Every returned page must exercise a real zero, distinct from inheritance.
 			command.Units = append(command.Units, PriceUnitConfiguration{UnitDefinitionID: uuid.MustParse(fmt.Sprintf("00000000-0000-7000-8100-%012d", unit)), ConfigType: "FIXED_PRICE", FixedPricePerDenominator: &value})
 		}
 		item, err := repo.CreatePriceDraft(ctx, command, actor, uuid.NewString())
@@ -120,10 +123,19 @@ func testManagedPriceBatchReadContract(t *testing.T) {
 		if len(items) != want {
 			t.Fatalf("got %d price rows, want %d", len(items), want)
 		}
+		zeroObserved := false
 		for _, item := range items {
 			if !reflect.DeepEqual(item, canonical[item.PriceVersionID]) {
 				t.Fatalf("batch changed the unchanged single-read contract for %s", item.PriceVersionID)
 			}
+			for _, unit := range item.Units {
+				if unit.ConfigType == "FIXED_PRICE" && unit.FixedPricePerDenominator != nil && *unit.FixedPricePerDenominator == 0 {
+					zeroObserved = true
+				}
+			}
+		}
+		if !zeroObserved {
+			t.Fatal("returned page did not actually exercise an explicit zero-priced unit")
 		}
 	}
 	space := ManagedPriceSpaceQuery{ScopeType: "GLOBAL", ProtocolCode: "CHAT", FormulaVersionID: chatFormulaVersionID, CreditUnit: "MICROCREDIT"}
@@ -161,6 +173,19 @@ func testManagedPriceBatchReadContract(t *testing.T) {
 			}
 		})
 	}
+	t.Run("model-zero-and-inherited-units", func(t *testing.T) {
+		trace.reset()
+		query := space
+		query.ScopeType, query.ScopeID = "MODEL", &model
+		etag, items, more, err := repo.ReadManagedPriceSpace(ctx, query, 200)
+		if err != nil || etag != 1 || more || trace.count() != 4 {
+			t.Fatal("model namespace read changed", etag, more, err, trace.count())
+		}
+		check(t, items, 1)
+		if len(items[0].Units) != 3 || items[0].Units[0].ConfigType != "INHERIT_GLOBAL" || items[0].Units[0].FixedPricePerDenominator != nil || items[0].Units[1].ConfigType != "FIXED_PRICE" || items[0].Units[1].FixedPricePerDenominator == nil || *items[0].Units[1].FixedPricePerDenominator != 0 {
+			t.Fatal("model batch confused inherited nil and explicit fixed zero")
+		}
+	})
 	t.Run("empty-page", func(t *testing.T) {
 		trace.reset()
 		page, err := repo.ListManagedPrices(ctx, 200, encodeManagedPriceCursor(fixed.Add(-time.Hour), uuid.New(), 200))

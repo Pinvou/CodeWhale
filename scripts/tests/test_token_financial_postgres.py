@@ -631,6 +631,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
             "bounded-batch-queries",
             *{f"bounded-batch-queries/{kind}-{size}" for kind in ("list", "namespace") for size in (1, 100, 200)},
             "bounded-batch-queries/empty-page", "bounded-batch-queries/absent-namespace",
+            "bounded-batch-queries/model-zero-and-inherited-units",
             "bounded-batch-queries/snapshot-and-next-read",
             "bounded-batch-queries/database-faults-and-recovery",
             *{f"bounded-batch-queries/database-faults-and-recovery/{table}" for table in ("pricing_versions", "pricing_version_unit_configs", "pricing_space_versions")},
