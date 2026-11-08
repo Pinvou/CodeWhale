@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useId, useRef, useState } from 'react';
 import {
   financialRepairCommandTypes, financialRepairInputs, financialRepairPrecheckBody,
   financialRepairProjectionRows, financialRepairDraftFromProjection,
@@ -28,9 +28,13 @@ export function AdminReceivableWriteOffForm({ client, copy, onCreated, owner = '
   currentClient.current = client;
   const operation = useFinanceOperation(owner, operationCopy, client, `financial-repair:${commandTypes.join(':')}`);
   const writeOff = commandType === 'RECEIVABLE_WRITE_OFF';
+  const targetWords = copy.receivableTarget;
+  const targetFieldsID = useId();
   const locked = busy !== '' || operation.busy || operation.unknown;
   const pending = operation.pendingFacts;
   const displayedFacts = pending ? financialRepairProjectionRows(pending.projection) : facts;
+  const displayedProjection = pending?.projection || projection;
+  const refreshingTarget = writeOff && busy === 'facts' && Boolean(displayedFacts);
 
   useEffect(() => {
     mounted.current = true;
@@ -45,7 +49,8 @@ export function AdminReceivableWriteOffForm({ client, copy, onCreated, owner = '
   }, [client]);
 
   const fields = financialRepairInputs[commandType];
-  const label = (field) => (field.key === 'target_resource_id' ? copy.targets[commandType] : copy.fields[field.key]);
+  const targetField = (key) => writeOff ? targetWords.fields[key] : null;
+  const label = (field) => targetField(field.key)?.label || (field.key === 'target_resource_id' ? copy.targets[commandType] : copy.fields[field.key]);
   const setValue = (key, value) => {
     factsRevision.current += 1;
     setBusy((current) => current === 'facts' ? '' : current);
@@ -98,7 +103,8 @@ export function AdminReceivableWriteOffForm({ client, copy, onCreated, owner = '
       setProjection(null);
       setFacts(null);
       if (error?.code === 'RECENT_AUTHENTICATION_REQUIRED') setNeedsAuthentication(true);
-      setFailure(error?.code === 'APPROVAL_PRECHECK_UNAVAILABLE' ? copy.factsUnavailable : copy.factsFailed);
+      const feedback = error?.code === 'APPROVAL_PRECHECK_UNAVAILABLE' ? 'factsUnavailable' : 'factsFailed';
+      setFailure(writeOff ? { feedback } : copy[feedback]);
     } finally {
       if (live()) setBusy('');
     }
@@ -159,26 +165,39 @@ export function AdminReceivableWriteOffForm({ client, copy, onCreated, owner = '
     {writeOff && operation.error && <p role="alert">{operation.error}</p>}
     {needsAuthentication && <div className="adm-writeoff-reauthentication"><p>{copy.writeOffRecentAuthenticationRequired}</p><button type="button" disabled={busy !== '' || operation.busy} onClick={() => client.reauthenticate('/admin.html')}>{copy.reauthenticate}</button></div>}
     <form className="adm-financial-repair-target" onSubmit={readFacts}>
+      {writeOff && <p className="adm-writeoff-target-intro">{targetWords.intro}</p>}
       <label>{copy.command}
         <select disabled={writeOff && locked} value={commandType} onChange={(event) => changeCommand(event.target.value)}>
           {commandTypes.map((command) => <option key={command} value={command}>{command}</option>)}
         </select>
       </label>
-      {fields.map((field) => <label key={field.key}>{label(field)}
-        <input disabled={writeOff && locked} required value={pending ? String(field.key === 'target_resource_id' ? pending.draft.target_resource_id : field.key === 'expected_version' ? pending.draft.normalized_command.expected_receivable_version : pending.draft.normalized_command[field.key]) : values[field.key] || ''} inputMode={field.kind === 'integer' ? 'numeric' : 'text'}
-          onChange={(event) => setValue(field.key, event.target.value)} />
-      </label>)}
+      {fields.map((field) => {
+        const guidance = targetField(field.key);
+        const fieldID = guidance ? targetFieldsID + '-input-' + field.key : undefined;
+        const helpID = guidance ? targetFieldsID + '-' + field.key : undefined;
+        const control = <input id={fieldID} disabled={writeOff && locked} required value={pending ? String(field.key === 'target_resource_id' ? pending.draft.target_resource_id : field.key === 'expected_version' ? pending.draft.normalized_command.expected_receivable_version : pending.draft.normalized_command[field.key]) : values[field.key] || ''} inputMode={field.kind === 'integer' ? 'numeric' : 'text'}
+          aria-describedby={helpID} onChange={(event) => setValue(field.key, event.target.value)} />;
+        if (!guidance) return <label key={field.key}>{label(field)}{control}</label>;
+        return <div key={field.key} className={field.key === 'expected_version' ? 'adm-writeoff-target-field adm-writeoff-version-field' : 'adm-writeoff-target-field'}>
+          <label htmlFor={fieldID}>{label(field)}</label>{control}<small id={helpID}>{guidance.help}</small>
+        </div>;
+      })}
       <button type="submit" disabled={locked}>{busy === 'facts' ? copy.reading : copy.readFacts}</button>
     </form>
-    {failure && <p role="alert">{failure}</p>}
+    {failure && <p role="alert">{failure.feedback ? copy[failure.feedback] : failure}{failure.feedback && !operation.unknown && <> {targetWords.recheck}</>}</p>}
     {created && <p role="status">{copy.createdHint} <code>{created}</code></p>}
-    {displayedFacts && <div className="adm-financial-repair-facts">
+    {refreshingTarget && <p role="status">{copy.reading}</p>}
+    {displayedFacts && !refreshingTarget && <div className="adm-financial-repair-facts">
       <h4>{copy.frozenFacts}</h4>
+      {writeOff && displayedProjection && <dl className="adm-writeoff-confirmed-target">
+        <div><dt>{targetWords.confirmed}</dt><dd><code>{displayedProjection.target_resource_id}</code></dd></div>
+        <div><dt>{targetWords.version}</dt><dd>{String(displayedProjection.critical_resource_versions.receivable_version)}</dd></div>
+      </dl>}
       <dl>{displayedFacts.rows.map((row) => <div key={row.key}><dt>{copy.fields[row.key] || row.key}</dt><dd><code>{row.value}</code></dd></div>)}</dl>
       <details><summary>{copy.criticalFacts}</summary><pre>{displayedFacts.critical}</pre></details>
       <details><summary>{copy.financialFacts}</summary><pre>{displayedFacts.financial}</pre></details>
     </div>}
-    {(projection || writeOff && operation.unknown) && <form className="adm-financial-repair-draft" onSubmit={createDraft}>
+    {(projection || writeOff && operation.unknown) && !refreshingTarget && <form className="adm-financial-repair-draft" onSubmit={createDraft}>
       <label>{copy.reason}<textarea disabled={writeOff && locked} required minLength="10" maxLength="2000" value={pending?.draft.reason ?? reason} onChange={(event) => setReason(event.target.value)} /></label>
       <small>{copy.reasonHint}</small>
       <label>{copy.requestKey}<input disabled={writeOff && locked} required value={pending?.draft.idempotency_key?.slice('approval:'.length) ?? requestKey} onChange={(event) => setRequestKey(event.target.value)} /></label>

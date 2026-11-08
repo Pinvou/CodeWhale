@@ -514,3 +514,19 @@ ledgerRepairCopy.ja.ledgerImpact = {
 ledgerRepairCopy.zh.ledgerWorkflow = { title: '财务修复步骤', steps: ["核对修复目标","读取快照并核对影响","创建审批草稿"], phaseReading: "正在读取快照", phaseReview: "可核对影响", approvalNext: "草稿创建成功后，在审批中心继续处理。", load: '读取服务端快照', loading: '正在读取服务端快照…' };
 ledgerRepairCopy.en.ledgerWorkflow = { title: 'Financial repair steps', steps: ["Identify the target","Read the snapshot and check the impact","Create approval draft"], phaseReading: "Reading the snapshot", phaseReview: "Ready to check the impact", approvalNext: "After the draft is created, continue in the Approval Center.", load: 'Read server snapshot', loading: 'Reading server snapshot…' };
 ledgerRepairCopy.ja.ledgerWorkflow = { title: '財務修復の手順', steps: ["修復対象を確認","スナップショットを取得して影響を確認","承認の下書きを作成"], phaseReading: "スナップショットを取得中", phaseReview: "影響を確認できます", approvalNext: "下書きの作成後は承認センターで手続きを続けます。", load: 'サーバーのスナップショットを取得', loading: 'サーバーのスナップショットを取得中…' };
+
+ledgerRepairCopy.zh.receivableTarget = {
+  intro: '用同一条应收记录的完整 ID 和当前版本核对核销对象。版本用于检测记录变化。',
+  fields: { target_resource_id: { label: '待核销应收 ID', help: '输入要核销的那条应收记录。' }, expected_version: { label: '记录版本（核对用）', help: '输入已从获准的账务记录核实的当前版本。本页不会自动填入版本。' } },
+  confirmed: '快照对应的应收记录', version: '快照记录版本', recheck: '请核对原应收记录的 ID 和当前版本，再重新读取。',
+};
+ledgerRepairCopy.en.receivableTarget = {
+  intro: 'Verify the write-off target using the full ID and current version of the same receivable. The version detects changes to the record.',
+  fields: { target_resource_id: { label: 'Receivable ID to write off', help: 'Enter the ID of the exact receivable record.' }, expected_version: { label: 'Record version for verification', help: 'Enter the current version you verified from an authorized financial record. This form does not fill it in automatically.' } },
+  confirmed: 'Receivable in this snapshot', version: 'Record version in this snapshot', recheck: 'Check the ID and current version of the original receivable, then read again.',
+};
+ledgerRepairCopy.ja.receivableTarget = {
+  intro: '同じ未収金の完全な ID と現在の版で対象を確認します。版は記録の変更を検出するために使います。',
+  fields: { target_resource_id: { label: '償却する未収金の ID', help: '償却対象の未収金記録の ID を入力してください。' }, expected_version: { label: '記録の版（確認用）', help: '参照権限のある会計記録で確認した現在の版を入力してください。このフォームには自動入力されません。' } },
+  confirmed: 'スナップショットの未収金', version: 'スナップショットの記録の版', recheck: '元の未収金の ID と現在の版を確認してから、再度取得してください。',
+};
