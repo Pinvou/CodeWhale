@@ -147,7 +147,7 @@ impl DesktopRemoteActionState {
                     request_id: Some(entry.request_id.clone()),
                 });
             }
-            if operation.starts_with("attachment_") {
+            if matches!(operation, "attachment_begin" | "attachment_chunk") {
                 return Err(ActionIdentityError {
                     code: "result_unknown",
                     request_id: Some(entry.request_id.clone()),
@@ -724,6 +724,32 @@ mod identity_tests {
             ),
             Err(ActionIdentityError { code: "result_unknown", request_id: Some(ref id) }) if id == "first"
         ));
+        // Cleanup remains reconcilable; it cannot create another attachment.
+        let abort = state
+            .reserve_identity(
+                "local",
+                "remote",
+                &live(),
+                "attachment_abort",
+                &json!({"task_id":"task","transfer_id":"transfer"}),
+                "abort-original",
+            )
+            .unwrap();
+        abort.mark_dispatched();
+        drop(abort);
+        let retry = state
+            .reserve_identity(
+                "local",
+                "remote",
+                &live(),
+                "attachment_abort",
+                &json!({"task_id":"task","transfer_id":"transfer"}),
+                "abort-new-renderer",
+            )
+            .unwrap();
+        assert_eq!(retry.request_id, "abort-original");
+        retry.settle(true);
+        drop(retry);
         state.clear_all();
         let entry = state
             .reserve_identity(
