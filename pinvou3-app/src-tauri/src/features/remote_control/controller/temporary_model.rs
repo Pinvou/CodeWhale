@@ -174,7 +174,7 @@ impl fmt::Debug for ExportRoute {
             .field("display_name", &self.display_name)
             .field("preset", &self.preset)
             .field("wire_api", &self.wire_api)
-            .field("base_url", &self.base_url)
+            .field("base_url", &self.redacted_base_url())
             .field("model", &self.model)
             .field("secret", &"[REDACTED]")
             .finish()
@@ -182,6 +182,21 @@ impl fmt::Debug for ExportRoute {
 }
 
 impl ExportRoute {
+    fn redacted_base_url(&self) -> String {
+        let Ok(mut url) = reqwest::Url::parse(&self.base_url) else {
+            return "[REDACTED]".into();
+        };
+        if !matches!(url.scheme(), "https" | "http") || url.host_str().is_none() {
+            return "[REDACTED]".into();
+        }
+        if url.set_username("").is_err() || url.set_password(None).is_err() {
+            return "[REDACTED]".into();
+        }
+        url.set_query(None);
+        url.set_fragment(None);
+        url.to_string()
+    }
+
     fn to_runtime_model(&self, runtime_id: String) -> Result<SavedModel> {
         // Defense in depth: even internal callers must not materialize a route
         // whose effective protocol is outside the transported v1 contract.
@@ -327,6 +342,7 @@ impl ExportRoute {
 
     fn to_redacted_value(&self) -> Value {
         let mut value = self.to_wire_value();
+        value["base_url"] = json!(self.redacted_base_url());
         value["has_credential"] = json!(true);
         value
     }
@@ -1259,6 +1275,110 @@ mod tests {
             "SensitiveString([REDACTED])"
         );
         assert_eq!(format!("{}", package.primary.secret), "[REDACTED]");
+    }
+
+    #[test]
+    fn route_summary_and_debug_strip_url_authentication_for_primary_and_vision() {
+        let mut exported = package("sk-test-only");
+        let raw = "https://fixture-user:fixture-password@models.example.test:8443/v1?api_key=fixture-query#fixture-fragment";
+        exported.primary.base_url = raw.into();
+        exported.vision_fallback = Some(route(raw, "openai", "sk-vision-test-only"));
+        let summary = exported.to_redacted_value();
+        assert_eq!(
+            summary["primary"]["base_url"],
+            "https://models.example.test:8443/v1"
+        );
+        assert_eq!(
+            summary["vision_fallback"]["base_url"],
+            "https://models.example.test:8443/v1"
+        );
+        for rendered in [summary.to_string(), format!("{exported:?}")] {
+            for secret in [
+                "fixture-user",
+                "fixture-password",
+                "fixture-query",
+                "fixture-fragment",
+            ] {
+                assert!(
+                    !rendered.contains(secret),
+                    "URL authentication must not reach summaries or Debug"
+                );
+            }
+        }
+        assert_eq!(exported.primary.base_url, raw);
+        assert_eq!(exported.to_wire_value()["primary"]["base_url"], raw);
+        assert_eq!(
+            exported.to_wire_value()["vision_fallback"]["route"]["base_url"],
+            raw
+        );
+    }
+
+    #[test]
+    fn url_summary_fails_closed_without_changing_valid_runtime_routes() {
+        let mut exported = package("sk-test-only");
+        for (raw, display) in [
+            (
+                "https://models.example.test/v1",
+                "https://models.example.test/v1",
+            ),
+            (
+                "https://models.example.test/v1?fixture-query",
+                "https://models.example.test/v1",
+            ),
+            (
+                "https://1.1.1.1:8443/v1?fixture-query",
+                "https://1.1.1.1:8443/v1",
+            ),
+        ] {
+            exported.primary.base_url = raw.into();
+            assert_eq!(exported.primary.to_redacted_value()["base_url"], display);
+            assert_eq!(
+                exported
+                    .primary
+                    .to_runtime_model("frozen-route".into())
+                    .unwrap()
+                    .base_url,
+                raw
+            );
+            assert_eq!(exported.to_wire_value()["primary"]["base_url"], raw);
+        }
+        // Diagnostic projection must not widen the frozen runtime URL contract.
+        for (raw, display) in [
+            (
+                "https://models.example.test/v1?fixture-query#fixture-fragment",
+                "https://models.example.test/v1",
+            ),
+            (
+                "https://[2606:4700:4700::1111]:8443/v1?fixture-query",
+                "https://[2606:4700:4700::1111]:8443/v1",
+            ),
+        ] {
+            exported.primary.base_url = raw.into();
+            assert_eq!(exported.primary.to_redacted_value()["base_url"], display);
+            assert_eq!(
+                exported
+                    .primary
+                    .to_runtime_model("frozen-route".into())
+                    .unwrap_err()
+                    .code,
+                "model_endpoint_invalid"
+            );
+            assert_eq!(exported.to_wire_value()["primary"]["base_url"], raw);
+        }
+        for raw in [
+            "not a URL fixture-query",
+            "https:///",
+            "https://fixture-user:fixture-password@",
+            "data:fixture-query",
+            "file:///fixture-query",
+        ] {
+            exported.primary.base_url = raw.into();
+            assert_eq!(
+                exported.primary.to_redacted_value()["base_url"],
+                "[REDACTED]"
+            );
+            assert!(!format!("{:?}", exported.primary).contains("fixture-query"));
+        }
     }
 
     #[test]
