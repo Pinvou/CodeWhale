@@ -138,7 +138,9 @@ export function OrganizationAdminWorkspace({ client, me, language, route, accept
     const summary = await observeOverviewRead(() => api.summary(org, undefined, { fresh: true }));
     if (stamp !== selectionGeneration.current) return;
     if (summary.status === 'DELETED') { setDetail({ summary, units: { items: [], structure_version: 0 }, members: { items: [] }, readiness: null }); setDetailReadGeneration(stamp); setMemberCursor(''); clearOverviewReadBlock(fresh, overviewStarted); return; }
-    const results = await Promise.allSettled([observeOverviewRead(() => api.read(org, 'units')), observeOverviewRead(() => api.members(org, target, undefined, { q: memberQuery, role: memberRole }, { fresh: true })), can('delete') && summary.status === 'DISABLED' ? observeOverviewRead(() => api.read(org, 'deletion-readiness', undefined, { fresh: true }), false) : null]);
+    // The deletion summary may only describe structure accepted for this visit.
+    const unitReadOptions = can('units.manage') ? { fresh: true } : undefined;
+    const results = await Promise.allSettled([observeOverviewRead(() => api.read(org, 'units', undefined, unitReadOptions)), observeOverviewRead(() => api.members(org, target, undefined, { q: memberQuery, role: memberRole }, { fresh: true })), can('delete') && summary.status === 'DISABLED' ? observeOverviewRead(() => api.read(org, 'deletion-readiness', undefined, { fresh: true }), false) : null]);
     if (stamp !== selectionGeneration.current) return;
     const [u,m,r] = results;
     setDetail({ summary, units: u.status === 'fulfilled' ? u.value : { items: [], structure_version: 0 }, unitsError: u.status === 'rejected' ? u.reason : null, members: m.status === 'fulfilled' ? m.value : { items: [] }, membersError: m.status === 'rejected' ? m.reason : null, membersScope: { q: memberQuery, role: memberRole, cursor: target }, readiness: r.status === 'fulfilled' ? r.value : null, readinessError: r.status === 'rejected' ? r.reason : null }); setDetailReadGeneration(stamp); setMemberCursor(target); clearOverviewReadBlock(fresh, overviewStarted);
