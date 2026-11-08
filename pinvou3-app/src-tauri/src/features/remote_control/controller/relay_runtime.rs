@@ -1085,13 +1085,41 @@ async fn finish_controlled_registration<W, S, F>(
     serve(worker).await;
 }
 
+/// Keep the task until its registration result has been observed. If it exits
+/// abnormally, joining it before reporting channel closure guarantees that its
+/// generation-bound worker/channel have been dropped. Successful registration
+/// still leaves the existing serving task running independently.
+pub(crate) struct ControlledRegistrationTask {
+    done: oneshot::Receiver<Result<ControlledStatus, String>>,
+    task: tauri::async_runtime::JoinHandle<()>,
+}
+
+impl ControlledRegistrationTask {
+    pub(crate) async fn wait(
+        self,
+    ) -> Result<Result<ControlledStatus, String>, oneshot::error::RecvError> {
+        let result = self.done.await;
+        if result.is_err() {
+            // The JoinError can contain a panic payload. It is deliberately
+            // neither formatted nor exposed through diagnostics or IPC.
+            let _ = self.task.await;
+        }
+        result
+    }
+
+    #[cfg(test)]
+    pub(crate) fn abort_handle_for_test(&self) -> tokio::task::AbortHandle {
+        self.task.inner().abort_handle()
+    }
+}
+
 impl ControlledRelayWorker {
     pub(crate) async fn start(
         app: AppHandle,
         relay: RemoteControlManager,
         operation: ControlledOperation,
         business: std::sync::Arc<dyn ControlledBusinessPort>,
-    ) -> Result<oneshot::Receiver<Result<ControlledStatus, String>>, String> {
+    ) -> Result<ControlledRegistrationTask, String> {
         let code_wrap = CodeWrapKeyPair::generate().map_err(|_| "pairing_key_invalid")?;
         let handshake = HandshakeKeyPair::generate().map_err(|_| "handshake_key_invalid")?;
         let channel = relay.start_controller_relay(operation.generation()).await?;
@@ -1117,7 +1145,7 @@ impl ControlledRelayWorker {
             #[cfg(test)]
             evidence_hooks: None,
         };
-        tauri::async_runtime::spawn(async move {
+        let task = tauri::async_runtime::spawn(async move {
             let result = worker.register_pairing().await;
             finish_controlled_registration(
                 worker,
@@ -1128,7 +1156,10 @@ impl ControlledRelayWorker {
             )
             .await;
         });
-        Ok(done_rx)
+        Ok(ControlledRegistrationTask {
+            done: done_rx,
+            task,
+        })
     }
 
     async fn register_pairing(&mut self) -> Result<ControlledStatus, String> {
