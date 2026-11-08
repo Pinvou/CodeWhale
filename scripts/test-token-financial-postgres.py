@@ -196,6 +196,7 @@ RETAINED_REQUIRED = {
     "TestPaymentPersonalWalletAdmissionStatusRacePostgres",
     "TestReceivableSettlementGuardedWritesPostgres",
     "TestPostgresManagedPricePagination",
+    "TestPriceFallbackMissingBindingPostgres",
     "TestLedgerRepairProofHistoricalUpgradePostgres",
     "TestLedgerRepairAuthorityDuplicateForcedRefundPostgres",
     "TestLedgerRepairAuthorityCrossDatePostgres",
@@ -279,6 +280,12 @@ EXACT_REQUIRED_CHILDREN = {
         for suffix in ("", "/actual-cli")
     },
     "TestRechargeProductCommandAtomicityPostgres": {"active-provider-admission-candidate-progress"},
+    "TestPriceFallbackMissingBindingPostgres": {
+        "missing-binding-and-rollback",
+        "permission-denied-before-mutation",
+        "binding-read-fault-and-later-retry",
+        "valid-binding-fallback-and-receipt-replay",
+    },
     "TestProductManualAdmissionPostgres": {
         "two-explicit-humans-first-publish-and-immutable-replay",
         "runtime-cannot-rewrite-frozen-manual-facts",

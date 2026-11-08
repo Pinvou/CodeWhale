@@ -824,7 +824,11 @@ func (r *PostgresRepository) TransitionPriceVersion(ctx context.Context, id, act
 				return ManagedPriceVersion{}, err
 			}
 			var required []uuid.UUID
-			if err = tx.QueryRow(ctx, `SELECT required_unit_definition_ids FROM billing_protocol_formula_bindings WHERE formula_version_id=$1 AND protocol_code=$2`, item.FormulaVersionID, item.ProtocolCode).Scan(&required); err == nil {
+			err = tx.QueryRow(ctx, `SELECT required_unit_definition_ids FROM billing_protocol_formula_bindings WHERE formula_version_id=$1 AND protocol_code=$2`, item.FormulaVersionID, item.ProtocolCode).Scan(&required)
+			if errors.Is(err, pgx.ErrNoRows) {
+				return ManagedPriceVersion{}, ErrPriceMissing
+			}
+			if err == nil {
 				global, found, resolveErr := selectUniquePriceCandidate(ctx, tx, "GLOBAL", "", item.ProtocolCode, item.FormulaVersionID, item.CreditUnit, now)
 				if resolveErr != nil || !found {
 					if resolveErr != nil {

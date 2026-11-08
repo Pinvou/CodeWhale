@@ -51,6 +51,29 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
                 with self.subTest(child=child), self.assertRaises(RuntimeError):
                     RUNNER.verify_results(invalid, {root}, **options)
 
+    def test_price_fallback_requires_missing_binding_fault_rollback_and_replay(self):
+        root = "TestPriceFallbackMissingBindingPostgres"
+        required = {
+            "missing-binding-and-rollback", "permission-denied-before-mutation",
+            "binding-read-fault-and-later-retry", "valid-binding-fallback-and-receipt-replay",
+        }
+        self.assertIn(root, RUNNER.RETAINED_REQUIRED)
+        self.assertIn(root, RUNNER.BILLING_CHILD_REQUIRED)
+        self.assertEqual(RUNNER.EXACT_REQUIRED_CHILDREN[root], required)
+        self.run_main_fixture()
+        command = self.fixture_commands[self.fixture_phases.index("retained-billing")]
+        self.assertIn(root, command[command.index("-run") + 1])
+        events = self.events({root}, RUNNER.BILLING_PACKAGE, children=True)
+        options = {"package": RUNNER.BILLING_PACKAGE, "require_children": True, "exact_roots": True}
+        RUNNER.verify_results(events, {root}, **options)
+        for child in required:
+            for invalid in (
+                [event for event in events if event.get("Test") != root + "/" + child],
+                events + [{"Action": "skip", "Package": RUNNER.BILLING_PACKAGE, "Test": root + "/" + child}],
+            ):
+                with self.subTest(child=child), self.assertRaises(RuntimeError):
+                    RUNNER.verify_results(invalid, {root}, **options)
+
     def test_password_preparation_requires_redaction_boundaries_and_reference_safety(self):
         root = "TestPasswordPreparationAuthorizationPostgres"
         self.assertIn(root, RUNNER.ACCOUNT_REQUIRED)
