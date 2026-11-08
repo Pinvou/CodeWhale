@@ -51,6 +51,29 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
                 with self.subTest(child=child), self.assertRaises(RuntimeError):
                     RUNNER.verify_results(invalid, {root}, **options)
 
+    def test_organization_startup_diagnostics_require_actual_process_cases(self):
+        root = "TestOrganizationStartupDiagnosticsPostgres"
+        package = RUNNER.ACCOUNT_PACKAGE
+        self.assertIn(root, RUNNER.ACCOUNT_REQUIRED)
+        children = {"profile", "token", "billing-earlier-wallet-guard"}
+        self.assertEqual(RUNNER.EXACT_REQUIRED_CHILDREN[root], children)
+        self.run_main_fixture()
+        command = self.fixture_commands[self.fixture_phases.index("owner-account")]
+        self.assertIn(root, command[command.index("-run") + 1])
+        events = self.events({root}, package, children=True)
+        options = {"package": package, "exact_roots": True, "require_children": True}
+        self.assertGreater(RUNNER.verify_results(events, {root}, **options), 0)
+        for child in children:
+            name = root + "/" + child
+            for invalid in (
+                [event for event in events if event.get("Test", "").split("/", 1)[0] != root],
+                [event for event in events if event.get("Test") != name],
+                events + [{"Action": "skip", "Package": package, "Test": name}],
+                events + [{"Action": "fail", "Package": package, "Test": name}],
+            ):
+                with self.subTest(child=child), self.assertRaises(RuntimeError):
+                    RUNNER.verify_results(invalid, {root}, **options)
+
     def test_password_preparation_requires_redaction_boundaries_and_reference_safety(self):
         root = "TestPasswordPreparationAuthorizationPostgres"
         self.assertIn(root, RUNNER.ACCOUNT_REQUIRED)
@@ -1497,6 +1520,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
 
     def test_account_phase_requires_real_cas_lifecycle_and_review_governance_roots(self):
         self.assertEqual(RUNNER.ACCOUNT_REQUIRED, {
+            "TestOrganizationStartupDiagnosticsPostgres",
             "TestRestoredAdminReadsWithPublicMigrationsAndRuntimeActor",
             "TestMemberUnitsReceiptSurvivesLegalUnitDeletion",
             "TestF06OrganizationStatusProjectionVersionPublicPostgres",

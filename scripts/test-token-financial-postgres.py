@@ -73,6 +73,7 @@ REQUIRED = {
 ACCOUNT_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/account"
 LIFECYCLE_RECONCILIATION_REQUIRED = {"TestLifecycleV3ApprovalReconciliationPostgres"}
 ACCOUNT_REQUIRED = {
+    "TestOrganizationStartupDiagnosticsPostgres",
     "TestRestoredAdminReadsWithPublicMigrationsAndRuntimeActor",
     "TestApprovalDecisionOriginalReceiptPostgres",
     "TestApprovalDecisionLegacyConcurrentReceiptPostgres",
@@ -281,6 +282,9 @@ EXACT_REQUIRED_CHILDREN = {
         for version in (35, 36, 37, 51)
         for seeded in ("false", "true")
         for suffix in ("", "/actual-cli")
+    },
+    "TestOrganizationStartupDiagnosticsPostgres": {
+        "profile", "token", "billing-earlier-wallet-guard",
     },
     "TestRechargeProductCommandAtomicityPostgres": {"active-provider-admission-candidate-progress"},
     "TestProductManualAdmissionPostgres": {
