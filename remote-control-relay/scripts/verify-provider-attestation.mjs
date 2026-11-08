@@ -16,13 +16,14 @@ function arg(name) { const index = process.argv.indexOf(name); return index < 0 
 const CLOCK_SKEW_MS = 30_000;
 const FRESHNESS_MS = 300_000;
 const MAX_RUN_MS = 120 * 60_000;
+const QUALIFICATION_MAX_AGE_MS = 24 * 60 * 60_000;
 
 // Qualification must follow a completed, bounded run. The five-minute online
 // signing window is not a maximum duration for the physical two-host run.
 export function validateReleaseQualificationWindow(startedAt, finishedAt, now = Date.now()) {
   if (![startedAt, finishedAt, now].every((value) => Number.isSafeInteger(value) && value >= 0)
     || finishedAt < startedAt || finishedAt - startedAt > MAX_RUN_MS
-    || finishedAt > now + CLOCK_SKEW_MS || now - finishedAt > FRESHNESS_MS) {
+    || finishedAt > now + CLOCK_SKEW_MS || now - finishedAt > QUALIFICATION_MAX_AGE_MS) {
     fail("evidence_qualification_time_invalid");
   }
 }
@@ -82,7 +83,9 @@ function verifyAttestation(value, expected, now, run) {
     || Date.parse(certificate.validTo) < Math.max(issuedAt, now))) fail("provider_attestation_stale");
   const signature = Buffer.from(value.verifier.signature, "base64");
   if (!crypto.verify("sha256", providerAttestationPayload(value), leaf.publicKey, signature)) fail("provider_attestation_signature_invalid");
-  return { publicKeySha256: value.public_key_sha256, issuedAt: value.issued_at };
+  return { publicKeySha256: value.public_key_sha256, issuedAt: value.issued_at,
+    validFrom: Math.max(...certificates.map((certificate) => Date.parse(certificate.validFrom))),
+    validUntil: Math.min(...certificates.map((certificate) => Date.parse(certificate.validTo))) };
 }
 
 export function verifyProviderAttestation(value, expected, now = Date.now()) {

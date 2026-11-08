@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
+import { existsSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { test } from "node:test";
 import { runControllerReleaseGate } from "../scripts/controller-release-gate.mjs";
@@ -28,7 +29,13 @@ const testPublicKeyPem = testKeys.publicKey.export({ type: "spki", format: "pem"
 const testPublicKeySha256 = crypto.createHash("sha256")
   .update(testKeys.publicKey.export({ type: "spki", format: "der" })).digest("hex");
 const certificateRoot = await mkdtemp(join(tmpdir(), "pinvou-provider-chain-"));
-const openssl = process.platform === "win32" ? "C:\\Program Files\\Git\\usr\\bin\\openssl.exe" : "openssl";
+// Git for Windows may be installed outside Program Files on supported runners.
+let openssl = "openssl";
+if (process.platform === "win32") {
+  const gitExecPath = execFileSync("git", ["--exec-path"], { encoding: "utf8" }).trim();
+  const bundledOpenSSL = resolve(gitExecPath, "../../../usr/bin/openssl.exe");
+  if (existsSync(bundledOpenSSL)) openssl = bundledOpenSSL;
+}
 // Explicit extensions: LibreSSL emits no Basic Constraints by default and its
 // x509 subcommand lacks -addext, so the leaf profile comes from an extfile.
 const leafExtensions = join(certificateRoot, "leaf-extensions.cnf");
@@ -152,6 +159,7 @@ async function validEvidence() {
   const driverSha = addArtifact("binaries/pinvou-e2e-driver.exe", "driver");
   const legacyRelaySha = addArtifact("binaries/legacy-relay.bin", "legacy-relay");
   const nodeSha = addArtifact("binaries/pinvou-node.exe", "toolchain");
+  const completionSha = addArtifact("gates/run-completion.json", "check");
   const legacyRuntimeSha = addArtifact("rollback/legacy-runtime.json", "rollback");
   const legacyRouteSpecSha = addArtifact("rollback/legacy-route-spec.json", "rollback");
   const legacyConfigurationSha = addArtifact("rollback/legacy-configuration.json", "rollback");
@@ -205,6 +213,7 @@ async function validEvidence() {
     schema: "pinvou-remote-control-release-evidence",
     version: 1,
     commit_sha: commit,
+    run_completion_artifact_sha256: completionSha,
     provenance: { kind: "physical-dual-windows", orchestrator: "pinvou-windows-e2e-v1", source_commit_sha: commit, synthetic: false,
       node_version: "24.8.0", node_sha256: nodeSha, node_artifact_path: "binaries/pinvou-node.exe",
       node_authenticode_thumbprint: signer, node_publisher: "CN=OpenJS Foundation" },
@@ -271,6 +280,11 @@ async function materializeEvidence(evidence, root) {
     if (artifact.path === "gates/ui_smoke.json") continue;
     const ui = uiReferences.find((item) => artifact.sha256 === item.sha256);
     let content = `{"status":"pass","ordinal":${index}}\n`;
+    if (artifact.path === "gates/run-completion.json") content = `${JSON.stringify({
+      schema: "pinvou-remote-control-run-completion", version: 1, source_commit_sha: evidence.commit_sha,
+      run_nonce: evidence.attestations[0].run_nonce, started_at: evidence.started_at, finished_at: evidence.finished_at,
+      monotonic_interval_sha256: hash(JSON.stringify([evidence.monotonic_start_ms, evidence.monotonic_end_ms])),
+    })}\n`;
     if (ui) {
       const value = { schema: "pinvou-remote-control-ui-smoke", version: 1, phase: ui.phase, result: "pass", checks: ["real_tauri_page", `phase_${ui.phase.replaceAll("-", "_")}`], actions: uiActions[ui.phase] };
       if (["approval-allow", "approval-deny", "attachment"].includes(ui.phase)) value.coordination_digest = hash(`coordination-${ui.phase}`);
@@ -291,7 +305,13 @@ async function materializeEvidence(evidence, root) {
     if (artifact.path.startsWith("build/attestation-provider")) {
       const role = artifact.path.endsWith("-A.json") ? "A" : artifact.path.endsWith("-B.json") ? "B" : "orchestrator";
       const identity = evidence.attestations.find((item) => item.role === role);
-      const receipt = { schema: "pinvou-provider-attestation-receipt", version: 1, role, role_policy_sha256: identity.role_policy_sha256, provider: "remote_signing_service", key_id: identity.key_id, run_nonce: runNonce, public_key_spki_pem: identity.public_key_spki_pem, public_key_sha256: identity.public_key_sha256, non_exportable: true, acl_attestation_sha256: hash("test-acl"), provider_measurement_sha256: hash("test-provider-measurement"), driver_sha256: replacements.get(evidence.driver.sha256), issued_at: testStartedAt, verifier: { kind: "independent-provider-verifier", vendor: "Pinvou Test Vendor", leaf_certificate_pem: providerLeafPem, certificate_chain_pem: [providerRootPem], signature_algorithm: "sha256", signature: "" } };
+      const receipt = { schema: "pinvou-provider-attestation-receipt", version: 1, role,
+        role_policy_sha256: identity.role_policy_sha256, provider: "remote_signing_service", key_id: identity.key_id,
+        run_nonce: runNonce, public_key_spki_pem: identity.public_key_spki_pem, public_key_sha256: identity.public_key_sha256,
+        non_exportable: true, acl_attestation_sha256: hash("test-acl"), provider_measurement_sha256: hash("test-provider-measurement"),
+        driver_sha256: replacements.get(evidence.driver.sha256), issued_at: evidence.started_at,
+        verifier: { kind: "independent-provider-verifier", vendor: "Pinvou Test Vendor", leaf_certificate_pem: providerLeafPem,
+          certificate_chain_pem: [providerRootPem], signature_algorithm: "sha256", signature: "" } };
       receipt.verifier.signature = crypto.sign("sha256", providerAttestationPayload(receipt), providerLeafKey).toString("base64");
       content = `${JSON.stringify(receipt)}\n`;
     }
@@ -313,6 +333,7 @@ if (artifact.path === "build/installer-attestation.sigstore.jsonl" || artifact.p
   for (const item of evidence.installers) item.sha256 = replacements.get(item.sha256);
   evidence.driver.sha256 = replacements.get(evidence.driver.sha256);
   evidence.provenance.node_sha256 = replacements.get(evidence.provenance.node_sha256);
+  evidence.run_completion_artifact_sha256 = replacements.get(evidence.run_completion_artifact_sha256);
   evidence.legacy_relay.sha256 = replacements.get(evidence.legacy_relay.sha256);
   evidence.legacy_relay.runtime_artifact_sha256 = replacements.get(evidence.legacy_relay.runtime_artifact_sha256);
   evidence.legacy_relay.route_spec_artifact_sha256 = replacements.get(evidence.legacy_relay.route_spec_artifact_sha256);
@@ -366,11 +387,11 @@ test("strict evidence validator accepts the exact 27 stable journey IDs", async 
 test("qualification uses trusted current time, rejects stale/future runs and bounds long runs", async () => {
   const evidence = await validEvidence();
   const finish = Date.parse(evidence.finished_at);
-  for (const now of [finish + 300_001, finish - 30_001, NaN, Infinity, -1]) {
+  for (const now of [finish + 86_400_001, finish - 30_001, NaN, Infinity, -1]) {
     await assert.rejects(() => validateReleaseEvidence(evidence, validationOptions({ qualificationClock: () => now })),
       { code: "evidence_qualification_time_invalid" });
   }
-  for (const now of [finish, finish + 300_000, finish - 30_000]) {
+  for (const now of [finish, finish + 86_400_000, finish - 30_000]) {
     await assert.doesNotReject(() => validateReleaseEvidence(evidence, validationOptions({ qualificationClock: () => now })));
   }
   const tooLong = structuredClone(evidence);
@@ -388,7 +409,7 @@ test("real provider proof permits a one-hour run but cannot qualify an old compl
   const finish = Date.parse(evidence.finished_at);
   await validateReleaseEvidence(evidence, validationOptions({ evidenceRoot: root }));
   await assert.rejects(() => validateReleaseEvidence(evidence, validationOptions({ evidenceRoot: root,
-    qualificationClock: () => finish + 300_001,
+    qualificationClock: () => finish + 86_400_001,
   })), { code: "evidence_qualification_time_invalid" });
 });
 
@@ -400,9 +421,73 @@ test("qualification checks time again after artifact verification instead of fre
   const finish = Date.parse(evidence.finished_at);
   let reads = 0;
   await assert.rejects(() => validateReleaseEvidence(evidence, validationOptions({ evidenceRoot: root,
-    qualificationClock: () => ++reads === 1 ? finish : finish + 300_001,
+    qualificationClock: () => ++reads === 1 ? finish : finish + 86_400_001,
   })), { code: "evidence_qualification_time_invalid" });
   assert.ok(reads >= 2);
+});
+
+test("a signed completion interval cannot be refreshed by editing manifest dates or swapping bytes after hashing", async (t) => {
+  const evidence = await validEvidence();
+  const root = await mkdtemp(join(tmpdir(), "pinvou-signed-completion-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await materializeEvidence(evidence, root);
+  const finish = Date.parse(evidence.finished_at);
+  await validateReleaseEvidence(evidence, validationOptions({ evidenceRoot: root,
+    qualificationClock: () => finish + 23 * 60 * 60_000 }));
+  const now = finish + 24 * 60 * 60_000 + 10 * 60_000;
+  await assert.rejects(() => validateReleaseEvidence(evidence, validationOptions({ evidenceRoot: root,
+    qualificationClock: () => now })), { code: "evidence_qualification_time_invalid" });
+  evidence.finished_at = new Date(finish + 20 * 60_000).toISOString();
+  // Eighty-minute run and recent unsigned finish would pass the window alone.
+  await assert.rejects(() => validateReleaseEvidence(evidence, validationOptions({ evidenceRoot: root,
+    qualificationClock: () => now })), { code: "evidence_run_completion_invalid" });
+  const marker = join(root, "gates/run-completion.json");
+  const value = JSON.parse(await readFile(marker, "utf8"));
+  value.finished_at = evidence.finished_at;
+  let reads = 0;
+  await assert.rejects(() => validateReleaseEvidence(evidence, validationOptions({ evidenceRoot: root,
+    qualificationClock: () => {
+      // The second observation follows the full artifact hash pass. Substitute
+      // matching untrusted dates before the semantic reader opens the file.
+      if (++reads === 2) writeFileSync(marker, `${JSON.stringify(value)}\n`);
+      return now;
+    } })), { code: "evidence_run_completion_invalid" });
+  assert.equal(reads, 2);
+});
+
+test("completion must be authenticated by the orchestrator even with a valid different-role signature", async (t) => {
+  const evidence = await validEvidence();
+  const root = await mkdtemp(join(tmpdir(), "pinvou-completion-role-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await materializeEvidence(evidence, root);
+  const marker = evidence.artifacts.find((item) => item.sha256 === evidence.run_completion_artifact_sha256);
+  marker.machine_role = "A";
+  signArtifact(marker);
+  await assert.rejects(() => validateReleaseEvidence(evidence, validationOptions({ evidenceRoot: root })),
+    { code: "evidence_run_completion_invalid" });
+});
+
+test("qualification rechecks the authenticated certificate intersection after the final provenance await", async (t) => {
+  const evidence = await validEvidence();
+  const root = await mkdtemp(join(tmpdir(), "pinvou-provider-final-certificate-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const expiry = Math.min(Date.parse(new crypto.X509Certificate(providerRootPem).validTo),
+    Date.parse(new crypto.X509Certificate(providerLeafPem).validTo));
+  evidence.started_at = new Date(expiry - 3_601_000).toISOString();
+  evidence.finished_at = new Date(expiry - 1_000).toISOString();
+  for (const journey of evidence.journeys) {
+    journey.started_at = evidence.started_at;
+    journey.finished_at = evidence.finished_at;
+  }
+  await materializeEvidence(evidence, root);
+  await validateReleaseEvidence(evidence, validationOptions({ evidenceRoot: root, qualificationClock: () => expiry - 1 }));
+  let reads = 0;
+  await assert.rejects(() => validateReleaseEvidence(evidence, validationOptions({ evidenceRoot: root,
+    // Entry, post-hash and three role verifications see a valid chain. The
+    // observation after provenance/SBOM I/O crosses notAfter by one millisecond.
+    qualificationClock: () => ++reads <= 5 ? expiry - 1 : expiry + 1,
+  })), { code: "evidence_attestation_provider_invalid" });
+  assert.equal(reads, 6);
 });
 
 test("provider online freshness and run qualification retain nonce, signature and certificate validity", async (t) => {
@@ -662,7 +747,8 @@ test("valid signatures cannot substitute the wrong producer for UI phases or com
   const evidence = await validEvidence();
   await materializeEvidence(evidence, root);
   await validateReleaseEvidence(evidence, validationOptions({ evidenceRoot: root }));
-  const targets = evidence.artifacts.filter((item) => item.path.startsWith("ui/") || item.path.startsWith("gates/"));
+  const gateDigests = new Set(Object.values(evidence.gates).map((gate) => gate.artifact_sha256));
+  const targets = evidence.artifacts.filter((item) => item.path.startsWith("ui/") || gateDigests.has(item.sha256));
   assert.equal(targets.length, 13, "seven phases and all six gates");
   for (const artifact of targets) {
     const originalRole = artifact.machine_role;

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import crypto from "node:crypto";
-import { lstat, readFile, realpath } from "node:fs/promises";
+import { lstat, open, readFile, realpath } from "node:fs/promises";
 import { dirname, isAbsolute, normalize, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { isDirectCliEntry } from "../cli-entrypoint.js";
@@ -358,6 +358,7 @@ async function validateLegacyRuntimeEvidence(root, artifacts, legacy, document) 
 }
 
 async function validateProviderAttestation(root, artifacts, document, qualificationClock) {
+  const validity = { validFrom: 0, validUntil: Number.MAX_SAFE_INTEGER };
   for (const attestation of document.attestations) {
     const entry = artifacts.find((item) => item.sha256 === attestation.provider_attestation_artifact_sha256);
     if (!entry || entry.kind !== "check" || entry.machine_role !== attestation.role) fail("evidence_attestation_provider_invalid");
@@ -367,7 +368,7 @@ async function validateProviderAttestation(root, artifacts, document, qualificat
     const runStartedAt = Date.parse(document.started_at); const runFinishedAt = Date.parse(document.finished_at);
     if (!Number.isFinite(issuedAt) || issuedAt < runStartedAt || issuedAt > runFinishedAt) fail("evidence_attestation_provider_invalid");
     try {
-      verifyProviderAttestationForRun(value, {
+      const verified = verifyProviderAttestationForRun(value, {
         role: attestation.role, rolePolicySha256: attestation.role_policy_sha256,
         provider: attestation.provider, keyId: attestation.key_id, runNonce: attestation.run_nonce,
         aclSha256: attestation.acl_attestation_sha256, measurementSha256: attestation.provider_measurement_sha256,
@@ -375,9 +376,44 @@ async function validateProviderAttestation(root, artifacts, document, qualificat
         rootCertificateSha256: attestation.provider_root_certificate_sha256,
         verifierCertificateSha256: attestation.provider_verifier_certificate_sha256,
       }, { startedAt: runStartedAt, finishedAt: runFinishedAt, now: qualificationClock() });
+      validity.validFrom = Math.max(validity.validFrom, verified.validFrom);
+      validity.validUntil = Math.min(validity.validUntil, verified.validUntil);
     } catch { fail("evidence_attestation_provider_invalid"); }
     if (value.public_key_sha256 !== attestation.public_key_sha256) fail("evidence_attestation_provider_invalid");
   }
+  return validity;
+}
+
+async function validateRunCompletion(root, artifacts, document) {
+  const entry = artifacts.find((item) => item.sha256 === document.run_completion_artifact_sha256);
+  if (!entry || entry.path !== "gates/run-completion.json" || entry.kind !== "check"
+    || entry.machine_role !== "orchestrator") fail("evidence_run_completion_invalid");
+  // Authenticate the same bounded bytes that supply the interval. An earlier
+  // whole-directory hash pass alone leaves an await/read TOCTOU window.
+  const file = await open(resolve(root, ...entry.path.split("/")), "r").catch(() => fail("evidence_run_completion_invalid"));
+  let bytes;
+  try {
+    const buffer = Buffer.alloc(16 * 1024 + 1);
+    let size = 0;
+    while (size < buffer.length) {
+      const { bytesRead } = await file.read(buffer, size, buffer.length - size, size);
+      if (!bytesRead) break;
+      size += bytesRead;
+    }
+    if (size === 0 || size > 16 * 1024) fail("evidence_run_completion_invalid");
+    bytes = buffer.subarray(0, size);
+  } catch { fail("evidence_run_completion_invalid"); }
+  finally { await file.close().catch(() => fail("evidence_run_completion_invalid")); }
+  if (crypto.createHash("sha256").update(bytes).digest("hex") !== entry.sha256) fail("evidence_run_completion_invalid");
+  let value;
+  try { value = JSON.parse(bytes.toString("utf8")); } catch { fail("evidence_run_completion_invalid"); }
+  exactObject(value, ["schema", "version", "source_commit_sha", "run_nonce", "started_at", "finished_at",
+    "monotonic_interval_sha256"], "evidence_run_completion_invalid");
+  if (value.schema !== "pinvou-remote-control-run-completion" || value.version !== 1
+    || value.source_commit_sha !== document.commit_sha || value.run_nonce !== document.attestations[0].run_nonce
+    || value.started_at !== document.started_at || value.finished_at !== document.finished_at
+    || value.monotonic_interval_sha256 !== crypto.createHash("sha256")
+      .update(JSON.stringify([document.monotonic_start_ms, document.monotonic_end_ms])).digest("hex")) fail("evidence_run_completion_invalid");
 }
 
 async function validateBuildProvenance(root, artifacts, document, {
@@ -443,7 +479,7 @@ export async function validateReleaseEvidence(document, {
   if (!validateEvidenceSchema(document)) fail("evidence_schema_invalid");
   exactObject(document, [
     "schema", "version", "commit_sha", "provenance", "attestations", "relay", "legacy_relay", "driver", "installers", "machines",
-    "started_at", "finished_at", "monotonic_start_ms", "monotonic_end_ms",
+    "started_at", "finished_at", "monotonic_start_ms", "monotonic_end_ms", "run_completion_artifact_sha256",
     "journeys", "artifacts", "gates",
   ], "evidence_document_invalid");
   if (document.schema !== "pinvou-remote-control-release-evidence" || document.version !== 1
@@ -590,6 +626,9 @@ export async function validateReleaseEvidence(document, {
     claimUniqueEvidence(legacyDigest);
   }
   for (const attestation of document.attestations) claimUniqueEvidence(attestation.provider_attestation_artifact_sha256);
+  digest(document.run_completion_artifact_sha256);
+  requireArtifact("gates/run-completion.json", document.run_completion_artifact_sha256, "check");
+  claimUniqueEvidence(document.run_completion_artifact_sha256);
   for (const item of document.journeys) {
     const trace = artifacts.find((artifact) => artifact.sha256 === item.trace_sha256);
     if (!trace || trace.kind !== "trace" || trace.machine_role !== "A") fail("evidence_journey_artifact_invalid");
@@ -614,6 +653,7 @@ export async function validateReleaseEvidence(document, {
       || artifact.kind !== (gate === "ui_smoke" ? "ui-smoke" : "check")) fail("evidence_gate_artifact_invalid");
     claimUniqueEvidence(value.artifact_sha256);
   }
+  let providerValidity = null;
   if (evidenceRoot) {
     const root = resolve(evidenceRoot);
     const rootMetadata = await lstat(root).catch(() => fail("evidence_root_unsafe"));
@@ -642,14 +682,21 @@ export async function validateReleaseEvidence(document, {
     await validateControlledAttachmentReceipt(root, artifacts, document);
     await validateLegacyRuntimeEvidence(root, artifacts, legacy, document);
     validateReleaseQualificationWindow(bounds.started, bounds.finished, qualificationClock());
-    await validateProviderAttestation(root, artifacts, document, qualificationClock);
+    await validateRunCompletion(root, artifacts, document);
+    providerValidity = await validateProviderAttestation(root, artifacts, document, qualificationClock);
     await validateBuildProvenance(root, artifacts, document, {
       expectedRepository: expectedBuildRepository,
       expectedWorkflow: expectedBuildWorkflow,
       expectedRunId: expectedBuildRunId,
     });
   }
-  validateReleaseQualificationWindow(bounds.started, bounds.finished, qualificationClock());
+  const qualifiedAt = qualificationClock();
+  validateReleaseQualificationWindow(bounds.started, bounds.finished, qualifiedAt);
+  // No await after this certificate observation: later provenance/SBOM I/O
+  // cannot silently extend a chain that was valid at its earlier verification.
+  if (providerValidity && (qualifiedAt < providerValidity.validFrom || qualifiedAt > providerValidity.validUntil)) {
+    fail("evidence_attestation_provider_invalid");
+  }
   return { ok: true, journey_count: expectedJourneys.length, artifact_count: artifacts.length };
 }
 

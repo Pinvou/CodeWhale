@@ -900,6 +900,21 @@ $flagOffEvidence = [Collections.Generic.List[object]]::new()
     $uiSummarySha = Add-LocalArtifact $artifacts $evidenceRoot 'gates\ui_smoke.json' 'ui-smoke'
     $gates.ui_smoke = [ordered]@{ result = 'pass'; artifact_sha256 = $uiSummarySha }
 
+    # Freeze functional run completion before artifact signing/qualification.
+    # The signed marker owns both wall-clock and monotonic interval bounds.
+    $runClock.Stop()
+    if ($runClock.ElapsedMilliseconds -gt (120 * 60 * 1000)) { throw 'e2e_run_duration_invalid' }
+    $runFinishedAt = [DateTime]::UtcNow.ToString($TimestampFormat)
+    $completion = [ordered]@{
+        schema = 'pinvou-remote-control-run-completion'; version = 1
+        source_commit_sha = $actualHead; run_nonce = $runNonce
+        started_at = $runStartedAt; finished_at = $runFinishedAt
+        monotonic_interval_sha256 = Get-PinvouSha256Hex ([Text.Encoding]::UTF8.GetBytes((ConvertTo-Json -InputObject @([long]0, [long]$runClock.ElapsedMilliseconds) -Compress)))
+    }
+    $completionPath = Join-Path $evidenceRoot 'gates\run-completion.json'
+    [IO.File]::WriteAllText($completionPath, (($completion | ConvertTo-Json -Depth 4 -Compress) + "`n"), [Text.UTF8Encoding]::new($false))
+    $completionSha = Add-LocalArtifact $artifacts $evidenceRoot 'gates\run-completion.json' 'check'
+
     foreach ($artifact in $artifacts) {
         if ($artifact.signature) {
             if ($artifact.machine_role -ne 'B' -or $artifact.path -ne 'checks/RC-E2E-008-controlled_attachment_received.json') { throw 'e2e_pre_attested_artifact_forbidden' }
@@ -939,7 +954,6 @@ $flagOffEvidence = [Collections.Generic.List[object]]::new()
         $artifact.signature = $attestationResult.signature
     }
 
-    $runClock.Stop()
     $manifest = [ordered]@{
         schema = 'pinvou-remote-control-release-evidence'; version = 1; commit_sha = $actualHead
         provenance = [ordered]@{ kind = 'physical-dual-windows'; orchestrator = 'pinvou-windows-e2e-v1'; source_commit_sha = $actualHead; synthetic = $false; node_version = $trustedNodeVersion; node_sha256 = $TrustedNodeSha256; node_artifact_path = 'binaries/pinvou-node.exe'; node_authenticode_thumbprint = $TrustedNodeSignerThumbprint; node_publisher = $TrustedNodeSignerPublisher }
@@ -955,7 +969,8 @@ $flagOffEvidence = [Collections.Generic.List[object]]::new()
             [ordered]@{ role = 'A'; identity_digest = $machineFacts[0].IdentityDigest; windows_build = $machineFacts[0].WindowsBuild },
             [ordered]@{ role = 'B'; identity_digest = $machineFacts[1].IdentityDigest; windows_build = $machineFacts[1].WindowsBuild }
         )
-        started_at = $runStartedAt; finished_at = [DateTime]::UtcNow.ToString($TimestampFormat)
+        started_at = $runStartedAt; finished_at = $runFinishedAt
+        run_completion_artifact_sha256 = $completionSha
         monotonic_start_ms = 0; monotonic_end_ms = [long]$runClock.ElapsedMilliseconds
         journeys = @($journeyEvidence); artifacts = @($artifacts); gates = $gates
     }
