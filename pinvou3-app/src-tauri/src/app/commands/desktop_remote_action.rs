@@ -217,6 +217,14 @@ impl serde::Serialize for RemoteActionIntent {
     }
 }
 
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteActionError {
+    code: String,
+    request_id: String,
+    authoritative: bool,
+}
+
 #[tauri::command]
 pub async fn desktop_remote_action_a(
     app: AppHandle,
@@ -224,7 +232,7 @@ pub async fn desktop_remote_action_a(
     remote_ref: String,
     request_id: String,
     intent: RemoteActionIntent,
-) -> Result<Value, String> {
+) -> Result<Value, RemoteActionError> {
     let operation = intent.operation();
     log_remote_action_event(
         "controller",
@@ -232,12 +240,18 @@ pub async fn desktop_remote_action_a(
         operation,
         "requested",
     );
-    super::desktop_remote_state::ensure_ready(&app).map_err(|code| {
-        log_remote_action_event("controller", "remote_action_failed", operation, &code);
-        code
-    })?;
+    super::desktop_remote_state::ensure_ready(&app)
+        .map_err(|code| {
+            log_remote_action_event("controller", "remote_action_failed", operation, &code);
+            code
+        })
+        .map_err(|code| RemoteActionError {
+            code,
+            request_id: request_id.clone(),
+            authoritative: false,
+        })?;
     let started = std::time::Instant::now();
-    let metric = match &intent {
+    let mut metric = match &intent {
         RemoteActionIntent::AttachmentBegin { .. } => {
             Some((RemoteStage::Attachment, request_id.clone()))
         }
@@ -252,6 +266,8 @@ pub async fn desktop_remote_action_a(
         }
         _ => None,
     };
+    let mut actual_request_id = request_id.clone();
+    let mut authoritative = false;
     let result = async {
         let store = app.state::<SessionStore>();
         let manager = app.state::<ControllingDeviceManager>();
@@ -286,7 +302,7 @@ pub async fn desktop_remote_action_a(
         }
         let operation = operation.to_owned();
         let body = intent.body()?;
-        let payload = json!({"v":1,"type":"remote_action_request",
+        let mut payload = json!({"v":1,"type":"remote_action_request",
         "connection_id":lease.connection_id,"controller_lease_id":lease.controller_lease_id,
         "lease_epoch":lease.lease_epoch,"relay_epoch":lease.relay_epoch,
         "remote_control_generation":lease.remote_control_generation,
@@ -309,6 +325,35 @@ pub async fn desktop_remote_action_a(
             );
             "remote_action_invalid".to_owned()
         })?;
+        // Authoritative native ownership outlives renderer stop/reload. Reserve
+        // before any dispatch and reuse an unresolved intent's original wire ID.
+        let identity = state
+            .reserve_identity(
+                &local_session_id,
+                &remote_ref,
+                &live,
+                &operation,
+                &body,
+                &request_id,
+            )
+            .map_err(|failure| {
+                if let Some(id) = failure.request_id {
+                    actual_request_id = id;
+                }
+                failure.code.to_owned()
+            })?;
+        let request_id = identity.request_id.clone();
+        actual_request_id = request_id.clone();
+        if matches!(
+            &intent,
+            RemoteActionIntent::AttachmentBegin { .. }
+                | RemoteActionIntent::ArtifactDownloadBegin { .. }
+        ) {
+            if let Some((_, id)) = &mut metric {
+                *id = request_id.clone();
+            }
+        }
+        payload["request_id"] = json!(request_id);
         let receiver = with_current_dispatch_binding(&app, &live, || {
             store
                 .require_live_remote_mutation(&local_session_id, &remote_ref, &live)
@@ -326,6 +371,7 @@ pub async fn desktop_remote_action_a(
                 .map_err(str::to_owned)
         })
         .map_err(|error| error.code().to_owned())?;
+        identity.mark_dispatched();
         let result = send_action_encrypted(&app, &live, &payload);
         if result.is_err() {
             state.detach_uncertain(&request_id);
@@ -339,7 +385,11 @@ pub async fn desktop_remote_action_a(
         }
         log_remote_action_event("controller", "remote_action_sent", &operation, "sent");
         match tokio::time::timeout(std::time::Duration::from_secs(15), receiver).await {
-            Ok(Ok(result)) => result,
+            Ok(Ok(result)) => {
+                authoritative = !matches!(&result, Err(code) if code == "result_unknown");
+                identity.settle(authoritative);
+                result
+            }
             _ => {
                 state.detach_uncertain(&request_id);
                 log_remote_action_event(
@@ -386,7 +436,11 @@ pub async fn desktop_remote_action_a(
             crate::features::behavior_telemetry::track_remote_transfer(&app, event, &transfer_id);
         }
     }
-    result
+    result.map_err(|code| RemoteActionError {
+        code,
+        request_id: actual_request_id,
+        authoritative,
+    })
 }
 
 fn send_action_encrypted(

@@ -19,6 +19,10 @@
 (function (root) {
   "use strict";
   var registry = root.__PINVOU_TAURI_BRIDGE_FEATURES__ = root.__PINVOU_TAURI_BRIDGE_FEATURES__ || {};
+  // A renderer-lifetime cache coalesces duplicates across bridge replacement.
+  // Native action ownership additionally survives a full WebView reload.
+  var actionLedger = root.__PINVOU_REMOTE_ACTION_LEDGER__ = root.__PINVOU_REMOTE_ACTION_LEDGER__
+    || { entries: Object.create(null), size: 0, lease: "" };
   registry["desktop-remote-control"] = function (context) {
     var state = context.state;
     var notify = context.notify;
@@ -49,12 +53,6 @@
     var proxyOpenIntent = 0;
     var proxyRefreshTimer = null;
     var remoteActionSequence = 0;
-    var uncertainActionRequests = Object.create(null);
-    var uncertainActionOrder = [];
-    var uncertainAttachmentActions = Object.create(null);
-    var uncertainAttachmentCount = 0;
-    var uncertainAttachmentSaturated = false;
-    var uncertainAttachmentLease = "";
     var CAPABILITY_RESPONSE_TIMEOUT_MS = 8_000;
     var CAPABILITY_MAX_ATTEMPTS = 3;
     var CAPABILITY_RENEWAL_LEAD_MS = 5_000;
@@ -251,8 +249,6 @@
       proxyReadIntents = Object.create(null);
       if (capabilityRenewalTimer) clearTimeout(capabilityRenewalTimer);
       capabilityRenewalTimer = null;
-      uncertainActionRequests = Object.create(null);
-      uncertainActionOrder = [];
       Object.keys(retiredWaiters).forEach(function (requestId) {
         clearTimeout(retiredWaiters[requestId].timer);
       });
@@ -466,6 +462,8 @@
       var text = String(raw || "desktop_remote_control_failed");
       var error = new Error(text);
       error.code = text;
+      if (failure && failure.authoritative === true) error.authoritative = true;
+      if (failure && typeof failure.requestId === "string") error.requestId = failure.requestId;
       return error;
     }
 
@@ -1230,24 +1228,13 @@
     }
 
     function remoteActionKey(localSessionId, remoteRef, intent) {
-      return [
-        localSessionId, remoteRef, intent.operation, intent.taskId, intent.transferId,
-        intent.chunkIndex, intent.chunkBytes, intent.permissionRequestId, intent.decision,
-        intent.artifactId, intent.fileName, intent.mimeType, intent.totalBytes, intent.sha256,
-      ].map(function (value) { return value == null ? "" : String(value); }).join("\u001f");
+      return JSON.stringify([attachmentLeaseKey(), localSessionId, remoteRef, intent]);
     }
 
-    function rememberUncertainAction(key, requestId) {
-      if (!uncertainActionRequests[key]) uncertainActionOrder.push(key);
-      uncertainActionRequests[key] = requestId;
-      while (uncertainActionOrder.length > 128) {
-        var expired = uncertainActionOrder.shift();
-        delete uncertainActionRequests[expired];
-      }
-    }
-
-    function forgetUncertainAction(key) {
-      delete uncertainActionRequests[key];
+    function forgetAction(key, entry) {
+      if (actionLedger.entries[key] !== entry) return;
+      delete actionLedger.entries[key];
+      actionLedger.size -= 1;
     }
 
     function attachmentLeaseKey() {
@@ -1267,41 +1254,56 @@
         return Promise.reject(invalidTaskIntent());
       }
       var key = remoteActionKey(localSessionId, remoteRef, intent);
-      var actionLease = retryUncertain === false ? attachmentLeaseKey() : "";
-      if (actionLease && actionLease !== uncertainAttachmentLease) {
-        uncertainAttachmentActions = Object.create(null);
-        uncertainAttachmentCount = 0;
-        uncertainAttachmentSaturated = false;
-        uncertainAttachmentLease = actionLease;
+      var actionLease = attachmentLeaseKey();
+      if (actionLease && actionLedger.lease && actionLease !== actionLedger.lease) {
+        actionLedger.entries = Object.create(null);
+        actionLedger.size = 0;
       }
-      if (retryUncertain === false && (uncertainAttachmentSaturated || uncertainAttachmentActions[key])) {
+      if (actionLease) actionLedger.lease = actionLease;
+      var entry = actionLedger.entries[key];
+      if (entry && suppliedRequestId && suppliedRequestId !== entry.requestId) {
+        return Promise.reject(asBoundedError("remote_action_invalid"));
+      }
+      if (entry && entry.promise) return entry.promise;
+      if (entry && retryUncertain === false) {
         return Promise.reject(asBoundedError("result_unknown"));
       }
-      var requestId = suppliedRequestId || uncertainActionRequests[key] || newRemoteActionRequestId();
+      if (!entry) {
+        if (actionLedger.size >= 128) return Promise.reject(asBoundedError("remote_action_capacity"));
+        entry = { requestId: suppliedRequestId || newRemoteActionRequestId(), unknown: false, promise: null };
+        actionLedger.entries[key] = entry;
+        actionLedger.size += 1;
+      }
       function attempt(mayRetry) {
-        return invoke("desktop_remote_action_a", {
+        return new Promise(function (resolve) {
+          if (actionLease !== attachmentLeaseKey() || actionLedger.entries[key] !== entry) {
+            throw asBoundedError("result_unknown");
+          }
+          resolve(invoke("desktop_remote_action_a", {
           localSessionId: localSessionId, remoteRef: remoteRef,
-          requestId: requestId, intent: intent,
-        }).then(function (body) {
-          forgetUncertainAction(key);
+          requestId: entry.requestId, intent: intent,
+        })); }).then(function (body) {
+          forgetAction(key, entry);
           return body;
         }).catch(function (failure) {
           var error = asBoundedError(failure);
-          error.requestId = requestId;
+          if (error.requestId) entry.requestId = error.requestId;
+          else error.requestId = entry.requestId;
           if (error.code === "result_unknown") {
-            if (retryUncertain === false && attachmentLeaseKey() === actionLease && !uncertainAttachmentActions[key]) {
-              if (uncertainAttachmentCount >= 128) uncertainAttachmentSaturated = true;
-              else { uncertainAttachmentActions[key] = true; uncertainAttachmentCount += 1; }
-            }
-            if (retryUncertain !== false) rememberUncertainAction(key, requestId);
-            if (mayRetry) return attempt(false);
-          } else {
-            forgetUncertainAction(key);
+            entry.unknown = true;
+            if (mayRetry && actionLease === attachmentLeaseKey() && actionLedger.entries[key] === entry) return attempt(false);
+          } else if (error.authoritative || !entry.unknown) {
+            forgetAction(key, entry);
           }
           throw error;
         });
       }
-      return attempt(retryUncertain !== false);
+      var resolveFlight;
+      var rejectFlight;
+      var flight = new Promise(function (resolve, reject) { resolveFlight = resolve; rejectFlight = reject; });
+      entry.promise = flight.finally(function () { entry.promise = null; });
+      attempt(retryUncertain !== false).then(resolveFlight, rejectFlight);
+      return entry.promise;
     }
 
     function permissionList(localSessionId, remoteRef, taskId) {
