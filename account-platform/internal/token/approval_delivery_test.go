@@ -58,10 +58,10 @@ type tokenAuthorizationHTTPFixture struct {
 	domain  TokenCommandResult
 	state   tokenAuthorizationDeliveryState
 
-	beginPersisted, domainPersisted, completePersisted      bool
-	routeReads, bindingReads, observes                      int
-	domainCalls, begins, completes, resultWrites, terminals int
-	failStage                                               string
+	beginPersisted, domainPersisted, completePersisted                   bool
+	routeReads, bindingReads, observes                                   int
+	domainReads, domainCalls, begins, completes, resultWrites, terminals int
+	failStage                                                            string
 }
 
 func newTokenAuthorizationHTTPFixture(t *testing.T, wire string) (*tokenAuthorizationHTTPFixture, *httptest.Server) {
@@ -170,6 +170,7 @@ func (fixture *tokenAuthorizationHTTPFixture) handleHTTP(w http.ResponseWriter, 
 		fixture.observes++
 		_ = json.NewEncoder(w).Encode(fixture.state)
 	case strings.HasSuffix(path, "/result") && strings.Contains(path, "/commands/"):
+		fixture.domainReads++
 		if !fixture.domainPersisted {
 			w.WriteHeader(http.StatusNotFound)
 			return
@@ -196,6 +197,11 @@ func (fixture *tokenAuthorizationHTTPFixture) handleHTTP(w http.ResponseWriter, 
 		var body approvedTokenCommandBody
 		if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
 			fixture.testing.Fatal(err)
+		}
+		if body.RequesterUserID != fixture.lease.RequesterUserID || body.AuthorizationVersion != fixture.lease.RequesterAuthorizationVersion ||
+			body.ApprovalRequestID != fixture.lease.ApprovalRequestID || body.ExecutionIdempotencyKey != fixture.lease.ExecutionIdempotencyKey ||
+			body.Envelope.Reason != fixture.lease.RequesterReason || body.CommandFingerprint != fixture.lease.CommandFingerprint {
+			fixture.testing.Error("execution did not retain frozen actor, reason and request identity")
 		}
 		if fixture.binding.SerializationVersion == approvalencoding.ApprovalSerializationVersion {
 			if body.ProofSchemaVersion != fixture.event.ProofSchemaVersion || body.DomainRevision != fixture.event.DomainRevision || body.ProofDigest != fixture.event.ProofDigest ||
@@ -264,8 +270,9 @@ func TestTokenAuthorizationConsumerAcknowledgesAuthenticatedNonTargetWithoutStat
 }
 
 func (fixture *tokenAuthorizationHTTPFixture) delivery(number uint64) *tokenAuthorizationDeliveryStub {
+	// Redelivery changes the delivery count, not the original stream sequence.
 	return &tokenAuthorizationDeliveryStub{raw: fixture.raw, id: fixture.binding.EventID.String(),
-		meta: events.AuthorizationDeliveryMetadata{Stream: "ACCOUNT_PLATFORM", StreamSequence: 40 + number, NumDelivered: number}}
+		meta: events.AuthorizationDeliveryMetadata{Stream: "ACCOUNT_PLATFORM", StreamSequence: 41, NumDelivered: number}}
 }
 
 func TestTokenAuthorizationRawConsumerDualWire(t *testing.T) {
