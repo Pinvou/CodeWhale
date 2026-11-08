@@ -998,6 +998,7 @@ stateNotReady: '遠隔操作の状態が未準備のため、デスクトップ�
 unnegotiatedEvent: event => `デスクトップが未ネゴシエーションの遠隔操作イベントを送信しました：${event}`,
 rpcFailed: 'リモート呼び出しに失敗しました',
 incompatibleDesktop: 'デスクトップのバージョンが現在の遠隔操作に対応していません。先にデスクトップを更新してください',
+accountPlatformFirstTurnUnsupported: 'Web の新しいチャットの最初のメッセージでは、アカウントプラットフォームのモデルを利用できません。他の利用可能なモデルを選択してください。',
 unsupportedCommand: command => `現在のデスクトップはこの遠隔操作コマンドに未対応です：${command}`,
 commandNotAllowed: command => `遠隔操作では ${command} の呼び出しは許可されていません`,
 invalidRequestId: 'リモート呼び出しのリクエスト ID が無効です',
