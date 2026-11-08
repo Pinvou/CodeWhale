@@ -5,7 +5,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 )
@@ -19,17 +18,9 @@ func TestF09CorrectedFinancialPublicCoordinator(t *testing.T) {
 	defer cancel()
 	_ = newStageFixture(t, ctx, raw)
 	dir := filepath.Join("..", "billing")
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
 	args := []string{"test", "-race", "-json", "-count=1", "-mod=readonly", "-run", "^TestF09Corrected"}
-	for _, entry := range entries {
-		if strings.HasSuffix(entry.Name(), ".go") && !strings.HasSuffix(entry.Name(), "_test.go") {
-			args = append(args, filepath.Join(dir, entry.Name()))
-		}
-	}
-	for _, file := range []string{"retained_financial_integration_test.go", "finance_refund_reconcile_integration_test.go", "entitlement_correction_execute_integration_test.go", "entitlement_correction_refund_integration_test.go"} {
+	args = append(args, stageProductionSources(t, ctx, dir)...)
+	for _, file := range []string{"payment_credit_legacy_fixture_test.go", "payment_credit_fixture_test.go", "retained_financial_integration_test.go", "retained_organization_financial_dismiss_integration_test.go", "finance_refund_reconcile_integration_test.go", "entitlement_correction_execute_integration_test.go", "entitlement_correction_refund_integration_test.go"} {
 		args = append(args, filepath.Join(dir, file))
 	}
 	child := exec.CommandContext(ctx, os.Getenv("PINVOU_PRIVATE_GO"), args...)
