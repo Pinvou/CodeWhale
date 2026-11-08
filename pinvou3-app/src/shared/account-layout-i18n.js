@@ -152,3 +152,30 @@ adminLayoutCopy.ja.organization.unitMove = { currentPath: '現在の場所', pat
 Object.assign(adminLayoutCopy.zh.organization.unitMove, { conflictOption: '已有同名单元', moveNameConflict: '所选层级已有同名单元，请选择其他位置。', recoveryTarget: '原请求的移动目标', possibleConflictOption: '可能重名，由系统在提交时核对', currentParentID: '当前上级单元 ID', sourceOrganization: '所属组织', sourceUnit: '待移动单元' });
 Object.assign(adminLayoutCopy.en.organization.unitMove, { conflictOption: 'Same name already present', moveNameConflict: 'A unit with this name already exists at this level. Choose a different location.', recoveryTarget: 'Destination in the original request', possibleConflictOption: 'Possible name conflict; checked on submit', currentParentID: 'Current parent unit ID', sourceOrganization: 'Organization', sourceUnit: 'Unit to move' });
 Object.assign(adminLayoutCopy.ja.organization.unitMove, { conflictOption: '同名の単位あり', moveNameConflict: '選んだ階層に同名の単位があります。別の場所を選択してください。', recoveryTarget: '元のリクエストの移動先', possibleConflictOption: '同名の可能性があります。送信時に確認します', currentParentID: '現在の親単位 ID', sourceOrganization: '所属組織', sourceUnit: '移動する単位' });
+Object.assign(adminLayoutCopy.zh.organization.unitMove, {
+  proposedPath: '拟移动到',
+  proposedUnknown: '尚未确认移动后路径',
+  impactTitle: '对下级单元的影响',
+  knownImpact: count => count ? `按已加载的结构，${count} 个未删除的下级单元（含间接下级）的路径将一同变更。` : '已加载的结构中没有未删除的下级单元。',
+  partialImpact: count => `已确认 ${count} 个未删除的下级单元的路径将变更；无法确认总数。`,
+  unknownImpact: '暂无法确认下级单元的影响。',
+  previewStale: '此结构的移动预览已失效。请关闭弹窗，刷新组织结构后重新核对。',
+});
+Object.assign(adminLayoutCopy.en.organization.unitMove, {
+  proposedPath: 'Proposed location',
+  proposedUnknown: 'The proposed path is not confirmed',
+  impactTitle: 'Effect on descendant units',
+  knownImpact: count => count === 1 ? 'In the loaded structure, the path of one non-deleted descendant unit will change.' : count > 1 ? `In the loaded structure, the paths of ${count} non-deleted descendant units will change.` : 'The loaded structure contains no non-deleted descendant units.',
+  partialImpact: count => count === 1 ? 'The path of one non-deleted descendant unit is known to change. The total could not be confirmed.' : `The paths of ${count} non-deleted descendant units are known to change. The total could not be confirmed.`,
+  unknownImpact: 'The effect on descendant units could not be confirmed.',
+  previewStale: 'This move preview is out of date. Close this dialog, refresh the organization, and check the preview again.',
+});
+Object.assign(adminLayoutCopy.ja.organization.unitMove, {
+  proposedPath: '移動先のパス',
+  proposedUnknown: '移動先のパスは確認できていません',
+  impactTitle: '下位単位への影響',
+  knownImpact: count => count ? `取得済みの構造では、削除されていない下位単位（間接的な下位を含む）${count} 件のパスが変わります。` : '取得済みの構造には、削除されていない下位単位はありません。',
+  partialImpact: count => `削除されていない下位単位 ${count} 件のパスが変わることを確認できました。総数は確認できません。`,
+  unknownImpact: '下位単位への影響は確認できません。',
+  previewStale: 'この移動プレビューは無効になりました。ダイアログを閉じ、組織情報を更新してから再度確認してください。',
+});

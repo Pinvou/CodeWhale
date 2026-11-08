@@ -78,6 +78,9 @@ export function OrganizationAdminPortalWorkspace({ client, me, acceptedSessionEp
     }}>{labels.directoryPagination.next}</button></nav>
   </>;
   const available = current?.organization_id === requestedID && detail?.summary?.organization_id === requestedID;
+  const [rejectedMovePreview, setRejectedMovePreview] = useState(null);
+  const moveTree = detail?.units, moveEpoch = client.financeSessionEpoch || 0;
+  const movePreviewStale = available && rejectedMovePreview?.client === client && rejectedMovePreview.epoch === moveEpoch && rejectedMovePreview.organizationID === requestedID && rejectedMovePreview.tree === moveTree;
   const unitNames = new Map((detail?.units.items || []).map(unit => [unit.unit_id, unit.name]));
   const readiness = detail?.readiness;
   const mayDelete = current?.status === 'DISABLED' && readiness?.ready === true && readiness.current_status === 'DISABLED' && readiness.account_version === current.version && !detail?.readinessError;
@@ -90,6 +93,7 @@ export function OrganizationAdminPortalWorkspace({ client, me, acceptedSessionEp
     const words = labels.unitMove;
     let plan;
     const getPlan = () => { if (plan === undefined) plan = organizationUnitMovePlan(current, detail, unit.unit_id, copy.root); return plan; };
+    const renderPath = (segments, unavailable) => segments ? <span dir="ltr">{segments.map((part, index) => <React.Fragment key={part.id ?? '@root'}>{index > 0 && ' › '}<bdi>{part.label}</bdi></React.Fragment>)}</span> : unavailable;
     const revision = JSON.stringify([requestedID, current?.status, unit.unit_id, unit.status, unit.parent_id === undefined ? 'unknown' : unit.parent_id, detail?.units?.structure_version, Boolean(detail?.unitsError)]);
     return action('move-unit:' + unit.unit_id, copy.moveUnit, [{ name: 'parent', options: () => getPlan()?.options.map(option => option.conflict ? { ...option, label: option.label + ' · ' + words.conflictOption } : option.possibleConflict ? { ...option, label: option.label + ' · ' + words.possibleConflictOption } : option) || [], emptyLabel: words.placeholder }], values => {
       const currentPlan = getPlan();
@@ -97,18 +101,16 @@ export function OrganizationAdminPortalWorkspace({ client, me, acceptedSessionEp
       return currentPlan.prepare(values.parent);
     }, 'moveUnit', unit.unit_id, false, { draftContext: {
       revision, changed: words.changed,
+      onKnownRejection: reason => {
+        // A removed organization or source can be rejected before the structure version check.
+        const rejectedTree = reason?.status === 409 && reason.code === 'ACCOUNT_CONFLICT' || reason?.status === 404 && reason.code === 'NOT_FOUND';
+        if (rejectedTree) setRejectedMovePreview({ client, epoch: moveEpoch, organizationID: requestedID, tree: moveTree });
+      },
       targetSummary: () => <span className="ap-org-move-subject">
         {moveSubject(words.sourceOrganization, current.name, current.organization_id)}
         {moveSubject(words.sourceUnit, unit.name, unit.unit_id)}
       </span>,
       reason: values => { const currentPlan = getPlan(); return currentPlan ? words[currentPlan.reason(values.parent)] || '' : words.moveUnavailable; },
-      summary: () => {
-        const currentPlan = getPlan();
-        return <dl className="ap-org-move-current"><dt>{words.currentPath}</dt><dd>
-          {currentPlan?.segments ? <span dir="ltr">{currentPlan.segments.map((part, index) => <React.Fragment key={part.id ?? '@root'}>{index > 0 && ' › '}<bdi>{part.label}</bdi></React.Fragment>)}</span> : words.pathUnavailable}
-          {currentPlan?.segments && currentPlan.currentParent && <small className="ap-org-move-current-parent">{words.currentParentID}: <code>{currentPlan.currentParent}</code></small>}
-        </dd></dl>;
-      },
       pendingSummary: facts => {
         const parentID = facts.parent_id;
         let target = words.pathUnavailable;
@@ -117,6 +119,16 @@ export function OrganizationAdminPortalWorkspace({ client, me, acceptedSessionEp
           try { target = <code>{organizationID(parentID)}</code>; } catch { /* Keep the original request unchanged. */ }
         }
         return <dl className="ap-org-move-current ap-org-move-recovery-target"><dt>{words.recoveryTarget}</dt><dd>{target}</dd></dl>;
+      },
+      preview: (values, sameRevision) => {
+        const currentPlan = sameRevision && !movePreviewStale && !detailBusy && available ? getPlan() : null;
+        const preview = currentPlan?.preview(values.parent);
+        const impact = preview?.impact;
+        return <>{movePreviewStale && <p className="ap-org-move-draft-help" role="status">{words.previewStale}</p>}<dl className="ap-org-move-current ap-org-move-preview" aria-live={movePreviewStale ? 'off' : 'polite'}>
+          <dt>{words.currentPath}</dt><dd>{renderPath(currentPlan?.segments, words.pathUnavailable)}{currentPlan?.segments && currentPlan.currentParent && <small className="ap-org-move-current-parent">{words.currentParentID}: <code>{currentPlan.currentParent}</code></small>}</dd>
+          <dt>{words.proposedPath}</dt><dd>{renderPath(preview?.segments, words.proposedUnknown)}{preview?.targetID && <small>{copy.parent}: <code>{preview.targetID}</code></small>}</dd>
+          <dt>{words.impactTitle}</dt><dd>{impact?.complete ? words.knownImpact(impact.known) : impact?.known ? words.partialImpact(impact.known) : words.unknownImpact}</dd>
+        </dl></>;
       },
     } });
   };
