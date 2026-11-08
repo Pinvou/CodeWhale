@@ -180,8 +180,17 @@ export class OrganizationAdminClient {
   const value = await this.client.request('account', resource, signal);
   collection(value, adminOrganization); return value;
  }
- async read(org, resource, signal) { const value = await this.client.request('account', `/admin/v1/organizations/${organizationID(org)}/${resource}`, signal); if (resource === 'units') { organizationVersion(value.structure_version); collection(value, item => owned(item, org, 'unit_id')); } else if (resource === 'members') collection(value, requireMembership); else if (value?.organization_id !== org) invalid(); return value; }
- async members(org, cursor = '', signal, filters = {}) { const query = new URLSearchParams({ limit: '25' }); if (cursor) query.set('cursor', cursor); for (const key of ['q', 'role']) if (filters[key]) query.set(key, String(filters[key]).trim()); const value = await this.client.request('account', `/admin/v1/organizations/${organizationID(org)}/members?${query}`, signal); collection(value, requireMembership); return value; }
+ async read(org, resource, signal, { fresh = false } = {}) { const path = `/admin/v1/organizations/${organizationID(org)}/${resource}`; prepareOrganizationRead(this.client, path, signal, fresh); const value = await this.client.request('account', path, signal); if (resource === 'units') { organizationVersion(value.structure_version); collection(value, item => owned(item, org, 'unit_id')); } else if (resource === 'members') collection(value, requireMembership); else if (value?.organization_id !== org) invalid(); return value; }
+ async members(org, cursor = '', signal, filters = {}, { fresh = false } = {}) {
+  const query = new URLSearchParams({ limit: '25' });
+  if (cursor) query.set('cursor', cursor);
+  for (const key of ['q', 'role']) if (filters[key]) query.set(key, String(filters[key]).trim());
+  const resource = `/admin/v1/organizations/${organizationID(org)}/members?${query}`;
+  prepareOrganizationRead(this.client, resource, signal, fresh);
+  const value = await this.client.request('account', resource, signal);
+  collection(value, requireMembership);
+  return value;
+ }
  async write(org, action, body, key, target = '') {
   const root = `/admin/v1/organizations${org ? `/${organizationID(org)}` : ''}`;
   const id = target ? organizationID(target) : '';
