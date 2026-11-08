@@ -2043,7 +2043,13 @@ function composePlanMarkdown(snapshots) { return pinvouSharedtauriMain().compose
     // Live suppression probe for scheduleStreamNotify: inside a background
     // working set the immediate first-delta notify is suppressed, so the
     // stream scheduler must fall through to its bounded frame instead.
-    isNotifySuppressed: function () { return suppressNotify; },
+    // r12 P2-2：谓词必须与 notify() 的真实短路条件一致（suppressNotify ||
+    // startupNotificationBatching）——启动批处理窗内 notify 不发布，若谓词
+    // 仍报「未抑制」，chat-events 的派发盖章门会把一次零发布的 dispatch
+    // 量成健康派发（漏报方向的假健康章）。scheduleStreamNotify 的直发/合并
+    // 分流同理受益：批处理窗内的首 delta 走合并帧腿，批处理结束后随首次
+    // 真实发布落章。
+    isNotifySuppressed: function () { return suppressNotify || startupNotificationBatching; },
     recordAuthoritySyncDiagnostic: recordAuthoritySyncDiagnostic,
     authoritySyncBufferSnapshot: authoritySyncBufferSnapshot,
     // 与历史重载路径共用同一信封判定（userMessageDisplayText 的 isInternalRuntimeEnvelopeText），

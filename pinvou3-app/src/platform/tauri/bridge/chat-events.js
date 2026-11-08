@@ -1116,6 +1116,12 @@ function finalizeStreamingReasoning(index) { return pinvouSharedtauriChatEvents(
       markRemoteTurn(sid, doneBuffer, true, "chat_done_without_local_owner");
     }
     if (!requiresAuthorityReconcile) markScheduledInitialTurnTerminal(sid);
+    // r12 P2-1：终态的前台/后台判定必须在进 runSyncOnSession **之前**取——
+    // 路由内部会把 activeSessionId 临时翻成 sid（:104 harness 同款语义），
+    // 闭包内再比就是恒等。前台终态的合并帧虽被取消，但路由恢复后的真实
+    // notify 会发布并补章；打节流标会让 throttledOrigin 否决补章后的
+    // finalize，用户看着会话完成时的真实主线程冻结零上报。
+    var terminalForeground = sid === state.activeSessionId;
     runSyncOnSession(sid, function () {
       var error = e.payload && e.payload.error;
       var terminalRecord = recordTurnCompleted(e.payload || {});
@@ -1174,7 +1180,11 @@ function finalizeStreamingReasoning(index) { return pinvouSharedtauriChatEvents(
       // r9 P1-C：后台终态取消的合并帧是滞留条目（引擎 delta+done 背靠背时
       // 终态总在 +16ms rAF 之前到——每次后台会话完成都会滞留）。切回后下一
       // 个事件会把它盖章成假 stall（recv→dispatch= 纯阅读时间）。按节流收口。
-      if (window.RenderStageProbe) {
+      // r12 P2-1：**仅后台会话**（terminalForeground 在 runSyncOnSession 之前
+      // 捕获，见上方声明处注释）——前台终态的补偿发布真实存在，节流标会否决
+      // 会话完成时刻的真实冻结上报。后台条目无补偿发布（其内容已随活跃会话
+      // 的发布上屏），维持节流收口不变。
+      if (window.RenderStageProbe && !terminalForeground) {
         try { window.RenderStageProbe.markThrottled(sid); } catch (_) {}
       }
       var terminalStatus = String(e.payload && e.payload.status || "").toLowerCase();

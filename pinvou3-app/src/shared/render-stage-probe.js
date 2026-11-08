@@ -37,7 +37,12 @@
  *     pend 时出现，独流后台会话会被自己的 32ms 帧在 ~16ms 盖章。
  *   - 先章有效分支对等待超阈值的条目补章 t_frame（r7 P2-3）：冻结中排队的
  *     终态 notify 解冻后先于 rAF 执行，不补章则该条 dispatch→frame 为 null、
- *     真实冻结零记录。t_dispatch 首章有效，归因不颠倒。
+ *     真实冻结零记录。t_dispatch 首章有效，归因不颠倒。等待**未**超阈值的
+ *     条目不补章也不收尾（r12 P2-3 帧腿保留）：刚武装的 rAF 帧腿照常落章
+ *     量终态提交 paint，finalize 只发生在补章/帧回调/visibility/begin 收口。
+ *   - markThrottled 只打标不收尾，滞留条目由 begin 入口的扫尾按 5s 新鲜度
+ *     上界有界收口（r12 P2-4）：先标后章（r7 P2-2）语义原样保留，等不来
+ *     章的未派发条目在任何后续活动后 5s 内被移出 currentBySession。
  */
 (function (root) {
   "use strict";
@@ -178,9 +183,31 @@
     });
   }
 
+  // r12 P2-4：滞留打标条目的有界收口。原实现只打标不收尾——条目滞留到该
+  // sid 下次 begin 或窗口隐藏，currentBySession 对环形淘汰免疫（_liveEntry
+  // 仍取到同引用），后台终态/被弃会话的未派发条目无界滞留。此处按派发章
+  // 同款的 5s 新鲜度上界扫尾：**先标后章**（r7 P2-2）不受影响——后台预览腿
+  // 打标后 ~16-32ms 内的合法补章远早于上界；只有等不来章的滞留条目被收走。
+  // 挂在 begin（探针最高频入口）上摊销，任何会话的后续活动都会清其它 sid
+  // 的滞留条目。
+  function sweepStaleThrottled() {
+    var keys = Object.keys(currentBySession);
+    for (var i = 0; i < keys.length; i++) {
+      var entry = currentBySession[keys[i]];
+      if (
+        entry && !entry.finalized &&
+        entry.throttledOrigin && entry.t_dispatch == null &&
+        entry.t_recv != null && now() - entry.t_recv > STALE_DISPATCH_LIMIT_MS
+      ) {
+        finalize(entry);
+      }
+    }
+  }
+
   root.RenderStageProbe = {
     /** 事件已到达 JS 监听器。同 session 的上一个未完结周期先按已有时间戳收尾。 */
     begin: function (sid) {
+      sweepStaleThrottled();
       var key = sid || "";
       var previous = currentBySession[key];
       if (previous) {
@@ -239,8 +266,14 @@
         // 分段归因不颠倒（recv→dispatch 保持在首章量级）。
         if (entry.t_frame == null && now() - entry.t_dispatch > STALL_DISPATCH_TO_FRAME_MS) {
           entry.t_frame = now();
+          finalize(entry);
+          return;
         }
-        finalize(entry);
+        // r12 P2-3 帧腿保留：等待未超阈值（正常合并节奏 ~16ms 间隙恰在此带）
+        // 时**不补章也不收尾**——此刻 rAF 帧腿刚武装，finalize 会取消它，
+        // 终态提交 paint 的真实呈现时刻被系统性失测（每条终态都走这臂）。
+        // 让已武装的帧回调自己落章：markFrame 量到 t_frame 后 finalize。
+        // 兜底不变：窗口隐藏由 visibilitychange 收尾、supersede 由 begin 收尾。
         return;
       }
       // r4 P2-A（陈旧条目新鲜度上界）：后台会话的最后一条 delta 停在「未派发」

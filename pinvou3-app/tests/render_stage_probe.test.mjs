@@ -193,22 +193,147 @@ test('周期被下一事件收尾时，已武装的帧回调被取消（隐藏�
 });
 
 
-// r2 P2-5①：markDispatched 覆盖旧句柄前必须 cancel——同一 entry 双派发场景。
-// 桩按句柄删除（真取消语义），此测试在旧实现（不 cancel 直接覆盖）下必红。
-test('同一周期二次 markDispatched 时旧 rAF 句柄被取消（P2-5 行为锁）', () => {
+// r2 P2-5① → r6 P2-B → r8 P2-3 → r12 P2-3：先章有效分支的收尾语义变迁。
+// r12 起：等待**未**超阈值的二次 markDispatched（终态 notify 的正常 ~16ms
+// 间隙）不 finalize、不取消刚武装的 rAF——帧腿保留，量终态提交 paint 的
+// 真实呈现；等待超阈值才补章并收尾（下方补章臂测试覆盖）。
+test('先章有效：等待未超阈值保留帧腿，帧回调自量 t_frame（r12 P2-3）', () => {
   const h = harness();
   h.probe.begin('dbl');
   h.probe.markDispatched('dbl');
   assert.equal(h.rafCount(), 1);
-  // r6 P2-B：先章有效——已有 t_dispatch 的二次 markDispatched 直接收尾，
-  // 不重臂 rAF、不堆积句柄
-  h.probe.markDispatched('dbl');
-  // r8 P2-3：先章有效分支必 finalize——finalize 取消刚武装的 rAF，句柄应为
-  // 恒 0（原 <=1 断言对任何回归都不红；「覆盖前取消」的防御分支已随死代码
-  // 删除，变异亲证删除后全套件绿）。
-  assert.equal(h.rafCount(), 0, '先章有效：二次 markDispatched finalize 并取消 rAF');
+  h.probe.markDispatched('dbl');          // 终态 notify 紧随（waited ≈ 0ms ≤ 120）
+  assert.equal(h.rafCount(), 1, '帧腿保留：不取消刚武装的 rAF');
+  assert.equal(h.cancelled.size, 0, '无取消');
+  const entry = h.probe._liveEntry('dbl');
+  assert.ok(entry && !entry.finalized, '条目未收尾，等帧回调落章');
+  assert.equal(entry.t_frame, null, '未到补章阈值，不补 t_frame');
+  flushFrames(h);                          // 终态提交 paint 的帧
+  assert.equal(h.rafCount(), 0, '帧回调后清空');
   assert.ok(h.probe._liveEntry('dbl') === null || h.probe._liveEntry('dbl').finalized,
-    '先章有效：二次 markDispatched 应 finalize 而非覆盖');
+    '帧回调落章后 finalize');
+  assert.equal(h.recorded.length, 0, '正常速度不上报');
+  const snap = h.probe.snapshot();
+  assert.ok(snap[snap.length - 1].dispatch_to_frame_ms != null,
+    '帧腿保留后 dispatch→frame 有量值（原实现此段恒 null）');
+});
+
+// r12 P2-3 行为锁：等待**超**阈值的二次 markDispatched 仍走补章+收尾臂
+// （r7 P2-3 冻结中排队语义不变），补章收尾取消已武装的帧回调。
+test('先章有效：等待超阈值仍补章收尾并取消 rAF（r7 P2-3 语义保持）', () => {
+  const h = harness();
+  h.probe.begin('frz');
+  h.probe.markDispatched('frz');
+  const fe = h.probe._liveEntry('frz');
+  fe.t_recv -= 400;                        // 两章一起回拨：recv→dispatch 保持 ≈0（聚焦帧段）
+  fe.t_dispatch -= 400;                    // 帧等待 400ms（>120）：解冻后的终态 notify
+  h.probe.markDispatched('frz');
+  assert.equal(h.rafCount(), 0, '补章臂收尾并取消 rAF');
+  assert.ok(h.probe._liveEntry('frz') === null || h.probe._liveEntry('frz').finalized,
+    '超阈值补章后收尾');
+  assert.equal(h.recorded.length, 1, '真实冻结上报（dispatch→frame）');
+});
+
+// r12 P2-4：打标未派发条目在其 sid 永不再 begin 时，由**其它会话**的后续
+// 活动按 5s 新鲜度上界扫掉——currentBySession 不再无界滞留。先标后章窗口
+// （打标后 ~16-32ms 的合法补章）不受影响（既有 P2-2 测试覆盖）。
+test('滞留打标条目经跨会话活动有界收口（r12 P2-4）', () => {
+  const h = harness();
+  h.probe.begin('ghost');
+  const ghost = h.probe._liveEntry('ghost');
+  ghost.t_recv -= 60000;                   // 一分钟前（远超 5s 上界）
+  h.probe.markThrottled('ghost');          // 后台终态收口：此后该 sid 不再 begin
+  h.probe.begin('other');                  // 任何后续活动
+  assert.ok(h.probe._liveEntry('ghost') === null || h.probe._liveEntry('ghost').finalized,
+    '滞留打标条目被扫尾（原实现永远滞留到窗口隐藏）');
+  // 5s 以内的打标条目不受扫尾影响（先标后章窗口）。
+  h.probe.begin('fresh');
+  h.probe.markThrottled('fresh');
+  h.probe.begin('other2');
+  const fresh = h.probe._liveEntry('fresh');
+  assert.ok(fresh && !fresh.finalized, '新鲜打标条目不被误扫');
+});
+
+// r12 P3（评审随批点名）：120ms 阈值的排他边界无行为锁——变异 `>` → `>=`
+// 后全套件曾 21/21 假绿。两段各钉「恰 120 不上报、刚超即上报」。段差由
+// **手工对齐时间戳**构造（不靠回拨+真实时钟的 ε），边界值逐毫秒精确。
+test('120ms 阈值边界锁：恰 120 不上报，>120 上报（两段）', () => {
+  // recv→dispatch 段：盖章后把 t_recv 对齐到 t_dispatch−120（恰）/−121（超）。
+  const a = harness();
+  a.probe.begin('b1');
+  a.probe.markDispatched('b1');
+  const e1 = a.probe._liveEntry('b1');
+  e1.t_recv = e1.t_dispatch - 120;
+  flushFrames(a);
+  assert.equal(a.recorded.length, 0, 'recv→dispatch 恰 120ms：排他语义不上报');
+  const b = harness();
+  b.probe.begin('b2');
+  b.probe.markDispatched('b2');
+  const e2 = b.probe._liveEntry('b2');
+  e2.t_recv = e2.t_dispatch - 121;
+  flushFrames(b);
+  assert.equal(b.recorded.length, 1, 'recv→dispatch 121ms 必须上报');
+  // dispatch→frame 段：armed 条目手工对齐 t_frame−t_dispatch 后经 begin-supersede
+  // 收尾（supersede 的补章门按真实 waited≈0 判定不补章，段差用手工值）。
+  const c = harness();
+  c.probe.begin('b3');
+  c.probe.markDispatched('b3');
+  const e3 = c.probe._liveEntry('b3');
+  e3.t_dispatch -= 100;                    // waited ≈ 100+ε < 120：supersede 不补章
+  e3.t_frame = e3.t_dispatch + 120;        // dispatch→frame 恰 120
+  c.probe.begin('b3');
+  assert.equal(c.recorded.length, 0, 'dispatch→frame 恰 120ms：排他语义不上报');
+  const d = harness();
+  d.probe.begin('b4');
+  d.probe.markDispatched('b4');
+  const e4 = d.probe._liveEntry('b4');
+  e4.t_dispatch -= 100;
+  e4.t_frame = e4.t_dispatch + 121;        // 刚超
+  d.probe.begin('b4');
+  assert.equal(d.recorded.length, 1, 'dispatch→frame 121ms 必须上报');
+});
+
+// r12 P3（评审随批点名）：record 抛错不得烧掉 10s 节流窗口——诊断恢复后
+// 同会话的下一条真实 stall 仍可上报。原实现只测「模块缺失」，未测「抛错」。
+test('record 抛错不烧节流配额（r12 P3）', () => {
+  const recorded = [];
+  const frames = [];
+  let throwOnce = true;
+  const window = {
+    requestAnimationFrame: fn => { frames.push(fn); return frames.length; },
+    cancelAnimationFrame: () => {},
+    PinvouAuthoritySyncDiagnostics: {
+      record: (event, details) => {
+        if (throwOnce) { throwOnce = false; throw new Error('sink unavailable'); }
+        recorded.push({ event, details });
+      },
+    },
+  };
+  const listeners = {};
+  const document = {
+    visibilityState: 'visible',
+    addEventListener(name, fn) { (listeners[name] = listeners[name] || []).push(fn); },
+    dispatchEvent(event) { (listeners[event.type] || []).forEach((fn) => fn(event)); },
+  };
+  const sandbox = { window, document, Event: class { constructor(type) { this.type = type; } } };
+  vm.createContext(sandbox);
+  vm.runInContext(source, sandbox, { filename: 'render-stage-probe.js' });
+  const probe = window.RenderStageProbe;
+  const flush = () => { const fns = frames.splice(0); for (const fn of fns) if (fn) fn(); };
+  probe.begin('t1');
+  probe._liveEntry('t1').t_recv -= 500;
+  probe.markScheduled('t1');
+  probe.markDispatched('t1');               // 第一次 stall：record 抛错
+  probe._liveEntry('t1').t_frame = probe._liveEntry('t1').t_dispatch;
+  flush();
+  assert.equal(recorded.length, 0, '抛错的那次未落账');
+  probe.begin('t1');                        // 同会话紧接着第二条真实 stall（<10s）
+  probe._liveEntry('t1').t_recv -= 500;
+  probe.markScheduled('t1');
+  probe.markDispatched('t1');
+  probe._liveEntry('t1').t_frame = probe._liveEntry('t1').t_dispatch;
+  flush();
+  assert.equal(recorded.length, 1, '抛错未烧节流配额：恢复后的 stall 照常上报');
 });
 
 // r2 P1-1 行为锁：窗口隐藏期间的 markDispatched 不武装 rAF（同步收尾），
