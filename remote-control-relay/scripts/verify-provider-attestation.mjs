@@ -13,6 +13,20 @@ function exact(value, keys, code) {
 function digest(value) { return crypto.createHash("sha256").update(value).digest("hex"); }
 function arg(name) { const index = process.argv.indexOf(name); return index < 0 ? undefined : process.argv[index + 1]; }
 
+const CLOCK_SKEW_MS = 30_000;
+const FRESHNESS_MS = 300_000;
+const MAX_RUN_MS = 120 * 60_000;
+
+// Qualification must follow a completed, bounded run. The five-minute online
+// signing window is not a maximum duration for the physical two-host run.
+export function validateReleaseQualificationWindow(startedAt, finishedAt, now = Date.now()) {
+  if (![startedAt, finishedAt, now].every((value) => Number.isSafeInteger(value) && value >= 0)
+    || finishedAt < startedAt || finishedAt - startedAt > MAX_RUN_MS
+    || finishedAt > now + CLOCK_SKEW_MS || now - finishedAt > FRESHNESS_MS) {
+    fail("evidence_qualification_time_invalid");
+  }
+}
+
 export function providerAttestationPayload(value) {
   return Buffer.from(JSON.stringify({
     schema: value.schema, version: value.version, role: value.role, role_policy_sha256: value.role_policy_sha256, provider: value.provider, key_id: value.key_id,
@@ -24,7 +38,7 @@ export function providerAttestationPayload(value) {
   }), "utf8");
 }
 
-export function verifyProviderAttestation(value, expected, now = Date.now()) {
+function verifyAttestation(value, expected, now, run) {
   exact(value, ["schema", "version", "role", "role_policy_sha256", "provider", "key_id", "run_nonce", "public_key_spki_pem", "public_key_sha256",
     "non_exportable", "acl_attestation_sha256", "provider_measurement_sha256", "driver_sha256", "issued_at", "verifier"], "provider_attestation_schema_invalid");
   exact(value.verifier, ["kind", "vendor", "leaf_certificate_pem", "certificate_chain_pem", "signature_algorithm", "signature"], "provider_attestation_schema_invalid");
@@ -56,11 +70,27 @@ export function verifyProviderAttestation(value, expected, now = Date.now()) {
   if (root.ca !== true || !root.checkIssued(root) || !root.verify(root.publicKey)) fail("provider_attestation_chain_invalid");
   if (digest(root.raw) !== expected.rootCertificateSha256 || digest(leaf.raw) !== expected.verifierCertificateSha256) fail("provider_attestation_certificate_untrusted");
   const issuedAt = Date.parse(value.issued_at);
-  if (!Number.isFinite(issuedAt) || issuedAt > now + 30_000 || now - issuedAt > 300_000
-    || certificates.some((certificate) => Date.parse(certificate.validFrom) > issuedAt || Date.parse(certificate.validTo) < issuedAt)) fail("provider_attestation_stale");
+  if (!Number.isSafeInteger(now) || now < 0 || !Number.isFinite(issuedAt)) fail("provider_attestation_stale");
+  if (run) {
+    validateReleaseQualificationWindow(run.startedAt, run.finishedAt, now);
+    if (issuedAt < run.startedAt || issuedAt > run.finishedAt) fail("provider_attestation_stale");
+  } else if (issuedAt > now + CLOCK_SKEW_MS || now - issuedAt > FRESHNESS_MS) {
+    fail("provider_attestation_stale");
+  }
+  // Both signing and qualification must fall inside the pinned chain's validity.
+  if (certificates.some((certificate) => Date.parse(certificate.validFrom) > Math.min(issuedAt, now)
+    || Date.parse(certificate.validTo) < Math.max(issuedAt, now))) fail("provider_attestation_stale");
   const signature = Buffer.from(value.verifier.signature, "base64");
   if (!crypto.verify("sha256", providerAttestationPayload(value), leaf.publicKey, signature)) fail("provider_attestation_signature_invalid");
   return { publicKeySha256: value.public_key_sha256, issuedAt: value.issued_at };
+}
+
+export function verifyProviderAttestation(value, expected, now = Date.now()) {
+  return verifyAttestation(value, expected, now, null);
+}
+
+export function verifyProviderAttestationForRun(value, expected, { startedAt, finishedAt, now = Date.now() } = {}) {
+  return verifyAttestation(value, expected, now, { startedAt, finishedAt });
 }
 
 export async function verifyProviderAttestationFile(input, output, expected) {

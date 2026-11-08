@@ -20,6 +20,8 @@
 
 ### 1.1 泄露扫描的非空执行证据
 
+发布资格须在最长 120 分钟的演练结束后五分钟内验证；证明签发时序、墙钟偏差和证书有效期按[发布证明时间合同](remote-control-provider-evidence-time.md)执行，陈旧证据不得用于放行。
+
 已删除的 Rust `controller::telemetry` 不再是验证入口。以下每条必须实际报告 `1 passed; 0 failed`，不能仅用 cargo 退出码 0 或 `0 tests` 作为通过证据：
 
 ```bash

@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { test } from "node:test";
 import { runControllerReleaseGate } from "../scripts/controller-release-gate.mjs";
 import { validateMonotonicDeadlineObservation, validateReleaseEvidence } from "../scripts/validate-controller-release-evidence.mjs";
-import { providerAttestationPayload } from "../scripts/verify-provider-attestation.mjs";
+import { providerAttestationPayload, verifyProviderAttestation, verifyProviderAttestationForRun } from "../scripts/verify-provider-attestation.mjs";
 import { parseSigstoreJsonl, uniqueStatementForDigest, validateGitHubBuildIdentity } from "../scripts/verify-installer-supply-chain.mjs";
 import { requireCompleteCoverage } from "../../scripts/check-enrollment-gated-v2-rollback.mjs";
 
@@ -81,7 +81,8 @@ function signArtifact(artifact) {
   artifact.signature = crypto.sign(null, payload, testKeysByRole.get(artifact.machine_role).privateKey).toString("base64");
 }
 
-const validationOptions = (extra = {}) => ({ expectedCommit: commit, allowTestAttestation: true, ...extra });
+const validationOptions = (extra = {}) => ({ expectedCommit: commit, allowTestAttestation: true,
+  qualificationClock: () => Date.parse(testFinishedAt), ...extra });
 
 test("RC-E2E-011 applies the RTT safety formula and rejects a terminal after its candidate deadline", () => {
   const terminal = {
@@ -362,6 +363,87 @@ test("strict evidence validator accepts the exact 27 stable journey IDs", async 
   assert.ok(result.artifact_count > 60);
 });
 
+test("qualification uses trusted current time, rejects stale/future runs and bounds long runs", async () => {
+  const evidence = await validEvidence();
+  const finish = Date.parse(evidence.finished_at);
+  for (const now of [finish + 300_001, finish - 30_001, NaN, Infinity, -1]) {
+    await assert.rejects(() => validateReleaseEvidence(evidence, validationOptions({ qualificationClock: () => now })),
+      { code: "evidence_qualification_time_invalid" });
+  }
+  for (const now of [finish, finish + 300_000, finish - 30_000]) {
+    await assert.doesNotReject(() => validateReleaseEvidence(evidence, validationOptions({ qualificationClock: () => now })));
+  }
+  const tooLong = structuredClone(evidence);
+  tooLong.finished_at = new Date(Date.parse(tooLong.started_at) + 7_200_001).toISOString();
+  await assert.rejects(() => validateReleaseEvidence(tooLong, validationOptions({
+    qualificationClock: () => Date.parse(tooLong.finished_at),
+  })), { code: "evidence_qualification_time_invalid" });
+});
+
+test("real provider proof permits a one-hour run but cannot qualify an old completed run", async (t) => {
+  const evidence = await validEvidence();
+  const root = await mkdtemp(join(tmpdir(), "pinvou-provider-freshness-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await materializeEvidence(evidence, root);
+  const finish = Date.parse(evidence.finished_at);
+  await validateReleaseEvidence(evidence, validationOptions({ evidenceRoot: root }));
+  await assert.rejects(() => validateReleaseEvidence(evidence, validationOptions({ evidenceRoot: root,
+    qualificationClock: () => finish + 300_001,
+  })), { code: "evidence_qualification_time_invalid" });
+});
+
+test("qualification checks time again after artifact verification instead of freezing the entry clock", async (t) => {
+  const evidence = await validEvidence();
+  const root = await mkdtemp(join(tmpdir(), "pinvou-provider-expiry-during-check-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await materializeEvidence(evidence, root);
+  const finish = Date.parse(evidence.finished_at);
+  let reads = 0;
+  await assert.rejects(() => validateReleaseEvidence(evidence, validationOptions({ evidenceRoot: root,
+    qualificationClock: () => ++reads === 1 ? finish : finish + 300_001,
+  })), { code: "evidence_qualification_time_invalid" });
+  assert.ok(reads >= 2);
+});
+
+test("provider online freshness and run qualification retain nonce, signature and certificate validity", async (t) => {
+  const evidence = await validEvidence();
+  const root = await mkdtemp(join(tmpdir(), "pinvou-provider-time-policy-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await materializeEvidence(evidence, root);
+  const attestation = evidence.attestations.find((value) => value.role === "A");
+  const artifact = evidence.artifacts.find((value) => value.sha256 === attestation.provider_attestation_artifact_sha256);
+  const receipt = JSON.parse(await readFile(join(root, ...artifact.path.split("/")), "utf8"));
+  const expected = {
+    role: "A", rolePolicySha256: attestation.role_policy_sha256, provider: attestation.provider,
+    keyId: attestation.key_id, runNonce: attestation.run_nonce, aclSha256: attestation.acl_attestation_sha256,
+    measurementSha256: attestation.provider_measurement_sha256, driverSha256: evidence.driver.sha256,
+    vendor: attestation.provider_vendor, rootCertificateSha256: providerRootSha256,
+    verifierCertificateSha256: providerLeafSha256,
+  };
+  const run = { startedAt: Date.parse(evidence.started_at), finishedAt: Date.parse(evidence.finished_at),
+    now: Date.parse(evidence.finished_at) };
+  assert.throws(() => verifyProviderAttestation(receipt, expected, run.now), { code: "provider_attestation_stale" });
+  assert.doesNotThrow(() => verifyProviderAttestationForRun(receipt, expected, run));
+  for (const now of [NaN, Infinity, -1]) assert.throws(() => verifyProviderAttestation(receipt, expected, now),
+    { code: "provider_attestation_stale" });
+  assert.throws(() => verifyProviderAttestationForRun(receipt, { ...expected, runNonce: hash("other-run") }, run),
+    { code: "provider_attestation_invalid" });
+  const tampered = structuredClone(receipt);
+  tampered.verifier.signature = Buffer.alloc(256).toString("base64");
+  assert.throws(() => verifyProviderAttestationForRun(tampered, expected, run),
+    { code: "provider_attestation_signature_invalid" });
+  const future = structuredClone(receipt);
+  future.issued_at = new Date(run.finishedAt + 1).toISOString();
+  assert.throws(() => verifyProviderAttestationForRun(future, expected, run), { code: "provider_attestation_stale" });
+  const expires = Math.min(Date.parse(new crypto.X509Certificate(providerRootPem).validTo),
+    Date.parse(new crypto.X509Certificate(providerLeafPem).validTo));
+  const expired = structuredClone(receipt);
+  expired.issued_at = new Date(expires - 1_000).toISOString();
+  expired.verifier.signature = crypto.sign("sha256", providerAttestationPayload(expired), providerLeafKey).toString("base64");
+  assert.throws(() => verifyProviderAttestationForRun(expired, expected,
+    { startedAt: expires - 1_000, finishedAt: expires - 500, now: expires + 1 }), { code: "provider_attestation_stale" });
+});
+
 test("validator executes the published draft-2020-12 JSON Schema before semantic checks", async () => {
   const evidence = await validEvidence();
   evidence.relay.unpublished_field = true;
@@ -437,10 +519,12 @@ test("production validation rejects the explicit test attestation identity and u
   );
   await assert.doesNotReject(() => validateReleaseEvidence(evidence, {
     expectedCommit: commit, expectedAttestationPublicKeySha256: testPublicKeySha256,
+    qualificationClock: () => Date.parse(testFinishedAt),
   }));
   evidence.artifacts[0].signature = evidence.artifacts[1].signature;
   await assert.rejects(
-    () => validateReleaseEvidence(evidence, { expectedCommit: commit, expectedAttestationPublicKeySha256: testPublicKeySha256 }),
+    () => validateReleaseEvidence(evidence, { expectedCommit: commit, expectedAttestationPublicKeySha256: testPublicKeySha256,
+      qualificationClock: () => Date.parse(testFinishedAt) }),
     (error) => error?.code === "evidence_artifact_signature_invalid",
   );
 });

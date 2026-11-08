@@ -5,7 +5,7 @@ import { dirname, isAbsolute, normalize, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { isDirectCliEntry } from "../cli-entrypoint.js";
 import validateEvidenceSchema from "../docs/schemas/remote-control-release-evidence.v1.validator.mjs";
-import { verifyProviderAttestation } from "./verify-provider-attestation.mjs";
+import { verifyProviderAttestationForRun, validateReleaseQualificationWindow } from "./verify-provider-attestation.mjs";
 import { validateSpdx } from "./verify-installer-supply-chain.mjs";
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
@@ -357,7 +357,7 @@ async function validateLegacyRuntimeEvidence(root, artifacts, legacy, document) 
   for (const value of [routeSpec.canonical_inventory_sha256, routeSpec.canonical_gateway_config_sha256, routeSpec.canonical_input_state_digest, configuration.control_plane_state_before_digest, configuration.listener_url_sha256, configuration.route_state_digest, configuration.original_state_digest, restoration.control_plane_state_after_digest, probe.listener_url_sha256, probe.request_nonce, probe.response_nonce]) digest(value, "evidence_legacy_relay_invalid");
 }
 
-async function validateProviderAttestation(root, artifacts, document) {
+async function validateProviderAttestation(root, artifacts, document, qualificationClock) {
   for (const attestation of document.attestations) {
     const entry = artifacts.find((item) => item.sha256 === attestation.provider_attestation_artifact_sha256);
     if (!entry || entry.kind !== "check" || entry.machine_role !== attestation.role) fail("evidence_attestation_provider_invalid");
@@ -367,14 +367,14 @@ async function validateProviderAttestation(root, artifacts, document) {
     const runStartedAt = Date.parse(document.started_at); const runFinishedAt = Date.parse(document.finished_at);
     if (!Number.isFinite(issuedAt) || issuedAt < runStartedAt || issuedAt > runFinishedAt) fail("evidence_attestation_provider_invalid");
     try {
-      verifyProviderAttestation(value, {
+      verifyProviderAttestationForRun(value, {
         role: attestation.role, rolePolicySha256: attestation.role_policy_sha256,
         provider: attestation.provider, keyId: attestation.key_id, runNonce: attestation.run_nonce,
         aclSha256: attestation.acl_attestation_sha256, measurementSha256: attestation.provider_measurement_sha256,
         driverSha256: document.driver.sha256, vendor: attestation.provider_vendor,
         rootCertificateSha256: attestation.provider_root_certificate_sha256,
         verifierCertificateSha256: attestation.provider_verifier_certificate_sha256,
-      }, issuedAt);
+      }, { startedAt: runStartedAt, finishedAt: runFinishedAt, now: qualificationClock() });
     } catch { fail("evidence_attestation_provider_invalid"); }
     if (value.public_key_sha256 !== attestation.public_key_sha256) fail("evidence_attestation_provider_invalid");
   }
@@ -438,6 +438,7 @@ export async function validateReleaseEvidence(document, {
   expectedBuildWorkflow,
   expectedBuildRunId,
   allowTestAttestation = false,
+  qualificationClock = Date.now,
 } = {}) {
   if (!validateEvidenceSchema(document)) fail("evidence_schema_invalid");
   exactObject(document, [
@@ -548,6 +549,7 @@ export async function validateReleaseEvidence(document, {
     monotonicStart: monotonic(document.monotonic_start_ms), monotonicEnd: monotonic(document.monotonic_end_ms),
   };
   if (bounds.finished < bounds.started || bounds.monotonicEnd < bounds.monotonicStart) fail("evidence_order_invalid");
+  validateReleaseQualificationWindow(bounds.started, bounds.finished, qualificationClock());
   const catalog = JSON.parse(await readFile(CATALOG_PATH, "utf8"));
   const expectedJourneys = catalog.journeys;
   if (!Array.isArray(document.journeys) || document.journeys.length !== expectedJourneys.length) fail("evidence_journey_set_invalid");
@@ -639,13 +641,15 @@ export async function validateReleaseEvidence(document, {
     await validateFeatureOffEvidence(root, artifacts, document.gates.feature_flag_off.artifact_sha256, document.commit_sha);
     await validateControlledAttachmentReceipt(root, artifacts, document);
     await validateLegacyRuntimeEvidence(root, artifacts, legacy, document);
-    await validateProviderAttestation(root, artifacts, document);
+    validateReleaseQualificationWindow(bounds.started, bounds.finished, qualificationClock());
+    await validateProviderAttestation(root, artifacts, document, qualificationClock);
     await validateBuildProvenance(root, artifacts, document, {
       expectedRepository: expectedBuildRepository,
       expectedWorkflow: expectedBuildWorkflow,
       expectedRunId: expectedBuildRunId,
     });
   }
+  validateReleaseQualificationWindow(bounds.started, bounds.finished, qualificationClock());
   return { ok: true, journey_count: expectedJourneys.length, artifact_count: artifacts.length };
 }
 
