@@ -28,7 +28,7 @@ use crate::features::remote_control::controller::task::{
 use crate::features::remote_control::controller::transfer::TransferRegistry;
 use crate::features::remote_control::controller::transfer::download::{
     ArtifactDescriptor, ArtifactDownloadBegin, ArtifactDownloads, ArtifactIndex, ArtifactPreview,
-    DownloadChunk, FileArtifactSource,
+    DownloadChunk, FileArtifactSource, SnapshotArtifactSource,
 };
 use crate::features::sessions::{SessionKind, SessionStore};
 
@@ -1472,7 +1472,15 @@ fn index_artifact_owned(
                 display_name,
                 mime_type,
                 sha256,
-                Arc::new(FileArtifactSource::new(path)),
+                // Retain the exact published digest, not a mutable task output
+                // path. Later tasks can overwrite/delete the original safely.
+                Arc::new(SnapshotArtifactSource::capture(
+                    &path,
+                    std::fs::metadata(&path)
+                        .map_err(|_| "artifact_unavailable".to_owned())?
+                        .len(),
+                    sha256,
+                )?),
                 sequence,
                 true,
             )
@@ -2874,6 +2882,65 @@ mod tests {
             .collect::<Vec<_>>();
         names.sort();
         assert_eq!(names, vec!["created.md", "existing.txt"]);
+        // A later task edits/deletes the original outputs. The real command
+        // owner still serves the bytes of this completed task, including a
+        // retry after losing the terminal chunk response.
+        std::fs::write(&existing, b"later").unwrap();
+        std::fs::remove_file(ledger.join("created.md")).unwrap();
+        for descriptor in &descriptors {
+            let begin = runtime
+                .artifact_download_begin(
+                    &test_lease(),
+                    &session_id,
+                    "task-0001",
+                    &descriptor.artifact_id,
+                    1200,
+                )
+                .unwrap();
+            let chunk = runtime
+                .artifact_download_chunk(
+                    &test_lease(),
+                    &session_id,
+                    "task-0001",
+                    &descriptor.artifact_id,
+                    &begin.handle_id,
+                    0,
+                    1300,
+                )
+                .unwrap();
+            let expected: &[u8] = if descriptor.display_name == "existing.txt" {
+                b"world"
+            } else {
+                b"new"
+            };
+            assert_eq!(chunk.as_ref().unwrap().bytes, expected);
+            assert!(chunk.as_ref().unwrap().completed.is_some());
+            assert_eq!(
+                runtime
+                    .artifact_download_chunk(
+                        &test_lease(),
+                        &session_id,
+                        "task-0001",
+                        &descriptor.artifact_id,
+                        &begin.handle_id,
+                        0,
+                        1400
+                    )
+                    .unwrap(),
+                chunk
+            );
+            assert!(
+                runtime
+                    .artifact_download_abort(
+                        &test_lease(),
+                        &session_id,
+                        "task-0001",
+                        &descriptor.artifact_id,
+                        &begin.handle_id
+                    )
+                    .unwrap()
+            );
+        }
         let encoded = serde_json::to_string(&descriptors).unwrap();
         assert!(!encoded.contains(home.path().to_string_lossy().as_ref()));
         assert!(!encoded.contains(external.path().to_string_lossy().as_ref()));

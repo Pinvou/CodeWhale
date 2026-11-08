@@ -53,6 +53,35 @@ function installFeature(onInvoke, withUploadLimit = true, timers = { setTimeout,
   return { feature, calls, state, listeners, logic: root.__PINVOU_REMOTE_CONTROL_STATE__ };
 }
 
+test('artifact downloader uses the real bridge to reconcile a lost final response then retire the receipt', async () => {
+  const { downloadRemoteArtifact } = await import('../src/features/remote-control/remote-file-transfer.mjs');
+  let attempts = 0;
+  let retired = false;
+  const { feature, calls } = installFeature((command, args) => {
+    if (command !== 'desktop_remote_action_a') return undefined;
+    switch (args.intent.operation) {
+      case 'artifact_download_begin': return Promise.resolve({ transfer_id: 'download-1', chunk_bytes: 5, total_bytes: 5 });
+      case 'artifact_download_chunk':
+        if (++attempts === 1) return Promise.reject('result_unknown');
+        return Promise.resolve({ chunk_index: 0, chunk_b64: Buffer.from('hello').toString('base64'),
+          chunk_bytes: 5, received_bytes: 5, next_chunk: 1, completed: true });
+      case 'artifact_download_abort': retired = true; return Promise.resolve({ aborted: true });
+      default: assert.fail('unexpected operation');
+    }
+  });
+  const blob = await downloadRemoteArtifact(feature, { localSessionId: 'remote-one', remoteRef: 'ref-one' }, {
+    taskId: 'task-1', artifactId: 'artifact-1', mimeType: 'text/plain',
+    sha256: '2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824',
+  });
+  assert.equal(await blob.text(), 'hello');
+  assert.equal(retired, true);
+  const chunks = calls.filter(call => call.args?.intent?.operation === 'artifact_download_chunk');
+  assert.equal(chunks.length, 2);
+  assert.equal(chunks[0].args.requestId, chunks[1].args.requestId);
+  assert.equal(chunks[0].args.intent.transferId, 'download-1');
+  assert.equal(chunks[1].args.intent.chunkIndex, 0);
+});
+
 test('attachment bridge uses the shared boundary and fails closed without it', async () => {
   const onInvoke = command => command === 'desktop_remote_action_a'
     ? Promise.resolve({ transfer_id: 't', chunk_bytes: 1, total_bytes: 20 * 1024 * 1024 }) : undefined;
