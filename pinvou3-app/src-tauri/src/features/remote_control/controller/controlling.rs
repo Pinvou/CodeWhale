@@ -1,8 +1,8 @@
 //! Windows controller-device (A) connection owner.
 //!
 //! A keeps the short pairing code and resume token only in memory. Closing the
-//! remote message window is invisible here; only an explicit disconnect or
-//! transport failure clears the live lease context.
+//! remote message window is invisible here; explicit disconnect, stop and
+//! terminal transport failure clear the live lease context.
 
 use parking_lot::Mutex;
 use serde::Serialize;
@@ -259,6 +259,10 @@ impl ControllingDeviceManager {
 
     pub(crate) fn replace_transport(&self, transport: ControllerTransportSender) {
         let mut inner = self.inner.lock();
+        if inner.stopped {
+            transport.stop();
+            return;
+        }
         if let Some(previous) = inner.transport.replace(transport) {
             previous.stop();
         }
@@ -1822,6 +1826,9 @@ mod tests {
                     .unwrap();
             }
             let old_status = manager.status();
+            if phase == "reconnecting" {
+                assert_eq!(old_status.status, ControllingStatusKind::Reconnecting);
+            }
             manager.stop();
             let stopped = manager.status();
             assert_eq!(
@@ -1920,6 +1927,31 @@ mod tests {
                 .is_err()
         );
         assert!(!manager.is_running());
+    }
+
+    #[test]
+    fn stopped_manager_rejects_transport_replacement_until_a_new_connect() {
+        let manager = ControllingDeviceManager::default();
+        manager.stop();
+        let make_transport = || {
+            super::super::relay_transport::transport_channels(
+                ControllerRole::ControllerA,
+                "generation-0001",
+                2,
+                2,
+                8192,
+                1024,
+            )
+        };
+        let (late, _receiver) = make_transport();
+        manager.replace_transport(late.clone());
+        assert!(late.is_stopped());
+        assert!(!manager.is_running());
+        manager.connect("2345678").unwrap();
+        let (next, _receiver) = make_transport();
+        manager.replace_transport(next.clone());
+        assert!(!next.is_stopped());
+        assert!(manager.is_running());
     }
 
     #[test]
