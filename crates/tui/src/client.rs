@@ -4432,14 +4432,14 @@ mod ds4_tests;
 #[cfg(test)]
 #[path = "client/operation_tests.rs"]
 mod operation_tests;
-#[cfg(test)]
-#[path = "client/transport_policy_tests.rs"]
-mod transport_policy_tests;
 mod prepared;
 mod provider_native_search;
 mod responses;
 mod role_placement;
 mod stream_entry;
+#[cfg(test)]
+#[path = "client/transport_policy_tests.rs"]
+mod transport_policy_tests;
 mod wire;
 
 // Retain the crate-visible accounting helpers at the existing client seam.
