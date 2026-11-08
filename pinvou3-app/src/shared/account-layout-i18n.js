@@ -214,6 +214,9 @@ adminLayoutCopy.ja.organization.lifecycleTasks = {
   transferEffect: '別のメンバーへの譲渡が完了すると、そのメンバーが所有者ロールを取得し、以前の所有者はそのロールを失います。',
 };
 
+Object.assign(adminLayoutCopy.zh.organization.lifecycleTasks, {"disablePaymentLabel":"组织充值订单","disablePaymentEffect":"停用成功后，该组织不能创建新的充值订单。已创建的订单请按原流程核对。"});
+Object.assign(adminLayoutCopy.en.organization.lifecycleTasks, {"disablePaymentLabel":"Organization recharge orders","disablePaymentEffect":"After disabling succeeds, the organization cannot create new recharge orders. Check existing orders through the usual process."});
+Object.assign(adminLayoutCopy.ja.organization.lifecycleTasks, {"disablePaymentLabel":"組織のチャージ注文","disablePaymentEffect":"無効化が完了すると、この組織では新しいチャージ注文を作成できません。作成済みの注文は従来の手順で確認してください。"});
 Object.assign(adminLayoutCopy.zh.organization.lifecycleTasks, {"contextTitle":"生命周期概况","contextOwner":"当前所有者","contextOwnerUnverified":"现有成员结果无法确认所有者","contextOwnerReadFailed":"成员读取失败，无法确认所有者","contextHistory":"此页不提供状态变更记录。"});
 Object.assign(adminLayoutCopy.en.organization.lifecycleTasks, {"contextTitle":"Lifecycle overview","contextOwner":"Current owner","contextOwnerUnverified":"The available member results do not confirm the owner","contextOwnerReadFailed":"Could not load members to confirm the owner","contextHistory":"Status history is not provided in this view."});
 Object.assign(adminLayoutCopy.ja.organization.lifecycleTasks, {"contextTitle":"ライフサイクルの概要","contextOwner":"現在の所有者","contextOwnerUnverified":"利用可能なメンバー情報から所有者を確認できません","contextOwnerReadFailed":"メンバーを読み込めなかったため所有者を確認できません","contextHistory":"この画面では状態変更履歴は表示されません。"});

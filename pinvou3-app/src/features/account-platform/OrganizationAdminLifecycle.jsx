@@ -34,7 +34,7 @@ export function OrganizationAdminLifecycle({ current, ownerMember, ownerReadFail
         </>}
         </dl>
         {statusCanStart && <div className="adm-organization-lifecycle-action">
-          {action('status', active ? copy.disable : copy.enable, [], () => ({ status: active ? 'DISABLED' : 'ACTIVE' }), 'status', '', true)}
+          {action('status', active ? copy.disable : copy.enable, [], () => ({ status: active ? 'DISABLED' : 'ACTIVE' }), 'status', '', true, active ? { confirmationContext: [{ name: 'currentOrganizationStatus', label: words.currentStatus, value: organizationLabel(copy, 'Status', status) }, { name: 'organizationPaymentImpact', label: words.disablePaymentLabel, value: words.disablePaymentEffect }, { name: 'organizationUsageImpact', label: words.usageEffect, value: words.disableUsageEffect }] } : undefined)}
         </div>}
       </section>
       <section className="adm-organization-lifecycle-task" aria-labelledby={heading + '-transfer'}>
