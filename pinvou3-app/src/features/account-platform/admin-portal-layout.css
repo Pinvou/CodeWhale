@@ -517,3 +517,13 @@
 .ap-admin-unit-delete-facts>p,.ap-admin-unit-delete-facts ul{margin:0}
 .ap-admin-unit-delete-facts>p+p,.ap-admin-unit-delete-facts ul{margin-top:6px}
 .ap-admin-unit-delete-blockers{border-color:#f0c8cc;background:var(--adm-danger-soft,#fff5f5)}
+
+.adm-restored-shell .adm-receivable-time-range{flex:1 1 380px;min-width:0;max-width:100%;margin:0;padding:10px 12px;border:1px solid var(--adm-line);border-radius:10px;display:grid;gap:8px}
+.adm-restored-shell .adm-receivable-time-range legend{font-weight:650;padding:0 4px}
+.adm-restored-shell .adm-receivable-time-range small{color:var(--adm-muted);overflow-wrap:break-word}
+.adm-restored-shell .adm-receivable-time-fields{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+.adm-restored-shell .adm-receivable-time-fields label{display:grid;min-width:0;gap:4px}
+.adm-restored-shell .adm-receivable-time-fields input{width:100%;min-width:0;max-width:100%}
+.adm-restored-shell .adm-receivable-time-presets{display:flex;flex-wrap:wrap;margin:-6px 0 0 -6px}
+.adm-restored-shell .adm-receivable-time-presets>button{margin:6px 0 0 6px}
+@media(max-width:560px){.adm-restored-shell .adm-receivable-time-fields{grid-template-columns:minmax(0,1fr)}}
