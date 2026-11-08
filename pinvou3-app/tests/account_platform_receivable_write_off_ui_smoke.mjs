@@ -85,7 +85,9 @@ try {
     assert.ok(calls.some(call => call.url.includes('command_type=RECEIVABLE_WRITE_OFF') && call.url.includes('target=')));
     await page.waitForFunction(() => [...document.querySelectorAll('article button')].some(button => button.textContent === window.f11.adminPlatformCopy.zh.approvalCenter.openBusinessArea && !button.disabled));
     await page.evaluate(() => [...document.querySelectorAll('article button')].find(button => button.textContent === window.f11.adminPlatformCopy.zh.approvalCenter.openBusinessArea).click());
-    await page.waitForSelector('[data-workspace="writeoff"]:not([hidden]) .adm-financial-repair-target select', { visible: true }); assert.equal(await page.$eval('[data-workspace="writeoff"]:not([hidden]) .adm-financial-repair-target select', select => select.value), 'RECEIVABLE_WRITE_OFF');
+    const taskLabel = '[data-workspace="writeoff"]:not([hidden]) .adm-writeoff-fixed-command dd';
+    await page.waitForSelector(taskLabel, { visible: true });
+    assert.equal(await page.$eval(taskLabel, node => node.textContent), await page.evaluate(() => window.f11.ledgerRepairCopy[window.f11.language].receivableTask.name));
   });
   await run('WriteOff approver-only real detail decide without requester or wallet calls', 'approve=1&existing=1', async page => {
     await page.waitForSelector('tbody tr button'); assert.equal(await page.$('.adm-financial-repair'), null);

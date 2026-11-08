@@ -45,6 +45,7 @@ export function AdminReceivableWriteOffForm({ client, copy, onCreated, owner = '
   currentClient.current = client;
   const operation = useFinanceOperation(owner, operationCopy, client, `financial-repair:${commandTypes.join(':')}`);
   const writeOff = commandType === 'RECEIVABLE_WRITE_OFF';
+  const fixedWriteOff = writeOff && commandTypes.length === 1 && commandTypes[0] === commandType;
   const targetWords = copy.receivableTarget;
   const amountWords = copy.receivableAmounts;
   const targetFieldsID = useId();
@@ -179,16 +180,17 @@ export function AdminReceivableWriteOffForm({ client, copy, onCreated, owner = '
 
   return <section className="adm-financial-repair" aria-label={copy.title}>
     <h3>{copy.title}</h3>
-    <p>{copy.lead}</p>
+    <p>{fixedWriteOff ? copy.receivableTask.lead : copy.lead}</p>
     {writeOff && operation.error && <p role="alert">{operation.error}</p>}
     {needsAuthentication && <div className="adm-writeoff-reauthentication"><p>{copy.writeOffRecentAuthenticationRequired}</p><button type="button" disabled={busy !== '' || operation.busy} onClick={() => client.reauthenticate('/admin.html')}>{copy.reauthenticate}</button></div>}
     <form className="adm-financial-repair-target" onSubmit={readFacts}>
       {writeOff && <p className="adm-writeoff-target-intro">{targetWords.intro}</p>}
-      <label>{copy.command}
+      {fixedWriteOff ? <dl className="adm-writeoff-fixed-command"><div><dt>{copy.receivableTask.action}</dt><dd>{copy.receivableTask.name}</dd></div></dl>
+      : <label>{copy.command}
         <select disabled={writeOff && locked} value={commandType} onChange={(event) => changeCommand(event.target.value)}>
           {commandTypes.map((command) => <option key={command} value={command}>{command}</option>)}
         </select>
-      </label>
+      </label>}
       {fields.map((field) => {
         const guidance = targetField(field.key);
         const fieldID = guidance ? targetFieldsID + '-input-' + field.key : undefined;
@@ -206,7 +208,7 @@ export function AdminReceivableWriteOffForm({ client, copy, onCreated, owner = '
       <button type="submit" disabled={locked}>{busy === 'facts' ? copy.reading : copy.readFacts}</button>
     </form>
     {failure && !failure.field && <p role="alert">{failure.feedback ? copy[failure.feedback] : failure}{failure.feedback && !operation.unknown && <> {targetWords.recheck}</>}</p>}
-    {created && <p role="status">{copy.createdHint} <code>{created}</code></p>}
+    {created && <p role="status">{fixedWriteOff ? copy.receivableTask.submissionConfirmed : copy.createdHint} <code>{created}</code></p>}
     {refreshingTarget && <p role="status">{copy.reading}</p>}
     {displayedFacts && !refreshingTarget && <div className="adm-financial-repair-facts">
       <h4>{copy.frozenFacts}</h4>
@@ -224,7 +226,10 @@ export function AdminReceivableWriteOffForm({ client, copy, onCreated, owner = '
       <small>{copy.reasonHint}</small>
       <label>{copy.requestKey}<input disabled={writeOff && locked} required value={pending?.draft.idempotency_key?.slice('approval:'.length) ?? requestKey} onChange={(event) => setRequestKey(event.target.value)} /></label>
       <small>{copy.requestKeyHint}</small>
-      <button type="submit" disabled={busy !== '' || operation.busy}>{writeOff && operation.unknown ? operationCopy.retry : busy === 'draft' || operation.busy ? copy.creating : copy.createDraft}</button>
+      {fixedWriteOff && <small>{operation.unknown ? copy.receivableTask.recoveryHelp : copy.receivableTask.submitHelp}</small>}
+      <button type="submit" disabled={busy !== '' || operation.busy}>{writeOff && operation.unknown ? operationCopy.retry
+        : busy === 'draft' || operation.busy ? (fixedWriteOff ? copy.receivableTask.submitting : copy.creating)
+        : fixedWriteOff ? copy.receivableTask.submit : copy.createDraft}</button>
     </form>}
   </section>;
 }
