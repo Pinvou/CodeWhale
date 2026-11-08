@@ -2668,6 +2668,7 @@ dictJa["remoteConversation"] = {
   previewUnavailable: "表示できるテキストプレビューはありません。",
   actionFailed: "リモート操作に失敗しました",
   artifactIntegrityFailed: "ダウンロード内容の検証に失敗したため、保存しませんでした。再度ダウンロードしてください。",
+  transferIntegrityFailed: "転送内容の検証に失敗しました。再度転送してください。",
   artifactTransferInvalid: "ダウンロードデータが不完全か形式が不正なため、保存しませんでした。再試行してください。",
   artifactSizeLimit: "この成果物は 32 MiB のダウンロード上限を超えています。",
   artifactUnavailable: "リモート成果物を利用できません。一覧を更新して再試行してください。",

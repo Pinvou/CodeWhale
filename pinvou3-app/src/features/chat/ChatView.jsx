@@ -223,8 +223,8 @@ function remoteActionFailureCopyKey(code) {
     case 'transfer_size_invalid': return 'attachmentSizeInvalid';
     case 'remote_attachment_total_size_invalid': return 'attachmentTotalSizeInvalid';
     case 'remote_attachment_metadata_invalid': return 'attachmentMetadataInvalid';
-    case 'remote_artifact_checksum_mismatch':
-    case 'transfer_digest_mismatch': return 'artifactIntegrityFailed';
+    case 'remote_artifact_checksum_mismatch': return 'artifactIntegrityFailed';
+    case 'transfer_digest_mismatch': return 'transferIntegrityFailed';
     case 'remote_artifact_size_mismatch':
     case 'remote_artifact_chunk_invalid': return 'artifactTransferInvalid';
     case 'remote_artifact_size_limit': return 'artifactSizeLimit';

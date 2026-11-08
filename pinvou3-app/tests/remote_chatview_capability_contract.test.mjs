@@ -346,7 +346,7 @@ test('download failures retain bounded diagnostic categories in every language',
     return {remoteActionFailureCode, remoteActionFailureCopyKey};`)();
   for (const [code, key] of [
     ['remote_artifact_checksum_mismatch', 'artifactIntegrityFailed'],
-    ['transfer_digest_mismatch', 'artifactIntegrityFailed'],
+    ['transfer_digest_mismatch', 'transferIntegrityFailed'],
     ['remote_artifact_size_mismatch', 'artifactTransferInvalid'],
     ['remote_artifact_chunk_invalid', 'artifactTransferInvalid'],
     ['remote_artifact_size_limit', 'artifactSizeLimit'],

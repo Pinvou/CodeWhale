@@ -2669,6 +2669,7 @@ dictEn["remoteConversation"] = {
   previewUnavailable: "No text preview is available for this artifact.",
   actionFailed: "Remote action failed",
   artifactIntegrityFailed: "The download failed its integrity check and was not saved. Download it again.",
+  transferIntegrityFailed: "The transferred content failed its integrity check. Try the transfer again.",
   artifactTransferInvalid: "The download is incomplete or malformed and was not saved. Try again.",
   artifactSizeLimit: "This artifact exceeds the 32 MiB download limit.",
   artifactUnavailable: "The remote artifact is unavailable. Refresh the artifact list and try again.",
