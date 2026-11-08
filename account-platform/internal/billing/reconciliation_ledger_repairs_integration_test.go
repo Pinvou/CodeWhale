@@ -62,7 +62,7 @@ func TestReconciliationLedgerRepairPublicPostgres(t *testing.T) {
 	}
 	row := ProviderBillEntry{EntryType: "PAYMENT", ProviderReferenceID: *providerFact.ChannelTransactionID, ChannelTransactionID: *providerFact.ChannelTransactionID, MerchantOrderNo: order.MerchantOrderNo, Channel: order.Channel, AmountFen: order.AmountFen, Currency: order.Currency, Status: "SUCCESS", PaidAt: *providerFact.PaidAt}
 	provider := &reconciliationFixtureProvider{retainedFinancialProvider: retainedFinancialProvider{result: providerFact}, rows: []ProviderBillEntry{row}}
-	c, err := NewPaymentCoordinatorWithProvider(r, provider, "test")
+	c, err := newBillingFixturePaymentCoordinator(r, provider, "test")
 	if err != nil {
 		t.Fatal(err)
 	}

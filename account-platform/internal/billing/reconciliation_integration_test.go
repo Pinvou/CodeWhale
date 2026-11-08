@@ -44,7 +44,7 @@ func TestF03ReconciliationAuthorityAndReceipts(t *testing.T) {
 	now, transactionID := r.now(), uuid.NewString()
 	row := ProviderBillEntry{EntryType: "PAYMENT", ProviderReferenceID: transactionID, ChannelTransactionID: transactionID, MerchantOrderNo: order.MerchantOrderNo, Channel: order.Channel, AmountFen: order.AmountFen, Currency: order.Currency, Status: "SUCCESS", PaidAt: now}
 	provider := &reconciliationFixtureProvider{retainedFinancialProvider: retainedFinancialProvider{result: ProviderOrder{MerchantOrderNo: order.MerchantOrderNo, Status: "SUCCESS", Channel: order.Channel, AmountFen: order.AmountFen, Currency: order.Currency, ChannelTransactionID: &transactionID, PaidAt: &now, ExternalCustomerKey: uuid.NewString(), ExternalSKU: sku}}, rows: []ProviderBillEntry{row}}
-	c, err := NewPaymentCoordinatorWithProvider(r, provider, "test")
+	c, err := newBillingFixturePaymentCoordinator(r, provider, "test")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -175,7 +175,7 @@ func TestF03StatusSpelling(t *testing.T) {
 				row.Channel = strings.ToLower(row.Channel)
 			}
 			supplier := &reconciliationFixtureProvider{retainedFinancialProvider: retainedFinancialProvider{result: ProviderOrder{MerchantOrderNo: order.MerchantOrderNo, Status: "SUCCESS", Channel: order.Channel, AmountFen: order.AmountFen, Currency: order.Currency, ChannelTransactionID: &reference, PaidAt: &now, ExternalCustomerKey: order.RequesterID.String(), ExternalSKU: sku}}}
-			coordinator, err := NewPaymentCoordinatorWithProvider(repo, supplier, "test")
+			coordinator, err := newBillingFixturePaymentCoordinator(repo, supplier, "test")
 			if err != nil {
 				t.Fatal(err)
 			}

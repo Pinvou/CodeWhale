@@ -59,13 +59,14 @@ func configureEntitlementProofIdentity(t *testing.T) (string, string) {
 	rules, err := json.Marshal([]map[string]any{
 		{
 			"subject": accountSubject, "service": "account-service",
-			"permissions": []string{"internal.billing.approval-proof.read", "internal.billing.approval-activation.read"},
+			"permissions": []string{"internal.billing.approval-proof.read", "internal.billing.approval-activation.read", "internal.billing.payment-credit.resolve"},
 		},
 		{
 			"subject": executorSubject, "service": "billing-command-executor",
 			"permissions": []string{
 				"internal.authorization.check", "internal.approval-authorization.consume",
 				"internal.approval-execution.begin", "internal.approval-execution.complete",
+				"internal.account.payment-credit.admit",
 			},
 		},
 	})

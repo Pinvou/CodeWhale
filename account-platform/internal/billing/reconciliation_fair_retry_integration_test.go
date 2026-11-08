@@ -78,7 +78,7 @@ func reconciliationFairRetryActualHTTP(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	c, err := NewPaymentCoordinatorWithProvider(r, provider, "test")
+	c, err := newBillingFixturePaymentCoordinator(r, provider, "test")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -147,7 +147,7 @@ func reconciliationFairRetrySeed(t *testing.T, r *PostgresRepository, ctx contex
 	}
 	provider := &recoveryBillProvider{orders: map[string]ProviderOrder{order.MerchantOrderNo: {MerchantOrderNo: order.MerchantOrderNo, Status: "SUCCESS", Channel: order.Channel, AmountFen: order.AmountFen, Currency: order.Currency, ChannelTransactionID: &ref, PaidAt: &now, ExternalCustomerKey: order.RequesterID.String(), ExternalSKU: sku}}, failing: map[string]bool{order.MerchantOrderNo: true}}
 	row := ProviderBillEntry{EntryType: "PAYMENT", ProviderReferenceID: ref, ChannelTransactionID: ref, MerchantOrderNo: order.MerchantOrderNo, Channel: order.Channel, AmountFen: order.AmountFen, Currency: order.Currency, Status: "SUCCESS", PaidAt: now}
-	c, err := NewPaymentCoordinatorWithProvider(r, provider, "test")
+	c, err := newBillingFixturePaymentCoordinator(r, provider, "test")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -342,7 +342,7 @@ func reconciliationFairRetryCircuitAdmission(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	c, err := NewPaymentCoordinatorWithProvider(r, provider, "test")
+	c, err := newBillingFixturePaymentCoordinator(r, provider, "test")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -414,7 +414,7 @@ func reconciliationFairRetryCircuitAdmission(t *testing.T) {
 	// A real process restart gets a fresh breaker; same original batch/facts
 	// remains query-only and posts each source once when the producer recovers.
 	phase.Store(2)
-	restarted, err := NewPaymentCoordinatorWithProvider(r, provider, "test")
+	restarted, err := newBillingFixturePaymentCoordinator(r, provider, "test")
 	if err != nil {
 		t.Fatal(err)
 	}

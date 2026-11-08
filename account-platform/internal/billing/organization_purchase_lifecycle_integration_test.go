@@ -62,7 +62,7 @@ func TestOrganizationPlanPurchaseLifecycleFencePostgres(t *testing.T) {
 		}
 		product := retainedSameKeyProduct(t, r, ctx, owner)
 		provider := &organizationLifecycleControlledProvider{retainedFinancialProvider: &retainedFinancialProvider{}}
-		c, e := NewPaymentCoordinatorWithProvider(r, provider, "test")
+		c, e := newBillingFixturePaymentCoordinator(r, provider, "test")
 		if e != nil {
 			t.Fatal(e)
 		}
@@ -183,7 +183,7 @@ func TestOrganizationPlanPurchaseLifecycleFencePostgres(t *testing.T) {
 		}
 		product := retainedSameKeyProduct(t, r, ctx, owner)
 		provider := &organizationLifecycleControlledProvider{retainedFinancialProvider: &retainedFinancialProvider{}}
-		c, e := NewPaymentCoordinatorWithProvider(r, provider, "test")
+		c, e := newBillingFixturePaymentCoordinator(r, provider, "test")
 		if e != nil {
 			t.Fatal(e)
 		}
@@ -208,7 +208,7 @@ func TestOrganizationPlanPurchaseLifecycleFencePostgres(t *testing.T) {
 		}
 		product := retainedSameKeyProduct(t, r, ctx, owner)
 		provider := &organizationLifecycleControlledProvider{retainedFinancialProvider: &retainedFinancialProvider{}}
-		c, e := NewPaymentCoordinatorWithProvider(r, provider, "test")
+		c, e := newBillingFixturePaymentCoordinator(r, provider, "test")
 		if e != nil {
 			t.Fatal(e)
 		}

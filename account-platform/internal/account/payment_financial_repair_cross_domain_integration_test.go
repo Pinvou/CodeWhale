@@ -18,6 +18,7 @@ import (
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/billinggovernance"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/events"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/payment"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/paymentcredit"
 	"github.com/google/uuid"
 )
 
@@ -67,6 +68,22 @@ func (p *paymentRepairE2EProvider) Bill(context.Context, string, time.Time) ([]p
 // an idempotent replay adds nothing and flipping the row back closes the command
 // again.
 func TestPaymentFinancialRepairCrossDomainActivationPostgresIntegration(t *testing.T) {
+	t.Run("active-subject-and-legacy-closed-receipt-replay", func(t *testing.T) { runPaymentFinancialRepairCrossDomainActivation(t, false) })
+	t.Run("closed-subject-cannot-create-a-new-repair-effect", func(t *testing.T) { runPaymentFinancialRepairCrossDomainActivation(t, true) })
+}
+
+type paymentCreditF12Delivery struct {
+	*entitlementCrossDomainDelivery
+	naks, deadLetters int
+}
+
+func (d *paymentCreditF12Delivery) NakWithDelay(time.Duration) error { d.naks++; return nil }
+func (d *paymentCreditF12Delivery) PublishDeadLetter(ctx context.Context) (events.AuthorizationDLQPubAck, error) {
+	d.deadLetters++
+	return d.entitlementCrossDomainDelivery.PublishDeadLetter(ctx)
+}
+
+func runPaymentFinancialRepairCrossDomainActivation(t *testing.T, closedBeforeEffect bool) {
 	accountURL := strings.TrimSpace(os.Getenv("PINVOU_TEST_ACCOUNT_DATABASE_URL"))
 	billingURL := strings.TrimSpace(os.Getenv("PINVOU_TEST_BILLING_DATABASE_URL"))
 	if accountURL == "" || billingURL == "" {
@@ -318,13 +335,51 @@ WHERE o.aggregate_id=$1 AND o.event_type='account.approval-command.authorized.v1
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The legacy Billing-only payment fixture used an arbitrary payer UUID.
+	// Admission now uses the actual Account subject and authenticated workload
+	// HTTP route; this fixture subject has no closure and owns the same order.
+	var paymentSubject uuid.UUID
+	if err := billingPool.QueryRow(ctx, `SELECT payer_user_id FROM payment_orders WHERE id=$1`, repair.OrderID).Scan(&paymentSubject); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repository.pool.Exec(ctx, `WITH capability AS (SELECT set_config('pinvou.registration_bonus_capable','1',true)) INSERT INTO users(id,status,user_code,username,created_at,updated_at) SELECT $1,'ACTIVE',generate_unique_user_code(),$2,clock_timestamp(),clock_timestamp() FROM capability`, paymentSubject, "payment_"+strings.ReplaceAll(paymentSubject.String(), "-", "")[:16]); err != nil {
+		t.Fatal(err)
+	}
+	creditAdmission, err := paymentcredit.NewHTTPClient(accountServer.URL, executorToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	coordinator.WithPaymentCreditAdmission(creditAdmission)
+	for _, credential := range []string{proofToken, "invalid-credit-fixture-jwt"} {
+		unauthorized, err := paymentcredit.NewHTTPClient(accountServer.URL, credential)
+		if err != nil {
+			t.Fatal(err)
+		}
+		input := paymentcredit.Request{ID: uuid.New(), UserID: paymentSubject, OrderID: repair.OrderID, TransactionDigest: paymentcredit.Digest([]byte(repair.ProviderTransactionID)), FactsDigest: paymentcredit.Digest(frozen.FinancialSnapshot)}
+		if _, err = unauthorized.Admit(ctx, input); err == nil {
+			t.Fatal("workload without admit permission created a money grant")
+		}
+		var count int
+		if err = repository.pool.QueryRow(ctx, `SELECT count(*) FROM account_payment_credit_admissions WHERE id=$1`, input.ID).Scan(&count); err != nil || count != 0 {
+			t.Fatal("denied workload left an admission", count, err)
+		}
+	}
+	if closedBeforeEffect {
+		// Reachable retained layout from the original late-confirmation window:
+		// a closed subject, ACTIVE wallet and verified manual-review payment.
+		// This controlled state fixture is not an IdP/closure-worker E2E claim;
+		// the three-domain boundary regression exercises actual public Advance.
+		if _, err := repository.pool.Exec(ctx, `UPDATE users SET status='DELETED',anonymized_at=clock_timestamp(),version=version+1 WHERE id=$1`, paymentSubject); err != nil {
+			t.Fatal(err)
+		}
+	}
 	consumer, err := billingdomain.NewAuthorizationCommandConsumer(billingdomain.NewService(billingRepository).WithPayments(coordinator), gate, descriptor.Durable)
 	if err != nil {
 		t.Fatal(err)
 	}
-	deliveries := []*entitlementCrossDomainDelivery{
-		{raw: raw, id: eventID.String(), meta: events.AuthorizationDeliveryMetadata{Stream: "ACCOUNT_PLATFORM", StreamSequence: 1, NumDelivered: 1}},
-		{raw: raw, id: eventID.String(), meta: events.AuthorizationDeliveryMetadata{Stream: "ACCOUNT_PLATFORM", StreamSequence: 1, NumDelivered: 2}},
+	deliveries := []*paymentCreditF12Delivery{
+		{entitlementCrossDomainDelivery: &entitlementCrossDomainDelivery{raw: raw, id: eventID.String(), meta: events.AuthorizationDeliveryMetadata{Stream: "ACCOUNT_PLATFORM", StreamSequence: 1, NumDelivered: 1}}},
+		{entitlementCrossDomainDelivery: &entitlementCrossDomainDelivery{raw: raw, id: eventID.String(), meta: events.AuthorizationDeliveryMetadata{Stream: "ACCOUNT_PLATFORM", StreamSequence: 1, NumDelivered: 2}}},
 	}
 	acked := 0
 	for _, delivery := range deliveries {
@@ -333,6 +388,37 @@ WHERE o.aggregate_id=$1 AND o.event_type='account.approval-command.authorized.v1
 		}
 		consumer.Handle(ctx, delivery)
 		acked = delivery.ack
+	}
+	if closedBeforeEffect {
+		for _, delivery := range deliveries {
+			if delivery.ack != 0 || delivery.naks != 1 || delivery.deadLetters != 0 {
+				t.Fatal("closed payment approval must retain the original unconfirmed delivery", delivery.ack, delivery.naks, delivery.deadLetters)
+			}
+		}
+		var repairCount, journalCount, packageCount, paymentEvidence int
+		var balance int64
+		var paymentStatus, paymentFulfillment string
+		if err := billingPool.QueryRow(ctx, `SELECT (SELECT count(*) FROM payment_order_repairs WHERE payment_order_id=$1),(SELECT count(*) FROM journal_entries WHERE entry_type='REPAIR_CREDIT'),(SELECT count(*) FROM entitlement_packages WHERE payment_order_id=$1),(SELECT count(*) FROM payment_evidence WHERE payment_order_id=$1),(SELECT posted_microcredits FROM wallets WHERE id=$2),(SELECT status FROM payment_orders WHERE id=$1),(SELECT fulfillment_status FROM payment_orders WHERE id=$1)`, repair.OrderID, repair.WalletID).Scan(&repairCount, &journalCount, &packageCount, &paymentEvidence, &balance, &paymentStatus, &paymentFulfillment); err != nil || repairCount != 0 || journalCount != 0 || packageCount != 0 || paymentEvidence != 1 || balance != 0 || paymentStatus != "MANUAL_REVIEW" || paymentFulfillment != "MANUAL_REVIEW" {
+			t.Fatal("closed F12 changed original financial/manual evidence", repairCount, journalCount, packageCount, paymentEvidence, balance, paymentStatus, paymentFulfillment, err)
+		}
+		var requestState, executionState, errorClass, deliveryState string
+		var attempts int
+		if err := repository.pool.QueryRow(ctx, `SELECT request.status,execution.status,execution.error_class FROM approval_requests request JOIN approval_executions execution ON execution.approval_request_id=request.id WHERE request.id=$1`, requestID).Scan(&requestState, &executionState, &errorClass); err != nil || requestState != "EXECUTION_FAILED" || executionState != "FAILED" || errorClass != "DOMAIN_PRECONDITION_REJECTED" {
+			t.Fatal("closed F12 execution result", requestState, executionState, errorClass, err)
+		}
+		if _, err := accountConnection.Exec(ctx, `SET ROLE account_approval_authorization_owner`); err != nil {
+			t.Fatal(err)
+		}
+		if err := accountConnection.QueryRow(ctx, `SELECT state,domain_attempt_count FROM account_approval_authorization.approval_delivery_states WHERE approval_request_id=$1`, requestID).Scan(&deliveryState, &attempts); err != nil || deliveryState != "DOMAIN_INFLIGHT" || attempts != 1 {
+			t.Fatal("closed F12 proof-era single-attempt recovery", deliveryState, attempts, err)
+		}
+		if _, err := accountConnection.Exec(ctx, `RESET ROLE; SET ROLE account_service`); err != nil {
+			t.Fatal(err)
+		}
+		if provider.calls != 0 {
+			t.Fatal("closed repair retried the provider")
+		}
+		return
 	}
 	if acked != 1 {
 		var state, lastError string
@@ -386,6 +472,62 @@ JOIN account_approval_authorization.approval_delivery_states d ON d.approval_req
 	}
 	if _, err := accountConnection.Exec(ctx, `RESET ROLE; SET ROLE account_service`); err != nil {
 		t.Fatal(err)
+	}
+	resolver, err := paymentcredit.NewHTTPClient(billingServer.URL, proofToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = repository.ReconcilePaymentCredits(ctx, resolver); err != nil {
+		t.Fatal("authenticated credit outcome/ack", err)
+	}
+	var pending int
+	if err = repository.pool.QueryRow(ctx, `SELECT count(*) FROM account_payment_credit_admissions WHERE user_id=$1 AND (state='PENDING' OR billing_acknowledged_at IS NULL)`, paymentSubject).Scan(&pending); err != nil || pending != 0 {
+		t.Fatal("credit outcome did not durably converge", pending, err)
+	}
+	// Preserve a committed pre-fix receipt even in the old closed-user layout.
+	// This deliberately seeds the legacy subject marker, not a new valid
+	// financial-clearance workflow with a positive balance.
+	if _, err = repository.pool.Exec(ctx, `UPDATE users SET status='DELETED',anonymized_at=clock_timestamp(),version=version+1 WHERE id=$1`, paymentSubject); err != nil {
+		t.Fatal(err)
+	}
+	stored, err := billingRepository.PaymentFinancialRepairForRequest(ctx, requestID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var originalKey string
+	if err = accountConnection.QueryRow(ctx, `SELECT execution_idempotency_key FROM public.approval_executions WHERE approval_request_id=$1`, requestID).Scan(&originalKey); err != nil {
+		t.Fatal("original execution identity unavailable", err)
+	}
+	var activationVersion int64
+	if err = billingPool.QueryRow(ctx, `SELECT version FROM billing_approval_command_activations WHERE command_type='PAYMENT_FINANCIAL_REPAIR' AND policy_version=1 AND snapshot_schema_version=1`).Scan(&activationVersion); err != nil {
+		t.Fatal(err)
+	}
+	backendInput := billingdomain.PaymentFinancialRepairExecutionInput{ApprovalRequestID: requestID, AuthorizationEventID: eventID, ApprovalEpoch: route.ApprovalEpoch, ApproverUserID: approver.ID, RequesterUserID: requester.ID, ExecutionKey: originalKey, PolicyVersion: 1, SchemaVersion: 1, ActivationVersion: activationVersion, Command: command}
+	financialSnapshot := func() string {
+		t.Helper()
+		var raw string
+		if err := billingPool.QueryRow(ctx, `SELECT jsonb_build_object('wallets',(SELECT jsonb_agg(to_jsonb(x) ORDER BY id) FROM wallets x),'orders',(SELECT jsonb_agg(to_jsonb(x) ORDER BY id) FROM payment_orders x),'transactions',(SELECT jsonb_agg(to_jsonb(x) ORDER BY id) FROM payment_transactions x),'evidence',(SELECT jsonb_agg(to_jsonb(x) ORDER BY id) FROM payment_evidence x),'packages',(SELECT jsonb_agg(to_jsonb(x) ORDER BY id) FROM entitlement_packages x),'components',(SELECT jsonb_agg(to_jsonb(x) ORDER BY id) FROM entitlement_components x),'lots',(SELECT jsonb_agg(to_jsonb(x) ORDER BY id) FROM credit_lots x),'journals',(SELECT jsonb_agg(to_jsonb(x) ORDER BY id) FROM journal_entries x),'postings',(SELECT jsonb_agg(to_jsonb(x) ORDER BY id) FROM ledger_postings x),'repairs',(SELECT jsonb_agg(to_jsonb(x) ORDER BY id) FROM payment_order_repairs x),'credit_attempts',(SELECT jsonb_agg(to_jsonb(x) ORDER BY id) FROM payment_credit_attempts x))::text`).Scan(&raw); err != nil {
+			t.Fatal(err)
+		}
+		return raw
+	}
+	beforeReplay := financialSnapshot()
+	for attempt := 0; attempt < 2; attempt++ {
+		result, err := coordinator.ApplyPaymentFinancialRepair(ctx, backendInput)
+		if err != nil || result != stored {
+			t.Fatal("committed backend receipt was not replayed after anonymization", err)
+		}
+		if financialSnapshot() != beforeReplay {
+			t.Fatal("committed backend receipt replay changed financial facts")
+		}
+	}
+	wrong := backendInput
+	wrong.ExecutionKey += "-different"
+	if _, err = coordinator.ApplyPaymentFinancialRepair(ctx, wrong); !errors.Is(err, billingdomain.ErrConflict) {
+		t.Fatal("wrong identity borrowed historical receipt", err)
+	}
+	if financialSnapshot() != beforeReplay {
+		t.Fatal("wrong replay identity changed financial facts")
 	}
 	replay := &entitlementCrossDomainDelivery{raw: raw, id: eventID.String(), meta: events.AuthorizationDeliveryMetadata{Stream: "ACCOUNT_PLATFORM", StreamSequence: 1, NumDelivered: 3}}
 	consumer.Handle(ctx, replay)

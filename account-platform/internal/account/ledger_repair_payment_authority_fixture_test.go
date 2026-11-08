@@ -82,6 +82,7 @@ func issue2016BuildApprovalFixture(ctx context.Context, r *billingdomain.Postgre
 	if err != nil {
 		return f, err
 	}
+	c.WithPaymentCreditAdmission(accountFixturePaymentCreditAdmission{})
 	order, err = c.SyncOrder(ctx, order.ID)
 	if err != nil {
 		return f, err

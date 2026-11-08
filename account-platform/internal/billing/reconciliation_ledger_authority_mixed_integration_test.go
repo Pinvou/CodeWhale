@@ -50,7 +50,7 @@ func TestLedgerRepairAuthorityMixedBatchPostgres(t *testing.T) {
 	// ignored even while the repaired order's authority is unavailable.
 	rows[1].AmountFen++
 	provider := &reconciliationFixtureProvider{retainedFinancialProvider: retainedFinancialProvider{result: fact1}, rows: rows}
-	c, err := NewPaymentCoordinatorWithProvider(r, provider, "test")
+	c, err := newBillingFixturePaymentCoordinator(r, provider, "test")
 	if err != nil {
 		t.Fatal(err)
 	}

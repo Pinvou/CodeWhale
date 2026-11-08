@@ -29,6 +29,7 @@ import (
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/observability"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/payment"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/paymentcallback"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/paymentcredit"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/paymentsimulator"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/serviceauth"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/transit"
@@ -75,6 +76,11 @@ func main() {
 	if err != nil {
 		log.Fatal("BILLING_PAYMENT_CONFIGURATION_INVALID")
 	}
+	creditAdmission, err := paymentcredit.NewHTTPClient(os.Getenv("ACCOUNT_HTTP_URL"), credential)
+	if err != nil {
+		log.Fatal("BILLING_PAYMENT_CREDIT_CONFIGURATION_INVALID")
+	}
+	payments.WithPaymentCreditAdmission(creditAdmission)
 	ledgerRepairAuthority, err := billing.NewHTTPLedgerRepairProofAuthority(os.Getenv("ACCOUNT_HTTP_URL"), credential, cfg.Environment)
 	if err != nil {
 		log.Fatal("BILLING_LEDGER_REPAIR_AUTHORITY_CONFIGURATION_INVALID")
@@ -202,6 +208,7 @@ func main() {
 		log.Fatal("BILLING_TEST_ADMISSION_TTL_INVALID")
 	}
 	go observability.RunBackground(ctx, "package-expiry", billing.NewPackageExpiryWorker(repository, time.Minute).Run)
+	go observability.RunBackground(ctx, "payment-credit-retention", repository.RunPaymentCreditRetention)
 	go observability.RunBackground(ctx, "expired-hold-recovery", billing.NewExpiredHoldRecoveryWorker(repository, expiredHoldClient, time.Minute).Run)
 	go observability.RunBackground(ctx, "product-admission-expiry", billing.NewProductAdmissionExpiryWorker(repository, time.Minute).Run)
 	go observability.RunBackground(ctx, "product-admission-verification", billing.NewProductAdmissionVerificationWorker(repository, payments.Capabilities(), 5*time.Second, admissionTTL).Run)

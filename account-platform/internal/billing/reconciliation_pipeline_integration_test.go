@@ -64,7 +64,7 @@ func TestF03PipelineStableCasesAndVerifiedResolution(t *testing.T) {
 	businessDate := r.now().In(time.FixedZone("Asia/Shanghai", 8*60*60))
 	row := pipelineRefundRow(order, r.now())
 	provider := &trackedBillProvider{reconciliationFixtureProvider: reconciliationFixtureProvider{rows: []ProviderBillEntry{row}}}
-	c, err := NewPaymentCoordinatorWithProvider(r, provider, "test")
+	c, err := newBillingFixturePaymentCoordinator(r, provider, "test")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -190,7 +190,7 @@ func TestF03PipelineFailedAuthorityDoesNotStarveOtherRows(t *testing.T) {
 		provider.rows = append(provider.rows, ProviderBillEntry{EntryType: "PAYMENT", ProviderReferenceID: ref, ChannelTransactionID: ref, MerchantOrderNo: order.MerchantOrderNo, Channel: order.Channel, AmountFen: order.AmountFen, Currency: order.Currency, Status: "SUCCESS", PaidAt: now})
 		provider.orders[order.MerchantOrderNo] = ProviderOrder{MerchantOrderNo: order.MerchantOrderNo, Status: "SUCCESS", Channel: order.Channel, AmountFen: order.AmountFen, Currency: order.Currency, ChannelTransactionID: &ref, PaidAt: &now, ExternalCustomerKey: order.RequesterID.String(), ExternalSKU: "controlled-pipeline-sku"}
 	}
-	c, err := NewPaymentCoordinatorWithProvider(r, provider, "test")
+	c, err := newBillingFixturePaymentCoordinator(r, provider, "test")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -233,7 +233,7 @@ func TestF03PipelineHundredThousandRowsWithoutFinancialLock(t *testing.T) {
 	for i := range input {
 		input[i] = row
 	}
-	c, err := NewPaymentCoordinatorWithProvider(r, &reconciliationFixtureProvider{}, "test")
+	c, err := newBillingFixturePaymentCoordinator(r, &reconciliationFixtureProvider{}, "test")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -330,7 +330,7 @@ func TestF03PipelineDistinctCasesResumeAfterCommittedProgress(t *testing.T) {
 	for i := range rows {
 		rows[i] = pipelineRefundRow(order, r.now())
 	}
-	c, err := NewPaymentCoordinatorWithProvider(r, &reconciliationFixtureProvider{}, "test")
+	c, err := newBillingFixturePaymentCoordinator(r, &reconciliationFixtureProvider{}, "test")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -397,7 +397,7 @@ func TestF03InternalMissingReferencesHaveDistinctStableIdentity(t *testing.T) {
 func TestF03ScheduledUnchangedBillObservesLateInternalFacts(t *testing.T) {
 	r, ctx := retainedFinanceRepository(t)
 	provider := &reconciliationFixtureProvider{}
-	c, err := NewPaymentCoordinatorWithProvider(r, provider, "test")
+	c, err := newBillingFixturePaymentCoordinator(r, provider, "test")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -460,7 +460,7 @@ func (b *reconciliationAcquireBarrier) TraceAcquireEnd(context.Context, *pgxpool
 func TestF03ResumeAdmissionRechecksCompletedReceipt(t *testing.T) {
 	r, ctx := retainedFinanceRepository(t)
 	provider := &reconciliationFixtureProvider{}
-	c, err := NewPaymentCoordinatorWithProvider(r, provider, "test")
+	c, err := newBillingFixturePaymentCoordinator(r, provider, "test")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -482,7 +482,7 @@ func TestF03ResumeAdmissionRechecksCompletedReceipt(t *testing.T) {
 	defer pool.Close()
 	other := *r
 	other.pool = pool
-	second, err := NewPaymentCoordinatorWithProvider(&other, provider, "test")
+	second, err := newBillingFixturePaymentCoordinator(&other, provider, "test")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -517,7 +517,7 @@ func TestF03ScheduledProviderOnlyFactsObserveNewOrderBinding(t *testing.T) {
 	r, ctx := retainedFinanceRepository(t)
 	row := ProviderBillEntry{EntryType: "REFUND", ProviderReferenceID: uuid.NewString(), MerchantOrderNo: "late-binding-" + uuid.NewString(), Channel: "ALIPAY", AmountFen: 100, Currency: "CNY", Status: "SUCCESS", PaidAt: r.now()}
 	provider := &reconciliationFixtureProvider{rows: []ProviderBillEntry{row}}
-	c, err := NewPaymentCoordinatorWithProvider(r, provider, "test")
+	c, err := newBillingFixturePaymentCoordinator(r, provider, "test")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -563,7 +563,7 @@ func TestF03ScheduledProviderOnlyFactsObserveNewOrderBinding(t *testing.T) {
 
 func TestF03ScheduledLegacyReceiptWithoutObservationIsPreserved(t *testing.T) {
 	r, ctx := retainedFinanceRepository(t)
-	c, err := NewPaymentCoordinatorWithProvider(r, &reconciliationFixtureProvider{}, "test")
+	c, err := newBillingFixturePaymentCoordinator(r, &reconciliationFixtureProvider{}, "test")
 	if err != nil {
 		t.Fatal(err)
 	}

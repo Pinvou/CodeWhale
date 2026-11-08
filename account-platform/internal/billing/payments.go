@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/payment"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/paymentcredit"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/resilience"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -78,6 +79,7 @@ type PaymentOrderHistoryItem struct {
 }
 
 type PaymentCoordinator struct {
+	creditAdmission             paymentcredit.Admission
 	repository                  *PostgresRepository
 	ledgerRepairAuthority       ledgerRepairProofAuthority
 	provider                    PaymentProvider

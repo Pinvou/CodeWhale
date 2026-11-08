@@ -112,7 +112,7 @@ func TestF03SimulatorBillRefundAndLedger(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	coordinator, err := NewPaymentCoordinatorWithProvider(r, provider, "test")
+	coordinator, err := newBillingFixturePaymentCoordinator(r, provider, "test")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -196,7 +196,7 @@ func TestF03SimulatorBillRefundAndLedger(t *testing.T) {
 	for index := range rows {
 		rows[index].MerchantOrderNo = "wrong-" + order.MerchantOrderNo
 	}
-	wrongCoordinator, err := NewPaymentCoordinatorWithProvider(r, f03WrongMerchantBillProvider{PaymentProvider: provider, rows: rows}, "test")
+	wrongCoordinator, err := newBillingFixturePaymentCoordinator(r, f03WrongMerchantBillProvider{PaymentProvider: provider, rows: rows}, "test")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -15,7 +15,7 @@ func TestRetainedPaymentRepairProviderFacts(t *testing.T) {
 	r, ctx := retainedFinanceRepository(t)
 	activationVersion := paymentFixtureActivation(t, ctx, r.pool)("ACTIVE")
 	provider := &paymentRepairStubProvider{}
-	p, err := NewPaymentCoordinatorWithProvider(r, provider)
+	p, err := newBillingFixturePaymentCoordinator(r, provider)
 	if err != nil {
 		t.Fatal(err)
 	}

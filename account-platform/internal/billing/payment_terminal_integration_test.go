@@ -103,7 +103,7 @@ func TestRetainedCreateResponsePreservesConfirmedPayment(t *testing.T) {
 		t.Fatal(e)
 	}
 	provider := &retainedCreateRaceProvider{retainedFinancialProvider: &retainedFinancialProvider{}}
-	c, e := NewPaymentCoordinatorWithProvider(r, provider, "test")
+	c, e := newBillingFixturePaymentCoordinator(r, provider, "test")
 	if e != nil {
 		t.Fatal(e)
 	}

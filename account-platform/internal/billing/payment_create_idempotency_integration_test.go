@@ -29,7 +29,7 @@ func TestRetainedCreateSameKeyExternalWait(t *testing.T) {
 				secondProduct = retainedSameKeyProduct(t, r, ctx, owner)
 			}
 			provider := &retainedSameKeyProvider{retainedFinancialProvider: &retainedFinancialProvider{}, entered: make(chan struct{}), release: make(chan struct{})}
-			c, err := NewPaymentCoordinatorWithProvider(r, provider, "test")
+			c, err := newBillingFixturePaymentCoordinator(r, provider, "test")
 			if err != nil {
 				t.Fatal(err)
 			}

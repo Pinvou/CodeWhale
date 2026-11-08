@@ -19,6 +19,7 @@ import (
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/identity"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/observability"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/paymentcredit"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/serviceauth"
 )
 
@@ -115,20 +116,32 @@ func main() {
 		log.Fatal("ACCOUNT_CLOSURE_CONFIGURATION_INVALID")
 	}
 	closureDone := make(chan struct{})
+	creditResolver, err := paymentcredit.NewHTTPClient(os.Getenv("BILLING_HTTP_URL"), credential)
+	if err != nil {
+		log.Fatal("ACCOUNT_PAYMENT_CREDIT_CONFIGURATION_INVALID")
+	}
+	creditRecoveryDone := make(chan struct{})
+	go func() {
+		defer close(creditRecoveryDone)
+		observability.RunBackground(ctx, "payment-credit-recovery", func(ctx context.Context) { repository.RunPaymentCreditRecovery(ctx, creditResolver) })
+	}()
 	go func() {
 		defer close(closureDone)
 		observability.RunBackground(ctx, "account-closure", account.NewAccountClosureWorker(repository, 5*time.Second, closureBilling, closureToken).WithCleanup(identities, closureBilling, closureToken).Run)
 	}()
-	// Registered after repository.Close's defer, so cancellation and this bounded
-	// wait run before the database pool is closed. A lost ACK resumes by its lease.
+	// Registered after repository.Close's defer: cancel and drain both recovery
+	// workers before pool closure, using the existing single shutdown budget.
 	drainClosure := func() {
 		stopWorkers()
 		timer := time.NewTimer(10 * time.Second)
 		defer timer.Stop()
-		select {
-		case <-closureDone:
-		case <-timer.C:
-			log.Print("ACCOUNT_CLOSURE_SHUTDOWN_TIMEOUT")
+		for _, done := range []<-chan struct{}{closureDone, creditRecoveryDone} {
+			select {
+			case <-done:
+			case <-timer.C:
+				log.Print("ACCOUNT_CLOSURE_SHUTDOWN_TIMEOUT")
+				return
+			}
 		}
 	}
 	defer drainClosure()

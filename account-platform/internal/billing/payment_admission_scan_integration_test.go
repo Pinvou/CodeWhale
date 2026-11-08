@@ -24,7 +24,7 @@ func TestPaymentActionAdmissionPostgres(t *testing.T) {
 	run := func(name string, check func(*testing.T, *PostgresRepository, context.Context, *PaymentCoordinator)) {
 		t.Run(name, func(t *testing.T) {
 			r, ctx := retainedFinanceRepository(t)
-			p, err := NewPaymentCoordinatorWithProvider(r, &retainedFinancialProvider{}, "test")
+			p, err := newBillingFixturePaymentCoordinator(r, &retainedFinancialProvider{}, "test")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -64,7 +64,7 @@ func TestPaymentActionAdmissionPostgres(t *testing.T) {
 		}
 		product := retainedSameKeyProduct(t, r, ctx, payer)
 		provider := &coreRecoveryProvider{retainedFinancialProvider: &retainedFinancialProvider{}}
-		coordinator, err := NewPaymentCoordinatorWithProvider(r, provider, "test")
+		coordinator, err := newBillingFixturePaymentCoordinator(r, provider, "test")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -140,7 +140,7 @@ func TestPaymentActionAdmissionPostgres(t *testing.T) {
 		// Keep these two histories separate. Eighty accepted boundary attempts
 		// would have prevented another accepted batch ten seconds before now.
 		r, ctx = retainedFinanceRepository(t)
-		p, err := NewPaymentCoordinatorWithProvider(r, &retainedFinancialProvider{}, "test")
+		p, err := newBillingFixturePaymentCoordinator(r, &retainedFinancialProvider{}, "test")
 		if err != nil {
 			t.Fatal(err)
 		}

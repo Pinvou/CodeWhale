@@ -2,7 +2,7 @@
 
 ## 身份清理前的自助资金恢复
 
-创建申请仅持久化原申请 ID、幂等摘要、确认事实及审计，保持 `CLOSURE_REQUESTED`，不立即将用户关闭。worker 先复核角色以及 Billing、Token 全域阻断；有阻断保持账号可操作，全部清除才进入静默期。静默后的复核仍然保留，前检查不构成跨服务资金原子围栏。
+创建申请仅持久化原申请 ID、幂等摘要、确认事实及审计，保持 `CLOSURE_REQUESTED`，不立即将用户关闭。worker 先复核角色以及 Billing、Token 全域阻断；有阻断保持账号可操作，全部清除才进入静默期。静默后的复核仍然保留，前检查本身不构成跨服务资金原子围栏。历史付款新增入账另由[持久准入与身份清理协调](../../docs/payment-credit-identity-cleanup.md)约束：身份清理开始后保留付款证据、转人工，禁止增加余额或权益；未决准入阻止清理，资金结果确认会作废旧评估版本。
 
 在 `QUIESCING` / `FINANCIAL_CLEARANCE` 发现 `PERSONAL_BALANCE_NONZERO/CLEAR_PERSONAL_BALANCE`、`RECEIVABLE_OUTSTANDING/SETTLE_RECEIVABLE` 或 `PAYMENT_PROCESSING/FINISH_PAYMENT_ORDER` 时，仅在原 claim、请求版本、用户状态与版本仍有效，且身份清理准备、删除、权益隔离、重放清理及生命周期里程碑均为空的事务中，将 `CLOSING` 受控恢复为 `ACTIVE` 并追加审计。请求保持 `FINANCIAL_CLEARANCE/BLOCKED`、原 ID 和原 key，按原机制重试，不撤销申请、不退款、不清除应收。纯等待或平台处理阻断不会单独触发恢复，未知动作字符串不能触发恢复。
 

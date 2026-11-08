@@ -73,7 +73,7 @@ func TestPrivateF12OriginalOwnerIntegration(t *testing.T) {
 	setActivation := paymentFixtureActivation(t, ctx, pool)
 	activationVersion := setActivation("ACTIVE")
 	provider := &privateF12OriginalProvider{}
-	coordinator, err := NewPaymentCoordinatorWithProvider(repository, provider)
+	coordinator, err := newBillingFixturePaymentCoordinator(repository, provider)
 	if err != nil {
 		t.Fatal(err)
 	}

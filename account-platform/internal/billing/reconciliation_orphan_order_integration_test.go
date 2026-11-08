@@ -68,7 +68,7 @@ func TestReconciliationOrphanPaidOrderPostgres(t *testing.T) {
 			if upgrade {
 				provider.rows = []ProviderBillEntry{{EntryType: "PAYMENT", ProviderReferenceID: reference, ChannelTransactionID: reference, MerchantOrderNo: normalOrder.MerchantOrderNo, Channel: normalOrder.Channel, AmountFen: normalOrder.AmountFen, Currency: normalOrder.Currency, Status: "SUCCESS", PaidAt: *normalProvider.result.PaidAt}}
 			}
-			coordinator, err := NewPaymentCoordinatorWithProvider(r, provider, "test")
+			coordinator, err := newBillingFixturePaymentCoordinator(r, provider, "test")
 			if err != nil {
 				t.Fatal(err)
 			}
