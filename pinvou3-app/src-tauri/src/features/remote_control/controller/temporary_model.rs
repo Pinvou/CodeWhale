@@ -10,7 +10,6 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
-use std::time::Duration;
 
 use parking_lot::Mutex;
 use serde_json::{Map, Value, json};
@@ -34,7 +33,6 @@ pub(crate) const MAX_MODEL_CHARS: usize = 256;
 pub(crate) const MAX_URL_CHARS: usize = 2048;
 pub(crate) const MAX_SECRET_BYTES: usize = super::protocol::MAX_TEMPORARY_MODEL_CREDENTIAL_BYTES;
 const MAX_LIVE_MODEL_PACKAGES: usize = 64;
-const RUNTIME_DNS_TIMEOUT: Duration = Duration::from_secs(5);
 
 const PRESETS: &[&str] = &[
     "local_vllm",
@@ -767,7 +765,9 @@ fn is_globally_routable(address: IpAddr) -> bool {
     }
 }
 
-fn validate_runtime_addresses(mut addresses: Vec<SocketAddr>) -> Result<Vec<SocketAddr>> {
+pub(super) fn validate_runtime_addresses(
+    mut addresses: Vec<SocketAddr>,
+) -> Result<Vec<SocketAddr>> {
     if addresses.is_empty()
         || addresses
             .iter()
@@ -775,8 +775,8 @@ fn validate_runtime_addresses(mut addresses: Vec<SocketAddr>) -> Result<Vec<Sock
     {
         return Err(error("model_endpoint_private"));
     }
-    addresses.sort_unstable();
-    addresses.dedup();
+    let mut seen = std::collections::BTreeSet::new();
+    addresses.retain(|address| seen.insert(*address));
     Ok(addresses)
 }
 
@@ -785,35 +785,16 @@ fn validate_runtime_addresses(mut addresses: Vec<SocketAddr>) -> Result<Vec<Sock
 pub(crate) struct TemporaryRuntimeModels {
     pub(crate) primary: SavedModel,
     pub(crate) vision: Option<SavedModel>,
+    pub(crate) egress: Arc<super::runtime_egress::RuntimeEgress>,
 }
 
-/// Performs the app-owned execution-preparation check for a temporary endpoint. The
-/// validated address snapshot is intentionally not injected into CodeWhale:
-/// the accepted residual risk is that the HTTP client may resolve the host
-/// again, honor a process proxy, or follow a redirect before inference.
-async fn validate_runtime_endpoint(base_url: &str) -> Result<()> {
-    let url = reqwest::Url::parse(base_url).map_err(|_| error("model_endpoint_invalid"))?;
-    if url.scheme() != "https" {
-        return Err(error("model_endpoint_insecure"));
-    }
-    let host = url
-        .host_str()
-        .ok_or_else(|| error("model_endpoint_invalid"))?
-        .trim_end_matches('.')
-        .to_ascii_lowercase();
-    let port = url
-        .port_or_known_default()
-        .ok_or_else(|| error("model_endpoint_invalid"))?;
-    let addresses = tokio::time::timeout(
-        RUNTIME_DNS_TIMEOUT,
-        tokio::net::lookup_host((host.as_str(), port)),
-    )
-    .await
-    .map_err(|_| error("model_endpoint_unresolved"))?
-    .map_err(|_| error("model_endpoint_unresolved"))?
-    .collect::<Vec<_>>();
-    validate_runtime_addresses(addresses)?;
-    Ok(())
+fn runtime_endpoint_error(code: &'static str) -> TemporaryModelError {
+    // Keep the published closed rejection vocabulary: a resolver unable to
+    // admit/return a bounded snapshot is an unresolved endpoint for this turn.
+    error(match code {
+        "model_endpoint_dns_busy" | "model_endpoint_dns_capacity" => "model_endpoint_unresolved",
+        other => other,
+    })
 }
 
 /// A-side export decision for one saved model.
@@ -1000,11 +981,23 @@ impl TemporaryModelStore {
                 ))
             })??;
         primary.vision_model_id = vision.as_ref().map(|model| model.id.clone());
-        validate_runtime_endpoint(&primary.base_url).await?;
-        if let Some(model) = vision.as_ref() {
-            validate_runtime_endpoint(&model.base_url).await?;
-        }
-        Ok(TemporaryRuntimeModels { primary, vision })
+        let primary_endpoint = super::runtime_egress::prepare_endpoint(&primary.base_url)
+            .await
+            .map_err(runtime_endpoint_error)?;
+        let vision_endpoint = match vision.as_ref() {
+            Some(model) => Some(
+                super::runtime_egress::prepare_endpoint(&model.base_url)
+                    .await
+                    .map_err(runtime_endpoint_error)?,
+            ),
+            None => None,
+        };
+        let egress = super::runtime_egress::RuntimeEgress::new(primary_endpoint, vision_endpoint);
+        Ok(TemporaryRuntimeModels {
+            primary,
+            vision,
+            egress,
+        })
     }
 
     pub(crate) fn installed_at_ms(&self) -> Option<u64> {
@@ -1446,6 +1439,11 @@ mod tests {
                 .unwrap()
                 .as_slice(),
             [public]
+        );
+        let other: SocketAddr = "1.1.1.1:443".parse().unwrap();
+        assert_eq!(
+            validate_runtime_addresses(vec![public, other, public]).unwrap(),
+            vec![public, other]
         );
     }
 

@@ -25,6 +25,7 @@ pub(crate) mod redaction;
 pub(crate) mod relay_runtime;
 pub(crate) mod relay_transport;
 pub(crate) mod resume;
+pub(crate) mod runtime_egress;
 pub(crate) mod shared_transport;
 pub(crate) mod task;
 pub(crate) mod task_rejection;

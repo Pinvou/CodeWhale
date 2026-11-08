@@ -87,6 +87,7 @@ pub(crate) struct RemoteRuntimeModelBundle {
     primary_credential: RuntimeModelCredential,
     vision: Option<SavedModel>,
     vision_credential: Option<RuntimeModelCredential>,
+    egress: Option<Arc<dyn deepseek_tui::config::ModelHttpPolicy>>,
 }
 
 /// Per-call preparation inputs, including the remote task's frozen route.
@@ -225,7 +226,24 @@ where
 }
 
 impl RemoteRuntimeModelBundle {
-    pub(crate) fn new(mut primary: SavedModel, mut vision: Option<SavedModel>) -> Result<Self> {
+    pub(crate) fn new_with_http_policy(
+        primary: SavedModel,
+        vision: Option<SavedModel>,
+        policy: Arc<dyn deepseek_tui::config::ModelHttpPolicy>,
+    ) -> Result<Self> {
+        Self::with_egress(primary, vision, Some(policy))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new(primary: SavedModel, vision: Option<SavedModel>) -> Result<Self> {
+        Self::with_egress(primary, vision, None)
+    }
+
+    fn with_egress(
+        mut primary: SavedModel,
+        mut vision: Option<SavedModel>,
+        egress: Option<Arc<dyn deepseek_tui::config::ModelHttpPolicy>>,
+    ) -> Result<Self> {
         let primary_credential = RuntimeModelCredential::api_key(primary.api_key.clone())?;
         primary.api_key.clear();
         let vision_credential = vision
@@ -240,6 +258,7 @@ impl RemoteRuntimeModelBundle {
             primary_credential,
             vision,
             vision_credential,
+            egress,
         })
     }
 
@@ -2740,6 +2759,7 @@ impl EnginePool {
         let (explicit_model_override, explicit_credential) = match remote_bundle {
             Some(bundle) => {
                 bridge.runtime_route_locked = true;
+                bridge.runtime_model_egress = bundle.egress;
                 bridge.runtime_vision_model = bundle.vision;
                 bridge.runtime_vision_credential = bundle.vision_credential;
                 (Some(bundle.primary), Some(bundle.primary_credential))
@@ -7875,9 +7895,34 @@ mod scheduled_model_tests {
         let provider = ControlledRuntimeProvider::user_managed();
         let mut primary = model("task-primary", "primary-wire");
         primary.api_key = "task-scoped-fixture-key".into();
+        primary.base_url = "https://1.1.1.1/v1".into();
         let mut vision = model("task-vision", "vision-wire");
         vision.api_key = "vision-fixture-key".into();
-        let bundle = super::RemoteRuntimeModelBundle::new(primary, Some(vision)).unwrap();
+        vision.base_url = "https://8.8.8.8/v1".into();
+        primary.vision_model_id = Some(vision.id.clone());
+        #[derive(Debug)]
+        struct FrozenHttpPolicy;
+        impl deepseek_tui::config::ModelHttpPolicy for FrozenHttpPolicy {
+            fn configure(
+                &self,
+                builder: reqwest::ClientBuilder,
+                base: &str,
+            ) -> Result<reqwest::ClientBuilder> {
+                anyhow::ensure!(
+                    matches!(base, "https://1.1.1.1/v1" | "https://8.8.8.8/v1"),
+                    "unprepared route"
+                );
+                Ok(builder)
+            }
+        }
+        let expected_policy: Arc<dyn deepseek_tui::config::ModelHttpPolicy> =
+            Arc::new(FrozenHttpPolicy);
+        let bundle = super::RemoteRuntimeModelBundle::new_with_http_policy(
+            primary,
+            Some(vision),
+            expected_policy.clone(),
+        )
+        .unwrap();
         let (prepared_bridge, prepared, _) = super::EnginePool::prepare_runtime_model_with(
             &store,
             provider.as_ref(),
@@ -7914,6 +7959,37 @@ mod scheduled_model_tests {
                 .is_empty()
         );
         assert!(prepared_bridge.runtime_vision_credential.is_some());
+        let config = prepared_bridge.build_dt_config();
+        assert!(Arc::ptr_eq(
+            config.model_http_policy.as_ref().unwrap(),
+            &expected_policy
+        ));
+        let cloned_config = prepared_bridge.clone().build_engine_config();
+        assert!(Arc::ptr_eq(
+            cloned_config
+                .vision_config
+                .as_ref()
+                .unwrap()
+                .model_http_policy
+                .as_ref()
+                .unwrap(),
+            &expected_policy
+        ));
+        assert!(
+            expected_policy
+                .configure(reqwest::Client::builder(), "https://1.1.1.1/v1")
+                .is_ok()
+        );
+        assert!(
+            expected_policy
+                .configure(reqwest::Client::builder(), "https://8.8.8.8/v1")
+                .is_ok()
+        );
+        assert!(
+            expected_policy
+                .configure(reqwest::Client::builder(), "https://unprepared.invalid/v1")
+                .is_err()
+        );
         assert_eq!(
             prepared_bridge.build_dt_config().api_key.as_deref(),
             Some("task-scoped-fixture-key")
@@ -12174,6 +12250,7 @@ mod probed_facts_wiring_tests {
             remote_turn_skills: None,
             runtime_route_locked: false,
             runtime_vision_model: None,
+            runtime_model_egress: None,
             runtime_vision_credential: None,
             session_affinity_key: None,
             probed_context_tokens: None,

@@ -1,5 +1,7 @@
 # Pinvou 对 CodeWhale 底座的 fork 维护策略
 
+> 本评审分支另含 T1 HTTP policy 候选 `55393015d8a4905d47ca1a81ad41aead8c60962f`，基于下述已公开基线；该候选尚未合入公开维护分支，具体范围与待办见 `docs/fork-modifications.md` 的 T1 候选登记。公开维护头与不可变标签门禁不变。
+
 > 最后更新：2026-11-05。公开维护头 11cba403d 已包含 #114/#125 与 #123/#124/#129/#131/#133/#134/#135；父仓 gitlink 与公开维护头对齐。
 > 配套：`docs/fork-modifications.md`、`scripts/fork-guard.sh`、`docs/底座升级验收清单.md`
 

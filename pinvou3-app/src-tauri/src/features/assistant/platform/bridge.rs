@@ -434,6 +434,8 @@ pub struct Pinvou3Bridge {
     /// The app has supplied a complete task-scoped route. Process-wide model
     /// environment variables and discovery probes must not rewrite it.
     pub runtime_route_locked: bool,
+    /// Task-scoped validated egress; never loaded from preferences or the environment.
+    pub(crate) runtime_model_egress: Option<Arc<dyn deepseek_tui::config::ModelHttpPolicy>>,
     /// Optional task-scoped visual fallback and its isolated credential.
     pub runtime_vision_model: Option<SavedModel>,
     pub runtime_vision_credential: Option<RuntimeModelCredential>,
@@ -517,6 +519,7 @@ impl std::fmt::Debug for Pinvou3Bridge {
                 &self.runtime_model_credential_frozen,
             )
             .field("runtime_route_locked", &self.runtime_route_locked)
+            .field("runtime_model_egress", &self.runtime_model_egress)
             .field(
                 "runtime_vision_model",
                 &self.runtime_vision_model.as_ref().map(|model| &model.id),
@@ -680,6 +683,7 @@ impl Pinvou3Bridge {
             runtime_model_credential_frozen: false,
             remote_turn_skills: None,
             runtime_route_locked: false,
+            runtime_model_egress: None,
             runtime_vision_model: None,
             runtime_vision_credential: None,
             probed_context_tokens: None,
@@ -1990,6 +1994,7 @@ impl Pinvou3Bridge {
                 model: vision.model.clone(),
                 api_key: Some(api_key),
                 base_url: Some(vision.base_url.clone()),
+                model_http_policy: self.runtime_model_egress.clone(),
             });
         }
         // Native image input still follows the main protocol's client; only
@@ -2011,6 +2016,7 @@ impl Pinvou3Bridge {
                 model: self.model(),
                 api_key: Some(self.api_key()),
                 base_url: Some(self.base_url()),
+                model_http_policy: self.runtime_model_egress.clone(),
             });
         }
         // scheduled exception: Unknown (e.g. a local vLLM model absent from
@@ -2024,6 +2030,7 @@ impl Pinvou3Bridge {
                 model: self.model(),
                 api_key: Some(self.api_key()),
                 base_url: Some(self.base_url()),
+                model_http_policy: self.runtime_model_egress.clone(),
             });
         }
         None
@@ -3418,13 +3425,11 @@ impl Pinvou3Bridge {
         cfg
     }
 
-    /// Build the deepseek-tui top-level [`DtConfig`]: dynamically route
-    /// provider / model / base_url / api_key by `ModelPreset`, and inject the
-    /// sensitive-directory interception hook.
-    /// Environment variables take priority (compatible with the existing
-    /// `DEEPSEEK_*` settings in run-dev.sh).
+    /// Build the engine configuration. A task's frozen route and transport
+    /// policy take priority; ordinary local routes retain environment settings.
     pub fn build_dt_config(&self) -> DtConfig {
         let mut cfg = DtConfig::default();
+        cfg.model_http_policy = self.runtime_model_egress.clone();
         cfg.request_idempotency_header = self
             .runtime_model_credential
             .as_ref()
@@ -4312,6 +4317,7 @@ impl Pinvou3Bridge {
             runtime_model_credential_frozen: false,
             runtime_route_locked: false,
             remote_turn_skills: None,
+            runtime_model_egress: None,
             runtime_vision_model: None,
             runtime_vision_credential: None,
             session_affinity_key: None,
@@ -4404,6 +4410,7 @@ mod tests {
             runtime_model_credential_frozen: false,
             runtime_route_locked: false,
             runtime_vision_model: None,
+            runtime_model_egress: None,
             remote_turn_skills: None,
             runtime_vision_credential: None,
             probed_context_tokens: None,

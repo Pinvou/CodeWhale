@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
-# CodeWhale v0.9.12 clean re-fork guard: 93 maintenance commits, ten maintained themes (r3 closed at pinvou-v0.9.12-r3; inside a transition window the head may lead the tag).
+# CodeWhale v0.9.12 guard: 93 published maintenance commits plus one T1 review candidate, ten themes; public-head alignment remains a separate gate.
 set -uo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CODEWHALE="$REPO/CodeWhale"
 APP="$REPO/pinvou3-app/src-tauri"
 EXPECTED_UPSTREAM="dcd4c200f72f0c1ffd60d8e7f6850313db879fc5"
-# Public maintenance after CodeWhale#123/#124/#129/#131/#133/#134/#135 merged.
-EXPECTED_HEAD="11cba403dc6bd6ca5c4dca55042785b03449ac8e"
-EXPECTED_COMMITS=93
+# Registered T1 review candidate above public CodeWhale#135; not a claim of public maintenance integration.
+EXPECTED_HEAD="55393015d8a4905d47ca1a81ad41aead8c60962f"
+EXPECTED_COMMITS=94
 # Published maintenance base of this integration.
 MAINTENANCE_BASE="11cba403dc6bd6ca5c4dca55042785b03449ac8e"
 # The immutable r1 closure must remain an ancestor of the registered head.
@@ -70,6 +70,10 @@ fi
 bold "── 第 1 层：登记主题与父仓适配指纹 ──"
 # 格式：主题|说明|文件（相对父仓根）|grep -F 固定串
 fingerprints=(
+  "T1|宿主模型传输约束接口                 |CodeWhale/crates/tui/src/config.rs|pub trait ModelHttpPolicy"
+  "T1|实际主模型与回退客户端继承约束       |CodeWhale/crates/tui/src/client.rs|policy.configure(builder, &base_url)"
+  "T1|实际三客户端出口结果回归             |CodeWhale/crates/tui/src/client/transport_policy_tests.rs|async fn forkguard_host_http_policy_reaches_primary_fallback_and_vision()"
+  "T1|约束拒绝与配置注入关闭回归           |CodeWhale/crates/tui/src/client/transport_policy_tests.rs|async fn forkguard_host_http_policy_denial_fails_primary_and_vision_closed()"
   "T1|宿主单 execution-root 显式配置     |pinvou3-app/src-tauri/src/features/assistant/platform/bridge.rs|workspace_roots: _, // host exposes one execution root"
   "T1|宿主同步使用当前会话冻结根集合    |pinvou3-app/src-tauri/src/features/assistant/engine.rs|sync_session_workspace_roots(&session_id,"
   "T1|宿主同步保持非辅助会话完整根回归  |pinvou3-app/src-tauri/src/features/assistant/engine.rs|fn session_sync_root_selection_preserves_the_frozen_non_aux_keychain()"

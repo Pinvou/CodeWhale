@@ -1,5 +1,13 @@
 # CodeWhale Fork 修改清单
 
+## T1 候选：宿主冻结模型 HTTP 约束（2026-11-08）
+
+- 候选 `55393015d8a4905d47ca1a81ad41aead8c60962f` 基于公开维护头 `11cba403d`，尚未合入受保护维护分支。新增仅在内存中配置的通用 `ModelHttpPolicy`，实际应用于主模型、HTTP/1 回退和独立视觉 HTTP builder；clone/profile merge 与视觉继承保留该约束，构造拒绝 fail closed。
+- Pinvou 的临时模型公网分类、DNS 工作预算、地址快照、禁止代理/重定向等产品政策留在 App 的 `controller/runtime_egress.rs`。通用底座不包含远控任务、租约、凭据或内部服务语义；不引入第二个模型客户端。
+- 结果式 `forkguard_host_http_policy_reaches_primary_fallback_and_vision`、`forkguard_host_http_policy_denial_fails_primary_and_vision_closed` 覆盖三条实际网络入口及拒绝传播；父仓同模块默认状态测试、独立 TLS/代理/重定向测试和 EnginePool 冻结 handoff 另行验证，具体执行结果随固定版本证据记录，不将源码名存在当运行通过。
+- 已在真实最新上游 main `61e914bfdde385343e409ff1119ad49d753823e0` 的 `runtime/config` 与 `engine` 位置准备通用候选；这是上游重构后的源路径，不能把旧 TUI 补丁机械声称为已适配上游。两候选的提交、编译与审核状态分别记录。
+- 本分支 gitlink 为评审候选；不可变 r3 标签与 `MAINTENANCE_BASE` 仍保留原值。`verify-public-submodule.sh` 的公开维护头相等要求不放宽，维护分支合入与最终父仓引用须取得明确授权并复核；当前不得据此宣称发布依赖已齐。
+
 ## 本轮同步接线：冷启动所有权与有界拆除（2026-10-13）
 
 - 按用户最新确认，本轮为远控 v1 接入主模型 Responses（含原生图片输入），不扩视觉兜底协议。显式 openai_responses 与官方 OpenAI GPT 目录路线均导出正确 wire，B 与 Relay 独立复算；伪造 Chat/Responses 标签拒绝，不改写原 SavedModel 预设，不改 CodeWhale 源码。视觉兜底仅接受 Chat；远程 Responses 主模型不会被 Chat-only image_analyze 自动复用，原生图片路径不受影响。普通本地 Responses 行为保留。
