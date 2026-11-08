@@ -1294,6 +1294,29 @@ mod tests {
     use tokio::sync::oneshot;
     use tokio_tungstenite::accept_async;
 
+    struct ControllerUpgrade;
+
+    // The upstream trait fixes the ErrorResponse ABI. Implement that interface
+    // directly instead of an inferred closure with a large error variant.
+    impl tokio_tungstenite::tungstenite::handshake::server::Callback for ControllerUpgrade {
+        fn on_request(
+            self,
+            _request: &tokio_tungstenite::tungstenite::handshake::server::Request,
+            mut response: tokio_tungstenite::tungstenite::handshake::server::Response,
+        ) -> std::result::Result<
+            tokio_tungstenite::tungstenite::handshake::server::Response,
+            tokio_tungstenite::tungstenite::handshake::server::ErrorResponse,
+        > {
+            response.headers_mut().insert(
+                SEC_WEBSOCKET_PROTOCOL,
+                HeaderValue::from_static(
+                    super::super::controller::protocol::CONTROLLER_SUBPROTOCOL,
+                ),
+            );
+            Ok(response)
+        }
+    }
+
     async fn observe_stalled_upgrade(stream: &mut tokio::net::TcpStream) {
         let mut request = Vec::new();
         while !request.ends_with(b"\r\n\r\n") {
@@ -1335,12 +1358,9 @@ mod tests {
             );
             let (next, _) = listener.accept().await.unwrap();
             assert!(began.elapsed() >= CONNECT_ATTEMPT_TIMEOUT + Duration::from_millis(350));
-            let mut socket = tokio_tungstenite::accept_hdr_async(next,
-                |_: &Request<()>, mut response: tokio_tungstenite::tungstenite::handshake::server::Response| {
-                    response.headers_mut().insert(SEC_WEBSOCKET_PROTOCOL,
-                        HeaderValue::from_static(super::super::controller::protocol::CONTROLLER_SUBPROTOCOL));
-                    Ok(response)
-                }).await.unwrap();
+            let mut socket = tokio_tungstenite::accept_hdr_async(next, ControllerUpgrade)
+                .await
+                .unwrap();
             let register = socket.next().await.unwrap().unwrap();
             let Message::Text(register) = register else {
                 panic!("registration")
