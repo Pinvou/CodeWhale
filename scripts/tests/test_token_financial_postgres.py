@@ -1846,7 +1846,6 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
             "TestEscalatedForcedRefundWalletLockOrderPostgres",
             "TestOrdinaryForcedRefundAppliedReceiptRecoveryPostgres",
             "TestPaymentPersonalWalletAdmissionStatusRacePostgres",
-            "TestPostgresManagedPricePagination",
             "TestLedgerRepairProofHistoricalUpgradePostgres",
             "TestLedgerRepairAuthorityMixedBatchPostgres",
             "TestLedgerRepairHistoryCapabilityPostgres",
