@@ -488,3 +488,25 @@ ledgerRepairCopy.ja.ledgerTargetEntry = {
     correct_ledger_account_id: { label: '正しい転記先口座 ID', help: '本来の転記先となるプラットフォーム口座です。' },
   },
 };
+
+ledgerRepairCopy.zh.ledgerImpact = {
+  refreshing: "正在重新读取这笔更正的预览。",
+  title: '受影响的账户', original: '当前入账账户', intended: '应入账账户', accountType: '账户类型',
+  requested: '申请更正金额', points: value => value + ' 积分', notProvided: '未提供', identifiers: '查看冻结标识和参数',
+  limit: '快照未提供账户增减方向和更正前后的余额。这里显示的是申请金额，实际结果以审批执行和账本为准。',
+  types: { PAYMENT_CLEARING: '支付清算', USAGE_REVENUE: '用量收入', WALLET_LIABILITY: '钱包负债', RECEIVABLE_ASSET: '应收资产', ADJUSTMENT: '调账', REFUND_CLEARING: '退款清算', CHARGEBACK_CLEARING: '拒付清算' },
+};
+ledgerRepairCopy.en.ledgerImpact = {
+  refreshing: "Refreshing the preview for this correction.",
+  title: 'Accounts affected', original: 'Account currently posted to', intended: 'Intended account', accountType: 'Account type',
+  requested: 'Requested correction amount', points: value => value + ' points', notProvided: 'Not provided', identifiers: 'View frozen IDs and parameters',
+  limit: 'The snapshot does not provide the direction of each balance change or before and after balances. This is the requested amount. Check approval execution and the ledger for the actual result.',
+  types: { PAYMENT_CLEARING: 'Payment clearing', USAGE_REVENUE: 'Usage revenue', WALLET_LIABILITY: 'Wallet liability', RECEIVABLE_ASSET: 'Receivable asset', ADJUSTMENT: 'Adjustment', REFUND_CLEARING: 'Refund clearing', CHARGEBACK_CLEARING: 'Chargeback clearing' },
+};
+ledgerRepairCopy.ja.ledgerImpact = {
+  refreshing: "この訂正のプレビューを再取得しています。",
+  title: '影響を受ける口座', original: '現在の転記先口座', intended: '正しい転記先口座', accountType: '口座種別',
+  requested: '訂正申請額', points: value => value + ' ポイント', notProvided: '未提供', identifiers: '取得時の ID とパラメーターを表示',
+  limit: 'スナップショットに各口座の増減方向や訂正前後の残高は含まれていません。表示額は申請額です。結果は承認の実行と台帳で確認してください。',
+  types: { PAYMENT_CLEARING: '支払い精算', USAGE_REVENUE: '利用収益', WALLET_LIABILITY: 'ウォレット負債', RECEIVABLE_ASSET: '未収資産', ADJUSTMENT: '調整', REFUND_CLEARING: '返金精算', CHARGEBACK_CLEARING: 'チャージバック精算' },
+};
