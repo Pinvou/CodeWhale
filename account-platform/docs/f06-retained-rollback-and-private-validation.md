@@ -27,6 +27,8 @@ psql -X --no-password --dbname="service=$APPROVED_ACCOUNT_AUDIT_SERVICE" \
 
 ## 已有隔离验证
 
+账户平台 CI 在独立 PostgreSQL 服务上，以仅有必要列读取权限的身份执行实际核查 SQL。门禁验证空账本、017、039、039 的第二版策略引用、高于 039 的真实迁移，以及目标库或列权限不匹配时的退出码与输出。
+
 真实 PostgreSQL 回归 `TestF10OrganizationGovernanceRollbackPostgres` 从原数值版本 001–039 安装独有数据库，不删高版本账本伪造历史阶段。它覆盖原始 SQL 的失败对照、空库与含角色绑定的正确撤权、重复权限关联只失效一次、撤销绑定和无关绑定不变、未知账本身份、后段失败原子性及历史审批外键保护。设置 `PINVOU_TEST_ACCOUNT_MIGRATE_BINARY` 为当前源码实际构建的 `cmd/migrate` 后，另经正式 CLI 验证；未设置时该 CLI 子例明确跳过，不能算 CLI 验证通过。本地验证不操作留存数据库，不等同部署回退验收。
 
 私有 F06 资金验证入口执行现存的个人调用共享 Token/Billing 用例和组织成员额度资金用例，解析实际 `go test -json` 结果，要求两组父用例及叶场景真实通过；零命中、跳过、失败、错误名称或损坏证据均不能通过。个人 JSON/SSE/未知用量覆盖不冒称已验证完整组织身份、供应商、组织开通或分布式执行流程。
