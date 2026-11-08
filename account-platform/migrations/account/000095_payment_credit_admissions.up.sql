@@ -73,8 +73,9 @@ BEGIN
     END IF;
     RETURN NEW;
 END $$;
-CREATE TRIGGER account_closure_payment_credit_guard BEFORE UPDATE OF stage ON account_closure_requests
-FOR EACH ROW EXECUTE FUNCTION guard_identity_cleanup_payment_credits();
+-- Install the closure-table trigger in 900015, after the optional historical
+-- closure lineage. This ordinary migration must also upgrade databases that
+-- have never installed account_closure_requests.
 
 CREATE FUNCTION guard_subject_cleanup_payment_credits() RETURNS trigger LANGUAGE plpgsql SET search_path=pg_catalog AS $$
 BEGIN
@@ -85,8 +86,8 @@ BEGIN
 		END IF;
 		RETURN NEW;
 END $$;
-CREATE TRIGGER subject_cleanup_payment_credit_guard BEFORE UPDATE OF status,anonymized_at ON users
-FOR EACH ROW EXECUTE FUNCTION guard_subject_cleanup_payment_credits();
+-- The anonymized_at column is also introduced by the closure lineage. Its
+-- subject cleanup trigger is installed together with the stage fence in 900015.
 
 -- Content-free clearance evidence is committed atomically with each purge.
 CREATE TABLE account_payment_credit_retention_batches (

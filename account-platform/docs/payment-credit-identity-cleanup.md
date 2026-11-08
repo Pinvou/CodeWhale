@@ -19,7 +19,7 @@ Account 的事务和用户锁不跨 Billing 结果核实 RPC。实际新增入�
 
 装配需在 Account 侧仅向 Billing 的真实 workload 授予 `internal.account.payment-credit.admit`（准入及只读最终确认核对）；Billing 侧仅向 Account 授予 `internal.billing.payment-credit.resolve`，该权限覆盖结果核实与确认。沿用已有 workload 身份凭证、网络边界及 `ACCOUNT_HTTP_URL` / `BILLING_HTTP_URL`。Compose model-token 和 Helm 的对应规则随代码更新。生产 compose.signup 的 ACCOUNT_WORKLOAD_RULES_JSON / BILLING_WORKLOAD_RULES_JSON 是运维提供的完整规则覆盖，部署前必须同步上述调用方专属权限；不能只更新基础模板。
 
-滚动升级先安装 Billing `900039` 数据库资金守卫，再安装 Account `000095` 及其准入/恢复入口，最后启用新 Billing writer。新旧代码并存时，保留数据库围栏；旧 writer 的新资金写入会拒绝，应通过原订单和回执核实恢复。应用回退也保留两份 forward-only 数据库迁移，不能通过回滚、删除未决准入或手改 `APPLIED` 解除资金围栏。首次安装使用相同固定版本的代码与完整原迁移包。
+滚动升级先安装 Billing `900039` 数据库资金守卫，再安装 Account `000095`、注销谱系之后的 `900015` 及准入/恢复入口，最后启用新 Billing writer。`000095` 可用于尚未安装注销表的历史库；完整安装必须继续执行注销谱系和 `900015`，不能将这一历史前缀视为已具备注销围栏。新旧代码并存时，保留数据库围栏；旧 writer 的新资金写入会拒绝，应通过原订单和回执核实恢复。应用回退保留这些 forward-only 数据库迁移，不能通过回滚、删除未决准入或手改 `APPLIED` 解除资金围栏。首次安装使用相同固定版本的代码与完整原迁移包。
 
 运维核查先按原订单、付款证据和 attempt ID 关联两端事实。`PENDING` 或未确认记录由原恢复任务核实；持续未决转入现有人工案件，记录责任人与保全复核依据。仅查询状态和重试原操作；不要按时间、读不到记录或投递次数推定资金效果，不手工放行身份清理。
 

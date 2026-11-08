@@ -101,7 +101,9 @@ func TestClosurePrivatePublicCombination(t *testing.T) {
 		upgradedAccount := f.database(t, ctx, "account", "account_service")
 		var oldAccount []migrations.Migration
 		for _, x := range am {
-			if x.Version != 27 && x.Version != 28 && x.Version != 900005 {
+			// The payment-credit closure trigger belongs to the optional closure
+			// lineage; its ordinary 000095 admission schema remains a predecessor.
+			if x.Version != 27 && x.Version != 28 && x.Version != 900005 && x.Version != 900015 {
 				oldAccount = append(oldAccount, x)
 			}
 		}
@@ -123,6 +125,15 @@ func TestClosurePrivatePublicCombination(t *testing.T) {
 		}
 		if stageShape(t, ctx, upgradedAccount) != stageShape(t, ctx, ac) {
 			t.Fatal("Account fresh/cumulative schema ACL shape mismatch")
+		}
+		ledger := stageValue(t, ctx, upgradedAccount, `SELECT jsonb_agg(to_jsonb(entry) ORDER BY version)::text FROM schema_migrations entry`)
+		shape := stageShape(t, ctx, upgradedAccount)
+		var fenceError *pgconn.PgError
+		if downErr := migrations.DownOne(ctx, upgradedAccount, am); !errors.As(downErr, &fenceError) || fenceError.Code != "55000" || fenceError.Message != "payment credit closure fence is forward-only; preserve pending and resolved outcomes" {
+			t.Fatal("current closure payment fence rollback was not rejected", downErr)
+		}
+		if ledger != stageValue(t, ctx, upgradedAccount, `SELECT jsonb_agg(to_jsonb(entry) ORDER BY version)::text FROM schema_migrations entry`) || shape != stageShape(t, ctx, upgradedAccount) {
+			t.Fatal("rejected payment fence rollback changed migration history or schema")
 		}
 		migrations.Unlock(ctx, upgradedAccount)
 		upgradedBilling := f.database(t, ctx, "billing", "billing_schema_owner")

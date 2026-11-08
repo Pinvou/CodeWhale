@@ -102,6 +102,13 @@ func (f *retainedWalletFenceFixture) repository(t *testing.T) *PostgresRepositor
 
 func (f *retainedWalletFenceFixture) repositoryWithInitialStage(t *testing.T, initial func(context.Context, *pgx.Conn, []migrations.Migration) error) *PostgresRepository {
 	t.Helper()
+	return f.repositoryThroughVersion(t, 0, initial)
+}
+
+// Zero keeps the current complete public installation. A historical rollback
+// contract must request its exact published head rather than the moving latest.
+func (f *retainedWalletFenceFixture) repositoryThroughVersion(t *testing.T, version int64, initial func(context.Context, *pgx.Conn, []migrations.Migration) error) *PostgresRepository {
+	t.Helper()
 	ctx := f.ctx
 	name := "f01_wallet_fence_" + strings.ReplaceAll(uuid.NewString(), "-", "")
 	var fixtureDatabase *cifixture.Database
@@ -147,6 +154,20 @@ func (f *retainedWalletFenceFixture) repositoryWithInitialStage(t *testing.T, in
 	installed, err := migrations.Load("../../migrations/account")
 	if err != nil {
 		t.Fatal(err)
+	}
+	if version > 0 {
+		var prefix []migrations.Migration
+		found := false
+		for _, migration := range installed {
+			if migration.Version <= version {
+				prefix = append(prefix, migration)
+			}
+			found = found || migration.Version == version
+		}
+		if !found {
+			t.Fatal("historical public migration head missing", version)
+		}
+		installed = prefix
 	}
 	if initial != nil {
 		if err = initial(ctx, connection, installed); err != nil {

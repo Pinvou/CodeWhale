@@ -951,7 +951,7 @@
       {
         "file": "000095_payment_credit_admissions.up.sql",
         "version": 95,
-        "sha256": "2e54561f58463b9c12abd699c6685fcd5e6827cc7992b5198fe8290ba89be285"
+        "sha256": "8be7d1c2b358612035707dbfd6c72ed5b174de716c64acd8b6866255bb954743"
       },
       {
         "file": "900001_first_delivery_permission_metadata.down.sql",
@@ -1092,6 +1092,16 @@
         "file": "900014_registration_bonus_backfill_progress.up.sql",
         "version": 900014,
         "sha256": "275c8a43bbf3741806ffd9204b506b2730074878b5cd83ac2477e9e14df2fede"
+      },
+      {
+        "file": "900015_payment_credit_closure_fence.down.sql",
+        "version": 900015,
+        "sha256": "f60abcb676fdeeba7e45553783a0fac99190b664fa8b208a6759ec7b6c6d0c39"
+      },
+      {
+        "file": "900015_payment_credit_closure_fence.up.sql",
+        "version": 900015,
+        "sha256": "bcad7dc0e37298b45f4bd16cd356f1cd385a4500db867eb8016c7fbe9e33ac13"
       }
     ],
     "billing": [
