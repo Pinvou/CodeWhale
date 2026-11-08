@@ -45,9 +45,6 @@ function pinvouSharedtauriChat() {
     var userMessageDisplayText = context.userMessageDisplayText;
     var parseScheduledTaskDraftFromText = context.parseScheduledTaskDraftFromText;
     var autoCreateScheduledTaskDraft = context.autoCreateScheduledTaskDraft;
-    var modelAvailabilityError = typeof context.modelAvailabilityError === "function"
-      ? context.modelAvailabilityError
-      : function () { return null; };
 
   // Composer 草稿是纯前端短期状态：写入时不 notify，避免每次按键都克隆
   // 整个 chat slice 并触发 App 重渲染。会话切换本身会 notify，ChatView 会在
@@ -319,16 +316,6 @@ function timeStr() { return pinvouSharedtauriChat().timeStr(); }
   // 真正发送:在 sid 的工作集上加 user 气泡 + 流式占位 + busy,然后 invoke chat。
   // active/后台通用(后台走 runSyncOnSession 临时切工作集)。
   function doSendFor(sid, text, displayText, attachmentsPayload, meta, restrictTools, surfaceFailure) {
-    var unavailableModelMessage = modelAvailabilityError(sid);
-    if (unavailableModelMessage) {
-      var unavailableModelError = new Error(unavailableModelMessage);
-      runSyncOnSession(sid, function () {
-        state.chatItems = state.chatItems.filter(function (item) { return !item.turnErrorNotice; });
-        addSystemItem("⚠️ " + unavailableModelMessage, { turnErrorNotice: true });
-      });
-      notify();
-      return surfaceFailure ? Promise.reject(unavailableModelError) : Promise.resolve(false);
-    }
     safeConsoleInfo("[pinvou3][chat-ui] send start", {
       sid: sid,
       textLen: (text || "").length,
@@ -340,11 +327,13 @@ function timeStr() { return pinvouSharedtauriChat().timeStr(); }
     var submittedMessagePos = -1;
     var submittedUserItemId = 0;
     var submittedStreamId = 0;
+    var submittedTimelineAnchor = null;
     if (turnOwnerBuffer && turnOwnerBuffer.remoteTurnActive) {
       recordAuthoritySyncDiagnostic("local_send_blocked_by_remote_sync", authoritySyncBufferSnapshot(sid, turnOwnerBuffer));
       return Promise.reject(new Error(bt("sessionSyncingTurn")));
     }
     if (turnOwnerBuffer) {
+      turnOwnerBuffer.timelineReadEpoch = (turnOwnerBuffer.timelineReadEpoch || 0) + 1;
       turnOwnerBuffer.localTurnOwned = true;
       turnOwnerBuffer.remoteTurnActive = false;
       turnOwnerBuffer.remoteTerminalSeen = false;
@@ -370,6 +359,25 @@ function timeStr() { return pinvouSharedtauriChat().timeStr(); }
       submittedMessage = { role: "user", content: [{ type: "text", text: displayText }] };
       submittedMessagePos = state.messages.length;
       state.messages.push(submittedMessage);
+      if (turnOwnerBuffer) {
+        var timeline = state.turnTimeline || [];
+        var submittedAt = Date.now();
+        turnOwnerBuffer.timelineTurnSeq = (turnOwnerBuffer.timelineTurnSeq || 0) + 1;
+        var localTurnId = "ui_" + sid + "_" + submittedAt + "_" + turnOwnerBuffer.timelineTurnSeq;
+        submittedTimelineAnchor = {
+          knownStartIds: timeline.filter(function (event) { return event && event.event === "user_start"; })
+            .map(function (event) { return event.turn_id; }),
+          submittedAt: submittedAt,
+          localTurnId: localTurnId,
+        };
+        turnOwnerBuffer.timelineTurnAnchor = submittedTimelineAnchor;
+        state.turnTimeline = timeline.concat([{
+          event: "user_start", turn_id: localTurnId, timestamp: submittedAt,
+          ts: new Date(submittedAt).toISOString(),
+          ui_turn_index: Math.max(0, state.chatItems.filter(function (item) { return item && item.type === "user"; }).length - 1),
+        }]);
+        state.activeTurnTimelineId = localTurnId;
+      }
       state.busy = true;
       startThinking();
       context.currentStreamText = "";
@@ -421,6 +429,18 @@ function timeStr() { return pinvouSharedtauriChat().timeStr(); }
             return item.id !== submittedUserItemId && item.id !== submittedStreamId;
           });
           flushPendingStreamRender(); // admission reject mid-stream: emit final html before the reset
+          if (sessionStates[sid] === turnOwnerBuffer && turnOwnerBuffer && turnOwnerBuffer.timelineTurnAnchor === submittedTimelineAnchor && submittedTimelineAnchor) {
+            var localId = submittedTimelineAnchor.localTurnId;
+            if ((state.turnTimeline || []).some(function (event) { return event && event.event === "user_start" && event.turn_id === localId; })
+                && !(state.turnTimeline || []).some(function (event) { return event && event.event === "assistant_done" && event.turn_id === localId; })) {
+              var timestamp = Date.now();
+              state.turnTimeline = (state.turnTimeline || []).concat([{
+                event: "assistant_done", turn_id: localId, timestamp: timestamp,
+                ts: new Date(timestamp).toISOString(), status: "send_error", error: null,
+              }]);
+            }
+            if (state.activeTurnTimelineId === localId) state.activeTurnTimelineId = null;
+          }
           resetPendingAssistant();
           state.busy = false;
           stopThinking();
@@ -458,6 +478,11 @@ function timeStr() { return pinvouSharedtauriChat().timeStr(); }
           });
         });
         notify();
+        // Preparation failures finish timing with send_error before IPC rejects;
+        // they never produce chat:done. Read the same authority after rollback.
+        if (sessionStates[sid] === turnOwnerBuffer && typeof context.refreshAuthoritativeTurnTimeline === "function") {
+          context.refreshAuthoritativeTurnTimeline(sid);
+        }
         if (surfaceFailure) throw err;
         return false;
       });
@@ -815,7 +840,9 @@ function restoreUiTurnState(consumed) { return pinvouSharedtauriChatN31666().res
         // setComposerDraft syncs the session buffer so switching away and back
         // does not resurrect the sent text; a background session's steer
         // (remote control etc.) must not clear the active session's composer.
-        if (state.activeSessionId === sid) setComposerDraft("");
+        // A draft-owned send already waited for materialization. Text typed
+        // during model confirmation belongs to the new session, not this steer.
+        if (state.activeSessionId === sid && !draftOwner) setComposerDraft("");
         // Show the queue chip immediately. steered=true marks it as delivered
         // to the engine: flushQueued skips it (prevents double sends). The
         // steerId is backfilled when the invoke resolves; events may arrive
@@ -980,7 +1007,18 @@ function restoreUiTurnState(consumed) { return pinvouSharedtauriChatN31666().res
         // refuses terminal operations).
         voice().rebindVoiceOperationToDraft(owner.operationId, state.draftEpoch);
       }
-      prefillComposer(text, true);
+      if (owner.rollbackFromDraftEpoch !== undefined
+        && owner.rollbackFromDraftEpoch === owner.draftEpoch
+        && owner.draftEpoch === Number(state.draftEpoch || 0)) {
+        // This model-confirmation failure never published/consumed its draft.
+        // Coalesced sends restore in one React batch: publish their accumulated
+        // store value, so the last notification cannot discard an earlier one.
+        const current = String(state.composerDraft || "");
+        state.composerDraft = current ? current + "\n" + text : text;
+        prefillComposer(state.composerDraft, false);
+      } else {
+        prefillComposer(text, true);
+      }
     }
     owner.restored = true;
     return true;

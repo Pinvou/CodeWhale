@@ -2,8 +2,21 @@ use anyhow::Result;
 use async_trait::async_trait;
 use serde::Serialize;
 use std::fmt;
+use std::sync::Arc;
 
 use crate::platform::prefs::SavedModel;
+
+/// Read-only turn ownership supplied by the engine host. Callbacks run under
+/// the lifecycle lock and must not re-enter lifecycle or pool operations.
+pub trait RuntimeTurnAuthority: Send + Sync {
+    fn current_generation(&self, session_id: &str) -> Option<u64>;
+    fn with_generation(
+        &self,
+        session_id: &str,
+        generation: u64,
+        callback: &mut dyn FnMut(),
+    ) -> bool;
+}
 
 /// 模型凭据由谁负责提供。前端只消费这一语义，不需要认识具体模型或认证后端。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -20,17 +33,59 @@ pub struct RuntimeModelRequest {
     pub session_id: String,
     pub model: SavedModel,
     pub scheduled_unattended: bool,
+    /// App-owned catalog reference frozen when the task profile selected the
+    /// platform model. It is never inferred from an Engine protocol alias.
+    pub(crate) scheduled_model_ref: Option<String>,
+    pub(crate) auxiliary: Option<AuxiliaryModelContext>,
+}
+
+/// App-private delivery ownership for an auxiliary invocation, never a stored chat.
+#[derive(Clone)]
+pub(crate) struct AuxiliaryModelContext {
+    pub scope_id: String,
+    pub draft_model_ref: Option<String>,
+    /// Present only for a draft resolved from the backend's current global default.
+    /// It is private invocation provenance, not a session or a browser assertion.
+    pub inherited_default_revision: Option<String>,
+}
+
+/// Retiring local voice delivery does not request Provider cancellation or release funds.
+pub(crate) struct AuxiliaryModelScope {
+    id: String,
+    provider: Arc<dyn RuntimeModelProvider>,
+}
+impl AuxiliaryModelScope {
+    pub(crate) fn new(provider: Arc<dyn RuntimeModelProvider>) -> Self {
+        Self {
+            id: format!("pinvou-voice-{}", uuid::Uuid::new_v4()),
+            provider,
+        }
+    }
+    pub(crate) fn context(&self, draft_model_ref: Option<String>) -> AuxiliaryModelContext {
+        AuxiliaryModelContext {
+            scope_id: self.id.clone(),
+            draft_model_ref,
+            inherited_default_revision: None,
+        }
+    }
+}
+impl Drop for AuxiliaryModelScope {
+    fn drop(&mut self) {
+        self.provider.forget_model_session(&self.id);
+    }
 }
 
 /// 运行时提供器准备的敏感模型凭据。
 ///
 /// 凭据只保存在内存中，不参与序列化；`Debug` 固定脱敏，避免 bridge 或测试日志
 /// 意外输出明文。存在时它是本次引擎配置的最终凭据，优先于环境变量和本地凭据库。
-/// The Community default preparation path is always passthrough (`credential` stays None; see
-/// engine_pool's `prepare_runtime_model`); the field is reserved for the enterprise seam.
+/// Ordinary provider preparation leaves this absent. The built-in Account
+/// Platform route supplies an ephemeral verified access token through the same
+/// EnginePool provider seam; it never persists that token in saved settings.
 #[derive(Clone, PartialEq, Eq)]
 pub struct RuntimeModelCredential {
     api_key: String,
+    request_idempotency_header: Option<String>,
 }
 
 impl RuntimeModelCredential {
@@ -39,7 +94,22 @@ impl RuntimeModelCredential {
         if api_key.trim().is_empty() {
             anyhow::bail!("runtime model API key must not be empty");
         }
-        Ok(Self { api_key })
+        Ok(Self {
+            api_key,
+            request_idempotency_header: None,
+        })
+    }
+
+    /// Account Gateway requires one operation key that the foundation generates
+    /// and reuses across retries. Ordinary provider credentials do not opt in.
+    pub(crate) fn account_platform_access_token(access_token: String) -> Result<Self> {
+        let mut credential = Self::api_key(access_token)?;
+        credential.request_idempotency_header = Some("Idempotency-Key".into());
+        Ok(credential)
+    }
+
+    pub(crate) fn request_idempotency_header(&self) -> Option<&str> {
+        self.request_idempotency_header.as_deref()
     }
 
     pub(crate) fn expose_api_key(&self) -> &str {
@@ -90,6 +160,27 @@ pub trait RuntimeModelProvider: Send + Sync {
     }
 
     async fn prepare(&self, request: RuntimeModelRequest) -> Result<PreparedRuntimeModel>;
+
+    fn bind_turn_authority(&self, _authority: Arc<dyn RuntimeTurnAuthority>) -> Result<()> {
+        Ok(())
+    }
+
+    /// Freeze cancellation to this lifecycle epoch. Implementations mark local
+    /// delivery synchronously and schedule bounded network reconciliation.
+    fn capture_model_cancellation_scope(&self, _session_id: &str) -> Option<String> {
+        None
+    }
+    fn cancel_logical_turn(&self, _session_id: &str, _generation: u64, _scope: Option<&str>) {}
+
+    /// Reclaim only captured calls; an unsubmitted reserved epoch survives a rebuild.
+    fn reclaim_model_session(&self, _session_id: &str, _preserved_generation: Option<u64>) {}
+    /// Permanently retire the deleted lifecycle's transport incarnation.
+    fn forget_model_session(&self, _session_id: &str) {}
+
+    /// A user turn groups calls; the foundation owns each invocation identity.
+    async fn begin_logical_turn(&self, _session_id: &str) -> Result<()> {
+        Ok(())
+    }
 }
 
 #[derive(Debug, Default)]
@@ -104,6 +195,35 @@ impl RuntimeModelProvider for PassthroughRuntimeModelProvider {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn voice_scopes_retire_only_their_own_invisible_delivery_identity() {
+        #[derive(Default)]
+        struct Recorder(std::sync::Mutex<Vec<String>>);
+        #[async_trait::async_trait]
+        impl super::RuntimeModelProvider for Recorder {
+            async fn prepare(
+                &self,
+                request: super::RuntimeModelRequest,
+            ) -> anyhow::Result<super::PreparedRuntimeModel> {
+                Ok(super::PreparedRuntimeModel::unchanged(request.model))
+            }
+            fn forget_model_session(&self, id: &str) {
+                self.0.lock().unwrap().push(id.to_string());
+            }
+        }
+        let provider = std::sync::Arc::new(Recorder::default());
+        let first = super::AuxiliaryModelScope::new(provider.clone());
+        let second = super::AuxiliaryModelScope::new(provider.clone());
+        let first_id = first.context(None).scope_id;
+        let second_id = second.context(None).scope_id;
+        assert_ne!(first_id, second_id);
+        assert!(first_id.starts_with("pinvou-voice-"));
+        drop(first);
+        assert_eq!(*provider.0.lock().unwrap(), vec![first_id.clone()]);
+        drop(second);
+        assert_eq!(*provider.0.lock().unwrap(), vec![first_id, second_id]);
+    }
+
     use super::{
         ModelCredentialMode, PassthroughRuntimeModelProvider, PreparedRuntimeModel,
         RuntimeModelCredential, RuntimeModelProvider, RuntimeModelRequest,
@@ -111,7 +231,7 @@ mod tests {
     use crate::platform::credential_store::{CredentialEditAction, CredentialState};
     use crate::platform::prefs::{ModelPreset, SavedModel};
 
-    /// Official 仍提供带非空校验的公开构造器（llmapi_hub / bridge 层使用）；
+    /// Official 仍提供带非空校验的公开构造器（account_platform / bridge 层使用）；
     /// 测试统一经它构造，保持与生产路径一致。
     fn credential(api_key: &str) -> RuntimeModelCredential {
         RuntimeModelCredential::api_key(api_key).expect("runtime credential")
@@ -149,6 +269,8 @@ mod tests {
                 session_id: "session-1".to_string(),
                 model: model(),
                 scheduled_unattended: false,
+                scheduled_model_ref: None,
+                auxiliary: None,
             })
             .await
             .expect("prepare model");
@@ -181,6 +303,21 @@ mod tests {
         assert!(!rendered.contains("runtime-secret"));
         // Official 构造器带非空校验；空/空白 key 必须被拒绝。
         assert!(RuntimeModelCredential::api_key("  ").is_err());
+    }
+
+    #[test]
+    fn account_gateway_operation_header_is_transient_and_affects_runtime_identity() {
+        let ordinary = credential("same-in-memory-value");
+        let account =
+            RuntimeModelCredential::account_platform_access_token("same-in-memory-value".into())
+                .unwrap();
+        assert!(ordinary.request_idempotency_header().is_none());
+        assert_eq!(
+            account.request_idempotency_header(),
+            Some("Idempotency-Key")
+        );
+        assert!(ordinary != account);
+        assert_eq!(format!("{account:?}"), "RuntimeModelCredential([REDACTED])");
     }
 
     #[test]

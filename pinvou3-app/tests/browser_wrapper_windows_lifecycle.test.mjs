@@ -2,6 +2,7 @@
 import assert from 'node:assert/strict';
 import {
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -11,13 +12,14 @@ import {
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
-import { createServer } from 'node:http';
+import { createServer } from './helpers/http-fixture.mjs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
 import test from 'node:test';
 import { spawnNdjsonChild, stopNdjsonChild } from './helpers/ndjson-child-driver.mjs';
+import { cleanupBrowserFixture, confirmedChildStopper, confirmedProcessExited, readPendingHostRequest } from './helpers/browser-wrapper-fixture-cleanup.mjs';
 
 const WRAPPER = fileURLToPath(new URL(
   '../src-tauri/resources/common/bundle/mcp-servers/browser-wrapper.mjs',
@@ -387,7 +389,13 @@ function readAudit(path) {
     .map((line) => JSON.parse(line));
 }
 
-async function waitUntil(predicate, message, timeoutMs = 3_000) {
+// Cross-process observables (host-request files, audit entries, counters
+// published by the wrapper subprocess) only need to eventually appear; every
+// call site asserts state, not speed. The default budget absorbs loaded
+// Windows CI runners where subprocess startup and stdout delivery can stall
+// for seconds (11-04/11-05 flakes: a 3s budget expired before the wrapper
+// finished publishing an in-flight close request).
+async function waitUntil(predicate, message, timeoutMs = 10_000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (predicate()) return;
@@ -495,15 +503,8 @@ function createFakeHost(fixture) {
     try {
       for (const name of readdirSync(requestDirectory)) {
         if (!name.endsWith('.json') || handled.has(name)) continue;
-        let raw;
-        try {
-          raw = readFileSync(join(requestDirectory, name), 'utf8');
-        } catch (error) {
-          // The wrapper renames a request file (claim/cancel tombstone) between
-          // our readdir and read; a vanished file has nothing left to handle.
-          if (error?.code !== 'ENOENT') throw error;
-          continue;
-        }
+        const raw = readPendingHostRequest(join(requestDirectory, name));
+        if (raw === null) continue;
         const request = JSON.parse(raw);
         if (state.deferredOperations.has(request.operation)) continue;
         handled.add(name);
@@ -617,6 +618,7 @@ function driveWrapper(fixture) {
   });
   return {
     ...driver,
+    stopConfirmed: confirmedChildStopper(driver.child, stopNdjsonChild),
     abandonRequest(id) {
       driver.dropRequest(id, { abandoned: true });
     },
@@ -634,12 +636,27 @@ async function initializeWrapper(wrapper, clientName) {
 }
 
 async function cleanupFixture(fixture, host, ...wrappers) {
-  host.close();
-  for (const wrapper of wrappers.filter(Boolean)) {
-    await stopNdjsonChild(wrapper.child);
-  }
-  await new Promise((resolve) => fixture.cdp.close(resolve));
-  rmSync(fixture.root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  await cleanupBrowserFixture({
+    closeHost: () => host.close(),
+    stopChildren: [
+      ...wrappers.filter(Boolean).map(wrapper => () => wrapper.stopConfirmed()),
+      () => waitUntil(
+        () => readAudit(fixture.auditPath).filter(entry => entry.kind === 'start')
+          .every(entry => confirmedProcessExited(entry.pid)),
+        'owned fake MCP children did not exit; preserving fixture files',
+      ),
+    ],
+    closeServer: () => new Promise((resolveClose, reject) => fixture.cdp.close(error => {
+      if (error) reject(error); else resolveClose();
+    })),
+    removeFiles: () => {
+      const target = resolve(fixture.root);
+      assert.equal(dirname(target), resolve(tmpdir()), 'cleanup must stay within this fixture temp parent');
+      assert.ok(basename(target).startsWith('pinvou-windows-lifecycle-'), 'cleanup must target the owned fixture');
+      assert.equal(lstatSync(target).isSymbolicLink(), false, 'cleanup refuses a replaced fixture link');
+      rmSync(target, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    },
+  });
 }
 
 function processIsAlive(pid) {
@@ -757,7 +774,7 @@ test('Windows proxy: stdin shutdown cannot release a request buffered during sta
     if (wrapper.child.exitCode == null && wrapper.child.signalCode == null) {
       await Promise.race([
         new Promise((resolve) => wrapper.child.once('exit', resolve)),
-        sleep(3_000).then(() => { throw new Error('startup shutdown did not exit promptly'); }),
+        sleep(10_000).then(() => { throw new Error('startup shutdown did not exit promptly'); }),
       ]);
     }
     assert.equal(
@@ -1261,7 +1278,7 @@ test('Windows proxy: stdin shutdown tombstones an in-flight close before exit', 
     if (wrapper.child.exitCode == null && wrapper.child.signalCode == null) {
       await Promise.race([
         new Promise((resolve) => wrapper.child.once('exit', resolve)),
-        sleep(2_000).then(() => { throw new Error('Windows wrapper did not exit promptly'); }),
+        sleep(10_000).then(() => { throw new Error('Windows wrapper did not exit promptly'); }),
       ]);
     }
     assert.equal(host.state.operationCalls.get('close_tab') || 0, 0);
@@ -1747,7 +1764,7 @@ test('Windows proxy: upstream crash settles the claimed dispatch before wrapper 
     if (wrapper.child.exitCode == null && wrapper.child.signalCode == null) {
       await Promise.race([
         new Promise((resolve) => wrapper.child.once('exit', resolve)),
-        sleep(5_000).then(() => { throw new Error('wrapper did not exit after upstream crash'); }),
+        sleep(10_000).then(() => { throw new Error('wrapper did not exit after upstream crash'); }),
       ]);
     }
   } finally {
@@ -1796,22 +1813,29 @@ test('Windows proxy: cancelled uncooperative dispatch shuts down on the first de
       name: 'list_pages',
       arguments: {},
     });
+    // The production grace is a single 5s settlement window armed on the
+    // cancellation notification, so rejection cannot arrive before ~5s; the
+    // 20s race only bounds delivery under runner load (and stays below the
+    // fixture's 30s in-flight click, which must never settle first). The
+    // first-deadline window below keeps the anti-extension contract: a second
+    // armed grace would land the rejection at >=10s and fail the 9.5s cap.
     const queuedOutcome = await Promise.race([
       queued.response,
-      sleep(8_000).then(() => { throw new Error('queued call was not rejected before shutdown deadline'); }),
+      sleep(20_000).then(() => { throw new Error('queued call was not rejected before shutdown deadline'); }),
     ]);
+    const rejectedAt = Date.now();
     assert.match(queuedOutcome.error?.message || '', /browser\/wrapper-shutting-down/);
 
     if (wrapper.child.exitCode == null && wrapper.child.signalCode == null) {
       await Promise.race([
         new Promise((resolve) => wrapper.child.once('exit', resolve)),
-        sleep(1_000).then(() => { throw new Error('wrapper did not exit after rejecting queued work'); }),
+        sleep(10_000).then(() => { throw new Error('wrapper did not exit after rejecting queued work'); }),
       ]);
     }
-    const shutdownElapsedMs = Date.now() - cancelledAt;
+    const shutdownElapsedMs = rejectedAt - cancelledAt;
     assert.ok(
-      shutdownElapsedMs >= 4_500 && shutdownElapsedMs < 7_000,
-      `cooperative cancel shutdown exceeded its first deadline: ${shutdownElapsedMs}ms`,
+      shutdownElapsedMs >= 4_500 && shutdownElapsedMs < 9_500,
+      `cooperative cancel shutdown did not reject queued work on its single first deadline: ${shutdownElapsedMs}ms`,
     );
     assert.equal(
       (host.state.operationCalls.get('end_agent_operation') || 0) - before.end,

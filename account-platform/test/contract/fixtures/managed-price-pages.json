@@ -1,0 +1,3045 @@
+{
+  "first": {
+    "has_more": true,
+    "items": [
+      {
+        "price_version_id": "01a184dd-c2c7-7d52-ae70-8618feba604d",
+        "scope_type": "GLOBAL",
+        "protocol_code": "CHAT",
+        "formula_version_id": "00000000-0000-7000-8200-000000000001",
+        "credit_unit": "MICROCREDIT",
+        "lifecycle_status": "DRAFT",
+        "derived_status": "DRAFT",
+        "version": 101,
+        "space_etag": 2,
+        "current_space_etag": 2,
+        "effective_from": "2026-10-30T00:00:00+08:00",
+        "units": [
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000001",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000002",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000003",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          }
+        ]
+      },
+      {
+        "price_version_id": "01a184dd-c2c6-7c89-b330-038a1c5357d2",
+        "scope_type": "GLOBAL",
+        "protocol_code": "CHAT",
+        "formula_version_id": "00000000-0000-7000-8200-000000000001",
+        "credit_unit": "MICROCREDIT",
+        "lifecycle_status": "DRAFT",
+        "derived_status": "DRAFT",
+        "version": 100,
+        "space_etag": 2,
+        "current_space_etag": 2,
+        "effective_from": "2026-10-30T00:00:00+08:00",
+        "units": [
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000001",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000002",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000003",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          }
+        ]
+      },
+      {
+        "price_version_id": "01a184dd-c2c5-7b2b-aaa4-87c14ae60735",
+        "scope_type": "GLOBAL",
+        "protocol_code": "CHAT",
+        "formula_version_id": "00000000-0000-7000-8200-000000000001",
+        "credit_unit": "MICROCREDIT",
+        "lifecycle_status": "DRAFT",
+        "derived_status": "DRAFT",
+        "version": 99,
+        "space_etag": 2,
+        "current_space_etag": 2,
+        "effective_from": "2026-10-30T00:00:00+08:00",
+        "units": [
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000001",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000002",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000003",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          }
+        ]
+      },
+      {
+        "price_version_id": "01a184dd-c2c4-71ed-b46c-d526ef76510e",
+        "scope_type": "GLOBAL",
+        "protocol_code": "CHAT",
+        "formula_version_id": "00000000-0000-7000-8200-000000000001",
+        "credit_unit": "MICROCREDIT",
+        "lifecycle_status": "DRAFT",
+        "derived_status": "DRAFT",
+        "version": 98,
+        "space_etag": 2,
+        "current_space_etag": 2,
+        "effective_from": "2026-10-30T00:00:00+08:00",
+        "units": [
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000001",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000002",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000003",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          }
+        ]
+      },
+      {
+        "price_version_id": "01a184dd-c2c2-7eeb-b0b3-a9ea5a50f1ec",
+        "scope_type": "GLOBAL",
+        "protocol_code": "CHAT",
+        "formula_version_id": "00000000-0000-7000-8200-000000000001",
+        "credit_unit": "MICROCREDIT",
+        "lifecycle_status": "DRAFT",
+        "derived_status": "DRAFT",
+        "version": 97,
+        "space_etag": 2,
+        "current_space_etag": 2,
+        "effective_from": "2026-10-30T00:00:00+08:00",
+        "units": [
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000001",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000002",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000003",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          }
+        ]
+      },
+      {
+        "price_version_id": "01a184dd-c2c1-742b-ad26-7a5cced80bd4",
+        "scope_type": "GLOBAL",
+        "protocol_code": "CHAT",
+        "formula_version_id": "00000000-0000-7000-8200-000000000001",
+        "credit_unit": "MICROCREDIT",
+        "lifecycle_status": "DRAFT",
+        "derived_status": "DRAFT",
+        "version": 96,
+        "space_etag": 2,
+        "current_space_etag": 2,
+        "effective_from": "2026-10-30T00:00:00+08:00",
+        "units": [
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000001",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000002",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000003",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          }
+        ]
+      },
+      {
+        "price_version_id": "01a184dd-c2bf-769a-9ab0-8e68bc20ab84",
+        "scope_type": "GLOBAL",
+        "protocol_code": "CHAT",
+        "formula_version_id": "00000000-0000-7000-8200-000000000001",
+        "credit_unit": "MICROCREDIT",
+        "lifecycle_status": "DRAFT",
+        "derived_status": "DRAFT",
+        "version": 95,
+        "space_etag": 2,
+        "current_space_etag": 2,
+        "effective_from": "2026-10-30T00:00:00+08:00",
+        "units": [
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000001",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000002",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000003",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          }
+        ]
+      },
+      {
+        "price_version_id": "01a184dd-c2bd-7041-bda1-61c74e9d5eb4",
+        "scope_type": "GLOBAL",
+        "protocol_code": "CHAT",
+        "formula_version_id": "00000000-0000-7000-8200-000000000001",
+        "credit_unit": "MICROCREDIT",
+        "lifecycle_status": "DRAFT",
+        "derived_status": "DRAFT",
+        "version": 94,
+        "space_etag": 2,
+        "current_space_etag": 2,
+        "effective_from": "2026-10-30T00:00:00+08:00",
+        "units": [
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000001",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000002",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000003",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          }
+        ]
+      },
+      {
+        "price_version_id": "01a184dd-c2bb-7dad-96dc-412a5a8a24c9",
+        "scope_type": "GLOBAL",
+        "protocol_code": "CHAT",
+        "formula_version_id": "00000000-0000-7000-8200-000000000001",
+        "credit_unit": "MICROCREDIT",
+        "lifecycle_status": "DRAFT",
+        "derived_status": "DRAFT",
+        "version": 93,
+        "space_etag": 2,
+        "current_space_etag": 2,
+        "effective_from": "2026-10-30T00:00:00+08:00",
+        "units": [
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000001",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000002",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000003",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          }
+        ]
+      },
+      {
+        "price_version_id": "01a184dd-c2ba-7c01-8eab-690e9a6a6dc8",
+        "scope_type": "GLOBAL",
+        "protocol_code": "CHAT",
+        "formula_version_id": "00000000-0000-7000-8200-000000000001",
+        "credit_unit": "MICROCREDIT",
+        "lifecycle_status": "DRAFT",
+        "derived_status": "DRAFT",
+        "version": 92,
+        "space_etag": 2,
+        "current_space_etag": 2,
+        "effective_from": "2026-10-30T00:00:00+08:00",
+        "units": [
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000001",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000002",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000003",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          }
+        ]
+      },
+      {
+        "price_version_id": "01a184dd-c2b9-7a21-8ae2-46c03665e490",
+        "scope_type": "GLOBAL",
+        "protocol_code": "CHAT",
+        "formula_version_id": "00000000-0000-7000-8200-000000000001",
+        "credit_unit": "MICROCREDIT",
+        "lifecycle_status": "DRAFT",
+        "derived_status": "DRAFT",
+        "version": 91,
+        "space_etag": 2,
+        "current_space_etag": 2,
+        "effective_from": "2026-10-30T00:00:00+08:00",
+        "units": [
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000001",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000002",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000003",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          }
+        ]
+      },
+      {
+        "price_version_id": "01a184dd-c2b8-7720-87b8-4de7e0c11e21",
+        "scope_type": "GLOBAL",
+        "protocol_code": "CHAT",
+        "formula_version_id": "00000000-0000-7000-8200-000000000001",
+        "credit_unit": "MICROCREDIT",
+        "lifecycle_status": "DRAFT",
+        "derived_status": "DRAFT",
+        "version": 90,
+        "space_etag": 2,
+        "current_space_etag": 2,
+        "effective_from": "2026-10-30T00:00:00+08:00",
+        "units": [
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000001",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000002",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000003",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          }
+        ]
+      },
+      {
+        "price_version_id": "01a184dd-c2b7-74d5-a6e2-3d0e1a589b40",
+        "scope_type": "GLOBAL",
+        "protocol_code": "CHAT",
+        "formula_version_id": "00000000-0000-7000-8200-000000000001",
+        "credit_unit": "MICROCREDIT",
+        "lifecycle_status": "DRAFT",
+        "derived_status": "DRAFT",
+        "version": 89,
+        "space_etag": 2,
+        "current_space_etag": 2,
+        "effective_from": "2026-10-30T00:00:00+08:00",
+        "units": [
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000001",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000002",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000003",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          }
+        ]
+      },
+      {
+        "price_version_id": "01a184dd-c2b6-7213-a6e5-4d489f4837f9",
+        "scope_type": "GLOBAL",
+        "protocol_code": "CHAT",
+        "formula_version_id": "00000000-0000-7000-8200-000000000001",
+        "credit_unit": "MICROCREDIT",
+        "lifecycle_status": "DRAFT",
+        "derived_status": "DRAFT",
+        "version": 88,
+        "space_etag": 2,
+        "current_space_etag": 2,
+        "effective_from": "2026-10-30T00:00:00+08:00",
+        "units": [
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000001",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000002",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000003",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          }
+        ]
+      },
+      {
+        "price_version_id": "01a184dd-c2b4-74da-adf3-b5cc6b263763",
+        "scope_type": "GLOBAL",
+        "protocol_code": "CHAT",
+        "formula_version_id": "00000000-0000-7000-8200-000000000001",
+        "credit_unit": "MICROCREDIT",
+        "lifecycle_status": "DRAFT",
+        "derived_status": "DRAFT",
+        "version": 87,
+        "space_etag": 2,
+        "current_space_etag": 2,
+        "effective_from": "2026-10-30T00:00:00+08:00",
+        "units": [
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000001",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000002",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000003",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          }
+        ]
+      },
+      {
+        "price_version_id": "01a184dd-c2b3-73e2-a127-2c4dc037eeba",
+        "scope_type": "GLOBAL",
+        "protocol_code": "CHAT",
+        "formula_version_id": "00000000-0000-7000-8200-000000000001",
+        "credit_unit": "MICROCREDIT",
+        "lifecycle_status": "DRAFT",
+        "derived_status": "DRAFT",
+        "version": 86,
+        "space_etag": 2,
+        "current_space_etag": 2,
+        "effective_from": "2026-10-30T00:00:00+08:00",
+        "units": [
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000001",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000002",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000003",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          }
+        ]
+      },
+      {
+        "price_version_id": "01a184dd-c2b2-70bb-81c3-ef4433b330ab",
+        "scope_type": "GLOBAL",
+        "protocol_code": "CHAT",
+        "formula_version_id": "00000000-0000-7000-8200-000000000001",
+        "credit_unit": "MICROCREDIT",
+        "lifecycle_status": "DRAFT",
+        "derived_status": "DRAFT",
+        "version": 85,
+        "space_etag": 2,
+        "current_space_etag": 2,
+        "effective_from": "2026-10-30T00:00:00+08:00",
+        "units": [
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000001",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000002",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000003",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          }
+        ]
+      },
+      {
+        "price_version_id": "01a184dd-c2b0-7eb1-a0a8-4da19a6cbc04",
+        "scope_type": "GLOBAL",
+        "protocol_code": "CHAT",
+        "formula_version_id": "00000000-0000-7000-8200-000000000001",
+        "credit_unit": "MICROCREDIT",
+        "lifecycle_status": "DRAFT",
+        "derived_status": "DRAFT",
+        "version": 84,
+        "space_etag": 2,
+        "current_space_etag": 2,
+        "effective_from": "2026-10-30T00:00:00+08:00",
+        "units": [
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000001",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000002",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000003",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          }
+        ]
+      },
+      {
+        "price_version_id": "01a184dd-c2af-7c42-9e02-0320d895be85",
+        "scope_type": "GLOBAL",
+        "protocol_code": "CHAT",
+        "formula_version_id": "00000000-0000-7000-8200-000000000001",
+        "credit_unit": "MICROCREDIT",
+        "lifecycle_status": "DRAFT",
+        "derived_status": "DRAFT",
+        "version": 83,
+        "space_etag": 2,
+        "current_space_etag": 2,
+        "effective_from": "2026-10-30T00:00:00+08:00",
+        "units": [
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000001",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000002",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000003",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          }
+        ]
+      },
+      {
+        "price_version_id": "01a184dd-c2ae-7a91-b74b-e77ac57abf6f",
+        "scope_type": "GLOBAL",
+        "protocol_code": "CHAT",
+        "formula_version_id": "00000000-0000-7000-8200-000000000001",
+        "credit_unit": "MICROCREDIT",
+        "lifecycle_status": "DRAFT",
+        "derived_status": "DRAFT",
+        "version": 82,
+        "space_etag": 2,
+        "current_space_etag": 2,
+        "effective_from": "2026-10-30T00:00:00+08:00",
+        "units": [
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000001",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000002",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000003",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          }
+        ]
+      },
+      {
+        "price_version_id": "01a184dd-c2ac-7c5a-a34c-73d982d39bb1",
+        "scope_type": "GLOBAL",
+        "protocol_code": "CHAT",
+        "formula_version_id": "00000000-0000-7000-8200-000000000001",
+        "credit_unit": "MICROCREDIT",
+        "lifecycle_status": "DRAFT",
+        "derived_status": "DRAFT",
+        "version": 81,
+        "space_etag": 2,
+        "current_space_etag": 2,
+        "effective_from": "2026-10-30T00:00:00+08:00",
+        "units": [
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000001",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000002",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000003",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          }
+        ]
+      },
+      {
+        "price_version_id": "01a184dd-c2ab-76ab-942d-f2a72085b634",
+        "scope_type": "GLOBAL",
+        "protocol_code": "CHAT",
+        "formula_version_id": "00000000-0000-7000-8200-000000000001",
+        "credit_unit": "MICROCREDIT",
+        "lifecycle_status": "DRAFT",
+        "derived_status": "DRAFT",
+        "version": 80,
+        "space_etag": 2,
+        "current_space_etag": 2,
+        "effective_from": "2026-10-30T00:00:00+08:00",
+        "units": [
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000001",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000002",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000003",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          }
+        ]
+      },
+      {
+        "price_version_id": "01a184dd-c2aa-7591-bd3e-ebe713d443eb",
+        "scope_type": "GLOBAL",
+        "protocol_code": "CHAT",
+        "formula_version_id": "00000000-0000-7000-8200-000000000001",
+        "credit_unit": "MICROCREDIT",
+        "lifecycle_status": "DRAFT",
+        "derived_status": "DRAFT",
+        "version": 79,
+        "space_etag": 2,
+        "current_space_etag": 2,
+        "effective_from": "2026-10-30T00:00:00+08:00",
+        "units": [
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000001",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000002",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000003",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          }
+        ]
+      },
+      {
+        "price_version_id": "01a184dd-c2a9-7444-820e-1a2ef438da4c",
+        "scope_type": "GLOBAL",
+        "protocol_code": "CHAT",
+        "formula_version_id": "00000000-0000-7000-8200-000000000001",
+        "credit_unit": "MICROCREDIT",
+        "lifecycle_status": "DRAFT",
+        "derived_status": "DRAFT",
+        "version": 78,
+        "space_etag": 2,
+        "current_space_etag": 2,
+        "effective_from": "2026-10-30T00:00:00+08:00",
+        "units": [
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000001",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000002",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000003",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          }
+        ]
+      },
+      {
+        "price_version_id": "01a184dd-c2a7-772f-8eb3-736a13433bee",
+        "scope_type": "GLOBAL",
+        "protocol_code": "CHAT",
+        "formula_version_id": "00000000-0000-7000-8200-000000000001",
+        "credit_unit": "MICROCREDIT",
+        "lifecycle_status": "DRAFT",
+        "derived_status": "DRAFT",
+        "version": 77,
+        "space_etag": 2,
+        "current_space_etag": 2,
+        "effective_from": "2026-10-30T00:00:00+08:00",
+        "units": [
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000001",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000002",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000003",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          }
+        ]
+      },
+      {
+        "price_version_id": "01a184dd-c2a6-7e43-90b2-5663051f3d40",
+        "scope_type": "GLOBAL",
+        "protocol_code": "CHAT",
+        "formula_version_id": "00000000-0000-7000-8200-000000000001",
+        "credit_unit": "MICROCREDIT",
+        "lifecycle_status": "DRAFT",
+        "derived_status": "DRAFT",
+        "version": 76,
+        "space_etag": 2,
+        "current_space_etag": 2,
+        "effective_from": "2026-10-30T00:00:00+08:00",
+        "units": [
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000001",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000002",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000003",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          }
+        ]
+      },
+      {
+        "price_version_id": "01a184dd-c2a5-7b97-a993-5d1d8103b515",
+        "scope_type": "GLOBAL",
+        "protocol_code": "CHAT",
+        "formula_version_id": "00000000-0000-7000-8200-000000000001",
+        "credit_unit": "MICROCREDIT",
+        "lifecycle_status": "DRAFT",
+        "derived_status": "DRAFT",
+        "version": 75,
+        "space_etag": 2,
+        "current_space_etag": 2,
+        "effective_from": "2026-10-30T00:00:00+08:00",
+        "units": [
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000001",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000002",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000003",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          }
+        ]
+      },
+      {
+        "price_version_id": "01a184dd-c2a4-781d-bafd-19d7abede30a",
+        "scope_type": "GLOBAL",
+        "protocol_code": "CHAT",
+        "formula_version_id": "00000000-0000-7000-8200-000000000001",
+        "credit_unit": "MICROCREDIT",
+        "lifecycle_status": "DRAFT",
+        "derived_status": "DRAFT",
+        "version": 74,
+        "space_etag": 2,
+        "current_space_etag": 2,
+        "effective_from": "2026-10-30T00:00:00+08:00",
+        "units": [
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000001",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000002",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000003",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          }
+        ]
+      },
+      {
+        "price_version_id": "01a184dd-c2a3-75d4-9daa-2faab5a40945",
+        "scope_type": "GLOBAL",
+        "protocol_code": "CHAT",
+        "formula_version_id": "00000000-0000-7000-8200-000000000001",
+        "credit_unit": "MICROCREDIT",
+        "lifecycle_status": "DRAFT",
+        "derived_status": "DRAFT",
+        "version": 73,
+        "space_etag": 2,
+        "current_space_etag": 2,
+        "effective_from": "2026-10-30T00:00:00+08:00",
+        "units": [
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000001",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000002",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000003",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          }
+        ]
+      },
+      {
+        "price_version_id": "01a184dd-c2a2-7353-b30e-6fa9175a438c",
+        "scope_type": "GLOBAL",
+        "protocol_code": "CHAT",
+        "formula_version_id": "00000000-0000-7000-8200-000000000001",
+        "credit_unit": "MICROCREDIT",
+        "lifecycle_status": "DRAFT",
+        "derived_status": "DRAFT",
+        "version": 72,
+        "space_etag": 2,
+        "current_space_etag": 2,
+        "effective_from": "2026-10-30T00:00:00+08:00",
+        "units": [
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000001",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000002",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000003",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          }
+        ]
+      },
+      {
+        "price_version_id": "01a184dd-c2a1-7050-b227-0b94ef0edf8b",
+        "scope_type": "GLOBAL",
+        "protocol_code": "CHAT",
+        "formula_version_id": "00000000-0000-7000-8200-000000000001",
+        "credit_unit": "MICROCREDIT",
+        "lifecycle_status": "DRAFT",
+        "derived_status": "DRAFT",
+        "version": 71,
+        "space_etag": 2,
+        "current_space_etag": 2,
+        "effective_from": "2026-10-30T00:00:00+08:00",
+        "units": [
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000001",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000002",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000003",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          }
+        ]
+      },
+      {
+        "price_version_id": "01a184dd-c29f-7cfe-955c-4789062e6d6d",
+        "scope_type": "GLOBAL",
+        "protocol_code": "CHAT",
+        "formula_version_id": "00000000-0000-7000-8200-000000000001",
+        "credit_unit": "MICROCREDIT",
+        "lifecycle_status": "DRAFT",
+        "derived_status": "DRAFT",
+        "version": 70,
+        "space_etag": 2,
+        "current_space_etag": 2,
+        "effective_from": "2026-10-30T00:00:00+08:00",
+        "units": [
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000001",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000002",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000003",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          }
+        ]
+      },
+      {
+        "price_version_id": "01a184dd-c29e-797d-9bf4-a9939a809ec3",
+        "scope_type": "GLOBAL",
+        "protocol_code": "CHAT",
+        "formula_version_id": "00000000-0000-7000-8200-000000000001",
+        "credit_unit": "MICROCREDIT",
+        "lifecycle_status": "DRAFT",
+        "derived_status": "DRAFT",
+        "version": 69,
+        "space_etag": 2,
+        "current_space_etag": 2,
+        "effective_from": "2026-10-30T00:00:00+08:00",
+        "units": [
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000001",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000002",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000003",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          }
+        ]
+      },
+      {
+        "price_version_id": "01a184dd-c29c-78c5-89f9-431a5b4ae8f6",
+        "scope_type": "GLOBAL",
+        "protocol_code": "CHAT",
+        "formula_version_id": "00000000-0000-7000-8200-000000000001",
+        "credit_unit": "MICROCREDIT",
+        "lifecycle_status": "DRAFT",
+        "derived_status": "DRAFT",
+        "version": 68,
+        "space_etag": 2,
+        "current_space_etag": 2,
+        "effective_from": "2026-10-30T00:00:00+08:00",
+        "units": [
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000001",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000002",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000003",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          }
+        ]
+      },
+      {
+        "price_version_id": "01a184dd-c29b-768e-8797-978b02a4378e",
+        "scope_type": "GLOBAL",
+        "protocol_code": "CHAT",
+        "formula_version_id": "00000000-0000-7000-8200-000000000001",
+        "credit_unit": "MICROCREDIT",
+        "lifecycle_status": "DRAFT",
+        "derived_status": "DRAFT",
+        "version": 67,
+        "space_etag": 2,
+        "current_space_etag": 2,
+        "effective_from": "2026-10-30T00:00:00+08:00",
+        "units": [
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000001",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000002",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000003",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          }
+        ]
+      },
+      {
+        "price_version_id": "01a184dd-c29a-729a-9803-19b0d4bf5cf6",
+        "scope_type": "GLOBAL",
+        "protocol_code": "CHAT",
+        "formula_version_id": "00000000-0000-7000-8200-000000000001",
+        "credit_unit": "MICROCREDIT",
+        "lifecycle_status": "DRAFT",
+        "derived_status": "DRAFT",
+        "version": 66,
+        "space_etag": 2,
+        "current_space_etag": 2,
+        "effective_from": "2026-10-30T00:00:00+08:00",
+        "units": [
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000001",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000002",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000003",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          }
+        ]
+      },
+      {
+        "price_version_id": "01a184dd-c298-7d0c-b1b5-9a54c89b004e",
+        "scope_type": "GLOBAL",
+        "protocol_code": "CHAT",
+        "formula_version_id": "00000000-0000-7000-8200-000000000001",
+        "credit_unit": "MICROCREDIT",
+        "lifecycle_status": "DRAFT",
+        "derived_status": "DRAFT",
+        "version": 65,
+        "space_etag": 2,
+        "current_space_etag": 2,
+        "effective_from": "2026-10-30T00:00:00+08:00",
+        "units": [
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000001",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000002",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000003",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          }
+        ]
+      },
+      {
+        "price_version_id": "01a184dd-c298-740f-9b78-00977101ef6e",
+        "scope_type": "GLOBAL",
+        "protocol_code": "CHAT",
+        "formula_version_id": "00000000-0000-7000-8200-000000000001",
+        "credit_unit": "MICROCREDIT",
+        "lifecycle_status": "DRAFT",
+        "derived_status": "DRAFT",
+        "version": 64,
+        "space_etag": 2,
+        "current_space_etag": 2,
+        "effective_from": "2026-10-30T00:00:00+08:00",
+        "units": [
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000001",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000002",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000003",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          }
+        ]
+      },
+      {
+        "price_version_id": "01a184dd-c297-706d-95b2-327bb195825a",
+        "scope_type": "GLOBAL",
+        "protocol_code": "CHAT",
+        "formula_version_id": "00000000-0000-7000-8200-000000000001",
+        "credit_unit": "MICROCREDIT",
+        "lifecycle_status": "DRAFT",
+        "derived_status": "DRAFT",
+        "version": 63,
+        "space_etag": 2,
+        "current_space_etag": 2,
+        "effective_from": "2026-10-30T00:00:00+08:00",
+        "units": [
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000001",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000002",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000003",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          }
+        ]
+      },
+      {
+        "price_version_id": "01a184dd-c295-7c8a-9030-cabbaa98b35a",
+        "scope_type": "GLOBAL",
+        "protocol_code": "CHAT",
+        "formula_version_id": "00000000-0000-7000-8200-000000000001",
+        "credit_unit": "MICROCREDIT",
+        "lifecycle_status": "DRAFT",
+        "derived_status": "DRAFT",
+        "version": 62,
+        "space_etag": 2,
+        "current_space_etag": 2,
+        "effective_from": "2026-10-30T00:00:00+08:00",
+        "units": [
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000001",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000002",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000003",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          }
+        ]
+      },
+      {
+        "price_version_id": "01a184dd-c295-7336-839b-31f80c545b3d",
+        "scope_type": "GLOBAL",
+        "protocol_code": "CHAT",
+        "formula_version_id": "00000000-0000-7000-8200-000000000001",
+        "credit_unit": "MICROCREDIT",
+        "lifecycle_status": "DRAFT",
+        "derived_status": "DRAFT",
+        "version": 61,
+        "space_etag": 2,
+        "current_space_etag": 2,
+        "effective_from": "2026-10-30T00:00:00+08:00",
+        "units": [
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000001",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000002",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000003",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          }
+        ]
+      },
+      {
+        "price_version_id": "01a184dd-c294-710b-830e-47e5227d5a66",
+        "scope_type": "GLOBAL",
+        "protocol_code": "CHAT",
+        "formula_version_id": "00000000-0000-7000-8200-000000000001",
+        "credit_unit": "MICROCREDIT",
+        "lifecycle_status": "DRAFT",
+        "derived_status": "DRAFT",
+        "version": 60,
+        "space_etag": 2,
+        "current_space_etag": 2,
+        "effective_from": "2026-10-30T00:00:00+08:00",
+        "units": [
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000001",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000002",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000003",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          }
+        ]
+      },
+      {
+        "price_version_id": "01a184dd-c293-7591-b19c-0049fcfae330",
+        "scope_type": "GLOBAL",
+        "protocol_code": "CHAT",
+        "formula_version_id": "00000000-0000-7000-8200-000000000001",
+        "credit_unit": "MICROCREDIT",
+        "lifecycle_status": "DRAFT",
+        "derived_status": "DRAFT",
+        "version": 59,
+        "space_etag": 2,
+        "current_space_etag": 2,
+        "effective_from": "2026-10-30T00:00:00+08:00",
+        "units": [
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000001",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000002",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000003",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          }
+        ]
+      },
+      {
+        "price_version_id": "01a184dd-c292-729a-b77f-87c60ec81d1e",
+        "scope_type": "GLOBAL",
+        "protocol_code": "CHAT",
+        "formula_version_id": "00000000-0000-7000-8200-000000000001",
+        "credit_unit": "MICROCREDIT",
+        "lifecycle_status": "DRAFT",
+        "derived_status": "DRAFT",
+        "version": 58,
+        "space_etag": 2,
+        "current_space_etag": 2,
+        "effective_from": "2026-10-30T00:00:00+08:00",
+        "units": [
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000001",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000002",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000003",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          }
+        ]
+      },
+      {
+        "price_version_id": "01a184dd-c290-7ed8-b730-6bdec0c21a36",
+        "scope_type": "GLOBAL",
+        "protocol_code": "CHAT",
+        "formula_version_id": "00000000-0000-7000-8200-000000000001",
+        "credit_unit": "MICROCREDIT",
+        "lifecycle_status": "DRAFT",
+        "derived_status": "DRAFT",
+        "version": 57,
+        "space_etag": 2,
+        "current_space_etag": 2,
+        "effective_from": "2026-10-30T00:00:00+08:00",
+        "units": [
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000001",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000002",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000003",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          }
+        ]
+      },
+      {
+        "price_version_id": "01a184dd-c290-744c-85f4-a42e045f1d44",
+        "scope_type": "GLOBAL",
+        "protocol_code": "CHAT",
+        "formula_version_id": "00000000-0000-7000-8200-000000000001",
+        "credit_unit": "MICROCREDIT",
+        "lifecycle_status": "DRAFT",
+        "derived_status": "DRAFT",
+        "version": 56,
+        "space_etag": 2,
+        "current_space_etag": 2,
+        "effective_from": "2026-10-30T00:00:00+08:00",
+        "units": [
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000001",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000002",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000003",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          }
+        ]
+      },
+      {
+        "price_version_id": "01a184dd-c28e-733f-a17a-2a56ffdef14e",
+        "scope_type": "GLOBAL",
+        "protocol_code": "CHAT",
+        "formula_version_id": "00000000-0000-7000-8200-000000000001",
+        "credit_unit": "MICROCREDIT",
+        "lifecycle_status": "DRAFT",
+        "derived_status": "DRAFT",
+        "version": 55,
+        "space_etag": 2,
+        "current_space_etag": 2,
+        "effective_from": "2026-10-30T00:00:00+08:00",
+        "units": [
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000001",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000002",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000003",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          }
+        ]
+      },
+      {
+        "price_version_id": "01a184dd-c28c-747f-a019-c5e5f0f84746",
+        "scope_type": "GLOBAL",
+        "protocol_code": "CHAT",
+        "formula_version_id": "00000000-0000-7000-8200-000000000001",
+        "credit_unit": "MICROCREDIT",
+        "lifecycle_status": "DRAFT",
+        "derived_status": "DRAFT",
+        "version": 54,
+        "space_etag": 2,
+        "current_space_etag": 2,
+        "effective_from": "2026-10-30T00:00:00+08:00",
+        "units": [
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000001",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000002",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000003",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          }
+        ]
+      },
+      {
+        "price_version_id": "01a184dd-c28a-7d23-9fb0-b5cc3498dccf",
+        "scope_type": "GLOBAL",
+        "protocol_code": "CHAT",
+        "formula_version_id": "00000000-0000-7000-8200-000000000001",
+        "credit_unit": "MICROCREDIT",
+        "lifecycle_status": "DRAFT",
+        "derived_status": "DRAFT",
+        "version": 53,
+        "space_etag": 2,
+        "current_space_etag": 2,
+        "effective_from": "2026-10-30T00:00:00+08:00",
+        "units": [
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000001",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000002",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000003",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          }
+        ]
+      },
+      {
+        "price_version_id": "01a184dd-c224-79a3-a62e-bb9e605c846b",
+        "scope_type": "GLOBAL",
+        "protocol_code": "CHAT",
+        "formula_version_id": "00000000-0000-7000-8200-000000000001",
+        "credit_unit": "MICROCREDIT",
+        "lifecycle_status": "DRAFT",
+        "derived_status": "DRAFT",
+        "version": 52,
+        "space_etag": 2,
+        "current_space_etag": 2,
+        "effective_from": "2026-10-30T00:00:00+08:00",
+        "units": [
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000001",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000002",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000003",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          }
+        ]
+      },
+      {
+        "price_version_id": "01a184dd-c222-7ccb-ad1b-bc73da2f7bb0",
+        "scope_type": "GLOBAL",
+        "protocol_code": "CHAT",
+        "formula_version_id": "00000000-0000-7000-8200-000000000001",
+        "credit_unit": "MICROCREDIT",
+        "lifecycle_status": "DRAFT",
+        "derived_status": "DRAFT",
+        "version": 51,
+        "space_etag": 2,
+        "current_space_etag": 2,
+        "effective_from": "2026-10-30T00:00:00+08:00",
+        "units": [
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000001",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000002",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000003",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          }
+        ]
+      },
+      {
+        "price_version_id": "01a184dd-c221-783d-b5a4-c88561a04c6b",
+        "scope_type": "GLOBAL",
+        "protocol_code": "CHAT",
+        "formula_version_id": "00000000-0000-7000-8200-000000000001",
+        "credit_unit": "MICROCREDIT",
+        "lifecycle_status": "DRAFT",
+        "derived_status": "DRAFT",
+        "version": 50,
+        "space_etag": 2,
+        "current_space_etag": 2,
+        "effective_from": "2026-10-30T00:00:00+08:00",
+        "units": [
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000001",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000002",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000003",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          }
+        ]
+      },
+      {
+        "price_version_id": "01a184dd-c220-75fc-8e05-4d37f77918d1",
+        "scope_type": "GLOBAL",
+        "protocol_code": "CHAT",
+        "formula_version_id": "00000000-0000-7000-8200-000000000001",
+        "credit_unit": "MICROCREDIT",
+        "lifecycle_status": "DRAFT",
+        "derived_status": "DRAFT",
+        "version": 49,
+        "space_etag": 2,
+        "current_space_etag": 2,
+        "effective_from": "2026-10-30T00:00:00+08:00",
+        "units": [
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000001",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000002",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000003",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          }
+        ]
+      },
+      {
+        "price_version_id": "01a184dd-c21f-72df-a923-f590fdbec32a",
+        "scope_type": "GLOBAL",
+        "protocol_code": "CHAT",
+        "formula_version_id": "00000000-0000-7000-8200-000000000001",
+        "credit_unit": "MICROCREDIT",
+        "lifecycle_status": "DRAFT",
+        "derived_status": "DRAFT",
+        "version": 48,
+        "space_etag": 2,
+        "current_space_etag": 2,
+        "effective_from": "2026-10-30T00:00:00+08:00",
+        "units": [
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000001",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000002",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000003",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          }
+        ]
+      },
+      {
+        "price_version_id": "01a184dd-c21e-70b5-bcd5-b690181b895c",
+        "scope_type": "GLOBAL",
+        "protocol_code": "CHAT",
+        "formula_version_id": "00000000-0000-7000-8200-000000000001",
+        "credit_unit": "MICROCREDIT",
+        "lifecycle_status": "DRAFT",
+        "derived_status": "DRAFT",
+        "version": 47,
+        "space_etag": 2,
+        "current_space_etag": 2,
+        "effective_from": "2026-10-30T00:00:00+08:00",
+        "units": [
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000001",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000002",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000003",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          }
+        ]
+      },
+      {
+        "price_version_id": "01a184dd-c21c-7c04-9c34-23b76fa6b9cc",
+        "scope_type": "GLOBAL",
+        "protocol_code": "CHAT",
+        "formula_version_id": "00000000-0000-7000-8200-000000000001",
+        "credit_unit": "MICROCREDIT",
+        "lifecycle_status": "DRAFT",
+        "derived_status": "DRAFT",
+        "version": 46,
+        "space_etag": 2,
+        "current_space_etag": 2,
+        "effective_from": "2026-10-30T00:00:00+08:00",
+        "units": [
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000001",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000002",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000003",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          }
+        ]
+      },
+      {
+        "price_version_id": "01a184dd-c21b-75d1-a4e7-5cfa4e79cc64",
+        "scope_type": "GLOBAL",
+        "protocol_code": "CHAT",
+        "formula_version_id": "00000000-0000-7000-8200-000000000001",
+        "credit_unit": "MICROCREDIT",
+        "lifecycle_status": "DRAFT",
+        "derived_status": "DRAFT",
+        "version": 45,
+        "space_etag": 2,
+        "current_space_etag": 2,
+        "effective_from": "2026-10-30T00:00:00+08:00",
+        "units": [
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000001",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000002",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000003",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          }
+        ]
+      },
+      {
+        "price_version_id": "01a184dd-c21a-73e8-b0f7-a54a0bb5ae3f",
+        "scope_type": "GLOBAL",
+        "protocol_code": "CHAT",
+        "formula_version_id": "00000000-0000-7000-8200-000000000001",
+        "credit_unit": "MICROCREDIT",
+        "lifecycle_status": "DRAFT",
+        "derived_status": "DRAFT",
+        "version": 44,
+        "space_etag": 2,
+        "current_space_etag": 2,
+        "effective_from": "2026-10-30T00:00:00+08:00",
+        "units": [
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000001",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000002",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000003",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          }
+        ]
+      },
+      {
+        "price_version_id": "01a184dd-c217-7d9a-b974-facdc7ee02df",
+        "scope_type": "GLOBAL",
+        "protocol_code": "CHAT",
+        "formula_version_id": "00000000-0000-7000-8200-000000000001",
+        "credit_unit": "MICROCREDIT",
+        "lifecycle_status": "DRAFT",
+        "derived_status": "DRAFT",
+        "version": 43,
+        "space_etag": 2,
+        "current_space_etag": 2,
+        "effective_from": "2026-10-30T00:00:00+08:00",
+        "units": [
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000001",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000002",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000003",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          }
+        ]
+      },
+      {
+        "price_version_id": "01a184dd-c216-7952-905d-6c086d13816e",
+        "scope_type": "GLOBAL",
+        "protocol_code": "CHAT",
+        "formula_version_id": "00000000-0000-7000-8200-000000000001",
+        "credit_unit": "MICROCREDIT",
+        "lifecycle_status": "DRAFT",
+        "derived_status": "DRAFT",
+        "version": 42,
+        "space_etag": 2,
+        "current_space_etag": 2,
+        "effective_from": "2026-10-30T00:00:00+08:00",
+        "units": [
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000001",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000002",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000003",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          }
+        ]
+      },
+      {
+        "price_version_id": "01a184dd-c215-708b-b2a7-455e9eb94115",
+        "scope_type": "GLOBAL",
+        "protocol_code": "CHAT",
+        "formula_version_id": "00000000-0000-7000-8200-000000000001",
+        "credit_unit": "MICROCREDIT",
+        "lifecycle_status": "DRAFT",
+        "derived_status": "DRAFT",
+        "version": 41,
+        "space_etag": 2,
+        "current_space_etag": 2,
+        "effective_from": "2026-10-30T00:00:00+08:00",
+        "units": [
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000001",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000002",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000003",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          }
+        ]
+      },
+      {
+        "price_version_id": "01a184dd-c213-7bbf-a7cc-81051c882fd4",
+        "scope_type": "GLOBAL",
+        "protocol_code": "CHAT",
+        "formula_version_id": "00000000-0000-7000-8200-000000000001",
+        "credit_unit": "MICROCREDIT",
+        "lifecycle_status": "DRAFT",
+        "derived_status": "DRAFT",
+        "version": 40,
+        "space_etag": 2,
+        "current_space_etag": 2,
+        "effective_from": "2026-10-30T00:00:00+08:00",
+        "units": [
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000001",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000002",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000003",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          }
+        ]
+      },
+      {
+        "price_version_id": "01a184dd-c212-769a-89e2-9f5ea4357412",
+        "scope_type": "GLOBAL",
+        "protocol_code": "CHAT",
+        "formula_version_id": "00000000-0000-7000-8200-000000000001",
+        "credit_unit": "MICROCREDIT",
+        "lifecycle_status": "DRAFT",
+        "derived_status": "DRAFT",
+        "version": 39,
+        "space_etag": 2,
+        "current_space_etag": 2,
+        "effective_from": "2026-10-30T00:00:00+08:00",
+        "units": [
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000001",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000002",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000003",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          }
+        ]
+      },
+      {
+        "price_version_id": "01a184dd-c211-7469-aec3-45d2f355c4af",
+        "scope_type": "GLOBAL",
+        "protocol_code": "CHAT",
+        "formula_version_id": "00000000-0000-7000-8200-000000000001",
+        "credit_unit": "MICROCREDIT",
+        "lifecycle_status": "DRAFT",
+        "derived_status": "DRAFT",
+        "version": 38,
+        "space_etag": 2,
+        "current_space_etag": 2,
+        "effective_from": "2026-10-30T00:00:00+08:00",
+        "units": [
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000001",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000002",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000003",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          }
+        ]
+      },
+      {
+        "price_version_id": "01a184dd-c210-7224-91dd-9174caad761b",
+        "scope_type": "GLOBAL",
+        "protocol_code": "CHAT",
+        "formula_version_id": "00000000-0000-7000-8200-000000000001",
+        "credit_unit": "MICROCREDIT",
+        "lifecycle_status": "DRAFT",
+        "derived_status": "DRAFT",
+        "version": 37,
+        "space_etag": 2,
+        "current_space_etag": 2,
+        "effective_from": "2026-10-30T00:00:00+08:00",
+        "units": [
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000001",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000002",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000003",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          }
+        ]
+      },
+      {
+        "price_version_id": "01a184dd-c20e-7702-ab3b-f57510108d9e",
+        "scope_type": "GLOBAL",
+        "protocol_code": "CHAT",
+        "formula_version_id": "00000000-0000-7000-8200-000000000001",
+        "credit_unit": "MICROCREDIT",
+        "lifecycle_status": "DRAFT",
+        "derived_status": "DRAFT",
+        "version": 36,
+        "space_etag": 2,
+        "current_space_etag": 2,
+        "effective_from": "2026-10-30T00:00:00+08:00",
+        "units": [
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000001",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000002",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000003",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          }
+        ]
+      },
+      {
+        "price_version_id": "01a184dd-c20d-7427-aa2a-b75d7dcd04b0",
+        "scope_type": "GLOBAL",
+        "protocol_code": "CHAT",
+        "formula_version_id": "00000000-0000-7000-8200-000000000001",
+        "credit_unit": "MICROCREDIT",
+        "lifecycle_status": "DRAFT",
+        "derived_status": "DRAFT",
+        "version": 35,
+        "space_etag": 2,
+        "current_space_etag": 2,
+        "effective_from": "2026-10-30T00:00:00+08:00",
+        "units": [
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000001",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000002",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000003",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          }
+        ]
+      },
+      {
+        "price_version_id": "01a184dd-c20b-76b5-b0eb-ec0cb77b2c6a",
+        "scope_type": "GLOBAL",
+        "protocol_code": "CHAT",
+        "formula_version_id": "00000000-0000-7000-8200-000000000001",
+        "credit_unit": "MICROCREDIT",
+        "lifecycle_status": "DRAFT",
+        "derived_status": "DRAFT",
+        "version": 34,
+        "space_etag": 2,
+        "current_space_etag": 2,
+        "effective_from": "2026-10-30T00:00:00+08:00",
+        "units": [
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000001",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000002",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000003",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          }
+        ]
+      },
+      {
+        "price_version_id": "01a184dd-c20a-73a1-9c58-13ce7cd6a3cd",
+        "scope_type": "GLOBAL",
+        "protocol_code": "CHAT",
+        "formula_version_id": "00000000-0000-7000-8200-000000000001",
+        "credit_unit": "MICROCREDIT",
+        "lifecycle_status": "DRAFT",
+        "derived_status": "DRAFT",
+        "version": 33,
+        "space_etag": 2,
+        "current_space_etag": 2,
+        "effective_from": "2026-10-30T00:00:00+08:00",
+        "units": [
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000001",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000002",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000003",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          }
+        ]
+      },
+      {
+        "price_version_id": "01a184dd-c207-7b23-a346-0d5ddd1de0d9",
+        "scope_type": "GLOBAL",
+        "protocol_code": "CHAT",
+        "formula_version_id": "00000000-0000-7000-8200-000000000001",
+        "credit_unit": "MICROCREDIT",
+        "lifecycle_status": "DRAFT",
+        "derived_status": "DRAFT",
+        "version": 32,
+        "space_etag": 2,
+        "current_space_etag": 2,
+        "effective_from": "2026-10-30T00:00:00+08:00",
+        "units": [
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000001",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000002",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000003",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          }
+        ]
+      },
+      {
+        "price_version_id": "01a184dd-c205-787a-91ed-a8c958c8eac8",
+        "scope_type": "GLOBAL",
+        "protocol_code": "CHAT",
+        "formula_version_id": "00000000-0000-7000-8200-000000000001",
+        "credit_unit": "MICROCREDIT",
+        "lifecycle_status": "DRAFT",
+        "derived_status": "DRAFT",
+        "version": 31,
+        "space_etag": 2,
+        "current_space_etag": 2,
+        "effective_from": "2026-10-30T00:00:00+08:00",
+        "units": [
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000001",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000002",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000003",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          }
+        ]
+      },
+      {
+        "price_version_id": "01a184dd-c204-720d-b86b-0301a84e90a3",
+        "scope_type": "GLOBAL",
+        "protocol_code": "CHAT",
+        "formula_version_id": "00000000-0000-7000-8200-000000000001",
+        "credit_unit": "MICROCREDIT",
+        "lifecycle_status": "DRAFT",
+        "derived_status": "DRAFT",
+        "version": 30,
+        "space_etag": 2,
+        "current_space_etag": 2,
+        "effective_from": "2026-10-30T00:00:00+08:00",
+        "units": [
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000001",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000002",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000003",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          }
+        ]
+      },
+      {
+        "price_version_id": "01a184dd-c202-7318-a14a-85d72598ef41",
+        "scope_type": "GLOBAL",
+        "protocol_code": "CHAT",
+        "formula_version_id": "00000000-0000-7000-8200-000000000001",
+        "credit_unit": "MICROCREDIT",
+        "lifecycle_status": "DRAFT",
+        "derived_status": "DRAFT",
+        "version": 29,
+        "space_etag": 2,
+        "current_space_etag": 2,
+        "effective_from": "2026-10-30T00:00:00+08:00",
+        "units": [
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000001",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000002",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000003",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          }
+        ]
+      },
+      {
+        "price_version_id": "01a184dd-c201-709c-b4df-88c69fdb205b",
+        "scope_type": "GLOBAL",
+        "protocol_code": "CHAT",
+        "formula_version_id": "00000000-0000-7000-8200-000000000001",
+        "credit_unit": "MICROCREDIT",
+        "lifecycle_status": "DRAFT",
+        "derived_status": "DRAFT",
+        "version": 28,
+        "space_etag": 2,
+        "current_space_etag": 2,
+        "effective_from": "2026-10-30T00:00:00+08:00",
+        "units": [
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000001",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000002",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000003",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          }
+        ]
+      },
+      {
+        "price_version_id": "01a184dd-c1ff-7e1e-8632-1811bf552d82",
+        "scope_type": "GLOBAL",
+        "protocol_code": "CHAT",
+        "formula_version_id": "00000000-0000-7000-8200-000000000001",
+        "credit_unit": "MICROCREDIT",
+        "lifecycle_status": "DRAFT",
+        "derived_status": "DRAFT",
+        "version": 27,
+        "space_etag": 2,
+        "current_space_etag": 2,
+        "effective_from": "2026-10-30T00:00:00+08:00",
+        "units": [
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000001",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000002",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000003",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          }
+        ]
+      },
+      {
+        "price_version_id": "01a184dd-c1fe-7c46-a946-6f71f7caa59d",
+        "scope_type": "GLOBAL",
+        "protocol_code": "CHAT",
+        "formula_version_id": "00000000-0000-7000-8200-000000000001",
+        "credit_unit": "MICROCREDIT",
+        "lifecycle_status": "DRAFT",
+        "derived_status": "DRAFT",
+        "version": 26,
+        "space_etag": 2,
+        "current_space_etag": 2,
+        "effective_from": "2026-10-30T00:00:00+08:00",
+        "units": [
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000001",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000002",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000003",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          }
+        ]
+      },
+      {
+        "price_version_id": "01a184dd-c1fd-7261-8baf-6b4892812847",
+        "scope_type": "GLOBAL",
+        "protocol_code": "CHAT",
+        "formula_version_id": "00000000-0000-7000-8200-000000000001",
+        "credit_unit": "MICROCREDIT",
+        "lifecycle_status": "DRAFT",
+        "derived_status": "DRAFT",
+        "version": 25,
+        "space_etag": 2,
+        "current_space_etag": 2,
+        "effective_from": "2026-10-30T00:00:00+08:00",
+        "units": [
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000001",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000002",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000003",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          }
+        ]
+      },
+      {
+        "price_version_id": "01a184dd-c1fb-76a7-99f5-b411aa12af58",
+        "scope_type": "GLOBAL",
+        "protocol_code": "CHAT",
+        "formula_version_id": "00000000-0000-7000-8200-000000000001",
+        "credit_unit": "MICROCREDIT",
+        "lifecycle_status": "DRAFT",
+        "derived_status": "DRAFT",
+        "version": 24,
+        "space_etag": 2,
+        "current_space_etag": 2,
+        "effective_from": "2026-10-30T00:00:00+08:00",
+        "units": [
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000001",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000002",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000003",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          }
+        ]
+      },
+      {
+        "price_version_id": "01a184dd-c1f9-7a62-89c8-d97de5d638f9",
+        "scope_type": "GLOBAL",
+        "protocol_code": "CHAT",
+        "formula_version_id": "00000000-0000-7000-8200-000000000001",
+        "credit_unit": "MICROCREDIT",
+        "lifecycle_status": "DRAFT",
+        "derived_status": "DRAFT",
+        "version": 23,
+        "space_etag": 2,
+        "current_space_etag": 2,
+        "effective_from": "2026-10-30T00:00:00+08:00",
+        "units": [
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000001",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000002",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000003",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          }
+        ]
+      },
+      {
+        "price_version_id": "01a184dd-c1f7-7377-b45b-6fe77d6fce0e",
+        "scope_type": "GLOBAL",
+        "protocol_code": "CHAT",
+        "formula_version_id": "00000000-0000-7000-8200-000000000001",
+        "credit_unit": "MICROCREDIT",
+        "lifecycle_status": "DRAFT",
+        "derived_status": "DRAFT",
+        "version": 22,
+        "space_etag": 2,
+        "current_space_etag": 2,
+        "effective_from": "2026-10-30T00:00:00+08:00",
+        "units": [
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000001",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000002",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000003",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          }
+        ]
+      },
+      {
+        "price_version_id": "01a184dd-c1f4-7ef5-8b51-f512789c6bd5",
+        "scope_type": "GLOBAL",
+        "protocol_code": "CHAT",
+        "formula_version_id": "00000000-0000-7000-8200-000000000001",
+        "credit_unit": "MICROCREDIT",
+        "lifecycle_status": "DRAFT",
+        "derived_status": "DRAFT",
+        "version": 21,
+        "space_etag": 2,
+        "current_space_etag": 2,
+        "effective_from": "2026-10-30T00:00:00+08:00",
+        "units": [
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000001",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000002",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000003",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          }
+        ]
+      },
+      {
+        "price_version_id": "01a184dd-c1f3-72bc-aab3-442dfe213bf9",
+        "scope_type": "GLOBAL",
+        "protocol_code": "CHAT",
+        "formula_version_id": "00000000-0000-7000-8200-000000000001",
+        "credit_unit": "MICROCREDIT",
+        "lifecycle_status": "DRAFT",
+        "derived_status": "DRAFT",
+        "version": 20,
+        "space_etag": 2,
+        "current_space_etag": 2,
+        "effective_from": "2026-10-30T00:00:00+08:00",
+        "units": [
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000001",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000002",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000003",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          }
+        ]
+      },
+      {
+        "price_version_id": "01a184dd-c1f1-74c7-9cb7-76193c3138ad",
+        "scope_type": "GLOBAL",
+        "protocol_code": "CHAT",
+        "formula_version_id": "00000000-0000-7000-8200-000000000001",
+        "credit_unit": "MICROCREDIT",
+        "lifecycle_status": "DRAFT",
+        "derived_status": "DRAFT",
+        "version": 19,
+        "space_etag": 2,
+        "current_space_etag": 2,
+        "effective_from": "2026-10-30T00:00:00+08:00",
+        "units": [
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000001",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000002",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000003",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          }
+        ]
+      },
+      {
+        "price_version_id": "01a184dd-c1f0-7217-87d4-ebca31216154",
+        "scope_type": "GLOBAL",
+        "protocol_code": "CHAT",
+        "formula_version_id": "00000000-0000-7000-8200-000000000001",
+        "credit_unit": "MICROCREDIT",
+        "lifecycle_status": "DRAFT",
+        "derived_status": "DRAFT",
+        "version": 18,
+        "space_etag": 2,
+        "current_space_etag": 2,
+        "effective_from": "2026-10-30T00:00:00+08:00",
+        "units": [
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000001",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000002",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000003",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          }
+        ]
+      },
+      {
+        "price_version_id": "01a184dd-c1ee-736e-96bd-d0c74bfe7227",
+        "scope_type": "GLOBAL",
+        "protocol_code": "CHAT",
+        "formula_version_id": "00000000-0000-7000-8200-000000000001",
+        "credit_unit": "MICROCREDIT",
+        "lifecycle_status": "DRAFT",
+        "derived_status": "DRAFT",
+        "version": 17,
+        "space_etag": 2,
+        "current_space_etag": 2,
+        "effective_from": "2026-10-30T00:00:00+08:00",
+        "units": [
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000001",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000002",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000003",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          }
+        ]
+      },
+      {
+        "price_version_id": "01a184dd-c1ed-70fd-a72d-97f18ca6432e",
+        "scope_type": "GLOBAL",
+        "protocol_code": "CHAT",
+        "formula_version_id": "00000000-0000-7000-8200-000000000001",
+        "credit_unit": "MICROCREDIT",
+        "lifecycle_status": "DRAFT",
+        "derived_status": "DRAFT",
+        "version": 16,
+        "space_etag": 2,
+        "current_space_etag": 2,
+        "effective_from": "2026-10-30T00:00:00+08:00",
+        "units": [
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000001",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000002",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000003",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          }
+        ]
+      },
+      {
+        "price_version_id": "01a184dd-c1eb-7262-9ade-6ff9eac6e059",
+        "scope_type": "GLOBAL",
+        "protocol_code": "CHAT",
+        "formula_version_id": "00000000-0000-7000-8200-000000000001",
+        "credit_unit": "MICROCREDIT",
+        "lifecycle_status": "DRAFT",
+        "derived_status": "DRAFT",
+        "version": 15,
+        "space_etag": 2,
+        "current_space_etag": 2,
+        "effective_from": "2026-10-30T00:00:00+08:00",
+        "units": [
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000001",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000002",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000003",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          }
+        ]
+      },
+      {
+        "price_version_id": "01a184dd-c1e9-75b8-922e-d72014fa4d61",
+        "scope_type": "GLOBAL",
+        "protocol_code": "CHAT",
+        "formula_version_id": "00000000-0000-7000-8200-000000000001",
+        "credit_unit": "MICROCREDIT",
+        "lifecycle_status": "DRAFT",
+        "derived_status": "DRAFT",
+        "version": 14,
+        "space_etag": 2,
+        "current_space_etag": 2,
+        "effective_from": "2026-10-30T00:00:00+08:00",
+        "units": [
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000001",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000002",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000003",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          }
+        ]
+      },
+      {
+        "price_version_id": "01a184dd-c1e7-7973-8f51-79932a2b78cc",
+        "scope_type": "GLOBAL",
+        "protocol_code": "CHAT",
+        "formula_version_id": "00000000-0000-7000-8200-000000000001",
+        "credit_unit": "MICROCREDIT",
+        "lifecycle_status": "DRAFT",
+        "derived_status": "DRAFT",
+        "version": 13,
+        "space_etag": 2,
+        "current_space_etag": 2,
+        "effective_from": "2026-10-30T00:00:00+08:00",
+        "units": [
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000001",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000002",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000003",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          }
+        ]
+      },
+      {
+        "price_version_id": "01a184dd-c1e5-739c-836c-2f419d1976fb",
+        "scope_type": "GLOBAL",
+        "protocol_code": "CHAT",
+        "formula_version_id": "00000000-0000-7000-8200-000000000001",
+        "credit_unit": "MICROCREDIT",
+        "lifecycle_status": "DRAFT",
+        "derived_status": "DRAFT",
+        "version": 12,
+        "space_etag": 2,
+        "current_space_etag": 2,
+        "effective_from": "2026-10-30T00:00:00+08:00",
+        "units": [
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000001",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000002",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000003",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          }
+        ]
+      },
+      {
+        "price_version_id": "01a184dd-c1e2-7ce7-ad7d-3f0c6e0008eb",
+        "scope_type": "GLOBAL",
+        "protocol_code": "CHAT",
+        "formula_version_id": "00000000-0000-7000-8200-000000000001",
+        "credit_unit": "MICROCREDIT",
+        "lifecycle_status": "DRAFT",
+        "derived_status": "DRAFT",
+        "version": 11,
+        "space_etag": 2,
+        "current_space_etag": 2,
+        "effective_from": "2026-10-30T00:00:00+08:00",
+        "units": [
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000001",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000002",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000003",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          }
+        ]
+      },
+      {
+        "price_version_id": "01a184dd-c1e1-78fd-a13c-ccebbdfdc91b",
+        "scope_type": "GLOBAL",
+        "protocol_code": "CHAT",
+        "formula_version_id": "00000000-0000-7000-8200-000000000001",
+        "credit_unit": "MICROCREDIT",
+        "lifecycle_status": "DRAFT",
+        "derived_status": "DRAFT",
+        "version": 10,
+        "space_etag": 2,
+        "current_space_etag": 2,
+        "effective_from": "2026-10-30T00:00:00+08:00",
+        "units": [
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000001",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000002",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000003",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          }
+        ]
+      },
+      {
+        "price_version_id": "01a184dd-c1e0-7854-b3bd-608ad4bba39e",
+        "scope_type": "GLOBAL",
+        "protocol_code": "CHAT",
+        "formula_version_id": "00000000-0000-7000-8200-000000000001",
+        "credit_unit": "MICROCREDIT",
+        "lifecycle_status": "DRAFT",
+        "derived_status": "DRAFT",
+        "version": 9,
+        "space_etag": 2,
+        "current_space_etag": 2,
+        "effective_from": "2026-10-30T00:00:00+08:00",
+        "units": [
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000001",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000002",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000003",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          }
+        ]
+      },
+      {
+        "price_version_id": "01a184dd-c1de-73ab-99d7-a0bc8cb1b1f7",
+        "scope_type": "GLOBAL",
+        "protocol_code": "CHAT",
+        "formula_version_id": "00000000-0000-7000-8200-000000000001",
+        "credit_unit": "MICROCREDIT",
+        "lifecycle_status": "DRAFT",
+        "derived_status": "DRAFT",
+        "version": 8,
+        "space_etag": 2,
+        "current_space_etag": 2,
+        "effective_from": "2026-10-30T00:00:00+08:00",
+        "units": [
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000001",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000002",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000003",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          }
+        ]
+      },
+      {
+        "price_version_id": "01a184dd-c1dd-7177-ba9e-680eef019f70",
+        "scope_type": "GLOBAL",
+        "protocol_code": "CHAT",
+        "formula_version_id": "00000000-0000-7000-8200-000000000001",
+        "credit_unit": "MICROCREDIT",
+        "lifecycle_status": "DRAFT",
+        "derived_status": "DRAFT",
+        "version": 7,
+        "space_etag": 2,
+        "current_space_etag": 2,
+        "effective_from": "2026-10-30T00:00:00+08:00",
+        "units": [
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000001",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000002",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000003",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          }
+        ]
+      },
+      {
+        "price_version_id": "01a184dd-c1db-7dbc-a77b-0735d78db553",
+        "scope_type": "GLOBAL",
+        "protocol_code": "CHAT",
+        "formula_version_id": "00000000-0000-7000-8200-000000000001",
+        "credit_unit": "MICROCREDIT",
+        "lifecycle_status": "DRAFT",
+        "derived_status": "DRAFT",
+        "version": 6,
+        "space_etag": 2,
+        "current_space_etag": 2,
+        "effective_from": "2026-10-30T00:00:00+08:00",
+        "units": [
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000001",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000002",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000003",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          }
+        ]
+      },
+      {
+        "price_version_id": "01a184dd-c1da-734d-bb0b-06330b8a4a75",
+        "scope_type": "GLOBAL",
+        "protocol_code": "CHAT",
+        "formula_version_id": "00000000-0000-7000-8200-000000000001",
+        "credit_unit": "MICROCREDIT",
+        "lifecycle_status": "DRAFT",
+        "derived_status": "DRAFT",
+        "version": 5,
+        "space_etag": 2,
+        "current_space_etag": 2,
+        "effective_from": "2026-10-30T00:00:00+08:00",
+        "units": [
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000001",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000002",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000003",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          }
+        ]
+      },
+      {
+        "price_version_id": "01a184dd-c1d9-70da-873e-316ab29ca8f2",
+        "scope_type": "GLOBAL",
+        "protocol_code": "CHAT",
+        "formula_version_id": "00000000-0000-7000-8200-000000000001",
+        "credit_unit": "MICROCREDIT",
+        "lifecycle_status": "DRAFT",
+        "derived_status": "DRAFT",
+        "version": 4,
+        "space_etag": 2,
+        "current_space_etag": 2,
+        "effective_from": "2026-10-30T00:00:00+08:00",
+        "units": [
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000001",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000002",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000003",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          }
+        ]
+      },
+      {
+        "price_version_id": "01a184dd-c1d6-7732-b078-ee7d9df1bd5c",
+        "scope_type": "GLOBAL",
+        "protocol_code": "CHAT",
+        "formula_version_id": "00000000-0000-7000-8200-000000000001",
+        "credit_unit": "MICROCREDIT",
+        "lifecycle_status": "DRAFT",
+        "derived_status": "DRAFT",
+        "version": 3,
+        "space_etag": 2,
+        "current_space_etag": 2,
+        "effective_from": "2026-10-30T00:00:00+08:00",
+        "units": [
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000001",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000002",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000003",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          }
+        ]
+      },
+      {
+        "price_version_id": "01a184dd-c1d2-7d5c-8560-3c68c7aab458",
+        "scope_type": "GLOBAL",
+        "protocol_code": "CHAT",
+        "formula_version_id": "00000000-0000-7000-8200-000000000001",
+        "credit_unit": "MICROCREDIT",
+        "lifecycle_status": "DRAFT",
+        "derived_status": "DRAFT",
+        "version": 2,
+        "space_etag": 2,
+        "current_space_etag": 2,
+        "effective_from": "2026-10-30T00:00:00+08:00",
+        "units": [
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000001",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000002",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000003",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          }
+        ]
+      }
+    ],
+    "next_cursor": "eyJ2IjoxLCJjcmVhdGVkIjoiMjAyNi0xMC0yOVQwMDowMDowMC4xMjM0NTZaIiwiaWQiOiIwMWExODRkZC1jMWQyLTdkNWMtODU2MC0zYzY4YzdhYWI0NTgiLCJsaW1pdCI6MTAwfQ"
+  },
+  "second": {
+    "has_more": false,
+    "items": [
+      {
+        "price_version_id": "01a184dd-c17e-7591-97a0-cb4e741c57c3",
+        "scope_type": "GLOBAL",
+        "protocol_code": "CHAT",
+        "formula_version_id": "00000000-0000-7000-8200-000000000001",
+        "credit_unit": "MICROCREDIT",
+        "lifecycle_status": "PUBLISHED",
+        "derived_status": "ACTIVE",
+        "version": 1,
+        "space_etag": 2,
+        "current_space_etag": 2,
+        "effective_from": "2026-10-30T00:00:00+08:00",
+        "published_at": "2026-10-29T08:00:00.123456+08:00",
+        "units": [
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000001",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000002",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          },
+          {
+            "unit_definition_id": "00000000-0000-7000-8100-000000000003",
+            "config_type": "FIXED_PRICE",
+            "fixed_price_per_denominator": "1"
+          }
+        ]
+      }
+    ],
+    "next_cursor": ""
+  }
+}

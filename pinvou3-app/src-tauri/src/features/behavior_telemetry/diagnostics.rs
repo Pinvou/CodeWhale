@@ -289,6 +289,8 @@ struct Context {
     #[serde(default)]
     last_used: u64,
     turn: Option<String>,
+    #[serde(default)]
+    attempt: Option<String>,
     steps: Vec<Value>,
     code: Option<String>,
     site: String,
@@ -630,6 +632,7 @@ pub(super) fn classify(error: &str) -> (&'static str, Option<u16>) {
 pub(crate) fn capture_failure_context(
     app: &tauri::AppHandle,
     session: &str,
+    turn: &str,
     error: &str,
     acp: bool,
 ) {
@@ -639,19 +642,54 @@ pub(crate) fn capture_failure_context(
     let Some(telemetry) = app.try_state::<BehaviorTelemetry>() else {
         return;
     };
-    let Ok(mut state) = telemetry.diagnostics.lock() else {
-        return;
-    };
-    let Some(context) = state.contexts.get_mut(session) else {
-        return;
-    };
-    if !telemetry.lease_is_current(&context.lease) {
-        return;
+    telemetry.capture_failure_context(session, turn, error, acp);
+}
+
+impl BehaviorTelemetry {
+    pub(super) fn capture_failure_context(
+        &self,
+        session: &str,
+        turn: &str,
+        error: &str,
+        acp: bool,
+    ) {
+        // Keep authoritative task ownership stable through the diagnostic
+        // write. Task lifecycle writers release this lock before enrichment;
+        // the lock order here is tasks -> diagnostics, with no await.
+        let Ok(tasks) = self.tasks.lock() else {
+            return;
+        };
+        let Some(attempt) = tasks.get(session) else {
+            return;
+        };
+        if turn.is_empty()
+            || attempt.admitted_at.is_none()
+            || attempt.turn_id.as_deref() != Some(turn)
+            || !self.lease_is_current(&attempt.lease())
+        {
+            return;
+        }
+        let Ok(mut state) = self.diagnostics.lock() else {
+            return;
+        };
+        let Some(context) = state.contexts.get_mut(session) else {
+            return;
+        };
+        // UI observations can carry old turns. Only the admitted task record
+        // and its exact submission context can authorize a terminal source.
+        if context.attempt.as_deref() != Some(attempt.attempt_id.as_str())
+            || context.lease != attempt.lease()
+            || context.turn.as_deref() != Some(turn)
+            || !self.lease_is_current(&context.lease)
+        {
+            return;
+        }
+        let site = if acp { "acp_error" } else { "assistant_error" };
+        let (code, http) = classify(error);
+        context.code = Some(code.into());
+        context.http = http;
+        context.site = site.into();
     }
-    let (code, http) = classify(error);
-    context.code = Some(code.into());
-    context.http = http;
-    context.site = if acp { "acp_error" } else { "assistant_error" }.into();
 }
 // Per-thread, one-shot observation points let tests fix the actual lock ordering
 // without replacing authorization, publication or persistence decisions.
@@ -790,6 +828,9 @@ pub(super) fn enrich(
                 started: event.occurred_at,
                 last_used: event.occurred_at,
                 turn: None,
+                attempt: matches!(event.event_name, "task_submitted" | "task_admitted")
+                    .then(|| field(event, "attempt_id").map(str::to_owned))
+                    .flatten(),
                 steps: Vec::new(),
                 code: None,
                 site: "lifecycle".into(),
@@ -813,10 +854,23 @@ pub(super) fn enrich(
     sanitize_environment(&mut context.environment);
     context.last_used = context.last_used.max(event.occurred_at);
     if let Some(turn) = field(event, "turn_id") {
-        if context.turn.as_deref().is_some_and(|t| t != turn) {
-            return;
+        if let Some(attempt) = context.attempt.as_deref() {
+            if event.event_name == "task_admitted" {
+                if field(event, "attempt_id") != Some(attempt) {
+                    return;
+                }
+                // Admission for this exact submission is authoritative;
+                // an earlier UI observation cannot choose its turn.
+                context.turn = Some(turn.to_owned());
+            } else if context.turn.as_deref() != Some(turn) {
+                return;
+            }
+        } else {
+            if context.turn.as_deref().is_some_and(|t| t != turn) {
+                return;
+            }
+            context.turn = Some(turn.to_owned());
         }
-        context.turn = Some(turn.to_owned());
     }
     let stage = event_stage(event);
     if let Some((trace, controlled)) = &event.diagnostic_remote {

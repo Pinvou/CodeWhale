@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+const finishFixtures = require('./helpers/fixture-exit.cjs');
 /**
  * ACP Provider（第三方中转）管理 UI smoke：加载真实 Vite dist，mock TauriBridge，
  * 点击真实 React UI。覆盖设置页 模型 →「ACP 管理」子页：标签页、新增/保存、
@@ -11,13 +12,13 @@ const assert = require('assert');
 const { startUiTestServer } = require('./ui_test_server');
 
 function loadPuppeteer() {
-  try { return require('puppeteer-core'); } catch (_) { /* fall through */ }
+  try { return require('./helpers/puppeteer-fixture.cjs'); } catch (_) { /* fall through */ }
   const npx = path.join(os.homedir(), '.npm', '_npx');
   if (fs.existsSync(npx)) {
     for (const directory of fs.readdirSync(npx)) {
       const candidate = path.join(npx, directory, 'node_modules', 'puppeteer-core');
       if (fs.existsSync(candidate)) {
-        try { return require(candidate); } catch (_) { /* try next */ }
+        try { return require('./helpers/browser-fixture.cjs').wrapNative(require(candidate)); } catch (_) { /* try next */ }
       }
     }
   }
@@ -421,17 +422,19 @@ async function clickSettingsSection(page, label) {
   rec('⑥.3 槽位缺失时阻止保存', await page.evaluate(() =>
     !!document.querySelector('[data-testid="acp-provider-form-error"]')
   ) && (await callCount(page, 'save_acp_provider')) === savesBefore);
-  // 1M 变体按厂商归属：claude 选 Kimi Code 预设只出现 k3[1m]，不出现别家变体
+  // 1M variants are vendor-scoped: the Kimi Code preset shows
+  // k3.1-pro[1m]/k3[1m] and nothing from other vendors
   await page.click('[data-testid="acp-provider-preset"]');
   await sleep(200);
   await page.click('[data-testid="acp-provider-preset-option-kimi-code"]');
   await sleep(200);
   await page.click('[data-testid="acp-provider-model"]');
   await sleep(200);
-  rec('⑥.4 1M 变体按厂商过滤（Kimi Code 仅 k3[1m]）', await page.evaluate(() => {
+  rec('⑥.4 1M variants filter by vendor (Kimi Code k3.1-pro[1m]/k3[1m])', await page.evaluate(() => {
     const values = [...document.querySelectorAll('[data-testid^="acp-provider-model-option-"]')]
       .map(option => (option.textContent || '').trim());
-    return values.includes('k3[1m]')
+    return values.includes('k3.1-pro[1m]')
+      && values.includes('k3[1m]')
       && !values.some(value => /\[1M\]/.test(value))
       && !values.includes('deepseek-v4-flash[1m]');
   }));
@@ -697,11 +700,11 @@ async function clickSettingsSection(page, label) {
   const failed = results.filter(result => !result.pass);
   if (failed.length) {
     console.error(`ACP providers UI smoke FAILED: ${failed.length}/${results.length}`);
-    process.exit(1);
+    finishFixtures(1);
   }
   console.log('ACP providers UI smoke passed');
-  process.exit(0);
+  finishFixtures(0);
 })().catch(async error => {
   console.error('ACP providers UI smoke crashed:', error);
-  process.exit(1);
+  finishFixtures(1);
 });

@@ -51,6 +51,10 @@
     var remoteActionSequence = 0;
     var uncertainActionRequests = Object.create(null);
     var uncertainActionOrder = [];
+    var uncertainAttachmentActions = Object.create(null);
+    var uncertainAttachmentCount = 0;
+    var uncertainAttachmentSaturated = false;
+    var uncertainAttachmentLease = "";
     var CAPABILITY_RESPONSE_TIMEOUT_MS = 8_000;
     var CAPABILITY_MAX_ATTEMPTS = 3;
     var CAPABILITY_RENEWAL_LEAD_MS = 5_000;
@@ -1246,7 +1250,15 @@
       delete uncertainActionRequests[key];
     }
 
-    function invokeRemoteAction(localSessionId, remoteRef, intent, suppliedRequestId) {
+    function attachmentLeaseKey() {
+      var connection = current().controllerConnection || {};
+      var parts = [connection.connectionId, connection.controllerLeaseId, connection.leaseEpoch,
+        connection.relayEpoch, connection.generation];
+      return parts.every(function (part) { return typeof part === "string" && part.length > 0; })
+        ? JSON.stringify(parts) : "";
+    }
+
+    function invokeRemoteAction(localSessionId, remoteRef, intent, suppliedRequestId, retryUncertain) {
       ensureAvailable();
       if (!requiredOpaqueId(localSessionId) || !requiredOpaqueId(remoteRef)) {
         return Promise.reject(invalidTaskIntent());
@@ -1255,8 +1267,18 @@
         return Promise.reject(invalidTaskIntent());
       }
       var key = remoteActionKey(localSessionId, remoteRef, intent);
+      var actionLease = retryUncertain === false ? attachmentLeaseKey() : "";
+      if (actionLease && actionLease !== uncertainAttachmentLease) {
+        uncertainAttachmentActions = Object.create(null);
+        uncertainAttachmentCount = 0;
+        uncertainAttachmentSaturated = false;
+        uncertainAttachmentLease = actionLease;
+      }
+      if (retryUncertain === false && (uncertainAttachmentSaturated || uncertainAttachmentActions[key])) {
+        return Promise.reject(asBoundedError("result_unknown"));
+      }
       var requestId = suppliedRequestId || uncertainActionRequests[key] || newRemoteActionRequestId();
-      function attempt(retryUncertain) {
+      function attempt(mayRetry) {
         return invoke("desktop_remote_action_a", {
           localSessionId: localSessionId, remoteRef: remoteRef,
           requestId: requestId, intent: intent,
@@ -1267,15 +1289,19 @@
           var error = asBoundedError(failure);
           error.requestId = requestId;
           if (error.code === "result_unknown") {
-            rememberUncertainAction(key, requestId);
-            if (retryUncertain) return attempt(false);
+            if (retryUncertain === false && attachmentLeaseKey() === actionLease && !uncertainAttachmentActions[key]) {
+              if (uncertainAttachmentCount >= 128) uncertainAttachmentSaturated = true;
+              else { uncertainAttachmentActions[key] = true; uncertainAttachmentCount += 1; }
+            }
+            if (retryUncertain !== false) rememberUncertainAction(key, requestId);
+            if (mayRetry) return attempt(false);
           } else {
             forgetUncertainAction(key);
           }
           throw error;
         });
       }
-      return attempt(true);
+      return attempt(retryUncertain !== false);
     }
 
     function permissionList(localSessionId, remoteRef, taskId) {
@@ -1333,15 +1359,22 @@
     }
 
     function attachmentBegin(localSessionId, remoteRef, taskId, fileName, mimeType, totalBytes, sha256) {
+      var maxFileBytes = root.PinvouChunkedFileUpload && root.PinvouChunkedFileUpload.MAX_FILE_BYTES;
+      if (!Number.isSafeInteger(maxFileBytes) || maxFileBytes <= 0) {
+        return Promise.reject(asBoundedError("remote_attachment_size_invalid"));
+      }
+      if (Number.isSafeInteger(totalBytes) && totalBytes > maxFileBytes) {
+        return Promise.reject(asBoundedError("remote_attachment_size_invalid"));
+      }
       if (!requiredOpaqueId(taskId) || typeof fileName !== "string" || typeof mimeType !== "string"
         || !fileName.trim() || Array.from(fileName).length > 200
         || !mimeType || mimeType.length > 120
-        || !Number.isSafeInteger(totalBytes) || totalBytes <= 0 || totalBytes > 32 * 1024 * 1024
+        || !Number.isSafeInteger(totalBytes) || totalBytes <= 0
         || !/^[a-f0-9]{64}$/.test(sha256 || "")) return Promise.reject(invalidTaskIntent());
       return invokeRemoteAction(localSessionId, remoteRef, {
         operation: "attachment_begin", taskId: taskId, fileName: fileName,
         mimeType: mimeType, totalBytes: totalBytes, sha256: sha256,
-      }).then(function (body) { return {
+      }, undefined, false).then(function (body) { return {
         transferId: body.transfer_id, chunkBytes: Number(body.chunk_bytes), totalBytes: Number(body.total_bytes),
       }; });
     }
@@ -1356,7 +1389,7 @@
       return invokeRemoteAction(localSessionId, remoteRef, {
         operation: "attachment_chunk", taskId: taskId, transferId: transferId,
         chunkIndex: chunkIndex, chunkB64: chunkB64, chunkBytes: chunkBytes,
-      }).then(function (body) { return {
+      }, undefined, false).then(function (body) { return {
         state: body.state, receivedBytes: Number(body.received_bytes), sha256: body.sha256 || null,
       }; });
     }
@@ -1365,7 +1398,7 @@
       if (!requiredOpaqueId(taskId) || !requiredOpaqueId(transferId)) return Promise.reject(invalidTaskIntent());
       return invokeRemoteAction(localSessionId, remoteRef, {
         operation: "attachment_abort", taskId: taskId, transferId: transferId,
-      });
+      }, undefined, false);
     }
 
     function artifactIndex(localSessionId, remoteRef) {

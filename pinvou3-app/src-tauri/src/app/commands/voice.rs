@@ -34,6 +34,7 @@ pub struct VoicePostprocessRequest {
     pub session_id: Option<String>,
     /// Only used before a session exists; existing sessions retain their authoritative model.
     pub model_id: Option<String>,
+    pub model_ref: Option<crate::platform::prefs::ModelSelectionRef>,
     pub draft_text: Option<String>,
     /// Raw ASR transcript (before rule-based correction). When present and
     /// different from `text`, it is sent along in the prompt so the model can
@@ -650,9 +651,13 @@ fn voice_chat_message_text(value: &Value) -> String {
 async fn voice_postprocess_bridge(
     session_id: Option<&str>,
     model_id: Option<&str>,
+    model_ref: Option<&crate::platform::prefs::ModelSelectionRef>,
     pool: &EnginePool,
     store: &SessionStore,
-) -> AnyResult<crate::features::assistant::platform::bridge::Pinvou3Bridge> {
+) -> AnyResult<(
+    crate::features::assistant::platform::bridge::Pinvou3Bridge,
+    crate::features::assistant::runtime_model::AuxiliaryModelScope,
+)> {
     if let Some(sid) = session_id.filter(|sid| !sid.trim().is_empty()) {
         // The error chain reaches the local log and the frontend diagnostics
         // verbatim (summarize_voice_postprocess_error), so keep the session
@@ -663,11 +668,11 @@ async fn voice_postprocess_bridge(
             .load(sid)
             .map_err(|_| anyhow!("session snapshot is unavailable"))?;
         return pool
-            .fresh_bridge_for(sid)
+            .fresh_bridge_for_voice(sid)
             .await
             .context("prepare session model for voice postprocess");
     }
-    pool.fresh_bridge_for_draft(model_id)
+    pool.fresh_bridge_for_draft(model_id, model_ref)
         .await
         .context("prepare draft model for voice postprocess")
 }
@@ -735,7 +740,7 @@ async fn call_voice_postprocess_model(
     let max_tokens = voice_postprocess_max_tokens(mode, retry);
     let mut body = voice_postprocess_request_body(model_name, &system, &user, max_tokens);
     apply_voice_reasoning_controls(&mut body, preset, &bridge.provider(), &base_url, model_name);
-    let resp = crate::core::model_endpoint::with_opencode_session_header(
+    let request = crate::core::model_endpoint::with_opencode_session_header(
         client.post(format!(
             "{}/chat/completions",
             base_url.trim_end_matches('/')
@@ -744,19 +749,48 @@ async fn call_voice_postprocess_model(
         bridge.opencode_conversation_key("voice-postprocess"),
     )
     .bearer_auth(bridge.api_key())
-    .json(&body)
-    .send()
-    .await
-    .context("post voice postprocess chat/completions")?;
+    .json(&body);
+    // One ID per actual generation. The proxy reuses it for transport/401
+    // retries; a content retry changes facts and therefore enters here anew.
+    let request = match bridge
+        .runtime_model_credential
+        .as_ref()
+        .and_then(|credential| credential.request_idempotency_header())
+    {
+        Some(header) => request.header(header, uuid::Uuid::new_v4().to_string()),
+        None => request,
+    };
+    let resp = request
+        .send()
+        .await
+        .context("post voice postprocess chat/completions")?;
     let resp = crate::core::model_endpoint::error_for_status_with_body(
         resp,
         "voice postprocess chat/completions status",
     )
     .await?;
+    if resp.status() == reqwest::StatusCode::ACCEPTED {
+        anyhow::bail!("voice model invocation is still reconciling");
+    }
     let value: Value = resp
         .json()
         .await
         .context("parse voice postprocess response json")?;
+    let content = value
+        .get("choices")
+        .and_then(Value::as_array)
+        .and_then(|choices| choices.first())
+        .and_then(|choice| choice.get("message"))
+        .and_then(|message| message.get("content"));
+    if bridge
+        .runtime_model_credential
+        .as_ref()
+        .and_then(|credential| credential.request_idempotency_header())
+        .is_some()
+        && !content.is_some_and(|content| content.is_string() || content.is_array())
+    {
+        anyhow::bail!("voice model returned no completion result");
+    }
     let content = voice_chat_message_text(&value);
     let truncated = value
         .get("choices")
@@ -851,9 +885,10 @@ pub async fn postprocess_voice_text(
             truncated: false,
         });
     }
-    let bridge = match voice_postprocess_bridge(
+    let (bridge, _voice_scope) = match voice_postprocess_bridge(
         request.session_id.as_deref(),
         request.model_id.as_deref(),
+        request.model_ref.as_ref(),
         &pool,
         &store,
     )
@@ -1292,3 +1327,7 @@ mod voice_postprocess_tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "voice_model_delivery_tests.rs"]
+mod voice_model_delivery_tests;

@@ -1282,7 +1282,16 @@ impl Pinvou3Bridge {
         b
     }
 
+    fn account_gateway_runtime(&self) -> bool {
+        self.runtime_model_credential
+            .as_ref()
+            .is_some_and(|credential| credential.request_idempotency_header().is_some())
+    }
+
     pub fn provider(&self) -> String {
+        if self.account_gateway_runtime() {
+            return "openai".into();
+        }
         if is_official_deepseek_base_url(&self.base_url()) {
             return "deepseek".to_string();
         }
@@ -1603,6 +1612,50 @@ impl Pinvou3Bridge {
     /// [`Self::request_reasoning_effort`] 的档位推导主体；Tachyon 的
     /// high→medium 归一在公共入口统一收口，这里不做 provider 特判。
     fn request_reasoning_effort_for_provider(&self, provider: &str) -> Option<String> {
+        // Kimi K3.1 spellings (kimi-k3.1-pro[-highspeed] /
+        // k3.1-pro[-highspeed], vendor "kimi") are always-reasoning per the
+        // vendor contract: on the platform API lane the K3 series resolves
+        // depth through the top-level `reasoning_effort` ladder (low/high/
+        // max; the default for omitted effort is endpoint-specific — `high`
+        // on the Kimi Code coding-plan lane per its models table, `max` on
+        // the platform-API surface) and the K2.x `thinking` parameter is
+        // not part of the K3.1 request contract (models-overview:
+        // "参数约束也与 kimi-k3 完全一致"; api docs: K3 系列使用顶层
+        // reasoning_effort，不使用 thinking — the engine's separate Kimi
+        // Code k3/k3-256k shaper dialect wires a nested thinking shape and
+        // learns none of the K3.1 ids). The base's exact-K3 route shapers
+        // only learn bare k3 spellings, so
+        // any effort resolved here falls to the generic Moonshot arm and
+        // wires a `thinking` shape outside that documented contract — no
+        // `thinking` shape is known-valid for K3.1. Resolve to None so the
+        // field is omitted entirely — omission is the documented-valid form
+        // (the probe list mirrors this: image_capability's K3.1 spellings
+        // are deliberately outside the explicit-thinking injection list)
+        // and the vendor default applies (endpoint-specific — `high` on
+        // the Kimi Code coding-plan lane, `max` on the platform API).
+        // Covers both a stored value
+        // (already dropped by the prefs load normalization, bracket `[1m]`
+        // declaration forms included via prefs::is_moonshot_k31_route) and
+        // the `_ => Some("high")` default arm below, which re-introduced
+        // the parameter for fresh records (2026-11-04 review). The contract
+        // attaches via the kimi/moonshot vendor stamp or the vendor's own
+        // official route (legacy migrated records may carry an empty vendor
+        // or the moonshot alias there); unstamped custom relay endpoints
+        // keep their existing contract (mirrors prefs::is_moonshot_k31_route
+        // and the frontend isMoonshotK31ModelName tiers exit). The arm keys
+        // off that shared predicate alone — not the resolved provider
+        // (round-9 review): a route-attached record whose resolved provider
+        // is not "moonshot" (empty vendor + openai_compatible preset on an
+        // official platform host) must resolve None like every other
+        // attached record; the old provider gate let the `_ =>
+        // Some("high")` default arm contradict the resolve-to-None contract
+        // at the DtConfig level (wire-inert today — the engine writes no
+        // effort on the plain-openai dialect — but a latent drift).
+        if let Some(model) = self.effective_model() {
+            if prefs::is_moonshot_k31_route(&model.vendor, &model.base_url, &model.model) {
+                return None;
+            }
+        }
         // "Local route": the vllm/ollama/tachyon providers. When the openai
         // wire points at a local/private endpoint (LM Studio/generic server),
         // the engine treats reasoning_effort as a no-op, so knowledge-table
@@ -1687,6 +1740,15 @@ impl Pinvou3Bridge {
     /// `DtConfig.default_text_model` / `EngineConfig.model`).
     /// env var > settings.custom_model_name > vendor default.
     pub fn model(&self) -> String {
+        if self.account_gateway_runtime() {
+            // finalize_runtime_bridge always installs the prepared model with
+            // this credential. Its account route cannot inherit a cloud override.
+            return self
+                .session_model
+                .as_ref()
+                .map(|model| model.model.clone())
+                .unwrap_or_default();
+        }
         let is_official_deepseek = is_official_deepseek_base_url(&self.base_url());
         if !self.runtime_route_is_locked() {
             if let Ok(v) = std::env::var("DEEPSEEK_MODEL") {
@@ -1725,6 +1787,13 @@ impl Pinvou3Bridge {
     /// `DtConfig.providers.*.base_url`).
     /// env var > settings.custom_base_url > vendor default.
     pub fn base_url(&self) -> String {
+        if self.account_gateway_runtime() {
+            return self
+                .session_model
+                .as_ref()
+                .map(|model| model.base_url.clone())
+                .unwrap_or_default();
+        }
         if !self.runtime_route_is_locked() {
             if let Ok(v) = std::env::var("DEEPSEEK_BASE_URL") {
                 return v;
@@ -2319,6 +2388,7 @@ impl Pinvou3Bridge {
             //    in the new struct) ——
             model: _,
             workspace: _,
+            workspace_roots: _, // host exposes one execution root, not SDK attachments
             session_id: _,
             allow_shell: _,
             trust_mode: _,
@@ -2427,10 +2497,6 @@ impl Pinvou3Bridge {
             terminal_chrome_enabled,
             advisor_config,
             subagent_state_root,
-            // v0.9.12 workspace_roots foundation field: this stage only
-            // enumerates the default shape; the real per-session keychain is
-            // assigned in `build_engine_config_for_session_roots`.
-            workspace_roots: _,
         } = EngineConfig::default();
 
         // Hooks have two consumption paths: turn_loop runs ToolCallBefore
@@ -2460,13 +2526,26 @@ impl Pinvou3Bridge {
             // pinvou3 override
             model: self.model(),
             workspace: self.workspace.clone(),
-            // Compile-time convergence: empty set = primary root only (the
-            // single-root status quo); multi-root keychains are assigned per
-            // session in `build_engine_config_for_session_roots`.
+            // Input is EngineConfig::default(), not a caller-supplied root set.
+            // Empty attachments preserve the single execution-root contract;
+            // SessionRoots.ledger remains delegated-agent state, not tool authority.
+            // CodeWhale #54 多根授权基建：空集经底座 normalize 后等价单根
+            // （workspace 置于位置 0），保持既有行为。
             workspace_roots: Vec::new(),
             session_id: None,
             allow_shell: self.allow_shell(),
             trust_mode: true,
+            // The base NoteTool is stripped from parent sessions by the
+            // product allowlist (no "note" entry), so the parent can never
+            // write this file and no UI reads it. Subagent children inherit
+            // the ungated base registry and could still write it (the same
+            // parent/child asymmetry disclosed for `revert_turn` in
+            // `tool_policy.rs`). The field is a non-optional PathBuf
+            // upstream, so a path must be supplied; keep the stable product
+            // path and do not treat `~/.pinvou3/notes.md` as a live feature.
+            // Enabling the tool requires either an allowlist entry plus a UI
+            // consumer, or an upstream surface switch for NoteTool
+            // registration.
             notes_path: paths::notes_path(),
             // Work-mode gate: Browser MCP tools are exposed only to assistant Engine
             // sessions. Global mcp.json has no browser entry; this creates a session-specific
@@ -3346,6 +3425,11 @@ impl Pinvou3Bridge {
     /// `DEEPSEEK_*` settings in run-dev.sh).
     pub fn build_dt_config(&self) -> DtConfig {
         let mut cfg = DtConfig::default();
+        cfg.request_idempotency_header = self
+            .runtime_model_credential
+            .as_ref()
+            .and_then(|credential| credential.request_idempotency_header())
+            .map(str::to_owned);
         // The engine landing (the RESPONSES_ROUTE_PROVIDER named-custom route
         // on a GPT×Responses hit) may diverge from the vendor-semantics
         // provider(); see `engine_route_provider`.
@@ -5466,11 +5550,11 @@ mod tests {
                 .check(codewhale_execpolicy::ExecPolicyContext {
                     command,
                     cwd: ".",
+                    workspace_roots: Vec::new(),
                     tool: Some("exec_shell"),
                     path: None,
                     ask_for_approval: codewhale_execpolicy::AskForApproval::Never,
                     sandbox_mode: None,
-                    workspace_roots: Vec::new(),
                 })
                 .unwrap()
         };
@@ -5522,11 +5606,11 @@ mod tests {
                 .check(codewhale_execpolicy::ExecPolicyContext {
                     command,
                     cwd: ".",
+                    workspace_roots: Vec::new(),
                     tool: Some("exec_shell"),
                     path: None,
                     ask_for_approval: codewhale_execpolicy::AskForApproval::Never,
                     sandbox_mode: None,
-                    workspace_roots: Vec::new(),
                 })
                 .unwrap()
         };
@@ -5586,11 +5670,11 @@ mod tests {
                 .check(codewhale_execpolicy::ExecPolicyContext {
                     command,
                     cwd: ".",
+                    workspace_roots: Vec::new(),
                     tool: Some("exec_shell"),
                     path: None,
                     ask_for_approval: codewhale_execpolicy::AskForApproval::Never,
                     sandbox_mode: None,
-                    workspace_roots: Vec::new(),
                 })
                 .unwrap()
         };
@@ -5899,13 +5983,13 @@ mod tests {
                 .check(codewhale_execpolicy::ExecPolicyContext {
                     command,
                     cwd: ".",
+                    workspace_roots: Vec::new(),
                     // The model-facing `bash` tool reaches the internal
                     // `exec_shell` policy identity before consulting rules.
                     tool: Some("exec_shell"),
                     path: None,
                     ask_for_approval: codewhale_execpolicy::AskForApproval::Never,
                     sandbox_mode: None,
-                    workspace_roots: Vec::new(),
                 })
                 .unwrap()
         };
@@ -6270,7 +6354,7 @@ mod tests {
         unsafe { std::env::set_var("DEEPSEEK_BASE_URL", "https://controlled.invalid/v1") };
 
         let mut bridge = fixture_bridge();
-        let mut model = SavedModel::builtin_llmapi();
+        let mut model = SavedModel::builtin_account_platform();
         model.id = "runtime-route".into();
         model.preset = ModelPreset::LocalVllm;
         model.model = "controller-model".into();
@@ -9289,6 +9373,41 @@ mod tests {
         );
     }
 
+    /// SDK attachments are not exposed by the current host. The execution
+    /// directory and delegated-agent ledger are separate authority domains.
+    #[test]
+    fn forkguard_engine_config_keeps_only_execution_root() {
+        let (_lock, _env) = locked_env(&["PINVOU3_HOME"]);
+        let root = std::env::temp_dir().join(format!(
+            "pinvou3-single-execution-root-{}-{}",
+            std::process::id(),
+            crate::bridge::paths::tests::unique_suffix()
+        ));
+        std::fs::create_dir_all(&root).expect("create hermetic test home");
+        // SAFETY: platform::paths::tests::ENV_LOCK held; env writes are serialized.
+        unsafe { std::env::set_var("PINVOU3_HOME", &root) };
+        let bridge = fixture_bridge();
+        assert!(bridge.build_engine_config().workspace_roots.is_empty());
+
+        let execution = root.join("project");
+        let ledger = root.join("session-ledger");
+        let cfg = bridge.build_engine_config_for_session_roots(
+            "single-execution-root",
+            SessionRoots {
+                execution: execution.clone(),
+                ledger: ledger.clone(),
+                bound: true,
+            },
+        );
+        assert_eq!(cfg.workspace, execution);
+        assert_eq!(cfg.subagent_state_root.as_deref(), Some(ledger.as_path()));
+        assert!(
+            cfg.workspace_roots.is_empty(),
+            "ledger must not become a writable attachment"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     /// Destructure the Op returned by build_send_message_op into
     /// (allow_shell, trust_mode); panics on failure (test helper).
     fn extract_shell_trust(op: Op) -> (bool, bool) {
@@ -9893,6 +10012,179 @@ mod tests {
             bridge.opencode_conversation_key("voice-postprocess"),
             "session-a",
             "session-bound bridges share the conversation's session ID"
+        );
+    }
+
+    /// Kimi K3.1 request contract (2026-11-04 review): the K3.1 spellings are
+    /// always-reasoning and the vendor rejects the K2.x-specific `thinking`
+    /// parameter outright, while the base's exact-K3 shapers only learn bare
+    /// k3. The chat request must therefore carry NO reasoning_effort — the
+    /// foundation's apply_reasoning_effort early-returns on None and omits
+    /// the thinking key, letting the vendor default apply (endpoint-
+    /// specific: `high` on the Kimi Code coding-plan lane, `max` on the
+    /// platform API). Both the
+    /// default arm (`_ => Some("high")`, which re-introduced the parameter
+    /// for fresh records) and a legacy stored value must resolve to None.
+    #[test]
+    fn kimi_k31_models_resolve_no_effort() {
+        let (_lock, _env) = locked_env(&[
+            "DEEPSEEK_MODEL",
+            "DEEPSEEK_PROVIDER",
+            "DEEPSEEK_BASE_URL",
+            "DEEPSEEK_API_KEY",
+        ]);
+
+        // A fresh K3.1 record (no stored effort): the default arm must not
+        // inject "high".
+        let mut b = fixture_bridge();
+        set_active_model(
+            &mut b,
+            ModelPreset::Kimi,
+            "kimi-k3.1-pro",
+            "https://api.moonshot.cn/v1",
+            "sk-kimi",
+        );
+        b.prefs.advanced.saved_models[0].vendor = Some("kimi".into());
+        assert_eq!(b.provider(), "moonshot");
+        assert_eq!(
+            b.request_reasoning_effort(),
+            None,
+            "a fresh K3.1 record must resolve to no effort (omits thinking on the wire)"
+        );
+        assert_eq!(
+            b.build_dt_config().reasoning_effort,
+            None,
+            "the engine config carries no effort for K3.1 (the generic Moonshot arm must not fire)"
+        );
+
+        // A legacy stored value (saved through the old generic off/high
+        // ladder) also resolves to None — the send path must not re-inject
+        // what the prefs load normalization dropped.
+        b.prefs.advanced.saved_models[0].reasoning_effort = Some("high".into());
+        assert_eq!(b.request_reasoning_effort(), None);
+        b.prefs.advanced.saved_models[0].reasoning_effort = Some("off".into());
+        assert_eq!(b.request_reasoning_effort(), None);
+
+        // The Kimi Code spelling rides the same contract.
+        set_active_model(
+            &mut b,
+            ModelPreset::OpenaiCompatible,
+            "k3.1-pro-highspeed",
+            "https://api.kimi.com/coding/v1",
+            "sk-kimi-code",
+        );
+        b.prefs.advanced.saved_models[0].vendor = Some("kimi".into());
+        assert_eq!(b.request_reasoning_effort(), None);
+
+        // The documented `[1m]` declaration forms are the same K3.1 models
+        // (k3.1-pro[1m] is the ACP Kimi Code models1m datalist entry) — the
+        // bracket spelling must not fall through to the generic default arm
+        // (2026-11-04 review round 4).
+        set_active_model(
+            &mut b,
+            ModelPreset::OpenaiCompatible,
+            "k3.1-pro[1m]",
+            "https://api.kimi.com/coding/v1",
+            "sk-kimi-code",
+        );
+        b.prefs.advanced.saved_models[0].vendor = Some("kimi".into());
+        assert_eq!(
+            b.request_reasoning_effort(),
+            None,
+            "the [1m] declaration form resolves like its bare K3.1 spelling"
+        );
+
+        // Bracket forms of NON-K3.1 spellings keep their own contract:
+        // kimi-k3[1m] is bare kimi-k3's declaration form, not a K3.1
+        // spelling, so the default arm still applies.
+        set_active_model(
+            &mut b,
+            ModelPreset::Kimi,
+            "kimi-k3[1m]",
+            "https://api.moonshot.cn/v1",
+            "sk-kimi",
+        );
+        b.prefs.advanced.saved_models[0].vendor = Some("kimi".into());
+        assert_eq!(
+            b.request_reasoning_effort(),
+            Some("high".to_string()),
+            "kimi-k3[1m] stays on the bare-k3 contract, outside the K3.1 arm"
+        );
+
+        // A legacy migrated record with an EMPTY vendor on the official
+        // endpoint is still K3.1: the resolved route plus the model spelling
+        // is the contract, not the vendor stamp (2026-11-04 review round 3).
+        set_active_model(
+            &mut b,
+            ModelPreset::Kimi,
+            "kimi-k3.1-pro-highspeed",
+            "https://api.moonshot.ai/v1",
+            "sk-kimi",
+        );
+        b.prefs.advanced.saved_models[0].vendor = None;
+        assert_eq!(
+            b.request_reasoning_effort(),
+            None,
+            "an empty-vendor record on the official endpoint is still K3.1"
+        );
+
+        // Bare kimi-k3 keeps the exact tiered route semantics (effort
+        // resolution is untouched for it — off clamps to low on the wire).
+        set_active_model(
+            &mut b,
+            ModelPreset::Kimi,
+            "kimi-k3",
+            "https://api.moonshot.cn/v1",
+            "sk-kimi",
+        );
+        b.prefs.advanced.saved_models[0].vendor = Some("kimi".into());
+        assert_eq!(
+            b.request_reasoning_effort(),
+            Some("high".to_string()),
+            "the K3 exact route keeps its ladder (default high)"
+        );
+
+        // The same id without the kimi vendor stamp (a free-text
+        // openai_compatible row) is outside the vendor contract and keeps
+        // the generic default.
+        set_active_model(
+            &mut b,
+            ModelPreset::OpenaiCompatible,
+            "kimi-k3.1-pro",
+            "https://relay.example/v1",
+            "sk-relay",
+        );
+        b.prefs.advanced.saved_models[0].vendor = None;
+        assert_eq!(
+            b.request_reasoning_effort(),
+            Some("high".to_string()),
+            "no kimi vendor stamp → outside the K3.1 contract"
+        );
+
+        // Round-9 review: the route arm must attach WITHOUT the resolved
+        // provider gate. An empty-vendor openai_compatible record on the
+        // official platform host resolves provider "openai", but the
+        // contract attaches via prefs::is_moonshot_k31_route's route arm —
+        // the old provider gate let the `_ => Some("high")` default arm
+        // contradict the resolve-to-None contract for exactly this shape
+        // (wire-inert today, latent drift).
+        set_active_model(
+            &mut b,
+            ModelPreset::OpenaiCompatible,
+            "kimi-k3.1-pro",
+            "https://api.moonshot.cn/v1",
+            "sk-kimi",
+        );
+        b.prefs.advanced.saved_models[0].vendor = None;
+        assert_eq!(
+            b.provider(),
+            "openai",
+            "the resolved provider is openai — this shape is about the route arm"
+        );
+        assert_eq!(
+            b.request_reasoning_effort(),
+            None,
+            "route-attached K3.1 resolves None regardless of the resolved provider"
         );
     }
 
@@ -10835,6 +11127,63 @@ mod tests {
         assert_eq!(bridge.provider(), "env-provider");
         assert_eq!(bridge.base_url(), "http://env:8000/v1");
         assert_eq!(bridge.api_key(), "env-key");
+    }
+
+    #[test]
+    fn account_gateway_credentials_and_operation_header_stay_on_prepared_route() {
+        let (_lock, _env) = locked_env(&[
+            "DEEPSEEK_MODEL",
+            "DEEPSEEK_PROVIDER",
+            "DEEPSEEK_BASE_URL",
+            "DEEPSEEK_API_KEY",
+        ]);
+        let mut bridge = fixture_bridge();
+        let mut account_model = SavedModel::builtin_account_platform();
+        account_model.base_url = "https://gateway.example.test/v1".into();
+        account_model.model = "prepared-account-model".into();
+        bridge.session_model = Some(account_model);
+        bridge.runtime_model_credential = Some(
+            RuntimeModelCredential::account_platform_access_token("isolated-account-access".into())
+                .unwrap(),
+        );
+        // SAFETY: shared test ENV_LOCK serializes mutation and restores all values.
+        unsafe {
+            std::env::set_var("DEEPSEEK_MODEL", "other-model");
+            std::env::set_var("DEEPSEEK_PROVIDER", "anthropic");
+            std::env::set_var(
+                "DEEPSEEK_BASE_URL",
+                "https://other-provider.example.test/v1",
+            );
+            std::env::set_var("DEEPSEEK_API_KEY", "other-key");
+        }
+        let config = bridge.build_dt_config();
+        assert_eq!(bridge.base_url(), "https://gateway.example.test/v1");
+        assert_eq!(bridge.model(), "prepared-account-model");
+        assert_eq!(bridge.provider(), "openai");
+        assert_eq!(
+            config.request_idempotency_header.as_deref(),
+            Some("Idempotency-Key")
+        );
+        assert_eq!(
+            config
+                .providers
+                .as_ref()
+                .unwrap()
+                .openai
+                .base_url
+                .as_deref(),
+            Some("https://gateway.example.test/v1")
+        );
+        assert!(
+            config.providers.as_ref().unwrap().openai.api_key.as_deref()
+                == Some("isolated-account-access")
+        );
+        bridge.runtime_model_credential = None;
+        let ordinary = bridge.build_dt_config();
+        assert!(ordinary.request_idempotency_header.is_none());
+        assert_eq!(bridge.base_url(), "https://other-provider.example.test/v1");
+        assert_eq!(bridge.provider(), "anthropic");
+        assert_eq!(bridge.model(), "other-model");
     }
 
     #[test]
@@ -12137,6 +12486,7 @@ mod tests {
 
         let ordinary = bridge.build_engine_config_for_session_roots("sched-run", roots.clone());
         assert_eq!(ordinary.workspace, automation);
+        assert!(ordinary.workspace_roots.is_empty());
         assert_eq!(
             ordinary.subagent_state_root.as_deref(),
             Some(automation.as_path()),
@@ -12147,6 +12497,7 @@ mod tests {
         let multi_agent =
             bridge.build_engine_config_for_multi_agent("sched-run", roots, &snapshot, true);
         assert_eq!(multi_agent.workspace, automation);
+        assert!(multi_agent.workspace_roots.is_empty());
         assert_eq!(
             multi_agent.subagent_state_root.as_deref(),
             Some(automation.as_path())

@@ -35,6 +35,17 @@ fn voice_preflight_does_not_inherit_or_replace_chat_diagnostics() {
         .boolean("has_attachment", false);
     submitted.occurred_at = at - 300_000;
     telemetry.track(submitted);
+    let mut admitted = BehaviorEvent::new("task_admitted")
+        .session("voice_shared_chat")
+        .turn("turn_voice_chat")
+        .string("attempt_id", "attempt_voice_chat")
+        .string("mode", "assistant")
+        .string("initiator_type", "user")
+        .input_type("text")
+        .boolean("has_attachment", false)
+        .integer("queue_duration_ms", 1);
+    admitted.occurred_at = at - 299_999;
+    telemetry.track(admitted);
     let tool_failure = BehaviorEvent::new("tool_call_completed")
         .session("voice_shared_chat")
         .turn("turn_voice_chat")

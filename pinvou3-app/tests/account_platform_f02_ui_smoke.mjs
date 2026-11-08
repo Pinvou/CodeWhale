@@ -1,0 +1,444 @@
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import react from '@vitejs/plugin-react';
+import * as puppeteer from './helpers/puppeteer-fixture.mjs';
+import { createServer } from './helpers/vite-fixture.mjs';
+
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const chrome = process.env.CHROME || [
+  'C:/Program Files/Google/Chrome/Application/chrome.exe',
+  'C:/Program Files (x86)/Google/Chrome/Application/chrome.exe',
+  'C:/Program Files/Microsoft/Edge/Application/msedge.exe',
+  'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe',
+  '/snap/bin/chromium', '/usr/bin/chromium', '/usr/bin/chromium-browser',
+  '/usr/bin/google-chrome', '/usr/bin/google-chrome-stable',
+  '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+].find(fs.existsSync);
+assert.ok(chrome, 'Browser unavailable; UI validation not performed');
+const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'pinvou-f02-ui-'));
+let vite; let browser; let page; let passed = 0;
+const errors = [];
+try {
+  vite = await createServer({ root, cacheDir: process.env.F04_CLOSE_CACHE || path.join(root, 'node_modules/.vite-f02-ui'), configFile: false, appType: 'mpa', logLevel: 'error', plugins: [react()], server: { host: '127.0.0.1', port: 0, watch: null } });
+  await vite.listen();
+  browser = await puppeteer.launch({ executablePath: chrome, headless: 'new', userDataDir: profile, args: ['--disable-gpu', '--no-first-run'] });
+  page = await browser.newPage(); page.setDefaultTimeout(10000);
+  page.on('pageerror', error => errors.push(error.message)); page.on('dialog', dialog => dialog.accept());
+  const url = `http://127.0.0.1:${vite.httpServer.address().port}/tests/fixtures/account-platform-f02-ui.html`;
+  const fresh = async (kind = 'personal') => { errors.length = 0; await page.goto(url); await page.waitForFunction(() => window.f02); if (kind !== 'personal') await page.evaluate(kind => window.f02.render(kind), kind); await page.waitForFunction(() => ![...document.querySelectorAll('[role=status]')].some(item => item.textContent === window.f02.languageCopy().loading)); await page.waitForSelector(kind === 'personal' ? 'form select' : 'tbody tr'); };
+  const click = async key => { const clicked = await page.evaluate(key => { const text = window.f02.languageCopy()[key]; const button = [...document.querySelectorAll('button')].find(item => item.textContent.trim() === text && !item.disabled); if (!button) return false; button.click(); return true; }, key); assert.ok(clicked, `Unavailable button: ${key}`); };
+  const settled = async () => page.waitForFunction(() => ![...document.querySelectorAll('[role=status]')].some(item => item.textContent === window.f02.languageCopy().loading));
+  const caseRun = async (name, fn) => { await fn(); assert.deepEqual(errors, [], 'Unexpected React errors'); passed++; console.log(`PASS ${name}`); };
+  await caseRun('Personal create renders exact money and rejects unsafe provider link and SVG', async () => {
+    await fresh(); await click('create'); await page.waitForSelector('article'); await settled();
+    assert.ok(await page.evaluate(() => document.querySelector('article').textContent.includes('90,071,992,547,409.93')));
+    assert.equal(await page.$('article a, article img'), null);
+    assert.equal(await page.evaluate(() => window.f02.calls.filter(call => call.method === 'POST').length), 1);
+  });
+  await caseRun('Personal unknown outcome retains key and facts across language change', async () => {
+    await fresh(); await page.evaluate(() => { window.f02.unknownCreate = true; }); await click('create'); await page.waitForSelector('[role=alert]'); await settled();
+    await page.select('[aria-label=fixture-language]', 'ja');
+    assert.ok(await page.evaluate(() => document.querySelector('[role=alert]').textContent === window.f02.languageCopy().unknown));
+    await page.evaluate(() => { window.f02.unknownCreate = false; }); await click('retry'); await page.waitForSelector('article'); await settled();
+    assert.ok(await page.evaluate(() => { const calls = window.f02.calls.filter(call => call.method === 'POST'); return calls.length === 2 && calls[0].key === calls[1].key && calls[0].body === calls[1].body; }));
+  });
+  await caseRun('Delayed previous identity create cannot update the new identity', async () => {
+    await fresh(); await page.evaluate(() => { window.f02.delayedCreate = true; }); await click('create'); await page.waitForFunction(() => typeof window.f02.releaseCreate === 'function');
+    await page.evaluate(() => window.f02.switchIdentity()); await settled(); await page.evaluate(() => window.f02.releaseCreate());
+    await page.waitForFunction(() => window.f02.calls.filter(call => call.url.endsWith('/v1/me/entitlement-packages')).length === 2);
+    assert.equal(await page.$('article'), null);
+  });
+  await caseRun('PLAN package has no ordinary refund operation', async () => {
+    await fresh('admin'); await page.evaluate(() => { window.f02.plan = true; }); await click('details'); await page.waitForSelector('article'); await settled();
+    assert.ok(await page.evaluate(() => ![...document.querySelectorAll('article button')].some(item => item.textContent.trim() === window.f02.languageCopy().refunds)));
+    assert.ok(await page.evaluate(() => !window.f02.calls.some(call => call.url.endsWith('/refunds'))));
+  });
+  await caseRun('Unknown whole refund retains original target and key after leaving its tab', async () => {
+    await fresh('admin'); await click('details'); await page.waitForSelector('article textarea'); await page.type('article textarea', 'Controlled whole refund reason');
+    await page.evaluate(() => { window.f02.unknownRefund = true; }); await click('refunds'); await page.waitForSelector('[role=alert]'); await settled();
+    await click('wallet'); await page.waitForSelector('form textarea'); await settled(); await click('orders'); await page.waitForFunction(() => [...document.querySelectorAll('button')].some(item => item.textContent.trim() === window.f02.languageCopy().retry && !item.disabled));
+    await page.evaluate(() => { window.f02.unknownRefund = false; }); await click('retry'); await page.waitForFunction(() => window.f02.calls.filter(call => call.url.endsWith('/refunds')).length === 2); await settled();
+    assert.ok(await page.evaluate(() => { const calls = window.f02.calls.filter(call => call.url.endsWith('/refunds')); const body = JSON.parse(calls[0].body); return calls[0].key === calls[1].key && calls[0].body === calls[1].body && body.payment_transaction_id === window.f02.id && body.entitlement_package_id === window.f02.id && !('amount_fen' in body); }));
+  });
+  for (const rejection of [401, 403]) await caseRun(`Unknown refund survives replay ${rejection} and remount until the original receipt is confirmed`, async () => {
+    await fresh('admin'); await click('details'); await page.waitForSelector('article textarea'); await page.type('article textarea', 'Controlled retained refund reason');
+    await page.evaluate(rejection => { window.f02.refundResponses = [503, rejection, 201]; }, rejection);
+    await click('refunds'); await page.waitForSelector('[role=alert]'); await settled();
+    await click('retry'); await page.waitForFunction(() => window.f02.calls.filter(call => call.url.endsWith('/refunds')).length === 2); await settled();
+    assert.equal(await page.evaluate(() => document.querySelector('[role=alert]').textContent), await page.evaluate(() => window.f02.languageCopy().unknown));
+    assert.equal(await page.$eval('article textarea', element => element.disabled), true, 'uncertain invocation facts stay frozen after denied replay');
+    await click('wallet'); await page.waitForSelector('form textarea'); await settled(); await click('orders');
+    await page.waitForFunction(() => [...document.querySelectorAll('button')].some(button => button.textContent.trim() === window.f02.languageCopy().retry && !button.disabled));
+    await click('retry'); await page.waitForFunction(() => window.f02.calls.filter(call => call.url.endsWith('/refunds')).length === 3); await settled();
+    assert.ok(await page.evaluate(() => { const calls = window.f02.calls.filter(call => call.url.endsWith('/refunds')); return calls.every(call => call.key === calls[0].key && call.body === calls[0].body) && window.f02.refundEffects === 1; }), 'same frozen HTTP body/key recovers exactly one controlled mutation');
+  });
+  await caseRun('First denied refund releases its unused key and accepts a new invocation', async () => {
+    await fresh('admin'); await click('details'); await page.waitForSelector('article textarea'); await page.type('article textarea', 'Controlled first denial reason');
+    await page.evaluate(() => { window.f02.refundResponses = [403, 201]; });
+    await click('refunds'); await page.waitForSelector('[role=alert]'); await settled();
+    assert.equal(await page.$eval('article textarea', element => element.disabled), false);
+    await click('refunds'); await page.waitForFunction(() => window.f02.calls.filter(call => call.url.endsWith('/refunds')).length === 2); await settled();
+    assert.ok(await page.evaluate(() => { const calls = window.f02.calls.filter(call => call.url.endsWith('/refunds')); return calls[0].key !== calls[1].key && window.f02.refundEffects === 1; }));
+  });
+  await caseRun('An unknown refund is isolated from a new session epoch and restored only to its original epoch', async () => {
+    await fresh('admin'); await click('details'); await page.waitForSelector('article textarea'); await page.type('article textarea', 'Controlled original epoch reason');
+    await page.evaluate(() => { window.f02.refundResponses = [503, 201]; }); await click('refunds'); await page.waitForSelector('[role=alert]'); await settled();
+    await page.evaluate(() => { window.f02.setAdminEpoch(1); }); await settled();
+    assert.equal(await page.$('article textarea'), null, 'retired epoch detail is unmounted');
+    assert.equal(await page.evaluate(() => [...document.querySelectorAll('button')].some(button => button.textContent.trim() === window.f02.languageCopy().retry)), false, 'new epoch cannot replay the original invocation');
+    await click('details'); await page.waitForSelector('article textarea'); await settled();
+    assert.equal(await page.$eval('article textarea', element => element.disabled), false);
+    assert.equal(await page.$eval('article textarea', element => element.value), '', 'new epoch does not inherit the old refund facts');
+    assert.equal(await page.evaluate(() => window.f02.calls.filter(call => call.url.endsWith('/refunds')).length), 1, 'session change does not dispatch recovery');
+    await page.evaluate(() => { window.f02.setAdminEpoch(0); }); await settled();
+    await page.waitForFunction(() => [...document.querySelectorAll('button')].some(button => button.textContent.trim() === window.f02.languageCopy().retry && !button.disabled));
+    await click('retry');
+    await page.waitForFunction(() => window.f02.calls.filter(call => call.url.endsWith('/refunds')).length === 2); await settled();
+    assert.ok(await page.evaluate(() => { const calls = window.f02.calls.filter(call => call.url.endsWith('/refunds')); return calls[0].key === calls[1].key && calls[0].body === calls[1].body && window.f02.refundEffects === 1; }));
+  });
+  await caseRun('An unknown refund is never inherited by another actor', async () => {
+    await fresh('admin'); await click('details'); await page.waitForSelector('article textarea'); await page.type('article textarea', 'Controlled original actor reason');
+    await page.evaluate(() => { window.f02.refundResponses = [503, 201]; }); await click('refunds'); await page.waitForSelector('[role=alert]'); await settled();
+    await page.evaluate(() => { window.f02.switchIdentity(); }); await settled();
+    assert.equal(await page.$('article textarea'), null, 'retired actor detail is unmounted');
+    assert.equal(await page.evaluate(() => [...document.querySelectorAll('button')].some(button => button.textContent.trim() === window.f02.languageCopy().retry)), false, 'foreign actor has no original invocation to replay');
+    assert.equal(await page.evaluate(() => window.f02.calls.filter(call => call.url.endsWith('/refunds')).length), 1, 'a foreign actor never automatically replays the original key');
+    await page.evaluate(() => { window.f02.user = window.f02.id; window.f02.render('admin'); }); await settled(); await click('retry');
+    await page.waitForFunction(() => window.f02.calls.filter(call => call.url.endsWith('/refunds')).length === 2); await settled();
+    assert.ok(await page.evaluate(() => { const calls = window.f02.calls.filter(call => call.url.endsWith('/refunds')); return calls[0].key === calls[1].key && calls[0].body === calls[1].body && window.f02.refundEffects === 1; }));
+  });
+  await caseRun('Mismatched refund amount is unknown and retry uses the same invocation', async () => {
+    await fresh('admin'); await click('details'); await page.waitForSelector('article textarea'); await page.type('article textarea', 'Controlled whole refund reason');
+    await page.evaluate(() => { window.f02.wrongRefund = true; }); await click('refunds'); await page.waitForSelector('[role=alert]'); await settled();
+    await page.evaluate(() => { window.f02.wrongRefund = false; }); await click('retry'); await page.waitForFunction(() => window.f02.calls.filter(call => call.url.endsWith('/refunds')).length === 2); await settled();
+    assert.ok(await page.evaluate(() => { const calls = window.f02.calls.filter(call => call.url.endsWith('/refunds')); return calls[0].key === calls[1].key && calls[0].body === calls[1].body; }));
+  });
+  await caseRun('Owned late review uses its actual review_status and query route', async () => {
+    await fresh('admin'); await click('sla'); await page.waitForFunction(() => document.body.textContent.includes('REVIEW_REQUIRED_LATE_PAYMENT')); await settled(); await click('details'); await page.waitForSelector('article'); await settled(); await click('query');
+    await page.waitForSelector('[role=alertdialog]'); await click('confirmQueryAction');
+    await page.waitForFunction(() => window.f02.calls.some(call => call.url.endsWith('/query-commands') && call.method === 'POST')); await settled();
+  });
+  // QUERY_PROTOCOL_CASES_START
+  const openLateQuery = async () => { await fresh('admin'); await click('sla'); await page.waitForSelector('tbody tr'); await settled(); await click('details'); await page.waitForSelector('article'); await settled(); };
+  await caseRun('Query original ACK recovery uses only the original result route and key', async () => {
+    await openLateQuery(); await page.evaluate(() => { window.f02.queryLostACK = true; });
+    await click('query'); await page.waitForSelector('[role=alertdialog]');
+    assert.equal(await page.evaluate(() => window.f02.queryDispatches || 0), 0);
+    await click('confirmQueryAction'); await page.waitForSelector('[role=alert]'); await settled();
+    const reference = await page.evaluate(() => window.f02.calls.find(call => call.url.endsWith('/query-commands')).key);
+    await click('retry'); await settled();
+    assert.ok(await page.evaluate(reference => { const calls = window.f02.calls.filter(call => /\/query-(?:commands|command-results)$/.test(call.url)); return calls.length === 2 && calls[0].key === reference && calls[1].key === reference && calls[0].body === calls[1].body && calls[1].url.endsWith('/query-command-results') && window.f02.queryDispatches === 1; }, reference));
+    assert.equal(await page.evaluate(() => [...document.querySelectorAll('[role=alert]')].some(item => item.textContent.includes(window.f02.languageCopy().queryUnknown))), false);
+  });
+  await caseRun('Query UNKNOWN survives retry and explicit new review retains its old reference', async () => {
+    await openLateQuery(); await page.evaluate(() => { window.f02.queryUnknown = true; });
+    await click('query'); await page.waitForSelector('[role=alertdialog]'); await click('confirmQueryAction'); await page.waitForSelector('[role=alert]'); await settled();
+    const reference = await page.evaluate(() => window.f02.calls.find(call => call.url.endsWith('/query-commands')).key);
+    await click('retry'); await settled();
+    assert.equal(await page.evaluate(() => window.f02.queryDispatches), 1);
+    await click('newQuery'); await page.waitForSelector('[role=alertdialog]'); await page.keyboard.press('Escape');
+    await page.waitForFunction(() => !document.querySelector('[role=alertdialog]'));
+    assert.equal(await page.evaluate(() => window.f02.queryDispatches), 1);
+    await page.evaluate(() => { window.f02.queryUnknown = false; }); await click('newQuery'); await page.waitForSelector('[role=alertdialog]'); await click('confirmQueryAction'); await settled();
+    assert.ok(await page.evaluate(reference => { const calls = window.f02.calls.filter(call => call.url.endsWith('/query-commands')); return calls.length === 2 && calls[0].key === reference && calls[1].key !== reference && window.f02.queryDispatches === 2 && [...document.querySelectorAll('[role=alert]')].some(item => item.textContent.includes(reference) && item.textContent.includes(window.f02.languageCopy().queryUnknown)); }, reference));
+    for (const language of ['zh', 'ja', 'en']) { await page.select('[aria-label=fixture-language]', language); assert.ok(await page.evaluate(reference => [...document.querySelectorAll('[role=alert]')].some(item => item.textContent.includes(reference) && item.textContent.includes(window.f02.languageCopy().queryUnknown)), reference)); }
+    await click('wallet'); await settled(); await click('sla'); await settled(); await click('details'); await page.waitForSelector('article');
+    assert.ok(await page.evaluate(reference => document.body.textContent.includes(reference), reference));
+  });
+  await caseRun('Query old pending has no protocol upgrade or dispatch on retry and can explicitly start a new review', async () => {
+    await fresh('admin'); await page.evaluate(() => window.f02.seedLegacyQuery()); await click('sla'); await settled(); await click('details'); await page.waitForSelector('article');
+    const reference = await page.evaluate(() => window.f02.legacyQueryReference);
+    assert.ok(reference);
+    await click('retry'); await settled();
+    assert.equal(await page.evaluate(() => window.f02.calls.filter(call => /\/query(?:-commands|-command-results)?$/.test(call.url)).length), 0);
+    assert.ok(await page.evaluate(reference => document.body.textContent.includes(reference), reference));
+    await click('newQuery'); await page.waitForSelector('[role=alertdialog]'); await click('confirmQueryAction'); await settled();
+    assert.ok(await page.evaluate(reference => { const calls = window.f02.calls.filter(call => call.url.endsWith('/query-commands')); return calls.length === 1 && calls[0].key !== reference && JSON.parse(calls[0].body).command_protocol === 1 && document.body.textContent.includes(reference); }, reference));
+  });
+  await caseRun('Query completion from a retired actor cannot overwrite the next actor or consume original UNKNOWN', async () => {
+    await openLateQuery(); await page.evaluate(() => { window.f02.queryDelayed = true; }); await click('query'); await page.waitForSelector('[role=alertdialog]'); await click('confirmQueryAction');
+    await page.waitForFunction(() => typeof window.f02.releaseQuery === 'function');
+    const reference = await page.evaluate(() => window.f02.calls.find(call => call.url.endsWith('/query-commands')).key);
+    await page.evaluate(() => { window.f02.queryDelayed = false; window.f02.switchIdentity(); }); await settled(); await click('details'); await page.waitForSelector('article'); await click('query'); await page.waitForSelector('[role=alertdialog]'); await click('confirmQueryAction'); await settled();
+    await page.evaluate(() => window.f02.releaseQuery()); await settled();
+    assert.equal(await page.evaluate(reference => document.body.textContent.includes(reference), reference), false);
+    await page.evaluate(() => { window.f02.user = window.f02.id; window.f02.render('admin'); }); await settled();
+    assert.ok(await page.evaluate(reference => document.body.textContent.includes(reference) && [...document.querySelectorAll('[role=alert]')].some(item => item.textContent.includes(window.f02.languageCopy().queryUnknown)), reference));
+  });
+  await caseRun('Query journal leaves Anomaly independent and cannot bypass another finance UNKNOWN', async () => {
+    await openLateQuery(); await page.evaluate(() => { window.f02.queryUnknown = true; }); await click('query'); await page.waitForSelector('[role=alertdialog]'); await click('confirmQueryAction'); await page.waitForSelector('[role=alert]'); await settled();
+    await click('resolve'); await settled(); await click('details'); await page.waitForSelector('article select'); await page.select('article select', 'DISMISS'); await page.type('article textarea', 'Controlled anomaly decision remains independent');
+    await page.evaluate(() => [...document.querySelectorAll('article button')].find(item => item.textContent === window.f02.languageCopy().resolve).click()); await page.waitForFunction(() => window.f02.anomalyResolved); await settled();
+    await click('wallet'); await settled(); await page.evaluate(() => window.f02.seedOtherUnknown()); await click('sla'); await settled();
+    assert.ok(await page.evaluate(() => [...document.querySelectorAll('button')].filter(item => [window.f02.languageCopy().query, window.f02.languageCopy().newQuery].includes(item.textContent.trim())).every(item => item.disabled)));
+    assert.equal(await page.evaluate(() => window.f02.queryDispatches), 1);
+  });
+  // QUERY_AUTHORIZATION_CASES_START
+  for (const version of [1, 2]) await caseRun(`Query delayed original receipt with authority ${version} respects its original journal`, async () => {
+    await openLateQuery();
+    await page.evaluate(version => {
+      const original = globalThis.fetch;
+      globalThis.fetch = async (url, options) => {
+        const response = await original(url, options);
+        if (String(url).endsWith('/query-commands')) return new Response(new ReadableStream({
+          start(controller) { controller.error(new TypeError('controlled committed ACK body loss')); },
+        }), { status: 200, headers: { 'X-Platform-Authorization-Version': String(window.f02.platformVersion || 1) } });
+        if (String(url).endsWith('/query-command-results')) {
+          const raw = await response.text();
+          return new Promise(resolve => { window.f02.releaseRead = () => resolve(new Response(raw, {
+            status: 200, headers: { 'X-Platform-Authorization-Version': String(version) },
+          })); });
+        }
+        return response;
+      };
+    }, version);
+    await click('query'); await page.waitForSelector('[role=alertdialog]'); await click('confirmQueryAction');
+    await page.waitForSelector('[role=alert]'); await settled();
+    const reference = await page.evaluate(() => window.f02.calls.find(call => call.url.endsWith('/query-commands')).key);
+    await click('retry'); await page.waitForFunction(() => typeof window.f02.releaseRead === 'function');
+    await page.evaluate(() => window.f02.releaseRead()); await settled();
+    const outcome = await page.evaluate(reference => ({
+      retained: [...document.querySelectorAll('[role=alert]')].some(item => item.textContent.includes(reference)),
+      recorded: [...document.querySelectorAll('[role=status]')].some(item => item.textContent === window.f02.languageCopy().queryRecorded),
+      calls: window.f02.calls.filter(call => /\/query-(?:commands|command-results)$/.test(call.url)).map(call => call.key),
+      dispatches: window.f02.queryDispatches,
+    }), reference);
+    assert.equal(outcome.dispatches, 1); assert.deepEqual(outcome.calls, [reference, reference]);
+    assert.equal(outcome.retained, version === 2); assert.equal(outcome.recorded, version === 1);
+    if (version === 2) {
+      // Same owner remount must not refresh a retired journal or invent a key.
+      await click('wallet'); await settled(); await click('sla'); await settled(); await click('details'); await settled();
+      assert.ok(await page.evaluate(reference => document.body.textContent.includes(reference), reference));
+      assert.ok(await page.evaluate(() => [...document.querySelectorAll('button')].filter(item =>
+        [window.f02.languageCopy().retry, window.f02.languageCopy().newQuery].includes(item.textContent.trim())).every(item => item.disabled)));
+      await page.evaluate(() => { window.f02.platformVersion = 2; window.f02.render('admin'); }); await settled();
+      assert.equal(await page.evaluate(reference => document.body.textContent.includes(reference), reference), true);
+      assert.equal(await page.evaluate(() => window.f02.calls.filter(call => /\/query-(?:commands|command-results)$/.test(call.url)).length), 2);
+      await click('details'); await settled(); await click('newQuery'); await page.waitForSelector('[role=alertdialog]');
+      // The explicit new owner confirmation is a new invocation, never an old retry.
+      await click('cancelQuery'); await settled();
+      assert.equal(await page.evaluate(() => window.f02.queryDispatches), 1);
+      await click('newQuery'); await page.waitForSelector('[role=alertdialog]'); await click('confirmQueryAction');
+      await page.waitForFunction(() => window.f02.queryDispatches === 2); await settled();
+      const nextReference = await page.evaluate(() => window.f02.calls.filter(call => call.url.endsWith('/query-commands')).at(-1).key);
+      assert.notEqual(nextReference, reference);
+      await page.evaluate(() => { window.f02.platformVersion = 1; window.f02.render('admin'); }); await settled();
+      assert.ok(await page.evaluate(reference => document.body.textContent.includes(reference), reference));
+      assert.equal(await page.evaluate(nextReference => document.body.textContent.includes(nextReference), nextReference), true);
+      assert.equal(await page.evaluate(() => window.f02.queryDispatches), 2);
+    }
+  });
+  await caseRun('Query observer retires an open confirmation before any key or dispatch', async () => {
+    await openLateQuery(); await page.evaluate(() => window.f02.observeAdminAuthorization(1));
+    await click('query'); await page.waitForSelector('[role=alertdialog]');
+    await page.evaluate(() => {
+      const button = document.querySelectorAll('[role=alertdialog] button')[1];
+      const props = button[Object.keys(button).find(key => key.startsWith('__reactProps$'))];
+      window.f02.staleQueryConfirm = props.onClick;
+      window.f02.observeAdminAuthorization(2);
+      window.f02.staleQueryConfirm();
+    });
+    await settled(); await page.waitForFunction(() => !document.querySelector('[role=alertdialog]'));
+    assert.equal(await page.evaluate(() => window.f02.calls.filter(call => /\/query-(?:commands|command-results)$/.test(call.url)).length), 0);
+    assert.equal(await page.evaluate(() => window.f02.queryDispatches || 0), 0);
+  });
+  await caseRun('Query first mount rejects known stale nested me and current lawful me needs explicit new confirmation', async () => {
+    await fresh('admin');
+    await page.evaluate(() => { window.f02.observeAdminAuthorization(1); window.f02.observeAdminAuthorization(2); });
+    await click('sla'); await settled(); await click('details'); await settled();
+    assert.ok(await page.evaluate(() => [...document.querySelectorAll('button')].filter(item => item.textContent.trim() === window.f02.languageCopy().query).every(item => item.disabled)));
+    assert.equal(await page.evaluate(() => window.f02.queryDispatches || 0), 0);
+    await page.evaluate(() => { window.f02.platformVersion = 2; window.f02.render('admin'); }); await settled();
+    await click('details'); await settled(); await click('query'); await page.waitForSelector('[role=alertdialog]');
+    assert.equal(await page.evaluate(() => window.f02.queryDispatches || 0), 0);
+    await click('cancelQuery'); await settled(); assert.equal(await page.evaluate(() => window.f02.queryDispatches || 0), 0);
+    await click('query'); await page.waitForSelector('[role=alertdialog]'); await click('confirmQueryAction'); await settled();
+    assert.equal(await page.evaluate(() => window.f02.queryDispatches), 1);
+    assert.equal(await page.evaluate(() => window.f02.calls.filter(call => call.url.endsWith('/query-commands')).length), 1);
+  });
+  await caseRun('Query current nested me can explicitly read original UNKNOWN without changing its original facts or key', async () => {
+    await openLateQuery(); await page.evaluate(() => { window.f02.observeAdminAuthorization(1); window.f02.queryLostACK = true; });
+    await click('query'); await page.waitForSelector('[role=alertdialog]'); await click('confirmQueryAction'); await settled();
+    const original = await page.evaluate(() => window.f02.calls.find(call => call.url.endsWith('/query-commands')));
+    await page.evaluate(() => { window.f02.observeAdminAuthorization(2); window.f02.platformVersion = 2; window.f02.render('admin'); }); await settled();
+    assert.ok(await page.evaluate(key => document.body.textContent.includes(key), original.key));
+    assert.equal(await page.evaluate(() => window.f02.calls.filter(call => /\/query-(?:commands|command-results)$/.test(call.url)).length), 1);
+    await click('retry'); await settled();
+    assert.ok(await page.evaluate(original => { const calls = window.f02.calls.filter(call => /\/query-(?:commands|command-results)$/.test(call.url)); return calls.length === 2 && calls[1].url.endsWith('/query-command-results') && calls[1].key === original.key && calls[1].body === original.body && window.f02.queryDispatches === 1; }, original));
+    assert.equal(await page.evaluate(key => document.body.textContent.includes(key), original.key), false);
+  });
+  await caseRun('Query replacement client first observation works and previous client or session UNKNOWN remains private', async () => {
+    await openLateQuery();
+    await page.evaluate(() => { window.f02.observeAdminAuthorization(1); window.f02.observeAdminAuthorization(2); window.f02.platformVersion = 2; window.f02.queryUnknown = true; window.f02.render('admin'); }); await settled();
+    await click('details'); await settled(); await click('query'); await page.waitForSelector('[role=alertdialog]'); await click('confirmQueryAction'); await settled();
+    const prior = await page.evaluate(() => window.f02.calls.find(call => call.url.endsWith('/query-commands')).key);
+    await page.evaluate(() => {
+      const original = globalThis.fetch;
+      globalThis.fetch = async (url, options) => {
+        const response = await original(url, options);
+        return String(url).endsWith('/query-commands') ? new Response(await response.text(), { status: response.status,
+          headers: { 'X-Platform-Authorization-Version': '2' } }) : response;
+      };
+      window.f02.queryUnknown = false; window.f02.replaceAdminClient();
+    }); await settled();
+    assert.equal(await page.evaluate(key => document.body.textContent.includes(key), prior), false);
+    await click('details'); await settled(); await click('query'); await page.waitForSelector('[role=alertdialog]'); await click('confirmQueryAction'); await settled();
+    assert.equal(await page.evaluate(() => window.f02.queryDispatches), 2);
+    assert.ok(await page.evaluate(() => [...document.querySelectorAll('[role=status]')].some(item => item.textContent === window.f02.languageCopy().queryRecorded)));
+    await page.evaluate(() => { window.f02.queryUnknown = true; }); await click('query'); await page.waitForSelector('[role=alertdialog]'); await click('confirmQueryAction'); await settled();
+    const sessionReference = await page.evaluate(() => window.f02.calls.filter(call => call.url.endsWith('/query-commands')).at(-1).key);
+    await page.evaluate(() => window.f02.retireAdminSession()); await settled();
+    assert.equal(await page.evaluate(key => document.body.textContent.includes(key), sessionReference), false);
+    assert.equal(await page.evaluate(() => window.f02.queryDispatches), 3);
+  });
+  // QUERY_AUTHORIZATION_CASES_END
+  // QUERY_PROTOCOL_CASES_END
+  await caseRun('Product display names update only the three localized fields and current version', async () => {
+    await fresh('products'); await click('details'); await page.waitForSelector('form textarea'); await page.type('form textarea', 'Controlled display correction'); await click('saveNames');
+    await page.waitForFunction(() => window.f02.calls.some(call => call.url.endsWith('/display-names'))); await settled();
+    assert.ok(await page.evaluate(() => { const call = window.f02.calls.find(call => call.url.endsWith('/display-names')); const body = JSON.parse(call.body); return call.method === 'POST' && Object.keys(body).sort().join(',') === ['display_name_en', 'display_name_ja', 'display_name_zh_cn', 'expected_version', 'reason'].sort().join(',') && body.expected_version === 1; }));
+  });
+  await caseRun('Invalid draft integer fails visibly before any product mutation', async () => {
+    await fresh('products'); await click('details'); await page.waitForSelector('form textarea'); await page.type('form textarea', 'Controlled draft correction');
+    await page.evaluate(() => { const input = [...document.querySelectorAll('label')].find(item => item.firstChild?.textContent === window.f02.languageCopy().validityDays)?.querySelector('input'); const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set; setter.call(input, '1e3'); input.dispatchEvent(new Event('input', { bubbles: true })); });
+    await click('saveDraft'); await page.waitForSelector('[role=alert]');
+    assert.ok(await page.evaluate(() => !window.f02.calls.some(call => call.method === 'PUT')));
+  });
+  await caseRun('All three languages expose localized current finance labels', async () => {
+    await fresh(); for (const language of ['zh', 'ja', 'en']) { await page.select('[aria-label=fixture-language]', language); await page.waitForFunction(() => document.querySelector('h2')?.textContent === window.f02.languageCopy().title); }
+  });
+  await caseRun('Wallet approval edit reconstructs exact owner proof and submits the updated version', async () => {
+    await fresh('admin'); await click('approvals'); await page.waitForFunction(() => document.body.textContent.includes('WALLET_ADJUSTMENT')); await settled(); await click('details'); await page.waitForSelector('article textarea');
+    await page.type('article textarea', 'Controlled adjustment approval reason'); await click('editSubmit'); await page.waitForFunction(() => window.f02.approvalStatus === 'SUBMITTED'); await settled();
+    assert.ok(await page.evaluate(() => { const calls = window.f02.calls; const edit = calls.find(call => call.method === 'PUT'); const submit = calls.find(call => call.url.endsWith('/actions/submit')); return edit.body.includes('"amount_microcredits":9007199254740993') && edit.body.includes('"expected_version":1') && JSON.parse(submit.body).expected_version === 2 && calls.some(call => call.url.includes('/adjustments?')); }));
+  });
+  await caseRun('Unknown approval 202 cannot confirm submission and retry preserves expected version', async () => {
+    await fresh('admin'); await click('approvals'); await page.waitForFunction(() => document.body.textContent.includes('WALLET_ADJUSTMENT')); await settled(); await click('details'); await page.waitForSelector('article textarea'); await page.evaluate(() => { window.f02.approval202 = true; });
+    await click('submit'); await page.waitForSelector('[role=alert]'); await settled(); assert.equal(await page.evaluate(() => window.f02.approvalStatus), 'DRAFT');
+    await page.evaluate(() => { window.f02.approval202 = false; }); await click('retry'); await page.waitForFunction(() => window.f02.approvalStatus === 'SUBMITTED'); await settled();
+    assert.ok(await page.evaluate(() => { const calls = window.f02.calls.filter(call => call.url.endsWith('/actions/submit')); return calls.length === 2 && calls[0].body === calls[1].body && JSON.parse(calls[1].body).expected_version === 1; }));
+  });
+  for (const product of [false, true]) await caseRun(`${product ? 'Product' : 'Provider'} resume submits only the actual owner draft`, async () => {
+    await fresh('admin'); await click('providerControls'); await page.waitForSelector('section textarea'); await settled(); await page.type('section textarea', 'Controlled payment resume reason');
+    await page.evaluate(product => { const label = window.f02.languageCopy().resume; const buttons = [...document.querySelectorAll('button')].filter(item => item.textContent.trim() === label && !item.disabled); buttons[product ? 1 : 0].click(); }, product);
+    await page.waitForFunction(() => window.f02.approvalStatus === 'SUBMITTED'); await settled();
+    assert.ok(await page.evaluate(product => { const call = window.f02.calls.find(call => call.url.endsWith('/api/admin/approvals/requests') && call.method === 'POST'); const body = JSON.parse(call.body); return body.command_type === (product ? 'PAYMENT_PRODUCT_RESUME' : 'PAYMENT_PROVIDER_RESUME') && body.normalized_command.provider_control_version === 3 && (!product || body.normalized_command.product_control_version === 4) && window.f02.calls.some(call => call.url.endsWith('/payment-provider-controls')); }, product));
+  });
+  await caseRun('Approval decision uses the current action control and expected request version', async () => {
+    await fresh('admin'); await page.evaluate(() => { window.f02.approvalStatus = 'SUBMITTED'; }); await click('approvals'); await settled(); await click('details'); await page.waitForSelector('article textarea'); await page.type('article textarea', 'Controlled approval decision reason'); await click('approve'); await page.waitForFunction(() => window.f02.approvalStatus === 'APPROVED'); await settled();
+    assert.ok(await page.evaluate(() => { const call = window.f02.calls.find(call => call.url.endsWith('/actions/decide')); const body = JSON.parse(call.body); return body.expected_version === 1 && body.decision === 'APPROVED' && body.reason === 'Controlled approval decision reason'; }));
+  });
+  await caseRun('Publish-only product operator keeps mapping read-only while saving localized names', async () => {
+    await fresh('products'); await page.evaluate(() => { window.f02.publishOnly = true; window.f02.switchIdentity(); }); await settled(); await click('details'); await page.waitForSelector('form textarea'); await settled();
+    assert.ok(await page.evaluate(() => [...document.querySelectorAll('form select, form input[type=checkbox]')].every(item => item.disabled)), 'Publish-only operator can edit mapping');
+    assert.ok(await page.evaluate(() => !window.f02.calls.some(call => call.url.endsWith('/recharge-product-create-options') && window.f02.calls.indexOf(call) > window.f02.calls.findIndex(call => call.url.endsWith('/admission-verifications')))), 'Publish-only operator requested create metadata');
+    await page.type('form textarea', 'Controlled localized display reason'); await click('saveNames'); await page.waitForFunction(() => window.f02.calls.some(call => call.url.endsWith('/display-names'))); await settled();
+    assert.ok(await page.evaluate(() => window.f02.calls.filter(call => call.url.endsWith('/display-names')).length === 1 && !window.f02.calls.some(call => call.method === 'PUT')));
+  });
+  await caseRun('Verified current product evidence enables publishing with the selected evidence and version', async () => {
+    await fresh('products'); await page.evaluate(() => { window.f02.verifiedProduct = true; }); await click('details'); await page.waitForSelector('form textarea'); await settled();
+    await page.type('form textarea', 'Controlled verified publication reason'); await click('publish'); await page.waitForFunction(() => window.f02.productPublished); await settled();
+    assert.ok(await page.evaluate(() => { const call = window.f02.calls.find(item => item.url.endsWith('/publish')); const facts = JSON.parse(call.body); return call.method === 'POST' && facts.evidence_id === window.f02.other && facts.expected_version === 1 && call.key; }));
+  });
+  for (const status of ['PENDING', 'FAILED', 'SUCCEEDED']) await caseRun(`Product ${status} evidence cannot publish`, async () => {
+    await fresh('products'); await page.evaluate(status => { window.f02.verifiedProduct = true; window.f02.verificationStatus = status; }, status); await click('details'); await page.waitForSelector('form textarea'); await settled(); await page.type('form textarea', 'Controlled publication reason');
+    assert.ok(await page.evaluate(() => [...document.querySelectorAll('button')].find(item => item.textContent.trim() === window.f02.languageCopy().publish).disabled));
+    assert.ok(await page.evaluate(() => !window.f02.calls.some(item => item.url.endsWith('/publish'))));
+  });
+  const anomalyChoices = { CHARGEBACK: ['CONFIRM_CHARGEBACK', 'DISMISS', 'ESCALATE_FINANCIAL_REPAIR'], FORCED_REFUND: ['CONFIRM_FORCED_REFUND', 'DISMISS', 'ESCALATE_FINANCIAL_REPAIR'], DUPLICATE_PAYMENT: ['CONFIRM_PAYMENT', 'ESCALATE_FINANCIAL_REPAIR'], LATE_PAYMENT_CONFLICT: ['CONFIRM_PAYMENT', 'ESCALATE_FINANCIAL_REPAIR'], ILLEGAL_TRANSITION: ['CONFIRM_PROVIDER_FAILED', 'ESCALATE_FINANCIAL_REPAIR'], PAYMENT_FACT_CONFLICT: ['DISMISS', 'ESCALATE_FINANCIAL_REPAIR'], REFUND_FAILURE: ['RECONCILE_REFUND', 'DISMISS', 'ESCALATE_FINANCIAL_REPAIR'], UNKNOWN: [] };
+  for (const [type, choices] of Object.entries(anomalyChoices)) await caseRun(`${type} anomaly exposes only supported localized resolutions`, async () => {
+    await fresh('admin'); await page.evaluate(type => { window.f02.anomalyType = type; }, type); await click('resolve'); await settled(); await click('details'); await page.waitForSelector('article textarea'); await settled();
+    assert.deepEqual(await page.$$eval('article select option', items => items.map(item => item.value).filter(Boolean)), choices);
+    for (const language of ['zh', 'ja', 'en']) { await page.select('[aria-label=fixture-language]', language); assert.ok(await page.evaluate(() => [...document.querySelectorAll('article select option')].filter(item => item.value).every(item => item.textContent === window.f02.languageCopy().resolutions[item.value] && item.textContent !== item.value))); }
+    if (type === 'REFUND_FAILURE') { await page.select('article select', 'RECONCILE_REFUND'); for (const language of ['zh', 'ja', 'en']) { await page.select('[aria-label=fixture-language]', language); assert.ok(await page.evaluate(() => [...document.querySelectorAll('article p')].some(item => item.textContent === window.f02.languageCopy().refundReconcileHelp))); } }
+    if (choices.length) { await page.select('article select', choices[0]); await page.type('article textarea', 'Controlled anomaly resolution reason'); await page.evaluate(() => [...document.querySelectorAll('article button')].find(item => item.textContent === window.f02.languageCopy().resolve).click()); await page.waitForFunction(() => window.f02.anomalyResolved); await settled(); assert.equal(await page.evaluate(() => JSON.parse(window.f02.calls.find(item => item.url.endsWith('/resolve')).body).resolution), choices[0]); }
+    else assert.ok(await page.evaluate(() => [...document.querySelectorAll('article button')].find(item => item.textContent === window.f02.languageCopy().resolve).disabled));
+  });
+  await caseRun('Unknown anomaly resolution retains original decision and invocation after changing language', async () => {
+    await fresh('admin'); await page.evaluate(() => { window.f02.anomalyType = 'ILLEGAL_TRANSITION'; window.f02.unknownAnomaly = true; }); await click('resolve'); await settled(); await click('details'); await page.waitForSelector('article textarea'); await settled();
+    await page.select('article select', 'CONFIRM_PROVIDER_FAILED'); await page.type('article textarea', 'Controlled provider failure evidence'); await page.evaluate(() => [...document.querySelectorAll('article button')].find(item => item.textContent === window.f02.languageCopy().resolve).click()); await page.waitForSelector('[role=alert]'); await settled();
+    await page.select('[aria-label=fixture-language]', 'ja'); assert.ok(await page.evaluate(() => document.querySelector('[role=alert]').textContent === window.f02.languageCopy().unknown));
+    await page.evaluate(() => { window.f02.unknownAnomaly = false; }); await click('retry'); await page.waitForFunction(() => window.f02.anomalyResolved); await settled();
+    assert.ok(await page.evaluate(() => { const calls = window.f02.calls.filter(item => item.url.endsWith('/resolve')); return calls.length === 2 && calls[0].key === calls[1].key && calls[0].body === calls[1].body && JSON.parse(calls[1].body).resolution === 'CONFIRM_PROVIDER_FAILED'; }));
+  });
+  await caseRun('Accepted refund intent awaiting provider evidence keeps the same key until terminal reconciliation', async () => {
+    await fresh('admin'); await page.evaluate(() => { window.f02.anomalyType = 'REFUND_FAILURE'; window.f02.unknownAnomaly = true; window.f02.anomalyUnknownCode = 'COMMAND_RESULT_UNKNOWN'; }); await click('resolve'); await settled(); await click('details'); await page.waitForSelector('article textarea'); await settled();
+    await page.select('article select', 'RECONCILE_REFUND'); await page.type('article textarea', 'Controlled original refund reconciliation'); await page.evaluate(() => [...document.querySelectorAll('article button')].find(item => item.textContent === window.f02.languageCopy().resolve).click()); await page.waitForSelector('[role=alert]'); await settled();
+    assert.ok(await page.evaluate(() => !window.f02.anomalyResolved && document.querySelector('[role=alert]').textContent === window.f02.languageCopy().unknown));
+    await page.select('[aria-label=fixture-language]', 'zh'); await page.evaluate(() => { window.f02.unknownAnomaly = false; }); await click('retry'); await page.waitForFunction(() => window.f02.anomalyResolved); await settled();
+    assert.ok(await page.evaluate(() => { const calls = window.f02.calls.filter(item => item.url.endsWith('/resolve')); return calls.length === 2 && calls[0].key === calls[1].key && calls[0].body === calls[1].body && JSON.parse(calls[1].body).resolution === 'RECONCILE_REFUND'; }));
+  });
+  const closePosts = async () => page.evaluate(() => window.f02.calls.filter(call => call.url.endsWith('/close') && call.method === 'POST').length);
+  const personalOrder = async () => { await fresh(); await page.evaluate(() => { window.f02.personalClose = true; }); await click('create'); await page.waitForSelector('article'); await settled(); };
+  await caseRun('Personal pending native-shaped confirm never closes before an explicit choice', async () => {
+    await personalOrder(); await page.evaluate(() => { window.f02.confirmCalls = 0; globalThis.confirm = () => { window.f02.confirmCalls++; return new Promise(() => {}); }; });
+    await click('close'); await page.waitForFunction(() => document.querySelector('[role=alertdialog]') || window.f02.calls.some(call => call.url.endsWith('/close')));
+    assert.equal(await closePosts(), 0, 'pending confirmation cannot dispatch close');
+    assert.equal(await page.evaluate(() => window.f02.confirmCalls), 0, 'feature confirmation must not call the native shim');
+    await page.waitForSelector('[role=alertdialog]'); await page.keyboard.press('Escape'); await page.waitForFunction(() => !document.querySelector('[role=alertdialog]'));
+    assert.equal(await closePosts(), 0);
+  });
+  for (const language of ['zh', 'en', 'ja']) await caseRun(`Personal close confirmation ${language} cancels safely and accepts exactly its displayed target`, async () => {
+    await personalOrder(); await page.select('[aria-label=fixture-language]', language);
+    await page.evaluate(() => [...document.querySelectorAll('article button')].find(button => button.textContent === window.f02.languageCopy().close).focus());
+    await click('close'); await page.waitForSelector('[role=alertdialog]');
+    assert.ok(await page.evaluate(() => { const dialog = document.querySelector('[role=alertdialog]'); const copy = window.f02.languageCopy(); return dialog.textContent.includes(copy.confirmClose) && dialog.textContent.includes(window.f02.id) && document.activeElement.textContent === copy.cancelClose; }));
+    await page.keyboard.press('Tab'); assert.equal(await page.evaluate(() => document.activeElement.textContent), await page.evaluate(() => window.f02.languageCopy().close));
+    await page.keyboard.press('Tab'); assert.equal(await page.evaluate(() => document.activeElement.textContent), await page.evaluate(() => window.f02.languageCopy().cancelClose));
+    await page.click('[role=alertdialog] button'); await page.waitForFunction(() => !document.querySelector('[role=alertdialog]')); assert.equal(await closePosts(), 0);
+    assert.equal(await page.evaluate(() => document.activeElement.textContent), await page.evaluate(() => window.f02.languageCopy().close));
+    await click('close'); await page.waitForSelector('[role=alertdialog]'); await page.evaluate(() => { const buttons = document.querySelectorAll('[role=alertdialog] button'); buttons[1].click(); buttons[1].click(); });
+    await page.waitForFunction(() => window.f02.calls.some(call => call.url.endsWith('/close'))); await settled(); assert.equal(await closePosts(), 1);
+    assert.ok(await page.evaluate(() => { const call = window.f02.calls.find(call => call.url.endsWith('/close')); return call.url.endsWith(`/recharge/orders/${window.f02.id}/close`) && call.body === '{}' && !call.key; }));
+  });
+  for (const invalidation of ['identity', 'client', 'context', 'permission', 'read-permission', 'unmount']) await caseRun(`Personal pending close is invalidated by ${invalidation}`, async () => {
+    await personalOrder(); await click('close'); await page.waitForSelector('[role=alertdialog]');
+    await page.evaluate(invalidation => { document.querySelector('[aria-label=fixture-language]').focus(); if (invalidation === 'identity') window.f02.switchIdentity(); else if (invalidation === 'unmount') window.f02.unmountPersonal(); else { if (invalidation === 'client') window.f02.alternateClient = true; if (invalidation === 'context') window.f02.contextVersion = 2; if (invalidation === 'permission') window.f02.denyClose = true; if (invalidation === 'read-permission') window.f02.denyPersonalRead = true; window.f02.render('personal'); } }, invalidation);
+    await page.waitForFunction(() => !document.querySelector('[role=alertdialog]')); assert.equal(await closePosts(), 0);
+    if (invalidation !== 'unmount') assert.equal(await page.evaluate(() => document.activeElement.getAttribute('aria-label')), 'fixture-language', 'stale cleanup must not steal focus');
+  });
+  await caseRun('Personal confirmed close rechecks actual time before dispatch', async () => {
+    await personalOrder(); await click('close'); await page.waitForSelector('[role=alertdialog]');
+    await page.evaluate(() => { const now = Date.now; Date.now = () => Date.parse('2099-01-01T00:00:00Z'); try { document.querySelectorAll('[role=alertdialog] button')[1].click(); } finally { Date.now = now; } });
+    await page.waitForFunction(() => !document.querySelector('[role=alertdialog]')); assert.equal(await closePosts(), 0);
+  });
+  await caseRun('Personal read in flight and changed order invalidate the original close', async () => {
+    await personalOrder(); await click('close'); await page.waitForSelector('[role=alertdialog]');
+    await page.evaluate(() => { window.f02.delayedOrder = true; const confirm = document.querySelectorAll('[role=alertdialog] button')[1]; [...document.querySelectorAll('article button')].find(button => button.textContent === window.f02.languageCopy().query).click(); confirm.click(); });
+    await page.waitForFunction(() => typeof window.f02.releaseOrder === 'function'); assert.equal(await closePosts(), 0);
+    await page.evaluate(() => { window.f02.closeStatus = 'PAID'; window.f02.releaseOrder(); }); await settled(); assert.equal(await closePosts(), 0); assert.equal(await page.$('[role=alertdialog]'), null);
+  });
+  await caseRun('Personal unknown create retains original key while no close can be confirmed', async () => {
+    await personalOrder(); await click('close'); await page.waitForSelector('[role=alertdialog]');
+    await page.evaluate(() => { window.f02.unknownCreate = true; [...document.querySelectorAll('form button')].find(button => button.textContent === window.f02.languageCopy().create).click(); });
+    await page.waitForSelector('[role=alert]'); await settled(); assert.equal(await page.$('[role=alertdialog]'), null); assert.equal(await closePosts(), 0);
+    assert.equal(await page.evaluate(() => [...document.querySelectorAll('article button')].find(button => button.textContent === window.f02.languageCopy().close)?.disabled), true);
+    await page.evaluate(() => { window.f02.unknownCreate = false; }); await click('retry'); await settled();
+    assert.ok(await page.evaluate(() => { const posts = window.f02.calls.filter(call => call.method === 'POST' && call.url.endsWith('/recharge/orders')); return posts.length === 3 && posts[1].key === posts[2].key && posts[1].body === posts[2].body; })); assert.equal(await closePosts(), 0);
+  });
+  await caseRun('Personal target replacement requires a new explicit confirmation', async () => {
+    await personalOrder(); await click('close'); await page.waitForSelector('[role=alertdialog]');
+    // Capture actual rendered callbacks to exercise a delayed invocation after replacement.
+    await page.evaluate(() => {
+      const buttons = document.querySelectorAll('[role=alertdialog] button');
+      const props = button => button[Object.keys(button).find(key => key.startsWith('__reactProps$'))];
+      window.f02.staleCancel = props(buttons[0]).onClick; window.f02.staleConfirm = props(buttons[1]).onClick;
+      const rows = [...document.querySelectorAll('table')][0].querySelectorAll('tbody tr');
+      [...rows].find(row => row.textContent.includes('controlled-alternate-order')).querySelector('button').click();
+    }); await settled();
+    assert.equal(await page.$('[role=alertdialog]'), null); assert.equal(await closePosts(), 0); await click('close'); await page.waitForSelector('[role=alertdialog]');
+    assert.ok(await page.$eval('[role=alertdialog]', element => element.textContent.includes(window.f02.other)));
+    await page.evaluate(() => { window.f02.staleConfirm(); window.f02.staleCancel(); });
+    assert.equal(await closePosts(), 0); assert.ok(await page.$('[role=alertdialog]'), 'old callbacks must not consume or cancel the new intent');
+    await page.evaluate(() => document.querySelectorAll('[role=alertdialog] button')[1].click()); await settled();
+    assert.equal(await closePosts(), 1); assert.ok(await page.evaluate(() => window.f02.calls.find(call => call.url.endsWith('/close')).url.endsWith(`/orders/${window.f02.other}/close`)));
+  });
+  console.log(`RESULT ${passed} PASS 0 FAIL 0 SKIP`);
+} catch (error) {
+  console.error(`FAIL after ${passed} PASS: ${error.message}`);
+  if (page) console.error(JSON.stringify(await page.evaluate(() => ({ text: document.body.textContent.slice(0, 1200), methods: window.f02?.calls.slice(-8).map(call => [call.method, call.url]) })).catch(() => ({}))));
+  process.exitCode = 1;
+} finally { if (browser) await browser.close(); if (vite) await vite.close(); if (fs.existsSync(profile)) fs.rmSync(profile, { recursive: true, force: true }); }

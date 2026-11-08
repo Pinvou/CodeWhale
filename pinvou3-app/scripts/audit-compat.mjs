@@ -26,8 +26,8 @@
 // runtime scripts and the inline <script> blocks of the HTML entries (the
 // first code to execute on startup). Run via `npm run audit:compat` after a
 // build; tests/compat_audit.test.mjs gates this in CI.
-import { existsSync, readFileSync, readdirSync } from 'node:fs';
-import { extname, join, resolve } from 'node:path';
+import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
+import { dirname, extname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as acorn from 'acorn';
 import { staticRuntimeScripts, staticRuntimeScriptPrefixes } from '../vite.config.mjs';
@@ -36,6 +36,7 @@ const appRoot = resolve(fileURLToPath(import.meta.url), '../..');
 const sourceRoot = join(appRoot, 'src');
 const distRoot = join(appRoot, 'dist');
 const webDistRoot = resolve(appRoot, '../remote-control-relay/web/dist');
+const portalDistRoot = resolve(appRoot, '../account-platform/internal/portal/static');
 
 // APIs the startup polyfill (src/shared/legacy-polyfills.js) installs in every
 // HTML entry before any other script runs. Once the contract test pins that
@@ -281,7 +282,279 @@ function collectStaticRuntimeScripts() {
 // `.ring-inset` class name that Tailwind emits don't phantom-match.
 // `inset(` (clip-path function) and logical properties (`inset-inline:`)
 // don't match either: in both, `inset` is not followed by `:`.
-function auditDistCss(assetsDir) {
+// Replace CSS comments, quoted strings, and unquoted url() token bodies with
+// same-length space runs so the layer scans cannot fire inside them. Offsets
+// in the stripped copy index the original string 1:1. Default-state escapes
+// are consumed first (`\X` is one token character): CSS tokenizes `.foo\"bar`
+// as the ident `foo"bar`, so an escaped quote must not open a string that
+// blanks the rest of the stylesheet and hides a real layer behind it. Hex
+// escapes are consumed as `\` + first digit — producers emit at-keywords
+// literally, so no escape-decoded form needs to match. An unquoted url()
+// token is recognized before the comment arm: CSS consumes a `/*` inside it
+// as token content, so treating it as a comment opener would blank the rest
+// of the stylesheet and hide a real layer behind it (lightningcss emits a
+// URL unquoted whenever it needs no escaping — a quoted source url ships
+// unquoted in dist). `url(` only starts a token at an ident boundary
+// (`svg-url(` is a function name, not a url token). A quoted body falls
+// through to the string arm; an unterminated comment, string, or url() token
+// blanks the remainder, keeping this single pass linear on malformed input.
+function stripCssCommentsAndStrings(code) {
+  let out = '';
+  let i = 0;
+  while (i < code.length) {
+    const ch = code[i];
+    if (ch === '\\' && i + 1 < code.length) {
+      out += code.slice(i, i + 2);
+      i += 2;
+    } else if (ch === '/' && code[i + 1] === '*') {
+      const end = code.indexOf('*/', i + 2);
+      const stop = end === -1 ? code.length : end + 2;
+      out += ' '.repeat(stop - i);
+      i = stop;
+    } else if (ch === '"' || ch === "'") {
+      // Divergence from CSS bad-string tokens (which end at an unescaped
+      // newline): a string whose quote never closes blanks to EOF. The
+      // default-state escape arm above keeps escaped quotes inside idents
+      // from entering here, so this fires only when the stylesheet really
+      // ships an unclosed quote — a shape minified dist CSS never has.
+      // Over-blanking on such malformed input loses a survivor behind it
+      // (a false negative, bounded to that invalid prefix); it keeps the
+      // single pass linear without ever inventing a violation.
+      let j = i + 1;
+      while (j < code.length && code[j] !== ch) {
+        if (code[j] === '\\') j += 1;
+        j += 1;
+      }
+      const stop = j < code.length ? j + 1 : code.length;
+      out += ' '.repeat(stop - i);
+      i = stop;
+    } else if (
+      (ch === 'u' || ch === 'U')
+      && code.slice(i, i + 4).toLowerCase() === 'url('
+      && (i === 0 || !/[-\w\\]/.test(code[i - 1]))
+    ) {
+      // Copy `url(` and its leading whitespace, blank the token body, copy
+      // the closer (an escape may hide that paren from the scan). The body
+      // span is padded from its own start (after the copied whitespace), so
+      // the masked copy keeps indexing the original 1:1 — padding measured
+      // from `url(` would double-count the whitespace and shift every later
+      // line/excerpt attribution.
+      out += code.slice(i, i + 4);
+      let j = i + 4;
+      while (j < code.length && /\s/.test(code[j])) j += 1;
+      out += code.slice(i + 4, j);
+      const bodyStart = j;
+      if (code[j] !== '"' && code[j] !== "'") {
+        while (j < code.length && code[j] !== ')') {
+          if (code[j] === '\\') j += 1;
+          j += 1;
+        }
+        if (j < code.length) {
+          out += ' '.repeat(j - bodyStart);
+          out += ')';
+          i = j + 1;
+        } else {
+          out += ' '.repeat(code.length - bodyStart);
+          i = code.length;
+        }
+      } else {
+        i = j;
+      }
+    } else {
+      out += ch;
+      i += 1;
+    }
+  }
+  return out;
+}
+
+// True when scan[index] sits where a rule may start: the previous
+// non-whitespace scan byte is a block/declaration delimiter or the
+// stylesheet starts here. The stripped copy keeps every byte outside the
+// blanked regions verbatim, so any non-space byte before the `@` is real
+// syntax — a `\` (escape content) or `:` / ident character (selector or
+// declaration value) means this `@layer` substring is not an at-rule.
+// This is only the byte-level gate; findLayerAtRulePositions additionally
+// tracks block and declaration context around it.
+function isAtRulePosition(scan, index) {
+  for (let k = index - 1; k >= 0; k -= 1) {
+    const prev = scan[k];
+    if (prev !== ' ' && prev !== '\t' && prev !== '\n' && prev !== '\r' && prev !== '\f') {
+      return prev === '{' || prev === '}' || prev === ';';
+    }
+  }
+  return true;
+}
+
+// One linear pass over the stripped copy reporting every offset where the
+// `@layer`/`@import` at-keyword starts an at-rule (complete keyword,
+// case-insensitive). A rule-start byte alone is not enough: minified dist
+// keeps custom-property values verbatim (lightningcss does not touch their
+// tokens at cssTarget safari14), and CSS Variables §2.1 lets such values
+// carry balanced `(`/`[`/`{` component blocks and escaped characters —
+// `a{--token:{@layer demo{b{color:red}}}}`, `a{--x:red\;@layer demo{…}}`,
+// and `a{--x:f(;@layer demo{…})}` are all legal non-layer CSS whose
+// `@layer` substrings sit right after a `{`/`;` byte. The walk therefore
+// tracks context:
+//   - `(`/`[` always open component context — no at-rule starts inside;
+//   - a `{` opens a rule body at the stylesheet top level, inside a rule
+//     body with no declaration open, or after a non-custom `ident:` (CSS
+//     nesting re-opens a rule there, so nested real layers stay detected);
+//     inside a `--*` declaration it is a value block — `@layer` inside any
+//     non-rule frame or open declaration is value content. Opening a rule
+//     body also closes the parent frame's pending "declaration": in a
+//     rule-list frame a preceding `:` belonged to selector syntax
+//     (`.x:hover`), not a declaration opener, so the stale state must not
+//     suppress a sibling at-rule after that nested rule closes;
+//   - rule bodies whose prelude started with an at-keyword (@media,
+//     @supports, @layer, @scope, …) are rule-list frames: every `:` in
+//     their prelude or selector text is selector syntax and never opens a
+//     declaration, so a `--`-prefixed selector compound cannot poison the
+//     frame — `@media screen{.--x:hover{color:red}@layer real{…}}` is
+//     valid, minifier-surviving CSS whose real sibling layer must stay
+//     reported (a `--*` declaration is only legal inside a style-rule
+//     body, which has no `@` in its prelude);
+//   - a declaration opens when an ident is followed by `:` in a rule body
+//     and closes at `;` — an escaped `\;` is ident content, not a
+//     terminator (consumed like the stripper does), and the declaration
+//     ends with its frame.
+// Escapes are consumed as `\` + next character; hex escapes keep their
+// remaining digits as ordinary ident characters, which cannot produce a
+// structural byte at that position. `@import` is followed by its URL
+// token, and whitespace before it is optional (`@import"a.css"` is valid
+// CSS), so whitespace, a quote, or a `url(` token completes the keyword —
+// `@imports`-style longer at-keywords and a bare `@import` at EOF do not
+// count.
+function findAtRulePositions(scan, keyword) {
+  const at = keyword === 'layer' ? '@layer' : '@import';
+  const isCompleteAt = (i) => {
+    if (scan.slice(i, i + at.length).toLowerCase() !== at) return false;
+    const next = scan[i + at.length] ?? '';
+    if (keyword === 'layer') return /[\s{]/.test(next);
+    // Token boundary: an identifier character directly after the keyword
+    // extends it (`@importurl(...)` tokenizes as one unknown at-rule, never
+    // as @import), so only whitespace, EOF, or a directly-attached string
+    // delimiter complete the keyword. Minified output always keeps the
+    // whitespace before the URL token, so no `url(` special case is needed.
+    return next === '' || /[\s"']/.test(next);
+  };
+  const hits = [];
+  const stack = [];
+  let identLen = 0;
+  let identCustom = false;
+  let firstIdentChar = '';
+  // Whether the current prelude (text since the last `{`/`}`/`;`) started
+  // with an at-keyword: the rule body a following `{` opens is then a rule
+  // list (@media/@supports/@layer/…) rather than a declaration block, so
+  // colons inside it are selector syntax, never `--*` declaration openers.
+  let hasAtPrelude = false;
+  const resetIdent = () => {
+    identLen = 0;
+    identCustom = false;
+  };
+  for (let i = 0; i < scan.length; i += 1) {
+    const ch = scan[i];
+    if (ch === '\\' && i + 1 < scan.length) {
+      identLen += 1;
+      i += 1;
+      continue;
+    }
+    if (ch === '@') {
+      const top = stack[stack.length - 1];
+      hasAtPrelude = true;
+      if (
+        isCompleteAt(i)
+        && isAtRulePosition(scan, i)
+        && (!top || (top.rule && top.decl === null))
+      ) {
+        hits.push(i);
+      }
+      resetIdent();
+      continue;
+    }
+    if (ch === ':') {
+      const top = stack[stack.length - 1];
+      if (top && top.rule && top.decl === null && !top.grouping) {
+        top.decl = identLen === 0 ? '' : identCustom ? 'custom' : 'plain';
+      }
+      resetIdent();
+      continue;
+    }
+    if (ch === ';') {
+      const top = stack[stack.length - 1];
+      if (top && top.rule) top.decl = null;
+      hasAtPrelude = false;
+      resetIdent();
+      continue;
+    }
+    if (ch === '{') {
+      const top = stack[stack.length - 1];
+      const rule = !top || (top.rule && top.decl !== 'custom');
+      if (rule && top && top.rule) top.decl = null;
+      stack.push({ rule, decl: null, grouping: rule && hasAtPrelude });
+      hasAtPrelude = false;
+      resetIdent();
+      continue;
+    }
+    if (ch === '}') {
+      stack.pop();
+      hasAtPrelude = false;
+      resetIdent();
+      continue;
+    }
+    if (ch === '(' || ch === '[') {
+      stack.push({ rule: false, decl: null });
+      resetIdent();
+      continue;
+    }
+    if (ch === ')' || ch === ']') {
+      stack.pop();
+      resetIdent();
+      continue;
+    }
+    if (/\s/.test(ch)) continue;
+    if (/[-\w]/.test(ch) || ch.charCodeAt(0) > 127) {
+      if (identLen === 0) firstIdentChar = ch;
+      else if (identLen === 1) identCustom = firstIdentChar === '-' && ch === '-';
+      identLen += 1;
+      continue;
+    }
+    resetIdent();
+  }
+  return hits;
+}
+
+// Removes every `supports(…)` region from an @import prelude so the clause
+// scan only sees text outside those parentheses: a `layer(` token inside a
+// condition value (`supports(display: layer(x))`) is a feature argument,
+// not an import layer clause. Strings and url() bodies are already blank,
+// so paren depth is reliable; the cursor jumps to the region's end (an
+// unclosed region consumes the rest of the prelude), keeping the read
+// linear by construction.
+function stripSupportsConditions(prelude) {
+  let out = '';
+  let i = 0;
+  while (i < prelude.length) {
+    if (/^supports\(/i.test(prelude.slice(i, i + 9))) {
+      let depth = 1;
+      let j = i + 9;
+      while (j < prelude.length && depth > 0) {
+        if (prelude[j] === '(') depth += 1;
+        else if (prelude[j] === ')') depth -= 1;
+        j += 1;
+      }
+      i = j;
+    } else {
+      out += prelude[i];
+      i += 1;
+    }
+  }
+  return out;
+}
+
+// Exported for the tests' perf pin only: timing a full runAudit re-parses
+// every static runtime script and drowns the CSS-scan signal.
+export function auditDistCss(assetsDir) {
   const violations = [];
   for (const name of readdirSync(assetsDir)) {
     if (!name.endsWith('.css')) continue;
@@ -294,7 +567,118 @@ function auditDistCss(assetsDir) {
         `dist:${name}:${lineOfOffset(code, match.index).line}: inset shorthand survives the build — Safari 14.0 cannot parse it (needs 14.1); context: …${excerpt}…`,
       );
     }
+    // Cascade layers ship in Safari 15.4+ and lightningcss does not flatten
+    // them at cssTarget safari14; a Tailwind 4 build puts ~90% of its output
+    // inside @layer blocks, so any survivor means the macOS 11 / Safari 14.0
+    // floor renders unstyled (same verdict as the earlier Tailwind 4 deps-bump audit).
+    // Comments, quoted strings, url() token bodies, and default-state escapes
+    // cannot create layers, but lightningcss keeps `/*! … */` license headers
+    // verbatim and `content` strings can quote at-rule syntax, so both scans
+    // run over the stripped copy. The replacement is space-padded, preserving
+    // offsets for the excerpt/line attribution. A survivor must be the
+    // complete at-keyword at a real rule position — findAtRulePositions
+    // combines the rule-start byte check (escaped selector characters
+    // (`.\@layer`) and declaration values (`a{--token:@layer}`) do not fire;
+    // `@layered` is an ident) with block/declaration-context tracking, so
+    // `@layer` tokens inside custom-property value blocks, behind escaped
+    // terminators, or after a `;` inside function blocks do not fire either.
+    // Covers the block/anonymous/statement `@layer`
+    // forms, case-insensitively (CSS at-keywords are ASCII case-insensitive).
+    // The import form (`@import … layer|layer(name)`) carries no `@layer`
+    // substring, so the @import preludes are parsed separately: the prelude
+    // reader consumes through the rule's `;` (an unquoted data URL may
+    // contain `;`, but its body is blanked with the token), strips the
+    // leading URL token, then removes supports() conditions (a `layer(`
+    // feature argument inside them is not a clause), so only a standalone
+    // layer clause after it fires — `layer(` inside the URL never does and
+    // the clause is caught in any position (after supports(), before/after
+    // the media query, bare or named).
+    const scan = stripCssCommentsAndStrings(code);
+    for (const at of findAtRulePositions(scan, 'layer')) {
+      const excerpt = code.slice(Math.max(0, at - 30), at + 50).replaceAll(/\s+/g, ' ');
+      violations.push(
+        `dist:${name}:${lineOfOffset(code, at).line}: @layer survives the build — cascade layers need Safari 15.4, below the Safari 14.0 floor; context: …${excerpt}…`,
+      );
+    }
+    // The prelude is read with the same single-pass shape as the stripper,
+    // not a repetition regex: alternation arms that can both consume a
+    // `url(…)` token backtrack exponentially on an unterminated prelude.
+    // Each prelude consumes through its `;` exactly once and the scan stays
+    // linear by construction. The candidate positions come from the same
+    // context walk as the @layer scan, so an `@import` token that is not an
+    // at-rule never starts a prelude: a custom-property value is token
+    // content, not a rule list — `a{--tokens:@IMPORT "x.css" LAYER(fake)}`
+    // (uppercase custom-property values survive the real build verbatim)
+    // must not fail the audit, while `@import` preludes after a sibling
+    // rule keep firing.
+    for (const at of findAtRulePositions(scan, 'import')) {
+      const preludeStart = at + 7;
+      const preludeEnd = scan.indexOf(';', preludeStart);
+      const stop = preludeEnd === -1 ? scan.length : preludeEnd;
+      // @import grammar: [ <url> | <string> ] first, then the optional
+      // layer clause and import conditions — only a clause after the URL
+      // token creates a cascade layer. Bodies of strings and unquoted url()
+      // tokens are already blank, so the leading token peels off without
+      // ambiguity.
+      let rest = scan.slice(preludeStart, stop).replace(/^\s+/, '');
+      if (/^url\(/i.test(rest)) {
+        const close = rest.indexOf(')');
+        rest = close === -1 ? '' : rest.slice(close + 1);
+      }
+      rest = stripSupportsConditions(rest);
+      if (!/(?:^|\s)layer(?:\s*\(|(?=\s|$))/i.test(rest)) continue;
+      const excerpt = code.slice(Math.max(0, at - 30), at + 50).replaceAll(/\s+/g, ' ');
+      violations.push(
+        `dist:${name}:${lineOfOffset(code, at).line}: @import layer survives the build — cascade layers need Safari 15.4, below the Safari 14.0 floor; context: …${excerpt}…`,
+      );
+    }
   }
+  return violations;
+}
+
+// Portal uses separate HTML entries and no desktop startup bundles. Audit its
+// actual compiled assets rather than letting missing desktop outputs skip it.
+export function auditPortalAssets(portalDir = portalDistRoot) {
+  const violations = [];
+  const root = resolve(portalDir);
+  const checkReference = (filename, reference) => {
+    if (!reference.startsWith('.') && !reference.startsWith('/')) return;
+    const pathname = reference.split(/[?#]/, 1)[0];
+    const target = pathname.startsWith('/') ? resolve(root, `.${pathname}`) : resolve(dirname(filename), pathname);
+    if (!target.startsWith(`${root}${sep}`) || !existsSync(target) || !statSync(target).isFile()) violations.push(`portal:${filename.slice(root.length + 1)} missing local asset ${reference}`);
+  };
+  for (const entry of ['account.html', 'admin.html', 'portal-session-handoff.html']) {
+    const filename = join(root, entry);
+    if (!existsSync(filename)) violations.push(`portal/${entry} missing — run npm run build:account-portal first`);
+    else {
+      violations.push(...auditHtmlInlineScripts(filename, `portal:${entry}`));
+      const html = readFileSync(filename, 'utf8');
+      let scriptCount = 0;
+      for (const match of html.matchAll(/<(script|link)\b[^>]*\b(?:src|href)\s*=\s*(["'])(.*?)\2/gi)) {
+        checkReference(filename, match[3]);
+        if (match[1].toLowerCase() === 'script' && /\.js(?:[?#]|$)/.test(match[3])) scriptCount++;
+      }
+      if (!scriptCount) violations.push(`portal/${entry} has no JavaScript entry`);
+    }
+  }
+  const assets = join(root, 'assets');
+  if (!existsSync(assets)) return [...violations, 'portal/assets missing — run npm run build:account-portal first'];
+  const files = readdirSync(assets);
+  if (!files.some(name => name.endsWith('.js'))) violations.push('portal/assets has no JavaScript');
+  if (!files.some(name => name.endsWith('.css'))) violations.push('portal/assets has no CSS');
+  for (const name of files) {
+    if (!name.endsWith('.js')) continue;
+    const filename = join(assets, name), code = readFileSync(filename, 'utf8');
+    violations.push(...auditSource(`portal:${name}`, code));
+    let ast;
+    try { ast = acorn.parse(code, { ecmaVersion: 'latest', sourceType: 'module' }); }
+    catch { continue; } // The baseline parser above already reports syntax failures.
+    walk(ast, node => {
+      const source = ['ImportDeclaration', 'ExportNamedDeclaration', 'ExportAllDeclaration', 'ImportExpression'].includes(node.type) && node.source;
+      if (source?.type === 'Literal' && typeof source.value === 'string') checkReference(filename, source.value);
+    });
+  }
+  violations.push(...auditDistCss(assets).map(message => message.replace(/^dist:/, 'portal:')));
   return violations;
 }
 
@@ -412,8 +796,9 @@ export function auditDistPresenceProblems({
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  const violations = runAudit();
-  for (const problem of auditDistPresenceProblems()) {
+  const portalOnly = process.argv.includes('--portal-only');
+  const violations = [...(portalOnly ? [] : runAudit()), ...auditPortalAssets()];
+  for (const problem of portalOnly ? [] : auditDistPresenceProblems()) {
     console.error(problem);
     process.exitCode = 1;
   }

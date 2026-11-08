@@ -1,0 +1,3 @@
+DROP INDEX audit_logs_result_occurred_idx;
+DROP INDEX audit_logs_actor_occurred_idx;
+DROP INDEX audit_logs_occurred_idx;

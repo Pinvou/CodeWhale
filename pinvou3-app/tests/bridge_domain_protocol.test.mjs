@@ -62,6 +62,7 @@ function extractCalls(source, callee, normalize = true) {
 }
 
 const protocolSources = {
+  accountPlatform: ['bridge/account-platform.js'],
   orchestration: ['bridge.js'],
   artifacts: ['bridge/artifact-tracker.js', 'bridge/artifacts.js'],
   auxChat: ['bridge/aux-chat.js'],
@@ -84,7 +85,11 @@ const protocolSources = {
   computerUse: ['bridge/computer_use.js'],
 };
 
+// Combined main954 shared extraction with current Account model refs, typed selection,
+// local rollback and compact API. Digests pin actual combined invoke/listen bodies.
 const expectedProtocolHashes = {
+  // Registration prepares only the password reference; availability stays behind captcha in Send.
+  accountPlatform: '5a768685d7d2c8f5eea288b6b00d0ba03e680f76be195d20a131a71b8436fa8f',
   // #566 共享模块移植后的重算：invoke/listen 函数体按字节等价合并进
   // shared/bridge-shared-helpers.js（其共享面哈希单独立钉于 expectedSharedBaseHash），
   // 各 lane feature 文件的原始文本摘要随之变化；命令面（命令名/事件名集合）
@@ -127,12 +132,15 @@ const expectedProtocolHashes = {
   // stale-absolute heal arm + rebasing save — same command surface, no new
   // invoke or listen entries (the extractor scans raw source, so
   // body/comment text is part of the digest).
-  // T4b 重算：listDeliverableIndex 委托回共享核 v2 协商（官方 v2 命令已随 TB
+  // T4b 重算（main）：listDeliverableIndex 委托回共享核 v2 协商（官方 v2 命令已随 TB
   // 入主线），list_deliverable_index / list_workspace_files 两个 invoke 面随之
   // 回到 helpers 共享基座；裁决⑤ 定案删除 open_in_system / open_external_url
   // 包装位（Rust 命令有 features 层消费，仅删 JS 面）。同批改动见
   // artifacts.js / tauri/bridge.js facade / web bridge。
-  artifacts: 'e4cd72cc8f6953c8e27cba48f24659e28cbe2c68b3b27e35ff3d5237dbbb9db1',
+  // Attachment failure telemetry extends the two track_behavior_event payloads
+  // with stage, step and inputType and updates the terminal error fallback.
+  // Retain that payload extension when combining main's Account bridge surface.
+  artifacts: '3e7a4ef7c3924e2c1028500de53a3de747f2f3ecc30780b5043ac1f37fe54403',
 // New domain: computer-use consent commands/events (desktop-only; the web
   // RPC allowlist excludes them, same policy as browser:*).
   // Recomputed when the 30s deny-suppression cooldown was removed: a deny now
@@ -189,6 +197,12 @@ const expectedProtocolHashes = {
   // display-equality gate — listener body-internal edits only, no new invoke
   // or listen entries (capture-text refresh). Recomputed for per-frame stream
   // notification coalescing; event names and invoke shapes remain unchanged.
+  // Recomputed for the F05 model lifecycle receipt: the existing chat listener
+  // preserves the typed rejection only for its exact current timing owner.
+  // Commands, event names and invoke payloads retain their existing shapes;
+  // listener callback text is included in this source fingerprint.
+  // Deleted scheduled notice IDs now take precedence over live/prefix admission; callback text only, no event/command surface changes.
+  // Combined Account billing/model receipts with main's shared stream publication.
   // Recomputed for the per-frame stream notification coalescing backflow
   // (Community #727): chat:delta/chat:tool_start/chat:done listener bodies moved
   // to the shared single-publication flush (notify() without domains, one
@@ -215,7 +229,9 @@ const expectedProtocolHashes = {
   // （runSyncOnSession 之前捕获）、isNotifySuppressed 谓词并入
   // startupNotificationBatching——invoke/listen 调用面零增删（52 条不变），
   // 抑制臂载荷文本漂移。此钉=当前 head 实算值。
-  chat: '0a49c568a9ec7e412d214874e706e631fda2671b30d1636e40b9b8160daf5459',
+  // 合并 main fb01c48b6 重钉：main 侧 Account lifecycle receipts + 流式发布
+  // 载荷改动与本分支 r12 收口批叠加，chat 面哈希=合并树实算值。
+  chat: '1e18e33421ccd708e6cf931c8ad7dadfac332ff2fb0d6c130e251bab5618e105',
   dependencies: 'd39f5a46b8e34c1c30d8f8e08ef62baccfe822ffb7fad8dbf3301c69c566e31c',
   // Recomputed for #445: the YOLO gate threads an adjudicated session id
   // through exitPlanToYolo and planStuckGo.
@@ -250,11 +266,8 @@ const expectedProtocolHashes = {
   // maybePruneFailedWorkspaceRecent wiring (single-entry workspace picker);
   // same command set, no new invoke or listen entries — the extractor scans
   // raw source, so the merged body/comment text is part of the digest.
-  // T0-b (#701 桥接面对齐) 重算：get_session_persona_events /
-  // get_session_pinvou_reviews 两支 invoke 移入 helpers 的
-  // loadPersonaEventsForSession / loadPinvouReviewsForSession（sessions.js 留
-  // 转发壳 + reportSidecarReadFailure 注入），命令面无增删。
-  sessions: 'dbaca4e95cd63b5fa5498eca5d7170eefbd17f52eb4ada9e8c7d40d9cdc79e9c',
+  // Combined local model rollback receipts and main workspace keychain carryover.
+  sessions: '70bec8acd21b45ce46ecce0cd9f1b78deb456c064693e64129aac339c9a72235',
   // Recomputed for the builtin feature toggle hook: settings.js gains the
   // list_builtin_features / set_builtin_feature_enabled invoke wrappers (the
   // session-mention feature gate reads the list; the setter is the contract
@@ -263,12 +276,13 @@ const expectedProtocolHashes = {
   // the set_global_shortcut_config invoke (the dedicated command owns both
   // the plugin registration and the prefs persistence; update_settings
   // stays untouched).
-  settings: 'afdc9da9a5343f61bf90f2d4adcf4e7677df117537c7a8bfc15c2469c450e31c',
+  // Retain Account builtin toggles and typed voice references; updater also
+  // inherits main's Windows progress event and installation lifecycle.
+  settings: '5fadac6005cb2f3c179925fbf0511b445350dd19789254c5383ac193624fc3fd',
   updater: 'cfe92470008c2dade64f891c36a5fa70930478f803d4d2a6d100e68d9c29392b',
-  // Official's bridge/voice.js is untouched by this backflow, so the hash
-  // stays at the Official base value (the community value differs only via
-  // comment differences inside its own voice.js; no invoke/listen surface).
-  voice: '8581b43940d101353fdd1468232dc778c2d1320854af5fdbbbc0326e5cdedbbb',
+  // Voice draft preparation now carries its typed source/model reference;
+  // session bindings remain authoritative and the command set is unchanged.
+  voice: '79c031f1039f8b8cb46d47c37ec9946706d1ec5378cf06c1f7f4654cdf21bd37',
   // Official-only team-relay surface; unchanged by this backflow.
   teamRelay: '246f7cfd5a5ff4b730e2f3972fe9e74860b51a4781bd323bf10b3d795d24ed1d',
   // Recomputed for the rebind carryover feed-back (review #463 F-Major):
@@ -307,7 +321,7 @@ for (const [domain, files] of Object.entries(protocolSources)) {
 // T0-b 重算：helpers 新增 3 个 invoke 面（get_session_persona_events /
 // get_session_pinvou_reviews / resolveMemoryCandidate 的 invoke(command, args)
 // 参数化入口），合计 74 个签名。
-const expectedSharedBaseHash = '6beead90f5cc96b367c4df834d14369856280c14a715e7c0f806c7c15957b47e';
+const expectedSharedBaseHash = 'f92d9e73a2ed12655bf7516b894c7d3283b5634cd1774e933320ed122d889013';
 const sharedBaseSource = fs.readFileSync(path.join(root, 'src', 'shared', 'bridge-shared-helpers.js'), 'utf8');
 const sharedBaseSignatures = [
   ...extractCalls(sharedBaseSource, 'invoke').map(call => `shared/bridge-shared-helpers.js:invoke:${call}`),
@@ -318,7 +332,8 @@ if (!expectedSharedBaseHash) console.log(`sharedBase: ${sharedBaseHash} (${share
 else assert.equal(sharedBaseHash, expectedSharedBaseHash, 'shared bridge payload protocol changed');
 
 const featureRegistry = new Proxy({}, {
-  get() {
+  get(target, name) {
+    if (Object.prototype.hasOwnProperty.call(target, name)) return target[name];
     return () => new Proxy({}, { get: () => function () {} });
   },
 });
@@ -344,6 +359,7 @@ const context = vm.createContext({
   URL,
   Blob,
 });
+vm.runInContext(read('bridge/account-platform.js'), context, { filename: 'bridge/account-platform.js' });
 // bridge.js delegates shared helpers to window.PinvouBridgeShared; index.html loads
 // the shared payload before the bridges, so the harness loads it first too.
 vm.runInContext(fs.readFileSync(path.join(root, 'src', 'shared', 'bridge-shared-helpers.js'), 'utf8'),

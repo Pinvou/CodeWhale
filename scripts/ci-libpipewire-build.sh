@@ -45,7 +45,7 @@ if [[ -n "${PINVOU_PIPEWIRE_SOURCE_ARCHIVE:-}" ]]; then
   cp -- "$PINVOU_PIPEWIRE_SOURCE_ARCHIVE" "$work/pipewire.tar.gz"
 else
   curl --proto '=https' --tlsv1.2 --location --silent --show-error --fail \
-    --retry 3 --retry-all-errors --max-time 300 \
+    --retry 3 --retry-delay 2 --retry-max-time 180 --retry-all-errors --max-time 300 \
     "https://gitlab.freedesktop.org/pipewire/pipewire/-/archive/${PW_VERSION}/pipewire-${PW_VERSION}.tar.gz" \
     -o "$work/pipewire.tar.gz"
 fi

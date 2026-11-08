@@ -1,0 +1,1 @@
+-- Payment instructions are intentionally not restored after an order becomes non-payable.

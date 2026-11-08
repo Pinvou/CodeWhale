@@ -1,0 +1,4 @@
+DROP INDEX sms_verification_attempts_retention_idx;
+DROP INDEX sms_send_attempts_retention_idx;
+DROP INDEX sms_challenges_retention_idx;
+DROP INDEX slider_captcha_retention_idx;
