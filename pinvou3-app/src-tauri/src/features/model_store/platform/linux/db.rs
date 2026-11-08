@@ -2280,7 +2280,10 @@ mod tests {
         assert_eq!(rows[0].card_id, "card-run");
         assert!(rows[0].running, "running 列的 i64→bool 映射");
         assert_eq!(rows[0].container_name.as_deref(), Some("pw-card-run"));
-        assert_eq!(rows[0].endpoint_url.as_deref(), Some("http://127.0.0.1:9000"));
+        assert_eq!(
+            rows[0].endpoint_url.as_deref(),
+            Some("http://127.0.0.1:9000")
+        );
         assert_eq!(rows[0].engine_version.as_deref(), Some("1.2.3"));
         assert_eq!(rows[0].status, "deployed");
         // 停用卡：可空字段必须是 None 而不是空串（NULL 映射回归钉）。
@@ -2333,7 +2336,11 @@ mod tests {
         let rows = list_running_store_models_admission_columns()
             .unwrap_or_else(|e| panic!("admission 轻量查询执行失败：{e}"));
         // 停用卡已被 SQL 过滤，只剩两张运行中的卡。
-        assert_eq!(rows.len(), 2, "停用卡应被 WHERE running != 0 挡住：{rows:?}");
+        assert_eq!(
+            rows.len(),
+            2,
+            "停用卡应被 WHERE running != 0 挡住：{rows:?}"
+        );
 
         let full = rows.iter().find(|r| r.card_id == "card-run").unwrap();
         assert_eq!(full.install_engine.as_deref(), Some("#!/bin/sh\necho run"));
@@ -2341,7 +2348,10 @@ mod tests {
         assert_eq!(full.resource_requirements.gpu_vram_peak_mib, Some(16384));
 
         let bad = rows.iter().find(|r| r.card_id == "card-bad").unwrap();
-        assert!(bad.install_engine.is_none(), "坏 JSON 行应降级 NULL 而不是报错");
+        assert!(
+            bad.install_engine.is_none(),
+            "坏 JSON 行应降级 NULL 而不是报错"
+        );
         assert!(
             bad.common_sh.is_none(),
             "合法标量（'5'）不是 object，json_type 守门应降级 NULL"
