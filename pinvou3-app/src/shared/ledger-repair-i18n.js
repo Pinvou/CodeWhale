@@ -460,3 +460,31 @@ const reconciliationCaseDateCopy = {
   }
 };
 for (const language of ['zh', 'en', 'ja']) Object.assign(ledgerRepairCopy[language], reconciliationCaseDateCopy[language]);
+
+ledgerRepairCopy.zh.ledgerTargetEntry = {
+  task: '修正平台账户的入账归属', help: '根据已获权的账务资料填写完整 ID。读取服务端快照后，再核对分录和两侧账户。',
+  fields: {
+    target_resource_id: { label: '待修复过账 ID', help: '需要更正归属的过账记录。' },
+    target_journal_entry_id: { label: '关联账目分录 ID', help: '包含该笔过账的账目分录。' },
+    wrong_ledger_account_id: { label: '当前入账的平台账户 ID', help: '原过账错误计入的账户。' },
+    correct_ledger_account_id: { label: '应入账的平台账户 ID', help: '更正后应归属的账户。' },
+  },
+};
+ledgerRepairCopy.en.ledgerTargetEntry = {
+  task: 'Correct the platform account assigned to a posting', help: 'Enter full IDs from records you are authorized to view. Check the journal entry and both accounts after reading the server snapshot.',
+  fields: {
+    target_resource_id: { label: 'Posting ID to correct', help: 'The posting recorded under the wrong account.' },
+    target_journal_entry_id: { label: 'Related journal entry ID', help: 'The journal entry that contains this posting.' },
+    wrong_ledger_account_id: { label: 'Platform account ID currently posted to', help: 'The account that received the original posting in error.' },
+    correct_ledger_account_id: { label: 'Intended platform account ID', help: 'The account that should receive the posting.' },
+  },
+};
+ledgerRepairCopy.ja.ledgerTargetEntry = {
+  task: '転記先のプラットフォーム口座を訂正', help: '閲覧権限のある帳簿から ID をすべて入力します。サーバーのスナップショット取得後に、仕訳と両方の口座を確認してください。',
+  fields: {
+    target_resource_id: { label: '訂正する転記 ID', help: '誤った口座に記録された転記です。' },
+    target_journal_entry_id: { label: '関連する仕訳 ID', help: 'この転記を含む仕訳です。' },
+    wrong_ledger_account_id: { label: '現在の転記先口座 ID', help: '誤って転記されたプラットフォーム口座です。' },
+    correct_ledger_account_id: { label: '正しい転記先口座 ID', help: '本来の転記先となるプラットフォーム口座です。' },
+  },
+};

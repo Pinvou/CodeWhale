@@ -453,3 +453,11 @@
   .adm-restored-shell .adm-billing-task-group .adm-tabs button{width:100%;max-width:100%;margin:0}
 }
 @media(max-width:360px){.adm-restored-shell .adm-billing-task-group .adm-tabs{grid-template-columns:minmax(0,1fr)}}
+
+.adm-restored-shell .adm-financial-repair-target .adm-ledger-target-intro{grid-column:1/-1;min-width:0;padding:8px 10px;border-radius:8px;background:var(--adm-soft)}
+.adm-restored-shell .adm-ledger-target-intro strong{font-weight:650}
+.adm-restored-shell .adm-ledger-target-intro p{margin:4px 0 0;color:var(--adm-muted);font-size:12px}
+.adm-restored-shell .adm-ledger-target-form>.adm-ledger-target-field{display:grid;align-self:start;min-width:0;gap:6px}
+.adm-restored-shell .adm-ledger-target-field>small{color:var(--adm-muted);font-size:12px;line-height:1.45;overflow-wrap:break-word}
+.adm-restored-shell .adm-financial-repair .adm-ledger-target-form input:focus,
+.adm-restored-shell .adm-financial-repair .adm-ledger-target-form>button:focus{outline:3px solid var(--adm-primary);outline-offset:2px}

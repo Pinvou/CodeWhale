@@ -345,6 +345,7 @@ try {
     const precheckURL = '/api/admin/account/admin/v2/approval-command-prechecks';
     const draftURL = '/api/admin/approvals/requests';
     const copy = async () => (await page.evaluate(() => window.restored.copy())).ledger;
+    const targetFields = ['target_resource_id', 'target_journal_entry_id', 'wrong_ledger_account_id', 'correct_ledger_account_id'];
     const fill = async (selector, value) => {
       const modifier = process.platform === 'darwin' ? 'Meta' : 'Control';
       await page.focus(selector); await page.keyboard.down(modifier); await page.keyboard.press('KeyA'); await page.keyboard.up(modifier); await page.keyboard.press('Backspace');
@@ -353,7 +354,7 @@ try {
       assert.equal(await page.$eval(selector, node => node.value), value, 'actual input text equals the requested keyboard entry');
     };
     const read = async (expectedPoints, expectedMicrocredits) => {
-      const ready = await page.$eval(`${form} .adm-financial-repair-target`, node => ({ value: node.querySelector('[data-ledger-amount]').value, invalid: node.querySelector('[data-ledger-amount]').getAttribute('aria-invalid'), buttonText: node.querySelector('button').textContent, disabled: node.querySelector('button').disabled, hint: node.querySelector('small').textContent }));
+      const ready = await page.$eval(`${form} .adm-financial-repair-target`, node => ({ value: node.querySelector('[data-ledger-amount]').value, invalid: node.querySelector('[data-ledger-amount]').getAttribute('aria-invalid'), buttonText: node.querySelector('button').textContent, disabled: node.querySelector('button').disabled, hint: node.ownerDocument.getElementById(node.querySelector('[data-ledger-amount]').getAttribute('aria-describedby').split(' ')[0]).textContent }));
       assert.equal(ready.value, expectedPoints);
       assert.equal(ready.invalid, null);
       assert.equal(ready.buttonText, (await copy()).readFacts);
@@ -371,7 +372,7 @@ try {
       assert.ok(await page.$eval(form, (node, hint) => node.textContent.includes(hint), (await copy()).amountPointsHint));
     }
     const ids = ['11111111-1111-4111-8111-111111111111', '22222222-2222-4222-8222-222222222222', '33333333-3333-4333-8333-333333333333', '44444444-4444-4444-8444-444444444444'];
-    for (let index = 0; index < ids.length; index++) await fill(`${form} .adm-financial-repair-target label:nth-of-type(${index + 2}) input`, ids[index]);
+    for (let index = 0; index < ids.length; index++) await fill(`${form} .adm-financial-repair-target input[name="${targetFields[index]}"]`, ids[index]);
     await fill(amount, '1.2345');
     await page.evaluate(() => { window.restored.ledgerPlan = { amount: '12345', deferred: false }; });
     await read('1.2345', '12345'); await page.waitForSelector(`${form} .adm-financial-repair-draft`);
@@ -409,7 +410,7 @@ try {
     await page.evaluate(() => new Promise(resolve => requestAnimationFrame(resolve)));
     assert.equal(await page.$(`${form} .adm-financial-repair-draft`), null, 'retired client response cannot restore an accepted projection');
     // Refreshing the real parent can remount its children. Re-enter references.
-    for (let index = 0; index < ids.length; index++) await fill(`${form} .adm-financial-repair-target label:nth-of-type(${index + 2}) input`, ids[index]);
+    for (let index = 0; index < ids.length; index++) await fill(`${form} .adm-financial-repair-target input[name="${targetFields[index]}"]`, ids[index]);
     await fill(amount, '922337203685477.5807');
     await page.evaluate(() => { window.restored.ledgerPlan = { amount: '9223372036854775807', deferred: false }; });
     await read('922337203685477.5807', '9223372036854775807'); await page.waitForSelector(`${form} .adm-financial-repair-draft`);

@@ -44,7 +44,9 @@ export function AdminFinancialRepairDraftForm(props) {
 }
 
 function LedgerRepairDraftForm({ client, copy, owner, onCreated }) {
-  const [commandType, setCommandType] = useState('LEDGER_REPAIR');
+  const commandType = 'LEDGER_REPAIR';
+  const entry = copy.ledgerTargetEntry;
+  const targetEntryID = useId();
   const [values, setValues] = useState({});
   const [amountPoints, setAmountPoints] = useState('');
   const [amountTouched, setAmountTouched] = useState(false);
@@ -86,7 +88,14 @@ function LedgerRepairDraftForm({ client, copy, owner, onCreated }) {
   const displayedPoints = pending ? ledgerMicrocreditsToPoints(frozenAmount) : amountPoints;
   const displayedMicrocredits = pending ? String(frozenAmount) : values.amount_microcredits || '';
   const amountInvalid = !pending && amountPoints !== '' && !displayedMicrocredits;
-  const label = (field) => (field.key === 'amount_microcredits' ? copy.amountPointsLabel : field.key === 'target_resource_id' ? copy.targets[commandType] : copy.fields[field.key]);
+  const label = (field) => field.key === 'amount_microcredits' ? copy.amountPointsLabel : entry.fields[field.key].label;
+  const fieldValue = (field) => {
+    if (field.key === 'amount_microcredits') return displayedPoints;
+    if (pending && visibleFacts) return field.key === 'target_resource_id'
+      ? pending.projection.target_resource_id
+      : pending.projection.normalized_command[field.key] || '';
+    return values[field.key] || '';
+  };
   const setValue = (key, value) => {
     factsRevision.current += 1;
     acceptedRevision.current = null;
@@ -103,19 +112,6 @@ function LedgerRepairDraftForm({ client, copy, owner, onCreated }) {
     setAmountPoints(value);
     setValue('amount_microcredits', microcredits);
   };
-  const changeCommand = (next) => {
-    factsRevision.current += 1;
-    acceptedRevision.current = null;
-    setBusy((current) => current === 'facts' ? '' : current);
-    setCommandType(next);
-    setValues({});
-    setAmountPoints(''); setAmountTouched(false);
-    setFacts(null);
-    setProjection(null);
-    setFailure('');
-    setCreated('');
-  };
-
   const readFacts = async (event) => {
     event.preventDefault();
     if (locked) return;
@@ -197,22 +193,25 @@ function LedgerRepairDraftForm({ client, copy, owner, onCreated }) {
 
   return <section className="adm-financial-repair" aria-label={copy.title}>
     <h3>{copy.title}</h3>
-    <p>{copy.lead}</p>
-    <form className="adm-financial-repair-target" onSubmit={readFacts}>
-      <label>{copy.command}
-        <select disabled={locked} value={commandType} onChange={(event) => changeCommand(event.target.value)}>
-          {['LEDGER_REPAIR'].map((command) => <option key={command} value={command}>{command}</option>)}
-        </select>
-      </label>
-      {fields.map((field) => <label key={field.key}>{label(field)}
-        <input disabled={locked} required value={field.key === 'amount_microcredits' ? displayedPoints : values[field.key] || ''}
-          inputMode={field.key === 'amount_microcredits' ? 'decimal' : field.kind === 'integer' ? 'numeric' : 'text'}
-          data-ledger-amount={field.key === 'amount_microcredits' ? '' : undefined}
-          aria-describedby={field.key === 'amount_microcredits' ? `${amountHintID}${amountTouched && amountInvalid ? ` ${amountErrorID}` : ''}` : undefined}
-          aria-invalid={field.key === 'amount_microcredits' && amountTouched && amountInvalid ? true : undefined}
-          onBlur={field.key === 'amount_microcredits' ? () => setAmountTouched(true) : undefined}
-          onChange={(event) => field.key === 'amount_microcredits' ? setAmount(event.target.value) : setValue(field.key, event.target.value)} />
-      </label>)}
+    <form className="adm-financial-repair-target adm-ledger-target-form" onSubmit={readFacts}>
+      <div className="adm-ledger-target-intro"><strong>{entry.task}</strong><p>{entry.help}</p></div>
+      {fields.map((field) => {
+        const amountField = field.key === 'amount_microcredits';
+        const inputID = targetEntryID + '-' + field.key;
+        const input = <input id={inputID} name={field.key} disabled={locked} required value={fieldValue(field)}
+          inputMode={amountField ? 'decimal' : field.kind === 'integer' ? 'numeric' : 'text'}
+          data-ledger-amount={amountField ? '' : undefined}
+          aria-describedby={amountField ? amountHintID + (amountTouched && amountInvalid ? ' ' + amountErrorID : '') : inputID + '-help'}
+          aria-invalid={amountField && amountTouched && amountInvalid ? true : undefined}
+          onBlur={amountField ? () => setAmountTouched(true) : undefined}
+          onChange={(event) => amountField ? setAmount(event.target.value) : setValue(field.key, event.target.value)} />;
+        if (amountField) return <label key={field.key}>{label(field)}{input}</label>;
+        return <div className="adm-ledger-target-field" key={field.key}>
+          <label htmlFor={inputID}>{label(field)}</label>
+          {input}
+          <small id={inputID + '-help'}>{entry.fields[field.key].help}</small>
+        </div>;
+      })}
       <small id={amountHintID}>{copy.amountPointsHint}{displayedMicrocredits && <> {copy.amountPointsEquivalent.replace('{amount}', displayedMicrocredits)}</>}</small>
       {amountTouched && amountInvalid && <small id={amountErrorID} role="alert">{copy.amountPointsInvalid}</small>}
       <button type="submit" disabled={locked || amountInvalid}>{busy === 'facts' ? copy.reading : copy.readFacts}</button>
