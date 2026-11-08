@@ -467,6 +467,46 @@ test("completion must be authenticated by the orchestrator even with a valid dif
     { code: "evidence_run_completion_invalid" });
 });
 
+async function replaceCompletionBytes(evidence, root, bytes) {
+  const artifact = evidence.artifacts.find((item) => item.path === "gates/run-completion.json");
+  await writeFile(join(root, ...artifact.path.split("/")), bytes);
+  artifact.sha256 = hash(bytes);
+  evidence.run_completion_artifact_sha256 = artifact.sha256;
+  signArtifact(artifact);
+}
+
+test("completion marker binds its source commit even when the changed bytes are authentically signed", async (t) => {
+  const evidence = await validEvidence();
+  const root = await mkdtemp(join(tmpdir(), "pinvou-completion-commit-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await materializeEvidence(evidence, root);
+  await validateReleaseEvidence(evidence, validationOptions({ evidenceRoot: root }));
+  const value = JSON.parse(await readFile(join(root, "gates/run-completion.json"), "utf8"));
+  value.source_commit_sha = "c".repeat(40);
+  // Rebind the digest and genuine orchestrator signature so only the marker's
+  // source commit disagrees, rather than failing the earlier hash/signature pass.
+  await replaceCompletionBytes(evidence, root, Buffer.from(`${JSON.stringify(value)}\n`));
+  await assert.rejects(() => validateReleaseEvidence(evidence, validationOptions({ evidenceRoot: root })),
+    { code: "evidence_run_completion_invalid" });
+});
+
+test("completion marker enforces its 16 KiB byte boundary after valid hashing and signing", async (t) => {
+  const evidence = await validEvidence();
+  const root = await mkdtemp(join(tmpdir(), "pinvou-completion-byte-limit-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await materializeEvidence(evidence, root);
+  const bytes = await readFile(join(root, "gates/run-completion.json"));
+  assert.ok(bytes.length < 16 * 1024);
+  // JSON whitespace keeps both boundary inputs semantically valid. Their
+  // updated digest/signature isolates the bounded reader from other guards.
+  const boundary = Buffer.concat([bytes, Buffer.alloc(16 * 1024 - bytes.length, 0x20)]);
+  await replaceCompletionBytes(evidence, root, boundary);
+  await validateReleaseEvidence(evidence, validationOptions({ evidenceRoot: root }));
+  await replaceCompletionBytes(evidence, root, Buffer.concat([boundary, Buffer.from(" ")]));
+  await assert.rejects(() => validateReleaseEvidence(evidence, validationOptions({ evidenceRoot: root })),
+    { code: "evidence_run_completion_invalid" });
+});
+
 test("qualification rechecks the authenticated certificate intersection after the final provenance await", async (t) => {
   const evidence = await validEvidence();
   const root = await mkdtemp(join(tmpdir(), "pinvou-provider-final-certificate-"));
