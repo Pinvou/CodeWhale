@@ -9,6 +9,8 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const src = path.join(here, '..', 'src', 'features', 'pet', 'pet-card-state.js');
 const i18nSrc = path.join(here, '..', 'src', 'shared', 'i18n.js');
 const connectorI18nSrc = path.join(here, '..', 'src', 'shared', 'connector-i18n.js');
+const accountPlatformI18nSrc = path.join(here, '..', 'src', 'shared', 'account-platform-i18n.js');
+const productAdmissionI18nSrc = path.join(here, '..', 'src', 'shared', 'product-admission-i18n.js');
 const dir = mkdtempSync(path.join(tmpdir(), 'pinvou3-pet-card-state-'));
 // pet-card-state.js imports ../../shared/i18n.js，保持两层目录结构以便相对路径解析
 const tmp = path.join(dir, 'a', 'b', 'pet-card-state.mjs');
@@ -19,9 +21,22 @@ try {
   copyFileSync(src, tmp);
   copyFileSync(i18nSrc, path.join(dir, 'shared', 'i18n.js'));
   copyFileSync(connectorI18nSrc, path.join(dir, 'shared', 'connector-i18n.js'));
-  // Preserve the locale modules' transitive imports as dictionaries evolve.
-  cpSync(path.join(here, '..', 'src', 'shared', 'i18n'), path.join(dir, 'shared', 'i18n'), { recursive: true });
-  const cards = await import(`${pathToFileURL(tmp).href}?t=${Date.now()}`);
+  copyFileSync(accountPlatformI18nSrc, path.join(dir, 'shared', 'account-platform-i18n.js')); copyFileSync(path.join(here, '..', 'src', 'shared', 'admin-platform-i18n.js'), path.join(dir, 'shared', 'admin-platform-i18n.js'));
+  copyFileSync(productAdmissionI18nSrc, path.join(dir, 'shared', 'product-admission-i18n.js'));
+copyFileSync(path.join(here, '..', 'src', 'shared', 'registration-bonus-i18n.js'), path.join(dir, 'shared', 'registration-bonus-i18n.js'));
+copyFileSync(path.join(here, '..', 'src', 'shared', 'account-closure-i18n.js'), path.join(dir, 'shared', 'account-closure-i18n.js'));
+copyFileSync(path.join(here, '..', 'src', 'shared', 'account-closed-grants-i18n.js'), path.join(dir, 'shared', 'account-closed-grants-i18n.js'));
+copyFileSync(path.join(here, '..', 'src', 'shared', 'entitlement-correction-i18n.js'), path.join(dir, 'shared', 'entitlement-correction-i18n.js'));
+copyFileSync(path.join(here, '..', 'src', 'shared', 'finance-i18n.js'), path.join(dir, 'shared', 'finance-i18n.js'));
+copyFileSync(path.join(here, '..', 'src', 'shared', 'reconciliation-i18n.js'), path.join(dir, 'shared', 'reconciliation-i18n.js'));
+copyFileSync(path.join(here, '..', 'src', 'shared', 'token-management-i18n.js'), path.join(dir, 'shared', 'token-management-i18n.js'));
+copyFileSync(path.join(here, '..', 'src', 'shared', 'ledger-repair-i18n.js'), path.join(dir, 'shared', 'ledger-repair-i18n.js'));
+// Include every current shared/i18n.js domain re-export in the isolated tree.
+for (const name of ['organization-i18n.js', 'model-usage-i18n.js', 'account-closure-i18n.js', 'entitlement-correction-i18n.js', 'account-closed-grants-i18n.js', 'audit-i18n.js', 'platform-role-i18n.js', 'registration-repair-i18n.js', 'account-layout-i18n.js', 'admin-role-presentation-i18n.js']) {
+  copyFileSync(path.join(here, '..', 'src', 'shared', name), path.join(dir, 'shared', name));
+}
+// Preserve the locale modules' transitive imports as dictionaries evolve.
+  cpSync(path.join(here, '..', 'src', 'shared', 'i18n'), path.join(dir, 'shared', 'i18n'), { recursive: true });  const cards = await import(`${pathToFileURL(tmp).href}?t=${Date.now()}`);
 
   const initial = cards.createPetCardUiState();
   const expanded = cards.petCardUiReducer(initial, { type: 'toggle-expand', sessionId: 'a' });

@@ -45,12 +45,12 @@ mkdir -p "$PINVOU_UPDATE_CI_PUBLIC_ROOT/public" "$PINVOU_UPDATE_CI_PUBLIC_ROOT/s
 printf '%s\n' '{"platforms":{"linux-x86_64":{"version":"0.10.4"},"macos-universal":{"version":"0.10.4"}}}' \
   > "$PINVOU_UPDATE_CI_PUBLIC_ROOT/public/latest.json"
 chmod 0755 "$PINVOU_UPDATE_CI_PUBLIC_ROOT"
-docker build --file update-release-console/Dockerfile update-release-console
+docker build --build-arg NODE_IMAGE="$PINVOU_UPDATE_NODE_IMAGE" --file update-release-console/Dockerfile update-release-console
 compose config --quiet
 docker run --rm \
   -v "$PWD/update-release-console/deploy/nginx-test.conf:/etc/nginx/nginx.conf:ro" \
   -v "$PWD/update-release-console/deploy/nginx-location.conf:/etc/nginx/pinvou3-release-location.conf:ro" \
-  nginx:1.27-alpine nginx -t
+  mirror.gcr.io/library/nginx@sha256:65645c7bb6a0661892a8b03b89d0743208a18dd2f3f17a54ef4b76fb8e2f2a10 nginx -t
 compose up --detach --build
 address=$(compose port console 8792)
 port=${address##*:}

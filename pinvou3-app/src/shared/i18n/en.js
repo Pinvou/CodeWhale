@@ -31,7 +31,7 @@ const conversationEn = {
   attachment:'Attachment', operations:(count,failedCount)=>`${count} operations${failedCount?` · ${failedCount} failed`:''}`, copyReply:'Copy response', copyReplySuccess:'Copied', copyReplyFailed:'Copy failed',
   exportReply:'Export', exportReplyTitle:'Export response', exportMarkdown:'Markdown document', exportMarkdownHint:'Default; preserves source formatting', exportHtml:'HTML document', exportHtmlHint:'Best for viewing in a browser', exportSuccess:'Exported', exportFailed:'Export failed', exportTooLarge:'The response exceeds the export size limit',
   shareReply:'Share', shareReplyTitle:'Share response', shareSystem:'System share', shareSystemHint:'Choose an installed communication app', shareApps:'Copy content and open app', shareSuccess:'Shared', shareCopiedOpen:app=>`Content copied. Tried to open ${app}; paste there to send.`, shareCopiedWeb:app=>`Content copied. Open ${app} and paste to send.`, shareFailed:'Share failed', shareUnavailable:'System share is unavailable; content was copied', shareTargets:{wechat:'WeChat',wecom:'WeCom',feishu:'Feishu',dingtalk:'DingTalk',qq:'QQ'},
-  technicalDetails:'Technical details',
+  memberQuotaInsufficientTitle:"Insufficient member quota", memberQuotaInsufficientMessage:"Your quota in the current organization is too low to start this task. Contact your organization administrator.", organizationWalletInsufficientTitle:"Insufficient organization balance", organizationWalletInsufficientMessage:"The current organization has insufficient balance to start this task. Contact your organization administrator to add balance.", organizationInsufficientCompletedMessage:"This response is complete, but the organization balance or your member quota is insufficient. Contact your organization administrator before continuing.", technicalDetails:'Technical details', walletInsufficientTitle:'Insufficient balance', walletInsufficientMessage:'Your balance is too low to start this task.', walletInsufficientCompletedTitle:'Insufficient balance', walletInsufficientCompletedMessage:'This response is complete, but you need to recharge before continuing.', rechargeNow:'Recharge now',
 };
 
 const codexEn = {
@@ -312,7 +312,7 @@ export const dictEn = {
         modelContextWindow: 'Context Window (tokens)',
         modelMaxOutput: 'Max Output (tokens)',
         customApiKey: 'API Key',
-        credEnvOverride: 'Env override', credUnavailable: 'Credential unavailable', credConfigured: 'Configured', credNotConfigured: 'Not configured', credEnterNewKey: 'Enter new key to replace', credKeep: 'Keep', credReplace: 'Replace', credDeleteKey: 'Delete Key', clearSearch: 'Clear search', clearInput: 'Clear input', sendMsg: 'Send', apiKeyGateTitle: 'API Key required', apiKeyGateDesc: 'The current model is a cloud model. Configure an API Key to start chatting.', apiKeyGateBtn: 'Configure',
+        credEnvOverride: 'Env override', credUnavailable: 'Credential unavailable', credConfigured: 'Configured', credNotConfigured: 'Not configured', credEnterNewKey: 'Enter new key to replace', credKeep: 'Keep', credReplace: 'Replace', credDeleteKey: 'Delete Key', clearSearch: 'Clear search', clearInput: 'Clear input', sendMsg: 'Send',
         detectLocalVllm: 'Detect local model services',
         detectingLocalVllm: 'Detecting…',
         useVllmConfig: 'Use config',
@@ -346,7 +346,7 @@ export const dictEn = {
         uiMonitor: { bridgeNotReady:'Bridge not ready', readFailed:'Read failed', reading:'Loading', configError:'Configuration error', unverified:'Unverified', authFailed:'Authentication failed', bridgeError:'Monitor bridge is not ready. Open this page in the Tauri app window.', activity:'Activity' },
 
         uiSettings: { common:'Common', system:'System', general:'General', model:'Models', search:'Search', memory:'Memory', community:'User Community', permissions:'Permissions & Environment', data:'Data Management', update:'Updates', help:'Help & Feedback', appearance:'Appearance', language:'Interface Language', languageDesc:'Change the app display language', theme:'Theme', themeDesc:'Follow the system, or choose light / dark', notifications:'Notifications', taskNotice:'Task Completion Alerts', taskNoticeDesc:'Show a system notification when a task finishes', voiceShortcuts:'Voice Shortcuts', voiceShortcutEnable:'Enable Alt voice shortcut', voiceShortcutEnableDesc:'Alt starts voice input. When the input box already has text, Alt edits the current text. Off by default.', voiceShortcutHelp:'View Alt voice shortcut guide', voiceShortcutUnsupportedDesc:'The global Alt shortcut is only supported on Windows. On this platform, Alt voice input works while the app window is focused.', voicePostprocess:'Smart organize', voicePostprocessDesc:'Sends the recognized text — together with any existing input-box draft — to your configured model service to fix errors and organize it into structured input. When off, only on-device rule-based fixes are applied.', voiceShortcutWebDesc:'In the browser, Alt voice input works inside the app window. The global shortcut is unavailable, and only plain transcription is provided — no smart organize or voice editing.',globalShortcuts:'Global Shortcut', globalShortcutEnable:'Enable global shortcut', globalShortcutEnableDesc:'Press the shortcut anytime to bring the window to the front, even while Pinvou runs in the background. Off by default.', globalShortcutAccelerator:'Key combination', globalShortcutPlaceholder:'e.g. Ctrl/Cmd+Alt+P', globalShortcutInvalid:'Invalid shortcut format; use at least one modifier plus a key.', globalShortcutConflict:'The shortcut could not be applied; the combination may already be in use by another app.', globalShortcutUnsupportedDesc:'Global shortcuts are not supported in this desktop environment (for example, a Wayland session).', globalShortcutSaveFailed:'Failed to save the shortcut settings; try again.', desktopAssistant:'Desktop Assistant', pet:'Desktop Companion', petDesc:'Show a persistent companion on the desktop', version:'Version', currentVersion:'Current Version', beta:'Beta', releaseNotes:'Release Notes', noReleaseNotes:'No release notes', downloading:p=>`Downloading update ${p}%`, installingUpdate:'Installing update…', installerStarted:'Installer Started', cancelDownload:'Cancel Download', providers:'ACP' },
-        uiSettingsDetail: { modelSection:'Models', settingsLoadFailed:'Failed to load settings', addModel:'Add model', envManaged:'Model settings managed by environment variables remain visible here, but must be changed in the environment.', localModel:'Local model', defaultTag:'Default', edit:'Edit', delete:'Delete', noModels:'No models', localDefaultName:'Local Qwen3.6', searchList:'Search sources', setDefault:'Set as default', addSearch:'Add search source', searchDescriptions:{ bing:'Built-in search', metaso:'Chinese search service', bocha:'Search service', baidu:'Qianfan AI Search', tavily:'International search service' }, searchSourceHint:'Built-in search works without a key; if the selected service fails, searches fall back to it automatically. Adding a Chinese search service improves long Chinese-language queries.', memoryTypes:{ preference:'Long-term preference', work_context:'Work context', current_focus:'Current focus', recent_activity:'Recent activity' }, memoryDetail:'Memory details', content:'Content', editTitle:label=>`Edit ${label}`, userCallName:'Your name', assistantNickname:'Assistant nickname', callNameDesc:'How the assistant addresses you', assistantNameDesc:'How you address the assistant', unnamedMemory:'Untitled memory', view:'View', enableMemory:'Enable memory', enableMemoryDesc:'PINVOU remembers names, preferences, work context, and recent activity', profile:'Profile', notSet:'Not set', longMemory:'Long-term memory', shortMemory:'Short-term memory', noLongMemory:'No long-term memories', noShortMemory:'No short-term memories', hiddenTasks:'Hidden tasks', archivedAt:date=>`Archived ${date}`, restore:'Restore', noHiddenTasks:'No hidden tasks', noHiddenTasksDesc:'Archived tasks appear here', system:'System', advancedPermission:'Advanced execution permission', advancedPermissionDesc:'Allow the assistant to run advanced commands such as environment configuration', missing:'Missing', installMissing:'Install missing dependencies', feedbackTitle:'Submit an issue or suggestion', feedbackDesc:'Attach images or videos; a privacy notice is shown before submission', submitFeedback:'Submit feedback', editSearch:'Edit search source', apiKeyPlaceholder:'Enter API Key', hide:'Hide', show:'Show', cancel:'Cancel', save:'Save', restartSearchTitle:'Restart to apply search settings?', restartLanguageTitle:'Restart to apply language settings?', restartSearchDesc:'Restart the app before the assistant can use the updated search source or credentials.', restartLanguageDesc:'The interface language changed. Restart to also update the assistant response language.', later:'Later', restartNow:'Restart now', deleteModelTitle:'Delete model?', deleteModelDesc:'This removes the model configuration and its saved credentials.', deleteModel:'Delete model', deleteSearchTitle:'Delete search source?', deleteSearchDesc:name=>`This removes ${name} and its saved credentials.`, deleteSearch:'Delete search source', addSearchDesc:'Choose a search source, then enter the required credentials', closeSettings:'Close settings', chooseModelDesc:'Choose a model, then enter the required credentials', collapse:'Collapse', change:'Change', customModel:'Custom model', localModelName:name=>name ? `Local ${name}` : 'Local model', apiKeyReadFailed:'Failed to read API Key', localModelId:'Local model ID', modelId:'Model ID', modelIdPlaceholder:'Enter model ID', customModelTitle:provider=>`Custom ${provider} model`, customModelDesc:'Enter a model ID manually', customLocalDesc:'Enter the model ID exposed by the local service', customCompatibleDesc:'Enter the model ID and service URL manually', modelDescriptions:{ '本地服务默认模型':'Default local service model', '高能力模型':'High-capability model', '快速响应':'Fast responses', '最新通用模型':'Latest general-purpose model', '代码场景':'Coding tasks', '高速代码场景':'High-speed coding tasks', '稳定可用':'Stable release', '高性价比':'Cost-effective', '通用能力':'General-purpose', '兼容保留':'Compatibility option', '轻量模型':'Lightweight model' } },
+        uiSettingsDetail: { modelSection:'Models', settingsLoadFailed:'Failed to load settings', addModel:'Add model', envManaged:'Model settings managed by environment variables remain visible here, but must be changed in the environment.', localModel:'Local model', defaultTag:'Default', edit:'Edit', delete:'Delete', noModels:'No models', localDefaultName:'Local Qwen3.6', searchList:'Search sources', setDefault:'Set as default', addSearch:'Add search source', searchDescriptions:{ bing:'Built-in search', metaso:'Chinese search service', bocha:'Search service', baidu:'Qianfan AI Search', tavily:'International search service' }, searchSourceHint:'Built-in search works without a key; if the selected service fails, searches fall back to it automatically. Adding a Chinese search service improves long Chinese-language queries.', memoryTypes:{ preference:'Long-term preference', work_context:'Work context', current_focus:'Current focus', recent_activity:'Recent activity' }, memoryDetail:'Memory details', content:'Content', editTitle:label=>`Edit ${label}`, userCallName:'Your name', assistantNickname:'Assistant nickname', callNameDesc:'How the assistant addresses you', assistantNameDesc:'How you address the assistant', unnamedMemory:'Untitled memory', view:'View', enableMemory:'Enable memory', enableMemoryDesc:'PINVOU remembers names, preferences, work context, and recent activity', profile:'Profile', notSet:'Not set', longMemory:'Long-term memory', shortMemory:'Short-term memory', noLongMemory:'No long-term memories', noShortMemory:'No short-term memories', hiddenTasks:'Hidden tasks', archivedAt:date=>`Archived ${date}`, restore:'Restore', noHiddenTasks:'No hidden tasks', noHiddenTasksDesc:'Archived tasks appear here', system:'System', advancedPermission:'Advanced execution permission', advancedPermissionDesc:'Allow the assistant to run advanced commands such as environment configuration', missing:'Missing', installMissing:'Install missing dependencies', feedbackTitle:'Submit an issue or suggestion', feedbackDesc:'Attach images or videos; a privacy notice is shown before submission', submitFeedback:'Submit feedback', editSearch:'Edit search source', apiKeyPlaceholder:'Enter API Key', hide:'Hide', show:'Show', cancel:'Cancel', save:'Save', restartSearchTitle:'Restart to apply search settings?', restartLanguageTitle:'Restart to apply language settings?', restartSearchDesc:'Restart the app before the assistant can use the updated search source or credentials.', restartLanguageDesc:'The interface language changed. Restart to also update the assistant response language.', later:'Later', restartNow:'Restart now', deleteModelTitle:'Delete model?', deleteModelDesc:'This removes the model configuration and its saved credentials.', deleteModel:'Delete model', deleteSearchTitle:'Delete search source?', deleteSearchDesc:name=>`This removes ${name} and its saved credentials.`, deleteSearch:'Delete search source', addSearchDesc:'Choose a search source, then enter the required credentials', closeSettings:'Close settings', chooseModelDesc:'Choose a model, then enter the required credentials', collapse:'Collapse', change:'Change', customModel:'Custom model', localModelName:name=>name ? `Local ${name}` : 'Local model', apiKeyReadFailed:'Failed to read API Key', localModelId:'Local model ID', modelId:'Model ID', modelIdPlaceholder:'Enter model ID', customModelTitle:provider=>`Custom ${provider} model`, customModelDesc:'Enter a model ID manually', customLocalDesc:'Enter the model ID exposed by the local service', customCompatibleDesc:'Enter the model ID and service URL manually', modelDescriptions:{ '本地服务默认模型':'Default local service model', '高能力模型':'High-capability model', '快速响应':'Fast responses', '代码场景':'Coding tasks', '高性价比':'Cost-effective', '通用能力':'General-purpose', '兼容保留':'Compatibility option', '轻量模型':'Lightweight model' } },
 
         uiPetSettings: { choose:'Choose a companion', placeholder:'Coming soon', preparing:'Preparing animation', animationFailed:'Animation failed to load', coverFailed:'Cover failed to load', retry:'Retry', pets:{ lingling:{name:'Lingling',description:'Star-patterned tail, always lively'}, langlang:{name:'Langlang',description:'Black outfit and glasses, calmly by your side'}, 'ace-taffy':{name:'Ace Taffy',description:'Pink hair and crown, cheering you on'} } },
         uiScheduled: { title:'Scheduled Tasks', subtitle:'Let PINVOU automatically handle recurring work', newTask:'New Task', templates:'Recommended Templates', myTasks:'My Tasks', loading:'Loading scheduled tasks…', empty:'No matching scheduled tasks', view:n=>`View scheduled task: ${n}`, useTemplate:n=>`Use ${n} template`, running:'Task is running', unread:'Unviewed run conversation', navUnreadAria:'Scheduled tasks have unviewed run conversations', closeError:'Dismiss error', deleteTitle:'Delete scheduled task?', deleteDescription:n=>`“${n}” will stop running and be removed from the task list. Previous run history will be kept.`, cancel:'Cancel', delete:'Delete', save:'Save', filterAll:'All', filterActive:'Enabled', filterPaused:'Paused', active:'Active', paused:'Paused', enabled:'Enabled', unknown:'Unknown', notScheduled:'Not scheduled', noSchedule:'No schedule', waitingDispatch:'Waiting to run', soon:'Starting soon', nextRun:(time,remaining)=>`Next: ${time} (${remaining})`, date:(month,day)=>`${month}/${day} `, daysAfter:(days,hours)=>`in ${days}d${hours ? ` ${hours}h` : ''}`, hoursAfter:(hours,minutes)=>`in ${hours}h${minutes ? ` ${minutes}m` : ''}`, minutesAfter:(minutes,seconds)=>`in ${minutes}m ${seconds}s`, secondsAfter:seconds=>`in ${seconds}s`, runStatus:{ queued:'Queued', running:'Running', completed:'Completed', failed:'Failed', canceled:'Canceled' }, weekdays:[['Monday','Mon'],['Tuesday','Tue'],['Wednesday','Wed'],['Thursday','Thu'],['Friday','Fri'],['Saturday','Sat'],['Sunday','Sun']], hourCount:n=>`${n} hour${n === 1 ? '' : 's'}`, choose:'Choose', autoModel:'Auto select', currentModel:'Current model', reselectModel:n=>`Choose another model · ${n}`, repeatOptions:{ workdays:'Weekdays', daily:'Daily', weekly:'Weekly', hourly:'Hourly', once:'Once', custom:'Custom' }, everyHours:n=>`Every ${n} hours`, startsAt:time=>`from ${time}`, repeat:'Repeat', interval:'Interval', dateLabel:'Days', startTime:'Start time', time:'Time', chooseRepeat:'Choose repeat frequency', chooseInterval:'Choose hourly interval', chooseDate:'Choose run days', chooseStartTime:'Choose start time', chooseRunTime:'Choose run time', setStart:'Set start', createFromTemplate:'Create from template', closeCreate:'Close new task', taskName:'Task name', taskNamePlaceholder:'For example: Daily data backup', taskPrompt:'Instructions', taskPromptPlaceholder:'Describe what should be done on each run…', saveTask:'Save task', editTask:'Edit task', closeDetail:'Close task details', taskNameAria:'Scheduled task name', taskPromptAria:'Scheduled task instructions', aiModel:'AI model', chooseModel:'Choose scheduled task model', runningStatus:'Status', nextExecution:'Next run', enableTask:'Enable task', runNow:'Run now', openFolder:'Open folder', runHistory:'Run history', records:n=>`${n} record${n === 1 ? '' : 's'}`, noRecords:'No records', openRun:'Open run conversation', noOpenRun:'This run has no conversation to open', openRunLabel:s=>`Open run: ${s}`, runInProgress:'Run in progress', viewRunResult:'Open the conversation to view results', noRunSession:'No conversation available', noRunHistory:'No run history yet', saveState:{ saving:'Saving…', saved:'Saved', invalid:'Name and instructions are required', error:'Save failed' }, pause:n=>`Pause ${n}`, resume:n=>`Resume ${n}`, templateMap:{ 'daily-brief':{name:'Daily Briefing',schedule:'Daily at 8:00',description:'Summarize important news, industry updates, and connected workplace announcements',prompt:'Summarize important news and industry updates from the past 24 hours with sources and links; when Lark or WeCom is connected, include company announcements. Do not scan user directories; save results to the task workspace.'}, 'follow-up-monitor':{name:'Follow-up Monitor',schedule:'Weekdays at 9:00',description:'Review overdue and upcoming items, highlighting risks and next steps',prompt:'Summarize overdue, due-today, and upcoming (next 3 workdays) items from connected Lark or WeCom, with risks and next steps by priority. Query and organize only — do not send, approve, or modify; do not scan user directories.'}, 'weekly-review':{name:'Weekly Review',schedule:'Friday at 16:00',description:'Create a structured weekly report from this week’s workplace activity',prompt:'Create a weekly report from this week’s calendar, to-dos, and workplace messages in connected Lark or WeCom, covering progress, carry-over items, risks, and next week’s plan. Do not scan user directories or send automatically.'}, 'memory-organize':{name:'Memory Organizer',schedule:'Weekdays at 9:30',description:'Keep long-term memory tidy on a schedule: merge duplicates, prune stale items, fix wording',prompt:'Periodically organize my long-term memory: merge duplicate entries, remove outdated or invalid items, and fix vague wording so memory stays concise and accurate. This task runs automatically without opening a conversation; it only organizes memory and does not send messages or make other changes.'} }, noDeliveryTarget:'Delivery target record unavailable', targetSession:'Delivery target session', deliveredTo:id=>`Delivered to session ${id}`  },
@@ -1001,6 +1001,7 @@ stateNotReady: 'Remote control state is not ready; desktop events cannot be proc
 unnegotiatedEvent: event => `The desktop sent an unnegotiated remote control event: ${event}`,
 rpcFailed: 'Remote call failed',
 incompatibleDesktop: 'The desktop version does not support remote control. Update the desktop app first.',
+accountPlatformFirstTurnUnsupported: 'Account Platform models cannot be used for the first message of a new chat on the web. Choose another available model.',
 unsupportedCommand: command => `The current desktop does not support this remote control command: ${command}`,
 commandNotAllowed: command => `Remote control does not allow invoking ${command}`,
 invalidRequestId: 'Invalid remote call request ID',
@@ -1321,6 +1322,10 @@ Object.assign(dictEn.uiSettingsDetail, {
     openrouter:{title:'OpenRouter',configTitle:'OpenRouter',desc:'Official OpenRouter aggregator API'},
     siliconflow:{title:'SiliconFlow China',configTitle:'SiliconFlow',desc:'Official SiliconFlow China API'},
     siliconflow_global:{title:'SiliconFlow Global',configTitle:'SiliconFlow Global',desc:'SiliconFlow international API (keys are region-locked)'},
+    mistral:{title:'Mistral AI',configTitle:'Mistral AI',desc:'Official Mistral API (European flagship vendor)'},
+    meta:{title:'Meta Model API (Muse Spark)',configTitle:'Meta Model API',desc:'Official Meta model API'},
+    together:{title:'Together AI',configTitle:'Together AI',desc:'Together AI open-model hosting platform'},
+    groq:{title:'Groq',configTitle:'Groq',desc:'Groq ultra-low-latency inference platform'},
     openai_compatible:{title:'OpenAI Compatible',desc:'Custom OpenAI-compatible endpoint'},
     openai_responses:{title:'OpenAI Responses Compatible',desc:'Custom OpenAI Responses-compatible endpoint'},
   },
@@ -1350,17 +1355,16 @@ Object.assign(dictEn.uiSettingsDetail.modelDescriptions, {
   'Coding Plan 自动模型':'Coding Plan automatic model',
   '自动模型，智能路由':'Automatic model with smart routing',
   'Hy 套餐专属模型':'Exclusive to the Hy plan',
-  'K2.8 Preview，全档 1M 上下文':'K2.8 Preview, 1M context on all tiers',
-  'K3 长上下文模型':'K3 long-context model', '高速编码模型':'High-speed coding model',
+  'K3 长上下文模型':'K3 long-context model',
   'K3 256K 上下文，价格更低':'K3 with 256K context at a lower price',
-  '官方已转 Legacy，兼容保留':'Officially legacy; kept for compatibility',
+  '上代 Opus，兼容保留':'Previous-generation Opus, kept for compatibility',
   '官方将于 2026-11-18 下线':'Will be retired on 2026-11-18',
   '高速款，官方将于 2026-11-18 下线':'High-speed tier, retires on 2026-11-18',
   '官方已转 Legacy，2026-11-18 下线':'Officially legacy; retires on 2026-11-18',
   '官方已转 Legacy，高速款 2026-11-18 下线':'Officially legacy; high-speed tier retires on 2026-11-18',
   '最新旗舰':'Latest flagship', '上代旗舰推理':'Previous-generation flagship reasoning',
   '均衡性价比':'Balanced and cost-effective', '快速高性价比':'Fast and cost-effective',
-  '快速高性价比，夜间同样四折':'Fast and cost-effective, also 40% credit cost at night',
+  '快速高性价比，夜间同样四折（个人版）':'Fast and cost-effective, also 40% credit cost at night (personal plan)',
   '旗舰推理与编码':'Flagship reasoning and coding', '均衡智能与成本':'Balanced intelligence and cost',
   '低成本高并发':'Low cost, high volume', '上代旗舰':'Previous-generation flagship',
   '快速经济':'Fast and economical',
@@ -1374,15 +1378,13 @@ Object.assign(dictEn.uiSettingsDetail.modelDescriptions, {
   '历史模型，请求自动路由至 GLM-5.3':'Legacy model, requests auto-route to GLM-5.3', '历史模型，自动路由至 GLM-5.3-Flash':'Legacy model, auto-routes to GLM-5.3-Flash',
   'V4.1-Flash 原厂直供':'V4.1-Flash, first-party direct supply', '官方更多模型档':'Official "more models" tier',
   'MiMo 全模态轻量款':'MiMo omni-modal lightweight tier',
-  '10-14 起自动路由至 v2.6-pro，10-21 失效':'Auto-routes to v2.6-pro from 2026-10-14; ids invalid from 2026-10-21',
-  '10-14 起自动路由至 v2.6-flash，10-21 失效':'Auto-routes to v2.6-flash from 2026-10-14; ids invalid from 2026-10-21',
   '多模态高性价比':'Multimodal and cost-effective', '最新多模态高性价比':'Latest multimodal, cost-effective',
-  '新预览旗舰，仅订阅渠道':'New preview flagship, subscription channels only',
   'Kimi 最新旗舰':'Latest Kimi flagship', 'Kimi 编码模型':'Kimi coding model', 'MiniMax 最新旗舰':'Latest MiniMax flagship',
   'V4.1-Flash 主力，1M 上下文，支持图片输入':'V4.1-Flash mainline, 1M context, image input', '在售；官方确认 2026-09-14 后继续提供且计费不变':'On sale; officially continues past 2026-09-14 with billing unchanged',
-  '最新旗舰，强制思考':'Latest flagship, thinking always on', '最新旗舰，1M 上下文多模态':'Latest flagship, 1M context, multimodal',
+  '最新旗舰，强制思考':'Latest flagship, thinking always on', '旗舰模型，1M 上下文多模态':'Flagship model, 1M context, multimodal',
   '最新旗舰，1M 上下文':'Latest flagship, 1M context',
   'Hy4 预览':'Hy4 preview',
+  'Hy4 套餐模型':'Hy4 plan model',
   '上代旗舰推理（纯文本）':'Previous-generation flagship reasoning (text-only)', '上代快速款':'Previous-generation fast model',
   '正式旗舰，夜间 22:00-08:00 四折（个人版）':'GA flagship, 40% credit cost 22:00-08:00 (personal plan)',
   '轻量兼容款，支持图像输入':'Lightweight compatibility option, image input',
@@ -1393,16 +1395,62 @@ Object.assign(dictEn.uiSettingsDetail.modelDescriptions, {
   '低价高效':'Low-cost and efficient',
   'GPT-5.6 家族旗舰，推理与编码':'GPT-5.6 family flagship, reasoning and coding',
   '最强旗舰，高难推理与长程 Agent':'Strongest flagship, hard reasoning and long-running agents',
-  '官方默认推荐，复杂 Agent 编码':'Official default recommendation, complex agentic coding',
+  '新一代 Opus，对标 Fable 5.1，较 Opus 5 降本 40%':'Newest-generation Opus: at Fable 5.1 level, 40% cheaper than Opus 5',
   '新均衡款，较 Sonnet 5 快 30%+，至多省 30%':'New balanced tier: 30%+ faster than Sonnet 5, up to 30% cheaper',
   '上代旗舰，兼容保留':'Previous-generation flagship, kept for compatibility',
   '上代均衡款，兼容保留':'Previous balanced tier, kept for compatibility',
   '最新小旗舰，100K 以下请求较 4.5 降价 90%':'Latest small flagship: 90% below Haiku 4.5 for requests up to 100K tokens',
-  '最快，200K 上下文，Azure 端 2026-11-15 下线':'Fastest, 200K context; retires on Azure on 2026-11-15',
-  '上代稳定 Flash，仍在服务':'Previous-generation stable Flash, still served',
-  '已弃用，请求自动路由至 3.8-flash':'Deprecated; requests auto-route to 3.8-flash',
+  '上代快档，200K 上下文，Azure 端 2026-11-15 下线':'Previous-generation fast tier, 200K context; retires on Azure on 2026-11-15',
   '已弃用，请求自动路由至 3.6-flash':'Deprecated; requests auto-route to 3.6-flash',
-  '编码模型，官方将于 2026-10-28 下线':'Coding model, will be retired on 2026-10-28',
+  // 2026-11-03 refresh: K3.1 Pro / K2 sunset / GA renames / new vendor groups.
+  '最新旗舰，原生视觉，1M 上下文':'Latest flagship, native vision, 1M context',
+  '最新旗舰高速款':'Latest flagship high-speed tier',
+  '上代旗舰（当前默认），1M 上下文':'Previous-generation flagship (current default), 1M context',
+  '代码场景；K2 系列已停新用户，官方拟 2026 年 12 月底下线':'Coding tasks; the K2 series closed to new users, slated to go offline end of December 2026',
+  '高速代码场景；K2 系列拟 2026 年 12 月底下线':'High-speed coding tasks; the K2 series is slated to go offline end of December 2026',
+  '稳定可用；K2 系列拟 2026 年 12 月底下线':'Stable release; the K2 series is slated to go offline end of December 2026',
+  'K2.8 Preview，最高 1M':'K2.8 Preview, up to 1M',
+  'K2.7 Code 高速款，256K':'K2.7 Code high-speed tier, 256K',
+  'Kimi 编码模型（官方推荐档）':'Kimi coding model (officially recommended tier)',
+  'GA 新旗舰（2026-10-19），高效多模态':'GA flagship (2026-10-19), efficient multimodal',
+  '通用能力，官方将于 2026-11-17 下线':'General-purpose; retires on 2026-11-17',
+  '经济款，生成略慢':'Economy tier, slightly slower generation',
+  '快速响应（1017 快照）':'Fast responses (1017 snapshot)',
+  '快速响应，原厂升级 1017 快照':'Fast responses, upgraded in place to the 1017 snapshot',
+  '高能力模型（Pro 档）':'High-capability model (Pro tier)',
+  '上代旗舰（Pro 档）':'Previous-generation flagship (Pro tier)',
+  '6.1 高效款，视觉推理与计算机操作':'GPT-6.1 efficient tier, visual reasoning and computer use',
+  '6.1 高效款':'GPT-6.1 efficient tier',
+  '6.1 均衡旗舰':'GPT-6.1 balanced flagship',
+  '已弃用，自动路由至 3.8-flash；Vertex 端 2027-01-28 下线':'Deprecated; auto-routes to 3.8-flash; retires on Vertex on 2027-01-28',
+  '上代稳定 Flash；Vertex 端 2026-11-19 下线':'Previous-generation stable Flash; retires on Vertex on 2026-11-19',
+  '编码特化模型':'Coding-specialized model',
+  '轻量款，支持图像理解':'Lightweight tier with image understanding',
+  '当前默认，1M 上下文多模态':'Current default, 1M context, multimodal',
+  '上一代，仍在服务':'Previous generation, still served',
+  'MiniMax GA 新旗舰':'MiniMax GA flagship',
+  'MiniMax 上代旗舰':'MiniMax previous-generation flagship',
+  'Claude 新一代 Opus（注意点号拼写）':'Newest-generation Claude Opus (note the dotted spelling)',
+  'Gemini 最新旗舰':'Latest Gemini flagship',
+  '腾讯 Hy4 预览':'Tencent Hy4 preview',
+  'StepFun 预览旗舰':'StepFun preview flagship',
+  '通义旗舰托管版':'Hosted Qwen flagship',
+  '多模态中坚款，已弃用':'Multimodal workhorse, deprecated',
+  '旗舰推理，已弃用':'Flagship reasoning, deprecated',
+  'Kimi 上代旗舰':'Kimi previous-generation flagship',
+  'Kimi K3.1 旗舰（套餐页 1M 名单）':'Kimi K3.1 flagship (on the plan 1M-context list)',
+  'Kimi 旗舰，1M 上下文':'Kimi flagship, 1M context',
+  'GLM 旗舰':'GLM flagship',
+  'GLM 高速款':'GLM high-speed tier',
+  '通义 1M 托管版':'Hosted Qwen, 1M context',
+  '高能力模型，1M 上下文':'High-capability model, 1M context',
+  '高速款，1M 上下文':'High-speed tier, 1M context',
+  '最强旗舰，Agent 与计算机操作':'Strongest flagship for agents and computer use',
+  '上一代版本':'Previous version',
+  '开放权重推理模型':'Open-weight reasoning model',
+  '开放权重轻量推理':'Open-weight lightweight reasoning',
+  'Llama 旗舰档（企业套餐）':'Llama flagship tier (Enterprise plan)',
+  '极速轻量档（企业套餐）':'Ultra-fast lightweight tier (Enterprise plan)',
   '旗舰，编码与 Agent 默认推荐':'Flagship, default pick for coding and agents', '上代旗舰，编码与 Agent':'Previous-generation flagship, coding and agents',
   '4.20 推理，1M 上下文':'4.20 reasoning, 1M context', '4.20 非推理，1M 上下文':'4.20 non-reasoning, 1M context',
   '快速可靠，强工具调用':'Fast and reliable, strong tool calling', '代码 Agent，256K 上下文':'Coding agent, 256K context',
@@ -1420,6 +1468,7 @@ dictEn.uiSettingsDetail.customModelTitles = {
   tencent_coding_plan:'Custom Tencent Cloud Coding Plan model', tencent_token_plan:'Custom Tencent Cloud Token Plan model', kimi_coding_plan:'Custom Kimi Coding Plan model',
   volcengine_coding_plan:'Custom Volcengine Ark Coding Plan model', qwen_coding_plan:'Custom Qwen Coding Plan model',
   openrouter:'Custom OpenRouter model', siliconflow:'Custom SiliconFlow model', siliconflow_global:'Custom SiliconFlow model',
+  mistral:'Custom Mistral model', meta:'Custom Meta model', together:'Custom Together model', groq:'Custom Groq model',
 };
 
 // Official 主线在词典拆分基线之后新增或调整的文案。
@@ -1527,6 +1576,7 @@ dictEn["uiTeamRelay"] = {
     "team_has_open_work": "The team still has open work. Finish all of it before dissolving the team.",
     "revision_conflict": "This work changed moments ago. It has been refreshed; review and retry.",
     "action_not_allowed": "This action is not allowed in the current relay state.",
+    "self_service_enrollment_disabled": "Account sign-in is not enabled on the Team Relay service. Contact the service administrator and try again once it is enabled.",
     "attachment_too_large": "The file exceeds the 20 MiB limit.",
     "attachment_type_not_allowed": "This file type is not supported.",
     "credential_store_failed": "The local credential store could not be accessed securely. Check the system credential store.",
@@ -2043,10 +2093,6 @@ dictEn["uiTeamRelay"] = {
   "lifecycleSyncPending": "The operation is complete, but team data has not synced yet. Sync again to load the latest state."
 };
 dictEn["kbOutWeekdays"] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-dictEn["builtinModelSelect"] = "Backend model";
-dictEn["builtinModelRefresh"] = "Refresh";
-dictEn["builtinModelLoading"] = "Syncing…";
-dictEn["builtinModelEmpty"] = "No backend models";
 dictEn["uiRemote"]["status"]["idle"] = ["Not enabled", "Enable access to create a persistent remote control link."];
 dictEn["uiRemote"]["status"]["starting"] = ["Starting", "Creating the remote control connection."];
 dictEn["uiRemote"]["status"]["connecting_relay"] = ["Connecting", "Connecting to the relay…"];
@@ -2056,7 +2102,6 @@ dictEn["uiRemote"]["status"]["web_client_disconnected"] = ["Browser disconnected
 dictEn["uiRemote"]["status"]["revoked"] = ["Link revoked", "Enable remote control again."];
 dictEn["uiRemote"]["status"]["stopped"] = ["Stopped", "Open this panel to enable access again."];
 dictEn["uiRemote"]["status"]["error"] = ["Connection error", "Remote control is temporarily unavailable. Try again."];
-dictEn["uiSettingsDetail"]["builtinModel"] = "Built-in model";
 dictEn["uiSettingsDetail"]["settingsLoadFailedDetail"] = "Settings cannot be displayed right now. Reopen the page and try again.";
 dictEn["uiScheduled"]["weekdays"] = [["Monday", "Mon"], ["Tuesday", "Tue"], ["Wednesday", "Wed"], ["Thursday", "Thu"], ["Friday", "Fri"], ["Saturday", "Sat"], ["Sunday", "Sun"]];
 dictEn["uiAccount"] = {
@@ -2577,7 +2622,7 @@ dictEn["remoteConversation"] = {
   journalResync: "The conversation state was re-synced.",
   resultUnknownHint: "The connection dropped, so this task's outcome cannot be confirmed.",
   preparedNotSent: "This task has not been committed. Continue the same task, or abandon it before sending a new message.",
-  preparedPayloadLost: "This task was not sent, but its payload cannot be recovered after restart. Abandon it safely before entering it again.",
+  preparedPayloadLost: "This task was not sent, but its payload can no longer be recovered. Abandon it safely before entering it again.",
   outcomeUnknownNoResend: "The task outcome is unknown. It cannot be resent automatically because that might run it twice. Check the controlled device first.",
   commitPreparedTask: "Continue commit",
   abandonPreparedTask: "Abandon safely",
@@ -2603,7 +2648,9 @@ dictEn["remoteConversation"] = {
   attachmentOnlyPrompt: "Process the attachments submitted with this task.",
   addAttachment: "Add remote attachment",
   attachmentCountInvalid: "Select 1–8 remote attachments.",
-  attachmentSizeInvalid: "Each attachment must be nonempty and no larger than 32 MiB.",
+  attachmentSizeInvalid: "Each attachment must be nonempty and no larger than 20 MiB.",
+  attachmentFenced: "A previous attachment upload for this session is unconfirmed; this upload did not start. Check the controlled device, then disconnect and establish a new connection before trying again.",
+  attachmentCapacity: "The attachment upload record limit has been reached; this upload did not start. Check earlier uploads before reconnecting.",
   chatOpenFailed: "Could not open the remote conversation automatically.",
   sessionOpenFailed: "Could not open the session that received the task.",
   openAgain: "Open again",
@@ -2661,5 +2708,24 @@ dictEn.remoteArchive = {
 };
 dictEn.controllerConnection.errorArchiveCapacity = dictEn.remoteArchive.byteBudget;
 // restored: baseline catalog descriptions (referenced by the model catalog data)
-Object.assign(dictEn.uiSettingsDetail.modelDescriptions, { '本地服务默认模型': 'Default model for the local service', '高能力模型': 'High-capability model', '快速响应': 'Fast responses', '最新通用模型': 'Latest general-purpose model', '代码场景': 'Coding tasks', '高速代码场景': 'High-speed coding tasks', '稳定可用': 'Stable release', '高性价比': 'Cost-effective', '通用能力': 'General-purpose', '兼容保留': 'Compatibility option', '轻量模型': 'Lightweight model'
+Object.assign(dictEn.uiSettingsDetail.modelDescriptions, { '本地服务默认模型': 'Default model for the local service', '高能力模型': 'High-capability model', '快速响应': 'Fast responses', '代码场景': 'Coding tasks', '高性价比': 'Cost-effective', '通用能力': 'General-purpose', '兼容保留': 'Compatibility option', '轻量模型': 'Lightweight model'
 });
+
+// F05 complete platform-model selection copy, supplied by shared i18n.
+dictEn.modelAccessTitle = 'Welcome to PINVOU';
+dictEn.modelAccessDesc = 'Sign in to use PINVOU platform models, or connect a local or third-party model.';
+dictEn.modelAccessLogin = 'Sign in';
+dictEn.modelAccessExternal = 'Use a local / third-party model';
+Object.assign(dictEn.uiSettingsDetail, {
+  platformModels:'Pinvou platform models',
+  platformModelsDesc:'Choose the default model for a new blank conversation. Existing conversations are unchanged.',
+  platformModelsLoading:'Loading platform models…',
+  platformModelsSignIn:'Sign in to your Pinvou account to choose a platform model.',
+  platformModelsUnavailable:'Platform models are temporarily unavailable. Try again later.',
+  platformModelsRetry:'Retry loading',
+  appliesToNewSessions:'New conversations',
+  modelDeprecated:'Retiring soon',
+  modelUnavailable:'Unavailable',
+  modelSwitchFailed:'Could not switch models. Try again.',
+});
+dictEn.uiModelReplacement = { title:'This model cannot continue the conversation', lead:'The original conversation and messages remain unchanged. Select a current model and continue in a traceable new branch.', create:'Create replacement branch', creating:'Creating…' , branchTitleSuffix:'Replacement model branch' };

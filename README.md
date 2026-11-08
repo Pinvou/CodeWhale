@@ -165,6 +165,8 @@ git submodule update --init --recursive
 # 以下命令均从仓库根目录执行
 (cd pinvou3-app && npm run lint:ui)
 (cd pinvou3-app && npm run build:ui)
+# 前端测试也会加载账户平台的协议校验器，须安装该目录的锁定依赖
+npm --prefix account-platform ci
 (cd pinvou3-app && npm test)
 
 (cd pinvou3-app/src-tauri && cargo test --lib -- --test-threads=1)

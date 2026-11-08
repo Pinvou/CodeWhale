@@ -1,0 +1,17 @@
+services:
+  probe:
+    image: registry.example.invalid/config-only:never-run
+    volumes:
+      - type: bind
+        source: /opt/fixture-bind-false
+        target: /false
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: /opt/fixture-bind-true
+        target: /true
+        read_only: true
+        bind:
+          create_host_path: true
+      - /opt/fixture-bind-short:/short:ro

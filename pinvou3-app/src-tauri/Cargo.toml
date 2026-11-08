@@ -1,6 +1,6 @@
 [package]
 name = "pinvou3-tauri"
-version = "0.10.17"
+version = "0.10.18"
 description = "品悟智能助手桌面应用后端"
 authors = ["pinvou"]
 license = "MIT"
@@ -91,6 +91,7 @@ tauri-plugin-global-shortcut = "2.3.2"
 
 # 异步 / 错误
 anyhow = "1.0"
+axum = { version = "0.8.5", features = ["json"] }
 async-trait = "0.1" # impl 底座 ToolSpec(kb_search Agentic 工具)
 agent-backend-api = { path = "../../pinvou-cli/crates/agent-backend-api", optional = true }
 tokio = { version = "1.49", features = ["full"] }
@@ -141,7 +142,7 @@ codewhale-execpolicy = { path = "../../CodeWhale/crates/execpolicy" }
 # Windows 系统代理设置(非环境变量)。此前 default-features=false 把它关掉,
 # 导致用「系统代理」模式(非 TUN)的用户模型请求直连而被代理工具的路由规则
 # 绕过。显式启用后,reqwest 在 Client::build() 时自动注入系统代理 matcher。
-reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "blocking", "stream", "query", "multipart", "system-proxy"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "blocking", "stream", "query", "form", "multipart", "system-proxy"] }
 wait-timeout = "0.2"
 
 # rustls 直依赖:仅为在启动时调 aws_lc_rs::default_provider().install_default()
@@ -229,13 +230,15 @@ qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
 futures-util = "0.3"
 rand = "0.10"
-# Keep 0.22: age, codewhale-tui, reqwest 0.12, ureq 2.12, oauth2 5,
+# Keep 0.22: codewhale-tui, reqwest 0.12, ureq 2.12, oauth2 5,
 # hf-hub, ort-sys and rmcp 3 all still require 0.22 (wry 0.57.1 and
 # hyper-util have moved to 0.23); a solo 0.23 bump would only add a second
 # copy. Revisit once upstreams align.
 base64 = "0.22"
 tempfile = "3"
-age = { version = "=0.12.1", default-features = false }
+# Maintained 0.11.5 shares the 0.12.1 parser fixes and retains our X25519 backup wire/key format.
+# 0.12 unconditionally adds HPKE/P-256 with affected crypto-bigint; revisit after an upstream fixed release.
+age = { version = "=0.11.5", default-features = false }
 
 # Computer Use capability foundation (features/computer_use): screen capture via
 # xcap (0.9.8, reusing its re-exported image 0.25 for PNG encoding/scaling, no direct

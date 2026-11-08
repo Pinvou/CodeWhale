@@ -150,7 +150,7 @@ pub fn set_runtime_resource_dir(path: PathBuf) {
     let _ = RUNTIME_RESOURCE_DIR.set(path);
 }
 
-fn runtime_resource_dir() -> Option<PathBuf> {
+pub fn runtime_resource_dir() -> Option<PathBuf> {
     RUNTIME_RESOURCE_DIR
         .get()
         .cloned()

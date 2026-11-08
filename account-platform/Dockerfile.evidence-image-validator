@@ -1,0 +1,16 @@
+ARG GO_BUILD_IMAGE=golang:1.26.6-alpine@sha256:3889b425f035be855a72fb4755265311293b6d414521f0a519d819df32222d83
+FROM ${GO_BUILD_IMAGE} AS build
+ARG GOPROXY=https://proxy.golang.org,direct
+ENV GOPROXY=${GOPROXY}
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN --mount=type=cache,id=pinvou-account-platform-gomod-go126,target=/go/pkg/mod,sharing=locked go mod download
+COPY cmd/evidence-image-validator ./cmd/evidence-image-validator
+RUN --mount=type=cache,id=pinvou-account-platform-gomod-go126,target=/go/pkg/mod,sharing=locked \
+    --mount=type=cache,id=pinvou-account-platform-gobuild-go126,target=/root/.cache/go-build,sharing=locked \
+    CGO_ENABLED=0 go build -mod=readonly -trimpath -ldflags="-s -w" -o /out/validator ./cmd/evidence-image-validator
+FROM scratch
+COPY --from=build /out/validator /validator
+USER 65533:65533
+HEALTHCHECK NONE
+ENTRYPOINT ["/validator"]

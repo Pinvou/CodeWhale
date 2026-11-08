@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import vm from 'node:vm';
 import { fileURLToPath } from 'node:url';
+import { CHAT_RECOVERY_COPY } from '../src/shared/i18n.js';
 
 // Regression for the turn-error display chain: stable backend error codes
 // (session_model_binding_stale:<id>, image_input_unsupported) must reach the
@@ -46,6 +47,7 @@ const documentObject = {
 };
 let invokeResponse = async () => null;
 const windowObject = {
+  PinvouChatRecoveryCopy: CHAT_RECOVERY_COPY,
   PinvouPlatform: {
     kind: 'web',
     isWeb: true,
@@ -157,6 +159,60 @@ await withLanguage('en', () => {
   );
 });
 
+const migrationCases = {
+  en: [/restart Pinvou3/, /restore read access/],
+  ja: [/再起動/, /読み取りアクセス/],
+  'zh-Hans': [/重启/, /恢复读取/],
+};
+for (const [language, [restart, restoreRead]] of Object.entries(migrationCases)) {
+  await withLanguage(language, () => {
+    const pending = 'send_user_message failed: account_platform_migration_incomplete: internal detail';
+    const invalid = 'account_platform_migration_invalid: internal detail';
+    for (const input of [pending, new Error(pending)]) {
+      assert.match(displayTurnError(input), restart);
+      assert.doesNotMatch(displayTurnError(input), /account_platform_migration_|internal detail/);
+    }
+    assert.match(displayTurnError(new Error(invalid)), restoreRead);
+    assert.ok(displayTurnError(invalid).includes('migrations/account-platform-model-v1.json'));
+    assert.equal(displayTurnError('upstream says '+invalid), 'upstream says '+invalid);
+  });
+}
+assert.match(read('src', 'app', 'main.jsx'), /window.PinvouChatRecoveryCopy = CHAT_RECOVERY_COPY/);
+const firstTurnStart = rawBridgeSource.indexOf('  async function runFirstTurnSubmission(');
+const firstTurnEnd = rawBridgeSource.indexOf('  function submitFirstWebTurn(', firstTurnStart);
+assert.ok(firstTurnStart >= 0 && firstTurnEnd > firstTurnStart);
+const firstTurnSource = rawBridgeSource.slice(firstTurnStart, firstTurnEnd);
+for (const [language, [restart, restoreRead]] of Object.entries(migrationCases)) {
+  for (const [detail, code, expectedState, expectedCopy] of [
+    ['send_user_message failed: account_platform_migration_incomplete: internal detail', 'rpc_failed', 'failed', restart],
+    ['account_platform_migration_invalid: internal detail', 'rpc_failed', 'failed', restoreRead],
+    ['connection ended after submit', 'outcome_unknown', 'unknown', null],
+  ]) {
+    const item = {};
+    const submission = { clientMessageId: 'recovery-test', command: 'web_access_create_session_and_chat' };
+    const firstTurn = vm.createContext({
+      window: windowObject, state: { settings: { language } },
+      findFirstTurnItem: () => item, firstTurnStillVisible: () => true,
+      notify() {}, restoreFirstTurnUiState() {},
+      invokeWithRequestId(command) {
+        assert.equal(command, 'web_access_create_session_and_chat');
+        throw Object.assign(new Error(detail), { code });
+      },
+    });
+    vm.runInContext(firstTurnSource, firstTurn);
+    await firstTurn.runFirstTurnSubmission(submission);
+    assert.equal(submission.lastError, detail);
+    assert.equal(submission.lastErrorCode, code);
+    assert.equal(item.deliveryState, expectedState);
+    if (expectedCopy) {
+      assert.match(item.deliveryError, expectedCopy);
+      assert.doesNotMatch(item.deliveryError, /account_platform_migration_|internal detail/);
+    } else {
+      assert.equal(item.deliveryError, detail);
+    }
+  }
+}
+
 // Tauri counterpart audit pinned as a source contract: the display chain must
 // derive its text the same way the concurrentTurn check does (Error.message
 // first) and must match session_model_binding_stale before the raw-body
@@ -226,7 +282,9 @@ for (const [language, { marker, tail }] of Object.entries(LOCALE_MARKERS)) {
     const pathRedacted = displayTurnError(new Error(withSecret));
     assert.ok(pathRedacted.includes('C:\\fixture-project\\private-notes.md'));
     assert.ok(!pathRedacted.includes('fixture sensitive text'));
-    for (const input of [`session_model_binding_stale: ${STALE_ID}`, `session_model_binding_stale:${STALE_ID}`, raw, withSecret, 'disk full']) {
+    for (const input of [`session_model_binding_stale: ${STALE_ID}`, `session_model_binding_stale:${STALE_ID}`, raw, withSecret, 'disk full',
+      'send_user_message failed: account_platform_migration_incomplete: internal detail',
+      'account_platform_migration_invalid: internal detail']) {
       assert.equal(desktopContext.displayDesktopError(new Error(input)), displayTurnError(new Error(input)),
         `${language}: actual desktop and web blocks agree with the real helper loaded`);
       assert.equal(desktopContext.displayDesktopError(input), displayTurnError(input));

@@ -174,7 +174,18 @@
     return foundInternal;
   }
 
+  function migrationRecoveryText(text, state) {
+    var match = /^(?:send_user_message failed: )?account_platform_migration_(incomplete|invalid):/.exec(text);
+    var dictionary = window.PinvouChatRecoveryCopy;
+    if (!match || !dictionary) return null;
+    var language = state && state.settings && state.settings.language;
+    var copy = dictionary[language === "en" ? "en" : language === "ja" ? "ja" : "zh"];
+    if (!copy) return null;
+    return match[1] === "invalid" ? copy.migrationInvalid : copy.migrationIncomplete;
+  }
+
   window.PinvouBridgeMessages = Object.freeze({
+    migrationRecoveryText: migrationRecoveryText,
     isInternalRuntimeUserMessage: isInternalRuntimeUserMessage,
     isInternalUserMessage: isInternalUserMessage,
     isKnownInternalMetadataBlock: isKnownInternalMetadataBlock,
@@ -190,6 +201,8 @@
     redactRawError: function (error, state) {
       var text = String(error == null ? "" : error);
       if (!text) return text;
+      var recovery = migrationRecoveryText(text, state);
+      if (recovery != null) return recovery;
       var helper = window.PinvouModelServiceErrors;
       if (!helper || typeof helper.redactTechnicalDetail !== "function") return text;
       return helper.redactTechnicalDetail(text, state && state.settings && state.settings.language);

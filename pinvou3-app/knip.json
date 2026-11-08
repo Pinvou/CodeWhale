@@ -4,9 +4,19 @@
     "src/index.html",
     "src/pet.html",
     "src/reader.html",
+    "src/app/account-main.jsx",
+    "src/app/admin-main.jsx",
+    "src/app/portal-session-handoff-main.js",
     "src/app/pet-main.jsx",
     "src/app/personas-overlay.js",
     "tests/*.test.{js,mjs}",
+    "tests/fixtures/f04-governed-envelope.mjs",
+    "tests/helpers/late-payment-query-http-client.mjs",
+    "tests/account_platform_organization_boundaries_ui_smoke.mjs",
+    "tests/account_platform_installed_hosts_ui_smoke.mjs",
+    "tests/account_platform_ledger_repair_ui_smoke.mjs",
+    "tests/account_platform_product_admission_ui_smoke.mjs",
+    "tests/account_platform_desktop_reauthentication_ui_smoke.mjs",
     "tests/*.js",
     "tests/remote_archive_smoke.mjs",
     "tests/remote_quarantine_smoke.mjs",
@@ -21,6 +31,7 @@
     "src/platform/web/bootstrap.js",
     "src/platform/web/host-file-picker.js",
     "src/features/attachments/attachment-drop-controller.js",
+    "src/features/attachments/attachment-telemetry.js",
     "src/features/remote-control/remote-control-state.js",
     "src/features/personas/personas-i18n.js",
     "src/features/updater/update-notice-logic.js",
@@ -52,7 +63,8 @@
     "^/@id/react$",
     "^/@id/react-dom/client$",
     "^/features/team-relay/TeamRelayView.jsx$",
-    "^/shared/i18n.js$"
+    "^/shared/i18n.js$",
+    "^/platform/tauri/bridge/team-relay\\.js$"
   ],
   "ignoreDependencies": [
     "lightningcss"

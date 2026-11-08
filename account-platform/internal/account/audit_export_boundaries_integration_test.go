@@ -1,0 +1,728 @@
+package account
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"github.com/Pinvou/pinvou3/account-platform/internal/accountschema"
+	"github.com/Pinvou/pinvou3/account-platform/internal/cifixture"
+	"github.com/Pinvou/pinvou3/account-platform/internal/f17fixture"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/identity"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/migrations"
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"os"
+	"strings"
+	"testing"
+	"time"
+)
+
+type auditExportBoundaryWallet struct{}
+
+func (auditExportBoundaryWallet) EnsurePersonalWallet(context.Context, uuid.UUID) error { return nil }
+func auditExportBoundaryErrorClass(err error) string {
+	if err == nil {
+		return "nil"
+	}
+	var p *pgconn.PgError
+	if errors.As(err, &p) {
+		return "PG_" + p.Code
+	}
+	if errors.Is(err, ErrConflict) {
+		return "CONFLICT"
+	}
+	if errors.Is(err, ErrNotFound) {
+		return "NOT_FOUND"
+	}
+	return fmt.Sprintf("%T", err)
+}
+
+// This test uses an exclusively owned database and deployment actors. Wallet ACK is controlled; Billing ledger and admin permission middleware are outside this boundary test.
+func TestAuditExportPersistedBoundaries(t *testing.T) {
+	if os.Getenv("F17_TEST_DATABASE_URL") == "" {
+		t.Skip("isolated PostgreSQL fixture required")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Second)
+	defer cancel()
+	f := newAuditExportBoundaryFixture(t, ctx, os.Getenv("F17_TEST_DATABASE_URL"))
+	c := f.database(t, ctx, "account", "account_service")
+	loaded, err := migrations.Load("../../migrations/account")
+	if err != nil {
+		t.Fatal("SETUP_LOAD")
+	}
+	if err = accountschema.Up(ctx, c, loaded); err != nil {
+		t.Fatalf("SETUP_UP_%s", auditExportBoundaryErrorClass(err))
+	}
+	if _, verifyErr := migrations.VerifyApplied(ctx, c, loaded); verifyErr != nil {
+		t.Fatal("SETUP_VERIFY")
+	}
+	migrations.Unlock(ctx, c)
+	repo, err := NewPostgresRepository(ctx, f.serviceURL(t, c, "account_service"))
+	if err != nil {
+		t.Fatal("SETUP_REPO")
+	}
+	t.Cleanup(repo.Close)
+	principal := identity.Principal{Issuer: "https://test.invalid/realm", Subject: uuid.NewString(), SessionID: uuid.NewString(), AuthenticatedAt: time.Now().UTC()}
+	me, _, err := repo.Bootstrap(ctx, principal)
+	if err != nil {
+		t.Fatalf("SETUP_BOOTSTRAP_%s", auditExportBoundaryErrorClass(err))
+	}
+	_ = me
+	if err = NewWalletProvisioningWorker(repo, auditExportBoundaryWallet{}, time.Second).RunOnce(ctx); err != nil {
+		t.Fatalf("SETUP_WALLET_%s", auditExportBoundaryErrorClass(err))
+	}
+	exports, err := NewAuditExportService(repo, make([]byte, 32), "test")
+	if err != nil {
+		t.Fatal("SETUP_EXPORT")
+	}
+	t.Run("csv_reference_masking", func(t *testing.T) {
+		testAuditExportCSVReferenceMasking(t, ctx, exports, principal, me.UserID)
+	})
+	create := func(reason string) AuditExportJob {
+		t.Helper()
+		now := time.Now().UTC()
+		j, e := exports.Create(ctx, principal, AuditExportRequest{Reason: reason, IdempotencyKey: uuid.NewString(), Filter: AuditExportFilter{From: now.Add(-time.Minute), To: now}})
+		if e != nil {
+			t.Fatalf("SETUP_CREATE_%s", auditExportBoundaryErrorClass(e))
+		}
+		return j
+	}
+	ready := func() AuditExportJob {
+		t.Helper()
+		j := create("public test reason")
+		claim, ok, e := exports.claim(ctx)
+		if e != nil || !ok || claim.ID != j.ID {
+			t.Fatal("SETUP_CLAIM")
+		}
+		if e = exports.generate(ctx, claim); e != nil {
+			t.Fatalf("SETUP_GENERATE_%s", auditExportBoundaryErrorClass(e))
+		}
+		return j
+	}
+	t.Run("pending_ticket_nullable", func(t *testing.T) {
+		j := create("public test reason")
+		_, e := exports.IssueDownloadTicket(ctx, principal, j.ID)
+		if !errors.Is(e, ErrConflict) {
+			t.Errorf("EXPECTED_CONFLICT_ACTUAL_%s", auditExportBoundaryErrorClass(e))
+		}
+		_, e = repo.pool.Exec(ctx, `UPDATE audit_export_jobs SET status='FAILED' WHERE id=$1`, j.ID)
+		if e != nil {
+			t.Fatal("FIXTURE_RETIRE")
+		}
+	})
+	t.Run("ready_without_ticket_nullable", func(t *testing.T) {
+		j := ready()
+		_, e := exports.Download(ctx, principal, j.ID, strings.Repeat("x", 43))
+		if !errors.Is(e, ErrNotFound) {
+			t.Errorf("EXPECTED_NOT_FOUND_ACTUAL_%s", auditExportBoundaryErrorClass(e))
+		}
+	})
+	t.Run("reason_characters", func(t *testing.T) {
+		now := time.Now().UTC()
+		_, e := exports.Create(ctx, principal, AuditExportRequest{Reason: "中文五字啊", IdempotencyKey: uuid.NewString(), Filter: AuditExportFilter{From: now.Add(-time.Minute), To: now}})
+		if !errors.Is(e, ErrInvalidAuditExportRequest) {
+			t.Errorf("EXPECTED_VALIDATION_ACTUAL_%s", auditExportBoundaryErrorClass(e))
+		}
+	})
+	t.Run("ticket_lock_crosses_expiry", func(t *testing.T) {
+		j := ready()
+		lock, e := repo.pool.Begin(ctx)
+		if e != nil {
+			t.Fatal("FIXTURE_LOCK")
+		}
+		defer lock.Rollback(ctx)
+		var expiry time.Time
+		if e = lock.QueryRow(ctx, `UPDATE audit_export_jobs SET file_expires_at=clock_timestamp()+interval '500 milliseconds' WHERE id=$1 RETURNING file_expires_at`, j.ID).Scan(&expiry); e != nil {
+			t.Fatal("FIXTURE_EXPIRY")
+		}
+		type response struct {
+			ticket AuditExportDownloadTicket
+			err    error
+		}
+		ch := make(chan response, 1)
+		go func() { v, e := exports.IssueDownloadTicket(ctx, principal, j.ID); ch <- response{v, e} }()
+		deadline := time.Now().Add(3 * time.Second)
+		blocked := false
+		for time.Now().Before(deadline) {
+			var n int
+			if e = f.admin.QueryRow(ctx, `SELECT count(*) FROM pg_stat_activity WHERE datname=$1 AND wait_event_type='Lock' AND query LIKE '%file_expires_at%'`, c.Config().Database).Scan(&n); e != nil {
+				t.Fatal("FIXTURE_WAIT")
+			}
+			if n > 0 {
+				blocked = true
+				break
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		if !blocked {
+			t.Fatal("FIXTURE_NO_REAL_LOCKWAIT")
+		}
+		time.Sleep(time.Until(expiry) + 50*time.Millisecond)
+		if e = lock.Commit(ctx); e != nil {
+			t.Fatal("FIXTURE_UNLOCK")
+		}
+		v := <-ch
+		if !errors.Is(v.err, ErrConflict) {
+			t.Errorf("EXPECTED_EXPIRED_CONFLICT_ACTUAL_%s", auditExportBoundaryErrorClass(v.err))
+		}
+	})
+	t.Run("http_head_preserves_single_use", func(t *testing.T) {
+		j := ready()
+		ticket, e := exports.IssueDownloadTicket(ctx, principal, j.ID)
+		if e != nil {
+			t.Fatal("FIXTURE_TICKET")
+		}
+		svc := NewService(repo, nil).WithAuditExports(exports)
+		router := httpserver.NewRouter()
+		router.Use(identity.GinMiddleware(func(context.Context, string) (identity.Principal, error) { return principal, nil }))
+		router.GET("/admin/v1/audit-exports/:export_id/download", httpserver.AdaptFunc(svc.downloadAuditExport))
+		server := httptest.NewServer(router)
+		defer server.Close()
+		call := func(method string) int {
+			r, _ := http.NewRequest(method, server.URL+"/admin/v1/audit-exports/"+j.ID.String()+"/download", nil)
+			r.Header.Set("Authorization", "Bearer public-synthetic-test")
+			r.Header.Set("X-Pinvou-Download-Token", ticket.Token)
+			v, e := server.Client().Do(r)
+			if e != nil {
+				t.Fatal("FIXTURE_HTTP")
+			}
+			defer v.Body.Close()
+			return v.StatusCode
+		}
+		head := call(http.MethodHead)
+		get := call(http.MethodGet)
+		if head != http.StatusMethodNotAllowed || get != http.StatusOK {
+			t.Errorf("HEAD=%d_GET=%d_EXPECTED_405_200", head, get)
+		}
+	})
+	t.Run("expired_worker_reclaim_fenced", func(t *testing.T) {
+		j := create("public test reason")
+		first, ok, e := exports.claim(ctx)
+		if e != nil || !ok || first.ID != j.ID {
+			t.Fatal("FIXTURE_CLAIM")
+		}
+		if _, e = repo.pool.Exec(ctx, `UPDATE audit_export_jobs SET lease_until=clock_timestamp()-interval '1 second' WHERE id=$1`, j.ID); e != nil {
+			t.Fatal("FIXTURE_LEASE")
+		}
+		second, ok, e := exports.claim(ctx)
+		if e != nil || !ok || second.ID != j.ID || second.Attempt != first.Attempt+1 {
+			t.Fatal("FIXTURE_RECLAIM")
+		}
+		if e = exports.generate(ctx, first); !errors.Is(e, ErrConflict) {
+			t.Errorf("OLD_GENERATE_%s", auditExportBoundaryErrorClass(e))
+		}
+		if e = exports.fail(ctx, first, "GENERATION_FAILED"); !errors.Is(e, ErrConflict) {
+			t.Errorf("OLD_FAIL_%s", auditExportBoundaryErrorClass(e))
+		}
+		if e = exports.generate(ctx, second); e != nil {
+			t.Fatalf("LIVE_GENERATE_%s", auditExportBoundaryErrorClass(e))
+		}
+		if e = exports.fail(ctx, first, "GENERATION_FAILED"); !errors.Is(e, ErrConflict) {
+			t.Errorf("READY_OVERWRITE_%s", auditExportBoundaryErrorClass(e))
+		}
+		got, e := exports.Get(ctx, principal, j.ID)
+		if e != nil || got.Status != "READY" {
+			t.Fatal("READY_NOT_PRESERVED")
+		}
+	})
+	t.Run("expired_same_attempt_fenced", func(t *testing.T) {
+		j := create("public test reason")
+		claim, ok, e := exports.claim(ctx)
+		if e != nil || !ok || claim.ID != j.ID {
+			t.Fatal("FIXTURE_CLAIM")
+		}
+		if _, e = repo.pool.Exec(ctx, `UPDATE audit_export_jobs SET lease_until=clock_timestamp()-interval '1 second' WHERE id=$1`, j.ID); e != nil {
+			t.Fatal("FIXTURE_LEASE")
+		}
+		if e = exports.generate(ctx, claim); !errors.Is(e, ErrConflict) {
+			t.Errorf("EXPIRED_GENERATE_%s", auditExportBoundaryErrorClass(e))
+		}
+		if e = exports.fail(ctx, claim, "GENERATION_FAILED"); !errors.Is(e, ErrConflict) {
+			t.Errorf("EXPIRED_FAIL_%s", auditExportBoundaryErrorClass(e))
+		}
+		// Retire this deliberately expired fixture before the next independent job.
+		if _, e = repo.pool.Exec(ctx, `UPDATE audit_export_jobs SET status='FAILED' WHERE id=$1`, j.ID); e != nil {
+			t.Fatal("FIXTURE_RETIRE_EXPIRED")
+		}
+	})
+	t.Run("preview_export_same_actor_subject", func(t *testing.T) {
+		now := time.Now().UTC()
+		actor := "public-test-actor-subject"
+		from := now.Add(-time.Minute)
+		to := now.Add(time.Second)
+		_, e := repo.pool.Exec(ctx, `INSERT INTO audit_logs(id,actor_user_id,action,resource_type,resource_id,result,request_id,trace_id,change_summary,occurred_at) VALUES($1,$2,'public.actor.filter','test','public-test','SUCCEEDED','public-request','public-request',jsonb_build_object('actor_subject',$3::text),$4)`, uuid.New(), me.UserID, actor, now)
+		if e != nil {
+			t.Fatal("FIXTURE_AUDIT")
+		}
+		rows, e := repo.AdminAuditLogs(ctx, AdminAuditFilter{Actor: actor, From: &from, To: &to, Limit: 100})
+		if e != nil || len(rows) != 1 {
+			t.Fatal("PREVIEW_NOT_ONE")
+		}
+		job, e := exports.Create(ctx, principal, AuditExportRequest{Reason: "public filter reason", IdempotencyKey: uuid.NewString(), Filter: AuditExportFilter{Actor: actor, From: from, To: to}})
+		if e != nil {
+			t.Fatal("CREATE_FILTER")
+		}
+		claim, ok, e := exports.claim(ctx)
+		if e != nil || !ok || claim.ID != job.ID {
+			t.Fatal("CLAIM_FILTER")
+		}
+		if e = exports.generate(ctx, claim); e != nil {
+			t.Fatalf("GENERATE_%s", auditExportBoundaryErrorClass(e))
+		}
+		got, e := exports.Get(ctx, principal, job.ID)
+		if e != nil || got.RowCount == nil {
+			t.Fatal("GET_FILTER")
+		}
+		if *got.RowCount != len(rows) {
+			t.Errorf("PREVIEW=%d_EXPORT=%d", len(rows), *got.RowCount)
+		}
+	})
+
+	t.Run("pii_authority_is_live_after_job_lock", func(t *testing.T) {
+		for _, phase := range []string{"ticket", "download"} {
+			for _, loss := range []string{"expired", "revoked"} {
+				t.Run(phase+"_"+loss, func(t *testing.T) {
+					// A separate real account keeps the existing daily job quota intact.
+					actor := identity.Principal{Issuer: principal.Issuer, Subject: uuid.NewString(), SessionID: uuid.NewString(), AuthenticatedAt: time.Now().UTC()}
+					actorMe, _, err := repo.Bootstrap(ctx, actor)
+					if err != nil {
+						t.Fatal("PII_FIXTURE_BOOTSTRAP")
+					}
+					if err = NewWalletProvisioningWorker(repo, auditExportBoundaryWallet{}, time.Second).RunOnce(ctx); err != nil {
+						t.Fatal("PII_FIXTURE_WALLET")
+					}
+					grant := func(role string, expires time.Time, starts *time.Time) RoleBinding {
+						t.Helper()
+						binding, err := repo.AdminGrantRoleBinding(ctx, principal, RoleBindingGrant{UserID: actorMe.UserID, RoleCode: role, StartsAt: starts, ExpiresAt: &expires, IdempotencyKey: uuid.NewString(), Reason: "live PII authority boundary"})
+						if err != nil {
+							t.Fatalf("PII_FIXTURE_GRANT_%s", auditExportBoundaryErrorClass(err))
+						}
+						return binding
+					}
+					revoke := func(binding RoleBinding) {
+						t.Helper()
+						got, err := repo.AdminRevokeRoleBinding(ctx, principal, binding.ID)
+						if err != nil || got.Status != "REVOKED" {
+							t.Fatal("PII_FIXTURE_REVOKE")
+						}
+					}
+					grant("PLATFORM_AUDITOR", time.Now().UTC().Add(time.Hour), nil)
+					pii := grant("PLATFORM_AUDIT_PII_EXPORT", time.Now().UTC().Add(time.Hour), nil)
+					readyForActor := func(includePII bool) AuditExportJob {
+						t.Helper()
+						now := time.Now().UTC()
+						j, err := exports.Create(ctx, actor, AuditExportRequest{IncludePII: includePII, Reason: "live PII export boundary", IdempotencyKey: uuid.NewString(), Filter: AuditExportFilter{From: now.Add(-time.Minute), To: now}})
+						if err != nil {
+							t.Fatalf("PII_FIXTURE_CREATE_%s", auditExportBoundaryErrorClass(err))
+						}
+						claim, ok, err := exports.claim(ctx)
+						if err != nil || !ok || claim.ID != j.ID {
+							t.Fatal("PII_FIXTURE_CLAIM")
+						}
+						if err := exports.generate(ctx, claim); err != nil {
+							t.Fatalf("PII_FIXTURE_GENERATE_%s", auditExportBoundaryErrorClass(err))
+						}
+						return j
+					}
+					job := readyForActor(true)
+					var ticket AuditExportDownloadTicket
+					if phase == "download" {
+						ticket, err = exports.IssueDownloadTicket(ctx, actor, job.ID)
+						if err != nil {
+							t.Fatal("PII_FIXTURE_ORIGINAL_TICKET")
+						}
+					}
+					handler := NewService(repo, nil).WithAuditExports(exports).Handler(func(context.Context, string) (identity.Principal, error) { return actor, nil })
+					call := func(id uuid.UUID, phase, token string) *httptest.ResponseRecorder {
+						method, suffix := http.MethodGet, "/download"
+						if phase == "ticket" {
+							method, suffix = http.MethodPost, "/download-tickets"
+						}
+						r := httptest.NewRequest(method, "/admin/v1/audit-exports/"+id.String()+suffix, nil)
+						r.Header.Set("Authorization", "Bearer owned-pii-boundary")
+						r.Header.Set("X-Pinvou-Download-Token", token)
+						w := newAuditDeadlineRecorder()
+						handler.ServeHTTP(w, r)
+						return w.ResponseRecorder
+					}
+					type jobState struct {
+						row           string
+						events, audit int
+					}
+					snapshot := func() jobState {
+						t.Helper()
+						var v jobState
+						if err := repo.pool.QueryRow(ctx, `SELECT to_jsonb(job)::text,(SELECT count(*) FROM audit_export_events WHERE export_id=job.id),(SELECT count(*) FROM audit_logs WHERE resource_type='audit_export' AND resource_id=job.id::text) FROM audit_export_jobs job WHERE job.id=$1`, job.ID).Scan(&v.row, &v.events, &v.audit); err != nil {
+							t.Fatal("PII_FIXTURE_SNAPSHOT")
+						}
+						return v
+					}
+					before := snapshot()
+					lock, err := repo.pool.Begin(ctx)
+					if err != nil {
+						t.Fatal("PII_FIXTURE_LOCK")
+					}
+					defer lock.Rollback(ctx)
+					var lockedID uuid.UUID
+					if err = lock.QueryRow(ctx, `SELECT id FROM audit_export_jobs WHERE id=$1 FOR UPDATE`, job.ID).Scan(&lockedID); err != nil {
+						t.Fatal("PII_FIXTURE_LOCK_ROW")
+					}
+					response := make(chan *httptest.ResponseRecorder, 1)
+					go func() { response <- call(job.ID, phase, ticket.Token) }()
+					blocked := false
+					deadline := time.Now().Add(3 * time.Second)
+					for time.Now().Before(deadline) {
+						var n int
+						if err = f.admin.QueryRow(ctx, `SELECT count(*) FROM pg_stat_activity WHERE datname=$1 AND wait_event_type='Lock' AND query LIKE '%audit_export_jobs%FOR UPDATE%'`, c.Config().Database).Scan(&n); err != nil {
+							t.Fatal("PII_FIXTURE_LOCK_OBSERVATION")
+						}
+						if n > 0 {
+							blocked = true
+							break
+						}
+						time.Sleep(10 * time.Millisecond)
+					}
+					if !blocked {
+						t.Fatal("PII_FIXTURE_NO_REAL_JOB_LOCK_WAIT")
+					}
+					revoke(pii)
+					if loss == "expired" {
+						// Real role management supplies a short replacement, with the original
+						// start preceding the waiting transaction. A transaction-start now()
+						// would incorrectly retain this grant after its real expiry.
+						expires := time.Now().UTC().Add(time.Second)
+						grant("PLATFORM_AUDIT_PII_EXPORT", expires, &pii.StartsAt)
+						time.Sleep(time.Until(expires) + 50*time.Millisecond)
+					}
+					decision, err := repo.Authorize(ctx, actor, PermissionPlatformAuditPIIExport, nil, nil)
+					if err != nil || decision.Allowed {
+						t.Fatal("PII_FIXTURE_LOST_AUTHORITY_NOT_VISIBLE")
+					}
+					if err = lock.Commit(ctx); err != nil {
+						t.Fatal("PII_FIXTURE_UNLOCK")
+					}
+					var denied *httptest.ResponseRecorder
+					select {
+					case denied = <-response:
+					case <-ctx.Done():
+						t.Fatal("PII_OPERATION_DID_NOT_RETURN")
+					}
+					if denied.Code != http.StatusForbidden {
+						t.Fatalf("PII_%s_%s_STATUS_%d_WANT_403", phase, loss, denied.Code)
+					}
+					if snapshot() != before {
+						t.Fatal("PII_DENIAL_CHANGED_JOB_PAYLOAD_TOKEN_OR_AUDIT")
+					}
+					// Losing only PII authority does not make the existing job unreadable.
+					if got, err := exports.Get(ctx, actor, job.ID); err != nil || got.Status != "READY" {
+						t.Fatal("PII_DENIAL_CHANGED_GET")
+					}
+					if phase == "ticket" && loss == "revoked" {
+						redacted := readyForActor(false)
+						r := call(redacted.ID, "ticket", "")
+						if r.Code != http.StatusCreated || json.Unmarshal(r.Body.Bytes(), &ticket) != nil {
+							t.Fatal("NON_PII_TICKET_REGRESSED")
+						}
+						if call(redacted.ID, "download", ticket.Token).Code != http.StatusOK {
+							t.Fatal("NON_PII_DOWNLOAD_REGRESSED")
+						}
+					}
+					grant("PLATFORM_AUDIT_PII_EXPORT", time.Now().UTC().Add(time.Hour), nil)
+					if phase == "ticket" {
+						r := call(job.ID, "ticket", "")
+						if r.Code != http.StatusCreated || json.Unmarshal(r.Body.Bytes(), &ticket) != nil {
+							t.Fatal("PII_REGRANT_DID_NOT_ALLOW_TICKET")
+						}
+					}
+					if call(job.ID, "download", ticket.Token).Code != http.StatusOK {
+						t.Fatal("PII_REGRANT_DID_NOT_ALLOW_ORIGINAL_TICKET")
+					}
+					if call(job.ID, "download", ticket.Token).Code != http.StatusNotFound {
+						t.Fatal("PII_ORIGINAL_TICKET_WAS_NOT_SINGLE_USE")
+					}
+				})
+			}
+		}
+	})
+
+	t.Run("actual_http_base_and_pii_grant_revoke", func(t *testing.T) {
+		// The actual role-management repository validates and persists temporary
+		// bindings. This boundary test controls its trusted actor; it does not
+		// claim to test the management permission UI or approval delivery chain.
+		handler := NewService(repo, nil).WithAuditExports(exports).Handler(func(context.Context, string) (identity.Principal, error) { return principal, nil })
+		createHTTP := func(pii bool) int {
+			t.Helper()
+			now := time.Now().UTC()
+			payload, err := json.Marshal(AuditExportRequest{Reason: "public authority fixture", IncludePII: pii, IdempotencyKey: uuid.NewString(), Filter: AuditExportFilter{From: now.Add(-time.Minute), To: now}})
+			if err != nil {
+				t.Fatal("FIXTURE_REQUEST_ENCODING")
+			}
+			request := httptest.NewRequest(http.MethodPost, "/admin/v1/audit-exports", bytes.NewReader(payload))
+			request.Header.Set("Authorization", "Bearer controlled")
+			response := newAuditDeadlineRecorder()
+			handler.ServeHTTP(response, request)
+			return response.Code
+		}
+		jobs := func() int {
+			t.Helper()
+			var n int
+			if err := c.QueryRow(ctx, `SELECT count(*) FROM audit_export_jobs`).Scan(&n); err != nil {
+				t.Fatal("FIXTURE_JOB_COUNT")
+			}
+			return n
+		}
+		baseline := jobs()
+		if createHTTP(true) != http.StatusForbidden || jobs() != baseline {
+			t.Fatal("DEFAULT_PII_AUTHORITY_GRANTED")
+		}
+		grant := func(role string) uuid.UUID {
+			t.Helper()
+			expires := time.Now().UTC().Add(time.Hour)
+			binding, err := repo.AdminGrantRoleBinding(ctx, principal, RoleBindingGrant{UserID: me.UserID, RoleCode: role, ExpiresAt: &expires, IdempotencyKey: uuid.NewString(), Reason: "public temporary audit grant"})
+			if err != nil {
+				t.Fatalf("FIXTURE_GRANT_%s", auditExportBoundaryErrorClass(err))
+			}
+			return binding.ID
+		}
+		revoke := func(id uuid.UUID) {
+			t.Helper()
+			binding, err := repo.AdminRevokeRoleBinding(ctx, principal, id)
+			if err != nil || binding.ID != id || binding.Status != "REVOKED" {
+				t.Fatal("FIXTURE_REVOKE")
+			}
+		}
+		piiBinding := grant("PLATFORM_AUDIT_PII_EXPORT")
+		decision, err := repo.Authorize(ctx, principal, PermissionPlatformAuditPIIExport, nil, nil)
+		if err != nil || !decision.Allowed {
+			t.Fatal("ACTUAL_PII_GRANT_NOT_VISIBLE")
+		}
+		if createHTTP(true) != http.StatusForbidden || jobs() != baseline {
+			t.Fatal("PII_BYPASSED_BASE_PERMISSION")
+		}
+		baseBinding := grant("PLATFORM_AUDITOR")
+		if createHTTP(true) != http.StatusAccepted || jobs() != baseline+1 {
+			t.Fatal("ACTUAL_PII_EXPORT_NOT_ACCEPTED")
+		}
+		revoke(piiBinding)
+		decision, err = repo.Authorize(ctx, principal, PermissionPlatformAuditPIIExport, nil, nil)
+		if err != nil || decision.Allowed {
+			t.Fatal("ACTUAL_PII_REVOKE_NOT_VISIBLE")
+		}
+		if createHTTP(true) != http.StatusForbidden || jobs() != baseline+1 {
+			t.Fatal("REVOKED_PII_CREATED_JOB")
+		}
+		if createHTTP(false) != http.StatusAccepted || jobs() != baseline+2 {
+			t.Fatal("BASE_REDACTED_EXPORT_REGRESSED")
+		}
+		revoke(baseBinding)
+		if createHTTP(false) != http.StatusForbidden || jobs() != baseline+2 {
+			t.Fatal("REVOKED_BASE_CREATED_JOB")
+		}
+	})
+
+}
+
+type auditExportBoundaryFixture struct {
+	admin          *pgx.Conn
+	config         *pgx.ConnConfig
+	roles          []string
+	dbs            map[string]string
+	databaseLeases map[string]*cifixture.Database
+	connections    []*pgx.Conn
+}
+
+func newAuditExportBoundaryFixture(t *testing.T, ctx context.Context, raw string) *auditExportBoundaryFixture {
+	t.Helper()
+	expectedPort, expectedUser, expectedDirectory := uint16(55504), "pinvou_wave_test", "D:/Projects/pinvou3-account-functional/.cache/parallel-runtimes/f04/data"
+	switch os.Getenv("F17_TEST_DATABASE_PROFILE") {
+	case "":
+	case f17fixture.OwnedProfile:
+		config, err := pgx.ParseConfig(raw)
+		if err != nil || !f17fixture.OwnedConfigurationAllowed(config, os.Getenv("F17_TEST_OWNED_PORT"), os.Getenv("F17_TEST_OWNED_DATA_DIRECTORY")) {
+			t.Fatal("owned temporary fixture configuration required")
+		}
+		expectedPort, expectedUser, expectedDirectory = config.Port, f17fixture.OwnedActor, strings.ReplaceAll(os.Getenv("F17_TEST_OWNED_DATA_DIRECTORY"), "\\", "/")
+	case "github-actions-service":
+		if os.Getenv("GITHUB_ACTIONS") != "true" {
+			t.Fatal("CI fixture profile requires GitHub Actions")
+		}
+		config, err := pgx.ParseConfig(raw)
+		if err != nil || !f17fixture.CIConfigurationAllowed(config, os.Getenv("F17_TEST_SERVICE_PORT"), true) {
+			t.Fatal("CI service configuration rejected")
+		}
+		expectedPort, expectedUser, expectedDirectory = config.Port, "postgres", "/var/lib/postgresql/data"
+	default:
+		t.Fatal("unknown isolated PostgreSQL profile")
+	}
+	config, err := pgx.ParseConfig(raw)
+	if err != nil || config.Host != "127.0.0.1" || config.Port != expectedPort || config.User != expectedUser || config.Database != "postgres" || config.TLSConfig != nil || len(config.Fallbacks) != 0 {
+		t.Fatal("only the explicitly owned local PostgreSQL fixture is allowed")
+	}
+	admin, err := pgx.Connect(ctx, raw)
+	if err != nil {
+		t.Fatal("connect schema setup identity")
+	}
+	if os.Getenv("F17_TEST_DATABASE_PROFILE") == "github-actions-service" {
+		if err := cifixture.Verify(ctx, admin); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Only this branch's fixtures share the deployment-actor set on their isolated instance.
+	// The session lock serializes those fixtures across Go packages; it grants no authority.
+	t.Cleanup(func() { _ = admin.Close(context.Background()) })
+	if _, err := admin.Exec(ctx, `SELECT pg_advisory_lock(hashtext('pinvou.f17.audit-export.boundary.fixture'))`); err != nil {
+		t.Fatal("exclusive fixture lock failed")
+	}
+	expectedServerPort := expectedPort
+	if os.Getenv("F17_TEST_DATABASE_PROFILE") == "github-actions-service" {
+		expectedServerPort = 5432
+	}
+	var session, current, directory string
+	var port, otherSessions, otherDBs int
+	if err := admin.QueryRow(ctx, `SELECT session_user,current_user,inet_server_port(),current_setting('data_directory'),(SELECT count(*) FROM pg_stat_activity WHERE pid<>pg_backend_pid() AND backend_type='client backend'),(SELECT count(*) FROM pg_database WHERE NOT datistemplate AND datname<>'postgres')`).Scan(&session, &current, &port, &directory, &otherSessions, &otherDBs); err != nil || session != expectedUser || current != expectedUser || port != int(expectedServerPort) || strings.ReplaceAll(directory, "\\", "/") != expectedDirectory || otherSessions != 0 || otherDBs != 0 {
+		t.Fatal("owned server/identity/exclusive session/database guard failed")
+	}
+	if os.Getenv("F17_TEST_DATABASE_PROFILE") == f17fixture.OwnedProfile || os.Getenv("F17_TEST_DATABASE_PROFILE") == "github-actions-service" {
+		var super bool
+		var outsideActors int
+		if err := admin.QueryRow(ctx, `SELECT (SELECT rolsuper FROM pg_roles WHERE rolname=session_user),(SELECT count(*) FROM pg_roles WHERE rolname !~ '^pg_' AND rolname<>session_user)`).Scan(&super, &outsideActors); err != nil || !super || outsideActors != 0 {
+			t.Fatal("owned temporary coordinator/absent actors guard failed")
+		}
+	}
+	f := &auditExportBoundaryFixture{admin: admin, config: config, dbs: make(map[string]string), roles: []string{"account_service", "account_migrator", "account_approval_control_owner", "account_approval_authorization_owner", "account_approval_writer", "account_approval_backfill", "account_approval_relay", "account_approval_recovery", "billing_service", "billing_schema_owner", "billing_migrator"}}
+	var count int
+	if err := admin.QueryRow(ctx, `SELECT count(*) FROM pg_roles WHERE rolname=ANY($1)`, f.roles).Scan(&count); err != nil || count != 0 {
+		admin.Close(context.Background())
+		t.Fatal("existing deployment actors: no fixture writes permitted")
+	}
+	tx, err := admin.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback(context.Background())
+	for _, role := range f.roles {
+		login, inherit := "LOGIN", "NOINHERIT"
+		if strings.HasSuffix(role, "_owner") || role == "account_approval_recovery" {
+			login = "NOLOGIN"
+		}
+		if role == "account_service" || role == "billing_service" {
+			inherit = "INHERIT"
+		}
+		if _, err := tx.Exec(ctx, "CREATE ROLE "+pgx.Identifier{role}.Sanitize()+" "+login+" "+inherit+" NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS"); err != nil {
+			t.Fatal("exclusive actor creation rejected")
+		}
+	}
+	if _, err := tx.Exec(ctx, `GRANT account_service,account_approval_control_owner TO account_migrator; GRANT account_approval_authorization_owner TO account_migrator WITH INHERIT FALSE,SET TRUE,ADMIN TRUE; GRANT billing_service,billing_schema_owner TO billing_migrator`); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		clean, stop := context.WithTimeout(context.Background(), 45*time.Second)
+		defer stop()
+		defer admin.Close(clean)
+		for _, c := range f.connections {
+			if err := c.Close(clean); err != nil {
+				t.Error("owned migration connection close failed")
+			}
+		}
+		allGone := true
+		for name, owner := range f.dbs {
+			if _, err := cifixture.DropDatabase(clean, admin, f.databaseLeases[name], owner); err != nil {
+				t.Error("nonforce owned DB cleanup failed")
+				allGone = false
+			}
+		}
+		if !allGone {
+			t.Error("owned actors retained after incomplete DB cleanup")
+			return
+		}
+		var outside bool
+		if err := admin.QueryRow(clean, `SELECT EXISTS(SELECT 1 FROM pg_shdepend WHERE refclassid='pg_authid'::regclass AND refobjid IN(SELECT oid FROM pg_roles WHERE rolname=ANY($1)) AND dbid<>0) OR EXISTS(SELECT 1 FROM pg_auth_members WHERE (roleid IN(SELECT oid FROM pg_roles WHERE rolname=ANY($1)) OR member IN(SELECT oid FROM pg_roles WHERE rolname=ANY($1))) AND NOT(roleid IN(SELECT oid FROM pg_roles WHERE rolname=ANY($1)) AND member IN(SELECT oid FROM pg_roles WHERE rolname=ANY($1))))`, f.roles).Scan(&outside); err != nil || outside {
+			t.Error("external dependencies forbid actor cleanup")
+			return
+		}
+		for i := len(f.roles) - 1; i >= 0; i-- {
+			if _, err := admin.Exec(clean, "DROP ROLE "+pgx.Identifier{f.roles[i]}.Sanitize()); err != nil {
+				t.Error("nonforce owned actor cleanup failed")
+			}
+		}
+		if err := admin.QueryRow(clean, `SELECT count(*) FROM pg_roles WHERE rolname=ANY($1)`, f.roles).Scan(&count); err != nil || count != 0 {
+			t.Error("owned actors remain after cleanup")
+		} else {
+			t.Log("OWNED_DATABASES_AND_ACTORS_CLEANED")
+		}
+	})
+	return f
+}
+
+func (f *auditExportBoundaryFixture) database(t *testing.T, ctx context.Context, domain, owner string) *pgx.Conn {
+	t.Helper()
+	name := "f17_boundary_" + domain + "_" + strings.ReplaceAll(uuid.NewString(), "-", "")
+	fixtureDatabase, creationError := cifixture.CreateDatabase(ctx, f.admin, name, "CREATE DATABASE "+pgx.Identifier{name}.Sanitize()+" OWNER "+pgx.Identifier{owner}.Sanitize())
+	if creationError != nil {
+		t.Fatal(creationError)
+	}
+	if f.databaseLeases == nil {
+		f.databaseLeases = make(map[string]*cifixture.Database)
+	}
+	f.databaseLeases[name] = fixtureDatabase
+	if err := creationError; err != nil {
+		t.Fatal("create exclusively owned DB")
+	}
+	f.dbs[name] = owner
+	t.Logf("owned fixture database=%s owner=%s", name, owner)
+	config := f.config.Copy()
+	config.Database = name
+	if domain == "account" {
+		config.User = "account_migrator"
+		config.Password = ""
+		if _, err := f.admin.Exec(ctx, "GRANT CREATE ON DATABASE "+pgx.Identifier{name}.Sanitize()+" TO account_migrator"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if domain == "billing" {
+		config.User = "billing_migrator"
+		config.Password = ""
+	}
+	c, err := pgx.ConnectConfig(ctx, config)
+	if err != nil {
+		t.Fatal("connect isolated migration actor")
+	}
+	f.connections = append(f.connections, c)
+	if domain == "billing" {
+		if _, err := c.Exec(ctx, `SET ROLE billing_schema_owner; ALTER SCHEMA public OWNER TO billing_schema_owner; REVOKE CREATE ON SCHEMA public FROM PUBLIC; GRANT USAGE,CREATE ON SCHEMA public TO billing_service`); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if domain == "account" || domain == "billing" {
+		if _, err := c.Exec(ctx, "SET ROLE "+pgx.Identifier{domain + "_service"}.Sanitize()); err != nil {
+			t.Fatal(err)
+		}
+		var session, current string
+		var super bool
+		if err := c.QueryRow(ctx, `SELECT session_user,current_user,(SELECT rolsuper FROM pg_roles WHERE rolname=current_user)`).Scan(&session, &current, &super); err != nil || session != domain+"_migrator" || current != domain+"_service" || super {
+			t.Fatal("non-super migration actor contract failed")
+		}
+	}
+	return c
+}
+
+func (f *auditExportBoundaryFixture) serviceURL(t *testing.T, c *pgx.Conn, user string) string {
+	t.Helper()
+	parsed, err := url.Parse(f.config.ConnString())
+	if err != nil || (parsed.Scheme != "postgres" && parsed.Scheme != "postgresql") {
+		t.Fatal("schema fixture requires a PostgreSQL URL")
+	}
+	parsed.User = url.User(user)
+	parsed.Path = "/" + c.Config().Database
+	return parsed.String()
+}
