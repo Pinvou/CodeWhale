@@ -49,7 +49,7 @@ func TestReconciliationOrphanPaidOrderPostgres(t *testing.T) {
 					t.Fatal(err)
 				}
 				defer tx.Rollback(ctx)
-				if _, _, err := normal.mergeSuccessfulPaymentWithinTransaction(ctx, tx, normalOrder, "QUERY", "normal-payment", []byte(`{"controlled":true}`), normalProvider.result, false, r.now()); err != nil {
+				if _, _, err := mergeRetainedFixturePayment(ctx, tx, normal, normalOrder, "QUERY", "normal-payment", []byte(`{"controlled":true}`), normalProvider.result, false, r.now()); err != nil {
 					t.Fatal("create real normal transaction", err)
 				}
 				if err := tx.Commit(ctx); err != nil {

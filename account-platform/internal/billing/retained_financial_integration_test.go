@@ -209,7 +209,7 @@ func retainedFinanceOrder(t *testing.T, r *PostgresRepository, ctx context.Conte
 		t.Fatal(err)
 	}
 	defer tx.Rollback(ctx)
-	order, _, err = c.mergeSuccessfulPaymentWithinTransaction(ctx, tx, order, "QUERY", "fixture-paid-"+id, []byte(`{"controlled":true}`), provider.result, false, now)
+	order, _, err = mergeRetainedFixturePayment(ctx, tx, c, order, "QUERY", "fixture-paid-"+id, []byte(`{"controlled":true}`), provider.result, false, now)
 	if err != nil {
 		t.Fatal(err)
 	}

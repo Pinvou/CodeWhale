@@ -273,6 +273,10 @@ BILLING_LEAF_REQUIRED = {
 }
 BILLING_CHILD_REQUIRED = RETAINED_REQUIRED - BILLING_LEAF_REQUIRED
 EXACT_REQUIRED_CHILDREN = {
+    "TestDirectPaymentRepairCommandReceiptPostgres": {
+        "pre-admission-fixture-rejects-current-schema",
+        "runtime-immutable-command-and-exact-prefix-down",
+    },
     "TestBillingHistoricalCatalogRollbackPostgres": {
         f"version{version}/seeded={seeded}{suffix}"
         for version in (35, 36, 37, 51)

@@ -27,6 +27,25 @@ CHECKPOINT_FOREIGN_CHILDREN = {"unbound-existing-facts", "foreign-key-before-fin
 
 
 class FinancialPostgresRunnerTests(unittest.TestCase):
+    def test_direct_repair_requires_historical_model_isolation_and_exact_prefix_down(self):
+        root = "TestDirectPaymentRepairCommandReceiptPostgres"
+        children = {"pre-admission-fixture-rejects-current-schema", "runtime-immutable-command-and-exact-prefix-down"}
+        self.assertIn(root, RUNNER.RETAINED_REQUIRED)
+        self.assertEqual(RUNNER.EXACT_REQUIRED_CHILDREN[root], children)
+        self.run_main_fixture()
+        command = self.fixture_commands[self.fixture_phases.index("retained-billing")]
+        self.assertIsNotNone(re.fullmatch(command[command.index("-run") + 1], root))
+        events = self.events({root}, RUNNER.BILLING_PACKAGE, children=True)
+        options = {"package": RUNNER.BILLING_PACKAGE, "require_children": True, "exact_roots": True}
+        RUNNER.verify_results(events, {root}, **options)
+        for child in children:
+            for invalid in (
+                [event for event in events if event.get("Test") != root + "/" + child],
+                events + [{"Action": "skip", "Package": RUNNER.BILLING_PACKAGE, "Test": root + "/" + child}],
+            ):
+                with self.subTest(child=child), self.assertRaises(RuntimeError):
+                    RUNNER.verify_results(invalid, {root}, **options)
+
     def test_catalog_rollback_requires_all_historical_versions_and_actual_cli(self):
         root = "TestBillingHistoricalCatalogRollbackPostgres"
         self.assertIn(root, RUNNER.SCHEMA_REQUIRED)
