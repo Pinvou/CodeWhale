@@ -6,8 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -90,6 +92,92 @@ func assertEscalatedCompletionFacts(t *testing.T, ctx context.Context, r *Postgr
 FROM forced_refund_cases forced JOIN wallets wallet ON wallet.id=forced.wallet_id JOIN payment_anomaly_cases anomaly ON anomaly.forced_refund_case_id=forced.id JOIN manual_review_cases manual ON manual.id=anomaly.id WHERE forced.id=$1`, forced.ID, "forced-refund:"+forced.ID.String()).Scan(&status, &action, &manual, &posted, &revoked, &journals, &commands, &events)
 	if err != nil || status != "RESOLVED" || action != "APPLIED" || manual != "RESOLVED" || posted != 500000 || revoked != 500000 || journals != 1 || commands != 1 || events != 1 {
 		t.Fatal("incomplete or duplicated forced completion", status, action, manual, posted, revoked, journals, commands, events, err)
+	}
+}
+
+func TestEscalatedForcedRefundWalletLockOrderPostgres(t *testing.T) {
+	r, ctx, forced, _, reviewer := escalatedCompletionFixture(t)
+	caseID := *forced.ManualReviewCaseID
+	worker := func(label string) (*PostgresRepository, string) {
+		t.Helper()
+		config := r.pool.Config()
+		name := label + uuid.NewString()
+		config.ConnConfig.RuntimeParams["application_name"] = name
+		pool, err := pgxpool.NewWithConfig(ctx, config)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(pool.Close)
+		return NewPostgresRepositoryWithPool(pool), name
+	}
+	completion, completionName := worker("refund-complete-")
+	claim, claimName := worker("anomaly-claim-")
+	waitWallet := func(name string) {
+		t.Helper()
+		wait, cancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+		tick := time.NewTicker(10 * time.Millisecond)
+		defer tick.Stop()
+		for {
+			var blocked bool
+			if err := r.pool.QueryRow(wait, `SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND application_name=$1 AND query ILIKE '%FROM wallets%FOR UPDATE%' AND cardinality(pg_blocking_pids(pid))>0)`, name).Scan(&blocked); err != nil {
+				t.Fatal(err)
+			}
+			if blocked {
+				return
+			}
+			select {
+			case <-wait.Done():
+				t.Fatal("operation did not wait at the wallet lock", name)
+			case <-tick.C:
+			}
+		}
+	}
+	blocker, err := r.pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer blocker.Rollback(ctx)
+	if _, err := getWallet(ctx, blocker, forced.WalletID, true); err != nil {
+		t.Fatal(err)
+	}
+	const completionKey, claimKey = "lock-order-completion", "lock-order-claim"
+	const reason = "controlled forced completion lock order"
+	claimActor := uuid.New()
+	finished := make(chan error, 1)
+	go func() {
+		_, err := completion.CompleteEscalatedForcedRefund(ctx, caseID, reviewer, completionKey, reason)
+		finished <- err
+	}()
+	waitWallet(completionName)
+	claimed := make(chan error, 1)
+	go func() {
+		_, err := claim.ClaimPaymentAnomaly(ctx, caseID, claimActor, claimKey)
+		claimed <- err
+	}()
+	waitWallet(claimName)
+	// A transaction already holding the wallet must still be able to acquire
+	// the anomaly/manual rows. NOWAIT makes the old reverse order deterministic.
+	if _, err := blocker.Exec(ctx, paymentAnomalySelect+` WHERE anomaly.id=$1 FOR UPDATE OF anomaly,manual NOWAIT`, caseID); err != nil {
+		t.Fatal("completion locked the review before the wallet", err)
+	}
+	if err := blocker.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-finished; err != nil {
+		t.Fatal("completion failed after releasing the wallet", err)
+	}
+	var pgErr *pgconn.PgError
+	if err := <-claimed; !errors.Is(err, ErrConflict) && (!errors.As(err, &pgErr) || pgErr.Code != "40001") {
+		t.Fatal("claim should reject the escalated case or lose its serialization snapshot", err)
+	}
+	assertEscalatedCompletionFacts(t, ctx, r, forced)
+	after := forcedCompletionFacts(t, ctx, r)
+	if _, err := claim.ClaimPaymentAnomaly(ctx, caseID, claimActor, claimKey); !errors.Is(err, ErrConflict) {
+		t.Fatal("rejected claim did not retain its meaning on retry", err)
+	}
+	if _, err := completion.CompleteEscalatedForcedRefund(ctx, caseID, reviewer, completionKey, reason); err != nil || forcedCompletionFacts(t, ctx, r) != after {
+		t.Fatal("completion replay or claim retry changed committed facts", err)
 	}
 }
 
