@@ -3,6 +3,7 @@ package account
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -80,7 +81,13 @@ func (w *CommerceCustomerSyncWorker) Run(ctx context.Context) {
 
 func (w *CommerceCustomerSyncWorker) runOne(ctx context.Context) {
 	job, err := w.store.ClaimCommerceCustomerSyncJob(ctx, w.providerID, w.adapterVersion, 30*time.Second)
-	if err != nil || job == nil {
+	if err != nil {
+		if ctx.Err() == nil {
+			slog.ErrorContext(ctx, "commerce_customer_sync_claim_failed", "error_code", "COMMERCE_SYNC_CLAIM_FAILED")
+		}
+		return
+	}
+	if job == nil {
 		return
 	}
 	result, err := w.adapter.EnsureCustomer(ctx, commerce.CustomerProvisionRequest{
@@ -88,10 +95,14 @@ func (w *CommerceCustomerSyncWorker) runOne(ctx context.Context) {
 	})
 	if err != nil {
 		delay := time.Duration(1<<min(job.Attempts, 8)) * time.Minute
-		_ = w.store.RetryCommerceCustomerSyncJob(context.WithoutCancel(ctx), *job, "COMMERCE_PROVIDER_UNAVAILABLE", time.Now().UTC().Add(delay))
+		if err := w.store.RetryCommerceCustomerSyncJob(context.WithoutCancel(ctx), *job, "COMMERCE_PROVIDER_UNAVAILABLE", time.Now().UTC().Add(delay)); err != nil {
+			slog.ErrorContext(ctx, "commerce_customer_sync_retry_failed", "error_code", "COMMERCE_SYNC_RETRY_FAILED")
+		}
 		return
 	}
-	_ = w.store.CompleteCommerceCustomerSyncJob(context.WithoutCancel(ctx), *job, result)
+	if err := w.store.CompleteCommerceCustomerSyncJob(context.WithoutCancel(ctx), *job, result); err != nil {
+		slog.ErrorContext(ctx, "commerce_customer_sync_complete_failed", "error_code", "COMMERCE_SYNC_COMPLETE_FAILED")
+	}
 }
 
 func (r *PostgresRepository) ConfigureCommerceProvider(providerID, adapterVersion string) error {
