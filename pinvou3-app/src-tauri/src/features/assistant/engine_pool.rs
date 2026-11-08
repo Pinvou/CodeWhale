@@ -7907,7 +7907,7 @@ mod scheduled_model_tests {
                 &self,
                 builder: reqwest::ClientBuilder,
                 base: &str,
-            ) -> Result<reqwest::ClientBuilder> {
+            ) -> anyhow::Result<reqwest::ClientBuilder> {
                 anyhow::ensure!(
                     matches!(base, "https://1.1.1.1/v1" | "https://8.8.8.8/v1"),
                     "unprepared route"
