@@ -147,8 +147,24 @@ func TestReconciliationOrphanPaidOrderPostgres(t *testing.T) {
 				}
 			}
 			var firstCase uuid.UUID
-			for attempt := 0; attempt < 2; attempt++ {
-				run, err := coordinator.RunAdminReconciliation(ctx, actor, order.Channel, date)
+			var runs []uuid.UUID
+			var originalObservation uuid.UUID
+			var originalEvidence string
+			observationEvidence := func(id uuid.UUID) string {
+				t.Helper()
+				var evidence string
+				if err := r.pool.QueryRow(ctx, `SELECT jsonb_build_object('observation',to_jsonb(o),'facts',(SELECT jsonb_agg(to_jsonb(f) ORDER BY row_number) FROM reconciliation_observation_facts f WHERE f.observation_id=o.id))::text FROM reconciliation_observations o WHERE o.id=$1`, id).Scan(&evidence); err != nil {
+					t.Fatal(err)
+				}
+				return evidence
+			}
+			for attempt := 0; attempt < 3; attempt++ {
+				observedDate := date
+				if !upgrade {
+					// Observe past dates out of order; none proves the payment date.
+					observedDate = date.AddDate(0, 0, -[]int{0, 2, 1}[attempt])
+				}
+				run, err := coordinator.RunAdminReconciliation(ctx, actor, order.Channel, observedDate)
 				if err != nil || run.Status != "COMPLETED" || run.CaseCount != 1 {
 					t.Fatalf("orphan reconciliation did not complete %s: %v; cause=%v", run.Status, err, errors.Unwrap(err))
 				}
@@ -172,6 +188,10 @@ func TestReconciliationOrphanPaidOrderPostgres(t *testing.T) {
 				}
 				if attempt == 0 {
 					firstCase = id
+					if err := r.pool.QueryRow(ctx, `SELECT active_observation_id FROM reconciliation_runs WHERE id=$1`, run.ID).Scan(&originalObservation); err != nil {
+						t.Fatal(err)
+					}
+					originalEvidence = observationEvidence(originalObservation)
 				} else if id != firstCase {
 					t.Fatal("replay replaced original manual review identity")
 				}
@@ -184,6 +204,11 @@ func TestReconciliationOrphanPaidOrderPostgres(t *testing.T) {
 					{run.ID, "PAYMENT_LEDGER_MISSING", 0},
 					{uuid.New(), "PAYMENT_TRANSACTION_MISSING", 0},
 				} {
+					if attempt == 2 {
+						// The original two HTTP rounds exercise the real snapshot
+						// quota. Use repository reads for the additional third date.
+						break
+					}
 					response := readCases(selection.run, selection.kind)
 					var page struct {
 						Items []struct {
@@ -198,13 +223,36 @@ func TestReconciliationOrphanPaidOrderPostgres(t *testing.T) {
 						t.Fatal("public filter returned another case identity/type")
 					}
 				}
-				invalid := readCases(run.ID, "PAYMENT_TRANSACTION_MISSING_UNKNOWN")
-				if invalid.Code != http.StatusBadRequest || !strings.Contains(invalid.Body.String(), `"code":"INVALID_FILTER"`) {
-					t.Fatal("unknown case type bypassed the finite public filter")
+				for _, priorRun := range runs {
+					prior, err := r.AdminReconciliationCases(ctx, priorRun, 10)
+					if err != nil || len(prior) != 1 || prior[0].ID != firstCase {
+						t.Fatal("cross-date association lost the earlier run", prior, err)
+					}
+				}
+				runs = append(runs, run.ID)
+				if observationEvidence(originalObservation) != originalEvidence {
+					t.Fatal("later observation rewrote original immutable evidence")
+				}
+				if attempt < 2 {
+					invalid := readCases(run.ID, "PAYMENT_TRANSACTION_MISSING_UNKNOWN")
+					if invalid.Code != http.StatusBadRequest || !strings.Contains(invalid.Body.String(), `"code":"INVALID_FILTER"`) {
+						t.Fatal("unknown case type bypassed the finite public filter")
+					}
 				}
 				if financialFacts() != before || provider.queryCount != 0 {
 					t.Fatal("manual classification changed funds or queried an order to repair it")
 				}
+			}
+			var observations, dates int
+			if err := r.pool.QueryRow(ctx, `SELECT count(DISTINCT progress.observation_id),count(DISTINCT run.business_date) FROM reconciliation_observation_progress progress JOIN reconciliation_observations observation ON observation.id=progress.observation_id JOIN reconciliation_runs run ON run.id=observation.run_id WHERE progress.case_id=$1`, firstCase).Scan(&observations, &dates); err != nil {
+				t.Fatal(err)
+			}
+			want := 3
+			if upgrade {
+				want = 1
+			}
+			if observations != 3 || dates != want {
+				t.Fatal("independent business dates lost their own observation", observations, dates, want)
 			}
 			if upgrade {
 				var ledgerBefore, ledgerAfter string

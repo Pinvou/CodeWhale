@@ -192,6 +192,7 @@ RETAINED_REQUIRED = {
     "TestEscalatedForcedRefundEvidenceAndReceiptGuardsPostgres",
     "TestOrdinaryForcedRefundAppliedReceiptRecoveryPostgres",
     "TestReconciliationOrphanPaidOrderPostgres",
+    "TestReconciliationUnknownDateOrphanLifecyclePostgres",
     "TestPaymentPersonalWalletAdmissionPostgres",
     "TestPaymentPersonalWalletAdmissionStatusRacePostgres",
     "TestReceivableSettlementGuardedWritesPostgres",
@@ -369,6 +370,9 @@ EXACT_REQUIRED_CHILDREN = {
         "evidence-link", "receipt-identity-and-terminal-replay",
     },
     "TestReconciliationOrphanPaidOrderPostgres": {"fresh-install", "historical-upgrade"},
+    "TestReconciliationUnknownDateOrphanLifecyclePostgres": {
+        "cross-date-concurrency", "legacy-and-ignore", "observation-rollback",
+    },
     "TestRemoteModelCancellationOwnerLoopTransport": {
         "remote_emergency", "remote_emergency_then_user", "user_only",
         "read_failure", "lease_failure", "natural_terminal",

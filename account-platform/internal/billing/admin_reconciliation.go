@@ -343,6 +343,9 @@ func (r *PostgresRepository) updateReconciliationCaseOnce(ctx context.Context, c
 		_, err = tx.Exec(ctx, `UPDATE manual_review_cases SET status=$2,owner_id=$3,claimed_at=CASE WHEN $3::uuid IS NULL THEN claimed_at ELSE COALESCE(claimed_at,$4) END,first_response_at=CASE WHEN $3::uuid IS NULL THEN first_response_at ELSE COALESCE(first_response_at,$4) END,mitigation_at=CASE WHEN $5<>'' THEN COALESCE(mitigation_at,$4) ELSE mitigation_at END,resolved_at=$6,updated_at=$4 WHERE id=$1`, item.ID, manualStatus, item.OwnerID, now, command.RepairAction, item.ResolvedAt)
 	}
 	after, _ := json.Marshal(item)
+	if err == nil && command.Action == "IGNORE" {
+		after, err = recordUnknownDateOrphanAcceptance(ctx, tx, item, after)
+	}
 	if err == nil {
 		_, err = tx.Exec(ctx, `INSERT INTO reconciliation_case_commands(id,reconciliation_case_id,actor_id,idempotency_key,request_hash,action,reason,before_snapshot,after_snapshot,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`, uuid.Must(uuid.NewV7()), item.ID, command.ActorID, command.IdempotencyKey, requestHash, command.Action, command.Reason, before, after, now)
 	}
