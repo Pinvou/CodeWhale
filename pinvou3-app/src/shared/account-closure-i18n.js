@@ -29,7 +29,7 @@ export const accountClosureCopy = {
       "FORCED_REFUND_UNRESOLVED": "仍有强制退款待核实",
       "FINANCIAL_RECONCILIATION_OPEN": "仍有财务对账差异",
       "LATE_PAYMENT_REVIEW_OPEN": "仍有晚到支付复核",
-      "PAYMENT_ANOMALY_OPEN": "仍有支付异常",
+      "PAYMENT_ANOMALY_OPEN": "支付异常尚未解决，或其财务修复尚未完成",
       "UNSETTLED_USAGE_HOLD": "仍有用量预占",
       "MODEL_EXECUTION_ACTIVE": "仍有模型执行",
       "USAGE_RECONCILIATION_PENDING": "仍有用量待核对"
@@ -81,7 +81,7 @@ export const accountClosureCopy = {
       "FORCED_REFUND_UNRESOLVED": "A forced refund requires review",
       "FINANCIAL_RECONCILIATION_OPEN": "Financial reconciliation is open",
       "LATE_PAYMENT_REVIEW_OPEN": "A late-payment review is open",
-      "PAYMENT_ANOMALY_OPEN": "A payment anomaly is open",
+      "PAYMENT_ANOMALY_OPEN": "A payment anomaly is unresolved or its financial repair is pending",
       "UNSETTLED_USAGE_HOLD": "A usage hold remains",
       "MODEL_EXECUTION_ACTIVE": "Model execution is active",
       "USAGE_RECONCILIATION_PENDING": "Usage reconciliation is pending"
@@ -133,7 +133,7 @@ export const accountClosureCopy = {
       "FORCED_REFUND_UNRESOLVED": "強制返金の確認が必要です",
       "FINANCIAL_RECONCILIATION_OPEN": "財務照合が未解決です",
       "LATE_PAYMENT_REVIEW_OPEN": "遅延支払い確認が未解決です",
-      "PAYMENT_ANOMALY_OPEN": "支払い異常が未解決です",
+      "PAYMENT_ANOMALY_OPEN": "支払い異常が未解決か、財務修復が未完了です",
       "UNSETTLED_USAGE_HOLD": "利用予約が残っています",
       "MODEL_EXECUTION_ACTIVE": "モデル実行中です",
       "USAGE_RECONCILIATION_PENDING": "利用量の照合待ちです"
