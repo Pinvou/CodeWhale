@@ -805,7 +805,9 @@ pub fn take_startup_cleanup(service: &Arc<ModelStoreService>) -> Result<Value, S
 /// 引用"，这里从**在册模型 + 约定候选路径**恢复实际引用：枚举全部在册记录的
 /// 约定权重候选（当前 models_dir 与历史根下各一份，换目录不搬权重），exists()
 /// 过滤后 canonicalize 解析软链得到真实落点。卡片目录（data_dir/cards/<id>）
-/// 不在集合里——它恒在商店数据根之下，路径臂本已覆盖。
+/// 不在集合里——它恒在商店数据根之下，路径臂本已覆盖。另并入卡片脚本自己
+/// 落盘的 .env MODEL_PATH 权威路径（改名目录/零痕迹旧根的兜底，见
+/// card_env_model_paths 的文档）。
 ///
 /// fail-closed：settings/DB 读不了 → Err（与商店名单查询同口径，破坏性移除
 /// 路径不得当未命中放行）。与 residual_paths 同一把 exists() 尺子但方向相反：
@@ -843,6 +845,14 @@ pub(crate) fn installed_weight_paths_checked() -> Result<Vec<std::path::PathBuf>
                     }
                 }
             }
+        }
+    }
+    // .env MODEL_PATH 恢复腿（2026-11-08 评审 P2-3 处方一）：约定候选覆盖不
+    // 了的「改名目录/零痕迹旧根」由卡片脚本自己落盘的权威路径兜底（存在性
+    // 过滤 + canonicalize 与上方同一把尺）；见 card_env_model_paths 的文档。
+    for resolved in card_env_model_paths(&records) {
+        if !out.contains(&resolved) {
+            out.push(resolved);
         }
     }
     Ok(out)
@@ -976,6 +986,131 @@ pub(crate) fn installed_weight_filenames_checked() -> Result<Vec<String>, String
         }
     }
     Ok(out)
+}
+
+/// 卡片脚本自己落盘的 `.env`（官方卡片共用的 `MODEL_PATH=` 约定）恢复卡片
+/// 权重的**权威落点**。证据（脚本正文以商店/仓库下发件为准）：
+/// - ornith15-bf16 / qwen38-27b-nvfp4-mtp 的 `download_model.sh`：
+///   `sed -i -e "s#^MODEL_PATH=.*#MODEL_PATH=$MODELS_DIR#" .env`——下载完成即
+///   把真实权重目录写进 .env；VENDOR_DIR 是 `cards/<id>/vendor`（宿主 prepare
+///   约定）或脚本自带的旧约定 `~/.local/share/local-model-manager/vendor/<id>`。
+///
+/// 这是第五条恢复腿（2026-11-08 评审 P2-3 处方一「覆盖这类依赖」）：前四腿的
+/// 恢复数据全部来自商店库与约定推导，对「目录被改名/落在任何已知根之外的
+/// 零痕迹旧根」失明；.env 里的 MODEL_PATH 是卡片运行时自己记下的权威路径，
+/// 恰好覆盖这两类盲区（改名目录、任意深度祖先删除经路径相交两方向命中）。
+/// 三个落点逐一探测（找不到/无 MODEL_PATH/路径非绝对按该卡片无数据处理），
+/// exists() 过滤（残留 .env 指向已删除目录时不产生假引用）后 canonicalize
+/// 解析软链（与 installed_weight_paths_checked 同一把尺）。
+///
+/// 解析失败的方向是「少恢复」（该卡片退回前四腿的保护面），不是「错恢复」：
+/// .env 是卡片脚本可写文件，不把它当信任边界，只当引用恢复的数据源。
+fn card_env_model_paths(records: &[db::StoreModelRecord]) -> Vec<std::path::PathBuf> {
+    let home = crate::platform::paths::user_home_dir();
+    let mut out: Vec<std::path::PathBuf> = Vec::new();
+    for rec in records {
+        let Ok(safe_id) = config::safe_path_component(&rec.card_id) else {
+            continue;
+        };
+        let candidates = [
+            config::data_dir().join("cards").join(&safe_id).join(".env"),
+            config::data_dir()
+                .join("cards")
+                .join(&safe_id)
+                .join("vendor")
+                .join(".env"),
+            home.join("local/share/local-model-manager/vendor")
+                .join(&safe_id)
+                .join(".env"),
+        ];
+        for env_path in candidates {
+            let Ok(text) = std::fs::read_to_string(&env_path) else {
+                continue;
+            };
+            let Some(raw) = parse_env_model_path(&text) else {
+                continue;
+            };
+            let candidate = std::path::PathBuf::from(&raw);
+            if !candidate.is_absolute() {
+                continue;
+            }
+            if !candidate.exists() {
+                continue;
+            }
+            let resolved = candidate.canonicalize().unwrap_or(candidate);
+            if !out.contains(&resolved) {
+                out.push(resolved);
+            }
+        }
+    }
+    out
+}
+
+/// 解析 `.env` 正文里的 `MODEL_PATH=`（支持 `export ` 前缀与成对引号；多次
+/// 赋值取最后一次——与卡片脚本 `sed -i` 覆盖写语义一致）。空值/缺键返回 None。
+fn parse_env_model_path(text: &str) -> Option<String> {
+    let mut found: Option<String> = None;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        let trimmed = trimmed.strip_prefix("export ").unwrap_or(trimmed).trim();
+        if let Some(value) = trimmed.strip_prefix("MODEL_PATH=") {
+            let value = value
+                .trim()
+                .trim_matches('"')
+                .trim_matches('\'')
+                .trim()
+                .to_string();
+            if !value.is_empty() {
+                found = Some(value);
+            }
+        }
+    }
+    found
+}
+
+/// 设备管理删除守卫的「归属无法确认的在册卡片」探测（可失败版）。
+///
+/// 处方二的收窄版（2026-11-08 评审 P2-3：「在归属无法确认时拒绝物理删除」）：
+/// 五条恢复腿（引用路径/约定名/导入标记/权重文件名/.env MODEL_PATH）对某张
+/// 卡片**全部无数据**（无 source_filename、仓库末段与模型名都过不了
+/// `safe_path_component`、卡片 .env 也没有可用的 MODEL_PATH）时，它的权重
+/// 可以落在任何位置而守卫无从确认任何删除目标的归属——这类卡片在册期间，
+/// 物理删除按整体拒绝处理（解除登记不受影响）；卸载对应卡片后本臂自动放行。
+/// 真实触发面：非 ASCII/含路径分量的 model_name 且无来源仓库与文件名的卡片
+/// （`safe_path_component` 只放行 `[A-Za-z0-9._-]`，中文自取名卡片正是这个
+/// 形状）。仍有任一腿可用（哪怕只是约定名）的卡片不触发本臂——它们由对应
+/// 腿按各自的半径保护，本臂不放大拒绝面（与名字臂「宁可漏」的边界处方一致）。
+///
+/// fail-closed：DB 读不了 → Err（与前四臂同口径，破坏性移除路径不得当未命中
+/// 放行）。
+pub(crate) fn installed_ownership_unconfirmable_checked() -> Result<bool, String> {
+    let records = db::list_store_models().map_err(|e| format!("读取在册模型失败：{e}"))?;
+    let filename_usable = |rec: &db::StoreModelRecord| -> bool {
+        let Some(filename) = rec.source_filename.as_deref() else {
+            return false;
+        };
+        let trimmed = filename.trim();
+        !trimmed.is_empty() && config::safe_path_component(trimmed).is_ok()
+    };
+    let names_usable = |rec: &db::StoreModelRecord| -> bool {
+        let repo_usable = rec
+            .source_repo_id
+            .as_deref()
+            .and_then(|repo| repo.rsplit('/').next())
+            .map(|base| config::safe_path_component(base).is_ok())
+            .unwrap_or(false);
+        repo_usable || config::safe_path_component(&rec.model_name).is_ok()
+    };
+    for rec in &records {
+        if filename_usable(rec) || names_usable(rec) {
+            continue;
+        }
+        if !card_env_model_paths(std::slice::from_ref(rec)).is_empty() {
+            continue;
+        }
+        return Ok(true);
+    }
+    Ok(false)
 }
 
 pub fn storage_settings() -> Result<Value, String> {
@@ -1683,6 +1818,191 @@ mod tests {
         let names = crate::features::model_store::installed_weight_filenames_checked()
             .expect("derive filenames after dup/escape/blank");
         assert_eq!(names, vec!["model-Q4_K_M.gguf".to_string()]);
+        let _ = ctx;
+    }
+
+    #[test]
+    fn installed_ownership_unconfirmable_tracks_fully_blind_cards() {
+        // 第五臂收窄版（2026-11-08 评审 P2-3）：只有恢复腿全部无数据的卡片
+        // （无 source_filename、仓库末段与模型名都过不了 safe_path_component、
+        // .env 也没有 MODEL_PATH）才令归属无法确认；任一腿可用（哪怕只是约定
+        // 名）都不触发——本臂不放大拒绝面（与名字臂「宁可漏」边界处方一致）。
+        use crate::features::model_store::platform::linux::db;
+
+        let ctx = super::config::TempHome::new();
+        db::init_db().expect("init store db");
+        let probe = || {
+            crate::features::model_store::installed_ownership_unconfirmable_checked()
+                .expect("probe ownership confirmability")
+        };
+        assert!(!probe(), "empty store must be confirmable");
+
+        let insert = |card_id: &str, filename: Option<&str>| {
+            db::add_store_model(db::AddStoreModelParams {
+                card_id,
+                model_name: "some-model",
+                card_name: card_id,
+                org: None,
+                description: None,
+                engine_name: "e",
+                engine_version: None,
+                size_bytes: 0,
+                quantization: None,
+                source_repo_id: Some("org/repo"),
+                source_filename: filename,
+                scripts: &std::collections::BTreeMap::new(),
+                status: "downloaded",
+                profiles: &[],
+                deploy_topology: crate::features::model_store::platform::linux::store_client::DeployTopology::default(),
+                card_source: "store",
+            })
+            .expect("insert model");
+        };
+        // 有合法文件名 / 有约定名（仓库末段或模型名）的卡片：可确认。
+        insert("c-own-1", Some("model.gguf"));
+        insert("c-own-2", None);
+        assert!(
+            !probe(),
+            "cards with any usable recovery leg must stay confirmable"
+        );
+        // 真盲行：无文件名 + 无仓库 + model_name 过不了 safe_path_component
+        // （中文自取名/路径分量形状）——登记入口会拒，走原始 SQL 注入
+        // （db::connect 私有，按 db_path 直开）。
+        let conn = rusqlite::Connection::open(db::db_path()).expect("open store db");
+        conn.execute(
+            "INSERT INTO store_models
+                 (card_id, model_name, card_name, engine_name, status, downloaded_at)
+             VALUES ('c-blind-1', '中文自取名', 'cb', 'e', 'downloaded', '2026-01-01'),
+                    ('c-blind-2', '..', 'cb2', 'e', 'downloaded', '2026-01-01')",
+            [],
+        )
+        .expect("insert fully blind rows");
+        drop(conn);
+        assert!(
+            probe(),
+            "a fully blind card must make ownership unconfirmable"
+        );
+        // .env 落盘的 MODEL_PATH 是恢复数据：真盲行带上它即恢复可确认
+        // （MODEL_PATH 指向的目录必须真实存在——exists() 过滤不产生假引用）。
+        for (card_id, weight_name) in [
+            ("c-blind-1", "renamed-weights"),
+            ("c-blind-2", "other-weights"),
+        ] {
+            let weights = ctx.path().join(weight_name);
+            std::fs::create_dir_all(&weights).expect("create weights dir");
+            let card_dir = super::config::data_dir()
+                .join("cards")
+                .join(card_id)
+                .join("vendor");
+            std::fs::create_dir_all(&card_dir).expect("create card vendor dir");
+            std::fs::write(
+                card_dir.join(".env"),
+                format!("MODEL_PATH={}\n", weights.to_string_lossy()),
+            )
+            .expect("write card env");
+        }
+        assert!(
+            !probe(),
+            "a blind card with an .env MODEL_PATH must stay confirmable"
+        );
+        // 卸载（删行）即放行的解锁路径真实存在。
+        db::delete_store_model("c-blind-1").expect("remove blind card 1");
+        db::delete_store_model("c-blind-2").expect("remove blind card 2");
+        assert!(
+            !probe(),
+            "uninstalling blind cards must restore confirmability"
+        );
+        let _ = ctx;
+    }
+
+    #[test]
+    fn parse_env_model_path_takes_the_last_assignment() {
+        // 解析口径：支持 export 前缀与成对引号；多次赋值取最后一次（与卡片
+        // 脚本 sed -i 覆盖写语义一致）；空值/缺键返回 None。
+        assert_eq!(
+            super::parse_env_model_path("MODEL_PATH=/home/u/weights\n"),
+            Some("/home/u/weights".to_string())
+        );
+        assert_eq!(
+            super::parse_env_model_path(
+                "export MODEL_PATH=\"/home/u/my weights\"\nCACHE_PATH=/tmp\n"
+            ),
+            Some("/home/u/my weights".to_string())
+        );
+        assert_eq!(
+            super::parse_env_model_path("MODEL_PATH=/old\nMODEL_PATH=/new\n"),
+            Some("/new".to_string())
+        );
+        assert_eq!(super::parse_env_model_path("MODEL_PATH=\n"), None);
+        assert_eq!(super::parse_env_model_path("CACHE_PATH=/tmp\n"), None);
+    }
+
+    #[test]
+    fn card_env_model_paths_recover_renamed_weight_dirs() {
+        // .env 恢复腿端到端（2026-11-08 评审 P2-3 处方一）：改名目录/零痕迹
+        // 旧根上的卡片权重由 .env 的 MODEL_PATH 恢复进 installed refs——
+        // 存在性过滤 + canonicalize 解析软链，与约定候选同一把尺。
+        use crate::features::model_store::platform::linux::db;
+
+        let ctx = super::config::TempHome::new();
+        db::init_db().expect("init store db");
+        db::add_store_model(db::AddStoreModelParams {
+            card_id: "c-env-1",
+            model_name: "some-model",
+            card_name: "c-env-1",
+            org: None,
+            description: None,
+            engine_name: "e",
+            engine_version: None,
+            size_bytes: 0,
+            quantization: None,
+            source_repo_id: None,
+            source_filename: None,
+            scripts: &std::collections::BTreeMap::new(),
+            status: "downloaded",
+            profiles: &[],
+            deploy_topology: crate::features::model_store::platform::linux::store_client::DeployTopology::default(),
+            card_source: "store",
+        })
+        .expect("insert model");
+        // 约定候选（some-model 目录）不存在，集合为空。
+        let empty = crate::features::model_store::installed_weight_paths_checked()
+            .expect("enumerate installed refs");
+        assert!(empty.is_empty(), "no candidates on disk, got {empty:?}");
+        // 卡片 .env 记录的改名目录（零痕迹旧根形状）恢复进集合。
+        let renamed = ctx.path().join("zero-trace-root").join("renamed-weights");
+        std::fs::create_dir_all(&renamed).expect("create renamed weights");
+        let card_dir = super::config::data_dir()
+            .join("cards")
+            .join("c-env-1")
+            .join("vendor");
+        std::fs::create_dir_all(&card_dir).expect("create card vendor dir");
+        std::fs::write(
+            card_dir.join(".env"),
+            format!("MODEL_PATH={}\n", renamed.to_string_lossy()),
+        )
+        .expect("write card env");
+        let refs = crate::features::model_store::installed_weight_paths_checked()
+            .expect("enumerate installed refs with env leg");
+        let resolved = renamed.canonicalize().expect("resolve renamed dir");
+        assert!(
+            refs.contains(&resolved),
+            ".env MODEL_PATH must be recovered, got {refs:?}"
+        );
+        // 相对路径与不存在的路径不产生假引用。
+        std::fs::write(
+            card_dir.join(".env"),
+            "MODEL_PATH=relative/dir\nMODEL_PATH=/gone/dir\n",
+        )
+        .expect("write bad env");
+        let refs = crate::features::model_store::installed_weight_paths_checked()
+            .expect("enumerate installed refs with bad env");
+        assert!(
+            !refs
+                .iter()
+                .any(|p| p.ends_with("relative/dir") || p.ends_with("gone/dir")),
+            "relative and missing paths must be filtered, got {refs:?}"
+        );
         let _ = ctx;
     }
 

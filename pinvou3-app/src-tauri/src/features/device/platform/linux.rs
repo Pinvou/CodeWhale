@@ -1159,6 +1159,118 @@ mod tests {
         });
     }
 
+    /// 2026-11-08 评审 P2-3 处方一的端到端：卡片 .env 落盘的 MODEL_PATH 是
+    /// 权威归属数据——改名目录/零痕迹旧根上的卡片权重由它恢复进存量引用
+    /// 集合，删除其祖先目录（名字臂对深层祖先失明的形状）由路径臂拒绝；
+    /// 不相关的目录照常放行（钉住恢复腿不误伤）。
+    #[test]
+    fn card_env_model_path_shields_renamed_dir_from_ancestor_deletion() {
+        use crate::features::device::{external_models::registry_dir, remove_external_model};
+        use crate::features::model_store::platform::linux::{config, db};
+        use crate::platform::paths::user_home_dir;
+        let ctx = config::TempHome::new();
+        db::init_db().expect("init store db");
+        // 零痕迹旧根上的改名权重目录（不在任何已知根、约定名对不上）。
+        let legacy_root = user_home_dir().join("env-legacy-root");
+        let renamed = legacy_root.join("renamed-weights");
+        std::fs::create_dir_all(&renamed).expect("create renamed weights");
+        std::fs::write(renamed.join("weight.bin"), b"weights").expect("write weight");
+        // 在册卡片（无 repo/无 filename，约定名推不出 renamed）+ 卡片 .env。
+        db::add_store_model(db::AddStoreModelParams {
+            card_id: "c-env",
+            model_name: "env-model",
+            card_name: "c-env",
+            org: None,
+            description: None,
+            engine_name: "e",
+            engine_version: None,
+            size_bytes: 0,
+            quantization: None,
+            source_repo_id: None,
+            source_filename: None,
+            scripts: &std::collections::BTreeMap::new(),
+            status: "downloaded",
+            profiles: &[],
+            deploy_topology:
+                crate::features::model_store::platform::linux::store_client::DeployTopology::default(),
+            card_source: "store",
+        })
+        .expect("insert env card");
+        let card_vendor = config::data_dir()
+            .join("cards")
+            .join("c-env")
+            .join("vendor");
+        std::fs::create_dir_all(&card_vendor).expect("create card vendor dir");
+        std::fs::write(
+            card_vendor.join(".env"),
+            format!("MODEL_PATH={}\n", renamed.to_string_lossy()),
+        )
+        .expect("write card env");
+        // 外部登记：m-env01 的权重 = 改名目录的祖先（整树删除会连带毁掉它）。
+        let dir = registry_dir();
+        std::fs::create_dir_all(&dir).expect("registry dir");
+        std::fs::write(
+            dir.join("m-env01.json"),
+            format!(
+                r#"{{"schema":1,"id":"m-env01","name":"env-ext","kind":"other","weights_path":"{}"}}"#,
+                legacy_root.to_string_lossy()
+            ),
+        )
+        .expect("write ancestor record");
+        // 负验证对照：不相关名的家目录三层权重目录。
+        let unrelated = user_home_dir()
+            .join("env-unrelated-place")
+            .join("deep")
+            .join("store-free");
+        std::fs::create_dir_all(&unrelated).expect("create unrelated weights");
+        std::fs::write(unrelated.join("weight.bin"), b"weights").expect("write unrelated weight");
+        std::fs::write(
+            dir.join("m-free02.json"),
+            format!(
+                r#"{{"schema":1,"id":"m-free02","name":"env-ext-free","kind":"other","weights_path":"{}"}}"#,
+                unrelated.to_string_lossy()
+            ),
+        )
+        .expect("write unrelated record");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        runtime.block_on(async move {
+            // 祖先删除：.env 恢复的引用路径与目标相交 → 拒绝（报错来自存量
+            // 引用臂而非其他臂）。
+            let error =
+                remove_external_model("m-env01".to_string(), true, "env-ext".to_string(), None)
+                    .await
+                    .expect_err("ancestor deletion over .env-recovered weights must be refused");
+            assert!(
+                error.contains("已安装商店模型引用"),
+                "rejection must come from the installed-refs arm, got: {error}"
+            );
+            // 卡片、改名权重与注册记录全部存活。
+            assert!(
+                db::get_store_model("c-env")
+                    .expect("query store model")
+                    .is_some(),
+                "the in-store card must survive the rejection"
+            );
+            assert!(renamed.exists(), "recovered weights must survive");
+            assert!(dir.join("m-env01.json").exists());
+            // 负验证：不相关目录照常放行（整单删除成功）。
+            let outcome = remove_external_model(
+                "m-free02".to_string(),
+                true,
+                "env-ext-free".to_string(),
+                None,
+            )
+            .await
+            .expect("unrelated weights must delete normally");
+            assert!(outcome.removed_weights && outcome.removed_registry);
+            assert!(!unrelated.exists(), "unrelated weights must be gone");
+        });
+        let _ = ctx;
+    }
+
     /// 2026-11-04 评审 P3 的端到端：确认面板带来的守护进程地址与当前设置解析
     /// 值不一致时（列表之后、确认之前改过 `ollama_host`），整单拒绝且记录
     /// 原样保留——DELETE 绝不改投新实例；用**当前**地址重新确认则正常走完

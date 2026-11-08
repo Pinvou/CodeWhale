@@ -191,6 +191,11 @@ pub(crate) fn installed_weight_filenames_checked() -> Result<Vec<String>, String
     Ok(Vec::new())
 }
 
+/// 非 Linux 没有商店：不存在在册卡片，归属恒可确认（设备守卫的第五臂恒不命中）。
+pub(crate) fn installed_ownership_unconfirmable_checked() -> Result<bool, String> {
+    Ok(false)
+}
+
 pub(crate) fn ollama_base_url() -> String {
     "http://127.0.0.1:11434".to_string()
 }

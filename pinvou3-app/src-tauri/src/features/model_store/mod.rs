@@ -113,6 +113,11 @@ pub(crate) use platform::installed_import_markers_checked;
 // P2，review 5797725367）。
 // 见 platform::installed_weight_filenames_checked 的说明。
 pub(crate) use platform::installed_weight_filenames_checked;
+// 本机是否存在归属无法确认的在册卡片（可失败）：设备移除守卫的第五臂——
+// 恢复腿（引用路径/约定名/导入标记/权重文件名/.env MODEL_PATH）全部无数据的
+// 卡片，物理删除按「归属无法确认时拒绝」整体拦截（2026-11-08 评审 P2-3）。
+// 见 platform::installed_ownership_unconfirmable_checked 的说明。
+pub(crate) use platform::installed_ownership_unconfirmable_checked;
 // 本机 Ollama 守护进程基地址：设备管理的外部模型探测/标签/删除与商店生命周期
 // 对齐到同一实例。见 platform::ollama_base_url 的说明。
 pub(crate) use platform::ollama_base_url;
