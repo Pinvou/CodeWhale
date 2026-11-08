@@ -142,11 +142,25 @@ function walletFact(labels, value, unavailable) {
   return Object.prototype.hasOwnProperty.call(labels, value) ? labels[value] : value;
 }
 
+function adjustmentAmountView(value, language, words) {
+  if (value === '' || value == null) return null;
+  try {
+    const amount = integerMoney(value);
+    if (amount === 0n || amount === -(1n << 63n)) return { valid: false, text: words.invalidAmount };
+    const absolute = amount < 0n ? -amount : amount;
+    return { valid: true, text: words.change(amount > 0n ? words.increase : words.decrease, formatBalance(absolute.toString(), language)) };
+  } catch {
+    return { valid: false, text: words.invalidAmount };
+  }
+}
+
 function Wallets({ client, copy, language, permissions, owner, requesterID, onViewApproval, route, acceptedSessionEpoch, acceptedPlatformAuthorizationVersion }) {
   const walletDirectoryVisible = usePortalDialogScope();
-  const [walletCopyDenied, setWalletCopyDenied] = useState(false);
+  const [walletReadDenied, setWalletReadDenied] = useState(false);
   const walletCopy = adminLayoutCopy[language].walletDirectory;
   const walletIDLabel = adminLayoutCopy[language].financeLists.wallet_id;
+  const adjustmentCopy = adminLayoutCopy[language].walletAdjustmentForm;
+  const formID = React.useId();
   const filters = useFinanceReadRoute('wallets', route);
   const [page, setPage] = useState(null);
   const [cursor, setCursor] = useState('');
@@ -161,7 +175,7 @@ function Wallets({ client, copy, language, permissions, owner, requesterID, onVi
   const [adjustmentPrevious, setAdjustmentPrevious] = useState([]);
   const [selected, setSelected] = useState(null);
   const [replacement, setReplacement] = useState(null);
-  const operation = useFinanceOperation(owner, copy, client, 'wallets');
+  const operation = useFinanceOperation(owner, { ...copy, saved: adjustmentCopy.submissionConfirmed }, client, 'wallets');
   const list = useFinanceRouteLoader({ route, signature: filters.signature, client, owner, operation, load: async () => { if (await load(filters.query.cursor)) await loadAdjustments(''); }, reset: () => setPage(null) });
   const canRequest = permissions.includes('platform.billing.repairs.request');
   const loadAdjustments = async (next = adjustmentCursor) => {
@@ -170,10 +184,10 @@ function Wallets({ client, copy, language, permissions, owner, requesterID, onVi
   };
   const load = async (next = cursor) => {
     const result = await list.read(() => loadFinancePage({ ...(route ? filters.query : {}), cursor: next }, filters => client.wallets(filters), () => { setCursor(''); setPrevious([]); }), (reason, current) => {
-      if (current && [401, 403].includes(reason?.status)) setWalletCopyDenied(true);
+      if (current && [401, 403].includes(reason?.status)) setWalletReadDenied(true);
       return reason.status === 403 ? "permissions" : "unavailable";
     });
-    if (result) setWalletCopyDenied(false);
+    if (result) setWalletReadDenied(false);
     if (result) { setPage(result.value); setCursor(result.query.cursor); return true; }
   };
   useEffect(() => { if (!route) void (async () => { await load(''); await loadAdjustments(''); })();  }, [client, owner]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -190,7 +204,7 @@ function Wallets({ client, copy, language, permissions, owner, requesterID, onVi
   };
   const adjust = async () => {
     const facts = operation.pendingFacts || { action: 'create', walletID, delta, reason: reason.trim(), replacement };
-    if (facts.action === 'create' && (!facts.walletID || facts.reason.length < 10)) return;
+    if (!operation.pendingFacts && !canSubmitAdjustment) return;
     const value = await operation.mutate(facts, async (facts, operationKey) => {
       if (facts.action === 'resume') {
         const fresh = await currentPendingAdjustment(client, facts.item, requesterID);
@@ -218,7 +232,10 @@ function Wallets({ client, copy, language, permissions, owner, requesterID, onVi
       try { return await createAndSubmitFreshGovernedApproval(client, walletAdjustmentApprovalDraft(item, facts.reason, key)); }
       catch (error) { throw financeWriteObserved(error); }
     });
-    if (value) { setReplacement(null); setWalletID(''); setDelta(''); setReason(''); await load(); await loadAdjustments(); }
+    if (value) {
+      if (facts.action === 'create') { setReplacement(null); setWalletID(''); setDelta(''); setReason(''); }
+      await load(); await loadAdjustments();
+    }
   };
   const resume = () => {
     if (!selected || adjustmentApprovalAction(selected.item, selected.approval, { canRequest: canRequest && selected.item.requested_by === requesterID }) !== 'resume') return;
@@ -233,6 +250,21 @@ function Wallets({ client, copy, language, permissions, owner, requesterID, onVi
     setWalletID(selected.item.wallet_id); setDelta(''); setReason('');
   };
   const resumeAvailable = selected && adjustmentApprovalAction(selected.item, selected.approval, { canRequest: canRequest && selected.item.requested_by === requesterID }) === 'resume';
+  const pendingAdjustment = operation.busy || operation.unknown ? operation.pendingFacts : null;
+  const pendingRecord = pendingAdjustment?.action === 'resume' ? pendingAdjustment.item : null;
+  const formReplacement = pendingAdjustment ? pendingAdjustment.replacement : replacement;
+  const originalAdjustmentWalletID = pendingRecord?.wallet_id || pendingAdjustment?.walletID;
+  const formWalletID = pendingAdjustment ? originalAdjustmentWalletID || '' : walletID;
+  const formDelta = pendingAdjustment ? pendingRecord?.amount_microcredits ?? pendingAdjustment.delta ?? '' : delta;
+  const formReason = pendingAdjustment ? pendingRecord?.reason ?? pendingAdjustment.reason ?? '' : reason;
+  const adjustmentWallet = canRequest && !walletReadDenied && !pendingAdjustment && !operation.unknown ? page?.items.find(item => item.wallet_id === walletID) : null;
+  const adjustmentAmount = adjustmentAmountView(formDelta, language, adjustmentCopy);
+  const canSubmitAdjustment = canRequest && !operation.busy && !operation.unknown && Boolean(walletID && adjustmentAmount?.valid && reason.trim().length >= 10);
+  const fieldHelp = suffix => `${formID}-${suffix}`;
+  const balanceSnapshot = field => {
+    const value = adjustmentWallet ? formatBalance(adjustmentWallet[field], language) : '—';
+    return value === '—' ? adjustmentCopy.unavailable : adjustmentCopy.points(value);
+  };
   return <section><h3>{copy.wallet}</h3>{route && <AdminFinanceFilters kind="wallets" language={language} value={filters.draft} onChange={filters.setDraft} disabled={operation.busy || operation.unknown} onSubmit={() => { setPrevious([]); filters.move({ ...filters.draft, cursor: '' }, null); }} />}<button disabled={operation.busy || operation.unknown} onClick={async () => { await load(); await loadAdjustments(); }}>{copy.refresh}</button><Feedback operation={operation} copy={copy} />{operation.unknown && <button disabled={operation.busy} onClick={() => void adjust()}>{copy.retry}</button>}{page && <div className="adm-table-wrap adm-wallet-directory-scroll" role="region" aria-label={copy.wallet} tabIndex={0}>
     <table className="adm-table adm-wallet-directory" role="table">
       <thead role="rowgroup"><tr role="row"><th role="columnheader" scope="col">{copy.wallet}</th><th role="columnheader" scope="col">{copy.total}</th><th role="columnheader" scope="col">{copy.remaining}</th><th role="columnheader" scope="col">{copy.status}</th></tr></thead>
@@ -240,7 +272,7 @@ function Wallets({ client, copy, language, permissions, owner, requesterID, onVi
         const walletType = walletFact(walletCopy.types, item.owner_type, walletCopy.typeUnavailable);
         return <tr role="row" key={item.wallet_id}>
           <td role="cell"><button type="button" className="adm-wallet-directory-open" aria-label={walletCopy.select(walletType, item.wallet_id)} disabled={operation.busy || operation.unknown || Boolean(replacement)} onClick={async () => { setWalletID(item.wallet_id); if (route) filters.move(filters.query, item.wallet_id); else if (permissions.includes('platform.billing.ledger.read')) { const value = await operation.read(() => client.walletLedger(item.wallet_id)); if (value) setLedger(value); } }}>{walletType}</button>
-            <div className="adm-wallet-directory-id"><small>{walletIDLabel}</small>{walletDirectoryVisible && (walletCopyDenied ? <code>{item.wallet_id}</code> : <AdminIdentifier client={client} owner={owner} routeScope={route?.search || 'wallets'} value={item.wallet_id} label={walletIDLabel} targetLabel={item.wallet_id} language={language} sessionEpoch={acceptedSessionEpoch} platformAuthorizationVersion={acceptedPlatformAuthorizationVersion} alwaysExpanded />)}</div>
+            <div className="adm-wallet-directory-id"><small>{walletIDLabel}</small>{walletDirectoryVisible && (walletReadDenied ? <code>{item.wallet_id}</code> : <AdminIdentifier client={client} owner={owner} routeScope={route?.search || 'wallets'} value={item.wallet_id} label={walletIDLabel} targetLabel={item.wallet_id} language={language} sessionEpoch={acceptedSessionEpoch} platformAuthorizationVersion={acceptedPlatformAuthorizationVersion} alwaysExpanded />)}</div>
           </td>
           <td role="cell"><span className="adm-wallet-directory-mobile-label" aria-hidden="true">{copy.total}</span>{formatBalance(item.posted_microcredits, language)}</td><td role="cell"><span className="adm-wallet-directory-mobile-label" aria-hidden="true">{copy.remaining}</span>{formatBalance(item.available_microcredits, language)}</td>
           <td role="cell"><dl className="adm-wallet-directory-facts"><div><dt>{walletCopy.accountStatus}</dt><dd>{walletFact(walletCopy.account, item.status, walletCopy.unavailable)}</dd></div><div><dt>{walletCopy.riskStatus}</dt><dd>{walletFact(walletCopy.risk, item.financial_status, walletCopy.unavailable)}</dd></div></dl></td>
@@ -255,8 +287,31 @@ function Wallets({ client, copy, language, permissions, owner, requesterID, onVi
       <button disabled={operation.busy || operation.unknown || !adjustmentPrevious.length} onClick={() => { const values = [...adjustmentPrevious]; const value = values.pop(); setAdjustmentPrevious(values); void loadAdjustments(value); }}>{copy.previous}</button><button disabled={operation.busy || operation.unknown || !adjustments?.next_cursor} onClick={() => { setAdjustmentPrevious(values => [...values, adjustmentCursor]); void loadAdjustments(adjustments.next_cursor); }}>{copy.next}</button>
       {selected && <article><h4>{selected.item.adjustment_id}</h4><p>{selected.item.reason}</p>{selected.approval && <><p>{copy.approvals}: {selected.approval.approval_request_id} / {selected.approval.status}</p><button disabled={operation.busy || operation.unknown} onClick={() => onViewApproval(selected.approval.approval_request_id)}>{copy.details}</button></>}{resumeAvailable && <button disabled={operation.busy || operation.unknown} onClick={resume}>{copy.submit}</button>}{canRequest && walletReplacementEligible(selected.approval, selected.item.adjustment_id, selected.item.wallet_id, requesterID) && <button disabled={operation.busy || operation.unknown} onClick={beginReplacement}>{copy.newInvocation}</button>}</article>}
     </section>
-    {replacement && <p>{copy.approvals}: {replacement.requestID} / {copy.wallet}: {replacement.walletID}</p>}
-    {canRequest && <form onSubmit={event => { event.preventDefault(); void adjust(); }}><label>{copy.wallet}<input disabled={operation.busy || operation.unknown} readOnly={Boolean(replacement)} value={walletID} onChange={event => setWalletID(event.target.value)} /></label><label>{copy.delta}<input disabled={operation.busy || operation.unknown} value={delta} onChange={event => setDelta(event.target.value)} pattern="-?(0|[1-9][0-9]*)" /></label><label>{copy.reason}<textarea disabled={operation.busy || operation.unknown} maxLength={2000} value={reason} onChange={event => setReason(event.target.value)} /></label><button disabled={operation.busy || operation.unknown || !walletID || !delta || reason.trim().length < 10}>{operation.unknown ? copy.retry : copy.draft}</button></form>}
+    {formReplacement && <p>{copy.approvals}: {formReplacement.requestID} / {copy.wallet}: {formReplacement.walletID}</p>}
+    {canRequest && <form className="adm-wallet-adjustment-form" aria-labelledby={fieldHelp('title')} onSubmit={event => { event.preventDefault(); if (canSubmitAdjustment) void adjust(); }}>
+      <header><h4 id={fieldHelp('title')}>{adjustmentCopy.title}</h4><p>{adjustmentCopy.approval}</p></header>
+      <div className="adm-wallet-adjustment-field">
+        <label htmlFor={fieldHelp('wallet')}>{walletIDLabel}</label>
+        <input id={fieldHelp('wallet')} aria-describedby={fieldHelp('wallet-help')} disabled={operation.busy || operation.unknown} readOnly={Boolean(formReplacement)} value={formWalletID} onChange={event => setWalletID(event.target.value)} />
+        <small id={fieldHelp('wallet-help')}>{adjustmentCopy.walletHelp}</small>
+      </div>
+      {operation.unknown && originalAdjustmentWalletID && <p className="adm-wallet-adjustment-direction">{adjustmentCopy.recoveryWallet} <code>{originalAdjustmentWalletID}</code></p>}
+      {!pendingAdjustment && !operation.unknown && <div className="adm-wallet-adjustment-snapshot">
+        {adjustmentWallet ? <><p>{adjustmentCopy.snapshot}</p><dl><div><dt>{adjustmentCopy.posted}</dt><dd>{balanceSnapshot('posted_microcredits')}</dd></div><div><dt>{adjustmentCopy.available}</dt><dd>{balanceSnapshot('available_microcredits')}</dd></div></dl></> : <p>{adjustmentCopy.noSnapshot}</p>}
+      </div>}
+      <div className="adm-wallet-adjustment-field">
+        <label htmlFor={fieldHelp('delta')}>{adjustmentCopy.amount}</label>
+        <input id={fieldHelp('delta')} aria-describedby={fieldHelp('delta-help') + (adjustmentAmount ? ' ' + fieldHelp('direction') : '')} aria-invalid={adjustmentAmount?.valid === false || undefined} disabled={operation.busy || operation.unknown} value={formDelta} onChange={event => setDelta(event.target.value)} pattern="-?(0|[1-9][0-9]*)" />
+        <small id={fieldHelp('delta-help')}>{adjustmentCopy.amountHelp}</small>
+        {adjustmentAmount && <p id={fieldHelp('direction')} className="adm-wallet-adjustment-direction">{adjustmentAmount.text}</p>}
+      </div>
+      <div className="adm-wallet-adjustment-field">
+        <label htmlFor={fieldHelp('reason')}>{copy.reason}</label>
+        <textarea id={fieldHelp('reason')} aria-describedby={fieldHelp('reason-help')} disabled={operation.busy || operation.unknown} maxLength={2000} value={formReason} onChange={event => setReason(event.target.value)} />
+        <small id={fieldHelp('reason-help')}>{adjustmentCopy.reasonHelp}</small>
+      </div>
+      <footer><button type="submit" disabled={!canSubmitAdjustment}>{adjustmentCopy.send}</button></footer>
+    </form>}
   </section>;
 }
 

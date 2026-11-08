@@ -259,3 +259,34 @@ adminLayoutCopy.ja.walletDirectory = {
   risk: { CLEAR: '未決済の債権なし', RECEIVABLE_OPEN: '未決済の債権あり' },
   select: (type, id) => `${type}を選択 · ${id}`,
 };
+
+adminLayoutCopy.zh.walletAdjustmentForm = {
+  title: '申请钱包调账', approval: '将创建调账记录并提交审批。余额是否变更以审批执行和账本为准。',
+  walletHelp: '从上方钱包列表选择，或输入完整钱包 ID。', snapshot: '所选钱包在当前列表中的最近读数',
+  noSnapshot: '当前列表没有此钱包的余额读数。', posted: '账面积分', available: '可用积分', unavailable: '未提供',
+  amount: '调整金额（微积分）', amountHelp: '输入非零整数。正数增加，负数扣减；10,000 微积分等于 1 积分。',
+  invalidAmount: '请输入范围内的非零整数金额。', increase: '增加', decrease: '扣减',
+  change: (direction, points) => `本次申请：${direction} ${points} 积分`, points: value => `${value} 积分`,
+  submissionConfirmed: '已确认调账审批请求。请在审批中心查看处理状态。', recoveryWallet: '待恢复请求的钱包：',
+  reasonHelp: '请填写至少 10 个字符。', send: '提交调账审批',
+};
+adminLayoutCopy.en.walletAdjustmentForm = {
+  title: 'Request a wallet adjustment', approval: 'This creates an adjustment record and submits it for approval. Check approval execution and the ledger to confirm a balance change.',
+  walletHelp: 'Select a wallet above or enter its full wallet ID.', snapshot: 'Most recent amounts for this wallet in the current list',
+  noSnapshot: 'The current list has no balance amounts for this wallet.', posted: 'Posted points', available: 'Available points', unavailable: 'Not provided',
+  amount: 'Adjustment amount (microcredits)', amountHelp: 'Enter a nonzero whole number. Positive adds and negative deducts; 10,000 microcredits equal 1 point.',
+  invalidAmount: 'Enter a nonzero whole amount within the supported range.', increase: 'Add', decrease: 'Deduct',
+  change: (direction, points) => `Requested change: ${direction} ${points} points`, points: value => `${value} points`,
+  submissionConfirmed: 'The adjustment approval request was confirmed. Check its status in the approval center.', recoveryWallet: 'Wallet in the original request:',
+  reasonHelp: 'Enter at least 10 characters.', send: 'Submit adjustment for approval',
+};
+adminLayoutCopy.ja.walletAdjustmentForm = {
+  title: 'ウォレット調整を申請', approval: '調整記録を作成し、承認を申請します。残高の変更は承認の実行結果と台帳で確認してください。',
+  walletHelp: '上の一覧で選択するか、ウォレット ID をすべて入力してください。', snapshot: 'このウォレットの現在の一覧での最終取得値',
+  noSnapshot: '現在の一覧にこのウォレットの残高情報はありません。', posted: '帳簿ポイント', available: '利用可能ポイント', unavailable: '未提供',
+  amount: '調整額（マイクロクレジット）', amountHelp: '0 以外の整数を入力してください。正の数は加算、負の数は減算です。10,000 マイクロクレジットは 1 ポイントです。',
+  invalidAmount: '対応範囲内で 0 以外の整数を入力してください。', increase: '加算', decrease: '減算',
+  change: (direction, points) => `申請する変更：${points} ポイントを${direction}`, points: value => `${value} ポイント`,
+  submissionConfirmed: '調整の承認申請が確認されました。処理状況は承認センターで確認してください。', recoveryWallet: '元の申請のウォレット：',
+  reasonHelp: '10 文字以上で入力してください。', send: '調整の承認を申請',
+};

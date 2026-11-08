@@ -428,3 +428,16 @@
   .adm-restored-shell .adm-wallet-directory-mobile-label{display:block;margin-bottom:2px;color:var(--adm-muted);font-size:12px}
   .adm-restored-shell .adm-wallet-directory-facts{grid-template-columns:repeat(2,minmax(0,1fr))}
 }
+
+.adm-restored-shell .adm-wallet-adjustment-form{display:grid;gap:14px;max-width:700px;margin:16px 0 0;padding:16px;border:1px solid var(--adm-line);border-radius:10px}
+.adm-restored-shell .adm-wallet-adjustment-form h4,.adm-restored-shell .adm-wallet-adjustment-form p{margin:0}
+.adm-restored-shell .adm-wallet-adjustment-form header p{margin-top:4px}
+.adm-restored-shell .adm-wallet-adjustment-field{display:grid;gap:5px;min-width:0}
+.adm-restored-shell .adm-wallet-adjustment-field label{font-weight:650}
+.adm-restored-shell .adm-wallet-adjustment-field small,.adm-restored-shell .adm-wallet-adjustment-snapshot>p{color:var(--adm-muted);font-size:12px}
+.adm-restored-shell .adm-wallet-adjustment-field input,.adm-restored-shell .adm-wallet-adjustment-field textarea{box-sizing:border-box;width:100%;min-width:0}
+.adm-restored-shell .adm-wallet-adjustment-snapshot{padding:10px 12px;border-radius:8px;background:var(--adm-soft)}
+.adm-restored-shell .adm-wallet-adjustment-snapshot dl{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 12px;margin:7px 0 0}
+.adm-restored-shell .adm-wallet-adjustment-snapshot dd{margin:2px 0 0;font-weight:650;overflow-wrap:break-word;overflow-wrap:anywhere}
+.adm-restored-shell .adm-wallet-adjustment-direction{font-weight:650;overflow-wrap:break-word;overflow-wrap:anywhere}
+.adm-shell.adm-restored-shell .adm-wallet-adjustment-form input:focus,.adm-shell.adm-restored-shell .adm-wallet-adjustment-form textarea:focus,.adm-shell.adm-restored-shell .adm-wallet-adjustment-form button:focus{outline:3px solid var(--adm-primary);outline-offset:2px}
