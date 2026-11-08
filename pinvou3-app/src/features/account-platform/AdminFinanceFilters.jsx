@@ -34,12 +34,15 @@ export function useFinanceRouteLoader({ route, signature, client, owner, operati
     if (route && !operation.busy && !operation.unknown && attempted.current !== identity) void load();
   }, [identity, Boolean(route), operation.busy, operation.unknown]); // eslint-disable-line react-hooks/exhaustive-deps
   return {
-    read: async action => {
+    read: async (action, classifyError) => {
       const stamp = identity;
       // A completed write may resume a callback from an older render. It must
       // not relabel that callback's captured query as the current URL.
       if (route && stamp !== live.current) return undefined;
-      const value = await operation.read(() => { attempted.current = stamp; return action(); });
+      const value = await operation.read(
+        () => { attempted.current = stamp; return action(); },
+        classifyError ? reason => classifyError(reason, stamp === live.current) : undefined,
+      );
       return !route || stamp === live.current ? value : undefined;
     },
   };
