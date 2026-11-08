@@ -530,3 +530,19 @@ ledgerRepairCopy.ja.receivableTarget = {
   fields: { target_resource_id: { label: '償却する未収金の ID', help: '償却対象の未収金記録の ID を入力してください。' }, expected_version: { label: '記録の版（確認用）', help: '参照権限のある会計記録で確認した現在の版を入力してください。このフォームには自動入力されません。' } },
   confirmed: 'スナップショットの未収金', version: 'スナップショットの記録の版', recheck: '元の未収金の ID と現在の版を確認してから、再度取得してください。',
 };
+
+ledgerRepairCopy.zh.receivableAmounts = {
+  title: '核销金额核对', field: { label: '申请核销金额（微积分）', help: '填写大于零的整数，不得超过该记录的未核销余额。10,000 微积分等于 1 积分。', invalid: '请输入 1 到 9223372036854775807 之间的整数微积分。' },
+  outstanding: '快照中的未核销余额', requested: '申请核销金额', points: value => value + ' 积分',
+  full: '拟全额核销', partial: '拟部分核销', limit: '这些金额来自已读取的快照，核销后的余额以审批执行和应收记录为准。',
+};
+ledgerRepairCopy.en.receivableAmounts = {
+  title: 'Review write-off amounts', field: { label: 'Requested write-off (microcredits)', help: 'Enter a positive whole amount no higher than this record’s outstanding balance. 10,000 microcredits equal 1 point.', invalid: 'Enter a whole number from 1 to 9223372036854775807 microcredits.' },
+  outstanding: 'Outstanding balance in this snapshot', requested: 'Requested write-off', points: value => value + ' points',
+  full: 'Requested in full', partial: 'Requested in part', limit: 'These amounts are from the snapshot. Check approval execution and the receivable record for the balance after write-off.',
+};
+ledgerRepairCopy.ja.receivableAmounts = {
+  title: '償却額の確認', field: { label: '申請する償却額（マイクロクレジット）', help: 'この記録の未償却残高を超えない正の整数を入力してください。10,000 マイクロクレジットは 1 ポイントです。', invalid: '1 から 9223372036854775807 までの整数をマイクロクレジットで入力してください。' },
+  outstanding: 'スナップショットの未償却残高', requested: '申請する償却額', points: value => value + ' ポイント',
+  full: '全額の償却を申請', partial: '一部の償却を申請', limit: '金額は取得済みのスナップショットに基づきます。償却後の残高は承認の実行結果と未収金記録で確認してください。',
+};

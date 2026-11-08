@@ -4,8 +4,25 @@ import {
   financialRepairProjectionRows, financialRepairDraftFromProjection,
 } from './admin-financial-repair-form.js';
 import { integerMoney } from './finance-contract.js';
+import { ledgerMicrocreditsToPoints } from './ledger-amount-input.js';
 import { useFinanceOperation } from './useFinanceOperation.js';
 import { createAndSubmitFreshGovernedApproval } from './admin-governed-approval-workflow.js';
+
+function ReceivableWriteOffAmounts({ projection, words }) {
+  const snapshot = projection.financial_snapshot;
+  const requested = integerMoney(snapshot.write_off_microcredits);
+  const outstanding = integerMoney(snapshot.outstanding_microcredits);
+  const rows = [
+    [words.outstanding, ledgerMicrocreditsToPoints(outstanding)],
+    [words.requested, ledgerMicrocreditsToPoints(requested)],
+  ];
+  return <section className="adm-writeoff-amounts" aria-label={words.title}>
+    <h5>{words.title}</h5>
+    <dl>{rows.map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{words.points(value)}</dd></div>)}</dl>
+    <p className="adm-writeoff-plan-kind">{requested === outstanding ? words.full : words.partial}</p>
+    <p className="adm-writeoff-plan-limit">{words.limit}</p>
+  </section>;
+}
 
 // The repair page never asks the operator for amounts the owner already knows:
 // the precheck returns the frozen projection and the draft copies it verbatim.
@@ -29,6 +46,7 @@ export function AdminReceivableWriteOffForm({ client, copy, onCreated, owner = '
   const operation = useFinanceOperation(owner, operationCopy, client, `financial-repair:${commandTypes.join(':')}`);
   const writeOff = commandType === 'RECEIVABLE_WRITE_OFF';
   const targetWords = copy.receivableTarget;
+  const amountWords = copy.receivableAmounts;
   const targetFieldsID = useId();
   const locked = busy !== '' || operation.busy || operation.unknown;
   const pending = operation.pendingFacts;
@@ -49,7 +67,7 @@ export function AdminReceivableWriteOffForm({ client, copy, onCreated, owner = '
   }, [client]);
 
   const fields = financialRepairInputs[commandType];
-  const targetField = (key) => writeOff ? targetWords.fields[key] : null;
+  const targetField = (key) => writeOff ? (key === 'write_off_microcredits' ? amountWords.field : targetWords.fields[key]) : null;
   const label = (field) => targetField(field.key)?.label || (field.key === 'target_resource_id' ? copy.targets[commandType] : copy.fields[field.key]);
   const setValue = (key, value) => {
     factsRevision.current += 1;
@@ -78,7 +96,7 @@ export function AdminReceivableWriteOffForm({ client, copy, onCreated, owner = '
     if (prepared.error) {
       setProjection(null);
       setFacts(null);
-      setFailure(copy.invalidInput);
+      setFailure(writeOff && prepared.field === 'write_off_microcredits' ? { field: prepared.field } : copy.invalidInput);
       return;
     }
     const revision = ++factsRevision.current;
@@ -175,16 +193,19 @@ export function AdminReceivableWriteOffForm({ client, copy, onCreated, owner = '
         const guidance = targetField(field.key);
         const fieldID = guidance ? targetFieldsID + '-input-' + field.key : undefined;
         const helpID = guidance ? targetFieldsID + '-' + field.key : undefined;
+        const amountInvalid = writeOff && field.key === 'write_off_microcredits' && failure?.field === field.key;
+        const errorID = amountInvalid ? helpID + '-error' : undefined;
         const control = <input id={fieldID} disabled={writeOff && locked} required value={pending ? String(field.key === 'target_resource_id' ? pending.draft.target_resource_id : field.key === 'expected_version' ? pending.draft.normalized_command.expected_receivable_version : pending.draft.normalized_command[field.key]) : values[field.key] || ''} inputMode={field.kind === 'integer' ? 'numeric' : 'text'}
-          aria-describedby={helpID} onChange={(event) => setValue(field.key, event.target.value)} />;
+          aria-invalid={amountInvalid || undefined} aria-describedby={amountInvalid ? helpID + ' ' + errorID : helpID} onChange={(event) => setValue(field.key, event.target.value)} />;
         if (!guidance) return <label key={field.key}>{label(field)}{control}</label>;
         return <div key={field.key} className={field.key === 'expected_version' ? 'adm-writeoff-target-field adm-writeoff-version-field' : 'adm-writeoff-target-field'}>
           <label htmlFor={fieldID}>{label(field)}</label>{control}<small id={helpID}>{guidance.help}</small>
+          {amountInvalid && <small id={errorID} className="adm-writeoff-amount-error" role="alert">{amountWords.field.invalid}</small>}
         </div>;
       })}
       <button type="submit" disabled={locked}>{busy === 'facts' ? copy.reading : copy.readFacts}</button>
     </form>
-    {failure && <p role="alert">{failure.feedback ? copy[failure.feedback] : failure}{failure.feedback && !operation.unknown && <> {targetWords.recheck}</>}</p>}
+    {failure && !failure.field && <p role="alert">{failure.feedback ? copy[failure.feedback] : failure}{failure.feedback && !operation.unknown && <> {targetWords.recheck}</>}</p>}
     {created && <p role="status">{copy.createdHint} <code>{created}</code></p>}
     {refreshingTarget && <p role="status">{copy.reading}</p>}
     {displayedFacts && !refreshingTarget && <div className="adm-financial-repair-facts">
@@ -193,6 +214,7 @@ export function AdminReceivableWriteOffForm({ client, copy, onCreated, owner = '
         <div><dt>{targetWords.confirmed}</dt><dd><code>{displayedProjection.target_resource_id}</code></dd></div>
         <div><dt>{targetWords.version}</dt><dd>{String(displayedProjection.critical_resource_versions.receivable_version)}</dd></div>
       </dl>}
+      {writeOff && displayedProjection?.command_type === 'RECEIVABLE_WRITE_OFF' && <ReceivableWriteOffAmounts projection={displayedProjection} words={amountWords} />}
       <dl>{displayedFacts.rows.map((row) => <div key={row.key}><dt>{copy.fields[row.key] || row.key}</dt><dd><code>{row.value}</code></dd></div>)}</dl>
       <details><summary>{copy.criticalFacts}</summary><pre>{displayedFacts.critical}</pre></details>
       <details><summary>{copy.financialFacts}</summary><pre>{displayedFacts.financial}</pre></details>

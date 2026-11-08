@@ -491,3 +491,14 @@
 .adm-restored-shell .adm-financial-repair-facts .adm-writeoff-confirmed-target{padding:10px;border:1px solid var(--adm-line);border-radius:8px;background:var(--adm-soft)}
 .adm-restored-shell .adm-writeoff-confirmed-target dd{min-width:0;overflow-wrap:break-word;overflow-wrap:anywhere}
 @media(max-width:560px){.adm-restored-shell .adm-financial-repair-facts dl.adm-writeoff-confirmed-target{grid-template-columns:minmax(0,1fr)}}
+
+.adm-restored-shell .adm-writeoff-amounts{display:grid;gap:8px;margin:10px 0;padding:12px;border:1px solid var(--adm-line);border-radius:8px;background:var(--adm-soft)}
+.adm-restored-shell .adm-writeoff-amounts h5,.adm-restored-shell .adm-writeoff-amounts p{margin:0}
+.adm-restored-shell .adm-financial-repair-facts .adm-writeoff-amounts dl{margin:0;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+.adm-restored-shell .adm-writeoff-amounts dd{min-width:0;overflow-wrap:break-word;overflow-wrap:anywhere;font-weight:650}
+@media(max-width:560px){.adm-restored-shell .adm-financial-repair-facts .adm-writeoff-amounts dl{grid-template-columns:minmax(0,1fr)}}
+.adm-restored-shell .adm-writeoff-plan-kind{font-weight:650}
+.adm-restored-shell .adm-writeoff-plan-limit{color:var(--adm-muted);font-size:12px}
+
+.adm-restored-shell .adm-financial-repair-target .adm-writeoff-target-field .adm-writeoff-amount-error{color:var(--adm-danger,#a52837);font-weight:600;overflow-wrap:break-word;overflow-wrap:anywhere}
+.adm-restored-shell .adm-financial-repair-target .adm-writeoff-target-field>input[aria-invalid=true]{border-color:var(--adm-danger,#a52837)}
