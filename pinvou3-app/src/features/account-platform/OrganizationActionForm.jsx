@@ -155,12 +155,16 @@ export function OrganizationActionForm({ client, owner, copy, title, scope, fiel
   <button type="button" disabled={disabled || operation.blocked || !renderedReady} onClick={() => changeEditing(true)}>{title}</button>
  </div>;
  const displayed = confirmation && freshCurrent(confirmation);
- const details = displayed ? [...confirmationContext, ...fields.map(field => {
+ const pendingOwner = scope === 'transfer' ? operation.pendingFacts?.new_owner_user_id : undefined;
+ const knownTarget = ownerPickerAllowed && selectedPickerRecord?.identity === renderedReady && selectedPickerRecord?.record.user_id === values.newOwner ? selectedPickerRecord.record : null;
+ const contextual = typeof confirmationContext === 'function';
+ const ownerTransferSummary = adminAppearance && scope === 'transfer' && contextual;
+ const confirmationRows = contextual ? confirmationContext(values, knownTarget).filter(row => !pendingOwner || row.name !== 'newOwner') : confirmationContext;
+ const details = displayed ? [...confirmationRows, ...fields.filter(field => !contextual || !confirmationRows.some(row => row.name === field.name)).map(field => {
   const selected = field.multiple ? confirmation.values[field.name] : [confirmation.values[field.name]];
   return { name: field.name, label: copy[field.labelKey || field.label || field.name], value: selected.map(value => value === '' && field.optional ? copy.root : fieldOptions(field, confirmation.values)?.find(option => option.value === value)?.label || value).join(', ') };
  })] : [];
  const pendingSummary = operation.pendingFacts ? draftContext?.pendingSummary?.(operation.pendingFacts) : null;
- const pendingOwner = scope === 'transfer' ? operation.pendingFacts?.new_owner_user_id : undefined;
  const renderOwnerField = field => {
   const { words } = field.pickerPresentation, value = values[field.name];
   if (pendingOwner) return <div key={field.name} className="adm-owner-picker-selection adm-owner-picker-pending"><strong>{words.pendingTarget}</strong><code dir="ltr">{pendingOwner}</code></div>;
@@ -177,10 +181,10 @@ export function OrganizationActionForm({ client, owner, copy, title, scope, fiel
   </label>;
  };
  const form = <form className={`ap-org-action${adminAppearance ? ' ap-admin-org-action' : ''}${adminAppearance && dangerous ? ' ap-admin-org-action-danger' : ''}${draftContext ? ' ap-admin-unit-move' : ''}`} onSubmit={submit}><h4>{title}</h4>
-  {displayed && <OrganizationActionConfirmation copy={copy} title={title} target={confirmation.confirmationTarget} description={description} details={details} appearance={appearance} dangerous={dangerous} onCancel={() => cancel(confirmation)} onConfirm={() => void accept(confirmation)} canRestoreFocus={() => freshCurrent(confirmation)} />}
-  {dialog && (confirmationTarget || confirmationContext.length > 0) && <dl className="ap-org-action-target">
+  {displayed && <OrganizationActionConfirmation copy={copy} title={title} target={confirmation.confirmationTarget} description={description} details={details} className={ownerTransferSummary ? 'ap-admin-owner-transfer-confirm' : ''} appearance={appearance} dangerous={dangerous} onCancel={() => cancel(confirmation)} onConfirm={() => void accept(confirmation)} canRestoreFocus={() => freshCurrent(confirmation)} />}
+  {dialog && (confirmationTarget || confirmationRows.length > 0) && <dl className={ownerTransferSummary ? "ap-org-action-target ap-admin-owner-transfer-summary" : "ap-org-action-target"}>
    {confirmationTarget && <><dt>{copy.confirmationTarget}</dt><dd>{draftContext?.targetSummary?.() ?? confirmationTarget}</dd></>}
-   {confirmationContext.map(item => <React.Fragment key={item.name}><dt>{item.label}</dt><dd>{item.value}</dd></React.Fragment>)}
+   {confirmationRows.map(item => <React.Fragment key={item.name}><dt>{item.label}</dt><dd>{item.value}</dd></React.Fragment>)}
   </dl>}
   {description && <p className="ap-org-action-description">{description}</p>}
   {pendingSummary || (!operation.unknown && !operation.pendingFacts && draftContext?.summary?.())}

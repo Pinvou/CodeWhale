@@ -10,6 +10,17 @@ export function OrganizationAdminLifecycle({ current, ownerMember, ownerReadFail
   const statusCanStart = canManageStatus && (active || disabled);
   const statusCondition = !canManageStatus ? words.noStatusPermission : disabled ? words.enableCondition : active ? words.statusCondition : words.statusUnavailable;
   const transferCondition = !canTransfer ? words.noTransferPermission : active ? words.transferCondition : disabled ? words.transferDisabled : words.transferUnavailable;
+  const memberIdentity = (id, display) => <>{display && <><bdi>{display}</bdi>{' · '}</>}<code dir="ltr">{id}</code></>;
+  const transferRows = (values, picked) => {
+    let id = '';
+    try { id = organizationID(values.newOwner); } catch { /* The original confirmation validates the input. */ }
+    const candidate = id ? pickerPresentation?.members?.find(member => member.user_id === id) : null;
+    const targetName = picked?.display_name || picked?.username || candidate?.display_name || candidate?.user_code;
+    return [
+      { name: 'currentOwner', label: words.contextOwner, value: ownerMember ? memberIdentity(ownerMember.user_id, ownerMember.display_name || ownerMember.user_code) : ownerReadFailed ? words.contextOwnerReadFailed : words.contextOwnerUnverified },
+      { name: 'newOwner', label: words.transferTargetLabel, value: id ? memberIdentity(id, targetName) : words.transferTargetPending },
+    ];
+  };
   return <div className="adm-organization-lifecycle">
     <section className="adm-organization-lifecycle-context" aria-labelledby={heading + '-context'}>
       <div><h4 id={heading + '-context'}>{words.contextTitle}</h4>
@@ -46,7 +57,7 @@ export function OrganizationAdminLifecycle({ current, ownerMember, ownerReadFail
         </dl>
         {canTransfer && status !== 'DELETED' && <div className="adm-organization-lifecycle-action">
           {/* The existing form stays mounted for recovery even when a new transfer is unavailable. */}
-          {action('transfer', copy.transfer, [{ name: 'newOwner', lookup: true, pickerPresentation }], values => ({ new_owner_user_id: organizationID(values.newOwner) }), 'transfer', '', true, { disabled: !active })}
+          {action('transfer', copy.transfer, [{ name: 'newOwner', lookup: true, pickerPresentation }], values => ({ new_owner_user_id: organizationID(values.newOwner) }), 'transfer', '', true, { disabled: !active, confirmationContext: transferRows, description: [words.transferRoleChanges, words.transferRecovery].join(' ') })}
         </div>}
       </section>
     </div>
