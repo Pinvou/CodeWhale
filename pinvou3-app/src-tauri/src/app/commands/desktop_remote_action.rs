@@ -282,7 +282,6 @@ pub async fn desktop_remote_action_a(
         if !lease_matches_remote_binding(&lease, &live) {
             return Err("remote_binding_mismatch".to_owned());
         }
-        state.purge_stale(&live);
         sessions
             .state(&remote_ref, &lease)
             .map_err(|_| "remote_session_unavailable".to_owned())?;
@@ -325,23 +324,46 @@ pub async fn desktop_remote_action_a(
             );
             "remote_action_invalid".to_owned()
         })?;
-        // Authoritative native ownership outlives renderer stop/reload. Reserve
-        // before any dispatch and reuse an unresolved intent's original wire ID.
-        let identity = state
-            .reserve_identity(
-                &local_session_id,
-                &remote_ref,
-                &live,
-                &operation,
-                &body,
-                &request_id,
-            )
-            .map_err(|failure| {
-                if let Some(id) = failure.request_id {
-                    actual_request_id = id;
-                }
-                failure.code.to_owned()
-            })?;
+        // Retire/reserve/register inside the same current owner/lane and store
+        // binding fence. A captured old context must never prune new identities.
+        let (receiver, identity) = with_current_dispatch_binding(&app, &live, || {
+            store
+                .require_live_remote_mutation(&local_session_id, &remote_ref, &live)
+                .map_err(|_| "remote_binding_mismatch".to_owned())?;
+            // Preserve action errors as the inner result: this shared task
+            // fence otherwise maps unfamiliar errors to binding mismatch.
+            Ok((|| {
+                state.purge_stale(&live);
+                let identity = state
+                    .reserve_identity(
+                        &local_session_id,
+                        &remote_ref,
+                        &live,
+                        &operation,
+                        &body,
+                        &request_id,
+                    )
+                    .map_err(|failure| {
+                        if let Some(id) = failure.request_id {
+                            actual_request_id = id;
+                        }
+                        failure.code.to_owned()
+                    })?;
+                let receiver = state
+                    .register(
+                        identity.request_id.clone(),
+                        local_session_id.clone(),
+                        remote_ref.clone(),
+                        live.clone(),
+                        operation.clone(),
+                        intent.task_id().map(str::to_owned),
+                        intent.transfer_id().map(str::to_owned),
+                    )
+                    .map_err(str::to_owned)?;
+                Ok::<_, String>((receiver, identity))
+            })())
+        })
+        .map_err(|error| error.code().to_owned())??;
         let request_id = identity.request_id.clone();
         actual_request_id = request_id.clone();
         if matches!(
@@ -354,23 +376,6 @@ pub async fn desktop_remote_action_a(
             }
         }
         payload["request_id"] = json!(request_id);
-        let receiver = with_current_dispatch_binding(&app, &live, || {
-            store
-                .require_live_remote_mutation(&local_session_id, &remote_ref, &live)
-                .map_err(|_| "remote_binding_mismatch".to_owned())?;
-            state
-                .register(
-                    request_id.clone(),
-                    local_session_id.clone(),
-                    remote_ref.clone(),
-                    live.clone(),
-                    operation.clone(),
-                    intent.task_id().map(str::to_owned),
-                    intent.transfer_id().map(str::to_owned),
-                )
-                .map_err(str::to_owned)
-        })
-        .map_err(|error| error.code().to_owned())?;
         identity.mark_dispatched();
         let result = send_action_encrypted(&app, &live, &payload);
         if result.is_err() {

@@ -882,15 +882,30 @@ test('unknown attachment actions are fenced rather than replayed as new uploads'
     () => feature.attachmentChunk('remote-1', 'ref-1', 'task-1', 'transfer-1', 0, 'YQ==', 1),
     () => feature.attachmentAbort('remote-1', 'ref-1', 'task-1', 'transfer-1'),
   ];
-  for (const action of actions) {
+  for (const [index, action] of actions.entries()) {
     const before = calls.filter(call => call.command === 'desktop_remote_action_a').length;
     await assert.rejects(action(), { code: 'result_unknown' });
     await assert.rejects(action(), { code: 'result_unknown' });
-    assert.equal(calls.filter(call => call.command === 'desktop_remote_action_a').length, before + 1);
+    assert.equal(calls.filter(call => call.command === 'desktop_remote_action_a').length, before + (index === 2 ? 2 : 1));
   }
   const before = calls.length;
   await assert.rejects(feature.attachmentBegin('remote-1', 'ref-1', 'task-2', 'big.bin', 'application/octet-stream', 20 * 1024 * 1024 + 1, digest), { code: 'remote_attachment_size_invalid' });
   assert.equal(calls.length, before);
+});
+
+test('explicit unknown attachment cleanup retries its original id after bridge rebuild', async () => {
+  let first = true;
+  const { feature, calls, rebuild } = installFeature(command => command === 'desktop_remote_action_a'
+    ? (first ? (first = false, Promise.reject('result_unknown')) : Promise.resolve({ aborted: false, already_absent: true })) : undefined);
+  const abort = api => api.attachmentAbort('local', 'remote', 'task', 'transfer');
+  await assert.rejects(abort(feature), { code: 'result_unknown' });
+  const actions = () => calls.filter(call => call.command === 'desktop_remote_action_a');
+  assert.equal(actions().length, 1); // no automatic cleanup retry
+  const original = actions()[0].args.requestId;
+  feature.stop();
+  assert.equal((await abort(rebuild())).already_absent, true);
+  assert.equal(actions().length, 2);
+  assert.equal(actions()[1].args.requestId, original);
 });
 
 test('unconfirmed begin IPC result fences the upload batch across task identities', async () => {

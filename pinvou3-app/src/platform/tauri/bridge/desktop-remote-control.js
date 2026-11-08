@@ -1265,7 +1265,7 @@
         return Promise.reject(asBoundedError("remote_action_invalid"));
       }
       if (entry && entry.promise) return entry.promise;
-      if (entry && retryUncertain === false) {
+      if (entry && retryUncertain === false && intent.operation !== "attachment_abort") {
         return Promise.reject(asBoundedError("result_unknown"));
       }
       if (!entry) {
