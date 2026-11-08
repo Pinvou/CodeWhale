@@ -16,7 +16,7 @@ const currentSelections = (fields, values) => fields.every(field => {
 
 // Each displayed action owns one immutable invocation. Unknown outcomes retain
 // the original hook facts/key; only fresh invocations require user confirmation.
-export function OrganizationActionForm({ client, owner, copy, title, scope, fields, prepare, action, onConfirmed, confirm = false, disabled = false, confirmationTarget = '', confirmationContext = [], submitTargetHint = '', submitManualTargetHint = '', submitWaitingHint = '', description = '', editBeforeSubmit = false, editDrafts, draftContext, useOperation = useFinanceOperation, dialog = false, appearance = 'default', dangerous = false, actionStage, knownRejectionPresentation, targetPresentation, impactPresentation, finalConfirmationDescription, primaryTrigger = false, submitLabel = '' }) {
+export function OrganizationActionForm({ client, owner, copy, title, scope, fields, prepare, action, onConfirmed, confirm = false, disabled = false, confirmationTarget = '', confirmationContext = [], submitTargetHint = '', submitManualTargetHint = '', submitWaitingHint = '', description = '', editBeforeSubmit = false, editDrafts, draftContext, useOperation = useFinanceOperation, dialog = false, appearance = 'default', dangerous = false, triggerLabel, actionStage, knownRejectionPresentation, targetPresentation, impactPresentation, finalConfirmationDescription, primaryTrigger = false, submitLabel = '' }) {
  const [dialogOpen, setDialogOpen] = useState(false);
  const [stageAttempt, setStageAttempt] = useState(null);
  const [knownRejection, setKnownRejection] = useState(null);
@@ -156,7 +156,7 @@ export function OrganizationActionForm({ client, owner, copy, title, scope, fiel
  useLayoutEffect(() => { if (!open && wasOpen.current && !opener.current?.closest('[hidden]')) opener.current?.focus(); wasOpen.current = open; }, [open]);
  const adminAppearance = appearance === 'admin';
  const triggerClass = adminAppearance ? dangerous ? 'ap-admin-org-danger-trigger' : primaryTrigger ? 'ap-admin-org-primary-trigger' : undefined : undefined;
- const trigger = dialog && <button ref={opener} className={triggerClass} type="button" aria-expanded={open} disabled={open || disabled || operation.blocked || !renderedReady || operation.busy} onClick={() => { if (actionStage) setStageAttempt(null); if (editBeforeSubmit) changeEditing(true); if (draftContext) { setOpenedDraft(draftContext.revision); if (draftContext.preview) setPreviewIdentity(renderedReady); setValues(initialValues(fields)); setInvalid(false); setFieldErrors({}); } setDialogOpen(true); }}>{title}</button>;
+ const trigger = dialog && <button ref={opener} className={triggerClass} type="button" aria-label={triggerLabel} aria-expanded={open} disabled={open || disabled || operation.blocked || !renderedReady || operation.busy} onClick={() => { if (actionStage) setStageAttempt(null); if (editBeforeSubmit) changeEditing(true); if (draftContext) { setOpenedDraft(draftContext.revision); if (draftContext.preview) setPreviewIdentity(renderedReady); setValues(initialValues(fields)); setInvalid(false); setFieldErrors({}); } setDialogOpen(true); }}>{title}</button>;
  if (dialog && !open) return <>{trigger}</>;
  if (editBeforeSubmit && !editing && !operation.busy && !operation.unknown && !operation.pendingFacts) return <div className="ap-org-action"><h4>{title}</h4><p>{fields[0]?.initial}</p>
   {operation.error && <p role="alert">{operation.error}</p>}{operation.message && <p role="status">{operation.message}</p>}
