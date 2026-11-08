@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -718,8 +719,15 @@ func (r *PostgresRepository) EscalateArchiveBlindCases(ctx context.Context, limi
 	return count, nil
 }
 
+type manualReviewSLARepository interface {
+	EvaluateOverduePaymentStopLosses(context.Context, int) (int, error)
+	EvaluateProviderStopLosses(context.Context, int) (int, error)
+	EscalateOverdueManualReviews(context.Context, int, ...manualreview.OnCallSchedule) (int, error)
+	EscalateArchiveBlindCases(context.Context, int) (int, error)
+}
+
 type ManualReviewSLAWorker struct {
-	repository *PostgresRepository
+	repository manualReviewSLARepository
 	interval   time.Duration
 	schedule   manualreview.OnCallSchedule
 }
@@ -736,10 +744,7 @@ func NewManualReviewSLAWorker(repository *PostgresRepository, interval time.Dura
 }
 
 func (worker *ManualReviewSLAWorker) Run(ctx context.Context) {
-	_, _ = worker.repository.EvaluateOverduePaymentStopLosses(ctx, 100)
-	_, _ = worker.repository.EvaluateProviderStopLosses(ctx, 100)
-	_, _ = worker.repository.EscalateOverdueManualReviews(ctx, 100, worker.schedule)
-	_, _ = worker.repository.EscalateArchiveBlindCases(ctx, 100)
+	worker.runOne(ctx)
 	ticker := time.NewTicker(worker.interval)
 	defer ticker.Stop()
 	for {
@@ -747,10 +752,22 @@ func (worker *ManualReviewSLAWorker) Run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			_, _ = worker.repository.EvaluateOverduePaymentStopLosses(ctx, 100)
-			_, _ = worker.repository.EvaluateProviderStopLosses(ctx, 100)
-			_, _ = worker.repository.EscalateOverdueManualReviews(ctx, 100, worker.schedule)
-			_, _ = worker.repository.EscalateArchiveBlindCases(ctx, 100)
+			worker.runOne(ctx)
 		}
+	}
+}
+
+func (worker *ManualReviewSLAWorker) runOne(ctx context.Context) {
+	if _, err := worker.repository.EvaluateOverduePaymentStopLosses(ctx, 100); err != nil && (ctx.Err() == nil || !errors.Is(err, ctx.Err())) {
+		slog.ErrorContext(ctx, "payment_stop_loss_evaluation_failed", "error_code", "PAYMENT_STOP_LOSS_EVALUATION_FAILED")
+	}
+	if _, err := worker.repository.EvaluateProviderStopLosses(ctx, 100); err != nil && (ctx.Err() == nil || !errors.Is(err, ctx.Err())) {
+		slog.ErrorContext(ctx, "provider_stop_loss_evaluation_failed", "error_code", "PROVIDER_STOP_LOSS_EVALUATION_FAILED")
+	}
+	if _, err := worker.repository.EscalateOverdueManualReviews(ctx, 100, worker.schedule); err != nil && (ctx.Err() == nil || !errors.Is(err, ctx.Err())) {
+		slog.ErrorContext(ctx, "manual_review_escalation_failed", "error_code", "MANUAL_REVIEW_ESCALATION_FAILED")
+	}
+	if _, err := worker.repository.EscalateArchiveBlindCases(ctx, 100); err != nil && (ctx.Err() == nil || !errors.Is(err, ctx.Err())) {
+		slog.ErrorContext(ctx, "archive_blind_review_escalation_failed", "error_code", "ARCHIVE_BLIND_REVIEW_ESCALATION_FAILED")
 	}
 }
