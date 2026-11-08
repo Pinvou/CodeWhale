@@ -349,6 +349,7 @@ pub async fn desktop_remote_action_a(
                         }
                         failure.code.to_owned()
                     })?;
+                actual_request_id = identity.request_id.clone();
                 let receiver = state
                     .register(
                         identity.request_id.clone(),
