@@ -257,7 +257,10 @@ fn word_is_secret(word: &str) -> bool {
     // 紧凑 JSON（r5 评审 P2-3 实测泄漏）："api_key":"sk-xxx" 整体是一个词，
     // `sk-` 不在词首——把常见值定界符（冒号/逗号/引号）后的段也按前缀查一遍。
     // 只切这几个 ASCII 定界符，不切 CJK（前缀表全是 ASCII 开头，切中文白费）。
-    for segment in trimmed.split([':', ',', '"']) {
+    // r29 阻断一: < > 也作为定界符——<AccessKey>AKIA…</AccessKey> 的
+    // trim_matches 只剥词边缘，词中 <> 够不着；作为 split 定界符后
+    // AKIA… 独立成段可命中前缀。
+    for segment in trimmed.split([':', ',', '"', '<', '>']) {
         let segment = segment.trim_matches(['\'', '{', '}', '[', ']', '<', '>']); // r28 P2-14: <> 并入 segment trim
         if segment.len() >= MIN_LITERAL_SECRET_LEN
             && SECRET_PREFIXES
@@ -516,7 +519,10 @@ pub fn sanitize_for_disk(line: &str) -> String {
                 None => match trimmed.split_once('=') {
                     // `-H X-Amz-Signature=值`：KEY=VALUE 形态的 header（r5 P2-3）。
                     // 机密键的值抹掉；普通键原样，且不再等下一个词当值。
-                    Some((name, value)) if !value.is_empty() && key_is_secret(name) => {
+                    // r29 P1-1：改用 query_key_is_secret（三表并集）——此前
+                    // key_is_secret 单表漏 refresh_token/x-api-key 等，
+                    // 与平铺 = 分支(:552-558) 的名单不一致（r18 P1-3 复发）。
+                    Some((name, value)) if !value.is_empty() && query_key_is_secret(name) => {
                         out.push_str(name);
                         out.push('=');
                         out.push_str(REDACTED);
@@ -662,7 +668,20 @@ pub fn sanitize_for_disk(line: &str) -> String {
             // 整词抹除，本词保留供排查。**必须长于 14 字符**（冒号后真的黏了
             // scheme）才走这臂：裸 `Authorization:`（空格分离形态）的下一词是
             // basic/bearer 本身，得留给上面的 bare scheme 臂去标真正的凭证词。
-            redact_next = true;
+            //
+            // r29 P1-2：黏连值**不是 scheme**（basic/bearer）时是凭证本体
+            // （`Authorization:$TOKEN` set -x 展开的标准产物）——不能只标
+            // 下一词（值在本词内），必须当场抹值。
+            let glued = &word[14..];
+            let is_scheme =
+                glued.eq_ignore_ascii_case("basic") || glued.eq_ignore_ascii_case("bearer");
+            if is_scheme {
+                out.push_str(word);
+                redact_next = true;
+            } else {
+                out.push_str("Authorization:");
+                out.push_str(REDACTED);
+            }
         }
     }
     clamp_line(&out)
