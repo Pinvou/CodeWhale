@@ -542,6 +542,11 @@ func TestProfileSessionRevocationRecoveryRuntimePostgres(t *testing.T) {
 // used by the migrator; this is not a claim that DownOne can target old versions.
 func assertHistoricalForwardOnlyMigration(t *testing.T, r *PostgresRepository, installed []migrations.Migration, version int64, message string) {
 	t.Helper()
+	assertHistoricalRollbackRefusal(t, r, installed, version, "55000", message)
+}
+
+func assertHistoricalRollbackRefusal(t *testing.T, r *PostgresRepository, installed []migrations.Migration, version int64, sqlstate, message string) {
+	t.Helper()
 	var downSQL string
 	for _, migration := range installed {
 		if migration.Version == version {
@@ -579,7 +584,7 @@ func assertHistoricalForwardOnlyMigration(t *testing.T, r *PostgresRepository, i
 	_, downErr := tx.Exec(ctx, downSQL)
 	rollbackErr := tx.Rollback(ctx)
 	var refusal *pgconn.PgError
-	if !errors.As(downErr, &refusal) || refusal.Code != "55000" || refusal.Message != message {
+	if !errors.As(downErr, &refusal) || refusal.Code != sqlstate || refusal.Message != message {
 		t.Fatal("exact historical rollback guard missing", version, downErr)
 	}
 	if rollbackErr != nil {
