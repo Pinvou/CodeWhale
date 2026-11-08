@@ -356,3 +356,4 @@
 .adm-restored-shell .adm-organization-overview-reference{width:100%;padding:12px 0;border-top:1px solid var(--adm-line)}
 .adm-restored-shell .adm-organization-overview-reference summary{cursor:pointer;color:var(--adm-muted);font-weight:650}
 @media(max-width:560px){.adm-restored-shell .adm-organization-overview-facts{grid-template-columns:minmax(0,1fr)}}
+.adm-restored-shell .adm-organization-overview-members{justify-self:start;max-width:100%;margin-top:4px;white-space:normal;overflow-wrap:anywhere}

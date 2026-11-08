@@ -26,10 +26,9 @@ export function OrganizationOverviewSummary({ organization, detail, directoryPag
   const unitState = deleted ? [words.unavailable, words.deletedSource] : blockedFact || (detailBusy ? [words.loading, words.unitsLoading] : detail.unitsError ? [words.readFailed, words.unitsFailed] : [units ?? words.unavailable, units === null ? words.unitsUnavailable : words.unitsSource]);
   return <section className="adm-organization-overview" aria-label={labels.overview}>
     <dl className="adm-organization-overview-facts">
-      <div><dt>{words.activeMembers}</dt><dd><strong>{memberState[0]}</strong><small>{memberState[1]}</small></dd></div>
+      <div><dt>{words.activeMembers}</dt><dd><strong>{memberState[0]}</strong><small>{memberState[1]}</small>{!deleted && !blockedFact && <button type="button" className="adm-organization-overview-members" onClick={() => navigate({ organization_tab: 'members' })}>{labels.members}</button>}</dd></div>
       <div><dt>{words.activeUnits}</dt><dd><strong>{unitState[0]}</strong><small>{unitState[1]}</small></dd></div>
     </dl>
-    {!deleted && <button type="button" onClick={() => navigate({ organization_tab: 'members' })}>{labels.accessAndRoles}</button>}
     <details className="adm-organization-overview-reference"><summary>{words.technical}</summary><dl className="adm-user-details"><dt>{labels.version}</dt><dd>{organization.version}</dd></dl></details>
   </section>;
 }
