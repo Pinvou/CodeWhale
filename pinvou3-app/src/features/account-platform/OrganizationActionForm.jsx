@@ -22,6 +22,7 @@ export function OrganizationActionForm({ client, owner, copy, title, scope, fiel
  const draftIdentity = `${owner}:${scope}`;
  const [values, setValues] = useState(() => editDrafts?.get(draftIdentity) || initialValues(fields));
  const [openedDraft, setOpenedDraft] = useState(null);
+ const [previewIdentity, setPreviewIdentity] = useState(null);
  const draftIssue = draftContext && dialogOpen ? openedDraft === draftContext.revision ? draftContext.reason(values) : draftContext.changed : '';
  const [invalid, setInvalid] = useState(false);
  const [fieldErrors, setFieldErrors] = useState({});
@@ -33,7 +34,7 @@ export function OrganizationActionForm({ client, owner, copy, title, scope, fiel
  const operation = useOperation(owner, operationCopy, client, scope);
  const live = useRef(null), ready = useRef(null), generation = useRef(0), pending = useRef(null), dispatching = useRef(null);
  const epoch = client.financeSessionEpoch || 0;
- live.current = { client, owner, scope, epoch, values, fields, prepare, action, onConfirmed, disabled, operation, confirmationTarget, renderedReady, editBeforeSubmit, editing, editDrafts, draftIdentity, draftIssue, draftClosed: Boolean(draftContext && !dialogOpen) };
+ live.current = { client, owner, scope, epoch, values, fields, prepare, action, onConfirmed, disabled, operation, confirmationTarget, renderedReady, editBeforeSubmit, editing, editDrafts, draftIdentity, draftIssue, onDraftRejection: draftContext?.onKnownRejection, draftClosed: Boolean(draftContext && !dialogOpen) };
  const sameIdentity = snapshot => {
   const current = live.current, active = ready.current;
   return active && current.renderedReady === active && current.epoch === (current.client.financeSessionEpoch || 0) && snapshot.client === current.client && snapshot.owner === current.owner && snapshot.scope === current.scope && snapshot.epoch === current.epoch &&
@@ -64,7 +65,8 @@ export function OrganizationActionForm({ client, owner, copy, title, scope, fiel
   if (!sameIdentity(snapshot) || dispatching.current || live.current.operation.blocked || live.current.operation.busy) return;
   const marker = {}; dispatching.current = marker;
   try {
-   const result = await live.current.operation.mutate(facts, live.current.action);
+   const onDraftRejection = live.current.onDraftRejection;
+   const result = await live.current.operation.mutate(facts, live.current.action, onDraftRejection && (reason => { if (sameIdentity(snapshot)) onDraftRejection(reason); }));
    if (result !== undefined && sameIdentity(snapshot)) { if (live.current.editBeforeSubmit) { live.current.editDrafts?.delete(live.current.draftIdentity); setEditing(false); } live.current.onConfirmed?.(result); setDialogOpen(false); }
   } finally { if (dispatching.current === marker) dispatching.current = null; }
  };
@@ -120,7 +122,7 @@ export function OrganizationActionForm({ client, owner, copy, title, scope, fiel
  useLayoutEffect(() => { if (!open && wasOpen.current && !opener.current?.closest('[hidden]')) opener.current?.focus(); wasOpen.current = open; }, [open]);
  const adminAppearance = appearance === 'admin';
  const triggerClass = adminAppearance ? dangerous ? 'ap-admin-org-danger-trigger' : primaryTrigger ? 'ap-admin-org-primary-trigger' : undefined : undefined;
- const trigger = dialog && <button ref={opener} className={triggerClass} type="button" aria-expanded={open} disabled={open || disabled || operation.blocked || !renderedReady || operation.busy} onClick={() => { if (editBeforeSubmit) changeEditing(true); if (draftContext) { setOpenedDraft(draftContext.revision); setValues(initialValues(fields)); setInvalid(false); setFieldErrors({}); } setDialogOpen(true); }}>{title}</button>;
+ const trigger = dialog && <button ref={opener} className={triggerClass} type="button" aria-expanded={open} disabled={open || disabled || operation.blocked || !renderedReady || operation.busy} onClick={() => { if (editBeforeSubmit) changeEditing(true); if (draftContext) { setOpenedDraft(draftContext.revision); if (draftContext.preview) setPreviewIdentity(renderedReady); setValues(initialValues(fields)); setInvalid(false); setFieldErrors({}); } setDialogOpen(true); }}>{title}</button>;
  if (dialog && !open) return <>{trigger}</>;
  if (editBeforeSubmit && !editing && !operation.busy && !operation.unknown && !operation.pendingFacts) return <div className="ap-org-action"><h4>{title}</h4><p>{fields[0]?.initial}</p>
   {operation.error && <p role="alert">{operation.error}</p>}{operation.message && <p role="status">{operation.message}</p>}
@@ -138,6 +140,7 @@ export function OrganizationActionForm({ client, owner, copy, title, scope, fiel
   {description && <p className="ap-org-action-description">{description}</p>}
   {pendingSummary || (!operation.unknown && !operation.pendingFacts && draftContext?.summary?.())}
   {fields.length > 0 && !pendingSummary && <fieldset disabled={operation.busy || operation.unknown || operation.blocked || disabled}>{fields.map(field => <label key={field.name}>{copy[field.labelKey || field.label || field.name]}{field.lookup ? <OrganizationUserPicker client={client} copy={copy} value={values[field.name]} disabled={operation.busy || operation.unknown || operation.blocked || disabled} onChange={value => changeValue(field.name, value)} /> : field.options ? <select multiple={field.multiple || false} value={editBeforeSubmit ? operation.pendingFacts?.[field.name] ?? values[field.name] : values[field.name]} onChange={event => { const value = field.multiple ? [...event.target.selectedOptions].map(option => option.value) : event.target.value; changeValue(field.name, value); }}>{!field.multiple && <option value="">{field.emptyLabel ?? (field.optional ? copy.root : '—')}</option>}{fieldOptions(field, values).map(option => <option key={option.value} value={option.value}>{option.label}</option>)}</select> : <input type={field.type || 'text'} autoComplete="off" value={editBeforeSubmit ? operation.pendingFacts?.[field.name] ?? values[field.name] : values[field.name]} onChange={event => changeValue(field.name, event.target.value)} required={!field.optional && !field.nameRule} aria-required={field.nameRule ? true : undefined} aria-invalid={fieldErrors[field.name] ? true : undefined} aria-describedby={field.nameRule ? [`${fieldPrefix}-${field.name}-hint`, fieldErrors[field.name] ? `${fieldPrefix}-${field.name}-error` : '', operation.error ? `${fieldPrefix}-operation-error` : ''].filter(Boolean).join(' ') : undefined} />}{field.nameRule && <small className="ap-org-name-hint" id={`${fieldPrefix}-${field.name}-hint`}>{field.nameRule === 'unit' ? copy.unitNameRules : copy.organizationNameRules}</small>}{fieldErrors[field.name] && <small className="ap-org-name-error" id={`${fieldPrefix}-${field.name}-error`} role="alert">{copy[fieldErrors[field.name]]}</small>}{field.multiple && <small>{copy.unscopedUnits}</small>}</label>)}</fieldset>}
+  {dialogOpen && !operation.unknown && !operation.pendingFacts && draftContext?.preview?.(values, openedDraft === draftContext.revision && previewIdentity === renderedReady && previewIdentity?.client === client && previewIdentity.owner === owner && previewIdentity.scope === scope && previewIdentity.epoch === epoch)}
   {draftIssue && !operation.unknown && !operation.pendingFacts && <p className="ap-org-move-draft-help" role="status">{draftIssue}</p>}
   {invalid && <p role="alert">{copy.invalid}</p>}{operation.error && <p id={`${fieldPrefix}-operation-error`} role="alert">{operation.error}</p>}{operation.message && <p role="status">{operation.message}</p>}
   {dialog ? <footer className="ap-org-action-footer"><button type="button" disabled={operation.busy || operation.unknown || Boolean(operation.pendingFacts)} onClick={closeDialog}>{copy.cancelConfirmation}</button><button disabled={operation.busy || operation.blocked || (disabled && !operation.unknown) || (Boolean(draftIssue) && !operation.pendingFacts && !operation.unknown)} type="submit">{operation.unknown ? copy.retry : submitLabel || (editBeforeSubmit ? copy.save : title)}</button></footer> : <><button disabled={operation.busy || operation.blocked || (disabled && !operation.unknown)} type="submit">{operation.unknown ? copy.retry : editBeforeSubmit ? copy.save : title}</button>

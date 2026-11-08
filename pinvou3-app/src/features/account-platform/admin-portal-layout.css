@@ -372,5 +372,8 @@
 .ap-admin-unit-move .ap-org-move-subject-row{display:flex;align-items:baseline;flex-wrap:wrap;min-width:0;margin:-4px -4px 0;overflow-wrap:break-word}
 .ap-admin-unit-move .ap-org-move-subject-row>*{min-width:0;margin:4px 4px 0}
 .ap-admin-unit-move .ap-org-move-subject-row small{color:var(--adm-muted,#687083);font-weight:650}
+.ap-admin-unit-move .ap-org-move-preview dd+dt{margin-top:12px}
+.ap-admin-unit-move .ap-org-move-preview dd>small{display:block;margin-top:4px;color:var(--adm-muted,#687083)}
+.ap-admin-unit-move .ap-org-move-preview code{white-space:normal;overflow-wrap:anywhere}
 .ap-admin-unit-move fieldset,.ap-admin-unit-move fieldset label{min-width:0}
 .ap-admin-unit-move fieldset select{width:100%;min-width:0;max-width:100%}

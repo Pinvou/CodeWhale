@@ -58,13 +58,13 @@ export function organizationUnitMovePlan(organization, detail, unitID, rootLabel
     return path;
   };
   const path = pathFor(unitID), forbidden = new Set();
-  let segments = null;
-  if (path !== null) {
-    segments = [];
-    for (let item = source; item; item = units.get(item.parent)) segments.push({ id: item.id, label: pathSegment(item) });
-    segments.push({ id: null, label: rootLabel });
-    segments.reverse();
-  }
+  const segmentsFor = id => {
+    const parts = [];
+    for (let item = units.get(id); item; item = units.get(item.parent)) parts.push({ id: item.id, label: pathSegment(item) });
+    parts.push({ id: null, label: rootLabel });
+    return parts.reverse();
+  };
+  const segments = path === null ? null : segmentsFor(unitID);
   const pending = [unitID];
   while (pending.length) {
     const id = pending.pop();
@@ -93,6 +93,22 @@ export function organizationUnitMovePlan(organization, detail, unitID, rootLabel
   ] : [];
   const allowed = new Map(options.map(item => [item.value, item]));
   const hasAlternative = options.some(item => !item.conflict && (item.value === ROOT_TARGET ? null : item.value) !== source.parent);
+  // AdminUnits reads the unpaged tree. Missing ancestors or cycles mean the
+  // loaded rows cannot prove a complete impact count for this source.
+  let impact;
+  const descendantImpact = () => {
+    if (impact) return impact;
+    const rooted = new Set(), queue = [...units.values()].filter(unit => unit.parent === null).map(unit => unit.id);
+    while (queue.length) {
+      const id = queue.pop();
+      if (rooted.has(id)) continue;
+      rooted.add(id);
+      for (const child of children.get(id) || []) queue.push(child);
+    }
+    const known = [...forbidden].filter(id => id !== source.id && units.get(id)?.status !== 'DELETED').length;
+    impact = { known, complete: rooted.size === units.size };
+    return impact;
+  };
   const reason = value => {
     if (!active) return 'moveUnavailable';
     if (!value) return hasAlternative ? 'moveChooseTarget' : 'moveNoTargets';
@@ -101,7 +117,18 @@ export function organizationUnitMovePlan(organization, detail, unitID, rootLabel
     if (allowed.get(value).conflict) return 'moveNameConflict';
     return '';
   };
-  return { path, segments, currentParent: source.parent, sourceID: source.id, context: JSON.stringify([organizationKey, source.id, source.parent, structureVersion]), options, reason, prepare(value) {
+  return { path, segments, currentParent: source.parent, sourceID: source.id, context: JSON.stringify([organizationKey, source.id, source.parent, structureVersion]), options, reason, preview(value) {
+    if (reason(value)) return null;
+    const target = value === ROOT_TARGET ? null : value;
+    const parentPath = pathFor(target);
+    if (parentPath === null) return null;
+    return {
+      path: parentPath + ' › ' + pathSegment(source),
+      segments: [...segmentsFor(target), { id: source.id, label: pathSegment(source) }],
+      targetID: target,
+      impact: descendantImpact(),
+    };
+  }, prepare(value) {
     if (reason(value)) throw Error('INVALID_ORGANIZATION_UNIT_MOVE');
     return { parent_id: value === ROOT_TARGET ? null : value, expected_structure_version: structureVersion };
   } };
