@@ -1,6 +1,6 @@
 import { OrganizationUserPicker } from './OrganizationUserPicker.jsx';
 import { PortalDialog } from './PortalDialog.jsx';
-import React, { useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
 import { organizationNameInputError } from './organization-name-feedback.js';
 import { useFinanceOperation } from './useFinanceOperation.js';
 import { OrganizationActionConfirmation } from './OrganizationActionConfirmation.jsx';
@@ -30,6 +30,28 @@ export function OrganizationActionForm({ client, owner, copy, title, scope, fiel
  const [editing, setEditing] = useState(() => Boolean(editDrafts?.has(draftIdentity)));
  const [confirmation, setConfirmation] = useState(null);
  const [renderedReady, setRenderedReady] = useState(null);
+ const [selectedPickerRecord, setSelectedPickerRecord] = useState(null);
+ const ownerPickerAllowed = fields.some(field => field.pickerPresentation?.words && field.lookup);
+ const ownerFocus = useRef({ node: null, priorDocument: null, lookup: ownerPickerAllowed });
+ const attachOwnerField = useCallback(node => {
+  const focus = ownerFocus.current;
+  if (!node && focus.node) {
+   const doc = focus.node.ownerDocument;
+   focus.priorDocument = focus.node.contains(doc.activeElement) ? doc : null;
+  }
+  focus.node = node;
+ }, []);
+ useLayoutEffect(() => {
+  const focus = ownerFocus.current, doc = focus.priorDocument;
+  const changed = focus.lookup !== ownerPickerAllowed;
+  focus.lookup = ownerPickerAllowed; focus.priorDocument = null;
+  const active = doc?.activeElement;
+  if (!changed || !doc || active?.isConnected && active !== doc.body) return;
+  focus.node?.querySelector('input:not(:disabled)')?.focus();
+ });
+ useLayoutEffect(() => {
+  if (!ownerPickerAllowed && selectedPickerRecord) setSelectedPickerRecord(null);
+ }, [ownerPickerAllowed, selectedPickerRecord]);
  const operationCopy = fields.some(field => field.nameRule) ? { ...copy, sourceChanged: copy.nameSourceChanged } : copy;
  const operation = useOperation(owner, operationCopy, client, scope);
  const live = useRef(null), ready = useRef(null), generation = useRef(0), pending = useRef(null), dispatching = useRef(null);
@@ -104,6 +126,10 @@ export function OrganizationActionForm({ client, owner, copy, title, scope, fiel
   current.values = fresh; current.editing = next;
   setValues(fresh); setInvalid(false); setFieldErrors({}); setEditing(next);
  };
+ const rememberPickerRecord = candidate => {
+  if (!renderedReady || !sameIdentity(renderedReady) || !live.current.fields.some(field => field.pickerPresentation?.words && field.lookup)) return;
+  setSelectedPickerRecord(candidate ? { identity: renderedReady, record: { user_id: candidate.user_id, display_name: candidate.display_name, username: candidate.username, user_code: candidate.user_code, status: candidate.status } } : null);
+ };
  const changeValue = (name, value) => {
   setFieldErrors(previous => ({ ...previous, [name]: '' }));
   const current = live.current;
@@ -134,6 +160,22 @@ export function OrganizationActionForm({ client, owner, copy, title, scope, fiel
   return { name: field.name, label: copy[field.labelKey || field.label || field.name], value: selected.map(value => value === '' && field.optional ? copy.root : fieldOptions(field, confirmation.values)?.find(option => option.value === value)?.label || value).join(', ') };
  })] : [];
  const pendingSummary = operation.pendingFacts ? draftContext?.pendingSummary?.(operation.pendingFacts) : null;
+ const pendingOwner = scope === 'transfer' ? operation.pendingFacts?.new_owner_user_id : undefined;
+ const renderOwnerField = field => {
+  const { words } = field.pickerPresentation, value = values[field.name];
+  if (pendingOwner) return <div key={field.name} className="adm-owner-picker-selection adm-owner-picker-pending"><strong>{words.pendingTarget}</strong><code dir="ltr">{pendingOwner}</code></div>;
+  if (field.lookup) return <div key={field.name + ':lookup'} ref={attachOwnerField}>
+   <OrganizationUserPicker client={client} copy={copy} value={value} presentation={field.pickerPresentation} remembered={selectedPickerRecord?.identity === renderedReady ? selectedPickerRecord?.record : null} disabled={operation.busy || operation.unknown || operation.blocked || disabled} onRemember={candidate => {
+    if (!candidate || candidate.user_id === live.current.values[field.name]) rememberPickerRecord(candidate);
+   }} onChange={(next, candidate) => { rememberPickerRecord(candidate); changeValue(field.name, next); }} />
+  </div>;
+  const helpID = fieldPrefix + '-owner-direct-help';
+  return <label key={field.name + ':direct'} ref={attachOwnerField} className="adm-owner-picker-direct">
+   {copy[field.labelKey || field.label || field.name]}
+   <input autoComplete="off" value={value} onChange={event => changeValue(field.name, event.target.value)} required aria-describedby={helpID} />
+   <small id={helpID}>{words.directHelp}</small>
+  </label>;
+ };
  const form = <form className={`ap-org-action${adminAppearance ? ' ap-admin-org-action' : ''}${adminAppearance && dangerous ? ' ap-admin-org-action-danger' : ''}${draftContext ? ' ap-admin-unit-move' : ''}`} onSubmit={submit}><h4>{title}</h4>
   {displayed && <OrganizationActionConfirmation copy={copy} title={title} target={confirmation.confirmationTarget} description={description} details={details} appearance={appearance} dangerous={dangerous} onCancel={() => cancel(confirmation)} onConfirm={() => void accept(confirmation)} canRestoreFocus={() => freshCurrent(confirmation)} />}
   {dialog && (confirmationTarget || confirmationContext.length > 0) && <dl className="ap-org-action-target">
@@ -142,7 +184,7 @@ export function OrganizationActionForm({ client, owner, copy, title, scope, fiel
   </dl>}
   {description && <p className="ap-org-action-description">{description}</p>}
   {pendingSummary || (!operation.unknown && !operation.pendingFacts && draftContext?.summary?.())}
-  {fields.length > 0 && !pendingSummary && <fieldset disabled={operation.busy || operation.unknown || operation.blocked || disabled}>{fields.map(field => <label key={field.name}>{copy[field.labelKey || field.label || field.name]}{field.lookup ? <OrganizationUserPicker client={client} copy={copy} value={values[field.name]} disabled={operation.busy || operation.unknown || operation.blocked || disabled} onChange={value => changeValue(field.name, value)} /> : field.options ? <select multiple={field.multiple || false} value={editBeforeSubmit ? operation.pendingFacts?.[field.name] ?? values[field.name] : values[field.name]} onChange={event => { const value = field.multiple ? [...event.target.selectedOptions].map(option => option.value) : event.target.value; changeValue(field.name, value); }}>{!field.multiple && <option value="">{field.emptyLabel ?? (field.optional ? copy.root : '—')}</option>}{fieldOptions(field, values).map(option => <option key={option.value} value={option.value}>{option.label}</option>)}</select> : <input type={field.type || 'text'} autoComplete="off" value={editBeforeSubmit ? operation.pendingFacts?.[field.name] ?? values[field.name] : values[field.name]} onChange={event => changeValue(field.name, event.target.value)} required={!field.optional && !field.nameRule} aria-required={field.nameRule ? true : undefined} aria-invalid={fieldErrors[field.name] ? true : undefined} aria-describedby={field.nameRule ? [`${fieldPrefix}-${field.name}-hint`, fieldErrors[field.name] ? `${fieldPrefix}-${field.name}-error` : '', operation.error ? `${fieldPrefix}-operation-error` : ''].filter(Boolean).join(' ') : undefined} />}{field.nameRule && <small className="ap-org-name-hint" id={`${fieldPrefix}-${field.name}-hint`}>{field.nameRule === 'unit' ? copy.unitNameRules : copy.organizationNameRules}</small>}{fieldErrors[field.name] && <small className="ap-org-name-error" id={`${fieldPrefix}-${field.name}-error`} role="alert">{copy[fieldErrors[field.name]]}</small>}{field.multiple && <small>{copy.unscopedUnits}</small>}</label>)}</fieldset>}
+  {fields.length > 0 && !pendingSummary && <fieldset disabled={operation.busy || operation.unknown || operation.blocked || disabled}>{fields.map(field => field.pickerPresentation?.words ? renderOwnerField(field) : <label key={field.name}>{copy[field.labelKey || field.label || field.name]}{field.lookup ? <OrganizationUserPicker client={client} copy={copy} value={values[field.name]} disabled={operation.busy || operation.unknown || operation.blocked || disabled} onChange={value => changeValue(field.name, value)} /> : field.options ? <select multiple={field.multiple || false} value={editBeforeSubmit ? operation.pendingFacts?.[field.name] ?? values[field.name] : values[field.name]} onChange={event => { const value = field.multiple ? [...event.target.selectedOptions].map(option => option.value) : event.target.value; changeValue(field.name, value); }}>{!field.multiple && <option value="">{field.emptyLabel ?? (field.optional ? copy.root : '—')}</option>}{fieldOptions(field, values).map(option => <option key={option.value} value={option.value}>{option.label}</option>)}</select> : <input type={field.type || 'text'} autoComplete="off" value={editBeforeSubmit ? operation.pendingFacts?.[field.name] ?? values[field.name] : values[field.name]} onChange={event => changeValue(field.name, event.target.value)} required={!field.optional && !field.nameRule} aria-required={field.nameRule ? true : undefined} aria-invalid={fieldErrors[field.name] ? true : undefined} aria-describedby={field.nameRule ? [`${fieldPrefix}-${field.name}-hint`, fieldErrors[field.name] ? `${fieldPrefix}-${field.name}-error` : '', operation.error ? `${fieldPrefix}-operation-error` : ''].filter(Boolean).join(' ') : undefined} />}{field.nameRule && <small className="ap-org-name-hint" id={`${fieldPrefix}-${field.name}-hint`}>{field.nameRule === 'unit' ? copy.unitNameRules : copy.organizationNameRules}</small>}{fieldErrors[field.name] && <small className="ap-org-name-error" id={`${fieldPrefix}-${field.name}-error`} role="alert">{copy[fieldErrors[field.name]]}</small>}{field.multiple && <small>{copy.unscopedUnits}</small>}</label>)}</fieldset>}
   {dialogOpen && !operation.unknown && !operation.pendingFacts && draftContext?.preview?.(values, openedDraft === draftContext.revision && previewIdentity === renderedReady && previewIdentity?.client === client && previewIdentity.owner === owner && previewIdentity.scope === scope && previewIdentity.epoch === epoch)}
   {draftIssue && !operation.unknown && !operation.pendingFacts && <p className="ap-org-move-draft-help" role="status">{draftIssue}</p>}
   {invalid && <p role="alert">{copy.invalid}</p>}{operation.error && <p id={`${fieldPrefix}-operation-error`} role="alert">{operation.error}</p>}{operation.message && <p role="status">{operation.message}</p>}

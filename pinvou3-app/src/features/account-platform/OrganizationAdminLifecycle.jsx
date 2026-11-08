@@ -2,7 +2,7 @@ import React, { useId } from 'react';
 import { organizationID } from './organization-client.js';
 import { organizationLabel } from './organization-labels.js';
 
-export function OrganizationAdminLifecycle({ current, ownerMember, ownerReadFailed = false, can, action, copy, words }) {
+export function OrganizationAdminLifecycle({ current, ownerMember, ownerReadFailed = false, can, action, copy, words, pickerPresentation }) {
   const heading = useId();
   const status = ['ACTIVE', 'DISABLED', 'DELETED'].includes(current?.status) ? current.status : '';
   const active = status === 'ACTIVE', disabled = status === 'DISABLED';
@@ -46,7 +46,7 @@ export function OrganizationAdminLifecycle({ current, ownerMember, ownerReadFail
         </dl>
         {canTransfer && status !== 'DELETED' && <div className="adm-organization-lifecycle-action">
           {/* The existing form stays mounted for recovery even when a new transfer is unavailable. */}
-          {action('transfer', copy.transfer, [{ name: 'newOwner', lookup: true }], values => ({ new_owner_user_id: organizationID(values.newOwner) }), 'transfer', '', true, { disabled: !active })}
+          {action('transfer', copy.transfer, [{ name: 'newOwner', lookup: true, pickerPresentation }], values => ({ new_owner_user_id: organizationID(values.newOwner) }), 'transfer', '', true, { disabled: !active })}
         </div>}
       </section>
     </div>

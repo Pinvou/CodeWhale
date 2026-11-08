@@ -178,15 +178,18 @@ export class AdminPlatformClient {
     globalThis.location.assign(`${this.baseURL}/auth/login?reauthenticate=1&return_to=${encodeURIComponent(returnTo)}`);
   }
 
-  async request(area, resource, signal, decode = null) {
+  async request(area, resource, signal, decode = null, { isolateRead = false } = {}) {
     if (signal?.aborted) throw abortRequestError();
     const url = `${this.baseURL}/api/admin/${area}${resource}`;
-    let entry = this.inflightReads.get(url);
+    // A scoped picker must get its own authorization result, while an
+    // unrelated consumer can finish the shared request it already started.
+    const readKey = isolateRead ? Symbol() : url;
+    let entry = this.inflightReads.get(readKey);
     if (!entry) {
       const sessionEpoch = this.financeSessionEpoch;
       entry = { controller: new globalThis.AbortController(), consumers: 0, settled: false, promise: null, abandon: null };
       entry.abandon = () => {
-        if (this.inflightReads.get(url) === entry) this.inflightReads.delete(url);
+        if (this.inflightReads.get(readKey) === entry) this.inflightReads.delete(readKey);
       };
       entry.promise = (async () => {
         const response = await fetch(url, {
@@ -207,7 +210,7 @@ export class AdminPlatformClient {
         }
         return payload;
       })();
-      this.inflightReads.set(url, entry);
+      this.inflightReads.set(readKey, entry);
       const cleanup = () => {
         entry.settled = true;
         entry.abandon();
@@ -409,13 +412,13 @@ export class AdminPlatformClient {
     return result;
   }
 
-  users(searchOrFilters = '', signal, cursor = '') {
+  users(searchOrFilters = '', signal, cursor = '', { isolateRead = false } = {}) {
     const filters = typeof searchOrFilters === 'string' ? { q:searchOrFilters, cursor } : (searchOrFilters || {});
     const query = new URLSearchParams({ limit: '25' });
     if (filters.q) query.set('q', filters.q);
     if (filters.cursor) query.set('cursor', filters.cursor);
     if (filters.exclude_organization_id) query.set('exclude_organization_id', filters.exclude_organization_id);
-    return this.request('account', `/admin/v1/users?${query}`, signal);
+    return this.request('account', `/admin/v1/users?${query}`, signal, null, { isolateRead });
   }
 
   async userByCode(userCode, signal) {
