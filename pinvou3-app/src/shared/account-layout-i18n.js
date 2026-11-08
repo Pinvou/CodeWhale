@@ -213,3 +213,7 @@ adminLayoutCopy.ja.organization.lifecycleTasks = {
   transferDisabled: '組織が無効です。新しい所有権の譲渡を開始できません。', transferUnavailable: '組織の現在の状態では新しい所有権の譲渡を開始できません。',
   transferEffect: '別のメンバーへの譲渡が完了すると、そのメンバーが所有者ロールを取得し、以前の所有者はそのロールを失います。',
 };
+
+Object.assign(adminLayoutCopy.zh.organization.lifecycleTasks, {"contextTitle":"生命周期概况","contextOwner":"当前所有者","contextOwnerUnverified":"现有成员结果无法确认所有者","contextOwnerReadFailed":"成员读取失败，无法确认所有者","contextHistory":"此页不提供状态变更记录。"});
+Object.assign(adminLayoutCopy.en.organization.lifecycleTasks, {"contextTitle":"Lifecycle overview","contextOwner":"Current owner","contextOwnerUnverified":"The available member results do not confirm the owner","contextOwnerReadFailed":"Could not load members to confirm the owner","contextHistory":"Status history is not provided in this view."});
+Object.assign(adminLayoutCopy.ja.organization.lifecycleTasks, {"contextTitle":"ライフサイクルの概要","contextOwner":"現在の所有者","contextOwnerUnverified":"利用可能なメンバー情報から所有者を確認できません","contextOwnerReadFailed":"メンバーを読み込めなかったため所有者を確認できません","contextHistory":"この画面では状態変更履歴は表示されません。"});

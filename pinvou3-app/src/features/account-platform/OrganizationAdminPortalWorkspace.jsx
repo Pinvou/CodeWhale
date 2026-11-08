@@ -18,7 +18,7 @@ const optionalID = value => value ? organizationID(value) : null;
 const trimDirectoryValue = value => value.replace(/^\p{White_Space}+|\p{White_Space}+$/gu, '');
 const directoryStatusLabelValue = value => trimDirectoryValue(value).toUpperCase();
 
-export function OrganizationAdminPortalWorkspace({ client, me, acceptedSessionEpoch, language, copy, route, page, directoryCursor, directoryResultScope, query, setQuery, selected, current, detail, directoryReadError, overviewFeedback, detailReadError, listBusy, detailBusy, roles, units, memberCursor, memberPrevious, setMemberPrevious, previous, setPrevious, can, action, memberQuery, memberRole, onRefresh, nameFeedback, nameFeedbackKind, renamedUnit, renamedUnitNode }) {
+export function OrganizationAdminPortalWorkspace({ client, me, acceptedSessionEpoch, language, copy, route, page, directoryCursor, directoryResultScope, query, setQuery, selected, current, detail, lifecycleDetailCurrent, directoryReadError, overviewFeedback, detailReadError, listBusy, detailBusy, roles, units, memberCursor, memberPrevious, setMemberPrevious, previous, setPrevious, can, action, memberQuery, memberRole, onRefresh, nameFeedback, nameFeedbackKind, renamedUnit, renamedUnitNode }) {
   const words = adminLayoutCopy[language], labels = words.organization, params = new URLSearchParams(route.search);
   const directoryPaginationNote = useId();
   const [memberSearch, setMemberSearch] = useState(memberQuery), [role, setRole] = useState(memberRole);
@@ -79,6 +79,19 @@ export function OrganizationAdminPortalWorkspace({ client, me, acceptedSessionEp
     }}>{labels.directoryPagination.next}</button></nav>
   </>;
   const available = current?.organization_id === requestedID && detail?.summary?.organization_id === requestedID;
+  const lifecycleMemberScope = detail?.membersScope;
+  const lifecycleMemberAccepted = lifecycleDetailCurrent && available && !detailBusy && !detailReadError && lifecycleMemberScope &&
+    lifecycleMemberScope.q === memberQuery && lifecycleMemberScope.role === memberRole &&
+    lifecycleMemberScope.cursor === (params.get('member_cursor') || '');
+  // q and role go through the client trim and then Account's whitespace trim.
+  // The cursor goes straight to Account's trim; the original request is unchanged.
+  const lifecycleMemberPage = lifecycleMemberAccepted &&
+    !trimDirectoryValue(memberQuery.trim()) && !trimDirectoryValue(memberRole.trim()) && !trimDirectoryValue(lifecycleMemberScope.cursor)
+    ? detail.members : null;
+  const lifecycleOwnerCandidates = lifecycleMemberPage?.next_cursor === null && !detail.membersError
+    ? lifecycleMemberPage.items.filter(member => member.status !== 'REVOKED' && member.roles.includes('OWNER')) : [];
+  const lifecycleOwner = lifecycleOwnerCandidates.length === 1 ? lifecycleOwnerCandidates[0] : null;
+  const lifecycleOwnerReadFailed = Boolean(lifecycleMemberAccepted && detail.membersError);
   const [rejectedMovePreview, setRejectedMovePreview] = useState(null);
   const moveTree = detail?.units, moveEpoch = client.financeSessionEpoch || 0;
   const movePreviewStale = available && rejectedMovePreview?.client === client && rejectedMovePreview.epoch === moveEpoch && rejectedMovePreview.organizationID === requestedID && rejectedMovePreview.tree === moveTree;
@@ -147,9 +160,9 @@ export function OrganizationAdminPortalWorkspace({ client, me, acceptedSessionEp
             </>}
           </section>}
           {view === 'units' && current.status !== 'DELETED' && <section>{detail.unitsError ? <p role="alert">{copy.unavailable}<button disabled={busy} onClick={onRefresh}>{copy.refresh}</button></p> : <><div className="adm-unit-toolbar adm-section-toolbar"><h4>{labels.units}</h4>{can('units.manage') && action('create-unit', copy.createUnit, [{ name: 'name' }, { name: 'parent', optional: true, options: units }], values => ({ name: text(values.name), parent_id: optionalID(values.parent) }), 'unit')}</div><ul className="adm-organization-units">{detail.units.items.map(unit => <li key={unit.unit_id} ref={renamedUnit?.unit_id === unit.unit_id ? renamedUnitNode : undefined} tabIndex={renamedUnit?.unit_id === unit.unit_id ? -1 : undefined} className={renamedUnit?.unit_id === unit.unit_id ? 'ap-unit-renamed' : undefined}><strong>{unit.name}</strong><span className="adm-unit-parent"><small>{copy.parent}: </small><span>{unit.parent_id ? unitNames.get(unit.parent_id) || unit.parent_id : copy.root}</span></span><span className="adm-unit-status"><small>{copy.status}: </small><span>{organizationLabel(copy, 'Status', unit.status)}</span></span>{can('units.manage') && <div className="adm-row-actions">{action(`rename-unit:${unit.unit_id}`, copy.renameUnit, [{ name: 'name', initial: unit.name }], values => ({ name: text(values.name) }), 'renameUnit', unit.unit_id)}{moveUnit(unit)}{action(`delete-unit:${unit.unit_id}`, copy.deleteUnit, [], () => ({}), 'deleteUnit', unit.unit_id, true)}</div>}</li>)}</ul>{!detail.units.items.length && <p>{copy.empty}</p>}</>}</section>}
-          {view === 'lifecycle' && <section><OrganizationAdminLifecycle current={current} can={can} action={action} copy={copy} words={labels.lifecycleTasks} />
+          {view === 'lifecycle' && (lifecycleDetailCurrent ? <section><OrganizationAdminLifecycle current={current} ownerMember={lifecycleOwner} ownerReadFailed={lifecycleOwnerReadFailed} can={can} action={action} copy={copy} words={labels.lifecycleTasks} />
             {can('delete') && current.status === 'DISABLED' && <section><h4>{copy.readiness}</h4><button disabled={busy} onClick={onRefresh}>{copy.refresh}</button>{detail.readinessError && <p role="alert">{copy.unavailable}</p>}{readiness && <ul>{readiness.blockers?.map((item, index) => <li key={index}>{typeof item === 'string' ? item : item.code || item.resource_type}</li>)}</ul>}{mayDelete && action('delete', copy.delete, [{ name: 'confirmationName' }, { name: 'reason' }], values => { if (values.confirmationName !== current.name) throw new Error('INVALID_ORGANIZATION_INPUT'); return { reason: text(values.reason) }; }, 'delete', '', true, { confirmationTarget: `${current.name} · ${current.organization_id}` })}</section>}
-          </section>}
+          </section> : <p role="status">{copy.loading}</p>)}
         </>}</RetainedWorkspace>
       </>}
     </>}
