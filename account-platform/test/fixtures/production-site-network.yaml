@@ -1,0 +1,13 @@
+# Documentation address ranges for Helm contract tests only.
+external:
+  redisCidrs: [192.0.2.11/32]
+  natsCidrs: [192.0.2.12/32]
+  workloadJwksCidrs: [192.0.2.40/32]
+  oidcCidrs: [192.0.2.14/32]
+  natsMonitorCidrs: [192.0.2.15/32]
+  postgresCidrs: [198.51.100.21/32]
+  paymentProviderCidrs: [198.51.100.22/32]
+  secretProviderCidrs: [198.51.100.23/32]
+  modelProviderCidrs: [198.51.100.24/32]
+  telemetryCollectorCidrs: [198.51.100.25/32]
+  timeSourceCidrs: [203.0.113.31/32]

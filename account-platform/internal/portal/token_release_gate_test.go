@@ -217,26 +217,100 @@ func TestModelTokenGateUsesCurrentApprovalBFFClassification(t *testing.T) {
 	}
 }
 func TestDisabledTokenMutationGatePreservesRevokeCleanup(t *testing.T) {
+	for _, tc := range []struct {
+		name                     string
+		details, actions, origin bool
+	}{
+		{"both-off", false, false, true},
+		{"details-only", true, false, true},
+		{"actions-only", false, true, true},
+		{"both-on", true, true, true},
+		{"without-origin", true, true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			testCredentialWindowGates(t, tc.details, tc.actions, tc.origin)
+		})
+	}
+}
+
+func testCredentialWindowGates(t *testing.T, details, actions, origin bool) {
+	t.Helper()
 	store := newMemoryStore()
 	s := testService(t, store)
-	s.config.AdminModelTokenActionsEnabled = false
+	s.config.AdminTokenDetailsEnabled = details
+	s.config.AdminModelTokenActionsEnabled = actions
+	if origin {
+		s.config.CredentialOrigin = parseTestURL(t, "https://credentials.example.test")
+	}
 	session := validSession(uuid.NewString())
-	store.SaveSession(context.Background(), session)
-	var calls atomic.Int32
-	u := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { calls.Add(1); w.WriteHeader(204) }))
+	if err := store.SaveSession(t.Context(), session); err != nil {
+		t.Fatal(err)
+	}
+	type upstreamCall struct{ method, path, authorization string }
+	calls := make(chan upstreamCall, 1)
+	u := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case calls <- upstreamCall{r.Method, r.URL.Path, r.Header.Get("Authorization")}:
+		default:
+			t.Error("unexpected extra upstream request")
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
 	defer u.Close()
 	s.config.TokenGatewayURL = parseTestURL(t, u.URL)
-	for _, tc := range []struct {
-		path string
-		want int
-	}{{"/admin/v1/commands", 404}, {"/admin/v1/credential-results/" + uuid.NewString() + "/revoke-window", 204}} {
-		rr := httptest.NewRecorder()
-		s.Handler(nil).ServeHTTP(rr, financeBrowserRequest(s, session, "POST", "/api/admin/token"+tc.path, `{}`))
-		if rr.Code != tc.want {
-			t.Fatalf("path status %d want %d", rr.Code, tc.want)
+	result := "/admin/v1/credential-results/" + uuid.NewString()
+	revoke := result + "/revoke-window"
+	status := func(allowed bool) int {
+		if allowed {
+			return http.StatusNoContent
 		}
+		return http.StatusNotFound
 	}
-	if calls.Load() != 1 {
-		t.Fatal("mutation gate removed cleanup or allowed write")
+	handler := s.Handler(nil)
+	for _, tc := range []struct {
+		name, method, path string
+		want               int
+	}{
+		{"revoke", http.MethodPost, revoke, http.StatusNoContent},
+		{"detail", http.MethodGet, result, status(details && origin)},
+		{"detail-head", http.MethodHead, result, status(details && origin)},
+		{"command", http.MethodPost, "/admin/v1/commands", status(actions)},
+		{"enroll", http.MethodPost, "/admin/v1/token-accounts/" + uuid.NewString() + "/credential-launches/enroll", status(details && actions && origin)},
+		{"method", http.MethodGet, revoke, http.StatusNotFound},
+		{"head-method", http.MethodHead, revoke, http.StatusNotFound},
+		{"uuid", http.MethodPost, "/admin/v1/credential-results/not-a-uuid/revoke-window", http.StatusNotFound},
+		{"suffix", http.MethodPost, result + "/revoke", http.StatusNotFound},
+		{"extra-segment", http.MethodPost, revoke + "/extra", http.StatusNotFound},
+		{"no-session", http.MethodPost, revoke, http.StatusUnauthorized},
+		{"bad-csrf", http.MethodPost, revoke, http.StatusForbidden},
+		{"bad-origin", http.MethodPost, revoke, http.StatusForbidden},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := financeBrowserRequest(s, session, tc.method, "/api/admin/token"+tc.path, `{}`)
+			req.Header.Set("Authorization", "Bearer controlled-browser-header")
+			switch tc.name {
+			case "no-session":
+				req.Header.Del("Cookie")
+			case "bad-csrf":
+				req.Header.Set("X-CSRF-Token", "wrong")
+			case "bad-origin":
+				req.Header.Set("Origin", "https://wrong.example.test")
+			}
+			rr := httptest.NewRecorder()
+			handler.ServeHTTP(rr, req)
+			if rr.Code != tc.want {
+				t.Fatalf("status %d want %d", rr.Code, tc.want)
+			}
+			select {
+			case call := <-calls:
+				if tc.want != http.StatusNoContent || call != (upstreamCall{tc.method, tc.path, "Bearer " + session.AccessToken}) {
+					t.Fatal("unexpected upstream dispatch or authority")
+				}
+			default:
+				if tc.want == http.StatusNoContent {
+					t.Fatal("request did not reach Token Gateway")
+				}
+			}
+		})
 	}
 }
