@@ -329,6 +329,48 @@ fn value_looks_secret(value: &str) -> bool {
         || word_is_secret(value)
 }
 
+/// r30 P2-1：`-H`/`--header` 语境里 `名:值` 冒号形态的内联值收口。值非空即抹
+/// （沿 :509 旧臂的无条件口径），但 Authorization / Proxy-Authorization 的值是
+/// basic/bearer scheme 词时，真正的凭据在**下一个词**（`curl -H
+/// Authorization:basic dXNlcjpwYXNz… https://x`）——补设 redact_next，与
+/// Value 臂的 scheme 链同语义。scheme 判据带名字门：`X-Custom:basic` 后面跟
+/// 的多半是 URL 而不是凭据，无名字门会把下一个参数误吞。
+fn push_header_colon_value(name: &str, value: &str, out: &mut String, redact_next: &mut bool) {
+    // r30 P1-3 同理：set -x 回显带引号，名字先剥引号再比。
+    let bare_name = name.trim_matches(['"', '\'']);
+    let is_auth = bare_name.eq_ignore_ascii_case("authorization")
+        || bare_name.eq_ignore_ascii_case("proxy-authorization");
+    let scheme = value.trim_matches(|c: char| matches!(c, '"' | '\'' | ',' | ';'));
+    out.push_str(name);
+    out.push(':');
+    out.push_str(REDACTED);
+    if is_auth && (scheme.eq_ignore_ascii_case("basic") || scheme.eq_ignore_ascii_case("bearer")) {
+        *redact_next = true;
+    }
+}
+
+/// r30 P1-1/P1-3：`-H`/`--header` 语境里 `名=值` 形态的收口（`-H
+/// 'X-Api-Key=shortsecret1'`——set -x 对带引号参数的回显必带引号，名字/值的
+/// 判据前先剥引号，否则 `'X-Api-Key` 因前导引号对全部名单失配、逐字透传）。
+/// 机密键判据 = query 表 ∪ key 表：r29 P1-1 只换 query 单表，漏掉了 SigV4 三员
+/// 里只在 key 表的 credential / security-token。命中写入 `名=[REDACTED]` 并返回
+/// true；无 `=` / 值空 / 键不机密返回 false（调用方走透传 + 等值）。
+fn push_header_equals_spec(spec: &str, out: &mut String) -> bool {
+    let Some((name, value)) = spec.split_once('=') else {
+        return false;
+    };
+    let bare_name = name.trim_matches(['"', '\'']);
+    let bare_value = value.trim_matches(['"', '\'']);
+    if !bare_value.is_empty() && (query_key_is_secret(bare_name) || key_is_secret(bare_name)) {
+        out.push_str(name);
+        out.push('=');
+        out.push_str(REDACTED);
+        true
+    } else {
+        false
+    }
+}
+
 /// 把 URL 里的 userinfo（`https://user:pass@host`）和机密 query 参数抹掉。
 ///
 /// 只动**取值**，保留参数名和主机路径——`?token=[REDACTED]` 比整条 URL 变成
@@ -507,31 +549,53 @@ pub fn sanitize_for_disk(line: &str) -> String {
             let trimmed = word.trim_end_matches(',');
             match trimmed.split_once(':') {
                 Some((name, value)) if !value.is_empty() => {
-                    out.push_str(name);
-                    out.push(':');
-                    out.push_str(REDACTED);
+                    // r30 P2-1：冒号形态统一走 helper（补 scheme 链 + 引号 trim）。
+                    push_header_colon_value(name, value, &mut out, &mut redact_next);
                 }
                 Some((name, _)) => {
                     out.push_str(name);
                     out.push(':');
                     header_expect = Some(HeaderExpect::Value);
                 }
-                None => match trimmed.split_once('=') {
-                    // `-H X-Amz-Signature=值`：KEY=VALUE 形态的 header（r5 P2-3）。
-                    // 机密键的值抹掉；普通键原样，且不再等下一个词当值。
-                    // r29 P1-1：改用 query_key_is_secret（三表并集）——此前
-                    // key_is_secret 单表漏 refresh_token/x-api-key 等，
-                    // 与平铺 = 分支(:552-558) 的名单不一致（r18 P1-3 复发）。
-                    Some((name, value)) if !value.is_empty() && query_key_is_secret(name) => {
-                        out.push_str(name);
-                        out.push('=');
-                        out.push_str(REDACTED);
-                    }
-                    _ => {
+                None => {
+                    // r30 P1-1/P1-3：`= `形态统一走 helper（三表并集 + 引号 trim）。
+                    if !push_header_equals_spec(trimmed, &mut out) {
                         out.push_str(trimmed);
                         header_expect = Some(HeaderExpect::Value);
                     }
-                },
+                }
+            }
+            continue;
+        }
+        if word.len() > 14
+            && word
+                .get(..14)
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case("authorization:"))
+        {
+            // r22（10:21 分片 P2-1b）：`Authorization:Basic <b64>` 冒号黏连的
+            // scheme 声明词——词本身不含机密（值是 Basic/Bearer），base64 凭证
+            // 在**下一个词**。与 bare bearer/basic 同语义：标记下一个词整词抹除，
+            // 本词保留供排查。**必须长于 14 字符**（冒号后真的黏了内容）才走这臂：
+            // 裸 `Authorization:`（空格分离形态）的下一词是 basic/bearer 本身，
+            // 得留给 Value 臂的 scheme 链去标真正的凭证词。
+            //
+            // r29 P1-2：黏连值**不是 scheme**（basic/bearer）时是凭证本体
+            // （`Authorization:$TOKEN` set -x 展开的标准产物）——不能只标下一词
+            // （值在本词内），必须当场抹值。
+            //
+            // r30 P1-2：r29 把这臂放在下方 bare 链里，而主链此刻已把整词推入
+            // out（word_is_secret / colon_glued / `=` / URL 兜底四路必推其一），
+            // 臂内再 push 等于原值照落 + 追加垃圾（实测 `Authorization:plainsecret…`
+            // 输出 `Authorization:plainsecret…Authorization:[REDACTED]` 双份）。
+            // 重构为替换式：臂上移进主链、以 continue 收口，整词不经其它任何臂。
+            // scheme 词两侧的引号/尾随标点（`Authorization:"Basic"`）剥掉再比。
+            let glued = word[14..].trim_matches(|c: char| matches!(c, '"' | '\'' | ',' | ';'));
+            if glued.eq_ignore_ascii_case("basic") || glued.eq_ignore_ascii_case("bearer") {
+                out.push_str(word);
+                redact_next = true;
+            } else {
+                out.push_str("Authorization:");
+                out.push_str(REDACTED);
             }
             continue;
         }
@@ -566,15 +630,19 @@ pub fn sanitize_for_disk(line: &str) -> String {
                 out.push('=');
                 // `--header=X-Api-Key:value`：`= ` 形式里 header 的名字同样要留。
                 if key.eq_ignore_ascii_case("--header") {
+                    // r30 同族统筹：`= `黏连形态此前只认冒号、其余直通透传
+                    // （`--header='X-Api-Key=v'` 原样落盘）——与 -H 两段式
+                    // Name 臂的判据不一致（r18 P1-3 教训：两个分支必须同一张
+                    // 名单）。统一走与 Name 臂相同的两个 helper。
                     match rest.split_once(':') {
                         Some((name, value)) if !value.is_empty() => {
-                            out.push_str(name);
-                            out.push(':');
-                            out.push_str(REDACTED);
+                            push_header_colon_value(name, value, &mut out, &mut redact_next);
                         }
                         _ => {
-                            out.push_str(rest);
-                            header_expect = Some(HeaderExpect::Value);
+                            if !push_header_equals_spec(rest, &mut out) {
+                                out.push_str(rest);
+                                header_expect = Some(HeaderExpect::Value);
+                            }
                         }
                     }
                     // 状态已在上面落好，不能再走底部的 bare 检查（会把它覆写回等名字）
@@ -657,31 +725,6 @@ pub fn sanitize_for_disk(line: &str) -> String {
             // 刻意不进 SECRET_FLAGS：那张表对下一个词无条件整词抹，这里要按
             // 「带冒号才抹」收，避免误伤 `sudo -u root`。
             curl_user_next = true;
-        } else if word.len() > 14
-            && word
-                .get(..14)
-                .is_some_and(|prefix| prefix.eq_ignore_ascii_case("authorization:"))
-        {
-            // r22（10:21 分片 P2-1b）：`Authorization:Basic <b64>` 冒号黏连的
-            // scheme 声明词——词本身不含机密（值是 Basic/Bearer），base64 凭证
-            // 在**下一个词**。与上方 bare bearer/basic 同语义：标记下一个词
-            // 整词抹除，本词保留供排查。**必须长于 14 字符**（冒号后真的黏了
-            // scheme）才走这臂：裸 `Authorization:`（空格分离形态）的下一词是
-            // basic/bearer 本身，得留给上面的 bare scheme 臂去标真正的凭证词。
-            //
-            // r29 P1-2：黏连值**不是 scheme**（basic/bearer）时是凭证本体
-            // （`Authorization:$TOKEN` set -x 展开的标准产物）——不能只标
-            // 下一词（值在本词内），必须当场抹值。
-            let glued = &word[14..];
-            let is_scheme =
-                glued.eq_ignore_ascii_case("basic") || glued.eq_ignore_ascii_case("bearer");
-            if is_scheme {
-                out.push_str(word);
-                redact_next = true;
-            } else {
-                out.push_str("Authorization:");
-                out.push_str(REDACTED);
-            }
         }
     }
     clamp_line(&out)
@@ -1914,5 +1957,77 @@ mod tests {
         assert_eq!(safe_stem("../../etc/passwd"), "etcpasswd");
         assert_eq!(safe_stem("run-AbC_1-2"), "run-AbC_1-2");
         assert_eq!(safe_stem("///"), "unknown");
+    }
+
+    /// r30 P1×3 + P2-1 钉测试。半修三连（r27 P2-12 / r28 P2-14 / r29 P1×2）的
+    /// 共同教训：修复没有形状断言钉住，下一轮改判据就静默回归。这里每条都断言
+    /// **精确形状**（含负控与「无垃圾双推」），不是只断言原值不在。
+    #[test]
+    fn sanitiser_pins_r30_header_and_authorization_forms() {
+        // P1-1：-H KEY=VALUE 的键名判据必须是 query ∪ key 两表并集——SigV4 三员
+        // 里的 credential / security-token 只活在 key 表，r29 换单表即回归。
+        let cleaned = sanitize_for_disk(
+            "curl -H Credential=AKIAIOSFODNN7EXAMPLE/20261108/us-east-1/s3/aws4_request https://s3",
+        );
+        assert!(
+            !cleaned.contains("AKIAIOSFODNN7EXAMPLE/20261108"),
+            "{cleaned}"
+        );
+        assert!(cleaned.contains("Credential=[REDACTED]"), "{cleaned}");
+        let cleaned =
+            sanitize_for_disk("curl -H Security-Token=FwoGZXIvYXdzEBPaExample123456 https://x");
+        assert!(
+            !cleaned.contains("FwoGZXIvYXdzEBPaExample123456"),
+            "{cleaned}"
+        );
+        assert!(cleaned.contains("Security-Token=[REDACTED]"), "{cleaned}");
+        // P1-1 负控：普通键的 = 值不误伤。
+        let cleaned = sanitize_for_disk("curl -H X-Custom-Trace=abc123 https://x");
+        assert!(cleaned.contains("X-Custom-Trace=abc123"), "{cleaned}");
+
+        // P1-3：set -x 对带引号参数的回显必带引号——名字/值先剥引号再判。
+        let cleaned = sanitize_for_disk("+ curl -H 'X-Api-Key=shortsecret1' https://x");
+        assert!(!cleaned.contains("shortsecret1"), "{cleaned}");
+        assert!(cleaned.contains("'X-Api-Key=[REDACTED]"), "{cleaned}");
+
+        // P1-2：非 scheme 黏连（无 -H 语境）——原值不落盘，且不再有
+        // 「原词 + Authorization:[REDACTED] 垃圾」的双推形态。
+        let cleaned = sanitize_for_disk("config Authorization:plainsecret12345 tail");
+        assert!(!cleaned.contains("plainsecret12345"), "{cleaned}");
+        assert!(cleaned.contains("Authorization:[REDACTED]"), "{cleaned}");
+        assert!(
+            !cleaned.contains("Authorization:plainsecret"),
+            "双推回归：{cleaned}"
+        );
+        // P1-2：scheme 黏连此前同样双推（语义侥幸、行损坏）——钉住单份输出。
+        let cleaned = sanitize_for_disk("config Authorization:basic dXNlcjpwYXNzMTIzNA tail");
+        assert!(!cleaned.contains("dXNlcjpwYXNzMTIzNA"), "{cleaned}");
+        assert_eq!(
+            cleaned.matches("Authorization:basic").count(),
+            1,
+            "scheme 黏连词双推回归：{cleaned}"
+        );
+
+        // P2-1：两段式 -H 的 scheme 链——真凭据在下一个词；名字门保证
+        // URL（跟在后面的普通参数）不被误吞。
+        let cleaned = sanitize_for_disk("curl -H Authorization:basic dXNlcjpwYXNzMTIzNA https://x");
+        assert!(!cleaned.contains("dXNlcjpwYXNzMTIzNA"), "{cleaned}");
+        assert!(cleaned.contains("https://x"), "URL 被误吞：{cleaned}");
+        let cleaned = sanitize_for_disk("curl -H X-Custom:basic https://x");
+        assert!(cleaned.contains("https://x"), "名字门失效：{cleaned}");
+
+        // r29 阻断一回归钉：紧凑 XML 标签形态（词中部 <> 要当定界符切）。
+        let cleaned = sanitize_for_disk(
+            "echo '<AccessKey>AKIAIOSFODNN7EXAMPLE</AccessKey>' '<Key>sk-abcd1234</Key>'",
+        );
+        assert!(!cleaned.contains("AKIAIOSFODNN7EXAMPLE"), "{cleaned}");
+        assert!(!cleaned.contains("sk-abcd1234"), "{cleaned}");
+
+        // r30 同族扫荡：`--header=` 黏连的 = 形态此前直通透传。
+        let cleaned = sanitize_for_disk("curl --header='X-Api-Key=shortsecret2' https://x");
+        assert!(!cleaned.contains("shortsecret2"), "{cleaned}");
+        let cleaned =
+            sanitize_for_disk("curl --header=Authorization:basic dXNlcjpwYXNzMTIzNA https://x");
+        assert!(!cleaned.contains("dXNlcjpwYXNzMTIzNA"), "{cleaned}");
     }
 }
