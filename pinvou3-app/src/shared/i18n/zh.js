@@ -32,7 +32,7 @@ const conversationZh = {
   attachment:'附件', operations:(count,failedCount)=>`执行 ${count} 项${failedCount?` · ${failedCount} 项失败`:''}`, copyReply:'复制回复', copyReplySuccess:'已复制', copyReplyFailed:'复制失败',
   exportReply:'导出', exportReplyTitle:'导出回复', exportMarkdown:'Markdown 文档', exportMarkdownHint:'默认，保留原始排版', exportHtml:'HTML 文档', exportHtmlHint:'适合在浏览器中查看', exportSuccess:'导出成功', exportFailed:'导出失败', exportTooLarge:'回复内容超出导出大小限制',
   shareReply:'分享', shareReplyTitle:'分享回复', shareSystem:'系统分享', shareSystemHint:'选择系统中已安装的通信应用', shareApps:'复制内容并打开应用', shareSuccess:'已分享', shareCopiedOpen:app=>`内容已复制，已尝试打开${app}，请粘贴发送`, shareCopiedWeb:app=>`内容已复制，请打开${app}粘贴发送`, shareFailed:'分享失败', shareUnavailable:'系统分享不可用，内容已复制', shareTargets:{wechat:'微信',wecom:'企业微信',feishu:'飞书',dingtalk:'钉钉',qq:'QQ'},
-  technicalDetails:'技术详情',
+  memberQuotaInsufficientTitle:"成员额度不足", memberQuotaInsufficientMessage:"当前组织的成员额度不足，无法开始本次任务。请联系组织管理员。", organizationWalletInsufficientTitle:"组织余额不足", organizationWalletInsufficientMessage:"当前组织余额不足，无法开始本次任务。请联系组织管理员补充余额。", organizationInsufficientCompletedMessage:"本次回答已完成，但组织余额或成员额度不足。继续使用前请联系组织管理员。", technicalDetails:'技术详情', walletInsufficientTitle:'余额不足', walletInsufficientMessage:'当前余额不足，无法开始本次任务。', walletInsufficientCompletedTitle:'余额不足', walletInsufficientCompletedMessage:'本次回答已完成，但账户余额不足，继续使用前请充值。', rechargeNow:'立即充值',
 };
 
 const codexZh = {
@@ -313,7 +313,7 @@ export const dictZh = {
         modelContextWindow: '上下文窗口（tokens）',
         modelMaxOutput: '最大输出（tokens）',
         customApiKey: 'API Key',
-        credEnvOverride: '环境变量覆盖', credUnavailable: '凭证不可用', credConfigured: '已配置', credNotConfigured: '未配置', credEnterNewKey: '输入新 Key 替换', credKeep: '保留', credReplace: '替换', credDeleteKey: '删除 Key', clearSearch: '清除搜索', clearInput: '清除输入', sendMsg: '发送', apiKeyGateTitle: '需要配置 API Key', apiKeyGateDesc: '当前模型为云端模型，需要先配置 API Key 才能开始对话。', apiKeyGateBtn: '去配置',
+        credEnvOverride: '环境变量覆盖', credUnavailable: '凭证不可用', credConfigured: '已配置', credNotConfigured: '未配置', credEnterNewKey: '输入新 Key 替换', credKeep: '保留', credReplace: '替换', credDeleteKey: '删除 Key', clearSearch: '清除搜索', clearInput: '清除输入', sendMsg: '发送',
         detectLocalVllm: '检测本机模型服务',
         detectingLocalVllm: '检测中…',
         useVllmConfig: '使用此配置',
@@ -347,7 +347,7 @@ export const dictZh = {
         uiMonitor: { bridgeNotReady:'桥接未就绪', readFailed:'读取失败', reading:'正在读取', configError:'配置异常', unverified:'未验证', authFailed:'鉴权失败', bridgeError:'监控桥接未就绪：请确认打开的是 Tauri 应用窗口', activity:'运行活动' },
 
         uiSettings: { common:'常用', system:'系统', general:'通用', model:'模型', search:'搜索', memory:'记忆', community:'用户交流', permissions:'权限与环境', data:'数据管理', update:'更新', help:'帮助反馈', appearance:'外观', language:'界面语言', languageDesc:'切换应用显示语言', theme:'主题模式', themeDesc:'跟随系统,或选择浅色/深色外观', notifications:'通知', taskNotice:'任务完成提醒', taskNoticeDesc:'任务完成后展示系统通知', voiceShortcuts:'语音快捷键', voiceShortcutEnable:'启用 Alt 唤醒语音', voiceShortcutEnableDesc:'Alt 可语音输入；输入框已有文本时，Alt 可语音编辑当前文本。默认关闭，需主动开启。', voiceShortcutHelp:'查看 Alt 语音快捷键说明', voiceShortcutUnsupportedDesc:'全局 Alt 快捷键仅 Windows 支持；当前平台可在应用窗口内使用 Alt 语音输入。', voicePostprocess:'智能整理', voicePostprocessDesc:'把识别文本（连同输入框现有草稿）交给所选模型服务纠错并整理为结构化输入；关闭后仅做本地规则纠错。', voiceShortcutWebDesc:'浏览器端可在窗口内使用 Alt 语音输入；不支持全局快捷键，且仅做转写、不含智能整理与语音编辑。',globalShortcuts:'全局唤醒快捷键', globalShortcutEnable:'启用全局唤醒快捷键', globalShortcutEnableDesc:'窗口在后台时，也可随时按快捷键把品悟窗口带到前台。默认关闭。', globalShortcutAccelerator:'快捷键组合', globalShortcutPlaceholder:'例如 Ctrl/Cmd+Alt+P', globalShortcutInvalid:'快捷键格式无效，需至少包含一个修饰键和一个按键。', globalShortcutConflict:'无法应用该快捷键；该组合可能已被其他应用占用。', globalShortcutUnsupportedDesc:'当前桌面环境不支持全局快捷键（例如 Wayland 会话）。', globalShortcutSaveFailed:'快捷键设置保存失败，请重试。', desktopAssistant:'桌面助手', pet:'桌伴公仔', petDesc:'在桌面显示常驻小公仔', version:'版本', currentVersion:'当前版本', beta:'内测版', releaseNotes:'更新内容', noReleaseNotes:'暂无更新说明', downloading:p=>`正在下载更新 ${p}%`, installingUpdate:'正在安装更新…', installerStarted:'安装器已启动', cancelDownload:'取消下载', providers:'ACP 管理' },
-        uiSettingsDetail: { modelSection:'模型', settingsLoadFailed:'设置页加载失败', addModel:'添加模型', envManaged:'如果模型配置被环境变量管理，设置页会保留当前值，但修改可能需要到环境变量中完成。', localModel:'本地模型', defaultTag:'默认', edit:'编辑', delete:'删除', noModels:'暂无模型', localDefaultName:'本地 Qwen3.6', searchList:'搜索源列表', setDefault:'设为默认', addSearch:'添加搜索源', searchDescriptions:{ bing:'内置搜索', metaso:'中文搜索服务', bocha:'搜索服务', baidu:'千帆 AI 搜索', tavily:'海外搜索服务' }, searchSourceHint:'内置搜索免密钥、开箱即用；所选服务失败时自动回退内置搜索。中文长查询建议添加中文搜索服务获得更准结果。', memoryTypes:{ preference:'长期偏好', work_context:'工作背景', current_focus:'当前关注', recent_activity:'近期动态' }, memoryDetail:'记忆详情', content:'内容', editTitle:label=>`编辑${label}`, userCallName:'用户称呼', assistantNickname:'助手昵称', callNameDesc:'助手称呼你的方式', assistantNameDesc:'你称呼助手的方式', unnamedMemory:'未命名记忆', view:'查看', enableMemory:'启用记忆', enableMemoryDesc:'PINVOU 会记住称呼、偏好、工作背景和近期事项', profile:'个人资料', notSet:'未设置', longMemory:'长期记忆', shortMemory:'短期记忆', noLongMemory:'暂无长期记忆', noShortMemory:'暂无短期记忆', hiddenTasks:'隐藏任务', archivedAt:date=>`收纳于 ${date}`, restore:'恢复', noHiddenTasks:'暂无隐藏任务', noHiddenTasksDesc:'收纳后的任务会显示在这里', system:'系统', advancedPermission:'高级执行权限', advancedPermissionDesc:'允许助手执行环境配置等高级指令', missing:'缺失', installMissing:'安装缺失依赖', feedbackTitle:'提交问题或建议', feedbackDesc:'支持图片和视频附件，提交前会显示隐私提示', submitFeedback:'提交反馈', editSearch:'编辑搜索源', apiKeyPlaceholder:'输入 API Key', hide:'隐藏', show:'显示', cancel:'取消', save:'保存', saving:'保存中', restartSearchTitle:'重启以应用搜索配置？', restartLanguageTitle:'重启以应用语言设置？', restartSearchDesc:'搜索源或凭据保存后，需要重启应用才能用于助手的联网搜索。', restartLanguageDesc:'界面语言已切换，重启后助手回复语言也会同步生效。', later:'稍后', restartNow:'现在重启', deleteModelTitle:'删除模型？', deleteModelDesc:'将移除该模型配置和已保存的凭据。', deleteModel:'删除模型', deleteSearchTitle:'删除搜索源？', deleteSearchDesc:name=>`将移除 ${name} 和已保存的凭据。`, deleteSearch:'删除搜索源', addSearchDesc:'选择搜索源后再填写必要凭据', closeSettings:'关闭设置', chooseModelDesc:'选择模型后再填写必要凭据', collapse:'收起', change:'更换', customModel:'自定义模型', modelAlias:'别名', modelAliasPlaceholder:'选填，例如：日常助手', localModelName:name=>name ? `本地 ${name}` : '本地模型', apiKeyReadFailed:'读取 API Key 失败', localModelId:'本地模型 ID', modelId:'模型 ID', modelIdPlaceholder:'输入模型 ID', customModelTitle:provider=>`自定义 ${provider} 模型`, customModelDesc:'手动填写模型 ID', customLocalDesc:'填写本地服务暴露的模型 ID', customCompatibleDesc:'手动填写模型 ID 和服务地址', localDetectionTargets:'检测 vLLM、Ollama、LM Studio 等本地服务', redetect:'重新检测', detect:'检测', noRunningLocalModel:'未检测到运行中的本地模型', localPortLabel:'端口', localPortPlaceholder:'如 8080', localPortInvalid:'端口无效：请输入 1-65535 之间的数字', modelNotLoadedTag:'未加载', modelNotLoadedHint:'尚未载入内存，首次使用时会自动加载', add:'添加', manualLocalModel:'手动添加本地模型', manualLocalModelDesc:'填写 API 地址和模型 ID', cloudModels:'云端模型', localModels:'本地模型', toolCalling:'工具调用', apiKeyRequired:'需要 API Key', testBeforeSave:'保存前可测试服务是否可用', modelContextWindowPlaceholder:'如 1048576', modelContextWindowHint:'留空使用系统默认（未收录模型按 128K 保守值）。新模型官方标称更大上下文时填写，如 1M 填 1048576。', modelDescriptions:{ '本地服务默认模型':'本地服务默认模型', '高能力模型':'高能力模型', '快速响应':'快速响应', '最新通用模型':'最新通用模型', '代码场景':'代码场景', '高速代码场景':'高速代码场景', '稳定可用':'稳定可用', '高性价比':'高性价比', '通用能力':'通用能力', '兼容保留':'兼容保留', '轻量模型':'轻量模型' } },
+        uiSettingsDetail: { modelSection:'模型', settingsLoadFailed:'设置页加载失败', addModel:'添加模型', envManaged:'如果模型配置被环境变量管理，设置页会保留当前值，但修改可能需要到环境变量中完成。', localModel:'本地模型', defaultTag:'默认', edit:'编辑', delete:'删除', noModels:'暂无模型', localDefaultName:'本地 Qwen3.6', searchList:'搜索源列表', setDefault:'设为默认', addSearch:'添加搜索源', searchDescriptions:{ bing:'内置搜索', metaso:'中文搜索服务', bocha:'搜索服务', baidu:'千帆 AI 搜索', tavily:'海外搜索服务' }, searchSourceHint:'内置搜索免密钥、开箱即用；所选服务失败时自动回退内置搜索。中文长查询建议添加中文搜索服务获得更准结果。', memoryTypes:{ preference:'长期偏好', work_context:'工作背景', current_focus:'当前关注', recent_activity:'近期动态' }, memoryDetail:'记忆详情', content:'内容', editTitle:label=>`编辑${label}`, userCallName:'用户称呼', assistantNickname:'助手昵称', callNameDesc:'助手称呼你的方式', assistantNameDesc:'你称呼助手的方式', unnamedMemory:'未命名记忆', view:'查看', enableMemory:'启用记忆', enableMemoryDesc:'PINVOU 会记住称呼、偏好、工作背景和近期事项', profile:'个人资料', notSet:'未设置', longMemory:'长期记忆', shortMemory:'短期记忆', noLongMemory:'暂无长期记忆', noShortMemory:'暂无短期记忆', hiddenTasks:'隐藏任务', archivedAt:date=>`收纳于 ${date}`, restore:'恢复', noHiddenTasks:'暂无隐藏任务', noHiddenTasksDesc:'收纳后的任务会显示在这里', system:'系统', advancedPermission:'高级执行权限', advancedPermissionDesc:'允许助手执行环境配置等高级指令', missing:'缺失', installMissing:'安装缺失依赖', feedbackTitle:'提交问题或建议', feedbackDesc:'支持图片和视频附件，提交前会显示隐私提示', submitFeedback:'提交反馈', editSearch:'编辑搜索源', apiKeyPlaceholder:'输入 API Key', hide:'隐藏', show:'显示', cancel:'取消', save:'保存', saving:'保存中', restartSearchTitle:'重启以应用搜索配置？', restartLanguageTitle:'重启以应用语言设置？', restartSearchDesc:'搜索源或凭据保存后，需要重启应用才能用于助手的联网搜索。', restartLanguageDesc:'界面语言已切换，重启后助手回复语言也会同步生效。', later:'稍后', restartNow:'现在重启', deleteModelTitle:'删除模型？', deleteModelDesc:'将移除该模型配置和已保存的凭据。', deleteModel:'删除模型', deleteSearchTitle:'删除搜索源？', deleteSearchDesc:name=>`将移除 ${name} 和已保存的凭据。`, deleteSearch:'删除搜索源', addSearchDesc:'选择搜索源后再填写必要凭据', closeSettings:'关闭设置', chooseModelDesc:'选择模型后再填写必要凭据', collapse:'收起', change:'更换', customModel:'自定义模型', modelAlias:'别名', modelAliasPlaceholder:'选填，例如：日常助手', localModelName:name=>name ? `本地 ${name}` : '本地模型', apiKeyReadFailed:'读取 API Key 失败', localModelId:'本地模型 ID', modelId:'模型 ID', modelIdPlaceholder:'输入模型 ID', customModelTitle:provider=>`自定义 ${provider} 模型`, customModelDesc:'手动填写模型 ID', customLocalDesc:'填写本地服务暴露的模型 ID', customCompatibleDesc:'手动填写模型 ID 和服务地址', localDetectionTargets:'检测 vLLM、Ollama、LM Studio 等本地服务', redetect:'重新检测', detect:'检测', noRunningLocalModel:'未检测到运行中的本地模型', localPortLabel:'端口', localPortPlaceholder:'如 8080', localPortInvalid:'端口无效：请输入 1-65535 之间的数字', modelNotLoadedTag:'未加载', modelNotLoadedHint:'尚未载入内存，首次使用时会自动加载', add:'添加', manualLocalModel:'手动添加本地模型', manualLocalModelDesc:'填写 API 地址和模型 ID', cloudModels:'云端模型', localModels:'本地模型', toolCalling:'工具调用', apiKeyRequired:'需要 API Key', testBeforeSave:'保存前可测试服务是否可用', modelContextWindowPlaceholder:'如 1048576', modelContextWindowHint:'留空使用系统默认（未收录模型按 128K 保守值）。新模型官方标称更大上下文时填写，如 1M 填 1048576。', modelDescriptions:{ '本地服务默认模型':'本地服务默认模型', '高能力模型':'高能力模型', '快速响应':'快速响应', '代码场景':'代码场景', '高性价比':'高性价比', '通用能力':'通用能力', '兼容保留':'兼容保留', '轻量模型':'轻量模型' } },
 
 
         uiPetSettings: { choose:'选择公仔', placeholder:'开发占位', preparing:'正在准备动画', animationFailed:'动画加载失败', coverFailed:'封面加载失败', retry:'重试', pets:{ lingling:{name:'灵灵',description:'星纹卷尾，灵动相伴'}, langlang:{name:'浪浪',description:'黑衫眼镜，从容同行'}, 'ace-taffy':{name:'Ace Taffy',description:'粉发皇冠，元气应援'} } },
@@ -1056,6 +1056,7 @@ stateNotReady: '远程控制状态尚未就绪，无法处理桌面端事件',
 unnegotiatedEvent: event => `桌面端发送了未协商的远程控制事件：${event}`,
 rpcFailed: '远程调用失败',
 incompatibleDesktop: '桌面端版本不支持当前远程控制功能，请先更新桌面端',
+accountPlatformFirstTurnUnsupported: 'Web 新对话的首条消息暂不支持账户平台模型，请选择其他可用模型。',
 unsupportedCommand: command => `当前桌面端尚不支持远程控制功能：${command}`,
 commandNotAllowed: command => `远程控制不允许调用 ${command}`,
 invalidRequestId: '远程调用请求 ID 无效',
@@ -1392,6 +1393,7 @@ dictZh.uiSettingsDetail.customModelTitles = {
   tencent_coding_plan:'自定义腾讯云 Coding Plan 模型', tencent_token_plan:'自定义腾讯云 Token Plan 模型', kimi_coding_plan:'自定义 Kimi Coding Plan 模型',
   volcengine_coding_plan:'自定义火山方舟 Coding Plan 模型', qwen_coding_plan:'自定义千问 Coding Plan 模型',
   openrouter:'自定义 OpenRouter 模型', siliconflow:'自定义硅基流动模型', siliconflow_global:'自定义硅基流动模型',
+  mistral:'自定义 Mistral 模型', meta:'自定义 Meta 模型', together:'自定义 Together 模型', groq:'自定义 Groq 模型',
 };
 
 // Official 主线在词典拆分基线之后新增或调整的文案。
@@ -1499,6 +1501,7 @@ dictZh["uiTeamRelay"] = {
     "team_has_open_work": "团队仍有未结束的工作，全部结束后才能解散。",
     "revision_conflict": "这项工作刚刚发生变化，已刷新，请确认后重试。",
     "action_not_allowed": "当前接力状态不允许执行此操作。",
+    "self_service_enrollment_disabled": "团队接力服务尚未开放账号登录，请联系服务管理员启用后重试。",
     "attachment_too_large": "文件超过 20 MiB 限制。",
     "attachment_type_not_allowed": "不支持该文件类型。",
     "credential_store_failed": "无法安全访问本机凭据，请检查系统凭据存储。",
@@ -2015,10 +2018,6 @@ dictZh["uiTeamRelay"] = {
   "lifecycleSyncPending": "操作已完成，但团队数据尚未同步。请重新同步以获取最新状态。"
 };
 dictZh["kbOutWeekdays"] = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"];
-dictZh["builtinModelSelect"] = "后台模型";
-dictZh["builtinModelRefresh"] = "刷新";
-dictZh["builtinModelLoading"] = "同步中…";
-dictZh["builtinModelEmpty"] = "暂无后台模型";
 dictZh["uiRemote"]["status"]["idle"] = ["未开启", "开启后会生成一个长期有效的远程控制链接。"];
 dictZh["uiRemote"]["status"]["starting"] = ["正在开启", "正在创建远程控制连接。"];
 dictZh["uiRemote"]["status"]["connecting_relay"] = ["正在连接", "正在连接云端中继，请稍候。"];
@@ -2028,7 +2027,6 @@ dictZh["uiRemote"]["status"]["web_client_disconnected"] = ["浏览器已断开",
 dictZh["uiRemote"]["status"]["revoked"] = ["链接已撤销", "请重新开启远程控制。"];
 dictZh["uiRemote"]["status"]["stopped"] = ["已停止", "再次打开此面板即可重新开启。"];
 dictZh["uiRemote"]["status"]["error"] = ["连接异常", "远程控制暂时不可用，请重试。"];
-dictZh["uiSettingsDetail"]["builtinModel"] = "内置模型";
 dictZh["uiSettingsDetail"]["settingsLoadFailedDetail"] = "设置页面暂时无法显示，请重新打开后重试。";
 dictZh["uiScheduled"]["weekdays"] = [["星期一", "周一"], ["星期二", "周二"], ["星期三", "周三"], ["星期四", "周四"], ["星期五", "周五"], ["星期六", "周六"], ["星期日", "周日"]];
 dictZh["uiAccount"] = {
@@ -2291,6 +2289,24 @@ Object.assign(dictZh.uiChat, {
   bgTasksRunning: n => `${n} 个后台任务运行中`,
 });
 
+// F05 complete platform-model selection copy, supplied by shared i18n.
+dictZh.modelAccessTitle = '欢迎使用 PINVOU';
+dictZh.modelAccessDesc = '登录品悟账号即可使用平台模型，或连接你自己的本地与第三方模型。';
+dictZh.modelAccessLogin = '登录';
+dictZh.modelAccessExternal = '使用本地/第三方模型';
+Object.assign(dictZh.uiSettingsDetail, {
+  platformModels:'品悟平台模型',
+  platformModelsDesc:'选择空白新会话的默认模型，不会更改已有会话。',
+  platformModelsLoading:'正在加载平台模型…',
+  platformModelsSignIn:'登录品悟账号后可选择平台模型。',
+  platformModelsUnavailable:'暂时无法加载平台模型，请稍后重试。',
+  platformModelsRetry:'重试加载',
+  appliesToNewSessions:'应用于新会话',
+  modelDeprecated:'即将下架',
+  modelUnavailable:'当前不可用',
+  modelSwitchFailed:'模型切换失败，请重试。',
+});
+dictZh.uiModelReplacement = { title:'当前模型不能继续此历史会话', lead:'原会话与消息保持不变。请选择当前可用模型，创建带来源记录的新分支后继续。', create:'创建替代分支', creating:'创建中…' , branchTitleSuffix:'替代模型分支' };
 // Windows 双端远程控制：B 被控端面板（DEV-21）。
 dictZh["controlledDevice"] = {
   taskPermissionTitle: "远程任务权限",
@@ -2550,7 +2566,7 @@ dictZh["remoteConversation"] = {
   journalResync: "已重新同步会话状态。",
   resultUnknownHint: "连接中断，无法确认该任务是否执行完成。",
   preparedNotSent: "任务尚未提交。可继续提交同一任务；放弃后才可作为新消息发送。",
-  preparedPayloadLost: "任务尚未发送，但重启后原负载已不可恢复。请先安全放弃，再重新输入。",
+  preparedPayloadLost: "任务尚未发送，但原负载已不可恢复。请先安全放弃，再重新输入。",
   outcomeUnknownNoResend: "任务结果未知，不能自动重发，以免重复执行。请先核对被控端结果。",
   commitPreparedTask: "继续提交",
   abandonPreparedTask: "安全放弃",
@@ -2576,7 +2592,9 @@ dictZh["remoteConversation"] = {
   attachmentOnlyPrompt: "请处理随任务提交的附件。",
   addAttachment: "添加远程附件",
   attachmentCountInvalid: "请选择 1–8 个远程附件。",
-  attachmentSizeInvalid: "每个附件必须非空且不超过 32 MiB。",
+  attachmentSizeInvalid: "每个附件必须非空且不超过 20 MiB。",
+  attachmentFenced: "此会话的附件上传结果尚未确认，新上传未开始。请先在被控端核对，再断开并建立新连接后重试。",
+  attachmentCapacity: "附件上传记录已达上限，本次上传未开始。请先核对之前的上传，再重新连接。",
   chatOpenFailed: "无法自动打开远程会话页面。",
   sessionOpenFailed: "无法自动打开收到任务的会话。",
   openAgain: "重新打开",

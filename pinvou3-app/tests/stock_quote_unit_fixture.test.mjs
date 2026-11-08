@@ -12,7 +12,7 @@ import { after, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { createServer } from 'vite';
+import { createServer } from './helpers/vite-fixture.mjs';
 
 const hadWindow = Object.prototype.hasOwnProperty.call(globalThis, 'window');
 // useBridge.js reads window.TauriBridge at module load; the undefined stub hits

@@ -1,0 +1,222 @@
+package main
+
+import (
+	"context"
+	"flag"
+	"fmt"
+	"github.com/Pinvou/pinvou3/account-platform/internal/cifixture"
+	"net/url"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/Pinvou/pinvou3/account-platform/internal/billingschema"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/migrations"
+	"github.com/Pinvou/pinvou3/account-platform/internal/simulatorschema"
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+)
+
+// A child test process executes the real CLI entry point. This confines its
+// log.Fatal exit to the child and requires no alternate migration implementation.
+func TestPhaseMigrationCLIChild(t *testing.T) {
+	if os.Getenv("PINVOU_SCHEMA_CLI_CHILD") != "owned-phase-down" {
+		t.Skip("migration CLI child process only")
+	}
+	flag.CommandLine = flag.NewFlagSet("migrate", flag.ExitOnError)
+	os.Args = []string{"migrate", "--direction", "down"}
+	main()
+	os.Exit(0)
+}
+
+func TestPhaseMigrationCLIPinsBeforeDown(t *testing.T) {
+	raw := os.Getenv("PINVOU_TEST_SCHEMA_DATABASE_URL")
+	if raw == "" {
+		t.Skip("actual PostgreSQL schema fixture required")
+	}
+	ctx, stop := context.WithTimeout(context.Background(), 60*time.Second)
+	defer stop()
+	control, err := cifixture.Connect(ctx, raw)
+	if err != nil {
+		t.Fatal("connect isolated CLI fixture")
+	}
+	defer control.Close(context.Background())
+	config, err := pgx.ParseConfig(raw)
+	if err != nil {
+		t.Fatal("parse isolated CLI fixture")
+	}
+	var createdRoles []string
+	for _, role := range []string{"billing_service", "billing_schema_owner", "billing_migrator"} {
+		var exists bool
+		if err := control.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pg_roles WHERE rolname=$1)`, role).Scan(&exists); err != nil {
+			t.Fatal("inspect owned CLI fixture identities")
+		}
+		if !exists {
+			createdRoles = append(createdRoles, role)
+		}
+	}
+	// Child databases are cleaned by each subtest before parent cleanup. Never
+	// drop borrowed identities, force-disconnect clients, or DROP OWNED objects.
+	t.Cleanup(func() {
+		if len(createdRoles) == 0 {
+			return
+		}
+		clean, stop := context.WithTimeout(context.Background(), 10*time.Second)
+		defer stop()
+		c, err := cifixture.ConnectConfig(clean, config)
+		if err != nil {
+			t.Error("connect CLI fixture identity cleanup")
+			return
+		}
+		defer c.Close(context.Background())
+		for i := len(createdRoles) - 1; i >= 0; i-- {
+			if _, err := c.Exec(clean, "DROP ROLE "+pgx.Identifier{createdRoles[i]}.Sanitize()); err != nil {
+				t.Error("nonforce CLI fixture identity cleanup failed")
+			}
+		}
+	})
+	for _, fixture := range []struct{ domain, alias string }{{"billing", "billing"}, {"payment-simulator", "payment-simulator"}, {"billing", "owned-renamed-domain"}, {"payment-simulator", "owned-renamed-domain"}, {"billing", "owned-renamed-source"}, {"payment-simulator", "owned-renamed-source"}} {
+		t.Run(fixture.domain+"/"+fixture.alias, func(t *testing.T) {
+			domain := fixture.domain
+			name := "f02_cli_" + strings.ReplaceAll(uuid.NewString(), "-", "")
+			var fixtureDatabase *cifixture.Database
+			fixtureDatabaseCreated, creationError := cifixture.CreateDatabase(ctx, control, name, "CREATE DATABASE "+pgx.Identifier{name}.Sanitize())
+			fixtureDatabase = fixtureDatabaseCreated
+			if err := creationError; err != nil {
+				t.Fatal("create owned CLI database")
+			}
+			t.Cleanup(func() {
+				clean, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				defer cancel()
+				if _, err := cifixture.DropDatabase(clean, control, fixtureDatabase, config.User); err != nil {
+					t.Error("nonforce owned CLI database cleanup failed")
+				}
+			})
+			owned := config.Copy()
+			owned.Database = name
+			connection, err := pgx.ConnectConfig(ctx, owned)
+			if err != nil {
+				t.Fatal("connect owned CLI database")
+			}
+			defer connection.Close(context.Background())
+			loaded, err := migrations.Load(filepath.Join("../../migrations", domain))
+			if err != nil {
+				t.Fatal(err)
+			}
+			selected := loaded
+			if domain == "billing" {
+				// Use the real deployment identity bootstrap. Calling Billing Up
+				// as a DBA with a DBA-owned ledger is not a production-shaped
+				// fixture: the separate ledger owner then cannot record history.
+				psql := os.Getenv("PINVOU_TEST_PSQL")
+				if psql == "" {
+					psql, err = exec.LookPath("psql")
+					if err != nil {
+						t.Fatal("owned CLI fixture requires psql")
+					}
+				}
+				bootstrapURL, err := url.Parse(raw)
+				if err != nil {
+					t.Fatal("parse owned CLI bootstrap URL")
+				}
+				bootstrapURL.Path = "/" + name
+				bootstrap := exec.CommandContext(ctx, psql, "-X", "--dbname", bootstrapURL.String(), "-v", "ON_ERROR_STOP=1", "-v", "billing_database="+name, "-f", "../../deploy/postgres/billing-roles.sql")
+				bootstrap.Env = append(os.Environ(), "PGCLIENTENCODING=UTF8")
+				if err := bootstrap.Run(); err != nil {
+					t.Fatal("real Billing identity bootstrap failed")
+				}
+				if _, err := connection.Exec(ctx, "SET ROLE billing_service"); err != nil {
+					t.Fatal("select owned Billing fixture runtime role")
+				}
+				selected = nil
+				for _, m := range loaded {
+					if m.Version == 1 || m.Version == 6 || m.Version == 900001 {
+						selected = append(selected, m)
+					}
+				}
+				err = billingschema.Up(ctx, connection, selected)
+			} else {
+				err = simulatorschema.Up(ctx, connection, selected)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			migrations.Unlock(ctx, connection)
+			var before string
+			if err := connection.QueryRow(ctx, `SELECT jsonb_agg(to_jsonb(m) ORDER BY version)::text FROM schema_migrations m`).Scan(&before); err != nil {
+				t.Fatal(err)
+			}
+			directory := filepath.Join(t.TempDir(), fixture.alias)
+			if err := os.Mkdir(directory, 0700); err != nil {
+				t.Fatal(err)
+			}
+			for _, m := range selected {
+				name := m.Name
+				if fixture.alias == "owned-renamed-source" {
+					name = "custom_" + name
+				}
+				for _, direction := range []string{"up", "down"} {
+					body := m.UpSQL
+					if direction == "up" && fixture.alias == "owned-renamed-source" {
+						body += "\nSELECT 1;\n"
+					}
+					if direction == "down" {
+						body = m.DownSQL
+						if m.Version == 900001 || domain == "payment-simulator" && m.Version == 6 {
+							if domain == "billing" {
+								body = "ALTER TABLE outbox_events DROP COLUMN publication_generation;"
+							} else {
+								body = "ALTER TABLE simulator_orders DROP COLUMN merchant_customer_key;"
+							}
+						}
+					}
+					p := filepath.Join(directory, fmt.Sprintf("%06d_%s.%s.sql", m.Version, name, direction))
+					if err := os.WriteFile(p, []byte(body), 0600); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			parsed, err := url.Parse(raw)
+			if err != nil || (parsed.Scheme != "postgres" && parsed.Scheme != "postgresql") {
+				t.Fatal("CLI fixture requires a PostgreSQL URL")
+			}
+			parsed.Path = "/" + name
+			executable, err := os.Executable()
+			if err != nil {
+				t.Fatal(err)
+			}
+			child := exec.CommandContext(ctx, executable, "-test.run=^TestPhaseMigrationCLIChild$")
+			for _, value := range os.Environ() {
+				key, _, _ := strings.Cut(value, "=")
+				if key != "DATABASE_URL" && key != "MIGRATIONS_DIR" && key != "MIGRATION_ROLE" && key != "PINVOU_SCHEMA_CLI_CHILD" && key != "PINVOU_DEPLOYMENT_ENVIRONMENT" {
+					child.Env = append(child.Env, value)
+				}
+			}
+			child.Env = append(child.Env, "DATABASE_URL="+parsed.String(), "MIGRATIONS_DIR="+directory, "MIGRATION_ROLE=", "PINVOU_DEPLOYMENT_ENVIRONMENT=test", "PINVOU_SCHEMA_CLI_CHILD=owned-phase-down")
+			output, err := child.CombinedOutput()
+			if err == nil || !strings.Contains(string(output), "MIGRATION_EXECUTION_FAILED") {
+				t.Fatal("real migration CLI did not reject edited rollback before execution")
+			}
+			var after string
+			if err := connection.QueryRow(ctx, `SELECT jsonb_agg(to_jsonb(m) ORDER BY version)::text FROM schema_migrations m`).Scan(&after); err != nil {
+				t.Fatal(err)
+			}
+			if before != after {
+				t.Fatal("rejected CLI rollback changed ledger")
+			}
+			column := "publication_generation"
+			table := "outbox_events"
+			if domain == "payment-simulator" {
+				column = "merchant_customer_key"
+				table = "simulator_orders"
+			}
+			var exists bool
+			if err := connection.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name=$1 AND column_name=$2)`, table, column).Scan(&exists); err != nil || !exists {
+				t.Fatal("rejected CLI rollback removed durable identity column")
+			}
+		})
+	}
+}

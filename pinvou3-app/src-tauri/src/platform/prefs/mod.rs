@@ -337,9 +337,10 @@ impl Language {
 
 pub(crate) mod model;
 pub use model::{
-    BUILTIN_LLMAPI_DEFAULT_CHAT_BASE_URL, BUILTIN_LLMAPI_DEFAULT_MODEL, BUILTIN_LLMAPI_MODEL_ID,
-    BUILTIN_LLMAPI_MODEL_NAME, MODEL_PROVIDER_KIND_CODING_PLAN, MODEL_PROVIDER_KIND_CUSTOM,
-    MODEL_PROVIDER_KIND_OFFICIAL_API, ModelPreset, select_builtin_llmapi_model,
+    BUILTIN_ACCOUNT_PLATFORM_DEFAULT_MODEL, BUILTIN_ACCOUNT_PLATFORM_MODEL_ID,
+    BUILTIN_ACCOUNT_PLATFORM_MODEL_NAME, BUILTIN_ACCOUNT_PLATFORM_PLACEHOLDER_BASE_URL,
+    LEGACY_BUILTIN_LLMAPI_MODEL_ID, MODEL_PROVIDER_KIND_CODING_PLAN, MODEL_PROVIDER_KIND_CUSTOM,
+    MODEL_PROVIDER_KIND_OFFICIAL_API, ModelPreset, select_builtin_account_platform_model,
 };
 use model::{
     identify_coding_plan_endpoint, migrated_minimax_base_url, strip_chat_completions_suffix,
@@ -396,6 +397,78 @@ impl<'de> Deserialize<'de> for ImageCapabilityOverride {
             }
         }
         deserializer.deserialize_str(Visitor)
+    }
+}
+
+/// Stable, source-aware model selection used by global defaults and session bindings.
+/// Platform catalog model IDs are deliberately not SavedModel IDs: the built-in
+/// SavedModel is only a runtime route carrier and must never collapse the catalog.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(tag = "source", rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum ModelSelectionRef {
+    AccountPlatform { model_id: String },
+    LocalConfig { saved_model_id: String },
+}
+
+impl<'de> Deserialize<'de> for ModelSelectionRef {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(tag = "source", rename_all = "SCREAMING_SNAKE_CASE")]
+        enum CurrentRef {
+            AccountPlatform { model_id: String },
+            LocalConfig { saved_model_id: String },
+        }
+
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum CompatibleRef {
+            Current(CurrentRef),
+            LegacySavedModelId(String),
+        }
+
+        Ok(match CompatibleRef::deserialize(deserializer)? {
+            CompatibleRef::Current(CurrentRef::AccountPlatform { model_id }) => {
+                Self::AccountPlatform { model_id }
+            }
+            CompatibleRef::Current(CurrentRef::LocalConfig { saved_model_id }) => {
+                Self::LocalConfig { saved_model_id }
+            }
+            CompatibleRef::LegacySavedModelId(saved_model_id)
+                if saved_model_id == BUILTIN_ACCOUNT_PLATFORM_MODEL_ID
+                    || saved_model_id == LEGACY_BUILTIN_LLMAPI_MODEL_ID =>
+            {
+                Self::AccountPlatform {
+                    model_id: String::new(),
+                }
+            }
+            CompatibleRef::LegacySavedModelId(saved_model_id) => {
+                Self::LocalConfig { saved_model_id }
+            }
+        })
+    }
+}
+
+impl ModelSelectionRef {
+    pub fn account_platform(model_id: impl Into<String>) -> Self {
+        Self::AccountPlatform {
+            model_id: model_id.into(),
+        }
+    }
+
+    pub fn local(saved_model_id: impl Into<String>) -> Self {
+        Self::LocalConfig {
+            saved_model_id: saved_model_id.into(),
+        }
+    }
+
+    pub fn runtime_saved_model_id(&self) -> &str {
+        match self {
+            Self::AccountPlatform { .. } => BUILTIN_ACCOUNT_PLATFORM_MODEL_ID,
+            Self::LocalConfig { saved_model_id } => saved_model_id,
+        }
     }
 }
 
@@ -470,6 +543,70 @@ pub(crate) fn legacy_official_deepseek_base_url(base_url: &str) -> bool {
     normalized == "https://api.deepseek.com"
 }
 
+/// K3.1 family spellings on the official Kimi routes (moonshot platform
+/// `https://api.moonshot.ai|cn/v1` and Kimi Code
+/// `https://api.kimi.com/coding/v1`), case-insensitive on the model string
+/// and bracket-tolerant on the documented `[1m]` 1M declaration suffix
+/// (2026-11-04 review round 4). The contract attaches when the record
+/// carries a kimi/moonshot vendor
+/// stamp (the catalog rows stamp "kimi"; test/loopback fixtures ride the
+/// same stamp) OR the base URL resolves to the vendor's own official route
+/// (legacy migrated records may carry an empty vendor or the `moonshot`
+/// alias on those endpoints — 2026-11-04 review round 3). Records with no
+/// stamp on a non-official base are custom relay endpoints and keep their
+/// existing contract (effort passthrough). Also consumed by the bridge's
+/// effort resolution (the send-path default arm must resolve K3.1 to None —
+/// see `request_reasoning_effort_for_provider`) and mirrored by the
+/// frontend `isMoonshotK31ModelName` + `moonshotK31ContractAttaches`.
+pub(crate) fn is_moonshot_k31_route(vendor: &Option<String>, base_url: &str, model: &str) -> bool {
+    let vendor_stamped = vendor.as_deref().is_some_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "kimi" | "moonshot"
+        )
+    });
+    if !vendor_stamped && !is_official_kimi_route_base_url(base_url) {
+        return false;
+    }
+    // The `[1m]` declaration forms (k3.1-pro[1m] is the documented Kimi Code
+    // Claude Code declaration and the ACP catalog's Kimi Code models1m
+    // suggestion; kimi-k3.1-pro[1m] is its prefixed-platform composite — no
+    // platform page declares that spelling, re-verified 2026-11-05) are the
+    // same K3.1 models — strip the suffix before the exact match so the
+    // contract covers them too (2026-11-04 review round 4: the bare-only
+    // match let a stored "off" on a bracket spelling wire the
+    // vendor-rejected disable shape). Only the 1M declaration suffix is
+    // tolerated; anything else
+    // (versions, quantization tags) stays outside the exact-match contract.
+    // Bracket forms of NON-K3.1 ids (k3[1m] / kimi-k3[1m]) strip to non-K3.1
+    // spellings and keep their own contracts, as before.
+    let normalized = model.trim().to_ascii_lowercase();
+    let bare = normalized
+        .strip_suffix("[1m]")
+        .unwrap_or(normalized.as_str());
+    matches!(
+        bare,
+        "kimi-k3.1-pro" | "kimi-k3.1-pro-highspeed" | "k3.1-pro" | "k3.1-pro-highspeed"
+    )
+}
+
+/// The vendor's own K3-family endpoints (mirrors the frontend
+/// `isExactMoonshotPlatformBaseUrl` / `isExactKimiCodeBaseUrl` and the
+/// foundation's exact-route gates). The normalization here is deliberately
+/// looser than the frontend mirror (all trailing slashes stripped and the
+/// whole URL lowercased, vs the frontend's single-slash strip and
+/// scheme/authority-only case folding), so the Rust attach set is a
+/// superset of the FE one: the FE can only hide the tier control for a
+/// record this side also treats, never the reverse — and the wire arm keys
+/// off this same predicate, so no illegal shape can slip through either
+/// way.
+fn is_official_kimi_route_base_url(base_url: &str) -> bool {
+    let normalized = base_url.trim().trim_end_matches('/').to_ascii_lowercase();
+    normalized == "https://api.moonshot.ai/v1"
+        || normalized == "https://api.moonshot.cn/v1"
+        || normalized == "https://api.kimi.com/coding/v1"
+}
+
 pub(crate) fn legacy_local_route_base_url(base_url: &str) -> bool {
     reqwest::Url::parse(base_url)
         .ok()
@@ -503,17 +640,17 @@ pub(crate) fn legacy_local_route_base_url(base_url: &str) -> bool {
 }
 
 impl SavedModel {
-    pub fn builtin_llmapi() -> Self {
+    pub fn builtin_account_platform() -> Self {
         Self {
-            id: BUILTIN_LLMAPI_MODEL_ID.to_string(),
-            name: BUILTIN_LLMAPI_MODEL_NAME.to_string(),
+            id: BUILTIN_ACCOUNT_PLATFORM_MODEL_ID.to_string(),
             alias: None,
+            reasoning_effort: None,
+            name: BUILTIN_ACCOUNT_PLATFORM_MODEL_NAME.to_string(),
             preset: ModelPreset::OpenaiCompatible,
             context_window_tokens: None,
             max_output_tokens: None,
-            reasoning_effort: None,
-            model: BUILTIN_LLMAPI_DEFAULT_MODEL.to_string(),
-            base_url: BUILTIN_LLMAPI_DEFAULT_CHAT_BASE_URL.to_string(),
+            model: BUILTIN_ACCOUNT_PLATFORM_DEFAULT_MODEL.to_string(),
+            base_url: BUILTIN_ACCOUNT_PLATFORM_PLACEHOLDER_BASE_URL.to_string(),
             provider_kind: Some(MODEL_PROVIDER_KIND_CUSTOM.to_string()),
             vendor: None,
             endpoint_mode: None,
@@ -527,8 +664,8 @@ impl SavedModel {
         }
     }
 
-    pub fn is_builtin_llmapi(&self) -> bool {
-        self.id == BUILTIN_LLMAPI_MODEL_ID
+    pub fn is_builtin_account_platform(&self) -> bool {
+        self.id == BUILTIN_ACCOUNT_PLATFORM_MODEL_ID
     }
 
     /// Operator-owned endpoint: locally self-hosted (LocalVllm) or a
@@ -638,6 +775,33 @@ impl SavedModel {
                 "max" | "maximum" | "xhigh" | "ultra" | "ultracode" => Some("max".to_string()),
                 _ => None,
             };
+        }
+        // Kimi K3.1 spellings (kimi-k3.1-pro[-highspeed] / k3.1-pro[-highspeed]):
+        // the vendor contract is always-reasoning — depth via top-level
+        // reasoning_effort low/high/max, and `thinking:{type:"disabled"}` is
+        // rejected with an error (models-overview: "参数约束也与 kimi-k3 完全
+        // 一致"). The base's exact-K3 route shapers only learn bare k3
+        // spellings, so ANY stored effort for these models — notably an
+        // "off" saved through the generic off/high switch the catalog used
+        // to offer — reaches the generic Moonshot arm and wires an illegal
+        // disable shape. Drop the field: the documented omission is valid
+        // and resolves to the vendor default (endpoint-specific — the Kimi
+        // Code models table documents omitted K3.1 effort as `high` on the
+        // coding-plan lane; the models-overview `max` wording is the
+        // platform-API surface). Downgrade note: this drop is one-way —
+        // configs saved by this build no longer carry K3.1 effort, and an
+        // older build reading them sees the field absent and re-applies
+        // its own ladder/default; the previously chosen tier is not
+        // recoverable (nothing corrupts). The contract attaches
+        // via the kimi/moonshot vendor stamp or the vendor's own official
+        // route (legacy migrated records may carry an empty vendor or the
+        // moonshot alias there); unstamped custom relay endpoints keep
+        // their existing contract. Mirrors the frontend tiers exit
+        // (isMoonshotK31ModelName) added in the same pass.
+        if self.reasoning_effort.is_some()
+            && is_moonshot_k31_route(&self.vendor, &self.base_url, &self.model)
+        {
+            self.reasoning_effort = None;
         }
     }
 
@@ -757,10 +921,21 @@ pub struct AdvancedPrefs {
     /// 全局默认/当前激活模型 id(新建会话继承它)。None = 回退列表首条。
     #[serde(default)]
     pub active_model_id: Option<String>,
-    #[serde(default)]
-    pub builtin_llmapi_available_models: Vec<String>,
+    /// Source-aware default inherited by blank new sessions. This is the
+    /// authority; `active_model_id` and `account_platform_default_model` remain
+    /// compatibility mirrors for older clients and scheduled-task code.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub builtin_llmapi_default_model: Option<String>,
+    pub default_model_ref: Option<ModelSelectionRef>,
+    /// Opaque local CAS identity. Even reselecting the same default is a new
+    /// intent and must not be retired by an earlier catalog observation.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub(crate) default_model_selection_revision: String,
+    #[serde(
+        default,
+        alias = "builtin_llmapi_default_model",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub account_platform_default_model: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -928,6 +1103,11 @@ fn default_global_shortcut_accelerator() -> String {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct UserPrefs {
+    /// Version of the built-in model path stored in this file. Version 1 is
+    /// the Account Platform + Token Gateway-only path.
+    pub model_path_schema_version: u32,
+    /// Version 1 stores source-aware global and per-session model references.
+    pub model_selection_schema_version: u32,
     pub theme: Theme,
     /// Color-scheme preference: `system` follows the OS (decided by the
     /// frontend, light when undeterminable), light/dark are explicit picks.
@@ -1069,8 +1249,10 @@ impl UserPrefs {
         // Mirror the model-only in-memory part of load_unlocked. These methods
         // do not touch disk or keychain; the original settings bytes remain
         // untouched even when legacy route metadata is normalized here.
+        prefs.migrate_account_platform_model_path();
         prefs.migrate_models();
-        prefs.ensure_builtin_llmapi_model();
+        prefs.ensure_builtin_account_platform_model();
+        prefs.migrate_model_selection_ref();
         prefs.normalize_saved_model_metadata();
         prefs.sanitize_plaintext_api_keys();
         Ok(prefs)
@@ -1208,10 +1390,7 @@ impl UserPrefs {
                 .custom_base_url
                 .as_deref()
                 .is_some_and(|url| migrated_minimax_base_url(url).is_some());
-        let builtin_llmapi_endpoint_changed = prefs.advanced.saved_models.iter().any(|model| {
-            model.id == BUILTIN_LLMAPI_MODEL_ID
-                && model.base_url != BUILTIN_LLMAPI_DEFAULT_CHAT_BASE_URL
-        });
+        let account_platform_migration_changed = prefs.migrate_account_platform_model_path();
         let local_model_alias_changed = prefs
             .advanced
             .saved_models
@@ -1225,6 +1404,18 @@ impl UserPrefs {
         let local_output_sentinel_changed = prefs.advanced.saved_models.iter().any(|model| {
             model.preset == ModelPreset::LocalVllm && model.max_output_tokens == Some(24_576)
         });
+        // The K3.1 stored-effort drop (`normalize_route_limits` nulls the
+        // field on any kimi/moonshot-stamped or official-route K3.1 record)
+        // is the same class as the sentinel above — but the flag cannot be
+        // detected from RAW metadata before migrate/normalize run: a
+        // vendorless record on a recognized overseas coding URL or a full
+        // `/chat/completions` URL only acquires its Kimi identity during
+        // `normalize_saved_model_metadata` (2026-11-05 review 5783266663 /
+        // 5783312297), so a raw pre-check misses it and the dropped effort
+        // stays on disk forever for sessions that only ever load. Snapshot
+        // the records before the rewrite pass and detect the actual change
+        // across the normalized result instead.
+        let pre_normalize_saved_models = prefs.advanced.saved_models.clone();
         // The #622 machine-written-local-off migration must persist its
         // marker even when no record matched: "migration ran" is what keeps
         // a later explicitly-saved `off` from being stripped by a
@@ -1232,7 +1423,8 @@ impl UserPrefs {
         let local_thinking_default_migrated = !prefs.local_thinking_default_migrated;
         prefs.migrate_legacy_local_thinking_default();
         prefs.migrate_models();
-        prefs.ensure_builtin_llmapi_model();
+        prefs.ensure_builtin_account_platform_model();
+        let model_selection_migration_changed = prefs.migrate_model_selection_ref();
         prefs.normalize_saved_model_metadata();
         // deferred_search_deletes is intentionally ignored here: a Delete
         // action never reaches disk through the app's own flows
@@ -1241,10 +1433,18 @@ impl UserPrefs {
         // file, where not deleting is the benign orphan direction.
         let migration = prefs.migrate_plaintext_api_keys_with_store(&SystemCredentialStore::new());
         let memory_policy_changed = prefs.enforce_memory_locale_policy();
+        // Any saved_models drift across the rewrite pass — including a
+        // K3.1 record whose stored effort the drop arm cleared only after
+        // its vendor identity was stamped by the normalizers — counts as a
+        // normalization change (Snapshot comparison; see the comment above
+        // `pre_normalize_saved_models`).
+        let saved_models_changed = prefs.advanced.saved_models != pre_normalize_saved_models;
         let normalization_changed = minimax_endpoint_changed
-            || builtin_llmapi_endpoint_changed
+            || account_platform_migration_changed
+            || model_selection_migration_changed
             || local_model_alias_changed
             || local_output_sentinel_changed
+            || saved_models_changed
             || local_thinking_default_migrated
             || migration.settings_sanitized
             || memory_policy_changed
@@ -1514,28 +1714,174 @@ impl UserPrefs {
         }
     }
 
-    pub(crate) fn ensure_builtin_llmapi_model(&mut self) {
-        let builtin_model = select_builtin_llmapi_model(
-            &self.advanced.builtin_llmapi_available_models,
-            self.advanced.builtin_llmapi_default_model.as_deref(),
+    pub(crate) fn migrate_account_platform_model_path(&mut self) -> bool {
+        let mut changed = self.model_path_schema_version < 1;
+        let old_model = self
+            .advanced
+            .saved_models
+            .iter()
+            .find(|model| model.id == LEGACY_BUILTIN_LLMAPI_MODEL_ID)
+            .cloned();
+        if let Some(old_model) = old_model {
+            if self
+                .advanced
+                .account_platform_default_model
+                .as_deref()
+                .is_none_or(|model| model.trim().is_empty())
+            {
+                self.advanced.account_platform_default_model = Some(old_model.model.clone());
+            }
+            self.advanced
+                .saved_models
+                .retain(|model| model.id != LEGACY_BUILTIN_LLMAPI_MODEL_ID);
+            if self.advanced.active_model_id.as_deref() == Some(LEGACY_BUILTIN_LLMAPI_MODEL_ID) {
+                self.advanced.active_model_id = Some(BUILTIN_ACCOUNT_PLATFORM_MODEL_ID.to_string());
+            }
+            changed = true;
+        }
+        if self.model_path_schema_version != 1 {
+            self.model_path_schema_version = 1;
+            changed = true;
+        }
+        changed
+    }
+
+    pub(crate) fn ensure_builtin_account_platform_model(&mut self) {
+        let builtin_model = select_builtin_account_platform_model(
+            self.advanced.account_platform_default_model.as_deref(),
         );
         if let Some(model) = self
             .advanced
             .saved_models
             .iter_mut()
-            .find(|model| model.id == BUILTIN_LLMAPI_MODEL_ID)
+            .find(|model| model.id == BUILTIN_ACCOUNT_PLATFORM_MODEL_ID)
         {
-            model.name = BUILTIN_LLMAPI_MODEL_NAME.to_string();
+            model.name = BUILTIN_ACCOUNT_PLATFORM_MODEL_NAME.to_string();
             model.preset = ModelPreset::OpenaiCompatible;
             model.model = builtin_model;
-            model.base_url = BUILTIN_LLMAPI_DEFAULT_CHAT_BASE_URL.to_string();
+            model.base_url = BUILTIN_ACCOUNT_PLATFORM_PLACEHOLDER_BASE_URL.to_string();
             model.api_key.clear();
+            model.credential_ref = None;
+            model.credential_state = CredentialState::Missing;
+            model.has_secret = false;
             model.credential_action = None;
             return;
         }
-        let mut model = SavedModel::builtin_llmapi();
+        let mut model = SavedModel::builtin_account_platform();
         model.model = builtin_model;
         self.advanced.saved_models.push(model);
+    }
+
+    /// Migrates the legacy pair (`active_model_id`,
+    /// `account_platform_default_model`) to a source-aware default. Existing
+    /// local and third-party SavedModels are never rewritten or removed.
+    pub(crate) fn migrate_model_selection_ref(&mut self) -> bool {
+        if self.model_selection_schema_version >= 1 {
+            return false;
+        }
+        if self.advanced.default_model_ref.is_none() {
+            self.advanced.default_model_ref =
+                self.advanced.active_model_id.clone().and_then(|active_id| {
+                    if active_id == BUILTIN_ACCOUNT_PLATFORM_MODEL_ID
+                        || active_id == LEGACY_BUILTIN_LLMAPI_MODEL_ID
+                    {
+                        self.advanced
+                            .account_platform_default_model
+                            .clone()
+                            .filter(|value| !value.trim().is_empty())
+                            .or_else(|| {
+                                self.model_by_id(BUILTIN_ACCOUNT_PLATFORM_MODEL_ID)
+                                    .map(|model| model.model.clone())
+                            })
+                            .map(ModelSelectionRef::account_platform)
+                    } else if self.model_by_id(&active_id).is_some() {
+                        Some(ModelSelectionRef::local(active_id))
+                    } else {
+                        None
+                    }
+                });
+        }
+        self.model_selection_schema_version = 1;
+        true
+    }
+
+    /// Resolves a typed selection into the concrete runtime SavedModel without
+    /// mutating the global built-in route carrier.
+    pub fn resolve_model_ref(&self, selection: &ModelSelectionRef) -> Option<SavedModel> {
+        match selection {
+            ModelSelectionRef::LocalConfig { saved_model_id } => {
+                self.model_by_id(saved_model_id).cloned()
+            }
+            ModelSelectionRef::AccountPlatform { model_id } if !model_id.trim().is_empty() => {
+                let mut model = self
+                    .model_by_id(BUILTIN_ACCOUNT_PLATFORM_MODEL_ID)
+                    .cloned()
+                    .unwrap_or_else(SavedModel::builtin_account_platform);
+                model.model = model_id.trim().to_string();
+                Some(model)
+            }
+            ModelSelectionRef::AccountPlatform { .. } => None,
+        }
+    }
+
+    /// Updates the source-aware default and its legacy mirrors atomically in
+    /// the caller's settings transaction.
+    pub fn set_default_model_ref(&mut self, selection: ModelSelectionRef) -> Result<(), String> {
+        let resolved = self
+            .resolve_model_ref(&selection)
+            .ok_or_else(|| "model selection reference is invalid".to_string())?;
+        match &selection {
+            ModelSelectionRef::LocalConfig { saved_model_id } => {
+                if resolved.is_builtin_account_platform() {
+                    return Err(
+                        "Account Platform selections require a concrete catalog model ID"
+                            .to_string(),
+                    );
+                }
+                self.advanced.active_model_id = Some(saved_model_id.clone());
+            }
+            ModelSelectionRef::AccountPlatform { model_id } => {
+                self.advanced.active_model_id = Some(BUILTIN_ACCOUNT_PLATFORM_MODEL_ID.to_string());
+                self.advanced.account_platform_default_model = Some(model_id.clone());
+                if let Some(carrier) = self
+                    .advanced
+                    .saved_models
+                    .iter_mut()
+                    .find(|model| model.is_builtin_account_platform())
+                {
+                    carrier.model = resolved.model;
+                }
+            }
+        }
+        self.advanced.default_model_ref = Some(selection);
+        self.advanced.default_model_selection_revision = uuid::Uuid::new_v4().to_string();
+        self.model_selection_schema_version = 1;
+        Ok(())
+    }
+
+    /// Called only under the existing prefs transaction and a current Account
+    /// owner guard, after a catalog explicitly reports this model retired.
+    pub(crate) fn retire_observed_platform_default(
+        &mut self,
+        expected: &ModelSelectionRef,
+        revision: &str,
+    ) -> bool {
+        if !matches!(expected, ModelSelectionRef::AccountPlatform { .. })
+            || self.advanced.default_model_ref.as_ref() != Some(expected)
+            || self.advanced.default_model_selection_revision != revision
+        {
+            return false;
+        }
+        self.advanced.default_model_ref = None;
+        self.advanced.account_platform_default_model = None;
+        if self.advanced.active_model_id.as_deref().is_some_and(|id| {
+            id == BUILTIN_ACCOUNT_PLATFORM_MODEL_ID || id == LEGACY_BUILTIN_LLMAPI_MODEL_ID
+        }) {
+            self.advanced.active_model_id = None;
+        }
+        self.advanced.default_model_selection_revision = uuid::Uuid::new_v4().to_string();
+        self.model_selection_schema_version = 1;
+        true
     }
 
     pub fn migrate_plaintext_api_keys_with_store(
@@ -1545,7 +1891,7 @@ impl UserPrefs {
         let mut result = CredentialMigrationResult::default();
 
         for model in &mut self.advanced.saved_models {
-            if model.is_builtin_llmapi() {
+            if model.is_builtin_account_platform() {
                 model.credential_ref = None;
                 model.credential_state = CredentialState::Missing;
                 model.has_secret = false;
@@ -1722,7 +2068,7 @@ impl UserPrefs {
         }
         self.advanced.custom_api_key = None;
         for model in &mut self.advanced.saved_models {
-            if model.is_builtin_llmapi() {
+            if model.is_builtin_account_platform() {
                 model.credential_ref = None;
                 model.credential_state = CredentialState::Missing;
                 model.has_secret = false;
@@ -1738,7 +2084,7 @@ impl UserPrefs {
             .map(|v| !v.trim().is_empty())
             .unwrap_or(false);
         for model in &mut self.advanced.saved_models {
-            if model.is_builtin_llmapi() {
+            if model.is_builtin_account_platform() {
                 model.credential_ref = None;
                 model.credential_state = CredentialState::Missing;
                 model.has_secret = false;
@@ -1829,6 +2175,15 @@ impl UserPrefs {
     /// 删一条模型;若删的是当前 active,回退到列表首条。
     pub fn remove_model(&mut self, id: &str) {
         self.advanced.saved_models.retain(|m| m.id != id);
+        let removed_default = matches!(
+            self.advanced.default_model_ref.as_ref(),
+            Some(ModelSelectionRef::LocalConfig { saved_model_id }) if saved_model_id == id
+        );
+        if removed_default {
+            self.advanced.default_model_ref = None;
+            self.advanced.active_model_id = None;
+            return;
+        }
         if self.advanced.active_model_id.as_deref() == Some(id) {
             self.advanced.active_model_id =
                 self.advanced.saved_models.first().map(|m| m.id.clone());
@@ -1838,6 +2193,40 @@ impl UserPrefs {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn platform_default_retirement_rejects_reselection_aba_and_preserves_local_models() {
+        let mut prefs = super::UserPrefs::default();
+        let mut local = super::SavedModel::builtin_account_platform();
+        local.id = "controlled-local-config".into();
+        local.provider_kind = Some("custom".into());
+        prefs.advanced.saved_models = vec![super::SavedModel::builtin_account_platform(), local];
+        let selection =
+            super::ModelSelectionRef::account_platform("0199a100-0001-7000-8000-000000000106");
+        prefs.set_default_model_ref(selection.clone()).unwrap();
+        let old = prefs.advanced.default_model_selection_revision.clone();
+        let models = serde_json::to_value(&prefs.advanced.saved_models).unwrap();
+        prefs.set_default_model_ref(selection.clone()).unwrap();
+        assert_ne!(prefs.advanced.default_model_selection_revision, old);
+        assert!(!prefs.retire_observed_platform_default(&selection, &old));
+        prefs
+            .set_default_model_ref(super::ModelSelectionRef::account_platform(
+                "0199a100-0001-7000-8000-000000000107",
+            ))
+            .unwrap();
+        prefs.set_default_model_ref(selection.clone()).unwrap();
+        assert!(!prefs.retire_observed_platform_default(&selection, &old));
+        let current = prefs.advanced.default_model_selection_revision.clone();
+        assert!(prefs.retire_observed_platform_default(&selection, &current));
+        assert!(prefs.advanced.default_model_ref.is_none());
+        assert!(prefs.advanced.account_platform_default_model.is_none());
+        assert_eq!(
+            serde_json::to_value(&prefs.advanced.saved_models).unwrap(),
+            models
+        );
+        assert_eq!(prefs.model_selection_schema_version, 1);
+        assert!(!prefs.retire_observed_platform_default(&selection, &current));
+    }
+
     use super::*;
     use crate::platform::credential_store::MemoryCredentialStore;
     use crate::platform::paths::tests::ENV_LOCK;
@@ -2359,6 +2748,140 @@ mod tests {
         });
     }
 
+    /// Kimi K3.1 spellings are always-reasoning on the vendor wire (depth
+    /// via top-level reasoning_effort; `thinking:{type:"disabled"}` is
+    /// rejected) and the base's exact-K3 shapers only learn bare k3, so any
+    /// stored effort — notably an "off" saved through the generic off/high
+    /// switch the catalog used to offer — would wire an illegal shape. The
+    /// load-path normalization drops the field (documented omission resolves
+    /// to the endpoint-specific vendor default — `high` on the Kimi Code
+    /// coding lane, `max` on the platform-API surface); non-K3.1 records are
+    /// untouched.
+    #[test]
+    fn normalize_drops_stored_effort_for_kimi_k31_models() {
+        let base = SavedModel {
+            id: "m1".into(),
+            name: "m1".into(),
+            alias: None,
+            preset: ModelPreset::OpenaiCompatible,
+            context_window_tokens: None,
+            max_output_tokens: None,
+            reasoning_effort: Some("off".into()),
+            model: "kimi-k3.1-pro".into(),
+            base_url: "https://api.moonshot.cn/v1".into(),
+            provider_kind: None,
+            vendor: Some("kimi".into()),
+            endpoint_mode: None,
+            image_capability_override: Default::default(),
+            vision_model_id: None,
+            api_key: String::new(),
+            credential_ref: None,
+            credential_state: CredentialState::Missing,
+            has_secret: false,
+            credential_action: None,
+        };
+
+        for spelling in [
+            "kimi-k3.1-pro",
+            "kimi-k3.1-pro-highspeed",
+            "k3.1-pro",
+            "k3.1-pro-highspeed",
+            "KIMI-K3.1-PRO",
+            // The `[1m]` declaration forms are the same K3.1 models
+            // (k3.1-pro[1m] is the documented Kimi Code declaration and the
+            // ACP Kimi Code datalist entry; kimi-k3.1-pro[1m] its prefixed
+            // composite) — the stored-effort drop must cover them too, or a
+            // stored "off" picked through the generic ladder would wire the
+            // vendor-rejected disable shape (2026-11-04 review round 4).
+            "k3.1-pro[1m]",
+            "kimi-k3.1-pro[1m]",
+            "K3.1-PRO[1M]",
+            // The highspeed [1m] composites (round-9 review: the loop
+            // previously covered only the two non-highspeed composites;
+            // the matcher handles them via the same single-suffix strip).
+            "k3.1-pro-highspeed[1m]",
+            "kimi-k3.1-pro-highspeed[1m]",
+        ] {
+            let mut record = base.clone();
+            record.model = spelling.into();
+            record.normalize_route_limits();
+            assert_eq!(
+                record.reasoning_effort, None,
+                "stored effort is dropped for K3.1 spelling {spelling}"
+            );
+        }
+
+        // Legacy migrated records may carry an EMPTY vendor on the official
+        // endpoint: the resolved route plus the model spelling is the
+        // contract, so the drop applies there too (2026-11-04 review
+        // round 3 — the vendor stamp alone missed these).
+        let mut legacy = base.clone();
+        legacy.vendor = None;
+        legacy.normalize_route_limits();
+        assert_eq!(
+            legacy.reasoning_effort, None,
+            "an empty-vendor record on the official moonshot endpoint is still K3.1"
+        );
+        let mut aliased = base.clone();
+        aliased.vendor = Some("moonshot".into());
+        aliased.normalize_route_limits();
+        assert_eq!(
+            aliased.reasoning_effort, None,
+            "the moonshot vendor alias on the official endpoint is still K3.1"
+        );
+
+        // The `[1m]` suffix is only tolerated for K3.1 ids: bracket forms of
+        // NON-K3.1 spellings (k3[1m] / kimi-k3[1m]) strip to non-K3.1 models
+        // and keep their own contract — a stored value survives (2026-11-04
+        // review round 4).
+        for spelling in ["k3[1m]", "kimi-k3[1m]"] {
+            let mut record = base.clone();
+            record.model = spelling.into();
+            record.normalize_route_limits();
+            assert_eq!(
+                record.reasoning_effort,
+                Some("off".into()),
+                "non-K3.1 bracket spelling {spelling} keeps its stored effort"
+            );
+        }
+
+        // A custom relay endpoint with NO kimi vendor stamp keeps its
+        // existing contract (effort passthrough) — only the vendor's own
+        // routes (or a stamped record) carry the K3.1 thinking rejection.
+        let mut relay = base.clone();
+        relay.vendor = None;
+        relay.base_url = "https://relay.example/v1".into();
+        relay.normalize_route_limits();
+        assert_eq!(
+            relay.reasoning_effort,
+            Some("off".into()),
+            "an unstamped relay endpoint keeps the stored effort (its own contract)"
+        );
+
+        // The vendor STAMP arm alone (non-official base) also carries the
+        // contract — the main loop above exercises stamp+route combined, so
+        // pin the stamp arm in isolation, including the case/whitespace
+        // folding of the stamp value (2026-11-05 review).
+        for vendor_stamp in ["kimi", "Kimi", "MOONSHOT", " moonshot "] {
+            let mut stamped_relay = base.clone();
+            stamped_relay.vendor = Some(vendor_stamp.into());
+            stamped_relay.base_url = "https://relay.example/v1".into();
+            stamped_relay.normalize_route_limits();
+            assert_eq!(
+                stamped_relay.reasoning_effort, None,
+                "a kimi-stamped relay record drops the stored K3.1 effort (stamp arm alone; vendor {vendor_stamp:?})"
+            );
+        }
+
+        // A non-K3.1 kimi record (K3 rides the exact tiered route with its
+        // own off→low equivalence) keeps its stored effort.
+        let mut k3 = base.clone();
+        k3.model = "kimi-k3".into();
+        k3.reasoning_effort = Some("off".into());
+        k3.normalize_route_limits();
+        assert_eq!(k3.reasoning_effort, Some("off".into()));
+    }
+
     /// LocalVllm no longer forces a 24K output (stays None when not
     /// explicitly configured; declared uniformly by the runtime window
     /// tiers); the operator-owned predicate covers both local and custom
@@ -2577,7 +3100,11 @@ mod tests {
 
         let snapshot = UserPrefs::load_read_only_model_snapshot().unwrap();
         assert!(snapshot.active_model().unwrap().alias.is_none());
-        assert!(snapshot.model_by_id(BUILTIN_LLMAPI_MODEL_ID).is_some());
+        assert!(
+            snapshot
+                .model_by_id(BUILTIN_ACCOUNT_PLATFORM_MODEL_ID)
+                .is_some()
+        );
         assert_eq!(std::fs::read(&path).unwrap(), original);
     }
 
@@ -2711,48 +3238,113 @@ mod tests {
     }
 
     #[test]
-    fn ensure_builtin_llmapi_model_adds_fixed_option() {
-        let mut prefs = UserPrefs::default();
-        prefs.migrate_models();
-
-        prefs.ensure_builtin_llmapi_model();
-
-        let model = prefs
-            .model_by_id(BUILTIN_LLMAPI_MODEL_ID)
-            .expect("built-in model");
-        assert_eq!(model.name, BUILTIN_LLMAPI_MODEL_NAME);
-        assert_eq!(model.preset, ModelPreset::OpenaiCompatible);
-        assert_eq!(model.model, BUILTIN_LLMAPI_DEFAULT_MODEL);
-        assert_eq!(model.base_url, BUILTIN_LLMAPI_DEFAULT_CHAT_BASE_URL);
-        assert!(model.credential_ref.is_none());
+    fn model_selection_refs_round_trip_with_explicit_sources() {
+        let selections = [
+            ModelSelectionRef::account_platform("deepseek-flash"),
+            ModelSelectionRef::local("third-party-model"),
+        ];
+        for selection in selections {
+            let encoded = serde_json::to_value(&selection).expect("serialize selection");
+            assert!(encoded.get("source").is_some());
+            let decoded: ModelSelectionRef =
+                serde_json::from_value(encoded).expect("deserialize selection");
+            assert_eq!(decoded, selection);
+        }
+        let legacy_local: ModelSelectionRef =
+            serde_json::from_str("\"third-party-model\"").expect("legacy local selection");
+        assert_eq!(legacy_local, ModelSelectionRef::local("third-party-model"));
+        let legacy_platform: ModelSelectionRef =
+            serde_json::from_str(&format!("\"{BUILTIN_ACCOUNT_PLATFORM_MODEL_ID}\""))
+                .expect("legacy platform selection");
+        assert_eq!(legacy_platform, ModelSelectionRef::account_platform(""));
     }
 
     #[test]
-    fn ensure_builtin_llmapi_model_replaces_previous_path_endpoint() {
+    fn model_selection_migration_preserves_local_models_and_is_idempotent() {
         let mut prefs = UserPrefs::default();
         prefs.migrate_models();
-        prefs.ensure_builtin_llmapi_model();
+        prefs.ensure_builtin_account_platform_model();
+        let saved_models = prefs.advanced.saved_models.clone();
+
+        assert!(prefs.migrate_model_selection_ref());
+        assert_eq!(
+            prefs.advanced.default_model_ref,
+            Some(ModelSelectionRef::local("default"))
+        );
+        assert_eq!(prefs.advanced.saved_models, saved_models);
+        assert!(!prefs.migrate_model_selection_ref());
+    }
+
+    #[test]
+    fn account_platform_default_ref_resolves_without_rewriting_local_models() {
+        let mut prefs = UserPrefs::default();
+        prefs.migrate_models();
+        prefs.ensure_builtin_account_platform_model();
+        let local = prefs.model_by_id("default").cloned().expect("local model");
+
         prefs
-            .advanced
-            .saved_models
-            .iter_mut()
-            .find(|model| model.id == BUILTIN_LLMAPI_MODEL_ID)
-            .expect("built-in model")
-            .base_url = "https://pinvou.com/llmapi/v1".into();
+            .set_default_model_ref(ModelSelectionRef::account_platform("catalog-model-v2"))
+            .expect("set platform default");
 
-        prefs.ensure_builtin_llmapi_model();
-
+        assert_eq!(prefs.model_by_id("default"), Some(&local));
+        assert_eq!(
+            prefs.advanced.default_model_ref,
+            Some(ModelSelectionRef::account_platform("catalog-model-v2"))
+        );
         assert_eq!(
             prefs
-                .model_by_id(BUILTIN_LLMAPI_MODEL_ID)
-                .expect("built-in model")
-                .base_url,
-            BUILTIN_LLMAPI_DEFAULT_CHAT_BASE_URL
+                .resolve_model_ref(prefs.advanced.default_model_ref.as_ref().unwrap())
+                .map(|model| model.model),
+            Some("catalog-model-v2".to_string())
         );
     }
 
     #[test]
-    fn load_persists_legacy_builtin_llmapi_endpoint_migration() {
+    fn ensure_builtin_account_platform_model_adds_fixed_option() {
+        let mut prefs = UserPrefs::default();
+        prefs.migrate_models();
+
+        prefs.ensure_builtin_account_platform_model();
+
+        let model = prefs
+            .model_by_id(BUILTIN_ACCOUNT_PLATFORM_MODEL_ID)
+            .expect("built-in model");
+        assert_eq!(model.name, BUILTIN_ACCOUNT_PLATFORM_MODEL_NAME);
+        assert_eq!(model.preset, ModelPreset::OpenaiCompatible);
+        assert_eq!(model.model, BUILTIN_ACCOUNT_PLATFORM_DEFAULT_MODEL);
+        assert_eq!(
+            model.base_url,
+            BUILTIN_ACCOUNT_PLATFORM_PLACEHOLDER_BASE_URL
+        );
+        assert!(model.credential_ref.is_none());
+    }
+
+    #[test]
+    fn ensure_builtin_account_platform_model_replaces_previous_path_endpoint() {
+        let mut prefs = UserPrefs::default();
+        prefs.migrate_models();
+        prefs.ensure_builtin_account_platform_model();
+        prefs
+            .advanced
+            .saved_models
+            .iter_mut()
+            .find(|model| model.id == BUILTIN_ACCOUNT_PLATFORM_MODEL_ID)
+            .expect("built-in model")
+            .base_url = "https://pinvou.com/llmapi/v1".into();
+
+        prefs.ensure_builtin_account_platform_model();
+
+        assert_eq!(
+            prefs
+                .model_by_id(BUILTIN_ACCOUNT_PLATFORM_MODEL_ID)
+                .expect("built-in model")
+                .base_url,
+            BUILTIN_ACCOUNT_PLATFORM_PLACEHOLDER_BASE_URL
+        );
+    }
+
+    #[test]
+    fn load_persists_legacy_builtin_model_path_migration() {
         let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let _home = TemporaryPrefsHome::new("pinvou3-prefs-builtin-llmapi-migration");
 
@@ -2763,12 +3355,21 @@ mod tests {
         ] {
             let mut prefs = UserPrefs::default();
             prefs.migrate_models();
-            prefs.ensure_builtin_llmapi_model();
+            prefs.ensure_builtin_account_platform_model();
+            let current = prefs
+                .advanced
+                .saved_models
+                .iter_mut()
+                .find(|model| model.id == BUILTIN_ACCOUNT_PLATFORM_MODEL_ID)
+                .expect("built-in model");
+            current.id = LEGACY_BUILTIN_LLMAPI_MODEL_ID.to_string();
+            prefs.advanced.active_model_id = Some(LEGACY_BUILTIN_LLMAPI_MODEL_ID.to_string());
+            prefs.model_path_schema_version = 0;
             prefs
                 .advanced
                 .saved_models
                 .iter_mut()
-                .find(|model| model.id == BUILTIN_LLMAPI_MODEL_ID)
+                .find(|model| model.id == LEGACY_BUILTIN_LLMAPI_MODEL_ID)
                 .expect("built-in model")
                 .base_url = legacy_endpoint.into();
             std::fs::write(
@@ -2780,9 +3381,9 @@ mod tests {
             let loaded = UserPrefs::load();
             assert_eq!(
                 loaded
-                    .model_by_id(BUILTIN_LLMAPI_MODEL_ID)
+                    .model_by_id(BUILTIN_ACCOUNT_PLATFORM_MODEL_ID)
                     .map(|model| model.base_url.as_str()),
-                Some(BUILTIN_LLMAPI_DEFAULT_CHAT_BASE_URL)
+                Some(BUILTIN_ACCOUNT_PLATFORM_PLACEHOLDER_BASE_URL)
             );
 
             let persisted: UserPrefs =
@@ -2790,21 +3391,26 @@ mod tests {
                     .expect("parse migrated prefs");
             assert_eq!(
                 persisted
-                    .model_by_id(BUILTIN_LLMAPI_MODEL_ID)
+                    .model_by_id(BUILTIN_ACCOUNT_PLATFORM_MODEL_ID)
                     .map(|model| model.base_url.as_str()),
-                Some(BUILTIN_LLMAPI_DEFAULT_CHAT_BASE_URL)
+                Some(BUILTIN_ACCOUNT_PLATFORM_PLACEHOLDER_BASE_URL)
+            );
+            assert_eq!(loaded.model_path_schema_version, 1);
+            assert_eq!(
+                loaded.advanced.active_model_id.as_deref(),
+                Some(BUILTIN_ACCOUNT_PLATFORM_MODEL_ID)
             );
         }
     }
 
     #[test]
-    fn builtin_llmapi_model_is_not_treated_as_editable_secret_model() {
+    fn builtin_account_platform_model_is_not_treated_as_editable_secret_model() {
         let store = MemoryCredentialStore::default();
         let mut prefs = UserPrefs::default();
         prefs.migrate_models();
-        prefs.ensure_builtin_llmapi_model();
+        prefs.ensure_builtin_account_platform_model();
         let builtin = prefs
-            .model_by_id(BUILTIN_LLMAPI_MODEL_ID)
+            .model_by_id(BUILTIN_ACCOUNT_PLATFORM_MODEL_ID)
             .cloned()
             .expect("built-in model");
         prefs.upsert_model(SavedModel {
@@ -2818,7 +3424,9 @@ mod tests {
         let result = prefs.migrate_plaintext_api_keys_with_store(&store);
 
         assert_eq!(result.migrated_count, 0);
-        let model = prefs.model_by_id(BUILTIN_LLMAPI_MODEL_ID).unwrap();
+        let model = prefs
+            .model_by_id(BUILTIN_ACCOUNT_PLATFORM_MODEL_ID)
+            .unwrap();
         assert!(model.api_key.is_empty());
         assert!(model.credential_ref.is_none());
         assert_eq!(model.credential_state, CredentialState::Missing);
@@ -3083,6 +3691,167 @@ mod tests {
                 .find(|model| model["id"] == "custom-explicit")
                 .expect("custom on disk");
             assert_eq!(custom_on_disk["max_output_tokens"], 24_576);
+            // PINVOU3_HOME restoration and temporary home reclamation are
+            // handled by `with_temp_home`'s Drop (also on assertion/panic
+            // paths); no hand-written restore block here.
+        });
+    }
+
+    /// The K3.1 stored-effort drop must persist through a load-only session,
+    /// not just the next explicit save: the drop flag feeds the
+    /// `normalization_changed` gate like every other load-path rewrite
+    /// (2026-11-05 review M1). One official-route K3.1 record (empty vendor —
+    /// the migrated-record shape) must lose the effort on disk; one unstamped
+    /// relay record carrying the same model id must keep its effort verbatim.
+    #[test]
+    fn load_persists_k31_effort_drop() {
+        with_temp_home("pinvou3-prefs-k31-effort-drop", || {
+            let mut prefs = UserPrefs::default();
+            // Already-migrated fixture (review 5783312297): the unrelated
+            // #622 migration independently triggers a save, which would let
+            // the disk assertion pass even without the K3.1 drop flag.
+            // Settling it here isolates this regression to the
+            // saved-models drift detection.
+            prefs.local_thinking_default_migrated = true;
+            prefs.advanced.saved_models.push(SavedModel {
+                id: "k31-official".into(),
+                name: "K3.1 Official".into(),
+                alias: None,
+                preset: ModelPreset::Kimi,
+                context_window_tokens: None,
+                max_output_tokens: None,
+                // A stored tier the older builds could write: the vendor
+                // rejects the shape for K3.1, so the drop must clear it and
+                // the load lane must persist the cleared value.
+                reasoning_effort: Some("off".into()),
+                model: "kimi-k3.1-pro".into(),
+                base_url: "https://api.moonshot.cn/v1".into(),
+                provider_kind: None,
+                vendor: None,
+                endpoint_mode: None,
+                image_capability_override: ImageCapabilityOverride::default(),
+                vision_model_id: None,
+                api_key: String::new(),
+                credential_ref: None,
+                credential_state: CredentialState::Missing,
+                has_secret: false,
+                credential_action: None,
+            });
+            prefs.advanced.saved_models.push(SavedModel {
+                id: "k31-relay".into(),
+                name: "K3.1 Relay".into(),
+                alias: None,
+                preset: ModelPreset::OpenaiCompatible,
+                context_window_tokens: None,
+                max_output_tokens: None,
+                // The unstamped-relay passthrough negative: same model id on
+                // a custom endpoint keeps the contract it was saved with.
+                reasoning_effort: Some("high".into()),
+                model: "kimi-k3.1-pro".into(),
+                base_url: "https://relay.example.com/v1".into(),
+                provider_kind: Some(MODEL_PROVIDER_KIND_CUSTOM.into()),
+                vendor: None,
+                endpoint_mode: None,
+                image_capability_override: ImageCapabilityOverride::default(),
+                vision_model_id: None,
+                api_key: String::new(),
+                credential_ref: None,
+                credential_state: CredentialState::Missing,
+                has_secret: false,
+                credential_action: None,
+            });
+            prefs.advanced.saved_models.push(SavedModel {
+                id: "k31-suffixed".into(),
+                name: "K3.1 Suffixed Route".into(),
+                alias: None,
+                preset: ModelPreset::OpenaiCompatible,
+                context_window_tokens: None,
+                max_output_tokens: None,
+                // The raw URL carries the full endpoint path users paste;
+                // the drop arm only matches after provider-metadata
+                // normalization strips the suffix, so this shape is the one
+                // the removed raw pre-check missed (round-8 review) — the
+                // snapshot-diff detection must keep covering it, and this
+                // pins the strip_chat_completions_suffix integration into
+                // normalize_provider_metadata (previously untested).
+                reasoning_effort: Some("off".into()),
+                model: "kimi-k3.1-pro".into(),
+                base_url: "https://api.moonshot.cn/v1/chat/completions".into(),
+                provider_kind: None,
+                vendor: None,
+                endpoint_mode: None,
+                image_capability_override: ImageCapabilityOverride::default(),
+                vision_model_id: None,
+                api_key: String::new(),
+                credential_ref: None,
+                credential_state: CredentialState::Missing,
+                has_secret: false,
+                credential_action: None,
+            });
+            prefs.advanced.active_model_id = Some("k31-official".into());
+            let path = super::super::paths::settings_path();
+            std::fs::write(
+                &path,
+                serde_json::to_string_pretty(&prefs).expect("serialize k31 prefs"),
+            )
+            .expect("write k31 prefs");
+
+            let loaded = UserPrefs::load();
+            let official = loaded
+                .model_by_id("k31-official")
+                .expect("official k31 model");
+            assert_eq!(
+                official.reasoning_effort, None,
+                "the in-memory stored K3.1 effort must already be dropped"
+            );
+            let relay = loaded.model_by_id("k31-relay").expect("relay k31 model");
+            assert_eq!(
+                relay.reasoning_effort,
+                Some("high".into()),
+                "the unstamped relay record must keep its effort passthrough"
+            );
+            let suffixed = loaded
+                .model_by_id("k31-suffixed")
+                .expect("suffixed k31 model");
+            assert_eq!(
+                suffixed.reasoning_effort, None,
+                "the suffixed official-route record must drop in memory"
+            );
+            assert_eq!(
+                suffixed.base_url, "https://api.moonshot.cn/v1",
+                "the suffix must be stripped by provider-metadata normalization"
+            );
+
+            // Key assertion: the drop was written back to disk (not just
+            // changed in memory) by the load-only session.
+            let persisted: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(&path).expect("read migrated prefs"))
+                    .expect("parse migrated prefs");
+            let models = persisted["advanced"]["saved_models"]
+                .as_array()
+                .expect("saved_models array");
+            let official_on_disk = models
+                .iter()
+                .find(|model| model["id"] == "k31-official")
+                .expect("official k31 on disk");
+            assert!(
+                official_on_disk["reasoning_effort"].is_null(),
+                "the on-disk stored K3.1 effort must be cleared by the load-only session, got {}",
+                official_on_disk["reasoning_effort"]
+            );
+            let relay_on_disk = models
+                .iter()
+                .find(|model| model["id"] == "k31-relay")
+                .expect("relay k31 on disk");
+            assert_eq!(relay_on_disk["reasoning_effort"], "high");
+            let suffixed_on_disk = models
+                .iter()
+                .find(|model| model["id"] == "k31-suffixed")
+                .expect("suffixed k31 on disk");
+            assert!(
+                suffixed_on_disk["reasoning_effort"].is_null(),
+                "the on-disk suffixed-record effort must be cleared by the load-only session"
+            );
             // PINVOU3_HOME restoration and temporary home reclamation are
             // handled by `with_temp_home`'s Drop (also on assertion/panic
             // paths); no hand-written restore block here.
@@ -3439,6 +4208,35 @@ mod tests {
     }
 
     #[test]
+    fn remove_last_user_model_keeps_builtin_and_clears_local_default() {
+        let mut prefs = UserPrefs::default();
+        prefs.migrate_models();
+        prefs.ensure_builtin_account_platform_model();
+        let user_model_id = prefs
+            .advanced
+            .saved_models
+            .iter()
+            .find(|model| !model.is_builtin_account_platform())
+            .expect("default user model")
+            .id
+            .clone();
+        prefs
+            .advanced
+            .saved_models
+            .retain(|model| model.is_builtin_account_platform() || model.id == user_model_id);
+        prefs
+            .set_default_model_ref(ModelSelectionRef::local(&user_model_id))
+            .expect("select last user model");
+
+        prefs.remove_model(&user_model_id);
+
+        assert_eq!(prefs.advanced.saved_models.len(), 1);
+        assert!(prefs.advanced.saved_models[0].is_builtin_account_platform());
+        assert!(prefs.advanced.default_model_ref.is_none());
+        assert!(prefs.advanced.active_model_id.is_none());
+    }
+
+    #[test]
     fn saved_model_api_key_is_not_serialized() {
         let mut prefs = UserPrefs::default();
         prefs.migrate_models();
@@ -3590,6 +4388,8 @@ mod tests {
     #[test]
     fn prefs_roundtrip() {
         let prefs = UserPrefs {
+            model_path_schema_version: 1,
+            model_selection_schema_version: 1,
             theme: Theme::LiquidDark,
             color_scheme: ColorScheme::Dark,
             language: Language::En,

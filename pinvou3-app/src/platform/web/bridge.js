@@ -208,8 +208,12 @@ function pinvouSharedweb() {
     },
     // 「添加模型」方案:已保存模型列表 + 全局默认 id + 当前会话绑定的模型 id
     savedModels: [],
+    modelsLoaded: false,
     activeModelId: null,
+    defaultModelRef: null,
     currentSessionModelId: null, // 当前 active session 显式绑定的模型;null=跟随全局默认
+    currentSessionModelRef: null,
+    pendingDraftModelRef: null,
     superPermEnabled: false,
     modeState: { mode: "yolo" },
     // 两个工作区 lane（work/code，design 并入 work）的全局默认 mode（null=该
@@ -1390,6 +1394,7 @@ function rollbackScheduledOpenActivation(snapshot) { return pinvouSharedweb().ro
   }
   // 把 active 工作集存好后切到 id 的 buffer(opts.fresh=新建空 buffer)。
   function switchActiveTo(id, opts) {
+    state.pendingDraftModelRef = null;
     // Set the new active id before touching the old buffer: the LRU prune
     // triggered by that touch protects the target via activeSessionId. Touching
     // the old buffer first (active id still old) could evict an idle target as
@@ -2195,6 +2200,9 @@ function timeStr() { return pinvouSharedweb().timeStr(); }
     state.scheduledRunContext = null;
     state.draftEpoch++; // 每次点击都自增——含下面提前返回的「已在草稿态」分支,让前端能重置 welcomeToolId
     state.scheduledTaskPendingGuide = null; // 换了对话,未发送的定时任务引导词作废
+    state.pendingDraftModelRef = null;
+    state.currentSessionModelId = null;
+    state.currentSessionModelRef = null;
 
     // 已在干净草稿态 → 只 notify(epoch 已自增)。注意要连 chatItems 一起判空:messages 与 chatItems
     // 会背离(persona 气泡 / ensureSession 失败的 system 报错卡只进 chatItems),否则残留卡顶掉「你好」。
@@ -2229,45 +2237,103 @@ async function createNewSession() { return pinvouSharedweb().createNewSession();
   // 会话（导航被劫持）——物化前校验 activeSessionId 仍为空，已切走则只登记后台 buffer。
   var ensureSessionInFlight = null;
   var ensureSessionDraftOutcome = null;
+  function isCurrentMaterialization(outcome) {
+    return outcome && outcome.navToken === sessionSwitchRequestToken
+      && outcome.epoch === Number(state.draftEpoch || 0);
+  }
+
+  function hasPendingMaterialization() {
+    return ensureSessionInFlight && isCurrentMaterialization(ensureSessionDraftOutcome)
+      && (!state.activeSessionId || state.activeSessionId === ensureSessionDraftOutcome.createdSessionId);
+  }
+
   async function ensureSession(draftOwner) {
-    if (state.activeSessionId) return state.activeSessionId;
-    if (ensureSessionInFlight) {
+    function applyDraftOutcome(outcome) {
+      if (!draftOwner || !outcome || draftOwner.draftEpoch !== outcome.epoch) return;
+      draftOwner.createdSessionId = outcome.createdSessionId;
+      draftOwner.claimedAttachments = outcome.claimedAttachments;
+      if (outcome.rollbackEpoch !== undefined) {
+        draftOwner.rollbackFromDraftEpoch = outcome.epoch;
+        draftOwner.draftEpoch = outcome.rollbackEpoch;
+      }
+    }
+    if (hasPendingMaterialization()) {
       var pendingOutcome = ensureSessionDraftOutcome;
       var pendingResult = await ensureSessionInFlight;
-      if (draftOwner && pendingOutcome && draftOwner.draftEpoch === pendingOutcome.epoch) {
-        draftOwner.createdSessionId = pendingOutcome.createdSessionId;
-      }
+      applyDraftOutcome(pendingOutcome);
       return pendingResult;
     }
+    if (state.activeSessionId) return state.activeSessionId;
     // 捕获导航 token：仅判 activeSessionId 覆盖不了「再进草稿」——enterDraft
     // 只推进 token 不改 activeSessionId（仍为 null），在途 create_session 返回
     // 后必须连同 token 一起校验，否则会劫持用户新进的草稿（三审 P1）。
     var navToken = sessionSwitchRequestToken;
-    var draftOutcome = { epoch: Number(state.draftEpoch || 0), createdSessionId: null };
+    var draftOutcome = { epoch: Number(state.draftEpoch || 0), navToken: navToken, createdSessionId: null };
+    var pendingModelRef = state.pendingDraftModelRef;
+    if (pendingModelRef) draftOutcome.claimedAttachments = new Set();
+    var workspace = state.draftWorkspacePath;
+    var lane = state.modeLane;
     ensureSessionDraftOutcome = draftOutcome;
+    function ownsDraft() {
+      return !state.activeSessionId && isCurrentMaterialization(draftOutcome)
+        && state.pendingDraftModelRef === pendingModelRef
+        && (!pendingModelRef || (state.draftWorkspacePath === workspace && state.modeLane === lane));
+    }
+    function abandonUnpublishedSession(meta) {
+      if (isCurrentMaterialization(draftOutcome) || sessionStates[meta.id] || state.activeSessionId === meta.id) {
+        draftOutcome.rollbackEpoch = draftOutcome.epoch;
+        return null;
+      }
+      var buffer = sessionStates[meta.id] = freshBuffer();
+      buffer.loadedFromDisk = true;
+      buffer.sessionRevision = String(meta.transcript_revision || meta.transcriptRevision || "");
+      draftOutcome.createdSessionId = meta.id;
+      return null;
+    }
     var p = (async function () {
       // 多 session 并发:不预热 engine。新建空 session 的 buffer 由 switchActiveTo({fresh}) 起。
       try {
         var meta = await invoke(IS_WEB ? "web_access_create_session" : "create_session");
-        // create_session 等待期间用户可能已发送/清空输入，迁移当下的最新值。
-        var composerDraft = state.composerDraft || "";
         // create_session 等待期间用户可能已退出草稿（切到既有会话或再进草稿）：
         // 物化不得劫持 active（审计），新会话登记为后台 buffer 等下次切换，
         // 调用方按 null 处理不发送本条消息。「切到既有会话」→ activeSessionId
         // 非空；「再进草稿」→ activeSessionId 仍为 null 但导航 token 已前移——
         // 两种导航都中止物化（三审 P1）。
-        if (state.activeSessionId || navToken !== sessionSwitchRequestToken) {
-          var bg = sessionStates[meta.id] = freshBuffer();
-          bg.loadedFromDisk = true;
-          bg.sessionRevision = String(meta.transcript_revision || meta.transcriptRevision || "");
-          draftOutcome.createdSessionId = meta.id;
-          return null;
+        if (!ownsDraft()) return abandonUnpublishedSession(meta);
+        // Keep the draft unpublished until the selected model is confirmed.
+        // All sends for this draft wait for the same materialization.
+        if (pendingModelRef) {
+          try {
+            if (pendingModelRef.source === "ACCOUNT_PLATFORM") {
+              await invoke("account_platform_select_session_model", {
+                input: { sessionId: meta.id, modelId: pendingModelRef.model_id },
+              });
+            } else if (pendingModelRef.source === "LOCAL_CONFIG") {
+              await invoke("set_session_model", {
+                sessionId: meta.id,
+                modelId: pendingModelRef.saved_model_id,
+              });
+            } else {
+              throw new Error("unsupported model selection source");
+            }
+          } catch (modelError) {
+            // The legacy host has already announced this record to other
+            // clients. A browser-side ownership check cannot authorize deletion.
+            draftOutcome.rollbackEpoch = draftOutcome.epoch;
+            if (!ownsDraft()) return null;
+            addSystemItem(bt("newChatFailed"));
+            await refreshHistoryList();
+            return null;
+          }
         }
+        if (!ownsDraft()) return abandonUnpublishedSession(meta);
+        var composerDraft = state.composerDraft || "";
         switchActiveTo(meta.id, { fresh: true });
         draftOutcome.createdSessionId = meta.id;
         state.composerDraft = composerDraft;
         sessionStates[meta.id].composerDraft = composerDraft;
         getBuffer(meta.id).sessionRevision = String(meta.transcript_revision || meta.transcriptRevision || "");
+        if (pendingModelRef) state.currentSessionModelRef = pendingModelRef;
         await refreshHistoryList();
         await syncModeState();
         // 两分 lane 语义：后端 plain 缺省恒 Yolo、lane 只有 work/code；
@@ -2299,7 +2365,10 @@ async function createNewSession() { return pinvouSharedweb().createNewSession();
         return navToken === sessionSwitchRequestToken
           && state.activeSessionId === meta.id ? meta.id : null;
       } catch (e) {
-        addSystemItem(bt("newChatFailed") + e);
+        if (ownsDraft()) {
+          if (pendingModelRef) draftOutcome.rollbackEpoch = draftOutcome.epoch;
+          addSystemItem(bt("newChatFailed") + e);
+        }
         return null;
       }
     })();
@@ -2309,9 +2378,7 @@ async function createNewSession() { return pinvouSharedweb().createNewSession();
       function () { if (ensureSessionInFlight === p) ensureSessionInFlight = null; }
     );
     var result = await p;
-    if (draftOwner && draftOwner.draftEpoch === draftOutcome.epoch) {
-      draftOwner.createdSessionId = draftOutcome.createdSessionId;
-    }
+    applyDraftOutcome(draftOutcome);
     return result;
   }
 
@@ -3518,16 +3585,27 @@ function formatAttachmentDisplayText(text, attachments) { return pinvouSharedweb
     state.attachments = state.attachments.filter(function (attachment) {
       return submission.readyAttachments.indexOf(attachment) < 0;
     });
-    var shouldActivate = firstTurnStillVisible(submission);
+    var stillVisible = firstTurnStillVisible(submission);
+    var shouldActivate = stillVisible && (!submission.modelRef
+      || (submission.modelRef === state.pendingDraftModelRef
+        && submission.modeLane === state.modeLane
+        && submission.navToken === sessionSwitchRequestToken));
     if (shouldActivate) {
       if (submission.uiSnapshot && submission.uiSnapshot.scheduledTaskPendingGuide) {
         state.scheduledTaskCreationSessionId = sessionId;
       }
       delete firstTurnSubmissions[submission.clientMessageId];
+      buffer.composerDraft = state.composerDraft || "";
       switchActiveTo(sessionId);
+      if (submission.modelRef) state.currentSessionModelRef = submission.modelRef;
       notify();
     } else {
       delete firstTurnSubmissions[submission.clientMessageId];
+      if (stillVisible) {
+        state.chatItems = state.chatItems.filter(function (item) {
+          return !item || item.clientMessageId !== submission.clientMessageId;
+        });
+      }
     }
     syncNewFirstTurnSessionInBackground();
   }
@@ -3544,7 +3622,7 @@ function formatAttachmentDisplayText(text, attachments) { return pinvouSharedweb
     }
     try {
       var metadata = await invokeWithRequestId(
-        "web_access_create_session_and_chat",
+        submission.command,
         submission.args,
         submission.requestId,
       );
@@ -3559,7 +3637,11 @@ function formatAttachmentDisplayText(text, attachments) { return pinvouSharedweb
       acceptFirstTurnSubmission(submission, metadata);
     } catch (error) {
       submission.inFlight = false;
-      submission.lastErrorCode = String(error && error.code || "rpc_failed");
+      var errorCode = error && error.code;
+      submission.lastErrorCode = String(errorCode || "rpc_failed");
+      // Untyped bootstrap failures (including a capability downgrade) do
+      // not settle a request that may already have reached the host.
+      submission.retrySameRequest = !errorCode || errorCode === "rpc_timeout" || errorCode === "rpc_timed_out";
       submission.lastError = String(error && error.message ? error.message : error || "");
       if (submission.voiceOperationId && submission.lastErrorCode !== "outcome_unknown") {
         completeVoiceSubmission(submission.voiceOperationId, null, false);
@@ -3570,7 +3652,8 @@ function formatAttachmentDisplayText(text, attachments) { return pinvouSharedweb
         failedItem.deliveryState = submission.lastErrorCode === "outcome_unknown"
           ? "unknown"
           : "failed";
-        failedItem.deliveryError = submission.lastError;
+        failedItem.deliveryError = window.PinvouBridgeMessages?.migrationRecoveryText?.(submission.lastError, state)
+          ?? submission.lastError;
       }
       restoreFirstTurnUiState(submission);
       notify();
@@ -3593,9 +3676,14 @@ function formatAttachmentDisplayText(text, attachments) { return pinvouSharedweb
     };
     if (meta && meta.pinvouScene) optimisticItem.pinvouScene = meta.pinvouScene;
     addChatItem(optimisticItem);
+    var modelRef = state.pendingDraftModelRef;
     var submission = {
       clientMessageId: clientMessageId,
       requestId: requestId,
+      command: modelRef ? "web_access_create_session_and_chat_with_model" : "web_access_create_session_and_chat",
+      modelRef: modelRef,
+      modeLane: state.modeLane,
+      navToken: sessionSwitchRequestToken,
       draftEpoch: state.draftEpoch,
       optimisticItemId: optimisticItem.id,
       time: time,
@@ -3615,6 +3703,7 @@ function formatAttachmentDisplayText(text, attachments) { return pinvouSharedweb
       lastErrorCode: "",
       lastError: "",
     };
+    if (modelRef) submission.args.modelId = modelRef.saved_model_id;
     firstTurnSubmissions[clientMessageId] = submission;
     notify();
     runFirstTurnSubmission(submission);
@@ -3622,8 +3711,21 @@ function formatAttachmentDisplayText(text, attachments) { return pinvouSharedweb
 
   function retryFirstTurn(clientMessageId) {
     var submission = firstTurnSubmissions[String(clientMessageId || "")];
-    if (!submission || submission.inFlight || !firstTurnStillVisible(submission)) return;
-    if (submission.lastErrorCode !== "rpc_timeout") {
+    if (!submission || submission.inFlight || submission.lastErrorCode === "outcome_unknown"
+      || !firstTurnStillVisible(submission)) return;
+    // Replay the exact command and request ID until the host reports a result.
+    if (!submission.retrySameRequest) {
+      var modelRef = state.pendingDraftModelRef;
+      if (modelRef && !canSubmitFirstTurnWithModel(modelRef)) {
+        addSystemItem(firstTurnModelUnavailableMessage(modelRef));
+        return;
+      }
+      submission.modelRef = modelRef;
+      submission.modeLane = state.modeLane;
+      submission.navToken = sessionSwitchRequestToken;
+      submission.command = modelRef ? "web_access_create_session_and_chat_with_model" : "web_access_create_session_and_chat";
+      if (modelRef) submission.args.modelId = modelRef.saved_model_id;
+      else delete submission.args.modelId;
       submission.requestId = "first_turn_" + webRequestId("retry");
     }
     runFirstTurnSubmission(submission);
@@ -3637,14 +3739,30 @@ function formatAttachmentDisplayText(text, attachments) { return pinvouSharedweb
   // - false        nothing dispatched and the text was NOT restored
   //                (notice-only early returns / admission rejected) — the
   //                caller owns putting the draft back.
-  // Web first turn (no session yet): a first turn already in flight blocks a
-  // duplicate admission; otherwise the first turn dispatches through its own
-  // pipeline. Returns the send verdict for the caller.
+  function canSubmitFirstTurnWithModel(modelRef) {
+    return modelRef.source === "LOCAL_CONFIG" && canInvoke("web_access_create_session_and_chat_with_model");
+  }
+
+  function firstTurnModelUnavailableMessage(modelRef) {
+    var key = modelRef.source === "ACCOUNT_PLATFORM"
+      ? "accountPlatformFirstTurnUnsupported"
+      : "incompatibleDesktop";
+    return window.PinvouWebClientStrings?.[key] || bt("newChatFailed");
+  }
+
+  // Web first turn (no session yet): an existing atomic submission owns the
+  // draft. Null lets the caller join an already running legacy materialization.
   function maybeSubmitFirstWebTurn(text, displayText, readyAttachments, attachmentsPayload, meta) {
     const existingFirstTurn = state.chatItems.some(function (item) {
       return item && item.type === "user" && !!item.deliveryState;
     });
     if (existingFirstTurn) return false;
+    if (hasPendingMaterialization()) return null;
+    var modelRef = state.pendingDraftModelRef;
+    if (modelRef && !canSubmitFirstTurnWithModel(modelRef)) {
+      addSystemItem(firstTurnModelUnavailableMessage(modelRef));
+      return false;
+    }
     submitFirstWebTurn(text, displayText, readyAttachments, attachmentsPayload, meta);
     return true;
   }
@@ -3673,6 +3791,12 @@ function formatAttachmentDisplayText(text, attachments) { return pinvouSharedweb
     text = (text || "").trim();
     var readyAttachments = state.attachments.filter(function (a) { return a.status === "ready" && a.result; });
     if (!text && readyAttachments.length === 0) return false;
+    // During reconnect, a missing capability snapshot does not identify an
+    // older host. Keep the selected draft until its first-turn command is known.
+    if (!state.activeSessionId && state.pendingDraftModelRef && !webInvokeCapabilitiesReady()) {
+      addSystemItem(window.PinvouWebClientStrings?.stateNotReady || bt("newChatFailed"));
+      return false;
+    }
     // 还有解析中/上传中的附件 → 等
     if (state.attachments.some(function (a) { return a.status === "parsing"; })) {
       addSystemItem(bt("attachStillParsing"));
@@ -3687,10 +3811,11 @@ function formatAttachmentDisplayText(text, attachments) { return pinvouSharedweb
     var attachmentsPayload = readyAttachments.map(function (a) { return a.result; });
 
     if (!state.activeSessionId && IS_WEB && canInvoke("web_access_create_session_and_chat")) {
-      return maybeSubmitFirstWebTurn(text, displayText, readyAttachments, attachmentsPayload, meta);
+      var firstTurnVerdict = maybeSubmitFirstWebTurn(text, displayText, readyAttachments, attachmentsPayload, meta);
+      if (firstTurnVerdict !== null) return firstTurnVerdict;
     }
 
-    if (!state.activeSessionId) {
+    if (!state.activeSessionId || hasPendingMaterialization()) {
       // 草稿态首条消息 → 物化 session(命名靠下方 persistSession auto-title)。
       // 必须用返回值判空：切走场景 ensureSession 返回 null 但 activeSessionId
       // 非空（用户已切到别的会话），按 activeSessionId 继续会把本条消息发进
@@ -3702,13 +3827,7 @@ function formatAttachmentDisplayText(text, attachments) { return pinvouSharedweb
       // （与 tauri 版对齐，二审 F3；错误提示由 ensureSession 内如实给出）。
       if (!materialized || state.activeSessionId !== materialized) {
         if (materialized) draftOwner.createdSessionId = materialized;
-        // Round-27 asto MAJOR 2(a), mirrors the tauri m2(a) write: the
-        // commit-then-navigate tail COMMITS the created session to a
-        // background buffer (the draft epoch is dead) even though
-        // ensureSession returned null — report it so the send closure's
-        // verdict mapping routes the chips to the created session. The web
-        // lane has no rollback tail (desktop-only), so any null-return with
-        // a createdSessionId binding is this shape.
+        // Only map a draft to the session that actually retained it.
         if (!materialized && draftOwner.createdSessionId && meta) {
           meta.materializedSessionId = draftOwner.createdSessionId;
         }
@@ -3726,6 +3845,16 @@ function formatAttachmentDisplayText(text, attachments) { return pinvouSharedweb
       // recovery is the retry-chip path, not a settle verdict) — disclosed in
       // the upstream PR's Current limitations.
       if (meta) meta.materializedSessionId = materialized;
+      if (draftOwner.claimedAttachments && readyAttachments.length) {
+        // Coalesced sends may have snapshotted the same one-shot handles.
+        readyAttachments = readyAttachments.filter(function (attachment) {
+          return state.attachments.includes(attachment) && !draftOwner.claimedAttachments.has(attachment);
+        });
+        if (!text && !readyAttachments.length) return false;
+        readyAttachments.forEach(function (attachment) { draftOwner.claimedAttachments.add(attachment); });
+        displayText = formatAttachmentDisplayText(text, readyAttachments);
+        attachmentsPayload = readyAttachments.map(function (attachment) { return attachment.result; });
+      }
     }
     var sid = state.activeSessionId;
     var activeTurnBuffer = getBuffer(sid);
@@ -3883,7 +4012,8 @@ function formatAttachmentDisplayText(text, attachments) { return pinvouSharedweb
       // lane): false means the text landed NOWHERE — keep owner.restored
       // unset so a caller retry is not blocked.
       if (!restoreComposerText(sid, text)) return false;
-    } else if (state.activeSessionId) {
+    } else if (state.activeSessionId
+      || (owner.rollbackFromDraftEpoch !== undefined && owner.draftEpoch !== Number(state.draftEpoch || 0))) {
       // Retain one departed draft in memory, never in the unrelated active session.
       if (owner.operationId) completeVoiceSubmission(owner.operationId, null, false);
       const retained = pendingTaskDraftRecovery.buffer ? pendingTaskDraftRecovery.buffer.text : "";
@@ -3906,7 +4036,13 @@ function formatAttachmentDisplayText(text, attachments) { return pinvouSharedweb
         // refuses terminal operations).
         rebindVoiceOperationToDraft(owner.operationId, state.draftEpoch);
       }
-      prefillComposer(text, true);
+      if (owner.rollbackFromDraftEpoch !== undefined && owner.rollbackFromDraftEpoch === owner.draftEpoch) {
+        const current = String(state.composerDraft || "");
+        state.composerDraft = current ? current + "\n" + text : text;
+        prefillComposer(state.composerDraft, false);
+      } else {
+        prefillComposer(text, true);
+      }
     }
     owner.restored = true;
     return true;
@@ -5202,18 +5338,22 @@ async function setSelectedPet(id) { return pinvouSharedweb().setSelectedPet(id);
   async function setBehaviorTelemetryEnabled() {
     throw new Error("behavior telemetry is unsupported by the Web host");
   }
+  var effectiveModelLoadSeq = 0;
   async function loadEffectiveModelConfig(sessionId) {
+    var seq = ++effectiveModelLoadSeq;
     var requestedSessionId = arguments.length ? (sessionId || null) : (state.activeSessionId || null);
     try {
       var config = await invoke("get_effective_model_config", { sessionId: requestedSessionId });
       // 快速切会话时，旧请求可能晚于新请求返回；禁止旧会话配置覆盖当前遮罩状态。
-      if ((state.activeSessionId || null) !== requestedSessionId) return;
+      if (seq !== effectiveModelLoadSeq || (state.activeSessionId || null) !== requestedSessionId) return false;
       state.effectiveModelConfig = config;
     } catch (e) {
-      if ((state.activeSessionId || null) !== requestedSessionId) return;
-      state.effectiveModelConfig = null;
+      if (seq !== effectiveModelLoadSeq || (state.activeSessionId || null) !== requestedSessionId) return false;
+      // Preserve the last authoritative snapshot across transient failures.
+      return false;
     }
     notify();
+    return true;
   }
   let settingsWriteQueue = Promise.resolve();
 function enqueueSettingsWrite(write) { return pinvouSharedweb().enqueueSettingsWrite(write); }
@@ -5280,13 +5420,34 @@ function enqueueSettingsWrite(write) { return pinvouSharedweb().enqueueSettingsW
   async function discoverLocalVllm(request) { return pinvouSharedweb().discoverLocalVllm(request); }
 
   // 当前有效模型的图片输入能力(普通会话选图即时警告用);后端按会话模型绑定解析。
+  async function getEffectiveModelConfig(sessionId) {
+    return await invoke("get_effective_model_config", {
+      sessionId: arguments.length ? (sessionId || null) : (state.activeSessionId || null),
+    });
+  }
   async function getImageInputCapability(...args) { return pinvouSharedweb().getImageInputCapability(...args); }
 
   // ── 模型列表(「添加模型」方案)─────────────────────────────────
   // 整表覆盖加载：保存/删除/切换链式 loadModels 并发时旧列表不得覆盖新列表
   // （审计 b）。请求序号后发者胜（与 tauri settings 侧一致）。
-  let modelsLoadSeq = 0;
-async function loadModels() { return pinvouSharedweb().loadModels(); }
+  var modelsLoadSeq = 0;
+  async function loadModels() {
+    var seq = ++modelsLoadSeq;
+    try {
+      var v = await invoke("list_models");
+      if (seq !== modelsLoadSeq) return false;
+      state.savedModels = (v && v.models) || [];
+      state.activeModelId = (v && v.active_model_id) || null;
+      state.defaultModelRef = (v && v.default_model_ref) || null;
+      state.modelsLoaded = true;
+    } catch (e) {
+      if (seq !== modelsLoadSeq) return false;
+      // Keep the previous authoritative catalog on transport failure.
+      return false;
+    }
+    notify();
+    return true;
+  }
   // model 对象字段须是 snake_case(SavedModel serde):
   // {id,name,preset,context_window_tokens,max_output_tokens,model,base_url,api_key,credential_action,image_capability_override,vision_model_id}
  async function saveModel(model) {
@@ -5308,30 +5469,65 @@ async function revealModelApiKey(id) { return pinvouSharedweb().revealModelApiKe
   }
   // 读某会话当前绑定的模型 id(切会话时刷新 chip)。
   async function loadSessionModel(sessionId) {
+    var effectiveSeq = ++effectiveModelLoadSeq;
     var requestedSessionId = sessionId || null;
     var modelId = null;
-    var config = null;
+    var modelRef = null;
+    var configResult = { ok: false, value: null };
     try {
       var results = await Promise.all([
         requestedSessionId
           ? invoke("get_session_model_id", { sessionId: requestedSessionId }).catch(function () { return null; })
           : Promise.resolve(null),
-        invoke("get_effective_model_config", { sessionId: requestedSessionId }).catch(function () { return null; }),
+        requestedSessionId && canInvoke("get_session_model_ref")
+          ? invoke("get_session_model_ref", { sessionId: requestedSessionId }).catch(function () { return null; })
+          : Promise.resolve(null),
+        invoke("get_effective_model_config", { sessionId: requestedSessionId })
+          .then(function (value) { return { ok: true, value: value }; })
+          .catch(function () { return { ok: false, value: null }; }),
       ]);
       modelId = results[0];
-      config = results[1];
+      modelRef = results[1];
+      configResult = results[2];
     } catch (e) {
       modelId = null;
-      config = null;
+      modelRef = null;
+      configResult = { ok: false, value: null };
     }
     // ChatView effect 可能并发加载相邻两个会话；只提交仍为当前会话的结果。
-    if ((state.activeSessionId || null) !== requestedSessionId) return;
+    if ((state.activeSessionId || null) !== requestedSessionId) return false;
     state.currentSessionModelId = modelId;
-    state.effectiveModelConfig = config;
+    if (!modelRef && typeof modelId === "string" && modelId && modelId !== "builtin_account_platform") {
+      modelRef = { source: "LOCAL_CONFIG", saved_model_id: modelId };
+    }
+    state.currentSessionModelRef = modelRef;
+    var effectiveCurrent = effectiveSeq === effectiveModelLoadSeq;
+    if (effectiveCurrent && configResult.ok) state.effectiveModelConfig = configResult.value;
     notify();
+    return effectiveCurrent && configResult.ok;
   }
-  // 切当前会话模型(chip 热切)。无 session(草稿态)时改全局默认。
-async function switchModel(sessionId, modelId) { return pinvouSharedweb().switchModel(sessionId, modelId); }
+  // 切当前会话模型；草稿态只寄存到首条消息物化，不改全局默认。
+  async function switchModelRef(sessionId, modelRef) {
+    if (!modelRef || !modelRef.source) throw new Error("model selection is required");
+    if (!sessionId) {
+      state.pendingDraftModelRef = modelRef;
+      notify();
+      return;
+    }
+    if (modelRef.source === "ACCOUNT_PLATFORM") {
+      await invoke("account_platform_select_session_model", {
+        input: { sessionId: sessionId, modelId: modelRef.model_id },
+      });
+    } else if (modelRef.source === "LOCAL_CONFIG") {
+      await invoke("set_session_model", { sessionId: sessionId, modelId: modelRef.saved_model_id });
+    } else {
+      throw new Error("unsupported model selection source");
+    }
+    await loadSessionModel(sessionId);
+  }
+  async function switchModel(sessionId, modelId) {
+    return switchModelRef(sessionId, { source: "LOCAL_CONFIG", saved_model_id: modelId });
+  }
 async function testModelConnection(baseUrl, apiKey, modelId) { return pinvouSharedweb().testModelConnection(baseUrl, apiKey, modelId); }
   // 测试图片输入能力(设计 §7.3):用当前表单的 model/base_url/key 发一张内置纯色图,
   // 仅由模型编辑弹窗主动点击触发,无任何启动/定时自动测试。
@@ -5829,6 +6025,8 @@ async function submitUserInput(itemId, toolCallId, answers, questions) { return 
   }
 
   // ── 产物面板 ─────────────────────────────────────────────────────
+  async function compactNow() { return pinvouSharedweb().compactNow(); }
+
   function invokeArtifact(nativeCommand, webCommand, path, sessionId, extra) {
     var args = Object.assign({ path: path }, extra || {});
     if (IS_WEB) {
@@ -5883,6 +6081,7 @@ function sessionTitleById(sid) { return pinvouSharedweb().sessionTitleById(sid);
 function currentMemoryArtifacts() { return pinvouSharedweb().currentMemoryArtifacts(); }
   // 跨会话产出物索引:磁盘 session JSON 为主,再合并当前内存工作集。
   // 新产物在 chat:done/save_session_artifacts 前也能立刻出现在「产出物」一级入口。
+
   async function listDeliverableIndex() { return pinvouSharedweb().listDeliverableIndex(); }
   // 外部打开产物：HTML 走 Tauri 独立窗口（绕沙箱），其他走系统应用。
   // sessionId = 卡片携带的产物所属 session。后端 resolve_artifact_path 用它(而非全局
@@ -6135,12 +6334,24 @@ function conversationAttachmentArgs(reference) { return pinvouSharedweb().conver
     if (bytes <= 100 * 1024 * 1024) return "10_100mib";
     return "100mib_plus";
   }
-  function beginAttachmentTelemetry(att, size, entryPoint) {
+  function attachmentErrorCategory(error) {
+    return window.PinvouAttachmentTelemetry
+      ? window.PinvouAttachmentTelemetry.errorCategory(error) : "internal_error";
+  }
+  function attachmentPhase(att, phase) {
+    var attempt = att && att.telemetryAttempt;
+    if (attempt && !attempt.finished && window.PinvouAttachmentTelemetry) {
+      attempt.step = window.PinvouAttachmentTelemetry.step(phase);
+    }
+  }
+  function beginAttachmentTelemetry(att, size, entryPoint, phase) {
     var attempt = { attachmentId: attachmentTelemetryToken("attachment_"), operationId: attachmentTelemetryToken("attachment_op_"), fileTypeBucket: attachmentFileType(att.basename), startedAt: Date.now(), finished: false };
     att.telemetryAttempt = attempt;
+    attempt.step = phase === "ingest" ? "attachment_ingest" : "attachment_validation";
     invoke(IS_WEB ? "web_access_track_behavior_event" : "track_behavior_event", { request: {
       eventName: "attachment_added", attachmentId: attempt.attachmentId, operationId: attempt.operationId,
       attemptIndex: 1, fileTypeBucket: attempt.fileTypeBucket, sizeBucket: attachmentSizeBucket(size), entryPoint: entryPoint,
+      stage: "submission", step: attempt.step, inputType: "attachment",
     } }).catch(function () {});
   }
   function finishAttachmentTelemetry(att, success, errorCategory) {
@@ -6151,7 +6362,8 @@ function conversationAttachmentArgs(reference) { return pinvouSharedweb().conver
       eventName: "attachment_processing_completed", attachmentId: attempt.attachmentId,
       operationId: attempt.operationId, attemptIndex: 1, fileTypeBucket: attempt.fileTypeBucket,
       success: !!success, durationMs: Math.max(0, Date.now() - attempt.startedAt),
-      errorCategory: success ? undefined : (errorCategory || "validation_failed"),
+      errorCategory: success ? undefined : (errorCategory || "internal_error"),
+      stage: "submission", step: attempt.step, inputType: "attachment",
     } }).catch(function () {});
   }
 
@@ -6159,12 +6371,12 @@ function conversationAttachmentArgs(reference) { return pinvouSharedweb().conver
     var id = ++attachIdSeq;
     var att = { id: id, basename: basename(path), status: "parsing", result: null, error: null };
     state.attachments.push(att); notify();
-    beginAttachmentTelemetry(att, 0, "composer");
+    beginAttachmentTelemetry(att, 0, "composer", "ingest");
     try {
       var result = await invoke(IS_WEB ? "web_access_ingest_file" : "ingest_file", { path: path });
       att.status = "ready"; att.result = result;
       finishAttachmentTelemetry(att, true);
-    } catch (e) { att.status = "error"; att.error = String(e); finishAttachmentTelemetry(att, false, "validation_failed"); }
+    } catch (e) { att.status = "error"; att.error = String(e); finishAttachmentTelemetry(att, false, attachmentErrorCategory(e)); }
     notify();
   }
 
@@ -6252,12 +6464,13 @@ async function pickAndAttach() { return pinvouSharedweb().pickAndAttach(); }
     beginAttachmentTelemetry(att, file.size, "composer");
     try {
       if (!uploader || typeof uploader.uploadFile !== "function") {
-        throw new Error("chunked attachment uploader is unavailable");
+        throw Object.assign(new Error("chunked attachment uploader is unavailable"), { code: "attachment_uploader_unavailable" });
       }
       var completed = await uploader.uploadFile({
         file: file,
         uploadId: uploadId,
         isCancelled: function () { return state.attachments.indexOf(att) < 0; },
+        onPhase: function (phase) { attachmentPhase(att, phase); },
         sendChunk: function (chunk) {
           return invoke("web_access_upload_attachment_chunk", {
             uploadId: chunk.uploadId,
@@ -6292,7 +6505,7 @@ async function pickAndAttach() { return pinvouSharedweb().pickAndAttach(); }
         att.error = displayError.code;
         addSystemItem(bt("deviceUploadFailed") + displayError.message);
       }
-      finishAttachmentTelemetry(att, false, e && e.code === "device_upload_cancelled" ? "user_cancelled" : "validation_failed");
+      finishAttachmentTelemetry(att, false, attachmentErrorCategory(e));
     }
     notify();
   }
@@ -7490,6 +7703,8 @@ function appendVoiceText(base, text) { return pinvouSharedweb().appendVoiceText(
     saveSearchSettingsAndRestart: saveSearchSettingsAndRestart,
     submitFeedback: submitFeedback,
     discoverLocalVllm: discoverLocalVllm,
+    getEffectiveModelConfig: getEffectiveModelConfig,
+    loadEffectiveModelConfig: loadEffectiveModelConfig,
    loadModels: loadModels,
    saveModel: saveModel,
    revealModelApiKey: revealModelApiKey,
@@ -7499,6 +7714,7 @@ function appendVoiceText(base, text) { return pinvouSharedweb().appendVoiceText(
     setActiveModel: setActiveModel,
     loadSessionModel: loadSessionModel,
     switchModel: switchModel,
+    switchModelRef: switchModelRef,
     testModelConnection: testModelConnection,
     probeLocalServerKind: probeLocalServerKind,
     testSearchProvider: testSearchProvider,
@@ -7535,6 +7751,7 @@ function appendVoiceText(base, text) { return pinvouSharedweb().appendVoiceText(
     dismissPinvouReview: dismissPinvouReview,
     // 编辑/压缩
     editLastTurn: editLastTurn,
+    compactNow: compactNow,
     // 产物
     artifactInfo: artifactInfo,
     readArtifactText: readArtifactText,

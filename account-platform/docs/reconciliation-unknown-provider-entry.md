@@ -1,0 +1,7 @@
+# Unknown provider bill API entry kinds
+
+The existing provider bill API pipeline retains a nonempty normalized entry kind up to 64 UTF-8 bytes, including kinds it cannot financially interpret. The original raw snapshot and source identity are preserved; four-way comparison emits the existing OPEN/P0 UNSUPPORTED_PROVIDER_ENTRY case. Unknown kinds do not supply payment authority, trigger order queries, or create payment/refund/chargeback effects. Other valid source rows continue through their existing verified handling.
+
+Forward-only Billing 900025 changes only reconciliation_provider_rows.entry_type from the historical three-kind enumeration to this bounded source-evidence string. All old migration identities and rows remain intact. Malformed amounts, dates, channels, references and oversized kinds still fail before batch persistence. FILE_IMPORT retains its existing three-kind and status contract, including rejection of unknown kinds; this change does not claim arbitrary file-format compatibility.
+
+TestReconciliationUnknownProviderEntryPublicPostgres uses the registered authenticated Billing HTTP route, actual development-simulator HTTP adapter and a controlled upstream bill/query server, then complete public Billing migrations and billing_service. It verifies raw source persistence, an immutable manual case, a later normal row's one real funding effect, repeated observation idempotency, source length rejection and unchanged file-import behavior. It is not a live vendor or simulator-database acceptance.

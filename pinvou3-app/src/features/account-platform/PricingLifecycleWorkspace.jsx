@@ -1,0 +1,731 @@
+import { createPricingUnknownRecoveryGate, archivePricingUnknown, readPricingUnknownConfiguration, readPricingUnknownHistory } from './pricing-unknown-recovery.js';
+import { integerMoney } from './finance-contract.js';
+import { pricingUnknownStorageKey, replayPricingMutation } from './pricing-mutation.js';
+import { pricingUnknownSnapshot, pricingUnknownStateSnapshot, storePricingUnknown, subscribePricingUnknown } from './pricing-unknown-state.js';
+import { secureRequestID } from './request-id.js';
+import React, { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
+import { buildPriceDraftInput, matchingContinuationDrafts, newModelPriceAllowed, priceDraftForm, priceSpaceQuery, priceTransitionModes, pricingLifecycleMutationLock, publishedPricingFormulas } from './pricing-lifecycle.js';
+
+const shortID = (value) => {
+  const text = String(value || '');
+  return text.length > 16 ? `${text.slice(0, 8)}…${text.slice(-5)}` : text || '—';
+};
+const formatDate = (value) => value ? new Date(value).toLocaleString() : '—';
+const mutationKey = (prefix) => `${prefix}:${secureRequestID()}`;
+const outcomeUnknown = (error) => !Number.isFinite(error?.status) || error.status >= 500;
+const stableUUID = (value) => /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(value || ''));
+
+function PricingStatus({ value }) {
+  const normalized = String(value || '—');
+  const tone = ['ACTIVE', 'PUBLISHED'].includes(normalized) ? 'ok' : normalized === 'DRAFT' ? 'warn' : 'neutral';
+  return <span className={`adm-status ${tone}`} aria-label={normalized}>{normalized}</span>;
+}
+
+function fieldError(labels, value) {
+  if (!value) return '';
+  if (value === 'range') return labels.dateRangeError;
+  if (value === 'nonnegative_integer') return labels.integerError;
+  return labels.required;
+}
+
+export function PricingLifecycleWorkspace({ copy, client, permissions, owner, contextModel = null, contextFormula = null, onExit = null, onOpenModel = null }) {
+  const recoveryEpoch = client.financeSessionEpoch;
+  const unknownStorageKey = pricingUnknownStorageKey(owner, recoveryEpoch);
+  const intentRevision = pricingUnknownStateSnapshot(unknownStorageKey).revision;
+  const [unknownStateScope, setUnknownStateScope] = useState(unknownStorageKey);
+  const recoveryScopeCurrent = unknownStateScope === unknownStorageKey;
+  const retainUnknown = value => storePricingUnknown(unknownStorageKey, value, null);
+  const labels = copy.billing.pricingLifecycle;
+  const contextual = Boolean(contextModel?.model_id && contextFormula?.formula_version_id);
+  const [priceAccessDenied, setPriceAccessDenied] = useState(false);
+  const canManage = new Set(permissions || []).has('platform.pricing.manage') && !priceAccessDenied && recoveryScopeCurrent;
+  const canReadModels = new Set(permissions || []).has('platform.models.read');
+  const [prices, setPrices] = useState([]);
+  const [pricePage, setPricePage] = useState({ cursors: [''], index: 0, has_more: false, next_cursor: '' });
+  const pricePosition = useRef({ cursors: [''], index: 0 });
+  const priceAttempt = useRef({ cursors: [''], index: 0 });
+  const priceContext = JSON.stringify([owner, client.financeSessionEpoch, contextModel?.model_id, contextFormula?.formula_version_id, contextFormula?.protocol_code, [...(permissions || [])].sort()]);
+  const [units, setUnits] = useState([]);
+  const [protocols, setProtocols] = useState(() => contextual ? { protocols: [], formulas: [contextFormula] } : { protocols: [], formulas: [] });
+  const [formulaQuery, setFormulaQuery] = useState('');
+  const [activeFormulaQuery, setActiveFormulaQuery] = useState('');
+  const [formulaPage, setFormulaPage] = useState({ mode: null, has_more: null, next_cursor: null });
+  const [formulaPageExpired, setFormulaPageExpired] = useState(false);
+  const [formulaAccessDenied, setFormulaAccessDenied] = useState(false);
+  // A current denial retires preparing writes synchronously, including after
+  // a later successful read. Dispatched/unknown recovery keeps its original key.
+  const formulaAuthority = useRef({ denied: false, generation: 0 });
+  const [selectedFormula, setSelectedFormula] = useState(null);
+  const formulaAttempt = useRef({});
+  const [models, setModels] = useState(() => contextual ? [contextModel] : []);
+  const [loading, setLoading] = useState({});
+  const [errors, setErrors] = useState({});
+  const [updatedAt, setUpdatedAt] = useState({});
+  const [notice, setNotice] = useState('');
+  const [editorState, setEditorState] = useState(null);
+  const editor = editorState?.revision === intentRevision ? editorState.value : null;
+  const setEditor = value => setIntent(setEditorState, value);
+  const [editorErrors, setEditorErrors] = useState({});
+  const [unitFormState, setUnitFormState] = useState(null);
+  const unitForm = unitFormState?.revision === intentRevision ? unitFormState.value : null;
+  const setUnitForm = value => setIntent(setUnitFormState, value);
+  const [preview, setPreview] = useState(null);
+  const [pendingActionState, setPendingActionState] = useState(null);
+  const pendingAction = pendingActionState?.revision === intentRevision ? pendingActionState.value : null;
+  const setPendingAction = value => setIntent(setPendingActionState, value);
+  const recoveryGate = useRef(null);
+  if (!recoveryGate.current) recoveryGate.current = createPricingUnknownRecoveryGate();
+  const [unknownConfiguration, setUnknownConfiguration] = useState(null);
+  const [unknownHistory, setUnknownHistory] = useState(() => { try { return readPricingUnknownHistory(unknownStorageKey); } catch { return []; } });
+  const recoveryIdentity = useRef({ value: '', generation: 0 });
+  const recoveryIdentityValue = JSON.stringify([priceContext, canManage, formulaAccessDenied, formulaAuthority.current.generation]);
+  if (recoveryIdentity.current.value !== recoveryIdentityValue) recoveryIdentity.current = { value: recoveryIdentityValue, generation: recoveryIdentity.current.generation + 1 };
+  const subscribeUnknown = useCallback(listener => subscribePricingUnknown(unknownStorageKey, listener), [unknownStorageKey]);
+  const getUnknown = useCallback(() => pricingUnknownStateSnapshot(unknownStorageKey), [unknownStorageKey]);
+  const unknownMutation = useSyncExternalStore(subscribeUnknown, getUnknown, getUnknown).value;
+  const setUnknownMutation = (value, expected = null, options) => storePricingUnknown(unknownStorageKey, value, expected, options);
+  const latestUnknownScope = useRef(unknownStorageKey);
+  latestUnknownScope.current = unknownStorageKey;
+  // Recovery/archive retires prior form intent synchronously across presenters.
+  // Old closures and queued React state updaters must check the shared revision,
+  // even before the external-store notification has produced a new render.
+  const intentCurrent = () => latestUnknownScope.current === unknownStorageKey
+    && pricingUnknownStateSnapshot(unknownStorageKey).revision === intentRevision;
+  const setIntent = (setState, value) => {
+    if (!intentCurrent()) return;
+    setState(current => {
+      if (!intentCurrent()) return current;
+      const next = typeof value === 'function' ? value(current?.revision === intentRevision ? current.value : null) : value;
+      return next == null ? null : { revision: intentRevision, value: next };
+    });
+  };
+  // Local generations cannot fence another presenter replacing the shared record.
+  const sharedOperationCurrent = operation => latestUnknownScope.current === unknownStorageKey && pricingUnknownSnapshot(unknownStorageKey) === operation;
+  const generations = useRef({ prices: 0, units: 0, formulas: 0, models: 0 });
+  const mounted = useRef(true);
+  const preflights = useRef(new Set());
+  const sourceControllers = useRef(new Map());
+  const transientControllers = useRef(new Map());
+  const transientGenerations = useRef(new Map());
+  const abortTransientReads = useCallback(() => {
+    for (const controller of transientControllers.current.values()) controller.abort();
+    transientControllers.current.clear();
+  }, []);
+  const formulas = useMemo(() => {
+    const page = publishedPricingFormulas(protocols);
+    return selectedFormula && !page.some(item => item.formula_version_id === selectedFormula.formula_version_id) ? [...page, selectedFormula] : page;
+  }, [protocols, selectedFormula]);
+  const latestFacts = useRef({ canManage, canReadModels, models, formulas });
+  latestFacts.current = { canManage, canReadModels, models, formulas, unknownMutation };
+  const recoveryBoundary = () => JSON.stringify([recoveryIdentity.current, generations.current, client.financeSessionEpoch, recoveryGate.current.generation]);
+  useEffect(() => {
+    setUnknownConfiguration(null);
+    setUnknownStateScope(unknownStorageKey);
+    try { setUnknownHistory(readPricingUnknownHistory(unknownStorageKey)); } catch { setUnknownHistory([]); }
+    setEditor(null); setUnitForm(null); setPendingAction(null);
+  }, [unknownStorageKey]);
+  useEffect(() => {
+    // A peer may recover/archive/replace this record without changing local generations.
+    setUnknownConfiguration(null);
+    try { setUnknownHistory(readPricingUnknownHistory(unknownStorageKey)); } catch { setUnknownHistory([]); }
+  }, [unknownStorageKey, unknownMutation]);
+  useEffect(() => () => {
+    mounted.current = false;
+    for (const controller of preflights.current) controller.abort();
+    preflights.current.clear();
+    for (const controller of sourceControllers.current.values()) controller.abort();
+    sourceControllers.current.clear();
+    abortTransientReads();
+  }, [abortTransientReads]);
+  useEffect(() => {
+    setUnknownConfiguration(null);
+    recoveryGate.current.retire();
+    setLoading(current => ({ ...current, unknownConfiguration: false }));
+    transientControllers.current.get('unknownConfiguration')?.abort();
+    transientGenerations.current.set('unknownConfiguration', (transientGenerations.current.get('unknownConfiguration') || 0) + 1);
+  }, [priceContext, canManage, formulaAccessDenied]);
+  const unitByID = useMemo(() => new Map(units.map((unit) => [unit.unit_definition_id, unit])), [units]);
+  const editorFormula = formulas.find((item) => item.formula_version_id === editor?.formula_version_id);
+  const compatibleModels = models.filter((item) => item.protocol_code === editorFormula?.protocol_code);
+
+  // One resource generation owns every presenter of that resource. The first
+  // state key is pending; siblings are retired when a different intent starts.
+  const loadResource = useCallback(async (key, request, apply, message, stateKeys = [key]) => {
+    const stateKey = stateKeys[0];
+    const generation = (generations.current[key] || 0) + 1;
+    generations.current[key] = generation;
+    sourceControllers.current.get(key)?.abort();
+    const controller = new globalThis.AbortController();
+    sourceControllers.current.set(key, controller);
+    setLoading((current) => ({ ...current, ...Object.fromEntries(stateKeys.map(name => [name, name === stateKey])) }));
+    try {
+      const payload = await request(controller.signal);
+      if (!mounted.current || controller.signal.aborted || generations.current[key] !== generation) throw Object.assign(new Error('STALE_RESOURCE_RESPONSE'), { name: 'AbortError', code: 'STALE_RESOURCE_RESPONSE' });
+      apply(payload);
+      setUpdatedAt((current) => ({ ...current, [key]: new Date() }));
+      setErrors((current) => { const next = { ...current }; for (const name of stateKeys) delete next[name]; return next; });
+      return payload;
+    } catch (error) {
+      if (mounted.current && generations.current[key] === generation && error?.name !== 'AbortError') setErrors((current) => ({ ...current, [stateKey]: message }));
+      throw error;
+    } finally {
+      if (mounted.current && generations.current[key] === generation) {
+        sourceControllers.current.delete(key);
+        setLoading((current) => ({ ...current, [stateKey]: false }));
+      }
+    }
+  }, []);
+  const readTransient = useCallback(async (key, request) => {
+    const generation = (transientGenerations.current.get(key) || 0) + 1;
+    transientGenerations.current.set(key, generation);
+    transientControllers.current.get(key)?.abort();
+    const controller = new globalThis.AbortController();
+    transientControllers.current.set(key, controller);
+    try {
+      const payload = await request(controller.signal);
+      if (!mounted.current || transientGenerations.current.get(key) !== generation) {
+        throw Object.assign(new Error('STALE_TRANSIENT_RESPONSE'), { name: 'AbortError', code: 'STALE_TRANSIENT_RESPONSE' });
+      }
+      return payload;
+    } finally {
+      if (transientGenerations.current.get(key) === generation) transientControllers.current.delete(key);
+    }
+  }, []);
+  useEffect(() => {
+    pricePosition.current = { cursors: [''], index: 0 };
+    setPricePage({ ...pricePosition.current, has_more: false, next_cursor: '' });
+    setPrices([]);
+    generations.current.prices += 1;
+    sourceControllers.current.get('prices')?.abort();
+  }, [priceContext]);
+  const loadPrices = useCallback((position = pricePosition.current) => {
+    priceAttempt.current = position;
+    const generation = generations.current.prices + 1;
+    return loadResource('prices', signal => contextual
+      ? client.managedPriceSpace({ scope_type: 'MODEL', scope_id: contextModel.model_id, protocol_code: contextFormula.protocol_code, formula_version_id: contextFormula.formula_version_id, credit_unit: 'MICROCREDIT' }, signal)
+      : client.managedPrices({ cursor: position.cursors[position.index] }, signal), payload => {
+        setPrices(payload.items || []);
+        setPriceAccessDenied(false);
+        pricePosition.current = position;
+        setPricePage({ ...position, has_more: Boolean(payload.has_more), next_cursor: payload.next_cursor || '' });
+      }, labels.loadPricesFailed).catch(error => {
+        if (mounted.current && generations.current.prices === generation && [401, 403].includes(error?.status)) {
+          setPrices([]);
+          setPriceAccessDenied(true);
+        }
+        throw error;
+      });
+  }, [client, contextFormula, contextModel, contextual, labels.loadPricesFailed, loadResource, priceContext]);
+  const priceNavigationLocked = Boolean(editor || unitForm || pendingAction || unknownMutation || loading.mutation || loading.recovery);
+  const loadUnits = useCallback(() => loadResource('units', (signal) => client.meteringUnits(signal), (payload) => setUnits(payload.items || []), labels.loadUnitsFailed), [client, labels.loadUnitsFailed, loadResource]);
+  const loadProtocols = useCallback((filters = {}) => {
+    if (contextual) {
+      generations.current.formulas += 1;
+      sourceControllers.current.get('formulas')?.abort();
+      sourceControllers.current.delete('formulas');
+      setProtocols({ protocols: [], formulas: [contextFormula] });
+      setLoading((current) => ({ ...current, formulas: false, formulaSelection: false }));
+      setErrors((current) => { const next = { ...current }; delete next.formulas; return next; });
+      return Promise.resolve({ protocols: [], formulas: [contextFormula] });
+    }
+    const attempted = { q: String(filters.q || '').trim(), cursor: String(filters.cursor || '').trim() };
+    formulaAttempt.current = attempted;
+    const generation = generations.current.formulas + 1;
+    return loadResource('formulas', (signal) => client.pricingProtocols(attempted, signal), (payload) => {
+      setProtocols(payload);
+      setSelectedFormula(current => {
+        const refreshed = payload.formulas.find(item => item.formula_version_id === current?.formula_version_id);
+        return refreshed ? (refreshed.status === 'PUBLISHED' ? refreshed : null) : current;
+      });
+      setFormulaPage(payload.formula_page || { mode: 'aggregate', has_more: false, next_cursor: null });
+      setActiveFormulaQuery(attempted.q);
+      setFormulaPageExpired(false);
+      formulaAuthority.current.denied = false;
+      setFormulaAccessDenied(false);
+    }, labels.formulaPageFailed, ['formulas', 'formulaSelection']).catch(error => {
+      if (mounted.current && generations.current.formulas === generation && error?.name !== 'AbortError') {
+        if (error.status === 410) setFormulaPageExpired(true);
+        if ([401, 403].includes(error.status)) { formulaAuthority.current = { denied: true, generation: formulaAuthority.current.generation + 1 }; setFormulaAccessDenied(true); setSelectedFormula(null); if (!latestFacts.current.unknownMutation) setEditor(null); }
+      }
+      throw error;
+    });
+  }, [client, contextFormula, contextual, labels.formulaPageFailed, loadResource, unknownStorageKey, intentRevision]);
+  const loadModels = useCallback(() => {
+    if (contextual) {
+      generations.current.models += 1;
+      setModels([contextModel]);
+      setLoading((current) => ({ ...current, models: false }));
+      setErrors((current) => { const next = { ...current }; delete next.models; return next; });
+      return Promise.resolve({ items: [contextModel] });
+    }
+    if (!canReadModels) {
+      generations.current.models += 1;
+      setModels([]);
+      setLoading((current) => ({ ...current, models: false }));
+      setErrors((current) => { const next = { ...current }; delete next.models; return next; });
+      return Promise.resolve({ items: [] });
+    }
+    return loadResource('models', (signal) => client.catalogModels({}, signal), (payload) => setModels((payload.items || []).filter((item) => item.lifecycle_status !== 'REMOVED')), labels.loadModelsFailed);
+  }, [canReadModels, client, contextModel, contextual, labels.loadModelsFailed, loadResource]);
+
+  useEffect(() => { void loadPrices().catch(() => {}); void loadUnits().catch(() => {}); void loadProtocols().catch(() => {}); void loadModels().catch(() => {}); }, [loadModels, loadPrices, loadProtocols, loadUnits]);
+  useEffect(() => {
+    if (!canManage) { abortTransientReads(); setSelectedFormula(null); }
+    if (!canManage && !unknownMutation) {
+      setEditor(null);
+      setUnitForm(null);
+      setPendingAction(null);
+    }
+  }, [abortTransientReads, canManage, unknownMutation]);
+  useEffect(() => {
+    setEditor((current) => current && !newModelPriceAllowed(current, canReadModels, models, formulas.find((item) => item.formula_version_id === current.formula_version_id)) ? null : current);
+  }, [canReadModels, formulas, models]);
+
+  const openCreate = () => {
+    if (!intentCurrent() || pricingUnknownSnapshot(unknownStorageKey)) return;
+    const form = priceDraftForm();
+    const formula = formulas[0];
+    const compatibleModels = models.filter((item) => item.protocol_code === formula?.protocol_code);
+    form.scope_type = contextual ? 'MODEL' : compatibleModels.length ? 'MODEL' : 'GLOBAL';
+    form.scope_id = contextual ? contextModel.model_id : compatibleModels[0]?.model_id || '';
+    if (formula) {
+      setSelectedFormula(formula);
+      form.formula_version_id = formula.formula_version_id;
+      form.protocol_code = formula.protocol_code;
+      form.units = Object.fromEntries(Object.values(formula.required_unit_versions || {}).map((id) => [id, { config_type: 'FIXED_PRICE', fixed_price_per_denominator: '' }]));
+    }
+    setEditorErrors({});
+    setEditor(form);
+  };
+
+  const openEdit = async (item) => {
+    if (!intentCurrent() || pricingUnknownSnapshot(unknownStorageKey) || !canManage || formulaAccessDenied || loading.formulaSelection || unknownMutation) return;
+    const generation = generations.current.formulas + 1;
+    let locatedPage = null;
+    try {
+      // Cached selection and exact lookup share the page read's generation and
+      // AbortController. Only the latest formula intent may commit authority.
+      await loadResource('formulas', async signal => {
+        const cached = latestFacts.current.formulas.find(value => value.formula_version_id === item.formula_version_id);
+        if (cached || contextual) return cached;
+        locatedPage = await client.pricingProtocols({ q: item.formula_version_id }, signal);
+        const matches = publishedPricingFormulas(locatedPage).filter(value => value.formula_version_id === item.formula_version_id);
+        if (locatedPage.formula_page?.has_more || matches.length !== 1) throw new Error('FORMULA_SELECTION_UNAVAILABLE');
+        return matches[0];
+      }, formula => {
+        if (!formula || formula.status !== 'PUBLISHED' || formula.protocol_code !== item.protocol_code
+          || !/^[1-9]\d*$/.test(String(formula.version)) || !Object.keys(formula.required_unit_versions || {}).length
+          || !Object.values(formula.required_unit_versions).every(stableUUID)) throw new Error('FORMULA_SELECTION_UNAVAILABLE');
+        if (!intentCurrent() || !latestFacts.current.canManage || pricingUnknownSnapshot(unknownStorageKey)) {
+          throw Object.assign(new Error('FORMULA_SELECTION_RETIRED'), { name: 'AbortError' });
+        }
+        if (locatedPage) {
+          // A new same-resource snapshot replaces the previous cursor.
+          setProtocols(locatedPage);
+          setFormulaPage(locatedPage.formula_page);
+          setActiveFormulaQuery(item.formula_version_id);
+          setFormulaQuery(item.formula_version_id);
+          formulaAttempt.current = { q: item.formula_version_id, cursor: '' };
+          setFormulaPageExpired(false);
+        }
+        setSelectedFormula(formula);
+        setEditorErrors({});
+        setEditor(priceDraftForm(item));
+      }, labels.formulaSelectionFailed, ['formulaSelection', 'formulas']);
+    } catch (error) {
+      if (mounted.current && generations.current.formulas === generation && error?.name !== 'AbortError') {
+        if ([401, 403].includes(error.status)) { formulaAuthority.current = { denied: true, generation: formulaAuthority.current.generation + 1 }; setFormulaAccessDenied(true); setSelectedFormula(null); if (!latestFacts.current.unknownMutation) setEditor(null); }
+        if (locatedPage?.formula_page?.mode === 'snapshot') setFormulaPageExpired(true);
+      }
+    }
+  };
+
+  const changeFormula = (formulaID) => {
+    if (contextual) return;
+    const formula = formulas.find((item) => item.formula_version_id === formulaID);
+    const compatibleModels = models.filter((item) => item.protocol_code === formula?.protocol_code);
+    setSelectedFormula(formula || null);
+    setEditor((current) => ({
+      ...current,
+      formula_version_id: formulaID,
+      protocol_code: formula?.protocol_code || '',
+      scope_id: current.scope_type === 'MODEL' && compatibleModels.some((item) => item.model_id === current.scope_id) ? current.scope_id : (compatibleModels[0]?.model_id || ''),
+      units: Object.fromEntries(Object.values(formula?.required_unit_versions || {}).map((id) => [id, current.units?.[id] || { config_type: 'FIXED_PRICE', fixed_price_per_denominator: '' }])),
+    }));
+  };
+
+  const submitDraft = async (event) => {
+    event.preventDefault();
+    if (!intentCurrent() || !editor || formulaAuthority.current.denied || loading.formulaSelection || loading.mutation || pricingUnknownSnapshot(unknownStorageKey) || !pricingLifecycleMutationLock.tryAcquire()) return;
+    const formulaAuthorizationGeneration = formulaAuthority.current.generation;
+    retainUnknown({ phase: 'PREPARING', kind: editor.price_version_id ? 'DRAFT_UPDATE' : 'DRAFT_CREATE' });
+    if (!canManage) { setEditorErrors({ form: labels.permissionLost }); retainUnknown(null); pricingLifecycleMutationLock.release(); return; }
+    setLoading((current) => ({ ...current, mutation: true }));
+    const formula = formulas.find((item) => item.formula_version_id === editor.formula_version_id);
+    if (!newModelPriceAllowed(editor, canReadModels, models, formula)) {
+      setEditorErrors({ form: labels.modelSelectionInvalid });
+      retainUnknown(null);
+      pricingLifecycleMutationLock.release();
+      setLoading((current) => ({ ...current, mutation: false }));
+      return;
+    }
+    let currentETag = 1;
+    let spaceBeforeIDs = [];
+    const preflightController = new globalThis.AbortController();
+    preflights.current.add(preflightController);
+    if (!editor.price_version_id && formula) {
+      try {
+        const projection = await client.managedPriceSpace(priceSpaceQuery(editor, formula), preflightController.signal);
+        currentETag = projection.current_space_etag;
+        spaceBeforeIDs = (projection.items || []).map((item) => item.price_version_id);
+      } catch {
+        preflights.current.delete(preflightController);
+        if (mounted.current) { setEditorErrors({ form: labels.loadPriceSpaceFailed }); setLoading((current) => ({ ...current, mutation: false })); }
+        retainUnknown(null);
+        pricingLifecycleMutationLock.release();
+        return;
+      }
+    }
+    preflights.current.delete(preflightController);
+    const { errors: validation, input } = buildPriceDraftInput(editor, formula, currentETag);
+    if (Object.keys(validation).length) {
+      setEditorErrors(validation);
+      retainUnknown(null);
+      pricingLifecycleMutationLock.release();
+      setLoading((current) => ({ ...current, mutation: false }));
+      return;
+    }
+    const currentFacts = latestFacts.current;
+    const currentFormula = currentFacts.formulas.find((item) => item.formula_version_id === editor.formula_version_id);
+    if (!intentCurrent() || !mounted.current || latestUnknownScope.current !== unknownStorageKey || formulaAuthority.current.denied || formulaAuthority.current.generation !== formulaAuthorizationGeneration || !currentFacts.canManage || !currentFormula || !newModelPriceAllowed(editor, currentFacts.canReadModels, currentFacts.models, currentFormula)) {
+      if (mounted.current) { setEditorErrors({ form: currentFacts.canManage ? labels.modelSelectionInvalid : labels.permissionLost }); setLoading((current) => ({ ...current, mutation: false })); }
+      retainUnknown(null);
+      pricingLifecycleMutationLock.release();
+      return;
+    }
+    const dispatched = { phase: 'DISPATCHED', kind: editor.price_version_id ? 'DRAFT_UPDATE' : 'DRAFT_CREATE', targetID: editor.price_version_id, input, idempotencyKey: mutationKey('price-draft'), beforeIDs: editor.price_version_id ? [] : spaceBeforeIDs };
+    if (!setUnknownMutation(dispatched)) {
+      pricingLifecycleMutationLock.release();
+      setLoading(current => ({ ...current, mutation: false }));
+      return;
+    }
+    setNotice('');
+    try {
+      await replayPricingMutation(client, dispatched);
+      if (!mounted.current || !sharedOperationCurrent(dispatched) || !setUnknownMutation(null, dispatched)) return;
+      setEditor(null);
+      setNotice(labels.draftSaved);
+      void loadPrices().catch(() => {});
+    } catch (error) {
+      if (!mounted.current || !sharedOperationCurrent(dispatched)) return;
+      setEditorErrors({ form: labels.errors[error?.code] || labels.actionFailed });
+      if (!outcomeUnknown(error)) setUnknownMutation(null, dispatched);
+    } finally {
+      pricingLifecycleMutationLock.release();
+      setLoading((current) => ({ ...current, mutation: false }));
+    }
+  };
+
+  const submitUnit = async (event) => {
+    event.preventDefault();
+    if (!intentCurrent() || !unitForm || loading.mutation || pricingUnknownSnapshot(unknownStorageKey) || !pricingLifecycleMutationLock.tryAcquire()) return;
+    retainUnknown({ phase: 'PREPARING', kind: 'UNIT_CREATE' });
+    if (!canManage) { setErrors((current) => ({ ...current, unitMutation: labels.permissionLost })); retainUnknown(null); pricingLifecycleMutationLock.release(); return; }
+    setLoading((current) => ({ ...current, mutation: true }));
+    let input;
+    try { input = {
+      unit_code: unitForm.unit_code.trim().toUpperCase(),
+      minimum_precision: integerMoney(unitForm.minimum_precision).toString(),
+      price_denominator: integerMoney(unitForm.price_denominator).toString(),
+      rounding_rule: unitForm.rounding_rule,
+    }; } catch {
+      setErrors(current => ({ ...current, unitMutation: labels.integerError }));
+      retainUnknown(null); pricingLifecycleMutationLock.release();
+      setLoading(current => ({ ...current, mutation: false })); return;
+    }
+    if (!input.unit_code || !input.minimum_precision || BigInt(input.minimum_precision) < 1n || !input.price_denominator || BigInt(input.price_denominator) < 1n) {
+      setErrors(current => ({ ...current, unitMutation: labels.integerError }));
+      retainUnknown(null);
+      pricingLifecycleMutationLock.release();
+      setLoading((current) => ({ ...current, mutation: false }));
+      return;
+    }
+    let baseline;
+    const baselineController = new globalThis.AbortController();
+    preflights.current.add(baselineController);
+    try {
+      baseline = await client.meteringUnits(baselineController.signal);
+      preflights.current.delete(baselineController);
+      if (!intentCurrent() || !mounted.current || latestUnknownScope.current !== unknownStorageKey || !latestFacts.current.canManage) {
+        retainUnknown(null);
+        pricingLifecycleMutationLock.release();
+        if (mounted.current) setLoading((current) => ({ ...current, mutation: false }));
+        return;
+      }
+      setUnits(baseline.items || []);
+    } catch {
+      preflights.current.delete(baselineController);
+      if (mounted.current) setErrors((current) => ({ ...current, unitMutation: labels.unitBaselineFailed }));
+      retainUnknown(null);
+      pricingLifecycleMutationLock.release();
+      if (mounted.current) setLoading((current) => ({ ...current, mutation: false }));
+      return;
+    }
+    const dispatched = { phase: 'DISPATCHED', kind: 'UNIT_CREATE', input, idempotencyKey: mutationKey('metering-unit'), beforeIDs: (baseline.items || []).map((item) => item.unit_definition_id) };
+    if (!setUnknownMutation(dispatched)) {
+      pricingLifecycleMutationLock.release();
+      setLoading(current => ({ ...current, mutation: false }));
+      return;
+    }
+    setNotice('');
+    try {
+      await replayPricingMutation(client, dispatched);
+      if (!mounted.current || !sharedOperationCurrent(dispatched) || !setUnknownMutation(null, dispatched)) return;
+      setUnitForm(null);
+      setNotice(labels.unitCreated);
+      void loadUnits().catch(() => {});
+    } catch (error) {
+      if (!mounted.current || !sharedOperationCurrent(dispatched)) return;
+      setErrors((current) => ({ ...current, unitMutation: labels.errors[error?.code] || labels.actionFailed }));
+      if (!outcomeUnknown(error)) setUnknownMutation(null, dispatched);
+    } finally {
+      pricingLifecycleMutationLock.release();
+      setLoading((current) => ({ ...current, mutation: false }));
+    }
+  };
+
+  const showPreview = async (item) => {
+    setLoading((current) => ({ ...current, preview: true }));
+    setNotice('');
+    try {
+      const payload = await readTransient('preview', (signal) => client.previewPrice(item.price_version_id, signal));
+      setPreview(payload);
+    } catch (error) {
+      if (error?.name !== 'AbortError') setErrors((current) => ({ ...current, preview: labels.errors[error?.code] || labels.previewFailed }));
+    } finally {
+      if (mounted.current) setLoading((current) => ({ ...current, preview: false }));
+    }
+  };
+
+  const runPendingAction = async (event) => {
+    event.preventDefault();
+    if (!intentCurrent() || !pendingAction || loading.mutation || pricingUnknownSnapshot(unknownStorageKey) || !pricingLifecycleMutationLock.tryAcquire()) return;
+    if (!canManage) { setPendingAction((current) => ({ ...current, error: labels.permissionLost })); pricingLifecycleMutationLock.release(); return; }
+    const { type, item } = pendingAction;
+    const reason = String(pendingAction.reason || '').trim();
+    if (type === 'TRANSITION' && !reason || type === 'TRANSITION' && pendingAction.mode === 'CONTINUATION' && !pendingAction.replacementID) {
+      pricingLifecycleMutationLock.release();
+      return;
+    }
+    setLoading((current) => ({ ...current, mutation: true }));
+    setNotice('');
+    const dispatched = { phase: 'DISPATCHED', kind: type === 'PUBLISH' ? 'PRICE_PUBLISH' : type === 'TRANSITION' ? 'PRICE_TRANSITION' : 'UNIT_DEACTIVATE',
+      targetID: type === 'DEACTIVATE' ? item.unit_definition_id : item.price_version_id,
+      idempotencyKey: pendingAction.idempotencyKey,
+      input: type === 'PUBLISH' ? { expected_etag: item.space_etag } : type === 'TRANSITION' ? {
+        action: item.derived_status === 'PUBLISHED' ? 'CANCEL' : 'END',
+        ...(item.derived_status === 'ACTIVE' ? { mode: pendingAction.mode } : {}), reason,
+        ...(pendingAction.mode === 'CONTINUATION' ? { replacement_price_version_id: pendingAction.replacementID } : {}),
+      } : {} };
+    if (!setUnknownMutation(dispatched)) {
+      pricingLifecycleMutationLock.release();
+      setLoading(current => ({ ...current, mutation: false }));
+      return;
+    }
+    try {
+      await replayPricingMutation(client, dispatched);
+      if (!mounted.current || !sharedOperationCurrent(dispatched) || !setUnknownMutation(null, dispatched)) return;
+      setPendingAction(null);
+      setNotice(labels.actionCompleted);
+      if (type === 'DEACTIVATE') void loadUnits().catch(() => {}); else void loadPrices().catch(() => {});
+    } catch (error) {
+      if (!mounted.current || !sharedOperationCurrent(dispatched)) return;
+      setPendingAction((current) => ({ ...current, error: labels.errors[error?.code] || labels.actionFailed }));
+      if (!outcomeUnknown(error)) { setUnknownMutation(null, dispatched); setPendingAction(current => ({ ...current, idempotencyKey: mutationKey('price-action') })); }
+    } finally {
+      pricingLifecycleMutationLock.release();
+      setLoading((current) => ({ ...current, mutation: false }));
+    }
+  };
+
+  const openPublish = (item) => setPendingAction({ type: 'PUBLISH', item, idempotencyKey: mutationKey('price-publish'), error: '' });
+  const openTransition = async (item) => {
+    if (!intentCurrent() || pricingUnknownSnapshot(unknownStorageKey)) return;
+    const modes = priceTransitionModes(item);
+    let candidates = [];
+    if (item.derived_status === 'ACTIVE') {
+      try {
+        const projection = await readTransient('transition', (signal) => client.managedPriceSpace(priceSpaceQuery(item, item), signal));
+        if (projection.has_more) {
+          setErrors((current) => ({ ...current, prices: labels.continuationTruncated }));
+          return;
+        }
+        candidates = matchingContinuationDrafts(item, projection.items || []);
+      } catch (error) {
+        if (error?.name !== 'AbortError') setErrors((current) => ({ ...current, prices: labels.loadPriceSpaceFailed }));
+        return;
+      }
+    }
+    setPendingAction({ type: 'TRANSITION', item, candidates, mode: modes[0] || '', reason: '', replacementID: '', idempotencyKey: mutationKey('price-transition'), error: '' });
+  };
+  const openDeactivate = (item) => setPendingAction({ type: 'DEACTIVATE', item, idempotencyKey: mutationKey('unit-deactivate'), error: '' });
+
+  const reloadUnknownConfiguration = async () => {
+    const operation = pricingUnknownSnapshot(unknownStorageKey);
+    if (!operation || !canManage || client.financeSessionEpoch !== recoveryEpoch || pricingLifecycleMutationLock.isLocked() || recoveryGate.current.replaying || loading.recovery || loading.unknownConfiguration) return;
+    const ticket = recoveryGate.current.beginRead();
+    const boundary = recoveryBoundary();
+    setUnknownConfiguration(null);
+    setLoading(current => ({ ...current, unknownConfiguration: true }));
+    try {
+      const facts = await readTransient('unknownConfiguration', signal => readPricingUnknownConfiguration(client, operation, signal));
+      if (!mounted.current || !recoveryGate.current.readIsCurrent(ticket) || recoveryBoundary() !== boundary || !latestFacts.current.canManage || !sharedOperationCurrent(operation)) return;
+      setUnknownConfiguration({ operation, boundary, facts, ticket });
+    } catch (error) {
+      if (mounted.current && sharedOperationCurrent(operation) && recoveryGate.current.readIsCurrent(ticket) && error?.name !== 'AbortError') setNotice(labels.unknownReloadFailed);
+    } finally {
+      if (mounted.current && recoveryGate.current.readIsCurrent(ticket)) setLoading(current => ({ ...current, unknownConfiguration: false }));
+    }
+  };
+  const startAfterUnknown = () => {
+    if (!canManage || client.financeSessionEpoch !== recoveryEpoch || recoveryGate.current.replaying || loading.recovery || loading.unknownConfiguration || !unknownConfiguration || !recoveryGate.current.readIsCurrent(unknownConfiguration.ticket) || !sharedOperationCurrent(unknownConfiguration.operation) || unknownConfiguration.boundary !== recoveryBoundary()) {
+      setUnknownConfiguration(null); setNotice(labels.unknownReloadFailed); return;
+    }
+    if (!pricingLifecycleMutationLock.tryAcquire()) return;
+    try {
+      const operation = unknownConfiguration.operation;
+      if (!sharedOperationCurrent(operation)) return;
+      const history = archivePricingUnknown(unknownStorageKey, operation);
+      if (!setUnknownMutation(null, operation, { retireIntents: true })) return;
+      setUnknownHistory(history);
+      setUnknownConfiguration(null);
+      // This explicit acknowledgement never dispatches or reuses a stale form.
+      setEditor(null); setUnitForm(null); setPendingAction(null); setPreview(null);
+      setNotice(labels.unknownPreserved);
+      void loadPrices().catch(() => {}); void loadUnits().catch(() => {});
+    } catch { setNotice(labels.unknownStorageFailed); }
+    finally { pricingLifecycleMutationLock.release(); }
+  };
+
+  const verifyUnknown = async () => {
+    const retained = pricingUnknownSnapshot(unknownStorageKey);
+    if (!retained || client.financeSessionEpoch !== recoveryEpoch || loading.recovery || !pricingLifecycleMutationLock.tryAcquire()) return;
+    if (!latestFacts.current.canManage) { setNotice(labels.permissionLost); pricingLifecycleMutationLock.release(); return; }
+    // Publish a fresh shared identity before any await. Peer configuration reads
+    // must retire even if this replay remains UNKNOWN with identical facts/key.
+    const operation = { ...retained };
+    if (!setUnknownMutation(operation, retained)) { pricingLifecycleMutationLock.release(); return; }
+    const ticket = recoveryGate.current.beginReplay();
+    transientControllers.current.get('unknownConfiguration')?.abort();
+    transientGenerations.current.set('unknownConfiguration', (transientGenerations.current.get('unknownConfiguration') || 0) + 1);
+    const boundary = recoveryBoundary();
+    setUnknownConfiguration(null);
+    setLoading((current) => ({ ...current, recovery: true, unknownConfiguration: false }));
+    try {
+      // The original key recovers the durable receipt even after a lost response.
+      await replayPricingMutation(client, operation);
+      if (!mounted.current || recoveryBoundary() !== boundary || !sharedOperationCurrent(operation) || !latestFacts.current.canManage) return;
+      if (!setUnknownMutation(null, operation, { retireIntents: true })) return;
+      setNotice(labels.recoveryConfirmed);
+      setEditor(null); setUnitForm(null); setPendingAction(null);
+      void loadPrices().catch(() => {}); void loadUnits().catch(() => {});
+    } catch (error) {
+      if (mounted.current && sharedOperationCurrent(operation) && recoveryBoundary() === boundary && error?.name !== 'AbortError') setNotice(labels.errors[error?.code] || labels.recoveryFailed);
+    } finally {
+      recoveryGate.current.endReplay(ticket);
+      pricingLifecycleMutationLock.release();
+      if (mounted.current) setLoading((current) => ({ ...current, recovery: false }));
+    }
+  };
+
+  // Hide every previous-owner presenter until the retained state is rebound.
+  if (!recoveryScopeCurrent) return <div className="adm-pricing-workspace" aria-busy="true">{labels.verifying}</div>;
+
+  return (
+    <div className="adm-pricing-workspace">
+      <div className="adm-section-tools">
+        <span>{contextual ? labels.modelContextBoundary(contextModel.display_name) : labels.lifecycleBoundary}</span>
+        <div className="adm-row-actions">
+          {canManage && <button type="button" onClick={openCreate} disabled={loading.formulaSelection || loading.mutation || unknownMutation || formulaAccessDenied || !formulas.length}>{labels.createDraft}</button>}
+          {onExit && <button type="button" onClick={onExit}>{labels.readOnlySummary}</button>}
+          <button type="button" onClick={() => { void loadPrices().catch(() => {}); void loadUnits().catch(() => {}); void loadProtocols({ q: activeFormulaQuery }).catch(() => {}); void loadModels().catch(() => {}); }} disabled={Boolean(priceNavigationLocked || loading.prices || loading.units || loading.formulas || loading.models)}>{copy.refresh}</button>
+        </div>
+      </div>
+      {recoveryScopeCurrent && unknownMutation && <div className="adm-inline-message error" role="alert">{labels.resultUnknown}<code>{unknownMutation.idempotencyKey}</code><button type="button" onClick={() => void verifyUnknown()} disabled={loading.recovery}>{loading.recovery ? labels.verifying : labels.verifyResult}</button><details><summary>{labels.unknownOriginal}</summary><pre>{JSON.stringify(unknownMutation, null, 2)}</pre></details><p>{labels.unknownNewOperationLead}</p><button type="button" onClick={() => void reloadUnknownConfiguration()} disabled={!canManage || loading.recovery || loading.unknownConfiguration}>{labels.unknownReload}</button>{unknownConfiguration && <><pre>{JSON.stringify(unknownConfiguration.facts, null, 2)}</pre><button type="button" onClick={startAfterUnknown} disabled={!canManage || loading.recovery || loading.unknownConfiguration || unknownConfiguration.boundary !== recoveryBoundary()}>{labels.unknownStartNew}</button></>}</div>}
+      {recoveryScopeCurrent && unknownHistory.length > 0 && <details className="adm-unknown-history"><summary>{labels.unknownHistory}</summary><p>{labels.unknownLocalOnly}</p>{unknownHistory.map(record => <details key={record.operation.idempotencyKey}><summary>UNKNOWN · {record.operation.kind} · {record.operation.idempotencyKey}</summary><pre>{JSON.stringify(record.operation, null, 2)}</pre></details>)}</details>}
+      {notice && <div className="adm-inline-message ok" role="status">{notice}</div>}
+      {Object.entries(errors).map(([key, error]) => <div key={key} className="adm-inline-message error" role="alert">{error}</div>)}
+      {!contextual && formulaPage.mode !== 'aggregate' && <section className="adm-finance-subpanel" aria-label={labels.formulaDirectory}>
+        <p>{labels.formulaActiveFilter}: {activeFormulaQuery || labels.formulaAll}</p>
+        <form onSubmit={event => { event.preventDefault(); void loadProtocols({ q: formulaQuery }).catch(() => {}); }}>
+          <label>{labels.formulaSearch}<input maxLength="160" value={formulaQuery} disabled={Boolean(loading.formulas || unknownMutation)} onChange={event => setFormulaQuery(event.target.value)} /></label>
+          <button type="submit" disabled={Boolean(loading.formulas || unknownMutation)}>{labels.formulaSearchAction}</button>
+        </form>
+        {formulaPage.has_more !== null && !errors.formulas && <p>{formulaPage.has_more ? labels.formulaPageMore : labels.formulaPageEnd}</p>}
+        {formulaPageExpired && <p role="alert">{labels.formulaPageExpired}</p>}
+        <div className="adm-row-actions">
+          <button type="button" disabled={!formulaPage.has_more || Boolean(loading.formulas || errors.formulas || formulaPageExpired || unknownMutation)} onClick={() => void loadProtocols({ q: activeFormulaQuery, cursor: formulaPage.next_cursor }).catch(() => {})}>{labels.formulaNext}</button>
+          {errors.formulas && !formulaPageExpired && <button type="button" disabled={Boolean(loading.formulas || unknownMutation)} onClick={() => void loadProtocols(formulaAttempt.current).catch(() => {})}>{labels.formulaRetry}</button>}
+          <button type="button" disabled={Boolean(loading.formulas || unknownMutation)} onClick={() => void loadProtocols({ q: activeFormulaQuery }).catch(() => {})}>{labels.formulaRestart}</button>
+        </div>
+      </section>}
+      {!publishedPricingFormulas(protocols).length && !loading.formulas && !errors.formulas && (contextual || formulaPage.has_more === false) && <div className="adm-inline-message">{activeFormulaQuery ? labels.formulaSearchEmpty : labels.noPublishedFormula}</div>}
+
+      {editor && (
+        <form className="adm-pricing-editor" onSubmit={submitDraft} noValidate>
+          <fieldset className="adm-pricing-fieldset" disabled={Boolean(loading.formulaSelection || loading.mutation || unknownMutation || !canManage || formulaAccessDenied)}>
+          <header><div><strong>{editor.price_version_id ? labels.editDraft : labels.createDraft}</strong><small>{labels.draftContract}</small></div><button type="button" disabled={Boolean(unknownMutation)} onClick={() => setEditor(null)}>{labels.cancel}</button></header>
+          {editorErrors.form && <div className="adm-inline-message error" role="alert">{editorErrors.form}</div>}
+          <div className="adm-pricing-fields">
+            <label>{labels.scope}<select value={editor.scope_type} disabled={contextual || Boolean(editor.price_version_id)} onChange={(event) => setEditor((current) => ({ ...current, scope_type: event.target.value, scope_id: event.target.value === 'GLOBAL' ? '' : (compatibleModels[0]?.model_id || ''), units: Object.fromEntries(Object.entries(current.units).map(([id, value]) => [id, { ...value, config_type: event.target.value === 'GLOBAL' ? 'FIXED_PRICE' : value.config_type }])) }))}><option value="MODEL" disabled={!compatibleModels.length}>{labels.modelScope}</option><option value="GLOBAL">{labels.global}</option></select></label>
+            {editor.scope_type === 'MODEL' && <label>{labels.model}<select value={editor.scope_id} disabled={contextual || Boolean(editor.price_version_id)} onChange={(event) => setEditor((current) => ({ ...current, scope_id: event.target.value }))}>{editor.price_version_id && !compatibleModels.some((item) => item.model_id === editor.scope_id) && <option value={editor.scope_id}>{editor.scope_id}</option>}{compatibleModels.map((item) => <option key={item.model_id} value={item.model_id}>{item.display_name} · {shortID(item.model_id)}</option>)}</select>{!compatibleModels.length && <small>{labels.modelDirectoryRequired}</small>}{editorErrors.scope_id && <small className="adm-field-error">{fieldError(labels, editorErrors.scope_id)}</small>}</label>}
+            <label>{labels.formula}<select value={editor.formula_version_id} disabled={contextual || Boolean(editor.price_version_id)} onChange={(event) => changeFormula(event.target.value)}><option value="">{labels.chooseFormula}</option>{formulas.map((formula) => <option key={formula.formula_version_id} value={formula.formula_version_id}>{formula.protocol_code} · v{formula.version} · {shortID(formula.formula_version_id)}</option>)}</select></label>
+            <label>{labels.effectiveFrom}<input type="date" value={editor.effective_from} onChange={(event) => setEditor((current) => ({ ...current, effective_from: event.target.value }))} />{editorErrors.effective_from && <small className="adm-field-error">{fieldError(labels, editorErrors.effective_from)}</small>}</label>
+            <label>{labels.effectiveTo}<input type="date" value={editor.effective_to} onChange={(event) => setEditor((current) => ({ ...current, effective_to: event.target.value }))} />{editorErrors.effective_to && <small className="adm-field-error">{fieldError(labels, editorErrors.effective_to)}</small>}</label>
+            <label>{labels.etag}<input value={editor.price_version_id ? editor.expected_etag : labels.serverDerived} readOnly /></label>
+          </div>
+          <strong>{labels.unitConfiguration}</strong>
+          <div className="adm-pricing-unit-configs">
+            {Object.entries(formulas.find((item) => item.formula_version_id === editor.formula_version_id)?.required_unit_versions || {}).map(([code, unitID]) => {
+              const value = editor.units?.[unitID] || { config_type: 'FIXED_PRICE', fixed_price_per_denominator: '' };
+              const definition = unitByID.get(unitID);
+              return <div key={unitID}><div><strong>{code}</strong><small>v{definition?.version || '—'} · {shortID(unitID)}</small></div>{editor.scope_type === 'MODEL' && <select aria-label={`${code} ${labels.configurationType}`} value={value.config_type} onChange={(event) => setEditor((current) => ({ ...current, units: { ...current.units, [unitID]: { ...value, config_type: event.target.value, fixed_price_per_denominator: event.target.value === 'INHERIT_GLOBAL' ? '' : value.fixed_price_per_denominator } } }))}><option value="FIXED_PRICE">{labels.fixedPrice}</option><option value="INHERIT_GLOBAL">{labels.inheritGlobal}</option></select>}{(editor.scope_type === 'GLOBAL' || value.config_type !== 'INHERIT_GLOBAL') && <input type="number" min="0" step="1" aria-label={`${code} ${labels.unitPrice}`} value={value.fixed_price_per_denominator} onChange={(event) => setEditor((current) => ({ ...current, units: { ...current.units, [unitID]: { ...value, fixed_price_per_denominator: event.target.value } } }))} />}{editorErrors[unitID] && <small className="adm-field-error">{fieldError(labels, editorErrors[unitID])}</small>}</div>;
+            })}
+          </div>
+          <footer><button type="submit" disabled={loading.mutation || unknownMutation || !canManage}>{labels.save}</button><button type="button" disabled={Boolean(unknownMutation)} onClick={() => setEditor(null)}>{labels.cancel}</button></footer>
+          </fieldset>
+        </form>
+      )}
+
+      <section className="adm-finance-subpanel">
+        <header className="adm-pricing-panel-head"><div><h3>{labels.priceVersions}</h3><p>{contextual ? labels.modelPriceVersionsLead : labels.priceVersionsLead}</p></div><div className="adm-row-actions"><span>{labels.returnedCount(prices.length)}</span>{updatedAt.prices && <small>{labels.lastUpdated} {updatedAt.prices.toLocaleString()}</small>}<button type="button" onClick={() => void loadPrices().catch(() => {})} disabled={loading.prices || priceNavigationLocked}>{copy.refresh}</button></div></header>
+        {!contextual && <nav className="adm-row-actions" aria-label={labels.pricePages}>
+          <button type="button" disabled={loading.prices || priceNavigationLocked || pricePage.index === 0} onClick={() => void loadPrices({ cursors: pricePage.cursors.slice(0, pricePage.index), index: pricePage.index - 1 }).catch(() => {})}>{labels.pricePrevious}</button>
+          <button type="button" disabled={loading.prices || priceNavigationLocked || !pricePage.has_more} onClick={() => void loadPrices({ cursors: [...pricePage.cursors.slice(0, pricePage.index + 1), pricePage.next_cursor], index: pricePage.index + 1 }).catch(() => {})}>{labels.priceNext}</button>
+          <button type="button" disabled={loading.prices || priceNavigationLocked} onClick={() => void loadPrices({ cursors: [''], index: 0 }).catch(() => {})}>{labels.priceRestart}</button>
+          {errors.prices && <button type="button" disabled={loading.prices || priceNavigationLocked} onClick={() => void loadPrices(priceAttempt.current).catch(() => {})}>{labels.priceRetry}</button>}
+          <small>{pricePage.has_more ? labels.priceMore : labels.priceEnd}</small>
+        </nav>}
+        {/* biome-ignore lint/a11y/noNoninteractiveTabindex: This named overflow region needs keyboard focus for native table scrolling. */}
+        <div className="adm-table-wrap" tabIndex="0" role="region" aria-label={labels.priceVersions}><table className="adm-table"><thead><tr><th>{labels.scope}</th><th>{labels.protocolFormula}</th><th>{labels.version}</th><th>{copy.accounts.status}</th><th>{labels.effectivity}</th><th>{labels.etag}</th><th>{copy.accounts.actions}</th></tr></thead><tbody>
+          {prices.map((item) => <tr key={item.price_version_id}><td><strong>{item.scope_type}</strong><br />{onOpenModel && item.scope_type === 'MODEL' && stableUUID(item.scope_id) ? <button type="button" className="adm-name-link" onClick={() => onOpenModel(item.scope_id)}>{item.scope_id}</button> : <small>{item.scope_id || labels.global}</small>}</td><td>{item.protocol_code}<br /><code title={item.formula_version_id}>{shortID(item.formula_version_id)}</code></td><td>v{item.version}</td><td><PricingStatus value={item.derived_status} /></td><td>{formatDate(item.effective_from)}<br /><small>{item.effective_to ? formatDate(item.effective_to) : labels.openEnded}</small></td><td>{item.lifecycle_status === 'DRAFT' ? item.space_etag : item.current_space_etag || item.space_etag}</td><td><div className="adm-row-actions"><button type="button" onClick={() => void showPreview(item)} disabled={loading.preview}>{labels.preview}</button>{canManage && item.lifecycle_status === 'DRAFT' && <button type="button" onClick={() => void openEdit(item)} disabled={loading.prices || loading.mutation || unknownMutation || formulaAccessDenied || loading.formulaSelection}>{labels.editDraft}</button>}{canManage && item.lifecycle_status === 'DRAFT' && <button type="button" onClick={() => openPublish(item)} disabled={loading.prices || loading.mutation || unknownMutation}>{labels.publish}</button>}{canManage && ['PUBLISHED', 'ACTIVE'].includes(item.derived_status) && <button type="button" className={item.derived_status === 'ACTIVE' ? 'danger' : ''} onClick={() => void openTransition(item)} disabled={loading.prices || loading.mutation || unknownMutation}>{item.derived_status === 'PUBLISHED' ? labels.cancelFuture : labels.endActive}</button>}</div></td></tr>)}
+          {!prices.length && !loading.prices && <tr><td colSpan="7" className="adm-empty">{contextual ? labels.noModelPrices : labels.noPrices}</td></tr>}
+        </tbody></table></div>
+      </section>
+
+      {!contextual && <section className="adm-finance-subpanel">
+        <header className="adm-pricing-panel-head"><div><h3>{labels.meteringUnits}</h3><p>{labels.meteringUnitsLead}</p></div><div className="adm-row-actions"><button type="button" onClick={() => void loadUnits().catch(() => {})} disabled={loading.units || loading.recovery}>{copy.refresh}</button>{canManage && <button type="button" onClick={() => setUnitForm({ unit_code: '', minimum_precision: '1', price_denominator: '1000000', rounding_rule: 'CEILING' })} disabled={loading.mutation || unknownMutation}>{labels.createUnitVersion}</button>}</div></header>
+        {unitForm && <form className="adm-pricing-unit-form" onSubmit={submitUnit}><fieldset className="adm-pricing-fieldset" disabled={Boolean(loading.mutation || unknownMutation || !canManage)}><label>{labels.unitCode}<input maxLength="80" value={unitForm.unit_code} onChange={(event) => setUnitForm((current) => ({ ...current, unit_code: event.target.value }))} /></label><label>{labels.minimumPrecision}<input type="number" min="1" step="1" value={unitForm.minimum_precision} onChange={(event) => setUnitForm((current) => ({ ...current, minimum_precision: event.target.value }))} /></label><label>{labels.priceDenominator}<input type="number" min="1" step="1" value={unitForm.price_denominator} onChange={(event) => setUnitForm((current) => ({ ...current, price_denominator: event.target.value }))} /></label><label>{labels.roundingRule}<select value={unitForm.rounding_rule} onChange={(event) => setUnitForm((current) => ({ ...current, rounding_rule: event.target.value }))}><option>CEILING</option><option>FLOOR</option><option>HALF_UP</option></select></label><button disabled={loading.mutation || unknownMutation || !canManage}>{labels.createUnitVersion}</button><button type="button" disabled={Boolean(unknownMutation)} onClick={() => setUnitForm(null)}>{labels.cancel}</button></fieldset></form>}
+        {/* biome-ignore lint/a11y/noNoninteractiveTabindex: This named overflow region needs keyboard focus for native table scrolling. */}
+        <div className="adm-table-wrap" tabIndex="0" role="region" aria-label={labels.meteringUnits}><table className="adm-table"><thead><tr><th>{labels.unitCode}</th><th>{labels.version}</th><th>{labels.minimumPrecision}</th><th>{labels.priceDenominator}</th><th>{labels.roundingRule}</th><th>{copy.accounts.status}</th><th>{copy.accounts.actions}</th></tr></thead><tbody>
+          {units.map((item) => <tr key={item.unit_definition_id}><td><strong>{item.unit_code}</strong><br /><code title={item.unit_definition_id}>{shortID(item.unit_definition_id)}</code></td><td>v{item.version}</td><td>{item.minimum_precision}</td><td>{item.price_denominator}</td><td>{item.rounding_rule}</td><td><PricingStatus value={item.status} /></td><td>{canManage && item.status === 'ACTIVE' ? <button type="button" className="danger" onClick={() => openDeactivate(item)} disabled={loading.mutation || unknownMutation}>{labels.deactivate}</button> : '—'}</td></tr>)}
+          {!units.length && !loading.units && <tr><td colSpan="7" className="adm-empty">{labels.noUnits}</td></tr>}
+        </tbody></table></div>
+      </section>}
+
+      {preview && <aside className="adm-pricing-preview" role="dialog" aria-modal="true" aria-label={labels.preview}><header><div><strong>{labels.resolvedPreview}</strong><code>{preview.price_version_id}</code></div><button type="button" onClick={() => setPreview(null)} aria-label={labels.cancel}>×</button></header><div className="adm-detail-grid"><div><small>{labels.scope}</small><strong>{preview.scope_type} · {preview.model}</strong></div><div><small>{labels.protocolFormula}</small><strong>{preview.protocol_code} · {shortID(preview.formula_version_id)}</strong></div><div><small>{labels.resolvedAt}</small><strong>{formatDate(preview.resolved_at)}</strong></div></div><div className="adm-table-wrap"><table className="adm-table"><thead><tr><th>{labels.unitCode}</th><th>{labels.configurationType}</th><th>{labels.unitPrice}</th><th>{labels.priceSource}</th><th>{labels.priceDenominator}</th></tr></thead><tbody>{(preview.units || []).map((unit) => <tr key={unit.unit_definition_id}><td>{unit.unit_code} v{unit.unit_version}</td><td>{unit.configuration_type}</td><td>{unit.resolved_price}</td><td>{unit.price_source_scope}<br /><code>{shortID(unit.source_price_version_id)}</code></td><td>{unit.price_denominator}</td></tr>)}</tbody></table></div></aside>}
+
+      {pendingAction && <div className="adm-pricing-action-backdrop"><form className="adm-pricing-action" role="dialog" aria-modal="true" aria-label={labels.confirmAction} onSubmit={runPendingAction}><header><div><strong>{pendingAction.type === 'PUBLISH' ? labels.publish : pendingAction.type === 'DEACTIVATE' ? labels.deactivate : pendingAction.item.derived_status === 'PUBLISHED' ? labels.cancelFuture : labels.endActive}</strong><code>{pendingAction.item.price_version_id || pendingAction.item.unit_definition_id}</code></div><button type="button" disabled={Boolean(unknownMutation)} onClick={() => setPendingAction(null)} aria-label={labels.cancel}>×</button></header>{pendingAction.error && <div className="adm-inline-message error" role="alert">{pendingAction.error}</div>}<p>{pendingAction.type === 'PUBLISH' ? labels.publishConfirmation : pendingAction.type === 'DEACTIVATE' ? labels.deactivateConfirmation : labels.transitionConfirmation}</p>{pendingAction.type === 'TRANSITION' && <>{pendingAction.item.derived_status === 'ACTIVE' && <label>{labels.transitionMode}<select disabled={Boolean(loading.mutation || unknownMutation || !canManage)} value={pendingAction.mode} onChange={(event) => setPendingAction((current) => ({ ...current, mode: event.target.value, replacementID: event.target.value === 'CONTINUATION' ? current.replacementID : '' }))}>{priceTransitionModes(pendingAction.item).map((mode) => <option key={mode}>{mode}</option>)}</select></label>}{pendingAction.mode === 'CONTINUATION' && <label>{labels.replacementDraft}<select disabled={Boolean(loading.mutation || unknownMutation || !canManage)} required value={pendingAction.replacementID} onChange={(event) => setPendingAction((current) => ({ ...current, replacementID: event.target.value }))}><option value="">{labels.chooseReplacement}</option>{(pendingAction.candidates || []).map((item) => <option key={item.price_version_id} value={item.price_version_id}>v{item.version} · {shortID(item.price_version_id)}</option>)}</select></label>}<label>{labels.reason}<textarea disabled={Boolean(loading.mutation || unknownMutation || !canManage)} required maxLength="500" value={pendingAction.reason} onChange={(event) => setPendingAction((current) => ({ ...current, reason: event.target.value }))} /></label></>}<footer><button type="submit" className={pendingAction.type === 'DEACTIVATE' || pendingAction.type === 'TRANSITION' ? 'danger' : ''} disabled={loading.mutation || unknownMutation || !canManage}>{labels.confirmAction}</button><button type="button" disabled={Boolean(unknownMutation)} onClick={() => setPendingAction(null)}>{labels.cancel}</button></footer></form></div>}
+    </div>
+  );
+}

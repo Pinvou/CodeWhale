@@ -1,0 +1,11 @@
+[Unit]
+Description=Pinvou encrypted KMS snapshot (not offline backup confirmation)
+Requires=docker.service
+After=docker.service systemd-tmpfiles-setup.service
+
+[Service]
+Type=oneshot
+UMask=0077
+LimitCORE=0
+TimeoutStartSec=120
+ExecStart=/usr/bin/docker compose --env-file /opt/pinvou-security/backup/backup.env -f /opt/pinvou-security/backup/compose.backup.yaml run --rm --no-deps --pull never snapshot

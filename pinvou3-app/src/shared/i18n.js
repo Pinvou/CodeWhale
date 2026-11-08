@@ -129,3 +129,25 @@ export async function ensureLanguageWithZhFallback(lang) {
 }
 
 export { dict, LANG_TO_TAG, TAG_TO_LANG, languageFromLocaleTags, initialSystemLanguage, SEARCH_KEY_PROVIDERS };
+
+export { accountPlatformCopy } from './account-platform-i18n.js';
+export { accountLayoutCopy, adminLayoutCopy } from './account-layout-i18n.js';
+export { adminPlatformCopy } from './admin-platform-i18n.js';
+export { financeCopy } from './finance-i18n.js';
+export { ledgerRepairCopy } from './ledger-repair-i18n.js';
+export { reconciliationCopy } from './reconciliation-i18n.js';
+export { organizationCopy } from './organization-i18n.js';
+
+export { tokenManagementCopy } from './token-management-i18n.js';
+export { modelUsageCopy } from './model-usage-i18n.js';
+export { accountClosureCopy } from './account-closure-i18n.js';
+export { entitlementCorrectionCopy } from './entitlement-correction-i18n.js';
+export { accountClosedGrantCopy } from './account-closed-grants-i18n.js';
+
+export { auditWorkspaceCopy } from './audit-i18n.js';
+
+export { platformRoleCopy } from './platform-role-i18n.js';
+export { adminRolePresentationCopy } from './admin-role-presentation-i18n.js';
+
+export { registrationRepairCopy } from './registration-repair-i18n.js';
+export { productAdmissionCopy } from './product-admission-i18n.js';
