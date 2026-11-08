@@ -471,3 +471,13 @@
 @media(max-width:560px){.adm-restored-shell .adm-ledger-impact-accounts{grid-template-columns:minmax(0,1fr)}}
 
 .adm-restored-shell .adm-financial-repair .adm-ledger-impact-refresh{padding:10px 12px;border:1px solid var(--adm-line);border-radius:8px;background:var(--adm-soft);color:var(--adm-muted);font-size:12px;line-height:1.45}
+
+.adm-restored-shell .adm-ledger-workflow{display:flex;flex-wrap:wrap;margin:12px 0 5px;padding:0;list-style:none;counter-reset:adm-ledger-step}
+.adm-restored-shell .adm-ledger-workflow li{counter-increment:adm-ledger-step;min-width:0;margin:0 7px 7px 0;padding:5px 8px;border:1px solid var(--adm-line);border-radius:8px;color:var(--adm-muted);font-size:12px;overflow-wrap:break-word;overflow-wrap:anywhere}
+.adm-restored-shell .adm-ledger-workflow li::before{content:counter(adm-ledger-step) ". ";font-weight:650}
+.adm-restored-shell .adm-ledger-workflow li[aria-current="step"]{border-color:var(--adm-primary);background:var(--adm-primary-soft);color:var(--adm-text);font-weight:650}
+.adm-restored-shell .adm-ledger-workflow-phase{display:block;margin-top:3px;color:var(--adm-text);font-size:11px;font-weight:400}
+.adm-restored-shell .adm-billing-overview-disclosure{margin:16px 0 0}
+.adm-restored-shell .adm-billing-overview-disclosure>summary{padding:10px 12px;border:1px solid var(--adm-line);border-radius:8px;color:var(--adm-primary);font-weight:650;cursor:pointer}
+.adm-restored-shell .adm-billing-overview-disclosure>summary:focus{outline:3px solid var(--adm-primary);outline-offset:2px}
+.adm-restored-shell .adm-billing-overview-disclosure[open]>.adm-finance-overview{margin-top:10px}

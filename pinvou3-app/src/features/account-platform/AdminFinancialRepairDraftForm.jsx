@@ -212,8 +212,13 @@ function LedgerRepairDraftForm({ client, copy, owner, onCreated }) {
     onCreated?.(id);
   };
 
+  const workflow = copy.ledgerWorkflow;
+  const readingSnapshot = busy === 'facts';
+  const stage = operation.busy || operation.unknown || created ? 2 : readingSnapshot || visibleProjection ? 1 : 0;
+  const phase = readingSnapshot ? workflow.phaseReading : workflow.phaseReview;
   return <section className="adm-financial-repair" aria-label={copy.title}>
     <h3>{copy.title}</h3>
+    <ol className="adm-ledger-workflow" role="list" aria-label={workflow.title}>{workflow.steps.map((label, i) => <li key={label} aria-current={i === stage ? 'step' : undefined}><span>{label}</span>{i === 1 && stage === 1 && <small className="adm-ledger-workflow-phase">{phase}</small>}{i === 2 && <small className="adm-ledger-workflow-phase">{workflow.approvalNext}</small>}</li>)}</ol>
     <form className="adm-financial-repair-target adm-ledger-target-form" onSubmit={readFacts}>
       <div className="adm-ledger-target-intro"><strong>{entry.task}</strong><p>{entry.help}</p></div>
       {fields.map((field) => {
@@ -235,7 +240,7 @@ function LedgerRepairDraftForm({ client, copy, owner, onCreated }) {
       })}
       <small id={amountHintID}>{copy.amountPointsHint}{displayedMicrocredits && <> {copy.amountPointsEquivalent.replace('{amount}', displayedMicrocredits)}</>}</small>
       {amountTouched && amountInvalid && <small id={amountErrorID} role="alert">{copy.amountPointsInvalid}</small>}
-      <button type="submit" disabled={locked || amountInvalid}>{busy === 'facts' ? copy.reading : copy.readFacts}</button>
+      <button type="submit" disabled={locked || amountInvalid}>{busy === 'facts' ? workflow.loading : workflow.load}</button>
     </form>
     {(failure || operation.error) && <p role="alert">{failure || operation.error}</p>}{operation.unknown && <p role="status">{copy.recoveryPending}</p>}
     {needsAuthentication && <><p>{copy.recentAuthenticationRequired}</p><button disabled={operation.busy} onClick={() => client.reauthenticate('/admin.html?section=finance&finance_tab=ledger')}>{copy.reauthenticate}</button></>}

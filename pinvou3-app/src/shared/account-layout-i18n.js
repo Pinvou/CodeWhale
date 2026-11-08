@@ -294,3 +294,7 @@ adminLayoutCopy.ja.walletAdjustmentForm = {
 adminLayoutCopy.zh.billingTasks = { title: '账户与计费任务', accounts: '账户与记录', ledger: '账务处理', exceptions: '异常与修复', other: '其他任务' };
 adminLayoutCopy.en.billingTasks = { title: 'Billing tasks', accounts: 'Accounts and records', ledger: 'Ledger operations', exceptions: 'Exceptions and repairs', other: 'Other tasks' };
 adminLayoutCopy.ja.billingTasks = { title: 'アカウントと請求のタスク', accounts: '口座と記録', ledger: '台帳処理', exceptions: '例外と修復', other: 'その他のタスク' };
+
+adminLayoutCopy.zh.billingTasks.showOverview = '账户与计费概览';
+adminLayoutCopy.en.billingTasks.showOverview = 'Accounts and billing overview';
+adminLayoutCopy.ja.billingTasks.showOverview = 'アカウントと請求の概要';
