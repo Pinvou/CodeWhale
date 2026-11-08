@@ -237,3 +237,25 @@ Object.assign(adminLayoutCopy.ja.organization.lifecycleTasks, {"transferWaiting"
 Object.assign(adminLayoutCopy.zh.financeOverview, { metricScope: '查看指标口径' });
 Object.assign(adminLayoutCopy.en.financeOverview, { metricScope: 'View metric scope' });
 Object.assign(adminLayoutCopy.ja.financeOverview, { metricScope: '集計対象を確認' });
+
+adminLayoutCopy.zh.walletDirectory = {
+  types: { PERSONAL: '个人钱包', ORGANIZATION: '组织钱包', ORG_UNIT: '组织单元钱包' },
+  typeUnavailable: '钱包类型未提供', accountStatus: '账户状态', riskStatus: '风险状态', unavailable: '未提供',
+  account: { ACTIVE: '有效', FROZEN: '已冻结', CLOSED: '已关闭' },
+  risk: { CLEAR: '无未结应收', RECEIVABLE_OPEN: '有未结应收' },
+  select: (type, id) => `选择${type} · ${id}`,
+};
+adminLayoutCopy.en.walletDirectory = {
+  types: { PERSONAL: 'Personal wallet', ORGANIZATION: 'Organization wallet', ORG_UNIT: 'Organization unit wallet' },
+  typeUnavailable: 'Wallet type unavailable', accountStatus: 'Account status', riskStatus: 'Risk status', unavailable: 'Not provided',
+  account: { ACTIVE: 'Active', FROZEN: 'Frozen', CLOSED: 'Closed' },
+  risk: { CLEAR: 'No open receivable', RECEIVABLE_OPEN: 'Open receivable' },
+  select: (type, id) => `Select ${type} · ${id}`,
+};
+adminLayoutCopy.ja.walletDirectory = {
+  types: { PERSONAL: '個人ウォレット', ORGANIZATION: '組織ウォレット', ORG_UNIT: '組織単位のウォレット' },
+  typeUnavailable: 'ウォレット種別は未提供', accountStatus: '口座の状態', riskStatus: 'リスク状態', unavailable: '未提供',
+  account: { ACTIVE: '有効', FROZEN: '凍結中', CLOSED: '閉鎖済み' },
+  risk: { CLEAR: '未決済の債権なし', RECEIVABLE_OPEN: '未決済の債権あり' },
+  select: (type, id) => `${type}を選択 · ${id}`,
+};
