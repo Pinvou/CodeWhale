@@ -19,7 +19,10 @@ func (r *PostgresRepository) AdmitPaymentCredit(ctx context.Context, input payme
 	if !input.Valid() {
 		return paymentcredit.Decision{}, ErrConflict
 	}
-	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
+	// A legacy cleanup writer can commit only its stage while holding the
+	// subject lock. Read that stage from a fresh snapshot AFTER acquiring
+	// the lock; a transaction-wide pre-wait snapshot could admit stale state.
+	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 	if err != nil {
 		return paymentcredit.Decision{}, err
 	}

@@ -944,6 +944,16 @@
         "sha256": "eea5cccf8417dc013b56b459da58335391228fb51d71a4a9afe5cbc178618fb1"
       },
       {
+        "file": "000095_payment_credit_admissions.down.sql",
+        "version": 95,
+        "sha256": "d75574c134ac440670ca70c90b38b379864717b1a484a5158798f5f146190e87"
+      },
+      {
+        "file": "000095_payment_credit_admissions.up.sql",
+        "version": 95,
+        "sha256": "2e54561f58463b9c12abd699c6685fcd5e6827cc7992b5198fe8290ba89be285"
+      },
+      {
         "file": "900001_first_delivery_permission_metadata.down.sql",
         "version": 900001,
         "sha256": "fb0c59fb6749b7c82dc824a64a248a152b5a86672c2b7c44fdd06c52ab2cef04"
@@ -2214,6 +2224,16 @@
         "file": "900038_product_manual_admission.up.sql",
         "version": 900038,
         "sha256": "458f58680bc1ff48ceb59ec274329e429d5806a07000e0aae3c9551136eaaa70"
+      },
+      {
+        "file": "900039_payment_credit_attempts.down.sql",
+        "version": 900039,
+        "sha256": "65553f8114e3778b096386114aea689afbd3fb222147a6f8a7451d8912d62d24"
+      },
+      {
+        "file": "900039_payment_credit_attempts.up.sql",
+        "version": 900039,
+        "sha256": "f446d512d7b1b7d47b59d3e78801d2b82c8e81d6d5c3b732fb8afbf805b0d76e"
       }
     ],
     "payment-simulator": [

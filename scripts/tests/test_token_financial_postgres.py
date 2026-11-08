@@ -51,6 +51,29 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
                 with self.subTest(child=child), self.assertRaises(RuntimeError):
                     RUNNER.verify_results(invalid, {root}, **options)
 
+
+    def test_payment_cleanup_boundary_and_clearance_are_selected_with_real_cases(self):
+        boundary = "TestPaymentCreditClosureBoundaryPostgres"
+        retention = "TestPaymentCreditRetentionPublicPostgres"
+        self.assertTrue({boundary, retention} <= RUNNER.SCHEMA_REQUIRED)
+        self.assertIn(boundary, RUNNER.SCHEMA_CHILD_REQUIRED)
+        self.assertNotIn(retention, RUNNER.SCHEMA_CHILD_REQUIRED)
+        self.run_main_fixture()
+        command = self.fixture_commands[self.fixture_phases.index("owner-schema")]
+        for root in (boundary,retention):
+            self.assertIn(root,command[command.index("-run")+1])
+        roots = {boundary,retention}
+        events = self.events(roots,RUNNER.SCHEMA_PACKAGE,children=True)
+        options = {"package":RUNNER.SCHEMA_PACKAGE,"exact_roots":True,"require_children":True,"children_required":{boundary}}
+        RUNNER.verify_results(events,roots,**options)
+        for root in roots:
+            for invalid in ([event for event in events if event.get("Test","").split("/",1)[0]!=root],events+[{"Action":"skip","Package":RUNNER.SCHEMA_PACKAGE,"Test":root}]):
+                with self.subTest(root=root),self.assertRaises(RuntimeError):RUNNER.verify_results(invalid,roots,**options)
+        for child in RUNNER.EXACT_REQUIRED_CHILDREN[boundary]:
+            missing=[event for event in events if event.get("Test")!=boundary+"/"+child]
+            with self.subTest(child=child),self.assertRaises(RuntimeError):RUNNER.verify_results(missing,roots,**options)
+
+
     def test_password_preparation_requires_redaction_boundaries_and_reference_safety(self):
         root = "TestPasswordPreparationAuthorizationPostgres"
         self.assertIn(root, RUNNER.ACCOUNT_REQUIRED)

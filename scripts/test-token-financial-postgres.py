@@ -147,7 +147,8 @@ BILLING_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/billing"
 SCHEMA_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/billingschema"
 TOKEN_SCHEMA_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/tokenschema"
 TOKEN_SCHEMA_REQUIRED = {"TestManagementPublicMigrationInstallation"}
-SCHEMA_REQUIRED = {"TestLatePaymentQueryRegisteredIdentity", "TestReconciliationFairRetryRegisteredIdentity", "TestF09EntitlementPackageIndexPublicMigration", "TestTokenWalletReceiptSchemaPostgres", "TestLegacyEntitlementUpgradeAdmissionPostgres", "TestUsageWaiverHistoricalSchemaPostgres", "TestBillingOrdinaryReplayOriginalMigrationPostgres", "TestUnknownProviderEntryPublicMigrationPostgres", "TestLegacyExpiry025UpgradePreservesOriginalLedgerPostgres", "TestF04PublicTokenUserOwnerAuthorityAndDirectory", "TestManualRetentionHistoricalHardeningPostgres", "TestBillingHistoricalCatalogRollbackPostgres"}
+SCHEMA_REQUIRED = {"TestLatePaymentQueryRegisteredIdentity", "TestReconciliationFairRetryRegisteredIdentity", "TestF09EntitlementPackageIndexPublicMigration", "TestTokenWalletReceiptSchemaPostgres", "TestLegacyEntitlementUpgradeAdmissionPostgres", "TestUsageWaiverHistoricalSchemaPostgres", "TestBillingOrdinaryReplayOriginalMigrationPostgres", "TestUnknownProviderEntryPublicMigrationPostgres", "TestLegacyExpiry025UpgradePreservesOriginalLedgerPostgres", "TestF04PublicTokenUserOwnerAuthorityAndDirectory", "TestManualRetentionHistoricalHardeningPostgres", "TestBillingHistoricalCatalogRollbackPostgres", "TestPaymentCreditClosureBoundaryPostgres", "TestPaymentCreditRetentionPublicPostgres"}
+SCHEMA_CHILD_REQUIRED = SCHEMA_REQUIRED - {"TestPaymentCreditRetentionPublicPostgres"}
 OWNER_REQUIRED = {
     "TestPaymentActionAdmissionPostgres",
     "TestF06OrganizationWalletRequiresLifecycleEvidence",
@@ -277,6 +278,16 @@ EXACT_REQUIRED_CHILDREN = {
         for version in (35, 36, 37, 51)
         for seeded in ("false", "true")
         for suffix in ("", "/actual-cli")
+    },
+    "TestPaymentCreditClosureBoundaryPostgres": {
+        "cleanup-wins-retains-evidence-without-credit",
+        "cleanup-commit-during-admission-lock-wait",
+        "inflight-credit-and-resolved-credit-invalidate-stale-ready",
+        "admission-reply-loss-recovers-abort-and-manual-evidence",
+        "rollback-after-grant-retains-abort-and-next-payment-recovers",
+        "lost-ack-reply-resumes-metadata-without-repeating-money",
+        "wrong-resolution-identity-retains-pending-then-valid-tick-recovers",
+        "unconfigured-authority-retains-manual-payment-without-bypass",
     },
     "TestRechargeProductCommandAtomicityPostgres": {"active-provider-admission-candidate-progress"},
     "TestProductManualAdmissionPostgres": {
@@ -593,7 +604,7 @@ def main(*, group="all"):
             raise RuntimeError("Go financial phase failed: " + label)
         count = verify_results([json.loads(line) for line in result.stdout.splitlines() if line.startswith("{")],
                                required, package=package, require_children=scoped or label == "retained-token", exact_roots=scoped,
-                               children_required=ACCOUNT_CHILD_REQUIRED if label == "owner-account" else TOKEN_CHILD_REQUIRED if label == "retained-token" else BILLING_CHILD_REQUIRED & required if label == "retained-billing" else None)
+                               children_required=SCHEMA_CHILD_REQUIRED if label == "owner-schema" else ACCOUNT_CHILD_REQUIRED if label == "owner-account" else TOKEN_CHILD_REQUIRED if label == "retained-token" else BILLING_CHILD_REQUIRED & required if label == "retained-billing" else None)
         print(f"Financial phase {label}: {count} named passes; all {len(required)} required roots completed", flush=True)
 
     if group in ("all", "owners"):

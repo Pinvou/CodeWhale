@@ -20,7 +20,9 @@ local_database_url = _financial_helpers["local_database_url"]
 ci_identity_guard = _financial_helpers["ci_identity_guard"]
 LEDGER_REPAIR_APPROVAL_ROOT = "TestLedgerRepairCrossDomainActivationPostgresIntegration"
 LEDGER_REPAIR_PAYMENT_E2E_ROOT = "TestLedgerRepairPaymentAuthorityE2EPostgresIntegration"
-LEDGER_REPAIR_APPROVAL_ROOTS = {LEDGER_REPAIR_APPROVAL_ROOT, LEDGER_REPAIR_PAYMENT_E2E_ROOT}
+PAYMENT_CREDIT_F12_ROOT = "TestPaymentFinancialRepairCrossDomainActivationPostgresIntegration"
+PAYMENT_CREDIT_F12_CHILDREN = {"active-subject-and-legacy-closed-receipt-replay", "closed-subject-cannot-create-a-new-repair-effect"}
+LEDGER_REPAIR_APPROVAL_ROOTS = {LEDGER_REPAIR_APPROVAL_ROOT, LEDGER_REPAIR_PAYMENT_E2E_ROOT, PAYMENT_CREDIT_F12_ROOT}
 BILLING_ACTORS = {"billing_migrator", "billing_schema_owner", "billing_service"}
 BILLING_ROOTS = {
     "TestClosedGrantPublishedOwnerEffects",
@@ -108,6 +110,7 @@ def emit_child_logs(child_log, children):
 
 def verify_results(raw, required):
     passed = set()
+    passed_children = set()
     count = 0
     running = set()
     started_packages, passed_packages, test_packages = set(), set(), set()
@@ -137,6 +140,8 @@ def verify_results(raw, required):
             raise RuntimeError("closure contract failed or skipped")
         if name and action == "pass":
             count += 1
+            if "/" in name:
+                passed_children.add(name)
             if "/" not in name:
                 if name in passed:
                     raise RuntimeError("duplicate closure root result: " + name)
@@ -148,6 +153,8 @@ def verify_results(raw, required):
         raise RuntimeError("required closure contracts did not execute exactly: missing="
                            + ", ".join(sorted(required - passed)) + "; unexpected="
                            + ", ".join(sorted(passed - required)))
+    if PAYMENT_CREDIT_F12_ROOT in required and {PAYMENT_CREDIT_F12_ROOT+"/"+name for name in PAYMENT_CREDIT_F12_CHILDREN} - passed_children:
+        raise RuntimeError("payment credit F12 child contracts did not execute")
     return count
 
 

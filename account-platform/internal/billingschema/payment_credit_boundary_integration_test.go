@@ -261,6 +261,67 @@ func TestPaymentCreditClosureBoundaryPostgres(t *testing.T) {
 		}
 		assertEffects(t, s, 0)
 	})
+	t.Run("cleanup-commit-during-admission-lock-wait", func(t *testing.T) {
+		s := seed(t)
+		claim := claimReady(t, s)
+		// Exercise the installed guard for a legacy READ COMMITTED writer.
+		// Its cleanup stage is uncommitted when the real admission starts.
+		held, err := ac.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer held.Rollback(ctx)
+		if _, err = held.Exec(ctx, `UPDATE account_closure_requests SET stage='IDENTITY_CLEANUP' WHERE id=$1`, claim.ID); err != nil {
+			t.Fatal(err)
+		}
+		input := paymentcredit.Request{ID: uuid.New(), UserID: s.user, OrderID: s.order, TransactionDigest: paymentcredit.Digest([]byte("lock-wait-transaction")), FactsDigest: paymentcredit.Digest([]byte("lock-wait-facts"))}
+		type result struct {
+			decision paymentcredit.Decision
+			err      error
+		}
+		admitCtx, cancelAdmit := context.WithCancel(ctx)
+		defer cancelAdmit()
+		finished := make(chan result, 1)
+		go func() { d, e := ar.AdmitPaymentCredit(admitCtx, input); finished <- result{d, e} }()
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			if _, err = held.Exec(ctx, `SELECT pg_stat_clear_snapshot()`); err != nil {
+				t.Fatal(err)
+			}
+			var blocked bool
+			if err = held.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND query LIKE 'SELECT status,anonymized_at IS NOT NULL FROM users WHERE id=$1 FOR UPDATE%' AND wait_event_type='Lock' AND pg_backend_pid()=ANY(pg_blocking_pids(pid)))`).Scan(&blocked); err != nil {
+				t.Fatal(err)
+			}
+			if blocked {
+				break
+			}
+			select {
+			case done := <-finished:
+				t.Fatal("admission did not wait for cleanup subject lock", done.decision.State, done.err)
+			default:
+			}
+			if time.Now().After(deadline) {
+				t.Fatal("actual cleanup/admission lock barrier was not observed")
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		if err = held.Commit(ctx); err != nil {
+			t.Fatal(err)
+		}
+		done := <-finished
+		if done.err != nil || done.decision.State != "CLOSED" {
+			t.Fatal("admission used a pre-lock cleanup snapshot", done.decision.State, done.err)
+		}
+		var pending int
+		if err = ac.QueryRow(ctx, `SELECT count(*) FROM account_payment_credit_admissions WHERE user_id=$1`, s.user).Scan(&pending); err != nil || pending != 0 {
+			t.Fatal("cleanup winner left an admitted attempt", pending, err)
+		}
+		order, err := s.coordinator.SyncOrder(ctx, s.order)
+		if err != nil || order.FulfillmentStatus != "MANUAL_REVIEW" {
+			t.Fatal("cleanup winner failed original manual evidence path", order.FulfillmentStatus, err)
+		}
+		assertEffects(t, s, 0)
+	})
 	t.Run("inflight-credit-and-resolved-credit-invalidate-stale-ready", func(t *testing.T) {
 		s := seed(t)
 		claim := claimReady(t, s)

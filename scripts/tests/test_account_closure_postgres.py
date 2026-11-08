@@ -23,6 +23,17 @@ def stream(*events):
 
 
 class ClosurePostgresResults(unittest.TestCase):
+
+    def test_payment_credit_f12_requires_both_behavior_cases(self):
+        root=runner.PAYMENT_CREDIT_F12_ROOT
+        children={root+"/"+child for child in runner.PAYMENT_CREDIT_F12_CHILDREN}
+        rows=[{"Action":"pass","Test":name} for name in sorted(children|{root})]
+        runner.verify_results(stream(*rows),{root})
+        for child in children:
+            for invalid in ([row for row in rows if row["Test"]!=child],rows+[{"Action":"skip","Test":child}]):
+                with self.subTest(child=child),self.assertRaises(RuntimeError):runner.verify_results(stream(*invalid),{root})
+
+
     def test_real_pagination_root_is_required_once_and_cannot_skip(self):
         root = "TestAccountClosurePaginationPostgres"
         selected = [row for row in runner.CONTRACTS if row[0] == "account-pagination"]
@@ -157,8 +168,10 @@ class ClosurePostgresResults(unittest.TestCase):
                 log.write_text(stream(*rows), encoding="utf-8")
             if name == bad_group and failure == "missing-parent-process":
                 return subprocess_result("")
-            return subprocess_result(stream(*({"Action": "pass", "Test": root} for root in sorted(roots))),
-                                     1 if name == bad_group and failure == "process-failed" else 0)
+            rows = [{"Action":"pass","Test":root} for root in sorted(roots)]
+            if runner.PAYMENT_CREDIT_F12_ROOT in roots:
+                rows += [{"Action":"pass","Test":runner.PAYMENT_CREDIT_F12_ROOT+"/"+child} for child in sorted(runner.PAYMENT_CREDIT_F12_CHILDREN)]
+            return subprocess_result(stream(*rows), 1 if name == bad_group and failure == "process-failed" else 0)
 
         def subprocess_result(output, code=0):
             return mock.Mock(stdout=output, stderr="", returncode=code)
@@ -215,7 +228,7 @@ class ClosurePostgresResults(unittest.TestCase):
 
     def test_ledger_repair_public_phase_and_result_cannot_be_omitted_or_skipped(self):
         roots = runner.LEDGER_REPAIR_APPROVAL_ROOTS
-        self.assertEqual(roots, {runner.LEDGER_REPAIR_APPROVAL_ROOT, runner.LEDGER_REPAIR_PAYMENT_E2E_ROOT})
+        self.assertEqual(roots, {runner.LEDGER_REPAIR_APPROVAL_ROOT, runner.LEDGER_REPAIR_PAYMENT_E2E_ROOT, runner.PAYMENT_CREDIT_F12_ROOT})
         self.assertEqual([x for x in runner.CONTRACTS if x[0] == "ledger-repair-approval-proof"],
                          [("ledger-repair-approval-proof", "./internal/account", roots, {})])
         for missing in roots:
