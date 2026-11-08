@@ -510,3 +510,7 @@ ledgerRepairCopy.ja.ledgerImpact = {
   limit: 'スナップショットに各口座の増減方向や訂正前後の残高は含まれていません。表示額は申請額です。結果は承認の実行と台帳で確認してください。',
   types: { PAYMENT_CLEARING: '支払い精算', USAGE_REVENUE: '利用収益', WALLET_LIABILITY: 'ウォレット負債', RECEIVABLE_ASSET: '未収資産', ADJUSTMENT: '調整', REFUND_CLEARING: '返金精算', CHARGEBACK_CLEARING: 'チャージバック精算' },
 };
+
+ledgerRepairCopy.zh.ledgerWorkflow = { title: '财务修复步骤', steps: ["核对修复目标","读取快照并核对影响","创建审批草稿"], phaseReading: "正在读取快照", phaseReview: "可核对影响", approvalNext: "草稿创建成功后，在审批中心继续处理。", load: '读取服务端快照', loading: '正在读取服务端快照…' };
+ledgerRepairCopy.en.ledgerWorkflow = { title: 'Financial repair steps', steps: ["Identify the target","Read the snapshot and check the impact","Create approval draft"], phaseReading: "Reading the snapshot", phaseReview: "Ready to check the impact", approvalNext: "After the draft is created, continue in the Approval Center.", load: 'Read server snapshot', loading: 'Reading server snapshot…' };
+ledgerRepairCopy.ja.ledgerWorkflow = { title: '財務修復の手順', steps: ["修復対象を確認","スナップショットを取得して影響を確認","承認の下書きを作成"], phaseReading: "スナップショットを取得中", phaseReview: "影響を確認できます", approvalNext: "下書きの作成後は承認センターで手続きを続けます。", load: 'サーバーのスナップショットを取得', loading: 'サーバーのスナップショットを取得中…' };

@@ -357,10 +357,10 @@ try {
       const ready = await page.$eval(`${form} .adm-financial-repair-target`, node => ({ value: node.querySelector('[data-ledger-amount]').value, invalid: node.querySelector('[data-ledger-amount]').getAttribute('aria-invalid'), buttonText: node.querySelector('button').textContent, disabled: node.querySelector('button').disabled, hint: node.ownerDocument.getElementById(node.querySelector('[data-ledger-amount]').getAttribute('aria-describedby').split(' ')[0]).textContent }));
       assert.equal(ready.value, expectedPoints);
       assert.equal(ready.invalid, null);
-      assert.equal(ready.buttonText, (await copy()).readFacts);
+      assert.equal(ready.buttonText, (await copy()).ledgerWorkflow.load);
       assert.ok(ready.hint.includes((await copy()).amountPointsEquivalent.replace('{amount}', expectedMicrocredits)));
       assert.equal(ready.disabled, false, `valid read must be enabled: ${JSON.stringify(ready)}`);
-      await click(`${form} .adm-financial-repair-target button`, (await copy()).readFacts);
+      await click(`${form} .adm-financial-repair-target button`, (await copy()).ledgerWorkflow.load);
     };
     const calls = url => page.evaluate(url => window.restored.calls.filter(call => call.url === url && call.method === 'POST'), url);
     const settleRead = () => page.waitForFunction(selector => { const node = document.querySelector(selector); return node && !node.disabled; }, {}, amount);
