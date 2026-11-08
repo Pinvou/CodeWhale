@@ -625,6 +625,38 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
                 RUNNER.verify_results([event for event in events
                                        if not event.get("Test", "").startswith(name + "/")], **options)
 
+    def test_price_batch_requires_scale_snapshot_and_database_fault_children(self):
+        root = "TestPostgresManagedPricePagination"
+        required = {
+            "bounded-batch-queries",
+            *{f"bounded-batch-queries/{kind}-{size}" for kind in ("list", "namespace") for size in (1, 100, 200)},
+            "bounded-batch-queries/empty-page", "bounded-batch-queries/absent-namespace",
+            "bounded-batch-queries/snapshot-and-next-read",
+            "bounded-batch-queries/database-faults-and-recovery",
+            *{f"bounded-batch-queries/database-faults-and-recovery/{table}" for table in ("pricing_versions", "pricing_version_unit_configs", "pricing_space_versions")},
+            "bounded-batch-queries/cancelled-and-next-read",
+            "bounded-batch-queries/abnormal-read-shapes",
+            "bounded-batch-queries/abnormal-read-shapes/empty-units",
+            "bounded-batch-queries/abnormal-read-shapes/missing-namespace",
+        }
+        self.assertIn(root, RUNNER.RETAINED_REQUIRED)
+        self.assertIn(root, RUNNER.BILLING_CHILD_REQUIRED)
+        self.assertNotIn(root, RUNNER.BILLING_LEAF_REQUIRED)
+        self.assertEqual(RUNNER.EXACT_REQUIRED_CHILDREN[root], required)
+        self.run_main_fixture()
+        command = self.fixture_commands[self.fixture_phases.index("retained-billing")]
+        self.assertIn(root, command[command.index("-run") + 1])
+        events = self.events({root}, RUNNER.BILLING_PACKAGE, children=True)
+        options = {"package": RUNNER.BILLING_PACKAGE, "require_children": True, "exact_roots": True}
+        RUNNER.verify_results(events, {root}, **options)
+        for child in required:
+            for invalid in (
+                [event for event in events if event.get("Test") != root + "/" + child],
+                events + [{"Action": "skip", "Package": RUNNER.BILLING_PACKAGE, "Test": root + "/" + child}],
+            ):
+                with self.subTest(child=child), self.assertRaises(RuntimeError):
+                    RUNNER.verify_results(invalid, {root}, **options)
+
     def test_retained_billing_budget_preserves_all_phase_commands_and_cleanup(self):
         self.run_main_fixture()
         self.assertEqual(self.fixture_phases, [
