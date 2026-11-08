@@ -2961,6 +2961,16 @@ impl TranscriptConfig {
     }
 }
 
+/// Host-owned constraints applied to every inference HTTP client, including
+/// the HTTP/1 fallback and standalone vision route. Never loaded from TOML.
+pub trait ModelHttpPolicy: std::fmt::Debug + Send + Sync {
+    fn configure(
+        &self,
+        builder: reqwest::ClientBuilder,
+        base_url: &str,
+    ) -> Result<reqwest::ClientBuilder>;
+}
+
 /// Resolved CLI configuration, including defaults and environment overrides.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct Config {
@@ -2986,6 +2996,8 @@ pub struct Config {
     /// a static Idempotency-Key conflicts with this opt-in and is rejected.
     #[serde(skip)]
     pub request_idempotency_header: Option<String>,
+    #[serde(skip)]
+    pub model_http_policy: Option<std::sync::Arc<dyn ModelHttpPolicy>>,
     /// Optional user-facing tab/window title shown as `[title] …` in front of
     /// the terminal window title (the `Codewhale` / `reasoning…` / `done.`
     /// states). This is the default for every session in this config scope;
@@ -3649,6 +3661,9 @@ pub struct VisionModelConfig {
     /// Base URL for the vision model API. Defaults to OpenAI.
     #[serde(default)]
     pub base_url: Option<String>,
+    /// In-memory host policy, retained when a vision route is cloned.
+    #[serde(skip)]
+    pub model_http_policy: Option<std::sync::Arc<dyn ModelHttpPolicy>>,
 }
 
 /// `[runtime_api]` table — knobs for the local HTTP/SSE daemon.
@@ -7344,6 +7359,9 @@ impl Config {
     #[must_use]
     pub fn vision_model_config(&self) -> Option<VisionModelConfig> {
         let mut config = self.vision_model.clone()?;
+        if config.model_http_policy.is_none() {
+            config.model_http_policy = self.model_http_policy.clone();
+        }
         if config.api_key.is_none() {
             config.api_key = self.api_key.clone();
         }
@@ -10545,6 +10563,7 @@ fn merge_config(base: Config, override_cfg: Config) -> Config {
         request_idempotency_header: override_cfg
             .request_idempotency_header
             .or(base.request_idempotency_header),
+        model_http_policy: override_cfg.model_http_policy.or(base.model_http_policy),
         default_text_model: override_cfg.default_text_model.or(base.default_text_model),
         auth_mode: override_cfg.auth_mode.or(base.auth_mode),
         reasoning_effort: override_cfg.reasoning_effort.or(base.reasoning_effort),
