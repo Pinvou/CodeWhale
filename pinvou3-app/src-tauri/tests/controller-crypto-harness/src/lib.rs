@@ -211,7 +211,8 @@ mod features {
             }
             pub(crate) use crate::transfer;
             pub(crate) use crate::{
-                liveness, protocol, relay_transport, resume, shared_transport, test_support,
+                crypto, encrypted_lane, liveness, protocol, relay_transport, resume,
+                shared_transport, test_support,
             };
         }
         pub(crate) use crate::legacy_relay::relay_client;

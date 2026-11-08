@@ -202,9 +202,10 @@ impl DesktopRemoteActionState {
         let mut inner = self.inner.lock();
         inner.pending.clear();
         inner.uploads.clear();
-        // This method is called after the controller authority transitions,
-        // not by a renderer stop/reset.
-        inner.identities.clear();
+        // Clearing waiters is not proof of a remote terminal outcome. A late
+        // connect/disconnect cleanup may also run after a new owner exists.
+        // Only purge_stale, called inside the current dispatch authority fence,
+        // retires old identity records; never clear a new owner's unknown IDs.
     }
 
     pub(crate) fn pending_binding(
@@ -698,6 +699,110 @@ mod identity_tests {
     }
 
     #[test]
+    fn old_authority_and_late_cleanup_cannot_retire_new_unknown_identity() {
+        use crate::features::remote_control::controller::{
+            controlling::{ControllerLease, ControllingDeviceManager},
+            crypto::ControllerRole,
+            encrypted_lane::ControllingLaneState,
+            test_support::{
+                bind_pairing_generation, lease_context, paired_session_keys, pairing_fixture,
+            },
+        };
+        fn activate(
+            manager: &ControllingDeviceManager,
+            lane: &ControllingLaneState,
+            generation: &str,
+        ) -> LiveRemoteContext {
+            let mut fixture = pairing_fixture("identity-owner-fence");
+            bind_pairing_generation(&mut fixture, generation);
+            let context = lease_context(&fixture.reservation);
+            let (keys, _) =
+                paired_session_keys(fixture.a_keys, fixture.b_keys, &fixture.reservation);
+            let operation = manager.connect("2345678").unwrap();
+            manager.complete_reserved(operation.clone()).unwrap();
+            manager
+                .complete_connected(
+                    operation,
+                    ControllerLease {
+                        context: context.clone(),
+                        peer_endpoint_id: "endpoint-0001".into(),
+                        reservation_id: "reservation-0001".into(),
+                        device_display_name: "test".into(),
+                        liveness_epoch_a: "live-a-1".into(),
+                        liveness_epoch_b: "live-b-1".into(),
+                        resume_deadline_b: 30000,
+                        resume_token: [1; 32],
+                        transport_key_fingerprint: [2; 32],
+                        negotiated_capabilities: vec![
+                            "encrypted_frames_v1".into(),
+                            "pairing_v1".into(),
+                            "task_v1".into(),
+                        ],
+                    },
+                )
+                .unwrap();
+            lane.install(ControllerRole::A, &context, keys).unwrap();
+            let identity = manager.authenticated_remote_proxy_identity().unwrap();
+            LiveRemoteContext {
+                peer_id: identity.1,
+                resume_boundary_id: identity.2,
+                connection_id: context.connection_id,
+                controller_lease_id: context.controller_lease_id,
+                lease_epoch: context.lease_epoch,
+                relay_epoch: context.relay_epoch,
+                generation: context.remote_control_generation,
+                control_connected: true,
+                encrypted_channel_connected: true,
+            }
+        }
+        let state = Arc::new(DesktopRemoteActionState::default());
+        let manager = ControllingDeviceManager::default();
+        let lane = ControllingLaneState::default();
+        let old = activate(&manager, &lane, "old-generation");
+        let expected = manager.authenticated_remote_proxy_identity().unwrap();
+        let (release, wait) = std::sync::mpsc::sync_channel(0);
+        let ran_old_mutation = AtomicBool::new(false);
+        std::thread::scope(|scope| {
+            let old_manager = &manager;
+            let old_lane = &lane;
+            let old_state = &state;
+            let old_ran = &ran_old_mutation;
+            let old_call = scope.spawn(move || {
+                wait.recv_timeout(Duration::from_secs(10)).unwrap();
+                old_manager.with_current_authenticated_remote_proxy_identity(
+                    old_lane,
+                    &expected,
+                    || {
+                        old_ran.store(true, Ordering::SeqCst);
+                        old_state.purge_stale(&old);
+                        Ok(())
+                    },
+                )
+            });
+            manager.disconnect();
+            let current = activate(&manager, &lane, "new-generation");
+            let identity = manager.authenticated_remote_proxy_identity().unwrap();
+            manager
+                .with_current_authenticated_remote_proxy_identity(&lane, &identity, || {
+                    state.purge_stale(&current);
+                    let request = reserve(&state, &current, 0, "new-owner-original").unwrap();
+                    request.mark_dispatched();
+                    drop(request);
+                    Ok(())
+                })
+                .unwrap();
+            release.send(()).unwrap();
+            assert!(old_call.join().unwrap().is_err());
+            assert!(!ran_old_mutation.load(Ordering::SeqCst));
+            // A delayed connect cleanup is allowed to drop waiters, never this
+            // new owner's result-unknown identity.
+            state.clear_all();
+            let retry = reserve(&state, &current, 0, "new-renderer-candidate").unwrap();
+            assert_eq!(retry.request_id, "new-owner-original");
+        });
+    }
+
+    #[test]
     fn unknown_attachment_remains_fenced_until_native_authority_changes() {
         let state = Arc::new(DesktopRemoteActionState::default());
         let body = json!({"task_id":"task","file_name":"a.txt"});
@@ -751,15 +856,25 @@ mod identity_tests {
         retry.settle(true);
         drop(retry);
         state.clear_all();
-        let entry = state
-            .reserve_identity(
+        assert!(matches!(
+            state.reserve_identity(
                 "local",
                 "remote",
                 &live(),
                 "attachment_begin",
                 &body,
-                "fresh",
-            )
+                "after-waiter-reset"
+            ),
+            Err(ActionIdentityError {
+                code: "result_unknown",
+                ..
+            })
+        ));
+        let mut next = live();
+        next.generation = "next-generation".into();
+        state.purge_stale(&next);
+        let entry = state
+            .reserve_identity("local", "remote", &next, "attachment_begin", &body, "fresh")
             .unwrap();
         assert_eq!(entry.request_id, "fresh");
     }
