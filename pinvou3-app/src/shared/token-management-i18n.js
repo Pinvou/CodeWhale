@@ -185,3 +185,7 @@ Object.assign(tokenManagementCopy.ja, { title: "モデルとトークンの管�
 Object.assign(tokenManagementCopy.zh.modelToken, { deliveryStatus: "交付状态" });
 Object.assign(tokenManagementCopy.en.modelToken, { deliveryStatus: "Delivery status" });
 Object.assign(tokenManagementCopy.ja.modelToken, { deliveryStatus: "配信状態" });
+
+Object.assign(tokenManagementCopy.zh.modelToken.validationErrors, { invalidVersion: '版本信息无效，请刷新数据后重试。' });
+Object.assign(tokenManagementCopy.en.modelToken.validationErrors, { invalidVersion: 'Version information is invalid. Refresh the data and try again.' });
+Object.assign(tokenManagementCopy.ja.modelToken.validationErrors, { invalidVersion: 'バージョン情報が無効です。データを更新して再試行してください。' });
