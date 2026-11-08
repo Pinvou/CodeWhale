@@ -1315,6 +1315,7 @@ mod tests {
             .try_send(RelayOutbound::Message(queued.clone()))
             .unwrap();
         let (tx_in, mut rx_in) = mpsc::channel(8);
+        let began = tokio::time::Instant::now();
         let worker = tokio::spawn(run_loop(
             configuration,
             tx_in,
@@ -1326,7 +1327,6 @@ mod tests {
         let server = async {
             let (mut stalled, _) = listener.accept().await.unwrap();
             observe_stalled_upgrade(&mut stalled).await;
-            let began = tokio::time::Instant::now();
             // The peer does not send a response or close: the client deadline
             // must cause EOF, then the existing backoff must lead to a new TCP.
             assert_eq!(
@@ -1382,6 +1382,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let relay_url = format!("ws://{}", listener.local_addr().unwrap());
         let (tx_in, mut rx_in) = mpsc::channel(8);
+        let began = tokio::time::Instant::now();
         let worker = tokio::spawn(run_revocation_loop(
             relay_url,
             "ep_fixture".into(),
@@ -1391,7 +1392,6 @@ mod tests {
         let server = async {
             let (mut stalled, _) = listener.accept().await.unwrap();
             observe_stalled_upgrade(&mut stalled).await;
-            let began = tokio::time::Instant::now();
             assert_eq!(
                 stalled.read_u8().await.unwrap_err().kind(),
                 std::io::ErrorKind::UnexpectedEof
