@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"reflect"
@@ -25,6 +26,7 @@ type commerceWorkerFaultStore struct {
 	provider, version, reason       string
 	retryAt                         time.Time
 	persistenceContextError         error
+	onClaim                         func()
 }
 
 func commerceWorkerLogJob(version string) *CommerceCustomerSyncJob {
@@ -34,6 +36,9 @@ func commerceWorkerLogJob(version string) *CommerceCustomerSyncJob {
 func (s *commerceWorkerFaultStore) ClaimCommerceCustomerSyncJob(_ context.Context, provider, version string, lease time.Duration) (*CommerceCustomerSyncJob, error) {
 	s.calls = append(s.calls, "claim")
 	s.provider, s.version, s.lease = provider, version, lease
+	if s.onClaim != nil {
+		s.onClaim()
+	}
 	if s.claimErr != nil {
 		return nil, s.claimErr
 	}
@@ -99,7 +104,7 @@ func captureCommerceWorkerLogs(t *testing.T, safe bool, run func()) ([]commerceW
 }
 
 func TestCommerceWorkerFailureEventsUseDefaultSafeLogger(t *testing.T) {
-	for _, stage := range []string{"claim", "retry", "complete", "idle", "cancelled-claim", "provider-retry-recorded"} {
+	for _, stage := range []string{"claim", "retry", "complete", "idle", "cancelled-claim", "shutdown-independent-storage-failure", "active-dependency-cancellation", "provider-retry-recorded"} {
 		t.Run(stage, func(t *testing.T) {
 			job := commerceWorkerLogJob("adapter-v2")
 			secret := errors.New("controlled-secret Authorization Bearer private-provider-message +8613800001234")
@@ -122,7 +127,16 @@ func TestCommerceWorkerFailureEventsUseDefaultSafeLogger(t *testing.T) {
 				var cancel context.CancelFunc
 				ctx, cancel = context.WithCancel(ctx)
 				cancel()
+				store.claimErr = fmt.Errorf("controlled wrapped cancellation: %w", context.Canceled)
+			case "shutdown-independent-storage-failure":
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithCancel(ctx)
+				defer cancel()
+				store.onClaim, store.claimErr = cancel, secret
+				expectedEvent, expectedCode = "commerce_customer_sync_claim_failed", "COMMERCE_SYNC_CLAIM_FAILED"
+			case "active-dependency-cancellation":
 				store.claimErr = context.Canceled
+				expectedEvent, expectedCode = "commerce_customer_sync_claim_failed", "COMMERCE_SYNC_CLAIM_FAILED"
 			case "provider-retry-recorded":
 				adapter.err = secret
 			}

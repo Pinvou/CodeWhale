@@ -82,7 +82,7 @@ func (w *CommerceCustomerSyncWorker) Run(ctx context.Context) {
 func (w *CommerceCustomerSyncWorker) runOne(ctx context.Context) {
 	job, err := w.store.ClaimCommerceCustomerSyncJob(ctx, w.providerID, w.adapterVersion, 30*time.Second)
 	if err != nil {
-		if ctx.Err() == nil {
+		if ctx.Err() == nil || !errors.Is(err, ctx.Err()) {
 			slog.ErrorContext(ctx, "commerce_customer_sync_claim_failed", "error_code", "COMMERCE_SYNC_CLAIM_FAILED")
 		}
 		return

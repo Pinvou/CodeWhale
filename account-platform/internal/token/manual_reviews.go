@@ -252,10 +252,10 @@ func (worker *ManualReviewSLAWorker) Run(ctx context.Context) {
 }
 
 func (worker *ManualReviewSLAWorker) runOne(ctx context.Context) {
-	if _, err := worker.repository.SyncManualReviewCases(ctx, 100); err != nil && ctx.Err() == nil {
+	if _, err := worker.repository.SyncManualReviewCases(ctx, 100); err != nil && (ctx.Err() == nil || !errors.Is(err, ctx.Err())) {
 		slog.ErrorContext(ctx, "manual_review_sync_failed", "error_code", "MANUAL_REVIEW_SYNC_FAILED")
 	}
-	if _, err := worker.repository.EscalateOverdueManualReviews(ctx, worker.schedule, 100); err != nil && ctx.Err() == nil {
+	if _, err := worker.repository.EscalateOverdueManualReviews(ctx, worker.schedule, 100); err != nil && (ctx.Err() == nil || !errors.Is(err, ctx.Err())) {
 		slog.ErrorContext(ctx, "manual_review_escalation_failed", "error_code", "MANUAL_REVIEW_ESCALATION_FAILED")
 	}
 }

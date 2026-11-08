@@ -13,7 +13,7 @@ Commerce 客户同步及 Account、Billing、Token 人工审核 SLA worker 通�
 | `provider_stop_loss_evaluation_failed` | `PROVIDER_STOP_LOSS_EVALUATION_FAILED` | Billing：供应商止损评估失败 |
 | `archive_blind_review_escalation_failed` | `ARCHIVE_BLIND_REVIEW_ESCALATION_FAILED` | Billing：归档盲区案件升级失败 |
 
-正常停机导致领取或 SLA 操作取消时不新增失败日志。已领取 Commerce 任务的 Retry/Complete 仍用原 `WithoutCancel` 上下文；即使父上下文已取消，真实持久化失败仍会被观察。日志写入失败不改变原独立步骤及下一轮继续执行。
+正常停机时，只有操作返回与父上下文取消相符的错误（包括包装错误）才不新增失败日志；同时发生的其他存储错误，以及父上下文仍有效时依赖自身返回的取消错误，继续记录。已领取 Commerce 任务的 Retry/Complete 仍用原 `WithoutCancel` 上下文；即使父上下文已取消，真实持久化失败仍会被观察。日志写入失败不改变原独立步骤及下一轮继续执行。
 
 事件不是业务成功或失败终态凭证。Commerce 原 Provider/主体标识、30 秒租约、退避及失败次数策略保持；人工审核原启动调度、100 条批量、值班安排、止损和升级次序保持。供应商成功但本地完成未确认时，保留原幂等身份及已有恢复路径。
 

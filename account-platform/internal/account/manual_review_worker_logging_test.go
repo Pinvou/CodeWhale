@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/manualreview"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/observability"
 	"github.com/google/uuid"
@@ -18,6 +19,7 @@ import (
 
 type manualWorkerFaultStore struct {
 	fault       string
+	faultErr    error
 	calls       []string
 	badLimit    bool
 	gotSchedule manualreview.OnCallSchedule
@@ -36,6 +38,9 @@ func (s *manualWorkerFaultStore) step(ctx context.Context, name string, limit in
 		s.onStep(name)
 	}
 	if s.fault == name {
+		if s.faultErr != nil {
+			return 0, s.faultErr
+		}
 		return 0, errors.New("controlled-private-repository-token +8613800001234")
 	}
 	return 1, nil
@@ -169,5 +174,61 @@ func TestManualReviewWorkerArgumentsRemainPrivateWithoutFiltering(t *testing.T) 
 		if output.Len() == 0 || strings.Contains(output.String(), "controlled-private") || strings.Contains(output.String(), "+8613800001234") {
 			t.Fatal("worker passed a raw repository error to its logger")
 		}
+	}
+}
+
+func TestManualReviewWorkerShutdownKeepsIndependentStorageFailure(t *testing.T) {
+	expectedSteps := []string{"sync", "escalate"}
+	expectedEvents := map[string]string{"sync": "manual_review_sync_failed", "escalate": "manual_review_escalation_failed"}
+	for _, tc := range []struct {
+		name             string
+		err              error
+		cancelDuringStep bool
+		wantLog          bool
+	}{
+		{"shutdown-independent-storage-failure", errors.New("controlled-private-repository-token +8613800001234"), true, true},
+		{"shutdown-wrapped-cancellation", fmt.Errorf("controlled wrapped cancellation: %w", context.Canceled), true, false},
+		{"active-dependency-cancellation", context.Canceled, false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			store := &manualWorkerFaultStore{fault: expectedSteps[0], faultErr: tc.err}
+			if tc.cancelDuringStep {
+				store.onStep = func(name string) {
+					if name == expectedSteps[0] {
+						cancel()
+					}
+				}
+			}
+			worker := &ManualReviewSLAWorker{repository: store, interval: time.Minute}
+			var output bytes.Buffer
+			previous := slog.Default()
+			slog.SetDefault(observability.NewLogger(&output, observability.Config{Service: "account"}))
+			defer slog.SetDefault(previous)
+			worker.runOne(ctx)
+			if tc.wantLog {
+				var record struct {
+					Event string `json:"event"`
+					Code  string `json:"error_code"`
+				}
+				if err := json.Unmarshal(output.Bytes(), &record); err != nil || record.Event != expectedEvents[expectedSteps[0]] || record.Code != strings.ToUpper(expectedEvents[expectedSteps[0]]) {
+					t.Fatal("shutdown suppressed an independent operation failure", record, err)
+				}
+			} else if output.Len() != 0 {
+				t.Fatal("actual wrapped shutdown cancellation emitted a failure")
+			}
+			if strings.Contains(output.String(), "controlled-private") || strings.Contains(output.String(), "+8613800001234") {
+				t.Fatal("shutdown failure log exposed the repository error")
+			}
+			firstCalls := len(store.calls)
+			before := output.String()
+			store.fault = ""
+			store.onStep = nil
+			worker.runOne(context.Background())
+			if !reflect.DeepEqual(store.calls[firstCalls:], expectedSteps) || store.badLimit || output.String() != before {
+				t.Fatal("shutdown observation changed the next independent pass", store.calls)
+			}
+		})
 	}
 }

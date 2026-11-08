@@ -758,16 +758,16 @@ func (worker *ManualReviewSLAWorker) Run(ctx context.Context) {
 }
 
 func (worker *ManualReviewSLAWorker) runOne(ctx context.Context) {
-	if _, err := worker.repository.EvaluateOverduePaymentStopLosses(ctx, 100); err != nil && ctx.Err() == nil {
+	if _, err := worker.repository.EvaluateOverduePaymentStopLosses(ctx, 100); err != nil && (ctx.Err() == nil || !errors.Is(err, ctx.Err())) {
 		slog.ErrorContext(ctx, "payment_stop_loss_evaluation_failed", "error_code", "PAYMENT_STOP_LOSS_EVALUATION_FAILED")
 	}
-	if _, err := worker.repository.EvaluateProviderStopLosses(ctx, 100); err != nil && ctx.Err() == nil {
+	if _, err := worker.repository.EvaluateProviderStopLosses(ctx, 100); err != nil && (ctx.Err() == nil || !errors.Is(err, ctx.Err())) {
 		slog.ErrorContext(ctx, "provider_stop_loss_evaluation_failed", "error_code", "PROVIDER_STOP_LOSS_EVALUATION_FAILED")
 	}
-	if _, err := worker.repository.EscalateOverdueManualReviews(ctx, 100, worker.schedule); err != nil && ctx.Err() == nil {
+	if _, err := worker.repository.EscalateOverdueManualReviews(ctx, 100, worker.schedule); err != nil && (ctx.Err() == nil || !errors.Is(err, ctx.Err())) {
 		slog.ErrorContext(ctx, "manual_review_escalation_failed", "error_code", "MANUAL_REVIEW_ESCALATION_FAILED")
 	}
-	if _, err := worker.repository.EscalateArchiveBlindCases(ctx, 100); err != nil && ctx.Err() == nil {
+	if _, err := worker.repository.EscalateArchiveBlindCases(ctx, 100); err != nil && (ctx.Err() == nil || !errors.Is(err, ctx.Err())) {
 		slog.ErrorContext(ctx, "archive_blind_review_escalation_failed", "error_code", "ARCHIVE_BLIND_REVIEW_ESCALATION_FAILED")
 	}
 }
