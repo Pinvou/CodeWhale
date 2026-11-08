@@ -4,14 +4,18 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/identity"
 	"github.com/google/uuid"
 )
 
 func TestReconciliationUnknownDateOrphanLifecyclePostgres(t *testing.T) {
-	for _, scenario := range []string{"cross-date-concurrency", "legacy-and-ignore", "observation-rollback"} {
+	for _, scenario := range []string{"cross-date-concurrency", "legacy-and-ignore", "observation-rollback", "stale-review-binding"} {
 		t.Run(scenario, func(t *testing.T) {
 			r, ctx := retainedFinanceRepository(t)
 			normal, order, _, _ := retainedFinanceOrder(t, r, ctx, 1000000, false)
@@ -151,7 +155,21 @@ func TestReconciliationUnknownDateOrphanLifecyclePostgres(t *testing.T) {
 				}
 				command := func(action string) AdminReconciliationCase {
 					t.Helper()
-					item, err := r.UpdateReconciliationCase(ctx, first.ID, ReconciliationCaseCommand{Action: action, ActorID: actor, IdempotencyKey: uuid.NewString(), Reason: "controlled manual orphan date review", ReviewResult: "controlled accepted original financial facts"})
+					command := ReconciliationCaseCommand{Action: action, ActorID: actor, IdempotencyKey: uuid.NewString(), Reason: "controlled manual orphan date review", ReviewResult: "controlled accepted original financial facts"}
+					if action == "IGNORE" {
+						items, err := r.AdminReconciliationCasesByIDs(ctx, []uuid.UUID{first.ID})
+						if err != nil || len(items) != 1 {
+							t.Fatal("read actual review observation", err)
+						}
+						var observation struct {
+							ID uuid.UUID `json:"observation_id"`
+						}
+						if err := json.Unmarshal(items[0].LatestObservation, &observation); err != nil {
+							t.Fatal(err)
+						}
+						command.ObservedObservationID = observation.ID
+					}
+					item, err := r.UpdateReconciliationCase(ctx, first.ID, command)
 					if err != nil {
 						t.Fatal(action, err)
 					}
@@ -177,6 +195,97 @@ func TestReconciliationUnknownDateOrphanLifecyclePostgres(t *testing.T) {
 				if err := r.pool.QueryRow(ctx, `SELECT (SELECT count(*) FROM reconciliation_cases WHERE payment_order_id=$1),(SELECT count(*) FROM reconciliation_observation_progress WHERE case_id=$2)`, order.ID, first.ID).Scan(&cases, &observations); err != nil || cases != 1 || observations != 4 {
 					t.Fatal("legacy/ignore lifecycle lost evidence", cases, observations, err)
 				}
+			case "stale-review-binding":
+				firstRun := observe(0)
+				first := read(firstRun, "OPEN")
+				var originalObservation struct {
+					ID uuid.UUID `json:"observation_id"`
+				}
+				if err := json.Unmarshal(first.LatestObservation, &originalObservation); err != nil || originalObservation.ID == uuid.Nil {
+					t.Fatal("original case read lacks its review observation", err)
+				}
+				if _, err := r.UpdateReconciliationCase(ctx, first.ID, ReconciliationCaseCommand{Action: "CLAIM", ActorID: actor, IdempotencyKey: uuid.NewString(), Reason: "controlled claim before new observation"}); err != nil {
+					t.Fatal(err)
+				}
+				// A reachable audit repair/corruption changes the source while the
+				// operator still has the first case page open. No financial API is
+				// claimed to produce this controlled damaged-data fixture.
+				if _, err := r.pool.Exec(ctx, `UPDATE payment_orders SET amount_fen=amount_fen+1 WHERE id=$1`, order.ID); err != nil {
+					t.Fatal(err)
+				}
+				latestRun := observe(1)
+				latest := read(latestRun, "IN_REVIEW")
+				var currentObservation struct {
+					ID uuid.UUID `json:"observation_id"`
+				}
+				if err := json.Unmarshal(latest.LatestObservation, &currentObservation); err != nil || currentObservation.ID == originalObservation.ID {
+					t.Fatal("changed observation was hidden", err)
+				}
+				service := NewService(r).WithPayments(coordinator)
+				request := httptest.NewRequest(http.MethodGet, "/admin/v1/reconciliation-cases?run_id="+latestRun.ID.String(), nil).WithContext(ctx)
+				request.Header.Set("Authorization", "Bearer controlled-human")
+				response := httptest.NewRecorder()
+				identity.Middleware(func(context.Context, string) (identity.Principal, error) {
+					return identity.Principal{Issuer: "controlled", Subject: actor.String()}, nil
+				}, http.HandlerFunc(service.adminReconciliationCases)).ServeHTTP(response, request)
+				var page struct {
+					Items []json.RawMessage `json:"items"`
+				}
+				if err := json.Unmarshal(response.Body.Bytes(), &page); err != nil || response.Code != http.StatusOK || len(page.Items) != 1 {
+					t.Fatal("original public case read lost the current review evidence", response.Code, err)
+				}
+				t.Logf("synthetic_orphan_review_wire=%s", page.Items[0])
+				post := func(observed uuid.UUID, key string, want int) string {
+					t.Helper()
+					body := map[string]any{"action": "IGNORE", "reason": "controlled review of displayed orphan facts", "review_result": "controlled explicit review decision"}
+					if observed != uuid.Nil {
+						body["observed_observation_id"] = observed
+					}
+					raw, _ := json.Marshal(body)
+					request := httptest.NewRequest(http.MethodPost, "/admin/v1/reconciliation-cases/"+first.ID.String()+"/commands", strings.NewReader(string(raw))).WithContext(ctx)
+					request.SetPathValue("case_id", first.ID.String())
+					request.Header.Set("Authorization", "Bearer controlled-human")
+					request.Header.Set("Idempotency-Key", key)
+					response := httptest.NewRecorder()
+					identity.Middleware(func(context.Context, string) (identity.Principal, error) {
+						return identity.Principal{Issuer: "controlled", Subject: actor.String()}, nil
+					}, http.HandlerFunc(service.adminUpdateReconciliationCase)).ServeHTTP(response, request)
+					if response.Code != want {
+						t.Fatal("actual IGNORE handler observation binding", response.Code, want, response.Body.String())
+					}
+					return response.Body.String()
+				}
+				post(originalObservation.ID, uuid.NewString(), http.StatusConflict)
+				post(uuid.Nil, uuid.NewString(), http.StatusConflict)
+				unchanged := read(latestRun, "IN_REVIEW")
+				if unchanged.Version != latest.Version {
+					t.Fatal("stale review modified state/version")
+				}
+				key := uuid.NewString()
+				receipt := post(currentObservation.ID, key, http.StatusOK)
+				var wire struct {
+					Internal struct {
+						Order struct {
+							Amount string `json:"amount_fen"`
+						} `json:"payment_order"`
+					} `json:"internal_snapshot"`
+					Latest struct {
+						ID       uuid.UUID `json:"observation_id"`
+						Internal struct {
+							Order struct {
+								Amount string `json:"amount_fen"`
+							} `json:"payment_order"`
+						} `json:"internal_snapshot"`
+					} `json:"latest_observation"`
+				}
+				if err := json.Unmarshal([]byte(receipt), &wire); err != nil || wire.Latest.ID != currentObservation.ID || wire.Internal.Order.Amount != fmt.Sprint(order.AmountFen) || wire.Latest.Internal.Order.Amount != fmt.Sprint(order.AmountFen+1) {
+					t.Fatal("actual wire lost original/latest exact-money evidence", receipt, err)
+				}
+				read(observe(2), "IGNORED")
+				if replay := post(currentObservation.ID, key, http.StatusOK); replay != receipt {
+					t.Fatal("lost ACK replay adopted later evidence")
+				}
+				post(originalObservation.ID, key, http.StatusConflict)
 			case "observation-rollback":
 				if _, err := retainedFinanceOwnerExec(t, r, ctx, `CREATE FUNCTION controlled_orphan_progress_failure() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'controlled observation insert failure'; END $$; CREATE TRIGGER controlled_orphan_progress_failure BEFORE INSERT ON reconciliation_observation_progress FOR EACH ROW EXECUTE FUNCTION controlled_orphan_progress_failure()`); err != nil {
 					t.Fatal(err)

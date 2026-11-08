@@ -287,7 +287,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
 
     def test_unknown_date_orphan_requires_cross_date_lifecycle(self):
         root = "TestReconciliationUnknownDateOrphanLifecyclePostgres"
-        children = {"cross-date-concurrency", "legacy-and-ignore", "observation-rollback"}
+        children = {"cross-date-concurrency", "legacy-and-ignore", "observation-rollback", "stale-review-binding"}
         self.assertIn(root, RUNNER.RETAINED_REQUIRED)
         self.assertIn(root, RUNNER.BILLING_CHILD_REQUIRED)
         self.assertEqual(RUNNER.EXACT_REQUIRED_CHILDREN[root], children)
@@ -661,7 +661,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
         self.assertEqual(billing[-1], "./internal/billing")
         self.assertEqual(billing[billing.index("-run") + 1],
                          "^(" + "|".join(sorted(RUNNER.RETAINED_REQUIRED)) + ")$")
-        self.assertEqual(len(RUNNER.RETAINED_REQUIRED), 74)
+        self.assertEqual(len(RUNNER.RETAINED_REQUIRED), 75)
         self.assertEqual(self.fixture_writes, ["create", "drop"])
         self.assertEqual(self.fixture_trace, [
             "owner-account", "owner-wallet", "owner-schema", "owner-token-schema", "owner-provisioning",
@@ -1897,7 +1897,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
         }
         self.assertEqual(RUNNER.REFUND_REQUIRED, expected)
         self.assertTrue(expected <= RUNNER.RETAINED_REQUIRED)
-        self.assertEqual(len(RUNNER.RETAINED_REQUIRED), 74)
+        self.assertEqual(len(RUNNER.RETAINED_REQUIRED), 75)
         valid = self.events(RUNNER.RETAINED_REQUIRED, RUNNER.BILLING_PACKAGE, children=True)
         options = {"package": RUNNER.BILLING_PACKAGE, "require_children": True, "exact_roots": True,
                    "children_required": RUNNER.BILLING_CHILD_REQUIRED}

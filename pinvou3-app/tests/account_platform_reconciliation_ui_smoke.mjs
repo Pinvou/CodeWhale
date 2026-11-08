@@ -13,7 +13,8 @@ const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'pinvou-f03-ui-'));
 let vite; let browser; let page; let passed = 0;
 const errors = [];
 try {
-  vite = await createServer({ root, configFile: false, appType: 'mpa', logLevel: 'error', plugins: [react()], server: { host: '127.0.0.1', port: 0, watch: null } });
+  const producedCase = process.env.PINVOU_ORPHAN_CASE_FIXTURE ? JSON.parse(fs.readFileSync(process.env.PINVOU_ORPHAN_CASE_FIXTURE, 'utf8')).case : null;
+  vite = await createServer({ root, configFile: false, appType: 'mpa', logLevel: 'error', plugins: [react()], define: producedCase ? { __PINVOU_ORPHAN_CASE__: JSON.stringify(producedCase) } : {}, server: { host: '127.0.0.1', port: 0, watch: null } });
   await vite.listen();
   browser = await puppeteer.launch({ executablePath: chrome, headless: 'new', userDataDir: profile, args: ['--disable-gpu', '--no-first-run'] });
   page = await browser.newPage(); page.setDefaultTimeout(10000); page.on('pageerror', error => errors.push(error.message));
@@ -24,6 +25,33 @@ try {
   const selectCase = async () => { await click('cases'); await page.waitForFunction(() => document.querySelector('tbody')?.textContent.includes('controlled-merchant')); await page.evaluate(() => document.querySelector('tbody button').click()); await page.waitForSelector('details'); };
   const caseRun = async (name, action) => { await action(); assert.deepEqual(errors, []); passed++; console.log(`PASS ${name}`); };
   for (const language of ['zh', 'en', 'ja']) {
+    await caseRun(`${language}: orphan review displays producer evidence and binds the refreshed observation`, async () => {
+      await fresh(language); await page.evaluate(() => window.f03.useOrphanFixture()); await selectCase();
+      await page.click('details summary');
+      assert.ok(await page.evaluate(() => {
+        const item = window.f03.orphanCase;
+        const text = document.querySelector('details').textContent;
+        return text.includes(window.f03.copy().latestObservation) && text.includes(item.latest_observation.observation_id) &&
+          text.includes(item.internal_snapshot.payment_order.amount_fen) && text.includes(item.latest_observation.internal_snapshot.payment_order.amount_fen) &&
+          item.internal_snapshot.payment_date_verification_required && item.latest_observation.internal_snapshot.payment_order.paid_at === null;
+      }));
+      await page.select('section section select', 'IGNORE');
+      const fields = await page.$$('section section textarea');
+      await fields[0].type('Controlled review of displayed observation'); await fields[1].type('Controlled explicit human review reason');
+      const original = await page.evaluate(() => window.f03.orphanCase.latest_observation.observation_id);
+      await page.evaluate(() => {
+        const latest = structuredClone(window.f03.orphanCase);
+        latest.latest_observation.observation_id = window.f03.other;
+        latest.latest_observation.internal_snapshot.payment_order.amount_fen = (BigInt(latest.latest_observation.internal_snapshot.payment_order.amount_fen) + 1n).toString();
+        window.f03.orphanCase = latest;
+      });
+      await click('submit'); await page.waitForFunction(() => document.querySelector('[role=alert]')?.textContent === window.f03.copy().sourceChanged);
+      await click('refresh'); await page.waitForFunction(() => document.querySelector('details').textContent.includes(window.f03.other));
+      await click('submit'); await page.waitForFunction(() => document.querySelector('[role=status]')?.textContent === window.f03.copy().saved);
+      const commands = await page.evaluate(() => window.f03.calls.filter(value => value.url.endsWith('/commands')).map(value => ({ facts: JSON.parse(value.body), key: value.key })));
+      assert.equal(commands.length, 2); assert.equal(commands[0].facts.observed_observation_id, original);
+      assert.notEqual(commands[0].key, commands[1].key); assert.equal(commands[1].facts.observed_observation_id, await page.evaluate(() => window.f03.other));
+    });
     await caseRun(`${language}: missing supplier occurrence dates remain explicit manual review cases`, async () => {
       await fresh(language); await page.evaluate(() => { window.f03.caseType = 'REFUND_DATE_UNVERIFIED'; }); await selectCase();
       assert.ok(await page.evaluate(() => document.querySelector('tbody').textContent.includes(window.f03.copy().caseTypes.REFUND_DATE_UNVERIFIED) && document.querySelector('section section h3').textContent.includes(window.f03.copy().caseTypes.REFUND_DATE_UNVERIFIED)));

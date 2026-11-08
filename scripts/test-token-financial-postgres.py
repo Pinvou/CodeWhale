@@ -372,6 +372,7 @@ EXACT_REQUIRED_CHILDREN = {
     "TestReconciliationOrphanPaidOrderPostgres": {"fresh-install", "historical-upgrade"},
     "TestReconciliationUnknownDateOrphanLifecyclePostgres": {
         "cross-date-concurrency", "legacy-and-ignore", "observation-rollback",
+        "stale-review-binding",
     },
     "TestRemoteModelCancellationOwnerLoopTransport": {
         "remote_emergency", "remote_emergency_then_user", "user_only",

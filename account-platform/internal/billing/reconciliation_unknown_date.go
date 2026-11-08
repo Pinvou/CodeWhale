@@ -116,27 +116,44 @@ func unknownDateOrphanRun(ctx context.Context, tx pgx.Tx, runID uuid.UUID) (Reco
 
 // Add acceptance evidence to the existing private immutable command receipt.
 // Its ordinary AdminReconciliationCase JSON fields and replay remain compatible.
-func recordUnknownDateOrphanAcceptance(ctx context.Context, tx pgx.Tx, item AdminReconciliationCase, after []byte) ([]byte, error) {
+func recordUnknownDateOrphanAcceptance(ctx context.Context, tx pgx.Tx, item AdminReconciliationCase, observedID uuid.UUID, after []byte) ([]byte, error) {
 	difference := unknownDateOrphanOriginalDifference(item)
 	if !unknownDateOrphanDifference(difference) {
+		if observedID != uuid.Nil {
+			return nil, ErrConflict
+		}
 		return after, nil
 	}
 	run, err := unknownDateOrphanRun(ctx, tx, item.RunID)
 	if err != nil {
 		return nil, err
 	}
-	var fact ReconciliationInternalFact
-	err = tx.QueryRow(ctx, `SELECT fact.entry_type,fact.provider_reference_id,fact.payment_order_id,fact.amount_fen,fact.currency,fact.internal_snapshot
-FROM reconciliation_observation_progress progress
-JOIN reconciliation_observations observation ON observation.id=progress.observation_id
-JOIN reconciliation_observation_facts fact ON fact.observation_id=observation.id AND fact.payment_order_id=$2 AND fact.entry_type='PAYMENT'
-WHERE progress.case_id=$1 AND fact.provider_reference_id=$3
-ORDER BY observation.created_at DESC,observation.id DESC LIMIT 1`, item.ID, item.PaymentOrderID, difference.InternalReference).Scan(&fact.EntryType, &fact.ProviderReferenceID, &fact.PaymentOrderID, &fact.AmountFen, &fact.Currency, &fact.InternalSnapshot)
-	if err == nil {
-		fact.MerchantOrderNo = item.MerchantOrderNo
-		difference = differenceFromFact(fact, item.CaseType, item.Severity, nil)
-	} else if !errors.Is(err, pgx.ErrNoRows) {
-		return nil, err
+	var observation struct {
+		ID               uuid.UUID       `json:"observation_id"`
+		InternalSnapshot json.RawMessage `json:"internal_snapshot"`
+	}
+	if len(item.LatestObservation) > 0 {
+		if err := json.Unmarshal(item.LatestObservation, &observation); err != nil || observation.ID == uuid.Nil {
+			return nil, ErrConflict
+		}
+		latest := item
+		latest.InternalSnapshot = observation.InternalSnapshot
+		latestDifference := unknownDateOrphanOriginalDifference(latest)
+		if !unknownDateOrphanDifference(latestDifference) {
+			return nil, ErrConflict
+		}
+		// A legacy client may still accept the unchanged original fact. It must
+		// never silently accept a changed snapshot it cannot display or bind.
+		if observedID == uuid.Nil {
+			if unknownDateOrphanFingerprint(run, latestDifference) != unknownDateOrphanFingerprint(run, difference) {
+				return nil, ErrConflict
+			}
+		} else if observedID != observation.ID {
+			return nil, ErrConflict
+		}
+		difference = latestDifference
+	} else if observedID != uuid.Nil {
+		return nil, ErrConflict
 	}
 	var receipt map[string]json.RawMessage
 	if err := json.Unmarshal(after, &receipt); err != nil {
@@ -145,6 +162,23 @@ ORDER BY observation.created_at DESC,observation.id DESC LIMIT 1`, item.ID, item
 	receipt["unknown_date_accepted_fact_digest"], _ = json.Marshal(unknownDateOrphanFingerprint(run, difference))
 	return json.Marshal(receipt)
 }
+
+// The original case snapshots remain immutable. Its read projection separately
+// exposes the latest associated observation, so IGNORE can name the exact facts
+// the administrator saw. Replayed command receipts retain their original view.
+const unknownDateOrphanLatestObservationSQL = `CASE WHEN case_type='PAYMENT_TRANSACTION_MISSING'
+AND internal_snapshot->'payment_date_verification_required'='true'::jsonb
+AND internal_snapshot->'payment_order'->'paid_at'='null'::jsonb
+THEN (SELECT jsonb_build_object('observation_id',observation.id,'reconciliation_run_id',observed_run.id,
+'business_date',observed_run.business_date,'observed_at',observation.created_at,'internal_snapshot',fact.internal_snapshot)
+FROM reconciliation_observation_progress progress
+JOIN reconciliation_observations observation ON observation.id=progress.observation_id
+JOIN reconciliation_runs observed_run ON observed_run.id=observation.run_id
+JOIN reconciliation_observation_facts fact ON fact.observation_id=observation.id
+AND fact.payment_order_id=reconciliation_cases.payment_order_id AND fact.entry_type='PAYMENT'
+AND fact.provider_reference_id='ORPHAN_PAYMENT_ORDER:'||reconciliation_cases.payment_order_id::text
+WHERE progress.case_id=reconciliation_cases.id
+ORDER BY observation.created_at DESC,observation.id DESC LIMIT 1) END`
 
 func changedIgnoredUnknownDateOrphan(ctx context.Context, tx pgx.Tx, caseID uuid.UUID, run ReconciliationRun, difference ReconciliationDifference) (bool, error) {
 	var accepted *string

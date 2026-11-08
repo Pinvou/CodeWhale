@@ -1049,4 +1049,4 @@ func (r *PostgresRepository) AdminPaymentOrder(ctx context.Context, orderID uuid
 	return item, evidenceRows.Err()
 }
 
-const reconciliationCaseSelect = `SELECT id,reconciliation_run_id,payment_order_id,merchant_order_no,case_type,status,severity,owner_id,repair_action,review_result,provider_snapshot,internal_snapshot,refund_snapshot,ledger_snapshot,resolution,created_at,resolved_at,updated_at,version FROM reconciliation_cases`
+const reconciliationCaseSelect = `SELECT id,reconciliation_run_id,payment_order_id,merchant_order_no,case_type,status,severity,owner_id,repair_action,review_result,provider_snapshot,internal_snapshot,refund_snapshot,ledger_snapshot,resolution,created_at,resolved_at,updated_at,version,` + unknownDateOrphanLatestObservationSQL + ` FROM reconciliation_cases`
