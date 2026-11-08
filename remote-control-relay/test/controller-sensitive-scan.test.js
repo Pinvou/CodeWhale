@@ -344,6 +344,21 @@ test("reflection and byte-conversion failures never expose proxy exceptions", ()
   assert.equal(scanner.assertClean(cleanSurfaces()).clean, true);
 });
 
+test("typed-array conversion scans actual bytes without replacement hooks", () => {
+  const scanner = new ControllerSensitiveScanner(SENTINELS);
+  for (const make of [value => Buffer.from(value), value => new Uint8Array(Buffer.from(value))]) {
+    for (const name of CONTROLLER_SCAN_SURFACES) {
+      const value = make(SENTINELS[0]);
+      value.valueOf = () => "safe replacement";
+      value.toString = () => "safe replacement";
+      value[Symbol.iterator] = function* () { yield 0; };
+      Object.defineProperty(value, "length", { get() { throw new Error("must-not-read-shadow-length"); } });
+      assert.deepEqual(scanner.scan({ ...cleanSurfaces(), [name]: value }).matched_surfaces, [name]);
+      assert.throws(() => scanner.assertClean({ ...cleanSurfaces(), [name]: value }), { code: "controller_sensitive_sentinel_detected" });
+    }
+  }
+});
+
 test("every scan requires all four owned evidence surfaces", () => {
   const scanner = new ControllerSensitiveScanner(SENTINELS);
   for (let mask = 0; mask < 15; mask += 1) {

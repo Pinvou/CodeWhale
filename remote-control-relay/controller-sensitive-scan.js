@@ -15,8 +15,16 @@ function fail(code) {
 
 function surfaceBytes(value) {
   try {
-    if (Buffer.isBuffer(value)) return Buffer.from(value);
-    if (value instanceof Uint8Array) return Buffer.from(value);
+    if (Buffer.isBuffer(value) || value instanceof Uint8Array) {
+      // Read typed-array slots directly. Buffer.from(value) consults valueOf,
+      // which could replace contaminated bytes with a clean string. These
+      // intrinsics also reject a Proxy rather than invoking its byte hooks.
+      const typedArray = Object.getPrototypeOf(Uint8Array.prototype);
+      const length = Object.getOwnPropertyDescriptor(typedArray, "length").get.call(value);
+      const bytes = Buffer.alloc(length);
+      Uint8Array.prototype.set.call(bytes, value);
+      return bytes;
+    }
     if (typeof value === "string") return Buffer.from(value, "utf8");
     if (!value || typeof value !== "object") fail("controller_scan_surface_invalid");
     const serialized = JSON.stringify(value);
