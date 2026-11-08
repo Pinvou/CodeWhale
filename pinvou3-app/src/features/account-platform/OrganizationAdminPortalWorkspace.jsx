@@ -5,6 +5,7 @@ import { organizationLabel } from './organization-labels.js';
 import { RetainedWorkspace } from './RetainedWorkspace.jsx';
 import { OrganizationMemberMenu } from './OrganizationMemberMenu.jsx';
 import { OrganizationOverviewSummary } from './OrganizationOverviewSummary.jsx';
+import { organizationUnitMovePlan } from './organization-unit-move-plan.js';
 import { AdminIdentifier } from './AdminIdentifier.jsx';
 import { adminRouteLocation } from './admin-sections.js';
 
@@ -80,6 +81,45 @@ export function OrganizationAdminPortalWorkspace({ client, me, acceptedSessionEp
   const unitNames = new Map((detail?.units.items || []).map(unit => [unit.unit_id, unit.name]));
   const readiness = detail?.readiness;
   const mayDelete = current?.status === 'DISABLED' && readiness?.ready === true && readiness.current_status === 'DISABLED' && readiness.account_version === current.version && !detail?.readinessError;
+  const moveSubject = (label, name, id) => {
+    const displayName = typeof name === 'string' && name.replace(/\p{Default_Ignorable_Code_Point}/gu, '').trim()
+      ? name.replace(/\p{Bidi_Control}/gu, char => '\\u' + char.charCodeAt(0).toString(16).padStart(4, '0')) : '';
+    return <span className="ap-org-move-subject-row"><small>{label}</small>{displayName && <bdi>{displayName}</bdi>}<bdi dir="ltr"><code>{id}</code></bdi></span>;
+  };
+  const moveUnit = unit => {
+    const words = labels.unitMove;
+    let plan;
+    const getPlan = () => { if (plan === undefined) plan = organizationUnitMovePlan(current, detail, unit.unit_id, copy.root); return plan; };
+    const revision = JSON.stringify([requestedID, current?.status, unit.unit_id, unit.status, unit.parent_id === undefined ? 'unknown' : unit.parent_id, detail?.units?.structure_version, Boolean(detail?.unitsError)]);
+    return action('move-unit:' + unit.unit_id, copy.moveUnit, [{ name: 'parent', options: () => getPlan()?.options.map(option => option.conflict ? { ...option, label: option.label + ' · ' + words.conflictOption } : option.possibleConflict ? { ...option, label: option.label + ' · ' + words.possibleConflictOption } : option) || [], emptyLabel: words.placeholder }], values => {
+      const currentPlan = getPlan();
+      if (!currentPlan) throw Error('INVALID_ORGANIZATION_UNIT_MOVE');
+      return currentPlan.prepare(values.parent);
+    }, 'moveUnit', unit.unit_id, false, { draftContext: {
+      revision, changed: words.changed,
+      targetSummary: () => <span className="ap-org-move-subject">
+        {moveSubject(words.sourceOrganization, current.name, current.organization_id)}
+        {moveSubject(words.sourceUnit, unit.name, unit.unit_id)}
+      </span>,
+      reason: values => { const currentPlan = getPlan(); return currentPlan ? words[currentPlan.reason(values.parent)] || '' : words.moveUnavailable; },
+      summary: () => {
+        const currentPlan = getPlan();
+        return <dl className="ap-org-move-current"><dt>{words.currentPath}</dt><dd>
+          {currentPlan?.segments ? <span dir="ltr">{currentPlan.segments.map((part, index) => <React.Fragment key={part.id ?? '@root'}>{index > 0 && ' › '}<bdi>{part.label}</bdi></React.Fragment>)}</span> : words.pathUnavailable}
+          {currentPlan?.segments && currentPlan.currentParent && <small className="ap-org-move-current-parent">{words.currentParentID}: <code>{currentPlan.currentParent}</code></small>}
+        </dd></dl>;
+      },
+      pendingSummary: facts => {
+        const parentID = facts.parent_id;
+        let target = words.pathUnavailable;
+        if (parentID === null) target = copy.root;
+        else {
+          try { target = <code>{organizationID(parentID)}</code>; } catch { /* Keep the original request unchanged. */ }
+        }
+        return <dl className="ap-org-move-current ap-org-move-recovery-target"><dt>{words.recoveryTarget}</dt><dd>{target}</dd></dl>;
+      },
+    } });
+  };
   return <section className="adm-panel adm-organization-directory">
     {error && <p role="alert">{error}<button disabled={busy} onClick={onRefresh}>{copy.refresh}</button></p>}{busy && <p role="status">{copy.loading}</p>}
     {!requestedID ? directory : <><button className="adm-organization-back" onClick={() => navigate({ organization_id: null, organization_tab: null, member_cursor: null })}>{words.backToDirectory}</button>
@@ -93,7 +133,7 @@ export function OrganizationAdminPortalWorkspace({ client, me, acceptedSessionEp
               <nav><button disabled={busy || !memberPrevious.length} onClick={() => { const values = [...memberPrevious], cursor = values.pop(); setMemberPrevious(values); navigate({ member_cursor: cursor || null }); }}>{copy.previous}</button><button disabled={busy || !detail.members.next_cursor} onClick={() => { setMemberPrevious(values => [...values, memberCursor]); navigate({ member_cursor: detail.members.next_cursor }); }}>{copy.next}</button></nav>
             </>}
           </section>}
-          {view === 'units' && current.status !== 'DELETED' && <section>{detail.unitsError ? <p role="alert">{copy.unavailable}<button disabled={busy} onClick={onRefresh}>{copy.refresh}</button></p> : <><div className="adm-unit-toolbar adm-section-toolbar"><h4>{labels.units}</h4>{can('units.manage') && action('create-unit', copy.createUnit, [{ name: 'name' }, { name: 'parent', optional: true, options: units }], values => ({ name: text(values.name), parent_id: optionalID(values.parent) }), 'unit')}</div><ul className="adm-organization-units">{detail.units.items.map(unit => <li key={unit.unit_id} ref={renamedUnit?.unit_id === unit.unit_id ? renamedUnitNode : undefined} tabIndex={renamedUnit?.unit_id === unit.unit_id ? -1 : undefined} className={renamedUnit?.unit_id === unit.unit_id ? 'ap-unit-renamed' : undefined}><strong>{unit.name}</strong><span className="adm-unit-parent"><small>{copy.parent}: </small><span>{unit.parent_id ? unitNames.get(unit.parent_id) || unit.parent_id : copy.root}</span></span><span className="adm-unit-status"><small>{copy.status}: </small><span>{organizationLabel(copy, 'Status', unit.status)}</span></span>{can('units.manage') && <div className="adm-row-actions">{action(`rename-unit:${unit.unit_id}`, copy.renameUnit, [{ name: 'name', initial: unit.name }], values => ({ name: text(values.name) }), 'renameUnit', unit.unit_id)}{action(`move-unit:${unit.unit_id}`, copy.moveUnit, [{ name: 'parent', optional: true, options: units }], values => ({ parent_id: optionalID(values.parent), expected_structure_version: organizationVersion(detail.units.structure_version) }), 'moveUnit', unit.unit_id)}{action(`delete-unit:${unit.unit_id}`, copy.deleteUnit, [], () => ({}), 'deleteUnit', unit.unit_id, true)}</div>}</li>)}</ul>{!detail.units.items.length && <p>{copy.empty}</p>}</>}</section>}
+          {view === 'units' && current.status !== 'DELETED' && <section>{detail.unitsError ? <p role="alert">{copy.unavailable}<button disabled={busy} onClick={onRefresh}>{copy.refresh}</button></p> : <><div className="adm-unit-toolbar adm-section-toolbar"><h4>{labels.units}</h4>{can('units.manage') && action('create-unit', copy.createUnit, [{ name: 'name' }, { name: 'parent', optional: true, options: units }], values => ({ name: text(values.name), parent_id: optionalID(values.parent) }), 'unit')}</div><ul className="adm-organization-units">{detail.units.items.map(unit => <li key={unit.unit_id} ref={renamedUnit?.unit_id === unit.unit_id ? renamedUnitNode : undefined} tabIndex={renamedUnit?.unit_id === unit.unit_id ? -1 : undefined} className={renamedUnit?.unit_id === unit.unit_id ? 'ap-unit-renamed' : undefined}><strong>{unit.name}</strong><span className="adm-unit-parent"><small>{copy.parent}: </small><span>{unit.parent_id ? unitNames.get(unit.parent_id) || unit.parent_id : copy.root}</span></span><span className="adm-unit-status"><small>{copy.status}: </small><span>{organizationLabel(copy, 'Status', unit.status)}</span></span>{can('units.manage') && <div className="adm-row-actions">{action(`rename-unit:${unit.unit_id}`, copy.renameUnit, [{ name: 'name', initial: unit.name }], values => ({ name: text(values.name) }), 'renameUnit', unit.unit_id)}{moveUnit(unit)}{action(`delete-unit:${unit.unit_id}`, copy.deleteUnit, [], () => ({}), 'deleteUnit', unit.unit_id, true)}</div>}</li>)}</ul>{!detail.units.items.length && <p>{copy.empty}</p>}</>}</section>}
           {view === 'lifecycle' && <section>{can('status.manage') && ['ACTIVE', 'DISABLED'].includes(current.status) && action('status', current.status === 'ACTIVE' ? copy.disable : copy.enable, [], () => ({ status: current.status === 'ACTIVE' ? 'DISABLED' : 'ACTIVE' }), 'status', '', true)}
             {can('owner.transfer') && current.status !== 'DELETED' && action('transfer', copy.transfer, [{ name: 'newOwner', lookup: true }], values => ({ new_owner_user_id: organizationID(values.newOwner) }), 'transfer', '', true)}
             {can('delete') && current.status === 'DISABLED' && <section><h4>{copy.readiness}</h4><button disabled={busy} onClick={onRefresh}>{copy.refresh}</button>{detail.readinessError && <p role="alert">{copy.unavailable}</p>}{readiness && <ul>{readiness.blockers?.map((item, index) => <li key={index}>{typeof item === 'string' ? item : item.code || item.resource_type}</li>)}</ul>}{mayDelete && action('delete', copy.delete, [{ name: 'confirmationName' }, { name: 'reason' }], values => { if (values.confirmationName !== current.name) throw new Error('INVALID_ORGANIZATION_INPUT'); return { reason: text(values.reason) }; }, 'delete', '', true, { confirmationTarget: `${current.name} · ${current.organization_id}` })}</section>}

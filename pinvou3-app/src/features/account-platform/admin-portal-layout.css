@@ -357,3 +357,20 @@
 .adm-restored-shell .adm-organization-overview-reference summary{cursor:pointer;color:var(--adm-muted);font-weight:650}
 @media(max-width:560px){.adm-restored-shell .adm-organization-overview-facts{grid-template-columns:minmax(0,1fr)}}
 .adm-restored-shell .adm-organization-overview-members{justify-self:start;max-width:100%;margin-top:4px;white-space:normal;overflow-wrap:anywhere}
+
+.ap-restored-dialog .ap-admin-unit-move{min-width:0;grid-template-columns:minmax(0,1fr)}
+.ap-admin-unit-move .ap-org-action-target{min-width:0}
+.ap-admin-unit-move .ap-org-action-target,.ap-admin-unit-move .ap-org-move-current{grid-template-columns:minmax(120px,1fr) minmax(0,2fr)}
+@media(max-width:560px){.ap-admin-unit-move .ap-org-action-target,.ap-admin-unit-move .ap-org-move-current{grid-template-columns:minmax(0,1fr)}}
+.ap-admin-unit-move .ap-org-move-current{min-width:0;margin:0;padding:12px;border:1px solid var(--adm-line,#e3e7ee);border-radius:10px;background:var(--adm-soft,#f8f9fc)}
+.ap-admin-unit-move .ap-org-move-current dt,.ap-admin-unit-move .ap-org-move-draft-help{color:var(--adm-muted,#687083);font-size:12px}
+.ap-admin-unit-move .ap-org-move-current dd{margin:4px 0 0;min-width:0;white-space:pre-wrap;overflow-wrap:break-word}
+.ap-admin-unit-move .ap-org-move-current-parent{display:block;margin-top:6px;color:var(--adm-muted,#687083)}
+.ap-admin-unit-move .ap-org-action-target>dd{min-width:0}
+.ap-admin-unit-move .ap-org-move-subject{display:grid;gap:6px;min-width:0}
+/* Safari 14.0 does not apply gap to flex items. */
+.ap-admin-unit-move .ap-org-move-subject-row{display:flex;align-items:baseline;flex-wrap:wrap;min-width:0;margin:-4px -4px 0;overflow-wrap:break-word}
+.ap-admin-unit-move .ap-org-move-subject-row>*{min-width:0;margin:4px 4px 0}
+.ap-admin-unit-move .ap-org-move-subject-row small{color:var(--adm-muted,#687083);font-weight:650}
+.ap-admin-unit-move fieldset,.ap-admin-unit-move fieldset label{min-width:0}
+.ap-admin-unit-move fieldset select{width:100%;min-width:0;max-width:100%}
