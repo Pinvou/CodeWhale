@@ -1546,6 +1546,11 @@
     },
     {
       "source": "account-platform/cmd/account-service/approval_runtime.go",
+      "name": "approval-delivery-terminal-recovery",
+      "permission": "internal.job.approval-delivery-terminal-recovery"
+    },
+    {
+      "source": "account-platform/cmd/account-service/approval_runtime.go",
       "name": "manual-review-sla",
       "permission": "internal.job.manual-review-sla"
     },
