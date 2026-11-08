@@ -52,6 +52,7 @@ func configureApprovals(ctx context.Context, repository *account.PostgresReposit
 	}
 	go observability.RunBackground(ctx, "approval-expiry", account.NewApprovalExpiryWorker(repository, time.Minute).Run)
 	go observability.RunBackground(ctx, "approval-pagination-cleanup", account.NewApprovalPaginationCleanupWorker(repository, time.Minute).Run)
+	go observability.RunBackground(ctx, "approval-delivery-terminal-recovery", account.NewApprovalDeliveryTerminalRecoveryWorker(repository, time.Minute).Run)
 	go observability.RunBackground(ctx, "manual-review-sla", account.NewManualReviewSLAWorker(repository, schedule, time.Minute).Run)
 	return nil
 }

@@ -234,6 +234,10 @@ func (fixture *tokenAuthorizationHTTPFixture) handleHTTP(w http.ResponseWriter, 
 		_ = json.NewEncoder(w).Encode(fixture.state)
 	case strings.HasSuffix(path, "/terminal"):
 		fixture.terminals++
+		if fixture.failStage == "terminal-write-unavailable" {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
 		fixture.state = tokenAuthorizationDeliveryState{State: "TERMINAL_CONFIRMED", Version: fixture.state.Version + 1}
 		if fixture.failStage == "terminal-response-lost" && fixture.terminals == 1 {
 			w.WriteHeader(http.StatusServiceUnavailable)

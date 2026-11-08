@@ -12,6 +12,8 @@ import (
 )
 
 var safeLogEvents = map[string]string{
+	"approval delivery terminal recovery failed": "approval_delivery_terminal_recovery_failed",
+
 	"expired hold recovery failed":         "expired_hold_recovery_failed",
 	"model catalog synchronization failed": "model_catalog_sync_failed",
 	"application event":                    "application_event",

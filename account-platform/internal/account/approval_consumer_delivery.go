@@ -163,8 +163,26 @@ func (r *PostgresRepository) RecordApprovalAuthorizationTerminal(ctx context.Con
 	if !validApprovalAuthorizationLookup(eventID, durable, workload) || expectedVersion <= 0 {
 		return ApprovalDeliveryState{}, ErrApprovalConsumerBindingInvalid
 	}
-	return scanApprovalDeliveryState(ctx, r.pool.QueryRow(ctx, `SELECT domain_attempt_count,state,version
-FROM public.record_approval_authorization_terminal($1,$2,$3,$4)`, eventID, durable, workload, expectedVersion))
+	var state ApprovalDeliveryState
+	err := r.pool.QueryRow(ctx, `SELECT domain_attempt_count,state,version
+FROM public.record_approval_authorization_terminal($1,$2,$3,$4)`, eventID, durable, workload, expectedVersion).Scan(&state.DomainAttemptCount, &state.State, &state.Version)
+	var postgresError *pgconn.PgError
+	if ctx.Err() == nil && errors.As(err, &postgresError) && postgresError.Code == "55000" && postgresError.Message == "authorization terminal CAS rejected" {
+		// A concurrent metadata sweep or another consumer can win the strict
+		// SQL CAS after this consumer ACKed. Read the same frozen binding;
+		// never treat an unknown/failed write as proof of domain completion.
+		current, readErr := r.ApprovalAuthorizationDeliveryState(ctx, eventID, durable, workload)
+		if readErr != nil {
+			return ApprovalDeliveryState{}, readErr
+		}
+		if current.State == "TERMINAL_CONFIRMED" && current.Version > expectedVersion {
+			return current, nil
+		}
+	}
+	if err != nil {
+		return ApprovalDeliveryState{}, approvalConsumerError(ctx, err)
+	}
+	return state, nil
 }
 
 func (r *PostgresRepository) RecordApprovalAuthorizationDLQPubAck(ctx context.Context, eventID uuid.UUID, durable, workload string, expectedVersion int64, messageID string, streamSequence approvalconsumer.Sequence) (ApprovalDeliveryState, error) {
