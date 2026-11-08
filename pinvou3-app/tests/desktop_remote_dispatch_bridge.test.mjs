@@ -62,6 +62,7 @@ test('artifact downloader uses the real bridge to reconcile a lost final respons
     switch (args.intent.operation) {
       case 'artifact_download_begin': return Promise.resolve({ transfer_id: 'download-1', chunk_bytes: 5, total_bytes: 5 });
       case 'artifact_download_chunk':
+        // eslint-disable-next-line prefer-promise-reject-errors -- Preserve the native IPC unknown-result string in the lost-reply regression.
         if (++attempts === 1) return Promise.reject('result_unknown');
         return Promise.resolve({ chunk_index: 0, chunk_b64: Buffer.from('hello').toString('base64'),
           chunk_bytes: 5, received_bytes: 5, next_chunk: 1, completed: true });
