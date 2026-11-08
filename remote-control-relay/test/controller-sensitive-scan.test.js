@@ -15,7 +15,7 @@ import { sealPairingCode } from "../pairing-code-sealer.js";
 import { PairingStore } from "../pairing-store.js";
 import { validateControllerMessage } from "../protocol-controller.js";
 import { RelayStateStore } from "../relay-state-store.js";
-import { ControllerSensitiveScanner } from "../controller-sensitive-scan.js";
+import { ControllerSensitiveScanner, CONTROLLER_SCAN_SURFACES } from "../controller-sensitive-scan.js";
 import { ControllerTelemetry } from "../controller-telemetry.js";
 
 const SENSITIVE_VALUES = Object.freeze({
@@ -318,4 +318,61 @@ test("scanner rejects raw, base64 and hex contamination in real crash diagnostic
 test("scanner rejects arbitrary surface names instead of widening evidence scope", () => {
   const scanner = new ControllerSensitiveScanner(SENTINELS);
   assert.throws(() => scanner.scan({ arbitrary_patch: "safe" }), /surface_unknown/u);
+});
+
+const cleanSurfaces = () => Object.fromEntries(CONTROLLER_SCAN_SURFACES.map((name) => [name, "collected-safe-data"]));
+
+test("every scan requires all four owned evidence surfaces", () => {
+  const scanner = new ControllerSensitiveScanner(SENTINELS);
+  for (let mask = 0; mask < 15; mask += 1) {
+    const partial = Object.fromEntries(CONTROLLER_SCAN_SURFACES
+      .filter((_, index) => mask & (1 << index)).map((name) => [name, "safe"]));
+    for (const scan of [() => scanner.scan(partial), () => scanner.assertClean(partial)]) {
+      assert.throws(scan, (error) => error.code === "controller_scan_surfaces_incomplete");
+    }
+  }
+  const inherited = Object.create(cleanSurfaces());
+  assert.throws(() => scanner.scan(inherited), { code: "controller_scan_surfaces_incomplete" });
+  assert.equal(scanner.assertClean(cleanSurfaces()).scanned_surfaces.length, 4);
+});
+
+test("invalid surface values fail with bounded codes without echoing data", () => {
+  const scanner = new ControllerSensitiveScanner(SENTINELS);
+  const cycle = {}; cycle.self = cycle;
+  for (const name of CONTROLLER_SCAN_SURFACES) {
+    for (const value of [undefined, null, 42, true, 1n, Symbol("private"), () => "private", cycle, { value: 1n },
+      { toJSON() { throw new Error(SENTINELS[0]); } }]) {
+      assert.throws(() => scanner.assertClean({ ...cleanSurfaces(), [name]: value }),
+        (error) => error.code === "controller_scan_surface_invalid"
+          && error.message === error.code && !error.message.includes(SENTINELS[0]));
+    }
+    const accessor = cleanSurfaces();
+    Object.defineProperty(accessor, name, { enumerable: true, get() { throw new Error(SENTINELS[0]); } });
+    assert.throws(() => scanner.scan(accessor), { code: "controller_scan_surface_invalid" });
+  }
+  assert.throws(() => scanner.scan({ ...cleanSurfaces(), extra: SENTINELS[0] }),
+    { code: "controller_scan_surface_unknown" });
+  assert.throws(() => scanner.scan({ ...cleanSurfaces(), [Symbol("private")]: "secret" }),
+    { code: "controller_scan_surface_unknown" });
+});
+
+test("registered whole-value encoding variants are detected on every evidence surface", () => {
+  const sentinel = "secret/\u9ad8\u00ff?\"\\\n";
+  const raw = Buffer.from(sentinel);
+  const unicode = [...sentinel].map((char) => `\\u${char.charCodeAt(0).toString(16).padStart(4, "0")}`).join("");
+  const variants = [sentinel, raw.toString("base64"), raw.toString("base64").replace(/=+$/u, ""),
+    raw.toString("base64url"), raw.toString("base64url").padEnd(Math.ceil(raw.length / 3) * 4, "="),
+    raw.toString("hex"), raw.toString("hex").toUpperCase(), JSON.stringify(sentinel).slice(1, -1),
+    unicode, unicode.replace(/[a-f]/gu, (char) => char.toUpperCase()), encodeURIComponent(sentinel),
+    raw.toString("hex").replace(/../gu, (hex) => `%${hex}`), raw.toString("hex").replace(/../gu, (hex) => `%${hex.toUpperCase()}`)];
+  const scanner = new ControllerSensitiveScanner([sentinel]);
+  for (const name of CONTROLLER_SCAN_SURFACES) for (const variant of variants) {
+    const surfaces = { ...cleanSurfaces(), [name]: `prefix:${variant}:suffix` };
+    const result = scanner.scan(surfaces);
+    assert.deepEqual(result.matched_surfaces, [name]);
+    assert.throws(() => scanner.assertClean(surfaces), { code: "controller_sensitive_sentinel_detected" });
+    assert.equal(JSON.stringify(result).includes(sentinel), false);
+  }
+  assert.equal(scanner.assertClean({ logs: Buffer.from("safe"), persistence: { entries: [] },
+    packet_capture: new Uint8Array([1, 2, 3]), crash_diagnostics: [] }).clean, true);
 });
