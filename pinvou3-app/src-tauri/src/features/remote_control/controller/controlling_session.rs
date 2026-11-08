@@ -1863,19 +1863,45 @@ mod tests {
             "../../../../../../remote-control-relay/test/fixtures/controller-protocol-v1.json"
         ))
         .unwrap();
+        let package_for = |task_id: &str| {
+            let live = lease();
+            let mut package =
+                fixture["task_submit_vectors"]["temporary"]["temporary_model_package"].clone();
+            // The shared wire vector has its own relay epoch. A task fixture
+            // must model the live production writer, which binds every field.
+            package["binding"] = json!({
+                "connection_id": live.connection_id,
+                "controller_lease_id": live.controller_lease_id,
+                "lease_epoch": live.lease_epoch,
+                "relay_epoch": live.relay_epoch,
+                "remote_control_generation": live.remote_control_generation,
+                "task_id": task_id,
+            });
+            package
+        };
+        for field in ["relay_epoch", "remote_control_generation"] {
+            let error = sessions
+                .task_intent_with_model(
+                    &session.session_ref,
+                    "reject a stale model",
+                    &lease(),
+                    MODEL_SOURCE_TEMPORARY,
+                    |task_id| {
+                        let mut package = package_for(task_id);
+                        package["binding"][field] = json!("stale-value");
+                        Ok(Some(package))
+                    },
+                )
+                .unwrap_err();
+            assert_eq!(error.code, "session_context_stale");
+        }
         let intent = sessions
             .task_intent_with_model(
                 &session.session_ref,
                 "use my model",
                 &lease(),
                 MODEL_SOURCE_TEMPORARY,
-                |task_id| {
-                    let mut package =
-                        fixture["task_submit_vectors"]["temporary"]["temporary_model_package"]
-                            .clone();
-                    package["binding"]["task_id"] = json!(task_id);
-                    Ok(Some(package))
-                },
+                |task_id| Ok(Some(package_for(task_id))),
             )
             .unwrap();
         assert_eq!(intent.payload["model_source"], MODEL_SOURCE_TEMPORARY);
