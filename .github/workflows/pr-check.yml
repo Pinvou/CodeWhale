@@ -4402,6 +4402,11 @@ jobs:
             pinvou3-app/package-lock.json
             remote-control-relay/package-lock.json
 
+      - name: Python for owned browser fixture supervision
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+
       # Ubuntu npm tests skip these suites outside win32. They use only Node
       # built-ins and fake MCP/host fixtures to exercise the real wrapper
       # subprocess, protocol, heartbeat, tombstone, and commit-unknown paths.
@@ -4410,12 +4415,25 @@ jobs:
       - name: Windows browser wrapper lifecycle regression
         env:
           PINVOU3_TEST_BROWSER_NO_HOST: "1"
-        run: node --test pinvou3-app/tests/browser_wrapper_windows_lifecycle.test.mjs
+        run: python scripts/ci-fixture-process.py --receipt "${{ runner.temp }}/windows-browser-lifecycle-${{ github.run_id }}-${{ github.run_attempt }}.json" -- node --test pinvou3-app/tests/browser_wrapper_windows_lifecycle.test.mjs
 
       - name: Windows browser wrapper lazy regression
         env:
           PINVOU3_TEST_BROWSER_NO_HOST: "1"
-        run: node pinvou3-app/tests/browser_wrapper_lazy.test.mjs
+        run: python scripts/ci-fixture-process.py --receipt "${{ runner.temp }}/windows-browser-lazy-${{ github.run_id }}-${{ github.run_attempt }}.json" -- node pinvou3-app/tests/browser_wrapper_lazy.test.mjs
+
+      - name: Preserve browser fixture exit receipts
+        if: always()
+        timeout-minutes: 3
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-browser-exit-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 7
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}/windows-browser-*-${{ github.run_id }}-${{ github.run_attempt }}.json
+            ${{ runner.temp }}/windows-browser-*-${{ github.run_id }}-${{ github.run_attempt }}-resources/*.json
 
       - name: 安装构建依赖
         run: npm --prefix pinvou3-app ci --prefer-offline --no-audit

@@ -3,6 +3,31 @@ import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { readPendingHostRequest, cleanupBrowserFixture, confirmedChildStopper, confirmedProcessExited } from './helpers/browser-wrapper-fixture-cleanup.mjs';
 
+test('cleanup failure retains the primary failure and still closes other resources', async () => {
+  const primary = new Error('original lifecycle assertion');
+  const cleanup = Object.assign(new Error('exit unknown'), { code: 'EPERM' });
+  const calls = [];
+  await assert.rejects(cleanupBrowserFixture({
+    primaryErrors: [primary],
+    closeHost: () => calls.push('host'),
+    stopChildren: [() => { throw cleanup; }, () => calls.push('other-child')],
+    closeServer: () => calls.push('server'),
+    removeFiles: () => calls.push('files'),
+  }), error => error instanceof AggregateError
+    && error.errors.length === 2 && error.errors[0] === primary && error.errors[1] === cleanup);
+  assert.deepEqual(calls, ['host', 'other-child', 'server']);
+});
+
+test('successful cleanup leaves the primary failure to its original caller', async () => {
+  let removed = false;
+  await cleanupBrowserFixture({
+    primaryErrors: [new Error('original lifecycle assertion')],
+    closeHost: () => {}, stopChildren: [], closeServer: () => {},
+    removeFiles: () => { removed = true; },
+  });
+  assert.equal(removed, true);
+});
+
 test('only process absence proves exit; denied or unknown probes preserve files', async () => {
   assert.equal(confirmedProcessExited(123, () => {}), false);
   assert.equal(confirmedProcessExited(123, () => { throw Object.assign(new Error('absent'), { code: 'ESRCH' }); }), true);
