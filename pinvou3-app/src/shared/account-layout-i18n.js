@@ -179,3 +179,37 @@ Object.assign(adminLayoutCopy.ja.organization.unitMove, {
   unknownImpact: '下位単位への影響は確認できません。',
   previewStale: 'この移動プレビューは無効になりました。ダイアログを閉じ、組織情報を更新してから再度確認してください。',
 });
+
+adminLayoutCopy.zh.organization.lifecycleTasks = {
+  statusTitle: '停用与启用', statusPurpose: '管理成员能否在该组织身份下工作。', currentStatus: '当前组织状态', unknownStatus: '暂无法确认状态',
+  conditions: '执行条件', effect: '操作影响', noStatusPermission: '当前账号没有管理组织状态的权限。', statusCondition: '系统会在提交时核对当前状态和适用的检查结果。', statusUnavailable: '当前状态无法发起停用或启用。',
+  disableEffect: '停用会暂停有效成员身份，并将当前组织会话切回个人身份；组织不会被删除。',
+  enableEffect: '启用会恢复该组织已暂停的成员身份；现有个人会话不会自动切回组织。',
+  enableCondition: "提交时核对组织状态和适用条件；已关闭的组织钱包会阻止启用。", usageEffect: "钱包与新用量", disableUsageEffect: "停用成功后，未关闭的组织钱包会被冻结，新的组织用量请求会被拒绝。已受理请求仍按原有规则处理。", enableUsageEffect: "启用成功后，已有组织钱包的生命周期状态恢复为有效；启用不会新建钱包。新的用量请求仍须满足原有权限、额度和准入条件。",
+  transferPurpose: '将组织的所有者角色交给另一名成员。', noTransferPermission: '当前账号没有转让所有权的权限。',
+  transferCondition: '组织须处于有效状态。接收人须为本组织的有效成员且账号有效，由系统在提交时核验。',
+  transferDisabled: '该组织已停用，不能发起新的所有权转让。', transferUnavailable: '当前组织状态无法发起新的所有权转让。',
+  transferEffect: '转让给另一名成员成功后，对方获得所有者角色，原所有者失去该角色。',
+};
+adminLayoutCopy.en.organization.lifecycleTasks = {
+  statusTitle: 'Disable or enable the organization', statusPurpose: 'Control whether members can work in this organization context.', currentStatus: 'Current organization status', unknownStatus: 'Status could not be confirmed',
+  conditions: 'Requirements', effect: 'Effect', noStatusPermission: 'Your account cannot manage the organization status.', statusCondition: 'When you submit, the system checks the current status and any other applicable requirements.', statusUnavailable: 'The organization cannot be disabled or enabled from its current status.',
+  disableEffect: 'Disabling suspends active memberships and switches current organization sessions to personal context. It does not delete the organization.',
+  enableEffect: 'Enabling restores suspended memberships in this organization. Current personal sessions do not switch back automatically.',
+  enableCondition: "When you submit, the system checks the organization status and applicable requirements. A closed organization wallet blocks enabling.", usageEffect: "Wallet and new usage", disableUsageEffect: "Once disabled, organization wallets that are not closed are frozen, and new organization usage requests are rejected. Previously accepted requests follow the existing rules.", enableUsageEffect: "If the organization already has a wallet, enabling restores its lifecycle status to active after the checks pass. Enabling does not create a wallet. Existing permission, quota, and admission rules still apply to new usage.",
+  transferPurpose: 'Pass the organization’s owner role to another member.', noTransferPermission: 'Your account cannot transfer ownership.',
+  transferCondition: 'The organization must be active. The recipient must have an active account and an active membership in this organization. The system checks this when you submit.',
+  transferDisabled: 'The organization is disabled. You cannot start a new ownership transfer.', transferUnavailable: 'A new ownership transfer is unavailable for the current organization status.',
+  transferEffect: 'After a successful transfer to another member, they gain the owner role and the previous owner loses it.',
+};
+adminLayoutCopy.ja.organization.lifecycleTasks = {
+  statusTitle: '組織の無効化と有効化', statusPurpose: 'メンバーがこの組織のコンテキストで作業できる状態を管理します。', currentStatus: '現在の組織の状態', unknownStatus: '状態を確認できません',
+  conditions: '実行条件', effect: '操作の影響', noStatusPermission: '現在のアカウントには組織の状態を管理する権限がありません。', statusCondition: '送信時に、現在の状態と適用される条件がシステムによって確認されます。', statusUnavailable: '現在の状態では無効化も有効化もできません。',
+  disableEffect: '無効化すると、有効なメンバー資格が停止され、現在の組織セッションは個人のコンテキストに切り替わります。組織は削除されません。',
+  enableEffect: '有効化すると、この組織の停止中のメンバー資格が復元されます。現在の個人セッションは自動的に組織に切り替わりません。',
+  enableCondition: "送信時に組織の状態と適用される条件を確認します。組織のウォレットが閉鎖済みの場合は有効化できません。", usageEffect: "ウォレットと新規利用", disableUsageEffect: "無効化が完了すると、閉鎖されていない組織ウォレットが凍結され、組織の新規利用リクエストは拒否されます。受理済みのリクエストには従来のルールが適用されます。", enableUsageEffect: "有効化が完了すると、既存の組織ウォレットの状態が有効に戻ります。有効化によってウォレットは新規作成されません。利用には従来の権限、割当、受け付け条件が適用されます。",
+  transferPurpose: '組織の所有者ロールを別のメンバーに引き継ぎます。', noTransferPermission: '現在のアカウントには所有権を譲渡する権限がありません。',
+  transferCondition: '組織が有効である必要があります。譲渡先は、この組織の有効なメンバーで、アカウントも有効である必要があります。送信時に確認されます。',
+  transferDisabled: '組織が無効です。新しい所有権の譲渡を開始できません。', transferUnavailable: '組織の現在の状態では新しい所有権の譲渡を開始できません。',
+  transferEffect: '別のメンバーへの譲渡が完了すると、そのメンバーが所有者ロールを取得し、以前の所有者はそのロールを失います。',
+};
