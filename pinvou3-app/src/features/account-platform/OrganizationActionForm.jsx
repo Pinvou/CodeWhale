@@ -16,7 +16,7 @@ const currentSelections = (fields, values) => fields.every(field => {
 
 // Each displayed action owns one immutable invocation. Unknown outcomes retain
 // the original hook facts/key; only fresh invocations require user confirmation.
-export function OrganizationActionForm({ client, owner, copy, title, scope, fields, prepare, action, onConfirmed, confirm = false, disabled = false, confirmationTarget = '', description = '', editBeforeSubmit = false, editDrafts, draftContext, useOperation = useFinanceOperation, dialog = false, appearance = 'default', dangerous = false, primaryTrigger = false, submitLabel = '' }) {
+export function OrganizationActionForm({ client, owner, copy, title, scope, fields, prepare, action, onConfirmed, confirm = false, disabled = false, confirmationTarget = '', confirmationContext = [], description = '', editBeforeSubmit = false, editDrafts, draftContext, useOperation = useFinanceOperation, dialog = false, appearance = 'default', dangerous = false, primaryTrigger = false, submitLabel = '' }) {
  const [dialogOpen, setDialogOpen] = useState(false);
  const opener = useRef(null), wasOpen = useRef(false);
  const draftIdentity = `${owner}:${scope}`;
@@ -129,14 +129,17 @@ export function OrganizationActionForm({ client, owner, copy, title, scope, fiel
   <button type="button" disabled={disabled || operation.blocked || !renderedReady} onClick={() => changeEditing(true)}>{title}</button>
  </div>;
  const displayed = confirmation && freshCurrent(confirmation);
- const details = displayed ? fields.map(field => {
+ const details = displayed ? [...confirmationContext, ...fields.map(field => {
   const selected = field.multiple ? confirmation.values[field.name] : [confirmation.values[field.name]];
   return { name: field.name, label: copy[field.labelKey || field.label || field.name], value: selected.map(value => value === '' && field.optional ? copy.root : fieldOptions(field, confirmation.values)?.find(option => option.value === value)?.label || value).join(', ') };
- }) : [];
+ })] : [];
  const pendingSummary = operation.pendingFacts ? draftContext?.pendingSummary?.(operation.pendingFacts) : null;
  const form = <form className={`ap-org-action${adminAppearance ? ' ap-admin-org-action' : ''}${adminAppearance && dangerous ? ' ap-admin-org-action-danger' : ''}${draftContext ? ' ap-admin-unit-move' : ''}`} onSubmit={submit}><h4>{title}</h4>
   {displayed && <OrganizationActionConfirmation copy={copy} title={title} target={confirmation.confirmationTarget} description={description} details={details} appearance={appearance} dangerous={dangerous} onCancel={() => cancel(confirmation)} onConfirm={() => void accept(confirmation)} canRestoreFocus={() => freshCurrent(confirmation)} />}
-  {dialog && confirmationTarget && <dl className="ap-org-action-target"><dt>{copy.confirmationTarget}</dt><dd>{draftContext?.targetSummary?.() ?? confirmationTarget}</dd></dl>}
+  {dialog && (confirmationTarget || confirmationContext.length > 0) && <dl className="ap-org-action-target">
+   {confirmationTarget && <><dt>{copy.confirmationTarget}</dt><dd>{draftContext?.targetSummary?.() ?? confirmationTarget}</dd></>}
+   {confirmationContext.map(item => <React.Fragment key={item.name}><dt>{item.label}</dt><dd>{item.value}</dd></React.Fragment>)}
+  </dl>}
   {description && <p className="ap-org-action-description">{description}</p>}
   {pendingSummary || (!operation.unknown && !operation.pendingFacts && draftContext?.summary?.())}
   {fields.length > 0 && !pendingSummary && <fieldset disabled={operation.busy || operation.unknown || operation.blocked || disabled}>{fields.map(field => <label key={field.name}>{copy[field.labelKey || field.label || field.name]}{field.lookup ? <OrganizationUserPicker client={client} copy={copy} value={values[field.name]} disabled={operation.busy || operation.unknown || operation.blocked || disabled} onChange={value => changeValue(field.name, value)} /> : field.options ? <select multiple={field.multiple || false} value={editBeforeSubmit ? operation.pendingFacts?.[field.name] ?? values[field.name] : values[field.name]} onChange={event => { const value = field.multiple ? [...event.target.selectedOptions].map(option => option.value) : event.target.value; changeValue(field.name, value); }}>{!field.multiple && <option value="">{field.emptyLabel ?? (field.optional ? copy.root : '—')}</option>}{fieldOptions(field, values).map(option => <option key={option.value} value={option.value}>{option.label}</option>)}</select> : <input type={field.type || 'text'} autoComplete="off" value={editBeforeSubmit ? operation.pendingFacts?.[field.name] ?? values[field.name] : values[field.name]} onChange={event => changeValue(field.name, event.target.value)} required={!field.optional && !field.nameRule} aria-required={field.nameRule ? true : undefined} aria-invalid={fieldErrors[field.name] ? true : undefined} aria-describedby={field.nameRule ? [`${fieldPrefix}-${field.name}-hint`, fieldErrors[field.name] ? `${fieldPrefix}-${field.name}-error` : '', operation.error ? `${fieldPrefix}-operation-error` : ''].filter(Boolean).join(' ') : undefined} />}{field.nameRule && <small className="ap-org-name-hint" id={`${fieldPrefix}-${field.name}-hint`}>{field.nameRule === 'unit' ? copy.unitNameRules : copy.organizationNameRules}</small>}{fieldErrors[field.name] && <small className="ap-org-name-error" id={`${fieldPrefix}-${field.name}-error`} role="alert">{copy[fieldErrors[field.name]]}</small>}{field.multiple && <small>{copy.unscopedUnits}</small>}</label>)}</fieldset>}
