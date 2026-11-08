@@ -502,3 +502,7 @@
 
 .adm-restored-shell .adm-financial-repair-target .adm-writeoff-target-field .adm-writeoff-amount-error{color:var(--adm-danger,#a52837);font-weight:600;overflow-wrap:break-word;overflow-wrap:anywhere}
 .adm-restored-shell .adm-financial-repair-target .adm-writeoff-target-field>input[aria-invalid=true]{border-color:var(--adm-danger,#a52837)}
+
+.adm-restored-shell .adm-writeoff-fixed-command{grid-column:1/-1;margin:0;padding:8px 10px;border-radius:8px;background:var(--adm-soft)}
+.adm-restored-shell .adm-writeoff-fixed-command dt{color:var(--adm-muted);font-size:12px}
+.adm-restored-shell .adm-writeoff-fixed-command dd{margin:2px 0 0;font-weight:650}
