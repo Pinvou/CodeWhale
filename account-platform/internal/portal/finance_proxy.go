@@ -64,7 +64,7 @@ func billingAdminPathAllowed(method, resource string) bool {
 	}
 	if len(parts) == 5 {
 		if method == http.MethodGet {
-			return parts[2] == "reconciliation-runs" && parts[4] == "cases" || parts[2] == "wallets" && parts[4] == "ledger" || parts[2] == "receivables" && parts[4] == "allocations" || parts[2] == "recharge-products" && parts[4] == "admission-verifications"
+			return parts[2] == "reconciliation-cases" && parts[4] == "repair-context" || parts[2] == "reconciliation-runs" && parts[4] == "cases" || parts[2] == "wallets" && parts[4] == "ledger" || parts[2] == "receivables" && parts[4] == "allocations" || parts[2] == "recharge-products" && parts[4] == "admission-verifications"
 		}
 		if method == http.MethodPut {
 			return parts[2] == "recharge-products" && parts[4] == "draft"

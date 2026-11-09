@@ -1,10 +1,11 @@
 import test from 'node:test'; import assert from 'node:assert/strict'; import fs from 'node:fs';
-import {financialRepairPrecheckBody,financialRepairCommandTypes} from '../src/features/account-platform/admin-financial-repair-form.js';
+import {financialRepairPrecheckBody,financialRepairCommandTypes,financialRepairDateCanUseCalendar} from '../src/features/account-platform/admin-financial-repair-form.js';
 import {financialRepairApprovalDraft,financialRepairPrecheck} from '../src/features/account-platform/admin-financial-repair-drafts.js';
 import {currentApprovalEditDraft} from '../src/features/account-platform/admin-finance.js';
 import {AdminPlatformClient} from '../src/features/account-platform/admin-client.js';
 import {parseFinanceJSON,encodeFinanceJSON} from '../src/features/account-platform/finance-contract.js';
 import {ledgerRepairCopy} from '../src/shared/ledger-repair-i18n.js';
+import {requireReconciliationRepairContext,reconciliationSourceBusinessDate,reconciliationRepairHost} from '../src/features/account-platform/reconciliation-repair-context.js';
 const raw=()=>"{\"command_type\":\"RECONCILIATION_FINANCIAL_REPAIR\",\"policy_version\":1,\"snapshot_schema_version\":1,\"target_resource_type\":\"RECONCILIATION_CASE\",\"target_resource_id\":\"00000000-0000-4000-8000-000000000001\",\"normalized_command\":{\"reconciliation_case_id\":\"00000000-0000-4000-8000-000000000001\",\"payment_evidence_id\":\"00000000-0000-4000-8000-000000000002\",\"business_date\":\"2026-10-07\",\"resolution_code\":\"PROVIDER_REFUND_CONFIRMED\"},\"critical_resource_versions\":{\"run_id\":\"00000000-0000-4000-8000-000000000003\",\"case_id\":\"00000000-0000-4000-8000-000000000001\",\"provider_snapshot_digest\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"facts_digest\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"policy_version\":1},\"financial_snapshot\":{\"amount_fen\":9007199254740993,\"currency\":\"CNY\",\"provider_transaction_id\":\"controlled-provider-transaction\",\"ledger_effect\":\"NONE\"}}";
 const id=n=>`00000000-0000-4000-8000-${String(n).padStart(12,'0')}`;
 const values={target_resource_id:id(1),payment_evidence_id:id(2),business_date:'2026-10-07'};
@@ -46,4 +47,58 @@ test('Recon fresh EDIT preserves original tuple/date and replaces only authorita
   const d=await currentApprovalEditDraft({approvalCommandPrecheck:async b=>{request=b;return fresh}},detail,'Controlled current original-intent EDIT');
   assert.deepEqual(request,{command_type:p.command_type,...values,reason_code:'PROVIDER_REFUND_CONFIRMED'});assert.equal(d.critical_resource_versions.facts_digest,'c'.repeat(64));assert.deepEqual(d.normalized_command,detail.command);
   for(const field of ['reconciliation_case_id','payment_evidence_id','business_date']){const changed=parseFinanceJSON(raw());changed.normalized_command[field]=field==='business_date'?'2026-10-08':id(5);await assert.rejects(currentApprovalEditDraft({approvalCommandPrecheck:async()=>changed},detail,'Controlled current original-intent EDIT'));}
+});
+
+test('Recon native calendar eligibility preserves legacy manual business dates',()=>{
+  for(const value of ['', '0001-01-01', '0099-10-07', '2000-02-29', '2026-10-07'])assert.equal(financialRepairDateCanUseCalendar(value),true);
+  for(const value of ['0000-02-29', '2026-02-30', '2026-10-07 ', '2026-1-07', null, true])assert.equal(financialRepairDateCanUseCalendar(value),false);
+  assert.equal(financialRepairPrecheckBody('RECONCILIATION_FINANCIAL_REPAIR',{...values,business_date:'0000-02-29'}).body.business_date,'0000-02-29');
+});
+
+const sourceContext=()=>({case_id:id(1),reconciliation_run_id:id(3),case_type:'PROVIDER_PAID_INTERNAL_MISSING',status:'OPEN',case_version:'9223372036854775807',channel:'ALIPAY',business_date:'2026-10-09',provider_id:'controlled-provider',provider_version:'v1',merchant_order_no:'controlled-orphan',amount_fen:'9007199254740993',currency:'CNY',provider_transaction_id:'source-transaction',snapshot_available:true});
+test('Reconciliation source read binds original case/run/day and exact int64 without granting eligibility',()=>{
+  const source=sourceContext();
+  assert.equal(requireReconciliationRepairContext(source,id(1)),source);
+  assert.equal(source.amount_fen,'9007199254740993');assert.equal(source.case_version,'9223372036854775807');
+  for(const mutate of [v=>{v.case_id=id(2)},v=>{v.reconciliation_run_id='invalid'},v=>{v.business_date='2026-02-30'},v=>{v.case_version=9007199254740992},v=>{v.amount_fen=9007199254740992},v=>{v.amount_fen='9223372036854775808'},v=>{v.snapshot_available='true'}]){
+    const value=sourceContext();mutate(value);assert.throws(()=>requireReconciliationRepairContext(value,id(1)));
+  }
+  for(const amount_fen of ['0','-9223372036854775808'])assert.equal(requireReconciliationRepairContext({...source,amount_fen},id(1)).amount_fen,amount_fen);
+  const missing={...source,snapshot_available:false,amount_fen:null,currency:'',provider_transaction_id:''};assert.equal(requireReconciliationRepairContext(missing,id(1)).amount_fen,null);
+  assert.throws(()=>requireReconciliationRepairContext({...missing,amount_fen:'0'},id(1)));
+});
+test('Reconciliation actual client source entry uses protected no-store GET and validates returned target',async()=>{
+  const previous=globalThis.fetch;let call;let response=sourceContext();
+  globalThis.fetch=async(url,options)=>{call={url,options};return new Response(JSON.stringify(response),{status:200})};
+  try{
+    const client=new AdminPlatformClient('https://portal.example');
+    const value=await client.reconciliationRepairContext(id(1));
+    assert.equal(call.url,'https://portal.example/api/admin/billing/admin/v1/reconciliation-cases/00000000-0000-4000-8000-000000000001/repair-context');
+    assert.equal(call.options.method,undefined);assert.equal(call.options.cache,'no-store');assert.equal(call.options.credentials,'same-origin');
+    assert.equal(value.business_date,'2026-10-09');assert.equal(value.reconciliation_run_id,id(3));assert.equal(value.amount_fen,'9007199254740993');
+    response={...sourceContext(),case_id:id(2)};await assert.rejects(client.reconciliationRepairContext(id(1)));
+    globalThis.fetch=async()=>new Response(JSON.stringify({code:'FORBIDDEN'}),{status:403});
+    await assert.rejects(client.reconciliationRepairContext(id(1)),error=>error.status===403&&error.code==='FORBIDDEN');
+  }finally{globalThis.fetch=previous}
+});
+
+test('Reconciliation case date populates only accepted same-case source and preserves explicit edits',()=>{
+  assert.equal(reconciliationSourceBusinessDate({target_resource_id:id(1)},sourceContext(),false),'2026-10-09');
+  assert.equal(reconciliationSourceBusinessDate({target_resource_id:id(1),business_date:''},sourceContext(),true),null);
+  assert.equal(reconciliationSourceBusinessDate({target_resource_id:id(1),business_date:'2026-09-01'},sourceContext(),false),null);
+  assert.equal(reconciliationSourceBusinessDate({target_resource_id:id(1),business_date:'2026-10-09'},sourceContext(),true,'2026-10-09'),null);
+  assert.equal(reconciliationSourceBusinessDate({target_resource_id:id(1),business_date:'2026-10-07'},sourceContext(),false,'2026-10-07'),'2026-10-09');
+  assert.equal(reconciliationSourceBusinessDate({target_resource_id:id(2)},sourceContext(),false),null);
+  assert.equal(reconciliationSourceBusinessDate({target_resource_id:id(1)},{...sourceContext(),business_date:'2026-02-30'},false),null);
+  assert.equal(reconciliationSourceBusinessDate({target_resource_id:id(1)},{...sourceContext(),business_date:'0000-02-29'},false),'0000-02-29');
+  const business_date=reconciliationSourceBusinessDate({target_resource_id:id(1)},sourceContext(),false);
+  assert.deepEqual(financialRepairPrecheckBody('RECONCILIATION_FINANCIAL_REPAIR',{target_resource_id:id(1),payment_evidence_id:id(2),business_date}).body,{command_type:'RECONCILIATION_FINANCIAL_REPAIR',target_resource_id:id(1),payment_evidence_id:id(2),business_date:'2026-10-09',reason_code:'PROVIDER_REFUND_CONFIRMED'});
+});
+
+test('Reconciliation manual and immutable case hosts have stable disjoint recovery buckets and reset targets',()=>{
+  assert.deepEqual(reconciliationRepairHost(),{scope:'financial-repair:RECONCILIATION_FINANCIAL_REPAIR',initialValues:{},targetLocked:false});
+  assert.deepEqual(reconciliationRepairHost(id(1)),{scope:'financial-repair:RECONCILIATION_FINANCIAL_REPAIR:case:00000000-0000-4000-8000-000000000001',initialValues:{target_resource_id:id(1)},targetLocked:true});
+  assert.equal(reconciliationRepairHost(id(2)).scope,'financial-repair:RECONCILIATION_FINANCIAL_REPAIR:case:00000000-0000-4000-8000-000000000002');
+  assert.equal(reconciliationRepairHost(id(1)).scope,'financial-repair:RECONCILIATION_FINANCIAL_REPAIR:case:00000000-0000-4000-8000-000000000001');
+  for(const invalid of [null,'invalid','00000000-0000-0000-0000-000000000000','ABCDEF12-0000-4000-8000-000000000001'])assert.throws(()=>reconciliationRepairHost(invalid));
 });

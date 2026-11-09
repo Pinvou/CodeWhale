@@ -78,3 +78,13 @@
 
 .ap-payment-dialog { box-sizing: border-box; }
 .ap-payment-dialog footer { flex-wrap: wrap; }
+.ap-member-units-help { font-size: 12px; font-weight: 400; line-height: 1.5; white-space: normal; }
+th > .ap-member-units-help { display: block; max-width: 28ch; margin-top: 4px; }
+
+/* Naming rules and confirmed-update feedback share the existing form palette. */
+.ap-org-action .ap-org-name-hint{display:block;color:var(--adm-muted,#5f6368);font-size:13px;line-height:1.6;overflow-wrap:anywhere}
+.ap-org-action .ap-org-name-error{display:block;color:var(--adm-danger,#c33b46);font-size:13px;line-height:1.5}
+.ap-org-name-feedback{margin:12px 0;padding:12px 16px;border:1px solid var(--adm-line,#dfe2e7);border-radius:8px;background:var(--adm-soft,#f6f8fb)}
+.ap-org-name-feedback p{margin:0 0 8px;overflow-wrap:anywhere}
+.ap-org-name-feedback p:last-child{margin-bottom:0}
+.ap-unit-renamed{outline:2px solid var(--adm-primary,#3159e8);outline-offset:-2px}

@@ -14,7 +14,70 @@
 
 .ap-restored-dialog,.ap-restored-dialog *{box-sizing:border-box}
 .ap-restored-dialog form.ap-org-action>h4{display:none}
+.ap-restored-dialog form.ap-org-action>fieldset{display:grid;min-width:0;gap:16px;margin:0;padding:0;border:0}
+.ap-restored-dialog .ap-org-action-footer{display:flex;justify-content:flex-end;flex-wrap:wrap;gap:12px;margin-top:8px}
+.ap-restored-dialog .ap-org-action-footer>button{width:auto;min-width:96px}
+.ap-admin-org-confirm{font:14px/1.5 'PingFang SC',system-ui,sans-serif}
+.ap-restored-dialog form.ap-admin-org-action .ap-org-action-footer>button[type=submit],.ap-admin-org-confirm footer>button:last-child{border-color:var(--adm-primary,#3159e8);background:var(--adm-primary,#3159e8);color:#fff}
+.ap-restored-dialog form.ap-admin-org-action-danger .ap-org-action-footer>button[type=submit],.ap-admin-org-confirm-danger footer>button:last-child{border-color:var(--adm-danger,#c33b46);background:var(--adm-danger,#c33b46);color:#fff}
+.ap-admin-org-confirm footer>button{min-width:96px;min-height:40px;padding:8px 12px;border:1px solid #dfe2e7;border-radius:8px;background:#fff;color:inherit;font:inherit;cursor:pointer}
+.ap-restored-dialog form.ap-admin-org-action button:focus-visible,.ap-admin-org-confirm button:focus-visible{outline:3px solid #3159e848;outline-offset:2px}
+.ap-restored-dialog form.ap-admin-org-action-danger .ap-org-action-footer>button[type=submit]:focus-visible,.ap-admin-org-confirm-danger footer>button:last-child:focus-visible{outline-color:#c33b4648}
+.ap-admin-org-action .adm-owner-picker,.ap-admin-org-action .adm-owner-picker-selection{display:grid;gap:8px;min-width:0;overflow-wrap:anywhere}
+.ap-admin-org-action .adm-owner-picker .adm-filter-row{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:end;gap:8px}
+.ap-admin-org-action .adm-owner-picker label{min-width:0;gap:6px}
+.ap-admin-org-action .adm-owner-picker input,.ap-admin-org-action .adm-owner-picker select,.ap-admin-org-action .adm-owner-picker-direct input{width:100%;min-width:0}
+.ap-admin-org-action .adm-owner-picker small,.ap-admin-org-action .adm-owner-picker-direct small{color:#5f6368;overflow-wrap:anywhere}
+.ap-admin-org-action .adm-owner-picker-selection{padding:10px 12px;border:1px solid #dfe2e7;border-radius:8px;background:#f8f9fb}
+.ap-admin-org-action .adm-owner-picker>button{justify-self:start}
 @media(max-width:560px){.ap-restored-dialog-backdrop{padding:12px}.ap-restored-dialog{padding:20px}.ap-restored-dialog dl{grid-template-columns:minmax(0,1fr)}}
+@media(max-width:420px){.ap-admin-org-action .adm-owner-picker .adm-filter-row{grid-template-columns:minmax(0,1fr)}.ap-admin-org-action .adm-owner-picker .adm-filter-row>button{justify-self:start}}
 @media(pointer:coarse){.ap-restored-dialog button{min-height:44px}}
 .ap-restored-drawer-backdrop{display:flex;justify-content:flex-end;padding:0}
 .ap-restored-dialog.ap-restored-drawer{width:min(580px,100%);height:100%;max-height:100vh;padding:24px;border-radius:0;box-shadow:-10px 0 40px #0002}
+
+/* Ownership confirmation is rendered in two body-level Admin dialogs. */
+.ap-restored-dialog .ap-admin-owner-transfer-summary { grid-template-columns: minmax(0, 1fr) minmax(0, 2fr); }
+.ap-admin-owner-transfer-confirm { box-sizing: border-box; min-width: 0; }
+.ap-restored-dialog .ap-admin-owner-transfer-summary > :is(dt,dd),
+.ap-restored-dialog .ap-admin-owner-transfer-summary :is(bdi,code),
+.ap-admin-owner-transfer-confirm :is(dt,dd,bdi,code) {
+  min-width: 0;
+  white-space: normal;
+  overflow-wrap: break-word;
+  overflow-wrap: anywhere;
+}
+.ap-admin-owner-transfer-confirm footer { flex-wrap: wrap; }
+@media (max-width:560px) {
+  .ap-restored-dialog .ap-admin-owner-transfer-summary { grid-template-columns: minmax(0,1fr); }
+}
+
+.ap-restored-dialog .ap-org-action-footer-feedback { flex: 1 1 100%; margin: 0; color: #5f6368; }
+.ap-restored-dialog .ap-org-action-footer-feedback:empty { position: absolute; }
+
+/* Use Grid gaps for the ownership footer, including Safari 14.0. */
+.ap-restored-dialog .ap-org-action-footer.ap-admin-owner-transfer-footer,
+.ap-org-confirm-dialog.ap-admin-owner-transfer-confirm footer {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) repeat(2, minmax(96px, max-content));
+  align-items: start;
+  gap: 12px;
+}
+.ap-restored-dialog .ap-admin-owner-transfer-footer > .ap-org-action-footer-feedback { grid-column: 1 / -1; }
+.ap-restored-dialog .ap-admin-owner-transfer-footer > button:first-of-type,
+.ap-org-confirm-dialog.ap-admin-owner-transfer-confirm footer > button:first-of-type { grid-column: 2; }
+.ap-restored-dialog .ap-admin-owner-transfer-footer > button:last-of-type,
+.ap-org-confirm-dialog.ap-admin-owner-transfer-confirm footer > button:last-of-type { grid-column: 3; }
+.ap-restored-dialog form.ap-admin-org-action.ap-admin-org-action-danger .ap-org-action-footer.ap-admin-owner-transfer-footer > button:focus,
+.ap-admin-org-confirm.ap-admin-org-confirm-danger.ap-admin-owner-transfer-confirm footer > button:focus {
+  outline: 3px solid #243b80;
+  outline-offset: 2px;
+}
+@media (max-width: 420px) {
+  .ap-restored-dialog .ap-org-action-footer.ap-admin-owner-transfer-footer,
+  .ap-org-confirm-dialog.ap-admin-owner-transfer-confirm footer { grid-template-columns: minmax(0, 1fr); }
+  .ap-restored-dialog .ap-admin-owner-transfer-footer > button:first-of-type,
+  .ap-restored-dialog .ap-admin-owner-transfer-footer > button:last-of-type,
+  .ap-org-confirm-dialog.ap-admin-owner-transfer-confirm footer > button:first-of-type,
+  .ap-org-confirm-dialog.ap-admin-owner-transfer-confirm footer > button:last-of-type { grid-column: 1; justify-self: end; width: auto; min-width: 0; max-width: 100%; white-space: normal; overflow-wrap: break-word; }
+}

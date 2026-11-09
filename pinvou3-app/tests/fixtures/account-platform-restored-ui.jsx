@@ -4,11 +4,92 @@ import { AccountPlatformView } from '../../src/features/account-platform/Account
 import { AdminPlatformView } from '../../src/features/account-platform/AdminPlatformView.jsx';
 import { AccountPlatformBffClient } from '../../src/features/account-platform/bff-client.js';
 import { AdminPlatformClient } from '../../src/features/account-platform/admin-client.js';
-import { accountPlatformCopy, adminPlatformCopy, financeCopy, accountLayoutCopy, adminLayoutCopy, organizationCopy, adminRolePresentationCopy, platformRoleCopy } from '../../src/shared/i18n.js';
+import { encodeFinanceJSON } from '../../src/features/account-platform/finance-contract.js';
+import { readClosureIntent, saveClosureIntent } from '../../src/features/account-platform/closure-intent.js';
+import { accountPlatformCopy, adminPlatformCopy, financeCopy, accountLayoutCopy, adminLayoutCopy, organizationCopy, adminRolePresentationCopy, platformRoleCopy, accountClosureCopy, ledgerRepairCopy } from '../../src/shared/i18n.js';
 const id = '11111111-1111-4111-8111-111111111111';
 const orgID = '33333333-3333-4333-8333-333333333333', unitID = '44444444-4444-4444-8444-444444444444', otherID = '22222222-2222-4222-8222-222222222222';
 const root = createRoot(document.querySelector('#root'));
 const c = window.restored = { calls: [], effects: new Set(), user: id, language: 'zh', flags: {}, unknown: false, kind: new URLSearchParams(location.search).get('mode') || 'account' };
+const gridOverview = new URLSearchParams(location.search).get('gridOverview') === '1';
+if (gridOverview) {
+  c.flags = { admin_model_token_ia: true, admin_model_details: true, admin_token_details: true };
+  c.permissions = ['platform.billing.wallets.read', 'platform.products.read', 'platform.models.read', 'platform.tokens.read'];
+}
+const closureFeedback = new URLSearchParams(location.search).get('closureFeedback') === '1';
+if (closureFeedback) {
+  c.permissions = ['platform.account-closures.read', 'platform.account-closures.repair'];
+  c.closurePlan = { deferred: true, body: { items: [], next_cursor: null }, status: 200 };
+  c.pendingClosureReads = [];
+  c.closureClients = [];
+  c.releaseClosureRead = () => c.pendingClosureReads.shift()?.();
+  c.seedClosureRecovery = () => saveClosureIntent({ actor: c.user, scope: `account-closure-retry:${otherID}`, key: 'closure-controlled-original-key', facts: { id: otherID, reason: 'Controlled original recovery' } });
+  c.readClosureRecovery = actor => readClosureIntent(actor || c.user, `account-closure-retry:${otherID}`);
+}
+const userStatusRisk = new URLSearchParams(location.search).get('userStatusRisk') === '1';
+const userDetailHeader = new URLSearchParams(location.search).get('userDetailHeader') === '1';
+if (userDetailHeader) {
+  c.permissions = ['platform.users.read', 'platform.roles.read', 'platform.organizations.read'];
+  c.headerUser = { user_id: otherID, user_code: 'USR-1111-1111-1111-1111-DP', display_name: '用于验证用户详情标题和返回入口布局的测试用户名称', status: 'ACTIVE', created_at: '2026-10-01T00:00:00Z', updated_at: '2026-10-01T00:00:00Z' };
+  c.headerReadStatus = 200;
+}
+const userSearchTools = new URLSearchParams(location.search).get('userSearchTools') === '1';
+if (userSearchTools) {
+  c.permissions = ['platform.users.read'];
+  c.searchUsers = [
+    { user_id: id, user_code: 'USR-0000-0000-0000-0000-Q3', username: 'alice-slow', status: 'ACTIVE', created_at: '2026-10-01T00:00:00Z', updated_at: '2026-10-01T00:00:00Z' },
+    { user_id: otherID, user_code: 'USR-1111-1111-1111-1111-DP', username: 'bob-user', status: 'ACTIVE', created_at: '2026-10-01T00:00:00Z', updated_at: '2026-10-01T00:00:00Z' },
+  ];
+  c.pendingUserSearchReads = []; c.userSearchClients = [];
+  c.releaseUserSearchRead = () => c.pendingUserSearchReads.shift()?.();
+}
+if (userStatusRisk) {
+  c.permissions = ['platform.users.read', 'platform.users.status.manage'];
+  // Legal AdminUser fields: optional username/display_name, distinct checksum-
+  // valid formatted codes, canonical IDs and required creation/update times.
+  c.statusUsers = [{"user_id": "11111111-1111-4111-8111-111111111111", "user_code": "USR-0000-0000-0000-0000-Q3", "username": "sample-account", "status": "ACTIVE", "created_at": "2026-10-01T00:00:00Z", "updated_at": "2026-10-01T00:00:00Z"}, {"user_id": "22222222-2222-4222-8222-222222222222", "user_code": "USR-1111-1111-1111-1111-DP", "display_name": "Status target", "status": "ACTIVE", "created_at": "2026-10-01T00:00:00Z", "updated_at": "2026-10-01T00:00:00Z"}, {"user_id": "33333333-3333-4333-8333-333333333333", "user_code": "USR-2222-2222-2222-2222-8X", "display_name": "Status target", "status": "DISABLED", "created_at": "2026-10-01T00:00:00Z", "updated_at": "2026-10-01T00:00:00Z"}];
+  c.pendingUserStatusWrites = [];
+  c.releaseUserStatusWrite = () => c.pendingUserStatusWrites.shift()?.();
+}
+const ledgerPoints = new URLSearchParams(location.search).get('ledgerPoints') === '1';
+if (ledgerPoints) {
+  c.permissions = ['platform.billing.repairs.request', 'platform.billing.wallets.read'];
+  c.ledgerPlan = { amount: '9223372036854775807', deferred: false };
+  c.pendingLedgerReads = []; c.ledgerClients = []; c.loseLedgerDraft = true;
+  c.releaseLedgerRead = () => c.pendingLedgerReads.shift()?.();
+}
+// Closed owner projection: independent fixed response amounts are selected by
+// the test, never computed by echoing the submitted amount/conversion helper.
+const ledgerProjection = amount => ({
+  command_type: 'LEDGER_REPAIR', policy_version: 1, snapshot_schema_version: 1,
+  target_resource_type: 'LEDGER_POSTING', target_resource_id: id,
+  normalized_command: { target_posting_id: id, target_journal_entry_id: otherID, wrong_ledger_account_id: orgID, correct_ledger_account_id: unitID, amount_microcredits: amount, reason_code: 'ATTRIBUTION_TO_WRONG_PLATFORM_ACCOUNT' },
+  critical_resource_versions: { target_posting_id: id, target_journal_entry_id: otherID, posting_set_digest: 'a'.repeat(64), entry_type: 'USAGE', policy_version: 1 },
+  financial_snapshot: { amount_microcredits: amount, wrong_ledger_account_id: orgID, correct_ledger_account_id: unitID, wrong_account_type: 'ADJUSTMENT', correct_account_type: 'USAGE_REVENUE', wallet_id: null },
+});
+// These opt-in DTOs match the real seven/six metric keys; emit int64 values as
+// exact JSON number tokens so the production finance parser handles them.
+const gridFinanceOverview = surface => {
+  const wallets = ['ACTIVE', 'FROZEN', 'CLOSED'];
+  const rows = surface === 'accounts' ? [
+    ['wallet_count', '2', 'COUNT', wallets],
+    ['posted_microcredits', '9223372036854775807', 'MICROCREDITS', wallets],
+    ['reserved_microcredits', '0', 'MICROCREDITS', wallets],
+    ['available_microcredits', '9223372036854775807', 'MICROCREDITS', wallets],
+    ['receivable_microcredits', '0', 'MICROCREDITS', wallets],
+    ['pending_adjustment_count', '0', 'COUNT', ['PENDING_APPROVAL']],
+    ['at_risk_hold_count', '0', 'COUNT', ['ACTIVE', 'REVIEW']],
+  ] : [
+    ['product_draft_count', '0', 'COUNT', ['DRAFT']],
+    ['product_on_sale_count', '0', 'COUNT', ['ON_SALE']],
+    ['product_off_sale_count', '0', 'COUNT', ['OFF_SALE']],
+    ['product_deleted_count', '0', 'COUNT', ['DELETED']],
+    ['admission_pending_count', '0', 'COUNT', ['PENDING']],
+    ['admission_blocked_count', '0', 'COUNT', ['MISSING', 'FAILED', 'EXPIRED', 'REVOKED']],
+  ];
+  const metrics = rows.map(([key, value, unit, included_statuses]) => `{"key":${JSON.stringify(key)},"value":${value},"unit":${JSON.stringify(unit)},"included_statuses":${JSON.stringify(included_statuses)}}`);
+  return new Response(`{"as_of":"2026-10-29T00:00:00Z","window":null,"metrics":[${metrics.join(',')}]}`, { headers: { 'Content-Type': 'application/json' } });
+};
 const json = (value, status = 200) => new Response(status === 204 ? null : JSON.stringify(value), { status, headers: { 'Content-Type': 'application/json' } });
 const roleCatalog = [
   { code: 'PLATFORM_AUDITOR', scope: 'PLATFORM', assignable: true, permissions: ['platform.audit.read', 'platform.audit.export', 'platform.billing.ledger.read', 'platform.billing.wallets.read', 'platform.models.read', 'platform.organizations.read', 'platform.roles.read', 'platform.system.status.read', 'platform.users.read', 'platform.usage.read'] },
@@ -16,6 +97,9 @@ const roleCatalog = [
   { code: 'PLATFORM_AUDIT_PII_EXPORT', scope: 'PLATFORM', assignable: true, permissions: ['platform.audit.pii.export'] },
   { code: 'PLATFORM_SUPER_ADMIN', scope: 'PLATFORM', assignable: false, permissions: ['platform.roles.read', 'platform.roles.assign'] },
 ];
+const longCatalogRole = new URLSearchParams(location.search).has('longCatalogRole') ? {
+  code: `PLATFORM_EXTENSION_${'X'.repeat(160)}_TAIL`, scope: 'PLATFORM', assignable: false, description: `Extension${'W'.repeat(160)}Description`, permissions: ['platform.roles.read'],
+} : null;
 c.roleBindings = [{ binding_id: '66666666-6666-4666-8666-666666666666', user_id: otherID, role_code: 'PLATFORM_AUDITOR', scope: 'PLATFORM', grant_source: 'ADMIN', status: 'ACTIVE', starts_at: '2026-10-01T00:00:00Z', expires_at: null }];
 c.roleReceipts = new Map();
 // The service computes the current projection on each read/replay. A controlled
@@ -39,9 +123,38 @@ globalThis.fetch = async (input, options = {}) => {
     for (const key of ['created_from', 'created_to', 'entered_from', 'entered_to', 'next_review_before']) if (params.get(key) && !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(params.get(key))) return json({ code: 'INVALID_TIME_WINDOW' }, 400);
   }
 
-  if (url === '/api/session') return json({ authenticated: true, csrf_token: 'CONTROL_SYNTHETIC_CSRF', feature_flags: c.flags });
+  if (url === '/api/session') return json({ authenticated: true, csrf_token: 'CONTROL_SYNTHETIC_CSRF', feature_flags: c.flags, ...(gridOverview ? { credential_origin: 'https://credentials.example.invalid' } : {}) });
   if (url.endsWith('/account/bootstrap')) return json(account());
-  if (url.endsWith('/admin/v1/roles') && method === 'GET') return json({ items: roleCatalog });
+  if (ledgerPoints) {
+    if (url === '/api/admin/account/admin/v2/approval-command-prechecks') {
+      const plan = { ...c.ledgerPlan };
+      const response = () => new Response(encodeFinanceJSON(ledgerProjection(plan.amount)), { headers: { 'Content-Type': 'application/json' } });
+      if (plan.deferred) return new Promise(resolve => c.pendingLedgerReads.push(() => resolve(response())));
+      return response();
+    }
+    if (url === '/api/admin/approvals/directory') return new Response(JSON.stringify({ schema_version: 1, platform_authorization_version: 1, items: [{ command_type: 'LEDGER_REPAIR', policy_version: 1, risk_class: 'FINANCIAL_FACT_CHANGE', requestable: true }] }), { headers: { 'Content-Type': 'application/json', 'X-Platform-Authorization-Version': '1' } });
+    if (url === '/api/admin/approvals/capability') return json({ session_approval_wire_version: 2, control: { version: 1, epoch: 1, authorization_relay_epoch: 1 } });
+    if (url === '/api/admin/approvals/requests' && method === 'POST') {
+      c.effects.add(JSON.parse(options.body).idempotency_key);
+      if (c.loseLedgerDraft) { c.loseLedgerDraft = false; throw new TypeError('Controlled lost draft acknowledgment'); }
+      return json({ approval_request_id: '55555555-5555-4555-8555-555555555555' }, 201);
+    }
+    if (url.startsWith('/api/admin/approvals/requests?')) return json({ items: [], has_more: false });
+    if (url === '/api/admin/approvals/requests/55555555-5555-4555-8555-555555555555') return json({ approval_request_id: '55555555-5555-4555-8555-555555555555', command_type: 'LEDGER_REPAIR', status: 'DRAFT', version: 1, action_control_version: 1, detail_availability: 'AVAILABLE', allowed_actions: ['EDIT', 'SUBMIT'], target: { resource_type: 'LEDGER_POSTING', resource_id: id }, command: ledgerProjection('9223372036854775807').normalized_command, reason: 'Controlled ledger correction justification' });
+  }
+  if (closureFeedback && method === 'GET' && new URL(url, location.origin).pathname === '/api/admin/account/admin/v1/account-closure-requests') {
+    const plan = c.closurePlan;
+    if (plan.deferred) return new Promise(resolve => c.pendingClosureReads.push(() => resolve(json(plan.body, plan.status))));
+    return json(plan.body, plan.status);
+  }
+  if (gridOverview && method === 'GET') {
+    const pathname = new URL(url, location.origin).pathname;
+    if (pathname === '/api/admin/billing/admin/v1/finance-overviews/accounts') return gridFinanceOverview('accounts');
+    if (pathname === '/api/admin/billing/admin/v1/finance-overviews/products') return gridFinanceOverview('products');
+    if (pathname === `/api/admin/token/admin/v1/models/${id}`) return json({ model: { model_id: id, display_name: 'Controlled model', lifecycle_status: 'PUBLISHED', catalog_version: 1, capability_version: 1, protocol_code: 'CHAT', protocol_version: 1, context_length: 128000, maximum_output_tokens: 4096, supported_modalities: ['text'], tokenizer_version: 'CONTROLLED_V1', runtime_protocol: null, source_available: true }, draft: null, protocol: {}, formula: null, as_of: '2026-10-29T00:00:00Z' });
+    if (pathname === `/api/admin/token/admin/v2/token-accounts/${id}`) return json({ token_account_id: id, name: 'Controlled model account', status: 'ACTIVE', owner_type: 'USER', owner_id: id, share_scope: 'PRIVATE', account_version: 1, active_credential_count: 1, route_count: 1, updated_at: '2026-10-29T00:00:00Z' });
+  }
+  if (url.endsWith('/admin/v1/roles') && method === 'GET') return json({ items: longCatalogRole ? [...roleCatalog, longCatalogRole] : roleCatalog });
   if (url.includes('/admin/v1/role-bindings') && method === 'GET') {
     if (c.roleReadFail && c.roleReceipts.size) return json({ code: 'UPSTREAM_UNAVAILABLE' }, 503);
     const target = new URL(url, location.origin).searchParams.get('user_id');
@@ -75,9 +188,42 @@ globalThis.fetch = async (input, options = {}) => {
   if (url.endsWith('/v1/recharge/orders') && method === 'POST') { c.effects.add(call.key); const receipt = () => c.unknown ? json({ code: 'COMMAND_RESULT_UNKNOWN' }, 503) : json(order(), 201); if (c.delayCreate) return new Promise(resolve => { c.releaseCreate = () => resolve(receipt()); }); return receipt(); }
   if (url.endsWith('/v1/recharge/orders')) return json({ items: Array.from({ length: 6 }, (_, i) => order(i + 1)) });
   if (/\/v1\/recharge\/orders\/[^/?]+$/.test(url)) return json(order(Number(url.split('-').at(-1))));
+  if (userDetailHeader && method === 'GET') {
+    const requestURL = new URL(url, location.origin), pathname = requestURL.pathname;
+    if (pathname === `/api/admin/account/admin/v1/users/${otherID}`) return c.headerReadStatus === 200 ? json(c.headerUser) : json({ code: 'NOT_FOUND' }, c.headerReadStatus);
+    if (pathname === `/api/admin/account/admin/v1/users/${otherID}/memberships`) return json({ items: [{ organization_id: orgID, organization_name: '示例组织', membership_status: 'ACTIVE', roles: ['OWNER'], unit_admin_unit_ids: [] }] });
+    if (pathname === '/api/admin/account/admin/v1/users') {
+      const query = (requestURL.searchParams.get('q') || '').trim().toLowerCase();
+      const expectedCursor = 'eyJ1cGRhdGVkX2F0IjoiMjAyNi0xMC0wMVQwMDowMDowMFoiLCJ1c2VyX2lkIjoiMzMzMzMzMzMtMzMzMy00MzMzLTgzMzMtMzMzMzMzMzMzMzMzIn0';
+      if (requestURL.searchParams.get('cursor') && requestURL.searchParams.get('cursor') !== expectedCursor) return json({ code: 'INVALID_USER_FILTER' }, 400);
+      return json({ items: c.headerUser.display_name.includes(query) || c.headerUser.user_id === query ? [c.headerUser] : [], next_cursor: null });
+    }
+  }
+  if (userSearchTools && method === 'GET' && new URL(url, location.origin).pathname === '/api/admin/account/admin/v1/users') {
+    const query = (new URL(url, location.origin).searchParams.get('q') || '').trim().toLowerCase();
+    const items = c.searchUsers.filter(user => user.username.includes(query) || user.user_id === query);
+    const response = () => json({ items, next_cursor: null });
+    if (query === 'slow' && c.holdUserSearchRead) return new Promise(resolve => c.pendingUserSearchReads.push(() => resolve(response())));
+    return response();
+  }
+  if (userSearchTools && method === 'GET' && url.includes('/admin/v1/user-code-lookups/')) {
+    const code = decodeURIComponent(url.split('/').at(-1)).replaceAll('-', '').toUpperCase();
+    const user = c.searchUsers.find(item => item.user_code.replaceAll('-', '') === code);
+    return user ? json(user) : json({ code: 'NOT_FOUND' }, 404);
+  }
   if (url.includes('/admin/v1/user-code-lookups/')) {
     const code = decodeURIComponent(url.split('/').at(-1)).replaceAll('-', '').toUpperCase();
     return code === 'USR0123456789ABCDEFMV' ? json({ user_id: otherID, username: 'coded-user', user_code: 'USR-0123-4567-89AB-CDEF-MV', status: 'ACTIVE' }) : json({ code: 'NOT_FOUND' }, 404);
+  }
+  if (userStatusRisk && method === 'GET' && new URL(url, location.origin).pathname === '/api/admin/account/admin/v1/users') return json({ items: c.statusUsers, next_cursor: null });
+  if (userStatusRisk && method === 'PATCH' && /^\/api\/admin\/account\/admin\/v1\/users\/[a-f0-9-]+\/status$/.test(url)) {
+    if (!c.permissions.includes('platform.users.status.manage')) return json({ code: 'PERMISSION_DENIED' }, 403);
+    const body = JSON.parse(options.body), target = c.statusUsers.find(user => user.user_id === url.split('/').at(-2));
+    if (!target) return json({ code: 'NOT_FOUND' }, 404);
+    if (Object.keys(body).join(',') !== 'status' || !['ACTIVE', 'DISABLED'].includes(body.status)) return json({ code: 'INVALID_USER_STATUS' }, 400);
+    const response = () => { target.status = body.status; target.updated_at = '2026-11-06T00:00:00Z'; return json(null, 204); };
+    if (c.holdUserStatusWrite) return new Promise(resolve => c.pendingUserStatusWrites.push(() => resolve(response())));
+    return response();
   }
   if (url.includes('/admin/v1/users?')) {
     const query = new URL(url, location.origin).searchParams.get('q') || '';
@@ -90,8 +236,16 @@ globalThis.fetch = async (input, options = {}) => {
   if (url.includes('/admin/v1/organizations?')) return json({ items: [org], next_cursor: null });
   if (url.endsWith(`/admin/v1/organizations/${orgID}`)) return json(org);
   if (url.endsWith('/admin/v1/organizations') && method === 'POST') { c.effects.add(call.key); return c.unknownOrgCreate ? json({ code: 'COMMAND_RESULT_UNKNOWN' }, 503) : json(org, 201); }
-  if (url.endsWith(`/organizations/${orgID}/units`)) return json({ items: [{ organization_id: orgID, unit_id: unitID, name: 'Sample unit', parent_id: null, status: 'ACTIVE', version: 1 }], structure_version: 2 });
-  if (url.includes(`/organizations/${orgID}/members?`)) return json({ items: [{ organization_id: orgID, membership_id: '55555555-5555-4555-8555-555555555555', user_id: otherID, display_name: new URL(url, location.origin).searchParams.get('q') || 'Sample member', status: 'ACTIVE', version: 1, roles: ['MEMBER'], unit_ids: [unitID] }], next_cursor: null });
+  if (method === 'DELETE' && url.endsWith(`/organizations/${orgID}/units/${unitID}`) || method === 'PATCH' && url.endsWith(`/organizations/${orgID}/status`)) {
+    const replayed = c.effects.has(call.key);
+    c.effects.add(call.key);
+    if (method === 'DELETE') c.unitDeleted = true;
+    else c.orgStatus = JSON.parse(options.body).status;
+    if (c.unknownOrgAction) { c.unknownOrgAction = false; return json({ code: 'COMMAND_RESULT_UNKNOWN' }, 503); }
+    return method === 'DELETE' ? json({ unit: { organization_id: orgID, unit_id: unitID, parent_id: null, name: 'Sample unit', status: 'DELETED', version: 2 }, structure_version: 3, replayed }) : json(null, 204);
+  }
+  if (url.endsWith(`/organizations/${orgID}/units`)) return json({ items: c.unitDeleted ? [] : [{ organization_id: orgID, unit_id: unitID, name: 'Sample unit', parent_id: null, status: 'ACTIVE', version: 1 }], structure_version: c.unitDeleted ? 3 : 2 });
+  if (url.includes(`/organizations/${orgID}/members?`)) return json({ items: [{ organization_id: orgID, membership_id: '55555555-5555-4555-8555-555555555555', user_id: otherID, display_name: new URL(url, location.origin).searchParams.get('q') || 'Sample member', status: 'ACTIVE', version: 1, roles: ['MEMBER'], unit_ids: c.noUnitMembers ? [] : [unitID] }], next_cursor: null });
   if (url.endsWith(`/organizations/${orgID}/deletion-readiness`)) return json({ organization_id: orgID, current_status: c.orgStatus || 'ACTIVE', account_version: 3, ready: c.orgReady === true, blockers: c.orgReady ? [] : [{ code: 'ACTIVE_MEMBERS', resource_type: 'MEMBERSHIP', resource_id: otherID }] });
   if (url.includes('/admin/v1/finance-overviews/')) {
     const surface = url.split('/').at(-1);
@@ -145,6 +299,34 @@ let client;
 function render() {
   root.render(c.kind === 'admin' ? <AdminPlatformView client={client} copy={adminPlatformCopy[c.language]} language={c.language} onLanguageChange={value => { c.language = value; render(); }} /> : <AccountPlatformView client={client} copy={accountPlatformCopy[c.language]} language={c.language} portal onLanguageChange={value => { c.language = value; render(); }} />);
 }
-c.reload = () => { client = c.kind === 'admin' ? new AdminPlatformClient() : new AccountPlatformBffClient(); render(); };
-c.copy = () => ({ account: accountPlatformCopy[c.language], admin: adminPlatformCopy[c.language], finance: financeCopy[c.language], accountLayout: accountLayoutCopy[c.language], adminLayout: adminLayoutCopy[c.language], organization: organizationCopy[c.language], rolePresentation: adminRolePresentationCopy[c.language], roles: platformRoleCopy[c.language] });
+c.reload = () => {
+  client = c.kind === 'admin' ? new AdminPlatformClient() : new AccountPlatformBffClient();
+  if (closureFeedback) c.closureClients.push(client);
+  if (userSearchTools) {
+    const observedClient = client, originalUsers = client.users.bind(client), originalByCode = client.userByCode.bind(client);
+    observedClient.userReadsSettled = 0; observedClient.userCodeReadsSettled = 0;
+    observedClient.users = async (...args) => {
+      try { return await originalUsers(...args); }
+      finally { observedClient.userReadsSettled++; }
+    };
+    observedClient.userByCode = async (...args) => {
+      try { return await originalByCode(...args); }
+      finally { observedClient.userCodeReadsSettled++; }
+    };
+    c.userSearchClients.push(observedClient);
+  }
+  if (ledgerPoints) {
+    const observedClient = client, originalPrecheck = client.approvalCommandPrecheck.bind(client);
+    observedClient.ledgerReadsSettled = 0;
+    // Observe the actual client's decoded promise without replacing its result,
+    // errors, codec, dispatch, lineage or the form's acceptance decision.
+    observedClient.approvalCommandPrecheck = async (...args) => {
+      try { return await originalPrecheck(...args); }
+      finally { observedClient.ledgerReadsSettled++; }
+    };
+    c.ledgerClients.push(observedClient);
+  }
+  render();
+};
+c.copy = () => ({ account: accountPlatformCopy[c.language], admin: adminPlatformCopy[c.language], finance: financeCopy[c.language], accountLayout: accountLayoutCopy[c.language], adminLayout: adminLayoutCopy[c.language], organization: organizationCopy[c.language], rolePresentation: adminRolePresentationCopy[c.language], roles: platformRoleCopy[c.language], closure: accountClosureCopy[c.language], ledger: ledgerRepairCopy[c.language] });
 c.reload();

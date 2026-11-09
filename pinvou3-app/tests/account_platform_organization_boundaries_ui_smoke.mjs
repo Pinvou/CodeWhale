@@ -79,7 +79,16 @@ try {
   });
   await run('Invalid name and definite denial retain editable state without an unresolved invocation', async () => {
     await renameFresh(); await editName('rename', 'Controlled Org', '   '); await submitName('rename');
-    await page.waitForFunction(() => [...document.querySelectorAll('form.ap-org-action')].find(node => node.querySelector('h4')?.textContent === window.f06.copy().rename).querySelector('[role=alert]')?.textContent === window.f06.copy().invalid);
+    await page.waitForFunction(() => {
+      const form = [...document.querySelectorAll('form.ap-org-action')].find(node => node.querySelector('h4')?.textContent === window.f06.copy().rename);
+      const input = form?.querySelector('input'), error = form?.querySelector('[role=alert]');
+      return Boolean(error?.id) && error.textContent === window.f06.copy().nameRequired && input?.getAttribute('aria-invalid') === 'true' && input.getAttribute('aria-describedby')?.split(/\s+/).includes(error.id);
+    });
+    assert.deepEqual(await page.evaluate(() => {
+      const form = [...document.querySelectorAll('form.ap-org-action')].find(node => node.querySelector('h4')?.textContent === window.f06.copy().rename);
+      const input = form.querySelector('input');
+      return { value: input.value, disabled: input.matches(':disabled'), cancelDisabled: form.querySelector('button[type=button]').disabled };
+    }), { value: '   ', disabled: false, cancelDisabled: false });
     assert.equal((await renameWrites()).length, 0); await cancelName('rename');
     await editName('rename', 'Controlled Org', 'Denied Name'); await page.evaluate(() => { window.f06.renameDenied = true; }); await submitName('rename');
     await page.waitForFunction(() => [...document.querySelectorAll('form.ap-org-action')].find(node => node.querySelector('h4')?.textContent === window.f06.copy().rename).querySelector('[role=alert]')?.textContent === window.f06.copy().permissions);

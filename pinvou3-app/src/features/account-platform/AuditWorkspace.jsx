@@ -66,7 +66,7 @@ function Table({ columns, items, copy }) {
           {items.map((item, index) => (
             <tr key={item.audit_id || index}>
               {columns.map((column) => (
-                <td key={column.key}>{column.render ? column.render(item) : (item[column.key] ?? '—')}</td>
+                <td key={column.key} className={column.className}>{column.render ? column.render(item) : (item[column.key] ?? '—')}</td>
               ))}
             </tr>
           ))}
@@ -358,8 +358,9 @@ function Audit({ copy, data, client, setData, permissions, currentUserID }) {
     {
       key: 'action',
       label: copy.audit.action,
+      className: 'adm-audit-action-cell',
       render: (item) => (
-        <button className="adm-name-link" onClick={() => showDetail(item)}>
+        <button className="adm-name-link adm-audit-action" onClick={() => showDetail(item)}>
           {item.action}
         </button>
       ),
@@ -470,7 +471,7 @@ function Audit({ copy, data, client, setData, permissions, currentUserID }) {
       {(needsAuthentication || recoveryBlocked) && <div><p>{copy.audit.reauthenticateHelp}</p><button type="button" disabled={busy} onClick={() => void reauthenticate()}>{copy.audit.reauthenticate}</button></div>}
       {canExport && <form className="adm-ops-form" onSubmit={(event) => { event.preventDefault(); void createExport(); }}>
         <label>{copy.audit.exportReason}<input value={exportReason} minLength="10" disabled={recoveryBlocked || exportAttempted || busy || Boolean(exportJob)} onChange={(event) => setExportReason(event.target.value)} required /></label>
-        <label><input type="checkbox" checked={includePII} disabled={recoveryBlocked || !canExportPII || exportAttempted || busy || Boolean(exportJob)} title={!canExportPII ? copy.permissionDenied : undefined} onChange={(event) => setIncludePII(event.target.checked)} />{copy.audit.includePII}</label>
+        <label className="adm-checkbox-field"><input type="checkbox" checked={includePII} disabled={recoveryBlocked || !canExportPII || exportAttempted || busy || Boolean(exportJob)} title={!canExportPII ? copy.permissionDenied : undefined} onChange={(event) => setIncludePII(event.target.checked)} />{copy.audit.includePII}</label>
         <button type="submit" disabled={recoveryBlocked || busy || Boolean(exportJob)}>{exportAttempted ? copy.audit.retryExport : copy.audit.export}</button>
         {exportAttempted && !exportJob && <small role="status">{copy.audit.retrySameExport}</small>}
       </form>}

@@ -70,11 +70,11 @@ try {
   assert.equal(await page.$eval('body', node => getComputedStyle(node).margin), '0px');
   assert.equal(await page.$eval('.adm-sidebar', node => Math.round(node.getBoundingClientRect().width)), 272);
   await page.click('.adm-sidebar [data-section=organizations]');
-  await page.waitForFunction(value => [...document.querySelectorAll('.adm-section-toolbar button')].some(node => node.textContent.trim() === value && !node.disabled), {}, organizationCopy.zh.create);
-  const trigger = await page.$('.adm-section-toolbar button'); await trigger.click(); await page.waitForSelector('.ap-restored-dialog');
+  await page.waitForFunction(value => [...document.querySelectorAll('.adm-organization-toolbar>button.ap-admin-org-primary-trigger')].some(node => node.textContent.trim() === value && !node.disabled), {}, organizationCopy.zh.create);
+  const trigger = await page.$('.adm-organization-toolbar>button.ap-admin-org-primary-trigger'); await trigger.click(); await page.waitForSelector('.ap-restored-dialog');
   assert.equal(await page.$eval('.ap-restored-dialog-backdrop', node => getComputedStyle(node).position), 'fixed');
   await page.keyboard.press('Escape'); await page.waitForFunction(() => !document.querySelector('[role=dialog]'));
-  await page.waitForFunction(() => document.activeElement.closest('.adm-section-toolbar'));
+  await page.waitForFunction(opener => document.activeElement === opener, {}, trigger);
   // This style probe deliberately checks the separate built admin entry. A
   // fixture importing both roots would mask a missing shared confirmation CSS.
   assert.equal(await page.evaluate(() => { const node = document.createElement('div'); node.className = 'ap-org-confirm-backdrop'; document.body.append(node); const position = getComputedStyle(node).position; node.remove(); return position; }), 'fixed');
