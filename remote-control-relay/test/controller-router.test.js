@@ -143,12 +143,12 @@ test("an unsuccessful claim releases only its own role admission", async () => {
     socketIdentity: "socket-A",
     message: { type: "controller_pairing_claim", request_id: "request-role-failure" },
   });
-  assert.equal(value.router.reserveControlledRegistration("socket-A"), null);
+  assert.equal(value.router.reserveControlledRegistration("socket-A", "endpoint-0002"), null);
   const rejected = assert.rejects(pending, /claim rejected/u);
   rejectClaim(new Error("claim rejected"));
   await rejected;
 
-  const release = value.router.reserveControlledRegistration("socket-A");
+  const release = value.router.reserveControlledRegistration("socket-A", "endpoint-0002");
   assert.equal(typeof release, "function");
   await assert.rejects(value.router.handle({ socketIdentity: "socket-A", message: {
     type: "controller_resume_prepare", request_id: "request-role-resume", sender_role: "B",

@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import {
   CONTROLLER_PROTOCOL_VERSION,
   validateControllerMessage,
@@ -188,10 +189,33 @@ export class ControllerRouter {
     };
   }
 
-  reserveControlledRegistration(socketIdentity) {
+  reserveControlledRegistration(socketIdentity, endpointId) {
     const peer = this.#peers.get(id(socketIdentity, "socket_identity"));
     if (!this.#isLivePeer(peer) || peer.role !== "unknown" || peer.roleAdmission) return null;
-    return this.#reserveRole(peer, "B", "registration");
+    endpointId = endpointIdentifier(endpointId);
+    const release = this.#reserveRole(peer, "B", "registration");
+    const admission = peer.roleAdmission;
+    admission.endpointId = endpointId;
+    admission.ready = new Promise((resolve) => { admission.finishRegistration = resolve; });
+    return () => {
+      release();
+      admission.finishRegistration(this.#isLivePeer(peer) && peer.role === "B"
+        && peer.endpointId === endpointId && this.#controlled.get(endpointId) === socketIdentity);
+    };
+  }
+
+  async #waitForControlledRegistration(admission, message, lease) {
+    if (lease?.endpoint_id !== admission.endpointId) fail("controller_role_invalid");
+    const validated = validateControllerMessage(message, "B", lease);
+    const digest = createHash("sha256")
+      .update(JSON.stringify(validated, Object.keys(validated).sort())).digest("hex");
+    // Native B can send prepare right after register without waiting for the
+    // ACK. Keep one exact prepare across that wait and coalesce its retransmit.
+    if (admission.resumeDigest === digest) return false;
+    if (admission.resumeDigest) fail("controller_busy");
+    admission.resumeDigest = digest;
+    if (!await admission.ready) fail("endpoint_offline");
+    return true;
   }
 
   authenticateControlled({ socketIdentity, endpointId, authenticatedContext } = {}) {
@@ -366,11 +390,18 @@ export class ControllerRouter {
       }
       const hooks = this.#hooks.find((candidate) => candidate.handles(message?.type));
       if (hooks) {
+        let lease = typeof message?.controller_lease_id === "string"
+          ? this.#leases.lease(message.controller_lease_id) : null;
         if (message.type === "controller_resume_prepare" && ["A", "B"].includes(message.sender_role)) {
+          const registration = peer.roleAdmission;
+          if (message.sender_role === "B" && registration?.kind === "registration") {
+            if (!await this.#waitForControlledRegistration(registration, message, lease)) return undefined;
+            lease = this.#leases.lease(message.controller_lease_id);
+            if (peer.endpointId !== registration.endpointId || lease?.endpoint_id !== registration.endpointId
+              || this.#controlled.get(registration.endpointId) !== socketIdentity) fail("endpoint_offline");
+          }
           releaseRole = this.#reserveRole(peer, message.sender_role, "resume");
         }
-        const lease = typeof message?.controller_lease_id === "string"
-          ? this.#leases.lease(message.controller_lease_id) : null;
         // A heartbeat for the frozen lease's current liveness epoch can be in flight when its
         // counterpart closes. During recovery it is neither new evidence nor
         // a fatal error: returning an error can abort A's recovery worker.
@@ -533,6 +564,7 @@ export class ControllerRouter {
     const peer = this.#peers.get(socketIdentity);
     if (!peer || peer.closing) return Object.freeze({ handshakes: 0, leases: 0 });
     peer.closing = true;
+    peer.roleAdmission?.finishRegistration?.(false);
     const lease = peer.controllerLeaseId ? this.#leases.lease(peer.controllerLeaseId) : null;
     // Both hooks run asynchronously and liveness removes its state on close.
     // Capture authenticated evidence once, before dispatching either hook.

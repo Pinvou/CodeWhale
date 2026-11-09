@@ -1132,7 +1132,7 @@ async function registerDesktop(ws, msg) {
   // Reserve the negotiated socket's role before any asynchronous enrollment
   // can create an identity. A conflicting frame must leave the incumbent live.
   const router = ws.protocol === CONTROLLER_SUBPROTOCOL ? controllerRuntime?.router : null;
-  const releaseRole = router?.reserveControlledRegistration(ws.controllerSocketIdentity);
+  const releaseRole = router?.reserveControlledRegistration(ws.controllerSocketIdentity, endpointId);
   if (router && !releaseRole) {
     send(ws, { v: 2, type: "error", code: "bad_desktop_endpoint_register", message: "bad desktop endpoint registration" });
     return;
@@ -1552,9 +1552,9 @@ wss.on("connection", (ws, req) => {
       void controllerRuntime.router.handle({
         socketIdentity: ws.controllerSocketIdentity,
         message: msg,
-      }).then(() => {
-        if (msg.type === "controller_pairing_claim"
-          || (typeof msg.type === "string" && msg.type.startsWith("controller_"))) {
+      }).then((result) => {
+        if (result !== undefined && (msg.type === "controller_pairing_claim"
+          || (typeof msg.type === "string" && msg.type.startsWith("controller_")))) {
           ws.controllerAuthenticated = true;
           clearTimeout(ws.authTimer);
           ws.authTimer = null;

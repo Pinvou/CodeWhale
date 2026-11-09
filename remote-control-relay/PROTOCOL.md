@@ -785,6 +785,15 @@ because it carries controller v1 frames, while its existing v2
 An ordinary browser socket does not negotiate the controller subprotocol and
 cannot submit controller v1 frames. The Relay binds a controlled controller
 identity only to a negotiated desktop socket.
+On a negotiated socket the first role-establishing operation reserves the
+socket's role while authentication is pending. A competing operation for the
+other role cannot change that reservation or replace an enrolled endpoint.
+On reconnect, B may send `controller_resume_prepare` immediately after
+`desktop_endpoint_register`. The Relay holds at most one prepare for a lease
+of that endpoint, coalesces exact retransmissions while registration is
+pending, and processes it after successful registration and its ACK. The
+resume token, current endpoint binding and original recovery deadline still
+apply.
 If an older Relay or proxy omits the requested subprotocol in its upgrade
 response, the desktop opens a fresh v2-only connection to preserve WebUI
 access. That connection cannot carry controller v1 traffic: already queued v1

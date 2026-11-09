@@ -2286,10 +2286,13 @@ for (const firstRole of ["A", "B"]) {
   });
 }
 
-test("controller v1 completes a real three-party encrypted handshake beside legacy Web v2", async () => {
+test("controller v1 completes a real three-party handshake and resumes B beside legacy Web v2", async () => {
   const statePath = join(testRoot, `controller-legacy-${Date.now()}.json`);
   const controllerStatePath = join(testRoot, `controller-state-${Date.now()}`, "state.json");
   const signing = crypto.generateKeyPairSync("ed25519");
+  const endpointId = "endpoint-controller-e2e";
+  const resumeRequest = "request-resume-reconnect-B";
+  const capabilities = ["pairing_v1", "encrypted_frames_v1", "finished_receipt_v1", "task_v1", "role_liveness_v1", "resume_v1"];
   const isolated = await spawnRelay({
     NODE_ENV: "development",
     PINVOU_DESKTOP_CONTROLLER_ENABLED: "1",
@@ -2305,7 +2308,10 @@ test("controller v1 completes a real three-party encrypted handshake beside lega
     PINVOU_REMOTE_RELAY_SIGNING_PRIVATE_KEY_B64: signing.privateKey.export({
       type: "pkcs8", format: "der",
     }).toString("base64"),
-  });
+    PINVOU_TEST_PAUSE_ROLE_ENDPOINT: endpointId,
+    PINVOU_TEST_PAUSE_ROLE_AFTER: "1",
+    PINVOU_TEST_ROLE_RESUME_REQUEST: resumeRequest,
+  }, { preload: new URL("./fixtures/controller-role-admission-barrier.js", import.meta.url).href, ipc: true });
   const sockets = [];
   try {
     const controllerHealth = await (await fetch(`${isolated.httpUrl}/pinvou3/remote/healthz`)).json();
@@ -2327,7 +2333,6 @@ test("controller v1 completes a real three-party encrypted handshake beside lega
     assert.equal((await duplicateError).code, "bad_json");
     closeSocket(duplicateSocket);
     await smokeControllerRoute(isolated.wsUrl);
-    const endpointId = "endpoint-controller-e2e";
     const accessToken = "controller-access-token-0000000000000001";
     const desktopSecret = "controller-desktop-secret-000000000001";
     const desktop = await registerDesktop(endpointId, accessToken, desktopSecret,
@@ -2349,7 +2354,7 @@ test("controller v1 completes a real three-party encrypted handshake beside lega
       code_wrap_public_key_b64: rawX25519Public(codeWrap.publicKey).toString("base64"),
       handshake_public_key_b64: rawX25519Public(handshakeB.publicKey).toString("base64"),
       key_algorithm: "x25519",
-      capabilities: ["pairing_v1", "encrypted_frames_v1", "finished_receipt_v1", "task_v1"],
+      capabilities,
     }));
     const registered = await registeredPromise;
     if (registered.type === "error") throw new Error(`pairing registration failed: ${registered.code}`);
@@ -2369,7 +2374,7 @@ test("controller v1 completes a real three-party encrypted handshake beside lega
       pairing_code: pairingCode,
       handshake_public_key_b64: rawX25519Public(handshakeA.publicKey).toString("base64"),
       key_algorithm: "x25519",
-      capabilities: ["pairing_v1", "encrypted_frames_v1", "finished_receipt_v1", "task_v1"],
+      capabilities,
     }));
     const [reserved, controlledReserved] = await Promise.all([reservedA, reservedB]);
     assert.equal(controlledReserved.transcript_hash, reserved.transcript_hash);
@@ -2506,6 +2511,37 @@ test("controller v1 completes a real three-party encrypted handshake beside lega
       + `"endpoint_id":"${endpointId}","access_token":"${accessToken}",`
       + '"stream_epoch":null,"after_seq":0}');
     assert.equal((await conflict).code, "endpoint_not_found");
+
+    const removed = waitForRegistrationProbe(isolated.child, "role-socket-removed", endpointId);
+    closeSocket(desktop.ws);
+    await removed;
+    const prepare = (role, joined, requestId) => ({
+      v: 1, type: "controller_resume_prepare", request_id: requestId, ...leaseContext,
+      sender_role: role, resume_token_b64: joined.resume_token_b64,
+      transport_challenge_b64: crypto.randomBytes(16).toString("base64"),
+      original_deadline_ms: joined.resume_deadline_ms,
+    });
+    const prepareA = "request-resume-reconnect-A";
+    const preparedA = waitForRegistrationProbe(isolated.child, "role-resume-finished", prepareA);
+    controller.send(JSON.stringify(prepare("A", controllerJoined, prepareA)));
+    assert.equal((await preparedA).error, undefined);
+    const rebound = await openControllerSocket(isolated.wsUrl);
+    sockets.push(rebound);
+    const registrationReady = waitForRegistrationProbe(isolated.child, "role-registration-ready", endpointId);
+    const resumeSeen = waitForRegistrationProbe(isolated.child, "role-resume-seen");
+    const first = nextMessageOneOf(rebound, ["desktop_endpoint_registered", "controller_resume_provisional", "error"], 10_000);
+    const provisional = nextMessageOneOf(rebound, ["controller_resume_provisional", "error"], 10_000);
+    rebound.send(JSON.stringify({ v: 2, type: "desktop_endpoint_register", endpoint_id: endpointId,
+      access_token: accessToken, desktop_secret: desktopSecret }));
+    const prepareB = JSON.stringify(prepare("B", desktopJoined, resumeRequest));
+    rebound.send(prepareB);
+    rebound.send(prepareB);
+    await Promise.all([registrationReady, resumeSeen]);
+    isolated.child.send({ type: "release-role-admission" });
+    const [ack, resumed] = await Promise.all([first, provisional]);
+    assert.equal(ack.type, "desktop_endpoint_registered", ack.code);
+    assert.equal(resumed.type, "controller_resume_provisional", resumed.code);
+    assert.equal(resumed.request_id, resumeRequest);
   } finally {
     sockets.forEach(closeSocket);
     await stopRelay(isolated.child);
