@@ -192,9 +192,8 @@ INSERT INTO payment_anomaly_resolution_intents(payment_anomaly_case_id,actor_id,
 			t.Fatal(err)
 		}
 		ledger := stageValue(t, ctx, c, `SELECT jsonb_agg(to_jsonb(m) ORDER BY version)::text FROM schema_migrations m`)
-		if err := migrations.DownOne(ctx, c, billing); err == nil {
-			t.Fatal("forward-only financial phase migration was removed")
-		}
+		assertHistoricalBillingRollback(t, ctx, f.database(t, ctx, "billing", "billing_schema_owner"), billing, 900038, "P0001", "manual admission facts cannot be rolled back; restore a compatible application version")
+		assertBillingCurrentReplay(t, ctx, c, billing)
 		if ledger != stageValue(t, ctx, c, `SELECT jsonb_agg(to_jsonb(m) ORDER BY version)::text FROM schema_migrations m`) {
 			t.Fatal("failed rollback changed migration ledger")
 		}

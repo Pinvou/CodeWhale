@@ -287,7 +287,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
 
     def test_unknown_date_orphan_requires_cross_date_lifecycle(self):
         root = "TestReconciliationUnknownDateOrphanLifecyclePostgres"
-        children = {"cross-date-concurrency", "legacy-and-ignore", "observation-rollback", "stale-review-binding"}
+        children = {"cross-date-concurrency", "legacy-and-ignore", "mixed-canonical-and-legacy", "observation-rollback", "stale-review-binding", "query-index-upgrade", "case-identity-recovery-fence", "legacy-unbound-recovery-fence"}
         self.assertIn(root, RUNNER.RETAINED_REQUIRED)
         self.assertIn(root, RUNNER.BILLING_CHILD_REQUIRED)
         self.assertEqual(RUNNER.EXACT_REQUIRED_CHILDREN[root], children)

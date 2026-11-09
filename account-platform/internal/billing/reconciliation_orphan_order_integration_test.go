@@ -255,6 +255,20 @@ func TestReconciliationOrphanPaidOrderPostgres(t *testing.T) {
 				t.Fatal("independent business dates lost their own observation", observations, dates, want)
 			}
 			if upgrade {
+				reviewFacts := func() string {
+					t.Helper()
+					var facts string
+					if err := r.pool.QueryRow(ctx, `SELECT jsonb_build_object(
+ 'cases',(SELECT jsonb_agg(to_jsonb(x) ORDER BY id) FROM reconciliation_cases x),
+ 'associations',(SELECT jsonb_agg(to_jsonb(x) ORDER BY run_id,case_id) FROM reconciliation_case_runs x),
+ 'manual_cases',(SELECT jsonb_agg(to_jsonb(x) ORDER BY id) FROM manual_review_cases x),
+ 'manual_events',(SELECT jsonb_agg(to_jsonb(x) ORDER BY id) FROM manual_review_case_events x)
+)::text`).Scan(&facts); err != nil {
+						t.Fatal("snapshot persisted manual review facts", err)
+					}
+					return facts
+				}
+				originalReviews := reviewFacts()
 				var ledgerBefore, ledgerAfter string
 				if err := r.pool.QueryRow(ctx, `SELECT jsonb_agg(to_jsonb(m) ORDER BY version)::text FROM schema_migrations m`).Scan(&ledgerBefore); err != nil {
 					t.Fatal(err)
@@ -270,9 +284,56 @@ func TestReconciliationOrphanPaidOrderPostgres(t *testing.T) {
 				if _, err := billingschema.VerifyApplied(ctx, operator, orphanPrefix); err != nil {
 					t.Fatal("verify after refused rollback", err)
 				}
-				if err := r.pool.QueryRow(ctx, `SELECT jsonb_agg(to_jsonb(m) ORDER BY version)::text FROM schema_migrations m`).Scan(&ledgerAfter); err != nil || ledgerAfter != ledgerBefore || financialFacts() != before {
+				if err := r.pool.QueryRow(ctx, `SELECT jsonb_agg(to_jsonb(m) ORDER BY version)::text FROM schema_migrations m`).Scan(&ledgerAfter); err != nil || ledgerAfter != ledgerBefore || financialFacts() != before || reviewFacts() != originalReviews {
 					t.Fatal("replay or refused rollback changed migration ledger or funds", err)
 				}
+				// Each later boundary owns its refusal. Never ask the current
+				// highest migration to return 900033's SQLSTATE or message.
+				assertLaterRefusal := func(input []migrations.Migration, version int64, message string) {
+					t.Helper()
+					var highest int64
+					if err := operator.QueryRow(ctx, `SELECT max(version) FROM schema_migrations`).Scan(&highest); err != nil || highest != version {
+						t.Fatal("unexpected rollback boundary", highest, version, err)
+					}
+					var ledger string
+					if err := r.pool.QueryRow(ctx, `SELECT jsonb_agg(to_jsonb(m) ORDER BY version)::text FROM schema_migrations m`).Scan(&ledger); err != nil {
+						t.Fatal(err)
+					}
+					var refused *pgconn.PgError
+					err := billingschema.DownOne(ctx, operator, input)
+					if !errors.As(err, &refused) || refused.Code != "P0001" || refused.Message != message {
+						t.Fatal("later migration must preserve its own exact rollback refusal", version, err)
+					}
+					if _, err := billingschema.VerifyApplied(ctx, operator, input); err != nil {
+						t.Fatal("verify later boundary after refused rollback", err)
+					}
+					if err := r.pool.QueryRow(ctx, `SELECT jsonb_agg(to_jsonb(m) ORDER BY version)::text FROM schema_migrations m`).Scan(&ledgerAfter); err != nil || ledgerAfter != ledger || financialFacts() != before || reviewFacts() != originalReviews {
+						t.Fatal("later rollback refusal changed migration ledger, funds or manual review facts", version, err)
+					}
+				}
+				var materialsPrefix []migrations.Migration
+				for _, migration := range all {
+					if migration.Version <= 900037 {
+						materialsPrefix = append(materialsPrefix, migration)
+					}
+				}
+				if err := billingschema.Up(ctx, operator, materialsPrefix); err != nil {
+					t.Fatal("official materials boundary upgrade", err)
+				}
+				assertLaterRefusal(materialsPrefix, 900037, "product admission originals are retained; rollback requires an independently reviewed data-preserving plan")
+				var manualPrefix []migrations.Migration
+				for _, migration := range all {
+					if migration.Version <= 900038 {
+						manualPrefix = append(manualPrefix, migration)
+					}
+				}
+				if err := billingschema.Up(ctx, operator, manualPrefix); err != nil {
+					t.Fatal("official manual admission boundary upgrade", err)
+				}
+				if _, err := billingschema.VerifyApplied(ctx, operator, manualPrefix); err != nil {
+					t.Fatal("verify manual admission boundary", err)
+				}
+				assertLaterRefusal(manualPrefix, 900038, "manual admission facts cannot be rolled back; restore a compatible application version")
 				// Check 900033's refusal at its exact boundary, then retain the
 				// complete current upgrade and replay contract independently.
 				if err := billingschema.Up(ctx, operator, all); err != nil {
@@ -294,7 +355,7 @@ func TestReconciliationOrphanPaidOrderPostgres(t *testing.T) {
 					t.Fatal("verify complete forward replay", err)
 				}
 				migrations.Unlock(ctx, operator)
-				if err := r.pool.QueryRow(ctx, `SELECT jsonb_agg(to_jsonb(m) ORDER BY version)::text FROM schema_migrations m`).Scan(&ledgerAfter); err != nil || ledgerAfter != ledgerBefore || financialFacts() != before {
+				if err := r.pool.QueryRow(ctx, `SELECT jsonb_agg(to_jsonb(m) ORDER BY version)::text FROM schema_migrations m`).Scan(&ledgerAfter); err != nil || ledgerAfter != ledgerBefore || financialFacts() != before || reviewFacts() != originalReviews {
 					t.Fatal("complete upgrade replay changed migration ledger or funds", err)
 				}
 				var retained int

@@ -345,7 +345,7 @@ func reconciliationRetry(ctx context.Context, action func() error) error {
 	return ErrConflict
 }
 
-func (p *PaymentCoordinator) persistStableReconciliationCase(ctx context.Context, tx pgx.Tx, run ReconciliationRun, difference ReconciliationDifference, observedVersions map[string]int64) (uuid.UUID, error) {
+func (p *PaymentCoordinator) persistStableReconciliationCase(ctx context.Context, tx pgx.Tx, run ReconciliationRun, difference ReconciliationDifference, observedVersions map[string]int64, observedCaseIDs map[string]uuid.UUID) (uuid.UUID, error) {
 	if err := lockTransactionKey(ctx, tx, "reconciliation-repair-source", run.Channel+":"+run.BusinessDate+":"+difference.MerchantOrderNo); err != nil {
 		return uuid.Nil, err
 	}
@@ -415,14 +415,20 @@ FROM reconciliation_cases c WHERE c.id=$1 FOR UPDATE OF c`, caseID).Scan(&status
 	// financial facts. It must stay resolved when the same difference recurs.
 	// Changed source facts have another digest and still create a new case.
 	changedIgnored := false
-	if status == "IGNORED" && observedVersions[digest] == version && unknownDateOrphanDifference(difference) {
+	// Legacy and canonical identities can select different rows between capture
+	// and recovery. A version belongs to its observed row, never another row
+	// with the same number. Old unbound sources retain ordinary digest behavior,
+	// but cannot reopen an unknown-date investigation across that identity seam.
+	boundCase := observedCaseIDs[digest] == caseID || (observedCaseIDs == nil && !unknownDateOrphanDifference(difference))
+	canReopen := boundCase && observedVersions[digest] == version
+	if status == "IGNORED" && canReopen && unknownDateOrphanDifference(difference) {
 		var err error
 		changedIgnored, err = changedIgnoredUnknownDateOrphan(ctx, tx, caseID, run, difference)
 		if err != nil {
 			return uuid.Nil, err
 		}
 	}
-	if (status == "RESOLVED" && !repaired || changedIgnored) && observedVersions[digest] == version {
+	if (status == "RESOLVED" && !repaired || changedIgnored) && canReopen {
 		now := p.now().UTC()
 		claim, response, mitigation, resolution := paymentAnomalyDeadlines(now, difference.Severity)
 		if _, err := tx.Exec(ctx, `UPDATE reconciliation_cases SET status='OPEN',owner_id=NULL,repair_action=NULL,review_result=NULL,resolution=NULL,resolved_at=NULL,version=version+1,updated_at=$2 WHERE id=$1`, caseID, now); err != nil {
@@ -788,80 +794,100 @@ func (p *PaymentCoordinator) auditedReconciliationFacts(ctx context.Context, q r
 // Financial digests and the original 17-field order bindings retain their
 // meaning. This private envelope adds only publication authority, not money.
 type reconciliationObservationSource struct {
-	OrderBindings json.RawMessage  `json:"order_bindings"`
-	CaseVersions  map[string]int64 `json:"case_versions"`
+	OrderBindings json.RawMessage      `json:"order_bindings"`
+	CaseVersions  map[string]int64     `json:"case_versions"`
+	CaseIDs       map[string]uuid.UUID `json:"case_ids,omitempty"`
 }
 
-func reconciliationCaseVersions(ctx context.Context, tx pgx.Tx, run ReconciliationRun, differences []ReconciliationDifference) (map[string]int64, error) {
+func reconciliationCaseVersions(ctx context.Context, tx pgx.Tx, run ReconciliationRun, differences []ReconciliationDifference) (map[string]int64, map[string]uuid.UUID, error) {
 	keys := make([]string, 0, len(differences))
 	for _, difference := range differences {
 		key := reconciliationCaseIdentity(run, difference)
 		keys = append(keys, key)
 	}
 	versions := make(map[string]int64, len(keys))
-	rows, err := tx.Query(ctx, `SELECT fact_digest,version FROM reconciliation_cases WHERE fact_digest=ANY($1::text[])`, keys)
+	ids := make(map[string]uuid.UUID, len(keys))
+	rows, err := tx.Query(ctx, `SELECT fact_digest,id,version FROM reconciliation_cases WHERE fact_digest=ANY($1::text[])`, keys)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	for rows.Next() {
 		var key string
+		var id uuid.UUID
 		var version int64
-		if err := rows.Scan(&key, &version); err != nil {
+		if err := rows.Scan(&key, &id, &version); err != nil {
 			rows.Close()
-			return nil, err
+			return nil, nil, err
 		}
 		versions[key] = version
+		ids[key] = id
 	}
 	err = rows.Err()
 	rows.Close()
 	if err != nil {
-		return versions, err
+		return nil, nil, err
 	}
 	legacy, err := unknownDateOrphanCases(ctx, tx, run, differences)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	for key, candidate := range legacy {
-		versions[key] = candidate.Version
+		// Publication first reuses an existing canonical identity. Its version
+		// must own this fence too; an older legacy investigation is only the
+		// fallback when no canonical case exists, never another case's version.
+		if _, canonical := versions[key]; !canonical {
+			versions[key] = candidate.Version
+			ids[key] = candidate.ID
+		}
 	}
-	return versions, nil
+	return versions, ids, nil
 }
 
-func reconciliationObservedCaseVersions(raw []byte) (map[string]int64, error) {
+func reconciliationObservedCaseState(raw []byte) (map[string]int64, map[string]uuid.UUID, error) {
 	// Original immutable observations contain an array (or pre-007 SQL NULL).
 	// They lack publication authority for undoing a later resolution. Keep
 	// their evidence/progress intact; a fresh provider call can create a new run.
 	trimmed := strings.TrimSpace(string(raw))
 	if trimmed == "" || trimmed == "null" {
-		return nil, nil
+		return nil, nil, nil
 	}
 	if strings.HasPrefix(trimmed, "[") {
 		var original []json.RawMessage
 		if json.Unmarshal(raw, &original) != nil {
-			return nil, ErrConflict
+			return nil, nil, ErrConflict
 		}
-		return nil, nil
+		return nil, nil, nil
 	}
 	var source reconciliationObservationSource
 	if json.Unmarshal(raw, &source) != nil || source.CaseVersions == nil || len(source.OrderBindings) == 0 {
-		return nil, ErrConflict
+		return nil, nil, ErrConflict
 	}
 	var bindings [][]json.RawMessage
 	if json.Unmarshal(source.OrderBindings, &bindings) != nil || bindings == nil {
-		return nil, ErrConflict
+		return nil, nil, ErrConflict
 	}
 	for _, binding := range bindings {
 		if len(binding) != 17 {
-			return nil, ErrConflict
+			return nil, nil, ErrConflict
 		}
 	}
 	for key, version := range source.CaseVersions {
 		decoded, err := hex.DecodeString(key)
 		if err != nil || len(decoded) != sha256.Size || version < 1 {
-			return nil, ErrConflict
+			return nil, nil, ErrConflict
 		}
 	}
-	return source.CaseVersions, nil
+	if source.CaseIDs != nil {
+		if len(source.CaseIDs) != len(source.CaseVersions) {
+			return nil, nil, ErrConflict
+		}
+		for key, id := range source.CaseIDs {
+			if id == uuid.Nil || source.CaseVersions[key] < 1 {
+				return nil, nil, ErrConflict
+			}
+		}
+	}
+	return source.CaseVersions, source.CaseIDs, nil
 }
 
 func (p *PaymentCoordinator) finalizeReconciliationObservation(ctx context.Context, run ReconciliationRun, providerRows []ProviderBillEntry) error {
@@ -875,6 +901,7 @@ func (p *PaymentCoordinator) finalizeReconciliationObservation(ctx context.Conte
 	var sourceBindings []byte
 	var unique []ReconciliationDifference
 	var observedVersions map[string]int64
+	var observedCaseIDs map[string]uuid.UUID
 	// This snapshot transaction copies audit evidence, never locks financial rows.
 	err = reconciliationRetry(ctx, func() error {
 		tx, err := p.repository.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
@@ -908,11 +935,11 @@ func (p *PaymentCoordinator) finalizeReconciliationObservation(ctx context.Conte
 		if errors.Is(err, pgx.ErrNoRows) {
 			// Capture case versions in this same SSI snapshot. Recovery must use
 			// the stored versions, never replace them with current case state.
-			observedVersions, err = reconciliationCaseVersions(ctx, tx, run, unique)
+			observedVersions, observedCaseIDs, err = reconciliationCaseVersions(ctx, tx, run, unique)
 			if err != nil {
 				return err
 			}
-			storedSource, err = json.Marshal(reconciliationObservationSource{OrderBindings: sourceBindings, CaseVersions: observedVersions})
+			storedSource, err = json.Marshal(reconciliationObservationSource{OrderBindings: sourceBindings, CaseVersions: observedVersions, CaseIDs: observedCaseIDs})
 			if err != nil {
 				return err
 			}
@@ -930,7 +957,7 @@ func (p *PaymentCoordinator) finalizeReconciliationObservation(ctx context.Conte
 		} else if err != nil {
 			return err
 		} else {
-			observedVersions, err = reconciliationObservedCaseVersions(storedSource)
+			observedVersions, observedCaseIDs, err = reconciliationObservedCaseState(storedSource)
 			if err != nil {
 				return err
 			}
@@ -977,7 +1004,7 @@ func (p *PaymentCoordinator) finalizeReconciliationObservation(ctx context.Conte
 				if done[key] {
 					continue
 				}
-				caseID, err := p.persistStableReconciliationCase(ctx, tx, run, difference, observedVersions)
+				caseID, err := p.persistStableReconciliationCase(ctx, tx, run, difference, observedVersions, observedCaseIDs)
 				if err != nil {
 					return err
 				}

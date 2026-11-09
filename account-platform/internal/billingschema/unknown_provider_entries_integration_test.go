@@ -91,15 +91,14 @@ func TestUnknownProviderEntryPublicMigrationPostgres(t *testing.T) {
 			if kind == "historical-forward-only" && stageValue(t, ctx, c, `SELECT max(version)::text FROM schema_migrations`) != "900025" {
 				t.Fatal("forward-only probe is not at migration 900025")
 			}
-			downErr := DownOne(ctx, c, target)
-			if downErr == nil {
-				t.Fatal("forward-only evidence rollback accepted")
-			}
 			if kind == "historical-forward-only" {
+				downErr := DownOne(ctx, c, target)
 				var rejected *pgconn.PgError
 				if !errors.As(downErr, &rejected) || rejected.Code != "P0001" || rejected.Message != "unsupported provider entry evidence is forward-only" {
 					t.Fatal("unexpected 900025 rollback rejection", downErr)
 				}
+			} else {
+				assertBillingCurrentReplay(t, ctx, c, target)
 			}
 			if before != stageValue(t, ctx, c, `SELECT jsonb_build_object('rows',(SELECT jsonb_agg(to_jsonb(x) ORDER BY row_number) FROM reconciliation_provider_rows x),'ledger',(SELECT jsonb_agg(to_jsonb(x) ORDER BY version) FROM schema_migrations x))::text`) {
 				t.Fatal("rejected rollback left changes")

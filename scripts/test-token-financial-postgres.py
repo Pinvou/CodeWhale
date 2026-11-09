@@ -371,8 +371,8 @@ EXACT_REQUIRED_CHILDREN = {
     },
     "TestReconciliationOrphanPaidOrderPostgres": {"fresh-install", "historical-upgrade"},
     "TestReconciliationUnknownDateOrphanLifecyclePostgres": {
-        "cross-date-concurrency", "legacy-and-ignore", "observation-rollback",
-        "stale-review-binding",
+        "cross-date-concurrency", "legacy-and-ignore", "mixed-canonical-and-legacy", "observation-rollback",
+        "stale-review-binding", "query-index-upgrade", "case-identity-recovery-fence", "legacy-unbound-recovery-fence",
     },
     "TestRemoteModelCancellationOwnerLoopTransport": {
         "remote_emergency", "remote_emergency_then_user", "user_only",
