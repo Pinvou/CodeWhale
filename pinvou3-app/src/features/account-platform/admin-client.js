@@ -18,6 +18,7 @@ import { parseRegistrationBonusJSON, encodeRegistrationBonusJSON } from './regis
 function errorFromResponse(response, payload) {
   const error = new Error(payload?.message || `HTTP ${response.status}`);
   error.code = payload?.code || 'REQUEST_FAILED';
+  Object.defineProperty(error, 'responseCode', { value: typeof payload?.code === 'string' ? payload.code : '' });
   error.status = response.status;
   error.details = payload?.details || null;
   error.requestID = payload?.request_id || '';
