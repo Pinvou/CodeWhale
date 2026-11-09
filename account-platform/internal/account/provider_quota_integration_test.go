@@ -6,71 +6,85 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"testing"
+	"time"
+
 	"github.com/Pinvou/pinvou3/account-platform/internal/accountschema"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/migrations"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
-	"os"
-	"strings"
-	"testing"
-	"time"
 )
 
 func TestProviderQuotaConcurrentBoundary(t *testing.T) {
+	f := retainedWalletFenceActors(t)
+	t.Run("migration-round-trip", func(t *testing.T) {
+		ctx := f.ctx
+		repo := f.repositoryThroughVersion(t, 900015, nil)
+		migrator := registrationBonusCheckpointMigrator(t, repo)
+		for _, table := range []string{"sms_send_attempts", "sms_verification_attempts"} {
+			if _, err := repo.pool.Exec(ctx, `INSERT INTO `+table+`(id,mobile_hash,source_hash,device_hash,purpose,provider_id,result,occurred_at)
+SELECT gen_random_uuid(),decode(repeat('11',32),'hex'),decode(repeat('22',32),'hex'),decode(repeat('33',32),'hex'),
+'REGISTER','fixture-provider',result,now()-interval '1 hour' FROM (VALUES ('ACCEPTED'),('RATE_LIMITED')) seed(result)`); err != nil {
+				t.Fatal("retained quota evidence seed failed", err)
+			}
+		}
+		snapshot := func() string {
+			t.Helper()
+			var facts string
+			err := repo.pool.QueryRow(ctx, `SELECT jsonb_build_object(
+ 'send',(SELECT jsonb_agg(to_jsonb(s) ORDER BY id) FROM sms_send_attempts s),
+ 'verify',(SELECT jsonb_agg(to_jsonb(v) ORDER BY id) FROM sms_verification_attempts v),
+ 'previous_ledger',(SELECT jsonb_agg(to_jsonb(m) ORDER BY version) FROM schema_migrations m WHERE version<>900017))::text`).Scan(&facts)
+			if err != nil {
+				t.Fatal("retained quota evidence read failed", err)
+			}
+			return facts
+		}
+		before := snapshot()
+		loaded, err := migrations.Load("../../migrations/account")
+		if err != nil {
+			t.Fatal(err)
+		}
+		var throughUpgrade []migrations.Migration
+		for _, migration := range loaded {
+			if migration.Version <= 900015 || migration.Version == 900017 {
+				throughUpgrade = append(throughUpgrade, migration)
+			}
+		}
+		for _, phase := range []struct {
+			name  string
+			apply func(context.Context, *pgx.Conn, []migrations.Migration) error
+			want  int
+		}{{"install", accountschema.Up, 2}, {"rollback", accountschema.DownOne, 0}, {"reinstall", accountschema.Up, 2}} {
+			if err := phase.apply(ctx, migrator, throughUpgrade); err != nil {
+				t.Fatalf("%s quota index migration: %v", phase.name, err)
+			}
+			var actual int
+			var applied bool
+			err := repo.pool.QueryRow(ctx, `SELECT count(*),EXISTS(SELECT 1 FROM schema_migrations WHERE version=900017)
+FROM pg_index i JOIN pg_class c ON c.oid=i.indexrelid
+WHERE c.relname IN ('sms_send_attempts_accepted_provider_window_idx','sms_verification_attempts_accepted_provider_window_idx')
+  AND i.indisvalid AND i.indisready AND pg_get_indexdef(i.indexrelid) LIKE '%(provider_id, occurred_at DESC) WHERE (result = ''ACCEPTED''::text)'`).Scan(&actual, &applied)
+			if err != nil || actual != phase.want || applied != (phase.want != 0) || snapshot() != before {
+				t.Fatalf("%s did not preserve facts and the expected valid indexes: indexes=%d applied=%t error=%v", phase.name, actual, applied, err)
+			}
+		}
+	})
 	for _, kind := range []string{"send", "verify"} {
 		t.Run(kind, func(t *testing.T) {
-			ctx, cancel := context.WithTimeout(context.Background(), 75*time.Second)
-			defer cancel()
-			raw := os.Getenv("PINVOU_TEST_ACCOUNT_DATABASE_URL")
-			if raw == "" {
-				t.Skip("PINVOU_TEST_ACCOUNT_DATABASE_URL is required for actual PostgreSQL")
-			}
-			c, err := pgx.Connect(ctx, raw)
+			ctx := f.ctx
+			repo := f.repository(t)
+			// Only the fixture coordinator installs the fault gate. Admission
+			// uses the restricted account_service pool from the public fixture.
+			config := f.config.Copy()
+			config.Database = repo.pool.Config().ConnConfig.Database
+			c, err := pgx.ConnectConfig(ctx, config)
 			if err != nil {
-				t.Fatal("private database connect failed")
+				t.Fatal("owned database coordinator connection failed")
 			}
 			defer c.Close(context.Background())
-			schema := "ind_quota_" + strings.ReplaceAll(uuid.NewString(), "-", "")
-			quoted := pgx.Identifier{schema}.Sanitize()
-			if _, err = c.Exec(ctx, "CREATE SCHEMA "+quoted); err != nil {
-				t.Fatal("create owned schema failed")
-			}
-			defer func() {
-				cleanup, stop := context.WithTimeout(context.Background(), 15*time.Second)
-				defer stop()
-				if _, err := c.Exec(cleanup, "DROP SCHEMA "+quoted+" CASCADE"); err != nil {
-					t.Error("owned schema cleanup failed")
-				}
-				var remains bool
-				if err := c.QueryRow(cleanup, "SELECT EXISTS(SELECT 1 FROM pg_namespace WHERE nspname=$1)", schema).Scan(&remains); err != nil || remains {
-					t.Error("owned schema absence unconfirmed")
-				}
-			}()
-			if _, err = c.Exec(ctx, "SET search_path TO "+quoted); err != nil {
-				t.Fatal("owned schema selection failed")
-			}
-			installed, err := migrations.Load("../../migrations/account")
-			if err != nil {
-				t.Fatal("load installed migrations failed")
-			}
-			if err = accountschema.Up(ctx, c, installed); err != nil {
-				t.Fatal("actual account migration failed")
-			}
-			cfg, err := pgxpool.ParseConfig(raw)
-			if err != nil {
-				t.Fatal("pool input invalid")
-			}
-			cfg.ConnConfig.RuntimeParams["search_path"] = schema
-			cfg.ConnConfig.RuntimeParams["application_name"] = schema
-			cfg.MaxConns = 4
-			pool, err := pgxpool.NewWithConfig(ctx, cfg)
-			if err != nil {
-				t.Fatal("owned pool failed")
-			}
-			defer pool.Close()
-			now := time.Now().UTC()
-			repo := &PostgresRepository{pool: pool, now: func() time.Time { return now }}
+			now := time.Now().UTC().Truncate(time.Second)
+			repo.now = func() time.Time { return now }
 			provider := "independent-fixture-provider"
 			table := "sms_send_attempts"
 			limit := 100
@@ -78,11 +92,15 @@ func TestProviderQuotaConcurrentBoundary(t *testing.T) {
 				table = "sms_verification_attempts"
 				limit = 300
 			}
-			for i := 0; i < limit-1; i++ {
-				q := `INSERT INTO ` + table + `(id,mobile_hash,source_hash,device_hash,purpose,provider_id,result,occurred_at) VALUES($1,decode(repeat('11',32),'hex'),decode(repeat('22',32),'hex'),decode(repeat('33',32),'hex'),'LOGIN',$2,'ACCEPTED',$3)`
-				if _, err = c.Exec(ctx, q, uuid.New(), provider, now); err != nil {
-					t.Fatal("owned boundary seed failed")
-				}
+			seed := `INSERT INTO ` + table + `(id,mobile_hash,source_hash,device_hash,purpose,provider_id,result,occurred_at)
+SELECT gen_random_uuid(),decode(repeat('11',32),'hex'),decode(repeat('22',32),'hex'),decode(repeat('33',32),'hex'),
+    CASE WHEN i%2=0 THEN 'REGISTER' ELSE 'PROFILE_MOBILE' END,
+    CASE WHEN i=$1+1 THEN 'other-provider' ELSE $2 END,
+    CASE WHEN i=$1+2 THEN 'RATE_LIMITED' ELSE 'ACCEPTED' END,
+    CASE WHEN i=$1 THEN $3::timestamptz-interval '25 hours' ELSE $3::timestamptz END
+FROM generate_series(1,$1+2) i`
+			if _, err = c.Exec(ctx, seed, limit, provider, now); err != nil {
+				t.Fatal("owned boundary seed failed", err)
 			}
 			var random [8]byte
 			if _, err = rand.Read(random[:]); err != nil {
@@ -127,7 +145,7 @@ func TestProviderQuotaConcurrentBoundary(t *testing.T) {
 			deadline := time.Now().Add(10 * time.Second)
 			waiting := 0
 			for time.Now().Before(deadline) {
-				if err = c.QueryRow(ctx, `SELECT count(*) FROM pg_stat_activity WHERE application_name=$1 AND wait_event='advisory'`, schema).Scan(&waiting); err != nil {
+				if err = c.QueryRow(ctx, `SELECT count(*) FROM pg_stat_activity WHERE datname=$1 AND usename='account_service' AND wait_event='advisory'`, config.Database).Scan(&waiting); err != nil {
 					t.Fatal("owned wait inspection failed")
 				}
 				if waiting == 2 {
@@ -145,16 +163,17 @@ func TestProviderQuotaConcurrentBoundary(t *testing.T) {
 			accepted, limited := 0, 0
 			for i := 0; i < 2; i++ {
 				e := <-result
+				var limitError *SMSRateLimitError
 				if e == nil {
 					accepted++
-				} else if errors.Is(e, ErrSMSRateLimited) {
+				} else if errors.As(e, &limitError) && limitError.RetryAfter == time.Minute {
 					limited++
 				} else {
 					t.Fatal("unexpected actual repository outcome")
 				}
 			}
 			var total int
-			if err = c.QueryRow(ctx, `SELECT count(*) FROM `+table+` WHERE provider_id=$1 AND result='ACCEPTED'`, provider).Scan(&total); err != nil {
+			if err = c.QueryRow(ctx, `SELECT count(*) FROM `+table+` WHERE provider_id=$1 AND result='ACCEPTED' AND occurred_at>$2::timestamptz-interval '1 minute'`, provider, now).Scan(&total); err != nil {
 				t.Fatal("read actual admission facts failed")
 			}
 			if accepted != 1 || limited != 1 || total != limit {

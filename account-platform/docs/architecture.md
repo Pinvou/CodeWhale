@@ -132,7 +132,7 @@ flowchart LR
 - `user_active_contexts`：以 `user_id` 唯一保存 PERSONAL/ORGANIZATION、目标组织和单调 `context_version`；最近有效 Session 只用于迁移初值，切换使用期望版本 CAS。
 - `user_sessions`：按 issuer + OIDC Session 保存登录观察和兼容投影，不再作为聊天或计费上下文事实源。
 - `slider_captcha_challenges`、`sms_challenges`：滑块和短信挑战元数据；平台生成验证码模式只保存带密钥校验数据，不保存明文。
-- `sms_send_attempts`：手机号、来源和设备的单向摘要、用途、结果与时间，用于短信多维限流和反枚举审计。
+- `sms_send_attempts`、`sms_verification_attempts`：手机号、来源和设备的单向摘要、用途、服务商、结果与时间，用于短信多维限流和反枚举审计。发送与验证各自持有原服务商配额锁，将窗口聚合限定为匹配手机号、来源、设备或服务商的 `ACCEPTED` 记录。迁移 `900017` 为服务商时间窗口添加部分索引，配额、时间边界、审计记录及事务内写入保持原语义。索引安装会在构建期间阻塞相关表的写入，应在 Account 数据库维护窗口执行并核对索引有效性。
 - `profile_change_requests`：用户名/手机号变更的旧值、新值、独立资料版本、短信验证和 Identity/Account/会话阶段；活跃请求对用户字段及新值分别唯一预约。
 - `password_reset_operations`：只保存已验证挑战、稳定用户/Identity 引用及完成事实，不保存密码、密码摘要或验证码。
 - `commerce_customer_mappings`：用户/组织到外部客户的供应商中立映射，只保存 Provider ID、Adapter 版本、脱敏外部引用和通用状态；不参与认证或业务授权。

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/url"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 
@@ -117,7 +118,9 @@ func TestOrganizationEvidenceTruncatePublicPostgres(t *testing.T) {
 					return nil
 				}
 			}
-			r := f.repositoryWithInitialStage(t, initial)
+			// Exercise the release whose public Down is guarded. Later Account
+			// migrations are unrelated to this historical checkpoint.
+			r := f.repositoryThroughVersion(t, 900015, initial)
 			if scenario == "fresh-install" {
 				replay = seedOrganizationEvidence(t, ctx, r)
 				before = organizationEvidenceFacts(t, ctx, r)
@@ -165,6 +168,7 @@ func TestOrganizationEvidenceTruncatePublicPostgres(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
+				loaded = slices.DeleteFunc(loaded, func(m migrations.Migration) bool { return m.Version > 900015 })
 				connection, err := pgx.ConnectConfig(ctx, r.pool.Config().ConnConfig.Copy())
 				if err != nil {
 					t.Fatal(err)

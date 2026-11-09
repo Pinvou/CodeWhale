@@ -131,7 +131,11 @@ count(*) FILTER (WHERE result='ACCEPTED' AND mobile_hash=$4 AND occurred_at>$3::
 count(*) FILTER (WHERE result='ACCEPTED' AND source_hash=$1 AND purpose=$5 AND occurred_at>$3::timestamptz-interval '1 hour'), min(occurred_at) FILTER (WHERE result='ACCEPTED' AND source_hash=$1 AND purpose=$5 AND occurred_at>$3::timestamptz-interval '1 hour'),
 count(*) FILTER (WHERE result='ACCEPTED' AND provider_id=$6 AND occurred_at>$3::timestamptz-interval '1 minute'), min(occurred_at) FILTER (WHERE result='ACCEPTED' AND provider_id=$6 AND occurred_at>$3::timestamptz-interval '1 minute'),
 count(*) FILTER (WHERE result='ACCEPTED' AND provider_id=$6 AND occurred_at>$3::timestamptz-interval '1 hour'), min(occurred_at) FILTER (WHERE result='ACCEPTED' AND provider_id=$6 AND occurred_at>$3::timestamptz-interval '1 hour')
-FROM sms_send_attempts WHERE occurred_at>$3::timestamptz-interval '1 day'`, sourceHash[:], deviceHash[:], now, mobileHash[:], challenge.Purpose, challenge.Provider.ID).Scan(
+FROM sms_send_attempts
+WHERE result='ACCEPTED' AND (
+    (occurred_at>$3::timestamptz-interval '1 day' AND (source_hash=$1 OR device_hash=$2 OR mobile_hash=$4))
+    OR (provider_id=$6 AND occurred_at>$3::timestamptz-interval '1 hour')
+)`, sourceHash[:], deviceHash[:], now, mobileHash[:], challenge.Purpose, challenge.Provider.ID).Scan(
 		&sourceHour, &sourceHourOldest, &sourceDay, &sourceDayOldest, &deviceHour, &deviceHourOldest, &deviceDay, &deviceDayOldest,
 		&mobileDay, &mobileDayOldest, &purposeSourceHour, &purposeOldest, &providerMinute, &providerMinuteOldest, &providerHour, &providerHourOldest,
 	); err != nil {
