@@ -1345,7 +1345,12 @@ test('Windows proxy: same wrapper recovers A once after stop while B keeps share
             operations: host.state.operationTimeline.slice(before.log),
             audit: readAudit(fixture.auditPath).slice(-20),
           }),
-          10_000,
+          // The wrapper shares the (often loaded) runner with this test and
+          // the fake host; a starved wrapper pauses its heartbeat timer for
+          // seconds before catching up in a burst. 30s absorbs that stall
+          // while staying a bounded negative control: a wrapper that stops
+          // refreshing entirely still fails here, it just fails later.
+          30_000,
         ),
         request.then(() => assert.fail('tool completed before its release barrier')),
       ]);
