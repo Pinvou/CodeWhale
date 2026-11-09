@@ -99,6 +99,7 @@ export function AdminOperationsWorkspace({ client, copy, language = 'en', permis
   const labels = copy.operations;
   const editor = labels.policyEditor;
   const eligibility = labels.eligibilityPresentation;
+  const guidance = labels.fieldGuidance;
   const permissionSet = new Set(permissions);
   const canManage = permissionSet.has('platform.registration-bonus.manage');
   const canRead = permissionSet.has('platform.registration-bonus.read');
@@ -371,6 +372,11 @@ export function AdminOperationsWorkspace({ client, copy, language = 'en', permis
     : !registrationBonusReasonIsValid(form.reason) ? editor.checkReason
     : '';
   const saveStatusID = useId();
+  const reasonCount = [...form.reason.trim()].length;
+  const reasonValid = registrationBonusReasonIsValid(form.reason);
+  const amountGuideID = saveStatusID + '-amount-guide';
+  const daysGuideID = saveStatusID + '-days-guide';
+  const reasonGuideID = saveStatusID + '-reason-guide';
   const reauthenticate = () => {
     if (pendingWrite.current?.actor === currentUserID && canManage) {
       // The durable original command already retains its actor/key/body. A
@@ -498,10 +504,16 @@ export function AdminOperationsWorkspace({ client, copy, language = 'en', permis
             {canManage && <h3 className="adm-registration-bonus-policy-heading">{editor.draft}</h3>}
             <label className="adm-sms-switch"><input type="checkbox" checked={form.enabled} disabled={!canManage || unknownWrite || recoveryBlocked || state.saving || (!eligibilityReady && !form.enabled)} onChange={(event) => setForm((value) => ({ ...value, enabled: event.target.checked }))} /><span>{labels.enabled}</span></label>
             <div className="adm-sms-fields">
-              <label><span>{labels.amount}</span><input required type="number" min="0" step="1" value={form.amount_points} disabled={!canManage || unknownWrite || recoveryBlocked || state.saving} onChange={(event) => setForm((value) => ({ ...value, amount_points: event.target.value }))} /></label>
-              <label><span>{labels.validityDays}</span><input required type="number" min="1" max="3650" step="1" value={form.validity_days} disabled={!canManage || unknownWrite || recoveryBlocked || state.saving} onChange={(event) => setForm((value) => ({ ...value, validity_days: event.target.value }))} /></label>
+              <label><span id={amountGuideID + '-label'}>{labels.amount}</span><input required type="number" min="0" step="1" value={form.amount_points} aria-labelledby={amountGuideID + '-label'} aria-describedby={amountGuideID} aria-invalid={canManage && !enteredAmount || undefined} disabled={!canManage || unknownWrite || recoveryBlocked || state.saving} onChange={(event) => setForm((value) => ({ ...value, amount_points: event.target.value }))} />
+                <small id={amountGuideID} className={canManage && !enteredAmount ? 'adm-registration-bonus-field-error' : undefined}>{canManage && !enteredAmount ? guidance.amountInvalid(MAX_BONUS_POINTS) : guidance.amount(MAX_BONUS_POINTS)}</small>
+              </label>
+              <label><span id={daysGuideID + '-label'}>{labels.validityDays}</span><input required type="number" min="1" max="3650" step="1" value={form.validity_days} aria-labelledby={daysGuideID + '-label'} aria-describedby={daysGuideID} aria-invalid={canManage && !enteredDays || undefined} disabled={!canManage || unknownWrite || recoveryBlocked || state.saving} onChange={(event) => setForm((value) => ({ ...value, validity_days: event.target.value }))} />
+                <small id={daysGuideID} className={canManage && !enteredDays ? 'adm-registration-bonus-field-error' : undefined}>{canManage && !enteredDays ? guidance.daysInvalid : guidance.days}</small>
+              </label>
             </div>
-            {canManage && <label className="adm-sms-reason"><span>{labels.reason}</span><textarea required rows="4" value={form.reason} disabled={unknownWrite || recoveryBlocked || state.saving} onChange={(event) => setForm((value) => ({ ...value, reason: event.target.value }))} placeholder={labels.reasonPlaceholder} /></label>}
+            {canManage && <label className="adm-sms-reason"><span id={reasonGuideID + '-label'}>{labels.reason}</span><textarea required rows="4" value={form.reason} aria-labelledby={reasonGuideID + '-label'} aria-describedby={reasonGuideID} aria-invalid={form.reason !== '' && !reasonValid || undefined} disabled={unknownWrite || recoveryBlocked || state.saving} onChange={(event) => setForm((value) => ({ ...value, reason: event.target.value }))} />
+              <span id={reasonGuideID} className="adm-registration-bonus-reason-help"><small>{guidance.reason}</small><small className={form.reason !== '' && !reasonValid ? 'adm-registration-bonus-field-error' : undefined}>{guidance.reasonCount(reasonCount)}</small></span>
+            </label>}
             {!canManage && <div className="adm-inline-message info" role="status">{labels.readOnly}</div>}
             {canCompare && !unknownWrite && !recoveryBlocked && <div className="adm-registration-bonus-diff" aria-label={editor.compare}>
               {changes.length > 0 ? <><h4>{editor.compare}</h4><ul>{changes.map(([field, oldValue, newValue]) => <li key={field}><strong>{field}</strong><span>{editor.before}: {oldValue}</span><span>{editor.after}: {newValue}</span></li>)}</ul></>
