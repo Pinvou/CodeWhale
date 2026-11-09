@@ -70,3 +70,35 @@ registrationBonusRecoveryCopy.ja.policyEditor = {
   reloadForConflict: 'ポリシーのバージョンが変わりました。再読み込みして設定値を確認してください。', checkValues: '付与ポイントと有効期間を確認してください。', checkReason: '有効な保存理由を入力してください。',
   originalSavedReadFailed: '元の保存は確認できましたが、現在のポリシーを取得できませんでした。再読み込みしてください。',
 };
+
+registrationBonusRecoveryCopy.zh.eligibilityPresentation = {
+  title: '手机号终身资格',
+  example: '例如，同一个手机号在策略关闭或启用但为 0 积分时首次成功注册，两种情况都不赠送，且都会用掉资格。之后启用或调高积分，也不会补赠。',
+  preview: '保存生效后的影响：', disabledImpact: '关闭期间首次成功注册的手机号不会获赠，仍会用掉终身资格。',
+  zeroImpact: '赠送仍启用，但首次成功注册时赠送 0 积分，手机号仍会用掉终身资格。',
+  pending: '历史手机号资格仍在回填，暂时无法启用赠送。', blocked: '历史手机号资格回填受阻，暂时无法启用赠送。',
+  blockedCount: count => `历史手机号资格回填受阻：${count} 条已匿名注册记录无法安全恢复，暂时无法启用赠送。`,
+  unconfirmed: '当前回填状态未确认，请重新读取。', unavailable: '暂时无法获取手机号资格回填状态。',
+  loadFailed: '暂时无法读取策略：手机号资格回填状态不可用。请重试。',
+};
+registrationBonusRecoveryCopy.en.eligibilityPresentation = {
+  title: 'Lifetime eligibility by mobile number',
+  example: 'For example, suppose the same mobile number completes its first registration while the policy is off, or while it is on with a zero-point bonus. In either case no points are granted, and the number uses its eligibility. Turning the bonus on or increasing it later does not grant points retroactively.',
+  preview: 'If these changes take effect:', disabledImpact: 'A number that first registers while the policy is off receives no bonus and uses its lifetime eligibility.',
+  zeroImpact: 'The bonus stays on at zero points. A number that first registers then receives no points and uses its lifetime eligibility.',
+  pending: 'Historical mobile eligibility backfill is still in progress. The bonus cannot be enabled yet.',
+  blocked: 'Historical mobile eligibility backfill is blocked. The bonus cannot be enabled yet.',
+  blockedCount: count => `Historical mobile eligibility backfill is blocked: ${count} anonymized registrations cannot be reconstructed safely. The bonus cannot be enabled yet.`,
+  unconfirmed: 'The current backfill status could not be confirmed. Try loading it again.', unavailable: 'The mobile eligibility backfill status is unavailable.',
+  loadFailed: 'The policy could not be loaded because mobile eligibility backfill status is unavailable. Try again.',
+};
+registrationBonusRecoveryCopy.ja.eligibilityPresentation = {
+  title: '携帯番号ごとの生涯資格',
+  example: 'たとえば、同じ携帯番号で初回登録が完了したときに、ポリシーが無効、または有効でも付与が 0 ポイントだったとします。どちらも付与はなく、資格を使います。その後に有効化や増額をしても、さかのぼって付与されません。',
+  preview: '保存して適用された場合：', disabledImpact: '無効な期間に初回登録を完了した携帯番号には付与されず、生涯資格を使います。',
+  zeroImpact: '付与は有効ですが、初回登録時の付与は 0 ポイントで、携帯番号の生涯資格を使います。',
+  pending: '過去の携帯番号資格を補完しています。付与はまだ有効にできません。', blocked: '過去の携帯番号資格の補完が停止しています。付与はまだ有効にできません。',
+  blockedCount: count => `過去の携帯番号資格の補完が停止しています。匿名化済みの登録 ${count} 件を安全に復元できず、付与はまだ有効にできません。`,
+  unconfirmed: '現在の補完状態を確認できません。再読み込みしてください。', unavailable: '携帯番号資格の補完状態を取得できません。',
+  loadFailed: '携帯番号資格の補完状態を取得できないため、ポリシーを読み込めませんでした。再試行してください。',
+};
