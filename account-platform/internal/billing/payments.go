@@ -809,6 +809,10 @@ func (p *PaymentCoordinator) ProcessNotification(ctx context.Context, channel, s
 }
 
 func (p *PaymentCoordinator) ProcessPersistedNotification(ctx context.Context, notificationID uuid.UUID) error {
+	return p.processPersistedNotification(ctx, notificationID, false)
+}
+
+func (p *PaymentCoordinator) processPersistedNotification(ctx context.Context, notificationID uuid.UUID, scheduled bool) error {
 	tx, err := p.repository.pool.Begin(ctx)
 	if err != nil {
 		return err
@@ -817,10 +821,12 @@ func (p *PaymentCoordinator) ProcessPersistedNotification(ctx context.Context, n
 	var channel, result string
 	var body []byte
 	var sourceID, sourceVersion *string
-	if err := tx.QueryRow(ctx, `SELECT channel,payload,result,provider_id,provider_version FROM payment_notifications WHERE notification_id=$1 FOR UPDATE`, notificationID).Scan(&channel, &body, &result, &sourceID, &sourceVersion); err != nil {
+	var due bool
+	if err := tx.QueryRow(ctx, `SELECT channel,payload,result,provider_id,provider_version,next_attempt_at IS NULL OR next_attempt_at<=now()
+FROM payment_notifications WHERE notification_id=$1 FOR UPDATE`, notificationID).Scan(&channel, &body, &result, &sourceID, &sourceVersion, &due); err != nil {
 		return err
 	}
-	if result != "RECEIVED" {
+	if result != "RECEIVED" || (scheduled && !due) {
 		return tx.Commit(ctx)
 	}
 	var notification paymentNotification
@@ -829,6 +835,10 @@ func (p *PaymentCoordinator) ProcessPersistedNotification(ctx context.Context, n
 	}
 	order, err := getPaymentOrderForUpdate(ctx, tx, notification.MerchantOrderNo)
 	if err != nil {
+		if scheduled && errors.Is(err, errPaymentMerchantOrderNotFound) && sourceID != nil && *sourceID != "" && sourceVersion != nil && *sourceVersion != "" &&
+			notification.NotificationID == notificationID && notification.Channel == channel && notification.MerchantID != "" {
+			return p.recordUnmatchedPaymentNotification(ctx, tx, notificationID)
+		}
 		return err
 	}
 	if sourceID == nil || sourceVersion == nil || *sourceID != order.ProviderID || *sourceVersion != order.ProviderVersion || p.Capabilities().ProviderID != order.ProviderID || p.Capabilities().Version != order.ProviderVersion {
@@ -1047,9 +1057,14 @@ func productComponentAmounts(total, basePoints, bonusPoints int64) (int64, int64
 	return base, bonus, nil
 }
 
+var errPaymentMerchantOrderNotFound = fmt.Errorf("merchant order not found: %w", pgx.ErrNoRows)
+
 func getPaymentOrderForUpdate(ctx context.Context, tx pgx.Tx, merchant string) (PaymentOrder, error) {
 	var id uuid.UUID
 	if err := tx.QueryRow(ctx, `SELECT id FROM payment_orders WHERE merchant_order_no=$1`, merchant).Scan(&id); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return PaymentOrder{}, errPaymentMerchantOrderNotFound
+		}
 		return PaymentOrder{}, err
 	}
 	return getPaymentOrderByID(ctx, tx, id, true)
