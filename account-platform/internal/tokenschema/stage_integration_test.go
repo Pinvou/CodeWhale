@@ -303,6 +303,11 @@ WHERE i.indexrelid=to_regclass('public.usage_cancellation_dispatch_fence_idx')
 	// before testing a second independent invocation on this same connection.
 	migrations.Unlock(ctx, connection)
 	probeConfig := config.Copy()
+	if previousStage == 40 {
+		t.Run("dispatch-index-public-cli-round-trip", func(t *testing.T) {
+			testDispatchIndexPublicRollback(t, ctx, connection, config, loaded)
+		})
+	}
 	probeConfig.User = admin.Config().User
 	probe, err := connectManagementFixture(t, ctx, probeConfig)
 	if err != nil {

@@ -334,6 +334,7 @@ EXACT_REQUIRED_CHILDREN = {
         "installed-f07-36-upgrade", "installed-pre-runtime-37-upgrade",
         "installed-pre-cleanup-39-upgrade",
         "installed-pre-dispatch-index-40-upgrade",
+        "installed-pre-dispatch-index-40-upgrade/dispatch-index-public-cli-round-trip",
     },
     "TestUserUnusedIntentCancellationOwnerPostgres": {
         "before-claim", "after-claim", "waiting-owner-does-not-starve-later-target", "acquired-intent-control", "model-first-control",

@@ -126,6 +126,8 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
     def test_token_public_upgrade_phase_requires_retained_pre_cleanup_stage(self):
         root = "TestManagementPublicMigrationInstallation"
         self.assertEqual(RUNNER.TOKEN_SCHEMA_REQUIRED, {root})
+        self.assertIn("installed-pre-dispatch-index-40-upgrade", RUNNER.EXACT_REQUIRED_CHILDREN[root])
+        self.assertIn("installed-pre-dispatch-index-40-upgrade/dispatch-index-public-cli-round-trip", RUNNER.EXACT_REQUIRED_CHILDREN[root])
         self.run_main_fixture()
         index = self.fixture_phases.index("owner-token-schema")
         command = self.fixture_commands[index]
