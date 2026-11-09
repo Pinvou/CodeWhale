@@ -1467,7 +1467,8 @@ fn removal_boundary_error(
         // 受支持历史迁移写进本仓注册表的其他记录从不被咨询，其余记录的
         // weights_path 落在删除目标之内（例如以目标为权重父目录登记）时，
         // 整树删除会连带毁掉它们而四臂全放行。按其余记录的登记权重路径做
-        // 归属兜底（自身记录与身份相同的重复记录排除），宁可误拒不误删；
+        // 归属兜底（自身记录与除 id 外逐字段相等的真等价副本排除，见
+        // other_registry_weights_checked 的排除谓词），宁可误拒不误删；
         // 解除方式随文案告知。
         return Err(format!(
             "该模型的权重目录与其他外部登记模型引用的权重路径相交，删除会破坏仍被引用的外部登记权重。请先移除引用该目录的其他登记记录（本臂随之放行）{STORE_BOUNDARY_ESCAPE_HINT}"
@@ -1877,12 +1878,6 @@ fn other_registry_weights_checked(
             truncate_path_echo(&dir.to_string_lossy())
         ));
     }
-    let exclude_identity = registry_identity(
-        &exclude.kind,
-        &exclude.name,
-        exclude.model.as_deref(),
-        exclude.base_url.as_deref(),
-    );
     let mut out: Vec<PathBuf> = Vec::new();
     for path in paths {
         let record = match read_record(&path) {
@@ -1904,23 +1899,29 @@ fn other_registry_weights_checked(
         } else {
             record.id.clone()
         };
-        let identity = registry_identity(
-            &record.kind,
-            &record.name,
-            record.model.as_deref(),
-            record.base_url.as_deref(),
-        );
-        // 「能确证等价的副本」两条件缺一不可：同 kind 且身份相等（入口本会拒绝
-        // 创建的第二份落盘），且**登记引用本身等价**（weights_path 归一后相同
-        // 或双方均未登记）——身份相等但权重路径不同的手工记录携带一条独立的
-        // 活引用，是指向别处的真消费者，必须保留咨询。
-        let record_ref = record.weights_path.as_deref().map(str::trim);
-        let exclude_ref = exclude.weights_path.as_deref().map(str::trim);
-        if id == exclude.id
-            || (record.kind == exclude.kind
-                && identity == exclude_identity
-                && record_ref == exclude_ref)
-        {
+        // 「能确证等价的副本」只有两种：id 相同（含空 id 回落文件名的解析
+        // 口径），或**除 id 外整条记录逐字段相等**（weights_path 沿用归一口径
+        // 比较，tolerate 手写尾随空白；其余字段精确相等）。此前的「同 kind +
+        // 身份相等 + 引用相等」三元组不构成等价证明：读取端只告警不吞的
+        // 手写/AI 重复身份存量（warn_duplicate_identities 那一族，入口查重
+        // 拦不住落盘）完全可以三元组相同而 note/installed_at/schema/原始
+        // name 各异——内容并不等价的留存记录若被排除咨询，实际删除只清掉
+        // 选中登记，权重被连带删掉，留存记录沦为悬空引用（2026-11-09 评审
+        // P2，review 5824037828）。无法确证等价时保留咨询，由交叉引用臂拒绝
+        // 并指引先移除留存记录（fail-closed：无法确认 ≠ 确认不存在）；真等价
+        // 副本仍被排除，不回到"重复登记互为否决前提"的死锁（2026-11-08 评审
+        // P2-1 的初衷不变）。原始字段相等严格强于身份相等（ollama 标签归一
+        // 前的别名记录因此从"排除"转为"咨询"，宁可误拒不误删）。
+        let is_confirmed_copy = record.schema == exclude.schema
+            && record.name == exclude.name
+            && record.kind == exclude.kind
+            && record.base_url == exclude.base_url
+            && record.model == exclude.model
+            && record.installed_at == exclude.installed_at
+            && record.note == exclude.note
+            && record.weights_path.as_deref().map(str::trim)
+                == exclude.weights_path.as_deref().map(str::trim);
+        if id == exclude.id || is_confirmed_copy {
             continue;
         }
         let Some(weights) = record.weights_path.as_deref() else {
@@ -3655,13 +3656,13 @@ mod tests {
 
     #[test]
     fn other_registry_weights_checked_excludes_identity_equal_duplicates() {
-        // 身份排除（2026-11-08 评审 P2-1；2026-11-09 评审 P2 收窄口径，review
-        // 5820385522）：只有**同 kind 且身份相等**的重复落盘（重复 id 的手工
-        // 拷贝副本、早期模板 slug 文件名、空 id 存量）才被排除——登记查重的
-        // 冲突判定是 kind 范围内的，同 kind 同身份是入口本会拒绝创建的等价
-        // 副本；不同 kind 的同名记录（非 Ollama "qwen3" 与 Ollama "Qwen3"）
-        // 是入口明确允许并存的独立登记，必须保留咨询；不同身份的共享权重
-        // 登记同样纳入（真消费者）。
+        // 等价副本排除（2026-11-08 评审 P2-1；2026-11-09 评审 P2 收窄口径
+        // review 5820385522；同日评审 P2 再收紧为逐字段等价 review
+        // 5824037828）：只有**除 id 外整条记录逐字段相等**的重复落盘（重复 id
+        // 的手工拷贝副本、早期模板 slug 文件名、空 id 存量）才被排除；不同
+        // kind 的同名记录（非 Ollama "qwen3" 与 Ollama "Qwen3"）是入口明确
+        // 允许并存的独立登记，必须保留咨询；同 kind 同身份但权重路径不同的
+        // 手工记录携带独立活引用，同样纳入（真消费者）。
         let dir = TempDir::new("registry-cross-identity");
         // 自身：kind=other、name=qwen3、无 base_url/model。
         std::fs::write(
@@ -3682,9 +3683,11 @@ mod tests {
         )
         .expect("write legacy empty-id record");
         // 不同 kind 的同名记录（Ollama 归一后同为 "qwen3"）：独立登记，必须纳入。
+        // 引用取独立路径：让"排除/咨询"在唯一路径集合上可观察（此前与被排除
+        // 副本同路径、被去重掩蔽，排除失效也数不出来）。
         std::fs::write(
             dir.path().join("m-ollama.json"),
-            r#"{"id": "m-ollama", "name": "Qwen3", "kind": "ollama", "weights_path": "/home/u/ai-weights"}"#,
+            r#"{"id": "m-ollama", "name": "Qwen3", "kind": "ollama", "weights_path": "/home/u/ollama-place"}"#,
         )
         .expect("write cross-kind record");
         // 同 kind 同身份但权重路径不同：携带独立活引用，必须纳入（2026-11-09
@@ -3697,27 +3700,121 @@ mod tests {
         // 不同身份的共享权重登记（不同 name）：真消费者，必须纳入。
         std::fs::write(
             dir.path().join("m-distinct.json"),
-            r#"{"id": "m-distinct", "name": "qwen3-8b", "kind": "other", "weights_path": "/home/u/ai-weights"}"#,
+            r#"{"id": "m-distinct", "name": "qwen3-8b", "kind": "other", "weights_path": "/home/u/distinct-place"}"#,
         )
         .expect("write distinct-identity record");
-        let others =
-            other_registry_weights_checked(dir.path(), &exclude_record("m-self", "other", "qwen3"))
-                .expect("readable registry must resolve");
+        // 排除记录带真实登记引用（等价判定的前提；helper 的 None 引用会让
+        // ref 比较失配、连真副本也排除不掉，钉不住本断言）。
+        let exclude = RegistryRecord {
+            schema: 1,
+            id: "m-self".to_string(),
+            name: "qwen3".to_string(),
+            kind: "other".to_string(),
+            base_url: None,
+            model: None,
+            weights_path: Some("/home/u/ai-weights".to_string()),
+            installed_at: None,
+            note: None,
+        };
+        let others = other_registry_weights_checked(dir.path(), &exclude)
+            .expect("readable registry must resolve");
         assert!(
-            others.contains(&PathBuf::from("/home/u/ai-weights")),
-            "distinct consumers must still be consulted, got: {others:?}"
+            others.contains(&PathBuf::from("/home/u/ollama-place")),
+            "cross-kind same-name consumer must still be consulted, got: {others:?}"
         );
         assert!(
             others.contains(&PathBuf::from("/home/u/other-place")),
             "identity-equal sibling with a distinct weights path must stay consulted, got: {others:?}"
         );
-        // 纳入三条咨询记录去重后为两个唯一路径：不同 kind 的同名登记、
-        // 同 kind 同身份不同引用、不同身份；同 kind 同身份同引用的重复落盘
-        // 全部被排除。
+        // 恰三条唯一路径：不同 kind 的同名登记、同 kind 同身份不同引用、
+        // 不同身份；同 kind 同身份同引用的重复落盘（m-dup、空 id 存量）全部
+        // 被排除——它们是 "/home/u/ai-weights" 仅有的其他咨询来源，若排除
+        // 失效该路径会出现在结果里、计数变四。
+        assert!(
+            !others.contains(&PathBuf::from("/home/u/ai-weights")),
+            "full-field-equal duplicate copies must be excluded, got: {others:?}"
+        );
         assert_eq!(
             others.len(),
-            2,
-            "same-kind identity+ref-equal duplicates must be excluded, all distinct consumers must survive, got: {others:?}"
+            3,
+            "exactly the three distinct consumers must survive, got: {others:?}"
+        );
+    }
+
+    #[test]
+    fn other_registry_weights_checked_consults_non_equivalent_identity_conflicts() {
+        // 三元组（同 kind+身份+归一引用）相等但内容各异的存量重复——读取端只
+        // 告警不吞的手写/AI 族（warn_duplicate_identities），入口查重拦不住
+        // 落盘——不是「能确证等价的副本」，必须保留咨询（2026-11-09 评审 P2，
+        // review 5824037828）：否则删除会连带毁掉留存记录仍引用的权重，留下
+        // 悬空登记。区分维度取 note 与 installed_at 两个最常见的手工差异点。
+        let dir = TempDir::new("registry-cross-conflict");
+        std::fs::write(
+            dir.path().join("m-self.json"),
+            r#"{"id": "m-self", "name": "qwen3", "kind": "other", "weights_path": "/home/u/ai-weights"}"#,
+        )
+        .expect("write self record");
+        std::fs::write(
+            dir.path().join("m-note.json"),
+            r#"{"id": "m-note", "name": "qwen3", "kind": "other", "weights_path": "/home/u/ai-weights", "note": "备份副本"}"#,
+        )
+        .expect("write note-differing sibling");
+        std::fs::write(
+            dir.path().join("m-stale.json"),
+            r#"{"id": "m-stale", "name": "qwen3", "kind": "other", "weights_path": "/home/u/ai-weights", "installed_at": "2025-01-01T00:00:00Z"}"#,
+        )
+        .expect("write installed_at-differing sibling");
+        // 被删记录必须真实登记权重路径（真实删除场景的前提；helper 的 None
+        // 引用会因 ref 不等使旧三元组谓词也放行，钉不住本回归）。
+        let exclude = RegistryRecord {
+            schema: 1,
+            id: "m-self".to_string(),
+            name: "qwen3".to_string(),
+            kind: "other".to_string(),
+            base_url: None,
+            model: None,
+            weights_path: Some("/home/u/ai-weights".to_string()),
+            installed_at: None,
+            note: None,
+        };
+        let weights = other_registry_weights_checked(dir.path(), &exclude)
+            .expect("readable registry must resolve");
+        assert_eq!(
+            weights,
+            vec![PathBuf::from("/home/u/ai-weights")],
+            "identity-conflicted siblings with differing content must stay consulted, got: {weights:?}"
+        );
+    }
+
+    #[test]
+    fn other_registry_weights_checked_consults_ollama_alias_before_tag_folding() {
+        // 同 kind（ollama）标签归一身份相等但原始 name 不同（"qwen3:latest" 与
+        // "Qwen3"）：原始字段相等严格强于身份相等，别名记录从「排除」转为
+        // 「咨询」（2026-11-09 评审 P2 的收紧方向，review 5824037828）。
+        // exclude 直接构造（helper 不带 weights_path，装不下本例）。
+        let dir = TempDir::new("registry-cross-alias");
+        std::fs::write(
+            dir.path().join("m-alias.json"),
+            r#"{"id": "m-alias", "name": "Qwen3", "kind": "ollama", "weights_path": "/home/u/ai-weights"}"#,
+        )
+        .expect("write alias sibling");
+        let exclude = RegistryRecord {
+            schema: 1,
+            id: "m-self-ollama".to_string(),
+            name: "qwen3:latest".to_string(),
+            kind: "ollama".to_string(),
+            base_url: None,
+            model: None,
+            weights_path: Some("/home/u/ai-weights".to_string()),
+            installed_at: None,
+            note: None,
+        };
+        let weights = other_registry_weights_checked(dir.path(), &exclude)
+            .expect("readable registry must resolve");
+        assert_eq!(
+            weights,
+            vec![PathBuf::from("/home/u/ai-weights")],
+            "raw-name-unequal alias must stay consulted despite folded-identity equality, got: {weights:?}"
         );
     }
 

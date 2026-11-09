@@ -644,6 +644,77 @@ mod tests {
         });
     }
 
+    /// 身份冲突存量重复的留存引用必须能否决权重删除（2026-11-09 评审 P2，
+    /// review 5824037828）：两个「手写重复身份」登记（同 kind 同名同引用、
+    /// 内容不等价——note 不同）在场时，删除其中一条**不得**连带删掉两条仍
+    /// 共同引用的权重目录。交叉引用排除若把内容不等的留存记录从咨询中排除，
+    /// 删除会清掉权重、留下悬空登记——本测试钉排除谓词必须保留对非等价留存
+    /// 引用的咨询并走到交叉引用臂拒绝（谓词本体由 external_models 的
+    /// other_registry_weights_checked_consults_non_equivalent_identity_conflicts
+    /// 直打，这里钉端到端接线：谓词放松回三元组口径本测试必须转红）。
+    #[test]
+    fn removal_refuses_weights_when_identity_conflicted_sibling_differs() {
+        use crate::features::device::external_models::registry_dir;
+        use crate::features::device::{get_external_models, remove_external_model};
+        use crate::features::model_store::platform::linux::{config, db};
+        let _ctx = config::TempHome::new();
+        point_ollama_at_dead_port();
+        db::init_db().expect("init store db");
+        // 权重目录取家目录下恰好 3 层（深度臂放行的形状），避开商店根、
+        // 内置导入扫描根、daemon 根与 blobs/manifests 布局签名——让交叉引用臂
+        // 成为唯一可能的命中臂，拒绝消息即可定位到本臂。
+        let weights = crate::platform::paths::user_home_dir()
+            .join("ai-weights")
+            .join("qwen3")
+            .join("weights");
+        std::fs::create_dir_all(&weights).expect("create weights dir");
+        std::fs::write(weights.join("weights.bin"), b"weight bytes").expect("write weight");
+        let dir = registry_dir();
+        std::fs::create_dir_all(&dir).expect("registry dir");
+        let weights_json = serde_json::to_string(&weights.to_string_lossy()).expect("json string");
+        std::fs::write(
+            dir.join("m-selfconf.json"),
+            format!(
+                r#"{{"schema":1,"id":"m-selfconf","name":"qwen3","kind":"other","weights_path":{weights_json}}}"#
+            ),
+        )
+        .expect("write selected record");
+        // 同三元组留存重复：note 不同 = 内容不等价，不是确证副本。
+        std::fs::write(
+            dir.join("m-sibling.json"),
+            format!(
+                r#"{{"schema":1,"id":"m-sibling","name":"qwen3","kind":"other","weights_path":{weights_json},"note":"手工备份"}}"#
+            ),
+        )
+        .expect("write non-equivalent sibling record");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        runtime.block_on(async move {
+            let outcome =
+                remove_external_model("m-selfconf".to_string(), true, "qwen3".to_string(), None)
+                    .await;
+            let error =
+                outcome.expect_err("non-equivalent retained sibling must veto the weight deletion");
+            assert!(
+                error.contains("与其他外部登记模型引用的权重路径相交"),
+                "rejection must come from the cross-reference arm, got: {error}"
+            );
+            // 权重目录必须原样保留（fail-closed），两条登记都还在册。
+            assert!(weights.exists(), "weights must survive the refused removal");
+            let view = get_external_models().await.expect("list external models");
+            assert!(
+                view.models.iter().any(|model| model.id == "m-selfconf"),
+                "selected record must survive the refused removal"
+            );
+            assert!(
+                view.models.iter().any(|model| model.id == "m-sibling"),
+                "sibling record must survive the refused removal"
+            );
+        });
+    }
+
     /// 移除端对 ollama 记录**跳过权重删除**的端到端接线（第七轮评审 P2）：
     /// 登记端已硬校验拒绝 ollama+weights_path（external_models 直打测试），这里
     /// 钉存量兜底——早期模板/AI 手写的 ollama 记录可能登记了权重路径，而
