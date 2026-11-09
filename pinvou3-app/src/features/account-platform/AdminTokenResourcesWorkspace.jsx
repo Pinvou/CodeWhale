@@ -3,6 +3,7 @@ import { TokenResourceFeedback, TokenResourcePaging } from './TokenResourcePrimi
 import { useAdminSource } from './AdminModelTokenPrimitives.jsx';
 import { TokenAccountGovernanceActions } from './TokenAccountGovernanceActions.jsx';
 import { secureRequestID } from './request-id.js';
+import { AdminIdentifier } from './AdminIdentifier.jsx';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { adminModelTokenQueryUpdates, readAdminModelTokenQuery } from './admin-navigation.js';
 import { ownerCandidateQuery, serverRouteHealth, tokenAccountCreateInput, tokenOwnerOrganizationSelection, tokenResourceAccess } from './admin-token-resource-state.js';
@@ -213,7 +214,7 @@ function TokenAccountCount({ value, missing, open, label }) {
   return open ? <button type="button" className="adm-token-account-metric" aria-label={label + ' · ' + value} onClick={open}>{value}</button> : value;
 }
 
-export function AdminTokenResourcesWorkspace({ client, copy, permissions, formsEnabled, actionsEnabled, detailsEnabled, routeVersion, onQueryChange, onRouteChange, histories }) {
+export function AdminTokenResourcesWorkspace({ client, copy, language = 'zh', owner, authorizationVersion, permissions, formsEnabled, actionsEnabled, detailsEnabled, routeVersion, onQueryChange, onRouteChange, histories }) {
   const access = tokenResourceAccess(permissions, formsEnabled && actionsEnabled);
   const actionAccess = { ...access, manage: actionsEnabled && access.manage };
   const query = useMemo(() => readAdminModelTokenQuery('tokenAccounts'), [routeVersion]);
@@ -228,6 +229,8 @@ export function AdminTokenResourcesWorkspace({ client, copy, permissions, formsE
   const accountsEnabled = Boolean(readiness) && readiness.token_accounts_mode !== 'BLOCKED';
   const load = useMemo(() => (filters, signal) => snapshotMode ? client.tokenAccounts(filters, signal) : client.tokenAccounts(signal), [client, snapshotMode]);
   const state = useAdminSource({ load, query, enabled: accountsEnabled, refreshVersion: refresh });
+  const currentRows = accountsEnabled && !state.loading && !state.error;
+  const identityScope = 'token-account-list:' + routeVersion + ':' + (snapshotMode ? 'snapshot' : 'bounded');
   const openMetric = (item, tab) => onRouteChange({ token_account_id: item.token_account_id, token_detail_tab: tab, ...adminModelTokenQueryUpdates(tab === 'credentials' ? 'tokenCredentials' : 'tokenRoutes', {}) }, 'push');
   const retry = () => {
     if (state.error?.status === 410) { delete histories.current.tokenAccounts; onQueryChange('tokenAccounts', { ...query, cursor: '' }, 'replace'); }
@@ -244,8 +247,21 @@ export function AdminTokenResourcesWorkspace({ client, copy, permissions, formsE
       {readiness?.token_accounts_mode === 'BLOCKED' && <div className="adm-inline-message error" role="alert">{copy.tokenResourceUnavailableReasons?.[readiness.recovery_unavailable_reason] || copy.sourceUnavailable}</div>}
       {readiness?.token_accounts_mode === 'LEGACY_BOUNDED' && <div className="adm-inline-message info" role="status">{copy.tokenAccountsLegacyMode}</div>}
       {snapshotMode && <form key={JSON.stringify(query)} className="adm-model-token-filters" onSubmit={(event) => { event.preventDefault(); const values = new globalThis.FormData(event.currentTarget); onQueryChange('tokenAccounts', { ...query, q: values.get('q'), owner_type: values.get('owner_type'), status: values.get('status'), health_status: values.get('health_status'), cursor: '' }); }}><label><span>{copy.tokenSearch}</span><input name="q" type="search" defaultValue={query.q} placeholder={copy.tokenSearchPlaceholder} /></label><label><span>{copy.ownerType}</span><select name="owner_type" defaultValue={query.owner_type}><option value="">{copy.all}</option><option value="USER">{copy.enumLabels.USER}</option><option value="ORG">{copy.enumLabels.ORG}</option><option value="ORG_UNIT">{copy.enumLabels.ORG_UNIT}</option></select></label><label><span>{copy.tokenAccountStatus}</span><select name="status" defaultValue={query.status}><option value="">{copy.all}</option>{['ACTIVE', 'DISABLED', 'FROZEN'].map((value) => <option key={value} value={value}>{copy.tokenAccountStatuses[value]}</option>)}</select></label><label><span>{copy.health}</span><select name="health_status" defaultValue={query.health_status}><option value="">{copy.all}</option>{['UNKNOWN', 'PROBING', 'HEALTHY', 'DEGRADED', 'UNHEALTHY', 'STALE'].map((value) => <option key={value} value={value}>{copy.enumLabels[value]}</option>)}</select></label><button type="submit">{copy.search}</button><button type="button" onClick={() => onQueryChange('tokenAccounts', { q: '', owner_type: '', owner_id: '', status: '', health_status: '', credential_status: '', cursor: '' })}>{copy.clear}</button></form>}
-      {accountsEnabled && <TokenResourceFeedback state={state} copy={copy} onRetry={retry} />}
-			{accountsEnabled && state.items.length > 0 && <div className="adm-table-wrap"><table className="adm-table"><thead><tr><th>{copy.tokenAccount}</th><th>{copy.owner}</th><th>{copy.tokenAccountStatus}</th><th>{copy.tokenAccountActiveCredentials}</th><th>{copy.tokenAccountResolvedRoutes}</th><th>{copy.actions}</th></tr></thead><tbody>{state.items.map((item) => <tr key={item.token_account_id}><td data-label={copy.tokenAccount}><strong>{item.name}</strong><small className="adm-secondary-id">{item.token_account_id}</small></td><td data-label={copy.owner}>{copy.enumLabels[item.owner_type] || item.owner_type}<small className="adm-secondary-id">{item.owner_id}</small></td><td data-label={copy.tokenAccountStatus}><TokenAccountStatus value={item.status} copy={copy} /></td>
+      {accountsEnabled && <TokenResourceFeedback state={state.loading ? { ...state, items: [] } : state} copy={copy} onRetry={retry} />}
+			{currentRows && state.items.length > 0 && <div className="adm-table-wrap"><table className="adm-table"><thead><tr><th>{copy.tokenAccount}</th><th>{copy.owner}</th><th>{copy.tokenAccountStatus}</th><th>{copy.tokenAccountActiveCredentials}</th><th>{copy.tokenAccountResolvedRoutes}</th><th>{copy.actions}</th></tr></thead><tbody>{state.items.map((item) => <tr key={item.token_account_id}><td data-label={copy.tokenAccount}>
+        <div className="adm-token-account-identity">
+          <strong>{item.name || '—'}</strong>
+          <AdminIdentifier client={client} owner={owner} routeScope={identityScope + ':account:' + item.token_account_id} value={item.token_account_id} label={copy.tokenResourceAccountID} targetLabel={item.token_account_id} language={language} platformAuthorizationVersion={authorizationVersion} alwaysExpanded />
+        </div>
+      </td><td data-label={copy.owner}>
+        <div className="adm-token-account-identity">
+          <strong>{Object.prototype.hasOwnProperty.call(copy.enumLabels, item.owner_type) ? copy.enumLabels[item.owner_type] : item.owner_type || '—'}</strong>
+          <AdminIdentifier client={client} owner={owner} routeScope={identityScope + ':owner:' + item.token_account_id} value={item.owner_id} label={copy.tokenResourceOwnerID} targetLabel={item.token_account_id} language={language} platformAuthorizationVersion={authorizationVersion} alwaysExpanded />
+          <small>{copy.tokenResourcePolicy}: {Object.prototype.hasOwnProperty.call(copy.tokenResourceScopeLabels, item.share_scope) ? copy.tokenResourceScopeLabels[item.share_scope] : copy.tokenResourceScopeUnknown}</small>
+          {item.owner_organization_id && item.owner_organization_id !== item.owner_id && <small>{copy.tokenResourceOrgID}: <code>{item.owner_organization_id}</code></small>}
+          {item.owner_unit_id && item.owner_unit_id !== item.owner_id && <small>{copy.tokenResourceUnitID}: <code>{item.owner_unit_id}</code></small>}
+        </div>
+      </td><td data-label={copy.tokenAccountStatus}><TokenAccountStatus value={item.status} copy={copy} /></td>
       <td data-label={copy.tokenAccountActiveCredentials}><TokenAccountCount value={item.active_credential_count} missing={copy.tokenAccountMetricUnknown} open={detailsEnabled && snapshotMode && !state.loading && !state.error ? () => openMetric(item, 'credentials') : null} label={copy.tokenAccountViewCredentials + ' · ' + item.token_account_id} /></td>
       <td data-label={copy.tokenAccountResolvedRoutes}><TokenAccountCount value={item.route_count} missing={copy.tokenAccountMetricUnknown} open={detailsEnabled && snapshotMode && !state.loading && !state.error ? () => openMetric(item, 'routes') : null} label={copy.tokenAccountViewRoutes + ' · ' + item.token_account_id} /></td><td data-label={copy.actions}><button type="button" onClick={() => onRouteChange({ token_account_id: item.token_account_id, token_detail_tab: detailsEnabled ? 'overview' : 'routes' }, 'push')}>{detailsEnabled ? copy.viewDetail : copy.viewRouteHealth}</button></td></tr>)}</tbody></table></div>}
       {snapshotMode && <TokenResourcePaging source="tokenAccounts" query={query} state={state} copy={copy} histories={histories} onChange={(next) => onQueryChange('tokenAccounts', next)} />}
