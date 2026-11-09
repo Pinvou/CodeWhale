@@ -126,6 +126,18 @@ test("a change to one remote dispatch or authority entry routes all release chec
     "pinvou3-app/src-tauri/src/features/files/platform/model_reference.rs",
     "pinvou3-app/src-tauri/src/platform/filesystem.rs",
     "pinvou3-app/src-tauri/src/platform/filesystem/linux_publication.rs",
+    "pinvou3-app/src-tauri/src/features/files/ingest_deps.rs",
+    "pinvou3-app/src-tauri/src/features/files/platform/mod.rs",
+    "pinvou3-app/src-tauri/src/features/files/platform/office_stream.rs",
+    "pinvou3-app/src-tauri/src/features/files/platform/office_stream.py",
+    "pinvou3-app/src-tauri/src/features/files/ingest_diagnostics.rs",
+    "pinvou3-app/src-tauri/src/core/model_wire.rs",
+    "pinvou3-app/src-tauri/src/features/sessions/mod.rs",
+    "pinvou3-app/src-tauri/src/features/files/ingest_office.rs",
+    "pinvou3-app/src-tauri/src/features/files/ingest_email.rs",
+    "pinvou3-app/src-tauri/src/features/files/ingest_archive.rs",
+    "pinvou3-app/src-tauri/src/features/files/platform/archive_entry.rs",
+    "pinvou3-app/src-tauri/src/features/files/visual_preview.rs",
   ]) {
     assert.equal(changedPathsRequireRemoteControlRelease(`${path}\n`), true, `release diff misses ${path}`);
     for (const [route, patterns] of routes) {
@@ -136,6 +148,8 @@ test("a change to one remote dispatch or authority entry routes all release chec
     "pinvou3-app/src-tauri/src/features/assistant/multiagent_regression_tests.rs",
     "pinvou3-app/src-tauri/src/features/codex_acp/login.rs",
     "pinvou3-app/src-tauri/src/features/sessions/application/admission.rs",
+    "pinvou3-app/src-tauri/src/features/files/ingest_pdf.rs",
+    "pinvou3-app/src-tauri/src/platform/paths.rs",
   ]) {
     assert.equal(changedPathsRequireRemoteControlRelease(`${path}\n`), false, `release diff overmatches ${path}`);
     for (const [route, patterns] of routes) {
