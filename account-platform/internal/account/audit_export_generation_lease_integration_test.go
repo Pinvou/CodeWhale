@@ -7,13 +7,14 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // The caller owns the database and public migration/runtime identities. An
 // exclusive audit-table lock holds the real CSV query while lease operations
 // continue on the job table through a separate connection.
 func testAuditExportGenerationLease(t *testing.T, ctx context.Context, service *AuditExportService, owner *pgx.Conn, create func(string) AuditExportJob) {
-	for _, scenario := range []string{"renew_live_attempt", "cancel_expired_attempt_and_recover"} {
+	for _, scenario := range []string{"renew_live_attempt", "cancel_expired_attempt_and_recover", "ordinary_error_stops_inflight_renewal"} {
 		t.Run(scenario, func(t *testing.T) {
 			job := create("controlled long generation")
 			claim, found, err := service.claim(ctx)
@@ -45,21 +46,7 @@ func testAuditExportGenerationLease(t *testing.T, ctx context.Context, service *
 				}
 			}()
 			// Wait for the actual generator to reach the locked source table.
-			deadline := time.Now().Add(5 * time.Second)
-			for {
-				var waiting bool
-				err := service.repository.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE '%ORDER BY log.occurred_at,log.id LIMIT%')`).Scan(&waiting)
-				if err != nil {
-					t.Fatal(err)
-				}
-				if waiting {
-					break
-				}
-				if time.Now().After(deadline) {
-					t.Fatal("generator did not reach real table lock")
-				}
-				time.Sleep(5 * time.Millisecond)
-			}
+			generatorPID := waitAuditExportBlockedQuery(t, ctx, service, "%ORDER BY log.occurred_at,log.id LIMIT%")
 			if scenario == "renew_live_attempt" {
 				var shortDeadline time.Time
 				if err := service.repository.pool.QueryRow(ctx, `UPDATE audit_export_jobs SET lease_until=clock_timestamp()+interval '1 second' WHERE id=$1 RETURNING lease_until`, job.ID).Scan(&shortDeadline); err != nil {
@@ -81,6 +68,50 @@ func testAuditExportGenerationLease(t *testing.T, ctx context.Context, service *
 				if err != nil {
 					t.Fatal("renewed generator did not publish", err)
 				}
+			} else if scenario == "ordinary_error_stops_inflight_renewal" {
+				jobLock, err := service.repository.pool.Begin(ctx)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer jobLock.Rollback(ctx)
+				if _, err := jobLock.Exec(ctx, `SELECT id FROM audit_export_jobs WHERE id=$1 FOR UPDATE`, job.ID); err != nil {
+					t.Fatal(err)
+				}
+				waitAuditExportBlockedQuery(t, ctx, service, "SELECT attempts,actor_user_id,status,lease_until FROM audit_export_jobs WHERE id=$1 FOR UPDATE")
+				// Cancel the real CSV query while a real renewal is in flight.
+				// The resulting generation error then stops that renewal itself.
+				var cancelled bool
+				if err := service.repository.pool.QueryRow(ctx, `SELECT pg_cancel_backend($1)`, generatorPID).Scan(&cancelled); err != nil || !cancelled {
+					t.Fatal("controlled source query cancellation failed", err)
+				}
+				select {
+				case err = <-done:
+					joined = true
+				case <-time.After(5 * time.Second):
+					t.Fatal("ordinary generation error did not stop in-flight renewal")
+				}
+				if err == nil || errors.Is(err, errAuditExportLeaseLost) {
+					t.Fatal("ordinary generation error misclassified as lease loss", err)
+				}
+				var sourceError *pgconn.PgError
+				if !errors.As(err, &sourceError) || sourceError.Code != "57014" {
+					t.Fatal("expected controlled PostgreSQL source-query error", err)
+				}
+				if err := jobLock.Commit(ctx); err != nil {
+					t.Fatal(err)
+				}
+				if err := lock.Commit(ctx); err != nil {
+					t.Fatal(err)
+				}
+				if err := service.fail(ctx, claim, stableAuditExportError(err)); err != nil {
+					t.Fatal("ordinary error could not finalize original live attempt", err)
+				}
+				var status string
+				var failedEvents int
+				if err := service.repository.pool.QueryRow(ctx, `SELECT status,(SELECT count(*) FROM audit_export_events WHERE export_id=job.id AND event_type='FAILED') FROM audit_export_jobs job WHERE id=$1`, job.ID).Scan(&status, &failedEvents); err != nil || status != "FAILED" || failedEvents != 1 {
+					t.Fatal("ordinary error did not retain one terminal failure", status, failedEvents, err)
+				}
+				return
 			} else {
 				if _, err := service.repository.pool.Exec(ctx, `UPDATE audit_export_jobs SET lease_until=clock_timestamp()-interval '1 second' WHERE id=$1`, job.ID); err != nil {
 					t.Fatal(err)
@@ -114,5 +145,23 @@ func testAuditExportGenerationLease(t *testing.T, ctx context.Context, service *
 				t.Fatal("expected exactly one published result", status, readyEvents, err)
 			}
 		})
+	}
+}
+
+func waitAuditExportBlockedQuery(t *testing.T, ctx context.Context, service *AuditExportService, pattern string) int {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		var pid int
+		if err := service.repository.pool.QueryRow(ctx, `SELECT COALESCE(min(pid),0) FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE $1`, pattern).Scan(&pid); err != nil {
+			t.Fatal(err)
+		}
+		if pid != 0 {
+			return pid
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("audit query did not reach real lock wait", pattern)
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }

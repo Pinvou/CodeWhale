@@ -203,7 +203,7 @@ class AccountCIAdmissionTests(unittest.TestCase):
         account=[{"Test":"TestAuditExportPersistedBoundaries","Action":"pass"},
                  {"Test":"TestAuditExportPersistedBoundaries/actual","Action":"pass"}]
         lease_cases={"TestAuditExportPersistedBoundaries/generation_renews_and_recovers/"+case
-                     for case in ("renew_live_attempt", "cancel_expired_attempt_and_recover")}
+                     for case in ("renew_live_attempt", "cancel_expired_attempt_and_recover", "ordinary_error_stops_inflight_renewal")}
         account.extend({"Test":case,"Action":"pass"} for case in lease_cases)
         with tempfile.TemporaryDirectory(prefix='audit-result-contract-') as directory:
             schema_path, account_path=Path(directory)/'schema.jsonl',Path(directory)/'account.jsonl'

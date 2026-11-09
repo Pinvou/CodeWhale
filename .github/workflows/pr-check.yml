@@ -1678,7 +1678,7 @@ jobs:
               if audit in required:
                   prefix = audit + "/generation_renews_and_recovers/"
                   cases = {event["Test"].removeprefix(prefix) for event in terminal if event["Test"].startswith(prefix)}
-                  assert cases == {"renew_live_attempt", "cancel_expired_attempt_and_recover"}, "audit generation lease cases did not execute"
+                  assert cases == {"renew_live_attempt", "cancel_expired_attempt_and_recover", "ordinary_error_stops_inflight_renewal"}, "audit generation lease cases did not execute"
               inventory = "TestAccount039RollbackInventoryPostgres"
               if inventory in required:
                   prefix = inventory + "/"
