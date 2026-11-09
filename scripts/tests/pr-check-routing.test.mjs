@@ -256,6 +256,24 @@ function assertWorkflowFailurePolicy(workflowText) {
     remainder = remainder.replace(receipt, "");
   }
   {
+    const receipt = namedStep(jobBlock("windows-codex-runtime-test", text), "Preserve browser fixture exit receipts");
+    assert.equal(receipt.trimEnd(), [
+      "      - name: Preserve browser fixture exit receipts",
+      "        if: always()",
+      "        timeout-minutes: 3",
+      "        continue-on-error: true",
+      "        uses: actions/upload-artifact@v7",
+      "        with:",
+      "          name: windows-browser-exit-${{ github.run_id }}-${{ github.run_attempt }}",
+      "          retention-days: 7",
+      "          if-no-files-found: warn",
+      "          path: |",
+      "            ${{ runner.temp }}/windows-browser-*-${{ github.run_id }}-${{ github.run_attempt }}.json",
+      "            ${{ runner.temp }}/windows-browser-*-${{ github.run_id }}-${{ github.run_attempt }}-resources/*.json",
+    ].join("\n"));
+    remainder = remainder.replace(receipt, "");
+  }
+  {
     const receipt = namedStep(jobBlock("account-platform-test", text), "Account test resource lifecycle receipts");
     assert.equal(receipt.trimEnd(), [
       "      - name: Account test resource lifecycle receipts",
@@ -347,6 +365,7 @@ test("all workflow legs reject unreviewed job and step failure exemptions", () =
     ["frontend-test", "Test resource lifecycle receipts"],
     ["account-platform-test", "Account test resource lifecycle receipts"],
     ["account-closure-test", "Account closure resource lifecycle receipts"],
+    ["windows-codex-runtime-test", "Preserve browser fixture exit receipts"],
   ]) {
     const receipt = namedStep(jobBlock(jobName, original), stepName);
     const withoutReceiptExemption = original.replace(receipt,
@@ -501,7 +520,7 @@ function assertFiniteAuditPGSetup(job) {
   for (const [name, environment, commands] of [
     ["Token financial contracts on isolated PostgreSQL", [
       "ACCOUNT_FINANCIAL_SERVICES: ${{ steps.account-pg.outputs.financial_services }}",
-    ], ["set -euo pipefail", "python3 -m unittest discover -s scripts/tests -p test_token_financial_postgres.py", "python3 -m unittest discover -s scripts/tests -p test_financial_parallel.py", "python3 scripts/test-financial-parallel.py"]],
+    ], ["set -euo pipefail", "python3 -m unittest discover -s scripts/tests -p test_token_financial_postgres.py", "python3 -m unittest discover -s scripts/tests -p test_financial_parallel.py", 'python3 scripts/ci-fixture-process.py --receipt "$PINVOU_CI_RESOURCE_LEDGER/financial-process.json" -- python3 scripts/test-financial-parallel.py']],
 
   ]) {
     const step = namedStep(text, name);
@@ -925,6 +944,7 @@ test("finite audit PostgreSQL exception rejects unsafe or unrelated service and 
     ["python3 scripts/account-ci-postgres.py", "python3 scripts/account-ci-postgres.py || true"],
     ["python3 -m unittest discover -s scripts/tests -p test_account_ci_postgres.py", "true"],
     ["python3 scripts/test-financial-parallel.py", "python3 scripts/test-financial-parallel.py || true"],
+    ['python3 scripts/ci-fixture-process.py --receipt "$PINVOU_CI_RESOURCE_LEDGER/financial-process.json" -- ', ""],
     ["      GOTOOLCHAIN: local", "      F17_TEST_DATABASE_URL: postgres://postgres@127.0.0.1:5432/postgres\n      GOTOOLCHAIN: local"],
     ["        shell: bash", "        env:\n          F17_TEST_DATABASE_PROFILE: github-actions-service\n        shell: bash"],
     ["          POSTGRES_HOST_AUTH_METHOD: trust", "          POSTGRES_PASSWORD: ${{ secrets.DB_PASSWORD }}"],

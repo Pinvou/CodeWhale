@@ -1132,7 +1132,7 @@ class CiGatePolicyTests(unittest.TestCase):
             self.assertNotRegex(source, r"(?m)^        (?:if|continue-on-error):")
             postgres = _step_named(text, "Account closure contracts on isolated PostgreSQL")
             self.assertIn("python3 -m unittest discover -s scripts/tests -p test_account_closure_postgres.py", postgres)
-            self.assertIn("python3 scripts/test-account-closure-postgres.py", postgres)
+            self.assertIn('python3 scripts/ci-fixture-process.py --receipt "$PINVOU_CI_RESOURCE_LEDGER/closure-process.json" -- python3 scripts/test-account-closure-postgres.py', postgres)
             self.assertIn("PINVOU_ACCOUNT_CLOSURE_TEST_DATABASE_URL", postgres)
             self.assertNotRegex(postgres, r"(?m)^        (?:if|continue-on-error):")
 
@@ -1144,6 +1144,7 @@ class CiGatePolicyTests(unittest.TestCase):
             job.replace(postgres, "", 1),
             job.replace("npm --prefix account-platform run test:closure-contracts", "true", 1),
             job.replace("python3 scripts/test-account-closure-postgres.py", "true", 1),
+            job.replace('python3 scripts/ci-fixture-process.py --receipt "$PINVOU_CI_RESOURCE_LEDGER/closure-process.json" -- ', "", 1),
         ):
             with self.assertRaises(AssertionError):
                 assert_contract(mutated)
@@ -3440,6 +3441,7 @@ class CiGatePolicyTests(unittest.TestCase):
             "Financial parallel diagnostics",
             "Account test resource lifecycle receipts",
             "Account closure resource lifecycle receipts",
+            "Preserve browser fixture exit receipts",
         )
         self.assertEqual(
             len(step_level),
@@ -3470,6 +3472,28 @@ class CiGatePolicyTests(unittest.TestCase):
                   continue-on-error: true
                   shell: pwsh
                   run: python scripts/ci-windows-imports-diagnose.py "$env:PINVOU3_TEST_EXE"
+            """).rstrip(), "      "),
+        )
+        diagnostic_job = _extract_job_block(body, 'windows-codex-runtime-test')
+        matches = list(re.finditer(
+            r"(?ms)^      - name: Preserve browser fixture exit receipts\n.*?(?=^      - |\Z)", diagnostic_job
+        ))
+        self.assertEqual(len(matches), 1, "expected one reviewed browser receipt step")
+        self.assertEqual(
+            matches[0].group(0).rstrip(),
+            textwrap.indent(textwrap.dedent("""\
+                - name: Preserve browser fixture exit receipts
+                  if: always()
+                  timeout-minutes: 3
+                  continue-on-error: true
+                  uses: actions/upload-artifact@v7
+                  with:
+                    name: windows-browser-exit-${{ github.run_id }}-${{ github.run_attempt }}
+                    retention-days: 7
+                    if-no-files-found: warn
+                    path: |
+                      ${{ runner.temp }}/windows-browser-*-${{ github.run_id }}-${{ github.run_attempt }}.json
+                      ${{ runner.temp }}/windows-browser-*-${{ github.run_id }}-${{ github.run_attempt }}-resources/*.json
             """).rstrip(), "      "),
         )
         diagnostic_job = _extract_job_block(body, 'frontend-test')
@@ -3580,7 +3604,7 @@ class CiGatePolicyTests(unittest.TestCase):
             ("env:", "          FIXTURE: yes\n        run: exit 37\n"),
         ):
             # Moving the exception must fail even when the next valid YAML
-            # step starts with run/id/if/env and the total count stays four.
+            # step starts with run/id/if/env and the total count stays five.
             mutations[f"move exemption to {first_line} next step"] = without_upload_exemption.replace(
                 "      - name: Stop owned temporary PostgreSQL services\n",
                 f"      - {first_line}\n{remaining}        continue-on-error: true\n\n"
