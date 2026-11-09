@@ -11,6 +11,8 @@ export function AdminEntitlementCorrectionWorkspace({ client, copy, language, pe
   const [packageID, setPackageID] = useState(''), [orderID, setOrderID] = useState('');
   const [reasonCode, setReasonCode] = useState(''), [reason, setReason] = useState('');
   const [precheck, setPrecheck] = useState(null), [receipt, setReceipt] = useState(null);
+  const [displayScope, setDisplayScope] = useState(null);
+  const scopeEpoch = client.financeSessionEpoch;
   const [reading, setReading] = useState(false), [readError, setReadError] = useState('');
   const [needsAuthentication, setNeedsAuthentication] = useState(false);
   const generation = useRef(0), controller = useRef(null);
@@ -19,6 +21,7 @@ export function AdminEntitlementCorrectionWorkspace({ client, copy, language, pe
   useEffect(() => {
     generation.current++; controller.current?.abort(); setReading(false); setReadError('');
     setPrecheck(null); setReceipt(null); setNeedsAuthentication(false);
+    setDisplayScope({ client, owner, epoch: scopeEpoch, canRequest });
     return () => { generation.current++; controller.current?.abort(); };
   }, [client, client.financeSessionEpoch, owner, canRequest]);
   const reasonCodeID = useId();
@@ -27,6 +30,8 @@ export function AdminEntitlementCorrectionWorkspace({ client, copy, language, pe
   const reasonCodeBytes = new TextEncoder().encode(displayedReasonCode.trim()).length;
   const reasonCodeOver = reasonCodeBytes > 80;
   const projection = entitlementCorrectionPrecheck(pending?.precheck || precheck);
+  const visibleFacts = displayScope?.client === client && displayScope.owner === owner && displayScope.epoch === scopeEpoch && displayScope.canRequest && canRequest && !reading ? projection : null;
+  const referenceID = useId();
   const locked = reading || operation.busy || operation.unknown || operation.blocked;
   const change = (setter, value) => { generation.current++; controller.current?.abort(); setter(value); setPrecheck(null); setReceipt(null); setReadError(''); };
   const load = async () => {
@@ -72,12 +77,21 @@ export function AdminEntitlementCorrectionWorkspace({ client, copy, language, pe
     {operation.unknown && <p>{text.recoveryPending}</p>}
     {needsAuthentication && <><p>{text.recentAuthenticationRequired}</p><button onClick={() => client.reauthenticate('/admin.html?section=entitlement-correction')}>{text.reauthenticate}</button></>}
     <form onSubmit={event => { event.preventDefault(); void load(); }}>
-      <label>{text.packageID}<input disabled={locked} value={pending?.precheck.normalized_command.package_id || packageID} onChange={event => change(setPackageID, event.target.value)} /></label>
-      <label>{text.orderID}<input disabled={locked} value={pending?.precheck.normalized_command.payment_order_id || orderID} onChange={event => change(setOrderID, event.target.value)} /></label>
+      <label>{text.packageID}<input disabled={locked} value={pending?.precheck.normalized_command.package_id || packageID} aria-describedby={referenceID + '-package'} onChange={event => change(setPackageID, event.target.value)} /><small id={referenceID + '-package'}>{text.reference.packageHelp}</small></label>
+      <label>{text.orderID}<input disabled={locked} value={pending?.precheck.normalized_command.payment_order_id || orderID} aria-describedby={referenceID + '-order'} onChange={event => change(setOrderID, event.target.value)} /><small id={referenceID + '-order'}>{text.reference.orderHelp}</small></label>
       <label>{text.reasonCode}<input disabled={locked} value={displayedReasonCode} aria-required="true" aria-invalid={reasonCodeOver || undefined} aria-describedby={`${reasonCodeID}-help ${reasonCodeID}-count${reasonCodeOver ? ` ${reasonCodeID}-over` : ''}`} onChange={event => change(setReasonCode, event.target.value)} /><small id={`${reasonCodeID}-help`}>{text.reasonCodeHelp}</small><small id={`${reasonCodeID}-count`}>{text.reasonCodeCount(reasonCodeBytes)}</small>{reasonCodeOver && <small id={`${reasonCodeID}-over`} role="alert">{text.reasonCodeOver}</small>}</label>
       <button disabled={locked || !packageID || !orderID || !reasonCode.trim() || reasonCodeOver}>{text.precheck}</button>
     </form>
-    {projection && <dl>
+    {visibleFacts && <section className="adm-financial-repair-facts" aria-label={text.reference.title}>
+      <h3>{text.reference.title}</h3>
+      <dl>
+        <div><dt>{text.packageID}</dt><dd><code>{visibleFacts.packageID}</code></dd></div>
+        <div><dt>{text.orderID}</dt><dd><code>{visibleFacts.orderID}</code></dd></div>
+        <div><dt>{text.reference.wallet}</dt><dd><code>{visibleFacts.critical.wallet_id}</code></dd></div>
+        <div><dt>{text.reference.transaction}</dt><dd><code>{visibleFacts.critical.payment_transaction_id}</code></dd></div>
+      </dl>
+    </section>}
+    {visibleFacts && <dl>
       <dt>{text.source}</dt><dd>{text.types[projection.critical.source_type]}</dd>
       <dt>{text.target}</dt><dd>{text.types[projection.critical.target_type]}</dd>
       <dt>{text.amount}</dt><dd>{String(projection.critical.amount_microcredits)}</dd>
