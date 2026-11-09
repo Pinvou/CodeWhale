@@ -135,11 +135,10 @@ async fn start_controlled_worker<T>(
                     .copied()
                     .find(|code| *code == error)
                     .unwrap_or("pairing_registration_failed");
-            let status = manager
-                .fail_operation(operation, code.to_owned())
+            manager
+                .fail_operation_with_projection(operation, code.to_owned(), emit)
                 .map_err(controlled_error)?;
             log_controlled_event("start_failed", code);
-            emit(&status);
             Err(code.to_owned())
         }
     }
@@ -162,9 +161,7 @@ pub(crate) async fn wait_controlled_registration(
         Err(_) => {
             const ERROR: &str = "pairing_registration_failed";
             retire(operation.generation());
-            if let Ok(status) = manager.fail_operation(operation, ERROR.to_owned()) {
-                emit(&status);
-            }
+            let _ = manager.fail_operation_with_projection(operation, ERROR.to_owned(), emit);
             log_controlled_event("registration_failed", ERROR);
             Err(ERROR.to_owned())
         }
@@ -377,7 +374,7 @@ pub async fn desktop_remote_controlled_refresh(
         }
         checkpoint("refresh_state_rotation_begin");
         let operation = manager
-            .complete_refresh_revoked(refresh)
+            .complete_refresh_revoked_with_projection(refresh, |status| emit_status(&app, status))
             .map_err(controlled_error)?;
         checkpoint("refresh_state_rotation_done");
         checkpoint("refresh_worker_start_begin");
