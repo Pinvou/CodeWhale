@@ -18,6 +18,13 @@ func claimOneEmergencyCancellation(t *testing.T, r *PostgresRepository, ctx cont
 	return claimed[0]
 }
 
+func makeEmergencyTestClaimDue(t *testing.T, r *PostgresRepository, ctx context.Context, id uuid.UUID) {
+	t.Helper()
+	if _, err := r.pool.Exec(ctx, `UPDATE model_emergency_cancellations SET next_attempt_at=$2 WHERE id=$1 AND status='PENDING' AND next_attempt_at IS NOT NULL`, id, r.now().Add(-time.Second)); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestEmergencyCancellationClaimOwnershipPostgres(t *testing.T) {
 	for _, stage := range []string{"before-request", "after-request", "pending", "zero-attempt"} {
 		t.Run(stage, func(t *testing.T) {
@@ -40,7 +47,7 @@ func TestEmergencyCancellationClaimOwnershipPostgres(t *testing.T) {
 			var owner EmergencyCancellationTarget
 			if stage == "before-request" || stage == "after-request" {
 				// Expiry controls eligibility only; ownership comes from the real next claim.
-				if _, err := f.r.pool.Exec(f.ctx, `UPDATE model_emergency_cancellations SET lease_until=$2 WHERE id=$1`, id, f.r.now().Add(-time.Second)); err != nil {
+				if _, err := f.r.pool.Exec(f.ctx, `UPDATE model_emergency_cancellations SET lease_until=$2,next_attempt_at=$2 WHERE id=$1`, id, f.r.now().Add(-time.Second)); err != nil {
 					t.Fatal(err)
 				}
 				owner = claimOneEmergencyCancellation(t, f.r, f.ctx, id)
@@ -85,6 +92,9 @@ func TestEmergencyCancellationClaimOwnershipPostgres(t *testing.T) {
 			}
 			assertStale()
 			if owner.ClaimAttempt == 0 {
+				if stage == "pending" {
+					makeEmergencyTestClaimDue(t, f.r, f.ctx, id)
+				}
 				owner = claimOneEmergencyCancellation(t, f.r, f.ctx, id)
 			}
 			pre, terminal, err := f.r.requestEmergencyCancellation(f.ctx, owner, ProviderCancelUnsupported, f.service.upstream.AdapterVersion())
@@ -124,7 +134,7 @@ func TestEmergencyCancellationRequestLocksClaimPostgres(t *testing.T) {
 		f := newModelExpiryObservationFixture(t)
 		u, id := f.preparedExpiry(t, "hold")
 		claim := claimOneEmergencyCancellation(t, f.r, f.ctx, id)
-		if _, err := f.r.pool.Exec(f.ctx, `UPDATE model_emergency_cancellations SET lease_until=$2 WHERE id=$1`, id, f.r.now().Add(-time.Second)); err != nil {
+		if _, err := f.r.pool.Exec(f.ctx, `UPDATE model_emergency_cancellations SET lease_until=$2,next_attempt_at=$2 WHERE id=$1`, id, f.r.now().Add(-time.Second)); err != nil {
 			t.Fatal(err)
 		}
 		blocker, err := f.r.pool.Begin(f.ctx)
@@ -170,6 +180,7 @@ func TestEmergencyCancellationRequestLocksClaimPostgres(t *testing.T) {
 		if err := f.r.retryEmergencyCancellation(f.ctx, claim, errors.New("controlled retry")); err != nil {
 			t.Fatal(err)
 		}
+		makeEmergencyTestClaimDue(t, f.r, f.ctx, id)
 		next := claimOneEmergencyCancellation(t, f.r, f.ctx, id)
 		if next.ClaimAttempt != claim.ClaimAttempt+1 {
 			t.Fatal("claim not reclaimable after request transaction completed")

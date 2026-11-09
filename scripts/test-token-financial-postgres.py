@@ -19,6 +19,7 @@ from urllib.parse import parse_qs, urlsplit
 ROOT = Path(__file__).resolve().parents[1]
 ACTORS = {"billing_migrator", "billing_schema_owner", "billing_service"}
 REQUIRED = {
+    "TestEmergencyCancellationDurableRetryPostgres",
     "TestEmergencyCancellationWorkerDiagnosticsPostgres",
     "TestEmergencyCancellationClaimOwnershipPostgres",
     "TestEmergencyCancellationRequestLocksClaimPostgres",
@@ -122,6 +123,7 @@ ACCOUNT_LEAF_REQUIRED = {
 ACCOUNT_CHILD_REQUIRED = ACCOUNT_REQUIRED - ACCOUNT_LEAF_REQUIRED
 TOKEN_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/token"
 TOKEN_CHILD_REQUIRED = {
+    "TestEmergencyCancellationDurableRetryPostgres",
     "TestEmergencyCancellationClaimOwnershipPostgres",
     "TestEmergencyCancellationRequestLocksClaimPostgres",
     "TestUserUnusedIntentCancellationOwnerPostgres",
@@ -288,6 +290,7 @@ EXACT_REQUIRED_CHILDREN = {
         "retention-purges-submission-snapshot-and-review-reason",
     },
     "TestEmergencyCancellationClaimOwnershipPostgres": {"before-request", "after-request", "pending", "zero-attempt"},
+    "TestEmergencyCancellationDurableRetryPostgres": {"failure-backoff-and-manual-case", "expired-claim-and-stale-result"},
     "TestReceivableSettlementGuardedWritesPostgres": {"recharge-and-write-off-lock-order"},
     "TestEmergencyCancellationRequestLocksClaimPostgres": {"usage-lock-reclaim"},
     "TestPasswordPreparationAuthorizationPostgres": {
@@ -302,7 +305,7 @@ EXACT_REQUIRED_CHILDREN = {
         "fresh", "legacy-upgrade", "installed-29-upgrade", "installed-30-upgrade",
         "installed-f05-34-upgrade", "retained-management-lifecycle-upgrade",
         "installed-f07-36-upgrade", "installed-pre-runtime-37-upgrade",
-        "installed-pre-cleanup-39-upgrade",
+        "installed-pre-cleanup-39-upgrade", "installed-pre-emergency-retry-40-upgrade",
     },
     "TestUserUnusedIntentCancellationOwnerPostgres": {
         "before-claim", "after-claim", "waiting-owner-does-not-starve-later-target", "acquired-intent-control", "model-first-control",

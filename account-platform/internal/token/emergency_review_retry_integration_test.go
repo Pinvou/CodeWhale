@@ -331,6 +331,7 @@ func testEmergencyConfirmedHoldRecovery(t *testing.T, mode string) {
 		t.Fatal(err)
 	}
 	// A request and a completed reservation do not themselves prove release.
+	makeEmergencyTestClaimDue(t, repository, ctx, cancellationID)
 	claim := claimOneEmergencyCancellation(t, repository, ctx, cancellationID)
 	if err = repository.recordEmergencyCancellationAttempt(ctx, claim, ProviderCancelUnsupported, false, true, false); !errors.Is(err, ErrForbidden) {
 		t.Fatalf("unconfirmed attempt accepted: %v", err)
@@ -346,6 +347,7 @@ func testEmergencyConfirmedHoldRecovery(t *testing.T, mode string) {
 	reserveAllowed.Store(true)
 	// A second failed tick must preserve money and REVIEW rather than invent
 	// confirmation. The final positive tick below uses the real Billing client.
+	makeEmergencyTestClaimDue(t, repository, ctx, cancellationID)
 	if err = worker.runOnce(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -406,6 +408,7 @@ func testEmergencyConfirmedHoldRecovery(t *testing.T, mode string) {
 		})
 	}
 	allowed.Store(true)
+	makeEmergencyTestClaimDue(t, repository, ctx, cancellationID)
 	if err = worker.runOnce(ctx); err != nil {
 		t.Fatal(err)
 	}

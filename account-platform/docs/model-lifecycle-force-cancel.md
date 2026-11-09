@@ -24,11 +24,36 @@ Each emergency claim returns its incremented attempts as an ownership token.
 Request and attempt recording lock the target before the usage row and require
 that exact token in LEASED state; retry resets only that same claim. A delayed
 worker cannot overwrite a reclaimed target, its usage, or its cancellation
-evidence. Lease expiry makes a target eligible for reclaim; it does not revoke
-an unchanged claim by itself. An external cancellation or idempotent hold release
+evidence. Lease expiry alone does not revoke an unchanged claim; another worker
+must durably reclaim or isolate the target. An external cancellation or idempotent hold release
 already started after an owned request commits may still finish after reclaim;
 this fencing does not promise exactly-once external effects. Existing USER and
 expiry ownership checks and financial confirmation requirements still apply.
+
+On a failed claim, the next automatic attempt is scheduled in Token storage:
+5, 10, 20, 40, 80, 160, then at most 300 seconds. If a worker disappears, a
+later worker observes the same cooldown after the 30-second lease. Targets in
+cooldown do not occupy a claim slot. Failure or lease expiry on the eighth
+automatic claim moves that target to `MANUAL_REVIEW` and records immutable task
+evidence with a stable diagnostic. Existing claim generations are preserved;
+historical claims do not count against the new retry budget.
+
+Operations can find the usage request in the existing Token reconciliation
+queue. If a case already exists for that usage, the worker does not create a
+duplicate. Existing case resolution rules still apply when usage has a confirmed
+financial outcome. For diagnosis, read `model_emergency_cancellations` by
+`usage_request_id` and its `MANUAL_REVIEW` evidence by task ID using an approved
+read-only connection. Reconcile only through the existing usage and Billing
+proof paths. The exhausted task is not retried automatically; exhaustion does
+not establish a provider outcome, change the usage state, or release a hold.
+Do not reset the task, run the model again, or release funds based on the
+retry counter. An already started external action may still finish.
+
+Before enabling this worker version, stop old Token gateway workers, apply and
+verify Token migration `900007_emergency_cancellation_retry` with the existing
+migration identity, then start the new workers. Old workers do not honor the
+new cooldown column. Migration 900007 preserves review evidence and refuses
+Down; recover using a corrected compatible version.
 
 The worker attempts local transport cancellation immediately. When another
 replica owns the connection, that owner also reads the immutable cancellation

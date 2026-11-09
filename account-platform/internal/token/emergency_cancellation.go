@@ -27,6 +27,10 @@ type EmergencyModelCancellationWorker struct {
 
 const emergencyCancellationFailure = "model emergency cancellation failed"
 
+// Keep the attempt fence separate: installed targets may have historical claims
+// but have not yet used any of the new, bounded automatic retry budget.
+const emergencyCancellationRetryBudget = 8
+
 func NewEmergencyModelCancellationWorker(repository *PostgresRepository, service *Service, interval time.Duration) *EmergencyModelCancellationWorker {
 	if interval <= 0 {
 		interval = 5 * time.Second
@@ -54,6 +58,10 @@ func (w *EmergencyModelCancellationWorker) runOnce(ctx context.Context) error {
 	}
 	if err := w.repository.syncEmergencyCancellationTargets(ctx); err != nil {
 		reportTokenWorkerFailure(ctx, emergencyCancellationFailure, "sync_targets", err)
+		return err
+	}
+	if err := w.repository.reviewExpiredEmergencyCancellations(ctx, w.batchSize); err != nil {
+		reportTokenWorkerFailure(ctx, emergencyCancellationFailure, "review_expired_claims", err)
 		return err
 	}
 	targets, err := w.repository.claimEmergencyCancellations(ctx, w.batchSize)
@@ -118,16 +126,21 @@ func (r *PostgresRepository) claimEmergencyCancellations(ctx context.Context, li
 	rows, err := r.pool.Query(ctx, `WITH candidates AS (
     SELECT cancellation.id FROM model_emergency_cancellations cancellation
     WHERE cancellation.status IN ('PENDING','LEASED') AND (cancellation.lease_until IS NULL OR cancellation.lease_until<$1)
+    AND (cancellation.next_attempt_at IS NULL OR cancellation.next_attempt_at<=$1)
+    AND cancellation.retry_attempts<$3
     AND NOT EXISTS (SELECT 1 FROM usage_requests request WHERE request.id=cancellation.usage_request_id
         AND ((request.cancellation_origin='USER' AND request.execution_status='REVIEW'
         AND request.cancel_status='CANCEL_REQUESTED' AND request.error_class='cancel_hold_recovery_unconfirmed')
         OR (`+pendingUnusedExpiryFenceSQL+`) OR (`+pendingUserUnusedIntentSQL+`)))
     ORDER BY cancellation.requested_at,cancellation.id FOR UPDATE SKIP LOCKED LIMIT $2
 ), claimed AS (
-    UPDATE model_emergency_cancellations cancellation SET status='LEASED',lease_until=$1::timestamptz+interval '30 seconds',attempts=attempts+1,updated_at=$1::timestamptz
+    UPDATE model_emergency_cancellations cancellation SET status='LEASED',lease_until=$1::timestamptz+interval '30 seconds',attempts=attempts+1,
+        retry_attempts=retry_attempts+1,
+        next_attempt_at=$1::timestamptz+interval '30 seconds'+make_interval(secs=>LEAST(300,5*(1<<LEAST(retry_attempts,6)))),
+        updated_at=$1::timestamptz
     FROM candidates WHERE cancellation.id=candidates.id RETURNING cancellation.id,cancellation.usage_request_id,cancellation.attempts
 )
-SELECT claimed.id,claimed.usage_request_id,request.execution_status,claimed.attempts FROM claimed JOIN usage_requests request ON request.id=claimed.usage_request_id`, now, limit)
+SELECT claimed.id,claimed.usage_request_id,request.execution_status,claimed.attempts FROM claimed JOIN usage_requests request ON request.id=claimed.usage_request_id`, now, limit, emergencyCancellationRetryBudget)
 	if err != nil {
 		return nil, err
 	}
@@ -316,7 +329,7 @@ func (r *PostgresRepository) recordEmergencyCancellationAttempt(ctx context.Cont
 		return err
 	}
 	snapshot := map[string]any{"capability": capability, "local_transport_aborted": aborted, "provider_cancel_result": providerResult, "provider_success_inferred": cancelStatus == "PROVIDER_CONFIRMED", "hold_released": preDispatch}
-	if _, err := tx.Exec(ctx, `UPDATE model_emergency_cancellations SET status='CONVERGING',lease_until=NULL,cancellation_capability=$2,local_transport_aborted=$3,provider_cancel_result=$4,attempted_at=$5,updated_at=$5 WHERE id=$1`, target.ID, capability, aborted, providerResult, now); err != nil {
+	if _, err := tx.Exec(ctx, `UPDATE model_emergency_cancellations SET status='CONVERGING',lease_until=NULL,next_attempt_at=NULL,cancellation_capability=$2,local_transport_aborted=$3,provider_cancel_result=$4,attempted_at=$5,updated_at=$5 WHERE id=$1`, target.ID, capability, aborted, providerResult, now); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(ctx, `INSERT INTO model_emergency_cancellation_evidence(id,emergency_cancellation_id,evidence_type,snapshot,created_at) VALUES($1,$2,'ATTEMPTED',$3,$4)`, uuid.Must(uuid.NewV7()), target.ID, snapshot, now); err != nil {
@@ -329,9 +342,43 @@ func (r *PostgresRepository) recordEmergencyCancellationAttempt(ctx context.Cont
 }
 
 func (r *PostgresRepository) retryEmergencyCancellation(ctx context.Context, target EmergencyCancellationTarget, cause error) error {
-	_, err := r.pool.Exec(ctx, `UPDATE model_emergency_cancellations SET status='PENDING',lease_until=NULL,provider_cancel_result=$2,updated_at=$3 WHERE id=$1 AND status='LEASED' AND attempts=$4 AND attempts>0`, target.ID, "ATTEMPT_ERROR:"+stableEmergencyError(cause), r.now(), target.ClaimAttempt)
+	// A confirmed failure starts the same cooldown at failure time rather than
+	// at lease expiry. Change only the matching claim, even on the final attempt.
+	_, err := r.pool.Exec(ctx, `WITH changed AS (
+    UPDATE model_emergency_cancellations SET status=CASE WHEN retry_attempts>=$5 THEN 'MANUAL_REVIEW' ELSE 'PENDING' END,
+        next_attempt_at=CASE WHEN retry_attempts>=$5 THEN NULL ELSE $3::timestamptz+make_interval(secs=>LEAST(300,5*(1<<LEAST(retry_attempts-1,6)))) END,
+        lease_until=NULL,provider_cancel_result=$2,updated_at=$3
+    WHERE id=$1 AND status='LEASED' AND attempts=$4 AND attempts>0 AND retry_attempts>0
+    RETURNING id,status,retry_attempts,provider_cancel_result,updated_at
+)`+emergencyCancellationManualEvidenceSQL, target.ID, "ATTEMPT_ERROR:"+stableEmergencyError(cause), r.now(), target.ClaimAttempt, emergencyCancellationRetryBudget)
 	return err
 }
+
+func (r *PostgresRepository) reviewExpiredEmergencyCancellations(ctx context.Context, limit int) error {
+	if limit < 1 || limit > 1000 {
+		return ErrForbidden
+	}
+	// A crash on the last claim has no acknowledgement. Expiry isolates only
+	// that task; it is not evidence of a supplier outcome or a funds release.
+	_, err := r.pool.Exec(ctx, `WITH expired AS (
+    SELECT id FROM model_emergency_cancellations
+    WHERE status='LEASED' AND retry_attempts>=$2 AND lease_until<$1
+    ORDER BY lease_until,id FOR UPDATE SKIP LOCKED LIMIT $3
+), changed AS (
+    UPDATE model_emergency_cancellations cancellation SET status='MANUAL_REVIEW',lease_until=NULL,next_attempt_at=NULL,
+        provider_cancel_result='ATTEMPT_ERROR:LEASE_EXPIRED',updated_at=$1
+    FROM expired WHERE cancellation.id=expired.id
+    RETURNING cancellation.id,cancellation.status,cancellation.retry_attempts,cancellation.provider_cancel_result,cancellation.updated_at
+)`+emergencyCancellationManualEvidenceSQL, r.now(), emergencyCancellationRetryBudget, limit)
+	return err
+}
+
+// This records task evidence only. Adding a usage-cancellation or convergence
+// fact here could invalidate independent, immutable unused-hold release proofs.
+const emergencyCancellationManualEvidenceSQL = `
+INSERT INTO model_emergency_cancellation_evidence(id,emergency_cancellation_id,evidence_type,snapshot,created_at)
+SELECT gen_random_uuid(),id,'MANUAL_REVIEW',jsonb_build_object('retry_attempts',retry_attempts,'diagnostic',provider_cancel_result),updated_at
+FROM changed WHERE status='MANUAL_REVIEW'`
 
 func stableEmergencyError(err error) string {
 	if err == nil {

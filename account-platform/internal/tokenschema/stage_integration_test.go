@@ -26,6 +26,7 @@ func TestManagementPublicMigrationInstallation(t *testing.T) {
 	t.Run("installed-f07-36-upgrade", func(t *testing.T) { testManagementPublicMigrationInstallation(t, false, 36, false) })
 	t.Run("installed-pre-runtime-37-upgrade", func(t *testing.T) { testManagementPublicMigrationInstallation(t, false, 37, false) })
 	t.Run("installed-pre-cleanup-39-upgrade", func(t *testing.T) { testManagementPublicMigrationInstallation(t, false, 39, false) })
+	t.Run("installed-pre-emergency-retry-40-upgrade", func(t *testing.T) { testManagementPublicMigrationInstallation(t, false, 40, false) })
 }
 func testManagementPublicMigrationInstallation(t *testing.T, legacy bool, previousStage int, retainedManagement bool) {
 	dsn := os.Getenv("PINVOU_TEST_TOKEN_DATABASE_URL")
@@ -134,11 +135,12 @@ func testManagementPublicMigrationInstallation(t *testing.T, legacy bool, previo
 	var retainedVersions []int64
 	var previousAccountFacts string
 	var previousRuntimeCapabilityFacts string
+	var previousRetryHistory string
 	if previousStage > 0 {
 		previous := []migrations.Migration{}
 		for _, m := range loaded {
-			if previousStage == 39 {
-				if m.Version != 900006 {
+			if previousStage == 39 || previousStage == 40 {
+				if m.Version < 900006 || (previousStage == 40 && m.Version == 900006) {
 					previous = append(previous, m)
 				}
 				continue
@@ -157,6 +159,11 @@ func testManagementPublicMigrationInstallation(t *testing.T, legacy bool, previo
 		verified, e := migrations.VerifyApplied(ctx, connection, previous)
 		if e != nil || verified.AppliedCount != previousStage {
 			t.Fatal("installed previous stage fixture verification", verified, e)
+		}
+		if previousStage == 40 {
+			if e = connection.QueryRow(ctx, `SELECT jsonb_agg(to_jsonb(history) ORDER BY version)::text FROM schema_migrations history`).Scan(&previousRetryHistory); e != nil {
+				t.Fatal(e)
+			}
 		}
 		if previousStage == 36 {
 			if _, e = connection.Exec(ctx, `INSERT INTO token_accounts(id,owner_type,owner_id,wallet_id,name,status,default_priority,created_by,created_at,updated_at,management_mode) VALUES('11111111-1111-4111-8111-111111111111','USER','22222222-2222-4222-8222-222222222222','33333333-3333-4333-8333-333333333333','retained closure account','ACTIVE',100,'22222222-2222-4222-8222-222222222222','2026-01-01','2026-01-01','PLATFORM')`); e != nil {
@@ -308,6 +315,25 @@ VALUES('11111111-1111-4111-8111-111111111116','11111111-1111-4111-8111-111111111
 	}
 	if err = Up(ctx, connection, loaded); err != nil {
 		t.Fatalf("exact installed migration replay: %v", err)
+	}
+	if previousStage == 40 {
+		var kept string
+		var columns, hardened bool
+		if err = connection.QueryRow(ctx, `SELECT
+ (SELECT jsonb_agg(to_jsonb(history) ORDER BY version)::text FROM schema_migrations history WHERE version<900007),
+ (SELECT count(*)=2 FROM information_schema.columns WHERE table_schema='public' AND table_name='model_emergency_cancellations' AND column_name IN ('retry_attempts','next_attempt_at')),
+ (SELECT pg_get_userbyid(relowner)='token_schema_owner' FROM pg_class WHERE oid='public.model_emergency_cancellations'::regclass)
+ AND NOT pg_has_role('token_gateway','token_schema_owner','MEMBER')
+ AND NOT has_table_privilege('token_gateway','public.model_emergency_cancellations','TRUNCATE')`).Scan(&kept, &columns, &hardened); err != nil || kept != previousRetryHistory || !columns || !hardened {
+			t.Fatalf("emergency retry upgrade lost history, columns or runtime fence: %v %v %v %v", kept == previousRetryHistory, columns, hardened, err)
+		}
+		migrations.Unlock(ctx, connection)
+		if err = migrations.DownOne(ctx, connection, loaded); err == nil || !strings.Contains(err.Error(), "emergency cancellation retry and review history is forward-only") {
+			t.Fatalf("rollback did not reach the retry history guard: %v", err)
+		}
+		if verified, err := VerifyApplied(ctx, connection, loaded); err != nil || verified.AppliedCount != len(installed) {
+			t.Fatalf("refused rollback changed installed history: %+v err=%v", verified, err)
+		}
 	}
 	if previousStage == 37 {
 		var retainedFacts, profile string

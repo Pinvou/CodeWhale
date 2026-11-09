@@ -2678,6 +2678,16 @@
         "file": "900006_replay_cleanup_indexes.up.sql",
         "version": 900006,
         "sha256": "bf8521c04a898ba68675b828d09ad98afcc86c4b11115530520844dd9a2bae58"
+      },
+      {
+        "file": "900007_emergency_cancellation_retry.down.sql",
+        "version": 900007,
+        "sha256": "d61e88656c378b7f06312b9d4db858c64f4a75cfd6e7b63e4259c7b09f2ff86e"
+      },
+      {
+        "file": "900007_emergency_cancellation_retry.up.sql",
+        "version": 900007,
+        "sha256": "0ea53cbbf9cf89b694c02ee90fec301fed8ea0226ec21665123d1158c1671b49"
       }
     ]
   }
