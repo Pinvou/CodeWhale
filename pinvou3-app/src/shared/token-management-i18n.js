@@ -188,3 +188,49 @@ Object.assign(tokenManagementCopy.ja, { title: "モデルとトークンの管�
 Object.assign(tokenManagementCopy.zh.modelToken, { deliveryStatus: "交付状态" });
 Object.assign(tokenManagementCopy.en.modelToken, { deliveryStatus: "Delivery status" });
 Object.assign(tokenManagementCopy.ja.modelToken, { deliveryStatus: "配信状態" });
+
+Object.assign(tokenManagementCopy.zh.modelToken, {
+  "modelCallNotVerified": "调用资格尚未核实",
+  "modelCallNotVerifiedHelp": "目录发布、来源和协议配置不代表当前请求可调用。",
+  "modelCallDesktopBlocked": "桌面调用受阻",
+  "modelCallDesktopBlockedHelp": "此模型未配置运行协议。",
+  "modelCallCatalogBlocked": "目录调用受阻",
+  "modelCallSourceUnavailable": "目录来源不可用。",
+  "modelCallCatalogRemoved": "模型已从当前目录移除。",
+  "modelCallSourceAvailable": "来源可用",
+  "modelCallSourceUnknown": "来源状态未知",
+  "modelCallProtocolUnset": "未配置",
+  "modelCallProtocolUnknown": "配置状态未知",
+  "modelCallReviewOperations": "查看路由与运行",
+  "modelDetailSnapshot": "显示最近一次读取的快照。正在更新或读取失败时，无法确认当前调用状态。"
+});
+Object.assign(tokenManagementCopy.en.modelToken, {
+  "modelCallNotVerified": "Call eligibility not verified",
+  "modelCallNotVerifiedHelp": "Publication, source status and protocol configuration do not confirm that a request can run.",
+  "modelCallDesktopBlocked": "Desktop calls blocked",
+  "modelCallDesktopBlockedHelp": "No runtime protocol is configured for this model.",
+  "modelCallCatalogBlocked": "Catalog calls blocked",
+  "modelCallSourceUnavailable": "The catalog source is unavailable.",
+  "modelCallCatalogRemoved": "The model was removed from the current catalog.",
+  "modelCallSourceAvailable": "Source available",
+  "modelCallSourceUnknown": "Source status unknown",
+  "modelCallProtocolUnset": "Not configured",
+  "modelCallProtocolUnknown": "Configuration status unknown",
+  "modelCallReviewOperations": "View routing and operations",
+  "modelDetailSnapshot": "Showing the last loaded snapshot. Current call status cannot be confirmed while refreshing or after a failed read."
+});
+Object.assign(tokenManagementCopy.ja.modelToken, {
+  "modelCallNotVerified": "呼び出し可否は未確認",
+  "modelCallNotVerifiedHelp": "カタログでの公開、ソースの状態、プロトコルの設定だけでは、現在の呼び出し可否を確認できません。",
+  "modelCallDesktopBlocked": "デスクトップからの呼び出しは不可",
+  "modelCallDesktopBlockedHelp": "このモデルの実行プロトコルが設定されていません。",
+  "modelCallCatalogBlocked": "カタログ経由の呼び出しは不可",
+  "modelCallSourceUnavailable": "カタログのソースは利用できません。",
+  "modelCallCatalogRemoved": "現在のカタログからモデルが削除されています。",
+  "modelCallSourceAvailable": "ソースは利用可能",
+  "modelCallSourceUnknown": "ソースの状態は不明",
+  "modelCallProtocolUnset": "未設定",
+  "modelCallProtocolUnknown": "設定状態は不明",
+  "modelCallReviewOperations": "ルーティングと実行を確認",
+  "modelDetailSnapshot": "最後に読み込んだスナップショットを表示しています。更新中または読み込み失敗後は、現在の呼び出し状態を確認できません。"
+});
