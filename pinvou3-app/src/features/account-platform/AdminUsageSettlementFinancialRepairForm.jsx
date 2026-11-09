@@ -3,6 +3,7 @@ import {
   financialRepairInputs, financialRepairPrecheckBody,
   financialRepairProjectionRows, financialRepairDraftFromProjection,
 } from './admin-financial-repair-form.js';
+import { financialRepairPrecheck } from './admin-financial-repair-drafts.js';
 import { useFinanceOperation } from './useFinanceOperation.js';
 import { createAndSubmitFreshGovernedApproval } from './admin-governed-approval-workflow.js';
 
@@ -17,6 +18,8 @@ export function AdminUsageSettlementFinancialRepairForm({ client, copy, onCreate
   const [values, setValues] = useState({});
   const [facts, setFacts] = useState(null);
   const [projection, setProjection] = useState(null);
+  const acceptedDisplay = useRef(null);
+  const hintID = React.useId();
   const [reason, setReason] = useState('');
   const [requestKey, setRequestKey] = useState('');
   const [busy, setBusy] = useState('');
@@ -34,7 +37,13 @@ export function AdminUsageSettlementFinancialRepairForm({ client, copy, onCreate
   const fixedTask = commandTypes.length === 1 ? task : null;
   const locked = busy !== '' || operation.busy || operation.unknown;
   const pending = operation.pendingFacts;
-  const displayedFacts = pending ? financialRepairProjectionRows(pending.projection) : facts;
+  const epoch = client.financeSessionEpoch || 0;
+  const identityCopy = usageSettlementRepair ? copy.usageSettlementIdentity : null;
+  const matchesDisplayScope = fact => fact?.client === client && fact.owner === owner && fact.epoch === epoch;
+  const visiblePending = usageSettlementRepair && !matchesDisplayScope(pending?.displayScope) ? null : pending;
+  const presented = visiblePending?.projection || (!pending && busy !== 'facts' && matchesDisplayScope(acceptedDisplay.current) && acceptedDisplay.current.projection === projection ? projection : null);
+  const verified = usageSettlementRepair ? financialRepairPrecheck(presented) : null;
+  const displayedFacts = usageSettlementRepair ? (verified ? financialRepairProjectionRows(presented) : null) : pending ? financialRepairProjectionRows(pending.projection) : facts;
 
   useEffect(() => {
     mounted.current = true;
@@ -97,6 +106,7 @@ export function AdminUsageSettlementFinancialRepairForm({ client, copy, onCreate
         throw Object.assign(new Error('owner projection changed the usage-loss intent'), { code: 'FINANCIAL_REPAIR_PRECHECK_INVALID' });
       }
       setProjection(answer);
+      acceptedDisplay.current = { client, owner, epoch, projection: answer };
       setFacts(rendered);
     } catch (error) {
       if (!live()) return;
@@ -112,7 +122,7 @@ export function AdminUsageSettlementFinancialRepairForm({ client, copy, onCreate
   const createDraft = async (event) => {
     event.preventDefault();
     if (governed) {
-      const prepared = pending || { ...financialRepairDraftFromProjection(projection, reason, requestKey), projection };
+      const prepared = pending || { ...financialRepairDraftFromProjection(projection, reason, requestKey), projection, displayScope: { client, owner, epoch } };
       if (!prepared.draft) { setFailure(copy.invalidDraft); return; }
       const recovering = operation.unknown;
       const revision = factsRevision.current;
@@ -151,8 +161,9 @@ export function AdminUsageSettlementFinancialRepairForm({ client, copy, onCreate
         </select>
       </label>}
       {fields.map((field) => <label key={field.key}>{label(field)}
-        <input disabled={governed && locked} required value={pending ? String(field.key === 'target_resource_id' ? pending.draft.target_resource_id : field.key === 'expected_version' ? pending.draft.normalized_command.expected_receivable_version : pending.draft.normalized_command[field.key]) : values[field.key] || ''} inputMode={field.kind === 'integer' ? 'numeric' : 'text'}
+        <input disabled={governed && locked} required aria-describedby={identityCopy ? hintID + '-' + field.key : undefined} value={visiblePending ? String(field.key === 'target_resource_id' ? visiblePending.draft.target_resource_id : field.key === 'expected_version' ? visiblePending.draft.normalized_command.expected_receivable_version : visiblePending.draft.normalized_command[field.key]) : values[field.key] || ''} inputMode={field.kind === 'integer' ? 'numeric' : 'text'}
           onChange={(event) => setValue(field.key, event.target.value)} />
+        {identityCopy && <small id={hintID + '-' + field.key}>{identityCopy.hints[field.key]}</small>}
       </label>)}
       <button type="submit" disabled={locked}>{busy === 'facts' ? copy.reading : fixedTask?.load || copy.readFacts}</button>
     </form>
@@ -160,8 +171,13 @@ export function AdminUsageSettlementFinancialRepairForm({ client, copy, onCreate
     {fixedTask && <details className="adm-financial-repair-technical"><summary>{fixedTask.technical}</summary><p><code>{commandType}</code></p></details>}
     {created && <p role="status">{task?.submitted || copy.createdHint} <code>{created}</code></p>}
     {displayedFacts && <div className="adm-financial-repair-facts">
-      <h4>{copy.frozenFacts}</h4>
-      <dl>{displayedFacts.rows.map((row) => <div key={row.key}><dt>{copy.fields[row.key] || row.key}</dt><dd><code>{row.value}</code></dd></div>)}</dl>
+      <h4>{verified && identityCopy ? identityCopy.title : copy.frozenFacts}</h4>
+      {verified && identityCopy ? <><p>{identityCopy.scope}</p><dl>
+        <div><dt>{copy.targets[commandType]}</dt><dd><code>{verified.normalized.hold_id}</code></dd></div>
+        <div><dt>{copy.fields.usage_request_id}</dt><dd><code>{verified.normalized.usage_request_id}</code></dd></div>
+        <div><dt>{copy.fields.loss_review_id}</dt><dd><code>{verified.normalized.loss_review_id}</code></dd></div>
+        <div><dt>{identityCopy.wallet}</dt><dd><code>{verified.financial.wallet_id}</code></dd></div>
+      </dl></> : <dl>{displayedFacts.rows.map((row) => <div key={row.key}><dt>{copy.fields[row.key] || row.key}</dt><dd><code>{row.value}</code></dd></div>)}</dl>}
       <details><summary>{copy.criticalFacts}</summary><pre>{displayedFacts.critical}</pre></details>
       <details><summary>{copy.financialFacts}</summary><pre>{displayedFacts.financial}</pre></details>
     </div>}
