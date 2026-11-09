@@ -45,3 +45,28 @@ export const registrationBonusRecoveryCopy = {
     pendingStorageFailed: '要求の復元情報を使用できません。新しい変更要求は送信していません。既存の要求を先に確認してください。',
   },
 };
+
+registrationBonusRecoveryCopy.zh.policyEditor = {
+  current: '已生效策略', lastRead: '上次读取的策略', draft: '编辑策略', compare: '待保存的改动',
+  on: '已启用', off: '已关闭', before: '当前', after: '保存后', points: value => `${value} 积分`, days: value => `${value} 天`,
+  noChanges: '策略值未改动。', legacyPrecision: (current, draft) => `当前历史额度为 ${current}；按现有整数表单保存时会提交 ${draft}。`,
+  saving: '正在保存，请等待结果。', refreshingAuthorization: '正在核对管理权限，请稍候。',
+  reloadForConflict: '策略版本已变更，请先重新读取并核对。', checkValues: '请检查赠送积分和有效期。', checkReason: '请填写符合要求的变更原因。',
+  originalSavedReadFailed: '原请求已确认保存，但未能读取当前策略。请重试读取。',
+};
+registrationBonusRecoveryCopy.en.policyEditor = {
+  current: 'Active policy', lastRead: 'Last policy read', draft: 'Edit policy', compare: 'Changes to save',
+  on: 'Enabled', off: 'Off', before: 'Current', after: 'After saving', points: value => `${value} points`, days: value => `${value} days`,
+  noChanges: 'The policy values are unchanged.', legacyPrecision: (current, draft) => `The current legacy amount is ${current}. This form saves whole points and will submit ${draft}.`,
+  saving: 'Saving. Wait for the result.', refreshingAuthorization: 'Checking management permission. Please wait.',
+  reloadForConflict: 'The policy version changed. Reload it and review the values.', checkValues: 'Check the bonus points and validity period.', checkReason: 'Enter a valid reason for saving.',
+  originalSavedReadFailed: 'The original save was confirmed, but the current policy could not be read. Try loading it again.',
+};
+registrationBonusRecoveryCopy.ja.policyEditor = {
+  current: '有効なポリシー', lastRead: '最後に取得したポリシー', draft: 'ポリシーの編集', compare: '保存する変更',
+  on: '有効', off: '無効', before: '現在', after: '保存後', points: value => `${value} ポイント`, days: value => `${value} 日`,
+  noChanges: 'ポリシーの設定値に変更はありません。', legacyPrecision: (current, draft) => `現在の旧形式の付与額は ${current} です。このフォームは整数の ${draft} を送信します。`,
+  saving: '保存中です。結果をお待ちください。', refreshingAuthorization: '管理権限を確認しています。',
+  reloadForConflict: 'ポリシーのバージョンが変わりました。再読み込みして設定値を確認してください。', checkValues: '付与ポイントと有効期間を確認してください。', checkReason: '有効な保存理由を入力してください。',
+  originalSavedReadFailed: '元の保存は確認できましたが、現在のポリシーを取得できませんでした。再読み込みしてください。',
+};

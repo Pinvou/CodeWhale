@@ -6,3 +6,17 @@
 }
 .adm-registration-bonus .adm-primary-button{box-sizing:border-box}
 @media(max-width:760px){.adm-registration-bonus .adm-sms-form .adm-primary-button{width:100%}.adm-registration-bonus .adm-sms-fields{grid-template-columns:1fr}}
+
+.adm-registration-bonus .adm-registration-bonus-policy-heading{margin:0;font-size:15px;line-height:1.4}
+.adm-registration-bonus .adm-registration-bonus-summary dd{overflow-wrap:break-word;overflow-wrap:anywhere}
+.adm-registration-bonus-diff{padding:10px 12px;border:1px solid var(--adm-line);border-radius:8px;background:var(--adm-surface);min-width:0;overflow-wrap:break-word;overflow-wrap:anywhere}
+.adm-registration-bonus-diff:empty{display:none}
+.adm-registration-bonus-diff h4,.adm-registration-bonus-diff p{margin:0;font-size:13px}
+.adm-registration-bonus-diff ul{list-style:none;margin:6px 0 0;padding:0}
+.adm-registration-bonus-diff li{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr) minmax(0,1fr);gap:8px;padding:5px 0}
+.adm-registration-bonus-diff li+li{border-top:1px solid var(--adm-line)}
+.adm-registration-bonus-diff :not(:first-child)+p{margin-top:6px}
+.adm-registration-bonus .adm-registration-bonus-actions{gap:10px;align-items:center}
+.adm-registration-bonus .adm-registration-bonus-save-status{margin:0 auto 0 0;min-width:0;color:var(--adm-muted);overflow-wrap:break-word;overflow-wrap:anywhere}
+.adm-registration-bonus .adm-registration-bonus-actions button:focus{outline:3px solid var(--adm-primary);outline-offset:2px}
+@media(max-width:600px){.adm-registration-bonus-diff li{grid-template-columns:minmax(0,1fr);gap:3px}.adm-registration-bonus .adm-registration-bonus-actions{display:grid;grid-template-columns:minmax(0,1fr)}}
