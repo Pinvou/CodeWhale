@@ -30,6 +30,8 @@ export function AdminUsageSettlementFinancialRepairForm({ client, copy, onCreate
   const operation = useFinanceOperation(owner, operationCopy, client, `financial-repair:${commandTypes.join(':')}`);
   const usageSettlementRepair = commandType === 'USAGE_SETTLEMENT_REPAIR';
   const governed = usageSettlementRepair;
+  const task = usageSettlementRepair ? copy.usageSettlementTask : null;
+  const fixedTask = commandTypes.length === 1 ? task : null;
   const locked = busy !== '' || operation.busy || operation.unknown;
   const pending = operation.pendingFacts;
   const displayedFacts = pending ? financialRepairProjectionRows(pending.projection) : facts;
@@ -139,23 +141,24 @@ export function AdminUsageSettlementFinancialRepairForm({ client, copy, onCreate
 
   return <section className="adm-financial-repair" aria-label={copy.title}>
     <h3>{copy.title}</h3>
-    <p>{copy.lead}</p>
+    <p>{task?.lead || copy.lead}</p>
     {governed && operation.error && <p role="alert">{operation.error}</p>}
     {needsAuthentication && <div className="adm-usage-settlement-repair-reauthentication"><p>{copy.writeOffRecentAuthenticationRequired}</p><button type="button" disabled={busy !== '' || operation.busy} onClick={() => client.reauthenticate('/admin.html')}>{copy.reauthenticate}</button></div>}
     <form className="adm-financial-repair-target" onSubmit={readFacts}>
-      <label>{copy.command}
+      {!fixedTask && <label>{copy.command}
         <select disabled={governed && locked} value={commandType} onChange={(event) => changeCommand(event.target.value)}>
           {commandTypes.map((command) => <option key={command} value={command}>{command}</option>)}
         </select>
-      </label>
+      </label>}
       {fields.map((field) => <label key={field.key}>{label(field)}
         <input disabled={governed && locked} required value={pending ? String(field.key === 'target_resource_id' ? pending.draft.target_resource_id : field.key === 'expected_version' ? pending.draft.normalized_command.expected_receivable_version : pending.draft.normalized_command[field.key]) : values[field.key] || ''} inputMode={field.kind === 'integer' ? 'numeric' : 'text'}
           onChange={(event) => setValue(field.key, event.target.value)} />
       </label>)}
-      <button type="submit" disabled={locked}>{busy === 'facts' ? copy.reading : copy.readFacts}</button>
+      <button type="submit" disabled={locked}>{busy === 'facts' ? copy.reading : fixedTask?.load || copy.readFacts}</button>
     </form>
     {failure && <p role="alert">{failure}</p>}
-    {created && <p role="status">{copy.createdHint} <code>{created}</code></p>}
+    {fixedTask && <details className="adm-financial-repair-technical"><summary>{fixedTask.technical}</summary><p><code>{commandType}</code></p></details>}
+    {created && <p role="status">{task?.submitted || copy.createdHint} <code>{created}</code></p>}
     {displayedFacts && <div className="adm-financial-repair-facts">
       <h4>{copy.frozenFacts}</h4>
       <dl>{displayedFacts.rows.map((row) => <div key={row.key}><dt>{copy.fields[row.key] || row.key}</dt><dd><code>{row.value}</code></dd></div>)}</dl>
@@ -167,7 +170,7 @@ export function AdminUsageSettlementFinancialRepairForm({ client, copy, onCreate
       <small>{copy.reasonHint}</small>
       <label>{copy.requestKey}<input disabled={governed && locked} required maxLength="111" value={pending?.draft.idempotency_key?.slice('approval:'.length) ?? requestKey} onChange={(event) => setRequestKey(event.target.value)} /></label>
       <small>{copy.requestKeyHint}</small>
-      <button type="submit" disabled={busy !== '' || operation.busy}>{governed && operation.unknown ? operationCopy.retry : busy === 'draft' || operation.busy ? copy.creating : copy.createDraft}</button>
+      <button type="submit" disabled={busy !== '' || operation.busy}>{governed && operation.unknown ? operationCopy.retry : busy === 'draft' || operation.busy ? task?.submitting || copy.creating : task?.submit || copy.createDraft}</button>
     </form>}
   </section>;
 }
