@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useId, useRef, useState } from 'react';
 import { entitlementCorrectionCopy } from '../../shared/i18n.js';
 import { entitlementCorrectionPrecheck, entitlementCorrectionApprovalDraft, entitlementCorrectionInputValid } from './admin-entitlement-correction.js';
 import { createAndSubmitFreshGovernedApproval } from './admin-governed-approval-workflow.js';
@@ -21,7 +21,11 @@ export function AdminEntitlementCorrectionWorkspace({ client, copy, language, pe
     setPrecheck(null); setReceipt(null); setNeedsAuthentication(false);
     return () => { generation.current++; controller.current?.abort(); };
   }, [client, client.financeSessionEpoch, owner, canRequest]);
+  const reasonCodeID = useId();
   const pending = operation.pendingFacts;
+  const displayedReasonCode = pending?.reasonCode || reasonCode;
+  const reasonCodeBytes = new TextEncoder().encode(displayedReasonCode.trim()).length;
+  const reasonCodeOver = reasonCodeBytes > 80;
   const projection = entitlementCorrectionPrecheck(pending?.precheck || precheck);
   const locked = reading || operation.busy || operation.unknown || operation.blocked;
   const change = (setter, value) => { generation.current++; controller.current?.abort(); setter(value); setPrecheck(null); setReceipt(null); setReadError(''); };
@@ -70,8 +74,8 @@ export function AdminEntitlementCorrectionWorkspace({ client, copy, language, pe
     <form onSubmit={event => { event.preventDefault(); void load(); }}>
       <label>{text.packageID}<input disabled={locked} value={pending?.precheck.normalized_command.package_id || packageID} onChange={event => change(setPackageID, event.target.value)} /></label>
       <label>{text.orderID}<input disabled={locked} value={pending?.precheck.normalized_command.payment_order_id || orderID} onChange={event => change(setOrderID, event.target.value)} /></label>
-      <label>{text.reasonCode}<input disabled={locked} value={pending?.reasonCode || reasonCode} onChange={event => change(setReasonCode, event.target.value)} /><small>{text.reasonCodeHelp}</small></label>
-      <button disabled={locked || !packageID || !orderID || !reasonCode.trim()}>{text.precheck}</button>
+      <label>{text.reasonCode}<input disabled={locked} value={displayedReasonCode} aria-required="true" aria-invalid={reasonCodeOver || undefined} aria-describedby={`${reasonCodeID}-help ${reasonCodeID}-count${reasonCodeOver ? ` ${reasonCodeID}-over` : ''}`} onChange={event => change(setReasonCode, event.target.value)} /><small id={`${reasonCodeID}-help`}>{text.reasonCodeHelp}</small><small id={`${reasonCodeID}-count`}>{text.reasonCodeCount(reasonCodeBytes)}</small>{reasonCodeOver && <small id={`${reasonCodeID}-over`} role="alert">{text.reasonCodeOver}</small>}</label>
+      <button disabled={locked || !packageID || !orderID || !reasonCode.trim() || reasonCodeOver}>{text.precheck}</button>
     </form>
     {projection && <dl>
       <dt>{text.source}</dt><dd>{text.types[projection.critical.source_type]}</dd>
