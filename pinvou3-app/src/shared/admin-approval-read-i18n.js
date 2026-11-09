@@ -5,7 +5,13 @@ export const approvalReadCopy = {
     "signedOut": "登录状态已失效，请重新登录后查看我的申请。",
     "failed": "暂时无法读取我的申请。",
     "previous": "以下为当前条件下上次成功读取的结果。",
-    "empty": "当前条件下没有你的申请。"
+    "empty": "当前条件下没有你的申请。",
+    "query": "查询",
+    "reset": "重置",
+    "retryRead": "重试读取",
+    "refreshRead": "重新读取",
+    "snapshotTime": "上次成功结果 · 查询快照时间：",
+    "receivedTime": "上次成功读取 · 浏览器接收时间："
   },
   "en": {
     "loading": "Reading my requests…",
@@ -13,7 +19,13 @@ export const approvalReadCopy = {
     "signedOut": "Your sign-in has expired. Sign in again to view My requests.",
     "failed": "My requests could not be loaded.",
     "previous": "Showing the last successful result for these filters.",
-    "empty": "No requests of yours match these filters."
+    "empty": "No requests of yours match these filters.",
+    "query": "Search",
+    "reset": "Reset",
+    "retryRead": "Retry loading",
+    "refreshRead": "Reload results",
+    "snapshotTime": "Last successful result · query snapshot:",
+    "receivedTime": "Last successful read · received by this browser:"
   },
   "ja": {
     "loading": "自分の申請を読み込み中…",
@@ -21,6 +33,12 @@ export const approvalReadCopy = {
     "signedOut": "ログインの有効期限が切れました。再度ログインして自分の申請を確認してください。",
     "failed": "自分の申請を取得できませんでした。",
     "previous": "この条件で前回正常に取得した結果を表示しています。",
-    "empty": "この条件に一致する自分の申請はありません。"
+    "empty": "この条件に一致する自分の申請はありません。",
+    "query": "検索",
+    "reset": "リセット",
+    "retryRead": "再読み込みを試す",
+    "refreshRead": "結果を再読み込み",
+    "snapshotTime": "前回の結果・検索スナップショット時刻：",
+    "receivedTime": "前回成功時・ブラウザーの受信時刻："
   }
 };
