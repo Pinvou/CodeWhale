@@ -70,6 +70,17 @@ pub(crate) async fn respond_remote_permission_via_acp(
     permission_request_id: &str,
     decision: PermissionDecision,
 ) -> Result<(), String> {
+    if decision == PermissionDecision::Allow
+        && authority.allow_delivery_for_task_instance(
+            &owner.lease,
+            &owner.task_id,
+            &owner.session_id,
+            owner.task_sequence,
+            permission_request_id,
+        )
+    {
+        return Ok(());
+    }
     let result = acp_pool
         .respond_remote_permission(
             owner,
@@ -85,6 +96,17 @@ pub(crate) async fn respond_remote_permission_via_acp(
         .is_err_and(|error| error.to_string() == PERMISSION_DISPATCH_DEFERRED)
     {
         return Err(PERMISSION_DISPATCH_DEFERRED.to_owned());
+    }
+    if decision == PermissionDecision::Allow
+        && authority.allow_delivery_for_task_instance(
+            &owner.lease,
+            &owner.task_id,
+            &owner.session_id,
+            owner.task_sequence,
+            permission_request_id,
+        )
+    {
+        return Ok(());
     }
     // The ACP adapter may observe the authority decision and win the response
     // race. Treat that as the same successful resolution only while the exact

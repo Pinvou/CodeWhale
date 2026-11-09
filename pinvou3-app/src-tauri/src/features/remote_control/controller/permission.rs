@@ -307,6 +307,7 @@ pub(crate) enum DispatchResult {
 
 struct PendingPermission {
     binding: PermissionBinding,
+    task_instance: Option<(String, u64)>,
     request: PermissionRequest,
     state: PermissionState,
     decision: Option<PermissionDecision>,
@@ -453,6 +454,7 @@ impl PermissionAuthority {
         }
         let inserted = pending.entry(id).insert_entry(PendingPermission {
             binding,
+            task_instance: None,
             request,
             state: PermissionState::Pending,
             decision: None,
@@ -465,6 +467,59 @@ impl PermissionAuthority {
         drop(pending);
         self.emit_telemetry(PermissionTelemetryTransition::Requested, 0);
         Ok(view)
+    }
+
+    pub(crate) fn request_for_task_instance(
+        &self,
+        lease: &LeaseContext,
+        task_id: &str,
+        session_id: &str,
+        task_sequence: u64,
+        request: PermissionRequest,
+        now_b: u64,
+    ) -> Result<PermissionView> {
+        let view = self.request(lease, task_id, request, now_b)?;
+        // The caller still owns the live task and callback gates. This ID has
+        // not been projected, so no controller can decide it before binding.
+        let mut pending = self.pending.lock();
+        let entry = pending
+            .get_mut(&view.permission_request_id)
+            .ok_or_else(|| error("permission_unknown"))?;
+        entry.task_instance = Some((session_id.to_owned(), task_sequence));
+        Ok(view)
+    }
+
+    pub(crate) fn allow_delivery_for_task_instance(
+        &self,
+        lease: &LeaseContext,
+        task_id: &str,
+        session_id: &str,
+        task_sequence: u64,
+        request_id: &str,
+    ) -> bool {
+        self.pending.lock().get(request_id).is_some_and(|entry| {
+            entry.binding.matches(lease, task_id, request_id)
+                && entry.dispatch_state.committed()
+                && entry
+                    .task_instance
+                    .as_ref()
+                    .is_some_and(|(session, sequence)| {
+                        session == session_id && *sequence == task_sequence
+                    })
+        })
+    }
+
+    pub(crate) fn callback_was_cancelled(
+        &self,
+        lease: &LeaseContext,
+        task_id: &str,
+        request_id: &str,
+    ) -> bool {
+        self.pending.lock().get(request_id).is_some_and(|entry| {
+            entry.binding.matches(lease, task_id, request_id)
+                && entry.state == PermissionState::Denied
+                && entry.resolved_reason.as_deref() == Some("permission_callback_cancelled")
+        })
     }
 
     /// First effective A decision wins. B and local callers are rejected, and a
@@ -966,6 +1021,136 @@ mod tests {
             .request(&lease(), "task-0001", request(now_b + 60_000), now_b)
             .unwrap()
             .permission_request_id
+    }
+
+    #[test]
+    fn dispatched_receipt_retains_the_original_session_and_task_sequence() {
+        let (authority, _) = clocked(1_000);
+        let lease = lease();
+        let approval = authority
+            .request_for_task_instance(
+                &lease,
+                "task-0001",
+                "session-0001",
+                7,
+                request(61_000),
+                1_000,
+            )
+            .unwrap()
+            .permission_request_id;
+        authority
+            .decide(
+                DecisionAuthority::ControllerA,
+                &lease,
+                "task-0001",
+                &approval,
+                PermissionDecision::Allow,
+                1_100,
+            )
+            .unwrap();
+        assert!(!authority.allow_delivery_for_task_instance(
+            &lease,
+            "task-0001",
+            "session-0001",
+            7,
+            &approval
+        ));
+        assert_eq!(
+            authority
+                .dispatch_bound_allow(&lease, "task-0001", &approval, || true)
+                .unwrap()
+                .0,
+            DispatchCommit::Committed
+        );
+        assert!(authority.allow_delivery_for_task_instance(
+            &lease,
+            "task-0001",
+            "session-0001",
+            7,
+            &approval
+        ));
+        assert!(!authority.allow_delivery_for_task_instance(
+            &lease,
+            "task-0001",
+            "session-0001",
+            8,
+            &approval
+        ));
+        assert!(!authority.allow_delivery_for_task_instance(
+            &lease,
+            "task-0001",
+            "session-0002",
+            7,
+            &approval
+        ));
+        let mut foreign = lease.clone();
+        foreign.lease_epoch = "2".into();
+        assert!(!authority.allow_delivery_for_task_instance(
+            &foreign,
+            "task-0001",
+            "session-0001",
+            7,
+            &approval
+        ));
+        assert!(
+            authority
+                .cancel_bound_callback(&lease, "task-0001", &approval)
+                .is_none()
+        );
+        assert!(authority.allow_delivery_for_task_instance(
+            &lease,
+            "task-0001",
+            "session-0001",
+            7,
+            &approval
+        ));
+    }
+
+    #[test]
+    fn callback_cancellation_is_exact_and_releases_the_next_approval_slot() {
+        let (authority, _) = clocked(1_000);
+        let lease = lease();
+        let approval = authority
+            .request_for_task_instance(
+                &lease,
+                "task-0001",
+                "session-0001",
+                7,
+                request(61_000),
+                1_000,
+            )
+            .unwrap()
+            .permission_request_id;
+        assert!(!authority.callback_was_cancelled(&lease, "task-0001", &approval));
+        assert!(
+            authority
+                .cancel_bound_callback(&lease, "task-0001", &approval)
+                .is_some()
+        );
+        assert!(authority.callback_was_cancelled(&lease, "task-0001", &approval));
+        assert!(!authority.callback_was_cancelled(&lease, "another-task", &approval));
+        let mut foreign = lease.clone();
+        foreign.remote_control_generation = "another-generation".into();
+        assert!(!authority.callback_was_cancelled(&foreign, "task-0001", &approval));
+        assert!(!authority.allow_delivery_for_task_instance(
+            &lease,
+            "task-0001",
+            "session-0001",
+            7,
+            &approval
+        ));
+        let next = authority
+            .request_for_task_instance(
+                &lease,
+                "task-0001",
+                "session-0001",
+                7,
+                request(61_000),
+                1_100,
+            )
+            .unwrap();
+        assert_ne!(next.permission_request_id, approval);
+        assert_eq!(next.state, "pending");
     }
 
     #[test]

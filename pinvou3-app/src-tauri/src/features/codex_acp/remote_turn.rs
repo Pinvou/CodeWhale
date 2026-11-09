@@ -540,8 +540,22 @@ pub(super) fn permission_mint_projection(
     match result {
         Ok(view) => Ok(Some(view)),
         Err(error) if error.to_string() == "task_cleanup_busy" => Ok(None),
+        Err(error) if error.to_string() == "remote_permission_callback_gone" => Ok(None),
         Err(_) => Err("permission_binding_stale".to_owned()),
     }
+}
+
+pub(super) fn permission_dispatch_unresolved(
+    authority: &PermissionAuthority,
+    owner: &RemotePermissionOwner,
+    approval_id: &str,
+    allow: bool,
+    still_pending: bool,
+) -> bool {
+    still_pending
+        || (allow
+            && !authority.allow_delivery_observed(&owner.lease, &owner.task_id, approval_id)
+            && !authority.callback_was_cancelled(&owner.lease, &owner.task_id, approval_id))
 }
 
 impl AcpPoolCodeTurnPort {
@@ -610,19 +624,19 @@ impl AcpPoolCodeTurnPort {
                         if matches!(code.as_str(), TURN_TIMEOUT_CODE | TASK_CANCELLED_CODE) {
                             return Err(code);
                         }
-                        if (allow
-                            && !self.permission_authority.allow_delivery_observed(
-                                &owner.lease,
-                                &owner.task_id,
-                                approval_id,
-                            ))
-                            || self
-                                .pool
-                                .pending_remote_permissions(owner)
-                                .await
-                                .iter()
-                                .any(|pending| pending.approval_id.as_deref() == Some(approval_id))
-                        {
+                        let still_pending = self
+                            .pool
+                            .pending_remote_permissions(owner)
+                            .await
+                            .iter()
+                            .any(|pending| pending.approval_id.as_deref() == Some(approval_id));
+                        if permission_dispatch_unresolved(
+                            &self.permission_authority,
+                            owner,
+                            approval_id,
+                            allow,
+                            still_pending,
+                        ) {
                             return Err("permission_dispatch_failed".to_owned());
                         }
                     }

@@ -7362,13 +7362,6 @@ async fn mint_remote_permission_in_maps(
     use crate::features::remote_control::controller::task::{RemoteTaskState, TaskLeaseBinding};
     let mut pending = pending.lock().await;
     let owners = owners.lock();
-    let request = pending
-        .values_mut()
-        .find(|request| {
-            remote_request_owned_by(request.remote_owner.as_ref(), owner)
-                && request.remote_request_id.as_deref() == Some(callback_id)
-        })
-        .context("remote_permission_binding_stale")?;
     // Acquire only after the asynchronous pending-map wait, and never wait
     // on cleanup's resource gate while holding either permission map lock.
     // The same gate covers the authority mint AND callback binding.
@@ -7387,6 +7380,13 @@ async fn mint_remote_permission_in_maps(
                 {
                     bail!("remote_permission_binding_stale");
                 }
+                let request = pending
+                    .values_mut()
+                    .find(|request| {
+                        remote_request_owned_by(request.remote_owner.as_ref(), owner)
+                            && request.remote_request_id.as_deref() == Some(callback_id)
+                    })
+                    .context("remote_permission_callback_gone")?;
                 mint_pending_remote_permission(request, owner, callback_id, authority, ttl_ms)
             })
             .map_err(|error| anyhow::anyhow!(error.code))?
@@ -7418,9 +7418,11 @@ fn mint_pending_remote_permission(
     // Approval deadlines belong to the authority's epoch, never the task clock.
     let now_ms = authority.now_ms();
     let view = authority
-        .request(
+        .request_for_task_instance(
             &owner.lease,
             &owner.task_id,
+            &owner.session_id,
+            owner.task_sequence,
             PermissionRequest {
                 operation_type: projection.operation_type.clone(),
                 risk_level: projection.risk_level.clone(),
@@ -8725,7 +8727,14 @@ mod tests {
                 TaskLeaseBinding, task_input_digest_for_value,
             },
         };
-        for ending in ["live", "busy", "terminal", "reused"] {
+        for ending in [
+            "live",
+            "busy",
+            "callback_cancelled",
+            "owner_replaced",
+            "terminal",
+            "reused",
+        ] {
             let lease = crate::features::remote_control::controller::protocol::LeaseContext {
                 connection_id: "connection-1".into(),
                 controller_lease_id: "lease-1".into(),
@@ -8789,7 +8798,7 @@ mod tests {
             let authority = PermissionAuthority::default();
             // Drive the actual pool mint helper into the pending-map await.
             // The ACP owner deliberately remains old while ledger identity changes.
-            let held = pending.lock().await;
+            let mut held = pending.lock().await;
             let mut mint = Box::pin(mint_remote_permission_in_maps(
                 &pending,
                 &owners,
@@ -8804,6 +8813,14 @@ mod tests {
                 std::task::Poll::Ready(())
             })
             .await;
+            let cancelled_request = if ending == "callback_cancelled" {
+                held.remove("callback-key")
+            } else {
+                None
+            };
+            if ending == "owner_replaced" {
+                owners.lock().clear();
+            }
             if matches!(ending, "terminal" | "reused") {
                 ledger
                     .complete(&owner.task_id, RemoteTaskTerminal::Failed, None, 3)
@@ -8888,6 +8905,53 @@ mod tests {
             } else {
                 mint.await
             };
+            if ending == "callback_cancelled" {
+                assert_eq!(
+                    result.as_ref().unwrap_err().to_string(),
+                    "remote_permission_callback_gone"
+                );
+                assert!(
+                    remote_turn::permission_mint_projection(result)
+                        .unwrap()
+                        .is_none()
+                );
+                assert!(authority.pending_for_task(&owner.task_id).is_empty());
+                let mut successor = cancelled_request.unwrap();
+                let (response_tx, _successor_response) = oneshot::channel();
+                let cancelled_response = std::mem::replace(&mut successor.response_tx, response_tx);
+                let _ = cancelled_response.send(RequestPermissionResponse::new(
+                    RequestPermissionOutcome::Cancelled,
+                ));
+                successor.callback_instance = Arc::new(());
+                successor.view.tool_call_id = "tool-2".into();
+                successor.remote_request_id = Some("successor-callback".into());
+                pending
+                    .lock()
+                    .await
+                    .insert("successor-key".into(), successor);
+                let next = mint_remote_permission_in_maps(
+                    &pending,
+                    &owners,
+                    &owner,
+                    "successor-callback",
+                    &authority,
+                    &ledger,
+                    60_000,
+                )
+                .await
+                .unwrap();
+                assert_eq!(
+                    pending.lock().await["successor-key"]
+                        .remote_approval_id
+                        .as_deref(),
+                    Some(next.permission_request_id.as_str())
+                );
+                assert_eq!(
+                    ledger.record(&owner.task_id).unwrap().state,
+                    crate::features::remote_control::controller::task::RemoteTaskState::Running
+                );
+                continue;
+            }
             let requests = pending.lock().await;
             if matches!(ending, "live" | "busy") {
                 let view = result.unwrap();
@@ -9924,9 +9988,11 @@ mod tests {
             };
             let task_id = "task-0001";
             let approval = authority
-                .request(
+                .request_for_task_instance(
                     &lease,
                     task_id,
+                    "sdk-session",
+                    1,
                     PermissionRequest {
                         operation_type: "shell_command".into(),
                         risk_level: "high".into(),
@@ -10010,6 +10076,21 @@ mod tests {
                 assert!(pending.lock().await.is_empty());
                 assert_eq!(authority.view(&approval).unwrap().state, "denied");
                 assert!(!authority.allow_delivery_observed(&lease, task_id, &approval));
+                let owner = RemotePermissionOwner {
+                    task_sequence: 1,
+                    session_id: "sdk-session".into(),
+                    task_id: task_id.into(),
+                    lease: lease.clone(),
+                };
+                // Poll's previously read Allow is stale after this actual SDK
+                // cancellation. Its production classifier must settle only
+                // this callback, while a still-pending callback remains fatal.
+                assert!(!remote_turn::permission_dispatch_unresolved(
+                    &authority, &owner, &approval, true, false,
+                ));
+                assert!(remote_turn::permission_dispatch_unresolved(
+                    &authority, &owner, &approval, true, true,
+                ));
                 let connection = connection.unwrap();
                 connection.abort();
                 assert!(connection.await.unwrap_err().is_cancelled());
@@ -10042,9 +10123,39 @@ mod tests {
                 assert_eq!(response["result"]["outcome"]["optionId"], "allow");
                 connection.abort();
                 assert!(connection.await.unwrap_err().is_cancelled());
+                assert!(authority.allow_delivery_for_task_instance(
+                    &lease,
+                    task_id,
+                    "sdk-session",
+                    1,
+                    &approval
+                ));
+                assert!(!authority.allow_delivery_for_task_instance(
+                    &lease,
+                    task_id,
+                    "sdk-session",
+                    2,
+                    &approval
+                ));
+                assert!(!authority.allow_delivery_for_task_instance(
+                    &lease,
+                    task_id,
+                    "other-session",
+                    1,
+                    &approval
+                ));
             } else {
                 assert_eq!(outcome.unwrap_err().code, "permission_dispatch_failed");
                 assert!(peer.rx.next().await.is_none());
+                let owner = RemotePermissionOwner {
+                    task_sequence: 1,
+                    session_id: "sdk-session".into(),
+                    task_id: task_id.into(),
+                    lease: lease.clone(),
+                };
+                assert!(remote_turn::permission_dispatch_unresolved(
+                    &authority, &owner, &approval, true, false,
+                ));
             }
         }
     }
