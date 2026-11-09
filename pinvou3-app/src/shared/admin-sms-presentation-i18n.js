@@ -51,3 +51,30 @@ export const smsStatusCopy = {
     "retryOriginal": "元の保存を再試行"
   }
 };
+
+export const smsTemplateCopy = {
+  "zh": {
+    "identifier": "编号",
+    "savedID": "已确认编号",
+    "notConfigured": "未配置",
+    "saved": "已保存短信配置。返回版本：{revision}。",
+    "replaySaved": "已确认原保存请求，返回版本：{revision}。可刷新以核对当前版本。",
+    "originalReceipt": "原保存请求返回的配置"
+  },
+  "en": {
+    "identifier": "ID",
+    "savedID": "Last confirmed ID",
+    "notConfigured": "Not configured",
+    "saved": "SMS configuration saved. Returned revision: {revision}.",
+    "replaySaved": "Original save confirmed. Returned revision: {revision}. Refresh to check the current version.",
+    "originalReceipt": "Configuration returned by the original save"
+  },
+  "ja": {
+    "identifier": "ID",
+    "savedID": "確認済み ID",
+    "notConfigured": "未設定",
+    "saved": "SMS 設定を保存しました。返されたリビジョン：{revision}。",
+    "replaySaved": "元の保存が確認されました。返されたリビジョン：{revision}。現在の設定を確認するには更新してください。",
+    "originalReceipt": "元の保存リクエストから返された設定"
+  }
+};

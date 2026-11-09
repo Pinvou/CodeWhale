@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { localeNames, supportedLocales } from '../../shared/supported-locales.js';
 import { secureRequestID } from './request-id.js';
 import { useAccountOwner } from './useAccountOwner.js';
-import { smsStatusCopy } from '../../shared/i18n.js';
+import { smsStatusCopy, smsTemplateCopy } from '../../shared/i18n.js';
 import './admin-sms-presentation.css';
 function SectionHeader({ title, children }) { return <header className="adm-section-head"><h2>{title}</h2>{children}</header>; }
 function emptySMSTemplates() {
@@ -115,7 +115,7 @@ export function SettingsWorkspace({ copy, language, onLanguageChange, client, pe
       smsSource.current = token;
       setSMS(result);
       setSMSForm(smsConfigurationForm(result));
-      setSMSState({ loading: false, saving: false, error: '', notice: copy.settings.sms.saved });
+      setSMSState({ loading: false, saving: false, error: '', notice: { revision: result.revision, original: Boolean(attempt.unknown) } });
     } catch (error) {
       if (!current(token)) return;
       if (attempt && intent.current === attempt) {
@@ -134,6 +134,8 @@ export function SettingsWorkspace({ copy, language, onLanguageChange, client, pe
   };
 
   const smsWords = smsStatusCopy[language];
+  const templateWords = smsTemplateCopy[language];
+  const saveNotice = smsState.notice && (smsState.notice.original ? templateWords.replaySaved : templateWords.saved).replace('{revision}', smsState.notice.revision);
   const onOff = value => value === true ? smsWords.on : value === false ? smsWords.off : smsWords.unknown;
   const savedForm = sms ? smsConfigurationForm(sms) : null;
   const draftChanged = savedForm && (['enabled', 'provider_id', 'credential_profile', 'sign_name'].some(key => savedForm[key] !== smsForm[key]) ||
@@ -169,11 +171,10 @@ export function SettingsWorkspace({ copy, language, onLanguageChange, client, pe
           <p className="adm-muted">{copy.settings.sms.boundary}</p>
           {smsState.loading && <div className="adm-empty" role="status">{copy.loading}</div>}
           {smsState.error && <div className="adm-inline-message error adm-sms-error" role="alert"><span>{smsState.error}</span><button type="button" disabled={smsState.loading || smsState.saving} onClick={() => void loadSMSConfiguration()}>{copy.retry}</button></div>}
-          {smsState.notice && <div className="adm-inline-message ok" role="status">{smsState.notice}</div>}
           {sms && !smsState.loading && (
             <>
               <section className="adm-sms-effective">
-                <h3>{smsWords.saved}</h3>
+                <h3>{smsState.notice?.original ? templateWords.originalReceipt : smsWords.saved}</h3>
                 <dl className="adm-detail-grid adm-sms-summary">
                   <div><dt>{smsWords.switchLabel}</dt><dd>{onOff(sms.enabled)}</dd></div>
                   <div><dt>{copy.settings.sms.readiness}</dt><dd>{copy.settings.sms.readinessValues[sms.readiness] || sms.readiness || smsWords.unknown}</dd></div>
@@ -197,13 +198,24 @@ export function SettingsWorkspace({ copy, language, onLanguageChange, client, pe
                 <label><span>{copy.settings.sms.profile}</span><select value={smsForm.credential_profile} disabled={!canManageSMS || smsState.saving} onChange={(event) => setSMSForm((value) => ({ ...value, credential_profile: event.target.value }))}>{(sms.available_profiles || []).filter((profile) => profile.provider_id === smsForm.provider_id).map((profile) => <option key={profile.profile_id} value={profile.profile_id}>{profile.profile_id} · {profile.configured ? copy.settings.sms.configured : copy.settings.sms.notConfigured}</option>)}</select></label>
                 {smsForm.provider_id === 'aliyun-managed' && <>
                   <label><span>{copy.settings.sms.signName}</span><input required maxLength="100" value={smsForm.sign_name} disabled={!canManageSMS || smsState.saving} onChange={(event) => setSMSForm((value) => ({ ...value, sign_name: event.target.value }))} /></label>
-                  {Object.entries(copy.settings.sms.templateLabels).map(([purpose, label]) => <label key={purpose}><span>{label}</span><input required maxLength="120" value={smsForm.templates[purpose]} disabled={!canManageSMS || smsState.saving} onChange={(event) => setSMSForm((value) => ({ ...value, templates: { ...value.templates, [purpose]: event.target.value } }))} /></label>)}
+                  {Object.entries(copy.settings.sms.templateLabels).map(([purpose, label]) => {
+                    const saved = sms.provider_id === 'aliyun-managed' ? sms.templates?.[purpose] : '';
+                    return <label className="adm-sms-template" key={purpose}>
+                      <span>{label} · {templateWords.identifier}</span>
+                      <input aria-describedby={'adm-sms-template-' + purpose} required maxLength="120" value={smsForm.templates[purpose]} disabled={!canManageSMS || smsState.saving} onChange={(event) => setSMSForm((value) => ({ ...value, templates: { ...value.templates, [purpose]: event.target.value } }))} />
+                      <small id={'adm-sms-template-' + purpose}>{templateWords.savedID}: {saved ? <bdi dir="ltr"><code>{saved}</code></bdi> : templateWords.notConfigured}</small>
+                    </label>;
+                  })}
                 </>}
-                {canManageSMS && <label className="adm-sms-reason"><span>{copy.settings.sms.reason}</span><textarea required minLength="10" maxLength="500" rows="3" value={smsForm.reason} disabled={smsState.saving} onChange={(event) => setSMSForm((value) => ({ ...value, reason: event.target.value }))} placeholder={copy.settings.sms.reasonPlaceholder} /></label>}
+                {canManageSMS && <label className="adm-sms-reason"><span>{copy.settings.sms.reason}</span><textarea aria-describedby="adm-sms-reason-help" required minLength="10" maxLength="500" rows="3" value={smsForm.reason} disabled={smsState.saving} onChange={(event) => setSMSForm((value) => ({ ...value, reason: event.target.value }))} /><small id="adm-sms-reason-help">{copy.settings.sms.reasonPlaceholder}</small></label>}
               </div>
               {!selectedProfile?.configured && smsForm.enabled && <div className="adm-inline-message error" role="alert">{copy.settings.sms.profileUnavailable}</div>}
               {!canManageSMS && <div className="adm-inline-message info" role="status">{copy.settings.sms.readOnly}</div>}
-              {canManageSMS && <button type="submit" className="adm-primary-button" disabled={smsState.saving || !formValid || Boolean(intent.current?.conflicted)}>{smsState.saving ? copy.settings.sms.saving : pendingAttempt ? smsWords.retryOriginal : copy.settings.sms.save}</button>}
+              {canManageSMS && <footer className="adm-sms-form-actions">
+                <div className="adm-sms-save-feedback" role="status">{smsState.saving ? copy.settings.sms.saving : saveNotice}</div>
+                {smsState.notice?.original && <button type="button" disabled={smsState.saving || smsState.loading} onClick={() => void loadSMSConfiguration()}>{copy.refresh}</button>}
+                <button type="submit" className="adm-primary-button" disabled={smsState.saving || !formValid || Boolean(intent.current?.conflicted)}>{smsState.saving ? copy.settings.sms.saving : pendingAttempt ? smsWords.retryOriginal : copy.settings.sms.save}</button>
+              </footer>}
               </form>
             </>
           )}
