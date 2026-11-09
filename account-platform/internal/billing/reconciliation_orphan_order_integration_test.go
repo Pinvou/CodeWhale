@@ -283,6 +283,16 @@ func TestReconciliationOrphanPaidOrderPostgres(t *testing.T) {
 					t.Fatal("official manual admission boundary upgrade", err)
 				}
 				assertLaterRefusal(manualPrefix, 900038, "P0001", "manual admission facts cannot be rolled back; restore a compatible application version")
+				var creditPrefix []migrations.Migration
+				for _, migration := range all {
+					if migration.Version <= 900039 {
+						creditPrefix = append(creditPrefix, migration)
+					}
+				}
+				if err := billingschema.Up(ctx, operator, creditPrefix); err != nil {
+					t.Fatal("official payment credit boundary upgrade", err)
+				}
+				assertLaterRefusal(creditPrefix, 900039, "55000", "payment credit attempts are forward-only; preserve financial effects and abort tombstones")
 				// Check 900033's refusal at its exact boundary, then retain the
 				// complete current upgrade and replay contract independently.
 				if err := billingschema.Up(ctx, operator, all); err != nil {
@@ -291,7 +301,6 @@ func TestReconciliationOrphanPaidOrderPostgres(t *testing.T) {
 				if _, err := billingschema.VerifyApplied(ctx, operator, all); err != nil {
 					t.Fatal("verify complete forward upgrade", err)
 				}
-				assertLaterRefusal(all, 900039, "55000", "payment credit attempts are forward-only; preserve financial effects and abort tombstones")
 				if financialFacts() != before {
 					t.Fatal("complete forward upgrade changed original financial facts")
 				}

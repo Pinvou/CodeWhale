@@ -38,6 +38,12 @@ func TestPaymentCreditRetentionPublicPostgres(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	var creditStage []migrations.Migration
+	for _, migration := range bm {
+		if migration.Version <= 900039 {
+			creditStage = append(creditStage, migration)
+		}
+	}
 	for _, which := range []string{"account", "billing"} {
 		input := am
 		if which == "billing" {
@@ -69,7 +75,7 @@ func TestPaymentCreditRetentionPublicPostgres(t *testing.T) {
 		t.Fatal(err)
 	}
 	migrations.Unlock(ctx, ac)
-	if err = Up(ctx, bc, bm); err != nil {
+	if err = Up(ctx, bc, creditStage); err != nil {
 		t.Fatal(err)
 	}
 	migrations.Unlock(ctx, bc)
@@ -318,13 +324,62 @@ func TestPaymentCreditRetentionPublicPostgres(t *testing.T) {
 			guarded(ac, migration.DownSQL)
 		}
 	}
-	err = DownOne(ctx, bc, bm)
-	if !errorsAsPaymentCreditGuard(err, &failure) || !strings.Contains(err.Error(), "payment credit attempts are forward-only") {
-		t.Fatal("public Billing DownOne did not reach the new explicit refusal", err)
+	// Exercise the refused rollback with actual retained rows at the exact
+	// payment-credit boundary, before any later reversible migration is installed.
+	if stageValue(t, ctx, bc, `SELECT max(version)::text FROM schema_migrations`) != "900039" {
+		t.Fatal("payment credit refusal must target installed migration 900039")
+	}
+	if _, err := VerifyApplied(ctx, bc, creditStage); err != nil {
+		t.Fatal("verify installed payment credit boundary", err)
+	}
+	retainedFacts := func() string {
+		return stageValue(t, ctx, bc, `SELECT jsonb_build_object(
+'attempts',(SELECT jsonb_agg(to_jsonb(f) ORDER BY to_jsonb(f)::text) FROM payment_credit_attempts f),
+'clearances',(SELECT jsonb_agg(to_jsonb(f) ORDER BY to_jsonb(f)::text) FROM payment_credit_retention_batches f),
+'orders',(SELECT jsonb_agg(to_jsonb(f) ORDER BY to_jsonb(f)::text) FROM payment_orders f),
+'transactions',(SELECT jsonb_agg(to_jsonb(f) ORDER BY to_jsonb(f)::text) FROM payment_transactions f),
+'wallets',(SELECT jsonb_agg(to_jsonb(f) ORDER BY to_jsonb(f)::text) FROM wallets f),
+'lots',(SELECT jsonb_agg(to_jsonb(f) ORDER BY to_jsonb(f)::text) FROM credit_lots f),
+'journals',(SELECT jsonb_agg(to_jsonb(f) ORDER BY to_jsonb(f)::text) FROM journal_entries f),
+'postings',(SELECT jsonb_agg(to_jsonb(f) ORDER BY to_jsonb(f)::text) FROM ledger_postings f),
+'packages',(SELECT jsonb_agg(to_jsonb(f) ORDER BY to_jsonb(f)::text) FROM entitlement_packages f),
+'components',(SELECT jsonb_agg(to_jsonb(f) ORDER BY to_jsonb(f)::text) FROM entitlement_components f),
+'outbox',(SELECT jsonb_agg(to_jsonb(f) ORDER BY to_jsonb(f)::text) FROM outbox_events f))::text`)
+	}
+	creditLedger := func() string {
+		return stageValue(t, ctx, bc, `SELECT jsonb_agg(to_jsonb(m) ORDER BY version)::text FROM schema_migrations m WHERE version<=900039`)
+	}
+	factsBefore, ledgerBefore, shapeBefore := retainedFacts(), creditLedger(), stageShape(t, ctx, bc)
+	err = DownOne(ctx, bc, creditStage)
+	if !errorsAsPaymentCreditGuard(err, &failure) || failure.Message != "payment credit attempts are forward-only; preserve financial effects and abort tombstones" {
+		t.Fatal("public Billing DownOne did not reach the exact payment credit refusal", err)
 	}
 	migrations.Unlock(ctx, bc)
+	if _, err := VerifyApplied(ctx, bc, creditStage); err != nil || retainedFacts() != factsBefore || creditLedger() != ledgerBefore || stageShape(t, ctx, bc) != shapeBefore {
+		t.Fatal("refused payment credit rollback changed facts, ledger or schema", err)
+	}
 	if count(ac, "account_payment_credit_admissions") != 4 || count(bc, "payment_credit_attempts") != 4 {
 		t.Fatal("refused rollback changed evidence")
+	}
+	applyCurrent := func() {
+		t.Helper()
+		if err := Up(ctx, bc, bm); err != nil {
+			t.Fatal("public current Billing upgrade or replay", err)
+		}
+		if _, err := VerifyApplied(ctx, bc, bm); err != nil {
+			t.Fatal("verify current Billing upgrade or replay", err)
+		}
+		migrations.Unlock(ctx, bc)
+		if retainedFacts() != factsBefore || creditLedger() != ledgerBefore {
+			t.Fatal("current Billing upgrade or replay changed retained facts or historical ledger")
+		}
+	}
+	applyCurrent()
+	currentLedger := stageValue(t, ctx, bc, `SELECT jsonb_agg(to_jsonb(m) ORDER BY version)::text FROM schema_migrations m`)
+	currentShape := stageShape(t, ctx, bc)
+	applyCurrent()
+	if currentLedger != stageValue(t, ctx, bc, `SELECT jsonb_agg(to_jsonb(m) ORDER BY version)::text FROM schema_migrations m`) || currentShape != stageShape(t, ctx, bc) {
+		t.Fatal("current Billing replay changed its ledger or schema")
 	}
 
 	t.Run("late-acknowledgement-survives-billing-retention", func(t *testing.T) {
