@@ -1,8 +1,9 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { reconciliationCopy, ledgerRepairCopy, financeCopy } from '../../shared/i18n.js';
 import { AdminReconciliationFinancialRepairForm } from './AdminReconciliationFinancialRepairForm.jsx';
+import { AdminReconciliationBillImport } from './AdminReconciliationBillImport.jsx';
 import { requireFinanceCollection, requireFinanceID } from './finance-contract.js';
-import { RECONCILIATION_ACTIONS, reconciliationCommand, reconciliationDayRange, reconciliationImportItems, reconciliationCaseLabel, reconciliationReadError, reconciliationWriteError, requireReconciliationDate } from './reconciliation-contract.js';
+import { RECONCILIATION_ACTIONS, reconciliationCommand, reconciliationDayRange, reconciliationCaseLabel, reconciliationReadError, reconciliationWriteError, requireReconciliationDate } from './reconciliation-contract.js';
 import { loadFinancePage } from './admin-finance-pagination.js';
 import { useFinanceOperation } from './useFinanceOperation.js';
 
@@ -63,7 +64,6 @@ function Workspace({ client, me, copy, repairCopy, operationCopy, onViewApproval
   const [tab, setTab] = useState('runs');
   const [channel, setChannel] = useState('WECHAT');
   const [date, setDate] = useState(today);
-  const [bill, setBill] = useState('[]');
   const [runID, setRunID] = useState('');
   const [status, setStatus] = useState('');
   const filterKey = JSON.stringify([tab, channel, date, runID, status]);
@@ -98,12 +98,12 @@ function Workspace({ client, me, copy, repairCopy, operationCopy, onViewApproval
     } catch { setInvalid(true); }
   };
   useEffect(() => { setPage(null); setSelected(null); setHistory([]); setCursor(''); void load(''); }, [tab, channel, date, runID, status]); // eslint-disable-line react-hooks/exhaustive-deps
-  const write = async imported => {
+  const write = async (imported, items) => {
     const epoch = generation.current;
     setInvalid(false); setWriteError(''); setWriteNotice(''); setWriting(true);
     try {
       const facts = { channel, business_date: requireReconciliationDate(date) };
-      const result = imported ? await client.importReconciliation({ ...facts, items: reconciliationImportItems(bill) }) : await client.runReconciliation(facts);
+      const result = imported ? await client.importReconciliation({ ...facts, items }) : await client.runReconciliation(facts);
       if (epoch !== generation.current) return;
       setRunID(result.reconciliation_run_id); setWriteNotice(copy.saved); await load('');
     } catch (error) {
@@ -116,7 +116,7 @@ function Workspace({ client, me, copy, repairCopy, operationCopy, onViewApproval
   return <section className="adm-panel"><h2>{copy.title}</h2>
     <nav>{['runs', 'cases'].map(value => <button key={value} disabled={busy} aria-pressed={tab === value} onClick={() => setTab(value)}>{copy[value]}</button>)}</nav>
     {tab === 'runs' ? <><label>{copy.channel}<select disabled={busy} value={channel} onChange={event => setChannel(event.target.value)}>{['WECHAT', 'ALIPAY', 'UNIONPAY'].map(value => <option key={value}>{value}</option>)}</select></label><label>{copy.businessDate}<input type="date" disabled={busy} value={date} onChange={event => setDate(event.target.value)} /></label>
-      {canRun && <><button disabled={busy} onClick={() => void write(false)}>{copy.run}</button><label>{copy.importedItems}<textarea disabled={busy} value={bill} onChange={event => setBill(event.target.value)} /></label><button disabled={busy} onClick={() => void write(true)}>{copy.import}</button></>}
+      {canRun && <><button disabled={busy} onClick={() => void write(false)}>{copy.run}</button><AdminReconciliationBillImport {...{channel,date,copy}} disabled={busy} onImport={items => write(true, items)} /></>}
     </> : <><label>{copy.runs}<input disabled={busy} value={runID} onChange={event => setRunID(event.target.value)} /></label><label>{copy.status}<select disabled={busy} value={status} onChange={event => setStatus(event.target.value)}><option value="">{copy.all}</option>{['OPEN', 'IN_REVIEW', 'RESOLVED', 'IGNORED'].map(value => <option key={value}>{value}</option>)}</select></label></>}
     <button disabled={busy} onClick={() => { setHistory([]); void load(''); }}>{copy.refresh}</button>
     {(invalid || op.error || writeError) && <p role="alert">{invalid ? copy.invalid : op.error || writeError}</p>}{writeNotice && <p role="status">{writeNotice}</p>}{busy && <p role="status">{copy.loading}</p>}
