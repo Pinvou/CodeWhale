@@ -11,6 +11,7 @@ import { LatePaymentQueryConfirmation } from './LatePaymentQueryConfirmation.jsx
 import { AdminLateReviewFilters } from './AdminLateReviewFilters.jsx';
 import { AdminLateReviewDeadlineTools, AdminLateReviewDeadlines } from './AdminLateReviewDeadlines.jsx';
 import { normalizeAnomalyStatus, anomalyStatusText } from './anomaly-queue-status.js';
+import { AdminPaymentAnomalyTable } from './AdminPaymentAnomalyTable.jsx';
 
 export function AdminPaymentReviewQueue({ client, copy, me, anomaly = false, route, language = 'zh' }) {
   const filters = useFinanceReadRoute(anomaly ? 'anomalies' : 'late', route);
@@ -170,7 +171,8 @@ export function AdminPaymentReviewQueue({ client, copy, me, anomaly = false, rou
     {legacyQuery && <p role="alert">{copy.queryUnknown} <code>{operation.pendingKey}</code></p>}
     {query.message && <p role="status">{query.message}</p>}
     {query.unknownQueries.map(value => <div key={value.key} role="alert"><p>{copy.queryUnknown}</p><code>{value.facts.id} / {value.key}</code><button disabled={busy || query.retired} onClick={() => void retryQuery(value.key)}>{copy.retry}</button></div>)}
-    {page && <table className={anomaly ? undefined : 'adm-table'}><thead><tr><th>{copy.orderID}</th><th>{copy.status}</th><th>{copy.severity}</th><th>{copy.sla}</th><th>{copy.actions}</th></tr></thead><tbody>{lateRoute && !page.items.length && <tr><td colSpan={5} className="adm-late-empty-cell">
+    {page && anomaly && <AdminPaymentAnomalyTable items={page.items} language={language} detailsLabel={copy.details} disabled={busy || (operation.unknown && !legacyQuery)} onView={id => { if (route) { attemptedDetail.current = id; filters.move(filters.query, id); } void open(id); }} />}
+    {page && !anomaly && <table className="adm-table"><thead><tr><th>{copy.orderID}</th><th>{copy.status}</th><th>{copy.severity}</th><th>{copy.sla}</th><th>{copy.actions}</th></tr></thead><tbody>{lateRoute && !page.items.length && <tr><td colSpan={5} className="adm-late-empty-cell">
       <strong>{cursor ? lateWords.emptyBatch : hasLateFilters ? lateWords.emptyFiltered : lateWords.empty}</strong>
       {!cursor && hasLateFilters && <div className="adm-row-actions"><button type="button" onClick={clearLate} disabled={busy || blocked}>{lateWords.clear}</button></div>}
     </td></tr>}{page.items.map(value => <tr key={value.case_id}><td data-label={anomaly ? undefined : copy.orderID}>{value.payment_order_id || value.case_id}</td><td data-label={anomaly ? undefined : copy.status}>{anomaly ? anomalyStatusText(anomalyStatusCopy, reviewStatus(value)) : reviewStatus(value)}</td><td data-label={anomaly ? undefined : copy.severity}>{value.severity}</td><td data-label={anomaly ? undefined : copy.sla}>{anomaly ? <>{value.claim_due_at}<br />{value.resolution_due_at || value.next_review_at}</> : <AdminLateReviewDeadlines value={value} language={language} snapshot={page.snapshot_as_of} />}</td><td data-label={anomaly ? undefined : copy.actions}><button disabled={busy || (operation.unknown && !legacyQuery)} onClick={() => { if (route) { attemptedDetail.current = value.case_id; filters.move(filters.query, value.case_id); } void open(value.case_id); }}>{copy.details}</button></td></tr>)}</tbody></table>}

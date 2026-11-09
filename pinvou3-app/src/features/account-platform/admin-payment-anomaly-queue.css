@@ -1,0 +1,8 @@
+.adm-restored-shell .adm-anomaly-queue>p { margin:0 0 10px;color:var(--adm-muted);font-size:12px; }
+.adm-restored-shell .adm-anomaly-table td { vertical-align:top; }
+.adm-restored-shell .adm-anomaly-table td strong,.adm-restored-shell .adm-anomaly-table td small { display:block; }
+.adm-restored-shell .adm-anomaly-table dl { display:grid;gap:6px;margin:0; }
+.adm-restored-shell .adm-anomaly-table dt,.adm-restored-shell .adm-anomaly-table small { font-size:11px;color:var(--adm-muted); }
+.adm-restored-shell .adm-anomaly-table dd { margin:0; }
+.adm-restored-shell .adm-anomaly-table code,.adm-restored-shell .adm-anomaly-table time { white-space:normal;overflow-wrap:break-word;word-break:break-word; }
+.adm-restored-shell .adm-anomaly-table time { font-variant-numeric:tabular-nums; }
