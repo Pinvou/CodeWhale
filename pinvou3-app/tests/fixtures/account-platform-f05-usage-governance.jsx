@@ -28,7 +28,14 @@ globalThis.fetch = async (target, options = {}) => {
     }
     if (path === `${base}/usage-requests/${id}`) return json({ ...detail, delivery_status: control.delivery });
     if (path === `${base}/usage-requests/${id}/evidence`) return json(collection([{ source_kind: 'PROVIDER_USAGE', source_id: id, observed_at: version, evidence_type: 'TRUSTED_USAGE', evidence: { actual_microcredits: '9007199254740993' } }]));
-    if (path === `${base}/reconciliation-cases`) return json(collection([{ case_id: other, resource_id: id, case_type: 'USAGE_RECONCILIATION_REVIEW', severity: 'P1', status: 'OPEN', resolution_due_at: version }]));
+    if (path === `${base}/reconciliation-cases`) {
+      const cases = [
+        { case_id: other, resource_id: id, case_type: 'USAGE_RECONCILIATION_REVIEW', severity: 'P1', status: 'OPEN', resolution_due_at: version },
+        { case_id: '33333333-3333-4333-8333-333333333333', resource_id: id, case_type: 'MODEL_EMERGENCY_CANCELLATION_REVIEW', severity: 'P2', status: 'OPEN', resolution_due_at: version },
+      ];
+      const caseType = url.searchParams.get('case_type');
+      return json(collection(caseType ? cases.filter(item => item.case_type === caseType) : cases));
+    }
     if (path === `${base}/commands/${type}/readiness`) return json({ schema_version: 1, command_type: type, governance_state: control.ready ? 'ACTIVE' : 'PRE_ACTIVATION', governance_epoch: control.ready ? 1 : 0, commands_enabled: control.ready, ...(control.ready ? {} : { unavailable_reason: 'GOVERNANCE_INACTIVE' }) });
     if (path === `${base}/commands/by-idempotency-key`) {
       if (!control.receipt || options.headers?.['Idempotency-Key'] !== control.receipt.key || url.searchParams.get('command_type') !== type) return json({ code: 'NOT_FOUND' }, 404);

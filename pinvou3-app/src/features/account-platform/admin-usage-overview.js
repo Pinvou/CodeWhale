@@ -140,10 +140,10 @@ export function modelTokenPageOverviewDrilldown(section, key, window = null, buc
       provisioning_pending_count: { interaction: pageOverviewInteraction.EXACT, source: 'provisionings', query: { status: 'PENDING' }, page: { operations_tab: 'provisionings' } },
       provisioning_attention_count: { interaction: pageOverviewInteraction.RELATED, source: 'provisionings', query: {}, page: { operations_tab: 'provisionings' } },
       usage_request_count: { interaction: pageOverviewInteraction.EXACT, source: 'usage', query: { started_from: window?.from, started_to: window?.to }, page: { operations_tab: 'usage' } },
-      reconciliation_pending_count: { interaction: pageOverviewInteraction.RELATED, source: 'reconciliation', query: {}, page: { operations_tab: 'reconciliation' } },
-      reconciliation_stopped_count: { interaction: pageOverviewInteraction.RELATED, source: 'reconciliation', query: {}, page: { operations_tab: 'reconciliation' } },
+      reconciliation_pending_count: { interaction: pageOverviewInteraction.RELATED, source: 'reconciliation', query: { case_type: 'USAGE_RECONCILIATION_REVIEW' }, page: { operations_tab: 'reconciliation' } },
+      reconciliation_stopped_count: { interaction: pageOverviewInteraction.RELATED, source: 'reconciliation', query: { case_type: 'USAGE_RECONCILIATION_REVIEW' }, page: { operations_tab: 'reconciliation' } },
       usage_trend: { interaction: pageOverviewInteraction.EXACT, source: 'usage', query: { started_from: bucket?.from || window?.from, started_to: bucket?.to || window?.to }, page: { operations_tab: 'usage' } },
-      reconciliation_trend: { interaction: pageOverviewInteraction.RELATED, source: 'reconciliation', query: {}, page: { operations_tab: 'reconciliation' } },
+      reconciliation_trend: { interaction: pageOverviewInteraction.RELATED, source: 'reconciliation', query: { case_type: 'USAGE_RECONCILIATION_REVIEW' }, page: { operations_tab: 'reconciliation' } },
     },
   };
   const target = mapping[section]?.[key];
@@ -205,7 +205,7 @@ export function modelOperationsOverviewDrilldown(key, window) {
     provisioning_pending_count: { section: 'modelOperations', query: { operations_tab: 'provisionings', provisioning_status: 'PENDING', provisioning_cursor: null }, exact: true },
     provisioning_attention_count: { section: 'modelOperations', query: { operations_tab: 'provisionings', provisioning_cursor: null }, exact: false },
     usage_request_count: { section: 'modelOperations', query: { operations_tab: 'usage', usage_started_from: range.started_from, usage_started_to: range.started_to, usage_cursor: null }, exact: true },
-    reconciliation_pending_count: { section: 'modelOperations', query: { operations_tab: 'reconciliation', reconciliation_status: 'OPEN', reconciliation_cursor: null }, exact: false },
+    reconciliation_pending_count: { section: 'modelOperations', query: { operations_tab: 'reconciliation', reconciliation_status: 'OPEN', reconciliation_case_type: 'USAGE_RECONCILIATION_REVIEW', reconciliation_cursor: null }, exact: false },
     reconciliation_stopped_count: { section: 'modelOperations', query: { operations_tab: 'reconciliation', reconciliation_cursor: null }, exact: false },
   }[key] || null;
 }

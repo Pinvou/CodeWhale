@@ -31,8 +31,7 @@ const tokenManualReviewEscalationEligible = `status='OPEN'
       (mitigation_at IS NULL AND mitigation_due_at<=checked_at) OR resolution_due_at<=checked_at)
  AND (last_escalated_at IS NULL OR last_escalated_at<checked_at-interval '1 hour')`
 
-const tokenUsageManualReviewSource = `(request.status='REVIEW' AND
-    (request.reconciliation_stopped_at IS NOT NULL OR request.error_class='cancel_hold_recovery_unconfirmed'))`
+const modelEmergencyCancellationReviewCase = "MODEL_EMERGENCY_CANCELLATION_REVIEW"
 
 func (r *PostgresRepository) SyncManualReviewCases(ctx context.Context, limit int) (int, error) {
 	if limit < 1 || limit > 500 {
@@ -40,14 +39,13 @@ func (r *PostgresRepository) SyncManualReviewCases(ctx context.Context, limit in
 	}
 	rows, err := r.pool.Query(ctx, `
 SELECT case_type,resource_type,resource_id,severity,created_at FROM (
- SELECT 'USAGE_RECONCILIATION_REVIEW' AS case_type,'USAGE_REQUEST' AS resource_type,request.id AS resource_id,
-        CASE WHEN request.actual_microcredits>request.maximum_microcredits OR lower(COALESCE(request.error_class,'')) LIKE '%hold%' THEN 'P1' ELSE 'P2' END AS severity,
-        request.started_at AS created_at
-   FROM usage_requests request WHERE `+tokenUsageManualReviewSource+`
+ SELECT 'USAGE_RECONCILIATION_REVIEW' AS case_type,'USAGE_REQUEST' AS resource_type,id AS resource_id,
+        CASE WHEN actual_microcredits>maximum_microcredits OR lower(COALESCE(error_class,'')) LIKE '%hold%' THEN 'P1' ELSE 'P2' END AS severity,
+        started_at AS created_at
+   FROM usage_requests WHERE status='REVIEW' AND (reconciliation_stopped_at IS NOT NULL OR error_class='cancel_hold_recovery_unconfirmed')
  UNION ALL
- SELECT 'USAGE_RECONCILIATION_REVIEW','USAGE_REQUEST',request.id,'P2',target.updated_at
-   FROM model_emergency_cancellations target JOIN usage_requests request ON request.id=target.usage_request_id
-   WHERE target.status='MANUAL_REVIEW' AND `+tokenUsageManualReviewSource+` IS NOT TRUE
+ SELECT '`+modelEmergencyCancellationReviewCase+`','USAGE_REQUEST',usage_request_id,'P2',updated_at
+   FROM model_emergency_cancellations WHERE status='MANUAL_REVIEW'
  UNION ALL
  SELECT 'ROUTE_PROVISIONING_REPAIR','ROUTE_PROVISIONING',id,'P2',created_at
    FROM route_provisionings WHERE status='REPAIR_REQUIRED'

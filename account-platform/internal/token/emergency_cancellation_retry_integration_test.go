@@ -10,6 +10,9 @@ import (
 )
 
 func TestEmergencyCancellationDurableRetryPostgres(t *testing.T) {
+	t.Run("late-financial-review-is-independent", func(t *testing.T) { testEmergencyCancellationReviewSeparation(t, false) })
+	t.Run("settlement-does-not-close-emergency-case", func(t *testing.T) { testEmergencyCancellationReviewSeparation(t, true) })
+	t.Run("unstarted-tail-does-not-spend-budget", testEmergencyCancellationClaimsOnlyWhenReady)
 	for _, scenario := range []string{"failure-backoff-and-manual-case", "expired-claim-and-stale-result"} {
 		t.Run(scenario, func(t *testing.T) {
 			f := newModelExpiryObservationFixture(t)
@@ -114,7 +117,7 @@ func TestEmergencyCancellationDurableRetryPostgres(t *testing.T) {
 			}
 			var caseID uuid.UUID
 			if err := f.r.pool.QueryRow(f.ctx, `SELECT id FROM manual_review_cases
- WHERE domain='TOKEN' AND case_type='USAGE_RECONCILIATION_REVIEW' AND resource_type='USAGE_REQUEST' AND resource_id=$1 AND status='OPEN' AND severity='P2'`, u.ID).Scan(&caseID); err != nil || caseID == uuid.Nil {
+ WHERE domain='TOKEN' AND case_type=$2 AND resource_type='USAGE_REQUEST' AND resource_id=$1 AND status='OPEN' AND severity='P2'`, u.ID, modelEmergencyCancellationReviewCase).Scan(&caseID); err != nil || caseID == uuid.Nil {
 				t.Fatal("exhausted task is absent from the operations queue", caseID, err)
 			}
 		})

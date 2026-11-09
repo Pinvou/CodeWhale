@@ -64,13 +64,19 @@ func (w *EmergencyModelCancellationWorker) runOnce(ctx context.Context) error {
 		reportTokenWorkerFailure(ctx, emergencyCancellationFailure, "review_expired_claims", err)
 		return err
 	}
-	targets, err := w.repository.claimEmergencyCancellations(ctx, w.batchSize)
-	if err != nil {
-		reportTokenWorkerFailure(ctx, emergencyCancellationFailure, "claim_targets", err)
-		return err
-	}
 	capability := w.service.cancellationAdapter.CancelCapability()
-	for _, target := range targets {
+	for range w.batchSize {
+		// Claim only what this worker can start now. Leasing the whole batch
+		// would let its unstarted tail expire and spend the retry budget.
+		targets, err := w.repository.claimEmergencyCancellations(ctx, 1)
+		if err != nil {
+			reportTokenWorkerFailure(ctx, emergencyCancellationFailure, "claim_targets", err)
+			return err
+		}
+		if len(targets) == 0 {
+			break
+		}
+		target := targets[0]
 		preDispatch, terminal, requestErr := w.repository.requestEmergencyCancellation(ctx, target, capability, w.service.upstream.AdapterVersion())
 		if requestErr != nil {
 			w.retryTarget(ctx, target, "request_cancellation", requestErr)
@@ -92,7 +98,7 @@ func (w *EmergencyModelCancellationWorker) runOnce(ctx context.Context) error {
 			w.retryTarget(ctx, target, "record_attempt", err)
 		}
 	}
-	err = w.repository.finalizeEmergencyCancellations(ctx, w.batchSize)
+	err := w.repository.finalizeEmergencyCancellations(ctx, w.batchSize)
 	if err != nil {
 		reportTokenWorkerFailure(ctx, emergencyCancellationFailure, "finalize_targets", err)
 	}

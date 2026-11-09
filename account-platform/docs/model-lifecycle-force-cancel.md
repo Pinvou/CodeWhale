@@ -33,15 +33,18 @@ expiry ownership checks and financial confirmation requirements still apply.
 On a failed claim, the next automatic attempt is scheduled in Token storage:
 5, 10, 20, 40, 80, 160, then at most 300 seconds. If a worker disappears, a
 later worker observes the same cooldown after the 30-second lease. Targets in
-cooldown do not occupy a claim slot. Failure or lease expiry on the eighth
+cooldown do not occupy a claim slot. A worker leases each target just before
+processing it, so time spent waiting behind other targets does not use its
+budget. Failure or lease expiry on the eighth
 automatic claim moves that target to `MANUAL_REVIEW` and records immutable task
 evidence with a stable diagnostic. Existing claim generations are preserved;
 historical claims do not count against the new retry budget.
 
-Operations can find the usage request in the existing Token reconciliation
-queue. If a case already exists for that usage, the worker does not create a
-duplicate. Existing case resolution rules still apply when usage has a confirmed
-financial outcome. For diagnosis, read `model_emergency_cancellations` by
+Operations can filter the Token reconciliation queue for emergency cancellation
+review. There is one such case per usage request. A financial reconciliation
+case for the same request has its own severity, deadlines, and resolution;
+even confirmed settlement cannot establish that the cancellation succeeded.
+For diagnosis, read `model_emergency_cancellations` by
 `usage_request_id` and its `MANUAL_REVIEW` evidence by task ID using an approved
 read-only connection. Reconcile only through the existing usage and Billing
 proof paths. The exhausted task is not retried automatically; exhaustion does

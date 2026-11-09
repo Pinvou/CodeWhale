@@ -290,7 +290,11 @@ EXACT_REQUIRED_CHILDREN = {
         "retention-purges-submission-snapshot-and-review-reason",
     },
     "TestEmergencyCancellationClaimOwnershipPostgres": {"before-request", "after-request", "pending", "zero-attempt"},
-    "TestEmergencyCancellationDurableRetryPostgres": {"failure-backoff-and-manual-case", "expired-claim-and-stale-result"},
+    "TestEmergencyCancellationDurableRetryPostgres": {
+        "failure-backoff-and-manual-case", "expired-claim-and-stale-result",
+        "late-financial-review-is-independent", "settlement-does-not-close-emergency-case",
+        "unstarted-tail-does-not-spend-budget",
+    },
     "TestReceivableSettlementGuardedWritesPostgres": {"recharge-and-write-off-lock-order"},
     "TestEmergencyCancellationRequestLocksClaimPostgres": {"usage-lock-reclaim"},
     "TestPasswordPreparationAuthorizationPostgres": {

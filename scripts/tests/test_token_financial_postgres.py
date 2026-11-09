@@ -145,7 +145,11 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
 
     def test_model_terminal_observation_requires_all_windows_and_negative_probes(self):
         required = {
-            "TestEmergencyCancellationDurableRetryPostgres": {"failure-backoff-and-manual-case", "expired-claim-and-stale-result"},
+            "TestEmergencyCancellationDurableRetryPostgres": {
+                "failure-backoff-and-manual-case", "expired-claim-and-stale-result",
+                "late-financial-review-is-independent", "settlement-does-not-close-emergency-case",
+                "unstarted-tail-does-not-spend-budget",
+            },
             "TestEmergencyCancellationClaimOwnershipPostgres": {"before-request", "after-request", "pending", "zero-attempt"},
             "TestEmergencyCancellationRequestLocksClaimPostgres": {"usage-lock-reclaim"},
             "TestModelTerminalObservationPreservesExpiryProofPostgres": {
