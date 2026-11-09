@@ -98,3 +98,6 @@
 
 .adm-restored-shell .adm-approval-requestability .adm-status{white-space:normal;max-width:100%;overflow-wrap:break-word;overflow-wrap:anywhere}
 .adm-approval-requestability button{margin-top:8px}
+
+.adm-approval-directory-state{margin:0;padding:10px 12px;border:1px solid var(--adm-line);border-radius:8px;background:var(--adm-soft)}
+.adm-approval-directory-state[role=alert]{color:var(--adm-danger);background:var(--adm-danger-soft)}
