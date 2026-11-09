@@ -150,7 +150,12 @@ func testAuditExportGenerationLease(t *testing.T, ctx context.Context, service *
 
 func waitAuditExportBlockedQuery(t *testing.T, ctx context.Context, service *AuditExportService, pattern string) int {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
+	return waitAuditExportBlockedQueryWithin(t, ctx, service, pattern, 5*time.Second)
+}
+
+func waitAuditExportBlockedQueryWithin(t *testing.T, ctx context.Context, service *AuditExportService, pattern string, timeout time.Duration) int {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
 	for {
 		var pid int
 		if err := service.repository.pool.QueryRow(ctx, `SELECT COALESCE(min(pid),0) FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE $1`, pattern).Scan(&pid); err != nil {

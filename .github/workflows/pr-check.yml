@@ -1679,6 +1679,9 @@ jobs:
                   prefix = audit + "/generation_renews_and_recovers/"
                   cases = {event["Test"].removeprefix(prefix) for event in terminal if event["Test"].startswith(prefix)}
                   assert cases == {"renew_live_attempt", "cancel_expired_attempt_and_recover", "ordinary_error_stops_inflight_renewal"}, "audit generation lease cases did not execute"
+                  prefix = audit + "/bounded_retry_policy/"
+                  cases = {event["Test"].removeprefix(prefix) for event in terminal if event["Test"].startswith(prefix)}
+                  assert cases == {"transient_database_errors_stop_at_three", "expired_third_attempt_is_terminal", "permanent_generation_error_is_not_retried", "pending_without_worker_retains_quota"}, "audit bounded retry cases did not execute"
               inventory = "TestAccount039RollbackInventoryPostgres"
               if inventory in required:
                   prefix = inventory + "/"
