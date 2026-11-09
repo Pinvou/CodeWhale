@@ -2734,6 +2734,10 @@ fn unreadable_residuals_block_quota_admission_in_every_retained_state() {
             .unwrap();
         let permissions = fs::metadata(&residual).unwrap().permissions();
         fs::set_permissions(&residual, fs::Permissions::from_mode(0o000)).unwrap();
+        // Quota admission only reads retained bytes when a quota is enabled;
+        // arm a loose one so the blocked stage below actually performs the
+        // NULL-row calibration walk against the unreadable residual.
+        mgr.settings.storage_quota_gb = Some(1.0);
         let measurement = version_store::retained_bytes();
         let replacing = version_store::retained_bytes_without_reservation(&current.card_id, &id);
         // Counting while holding the existing reservation lock must not take
