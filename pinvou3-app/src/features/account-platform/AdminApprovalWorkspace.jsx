@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { financeCopy } from '../../shared/i18n.js';
-import { approvalReadCopy, pendingApprovalReadCopy } from '../../shared/admin-approval-read-i18n.js';
+import { approvalReadCopy, pendingApprovalReadCopy, executionApprovalReadCopy } from '../../shared/admin-approval-read-i18n.js';
 import { Approvals } from './AdminFinanceWorkspace.jsx';
 import { approvalCommands, approvalViews, approvalStatuses, executionStatuses, approvalQuery, approvalExpiryDate, readApprovalRoute } from './admin-approval-actions.js';
 import { approvalLabel } from './admin-approval-presentation.js';
@@ -110,6 +110,6 @@ export function AdminApprovalWorkspace({ client, copy, language, me, onNavigate,
         </tr>;
       })}</tbody></table></div>}
     </> : <Approvals client={client} copy={financeCopy[language]} permissions={me.platform_permissions || []} owner={owner} requestID={route.requestID}
-      query={query} pendingUserID={route.view === 'pending' ? me.user_id : null} onStateChange={setBlocked} onNavigate={onNavigate} centerCopy={c} mineReadCopy={mine ? mineWords : undefined} pendingReadCopy={route.view === 'pending' ? pendingApprovalReadCopy[language] : undefined} mineApplyGeneration={mine || pending ? mineApplyGeneration : undefined} />}
+      query={query} pendingUserID={route.view === 'pending' ? me.user_id : null} onStateChange={setBlocked} onNavigate={onNavigate} centerCopy={c} mineReadCopy={mine ? mineWords : undefined} pendingReadCopy={pending ? pendingWords : undefined} executionReadCopy={route.view === 'execution' ? executionApprovalReadCopy[language] : undefined} mineApplyGeneration={mine || pending ? mineApplyGeneration : undefined} />}
   </section>;
 }
