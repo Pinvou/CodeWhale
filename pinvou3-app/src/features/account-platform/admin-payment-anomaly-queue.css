@@ -6,3 +6,8 @@
 .adm-restored-shell .adm-anomaly-table dd { margin:0; }
 .adm-restored-shell .adm-anomaly-table code,.adm-restored-shell .adm-anomaly-table time { white-space:normal;overflow-wrap:break-word;word-break:break-word; }
 .adm-restored-shell .adm-anomaly-table time { font-variant-numeric:tabular-nums; }
+.adm-restored-shell .adm-anomaly-query-summary ul { display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:6px 18px;margin:6px 0 10px;padding:0;list-style:none;overflow-wrap:break-word; }
+.adm-restored-shell .adm-anomaly-query-summary p { margin:0; }
+.adm-restored-shell .adm-table .adm-anomaly-empty-cell { display:table-cell;text-align:center;padding:22px 12px;color:var(--adm-muted); }
+.adm-restored-shell .adm-anomaly-empty-cell .adm-row-actions { justify-content:center;margin-top:8px; }
+@media(max-width:740px){.adm-restored-shell .adm-table .adm-anomaly-empty-cell{display:block}}

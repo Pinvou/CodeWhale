@@ -10,7 +10,7 @@ const valid = value => typeof value === 'string' && value.trim();
 const timestamp = value => typeof value === 'string' && /^\d{4}-\d{2}-\d{2}T/.test(value) && !value.startsWith('0001-01-01') && Number.isFinite(Date.parse(value));
 const valueAt = (value, language, words) => timestamp(value) ? <time dir="ltr" dateTime={value}>{new Intl.DateTimeFormat(locale[language], { timeZone:'Asia/Shanghai',year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit',hourCycle:'h23' }).format(new Date(value))}</time> : words.missing;
 
-export function AdminPaymentAnomalyTable({ items, language, detailsLabel, disabled, onView }) {
+export function AdminPaymentAnomalyTable({ items, emptyState, language, detailsLabel, disabled, onView }) {
   const copy = adminLayoutCopy[language].anomalyQueueFields;
   const status = adminLayoutCopy[language].anomalyQueueStatus;
   const headings = [copy.case,copy.type,copy.status,copy.severity,copy.owner,copy.range,copy.deadlines,copy.actions];
@@ -20,7 +20,7 @@ export function AdminPaymentAnomalyTable({ items, language, detailsLabel, disabl
       // biome-ignore lint/a11y/noNoninteractiveTabindex: The named overflow region must remain keyboard-scrollable.
       <div className="adm-table-wrap" role="region" aria-label={copy.case} tabIndex={0}><table className="adm-table adm-anomaly-table">
       <thead><tr>{headings.map(label => <th key={label} scope="col">{label}</th>)}</tr></thead>
-      <tbody>{items.map(value => {
+      <tbody>{emptyState && <tr><td colSpan={headings.length} className="adm-anomaly-empty-cell">{emptyState}</td></tr>}{items.map(value => {
         const links = association.filter(key => valid(value[key]));
         const type = Object.prototype.hasOwnProperty.call(copy.types, value.anomaly_type) ? copy.types[value.anomaly_type] : null;
         return <tr key={value.case_id}>
