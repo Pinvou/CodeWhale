@@ -808,6 +808,12 @@ export class AdminPlatformClient {
   resolvePaymentAnomaly(caseID, resolution, reason, idempotencyKey) {
     return this.mutate('billing', `/admin/v1/payment-anomalies/${encodeURIComponent(caseID)}/resolve`, 'POST', { resolution, reason }, idempotencyKey, undefined, 200);
   }
+  proposePaymentFinancialCompletion(caseID, proofKind, referenceID, reason, key) {
+    return this.mutate('billing', `/admin/v1/payment-anomalies/${encodeURIComponent(caseID)}/financial-completion-proposals`, 'POST', { proof_kind: proofKind, ...(referenceID ? { reference_id: referenceID } : {}), reason }, key, undefined, 200);
+  }
+  confirmPaymentFinancialCompletion(caseID, proposalID, reason, key) {
+    return this.mutate('billing', `/admin/v1/payment-anomalies/${encodeURIComponent(caseID)}/financial-completion-proposals/${encodeURIComponent(proposalID)}/confirm`, 'POST', { reason }, key, undefined, 200);
+  }
 
   wallets(filters = {}, signal) { return this.request('billing', `/admin/v1/wallets?${billingCollectionQuery(filters, { keys: ['q', 'status', 'owner_type'] })}`, signal); }
   walletLedger(walletID, filters = {}, signal) { return this.request('billing', `/admin/v1/wallets/${encodeURIComponent(walletID)}/ledger?${billingCollectionQuery(filters, { keys: ['entry_type', 'business_reference'], dateTimeKeys: ['created_from', 'created_to'] })}`, signal); }

@@ -80,12 +80,15 @@ func billingAdminPathAllowed(method, resource string) bool {
 		case "late-payment-reviews":
 			return parts[4] == "claim" || parts[4] == "query-commands" || parts[4] == "query-command-results" || parts[4] == "schedule" || parts[4] == "archive-command" || parts[4] == "provider-blind"
 		case "payment-anomalies":
-			return parts[4] == "claim" || parts[4] == "resolve"
+			return parts[4] == "claim" || parts[4] == "resolve" || parts[4] == "financial-completion-proposals"
 		case "adjustments":
 			return parts[4] == "reject"
 		case "recharge-products":
 			return parts[4] == "admission-verifications" || parts[4] == "publish" || parts[4] == "unpublish" || parts[4] == "delete" || parts[4] == "display-names"
 		}
+	}
+	if len(parts) == 7 && parts[2] == "payment-anomalies" && parts[4] == "financial-completion-proposals" && pathUUID(parts[5]) && parts[6] == "confirm" {
+		return method == http.MethodPost
 	}
 	return len(parts) == 7 && parts[2] == "recharge-products" && parts[4] == "admission-verifications" && pathUUID(parts[5]) && method == http.MethodPost && (parts[6] == "retry" || parts[6] == "revoke")
 }

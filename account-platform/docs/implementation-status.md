@@ -1,5 +1,7 @@
 # 账号平台实现状态与差距
 
+2026-11-10：#2007 的剩余已升级付款异常补充[财务完成确认](escalated-payment-financial-completion.md)。限定既有资金完成回执或新的权威无资金效果查询，独立双人确认并原子结案；不新增余额/权益，不绕过其他注销阻断。仓库实现不等于固定版本 v3、远端 CI 或现场验收通过，也不代表缺失或矛盾的财务证据已经补齐；不能仅据此关单。
+
 > 2026-10-22 审核勘误：下文 2026-09-20 所称 approval-recovery / zero-effect OpenAPI 已修复，仅是原提交的历史结论；本轮固定基线中该正式合同曾缺失，不能据此宣称现状已覆盖。本轮补入 [Account 恢复权威](../contracts/openapi/approval-recovery.json)、[Billing 结果/效果读取](../contracts/openapi/approval-recovery-billing.json) 与 [Token 结果/效果读取](../contracts/openapi/approval-recovery-token.json)，分别描述已有入口，不新增 API、权限或自动恢复许可。实际 Go DTO 序列化交给同一 Ajv2020 验证器，并检验未知字段及 UNKNOWN/UNCONFIRMED 保守边界；这不等于真实跨域恢复、生产授权、部署或此前未验现场环境通过。
 
 
