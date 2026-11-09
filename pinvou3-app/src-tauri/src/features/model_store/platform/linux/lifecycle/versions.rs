@@ -1034,19 +1034,14 @@ impl ModelManager {
                 // A missing legacy directory is still an explicit reference:
                 // creating the download root inside it could make it
                 // resolvable again and wedge the unchanged deletion guard.
-                // Unlike the stage channel, equality also rejects here: for an
-                // ordinary download the candidate IS the configured root, so
-                // a declared resource equal to it is exactly the reviewer's
-                // reproduction (weights sitting in the download root itself).
-                let allowed = planned_directory(
-                    other
-                        .models_root
-                        .as_deref()
-                        .map(Path::new)
-                        .unwrap_or(configured_root),
-                )?;
+                // Unlike the stage channel there is no allowed-root filter:
+                // the ordinary candidate IS the configured root, so a declared
+                // resource equal to it (weights sitting in the download root
+                // itself) is exactly the reviewer's reproduction and must
+                // reject, as must a nested root inside it. The `inside` test
+                // alone scopes the protection to this candidate.
                 let declared_root = planned_directory(&declared)?;
-                if declared_root.starts_with(&allowed) && inside(&declared_root)? {
+                if inside(&declared_root)? {
                     return Err(reject());
                 }
             }
