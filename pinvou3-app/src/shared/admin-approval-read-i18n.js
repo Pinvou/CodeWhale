@@ -78,4 +78,39 @@ const pendingMessages = {
     "emptyWithNext": "このページに承認が必要な申請はありません。次のページを確認できます。"
   }
 };
-export const pendingApprovalReadCopy = Object.fromEntries(Object.entries(pendingMessages).map(([language, messages]) => [language, { ...approvalReadCopy[language], ...messages }]));
+const pendingDeadlineFacts = {
+  "zh": {
+    "expiryFrom": "到期起始日（含）",
+    "expiryTo": "到期截止日（不含）",
+    "expiryHelp": "按 UTC 日期筛选申请到期时间。可只填写一端。",
+    "invalidExpiry": "请输入有效日期，截止日期须晚于起始日期。",
+    "requesterID": "申请人 ID",
+    "submittedAt": "提交时间",
+    "expiresAt": "到期时间",
+    "missingFact": "未提供",
+    "pageCount": "本页 {count} 条 · 按服务返回顺序"
+  },
+  "en": {
+    "expiryFrom": "Expiry from (inclusive)",
+    "expiryTo": "Expiry before (exclusive)",
+    "expiryHelp": "Filter expiry by UTC date. Either boundary can be left empty.",
+    "invalidExpiry": "Enter valid dates. The end date must be after the start date.",
+    "requesterID": "Requester ID",
+    "submittedAt": "Submitted at",
+    "expiresAt": "Expires at",
+    "missingFact": "Not provided",
+    "pageCount": "{count} on this page · server order"
+  },
+  "ja": {
+    "expiryFrom": "期限の開始日（当日を含む）",
+    "expiryTo": "期限の終了日（当日を含まない）",
+    "expiryHelp": "有効期限を UTC の日付で絞り込みます。片方のみでも指定できます。",
+    "invalidExpiry": "有効な日付を指定し、終了日を開始日より後にしてください。",
+    "requesterID": "申請者 ID",
+    "submittedAt": "提出日時",
+    "expiresAt": "有効期限",
+    "missingFact": "未提供",
+    "pageCount": "このページに {count} 件・取得順"
+  }
+};
+export const pendingApprovalReadCopy = Object.fromEntries(Object.entries(pendingMessages).map(([language, messages]) => [language, { ...approvalReadCopy[language], ...messages, ...pendingDeadlineFacts[language] }]));
