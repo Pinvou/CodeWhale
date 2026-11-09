@@ -144,4 +144,72 @@ const executionMessages = {
     "emptyWithNext": "このページに条件と一致する実行記録はありません。次のページを確認できます。"
   }
 };
-export const executionApprovalReadCopy = Object.fromEntries(Object.entries(executionMessages).map(([language, messages]) => [language, { ...approvalReadCopy[language], ...messages }]));
+const executionDetailMessages = {
+  "zh": {
+    "detailsTitle": "执行详情",
+    "attempt": "执行尝试状态",
+    "attemptLabels": {
+      "EXECUTING": "执行中",
+      "EXECUTED": "已执行",
+      "FAILED": "执行失败"
+    },
+    "errorClass": "可展示的错误类别",
+    "publicFailure": "执行失败（服务未提供更具体类别）",
+    "retryable": "记录中的重试资格",
+    "retryableYes": "标记为可重试；实际可用动作仍受审批权限约束。",
+    "retryableNo": "标记为不可重试",
+    "nextRetry": "下次重试时间",
+    "deadline": "执行期限",
+    "noDetailValue": "未提供",
+    "noAttempt": "该审批详情未提供可查看的执行记录。",
+    "detailLoading": "正在读取所选审批的详情…",
+    "detailFailed": "暂时无法读取所选审批的执行详情。",
+    "detailDenied": "你没有权限读取所选审批的执行详情。",
+    "detailSignedOut": "登录状态已失效，请重新登录后查看执行详情。"
+  },
+  "en": {
+    "detailsTitle": "Execution details",
+    "attempt": "Attempt status",
+    "attemptLabels": {
+      "EXECUTING": "Executing",
+      "EXECUTED": "Executed",
+      "FAILED": "Execution failed"
+    },
+    "errorClass": "Available error category",
+    "publicFailure": "Execution failed (no more specific category was provided)",
+    "retryable": "Retry eligibility in the record",
+    "retryableYes": "Marked retryable; available actions still depend on approval permissions.",
+    "retryableNo": "Marked not retryable",
+    "nextRetry": "Next retry time",
+    "deadline": "Execution deadline",
+    "noDetailValue": "Not provided",
+    "noAttempt": "This approval detail does not provide a viewable execution record.",
+    "detailLoading": "Reading details for the selected approval…",
+    "detailFailed": "The selected approval’s execution details could not be loaded.",
+    "detailDenied": "You do not have access to the selected approval’s execution details.",
+    "detailSignedOut": "Your sign-in has expired. Sign in again to view execution details."
+  },
+  "ja": {
+    "detailsTitle": "実行詳細",
+    "attempt": "実行試行の状態",
+    "attemptLabels": {
+      "EXECUTING": "実行中",
+      "EXECUTED": "実行済み",
+      "FAILED": "実行失敗"
+    },
+    "errorClass": "表示できるエラー分類",
+    "publicFailure": "実行失敗（詳細な分類は提供されていません）",
+    "retryable": "記録上の再試行可否",
+    "retryableYes": "再試行可能と記録されています。利用できる操作は承認権限によって決まります。",
+    "retryableNo": "再試行不可と記録されています",
+    "nextRetry": "次の再試行時刻",
+    "deadline": "実行期限",
+    "noDetailValue": "未提供",
+    "noAttempt": "この承認詳細では閲覧できる実行記録が提供されていません。",
+    "detailLoading": "選択した承認の詳細を読み込み中…",
+    "detailFailed": "選択した承認の実行詳細を取得できませんでした。",
+    "detailDenied": "選択した承認の実行詳細を表示する権限がありません。",
+    "detailSignedOut": "ログインの有効期限が切れました。再度ログインして実行詳細を確認してください。"
+  }
+};
+export const executionApprovalReadCopy = Object.fromEntries(Object.entries(executionMessages).map(([language, messages]) => [language, { ...approvalReadCopy[language], ...messages, ...executionDetailMessages[language] }]));
