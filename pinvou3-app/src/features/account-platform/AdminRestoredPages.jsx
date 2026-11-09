@@ -17,13 +17,15 @@ import { personalPortalSections } from './portal-sections.js';
 export function AdminProductsPage({ client, me, copy, language, permissions, route }) {
   const granted = new Set(permissions);
   const tabs = [granted.has('platform.products.read') && ['catalog', financeCopy[language].productAdmin], granted.has('platform.pricing.read') && ['prices', tokenManagementCopy[language].pricingLifecycle.priceVersions]].filter(Boolean);
-  const requested = (new URLSearchParams(route.search).get('finance_tab') || new URLSearchParams(route.search).get('products_tab'));
+  const query = new URLSearchParams(route.search);
+  const requested = query.get('finance_tab') || query.get('products_tab');
+  const pricingPane = query.get('pricing_pane') === 'units' ? 'units' : 'prices';
   const active = tabs.some(([key]) => key === requested) ? requested : tabs[0]?.[0];
   const words = { ...copy, billing: { ...copy.billing, pricingLifecycle: tokenManagementCopy[language].pricingLifecycle } };
   return <section><AdminFinanceOverview {...{ client, language, route, permissions }} surface={active === 'catalog' ? 'products' : 'pricing'} /><nav className="adm-tabs">{tabs.map(([key, label]) => <button key={key} aria-pressed={active === key} onClick={() => route.navigate('products', { finance_tab: key, products_tab: null })}>{label}</button>)}</nav>
     <RetainedWorkspace active={active} available={tabs.map(([key]) => key)}>{view => <>
       {view === 'catalog' && <RechargeProductWorkspace {...{ client, me, language, route }} copy={financeCopy[language]} />}
-      {view === 'prices' && <PricingLifecycleWorkspace client={client} owner={me.user_id} copy={words} permissions={permissions} />}
+      {view === 'prices' && <PricingLifecycleWorkspace client={client} owner={me.user_id} copy={words} permissions={permissions} pricingPane={pricingPane} onPricingPaneChange={value => route.navigate("products", { finance_tab: "prices", products_tab: null, pricing_pane: value })} />}
     </>}</RetainedWorkspace>
   </section>;
 }
