@@ -67,13 +67,13 @@ try {
       }
       if (command === 'load_session' && args.id === 's1') return Promise.resolve(structuredClone(savedSource));
       if (command === 'account_platform_model_catalog') return Promise.resolve({ catalog_version: 1, items: [
-        { model_id: replacementId, display_name: 'Current replacement', context_eligible: true, lifecycle_status: 'PUBLISHED' },
-        { model_id: 'deprecated-future', display_name: 'Deprecated before cutoff', context_eligible: true, lifecycle_status: 'DEPRECATED', new_session_cutoff_at: new Date(now + 3600000).toISOString() },
-        { model_id: 'deprecated-expired', display_name: 'Expired', context_eligible: true, lifecycle_status: 'DEPRECATED', new_session_cutoff_at: new Date(now - 3600000).toISOString() },
-        { model_id: 'deprecated-invalid', display_name: 'Invalid cutoff', context_eligible: true, lifecycle_status: 'DEPRECATED', new_session_cutoff_at: 'invalid' },
-        { model_id: 'deprecated-missing', display_name: 'Missing cutoff', context_eligible: true, lifecycle_status: 'DEPRECATED' },
+        { model_id: replacementId, display_name: 'Current replacement', runtime_protocol: 'OPENAI_CHAT_V1', context_eligible: true, lifecycle_status: 'PUBLISHED' },
+        { model_id: 'deprecated-future', display_name: 'Deprecated before cutoff', runtime_protocol: 'OPENAI_CHAT_V1', context_eligible: true, lifecycle_status: 'DEPRECATED', new_session_cutoff_at: new Date(now + 3600000).toISOString() },
+        { model_id: 'deprecated-expired', display_name: 'Expired', runtime_protocol: 'OPENAI_CHAT_V1', context_eligible: true, lifecycle_status: 'DEPRECATED', new_session_cutoff_at: new Date(now - 3600000).toISOString() },
+        { model_id: 'deprecated-invalid', display_name: 'Invalid cutoff', runtime_protocol: 'OPENAI_CHAT_V1', context_eligible: true, lifecycle_status: 'DEPRECATED', new_session_cutoff_at: 'invalid' },
+        { model_id: 'deprecated-missing', display_name: 'Missing cutoff', runtime_protocol: 'OPENAI_CHAT_V1', context_eligible: true, lifecycle_status: 'DEPRECATED' },
         { model_id: 'context-denied', display_name: 'Denied', context_eligible: false, lifecycle_status: 'PUBLISHED' },
-        { model_id: 'removed', display_name: 'Removed', context_eligible: true, lifecycle_status: 'REMOVED' },
+        { model_id: 'removed', display_name: 'Removed', runtime_protocol: 'OPENAI_CHAT_V1', context_eligible: true, lifecycle_status: 'REMOVED' },
       ] });
       if (command === 'account_platform_branch_replacement_session') {
         control.branches++; control.branchInput = structuredClone(args.input);

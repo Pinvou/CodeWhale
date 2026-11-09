@@ -2732,3 +2732,4 @@ Object.assign(dictJa.uiSettingsDetail, {
   modelSwitchFailed:'モデルを切り替えられませんでした。もう一度お試しください。',
 });
 dictJa.uiModelReplacement = { title:'このモデルでは履歴を続行できません', lead:'元の会話とメッセージは変更されません。現在利用可能なモデルを選び、追跡可能な新しい分岐で続行してください。', create:'代替分岐を作成', creating:'作成中…' , branchTitleSuffix:'代替モデルの分岐' };
+dictJa.uiSettingsDetail.modelRuntimeProtocolUnavailable = '対応する実行プロトコルが未公開です。管理者に連絡するか、別のモデルを選択してください。';

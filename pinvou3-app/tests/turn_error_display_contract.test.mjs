@@ -164,6 +164,16 @@ const migrationCases = {
   ja: [/再起動/, /読み取りアクセス/],
   'zh-Hans': [/重启/, /恢复读取/],
 };
+for (const [language, copy] of Object.entries(CHAT_RECOVERY_COPY)) {
+  await withLanguage(language === 'zh' ? 'zh-Hans' : language, () => {
+    for (const message of ['account_platform_runtime_protocol_unavailable: internal detail', 'account platform model runtime protocol is missing or unsupported; publish its capability before invoking']) {
+      for (const prefix of ['', 'send_user_message failed: ']) {
+        assert.equal(displayTurnError(new Error(prefix + message)), copy.modelRuntimeProtocolUnavailable);
+        assert.equal(displayTurnError(prefix + message), copy.modelRuntimeProtocolUnavailable);
+      }
+    }
+  });
+}
 for (const [language, [restart, restoreRead]] of Object.entries(migrationCases)) {
   await withLanguage(language, () => {
     const pending = 'send_user_message failed: account_platform_migration_incomplete: internal detail';
