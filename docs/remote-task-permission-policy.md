@@ -23,6 +23,7 @@ B 明确拒绝接纳任务时，通过原有加密通道返回 `task_status: fai
 - code 仅支持可识别的 `@agentclientprotocol/codex-acp` 1.6.2 包及其明确报告的模式选项。`plan` 映射到 `read-only`（readOnly 沙箱、关闭网络、on-request 审批）；`yolo` 映射到受限 `agent`（workspaceWrite 沙箱、关闭网络、on-request 审批），**不映射到** `agent-full-access`（never 审批、dangerFullAccess）。这些语义来自该版本的 AgentMode 契约，不能推用于其他 ACP provider、任意替代二进制或未知版本。
 - code 的配置只作用于当前精确会话，不更新 B 的普通 ACP 全局默认。provider 不支持指定选项、配置失败或返回值不匹配时，不发送 prompt。
 - provider 发出的权限请求继续由已有远程权限 owner 和 A 的批准/拒绝链处理；B 的显式模式不能替代 A 对这些请求的决定。on-request 并不表示每个读取或沙箱内操作都必须产生独立审批。
+- 主控请求和 ACP 后台轮询在交付批准前使用同一个检查，核对当前租约、任务实例和待处理的 ACP 回调。取消、终态或过期先发生时，旧批准不能触发操作。交付成功后登记批准已派发。任务仍在运行且归属匹配时，重复提交同一批准可读取已登记结果。
 
 尚未选定通道的协商只创建共同会话记录，不读取 chat 或 code 策略。可信首次通道 claim 读取 B 对应配置，先在普通会话的物理目录 `sessions/<id>/remote-task-permission.json` 登记不可变的通道和权限模式，再严格持久化当前模式；只有 code 配置也可协商并选择 code，两条通道可以配置不同模式。登记复用私有目录锚点和不覆盖发布，两实例同时首次认领也不能互相覆盖。ACP 绑定失败时通道尚未发布，已完成两份持久写入的合法同通道重试可复用会话；配置变化或改选另一通道均拒绝，即使两条通道模式相同。既有登记不是重写当前模式的许可，后续 claim 只验证，不重置用户选择。
 

@@ -1177,6 +1177,32 @@ impl RemoteTaskLedger {
         self.record_locked(&inner, task_id)
     }
 
+    /// Keep the exact live task and cancellation decision stable through one
+    /// synchronous permission response. The action must not re-enter the ledger.
+    pub(crate) fn with_live_permission_task<T>(
+        &self,
+        task_id: &str,
+        sequence: u64,
+        session_id: &str,
+        lease: &LeaseContext,
+        dispatch: impl FnOnce() -> T,
+    ) -> Result<T> {
+        let inner = self.inner.lock();
+        let task = self.record_locked(&inner, task_id)?;
+        if task.sequence != sequence
+            || task.session_id != session_id
+            || task.lease != TaskLeaseBinding::from_context(lease)
+            || task.cancel_requested
+            || !matches!(
+                task.state,
+                RemoteTaskState::Running | RemoteTaskState::WaitingPermission
+            )
+        {
+            return Err(error("task_binding_stale"));
+        }
+        Ok(dispatch())
+    }
+
     /// Only a confirmed absence authorizes a new rejection observation; a
     /// previously admitted task (including a terminal) is never rejected anew.
     pub(crate) fn confirms_absence(&self, task_id: &str) -> bool {
@@ -5019,6 +5045,39 @@ mod tests {
         assert_eq!(repeated.result_digest.as_deref(), Some(digest(3).as_str()));
         assert_eq!(repeated.wire_status(), TASK_STATUS_SUCCEEDED);
         assert_eq!(ledger.live_task_count(), 0);
+    }
+
+    #[test]
+    fn permission_response_requires_the_exact_active_uncancelled_task() {
+        let ledger = RemoteTaskLedger::in_memory();
+        let live = context("generation-0001");
+        ledger
+            .admit(
+                &live,
+                &request(&payload(
+                    "session-0001",
+                    "task-0001",
+                    "client-0001",
+                    &digest(1),
+                )),
+                1_000,
+            )
+            .unwrap();
+        let running = ledger.begin_dispatch("task-0001", 1_100).unwrap();
+        let try_dispatch = |sequence, session, lease| {
+            ledger.with_live_permission_task("task-0001", sequence, session, lease, || true)
+        };
+        assert!(try_dispatch(running.sequence, "session-0001", &live).unwrap());
+        assert!(try_dispatch(running.sequence + 1, "session-0001", &live).is_err());
+        assert!(try_dispatch(running.sequence, "session-0002", &live).is_err());
+        let stale = context("generation-0002");
+        assert!(try_dispatch(running.sequence, "session-0001", &stale).is_err());
+        ledger.request_cancel("task-0001", 1_200).unwrap();
+        assert!(try_dispatch(running.sequence, "session-0001", &live).is_err());
+        ledger
+            .complete("task-0001", RemoteTaskTerminal::Cancelled, None, 1_300)
+            .unwrap();
+        assert!(try_dispatch(running.sequence, "session-0001", &live).is_err());
     }
 
     #[test]

@@ -5510,6 +5510,12 @@ impl AcpPool {
         permission_request_id: &str,
         allow: bool,
     ) -> Result<()> {
+        use crate::features::remote_control::controller::controlled::ControlledDeviceManager;
+        use crate::features::remote_control::controller::permission::{
+            DispatchCommit, PermissionAuthority,
+        };
+        use crate::features::remote_control::controller::task::RemoteTaskLedger;
+
         let mut pending = self.pending_permissions.lock().await;
         let owners = self.remote_permission_owners.lock();
         let (runtime, turn_id) = owners
@@ -5518,41 +5524,99 @@ impl AcpPool {
         let key = remote_permission_response_key(&pending, owner, permission_request_id)
             .context("remote_permission_binding_stale")?;
         let request = pending
-            .remove(&key)
+            .get(&key)
             .context("remote_permission_binding_stale")?;
-        let selected = remote_permission_option_id(&request.option_kinds, allow);
-        let (response, option_id, outcome) = if let Some(option_id) = selected {
-            (
-                RequestPermissionResponse::new(RequestPermissionOutcome::Selected(
-                    SelectedPermissionOutcome::new(option_id.clone()),
-                )),
-                Some(option_id),
-                "selected",
-            )
-        } else if !allow {
-            (
-                RequestPermissionResponse::new(RequestPermissionOutcome::Cancelled),
-                None,
-                "cancelled",
-            )
-        } else {
-            pending.insert(key, request);
-            bail!("remote_permission_allow_option_missing");
-        };
+        if request.turn_id.as_deref() != Some(turn_id.as_str()) {
+            bail!("remote_permission_binding_stale");
+        }
         let tool_call_id = request.view.tool_call_id.clone();
-        runtime
+        let mut send = |allow: bool| -> Result<_> {
+            let request = pending
+                .get(&key)
+                .context("remote_permission_binding_stale")?;
+            let option = remote_permission_option_id(&request.option_kinds, allow);
+            let (response, outcome) = match option.as_ref() {
+                Some(option) => (
+                    RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(
+                        option.clone(),
+                    )),
+                    "selected",
+                ),
+                None if !allow => (RequestPermissionOutcome::Cancelled, "cancelled"),
+                None => bail!("remote_permission_allow_option_missing"),
+            };
+            pending
+                .remove(&key)
+                .context("remote_permission_binding_stale")?
+                .response_tx
+                .send(RequestPermissionResponse::new(response))
+                .map_err(|_| anyhow::anyhow!("remote_permission_closed"))?;
+            Ok((option, outcome))
+        };
+        let authority = self.app.try_state::<Arc<PermissionAuthority>>();
+        let telemetry = runtime
             .bridge
-            .with_active_runtime(|| -> Result<()> {
-                if request.turn_id.as_deref() != Some(turn_id.as_str()) {
-                    bail!("remote_permission_binding_stale");
-                }
-                runtime
+            .with_active_runtime(|| -> Result<_> {
+                let ((option_id, outcome), telemetry) = runtime
                     .bridge
-                    .with_current_turn(&turn_id, || {
-                        request
-                            .response_tx
-                            .send(response)
-                            .map_err(|_| anyhow::anyhow!("remote_permission_closed"))
+                    .with_current_turn(&turn_id, || -> Result<_> {
+                        if !allow {
+                            return Ok((send(false)?, None));
+                        }
+                        let controlled = self
+                            .app
+                            .try_state::<ControlledDeviceManager>()
+                            .context("remote_permission_binding_stale")?;
+                        let ledger = self
+                            .app
+                            .try_state::<Arc<RemoteTaskLedger>>()
+                            .context("remote_permission_binding_stale")?;
+                        let authority = authority
+                            .as_ref()
+                            .context("remote_permission_binding_stale")?;
+                        let mut sent = None;
+                        let result = controlled
+                            .with_current_business_lease(&owner.lease, || {
+                                ledger.with_live_permission_task(
+                                    &owner.task_id,
+                                    owner.task_sequence,
+                                    &owner.session_id,
+                                    &owner.lease,
+                                    || {
+                                        authority.dispatch_bound_allow(
+                                            &owner.lease,
+                                            &owner.task_id,
+                                            permission_request_id,
+                                            || {
+                                                let response = send(true);
+                                                let succeeded = response.is_ok();
+                                                sent = Some(response);
+                                                succeeded
+                                            },
+                                        )
+                                    },
+                                )
+                            })
+                            .map_err(|error| anyhow::anyhow!(error.code))?
+                            .map_err(|error| anyhow::anyhow!(error.code))?;
+                        let (commit, telemetry) = match result {
+                            Ok(result) => result,
+                            Err(error) => {
+                                if let Some(Err(send_error)) = sent {
+                                    return Err(send_error);
+                                }
+                                bail!(error.code);
+                            }
+                        };
+                        match commit {
+                            DispatchCommit::Committed => {
+                                Ok((sent.context("permission_dispatch_failed")??, telemetry))
+                            }
+                            DispatchCommit::Rejected {
+                                code: "permission_expired",
+                            } => Ok((send(false)?, telemetry)),
+                            DispatchCommit::Rejected { code } => bail!(code),
+                        }
                     })
                     .context("remote_permission_binding_stale")??;
                 runtime.bridge.emit(
@@ -5563,11 +5627,14 @@ impl AcpPool {
                         "outcome": outcome,
                     }),
                 );
-                Ok(())
+                Ok(telemetry)
             })
             .context("remote_permission_closed")??;
         drop(owners);
         drop(pending);
+        if let Some(authority) = authority {
+            authority.publish_dispatch_telemetry(telemetry);
+        }
         Ok(())
     }
 

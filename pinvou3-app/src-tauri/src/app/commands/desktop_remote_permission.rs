@@ -63,6 +63,7 @@ pub fn desktop_remote_permission_deny_task(
 /// never decide a remote request.
 pub(crate) async fn respond_remote_permission_via_acp(
     acp_pool: &AcpPool,
+    authority: &PermissionAuthority,
     owner: &RemotePermissionOwner,
     permission_request_id: &str,
     decision: PermissionDecision,
@@ -80,7 +81,9 @@ pub(crate) async fn respond_remote_permission_via_acp(
     // The ACP adapter may observe the authority decision and win the response
     // race. Treat that as the same successful resolution only while the exact
     // owner is still current and the exact request is no longer pending.
-    if acp_pool.has_remote_permission_owner(owner)
+    if (decision != PermissionDecision::Allow
+        || authority.allow_delivery_observed(&owner.lease, &owner.task_id, permission_request_id))
+        && acp_pool.has_remote_permission_owner(owner)
         && !acp_pool
             .pending_remote_permissions(owner)
             .await
