@@ -4917,7 +4917,7 @@ const App = () => {
                   className={`flex items-center rounded-xl px-2 py-1.5 gap-3 ${isSidebarOpen ? 'w-full' : 'justify-center w-10 h-10'}`}>
                   <User size={18} />{isSidebarOpen && <span>{accountPlatformCopy[language].title}</span>}
                 </button>
-                <Suspense fallback={null}><LazyAccountPlatformPopover open={personalAccountOpen} client={personalAccountClient} rechargeRequest={accountRechargeRequest}
+                <Suspense fallback={null}><LazyAccountPlatformPopover open={personalAccountOpen} client={personalAccountClient} rechargeRequest={accountRechargeRequest} theme={activeTheme}
                   copy={accountPlatformCopy[language]} language={language} onLanguageChange={handleSetLanguage}
                   onClose={() => { accountRechargeSequence.current++; setAccountRechargeRequest(null); setPersonalAccountOpen(false); }} /></Suspense>
               </div>}
