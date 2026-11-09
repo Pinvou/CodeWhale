@@ -1,3 +1,48 @@
+export const auditActionLabels = {
+  "zh": {
+    "APPROVAL_EXISTING_BROKER_INITIALIZATION": "初始化已有审批服务",
+    "APPROVAL_FRESH_INITIALIZATION": "初始化审批服务",
+    "ACCOUNT_UNIT_DELETE": "删除组织单元",
+    "ACCOUNT_UNIT_RENAME": "重命名组织单元",
+    "ACCOUNT_ORGANIZATION_RENAME": "重命名组织"
+  },
+  "en": {
+    "APPROVAL_EXISTING_BROKER_INITIALIZATION": "Initialize the existing approval broker",
+    "APPROVAL_FRESH_INITIALIZATION": "Initialize the approval system",
+    "ACCOUNT_UNIT_DELETE": "Delete an organization unit",
+    "ACCOUNT_UNIT_RENAME": "Rename an organization unit",
+    "ACCOUNT_ORGANIZATION_RENAME": "Rename an organization"
+  },
+  "ja": {
+    "APPROVAL_EXISTING_BROKER_INITIALIZATION": "既存の承認ブローカーを初期化",
+    "APPROVAL_FRESH_INITIALIZATION": "承認システムを初期化",
+    "ACCOUNT_UNIT_DELETE": "組織単位を削除",
+    "ACCOUNT_UNIT_RENAME": "組織単位の名前を変更",
+    "ACCOUNT_ORGANIZATION_RENAME": "組織の名前を変更"
+  }
+};
+
+export const auditActionCopy = {
+  "zh": {
+    "code": "原操作代码",
+    "copy": "复制原代码",
+    "copied": "已复制原操作代码。",
+    "copyFailed": "无法自动复制。请选中原代码后手动复制。"
+  },
+  "en": {
+    "code": "Original action code",
+    "copy": "Copy action code",
+    "copied": "The original action code was copied.",
+    "copyFailed": "The code could not be copied automatically. Select it to copy manually."
+  },
+  "ja": {
+    "code": "元の操作コード",
+    "copy": "操作コードをコピー",
+    "copied": "元の操作コードをコピーしました。",
+    "copyFailed": "自動でコピーできませんでした。コードを選択して手動でコピーしてください。"
+  }
+};
+
 export const auditPrivacyCopy = {
   "zh": {
     "defaultRedacted": "新导出默认脱敏。只有获得未脱敏审计导出权限才可选此项。",

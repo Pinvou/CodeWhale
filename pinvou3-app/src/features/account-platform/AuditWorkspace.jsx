@@ -1,5 +1,5 @@
 import React, {useCallback,useEffect,useId,useRef,useState} from 'react';
-import { auditPrivacyCopy, auditExportPresentation } from '../../shared/i18n.js';
+import { auditActionCopy, auditActionLabels, auditPrivacyCopy, auditExportPresentation } from '../../shared/i18n.js';
 import './admin-audit-presentation.css';
 import {secureRequestID} from './request-id.js';
 import {acquireAuditExportTicket,newAuditExportAttempt,submitAuditExportAttempt} from './admin-audit-export.js';
@@ -23,6 +23,24 @@ function readAuditQueryFilters(locationLike = globalThis.location) {
     from: '',
     to: '',
   };
+}
+
+function AuditActionCode({ value, words }) {
+  const [result, setResult] = useState('');
+  if (typeof value !== 'string' || !value) return '—';
+  const copyCode = async () => {
+    setResult('');
+    try { await navigator.clipboard.writeText(value); setResult('copied'); }
+    catch { setResult('copyFailed'); }
+  };
+  return <div className="adm-audit-action-code"><code>{value}</code><button type="button" onClick={copyCode}>{words.copy}</button>
+    {result && <span role={result === 'copied' ? 'status' : 'alert'}>{words[result]}</span>}
+  </div>;
+}
+
+function auditActionLabel(language, value) {
+  const labels = auditActionLabels[language] || auditActionLabels.zh;
+  return Object.prototype.hasOwnProperty.call(labels, value) ? labels[value] : null;
 }
 
 function TechnicalID({ value, copy, compact = true }) {
@@ -243,6 +261,7 @@ function Audit({ copy, data, client, setData, permissions, currentUserID, langua
     try {
       const itemDetail = await client.audit(item.audit_id);
       if (!liveRef.current) return;
+      if (itemDetail?.audit_id !== item.audit_id) throw new Error('INVALID_AUDIT_DETAIL_ACK');
       setDetail(itemDetail);
     } catch {
       if (liveRef.current) setError(copy.audit.actionFailed);
@@ -394,7 +413,7 @@ function Audit({ copy, data, client, setData, permissions, currentUserID, langua
       if (liveRef.current) setBusy(false);
     }
   };
-  if (detail) return <AuditDetail copy={copy} item={detail} onBack={() => setDetail(null)} />;
+  if (detail) return <AuditDetail copy={copy} item={detail} onBack={() => setDetail(null)} language={language} />;
   const ticketExpiry = exportJob?.download_expires_at || exportTicketRef.current?.expires_at;
   const columns = [
     {
@@ -402,8 +421,8 @@ function Audit({ copy, data, client, setData, permissions, currentUserID, langua
       label: copy.audit.action,
       className: 'adm-audit-action-cell',
       render: (item) => (
-        <button className="adm-name-link adm-audit-action" onClick={() => showDetail(item)}>
-          {item.action}
+        <button type="button" className="adm-name-link adm-audit-action" disabled={busy} onClick={() => showDetail(item)}>
+          {auditActionLabel(language, item.action) || <code>{item.action || '—'}</code>}
         </button>
       ),
     },
@@ -560,11 +579,15 @@ function Audit({ copy, data, client, setData, permissions, currentUserID, langua
   );
 }
 
-function AuditDetail({ copy, item, onBack }) {
+function AuditDetail({ copy, item, onBack, language }) {
+  const actionWords = auditActionCopy[language] || auditActionCopy.zh;
+  const actionLabel = auditActionLabel(language, item.action);
+  const actionCode = <AuditActionCode key={item.audit_id + ':' + item.action} value={item.action} words={actionWords} />;
   const rows = [
     [copy.audit.source, 'Account Service'],
     [copy.audit.actor, item.actor_display_name || item.actor_email || <TechnicalID key="audit.actor" value={item.actor_user_id} copy={copy} compact={false} />],
-    [copy.audit.action, item.action],
+    [copy.audit.action, actionLabel || actionCode],
+    ...(actionLabel ? [[actionWords.code, actionCode]] : []),
     [copy.audit.resource, <span key="audit.resource">{item.resource_type} · <TechnicalID value={item.resource_id} copy={copy} compact={false} /></span>],
     [copy.audit.result, <Status key="audit.result" value={item.result} />],
     [copy.audit.request, <TechnicalID key="audit.request" value={item.request_id} copy={copy} compact={false} />],
