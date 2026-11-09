@@ -550,3 +550,49 @@ ledgerRepairCopy.ja.receivableAmounts = {
 ledgerRepairCopy.zh.receivableTask = { action: '当前任务', name: '应收核销', lead: '填写目标与金额，读取服务端快照并核对后，提交核销审批。', submit: '提交核销审批', submitting: '正在提交审批…', submitHelp: '系统会按当前状态创建草稿或更新已有的可编辑草稿，并在审批状态允许时提交。审批通过且执行完成后，才会核销应收。', recoveryHelp: '使用原请求确认提交结果。结果明确前，当前单据和已填内容会保留。', submissionConfirmed: '已确认提交核销审批。请在审批中心查看最新状态。' };
 ledgerRepairCopy.en.receivableTask = { action: 'Current task', name: 'Receivable write-off', lead: 'Enter the target and amount, read and review the server snapshot, then submit the write-off for approval.', submit: 'Submit for write-off approval', submitting: 'Submitting for approval…', submitHelp: 'The system creates a draft or updates an existing editable draft and submits it when the approval status allows. The receivable is written off only after approval and execution.', recoveryHelp: 'Use the original request to confirm the submission result. The current receivable and your entries stay in place until the result is confirmed.', submissionConfirmed: 'Write-off approval submission confirmed. Check the Approval Center for the latest status.' };
 ledgerRepairCopy.ja.receivableTask = { action: '現在のタスク', name: '未収金の償却', lead: '対象と金額を入力し、サーバーのスナップショットを取得して確認してから、償却の承認を申請します。', submit: '償却の承認を申請', submitting: '承認を申請中…', submitHelp: '現在の状態に応じて下書きを作成するか、編集可能な既存の下書きを更新し、承認状態が許可する場合に申請します。承認後、処理が実行されてから未収金が償却されます。', recoveryHelp: '元のリクエストで申請結果を確認します。結果が確認されるまで、対象の未収金と入力内容は保持されます。', submissionConfirmed: '償却の承認申請を確認しました。最新の状態は承認センターで確認してください。' };
+
+ledgerRepairCopy.zh.paymentRelation = {
+  "intro": "输入要核对的支付订单和这笔支付已经保存的凭证。读取后会核对它们是否属于同一笔支付。",
+  "title": "订单与凭证核对",
+  "fields": [
+    "支付订单 ID",
+    "已保存的支付凭证 ID",
+    "渠道交易流水",
+    "订单金额（分）"
+  ],
+  "limit": "此快照未提供币种、渠道名称或实时收款状态。",
+  "reading": "正在核对当前输入…",
+  "matched": "已核对本次读取的关联。",
+  "pending": "仍在确认上一次审批请求的结果。",
+  "waiting": "请读取快照以核对当前输入。"
+};
+ledgerRepairCopy.en.paymentRelation = {
+  "intro": "Enter the payment order and the evidence already recorded for that payment. The snapshot checks that they refer to the same payment.",
+  "title": "Order and evidence",
+  "fields": [
+    "Payment order ID",
+    "Recorded payment evidence ID",
+    "Provider transaction reference",
+    "Order amount (minor units)"
+  ],
+  "limit": "This snapshot does not include the currency, provider name, or live payment status.",
+  "reading": "Checking the current references…",
+  "matched": "These references match in the loaded snapshot.",
+  "pending": "The previous approval request is still being confirmed.",
+  "waiting": "Load the snapshot to check the current references."
+};
+ledgerRepairCopy.ja.paymentRelation = {
+  "intro": "対象の支払い注文と、その支払いについて記録済みの証拠を入力してください。スナップショットで同じ支払いかを確認します。",
+  "title": "注文と証拠の確認",
+  "fields": [
+    "支払い注文 ID",
+    "記録済みの支払い証拠 ID",
+    "決済事業者の取引参照",
+    "注文額（最小通貨単位）"
+  ],
+  "limit": "このスナップショットには通貨、決済事業者名、現在の支払い状態が含まれません。",
+  "reading": "現在の参照を照合中…",
+  "matched": "取得したスナップショットでこれらの参照が一致しました。",
+  "pending": "前回の承認リクエストの結果を確認中です。",
+  "waiting": "スナップショットを取得して現在の参照を照合してください。"
+};

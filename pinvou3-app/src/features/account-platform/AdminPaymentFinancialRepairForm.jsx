@@ -4,6 +4,7 @@ import {
   financialRepairProjectionRows, financialRepairDraftFromProjection,
 } from './admin-financial-repair-form.js';
 import { useFinanceOperation } from './useFinanceOperation.js';
+import { AdminRepairRelationship } from './AdminRepairRelationship.jsx';
 import { createAndSubmitFreshGovernedApproval } from './admin-governed-approval-workflow.js';
 
 const paymentRepairCommandTypes = Object.freeze(['PAYMENT_FINANCIAL_REPAIR']);
@@ -142,6 +143,7 @@ export function AdminPaymentFinancialRepairForm({ client, copy, onCreated, owner
     <p>{copy.lead}</p>
     {governed && operation.error && <p role="alert">{operation.error}</p>}
     {needsAuthentication && <div className="adm-payment-repair-reauthentication"><p>{copy.writeOffRecentAuthenticationRequired}</p><button type="button" disabled={busy !== '' || operation.busy} onClick={() => client.reauthenticate('/admin.html')}>{copy.reauthenticate}</button></div>}
+    {copy.paymentRelation && <p className="adm-repair-relationship-intro">{copy.paymentRelation.intro}</p>}
     <form className="adm-financial-repair-target" onSubmit={readFacts}>
       <label>{copy.command}
         <select disabled={governed && locked} value={commandType} onChange={(event) => changeCommand(event.target.value)}>
@@ -156,7 +158,9 @@ export function AdminPaymentFinancialRepairForm({ client, copy, onCreated, owner
     </form>
     {failure && <p role="alert">{failure}</p>}
     {created && <p role="status">{copy.createdHint} <code>{created}</code></p>}
-    {displayedFacts && <div className="adm-financial-repair-facts">
+    <AdminRepairRelationship words={copy.paymentRelation} projection={projection} reading={busy === 'facts'} pending={operation.unknown}
+      normalizedKeys={["payment_order_id","payment_evidence_id"]} snapshotKeys={["provider_transaction_id","amount_fen"]} />
+    {busy !== 'facts' && displayedFacts && <div className="adm-financial-repair-facts">
       <h4>{copy.frozenFacts}</h4>
       <dl>{displayedFacts.rows.map((row) => <div key={row.key}><dt>{copy.fields[row.key] || row.key}</dt><dd><code>{row.value}</code></dd></div>)}</dl>
       <details><summary>{copy.criticalFacts}</summary><pre>{displayedFacts.critical}</pre></details>
