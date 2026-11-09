@@ -99,6 +99,8 @@ GitHub protected environment/self-hosted runner、runner OS 与同一 SID 进程
 
 ## 5. 回滚
 
+生产部署保存 Relay 顶层 JavaScript 文件及逐文件 SHA-256 清单。部署阶段和公网检查触发的回滚都先在同卷暂存并核对完整集合。缺失、增加或改写的文件会在停止服务和替换当前代码之前中止回滚。带有效清单的空集合也可恢复。替换中途失败会尝试恢复替换前的代码，恢复失败时保留暂存文件供运维检查。
+
 - 首选回滚是把 Relay、A、B 的统一开关关闭；入口隐藏/拒绝，但 registry、tombstone、digest keyring 和 state schema 原样保留。
 - 最低回滚版本必须 registry-aware。真实旧 v2 二进制只能监听 literal loopback，并置于唯一 enrollment gateway 后；nginx 所有公开 websocket 路径必须指向 gateway，不能直达旧 Relay。
 - 已写入 `self_registration` 来源时，读取注册表的 Relay/gateway/维护工具都须理解该来源；旧 parser 不能直接读取。使用兼容构建关闭自动登记，不删除撤销记录或恢复陈旧整库来绕过格式检查。兼容及自行撤销后的额度恢复步骤见 [ENROLLMENT.md](../remote-control-relay/ENROLLMENT.md#recovering-quota-after-a-device-self-revokes)。
