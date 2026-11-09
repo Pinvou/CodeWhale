@@ -28,14 +28,16 @@ import (
 )
 
 const (
-	auditExportMaximumRange = 31 * 24 * time.Hour
-	auditExportMaximumRows  = 100_000
-	auditExportMaximumBytes = 500 * 1024 * 1024
-	auditExportRecentAuth   = 15 * time.Minute
-	auditExportTicketTTL    = 15 * time.Minute
-	auditExportFileTTL      = 24 * time.Hour
-	auditExportLeaseTTL     = 5 * time.Minute
-	auditExportRenewEvery   = 30 * time.Second
+	auditExportMaximumRange    = 31 * 24 * time.Hour
+	auditExportMaximumRows     = 100_000
+	auditExportMaximumBytes    = 500 * 1024 * 1024
+	auditExportRecentAuth      = 15 * time.Minute
+	auditExportTicketTTL       = 15 * time.Minute
+	auditExportFileTTL         = 24 * time.Hour
+	auditExportLeaseTTL        = 5 * time.Minute
+	auditExportRenewEvery      = 30 * time.Second
+	auditExportMaximumAttempts = 3
+	auditExportRetryDelay      = 5 * time.Second
 )
 
 var ErrAuditExportAuthorizationUnavailable = errors.New("audit export authorization unavailable")
@@ -484,13 +486,18 @@ func (s *AuditExportService) Run(ctx context.Context) {
 	defer ticker.Stop()
 	for {
 		_ = s.expire(ctx)
+		_ = s.exhaustAttempts(ctx)
 		for index := 0; index < 4; index++ {
 			job, found, err := s.claim(ctx)
 			if err != nil || !found {
 				break
 			}
 			if err := s.generate(ctx, job); err != nil && !errors.Is(err, errAuditExportLeaseLost) {
-				_ = s.fail(ctx, job, stableAuditExportError(err))
+				if ctx.Err() == nil && transientAuditExportDatabaseError(err) {
+					_ = s.retryGeneration(ctx, job)
+				} else {
+					_ = s.fail(ctx, job, stableAuditExportError(err))
+				}
 			}
 		}
 		select {
@@ -515,13 +522,13 @@ func (s *AuditExportService) claim(ctx context.Context) (claimedAuditExport, boo
 	var job claimedAuditExport
 	var filter []byte
 	err := s.repository.pool.QueryRow(ctx, `WITH candidate AS (
-    SELECT id FROM audit_export_jobs WHERE status IN ('PENDING','GENERATING') AND (lease_until IS NULL OR lease_until<clock_timestamp())
+    SELECT id FROM audit_export_jobs WHERE status IN ('PENDING','GENERATING') AND attempts<$1 AND (lease_until IS NULL OR lease_until<clock_timestamp())
     ORDER BY created_at,id FOR UPDATE SKIP LOCKED LIMIT 1
 ), claimed AS (
     UPDATE audit_export_jobs job SET status='GENERATING',attempts=attempts+1,lease_until=clock_timestamp()+interval '5 minutes',updated_at=clock_timestamp()
     FROM candidate WHERE job.id=candidate.id RETURNING job.id,job.actor_user_id,job.filter_snapshot,job.include_pii,job.wrapped_file_key_nonce,job.wrapped_file_key,job.attempts
 )
-SELECT id,actor_user_id,filter_snapshot,include_pii,wrapped_file_key_nonce,wrapped_file_key,attempts FROM claimed`).Scan(&job.ID, &job.ActorUserID, &filter, &job.IncludePII, &job.WrappedNonce, &job.WrappedFileKey, &job.Attempt)
+SELECT id,actor_user_id,filter_snapshot,include_pii,wrapped_file_key_nonce,wrapped_file_key,attempts FROM claimed`, auditExportMaximumAttempts).Scan(&job.ID, &job.ActorUserID, &filter, &job.IncludePII, &job.WrappedNonce, &job.WrappedFileKey, &job.Attempt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return claimedAuditExport{}, false, nil
 	}
@@ -610,7 +617,7 @@ WHERE ($1='' OR COALESCE(log.actor_user_id::text,'') ILIKE '%'||$1||'%' OR COALE
   AND ($4='' OR log.result=$4) AND log.occurred_at >= $5 AND log.occurred_at <= $6
 ORDER BY log.occurred_at,log.id LIMIT $7`, job.Filter.Actor, job.Filter.Action, job.Filter.Resource, job.Filter.Result, job.Filter.From, job.Filter.To, auditExportMaximumRows+1)
 	if err != nil {
-		return err
+		return wrapAuditExportDatabaseError(err)
 	}
 	defer rows.Close()
 	filterPayload, _ := json.Marshal(job.Filter)
@@ -630,7 +637,7 @@ ORDER BY log.occurred_at,log.id LIMIT $7`, job.Filter.Actor, job.Filter.Action, 
 	for rows.Next() {
 		var item AdminAuditLog
 		if err := rows.Scan(&item.ID, &item.ActorUserID, &item.ActorDisplayName, &item.ActorEmail, &item.ActiveOrganizationID, &item.Action, &item.ResourceType, &item.ResourceID, &item.Result, &item.RequestID, &item.ChangeSummary, &item.OccurredAt); err != nil {
-			return err
+			return wrapAuditExportDatabaseError(err)
 		}
 		count++
 		if count > auditExportMaximumRows {
@@ -671,7 +678,7 @@ ORDER BY log.occurred_at,log.id LIMIT $7`, job.Filter.Actor, job.Filter.Action, 
 		}
 	}
 	if err := rows.Err(); err != nil {
-		return err
+		return wrapAuditExportDatabaseError(err)
 	}
 	writer.Flush()
 	if err := writer.Error(); err != nil {
@@ -693,27 +700,27 @@ ORDER BY log.occurred_at,log.id LIMIT $7`, job.Filter.Actor, job.Filter.Action, 
 	filename := fmt.Sprintf("pinvou-audit-%s-%s-%s-%s-%s.pae", job.ID, job.ActorUserID, now.Format("20060102T150405Z"), safeFilenamePart(s.environment), scopeDigest)
 	tx, err := s.repository.pool.Begin(ctx)
 	if err != nil {
-		return err
+		return wrapAuditExportDatabaseError(err)
 	}
 	defer tx.Rollback(ctx)
 	now, err = requireAuditExportLease(ctx, tx, job)
 	if err != nil {
-		return err
+		return wrapAuditExportDatabaseError(err)
 	}
 	command, err := tx.Exec(ctx, `UPDATE audit_export_jobs SET status='READY',file_payload=$2,file_signature=$3,filename=$4,row_count=$5,size_bytes=$6,lease_until=NULL,file_expires_at=$7,completed_at=$8,updated_at=$8,error_code=NULL WHERE id=$1 AND status='GENERATING'`, job.ID, envelope, signature, filename, count, len(envelope), now.Add(auditExportFileTTL), now)
 	if err != nil || command.RowsAffected() != 1 {
 		if err == nil {
 			err = ErrConflict
 		}
-		return err
+		return wrapAuditExportDatabaseError(err)
 	}
 	if err := appendAuditExportEvent(ctx, tx, job.ID, "READY", nil, map[string]any{"row_count": count, "size_bytes": len(envelope), "file_signature": signature, "watermark": watermark}, now); err != nil {
-		return err
+		return wrapAuditExportDatabaseError(err)
 	}
 	if err := appendAuditExportAudit(ctx, tx, job.ActorUserID, "admin.audit.export.ready", job.ID, "SUCCEEDED", map[string]any{"row_count": count, "size_bytes": len(envelope), "file_signature": signature}, now); err != nil {
-		return err
+		return wrapAuditExportDatabaseError(err)
 	}
-	return tx.Commit(ctx)
+	return wrapAuditExportDatabaseError(tx.Commit(ctx))
 }
 
 // requireAuditExportLease serializes a terminal write with reclaim and checks
@@ -750,13 +757,7 @@ func (s *AuditExportService) fail(ctx context.Context, job claimedAuditExport, c
 	if err != nil {
 		return err
 	}
-	if _, err := tx.Exec(ctx, `UPDATE audit_export_jobs SET status='FAILED',wrapped_file_key_nonce=NULL,wrapped_file_key=NULL,file_payload=NULL,lease_until=NULL,error_code=$2,completed_at=$3,updated_at=$3 WHERE id=$1`, job.ID, code, now); err != nil {
-		return err
-	}
-	if err := appendAuditExportEvent(ctx, tx, job.ID, "FAILED", nil, map[string]any{"error_code": code}, now); err != nil {
-		return err
-	}
-	if err := appendAuditExportAudit(ctx, tx, job.ActorUserID, "admin.audit.export.failed", job.ID, "FAILED", map[string]any{"error_code": code}, now); err != nil {
+	if err := finishAuditExportFailure(ctx, tx, job, code, now); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)

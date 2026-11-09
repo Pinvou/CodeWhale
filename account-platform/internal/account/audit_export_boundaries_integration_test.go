@@ -85,6 +85,9 @@ func TestAuditExportPersistedBoundaries(t *testing.T) {
 	t.Run("csv_reference_masking", func(t *testing.T) {
 		testAuditExportCSVReferenceMasking(t, ctx, exports, principal, me.UserID)
 	})
+	t.Run("bounded_retry_policy", func(t *testing.T) {
+		testAuditExportRetryPolicy(t, ctx, exports, c, principal)
+	})
 	create := func(reason string) AuditExportJob {
 		t.Helper()
 		now := time.Now().UTC()
