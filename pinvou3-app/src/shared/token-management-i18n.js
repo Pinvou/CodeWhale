@@ -243,6 +243,68 @@ function completeTokenManagementCopy(translations) {
       }
     }
   };
+  const priceRiskCopy = {
+    "zh": {
+      "currentStatus": "当前状态",
+      "deactivateImpact": "停用后，新建公式不能选用此版本。已有关联和历史记录会保留。",
+      "knownReferences": "当前可见引用",
+      "referencesBoundary": "仅检查本次成功加载的价格和公式，未查询全部引用。",
+      "noneConfirmed": "本次未确认引用。其他记录中仍可能存在关联。",
+      "visibleTotals": "本次已读数据中找到 {p} 条价格引用、{f} 条公式引用。",
+      "sampleLimit": "每类最多展示 3 条已知记录。",
+      "endImpact": "确认后将结束此生效价格版本。后续处理取决于所选方式及服务校验。",
+      "modes": {
+        "FALLBACK_GLOBAL": "回退到全局价格",
+        "CONTINUATION": "由同一范围的草稿接续",
+        "BLOCK": "阻断后续定价"
+      },
+      "modeHelp": {
+        "FALLBACK_GLOBAL": "服务会校验是否有可用的全局价格。",
+        "CONTINUATION": "请选择同一价格范围内的接续草稿，提交时由服务再次校验。",
+        "BLOCK": "结束后，该模型在当前协议、公式和计价单位下的价格解析将被阻断。"
+      }
+    },
+    "en": {
+      "currentStatus": "Current status",
+      "deactivateImpact": "New formulas can no longer select this version after deactivation. Existing references and history are kept.",
+      "knownReferences": "References in the loaded data",
+      "referencesBoundary": "Only successfully loaded prices and formulas were checked. This is a partial view.",
+      "noneConfirmed": "No references were confirmed in this view. Other records may still refer to this version.",
+      "visibleTotals": "Found {p} price references and {f} formula references in the loaded data.",
+      "sampleLimit": "Showing up to three known records of each kind.",
+      "endImpact": "Confirming ends this active price version. What follows depends on the selected mode and server validation.",
+      "modes": {
+        "FALLBACK_GLOBAL": "Fall back to the global price",
+        "CONTINUATION": "Continue with a draft in the same scope",
+        "BLOCK": "Block subsequent pricing"
+      },
+      "modeHelp": {
+        "FALLBACK_GLOBAL": "The service checks whether an applicable global price is available.",
+        "CONTINUATION": "Choose a draft in the same price scope. The service checks it again on submission.",
+        "BLOCK": "After this price ends, resolution is blocked for this model, protocol, formula, and credit unit."
+      }
+    },
+    "ja": {
+      "currentStatus": "現在の状態",
+      "deactivateImpact": "無効化すると、新しい式ではこのバージョンを選べません。既存の参照と履歴は保持されます。",
+      "knownReferences": "取得済みデータの参照",
+      "referencesBoundary": "取得に成功した価格と式のみを確認しています。参照全体は確認していません。",
+      "noneConfirmed": "今回の表示範囲では参照を確認できませんでした。他のレコードに参照がある可能性があります。",
+      "visibleTotals": "取得済みデータに価格の参照が {p} 件、式の参照が {f} 件あります。",
+      "sampleLimit": "確認済みの各種類を最大 3 件表示します。",
+      "endImpact": "確認すると、適用中の価格バージョンを終了します。終了後の扱いは選択した方式とサーバーの検証によって決まります。",
+      "modes": {
+        "FALLBACK_GLOBAL": "全体価格に切り替える",
+        "CONTINUATION": "同じ適用範囲の下書きで継続",
+        "BLOCK": "以降の価格解決をブロック"
+      },
+      "modeHelp": {
+        "FALLBACK_GLOBAL": "適用できる全体価格があるか、サービスが検証します。",
+        "CONTINUATION": "同じ価格範囲の継続用下書きを選択してください。送信時に再検証されます。",
+        "BLOCK": "終了後、このモデル、プロトコル、式、価格単位の組み合わせで価格解決がブロックされます。"
+      }
+    }
+  };
   for (const language of ['zh', 'en', 'ja']) {
     const copy = translations[language].modelToken;
     const provisioningCopy = {
@@ -257,8 +319,10 @@ function completeTokenManagementCopy(translations) {
 
     const { pricingControls, ...modelAdditions } = additions[language];
     const list = priceListCopy[language];
+    const risk = priceRiskCopy[language];
     const fill = key => value => list[key].replace('{n}', String(value));
     Object.assign(translations[language].pricingLifecycle, pricingControls, formulaSelectionCopy[language], {
+      riskPresentation: { ...risk, visibleTotals: (prices, formulas) => risk.visibleTotals.replace('{p}', String(prices)).replace('{f}', String(formulas)) },
       listPresentation: { ...list, language, perDenominator: fill("perDenominator"), unitVersion: fill("unitVersion"), formulaVersion: fill("formulaVersion") },
     });
     Object.assign(copy, modelAdditions, { enumLabels: { ...copy.enumLabels, ...additions[language].enumLabels }, commandErrors: { ...copy.commandErrors, ...additions[language].commandErrors } });
