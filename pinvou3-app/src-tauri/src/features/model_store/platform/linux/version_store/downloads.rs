@@ -171,6 +171,21 @@ pub(super) fn release_plan(card_id: &str) -> Result<(), String> {
     // installation there. Keep old targets and installed records unchanged.
     let pending = "card_id=?1 AND target_started=0
         AND NOT EXISTS(SELECT 1 FROM store_models WHERE card_id=?1)";
+    // Started rows are demoted below while their script outputs stay on disk;
+    // capture their roots so the registered measurement can be refreshed after
+    // the commit (the publish-time value predates those files — review
+    // round 7's crash/failure invalidation point).
+    let started_roots: Vec<String> = tx
+        .prepare(
+            "SELECT models_root FROM model_download_reservations
+             WHERE card_id=?1 AND downloading=1 AND target_started=1",
+        )
+        .and_then(|mut query| {
+            query
+                .query_map([card_id], |row| row.get::<_, String>(0))
+                .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
+        })
+        .unwrap_or_default();
     tx.execute(
         &format!(
             "INSERT OR IGNORE INTO model_download_retained_roots(card_id,models_root)
@@ -189,7 +204,12 @@ pub(super) fn release_plan(card_id: &str) -> Result<(), String> {
         [card_id],
     )
     .map_err(|e| e.to_string())?;
-    tx.commit().map_err(|e| e.to_string())
+    tx.commit().map_err(|e| e.to_string())?;
+    for root in started_roots {
+        let root = PathBuf::from(root);
+        upsert_root_measurement(&root, walk_root_now(&root)?)?;
+    }
+    Ok(())
 }
 
 /// A lease makes process crashes distinguishable from slow active downloads,
