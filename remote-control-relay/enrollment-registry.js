@@ -22,7 +22,7 @@ const CREDENTIAL_MIN_BYTES = 32;
 const CREDENTIAL_MAX_BYTES = 4096;
 const NEW_CREDENTIAL_MAX_UTF16_UNITS = 1024;
 const CREDENTIAL_TRANSPORT_ERROR = "enrollment_credential_transport_invalid";
-const DEFAULT_MAX_ENTRIES = 100_000;
+export const DEFAULT_MAX_ENROLLMENT_ENTRIES = 100_000;
 const MAX_ENTRIES = 1_000_000;
 const MAX_MIGRATION_REQUESTS = 100_000;
 const MAX_BATCH_OPERATIONS = 10_000;
@@ -701,7 +701,7 @@ export function loadEnrollmentRegistryConfig(env = process.env) {
     self_registration: selfRegistration,
     controller_state_path: controllerStatePath,
     legacy_web_state_path: legacyWebStatePath,
-    max_entries: configuredCapacity(env.PINVOU_REMOTE_ENROLLMENT_MAX_ENTRIES, DEFAULT_MAX_ENTRIES,
+    max_entries: configuredCapacity(env.PINVOU_REMOTE_ENROLLMENT_MAX_ENTRIES, DEFAULT_MAX_ENROLLMENT_ENTRIES,
       1, MAX_ENTRIES, "enrollment_entry_limit_invalid"),
     controller_state_max_bytes: configuredCapacity(env.PINVOU_REMOTE_CONTROLLER_STATE_MAX_BYTES,
       DEFAULT_MAX_RELAY_CONTROLLER_STATE_BYTES, 1024, 256 * 1024 * 1024, "enrollment_state_limit_invalid"),
