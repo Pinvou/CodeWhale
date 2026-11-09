@@ -609,3 +609,12 @@
 .adm-restored-shell .adm-source-head .adm-catalog-directory-actions>button.adm-catalog-rollback{border-color:currentColor;color:var(--adm-danger);background:var(--adm-surface)}
 .adm-restored-shell .adm-source-head .adm-catalog-directory-actions>button:focus{outline:3px solid #3159e8;outline-offset:2px}
 @media(max-width:600px){.adm-restored-shell .adm-source-head .adm-catalog-directory-actions{justify-content:flex-start}.adm-restored-shell .adm-source-head .adm-catalog-directory-actions>button{width:auto;min-width:0;max-width:calc(100% - 8px)}}
+
+.adm-restored-shell .adm-model-token-filters .adm-catalog-code-filter{display:grid;gap:5px;align-self:start;min-width:0}
+.adm-restored-shell .adm-model-token-filters .adm-catalog-code-filter small{color:var(--adm-muted);line-height:1.45}
+.adm-restored-shell .adm-catalog-code-filter details{min-width:0;border:1px solid var(--adm-line);border-radius:8px;background:var(--adm-surface)}
+.adm-restored-shell .adm-catalog-code-filter details>summary{padding:7px 9px;cursor:pointer;overflow-wrap:break-word}
+.adm-restored-shell .adm-catalog-code-filter details>p,.adm-restored-shell .adm-catalog-code-filter details>ul{margin:0;padding:8px 10px;overflow-wrap:break-word}
+.adm-restored-shell .adm-catalog-code-filter details>ul{display:grid;gap:5px;list-style:none}
+.adm-restored-shell .adm-catalog-code-filter details button{width:100%;white-space:normal;overflow-wrap:break-word}
+.adm-restored-shell .adm-model-token-filters .adm-catalog-code-filter :is(input,summary,button):focus{outline:3px solid #3159e8;outline-offset:2px}

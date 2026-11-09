@@ -51,7 +51,8 @@ function ModelDirectory({ client, copy, permissions, actionsEnabled, detailsEnab
 		if (action && !activeActionAllowed) setAction(null);
 	}, [action, activeActionAllowed]);
   const load = useMemo(() => (filters, signal) => client.catalogModels(filters, signal), [client]);
-  const state = useAdminSource({ enabled: true, load, query, refreshVersion });
+  const state = useAdminSource({ enabled: true, load, query, refreshVersion, trackReadAccess: true });
+  const protocolCodes = state.error || state.readDenied ? [] : [...new Set(state.items.map(item => item.protocol_code).filter(value => typeof value === 'string' && value))].sort();
   const retry = () => {
     if (state.error?.status === 410) {
       delete cursorHistory.current.models;
@@ -61,11 +62,11 @@ function ModelDirectory({ client, copy, permissions, actionsEnabled, detailsEnab
   return (
     <section className="adm-card adm-source-card" aria-labelledby="model-directory-title">
 			<SourceHeader title={copy.modelDirectory} titleID="model-directory-title" state={state} copy={copy} onRetry={retry} actionClassName="adm-catalog-directory-actions" actions={actionsEnabled && <>{canSync && <button type="button" className="adm-catalog-preview" onClick={() => setAction({ type: 'SYNC' })}>{copy.catalogDirectory.previewSync}</button>}{canRollback && <button type="button" className="adm-catalog-rollback" onClick={() => setAction({ type: 'ROLLBACK', sourceVersion: '' })}>{copy.rollbackCatalog}</button>}</>} />
-      <FilterForm source="models" query={query} copy={copy} onQueryChange={onQueryChange} fields={[
+      <FilterForm source="models" query={query} copy={copy} onQueryChange={onQueryChange} resetDraftOnClear fields={[
         { key: 'q', label: copy.modelSearch, placeholder: copy.modelSearchPlaceholder },
         { key: 'lifecycle_status', label: copy.lifecycle, options: ['PUBLISHED', 'DEPRECATED', 'REMOVED'] },
-        { key: 'protocol_code', label: copy.protocol },
-        { key: 'source_adapter', label: copy.sourceAdapter },
+        { key: 'protocol_code', label: copy.protocol, suggestions: protocolCodes, suggestionsCopy: copy.catalogDirectory, help: copy.catalogDirectory.protocolHelp },
+        { key: 'source_adapter', label: copy.sourceAdapter, help: copy.catalogDirectory.adapterHelp },
       ]} />
       <SourceFeedback state={state} copy={copy} onRetry={retry} />
       <p className="adm-source-lead adm-source-missing-policy">{copy.sourceMissingPolicy}</p>

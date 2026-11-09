@@ -683,3 +683,10 @@ const catalogDirectoryCopy = {
   ja: { previewSync: 'カタログ同期をプレビュー', syncLead: '現在のカタログとソースのスナップショットを比較します。プレビューでは変更せず、確認後に同期を送信します。', noVersion: 'ソースバージョン未選択', selectVersion: '有効なソースバージョンを入力してロールバックの影響を確認してください。', observedVersion: (current, observed) => '現在のカタログバージョン：' + current + ' · ソーススナップショット：' + observed },
 };
 for (const language of ['zh', 'en', 'ja']) tokenManagementCopy[language].modelToken.catalogDirectory = catalogDirectoryCopy[language];
+
+const catalogFilterCopy = {
+  zh: { protocolHelp: '可直接输入完整协议代码，也可以从本页已加载的代码中选取。', adapterHelp: '当前目录不提供 Adapter 选项。请输入完整 Adapter 版本代码。', knownProtocols: '本页已加载的协议代码', noKnownProtocols: '已加载的代码中无匹配项，仍可按完整代码搜索。' },
+  en: { protocolHelp: 'Enter an exact protocol code or choose one from this page’s loaded results.', adapterHelp: 'This catalog does not provide Adapter options. Enter the exact Adapter version code.', knownProtocols: 'Protocol codes loaded on this page', noKnownProtocols: 'No loaded code matches. You can still search by exact code.' },
+  ja: { protocolHelp: 'プロトコルコードを完全に入力するか、このページで読み込んだコードから選択してください。', adapterHelp: 'このカタログは Adapter の候補を提供しません。Adapter バージョンの完全なコードを入力してください。', knownProtocols: 'このページで読み込んだプロトコルコード', noKnownProtocols: '読み込んだコードに一致はありません。完全なコードで検索できます。' },
+};
+for (const language of ['zh', 'en', 'ja']) Object.assign(tokenManagementCopy[language].modelToken.catalogDirectory, catalogFilterCopy[language]);

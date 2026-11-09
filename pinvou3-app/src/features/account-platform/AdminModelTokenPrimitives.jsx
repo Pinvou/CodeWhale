@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { previousAdminModelTokenCursor, rememberAdminModelTokenNextCursor, synchronizeAdminModelTokenCursorHistory } from './admin-navigation.js';
 import { executeAdminSourceRequest, initialAdminSourceState, reduceAdminSourceState, visibleAdminSourceState } from './admin-model-token-state.js';
 
-export function useAdminSource({ enabled, load, query, refreshVersion }) {
+export function useAdminSource({ enabled, load, query, refreshVersion, trackReadAccess = false }) {
   const [state, setState] = useState(initialAdminSourceState);
   const generation = useRef(0);
   const queryKey = JSON.stringify(query);
@@ -16,10 +16,16 @@ export function useAdminSource({ enabled, load, query, refreshVersion }) {
       query,
       load,
       signal: controller.signal,
-      transition: (event) => setState((previous) => reduceAdminSourceState(previous, event)),
+      transition: (event) => setState(previous => {
+        const next = reduceAdminSourceState(previous, event);
+        if (!trackReadAccess || next === previous) return next;
+        if (event.type === 'failure' && [401, 403].includes(event.error?.status)) return { ...next, readDenied: true };
+        if (event.type === 'success') return { ...next, readDenied: false };
+        return next;
+      }),
     });
     return () => controller.abort();
-  }, [enabled, load, queryKey, refreshVersion]);
+  }, [enabled, load, queryKey, refreshVersion, trackReadAccess]);
   return visibleAdminSourceState(state, queryKey, enabled);
 }
 
@@ -123,8 +129,15 @@ export function Pagination({ source, query, state, copy, cursorHistory, onQueryC
   );
 }
 
-export function FilterForm({ source, query, fields, copy, onQueryChange }) {
+export function FilterForm({ source, query, fields, copy, onQueryChange, resetDraftOnClear = false }) {
   const [draft, setDraft] = useState(query);
+  const id = React.useId();
+  const update = (key, value) => setDraft(current => ({ ...current, [key]: value }));
+  const clear = () => {
+    const empty = Object.fromEntries(Object.keys(query).map(key => [key, '']));
+    if (resetDraftOnClear) setDraft(empty);
+    onQueryChange(source, empty);
+  };
   useEffect(() => setDraft(query), [JSON.stringify(query)]);
   const fieldValue = (field) => {
     const value = draft[field.key] || '';
@@ -144,7 +157,15 @@ export function FilterForm({ source, query, fields, copy, onQueryChange }) {
       event.preventDefault();
       onQueryChange(source, { ...submitted(), cursor: '' });
     }}>
-      {fields.map((field) => (
+      {fields.map((field) => field.help ? <div className="adm-catalog-code-filter" key={field.key}>
+        <label><span>{field.label}</span><input type="search" aria-describedby={id + '-' + field.key} value={fieldValue(field)} onChange={event => update(field.key, event.target.value)} /></label>
+        <small id={id + '-' + field.key}>{field.help}</small>
+        {field.suggestions?.length > 0 && <details><summary>{field.suggestionsCopy.knownProtocols}</summary>
+          {field.suggestions.some(code => code.toLowerCase().includes(fieldValue(field).trim().toLowerCase())) ?
+            <ul>{field.suggestions.filter(code => code.toLowerCase().includes(fieldValue(field).trim().toLowerCase())).map(code => <li key={code}><button type="button" onClick={() => update(field.key, code)}>{code}</button></li>)}</ul> :
+            <p role="status">{field.suggestionsCopy.noKnownProtocols}</p>}
+        </details>}
+      </div> : (
         <label key={field.key}>
           <span>{field.label}</span>
           {field.options ? (
@@ -158,7 +179,7 @@ export function FilterForm({ source, query, fields, copy, onQueryChange }) {
         </label>
       ))}
       <button type="submit">{copy.search}</button>
-      <button type="button" className="secondary" onClick={() => onQueryChange(source, Object.fromEntries(Object.keys(query).map((key) => [key, ''])))}>{copy.clear}</button>
+      <button type="button" className="secondary" onClick={clear}>{copy.clear}</button>
     </form>
   );
 }
