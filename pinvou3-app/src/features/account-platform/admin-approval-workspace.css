@@ -95,3 +95,6 @@
 .adm-approval-execution-facts dt{color:var(--adm-muted)}.adm-approval-execution-facts dd{margin:3px 0 0}
 .adm-approval-execution-facts time{font-variant-numeric:tabular-nums}
 @media(max-width:560px){.adm-approval-execution-facts dl{grid-template-columns:1fr}}
+
+.adm-restored-shell .adm-approval-requestability .adm-status{white-space:normal;max-width:100%;overflow-wrap:break-word;overflow-wrap:anywhere}
+.adm-approval-requestability button{margin-top:8px}

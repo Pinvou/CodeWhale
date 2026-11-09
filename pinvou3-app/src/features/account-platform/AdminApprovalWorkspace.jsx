@@ -1,10 +1,18 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { financeCopy } from '../../shared/i18n.js';
-import { approvalReadCopy, pendingApprovalReadCopy, executionApprovalReadCopy } from '../../shared/admin-approval-read-i18n.js';
+import { approvalReadCopy, pendingApprovalReadCopy, executionApprovalReadCopy, approvalDirectoryCopy } from '../../shared/admin-approval-read-i18n.js';
 import { Approvals } from './AdminFinanceWorkspace.jsx';
 import { approvalCommands, approvalViews, approvalStatuses, executionStatuses, approvalQuery, approvalExpiryDate, readApprovalRoute } from './admin-approval-actions.js';
 import { approvalLabel } from './admin-approval-presentation.js';
 import './admin-approval-workspace.css';
+
+// These existing Billing tabs accept an unbound visit with repairs.request.
+// A directory entry has no resource ID or authorization for a specific request.
+const directoryRepairTabs = new Map([
+  ['LEDGER_REPAIR', 'ledger'], ['ENTITLEMENT_COMPONENT_ADJUSTMENT', 'correction'], ['RECEIVABLE_WRITE_OFF', 'writeoff'],
+  ['PAYMENT_FINANCIAL_REPAIR', 'paymentrepair'], ['REFUND_EXCEPTION_REPAIR', 'refundrepair'], ['CHARGEBACK_FINANCIAL_REPAIR', 'chargebackrepair'],
+  ['RECONCILIATION_FINANCIAL_REPAIR', 'reconciliationrepair'], ['USAGE_SETTLEMENT_REPAIR', 'usagesettlementrepair'],
+]);
 
 export function AdminApprovalWorkspace({ client, copy, language, me, onNavigate, routeSearch, onRouteChange }) {
   const c = copy.approvalCenter;
@@ -23,6 +31,11 @@ export function AdminApprovalWorkspace({ client, copy, language, me, onNavigate,
   const [refresh, setRefresh] = useState(0);
   const owner = `${me.user_id}:${me.platform_authorization_version || me.active_context?.platform_authorization_version || 0}`;
   const localRoute = useRef(null);
+  const directoryEpoch = client.financeSessionEpoch || 0;
+  const directoryScope = useMemo(() => ({ client, owner, view: route.view, epoch: directoryEpoch }), [client, owner, route.view, directoryEpoch]);
+  const directoryWords = approvalDirectoryCopy[language];
+  const currentDirectory = directory?.scope === directoryScope ? directory.value : null;
+  const canVisitRepairs = (me.platform_permissions || []).includes('platform.billing.repairs.request') && !!onNavigate;
   const externalRoute = useRef({ search: routeSearch, applied: true });
   useEffect(() => {
     if (routeSearch === undefined) return;
@@ -79,11 +92,11 @@ export function AdminApprovalWorkspace({ client, copy, language, me, onNavigate,
     void client.governedApprovalDirectory(controller.signal).then(value => {
       if (controller.signal.aborted) return;
       if (!Array.isArray(value?.items)) throw new Error('INVALID_APPROVAL_DIRECTORY');
-      setDirectory({ ...value, items: value.items.filter(item => item && approvalCommands.includes(item.command_type)) });
+      setDirectory({ scope: directoryScope, value: { ...value, items: value.items.filter(item => item?.visible === true && approvalCommands.includes(item.command_type)) } });
       setDirectoryState('ready');
     }).catch(() => { if (!controller.signal.aborted) setDirectoryState('error'); });
     return () => controller.abort();
-  }, [client, owner, route.view, refresh]);
+  }, [client, directoryScope, route.view, refresh]);
   return <section className="adm-approval-workspace" aria-label={copy.nav.approvals}>
     <nav className="adm-tabs adm-approval-tabs" aria-label={c.views}>{approvalViews.map(view => <button key={view} className={route.view === view ? 'active' : undefined} disabled={blocked} aria-current={route.view === view ? 'page' : undefined} onClick={() => { if (view !== route.view) { setMineStatus(''); setExpiryDraft({ from: '', to: '' }); setInvalidExpiry(false); } changeRoute({ view, status: '', requestID: '', ...(view !== route.view ? { expiresFrom: '', expiresTo: '' } : {}) }); }}>{c[view]}</button>)}</nav>
     {route.view !== 'directory' && <form className={'adm-approval-toolbar' + (pending ? ' adm-approval-pending-toolbar' : '')} onSubmit={event => { event.preventDefault(); if (mine) applyMine(); else if (route.view === 'pending') applyPendingDeadline(); else changeRoute({ commandType: command, target: target.trim(), requestID: '' }); }}>
@@ -101,12 +114,16 @@ export function AdminApprovalWorkspace({ client, copy, language, me, onNavigate,
     {route.view === 'execution' && <p className="adm-approval-execution-scope">{c.executionScopeLabel}: <strong>{approvalLabel(c.statusLabels, query.status)}</strong><small>{c.executionDefaultHelp}</small></p>}
     {route.view === 'directory' ? <><button onClick={() => setRefresh(value => value + 1)}>{c.refresh}</button>
       {directoryState === 'loading' && <p role="status">{c.loading}</p>}{directoryState === 'error' && <p role="alert">{c.listUnavailable}</p>}
-      {directory && <div className="adm-table-wrap adm-approval-policy-wrap"><table className="adm-approval-policy-table"><thead><tr><th>{c.commandType}</th><th>{c.risk}</th><th>{c.requestable}</th></tr></thead><tbody>{directory.items.map(item => {
+      {currentDirectory && <div className="adm-table-wrap adm-approval-policy-wrap"><table className="adm-approval-policy-table"><thead><tr><th>{c.commandType}</th><th>{c.risk}</th><th>{c.requestable}</th></tr></thead><tbody>{currentDirectory.items.map(item => {
         const commandLabel = approvalLabel(c.policyCommandLabels, item.command_type), riskLabel = approvalLabel(c.policyRiskLabels, item.risk_class);
+        const requestable = item.requestable === true, unavailable = item.requestable === false, tab = requestable && canVisitRepairs ? directoryRepairTabs.get(item.command_type) : undefined;
         return <tr key={`${item.command_type}:${item.policy_version}`}>
           <td><strong>{commandLabel}</strong>{commandLabel !== item.command_type && <code>{item.command_type}</code>}<small>{financeCopy[language].version}: {item.policy_version}</small></td>
           <td><span className="adm-approval-policy-risk">{riskLabel}</span>{riskLabel !== item.risk_class && <code>{item.risk_class}</code>}</td>
-          <td>{item.requestable ? c.yes : c.no}</td>
+          <td className="adm-approval-requestability"><span className={'adm-status' + (requestable ? ' ok' : '')}>{requestable ? directoryWords.requestable : unavailable ? directoryWords.unavailable : directoryWords.unknown}</span>
+            <small>{requestable ? directoryWords.eligibleHelp : unavailable ? directoryWords.unavailableHelp : directoryWords.unknownHelp}</small>
+            {tab && <button type="button" onClick={() => onNavigate({ section: 'finance', tab })}>{c.openBusinessArea}</button>}
+          </td>
         </tr>;
       })}</tbody></table></div>}
     </> : <Approvals client={client} copy={financeCopy[language]} permissions={me.platform_permissions || []} owner={owner} requestID={route.requestID}
