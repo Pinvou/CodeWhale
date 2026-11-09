@@ -1,4 +1,6 @@
-import React, {useEffect,useRef,useState} from 'react';
+import React, {useEffect,useId,useRef,useState} from 'react';
+import { auditPrivacyCopy } from '../../shared/i18n.js';
+import './admin-audit-presentation.css';
 import {secureRequestID} from './request-id.js';
 import {acquireAuditExportTicket,newAuditExportAttempt,submitAuditExportAttempt} from './admin-audit-export.js';
 import { AUDIT_EXPORT_STEPUP_QUERY, auditExportStepupNonce, newAuditExportRecovery, readAuditExportRecovery, clearAuditExportRecovery, requireAuditExportActor, reauthenticateAuditExport } from './audit-export-recovery.js';
@@ -138,7 +140,7 @@ function restoredFilters(filter) {
   };
   return { ...readAuditQueryFilters(), ...filter, from: local(filter.from), to: local(filter.to) };
 }
-function Audit({ copy, data, client, setData, permissions, currentUserID }) {
+function Audit({ copy, data, client, setData, permissions, currentUserID, language }) {
   const [recovery] = useState(() => {
     const nonce = auditExportStepupNonce();
     try {
@@ -171,6 +173,7 @@ function Audit({ copy, data, client, setData, permissions, currentUserID }) {
   const canRead = (permissions || []).includes('platform.audit.read');
   const canExport = (permissions || []).includes('platform.audit.export');
   const canExportPII = (permissions || []).includes('platform.audit.pii.export');
+  const privacyID = useId(), privacyWords = auditPrivacyCopy[language];
   const items = data.audits || [];
   const observeRecoveryError = cause => {
     if (cause?.status === 401 || cause?.code === 'RECENT_AUTHENTICATION_REQUIRED') setNeedsAuthentication(true);
@@ -471,7 +474,10 @@ function Audit({ copy, data, client, setData, permissions, currentUserID }) {
       {(needsAuthentication || recoveryBlocked) && <div><p>{copy.audit.reauthenticateHelp}</p><button type="button" disabled={busy} onClick={() => void reauthenticate()}>{copy.audit.reauthenticate}</button></div>}
       {canExport && <form className="adm-ops-form" onSubmit={(event) => { event.preventDefault(); void createExport(); }}>
         <label>{copy.audit.exportReason}<input value={exportReason} minLength="10" disabled={recoveryBlocked || exportAttempted || busy || Boolean(exportJob)} onChange={(event) => setExportReason(event.target.value)} required /></label>
-        <label className="adm-checkbox-field"><input type="checkbox" checked={includePII} disabled={recoveryBlocked || !canExportPII || exportAttempted || busy || Boolean(exportJob)} title={!canExportPII ? copy.permissionDenied : undefined} onChange={(event) => setIncludePII(event.target.checked)} />{copy.audit.includePII}</label>
+        <div className="adm-audit-export-privacy">
+          <label className="adm-checkbox-field"><input type="checkbox" checked={includePII} aria-describedby={privacyID} disabled={recoveryBlocked || !canExportPII || exportAttempted || busy || Boolean(exportJob)} onChange={(event) => setIncludePII(event.target.checked)} />{privacyWords.includeUnredacted}</label>
+          <small id={privacyID}>{privacyWords.defaultRedacted} {privacyWords.recentAuth} {!canExportPII && (includePII ? privacyWords.savedSelectionUnavailable : privacyWords.permissionUnavailable)}</small>
+        </div>
         <button type="submit" disabled={recoveryBlocked || busy || Boolean(exportJob)}>{exportAttempted ? copy.audit.retryExport : copy.audit.export}</button>
         {exportAttempted && !exportJob && <small role="status">{copy.audit.retrySameExport}</small>}
       </form>}
@@ -545,7 +551,7 @@ function AuditDetail({ copy, item, onBack }) {
 }
 
 function Status({value}) {return <span className="adm-status">{String(value || '—')}</span>;}
-export function AuditWorkspace({client,copy,permissions,currentUserID}){
+export function AuditWorkspace({client,copy,permissions,currentUserID,language = 'zh'}){
  const [data,setData]=useState({audits:[]});
  const [loading,setLoading]=useState(true);
  const [loadError,setLoadError]=useState(false);
@@ -562,5 +568,5 @@ export function AuditWorkspace({client,copy,permissions,currentUserID}){
  },[client,retry,canRead]);
  if(loading)return <p role="status">{copy.loading}</p>;
  if(loadError)return <div role="alert">{copy.audit.actionFailed}<button onClick={()=>setRetry(value=>value+1)}>{copy.refresh}</button></div>;
- return <Audit copy={copy} data={data} client={client} setData={setData} permissions={permissions} currentUserID={currentUserID}/>;
+ return <Audit copy={copy} data={data} client={client} setData={setData} permissions={permissions} currentUserID={currentUserID} language={language}/>;
 }
