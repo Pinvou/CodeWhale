@@ -562,3 +562,7 @@
 .adm-restored-shell .adm-model-call-summary>button{min-height:44px;white-space:normal}
 .adm-restored-shell .adm-model-call-summary>button:focus{outline:3px solid var(--adm-primary);outline-offset:2px}
 @media(max-width:480px){.adm-restored-shell .adm-model-detail-header>.adm-model-call-summary{grid-template-columns:minmax(0,1fr)}.adm-restored-shell .adm-model-call-summary>button{width:100%}}
+
+.adm-restored-shell .adm-token-account-list .adm-token-account-metric-help{margin:10px 16px;color:var(--adm-muted);font-size:12px;line-height:1.45}
+.adm-restored-shell .adm-token-account-list .adm-token-account-metric{min-width:44px;min-height:44px;color:var(--adm-primary);font-variant-numeric:tabular-nums}
+.adm-restored-shell .adm-token-account-list .adm-token-account-metric:focus{outline:3px solid var(--adm-primary);outline-offset:2px}
