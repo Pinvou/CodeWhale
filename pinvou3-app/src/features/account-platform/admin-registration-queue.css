@@ -1,0 +1,8 @@
+.adm-repair-queue .adm-registration-filters{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,150px),1fr));align-items:start;gap:10px;margin:14px 0}
+.adm-repair-queue .adm-registration-filters>button{align-self:start;margin-top:19px}
+.adm-repair-queue .adm-registration-filters select,.adm-repair-queue .adm-registration-filters input{min-width:0;width:100%}
+.adm-registration-duration{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:5px 8px;grid-column:span 2}
+.adm-registration-duration small{grid-column:1/-1;color:var(--adm-muted);overflow-wrap:break-word;overflow-wrap:anywhere}
+.adm-registration-filter-scope{font-size:13px;color:var(--adm-muted);overflow-wrap:break-word;overflow-wrap:anywhere}
+.adm-repair-queue .adm-registration-filters :focus{outline:3px solid var(--adm-primary);outline-offset:2px}
+@media(max-width:520px){.adm-repair-queue .adm-registration-filters{grid-template-columns:repeat(2,minmax(0,1fr))}.adm-repair-queue .adm-registration-filters>button{margin-top:0}}
