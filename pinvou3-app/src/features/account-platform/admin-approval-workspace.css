@@ -65,3 +65,7 @@
 
 .adm-financial-repair .adm-reconciliation-date-mode{grid-column:1/-1;display:grid;justify-items:start;gap:6px;min-width:0}
 .adm-financial-repair .adm-reconciliation-date-mode button{min-height:32px;max-width:100%;padding:4px 0;border-color:transparent;color:var(--adm-primary);white-space:normal;text-align:start}
+
+.adm-approval-mine-read:empty{display:none}
+.adm-approval-mine-read p{padding:10px 12px;margin:8px 0;border:1px solid var(--adm-line);border-radius:8px;background:var(--adm-soft);color:var(--adm-text);overflow-wrap:break-word;overflow-wrap:anywhere}
+.adm-approval-mine-read [role=alert]{color:var(--adm-danger);background:var(--adm-danger-soft)}
