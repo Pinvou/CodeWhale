@@ -25,7 +25,7 @@ export function AdminOrderResults({ page, language, disabled, onOpen }) {
       <td data-label={columns[4]}>{dateLabel(item.created_at, locale)}</td>
       <td data-label={columns[5]}>{formatFen(item.amount_fen, language)}</td>
       <td data-label={columns[6]}>{Object.prototype.hasOwnProperty.call(statuses, item.status) ? statuses[item.status] : identifier(item.status)}</td>
-      <td data-label={columns[7]}><button type="button" disabled={disabled} aria-label={copy.details + ': ' + item.order_id} onClick={() => onOpen(item.order_id)}>{copy.details}</button></td>
+      <td data-label={columns[7]}><button type="button" disabled={disabled} aria-label={copy.details + ': ' + item.order_id} onClick={event => onOpen(item.order_id, event.currentTarget)}>{copy.details}</button></td>
     </tr>)}</tbody>
   </table></div>;
 }
