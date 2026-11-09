@@ -134,6 +134,57 @@ async function joined(value) {
   }
 }
 
+test("an unsuccessful claim releases only its own role admission", async () => {
+  const value = fixture();
+  let rejectClaim;
+  const attempt = new Promise((_resolve, reject) => { rejectClaim = reject; });
+  value.leases.claimForDelivery = () => attempt;
+  const pending = value.router.handle({
+    socketIdentity: "socket-A",
+    message: { type: "controller_pairing_claim", request_id: "request-role-failure" },
+  });
+  assert.equal(value.router.reserveControlledRegistration("socket-A"), null);
+  const rejected = assert.rejects(pending, /claim rejected/u);
+  rejectClaim(new Error("claim rejected"));
+  await rejected;
+
+  const release = value.router.reserveControlledRegistration("socket-A");
+  assert.equal(typeof release, "function");
+  await assert.rejects(value.router.handle({ socketIdentity: "socket-A", message: {
+    type: "controller_resume_prepare", request_id: "request-role-resume", sender_role: "B",
+  } }), { code: "controller_role_invalid" });
+  value.router.authenticateControlled({ socketIdentity: "socket-A", endpointId: "endpoint-0002" });
+  release();
+  assert.deepEqual(value.router.resolveControlledEndpoint("endpoint-0002"), { socketIdentity: "socket-A" });
+  assert.deepEqual(value.router.resolveControlledEndpoint("endpoint-0001"), { socketIdentity: "socket-B" });
+});
+
+test("a claim returning after its socket closes cannot publish or abort a replacement", async () => {
+  const value = fixture();
+  const originalClaim = value.leases.claimForDelivery;
+  let resolveClaim;
+  const claim = new Promise((resolve) => { resolveClaim = resolve; });
+  value.leases.claimForDelivery = () => claim;
+  const cleanups = [];
+  value.leases.abortHandshakesBySocket = async (input) => { cleanups.push(input); return 0; };
+  const pending = value.router.handle({
+    socketIdentity: "socket-A",
+    message: { type: "controller_pairing_claim", request_id: "request-role-close" },
+  });
+  await value.router.removeSocket("socket-A");
+  value.router.addSocket({ socketIdentity: "socket-next-A", source: "198.51.100.3", socket: "socket-A" });
+  const rejected = assert.rejects(pending, { code: "endpoint_offline" });
+  resolveClaim(await originalClaim());
+  await rejected;
+  assert.deepEqual(cleanups, [{ socketIdentity: "socket-A", reservationId: "reservation-0001", reason: "handshake_failed" }]);
+  assert.deepEqual(value.sent.get("socket-B"), []);
+  value.leases.claimForDelivery = originalClaim;
+  await value.router.handle({ socketIdentity: "socket-next-A", message: {
+    type: "controller_pairing_claim", request_id: "request-role-replacement",
+  } });
+  assert.equal(value.sent.get("socket-B").at(-1)?.type, "controller_pairing_reserved");
+});
+
 test("real close hooks snapshot evidence before deleting it and freeze only the first close", async () => {
   let clock = 1_000;
   const value = fixture({ clock: () => clock, capabilities: ["encrypted_frames_v1", "task_v1", "role_liveness_v1", "resume_v1"] });

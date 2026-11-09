@@ -2189,6 +2189,103 @@ test("real Relay heartbeat retries failed reservation invalidation and releases 
   }
 });
 
+for (const firstRole of ["A", "B"]) {
+  test(`controller role admission preserves ${firstRole} while the opposite role arrives`, { timeout: 90_000 }, async () => {
+    const targetId = `ep_${crypto.randomBytes(12).toString("hex")}`;
+    const mixedId = `ep_${crypto.randomBytes(12).toString("hex")}`;
+    const accessToken = crypto.randomBytes(32).toString("base64url");
+    const desktopSecret = crypto.randomBytes(32).toString("base64url");
+    const claimId = "claim-cross-role-0001";
+    const env = selfRegistrationEnvironment(`role-admission-${firstRole}`, {
+      PINVOU_TEST_PAUSE_ROLE_ENDPOINT: firstRole === "B" ? mixedId : "",
+      PINVOU_TEST_PAUSE_ROLE_CLAIM: firstRole === "A" ? claimId : "",
+    });
+    const isolated = await spawnRelay(env, {
+      preload: new URL("./fixtures/controller-role-admission-barrier.js", import.meta.url).href,
+      ipc: true,
+    });
+    const sockets = [];
+    const capabilities = ["pairing_v1", "encrypted_frames_v1", "finished_receipt_v1"];
+    const publicKey = (pair) => rawX25519Public(pair.publicKey).toString("base64");
+    const send = (ws, frame) => ws.send(JSON.stringify(frame));
+    const register = (ws, endpointId) => send(ws, {
+      v: 2, type: "desktop_endpoint_register", endpoint_id: endpointId,
+      access_token: accessToken, desktop_secret: desktopSecret,
+    });
+    const receive = (ws, ...types) => nextMessageOneOf(ws, types, 15_000);
+    try {
+      const target = await registerDesktop(targetId, accessToken, desktopSecret, isolated.wsUrl, 15_000, true);
+      sockets.push(target.ws);
+      const codeWrap = crypto.generateKeyPairSync("x25519");
+      const registered = receive(target.ws, "desktop_pairing_registered", "error");
+      send(target.ws, {
+        v: 1, type: "desktop_pairing_register", request_id: "request-cross-role-register",
+        registration_request_id: "registration-cross-role-0001", endpoint_id: targetId,
+        remote_control_generation: "generation-cross-role-0001", key_algorithm: "x25519", capabilities,
+        code_wrap_public_key_b64: publicKey(codeWrap),
+        handshake_public_key_b64: publicKey(crypto.generateKeyPairSync("x25519")),
+      });
+      const pairing = await registered;
+      assert.equal(pairing.type, "desktop_pairing_registered", pairing.code);
+      const claim = {
+        v: 1, type: "controller_pairing_claim", request_id: "request-cross-role-claim",
+        claim_request_id: claimId, pairing_code: openPairingCode(codeWrap.privateKey, pairing),
+        handshake_public_key_b64: publicKey(crypto.generateKeyPairSync("x25519")),
+        key_algorithm: "x25519", capabilities,
+      };
+      const mixed = await openControllerSocket(isolated.wsUrl);
+      sockets.push(mixed);
+      if (firstRole === "A") {
+        const ready = waitForRegistrationProbe(isolated.child, "role-claim-ready", claimId);
+        send(mixed, claim);
+        await ready;
+        for (const endpoint of [targetId, mixedId]) {
+          const conflict = receive(mixed, "desktop_endpoint_registered", "error");
+          register(mixed, endpoint);
+          assert.equal((await conflict).code, "bad_desktop_endpoint_register");
+        }
+        const snapshot = await enrollmentSnapshot(env.PINVOU_REMOTE_CONTROLLER_STATE_PATH);
+        assert.deepEqual(snapshot.value.entries.map(entry => entry.endpoint_id), [targetId]);
+        const delivered = [mixed, target.ws].map(ws => receive(ws, "controller_pairing_reserved"));
+        isolated.child.send({ type: "release-role-admission" });
+        const [a, b] = await Promise.all(delivered);
+        assert.equal(a.reservation_id, b.reservation_id);
+        const conflict = receive(mixed, "desktop_endpoint_registered", "error");
+        register(mixed, targetId);
+        assert.equal((await conflict).code, "bad_desktop_endpoint_register");
+        const retry = [mixed, target.ws].map(ws => receive(ws, "controller_pairing_reserved"));
+        send(mixed, { ...claim, request_id: "request-cross-role-claim-retry" });
+        for (const response of await Promise.all(retry)) assert.equal(response.reservation_id, a.reservation_id);
+      } else {
+        const ready = waitForRegistrationProbe(isolated.child, "role-registration-ready", mixedId);
+        register(mixed, mixedId);
+        await ready;
+        const conflict = receive(mixed, "controller_pairing_reserved", "error");
+        send(mixed, claim);
+        assert.equal((await conflict).code, "invalid_message");
+        const registeredMixed = receive(mixed, "desktop_endpoint_registered", "error");
+        isolated.child.send({ type: "release-role-admission" });
+        assert.equal((await registeredMixed).endpoint_id, mixedId);
+        const selfClaim = receive(target.ws, "controller_pairing_reserved", "error");
+        send(target.ws, claim);
+        assert.equal((await selfClaim).code, "invalid_message");
+        const independent = await openControllerSocket(isolated.wsUrl);
+        sockets.push(independent);
+        const delivered = [independent, target.ws].map(ws => receive(ws, "controller_pairing_reserved"));
+        send(independent, claim);
+        const [a, b] = await Promise.all(delivered);
+        assert.equal(a.reservation_id, b.reservation_id);
+        const web = await joinWeb(mixedId, accessToken, {}, isolated.wsUrl);
+        sockets.push(web.ws);
+        assert.equal(web.joined.desktop_connected, true);
+      }
+    } finally {
+      sockets.forEach(closeSocket);
+      await stopRelay(isolated.child);
+    }
+  });
+}
+
 test("controller v1 completes a real three-party encrypted handshake beside legacy Web v2", async () => {
   const statePath = join(testRoot, `controller-legacy-${Date.now()}.json`);
   const controllerStatePath = join(testRoot, `controller-state-${Date.now()}`, "state.json");
