@@ -4,21 +4,26 @@ relay_code_manifest() (
   cd -- "$1" || exit
   export LC_ALL=C
   local module
-  printf '%s\n' pinvou-relay-js-manifest-v1 || exit
+  local -a modules=()
   for module in *.js; do
     [[ -e "$module" || -L "$module" ]] || continue
     [[ -f "$module" && ! -L "$module" ]] || exit 1
+    modules+=("$module")
+  done
+  printf 'pinvou-relay-js-manifest-v2 %s\n' "${#modules[@]}" || exit
+  for module in "${modules[@]}"; do
     sha256sum -- "$module" || exit
   done
 )
 
 relay_code_verify() {
-  local directory="$1" expected actual
+  local directory="$1" actual
   [[ -d "$directory" && ! -L "$directory" \
     && -f "$directory/.manifest.sha256" && ! -L "$directory/.manifest.sha256" ]] || return 1
-  expected="$(cat -- "$directory/.manifest.sha256")" || return
   actual="$(relay_code_manifest "$directory")" || return
-  [[ "$actual" == "$expected" ]]
+  # Compare the stored bytes directly. Bash command substitution would
+  # discard a damaged manifest's trailing LF differences and embedded NULs.
+  cmp -s -- "$directory/.manifest.sha256" - <<< "$actual"
 }
 
 relay_code_capture() (
@@ -68,8 +73,10 @@ relay_code_replace() {
     done
   fi
   if (( ! failed )); then
-    rm -rf -- "$stage"
-    return
+    if ! rm -rf -- "$stage"; then
+      printf 'relay_code_cleanup_pending: remove retained staging after rollback at %s\n' "$stage" >&2
+    fi
+    return 0
   fi
   for module in "${installed[@]}"; do
     mv -- "$live/$module" "$stage/incoming/" || recovery_failed=1
@@ -85,7 +92,9 @@ relay_code_replace() {
   if (( recovery_failed )); then
     printf 'relay_code_recovery_incomplete: preserved recovery files at %s\n' "$stage" >&2
   else
-    rm -rf -- "$stage"
+    if ! rm -rf -- "$stage"; then
+      printf 'relay_code_cleanup_pending: remove retained staging at %s\n' "$stage" >&2
+    fi
     echo 'relay_code_replace_failed: previous code restored' >&2
   fi
   return 1
