@@ -1499,6 +1499,12 @@ impl ModelManager {
             record: Some(current.clone()),
             error: None,
             planned_bytes: 0,
+            // A switch moves no files: carry the active row's registered
+            // measurement so later reads stay walk-free (review round 7).
+            measured_bytes: version_store::get(card_id, &version_store::active_id(&current))
+                .ok()
+                .flatten()
+                .and_then(|row| row.measured_bytes),
         };
         old.models_root = Some(
             current

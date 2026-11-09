@@ -15,6 +15,7 @@ fn interrupted_candidate(root: &std::path::Path) -> (version_store::Version, std
     let partial = root.join("weights.incomplete");
     fs::write(&partial, b"part").unwrap();
     let version = version_store::Version {
+            measured_bytes: None,
         card_id: INTERRUPTED_CARD.into(),
         version_id: revision,
         state: "downloading".into(),

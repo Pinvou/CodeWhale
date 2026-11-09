@@ -467,6 +467,7 @@ fn archived_version_identity_repairs_an_already_upgraded_legacy_row() {
     .unwrap();
     let old = db::get_store_model("qwen-card").unwrap().unwrap();
     version_store::put(&version_store::Version {
+            measured_bytes: None,
         planned_bytes: 0,
         card_id: "qwen-card".into(),
         version_id: "old-version".into(),
