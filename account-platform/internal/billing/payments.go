@@ -772,11 +772,20 @@ func (p *PaymentCoordinator) persistNotification(ctx context.Context, channel st
 		var existingBody []byte
 		var sourceID, sourceVersion *string
 		var existingResult string
-		if err := tx.QueryRow(ctx, `SELECT payload,provider_id,provider_version,result FROM payment_notifications WHERE notification_id=$1`, notification.NotificationID).Scan(&existingBody, &sourceID, &sourceVersion, &existingResult); err != nil {
+		var sameProviderPayload bool
+		// Both sides use JSONB's comparison so reordering object keys on
+		// persistence cannot change the signed provider facts on replay.
+		if err := tx.QueryRow(ctx, `SELECT payload,provider_id,provider_version,result,
+(payload->'provider_payload') IS NOT DISTINCT FROM ($2::jsonb->'provider_payload')
+FROM payment_notifications WHERE notification_id=$1`, notification.NotificationID, body).Scan(&existingBody, &sourceID, &sourceVersion, &existingResult, &sameProviderPayload); err != nil {
 			return uuid.Nil, false, err
 		}
 		var previous paymentNotification
-		if json.Unmarshal(existingBody, &previous) != nil || !sameNotificationPaymentFacts(previous, notification) {
+		if !sameProviderPayload || json.Unmarshal(existingBody, &previous) != nil {
+			return uuid.Nil, false, ErrForbiddenPayment
+		}
+		previous.ProviderPayload, notification.ProviderPayload = nil, nil
+		if !sameNotificationPaymentFacts(previous, notification) {
 			return uuid.Nil, false, ErrForbiddenPayment
 		}
 		legacyTerminal := sourceID == nil && sourceVersion == nil && (existingResult == "PROCESSED" || existingResult == "REJECTED" || existingResult == "MANUAL_REVIEW")
@@ -837,7 +846,12 @@ FROM payment_notifications WHERE notification_id=$1 FOR UPDATE`, notificationID)
 	if err != nil {
 		if scheduled && errors.Is(err, errPaymentMerchantOrderNotFound) && sourceID != nil && *sourceID != "" && sourceVersion != nil && *sourceVersion != "" &&
 			notification.NotificationID == notificationID && notification.Channel == channel && notification.MerchantID != "" {
-			return p.recordUnmatchedPaymentNotification(ctx, tx, notificationID)
+			return p.recordUnmatchedPaymentNotification(ctx, tx, unmatchedPaymentNotificationSnapshot{
+				NotificationID: notificationID, Reason: unmatchedPaymentNotificationReason,
+				ProviderID: *sourceID, ProviderVersion: *sourceVersion, Channel: channel,
+				MerchantOrderNo: notification.MerchantOrderNo, ChannelTransactionID: notification.ChannelTransaction,
+				ProviderOrderReference: notification.ProviderOrderReference,
+			})
 		}
 		return err
 	}

@@ -48,6 +48,18 @@ func TestPaymentNotificationWorkerEscalatesUnmatchedTrustedCallback(t *testing.T
 		if attempt == retryLimit && (result != "MANUAL_REVIEW" || scheduled) {
 			t.Fatalf("exhausted unmatched notification did not enter review: %s", result)
 		}
+		if attempt == retryLimit-1 {
+			// A competing worker can have selected this ID before the previous
+			// worker committed its backoff. That stale selection may not run it.
+			if err := c.processPersistedNotification(ctx, id, true); err != nil {
+				t.Fatal(err)
+			}
+			var delayed bool
+			if err := r.pool.QueryRow(ctx, `SELECT result='RECEIVED' AND processing_attempts=$2 AND next_attempt_at>now()
+FROM payment_notifications WHERE notification_id=$1`, id, attempt).Scan(&delayed); err != nil || !delayed {
+				t.Fatal("stale selection consumed a retry before its deadline", err)
+			}
+		}
 	}
 
 	if _, created, err := c.PersistNotification(ctx, order.Channel, signature, body, "fixture-source"); err != nil || created {
@@ -61,13 +73,21 @@ func TestPaymentNotificationWorkerEscalatesUnmatchedTrustedCallback(t *testing.T
 		t.Fatalf("missing or incorrectly bound manual case: %d, %v", len(items), err)
 	}
 	detail, err := r.PaymentAnomalyDetail(ctx, items[0].ID)
-	var snapshot struct {
-		NotificationID uuid.UUID `json:"notification_id"`
-		Reason         string    `json:"reason"`
-	}
+	var snapshot unmatchedPaymentNotificationSnapshot
 	if err != nil || len(detail.Events) != 1 || detail.Events[0].EventType != "CREATED" ||
-		json.Unmarshal(detail.Case.ResourceSnapshot, &snapshot) != nil || snapshot.NotificationID != id || snapshot.Reason != "PAYMENT_ORDER_NOT_FOUND" {
+		json.Unmarshal(detail.Case.ResourceSnapshot, &snapshot) != nil || snapshot.NotificationID != id || snapshot.Reason != "PAYMENT_ORDER_NOT_FOUND" ||
+		snapshot.MerchantOrderNo != missingOrder.MerchantOrderNo || snapshot.ChannelTransactionID == "" || snapshot.Channel != order.Channel ||
+		snapshot.ProviderID != "controlled" || snapshot.ProviderVersion != "v1" {
 		t.Fatal("manual case did not preserve the auditable notification reference", err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(detail.Case.ResourceSnapshot, &fields); err != nil || len(fields) != 7 {
+		t.Fatal("manual case exposed fields beyond transaction lookup", err)
+	}
+	var outboxMatches bool
+	if err := r.pool.QueryRow(ctx, `SELECT count(*)=1 AND bool_and(payload->>'case_id'=$2 AND payload->'payment_order_id'='null'::jsonb)
+FROM outbox_events WHERE aggregate_id=$1 AND event_type='billing.payment-anomaly.review-required.v1'`, items[0].ID, items[0].ID.String()).Scan(&outboxMatches); err != nil || !outboxMatches {
+		t.Fatal("manual case did not produce its one orderless review event", err)
 	}
 	var preserved bool
 	var posted, journals, transactions int64
@@ -84,6 +104,16 @@ FROM payment_notifications n CROSS JOIN wallets w WHERE n.notification_id=$1 AND
 	}
 	if _, err := r.ResolvePaymentAnomaly(ctx, items[0].ID, uuid.New(), uuid.NewString(), "DISMISS", "verified another transaction", "NONE"); !errors.Is(err, ErrConflict) {
 		t.Fatal("another reviewer could bypass the existing case ownership fence", err)
+	}
+	if _, err := r.ResolvePaymentAnomaly(ctx, items[0].ID, actor, uuid.NewString(), "ESCALATE_FINANCIAL_REPAIR", "transaction has no local authority", "PENDING"); !errors.Is(err, ErrConflict) {
+		t.Fatal("case without an authoritative order entered financial repair", err)
+	}
+	resolved, err := r.ResolvePaymentAnomaly(ctx, items[0].ID, actor, uuid.NewString(), "DISMISS", "verified no unmatched settlement", "NONE")
+	if err != nil || resolved.Status != "RESOLVED" || resolved.FinancialActionStatus != "NONE" {
+		t.Fatal("existing review command did not preserve the non-financial resolution", err)
+	}
+	if err := r.pool.QueryRow(ctx, `SELECT result='MANUAL_REVIEW' AND payload=$2::jsonb FROM payment_notifications WHERE notification_id=$1`, id, body).Scan(&preserved); err != nil || !preserved {
+		t.Fatal("resolving the case altered the original callback receipt", err)
 	}
 }
 
@@ -126,8 +156,11 @@ func TestPaymentNotificationWorkerRollsBackAndRetriesManualCase(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := retainedFinanceOwnerExec(t, r, ctx, `CREATE FUNCTION fixture_fail_unmatched_case() RETURNS trigger LANGUAGE plpgsql AS $$
-BEGIN RAISE EXCEPTION 'controlled manual case failure'; END $$;
-CREATE TRIGGER fixture_fail_unmatched_case BEFORE INSERT ON manual_review_cases FOR EACH ROW EXECUTE FUNCTION fixture_fail_unmatched_case()`); err != nil {
+BEGIN
+    IF NEW.event_type='billing.payment-anomaly.review-required.v1' THEN RAISE EXCEPTION 'controlled case event failure'; END IF;
+    RETURN NEW;
+END $$;
+CREATE TRIGGER fixture_fail_unmatched_case BEFORE INSERT ON outbox_events FOR EACH ROW EXECUTE FUNCTION fixture_fail_unmatched_case()`); err != nil {
 		t.Fatal(err)
 	}
 	worker := NewPaymentNotificationWorker(c, time.Second)
@@ -137,10 +170,11 @@ CREATE TRIGGER fixture_fail_unmatched_case BEFORE INSERT ON manual_review_cases 
 	var retryable bool
 	if err := r.pool.QueryRow(ctx, `SELECT result='RECEIVED' AND processed_at IS NULL AND processing_attempts=12
  AND next_attempt_at>now() AND last_error_code='POSTGRES_P0001' AND NOT EXISTS(SELECT 1 FROM manual_review_cases)
+ AND NOT EXISTS(SELECT 1 FROM outbox_events WHERE event_type='billing.payment-anomaly.review-required.v1')
 FROM payment_notifications WHERE notification_id=$1`, id).Scan(&retryable); err != nil || !retryable {
 		t.Fatal("failed case creation did not leave one retryable notification", retryable, err)
 	}
-	if _, err := retainedFinanceOwnerExec(t, r, ctx, `DROP TRIGGER fixture_fail_unmatched_case ON manual_review_cases; DROP FUNCTION fixture_fail_unmatched_case()`); err != nil {
+	if _, err := retainedFinanceOwnerExec(t, r, ctx, `DROP TRIGGER fixture_fail_unmatched_case ON outbox_events; DROP FUNCTION fixture_fail_unmatched_case()`); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := r.pool.Exec(ctx, `UPDATE payment_notifications SET next_attempt_at=now()-interval '1 second' WHERE notification_id=$1`, id); err != nil {

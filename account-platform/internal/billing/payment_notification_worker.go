@@ -14,6 +14,20 @@ import (
 
 const paymentNotificationRetryDelay = `make_interval(secs=>LEAST(300,power(2,LEAST(processing_attempts,8))::integer))`
 const unmatchedPaymentNotificationAttemptLimit = 12
+const unmatchedPaymentNotificationReason = "PAYMENT_ORDER_NOT_FOUND"
+
+// Only facts needed to locate the provider transaction go into the admin case.
+// The original callback, customer identifiers and raw provider data stay in the inbox.
+type unmatchedPaymentNotificationSnapshot struct {
+	NotificationID         uuid.UUID `json:"notification_id"`
+	Reason                 string    `json:"reason"`
+	ProviderID             string    `json:"provider_id"`
+	ProviderVersion        string    `json:"provider_version"`
+	Channel                string    `json:"channel"`
+	MerchantOrderNo        string    `json:"merchant_order_no,omitempty"`
+	ChannelTransactionID   string    `json:"channel_transaction_id,omitempty"`
+	ProviderOrderReference string    `json:"provider_order_reference,omitempty"`
+}
 
 type PaymentNotificationWorker struct {
 	payments *PaymentCoordinator
@@ -103,8 +117,8 @@ RETURNING processing_attempts,next_attempt_at`, id, now, errorCode).Scan(&attemp
 
 // The inbox row is locked and still due. Update its retry state and create any
 // manual case in the same transaction, so either both persist or neither does.
-func (p *PaymentCoordinator) recordUnmatchedPaymentNotification(ctx context.Context, tx pgx.Tx, id uuid.UUID) error {
-	const reason = "PAYMENT_ORDER_NOT_FOUND"
+func (p *PaymentCoordinator) recordUnmatchedPaymentNotification(ctx context.Context, tx pgx.Tx, snapshot unmatchedPaymentNotificationSnapshot) error {
+	id := snapshot.NotificationID
 	now := p.now()
 	var attempts int
 	var result string
@@ -116,14 +130,13 @@ SET processing_attempts=processing_attempts+1,
     processed_at=CASE WHEN processing_attempts+1 >= $4 THEN $2::timestamptz ELSE NULL END,
     next_attempt_at=CASE WHEN processing_attempts+1 >= $4 THEN NULL ELSE $2::timestamptz+`+paymentNotificationRetryDelay+` END
 WHERE notification_id=$1
-RETURNING processing_attempts,result`, id, now, reason, unmatchedPaymentNotificationAttemptLimit).Scan(&attempts, &result)
+RETURNING processing_attempts,result`, id, now, unmatchedPaymentNotificationReason, unmatchedPaymentNotificationAttemptLimit).Scan(&attempts, &result)
 	if err != nil {
 		return err
 	}
 	if result == "MANUAL_REVIEW" {
 		if _, err := createPaymentAnomalyWithinTransaction(ctx, tx, "PAYMENT_FACT_CONFLICT", "P1",
-			"payment-notification:"+id.String()+":missing-order", paymentAnomalyReference{},
-			map[string]any{"notification_id": id, "reason": reason}, now); err != nil {
+			"payment-notification:"+id.String()+":missing-order", paymentAnomalyReference{}, snapshot, now); err != nil {
 			return err
 		}
 	}
@@ -132,7 +145,7 @@ RETURNING processing_attempts,result`, id, now, reason, unmatchedPaymentNotifica
 	}
 	if result == "MANUAL_REVIEW" {
 		slog.WarnContext(ctx, "unmatched payment notification requires manual review", "task", "payment-notification-inbox",
-			"notification_id", id, "error_code", reason, "processing_attempts", attempts)
+			"notification_id", id, "error_code", unmatchedPaymentNotificationReason, "processing_attempts", attempts)
 	}
 	return nil
 }

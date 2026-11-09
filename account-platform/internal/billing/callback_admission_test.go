@@ -230,7 +230,7 @@ func TestCallbackHTTPAdmissionPersistsPostgres(t *testing.T) {
 	}
 	ids := []uuid.UUID{uuid.New(), uuid.New()}
 	for i, id := range ids {
-		body := fmt.Sprintf(`{"id":%q}`, id.String())
+		body := fmt.Sprintf(`{"provider_metadata":{"reference":"controlled","code":7},"id":%q}`, id.String())
 		source := fmt.Sprintf("198.51.100.%d", i+1)
 		w := admissionRequest(h, "/api/v1/payment-callbacks", "Bearer "+a, source, body)
 		if w.Code != 202 {
@@ -248,8 +248,14 @@ func TestCallbackHTTPAdmissionPersistsPostgres(t *testing.T) {
 		}
 	}
 	// Retained financial idempotency: replay leaves one notification and no new risk fact.
-	if got := admissionRequest(h, "/api/v1/payment-callbacks", "Bearer "+a, "198.51.100.1", fmt.Sprintf(`{"id":%q}`, ids[0].String())).Code; got != 202 {
+	if got := admissionRequest(h, "/api/v1/payment-callbacks", "Bearer "+a, "198.51.100.1", fmt.Sprintf(`{"provider_metadata":{"reference":"controlled","code":7},"id":%q}`, ids[0].String())).Code; got != 202 {
 		t.Fatal("retained callback replay failed", got)
+	}
+	if got := admissionRequest(h, "/api/v1/payment-callbacks", "Bearer "+a, "198.51.100.1", fmt.Sprintf(`{"id":%q,"provider_metadata":{"code":7,"reference":"controlled"}}`, ids[0].String())).Code; got != 202 {
+		t.Fatal("equivalent provider evidence did not replay", got)
+	}
+	if got := admissionRequest(h, "/api/v1/payment-callbacks", "Bearer "+a, "198.51.100.1", fmt.Sprintf(`{"id":%q,"provider_metadata":{"code":8,"reference":"controlled"}}`, ids[0].String())).Code; got != 401 {
+		t.Fatal("changed provider evidence reused an existing receipt", got)
 	}
 	if err := repository.pool.QueryRow(ctx, `SELECT count(*) FROM payment_notifications`).Scan(&received); err != nil || received != 2 {
 		t.Fatal("callback replay duplicated facts", received, err)

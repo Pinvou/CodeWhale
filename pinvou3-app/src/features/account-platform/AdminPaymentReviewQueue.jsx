@@ -72,7 +72,7 @@ export function AdminPaymentReviewQueue({ client, copy, me, anomaly = false, rou
     // instant is immutable with the key even if the system time zone changes.
     const scheduleDate = !operation.pendingFacts && action === 'schedule' ? new Date(nextReview) : null;
     const facts = operation.pendingFacts || { action, id: detail?.case?.case_id, reason: reason.trim(), resolution, nextReview: scheduleDate && Number.isFinite(scheduleDate.getTime()) ? scheduleDate.toISOString() : nextReview, commandProtocol: action === 'schedule' || action === 'provider-blind' || action === 'archive' ? 1 : undefined };
-    if (!facts.id || (!operation.pendingFacts && action === 'resolve' && !paymentAnomalyResolutions(detail?.case?.anomaly_type).includes(resolution)) || (!operation.unknown && !globalThis.confirm(copy.confirmAction))) return;
+    if (!facts.id || (!operation.pendingFacts && action === 'resolve' && !resolutions.includes(resolution)) || (!operation.unknown && !globalThis.confirm(copy.confirmAction))) return;
     const value = await operation.mutate(facts, async (current, key) => {
       const receipt = await execute(current, key);
       if ((receipt?.case_id || receipt?.case?.case_id) !== current.id) throw new Error('INVALID_FINANCE_ACK');
@@ -85,7 +85,10 @@ export function AdminPaymentReviewQueue({ client, copy, me, anomaly = false, rou
   const statuses = anomaly ? ['OPEN', 'RESOLVED'] : ['REVIEW_REQUIRED_LATE_PAYMENT', 'PROVIDER_BLIND', 'ARCHIVED_CONFIRMED_UNPAID', 'RESOLVED_PAID'];
   const active = item && (anomaly ? item.status === 'OPEN' : ['REVIEW_REQUIRED_LATE_PAYMENT', 'PROVIDER_BLIND'].includes(item.review_status));
   const owned = item?.owner_id === me.user_id;
-  const resolutions = paymentAnomalyResolutions(item?.anomaly_type);
+  const snapshot = item?.resource_snapshot;
+  const unmatchedCallback = anomaly && item?.anomaly_type === 'PAYMENT_FACT_CONFLICT' && !item?.payment_order_id &&
+    snapshot?.reason === 'PAYMENT_ORDER_NOT_FOUND' && snapshot?.notification_id ? snapshot : null;
+  const resolutions = unmatchedCallback ? ['DISMISS'] : paymentAnomalyResolutions(item?.anomaly_type);
   const confirmQuery = () => {
     if (busy || query.retired || (operation.unknown && !legacyQuery) || anomaly || !canQuery || !active || !owned) return;
     setQueryConfirmation({ facts: freshLatePaymentQuery(item, me.user_id, queryAuthority), owner, epoch: client.financeSessionEpoch || 0 });
@@ -113,6 +116,14 @@ export function AdminPaymentReviewQueue({ client, copy, me, anomaly = false, rou
     <button disabled={busy || !previous.length} onClick={() => { const values = [...previous]; const value = values.pop(); setPrevious(values); if (route) filters.move({ ...filters.query, cursor: value }, null); else void load(value); }}>{copy.previous}</button><button disabled={busy || !page?.next_cursor} onClick={() => { setPrevious(values => [...values, cursor]); if (route) filters.move({ ...filters.query, cursor: page.next_cursor }, null); else void load(page.next_cursor); }}>{copy.next}</button>
     {route && filters.selectedID && <nav><button disabled={busy || blocked} onClick={() => filters.move(filters.query, null)}>{adminLayoutCopy[language].backToDirectory}</button><code>{filters.selectedID}</code>{operation.error && !blocked && <button disabled={busy} onClick={() => void open(filters.selectedID)}>{copy.retry}</button>}</nav>}
     {item && <article><h4>{item.case_id}</h4><p>{reviewStatus(item)} / {item.severity} / {copy.owner}: {item.owner_id || copy.empty}</p><p>{item.claim_due_at}<br />{item.first_response_due_at}<br />{item.mitigation_due_at}<br />{item.resolution_due_at}</p>
+      {unmatchedCallback && <><p>{copy.unmatchedCallbackHelp}</p><dl>
+        <dt>{copy.callbackNotificationID}</dt><dd><code>{unmatchedCallback.notification_id}</code></dd>
+        <dt>{copy.callbackProvider}</dt><dd>{unmatchedCallback.provider_id} / {unmatchedCallback.provider_version}</dd>
+        <dt>{copy.channel}</dt><dd>{unmatchedCallback.channel}</dd>
+        <dt>{copy.callbackMerchantOrder}</dt><dd><code>{unmatchedCallback.merchant_order_no || copy.empty}</code></dd>
+        <dt>{copy.callbackTransaction}</dt><dd><code>{unmatchedCallback.channel_transaction_id || copy.empty}</code></dd>
+        <dt>{copy.callbackProviderOrder}</dt><dd><code>{unmatchedCallback.provider_order_reference || copy.empty}</code></dd>
+      </dl></>}
       <label>{copy.reason}<textarea disabled={busy || blocked} maxLength={2000} value={reason} onChange={event => setReason(event.target.value)} /></label>
       {canQuery && active && !owned && <button disabled={busy || blocked} onClick={() => void act('claim')}>{copy.claimCase}</button>}
       {owned && active && !anomaly && canQuery && <><button disabled={busy || blocked || query.retired} onClick={confirmQuery}>{copy.query}</button>{(query.unknown || legacyQuery) && <button disabled={busy || query.retired || (operation.unknown && !legacyQuery)} onClick={confirmQuery}>{copy.newQuery}</button>}<label>{copy.nextReview}<input type="datetime-local" value={nextReview} onChange={event => setNextReview(event.target.value)} /></label><button disabled={busy || blocked || !nextReview || !reason.trim()} onClick={() => void act('schedule')}>{copy.schedule}</button><button disabled={busy || blocked || item.review_status !== 'REVIEW_REQUIRED_LATE_PAYMENT'} onClick={() => void act('archive')}>{copy.archive}</button><button disabled={busy || blocked || reason.trim().length < 10} onClick={() => void act('provider-blind')}>{copy.escalate}</button></>}
