@@ -19,3 +19,10 @@
 .adm-registration-row-evidence dl>div{min-width:0}
 .adm-registration-row-evidence dt{color:var(--adm-muted)}
 .adm-registration-row-evidence dd{margin:2px 0 0;overflow-wrap:break-word;overflow-wrap:anywhere}
+
+.adm-registration-result-scope{display:grid;gap:4px;margin:12px 0}
+.adm-registration-result-scope p{margin:0}
+.adm-registration-previous,.adm-registration-empty{padding:12px 14px;background:var(--adm-soft);color:var(--adm-text);border:1px solid var(--adm-line);border-radius:10px}
+.adm-registration-empty{display:grid;gap:9px;margin-top:12px;justify-items:start}
+.adm-registration-empty p{margin:0}
+.adm-registration-empty button:focus{outline:3px solid var(--adm-primary);outline-offset:2px}
