@@ -206,7 +206,7 @@ export function modelOperationsOverviewDrilldown(key, window) {
     provisioning_attention_count: { section: 'modelOperations', query: { operations_tab: 'provisionings', provisioning_cursor: null }, exact: false },
     usage_request_count: { section: 'modelOperations', query: { operations_tab: 'usage', usage_started_from: range.started_from, usage_started_to: range.started_to, usage_cursor: null }, exact: true },
     reconciliation_pending_count: { section: 'modelOperations', query: { operations_tab: 'reconciliation', reconciliation_status: 'OPEN', reconciliation_case_type: 'USAGE_RECONCILIATION_REVIEW', reconciliation_cursor: null }, exact: false },
-    reconciliation_stopped_count: { section: 'modelOperations', query: { operations_tab: 'reconciliation', reconciliation_cursor: null }, exact: false },
+    reconciliation_stopped_count: { section: 'modelOperations', query: { operations_tab: 'reconciliation', reconciliation_case_type: 'USAGE_RECONCILIATION_REVIEW', reconciliation_cursor: null }, exact: false },
   }[key] || null;
 }
 
