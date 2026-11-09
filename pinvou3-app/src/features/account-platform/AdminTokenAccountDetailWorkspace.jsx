@@ -259,19 +259,53 @@ function AuditTab({ client, copy, accountID, query, onQueryChange, cursorHistory
   return <Source title={copy.detailAudit} id="token-audit-heading" state={state} copy={copy} retry={() => setRefresh((v) => v + 1)}><FilterForm source="tokenAudit" query={query} copy={copy} onQueryChange={onQueryChange} fields={[{ key: 'action', label: copy.auditAction }, { key: 'actor_id', label: copy.auditActor }, { key: 'occurred_from', label: copy.createdFrom, type: 'datetime-local' }, { key: 'occurred_to', label: copy.createdTo, type: 'datetime-local' }]} /><div className="adm-table-wrap"><table className="adm-table"><thead><tr><th>{copy.auditAction}</th><th>{copy.auditActor}</th><th>{copy.occurredAt}</th></tr></thead><tbody>{state.items.map((item) => <tr key={item.audit_id}><td data-label={copy.auditAction}>{item.action}</td><td data-label={copy.auditActor}><span className="adm-mono">{item.actor_id}</span></td><td data-label={copy.occurredAt}>{date(item.occurred_at)}</td></tr>)}</tbody></table></div><Pagination source="tokenAudit" query={query} state={state} copy={copy} cursorHistory={cursorHistory} onQueryChange={onQueryChange} /></Source>;
 }
 
+function TokenAccountOwner({ account, copy }) {
+  const type = Object.prototype.hasOwnProperty.call(copy.enumLabels, account.owner_type) ? copy.enumLabels[account.owner_type] : account.owner_type || '—';
+  return <div className="adm-token-detail-identity">
+    <span>{type}</span>
+    <span>{copy.tokenResourceOwnerID}: <code>{account.owner_id || '—'}</code></span>
+    {account.owner_organization_id && <span>{copy.tokenResourceOrgID}: <code>{account.owner_organization_id}</code></span>}
+    {account.owner_unit_id && <span>{copy.tokenResourceUnitID}: <code>{account.owner_unit_id}</code></span>}
+  </div>;
+}
+
+function TokenAccountSharing({ account, copy }) {
+  const value = account.share_scope;
+  const known = Object.prototype.hasOwnProperty.call(copy.tokenResourceScopeLabels, value);
+  const code = typeof value === 'string' && value.trim() ? value : null;
+  return <div className="adm-token-detail-identity">
+    <span>{account.owner_type === 'USER' ? copy.tokenAccountPersonalPolicy : known ? copy.tokenResourceScopeLabels[value] : copy.tokenResourceScopeUnknown}</span>
+    {account.owner_type !== 'USER' && <small>{copy.tokenAccountPolicyHint}</small>}
+    {code && <details className="adm-token-detail-policy"><summary>{copy.tokenAccountPolicyCode}</summary><code>{code}</code></details>}
+  </div>;
+}
+
 export function AdminTokenAccountDetailWorkspace({ accountID, client, copy, permissions, routeVersion, onRouteChange, onQueryChange, cursorHistory, onTabsKeyDown, actionsEnabled, onNavigate }) {
   const [refresh, setRefresh] = useState(0);
+  const [readRejected, setReadRejected] = useState(null);
   const requested = useMemo(() => new URLSearchParams(globalThis.location?.search || '').get('token_detail_tab') || 'overview', [routeVersion]);
   const tabs = useMemo(() => TABS.filter((item) => item !== 'audit' || permissions.includes('platform.audit.read')), [permissions]);
   const tab = tabs.includes(requested) ? requested : 'overview';
-  const load = useMemo(() => async (_, signal) => { const value = await client.tokenAccountSafeDetail(accountID, signal); if (value.token_account_id !== accountID) throw Object.assign(new Error('account mismatch'), { code: 'INVALID_TOKEN_ACCOUNT_DETAIL' }); return asCollection(value); }, [client, accountID]);
+  const load = useMemo(() => async (_, signal) => {
+    try {
+      const value = await client.tokenAccountSafeDetail(accountID, signal);
+      if (value?.token_account_id !== accountID) throw Object.assign(new Error('account mismatch'), { code: 'INVALID_TOKEN_ACCOUNT_DETAIL' });
+      if (!signal?.aborted) setReadRejected((previous) => previous?.client === client && previous.accountID === accountID ? null : previous);
+      return asCollection(value);
+    } catch (error) {
+      if (!signal?.aborted && ([401, 403, 404].includes(error?.status) || error?.code === 'INVALID_TOKEN_ACCOUNT_DETAIL')) setReadRejected({ client, accountID });
+      throw error;
+    }
+  }, [client, accountID]);
   const state = useAdminSource({ enabled: true, load, query: { token_account_id: accountID }, refreshVersion: refresh });
-  const account = state.items[0];
+  const denied = readRejected?.client === client && readRejected.accountID === accountID;
+  const account = denied ? null : state.items[0];
   const queries = { credentials: readAdminModelTokenQuery('tokenCredentials'), routes: readAdminModelTokenQuery('tokenRoutes'), provisionings: readAdminModelTokenQuery('tokenProvisionings'), audit: readAdminModelTokenQuery('tokenAudit') };
   const back = () => onRouteChange({ token_account_id: null, token_detail_tab: null, ...adminModelTokenQueryUpdates('tokenCredentials', {}), ...adminModelTokenQueryUpdates('tokenRoutes', {}), ...adminModelTokenQueryUpdates('tokenProvisionings', {}), ...adminModelTokenQueryUpdates('tokenAudit', {}) }, 'push');
-  return <article className="adm-model-detail"><header className="adm-card adm-model-detail-header"><button type="button" className="adm-back" onClick={back}>← {copy.backToAccounts}</button><div><p>{copy.tokenAccountDetail}</p><h2>{account?.name || copy.loading}</h2><span className="adm-mono">{accountID}</span></div><div><small>{state.updatedAt ? `${copy.lastUpdated} ${date(state.updatedAt)}` : copy.notUpdated}</small><button type="button" disabled={state.loading} onClick={() => setRefresh((v) => v + 1)}>{copy.refreshSource}</button></div></header><SourceFeedback state={state} copy={copy} onRetry={() => setRefresh((v) => v + 1)} />
+  return <article className="adm-model-detail"><header className="adm-card adm-model-detail-header"><button type="button" className="adm-back" onClick={back}>← {copy.backToAccounts}</button><div><p>{copy.tokenAccountDetail}</p><h2>{account?.name || (state.error ? copy.sourceUnavailable : copy.loading)}</h2><span className="adm-mono">{accountID}</span></div><div><small>{state.updatedAt ? `${copy.lastUpdated} ${date(state.updatedAt)}` : copy.notUpdated}</small><button type="button" disabled={state.loading} onClick={() => setRefresh((v) => v + 1)}>{copy.refreshSource}</button></div></header><SourceFeedback state={state} copy={copy} onRetry={() => setRefresh((v) => v + 1)} />
+    {account && (state.loading || state.error) && <p className="adm-token-detail-stale" role="status">{copy.tokenAccountSnapshotStale}</p>}
     {account && <><div className="adm-tabs adm-model-detail-tabs" role="tablist" aria-label={copy.tokenAccountViews} onKeyDown={onTabsKeyDown}>{tabs.map((item) => <button type="button" role="tab" id={`token-detail-tab-${item}`} aria-controls={`token-detail-panel-${item}`} aria-selected={tab === item} tabIndex={tab === item ? 0 : -1} className={tab === item ? 'active' : ''} key={item} onClick={() => onRouteChange({ token_detail_tab: item }, 'push')}>{copy.tokenDetailTabs[item]}</button>)}</div><div role="tabpanel" id={`token-detail-panel-${tab}`} aria-labelledby={`token-detail-tab-${tab}`}>
-      {tab === 'overview' && <section className="adm-card adm-model-detail-panel" aria-labelledby="token-overview-heading"><h2 id="token-overview-heading">{copy.tokenAccountOverview}</h2><Facts><Fact label={copy.status}><Status value={account.status} copy={copy} /></Fact><Fact label={copy.owner}>{copy.enumLabels[account.owner_type] || account.owner_type}</Fact><Fact label={copy.shareScope}>{copy.enumLabels[account.share_scope] || account.share_scope}</Fact><Fact label={copy.accountVersion}>{account.account_version}</Fact><Fact label={copy.credentials}>{account.active_credential_count}</Fact><Fact label={copy.routes}>{account.route_count}</Fact><Fact label={copy.updatedAt}>{date(account.updated_at)}</Fact></Facts></section>}
+      {tab === 'overview' && <section className="adm-card adm-model-detail-panel" aria-labelledby="token-overview-heading"><h2 id="token-overview-heading">{copy.tokenAccountOverview}</h2><Facts><Fact label={copy.status}><Status value={account.status} copy={copy} /></Fact><Fact label={copy.owner}><TokenAccountOwner account={account} copy={copy} /></Fact><Fact label={copy.tokenResourcePolicy}><TokenAccountSharing account={account} copy={copy} /></Fact><Fact label={copy.accountVersion}>{account.account_version}</Fact><Fact label={copy.credentials}>{account.active_credential_count}</Fact><Fact label={copy.routes}>{account.route_count}</Fact><Fact label={copy.updatedAt}>{date(account.updated_at)}</Fact></Facts></section>}
       {tab === 'credentials' && <CredentialsTab client={client} copy={copy} account={account} query={queries.credentials} onQueryChange={onQueryChange} cursorHistory={cursorHistory} actionsEnabled={actionsEnabled} permissions={permissions} onNavigate={onNavigate} />}
       {tab === 'routes' && <RoutesTab access={{ ...tokenResourceAccess(permissions, actionsEnabled), manage: Boolean(actionsEnabled && permissions.includes('platform.tokens.manage')) }} onAccountRefresh={() => setRefresh((v) => v + 1)} client={client} copy={copy} account={account} query={queries.routes} onQueryChange={onQueryChange} cursorHistory={cursorHistory} />}
       {tab === 'provisionings' && <ProvisioningsTab client={client} copy={copy} accountID={accountID} query={queries.provisionings} onQueryChange={onQueryChange} cursorHistory={cursorHistory} />}
