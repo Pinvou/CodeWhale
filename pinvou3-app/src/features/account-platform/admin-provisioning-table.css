@@ -7,3 +7,10 @@
 .adm-provisioning-row-detail{max-width:24ch;margin:8px 0 0;padding:8px 10px;border:1px solid var(--adm-line);border-radius:8px;background:var(--adm-soft)}
 .adm-provisioning-row-detail p{margin:0 0 4px}
 @media(max-width:680px){.adm-provisioning-object-facts div{grid-template-columns:minmax(0,1fr);gap:1px}.adm-provisioning-row-detail{max-width:none}}
+
+.adm-provisioning-filter-field{display:grid;min-width:0;gap:6px}
+.adm-provisioning-filter-field label,.adm-provisioning-filter-field select,.adm-provisioning-filter-field input{min-width:0;width:100%}
+.adm-provisioning-task-table .adm-provisioning-versions{display:grid;gap:4px;margin:0}
+.adm-provisioning-versions div{display:grid;gap:2px}
+.adm-provisioning-versions dt{color:var(--adm-muted);font-size:11px}
+.adm-provisioning-versions dd{margin:0;font-variant-numeric:tabular-nums;overflow-wrap:break-word}
