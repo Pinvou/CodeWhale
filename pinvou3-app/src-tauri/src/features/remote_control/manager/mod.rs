@@ -1283,6 +1283,15 @@ fn enqueue_controller_inbound(
     frame: ControllerRelayFrame,
 ) -> Result<(), &'static str> {
     use tokio::sync::mpsc::error::TrySendError;
+    // The shared reader and its wire backlog outlive controller operations.
+    // Reject an explicitly different generation before it consumes capacity
+    // or makes an already-full successor lane retire. Endpoint-wide messages
+    // without a generation retain their existing Legacy/connection semantics.
+    if let Some(generation) = frame.message.get("remote_control_generation")
+        && generation.as_str() != inner.controller_relay_generation.as_deref()
+    {
+        return Ok(());
+    }
     let Some(sender) = &inner.controller_inbound else {
         return Ok(());
     };
@@ -4273,6 +4282,55 @@ mod tests {
         assert!(!controller_relay_message(&json!({
             "type": "chat:delta"
         })));
+    }
+
+    #[test]
+    fn stale_controller_generation_cannot_fill_or_retire_a_successor_queue() {
+        let mut inner = Inner::default();
+        let endpoint = test_active_endpoint(Some(TEST_LEASE_ID));
+        let owner = endpoint.sender.clone();
+        let generation = "generation-successor";
+        let binding = owner.controller_authority.bind(generation).unwrap();
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(128);
+        inner.endpoint = Some(endpoint);
+        inner.controller_relay_generation = Some(generation.to_owned());
+        inner.controller_binding = Some(binding);
+        inner.controller_inbound = Some(sender);
+        let frame = |generation: &str| ControllerRelayFrame {
+            message: json!({"type":"encrypted_frame", "remote_control_generation":generation}),
+            receipt: None,
+        };
+        for _ in 0..129 {
+            assert_eq!(
+                enqueue_controller_inbound(&mut inner, frame("generation-old")),
+                Ok(())
+            );
+        }
+        assert_eq!(receiver.len(), 0);
+        for _ in 0..128 {
+            assert_eq!(
+                enqueue_controller_inbound(&mut inner, frame(generation)),
+                Ok(())
+            );
+        }
+        assert_eq!(
+            enqueue_controller_inbound(&mut inner, frame("generation-old")),
+            Ok(())
+        );
+        assert_eq!(receiver.len(), 128);
+        assert_eq!(inner.controller_binding, Some(binding));
+        assert_eq!(
+            owner.controller_authority.binding(generation),
+            Some(binding)
+        );
+        assert_eq!(
+            receiver.try_recv().unwrap().message["remote_control_generation"],
+            generation
+        );
+        assert_eq!(
+            enqueue_controller_inbound(&mut inner, frame(generation)),
+            Ok(())
+        );
     }
 
     #[test]

@@ -1588,4 +1588,47 @@ pub(crate) async fn controller_lane_outage_round_trip<T>(
     assert!(!retired.same_binding(&replacement.sender()));
     drop(channel);
     assert_lifecycle_route(&mut socket, &mut replacement).await;
+
+    // Leave a new lane unconsumed while the persistent socket delivers a
+    // protocol-valid old-generation burst. These must not fill its queue.
+    let old_generation = replacement.generation().to_owned();
+    drop(replacement);
+    let mut successor = relay
+        .start_controller_relay("generation-lane-outage-successor")
+        .await
+        .unwrap();
+    let expiry = fixture_wall_clock_millis() + 60_000;
+    let binding = CodeWrapBinding::new(
+        "registration-retired-overload",
+        "pairing-retired-overload",
+        &old_generation,
+        "relay-retired-overload",
+        expiry,
+    )
+    .unwrap();
+    let receiver = CodeWrapKeyPair::generate().unwrap();
+    let sealed = CodeWrapKeyPair::generate()
+        .unwrap()
+        .seal_pairing_code(receiver.public_key(), &binding, "2345678")
+        .unwrap();
+    let stale = json!({"v":1,"type":"desktop_pairing_registered",
+        "request_id":"request-retired-overload", "registration_request_id":"registration-retired-overload",
+        "pairing_id":"pairing-retired-overload", "remote_control_generation":old_generation,
+        "relay_epoch":"relay-retired-overload", "expires_at_ms":expiry.to_string(),
+        "sealed_code_b64":base64::engine::general_purpose::STANDARD.encode(sealed)});
+    for _ in 0..129 {
+        send(&mut socket, &stale).await;
+    }
+    marker["message"] = json!("legacy route after stale generation burst");
+    send(&mut socket, &marker).await;
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while relay.status().last_error.as_deref()
+            != Some("legacy route after stale generation burst")
+        {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("persistent reader must drain old frames and retain Legacy routing");
+    assert_lifecycle_route(&mut socket, &mut successor).await;
 }
