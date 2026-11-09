@@ -42,6 +42,8 @@ export function AdminRepairQueue({ client, copy, language, profile = false }) {
   const labels = registrationRepairCopy[language], queryCopy = registrationQueueCopy[language];
   const [items, setItems] = useState(null);
   const [receivedAt, setReceivedAt] = useState(null);
+  const [readState, setReadState] = useState("loading");
+  const [readOwner, setReadOwner] = useState(null);
   const [filters, setFilters] = useState(initialFilters);
   const [unit, setUnit] = useState('minutes');
   const adopted = useRef({}), readController = useRef(null);
@@ -52,18 +54,22 @@ export function AdminRepairQueue({ client, copy, language, profile = false }) {
   const mutation = useRef(false);
   const load = async (requestFilters = adopted.current) => {
     const controller = profile ? null : new AbortController();
-    if (controller) { readController.current?.abort(); readController.current = controller; }
+    if (controller) { readController.current?.abort(); readController.current = controller; setReadState("loading"); }
     const request = ++generation.current;
     setBusy(true); setError('');
     try {
       const result = await (profile ? client.profileChangeRepairs() : client.registrationRepairs(requestFilters, controller.signal));
       if (request !== generation.current) return;
       if (!Array.isArray(result?.items)) throw new Error('INVALID_REPAIR_COLLECTION');
-      if (!profile) { adopted.current = requestFilters; setReceivedAt(Date.now()); }
+      if (!profile) { adopted.current = requestFilters; setReceivedAt(Date.now()); setReadOwner(client); setReadState("ready"); }
       setItems(result.items);
     } catch (reason) {
       if (request === generation.current) {
-        if (!profile && (reason?.status === 401 || reason?.status === 403)) setItems(null);
+        if (!profile && (reason?.status === 401 || reason?.status === 403)) {
+          setItems(null); setReceivedAt(null); setReadState('denied');
+        } else if (!profile) {
+          setReadState('error');
+        }
         setError(localizedAccountPlatformError(copy, reason));
       }
     } finally { if (request === generation.current) setBusy(false); }
@@ -94,6 +100,9 @@ export function AdminRepairQueue({ client, copy, language, profile = false }) {
     void load(criteria);
   };
   const applied = adopted.current;
+  const currentItems = profile || readOwner === client ? items : null;
+  const filtered = Object.keys(applied).length > 0;
+  const clearFilters = () => { if (busy) return; setFilters(initialFilters()); setUnit("minutes"); void load({}); };
   const appliedLabels = [
     applied.operation_id, labels.statuses[applied.status], labels.stages[applied.stage], labels.responsibilities[applied.responsibility],
     applied.sla === 'WITHIN' ? labels.within : applied.sla === 'OVERDUE' ? labels.overdue : '',
@@ -116,10 +125,15 @@ export function AdminRepairQueue({ client, copy, language, profile = false }) {
       <button type="submit" className="adm-primary-button" disabled={busy}>{queryCopy.search}</button>
     </form>}
     <button type="button" disabled={busy} onClick={() => void load()}>{copy.refresh}</button>
-    {!profile && items && <p className="adm-registration-filter-scope">{queryCopy.applied}: {appliedLabels.length ? appliedLabels.join(' · ') : queryCopy.unfiltered}</p>}
-    {error && <div role="alert">{error.filter ? queryCopy[error.filter] : error}</div>}{busy && <p role="status">{copy.loading}</p>}
+    {!profile && currentItems && <div className="adm-registration-result-scope">
+      <p className="adm-registration-filter-scope">{queryCopy.applied}: {appliedLabels.length ? appliedLabels.join(' · ') : queryCopy.unfiltered}</p>
+      {receivedAt !== null && <p className="adm-registration-filter-scope">{queryCopy.receivedAt} <time dateTime={new Date(receivedAt).toISOString()}>{time(new Date(receivedAt).toISOString())}</time></p>}
+      {(readState === 'error' || readState === 'loading') && <p className="adm-registration-previous">{currentItems.length ? queryCopy.previousRows : queryCopy.previousEmpty}</p>}
+    </div>}
+    {!profile && readState === 'denied' ? <p role="alert">{queryCopy.denied}</p> : error && <div role="alert">{error.filter ? queryCopy[error.filter] : error}</div>}
+    {busy && <p role="status">{!profile && readState === 'loading' ? queryCopy.reading : copy.loading}</p>}
     {/* biome-ignore lint/a11y/noNoninteractiveTabindex: The read-only wide table needs keyboard access to native horizontal scrolling. */}
-    {items && <div className={profile ? "adm-table-wrap" : "adm-table-wrap adm-registration-table"} tabIndex="0" role="region" aria-label={profile ? copy.userManagement.profileRepair : copy.userManagement.registrationRepair}><table><thead><tr><th>{copy.userManagement.operation}</th><th>{copy.accounts.status}</th>{!profile && <><th>{labels.responsibility}</th><th>{queryCopy.sinceUpdate}<small>{queryCopy.sinceUpdateHelp}</small></th><th>{labels.nextRetryAt}</th><th>{labels.sla}</th></>}<th>{copy.accounts.actions}</th></tr></thead><tbody>{items.map(item => {
+    {(profile ? currentItems : currentItems?.length > 0) && <div className={profile ? "adm-table-wrap" : "adm-table-wrap adm-registration-table"} tabIndex="0" role="region" aria-label={profile ? copy.userManagement.profileRepair : copy.userManagement.registrationRepair}><table><thead><tr><th>{copy.userManagement.operation}</th><th>{copy.accounts.status}</th>{!profile && <><th>{labels.responsibility}</th><th>{queryCopy.sinceUpdate}<small>{queryCopy.sinceUpdateHelp}</small></th><th>{labels.nextRetryAt}</th><th>{labels.sla}</th></>}<th>{copy.accounts.actions}</th></tr></thead><tbody>{currentItems.map(item => {
       const id = profile ? item.profile_change_request_id : item.registration_operation_id;
       const allowed = profile ? { retry: true, compensate: false } : registrationRepairActions(item);
       const age = !profile && receivedAt !== null && typeof item.updated_at === 'string' && !item.updated_at.startsWith('0001-')
@@ -128,6 +142,10 @@ export function AdminRepairQueue({ client, copy, language, profile = false }) {
         {!profile && <><td>{labels.responsibilities[item.responsibility] || item.responsibility}</td><td>{age === null ? queryCopy.notReported : labels.minutes(age)}</td><td><RegistrationQueueTime value={item.next_retry_at} queryCopy={queryCopy} /></td><td><RegistrationQueueTime value={item.sla_expires_at} queryCopy={queryCopy} /></td></>}
         <td>{allowed.retry && <button disabled={busy} onClick={() => void act(item)}>{allowed.query ? labels.stages.IDENTITY_CREATING : copy.userManagement.retry}</button>}{allowed.compensate && <button disabled={busy} onClick={() => void act(item, true)}>{copy.userManagement.compensate}</button>}{!profile && (allowed.query || (!allowed.retry && !allowed.compensate)) && <small>{item.status === 'IDENTITY_CREATING' ? labels.identityUnknown : labels.readOnly}</small>}{!profile && <RegistrationEvidence {...{ item, labels, queryCopy, id }} />}</td></tr>;
     })}</tbody></table></div>}
-    {items?.length === 0 && <p>{copy.noData}</p>}
+    {profile && currentItems?.length === 0 && <p>{copy.noData}</p>}
+    {!profile && currentItems?.length === 0 && readState === 'ready' && <div className="adm-registration-empty">
+      <p role="status">{filtered ? queryCopy.filteredEmpty : queryCopy.empty}</p>
+      {filtered && <button type="button" disabled={busy} onClick={clearFilters}>{queryCopy.clear}</button>}
+    </div>}
   </section>;
 }
