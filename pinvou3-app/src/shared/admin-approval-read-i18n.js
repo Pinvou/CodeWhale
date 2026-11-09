@@ -48,3 +48,34 @@ export const approvalReadCopy = {
     "targetHelp": "対象の完全な ID を入力すると、完全一致で検索できます。UUID や決済事業者 ID などの業務 ID に対応しています。"
   }
 };
+
+const pendingMessages = {
+  "zh": {
+    "loading": "正在读取待我审批…",
+    "denied": "你没有权限读取待我审批。",
+    "signedOut": "登录状态已失效，请重新登录后查看待我审批。",
+    "failed": "暂时无法读取待我审批。",
+    "empty": "当前查询结果没有需要你审批的申请。",
+    "emptyPage": "这一页没有需要你审批的申请。",
+    "emptyWithNext": "这一页没有需要你审批的申请，可以继续查看下一页。"
+  },
+  "en": {
+    "loading": "Reading requests awaiting your approval…",
+    "denied": "You do not have access to read requests awaiting your approval.",
+    "signedOut": "Your sign-in has expired. Sign in again to view requests awaiting your approval.",
+    "failed": "Requests awaiting your approval could not be loaded.",
+    "empty": "There are no requests awaiting your approval in this result.",
+    "emptyPage": "No requests on this page await your approval.",
+    "emptyWithNext": "No requests on this page await your approval. You can continue to the next page."
+  },
+  "ja": {
+    "loading": "承認待ちの申請を読み込み中…",
+    "denied": "承認待ちの申請を表示する権限がありません。",
+    "signedOut": "ログインの有効期限が切れました。再度ログインして承認待ちの申請を確認してください。",
+    "failed": "承認待ちの申請を取得できませんでした。",
+    "empty": "この検索結果に承認が必要な申請はありません。",
+    "emptyPage": "このページに承認が必要な申請はありません。",
+    "emptyWithNext": "このページに承認が必要な申請はありません。次のページを確認できます。"
+  }
+};
+export const pendingApprovalReadCopy = Object.fromEntries(Object.entries(pendingMessages).map(([language, messages]) => [language, { ...approvalReadCopy[language], ...messages }]));
