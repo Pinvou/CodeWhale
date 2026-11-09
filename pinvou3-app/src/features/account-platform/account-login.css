@@ -1,0 +1,30 @@
+.ap-shell.ap-login {
+  --auth-card: #fff; --auth-page: #f6f8f9; --auth-text: #202a36; --auth-muted: #647283; --auth-border: #dde3e8; --auth-accent: #0f766e;
+  color: var(--auth-text); background: var(--auth-card); border-radius: 20px; padding: 32px;
+}
+.dark .ap-shell.ap-login { --auth-card: #20262b; --auth-page: #171c20; --auth-text: #e5ebef; --auth-muted: #aeb8c1; --auth-border: #39434c; --auth-accent: #5eead4; }
+.ap-popover-backdrop .ap-shell.ap-login { width: min(480px, calc(100vw - 48px)); max-width: 480px; max-height: calc(100vh - 48px); overscroll-behavior: contain; box-shadow: 0 24px 80px #0003; }
+.ap-login .ap-auth-card { display: grid; gap: 24px; width: 100%; max-width: none; padding: 0; margin: 0; background: transparent; }
+.ap-login .ap-auth-heading { display: block; }
+.ap-login .ap-auth-heading h1 { margin: 0 0 10px; font-size: 24px; line-height: 1.4; font-weight: 650; }
+.ap-login .ap-auth-heading p { margin: 0; color: var(--auth-muted); line-height: 1.7; }
+.ap-login .ap-auth-modes { display: flex; flex-wrap: nowrap; gap: 6px; padding: 4px; border-radius: 12px; background: var(--auth-page); }
+.ap-login .ap-auth-modes button { flex: 1; border-color: transparent; background: transparent; }
+.ap-shell.ap-login button, .ap-shell.ap-login select, .ap-shell.ap-login input { color: var(--auth-text); background: var(--auth-card); border-color: var(--auth-border); min-height: 40px; }
+.ap-login .ap-auth-modes button[aria-pressed="true"] { color: var(--auth-accent); background: var(--auth-card); box-shadow: 0 1px 4px #0001; font-weight: 600; }
+.ap-login .ap-auth-form { display: grid; gap: 18px; }
+.ap-login .ap-auth-form label { display: grid; gap: 7px; min-width: 0; }
+.ap-login .ap-auth-form input { display: block; width: 100%; min-width: 0; }
+.ap-login .ap-password-input > button { min-height: 32px; height: 32px; width: 32px; top: 4px; right: 4px; transform: none; }
+.ap-login .ap-auth-form small, .ap-login .ap-auth-hint { margin: 0; font-size: 12px; line-height: 1.6; color: var(--auth-muted); }
+.ap-login .ap-auth-code { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; align-items: end; }
+.ap-login .ap-auth-code button { white-space: nowrap; }
+.ap-login button.ap-auth-submit { min-height: 44px; border-color: transparent; background: #0f766e; color: #fff; font-weight: 600; }
+.ap-login .ap-auth-links { display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.ap-login .ap-auth-links button { padding: 0; border: 0; min-height: 32px; color: var(--auth-accent); background: transparent; }
+.ap-login > button { display: block; margin: 24px auto 0; border: 0; color: var(--auth-muted); background: transparent; }
+.ap-login button:focus-visible, .ap-login input:focus-visible { outline: 3px solid var(--auth-accent); outline-offset: 2px; }
+@media (max-width: 560px) {
+  .ap-popover-backdrop .ap-shell.ap-login { width: calc(100vw - 40px); max-height: calc(100vh - 40px); padding: 24px; }
+  .ap-login .ap-auth-code { grid-template-columns: minmax(0, 1fr); }
+}

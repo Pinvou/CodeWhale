@@ -132,6 +132,7 @@ export { dict, LANG_TO_TAG, TAG_TO_LANG, languageFromLocaleTags, initialSystemLa
 
 export { accountPlatformCopy } from './account-platform-i18n.js';
 export { accountLayoutCopy, adminLayoutCopy } from './account-layout-i18n.js';
+export { accountAuthCopy } from './account-auth-i18n.js';
 export { adminPlatformCopy } from './admin-platform-i18n.js';
 export { financeCopy } from './finance-i18n.js';
 export { ledgerRepairCopy } from './ledger-repair-i18n.js';
