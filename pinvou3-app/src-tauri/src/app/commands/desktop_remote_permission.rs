@@ -70,6 +70,15 @@ pub(crate) async fn respond_remote_permission_via_acp(
     permission_request_id: &str,
     decision: PermissionDecision,
 ) -> Result<(), String> {
+    if !authority.request_matches_task_instance(
+        &owner.lease,
+        &owner.task_id,
+        &owner.session_id,
+        owner.task_sequence,
+        permission_request_id,
+    ) {
+        return Err("permission_binding_stale".to_owned());
+    }
     if decision == PermissionDecision::Allow
         && authority.allow_delivery_for_task_instance(
             &owner.lease,
@@ -112,7 +121,13 @@ pub(crate) async fn respond_remote_permission_via_acp(
     // race. Treat that as the same successful resolution only while the exact
     // owner is still current and the exact request is no longer pending.
     if (decision != PermissionDecision::Allow
-        || authority.allow_delivery_observed(&owner.lease, &owner.task_id, permission_request_id))
+        || authority.allow_delivery_for_task_instance(
+            &owner.lease,
+            &owner.task_id,
+            &owner.session_id,
+            owner.task_sequence,
+            permission_request_id,
+        ))
         && acp_pool.has_remote_permission_owner(owner)
         && !acp_pool
             .pending_remote_permissions(owner)

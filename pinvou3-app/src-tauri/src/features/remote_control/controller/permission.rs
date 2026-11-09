@@ -318,6 +318,23 @@ struct PendingPermission {
 }
 
 impl PendingPermission {
+    fn matches_task_instance(
+        &self,
+        lease: &LeaseContext,
+        task_id: &str,
+        session_id: &str,
+        task_sequence: u64,
+        request_id: &str,
+    ) -> bool {
+        self.binding.matches(lease, task_id, request_id)
+            && self
+                .task_instance
+                .as_ref()
+                .is_some_and(|(session, sequence)| {
+                    session == session_id && *sequence == task_sequence
+                })
+    }
+
     fn active(&self) -> bool {
         !self.dispatch_state.committed()
             && matches!(
@@ -420,10 +437,22 @@ impl PermissionAuthority {
     }
     /// Registers a pending permission. B may only have one pending request per
     /// task at a time.
+    #[cfg(test)]
     pub(crate) fn request(
         &self,
         lease: &LeaseContext,
         task_id: &str,
+        request: PermissionRequest,
+        now_b: u64,
+    ) -> Result<PermissionView> {
+        self.register_request(lease, task_id, None, request, now_b)
+    }
+
+    fn register_request(
+        &self,
+        lease: &LeaseContext,
+        task_id: &str,
+        task_instance: Option<(String, u64)>,
         request: PermissionRequest,
         now_b: u64,
     ) -> Result<PermissionView> {
@@ -454,7 +483,7 @@ impl PermissionAuthority {
         }
         let inserted = pending.entry(id).insert_entry(PendingPermission {
             binding,
-            task_instance: None,
+            task_instance,
             request,
             state: PermissionState::Pending,
             decision: None,
@@ -478,15 +507,26 @@ impl PermissionAuthority {
         request: PermissionRequest,
         now_b: u64,
     ) -> Result<PermissionView> {
-        let view = self.request(lease, task_id, request, now_b)?;
-        // The caller still owns the live task and callback gates. Receipt
-        // reads stay unavailable until the original instance is bound here.
-        let mut pending = self.pending.lock();
-        let entry = pending
-            .get_mut(&view.permission_request_id)
-            .ok_or_else(|| error("permission_unknown"))?;
-        entry.task_instance = Some((session_id.to_owned(), task_sequence));
-        Ok(view)
+        self.register_request(
+            lease,
+            task_id,
+            Some((session_id.to_owned(), task_sequence)),
+            request,
+            now_b,
+        )
+    }
+
+    pub(crate) fn request_matches_task_instance(
+        &self,
+        lease: &LeaseContext,
+        task_id: &str,
+        session_id: &str,
+        task_sequence: u64,
+        request_id: &str,
+    ) -> bool {
+        self.pending.lock().get(request_id).is_some_and(|entry| {
+            entry.matches_task_instance(lease, task_id, session_id, task_sequence, request_id)
+        })
     }
 
     pub(crate) fn allow_delivery_for_task_instance(
@@ -498,14 +538,8 @@ impl PermissionAuthority {
         request_id: &str,
     ) -> bool {
         self.pending.lock().get(request_id).is_some_and(|entry| {
-            entry.binding.matches(lease, task_id, request_id)
+            entry.matches_task_instance(lease, task_id, session_id, task_sequence, request_id)
                 && entry.dispatch_state.committed()
-                && entry
-                    .task_instance
-                    .as_ref()
-                    .is_some_and(|(session, sequence)| {
-                        session == session_id && *sequence == task_sequence
-                    })
         })
     }
 
@@ -1038,6 +1072,27 @@ mod tests {
             )
             .unwrap()
             .permission_request_id;
+        assert!(authority.request_matches_task_instance(
+            &lease,
+            "task-0001",
+            "session-0001",
+            7,
+            &approval,
+        ));
+        assert!(!authority.request_matches_task_instance(
+            &lease,
+            "task-0001",
+            "session-0001",
+            8,
+            &approval,
+        ));
+        assert!(!authority.request_matches_task_instance(
+            &lease,
+            "task-0001",
+            "session-0002",
+            7,
+            &approval,
+        ));
         authority
             .decide(
                 DecisionAuthority::ControllerA,
@@ -1104,6 +1159,40 @@ mod tests {
             7,
             &approval
         ));
+    }
+
+    #[test]
+    fn task_instance_binding_is_complete_when_a_pending_request_becomes_visible() {
+        let authority = Arc::new(PermissionAuthority::with_clock(Arc::new(|| 1_100)));
+        let observed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let observer = Arc::clone(&observed);
+        let weak = Arc::downgrade(&authority);
+        authority.set_telemetry_sink(Arc::new(move |event| {
+            if matches!(event.transition, PermissionTelemetryTransition::Requested) {
+                let authority = weak.upgrade().unwrap();
+                let pending = authority.pending_for_task("task-0001");
+                assert_eq!(pending.len(), 1);
+                assert!(authority.request_matches_task_instance(
+                    &lease(),
+                    "task-0001",
+                    "session-0001",
+                    7,
+                    &pending[0].permission_request_id,
+                ));
+                observer.store(true, Ordering::SeqCst);
+            }
+        }));
+        authority
+            .request_for_task_instance(
+                &lease(),
+                "task-0001",
+                "session-0001",
+                7,
+                request(61_000),
+                1_000,
+            )
+            .unwrap();
+        assert!(observed.load(Ordering::SeqCst));
     }
 
     #[test]
