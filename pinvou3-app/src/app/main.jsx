@@ -90,6 +90,7 @@ import {
   isControlledSessionChatActive,
 } from '../features/remote-control/remote-control-logic.mjs';
 import { modelSourceForLease } from '../features/remote-control/remote-model-source.mjs';
+import { useRemoteConversationVisibility } from '../features/remote-control/useRemoteConversationVisibility.js';
 import { mergeSessionStoreHistory, remoteProxyForSession } from '../features/remote-control/remote-session-adapter.mjs';
 import {
   sessionTitlePlainText,
@@ -1331,7 +1332,11 @@ const App = () => {
       const [savedConfirm, setSavedConfirm] = useState(null); // 存入成功 → iOS 确认窗 {name}
       const [poolMyOnly, setPoolMyOnly] = useState(false); // 跳卡池时是否直接落「我的卡牌」筛选(从确认窗"去查看"进来=true)
       const [webAccessOpen, setWebAccessOpen] = useState(false);
-      const [remoteConversationOpen, setRemoteConversationOpen] = useState(false);
+      const {
+        open: remoteConversationOpen,
+        setOpen: setRemoteConversationOpen,
+        close: closeRemoteConversation,
+      } = useRemoteConversationVisibility();
       const [remoteModelSource, setRemoteModelSource] = useState('controller_temporary');
       const remoteTemporaryModelAvailable = bs?.controllerConnection?.temporaryModelAvailable === true;
       const remoteModelLeaseKey = `${bs?.controllerConnection?.connectionId || ''}:${bs?.controllerConnection?.leaseEpoch || ''}:${remoteTemporaryModelAvailable ? 'temporary' : 'controlled'}`;
@@ -5089,12 +5094,18 @@ const App = () => {
                   initialSection={settingsInitialSection}
                   remoteConversationOpen={remoteConversationOpen}
                   onRemoteConversationOpen={() => {
-                    openCurrentRemoteProxy()
-                      .then(opened => { if (!opened) setRemoteConversationOpen(true); })
-                      .catch(() => setRemoteConversationOpen(true));
+                    const connectionId = bsRef.current?.controllerConnection?.connectionId;
+                    const showFallback = () => {
+                      if (bsRef.current?.controllerConnection?.connectionId === connectionId) {
+                        setRemoteConversationOpen(true);
+                      }
+                    };
+                    return openCurrentRemoteProxy()
+                      .then(opened => { if (!opened) showFallback(); })
+                      .catch(showFallback);
                   }}
                   onRemoteConnected={activateRemoteProxy}
-                  onRemoteConversationClose={() => setRemoteConversationOpen(false)}
+                  onRemoteConversationClose={closeRemoteConversation}
                   onCloseSettings={() => {
                     navigateFromScheduledRun(settingsReturnViewRef.current || 'chat');
                   }}
@@ -5213,18 +5224,22 @@ const App = () => {
                   <div className="fixed inset-0 z-[120] flex items-start sm:items-center justify-center bg-black/50 p-3 sm:p-6">
                     <div role="dialog" aria-modal="true" aria-labelledby="remote-connection-title" aria-describedby="remote-connection-background-hint" className="w-full max-w-[960px] max-h-full overflow-y-auto custom-scrollbar rounded-2xl bg-white shadow-2xl forced-colors:border forced-colors:border-[CanvasText] dark:bg-[#1F2023]">
                       <LazyRemoteConnectionShell
+                        key={bs?.controllerConnection?.connectionId || 'unbound'}
                         t={t}
                         bs={bs}
-                        onClose={() => setRemoteConversationOpen(false)}
+                        onClose={closeRemoteConversation}
                         onOpenChat={openCurrentRemoteProxy}
                         onRequestDisconnect={async () => {
+                          const connectionId = bsRef.current?.controllerConnection?.connectionId;
                           if (!bridge?.available || !bridge.desktopRemoteControl) {
                             const failure = new Error('desktop_remote_control_unsupported');
                             failure.code = 'desktop_remote_control_unsupported';
                             throw failure;
                           }
                           await bridge.desktopRemoteControl.controllerDisconnect();
-                          setRemoteConversationOpen(false);
+                          if (bsRef.current?.controllerConnection?.connectionId === connectionId) {
+                            closeRemoteConversation();
+                          }
                         }}
                       />
                     </div>

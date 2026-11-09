@@ -5,6 +5,7 @@ use crate::features::sessions::remote_proxy::binding::LiveRemoteContext;
 use parking_lot::Mutex;
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::oneshot;
 
@@ -13,6 +14,7 @@ pub(super) const MAX_UPLOAD_RECEIPTS: usize = 128;
 const UPLOAD_RECEIPT_TTL: Duration = Duration::from_secs(10 * 60);
 
 struct PendingAction {
+    registration: Arc<()>,
     local_session_id: String,
     remote_ref: String,
     live: LiveRemoteContext,
@@ -134,16 +136,18 @@ impl DesktopRemoteActionState {
         operation: String,
         task_id: Option<String>,
         transfer_id: Option<String>,
-    ) -> Result<oneshot::Receiver<Result<Value, String>>, &'static str> {
+    ) -> Result<(Arc<()>, oneshot::Receiver<Result<Value, String>>), &'static str> {
         let mut inner = self.inner.lock();
         Self::purge_expired_uploads(&mut inner);
         if inner.pending.len() >= MAX_PENDING_ACTIONS || inner.pending.contains_key(&request_id) {
             return Err("remote_action_capacity");
         }
         let (reply, receiver) = oneshot::channel();
+        let registration = Arc::new(());
         inner.pending.insert(
             request_id,
             PendingAction {
+                registration: Arc::clone(&registration),
                 local_session_id,
                 remote_ref,
                 live,
@@ -153,15 +157,22 @@ impl DesktopRemoteActionState {
                 reply,
             },
         );
-        Ok(receiver)
+        Ok((registration, receiver))
     }
 
     /// Stop waiting after an uncertain send/timeout without changing any
     /// transfer receipt. The peer may already have completed the action; a
     /// retry must therefore reuse the same request id and reconcile against
     /// B's idempotency cache rather than treating the action as failed.
-    pub(crate) fn detach_uncertain(&self, request_id: &str) {
-        self.inner.lock().pending.remove(request_id);
+    pub(crate) fn detach_uncertain(&self, request_id: &str, registration: &Arc<()>) {
+        let mut inner = self.inner.lock();
+        if inner
+            .pending
+            .get(request_id)
+            .is_some_and(|pending| Arc::ptr_eq(&pending.registration, registration))
+        {
+            inner.pending.remove(request_id);
+        }
     }
 
     /// Called only from the AEAD-opened A inbound branch. The caller still

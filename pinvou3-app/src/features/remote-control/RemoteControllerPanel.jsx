@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { AlertTriangle, CheckCircle2, Clock, Lock, RefreshCw } from '../../components/icons.jsx';
 import { bridge } from '../../hooks/useBridge.js';
-import { connectionErrorKey, controllerConnectionUiState } from './remote-control-logic.mjs';
+import { connectionErrorKey, controllerConnectionUiState, createAsyncOperationGuard } from './remote-control-logic.mjs';
 import RemoteConnectForm from './RemoteConnectForm.jsx';
 import RemoteProxyArchivePanel from './RemoteProxyArchivePanel.jsx';
 
@@ -91,6 +91,9 @@ export default function RemoteControllerPanel({
   const [disconnectError, setDisconnectError] = useState(null);
   const [cancelEpoch, setCancelEpoch] = useState(0);
   const connectCancellation = useRef(0);
+  const operationGuard = useRef(createAsyncOperationGuard());
+  const connectionId = useRef(connection.connectionId);
+  connectionId.current = connection.connectionId;
   const state = controllerConnectionUiState(connection, formState);
   const showForm = !ACTIVE_STATES.includes(state);
   const showStatusCard = ACTIVE_STATES.includes(state) || state === 'disconnected' || ERROR_STATES.includes(state);
@@ -105,7 +108,19 @@ export default function RemoteControllerPanel({
     if (!ACTIVE_STATES.includes(state)) setBusy(false);
   }, [state]);
 
+  useEffect(() => {
+    const guard = createAsyncOperationGuard();
+    operationGuard.current = guard;
+    setBusy(false);
+    setDisconnectError(null);
+    return () => guard.dispose();
+  }, [connection.connectionId]);
+
   const disconnect = async () => {
+    const guard = operationGuard.current;
+    const token = guard.start();
+    const isCurrent = () => guard.isCurrent(token)
+      && connectionId.current === connection.connectionId;
     connectCancellation.current += 1;
     onFormValueChange?.('');
     onFormStateChange?.('empty');
@@ -118,21 +133,25 @@ export default function RemoteControllerPanel({
         return;
       }
       await bridge.desktopRemoteControl.controllerDisconnect();
-      onConversationClose?.();
+      if (isCurrent()) onConversationClose?.();
     } catch (failure) {
-      setDisconnectError(connectionErrorKey(failure?.code));
+      if (isCurrent()) setDisconnectError(connectionErrorKey(failure?.code));
     } finally {
-      setBusy(false);
+      if (isCurrent()) setBusy(false);
     }
   };
 
   const openConversation = async () => {
     if (busy) return;
+    const guard = operationGuard.current;
+    const token = guard.start();
+    const isCurrent = () => guard.isCurrent(token)
+      && connectionId.current === connection.connectionId;
     setBusy(true);
     setDisconnectError(null);
     try { await onConversationOpen?.(); }
-    catch (failure) { setDisconnectError(connectionErrorKey(failure?.code)); }
-    finally { setBusy(false); }
+    catch (failure) { if (isCurrent()) setDisconnectError(connectionErrorKey(failure?.code)); }
+    finally { if (isCurrent()) setBusy(false); }
   };
 
   return (
