@@ -114,3 +114,34 @@ const pendingDeadlineFacts = {
   }
 };
 export const pendingApprovalReadCopy = Object.fromEntries(Object.entries(pendingMessages).map(([language, messages]) => [language, { ...approvalReadCopy[language], ...messages, ...pendingDeadlineFacts[language] }]));
+
+const executionMessages = {
+  "zh": {
+    "loading": "正在读取审批执行记录…",
+    "denied": "你没有权限读取审批执行记录。",
+    "signedOut": "登录状态已失效，请重新登录后查看执行记录。",
+    "failed": "暂时无法读取执行列表，无法据此判断任何审批的执行结果。",
+    "empty": "当前筛选结果没有审批执行记录。",
+    "emptyPage": "这一页没有符合筛选条件的执行记录。",
+    "emptyWithNext": "这一页没有符合筛选条件的执行记录，可以继续查看下一页。"
+  },
+  "en": {
+    "loading": "Reading approval execution records…",
+    "denied": "You do not have access to read approval execution records.",
+    "signedOut": "Your sign-in has expired. Sign in again to view execution records.",
+    "failed": "The execution list could not be loaded. This does not tell you whether any approval executed successfully.",
+    "empty": "No approval execution records match these filters.",
+    "emptyPage": "No execution records on this page match these filters.",
+    "emptyWithNext": "No execution records on this page match these filters. You can continue to the next page."
+  },
+  "ja": {
+    "loading": "承認の実行記録を読み込み中…",
+    "denied": "承認の実行記録を表示する権限がありません。",
+    "signedOut": "ログインの有効期限が切れました。再度ログインして実行記録を確認してください。",
+    "failed": "実行一覧を取得できませんでした。このエラーから各承認の実行結果は判断できません。",
+    "empty": "この条件に一致する実行記録はありません。",
+    "emptyPage": "このページに条件と一致する実行記録はありません。",
+    "emptyWithNext": "このページに条件と一致する実行記録はありません。次のページを確認できます。"
+  }
+};
+export const executionApprovalReadCopy = Object.fromEntries(Object.entries(executionMessages).map(([language, messages]) => [language, { ...approvalReadCopy[language], ...messages }]));
