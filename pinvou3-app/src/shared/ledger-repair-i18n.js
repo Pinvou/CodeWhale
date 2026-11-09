@@ -761,3 +761,94 @@ ledgerRepairCopy.ja.refundRelation = {
   "pending": "前回の承認リクエストの結果を確認中です。",
   "waiting": "スナップショットを取得して現在の参照を照合してください。"
 };
+
+ledgerRepairCopy.zh.refundImpact = {
+  "title": "拟议账务影响",
+  "gate": "当前只核对快照。提交的是审批请求，处理进度以审批详情为准。",
+  "missing": "此快照未提供",
+  "unit": "积分",
+  "amount": "最小货币单位",
+  "ref": "审批请求",
+  "state": "审批状态",
+  "unknown": "请查看审批详情",
+  "states": {
+    "SUBMITTED": "已提交，待审批",
+    "APPROVED": "已批准，待执行",
+    "EXECUTING": "正在执行",
+    "EXECUTED": "执行完成",
+    "EXECUTION_FAILED": "执行失败"
+  },
+  "scenario": "适用于渠道退款已完成、本地账务待冲回的异常。此操作用于补记本地冲回，不会再次发起渠道退款。",
+  "fields": [
+    "渠道退款金额",
+    "应冲回积分",
+    "可收回积分",
+    "缺口积分",
+    "目标钱包",
+    "权益包",
+    "订单已付金额",
+    "累计已退金额",
+    "币种",
+    "渠道实时状态"
+  ]
+};
+ledgerRepairCopy.en.refundImpact = {
+  "title": "Proposed ledger impact",
+  "gate": "This is a snapshot. Submission starts an approval request; check its details for processing status.",
+  "missing": "Not provided in this snapshot",
+  "unit": "points",
+  "amount": "minor currency units",
+  "ref": "Approval request",
+  "state": "Approval status",
+  "unknown": "See approval details",
+  "states": {
+    "SUBMITTED": "Submitted, awaiting approval",
+    "APPROVED": "Approved, awaiting execution",
+    "EXECUTING": "Executing",
+    "EXECUTED": "Execution complete",
+    "EXECUTION_FAILED": "Execution failed"
+  },
+  "scenario": "Use this when the provider has refunded the payment and the local ledger still needs a reversal. This records a local reversal without requesting another provider refund.",
+  "fields": [
+    "Provider refund amount",
+    "Points to reverse",
+    "Recoverable points",
+    "Points shortfall",
+    "Destination wallet",
+    "Entitlement package",
+    "Order amount paid",
+    "Total refunded",
+    "Currency",
+    "Live provider status"
+  ]
+};
+ledgerRepairCopy.ja.refundImpact = {
+  "title": "予定される台帳への影響",
+  "gate": "これはスナップショットです。送信すると承認申請が開始されます。進捗は申請の詳細で確認してください。",
+  "missing": "このスナップショットにはありません",
+  "unit": "ポイント",
+  "amount": "通貨の最小単位",
+  "ref": "承認申請",
+  "state": "承認状況",
+  "unknown": "承認申請の詳細を確認",
+  "states": {
+    "SUBMITTED": "送信済み・承認待ち",
+    "APPROVED": "承認済み・実行待ち",
+    "EXECUTING": "実行中",
+    "EXECUTED": "実行完了",
+    "EXECUTION_FAILED": "実行失敗"
+  },
+  "scenario": "決済事業者による返金が完了し、ローカル台帳で取消処理が残っている場合に使用します。決済事業者に再度返金を依頼することはありません。",
+  "fields": [
+    "事業者の返金額",
+    "取消対象ポイント",
+    "回収可能なポイント",
+    "不足ポイント",
+    "対象ウォレット",
+    "権益パッケージ",
+    "注文の支払済額",
+    "返金累計",
+    "通貨",
+    "事業者の現在の状態"
+  ]
+};
