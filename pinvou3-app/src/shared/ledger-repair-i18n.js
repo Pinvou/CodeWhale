@@ -941,3 +941,76 @@ ledgerRepairCopy.ja.chargebackRelation = {
   "pending": "前回の承認リクエストの結果を確認中です。",
   "waiting": "スナップショットを取得して現在の参照を照合してください。"
 };
+
+ledgerRepairCopy.zh.chargebackImpact = {
+  "title": "拟议账务影响",
+  "gate": "当前只核对快照。提交的是审批请求，处理进度以审批详情为准。",
+  "missing": "此快照未提供",
+  "unit": "积分",
+  "amount": "最小货币单位",
+  "ref": "审批请求",
+  "state": "审批状态",
+  "unknown": "请查看审批详情",
+  "states": {
+    "SUBMITTED": "已提交，待审批",
+    "APPROVED": "已批准，待执行",
+    "EXECUTING": "正在执行",
+    "EXECUTED": "执行完成",
+    "EXECUTION_FAILED": "执行失败"
+  },
+  "scenario": "适用于已经确认的拒付，用于处理本地账务的基础积分缺口。此操作不会登记新拒付或代渠道申诉。",
+  "fields": [
+    "基础积分缺口",
+    "目标钱包",
+    "权益包",
+    "渠道拒付金额"
+  ]
+};
+ledgerRepairCopy.en.chargebackImpact = {
+  "title": "Proposed ledger impact",
+  "gate": "This is a snapshot. Submission starts an approval request; check its details for processing status.",
+  "missing": "Not provided in this snapshot",
+  "unit": "points",
+  "amount": "minor currency units",
+  "ref": "Approval request",
+  "state": "Approval status",
+  "unknown": "See approval details",
+  "states": {
+    "SUBMITTED": "Submitted, awaiting approval",
+    "APPROVED": "Approved, awaiting execution",
+    "EXECUTING": "Executing",
+    "EXECUTED": "Execution complete",
+    "EXECUTION_FAILED": "Execution failed"
+  },
+  "scenario": "Use this for an already confirmed chargeback to address the base points shortfall in the local ledger. It does not open a new chargeback or dispute it with the provider.",
+  "fields": [
+    "Base points shortfall",
+    "Destination wallet",
+    "Entitlement package",
+    "Provider chargeback amount"
+  ]
+};
+ledgerRepairCopy.ja.chargebackImpact = {
+  "title": "予定される台帳への影響",
+  "gate": "これはスナップショットです。送信すると承認申請が開始されます。進捗は申請の詳細で確認してください。",
+  "missing": "このスナップショットにはありません",
+  "unit": "ポイント",
+  "amount": "通貨の最小単位",
+  "ref": "承認申請",
+  "state": "承認状況",
+  "unknown": "承認申請の詳細を確認",
+  "states": {
+    "SUBMITTED": "送信済み・承認待ち",
+    "APPROVED": "承認済み・実行待ち",
+    "EXECUTING": "実行中",
+    "EXECUTED": "実行完了",
+    "EXECUTION_FAILED": "実行失敗"
+  },
+  "scenario": "確認済みのチャージバックによるローカル台帳の基本ポイント不足を処理します。新規の登録や決済事業者への異議申立ては行いません。",
+  "fields": [
+    "基本ポイントの不足",
+    "対象ウォレット",
+    "権益パッケージ",
+    "事業者のチャージバック額"
+  ]
+};
