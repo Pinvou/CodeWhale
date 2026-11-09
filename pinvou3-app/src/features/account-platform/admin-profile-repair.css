@@ -12,3 +12,12 @@
 .adm-profile-repair-detail dl>div{min-width:0}
 .adm-profile-repair-detail dt{color:var(--adm-muted)}
 .adm-profile-repair-detail dd{margin:2px 0 0;overflow-wrap:break-word;overflow-wrap:anywhere}
+
+.adm-profile-repair-filters{display:grid;grid-template-columns:minmax(0,1.2fr) minmax(0,1fr) auto;align-items:end;gap:10px;margin:14px 0}
+.adm-profile-repair-filters label{display:grid;gap:5px;min-width:0;color:var(--adm-muted)}
+.adm-profile-repair-filters input,.adm-profile-repair-filters select{box-sizing:border-box;min-height:38px;max-width:100%;padding:0 10px;background:var(--adm-surface);color:var(--adm-text);border:1px solid var(--adm-line);border-radius:8px}
+.adm-profile-repair-filters :focus,.adm-profile-repair-empty button:focus{outline:3px solid var(--adm-primary);outline-offset:2px}
+.adm-profile-repair-scope{color:var(--adm-muted);overflow-wrap:break-word;overflow-wrap:anywhere}
+.adm-profile-repair-empty{display:grid;justify-items:start;gap:9px;margin-top:12px;padding:12px 14px;background:var(--adm-soft);border:1px solid var(--adm-line);border-radius:10px}
+.adm-profile-repair-empty p{margin:0}
+@media(max-width:520px){.adm-profile-repair-filters{display:grid;grid-template-columns:minmax(0,1fr)}.adm-profile-repair-filters input,.adm-profile-repair-filters select{width:100%}}
