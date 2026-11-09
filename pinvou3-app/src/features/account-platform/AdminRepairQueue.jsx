@@ -20,9 +20,28 @@ function draftMinutes(raw, unit) {
   return minutes % scale === 0n ? String(minutes / scale) : null;
 }
 
+function RegistrationEvidence({ item, labels, queryCopy, id }) {
+  const timestamp = value => typeof value === 'string' && Number.isFinite(Date.parse(value)) && !value.startsWith('0001-') ? <time dateTime={value}>{time(value)}</time> : queryCopy.notReported;
+  // Only show a diagnostic token already supplied by this authorized collection.
+  const reason = typeof item.reason === 'string' && /^[A-Z][A-Z0-9_]{1,95}$/.test(item.reason) ? <code>{item.reason}</code> : queryCopy.notReported;
+  return <details className="adm-registration-row-evidence"><summary aria-label={queryCopy.details + ' · ' + id}>{queryCopy.details}</summary>
+    <dl><div><dt>{labels.createdAt}</dt><dd>{timestamp(item.created_at)}</dd></div>
+      <div><dt>{labels.updatedAt}</dt><dd>{timestamp(item.updated_at)}</dd></div>
+      <div><dt>{labels.attemptAt}</dt><dd>{timestamp(item.identity_create_attempted_at)}</dd></div>
+      <div><dt>{queryCopy.attempts}</dt><dd>{Number.isSafeInteger(item.attempts) && item.attempts >= 0 ? item.attempts : queryCopy.notReported}</dd></div>
+      <div><dt>{queryCopy.lastError}</dt><dd>{reason}</dd></div>
+    </dl>
+  </details>;
+}
+
+function RegistrationQueueTime({ value, queryCopy }) {
+  return typeof value === 'string' && Number.isFinite(Date.parse(value)) && !value.startsWith('0001-') ? <time dateTime={value}>{time(value)}</time> : queryCopy.notReported;
+}
+
 export function AdminRepairQueue({ client, copy, language, profile = false }) {
   const labels = registrationRepairCopy[language], queryCopy = registrationQueueCopy[language];
   const [items, setItems] = useState(null);
+  const [receivedAt, setReceivedAt] = useState(null);
   const [filters, setFilters] = useState(initialFilters);
   const [unit, setUnit] = useState('minutes');
   const adopted = useRef({}), readController = useRef(null);
@@ -40,7 +59,7 @@ export function AdminRepairQueue({ client, copy, language, profile = false }) {
       const result = await (profile ? client.profileChangeRepairs() : client.registrationRepairs(requestFilters, controller.signal));
       if (request !== generation.current) return;
       if (!Array.isArray(result?.items)) throw new Error('INVALID_REPAIR_COLLECTION');
-      if (!profile) adopted.current = requestFilters;
+      if (!profile) { adopted.current = requestFilters; setReceivedAt(Date.now()); }
       setItems(result.items);
     } catch (reason) {
       if (request === generation.current) {
@@ -100,13 +119,14 @@ export function AdminRepairQueue({ client, copy, language, profile = false }) {
     {!profile && items && <p className="adm-registration-filter-scope">{queryCopy.applied}: {appliedLabels.length ? appliedLabels.join(' · ') : queryCopy.unfiltered}</p>}
     {error && <div role="alert">{error.filter ? queryCopy[error.filter] : error}</div>}{busy && <p role="status">{copy.loading}</p>}
     {/* biome-ignore lint/a11y/noNoninteractiveTabindex: The read-only wide table needs keyboard access to native horizontal scrolling. */}
-    {items && <div className="adm-table-wrap" tabIndex="0" role="region" aria-label={profile ? copy.userManagement.profileRepair : copy.userManagement.registrationRepair}><table><thead><tr><th>{copy.userManagement.operation}</th><th>{copy.accounts.status}</th>{!profile && <><th>{labels.responsibility}</th><th>{labels.age}</th><th>{labels.createdAt}</th><th>{labels.updatedAt}</th><th>{labels.attemptAt}</th><th>{labels.nextRetryAt}</th><th>{labels.sla}</th></>}<th>{copy.accounts.actions}</th></tr></thead><tbody>{items.map(item => {
+    {items && <div className={profile ? "adm-table-wrap" : "adm-table-wrap adm-registration-table"} tabIndex="0" role="region" aria-label={profile ? copy.userManagement.profileRepair : copy.userManagement.registrationRepair}><table><thead><tr><th>{copy.userManagement.operation}</th><th>{copy.accounts.status}</th>{!profile && <><th>{labels.responsibility}</th><th>{queryCopy.sinceUpdate}<small>{queryCopy.sinceUpdateHelp}</small></th><th>{labels.nextRetryAt}</th><th>{labels.sla}</th></>}<th>{copy.accounts.actions}</th></tr></thead><tbody>{items.map(item => {
       const id = profile ? item.profile_change_request_id : item.registration_operation_id;
       const allowed = profile ? { retry: true, compensate: false } : registrationRepairActions(item);
-      const age = registrationOperationAge(item.created_at);
-      return <tr key={id} data-operation-id={id} data-operation-status={item.status}><td><code>{id}</code><small>{profile ? item.stage : labels.stages[item.stage] || item.stage}</small></td><td>{profile ? item.status : labels.statuses[item.status] || item.status}{item.reason && <small>{item.reason}</small>}</td>
-        {!profile && <><td>{labels.responsibilities[item.responsibility] || item.responsibility}</td><td>{age === null ? '—' : labels.minutes(age)}</td><td><time dateTime={item.created_at}>{time(item.created_at)}</time></td><td><time dateTime={item.updated_at}>{time(item.updated_at)}</time></td><td><time dateTime={item.identity_create_attempted_at}>{time(item.identity_create_attempted_at)}</time></td><td><time dateTime={item.next_retry_at}>{time(item.next_retry_at)}</time></td><td><time dateTime={item.sla_expires_at}>{time(item.sla_expires_at)}</time></td></>}
-        <td>{allowed.retry && <button disabled={busy} onClick={() => void act(item)}>{allowed.query ? labels.stages.IDENTITY_CREATING : copy.userManagement.retry}</button>}{allowed.compensate && <button disabled={busy} onClick={() => void act(item, true)}>{copy.userManagement.compensate}</button>}{!profile && (allowed.query || (!allowed.retry && !allowed.compensate)) && <small>{item.status === 'IDENTITY_CREATING' ? labels.identityUnknown : labels.readOnly}</small>}</td></tr>;
+      const age = !profile && receivedAt !== null && typeof item.updated_at === 'string' && !item.updated_at.startsWith('0001-')
+        ? registrationOperationAge(item.updated_at, receivedAt) : null;
+      return <tr key={id} data-operation-id={id} data-operation-status={item.status}><td><code>{id}</code><small>{profile ? item.stage : labels.stages[item.stage] || item.stage}</small></td><td>{profile ? item.status : labels.statuses[item.status] || item.status}{profile && item.reason && <small>{item.reason}</small>}</td>
+        {!profile && <><td>{labels.responsibilities[item.responsibility] || item.responsibility}</td><td>{age === null ? queryCopy.notReported : labels.minutes(age)}</td><td><RegistrationQueueTime value={item.next_retry_at} queryCopy={queryCopy} /></td><td><RegistrationQueueTime value={item.sla_expires_at} queryCopy={queryCopy} /></td></>}
+        <td>{allowed.retry && <button disabled={busy} onClick={() => void act(item)}>{allowed.query ? labels.stages.IDENTITY_CREATING : copy.userManagement.retry}</button>}{allowed.compensate && <button disabled={busy} onClick={() => void act(item, true)}>{copy.userManagement.compensate}</button>}{!profile && (allowed.query || (!allowed.retry && !allowed.compensate)) && <small>{item.status === 'IDENTITY_CREATING' ? labels.identityUnknown : labels.readOnly}</small>}{!profile && <RegistrationEvidence {...{ item, labels, queryCopy, id }} />}</td></tr>;
     })}</tbody></table></div>}
     {items?.length === 0 && <p>{copy.noData}</p>}
   </section>;
