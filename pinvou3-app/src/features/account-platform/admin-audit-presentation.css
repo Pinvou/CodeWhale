@@ -1,1 +1,6 @@
 .adm-audit-export-privacy{display:grid;gap:4px;min-width:0}.adm-audit-export-privacy small{color:var(--adm-muted);line-height:1.5;overflow-wrap:break-word;overflow-wrap:anywhere}
+
+.adm-audit-export-limits{display:flex;flex-wrap:wrap;gap:8px 16px;margin:8px 0;padding:10px 12px;border:1px solid var(--adm-line);border-radius:10px;background:var(--adm-soft)}
+.adm-audit-export-limits dt{font-size:12px;color:var(--adm-muted)}.adm-audit-export-limits dd{margin:4px 0 0}
+.adm-audit-export-confirm dd code{white-space:pre-wrap;overflow-wrap:break-word;overflow-wrap:anywhere}.adm-audit-export-confirm footer{display:flex;justify-content:flex-end;gap:8px;flex-wrap:wrap;margin-top:12px}
+.adm-audit-export-confirm .adm-audit-confirm-submit{border-color:var(--adm-primary);background:var(--adm-primary);color:#fff}

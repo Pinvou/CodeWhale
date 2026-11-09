@@ -1,5 +1,5 @@
-import React, {useEffect,useId,useRef,useState} from 'react';
-import { auditPrivacyCopy } from '../../shared/i18n.js';
+import React, {useCallback,useEffect,useId,useRef,useState} from 'react';
+import { auditPrivacyCopy, auditExportPresentation } from '../../shared/i18n.js';
 import './admin-audit-presentation.css';
 import {secureRequestID} from './request-id.js';
 import {acquireAuditExportTicket,newAuditExportAttempt,submitAuditExportAttempt} from './admin-audit-export.js';
@@ -90,7 +90,7 @@ function SectionHeader({ title, count, copy, children }) {
   );
 }
 
-function DetailDrawer({ label, onClose, children }) {
+function DetailDrawer({ label, onClose, children, describedBy, role = 'dialog' }) {
   const drawerRef = useRef(null);
   useEffect(() => {
     const previousFocus = document.activeElement;
@@ -124,11 +124,33 @@ function DetailDrawer({ label, onClose, children }) {
   };
   return (
     <div className="adm-drawer-backdrop" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
-      <aside ref={drawerRef} className="adm-detail-drawer" role="dialog" aria-modal="true" aria-label={label} tabIndex="-1" onKeyDown={trapFocus}>
+      <aside ref={drawerRef} className="adm-detail-drawer" role={role} aria-modal="true" aria-label={label} aria-describedby={describedBy} tabIndex="-1" onKeyDown={trapFocus}>
         {children}
       </aside>
     </div>
   );
+}
+
+function ExportLimits({ words }) {
+  return <dl className="adm-audit-export-limits">{words.limits.map(([label,value]) => <div key={label}><dt>{label}</dt><dd>{value}</dd></div>)}</dl>;
+}
+
+function AuditExportConfirmation({ snapshot, words, copy, onClose, onConfirm, disabled }) {
+  const descriptionID = useId(), { attempt, timeZone } = snapshot;
+  const labels = { actor: copy.audit.actor, action: copy.audit.action, resource: copy.audit.resource, result: copy.audit.result, from: copy.audit.from, to: copy.audit.to };
+  return <DetailDrawer label={words.confirmTitle} role="alertdialog" describedBy={descriptionID} onClose={onClose}>
+    <section className="adm-panel adm-audit-export-confirm">
+      <h3>{words.confirmTitle}</h3><p id={descriptionID}>{words.confirmLead}</p>
+      <dl className="adm-detail-list">
+        {Object.entries(labels).map(([key,label]) => <div key={key}><dt>{label}</dt><dd>{!attempt.filter[key] ? words.all : key === 'from' || key === 'to' ? <time dateTime={attempt.filter[key]}>{attempt.filter[key]}</time> : <code>{attempt.filter[key]}</code>}</dd></div>)}
+        <div><dt>{words.timeZone}</dt><dd>{timeZone || words.zoneUnavailable}</dd></div>
+        <div><dt>{words.privacy}</dt><dd>{attempt.includePII ? words.unredacted : words.redacted}</dd></div>
+        <div><dt>{words.reason}</dt><dd>{attempt.reason}</dd></div>
+      </dl>
+      <ExportLimits words={words} />
+      <footer><button type="button" onClick={onClose}>{words.cancel}</button><button type="button" className="adm-audit-confirm-submit" disabled={disabled} onClick={onConfirm}>{words.confirmSubmit}</button></footer>
+    </section>
+  </DetailDrawer>;
 }
 
 function restoredFilters(filter) {
@@ -161,6 +183,10 @@ function Audit({ copy, data, client, setData, permissions, currentUserID, langua
   const [error, setError] = useState('');
   const [includePII, setIncludePII] = useState(recoveredInput?.includePII || false);
   const [exportJob, setExportJob] = useState(null);
+  const [exportConfirmation, setExportConfirmation] = useState(null), exportConfirmationRef = useRef(null);
+  const closeExportConfirmation = useCallback(() => { exportConfirmationRef.current = null; setExportConfirmation(null); }, []);
+  const confirmationEpoch = client.financeSessionEpoch || 0;
+  useEffect(() => { closeExportConfirmation(); }, [client, currentUserID, confirmationEpoch, closeExportConfirmation]);
   const [exportKey, setExportKey] = useState('');
   const [exportReason, setExportReason] = useState(recoveredInput?.reason || '');
   const [exportAttempted, setExportAttempted] = useState(Boolean(recovery.record?.attempt));
@@ -174,6 +200,7 @@ function Audit({ copy, data, client, setData, permissions, currentUserID, langua
   const canExport = (permissions || []).includes('platform.audit.export');
   const canExportPII = (permissions || []).includes('platform.audit.pii.export');
   const privacyID = useId(), privacyWords = auditPrivacyCopy[language];
+  const exportWords = auditExportPresentation[language];
   const items = data.audits || [];
   const observeRecoveryError = cause => {
     if (cause?.status === 401 || cause?.code === 'RECENT_AUTHENTICATION_REQUIRED') setNeedsAuthentication(true);
@@ -223,18 +250,29 @@ function Audit({ copy, data, client, setData, permissions, currentUserID, langua
       if (liveRef.current) setBusy(false);
     }
   };
+  const prepareExport = () => {
+    if (!canExport || busy || recoveryBlocked || exportJob || exportConfirmationRef.current) return;
+    if (exportAttemptRef.current) { void createExport(); return; }
+    if (includePII && !canExportPII) { setError(copy.permissionDenied); return; }
+    let filter;
+    try { filter = queryFilters(); } catch { setError(copy.audit.exportRequestInvalid); return; }
+    if (!filter.from || !filter.to) { setError(copy.audit.exportRangeRequired); return; }
+    let attempt;
+    try { attempt = newAuditExportAttempt(filter, exportReason, includePII, `audit-export-${secureRequestID()}`); }
+    catch { setError(copy.audit.exportRequestInvalid); return; }
+    let timeZone;
+    try { timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone; } catch { /* UTC wire values remain visible. */ }
+    const snapshot = { client, actor: currentUserID, epoch: confirmationEpoch, attempt, timeZone };
+    exportConfirmationRef.current = snapshot; setExportConfirmation(snapshot); setError('');
+  };
+  const confirmExport = snapshot => {
+    if (exportConfirmationRef.current !== snapshot || snapshot.client !== client || snapshot.actor !== currentUserID || snapshot.epoch !== (client.financeSessionEpoch || 0) ||
+        !canExport || snapshot.attempt.includePII && !canExportPII || busy || recoveryBlocked || exportJob || exportAttemptRef.current) return;
+    closeExportConfirmation();
+    exportAttemptRef.current = snapshot.attempt; setExportAttempted(true); void createExport();
+  };
   const createExport = async () => {
-    if (recoveryBlocked) return;
-    if (!exportAttemptRef.current) {
-      let filter;
-      try { filter = queryFilters(); } catch { setError(copy.audit.exportRequestInvalid); return; }
-      if (!filter.from || !filter.to) { setError(copy.audit.exportRangeRequired); return; }
-      try {
-        exportAttemptRef.current = newAuditExportAttempt(filter, exportReason, includePII,
-          `audit-export-${secureRequestID()}`);
-      } catch { setError(copy.audit.exportRequestInvalid); return; }
-      setExportAttempted(true);
-    }
+    if (recoveryBlocked || !exportAttemptRef.current) return;
     setBusy(true);
     setError('');
     try {
@@ -357,6 +395,7 @@ function Audit({ copy, data, client, setData, permissions, currentUserID, langua
     }
   };
   if (detail) return <AuditDetail copy={copy} item={detail} onBack={() => setDetail(null)} />;
+  const ticketExpiry = exportJob?.download_expires_at || exportTicketRef.current?.expires_at;
   const columns = [
     {
       key: 'action',
@@ -468,24 +507,28 @@ function Audit({ copy, data, client, setData, permissions, currentUserID, langua
         </label>
         <button disabled={busy || !canRead}>{copy.searchAction}</button></fieldset>
       </form>
-      <p>{copy.audit.exportLimits}</p>
+      {canExport && <ExportLimits words={exportWords} />}
       {recoveryPending && <p role="status">{copy.audit.recoveryReady}</p>}
       {recoveryBlocked && <p role="alert">{copy.audit.recoveryUnavailable}</p>}
       {(needsAuthentication || recoveryBlocked) && <div><p>{copy.audit.reauthenticateHelp}</p><button type="button" disabled={busy} onClick={() => void reauthenticate()}>{copy.audit.reauthenticate}</button></div>}
-      {canExport && <form className="adm-ops-form" onSubmit={(event) => { event.preventDefault(); void createExport(); }}>
+      {canExport && <form className="adm-ops-form" onSubmit={(event) => { event.preventDefault(); prepareExport(); }}>
         <label>{copy.audit.exportReason}<input value={exportReason} minLength="10" disabled={recoveryBlocked || exportAttempted || busy || Boolean(exportJob)} onChange={(event) => setExportReason(event.target.value)} required /></label>
         <div className="adm-audit-export-privacy">
           <label className="adm-checkbox-field"><input type="checkbox" checked={includePII} aria-describedby={privacyID} disabled={recoveryBlocked || !canExportPII || exportAttempted || busy || Boolean(exportJob)} onChange={(event) => setIncludePII(event.target.checked)} />{privacyWords.includeUnredacted}</label>
           <small id={privacyID}>{privacyWords.defaultRedacted} {privacyWords.recentAuth} {!canExportPII && (includePII ? privacyWords.savedSelectionUnavailable : privacyWords.permissionUnavailable)}</small>
         </div>
-        <button type="submit" disabled={recoveryBlocked || busy || Boolean(exportJob)}>{exportAttempted ? copy.audit.retryExport : copy.audit.export}</button>
-        {exportAttempted && !exportJob && <small role="status">{copy.audit.retrySameExport}</small>}
+        <button type="submit" disabled={recoveryBlocked || busy || Boolean(exportJob)}>{exportAttempted ? copy.audit.retryExport : exportWords.reviewButton}</button>
+        {exportAttempted && !exportJob && <small role="status">{busy ? exportWords.submitting : exportOutcomeUnknownRef.current ? exportWords.unknown : copy.audit.retrySameExport}</small>}
       </form>}
+      {exportConfirmation && exportConfirmation.client === client && exportConfirmation.actor === currentUserID && exportConfirmation.epoch === confirmationEpoch && canExport &&
+        <AuditExportConfirmation snapshot={exportConfirmation} words={exportWords} copy={copy} onClose={closeExportConfirmation}
+          onConfirm={() => confirmExport(exportConfirmation)} disabled={busy || recoveryBlocked || exportConfirmation.attempt.includePII && !canExportPII} />}
       {exportJob && (
         <div className="adm-inline-message">
           <strong>
-            {copy.audit.exportStatus}: {exportJob.status}
+            {copy.audit.exportStatus}: {exportWords.status[exportJob.status] || exportWords.statusUnknown}
           </strong>
+          {typeof ticketExpiry === 'string' && Number.isFinite(Date.parse(ticketExpiry)) && <p>{exportWords.ticketExpiry}: <time dateTime={ticketExpiry}>{formatDate(ticketExpiry)}</time></p>}
           {exportKey && (
             <>
               <br />
