@@ -584,3 +584,14 @@
 .adm-restored-shell .adm-token-account-list .adm-token-account-identity strong{font-weight:650}
 .adm-restored-shell .adm-token-account-list .adm-token-account-identity small{color:var(--adm-muted);font-size:12px}
 .adm-restored-shell .adm-token-account-list .adm-identifier-copy:focus{outline:3px solid var(--adm-primary);outline-offset:2px}
+
+/* Only the token account recovery queue uses compact search and empty states. */
+.adm-restored-shell .adm-token-recovery-queue .adm-token-recovery-search{margin:12px 16px;border:1px solid var(--adm-line);border-radius:10px;background:var(--adm-surface)}
+.adm-restored-shell .adm-token-recovery-search>summary{min-height:44px;padding:11px 12px;font-weight:650;cursor:pointer}
+.adm-restored-shell .adm-token-recovery-search form{display:grid;grid-template-columns:minmax(0,1fr) auto auto;gap:8px;margin:0;border:0;padding:0 12px 12px;background:var(--adm-surface)}
+.adm-restored-shell .adm-token-recovery-search form p{grid-column:1/-1;margin:0;color:var(--adm-muted);font-size:12px}
+.adm-restored-shell .adm-token-recovery-current{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:8px;margin:12px 16px;color:var(--adm-muted)}
+.adm-restored-shell .adm-token-recovery-current code{overflow-wrap:break-word;word-break:break-all}
+.adm-restored-shell .adm-token-recovery-state{padding:12px 16px;color:var(--adm-muted);line-height:1.45}
+.adm-restored-shell .adm-token-recovery-queue :is(summary,button,input):focus{outline:3px solid var(--adm-primary);outline-offset:2px}
+@media(max-width:480px){.adm-restored-shell .adm-token-recovery-search form,.adm-restored-shell .adm-token-recovery-current{grid-template-columns:minmax(0,1fr)}}
