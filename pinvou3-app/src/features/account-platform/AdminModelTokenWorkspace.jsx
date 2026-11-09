@@ -98,7 +98,7 @@ function ModelDirectory({ client, copy, permissions, actionsEnabled, detailsEnab
   );
 }
 
-export function AdminModelTokenWorkspace({ owner, section, copy, client, permissions, routeVersion, onRouteChange, onNavigate, routeNotice, tokenResourceFormsEnabled = false, modelOperationsDetailsEnabled = false, modelOperationsOverviewEnabled = false, modelTokenPageOverviewsEnabled = false, overviewUserID = '', overviewAuthorizationVersion = 0, modelDetailsEnabled = false, modelPricingEditEnabled = false, tokenDetailsEnabled = false, credentialOrigin = '', modelTokenActionsEnabled = false }) {
+export function AdminModelTokenWorkspace({ owner, section, copy, language = 'zh', client, permissions, routeVersion, onRouteChange, onNavigate, routeNotice, tokenResourceFormsEnabled = false, modelOperationsDetailsEnabled = false, modelOperationsOverviewEnabled = false, modelTokenPageOverviewsEnabled = false, overviewUserID = '', overviewAuthorizationVersion = 0, modelDetailsEnabled = false, modelPricingEditEnabled = false, tokenDetailsEnabled = false, credentialOrigin = '', modelTokenActionsEnabled = false }) {
   const modelTokenCopy = copy.modelToken;
   const granted = new Set(permissions || []);
   const cursorHistory = useRef({});
@@ -131,6 +131,6 @@ export function AdminModelTokenWorkspace({ owner, section, copy, client, permiss
 			{modelTabs.tab === 'protocols' && granted.has('platform.pricing.read') && <div role="tabpanel" id="model-panel-protocols" aria-labelledby="model-tab-protocols"><AdminProtocolFormulaWorkspace client={client} copy={modelTokenCopy} canManage={modelTokenActionsEnabled && granted.has('platform.pricing.manage')} routeVersion={routeVersion} onRouteChange={onRouteChange} cursorHistory={cursorHistory} /></div>}
     </>}
 		{section === 'tokenResources' && tokenDetailsEnabled && tokenAccountID && granted.has('platform.tokens.read') && <AdminTokenAccountDetailWorkspace accountID={tokenAccountID} client={client} copy={modelTokenCopy} permissions={permissions} routeVersion={routeVersion} onRouteChange={onRouteChange} onQueryChange={onQueryChange} cursorHistory={cursorHistory} onTabsKeyDown={moveOperationsTab} actionsEnabled={modelTokenActionsEnabled} credentialOrigin={credentialOrigin} onNavigate={onNavigate} />}
-		{section === 'tokenResources' && (!tokenDetailsEnabled || !tokenAccountID) && <AdminTokenResourcesWorkspace client={client} copy={modelTokenCopy} permissions={permissions} formsEnabled={tokenResourceFormsEnabled} actionsEnabled={modelTokenActionsEnabled} detailsEnabled={tokenDetailsEnabled} routeVersion={routeVersion} onQueryChange={onQueryChange} onRouteChange={onRouteChange} histories={cursorHistory} />}
+		{section === 'tokenResources' && (!tokenDetailsEnabled || !tokenAccountID) && <AdminTokenResourcesWorkspace client={client} copy={modelTokenCopy} language={language} owner={owner} authorizationVersion={overviewAuthorizationVersion} permissions={permissions} formsEnabled={tokenResourceFormsEnabled} actionsEnabled={modelTokenActionsEnabled} detailsEnabled={tokenDetailsEnabled} routeVersion={routeVersion} onQueryChange={onQueryChange} onRouteChange={onRouteChange} histories={cursorHistory} />}
   </>;
 }
