@@ -286,3 +286,62 @@ Object.assign(tokenManagementCopy.ja.modelToken, {
   "tokenAccountViewCredentials": "このアカウントの認証情報を表示",
   "tokenAccountViewRoutes": "このアカウントのルートを表示"
 });
+
+Object.assign(tokenManagementCopy.zh.modelToken, {
+  "tokenAccountPolicyHint": "共享政策只说明适用范围，不能确认某个成员的权限或当前是否可调用。",
+  "tokenAccountPersonalPolicy": "个人账户按个人所有者核对，不以组织共享政策判断调用权限。",
+  "tokenAccountPolicyCode": "查看政策代码",
+  "tokenAccountSnapshotStale": "当前显示上次已读取的快照，本次刷新尚未确认。"
+});
+Object.assign(tokenManagementCopy.en.modelToken, {
+  "tokenAccountPolicyHint": "The sharing policy describes its scope. It does not verify a member’s permissions or current call eligibility.",
+  "tokenAccountPersonalPolicy": "Personal accounts use the individual owner. Organization sharing policy does not determine call eligibility for these accounts.",
+  "tokenAccountPolicyCode": "View policy code",
+  "tokenAccountSnapshotStale": "Showing the last loaded snapshot. This refresh has not confirmed current data."
+});
+Object.assign(tokenManagementCopy.ja.modelToken, {
+  "tokenAccountPolicyHint": "共有ポリシーは適用範囲を示します。個々のメンバーの権限や現在の呼び出し可否は確認できません。",
+  "tokenAccountPersonalPolicy": "個人アカウントは個人の所有者で確認します。組織の共有ポリシーでは呼び出し可否を判断できません。",
+  "tokenAccountPolicyCode": "ポリシーコードを表示",
+  "tokenAccountSnapshotStale": "最後に取得したスナップショットを表示しています。今回の更新では現在のデータを確認できていません。"
+});
+
+Object.assign(tokenManagementCopy.zh.modelToken, {
+  "tokenResourceOwnerID": "所有者 ID",
+  "tokenResourceOrgID": "所属组织 ID",
+  "tokenResourceUnitID": "所属单元 ID",
+  "tokenResourceScopeLabels": {
+    "ORG_ALL": "组织全部成员",
+    "OWNER_UNIT_ONLY": "仅所属单元",
+    "OWNER_SUBTREE": "所属单元及其下级单元",
+    "EXPLICIT_MEMBERS": "指定成员"
+  },
+  "tokenResourceScopeUnknown": "共享政策未确认",
+  "tokenResourcePolicy": "共享政策"
+});
+Object.assign(tokenManagementCopy.en.modelToken, {
+  "tokenResourceOwnerID": "Owner ID",
+  "tokenResourceOrgID": "Owning organization ID",
+  "tokenResourceUnitID": "Owning unit ID",
+  "tokenResourceScopeLabels": {
+    "ORG_ALL": "All organization members",
+    "OWNER_UNIT_ONLY": "Owning unit only",
+    "OWNER_SUBTREE": "Owning unit and its subunits",
+    "EXPLICIT_MEMBERS": "Selected members"
+  },
+  "tokenResourceScopeUnknown": "Sharing policy not verified",
+  "tokenResourcePolicy": "Sharing policy"
+});
+Object.assign(tokenManagementCopy.ja.modelToken, {
+  "tokenResourceOwnerID": "所有者 ID",
+  "tokenResourceOrgID": "所属組織 ID",
+  "tokenResourceUnitID": "所属ユニット ID",
+  "tokenResourceScopeLabels": {
+    "ORG_ALL": "組織の全メンバー",
+    "OWNER_UNIT_ONLY": "所属ユニットのみ",
+    "OWNER_SUBTREE": "所属ユニットとその下位ユニット",
+    "EXPLICIT_MEMBERS": "指定メンバー"
+  },
+  "tokenResourceScopeUnknown": "共有ポリシーは未確認",
+  "tokenResourcePolicy": "共有ポリシー"
+});
