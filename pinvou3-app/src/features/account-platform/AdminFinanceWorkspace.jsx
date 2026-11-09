@@ -188,7 +188,7 @@ function Payments({ client, copy, language, permissions, owner, route }) {
 
 const defaultApprovalCommandTypes = approvalCommands;
 
-export function Approvals({ client, copy, permissions, owner, commandTypes = defaultApprovalCommandTypes, initialRequestID = '', requestID = initialRequestID, query = null, pendingUserID = null, onStateChange, onNavigate, centerCopy, mineReadCopy, mineApplyGeneration }) {
+export function Approvals({ client, copy, permissions, owner, commandTypes = defaultApprovalCommandTypes, initialRequestID = '', requestID = initialRequestID, query = null, pendingUserID = null, onStateChange, onNavigate, centerCopy, mineReadCopy, pendingReadCopy, mineApplyGeneration }) {
   const [items, setItems] = useState([]);
   const [page, setPage] = useState(null);
   const [cursor, setCursor] = useState('');
@@ -202,16 +202,17 @@ export function Approvals({ client, copy, permissions, owner, commandTypes = def
   const operation = useFinanceOperation(owner, { ...copy, unavailable: copy.approvalReadUnavailable || copy.unavailable }, client, 'approvals');
   const loadLegacy = async (next = cursor) => { const result = await operation.read(() => loadFinancePage({ ...query, cursor: next }, filters => client.governedApprovalRequests(filters), () => { setCursor(''); setPrevious([]); })); if (result) { const value = result.value; setPage(value); setCursor(result.query.cursor); setItems(requireFinanceCollection(value).filter(item => commandTypes.includes(item.command_type) && (!pendingUserID || approvalRequester(item) !== pendingUserID))); } };
   const queryKey = JSON.stringify(query);
-  const mine = Boolean(mineReadCopy);
+  const mine = Boolean(mineReadCopy), pending = Boolean(pendingReadCopy && pendingUserID);
+  const scopedRead = mine || pending, readCopy = mine ? mineReadCopy : pendingReadCopy;
   const mineEpoch = client.financeSessionEpoch || 0;
-  const mineScope = React.useMemo(() => ({ client, owner, queryKey, requestID, mine, epoch: mineEpoch }), [client, owner, queryKey, requestID, mine, mineEpoch]);
+  const mineScope = React.useMemo(() => ({ client, owner, queryKey, requestID, mine, pending, pendingUserID, epoch: mineEpoch }), [client, owner, queryKey, requestID, mine, pending, pendingUserID, mineEpoch]);
   const liveMineScope = React.useRef(mineScope);
   liveMineScope.current = mineScope;
-  const readState = mine && mineResult?.scope === mineScope ? mineResult : null;
-  const mineLoading = mine && (!readState || readState.phase === 'loading');
-  const busy = operation.busy || mineLoading;
+  const readState = scopedRead && mineResult?.scope === mineScope ? mineResult : null;
+  const scopedLoading = scopedRead && (!readState || readState.phase === 'loading');
+  const busy = operation.busy || scopedLoading;
   const load = async (next = cursor) => {
-    if (!mine) return loadLegacy(next);
+    if (!scopedRead) return loadLegacy(next);
     mineRequest.current?.controller.abort();
     const controller = new AbortController(), request = { scope: mineScope, controller };
     mineRequest.current = request;
@@ -225,9 +226,9 @@ export function Approvals({ client, copy, permissions, owner, commandTypes = def
         () => { attemptedCursor = ''; if (live()) { setCursor(''); setPrevious([]); } });
       if (!live()) return;
       const list = requireFinanceCollection(result.value);
-      if (!query?.requester_user_id || list.some(item => approvalRequester(item) !== query.requester_user_id)) throw new Error('INVALID_APPROVAL_COLLECTION');
+      if (mine && (!query?.requester_user_id || list.some(item => approvalRequester(item) !== query.requester_user_id))) throw new Error('INVALID_APPROVAL_COLLECTION');
       setPage(result.value); setCursor(result.query.cursor);
-      setItems(list.filter(item => commandTypes.includes(item.command_type)));
+      setItems(list.filter(item => commandTypes.includes(item.command_type) && (!pending || approvalRequester(item) !== pendingUserID)));
       const rawSnapshot = result.value.as_of;
       const snapshot = typeof rawSnapshot === 'string' && /^\d{4}-\d{2}-\d{2}T/.test(rawSnapshot) && /(?:Z|[+-]\d{2}:\d{2})$/.test(rawSnapshot) ? Date.parse(rawSnapshot) : NaN;
       setMineResult({ scope: mineScope, phase: 'ready', hasResult: true, acceptedTime: Number.isFinite(snapshot)
@@ -249,14 +250,14 @@ export function Approvals({ client, copy, permissions, owner, commandTypes = def
     // on retirement; the next child's effect installs its own current lock.
     return () => onStateChange?.(false);
   }, [onStateChange, busy, operation.unknown]);
-  useEffect(() => { let active = true; void (async () => { setDetail(null); setPage(null); setItems([]); setPrevious([]); const phase = await load(''); if (active && requestID && (!mine || phase === 'ready' || phase === 'failed')) await open(requestID); })(); return () => { active = false; if (mineRequest.current?.scope === mineScope) mineRequest.current.controller.abort(); }; }, [client, owner, requestID, queryKey, pendingUserID, mineScope]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { let active = true; void (async () => { setDetail(null); setPage(null); setItems([]); setPrevious([]); const phase = await load(''); if (active && requestID && (!scopedRead || phase === 'ready' || phase === 'failed')) await open(requestID); })(); return () => { active = false; if (mineRequest.current?.scope === mineScope) mineRequest.current.controller.abort(); }; }, [client, owner, requestID, queryKey, pendingUserID, mineScope]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
     const previousApply = lastMineApply.current;
     lastMineApply.current = { generation: mineApplyGeneration, scope: mineScope };
     if (!mine || previousApply?.scope !== mineScope || previousApply.generation === mineApplyGeneration) return;
     setPrevious([]); void load('');
   }, [mine, mineApplyGeneration, mineScope]); // eslint-disable-line react-hooks/exhaustive-deps
-  const open = async id => { const value = await operation.read(async () => { const value = await client.governedApprovalRequest(id); if (value?.approval_request_id !== id || !commandTypes.includes(value.command_type)) throw new Error('INVALID_FINANCE_ACK'); return value; }); if (value && (!mine || liveMineScope.current === mineScope)) { if (mine) setMineDetailScope(mineScope); setDetail(value); } };
+  const open = async id => { const value = await operation.read(async () => { const value = await client.governedApprovalRequest(id); if (value?.approval_request_id !== id || !commandTypes.includes(value.command_type)) throw new Error('INVALID_FINANCE_ACK'); return value; }); if (value && (!scopedRead || liveMineScope.current === mineScope)) { if (scopedRead) setMineDetailScope(mineScope); setDetail(value); } };
   const act = async action => {
     let facts = operation.pendingFacts;
     if (!facts) {
@@ -274,21 +275,21 @@ export function Approvals({ client, copy, permissions, owner, commandTypes = def
     if (value) { await open(facts.detail.approval_request_id); await load(); }
   };
   const businessRoute = approvalBusinessRoute(detail);
-  const showMineRows = readState?.hasResult && items.length > 0;
-  const mineFeedback = mine && <div className="adm-approval-mine-read">
-    {mineLoading && <p role="status">{mineReadCopy.loading}</p>}
-    {readState && ['denied', 'signedOut', 'failed'].includes(readState.phase) && <p role="alert">{mineReadCopy[readState.phase]}</p>}
-    {readState?.hasResult && readState.phase !== 'ready' && <p className="adm-approval-previous">{mineReadCopy.previous}</p>}
-    {readState?.phase === 'ready' && !items.length && <p role="status">{mineReadCopy.empty}</p>}
+  const showScopedRows = readState?.hasResult && items.length > 0;
+  const scopedFeedback = scopedRead && <div className={mine ? "adm-approval-mine-read" : "adm-approval-mine-read adm-approval-pending-read"}>
+    {scopedLoading && <p role="status">{readCopy.loading}</p>}
+    {readState && ['denied', 'signedOut', 'failed'].includes(readState.phase) && <p role="alert">{readCopy[readState.phase]}</p>}
+    {readState?.hasResult && readState.phase !== 'ready' && <p className="adm-approval-previous">{readCopy.previous}</p>}
+    {readState?.phase === 'ready' && !items.length && <p role="status">{pending && page?.next_cursor ? readCopy.emptyWithNext : pending && cursor ? readCopy.emptyPage : readCopy.empty}</p>}
     <div className="adm-approval-mine-tools">
-      {readState?.acceptedTime && <small>{mineReadCopy[readState.acceptedTime.source]} <time dateTime={readState.acceptedTime.iso}>{readState.acceptedTime.iso.slice(0, 19).replace('T', ' ')} UTC</time></small>}
+      {readState?.acceptedTime && <small>{readCopy[readState.acceptedTime.source]} <time dateTime={readState.acceptedTime.iso}>{readState.acceptedTime.iso.slice(0, 19).replace('T', ' ')} UTC</time></small>}
       {(readState?.phase === 'ready' || readState?.phase === 'failed') && <button type="button" disabled={busy || operation.unknown}
-        onClick={() => void load(readState.phase === 'failed' ? readState.requestedCursor : cursor)}>{readState.phase === 'failed' ? mineReadCopy.retryRead : mineReadCopy.refreshRead}</button>}
+        onClick={() => void load(readState.phase === 'failed' ? readState.requestedCursor : cursor)}>{readState.phase === 'failed' ? readCopy.retryRead : readCopy.refreshRead}</button>}
     </div>
   </div>;
-  return <section><h3>{copy.approvals}</h3>{!mine && <button disabled={busy} onClick={() => void load()}>{copy.refresh}</button>}<Feedback operation={operation} copy={copy} />{operation.unknown && <button disabled={busy} onClick={() => void act('')}>{copy.retry}</button>}{mineFeedback}{(!mine || showMineRows) && <table><thead><tr><th>{copy.command}</th><th>{copy.status}</th>{centerCopy && <><th>{centerCopy.target}</th><th>{centerCopy.requester}</th><th>{centerCopy.updated}</th></>}<th>{copy.details}</th></tr></thead><tbody>{items.map(item => <tr key={item.approval_request_id}><td>{mine ? <><strong>{approvalLabel(centerCopy?.policyCommandLabels, item.command_type)}</strong>{approvalLabel(centerCopy?.policyCommandLabels, item.command_type) !== item.command_type && <code className="adm-approval-status-code">{item.command_type}</code>}</> : item.command_type}</td><td>{mine ? <span className={'adm-status adm-approval-mine-status' + (['APPROVED', 'EXECUTED'].includes(item.status) ? ' ok' : ['EXECUTING', 'EXECUTION_FAILED', 'REJECTED', 'EXPIRED', 'INVALIDATED'].includes(item.status) ? ' warn' : '')}>{approvalLabel(centerCopy?.statusLabels, item.status)}</span> : approvalLabel(centerCopy?.statusLabels, item.status)}{approvalLabel(centerCopy?.statusLabels, item.status) !== item.status && <small className="adm-approval-status-code">{item.status}</small>}</td>{centerCopy && <><td>{item.target?.resource_id || item.target_resource_id}</td><td>{approvalRequester(item)}</td><td>{item.updated_at}</td></>}<td><button disabled={busy || operation.unknown} onClick={() => void open(item.approval_request_id)}>{copy.details}</button></td></tr>)}</tbody></table>}
-    <button disabled={busy || operation.unknown || (mine && readState?.phase !== 'ready') || !previous.length} onClick={() => { const values = [...previous]; const value = values.pop(); setPrevious(values); void load(value); }}>{copy.previous}</button><button disabled={busy || operation.unknown || (mine && readState?.phase !== 'ready') || !page?.next_cursor} onClick={() => { setPrevious(values => [...values, cursor]); void load(page.next_cursor); }}>{copy.next}</button>
-    {detail && (!mine || mineDetailScope === mineScope && !['denied', 'signedOut'].includes(readState?.phase)) && <article><h4>{detail.approval_request_id}</h4><p>{mine ? approvalLabel(centerCopy?.policyCommandLabels, detail.command_type) : detail.command_type} / {approvalLabel(centerCopy?.statusLabels, detail.status)} / {copy.version}: {detail.version}</p>{approvalLabel(centerCopy?.statusLabels, detail.status) !== detail.status && <code className="adm-approval-status-code">{detail.status}</code>}<p>{detail.reason}</p>{businessRoute && onNavigate && <button disabled={busy || operation.unknown} onClick={() => onNavigate(businessRoute)}>{centerCopy.openBusinessArea}</button>}<h5>{copy.command}</h5><pre>{JSON.stringify(detail.command || {}, null, 2)}</pre>{detail.command_type === 'TOKEN_MODEL_LIFECYCLE_CHANGE' && <><p>{copy.forceCancelInflight}: {detail.command?.force_cancel_inflight === true ? copy.forceCancelEnabled : copy.forceCancelDisabled}</p><p>{copy.forceCancelInflightHelp}</p></>}{detail.execution && <><h5>{copy.effects}</h5><p>{detail.execution.attempt_status} / {detail.execution.error_class} / {detail.execution.next_retry_at} / {detail.execution.execution_deadline}</p></>}<label>{copy.reason}<textarea disabled={busy || operation.unknown} value={reason} onChange={event => setReason(event.target.value)} maxLength={2000} /></label>{['EDIT', 'SUBMIT', 'WITHDRAW', 'APPROVE', 'REJECT'].filter(action => detail.allowed_actions?.includes(action)).map(action => {
+  return <section><h3>{copy.approvals}</h3>{!scopedRead && <button disabled={busy} onClick={() => void load()}>{copy.refresh}</button>}<Feedback operation={operation} copy={copy} />{operation.unknown && <button disabled={busy} onClick={() => void act('')}>{copy.retry}</button>}{scopedFeedback}{(!scopedRead || showScopedRows) && <table><thead><tr><th>{copy.command}</th><th>{copy.status}</th>{centerCopy && <><th>{centerCopy.target}</th><th>{centerCopy.requester}</th><th>{centerCopy.updated}</th></>}<th>{copy.details}</th></tr></thead><tbody>{items.map(item => <tr key={item.approval_request_id}><td>{mine ? <><strong>{approvalLabel(centerCopy?.policyCommandLabels, item.command_type)}</strong>{approvalLabel(centerCopy?.policyCommandLabels, item.command_type) !== item.command_type && <code className="adm-approval-status-code">{item.command_type}</code>}</> : item.command_type}</td><td>{mine ? <span className={'adm-status adm-approval-mine-status' + (['APPROVED', 'EXECUTED'].includes(item.status) ? ' ok' : ['EXECUTING', 'EXECUTION_FAILED', 'REJECTED', 'EXPIRED', 'INVALIDATED'].includes(item.status) ? ' warn' : '')}>{approvalLabel(centerCopy?.statusLabels, item.status)}</span> : approvalLabel(centerCopy?.statusLabels, item.status)}{approvalLabel(centerCopy?.statusLabels, item.status) !== item.status && <small className="adm-approval-status-code">{item.status}</small>}</td>{centerCopy && <><td>{item.target?.resource_id || item.target_resource_id}</td><td>{approvalRequester(item)}</td><td>{item.updated_at}</td></>}<td><button disabled={busy || operation.unknown} onClick={() => void open(item.approval_request_id)}>{copy.details}</button></td></tr>)}</tbody></table>}
+    <button disabled={busy || operation.unknown || (scopedRead && readState?.phase !== 'ready') || !previous.length} onClick={() => { const values = [...previous]; const value = values.pop(); setPrevious(values); void load(value); }}>{copy.previous}</button><button disabled={busy || operation.unknown || (scopedRead && readState?.phase !== 'ready') || !page?.next_cursor} onClick={() => { setPrevious(values => [...values, cursor]); void load(page.next_cursor); }}>{copy.next}</button>
+    {detail && (!scopedRead || mineDetailScope === mineScope && !['denied', 'signedOut'].includes(readState?.phase)) && <article><h4>{detail.approval_request_id}</h4><p>{mine ? approvalLabel(centerCopy?.policyCommandLabels, detail.command_type) : detail.command_type} / {approvalLabel(centerCopy?.statusLabels, detail.status)} / {copy.version}: {detail.version}</p>{approvalLabel(centerCopy?.statusLabels, detail.status) !== detail.status && <code className="adm-approval-status-code">{detail.status}</code>}<p>{detail.reason}</p>{businessRoute && onNavigate && <button disabled={busy || operation.unknown} onClick={() => onNavigate(businessRoute)}>{centerCopy.openBusinessArea}</button>}<h5>{copy.command}</h5><pre>{JSON.stringify(detail.command || {}, null, 2)}</pre>{detail.command_type === 'TOKEN_MODEL_LIFECYCLE_CHANGE' && <><p>{copy.forceCancelInflight}: {detail.command?.force_cancel_inflight === true ? copy.forceCancelEnabled : copy.forceCancelDisabled}</p><p>{copy.forceCancelInflightHelp}</p></>}{detail.execution && <><h5>{copy.effects}</h5><p>{detail.execution.attempt_status} / {detail.execution.error_class} / {detail.execution.next_retry_at} / {detail.execution.execution_deadline}</p></>}<label>{copy.reason}<textarea disabled={busy || operation.unknown} value={reason} onChange={event => setReason(event.target.value)} maxLength={2000} /></label>{['EDIT', 'SUBMIT', 'WITHDRAW', 'APPROVE', 'REJECT'].filter(action => detail.allowed_actions?.includes(action)).map(action => {
       const approver = action === 'APPROVE' || action === 'REJECT';
       const allowed = approver ? permissions.includes({ USAGE_SETTLEMENT_REPAIR: 'platform.billing.repairs.approve', RECONCILIATION_FINANCIAL_REPAIR: 'platform.billing.repairs.approve', CHARGEBACK_FINANCIAL_REPAIR: 'platform.billing.repairs.approve', REFUND_EXCEPTION_REPAIR: 'platform.billing.repairs.approve', PAYMENT_FINANCIAL_REPAIR: 'platform.billing.repairs.approve', RECEIVABLE_WRITE_OFF: 'platform.billing.repairs.approve', ENTITLEMENT_COMPONENT_ADJUSTMENT: 'platform.billing.repairs.approve', LEDGER_REPAIR: 'platform.billing.repairs.approve', WALLET_ADJUSTMENT: 'platform.billing.adjustments.approve', PAYMENT_PROVIDER_RESUME: 'platform.billing.payment-controls.resume.approve', PAYMENT_PRODUCT_RESUME: 'platform.billing.payment-controls.resume.approve', TOKEN_MODEL_LIFECYCLE_CHANGE: 'platform.models.lifecycle.approve', TOKEN_MODEL_CATALOG_ROLLBACK: 'platform.models.catalog.rollback.approve', TOKEN_CREDENTIAL_REVOKE: 'platform.tokens.credentials.revoke.approve' }[detail.command_type]) : true;
       return allowed && <button key={action} disabled={busy || operation.unknown || ((approver || action === 'EDIT') && reason.trim().length < 10)} onClick={() => void act(action)}>{copy[{ EDIT: 'editSubmit', SUBMIT: 'submit', WITHDRAW: 'withdraw', APPROVE: 'approve', REJECT: 'reject' }[action]]}</button>;
