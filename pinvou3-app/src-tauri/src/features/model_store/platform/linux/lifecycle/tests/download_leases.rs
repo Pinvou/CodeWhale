@@ -54,6 +54,7 @@ fn worker(root: &Path, mode: &str) {
         fs::create_dir_all(&weights).unwrap();
         if mode.starts_with("owner-isolated") {
             version_store::put(&version_store::Version {
+            measured_bytes: None,
                 card_id: OWNER.into(),
                 version_id: "e".repeat(64),
                 state: "downloading".into(),

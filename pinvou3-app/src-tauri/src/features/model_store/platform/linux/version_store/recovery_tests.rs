@@ -12,6 +12,7 @@ const CARD: &str = "recovery-process-card";
 const CHILD_FLAG: &str = "PINVOU_QUOTA_RECOVERY_LOCK_CHILD";
 
 fn candidate(root: &Path, revision: char, state: &str) -> Version {
+            measured_bytes: None,
     let root = root.join(revision.to_string());
     fs::create_dir_all(&root).unwrap();
     fs::write(
@@ -20,6 +21,7 @@ fn candidate(root: &Path, revision: char, state: &str) -> Version {
     )
     .unwrap();
     let version = Version {
+            measured_bytes: None,
         card_id: CARD.into(),
         version_id: revision.to_string().repeat(64),
         state: state.into(),

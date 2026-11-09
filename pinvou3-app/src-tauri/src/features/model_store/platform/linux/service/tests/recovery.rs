@@ -32,10 +32,12 @@ fn add_record() -> db::StoreModelRecord {
 }
 
 fn interrupted(root: &Path, revision: char) -> Version {
+            measured_bytes: None,
     let root = root.join(revision.to_string());
     fs::create_dir_all(&root).unwrap();
     fs::write(root.join("weights.incomplete"), b"old partial weights").unwrap();
     let version = Version {
+            measured_bytes: None,
         card_id: CARD.into(),
         version_id: revision.to_string().repeat(64),
         state: "downloading".into(),
