@@ -89,6 +89,24 @@ pub fn sanitize(schema: &mut Value) {
 /// Per-action schema honesty would retire this list.
 const STRICT_UNUSABLE_TOOLS: &[&str] = &["update_goal", "send_later"];
 
+/// Structural and conditional keywords outside the documented strict
+/// subset. Their constraints cannot be expressed by the reshaping — the
+/// same family the Moonshot MFJS path fails closed on — so a schema
+/// relying on one ships unchanged and non-strict. Shared between the
+/// composition gate and the test loop that pins each keyword so the two
+/// lists cannot drift.
+const STRICT_UNREPRESENTABLE_KEYWORDS: &[&str] = &[
+    "not",
+    "if",
+    "then",
+    "else",
+    "contains",
+    "prefixItems",
+    "propertyNames",
+    "unevaluatedProperties",
+    "unevaluatedItems",
+];
+
 pub fn prepare_tools_for_strict_mode(tools: &mut [Tool]) -> bool {
     let mut all_strict = true;
     for tool in tools {
@@ -224,6 +242,29 @@ pub fn sanitize_for_responses(schema: &mut Value) -> Option<String> {
 fn strict_schema_supported(schema: &Value) -> bool {
     let mut normalized = schema.clone();
     sanitize(&mut normalized);
+    // A root map shape — no properties of its own beside a `true` or
+    // schema-valued `additionalProperties` — collapses under the enforce
+    // pass into `additionalProperties: false` plus an empty `properties`
+    // map: `strict: true` callable only with `{}` while the tool's
+    // runtime reads arbitrary keys. The authored no-argument roots that
+    // stay strict are the ones whose `additionalProperties` is absent or
+    // already `false` (tools that take no values at all); the same shape
+    // fails closed one level down through the gate's nested rule, so the
+    // root fails closed here, while the authored keyword shape is still
+    // visible. A node the enforce pass would not normalize at all keeps
+    // the keyword and is caught by the detector below.
+    if normalized
+        .get("properties")
+        .and_then(Value::as_object)
+        .is_none_or(Map::is_empty)
+        && normalized
+            .get("additionalProperties")
+            .is_some_and(|additional| {
+                !additional.is_boolean() || additional.as_bool() == Some(true)
+            })
+    {
+        return false;
+    }
     // The enforce pass strips some constraints before the compatibility
     // gate below can judge them: a null `const` (dropped outright) and a
     // schema-form draft-7 `dependencies` table (dropped with the name-table
@@ -268,6 +309,20 @@ fn has_unrepresentable_stripped_constraint(schema: &Value, ships: bool) -> bool 
             .get("dependencies")
             .and_then(Value::as_object)
             .is_some_and(|table| table.values().any(Value::is_object))
+    {
+        return true;
+    }
+    // The enforce pass normalizes `additionalProperties` to `false` only
+    // on schemas it treats as objects (`type: "object"` or a `properties`
+    // map). On any other node the authored keyword ships verbatim under a
+    // strict flag — and a `true` or schema-valued `additionalProperties`
+    // is map semantics the documented subset does not describe, so the
+    // node fails closed instead.
+    if ships
+        && !is_object_schema(obj)
+        && obj.get("additionalProperties").is_some_and(|additional| {
+            !additional.is_boolean() || additional.as_bool() == Some(true)
+        })
     {
         return true;
     }
@@ -352,26 +407,14 @@ fn has_strict_incompatible_composition(schema: &Value, is_root: bool) -> bool {
         if obj.get("const").is_some_and(Value::is_null) {
             return true;
         }
-        // Structural and conditional keywords outside the documented subset
-        // carry constraints the reshaping cannot express — the same family
-        // the Moonshot MFJS path fails closed on (`contains`, `prefixItems`,
-        // `not`, `if`/`then`/`else`, `propertyNames`, `unevaluatedProperties`,
-        // `unevaluatedItems`, tuple-form `items`). A schema relying on one
-        // ships unchanged and non-strict rather than reshaped-and-strict.
-        if obj.keys().any(|key| {
-            matches!(
-                key.as_str(),
-                "not"
-                    | "if"
-                    | "then"
-                    | "else"
-                    | "contains"
-                    | "prefixItems"
-                    | "propertyNames"
-                    | "unevaluatedProperties"
-                    | "unevaluatedItems"
-            )
-        }) {
+        // Keywords in `STRICT_UNREPRESENTABLE_KEYWORDS` carry constraints
+        // the reshaping cannot express — the same family the Moonshot MFJS
+        // path fails closed on. A schema relying on one ships unchanged and
+        // non-strict rather than reshaped-and-strict.
+        if obj
+            .keys()
+            .any(|key| STRICT_UNREPRESENTABLE_KEYWORDS.contains(&key.as_str()))
+        {
             return true;
         }
         if obj
@@ -400,9 +443,34 @@ fn has_strict_incompatible_composition(schema: &Value, is_root: bool) -> bool {
         {
             return true;
         }
-        return obj
-            .values()
-            .any(|value| has_strict_incompatible_composition(value, false));
+        // Walk children like the sibling walkers do: `properties`,
+        // `$defs`, `definitions`, and `$def` map names to schemas, and
+        // `enum`/`const`/`default`/`examples` hold literal values — only
+        // their values are schemas. Judging the name maps themselves as
+        // schemas made the gate fire on names alone: a required property
+        // named after a keyword (or a definition named `not`) failed the
+        // tool closed on its name, and object-shaped `enum` members or
+        // `default` values failed it on their shape.
+        for (key, value) in obj {
+            match key.as_str() {
+                "properties" | "$defs" | "definitions" | "$def" => {
+                    if let Some(named_schemas) = value.as_object() {
+                        if named_schemas.values().any(|named_schema| {
+                            has_strict_incompatible_composition(named_schema, false)
+                        }) {
+                            return true;
+                        }
+                    }
+                }
+                "enum" | "const" | "default" | "examples" => {}
+                _ => {
+                    if has_strict_incompatible_composition(value, false) {
+                        return true;
+                    }
+                }
+            }
+        }
+        return false;
     }
     schema.as_array().is_some_and(|arr| {
         arr.iter()
@@ -1629,20 +1697,11 @@ mod tests {
 
     #[test]
     fn strict_mode_fails_closed_on_each_structural_keyword() {
-        // Each member of the structural/conditional family is pinned
+        // Each member of `STRICT_UNREPRESENTABLE_KEYWORDS` is pinned
         // individually — a shared fixture let a single-arm regression (a
-        // typo in one keyword arm) pass silently.
-        for keyword in [
-            "not",
-            "if",
-            "then",
-            "else",
-            "contains",
-            "prefixItems",
-            "propertyNames",
-            "unevaluatedProperties",
-            "unevaluatedItems",
-        ] {
+        // typo in one keyword arm) pass silently. Iterating the same
+        // constant the gate checks keeps the two lists from drifting.
+        for &keyword in STRICT_UNREPRESENTABLE_KEYWORDS {
             let mut target = serde_json::Map::new();
             target.insert("type".into(), json!("string"));
             target.insert(keyword.into(), json!(true));
@@ -1667,6 +1726,192 @@ mod tests {
                 "the {keyword} keyword ships unchanged"
             );
         }
+    }
+
+    #[test]
+    fn strict_mode_keeps_strict_when_a_required_property_is_named_after_a_keyword() {
+        // The gate walks name maps as name maps: a required property named
+        // after a structural keyword (or `nullable`) is a name, not a
+        // keyword occurrence, and must not fail the tool closed on it.
+        let mut tools = vec![test_tool(
+            "search",
+            json!({
+                "type": "object",
+                "properties": {
+                    "needle": {"type": "string"},
+                    "contains": {
+                        "type": "string",
+                        "description": "substring the result must contain"
+                    }
+                },
+                "required": ["needle", "contains"]
+            }),
+        )];
+
+        assert!(prepare_tools_for_strict_mode(&mut tools));
+        assert_eq!(tools[0].strict, Some(true));
+        assert_eq!(
+            tools[0].input_schema["required"],
+            json!(["contains", "needle"])
+        );
+    }
+
+    #[test]
+    fn strict_mode_keeps_strict_when_a_definition_is_named_after_a_keyword() {
+        // `$defs` is a name map too: a definition named `not` ships when its
+        // `$ref` resolves, and its name is not a keyword occurrence. A
+        // definition whose SCHEMA relies on a structural keyword still fails
+        // the tool closed.
+        let mut named = vec![test_tool(
+            "cite",
+            json!({
+                "type": "object",
+                "properties": {"span": {"$ref": "#/$defs/not"}},
+                "required": ["span"],
+                "$defs": {"not": {"type": "string"}}
+            }),
+        )];
+        assert!(prepare_tools_for_strict_mode(&mut named));
+        assert_eq!(named[0].strict, Some(true));
+        assert_eq!(
+            named[0].input_schema["$defs"]["not"],
+            json!({"type": "string"})
+        );
+
+        let mut structural = vec![test_tool(
+            "cite",
+            json!({
+                "type": "object",
+                "properties": {"span": {"$ref": "#/$defs/span"}},
+                "required": ["span"],
+                "$defs": {"span": {"type": "string", "not": {"type": "string"}}}
+            }),
+        )];
+        assert!(!prepare_tools_for_strict_mode(&mut structural));
+        assert_eq!(structural[0].strict, None);
+    }
+
+    #[test]
+    fn strict_mode_keeps_strict_when_literals_hold_schema_shaped_values() {
+        // `enum` members and `default` values are values, not schemas: an
+        // object member that happens to carry a keyword-shaped key, or a
+        // `default` shaped like `{"nullable": true}`, is not a keyword
+        // occurrence.
+        let mut tools = vec![test_tool(
+            "filter",
+            json!({
+                "type": "object",
+                "properties": {
+                    "mode": {"enum": [{"contains": "abc"}, {"exact": "abc"}]},
+                    "fallback": {
+                        "type": "object",
+                        "properties": {"limit": {"type": "integer"}},
+                        "required": ["limit"],
+                        "default": {"nullable": true}
+                    }
+                },
+                "required": ["mode", "fallback"]
+            }),
+        )];
+
+        assert!(prepare_tools_for_strict_mode(&mut tools));
+        assert_eq!(tools[0].strict, Some(true));
+        assert_eq!(
+            tools[0].input_schema["properties"]["mode"]["enum"],
+            json!([{"contains": "abc"}, {"exact": "abc"}])
+        );
+    }
+
+    #[test]
+    fn strict_mode_fails_closed_on_a_root_map_shape() {
+        // A root that declares no properties but takes arbitrary keys
+        // (`additionalProperties` in schema form or `true`) collapses under
+        // the enforce pass into `properties: {}` +
+        // `additionalProperties: false` — `strict: true` callable only with
+        // `{}` while the runtime reads the keys. It ships unchanged and
+        // non-strict instead. The authored no-argument roots that stay
+        // strict are the ones whose `additionalProperties` is absent or
+        // already `false`.
+        let mut map_schema = vec![test_tool(
+            "annotate",
+            json!({
+                "type": "object",
+                "additionalProperties": {"type": "string"}
+            }),
+        )];
+        assert!(!prepare_tools_for_strict_mode(&mut map_schema));
+        assert_eq!(map_schema[0].strict, None);
+        assert_eq!(
+            map_schema[0].input_schema,
+            json!({
+                "type": "object",
+                "additionalProperties": {"type": "string"}
+            }),
+            "the schema ships unchanged"
+        );
+
+        let mut open_map = vec![test_tool(
+            "annotate",
+            json!({
+                "type": "object",
+                "additionalProperties": true
+            }),
+        )];
+        assert!(!prepare_tools_for_strict_mode(&mut open_map));
+        assert_eq!(open_map[0].strict, None);
+
+        let mut no_arg = vec![test_tool(
+            "ping",
+            json!({
+                "type": "object",
+                "additionalProperties": false
+            }),
+        )];
+        assert!(prepare_tools_for_strict_mode(&mut no_arg));
+        assert_eq!(no_arg[0].strict, Some(true));
+    }
+
+    #[test]
+    fn strict_mode_fails_closed_when_a_typeless_map_keyword_would_ship_verbatim() {
+        // The enforce pass normalizes `additionalProperties` only on object
+        // schemas; a node without `type`/`properties` keeps the authored
+        // keyword, and a non-`false` value is map semantics the documented
+        // subset does not describe — it fails closed instead of shipping the
+        // keyword under a strict flag.
+        let mut tools = vec![test_tool(
+            "tag",
+            json!({
+                "type": "object",
+                "properties": {
+                    "labels": {"additionalProperties": {"type": "string"}}
+                },
+                "required": ["labels"]
+            }),
+        )];
+        assert!(!prepare_tools_for_strict_mode(&mut tools));
+        assert_eq!(tools[0].strict, None);
+    }
+
+    #[test]
+    fn strict_mode_fails_closed_on_a_required_nested_map() {
+        // One level down the same shape already fails closed through the
+        // gate's nested rule once the enforce pass injects the empty
+        // `properties` map — pinned here beside the root variants.
+        let mut tools = vec![test_tool(
+            "annotate",
+            json!({
+                "type": "object",
+                "properties": {
+                    "meta": {
+                        "type": "object",
+                        "additionalProperties": {"type": "string"}
+                    }
+                },
+                "required": ["meta"]
+            }),
+        )];
+        assert!(!prepare_tools_for_strict_mode(&mut tools));
+        assert_eq!(tools[0].strict, None);
     }
 
     #[test]
