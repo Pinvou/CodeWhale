@@ -1098,7 +1098,13 @@ pub(crate) async fn resume_round_trip<T>(
         "observe retained evidence, not a None projection"
     );
     send(&mut socket, &stale).await;
-    processed(&mut processed_rx, &stale).await;
+    // The manager now discards an explicit retired generation before the
+    // worker queue. A following harmless frame on this same ordered reader
+    // proves the old frame has drained without requiring it to reach worker.
+    let ingress_barrier = json!({"v":1,"type":"error","request_id":"request-stale-ingress-barrier",
+        "code":"invalid_message","message":"rejected"});
+    send(&mut socket, &ingress_barrier).await;
+    processed(&mut processed_rx, &ingress_barrier).await;
     assert_eq!(
         manager.resume_phase_for_test(),
         Some(super::super::resume::ResumePhase::Prepared)
