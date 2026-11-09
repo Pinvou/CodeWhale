@@ -941,6 +941,99 @@ mod tests {
     }
 
     #[test]
+    fn controller_stop_clears_real_a_keys_and_preserves_the_b_lane() {
+        use super::super::controlling::{
+            ControllerLease, ControllingDeviceManager, ControllingStatusKind,
+        };
+        for reconnecting in [false, true] {
+            let manager = ControllingDeviceManager::default();
+            let operation = manager.connect("2345678").unwrap();
+            manager.complete_reserved(operation.clone()).unwrap();
+            let fixture = pairing_fixture("relay-stop-keys");
+            let lease = lease_context(&fixture.reservation);
+            let (a_session, b_session) =
+                paired_session_keys(fixture.a_keys, fixture.b_keys, &fixture.reservation);
+            let a = ControllingLaneState::default();
+            let b = ControlledLaneState::default();
+            a.install(ControllerRole::A, &lease, a_session).unwrap();
+            b.install(ControllerRole::B, &lease, b_session).unwrap();
+            let transcript = fixture.reservation["transcript_hash"].as_str().unwrap();
+            let hash = std::array::from_fn(|index| {
+                u8::from_str_radix(&transcript[index * 2..index * 2 + 2], 16).unwrap()
+            });
+            manager
+                .complete_connected(
+                    operation,
+                    ControllerLease {
+                        context: lease.clone(),
+                        peer_endpoint_id: "endpoint-0001".into(),
+                        reservation_id: "reservation-0001".into(),
+                        device_display_name: "B".into(),
+                        liveness_epoch_a: "live-a-1".into(),
+                        liveness_epoch_b: "live-b-1".into(),
+                        resume_deadline_b: 30_000,
+                        resume_token: fixture.resume_token,
+                        transport_key_fingerprint: super::super::crypto::transport_key_fingerprint(
+                            hash,
+                            ControllerRole::A,
+                        )
+                        .unwrap(),
+                        negotiated_capabilities: capabilities(),
+                    },
+                )
+                .unwrap();
+            let payload = task_submit_payload(&lease);
+            assert!(a.seal("task_submit", &payload, &capabilities()).is_ok());
+            if reconnecting {
+                manager.mark_transport_disconnected(5_000, Some(30_000));
+                a.suspend();
+                assert_eq!(manager.status().status, ControllingStatusKind::Reconnecting);
+                assert!(
+                    a.is_installed(),
+                    "resume retains keys until an explicit stop"
+                );
+            } else {
+                assert_eq!(manager.status().status, ControllingStatusKind::Connected);
+            }
+            manager.stop(&a);
+            assert_eq!(manager.status().status, ControllingStatusKind::Disconnected);
+            assert!(!a.is_installed());
+            assert!(a.seal("task_submit", &payload, &capabilities()).is_err());
+            assert!(a.resume_fingerprint("activation-0001").is_err());
+            assert!(
+                b.is_installed(),
+                "A stop must preserve B's distinct key owner"
+            );
+            manager.stop(&a);
+            assert!(b.is_installed());
+            let next = manager.connect("3455678").unwrap();
+            let fresh = pairing_fixture("relay-stop-keys-next");
+            let fresh_session = role_session_keys(
+                ControllerRole::A,
+                fresh.a_keys,
+                fresh.b_keys.public_key().to_bytes(),
+                &fresh.reservation,
+            );
+            manager
+                .with_lane_owner(&next, || {
+                    a.install(
+                        ControllerRole::A,
+                        &lease_context(&fresh.reservation),
+                        fresh_session,
+                    )
+                })
+                .unwrap()
+                .unwrap();
+            assert!(
+                a.is_installed(),
+                "stop must allow the next legitimate lifecycle"
+            );
+            manager.stop(&a);
+            b.clear();
+        }
+    }
+
+    #[test]
     fn delayed_disconnect_cleanup_preserves_a_successor_lane_and_its_suspend_gate() {
         let state = ControlledLaneState::default();
         let PairingFixture {

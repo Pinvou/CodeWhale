@@ -1947,7 +1947,7 @@ mod tests {
         let new_running = manager.is_running() && !next_sender.is_stopped();
         let new_status = projection(&manager.status());
         let new_code_retained = manager.pending_code(next).is_ok();
-        manager.stop();
+        manager.stop(&business);
         assert!(old_result.is_err());
         assert!(
             statuses.is_empty(),
