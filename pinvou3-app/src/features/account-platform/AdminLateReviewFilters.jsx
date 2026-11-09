@@ -36,13 +36,13 @@ export function AdminLateReviewFilters({ language, draft, applied, setDraft, onA
     [ui.from, dateLabel(effectiveDate(applied, 'from'))], [ui.to, dateLabel(effectiveDate(applied, 'to'))],
     [ui.review + ' · ' + ui.before, dateLabel(applied.next_review_before)],
   ].filter(([, value]) => value);
-  const hasApplied = Boolean(applied.status || applied.owner_id || ['true', 'false'].includes(applied.overdue) || advanced.length);
+  const hasApplied = Boolean(applied.status || applied.owner_id || applied.overdue === 'true' || advanced.length);
   const changed = fields.some(key => (draft[key] || '') !== (previous[key] || '')) || draft.limit !== applied.limit;
   return <form className="adm-late-filter" onSubmit={submit}>
     <div className="adm-late-filter-primary">
       <label>{words.status}{options('status', financeReadDefinition('late').statuses)}</label>
       <label>{words.owner_id}{text('owner_id')}<small>{ui.ownerHint}</small></label>
-      <label className="adm-late-filter-deadline">{words.overdue}{options('overdue', ['true', 'false'], ui.overdueOptions)}</label>
+      <label className="adm-late-filter-deadline">{words.overdue}{options('overdue', draft.overdue === 'false' ? ['true', 'false'] : ['true'], ui.overdueOptions)}</label>
     </div>
     {advanced.length > 0 && <p className="adm-late-filter-active"><strong>{ui.applied}:</strong>{' '}{advanced.map(([key, value]) => key + ' ' + value).join(' · ')}</p>}
     <details className="adm-late-filter-advanced">
