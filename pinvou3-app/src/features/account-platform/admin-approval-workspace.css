@@ -86,3 +86,5 @@
 .adm-approval-expiry-help{flex:1 1 100%;color:var(--adm-muted);font-size:12px;line-height:1.5}
 .adm-approval-expiry-help p{margin:4px 0;color:var(--adm-danger)}
 .adm-approval-current-page-count{display:block;margin:6px 0;color:var(--adm-muted)}
+
+.adm-approval-toolbar.adm-approval-pending-toolbar .adm-approval-query-actions{align-self:center}
