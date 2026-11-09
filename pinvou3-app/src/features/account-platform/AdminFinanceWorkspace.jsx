@@ -49,13 +49,14 @@ function Payments({ client, copy, language, permissions, owner, route }) {
   const [targets, setTargets] = useState([]);
   const [targetID, setTargetID] = useState('');
   const [reason, setReason] = useState('');
-  const [refundEnabled, setRefundEnabled] = useState(false);
+  const [refundReason, setRefundReason] = useState('');
+  const [refundEnabled, setRefundEnabled] = useState(null);
   const operation = useFinanceOperation(owner, copy, client, 'payments');
   const list = useFinanceRouteLoader({ route, signature: filters.signature, client, owner, operation, load: () => load(filters.query.cursor), reset: () => setPage(null) });
   const load = async (next = cursor) => {
     const result = await list.read(async () => {
       const [orders, overview] = await Promise.all([loadFinancePage({ ...(route ? filters.query : { q: query }), cursor: next }, filters => client.paymentOrders(filters), () => { setCursor(''); setPrevious([]); }), client.request('billing', '/admin/v1/overview')]);
-      return { orders: orders.value, cursor: orders.query.cursor, enabled: overview?.payment_capabilities?.normal_refund_creation_enabled === true };
+      return { orders: orders.value, cursor: orders.query.cursor, enabled: typeof overview?.payment_capabilities?.normal_refund_creation_enabled === 'boolean' ? overview.payment_capabilities.normal_refund_creation_enabled : null };
     });
     if (result) { setPage(result.orders); setCursor(result.cursor); setRefundEnabled(result.enabled); }
   };
@@ -73,7 +74,7 @@ function Payments({ client, copy, language, permissions, owner, route }) {
       // list/write feedback slot that can be visible on a different order.
       return route ? '' : key;
     });
-    if (result) { setDetailFailure(current => current?.visit === visit && visit.id === id ? null : current); setDetailSnapshot({ visit, value: result.value }); setTargets(result.targets); setTargetID(result.targets[0]?.package.package_id || ''); setReason(''); }
+    if (result) { setDetailFailure(current => current?.visit === visit && visit.id === id ? null : current); setDetailSnapshot({ visit, value: result.value }); setTargets(result.targets); setTargetID(result.targets[0]?.package.package_id || ''); setReason(''); setRefundReason(''); }
     return started;
   };
   useEffect(() => {
@@ -97,8 +98,9 @@ function Payments({ client, copy, language, permissions, owner, route }) {
   };
   const refund = async () => {
     const target = targets.find(item => item.package.package_id === targetID);
-    const facts = operation.pendingFacts || (detail && target && { action: 'refund', orderID: detail.order_id, transactionID: target.transaction.payment_transaction_id, packageID: targetID, amountFen: String(target.transaction.amount_fen), reason: reason.trim() });
-    if (!facts || (!operation.unknown && (!reason.trim() || !refundEnabled || !permissions.includes('platform.billing.repairs.request') || !globalThis.confirm(copy.confirmRefund)))) return;
+    const reasonForRefund = (route ? refundReason : reason).trim();
+    const facts = operation.pendingFacts || (detail && target && { action: 'refund', orderID: detail.order_id, transactionID: target.transaction.payment_transaction_id, packageID: targetID, amountFen: String(target.transaction.amount_fen), reason: reasonForRefund });
+    if (!facts || (!operation.unknown && (!reasonForRefund || !refundEnabled || !permissions.includes('platform.billing.repairs.request') || !globalThis.confirm(copy.confirmRefund)))) return;
     const value = await operation.mutate(facts, async (current, key) => {
       if (current.action === 'repair') return client.repairPaymentOrder(current.orderID, current.reason, key, current.commandProtocol);
       const receipt = await client.refundPaymentOrder(current.orderID, current.transactionID, current.packageID, current.reason, key);
@@ -107,17 +109,38 @@ function Payments({ client, copy, language, permissions, owner, route }) {
     });
     if (value) { await open(facts.orderID); await load(); }
   };
+  const orderActions = adminLayoutCopy[language].orderActionSections;
+  const canSyncOrder = permissions.includes('platform.billing.orders.sync');
+  const canRequestOrderAction = permissions.includes('platform.billing.repairs.request');
+  const syncOrder = async () => { const value = await operation.read(() => client.syncOrder(detail.order_id)); if (value) await open(detail.order_id); };
+  const refundUnavailable = !canRequestOrderAction ? orderActions.noPermission : refundEnabled === null ? orderActions.capabilityUnknown : !refundEnabled ? orderActions.capabilityOff : !targets.length ? orderActions.noTarget : '';
   return <section><h3>{copy.orders}</h3>{route ? <AdminFinanceFilters kind="orders" language={language} value={filters.draft} onChange={filters.setDraft} disabled={operation.busy || operation.unknown} onSubmit={() => { setPrevious([]); filters.move({ ...filters.draft, cursor: '' }, null); }} /> : <form onSubmit={event => { event.preventDefault(); setPrevious([]); void load(''); }}><label>{copy.search}<input value={query} onChange={event => setQuery(event.target.value)} /></label><button disabled={operation.busy || operation.unknown}>{copy.search}</button></form>}<Feedback operation={operation} copy={copy} />
     {operation.unknown && <div data-retained-finance-command><code>{operation.pendingFacts?.orderID} / {operation.pendingKey}</code><button disabled={operation.busy} onClick={() => void refund()}>{copy.retry}</button></div>}
     {page && <table><thead><tr><th>{copy.orderID}</th><th>{copy.amount}</th><th>{copy.status}</th><th>{copy.actions}</th></tr></thead><tbody>{page.items.map(item => <tr key={item.order_id}><td>{item.order_id}</td><td>{formatFen(item.amount_fen, language)}</td><td>{item.status}</td><td><button disabled={operation.busy || operation.unknown} onClick={() => selectDetail(item.order_id)}>{copy.details}</button></td></tr>)}</tbody></table>}
     <button disabled={operation.busy || operation.unknown || !previous.length} onClick={() => { const values = [...previous]; const value = values.pop(); setPrevious(values); if (route) filters.move({ ...filters.query, cursor: value }, null); else void load(value); }}>{copy.previous}</button><button disabled={operation.busy || operation.unknown || !page?.next_cursor} onClick={() => { setPrevious(values => [...values, cursor]); if (route) filters.move({ ...filters.query, cursor: page.next_cursor }, null); else void load(page.next_cursor); }}>{copy.next}</button>
     {currentDetailError && currentDetailError !== operation.error && <p role="alert">{currentDetailError}</p>}{route && filters.selectedID && (currentDetailError || operation.error) && !operation.unknown && <button disabled={operation.busy} onClick={() => void open(filters.selectedID)}>{copy.retry}</button>}{detail && (!route || operation.unknown || (detailSnapshot.visit === detailVisit && detail.order_id === filters.selectedID)) && <article>{route && <button disabled={operation.busy || operation.unknown} onClick={() => filters.move(filters.query, null)}>{adminLayoutCopy[language].backToDirectory}</button>}<h4>{copy.details}: {detail.order_id}</h4>{route ? <AdminOrderStatusSummary detail={detail} language={language} /> : <p>{detail.status} / {detail.fulfillment_status} / {detail.attention_summary}</p>}
-      {permissions.includes('platform.billing.orders.sync') && <button disabled={operation.busy || operation.unknown} onClick={async () => { const value = await operation.read(() => client.syncOrder(detail.order_id)); if (value) await open(detail.order_id); }}>{copy.query}</button>}
+      {route ? <>
+        {canSyncOrder && <section className="adm-order-action-group"><h5>{orderActions.queryTitle}</h5><p>{orderActions.queryHelp}</p><button type="button" disabled={operation.busy || operation.unknown} onClick={() => void syncOrder()}>{copy.query}</button></section>}
+        {detail.status === 'MANUAL_REVIEW' && canRequestOrderAction && <section className="adm-order-action-group">
+          <h5>{copy.orderRepair}</h5><label>{orderActions.repairReason}<textarea disabled={operation.busy || operation.unknown} maxLength={500} value={reason} onChange={event => setReason(event.target.value)} /></label>
+          <button type="button" disabled={operation.busy || operation.unknown || !reason.trim()} onClick={() => void repair()}>{copy.orderRepair}</button>
+        </section>}
+        <section className="adm-order-action-group">
+          <h5>{copy.refunds}</h5>
+          {refundUnavailable ? <p>{refundUnavailable}</p> : <>
+            <label>{copy.transaction} / {copy.package}<select disabled={operation.busy || operation.unknown} value={targetID} onChange={event => setTargetID(event.target.value)}>{targets.map(item => <option key={item.package.package_id} value={item.package.package_id}>{item.transaction.payment_transaction_id} / {item.package.package_id} — {formatFen(item.transaction.amount_fen, language)}</option>)}</select></label>
+            <label>{orderActions.refundReason}<textarea disabled={operation.busy || operation.unknown} maxLength={500} value={refundReason} onChange={event => setRefundReason(event.target.value)} /></label>
+            <button type="button" disabled={operation.busy || operation.unknown || !refundReason.trim()} onClick={() => void refund()}>{copy.refunds}</button>
+          </>}
+        </section>
+      </> : <>
+      {canSyncOrder && <button disabled={operation.busy || operation.unknown} onClick={() => void syncOrder()}>{copy.query}</button>}
       <label>{copy.reason}<textarea disabled={operation.busy || operation.unknown} maxLength={500} value={reason} onChange={event => setReason(event.target.value)} /></label>
       {detail.status === 'MANUAL_REVIEW' && permissions.includes('platform.billing.repairs.request') && <button disabled={operation.busy || operation.unknown || !reason.trim()} onClick={() => void repair()}>{copy.orderRepair}</button>}
       <h4>{copy.refunds}</h4>{targets.length ? <label>{copy.transaction} / {copy.package}<select disabled={operation.busy || operation.unknown} value={targetID} onChange={event => setTargetID(event.target.value)}>{targets.map(item => <option key={item.package.package_id} value={item.package.package_id}>{item.transaction.payment_transaction_id} / {item.package.package_id} — {formatFen(item.transaction.amount_fen, language)}</option>)}</select></label> : <p>{copy.refundUnavailable}</p>}
       {!refundEnabled && <p>{copy.refundUnavailable}</p>}
       {permissions.includes('platform.billing.repairs.request') && targets.length > 0 && <button disabled={operation.busy || operation.unknown || !refundEnabled || !reason.trim()} onClick={() => void refund()}>{operation.unknown ? copy.retry : copy.refunds}</button>}
+      </>}
     </article>}
   </section>;
 }
