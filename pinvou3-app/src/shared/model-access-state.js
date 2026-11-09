@@ -1,6 +1,6 @@
 import { isBuiltInAccountPlatformModel, isLocalModel } from './model-options.js';
 import { modelAccessAppliesToView } from './model-access-scope.js';
-export { baseUrlIsLoopback, isLocalModel, activeModelIsLocal } from './model-options.js';
+export { baseUrlIsLoopback, isLocalModel } from './model-options.js';
 export { modelAccessAppliesToView } from './model-access-scope.js';
 
 function hasUserCredential(model) {

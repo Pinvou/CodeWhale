@@ -36,6 +36,7 @@ export class AccountPlatformDesktopClient {
     this.versionObservationUserID = null;
     this.observedSessionAuthenticated = undefined;
     this.authenticationListeners = new Set();
+    this.authenticationMutationEpoch = 0;
   }
 
   onAuthenticationChange(listener) {
@@ -121,12 +122,17 @@ export class AccountPlatformDesktopClient {
     this.resetObservedVersions();
     this.observedSessionAuthenticated = undefined;
     const epoch = this.versionObservationEpoch;
+    const mutation = ++this.authenticationMutationEpoch;
     this.notifyAuthenticationChange('changing');
     try {
       const value = await this.call(() => this.transport.login({ account, password }), signal);
       if (epoch === this.versionObservationEpoch) { this.observedSessionAuthenticated = true; this.financeSessionEpoch++; }
       return value;
-    } finally { if (epoch === this.versionObservationEpoch) this.notifyAuthenticationChange('changed'); }
+    } finally {
+      // Reads may advance observation versions while a grant is pending.
+      // Only another authentication mutation can retire its completion event.
+      if (mutation === this.authenticationMutationEpoch) this.notifyAuthenticationChange('changed');
+    }
   }
 
   createSliderCaptcha(mobile, purpose, signal) {
@@ -179,12 +185,13 @@ export class AccountPlatformDesktopClient {
     this.resetObservedVersions();
     this.observedSessionAuthenticated = undefined;
     const epoch = this.versionObservationEpoch;
+    const mutation = ++this.authenticationMutationEpoch;
     this.notifyAuthenticationChange('changing');
     try {
       const value = await this.call(() => this.transport.loginSms({ mobile, challenge_id: challengeId, code }), signal);
       if (epoch === this.versionObservationEpoch) { this.observedSessionAuthenticated = true; this.financeSessionEpoch++; }
       return value;
-    } finally { if (epoch === this.versionObservationEpoch) this.notifyAuthenticationChange('changed'); }
+    } finally { if (mutation === this.authenticationMutationEpoch) this.notifyAuthenticationChange('changed'); }
   }
 
   resetPassword(mobile, challengeId, code, passwordReference, signal) {
@@ -203,14 +210,17 @@ export class AccountPlatformDesktopClient {
 
   async logout(signal) {
     const epoch = this.versionObservationEpoch;
-    const value = await this.call(() => this.transport.logout(), signal);
-    if (epoch === this.versionObservationEpoch) {
-      this.financeSessionEpoch++;
-      this.resetObservedVersions();
-      this.observedSessionAuthenticated = false;
-      this.notifyAuthenticationChange('changed');
-    }
-    return value;
+    const mutation = ++this.authenticationMutationEpoch;
+    this.notifyAuthenticationChange('changing');
+    try {
+      const value = await this.call(() => this.transport.logout(), signal);
+      if (epoch === this.versionObservationEpoch) {
+        this.financeSessionEpoch++;
+        this.resetObservedVersions();
+        this.observedSessionAuthenticated = false;
+      }
+      return value;
+    } finally { if (mutation === this.authenticationMutationEpoch) this.notifyAuthenticationChange('changed'); }
   }
 
   async call(action, signal) {

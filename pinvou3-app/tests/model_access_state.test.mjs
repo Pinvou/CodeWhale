@@ -110,3 +110,32 @@ test('logout completion retires an already running account read', async () => {
   old.resolve({ authenticated: true }); await stale;
   assert.equal(owner.getState().accountStatus, 'guest'); owner.dispose();
 });
+
+test('a session read during login cannot suppress the completed authentication refresh', async () => {
+  for (const method of ['login', 'loginSms']) {
+    const grant = deferred(); let authenticated = false;
+    const complete = async () => { await grant.promise; authenticated = true; };
+    const client = new AccountPlatformDesktopClient({ session: async () => ({ authenticated }), login: complete, loginSms: complete });
+    const owner = createModelAccessCoordinator({ loadModels: async () => true, loadEffectiveModelConfig: async () => true }, client);
+    await owner.refresh();
+    const login = client[method]('synthetic', 'synthetic', method === 'loginSms' ? 'synthetic' : undefined);
+    await owner.refresh(); assert.equal(owner.getState().accountStatus, 'guest');
+    grant.resolve(); await login; await new Promise(resolve => setImmediate(resolve));
+    assert.equal(owner.getState().accountStatus, 'authenticated', method); owner.dispose();
+  }
+});
+
+test('completion of an older login cannot end the current authentication check', { timeout: 5000 }, async () => {
+  const older = deferred(), current = deferred(); let authenticated = false;
+  const client = new AccountPlatformDesktopClient({
+    session: async () => ({ authenticated }),
+    login: async ({ account }) => { await (account === 'older' ? older : current).promise; authenticated = true; },
+  });
+  const owner = createModelAccessCoordinator({ loadModels: async () => true, loadEffectiveModelConfig: async () => true }, client);
+  await owner.refresh();
+  const first = client.login('older', 'synthetic'), latest = client.login('current', 'synthetic');
+  older.resolve(); await first; await new Promise(resolve => setImmediate(resolve));
+  assert.equal(owner.getState().accountStatus, 'checking');
+  current.resolve(); await latest; await new Promise(resolve => setImmediate(resolve));
+  assert.equal(owner.getState().accountStatus, 'authenticated'); owner.dispose();
+});
