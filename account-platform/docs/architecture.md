@@ -210,7 +210,11 @@ Token 域以 `usage_requests` 保存独立执行、交付、取消和账务状�
 - `usage_requests`、`usage_attempts`、`usage_execution_transitions`：模型请求的稳定用户级键摘要、版本化规范请求指纹、冻结上下文/路由/价格、独立执行/交付/结算状态、上游关联及不可变 CAS 跃迁审计。
 - `usage_dispatch_preparations`、`usage_dispatch_intents`：Hold 前加密冻结的派发材料，以及 Hold 确认后原子提升的唯一派发意图和一次性 Worker 租约；进入上游派发后缺少确定结果且 Adapter 不保证请求级幂等时只转 REVIEW，不重发。
 - `usage_cancel_commands`、`usage_cancellation_evidence`、`usage_delivery_confirmations`：原稳定用户的唯一幂等取消命令、不可变脱敏取消证据和各客户端最后确认事件序号；不保存用户正文或 Provider 凭据。
-  Token 迁移 `900008` 为派发围栏匹配的 `hold-expiry-v1` 和 `CANCEL_REQUESTED` 证据添加部分索引，以缩短用量行锁内的证据查询。索引构建期间会阻塞取消证据表的写入，安装须纳入 Token 数据库维护窗口。回退只移除索引，保留证据及派发围栏。
+  Token 迁移 `900008` 为派发围栏匹配的 `hold-expiry-v1` 和 `CANCEL_REQUESTED` 证据添加部分索引，以减少用量行锁内证据查询的扫描。安装沿用 Token 全表所有权硬化流程，维护窗口须覆盖全部 Token 表的锁等待。索引构建还会阻塞取消证据表的写入。合成查询计划不能替代现场围栏延迟和持锁时间测量。
+
+  回退 `900008` 须按既有数据库回退审批执行。先停止相关 Token 写入并确认迁移账本最高版本正是 `900008_hold_expiry_dispatch_evidence_index`，其 checksum 与当前发布包一致，同时保留备份回执。复用现有 `token_migrator` 登录连接，仅该次命令选择 `MIGRATION_ROLE=token_schema_owner`，执行镜像原入口 `/service --dir /migrations/token --direction down`。默认 Up 所选的 `token_gateway` 不拥有索引，直接用它 Down 会返回权限错误且不改变账本。回退成功后核对新索引和该版本账本行均已移除、此前账本和取消证据保留。若最高版本不同，停止并另行确定实际回退范围。
+
+  重新安装使用同一发布包及 `token_migrator` 连接，恢复 `MIGRATION_ROLE=token_gateway`，执行 `/service --dir /migrations/token --direction up`，核对迁移命令的版本校验回执、精确部分索引及硬化后的运行权限。受控 owner 选择只用于获授权的数据库回退，应用继续使用原运行角色。实际运行入口仍受派发围栏保护，索引 Down 只改变查询成本。
 - `usage_reconciliation_commands`、`usage_platform_loss_reviews`：只查询原上游证据的幂等人工核对命令，以及期限后释放 Hold、永久禁止再次向用户扣款的晚到成本/平台交付损失边界。
 - `usage_stream_events`、`usage_replay_results`、`usage_idempotency_tombstones`：先于客户端确认落库的加密规范事件、完整/聚合结果和零正文防重墓碑，普通业务最大保留期分别为24小时、30天和90天。
 - `usage_replay_retention_cases`、`usage_replay_case_payloads`：法律保全或未结案件的独立受限存储及原因、范围、责任人、复核/到期/解除后清除事实；普通在线重放表不借案件名义延长保留。
