@@ -27,6 +27,25 @@ CHECKPOINT_FOREIGN_CHILDREN = {"unbound-existing-facts", "foreign-key-before-fin
 
 
 class FinancialPostgresRunnerTests(unittest.TestCase):
+    def test_registration_outbox_index_requires_both_actual_install_shapes(self):
+        root="TestRegistrationOutboxAggregateLookupPostgres"
+        self.assertIn(root,RUNNER.ACCOUNT_REQUIRED)
+        self.assertIn(root,RUNNER.ACCOUNT_CHILD_REQUIRED)
+        self.run_main_fixture()
+        command=self.fixture_commands[self.fixture_phases.index("owner-account")]
+        self.assertIn(root,command[command.index("-run")+1])
+        self.assertEqual(RUNNER.EXACT_REQUIRED_CHILDREN[root],{"fresh-install","retained-upgrade"})
+        events=self.events({root},RUNNER.ACCOUNT_PACKAGE,children=True)
+        options={"package":RUNNER.ACCOUNT_PACKAGE,"exact_roots":True,"require_children":True}
+        RUNNER.verify_results(events,{root},**options)
+        for child in (root,root+"/fresh-install",root+"/retained-upgrade"):
+            for invalid in (
+                [event for event in events if event.get("Test")!=child],
+                events+[{"Action":"skip","Package":RUNNER.ACCOUNT_PACKAGE,"Test":child}],
+            ):
+                with self.subTest(child=child),self.assertRaises(RuntimeError):
+                    RUNNER.verify_results(invalid,{root},**options)
+
     def test_catalog_rollback_requires_all_historical_versions_and_actual_cli(self):
         root = "TestBillingHistoricalCatalogRollbackPostgres"
         self.assertIn(root, RUNNER.SCHEMA_REQUIRED)
@@ -1567,6 +1586,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
     "TestRegistrationUnknownInspectionPostgres",
             "TestRegistrationIdentityRejectionRuntimePostgres",
             "TestRegistrationCompensationDatabaseErrorIdentityPostgres",
+            "TestRegistrationOutboxAggregateLookupPostgres",
             "TestPlatformRoleManagementRuntimePostgres",
             "TestUserCodeLookupRuntimePostgres",
             "TestAuditSearchOriginalMigrationRuntimePostgres",
