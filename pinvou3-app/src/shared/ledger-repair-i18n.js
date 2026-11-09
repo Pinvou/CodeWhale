@@ -1014,3 +1014,49 @@ ledgerRepairCopy.ja.chargebackImpact = {
     "事業者のチャージバック額"
   ]
 };
+
+ledgerRepairCopy.zh.chargebackTask = {
+  "identity": "核对对象和证据",
+  "approval": "提交审批请求",
+  "command": "命令代码",
+  "reading": "正在加载核对快照…",
+  "read": "加载核对快照",
+  "submitting": "正在提交审批请求…",
+  "badID": "请输入完整、无首尾空格的 UUID。",
+  "evidence": "填写已持久化的支付证据 UUID。",
+  "anomaly": "填写这笔退款对应的异常案件 UUID。",
+  "approvalHelp": "核对上方快照后填写审批理由及请求标识。",
+  "title": "拒付积分缺口处理",
+  "target": "填写已确认拒付的案件 UUID。",
+  "factsFailed": "无法加载拒付补偿的核对快照。请检查拒付案件和支付证据后重试。"
+};
+ledgerRepairCopy.en.chargebackTask = {
+  "identity": "Check the target and evidence",
+  "approval": "Submit for approval",
+  "command": "Command code",
+  "reading": "Loading verification snapshot…",
+  "read": "Load verification snapshot",
+  "submitting": "Submitting approval request…",
+  "badID": "Enter the full UUID without leading or trailing spaces.",
+  "evidence": "Enter the UUID of the stored payment evidence.",
+  "anomaly": "Enter the UUID of the anomaly case for this refund.",
+  "approvalHelp": "Review the snapshot above, then provide the reason and request reference.",
+  "title": "Address a chargeback points shortfall",
+  "target": "Enter the UUID of the confirmed chargeback case.",
+  "factsFailed": "Could not load the chargeback verification snapshot. Check the chargeback case and payment evidence, then retry."
+};
+ledgerRepairCopy.ja.chargebackTask = {
+  "identity": "対象と証拠を確認",
+  "approval": "承認を申請",
+  "command": "コマンドコード",
+  "reading": "確認用スナップショットを読み込み中…",
+  "read": "確認用スナップショットを読み込む",
+  "submitting": "承認申請を送信中…",
+  "badID": "前後に空白を付けず、完全な UUID を入力してください。",
+  "evidence": "保存済みの決済証拠の UUID を入力してください。",
+  "anomaly": "この返金に対応する異常案件の UUID を入力してください。",
+  "approvalHelp": "上のスナップショットを確認し、申請理由と申請識別子を入力してください。",
+  "title": "チャージバックのポイント不足を処理",
+  "target": "確認済みのチャージバック案件の UUID を入力します。",
+  "factsFailed": "チャージバックの確認用スナップショットを読み込めませんでした。案件と決済証拠を確認して再試行してください。"
+};
