@@ -32,7 +32,19 @@ export const profileRepairQueueCopy = {
     "scheduling": "正在申请安排重试：",
     "scheduled": "服务已安排重试。请查看后续状态。原请求：",
     "uncertain": "暂时无法确认是否已安排重试。可刷新查看队列。原请求：",
-    "rejected": "服务未接受此次重试。请查看错误提示。原请求："
+    "rejected": "服务未接受此次重试。请查看错误提示。原请求：",
+    "filterTitle": "筛选当前返回的记录",
+    "search": "用户 ID 或原请求 ID",
+    "allStatuses": "全部状态",
+    "clear": "清除筛选",
+    "scope": "最多返回 100 条当前待重试或需处理的记录。筛选仅作用于本次返回的记录，能否安排重试以服务校验为准。",
+    "loaded": "已加载",
+    "matching": "筛选后",
+    "previous": "以下为上次成功读取的记录。当前读取成功后才能重试其中的请求。",
+    "reading": "正在读取资料与密码重试队列…",
+    "denied": "你没有权限查看资料与密码重试队列。",
+    "empty": "本次读取没有返回待重试或需处理的记录。",
+    "filteredEmpty": "本次返回的记录中没有符合条件的结果。"
   },
   "en": {
     "kind": "Change type",
@@ -67,7 +79,19 @@ export const profileRepairQueueCopy = {
     "scheduling": "Requesting a retry for:",
     "scheduled": "The service scheduled a retry. Check the subsequent status. Original request:",
     "uncertain": "Could not confirm whether the service scheduled a retry. Refresh to check the queue. Original request:",
-    "rejected": "The service did not accept this retry. Review the error message. Original request:"
+    "rejected": "The service did not accept this retry. Review the error message. Original request:",
+    "filterTitle": "Filter the current results",
+    "search": "User ID or original request ID",
+    "allStatuses": "All statuses",
+    "clear": "Clear filters",
+    "scope": "The service returns up to 100 records awaiting retry or attention. Filters apply to these results. The service checks whether a request can be scheduled.",
+    "loaded": "Loaded",
+    "matching": "Matching",
+    "previous": "Showing the last successful read. Wait for a successful refresh before retrying these requests.",
+    "reading": "Reading the profile and password retry queue…",
+    "denied": "You do not have access to the profile and password retry queue.",
+    "empty": "This read returned no records awaiting retry or attention.",
+    "filteredEmpty": "None of the returned records match these filters."
   },
   "ja": {
     "kind": "変更の種類",
@@ -102,6 +126,18 @@ export const profileRepairQueueCopy = {
     "scheduling": "再試行を依頼中：",
     "scheduled": "再試行が予定されました。以降の状態を確認してください。元のリクエスト：",
     "uncertain": "再試行が予定されたか確認できません。キューを更新して確認してください。元のリクエスト：",
-    "rejected": "サービスがこの再試行を受け付けませんでした。エラーを確認してください。元のリクエスト："
+    "rejected": "サービスがこの再試行を受け付けませんでした。エラーを確認してください。元のリクエスト：",
+    "filterTitle": "今回の取得結果を絞り込む",
+    "search": "ユーザー ID または元のリクエスト ID",
+    "allStatuses": "すべての状態",
+    "clear": "絞り込みを解除",
+    "scope": "再試行待ちまたは対応が必要な記録を最大 100 件取得します。絞り込みは今回の取得結果に適用され、再試行の可否はサービスが確認します。",
+    "loaded": "取得済み",
+    "matching": "条件に一致",
+    "previous": "前回正常に取得した記録を表示しています。再試行の前に正常に更新されるまで待ってください。",
+    "reading": "プロフィールとパスワードの再試行キューを読み込み中…",
+    "denied": "プロフィールとパスワードの再試行キューを表示する権限がありません。",
+    "empty": "今回の取得では再試行待ちまたは対応が必要な記録はありませんでした。",
+    "filteredEmpty": "取得した記録に条件と一致するものはありません。"
   }
 };
