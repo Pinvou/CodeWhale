@@ -238,6 +238,7 @@ RETAINED_REQUIRED = {
     *REFUND_REQUIRED,
     "TestLedgerRepairClaimActivationReadErrorsPostgres",
     "TestF06MemberQuotaRestoreUsesOrdinaryPackageExpiry",
+    "TestProviderHealthReadFailurePostgres",
     "TestMemberQuotaBatchPersistedFactsAndFinancialReplay",
     "TestMemberHoldIdentityMutationBoundaries",
     "TestPersonalUsageHoldBoundaries",
@@ -276,6 +277,7 @@ BILLING_LEAF_REQUIRED = {
 }
 BILLING_CHILD_REQUIRED = RETAINED_REQUIRED - BILLING_LEAF_REQUIRED
 EXACT_REQUIRED_CHILDREN = {
+    "TestProviderHealthReadFailurePostgres": {"discovery", "latest-five", "failure-rate"},
     "TestBillingHistoricalCatalogRollbackPostgres": {
         f"version{version}/seeded={seeded}{suffix}"
         for version in (35, 36, 37, 51)

@@ -723,7 +723,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
         self.assertEqual(billing[-1], "./internal/billing")
         self.assertEqual(billing[billing.index("-run") + 1],
                          "^(" + "|".join(sorted(RUNNER.RETAINED_REQUIRED)) + ")$")
-        self.assertEqual(len(RUNNER.RETAINED_REQUIRED), 75)
+        self.assertEqual(len(RUNNER.RETAINED_REQUIRED), 76)
         self.assertEqual(self.fixture_writes, ["create", "drop"])
         self.assertEqual(self.fixture_trace, [
             "owner-account", "owner-wallet", "owner-schema", "owner-token-schema", "owner-provisioning",
@@ -1960,7 +1960,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
         }
         self.assertEqual(RUNNER.REFUND_REQUIRED, expected)
         self.assertTrue(expected <= RUNNER.RETAINED_REQUIRED)
-        self.assertEqual(len(RUNNER.RETAINED_REQUIRED), 75)
+        self.assertEqual(len(RUNNER.RETAINED_REQUIRED), 76)
         valid = self.events(RUNNER.RETAINED_REQUIRED, RUNNER.BILLING_PACKAGE, children=True)
         options = {"package": RUNNER.BILLING_PACKAGE, "require_children": True, "exact_roots": True,
                    "children_required": RUNNER.BILLING_CHILD_REQUIRED}
@@ -2084,6 +2084,22 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
             for invalid in ([e for e in events if e.get("Test") != root + "/" + child],
                             events + [{"Action": "skip", "Package": RUNNER.ACCOUNT_PACKAGE, "Test": root + "/" + child}]):
                 with self.subTest(child=child), self.assertRaises(RuntimeError):
+                    RUNNER.verify_results(invalid, {root}, **options)
+
+    def test_provider_health_read_failure_requires_all_three_streams(self):
+        root = "TestProviderHealthReadFailurePostgres"
+        self.assertIn(root, RUNNER.RETAINED_REQUIRED)
+        self.assertIn(root, RUNNER.BILLING_CHILD_REQUIRED)
+        expected = {"discovery", "latest-five", "failure-rate"}
+        self.assertEqual(RUNNER.EXACT_REQUIRED_CHILDREN[root], expected)
+        events = self.events({root}, RUNNER.BILLING_PACKAGE, children=True)
+        options = {"package": RUNNER.BILLING_PACKAGE, "require_children": True, "exact_roots": True}
+        RUNNER.verify_results(events, {root}, **options)
+        for name in {root, *(root + "/" + child for child in expected)}:
+            for invalid in ([e for e in events if e.get("Test") != name],
+                            events + [{"Action": "skip", "Package": RUNNER.BILLING_PACKAGE, "Test": name}],
+                            events + [{"Action": "fail", "Package": RUNNER.BILLING_PACKAGE, "Test": name}]):
+                with self.subTest(name=name), self.assertRaises(RuntimeError):
                     RUNNER.verify_results(invalid, {root}, **options)
 
     def test_billing_evidence_guard_requires_both_original_relations(self):
