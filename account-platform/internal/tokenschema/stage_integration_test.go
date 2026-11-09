@@ -26,6 +26,7 @@ func TestManagementPublicMigrationInstallation(t *testing.T) {
 	t.Run("installed-f07-36-upgrade", func(t *testing.T) { testManagementPublicMigrationInstallation(t, false, 36, false) })
 	t.Run("installed-pre-runtime-37-upgrade", func(t *testing.T) { testManagementPublicMigrationInstallation(t, false, 37, false) })
 	t.Run("installed-pre-cleanup-39-upgrade", func(t *testing.T) { testManagementPublicMigrationInstallation(t, false, 39, false) })
+	t.Run("installed-pre-dispatch-index-40-upgrade", func(t *testing.T) { testManagementPublicMigrationInstallation(t, false, 40, false) })
 }
 func testManagementPublicMigrationInstallation(t *testing.T, legacy bool, previousStage int, retainedManagement bool) {
 	dsn := os.Getenv("PINVOU_TEST_TOKEN_DATABASE_URL")
@@ -137,8 +138,10 @@ func testManagementPublicMigrationInstallation(t *testing.T, legacy bool, previo
 	if previousStage > 0 {
 		previous := []migrations.Migration{}
 		for _, m := range loaded {
-			if previousStage == 39 {
-				if m.Version != 900006 {
+			if previousStage == 39 || previousStage == 40 {
+				// These fixtures are the real predecessors, excluding any later
+				// recovery or index work from the package under test.
+				if m.Version <= 900005 || (previousStage == 40 && m.Version == 900006) {
 					previous = append(previous, m)
 				}
 				continue
@@ -277,6 +280,14 @@ VALUES('11111111-1111-4111-8111-111111111116','11111111-1111-4111-8111-111111111
 	verification, err := migrations.VerifyApplied(ctx, connection, loaded)
 	if err != nil || verification.AppliedCount != len(installed) {
 		t.Fatalf("public migration verification: %+v err=%v", verification, err)
+	}
+	var dispatchIndex bool
+	if err := connection.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pg_index i JOIN pg_class c ON c.oid=i.indexrelid
+WHERE i.indexrelid=to_regclass('public.usage_cancellation_dispatch_fence_idx')
+  AND i.indrelid='public.usage_cancellation_evidence'::regclass AND i.indisvalid AND i.indisready AND i.indnatts=1
+  AND pg_get_userbyid(c.relowner)='token_schema_owner' AND pg_get_indexdef(i.indexrelid,1,false)='usage_request_id'
+  AND pg_get_expr(i.indpred,i.indrelid)='((adapter_version = ''hold-expiry-v1''::text) AND (evidence_type = ''CANCEL_REQUESTED''::text))')`).Scan(&dispatchIndex); err != nil || !dispatchIndex {
+		t.Fatal("dispatch fence index predicate or hardened owner did not match", err)
 	}
 	if retainedManagement {
 		var history string
