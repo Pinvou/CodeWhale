@@ -32,6 +32,51 @@ func TestOrganizationModelPolicyPublicPostgres(t *testing.T) {
 		}
 		readCount(org, 0)
 	})
+	t.Run("invalid-input-preserves-original-policy-and-next-write", func(t *testing.T) {
+		org := uuid.New()
+		first, err := r.SaveOrganizationModelPolicy(ctx, org, actor, 3, 0, "ALLOW_ALL", nil, "policy-input-original-key", "controlled original")
+		if err != nil {
+			t.Fatal(err)
+		}
+		facts := func() string {
+			t.Helper()
+			var value string
+			if err := r.pool.QueryRow(ctx, `SELECT jsonb_build_object(
+ 'policy',(SELECT to_jsonb(x) FROM organization_model_policies x WHERE organization_id=$1),
+ 'commands',(SELECT jsonb_agg(to_jsonb(x) ORDER BY idempotency_key) FROM organization_model_policy_commands x WHERE organization_id=$1),
+ 'audit',(SELECT jsonb_agg(to_jsonb(x) ORDER BY id) FROM organization_model_policy_audit x WHERE organization_id=$1))::text`, org).Scan(&value); err != nil {
+				t.Fatal(err)
+			}
+			return value
+		}
+		before := facts()
+		for _, invalid := range []struct {
+			mode, key, reason string
+			models            []uuid.UUID
+			version           int64
+		}{
+			{"INVALID", "controlled-invalid-key", "controlled", nil, 1},
+			{"ALLOW_ALL", "controlled-invalid-key", "", nil, 1},
+			{"ALLOW_ALL", "short", "controlled", nil, 1},
+			{"ALLOW_LIST", "controlled-invalid-key", "controlled", []uuid.UUID{uuid.Nil}, 1},
+			{"ALLOW_ALL", "controlled-invalid-key", "controlled", []uuid.UUID{uuid.New()}, 1},
+			{"ALLOW_ALL", "controlled-invalid-key", "controlled", nil, -1},
+		} {
+			_, err := r.SaveOrganizationModelPolicy(ctx, org, actor, 3, invalid.version, invalid.mode, invalid.models, invalid.key, invalid.reason)
+			if !errors.Is(err, errOrganizationPolicyInvalidInput) || errors.Is(err, ErrForbidden) || facts() != before {
+				t.Fatal("invalid input changed immutable policy facts", err)
+			}
+		}
+		next, err := r.SaveOrganizationModelPolicy(ctx, org, actor, 3, first.Version, "ALLOW_LIST", nil, "policy-input-next-valid-key", "controlled next")
+		if err != nil || next.Version != first.Version+1 {
+			t.Fatal("valid write after input rejection failed", err)
+		}
+		replay, err := r.SaveOrganizationModelPolicy(ctx, org, actor, 3, 0, "ALLOW_ALL", nil, "policy-input-original-key", "controlled original")
+		if err != nil || replay.Version != first.Version || replay.Mode != first.Mode {
+			t.Fatal("original receipt changed after rejected input", err)
+		}
+		readCount(org, 2)
+	})
 	t.Run("nil-and-explicit-empty-model-sets-have-identical-meaning", func(t *testing.T) {
 		for _, mode := range []string{"ALLOW_ALL", "ALLOW_LIST", "DENY_LIST"} {
 			org, key := uuid.New(), "organization-policy-empty-"+mode

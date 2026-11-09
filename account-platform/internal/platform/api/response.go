@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"io"
@@ -19,8 +20,23 @@ type Error struct {
 func WriteJSON(w http.ResponseWriter, status int, value any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
+	if status == http.StatusNoContent || status == http.StatusNotModified {
+		w.WriteHeader(status)
+		return
+	}
+	var encoded bytes.Buffer
+	if err := json.NewEncoder(&encoded).Encode(value); err != nil {
+		status = http.StatusInternalServerError
+		encoded.Reset()
+		encoded.WriteString("{\"code\":\"INTERNAL_ERROR\",\"message\":\"internal server error\"}\n")
+		w.Header().Del("Content-Length")
+	}
 	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(value)
+	if written, err := w.Write(encoded.Bytes()); err != nil || written != encoded.Len() {
+		// Headers may already be on the wire. Abort the incomplete response;
+		// never append a second error object or advertise delivery success.
+		panic(http.ErrAbortHandler)
+	}
 }
 
 func WriteError(w http.ResponseWriter, status int, code, message, requestID string) {
