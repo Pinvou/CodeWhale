@@ -13,7 +13,7 @@ fn interrupted_candidate(root: &Path, card_id: &str) -> (Version, PathBuf) {
     let partial = root.join("weights.incomplete");
     fs::write(&partial, b"part").unwrap();
     let version = Version {
-            measured_bytes: None,
+        measured_bytes: None,
         card_id: card_id.into(),
         version_id: revision,
         state: "downloading".into(),

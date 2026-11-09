@@ -3306,7 +3306,7 @@ fn stage_target_rejects_every_registered_version_state_and_overlap_direction_bef
                     };
                     record.models_root = Some(resource.to_string_lossy().into_owned());
                     let protected = Version {
-            measured_bytes: None,
+                        measured_bytes: None,
                         card_id: record.card_id.clone(),
                         version_id: "d".repeat(64),
                         state: state.into(),
@@ -3993,7 +3993,7 @@ fn stage_target_preserves_registered_overlap_when_a_nested_resource_becomes_an_e
     let mut historical_record = current.clone();
     historical_record.card_id = "registered-legacy-owner".into();
     let protected = Version {
-            measured_bytes: None,
+        measured_bytes: None,
         card_id: historical_record.card_id.clone(),
         version_id: "b".repeat(64),
         state: "history".into(),

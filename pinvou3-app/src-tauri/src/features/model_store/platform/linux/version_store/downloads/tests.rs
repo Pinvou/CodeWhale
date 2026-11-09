@@ -186,7 +186,7 @@ fn ordinary_root_accounting_skips_only_registered_managed_generations() {
     fs::create_dir_all(&isolated).unwrap();
     fs::write(isolated.join("partial"), vec![0; 20]).unwrap();
     super::super::put(&Version {
-            measured_bytes: None,
+        measured_bytes: None,
         card_id: "other".into(),
         version_id: "revision".into(),
         state: "failed".into(),
