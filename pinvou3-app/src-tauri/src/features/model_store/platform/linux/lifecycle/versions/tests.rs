@@ -2732,19 +2732,16 @@ fn unreadable_residuals_block_quota_admission_in_every_retained_state() {
                 rusqlite::params![retained.card_id, retained.version_id],
             )
             .unwrap();
-        // Counting while holding the existing reservation lock must not take
-        // that lock recursively. The admission caller owns synchronization.
-        let reservation = version_store::wait_quota_reservation_lock(|| false, || {}).unwrap();
-        let charged =
-            db::total_managed_bytes().unwrap() as u64 + version_store::retained_bytes().unwrap();
-        drop(reservation);
-        mgr.settings.storage_quota_gb = Some((charged - 32768) as f64 / 1073741824.0);
-        let active = db::get_store_model(&current.card_id).unwrap().unwrap();
-        let next_id = "f".repeat(64);
         let permissions = fs::metadata(&residual).unwrap().permissions();
         fs::set_permissions(&residual, fs::Permissions::from_mode(0o000)).unwrap();
         let measurement = version_store::retained_bytes();
         let replacing = version_store::retained_bytes_without_reservation(&current.card_id, &id);
+        // Counting while holding the existing reservation lock must not take
+        // that lock recursively. The admission caller owns synchronization.
+        let reservation = version_store::wait_quota_reservation_lock(|| false, || {}).unwrap();
+        drop(reservation);
+        let active = db::get_store_model(&current.card_id).unwrap().unwrap();
+        let next_id = "f".repeat(64);
         let blocked = mgr.stage_verified(
             &active,
             &card,
@@ -2773,8 +2770,13 @@ fn unreadable_residuals_block_quota_admission_in_every_retained_state() {
         if let Some(retry) = retry {
             assert!(retry.unwrap_err().to_string().contains("无法核算"));
         }
-        // Restoring access makes the scan possible, but the retained bytes
-        // still prevent a second stage from fitting into the configured quota.
+        // Restoring access makes the calibration possible; it charges the
+        // external residual and persists the measurement. The quota is set
+        // from that calibrated charge so the second stage still cannot fit.
+        let charged =
+            db::total_managed_bytes().unwrap() as u64 + version_store::retained_bytes().unwrap();
+        assert!(charged >= 65536, "{state}: the residual must be charged");
+        mgr.settings.storage_quota_gb = Some((charged - 32768) as f64 / 1073741824.0);
         assert_eq!(
             db::total_managed_bytes().unwrap() as u64 + version_store::retained_bytes().unwrap(),
             charged
