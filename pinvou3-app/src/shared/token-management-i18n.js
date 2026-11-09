@@ -163,13 +163,14 @@ function completeTokenManagementCopy(translations) {
   for (const language of ['zh', 'en', 'ja']) {
     const copy = translations[language].modelToken;
     const provisioningCopy = {
-      zh: { title: 'Provisioning 概览', boundary: '仅汇总当前路由 Provisioning 权威事实。', unavailable: 'Provisioning 概览暂时不可用，运行列表仍可使用。' },
-      en: { title: 'Provisioning overview', boundary: 'Current authoritative route provisioning facts only.', unavailable: 'Provisioning overview is unavailable; the provisioning list remains available.' },
-      ja: { title: 'Provisioning 概要', boundary: '現在のルート Provisioning の正式な情報のみを集計します。', unavailable: 'Provisioning 概要は利用できません。実行一覧は引き続き利用できます。' },
+      zh: { title: 'Provisioning 概览', boundary: '仅汇总当前路由 Provisioning 权威事实。', unavailable: '暂时无法读取资源配置概览。' },
+      en: { title: 'Provisioning overview', boundary: 'Current authoritative route provisioning facts only.', unavailable: 'The provisioning overview is temporarily unavailable.' },
+      ja: { title: 'Provisioning 概要', boundary: '現在のルート Provisioning の正式な情報のみを集計します。', unavailable: 'リソース設定の概要を一時的に読み込めません。' },
     }[language];
     copy.pageOverviews.titles.modelOperations = provisioningCopy.title;
     copy.pageOverviews.boundaries.modelOperations = provisioningCopy.boundary;
     copy.pageOverviews.unavailable.modelOperations = provisioningCopy.unavailable;
+    copy.pageOverviews.provisioningFailure = { language, ...{"zh":{"diagnostics":"查看诊断信息","code":"服务错误码","localList":"任务列表独立加载，请以下方状态为准。"},"en":{"diagnostics":"View diagnostics","code":"Service error code","localList":"The task list loads separately. Check its status below."},"ja":{"diagnostics":"診断情報を表示","code":"サービスエラーコード","localList":"タスク一覧は個別に読み込まれます。下の状態をご確認ください。"}}[language] };
 
     const { pricingControls, ...modelAdditions } = additions[language];
     Object.assign(translations[language].pricingLifecycle, pricingControls, formulaSelectionCopy[language]);

@@ -1,4 +1,5 @@
 import './admin-model-page-overview.css';
+import { AdminIdentifier } from './AdminIdentifier.jsx';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   modelTokenPageOverviewDrilldown,
@@ -45,10 +46,26 @@ function MetricCard({ section, metric, data, labels, onDrilldown }) {
     : <div className="adm-model-overview-metric">{content}</div>;
 }
 
+function ProvisioningOverviewFailure({ error, stale, retry, retrySeconds, labels, copy, client, userID, cacheKey, authorizationVersion, sessionEpoch }) {
+  const words = labels.provisioningFailure;
+  const values = [[words.code, error.responseCode], [copy.requestID, error.requestID]].filter(([, value]) => value);
+  return <div className="adm-provisioning-overview-failure">
+    <p role="alert"><strong>{error.status === 403 ? labels.permissionChanged : labels.unavailable.modelOperations}</strong>
+      <span>{words.localList}{stale ? ' · ' + labels.stale : ''}</span></p>
+    <button type="button" disabled={retrySeconds > 0} onClick={retry}>{retrySeconds > 0 ? labels.retryAfter(retrySeconds) : copy.retry}</button>
+    {values.length > 0 && <details key={error.generation}><summary>{words.diagnostics}</summary>
+      <dl>{values.map(([label, value]) => <div key={label}><dt>{label}</dt><dd><AdminIdentifier {...{ client, value, label, sessionEpoch }}
+        owner={userID} routeScope={cacheKey + ':' + error.generation} language={words.language} platformAuthorizationVersion={authorizationVersion} alwaysExpanded /></dd></div>)}</dl>
+    </details>}
+  </div>;
+}
+
 export function AdminModelTokenPageOverview({ section, client, copy, permissions, userID, authorizationVersion, enabled, onDrilldown }) {
   const labels = copy.pageOverviews;
   const plan = useMemo(() => planAdminModelTokenPageOverview(section, permissions, enabled), [section, permissions, enabled]);
   const cacheKey = useMemo(() => plan ? modelTokenPageOverviewCacheKey({ userID, authorizationVersion, section, permissionView: plan.permissionView, window: plan.window }) : '', [authorizationVersion, plan, section, userID]);
+  const localProvisioning = section === 'modelOperations';
+  const acceptedSession = useMemo(() => client?.financeSessionEpoch, [client, cacheKey]);
   const [refreshVersion, setRefreshVersion] = useState(0);
   const [clock, setClock] = useState(Date.now());
   const [state, setState] = useState({ key: '', loading: false, data: null, error: null, retryAt: 0, updatedAt: 0 });
@@ -72,7 +89,7 @@ export function AdminModelTokenPageOverview({ section, client, copy, permissions
       const failedAt = Date.now();
       setClock(failedAt);
       const status = Number(error?.status || 0);
-      setState((current) => ({ ...current, key: cacheKey, loading: false, data: status === 403 ? null : current.data, error: { status, code: error?.code || 'OVERVIEW_UNAVAILABLE', requestID: error?.requestID || '' }, retryAt: retrySeconds ? failedAt + retrySeconds * 1000 : 0 }));
+      setState((current) => ({ ...current, key: cacheKey, loading: false, data: status === 403 ? null : current.data, error: { status, code: error?.code || 'OVERVIEW_UNAVAILABLE', requestID: error?.requestID || '', responseCode: typeof error?.responseCode === 'string' && /^[A-Z0-9_]{1,160}$/.test(error.responseCode) ? error.responseCode : '', generation }, retryAt: retrySeconds ? failedAt + retrySeconds * 1000 : 0 }));
     }
   }, [cacheKey, client, plan, section]);
 
@@ -96,19 +113,22 @@ export function AdminModelTokenPageOverview({ section, client, copy, permissions
   }, [clock, state.retryAt]);
 
   if (!plan || !cacheKey) return null;
-  const data = state.key === cacheKey ? state.data : null;
-  const retrySeconds = state.retryAt > clock ? Math.ceil((state.retryAt - clock) / 1000) : 0;
+  const shown = localProvisioning && (state.key !== cacheKey || acceptedSession !== client?.financeSessionEpoch) ? { loading: true, retryAt: 0, error: null } : state;
+  const data = shown.key === cacheKey ? shown.data : null;
+  const retry = () => setRefreshVersion((value) => value + 1);
+  const retrySeconds = shown.retryAt > clock ? Math.ceil((shown.retryAt - clock) / 1000) : 0;
   const title = labels.titles[section];
   return <section className="adm-model-operations-overview adm-model-page-overview" aria-labelledby={`model-page-overview-title-${section}`}>
     <header>
       <div><span className="adm-eyebrow">{labels.eyebrow}</span><h2 id={`model-page-overview-title-${section}`}>{title}</h2><p>{labels.boundaries[section]}</p></div>
       <div className="adm-model-overview-actions">
 
-        <button type="button" disabled={state.loading || retrySeconds > 0} onClick={() => setRefreshVersion((value) => value + 1)}>{retrySeconds > 0 ? labels.retryAfter(retrySeconds) : copy.refreshSource}</button>
+        {!(localProvisioning && shown.error) && <button type="button" disabled={shown.loading || retrySeconds > 0} onClick={retry}>{retrySeconds > 0 ? labels.retryAfter(retrySeconds) : copy.refreshSource}</button>}
       </div>
     </header>
-    {state.loading && !data && <div className="adm-model-overview-state" role="status">{copy.loading}</div>}
-    {state.error && <div className="adm-model-overview-state error" role="alert"><span>{state.error.status === 403 ? labels.permissionChanged : labels.unavailable[section]}{state.error.code ? ` · ${state.error.code}` : ''}{state.error.requestID ? ` · ${copy.requestID}: ${state.error.requestID}` : ''}{data ? ` · ${labels.stale}` : ''}</span><button type="button" disabled={retrySeconds > 0} onClick={() => setRefreshVersion((value) => value + 1)}>{retrySeconds > 0 ? labels.retryAfter(retrySeconds) : copy.retry}</button></div>}
+    {shown.loading && !data && <div className="adm-model-overview-state" role="status">{copy.loading}</div>}
+    {localProvisioning && shown.error && <ProvisioningOverviewFailure error={{ ...shown.error, requestID: typeof shown.error.requestID === 'string' && /^[A-Za-z0-9_.:-]{1,160}$/.test(shown.error.requestID) ? shown.error.requestID : '' }} stale={Boolean(data)} sessionEpoch={acceptedSession} {...{ retry, retrySeconds, labels, copy, client, userID, cacheKey, authorizationVersion }} />}
+    {!localProvisioning && state.error && <div className="adm-model-overview-state error" role="alert"><span>{state.error.status === 403 ? labels.permissionChanged : labels.unavailable[section]}{state.error.code ? ` · ${state.error.code}` : ''}{state.error.requestID ? ` · ${copy.requestID}: ${state.error.requestID}` : ''}{data ? ` · ${labels.stale}` : ''}</span><button type="button" disabled={retrySeconds > 0} onClick={() => setRefreshVersion((value) => value + 1)}>{retrySeconds > 0 ? labels.retryAfter(retrySeconds) : copy.retry}</button></div>}
     {data && <>
       <div className="adm-model-overview-groups">{overviewGroups(section, data).map((group) => <article key={group.key}><h3>{labels.groups[group.key]}</h3><div>{[...group.metrics.values()].map((metric) => <MetricCard key={metric.key} section={section} metric={metric} data={data} labels={labels} onDrilldown={onDrilldown} />)}</div></article>)}</div>
       <footer>{labels.asOf}: {new Date(data.as_of).toLocaleString()} · {copy.lastUpdated}: {new Date(state.updatedAt).toLocaleString()} · {labels.zeroKnown} · {labels.snapshotBoundary}</footer>
