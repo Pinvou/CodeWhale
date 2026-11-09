@@ -1357,14 +1357,18 @@ async fn insert_pending_permission(
     let bridge = request.bridge.clone();
     let mut request = Some(request);
     let insert = || {
-        let candidate = request.as_ref().expect("permission insertion runs once");
+        let Some(candidate) = request.as_ref() else {
+            return false;
+        };
         if !owners
             .callback_owner(&candidate.view.session_id, identity)
             .is_ok_and(|current| current.as_ref() == candidate.remote_owner.as_ref())
         {
             return false;
         }
-        let candidate = request.take().expect("checked permission candidate");
+        let Some(candidate) = request.take() else {
+            return false;
+        };
         if let Some(previous) = pending.insert(key, candidate) {
             let _ = previous.respond(RequestPermissionResponse::new(
                 RequestPermissionOutcome::Cancelled,
