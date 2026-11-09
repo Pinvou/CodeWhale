@@ -270,6 +270,8 @@ attempted-task 台账检查；闭包不重入会话管理器。close/reopen 不�
 loopback WebSocket 向存活 lane 发撤销，确认旧 sender/recv 失效、新 lane 可启动，
 并故意复用 generation 验证旧 Drop 不清新绑定；迟到旧 reader 撤销不得清新端点。
 
+控制入站队列保留 128 帧上限。当前 reader 遇到队列已满或接收端已关闭时，立即退休该通道的绑定并记录固定错误码。接收端丢弃该绑定的缓冲帧，按已有的通道关闭路径退出。共享的 Legacy Web v2 端点仍可继续服务。
+
 归档 seal 在同一进程 owner/fd-lock 内、写不可逆 pending 前检查 local ID、remote
 ref 与 client/task 两域冲突。仅完全相同不可变记录及完整墓碑可幂等返回，不增长
 水位；不同内容或复用标识先失败，不毒化 anchor。原 pending 恢复的严格水位、

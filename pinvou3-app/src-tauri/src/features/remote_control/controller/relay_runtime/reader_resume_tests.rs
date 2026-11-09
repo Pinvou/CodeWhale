@@ -1552,4 +1552,40 @@ pub(crate) async fn controller_lane_outage_round_trip<T>(
             .is_err(),
         "endpoint-scoped legacy error must not enter the controller lane"
     );
+
+    let retired = channel.sender();
+    let controller_frame = json!({"v":1,"type":"error","request_id":"request-inbound-overload",
+        "code":"invalid_message","message":"test frame"});
+    for _ in 0..129 {
+        send(&mut socket, &controller_frame).await;
+    }
+    let mut marker = scoped;
+    marker["message"] = json!("legacy route after controller overload");
+    send(&mut socket, &marker).await;
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while relay.status().last_error.as_deref() != Some("legacy route after controller overload")
+        {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("same endpoint must continue to process legacy frames after the controller overflow");
+    assert_eq!(
+        retired.try_send(json!({})).unwrap_err(),
+        "desktop_controller_generation_stale"
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_secs(3), channel.recv())
+            .await
+            .unwrap()
+            .is_none(),
+        "a retired lane must discard buffered frames"
+    );
+    let mut replacement = relay
+        .start_controller_relay(channel.generation())
+        .await
+        .expect("the same endpoint can bind a new lane");
+    assert!(!retired.same_binding(&replacement.sender()));
+    drop(channel);
+    assert_lifecycle_route(&mut socket, &mut replacement).await;
 }
