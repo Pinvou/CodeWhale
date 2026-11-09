@@ -2,6 +2,8 @@ import React, { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { localizedAccountPlatformError } from "./error-localization.js";
 import { formatSystemCount, requireSystemStatus, systemDiagnosticMessage } from "./admin-system-status.js";
+import { systemGroupsCopy } from '../../shared/admin-system-presentation-i18n.js';
+import './admin-system-presentation.css';
 const NO_PERMISSIONS = [];
 
 function ReadTable({ title, columns, items, copy, description, limitation, emptyLabel }) {
@@ -95,17 +97,34 @@ export function AdminSystemStatusWorkspace({
   const status = visible.status;
   const checkedAt = typeof status?.checked_at === "string" && Number.isFinite(Date.parse(status.checked_at)) ? status.checked_at : null;
   const snapshotHelp = <p className="adm-system-snapshot-help">{labels.snapshotHelp}</p>;
-  const metrics = status && <div className="adm-metrics">{[
-    [labels.healthyServices, `${count(status.services.filter(item => item.status === "HEALTHY").length)} / ${count(status.services.length)}`],
-    [labels.pendingReconciliation, count(status.reconciliation.pending)],
-    [labels.stoppedReconciliation, count(status.reconciliation.stopped)],
-  ].map(([label, value], index) => <article key={label}>
-    <span>{label}</span><strong>{value}</strong>
-    {index === 2 && <div className="adm-system-reconciliation-detail">
-      {onOpenReconciliation ? <button className="adm-system-reconciliation-link" type="button" onClick={onOpenReconciliation}>{labels.relatedQueue}</button> : <small>{permissions.includes("platform.usage.read") ? labels.relatedQueueUnavailable : labels.relatedQueuePermission}</small>}
-      <small>{labels.relatedQueueHelp}</small>
-    </div>}
-  </article>)}</div>;
+  const relatedQueue = <div className="adm-system-reconciliation-detail">
+    {onOpenReconciliation ? <button className="adm-system-reconciliation-link" type="button" onClick={onOpenReconciliation}>{labels.relatedQueue}</button> : <small>{permissions.includes("platform.usage.read") ? labels.relatedQueueUnavailable : labels.relatedQueuePermission}</small>}
+    <small>{labels.relatedQueueHelp}</small>
+  </div>;
+  const metric = (label, value, extra = null, tone) => <article className={tone}>
+    <span>{label}</span><strong>{value}</strong>{extra}
+  </article>;
+  const groups = systemGroupsCopy[language] || systemGroupsCopy.zh;
+  const healthy = status && `${count(status.services.filter(item => item.status === "HEALTHY").length)} / ${count(status.services.length)}`;
+  const pending = status && count(status.reconciliation.pending), stopped = status && count(status.reconciliation.stopped);
+  const stoppedNeedsReview = stopped !== "—" && stopped !== count(0);
+  const metrics = status && (compact ? <div className="adm-metrics">
+    {metric(labels.healthyServices, healthy)}
+    {metric(labels.pendingReconciliation, pending)}
+    {metric(labels.stoppedReconciliation, stopped, relatedQueue)}
+  </div> : <div className="adm-system-metric-groups">
+    <section className="adm-system-metric-group">
+      <h2>{groups.services}</h2>
+      <div className="adm-metrics adm-system-service-metric">{metric(labels.healthyServices, healthy)}</div>
+    </section>
+    <section className="adm-system-metric-group">
+      <h2>{groups.jobs}</h2>
+      <div className="adm-metrics adm-system-job-metrics">
+        {metric(labels.pendingReconciliation, pending)}
+        {metric(labels.stoppedReconciliation, stopped, <>{stoppedNeedsReview && <p className="adm-system-stopped-attention">{groups.attention}</p>}{relatedQueue}</>, stoppedNeedsReview ? "adm-system-stopped-warning" : undefined)}
+      </div>
+    </section>
+  </div>);
   if (compact) return <section className="adm-panel adm-health-strip" aria-label={copy.nav.system}>
     <header><h3>{copy.nav.system}</h3><button disabled={visible.loading} onClick={() => setRefresh(value => value + 1)}>{copy.refresh}</button></header>
     {visible.loading && <p role="status">{copy.loading}</p>}
