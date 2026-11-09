@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { financeCopy } from '../../shared/i18n.js';
-import { approvalReadCopy, pendingApprovalReadCopy, executionApprovalReadCopy, approvalDirectoryCopy } from '../../shared/admin-approval-read-i18n.js';
+import { approvalReadCopy, pendingApprovalReadCopy, executionApprovalReadCopy, approvalDirectoryCopy, approvalDirectoryToolbarCopy } from '../../shared/admin-approval-read-i18n.js';
 import { Approvals } from './AdminFinanceWorkspace.jsx';
 import { approvalCommands, approvalViews, approvalStatuses, executionStatuses, approvalQuery, approvalExpiryDate, readApprovalRoute } from './admin-approval-actions.js';
 import { approvalLabel } from './admin-approval-presentation.js';
@@ -13,6 +13,11 @@ const directoryRepairTabs = new Map([
   ['PAYMENT_FINANCIAL_REPAIR', 'paymentrepair'], ['REFUND_EXCEPTION_REPAIR', 'refundrepair'], ['CHARGEBACK_FINANCIAL_REPAIR', 'chargebackrepair'],
   ['RECONCILIATION_FINANCIAL_REPAIR', 'reconciliationrepair'], ['USAGE_SETTLEMENT_REPAIR', 'usagesettlementrepair'],
 ]);
+
+const billingCommands = new Set(['WALLET_ADJUSTMENT', 'PAYMENT_PROVIDER_RESUME', 'PAYMENT_PRODUCT_RESUME', ...directoryRepairTabs.keys()]);
+const tokenCommands = new Set(['TOKEN_MODEL_LIFECYCLE_CHANGE', 'TOKEN_MODEL_CATALOG_ROLLBACK', 'TOKEN_CREDENTIAL_REVOKE']);
+const directoryRisks = ['FINANCIAL_FACT_CHANGE', 'GOVERNANCE_OR_NORMAL_STATE_MACHINE'];
+const emptyDirectoryFilters = { query: '', domain: '', risk: '' };
 
 export function AdminApprovalWorkspace({ client, copy, language, me, onNavigate, routeSearch, onRouteChange }) {
   const c = copy.approvalCenter;
@@ -27,14 +32,25 @@ export function AdminApprovalWorkspace({ client, copy, language, me, onNavigate,
   const mine = route.view === 'mine', mineWords = approvalReadCopy[language], mineTargetID = React.useId();
   const [blocked, setBlocked] = useState(false);
   const [directory, setDirectory] = useState(null);
-  const [directoryState, setDirectoryState] = useState('loading');
+  const [directoryState, setDirectoryState] = useState(null);
+  const [directoryFilters, setDirectoryFilters] = useState(emptyDirectoryFilters);
   const [refresh, setRefresh] = useState(0);
   const owner = `${me.user_id}:${me.platform_authorization_version || me.active_context?.platform_authorization_version || 0}`;
   const localRoute = useRef(null);
   const directoryEpoch = client.financeSessionEpoch || 0;
   const directoryScope = useMemo(() => ({ client, owner, view: route.view, epoch: directoryEpoch }), [client, owner, route.view, directoryEpoch]);
   const directoryWords = approvalDirectoryCopy[language];
-  const currentDirectory = directory?.scope === directoryScope ? directory.value : null;
+  const currentDirectory = directory?.scope === directoryScope && directory.refresh === refresh ? directory.value : null;
+  const currentDirectoryState = directoryState?.scope === directoryScope && directoryState.refresh === refresh ? directoryState.phase : 'loading';
+  const directoryTools = approvalDirectoryToolbarCopy[language];
+  const queryTerm = directoryFilters.query.trim().toLocaleLowerCase(language);
+  const visiblePolicies = currentDirectory?.items.filter(item => {
+    const label = approvalLabel(c.policyCommandLabels, item.command_type).toLocaleLowerCase(language);
+    const domain = billingCommands.has(item.command_type) ? 'billing' : tokenCommands.has(item.command_type) ? 'token' : '';
+    const risk = directoryRisks.includes(item.risk_class) ? item.risk_class : 'other';
+    return (!queryTerm || label.includes(queryTerm) || item.command_type.toLocaleLowerCase(language).includes(queryTerm)) &&
+      (!directoryFilters.domain || directoryFilters.domain === domain) && (!directoryFilters.risk || directoryFilters.risk === risk);
+  });
   const canVisitRepairs = (me.platform_permissions || []).includes('platform.billing.repairs.request') && !!onNavigate;
   const externalRoute = useRef({ search: routeSearch, applied: true });
   useEffect(() => {
@@ -88,15 +104,17 @@ export function AdminApprovalWorkspace({ client, copy, language, me, onNavigate,
   useEffect(() => {
     if (route.view !== 'directory') return undefined;
     const controller = new AbortController();
-    setDirectory(null); setDirectoryState('loading');
+    const setPhase = phase => setDirectoryState({ scope: directoryScope, refresh, phase });
+    setDirectory(null); setPhase('loading');
     void client.governedApprovalDirectory(controller.signal).then(value => {
       if (controller.signal.aborted) return;
       if (!Array.isArray(value?.items)) throw new Error('INVALID_APPROVAL_DIRECTORY');
-      setDirectory({ scope: directoryScope, value: { ...value, items: value.items.filter(item => item?.visible === true && approvalCommands.includes(item.command_type)) } });
-      setDirectoryState('ready');
-    }).catch(() => { if (!controller.signal.aborted) setDirectoryState('error'); });
+      setDirectory({ scope: directoryScope, refresh, value: { ...value, items: value.items.filter(item => item?.visible === true && approvalCommands.includes(item.command_type)) } });
+      setPhase('ready');
+    }).catch(error => { if (!controller.signal.aborted) setPhase(error?.status === 403 ? 'denied' : 'error'); });
     return () => controller.abort();
   }, [client, directoryScope, route.view, refresh]);
+  useEffect(() => { setDirectoryFilters(emptyDirectoryFilters); }, [directoryScope]);
   return <section className="adm-approval-workspace" aria-label={copy.nav.approvals}>
     <nav className="adm-tabs adm-approval-tabs" aria-label={c.views}>{approvalViews.map(view => <button key={view} className={route.view === view ? 'active' : undefined} disabled={blocked} aria-current={route.view === view ? 'page' : undefined} onClick={() => { if (view !== route.view) { setMineStatus(''); setExpiryDraft({ from: '', to: '' }); setInvalidExpiry(false); } changeRoute({ view, status: '', requestID: '', ...(view !== route.view ? { expiresFrom: '', expiresTo: '' } : {}) }); }}>{c[view]}</button>)}</nav>
     {route.view !== 'directory' && <form className={'adm-approval-toolbar' + (pending ? ' adm-approval-pending-toolbar' : '')} onSubmit={event => { event.preventDefault(); if (mine) applyMine(); else if (route.view === 'pending') applyPendingDeadline(); else changeRoute({ commandType: command, target: target.trim(), requestID: '' }); }}>
@@ -112,9 +130,22 @@ export function AdminApprovalWorkspace({ client, copy, language, me, onNavigate,
       </select></label>}{mine || pending ? <div className="adm-approval-query-actions"><button type="submit" className="adm-approval-query" disabled={blocked}>{listWords.query}</button><button type="button" disabled={blocked} onClick={() => mine ? applyMine(true) : applyPendingDeadline(true)}>{listWords.reset}</button></div> : <button disabled={blocked}>{copy.refresh}</button>}
     </form>}
     {route.view === 'execution' && <p className="adm-approval-execution-scope">{c.executionScopeLabel}: <strong>{approvalLabel(c.statusLabels, query.status)}</strong><small>{c.executionDefaultHelp}</small></p>}
-    {route.view === 'directory' ? <><button onClick={() => setRefresh(value => value + 1)}>{c.refresh}</button>
-      {directoryState === 'loading' && <p role="status">{c.loading}</p>}{directoryState === 'error' && <p role="alert">{c.listUnavailable}</p>}
-      {currentDirectory && <div className="adm-table-wrap adm-approval-policy-wrap"><table className="adm-approval-policy-table"><thead><tr><th>{c.commandType}</th><th>{c.risk}</th><th>{c.requestable}</th></tr></thead><tbody>{currentDirectory.items.map(item => {
+    {route.view === 'directory' ? <>
+      <div className="adm-approval-toolbar adm-approval-directory-toolbar" role="group" aria-label={directoryTools.filters}>
+        <label>{directoryTools.search}<input type="search" value={directoryFilters.query} onChange={event => setDirectoryFilters(value => ({ ...value, query: event.target.value }))} /></label>
+        <label>{directoryTools.domain}<select value={directoryFilters.domain} onChange={event => setDirectoryFilters(value => ({ ...value, domain: event.target.value }))}>
+          <option value="">{directoryTools.all}</option><option value="billing">{directoryTools.billing}</option><option value="token">{directoryTools.token}</option>
+        </select></label>
+        <label>{c.risk}<select value={directoryFilters.risk} onChange={event => setDirectoryFilters(value => ({ ...value, risk: event.target.value }))}>
+          <option value="">{directoryTools.all}</option>{directoryRisks.map(risk => <option key={risk} value={risk}>{approvalLabel(c.policyRiskLabels, risk)}</option>)}<option value="other">{directoryTools.otherRisk}</option>
+        </select></label>
+        <div className="adm-approval-query-actions"><button type="button" onClick={() => setDirectoryFilters(emptyDirectoryFilters)}>{directoryTools.clear}</button>
+          <button type="button" disabled={currentDirectoryState === 'loading'} onClick={() => setRefresh(value => value + 1)}>{currentDirectoryState === 'error' ? directoryTools.retry : c.refresh}</button></div>
+      </div>
+      {currentDirectoryState === 'loading' && <p role="status" className="adm-approval-directory-state">{directoryTools.loading}</p>}
+      {['error','denied'].includes(currentDirectoryState) && <p role="alert" className="adm-approval-directory-state">{currentDirectoryState === 'denied' ? directoryTools.denied : directoryTools.error}</p>}
+      {currentDirectory && !visiblePolicies.length && <p role="status" className="adm-approval-directory-state">{currentDirectory.items.length ? directoryTools.filteredEmpty : directoryTools.empty}</p>}
+      {!!visiblePolicies?.length && <div className="adm-table-wrap adm-approval-policy-wrap"><table className="adm-approval-policy-table"><thead><tr><th>{c.commandType}</th><th>{c.risk}</th><th>{c.requestable}</th></tr></thead><tbody>{visiblePolicies.map(item => {
         const commandLabel = approvalLabel(c.policyCommandLabels, item.command_type), riskLabel = approvalLabel(c.policyRiskLabels, item.risk_class);
         const requestable = item.requestable === true, unavailable = item.requestable === false, tab = requestable && canVisitRepairs ? directoryRepairTabs.get(item.command_type) : undefined;
         return <tr key={`${item.command_type}:${item.policy_version}`}>
