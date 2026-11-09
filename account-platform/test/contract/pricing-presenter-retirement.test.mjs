@@ -8,6 +8,7 @@ import * as mutation from '../../../pinvou3-app/src/features/account-platform/pr
 import * as lifecycle from '../../../pinvou3-app/src/features/account-platform/pricing-lifecycle.js';
 import { integerMoney } from '../../../pinvou3-app/src/features/account-platform/finance-contract.js';
 import { secureRequestID } from '../../../pinvou3-app/src/features/account-platform/request-id.js';
+import { tokenManagementCopy } from '../../../pinvou3-app/src/shared/i18n.js';
 
 // Execute the production presenter/controller body, including its actual handlers
 // and state setters. This scheduler caches memo/callback dependencies and can
@@ -20,11 +21,14 @@ assert.ok(begin >= 0 && end > begin);
 const body = source.slice(begin, end).replace('export function', 'function');
 const constants = source.slice(source.indexOf('const mutationKey'), source.indexOf('function PricingStatus'));
 const expose = 'return { editor, unitForm, pendingAction, editorErrors, errors, formulaPage, formulaAccessDenied, formulaAuthority, loadProtocols, unknownConfiguration, unknownMutation, setEditor, setUnitForm, setPendingAction, setProtocols, openEdit, openCreate, openTransition, submitDraft, submitUnit, runPendingAction, reloadUnknownConfiguration, startAfterUnknown, verifyUnknown }; }';
+let presenterSequence = 0;
 function presenter(client, owner, { effects = false } = {}) {
   let index = 0, defer = false, dirty = false;
+  const presenterID = ++presenterSequence;
   const slots = [], queued = [], pendingEffects = [];
   const sameDeps = (a, b) => a && b && a.length === b.length && a.every((v, i) => Object.is(v, b[i]));
   const hooks = {
+    useId() { const slot = index++; slots[slot] ??= `pricing-presenter-${presenterID}-${slot}`; return slots[slot]; },
     useState(initial) {
       const slot = index++;
       if (!(slot in slots)) slots[slot] = typeof initial === 'function' ? initial() : initial;
@@ -55,7 +59,7 @@ function presenter(client, owner, { effects = false } = {}) {
     useSyncExternalStore: (_subscribe, get) => get(),
   };
   const render = new Function('scope', `with (scope) { ${constants} ${body} ${expose}; return PricingLifecycleWorkspace; }`)({ ...hooks, ...state, ...recovery, ...mutation, ...lifecycle, integerMoney, secureRequestID });
-  const labels = { errors: {}, actionFailed: 'controlled failure', permissionLost: 'permission lost' };
+  const labels = { ...tokenManagementCopy.zh.pricingLifecycle, errors: {}, actionFailed: 'controlled failure', permissionLost: 'permission lost' };
   const driver = {
     render() { index = 0; return render({ client, owner, permissions: ['platform.pricing.manage'], copy: { billing: { pricingLifecycle: labels } } }); },
     setOwner(next) { owner = next; },
