@@ -77,8 +77,24 @@ try {
   await resolveOld();
   await click('[role="dialog"]', 'close');
   await page.waitForSelector('[role="dialog"]', { hidden: true });
+  for (const scope of ['[data-testid="remote-controller-panel"]', '[role="dialog"]']) {
+    await load();
+    await open();
+    await click(scope, 'disconnect');
+    await page.waitForFunction(() => window.disconnectFixture.requests.length === 1);
+    await page.evaluate(() => window.disconnectFixture.setConnection({ status: 'disconnected', connectionId: null }));
+    await flush();
+    await page.evaluate(() => window.disconnectFixture.requests[0].resolve({ status: 'disconnected' }));
+    await flush();
+    assert.equal(await page.$$eval('[role="dialog"]', nodes => nodes.length), 0);
+    await page.evaluate(() => window.disconnectFixture.setConnection({ status: 'connected', connectionId: 'connection-next' }));
+    await flush();
+    await open();
+    await click('[role="dialog"]', 'close');
+    await page.waitForSelector('[role="dialog"]', { hidden: true });
+  }
   assert.deepEqual(errors, []);
-  console.log('remote_disconnect_ownership_smoke passed three mounted UI interleavings (controlled host IPC)');
+  console.log('remote_disconnect_ownership_smoke passed five mounted UI interleavings (controlled host IPC)');
 } finally {
   if (browser) await browser.close();
   if (vite) await vite.close();

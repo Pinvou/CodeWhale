@@ -5230,16 +5230,13 @@ const App = () => {
                         onClose={closeRemoteConversation}
                         onOpenChat={openCurrentRemoteProxy}
                         onRequestDisconnect={async () => {
-                          const connectionId = bsRef.current?.controllerConnection?.connectionId;
                           if (!bridge?.available || !bridge.desktopRemoteControl) {
                             const failure = new Error('desktop_remote_control_unsupported');
                             failure.code = 'desktop_remote_control_unsupported';
                             throw failure;
                           }
                           await bridge.desktopRemoteControl.controllerDisconnect();
-                          if (bsRef.current?.controllerConnection?.connectionId === connectionId) {
-                            closeRemoteConversation();
-                          }
+                          closeRemoteConversation();
                         }}
                       />
                     </div>

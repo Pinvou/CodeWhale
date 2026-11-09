@@ -133,7 +133,9 @@ export default function RemoteControllerPanel({
         return;
       }
       await bridge.desktopRemoteControl.controllerDisconnect();
-      if (isCurrent()) onConversationClose?.();
+      // The parent close callback owns the opening captured at invocation.
+      // A normal terminal event can already have retired the connection ID.
+      onConversationClose?.();
     } catch (failure) {
       if (isCurrent()) setDisconnectError(connectionErrorKey(failure?.code));
     } finally {

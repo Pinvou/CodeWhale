@@ -296,6 +296,7 @@ mod tests {
                 negotiated_capabilities: original.negotiated_capabilities.clone(),
             })
             .unwrap();
+        let old_transport = transport.clone();
         manager.replace_transport(transport);
         let (old_session, mut old_reply, old_download) =
             add_resources(&original, "artifact-original");
@@ -319,6 +320,21 @@ mod tests {
         manager
             .complete_connected(next_operation, successor.clone())
             .unwrap();
+        let (next_transport, _next_receiver) = transport_channels(
+            ControllerRole::ControllerA,
+            "generation-0001",
+            4,
+            2,
+            8192,
+            2048,
+        );
+        next_transport
+            .install_authenticated_lease(AuthenticatedLease {
+                context: successor.context.clone(),
+                negotiated_capabilities: successor.negotiated_capabilities.clone(),
+            })
+            .unwrap();
+        manager.replace_transport(next_transport.clone());
         let (next_session, mut next_reply, next_download) =
             add_resources(&successor, "artifact-successor");
         // Closing the controlled transport releases both real receipt waits.
@@ -334,6 +350,9 @@ mod tests {
             "connection-successor"
         );
         assert_eq!(published.load(Ordering::SeqCst), 0);
+        assert!(old_transport.is_stopped());
+        assert!(!next_transport.is_stopped());
+        assert!(manager.send_disconnect("transport_probe"));
         assert!(
             sessions
                 .state(&old_session.session_ref, &original.context)
@@ -388,9 +407,18 @@ mod tests {
         );
         assert_eq!(index.len(), 1);
         disconnect_controller_state(&manager, &sessions, &actions, &downloads, publish).await;
+        assert!(next_transport.is_stopped());
         assert_eq!(published.load(Ordering::SeqCst), 1);
         assert_eq!(index.len(), 0);
-        assert!(manager.connect("456789A").is_ok());
+        let third_operation = manager.connect("456789A").unwrap();
+        manager.complete_reserved(third_operation.clone()).unwrap();
+        manager
+            .complete_connected(third_operation, lease("connection-third"))
+            .unwrap();
+        assert_eq!(
+            manager.live_lease().unwrap().connection_id,
+            "connection-third"
+        );
     }
 
     #[test]
