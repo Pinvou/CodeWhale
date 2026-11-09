@@ -18,7 +18,7 @@
 | 最终发布门禁 | `npm --prefix remote-control-relay run release:gate` | 证据属于待发布 commit，任何失败不放行 |
 | 泄露扫描 | 下述三个真实 Rust 用例、`node --test remote-control-relay/test/controller-sensitive-scan.test.js remote-control-relay/test/controller-telemetry.test.js` | 真实错误投影、Debug 脱敏、受控枚举与哨兵扫描；零匹配视为失败 |
 
-远控发布路径以 `scripts/remote-control-release-path-policy.mjs` 为准。修改主控派发和结果投影、被控任务提交、Chat/ACP 回合授权或 App 装配入口时，即使只改一个 Rust 文件，也会进入 PR 的发布契约检查及发布工作流的路径筛选。新增入口时同步更新两处工作流，并运行 `node --test remote-control-relay/test/release-path-policy.test.js` 验证路由。
+远控发布路径以 `scripts/remote-control-release-path-policy.mjs` 为准。主控派发和结果投影、被控任务提交、Chat/ACP 回合授权、持久化会话归属与模式、受控附件授权和私有发布、App 装配均登记了具体实现文件。单文件变更会进入 PR 的发布契约检查及发布工作流的路径筛选。新增这些入口时同步更新两处工作流，并运行 `node --test remote-control-relay/test/release-path-policy.test.js` 验证路由。
 
 ### 1.1 泄露扫描的非空执行证据
 
@@ -116,7 +116,7 @@ GitHub protected environment/self-hosted runner、runner OS 与同一 SID 进程
 
 构建与运行开关是两层独立约束：构建时 `PINVOU_DESKTOP_CONTROLLER_ENABLED=0`（以及未明确开启的 release/custom profile）将关闭状态固化到产物，运行时设为 `1` 或不设变量都不能重新开启。启用产物必须以构建值 `1` 生成并取得本节之外的全部发布验收证据；受保护的 installer 证据 workflow 固定构建值 `1`。debug 默认开启只用于本地开发，不提供发布资格。
 
-仅构建值为 `1` 的 Windows A/B 产物允许运行时未设变量或精确 `1` 开启；运行时 `0` 或其他值关闭。非 Windows 平台始终 unsupported。Relay 不使用桌面构建值，仍要求运行时精确 `1`、`self_hosted` 与 TOFU=false；当前 `official` 认证模式未接线，不能作为已支持的生产验收组合。普通 Windows 发布继续构建关闭远控的产物，不以“免验收”隐式开放功能。
+仅构建值为 `1` 的 Windows A/B 产物允许运行时未设变量或精确 `1` 开启；运行时 `0` 或其他值关闭。本节的受保护安装包证据覆盖 Windows。Linux 64 位可启用的桌面源码路径也纳入相关路径筛选，正式 Linux 发布资格另行验收。Relay 不使用桌面构建值，仍要求运行时精确 `1`、`self_hosted` 与 TOFU=false；当前 `official` 认证模式未接线，不能作为已支持的生产验收组合。普通 Windows 发布继续构建关闭远控的产物，不以“免验收”隐式开放功能。
 
 遥测快照由受信生产聚合服务提供，并非独立的实际会话取证；门禁预期 commit、URL、token-file 和回滚输入来自受保护配置，部署环境文件不得覆盖这些预期值。真实双机与 Provider 验收仍单独必需。
 
