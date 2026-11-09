@@ -1866,6 +1866,16 @@
         "sha256": "768099650ccd0ea81262cbdd2ef1fa8ec273304f4995a144ae829e1401fe6f4d"
       },
       {
+        "file": "000081_orphan_payment_order_lookup.down.sql",
+        "version": 81,
+        "sha256": "2910b62a9fde6b036d281d7bcdcc2f3b934a32e4cce49c88f28713a366d1348c"
+      },
+      {
+        "file": "000081_orphan_payment_order_lookup.up.sql",
+        "version": 81,
+        "sha256": "4cfdfdfeffbeba4bb6cb5d297dcf590dc6430c610f570e2811880293af685299"
+      },
+      {
         "file": "900001_outbox_publication_generation.down.sql",
         "version": 900001,
         "sha256": "d1895793b89e87a43e9e6b75aeafcab19d12b15676929ea864a16860128516d8"
