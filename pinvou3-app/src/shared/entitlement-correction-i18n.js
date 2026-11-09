@@ -39,3 +39,6 @@ export const entitlementCorrectionCopy = {
     approvalStatuses: { SUBMITTED: '提出済み', APPROVED: '承認済み', EXECUTING: '実行中', EXECUTED: '実行済み', EXECUTION_FAILED: '実行失敗・復元待ち' },
   },
 };
+entitlementCorrectionCopy.zh.reference = {"title":"已核对的权益归属","packageHelp":"填写待纠错的权益包编号。","orderHelp":"填写该权益包对应的原付款订单编号。","wallet":"所属钱包","transaction":"原支付交易"};
+entitlementCorrectionCopy.en.reference = {"title":"Verified entitlement and original payment","packageHelp":"Enter the entitlement package ID for this correction.","orderHelp":"Enter the original payment order ID for this package.","wallet":"Owning wallet","transaction":"Original payment transaction"};
+entitlementCorrectionCopy.ja.reference = {"title":"検証済みの利用権と元の決済","packageHelp":"訂正対象の利用権パッケージ ID を入力してください。","orderHelp":"このパッケージの元の支払い注文 ID を入力してください。","wallet":"所属ウォレット","transaction":"元の決済取引"};
