@@ -422,7 +422,7 @@ func TestAccountClosureAnonymizesOwnedHistoricalContacts(t *testing.T) {
 	})
 	t.Run("retention-not-yet-due", func(t *testing.T) {
 		before := snapshot()
-		if count, err := r.PurgeExpiredAccountClosureRetention(ctx, 0); err != nil || count != 0 || snapshot() != before {
+		if count, err := r.MarkExpiredAccountClosureRetention(ctx, 0); err != nil || count != 0 || snapshot() != before {
 			t.Fatal("future retention was purged", count, err)
 		}
 	})
@@ -431,7 +431,7 @@ func TestAccountClosureAnonymizesOwnedHistoricalContacts(t *testing.T) {
 			t.Fatal(err)
 		}
 		before := snapshot()
-		if count, err := r.PurgeExpiredAccountClosureRetention(ctx, 1); err != nil || count != 0 || snapshot() != before {
+		if count, err := r.MarkExpiredAccountClosureRetention(ctx, 1); err != nil || count != 0 || snapshot() != before {
 			t.Fatal("legal hold was purged", count, err)
 		}
 	})
@@ -454,7 +454,7 @@ func TestAccountClosureAnonymizesOwnedHistoricalContacts(t *testing.T) {
 		if err := r.pool.QueryRow(ctx, query, user).Scan(&recordBefore); err != nil {
 			t.Fatal(err)
 		}
-		if count, err := r.PurgeExpiredAccountClosureRetention(ctx, 1); err != nil || count != 1 {
+		if count, err := r.MarkExpiredAccountClosureRetention(ctx, 1); err != nil || count != 1 {
 			t.Fatal("due record was not marked purged", count, err)
 		}
 		var purged bool
@@ -464,7 +464,7 @@ func TestAccountClosureAnonymizesOwnedHistoricalContacts(t *testing.T) {
 		if err := r.pool.QueryRow(ctx, query, user).Scan(&recordAfter); err != nil || recordAfter != recordBefore || withoutRetention(snapshot()) != before {
 			t.Fatal("metadata purge destroyed retained evidence", err)
 		}
-		if count, err := r.PurgeExpiredAccountClosureRetention(ctx, 1); err != nil || count != 0 {
+		if count, err := r.MarkExpiredAccountClosureRetention(ctx, 1); err != nil || count != 0 {
 			t.Fatal("metadata purge replay changed result", count, err)
 		}
 	})

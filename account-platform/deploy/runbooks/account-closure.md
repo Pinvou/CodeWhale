@@ -44,7 +44,18 @@ LOGIN 短信挑战的 `mobile_e164` 可能没有可证明属主的用户外键�
 
 两条注销源码和 API 契约正式测试统一执行 `npm --prefix account-platform ci --ignore-scripts`、`npm --prefix account-platform run test:closure-contracts`；它们使用锁定的 YAML 解析依赖，并接入现有 `account-platform-test`，仅是源码接线和契约形状检查。专用三域 PostgreSQL 组合夹具另外需要显式的 `PINVOU_TEST_SCHEMA_DATABASE_URL`（隔离部署角色准备连接）、`F08_TEST_GO`（Go 可执行文件绝对路径）和 `F08_TEST_CHILD_LOG`（私有测试日志绝对路径）；父夹具创建并传递 `F08_ACCOUNT_URL`、`F08_BILLING_URL`、`F08_TOKEN_URL`，运行原公开迁移和子测试，再按归属清理测试资源。这些是测试启动参数，不是生产配置，实际数据库、父子测试与受控外部回执结果须分别记录。
 
-`account_subject_retention_records` 到期 `PURGED` 仅是元数据标记，不代表所有财务或加密实体已销毁。实体销毁、法律保全及不能证明属主的数据治理见 [Issue #1663](https://github.com/Pinvou/pinvou3/issues/1663)。不得直接修改账本、资格或匿名标记来完成注销。
+`account_subject_retention_records.retained_until` 从 Account 完成匿名化起算三个日历年。后台只将到期、状态为 `RETAINED` 且 `legal_hold=false` 的记录写成 `PURGED`，`purged_at` 记元数据标记时间。这组字段用于统计到期标记，实体销毁须有独立证据。
+
+按以下类别登记仍存在的记录及其处理依据。
+
+| 类别 | 当前处理与验收边界 |
+| --- | --- |
+| Account 原身份和联系方式 | 在注销的身份清理阶段按已验证的属主匿名化或移除，包括身份绑定、用户联系方式及已覆盖的历史邀请。以对应阶段回执核对。 |
+| 匿名主体、注销请求和审计 | 保留主体关联、阶段、处理回执和审计，支撑重试、对账及责任追溯。到期标记只写入保留期元数据表。 |
+| 永久注册资格和财务事实 | 保留永久资格、赠款和支付回执、资金及用量账本。实体清理方案必须证明这些事实和跨域引用完整保留。 |
+| 无法确认属主的数据、外部副本和备份 | 按来源单独登记范围、保留依据和处置回执。清理前先确认属主及恢复、审计或保全依赖。 |
+
+现有后台只读取 `legal_hold` 做到期判断。实体删除与法律保全的设置、解除和权限尚待 [Issue #1663](https://github.com/Pinvou/pinvou3/issues/1663) 验收。实施前由数据负责人确认每类实体的期限、保全责任人及双向审计，隔离验证备份覆盖、到期与保全的并发、重试及保留不可变事实。禁止通过直接修改保全标志、账本、资格或匿名标记代替受控流程。
 
 Commerce 的 USER enqueue、claim、complete、retry 与本地清理按用户→mapping→job 锁序串行化；已关闭主体或旧生命周期的晚回执不回写本地联系人、外部引用或证据。金融任务未权威完成仍阻止清理。非金融任务的 claim 事务提交后，供应商 EnsureCustomer 可能已在途；当前通用 adapter 没有供应商删除或取消回执，本地 noop 不证明外部客户已删除或供应商未留存联系方式。这一外部保留边界需按 Issue #1663 的治理方案核实，不伪造外部 ACK。
 
