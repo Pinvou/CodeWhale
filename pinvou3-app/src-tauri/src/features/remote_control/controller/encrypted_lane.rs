@@ -943,7 +943,7 @@ mod tests {
     #[test]
     fn controller_stop_clears_real_a_keys_and_preserves_the_b_lane() {
         use crate::features::remote_control::controller::controlling::{
-            ControllerLease, ControllingDeviceManager, ControllingStatusKind,
+            ControllerLease, ControllingDeviceManager,
         };
         for reconnecting in [false, true] {
             let manager = ControllingDeviceManager::default();
@@ -987,16 +987,25 @@ mod tests {
             if reconnecting {
                 manager.mark_transport_disconnected(5_000, Some(30_000));
                 a.suspend();
-                assert_eq!(manager.status().status, ControllingStatusKind::Reconnecting);
+                assert_eq!(
+                    serde_json::to_value(manager.status()).unwrap()["status"],
+                    "reconnecting"
+                );
                 assert!(
                     a.is_installed(),
                     "resume retains keys until an explicit stop"
                 );
             } else {
-                assert_eq!(manager.status().status, ControllingStatusKind::Connected);
+                assert_eq!(
+                    serde_json::to_value(manager.status()).unwrap()["status"],
+                    "connected"
+                );
             }
             manager.stop(&a);
-            assert_eq!(manager.status().status, ControllingStatusKind::Disconnected);
+            assert_eq!(
+                serde_json::to_value(manager.status()).unwrap()["status"],
+                "disconnected"
+            );
             assert!(!a.is_installed());
             assert!(a.seal("task_submit", &payload, &capabilities()).is_err());
             assert!(a.resume_fingerprint("activation-0001").is_err());
