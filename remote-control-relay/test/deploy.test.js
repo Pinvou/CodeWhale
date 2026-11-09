@@ -65,9 +65,10 @@ test("production deploy builds and replaces the complete shared WebUI dist", asy
   assert.match(source, /while IFS= read -r relay_module; do/);
   assert.match(source, /relay_modules\+=\("\$relay_module"\)/);
   assert.match(source, /"\$\{relay_modules\[@\]\}"/);
-  assert.match(source, /mkdir -p "\$backup\/code-js"/);
+  assert.match(source, /relay_code_capture "\$remote_dir" "\$backup\/code-js"/);
   assert.match(source, /for module in "\$code_stage"\/\*\.js/);
-  assert.equal((source.match(/for module in "\$backup\/code-js"\/\*\.js/g) || []).length, 2);
+  assert.equal((source.match(/relay_code_stage "\$backup\/code-js" "\$remote_dir"/g) || []).length, 2);
+  assert.equal((source.match(/relay_code_replace "\$staged" "\$remote_dir"/g) || []).length, 2);
   assert.match(source, /docs\/schemas\/behavior-telemetry-v1\.schema\.json/);
   assert.match(source, /docs\/schemas\/behavior-telemetry-registries\.json/);
   assert.match(source, /await import\('\.\/telemetry-service\.js'\)/);
@@ -94,7 +95,7 @@ test("production deploy builds and replaces the complete shared WebUI dist", asy
   assert.equal((source.match(/for _ in \$\(seq 1 30\); do/g) || []).length, 2);
   assert.match(source, /if curl -fsS --connect-timeout 3 --max-time 5 http:\/\/127\.0\.0\.1:8787\/pinvou3\/remote\/healthz >\/dev\/null 2>&1/);
   assert.match(source, /controller-v1 路由烟测失败/);
-  assert.equal((source.match(/cp -a "\$module" "\$remote_dir\/"/g) || []).length, 3);
+  assert.equal((source.match(/cp -a "\$module" "\$remote_dir\/"/g) || []).length, 1);
   assert.doesNotMatch(source, /PINVOU_ALLOW_LEGACY_REMOTE_DEPLOY/);
   assert.doesNotMatch(source, /nginx -t|systemctl reload nginx/);
 });
@@ -128,6 +129,99 @@ test("production relay code artifact supports a cold ESM load", async (t) => {
     "await import('./telemetry-service.js')",
   ], { cwd: stage, encoding: "utf8", timeout: 10_000 });
   assert.equal(loaded.status, 0, loaded.stderr);
+});
+
+test("rollback verifies and stages the complete code backup before touching live modules", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "relay-code-backup-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const helper = join(repoRoot, "remote-control-relay", "scripts", "relay-code-backup.sh");
+  const bash = bashExecutable();
+  const run = (directory, script) => spawnSync(bash, ["-c", [
+    "set -euo pipefail", 'source "$1"', 'cd -- "$2"', script,
+  ].join("\n"), "fixture", helper.replaceAll("\\", "/"), directory.replaceAll("\\", "/")], {
+    encoding: "utf8", timeout: 10_000,
+  });
+  for (const variant of ["valid", "empty", "missing", "truncated", "extra", "manifest", "replace-failure"]) {
+    const dir = join(root, variant);
+    await mkdir(join(dir, "old"), { recursive: true });
+    await mkdir(join(dir, "live"));
+    await writeFile(join(dir, "live", "server.js"), "new server");
+    await writeFile(join(dir, "live", "new-only.js"), "new only");
+    if (variant !== "empty") {
+      await writeFile(join(dir, "old", "server.js"), "old server");
+      await writeFile(join(dir, "old", "z-module.js"), "old module");
+    }
+    const capture = run(dir, 'relay_code_capture "$PWD/old" "$PWD/backup"');
+    assert.equal(capture.status, 0, capture.stderr);
+    const backup = (name) => join(dir, "backup", name);
+    if (variant === "missing") await rm(backup("z-module.js"));
+    if (variant === "truncated") await writeFile(backup("z-module.js"), "short");
+    if (variant === "extra") await writeFile(backup("extra.js"), "extra");
+    if (variant === "manifest") await writeFile(backup(".manifest.sha256"), "");
+    const inject = variant === "replace-failure"
+      ? 'mv() { case "$2" in */incoming/z-module.js) return 31 ;; esac; command mv "$@"; }'
+      : "";
+    const result = run(dir, [
+      'staged="$(relay_code_stage "$PWD/backup" "$PWD/live")"', inject,
+      'relay_code_replace "$staged" "$PWD/live"',
+    ].join("\n"));
+    const live = join(dir, "live");
+    if (variant === "valid" || variant === "empty") {
+      assert.equal(result.status, 0, result.stderr);
+      assert.deepEqual((await readdir(live)).sort(), variant === "empty" ? [] : ["server.js", "z-module.js"]);
+      if (variant === "valid") assert.equal(await readFile(join(live, "server.js"), "utf8"), "old server");
+    } else {
+      assert.equal(result.status, 1, `${variant}: ${result.stderr}`);
+      assert.match(result.stderr, variant === "replace-failure" ? /previous code restored/u : /backup_invalid/u);
+      assert.deepEqual((await readdir(live)).sort(), ["new-only.js", "server.js"]);
+      assert.equal(await readFile(join(live, "server.js"), "utf8"), "new server");
+      assert.equal(await readFile(join(live, "new-only.js"), "utf8"), "new only");
+    }
+  }
+});
+
+test("both production rollback entries reject a corrupt backup before stopping the service", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "relay-rollback-entry-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const source = (await readFile(deployScript, "utf8")).replaceAll("\r\n", "\n");
+  const jsBoundary = 'rm -rf "$remote_dir/web/dist"';
+  const autoStart = source.indexOf("\nrollback() {\n");
+  const manualStart = source.indexOf('\nsource "$backup/relay-code-backup.sh"\n');
+  const autoEnd = source.indexOf(jsBoundary, autoStart);
+  const manualEnd = source.indexOf(jsBoundary, manualStart);
+  assert.ok(autoStart >= 0 && autoEnd > autoStart && manualStart > autoEnd && manualEnd > manualStart);
+  const helper = join(repoRoot, "remote-control-relay", "scripts", "relay-code-backup.sh");
+  for (const [name, body] of [
+    ["automatic", `${source.slice(autoStart, autoEnd)}\n}\nrollback`],
+    ["public-check", source.slice(manualStart, manualEnd)],
+  ]) {
+    const dir = join(root, name);
+    await mkdir(join(dir, "old"), { recursive: true });
+    await mkdir(join(dir, "live"));
+    await mkdir(join(dir, "backup"));
+    await copyFile(helper, join(dir, "backup", "relay-code-backup.sh"));
+    await writeFile(join(dir, "old", "server.js"), "old server");
+    await writeFile(join(dir, "live", "server.js"), "new server");
+    const run = (corrupt) => spawnSync(bashExecutable(), ["-c", [
+      "set -euo pipefail", 'cd -- "$1"', 'backup="$PWD/backup"', 'remote_dir="$PWD/live"',
+      'source "$backup/relay-code-backup.sh"', 'service=fixture', 'controller_state_dir=fixture',
+      'controller_lock_before_rollback() { printf called > stopped; test -f "$3/server.js"; }',
+      corrupt ? [
+        'relay_code_capture "$PWD/old" "$backup/code-js"',
+        'printf corrupt > "$backup/code-js/server.js"',
+      ].join("\n") : 'cp -- "$PWD/old/server.js" "$backup/code-js/server.js"',
+      body,
+    ].join("\n"), "fixture", dir.replaceAll("\\", "/")], { encoding: "utf8", timeout: 10_000 });
+    const corrupt = run(true);
+    assert.equal(corrupt.status, 1, corrupt.stderr);
+    assert.match(corrupt.stderr, /backup_invalid/u);
+    await assert.rejects(access(join(dir, "stopped")), { code: "ENOENT" });
+    assert.equal(await readFile(join(dir, "live", "server.js"), "utf8"), "new server");
+    const valid = run(false);
+    assert.equal(valid.status, 0, valid.stderr);
+    assert.equal(await readFile(join(dir, "stopped"), "utf8"), "called");
+    assert.equal(await readFile(join(dir, "live", "server.js"), "utf8"), "old server");
+  }
 });
 
 test("staged controller smoke resolves its protocol after the real module install loop", async (t) => {
