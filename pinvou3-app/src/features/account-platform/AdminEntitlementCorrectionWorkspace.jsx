@@ -3,6 +3,7 @@ import { entitlementCorrectionCopy } from '../../shared/i18n.js';
 import { entitlementCorrectionPrecheck, entitlementCorrectionApprovalDraft, entitlementCorrectionInputValid } from './admin-entitlement-correction.js';
 import { createAndSubmitFreshGovernedApproval } from './admin-governed-approval-workflow.js';
 import { useClosureOperation } from './useClosureOperation.js';
+import { formatBalance } from './balance-view.js';
 import { entitlementIntentStorage, entitlementEditReferences } from './entitlement-correction-intent.js';
 
 export function AdminEntitlementCorrectionWorkspace({ client, copy, language, permissions, owner }) {
@@ -32,6 +33,20 @@ export function AdminEntitlementCorrectionWorkspace({ client, copy, language, pe
   const projection = entitlementCorrectionPrecheck(pending?.precheck || precheck);
   const visibleFacts = displayScope?.client === client && displayScope.owner === owner && displayScope.epoch === scopeEpoch && displayScope.canRequest && canRequest && !reading ? projection : null;
   const referenceID = useId();
+  const composition = visibleFacts && (() => {
+    // These are package category allocations, not a current wallet balance.
+    // The existing proof validates both original totals and the amount that
+    // the executor subtracts from the source and credits to the target type.
+    const { critical, financial } = visibleFacts;
+    const transfer = BigInt(critical.amount_microcredits);
+    const source = BigInt(financial.source_original_microcredits);
+    const target = BigInt(financial.target_original_microcredits);
+    return {
+      transfer, total: financial.package_total_microcredits,
+      rows: [[critical.source_type, source, source - transfer], [critical.target_type, target, target + transfer]],
+    };
+  })();
+  const showCredits = value => formatBalance(value, language) + ' ' + text.composition.points;
   const locked = reading || operation.busy || operation.unknown || operation.blocked;
   const change = (setter, value) => { generation.current++; controller.current?.abort(); setter(value); setPrecheck(null); setReceipt(null); setReadError(''); };
   const load = async () => {
@@ -91,12 +106,19 @@ export function AdminEntitlementCorrectionWorkspace({ client, copy, language, pe
         <div><dt>{text.reference.transaction}</dt><dd><code>{visibleFacts.critical.payment_transaction_id}</code></dd></div>
       </dl>
     </section>}
-    {visibleFacts && <dl>
-      <dt>{text.source}</dt><dd>{text.types[projection.critical.source_type]}</dd>
-      <dt>{text.target}</dt><dd>{text.types[projection.critical.target_type]}</dd>
-      <dt>{text.amount}</dt><dd>{String(projection.critical.amount_microcredits)}</dd>
-      <dt>{text.total}</dt><dd>{String(projection.financial.package_total_microcredits)}</dd>
-    </dl>}
+    {composition && <section className="adm-financial-repair-facts" aria-label={text.composition.title}>
+      <h3>{text.composition.title}</h3><p>{text.composition.scope}</p>
+      <div className="adm-table-wrap"><table className="adm-table">
+        <thead><tr><th scope="col">{text.composition.type}</th><th scope="col">{text.composition.before}</th><th scope="col">{text.composition.after}</th></tr></thead>
+        <tbody>{composition.rows.map(([kind, before, after]) => <tr key={kind}>
+          <th scope="row">{text.types[kind]}</th><td data-label={text.composition.before}>{showCredits(before)}</td><td data-label={text.composition.after}>{showCredits(after)}</td>
+        </tr>)}</tbody>
+      </table></div>
+      <dl>
+        <div><dt>{text.composition.amount}</dt><dd>{showCredits(composition.transfer)}</dd></div>
+        <div><dt>{text.composition.total}</dt><dd>{showCredits(composition.total)}</dd></div>
+      </dl>
+    </section>}
     {(projection || operation.unknown) && <>
       <label>{text.operatorReason}<textarea disabled={locked} maxLength={2000} value={pending?.reason || reason} onChange={event => setReason(event.target.value)} /></label>
       <button disabled={reading || operation.busy || operation.blocked || !operation.unknown && [...reason.trim()].length < 10} onClick={() => void submit()}>{operation.unknown ? copy.retry : text.submit}</button>
