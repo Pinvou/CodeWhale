@@ -2720,6 +2720,18 @@ fn unreadable_residuals_block_quota_admission_in_every_retained_state() {
         fs::create_dir(&residual).unwrap();
         let partial = residual.join("partial.bin");
         fs::write(&partial, vec![0; 65536]).unwrap();
+        // Registered accounting (review round 7) reads the last registered
+        // size instead of walking every tree. Simulate a pre-migration row so
+        // this regression keeps exercising the fail-closed unreadable-tree
+        // doctrine on the one walk that still happens: the NULL row's
+        // one-time calibration under the quota lock.
+        db::connect()
+            .unwrap()
+            .execute(
+                "UPDATE model_versions SET measured_bytes=NULL WHERE card_id=?1 AND version_id=?2",
+                rusqlite::params![retained.card_id, retained.version_id],
+            )
+            .unwrap();
         // Counting while holding the existing reservation lock must not take
         // that lock recursively. The admission caller owns synchronization.
         let reservation = version_store::wait_quota_reservation_lock(|| false, || {}).unwrap();
@@ -2784,10 +2796,24 @@ fn unreadable_residuals_block_quota_admission_in_every_retained_state() {
                 .is_none()
         );
         assert_eq!(fs::metadata(&partial).unwrap().len(), 65536);
+        let strip_measured = |mut value: serde_json::Value| {
+            value.as_object_mut().unwrap().remove("measured_bytes");
+            value
+        };
         assert_eq!(
-            serde_json::to_value(version_store::get(&current.card_id, &id).unwrap().unwrap())
-                .unwrap(),
-            serde_json::to_value(&retained).unwrap()
+            strip_measured(
+                serde_json::to_value(version_store::get(&current.card_id, &id).unwrap().unwrap())
+                    .unwrap()
+            ),
+            strip_measured(serde_json::to_value(&retained).unwrap())
+        );
+        // The calibration walk persisted the residual-inclusive measurement.
+        assert!(
+            version_store::get(&current.card_id, &id)
+                .unwrap()
+                .unwrap()
+                .measured_bytes
+                .is_some()
         );
     }
 }

@@ -3225,6 +3225,11 @@ fn save_model_inner_commits_prefs_before_the_deferred_delete() {
 fn save_model_rejects_a_new_stale_store_link_before_settings_or_credentials_change() {
     crate::platform::test_support::with_temp_home("store-model-stale-new-link", || {
         seed_model_deletion_prefs(&[model_deletion_test_model("keep-existing", false)]);
+        // Main's load-time normalization persists the builtin account-platform
+        // carrier row on the first load after seeding; run that load once so
+        // the frozen `before` snapshot is the normalized form the rejected
+        // save must leave byte-identical.
+        let _ = UserPrefs::load();
         let before = std::fs::read(crate::platform::paths::settings_path()).unwrap();
         let store = crate::platform::credential_store::RecordingCredentialStore::new();
         let mut new_link = model_deletion_test_model("new-store-link", false);

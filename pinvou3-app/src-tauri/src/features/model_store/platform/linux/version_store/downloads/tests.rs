@@ -268,7 +268,10 @@ fn full_delete_releases_install_target_but_keeps_each_old_roots_residuals_charge
     drop(new_install);
     complete_download("card", &second, 10);
     fs::write(second.join("leftover-cache"), vec![0; 3]).unwrap();
-    assert_eq!(super::super::retained_bytes().unwrap(), 10);
+    // Registered accounting (review round 7): the cache written after the
+    // completion re-measure stays uncharged until this root's next
+    // transition — the delete below re-walks and charges it (next assert).
+    assert_eq!(super::super::retained_bytes().unwrap(), 7);
     fs::remove_file(second.join("card-weights")).unwrap();
     db::delete_store_model("card").unwrap();
     assert_eq!(super::super::retained_bytes().unwrap(), 10);
