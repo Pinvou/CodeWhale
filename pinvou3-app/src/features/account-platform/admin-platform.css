@@ -20,3 +20,8 @@
 .adm-registration-bonus .adm-registration-bonus-save-status{margin:0 auto 0 0;min-width:0;color:var(--adm-muted);overflow-wrap:break-word;overflow-wrap:anywhere}
 .adm-registration-bonus .adm-registration-bonus-actions button:focus{outline:3px solid var(--adm-primary);outline-offset:2px}
 @media(max-width:600px){.adm-registration-bonus-diff li{grid-template-columns:minmax(0,1fr);gap:3px}.adm-registration-bonus .adm-registration-bonus-actions{display:grid;grid-template-columns:minmax(0,1fr)}}
+
+.adm-registration-bonus .adm-registration-bonus-lifetime h3{font-size:14px;margin:0 0 4px}
+.adm-registration-bonus .adm-registration-bonus-lifetime p{margin:0;overflow-wrap:break-word;overflow-wrap:anywhere}
+.adm-registration-bonus .adm-registration-bonus-lifetime p+p{margin-top:4px}
+.adm-registration-bonus-diff .adm-registration-bonus-impact{padding:8px;border-left:3px solid var(--adm-line-strong);background:var(--adm-soft);border-radius:4px}
