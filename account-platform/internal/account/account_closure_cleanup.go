@@ -448,7 +448,9 @@ func (r *PostgresRepository) CompleteAccountClosure(ctx context.Context, item *A
 	return tx.Commit(ctx)
 }
 
-func (r *PostgresRepository) PurgeExpiredAccountClosureRetention(ctx context.Context, limit int) (int64, error) {
+// MarkExpiredAccountClosureRetention records expiry in the existing metadata.
+// PURGED is the stored status for this marker.
+func (r *PostgresRepository) MarkExpiredAccountClosureRetention(ctx context.Context, limit int) (int64, error) {
 	if limit < 1 || limit > 500 {
 		limit = 100
 	}
