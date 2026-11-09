@@ -1785,7 +1785,7 @@ jobs:
   account-closure-test:
     name: account-closure-test
     needs: changes
-    if: ${{ !cancelled() && github.event.action != 'closed' && needs.changes.outputs.account_platform == 'true' }}
+    if: ${{ !cancelled() && github.event.action != 'closed' && needs.changes.outputs.account_platform == 'true' && !(github.event_name == 'merge_group' && needs.changes.outputs.reuse_verified == 'true' && contains(fromJSON(needs.changes.outputs.reused_jobs || '[]'), 'account-closure-test')) }}
     runs-on: ${{ fromJSON(vars.PINVOU_LINUX_HEAVY_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
     timeout-minutes: 45
     services:
@@ -4985,6 +4985,7 @@ jobs:
           FRONTEND_RESULT: ${{ needs.frontend-test.result }}
           RELAY_RESULT: ${{ needs.relay-test.result }}
           ACCOUNT_PLATFORM_RESULT: ${{ needs.account-platform-test.result }}
+          CLOSURE_REUSE_VERIFIED: ${{ github.event_name == 'merge_group' && needs.changes.outputs.reuse_verified == 'true' && contains(fromJSON(needs.changes.outputs.reused_jobs || '[]'), 'account-closure-test') }}
           ACCOUNT_CLOSURE_RESULT: ${{ needs.account-closure-test.result }}
           ACCOUNT_PLATFORM_REQUIRED: ${{ needs.changes.outputs.account_platform }}
           WINDOWS_RELAY_DACL_RESULT: ${{ needs.windows-relay-dacl.result }}
@@ -5038,7 +5039,7 @@ jobs:
             exit 1
           fi
 
-          if [[ "$ACCOUNT_PLATFORM_REQUIRED" == "true" && "$ACCOUNT_CLOSURE_RESULT" != success ]]; then
+          if [[ "$ACCOUNT_PLATFORM_REQUIRED" == "true" && "$ACCOUNT_CLOSURE_RESULT" != success && !( "$ACCOUNT_CLOSURE_RESULT" == skipped && "${CLOSURE_REUSE_VERIFIED:-false}" == true ) ]]; then
             echo "Required Account closure gate did not pass: $ACCOUNT_CLOSURE_RESULT" >&2
             exit 1
           fi

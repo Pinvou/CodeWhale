@@ -38,6 +38,9 @@ class AccountCIAdmissionTests(unittest.TestCase):
         self.assertIn('      - account-closure-test\n', gate)
         self.assertIn('ACCOUNT_CLOSURE_RESULT: ${{ needs.account-closure-test.result }}', gate)
         self.assertIn('"$ACCOUNT_CLOSURE_RESULT" != success', gate)
+        self.assertIn("needs.changes.outputs.reuse_verified == 'true'", closure)
+        self.assertIn("'account-closure-test'))", closure)
+        self.assertIn('"$ACCOUNT_CLOSURE_RESULT" == skipped && "${CLOSURE_REUSE_VERIFIED:-false}" == true', gate)
 
     def fixture(self):
         meta = {'id': 'a'*64, 'ports': {'5432':'49173'}}
