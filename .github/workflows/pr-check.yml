@@ -1674,6 +1674,11 @@ jobs:
               assert all(event["Action"] == "pass" for event in terminal), "finite PostgreSQL tests failed or skipped"
               roots = {event["Test"] for event in terminal if "/" not in event["Test"]}
               assert roots == required, "required finite PostgreSQL test selection did not execute"
+              audit = "TestAuditExportPersistedBoundaries"
+              if audit in required:
+                  prefix = audit + "/generation_renews_and_recovers/"
+                  cases = {event["Test"].removeprefix(prefix) for event in terminal if event["Test"].startswith(prefix)}
+                  assert cases == {"renew_live_attempt", "cancel_expired_attempt_and_recover"}, "audit generation lease cases did not execute"
               inventory = "TestAccount039RollbackInventoryPostgres"
               if inventory in required:
                   prefix = inventory + "/"

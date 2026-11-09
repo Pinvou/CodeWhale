@@ -202,6 +202,9 @@ class AccountCIAdmissionTests(unittest.TestCase):
             events.extend({"Test":root+"/"+child,"Action":"pass"} for child in children.get(root,{"actual"}))
         account=[{"Test":"TestAuditExportPersistedBoundaries","Action":"pass"},
                  {"Test":"TestAuditExportPersistedBoundaries/actual","Action":"pass"}]
+        lease_cases={"TestAuditExportPersistedBoundaries/generation_renews_and_recovers/"+case
+                     for case in ("renew_live_attempt", "cancel_expired_attempt_and_recover")}
+        account.extend({"Test":case,"Action":"pass"} for case in lease_cases)
         with tempfile.TemporaryDirectory(prefix='audit-result-contract-') as directory:
             schema_path, account_path=Path(directory)/'schema.jsonl',Path(directory)/'account.jsonl'
             account_path.write_text('\n'.join(map(json.dumps,account)),encoding='utf-8')
@@ -215,5 +218,10 @@ class AccountCIAdmissionTests(unittest.TestCase):
                                 [dict(e,Action='skip') if e['Test']==invitation+'/'+child else e for e in events]):
                     with self.subTest(child=child),self.assertRaises(AssertionError):verify(invalid)
             with self.assertRaises(AssertionError):verify([e for e in events if not e['Test'].startswith(invitation)])
+            for case in lease_cases:
+                for invalid in ([e for e in account if e['Test']!=case],
+                                [dict(e,Action='skip') if e['Test']==case else e for e in account]):
+                    account_path.write_text('\n'.join(map(json.dumps,invalid)),encoding='utf-8')
+                    with self.subTest(lease_case=case),self.assertRaises(AssertionError):verify(events)
 
 if __name__=='__main__':unittest.main()
