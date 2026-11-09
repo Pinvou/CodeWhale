@@ -18,7 +18,7 @@
 | 最终发布门禁 | `npm --prefix remote-control-relay run release:gate` | 证据属于待发布 commit，任何失败不放行 |
 | 泄露扫描 | 下述三个真实 Rust 用例、`node --test remote-control-relay/test/controller-sensitive-scan.test.js remote-control-relay/test/controller-telemetry.test.js` | 真实错误投影、Debug 脱敏、受控枚举与哨兵扫描；零匹配视为失败 |
 
-远控发布路径以 `scripts/remote-control-release-path-policy.mjs` 为准。主控派发和结果投影、被控任务提交、Chat/ACP 回合授权、持久化会话归属与模式、受控附件授权和私有发布、App 装配均登记了具体实现文件。单文件变更会进入 PR 的发布契约检查及发布工作流的路径筛选。新增这些入口时同步更新两处工作流，并运行 `node --test remote-control-relay/test/release-path-policy.test.js` 验证路由。
+远控发布路径以 `scripts/remote-control-release-path-policy.mjs` 为准。主控派发和结果投影、被控任务提交、Chat/ACP 回合授权、持久化会话归属与模式、模型协议判定、受控附件的私有发布与转换、App 装配均登记了具体实现文件。受控附件范围包括实际的私有输出、归档成员准入和嵌入执行的转换脚本。单文件变更会进入 PR 的发布契约检查及发布工作流的路径筛选。新增这些入口时同步更新两处工作流，并运行 `node --test remote-control-relay/test/release-path-policy.test.js` 验证路由。
 
 ### 1.1 泄露扫描的非空执行证据
 
