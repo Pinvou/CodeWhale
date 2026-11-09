@@ -55,6 +55,31 @@ try {
       assert.deepEqual(errors, []); passed++;
     }
   }
+  for (const language of ['zh', 'en', 'ja']) {
+    for (const archive of ['unsupported', 'conflict', 'transport']) {
+      await page.goto(`http://127.0.0.1:${vite.httpServer.address().port}/tests/fixtures/account-platform-review-owner.html?${new URLSearchParams({ language, owner: 'self', archive })}`);
+      await page.waitForSelector('tbody tr'); await click('details'); await page.waitForSelector('article');
+      if (archive === 'unsupported') {
+        assert.ok(await page.evaluate(() => [...document.querySelectorAll('article button')].some(node => node.textContent === window.reviewOwnerProbe.copy.archive && node.disabled)));
+        assert.ok(await page.evaluate(() => document.querySelector('article').textContent.includes(window.reviewOwnerProbe.copy.reviewArchiveUnsupported)));
+        assert.equal(await page.evaluate(() => window.reviewOwnerProbe.calls.filter(call => call.method === 'POST').length), 0);
+      } else {
+        await click('archive');
+        const message = archive === 'conflict' ? 'reviewArchiveConflict' : 'unknown';
+        await page.waitForFunction(key => [...document.querySelectorAll('[role=alert]')].some(node => node.textContent === window.reviewOwnerProbe.copy[key]), {}, message);
+        assert.equal(await page.$('[data-retained-finance-command]') !== null, archive === 'transport');
+        if (archive === 'transport') {
+          await click('retry');
+          await page.waitForFunction(() => document.querySelector('article')?.textContent.includes('ARCHIVED_CONFIRMED_UNPAID'));
+          const writes = await page.evaluate(() => window.reviewOwnerProbe.calls.filter(call => call.method === 'POST'));
+          assert.equal(writes.length, 2); assert.ok(writes[0].key);
+          assert.equal(writes[0].key, writes[1].key); assert.equal(writes[0].body, writes[1].body);
+          assert.equal(await page.$('[data-retained-finance-command]'), null);
+        }
+      }
+      assert.deepEqual(errors, []); passed++;
+    }
+  }
   console.log(`Review ownership UI: ${passed} passed; 0 failed (controlled backend, actual React and admin client)`);
 } finally {
   if (browser) await browser.close();

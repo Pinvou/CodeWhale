@@ -10,12 +10,19 @@ const user = '22222222-2222-4222-8222-222222222222';
 const other = '33333333-3333-4333-8333-333333333333';
 const language = params.get('language') || 'en';
 const anomaly = params.get('anomaly') === 'true';
-const state = { calls: [], owner: params.get('owner') === 'self' ? user : params.get('owner') === 'none' ? null : other };
+const state = { calls: [], owner: params.get('owner') === 'self' ? user : params.get('owner') === 'none' ? null : other, archiveCalls: 0, archived: false };
 const item = () => ({ case_id: id, payment_order_id: id, owner_id: state.owner, status: 'OPEN',
-  anomaly_type: 'PAYMENT_FACT_CONFLICT', review_status: 'REVIEW_REQUIRED_LATE_PAYMENT', severity: 'P2' });
+  anomaly_type: 'PAYMENT_FACT_CONFLICT', review_status: state.archived ? 'ARCHIVED_CONFIRMED_UNPAID' : 'REVIEW_REQUIRED_LATE_PAYMENT', severity: 'P2',
+  provider_capability_snapshot: { authoritative_unpaid_terminal: params.get('archive') !== 'unsupported' } });
 globalThis.fetch = async (url, options = {}) => {
-  const method = options.method || 'GET'; state.calls.push({ url, method });
+  const method = options.method || 'GET'; state.calls.push({ url, method, key: options.headers?.['Idempotency-Key'], body: options.body });
   const respond = (value, status = 200) => new Response(JSON.stringify(value), { status });
+  if (url.endsWith('/archive-command')) {
+    state.archiveCalls++;
+    if (params.get('archive') === 'conflict') return respond({ code: 'BILLING_CONFLICT' }, 409);
+    if (params.get('archive') === 'transport' && state.archiveCalls === 1) throw new TypeError('Controlled lost archive response');
+    state.archived = true; return respond(item());
+  }
   if (url.endsWith('/claim')) {
     if (params.get('claim') === 'transport') throw new TypeError('Controlled lost claim response');
     if (params.get('claim') === 'conflict') { state.owner = other; return respond({ code: 'BILLING_CONFLICT' }, 409); }

@@ -47,7 +47,7 @@ export function useFinanceOperation(owner, copy, client, scope) {
         (reason.financeRequestState !== 'NOT_DISPATCHED' &&
           (!Number.isInteger(reason.status) || reason.status >= 500 || reason.code === 'COMMAND_RESULT_UNKNOWN'));
       if (!uncertain) { intent.current = null; pending.delete(identity); }
-      setUnknown(uncertain); setError(uncertain ? 'unknown' : reason.financeInputInvalid ? 'inputInvalid' : reason.status === 403 ? 'permissions' : reason.financeReviewClaimConflict ? 'reviewClaimConflict' : 'sourceChanged');
+      setUnknown(uncertain); setError(uncertain ? 'unknown' : reason.financeInputInvalid ? 'inputInvalid' : reason.status === 403 ? 'permissions' : reason.financeReviewClaimConflict ? 'reviewClaimConflict' : reason.financeReviewArchiveConflict ? 'reviewArchiveConflict' : 'sourceChanged');
     } finally { if (stamp === generation.current) { running.current = false; setBusy(false); } }
   };
   return { busy, unknown, pendingFacts: intent.current?.facts || null, pendingKey: intent.current?.key || null, message: copy[message] || '', error: copy[error] || '', read, mutate };

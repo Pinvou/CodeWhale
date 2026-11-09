@@ -68,7 +68,13 @@ export function AdminPaymentReviewQueue({ client, copy, me, anomaly = false, rou
         }
       case 'query': return client.queryLatePaymentReview(facts.id, facts, key);
       case 'schedule': return client.scheduleLatePaymentReview(facts.id, facts.nextReview, facts.reason, key, facts.commandProtocol);
-      case 'archive': return client.archiveLatePaymentReview(facts.id, key, facts.commandProtocol);
+      case 'archive':
+        try {
+          return await client.archiveLatePaymentReview(facts.id, key, facts.commandProtocol);
+        } catch (error) {
+          if (error.status === 409) error.financeReviewArchiveConflict = true;
+          throw error;
+        }
       case 'provider-blind': return client.escalateProviderBlind(facts.id, facts.reason, key, facts.commandProtocol);
       case 'resolve': return client.resolvePaymentAnomaly(facts.id, facts.resolution, facts.reason, key);
       default: throw new Error('INVALID_FINANCE_ACK');
@@ -76,6 +82,9 @@ export function AdminPaymentReviewQueue({ client, copy, me, anomaly = false, rou
   };
   const act = async action => {
     if (query.unknown || query.busy) return;
+    // Block only a new archive. A retained invocation must still be able to
+    // recover its original receipt even if current capabilities changed.
+    if (!operation.pendingFacts && action === 'archive' && detail?.case?.provider_capability_snapshot?.authoritative_unpaid_terminal === false) return;
     // Capture the user's local wall time only for a new invocation. Its UTC
     // instant is immutable with the key even if the system time zone changes.
     const scheduleDate = !operation.pendingFacts && action === 'schedule' ? new Date(nextReview) : null;
@@ -93,6 +102,7 @@ export function AdminPaymentReviewQueue({ client, copy, me, anomaly = false, rou
   const statuses = anomaly ? ['OPEN', 'RESOLVED'] : ['REVIEW_REQUIRED_LATE_PAYMENT', 'PROVIDER_BLIND', 'ARCHIVED_CONFIRMED_UNPAID', 'RESOLVED_PAID'];
   const active = item && (anomaly ? item.status === 'OPEN' : ['REVIEW_REQUIRED_LATE_PAYMENT', 'PROVIDER_BLIND'].includes(item.review_status));
   const owned = item?.owner_id === me.user_id;
+  const archiveUnsupported = item?.provider_capability_snapshot?.authoritative_unpaid_terminal === false;
   const resolutions = paymentAnomalyResolutions(item?.anomaly_type);
   const confirmQuery = () => {
     if (busy || query.retired || (operation.unknown && !legacyQuery) || anomaly || !canQuery || !active || !owned) return;
@@ -124,7 +134,7 @@ export function AdminPaymentReviewQueue({ client, copy, me, anomaly = false, rou
       <label>{copy.reason}<textarea disabled={busy || blocked} maxLength={2000} value={reason} onChange={event => setReason(event.target.value)} /></label>
       {active && item.owner_id && !owned && <p role="status">{copy.reviewAssignedOther}</p>}
       {canQuery && active && !item.owner_id && <button disabled={busy || blocked} onClick={() => void act('claim')}>{copy.claimCase}</button>}
-      {owned && active && !anomaly && canQuery && <><button disabled={busy || blocked || query.retired} onClick={confirmQuery}>{copy.query}</button>{(query.unknown || legacyQuery) && <button disabled={busy || query.retired || (operation.unknown && !legacyQuery)} onClick={confirmQuery}>{copy.newQuery}</button>}<label>{copy.nextReview}<input type="datetime-local" value={nextReview} onChange={event => setNextReview(event.target.value)} /></label><button disabled={busy || blocked || !nextReview || !reason.trim()} onClick={() => void act('schedule')}>{copy.schedule}</button><button disabled={busy || blocked || item.review_status !== 'REVIEW_REQUIRED_LATE_PAYMENT'} onClick={() => void act('archive')}>{copy.archive}</button><button disabled={busy || blocked || reason.trim().length < 10} onClick={() => void act('provider-blind')}>{copy.escalate}</button></>}
+      {owned && active && !anomaly && canQuery && <><button disabled={busy || blocked || query.retired} onClick={confirmQuery}>{copy.query}</button>{(query.unknown || legacyQuery) && <button disabled={busy || query.retired || (operation.unknown && !legacyQuery)} onClick={confirmQuery}>{copy.newQuery}</button>}<label>{copy.nextReview}<input type="datetime-local" value={nextReview} onChange={event => setNextReview(event.target.value)} /></label><button disabled={busy || blocked || !nextReview || !reason.trim()} onClick={() => void act('schedule')}>{copy.schedule}</button><button disabled={busy || blocked || archiveUnsupported || item.review_status !== 'REVIEW_REQUIRED_LATE_PAYMENT'} onClick={() => void act('archive')}>{copy.archive}</button><p role="status">{archiveUnsupported ? copy.reviewArchiveUnsupported : copy.reviewArchiveRequirements}</p><button disabled={busy || blocked || reason.trim().length < 10} onClick={() => void act('provider-blind')}>{copy.escalate}</button></>}
       {owned && active && anomaly && canRepair && <><label>{copy.resolution}<select value={resolution} onChange={event => setResolution(event.target.value)}><option value="">{copy.resolution}</option>{resolutions.map(value => <option key={value} value={value}>{copy.resolutions[value]}</option>)}</select></label>{resolution === 'RECONCILE_REFUND' && <p>{copy.refundReconcileHelp}</p>}<button disabled={busy || blocked || !resolutions.includes(resolution) || reason.trim().length < 10} onClick={() => void act('resolve')}>{copy.resolve}</button></>}
       <ul>{(detail.events || []).map(value => <li key={value.event_id || value.id}>{value.event_type} / {value.created_at}</li>)}</ul>
     </article>}

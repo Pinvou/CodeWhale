@@ -40,3 +40,11 @@ existing unknown-operation recovery contract.
 An owner correction is not an unpaid-payment finding. In particular, a provider
 without an authoritative unpaid terminal result cannot be archived as confirmed
 unpaid merely because the local payment deadline elapsed.
+
+The UI disables a fresh archive when the stored provider capability explicitly
+states that authoritative unpaid terminal results are unavailable, and explains
+the waiting-period/evidence prerequisites otherwise. This is an early usability
+check, not a replacement for the repository's full transactional admission.
+Older/unknown capability snapshots still rely on server validation. A conflict
+asks the operator to reload the owner and archive evidence; a retained unknown
+archive invocation keeps its original receipt-recovery path and key.
