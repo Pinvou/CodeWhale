@@ -852,3 +852,49 @@ ledgerRepairCopy.ja.refundImpact = {
     "事業者の現在の状態"
   ]
 };
+
+ledgerRepairCopy.zh.refundTask = {
+  "identity": "核对对象和证据",
+  "approval": "提交审批请求",
+  "command": "命令代码",
+  "reading": "正在加载核对快照…",
+  "read": "加载核对快照",
+  "submitting": "正在提交审批请求…",
+  "badID": "请输入完整、无首尾空格的 UUID。",
+  "evidence": "填写已持久化的支付证据 UUID。",
+  "anomaly": "填写这笔退款对应的异常案件 UUID。",
+  "approvalHelp": "核对上方快照后填写审批理由及请求标识。",
+  "title": "退款账务冲回",
+  "target": "填写已完成渠道退款的退款记录 UUID。",
+  "factsFailed": "无法加载退款冲回的核对快照。请核对退款、支付证据及异常案件后重试。"
+};
+ledgerRepairCopy.en.refundTask = {
+  "identity": "Check the target and evidence",
+  "approval": "Submit for approval",
+  "command": "Command code",
+  "reading": "Loading verification snapshot…",
+  "read": "Load verification snapshot",
+  "submitting": "Submitting approval request…",
+  "badID": "Enter the full UUID without leading or trailing spaces.",
+  "evidence": "Enter the UUID of the stored payment evidence.",
+  "anomaly": "Enter the UUID of the anomaly case for this refund.",
+  "approvalHelp": "Review the snapshot above, then provide the reason and request reference.",
+  "title": "Record a refund reversal",
+  "target": "Enter the UUID of the refund record completed by the provider.",
+  "factsFailed": "Could not load the refund verification snapshot. Check the refund, payment evidence and anomaly case, then retry."
+};
+ledgerRepairCopy.ja.refundTask = {
+  "identity": "対象と証拠を確認",
+  "approval": "承認を申請",
+  "command": "コマンドコード",
+  "reading": "確認用スナップショットを読み込み中…",
+  "read": "確認用スナップショットを読み込む",
+  "submitting": "承認申請を送信中…",
+  "badID": "前後に空白を付けず、完全な UUID を入力してください。",
+  "evidence": "保存済みの決済証拠の UUID を入力してください。",
+  "anomaly": "この返金に対応する異常案件の UUID を入力してください。",
+  "approvalHelp": "上のスナップショットを確認し、申請理由と申請識別子を入力してください。",
+  "title": "返金の台帳取消を記録",
+  "target": "決済事業者が返金を完了した返金記録の UUID を入力します。",
+  "factsFailed": "返金の確認用スナップショットを読み込めませんでした。返金、決済証拠、異常案件を確認して再試行してください。"
+};
