@@ -98,7 +98,7 @@ func (consumer *TokenAuthorizationCommandConsumer) Handle(ctx context.Context, d
 	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
 	if err := consumer.handle(ctx, delivery); err != nil {
-		slog.Error("TOKEN_APPROVAL_AUTHORIZATION_DELIVERY_PENDING")
+		slog.Error("TOKEN_APPROVAL_AUTHORIZATION_DELIVERY_PENDING", "error_code", "DELIVERY_PENDING")
 		if !errors.Is(err, errTokenAuthorizationAlreadyAcknowledged) {
 			consumer.nak(delivery)
 		}
@@ -416,6 +416,6 @@ func (consumer *TokenAuthorizationCommandConsumer) nak(delivery events.Authoriza
 		exponent = 1
 	}
 	if err := delivery.NakWithDelay(time.Second * time.Duration(uint64(1)<<exponent)); err != nil {
-		slog.Error("TOKEN_APPROVAL_AUTHORIZATION_NAK_FAILED")
+		slog.Error("TOKEN_APPROVAL_AUTHORIZATION_NAK_FAILED", "error_code", "NAK_FAILED")
 	}
 }

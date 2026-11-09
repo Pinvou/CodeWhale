@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import fs from 'node:fs';
 import { readFileSync } from 'node:fs';
-import { checkCoverage, loadInputs } from '../check-token-management-authorization-coverage.mjs';
+import { checkCoverage, loadInputs, organizationFinanceRoutes } from '../check-token-management-authorization-coverage.mjs';
 import { authorizationRoutes } from '../check-account-platform-authorization-coverage.mjs';
 
 const inputs = loadInputs();
@@ -281,7 +281,7 @@ test('organization finance recognizes the path guard without weakening its middl
   const legacy = route.replace('httpserver.RequirePathSuffix("/quota-grants:batch"), ', '');
   const legacySource = inputs.organizationFinanceSource.replace(route, legacy);
   assert.ok(legacySource.includes(legacy));
-  assert.equal(checkCoverage({ ...inputs, organizationFinanceSource: legacySource }).organizationFinanceRoutes, 13);
+  assert.throws(() => checkCoverage({ ...inputs, organizationFinanceSource: legacySource }), /organization action path guard/);
   const guardedSource = legacySource.replace(legacy, route);
   assert.equal(checkCoverage({ ...inputs, organizationFinanceSource: guardedSource }).organizationFinanceRoutes, 13);
   for (const replacement of [
@@ -292,6 +292,45 @@ test('organization finance recognizes the path guard without weakening its middl
     const source = guardedSource.replace(route, replacement);
     assert.throws(() => checkCoverage({ ...inputs, organizationFinanceSource: source }), /organization handler/);
   }
+});
+
+test('every installed organization action requires one exact first path guard', () => {
+  for (const suffix of ['/quota-grants:batch', '/account-closed-grants:reclaim-batch']) {
+    const guard = `httpserver.RequirePathSuffix("${suffix}"), `;
+    const line = inputs.organizationFinanceSource.split(/\r?\n/).find(value => value.includes(guard));
+    assert.ok(line, suffix);
+    for (const changed of [
+      line.replace(guard, ''),
+      line.replace(guard, `httpserver.RequirePathSuffix("${suffix.slice(suffix.indexOf(':'))}"), `),
+      line.replace(guard, `httpserver.RequirePathSuffix("/other${suffix}"), `),
+      line.replace(guard, guard + guard),
+      line.replace(guard, `approvalpolicy.Require("TOKEN_ORGANIZATION_MODEL_POLICY_UPDATE", approvalpolicy.AuditOnly), ${guard}`),
+      line.replace(guard, '').replace(/\)$/, `, ${guard.slice(0, -2)})`),
+    ]) {
+      assert.notEqual(changed, line);
+      assert.throws(() => checkCoverage({ ...inputs,
+        organizationFinanceSource: inputs.organizationFinanceSource.replace(line, changed) }), /organization (?:action path guard|handler)/);
+    }
+  }
+});
+
+test('new literal organization actions obey the same guard rule without treating parameters as actions', () => {
+  const original = inputs.organizationFinanceSource.split(/\r?\n/).find(line => line.includes('"/quota-grants:batch"'));
+  assert.ok(original);
+  const next = original.replaceAll('quota-grants:batch', 'quota-grants:preview');
+  const source = inputs.organizationFinanceSource.replace(/\n\}\s*$/, '\n' + next + '\n}\n');
+  assert.notEqual(source, inputs.organizationFinanceSource);
+  const parsed = organizationFinanceRoutes(source, inputs.organizationHandlerSource);
+  assert.equal(parsed.length, 14);
+  assert.ok(parsed.some(route => route.path === '/v1/organizations/{organization_id}/quota-grants:preview'));
+  assert.throws(() => organizationFinanceRoutes(source.replace('httpserver.RequirePathSuffix("/quota-grants:preview"), ', ''), inputs.organizationHandlerSource), /organization action path guard/);
+  // Unsupported mixed parameter/action and non-final action shapes must demand
+  // review rather than silently falling back to the ordinary parameter case.
+  for (const path of ['/:grant_id:preview', '/quota-grants:preview/receipt', '/quota-grants:preview:again']) {
+    const changed = source.replaceAll('/quota-grants:preview', path);
+    assert.throws(() => organizationFinanceRoutes(changed, inputs.organizationHandlerSource), /unrecognized organization action path/);
+  }
+  assert.equal(organizationFinanceRoutes(inputs.organizationFinanceSource, inputs.organizationHandlerSource).length, 13);
 });
 
 test('closed-grant authority helper cannot disappear or change permission', () => {
