@@ -55,6 +55,16 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
         root = "TestPinnedMigrationLedgerPostgresIntegration"
         roots, package = RUNNER.MIGRATIONS_REQUIRED, RUNNER.MIGRATIONS_PACKAGE
         self.assertEqual(roots, {root, "TestRestrictedMigrationLedgerPostgresIntegration"})
+        required = {
+            "up-path-change-keeps-original-ledger",
+            "verify-rejects-original-drift-despite-shadow",
+            "down-path-change-removes-only-original-row",
+            "actual-cli-retains-bound-namespace",
+            "binding-cannot-cross-connections",
+            "missing-search-path-schema-rejects-before-preparation",
+            "another-workflow-selects-its-own-visible-ledger",
+        }
+        self.assertEqual(RUNNER.EXACT_REQUIRED_CHILDREN[root], required)
         self.run_main_fixture()
         self.assertEqual(self.fixture_phases[0], "owner-ledger")
         command = self.fixture_commands[0]
@@ -67,7 +77,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
             invalid = [event for event in events if event.get("Test", "").split("/", 1)[0] != name]
             with self.subTest(missing=name), self.assertRaises(RuntimeError):
                 RUNNER.verify_results(invalid, roots, **options)
-        for child in RUNNER.EXACT_REQUIRED_CHILDREN[root]:
+        for child in required:
             name = root + "/" + child
             for invalid in (
                 [event for event in events if event.get("Test") != name],
