@@ -239,6 +239,22 @@ function assertWorkflowFailurePolicy(workflowText) {
   ].join("\n"));
   let remainder = text.replace(financial, "").replace(windows, "");
   {
+    const receipt = namedStep(jobBlock("required-gate", text), "PR test success proof transport");
+    assert.equal(receipt.trimEnd(), [
+      "      - name: PR test success proof transport",
+      "        if: ${{ success() && steps.success_proof.outputs.directory != '' }}",
+      "        timeout-minutes: 3",
+      "        continue-on-error: true",
+      "        uses: actions/upload-artifact@v7",
+      "        with:",
+      "          name: ci-success-proof-${{ github.run_attempt }}",
+      "          path: ${{ steps.success_proof.outputs.directory }}/proof.json",
+      "          if-no-files-found: error",
+      "          retention-days: 2",
+    ].join("\n"));
+    remainder = remainder.replace(receipt, "");
+  }
+  {
     const receipt = namedStep(jobBlock("frontend-test", text), "Test resource lifecycle receipts");
     assert.equal(receipt.trimEnd(), [
       "      - name: Test resource lifecycle receipts",
@@ -1067,7 +1083,7 @@ test("required-gate rejects skipped applicable Go checks and permits unrelated s
   assert.match(gate, /^      - account-platform-test$/m);
   assert.match(gate, /ACCOUNT_PLATFORM_REQUIRED: \$\{\{ needs\.changes\.outputs\.account_platform \}\}/);
   assert.match(gate, /ACCOUNT_PLATFORM_RESULT: \$\{\{ needs\.account-platform-test\.result \}\}/);
-  const run = gate.match(/        run: \|\r?\n([\s\S]*)/)[1].replace(/^ {10}/gm, "");
+  const run = stepRun(gate, "汇总所有适用检查");
   const baseEnv = { ...process.env, GITHUB_EVENT_NAME: "pull_request", WINDOWS_RUST_REQUIRED_BY_POLICY: "false" };
   for (const match of gate.matchAll(/^          ([A-Z0-9_]+_RESULT):/gm)) baseEnv[match[1]] = "success";
   for (const event of ["pull_request", "merge_group"]) {
@@ -1079,6 +1095,38 @@ test("required-gate rejects skipped applicable Go checks and permits unrelated s
       }
     }
   }
+});
+
+test("queue reuse normalizes only verified skips and never failed executions", () => {
+  const gate = jobBlock("required-gate");
+  const run = stepRun(gate, "汇总所有适用检查");
+  const baseEnv = { ...process.env, WINDOWS_RUST_REQUIRED_BY_POLICY: "false", ACCOUNT_PLATFORM_REQUIRED: "true" };
+  for (const match of gate.matchAll(/^          ([A-Z0-9_]+_RESULT):/gm)) baseEnv[match[1]] = "success";
+  for (const [event, verified, listed, status, accepted] of [
+    ["merge_group", "true", "true", "skipped", true],
+    ["merge_group", "false", "true", "skipped", false],
+    ["merge_group", "true", "false", "skipped", false],
+    ["pull_request", "true", "true", "skipped", false],
+    ["merge_group", "true", "true", "failure", false],
+    ["merge_group", "true", "true", "cancelled", false],
+  ]) {
+    const result = spawnSync(bash, ["-c", run], { encoding: "utf8", timeout: 30_000, windowsHide: true,
+      env: { ...baseEnv, GITHUB_EVENT_NAME: event, CI_REUSE_VERIFIED: verified,
+        ACCOUNT_PLATFORM_REUSED: listed, ACCOUNT_PLATFORM_RESULT: status } });
+    assert.equal(result.status, accepted ? 0 : 1, `${event}/${verified}/${listed}/${status}: ${result.stderr}`);
+  }
+  const lookup = namedStep(jobBlock("changes"), "Verify identical-input PR success proofs");
+  assert.match(lookup, /if: \$\{\{ github.event_name == 'merge_group' \}\}/);
+  assert.match(lookup, /timeout-minutes: 2/);
+  assert.match(lookup, /python3 scripts\/ci-test-reuse.py lookup/);
+  for (const name of ["account-platform-test", "frontend-test"]) {
+    const block = jobBlock(name);
+    assert.ok(block.includes("needs.changes.outputs.reuse_verified == 'true'"));
+    assert.ok(block.includes(`contains(fromJSON(needs.changes.outputs.reused_jobs || '[]'), '${name}')`));
+  }
+  const producer = namedStep(gate, "Record successful PR test inputs");
+  assert.ok(producer.includes("success() && github.event_name == 'pull_request'"));
+  assert.ok(producer.includes("github.event.pull_request.head.repo.full_name == github.repository"));
 });
 
 test("rust_code filter covers plain Rust source changes", () => {

@@ -625,7 +625,7 @@ GATE_JOB_LEVEL_IFS = {
         "(github.event_name == 'pull_request' || "
         "github.event_name == 'merge_group') && "
         "(needs.changes.outputs.frontend == 'true' || "
-        "needs.changes.outputs.pet == 'true') }}"
+        "needs.changes.outputs.pet == 'true') && !(github.event_name == 'merge_group' && needs.changes.outputs.reuse_verified == 'true' && contains(fromJSON(needs.changes.outputs.reused_jobs || '[]'), 'frontend-test')) }}"
     ),
     "relay-test": (
         "${{ !cancelled() && needs.changes.outputs.relay == 'true' && "
@@ -873,7 +873,7 @@ class CiGatePolicyTests(unittest.TestCase):
         self.assertIn("WINDOWS_RELAY_RESULT: ${{ needs.windows-relay-tools-test.result }}", gate)
         self.assertIn("RELAY_REQUIRED_BY_POLICY: ${{ needs.changes.outputs.relay == 'true' }}", gate)
         self.assertIn('"windows-relay-tools-test:$WINDOWS_RELAY_RESULT"', gate)
-        body = gate.split("        run: |\n", 1)[1]
+        body = _step_named(gate, "汇总所有适用检查").split("        run: |\n", 1)[1]
         shell = "\n".join(line[10:] for line in body.splitlines())
         environment = {**os.environ, "GITHUB_EVENT_NAME": "pull_request", "BACKFLOW_MODE": "full",
                        "WINDOWS_RUST_REQUIRED_BY_POLICY": "false"}
@@ -892,7 +892,7 @@ class CiGatePolicyTests(unittest.TestCase):
 
     def test_required_gate_requires_actual_success_for_applicable_windows_dacl(self):
         gate = self.workflow.split("\n  required-gate:", 1)[1]
-        body = gate.split("        run: |\n", 1)[1]
+        body = _step_named(gate, "汇总所有适用检查").split("        run: |\n", 1)[1]
         shell = "\n".join(line[10:] for line in body.splitlines())
         environment = {**os.environ, "BACKFLOW_MODE": "full",
                        "WINDOWS_RUST_REQUIRED_BY_POLICY": "false"}
@@ -3385,7 +3385,7 @@ class CiGatePolicyTests(unittest.TestCase):
         # whole suite before this pin existed). The bare `[[ ]]` must stay
         # bare so a nonzero count fails the step.
         self.assertTrue(
-            required_gate.rstrip().endswith('[[ "$failed" -eq 0 ]]'),
+            _step_named(required_gate, "汇总所有适用检查").rstrip().endswith('[[ "$failed" -eq 0 ]]'),
             "required-gate must end in the bare failed-count verdict",
         )
         for suffix in (
@@ -3435,6 +3435,7 @@ class CiGatePolicyTests(unittest.TestCase):
         # test or cleanup failure. Artifact transport is bounded separately;
         # adding another advisory step still requires explicit review here.
         reviewed_diagnostics = (
+            "PR test success proof transport",
             "Windows 测试二进制导入诊断",
             "Test resource lifecycle receipts",
             "Financial parallel diagnostics",
@@ -3492,6 +3493,11 @@ class CiGatePolicyTests(unittest.TestCase):
                     retention-days: 7
             """).rstrip(), "      "),
         )
+        transport = _step_named(_extract_job_block(body, 'required-gate'), 'PR test success proof transport')
+        self.assertIn('timeout-minutes: 3', transport)
+        self.assertIn('uses: actions/upload-artifact@v7', transport)
+        self.assertIn('path: ${{ steps.success_proof.outputs.directory }}/proof.json', transport)
+        self.assertNotRegex(transport, r'(?m)^        (?:run|env):')
         diagnostic_job = _extract_job_block(body, 'account-platform-test')
         matches = list(re.finditer(
             r"(?ms)^      - name: Account test resource lifecycle receipts\n.*?(?=^      - |\Z)", diagnostic_job

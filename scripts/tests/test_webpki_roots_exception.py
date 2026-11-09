@@ -329,7 +329,8 @@ class WebpkiCiContractTests(unittest.TestCase):
         # Explicitly review each diagnostic-only entry. More uploads do not add
         # a Rust policy consumer, but neither an unknown entry nor a new action
         # version may silently inherit this review.
-        reviewed = [('frontend-test', 'Test resource lifecycle receipts'),
+        reviewed = [('required-gate', 'PR test success proof transport'),
+                    ('frontend-test', 'Test resource lifecycle receipts'),
                     ('account-platform-test', 'Financial parallel diagnostics'),
                     ('account-platform-test', 'Account test resource lifecycle receipts')]
         self.assertEqual(workflow.count('uses: actions/upload-artifact@v7'), len(reviewed))
@@ -338,7 +339,7 @@ class WebpkiCiContractTests(unittest.TestCase):
             entries = [step for step in steps if step.startswith(f'name: {name}\n')]
             self.assertEqual(len(entries), 1)
             self.assertIn('uses: actions/upload-artifact@v7\n', entries[0])
-            self.assertIn('retention-days: 7\n', entries[0])
+            self.assertIn(f"retention-days: {2 if job == 'required-gate' else 7}\n", entries[0])
             self.assertIn('        timeout-minutes: 3\n', entries[0])
             self.assertIn('        continue-on-error: true\n', entries[0])
         # Only diagnostic transport may be non-blocking. In particular, a

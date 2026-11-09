@@ -90,6 +90,7 @@ on:
     branches: [main]   # 暖 cache:见上方 Cache 策略
 
 permissions:
+  actions: read        # Read same-repository successful-run proofs; no check/status writes.
   contents: read
   pull-requests: read   # dorny/paths-filter 调 API 读 PR 改了哪些文件
 
@@ -242,6 +243,9 @@ jobs:
       frontend: ${{ steps.filter.outputs.frontend }}
       relay: ${{ steps.filter.outputs.relay }}
       account_platform: ${{ steps.filter.outputs.account_platform }}
+      reused_jobs: ${{ steps.reuse.outputs.reused_jobs || '[]' }}
+      reuse_verified: ${{ steps.reuse.outputs.reuse_verified || 'false' }}
+      reuse_source: ${{ steps.reuse.outputs.reuse_source }}
       team_relay_hub: ${{ steps.filter.outputs.team_relay_hub }}
       update_release_console: ${{ steps.filter.outputs.update_release_console }}
       acp_runtime: ${{ steps.filter.outputs.acp_runtime }}
@@ -285,6 +289,8 @@ jobs:
             # covered by their frontend checks, not the Go/PostgreSQL suite.
             # All other platform paths stay included, including new ones.
             account_platform:
+              - 'scripts/ci-test-reuse.py'
+              - 'scripts/tests/test_ci_test_reuse.py'
               - 'account-platform/**'
               - '!account-platform/docs/draft-model-confirmation.md'
               - '!account-platform/internal/portal/static/**'
@@ -660,6 +666,8 @@ jobs:
               - 'pinvou3-app/eslint.config.mjs'
               - '.github/workflows/pr-check.yml'
             frontend:
+              - 'scripts/ci-test-reuse.py'
+              - 'scripts/tests/test_ci_test_reuse.py'
               - 'scripts/tests/account-platform-invocation-environment.test.mjs'
               - 'account-platform/deploy/production/compose.personal.yaml'
               - 'account-platform/deploy/production/compose.models.yaml'
@@ -872,6 +880,20 @@ jobs:
   # 回流可以在 Windows、macOS 或 Linux 上创建和处理。本 job 不替代实际处理
   # 平台的本地 preflight，而是在 PR current head 与 Merge Queue 组合提交上都用
   # 三平台执行一致的无依赖门禁。main push 不重复，重型产品测试仍按路径路由。
+
+      - name: Verify identical-input PR success proofs
+        id: reuse
+        if: ${{ github.event_name == 'merge_group' }}
+        timeout-minutes: 2
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          TESTED_SHA: ${{ github.sha }}
+          CI_REUSE_CONFIGURATION: ${{ toJSON(vars) }}
+          CI_REUSE_ROUTING: >-
+            {"frontend":${{ toJSON(steps.filter.outputs.frontend) }},"pet":${{ toJSON(steps.filter.outputs.pet) }},"account_platform":${{ toJSON(steps.filter.outputs.account_platform) }},"pure_release_backflow":${{ toJSON(steps.pr-rust-policy.outputs.pure_release_backflow || steps.queue-rust-policy.outputs.pure_release_backflow || 'false') }},"backflow_mode":${{ toJSON(steps.pr-rust-policy.outputs.backflow_mode || steps.queue-rust-policy.outputs.backflow_mode || 'full') }}}
+        run: python3 scripts/ci-test-reuse.py lookup
+
+
   backflow-portability:
     name: backflow-portability (${{ matrix.os }})
     needs: changes
@@ -1066,7 +1088,7 @@ jobs:
     # killed at the 45-minute budget before retirement); leave time for setup, a
     # complete pass and one largest-smoke retry while retaining a bounded job
     # lifetime.
-    if: ${{ !cancelled() && github.event.action != 'closed' && needs.changes.outputs.pure_release_backflow != 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group') && (needs.changes.outputs.frontend == 'true' || needs.changes.outputs.pet == 'true') }}
+    if: ${{ !cancelled() && github.event.action != 'closed' && needs.changes.outputs.pure_release_backflow != 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group') && (needs.changes.outputs.frontend == 'true' || needs.changes.outputs.pet == 'true') && !(github.event_name == 'merge_group' && needs.changes.outputs.reuse_verified == 'true' && contains(fromJSON(needs.changes.outputs.reused_jobs || '[]'), 'frontend-test')) }}
     runs-on: ${{ fromJSON(vars.PINVOU_LINUX_MEDIUM_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
     timeout-minutes: 75
     defaults:
@@ -1282,7 +1304,7 @@ jobs:
     needs: changes
     # Draft, Ready and the Merge Queue validate the same Go contracts. No
     # backflow exemption may suppress this independently deployable module.
-    if: ${{ !cancelled() && github.event.action != 'closed' && needs.changes.outputs.account_platform == 'true' }}
+    if: ${{ !cancelled() && github.event.action != 'closed' && needs.changes.outputs.account_platform == 'true' && !(github.event_name == 'merge_group' && needs.changes.outputs.reuse_verified == 'true' && contains(fromJSON(needs.changes.outputs.reused_jobs || '[]'), 'account-platform-test')) }}
     runs-on: ${{ fromJSON(vars.PINVOU_LINUX_HEAVY_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
     # Four independent financial workers can use the heavy runner's CPU.
     # Preserve every worker's original limits and the finite overall budget.
@@ -4858,6 +4880,9 @@ jobs:
           BACKFLOW_PORTABILITY_RESULT: ${{ needs.backflow-portability.result }}
           FAST_GATE_RESULT: ${{ needs.fast-gate.result }}
           MERGE_AUTHORED_AUDIT_RESULT: ${{ needs.merge-authored-audit.result }}
+          CI_REUSE_VERIFIED: ${{ needs.changes.outputs.reuse_verified }}
+          ACCOUNT_PLATFORM_REUSED: ${{ contains(fromJSON(needs.changes.outputs.reused_jobs || '[]'), 'account-platform-test') }}
+          FRONTEND_REUSED: ${{ contains(fromJSON(needs.changes.outputs.reused_jobs || '[]'), 'frontend-test') }}
           FRONTEND_RESULT: ${{ needs.frontend-test.result }}
           RELAY_RESULT: ${{ needs.relay-test.result }}
           ACCOUNT_PLATFORM_RESULT: ${{ needs.account-platform-test.result }}
@@ -4888,6 +4913,16 @@ jobs:
           BACKFLOW_MODE: ${{ needs.changes.outputs.backflow_mode }}
           WINDOWS_RUST_REQUIRED_BY_POLICY: ${{ vars.PINVOU_WINDOWS_ENABLED != 'false' && ((github.event_name == 'merge_group' && needs.changes.outputs.backflow_mode == 'full') || (github.event_name == 'pull_request' && github.event.pull_request.draft == false && (needs.changes.outputs.backflow_mode == 'full' || needs.changes.outputs.backflow_mode == 'windows_full'))) }}
         run: |
+          # Only a skipped allowlisted job with verified queue evidence can be
+          # normalized. Failures/cancellations and PR runs remain strict.
+          if [[ "$GITHUB_EVENT_NAME" == merge_group && "${CI_REUSE_VERIFIED:-false}" == true ]]; then
+            if [[ "$ACCOUNT_PLATFORM_RESULT" == skipped && "${ACCOUNT_PLATFORM_REUSED:-false}" == true ]]; then
+              ACCOUNT_PLATFORM_RESULT=success
+            fi
+            if [[ "$FRONTEND_RESULT" == skipped && "${FRONTEND_REUSED:-false}" == true ]]; then
+              FRONTEND_RESULT=success
+            fi
+          fi
           if [[ "${LOONGARCH64_CHECK_ENABLED:-true}" == false ]]; then
             echo "::notice::LoongArch64 cross check temporarily disabled by PINVOU_LOONGARCH64_CHECK_ENABLED=false"
           fi
@@ -4968,3 +5003,24 @@ jobs:
             esac
           done
           [[ "$failed" -eq 0 ]]
+
+      - name: Record successful PR test inputs
+        id: success_proof
+        if: ${{ success() && github.event_name == 'pull_request' && github.event.pull_request.draft == false && github.event.pull_request.head.repo.full_name == github.repository }}
+        timeout-minutes: 2
+        env:
+          TESTED_SHA: ${{ github.sha }}
+          CI_REUSE_CONFIGURATION: ${{ toJSON(vars) }}
+          CI_REUSE_NEEDS: ${{ toJSON(needs) }}
+        run: python3 scripts/ci-test-reuse.py record
+
+      - name: PR test success proof transport
+        if: ${{ success() && steps.success_proof.outputs.directory != '' }}
+        timeout-minutes: 3
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: ci-success-proof-${{ github.run_attempt }}
+          path: ${{ steps.success_proof.outputs.directory }}/proof.json
+          if-no-files-found: error
+          retention-days: 2
