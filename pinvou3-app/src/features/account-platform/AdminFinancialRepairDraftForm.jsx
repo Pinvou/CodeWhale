@@ -218,6 +218,7 @@ function LedgerRepairDraftForm({ client, copy, owner, onCreated }) {
   const phase = readingSnapshot ? workflow.phaseReading : workflow.phaseReview;
   return <section className="adm-financial-repair" aria-label={copy.title}>
     <h3>{copy.title}</h3>
+    {/* biome-ignore lint/a11y/noRedundantRoles: Safari needs an explicit list role when the workflow removes native list markers. */}
     <ol className="adm-ledger-workflow" role="list" aria-label={workflow.title}>{workflow.steps.map((label, i) => <li key={label} aria-current={i === stage ? 'step' : undefined}><span>{label}</span>{i === 1 && stage === 1 && <small className="adm-ledger-workflow-phase">{phase}</small>}{i === 2 && <small className="adm-ledger-workflow-phase">{workflow.approvalNext}</small>}</li>)}</ol>
     <form className="adm-financial-repair-target adm-ledger-target-form" onSubmit={readFacts}>
       <div className="adm-ledger-target-intro"><strong>{entry.task}</strong><p>{entry.help}</p></div>
