@@ -201,7 +201,7 @@ test("both production rollback entries reject a corrupt backup before stopping t
   const manualStart = source.indexOf('\nstamp="${backup##*/}"\n');
   const autoEnd = source.indexOf(jsBoundary, autoStart);
   const manualEnd = source.indexOf(jsBoundary, manualStart);
-  assert.ok(autoStart >= 0 && autoEnd > autoStart && manualStart > autoEnd && manualEnd > manualStart);
+  assert.ok(autoStart >= 0 && autoEnd > autoStart && manualStart >= 0 && manualEnd > manualStart);
   const helper = join(repoRoot, "remote-control-relay", "scripts", "relay-code-backup.sh");
   for (const [name, body] of [
     ["automatic", `${source.slice(autoStart, autoEnd)}\nprintf continued > restored\n}\nrollback`],
@@ -244,6 +244,96 @@ test("both production rollback entries reject a corrupt backup before stopping t
     assert.equal(await readFile(join(dir, "stopped"), "utf8"), "called");
     assert.equal(await readFile(join(dir, "restored"), "utf8"), "continued");
     assert.equal(await readFile(join(dir, "live", "server.js"), "utf8"), "old server");
+  }
+});
+
+test("manual rollback CLI verifies real backup bytes before stopping and replacing code", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "relay-manual-rollback-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const bash = bashExecutable();
+  const stamp = "20261109-010000";
+  const dir = root.replaceAll("\\", "/");
+  const live = join(root, "live");
+  const backup = join(live, "backups", stamp);
+  await mkdir(backup, { recursive: true });
+  await mkdir(join(root, "old"));
+  for (const helper of ["controller-lock-rollout.sh", "relay-code-backup.sh"]) {
+    await copyFile(join(repoRoot, "remote-control-relay", "scripts", helper), join(backup, helper));
+  }
+  const runner = [
+    'set -euo pipefail',
+    'fixture="$1"; shift',
+    'export PINVOU_REMOTE_DEPLOY_DIR="$fixture/live"',
+    'systemctl() { case "$1" in show) printf loaded ;; stop) printf stopped > "$PINVOU_REMOTE_DEPLOY_DIR/../stopped" ;; *) return 98 ;; esac; }',
+    'export -f systemctl',
+    'ssh() {',
+    '  printf ssh >> "$fixture/calls"',
+    '  while (( $# > 0 )) && [[ "$1" != -- ]]; do shift; done; shift',
+    // Execute the real SSH payload through the complete JS transaction. The
+    // separate asset/systemd restoration is outside this isolated code fixture.
+    '  local line',
+    '  while IFS= read -r line; do',
+    '    [[ "$line" != \'rm -rf "$remote_dir/web/dist"\' ]] || break',
+    '    printf "%s\\n" "$line"',
+    '  done > "$fixture/remote-code.sh"',
+    '  cat >/dev/null',
+    '  bash "$fixture/remote-code.sh" "$@"',
+    '}',
+    'curl() { case "${!#}" in http://direct.invalid/*) return 22 ;; */healthz) printf \'{"ok":true,"room_count":0}\' ;; */r/deploy-check) printf old-page ;; *) return 99 ;; esac; }',
+    'npm() { echo unexpected-build >&2; return 99; }',
+    'scp() { echo unexpected-upload >&2; return 99; }',
+    'source "$0" "$@"',
+  ].join("\n");
+  const env = {
+    ...process.env,
+    PINVOU_CONFIRM_PRODUCTION_DEPLOY: "1", PINVOU_CONFIRM_CONTROLLER_LOCK_UPGRADE: "0",
+    PINVOU_REMOTE_DEPLOY_SERVER: "fixture@relay.invalid",
+    PINVOU_REMOTE_EXPECTED_DEPLOY_SERVER: "fixture@relay.invalid", SSH_KEY: "fixture-key",
+    PINVOU_REMOTE_PUBLIC_URL: "https://public.invalid/pinvou3/remote",
+    PINVOU_REMOTE_DIRECT_URL: "http://direct.invalid/pinvou3/remote",
+    PINVOU_REMOTE_PUBLIC_BASE_PATH: "/pinvou3/remote", PINVOU_REMOTE_HARDENING_FILE: "",
+  };
+  const run = (args, overrides = {}) => spawnSync(bash,
+    ["-c", runner, deployScript.replaceAll("\\", "/"), dir, ...args],
+    { env: { ...env, ...overrides }, encoding: "utf8", timeout: 15_000 });
+  for (const [args, overrides] of [
+    [["--rollback"], {}], [["--rollback", "../other"], {}],
+    [["--rollback", stamp, "extra"], {}], [["--unknown", stamp], {}],
+    [["--rollback", stamp], { PINVOU_CONFIRM_PRODUCTION_DEPLOY: "0" }],
+    [["--rollback", stamp], { PINVOU_REMOTE_EXPECTED_DEPLOY_SERVER: "other@relay.invalid" }],
+  ]) {
+    const result = run(args, overrides);
+    assert.equal(result.status, 64, result.stdout + result.stderr);
+    assert.equal(await pathExists(join(root, "calls")), false);
+  }
+  for (const mode of ["corrupt", "valid", "empty"]) {
+    await rm(join(backup, "code-js"), { recursive: true, force: true });
+    await rm(join(root, "stopped"), { force: true });
+    await writeFile(join(live, "server.js"), "new server");
+    await writeFile(join(live, "new-only.js"), "new module");
+    await rm(join(root, "old", "server.js"), { force: true });
+    if (mode !== "empty") await writeFile(join(root, "old", "server.js"), "old server");
+    const captured = spawnSync(bash, ["-c", [
+      'set -euo pipefail', 'source "$1/live/backups/20261109-010000/relay-code-backup.sh"',
+      'relay_code_capture "$1/old" "$1/live/backups/20261109-010000/code-js"',
+    ].join("\n"), "capture", dir], { encoding: "utf8", timeout: 10_000 });
+    assert.equal(captured.status, 0, captured.stderr);
+    if (mode === "corrupt") await writeFile(join(backup, "code-js", "server.js"), "truncated");
+    const result = run(["--rollback", stamp]);
+    assert.equal(result.error, undefined);
+    assert.equal(result.status, mode === "corrupt" ? 1 : 0, result.stdout + result.stderr);
+    if (mode === "corrupt") {
+      assert.match(result.stderr, /relay_code_backup_invalid/u);
+      assert.equal(await pathExists(join(root, "stopped")), false);
+      assert.equal(await readFile(join(live, "server.js"), "utf8"), "new server");
+      assert.equal(await readFile(join(live, "new-only.js"), "utf8"), "new module");
+    } else {
+      assert.match(result.stdout, /人工回滚完成并通过公网复检/u);
+      assert.equal(await readFile(join(root, "stopped"), "utf8"), "stopped");
+      assert.equal(await pathExists(join(live, "new-only.js")), false);
+      assert.equal(await pathExists(join(live, "server.js")), mode === "valid");
+      if (mode === "valid") assert.equal(await readFile(join(live, "server.js"), "utf8"), "old server");
+    }
   }
 });
 

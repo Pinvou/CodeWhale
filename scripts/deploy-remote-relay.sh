@@ -6,6 +6,16 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
+# No arguments deploy a new version; recovery selects an existing backup only.
+ROLLBACK_STAMP=""
+if (( $# != 0 )); then
+  if (( $# != 2 )) || [[ "$1" != "--rollback" || ! "$2" =~ ^[0-9]{8}-[0-9]{6}$ ]]; then
+    echo "用法：$0 [--rollback YYYYMMDD-HHMMSS]" >&2
+    exit 64
+  fi
+  ROLLBACK_STAMP="$2"
+fi
+
 if [[ "${PINVOU_CONFIRM_PRODUCTION_DEPLOY:-0}" != "1" ]]; then
   echo "拒绝修改生产 Relay：请在确认发布窗口和回滚负责人后设置 PINVOU_CONFIRM_PRODUCTION_DEPLOY=1。" >&2
   exit 64
@@ -58,14 +68,6 @@ if [[ "$BASE_PATH" != "/pinvou3/remote" ]]; then
   exit 64
 fi
 
-# 通用硬化限制须显式指定受控输入，可按仓库通用模板准备。
-# 代理地址唯一来源是远端受保护的 controller 环境文件。
-# 先验证来源，再验证私有快照，上传只消费这份已验证的内容。
-node "$RELAY_DIR/scripts/validate-deploy-hardening.cjs" "$HARDENING_FILE"
-HARDENING_SNAPSHOT="$(mktemp "${TMPDIR:-/tmp}/pinvou-hardening.XXXXXXXX")"
-trap 'rm -f "$HARDENING_SNAPSHOT"' EXIT
-cp "$HARDENING_FILE" "$HARDENING_SNAPSHOT"
-node "$RELAY_DIR/scripts/validate-deploy-hardening.cjs" "$HARDENING_SNAPSHOT"
 
 ensure_cached_db() {
   local path="$1"
@@ -115,6 +117,96 @@ verify_public() {
   LAST_HEALTH="$health"
   VERIFY_ERROR=""
 }
+
+
+backup="$REMOTE_DIR/backups/${ROLLBACK_STAMP:-$STAMP}"
+
+rollback_remote() {
+  ssh -i "$SSH_KEY" -o BatchMode=yes "$SERVER" bash -s -- "$REMOTE_DIR" "$SERVICE" "$backup" <<'REMOTE'
+set -euo pipefail
+remote_dir="$1"
+service="$2"
+backup="$3"
+
+stamp="${backup##*/}"
+if [[ ! "$stamp" =~ ^[0-9]{8}-[0-9]{6}$ || "$backup" != "$remote_dir/backups/$stamp" \
+  || -L "$remote_dir/backups" || ! -d "$backup" || -L "$backup" ]]; then
+  echo "拒绝未知备份目录：$backup" >&2
+  exit 1
+fi
+for helper in controller-lock-rollout.sh relay-code-backup.sh; do
+  test -f "$backup/$helper" && test ! -L "$backup/$helper" || exit 1
+done
+source "$backup/controller-lock-rollout.sh"
+source "$backup/relay-code-backup.sh"
+staged="$(relay_code_stage "$backup/code-js" "$remote_dir")"
+controller_lock_before_rollback "$service" /var/lib/pinvou-remote-relay/state "$staged/incoming" || {
+  status=$?
+  rm -rf -- "$staged"
+  exit "$status"
+}
+relay_code_replace "$staged" "$remote_dir"
+rm -rf "$remote_dir/web/dist"
+if [[ ! -f "$backup/no-web-dist" ]]; then test -d "$backup/web-dist"; cp -a "$backup/web-dist" "$remote_dir/web/dist"; fi
+if [[ -f "$backup/no-package" ]]; then rm -f "$remote_dir/package.json"; else test -f "$backup/package.json"; cp -a "$backup/package.json" "$remote_dir/package.json"; fi
+if [[ -f "$backup/no-package-lock" ]]; then rm -f "$remote_dir/package-lock.json"; else test -f "$backup/package-lock.json"; cp -a "$backup/package-lock.json" "$remote_dir/package-lock.json"; fi
+if [[ -f "$remote_dir/package.json" ]]; then (cd "$remote_dir" && npm ci --omit=dev); fi
+rm -rf "$remote_dir/docs/schemas"
+if [[ ! -f "$backup/no-telemetry-schemas" ]]; then test -d "$backup/telemetry-schemas"; mkdir -p "$remote_dir/docs"; cp -a "$backup/telemetry-schemas" "$remote_dir/docs/schemas"; fi
+if [[ -f "$backup/no-stats-html" ]]; then rm -f "$remote_dir/web/stats.html"; else cp -a "$backup/stats.html" "$remote_dir/web/stats.html"; fi
+if [[ -f "$backup/no-hardening-dropin" ]]; then
+  rm -f "/etc/systemd/system/${service}.d/10-hardening.conf"
+else
+  test -f "$backup/10-hardening.conf"
+  cp -a "$backup/10-hardening.conf" "/etc/systemd/system/${service}.d/10-hardening.conf"
+fi
+if [[ -f "$backup/no-controller-dropin" ]]; then
+  rm -f "/etc/systemd/system/${service}.d/40-controller.conf"
+else
+  test -f "$backup/40-controller.conf"
+  cp -a "$backup/40-controller.conf" "/etc/systemd/system/${service}.d/40-controller.conf"
+fi
+systemctl daemon-reload
+systemctl restart "$service"
+systemctl is-active --quiet "$service"
+healthy=0
+for _ in $(seq 1 30); do
+  if curl -fsS --connect-timeout 3 --max-time 5 http://127.0.0.1:8787/pinvou3/remote/healthz >/dev/null 2>&1; then
+    healthy=1
+    break
+  fi
+  sleep 1
+done
+test "$healthy" = 1
+echo "已恢复备份：$backup"
+REMOTE
+}
+
+# Manual recovery reuses the identical verified remote rollback used after a
+# failed public check. It must not build/upload a new release or require that
+# the broken version already passes the deployment baseline.
+if [[ -n "$ROLLBACK_STAMP" ]]; then
+  if ! rollback_remote; then
+    echo "人工回滚失败，请检查服务状态与保留的备份，勿继续部署。" >&2
+    exit 1
+  fi
+  if ! verify_public baseline; then
+    echo "备份已恢复，但人工回滚后的公网复检失败：$VERIFY_ERROR" >&2
+    exit 1
+  fi
+  echo "人工回滚完成并通过公网复检：$backup"
+  exit 0
+fi
+
+# 通用硬化限制须显式指定受控输入，可按仓库通用模板准备。
+# 代理地址唯一来源是远端受保护的 controller 环境文件。
+# 先验证来源，再验证私有快照，上传只消费这份已验证的内容。
+node "$RELAY_DIR/scripts/validate-deploy-hardening.cjs" "$HARDENING_FILE"
+HARDENING_SNAPSHOT="$(mktemp "${TMPDIR:-/tmp}/pinvou-hardening.XXXXXXXX")"
+trap 'rm -f "$HARDENING_SNAPSHOT"' EXIT
+cp "$HARDENING_FILE" "$HARDENING_SNAPSHOT"
+node "$RELAY_DIR/scripts/validate-deploy-hardening.cjs" "$HARDENING_SNAPSHOT"
+
 
 if ! verify_public baseline; then
   echo "部署前检查失败，未修改线上版本：$VERIFY_ERROR" >&2
@@ -407,69 +499,6 @@ REMOTE
   exit 1
 }
 echo "$deploy_output"
-
-backup="$REMOTE_DIR/backups/$STAMP"
-
-rollback_remote() {
-  ssh -i "$SSH_KEY" -o BatchMode=yes "$SERVER" bash -s -- "$REMOTE_DIR" "$SERVICE" "$backup" <<'REMOTE'
-set -euo pipefail
-remote_dir="$1"
-service="$2"
-backup="$3"
-
-stamp="${backup##*/}"
-if [[ ! "$stamp" =~ ^[0-9]{8}-[0-9]{6}$ || "$backup" != "$remote_dir/backups/$stamp" \
-  || -L "$remote_dir/backups" || ! -d "$backup" || -L "$backup" ]]; then
-  echo "拒绝未知备份目录：$backup" >&2
-  exit 1
-fi
-for helper in controller-lock-rollout.sh relay-code-backup.sh; do
-  test -f "$backup/$helper" && test ! -L "$backup/$helper" || exit 1
-done
-source "$backup/controller-lock-rollout.sh"
-source "$backup/relay-code-backup.sh"
-staged="$(relay_code_stage "$backup/code-js" "$remote_dir")"
-controller_lock_before_rollback "$service" /var/lib/pinvou-remote-relay/state "$staged/incoming" || {
-  status=$?
-  rm -rf -- "$staged"
-  exit "$status"
-}
-relay_code_replace "$staged" "$remote_dir"
-rm -rf "$remote_dir/web/dist"
-if [[ ! -f "$backup/no-web-dist" ]]; then test -d "$backup/web-dist"; cp -a "$backup/web-dist" "$remote_dir/web/dist"; fi
-if [[ -f "$backup/no-package" ]]; then rm -f "$remote_dir/package.json"; else test -f "$backup/package.json"; cp -a "$backup/package.json" "$remote_dir/package.json"; fi
-if [[ -f "$backup/no-package-lock" ]]; then rm -f "$remote_dir/package-lock.json"; else test -f "$backup/package-lock.json"; cp -a "$backup/package-lock.json" "$remote_dir/package-lock.json"; fi
-if [[ -f "$remote_dir/package.json" ]]; then (cd "$remote_dir" && npm ci --omit=dev); fi
-rm -rf "$remote_dir/docs/schemas"
-if [[ ! -f "$backup/no-telemetry-schemas" ]]; then test -d "$backup/telemetry-schemas"; mkdir -p "$remote_dir/docs"; cp -a "$backup/telemetry-schemas" "$remote_dir/docs/schemas"; fi
-if [[ -f "$backup/no-stats-html" ]]; then rm -f "$remote_dir/web/stats.html"; else cp -a "$backup/stats.html" "$remote_dir/web/stats.html"; fi
-if [[ -f "$backup/no-hardening-dropin" ]]; then
-  rm -f "/etc/systemd/system/${service}.d/10-hardening.conf"
-else
-  test -f "$backup/10-hardening.conf"
-  cp -a "$backup/10-hardening.conf" "/etc/systemd/system/${service}.d/10-hardening.conf"
-fi
-if [[ -f "$backup/no-controller-dropin" ]]; then
-  rm -f "/etc/systemd/system/${service}.d/40-controller.conf"
-else
-  test -f "$backup/40-controller.conf"
-  cp -a "$backup/40-controller.conf" "/etc/systemd/system/${service}.d/40-controller.conf"
-fi
-systemctl daemon-reload
-systemctl restart "$service"
-systemctl is-active --quiet "$service"
-healthy=0
-for _ in $(seq 1 30); do
-  if curl -fsS --connect-timeout 3 --max-time 5 http://127.0.0.1:8787/pinvou3/remote/healthz >/dev/null 2>&1; then
-    healthy=1
-    break
-  fi
-  sleep 1
-done
-test "$healthy" = 1
-echo "已恢复备份：$backup"
-REMOTE
-}
 
 if ! verify_public release; then
   deploy_error="$VERIFY_ERROR"
