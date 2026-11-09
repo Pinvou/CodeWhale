@@ -856,7 +856,7 @@ impl DesktopControlledBusiness {
     ) -> Result<Value, String> {
         let controlled = self.app.state::<ControlledDeviceManager>();
         let (owner, request_id, decision) = controlled
-            .with_current_business_lease(lease, || {
+            .with_permission_dispatch_lease(lease, || {
                 let field = |key: &str| -> Result<&str, String> {
                     body.get(key)
                         .and_then(Value::as_str)
@@ -921,7 +921,7 @@ impl DesktopControlledBusiness {
         )
         .await?;
         controlled
-            .with_current_business_lease(lease, || {
+            .with_permission_dispatch_lease(lease, || {
                 let record = self
                     .app
                     .state::<Arc<RemoteTaskLedger>>()

@@ -725,6 +725,13 @@ impl ControlledTransportAuthority for ControllerRelaySender {
             action,
         )
     }
+    fn permission_dispatch_paused(&self, expected: &LeaseContext) -> bool {
+        self.owner.controller_authority.permission_dispatch_paused(
+            &self.generation,
+            self.binding,
+            expected,
+        )
+    }
     fn stop(&self) {
         self.owner
             .controller_authority

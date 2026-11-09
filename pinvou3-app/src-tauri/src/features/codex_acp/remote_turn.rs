@@ -22,7 +22,9 @@ use crate::features::remote_control::controller::controlled::PERMISSION_DISPATCH
 use crate::features::remote_control::controller::journal::{
     JournalKind, StreamingTextSanitizer, sanitize_text,
 };
-use crate::features::remote_control::controller::permission::PermissionAuthority;
+use crate::features::remote_control::controller::permission::{
+    PermissionAuthority, PermissionView,
+};
 use crate::features::remote_control::controller::protocol::LeaseContext;
 use crate::features::remote_control::controller::task::{
     ControllerTaskEventSink, PublishedAttachment, RemoteCodeTurnPort, RemoteTaskService,
@@ -677,7 +679,7 @@ impl AcpPoolCodeTurnPort {
 
         for (callback_id, request_id) in registered.iter().filter(|(id, _)| !current.contains(*id))
         {
-            if !resolved.insert(callback_id.clone()) {
+            if resolved.contains(callback_id) {
                 continue;
             }
             let view = self
@@ -693,18 +695,10 @@ impl AcpPoolCodeTurnPort {
             {
                 return Err("permission_dispatch_failed".to_owned());
             }
-            events.emit_journal(
-                JournalKind::Permission,
-                &owner.session_id,
-                Some(&owner.task_id),
-                serde_json::json!({
-                    "status": view.state,
-                    "operation_type": view.operation_type,
-                    "risk_level": view.risk_level,
-                    "target_scope": view.target_scope,
-                    "decision": view.decision,
-                }),
-            );
+            Self::journal_permission_resolution(owner, &view, events.as_ref());
+            resolved.insert(callback_id.clone());
+        }
+        if current.is_empty() && !resolved.is_empty() {
             let record = self
                 .tasks
                 .status(&owner.task_id)
@@ -716,6 +710,46 @@ impl AcpPoolCodeTurnPort {
             }
         }
         Ok(())
+    }
+
+    fn journal_permission_resolution(
+        owner: &RemotePermissionOwner,
+        view: &PermissionView,
+        events: &dyn ControllerTaskEventSink,
+    ) {
+        events.emit_journal(
+            JournalKind::Permission,
+            &owner.session_id,
+            Some(&owner.task_id),
+            serde_json::json!({
+                "status": view.state,
+                "operation_type": view.operation_type,
+                "risk_level": view.risk_level,
+                "target_scope": view.target_scope,
+                "decision": view.decision,
+            }),
+        );
+    }
+
+    fn journal_committed_permissions(
+        &self,
+        owner: &RemotePermissionOwner,
+        registered: &HashMap<String, String>,
+        resolved: &HashSet<String>,
+        events: &dyn ControllerTaskEventSink,
+    ) {
+        for (callback, approval) in registered {
+            if !resolved.contains(callback)
+                && self.permission_authority.allow_delivery_observed(
+                    &owner.lease,
+                    &owner.task_id,
+                    approval,
+                )
+                && let Ok(view) = self.permission_authority.view(approval)
+            {
+                Self::journal_permission_resolution(owner, &view, events);
+            }
+        }
     }
 }
 
@@ -896,6 +930,8 @@ impl RemoteCodeTurnPort for AcpPoolCodeTurnPort {
             task_id,
             reservation.turn_id(),
         );
+        let mut registered = HashMap::new();
+        let mut resolved = HashSet::new();
         let mut result = budget
             .run(&cancel, async {
                 reservation
@@ -910,8 +946,6 @@ impl RemoteCodeTurnPort for AcpPoolCodeTurnPort {
                             .to_owned()
                         }
                     })?;
-                let mut registered = HashMap::new();
-                let mut resolved = HashSet::new();
                 let mut missing_terminal_since = None;
                 loop {
                     if turn_relay.state.lock().terminal.is_some() {
@@ -934,6 +968,9 @@ impl RemoteCodeTurnPort for AcpPoolCodeTurnPort {
                 }
             })
             .await;
+        // ACP may finish immediately after receiving an allow, before the
+        // next poll. Only exact committed receipts can supply that journal row.
+        self.journal_committed_permissions(&owner, &registered, &resolved, events.as_ref());
         if let Err(error) = &result {
             reservation.retire(error).await;
         }

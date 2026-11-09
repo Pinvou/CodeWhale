@@ -37,6 +37,9 @@ pub(crate) trait ControlledTransportAuthority: Send + Sync {
     fn stop(&self);
     /// Hold exact transport authority through a synchronous business mutation.
     fn with_business_authority(&self, expected: &LeaseContext, action: &mut dyn FnMut()) -> bool;
+    fn permission_dispatch_paused(&self, _expected: &LeaseContext) -> bool {
+        false
+    }
 }
 
 impl ControlledTransportAuthority for ControllerTransportSender {
@@ -1883,6 +1886,9 @@ impl ControlledDeviceManager {
         if !transport.with_business_authority(expected, &mut || {
             result = action.take().map(|action| action(&inner));
         }) {
+            if defer_permission && transport.permission_dispatch_paused(expected) {
+                return Err(ControlledStateError::new(PERMISSION_DISPATCH_DEFERRED));
+            }
             return Err(ControlledStateError::new("desktop_remote_not_connected"));
         }
         result.ok_or_else(|| ControlledStateError::new("desktop_remote_not_connected"))

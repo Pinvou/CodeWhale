@@ -132,6 +132,23 @@ mod business_authority_tests {
     }
 
     #[test]
+    fn physical_close_defers_only_the_retained_permission_lease() {
+        let (authority, expected) = fixture();
+        assert!(!authority.permission_dispatch_paused("generation-0001", 1, &expected));
+        drop(SharedSocket {
+            authority: authority.clone(),
+            epoch: 0,
+        });
+        assert!(authority.permission_dispatch_paused("generation-0001", 1, &expected));
+        assert!(!authority.permission_dispatch_paused("generation-0001", 2, &expected));
+        let mut foreign = expected.clone();
+        foreign.connection_id = "connection-0002".into();
+        assert!(!authority.permission_dispatch_paused("generation-0001", 1, &foreign));
+        authority.retire_owned("generation-0001", 1);
+        assert!(!authority.permission_dispatch_paused("generation-0001", 1, &expected));
+    }
+
+    #[test]
     fn retirement_cannot_cross_an_admitted_synchronous_mutation() {
         let (authority, expected) = fixture();
         let worker_authority = authority.clone();
@@ -247,6 +264,25 @@ impl SharedControllerAuthority {
         }
         action();
         true
+    }
+
+    /// The socket revokes business authority before the manager sees its
+    /// disconnect event. Only the retained exact binding can wait for resume.
+    pub(crate) fn permission_dispatch_paused(
+        &self,
+        generation: &str,
+        binding: u64,
+        expected: &LeaseContext,
+    ) -> bool {
+        let state = self.0.lock();
+        (!state.connected || state.suspended)
+            && state.generation.as_deref() == Some(generation)
+            && state.binding == binding
+            && state
+                .lease
+                .as_ref()
+                .and_then(|runtime| runtime.lease.as_ref())
+                == Some(expected)
     }
 
     pub(crate) fn retire_owned(&self, generation: &str, binding: u64) {

@@ -66,7 +66,9 @@ use agent_client_protocol::schema::v1::{
     SessionModeState, SessionNotification, SetSessionConfigOptionRequest, SetSessionModeRequest,
     StopReason, ToolKind,
 };
-use agent_client_protocol::{Agent, ByteStreams, Client, ConnectionTo, Responder};
+use agent_client_protocol::{
+    Agent, ByteStreams, Client, ConnectionTo, RequestCancellation, Responder,
+};
 use agent_probe::{CliProbeCache, CliProbeGates, ResolvedCli};
 use anyhow::{Context, Result, anyhow, bail};
 use auth_probe::{AgentAuthProbeState, CachedAuthStatus};
@@ -79,6 +81,7 @@ use tokio::sync::{Mutex, MutexGuard, oneshot};
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 use wait_timeout::ChildExt;
 
+use crate::features::remote_control::controller::permission::PermissionAuthority;
 use crate::features::sessions::SessionStore;
 use attachments::prepare_codex_prompt;
 use deepseek_tui::session_manager::SessionMetadata;
@@ -1374,6 +1377,42 @@ async fn insert_pending_permission(
         ));
     }
     inserted
+}
+
+async fn watch_remote_permission(
+    pending: Arc<Mutex<HashMap<String, PendingPermission>>>,
+    key: String,
+    callback: Arc<()>,
+    mut response_rx: oneshot::Receiver<RequestPermissionResponse>,
+    cancellation: RequestCancellation,
+    authority: Option<Arc<PermissionAuthority>>,
+) {
+    tokio::select! {
+        _ = &mut response_rx => return,
+        _ = cancellation.cancelled() => {}
+    }
+    let (request, telemetry) = {
+        let mut pending = pending.lock().await;
+        let request = lifecycle::remove_owned_callback(&mut *pending, &key, |request| {
+            Arc::ptr_eq(&request.callback_instance, &callback)
+        });
+        let telemetry = request.as_ref().and_then(|request| {
+            let owner = request.remote_owner.as_ref()?;
+            let approval = request.remote_approval_id.as_deref()?;
+            authority
+                .as_ref()?
+                .cancel_bound_callback(&owner.lease, &owner.task_id, approval)
+        });
+        (request, telemetry)
+    };
+    if let Some(request) = request {
+        let _ = request.respond(RequestPermissionResponse::new(
+            RequestPermissionOutcome::Cancelled,
+        ));
+    }
+    if let Some(authority) = authority {
+        authority.publish_dispatch_telemetry(telemetry);
+    }
 }
 
 async fn take_pending_elicitation(
@@ -6257,6 +6296,10 @@ impl AcpPool {
         let replay_for_notification = replay_suppressed.clone();
         let pending_for_permission = self.pending_permissions.clone();
         let remote_owners_for_permission = self.remote_permission_owners.clone();
+        let authority_for_permission = self
+            .app
+            .try_state::<Arc<PermissionAuthority>>()
+            .map(|state| Arc::clone(state.inner()));
         let pending_for_elicitation = self.pending_elicitations.clone();
         let remote_owners_for_elicitation = self.remote_permission_owners.clone();
         let pinvou_id_for_permission = pinvou_session_id.to_string();
@@ -6340,6 +6383,7 @@ impl AcpPool {
                             request: request_value.clone(),
                         };
                         let (response_tx, response_rx) = oneshot::channel();
+                        let cancellation = remote_owner.as_ref().map(|_| responder.cancellation());
                         let mut local_responder = Some(responder);
                         let sdk_responder = if remote_owner.is_some() {
                             local_responder.take()
@@ -6386,6 +6430,19 @@ impl AcpPool {
                         );
                         // A permission request is agent activity and resets the silence window.
                         bridge_for_permission.note_agent_activity();
+                        if let Some(cancellation) = cancellation {
+                            // The SDK handles incoming frames in order. It must be
+                            // free to read peer cancellation while A is deciding.
+                            tokio::spawn(watch_remote_permission(
+                                pending_for_permission.clone(),
+                                key,
+                                callback_instance,
+                                response_rx,
+                                cancellation,
+                                authority_for_permission.clone(),
+                            ));
+                            return Ok(());
+                        }
                         let response = response_rx.await.unwrap_or_else(|_| {
                             RequestPermissionResponse::new(RequestPermissionOutcome::Cancelled)
                         });
@@ -9804,7 +9861,8 @@ mod tests {
         use agent_client_protocol::{Channel, RawJsonRpcMessage, TransportFrame};
         use futures_util::StreamExt as _;
 
-        for disconnect in [false, true] {
+        for scenario in ["accepted", "closed", "cancelled"] {
+            let disconnect = scenario == "closed";
             let (transport, mut peer) = Channel::duplex();
             let (responder_tx, responder_rx) = oneshot::channel();
             let responder_tx = Mutex::new(Some(responder_tx));
@@ -9856,7 +9914,7 @@ mod tests {
                 Some(connection)
             };
 
-            let authority = PermissionAuthority::with_clock(Arc::new(|| 1_100));
+            let authority = Arc::new(PermissionAuthority::with_clock(Arc::new(|| 1_100)));
             let lease = LeaseContext {
                 connection_id: "connection-1".into(),
                 controller_lease_id: "lease-1".into(),
@@ -9901,7 +9959,12 @@ mod tests {
                 },
                 option_ids: vec!["allow".into()],
                 option_kinds: HashMap::new(),
-                remote_owner: None,
+                remote_owner: Some(RemotePermissionOwner {
+                    task_sequence: 1,
+                    session_id: "sdk-session".into(),
+                    task_id: task_id.to_owned(),
+                    lease: lease.clone(),
+                }),
                 remote_request_id: None,
                 remote_approval_id: Some(approval.clone()),
                 remote_projection: None,
@@ -9912,6 +9975,46 @@ mod tests {
                 response_tx,
                 sdk_responder: Some(sdk_responder),
             };
+            if scenario == "cancelled" {
+                let key = permission_key("sdk-session", "sdk-tool");
+                let callback = Arc::clone(&request.callback_instance);
+                let cancellation = request.sdk_responder.as_ref().unwrap().cancellation();
+                let pending = Arc::new(Mutex::new(HashMap::from([(key.clone(), request)])));
+                let watcher = tokio::spawn(watch_remote_permission(
+                    Arc::clone(&pending),
+                    key,
+                    callback,
+                    response_rx,
+                    cancellation,
+                    Some(Arc::clone(&authority)),
+                ));
+                let cancel = RawJsonRpcMessage::notification(
+                    "$/cancel_request".into(),
+                    json!({"requestId": 1}),
+                )
+                .unwrap();
+                peer.tx
+                    .unbounded_send(TransportFrame::Single(cancel))
+                    .unwrap();
+                let Some(TransportFrame::Single(response)) =
+                    tokio::time::timeout(Duration::from_secs(5), peer.rx.next())
+                        .await
+                        .unwrap()
+                else {
+                    panic!("SDK did not settle the cancelled permission");
+                };
+                let response = serde_json::to_value(response).unwrap();
+                assert_eq!(response["id"], 1);
+                assert_eq!(response["result"]["outcome"]["outcome"], "cancelled");
+                watcher.await.unwrap();
+                assert!(pending.lock().await.is_empty());
+                assert_eq!(authority.view(&approval).unwrap().state, "denied");
+                assert!(!authority.allow_delivery_observed(&lease, task_id, &approval));
+                let connection = connection.unwrap();
+                connection.abort();
+                assert!(connection.await.unwrap_err().is_cancelled());
+                continue;
+            }
             let outcome = authority.dispatch_bound_allow(&lease, task_id, &approval, || {
                 request
                     .respond(RequestPermissionResponse::new(

@@ -28,7 +28,7 @@ use super::controlled::{
     ControlledDeviceManager, ControlledLease, ControlledOperation, ControlledRegistration,
     ControlledResumeMaterial, ControlledResumeStep, ControlledStateError, ControlledStatus,
     ControlledStatusKind, ControlledTransportAuthority, ControlledTransportOwner,
-    MAX_HANDSHAKE_TTL_MS,
+    MAX_HANDSHAKE_TTL_MS, PERMISSION_DISPATCH_DEFERRED,
 };
 use super::controlled_handshake::ControlledHandshake;
 use super::controlling_handshake::JoinedLease;
@@ -58,7 +58,7 @@ const REMOTE_ACTION_CACHE_TTL: Duration = Duration::from_secs(10 * 60);
 #[derive(Clone)]
 struct CachedRemoteActionResult {
     fingerprint: [u8; 32],
-    response: Value,
+    response: Option<Value>,
     touched_at: Instant,
 }
 
@@ -84,19 +84,29 @@ impl RemoteActionResultCache {
         match entries.get_mut(request_id) {
             Some(entry) if entry.fingerprint == fingerprint => {
                 entry.touched_at = now;
-                RemoteActionCacheLookup::Hit(entry.response.clone())
+                entry
+                    .response
+                    .clone()
+                    .map_or(RemoteActionCacheLookup::Miss, RemoteActionCacheLookup::Hit)
             }
             Some(_) => RemoteActionCacheLookup::Conflict,
             None => RemoteActionCacheLookup::Miss,
         }
     }
 
-    fn insert(&self, request_id: String, fingerprint: [u8; 32], response: Value) {
+    fn insert(&self, request_id: String, fingerprint: [u8; 32], response: Option<Value>) {
         let mut entries = self.entries.lock();
         let now = Instant::now();
         entries.retain(|_, entry| {
             now.saturating_duration_since(entry.touched_at) <= REMOTE_ACTION_CACHE_TTL
         });
+        if let Some(entry) = entries.get_mut(&request_id) {
+            if entry.fingerprint == fingerprint && entry.response.is_none() {
+                entry.response = response;
+                entry.touched_at = now;
+            }
+            return;
+        }
         if entries.len() >= REMOTE_ACTION_CACHE_CAPACITY {
             if let Some(oldest) = entries
                 .iter()
@@ -2197,6 +2207,16 @@ async fn dispatch_decrypted_payload_cached<P: ControlledBusinessPort + ?Sized>(
             let action = port
                 .remote_action(lease, session_ref, operation, body)
                 .await;
+            if operation == "permission_decide"
+                && action
+                    .as_ref()
+                    .is_err_and(|code| code == PERMISSION_DISPATCH_DEFERRED)
+            {
+                // Bind the request ID across the pause without inventing a
+                // terminal result or replaying a failure after the SDK commit.
+                action_results.insert(request_id.to_owned(), fingerprint, None);
+                return Ok(Vec::new());
+            }
             match &action {
                 Ok(_) => log_remote_action_event(
                     "controlled",
@@ -2213,7 +2233,7 @@ async fn dispatch_decrypted_payload_cached<P: ControlledBusinessPort + ?Sized>(
             }
             let response =
                 remote_action_response(lease, session_ref, request_id, operation, action);
-            action_results.insert(request_id.to_owned(), fingerprint, response.clone());
+            action_results.insert(request_id.to_owned(), fingerprint, Some(response.clone()));
             Ok(vec![("remote_action_result", response)])
         }
         "capability_snapshot_request" => {
@@ -4221,6 +4241,7 @@ mod tests {
             action_calls: std::sync::atomic::AtomicUsize,
             task_calls: std::sync::atomic::AtomicUsize,
             block: Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
+            defer_action: std::sync::atomic::AtomicBool,
         }
 
         #[async_trait::async_trait]
@@ -4234,6 +4255,12 @@ mod tests {
             ) -> Result<Value, String> {
                 self.action_calls
                     .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if self
+                    .defer_action
+                    .swap(false, std::sync::atomic::Ordering::SeqCst)
+                {
+                    return Err(PERMISSION_DISPATCH_DEFERRED.into());
+                }
                 if let Some((started, release)) = &self.block {
                     started.notify_one();
                     release.notified().await;
@@ -4380,6 +4407,62 @@ mod tests {
             port.action_calls.load(std::sync::atomic::Ordering::SeqCst),
             1,
             "a reused request id with a different binding must never execute"
+        );
+
+        let deferred = StubPort {
+            defer_action: std::sync::atomic::AtomicBool::new(true),
+            ..Default::default()
+        };
+        let deferred_results = RemoteActionResultCache::default();
+        assert!(
+            dispatch_decrypted_payload_cached(
+                &deferred,
+                &deferred_results,
+                &lease,
+                "remote_action_request",
+                &action,
+            )
+            .await
+            .unwrap()
+            .is_empty()
+        );
+        let mut conflict_action = action.clone();
+        conflict_action["session_id"] = json!("different-session");
+        let conflict = dispatch_decrypted_payload_cached(
+            &deferred,
+            &deferred_results,
+            &lease,
+            "remote_action_request",
+            &conflict_action,
+        )
+        .await
+        .unwrap();
+        assert_eq!(conflict[0].1["error_code"], "result_unknown");
+        let resumed = dispatch_decrypted_payload_cached(
+            &deferred,
+            &deferred_results,
+            &lease,
+            "remote_action_request",
+            &action,
+        )
+        .await
+        .unwrap();
+        assert_eq!(resumed, first);
+        let repeated = dispatch_decrypted_payload_cached(
+            &deferred,
+            &deferred_results,
+            &lease,
+            "remote_action_request",
+            &action,
+        )
+        .await
+        .unwrap();
+        assert_eq!(repeated, resumed);
+        assert_eq!(
+            deferred
+                .action_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            2
         );
 
         let frames = dispatch_decrypted_payload(
@@ -4603,9 +4686,8 @@ mod tests {
         let started = Arc::new(tokio::sync::Notify::new());
         let release = Arc::new(tokio::sync::Notify::new());
         let blocking = Arc::new(StubPort {
-            action_calls: Default::default(),
-            task_calls: Default::default(),
             block: Some((started.clone(), release.clone())),
+            ..Default::default()
         });
         let cache = Arc::new(RemoteActionResultCache::default());
         let epoch = Arc::new(std::sync::atomic::AtomicU64::new(0));

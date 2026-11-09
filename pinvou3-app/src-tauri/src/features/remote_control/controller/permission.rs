@@ -335,6 +335,17 @@ impl PendingPermission {
         self.resolved_reason = Some("expired".into());
         true
     }
+
+    fn deny(&mut self, reason: &str, now_b: u64) -> Option<u64> {
+        if !self.active() {
+            return None;
+        }
+        self.state = PermissionState::Denied;
+        self.decision = Some(PermissionDecision::Deny);
+        self.resolved_at_ms = Some(now_b);
+        self.resolved_reason = Some(bounded_reason(reason));
+        Some(now_b.saturating_sub(self.created_at_ms))
+    }
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -568,6 +579,24 @@ impl PermissionAuthority {
         })
     }
 
+    pub(crate) fn cancel_bound_callback(
+        &self,
+        lease: &LeaseContext,
+        task_id: &str,
+        request_id: &str,
+    ) -> Option<PermissionTelemetryEvent> {
+        let mut pending = self.pending.lock();
+        let entry = pending.get_mut(request_id)?;
+        if !entry.binding.matches(lease, task_id, request_id) {
+            return None;
+        }
+        let latency_ms = entry.deny("permission_callback_cancelled", self.now_ms())?;
+        Some(PermissionTelemetryEvent {
+            transition: PermissionTelemetryTransition::Denied,
+            latency_ms,
+        })
+    }
+
     fn dispatch_allow(
         &self,
         request_id: &str,
@@ -745,25 +774,14 @@ impl PermissionAuthority {
         let mut changed = 0;
         let mut latencies = Vec::new();
         for entry in pending.values_mut() {
-            if !predicate(entry) {
-                continue;
-            }
             // Once the dispatch boundary was committed the operation already
             // ran (or its outcome is unknown); a B stop must not rewrite that
             // history into "not executed".
-            if entry.dispatch_state == DispatchState::Dispatched {
-                continue;
-            }
-            match entry.state {
-                PermissionState::Pending | PermissionState::AllowedAwaitingDispatch => {
-                    entry.state = PermissionState::Denied;
-                    entry.decision = Some(PermissionDecision::Deny);
-                    entry.resolved_at_ms = Some(now_b);
-                    entry.resolved_reason = Some(bounded_reason(reason));
-                    changed += 1;
-                    latencies.push(now_b.saturating_sub(entry.created_at_ms));
-                }
-                PermissionState::Denied | PermissionState::Expired => {}
+            if predicate(entry)
+                && let Some(latency) = entry.deny(reason, now_b)
+            {
+                changed += 1;
+                latencies.push(latency);
             }
         }
         drop(pending);
