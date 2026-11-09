@@ -100,9 +100,14 @@ func (f *retainedWalletFenceFixture) repository(t *testing.T) *PostgresRepositor
 	return f.repositoryWithInitialStage(t, nil)
 }
 
-// Ordinary callers retain the complete current schema. Only an explicit
-// historical migration contract may pin the original public prefix.
-func (f *retainedWalletFenceFixture) repositoryWithInitialStage(t *testing.T, initial func(context.Context, *pgx.Conn, []migrations.Migration) error, throughVersion ...int64) *PostgresRepository {
+func (f *retainedWalletFenceFixture) repositoryWithInitialStage(t *testing.T, initial func(context.Context, *pgx.Conn, []migrations.Migration) error) *PostgresRepository {
+	return f.repositoryThroughVersion(t, 0, initial)
+}
+
+// A nonzero boundary installs an actual historical release, without rewriting
+// its ledger or temporarily removing newer migrations from a current database.
+// Existing callers keep the full current public chain through the zero default.
+func (f *retainedWalletFenceFixture) repositoryThroughVersion(t *testing.T, through int64, initial func(context.Context, *pgx.Conn, []migrations.Migration) error) *PostgresRepository {
 	t.Helper()
 	ctx := f.ctx
 	name := "f01_wallet_fence_" + strings.ReplaceAll(uuid.NewString(), "-", "")
@@ -150,21 +155,19 @@ func (f *retainedWalletFenceFixture) repositoryWithInitialStage(t *testing.T, in
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(throughVersion) > 1 {
-		t.Fatal("one exact historical migration boundary is required")
-	}
-	if len(throughVersion) == 1 {
-		boundary := -1
-		for index, migration := range installed {
-			if migration.Version == throughVersion[0] {
-				boundary = index
-				break
+	if through != 0 {
+		var historical []migrations.Migration
+		found := false
+		for _, migration := range installed {
+			if migration.Version <= through {
+				historical = append(historical, migration)
 			}
+			found = found || migration.Version == through
 		}
-		if boundary < 0 {
-			t.Fatal("historical migration boundary is not installed input")
+		if !found {
+			t.Fatal("historical migration boundary missing", through)
 		}
-		installed = installed[:boundary+1]
+		installed = historical
 	}
 	if initial != nil {
 		if err = initial(ctx, connection, installed); err != nil {

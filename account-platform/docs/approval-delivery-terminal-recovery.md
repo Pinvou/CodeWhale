@@ -2,7 +2,7 @@
 
 Token 和 Billing 消费者先确认领域结果、持久化 `RESULT_CONFIRMED`，再确认消息 ACK、登记 `TERMINAL_CONFIRMED`。ACK 成功而最后登记失败时，不能依赖消息再次投递来补元数据。
 
-Account 服务的 `configureApprovals` 在 personal/models 两种模式启动 `approval-delivery-terminal-recovery`，启动立即运行，随后每分钟一轮，每轮最多 100 项、10 秒预算。应用前需先用原迁移入口安装 Account `900015_approval_delivery_terminal_recovery`。函数仅允许真实 `account_service` 登录调用，运行角色仍无私有投递表权限。
+Account 服务的 `configureApprovals` 在 personal/models 两种模式启动 `approval-delivery-terminal-recovery`，启动立即运行，随后每分钟一轮，每轮最多 100 项、10 秒预算。应用前需先用原迁移入口安装 Account `900016_approval_delivery_terminal_recovery`。函数仅允许真实 `account_service` 登录调用，运行角色仍无私有投递表权限。
 
 扫尾只选择当前注册映射及序列化版本允许的 `RESULT_CONFIRMED`，同事务锁定并推进 state、version、updated_at。行锁使用 SKIP LOCKED，其他实例或消费者已持锁的行留待后续轮次；批次 SQL 错误整体回滚，修复依赖后下一轮重试。它不领取领域执行权、不调用执行器、不改变审批或领域结果。READY、DOMAIN_INFLIGHT、DLQ_PUBLISHED_ACK_PENDING 均保留，未知结果不因等待时间自动收尾。
 

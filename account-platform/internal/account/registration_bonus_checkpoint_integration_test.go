@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"sort"
 	"strings"
 	"testing"
@@ -18,26 +19,25 @@ import (
 
 const registrationBonusCheckpointMigrationVersion int64 = 900014
 
-// These cases test the published 900014 backfill and rollback contract. Later
-// unrelated migrations must not silently replace that historical DownOne target.
-func registrationBonusCheckpointMigrations() ([]migrations.Migration, error) {
+// Historical rollback cases must load the same released prefix they install.
+func accountMigrationsThrough(version int64) ([]migrations.Migration, error) {
 	loaded, err := migrations.Load("../../migrations/account")
 	if err != nil {
 		return nil, err
 	}
 	for index, migration := range loaded {
-		if migration.Version == registrationBonusCheckpointMigrationVersion {
+		if migration.Version == version {
 			return loaded[:index+1], nil
 		}
 	}
-	return nil, errors.New("registration bonus checkpoint migration 900014 is required")
+	return nil, fmt.Errorf("account migration %d is required", version)
 }
 
 // The first page commits through the real public prefix and account_service.
 // A fixture trigger interrupts the next page, without guessing a timing window.
-func registrationBonusCheckpoint(t *testing.T) (*PostgresRepository, time.Time) {
+func registrationBonusCheckpoint(t *testing.T, through int64) (*PostgresRepository, time.Time) {
 	t.Helper()
-	r := retainedWalletFenceActors(t).repositoryWithInitialStage(t, nil, registrationBonusCheckpointMigrationVersion)
+	r := retainedWalletFenceActors(t).repositoryThroughVersion(t, through, nil)
 	ctx := context.Background()
 	now := time.Now().UTC().Truncate(time.Microsecond)
 	r.now = func() time.Time { return now }
@@ -98,7 +98,7 @@ func registrationBonusCheckpointSnapshot(t *testing.T, r *PostgresRepository) st
 }
 
 func TestRegistrationBonusEligibilityCheckpointPostgresIntegration(t *testing.T) {
-	r, snapshotAt := registrationBonusCheckpoint(t)
+	r, snapshotAt := registrationBonusCheckpoint(t, registrationBonusCheckpointMigrationVersion)
 	ctx := context.Background()
 	before := registrationBonusCheckpointSnapshot(t, r)
 	for _, keyID := range []string{"different-key", "checkpoint-key"} {
@@ -187,9 +187,9 @@ func TestRegistrationBonusCheckpointForeignFactsPostgresIntegration(t *testing.T
 		t.Run(map[bool]string{false: "unbound-existing-facts", true: "foreign-key-before-finalize"}[bound], func(t *testing.T) {
 			var r *PostgresRepository
 			if bound {
-				r, _ = registrationBonusCheckpoint(t)
+				r, _ = registrationBonusCheckpoint(t, registrationBonusCheckpointMigrationVersion)
 			} else {
-				r = retainedWalletFenceActors(t).repositoryWithInitialStage(t, nil, registrationBonusCheckpointMigrationVersion)
+				r = retainedWalletFenceActors(t).repositoryThroughVersion(t, registrationBonusCheckpointMigrationVersion, nil)
 				if err := r.ConfigureRegistrationBonusFingerprint("checkpoint-key", bytes.Repeat([]byte{0x51}, 32)); err != nil {
 					t.Fatal(err)
 				}
@@ -215,7 +215,7 @@ func TestRegistrationBonusCheckpointForeignFactsPostgresIntegration(t *testing.T
 }
 
 func TestRegistrationBonusCheckpointGuardsPostgresIntegration(t *testing.T) {
-	r, _ := registrationBonusCheckpoint(t)
+	r, _ := registrationBonusCheckpoint(t, organizationEvidenceTruncateMigrationVersion)
 	ctx := context.Background()
 	before := registrationBonusCheckpointSnapshot(t, r)
 	for _, mutation := range []map[string]string{
@@ -249,11 +249,14 @@ func TestRegistrationBonusCheckpointGuardsPostgresIntegration(t *testing.T) {
 		}
 	}
 	connection := registrationBonusCheckpointMigrator(t, r)
-	loaded, err := registrationBonusCheckpointMigrations()
+	loaded, err := accountMigrationsThrough(organizationEvidenceTruncateMigrationVersion)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = accountschema.DownOne(ctx, connection, loaded); err == nil || !strings.Contains(err.Error(), "destructive rollback is forbidden") {
+	// The evidence release refuses at its forward-only head. Exercise the
+	// original checkpoint guard independently so that refusal cannot mask it.
+	assertHistoricalRollbackRefusal(t, r, loaded, registrationBonusCheckpointMigrationVersion, "P0001", "registration bonus eligibility facts exist; destructive rollback is forbidden")
+	if err = accountschema.DownOne(ctx, connection, loaded); err == nil || !strings.Contains(err.Error(), "organization evidence truncate protection is forward-only") {
 		t.Fatalf("public down discarded a committed checkpoint: %v", err)
 	}
 	if registrationBonusCheckpointSnapshot(t, r) != before {
@@ -281,7 +284,8 @@ func registrationBonusCheckpointMigrator(t *testing.T, r *PostgresRepository) *p
 
 func TestRegistrationBonusCheckpointMigrationPostgresIntegration(t *testing.T) {
 	f := retainedWalletFenceActors(t)
-	r := f.repositoryWithInitialStage(t, func(ctx context.Context, connection *pgx.Conn, input []migrations.Migration) error {
+	// Test the actual checkpoint release, before later forward-only heads.
+	r := f.repositoryThroughVersion(t, registrationBonusCheckpointMigrationVersion, func(ctx context.Context, connection *pgx.Conn, input []migrations.Migration) error {
 		var previous []migrations.Migration
 		for _, migration := range input {
 			if migration.Version != registrationBonusCheckpointMigrationVersion {
@@ -299,13 +303,20 @@ func TestRegistrationBonusCheckpointMigrationPostgresIntegration(t *testing.T) {
 			t.Fatal("published migration87 identity changed")
 		}
 		return nil
-	}, registrationBonusCheckpointMigrationVersion)
+	})
 	ctx := context.Background()
 	connection := registrationBonusCheckpointMigrator(t, r)
-	input, err := registrationBonusCheckpointMigrations()
+	input, err := accountMigrationsThrough(registrationBonusCheckpointMigrationVersion)
 	if err != nil {
 		t.Fatal(err)
 	}
+	var history []migrations.Migration
+	for _, migration := range input {
+		if migration.Version <= 900014 {
+			history = append(history, migration)
+		}
+	}
+	input = history
 	if err := accountschema.DownOne(ctx, connection, input); err != nil {
 		t.Fatal("empty unbound checkpoint rollback failed: ", err)
 	}
