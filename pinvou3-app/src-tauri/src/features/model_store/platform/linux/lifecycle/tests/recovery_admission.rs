@@ -100,14 +100,19 @@ fn interrupted_quota_admission_keeps_other_live_card_reserved_during_ordinary_do
     assert!(db::get_store_model("card-dl").unwrap().is_none());
     assert_eq!(ran_times(&root.join("engine-installed")), 0);
     assert_eq!(ran_times(&root.join("download-ran")), 0);
+    // Recovery additionally registers the interrupted tree's measured size
+    // (review round 7); strip that field before comparing the carried state.
+    let recovered_row = version_store::get(&interrupted.card_id, &interrupted.version_id)
+        .unwrap()
+        .unwrap();
+    assert!(recovered_row.measured_bytes.is_some());
+    let strip_measured = |mut value: serde_json::Value| {
+        value.as_object_mut().unwrap().remove("measured_bytes");
+        value
+    };
     assert_eq!(
-        serde_json::to_value(
-            version_store::get(&interrupted.card_id, &interrupted.version_id)
-                .unwrap()
-                .unwrap()
-        )
-        .unwrap(),
-        serde_json::to_value(&interrupted).unwrap()
+        strip_measured(serde_json::to_value(&recovered_row).unwrap()),
+        strip_measured(serde_json::to_value(&interrupted).unwrap())
     );
     assert_eq!(fs::read(&partial).unwrap(), b"part");
 

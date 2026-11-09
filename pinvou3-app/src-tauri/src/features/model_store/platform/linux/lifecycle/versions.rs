@@ -489,7 +489,17 @@ pub(super) fn purge_current_storage(
     version.state = "deleting".into();
     version_store::put(&version).map_err(fail)?;
     if resource_presence(&root)? {
-        remove_managed_resource(&root)?;
+        let removal = remove_managed_resource(&root);
+        // The tree just changed hands from the record's charge to the deleting
+        // row's; re-register the post-attempt remainder (usually empty) so
+        // later quota reads do not keep charging the pre-deletion measurement
+        // (review round 7). A partial removal still measures what remains; a
+        // walk error keeps the stale value — conservative.
+        if let Ok(bytes) = version_store::quota_dir_size_bytes(&root) {
+            version.measured_bytes = Some(bytes);
+            version_store::put(&version).map_err(fail)?;
+        }
+        removal?;
     }
     if resource_presence(&runtime)? {
         fs::remove_dir_all(runtime).map_err(|e| fail(e.to_string()))?;
@@ -1024,6 +1034,10 @@ impl ModelManager {
                 // A missing legacy directory is still an explicit reference:
                 // creating the download root inside it could make it
                 // resolvable again and wedge the unchanged deletion guard.
+                // Unlike the stage channel, equality also rejects here: for an
+                // ordinary download the candidate IS the configured root, so
+                // a declared resource equal to it is exactly the reviewer's
+                // reproduction (weights sitting in the download root itself).
                 let allowed = planned_directory(
                     other
                         .models_root
@@ -1032,10 +1046,7 @@ impl ModelManager {
                         .unwrap_or(configured_root),
                 )?;
                 let declared_root = planned_directory(&declared)?;
-                if declared_root != allowed
-                    && declared_root.starts_with(&allowed)
-                    && inside(&declared_root)?
-                {
+                if declared_root.starts_with(&allowed) && inside(&declared_root)? {
                     return Err(reject());
                 }
             }
