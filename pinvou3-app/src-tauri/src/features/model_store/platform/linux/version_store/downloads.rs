@@ -22,7 +22,9 @@ fn table(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
         downloading INTEGER NOT NULL, target_started INTEGER NOT NULL DEFAULT 1);
         CREATE TABLE IF NOT EXISTS model_download_retained_roots (
         card_id TEXT NOT NULL, models_root TEXT NOT NULL,
-        PRIMARY KEY(card_id, models_root))",
+        PRIMARY KEY(card_id, models_root));
+        CREATE TABLE IF NOT EXISTS model_download_root_measurements (
+        models_root TEXT PRIMARY KEY, measured_bytes INTEGER NOT NULL)",
     )?;
     let has_started_column = || {
         conn.query_row(
@@ -91,6 +93,71 @@ pub(super) fn has_pending_plan(card_id: &str) -> Result<bool, String> {
         "SELECT EXISTS(SELECT 1 FROM model_download_reservations WHERE card_id=?1 AND downloading=1)",
         [card_id], |row| row.get(0),
     ).map_err(|e| e.to_string())
+}
+
+/// Walk one download root now, excluding every currently registered managed
+/// version tree (those bytes are charged by their own version rows).
+fn walk_root_now(root: &Path) -> Result<u64, String> {
+    let isolated_roots = list(None)?
+        .into_iter()
+        .filter(|v| v.managed)
+        .filter_map(|v| v.models_root.map(PathBuf::from))
+        .collect::<Vec<_>>();
+    quota_dir_size_bytes_excluding(root, &isolated_roots)
+}
+
+/// Register a download root's freshly measured size (review round 7): quota
+/// admission reads this instead of walking every download root under the
+/// global quota lock. Measurements are refreshed at publish, completion and
+/// uninstall transitions; bytes written by an in-flight script after its
+/// publish stay covered by that script's full-size reservation.
+fn upsert_root_measurement_on(
+    conn: &rusqlite::Connection,
+    root: &Path,
+    bytes: u64,
+) -> Result<(), String> {
+    table(conn).map_err(|e| e.to_string())?;
+    conn.execute(
+        "INSERT INTO model_download_root_measurements(models_root,measured_bytes)
+        VALUES(?1,?2) ON CONFLICT(models_root) DO UPDATE SET measured_bytes=excluded.measured_bytes",
+        params![
+            root.to_string_lossy(),
+            i64::try_from(bytes).map_err(|e| e.to_string())?
+        ],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn upsert_root_measurement(root: &Path, bytes: u64) -> Result<(), String> {
+    upsert_root_measurement_on(&connection()?, root, bytes)
+}
+
+/// Registered size of one download root; a root without a measurement (first
+/// read after this column existed) calibrates once with a fail-closed walk.
+fn registered_root_bytes(root: &Path) -> Result<u64, String> {
+    let conn = connection()?;
+    table(&conn).map_err(|e| e.to_string())?;
+    let stored: Option<i64> = conn
+        .query_row(
+            "SELECT measured_bytes FROM model_download_root_measurements WHERE models_root=?1",
+            [root.to_string_lossy().as_ref()],
+            |row| row.get(0),
+        )
+        .map(Some)
+        .or_else(|error| match error {
+            rusqlite::Error::QueryReturnedNoRows => Ok(None),
+            other => Err(other),
+        })
+        .map_err(|e| e.to_string())?;
+    match stored.and_then(|bytes| u64::try_from(bytes).ok()) {
+        Some(bytes) => Ok(bytes),
+        None => {
+            let bytes = walk_root_now(root)?;
+            upsert_root_measurement(root, bytes)?;
+            Ok(bytes)
+        }
+    }
 }
 
 pub(super) fn release_plan(card_id: &str) -> Result<(), String> {
@@ -219,6 +286,9 @@ impl DownloadReservation {
             ],
         )
         .map_err(|e| e.to_string())?;
+        // Register the root's current size so later quota reads charge its
+        // retained bytes without re-walking it (review round 7).
+        upsert_root_measurement(&self.root, walk_root_now(&self.root)?)?;
         Ok(())
     }
 
@@ -245,6 +315,10 @@ impl DownloadReservation {
     pub fn complete(&mut self) -> Result<(), String> {
         self.confirm_stopped()?;
         release_plan(&self.card_id)?;
+        // The scripts have written their final bytes; refresh the root's
+        // registered size so post-download reality is what later quota reads
+        // charge (the covered record's own size is subtracted at read time).
+        upsert_root_measurement(&self.root, walk_root_now(&self.root)?)?;
         self.finished = true;
         Ok(())
     }
@@ -272,11 +346,6 @@ impl Drop for DownloadReservation {
 pub fn retained_download_bytes() -> Result<u64, String> {
     let all = downloads()?;
     let records = db::list_store_models().map_err(|e| e.to_string())?;
-    let isolated_roots = list(None)?
-        .into_iter()
-        .filter(|v| v.managed)
-        .filter_map(|v| v.models_root.map(PathBuf::from))
-        .collect::<Vec<_>>();
     let mut roots = BTreeMap::<PathBuf, (u64, u64)>::new();
     // A completed uninstall ends this card's retry location, but its shared
     // download root may still contain caches or unrelated files. Merge those
@@ -326,7 +395,10 @@ pub fn retained_download_bytes() -> Result<u64, String> {
                 .fold(legacy_covered, |bytes, record| {
                     bytes.saturating_add(record.size_bytes.max(0) as u64)
                 });
-            let actual = quota_dir_size_bytes_excluding(&root, &isolated_roots)?;
+            // Registered accounting (review round 7): read the root's
+            // registered measurement instead of walking every download root
+            // under the quota lock; a root without one calibrates once.
+            let actual = registered_root_bytes(&root)?;
             Ok(sum.saturating_add(actual.saturating_sub(covered).saturating_add(planned)))
         })
 }
@@ -347,22 +419,50 @@ pub fn download_paths(card_id: &str) -> Result<Vec<PathBuf>, String> {
 /// End the installation's retry target in the caller's successful full-delete
 /// transaction. Keep roots separately for conservative residual accounting and
 /// disclosure; a subsequent new installation may use the configured directory.
-pub(super) fn retire_on(conn: &rusqlite::Connection, card_id: &str) -> rusqlite::Result<()> {
-    table(conn)?;
+pub(super) fn retire_on(conn: &rusqlite::Connection, card_id: &str) -> Result<(), String> {
+    table(conn).map_err(|e| e.to_string())?;
+    let roots: Vec<String> = conn
+        .prepare("SELECT models_root FROM model_download_reservations WHERE card_id=?1")
+        .and_then(|mut query| {
+            query
+                .query_map([card_id], |row| row.get::<_, String>(0))
+                .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
+        })
+        .map_err(|e| e.to_string())?;
     conn.execute(
         "INSERT OR IGNORE INTO model_download_retained_roots(card_id,models_root)
         SELECT card_id,models_root FROM model_download_reservations WHERE card_id=?1",
         [card_id],
-    )?;
+    )
+    .map_err(|e| e.to_string())?;
     conn.execute(
         "DELETE FROM model_download_reservations WHERE card_id=?1",
         [card_id],
-    )?;
+    )
+    .map_err(|e| e.to_string())?;
+    // The uninstall script has removed its weights; refresh each retired
+    // root's registered size in the same transaction so the residual charge
+    // matches what actually remains (caches, unrelated files) instead of the
+    // pre-uninstall walk.
+    for root in roots {
+        let _ =
+            upsert_root_measurement_on(conn, Path::new(&root), walk_root_now(Path::new(&root))?);
+    }
     Ok(())
 }
 
 pub(super) fn forget_on(conn: &rusqlite::Connection, card_id: &str) -> Result<(), String> {
     table(conn).map_err(|e| e.to_string())?;
+    // Abandonment drops every charge for the card's roots by design; a later
+    // read of a still-shared root calibrates a fresh measurement once. The
+    // roots must be captured before their membership rows are deleted.
+    conn.execute(
+        "DELETE FROM model_download_root_measurements WHERE models_root IN (
+            SELECT models_root FROM model_download_reservations WHERE card_id=?1
+            UNION SELECT models_root FROM model_download_retained_roots WHERE card_id=?1)",
+        [card_id],
+    )
+    .map_err(|e| e.to_string())?;
     conn.execute(
         "DELETE FROM model_download_reservations WHERE card_id=?1",
         [card_id],

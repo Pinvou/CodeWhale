@@ -11,10 +11,7 @@ pub(super) use download_lease::{
 };
 pub use downloads::{DownloadReservation, download_paths};
 
-pub(super) fn retire_download_on(
-    conn: &rusqlite::Connection,
-    card_id: &str,
-) -> rusqlite::Result<()> {
+pub(super) fn retire_download_on(conn: &rusqlite::Connection, card_id: &str) -> Result<(), String> {
     downloads::retire_on(conn, card_id)
 }
 
@@ -34,6 +31,14 @@ pub struct Version {
     /// unrelated files. Failed/interrupted candidates charge actual files only.
     #[serde(default)]
     pub planned_bytes: u64,
+    /// Last measured on-disk size of this version's tree, registered at state
+    /// transitions (publish / completion / failure / recovery) and by the
+    /// explicit re-measure action. Display and quota admission read this
+    /// instead of walking every tree on each call (review round 7); it can go
+    /// stale if files change outside the app — `None` rows calibrate once on
+    /// first quota read.
+    #[serde(default)]
+    pub measured_bytes: Option<u64>,
 }
 
 fn connection() -> Result<rusqlite::Connection, String> {
@@ -136,6 +141,9 @@ fn from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Version> {
         created_at: row.get("created_at")?,
         error: row.get("error")?,
         planned_bytes: row.get::<_, i64>("planned_bytes")?.max(0) as u64,
+        measured_bytes: row
+            .get::<_, Option<i64>>("measured_bytes")?
+            .and_then(|bytes| u64::try_from(bytes).ok()),
     })
 }
 
@@ -173,12 +181,15 @@ fn put_on(conn: &rusqlite::Connection, version: &Version) -> Result<(), String> 
     } else {
         0
     };
-    conn.execute("INSERT INTO model_versions(card_id,version_id,state,record_json,models_root,runtime_card_id,resource_dir,managed,created_at,error,planned_bytes)
-        VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11) ON CONFLICT(card_id,version_id) DO UPDATE SET
+    let measured = version
+        .measured_bytes
+        .and_then(|bytes| i64::try_from(bytes).ok());
+    conn.execute("INSERT INTO model_versions(card_id,version_id,state,record_json,models_root,runtime_card_id,resource_dir,managed,created_at,error,planned_bytes,measured_bytes)
+        VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12) ON CONFLICT(card_id,version_id) DO UPDATE SET
         state=excluded.state,record_json=excluded.record_json,models_root=excluded.models_root,
-        runtime_card_id=excluded.runtime_card_id,resource_dir=excluded.resource_dir,managed=excluded.managed,error=excluded.error,planned_bytes=excluded.planned_bytes",
+        runtime_card_id=excluded.runtime_card_id,resource_dir=excluded.resource_dir,managed=excluded.managed,error=excluded.error,planned_bytes=excluded.planned_bytes,measured_bytes=excluded.measured_bytes",
         params![version.card_id,version.version_id,version.state,record,version.models_root,
-            version.runtime_card_id,version.resource_dir,version.managed,version.created_at,version.error,planned])
+            version.runtime_card_id,version.resource_dir,version.managed,version.created_at,version.error,planned,measured])
         .map_err(|e| e.to_string())?;
     Ok(())
 }
@@ -354,6 +365,24 @@ fn quota_dir_size_bytes_excluding(
 #[cfg(test)]
 mod quota_tests;
 
+/// Persist a freshly measured tree size for one version row. Calibration
+/// writes are idempotent value updates; callers under the quota lock may also
+/// hit rows whose measured value is still NULL because they were written
+/// before the column existed (one-time migration walk).
+pub(super) fn update_measured(card_id: &str, version_id: &str, bytes: u64) -> Result<(), String> {
+    connection()?
+        .execute(
+            "UPDATE model_versions SET measured_bytes=?3 WHERE card_id=?1 AND version_id=?2",
+            params![
+                card_id,
+                version_id,
+                i64::try_from(bytes).map_err(|e| e.to_string())?
+            ],
+        )
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 fn retained_bytes_replacing(replacing: Option<(&str, &str)>) -> Result<u64, String> {
     // A current managed generation is already charged by store_models. Keep
     // charging its files above that amount, and deduplicate shared resources
@@ -376,32 +405,45 @@ fn retained_bytes_replacing(replacing: Option<(&str, &str)>) -> Result<u64, Stri
             .resource_dir
             .clone()
             .unwrap_or_else(|| format!("{}:{}", version.card_id, version.version_id));
-        let actual = || {
-            version
-                .models_root
-                .as_ref()
-                .map(|p| quota_dir_size_bytes(std::path::Path::new(p)))
-                .unwrap_or(Ok(0))
+        // Registered accounting (review round 7): quota admission reads the
+        // registered measured size instead of walking every tree under the
+        // global quota lock. Values are (re)taken at publish, completion,
+        // failure, crash recovery and the explicit re-measure action; a NULL
+        // row — written before this column existed — calibrates exactly once
+        // here with a fail-closed walk that is persisted for later reads.
+        let registered_size = |version: &Version| -> Result<u64, String> {
+            match version.measured_bytes {
+                Some(bytes) => Ok(bytes),
+                None => {
+                    let bytes = version
+                        .models_root
+                        .as_ref()
+                        .map(|p| quota_dir_size_bytes(std::path::Path::new(p)))
+                        .unwrap_or(Ok(0))?;
+                    update_measured(&version.card_id, &version.version_id, bytes)?;
+                    Ok(bytes)
+                }
+            }
         };
         let registered = version.record.as_ref().map(|r| r.size_bytes.max(0) as u64);
         let covered = active.as_ref().map_or(0, |r| r.size_bytes.max(0) as u64);
         let charge = if active.is_some() {
-            actual()?.max(covered)
+            registered_size(&version)?.max(covered)
         } else if version.state == "downloading" {
-            let actual = actual()?;
+            let measured = registered_size(&version)?;
             if replacing == Some((version.card_id.as_str(), version.version_id.as_str())) {
-                actual
+                measured
             } else {
-                actual.max(version.planned_bytes)
+                measured.max(version.planned_bytes)
             }
         } else if version.state == "failed" {
-            actual()?
+            registered_size(&version)?
         } else if version.managed {
-            actual()?.max(registered.unwrap_or(0))
+            registered_size(&version)?.max(registered.unwrap_or(0))
         } else {
             match registered {
                 Some(bytes) => bytes,
-                None => actual()?,
+                None => registered_size(&version)?,
             }
         };
         let resource = resources.entry(key).or_default();
@@ -482,13 +524,32 @@ fn has_interrupted_versions(card_id: &str) -> Result<bool, String> {
 }
 
 fn recover_interrupted_records(card_id: &str) -> Result<(), String> {
-    connection()?
-        .execute(
-            "UPDATE model_versions SET state='failed', planned_bytes=0,
-             error='version_download_interrupted' WHERE card_id=?1 AND state='downloading'",
-            [card_id],
-        )
+    let mut conn = connection()?;
+    // Register each interrupted tree's actual size while transitioning it to
+    // failed, so later quota reads keep using the registered value (review
+    // round 7) instead of re-walking these trees on every admission. Best
+    // effort here: this also runs from the versions dialog, which must not
+    // fail on an unreadable tree — the fail-closed calibration under the
+    // quota lock covers a NULL left behind by a walk error.
+    let interrupted = list(Some(card_id))?
+        .into_iter()
+        .filter(|version| version.state == "downloading")
+        .collect::<Vec<_>>();
+    let tx = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .map_err(|e| e.to_string())?;
+    for mut version in interrupted {
+        version.state = "failed".into();
+        version.planned_bytes = 0;
+        version.error = Some("version_download_interrupted".into());
+        if let Some(root) = version.models_root.as_deref()
+            && let Ok(bytes) = quota_dir_size_bytes(std::path::Path::new(root))
+        {
+            version.measured_bytes = Some(bytes);
+        }
+        put_on(&tx, &version)?;
+    }
+    tx.commit().map_err(|e| e.to_string())?;
     Ok(())
 }
 

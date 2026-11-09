@@ -72,9 +72,11 @@ pub async fn model_store_startup_update_check(
     model_store::startup_update_check(Arc::clone(service.inner())).await
 }
 
+/// `measure=true` 时逐行重测目录大小并登记（评审第 7 轮：展示与配额读登记
+/// 值，不每次全树遍历；显式测量是失效策略的用户入口）。
 #[tauri::command]
-pub async fn model_store_versions(card_id: String) -> Result<Value, String> {
-    model_store::versions(card_id).await
+pub async fn model_store_versions(card_id: String, measure: Option<bool>) -> Result<Value, String> {
+    model_store::versions(card_id, measure).await
 }
 #[tauri::command]
 pub fn model_store_start_version_action(

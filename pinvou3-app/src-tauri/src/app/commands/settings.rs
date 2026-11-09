@@ -244,19 +244,57 @@ pub async fn get_effective_model_config(
     if std::env::var("DEEPSEEK_PROVIDER").is_ok_and(|provider| provider == bridge.provider()) {
         env_overrides.push("provider".to_string());
     }
-    let effective = bridge.effective_model_owned();
-    let preset = effective
-        .as_ref()
-        .map(|model| model.preset)
-        .unwrap_or_default()
-        .as_str();
+    Ok(effective_model_config_snapshot(
+        &bridge,
+        env_api_key,
+        env_overrides,
+    ))
+}
+
+/// 展示层快照：从已绑定会话/默认引用的 bridge 解析 EffectiveModelConfig。
+/// 与发送路径（engine_pool 的 model_selection_required 门）同一判定：没有会话
+/// 绑定、typed 默认引用已被清空（schema≥1）时，发送会被拒绝，展示层必须如实
+/// 回空配置，而不是靠 active_model() 的列表首条回退继续报告一个不会真正生效
+/// 的模型（评审第 7 轮 P2：删除默认商店模型后“不自动另选”要在展示层成立）。
+pub(super) fn effective_model_config_snapshot(
+    bridge: &crate::features::assistant::platform::bridge::Pinvou3Bridge,
+    env_api_key: bool,
+    env_overrides: Vec<String>,
+) -> EffectiveModelConfig {
+    let selection_required = bridge.session_model.is_none()
+        && bridge.prefs.model_selection_schema_version >= 1
+        && bridge.prefs.advanced.default_model_ref.is_none();
+    let effective = if selection_required {
+        None
+    } else {
+        bridge.effective_model_owned()
+    };
+    let preset = if selection_required {
+        ""
+    } else {
+        effective
+            .as_ref()
+            .map(|model| model.preset)
+            .unwrap_or_default()
+            .as_str()
+    };
     // 运行时模型准备固定 passthrough（无后台托管凭据），是否要求用户 Key
-    // 完全由 bridge 的鉴权判定（provider + base_url）决定。
-    let requires_user_api_key = bridge.api_key_required();
-    Ok(EffectiveModelConfig {
+    // 完全由 bridge 的鉴权判定（provider + base_url）决定。选择必需态没有
+    // 已选端点，无从派生 Key 要求；置 false 避免前端弹出按 Key 的引导门，
+    // 正确的恢复动作是先在模型选择器里挑一个模型。
+    let requires_user_api_key = !selection_required && bridge.api_key_required();
+    EffectiveModelConfig {
         preset: preset.to_string(),
-        model: bridge.model(),
-        base_url: bridge.base_url(),
+        model: if selection_required {
+            String::new()
+        } else {
+            bridge.model()
+        },
+        base_url: if selection_required {
+            String::new()
+        } else {
+            bridge.base_url()
+        },
         api_key: String::new(),
         credential_state: if env_api_key {
             CredentialState::EnvOverride
@@ -270,7 +308,11 @@ pub async fn get_effective_model_config(
             .as_ref()
             .map(|model| model.has_secret)
             .unwrap_or(false),
-        provider: bridge.provider(),
+        provider: if selection_required {
+            String::new()
+        } else {
+            bridge.provider()
+        },
         provider_kind: effective
             .as_ref()
             .and_then(|model| model.provider_kind.clone()),
@@ -280,7 +322,7 @@ pub async fn get_effective_model_config(
             .and_then(|model| model.endpoint_mode.clone()),
         requires_user_api_key,
         env_overrides,
-    })
+    }
 }
 
 /// 「添加模型」方案:列出已保存模型 + 当前全局默认 id(前端高亮)。

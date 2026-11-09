@@ -84,6 +84,7 @@ CREATE TABLE IF NOT EXISTS model_versions (
  record_json TEXT, models_root TEXT, runtime_card_id TEXT NOT NULL,
  resource_dir TEXT, managed INTEGER NOT NULL DEFAULT 0,
  created_at TEXT NOT NULL, error TEXT, planned_bytes INTEGER NOT NULL DEFAULT 0,
+ measured_bytes INTEGER,
  PRIMARY KEY(card_id,version_id));
 
 CREATE TABLE IF NOT EXISTS api_keys (
@@ -101,7 +102,12 @@ CREATE TABLE IF NOT EXISTS api_keys (
 const MIGRATION_COLUMNS: &[(&str, &[(&str, &str)])] = &[
     (
         "model_versions",
-        &[("planned_bytes", "INTEGER NOT NULL DEFAULT 0")],
+        &[
+            ("planned_bytes", "INTEGER NOT NULL DEFAULT 0"),
+            // 登记的目录实测大小（评审第 7 轮 P1）：展示与配额准入读登记值，
+            // 不再每行每次全树遍历；仅在状态迁移与显式「重新测量」时更新。
+            ("measured_bytes", "INTEGER"),
+        ],
     ),
     (
         "store_models",
@@ -1073,6 +1079,8 @@ pub fn get_store_model_by_name(model_name: &str) -> rusqlite::Result<Option<Stor
 pub enum DeleteStoreModelError {
     RetainedVersions,
     Database(rusqlite::Error),
+    /// 事务内刷新下载根的登记测量失败（评审第 7 轮新增的登记核算）。
+    Measurement(String),
 }
 
 impl std::fmt::Display for DeleteStoreModelError {
@@ -1082,6 +1090,7 @@ impl std::fmt::Display for DeleteStoreModelError {
                 formatter.write_str("请先在历史版本中清理保留版本，再卸载或删除当前模型。")
             }
             Self::Database(error) => std::fmt::Display::fmt(error, formatter),
+            Self::Measurement(error) => formatter.write_str(error),
         }
     }
 }
@@ -1126,7 +1135,8 @@ fn delete_store_model_on(
     if retained != 0 {
         return Err(DeleteStoreModelError::RetainedVersions);
     }
-    super::version_store::retire_download_on(&tx, card_id)?;
+    super::version_store::retire_download_on(&tx, card_id)
+        .map_err(DeleteStoreModelError::Measurement)?;
     tx.execute("DELETE FROM model_versions WHERE card_id=?1", [card_id])?;
     tx.execute(
         "DELETE FROM store_models WHERE card_id = ?1",

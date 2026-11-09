@@ -901,7 +901,7 @@ fn interrupted_stage_is_recoverable_and_cancelled_cleanup_does_not_remove_files(
     let mut row = version_store::get(&current.card_id, &id).unwrap().unwrap();
     row.state = "downloading".into();
     version_store::put(&row).unwrap();
-    mgr.versions(&current.card_id).unwrap();
+    mgr.versions(&current.card_id, false).unwrap();
     assert_eq!(
         version_store::get(&current.card_id, &id)
             .unwrap()
@@ -1398,7 +1398,7 @@ fn interrupted_current_purge_can_retry_without_a_marker_after_the_commit_point()
     );
     assert!(!version_store::has_history(&current.card_id).unwrap());
     assert_eq!(version_store::retained_bytes().unwrap(), 0);
-    let rows = mgr.versions(&current.card_id).unwrap();
+    let rows = mgr.versions(&current.card_id, false).unwrap();
     assert_eq!(rows[0]["state"], "deleting");
     assert_eq!(rows[0]["can_delete"], false);
     assert!(
@@ -4089,5 +4089,90 @@ fn stage_target_preserves_registered_overlap_when_a_nested_resource_becomes_an_e
     assert_eq!(
         fs::read(models.join("legacy/old.tachyon")).unwrap(),
         b"old-weights"
+    );
+}
+
+/// Review round 7 P1: `versions` reads registered measurements instead of
+/// walking every tree on each open; the explicit measure action is the
+/// invalidation entry for externally changed files.
+#[test]
+fn versions_display_uses_registered_sizes_until_remeasured() {
+    let (_temp, mgr, current, card, pkg, id) = fixture();
+    mgr.stage_verified(&current, &card, &id, pkg, &mut |_| {}, Default::default())
+        .unwrap();
+    let find_staged = |rows: &serde_json::Value| {
+        rows.as_array()
+            .unwrap()
+            .iter()
+            .find(|v| v["version_id"].as_str() == Some(id.as_str()))
+            .unwrap()["size_bytes"]
+            .as_u64()
+            .unwrap()
+    };
+    let registered = find_staged(&mgr.versions(&current.card_id, false).unwrap());
+    assert!(
+        registered > 0,
+        "terminal transition registers a measurement"
+    );
+
+    // External interference: without measure, display keeps the registered
+    // value (no per-open walk); measure refreshes and persists it.
+    let row = version_store::get(&current.card_id, &id).unwrap().unwrap();
+    let root = PathBuf::from(row.models_root.as_deref().unwrap());
+    fs::write(root.join("external.bin"), vec![0u8; 4096]).unwrap();
+    assert_eq!(
+        find_staged(&mgr.versions(&current.card_id, false).unwrap()),
+        registered,
+        "plain display must not walk the tree"
+    );
+    let measured = find_staged(&mgr.versions(&current.card_id, true).unwrap());
+    assert!(
+        measured >= registered + 4096,
+        "explicit measure must reflect current disk contents"
+    );
+    assert_eq!(
+        find_staged(&mgr.versions(&current.card_id, false).unwrap()),
+        measured,
+        "measured value persists for later reads"
+    );
+}
+
+/// Review round 7 P1: quota accounting charges registered sizes; a NULL row
+/// (written before the column existed) calibrates exactly once under the
+/// fail-closed read and the walk is persisted.
+#[test]
+fn retained_bytes_charges_registered_sizes_and_calibrates_null_rows_once() {
+    let (_temp, mgr, current, card, pkg, id) = fixture();
+    mgr.stage_verified(&current, &card, &id, pkg, &mut |_| {}, Default::default())
+        .unwrap();
+    let row = version_store::get(&current.card_id, &id).unwrap().unwrap();
+    let root = PathBuf::from(row.models_root.as_deref().unwrap());
+    let external: u64 = 4096;
+    fs::write(root.join("external.bin"), vec![0u8; external as usize]).unwrap();
+    // Registered accounting: the post-terminal external bytes are not part of
+    // the charge until an explicit measure or a NULL calibration walk.
+    let retained_registered = version_store::retained_bytes().unwrap();
+    db::connect()
+        .unwrap()
+        .execute(
+            "UPDATE model_versions SET measured_bytes=NULL WHERE card_id=?1 AND version_id=?2",
+            rusqlite::params![current.card_id, id],
+        )
+        .unwrap();
+    let retained_calibrated = version_store::retained_bytes().unwrap();
+    assert!(
+        retained_calibrated >= retained_registered + external,
+        "a NULL row calibrates with a fail-closed walk"
+    );
+    let calibrated = version_store::get(&current.card_id, &id)
+        .unwrap()
+        .unwrap()
+        .measured_bytes
+        .expect("the calibration walk is persisted");
+    assert!(calibrated >= external);
+    // The persisted value is now authoritative for later reads.
+    assert_eq!(
+        version_store::retained_bytes().unwrap(),
+        retained_calibrated
     );
 }
