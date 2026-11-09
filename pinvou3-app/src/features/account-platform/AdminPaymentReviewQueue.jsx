@@ -8,6 +8,7 @@ import { freshLatePaymentQuery, latePaymentQueryAuthority } from './late-payment
 import { useLatePaymentQuery } from './useLatePaymentQuery.js';
 import { AdminFinanceFilters, useFinanceReadRoute, useFinanceRouteLoader } from './AdminFinanceFilters.jsx';
 import { LatePaymentQueryConfirmation } from './LatePaymentQueryConfirmation.jsx';
+import { AdminLateReviewFilters } from './AdminLateReviewFilters.jsx';
 
 export function AdminPaymentReviewQueue({ client, copy, me, anomaly = false, route, language = 'zh' }) {
   const filters = useFinanceReadRoute(anomaly ? 'anomalies' : 'late', route);
@@ -103,7 +104,7 @@ export function AdminPaymentReviewQueue({ client, copy, me, anomaly = false, rou
     if (value) { await open(value.case_id); await load(); }
   };
 
-  return <section><h3>{anomaly ? copy.resolve : copy.sla}</h3>{route ? <AdminFinanceFilters kind={anomaly ? 'anomalies' : 'late'} language={language} value={filters.draft} onChange={filters.setDraft} disabled={busy || blocked} onSubmit={() => { setPrevious([]); filters.move({ ...filters.draft, cursor: '' }, null); }} /> : <form onSubmit={event => { event.preventDefault(); setPrevious([]); void load(''); }}><label>{copy.status}<select value={status} onChange={event => setStatus(event.target.value)}><option value="">{copy.more}</option>{statuses.map(value => <option key={value} value={value}>{value}</option>)}</select></label><button disabled={busy}>{copy.refresh}</button></form>}
+  return <section><h3>{anomaly ? copy.resolve : copy.sla}</h3>{route && !anomaly ? <AdminLateReviewFilters language={language} draft={filters.draft} applied={filters.query} setDraft={filters.setDraft} disabled={busy || blocked} onApply={value => { setPrevious([]); filters.move({ ...value, cursor: '' }, null); }} /> : route ? <AdminFinanceFilters kind="anomalies" language={language} value={filters.draft} onChange={filters.setDraft} disabled={busy || blocked} onSubmit={() => { setPrevious([]); filters.move({ ...filters.draft, cursor: '' }, null); }} /> : <form onSubmit={event => { event.preventDefault(); setPrevious([]); void load(''); }}><label>{copy.status}<select value={status} onChange={event => setStatus(event.target.value)}><option value="">{copy.more}</option>{statuses.map(value => <option key={value} value={value}>{value}</option>)}</select></label><button disabled={busy}>{copy.refresh}</button></form>}
     {busy && <p role="status">{copy.loading}</p>}{operation.error && !(legacyQuery && operation.error === copy.unknown) && <p role="alert">{operation.error}</p>}{operation.message && <p role="status">{operation.message}</p>}
     {operation.unknown && <div data-retained-finance-command><code>{operation.pendingFacts?.id} / {operation.pendingKey}</code><button disabled={busy || query.unknown} onClick={() => void act('')}>{copy.retry}</button></div>}
     {legacyQuery && <p role="alert">{copy.queryUnknown} <code>{operation.pendingKey}</code></p>}
