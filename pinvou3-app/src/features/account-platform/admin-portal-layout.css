@@ -578,3 +578,9 @@
 .adm-restored-shell .adm-refund-date-range{display:grid;min-width:0;gap:6px}
 .adm-restored-shell .adm-refund-date-range p{margin:0;color:var(--adm-muted);font-size:.85em;overflow-wrap:anywhere}
 .adm-restored-shell .adm-finance-read-view [data-refund-amount]{text-align:end;font-variant-numeric:tabular-nums}
+
+/* Keep each token-account identifier attached to its row and role. */
+.adm-restored-shell .adm-token-account-list .adm-token-account-identity{display:grid;gap:5px;min-width:0;overflow-wrap:break-word}
+.adm-restored-shell .adm-token-account-list .adm-token-account-identity strong{font-weight:650}
+.adm-restored-shell .adm-token-account-list .adm-token-account-identity small{color:var(--adm-muted);font-size:12px}
+.adm-restored-shell .adm-token-account-list .adm-identifier-copy:focus{outline:3px solid var(--adm-primary);outline-offset:2px}

@@ -593,3 +593,15 @@ Object.assign(tokenManagementCopy.ja.modelToken, {
   "tokenResourceScopeUnknown": "共有ポリシーは未確認",
   "tokenResourcePolicy": "共有ポリシー"
 });
+
+Object.assign(tokenManagementCopy.zh.modelToken, {
+  "tokenResourceAccountID": "Token 账户 ID"
+});
+
+Object.assign(tokenManagementCopy.en.modelToken, {
+  "tokenResourceAccountID": "Token account ID"
+});
+
+Object.assign(tokenManagementCopy.ja.modelToken, {
+  "tokenResourceAccountID": "トークンアカウント ID"
+});
