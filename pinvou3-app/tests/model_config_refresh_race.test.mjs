@@ -185,6 +185,16 @@ const typedSelections = [
   { label: 'account-platform', ref: { source: 'ACCOUNT_PLATFORM', model_id: 'catalog-B' }, legacyId: 'builtin_account_platform', wireModel: 'catalog-B' },
 ];
 const plain = value => structuredClone(value);
+// The web access policy does not export `get_session_model_ref` (main
+// 4a3c36bf7 gates the read behind canInvoke), so on the web lane an
+// account-platform session selection resolves its model ID through
+// `get_session_model_id` while the typed ref stays null — the pre-merge
+// bridge merely invoked the command and swallowed the policy rejection.
+// Expectations below pin that honest production shape instead of the old
+// harness-only ref round-trip.
+const expectedRef = (platform, selection) => (platform === 'web' && selection.ref.source === 'ACCOUNT_PLATFORM'
+  ? null
+  : plain(selection.ref));
 
 for (const platform of ['tauri', 'web']) {
   for (const selection of typedSelections) {
@@ -202,7 +212,7 @@ for (const platform of ['tauri', 'web']) {
       old.resolve({ model: 'obsolete-selection-config' });
       await selecting;
       assert.equal(harness.state.currentSessionModelId, selection.legacyId);
-      assert.deepEqual(plain(harness.state.currentSessionModelRef), selection.ref);
+      assert.deepEqual(plain(harness.state.currentSessionModelRef), expectedRef(platform, selection));
       assert.equal(harness.state.effectiveModelConfig.model, selection.wireModel);
       const expectedCommand = selection.ref.source === 'LOCAL_CONFIG'
         ? 'set_session_model' : 'account_platform_select_session_model';
@@ -220,7 +230,7 @@ for (const platform of ['tauri', 'web']) {
       failed.reject(new Error('transient config failure'));
       assert.equal(await reading, false);
       assert.equal(harness.state.currentSessionModelId, selection.legacyId);
-      assert.deepEqual(plain(harness.state.currentSessionModelRef), selection.ref);
+      assert.deepEqual(plain(harness.state.currentSessionModelRef), expectedRef(platform, selection));
       assert.equal(harness.state.effectiveModelConfig, authoritative);
     });
 
@@ -253,7 +263,7 @@ for (const platform of ['tauri', 'web']) {
       old.resolve({ model: 'obsolete-read' });
       await earlierChoice;
       assert.equal(harness.state.currentSessionModelId, latest.legacyId);
-      assert.deepEqual(plain(harness.state.currentSessionModelRef), latest.ref);
+      assert.deepEqual(plain(harness.state.currentSessionModelRef), expectedRef(platform, latest));
       assert.equal(harness.state.effectiveModelConfig.model, latest.wireModel);
     });
   }
