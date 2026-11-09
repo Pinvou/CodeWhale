@@ -8,3 +8,6 @@
 .adm-restored-shell .adm-late-deadlines time { font-variant-numeric:tabular-nums; }
 .adm-restored-shell .adm-late-deadlines small { display:block; }
 @media(max-width:520px){.adm-restored-shell .adm-late-deadlines>div{grid-template-columns:minmax(0,1fr);gap:2px}}
+.adm-restored-shell .adm-table .adm-late-empty-cell { display:table-cell;text-align:center;padding:22px 12px;color:var(--adm-muted); }
+.adm-restored-shell .adm-late-empty-cell .adm-row-actions { justify-content:center;margin-top:8px; }
+@media(max-width:740px){.adm-restored-shell .adm-table .adm-late-empty-cell{display:block}}

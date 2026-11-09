@@ -15,6 +15,10 @@ export function AdminPaymentReviewQueue({ client, copy, me, anomaly = false, rou
   const filters = useFinanceReadRoute(anomaly ? 'anomalies' : 'late', route);
   const attemptedDetail = React.useRef('');
   const [page, setPage] = useState(null);
+  const lateRoute = Boolean(route && !anomaly);
+  const lateWords = adminLayoutCopy[language].lateReviewResults;
+  const [lateList, setLateList] = useState({ kind: 'loading' });
+  const recoveredLatePage = React.useRef(null);
   const [cursor, setCursor] = useState('');
   const [previous, setPrevious] = useState([]);
   useEffect(() => { setPrevious([]); }, [filters.filterSignature]);
@@ -27,7 +31,7 @@ export function AdminPaymentReviewQueue({ client, copy, me, anomaly = false, rou
   const permissions = me.platform_permissions || [];
   const owner = `${me.user_id}:${me.platform_authorization_version || me.active_context?.platform_authorization_version || 0}`;
   const operation = useFinanceOperation(owner, copy, client, anomaly ? 'anomaly-review' : 'late-review');
-  const list = useFinanceRouteLoader({ route, signature: filters.signature, client, owner, operation, load: () => load(filters.query.cursor), reset: () => setPage(null) });
+  const list = useFinanceRouteLoader({ route, signature: filters.signature, client, owner, operation, load: () => load(filters.query.cursor), reset: () => { setPage(null); if (lateRoute) setLateList({ kind: 'loading' }); } });
   const queryAuthority = latePaymentQueryAuthority(me);
   const query = useLatePaymentQuery(me.user_id, copy, client, !anomaly, queryAuthority);
   const busy = operation.busy || query.busy;
@@ -37,8 +41,40 @@ export function AdminPaymentReviewQueue({ client, copy, me, anomaly = false, rou
   useEffect(() => { setQueryConfirmation(null); }, [client, owner, anomaly, query.retired]);
   const canRepair = permissions.includes('platform.billing.repairs.request');
   const load = async (next = cursor) => {
-    const result = await list.read(() => loadFinancePage({ ...(route ? filters.query : { status }), cursor: next }, filters => anomaly ? client.paymentAnomalies(filters) : client.latePaymentReviews(filters), () => { setCursor(''); setPrevious([]); }));
-    if (result) { setPage(result.value); setCursor(result.query.cursor); }
+    const readQuery = { ...(route ? filters.query : { status }), cursor: next };
+    if (!lateRoute) {
+      const result = await list.read(() => loadFinancePage(readQuery, filters => anomaly ? client.paymentAnomalies(filters) : client.latePaymentReviews(filters), () => { setCursor(''); setPrevious([]); }));
+      if (result) { setPage(result.value); setCursor(result.query.cursor); }
+      return;
+    }
+    const epoch = client.financeSessionEpoch || 0, queryKey = JSON.stringify(readQuery);
+    const result = await list.read(async () => {
+      const recovered = recoveredLatePage.current;
+      recoveredLatePage.current = null;
+      if (recovered?.client === client && recovered.owner === owner && recovered.epoch === epoch && recovered.queryKey === queryKey) return { kind: 'ready', ...recovered.result, recovered: true };
+      setLateList({ kind: 'loading' }); setPage(null);
+      let restarted = false;
+      try {
+        const current = await loadFinancePage(readQuery, query => client.latePaymentReviews(query), () => { restarted = true; });
+        return { kind: 'ready', ...current, restarted };
+      } catch (reason) {
+        const kind = reason?.status === 403 ? 'denied' : reason?.code === 'PAGINATION_CURSOR_INVALID' ? 'cursorInvalid' :
+          reason?.code === 'INVALID_FILTER' ? 'filterInvalid' : 'unavailable';
+        return { kind, restarted };
+      }
+    });
+    if (!result) return;
+    if (result.restarted) { setCursor(''); setPrevious([]); }
+    if (result.kind !== 'ready') { setLateList(result); return; }
+    if (result.restarted) {
+      // This response was already read for the first batch of the same query.
+      // Replace the expired address without fetching the same batch again.
+      recoveredLatePage.current = { client, owner, epoch, queryKey: JSON.stringify(result.query), result: { value: result.value, query: result.query } };
+      filters.move(result.query, filters.selectedID || null, 'replace');
+      return;
+    }
+    setPage(result.value); setCursor(result.query.cursor);
+    setLateList({ kind: 'ready', recovered: Boolean(result.recovered) });
   };
   useEffect(() => { if (!route) void load(''); }, [client, owner, anomaly]); // eslint-disable-line react-hooks/exhaustive-deps
   const open = async id => {
@@ -105,14 +141,33 @@ export function AdminPaymentReviewQueue({ client, copy, me, anomaly = false, rou
     if (value) { await open(value.case_id); await load(); }
   };
 
+  const hasLateFilters = Boolean(filters.query.overdue === 'true' ||
+    ['q', 'status', 'severity', 'owner_id', 'provider_id', 'created_from', 'created_to', 'entered_from', 'entered_to', 'next_review_before']
+      .some(key => filters.query[key]?.trim()));
+  const clearLate = () => { setPrevious([]); filters.move({ limit: filters.query.limit, cursor: '' }, null); };
+  const retryLate = () => {
+    const first = lateList.restarted || lateList.kind === 'cursorInvalid';
+    if (first) setPrevious([]);
+    filters.move({ ...filters.query, ...(first ? { cursor: '' } : {}) }, filters.selectedID || null, 'replace');
+  };
+  const lateFailure = lateRoute && !['loading', 'ready'].includes(lateList.kind);
   return <section><h3>{anomaly ? copy.resolve : copy.sla}</h3>{route && !anomaly ? <AdminLateReviewFilters language={language} draft={filters.draft} applied={filters.query} setDraft={filters.setDraft} disabled={busy || blocked} onApply={value => { setPrevious([]); filters.move({ ...value, cursor: '' }, null); }} /> : route ? <AdminFinanceFilters kind="anomalies" language={language} value={filters.draft} onChange={filters.setDraft} disabled={busy || blocked} onSubmit={() => { setPrevious([]); filters.move({ ...filters.draft, cursor: '' }, null); }} /> : <form onSubmit={event => { event.preventDefault(); setPrevious([]); void load(''); }}><label>{copy.status}<select value={status} onChange={event => setStatus(event.target.value)}><option value="">{copy.more}</option>{statuses.map(value => <option key={value} value={value}>{value}</option>)}</select></label><button disabled={busy}>{copy.refresh}</button></form>}
     {route && !anomaly && <AdminLateReviewDeadlineTools language={language} query={filters.query} snapshot={page?.snapshot_as_of} disabled={busy || blocked} onChange={value => { setPrevious([]); filters.move({ ...value, cursor: '' }, null); }} />}
-    {busy && <p role="status">{copy.loading}</p>}{operation.error && !(legacyQuery && operation.error === copy.unknown) && <p role="alert">{operation.error}</p>}{operation.message && <p role="status">{operation.message}</p>}
+    {lateRoute && lateList.kind === 'loading' && <p className="adm-inline-message" role="status">{lateWords.loading}</p>}
+    {lateFailure && <div className="adm-inline-message error">
+      <p role="alert">{lateWords[lateList.kind]}</p>
+      {lateList.kind !== 'denied' && <div className="adm-row-actions"><button type="button" onClick={retryLate} disabled={busy || blocked}>{lateList.restarted || lateList.kind === 'cursorInvalid' ? lateWords.firstBatch : copy.retry}</button></div>}
+    </div>}
+    {lateRoute && lateList.recovered && <p className="adm-inline-message" role="status">{lateWords.recovered}</p>}
+    {busy && (!lateRoute || lateList.kind !== 'loading') && <p role="status">{copy.loading}</p>}{operation.error && !(legacyQuery && operation.error === copy.unknown) && <p role="alert">{operation.error}</p>}{operation.message && <p role="status">{operation.message}</p>}
     {operation.unknown && <div data-retained-finance-command><code>{operation.pendingFacts?.id} / {operation.pendingKey}</code><button disabled={busy || query.unknown} onClick={() => void act('')}>{copy.retry}</button></div>}
     {legacyQuery && <p role="alert">{copy.queryUnknown} <code>{operation.pendingKey}</code></p>}
     {query.message && <p role="status">{query.message}</p>}
     {query.unknownQueries.map(value => <div key={value.key} role="alert"><p>{copy.queryUnknown}</p><code>{value.facts.id} / {value.key}</code><button disabled={busy || query.retired} onClick={() => void retryQuery(value.key)}>{copy.retry}</button></div>)}
-    {page && <table className={anomaly ? undefined : 'adm-table'}><thead><tr><th>{copy.orderID}</th><th>{copy.status}</th><th>{copy.severity}</th><th>{copy.sla}</th><th>{copy.actions}</th></tr></thead><tbody>{page.items.map(value => <tr key={value.case_id}><td data-label={anomaly ? undefined : copy.orderID}>{value.payment_order_id || value.case_id}</td><td data-label={anomaly ? undefined : copy.status}>{reviewStatus(value)}</td><td data-label={anomaly ? undefined : copy.severity}>{value.severity}</td><td data-label={anomaly ? undefined : copy.sla}>{anomaly ? <>{value.claim_due_at}<br />{value.resolution_due_at || value.next_review_at}</> : <AdminLateReviewDeadlines value={value} language={language} snapshot={page.snapshot_as_of} />}</td><td data-label={anomaly ? undefined : copy.actions}><button disabled={busy || (operation.unknown && !legacyQuery)} onClick={() => { if (route) { attemptedDetail.current = value.case_id; filters.move(filters.query, value.case_id); } void open(value.case_id); }}>{copy.details}</button></td></tr>)}</tbody></table>}
+    {page && <table className={anomaly ? undefined : 'adm-table'}><thead><tr><th>{copy.orderID}</th><th>{copy.status}</th><th>{copy.severity}</th><th>{copy.sla}</th><th>{copy.actions}</th></tr></thead><tbody>{lateRoute && !page.items.length && <tr><td colSpan={5} className="adm-late-empty-cell">
+      <strong>{cursor ? lateWords.emptyBatch : hasLateFilters ? lateWords.emptyFiltered : lateWords.empty}</strong>
+      {!cursor && hasLateFilters && <div className="adm-row-actions"><button type="button" onClick={clearLate} disabled={busy || blocked}>{lateWords.clear}</button></div>}
+    </td></tr>}{page.items.map(value => <tr key={value.case_id}><td data-label={anomaly ? undefined : copy.orderID}>{value.payment_order_id || value.case_id}</td><td data-label={anomaly ? undefined : copy.status}>{reviewStatus(value)}</td><td data-label={anomaly ? undefined : copy.severity}>{value.severity}</td><td data-label={anomaly ? undefined : copy.sla}>{anomaly ? <>{value.claim_due_at}<br />{value.resolution_due_at || value.next_review_at}</> : <AdminLateReviewDeadlines value={value} language={language} snapshot={page.snapshot_as_of} />}</td><td data-label={anomaly ? undefined : copy.actions}><button disabled={busy || (operation.unknown && !legacyQuery)} onClick={() => { if (route) { attemptedDetail.current = value.case_id; filters.move(filters.query, value.case_id); } void open(value.case_id); }}>{copy.details}</button></td></tr>)}</tbody></table>}
     <button disabled={busy || !previous.length} onClick={() => { const values = [...previous]; const value = values.pop(); setPrevious(values); if (route) filters.move({ ...filters.query, cursor: value }, null); else void load(value); }}>{copy.previous}</button><button disabled={busy || !page?.next_cursor} onClick={() => { setPrevious(values => [...values, cursor]); if (route) filters.move({ ...filters.query, cursor: page.next_cursor }, null); else void load(page.next_cursor); }}>{copy.next}</button>
     {route && filters.selectedID && <nav><button disabled={busy || blocked} onClick={() => filters.move(filters.query, null)}>{adminLayoutCopy[language].backToDirectory}</button><code>{filters.selectedID}</code>{operation.error && !blocked && <button disabled={busy} onClick={() => void open(filters.selectedID)}>{copy.retry}</button>}</nav>}
     {item && <article><h4>{item.case_id}</h4><p>{reviewStatus(item)} / {item.severity} / {copy.owner}: {item.owner_id || copy.empty}</p>{anomaly ? <p>{item.claim_due_at}<br />{item.first_response_due_at}<br />{item.mitigation_due_at}<br />{item.resolution_due_at}</p> : <AdminLateReviewDeadlines value={item} language={language} detailed />}
