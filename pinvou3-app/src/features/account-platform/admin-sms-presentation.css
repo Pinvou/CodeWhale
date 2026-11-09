@@ -5,3 +5,8 @@
 .adm-restored-shell .adm-sms-draft-head{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap}
 .adm-restored-shell .adm-sms-impact{margin:-8px 0 0;font-size:13px;line-height:1.6}
 .adm-restored-shell .adm-sms-unknown{margin:0;padding:10px 12px;border:1px solid var(--adm-warning);border-radius:8px;background:var(--adm-warning-soft);overflow-wrap:anywhere}
+.adm-restored-shell .adm-sms-template small,.adm-restored-shell .adm-sms-reason small{font-size:12px;line-height:1.5;overflow-wrap:anywhere}
+.adm-restored-shell .adm-sms-form-actions{display:flex;align-items:center;justify-content:flex-end;gap:10px;flex-wrap:wrap;padding-top:14px;border-top:1px solid var(--adm-line)}
+.adm-restored-shell .adm-sms-save-feedback{margin-inline-end:auto;min-width:0;color:var(--adm-success);font-size:13px;line-height:1.5}
+.adm-restored-shell .adm-sms-form-actions button:not([type=submit]){min-height:40px;padding:0 13px;border:1px solid var(--adm-line);border-radius:9px;color:var(--adm-text);background:var(--adm-surface)}
+@media(max-width:760px){.adm-restored-shell .adm-sms-form-actions{align-items:stretch;flex-direction:column}.adm-restored-shell .adm-sms-save-feedback{margin-inline-end:0}}
