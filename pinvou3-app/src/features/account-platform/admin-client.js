@@ -835,7 +835,7 @@ export class AdminPlatformClient {
     return this.mutate('billing', `/admin/v1/payment-anomalies/${encodeURIComponent(caseID)}/resolve`, 'POST', { resolution, reason }, idempotencyKey, undefined, 200);
   }
 
-  wallets(filters = {}, signal) { return this.request('billing', `/admin/v1/wallets?${billingCollectionQuery(filters, { keys: ['q', 'status', 'owner_type'] })}`, signal); }
+  wallets(filters = {}, signal, { isolateRead = false } = {}) { return this.request('billing', `/admin/v1/wallets?${billingCollectionQuery(filters, { keys: ['q', 'status', 'owner_type'] })}`, signal, null, { isolateRead }); }
   walletLedger(walletID, filters = {}, signal) { return this.request('billing', `/admin/v1/wallets/${encodeURIComponent(walletID)}/ledger?${billingCollectionQuery(filters, { keys: ['entry_type', 'business_reference'], dateTimeKeys: ['created_from', 'created_to'] })}`, signal); }
   receivables(filters = {}, signal) { return this.request('billing', `/admin/v1/receivables?${billingCollectionQuery(filters, { keys: ['wallet_id', 'status', 'source_type'], dateTimeKeys: ['created_from', 'created_to'] })}`, signal); }
   receivableAllocations(id, signal) { return this.request('billing', `/admin/v1/receivables/${encodeURIComponent(id)}/allocations`, signal); }
