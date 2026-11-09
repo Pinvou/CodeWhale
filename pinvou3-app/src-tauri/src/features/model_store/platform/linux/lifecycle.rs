@@ -2195,11 +2195,9 @@ impl ModelManager {
                 }
                 // 事务内刷新下载根登记测量失败：记录尚未删除（事务中止），
                 // 按配额核算的失败关闭口径如实上报，修复读取问题后重试。
-                db::DeleteStoreModelError::Measurement(error) => {
-                    ModelManagerError::new(format!(
-                        "刷新下载目录登记大小失败，未删除模型记录：{error}"
-                    ))
-                }
+                db::DeleteStoreModelError::Measurement(error) => ModelManagerError::new(format!(
+                    "刷新下载目录登记大小失败，未删除模型记录：{error}"
+                )),
             })?;
         } else {
             db::mark_uninstalled(card_id)
