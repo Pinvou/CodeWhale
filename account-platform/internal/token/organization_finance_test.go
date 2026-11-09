@@ -34,6 +34,7 @@ func TestOrganizationFinanceAuthorityAndWalletScope(t *testing.T) {
 		{"denied-products", "denied", "GET", "/recharge/products", "", 403},
 		{"denied-capabilities", "denied", "GET", "/payment-capabilities", "", 403},
 		{"order", "valid", "GET", "/recharge/orders/" + order.String(), "", 200},
+		{"history-first-page", "valid", "GET", "/recharge/orders", "", 200},
 		{"history", "valid", "GET", "/recharge/orders?cursor=cGFnZQ", "", 200},
 		{"denied-history", "denied", "GET", "/recharge/orders", "", 403},
 		{"foreign-history-wallet", "foreign-history-wallet", "GET", "/recharge/orders", "", 502},
@@ -42,6 +43,9 @@ func TestOrganizationFinanceAuthorityAndWalletScope(t *testing.T) {
 		{"forged-history-wallet", "valid", "GET", "/recharge/orders?wallet_id=" + other.String(), "", 400},
 		{"duplicate-history-cursor", "valid", "GET", "/recharge/orders?cursor=a&cursor=b", "", 400},
 		{"invalid-history-cursor", "valid", "GET", "/recharge/orders?cursor=invalid%20cursor", "", 400},
+		{"malformed-history-escape", "invalid-history-query", "GET", "/recharge/orders?cursor=%GG", "", 400},
+		{"malformed-history-tail", "invalid-history-query", "GET", "/recharge/orders?cursor=cGFnZQ&ignored=x;y", "", 400},
+		{"empty-history-cursor", "invalid-history-query", "GET", "/recharge/orders?cursor=", "", 400},
 		{"foreign-order-org", "foreign-order-org", "GET", "/recharge/orders/" + order.String(), "", 404},
 		{"foreign-order-wallet", "foreign-order-wallet", "GET", "/recharge/orders/" + order.String(), "", 404},
 		{"create", "valid", "POST", "/recharge/orders", `{"product_id":"owned-product","channel":"alipay"}`, 201},
@@ -131,6 +135,9 @@ func TestOrganizationFinanceAuthorityAndWalletScope(t *testing.T) {
 						if tc.name == "history" && r.URL.Query().Get("cursor") != "cGFnZQ" {
 							t.Error("history cursor was not forwarded")
 						}
+						if tc.name == "history-first-page" && r.URL.Query().Has("cursor") {
+							t.Error("first-page request acquired a cursor")
+						}
 						requester, scopeWallet := user, wallet
 						if tc.kind == "foreign-history-requester" {
 							requester = other
@@ -202,6 +209,9 @@ func TestOrganizationFinanceAuthorityAndWalletScope(t *testing.T) {
 			}
 			if tc.want == 403 && ensure.Load() != 0 {
 				t.Error("denied authority reached Billing")
+			}
+			if tc.kind == "invalid-history-query" && (ensure.Load() != 0 || !strings.Contains(out.Body.String(), "INVALID_REQUEST")) {
+				t.Error("invalid history query reached Billing or lost its public error code")
 			}
 			if tc.method == "POST" && tc.want == 400 && create.Load() != 0 {
 				t.Error("invalid client facts reached payment creation")

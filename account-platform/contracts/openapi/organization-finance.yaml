@@ -424,6 +424,9 @@
           "403": {
             "description": "Current organization purchase permission denied."
           },
+          "502": {
+            "description": "Billing returned an invalid or mismatched history page; no orders are returned."
+          },
           "503": {
             "description": "History unavailable; not an empty result."
           }

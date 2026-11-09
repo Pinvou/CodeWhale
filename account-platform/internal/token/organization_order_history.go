@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/api"
@@ -18,14 +19,20 @@ func (s *Service) listOrganizationRechargeOrders(w http.ResponseWriter, r *http.
 	if !ok {
 		return
 	}
-	for key, values := range r.URL.Query() {
-		if key != "cursor" || len(values) != 1 || len(values[0]) > 256 || strings.IndexFunc(values[0], func(c rune) bool {
+	query, err := url.ParseQuery(r.URL.RawQuery)
+	if err != nil {
+		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid order history query", httpserver.RequestID(r.Context()))
+		return
+	}
+	for key, values := range query {
+		if key != "cursor" || len(values) != 1 || len(values[0]) == 0 || len(values[0]) > 256 || strings.IndexFunc(values[0], func(c rune) bool {
 			return !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '_' || c == '-')
 		}) >= 0 {
 			api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid order history query", httpserver.RequestID(r.Context()))
 			return
 		}
 	}
+	cursor := query.Get("cursor")
 	client, supported := s.billing.(OrganizationOrderHistoryClient)
 	if !supported {
 		api.WriteError(w, http.StatusServiceUnavailable, "BILLING_UNAVAILABLE", "organization order history is unavailable", httpserver.RequestID(r.Context()))
@@ -36,7 +43,7 @@ func (s *Service) listOrganizationRechargeOrders(w http.ResponseWriter, r *http.
 		api.WriteError(w, http.StatusServiceUnavailable, "BILLING_UNAVAILABLE", "organization order history is unavailable", httpserver.RequestID(r.Context()))
 		return
 	}
-	payload, err := client.OrganizationRechargeOrders(r.Context(), resolved.UserID, walletID, r.URL.Query().Get("cursor"))
+	payload, err := client.OrganizationRechargeOrders(r.Context(), resolved.UserID, walletID, cursor)
 	if err != nil {
 		var failure *BillingHTTPError
 		if errors.As(err, &failure) && failure.Status == http.StatusBadRequest {
@@ -52,7 +59,7 @@ func (s *Service) listOrganizationRechargeOrders(w http.ResponseWriter, r *http.
 		Items       []json.RawMessage `json:"items"`
 		NextCursor  *string           `json:"next_cursor"`
 	}
-	if json.Unmarshal(payload, &page) != nil || page.RequesterID != resolved.UserID || page.WalletID != walletID || page.Items == nil || len(page.Items) > 50 || page.NextCursor != nil && (*page.NextCursor == "" || len(*page.NextCursor) > 256 || *page.NextCursor == r.URL.Query().Get("cursor")) {
+	if json.Unmarshal(payload, &page) != nil || page.RequesterID != resolved.UserID || page.WalletID != walletID || page.Items == nil || len(page.Items) > 50 || page.NextCursor != nil && (*page.NextCursor == "" || len(*page.NextCursor) > 256 || *page.NextCursor == cursor) {
 		api.WriteError(w, http.StatusBadGateway, "BILLING_UNAVAILABLE", "invalid organization order history", httpserver.RequestID(r.Context()))
 		return
 	}

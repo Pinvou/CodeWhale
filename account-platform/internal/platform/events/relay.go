@@ -20,6 +20,12 @@ type Broker interface {
 type OutboxStore interface {
 	// Claim must filter allowed subjects before taking any delivery lease.
 	Claim(context.Context, string, int, time.Duration, []string) ([]Event, error)
+	// Each Mark method must compare the persisted event ID, worker owner,
+	// publication generation and exact, still-live lease against this claim in
+	// the same atomic write. A stale, expired or wrong-owner claim must return
+	// an error without changing attempts, retry state or terminal facts, even
+	// when a later lease belongs to the same worker. Broker acknowledgement
+	// alone does not authorize advancing a newer claim.
 	MarkPublished(context.Context, string, Event) error
 	MarkFailed(context.Context, string, Event, time.Time, string) error
 	MarkDeadLettered(context.Context, string, Event, string) error
