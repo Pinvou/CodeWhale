@@ -25,4 +25,6 @@ mirror.gcr.io/library/postgres@sha256:721873c34ceb9f8d8fc265984940dc982404c105f1
 
 原始 Go JSON 确认四个必需根及全部观测到的子例完整 run/pass，共34个具名结果，失败/skip 均为0；具名父子数量不代表34个独立业务场景。job 的初始化、服务隔离、审计步骤、停止自有 PostgreSQL 及最终资源退役检查均成功。其 `account-resource-lifecycle-1` artifact 内832份 JSON 收据均为 `released`；PostgreSQL 服务收据的剩余容器、卷和未登记项均为空。
 
-此验收属于该固定提交的临时 Linux CI，不能替代其他架构、后续提交的门禁、最新 main 组合或生产发布验收。更换镜像时须同步上述三个载体，重新核验可信 digest/目标平台，并实际运行原四根和退役检查；不能删字面守卫、放宽根选择或增加全局镜像豁免取绿。
+此验收属于该固定提交的临时 Linux CI，不能替代其他架构、后续提交的门禁、最新 main 组合或生产发布验收。当前主线的同一门禁在上述四根之外，还要求 `./internal/accountschema` 的 `TestAccount039RollbackInventoryPostgres` 及其七个固定子例（#2420）；它们不属于这次历史记录。
+
+更换镜像时须同步上述三个载体，重新核验可信 digest/目标平台，并实际运行当时门禁要求的完整根、子例及退役检查；不能删字面守卫、放宽根选择或增加全局镜像豁免取绿。
