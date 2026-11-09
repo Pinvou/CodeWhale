@@ -240,3 +240,54 @@ export const approvalDirectoryCopy = {
     "unknownHelp": "申請可否を確認できる情報が提供されていません。"
   }
 };
+
+export const approvalDirectoryToolbarCopy = {
+  "zh": {
+    "filters": "审批策略筛选",
+    "search": "搜索策略名称或代码",
+    "domain": "业务范围",
+    "all": "全部",
+    "billing": "计费",
+    "token": "模型与 Token",
+    "otherRisk": "其他风险",
+    "clear": "清除筛选",
+    "retry": "重试读取",
+    "loading": "正在读取审批策略目录…",
+    "denied": "你没有权限读取审批策略目录。",
+    "error": "暂时无法读取审批策略目录。",
+    "empty": "当前没有可查看的审批策略。",
+    "filteredEmpty": "当前筛选没有匹配的审批策略。"
+  },
+  "en": {
+    "filters": "Approval policy filters",
+    "search": "Search policy name or code",
+    "domain": "Business area",
+    "all": "All",
+    "billing": "Billing",
+    "token": "Models and Token",
+    "otherRisk": "Other risk",
+    "clear": "Clear filters",
+    "retry": "Retry loading",
+    "loading": "Reading the approval policy directory…",
+    "denied": "You do not have access to read the approval policy directory.",
+    "error": "The approval policy directory could not be loaded.",
+    "empty": "There are no approval policies available to view.",
+    "filteredEmpty": "No approval policies match the current filters."
+  },
+  "ja": {
+    "filters": "承認ポリシーの絞り込み",
+    "search": "ポリシー名またはコードを検索",
+    "domain": "業務範囲",
+    "all": "すべて",
+    "billing": "請求",
+    "token": "モデルと Token",
+    "otherRisk": "その他のリスク",
+    "clear": "絞り込みを解除",
+    "retry": "再読み込みを試す",
+    "loading": "承認ポリシーディレクトリを読み込み中…",
+    "denied": "承認ポリシーディレクトリを表示する権限がありません。",
+    "error": "承認ポリシーディレクトリを取得できませんでした。",
+    "empty": "閲覧できる承認ポリシーはありません。",
+    "filteredEmpty": "この条件に一致する承認ポリシーはありません。"
+  }
+};
