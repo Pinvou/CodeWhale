@@ -10,6 +10,7 @@ export function ModelVersionsDialog({ record, copy, theme, busy, onClose, onActi
   const [versions, setVersions] = useState(null);
   const [error, setError] = useState(null);
   const [attempt, setAttempt] = useState(0);
+  const [measuring, setMeasuring] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(null);
   useEffect(() => {
     let cancelled = false;
@@ -18,6 +19,18 @@ export function ModelVersionsDialog({ record, copy, theme, busy, onClose, onActi
     }).catch((failure) => { if (!cancelled) setError(String(failure?.message || failure)); });
     return () => { cancelled = true; };
   }, [record.card_id, attempt, busy]);
+
+  // Registered sizes can go stale when files change outside the app; the
+  // explicit re-measure is the invalidation entry (review round 7).
+  const remeasure = () => {
+    if (measuring) return;
+    setMeasuring(true);
+    fetchVersions(record.card_id, { measure: true }).then((rows) => {
+      setVersions(rows);
+      setError(null);
+    }).catch((failure) => { setError(String(failure?.message || failure)); })
+      .finally(() => { setMeasuring(false); });
+  };
 
   const act = (action, version) => {
     onAction(record, action, version.version_id);
@@ -36,6 +49,13 @@ export function ModelVersionsDialog({ record, copy, theme, busy, onClose, onActi
       {record.running ? <p role="status" className="mb-3 text-[13px] text-amber-700 dark:text-amber-300">{copy.versionStopFirst}</p> : null}
       {error ? <div role="alert"><p>{error}</p><MsButton tone="ghost" onClick={() => setAttempt((n) => n + 1)}>{copy.retry}</MsButton></div> : null}
       {!versions && !error ? <p role="status">{copy.cardUpdateChecking}</p> : null}
+      {versions ? (
+        <div className="mb-2 flex justify-end" data-testid="model-version-measure-row">
+          <MsButton tone="ghost" disabled={busy || measuring} onClick={remeasure}>
+            {measuring ? copy.versionMeasuring : copy.versionMeasure}
+          </MsButton>
+        </div>
+      ) : null}
       {confirmDelete ? (
         <div className="space-y-3" data-testid="model-version-delete-confirm">
           <p>{copy.versionDeleteConfirm(confirmDelete.filename || confirmDelete.version_id.slice(0, 12), sizeLabel(confirmDelete.size_bytes))}</p>

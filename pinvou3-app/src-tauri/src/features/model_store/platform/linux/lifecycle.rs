@@ -1039,6 +1039,10 @@ impl ModelManager {
             || on_progress("等待同一卡片下载完成，可取消…"),
         )
         .map_err(ModelManagerError::new)?;
+        // Cross-card protection parity with isolated staging (review round 7):
+        // reject a download root placed inside another card's registered
+        // legacy resource before any quota row or script output exists.
+        self.ensure_ordinary_download_root_disjoint(&reservation.root, card_id)?;
         let mut env = self.env_for_card(&card, &model_name);
         env.insert(
             "LMM_MODELS_DIR".into(),
@@ -4321,6 +4325,95 @@ echo '权重就绪'
                     .contains(&first)
             );
         }
+    }
+
+    /// Review round 7: an ordinary download root placed at or inside another
+    /// card's registered legacy resource must be rejected before scripts —
+    /// otherwise `LMM_MODELS_DIR` points into a protected tree and
+    /// `current_purge_preflight` refuses that card's full deletion forever.
+    #[test]
+    fn ordinary_download_rejects_root_inside_other_cards_legacy_resource() {
+        let tmp = setup_temp_db();
+        let shared = tmp.path().join("models");
+        let legacy_root = shared.join("legacy");
+        std::fs::create_dir_all(&legacy_root).unwrap();
+        std::fs::write(legacy_root.join("old.tachyon"), b"old-weights").unwrap();
+        // Card A: legacy deployment whose weights live under the shared root.
+        db::add_store_model(db::AddStoreModelParams {
+            card_id: "card-legacy",
+            model_name: "legacy-name",
+            card_name: "Legacy",
+            org: None,
+            description: None,
+            engine_name: "native",
+            engine_version: Some("old"),
+            size_bytes: 11,
+            quantization: None,
+            source_repo_id: Some("org/legacy"),
+            source_filename: Some("old.tachyon"),
+            scripts: &Default::default(),
+            status: "deployed",
+            profiles: &[],
+            deploy_topology: super::super::store_client::DeployTopology::Single,
+            card_source: "store",
+        })
+        .unwrap();
+        let runtime = super::super::config::data_dir().join("cards/card-legacy");
+        std::fs::create_dir_all(&runtime).unwrap();
+        std::fs::write(
+            runtime.join(".deploy-env"),
+            format!("MODEL_DIR=\"{}\"\n", legacy_root.display()),
+        )
+        .unwrap();
+
+        // Card B: fresh ordinary download whose configured root points at (or
+        // inside) card A's protected tree. Admission must fail without
+        // running any script or registering card B.
+        let scripts = tmp.path().join("scripts");
+        let card = local_script_card(&scripts, None);
+        for (entry, body) in [
+            ("install_engine", "#!/bin/sh\nexit 0\n"),
+            (
+                "download_model",
+                "#!/bin/sh\nset -eu\nprintf ran > \"$LMM_MODELS_DIR/download-ran\"\n",
+            ),
+        ] {
+            std::fs::write(scripts.join(format!("{entry}.sh")), body).unwrap();
+            card.script_sha256
+                .as_mut()
+                .unwrap()
+                .insert(entry.into(), script_runner::sha256_hex(body));
+        }
+        for target in [legacy_root.clone(), legacy_root.join("nested")] {
+            let manager = manager_with_card(download_settings(&target), card.clone());
+            let error = manager
+                .download_from_store("card-dl", &mut |_| {}, Default::default(), None)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains("重叠"),
+                "root inside a protected legacy resource must be rejected: {error}"
+            );
+            assert!(db::get_store_model("card-dl").unwrap().is_none());
+            assert!(
+                !target.join("download-ran").exists(),
+                "no script output may land inside the protected tree"
+            );
+            assert!(
+                std::fs::read(legacy_root.join("old.tachyon")).unwrap() == b"old-weights",
+                "the protected tree must stay untouched"
+            );
+        }
+
+        // Control: a disjoint root still downloads normally, and the same
+        // card's own registered root stays exempt from cross-card rejection.
+        let disjoint = tmp.path().join("other");
+        manager_with_card(download_settings(&disjoint), card.clone())
+            .download_from_store("card-dl", &mut |_| {}, Default::default(), None)
+            .unwrap();
+        assert!(disjoint.join("download-ran").exists());
+        let record = db::get_store_model("card-dl").unwrap().unwrap();
+        assert_eq!(record.models_root.as_deref(), disjoint.to_str());
     }
 
     #[test]

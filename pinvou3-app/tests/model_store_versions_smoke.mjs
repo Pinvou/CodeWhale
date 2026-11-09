@@ -127,6 +127,30 @@ try {
     version_id: 'test-version', state: 'downloading', can_switch: false, can_delete: false,
   }]));
   await expectActions(2);
+  // Review round 7: version sizes are registered measurements; the explicit
+  // re-measure entry issues the measure request and renders refreshed sizes.
+  await page.evaluate(() => {
+    window.measureRequests = [];
+    const original = window.__TAURI__.core.invoke;
+    window.__TAURI__.core.invoke = (command, payload) => {
+      if (command === 'model_store_versions' && payload && payload.measure) {
+        window.measureRequests.push(payload);
+        return Promise.resolve([{
+          version_id: 'test-version', filename: 'test.weights', state: 'ready',
+          can_switch: true, can_delete: true, size_bytes: 4096,
+        }]);
+      }
+      return original(command, payload);
+    };
+  });
+  await page.click('[data-testid="model-version-measure-row"] button');
+  await page.waitForFunction(() => window.measureRequests.length === 1);
+  assert.deepEqual(
+    await page.evaluate(() => window.measureRequests[0]),
+    { cardId: 'isolated-test', measure: true },
+  );
+  await page.waitForFunction(() => document.body.textContent.includes('4.0KB'),
+    { timeout: 5000 }, 're-measured sizes must render');
   assert.equal(await page.$('[data-testid="model-version-mtp-network-hint"]'), null,
     'other cards must not inherit the built-in MTP template disclosure');
   // Both entry points must show the active language's disclosure without

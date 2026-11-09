@@ -454,6 +454,7 @@ function pinvouSharedweb() {
       imageUnsupported: "The current model does not support images. Switch to an image-capable model, or configure a vision model in model settings.",
       imageUnknown: "Image input capability of the current model is unknown. If it supports images, set image input to “Supports images” in model settings; you can also configure a vision model.",
       sessionModelStale: id => `The model selected for this conversation is no longer available (missing saved model: ${id}). Please pick a model again in this conversation.`,
+      modelSelectionRequired: "No model is selected yet. Pick a model in model settings before sending.",
       attachStillUploading: "⚠️ Attachment still uploading, try again shortly",
       deviceUploadTooLarge: name => `⚠️ ${name} exceeds the 20 MB attachment limit`,
       archiveTooManyEntries: "the archive contains more than 50 entries and cannot be attached",
@@ -587,6 +588,7 @@ function pinvouSharedweb() {
       imageUnsupported: "現在のモデルは画像に対応していません。画像対応モデルに切り替えるか、モデル設定でビジョンモデルを構成してください。",
       imageUnknown: "現在のモデルの画像入力能力は不明です。画像に対応している場合は、モデル設定で画像入力能力を「画像対応」に設定してください。ビジョンモデルを構成することもできます。",
       sessionModelStale: id => `この会話で選択したモデルの設定は無効になりました（見つからない設定: ${id}）。会話でモデルを選び直してください。`,
+      modelSelectionRequired: "モデルがまだ選択されていません。送信する前にモデル設定でモデルを選んでください。",
       attachStillUploading: "⚠️ 添付ファイルをアップロード中です。少し待ってから送信してください",
       deviceUploadTooLarge: name => `⚠️ ${name} は添付の上限 20 MB を超えています`,
       archiveTooManyEntries: "アーカイブに 50 個を超える項目が含まれているため添付できません",
@@ -720,6 +722,7 @@ function pinvouSharedweb() {
       imageUnsupported: "当前模型不支持图片。请切换到支持图片的模型，或在模型设置中配置视觉模型。",
       imageUnknown: "当前模型的图片输入能力未知。如果它支持图片，请在模型设置中将图片输入能力设为“支持图片”后重试；也可以配置视觉模型。",
       sessionModelStale: id => `当前会话选择的模型配置已失效（缺失配置：${id}），请在对话中重新选择模型。`,
+      modelSelectionRequired: "尚未选择模型。请先在模型设置中选择模型后再发送。",
       attachStillUploading: "⚠️ 附件还在上传,请稍后再发",
       deviceUploadTooLarge: name => `⚠️ ${name} 超过附件 20 MB 上限`,
       archiveTooManyEntries: "压缩包包含超过 50 个条目，无法添加",
@@ -3248,6 +3251,11 @@ function formatAttachmentDisplayText(text, attachments) { return pinvouSharedweb
       return bt("sessionModelStale")(
         text.slice("session_model_binding_stale:".length).trim(),
       );
+    }
+    if (text.indexOf("model_selection_required") === 0) {
+      // engine_pool emits an English hint after the stable code; the
+      // recovery copy is fully localized, so drop the raw tail.
+      return bt("modelSelectionRequired");
     }
     // Same policy as the tauri bridge: redact raw submit-failure bodies
     // before display (classification may miss, credentials must not). Pass
