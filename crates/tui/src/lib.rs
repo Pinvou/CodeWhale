@@ -4719,7 +4719,7 @@ async fn run_doctor(
     let strict_tool_mode = doctor_strict_tool_mode_status(config);
     let strict_icon = match strict_tool_mode.status {
         "ready" | "official_route" => "✓".truecolor(aqua_r, aqua_g, aqua_b),
-        "fallback_non_beta" | "custom_endpoint" | "provider_mismatch" => {
+        "fallback_non_beta" | "custom_endpoint" | "provider_mismatch" | "responses_dialect" => {
             "!".truecolor(sky_r, sky_g, sky_b)
         }
         _ => "·".dimmed(),
@@ -7470,6 +7470,11 @@ struct DoctorApiTarget {
     base_url: String,
     model: String,
     resolution: DoctorModelResolution,
+    /// The resolver's endpoint key for the resolved route (`Some` only when
+    /// `resolution` is `Resolved`). The dialect answers — Anthropic
+    /// forwarding, Responses `strict: false` — are wire facts keyed on this,
+    /// not on the URL.
+    endpoint_key: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -7489,12 +7494,17 @@ fn doctor_api_target(config: &Config) -> DoctorApiTarget {
     // saved provider models, alias normalization, and roster preference
     // included — instead of re-deriving a config default that can diverge
     // from the engine (DGF-01, dogfood 2026-08-02).
-    let (model, resolution) =
+    let (model, resolution, endpoint_key) =
         match crate::route_runtime::resolve_runtime_route(config, provider, None) {
-            Ok(route) => (route.model.clone(), DoctorModelResolution::Resolved),
+            Ok(route) => (
+                route.model.clone(),
+                DoctorModelResolution::Resolved,
+                Some(route.candidate.endpoint().endpoint_key.clone()),
+            ),
             Err(_) => (
                 config.default_model(),
                 DoctorModelResolution::ConfiguredOnly,
+                None,
             ),
         };
     DoctorApiTarget {
@@ -7502,6 +7512,7 @@ fn doctor_api_target(config: &Config) -> DoctorApiTarget {
         base_url: config.deepseek_base_url(),
         model,
         resolution,
+        endpoint_key,
     }
 }
 
@@ -7569,6 +7580,25 @@ fn doctor_strict_tool_mode_status(config: &Config) -> DoctorStrictToolModeStatus
             // provider_mismatch arm uses ("recognized").
             message: "enabled; the Anthropic wire forwards function.strict \
                       untranslated on this DeepSeek-family endpoint"
+                .to_string(),
+            recommended_base_url: None,
+        };
+    }
+    // The Responses dialect answers from its wire too: a route whose model
+    // resolves to the Responses endpoint ships `"strict": false` per tool
+    // and `tool_choice: "auto"` regardless of which official URL serves it,
+    // so the reshaping applies with no enforcement. The dialect is
+    // model-driven, not URL-driven — no base-URL recommendation changes it.
+    if target.endpoint_key.as_deref() == Some("responses") {
+        return DoctorStrictToolModeStatus {
+            enabled: true,
+            status: "responses_dialect",
+            function_strict_sent: false,
+            message: "enabled, but this route's model resolves to the Responses dialect, \
+                      whose wire sends `strict: false` and `tool_choice: \"auto\"`; schemas \
+                      are still reshaped for the strict contract, but no strict enforcement \
+                      is sent — pick a model that resolves to the chat-completions surface \
+                      to send the flag"
                 .to_string(),
             recommended_base_url: None,
         };
@@ -14219,6 +14249,60 @@ mod doctor_endpoint_tests {
         assert!(status.function_strict_sent);
         assert!(status.message.contains("Anthropic wire forwards"));
         assert!(status.recommended_base_url.is_none());
+    }
+
+    #[test]
+    fn strict_tool_mode_doctor_reports_the_responses_dialect_for_versioned_models() {
+        // A route whose model resolves to the Responses endpoint ships
+        // `"strict": false` per tool and `tool_choice: "auto"` on the wire,
+        // so the doctor must not claim the flag was sent — the dialect is
+        // model-driven, so no base-URL recommendation is offered either.
+        let config = Config {
+            strict_tool_mode: Some(true),
+            providers: Some(crate::config::ProvidersConfig {
+                deepseek: crate::config::ProviderConfig {
+                    base_url: Some("https://api.deepseek.com/beta".to_string()),
+                    model: Some("deepseek-v3".to_string()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let status = doctor_strict_tool_mode_status(&config);
+
+        assert_eq!(status.status, "responses_dialect");
+        assert!(!status.function_strict_sent);
+        assert!(status.message.contains("Responses dialect"));
+        assert!(status.recommended_base_url.is_none());
+        let report = doctor_strict_tool_mode_report_json(&status);
+        assert_eq!(report["status"], "responses_dialect");
+        assert_eq!(report["function_strict_sent"], false);
+    }
+
+    #[test]
+    fn strict_tool_mode_doctor_keeps_the_url_verdict_for_a_chat_surface_model() {
+        // Exact catalog rows stay authoritative: a model whose row resolves
+        // to the chat surface keeps the URL-kind verdict (`ready` on the
+        // beta endpoint) even though it is versioned.
+        let config = Config {
+            strict_tool_mode: Some(true),
+            providers: Some(crate::config::ProvidersConfig {
+                deepseek: crate::config::ProviderConfig {
+                    base_url: Some("https://api.deepseek.com/beta".to_string()),
+                    model: Some("deepseek-v4-pro".to_string()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let status = doctor_strict_tool_mode_status(&config);
+
+        assert_eq!(status.status, "ready");
+        assert!(status.function_strict_sent);
     }
 
     #[test]
