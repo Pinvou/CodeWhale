@@ -596,3 +596,76 @@ ledgerRepairCopy.ja.paymentRelation = {
   "pending": "前回の承認リクエストの結果を確認中です。",
   "waiting": "スナップショットを取得して現在の参照を照合してください。"
 };
+
+ledgerRepairCopy.zh.paymentImpact = {
+  "title": "拟议账务影响",
+  "gate": "当前只核对快照。提交的是审批请求，处理进度以审批详情为准。",
+  "missing": "此快照未提供",
+  "unit": "积分",
+  "amount": "最小货币单位",
+  "ref": "审批请求",
+  "state": "审批状态",
+  "unknown": "请查看审批详情",
+  "states": {
+    "SUBMITTED": "已提交，待审批",
+    "APPROVED": "已批准，待执行",
+    "EXECUTING": "正在执行",
+    "EXECUTED": "执行完成",
+    "EXECUTION_FAILED": "执行失败"
+  },
+  "scenario": "适用于支付渠道已确认收款、本地账务尚未入账的订单。",
+  "fields": [
+    "拟补记积分",
+    "拟抵扣应收积分",
+    "目标钱包",
+    "当前钱包余额"
+  ]
+};
+ledgerRepairCopy.en.paymentImpact = {
+  "title": "Proposed ledger impact",
+  "gate": "This is a snapshot. Submission starts an approval request; check its details for processing status.",
+  "missing": "Not provided in this snapshot",
+  "unit": "points",
+  "amount": "minor currency units",
+  "ref": "Approval request",
+  "state": "Approval status",
+  "unknown": "See approval details",
+  "states": {
+    "SUBMITTED": "Submitted, awaiting approval",
+    "APPROVED": "Approved, awaiting execution",
+    "EXECUTING": "Executing",
+    "EXECUTED": "Execution complete",
+    "EXECUTION_FAILED": "Execution failed"
+  },
+  "scenario": "Use this for an order the payment provider confirmed as paid but the local ledger has yet to credit.",
+  "fields": [
+    "Points to credit",
+    "Points to apply to receivables",
+    "Destination wallet",
+    "Current wallet balance"
+  ]
+};
+ledgerRepairCopy.ja.paymentImpact = {
+  "title": "予定される台帳への影響",
+  "gate": "これはスナップショットです。送信すると承認申請が開始されます。進捗は申請の詳細で確認してください。",
+  "missing": "このスナップショットにはありません",
+  "unit": "ポイント",
+  "amount": "通貨の最小単位",
+  "ref": "承認申請",
+  "state": "承認状況",
+  "unknown": "承認申請の詳細を確認",
+  "states": {
+    "SUBMITTED": "送信済み・承認待ち",
+    "APPROVED": "承認済み・実行待ち",
+    "EXECUTING": "実行中",
+    "EXECUTED": "実行完了",
+    "EXECUTION_FAILED": "実行失敗"
+  },
+  "scenario": "決済事業者が入金を確認済みで、ローカル台帳に未計上の注文に使用します。",
+  "fields": [
+    "計上予定のポイント",
+    "未収分に充当するポイント",
+    "対象ウォレット",
+    "現在のウォレット残高"
+  ]
+};
