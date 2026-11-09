@@ -61,6 +61,13 @@ mod transfer;
 #[cfg(test)]
 mod state;
 
+#[cfg(test)]
+#[path = "production_attachment_pipeline.rs"]
+mod production_attachment_pipeline;
+
+#[path = "../../../src/app/commands/desktop_remote_action_state.rs"]
+mod desktop_remote_action_state;
+
 // Actual ACP instance fence and callback identity helpers; this is not a
 // provider/child-process/EventBridge integration test.
 #[cfg(test)]
@@ -103,6 +110,23 @@ mod file_limits;
 
 mod features {
     pub(crate) mod sessions {
+        pub(crate) mod remote_proxy {
+            pub(crate) mod binding {
+                // Host seam: the real SessionStore binding lifecycle is not linked.
+                #[derive(Clone, Debug, Eq, PartialEq)]
+                pub(crate) struct LiveRemoteContext {
+                    pub(crate) peer_id: String,
+                    pub(crate) resume_boundary_id: String,
+                    pub(crate) connection_id: String,
+                    pub(crate) controller_lease_id: String,
+                    pub(crate) lease_epoch: String,
+                    pub(crate) relay_epoch: String,
+                    pub(crate) generation: String,
+                    pub(crate) control_connected: bool,
+                    pub(crate) encrypted_channel_connected: bool,
+                }
+            }
+        }
         pub(crate) mod validators {
             // Explicit host seam: native tests cover SessionStore validation.
             pub(crate) fn validate_session_id(id: &str) -> anyhow::Result<()> {
@@ -124,8 +148,10 @@ mod features {
     }
     pub(crate) mod files {
         pub(crate) mod file_ingest {
-            pub(crate) use crate::file_limits::MAX_FILE_BYTES;
-            pub(crate) use crate::published_attachment::*;
+            include!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/src/file_ingest_host.rs"
+            ));
         }
     }
     pub(crate) mod remote_control {
@@ -175,6 +201,13 @@ mod features {
             pub(crate) mod relay_runtime {
                 pub(crate) fn log_controlled_event(_event: &str, _outcome: &str) {}
                 pub(crate) fn log_controller_event(_event: &str, _outcome: &str) {}
+                pub(crate) fn log_remote_action_event(
+                    _side: &str,
+                    _event: &str,
+                    _operation: &str,
+                    _outcome: &str,
+                ) {
+                }
             }
             pub(crate) use crate::transfer;
             pub(crate) use crate::{

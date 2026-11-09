@@ -67,6 +67,18 @@ test('failed abandon drops the retry payload but retains the durable handle for 
   assert.deepEqual(remoteDispatchCases(id, history), []);
 });
 
+test('lost file snapshot blocks retry while preserving the exact binding for safe abandon', () => {
+  const id = 'remote-navigation-loss';
+  recordRemoteDispatch(id, 'ref-preserved', 'lease-preserved', 'draft text', { state: 'prepared_not_sent', retryHandle: handle });
+  assert.equal(markRemoteDispatchPayloadLost(id, handle.taskId, { preserveContext: true }), true);
+  const [item] = remoteDispatchCases(id);
+  assert.equal(item.origin, 'history');
+  assert.equal(item.remoteRef, 'ref-preserved');
+  assert.equal(item.identity, 'lease-preserved');
+  assert.equal(item.text, 'draft text');
+  forgetRemoteDispatch(id, handle.taskId);
+});
+
 test('restart history exposes only unattempted abandon hints and aggregate unknown count', () => {
   const history = {
     localSessionId: 'remote-restart', pendingUnknownCount: 2,

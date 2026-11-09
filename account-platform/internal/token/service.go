@@ -225,6 +225,8 @@ func (s *Service) activeWallet(ctx context.Context, resolved AuthorizationContex
 func (s *Service) writeError(w http.ResponseWriter, r *http.Request, err error) {
 	status, code, message := http.StatusInternalServerError, "INTERNAL_ERROR", "the token request could not be completed"
 	switch {
+	case errors.Is(err, errOrganizationPolicyInvalidInput):
+		status, code, message = http.StatusBadRequest, "INVALID_REQUEST", "invalid organization model policy"
 	case errors.Is(err, errOrganizationPolicyModelUnavailable):
 		status, code, message = http.StatusUnprocessableEntity, "MODEL_UNAVAILABLE", "the model is unavailable"
 	case errors.Is(err, ErrModelUnavailable):

@@ -19,6 +19,7 @@ from urllib.parse import parse_qs, urlsplit
 ROOT = Path(__file__).resolve().parents[1]
 ACTORS = {"billing_migrator", "billing_schema_owner", "billing_service"}
 REQUIRED = {
+    "TestEmergencyCancellationWorkerDiagnosticsPostgres",
     "TestEmergencyCancellationClaimOwnershipPostgres",
     "TestEmergencyCancellationRequestLocksClaimPostgres",
     "TestUserUnusedIntentCancellationOwnerPostgres",
@@ -32,6 +33,7 @@ REQUIRED = {
     "TestCredentialFailurePersistenceBoundariesPostgres",
     "TestCredentialFailurePreparationFencePostgres",
     "TestCredentialFailureExistingEventsPostgres",
+    "TestCredentialWindowRevocationOwnerPostgres",
     "TestHoldAcknowledgementSurvivesDispatchPersistenceFailurePostgres",
     "TestCancellationReceivedReadRechecksReservationPostgres",
     "TestCancellationFirstUserPreservesConfirmedReceiptPostgres",
@@ -41,6 +43,7 @@ REQUIRED = {
     "TestUsageWaiverCoordinatorRecoveryPostgres",
     "TestF05AdditionalReservationProjectionPublicPostgres",
     "TestF06OrganizationAdmissionBoundariesPublicPostgres",
+    "TestOrganizationModelPolicyPublicPostgres",
     "TestContextEligibilityUsesCurrentScopedProductionRoutes",
     "TestReconciliationEvidenceMatchesPublicSchema",
     "TestF05DispatchLeaseLifecycle",
@@ -61,6 +64,7 @@ REQUIRED = {
     "TestManagementCancellationFundsRemainTruthful",
     "TestManagementEmergencyCancellationRecoversLostReserveACK",
     "TestLifecycleForceCancelApprovalPostgres",
+    "TestManualReviewSLAEscalationPostgres",
     "TestLocalModelCancellationHandshakeHTTP",
     "TestRemoteModelCancellationOwnerLoopTransport",
     "TestManagementCancellationHoldRecoveryRequiresRecordedProof",
@@ -69,6 +73,7 @@ REQUIRED = {
 ACCOUNT_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/account"
 LIFECYCLE_RECONCILIATION_REQUIRED = {"TestLifecycleV3ApprovalReconciliationPostgres"}
 ACCOUNT_REQUIRED = {
+    "TestOrganizationStartupDiagnosticsPostgres",
     "TestRestoredAdminReadsWithPublicMigrationsAndRuntimeActor",
     "TestApprovalDecisionOriginalReceiptPostgres",
     "TestApprovalDecisionLegacyConcurrentReceiptPostgres",
@@ -76,6 +81,7 @@ ACCOUNT_REQUIRED = {
     "TestF06OrganizationStatusProjectionVersionPublicPostgres",
     "TestF06OrganizationDeletionVersionAndTerminalScope",
     "TestF06Review5566377593PublicPostgres",
+    "TestOrganizationEvidenceTruncatePublicPostgres",
     "TestOrdinaryDeadLetterReplayRuntimePostgres",
     "TestIdentityRecoveryClaimsRuntimePostgres",
     "TestProfileSessionRevocationRecoveryRuntimePostgres",
@@ -119,6 +125,7 @@ ACCOUNT_LEAF_REQUIRED = {
 ACCOUNT_CHILD_REQUIRED = ACCOUNT_REQUIRED - ACCOUNT_LEAF_REQUIRED
 TOKEN_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/token"
 TOKEN_CHILD_REQUIRED = {
+    "TestOrganizationModelPolicyPublicPostgres",
     "TestEmergencyCancellationClaimOwnershipPostgres",
     "TestEmergencyCancellationRequestLocksClaimPostgres",
     "TestUserUnusedIntentCancellationOwnerPostgres",
@@ -144,7 +151,7 @@ BILLING_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/billing"
 SCHEMA_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/billingschema"
 TOKEN_SCHEMA_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/tokenschema"
 TOKEN_SCHEMA_REQUIRED = {"TestManagementPublicMigrationInstallation"}
-SCHEMA_REQUIRED = {"TestLatePaymentQueryRegisteredIdentity", "TestReconciliationFairRetryRegisteredIdentity", "TestF09EntitlementPackageIndexPublicMigration", "TestTokenWalletReceiptSchemaPostgres", "TestLegacyEntitlementUpgradeAdmissionPostgres", "TestUsageWaiverHistoricalSchemaPostgres", "TestBillingOrdinaryReplayOriginalMigrationPostgres", "TestUnknownProviderEntryPublicMigrationPostgres", "TestLegacyExpiry025UpgradePreservesOriginalLedgerPostgres", "TestF04PublicTokenUserOwnerAuthorityAndDirectory", "TestManualRetentionHistoricalHardeningPostgres"}
+SCHEMA_REQUIRED = {"TestLatePaymentQueryRegisteredIdentity", "TestReconciliationFairRetryRegisteredIdentity", "TestF09EntitlementPackageIndexPublicMigration", "TestTokenWalletReceiptSchemaPostgres", "TestLegacyEntitlementUpgradeAdmissionPostgres", "TestUsageWaiverHistoricalSchemaPostgres", "TestBillingOrdinaryReplayOriginalMigrationPostgres", "TestUnknownProviderEntryPublicMigrationPostgres", "TestLegacyExpiry025UpgradePreservesOriginalLedgerPostgres", "TestF04PublicTokenUserOwnerAuthorityAndDirectory", "TestManualRetentionHistoricalHardeningPostgres", "TestBillingHistoricalCatalogRollbackPostgres"}
 OWNER_REQUIRED = {
     "TestPaymentActionAdmissionPostgres",
     "TestF06OrganizationWalletRequiresLifecycleEvidence",
@@ -183,7 +190,9 @@ REFUND_REQUIRED = {
     "TestRefundOriginalUnknownSuccessQueriesAndSettlesOrdinaryGrantsPostgres",
 }
 RETAINED_REQUIRED = {
+    "TestClosedGrantEvidenceCurrentRoleGuardsPostgres",
     "TestEscalatedForcedRefundRequiresSecondActorAndReplays",
+    "TestEscalatedForcedRefundWalletLockOrderPostgres",
     "TestEscalatedForcedRefundAtomicRollbackPostgres",
     "TestEscalatedForcedRefundEvidenceAndReceiptGuardsPostgres",
     "TestOrdinaryForcedRefundAppliedReceiptRecoveryPostgres",
@@ -244,6 +253,7 @@ BILLING_LEAF_REQUIRED = {
     "TestProductAdmissionMaterialPurgePostgres",
     "TestProductAdmissionMaterialHTTPPostgres",
     "TestEscalatedForcedRefundRequiresSecondActorAndReplays",
+    "TestEscalatedForcedRefundWalletLockOrderPostgres",
     "TestOrdinaryForcedRefundAppliedReceiptRecoveryPostgres",
     "TestPaymentPersonalWalletAdmissionStatusRacePostgres",
     "TestPostgresManagedPricePagination",
@@ -267,6 +277,16 @@ BILLING_LEAF_REQUIRED = {
 }
 BILLING_CHILD_REQUIRED = RETAINED_REQUIRED - BILLING_LEAF_REQUIRED
 EXACT_REQUIRED_CHILDREN = {
+    "TestBillingHistoricalCatalogRollbackPostgres": {
+        f"version{version}/seeded={seeded}{suffix}"
+        for version in (35, 36, 37, 51)
+        for seeded in ("false", "true")
+        for suffix in ("", "/actual-cli")
+    },
+    "TestOrganizationStartupDiagnosticsPostgres": {
+        "profile", "token", "billing-earlier-wallet-guard",
+    },
+    "TestRechargeProductCommandAtomicityPostgres": {"active-provider-admission-candidate-progress"},
     "TestProductManualAdmissionPostgres": {
         "two-explicit-humans-first-publish-and-immutable-replay",
         "runtime-cannot-rewrite-frozen-manual-facts",
@@ -276,6 +296,7 @@ EXACT_REQUIRED_CHILDREN = {
         "retention-purges-submission-snapshot-and-review-reason",
     },
     "TestEmergencyCancellationClaimOwnershipPostgres": {"before-request", "after-request", "pending", "zero-attempt"},
+    "TestReceivableSettlementGuardedWritesPostgres": {"recharge-and-write-off-lock-order"},
     "TestEmergencyCancellationRequestLocksClaimPostgres": {"usage-lock-reclaim"},
     "TestPasswordPreparationAuthorizationPostgres": {
         "retention-redacts-expired-mobiles-without-changing-grant-facts/expired",
@@ -284,6 +305,15 @@ EXACT_REQUIRED_CHILDREN = {
         "retention-keeps-issued-grant-and-continues-later-artifact-cleanup",
         "retention-skips-locked-expired-captcha-and-rejects-late-grant",
         "retention-FK-protects-inflight-reference-and-subsequent-passes",
+    },
+    "TestOrganizationEvidenceTruncatePublicPostgres": {
+        scenario + suffix
+        for scenario in ("fresh-install", "retained-upgrade")
+        for suffix in ("", "/organization_creation_requests", "/organization_unit_commands",
+                       "/membership_commands", "/legal-replay-after-rejection", "/forward-only-public-down")
+    },
+    "TestClosedGrantEvidenceCurrentRoleGuardsPostgres": {
+        "account_closure_grant_isolations", "account_closed_grant_reclaim_commands",
     },
     "TestManagementPublicMigrationInstallation": {
         "fresh", "legacy-upgrade", "installed-29-upgrade", "installed-30-upgrade",
@@ -355,6 +385,15 @@ EXACT_REQUIRED_CHILDREN = {
         "manual-status", "manual-link", "order-link", "transaction-link",
         "evidence-link", "receipt-identity-and-terminal-replay",
     },
+    "TestOrganizationModelPolicyPublicPostgres": {
+        "initial-default-is-not-a-stored-policy",
+        "invalid-input-preserves-original-policy-and-next-write",
+        "nil-and-explicit-empty-model-sets-have-identical-meaning",
+        "immutable-replay-after-later-revision-and-actor-or-facts-conflict",
+        "same-key-first-writers-replay-one-version",
+        "different-key-initial-CAS-has-one-winner",
+        "stale-CAS-and-unavailable-model-do-not-write",
+    },
     "TestReconciliationOrphanPaidOrderPostgres": {"fresh-install", "historical-upgrade"},
     "TestRemoteModelCancellationOwnerLoopTransport": {
         "remote_emergency", "remote_emergency_then_user", "user_only",
@@ -377,6 +416,15 @@ EXACT_REQUIRED_CHILDREN = {
         "v2-false-compatibility", "v3-false", "v3-true-removed",
         "v3-true-removed/emergency-then-user-origin-retains-authority",
         "v3-true-removed/emergency-then-user-origin-retains-authority/owner-heartbeat-observes-remote-request",
+    },
+    "TestManualReviewSLAEscalationPostgres": {
+        "two_workers_and_strict_one_hour_boundary",
+        "database_clock_controls_deadlines_and_cooldown",
+        "later_candidate_starts_a_fresh_cooldown",
+        "closed_before_write",
+        "deadlines_completed_before_write",
+        "current_owner_and_stage_after_lock",
+        "outbox_failure_rolls_back_and_retries",
     },
     "TestRegistrationCompensationDatabaseErrorIdentityPostgres": {
         "operation-read",

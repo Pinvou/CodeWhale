@@ -15,7 +15,8 @@ const newApi = ['newApi.tlsSecretName=fixture-only-newapi', 'newApi.caConfigMap=
   'images.newApiTLS.repository=registry.example.invalid/config-only', `images.newApiTLS.digest=sha256:${'0'.repeat(64)}`];
 function render(overrides = [], production = true) {
   const args = ['template', 'fixture', chart,
-    ...(production ? ['-f', path.join(chart, 'values-production-new.yaml')] : []),
+    ...(production ? ['-f', path.join(chart, 'values-production-new.yaml'),
+      '-f', path.resolve(import.meta.dirname, '../fixtures/production-site-network.yaml')] : []),
     // The base profile also uses strict provisioned NATS consumers. Keep this
     // Identity fixture valid without reviving the unauthenticated legacy server.
     ...(!production ? ['--set', 'nats.enabled=false', '--set-string',

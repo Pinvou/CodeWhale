@@ -73,6 +73,13 @@
   }
 
   async function uploadFile(options) {
+    function observePhase(phase) {
+      // Optional, content-free observers must never change upload semantics.
+      try {
+        if (options && typeof options.onPhase === "function") options.onPhase(phase);
+      } catch (_) {}
+    }
+    observePhase("validation");
     var file = options && options.file;
     if (!file || !Number.isSafeInteger(file.size) || file.size < 0) {
       var invalid = new Error("invalid device attachment");
@@ -106,13 +113,16 @@
     }
 
     try {
+      observePhase("read");
       if (integrity) {
         sha256Hex = await fileSha256Hex(file);
       }
       while (offset < file.size) {
         var end = Math.min(offset + CHUNK_BYTES, file.size);
+        observePhase("read");
         var bytes = new Uint8Array(await file.slice(offset, end).arrayBuffer());
         assertActive();
+        observePhase(end === file.size ? "commit" : "upload");
         result = await options.sendChunk({
           uploadId: id,
           fileName: file.name || "attachment",
@@ -129,6 +139,7 @@
         }
       }
       assertActive();
+      observePhase("result");
       if (typeof options.validateResult === "function" && !options.validateResult(result)) {
         var invalidResult = new Error("upload did not return a valid attachment");
         invalidResult.code = "device_upload_invalid_result";

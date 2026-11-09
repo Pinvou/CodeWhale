@@ -53,7 +53,7 @@ function loadSessionsFeature(overrides) {
   };
   const sessionStates = {};
   const deferreds = {};
-  const calls = { invoke: [] };
+  const calls = { invoke: [], invokeArgs: [] };
   const api = factory(Object.assign({
     state,
     sessionStates,
@@ -65,6 +65,7 @@ function loadSessionsFeature(overrides) {
     timeStr() { return ''; },
     invoke(name, args) {
       calls.invoke.push(name);
+      calls.invokeArgs.push({ name, args });
       if (deferreds[name] && deferreds[name].promise) return deferreds[name].promise;
       return Promise.resolve({});
     },
@@ -99,7 +100,7 @@ function loadSessionsFeature(overrides) {
     personaPlaceholderTitles: {},
   }, overrides || {}));
   return {
-    api, state, sessionStates, calls,
+    api, state, sessionStates, calls, root,
     defer(name) {
       // 每次创建全新对象：同一 invoke 名的第二次 defer 不得覆盖第一次的 resolve。
       const d = {};
@@ -1102,7 +1103,10 @@ for (const [source, command, modelRef] of [
         creation.resolve({ id: 'typed-created' });
         await new Promise(resolve => setImmediate(resolve));
         assert.equal(rt.calls.invoke.filter(name => name === command).length, 1);
-        assert.equal(rt.state.activeSessionId, 'typed-created');
+        assert.equal(rt.state.activeSessionId, null, 'model confirmation must precede active-session publication');
+        assert.equal(rt.state.pendingDraftModelRef, modelRef, 'the uncommitted draft keeps its selection');
+        const third = rt.api.ensureSession();
+        assert.equal(rt.calls.invoke.filter(name => name === 'create_session').length, 1);
         if (navigateAway) {
           await rt.api.createNewSession();
           rt.state.composerDraft = 'later user draft';
@@ -1113,9 +1117,9 @@ for (const [source, command, modelRef] of [
           session_id: 'typed-created', model_id: modelRef.model_id,
           catalog_version: 1, lifecycle_status: 'PUBLISHED',
         } : null);
-        const ids = await Promise.all([first, second]);
-        assert.deepEqual(ids, navigateAway || rejectSelection ? [null, null] : ['typed-created', 'typed-created']);
-        assert.equal(rt.calls.invoke.filter(name => name === 'delete_session').length, rejectSelection ? 1 : 0);
+        const ids = await Promise.all([first, second, third]);
+        assert.deepEqual(ids, navigateAway || rejectSelection ? [null, null, null] : ['typed-created', 'typed-created', 'typed-created']);
+        assert.equal(rt.calls.invoke.filter(name => name === 'delete_session').length, rejectSelection && !navigateAway ? 1 : 0);
         if (navigateAway) {
           assert.equal(rt.state.activeSessionId, null);
           assert.equal(rt.state.draftEpoch, navigationEpoch);
@@ -1123,7 +1127,7 @@ for (const [source, command, modelRef] of [
           assert.equal(rt.state.pendingDraftModelRef, null);
         } else if (rejectSelection) {
           assert.equal(rt.state.activeSessionId, null);
-          assert.equal(rt.state.draftEpoch, originalEpoch + 1);
+          assert.equal(rt.state.draftEpoch, originalEpoch, 'a rejected unpublished session never consumed the draft');
           assert.equal(rt.state.composerDraft, 'owned typed draft');
           assert.deepEqual(rt.state.pendingDraftModelRef, modelRef);
         } else {
@@ -1132,5 +1136,158 @@ for (const [source, command, modelRef] of [
         }
       });
     }
+  }
+}
+
+for (const rejected of [false, true]) {
+  test(`a newer draft model choice survives the original confirmation ${rejected ? 'rejection' : 'success'}`, async () => {
+    const rt = loadSessionsFeature();
+    vm.runInNewContext(fs.readFileSync(path.join(bridgeDir, 'settings.js'), 'utf8'), {
+      window: rt.root, globalThis: rt.root,
+    });
+    const models = rt.root.__PINVOU_TAURI_BRIDGE_FEATURES__.settings({
+      state: rt.state, notify() {}, listen() {},
+    });
+    const firstRef = { source: 'ACCOUNT_PLATFORM', model_id: 'first-account-model' };
+    const nextRef = { source: 'LOCAL_CONFIG', saved_model_id: 'new-local-model' };
+    await models.switchModelRef(null, firstRef);
+    const create = rt.defer('create_session');
+    const select = rt.defer('account_platform_select_session_model');
+    const owner = { draftEpoch: rt.state.draftEpoch };
+    const pending = rt.api.ensureSession(owner);
+    create.resolve({ id: 'old-choice-session' });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(rt.state.activeSessionId, null);
+    await models.switchModelRef(null, nextRef);
+    rt.state.composerDraft = 'newer composer edit';
+    if (rejected) select.reject(new Error('controlled old choice rejected'));
+    else select.resolve({ session_id: 'old-choice-session', model_id: firstRef.model_id,
+      catalog_version: 1, lifecycle_status: 'PUBLISHED' });
+    assert.equal(await pending, null);
+    assert.equal(rt.state.activeSessionId, null);
+    assert.equal(rt.state.pendingDraftModelRef, nextRef);
+    assert.equal(rt.state.composerDraft, 'newer composer edit');
+    assert.equal(owner.createdSessionId, null);
+    assert.equal(rt.calls.invoke.includes('delete_session'), false);
+    const retryCreate = rt.defer('create_session');
+    const retry = rt.api.ensureSession();
+    retryCreate.resolve({ id: 'new-choice-session' });
+    assert.equal(await retry, 'new-choice-session');
+    assert.equal(rt.state.currentSessionModelRef, nextRef);
+    const localCall = rt.calls.invokeArgs.find(call => call.name === 'set_session_model');
+    assert.equal(localCall.args.sessionId, 'new-choice-session');
+    assert.equal(localCall.args.modelId, nextRef.saved_model_id);
+  });
+}
+
+for (const change of ['project', 'roots']) {
+  test(`model confirmation cannot consume a newer ${change} binding on the same workspace path`, async () => {
+    const rt = loadSessionsFeature();
+    const original = { projectId: 'original-project', workspaceRoots: ['/public/root', '/public/first'] };
+    const next = { projectId: change === 'project' ? 'new-project' : original.projectId,
+      workspaceRoots: change === 'roots' ? ['/public/root', '/public/second'] : original.workspaceRoots };
+    rt.api.setDraftWorkspace('/public/root', original);
+    rt.state.pendingDraftModelRef = { source: 'ACCOUNT_PLATFORM', model_id: 'intended-model' };
+    const create = rt.defer('create_session');
+    const select = rt.defer('account_platform_select_session_model');
+    const owner = { draftEpoch: rt.state.draftEpoch };
+    const first = rt.api.ensureSession(owner);
+    create.resolve({ id: 'original-binding' });
+    await new Promise(resolve => setImmediate(resolve));
+    rt.api.setDraftWorkspace('/public/root', next);
+    select.resolve({ session_id: 'original-binding', model_id: 'intended-model',
+      catalog_version: 1, lifecycle_status: 'PUBLISHED' });
+    assert.equal(await first, null);
+    assert.equal(rt.state.activeSessionId, null);
+    assert.equal(rt.state.draftProjectId, next.projectId);
+    assert.deepEqual(rt.state.draftWorkspaceRoots, next.workspaceRoots);
+    assert.equal(owner.createdSessionId, null);
+    const retryCreate = rt.defer('create_session');
+    const retrySelect = rt.defer('account_platform_select_session_model');
+    const retry = rt.api.ensureSession();
+    retryCreate.resolve({ id: 'new-binding' });
+    await new Promise(resolve => setImmediate(resolve));
+    const args = rt.calls.invokeArgs.filter(call => call.name === 'create_session').at(-1).args;
+    assert.equal(args.workspacePath, '/public/root');
+    assert.equal(args.projectId, next.projectId);
+    assert.deepEqual(args.workspaceRoots, next.workspaceRoots);
+    retrySelect.resolve({ session_id: 'new-binding', model_id: 'intended-model',
+      catalog_version: 1, lifecycle_status: 'PUBLISHED' });
+    assert.equal(await retry, 'new-binding');
+  });
+}
+
+for (const [source, command, modelRef] of [
+  ['ACCOUNT_PLATFORM', 'account_platform_select_session_model', { source: 'ACCOUNT_PLATFORM', model_id: 'intended-model' }],
+  ['LOCAL_CONFIG', 'set_session_model', { source: 'LOCAL_CONFIG', saved_model_id: 'intended-local-model' }],
+]) {
+  for (const outcome of ['resolve', 'reject', 'new-choice-resolve', 'new-choice-reject', 'new-workspace-resolve', 'new-workspace-reject']) {
+    const rejected = outcome.endsWith('reject');
+    const newChoice = outcome.startsWith('new-choice');
+    const newWorkspace = outcome.startsWith('new-workspace');
+    test(`real chat sends wait for draft model confirmation: ${source}/${outcome}`, async () => {
+      const rt = loadSessionsFeature();
+      rt.state.attachments = [];
+      rt.state.composerPrefill = { id: 0, text: '' };
+      rt.state.pendingDraftModelRef = modelRef;
+      if (newWorkspace) rt.api.setDraftWorkspace('/public/old', { projectId: 'old-project' });
+      vm.runInNewContext(fs.readFileSync(path.join(bridgeDir, 'chat.js'), 'utf8'), {
+        window: rt.root, console, setTimeout, clearTimeout,
+      });
+      const transportCalls = [];
+      const chat = rt.root.__PINVOU_TAURI_BRIDGE_FEATURES__.chat({
+        state: rt.state, sessionStates: rt.sessionStates,
+        ensureSession: rt.api.ensureSession, getBuffer: rt.api.getBuffer,
+        turnUsageDirty: {}, personaPlaceholderTitles: {}, itemIdSeq: 0,
+        notify() {}, safeConsoleInfo() {}, bt: key => key,
+        runSyncOnSession: (_id, fn) => fn(), startThinking() {}, touchSessionBuffer() {},
+        async invoke(name, args) { transportCalls.push({ name, args }); return null; },
+      });
+      const creation = rt.defer('create_session');
+      const selection = rt.defer(command);
+      const first = chat.sendMessage('first user message', {});
+      creation.resolve({ id: 'typed-pending' });
+      await new Promise(resolve => setImmediate(resolve));
+      const second = chat.sendMessage('second user message', {});
+      await new Promise(resolve => setImmediate(resolve));
+      assert.equal(rt.state.activeSessionId, null);
+      assert.equal(transportCalls.length, 0, 'neither send reaches chat/steer IPC before confirmation');
+      assert.equal(rt.calls.invoke.filter(name => name === 'create_session').length, 1);
+      chat.setComposerDraft('third text not submitted');
+      const nextRef = { source: 'LOCAL_CONFIG', saved_model_id: 'later-explicit-choice' };
+      if (newChoice) rt.state.pendingDraftModelRef = nextRef;
+      if (newWorkspace) rt.api.setDraftWorkspace('/public/new', {
+        projectId: 'new-project', workspaceRoots: ['/public/new', '/public/extra'],
+      });
+      if (rejected) selection.reject(new Error('controlled model rejection'));
+      else selection.resolve(source === 'ACCOUNT_PLATFORM' ? {
+        session_id: 'typed-pending', model_id: modelRef.model_id,
+        catalog_version: 1, lifecycle_status: 'PUBLISHED',
+      } : null);
+      const results = await Promise.all([first, second]);
+      if (rejected || newChoice || newWorkspace) {
+        assert.deepEqual(results, ['restored', 'restored']);
+        assert.equal(transportCalls.length, 0);
+        assert.equal(rt.state.activeSessionId, null);
+        assert.ok(rt.state.composerPrefill.text.includes('first user message'));
+        assert.ok(rt.state.composerPrefill.text.includes('second user message'));
+        assert.ok(rt.state.composerPrefill.text.includes('third text not submitted'));
+        if (newChoice) assert.equal(rt.state.pendingDraftModelRef, nextRef);
+        if (newWorkspace) {
+          assert.equal(rt.state.draftWorkspacePath, '/public/new');
+          assert.equal(rt.state.draftProjectId, 'new-project');
+          assert.deepEqual(rt.state.draftWorkspaceRoots, ['/public/new', '/public/extra']);
+        }
+      } else {
+        assert.equal(results[0], true);
+        assert.equal(rt.state.activeSessionId, 'typed-pending');
+        assert.equal(rt.state.currentSessionModelRef, modelRef);
+        assert.ok(transportCalls.some(call => call.name === 'chat' && call.args.sessionId === 'typed-pending'));
+        assert.ok(transportCalls.some(call => call.name === 'steer_chat'
+          && call.args.sessionId === 'typed-pending' && call.args.content === 'second user message'));
+        assert.equal(chat.getComposerDraft(), 'third text not submitted');
+        assert.equal(rt.sessionStates['typed-pending'].composerDraft, 'third text not submitted');
+      }
+    });
   }
 }

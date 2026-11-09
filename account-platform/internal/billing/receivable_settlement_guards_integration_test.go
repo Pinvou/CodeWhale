@@ -15,6 +15,7 @@ import (
 // Provider facts and the exceptional storage faults are controlled in an owned
 // UUID database; this is not live provider/channel acceptance.
 func TestReceivableSettlementGuardedWritesPostgres(t *testing.T) {
+	t.Run("recharge-and-write-off-lock-order", testReceivableWriteOffRechargeLockOrder)
 	for _, scenario := range []string{"normal", "wallet-summary-drift", "receivable-update-suppressed", "payment-order-update-error"} {
 		t.Run(scenario, func(t *testing.T) {
 			r, ctx := retainedFinanceRepository(t)

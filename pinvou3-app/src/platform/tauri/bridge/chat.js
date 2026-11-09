@@ -840,7 +840,9 @@ function restoreUiTurnState(consumed) { return pinvouSharedtauriChatN31666().res
         // setComposerDraft syncs the session buffer so switching away and back
         // does not resurrect the sent text; a background session's steer
         // (remote control etc.) must not clear the active session's composer.
-        if (state.activeSessionId === sid) setComposerDraft("");
+        // A draft-owned send already waited for materialization. Text typed
+        // during model confirmation belongs to the new session, not this steer.
+        if (state.activeSessionId === sid && !draftOwner) setComposerDraft("");
         // Show the queue chip immediately. steered=true marks it as delivered
         // to the engine: flushQueued skips it (prevents double sends). The
         // steerId is backfilled when the invoke resolves; events may arrive
@@ -1005,7 +1007,18 @@ function restoreUiTurnState(consumed) { return pinvouSharedtauriChatN31666().res
         // refuses terminal operations).
         voice().rebindVoiceOperationToDraft(owner.operationId, state.draftEpoch);
       }
-      prefillComposer(text, true);
+      if (owner.rollbackFromDraftEpoch !== undefined
+        && owner.rollbackFromDraftEpoch === owner.draftEpoch
+        && owner.draftEpoch === Number(state.draftEpoch || 0)) {
+        // This model-confirmation failure never published/consumed its draft.
+        // Coalesced sends restore in one React batch: publish their accumulated
+        // store value, so the last notification cannot discard an earlier one.
+        const current = String(state.composerDraft || "");
+        state.composerDraft = current ? current + "\n" + text : text;
+        prefillComposer(state.composerDraft, false);
+      } else {
+        prefillComposer(text, true);
+      }
     }
     owner.restored = true;
     return true;
