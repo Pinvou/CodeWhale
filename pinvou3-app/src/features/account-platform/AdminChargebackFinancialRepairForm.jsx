@@ -5,6 +5,7 @@ import {
 } from './admin-financial-repair-form.js';
 import { useFinanceOperation } from './useFinanceOperation.js';
 import { AdminRepairRelationship } from './AdminRepairRelationship.jsx';
+import { AdminRepairApprovalReceipt, AdminRepairImpact } from './AdminRepairImpact.jsx';
 import { createAndSubmitFreshGovernedApproval } from './admin-governed-approval-workflow.js';
 
 // The repair page never asks the operator for amounts the owner already knows:
@@ -22,7 +23,7 @@ export function AdminChargebackFinancialRepairForm({ client, copy, onCreated, ow
   const [requestKey, setRequestKey] = useState('');
   const [busy, setBusy] = useState('');
   const [failure, setFailure] = useState('');
-  const [created, setCreated] = useState('');
+  const [created, setCreated] = useState(null);
   const [needsAuthentication, setNeedsAuthentication] = useState(false);
   const factsRevision = useRef(0);
   const mounted = useRef(false);
@@ -56,7 +57,7 @@ export function AdminChargebackFinancialRepairForm({ client, copy, onCreated, ow
     setFacts(null);
     setProjection(null);
     setFailure('');
-    setCreated('');
+    setCreated(null);
   };
   const changeCommand = (next) => {
     factsRevision.current += 1;
@@ -66,7 +67,7 @@ export function AdminChargebackFinancialRepairForm({ client, copy, onCreated, ow
     setFacts(null);
     setProjection(null);
     setFailure('');
-    setCreated('');
+    setCreated(null);
   };
 
   const readFacts = async (event) => {
@@ -83,7 +84,7 @@ export function AdminChargebackFinancialRepairForm({ client, copy, onCreated, ow
     setBusy('facts');
     setNeedsAuthentication(false);
     setFailure('');
-    setCreated('');
+    setCreated(null);
     try {
       const answer = await client.approvalCommandPrecheck(prepared.body);
       if (!live()) return;
@@ -129,7 +130,7 @@ export function AdminChargebackFinancialRepairForm({ client, copy, onCreated, ow
         }
       });
       if (result) {
-        setCreated(result.approval_request_id); setProjection(null); setFacts(null);
+        setCreated({ approval_request_id: result.approval_request_id, status: result.status }); setProjection(null); setFacts(null);
         setValues({}); setReason(''); setRequestKey(''); onCreated?.(result.approval_request_id);
       }
       return;
@@ -139,7 +140,7 @@ export function AdminChargebackFinancialRepairForm({ client, copy, onCreated, ow
 
   return <section className="adm-financial-repair" aria-label={copy.title}>
     <h3>{copy.title}</h3>
-    <p>{copy.lead}</p>
+    <p>{copy.chargebackImpact?.scenario || copy.lead}</p>
     {governed && operation.error && <p role="alert">{operation.error}</p>}
     {needsAuthentication && <div className="adm-chargeback-repair-reauthentication"><p>{copy.writeOffRecentAuthenticationRequired}</p><button type="button" disabled={busy !== '' || operation.busy} onClick={() => client.reauthenticate('/admin.html')}>{copy.reauthenticate}</button></div>}
     {copy.chargebackRelation && <p className="adm-repair-relationship-intro">{copy.chargebackRelation.intro}</p>}
@@ -156,9 +157,11 @@ export function AdminChargebackFinancialRepairForm({ client, copy, onCreated, ow
       <button type="submit" disabled={locked}>{busy === 'facts' ? copy.reading : copy.readFacts}</button>
     </form>
     {failure && <p role="alert">{failure}</p>}
-    {created && <p role="status">{copy.createdHint} <code>{created}</code></p>}
+    <AdminRepairApprovalReceipt words={copy.chargebackImpact} receipt={created} />
     <AdminRepairRelationship words={copy.chargebackRelation} projection={projection} reading={busy === 'facts'} pending={operation.unknown}
       normalizedKeys={["chargeback_case_id","payment_evidence_id"]} snapshotKeys={["provider_chargeback_id"]} />
+    <AdminRepairImpact words={copy.chargebackImpact} fields={[["base_shortfall_microcredits","points"],["wallet_id","id"],["package_id","id"],["chargeback_money","missing"]]}
+      snapshot={busy !== 'facts' && !operation.unknown ? projection?.financial_snapshot : null} />
     {busy !== 'facts' && displayedFacts && <div className="adm-financial-repair-facts">
       <h4>{copy.frozenFacts}</h4>
       <dl>{displayedFacts.rows.map((row) => <div key={row.key}><dt>{copy.fields[row.key] || row.key}</dt><dd><code>{row.value}</code></dd></div>)}</dl>
