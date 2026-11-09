@@ -202,3 +202,60 @@ export const auditExportPresentation = {
     ]
   }
 };
+
+export const auditListCopy = {
+  "zh": {
+    "results": "审计结果",
+    "reset": "重置",
+    "details": "查看详情",
+    "detailsColumn": "详情",
+    "loading": "正在查询审计日志…",
+    "failed": "暂时无法读取审计日志。",
+    "denied": "你没有权限读取审计日志。",
+    "invalid": "请输入有效的查询时间。",
+    "previousBatch": "以下为上次成功读取的结果。",
+    "applied": "已应用条件：",
+    "unfiltered": "无筛选",
+    "empty": "当前查询没有审计记录。",
+    "pagination": "已加载记录分页",
+    "batch": "已加载 {count} 条，当前显示第 {from}–{to} 条",
+    "previous": "上一页",
+    "next": "下一页"
+  },
+  "en": {
+    "results": "Audit results",
+    "reset": "Reset",
+    "details": "View details",
+    "detailsColumn": "Details",
+    "loading": "Searching audit logs…",
+    "failed": "Audit logs could not be loaded.",
+    "denied": "You do not have access to read audit logs.",
+    "invalid": "Enter a valid search time.",
+    "previousBatch": "Showing the last successful result.",
+    "applied": "Applied filters:",
+    "unfiltered": "No filters",
+    "empty": "No audit records match this search.",
+    "pagination": "Loaded audit records pagination",
+    "batch": "Showing {from}–{to} of {count} loaded records",
+    "previous": "Previous page",
+    "next": "Next page"
+  },
+  "ja": {
+    "results": "監査結果",
+    "reset": "リセット",
+    "details": "詳細を表示",
+    "detailsColumn": "詳細",
+    "loading": "監査ログを検索中…",
+    "failed": "監査ログを取得できませんでした。",
+    "denied": "監査ログを表示する権限がありません。",
+    "invalid": "有効な検索日時を入力してください。",
+    "previousBatch": "前回正常に取得した結果を表示しています。",
+    "applied": "適用済みの条件：",
+    "unfiltered": "指定なし",
+    "empty": "検索条件に一致する監査記録はありません。",
+    "pagination": "読み込み済みの監査記録のページ",
+    "batch": "取得した {count} 件のうち {from}～{to} 件を表示",
+    "previous": "前のページ",
+    "next": "次のページ"
+  }
+};
