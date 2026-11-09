@@ -77,7 +77,7 @@ services:
   token-gateway:
     environment:
       <<: *governed-environment
-      WORKLOAD_IDENTITY_RULES_JSON: '[{"permissions":["internal.token.usage.waive","internal.token.hold-expiry.prove"],"service":"billing-service","subject":"pinvou:service:billing-service"},{"permissions":["internal.token.organization.lifecycle","internal.token.organization-unit.lifecycle","internal.token.account-closure.replay-clear","internal.token.account-closure.assess","internal.token.approval-snapshot.read","internal.token.approval-proof.read","internal.token.approval-effect.read","internal.token.approval-result.read","internal.authorization.check"],"service":"account-service","subject":"pinvou:service:account-service"},{"permissions":["internal.token.approval-effect.read","internal.token.approval-result.read"],"service":"account-approval-recovery","subject":"pinvou:service:account-approval-recovery"},{"permissions":["internal.token.model-lifecycle.execute","internal.token.catalog-rollback.execute","internal.token.credential-revoke.execute","internal.authorization.check"],"service":"token-command-executor","subject":"pinvou:service:token-command-executor"}]'
+      WORKLOAD_IDENTITY_RULES_JSON: '[{"permissions":["internal.token.usage.waive","internal.token.hold-expiry.prove"],"service":"billing-service","subject":"pinvou:service:billing-service"},{"permissions":["internal.token.organization.lifecycle","internal.token.organization-unit.lifecycle","internal.token.account-closure.replay-clear","internal.token.account-closure.assess","internal.token.approval-snapshot.read","internal.token.approval-proof.read","internal.token.approval-effect.read","internal.token.approval-result.read","internal.token.client-readiness.read","internal.token.client-readiness.attest","internal.authorization.check"],"service":"account-service","subject":"pinvou:service:account-service"},{"permissions":["internal.token.approval-effect.read","internal.token.approval-result.read"],"service":"account-approval-recovery","subject":"pinvou:service:account-approval-recovery"},{"permissions":["internal.token.model-lifecycle.execute","internal.token.catalog-rollback.execute","internal.token.credential-revoke.execute","internal.authorization.check"],"service":"token-command-executor","subject":"pinvou:service:token-command-executor"}]'
       DATABASE_URL: ${TOKEN_GATEWAY_RELEASE_DATABASE_URL:?set new release-scoped gateway database URL}
       TOKEN_SECRET_PROVIDER: remote
       TOKEN_SECRET_PROVIDER_URL: ${TOKEN_SECRET_PROVIDER_URL:?set remote secret provider}
@@ -130,6 +130,8 @@ services:
     environment:
       NATS_URL: ${MODEL_TOKEN_NATS_URL:?set the single authenticated event cluster}
       NATS_CREDENTIALS_FILE: /var/run/secrets/pinvou/nats/client.creds
+      APPROVAL_RELAY_HEALTHCHECK_URL: http://127.0.0.1:9090/health/ready/approval-authorization
+      APPROVAL_RELAY_MONITOR_SCOPE: ${COMPOSE_PROJECT_NAME}
       APPROVAL_RELAY_NATS_CREDENTIALS_FILE: /var/run/secrets/pinvou/approval-nats/client.creds
       APPROVAL_RELAY_NATS_CURRENT_PUBLIC_KEYS_FILE: /var/run/public/pinvou/nats-authorization/current-v2.json
       APPROVAL_RELAY_NATS_CURRENT_PUBLIC_KEYS_SHA256: ${APPROVAL_RELAY_NATS_CURRENT_PUBLIC_KEYS_SHA256:?set independently trusted current v2 public artifact digest}

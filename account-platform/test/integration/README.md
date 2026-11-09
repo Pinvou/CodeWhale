@@ -30,6 +30,6 @@ npm --prefix account-platform run test:auth-business -- --execute-disposable-fix
 npm --prefix account-platform run test:prometheus-rules -- --rendered /absolute/current-render.yaml --output /absolute/new-fixture-output --promtool /absolute/promtool
 ```
 
-Windows 使用相应的绝对路径。包装器先从该渲染结果提取实际 `PrometheusRule` 和八个隔离用例（五个告警用例、三个不告警对照），再真正调用 `promtool test rules`；工具缺失、无渲染结果、目录已存在或测试失败均返回失败，不以准备成功代替执行成功。仅需生成文件时使用 `prepare:prometheus-fixtures`，该动作不能登记告警测试通过。
+Windows 使用相应的绝对路径。渲染时开启 `observability.prometheusRulesEnabled=true`、`availability.enabled=true` 和 `approvalRelay.requireReady=true`，并设置 `replicas.eventRelay=2`。包装器提取实际 `PrometheusRule`，执行八个普通 Relay 场景、六个授权 Relay 场景和两个多范围告警场景。工具缺失、目录已存在、渲染缺规则或 `promtool test rules` 失败均返回失败。只生成文件时使用 `prepare:prometheus-fixtures`。
 
 这些测试没有部署、切换、发布或连接线上 Prometheus 的授权。当前分支修复报告须分别披露显式入口合同测试、真实 promtool 运行及真实业务验收是否执行。

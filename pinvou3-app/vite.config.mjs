@@ -22,6 +22,7 @@ const staticExtensions = new Set([
 // ships it (see runtimeFetchAssets below).
 export const staticRuntimeScripts = new Set([
   'features/attachments/attachment-drop-controller.js',
+  'features/attachments/attachment-telemetry.js',
   'features/personas/personas-i18n.js',
   'features/updater/update-notice-logic.js',
   // Windows 双端远程控制的纯状态模块（DEV-20）：index.html 经典脚本，

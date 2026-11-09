@@ -28,11 +28,14 @@ func openApprovalChannel(ctx context.Context, environment func(string) string, l
 		PreviousFile: environment("APPROVAL_RELAY_NATS_PREVIOUS_PUBLIC_KEYS_FILE"), PreviousSHA256: environment("APPROVAL_RELAY_NATS_PREVIOUS_PUBLIC_KEYS_SHA256"),
 		PrivateIdentityFiles: []string{seed, credentials},
 	}}
+	stage := "artifact"
 	err := channel.artifacts.Validate(time.Now().UTC())
 	if err == nil {
+		stage = "database"
 		channel.store, err = account.NewApprovalRelayStore(ctx, environment("APPROVAL_RELAY_DATABASE_URL"))
 	}
 	if err == nil {
+		stage = "broker"
 		channel.broker, err = events.NewNATSPublishOnlyBroker(ctx, environment("NATS_URL"), "account-approval-relay", events.NATSConfig{
 			Environment: environment("APP_ENV"), ResourceMode: "provisioned", CAFile: environment("NATS_CA_FILE"),
 			SeedFile: seed, CredentialsFile: credentials, RequireExplicitAuthentication: true,
@@ -41,7 +44,7 @@ func openApprovalChannel(ctx context.Context, environment func(string) string, l
 	if err != nil {
 		channel.close()
 		channel.store, channel.broker = nil, nil
-		logger.Error("authorization relay dependency is not ready", "error", "APPROVAL_AUTHORIZATION_RELAY_UNAVAILABLE")
+		logger.Error("authorization relay dependency is not ready", "error", "APPROVAL_AUTHORIZATION_RELAY_UNAVAILABLE", "stage", stage)
 	}
 	return channel
 }

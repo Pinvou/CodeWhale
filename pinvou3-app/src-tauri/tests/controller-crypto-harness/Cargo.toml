@@ -5,6 +5,7 @@ edition = "2024"
 publish = false
 
 [dependencies]
+encoding_rs = "=0.8.35"
 anyhow = "1"
 fd-lock = "4"
 rusqlite = { version = "0.40.2", features = ["bundled"] }

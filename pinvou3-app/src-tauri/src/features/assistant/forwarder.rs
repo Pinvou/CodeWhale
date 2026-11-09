@@ -1628,6 +1628,7 @@ pub(crate) fn spawn_event_forwarder(
                             crate::features::behavior_telemetry::capture_failure_context(
                                 &app,
                                 &session_id,
+                                turn_id,
                                 error,
                                 false,
                             );
