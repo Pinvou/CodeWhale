@@ -236,7 +236,10 @@ func TestRegistrationBonusCheckpointGuardsPostgresIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = accountschema.DownOne(ctx, connection, loaded); err == nil || !strings.Contains(err.Error(), "destructive rollback is forbidden") {
+	// The current chain refuses at its new forward-only head. Exercise the
+	// original checkpoint guard independently so that refusal cannot mask it.
+	assertHistoricalRollbackRefusal(t, r, loaded, 900014, "P0001", "registration bonus eligibility facts exist; destructive rollback is forbidden")
+	if err = accountschema.DownOne(ctx, connection, loaded); err == nil || !strings.Contains(err.Error(), "organization evidence truncate protection is forward-only") {
 		t.Fatalf("public down discarded a committed checkpoint: %v", err)
 	}
 	if registrationBonusCheckpointSnapshot(t, r) != before {
@@ -264,7 +267,8 @@ func registrationBonusCheckpointMigrator(t *testing.T, r *PostgresRepository) *p
 
 func TestRegistrationBonusCheckpointMigrationPostgresIntegration(t *testing.T) {
 	f := retainedWalletFenceActors(t)
-	r := f.repositoryWithInitialStage(t, func(ctx context.Context, connection *pgx.Conn, input []migrations.Migration) error {
+	// Test the actual checkpoint release, before later forward-only heads.
+	r := f.repositoryThroughVersion(t, 900014, func(ctx context.Context, connection *pgx.Conn, input []migrations.Migration) error {
 		var previous []migrations.Migration
 		for _, migration := range input {
 			if migration.Version != 900014 {
@@ -289,6 +293,13 @@ func TestRegistrationBonusCheckpointMigrationPostgresIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	var history []migrations.Migration
+	for _, migration := range input {
+		if migration.Version <= 900014 {
+			history = append(history, migration)
+		}
+	}
+	input = history
 	if err := accountschema.DownOne(ctx, connection, input); err != nil {
 		t.Fatal("empty unbound checkpoint rollback failed: ", err)
 	}
