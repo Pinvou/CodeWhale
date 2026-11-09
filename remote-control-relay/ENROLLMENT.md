@@ -337,8 +337,8 @@ fails, and a live store becomes unavailable.
 
 ### Offline recovery after an interrupted commit
 
-There is no supported automatic repair CLI. A failed open must not be bypassed
-by deleting a candidate, editing JSON, resetting the registry, or enabling TOFU.
+Startup fails closed on unexplained disagreement. Do not bypass a failed open by
+deleting a candidate, editing JSON, resetting the registry, or enabling TOFU.
 Stop the Relay and confirm no process still owns or writes the store before any
 recovery. First archive the entire dedicated directory unchanged, including the
 primary, `.bak`, lock, marker, temporary/stale files and their owner/permission
@@ -358,15 +358,32 @@ copy is not sufficient for automatic migration.
 For non-equivalent copies, a damaged peer or uncertain provenance, restore a
 verified pair from the same coordinated offline snapshot. Do not combine
 different snapshots or choose a copy solely because its revision is higher.
-Alternatively, an administrator may undertake an **offline, audited manual
-recovery** only after external commit/incident evidence establishes that the
-valid primary is the last committed state and the newer backup was merely
-staged. After archiving and validating that decision, reconstruct the backup
-from that confirmed primary through a same-directory temporary file, file sync,
-atomic replacement and directory sync; preserve and re-verify restrictive
-owner/permissions. Leave the primary unchanged. Do not promote the staged
-backup or apply this recipe to an unexplained mismatch. Without sufficient
-evidence, keep the service stopped and escalate rather than guessing.
+For a valid v1 primary and a valid v1 backup exactly one revision ahead, the
+offline recovery command can reconstruct the backup. First establish from
+external commit or incident records that the primary is the last committed
+state and the backup was only staged. Record the confirmed primary revision
+and exact SHA-256 of both files as part of that decision. The revision order
+alone does not establish which authorization state was committed. Keep the
+service stopped if the evidence is missing or the mismatch is unexplained.
+
+Run as the Relay state owner with the same supported Node runtime. Set
+`PINVOU_REMOTE_CONTROLLER_STATE_PATH` and `PINVOU_REMOTE_STATE_PATH` to the
+absolute paths used by the stopped Relay, then run from `remote-control-relay`.
+
+```sh
+node scripts/recover-controller-state.mjs \
+  --confirmed-primary-revision "$CONFIRMED_PRIMARY_REVISION" \
+  --primary-sha256 "$CONFIRMED_PRIMARY_SHA256" \
+  --staged-backup-sha256 "$STAGED_BACKUP_SHA256"
+```
+
+The command takes the same exclusive writer lock as startup. It copies both
+files byte for byte to a new private sibling directory, rechecks the file
+identities and digests, and atomically installs the primary bytes as the backup.
+Its result gives the archive path and recovered revision. The original primary
+stays in place. Keep the whole-directory incident archive and these two copies
+access-restricted. If an error interrupts recovery, keep the Relay stopped and
+inspect the current pair and the retained copies before attempting it again.
 
 Before restarting, verify that both candidates are valid, canonically equivalent
 and have the correct owner/protection. Retain the archive and recovery decision

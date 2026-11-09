@@ -635,6 +635,78 @@ test("a warm authorization cache fails closed after persistence degradation", as
   await rejectsCode(registry.authorizeWebRegistration({ endpointId: "warm-degraded", accessToken: FIRST_CREDENTIAL }), "enrollment_registry_unavailable");
 });
 
+test("offline recovery archives the exact interrupted pair and preserves committed authorization", async (t) => {
+  const statePath = await temporaryState(t);
+  const backupPath = `${statePath}.bak`;
+  const options = {
+    statePath, legacyStatePath: legacyStatePath(statePath),
+    processIdentity: async (pid) => `test-process:${pid}`,
+    ...testSecurityOptions(),
+  };
+  let failPrimary = false;
+  const store = await openStateStore(statePath, { fs: { ...fs, async rename(source, target) {
+    if (failPrimary && target === statePath) throw Object.assign(new Error("injected crash boundary"), { code: "EIO" });
+    return fs.rename(source, target);
+  } } });
+  resourcesFor(t).stores.push(store);
+  const registry = EnrollmentRegistry.open({ stateStore: store, config: configForState(statePath) });
+  await registry.enroll({ endpointId: "committed-revocation", credential: FIRST_CREDENTIAL });
+  await registry.revoke({ endpointId: "committed-revocation", expectedEndpointRevision: "1" });
+  const primary = await fs.readFile(statePath);
+  const primaryIdentity = await fs.stat(statePath, { bigint: true });
+  failPrimary = true;
+  await assert.rejects(registry.enroll({ endpointId: "staged-enrollment", credential: SECOND_CREDENTIAL }),
+    (error) => error.code === "enrollment_registry_unavailable" && error.cause?.code === "relay_state_persist_failed");
+  const staged = await fs.readFile(backupPath);
+  const sha256 = (bytes) => crypto.createHash("sha256").update(bytes).digest("hex");
+  const evidence = {
+    primaryRevision: JSON.parse(primary).revision,
+    primarySha256: sha256(primary),
+    backupSha256: sha256(staged),
+  };
+  await rejectsCode(RelayStateStore.recoverStagedBackup(options, evidence), "relay_state_locked");
+  await store.close();
+  await rejectsCode(openStateStore(statePath), "relay_state_unavailable");
+  await rejectsCode(RelayStateStore.recoverStagedBackup(options), "expected_primary_revision_malformed");
+  await rejectsCode(RelayStateStore.recoverStagedBackup(options, { ...evidence, backupSha256: "0".repeat(64) }),
+    "relay_state_recovery_evidence_mismatch");
+  const future = Buffer.from(JSON.stringify({ ...JSON.parse(staged), version: 99 }));
+  await fs.writeFile(backupPath, future);
+  await rejectsCode(RelayStateStore.recoverStagedBackup(options, { ...evidence, backupSha256: sha256(future) }),
+    "relay_state_unsupported");
+  assert.deepEqual(await fs.readFile(backupPath), future);
+  await fs.writeFile(backupPath, staged);
+
+  let replaced = false;
+  const switched = { ...fs, async open(target, flags, mode) {
+    if (!replaced && flags === "wx" && target.startsWith(`${backupPath}.`)) {
+      replaced = true;
+      const alternate = path.join(path.dirname(path.dirname(statePath)), "replacement.json");
+      await fs.writeFile(alternate, staged, { mode: 0o600 });
+      await fs.rename(alternate, backupPath);
+    }
+    return fs.open(target, flags, mode);
+  } };
+  await rejectsCode(RelayStateStore.recoverStagedBackup({ ...options, fs: switched }, evidence),
+    "relay_state_recovery_changed");
+  assert.equal(replaced, true);
+  assert.deepEqual(await fs.readFile(backupPath), staged);
+  const result = await RelayStateStore.recoverStagedBackup(options, evidence);
+  assert.equal(result.revision, evidence.primaryRevision);
+  assert.deepEqual(await fs.readFile(path.join(result.archive, "primary.json")), primary);
+  assert.deepEqual(await fs.readFile(path.join(result.archive, "backup.json")), staged);
+  assert.deepEqual(await fs.readFile(backupPath), primary);
+  assert.deepEqual(await fs.readFile(statePath), primary);
+  assert.equal((await fs.stat(statePath, { bigint: true })).ino, primaryIdentity.ino);
+  await rejectsCode(RelayStateStore.recoverStagedBackup(options, evidence), "relay_state_recovery_evidence_mismatch");
+  const reopened = await openStateStore(statePath);
+  resourcesFor(t).stores.push(reopened);
+  assert.equal(reopened.readNamespaceRevision(ENROLLMENT_NAMESPACE).store_revision, evidence.primaryRevision);
+  const restored = EnrollmentRegistry.open({ stateStore: reopened, config: configForState(statePath) });
+  await rejectsCode(restored.authorizeWebRegistration({ endpointId: "committed-revocation", accessToken: FIRST_CREDENTIAL }), "endpoint_revoked");
+  await rejectsCode(restored.authorizeWebRegistration({ endpointId: "staged-enrollment", accessToken: SECOND_CREDENTIAL }), "enrollment_required");
+});
+
 test("manual development enrollment never claims TOFU admission", async (t) => {
   for (const tofu of ["false", "true"]) {
     const { registry, store } = await openRegistry(t, {
