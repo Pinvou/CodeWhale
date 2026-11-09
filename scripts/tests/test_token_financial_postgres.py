@@ -699,10 +699,13 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
 
     def test_account_job_budget_includes_retained_billing_and_later_closure(self):
         workflow = (Path(__file__).resolve().parents[2] / ".github/workflows/pr-check.yml").read_text(encoding="utf-8")
-        job = workflow.split("\n  account-platform-test:\n", 1)[1].split("\n  windows-relay-dacl:\n", 1)[0]
+        job = workflow.split("\n  account-platform-test:\n", 1)[1].split("\n  account-closure-test:\n", 1)[0]
+        closure = workflow.split("\n  account-closure-test:\n", 1)[1].split("\n  windows-relay-dacl:\n", 1)[0]
         self.assertIn("\n    timeout-minutes: 180\n", job)
         self.assertIn("python3 scripts/test-financial-parallel.py", job)
-        self.assertIn("python3 scripts/test-account-closure-postgres.py", job)
+        self.assertNotIn("python3 scripts/test-account-closure-postgres.py", job)
+        self.assertIn("python3 scripts/test-account-closure-postgres.py", closure)
+        self.assertIn("\n    needs: changes\n", closure)
 
     def test_withdrawal_original_receipt_is_selected_and_requires_real_children(self):
         name = "TestApprovalWithdrawalOriginalReceiptPostgres"
@@ -1109,7 +1112,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
         selected = re.compile(command[command.index("-run") + 1])
         for root in roots:
             self.assertIsNotNone(selected.fullmatch(root))
-        self.assertEqual((RUNNER.billing_roots("billing-0") | RUNNER.billing_roots("billing-1")) & roots, roots)
+        self.assertEqual(set().union(*(RUNNER.billing_roots(group) for group in RUNNER.BILLING_GROUPS)) & roots, roots)
         self.assertFalse(RUNNER.billing_roots("billing-0") & RUNNER.billing_roots("billing-1"))
         cases = {
             "two-explicit-humans-first-publish-and-immutable-replay",
@@ -1364,10 +1367,11 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
             for command in self.fixture_commands:
                 self.assertIn("-race", command)
                 self.assertIn("-count=1", command)
-        self.assertEqual(len(phases), 9)  # Public Token schema phase; Billing is split in two.
+        self.assertEqual(len(phases), 11)  # Public Token schema phase; four complete Billing shards.
         self.assertEqual(set(phases), {"owner-account", "owner-wallet", "owner-schema", "owner-token-schema", "owner-provisioning", "lifecycle-reconciliation", "retained-token", "retained-billing"})
         self.assertFalse(shards[0] & shards[1])
-        self.assertEqual(shards[0] | shards[1], RUNNER.RETAINED_REQUIRED)
+        self.assertEqual(set().union(*shards), RUNNER.RETAINED_REQUIRED)
+        self.assertEqual(sum(map(len, shards)), len(RUNNER.RETAINED_REQUIRED))
         for group in RUNNER.GROUPS:
             phase = "owner-account" if group == "owners" else "retained-token" if group == "token" else "retained-billing"
             for option in ("empty_phase", "skipped_phase", "go_fail_phase"):

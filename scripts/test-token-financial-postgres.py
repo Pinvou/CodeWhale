@@ -10,6 +10,7 @@ privilege contract. This runner must never accept a deployed database URL.
 """
 import argparse
 import json
+import math
 import os
 from pathlib import Path
 import subprocess
@@ -526,17 +527,35 @@ def ci_identity_guard(raw):
     return ["-c", guard]
 
 
-GROUPS = ("owners", "token", "billing-0", "billing-1")
+BILLING_GROUPS = tuple(f"billing-{index}" for index in range(4))
+GROUPS = ("owners", "token", *BILLING_GROUPS)
+
+
+def billing_partitions(roots, durations):
+    """Assign complete roots by measured cost; unknown/new roots are never omitted."""
+    fallback, weights = durations["default_seconds"], durations["seconds"]
+    if (not isinstance(weights, dict) or not isinstance(fallback, (int, float))
+            or isinstance(fallback, bool) or not math.isfinite(fallback) or fallback <= 0
+            or any(not isinstance(value, (int, float)) or isinstance(value, bool)
+                   or not math.isfinite(value) or value < 0 for value in weights.values())):
+        raise ValueError("invalid financial test durations")
+    buckets = {name: set() for name in BILLING_GROUPS}
+    loads = {name: 0.0 for name in BILLING_GROUPS}
+    for root in sorted(roots, key=lambda name: (-weights.get(name, fallback), name)):
+        group = min(BILLING_GROUPS, key=lambda name: (loads[name], name))
+        buckets[group].add(root)
+        loads[group] += weights.get(root, fallback)
+    return buckets
 
 
 def billing_roots(group):
-    # Partition complete roots, never individual race/locking subcases. Sorting
-    # makes both shards deterministic; their union always includes new roots.
+    # Keep each root's race/locking subcases and exclusive actor lifecycle intact.
     if group == "all":
         return RETAINED_REQUIRED
-    if group not in ("billing-0", "billing-1"):
+    if group not in BILLING_GROUPS:
         raise ValueError("not a Billing group")
-    return set(sorted(RETAINED_REQUIRED)[int(group[-1])::2])
+    durations = json.loads((ROOT / "scripts/account-financial-test-durations.json").read_text(encoding="utf-8"))
+    return billing_partitions(RETAINED_REQUIRED, durations)[group]
 
 
 def main(*, group="all"):

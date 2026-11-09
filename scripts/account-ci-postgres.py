@@ -1,4 +1,4 @@
-"""Admit and stop only this account CI job's six disposable Docker PostgreSQL services."""
+"""Admit and stop only this account CI job's disposable Docker PostgreSQL services."""
 import argparse
 import json
 import os
@@ -13,8 +13,8 @@ SERVICES = {
     'financial': ('financial-postgres', 'mirror.gcr.io/library/postgres@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea', '/var/lib/postgresql/data', '16'),
 }
 FINANCIAL_GROUPS = {"owners": "financial", "token": "financial_token",
-                    "billing-0": "financial_billing_0", "billing-1": "financial_billing_1"}
-for key in ("financial_token", "financial_billing_0", "financial_billing_1"):
+                    **{f"billing-{index}": f"financial_billing_{index}" for index in range(4)}}
+for key in ("financial_token", *(f"financial_billing_{index}" for index in range(4))):
     original = SERVICES["financial"]
     SERVICES[key] = (key.replace("_", "-") + "-postgres", *original[1:])
 
@@ -59,7 +59,8 @@ def save_receipt(path, value):
     os.replace(temporary, path)
 
 
-def stop_owned_services(metadata, receipt_path=None):
+def stop_owned_services(metadata, receipt_path=None, *, services=None):
+    services = SERVICES if services is None else services
     if os.environ.get('GITHUB_ACTIONS') != 'true':
         raise RuntimeError('service stop requires this job service context')
     # A graceful stop lets Docker AutoRemove remove anonymous data volumes.
@@ -72,7 +73,7 @@ def stop_owned_services(metadata, receipt_path=None):
     existing = set(run(['docker', 'ps', '--all', '--quiet', '--no-trunc']).splitlines())
     ids, ports, volumes, selected = set(), set(), set(), []
     missing = []
-    for _, (name, image, _, _) in SERVICES.items():
+    for _, (name, image, _, _) in services.items():
         meta = metadata.get(name)
         if meta is None:
             missing.append(name)
@@ -127,12 +128,13 @@ def identity_matches(value, directory, major):
         raise ValueError('service PostgreSQL identity mismatch')
     return fields[0]
 
-def main():
+def main(*, services=None):
+    services = SERVICES if services is None else services
     metadata = json.loads(os.environ['ACCOUNT_CI_SERVICES'])
     ids, ports, volumes, systems = set(), set(), set(), set()
     outputs = []
     financial = {}
-    for key, (name, image, directory, major) in SERVICES.items():
+    for key, (name, image, directory, major) in services.items():
         meta = metadata[name]
         identifier = meta.get('id', '')
         if not re.fullmatch('[0-9a-f]{64}', identifier):
@@ -160,8 +162,11 @@ def main():
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--stop-owned-services', action='store_true')
-    if parser.parse_args().stop_owned_services:
+    parser.add_argument('--profile', choices=('full', 'closure'), default='full')
+    args = parser.parse_args()
+    services = {'financial': SERVICES['financial']} if args.profile == 'closure' else SERVICES
+    if args.stop_owned_services:
         ledger = os.environ.get('PINVOU_CI_RESOURCE_LEDGER')
-        stop_owned_services(json.loads(os.environ['ACCOUNT_CI_SERVICES']), Path(ledger) / 'postgres-services.json' if ledger else None)
+        stop_owned_services(json.loads(os.environ['ACCOUNT_CI_SERVICES']), Path(ledger) / 'postgres-services.json' if ledger else None, services=services)
     else:
-        main()
+        main(services=services)

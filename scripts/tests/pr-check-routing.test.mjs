@@ -274,10 +274,28 @@ function assertWorkflowFailurePolicy(workflowText) {
     ].join("\n"));
     remainder = remainder.replace(receipt, "");
   }
+  {
+    const receipt = namedStep(jobBlock("account-closure-test", text), "Account closure resource lifecycle receipts");
+    assert.equal(receipt.trimEnd(), [
+      "      - name: Account closure resource lifecycle receipts",
+      "        id: account_receipts_upload",
+      "        if: ${{ always() && env.PINVOU_CI_RESOURCE_LEDGER != '' }}",
+      "        timeout-minutes: 3",
+      "        continue-on-error: true",
+      "        uses: actions/upload-artifact@v7",
+      "        with:",
+      "          name: account-closure-resource-lifecycle-${{ github.run_attempt }}",
+      "          path: |",
+      "            ${{ env.PINVOU_CI_RESOURCE_LEDGER }}/",
+      "          if-no-files-found: error",
+      "          retention-days: 7",
+    ].join("\n"));
+    remainder = remainder.replace(receipt, "");
+  }
   // Explicit YAML keys may put comments/newlines before their value indicator.
   const keySeparator = String.raw`(?:\s|#[^\n]*(?:\n|$))*:`;
   assert.doesNotMatch(remainder, new RegExp(String.raw`\bcontinue-on-error\s*['"]?` + keySeparator),
-    "only the four exact reviewed diagnostic steps may be advisory in any job");
+    "only the exact reviewed diagnostic steps may be advisory in any job");
   // YAML double-quoted keys decode numeric escapes and escaped line breaks.
   // Inspect each possible quoted key, including inside flow mappings. A
   // lookahead avoids a quote in unrelated shell text hiding a later real key.
@@ -328,6 +346,7 @@ test("all workflow legs reject unreviewed job and step failure exemptions", () =
   for (const [jobName, stepName] of [
     ["frontend-test", "Test resource lifecycle receipts"],
     ["account-platform-test", "Account test resource lifecycle receipts"],
+    ["account-closure-test", "Account closure resource lifecycle receipts"],
   ]) {
     const receipt = namedStep(jobBlock(jobName, original), stepName);
     const withoutReceiptExemption = original.replace(receipt,
@@ -356,7 +375,7 @@ test("all workflow legs reject unreviewed job and step failure exemptions", () =
 
 function assertFiniteAuditPGSetup(job) {
   const text = job.replaceAll("\r\n", "\n");
-  // These are exactly six approved ephemeral services, not permission for arbitrary
+  // These are exactly eight approved ephemeral services, not permission for arbitrary
   // services, production credentials, public ports or persistent volumes.
   const service = text.match(/^ {4}services:\n[\s\S]*?(?=^ {4}\S|$(?![\s\S]))/m);
   assert.ok(service, "isolated audit PostgreSQL service not found");
@@ -391,7 +410,7 @@ function assertFiniteAuditPGSetup(job) {
     "          --health-interval 5s",
     "          --health-timeout 5s",
     "          --health-retries 12",
-    ...["financial-postgres", "financial-token-postgres", "financial-billing-0-postgres", "financial-billing-1-postgres"].flatMap(name => [
+    ...["financial-postgres", "financial-token-postgres", "financial-billing-0-postgres", "financial-billing-1-postgres", "financial-billing-2-postgres", "financial-billing-3-postgres"].flatMap(name => [
       `      ${name}:`,
     "        # Same immutable PostgreSQL image already used by team-relay-hub-test.",
     "        # Disposable runner only; trust is never a deployment configuration.",
@@ -426,7 +445,7 @@ function assertFiniteAuditPGSetup(job) {
     "          python3 scripts/account-ci-postgres.py",
   ].join("\n"));
   for (const name of [existingBrokerStepName, auditPGStepName,
-    "Token financial contracts on isolated PostgreSQL", "Account closure contracts on isolated PostgreSQL"]) {
+    "Token financial contracts on isolated PostgreSQL"]) {
     assert.ok(text.indexOf(preflight) < text.indexOf(namedStep(text, name)),
       `service identity verification must precede ${name}`);
   }
@@ -454,7 +473,7 @@ function assertFiniteAuditPGSetup(job) {
     "          python3 scripts/account-ci-postgres.py --stop-owned-services",
   ].join("\n"));
   for (const name of [existingBrokerStepName, auditPGStepName,
-    "Token financial contracts on isolated PostgreSQL", "Account closure contracts on isolated PostgreSQL"]) {
+    "Token financial contracts on isolated PostgreSQL"]) {
     assert.ok(text.indexOf(namedStep(text, name)) < text.indexOf(stop), "stop must follow database consumers");
   }
   let outsidePGSteps = text.replace(pg, "").replace(preflight, "").replace(stop, "");
@@ -483,11 +502,7 @@ function assertFiniteAuditPGSetup(job) {
     ["Token financial contracts on isolated PostgreSQL", [
       "ACCOUNT_FINANCIAL_SERVICES: ${{ steps.account-pg.outputs.financial_services }}",
     ], ["set -euo pipefail", "python3 -m unittest discover -s scripts/tests -p test_token_financial_postgres.py", "python3 -m unittest discover -s scripts/tests -p test_financial_parallel.py", "python3 scripts/test-financial-parallel.py"]],
-    ["Account closure contracts on isolated PostgreSQL", [
-      "PINVOU_ACCOUNT_CLOSURE_TEST_DATABASE_URL: ${{ steps.account-pg.outputs.financial_url }}",
-      ...pgIdentityEnvironment("financial"),
-      "PINVOU_ACCOUNT_CLOSURE_TEST_ARTIFACT_DIR: ${{ runner.temp }}/account-closure-postgres",
-    ], ["set -euo pipefail", "python3 -m unittest discover -s scripts/tests -p test_account_closure_postgres.py", "python3 scripts/test-account-closure-postgres.py"]],
+
   ]) {
     const step = namedStep(text, name);
     assert.equal(step.trimEnd(), [
@@ -905,13 +920,11 @@ test("finite audit PostgreSQL exception rejects unsafe or unrelated service and 
     ["PINVOU_TEST_SCHEMA_DATABASE_URL: ${{ steps.account-pg.outputs.broker_url }}", "PINVOU_TEST_SCHEMA_DATABASE_URL: postgres://postgres@remote.invalid:5434/postgres?sslmode=disable"],
     ["npm --prefix account-platform run test:existing-broker", "npm --prefix account-platform run test:existing-broker || true"],
     ["ACCOUNT_FINANCIAL_SERVICES: ${{ steps.account-pg.outputs.financial_services }}", "ACCOUNT_FINANCIAL_SERVICES: ${{ toJSON(needs.other.outputs.services) }}"],
-    ["PINVOU_ACCOUNT_CLOSURE_TEST_DATABASE_URL: ${{ steps.account-pg.outputs.financial_url }}", "PINVOU_ACCOUNT_CLOSURE_TEST_DATABASE_URL: ${{ steps.account-pg.outputs.audit_url }}"],
     ["ACCOUNT_CI_SERVICES: ${{ toJSON(job.services) }}", "ACCOUNT_CI_SERVICES: ${{ toJSON(needs.other.outputs.services) }}"],
     ["        id: account-pg", "        id: unrelated-pg"],
     ["python3 scripts/account-ci-postgres.py", "python3 scripts/account-ci-postgres.py || true"],
     ["python3 -m unittest discover -s scripts/tests -p test_account_ci_postgres.py", "true"],
     ["python3 scripts/test-financial-parallel.py", "python3 scripts/test-financial-parallel.py || true"],
-    ["python3 scripts/test-account-closure-postgres.py", "python3 scripts/test-account-closure-postgres.py || true"],
     ["      GOTOOLCHAIN: local", "      F17_TEST_DATABASE_URL: postgres://postgres@127.0.0.1:5432/postgres\n      GOTOOLCHAIN: local"],
     ["        shell: bash", "        env:\n          F17_TEST_DATABASE_PROFILE: github-actions-service\n        shell: bash"],
     ["          POSTGRES_HOST_AUTH_METHOD: trust", "          POSTGRES_PASSWORD: ${{ secrets.DB_PASSWORD }}"],
@@ -936,13 +949,12 @@ test("finite audit PostgreSQL exception rejects unsafe or unrelated service and 
     const mutated = job.replace(step, () => changed);
     assert.equal(namedStep(mutated, name), changed, "mutation must preserve the literal step payload");
     for (const required of [pgPreflightStepName, auditPGStepName, existingBrokerStepName,
-      "Token financial contracts on isolated PostgreSQL", "Account closure contracts on isolated PostgreSQL"]) {
+      "Token financial contracts on isolated PostgreSQL"]) {
       namedStep(mutated, required); // Missing/duplicate steps cannot satisfy a negative control.
     }
     assert.throws(() => assertFiniteAuditPGSetup(mutated), expected);
   };
-  for (const [name, service] of [[auditPGStepName, "audit"], [existingBrokerStepName, "broker"],
-    ["Account closure contracts on isolated PostgreSQL", "financial"]]) {
+  for (const [name, service] of [[auditPGStepName, "audit"], [existingBrokerStepName, "broker"]]) {
     const step = namedStep(job, name);
     const miswired = step.replace(`outputs.${service}_url`, "outputs.unrelated_url");
     assert.notEqual(miswired, step, "URL mutation must hit the selected consumer");
@@ -1043,8 +1055,8 @@ test("Token financial PostgreSQL gate is required and cannot swallow a failed ru
   assert.match(job, /image: mirror\.gcr\.io\/library\/postgres@sha256:[a-f0-9]{64}/);
   const services = job.match(/^    services:\r?\n([\s\S]*?)^    env:/m)?.[1];
   assert.ok(services, "the disposable PostgreSQL service must exist");
-  assert.deepEqual([...services.matchAll(/^ {6}([a-z][a-z0-9-]*):\r?$/gm)].map(match => match[1]), ["audit-export-postgres", "existing-broker-postgres", "financial-postgres", "financial-token-postgres", "financial-billing-0-postgres", "financial-billing-1-postgres"]);
-  assert.deepEqual([...services.matchAll(/^ {10}- (.+)\r?$/gm)].map(match => match[1]), Array(6).fill('"127.0.0.1::5432"'));
+  assert.deepEqual([...services.matchAll(/^ {6}([a-z][a-z0-9-]*):\r?$/gm)].map(match => match[1]), ["audit-export-postgres", "existing-broker-postgres", "financial-postgres", "financial-token-postgres", "financial-billing-0-postgres", "financial-billing-1-postgres", "financial-billing-2-postgres", "financial-billing-3-postgres"]);
+  assert.deepEqual([...services.matchAll(/^ {10}- (.+)\r?$/gm)].map(match => match[1]), Array(8).fill('"127.0.0.1::5432"'));
   assertFiniteAuditPGSetup(job);
   const run = stepRun(job, "Token financial contracts on isolated PostgreSQL");
   for (const failedPhase of ["guard", "postgres"]) {

@@ -17,6 +17,20 @@ SPEC.loader.exec_module(RUNNER)
 
 
 class FinancialParallelTests(unittest.TestCase):
+    def test_weighted_shards_cover_new_roots_once_and_balance_long_roots(self):
+        roots = {"slow", "medium", "third", "fourth", "new-root"}
+        durations = {"default_seconds": 20, "seconds": {"slow": 100, "medium": 80, "third": 70, "fourth": 60, "removed": 1000}}
+        partition = RUNNER.FIN["billing_partitions"](roots, durations)
+        self.assertEqual(len(partition), 4)
+        self.assertEqual(set().union(*partition.values()), roots)
+        self.assertEqual(sum(map(len, partition.values())), len(roots))
+        self.assertEqual(partition, RUNNER.FIN["billing_partitions"](reversed(sorted(roots)), durations))
+        loads = [sum(durations["seconds"].get(name, 20) for name in bucket) for bucket in partition.values()]
+        self.assertLessEqual(max(loads), 100)
+        for value in (0, -1, float("nan"), float("inf"), True, "slow"):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                RUNNER.FIN["billing_partitions"](roots, {**durations, "default_seconds": value})
+
     def services(self):
         return {group: {"url": f"postgres://postgres@127.0.0.1:{49173+i}/postgres?sslmode=disable",
                         "port": str(49173+i), "system": str(100+i),
@@ -46,7 +60,7 @@ class FinancialParallelTests(unittest.TestCase):
 
     def test_workers_overlap_and_failure_still_waits_for_every_cleanup(self):
         for failure in (None, "exit", "exception"):
-            barrier = threading.Barrier(4, timeout=5)
+            barrier = threading.Barrier(len(RUNNER.GROUPS), timeout=5)
             finished = []
             def worker(group, binding, artifacts):
                 barrier.wait()  # would time out if the coordinator serialized workers

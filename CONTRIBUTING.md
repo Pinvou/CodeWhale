@@ -141,6 +141,18 @@ surviving child resources stopped; use the owning process supervisor and ledger.
 
 ## CI and merge queue
 
+Account Platform PostgreSQL closure contracts run in `account-closure-test`,
+independently of `account-platform-test`; both are mandatory for Account changes.
+The financial gate runs six independently admitted services (owners, Token, and
+four Billing shards). Billing assigns complete test roots by longest estimated
+duration first using `scripts/account-financial-test-durations.json`; new roots
+receive the documented default weight and remain included exactly once. Weights
+affect scheduling only: race detection, required subcases, exclusive actors,
+identity checks and strict resource retirement remain mandatory. Closure uses
+its own job-owned service and its own cleanup receipt. Runner capacity must cover
+the extra PostgreSQL workers; the original per-worker CPU/memory caps remain.
+
+
 Pull requests use a staged, path-aware gate. Draft pull requests run fast feedback
 (lint, build, deterministic logic tests, and Rust formatting where applicable).
 Ready pull requests add browser smokes selected from the actual diff, platform

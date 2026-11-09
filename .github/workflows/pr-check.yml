@@ -305,6 +305,7 @@ jobs:
               - 'scripts/check-recharge-product-document-baseline.mjs'
               - 'scripts/account-ci-postgres.py'
               - 'scripts/tests/test_account_ci_postgres.py'
+              - 'scripts/account-financial-test-durations.json'
               - 'scripts/test-financial-parallel.py'
               - 'scripts/tests/test_financial_parallel.py'
               - 'scripts/test-token-financial-postgres.py'
@@ -1284,7 +1285,7 @@ jobs:
     # backflow exemption may suppress this independently deployable module.
     if: ${{ !cancelled() && github.event.action != 'closed' && needs.changes.outputs.account_platform == 'true' }}
     runs-on: ${{ fromJSON(vars.PINVOU_LINUX_HEAVY_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
-    # Four independent financial workers can use the heavy runner's CPU.
+    # Six independent financial workers can use the heavy runner's CPU.
     # Preserve every worker's original limits and the finite overall budget.
     timeout-minutes: 180
     services:
@@ -1372,6 +1373,42 @@ jobs:
           --health-timeout 5s
           --health-retries 12
       financial-billing-1-postgres:
+        # Same immutable PostgreSQL image already used by team-relay-hub-test.
+        # Disposable runner only; trust is never a deployment configuration.
+        image: mirror.gcr.io/library/postgres@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+          POSTGRES_DB: postgres
+        ports:
+          - "127.0.0.1::5432"
+        options: >-
+          --rm
+          --cpus 2
+          --memory 1g
+          --memory-swap 1g
+          --health-cmd "pg_isready -U postgres -d postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+      financial-billing-2-postgres:
+        # Same immutable PostgreSQL image already used by team-relay-hub-test.
+        # Disposable runner only; trust is never a deployment configuration.
+        image: mirror.gcr.io/library/postgres@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+          POSTGRES_DB: postgres
+        ports:
+          - "127.0.0.1::5432"
+        options: >-
+          --rm
+          --cpus 2
+          --memory 1g
+          --memory-swap 1g
+          --health-cmd "pg_isready -U postgres -d postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+      financial-billing-3-postgres:
         # Same immutable PostgreSQL image already used by team-relay-hub-test.
         # Disposable runner only; trust is never a deployment configuration.
         image: mirror.gcr.io/library/postgres@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea
@@ -1694,18 +1731,6 @@ jobs:
           python3 -m unittest discover -s scripts/tests -p test_financial_parallel.py
           python3 scripts/test-financial-parallel.py
 
-      - name: Account closure contracts on isolated PostgreSQL
-        shell: bash
-        env:
-          PINVOU_ACCOUNT_CLOSURE_TEST_DATABASE_URL: ${{ steps.account-pg.outputs.financial_url }}
-          PINVOU_ACCOUNT_CI_PG_PORT: ${{ steps.account-pg.outputs.financial_port }}
-          PINVOU_ACCOUNT_CI_PG_SYSTEM_ID: ${{ steps.account-pg.outputs.financial_system }}
-          PINVOU_ACCOUNT_CI_PG_DIRECTORY: ${{ steps.account-pg.outputs.financial_directory }}
-          PINVOU_ACCOUNT_CLOSURE_TEST_ARTIFACT_DIR: ${{ runner.temp }}/account-closure-postgres
-        run: |
-          set -euo pipefail
-          python3 -m unittest discover -s scripts/tests -p test_account_closure_postgres.py
-          python3 scripts/test-account-closure-postgres.py
 
       - name: Financial parallel diagnostics
         id: financial_diagnostics_upload
@@ -1755,6 +1780,104 @@ jobs:
 
       - name: Warn when Account diagnostic delivery fails
         if: ${{ always() && (steps.financial_diagnostics_upload.outcome == 'failure' || steps.account_receipts_upload.outcome == 'failure') }}
+        run: echo '::warning::Diagnostic upload failed or timed out; original logs and receipts remain on the runner. Tests and resource retirement remain mandatory.'
+
+  account-closure-test:
+    name: account-closure-test
+    needs: changes
+    if: ${{ !cancelled() && github.event.action != 'closed' && needs.changes.outputs.account_platform == 'true' }}
+    runs-on: ${{ fromJSON(vars.PINVOU_LINUX_HEAVY_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
+    timeout-minutes: 45
+    services:
+      financial-postgres:
+        # Same immutable PostgreSQL image already used by team-relay-hub-test.
+        # Disposable runner only; trust is never a deployment configuration.
+        image: mirror.gcr.io/library/postgres@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+          POSTGRES_DB: postgres
+        ports:
+          - "127.0.0.1::5432"
+        options: >-
+          --rm
+          --cpus 2
+          --memory 1g
+          --memory-swap 1g
+          --health-cmd "pg_isready -U postgres -d postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      GOTOOLCHAIN: local
+      CGO_ENABLED: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Initialize owned test resource ledger
+        run: python3 scripts/ci-resource-ledger.py --init --docker
+
+      - name: Set up zram and swap
+        run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM,RUNNER_ENVIRONMENT bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup did not finish; continuing with runner default memory"
+
+      - name: Go toolchain
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: account-platform/go.mod
+          cache-dependency-path: account-platform/**/go.sum
+          cache: ${{ runner.environment == 'github-hosted' }}
+
+      - name: Install PostgreSQL client
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends postgresql-client
+
+      - name: Verify account CI PostgreSQL service isolation
+        id: account-pg
+        env:
+          ACCOUNT_CI_SERVICES: ${{ toJSON(job.services) }}
+        run: python3 scripts/account-ci-postgres.py --profile closure
+
+      - name: Account closure contracts on isolated PostgreSQL
+        shell: bash
+        env:
+          PINVOU_ACCOUNT_CLOSURE_TEST_DATABASE_URL: ${{ steps.account-pg.outputs.financial_url }}
+          PINVOU_ACCOUNT_CI_PG_PORT: ${{ steps.account-pg.outputs.financial_port }}
+          PINVOU_ACCOUNT_CI_PG_SYSTEM_ID: ${{ steps.account-pg.outputs.financial_system }}
+          PINVOU_ACCOUNT_CI_PG_DIRECTORY: ${{ steps.account-pg.outputs.financial_directory }}
+          PINVOU_ACCOUNT_CLOSURE_TEST_ARTIFACT_DIR: ${{ runner.temp }}/account-closure-postgres
+        run: |
+          set -euo pipefail
+          python3 -m unittest discover -s scripts/tests -p test_account_closure_postgres.py
+          python3 scripts/test-account-closure-postgres.py
+
+      - name: Stop owned temporary PostgreSQL services
+        if: ${{ always() }}
+        env:
+          ACCOUNT_CI_SERVICES: ${{ toJSON(job.services) }}
+        run: |
+          python3 scripts/account-ci-postgres.py --profile closure --stop-owned-services
+
+      - name: Confirm Account test resource retirement
+        if: ${{ always() && env.PINVOU_CI_RESOURCE_LEDGER != '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/ci-resource-ledger.py --recover --directory "$PINVOU_CI_RESOURCE_LEDGER"
+
+      - name: Account closure resource lifecycle receipts
+        id: account_receipts_upload
+        if: ${{ always() && env.PINVOU_CI_RESOURCE_LEDGER != '' }}
+        timeout-minutes: 3
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: account-closure-resource-lifecycle-${{ github.run_attempt }}
+          path: |
+            ${{ env.PINVOU_CI_RESOURCE_LEDGER }}/
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Warn when Account diagnostic delivery fails
+        if: ${{ always() && (steps.account_receipts_upload.outcome == 'failure') }}
         run: echo '::warning::Diagnostic upload failed or timed out; original logs and receipts remain on the runner. Tests and resource retirement remain mandatory.'
 
   windows-relay-dacl:
@@ -4820,6 +4943,7 @@ jobs:
       - frontend-test
       - relay-test
       - account-platform-test
+      - account-closure-test
       - windows-relay-dacl
       - windows-relay-tools-test
       - team-relay-hub-test
@@ -4861,6 +4985,7 @@ jobs:
           FRONTEND_RESULT: ${{ needs.frontend-test.result }}
           RELAY_RESULT: ${{ needs.relay-test.result }}
           ACCOUNT_PLATFORM_RESULT: ${{ needs.account-platform-test.result }}
+          ACCOUNT_CLOSURE_RESULT: ${{ needs.account-closure-test.result }}
           ACCOUNT_PLATFORM_REQUIRED: ${{ needs.changes.outputs.account_platform }}
           WINDOWS_RELAY_DACL_RESULT: ${{ needs.windows-relay-dacl.result }}
           WINDOWS_RELAY_RESULT: ${{ needs.windows-relay-tools-test.result }}
@@ -4909,7 +5034,12 @@ jobs:
           fi
 
           if [[ "$ACCOUNT_PLATFORM_REQUIRED" == "true" && "$ACCOUNT_PLATFORM_RESULT" != success ]]; then
-            echo "Required Account Platform Go gate did not pass: $ACCOUNT_PLATFORM_RESULT" >&2
+            echo "Required Account Platform Go/closure gates did not pass: account=$ACCOUNT_PLATFORM_RESULT closure=$ACCOUNT_CLOSURE_RESULT" >&2
+            exit 1
+          fi
+
+          if [[ "$ACCOUNT_PLATFORM_REQUIRED" == "true" && "$ACCOUNT_CLOSURE_RESULT" != success ]]; then
+            echo "Required Account closure gate did not pass: $ACCOUNT_CLOSURE_RESULT" >&2
             exit 1
           fi
 
@@ -4934,6 +5064,7 @@ jobs:
             "frontend-test:$FRONTEND_RESULT" \
             "relay-test:$RELAY_RESULT" \
             "account-platform-test:$ACCOUNT_PLATFORM_RESULT" \
+            "account-closure-test:$ACCOUNT_CLOSURE_RESULT" \
             "windows-relay-dacl:$WINDOWS_RELAY_DACL_RESULT" \
             "windows-relay-tools-test:$WINDOWS_RELAY_RESULT" \
             "team-relay-hub-test:$TEAM_RELAY_HUB_RESULT" \

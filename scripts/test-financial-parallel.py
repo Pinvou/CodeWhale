@@ -1,4 +1,4 @@
-"""Run all financial groups concurrently on four separately admitted CI services.
+"""Run all financial groups concurrently on six separately admitted CI services.
 
 Each worker retains the original exclusive-role checks, UUID databases, real
 migrations, race detector, required roots/subcases and strict cleanup. No two
@@ -24,7 +24,7 @@ GROUPS = FIN["GROUPS"]
 def service_bindings(raw):
     services = json.loads(raw)
     if not isinstance(services, dict) or set(services) != set(GROUPS):
-        raise ValueError("all four financial groups require an admitted service")
+        raise ValueError("all six financial groups require an admitted service")
     ports, systems = set(), set()
     bindings = {}
     for group in GROUPS:
@@ -70,7 +70,7 @@ def main():
     artifacts = Path(tempfile.mkdtemp(prefix="financial-parallel-", dir=os.environ["RUNNER_TEMP"]))
     print(f"Financial parallel logs: {artifacts}", flush=True)
     results = []
-    # Bound concurrency to four. Finish every worker so its strict fixture
+    # Bound concurrency to six. Finish every worker so its strict fixture
     # cleanup and diagnostic logs are retained even if another worker fails.
     with concurrent.futures.ThreadPoolExecutor(max_workers=len(GROUPS)) as pool:
         futures = {pool.submit(run_group, group, bindings[group], artifacts): group for group in GROUPS}
@@ -89,7 +89,7 @@ def main():
     (artifacts / "summary.json").write_text(json.dumps(results, indent=2) + "\n", encoding="utf-8")
     if len(results) != len(GROUPS) or any(result["exit_code"] for result in results):
         raise RuntimeError("financial group failed; logs and summary retained at " + str(artifacts))
-    print("All four financial groups completed; no root or child-case checks were relaxed", flush=True)
+    print("All six financial groups completed; no root or child-case checks were relaxed", flush=True)
 
 
 if __name__ == "__main__":

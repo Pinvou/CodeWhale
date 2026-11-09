@@ -1124,7 +1124,7 @@ class CiGatePolicyTests(unittest.TestCase):
 
     def test_account_closure_ci_steps_are_precisely_pinned(self):
         """Keep the closure source and isolated-PG gates live and fail-closed."""
-        job = _without_inline_comments(_extract_job_block(self.pr_workflow, "account-platform-test"))
+        job = _without_inline_comments(_extract_job_block(self.pr_workflow, "account-platform-test")) + _without_inline_comments(_extract_job_block(self.pr_workflow, "account-closure-test"))
 
         def assert_contract(text):
             source = _step_named(text, "Verify Account closure source and API contracts")
@@ -3439,6 +3439,7 @@ class CiGatePolicyTests(unittest.TestCase):
             "Test resource lifecycle receipts",
             "Financial parallel diagnostics",
             "Account test resource lifecycle receipts",
+            "Account closure resource lifecycle receipts",
         )
         self.assertEqual(
             len(step_level),
@@ -3492,6 +3493,11 @@ class CiGatePolicyTests(unittest.TestCase):
                     retention-days: 7
             """).rstrip(), "      "),
         )
+        closure_receipt = _step_named(_extract_job_block(body, 'account-closure-test'), 'Account closure resource lifecycle receipts')
+        self.assertIn('timeout-minutes: 3', closure_receipt)
+        self.assertIn('uses: actions/upload-artifact@v7', closure_receipt)
+        self.assertIn('name: account-closure-resource-lifecycle-${{ github.run_attempt }}', closure_receipt)
+        self.assertNotRegex(closure_receipt, r'(?m)^        (?:run|env):')
         diagnostic_job = _extract_job_block(body, 'account-platform-test')
         matches = list(re.finditer(
             r"(?ms)^      - name: Account test resource lifecycle receipts\n.*?(?=^      - |\Z)", diagnostic_job
