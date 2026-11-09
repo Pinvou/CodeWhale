@@ -34,11 +34,14 @@ const (
 	auditExportRecentAuth   = 15 * time.Minute
 	auditExportTicketTTL    = 15 * time.Minute
 	auditExportFileTTL      = 24 * time.Hour
+	auditExportLeaseTTL     = 5 * time.Minute
+	auditExportRenewEvery   = 30 * time.Second
 )
 
 var ErrAuditExportAuthorizationUnavailable = errors.New("audit export authorization unavailable")
 var ErrAuditExportQuota = errors.New("audit export quota exceeded")
 var ErrInvalidAuditExportRequest = errors.New("audit export request is invalid")
+var errAuditExportLeaseLost = errors.New("audit export generation lease unavailable")
 
 type AuditExportFilter struct {
 	Actor    string    `json:"actor,omitempty"`
@@ -486,7 +489,7 @@ func (s *AuditExportService) Run(ctx context.Context) {
 			if err != nil || !found {
 				break
 			}
-			if err := s.generate(ctx, job); err != nil {
+			if err := s.generate(ctx, job); err != nil && !errors.Is(err, errAuditExportLeaseLost) {
 				_ = s.fail(ctx, job, stableAuditExportError(err))
 			}
 		}
@@ -509,17 +512,16 @@ type claimedAuditExport struct {
 }
 
 func (s *AuditExportService) claim(ctx context.Context) (claimedAuditExport, bool, error) {
-	now := s.now()
 	var job claimedAuditExport
 	var filter []byte
 	err := s.repository.pool.QueryRow(ctx, `WITH candidate AS (
-    SELECT id FROM audit_export_jobs WHERE status IN ('PENDING','GENERATING') AND (lease_until IS NULL OR lease_until<$1)
+    SELECT id FROM audit_export_jobs WHERE status IN ('PENDING','GENERATING') AND (lease_until IS NULL OR lease_until<clock_timestamp())
     ORDER BY created_at,id FOR UPDATE SKIP LOCKED LIMIT 1
 ), claimed AS (
-    UPDATE audit_export_jobs job SET status='GENERATING',attempts=attempts+1,lease_until=$1::timestamptz+interval '5 minutes',updated_at=$1::timestamptz
+    UPDATE audit_export_jobs job SET status='GENERATING',attempts=attempts+1,lease_until=clock_timestamp()+interval '5 minutes',updated_at=clock_timestamp()
     FROM candidate WHERE job.id=candidate.id RETURNING job.id,job.actor_user_id,job.filter_snapshot,job.include_pii,job.wrapped_file_key_nonce,job.wrapped_file_key,job.attempts
 )
-SELECT id,actor_user_id,filter_snapshot,include_pii,wrapped_file_key_nonce,wrapped_file_key,attempts FROM claimed`, now).Scan(&job.ID, &job.ActorUserID, &filter, &job.IncludePII, &job.WrappedNonce, &job.WrappedFileKey, &job.Attempt)
+SELECT id,actor_user_id,filter_snapshot,include_pii,wrapped_file_key_nonce,wrapped_file_key,attempts FROM claimed`).Scan(&job.ID, &job.ActorUserID, &filter, &job.IncludePII, &job.WrappedNonce, &job.WrappedFileKey, &job.Attempt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return claimedAuditExport{}, false, nil
 	}
@@ -533,6 +535,63 @@ SELECT id,actor_user_id,filter_snapshot,include_pii,wrapped_file_key_nonce,wrapp
 }
 
 func (s *AuditExportService) generate(ctx context.Context, job claimedAuditExport) error {
+	return s.generateWithLease(ctx, job, auditExportRenewEvery)
+}
+
+// A live generator renews only its current, unexpired attempt. A failed or
+// uncertain renewal cancels its database work and leaves recovery to the lease
+// fence, including when the renewal committed but its acknowledgement was lost.
+func (s *AuditExportService) generateWithLease(ctx context.Context, job claimedAuditExport, interval time.Duration) error {
+	if err := s.renewLease(ctx, job); err != nil {
+		return errors.Join(errAuditExportLeaseLost, err)
+	}
+	generationContext, cancel := context.WithCancel(ctx)
+	defer cancel()
+	stopped := make(chan error, 1)
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-generationContext.Done():
+				stopped <- nil
+				return
+			case <-ticker.C:
+				if err := s.renewLease(generationContext, job); err != nil {
+					cancel()
+					stopped <- err
+					return
+				}
+			}
+		}
+	}()
+	err := s.generateFile(generationContext, job)
+	cancel()
+	if renewalError := <-stopped; err != nil && renewalError != nil {
+		return errors.Join(errAuditExportLeaseLost, renewalError, err)
+	}
+	return err
+}
+
+func (s *AuditExportService) renewLease(ctx context.Context, job claimedAuditExport) error {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	tx, err := s.repository.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	now, err := requireAuditExportLease(ctx, tx, job)
+	if err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `UPDATE audit_export_jobs SET lease_until=$2,updated_at=$3 WHERE id=$1`, job.ID, now.Add(auditExportLeaseTTL), now); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+func (s *AuditExportService) generateFile(ctx context.Context, job claimedAuditExport) error {
 	fileKey, err := decryptAEAD(s.masterKey, job.WrappedNonce, job.WrappedFileKey, []byte(job.ID.String()))
 	if err != nil {
 		return err
