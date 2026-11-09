@@ -56,6 +56,8 @@ export function AdminFinanceFilters({ kind, language, value, onChange, onSubmit,
   const config = financeReadDefinition(kind);
   const anomalyStatus = kind === 'anomalies' ? adminLayoutCopy[language].anomalyQueueStatus : null;
   const normalizedStatus = anomalyStatus ? normalizeAnomalyStatus(value.status) : '';
+  const anomalyHelp = anomalyStatus ? adminLayoutCopy[language].anomalyQueueResults : null;
+  const helps = anomalyHelp ? { q: anomalyHelp.queryHelp, owner_id: anomalyHelp.ownerHelp, provider_id: anomalyHelp.providerHelp } : {};
   const options = key => {
     if (['status', 'lifecycle_status'].includes(key)) return config.statuses;
     if (key === 'owner_type') return ['PERSONAL', 'ORGANIZATION', 'ORG_UNIT'];
@@ -69,7 +71,7 @@ export function AdminFinanceFilters({ kind, language, value, onChange, onSubmit,
   return <form className="adm-filter-row" onSubmit={event => { event.preventDefault(); onSubmit(); }}>
     {config.fields.map(key => key === 'include_deleted' ? (
       <label key={key} className="adm-checkbox-field"><input type="checkbox" disabled={disabled} checked={value[key] === 'true'} onChange={event => onChange({ ...value, [key]: event.target.checked ? 'true' : '' })} />{words[key]}</label>
-    ) : <label key={key}>{words[key]}{orderListContext && key === 'q' && <small>{orderListContext.searchHelp}</small>}{orderListContext && /_(from|to)$/.test(key) && <small>{orderListContext.inputZone} ({Intl.DateTimeFormat().resolvedOptions().timeZone})</small>}{orderListContext && ['provider_id', 'channel'].includes(key) ? <>
+    ) : <label key={key}>{words[key]}{helps[key] && <small>{helps[key]}</small>}{orderListContext && key === 'q' && <small>{orderListContext.searchHelp}</small>}{orderListContext && /_(from|to)$/.test(key) && <small>{orderListContext.inputZone} ({Intl.DateTimeFormat().resolvedOptions().timeZone})</small>}{orderListContext && ['provider_id', 'channel'].includes(key) ? <>
       <input list={orderOptionsID + '-' + key} disabled={disabled} maxLength={key === 'channel' ? 32 : 120} value={value[key] || ''} onChange={event => onChange({ ...value, [key]: event.target.value })} />
       <datalist id={orderOptionsID + '-' + key}>{orderFilterOptions[key].map(option => <option key={option} value={option} />)}</datalist>
       <small>{orderListContext.optionHelp}</small>
