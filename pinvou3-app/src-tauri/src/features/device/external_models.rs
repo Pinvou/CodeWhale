@@ -971,13 +971,9 @@ pub async fn remove_external_model(
             .then(|| record.weights_path.clone())
             .flatten();
         let ollama_model_name = ollama_model_name.clone();
-        let record_id = record.id.clone();
-        // 交叉引用臂的身份排除需要当前记录的完整身份（kind/name/model/base_url，
-        // 与登记查重 registry_identity 同一把尺），闭包内用owned克隆。
-        let record_kind_for_identity = record.kind.clone();
-        let record_name_for_identity = record.name.clone();
-        let record_model_for_identity = record.model.clone();
-        let record_base_url_for_identity = record.base_url.clone();
+        // 交叉引用臂的排除需要当前记录的完整内容（id/kind/name/model/base_url），
+        // 闭包内用 owned 克隆。
+        let exclude_record_for_boundary = record.clone();
         let delete_weights = delete_weights;
         move || {
             let name_hit =
@@ -1054,14 +1050,8 @@ pub async fn remove_external_model(
             let (registry_weights_hit, ownership_unconfirmable) =
                 match weights_path.as_deref() {
                     Some(weights) if cross_reference_arms_active(delete_weights, Some(weights)) => {
-                        let identity = registry_identity(
-                            &record_kind_for_identity,
-                            &record_name_for_identity,
-                            record_model_for_identity.as_deref(),
-                            record_base_url_for_identity.as_deref(),
-                        );
                         let registry_weights =
-                            other_registry_weights_checked(&registry_dir(), &record_id, &identity)?;
+                            other_registry_weights_checked(&registry_dir(), &exclude_record_for_boundary)?;
                         let hit = paths_intersect_any(Path::new(weights), &registry_weights);
                         let unconfirmable =
                             crate::features::model_store::installed_ownership_unconfirmable_checked()?;
@@ -1159,12 +1149,8 @@ pub async fn remove_external_model(
                     let protected = crate::platform::paths::pinvou3_home();
                     let weights = weights.to_string();
                     let weights_for_task = weights.clone();
-                    let record_id_for_task = record.id.clone();
-                    // 删除时刻交叉引用复查的身份排除与边界臂同一把尺（owned 克隆）。
-                    let record_kind_for_task = record.kind.clone();
-                    let record_name_for_task = record.name.clone();
-                    let record_model_for_task = record.model.clone();
-                    let record_base_url_for_task = record.base_url.clone();
+                    // 删除时刻交叉引用复查的排除与边界臂同一把尺（owned 克隆）。
+                    let exclude_record_for_task = record.clone();
                     let removed =
                         tokio::task::spawn_blocking(move || -> Result<Option<PathBuf>, String> {
                             // 存在性预检与守卫/删除同一池：stat 与 canonicalize
@@ -1281,18 +1267,11 @@ pub async fn remove_external_model(
                             // 同仓注册表交叉引用删除时刻复查（2026-11-07 评审 P2
                             // zhuowp，review 5801985394）：与商店根复查同一模式
                             // 重推导（守卫后到删除前注册表可能被并发改写），读取
-                            // 失败按拒绝（fail-closed 同口径；身份排除与边界臂
-                            // 同一把尺）。
-                            let identity_for_task = registry_identity(
-                                &record_kind_for_task,
-                                &record_name_for_task,
-                                record_model_for_task.as_deref(),
-                                record_base_url_for_task.as_deref(),
-                            );
+                            // 失败按拒绝（fail-closed 同口径；排除口径与边界臂
+                            // 同一把尺：内容 id + 同 kind 身份等价副本）。
                             let registry_weights = other_registry_weights_checked(
                                 &registry_dir(),
-                                &record_id_for_task,
-                                &identity_for_task,
+                                &exclude_record_for_task,
                             )
                             .map_err(|error| {
                                 format!(
@@ -1853,16 +1832,20 @@ fn ensure_recheck_outside_installed_refs(
 /// 登记）按空集合放行。坏邻居文件（坏 JSON/超限）不再沿视图级容错静默当作
 /// 无引用（2026-11-08 评审 P2：无法读取 ≠ 确认不存在，把它折叠成"没有引用"
 /// 后物理删除会毁掉一条读不出来的在册记录仍需要的权重）——单文件读不了按
-/// Err 上抛（权重保留、错误即重试入口，修复/审阅该记录后重试）；文件数超出
-/// 扫描上限同样按 Err 拒绝（截断即放弃核对截断之外的存在）。自身记录按
-/// **内容 id** 排除（删除自身的权重正是本次请求），身份相同的重复记录（含
-/// 早期模板的 slug 文件名/空 id 存量——2026-11-08 评审 P2：用与登记查重
-/// `registry_identity` 同一把身份尺排除，读取端本就对它们只告警不吞）同样
-/// 排除——它们是同一逻辑登记的多份落盘，不是另一个消费者。
+/// Err 上抛（权重保留、错误即重试入口，修复/审阅该记录后重试）；目录条目
+/// 枚举失败（entry 错误）与文件元数据读取失败（`is_file` 把 EACCES/ELOOP
+/// 折叠成 false 再当"不是记录文件"）同口径拒绝（2026-11-09 评审 P2，review
+/// 5820385522：部分枚举或元数据失败 ≠ 记录不存在）；文件数超出扫描上限
+/// 同样按 Err 拒绝（截断即放弃核对截断之外的存在）。自身记录按**内容 id**
+/// 排除（删除自身的权重正是本次请求）；身份排除只对**同 kind** 且身份相等
+/// 的记录生效（2026-11-09 评审 P2：登记查重的冲突判定是 `record.kind ==
+/// kind` 范围内的——不同 kind 的同名记录（如非 Ollama 的 "qwen3" 与 Ollama
+/// 的 "Qwen3"）是入口明确允许并存的独立登记，不是同一逻辑登记的重复落盘，
+/// 必须保留咨询；同 kind 同身份的重复记录（含早期模板的 slug 文件名/空 id
+/// 存量）才是入口本会拒绝创建的等价副本，读取端对它们只告警不吞）。
 fn other_registry_weights_checked(
     dir: &Path,
-    exclude_id: &str,
-    exclude_identity: &(String, String),
+    exclude: &RegistryRecord,
 ) -> Result<Vec<PathBuf>, String> {
     let entries = match std::fs::read_dir(dir) {
         Ok(entries) => entries,
@@ -1874,11 +1857,19 @@ fn other_registry_weights_checked(
             ));
         }
     };
-    let mut paths: Vec<PathBuf> = entries
-        .filter_map(|entry| entry.ok())
-        .map(|entry| entry.path())
-        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("json"))
-        .collect();
+    let mut paths: Vec<PathBuf> = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|error| {
+            format!(
+                "注册表目录条目无法枚举（{}）：{error}；无法确认登记记录是否仍引用待删权重，为防误删已拒绝，请恢复目录可读后重试",
+                truncate_path_echo(&dir.to_string_lossy())
+            )
+        })?;
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) == Some("json") {
+            paths.push(path);
+        }
+    }
     paths.sort();
     if paths.len() > MAX_REGISTRY_FILES {
         return Err(format!(
@@ -1886,6 +1877,12 @@ fn other_registry_weights_checked(
             truncate_path_echo(&dir.to_string_lossy())
         ));
     }
+    let exclude_identity = registry_identity(
+        &exclude.kind,
+        &exclude.name,
+        exclude.model.as_deref(),
+        exclude.base_url.as_deref(),
+    );
     let mut out: Vec<PathBuf> = Vec::new();
     for path in paths {
         let record = match read_record(&path) {
@@ -1913,7 +1910,17 @@ fn other_registry_weights_checked(
             record.model.as_deref(),
             record.base_url.as_deref(),
         );
-        if id == exclude_id || &identity == exclude_identity {
+        // 「能确证等价的副本」两条件缺一不可：同 kind 且身份相等（入口本会拒绝
+        // 创建的第二份落盘），且**登记引用本身等价**（weights_path 归一后相同
+        // 或双方均未登记）——身份相等但权重路径不同的手工记录携带一条独立的
+        // 活引用，是指向别处的真消费者，必须保留咨询。
+        let record_ref = record.weights_path.as_deref().map(str::trim);
+        let exclude_ref = exclude.weights_path.as_deref().map(str::trim);
+        if id == exclude.id
+            || (record.kind == exclude.kind
+                && identity == exclude_identity
+                && record_ref == exclude_ref)
+        {
             continue;
         }
         let Some(weights) = record.weights_path.as_deref() else {
@@ -2097,10 +2104,24 @@ const MAX_REGISTRY_FILES: usize = 256;
 
 /// 读单个注册表文件。文件缺失 → Ok(None)；JSON 损坏/字段缺失/超大小上限 → Err（上层进 warnings）。
 /// 大小上限在 `Take` 有界读取处生效：metadata 检查与真正读取之间存在本地竞态，
-/// 有界读保证任何情况下读进内存的字节都有上界。
+/// 有界读保证任何情况下读进内存的字节都有上界。存在性判定走 `metadata()` 而
+/// 非 `is_file()`（2026-11-09 评审 P2，review 5820385522）：后者把元数据读取
+/// 失败（EACCES/ELOOP 等）折叠成 false，读不了的记录会被当"确认不存在"——
+/// 这里按成因分叉：NotFound 才是确认缺失，其余元数据错误按 Err 上抛（删除
+/// 守卫侧 fail-closed；视图侧沿既有容错进 warnings）。
 fn read_record(path: &Path) -> Result<Option<RegistryRecord>, String> {
     use std::io::Read;
-    if !path.is_file() {
+    let metadata = match std::fs::metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(format!(
+                "文件元数据无法读取（{}）：{error}；无法确认它是否为注册表记录",
+                truncate_path_echo(&path.to_string_lossy())
+            ));
+        }
+    };
+    if !metadata.is_file() {
         return Ok(None);
     }
     let file = std::fs::File::open(path).map_err(|error| format!("文件读取失败：{error}"))?;
@@ -3581,6 +3602,21 @@ mod tests {
         );
     }
 
+    /// 构造排除用记录（测试矩阵直打的辅助）。
+    fn exclude_record(id: &str, kind: &str, name: &str) -> RegistryRecord {
+        RegistryRecord {
+            schema: default_schema(),
+            id: id.to_string(),
+            name: name.to_string(),
+            kind: kind.to_string(),
+            base_url: None,
+            model: None,
+            weights_path: None,
+            installed_at: None,
+            note: None,
+        }
+    }
+
     #[test]
     fn other_registry_weights_checked_excludes_self_and_unregistered() {
         let dir = TempDir::new("registry-cross");
@@ -3600,12 +3636,9 @@ mod tests {
             r#"{"id": "m-bare", "name": "bare", "kind": "other"}"#,
         )
         .expect("write bare record");
-        let weights = other_registry_weights_checked(
-            dir.path(),
-            "m-self",
-            &("self".to_string(), String::new()),
-        )
-        .expect("readable registry must resolve");
+        let weights =
+            other_registry_weights_checked(dir.path(), &exclude_record("m-self", "other", "self"))
+                .expect("readable registry must resolve");
         assert_eq!(
             weights,
             vec![PathBuf::from("/home/u/ai-weights/qwen3")],
@@ -3614,22 +3647,21 @@ mod tests {
         // 目录不存在（还没有任何外部登记）：空集合放行，不是失败。
         let missing = TempDir::new("registry-cross-none").path().join("absent");
         assert!(
-            other_registry_weights_checked(
-                &missing,
-                "m-self",
-                &("self".to_string(), String::new())
-            )
-            .expect("missing registry dir is an empty registry, not a failure")
-            .is_empty()
+            other_registry_weights_checked(&missing, &exclude_record("m-self", "other", "self"))
+                .expect("missing registry dir is an empty registry, not a failure")
+                .is_empty()
         );
     }
 
     #[test]
     fn other_registry_weights_checked_excludes_identity_equal_duplicates() {
-        // 身份排除（2026-11-08 评审 P2-1）：同一逻辑登记的多份落盘（重复 id 的
-        // 手工拷贝副本、早期模板 slug 文件名、空 id 存量）与被移除记录共享
-        // registry_identity 口径——它们不是另一个消费者，删除自身权重不得被
-        // 它们的 weights_path 拦下；不同身份的共享权重登记仍纳入（真消费者）。
+        // 身份排除（2026-11-08 评审 P2-1；2026-11-09 评审 P2 收窄口径，review
+        // 5820385522）：只有**同 kind 且身份相等**的重复落盘（重复 id 的手工
+        // 拷贝副本、早期模板 slug 文件名、空 id 存量）才被排除——登记查重的
+        // 冲突判定是 kind 范围内的，同 kind 同身份是入口本会拒绝创建的等价
+        // 副本；不同 kind 的同名记录（非 Ollama "qwen3" 与 Ollama "Qwen3"）
+        // 是入口明确允许并存的独立登记，必须保留咨询；不同身份的共享权重
+        // 登记同样纳入（真消费者）。
         let dir = TempDir::new("registry-cross-identity");
         // 自身：kind=other、name=qwen3、无 base_url/model。
         std::fs::write(
@@ -3637,7 +3669,7 @@ mod tests {
             r#"{"id": "m-self", "name": "qwen3", "kind": "other", "weights_path": "/home/u/ai-weights"}"#,
         )
         .expect("write self record");
-        // 身份相等的重复记录：不同 id、同名同 kind 同（空）端点、同权重路径。
+        // 身份相等的同 kind 重复记录：不同 id、同名同 kind 同（空）端点。
         std::fs::write(
             dir.path().join("m-dup.json"),
             r#"{"id": "m-dup", "name": "qwen3", "kind": "other", "weights_path": "/home/u/ai-weights"}"#,
@@ -3649,33 +3681,43 @@ mod tests {
             r#"{"id": "", "name": "qwen3", "kind": "other", "weights_path": "/home/u/ai-weights"}"#,
         )
         .expect("write legacy empty-id record");
+        // 不同 kind 的同名记录（Ollama 归一后同为 "qwen3"）：独立登记，必须纳入。
+        std::fs::write(
+            dir.path().join("m-ollama.json"),
+            r#"{"id": "m-ollama", "name": "Qwen3", "kind": "ollama", "weights_path": "/home/u/ai-weights"}"#,
+        )
+        .expect("write cross-kind record");
+        // 同 kind 同身份但权重路径不同：携带独立活引用，必须纳入（2026-11-09
+        // 评审 P2 "能确证等价"标准的另一半）。
+        std::fs::write(
+            dir.path().join("m-dupw.json"),
+            r#"{"id": "m-dupw", "name": "qwen3", "kind": "other", "weights_path": "/home/u/other-place"}"#,
+        )
+        .expect("write identity-equal distinct-ref record");
         // 不同身份的共享权重登记（不同 name）：真消费者，必须纳入。
         std::fs::write(
             dir.path().join("m-distinct.json"),
             r#"{"id": "m-distinct", "name": "qwen3-8b", "kind": "other", "weights_path": "/home/u/ai-weights"}"#,
         )
         .expect("write distinct-identity record");
-        let weights = other_registry_weights_checked(
-            dir.path(),
-            "m-self",
-            &("qwen3".to_string(), String::new()),
-        )
-        .expect("readable registry must resolve");
+        let others =
+            other_registry_weights_checked(dir.path(), &exclude_record("m-self", "other", "qwen3"))
+                .expect("readable registry must resolve");
         assert!(
-            weights.contains(&PathBuf::from("/home/u/ai-weights")),
-            "distinct-identity consumer must still be consulted, got: {weights:?}"
+            others.contains(&PathBuf::from("/home/u/ai-weights")),
+            "distinct consumers must still be consulted, got: {others:?}"
         );
-        // 唯一纳入的路径来自不同身份的记录：排除只按身份，不按路径巧合。
-        let others = other_registry_weights_checked(
-            dir.path(),
-            "m-self",
-            &("qwen3".to_string(), String::new()),
-        )
-        .expect("readable registry must resolve");
+        assert!(
+            others.contains(&PathBuf::from("/home/u/other-place")),
+            "identity-equal sibling with a distinct weights path must stay consulted, got: {others:?}"
+        );
+        // 纳入三条咨询记录去重后为两个唯一路径：不同 kind 的同名登记、
+        // 同 kind 同身份不同引用、不同身份；同 kind 同身份同引用的重复落盘
+        // 全部被排除。
         assert_eq!(
             others.len(),
-            1,
-            "identity-equal duplicates must be excluded entirely, got: {others:?}"
+            2,
+            "same-kind identity+ref-equal duplicates must be excluded, all distinct consumers must survive, got: {others:?}"
         );
     }
 
@@ -3692,7 +3734,7 @@ mod tests {
         .expect("write good record");
         std::fs::write(dir.path().join("m-bad.json"), "{ broken").expect("write bad record");
         let error =
-            other_registry_weights_checked(dir.path(), "m-self", &("x".to_string(), String::new()))
+            other_registry_weights_checked(dir.path(), &exclude_record("m-self", "other", "x"))
                 .expect_err("unreadable neighbor must fail closed");
         assert!(
             error.contains("无法确认它是否仍引用待删权重"),
@@ -3702,14 +3744,33 @@ mod tests {
         let oversized = "x".repeat(MAX_RECORD_FILE_BYTES as usize + 1);
         std::fs::write(dir.path().join("m-big.json"), oversized).expect("write oversized record");
         let error =
-            other_registry_weights_checked(dir.path(), "m-self", &("x".to_string(), String::new()))
+            other_registry_weights_checked(dir.path(), &exclude_record("m-self", "other", "x"))
                 .expect_err("oversized neighbor must fail closed");
         assert!(error.contains("无法读取"), "got: {error}");
+        // 元数据读取失败同口径（2026-11-09 评审 P2-2，review 5820385522）：
+        // is_file 把元数据错误折叠成 false 会把读不了的记录当"确认不存在"——
+        // 自指符号链接的 metadata 报 ELOOP，必须按 Err 拒绝而不是静默跳过。
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(
+                dir.path().join("m-loop.json"),
+                dir.path().join("m-loop.json"),
+            )
+            .expect("create self-referencing symlink");
+            let error =
+                other_registry_weights_checked(dir.path(), &exclude_record("m-self", "other", "x"))
+                    .expect_err("metadata-failed neighbor must fail closed");
+            assert!(
+                error.contains("无法确认它是否仍引用待删权重"),
+                "metadata failure must carry the same fail-closed guidance, got: {error}"
+            );
+            std::fs::remove_file(dir.path().join("m-loop.json")).expect("remove loop symlink");
+        }
         // 修复坏邻居后恢复可读（重试入口真实存在）。
         std::fs::remove_file(dir.path().join("m-bad.json")).expect("remove bad record");
         std::fs::remove_file(dir.path().join("m-big.json")).expect("remove oversized record");
         let weights =
-            other_registry_weights_checked(dir.path(), "m-self", &("x".to_string(), String::new()))
+            other_registry_weights_checked(dir.path(), &exclude_record("m-self", "other", "x"))
                 .expect("fixed registry must resolve");
         assert_eq!(weights, vec![PathBuf::from("/home/u/good-weights")]);
     }
@@ -3727,7 +3788,7 @@ mod tests {
             .expect("write record");
         }
         let error =
-            other_registry_weights_checked(dir.path(), "m-0000", &("x".to_string(), String::new()))
+            other_registry_weights_checked(dir.path(), &exclude_record("m-0000", "other", "x"))
                 .expect_err("over-cap registry must fail closed");
         assert!(
             error.contains("超出扫描上限"),

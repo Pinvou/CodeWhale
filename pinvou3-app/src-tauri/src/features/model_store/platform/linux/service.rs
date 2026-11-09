@@ -999,14 +999,22 @@ pub(crate) fn installed_weight_filenames_checked() -> Result<Vec<String>, String
 /// 恢复数据全部来自商店库与约定推导，对「目录被改名/落在任何已知根之外的
 /// 零痕迹旧根」失明；.env 里的 MODEL_PATH 是卡片运行时自己记下的权威路径，
 /// 恰好覆盖这两类盲区（改名目录、任意深度祖先删除经路径相交两方向命中）。
-/// 三个落点逐一探测（找不到/无 MODEL_PATH/路径非绝对按该卡片无数据处理），
-/// exists() 过滤（残留 .env 指向已删除目录时不产生假引用）后 canonicalize
-/// 解析软链（与 installed_weight_paths_checked 同一把尺）。
+/// 五个落点逐一探测（2026-11-09 评审 P2 补旧写入约定，review 5820385522）：
+/// 现行宿主两处（`cards/<id>/.env`、`cards/<id>/vendor/.env`）+ 前代 LMM
+/// 独立应用的三处——LMM 的数据根是 `~/.local/share/local-model-manager/`
+/// （config.rs「不沿用 LMM 的老路径」一节记载，设备上原样保留），其宿主
+/// prepare 的卡片目录为 `<老根>/cards/<id>`，`.env` 落在卡片根与
+/// `cards/<id>/vendor/`，脚本自带的 vendor 老约定也在同一老根下——老商店
+/// 时期装的卡片，其 .env 仍记着现在仍在盘上的权重权威路径。找不到/无
+/// MODEL_PATH/路径非绝对按该卡片无数据处理；exists() 过滤（残留 .env 指向
+/// 已删除目录时不产生假引用）后 canonicalize 解析软链（与
+/// installed_weight_paths_checked 同一把尺）。
 ///
 /// 解析失败的方向是「少恢复」（该卡片退回前四腿的保护面），不是「错恢复」：
 /// .env 是卡片脚本可写文件，不把它当信任边界，只当引用恢复的数据源。
 fn card_env_model_paths(records: &[db::StoreModelRecord]) -> Vec<std::path::PathBuf> {
     let home = crate::platform::paths::user_home_dir();
+    let lmm_root = home.join(".local/share/local-model-manager");
     let mut out: Vec<std::path::PathBuf> = Vec::new();
     for rec in records {
         let Ok(safe_id) = config::safe_path_component(&rec.card_id) else {
@@ -1019,9 +1027,13 @@ fn card_env_model_paths(records: &[db::StoreModelRecord]) -> Vec<std::path::Path
                 .join(&safe_id)
                 .join("vendor")
                 .join(".env"),
-            home.join("local/share/local-model-manager/vendor")
+            lmm_root.join("cards").join(&safe_id).join(".env"),
+            lmm_root
+                .join("cards")
                 .join(&safe_id)
+                .join("vendor")
                 .join(".env"),
+            lmm_root.join("vendor").join(&safe_id).join(".env"),
         ];
         for env_path in candidates {
             let Ok(text) = std::fs::read_to_string(&env_path) else {
@@ -2002,6 +2014,30 @@ mod tests {
                 .iter()
                 .any(|p| p.ends_with("relative/dir") || p.ends_with("gone/dir")),
             "relative and missing paths must be filtered, got {refs:?}"
+        );
+        // 旧写入约定（2026-11-09 评审 P2-3，review 5820385522）：前代 LMM 的
+        // 数据根 `~/.local/share/local-model-manager/cards/<id>/.env` 同样是
+        // 权威落点（config.rs 记载老根在设备上原样保留）。
+        let old_card_env = ctx
+            .path()
+            .join(".local/share/local-model-manager/cards/c-env-1");
+        std::fs::create_dir_all(&old_card_env).expect("create legacy card dir");
+        let legacy_weights = ctx.path().join("lmm-era-weights");
+        std::fs::create_dir_all(&legacy_weights).expect("create legacy weights");
+        std::fs::write(card_dir.join(".env"), "MODEL_PATH=/gone/dir\n").expect("write bad env");
+        std::fs::write(
+            old_card_env.join(".env"),
+            format!("MODEL_PATH={}\n", legacy_weights.to_string_lossy()),
+        )
+        .expect("write legacy card env");
+        let refs = crate::features::model_store::installed_weight_paths_checked()
+            .expect("enumerate installed refs with legacy root probe");
+        let legacy_resolved = legacy_weights
+            .canonicalize()
+            .expect("resolve legacy weights");
+        assert!(
+            refs.contains(&legacy_resolved),
+            "legacy LMM card .env must be recovered, got {refs:?}"
         );
         let _ = ctx;
     }
