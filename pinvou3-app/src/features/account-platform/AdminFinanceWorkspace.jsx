@@ -519,7 +519,8 @@ function Wallets({ client, copy, language, permissions, owner, requesterID, onVi
 
 function ProviderControls({ client, copy, permissions, owner, language }) {
   const words = adminLayoutCopy[language].providerControlStatus;
-  const [control, setControl] = useState(null);
+  const [readState, setReadState] = useState(null);
+  const access = adminLayoutCopy[language].providerControlAccess;
 
   const resumeWords = adminLayoutCopy[language].providerControlRecovery;
   const [selection, setSelection] = useState(null);
@@ -529,7 +530,23 @@ function ProviderControls({ client, copy, permissions, owner, language }) {
   const canResume = permissions.includes('platform.billing.payment-controls.resume.request');
   const isCurrentIdentity = facts => facts?.client === client && facts.owner === owner && facts.epoch === epoch;
   const close = () => { setSelection(null); setReason(''); };
-  const load = async () => { close(); const value = await operation.read(() => client.paymentProviderControls()); if (value) setControl(value); };
+  const currentRead = isCurrentIdentity(readState) ? readState : null;
+  const control = currentRead?.kind === 'ready' ? currentRead.control : null;
+  const load = async () => {
+    close();
+    const identity = { client, owner, epoch };
+    const result = await operation.read(async () => {
+      setReadState({ ...identity, kind: 'loading' });
+      try {
+        const control = await client.paymentProviderControls();
+        return typeof control?.provider_id === 'string' && control.provider_id.trim() && Array.isArray(control.products)
+          ? { kind: 'ready', control } : { kind: 'unavailable' };
+      } catch (error) {
+        return { kind: error?.status === 403 ? 'denied' : error?.status === 503 && error?.code === 'PAYMENT_CONTROL_UNAVAILABLE' ? 'notConfigured' : 'unavailable' };
+      }
+    });
+    if (result) setReadState({ ...identity, ...result });
+  };
   useEffect(() => { void load(); }, [client, owner, epoch]); // eslint-disable-line react-hooks/exhaustive-deps
   const selected = canResume && isCurrentIdentity(selection) && selection.control === control && !operation.unknown && !operation.pendingFacts ? selection : null;
   const pending = operation.unknown && canResume && isCurrentIdentity(operation.pendingFacts) ? operation.pendingFacts : null;
@@ -567,7 +584,14 @@ function ProviderControls({ client, copy, permissions, owner, language }) {
     if (operation.busy || operation.unknown || operation.pendingFacts) return;
     setReason(''); setSelection({ client, owner, epoch, control, product });
   }}>{resumeWords.open}</button> : '—';
-  return <section><h3>{copy.providerControls}</h3><button type="button" disabled={operation.busy} onClick={() => void load()}>{copy.refresh}</button><Feedback operation={operation} copy={copy} />
+  const kind = currentRead?.kind || 'loading';
+  const hasRecovery = Boolean(control && (control.resume_draft || control.products.some(item => item.resume_draft)));
+  return <section>
+    <div className="adm-section-head"><h3>{copy.providerControls}</h3><button type="button" disabled={operation.busy} onClick={() => void load()}>{copy.refresh}</button></div>
+    {kind === 'loading' ? <p className="adm-inline-message" role="status">{access.loading}</p> : kind !== 'ready' ? <p className="adm-inline-message error" role="alert">{access[kind]}</p> : null}
+    {control && !canResume && <p className="adm-inline-message" role="status"><strong>{access.readOnly}</strong> {access.needsRequestPermission}</p>}
+    {control && canResume && !hasRecovery && !pending && <p className="adm-inline-message" role="status">{access.noAvailableRecovery}</p>}
+    {kind !== 'loading' && <Feedback operation={operation} copy={copy} />}
     {pending && <section className="adm-action-confirmation"><h4>{resumeWords.pending}</h4>{targetDetails(pending)}<p><strong>{resumeWords.reason}:</strong> {pending.reason}</p><div className="adm-row-actions"><button type="button" disabled={operation.busy} onClick={() => void resume(pending)}>{resumeWords.retry}</button></div></section>}
     {selected && <PortalDialog title={resumeWords.open} closeLabel={resumeWords.cancel} busy={operation.busy} onClose={close}>
       <p>{resumeWords.effect}</p>{targetDetails(selected)}
