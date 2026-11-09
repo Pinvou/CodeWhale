@@ -219,7 +219,9 @@ controller_lock_early_failure() {
 trap controller_lock_early_failure ERR
 # Keep a copy with the code backup so later public-check rollback uses the same
 # migration fence even after the staging tree has been removed.
-mkdir -p "$backup"
+mkdir -p -- "$remote_dir/backups"
+test ! -L "$remote_dir/backups"
+mkdir -- "$backup"
 cp "$code_stage/scripts/controller-lock-rollout.sh" "$backup/controller-lock-rollout.sh"
 cp "$code_stage/scripts/relay-code-backup.sh" "$backup/relay-code-backup.sh"
 controller_lock_prepare_upgrade "$service" "$controller_state_dir" "$remote_dir" "$backup" "$lock_upgrade_confirmed"
@@ -239,7 +241,6 @@ find "$web_stage" -type d -exec chmod 755 {} +
 find "$web_stage" -type f -exec chmod 644 {} +
 rm -f "$web_tmp"
 node "$code_stage/verify-web-dist-cli.js" "$web_stage" "/pinvou3/remote"
-mkdir -p "$backup"
 if [[ -d "$remote_dir/web/dist" ]]; then cp -a "$remote_dir/web/dist" "$backup/web-dist"; else touch "$backup/no-web-dist"; fi
 if [[ -f "$remote_dir/package.json" ]]; then cp -a "$remote_dir/package.json" "$backup/package.json"; else touch "$backup/no-package"; fi
 if [[ -f "$remote_dir/package-lock.json" ]]; then cp -a "$remote_dir/package-lock.json" "$backup/package-lock.json"; else touch "$backup/no-package-lock"; fi
@@ -416,11 +417,15 @@ remote_dir="$1"
 service="$2"
 backup="$3"
 
-case "$backup" in
-  "$remote_dir"/backups/*) ;;
-  *) echo "拒绝未知备份目录：$backup" >&2; exit 1 ;;
-esac
-test -d "$backup"
+stamp="${backup##*/}"
+if [[ ! "$stamp" =~ ^[0-9]{8}-[0-9]{6}$ || "$backup" != "$remote_dir/backups/$stamp" \
+  || -L "$remote_dir/backups" || ! -d "$backup" || -L "$backup" ]]; then
+  echo "拒绝未知备份目录：$backup" >&2
+  exit 1
+fi
+for helper in controller-lock-rollout.sh relay-code-backup.sh; do
+  test -f "$backup/$helper" && test ! -L "$backup/$helper" || exit 1
+done
 source "$backup/controller-lock-rollout.sh"
 source "$backup/relay-code-backup.sh"
 staged="$(relay_code_stage "$backup/code-js" "$remote_dir")"

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
-import { access, chmod, copyFile, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { access, chmod, copyFile, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
@@ -139,9 +139,10 @@ test("rollback verifies and stages the complete code backup before touching live
   const run = (directory, script) => spawnSync(bash, ["-c", [
     "set -euo pipefail", 'source "$1"', 'cd -- "$2"', script,
   ].join("\n"), "fixture", helper.replaceAll("\\", "/"), directory.replaceAll("\\", "/")], {
-    encoding: "utf8", timeout: 10_000,
+    encoding: "utf8", timeout: 25_000,
   });
-  for (const variant of ["valid", "empty", "missing", "truncated", "extra", "manifest", "replace-failure"]) {
+  for (const variant of ["valid", "empty", "missing", "truncated", "extra", "manifest",
+    "paired-suffix", "missing-lf", "embedded-nul", "replace-failure"]) {
     const dir = join(root, variant);
     await mkdir(join(dir, "old"), { recursive: true });
     await mkdir(join(dir, "live"));
@@ -158,6 +159,17 @@ test("rollback verifies and stages the complete code backup before touching live
     if (variant === "truncated") await writeFile(backup("z-module.js"), "short");
     if (variant === "extra") await writeFile(backup("extra.js"), "extra");
     if (variant === "manifest") await writeFile(backup(".manifest.sha256"), "");
+    if (["paired-suffix", "missing-lf", "embedded-nul"].includes(variant)) {
+      const manifest = await readFile(backup(".manifest.sha256"));
+      if (variant === "paired-suffix") {
+        await rm(backup("z-module.js"));
+        await writeFile(backup(".manifest.sha256"), manifest.subarray(0, manifest.lastIndexOf(10, manifest.length - 2) + 1));
+      } else if (variant === "missing-lf") {
+        await writeFile(backup(".manifest.sha256"), manifest.subarray(0, -1));
+      } else {
+        await writeFile(backup(".manifest.sha256"), Buffer.concat([manifest.subarray(0, 8), Buffer.of(0), manifest.subarray(8)]));
+      }
+    }
     const inject = variant === "replace-failure"
       ? 'mv() { case "$2" in */incoming/z-module.js) return 31 ;; esac; command mv "$@"; }'
       : "";
@@ -186,40 +198,51 @@ test("both production rollback entries reject a corrupt backup before stopping t
   const source = (await readFile(deployScript, "utf8")).replaceAll("\r\n", "\n");
   const jsBoundary = 'rm -rf "$remote_dir/web/dist"';
   const autoStart = source.indexOf("\nrollback() {\n");
-  const manualStart = source.indexOf('\nsource "$backup/relay-code-backup.sh"\n');
+  const manualStart = source.indexOf('\nstamp="${backup##*/}"\n');
   const autoEnd = source.indexOf(jsBoundary, autoStart);
   const manualEnd = source.indexOf(jsBoundary, manualStart);
   assert.ok(autoStart >= 0 && autoEnd > autoStart && manualStart > autoEnd && manualEnd > manualStart);
   const helper = join(repoRoot, "remote-control-relay", "scripts", "relay-code-backup.sh");
   for (const [name, body] of [
-    ["automatic", `${source.slice(autoStart, autoEnd)}\n}\nrollback`],
-    ["public-check", source.slice(manualStart, manualEnd)],
+    ["automatic", `${source.slice(autoStart, autoEnd)}\nprintf continued > restored\n}\nrollback`],
+    ["public-check", `${source.slice(manualStart, manualEnd)}\nprintf continued > restored`],
   ]) {
     const dir = join(root, name);
     await mkdir(join(dir, "old"), { recursive: true });
-    await mkdir(join(dir, "live"));
-    await mkdir(join(dir, "backup"));
-    await copyFile(helper, join(dir, "backup", "relay-code-backup.sh"));
+    const backup = join(dir, "live", "backups", "20261109-010000");
+    await mkdir(backup, { recursive: true });
+    await copyFile(helper, join(backup, "relay-code-backup.sh"));
+    await writeFile(join(backup, "controller-lock-rollout.sh"),
+      'controller_lock_before_rollback() { printf called > stopped; test -f "$3/server.js"; }\n');
     await writeFile(join(dir, "old", "server.js"), "old server");
     await writeFile(join(dir, "live", "server.js"), "new server");
-    const run = (corrupt) => spawnSync(bashExecutable(), ["-c", [
-      "set -euo pipefail", 'cd -- "$1"', 'backup="$PWD/backup"', 'remote_dir="$PWD/live"',
-      'source "$backup/relay-code-backup.sh"', 'service=fixture', 'controller_state_dir=fixture',
-      'controller_lock_before_rollback() { printf called > stopped; test -f "$3/server.js"; }',
-      corrupt ? [
-        'relay_code_capture "$PWD/old" "$backup/code-js"',
-        'printf corrupt > "$backup/code-js/server.js"',
-      ].join("\n") : 'cp -- "$PWD/old/server.js" "$backup/code-js/server.js"',
-      body,
+    const run = (script) => spawnSync(bashExecutable(), ["-c", [
+      "set -euo pipefail", 'cd -- "$1"', 'remote_dir="$PWD/live"',
+      'backup="$remote_dir/backups/20261109-010000"', 'service=fixture', 'controller_state_dir=fixture',
+      'source "$backup/relay-code-backup.sh"', 'source "$backup/controller-lock-rollout.sh"',
+      script, body,
     ].join("\n"), "fixture", dir.replaceAll("\\", "/")], { encoding: "utf8", timeout: 10_000 });
-    const corrupt = run(true);
+    const corrupt = run('relay_code_capture "$PWD/old" "$backup/code-js"; printf corrupt > "$backup/code-js/server.js"');
     assert.equal(corrupt.status, 1, corrupt.stderr);
     assert.match(corrupt.stderr, /backup_invalid/u);
     await assert.rejects(access(join(dir, "stopped")), { code: "ENOENT" });
     assert.equal(await readFile(join(dir, "live", "server.js"), "utf8"), "new server");
-    const valid = run(false);
+    if (name === "public-check" && process.platform !== "win32") {
+      const alternate = join(dir, "live", "backups", "20261109-010001");
+      await symlink(backup, alternate, "dir");
+      const alias = run('cp -- "$PWD/old/server.js" "$backup/code-js/server.js"; backup="$remote_dir/backups/20261109-010001"');
+      assert.equal(alias.status, 1, alias.stderr);
+      assert.match(alias.stderr, /拒绝未知备份目录/u);
+      await assert.rejects(access(join(dir, "stopped")), { code: "ENOENT" });
+    }
+    const valid = run([
+      'cp -- "$PWD/old/server.js" "$backup/code-js/server.js"',
+      'rm() { [[ "$*" != *"/.relay-code-rollback."* ]] || return 79; command rm "$@"; }',
+    ].join("\n"));
     assert.equal(valid.status, 0, valid.stderr);
+    assert.match(valid.stderr, /relay_code_cleanup_pending/u);
     assert.equal(await readFile(join(dir, "stopped"), "utf8"), "called");
+    assert.equal(await readFile(join(dir, "restored"), "utf8"), "continued");
     assert.equal(await readFile(join(dir, "live", "server.js"), "utf8"), "old server");
   }
 });
