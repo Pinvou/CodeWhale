@@ -168,6 +168,7 @@ const MAX_REVOKED_ENDPOINTS = Math.min(
   boundedInteger(process.env.MAX_REVOKED_ENDPOINTS, 100_000, 1, 1_000_000),
   Math.floor(MAX_RELAY_STATE_BYTES / 256),
 );
+let legacyCapacityWarning = false;
 const RELAY_STATE_PATH = resolve(
   process.env.PINVOU_REMOTE_STATE_PATH || resolve(__dirname, "data", "relay-state.json"),
 );
@@ -274,6 +275,7 @@ async function createControllerRuntime() {
   controllerStateStore = await RelayStateStore.open({
     statePath: config.controller_state_path,
     legacyStatePath: config.legacy_web_state_path,
+    maxBytes: config.controller_state_max_bytes,
   });
   try {
     const registry = EnrollmentRegistry.open({ stateStore: controllerStateStore, config });
@@ -712,9 +714,20 @@ function relayStateContents(entries) {
     revoked_endpoints: revoked,
   }, null, 2)}\n`;
   if (Buffer.byteLength(contents) > MAX_RELAY_STATE_BYTES) {
-    throw new Error("relay state exceeds MAX_RELAY_STATE_BYTES");
+    throw Object.assign(new Error("revoked endpoint state capacity reached"), {
+      code: "revoked_endpoint_capacity_reached",
+    });
   }
   return contents;
+}
+
+function reportLegacyRevocationCapacity(entries, bytes) {
+  if (legacyCapacityWarning
+    || (entries < Math.ceil(MAX_REVOKED_ENDPOINTS * 0.8) && bytes < Math.ceil(MAX_RELAY_STATE_BYTES * 0.8))) return;
+  legacyCapacityWarning = true;
+  console.warn("[relay-capacity] legacy_revocations", JSON.stringify({
+    entries, max_entries: MAX_REVOKED_ENDPOINTS, serialized_bytes: bytes, max_bytes: MAX_RELAY_STATE_BYTES,
+  }));
 }
 
 async function loadRelayState() {
@@ -758,6 +771,7 @@ async function loadRelayState() {
     }
     revokedEndpoints.set(entry.endpoint_id, revokedAt);
   }
+  reportLegacyRevocationCapacity(revokedEndpoints.size, Buffer.byteLength(contents));
 }
 
 async function syncDirectory(path) {
@@ -791,6 +805,7 @@ async function atomicWriteRelayState(nextState) {
     await rename(temporaryPath, RELAY_STATE_PATH);
     try { await chmod(RELAY_STATE_PATH, 0o600); } catch {}
     await syncDirectory(stateDirectory);
+    return Buffer.byteLength(contents);
   } catch (error) {
     try { await temporaryFile?.close(); } catch {}
     try { await rm(temporaryPath, { force: true }); } catch {}
@@ -812,8 +827,9 @@ function persistRevocation(endpointId) {
     const revokedAt = new Date().toISOString();
     const nextState = new Map(revokedEndpoints);
     nextState.set(endpointId, revokedAt);
-    await atomicWriteRelayState(nextState);
+    const bytes = await atomicWriteRelayState(nextState);
     revokedEndpoints.set(endpointId, revokedAt);
+    reportLegacyRevocationCapacity(revokedEndpoints.size, bytes);
     return revokedAt;
   });
   relayStateMutation = operation.catch(() => {});

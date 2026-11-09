@@ -1447,8 +1447,40 @@ test("a state above the clamped capacity loads and refuses only new revocations"
     await waitForClose(desktop.ws);
     const persisted = JSON.parse(await readFile(statePath, "utf8"));
     assert.equal(persisted.revoked_endpoints.length, 9);
+    assert.match(isolated.errors(), /\[relay-capacity\] legacy_revocations .*"entries":9,"max_entries":8/u);
   } finally {
     await stopRelay(isolated.child);
+  }
+  const expanded = await spawnRelay({
+    PINVOU_REMOTE_STATE_PATH: statePath,
+    MAX_RELAY_STATE_BYTES: "4096",
+    MAX_REVOKED_ENDPOINTS: "16",
+  });
+  try {
+    const stale = await openSocket(expanded.wsUrl);
+    const rejected = nextMessage(stale, "error");
+    stale.send(JSON.stringify({
+      v: 2, type: "desktop_endpoint_register", endpoint_id: "clamp3",
+      access_token: "clamped-stale-access-token-000001",
+      desktop_secret: "clamped-stale-desktop-secret-0001",
+    }));
+    assert.equal((await rejected).code, "endpoint_revoked");
+    await waitForClose(stale);
+    const desktop = await registerDesktop("legacy-capacity-expanded", "expanded-access-token-00000000",
+      "expanded-desktop-secret-000000", expanded.wsUrl);
+    const revoked = nextMessage(desktop.ws, "desktop_endpoint_revoked");
+    desktop.ws.send(JSON.stringify({
+      v: 2, type: "desktop_endpoint_revoke", endpoint_id: "legacy-capacity-expanded",
+    }));
+    await revoked;
+    await waitForClose(desktop.ws);
+    const persisted = JSON.parse(await readFile(statePath, "utf8"));
+    assert.equal(persisted.revoked_endpoints.length, 10);
+    for (const entry of entries) assert.deepEqual(
+      persisted.revoked_endpoints.find(candidate => candidate.endpoint_id === entry.endpoint_id), entry,
+    );
+  } finally {
+    await stopRelay(expanded.child);
   }
 });
 

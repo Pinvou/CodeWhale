@@ -40,6 +40,8 @@ Set these variables before opening the registry:
 |---|---|
 | `PINVOU_REMOTE_ENROLLMENT_DEPLOYMENT` | Required: `official`, `self_hosted`, or `development`. |
 | `PINVOU_REMOTE_CONTROLLER_STATE_PATH` | Absolute path for the new controller state file. It must not equal the existing `PINVOU_REMOTE_STATE_PATH`. The caller passes this value to `RelayStateStore.open`. |
+| `PINVOU_REMOTE_CONTROLLER_STATE_MAX_BYTES` | Shared controller-state UTF-8 byte budget, 1024 to 268435456, default 16777216. Use the same limit for the Relay, enrollment gateway and operator CLI. |
+| `PINVOU_REMOTE_ENROLLMENT_MAX_ENTRIES` | Enrollment admission limit for active plus revoked identities, 1 to 1000000, default 100000. Existing identities and revocations remain readable when the admission limit is lowered. |
 | `PINVOU_REMOTE_STATE_PATH` | Required absolute path of the legacy Web v2 state. It is used only for alias detection; this module never reads or changes it. |
 | `PINVOU_DESKTOP_CONTROLLER_ENABLED` | Set to `1` only when enabling the controller-v1 dispatcher. Any other value preserves legacy Web v2-only behavior. |
 | `PINVOU_REMOTE_PAIRING_HMAC_KEY_ID` / `PINVOU_REMOTE_PAIRING_HMAC_KEY` | Stable independent HMAC key used for pairing-code digests and quarantine lookup. Do not reuse the enrollment key. |
@@ -205,6 +207,37 @@ Retain the complete registry and keyring when rolling back. A compatible
 administrator-only rollback build disables new-device onboarding; already
 enrolled role digests keep their authentication meaning. The new audit origin
 must remain readable by that build as described above.
+
+### Capacity maintenance for permanent denials
+
+Enrollment counts active and revoked identities against its admission limit.
+It also shares the configured serialized byte budget with pairing and migration
+state. Legacy Web revocation has a separate byte budget (`MAX_RELAY_STATE_BYTES`,
+default 16 MiB) and an entry limit (`MAX_REVOKED_ENDPOINTS`, default 100000,
+effectively at most one entry per 256 configured bytes). Each owning process logs
+a `[relay-capacity]` warning at 80 percent of its first reached limit. The
+warning gives aggregate entries and bytes, with no endpoint IDs or credentials.
+
+At enrollment admission capacity, new identities are refused with
+`enrollment_capacity_reached` or `enrollment_registry_capacity_reached`.
+A registry revocation that cannot fit the shared byte budget returns
+`enrollment_revocation_capacity_reached`. The Legacy Web protocol retains
+`revoked_endpoint_capacity_reached` for its own exhausted budget and
+`revoke_persistence_failed` for an I/O failure. A repeated revocation of a
+committed identity keeps its prior result. A refusal does not create a denial.
+
+For planned expansion, stop the writer and capture a current consistent
+offline backup of both authorization stores. Check disk and memory capacity,
+then raise the limits as needed and restart using the same files, role keys
+and state paths. Confirm a known revoked identity remains denied before
+restoring admission. Keep the full stores in protected backups and do not
+expire or delete denials to free slots. Enrollment snapshot import and
+migration restore reject any snapshot that would remove or reactivate a
+currently revoked identity. Offline file restoration requires evidence that
+the selected snapshots retain the current denial sets, since an offline copy
+has no live state against which to check. A controller state above the
+previous 100000-entry or 16 MiB bounds requires a compatible build during
+rollback. Legacy Web state keeps its existing on-disk format.
 
 ### Gateway transport keepalive
 
