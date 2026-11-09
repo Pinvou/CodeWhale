@@ -64,7 +64,7 @@ export function useAdminRetryCountdown(retryAt) {
   return remaining;
 }
 
-export function SourceHeader({ title, titleID, state, copy, onRetry, actions = null }) {
+export function SourceHeader({ title, titleID, state, copy, onRetry, actions = null, actionClassName = '' }) {
   const retryRemaining = useAdminRetryCountdown(state.retryAt);
   return (
     <div className="adm-source-head">
@@ -72,7 +72,7 @@ export function SourceHeader({ title, titleID, state, copy, onRetry, actions = n
         <h2 id={titleID}>{title}</h2>
         <p>{state.updatedAt ? `${copy.lastUpdated} ${new Date(state.updatedAt).toLocaleString()}` : copy.notUpdated}</p>
       </div>
-      <div className="adm-row-actions">{actions}<button type="button" disabled={state.loading || retryRemaining > 0} onClick={onRetry}>{state.loading ? copy.loading : retryRemaining > 0 ? copy.retryCountdown(retryRemaining) : copy.refreshSource}</button></div>
+      <div className={('adm-row-actions ' + actionClassName).trim()}>{actions}<button type="button" disabled={state.loading || retryRemaining > 0} onClick={onRetry}>{state.loading ? copy.loading : retryRemaining > 0 ? copy.retryCountdown(retryRemaining) : copy.refreshSource}</button></div>
     </div>
   );
 }
