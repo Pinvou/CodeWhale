@@ -226,6 +226,12 @@ fn strip_annotation_keywords(value: &mut Value) {
 ///   restores the distinction (floors 0, 1 and 2 all leave every
 ///   shared-root-valid instance clearing them matching both alternatives;
 ///   reviews 5802378120, 5808313704, 5811366579),
+/// - R2 (shared surviving group, review 5811598796): object branches with
+///   equal surviving `required` groups and identically-normalized
+///   shared-field entries (see the arm below),
+/// - R2 (pairwise admission, reviews 5812488975, 5814012140): an
+///   all-object union where some ordered branch pair stays
+///   indistinguishable over the root-valid domain (see the arm below),
 /// - R3: a branch's subtree contains a dead inner `oneOf` (the branch
 ///   cannot match, so the union loses that alternative's payload).
 ///
@@ -240,62 +246,465 @@ fn strip_annotation_keywords(value: &mut Value) {
 /// field names or instance values, so the string is safe to log), or
 /// `None` when pass-through stays safe.
 fn oneof_semantic_defect(schema: &Value) -> Option<String> {
-    oneof_semantic_defect_at(schema, "root")
+    let mut walk = DefectWalk::default();
+    walk.subtree_defect(schema, "root")
 }
 
-fn oneof_semantic_defect_at(schema: &Value, path: &str) -> Option<String> {
-    match schema {
-        Value::Object(obj) => {
-            if let Some(branches) = obj.get("oneOf").and_then(Value::as_array)
-                && let Some(reason) = oneof_node_defect(branches, obj.get("properties"), path)
-            {
-                return Some(reason);
-            }
-            for (key, child) in obj {
-                match key.as_str() {
-                    // Name → schema maps: field names are not schemas, so
-                    // the map is never read as a union-bearing node.
-                    "properties" | "$defs" | "patternProperties" | "dependentSchemas" => {
-                        if let Some(map) = child.as_object() {
-                            for subschema in map.values() {
-                                if let Some(reason) =
-                                    oneof_semantic_defect_at(subschema, &format!("{path}.{key}.*"))
-                                {
-                                    return Some(reason);
+/// Counts actual computations, so tests can pin the single-traversal
+/// bound (`xai_union_defect_walk_computes_each_subtree_once`).
+#[cfg(test)]
+fn oneof_semantic_defect_with_computations(schema: &Value) -> (Option<String>, usize) {
+    let mut walk = DefectWalk::default();
+    let reason = walk.subtree_defect(schema, "root");
+    (reason, walk.computed)
+}
+
+/// Single-computation carrier for the defect walk. The R3 recursion and
+/// the outer keyword walk used to visit the same branch subtrees
+/// independently, so every healthy nesting level doubled the work —
+/// exponential on a linear-size document (reviews 5814012140,
+/// 5814046611). Memoizing per node keeps each subtree at one computation.
+///
+/// The tree is never mutated during the walk, so a node's address is a
+/// stable key, and a `serde_json` tree has single-parent nodes: every
+/// visit to the same node arrives with the same path (the R3 call site
+/// formats `{path}.oneOf[{index}]`, exactly the path the outer walk
+/// reaches that branch by), so cached reasons are path-exact.
+#[derive(Default)]
+struct DefectWalk {
+    memo: std::collections::HashMap<usize, Option<String>>,
+    computed: usize,
+}
+
+impl DefectWalk {
+    fn subtree_defect(&mut self, schema: &Value, path: &str) -> Option<String> {
+        let key = (schema as *const Value) as usize;
+        if let Some(cached) = self.memo.get(&key) {
+            return cached.clone();
+        }
+        self.computed += 1;
+        let reason = self.compute_defect(schema, path);
+        self.memo.insert(key, reason.clone());
+        reason
+    }
+
+    fn compute_defect(&mut self, schema: &Value, path: &str) -> Option<String> {
+        match schema {
+            Value::Object(obj) => {
+                if let Some(branches) = obj.get("oneOf").and_then(Value::as_array)
+                    && let Some(reason) = oneof_node_defect(branches, obj, path, self)
+                {
+                    return Some(reason);
+                }
+                for (key, child) in obj {
+                    match key.as_str() {
+                        // Name → schema maps: field names are not schemas, so
+                        // the map is never read as a union-bearing node.
+                        "properties" | "$defs" | "patternProperties" | "dependentSchemas" => {
+                            if let Some(map) = child.as_object() {
+                                for subschema in map.values() {
+                                    if let Some(reason) =
+                                        self.subtree_defect(subschema, &format!("{path}.{key}.*"))
+                                    {
+                                        return Some(reason);
+                                    }
                                 }
                             }
                         }
-                    }
-                    // Instance data is never a union.
-                    "const" | "enum" => {}
-                    _ => {
-                        if let Some(reason) =
-                            oneof_semantic_defect_at(child, &format!("{path}.{key}"))
-                        {
-                            return Some(reason);
+                        // Instance data is never a union.
+                        "const" | "enum" => {}
+                        _ => {
+                            if let Some(reason) =
+                                self.subtree_defect(child, &format!("{path}.{key}"))
+                            {
+                                return Some(reason);
+                            }
                         }
                     }
                 }
+                None
             }
-            None
-        }
-        Value::Array(items) => {
-            for (index, item) in items.iter().enumerate() {
-                if let Some(reason) = oneof_semantic_defect_at(item, &format!("{path}[{index}]")) {
-                    return Some(reason);
+            Value::Array(items) => {
+                for (index, item) in items.iter().enumerate() {
+                    if let Some(reason) = self.subtree_defect(item, &format!("{path}[{index}]")) {
+                        return Some(reason);
+                    }
                 }
+                None
             }
-            None
+            _ => None,
         }
-        _ => None,
     }
 }
 
-/// Judge one `oneOf` node's branches by R1/R2/R3; `path` is the path of
-/// the object holding the `oneOf` keyword, whose `properties` (when
-/// present) is the root-level constraint set the shared-group arm
-/// normalizes branch-local entries against.
-fn oneof_node_defect(branches: &[Value], root_props: Option<&Value>, path: &str) -> Option<String> {
+/// The enclosing-schema context the pairwise admission arm normalizes
+/// against: the object holding the `oneOf` keyword contributes its own
+/// `required` names (instances the root validates carry them for free)
+/// and its `properties` entries (the per-field constraints a witness
+/// value must stay admissible under).
+#[derive(Default)]
+struct PairAdmission<'a> {
+    enclosing: SchemaView<'a>,
+}
+
+/// The bounded slice of a schema node the admission arms read: its
+/// `required` names, its `properties` map, and whether the node carries
+/// only structural keys — `type`, `properties`, `required`, plus the
+/// union keywords themselves (the structure under judgment, not a
+/// witness constraint). A sibling `allOf`/`not`/`minProperties` at the
+/// node could reject the arms' constructed witnesses, so such nodes keep
+/// their pairs unproven and the union takes the flattening fallback.
+struct SchemaView<'a> {
+    required: std::collections::BTreeSet<&'a str>,
+    props: Option<&'a serde_json::Map<String, Value>>,
+    structural: bool,
+}
+
+impl<'a> Default for SchemaView<'a> {
+    fn default() -> Self {
+        Self {
+            required: std::collections::BTreeSet::new(),
+            props: None,
+            structural: true,
+        }
+    }
+}
+
+impl<'a> SchemaView<'a> {
+    fn of(schema: Option<&'a Value>) -> Self {
+        match schema.and_then(Value::as_object) {
+            Some(obj) => Self::of_object(obj),
+            // An absent entry constrains nothing, so a witness never
+            // collides with it.
+            None => Self::default(),
+        }
+    }
+
+    fn of_object(obj: &'a serde_json::Map<String, Value>) -> Self {
+        Self {
+            required: obj
+                .get("required")
+                .and_then(Value::as_array)
+                .map(|required| required.iter().filter_map(Value::as_str).collect())
+                .unwrap_or_default(),
+            props: obj.get("properties").and_then(Value::as_object),
+            structural: obj.keys().all(|key| {
+                matches!(
+                    key.as_str(),
+                    "type" | "properties" | "required" | "oneOf" | "anyOf"
+                )
+            }),
+        }
+    }
+}
+
+/// Whether an entry constrains its field no further than a witness value
+/// can satisfy: only `type`, `const`, and `enum` keys, each of which
+/// admits a concrete value (a type default, the pinned value, an enum
+/// member). A `minLength`, `pattern`, or any other validation keyword
+/// could reject the witness, so the entry keeps its pair unproven.
+fn entry_is_value_permissive(entry: &Value) -> bool {
+    entry.as_object().is_some_and(|obj| {
+        obj.keys()
+            .all(|key| matches!(key.as_str(), "type" | "const" | "enum"))
+    })
+}
+
+/// Whether a schema node's own keys are structural only (see
+/// [`SchemaView`]) — the left side of an admission arm must be, or its
+/// witness could be rejected by a keyword the arms never read.
+fn shape_is_structural(schema: &Value) -> bool {
+    schema.as_object().is_some_and(|obj| {
+        obj.keys().all(|key| {
+            matches!(
+                key.as_str(),
+                "type" | "properties" | "required" | "oneOf" | "anyOf"
+            )
+        })
+    })
+}
+
+/// The pin arm's value sets: `const` contributes the single value, `enum`
+/// the whole list; an entry carrying further validation keywords beside
+/// the pin could reject its own pinned value, so it stops being a
+/// witness-able pin. Anything else is not an instance-data pin.
+fn pinned_value_set(entry: &Value) -> Option<Vec<Value>> {
+    let obj = entry.as_object()?;
+    if !obj
+        .keys()
+        .all(|key| matches!(key.as_str(), "type" | "const" | "enum"))
+    {
+        return None;
+    }
+    if let Some(pinned) = obj.get("const") {
+        return Some(vec![pinned.clone()]);
+    }
+    if let Some(values) = obj.get("enum").and_then(Value::as_array) {
+        return Some(values.clone());
+    }
+    None
+}
+
+/// Bounded type check for the pin arm's enclosing-admissibility test.
+/// `integer` only admits integral numbers, so a float candidate fails it
+/// conservatively.
+fn json_value_is_type(candidate: &Value, expected: &str) -> bool {
+    match expected {
+        "string" => candidate.is_string(),
+        "boolean" => candidate.is_boolean(),
+        "object" => candidate.is_object(),
+        "array" => candidate.is_array(),
+        "null" => candidate.is_null(),
+        "number" => candidate.is_number(),
+        "integer" => candidate.is_i64() || candidate.is_u64(),
+        _ => false,
+    }
+}
+
+/// A branch's surviving `required` group: the string names, sorted and
+/// deduplicated.
+fn branch_required_names(branch: &Value) -> Vec<&str> {
+    let mut names: Vec<&str> = branch
+        .get("required")
+        .and_then(Value::as_array)
+        .map(|required| required.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    names.sort_unstable();
+    names.dedup();
+    names
+}
+
+impl<'a> PairAdmission<'a> {
+    /// Conservative admission domain for one ordered branch pair over the
+    /// root-valid domain (reviews 5812488975, 5814012140): the pair is
+    /// admissible only when a bounded arm proves an instance exists that
+    /// matches `left` and fails `right` — otherwise every root-valid
+    /// instance may match both and exactly-one holds for no instance.
+    /// This is deliberately NOT a general subsumption solver: each arm's
+    /// witness is an omission witness (carry the left branch's group plus
+    /// everything the enclosing schema requires, omit one discriminating
+    /// name — or pin one discriminating value on a shared field), and
+    /// only a value-permissive left shape can prove such a witness (see
+    /// [`Self::witness_provable`]). Anything unproven takes the
+    /// protective flattening fallback, which keeps the shared root
+    /// properties usable.
+    fn pair_discriminated(
+        &self,
+        left: &Value,
+        right: &Value,
+        left_group: &[&str],
+        right_group: &[&str],
+        depth: usize,
+    ) -> bool {
+        // Arm 1 — group discrimination: the right branch requires a name
+        // the left branch does not and the enclosing schema does not
+        // either, so a root-valid instance may omit it (failing the right
+        // branch) while carrying the left branch's group and everything
+        // the enclosing schema requires. This also kills the review
+        // 5814012140 form: two different groups the root requires in full.
+        if self.witness_provable(left, left_group, &self.enclosing)
+            && right_group
+                .iter()
+                .any(|name| !left_group.contains(name) && !self.enclosing.required.contains(name))
+        {
+            return true;
+        }
+        let (Some(left_props), Some(right_props)) = (
+            left.get("properties").and_then(Value::as_object),
+            right.get("properties").and_then(Value::as_object),
+        ) else {
+            return false;
+        };
+        for (name, left_entry) in left_props {
+            let Some(right_entry) = right_props.get(name.as_str()) else {
+                continue;
+            };
+            // Arm 2 — pin discrimination: both sides pin the field's
+            // value set (`const`/`enum`) with disjoint admitted sets, and
+            // a left-admitted value survives the enclosing entry for the
+            // field. The pin alone proves the right-branch failure (a
+            // pinned value is rejected absolutely); the witness gate and
+            // the enclosing check keep the witness left-branch- and
+            // root-valid.
+            if let (Some(left_set), Some(right_set)) =
+                (pinned_value_set(left_entry), pinned_value_set(right_entry))
+                && self.witness_provable(left, left_group, &self.enclosing)
+                && left_set.iter().any(|candidate| {
+                    !right_set.contains(candidate)
+                        && self.enclosing_entry_admits(name.as_str(), candidate)
+                })
+            {
+                return true;
+            }
+            // Arm 3 — nested group discrimination (depth-bounded): both
+            // entries are object schemas whose own surviving groups differ
+            // by a name neither entry requires and the enclosing entry for
+            // the field does not require either, so the sub-instance may
+            // omit it and fail the right entry while carrying the left
+            // entry's group. This keeps genuinely self-contained nested
+            // discriminators (the satisfiable control of
+            // `xai_sanitize_flattens_oneof_distinct_only_before_recursive_normalization`)
+            // shipping, while a root-stronger or root-required nested
+            // group stays kill-worthy.
+            let enclosing_entry = SchemaView::of(
+                self.enclosing
+                    .props
+                    .and_then(|props| props.get(name.as_str())),
+            );
+            if depth < 8
+                && is_object_branch(left_entry)
+                && is_object_branch(right_entry)
+                && self.witness_provable(
+                    left_entry,
+                    &branch_required_names(left_entry),
+                    &enclosing_entry,
+                )
+                && nested_entries_discriminated(left_entry, right_entry, &enclosing_entry)
+            {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Whether the arms' omission witness exists for `left` under
+    /// `enclosing`: an instance carrying `left_group` plus every name in
+    /// the enclosing `required` is only guaranteed to match both when
+    /// both shapes carry structural keys only and every carried field's
+    /// entry is value-permissive (a concrete satisfying value provably
+    /// exists: a type default, the pinned value, an enum member). A
+    /// restrictive `additionalProperties` floor, a `minLength` on a
+    /// carried field, or any other validation keyword could reject the
+    /// witness, so the pair stays unproven and the union takes the
+    /// flattening fallback.
+    fn witness_provable(
+        &self,
+        left: &Value,
+        left_group: &[&str],
+        enclosing: &SchemaView<'a>,
+    ) -> bool {
+        if !shape_is_structural(left) || !enclosing.structural {
+            return false;
+        }
+        let left_props = left.get("properties").and_then(Value::as_object);
+        left_group
+            .iter()
+            .copied()
+            .chain(enclosing.required.iter().copied())
+            .all(|field| {
+                let entries = [
+                    left_props.and_then(|props| props.get(field)),
+                    enclosing.props.and_then(|props| props.get(field)),
+                ];
+                entries.into_iter().flatten().all(entry_is_value_permissive)
+            })
+    }
+
+    /// Arm 2 witness check: is `candidate` admissible under the enclosing
+    /// schema's own entry for this field? Only trivially-checkable entry
+    /// shapes admit a witness (absent, empty, a matching `const`, a
+    /// matching `enum` membership, or a matching `type`); anything with
+    /// further validation keywords refuses to prove the witness and the
+    /// pair falls back to flattening.
+    fn enclosing_entry_admits(&self, name: &str, candidate: &Value) -> bool {
+        let Some(entry) = self.enclosing.props.and_then(|props| props.get(name)) else {
+            return true;
+        };
+        let Some(obj) = entry.as_object() else {
+            return false;
+        };
+        if obj.is_empty() {
+            return true;
+        }
+        if obj.len() != 1 {
+            return false;
+        }
+        if let Some(pinned) = obj.get("const") {
+            return pinned == candidate;
+        }
+        if let Some(values) = obj.get("enum").and_then(Value::as_array) {
+            return values.contains(candidate);
+        }
+        if let Some(expected) = obj.get("type").and_then(Value::as_str) {
+            return json_value_is_type(candidate, expected);
+        }
+        false
+    }
+}
+
+/// Arm 3 check: the entries' own `required` groups differ by a name
+/// neither entry requires and the enclosing entry for the field does not
+/// require either.
+fn nested_entries_discriminated(
+    left_entry: &Value,
+    right_entry: &Value,
+    enclosing_entry: &SchemaView<'_>,
+) -> bool {
+    let left_group = branch_required_names(left_entry);
+    let right_group = branch_required_names(right_entry);
+    right_group.iter().any(|candidate| {
+        !left_group.contains(candidate) && !enclosing_entry.required.contains(candidate)
+    })
+}
+
+/// R2 (pairwise admission): an all-object union ships only when EVERY
+/// ordered branch pair stays discriminable over the root-valid domain by
+/// one of the bounded [`PairAdmission`] arms. Reviews 5812488975 and
+/// 5814012140 each shipped a form the earlier arms missed: a root
+/// strictly stronger than both branch-local shared-field constraints
+/// (`minLength: 2` dominating `{}` and `{"type":"string"}` leaves unequal
+/// signatures that both admit every root-valid instance), and two
+/// different surviving groups the enclosing root already requires in
+/// full. The judgment runs on the post-preprocessing projection — the
+/// shape that actually reaches the wire — and a union with any
+/// non-object branch is outside the domain (its exactly-one analysis is
+/// a general schema question; R1 and the required-free arm still cover
+/// its pinned degenerate shapes).
+fn unions_lack_pairwise_discrimination(
+    branches: &[Value],
+    enclosing: &serde_json::Map<String, Value>,
+    path: &str,
+) -> Option<String> {
+    if branches.iter().any(|branch| !is_object_branch(branch)) {
+        return None;
+    }
+    let admission = PairAdmission {
+        enclosing: SchemaView::of_object(enclosing),
+    };
+    let groups: Vec<Vec<&str>> = branches.iter().map(branch_required_names).collect();
+    for (left, left_group) in groups.iter().enumerate() {
+        for (right, right_group) in groups.iter().enumerate() {
+            if left == right {
+                continue;
+            }
+            if !admission.pair_discriminated(
+                &branches[left],
+                &branches[right],
+                left_group,
+                right_group,
+                0,
+            ) {
+                return Some(format!(
+                    "R2 branches {left} and {right} are not pairwise discriminated \
+                     over the root-valid domain at {path}"
+                ));
+            }
+        }
+    }
+    None
+}
+
+/// Judge one `oneOf` node's branches by R1/R2/R3; `enclosing` is the
+/// object holding the `oneOf` keyword, whose `properties` (when present)
+/// is the root-level constraint set the shared-group arm normalizes
+/// branch-local entries against and whose `required`/`properties` feed
+/// the pairwise admission arm.
+fn oneof_node_defect(
+    branches: &[Value],
+    enclosing: &serde_json::Map<String, Value>,
+    path: &str,
+    walk: &mut DefectWalk,
+) -> Option<String> {
     // R1: identical branches.
     for (left, left_branch) in branches.iter().enumerate() {
         for (right, right_branch) in branches.iter().enumerate().skip(left + 1) {
@@ -358,7 +767,7 @@ fn oneof_node_defect(branches: &[Value], root_props: Option<&Value>, path: &str)
     // matches exactly one, and instances carrying both were already
     // ambiguous in the original (the union's own semantics, not a
     // preprocessing loss).
-    let root_props = root_props.and_then(Value::as_object);
+    let root_props = enclosing.get("properties").and_then(Value::as_object);
     let mut group_shapes: std::collections::BTreeMap<(String, String), usize> =
         std::collections::BTreeMap::new();
     for branch in branches {
@@ -415,9 +824,21 @@ fn oneof_node_defect(branches: &[Value], root_props: Option<&Value>, path: &str)
             "R2 {count} branches share the required group {group:?} at {path}"
         ));
     }
+    // R2 (pairwise admission, reviews 5812488975 and 5814012140): the
+    // shared-group arm above only fires on signatures that normalize
+    // equal. Two more registry forms slip past it while the union serves
+    // no root-valid instance: a root STRICTLY STRONGER than both
+    // branch-local shared-field entries (unequal signatures, both
+    // implied), and two different surviving groups the enclosing root
+    // already requires in full. Every ordered pair must therefore stay
+    // discriminable by a bounded admission arm; the first unproven pair
+    // takes the compatible flattening fallback.
+    if let Some(reason) = unions_lack_pairwise_discrimination(branches, enclosing, path) {
+        return Some(reason);
+    }
     // R3: a branch carrying a dead inner union cannot match.
     for (index, branch) in branches.iter().enumerate() {
-        if let Some(inner) = oneof_semantic_defect_at(branch, &format!("{path}.oneOf[{index}]")) {
+        if let Some(inner) = walk.subtree_defect(branch, &format!("{path}.oneOf[{index}]")) {
             return Some(format!(
                 "R3 branch {index} at {path} carries a dead inner union: {inner}"
             ));
@@ -2963,6 +3384,293 @@ mod tests {
             validator.is_valid(&json!({"a": "x", "c": "z"})),
             "a valid instance of the original union must stay valid: {schema}"
         );
+    }
+
+    #[test]
+    fn xai_sanitize_registry_path_flattens_root_stronger_shared_required_union() {
+        // Review 5812488975: the shared-group arm normalizes vacuous and
+        // root-identical entries away, but a branch-local entry that is
+        // STRICTLY WEAKER than the root's own schema for the field
+        // (`{"type":"string"}` under a root `minLength: 2`) is neither, so
+        // the signatures stay unequal and the equal surviving groups
+        // (`[c]` on both branches after the cross-required prune) shipped.
+        // The root is stronger than both branch constraints, so every
+        // root-valid instance matches both alternatives and exactly-one
+        // holds for no instance. The full production order (sanitize THEN
+        // canonicalize_schema, registry.rs:278-279) must land on the
+        // flattening fallback, keeping {"a":"x","c":"zz"} valid.
+        let mut schema = json!({
+            "type": "object",
+            "properties": {
+                "a": {"type": "string"},
+                "b": {"type": "string"},
+                "c": {"type": "string", "minLength": 2}
+            },
+            "required": ["c"],
+            "oneOf": [
+                {
+                    "type": "object",
+                    "properties": {"a": {"type": "string"}, "c": {}},
+                    "required": ["b", "c"]
+                },
+                {
+                    "type": "object",
+                    "properties": {"b": {"type": "string"}, "c": {"type": "string"}},
+                    "required": ["a", "c"]
+                }
+            ]
+        });
+        sanitize(&mut schema);
+        crate::tools::schema_canonicalize::canonicalize_schema(&mut schema);
+
+        let note = sanitize_for_xai_parameters(&mut schema);
+
+        assert_eq!(schema["type"], "object");
+        assert!(
+            schema.get("oneOf").is_none() && schema.get("anyOf").is_none(),
+            "the root-stronger shared-required union must not reach the wire: {schema}"
+        );
+        assert_eq!(
+            schema["required"],
+            json!(["c"]),
+            "the root's own requirement must survive"
+        );
+        assert_eq!(
+            schema["properties"]["c"]["minLength"], 2,
+            "the root's stronger constraint must survive the fallback: {schema}"
+        );
+        assert_eq!(note, None);
+        let validator = jsonschema::options()
+            .with_draft(jsonschema::Draft::Draft202012)
+            .build(&schema)
+            .expect("the flattened schema must compile");
+        assert!(
+            validator.is_valid(&json!({"a": "x", "c": "zz"})),
+            "a valid instance of the original union must stay valid: {schema}"
+        );
+    }
+
+    #[test]
+    fn xai_sanitize_flattens_union_whose_groups_the_root_already_requires() {
+        // Review 5814012140: two object branches whose surviving required
+        // groups differ ([a] versus [b]) pass every existing arm, but the
+        // enclosing root REQUIRES both names — every root-valid instance
+        // carries both groups and matches both alternatives, so exactly-one
+        // holds for no instance while the union still ships unflattened.
+        // The raw registered-tool path (no prune needed: both branches
+        // declare the fields they require) must take the flattening
+        // fallback, keeping the original witness valid.
+        let mut schema = json!({
+            "type": "object",
+            "properties": {
+                "a": {"type": "string"},
+                "b": {"type": "string"}
+            },
+            "required": ["a", "b"],
+            "oneOf": [
+                {
+                    "type": "object",
+                    "properties": {"a": {"type": "string"}},
+                    "required": ["a"]
+                },
+                {
+                    "type": "object",
+                    "properties": {"b": {"type": "string"}},
+                    "required": ["b"]
+                }
+            ]
+        });
+
+        let note = sanitize_for_xai_parameters(&mut schema);
+
+        assert_eq!(schema["type"], "object");
+        assert!(
+            schema.get("oneOf").is_none() && schema.get("anyOf").is_none(),
+            "a union whose groups the root already requires must not reach the wire: {schema}"
+        );
+        assert_eq!(
+            schema["required"],
+            json!(["a", "b"]),
+            "the root's own requirement must survive"
+        );
+        assert_eq!(
+            note.as_deref(),
+            Some("Exactly one of these parameter groups must be provided: `a` | `b`."),
+            "the flattening fallback must keep the parameter-groups note the \
+             branches' own declared groups support"
+        );
+        let validator = jsonschema::options()
+            .with_draft(jsonschema::Draft::Draft202012)
+            .build(&schema)
+            .expect("the flattened schema must compile");
+        assert!(
+            validator.is_valid(&json!({"a": "x", "b": "y"})),
+            "a valid instance of the original union must stay valid: {schema}"
+        );
+    }
+
+    #[test]
+    fn xai_union_defect_walk_computes_each_subtree_once() {
+        // Reviews 5814012140 and 5814046611: the R3 recursion plus the
+        // outer keyword walk used to visit every branch subtree
+        // independently, so each healthy nesting level doubled the work —
+        // exponential on a linear-size document, run synchronously during
+        // xAI request preparation for every tool-bearing request. The
+        // walk memoizes per node, so the computation count stays at the
+        // document's node count no matter how deep healthy unions nest.
+        fn nested_union(depth: usize) -> Value {
+            let child = if depth == 0 {
+                // A plain leaf object: the deepest branch carries no
+                // further union, and the walk must still have visited it
+                // once per node, not once per ancestor path.
+                json!({
+                    "type": "object",
+                    "properties": {"kind": {"const": "leaf"}},
+                    "required": ["kind"]
+                })
+            } else {
+                json!({
+                    "type": "object",
+                    "oneOf": [
+                        {
+                            "type": "object",
+                            "properties": {
+                                "kind": {"const": "A"},
+                                "child": nested_union(depth - 1)
+                            },
+                            "required": ["kind"]
+                        },
+                        {
+                            "type": "object",
+                            "properties": {"kind": {"const": "B"}},
+                            "required": ["kind"]
+                        }
+                    ]
+                })
+            };
+            json!({
+                "type": "object",
+                "properties": {"child": child},
+                "oneOf": [
+                    {
+                        "type": "object",
+                        "properties": {"kind": {"const": "A"}, "child": {}},
+                        "required": ["kind"]
+                    },
+                    {
+                        "type": "object",
+                        "properties": {"kind": {"const": "B"}},
+                        "required": ["kind"]
+                    }
+                ]
+            })
+        }
+        fn count_value_nodes(value: &Value) -> usize {
+            match value {
+                Value::Object(map) => 1 + map.values().map(count_value_nodes).sum::<usize>(),
+                Value::Array(items) => 1 + items.iter().map(count_value_nodes).sum::<usize>(),
+                _ => 1,
+            }
+        }
+        // Both branches pin `kind` with disjoint consts and the enclosing
+        // nodes never constrain the field, so every level is genuinely
+        // discriminated — the walk must report healthy, not short-circuit
+        // on a defect.
+        let deep = nested_union(10);
+        let (reason, computed) = oneof_semantic_defect_with_computations(&deep);
+        assert_eq!(reason, None, "the deep healthy union must stay usable");
+        assert!(
+            computed <= count_value_nodes(&deep),
+            "each subtree must be computed at most once: {computed} computations for {} nodes",
+            count_value_nodes(&deep)
+        );
+    }
+
+    #[test]
+    fn xai_sanitize_flattens_union_whose_witness_fields_carry_further_constraints() {
+        // The admission arms' witnesses are omission witnesses: they carry
+        // the left branch's group plus everything the enclosing schema
+        // requires. A witness is only provable when both shapes stay
+        // structural and every carried field's entry is value-permissive —
+        // a restrictive `additionalProperties` on the left branch, or a
+        // `minLength` on a carried field's entry, could reject the
+        // witness, and an unproven pair takes the flattening fallback
+        // instead of shipping a possibly unsatisfiable union.
+        let cases = [
+            // The enclosing schema requires `g`; the left branch does not
+            // declare it and closes its own property set, so the witness
+            // (forced to carry `g`) cannot match it.
+            json!({
+                "type": "object",
+                "properties": {
+                    "a": {"type": "string"},
+                    "b": {"type": "string"},
+                    "g": {"type": "string"}
+                },
+                "required": ["g"],
+                "oneOf": [
+                    {
+                        "type": "object",
+                        "properties": {"a": {"type": "string"}},
+                        "required": ["a"],
+                        "additionalProperties": false
+                    },
+                    {
+                        "type": "object",
+                        "properties": {"b": {"type": "string"}},
+                        "required": ["b"]
+                    }
+                ]
+            }),
+            // The left branch's carried field carries a `minLength` the
+            // witness's type default does not satisfy.
+            json!({
+                "type": "object",
+                "properties": {
+                    "a": {"type": "string", "minLength": 5},
+                    "b": {"type": "string"},
+                    "g": {"type": "string"}
+                },
+                "required": ["g"],
+                "oneOf": [
+                    {
+                        "type": "object",
+                        "properties": {"a": {"type": "string", "minLength": 5}},
+                        "required": ["a"]
+                    },
+                    {
+                        "type": "object",
+                        "properties": {"b": {"type": "string"}},
+                        "required": ["b"]
+                    }
+                ]
+            }),
+        ];
+        for case in cases {
+            let mut schema = case.clone();
+            let note = sanitize_for_xai_parameters(&mut schema);
+            assert_eq!(
+                schema["type"], "object",
+                "an unprovable-witness union must take the flattening fallback: {schema}"
+            );
+            assert!(
+                schema.get("oneOf").is_none() && schema.get("anyOf").is_none(),
+                "an unprovable-witness union must not reach the wire: {schema}"
+            );
+            let validator = jsonschema::options()
+                .with_draft(jsonschema::Draft::Draft202012)
+                .build(&schema)
+                .expect("the flattened schema must compile");
+            assert!(
+                validator.is_valid(&json!({"a": "xxxxx", "b": "y", "g": "z"})),
+                "a valid instance of the original union must stay valid: {case}"
+            );
+            assert_eq!(
+                note.as_deref(),
+                Some("Exactly one of these parameter groups must be provided: `a` | `b`."),
+                "the flattening fallback keeps the parameter-groups note: {case}"
+            );
+        }
     }
 
     #[test]
