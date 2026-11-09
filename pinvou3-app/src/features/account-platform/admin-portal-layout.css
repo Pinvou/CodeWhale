@@ -571,3 +571,6 @@
 .adm-restored-shell .adm-token-detail-identity small,.adm-restored-shell .adm-token-detail-stale{color:var(--adm-muted);font-size:12px}
 .adm-restored-shell .adm-token-detail-policy>summary{min-height:32px;cursor:pointer;color:var(--adm-primary)}
 .adm-restored-shell .adm-token-detail-policy>summary:focus{outline:3px solid var(--adm-primary);outline-offset:2px}
+
+.adm-restored-shell .adm-refund-provider-filter{display:grid;min-width:0;gap:5px;align-self:start}
+.adm-restored-shell .adm-refund-provider-filter small{color:var(--adm-muted);overflow-wrap:anywhere}
