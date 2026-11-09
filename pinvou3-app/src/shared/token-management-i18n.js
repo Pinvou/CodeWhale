@@ -633,3 +633,25 @@ Object.assign(tokenManagementCopy.ja.modelToken, {
   "accountRecoveryNoMatch": "このコマンド参照に一致する保留中の項目はありません。",
   "accountRecoveryEmptyPage": "このページに表示できる保留中の項目はありません。"
 });
+
+Object.assign(tokenManagementCopy.zh.modelToken, {
+  "tokenAccountDetail": "Token 账户详情",
+  "backToAccounts": "返回 Token 账户列表",
+  "tokenAccountViews": "Token 账户详情页签",
+  "tokenAccountProvisioning": "开通记录",
+  "tokenAccountProvisioningItem": "开通任务"
+});
+Object.assign(tokenManagementCopy.en.modelToken, {
+  "tokenAccountDetail": "Token account details",
+  "backToAccounts": "Back to Token accounts",
+  "tokenAccountViews": "Token account detail views",
+  "tokenAccountProvisioning": "Provisioning records",
+  "tokenAccountProvisioningItem": "Provisioning task"
+});
+Object.assign(tokenManagementCopy.ja.modelToken, {
+  "tokenAccountDetail": "トークンアカウントの詳細",
+  "backToAccounts": "トークンアカウント一覧に戻る",
+  "tokenAccountViews": "トークンアカウントの詳細タブ",
+  "tokenAccountProvisioning": "プロビジョニング履歴",
+  "tokenAccountProvisioningItem": "プロビジョニングタスク"
+});
