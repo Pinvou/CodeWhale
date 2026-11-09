@@ -234,3 +234,55 @@ Object.assign(tokenManagementCopy.ja.modelToken, {
   "modelCallReviewOperations": "ルーティングと実行を確認",
   "modelDetailSnapshot": "最後に読み込んだスナップショットを表示しています。更新中または読み込み失敗後は、現在の呼び出し状態を確認できません。"
 });
+
+Object.assign(tokenManagementCopy.zh.modelToken, {
+  "tokenAccount": "Token 账户",
+  "tokenAccounts": "Token 账户",
+  "tokenAccountStatus": "账户状态",
+  "tokenAccountStatuses": {
+    "ACTIVE": "启用",
+    "DISABLED": "已停用",
+    "FROZEN": "已冻结"
+  },
+  "tokenAccountStatusUnknown": "状态未确认",
+  "tokenAccountActiveCredentials": "已启用且验证有效的凭据",
+  "tokenAccountResolvedRoutes": "已解析引用的路由",
+  "tokenAccountMetricUnknown": "未提供",
+  "tokenAccountMetricHelp": "这两项是账户的配置计数。路由健康、可用容量与调用资格需另行核实。",
+  "tokenAccountViewCredentials": "查看该账户的凭据",
+  "tokenAccountViewRoutes": "查看该账户的路由"
+});
+Object.assign(tokenManagementCopy.en.modelToken, {
+  "tokenAccount": "Token account",
+  "tokenAccounts": "Token accounts",
+  "tokenAccountStatus": "Account status",
+  "tokenAccountStatuses": {
+    "ACTIVE": "Enabled",
+    "DISABLED": "Disabled",
+    "FROZEN": "Frozen"
+  },
+  "tokenAccountStatusUnknown": "Status not verified",
+  "tokenAccountActiveCredentials": "Enabled and validated credentials",
+  "tokenAccountResolvedRoutes": "Routes with resolved references",
+  "tokenAccountMetricUnknown": "Not provided",
+  "tokenAccountMetricHelp": "These counts describe account configuration. Verify route health, available capacity and call eligibility separately.",
+  "tokenAccountViewCredentials": "View credentials for this account",
+  "tokenAccountViewRoutes": "View routes for this account"
+});
+Object.assign(tokenManagementCopy.ja.modelToken, {
+  "tokenAccount": "トークンアカウント",
+  "tokenAccounts": "トークンアカウント",
+  "tokenAccountStatus": "アカウントの状態",
+  "tokenAccountStatuses": {
+    "ACTIVE": "有効",
+    "DISABLED": "無効",
+    "FROZEN": "凍結済み"
+  },
+  "tokenAccountStatusUnknown": "状態は未確認",
+  "tokenAccountActiveCredentials": "有効かつ検証済みの認証情報",
+  "tokenAccountResolvedRoutes": "参照を解決済みのルート",
+  "tokenAccountMetricUnknown": "未提供",
+  "tokenAccountMetricHelp": "これらはアカウントの設定件数です。ルートの健全性、利用可能な容量、呼び出し可否は別途確認してください。",
+  "tokenAccountViewCredentials": "このアカウントの認証情報を表示",
+  "tokenAccountViewRoutes": "このアカウントのルートを表示"
+});
