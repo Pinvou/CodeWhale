@@ -2650,3 +2650,4 @@ dictZh.remoteArchive = {
   unavailable: '归档存储不可用，请保留原数据并重试。',
 };
 dictZh.controllerConnection.errorArchiveCapacity = dictZh.remoteArchive.byteBudget;
+dictZh.uiSettingsDetail.modelRuntimeProtocolUnavailable = '模型尚未发布客户端支持的运行协议，请联系管理员或切换其他模型';

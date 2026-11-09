@@ -10,7 +10,7 @@ import { ComposerPopover } from '../../components/ComposerPopover.jsx';
 import { Toggle } from '../../components/Toggle.jsx';
 import { bridge, useBridgeState } from '../../hooks/useBridge.js';
 import { isBuiltInAccountPlatformModel, selectableModels } from '../../shared/model-options.js';
-import { ACCOUNT_PLATFORM_SOURCE, LOCAL_CONFIG_SOURCE, composerPlatformModels, platformModelSelectableForNewSession, sameModelSelectionRef } from '../account-platform/model-catalog-selection.js';
+import { ACCOUNT_PLATFORM_SOURCE, LOCAL_CONFIG_SOURCE, composerPlatformModels, platformModelRuntimeSupported, platformModelSelectableForNewSession, sameModelSelectionRef } from '../account-platform/model-catalog-selection.js';
 import { can } from '../../shared/platform.js';
 import { buildComposerToolMenuState, createToggleWriteGate, TOGGLE_WRITE_KEY_PROJECT_SKILLS } from './composer-tool-menu-logic.js';
 import { invokeTauri } from '../../platform/tauri/client.js';
@@ -265,7 +265,7 @@ window.addEventListener('pinvou:chat-round-committed', (event) => {
                           {platformModels.map(item => {
                             const selectable = platformModelSelectableForNewSession(item);
                             return (
-                              <button key={item.model_id} disabled={!selectable} onClick={() => pick({ source: ACCOUNT_PLATFORM_SOURCE, model_id: item.model_id })}
+                              <button key={item.model_id} disabled={!selectable} title={!platformModelRuntimeSupported(item) ? t.uiSettingsDetail.modelRuntimeProtocolUnavailable : undefined} onClick={() => pick({ source: ACCOUNT_PLATFORM_SOURCE, model_id: item.model_id })}
                                 className="w-full flex items-center justify-between gap-2 px-3 py-2 text-left rounded-xl transition-colors group hover:bg-[#007AFF] hover:text-white disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-inherit">
                                 <span className="flex items-center gap-2.5 min-w-0">
                                   <Cpu size={15} className="shrink-0 text-gray-400 group-hover:text-white/90" />

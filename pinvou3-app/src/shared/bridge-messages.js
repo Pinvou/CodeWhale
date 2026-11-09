@@ -176,11 +176,13 @@
 
   function migrationRecoveryText(text, state) {
     var match = /^(?:send_user_message failed: )?account_platform_migration_(incomplete|invalid):/.exec(text);
+    var runtimeUnavailable = /^(?:send_user_message failed: )?(?:account_platform_runtime_protocol_unavailable:|account platform model runtime protocol is missing or unsupported;)/.test(text);
     var dictionary = window.PinvouChatRecoveryCopy;
-    if (!match || !dictionary) return null;
+    if ((!match && !runtimeUnavailable) || !dictionary) return null;
     var language = state && state.settings && state.settings.language;
     var copy = dictionary[language === "en" ? "en" : language === "ja" ? "ja" : "zh"];
     if (!copy) return null;
+    if (runtimeUnavailable) return copy.modelRuntimeProtocolUnavailable;
     return match[1] === "invalid" ? copy.migrationInvalid : copy.migrationIncomplete;
   }
 

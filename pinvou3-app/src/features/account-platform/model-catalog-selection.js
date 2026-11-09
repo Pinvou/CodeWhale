@@ -1,12 +1,16 @@
 export const ACCOUNT_PLATFORM_SOURCE = 'ACCOUNT_PLATFORM';
 export const LOCAL_CONFIG_SOURCE = 'LOCAL_CONFIG';
 
+export function platformModelRuntimeSupported(item) {
+  return ['OPENAI_CHAT_V1', 'DEEPSEEK_V4_CHAT_V1'].includes(item?.runtime_protocol);
+}
+
 export function platformModelSelectableAsDefault(item) {
-  return item?.context_eligible === true && item.lifecycle_status === 'PUBLISHED';
+  return item?.context_eligible === true && item.lifecycle_status === 'PUBLISHED' && platformModelRuntimeSupported(item);
 }
 
 export function platformModelSelectableForNewSession(item, now = Date.now()) {
-  if (!item || item.context_eligible !== true) return false;
+  if (!item || item.context_eligible !== true || !platformModelRuntimeSupported(item)) return false;
   if (item.lifecycle_status === 'PUBLISHED') return true;
   if (item.lifecycle_status !== 'DEPRECATED' || !item.new_session_cutoff_at) return false;
   const cutoff = Date.parse(item.new_session_cutoff_at);

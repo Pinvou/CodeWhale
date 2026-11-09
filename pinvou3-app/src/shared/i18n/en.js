@@ -2729,3 +2729,4 @@ Object.assign(dictEn.uiSettingsDetail, {
   modelSwitchFailed:'Could not switch models. Try again.',
 });
 dictEn.uiModelReplacement = { title:'This model cannot continue the conversation', lead:'The original conversation and messages remain unchanged. Select a current model and continue in a traceable new branch.', create:'Create replacement branch', creating:'Creating…' , branchTitleSuffix:'Replacement model branch' };
+dictEn.uiSettingsDetail.modelRuntimeProtocolUnavailable = 'No supported runtime protocol has been published. Contact an administrator or choose another model.';
