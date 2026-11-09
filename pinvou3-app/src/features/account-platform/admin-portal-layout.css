@@ -647,3 +647,8 @@
 .adm-restored-shell .adm-protocol-definition-fields :is(dt,dd){margin:0}
 .adm-restored-shell .adm-protocol-definition-fields dt{color:var(--adm-muted);font-size:12px}
 .adm-shell.adm-restored-shell .adm-protocol-definition button:focus,.adm-shell.adm-restored-shell .adm-protocol-formula-workspace .adm-protocol-definition-open:focus{outline:3px solid var(--adm-primary);outline-offset:2px}
+
+.adm-restored-shell .adm-formula-explained :is(code,dd,strong,p){overflow-wrap:break-word;overflow-wrap:anywhere}
+.adm-restored-shell .adm-formula-explained-mapping{display:grid;gap:8px;margin:0;padding:0;list-style:none}
+.adm-restored-shell .adm-formula-explained-mapping>li{display:grid;gap:4px;min-width:0;padding:9px 12px;border:1px solid var(--adm-line);border-radius:8px}
+.adm-shell.adm-restored-shell .adm-protocol-formula-workspace .adm-protocol-dialog button:focus{outline:3px solid var(--adm-primary);outline-offset:2px}
