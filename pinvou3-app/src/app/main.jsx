@@ -1332,11 +1332,7 @@ const App = () => {
       const [savedConfirm, setSavedConfirm] = useState(null); // 存入成功 → iOS 确认窗 {name}
       const [poolMyOnly, setPoolMyOnly] = useState(false); // 跳卡池时是否直接落「我的卡牌」筛选(从确认窗"去查看"进来=true)
       const [webAccessOpen, setWebAccessOpen] = useState(false);
-      const {
-        open: remoteConversationOpen,
-        setOpen: setRemoteConversationOpen,
-        close: closeRemoteConversation,
-      } = useRemoteConversationVisibility();
+      const [remoteConversationOpen, setRemoteConversationOpen, closeRemoteConversation] = useRemoteConversationVisibility();
       const [remoteModelSource, setRemoteModelSource] = useState('controller_temporary');
       const remoteTemporaryModelAvailable = bs?.controllerConnection?.temporaryModelAvailable === true;
       const remoteModelLeaseKey = `${bs?.controllerConnection?.connectionId || ''}:${bs?.controllerConnection?.leaseEpoch || ''}:${remoteTemporaryModelAvailable ? 'temporary' : 'controlled'}`;

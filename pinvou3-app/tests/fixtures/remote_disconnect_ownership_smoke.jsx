@@ -23,7 +23,7 @@ const { default: Shell } = await import('../../src/features/remote-control/Remot
 
 function App() {
   const [connection, setConnection] = useState({ status: 'connected', connectionId: 'connection-1' });
-  const { open, setOpen, close } = useRemoteConversationVisibility();
+  const [open, setOpen, close] = useRemoteConversationVisibility();
   fixture.setConnection = setConnection;
   const bs = { controllerConnection: connection };
   return <>

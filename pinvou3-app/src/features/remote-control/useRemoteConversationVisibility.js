@@ -5,8 +5,8 @@ import { useCallback, useState } from 'react';
 export function useRemoteConversationVisibility() {
   const [owner, setOwner] = useState(null);
   const setOpen = useCallback(value => setOwner(value ? {} : null), []);
-  const close = useCallback(() => {
+  const close = () => {
     setOwner(current => current === owner ? null : current);
-  }, [owner]);
-  return { open: owner !== null, setOpen, close };
+  };
+  return [owner !== null, setOpen, close];
 }
