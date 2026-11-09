@@ -626,3 +626,16 @@
 .adm-restored-shell .adm-catalog-directory .adm-table .adm-secondary-id{overflow-wrap:break-word}
 .adm-restored-shell .adm-catalog-directory .adm-table button:focus{outline:3px solid #3159e8;outline-offset:2px}
 @media(max-width:600px){.adm-restored-shell .adm-catalog-directory>.adm-source-head{align-items:stretch}}
+
+.adm-restored-shell .adm-protocol-formula-workspace .adm-protocol-source-pane[hidden]{display:none}
+.adm-restored-shell .adm-protocol-formula-workspace .adm-protocol-source-tabs{display:flex;flex-wrap:wrap;gap:0;padding:3px;overflow:visible}
+.adm-restored-shell .adm-protocol-formula-workspace .adm-protocol-source-tabs>button{margin:3px;max-width:calc(100% - 6px);white-space:normal;overflow-wrap:break-word}
+.adm-restored-shell .adm-protocol-formula-workspace .adm-protocol-source-filters{display:grid;grid-template-columns:minmax(0,1fr);gap:10px;align-items:start}
+.adm-restored-shell .adm-protocol-formula-workspace .adm-protocol-filter-fields{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,185px),1fr));gap:9px}
+.adm-restored-shell .adm-protocol-formula-workspace .adm-protocol-advanced{border:1px solid var(--adm-line);border-radius:8px;padding:8px 10px}
+.adm-restored-shell .adm-protocol-formula-workspace .adm-protocol-advanced>summary{cursor:pointer}
+.adm-restored-shell .adm-protocol-formula-workspace .adm-protocol-advanced>summary>small{margin-inline-start:8px;color:var(--adm-muted)}
+.adm-restored-shell .adm-protocol-formula-workspace .adm-protocol-advanced>.adm-protocol-filter-fields{margin-top:9px}
+.adm-restored-shell .adm-protocol-formula-workspace .adm-protocol-filter-actions{display:flex;flex-wrap:wrap;margin:-3px}
+.adm-restored-shell .adm-protocol-formula-workspace .adm-protocol-filter-actions>button{width:auto;max-width:calc(100% - 6px);min-width:0;margin:3px;padding:0 14px;white-space:normal;overflow-wrap:break-word}
+.adm-shell.adm-restored-shell .adm-protocol-formula-workspace .adm-protocol-source-tabs>button:focus,.adm-shell.adm-restored-shell .adm-protocol-formula-workspace .adm-protocol-source-filters :is(summary,input,select,button):focus{outline:3px solid var(--adm-primary);outline-offset:2px}

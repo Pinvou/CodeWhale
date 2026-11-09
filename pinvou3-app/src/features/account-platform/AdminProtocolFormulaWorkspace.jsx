@@ -18,7 +18,13 @@ function useSource(load, query, refreshVersion) {
       query,
       load,
       signal: controller.signal,
-      transition: (event) => setState((previous) => reduceAdminSourceState(previous, event)),
+      transition: (event) => setState(previous => {
+        const next = reduceAdminSourceState(previous, event);
+        if (next === previous) return next;
+        if (event.type === 'failure' && [401, 403].includes(event.error?.status)) return { ...next, readDenied: true };
+        if (event.type === 'success') return { ...next, readDenied: false };
+        return next;
+      }),
     });
     return () => controller.abort();
   }, [load, queryKey, refreshVersion]);
@@ -39,18 +45,27 @@ function Filter({ source, query, copy, fields, onChange }) {
     const instant = new Date(value);
     return Number.isNaN(instant.getTime()) ? '' : new Date(instant.getTime() - instant.getTimezoneOffset() * 60_000).toISOString().slice(0, 16);
   };
-  return <form className="adm-model-token-filters" onSubmit={(event) => { event.preventDefault(); onChange(source, { ...submittedQuery(), cursor: '' }); }}>
-    {fields.map((field) => <label key={field.key}><span>{field.label}</span>{field.options
-      ? <select value={draft[field.key] || ''} onChange={(event) => setDraft((value) => ({ ...value, [field.key]: event.target.value }))}><option value="">{copy.all}</option>{field.options.map((option) => <option key={option} value={option}>{copy.enumLabels[option] || option}</option>)}</select>
-      : <input type={field.type || 'search'} value={fieldValue(field)} placeholder={field.placeholder || ''} onChange={(event) => setDraft((value) => ({ ...value, [field.key]: event.target.value }))} />}</label>)}
-    <button type="submit">{copy.search}</button><button type="button" className="secondary" onClick={() => onChange(source, Object.fromEntries(Object.keys(query).map((key) => [key, ''])))}>{copy.clear}</button>
+  const common = fields.filter(field => ['q', 'status'].includes(field.key));
+  const advanced = fields.filter(field => !common.includes(field));
+  const count = advanced.filter(field => Boolean(query[field.key])).length;
+  const control = field => <label key={field.key}><span>{field.label}</span>{field.options
+    ? <select value={draft[field.key] || ''} onChange={event => setDraft(value => ({ ...value, [field.key]: event.target.value }))}><option value="">{copy.all}</option>{field.options.map(option => <option key={option} value={option}>{copy.enumLabels[option] || option}</option>)}</select>
+    : <input type={field.type || 'search'} value={fieldValue(field)} placeholder={field.placeholder || ''} onChange={event => setDraft(value => ({ ...value, [field.key]: event.target.value }))} />}</label>;
+  const clear = () => {
+    const empty = Object.fromEntries(Object.keys(query).map(key => [key, '']));
+    setDraft(empty); onChange(source, empty);
+  };
+  return <form className="adm-model-token-filters adm-protocol-source-filters" onSubmit={event => { event.preventDefault(); onChange(source, { ...submittedQuery(), cursor: '' }); }}>
+    <div className="adm-protocol-filter-fields">{common.map(control)}</div>
+    <details className="adm-protocol-advanced"><summary>{copy.protocolTaskViews.advanced}{count > 0 && <small>{copy.protocolTaskViews.applied(count)}</small>}</summary><div className="adm-protocol-filter-fields">{advanced.map(control)}</div></details>
+    <div className="adm-protocol-filter-actions"><button type="submit">{copy.search}</button><button type="button" className="secondary" onClick={clear}>{copy.clear}</button></div>
   </form>;
 }
 
-function Feedback({ state, copy, retry }) {
-  if (state.error) return <div className="adm-source-error" role="alert"><strong>{state.error.status === 410 ? copy.cursorExpired : copy.sourceUnavailable}</strong><span>{state.error.requestID ? `${copy.requestID}: ${state.error.requestID}` : copy.retryHelp}</span><button type="button" onClick={retry}>{copy.retry}</button></div>;
+function Feedback({ state, copy, retry, filtered }) {
+  if (state.error) return <div className="adm-source-error" role="alert"><strong>{state.error.status === 410 ? copy.cursorExpired : [401, 403].includes(state.error.status) ? copy.protocolTaskViews.noAccess : copy.sourceUnavailable}</strong><span>{state.error.requestID ? `${copy.requestID}: ${state.error.requestID}` : copy.retryHelp}</span><button type="button" onClick={retry}>{copy.retry}</button></div>;
   if (state.loading && !state.items.length) return <div className="adm-source-state" role="status">{copy.loading}</div>;
-  if (!state.loading && !state.items.length) return <div className="adm-source-state">{copy.noResults}</div>;
+  if (!state.loading && !state.items.length) return <div className="adm-source-state">{filtered ? copy.noResults : copy.protocolTaskViews.empty}</div>;
   return null;
 }
 
@@ -169,6 +184,10 @@ function protocolFormulaDescriptor(next) {
 export function AdminProtocolFormulaWorkspace({ client, copy, canManage, routeVersion, onRouteChange, cursorHistory }) {
   const protocolQuery = useMemo(() => readAdminModelTokenQuery('protocols'), [routeVersion]);
   const formulaQuery = useMemo(() => readAdminModelTokenQuery('formulas'), [routeVersion]);
+  const sourceViewID = React.useId();
+  const requestedPane = useMemo(() => new URLSearchParams(globalThis.location?.search || '').get('protocol_formula_pane'), [routeVersion]);
+  const hasFilters = query => Object.entries(query).some(([key, value]) => key !== 'cursor' && Boolean(value));
+  const currentPane = ['protocols', 'formulas'].includes(requestedPane) ? requestedPane : !Object.values(protocolQuery).some(Boolean) && Object.values(formulaQuery).some(Boolean) ? 'formulas' : 'protocols';
   const [protocolRefresh, setProtocolRefresh] = useState(0);
   const [formulaRefresh, setFormulaRefresh] = useState(0);
   const [units, setUnits] = useState({ items: [], loading: canManage, error: null, updatedAt: null });
@@ -251,19 +270,32 @@ export function AdminProtocolFormulaWorkspace({ client, copy, canManage, routeVe
     try { setPreview({ loading: true }); const payload = await client.previewFormula(item.formula_version_id); const summary = safeFormulaPreviewSummary(payload); setPreview(summary.deterministic && !summary.externalAccess ? summary : { error: { code: 'UNSAFE_PREVIEW', requestID: '' } }); }
     catch (error) { setPreview({ error: safeProtocolFormulaFailure(error) }); }
   };
+  const setPane = pane => { if (pane !== currentPane && !action && !preview) onRouteChange({ protocol_formula_pane: pane }, 'push'); };
+  const tabKeys = event => {
+    if (action || preview || !['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+    const buttons = Array.from(event.currentTarget.querySelectorAll('[role=tab]'));
+    const index = buttons.indexOf(document.activeElement);
+    if (index < 0 || buttons.length !== 2) return;
+    event.preventDefault();
+    const next = event.key === 'Home' ? 0 : event.key === 'End' ? 1 : 1 - index;
+    buttons[next].focus(); buttons[next].click();
+  };
   return <div className="adm-protocol-formula-workspace">
+    <div className="adm-tabs adm-protocol-source-tabs" role="tablist" aria-label={copy.protocolTaskViews.label} onKeyDown={tabKeys}>
+      {[['protocols', copy.protocolDefinitions], ['formulas', copy.safeFormulas]].map(([key, label]) => <button key={key} type="button" role="tab" id={sourceViewID + '-tab-' + key} aria-controls={sourceViewID + '-panel-' + key} aria-selected={currentPane === key} tabIndex={currentPane === key ? 0 : -1} className={currentPane === key ? 'active' : ''} onClick={() => setPane(key)}>{label}</button>)}
+    </div>
     {receipt && <div className="adm-inline-message success" role="status"><strong>{copy.commandCompleted}</strong><span>{copy.commandReference}: {receipt.commandReference}</span><span>{copy.actionAuditReference}: {receipt.auditRequestID}</span>{receipt.billingValidation && <span>{copy.billingValidation}: {copy.verifiedUnits(receipt.verifiedUnitCount)}</span>}{receipt.billingSync && <span>{copy.billingSync}: {copy.enumLabels[receipt.billingSync] || receipt.billingSync} · {copy.verifiedUnits(receipt.verifiedUnitCount)}</span>}</div>}
     {canManage && <div className={`adm-billing-authority ${units.error ? 'error' : ''}`} role={units.error ? 'alert' : 'status'}><div><strong>{copy.billingAuthority}</strong><span>{units.error ? copy.billingUnitsUnavailable : units.loading ? copy.loading : copy.billingUnitsReady(units.items.filter((unit) => unit.status === 'ACTIVE').length)}</span></div>{units.error && <button type="button" onClick={loadUnits}>{copy.retry}</button>}</div>}
-    <section className="adm-card adm-source-card" aria-labelledby="protocols-title"><SourceHead title={copy.protocolDefinitions} titleID="protocols-title" state={protocols} copy={copy} retry={() => retry('protocols', protocols, protocolQuery, setProtocolRefresh)} action={canManage && <button type="button" onClick={() => setAction({ type: 'PROTOCOL_DRAFT', expectedHeadVersion: 0, idempotencyKey: createProtocolFormulaIdempotencyKey('protocol-draft') })}>{copy.createProtocolDraft}</button>} />
+    <section className="adm-card adm-source-card adm-protocol-source-pane" role="tabpanel" id={sourceViewID + '-panel-protocols'} aria-labelledby={sourceViewID + '-tab-protocols'} hidden={currentPane !== 'protocols'}><SourceHead title={copy.protocolDefinitions} titleID="protocols-title" state={protocols} copy={copy} retry={() => retry('protocols', protocols, protocolQuery, setProtocolRefresh)} action={canManage && <button type="button" onClick={() => setAction({ type: 'PROTOCOL_DRAFT', expectedHeadVersion: 0, idempotencyKey: createProtocolFormulaIdempotencyKey('protocol-draft') })}>{copy.createProtocolDraft}</button>} />
       <Filter source="protocols" query={protocolQuery} copy={copy} onChange={onChange} fields={[{ key: 'q', label: copy.protocolSearch, placeholder: copy.protocolSearchPlaceholder }, { key: 'status', label: copy.status, options: ['DRAFT', 'PUBLISHED', 'DEPRECATED'] }, { key: 'protocol_code', label: copy.protocolCode }, { key: 'published', label: copy.publishedFilter, options: ['true', 'false'] }, { key: 'created_from', label: copy.createdFrom, type: 'datetime-local' }, { key: 'created_to', label: copy.createdTo, type: 'datetime-local' }]} />
-      <Feedback state={protocols} copy={copy} retry={() => retry('protocols', protocols, protocolQuery, setProtocolRefresh)} />
-      {protocols.items.length > 0 && <div className="adm-table-wrap"><table className="adm-table"><thead><tr><th>{copy.protocol}</th><th>{copy.version}</th><th>{copy.status}</th><th>{copy.schemaSummary}</th><th>{copy.createdAt}</th><th>{copy.actions}</th></tr></thead><tbody>{protocols.items.map((item) => <tr key={item.protocol_definition_id}><td data-label={copy.protocol}><strong>{item.protocol_code}</strong><small className="adm-secondary-id">{item.protocol_definition_id}</small></td><td data-label={copy.version}>v{item.version}</td><td data-label={copy.status}><Status value={item.status} copy={copy} /></td><td data-label={copy.schemaSummary}>{copy.schemaFields(Object.keys(item.request_schema?.properties || {}).length)}</td><td data-label={copy.createdAt}>{new Date(item.created_at).toLocaleString()}</td><td data-label={copy.actions}><div className="adm-row-actions">{canManage && item.status === 'DRAFT' && <button type="button" onClick={() => setAction({ type: 'PROTOCOL_PUBLISH', item, idempotencyKey: createProtocolFormulaIdempotencyKey('protocol-publish') })}>{copy.publish}</button>}{canManage && item.status === 'PUBLISHED' && <button type="button" disabled={units.loading || Boolean(units.error)} onClick={() => openFormulaDraft(item)}>{copy.createFormulaDraft}</button>}</div></td></tr>)}</tbody></table></div>}
+      <Feedback state={protocols} copy={copy} filtered={hasFilters(protocolQuery)} retry={() => retry('protocols', protocols, protocolQuery, setProtocolRefresh)} />
+      {!protocols.readDenied && protocols.items.length > 0 && <div className="adm-table-wrap"><table className="adm-table"><thead><tr><th>{copy.protocol}</th><th>{copy.version}</th><th>{copy.status}</th><th>{copy.schemaSummary}</th><th>{copy.createdAt}</th><th>{copy.actions}</th></tr></thead><tbody>{protocols.items.map((item) => <tr key={item.protocol_definition_id}><td data-label={copy.protocol}><strong>{item.protocol_code}</strong><small className="adm-secondary-id">{item.protocol_definition_id}</small></td><td data-label={copy.version}>v{item.version}</td><td data-label={copy.status}><Status value={item.status} copy={copy} /></td><td data-label={copy.schemaSummary}>{copy.schemaFields(Object.keys(item.request_schema?.properties || {}).length)}</td><td data-label={copy.createdAt}>{new Date(item.created_at).toLocaleString()}</td><td data-label={copy.actions}><div className="adm-row-actions">{canManage && item.status === 'DRAFT' && <button type="button" onClick={() => setAction({ type: 'PROTOCOL_PUBLISH', item, idempotencyKey: createProtocolFormulaIdempotencyKey('protocol-publish') })}>{copy.publish}</button>}{canManage && item.status === 'PUBLISHED' && <button type="button" disabled={units.loading || Boolean(units.error)} onClick={() => openFormulaDraft(item)}>{copy.createFormulaDraft}</button>}</div></td></tr>)}</tbody></table></div>}
       <Paging source="protocols" query={protocolQuery} state={protocols} copy={copy} cursorHistory={cursorHistory} onChange={onChange} />
     </section>
-    <section className="adm-card adm-source-card" aria-labelledby="formulas-title"><SourceHead title={copy.safeFormulas} titleID="formulas-title" state={formulas} copy={copy} retry={() => retry('formulas', formulas, formulaQuery, setFormulaRefresh)} />
+    <section className="adm-card adm-source-card adm-protocol-source-pane" role="tabpanel" id={sourceViewID + '-panel-formulas'} aria-labelledby={sourceViewID + '-tab-formulas'} hidden={currentPane !== 'formulas'}><SourceHead title={copy.safeFormulas} titleID="formulas-title" state={formulas} copy={copy} retry={() => retry('formulas', formulas, formulaQuery, setFormulaRefresh)} />
       <Filter source="formulas" query={formulaQuery} copy={copy} onChange={onChange} fields={[{ key: 'q', label: copy.formulaSearch, placeholder: copy.formulaSearchPlaceholder }, { key: 'status', label: copy.status, options: ['DRAFT', 'PUBLISHED', 'DEPRECATED'] }, { key: 'protocol_definition_id', label: copy.protocolID }, { key: 'metering_unit_code', label: copy.unitCode }, { key: 'published', label: copy.publishedFilter, options: ['true', 'false'] }, { key: 'created_from', label: copy.createdFrom, type: 'datetime-local' }, { key: 'created_to', label: copy.createdTo, type: 'datetime-local' }]} />
-      <Feedback state={formulas} copy={copy} retry={() => retry('formulas', formulas, formulaQuery, setFormulaRefresh)} />
-      {formulas.items.length > 0 && <div className="adm-table-wrap"><table className="adm-table"><thead><tr><th>{copy.protocol}</th><th>{copy.version}</th><th>{copy.status}</th><th>{copy.units}</th><th>{copy.safety}</th><th>{copy.billingSync}</th><th>{copy.actions}</th></tr></thead><tbody>{formulas.items.map((item) => <tr key={item.formula_version_id}><td data-label={copy.protocol}><strong>{item.protocol_code}</strong><small className="adm-secondary-id">{item.formula_version_id}</small></td><td data-label={copy.version}>v{item.version}</td><td data-label={copy.status}><Status value={item.status} copy={copy} /></td><td data-label={copy.units}>{Object.keys(item.required_unit_versions || {}).sort().join(', ')}</td><td data-label={copy.safety}>{copy.safeEvaluator}</td><td data-label={copy.billingSync}><Status value={item.status === 'PUBLISHED' ? 'SYNCHRONIZED' : 'PENDING'} copy={copy} /></td><td data-label={copy.actions}><div className="adm-row-actions"><button type="button" onClick={() => openPreview(item)}>{copy.preview}</button>{canManage && item.status === 'DRAFT' && <button type="button" onClick={() => setAction({ type: 'FORMULA_PUBLISH', item, idempotencyKey: createProtocolFormulaIdempotencyKey('formula-publish') })}>{copy.publish}</button>}</div></td></tr>)}</tbody></table></div>}
+      <Feedback state={formulas} copy={copy} filtered={hasFilters(formulaQuery)} retry={() => retry('formulas', formulas, formulaQuery, setFormulaRefresh)} />
+      {!formulas.readDenied && formulas.items.length > 0 && <div className="adm-table-wrap"><table className="adm-table"><thead><tr><th>{copy.protocol}</th><th>{copy.version}</th><th>{copy.status}</th><th>{copy.units}</th><th>{copy.safety}</th><th>{copy.billingSync}</th><th>{copy.actions}</th></tr></thead><tbody>{formulas.items.map((item) => <tr key={item.formula_version_id}><td data-label={copy.protocol}><strong>{item.protocol_code}</strong><small className="adm-secondary-id">{item.formula_version_id}</small></td><td data-label={copy.version}>v{item.version}</td><td data-label={copy.status}><Status value={item.status} copy={copy} /></td><td data-label={copy.units}>{Object.keys(item.required_unit_versions || {}).sort().join(', ')}</td><td data-label={copy.safety}>{copy.safeEvaluator}</td><td data-label={copy.billingSync}><Status value={item.status === 'PUBLISHED' ? 'SYNCHRONIZED' : 'PENDING'} copy={copy} /></td><td data-label={copy.actions}><div className="adm-row-actions"><button type="button" onClick={() => openPreview(item)}>{copy.preview}</button>{canManage && item.status === 'DRAFT' && <button type="button" onClick={() => setAction({ type: 'FORMULA_PUBLISH', item, idempotencyKey: createProtocolFormulaIdempotencyKey('formula-publish') })}>{copy.publish}</button>}</div></td></tr>)}</tbody></table></div>}
       <Paging source="formulas" query={formulaQuery} state={formulas} copy={copy} cursorHistory={cursorHistory} onChange={onChange} />
     </section>
     {action && canManage && <Dialog action={action} copy={copy} units={units.items} busy={busy} onClose={() => setAction(null)} onSubmit={runAction} />}

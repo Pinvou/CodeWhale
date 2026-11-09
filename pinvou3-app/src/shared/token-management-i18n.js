@@ -697,3 +697,10 @@ const catalogListCopy = {
   ja: { locale: 'ja-JP', tokenLength: 'コンテキスト長（トークン）', unknown: '未提供', listDenied: 'モデルカタログの読み取り権限がありません', empty: '現在のカタログにモデルはありません。', noMatches: '適用した条件に一致するモデルはありません。', stale: '下には前回正常に読み取った結果を表示しています。' },
 };
 for (const language of ['zh', 'en', 'ja']) Object.assign(tokenManagementCopy[language].modelToken.catalogDirectory, catalogListCopy[language]);
+
+const protocolTaskViews = {
+  zh: { label: '协议与公式任务', advanced: '高级筛选', applied: count => '已应用 ' + count + ' 项', noAccess: '当前无权读取此列表', empty: '此列表暂无记录。' },
+  en: { label: 'Protocol and formula tasks', advanced: 'Advanced filters', applied: count => count + ' applied', noAccess: 'You do not have access to this list', empty: 'This list has no records yet.' },
+  ja: { label: 'プロトコルと計算式の操作', advanced: '詳細フィルター', applied: count => count + ' 件適用中', noAccess: 'この一覧の読み取り権限がありません', empty: 'この一覧にレコードはありません。' },
+};
+for (const language of ['zh', 'en', 'ja']) tokenManagementCopy[language].modelToken.protocolTaskViews = protocolTaskViews[language];
