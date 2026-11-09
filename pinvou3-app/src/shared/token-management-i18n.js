@@ -704,3 +704,10 @@ const protocolTaskViews = {
   ja: { label: 'プロトコルと計算式の操作', advanced: '詳細フィルター', applied: count => count + ' 件適用中', noAccess: 'この一覧の読み取り権限がありません', empty: 'この一覧にレコードはありません。' },
 };
 for (const language of ['zh', 'en', 'ja']) tokenManagementCopy[language].modelToken.protocolTaskViews = protocolTaskViews[language];
+
+const protocolDefinitionViews = {
+  zh: { title: '协议定义详情', open: '查看协议定义', snapshot: '来自当前列表快照', unavailable: '当前获准列表没有该协议版本。', unknown: '未提供字段声明', unsupported: '无法确认字段结构', empty: '此版本没有声明字段；这不代表接受任意输入。', additionalAllowed: '此结构明确允许额外字段。', additionalDenied: '此结构明确不允许额外字段。', type: '字段类型', requirement: '是否必填', required: '必填', notRequired: '非必填', notDeclared: '未声明' },
+  en: { title: 'Protocol definition details', open: 'View protocol definition', snapshot: 'From the current list snapshot', unavailable: 'This protocol version is not in the current authorized list.', unknown: 'No field declaration was provided', unsupported: 'The field structure could not be verified', empty: 'This version declares no fields. This does not imply arbitrary input is allowed.', additionalAllowed: 'This schema explicitly allows additional fields.', additionalDenied: 'This schema explicitly disallows additional fields.', type: 'Field type', requirement: 'Requirement', required: 'Required', notRequired: 'Not required', notDeclared: 'Not declared' },
+  ja: { title: 'プロトコル定義の詳細', open: 'プロトコル定義を表示', snapshot: '現在の一覧スナップショット', unavailable: '現在許可されている一覧にこのバージョンがありません。', unknown: 'フィールド宣言が提供されていません', unsupported: 'フィールド構造を確認できません', empty: 'このバージョンには宣言済みフィールドがありません。任意入力を許可する意味ではありません。', additionalAllowed: 'このスキーマは追加フィールドを明示的に許可しています。', additionalDenied: 'このスキーマは追加フィールドを明示的に禁止しています。', type: 'フィールド型', requirement: '必須条件', required: '必須', notRequired: '必須ではない', notDeclared: '宣言なし' },
+};
+for (const language of ['zh', 'en', 'ja']) tokenManagementCopy[language].modelToken.protocolDefinitionView = protocolDefinitionViews[language];
