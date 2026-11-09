@@ -5,6 +5,7 @@ import {
 } from './admin-financial-repair-form.js';
 import { useFinanceOperation } from './useFinanceOperation.js';
 import { AdminRepairRelationship } from './AdminRepairRelationship.jsx';
+import { AdminRepairApprovalReceipt, AdminRepairImpact } from './AdminRepairImpact.jsx';
 import { createAndSubmitFreshGovernedApproval } from './admin-governed-approval-workflow.js';
 
 const paymentRepairCommandTypes = Object.freeze(['PAYMENT_FINANCIAL_REPAIR']);
@@ -22,7 +23,7 @@ export function AdminPaymentFinancialRepairForm({ client, copy, onCreated, owner
   const [requestKey, setRequestKey] = useState('');
   const [busy, setBusy] = useState('');
   const [failure, setFailure] = useState('');
-  const [created, setCreated] = useState('');
+  const [created, setCreated] = useState(null);
   const [needsAuthentication, setNeedsAuthentication] = useState(false);
   const factsRevision = useRef(0);
   const mounted = useRef(false);
@@ -58,7 +59,7 @@ export function AdminPaymentFinancialRepairForm({ client, copy, onCreated, owner
     setFacts(null);
     setProjection(null);
     setFailure('');
-    setCreated('');
+    setCreated(null);
   };
   const changeCommand = (next) => {
     factsRevision.current += 1;
@@ -68,7 +69,7 @@ export function AdminPaymentFinancialRepairForm({ client, copy, onCreated, owner
     setFacts(null);
     setProjection(null);
     setFailure('');
-    setCreated('');
+    setCreated(null);
   };
 
   const readFacts = async (event) => {
@@ -86,7 +87,7 @@ export function AdminPaymentFinancialRepairForm({ client, copy, onCreated, owner
     setBusy('facts');
     setNeedsAuthentication(false);
     setFailure('');
-    setCreated('');
+    setCreated(null);
     try {
       const answer = await client.approvalCommandPrecheck(prepared.body);
       if (!live()) return;
@@ -131,7 +132,7 @@ export function AdminPaymentFinancialRepairForm({ client, copy, onCreated, owner
         }
       });
       if (result && live()) {
-        setCreated(result.approval_request_id); setProjection(null); setFacts(null);
+        setCreated({ approval_request_id: result.approval_request_id, status: result.status }); setProjection(null); setFacts(null);
         setValues({}); setReason(''); setRequestKey(''); onCreated?.(result.approval_request_id);
       }
       return;
@@ -140,7 +141,7 @@ export function AdminPaymentFinancialRepairForm({ client, copy, onCreated, owner
 
   return <section className="adm-financial-repair" aria-label={copy.title}>
     <h3>{copy.title}</h3>
-    <p>{copy.lead}</p>
+    <p>{copy.paymentImpact?.scenario || copy.lead}</p>
     {governed && operation.error && <p role="alert">{operation.error}</p>}
     {needsAuthentication && <div className="adm-payment-repair-reauthentication"><p>{copy.writeOffRecentAuthenticationRequired}</p><button type="button" disabled={busy !== '' || operation.busy} onClick={() => client.reauthenticate('/admin.html')}>{copy.reauthenticate}</button></div>}
     {copy.paymentRelation && <p className="adm-repair-relationship-intro">{copy.paymentRelation.intro}</p>}
@@ -157,9 +158,11 @@ export function AdminPaymentFinancialRepairForm({ client, copy, onCreated, owner
       <button type="submit" disabled={locked}>{busy === 'facts' ? copy.reading : copy.readFacts}</button>
     </form>
     {failure && <p role="alert">{failure}</p>}
-    {created && <p role="status">{copy.createdHint} <code>{created}</code></p>}
+    <AdminRepairApprovalReceipt words={copy.paymentImpact} receipt={created} />
     <AdminRepairRelationship words={copy.paymentRelation} projection={projection} reading={busy === 'facts'} pending={operation.unknown}
       normalizedKeys={["payment_order_id","payment_evidence_id"]} snapshotKeys={["provider_transaction_id","amount_fen"]} />
+    <AdminRepairImpact words={copy.paymentImpact} fields={[["credit_microcredits","points"],["applied_to_receivables","points"],["wallet_id","id"],["current_wallet_balance","missing"]]}
+      snapshot={busy !== 'facts' && !operation.unknown ? projection?.financial_snapshot : null} />
     {busy !== 'facts' && displayedFacts && <div className="adm-financial-repair-facts">
       <h4>{copy.frozenFacts}</h4>
       <dl>{displayedFacts.rows.map((row) => <div key={row.key}><dt>{copy.fields[row.key] || row.key}</dt><dd><code>{row.value}</code></dd></div>)}</dl>
