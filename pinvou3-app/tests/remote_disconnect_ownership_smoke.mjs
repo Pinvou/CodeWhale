@@ -15,6 +15,11 @@ const chrome = process.env.CHROME || [
 ].find(candidate => fs.existsSync(candidate));
 if (!chrome) { console.error('SKIP: Chrome/Edge unavailable'); process.exit(2); }
 const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'pinvou-remote-disconnect-'));
+function removeOwnedProfile() {
+  const resolved = fs.realpathSync(profile);
+  if (path.dirname(resolved) !== fs.realpathSync(os.tmpdir())) throw new Error('Unexpected profile parent');
+  fs.rmSync(resolved, { recursive: true, force: true });
+}
 let browser, vite;
 try {
   vite = await createServer({ root, configFile: false, appType: 'mpa', logLevel: 'error',
@@ -98,7 +103,5 @@ try {
 } finally {
   if (browser) await browser.close();
   if (vite) await vite.close();
-  const resolved = fs.realpathSync(profile);
-  if (path.dirname(resolved) !== fs.realpathSync(os.tmpdir())) throw new Error('Unexpected profile parent');
-  fs.rmSync(resolved, { recursive: true, force: true });
+  removeOwnedProfile();
 }
