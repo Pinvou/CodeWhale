@@ -333,6 +333,7 @@ EXACT_REQUIRED_CHILDREN = {
         "installed-f05-34-upgrade", "retained-management-lifecycle-upgrade",
         "installed-f07-36-upgrade", "installed-pre-runtime-37-upgrade",
         "installed-pre-cleanup-39-upgrade",
+        "installed-pre-dispatch-index-40-upgrade",
     },
     "TestUserUnusedIntentCancellationOwnerPostgres": {
         "before-claim", "after-claim", "waiting-owner-does-not-starve-later-target", "acquired-intent-control", "model-first-control",
