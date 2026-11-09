@@ -55,9 +55,17 @@ export function AdminPaymentReviewQueue({ client, copy, me, anomaly = false, rou
     if (id && !busy && !blocked && attemptedDetail.current !== id) { attemptedDetail.current = id; void open(id).then(started => { if (!started && attemptedDetail.current === id) attemptedDetail.current = ''; }); }
     if (!id) { attemptedDetail.current = ''; if (route && !blocked) setDetail(null); }
   }, [client, owner, filters.selectedID, busy, blocked, operation.error, page]);
-  const execute = (facts, key) => {
+  const execute = async (facts, key) => {
     switch (facts.action) {
-      case 'claim': return anomaly ? client.claimPaymentAnomaly(facts.id, key) : client.claimLatePaymentReview(facts.id);
+      case 'claim':
+        try {
+          return await (anomaly ? client.claimPaymentAnomaly(facts.id, key) : client.claimLatePaymentReview(facts.id));
+        } catch (error) {
+          // A concurrent assignment or resolution is a claim conflict, not a
+          // permission change. Keep transport uncertainty in the shared hook.
+          if (error.status === 409) error.financeReviewClaimConflict = true;
+          throw error;
+        }
       case 'query': return client.queryLatePaymentReview(facts.id, facts, key);
       case 'schedule': return client.scheduleLatePaymentReview(facts.id, facts.nextReview, facts.reason, key, facts.commandProtocol);
       case 'archive': return client.archiveLatePaymentReview(facts.id, key, facts.commandProtocol);
@@ -114,7 +122,8 @@ export function AdminPaymentReviewQueue({ client, copy, me, anomaly = false, rou
     {route && filters.selectedID && <nav><button disabled={busy || blocked} onClick={() => filters.move(filters.query, null)}>{adminLayoutCopy[language].backToDirectory}</button><code>{filters.selectedID}</code>{operation.error && !blocked && <button disabled={busy} onClick={() => void open(filters.selectedID)}>{copy.retry}</button>}</nav>}
     {item && <article><h4>{item.case_id}</h4><p>{reviewStatus(item)} / {item.severity} / {copy.owner}: {item.owner_id || copy.empty}</p><p>{item.claim_due_at}<br />{item.first_response_due_at}<br />{item.mitigation_due_at}<br />{item.resolution_due_at}</p>
       <label>{copy.reason}<textarea disabled={busy || blocked} maxLength={2000} value={reason} onChange={event => setReason(event.target.value)} /></label>
-      {canQuery && active && !owned && <button disabled={busy || blocked} onClick={() => void act('claim')}>{copy.claimCase}</button>}
+      {active && item.owner_id && !owned && <p role="status">{copy.reviewAssignedOther}</p>}
+      {canQuery && active && !item.owner_id && <button disabled={busy || blocked} onClick={() => void act('claim')}>{copy.claimCase}</button>}
       {owned && active && !anomaly && canQuery && <><button disabled={busy || blocked || query.retired} onClick={confirmQuery}>{copy.query}</button>{(query.unknown || legacyQuery) && <button disabled={busy || query.retired || (operation.unknown && !legacyQuery)} onClick={confirmQuery}>{copy.newQuery}</button>}<label>{copy.nextReview}<input type="datetime-local" value={nextReview} onChange={event => setNextReview(event.target.value)} /></label><button disabled={busy || blocked || !nextReview || !reason.trim()} onClick={() => void act('schedule')}>{copy.schedule}</button><button disabled={busy || blocked || item.review_status !== 'REVIEW_REQUIRED_LATE_PAYMENT'} onClick={() => void act('archive')}>{copy.archive}</button><button disabled={busy || blocked || reason.trim().length < 10} onClick={() => void act('provider-blind')}>{copy.escalate}</button></>}
       {owned && active && anomaly && canRepair && <><label>{copy.resolution}<select value={resolution} onChange={event => setResolution(event.target.value)}><option value="">{copy.resolution}</option>{resolutions.map(value => <option key={value} value={value}>{copy.resolutions[value]}</option>)}</select></label>{resolution === 'RECONCILE_REFUND' && <p>{copy.refundReconcileHelp}</p>}<button disabled={busy || blocked || !resolutions.includes(resolution) || reason.trim().length < 10} onClick={() => void act('resolve')}>{copy.resolve}</button></>}
       <ul>{(detail.events || []).map(value => <li key={value.event_id || value.id}>{value.event_type} / {value.created_at}</li>)}</ul>
