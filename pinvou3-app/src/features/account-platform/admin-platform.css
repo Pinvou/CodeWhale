@@ -25,3 +25,13 @@
 .adm-registration-bonus .adm-registration-bonus-lifetime p{margin:0;overflow-wrap:break-word;overflow-wrap:anywhere}
 .adm-registration-bonus .adm-registration-bonus-lifetime p+p{margin-top:4px}
 .adm-registration-bonus-diff .adm-registration-bonus-impact{padding:8px;border-left:3px solid var(--adm-line-strong);background:var(--adm-soft);border-radius:4px}
+
+.adm-registration-bonus .adm-sms-form{gap:12px;margin-top:16px}
+.adm-registration-bonus .adm-registration-bonus-editor{gap:12px}
+.adm-registration-bonus .adm-registration-bonus-editor .adm-sms-switch{padding-bottom:10px}
+.adm-registration-bonus .adm-registration-bonus-editor .adm-sms-fields{gap:12px}
+.adm-registration-bonus .adm-registration-bonus-editor small{font-size:12px;font-weight:400;line-height:1.45;overflow-wrap:break-word;overflow-wrap:anywhere}
+.adm-registration-bonus .adm-registration-bonus-reason-help{display:flex;justify-content:space-between;flex-wrap:wrap;gap:4px 12px;min-width:0}
+.adm-registration-bonus .adm-registration-bonus-field-error{color:var(--adm-danger,#a52837)}
+.adm-registration-bonus .adm-registration-bonus-editor input:focus,.adm-registration-bonus .adm-registration-bonus-editor textarea:focus{outline:3px solid var(--adm-primary);outline-offset:2px}
+@media(max-width:760px){.adm-registration-bonus .adm-registration-bonus-editor .adm-sms-fields{grid-template-columns:minmax(0,1fr)}.adm-registration-bonus .adm-registration-bonus-editor input,.adm-registration-bonus .adm-registration-bonus-editor textarea{min-width:0}}
