@@ -161,6 +161,55 @@ function PreviewFailure({ failure, copy, onClose }) {
   return <div className="adm-protocol-dialog-backdrop"><section ref={root} className="adm-protocol-dialog adm-formula-preview" role="dialog" aria-modal="true" aria-labelledby="formula-preview-error-title" onKeyDown={(event) => { keepDialogFocus(event, root.current); if (event.key === 'Escape') onClose(); }}><div className="adm-source-error" role="alert"><strong id="formula-preview-error-title">{copy.previewFailed}</strong>{failure.requestID && <span>{copy.requestID}: {failure.requestID}</span>}<button ref={close} type="button" onClick={onClose}>{copy.close}</button></div></section></div>;
 }
 
+const schemaRecord = value => Boolean(value && typeof value === 'object' && !Array.isArray(value));
+const ownSchemaKey = (value, key) => Object.prototype.hasOwnProperty.call(value, key);
+const visibleScalar = value => ['string', 'boolean'].includes(typeof value) || (typeof value === 'number' && Number.isFinite(value)) || value === null;
+const knownFieldTypes = new Set(['object','array','string','number','integer','boolean','null']);
+const schemaConstraintKeys = ['minLength','maxLength','minimum','maximum','minItems','maxItems','pattern','format','enum','const'];
+function viewProtocolSchema(schema) {
+  if (schema == null) return { state: 'unknown' };
+  if (!schemaRecord(schema)) return { state: 'unsupported' };
+  const properties = ownSchemaKey(schema, 'properties'), parameters = ownSchemaKey(schema, 'parameters');
+  if (properties === parameters) return { state: properties ? 'unsupported' : 'unknown' };
+  if (parameters) {
+    const raw = schema.parameters;
+    if (!Array.isArray(raw) || raw.some(value => typeof value !== 'string' || !value.trim()) || new Set(raw).size !== raw.length) return { state: 'unsupported' };
+    return { state: 'known', fields: raw.map(name => ({ name, type: '', required: null, constraints: [] })), additional: null };
+  }
+  if (!schemaRecord(schema.properties) || Object.values(schema.properties).some(value => !schemaRecord(value) && typeof value !== 'boolean')) return { state: 'unsupported' };
+  const required = Array.isArray(schema.required) && schema.required.every(name => typeof name === 'string') ? new Set(schema.required) : null;
+  const fields = Object.entries(schema.properties).map(([name, value]) => {
+    if (typeof value === 'boolean') return { name, type: '', required: required ? required.has(name) : null, constraints: [['booleanSchema', String(value)]] };
+    const type = knownFieldTypes.has(value.type) ? value.type : Array.isArray(value.type) && value.type.every(item => knownFieldTypes.has(item)) ? value.type.join(' / ') : '';
+    const constraints = schemaConstraintKeys.flatMap(key => {
+      if (!ownSchemaKey(value, key)) return [];
+      const fact = value[key];
+      if (key === 'enum') return Array.isArray(fact) && fact.every(visibleScalar) ? [[key, fact.map(item => JSON.stringify(item)).join(', ')]] : [];
+      return visibleScalar(fact) ? [[key, typeof fact === 'string' ? fact : JSON.stringify(fact)]] : [];
+    });
+    return { name, type, required: required ? required.has(name) : null, constraints };
+  });
+  return { state: 'known', fields, additional: typeof schema.additionalProperties === 'boolean' ? schema.additionalProperties : null };
+}
+
+function ProtocolDefinitionPreview({ item, snapshot, copy, onClose }) {
+  const root = useRef(null), first = useRef(null), previousFocus = useRef(document.activeElement);
+  const titleID = React.useId(), words = copy.protocolDefinitionView;
+  useEffect(() => { first.current?.focus(); return () => previousFocus.current?.focus?.(); }, []);
+  const facts = item ? viewProtocolSchema(item.request_schema) : null;
+  const at = typeof snapshot === 'string' && !Number.isNaN(Date.parse(snapshot)) ? new Date(snapshot).toLocaleString() : '';
+  return <div className="adm-protocol-dialog-backdrop"><section className="adm-protocol-dialog adm-protocol-definition" ref={root} role="dialog" aria-modal="true" aria-labelledby={titleID} onKeyDown={event => { keepDialogFocus(event, root.current); if (event.key === 'Escape' && !isImeComposing(event)) onClose(); }}>
+    <header><div><h3 id={titleID}>{words.title}</h3><p>{words.snapshot}{at && ' · ' + at}</p></div><button type="button" ref={first} aria-label={copy.close} onClick={onClose}>×</button></header>
+    {!item ? <p role="status">{words.unavailable}</p> : <>
+      <dl className="adm-command-target"><div><dt>{copy.protocol}</dt><dd><strong>{item.protocol_code}</strong> · v{item.version}<br /><code>{item.protocol_definition_id}</code></dd></div><div><dt>{copy.status}</dt><dd><Status value={item.status} copy={copy} /></dd></div></dl>
+      <p>{facts.state === 'known' ? facts.fields.length ? copy.schemaFields(facts.fields.length) : words.empty : words[facts.state]}</p>
+      {facts.state === 'known' && facts.additional !== null && <p>{facts.additional ? words.additionalAllowed : words.additionalDenied}</p>}
+      {facts.fields?.length > 0 && <ul className="adm-protocol-definition-fields">{facts.fields.map(field => <li key={field.name}><code>{field.name}</code><dl><div><dt>{words.type}</dt><dd>{field.type || words.notDeclared}</dd></div><div><dt>{words.requirement}</dt><dd>{field.required == null ? words.notDeclared : field.required ? words.required : words.notRequired}</dd></div>{field.constraints.map(([key, value]) => <div key={key}><dt>{key}</dt><dd>{value}</dd></div>)}</dl></li>)}</ul>}
+    </>}
+    <footer><button type="button" onClick={onClose}>{copy.close}</button></footer>
+  </section></div>;
+}
+
 function protocolFormulaDescriptor(next) {
 	if (next.type === 'PROTOCOL_DRAFT') return {
 		commandType: 'TOKEN_PROTOCOL_DRAFT_CREATE', targetResourceType: 'PROTOCOL', targetResourceID: next.body.protocol_code,
@@ -193,6 +242,7 @@ export function AdminProtocolFormulaWorkspace({ client, copy, canManage, routeVe
   const [units, setUnits] = useState({ items: [], loading: canManage, error: null, updatedAt: null });
   const [action, setAction] = useState(null);
   const [preview, setPreview] = useState(null);
+  const [definition, setDefinition] = useState(null);
   const [receipt, setReceipt] = useState(null);
   const [busy, setBusy] = useState(false);
   const mutationInFlight = useRef(false);
@@ -201,6 +251,8 @@ export function AdminProtocolFormulaWorkspace({ client, copy, canManage, routeVe
   const formulaLoad = useMemo(() => (query, signal) => client.formulas(query, signal), [client]);
   const protocols = useSource(protocolLoad, protocolQuery, protocolRefresh);
   const formulas = useSource(formulaLoad, formulaQuery, formulaRefresh);
+  const protocolQueryKey = JSON.stringify(protocolQuery);
+  const selectedDefinition = definition && !protocols.readDenied && protocolQueryKey === definition.query ? protocols.items.find(item => item.protocol_definition_id === definition.id && item.version === definition.version) : null;
   const onChange = (source, query, mode = 'push') => onRouteChange(adminModelTokenQueryUpdates(source, query), mode);
   const retry = (source, state, query, setter) => {
     if (state.error?.status === 410) { delete cursorHistory.current[source]; onChange(source, { ...query, cursor: '' }, 'replace'); } else setter((value) => value + 1);
@@ -270,9 +322,9 @@ export function AdminProtocolFormulaWorkspace({ client, copy, canManage, routeVe
     try { setPreview({ loading: true }); const payload = await client.previewFormula(item.formula_version_id); const summary = safeFormulaPreviewSummary(payload); setPreview(summary.deterministic && !summary.externalAccess ? summary : { error: { code: 'UNSAFE_PREVIEW', requestID: '' } }); }
     catch (error) { setPreview({ error: safeProtocolFormulaFailure(error) }); }
   };
-  const setPane = pane => { if (pane !== currentPane && !action && !preview) onRouteChange({ protocol_formula_pane: pane }, 'push'); };
+  const setPane = pane => { if (pane !== currentPane && !action && !preview && !definition) onRouteChange({ protocol_formula_pane: pane }, 'push'); };
   const tabKeys = event => {
-    if (action || preview || !['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+    if (action || preview || definition || !['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
     const buttons = Array.from(event.currentTarget.querySelectorAll('[role=tab]'));
     const index = buttons.indexOf(document.activeElement);
     if (index < 0 || buttons.length !== 2) return;
@@ -289,7 +341,7 @@ export function AdminProtocolFormulaWorkspace({ client, copy, canManage, routeVe
     <section className="adm-card adm-source-card adm-protocol-source-pane" role="tabpanel" id={sourceViewID + '-panel-protocols'} aria-labelledby={sourceViewID + '-tab-protocols'} hidden={currentPane !== 'protocols'}><SourceHead title={copy.protocolDefinitions} titleID="protocols-title" state={protocols} copy={copy} retry={() => retry('protocols', protocols, protocolQuery, setProtocolRefresh)} action={canManage && <button type="button" onClick={() => setAction({ type: 'PROTOCOL_DRAFT', expectedHeadVersion: 0, idempotencyKey: createProtocolFormulaIdempotencyKey('protocol-draft') })}>{copy.createProtocolDraft}</button>} />
       <Filter source="protocols" query={protocolQuery} copy={copy} onChange={onChange} fields={[{ key: 'q', label: copy.protocolSearch, placeholder: copy.protocolSearchPlaceholder }, { key: 'status', label: copy.status, options: ['DRAFT', 'PUBLISHED', 'DEPRECATED'] }, { key: 'protocol_code', label: copy.protocolCode }, { key: 'published', label: copy.publishedFilter, options: ['true', 'false'] }, { key: 'created_from', label: copy.createdFrom, type: 'datetime-local' }, { key: 'created_to', label: copy.createdTo, type: 'datetime-local' }]} />
       <Feedback state={protocols} copy={copy} filtered={hasFilters(protocolQuery)} retry={() => retry('protocols', protocols, protocolQuery, setProtocolRefresh)} />
-      {!protocols.readDenied && protocols.items.length > 0 && <div className="adm-table-wrap"><table className="adm-table"><thead><tr><th>{copy.protocol}</th><th>{copy.version}</th><th>{copy.status}</th><th>{copy.schemaSummary}</th><th>{copy.createdAt}</th><th>{copy.actions}</th></tr></thead><tbody>{protocols.items.map((item) => <tr key={item.protocol_definition_id}><td data-label={copy.protocol}><strong>{item.protocol_code}</strong><small className="adm-secondary-id">{item.protocol_definition_id}</small></td><td data-label={copy.version}>v{item.version}</td><td data-label={copy.status}><Status value={item.status} copy={copy} /></td><td data-label={copy.schemaSummary}>{copy.schemaFields(Object.keys(item.request_schema?.properties || {}).length)}</td><td data-label={copy.createdAt}>{new Date(item.created_at).toLocaleString()}</td><td data-label={copy.actions}><div className="adm-row-actions">{canManage && item.status === 'DRAFT' && <button type="button" onClick={() => setAction({ type: 'PROTOCOL_PUBLISH', item, idempotencyKey: createProtocolFormulaIdempotencyKey('protocol-publish') })}>{copy.publish}</button>}{canManage && item.status === 'PUBLISHED' && <button type="button" disabled={units.loading || Boolean(units.error)} onClick={() => openFormulaDraft(item)}>{copy.createFormulaDraft}</button>}</div></td></tr>)}</tbody></table></div>}
+      {!protocols.readDenied && protocols.items.length > 0 && <div className="adm-table-wrap"><table className="adm-table"><thead><tr><th>{copy.protocol}</th><th>{copy.version}</th><th>{copy.status}</th><th>{copy.schemaSummary}</th><th>{copy.createdAt}</th><th>{copy.actions}</th></tr></thead><tbody>{protocols.items.map((item) => <tr key={item.protocol_definition_id}><td data-label={copy.protocol}><strong>{item.protocol_code}</strong><small className="adm-secondary-id">{item.protocol_definition_id}</small></td><td data-label={copy.version}>v{item.version}</td><td data-label={copy.status}><Status value={item.status} copy={copy} /></td><td data-label={copy.schemaSummary}>{(() => { const schema = viewProtocolSchema(item.request_schema); return schema.state === 'known' ? copy.schemaFields(schema.fields.length) : copy.protocolDefinitionView[schema.state]; })()}</td><td data-label={copy.createdAt}>{new Date(item.created_at).toLocaleString()}</td><td data-label={copy.actions}><div className="adm-row-actions"><button type="button" className="adm-protocol-definition-open" onClick={() => setDefinition({ id: item.protocol_definition_id, version: item.version, query: protocolQueryKey })}>{copy.protocolDefinitionView.open}</button>{canManage && item.status === 'DRAFT' && <button type="button" onClick={() => setAction({ type: 'PROTOCOL_PUBLISH', item, idempotencyKey: createProtocolFormulaIdempotencyKey('protocol-publish') })}>{copy.publish}</button>}{canManage && item.status === 'PUBLISHED' && <button type="button" disabled={units.loading || Boolean(units.error)} onClick={() => openFormulaDraft(item)}>{copy.createFormulaDraft}</button>}</div></td></tr>)}</tbody></table></div>}
       <Paging source="protocols" query={protocolQuery} state={protocols} copy={copy} cursorHistory={cursorHistory} onChange={onChange} />
     </section>
     <section className="adm-card adm-source-card adm-protocol-source-pane" role="tabpanel" id={sourceViewID + '-panel-formulas'} aria-labelledby={sourceViewID + '-tab-formulas'} hidden={currentPane !== 'formulas'}><SourceHead title={copy.safeFormulas} titleID="formulas-title" state={formulas} copy={copy} retry={() => retry('formulas', formulas, formulaQuery, setFormulaRefresh)} />
@@ -298,6 +350,7 @@ export function AdminProtocolFormulaWorkspace({ client, copy, canManage, routeVe
       {!formulas.readDenied && formulas.items.length > 0 && <div className="adm-table-wrap"><table className="adm-table"><thead><tr><th>{copy.protocol}</th><th>{copy.version}</th><th>{copy.status}</th><th>{copy.units}</th><th>{copy.safety}</th><th>{copy.billingSync}</th><th>{copy.actions}</th></tr></thead><tbody>{formulas.items.map((item) => <tr key={item.formula_version_id}><td data-label={copy.protocol}><strong>{item.protocol_code}</strong><small className="adm-secondary-id">{item.formula_version_id}</small></td><td data-label={copy.version}>v{item.version}</td><td data-label={copy.status}><Status value={item.status} copy={copy} /></td><td data-label={copy.units}>{Object.keys(item.required_unit_versions || {}).sort().join(', ')}</td><td data-label={copy.safety}>{copy.safeEvaluator}</td><td data-label={copy.billingSync}><Status value={item.status === 'PUBLISHED' ? 'SYNCHRONIZED' : 'PENDING'} copy={copy} /></td><td data-label={copy.actions}><div className="adm-row-actions"><button type="button" onClick={() => openPreview(item)}>{copy.preview}</button>{canManage && item.status === 'DRAFT' && <button type="button" onClick={() => setAction({ type: 'FORMULA_PUBLISH', item, idempotencyKey: createProtocolFormulaIdempotencyKey('formula-publish') })}>{copy.publish}</button>}</div></td></tr>)}</tbody></table></div>}
       <Paging source="formulas" query={formulaQuery} state={formulas} copy={copy} cursorHistory={cursorHistory} onChange={onChange} />
     </section>
+    {definition && <ProtocolDefinitionPreview item={selectedDefinition} snapshot={protocols.page?.asOf} copy={copy} onClose={() => setDefinition(null)} />}
     {action && canManage && <Dialog action={action} copy={copy} units={units.items} busy={busy} onClose={() => setAction(null)} onSubmit={runAction} />}
     {preview?.loading && <div className="adm-protocol-dialog-backdrop"><div className="adm-protocol-dialog" role="status">{copy.loading}</div></div>}
     {preview?.error && <PreviewFailure failure={preview.error} copy={copy} onClose={() => setPreview(null)} />}

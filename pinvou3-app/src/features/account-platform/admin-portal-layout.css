@@ -639,3 +639,11 @@
 .adm-restored-shell .adm-protocol-formula-workspace .adm-protocol-filter-actions{display:flex;flex-wrap:wrap;margin:-3px}
 .adm-restored-shell .adm-protocol-formula-workspace .adm-protocol-filter-actions>button{width:auto;max-width:calc(100% - 6px);min-width:0;margin:3px;padding:0 14px;white-space:normal;overflow-wrap:break-word}
 .adm-shell.adm-restored-shell .adm-protocol-formula-workspace .adm-protocol-source-tabs>button:focus,.adm-shell.adm-restored-shell .adm-protocol-formula-workspace .adm-protocol-source-filters :is(summary,input,select,button):focus{outline:3px solid var(--adm-primary);outline-offset:2px}
+
+.adm-restored-shell .adm-protocol-definition :is(code,dd,dt,p){overflow-wrap:break-word;overflow-wrap:anywhere}
+.adm-restored-shell .adm-protocol-definition-fields{display:grid;gap:8px;margin:0;padding:0;list-style:none}
+.adm-restored-shell .adm-protocol-definition-fields>li{min-width:0;padding:9px 12px;border:1px solid var(--adm-line);border-radius:8px}
+.adm-restored-shell .adm-protocol-definition-fields li>dl{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,135px),1fr));gap:8px;margin:6px 0 0}
+.adm-restored-shell .adm-protocol-definition-fields :is(dt,dd){margin:0}
+.adm-restored-shell .adm-protocol-definition-fields dt{color:var(--adm-muted);font-size:12px}
+.adm-shell.adm-restored-shell .adm-protocol-definition button:focus,.adm-shell.adm-restored-shell .adm-protocol-formula-workspace .adm-protocol-definition-open:focus{outline:3px solid var(--adm-primary);outline-offset:2px}
