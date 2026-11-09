@@ -2,6 +2,8 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { localeNames, supportedLocales } from '../../shared/supported-locales.js';
 import { secureRequestID } from './request-id.js';
 import { useAccountOwner } from './useAccountOwner.js';
+import { smsStatusCopy } from '../../shared/i18n.js';
+import './admin-sms-presentation.css';
 function SectionHeader({ title, children }) { return <header className="adm-section-head"><h2>{title}</h2>{children}</header>; }
 function emptySMSTemplates() {
   return { REGISTER: '', LOGIN: '', PROFILE_MOBILE: '', PASSWORD_RESET: '' };
@@ -126,11 +128,19 @@ export function SettingsWorkspace({ copy, language, onLanguageChange, client, pe
           ? copy.settings.sms.profileUnavailable
           : error?.code === 'RECENT_AUTHENTICATION_REQUIRED'
             ? copy.settings.sms.recentAuthenticationRequired
-            : copy.settings.sms.saveFailed;
+            : attempt?.unknown ? '' : copy.settings.sms.saveFailed;
       setSMSState({ loading: false, saving: false, error: message, notice: '' });
     }
   };
 
+  const smsWords = smsStatusCopy[language];
+  const onOff = value => value === true ? smsWords.on : value === false ? smsWords.off : smsWords.unknown;
+  const savedForm = sms ? smsConfigurationForm(sms) : null;
+  const draftChanged = savedForm && (['enabled', 'provider_id', 'credential_profile', 'sign_name'].some(key => savedForm[key] !== smsForm[key]) ||
+    Object.keys(emptySMSTemplates()).some(key => savedForm.templates[key] !== smsForm.templates[key]));
+  const savedProfile = sms?.available_profiles?.find(profile => profile.provider_id === sms.provider_id && profile.profile_id === sms.credential_profile);
+  const pendingAttempt = intent.current?.unknown && !intent.current.conflicted ? intent.current.command : null;
+  const providerName = value => copy.settings.sms.providers[value] || value || smsWords.unknown;
   const selectedProfile = sms?.available_profiles?.find((profile) => profile.profile_id === smsForm.credential_profile);
   const formValid = smsForm.reason.trim().length >= 10 && (!smsForm.enabled || selectedProfile?.configured) && (smsForm.provider_id !== 'aliyun-managed' || (
     smsForm.sign_name.trim() && Object.values(smsForm.templates).every((value) => value.trim())
@@ -161,13 +171,27 @@ export function SettingsWorkspace({ copy, language, onLanguageChange, client, pe
           {smsState.error && <div className="adm-inline-message error adm-sms-error" role="alert"><span>{smsState.error}</span><button type="button" disabled={smsState.loading || smsState.saving} onClick={() => void loadSMSConfiguration()}>{copy.retry}</button></div>}
           {smsState.notice && <div className="adm-inline-message ok" role="status">{smsState.notice}</div>}
           {sms && !smsState.loading && (
-            <form className="adm-sms-form" onSubmit={saveSMSConfiguration}>
-              <div className="adm-detail-grid adm-sms-summary">
-                <div><small>{copy.settings.sms.revision}</small><strong>{sms.revision}</strong></div>
-                <div><small>{copy.settings.sms.source}</small><strong>{copy.settings.sms.sources[sms.source] || sms.source}</strong></div>
-                <div><small>{copy.settings.sms.readiness}</small><strong>{copy.settings.sms.readinessValues[sms.readiness] || sms.readiness}</strong></div>
-              </div>
-              <label className="adm-sms-switch"><input type="checkbox" checked={smsForm.enabled} disabled={!canManageSMS || smsState.saving} onChange={(event) => setSMSForm((value) => ({ ...value, enabled: event.target.checked }))} /><span>{copy.settings.sms.enabled}</span></label>
+            <>
+              <section className="adm-sms-effective">
+                <h3>{smsWords.saved}</h3>
+                <dl className="adm-detail-grid adm-sms-summary">
+                  <div><dt>{smsWords.switchLabel}</dt><dd>{onOff(sms.enabled)}</dd></div>
+                  <div><dt>{copy.settings.sms.readiness}</dt><dd>{copy.settings.sms.readinessValues[sms.readiness] || sms.readiness || smsWords.unknown}</dd></div>
+                  <div><dt>{copy.settings.sms.profile}</dt><dd>{savedProfile?.configured === true ? copy.settings.sms.configured : savedProfile?.configured === false ? copy.settings.sms.notConfigured : smsWords.unknown}</dd></div>
+                  <div><dt>{copy.settings.sms.provider}</dt><dd>{providerName(sms.provider_id)}</dd></div>
+                  <div><dt>{copy.settings.sms.revision}</dt><dd>{sms.revision}</dd></div>
+                  <div><dt>{copy.settings.sms.source}</dt><dd>{copy.settings.sms.sources[sms.source] || sms.source || smsWords.unknown}</dd></div>
+                </dl>
+                <p className="adm-muted">{smsWords.readinessBoundary}</p>
+              </section>
+              <form className="adm-sms-form" onSubmit={saveSMSConfiguration}>
+              {canManageSMS && <div className="adm-sms-draft-head">
+                <h3>{smsWords.edit}</h3>
+                <p role="status" className={draftChanged ? "adm-status warn" : "adm-status neutral"}>{draftChanged ? smsWords.dirty : smsWords.clean}</p>
+              </div>}
+              {pendingAttempt && <p className="adm-sms-unknown" role="status">{smsWords.unknownWrite} {smsWords.retryTarget}: <strong>{onOff(pendingAttempt.enabled)} · {providerName(pendingAttempt.provider_id)} · {smsWords.version} {pendingAttempt.expected_revision}</strong></p>}
+              <label className="adm-sms-switch"><input aria-describedby="adm-sms-impact" type="checkbox" checked={smsForm.enabled} disabled={!canManageSMS || smsState.saving} onChange={(event) => setSMSForm((value) => ({ ...value, enabled: event.target.checked }))} /><span>{copy.settings.sms.enabled}</span></label>
+              <p className="adm-muted adm-sms-impact" id="adm-sms-impact">{smsForm.enabled ? smsWords.enableImpact : smsWords.disableImpact}</p>
               <div className="adm-sms-fields">
                 <label><span>{copy.settings.sms.provider}</span><select value={smsForm.provider_id} disabled={!canManageSMS || smsState.saving} onChange={(event) => chooseSMSProvider(event.target.value)}>{(sms.available_profiles || []).map((profile) => <option key={profile.profile_id} value={profile.provider_id}>{copy.settings.sms.providers[profile.provider_id] || profile.provider_id}</option>)}</select></label>
                 <label><span>{copy.settings.sms.profile}</span><select value={smsForm.credential_profile} disabled={!canManageSMS || smsState.saving} onChange={(event) => setSMSForm((value) => ({ ...value, credential_profile: event.target.value }))}>{(sms.available_profiles || []).filter((profile) => profile.provider_id === smsForm.provider_id).map((profile) => <option key={profile.profile_id} value={profile.profile_id}>{profile.profile_id} · {profile.configured ? copy.settings.sms.configured : copy.settings.sms.notConfigured}</option>)}</select></label>
@@ -179,8 +203,9 @@ export function SettingsWorkspace({ copy, language, onLanguageChange, client, pe
               </div>
               {!selectedProfile?.configured && smsForm.enabled && <div className="adm-inline-message error" role="alert">{copy.settings.sms.profileUnavailable}</div>}
               {!canManageSMS && <div className="adm-inline-message info" role="status">{copy.settings.sms.readOnly}</div>}
-              {canManageSMS && <button type="submit" className="adm-primary-button" disabled={smsState.saving || !formValid || Boolean(intent.current?.conflicted)}>{smsState.saving ? copy.settings.sms.saving : copy.settings.sms.save}</button>}
-            </form>
+              {canManageSMS && <button type="submit" className="adm-primary-button" disabled={smsState.saving || !formValid || Boolean(intent.current?.conflicted)}>{smsState.saving ? copy.settings.sms.saving : pendingAttempt ? smsWords.retryOriginal : copy.settings.sms.save}</button>}
+              </form>
+            </>
           )}
         </section>
       )}
