@@ -93,14 +93,15 @@ test("official desktop releases enable Windows and Linux and keep macOS disabled
   const source = await readFile(new URL("../../.github/workflows/release-packages.yml", import.meta.url), "utf8");
   const { jobs } = parse(source);
   const flag = "PINVOU_DESKTOP_CONTROLLER_ENABLED";
-  for (const [name, value] of Object.entries({
-    "remote-control-release-gate": "1",
+  const gateJobName = "remote-control-release-gate";
+  const pinnedCompileJobs = {
     "build-windows-x64": "1",
     "build-linux-x64": "1",
     "build-linux-arm64": "1",
     "build-linux-loongarch64": "1",
     "build-macos-universal": "0",
-  })) {
+  };
+  for (const [name, value] of Object.entries({ [gateJobName]: "1", ...pinnedCompileJobs })) {
     const job = jobs[name];
     assert.equal(job?.env?.[flag], value, `${name} must explicitly select its build capability`);
     for (const step of job.steps) {
@@ -110,8 +111,35 @@ test("official desktop releases enable Windows and Linux and keep macOS disabled
   }
   assert.doesNotMatch(source, /vars\.PINVOU_DESKTOP_CONTROLLER_ENABLED/u);
   const windows = jobs["build-windows-x64"];
-  assert.ok(windows.needs.includes("remote-control-release-gate"));
-  assert.match(windows.if, /needs\.remote-control-release-gate\.result == 'success'/u);
+  assert.ok(windows.needs?.includes("remote-control-release-gate"), "build-windows-x64 must depend on remote-control-release-gate");
+  assert.match(windows.if ?? "", /needs\.remote-control-release-gate\.result == 'success'/u);
+  // Reverse inventory: a release build without the flag silently compiles the
+  // controller out (build.rs defaults to '0'), so the whitelist above must be
+  // exhaustive. Every job whose steps invoke a desktop compile entry point has
+  // to be pinned above, and every pinned job has to actually compile, so the
+  // two sets must stay equal; the evidence gate is inventoried separately by
+  // its controller-release-gate.mjs invocation.
+  const isDesktopCompileStep = (step) => {
+    const run = typeof step.run === "string" ? step.run : "";
+    return run.includes("scripts/tauri/build.js build")
+      || run.includes("npm run build")
+      || run.includes("scripts/ci-build-linux-loongarch64.sh");
+  };
+  const compileJobNames = Object.keys(jobs)
+    .filter((name) => (jobs[name]?.steps ?? []).some(isDesktopCompileStep))
+    .sort();
+  assert.deepEqual(
+    compileJobNames,
+    Object.keys(pinnedCompileJobs).sort(),
+    "every desktop compile job in release-packages.yml must be pinned to an explicit "
+      + `${flag} value; unpinned compile jobs would ship official installers `
+      + "without the desktop remote control capability",
+  );
+  const gateJobNames = Object.keys(jobs)
+    .filter((name) => (jobs[name]?.steps ?? []).some((step) => (
+      typeof step.run === "string" && step.run.includes("remote-control-relay/scripts/controller-release-gate.mjs")
+    )));
+  assert.deepEqual(gateJobNames, [gateJobName], "controller-release-gate.mjs may only run inside the pinned gate job");
 });
 
 test("release platform and compiled capability contracts also run when Windows jobs are disabled", async () => {
@@ -120,11 +148,20 @@ test("release platform and compiled capability contracts also run when Windows j
   const dependencies = steps.find((step) => step.run?.includes("npm --prefix remote-control-relay ci"));
   assert.ok(dependencies, "YAML policy tests require Relay dependencies on Linux too");
   assert.equal(dependencies.if, undefined);
-  const contract = steps.find((step) => step.run?.includes("node --test remote-control-relay/test/release-path-policy.test.js"));
+  // Match by test-file presence instead of pinning one node --test invocation:
+  // reordering the runner arguments or splitting the contract step in two must
+  // stay green, as long as every contract file runs ungated after the Relay
+  // dependencies install.
+  const contract = steps.find((step) => step.run?.includes("remote-control-relay/test/release-path-policy.test.js"));
   assert.ok(contract, "the shared platform contract must run on every release-contract matrix leg");
   assert.equal(contract.if, undefined);
-  assert.ok(contract.run.includes("pinvou3-app/tests/remote_control_feature_gate_contract.test.mjs"));
-  assert.ok(contract.run.includes("pinvou3-app/tests/desktop_remote_loaded_capability.test.mjs"));
+  for (const companion of [
+    "pinvou3-app/tests/remote_control_feature_gate_contract.test.mjs",
+    "pinvou3-app/tests/desktop_remote_loaded_capability.test.mjs",
+  ]) {
+    assert.ok(steps.some((step) => step.run?.includes(companion)),
+      `release-contract-test must execute ${companion} on every matrix leg`);
+  }
   assert.ok(steps.indexOf(dependencies) < steps.indexOf(contract));
 });
 
