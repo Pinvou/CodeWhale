@@ -1,0 +1,14 @@
+.adm-restored-shell .adm-product-table-scroll{min-width:0;max-width:100%;overflow:auto}
+.adm-restored-shell .adm-product-catalog-table{width:100%;min-width:44rem;table-layout:fixed}
+.adm-restored-shell .adm-product-catalog-table thead th:first-child{width:24%}
+.adm-restored-shell .adm-product-catalog-table tbody th{font-weight:600}
+.adm-restored-shell .adm-product-identity,.adm-restored-shell .adm-product-lifecycle{display:grid;justify-items:start;gap:4px;min-width:0}
+.adm-restored-shell .adm-product-identity code,.adm-restored-shell .adm-product-lifecycle small,.adm-restored-shell .adm-product-points dt{color:var(--adm-muted);font-size:12px}
+.adm-restored-shell .adm-product-identity :is(code,bdi){white-space:normal;overflow-wrap:break-word;overflow-wrap:anywhere}
+.adm-restored-shell .adm-product-number{font-variant-numeric:tabular-nums;white-space:nowrap}
+.adm-restored-shell .adm-product-points{display:grid;gap:4px;margin:0}
+.adm-restored-shell .adm-product-points>div{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px}
+.adm-restored-shell .adm-product-points dd{margin:0;font-variant-numeric:tabular-nums}
+.adm-restored-shell .adm-product-state{display:inline-block;padding:3px 8px;border-radius:999px;background:var(--adm-soft);color:var(--adm-muted);font-size:12px;line-height:1.5}
+.adm-restored-shell .adm-product-state[data-state=ON_SALE]{background:#e6f4ea;color:#12612b}
+.adm-restored-shell .adm-product-state[data-state=DELETED]{background:#fce8e8;color:#a4262c}

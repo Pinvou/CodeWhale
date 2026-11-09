@@ -75,3 +75,7 @@ Object.assign(financeCopy.ja, { pendingOrders: '支払い待ちの注文', conti
 Object.assign(financeCopy.zh, { approvalReadUnavailable: '暂时无法读取审批数据，请重试。' });
 Object.assign(financeCopy.en, { approvalReadUnavailable: 'Approval data could not be loaded. Please retry.' });
 Object.assign(financeCopy.ja, { approvalReadUnavailable: '承認データを取得できません。再試行してください。' });
+
+Object.assign(financeCopy.zh, {"catalogValueMissing":"未提供","catalogNameMissing":"名称未配置","catalogCurrencyMissing":"币种未提供","catalogConfigAmount":"目录配置金额","catalogEntitlement":"积分权益","catalogLifecycle":{"DRAFT":"草稿","ON_SALE":"在售","OFF_SALE":"停售","DELETED":"已删除"}});
+Object.assign(financeCopy.en, {"catalogValueMissing":"Not provided","catalogNameMissing":"Name not configured","catalogCurrencyMissing":"Currency not provided","catalogConfigAmount":"Catalog configured amount","catalogEntitlement":"Points entitlement","catalogLifecycle":{"DRAFT":"Draft","ON_SALE":"On sale","OFF_SALE":"Off sale","DELETED":"Deleted"}});
+Object.assign(financeCopy.ja, {"catalogValueMissing":"提供されていません","catalogNameMissing":"名称未設定","catalogCurrencyMissing":"通貨情報なし","catalogConfigAmount":"カタログ設定金額","catalogEntitlement":"付与ポイント","catalogLifecycle":{"DRAFT":"下書き","ON_SALE":"販売中","OFF_SALE":"販売停止","DELETED":"削除済み"}});
