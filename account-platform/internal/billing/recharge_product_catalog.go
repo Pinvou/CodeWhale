@@ -48,33 +48,35 @@ func (r *PostgresRepository) VerifyPendingTestProductAdmissions(ctx context.Cont
 	if evidenceTTL <= 0 {
 		evidenceTTL = defaultTestAdmissionEvidenceTTL
 	}
-	rows, err := r.pool.Query(ctx, `SELECT verification.verification_id,draft.provider_id,draft.provider_version,draft.channels
+	// Apply the worker's provider scope before the batch limit so pending rows
+	// owned by another adapter cannot prevent this worker from making progress.
+	rows, err := r.pool.Query(ctx, `SELECT verification.verification_id,draft.channels
 FROM product_admission_verifications verification
 JOIN recharge_product_mapping_drafts draft USING(catalog_item_id)
 WHERE verification.status='PENDING' AND draft.admission_class='TEST_ONLY'
-ORDER BY verification.requested_at,verification.verification_id LIMIT $1`, limit)
+  AND draft.provider_id=$1 AND draft.provider_version=$2
+ORDER BY verification.requested_at,verification.verification_id LIMIT $3`, capabilities.ProviderID, capabilities.Version, limit)
 	if err != nil {
 		return 0, err
 	}
 	defer rows.Close()
 	type candidate struct {
-		id                          uuid.UUID
-		providerID, providerVersion string
-		channels                    []string
+		id       uuid.UUID
+		channels []string
 	}
 	items := make([]candidate, 0)
 	for rows.Next() {
 		var item candidate
-		if err := rows.Scan(&item.id, &item.providerID, &item.providerVersion, &item.channels); err != nil {
+		if err := rows.Scan(&item.id, &item.channels); err != nil {
 			return 0, err
 		}
 		items = append(items, item)
 	}
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
 	completed := 0
 	for _, item := range items {
-		if item.providerID != capabilities.ProviderID || item.providerVersion != capabilities.Version {
-			continue
-		}
 		valid := true
 		for _, channel := range item.channels {
 			valid = valid && capabilities.SupportsChannel(channel)

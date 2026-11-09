@@ -61,6 +61,12 @@ spec:
             - { name: NATS_URL, value: {{ include "pinvou.natsUrl" $root | quote }} }
             - { name: NATS_CREDENTIALS_FILE, value: {{ printf "/run/pinvou/nats/private/%s-event-relay.creds" $source | quote }} }
             {{- if eq $source "account" }}
+            {{- if $root.Values.approvalRelay.requireReady }}
+            # Used by the explicit release check. The ordinary Kubernetes probe is independent.
+            - { name: HEALTHCHECK_URL, value: "http://127.0.0.1:9090/health/ready/approval-authorization" }
+            - { name: APPROVAL_RELAY_MONITOR_SCOPE, value: {{ printf "%s/%s" $root.Release.Namespace $root.Release.Name | quote }} }
+            - { name: APPROVAL_RELAY_MONITOR_REPLICA, valueFrom: { fieldRef: { fieldPath: metadata.name } } }
+            {{- end }}
             - name: APPROVAL_RELAY_DATABASE_URL
               valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: account-approval-relay-database-url } }
             - { name: APPROVAL_RELAY_NATS_CREDENTIALS_FILE, value: "/run/pinvou/nats/private/account-approval-relay.creds" }

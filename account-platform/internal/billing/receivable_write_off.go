@@ -271,6 +271,19 @@ func (r *PostgresRepository) ReceivableWriteOffProofInput(ctx context.Context, t
 // and wallet projections and the immutable case row. It never touches
 // available balances, credit lots or entitlement facts.
 func (r *PostgresRepository) ApplyReceivableWriteOff(ctx context.Context, input ReceivableWriteOffExecutionInput) (ReceivableWriteOffResult, error) {
+	result, err := r.applyReceivableWriteOff(ctx, input)
+	if errors.Is(err, errReceivableWriteOffWalletSnapshot) && ctx.Err() == nil {
+		// PostgreSQL aborted the old snapshot before any financial writes. Use
+		// a fresh transaction within this same approved execution to recheck the
+		// activation and frozen facts, keeping the same approval and key.
+		return r.applyReceivableWriteOff(ctx, input)
+	}
+	return result, err
+}
+
+var errReceivableWriteOffWalletSnapshot = errors.New("receivable write-off wallet snapshot aborted before writes")
+
+func (r *PostgresRepository) applyReceivableWriteOff(ctx context.Context, input ReceivableWriteOffExecutionInput) (ReceivableWriteOffResult, error) {
 	executionKey := strings.TrimSpace(input.ExecutionKey)
 	if r == nil || r.pool == nil || input.ApprovalRequestID == uuid.Nil || input.AuthorizationEventID == uuid.Nil ||
 		input.ApprovalEpoch < 1 || executionKey == "" || executionKey != input.ExecutionKey ||
@@ -293,9 +306,25 @@ func (r *PostgresRepository) ApplyReceivableWriteOff(ctx context.Context, input 
 	if err := receivableWriteOffExecutionActivation(ctx, tx, input, r.now()); err != nil {
 		return ReceivableWriteOffResult{}, err
 	}
+	// Match recharge's wallet-first lock order before reading the frozen facts
+	// and taking the receivable write lock. Keep result-first replay above it.
+	var lockedWalletID uuid.UUID
+	err = tx.QueryRow(ctx, `SELECT wallet.id FROM receivables receivable
+ JOIN wallets wallet ON wallet.id=receivable.wallet_id WHERE receivable.id=$1 FOR UPDATE OF wallet`, input.Command.ReceivableID).
+		Scan(&lockedWalletID)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		var postgresError *pgconn.PgError
+		if errors.As(err, &postgresError) && postgresError.Code == "40001" {
+			return ReceivableWriteOffResult{}, errors.Join(errReceivableWriteOffWalletSnapshot, err)
+		}
+		return ReceivableWriteOffResult{}, err
+	}
 	plan, err := receivableWriteOffPlanFrom(ctx, tx, input.Command, input.PolicyVersion, input.SchemaVersion, input.ActivationVersion)
 	if err != nil {
 		return ReceivableWriteOffResult{}, err
+	}
+	if plan.WalletID != lockedWalletID {
+		return ReceivableWriteOffResult{}, ErrApprovalSnapshotMismatch
 	}
 	if mismatch := receivableWriteOffFrozenMismatch(plan, input.Command, input.Frozen); mismatch != "" {
 		return ReceivableWriteOffResult{}, wrapSnapshotMismatch(mismatch)

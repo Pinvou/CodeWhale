@@ -1527,7 +1527,8 @@ jobs:
           chart="$GITHUB_WORKSPACE/account-platform/deploy/helm/account-platform"
           "$PINVOU_TEST_KMS_HELM_BINARY" template prometheus-ci "$chart" \
             -f "$chart/values-model-token-test.yaml" \
-            --set observability.prometheusRulesEnabled=true --set availability.enabled=true > "$fixture/rendered.yaml"
+            --set observability.prometheusRulesEnabled=true --set availability.enabled=true \
+            --set approvalRelay.requireReady=true --set replicas.eventRelay=2 > "$fixture/rendered.yaml"
           npm --prefix account-platform run test:prometheus-rules -- \
             --rendered "$fixture/rendered.yaml" --output "$fixture/cases" --promtool "$PINVOU_TEST_PROMTOOL_BINARY"
 
@@ -1657,12 +1658,12 @@ jobs:
           set -euo pipefail
           # Fixed actor names are exclusive to this ephemeral service. Keep
           # package execution serial and run only the bounded audit fixtures.
-          go test -race -json -tags=nomsgpack -mod=readonly -count=1 -parallel=1 ./internal/accountschema -run '^TestAuditExport(RollbackRoleStorageGuard|PublicDownRetainsOriginalHistory|GuardedRollbackTransactions)$' | tee "$RUNNER_TEMP/f17-audit-schema.jsonl"
+          go test -race -json -tags=nomsgpack -mod=readonly -count=1 -parallel=1 ./internal/accountschema -run '^Test(AuditExport(RollbackRoleStorageGuard|PublicDownRetainsOriginalHistory|GuardedRollbackTransactions)|Account039RollbackInventoryPostgres|MembershipInvitationLegacyRollbackPublicPostgres)$' | tee "$RUNNER_TEMP/f17-audit-schema.jsonl"
           go test -race -json -tags=nomsgpack -mod=readonly -count=1 -parallel=1 ./internal/account -run '^TestAuditExportPersistedBoundaries$' | tee "$RUNNER_TEMP/f17-audit-account.jsonl"
           python3 - "$RUNNER_TEMP/f17-audit-schema.jsonl" "$RUNNER_TEMP/f17-audit-account.jsonl" <<'PY'
           import json, pathlib, sys
           expected = [
-              {"TestAuditExportRollbackRoleStorageGuard", "TestAuditExportPublicDownRetainsOriginalHistory", "TestAuditExportGuardedRollbackTransactions"},
+              {"TestAuditExportRollbackRoleStorageGuard", "TestAuditExportPublicDownRetainsOriginalHistory", "TestAuditExportGuardedRollbackTransactions", "TestAccount039RollbackInventoryPostgres", "TestMembershipInvitationLegacyRollbackPublicPostgres"},
               {"TestAuditExportPersistedBoundaries"},
           ]
           for filename, required in zip(sys.argv[1:], expected, strict=True):
@@ -1672,6 +1673,16 @@ jobs:
               assert all(event["Action"] == "pass" for event in terminal), "finite PostgreSQL tests failed or skipped"
               roots = {event["Test"] for event in terminal if "/" not in event["Test"]}
               assert roots == required, "required finite PostgreSQL test selection did not execute"
+              inventory = "TestAccount039RollbackInventoryPostgres"
+              if inventory in required:
+                  prefix = inventory + "/"
+                  cases = {event["Test"].removeprefix(prefix) for event in terminal if event["Test"].startswith(prefix)}
+                  assert cases == {"empty-ledger", "before-approval-schema", "installed-039", "higher-version", "retained-v2-reference", "wrong-database", "missing-approval-column-grant"}, "039 inventory cases did not execute"
+              invitation = "TestMembershipInvitationLegacyRollbackPublicPostgres"
+              if invitation in required:
+                  prefix = invitation + "/"
+                  cases = {event["Test"].removeprefix(prefix) for event in terminal if event["Test"].startswith(prefix)}
+                  assert cases == {"retained-link-refuses-down-without-fact-or-schema-loss", "forward-upgrade-replays-original-and-accepts-next-command"}, "retained invitation rollback cases did not execute"
           PY
       - name: Token financial contracts on isolated PostgreSQL
         shell: bash

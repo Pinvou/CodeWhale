@@ -19,6 +19,7 @@ from urllib.parse import parse_qs, urlsplit
 ROOT = Path(__file__).resolve().parents[1]
 ACTORS = {"billing_migrator", "billing_schema_owner", "billing_service"}
 REQUIRED = {
+    "TestEmergencyCancellationWorkerDiagnosticsPostgres",
     "TestEmergencyCancellationClaimOwnershipPostgres",
     "TestEmergencyCancellationRequestLocksClaimPostgres",
     "TestUserUnusedIntentCancellationOwnerPostgres",
@@ -32,6 +33,7 @@ REQUIRED = {
     "TestCredentialFailurePersistenceBoundariesPostgres",
     "TestCredentialFailurePreparationFencePostgres",
     "TestCredentialFailureExistingEventsPostgres",
+    "TestCredentialWindowRevocationOwnerPostgres",
     "TestHoldAcknowledgementSurvivesDispatchPersistenceFailurePostgres",
     "TestCancellationReceivedReadRechecksReservationPostgres",
     "TestCancellationFirstUserPreservesConfirmedReceiptPostgres",
@@ -145,7 +147,7 @@ BILLING_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/billing"
 SCHEMA_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/billingschema"
 TOKEN_SCHEMA_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/tokenschema"
 TOKEN_SCHEMA_REQUIRED = {"TestManagementPublicMigrationInstallation"}
-SCHEMA_REQUIRED = {"TestLatePaymentQueryRegisteredIdentity", "TestReconciliationFairRetryRegisteredIdentity", "TestF09EntitlementPackageIndexPublicMigration", "TestTokenWalletReceiptSchemaPostgres", "TestLegacyEntitlementUpgradeAdmissionPostgres", "TestUsageWaiverHistoricalSchemaPostgres", "TestBillingOrdinaryReplayOriginalMigrationPostgres", "TestUnknownProviderEntryPublicMigrationPostgres", "TestLegacyExpiry025UpgradePreservesOriginalLedgerPostgres", "TestF04PublicTokenUserOwnerAuthorityAndDirectory", "TestManualRetentionHistoricalHardeningPostgres"}
+SCHEMA_REQUIRED = {"TestLatePaymentQueryRegisteredIdentity", "TestReconciliationFairRetryRegisteredIdentity", "TestF09EntitlementPackageIndexPublicMigration", "TestTokenWalletReceiptSchemaPostgres", "TestLegacyEntitlementUpgradeAdmissionPostgres", "TestUsageWaiverHistoricalSchemaPostgres", "TestBillingOrdinaryReplayOriginalMigrationPostgres", "TestUnknownProviderEntryPublicMigrationPostgres", "TestLegacyExpiry025UpgradePreservesOriginalLedgerPostgres", "TestF04PublicTokenUserOwnerAuthorityAndDirectory", "TestManualRetentionHistoricalHardeningPostgres", "TestBillingHistoricalCatalogRollbackPostgres"}
 OWNER_REQUIRED = {
     "TestPaymentActionAdmissionPostgres",
     "TestF06OrganizationWalletRequiresLifecycleEvidence",
@@ -185,6 +187,7 @@ REFUND_REQUIRED = {
 }
 RETAINED_REQUIRED = {
     "TestEscalatedForcedRefundRequiresSecondActorAndReplays",
+    "TestEscalatedForcedRefundWalletLockOrderPostgres",
     "TestEscalatedForcedRefundAtomicRollbackPostgres",
     "TestEscalatedForcedRefundEvidenceAndReceiptGuardsPostgres",
     "TestOrdinaryForcedRefundAppliedReceiptRecoveryPostgres",
@@ -245,6 +248,7 @@ BILLING_LEAF_REQUIRED = {
     "TestProductAdmissionMaterialPurgePostgres",
     "TestProductAdmissionMaterialHTTPPostgres",
     "TestEscalatedForcedRefundRequiresSecondActorAndReplays",
+    "TestEscalatedForcedRefundWalletLockOrderPostgres",
     "TestOrdinaryForcedRefundAppliedReceiptRecoveryPostgres",
     "TestPaymentPersonalWalletAdmissionStatusRacePostgres",
     "TestPostgresManagedPricePagination",
@@ -268,6 +272,13 @@ BILLING_LEAF_REQUIRED = {
 }
 BILLING_CHILD_REQUIRED = RETAINED_REQUIRED - BILLING_LEAF_REQUIRED
 EXACT_REQUIRED_CHILDREN = {
+    "TestBillingHistoricalCatalogRollbackPostgres": {
+        f"version{version}/seeded={seeded}{suffix}"
+        for version in (35, 36, 37, 51)
+        for seeded in ("false", "true")
+        for suffix in ("", "/actual-cli")
+    },
+    "TestRechargeProductCommandAtomicityPostgres": {"active-provider-admission-candidate-progress"},
     "TestProductManualAdmissionPostgres": {
         "two-explicit-humans-first-publish-and-immutable-replay",
         "runtime-cannot-rewrite-frozen-manual-facts",
@@ -277,6 +288,7 @@ EXACT_REQUIRED_CHILDREN = {
         "retention-purges-submission-snapshot-and-review-reason",
     },
     "TestEmergencyCancellationClaimOwnershipPostgres": {"before-request", "after-request", "pending", "zero-attempt"},
+    "TestReceivableSettlementGuardedWritesPostgres": {"recharge-and-write-off-lock-order"},
     "TestEmergencyCancellationRequestLocksClaimPostgres": {"usage-lock-reclaim"},
     "TestPasswordPreparationAuthorizationPostgres": {
         "retention-redacts-expired-mobiles-without-changing-grant-facts/expired",

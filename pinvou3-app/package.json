@@ -1,6 +1,6 @@
 {
   "name": "pinvou3-app",
-  "version": "0.10.17",
+  "version": "0.10.18",
   "description": "品悟智能助手桌面应用",
   "private": true,
   "scripts": {
@@ -99,7 +99,7 @@
     "test:web-asset-base-path": "node tests/web_asset_base_path.test.mjs",
     "test:ui-language": "node tests/ui_language_coverage.test.mjs",
     "test:color-scheme": "node --test tests/color_scheme_logic.test.mjs",
-    "test:team-relay": "node tests/team_relay_preview.test.mjs && node tests/team_relay_bridge.test.mjs && node tests/team_relay_action_smoke.mjs",
+    "test:team-relay": "node --test tests/team_relay_errors.test.mjs && node tests/team_relay_preview.test.mjs && node tests/team_relay_bridge.test.mjs && node tests/team_relay_action_smoke.mjs",
     "test:team-relay-ui": "node tests/team_relay_action_smoke.mjs",
     "test:web-bootstrap": "node tests/web_bootstrap_transport.test.mjs",
     "test:api-key-gate": "node tests/api_key_gate_logic.test.js",

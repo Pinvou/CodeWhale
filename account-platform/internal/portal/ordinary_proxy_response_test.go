@@ -31,10 +31,11 @@ func TestOrdinaryProxyValidatesResponseBeforeForwarding(t *testing.T) {
 		}
 	}
 	tests := []struct {
-		name   string
-		write  func(http.ResponseWriter)
-		status int
-		size   int
+		name      string
+		write     func(http.ResponseWriter)
+		status    int
+		size      int
+		errorCode string
 	}{
 		{
 			name: "exact limit",
@@ -53,7 +54,8 @@ func TestOrdinaryProxyValidatesResponseBeforeForwarding(t *testing.T) {
 				w.WriteHeader(http.StatusCreated)
 				writePayload(w, limit+1)
 			},
-			status: http.StatusBadGateway,
+			status:    http.StatusBadGateway,
+			errorCode: "UPSTREAM_RESPONSE_TOO_LARGE",
 		},
 		{
 			name: "chunked exact limit",
@@ -82,7 +84,8 @@ func TestOrdinaryProxyValidatesResponseBeforeForwarding(t *testing.T) {
 				w.(http.Flusher).Flush()
 				writePayload(w, limit+1)
 			},
-			status: http.StatusBadGateway,
+			status:    http.StatusBadGateway,
+			errorCode: "UPSTREAM_RESPONSE_TOO_LARGE",
 		},
 		{
 			name: "decompressed over limit",
@@ -93,7 +96,8 @@ func TestOrdinaryProxyValidatesResponseBeforeForwarding(t *testing.T) {
 				writePayload(compressed, limit+1)
 				_ = compressed.Close()
 			},
-			status: http.StatusBadGateway,
+			status:    http.StatusBadGateway,
+			errorCode: "UPSTREAM_RESPONSE_TOO_LARGE",
 		},
 		{
 			name: "upstream closes before declared end",
@@ -102,7 +106,8 @@ func TestOrdinaryProxyValidatesResponseBeforeForwarding(t *testing.T) {
 				w.WriteHeader(http.StatusCreated)
 				_, _ = io.WriteString(w, `{"private":"partial"`)
 			},
-			status: http.StatusBadGateway,
+			status:    http.StatusBadGateway,
+			errorCode: "UPSTREAM_UNAVAILABLE",
 		},
 		{
 			name: "valid upstream error",
@@ -149,7 +154,7 @@ func TestOrdinaryProxyValidatesResponseBeforeForwarding(t *testing.T) {
 			}
 			if tc.status == http.StatusBadGateway {
 				var failure map[string]any
-				if err := json.Unmarshal(response.Body.Bytes(), &failure); err != nil || failure["code"] != "UPSTREAM_UNAVAILABLE" || strings.Contains(response.Body.String(), "partial") {
+				if err := json.Unmarshal(response.Body.Bytes(), &failure); err != nil || failure["code"] != tc.errorCode || strings.Contains(response.Body.String(), "partial") {
 					t.Fatalf("invalid gateway error: %q", response.Body.String())
 				}
 				if response.Header().Get("Content-Type") != "application/json" || response.Header().Get("Retry-After") != "" || response.Header().Get("X-Context-Version") != "" {

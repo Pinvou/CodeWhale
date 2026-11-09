@@ -11,7 +11,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/netip"
 	"net/url"
@@ -1044,30 +1043,13 @@ func (s *Service) forward(w http.ResponseWriter, r *http.Request, upstream *url.
 	}
 	defer response.Body.Close()
 	materialContent := authenticated && upstream == s.config.BillingURL && productAdmissionMaterialContent(r.Method, resource) && response.StatusCode == http.StatusOK
-	var responseBody net.Buffers
-	if !auditDownload && !materialContent && r.Method != http.MethodHead && response.StatusCode != http.StatusNoContent && response.StatusCode != http.StatusNotModified {
-		// Validate the whole ordinary response before committing the upstream status.
-		const responseLimit = 32 << 20
-		var size int64
-		if response.ContentLength <= responseLimit {
-			responseBody, size, err = readOrdinaryProxyBody(response.Body, response.ContentLength, responseLimit)
-		}
-		if response.ContentLength > responseLimit || err != nil || size > responseLimit {
-			api.WriteError(w, http.StatusBadGateway, "UPSTREAM_UNAVAILABLE", "the account platform is unavailable", httpserver.RequestID(r.Context()))
-			return
-		}
-	}
-	for _, name := range []string{"Content-Type", "Retry-After", "X-Context-Version", "X-Authorization-Version", "X-Personal-Authorization-Version", "X-Platform-Authorization-Version", "X-Organization-Authorization-Version"} {
-		if value := response.Header.Get(name); value != "" {
-			w.Header().Set(name, value)
-		}
-	}
-	w.Header().Set("Cache-Control", "no-store")
 	if materialContent {
+		copyPortalResponseHeaders(w, response)
 		forwardProductAdmissionOriginal(w, r, response)
 		return
 	}
 	if auditDownload {
+		copyPortalResponseHeaders(w, response)
 		for _, name := range []string{"Content-Disposition", "Content-Length"} {
 			if value := response.Header.Get(name); value != "" {
 				w.Header().Set(name, value)
@@ -1084,38 +1066,7 @@ func (s *Service) forward(w http.ResponseWriter, r *http.Request, upstream *url.
 		}
 		return
 	}
-	w.WriteHeader(response.StatusCode)
-	if len(responseBody) != 0 {
-		_, _ = responseBody.WriteTo(w)
-	}
-}
-
-func readOrdinaryProxyBody(body io.Reader, contentLength, limit int64) (net.Buffers, int64, error) {
-	limited := &io.LimitedReader{R: body, N: limit + 1}
-	var buffers net.Buffers
-	chunkSize := int64(1024)
-	if contentLength >= 0 {
-		chunkSize = contentLength + 1
-	}
-	// Keep validated chunks instead of growing or flattening a large buffer.
-	// A known-length body fits one allocation, including its overflow probe.
-	for limited.N > 0 {
-		size := min(chunkSize, limited.N)
-		var chunk bytes.Buffer
-		chunk.Grow(int(size) + bytes.MinRead)
-		n, err := chunk.ReadFrom(io.LimitReader(limited, size))
-		if err != nil {
-			return nil, 0, err
-		}
-		if n > 0 {
-			buffers = append(buffers, chunk.Bytes())
-		}
-		if n < size {
-			break
-		}
-		chunkSize = min(chunkSize*2, 1<<20)
-	}
-	return buffers, limit + 1 - limited.N, nil
+	forwardOrdinaryAPIResponse(w, r, response)
 }
 
 // This read has an Account-owned durable audit and quota outcome. HEAD is not
