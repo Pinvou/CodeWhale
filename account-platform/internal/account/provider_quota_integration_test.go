@@ -37,7 +37,7 @@ SELECT gen_random_uuid(),decode(repeat('11',32),'hex'),decode(repeat('22',32),'h
 			err := repo.pool.QueryRow(ctx, `SELECT jsonb_build_object(
  'send',(SELECT jsonb_agg(to_jsonb(s) ORDER BY id) FROM sms_send_attempts s),
  'verify',(SELECT jsonb_agg(to_jsonb(v) ORDER BY id) FROM sms_verification_attempts v),
- 'previous_ledger',(SELECT jsonb_agg(to_jsonb(m) ORDER BY version) FROM schema_migrations m WHERE version<>900017))::text`).Scan(&facts)
+ 'previous_ledger',(SELECT jsonb_agg(to_jsonb(m) ORDER BY version) FROM schema_migrations m WHERE version NOT IN (900017,900018)))::text`).Scan(&facts)
 			if err != nil {
 				t.Fatal("retained quota evidence read failed", err)
 			}
@@ -77,8 +77,34 @@ WHERE c.relname IN ('sms_send_attempts_accepted_provider_window_idx','sms_verifi
 				throughUpgrade = append(throughUpgrade, migration)
 			}
 		}
+		stale, err := repo.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer stale.Rollback(ctx)
+		var oldCount int
+		if err := stale.QueryRow(ctx, `SELECT count(*) FROM sms_send_attempts WHERE provider_id='fixture-provider' AND result='ACCEPTED'`).Scan(&oldCount); err != nil || oldCount != 1 {
+			t.Fatal("failed to establish the live predecessor snapshot", err)
+		}
+		current := SMSChallenge{ID: uuid.New(), Mobile: "+8613800138040", Purpose: SMSPurposeLogin,
+			ExpiresAt: time.Now().Add(time.Minute), Source: "fixture-migration-source", Device: "fixture-migration-device",
+			Provider: SMSProviderDescriptor{ID: "fixture-provider", AdapterVersion: "v1"}}
+		if err := repo.CreateSMSChallenge(ctx, current); err != nil {
+			t.Fatal("predecessor login did not commit before installation", err)
+		}
+		beforeFence := snapshot()
 		if err := accountschema.Up(ctx, migrator, throughUpgrade); err != nil {
 			t.Fatal("install snapshot fence on the upgraded historical ledger", err)
+		}
+		_, err = stale.Exec(ctx, `INSERT INTO sms_send_attempts(id,mobile_hash,source_hash,device_hash,purpose,provider_id,result,occurred_at)
+VALUES(gen_random_uuid(),decode(repeat('11',32),'hex'),decode(repeat('22',32),'hex'),decode(repeat('33',32),'hex'),
+'REGISTER','fixture-provider','ACCEPTED',now())`)
+		var oldSnapshot *pgconn.PgError
+		if !errors.As(err, &oldSnapshot) || oldSnapshot.Code != "40001" {
+			t.Fatal("snapshot created before migration did not conflict with historical provider fence", err)
+		}
+		if err := stale.Rollback(ctx); err != nil {
+			t.Fatal(err)
 		}
 		err = accountschema.DownOne(ctx, migrator, throughUpgrade)
 		var rejected *pgconn.PgError
@@ -87,6 +113,10 @@ WHERE c.relname IN ('sms_send_attempts_accepted_provider_window_idx','sms_verifi
 		}
 		if _, err := accountschema.VerifyApplied(ctx, migrator, throughUpgrade); err != nil {
 			t.Fatal("forward-only rejection altered the migration ledger", err)
+		}
+		var seeded int
+		if err := repo.pool.QueryRow(ctx, `SELECT count(*) FROM sms_send_provider_admission_fences WHERE provider_id='fixture-provider'`).Scan(&seeded); err != nil || seeded != 1 || snapshot() != beforeFence {
+			t.Fatal("forward-only migration changed old evidence or omitted its provider fence", err)
 		}
 	})
 	for _, kind := range []string{"send", "verify"} {

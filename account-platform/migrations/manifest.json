@@ -1111,7 +1111,7 @@
       {
         "file": "900018_sms_send_provider_snapshot_fence.up.sql",
         "version": 900018,
-        "sha256": "45969693d43e7d82ab1595c760ceef47c9295c774741a1137a9e68aba77bac8b"
+        "sha256": "fb592617070959c695256e4c91528424f88b476b67e87fb005791f545e98defa"
       }
     ],
     "billing": [
