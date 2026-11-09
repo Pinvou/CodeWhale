@@ -1779,10 +1779,18 @@ test('Windows proxy: cancelled uncooperative dispatch shuts down on the first de
   const host = createFakeHost(fixture);
   const wrapper = driveWrapper(fixture);
   let replacement = null;
+  // In this fixture the first tool call includes lazy startup. Allow for a
+  // slow handshake followed by a slow post-bind catalog response. The
+  // cancellation phase below has its own observer and timing assertion.
+  const startupObservationMs = 45_000;
 
   try {
     await initializeWrapper(wrapper, 'windows-cancel-shutdown-test');
-    await wrapper.request('tools/call', { name: 'list_pages', arguments: {} });
+    const initial = await wrapper.request('tools/call', { name: 'list_pages', arguments: {} }, {
+      timeoutMs: startupObservationMs,
+      label: 'original wrapper first list_pages',
+    });
+    assert.equal(initial.result?.structuredContent?.pages?.length, 1);
 
     writeFileSync(fixture.modePath, JSON.stringify({ clickDelayMs: 30_000 }));
     const before = {
@@ -1809,20 +1817,12 @@ test('Windows proxy: cancelled uncooperative dispatch shuts down on the first de
       requestId: inFlight.id,
       reason: 'cancel uncooperative dispatch',
     });
-    const queued = wrapper.startRequest('tools/call', {
+    const queuedOutcome = await wrapper.request('tools/call', {
       name: 'list_pages',
       arguments: {},
+    }, {
+      label: 'queued list_pages awaiting shutdown rejection',
     });
-    // The production grace is a single 5s settlement window armed on the
-    // cancellation notification, so rejection cannot arrive before ~5s; the
-    // 20s race only bounds delivery under runner load (and stays below the
-    // fixture's 30s in-flight click, which must never settle first). The
-    // first-deadline window below keeps the anti-extension contract: a second
-    // armed grace would land the rejection at >=10s and fail the 9.5s cap.
-    const queuedOutcome = await Promise.race([
-      queued.response,
-      sleep(20_000).then(() => { throw new Error('queued call was not rejected before shutdown deadline'); }),
-    ]);
     const rejectedAt = Date.now();
     assert.match(queuedOutcome.error?.message || '', /browser\/wrapper-shutting-down/);
 
@@ -1833,6 +1833,8 @@ test('Windows proxy: cancelled uncooperative dispatch shuts down on the first de
       ]);
     }
     const shutdownElapsedMs = rejectedAt - cancelledAt;
+    // Reject delivery that takes a full additional 5s grace window even if
+    // the response arrives within the driver's 15s observation budget.
     assert.ok(
       shutdownElapsedMs >= 4_500 && shutdownElapsedMs < 9_500,
       `cooperative cancel shutdown did not reject queued work on its single first deadline: ${shutdownElapsedMs}ms`,
@@ -1861,6 +1863,9 @@ test('Windows proxy: cancelled uncooperative dispatch shuts down on the first de
     const recovered = await replacement.request('tools/call', {
       name: 'list_pages',
       arguments: {},
+    }, {
+      timeoutMs: startupObservationMs,
+      label: 'replacement wrapper first list_pages',
     });
     assert.equal(recovered.result.structuredContent.pages.length, 1);
   } finally {
