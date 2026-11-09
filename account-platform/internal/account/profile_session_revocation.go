@@ -2,6 +2,7 @@ package account
 
 import (
 	"context"
+	"crypto/hmac"
 	"crypto/sha256"
 	"errors"
 	"strings"
@@ -48,18 +49,22 @@ func (r *PostgresRepository) StartProfileSessionRevocation(ctx context.Context, 
 		if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('profile-revocation-admission',0))`); err != nil {
 			return err
 		}
+		if err = r.lockIdentityRecoveryClaim(ctx, tx, "profile", id); err != nil {
+			return err
+		}
 		capacity := r.profileRevocationCapacity
 		if capacity == 0 {
 			capacity = DefaultProfileRevocationCapacity
 		}
 		var pending int
-		if err = tx.QueryRow(ctx, `SELECT count(*) FROM (SELECT 1 FROM public.profile_session_revocation_receipts WHERE state<>'CONFIRMED' LIMIT $1) active`, capacity).Scan(&pending); err != nil {
+		if err = tx.QueryRow(ctx, `SELECT count(*) FROM (SELECT 1 FROM public.profile_session_revocation_receipts WHERE state IN ('RESERVED','DISPATCHED','UNKNOWN') LIMIT $1) active`, capacity).Scan(&pending); err != nil {
 			return err
 		}
 		if pending >= capacity {
 			return ErrProfileSessionRevocationCapacity
 		}
-		if _, err = tx.Exec(ctx, `INSERT INTO public.profile_session_revocation_receipts(operation_id,state,created_at) VALUES($1,'RESERVED',$2)`, id, r.now()); err != nil {
+		binding := profileRevocationSubjectBinding(id, c.IdentitySubject)
+		if _, err = tx.Exec(ctx, `INSERT INTO public.profile_session_revocation_receipts(operation_id,subject_binding,state,created_at) VALUES($1,$2,'RESERVED',$3)`, id, binding[:], r.now()); err != nil {
 			return err
 		}
 		if _, err = tx.Exec(ctx, `UPDATE profile_change_requests SET sessions_revocation_started_at=$2,version=version+1,updated_at=$2 WHERE id=$1`, id, r.now()); err != nil {
@@ -69,6 +74,10 @@ func (r *PostgresRepository) StartProfileSessionRevocation(ctx context.Context, 
 		return appendAudit(ctx, tx, c.UserID, "", nil, "account.profile_change.revocation_started", "profile_change", id.String(), "SUCCEEDED", map[string]any{"stage": "SESSION_REVOCATION"})
 	})
 	return first, err
+}
+
+func profileRevocationSubjectBinding(id uuid.UUID, subject string) [32]byte {
+	return sha256.Sum256([]byte("pinvou:profile-revocation:subject:v1:" + id.String() + ":" + subject))
 }
 
 func validProfileRevocationCommand(command profilerevocation.Command) bool {
@@ -87,21 +96,23 @@ func (r *PostgresRepository) ClaimProfileRevocation(ctx context.Context, command
 		if err := tx.QueryRow(ctx, `SELECT identity_subject,status,account_committed_at IS NOT NULL,sessions_revocation_started_at IS NOT NULL FROM profile_change_requests WHERE id=$1`, command.OperationID).Scan(&subject, &status, &committed, &started); err != nil {
 			return err
 		}
-		if subject != command.Subject {
-			return profilerevocation.ErrConflict
-		}
 		if !committed || !started {
 			return profilerevocation.ErrUnconfirmed
 		}
 		var state string
-		if err := tx.QueryRow(ctx, `SELECT state FROM public.profile_session_revocation_receipts WHERE operation_id=$1 FOR UPDATE`, command.OperationID).Scan(&state); err != nil {
+		var binding []byte
+		if err := tx.QueryRow(ctx, `SELECT state,subject_binding FROM public.profile_session_revocation_receipts WHERE operation_id=$1 FOR UPDATE`, command.OperationID).Scan(&state, &binding); err != nil {
 			return err
+		}
+		expected := profileRevocationSubjectBinding(command.OperationID, command.Subject)
+		if !hmac.Equal(binding, expected[:]) {
+			return profilerevocation.ErrConflict
 		}
 		if state == "CONFIRMED" {
 			result.State = "CONFIRMED"
 			return nil
 		}
-		if state != "RESERVED" || command.ReplayOnly {
+		if state != "RESERVED" || command.ReplayOnly || subject != command.Subject {
 			return profilerevocation.ErrUnconfirmed
 		}
 		var userStatus string
@@ -129,11 +140,12 @@ func (r *PostgresRepository) ConfirmProfileRevocation(ctx context.Context, comma
 		return profilerevocation.ErrConflict
 	}
 	return r.profileRecoveryWrite(ctx, command.OperationID, func(tx pgx.Tx) error {
-		var subject string
-		if err := tx.QueryRow(ctx, `SELECT identity_subject FROM profile_change_requests WHERE id=$1`, command.OperationID).Scan(&subject); err != nil {
+		var binding []byte
+		if err := tx.QueryRow(ctx, `SELECT subject_binding FROM public.profile_session_revocation_receipts WHERE operation_id=$1`, command.OperationID).Scan(&binding); err != nil {
 			return err
 		}
-		if subject != command.Subject {
+		expected := profileRevocationSubjectBinding(command.OperationID, command.Subject)
+		if !hmac.Equal(binding, expected[:]) {
 			return profilerevocation.ErrConflict
 		}
 		digest := sha256.Sum256(command.DispatchToken[:])

@@ -125,6 +125,12 @@ func (r *PostgresRepository) PrepareAccountClosureCleanup(ctx context.Context, i
 		if _, err := tx.Exec(ctx, `UPDATE profile_change_requests SET account_committed_at=CASE WHEN identity_updated_at IS NOT NULL THEN COALESCE(account_committed_at,$2) ELSE account_committed_at END,status='CANCELLED_ACCOUNT_CLOSURE',last_error_code='ACCOUNT_CLOSURE',version=version+1,updated_at=$2 WHERE id=$1`, item.id, now); err != nil {
 			return AccountClosureCleanupPreparation{}, err
 		}
+		// A RESERVED receipt proves that Identity never claimed dispatch. Seal
+		// it with profile cancellation under USER/profile locks so it cannot
+		// retain admission capacity or regain dispatch permission later.
+		if _, err := tx.Exec(ctx, `UPDATE public.profile_session_revocation_receipts SET state='NOT_DISPATCHED',not_dispatched_at=$2 WHERE operation_id=$1 AND state='RESERVED'`, item.id, now); err != nil {
+			return AccountClosureCleanupPreparation{}, err
+		}
 	}
 	if _, err := tx.Exec(ctx, `UPDATE commerce_customer_sync_jobs SET status='CANCELLED_ACCOUNT_CLOSURE',lease_until=NULL,last_error_code='ACCOUNT_CLOSURE',completed_at=$2,updated_at=$2 WHERE subject_type='USER' AND subject_id=$1 AND task_category<>'FINANCIAL' AND status NOT IN ('COMPLETED','CANCELLED_ACCOUNT_CLOSURE')`, userID, now); err != nil {
 		return AccountClosureCleanupPreparation{}, err

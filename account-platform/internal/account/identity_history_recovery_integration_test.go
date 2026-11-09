@@ -336,10 +336,20 @@ type historyLogoutDirectory struct {
 	identityadapter.UserDirectory
 	calls   atomic.Int64
 	unknown bool
+	entered chan struct{}
+	proceed chan struct{}
 }
 
-func (d *historyLogoutDirectory) RevokeSessions(context.Context, string) error {
+func (d *historyLogoutDirectory) RevokeSessions(ctx context.Context, _ string) error {
 	d.calls.Add(1)
+	if d.entered != nil {
+		close(d.entered)
+		select {
+		case <-d.proceed:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
 	if d.unknown {
 		return errors.New("controlled lost logout ACK")
 	}

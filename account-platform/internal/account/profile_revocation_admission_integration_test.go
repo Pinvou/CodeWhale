@@ -3,10 +3,15 @@ package account
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/accountschema"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/identity"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/migrations"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/profilerevocation"
 	"github.com/google/uuid"
@@ -256,6 +261,89 @@ func TestProfileRevocationDurableAdmissionRuntimePostgres(t *testing.T) {
 		}
 		if err = repository.pool.QueryRow(ctx, `SELECT state FROM profile_session_revocation_receipts WHERE operation_id=$1`, unknown.ID).Scan(&state); err != nil || state != "UNKNOWN" {
 			t.Fatal("refused rollback lost unknown evidence", state, err)
+		}
+	})
+	t.Run("capacity-public-complete-resumes-original-operation", func(t *testing.T) {
+		repository := fixture.repository(t)
+		if err := repository.ConfigureProfileRevocationCapacity(1); err != nil {
+			t.Fatal(err)
+		}
+		first := committedRevocationProfile(t, repository)
+		second := committedRevocationProfile(t, repository)
+		if _, err := repository.StartProfileSessionRevocation(ctx, first.ID); err != nil {
+			t.Fatal(err)
+		}
+		directory := &historyLogoutDirectory{}
+		client := historyAdapter(t, directory, repository)
+		service := NewService(repository, nil).WithProfileChanges(&ProfileChangeService{store: repository, identities: client, now: time.Now})
+		principal := identity.Principal{Issuer: second.IdentityIssuer, Subject: second.IdentitySubject, SessionID: "controlled-profile-session", AuthenticatedAt: time.Now()}
+		handler := service.Handler(func(context.Context, string) (identity.Principal, error) { return principal, nil })
+		complete := func() *httptest.ResponseRecorder {
+			request := httptest.NewRequest(http.MethodPost, "/v1/me/profile-change-requests/"+second.ID.String()+"/actions/complete", strings.NewReader(`{}`))
+			request.Header.Set("Authorization", "Bearer controlled-profile-user")
+			request.Header.Set("Content-Type", "application/json")
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+			return response
+		}
+		pending := complete()
+		if pending.Code != http.StatusAccepted || !strings.Contains(pending.Body.String(), `"reason":"SESSION_REVOCATION_CAPACITY"`) || directory.calls.Load() != 0 {
+			t.Fatal("public overload receipt did not remain actionable", pending.Code, pending.Body.String())
+		}
+		var untouched bool
+		if err := repository.pool.QueryRow(ctx, `SELECT sessions_revocation_started_at IS NULL AND NOT EXISTS(SELECT 1 FROM profile_session_revocation_receipts WHERE operation_id=$1) FROM profile_change_requests WHERE id=$1`, second.ID).Scan(&untouched); err != nil || !untouched {
+			t.Fatal("public overload consumed first grant", err)
+		}
+		if err := client.RevokeProfileSessions(ctx, first.IdentitySubject, first.ID, true); err != nil {
+			t.Fatal(err)
+		}
+		completed := complete()
+		if completed.Code != http.StatusOK || !strings.Contains(completed.Body.String(), `"status":"COMPLETED"`) || directory.calls.Load() != 2 {
+			t.Fatal("original operation failed to converge after capacity released", completed.Code, completed.Body.String(), directory.calls.Load())
+		}
+	})
+	t.Run("lease-expiry-during-global-admission-wait", func(t *testing.T) {
+		repository := fixture.repository(t)
+		var clock atomic.Int64
+		clock.Store(time.Now().UnixNano())
+		repository.now = func() time.Time { return time.Unix(0, clock.Load()).UTC() }
+		change := committedRevocationProfile(t, repository)
+		claim, err := repository.ClaimProfileChange(ctx)
+		if err != nil || claim == nil || claim.ID != change.ID {
+			t.Fatal("profile recovery claim", err)
+		}
+		claimed, cancel, err := withIdentityRecoveryClaim(ctx, "profile", claim.ID, claim.RecoveryGeneration, claim.RecoveryLeaseUntil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer cancel()
+		detached := context.WithoutCancel(claimed)
+		before := historyClaimSnapshot(t, repository, "profile_change_requests", change.ID)
+		blocker, err := repository.pool.Begin(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer blocker.Rollback(ctx)
+		if _, err = blocker.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('profile-revocation-admission',0))`); err != nil {
+			t.Fatal(err)
+		}
+		type admission struct {
+			first bool
+			err   error
+		}
+		finished := make(chan admission, 1)
+		go func() {
+			first, err := repository.StartProfileSessionRevocation(detached, change.ID)
+			finished <- admission{first, err}
+		}()
+		wallClockWait(t, ctx, fixture.admin, `SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=$1 AND wait_event='advisory' AND query LIKE '%profile-revocation-admission%')`, repository.pool.Config().ConnConfig.Database)
+		clock.Store(claim.RecoveryLeaseUntil.Add(time.Second).UnixNano())
+		if err = blocker.Commit(ctx); err != nil {
+			t.Fatal(err)
+		}
+		result := <-finished
+		if result.first || !errors.Is(result.err, ErrIdentityRecoveryClaimLost) || before != historyClaimSnapshot(t, repository, "profile_change_requests", change.ID) {
+			t.Fatal("expired worker persisted a grant after admission wait", result.first, result.err)
 		}
 	})
 }

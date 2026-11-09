@@ -18,10 +18,11 @@ receipt. Before granting the first attempt, Account locks USER, profile and a
 global admission key, then reserves the receipt in the same transaction as the
 grant and its audit. `PROFILE_REVOCATION_CAPACITY` defaults to 4096 unresolved
 operations per Account database and accepts 1 through 1000000. Replicas must use
-the same capacity. Helm exposes `account.profileRevocationCapacity`; governed
+the same capacity. Helm exposes `account.profileRevocationCapacity` and governed
 Compose reads the environment variable. Site capacity still requires measurement.
-Saturation returns `503 PROFILE_REVOCATION_CAPACITY`, creates neither receipt nor
-first grant, and follows the existing profile retry and SLA policy. Existing
+At saturation the original completion endpoint returns 202 with RETRY or
+REPAIR_REQUIRED and reason `SESSION_REVOCATION_CAPACITY`. It creates neither
+receipt nor first grant and follows the profile retry and SLA policy. Existing
 reservations and confirmed replays remain usable when admission is full.
 
 The existing Identity `POST /internal/v1/users/{subject}/profile-revocations`
@@ -35,8 +36,10 @@ Identity uses its existing Account URL, CA and rotating workload credential for
 `POST /internal/v1/profile-revocation-receipts/claim` and `/confirm`. Only the
 Identity workload receives `internal.account.profile-revocation.claim` and
 `internal.account.profile-revocation.confirm`. Commands bind the operation,
-exact subject and random dispatch token. The receipt copies no subject, mobile
-number, provider payload or credential from the original profile.
+exact subject and random dispatch token. A domain-separated SHA-256 digest binds
+the subject to this operation across later identity anonymization. This retained
+verifier is pseudonymous data, scoped to one operation. The receipt copies no raw
+subject, mobile number, provider payload or credential from the original profile.
 
 RESERVED permits one atomic claim to DISPATCHED and records the token hash. Even
 reclaiming the same token cannot grant dispatch again. Identity calls the provider
@@ -50,7 +53,10 @@ CONFIRMED replays 204 across Identity restarts and instances without a provider
 call. The original Account checkpoint then clears local sessions under its
 existing recovery fence. A lost checkpoint converges from the durable receipt.
 Confirmed history stays in Account for replay and releases active admission
-capacity. DISPATCHED and legacy UNKNOWN retain capacity slots. Identity has no
+capacity. Closure seals a still-RESERVED receipt as NOT_DISPATCHED under the
+original USER/profile transaction and releases its admission slot. That durable
+terminal state cannot grant logout or be confirmed. DISPATCHED and legacy UNKNOWN
+retain capacity slots. Identity has no
 process-level receipt map, and no TTL deletes known or unknown outcome evidence.
 Aggregate state counts, oldest unresolved time and `pg_total_relation_size` for
 this table provide Account capacity inputs. Database storage grows with retained
@@ -65,7 +71,10 @@ Install the migration while old writers remain stopped, verify ledger identity
 and receipt counts, then update both binaries and the exact Identity-to-Account
 workload rules before reopening ingress. Mixed old/new profile writers are
 unsupported during cutover. Previous grants become UNKNOWN unless Account already
-held `sessions_revoked_at`, which becomes CONFIRMED. Migration neither invents an
+held `sessions_revoked_at`, which becomes CONFIRMED. A legacy subject already
+anonymized before cutover cannot reconstruct its former verification binding.
+Migration binds the retained historical subject and never guesses the original.
+Migration neither invents an
 ACK nor renews a first grant. Unknown cases retain REPAIR_REQUIRED and redacted
 audit handling. Never clear an old marker to force a fresh logout.
 
@@ -76,7 +85,8 @@ fences retain their existing contract.
 
 Formal PostgreSQL roots are `TestIdentityRecoveryClaimsRuntimePostgres`,
 `TestProfileSessionRevocationRecoveryRuntimePostgres` and
-`TestProfileRevocationDurableAdmissionRuntimePostgres`. Public migrations and the
+`TestProfileRevocationDurableAdmissionRuntimePostgres`, plus
+`TestProfileRevocationClosureRuntimePostgres`. Public migrations and the
 non-superuser runtime exercise actual Account and Identity HTTP DTOs with a
 controlled provider counter. Live Keycloak and deployed cutover require separate
 site evidence.

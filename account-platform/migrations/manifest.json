@@ -1101,7 +1101,7 @@
       {
         "file": "900019_profile_revocation_receipts.up.sql",
         "version": 900019,
-        "sha256": "6cea67506f30e521110c16a7762e19ece52306593cf0295ab5b3030fffa943aa"
+        "sha256": "d17ec559d826ed5ed05f65ca573ab748ca9322551ef4593a252f24b655c72fac"
       }
     ],
     "billing": [

@@ -86,6 +86,7 @@ ACCOUNT_REQUIRED = {
     "TestIdentityRecoveryClaimsRuntimePostgres",
     "TestProfileSessionRevocationRecoveryRuntimePostgres",
     "TestProfileRevocationDurableAdmissionRuntimePostgres",
+    "TestProfileRevocationClosureRuntimePostgres",
     "TestRegistrationCreateDispatchRuntimePostgres",
     "TestRegistrationUnknownInspectionPostgres",
     "TestRegistrationIdentityRejectionRuntimePostgres",
@@ -283,6 +284,13 @@ EXACT_REQUIRED_CHILDREN = {
         "dispatch-token-and-legacy-command-cannot-regrant",
         "concurrent-global-admission-across-profiles",
         "legacy-upgrade-preserves-confirmed-and-unknown-receipts",
+        "capacity-public-complete-resumes-original-operation",
+        "lease-expiry-during-global-admission-wait",
+    },
+    "TestProfileRevocationClosureRuntimePostgres": {
+        "reserved-closure-seals-no-dispatch-and-releases-capacity",
+        "confirmed-replays-after-anonymization",
+        "late-confirmation-replays-after-anonymization",
     },
     "TestBillingHistoricalCatalogRollbackPostgres": {
         f"version{version}/seeded={seeded}{suffix}"
