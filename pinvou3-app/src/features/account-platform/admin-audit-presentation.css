@@ -9,3 +9,10 @@
 .adm-audit-export-limits dt{font-size:12px;color:var(--adm-muted)}.adm-audit-export-limits dd{margin:4px 0 0}
 .adm-audit-export-confirm dd code{white-space:pre-wrap;overflow-wrap:break-word;overflow-wrap:anywhere}.adm-audit-export-confirm footer{display:flex;justify-content:flex-end;gap:8px;flex-wrap:wrap;margin-top:12px}
 .adm-audit-export-confirm .adm-audit-confirm-submit{border-color:var(--adm-primary);background:var(--adm-primary);color:#fff}
+
+.adm-restored-shell .adm-ops-form.adm-audit-toolbar fieldset{display:grid;grid-template-columns:repeat(auto-fit,minmax(155px,1fr));gap:10px;align-items:end}
+.adm-audit-list-actions,.adm-audit-batch-pagination,.adm-audit-applied{display:flex;align-items:center;flex-wrap:wrap;gap:8px 12px}
+.adm-audit-applied{color:var(--adm-muted);font-size:12px;overflow-wrap:break-word;overflow-wrap:anywhere}
+.adm-restored-shell .adm-audit-table table td{padding:8px 10px}
+.adm-audit-list-results h3{margin:12px 0 8px}
+.adm-audit-batch-pagination{margin-top:10px}

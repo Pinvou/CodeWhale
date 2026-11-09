@@ -1,5 +1,5 @@
-import React, {useCallback,useEffect,useId,useRef,useState} from 'react';
-import { auditActionCopy, auditActionLabels, auditPrivacyCopy, auditExportPresentation } from '../../shared/i18n.js';
+import React, {useCallback,useEffect,useId,useLayoutEffect,useRef,useState} from 'react';
+import { auditActionCopy, auditActionLabels, auditPrivacyCopy, auditExportPresentation, auditListCopy } from '../../shared/i18n.js';
 import './admin-audit-presentation.css';
 import {secureRequestID} from './request-id.js';
 import {acquireAuditExportTicket,newAuditExportAttempt,submitAuditExportAttempt} from './admin-audit-export.js';
@@ -12,6 +12,9 @@ function shortID(value) {
   const text = String(value || '');
   return text.length > 16 ? `${text.slice(0, 8)}…${text.slice(-5)}` : text || '—';
 }
+
+const auditPageSize = 15;
+const emptyAuditFilters = () => ({ actor: '', action: '', resource: '', result: '', from: '', to: '' });
 
 function readAuditQueryFilters(locationLike = globalThis.location) {
   const search = new URLSearchParams(String(locationLike?.search || ''));
@@ -73,7 +76,7 @@ function Empty({ copy }) {
 function Table({ columns, items, copy }) {
   if (!items?.length) return <Empty copy={copy} />;
   return (
-    <div className="adm-table-wrap">
+    <div className="adm-table-wrap adm-audit-table" role="region" aria-label={copy.audit.title} tabIndex={0}>
       <table className="adm-table">
         <thead>
           <tr>
@@ -119,7 +122,7 @@ function DetailDrawer({ label, onClose, children, describedBy, role = 'dialog' }
     globalThis.addEventListener?.('keydown', onKeyDown);
     return () => {
       globalThis.removeEventListener?.('keydown', onKeyDown);
-      previousFocus?.focus?.();
+      if (previousFocus?.isConnected) previousFocus.focus?.();
     };
   }, [onClose]);
   const trapFocus = (event) => {
@@ -197,6 +200,15 @@ function Audit({ copy, data, client, setData, permissions, currentUserID, langua
   const knownExportID = useRef(recovery.record?.exportID || '');
   const [filters, setFilters] = useState(() => recoveredInput ? restoredFilters(recoveredInput.filter) : readAuditQueryFilters());
   const [detail, setDetail] = useState(null);
+  const [localPage, setLocalPage] = useState(0), [listRead, setListRead] = useState('ready');
+  const rowActions = useRef(new Map()), listHeading = useRef(null), returnRow = useRef(''), readAttempt = useRef(0);
+  const closeDetail = useCallback(() => { returnRow.current = detail?.audit_id || ''; setDetail(null); }, [detail?.audit_id]);
+  useLayoutEffect(() => {
+    if (detail || !returnRow.current) return;
+    const previous = rowActions.current.get(returnRow.current);
+    returnRow.current = '';
+    (previous?.isConnected ? previous : listHeading.current)?.focus();
+  }, [detail]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [includePII, setIncludePII] = useState(recoveredInput?.includePII || false);
@@ -219,7 +231,12 @@ function Audit({ copy, data, client, setData, permissions, currentUserID, langua
   const canExportPII = (permissions || []).includes('platform.audit.pii.export');
   const privacyID = useId(), privacyWords = auditPrivacyCopy[language];
   const exportWords = auditExportPresentation[language];
-  const items = data.audits || [];
+  const listWords = auditListCopy[language];
+  const items = canRead && listRead !== 'denied' ? data.audits || [] : [];
+  const pageCount = Math.ceil(items.length / auditPageSize), page = Math.min(localPage, Math.max(0, pageCount - 1));
+  const visibleItems = items.slice(page * auditPageSize, (page + 1) * auditPageSize);
+  const listFilterLabels = { actor: copy.audit.actor, action: copy.audit.action, resource: copy.audit.resource, result: copy.audit.result, from: copy.audit.from + ' (UTC)', to: copy.audit.to + ' (UTC)' };
+  const applied = Object.entries(data.auditFilters || {}).filter(([key,value]) => listFilterLabels[key] && value);
   const observeRecoveryError = cause => {
     if (cause?.status === 401 || cause?.code === 'RECENT_AUTHENTICATION_REQUIRED') setNeedsAuthentication(true);
     if (cause?.code === 'AUDIT_EXPORT_RECOVERY_UNAVAILABLE') setRecoveryBlocked(true);
@@ -233,41 +250,46 @@ function Audit({ copy, data, client, setData, permissions, currentUserID, langua
     } catch { setError(copy.audit.recoveryCleanupFailed); return false; }
   };
 
-  const queryFilters = () => ({
-    ...filters,
-    from: filters.from ? new Date(filters.from).toISOString() : '',
-    to: filters.to ? new Date(filters.to).toISOString() : '',
+  const queryFilters = (values = filters) => ({
+    ...values,
+    from: values.from ? new Date(values.from).toISOString() : '',
+    to: values.to ? new Date(values.to).toISOString() : '',
   });
-  const search = async (event) => {
+  const search = async (event, values = filters) => {
     event?.preventDefault();
-    if (!canRead) return;
-    setBusy(true);
-    setError('');
+    if (!canRead || busy || recoveryBlocked || exportAttempted || exportJob) return;
+    let applied;
+    try { applied = queryFilters(values); }
+    catch { setListRead('invalid'); return; }
+    const attempt = ++readAttempt.current;
+    setBusy(true); setListRead('loading');
     try {
-      const result = await client.audits(queryFilters());
-      if (!liveRef.current) return;
+      const result = await client.audits(applied);
+      if (!liveRef.current || attempt !== readAttempt.current) return;
       if (!Array.isArray(result?.items)) throw new Error('INVALID_AUDIT_LOGS_ACK');
-      setData((current) => ({ ...current, audits: result.items }));
-    } catch {
-      if (liveRef.current) setError(copy.audit.actionFailed);
-    } finally {
-      if (liveRef.current) setBusy(false);
-    }
+      setData(current => ({ ...current, audits: result.items, auditFilters: applied }));
+      setLocalPage(0); setListRead('ready');
+    } catch (failure) {
+      if (liveRef.current && attempt === readAttempt.current) {
+        const denied = failure?.status === 403 || failure?.status === 401;
+        if (denied) setData(current => ({ ...current, audits: [], auditFilters: {} }));
+        setListRead(denied ? 'denied' : 'failed');
+      }
+    } finally { if (liveRef.current && attempt === readAttempt.current) setBusy(false); }
   };
+  const resetSearch = () => { const initial = emptyAuditFilters(); setFilters(initial); void search(null, initial); };
   const showDetail = async (item) => {
-    if (!canRead) return;
-    setBusy(true);
-    setError('');
+    if (!canRead || busy) return;
+    const attempt = ++readAttempt.current;
+    setBusy(true); setError('');
     try {
       const itemDetail = await client.audit(item.audit_id);
-      if (!liveRef.current) return;
+      if (!liveRef.current || attempt !== readAttempt.current) return;
       if (itemDetail?.audit_id !== item.audit_id) throw new Error('INVALID_AUDIT_DETAIL_ACK');
       setDetail(itemDetail);
-    } catch {
-      if (liveRef.current) setError(copy.audit.actionFailed);
-    } finally {
-      if (liveRef.current) setBusy(false);
-    }
+    } catch (failure) {
+      if (liveRef.current && attempt === readAttempt.current) setError(failure?.status === 403 ? copy.permissionDenied : copy.audit.actionFailed);
+    } finally { if (liveRef.current && attempt === readAttempt.current) setBusy(false); }
   };
   const prepareExport = () => {
     if (!canExport || busy || recoveryBlocked || exportJob || exportConfirmationRef.current) return;
@@ -413,18 +435,14 @@ function Audit({ copy, data, client, setData, permissions, currentUserID, langua
       if (liveRef.current) setBusy(false);
     }
   };
-  if (detail) return <AuditDetail copy={copy} item={detail} onBack={() => setDetail(null)} language={language} />;
+  if (detail) return <AuditDetail copy={copy} item={detail} onBack={closeDetail} language={language} />;
   const ticketExpiry = exportJob?.download_expires_at || exportTicketRef.current?.expires_at;
   const columns = [
     {
       key: 'action',
       label: copy.audit.action,
       className: 'adm-audit-action-cell',
-      render: (item) => (
-        <button type="button" className="adm-name-link adm-audit-action" disabled={busy} onClick={() => showDetail(item)}>
-          {auditActionLabel(language, item.action) || <code>{item.action || '—'}</code>}
-        </button>
-      ),
+      render: (item) => <span className="adm-audit-action">{auditActionLabel(language, item.action) || <code>{item.action || '—'}</code>}</span>,
     },
     {
       key: 'resource_type',
@@ -463,50 +481,25 @@ function Audit({ copy, data, client, setData, permissions, currentUserID, langua
       label: copy.audit.occurred,
       render: (item) => formatDate(item.occurred_at),
     },
+    {
+      key: 'details', label: listWords.detailsColumn,
+      render: item => <button type="button" className="adm-name-link adm-audit-row-detail" disabled={busy}
+        aria-label={listWords.details + ': ' + (auditActionLabel(language, item.action) || item.action || '—') + ' · ' + item.audit_id}
+        ref={node => { if (node) rowActions.current.set(item.audit_id, node); else rowActions.current.delete(item.audit_id); }}
+        onClick={() => void showDetail(item)}>{listWords.details}</button>,
+    },
   ];
   return (
     <>
     <section className="adm-panel">
-      <SectionHeader title={copy.audit.title} count={items.length} copy={copy} />
-      <form className="adm-ops-form" onSubmit={search}><fieldset disabled={busy || recoveryBlocked || exportAttempted || Boolean(exportJob)}>
-        <input aria-label={copy.audit.actorFilter} placeholder={copy.audit.actorFilter} value={filters.actor} onChange={(event) => setFilters((current) => ({ ...current, actor: event.target.value }))} />
-        <input
-          aria-label={copy.audit.actionFilter}
-          placeholder={copy.audit.actionFilter}
-          value={filters.action}
-          onChange={(event) =>
-            setFilters((current) => ({
-              ...current,
-              action: event.target.value,
-            }))
-          }
-        />
-        <input
-          aria-label={copy.audit.resourceFilter}
-          placeholder={copy.audit.resourceFilter}
-          value={filters.resource}
-          onChange={(event) =>
-            setFilters((current) => ({
-              ...current,
-              resource: event.target.value,
-            }))
-          }
-        />
-        <select
-          aria-label={copy.audit.result}
-          value={filters.result}
-          onChange={(event) =>
-            setFilters((current) => ({
-              ...current,
-              result: event.target.value,
-            }))
-          }
-        >
-          <option value="">{copy.audit.allResults}</option>
-          <option>SUCCEEDED</option>
-          <option>DENIED</option>
-          <option>FAILED</option>
-        </select>
+      <SectionHeader title={copy.audit.title} copy={copy} />
+      <form className="adm-ops-form adm-audit-toolbar" onSubmit={search}><fieldset disabled={busy || recoveryBlocked || exportAttempted || Boolean(exportJob)}>
+        <label>{copy.audit.actor}<input aria-label={copy.audit.actorFilter} placeholder={copy.audit.actorFilter} value={filters.actor} onChange={event => setFilters(current => ({ ...current, actor: event.target.value }))} /></label>
+        <label>{copy.audit.action}<input aria-label={copy.audit.actionFilter} placeholder={copy.audit.actionFilter} value={filters.action} onChange={event => setFilters(current => ({ ...current, action: event.target.value }))} /></label>
+        <label>{copy.audit.resource}<input aria-label={copy.audit.resourceFilter} placeholder={copy.audit.resourceFilter} value={filters.resource} onChange={event => setFilters(current => ({ ...current, resource: event.target.value }))} /></label>
+        <label>{copy.audit.result}<select aria-label={copy.audit.result} value={filters.result} onChange={event => setFilters(current => ({ ...current, result: event.target.value }))}>
+          <option value="">{copy.audit.allResults}</option><option>SUCCEEDED</option><option>DENIED</option><option>FAILED</option>
+        </select></label>
         <label className="adm-filter-date">
           <span>{copy.audit.from}</span>
           <input
@@ -524,7 +517,7 @@ function Audit({ copy, data, client, setData, permissions, currentUserID, langua
           <span>{copy.audit.to}</span>
           <input type="datetime-local" value={filters.to} onChange={(event) => setFilters((current) => ({ ...current, to: event.target.value }))} />
         </label>
-        <button disabled={busy || !canRead}>{copy.searchAction}</button></fieldset>
+        <div className="adm-audit-list-actions"><button type="submit" disabled={busy || !canRead}>{copy.searchAction}</button><button type="button" disabled={busy || !canRead} onClick={resetSearch}>{listWords.reset}</button></div></fieldset>
       </form>
       {canExport && <ExportLimits words={exportWords} />}
       {recoveryPending && <p role="status">{copy.audit.recoveryReady}</p>}
@@ -572,7 +565,20 @@ function Audit({ copy, data, client, setData, permissions, currentUserID, langua
         </div>
       )}
       {error && <div className="adm-inline-message error" role="alert">{error}</div>}
-      <Table columns={columns} items={items} copy={copy} />
+      {canRead && <div className="adm-audit-list-results">
+        <h3 ref={listHeading} tabIndex={-1}>{listWords.results}</h3>
+        {listRead === 'loading' && <p role="status">{listWords.loading}</p>}
+        {['failed', 'denied', 'invalid'].includes(listRead) && <p role="alert">{listWords[listRead]}</p>}
+        {listRead !== 'ready' && listRead !== 'denied' && !!items.length && <p>{listWords.previousBatch}</p>}
+        {listRead !== 'denied' && (listRead === 'ready' || items.length > 0) && <p className="adm-audit-applied"><strong>{listWords.applied}</strong>{applied.length ? applied.map(([key,value]) => <span key={key}>{listFilterLabels[key]}: <bdi>{value}</bdi></span>) : <span>{listWords.unfiltered}</span>}</p>}
+        {listRead === 'ready' && !items.length && <p role="status">{listWords.empty}</p>}
+        {!!visibleItems.length && <><Table columns={columns} items={visibleItems} copy={copy} />
+          <nav className="adm-audit-batch-pagination" aria-label={listWords.pagination}>
+            <span>{listWords.batch.replace('{count}',items.length).replace('{from}',page*auditPageSize+1).replace('{to}',page*auditPageSize+visibleItems.length)}</span>
+            <button type="button" disabled={busy || page === 0} onClick={() => setLocalPage(page-1)}>{listWords.previous}</button>
+            <button type="button" disabled={busy || page + 1 >= pageCount} onClick={() => setLocalPage(page+1)}>{listWords.next}</button>
+          </nav></>}
+      </div>}
     </section>
 
     </>
