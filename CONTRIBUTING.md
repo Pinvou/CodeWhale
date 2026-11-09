@@ -130,6 +130,15 @@ runtime identity checks remain authoritative. A new resource type needs a shared
 factory, failure/cancellation verification and a zero-resource postcondition,
 rather than another ad-hoc cleanup command in an individual test.
 
+The static fixture guard covers Go test database DDL and JavaScript server/browser
+factories. It does not inspect Docker commands or Python/shell subprocess paths.
+An absolute Docker executable bypasses the job's PATH wrapper, just as a direct
+Docker API does; either requires equivalent ownership registration and retirement
+checks. A passing static guard does not establish Docker coverage for those paths.
+Fixture signal hooks allow at most 30 seconds for cooperative cleanup, then exit
+nonzero while preserving unfinished receipts. A process exit never confirms that
+surviving child resources stopped; use the owning process supervisor and ledger.
+
 ## CI and merge queue
 
 Pull requests use a staged, path-aware gate. Draft pull requests run fast feedback

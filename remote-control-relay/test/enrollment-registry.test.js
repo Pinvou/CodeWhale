@@ -2515,7 +2515,8 @@ test("public snapshot validation and import are strict, versioned, and one-CAS",
   const beforeRestore = importing.exportSnapshot();
   const restored = await importing.applyAtomicBatch({
     expectedNamespaceRevision: beforeRestore.namespace_revision,
-    operations: [{ operation: "restore", snapshot: exported.registry }],
+    operations: [{ operation: "restore", snapshot: exported.registry,
+      expected_namespace_revision: beforeRestore.namespace_revision }],
   });
   assert.equal(writes, 2);
   assert.equal(restored.restored_entry_count, 2);
