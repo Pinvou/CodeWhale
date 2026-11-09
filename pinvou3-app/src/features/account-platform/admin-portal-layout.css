@@ -566,3 +566,8 @@
 .adm-restored-shell .adm-token-account-list .adm-token-account-metric-help{margin:10px 16px;color:var(--adm-muted);font-size:12px;line-height:1.45}
 .adm-restored-shell .adm-token-account-list .adm-token-account-metric{min-width:44px;min-height:44px;color:var(--adm-primary);font-variant-numeric:tabular-nums}
 .adm-restored-shell .adm-token-account-list .adm-token-account-metric:focus{outline:3px solid var(--adm-primary);outline-offset:2px}
+
+.adm-restored-shell .adm-token-detail-identity{display:grid;gap:5px;min-width:0;overflow-wrap:break-word}
+.adm-restored-shell .adm-token-detail-identity small,.adm-restored-shell .adm-token-detail-stale{color:var(--adm-muted);font-size:12px}
+.adm-restored-shell .adm-token-detail-policy>summary{min-height:32px;cursor:pointer;color:var(--adm-primary)}
+.adm-restored-shell .adm-token-detail-policy>summary:focus{outline:3px solid var(--adm-primary);outline-offset:2px}
