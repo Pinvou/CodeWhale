@@ -11,7 +11,9 @@ export const approvalReadCopy = {
     "retryRead": "重试读取",
     "refreshRead": "重新读取",
     "snapshotTime": "上次成功结果 · 查询快照时间：",
-    "receivedTime": "上次成功读取 · 浏览器接收时间："
+    "receivedTime": "上次成功读取 · 浏览器接收时间：",
+    "targetID": "目标编号",
+    "targetHelp": "输入业务对象的完整编号，精确匹配。支持 UUID 及业务编号，例如支付服务商编号。"
   },
   "en": {
     "loading": "Reading my requests…",
@@ -25,7 +27,9 @@ export const approvalReadCopy = {
     "retryRead": "Retry loading",
     "refreshRead": "Reload results",
     "snapshotTime": "Last successful result · query snapshot:",
-    "receivedTime": "Last successful read · received by this browser:"
+    "receivedTime": "Last successful read · received by this browser:",
+    "targetID": "Target ID",
+    "targetHelp": "Enter the full resource ID for an exact match. UUIDs and business IDs, such as a payment provider ID, are supported."
   },
   "ja": {
     "loading": "自分の申請を読み込み中…",
@@ -39,6 +43,8 @@ export const approvalReadCopy = {
     "retryRead": "再読み込みを試す",
     "refreshRead": "結果を再読み込み",
     "snapshotTime": "前回の結果・検索スナップショット時刻：",
-    "receivedTime": "前回成功時・ブラウザーの受信時刻："
+    "receivedTime": "前回成功時・ブラウザーの受信時刻：",
+    "targetID": "対象 ID",
+    "targetHelp": "対象の完全な ID を入力すると、完全一致で検索できます。UUID や決済事業者 ID などの業務 ID に対応しています。"
   }
 };
