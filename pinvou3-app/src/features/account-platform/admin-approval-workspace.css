@@ -69,3 +69,12 @@
 .adm-approval-mine-read:empty{display:none}
 .adm-approval-mine-read p{padding:10px 12px;margin:8px 0;border:1px solid var(--adm-line);border-radius:8px;background:var(--adm-soft);color:var(--adm-text);overflow-wrap:break-word;overflow-wrap:anywhere}
 .adm-approval-mine-read [role=alert]{color:var(--adm-danger);background:var(--adm-danger-soft)}
+
+.adm-approval-query-actions,.adm-approval-mine-tools{display:flex;align-items:center;flex-wrap:wrap;gap:8px}
+.adm-approval-toolbar .adm-approval-query{border-color:var(--adm-primary);color:#fff;background:var(--adm-primary)}
+.adm-approval-toolbar .adm-approval-query:hover:not(:disabled){border-color:var(--adm-primary-strong);background:var(--adm-primary-strong)}
+.adm-approval-toolbar .adm-approval-query:disabled{opacity:.6;cursor:default}
+.adm-approval-mine-tools:not(:empty){margin:8px 0 12px}
+.adm-approval-mine-tools small{color:var(--adm-muted);overflow-wrap:anywhere}
+.adm-approval-mine-tools time{font-variant-numeric:tabular-nums}
+.adm-approval-mine-tools button{margin-left:auto}
