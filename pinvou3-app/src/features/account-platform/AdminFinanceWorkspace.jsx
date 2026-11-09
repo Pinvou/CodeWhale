@@ -521,7 +521,8 @@ function Wallets({ client, copy, language, permissions, owner, requesterID, onVi
   </section>;
 }
 
-function ProviderControls({ client, copy, permissions, owner }) {
+function ProviderControls({ client, copy, permissions, owner, language }) {
+  const words = adminLayoutCopy[language].providerControlStatus;
   const [control, setControl] = useState(null);
   const [reason, setReason] = useState('');
   const operation = useFinanceOperation(owner, copy, client, 'provider-controls');
@@ -535,8 +536,42 @@ function ProviderControls({ client, copy, permissions, owner }) {
     });
     if (result) await load();
   };
+  const controlStatus = row => row.new_orders_enabled === true ? words.enabled : row.new_orders_enabled === false ? words.disabled : words.unknown;
+  const controlReason = row => {
+    const code = row.reason_code;
+    if (!code) return '—';
+    return Object.prototype.hasOwnProperty.call(words.reasons, code) ? <>{words.reasons[code]} <code>{code}</code></> : <code>{code}</code>;
+  };
+  const resumeAction = (row, product) => row.resume_draft && permissions.includes('platform.billing.payment-controls.resume.request') ? <button type="button" disabled={operation.busy || operation.unknown || reason.trim().length < 10} onClick={() => void resume(product)}>{operation.unknown ? copy.retry : copy.resume}</button> : '—';
   return <section><h3>{copy.providerControls}</h3><button disabled={operation.busy} onClick={() => void load()}>{copy.refresh}</button><Feedback operation={operation} copy={copy} />{operation.unknown && <button disabled={operation.busy} onClick={() => void resume(null)}>{copy.retry}</button>}<label>{copy.reason}<textarea disabled={operation.busy || operation.unknown} value={reason} onChange={event => setReason(event.target.value)} /></label>
-    {control && <><p>{control.provider_id} / {control.reason_code}</p>{control.resume_draft && permissions.includes('platform.billing.payment-controls.resume.request') && <button disabled={operation.busy || operation.unknown || reason.trim().length < 10} onClick={() => void resume(null)}>{operation.unknown ? copy.retry : copy.resume}</button>}<ul>{(control.products || []).map(item => <li key={item.product_id}>{item.product_id} / {item.reason_code} {item.resume_draft && permissions.includes('platform.billing.payment-controls.resume.request') && <button disabled={operation.busy || operation.unknown || reason.trim().length < 10} onClick={() => void resume(item)}>{operation.unknown ? copy.retry : copy.resume}</button>}</li>)}</ul></>}
+    {control && <>
+      <section aria-label={words.provider}>
+        <h4>{words.provider}</h4>
+        <p>{words.scope}</p>
+        <div className="adm-table-wrap"><table className="adm-table"><thead><tr><th>{words.name}</th><th>{words.code}</th><th>{words.version}</th><th>{words.newOrders}</th><th>{words.reason}</th><th>{words.action}</th></tr></thead>
+          <tbody><tr>
+            <td data-label={words.name}>{Object.prototype.hasOwnProperty.call(words.providers, control.provider_id) ? words.providers[control.provider_id] : control.provider_id}</td>
+            <td data-label={words.code}><code>{control.provider_id}</code></td>
+            <td data-label={words.version}><code>{control.provider_version || '—'}</code></td>
+            <td data-label={words.newOrders}>{controlStatus(control)}</td>
+            <td data-label={words.reason}>{controlReason(control)}</td>
+            <td data-label={words.action}>{resumeAction(control, null)}</td>
+          </tr></tbody>
+        </table></div>
+      </section>
+      <section aria-label={words.products}>
+        <h4>{words.products}</h4>
+        {(control.products || []).length ? <div className="adm-table-wrap"><table className="adm-table"><thead><tr><th>{words.name}</th><th>{words.code}</th><th>{words.newOrders}</th><th>{words.reason}</th><th>{words.action}</th></tr></thead>
+          <tbody>{control.products.map(item => <tr key={item.product_id}>
+            <td data-label={words.name}>{Object.prototype.hasOwnProperty.call(words.catalog, item.product_id) ? words.catalog[item.product_id] : item.product_id}</td>
+            <td data-label={words.code}><code>{item.product_id}</code></td>
+            <td data-label={words.newOrders}>{controlStatus(item)}{control.new_orders_enabled === false && item.new_orders_enabled === true && <small>{words.providerBlocks}</small>}</td>
+            <td data-label={words.reason}>{controlReason(item)}</td>
+            <td data-label={words.action}>{resumeAction(item, item)}</td>
+          </tr>)}</tbody>
+        </table></div> : <p>{words.noControlledProducts}</p>}
+      </section>
+    </>}
   </section>;
 }
 
@@ -607,7 +642,7 @@ export function AdminFinanceWorkspace({ client, me, language, initialTab = 'orde
     ? <BillingTaskNavigation key="navigation" tabs={displayedTabs} active={active} choose={choose} words={adminLayoutCopy[language].billingTasks} />
     : <nav key="navigation" className="adm-tabs">{displayedTabs.map(([key, label]) => <button key={key} aria-pressed={active === key} onClick={() => choose(key)}>{label}</button>)}</nav>;
   const denied = deniedTab ? <p key="denied" role="alert">{copy.permissions}</p> : null;
-  const workspaces = <Views key="workspace" active={active} available={tabs.map(([key]) => key)}>{view => <>{['receivables', 'refunds', 'adjustments'].includes(view) && canReadFinance && route && <AdminFinanceReadWorkspace kind={view} {...{ client, language, route, onViewApproval, permissions }} />}{view === 'correction' && canRequestRepair && <AdminEntitlementCorrectionWorkspace {...{ client, copy, language, permissions, owner }} />}{view === 'ledger' && canRequestRepair && <AdminFinancialRepairDraftForm owner={owner} client={client} copy={ledgerRepairCopy[language]} commandTypes={['LEDGER_REPAIR']} onCreated={approval} />}{view === 'writeoff' && canRequestRepair && <AdminFinancialRepairDraftForm client={client} owner={owner} operationCopy={copy} copy={{ ...ledgerRepairCopy[language], title: ledgerRepairCopy[language].writeOffTitle }} commandTypes={['RECEIVABLE_WRITE_OFF']} onCreated={approval} />}{view === 'paymentrepair' && canRequestRepair && <AdminFinancialRepairDraftForm client={client} owner={owner} operationCopy={copy} copy={{ ...ledgerRepairCopy[language], title: ledgerRepairCopy[language].paymentRepairTitle }} commandTypes={['PAYMENT_FINANCIAL_REPAIR']} onCreated={approval} />}{view === 'usagesettlementrepair' && canRequestRepair && <AdminFinancialRepairDraftForm client={client} owner={owner} operationCopy={copy} copy={{ ...ledgerRepairCopy[language], title: ledgerRepairCopy[language].usageSettlementRepairTitle }} commandTypes={['USAGE_SETTLEMENT_REPAIR']} onCreated={approval} />}{view === 'reconciliationrepair' && canRequestRepair && <AdminFinancialRepairDraftForm client={client} owner={owner} operationCopy={copy} copy={{ ...ledgerRepairCopy[language], title: ledgerRepairCopy[language].reconciliationRepairTitle }} canReadCase={permissions.includes('platform.billing.reconciliation.read')} commandTypes={['RECONCILIATION_FINANCIAL_REPAIR']} onCreated={approval} />}{view === 'chargebackrepair' && canRequestRepair && <AdminFinancialRepairDraftForm client={client} owner={owner} operationCopy={copy} copy={{ ...ledgerRepairCopy[language], title: ledgerRepairCopy[language].chargebackRepairTitle }} commandTypes={['CHARGEBACK_FINANCIAL_REPAIR']} onCreated={approval} />}{view === 'refundrepair' && canRequestRepair && <AdminFinancialRepairDraftForm client={client} owner={owner} operationCopy={copy} copy={{ ...ledgerRepairCopy[language], title: ledgerRepairCopy[language].refundRepairTitle }} commandTypes={['REFUND_EXCEPTION_REPAIR']} onCreated={approval} />}{view === 'late' && canReadFinance && <AdminPaymentReviewQueue {...{ client, copy, me, route, language }} />}{view === 'anomalies' && canReadFinance && <AdminPaymentReviewQueue {...{ client, copy, me, route, language }} anomaly />}{view === 'orders' && canReadFinance && <Payments {...{ client, copy, language, permissions, owner, route }} />}{view === 'wallets' && canReadFinance && <Wallets {...{ client, copy, language, permissions, owner, route, acceptedSessionEpoch, acceptedPlatformAuthorizationVersion }} requesterID={me.user_id} onViewApproval={approval} />}{view === 'controls' && canReadFinance && <ProviderControls {...{ client, copy, permissions, owner }} />}{view === 'approvals' && <Approvals {...{ client, copy, permissions, owner }} initialRequestID={approvalID} />}{view === 'reconciliations' && permissions.includes('platform.billing.reconciliation.read') && <AdminReconciliationWorkspace client={client} me={me} language={language} onViewApproval={approval} />}</>}</Views>;
+  const workspaces = <Views key="workspace" active={active} available={tabs.map(([key]) => key)}>{view => <>{['receivables', 'refunds', 'adjustments'].includes(view) && canReadFinance && route && <AdminFinanceReadWorkspace kind={view} {...{ client, language, route, onViewApproval, permissions }} />}{view === 'correction' && canRequestRepair && <AdminEntitlementCorrectionWorkspace {...{ client, copy, language, permissions, owner }} />}{view === 'ledger' && canRequestRepair && <AdminFinancialRepairDraftForm owner={owner} client={client} copy={ledgerRepairCopy[language]} commandTypes={['LEDGER_REPAIR']} onCreated={approval} />}{view === 'writeoff' && canRequestRepair && <AdminFinancialRepairDraftForm client={client} owner={owner} operationCopy={copy} copy={{ ...ledgerRepairCopy[language], title: ledgerRepairCopy[language].writeOffTitle }} commandTypes={['RECEIVABLE_WRITE_OFF']} onCreated={approval} />}{view === 'paymentrepair' && canRequestRepair && <AdminFinancialRepairDraftForm client={client} owner={owner} operationCopy={copy} copy={{ ...ledgerRepairCopy[language], title: ledgerRepairCopy[language].paymentRepairTitle }} commandTypes={['PAYMENT_FINANCIAL_REPAIR']} onCreated={approval} />}{view === 'usagesettlementrepair' && canRequestRepair && <AdminFinancialRepairDraftForm client={client} owner={owner} operationCopy={copy} copy={{ ...ledgerRepairCopy[language], title: ledgerRepairCopy[language].usageSettlementRepairTitle }} commandTypes={['USAGE_SETTLEMENT_REPAIR']} onCreated={approval} />}{view === 'reconciliationrepair' && canRequestRepair && <AdminFinancialRepairDraftForm client={client} owner={owner} operationCopy={copy} copy={{ ...ledgerRepairCopy[language], title: ledgerRepairCopy[language].reconciliationRepairTitle }} canReadCase={permissions.includes('platform.billing.reconciliation.read')} commandTypes={['RECONCILIATION_FINANCIAL_REPAIR']} onCreated={approval} />}{view === 'chargebackrepair' && canRequestRepair && <AdminFinancialRepairDraftForm client={client} owner={owner} operationCopy={copy} copy={{ ...ledgerRepairCopy[language], title: ledgerRepairCopy[language].chargebackRepairTitle }} commandTypes={['CHARGEBACK_FINANCIAL_REPAIR']} onCreated={approval} />}{view === 'refundrepair' && canRequestRepair && <AdminFinancialRepairDraftForm client={client} owner={owner} operationCopy={copy} copy={{ ...ledgerRepairCopy[language], title: ledgerRepairCopy[language].refundRepairTitle }} commandTypes={['REFUND_EXCEPTION_REPAIR']} onCreated={approval} />}{view === 'late' && canReadFinance && <AdminPaymentReviewQueue {...{ client, copy, me, route, language }} />}{view === 'anomalies' && canReadFinance && <AdminPaymentReviewQueue {...{ client, copy, me, route, language }} anomaly />}{view === 'orders' && canReadFinance && <Payments {...{ client, copy, language, permissions, owner, route }} />}{view === 'wallets' && canReadFinance && <Wallets {...{ client, copy, language, permissions, owner, route, acceptedSessionEpoch, acceptedPlatformAuthorizationVersion }} requesterID={me.user_id} onViewApproval={approval} />}{view === 'controls' && canReadFinance && <ProviderControls {...{ client, copy, permissions, owner, language }} />}{view === 'approvals' && <Approvals {...{ client, copy, permissions, owner }} initialRequestID={approvalID} />}{view === 'reconciliations' && permissions.includes('platform.billing.reconciliation.read') && <AdminReconciliationWorkspace client={client} me={me} language={language} onViewApproval={approval} />}</>}</Views>;
   return <section className="adm-panel">{!surface && <h2>{copy.finance}</h2>}{compactOverview
     ? [navigation, denied, workspaces, overview]
     : [overview, navigation, denied, workspaces]}</section>;
