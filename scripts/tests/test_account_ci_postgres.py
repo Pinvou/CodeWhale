@@ -3,8 +3,13 @@ import copy
 import contextlib
 import importlib.util
 import io
+import json
 import os
 from pathlib import Path
+import re
+import sys
+import tempfile
+import textwrap
 import unittest
 from unittest.mock import patch
 
@@ -174,5 +179,41 @@ class AccountCIAdmissionTests(unittest.TestCase):
         self.assertIn('ACCOUNT_CI_SERVICES: ${{ toJSON(job.services) }}',job)
         self.assertIn('F17_TEST_SERVICE_PORT: ${{ steps.account-pg.outputs.audit_port }}',job)
         self.assertIn('lua5.1 postgresql-client',job)
+
+    def test_audit_workflow_requires_invitation_refusal_and_forward_recovery(self):
+        source=(ROOT/'.github/workflows/pr-check.yml').read_text(encoding='utf-8')
+        marker='          python3 - "$RUNNER_TEMP/f17-audit-schema.jsonl" "$RUNNER_TEMP/f17-audit-account.jsonl" <<\'PY\'\n'
+        before, code=source.split(marker,1)
+        code=textwrap.dedent(code.split('\n          PY',1)[0])
+        pattern=re.findall(r"./internal/accountschema -run '([^']+)'",before)[-1]
+        roots={"TestAuditExportRollbackRoleStorageGuard", "TestAuditExportPublicDownRetainsOriginalHistory",
+               "TestAuditExportGuardedRollbackTransactions", "TestAccount039RollbackInventoryPostgres",
+               "TestMembershipInvitationLegacyRollbackPublicPostgres"}
+        for root in roots:self.assertIsNotNone(re.fullmatch(pattern,root))
+        self.assertIsNone(re.fullmatch(pattern,"TestUnrelatedOptionalFixture"))
+        invitation="TestMembershipInvitationLegacyRollbackPublicPostgres"
+        children={
+            "TestAccount039RollbackInventoryPostgres": {"empty-ledger", "before-approval-schema", "installed-039", "higher-version", "retained-v2-reference", "wrong-database", "missing-approval-column-grant"},
+            invitation: {"retained-link-refuses-down-without-fact-or-schema-loss", "forward-upgrade-replays-original-and-accepts-next-command"},
+        }
+        events=[]
+        for root in roots:
+            events.append({"Test":root,"Action":"pass"})
+            events.extend({"Test":root+"/"+child,"Action":"pass"} for child in children.get(root,{"actual"}))
+        account=[{"Test":"TestAuditExportPersistedBoundaries","Action":"pass"},
+                 {"Test":"TestAuditExportPersistedBoundaries/actual","Action":"pass"}]
+        with tempfile.TemporaryDirectory(prefix='audit-result-contract-') as directory:
+            schema_path, account_path=Path(directory)/'schema.jsonl',Path(directory)/'account.jsonl'
+            account_path.write_text('\n'.join(map(json.dumps,account)),encoding='utf-8')
+            def verify(items):
+                schema_path.write_text('\n'.join(map(json.dumps,items)),encoding='utf-8')
+                with patch.object(sys,'argv',['audit-validator',str(schema_path),str(account_path)]):
+                    exec(compile(code,'<actual-audit-workflow-validator>','exec'),{})
+            verify(events)
+            for child in children[invitation]:
+                for invalid in ([e for e in events if e['Test']!=invitation+'/'+child],
+                                [dict(e,Action='skip') if e['Test']==invitation+'/'+child else e for e in events]):
+                    with self.subTest(child=child),self.assertRaises(AssertionError):verify(invalid)
+            with self.assertRaises(AssertionError):verify([e for e in events if not e['Test'].startswith(invitation)])
 
 if __name__=='__main__':unittest.main()
