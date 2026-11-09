@@ -546,3 +546,6 @@
 
 .adm-order-action-group { display: grid; gap: .5rem; justify-items: start; padding-block: 1rem; border-top: 1px solid var(--adm-line, #e0e5ee); }
 .adm-order-action-group label { width: min(100%, 44rem); }
+
+.adm-order-list small { display: block; margin-top: .2rem; }
+.adm-order-list code { overflow-wrap: break-word; }
