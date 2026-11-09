@@ -4,6 +4,7 @@ import {
   financialRepairProjectionRows, financialRepairDraftFromProjection,
 } from './admin-financial-repair-form.js';
 import { financialRepairPrecheck } from './admin-financial-repair-drafts.js';
+import { formatBalance } from './balance-view.js';
 import { useFinanceOperation } from './useFinanceOperation.js';
 import { createAndSubmitFreshGovernedApproval } from './admin-governed-approval-workflow.js';
 
@@ -39,6 +40,7 @@ export function AdminUsageSettlementFinancialRepairForm({ client, copy, onCreate
   const pending = operation.pendingFacts;
   const epoch = client.financeSessionEpoch || 0;
   const identityCopy = usageSettlementRepair ? copy.usageSettlementIdentity : null;
+  const planCopy = usageSettlementRepair ? copy.usageSettlementPlan : null;
   const matchesDisplayScope = fact => fact?.client === client && fact.owner === owner && fact.epoch === epoch;
   const visiblePending = usageSettlementRepair && !matchesDisplayScope(pending?.displayScope) ? null : pending;
   const presented = visiblePending?.projection || (!pending && busy !== 'facts' && matchesDisplayScope(acceptedDisplay.current) && acceptedDisplay.current.projection === projection ? projection : null);
@@ -178,6 +180,12 @@ export function AdminUsageSettlementFinancialRepairForm({ client, copy, onCreate
         <div><dt>{copy.fields.loss_review_id}</dt><dd><code>{verified.normalized.loss_review_id}</code></dd></div>
         <div><dt>{identityCopy.wallet}</dt><dd><code>{verified.financial.wallet_id}</code></dd></div>
       </dl></> : <dl>{displayedFacts.rows.map((row) => <div key={row.key}><dt>{copy.fields[row.key] || row.key}</dt><dd><code>{row.value}</code></dd></div>)}</dl>}
+      {verified && planCopy && <section aria-label={planCopy.title}>
+        <h5>{planCopy.title}</h5><p>{planCopy.scope}</p>
+        <dl>{[['expected', 'expected_microcredits'], ['settle', 'settlement_microcredits'], ['overage', 'overage_microcredits']].map(([key, field]) =>
+          <div key={key}><dt>{planCopy[key]}</dt><dd>{formatBalance(verified.financial[field], planCopy.language)} {planCopy.points}</dd></div>)}
+        </dl>
+      </section>}
       <details><summary>{copy.criticalFacts}</summary><pre>{displayedFacts.critical}</pre></details>
       <details><summary>{copy.financialFacts}</summary><pre>{displayedFacts.financial}</pre></details>
     </div>}
