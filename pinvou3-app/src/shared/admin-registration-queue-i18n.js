@@ -1,0 +1,5 @@
+export const registrationQueueCopy = {
+  zh: { duration: '至少多久未更新', unit: '时长单位', minutes: '分钟', hours: '小时', search: '查询', applied: '已应用条件', unfiltered: '无筛选', durationHelp: '按最近更新时间筛选。0 或留空表示不限；更换单位后重新填写。', durationInvalid: '请输入能精确换算为 0–43200 整分钟的时长。', operationInvalid: '请输入完整有效的注册操作 ID，或留空。' },
+  en: { duration: 'Minimum time since last update', unit: 'Time unit', minutes: 'Minutes', hours: 'Hours', search: 'Search', applied: 'Applied filters', unfiltered: 'No filters', durationHelp: 'Filters by last update. Enter zero or leave blank for any time. Reenter the value when switching units.', durationInvalid: 'Enter a duration that converts exactly to 0–43200 whole minutes.', operationInvalid: 'Enter a complete valid registration operation ID, or leave it blank.' },
+  ja: { duration: '最終更新からの最小経過時間', unit: '時間の単位', minutes: '分', hours: '時間', search: '検索', applied: '適用中の条件', unfiltered: '絞り込みなし', durationHelp: '最終更新時刻で絞り込みます。0 または空欄は指定なしです。単位を変えたら再入力してください。', durationInvalid: '0～43200 の整数分に正確に換算できる時間を入力してください。', operationInvalid: '有効な登録操作 ID をすべて入力するか、空欄にしてください。' },
+};
