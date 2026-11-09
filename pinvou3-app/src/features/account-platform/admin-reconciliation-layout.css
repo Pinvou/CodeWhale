@@ -29,3 +29,8 @@
 .adm-restored-shell .adm-case-facts dd{margin:0}
 .adm-restored-shell .adm-case-facts code{white-space:normal;overflow-wrap:break-word;overflow-wrap:anywhere}
 .adm-restored-shell .adm-case-evidence pre{max-width:100%;white-space:pre-wrap;overflow-wrap:break-word;overflow-wrap:anywhere}
+
+.adm-restored-shell .adm-case-scope{display:flex;min-width:0;align-items:center;gap:8px;flex-wrap:wrap;margin-top:16px}
+.adm-restored-shell .adm-case-scope>button[aria-pressed=true]{border-color:var(--adm-primary,#3159e8);background:var(--adm-soft)}
+.adm-restored-shell .adm-case-query-state{display:grid;justify-items:start;gap:8px;margin-block:12px}
+.adm-restored-shell .adm-case-query-state p{margin:0}
