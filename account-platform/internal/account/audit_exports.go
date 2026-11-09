@@ -558,6 +558,12 @@ func (s *AuditExportService) generateWithLease(ctx context.Context, job claimedA
 				return
 			case <-ticker.C:
 				if err := s.renewLease(generationContext, job); err != nil {
+					// Stopping an already-finished generation also cancels an
+					// in-flight renewal. Preserve that generation's own result.
+					if generationContext.Err() != nil {
+						stopped <- nil
+						return
+					}
 					cancel()
 					stopped <- err
 					return
