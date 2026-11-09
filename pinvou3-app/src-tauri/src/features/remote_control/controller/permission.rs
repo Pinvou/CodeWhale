@@ -479,8 +479,8 @@ impl PermissionAuthority {
         now_b: u64,
     ) -> Result<PermissionView> {
         let view = self.request(lease, task_id, request, now_b)?;
-        // The caller still owns the live task and callback gates. This ID has
-        // not been projected, so no controller can decide it before binding.
+        // The caller still owns the live task and callback gates. Receipt
+        // reads stay unavailable until the original instance is bound here.
         let mut pending = self.pending.lock();
         let entry = pending
             .get_mut(&view.permission_request_id)
