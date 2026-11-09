@@ -11,8 +11,10 @@ const focusableSelector = [
 ].join(',');
 
 function focusableElements(container) {
-  return Array.from(container.querySelectorAll(focusableSelector)).filter((element) => {
-    if (!(element instanceof HTMLElement) || element.hidden) return false;
+  const dialogs = Array.from(container.querySelectorAll('[role="dialog"], [role="alertdialog"]')).filter(element => !element.closest('[hidden]') && element.getClientRects().length);
+  const scope = dialogs[dialogs.length - 1] || container;
+  return Array.from(scope.querySelectorAll(focusableSelector)).filter((element) => {
+    if (!(element instanceof HTMLElement) || element.closest('[hidden]') || !element.getClientRects().length) return false;
     const style = window.getComputedStyle(element);
     return style.display !== 'none' && style.visibility !== 'hidden';
   });
@@ -93,10 +95,10 @@ export function useModalIsolation(open, containerRef) {
       const first = elements[0];
       const last = elements[elements.length - 1];
       const active = document.activeElement;
-      if (event.shiftKey && (active === first || !container.contains(active))) {
+      if (event.shiftKey && (active === first || !elements.includes(active))) {
         event.preventDefault();
         last.focus({ preventScroll: true });
-      } else if (!event.shiftKey && (active === last || !container.contains(active))) {
+      } else if (!event.shiftKey && (active === last || !elements.includes(active))) {
         event.preventDefault();
         first.focus({ preventScroll: true });
       }
@@ -105,7 +107,7 @@ export function useModalIsolation(open, containerRef) {
     const restoreBackground = isolateModalBackground(container);
 
     const focusNewContent = () => {
-      if (!container.contains(document.activeElement)) focusFirst(container);
+      if (!focusableElements(container).includes(document.activeElement)) focusFirst(container);
     };
     const contentObserver = new MutationObserver(focusNewContent);
     contentObserver.observe(container, { childList: true, subtree: true });

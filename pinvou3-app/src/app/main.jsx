@@ -21,11 +21,12 @@ const MobileTabBar = lazy(() =>
 const MobileTopBar = lazy(() =>
   import('../components/layout/MobileShell.jsx').then((m) => ({ default: m.MobileTopBar })));
 const ControlledOpenRecovery = lazy(() => import('../features/remote-control/ControlledOpenRecovery.jsx'));
-import { bridge, useBridgeState, usePlatformCapability, activeModelIsLocal, shouldShowModelAccessGate } from '../hooks/useBridge.js';
+import { bridge, useBridgeState, usePlatformCapability, activeModelIsLocal } from '../hooks/useBridge.js';
 import { useCompactViewport, useVisualViewportHeight } from '../hooks/useViewport.js';
 import { useSystemDarkMode } from '../hooks/useSystemDarkMode.js';
 import { useModalIsolation } from '../hooks/useModalIsolation.js';
-import { refreshModelAccessAfterAuthentication } from '../features/settings/model-access.js';
+const LazyModelAccessController = lazy(() => import('../features/settings/ModelAccessController.jsx').then(m => ({ default: m.ModelAccessController })));
+import { modelAccessAppliesToView } from '../shared/model-access-scope.js';
 import { COLOR_SCHEME_STORAGE_KEY, normalizeColorScheme, readStoredColorScheme, resolveTheme } from '../shared/color-scheme.js';
 import { CHAT_RECOVERY_COPY, DEFAULT_CHAT_TITLES, dict, createLatestLanguageGate, ensureLanguage, ensureLanguageWithZhFallback, LANG_TO_TAG, initialSystemLanguage, SEARCH_KEY_PROVIDERS, TAG_TO_LANG, zhDict, accountPlatformCopy, organizationCopy } from '../shared/i18n.js';
 import { mountWhenLanguageReady } from '../shared/entry-boot.js';
@@ -50,7 +51,6 @@ const SessionWorkspaceDialog = lazy(() =>
 import { classifyRebindError, mergeRebindCarryoverIds } from '../features/projects/rebindErrors.js';
 import { filterSessionsByTab, groupSessionsByLocalDate, sessionListComparator } from '../shared/session-list-pipeline.js';
 const LazyAccountPlatformPopover = lazy(() => VIEW_LOADERS.accountPlatformPopover().then(module => ({ default: module.AccountPlatformPopover })));
-import { AccountPlatformDesktopClient } from '../features/account-platform/desktop-client.js';
 import { walletRechargeTarget } from '../features/conversation/billing-notice.js';
 import { organizationRechargeTargetAllowed, requirePersonalAccount } from '../features/account-platform/personal-contract.js';
 import { can, isWeb } from '../shared/platform.js';
@@ -273,6 +273,7 @@ const NAV_PREFETCH = {
 
 const EMPTY_PICKER_ROWS = [];
 
+
     // App root component: aggregates bridge state, routing, and all sidebar/overlay UI. Size and complexity are historical
     // evolution; splitting requires a dedicated refactor task (involving a hundred-plus closure handlers and test contracts);
     // only lint fixes here, no behavior change.
@@ -371,9 +372,10 @@ const App = () => {
       const [personalAccountOpen, setPersonalAccountOpen] = useState(false);
       const [accountRechargeRequest, setAccountRechargeRequest] = useState(null);
       const accountRechargeSequence = useRef(0);
-      const personalAccountClient = useMemo(() => bridge.available && bridge.accountPlatform
-        ? new AccountPlatformDesktopClient(bridge.accountPlatform) : null, []);
+      const [personalAccountClient, setPersonalAccountClient] = useState(null);
       const [modelAccessLoginOpen, setModelAccessLoginOpen] = useState(false);
+      const [modelAccessGuideDismissed, setModelAccessGuideDismissed] = useState(false);
+      const [modelAccess, setModelAccess] = useState({ accountStatus: 'unknown', refreshStatus: 'idle', resolved: { kind: 'checking' } });
       const modelAccessLayerRef = useRef(null);
       const modelAccessSettingsFocusPendingRef = useRef(false);
       const [teamRelayEnabled, setTeamRelayEnabled] = useState(() => loadTeamRelayAccess());
@@ -4063,21 +4065,21 @@ const App = () => {
         bs?.controlledDevice, bs?.controlledSession, bs?.activeSessionId,
       );
       const isRemoteChatActive = Boolean(remoteProxyForSession(bs?.activeSessionId, bs?.remoteProxyHistory));
-      const modelAccessGateOpen = shouldShowModelAccessGate(
-        bs,
-        currentView,
-        bridge.available,
-        isControlledChatActive || isRemoteChatActive,
-      );
-      const refreshModelAccess = useCallback(async () => {
-        await refreshModelAccessAfterAuthentication(bridge.models);
+      const modelAccessState = { ...modelAccess.resolved, canLogin: personalAccountAvailable && modelAccess.accountStatus === 'guest' };
+      const modelAccessViewActive = can('modelManagement') && modelAccessAppliesToView(bs, currentView, bridge.available, isControlledChatActive || isRemoteChatActive);
+      const modelAccessGateOpen = !modelAccessGuideDismissed && !bs?.activeSessionId && modelAccessViewActive && modelAccessState.kind === 'first_use';
+      const modelAccessLayerOpen = modelAccessGateOpen || modelAccessLoginOpen;
+      const modelAccessNoticeOpen = !modelAccessLayerOpen && !['ready', 'checking'].includes(modelAccessState.kind)
+        && modelAccessViewActive;
+      const openModelAccessSettings = () => {
         setModelAccessLoginOpen(false);
-        // Authentication does not invent a default model. The existing settings
-        // page loads the current catalog and persists an explicit selection.
         modelAccessSettingsFocusPendingRef.current = true;
         openSettingsSection('model');
-      }, [openSettingsSection]);
-      useEffect(() => { if (!modelAccessGateOpen) setModelAccessLoginOpen(false); }, [modelAccessGateOpen]);
+      };
+      const refreshModelAccess = useCallback(async () => {
+        await modelAccess.refresh?.();
+        setModelAccessLoginOpen(false);
+      }, [modelAccess.refresh]);
       useEffect(() => {
         if (currentView !== 'settings' || !modelAccessSettingsFocusPendingRef.current) return undefined;
         const focus = () => { const target = document.querySelector('[data-testid="settings-close"]');
@@ -4095,7 +4097,7 @@ const App = () => {
         savedConfirm ? 'saved-confirm' : '',
         can('webAccessAdmin') && webAccessOpen ? 'web-access' : '',
         can('desktopRemoteControl') && remoteConversationOpen ? 'remote-connection' : '',
-        modelAccessGateOpen ? 'model-access' : '',
+        modelAccessLayerOpen ? 'model-access' : '',
         bs && bs.pinvouModal ? 'pinvou-review' : '',
         isCompactShell && isSidebarOpen ? 'mobile-sidebar' : '',
         isCompactShell && mobileMoreOpen ? 'mobile-more' : '',
@@ -4110,7 +4112,7 @@ const App = () => {
       // Keep the surface hidden while one already-published overlay hands off to
       // another. The replacement itself is still withheld until its own barrier
       // attempt has settled.
-      useModalIsolation(modelAccessGateOpen && browserOverlayPublicationReady, modelAccessLayerRef);
+      useModalIsolation(modelAccessLayerOpen && browserOverlayPublicationReady, modelAccessLayerRef);
       const browserOverlayOpen = !!publishedBrowserOverlayIntent;
       const browserBlockingLayerOpen = !browserPaneAllowed || browserOverlayOpen;
       const browserSurfaceSuspended = browserResizeActive
@@ -5022,8 +5024,11 @@ const App = () => {
           </div>
 
           {/* ================= Main Content ================= */}
+          {bridge.available && <ViewErrorBoundary t={t}><Suspense fallback={null}><LazyModelAccessController modelsBridge={bridge.models} accountTransport={bridge.accountPlatform} onClient={setPersonalAccountClient} enabled sessionId={bs?.activeSessionId} selectionKey={JSON.stringify(bs?.pendingDraftModelRef || bs?.currentSessionModelRef || bs?.defaultModelRef)} modelState={bs} onChange={setModelAccess} /></Suspense></ViewErrorBoundary>}
           <div className={`flex-1 flex relative min-w-0 overflow-hidden ${activeTheme === 'dark' ? 'bg-[#131314]' : 'bg-white'} ${isCompactShell ? '' : 'rounded-tl-[28px]'}`}>
             <div className="relative flex min-w-0 flex-1 flex-col overflow-hidden">
+            {modelAccessNoticeOpen && <ViewErrorBoundary t={t}><Suspense fallback={null}><LazyModelAccessGate variant="notice" access={modelAccessState} language={language} theme={activeTheme} t={t} busy={modelAccess.refreshStatus === 'checking'} onLogin={() => setModelAccessLoginOpen(true)} onRetry={() => void modelAccess.refresh()} onUseExternalModels={openModelAccessSettings} /></Suspense></ViewErrorBoundary>}
+
 
             {/* Gemini Style Background Glow */}
             {(currentView === 'chat'
@@ -5255,7 +5260,7 @@ const App = () => {
               </ViewErrorBoundary>
             )}
 
-            {modelAccessGateOpen && browserOverlayPublicationReady && (
+            {modelAccessLayerOpen && browserOverlayPublicationReady && (
               // The opaque shell stays outside the lazy boundary: the chat
               // surface remains fully covered while either the landing page or
               // the in-window account screen loads, and also after a chunk error.
@@ -5266,9 +5271,15 @@ const App = () => {
                 style={{ background: activeTheme === 'dark' ? '#111416' : '#F7FAF9' }}
                 role="dialog"
                 aria-modal="true"
-                aria-label={t.modelAccessTitle}
+                aria-label={modelAccessLoginOpen ? accountPlatformCopy[language].login : t.modelAccessTitle}
                 tabIndex={-1}
-                onKeyDown={(event) => event.stopPropagation()}
+                onKeyDown={(event) => {
+                  event.stopPropagation();
+                  if (event.key !== 'Escape' || event.isComposing || event.target.closest('[role="dialog"], [role="alertdialog"]') !== event.currentTarget) return;
+                  event.preventDefault();
+                  if (modelAccessLoginOpen) setModelAccessLoginOpen(false);
+                  else setModelAccessGuideDismissed(true);
+                }}
               >
                 <ViewErrorBoundary t={t}>
                   <Suspense fallback={<div role="status" className="text-[13px] opacity-60">{t.loading}</div>}>
@@ -5293,12 +5304,11 @@ const App = () => {
                       <LazyModelAccessGate
                         theme={activeTheme}
                         t={t}
+                        language={language}
+                        access={modelAccessState}
                         onLogin={() => setModelAccessLoginOpen(true)}
-                        onUseExternalModels={() => {
-                          setModelAccessLoginOpen(false);
-                          modelAccessSettingsFocusPendingRef.current = true;
-                          openSettingsSection('model');
-                        }}
+                        onDismiss={() => setModelAccessGuideDismissed(true)}
+                        onUseExternalModels={openModelAccessSettings}
                       />
                     )}
                   </Suspense>

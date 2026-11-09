@@ -35,6 +35,16 @@ export class AccountPlatformDesktopClient {
     this.versionObservationEpoch = 0;
     this.versionObservationUserID = null;
     this.observedSessionAuthenticated = undefined;
+    this.authenticationListeners = new Set();
+  }
+
+  onAuthenticationChange(listener) {
+    this.authenticationListeners.add(listener);
+    return () => this.authenticationListeners.delete(listener);
+  }
+
+  notifyAuthenticationChange(phase) {
+    for (const listener of this.authenticationListeners) { try { listener(phase); } catch { /* Observers cannot change an authentication result. */ } }
   }
 
   resetObservedVersions() {
@@ -111,12 +121,12 @@ export class AccountPlatformDesktopClient {
     this.resetObservedVersions();
     this.observedSessionAuthenticated = undefined;
     const epoch = this.versionObservationEpoch;
-    const value = await this.call(() => this.transport.login({ account, password }), signal);
-    if (epoch === this.versionObservationEpoch) {
-      this.observedSessionAuthenticated = true;
-      this.financeSessionEpoch++;
-    }
-    return value;
+    this.notifyAuthenticationChange('changing');
+    try {
+      const value = await this.call(() => this.transport.login({ account, password }), signal);
+      if (epoch === this.versionObservationEpoch) { this.observedSessionAuthenticated = true; this.financeSessionEpoch++; }
+      return value;
+    } finally { if (epoch === this.versionObservationEpoch) this.notifyAuthenticationChange('changed'); }
   }
 
   createSliderCaptcha(mobile, purpose, signal) {
@@ -169,12 +179,12 @@ export class AccountPlatformDesktopClient {
     this.resetObservedVersions();
     this.observedSessionAuthenticated = undefined;
     const epoch = this.versionObservationEpoch;
-    const value = await this.call(() => this.transport.loginSms({ mobile, challenge_id: challengeId, code }), signal);
-    if (epoch === this.versionObservationEpoch) {
-      this.observedSessionAuthenticated = true;
-      this.financeSessionEpoch++;
-    }
-    return value;
+    this.notifyAuthenticationChange('changing');
+    try {
+      const value = await this.call(() => this.transport.loginSms({ mobile, challenge_id: challengeId, code }), signal);
+      if (epoch === this.versionObservationEpoch) { this.observedSessionAuthenticated = true; this.financeSessionEpoch++; }
+      return value;
+    } finally { if (epoch === this.versionObservationEpoch) this.notifyAuthenticationChange('changed'); }
   }
 
   resetPassword(mobile, challengeId, code, passwordReference, signal) {
@@ -198,6 +208,7 @@ export class AccountPlatformDesktopClient {
       this.financeSessionEpoch++;
       this.resetObservedVersions();
       this.observedSessionAuthenticated = false;
+      this.notifyAuthenticationChange('changed');
     }
     return value;
   }
