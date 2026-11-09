@@ -67,61 +67,97 @@ function Workspace({ client, me, copy, repairCopy, operationCopy, onViewApproval
   const [runID, setRunID] = useState('');
   const [status, setStatus] = useState('');
   const filterKey = JSON.stringify([tab, channel, date, runID, status]);
-  const op = useFinanceOperation(owner, { ...copy, permissions: copy.permission }, client, `reconciliation-list:${filterKey}`);
   const currentFilter = useRef(filterKey);
   currentFilter.current = filterKey;
   const [page, setPage] = useState(null);
+  const [reading, setReading] = useState(null);
   const [cursor, setCursor] = useState('');
   const [history, setHistory] = useState([]);
   const [selected, setSelected] = useState(null);
-  const [invalid, setInvalid] = useState(false);
   const [writing, setWriting] = useState(false);
-  const [writeError, setWriteError] = useState('');
-  const [writeNotice, setWriteNotice] = useState('');
+  const [writeResult, setWriteResult] = useState(null);
   // Manual runs have no idempotency-key contract. An unknown result requires
   // reading current runs; another click is an explicit new run.
   const generation = useRef(0);
-  useEffect(() => () => { generation.current++; }, []);
+  const readGeneration = useRef(0), controller = useRef(null), inWrite = useRef(false);
+  useEffect(() => () => { generation.current++; controller.current?.abort(); }, []);
   const load = async (next = '') => {
-    setInvalid(false);
+    controller.current?.abort();
+    const active = new AbortController(); controller.current = active;
+    const stamp = ++readGeneration.current;
+    const isCurrent = () => stamp === readGeneration.current && currentFilter.current === filterKey && !active.signal.aborted;
+    setReading({ filterKey, stage: 'loading' });
+    let requested = false;
     try {
       if (tab === 'cases' && runID) requireFinanceID(runID);
       const range = tab === 'runs' ? reconciliationDayRange(date) : null;
       const query = tab === 'runs' ? { channel, ...range, cursor: next } : { run_id: runID, status, cursor: next };
-      const result = await op.read(() => loadFinancePage(query, filters => tab === 'runs' ? client.reconciliationRuns(filters) : client.reconciliationCases(filters), () => { if (currentFilter.current === filterKey) { setHistory([]); setCursor(''); } }), reconciliationReadError);
-      if (result && currentFilter.current === filterKey) {
+      requested = true;
+      const result = await loadFinancePage(query, filters => tab === 'runs' ? client.reconciliationRuns(filters, active.signal) : client.reconciliationCases(filters, active.signal), () => { if (isCurrent()) { setHistory([]); setCursor(''); } });
+      if (isCurrent()) {
         const value = result.value;
         requireFinanceCollection(value);
         value.items.forEach(item => requireFinanceID(tab === 'runs' ? item.reconciliation_run_id : item.case_id));
         setPage({ ...value, tab, filterKey }); setCursor(result.query.cursor);
+        setReading({ filterKey, stage: 'ready' });
       }
-    } catch { setInvalid(true); }
+    } catch (error) {
+      if (!isCurrent()) return;
+      const localInput = !requested && ['INVALID_RECONCILIATION_INPUT', 'INVALID_FINANCE_ACK'].includes(error?.message);
+      setReading({ filterKey, stage: 'error', code: localInput ? 'invalid' : reconciliationReadError(error) });
+    }
   };
-  useEffect(() => { setPage(null); setSelected(null); setHistory([]); setCursor(''); void load(''); }, [tab, channel, date, runID, status]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    setPage(null); setSelected(null); setHistory([]); setCursor(''); void load('');
+    return () => { readGeneration.current++; controller.current?.abort(); };
+  }, [tab, channel, date, runID, status]); // eslint-disable-line react-hooks/exhaustive-deps
   const write = async (imported, items) => {
+    if (!canRun || inWrite.current) return;
+    inWrite.current = true;
     const epoch = generation.current;
-    setInvalid(false); setWriteError(''); setWriteNotice(''); setWriting(true);
+    setWriteResult(null); setWriting(true);
+    const scope = { channel, business_date: date };
     try {
       const facts = { channel, business_date: requireReconciliationDate(date) };
       const result = imported ? await client.importReconciliation({ ...facts, items }) : await client.runReconciliation(facts);
       if (epoch !== generation.current) return;
-      setRunID(result.reconciliation_run_id); setWriteNotice(copy.saved); await load('');
+      setWriteResult({ ...scope, kind: 'saved', id: result.reconciliation_run_id });
+      if (result.reconciliation_run_id === runID) { setHistory([]); void load(''); }
+      else setRunID(result.reconciliation_run_id);
     } catch (error) {
       if (epoch !== generation.current) return;
-      setWriteError(copy[reconciliationWriteError(error)]);
-    } finally { if (epoch === generation.current) setWriting(false); }
+      const kind = reconciliationWriteError(error);
+      let id = '';
+      if (kind === 'runUnknown') {
+        try { id = requireFinanceID(error.details?.reconciliation_run_id); } catch { /* An unknown result may have no usable ID. */ }
+      }
+      setWriteResult({ ...scope, kind, id });
+    } finally {
+      if (epoch === generation.current) { inWrite.current = false; setWriting(false); }
+    }
   };
-  const busy = op.busy || writing;
-  const visiblePage = page?.filterKey === filterKey ? page : null;
+  const currentRead = reading?.filterKey === filterKey ? reading : null;
+  const busy = currentRead?.stage === 'loading' || writing;
+  const visiblePage = currentRead?.stage === 'ready' && page?.filterKey === filterKey ? page : null;
+  const refresh = () => { setHistory([]); void load(''); };
+  const checkResult = () => {
+    if (writeResult.channel !== channel || writeResult.business_date !== date) {
+      setChannel(writeResult.channel); setDate(writeResult.business_date);
+    } else refresh();
+  };
   return <section className="adm-panel"><h2>{copy.title}</h2>
     <nav>{['runs', 'cases'].map(value => <button key={value} disabled={busy} aria-pressed={tab === value} onClick={() => setTab(value)}>{copy[value]}</button>)}</nav>
     {tab === 'runs' ? <><label>{copy.channel}<select disabled={busy} value={channel} onChange={event => setChannel(event.target.value)}>{['WECHAT', 'ALIPAY', 'UNIONPAY'].map(value => <option key={value}>{value}</option>)}</select></label><label>{copy.businessDate}<input type="date" disabled={busy} value={date} onChange={event => setDate(event.target.value)} /></label>
-      {canRun && <><button disabled={busy} onClick={() => void write(false)}>{copy.run}</button><AdminReconciliationBillImport {...{channel,date,copy}} disabled={busy} onImport={items => write(true, items)} /></>}
+      {canRun && <><p>{copy.batchRunHelp}</p>{Boolean(visiblePage?.items.length) && <p>{copy.batchExisting}</p>}<button disabled={busy} onClick={() => void write(false)}>{copy.run}</button><AdminReconciliationBillImport {...{channel,date,copy}} disabled={busy} onImport={items => write(true, items)} /></>}
     </> : <><label>{copy.runs}<input disabled={busy} value={runID} onChange={event => setRunID(event.target.value)} /></label><label>{copy.status}<select disabled={busy} value={status} onChange={event => setStatus(event.target.value)}><option value="">{copy.all}</option>{['OPEN', 'IN_REVIEW', 'RESOLVED', 'IGNORED'].map(value => <option key={value}>{value}</option>)}</select></label></>}
-    <button disabled={busy} onClick={() => { setHistory([]); void load(''); }}>{copy.refresh}</button>
-    {(invalid || op.error || writeError) && <p role="alert">{invalid ? copy.invalid : op.error || writeError}</p>}{writeNotice && <p role="status">{writeNotice}</p>}{busy && <p role="status">{copy.loading}</p>}
-    {visiblePage && <table><thead><tr><th>{tab === 'runs' ? copy.businessDate : copy.merchant}</th><th>{copy.status}</th><th>{tab === 'runs' ? copy.count : copy.caseType}</th>{tab === 'runs' && <><th>{copy.rows}</th><th>{copy.source}</th></>}<th>{copy.action}</th></tr></thead><tbody>{visiblePage.items.map(item => <tr key={tab === 'runs' ? item.reconciliation_run_id : item.case_id}><td>{tab === 'runs' ? item.business_date : item.merchant_order_no}</td><td>{item.status}</td><td>{tab === 'runs' ? item.case_count : reconciliationCaseLabel(item.case_type, copy)}</td>{tab === 'runs' && <><td>{item.provider_row_count}</td><td>{item.source_mode}</td></>}<td><button disabled={busy} onClick={() => { if (tab === 'runs') { setRunID(item.reconciliation_run_id); setTab('cases'); } else setSelected(item); }}>{copy.cases}</button></td></tr>)}</tbody></table>}
-    {visiblePage?.items.length === 0 && <p>{copy.empty}</p>}
+    <button type="button" disabled={busy} onClick={refresh}>{copy.refresh}</button>
+    {tab === 'runs' && writeResult && <div className="adm-inline-message" role={writeResult.kind === 'saved' ? 'status' : 'alert'}>
+      <strong>{copy[writeResult.kind]}</strong><p>{writeResult.channel} · {writeResult.business_date}{writeResult.id && <> · <code>{writeResult.id}</code></>}</p>
+      {writeResult.kind === 'runUnknown' && <button type="button" disabled={busy} onClick={checkResult}>{copy.batchCheck}</button>}
+    </div>}
+    {currentRead?.stage === 'error' && <p role="alert">{copy[currentRead.code === 'permissions' ? 'permission' : currentRead.code] || copy.unavailable}</p>}
+    <p role="status">{writing ? copy.batchSubmitting : !currentRead ? copy.batchNotRead : currentRead.stage === 'loading' ? copy.loading : visiblePage?.items.length === 0 ? copy.empty : ''}</p>
+    {visiblePage && <table><thead><tr><th>{tab === 'runs' ? copy.businessDate : copy.merchant}</th>{tab === 'runs' && <><th>{copy.channel}</th><th>{copy.batchID}</th></>}<th>{copy.status}</th><th>{tab === 'runs' ? copy.count : copy.caseType}</th>{tab === 'runs' && <><th>{copy.rows}</th><th>{copy.source}</th></>}<th>{copy.action}</th></tr></thead><tbody>{visiblePage.items.map(item => <tr key={tab === 'runs' ? item.reconciliation_run_id : item.case_id}><td>{tab === 'runs' ? item.business_date : item.merchant_order_no}</td>{tab === 'runs' && <><td>{item.channel}</td><td><code>{item.reconciliation_run_id}</code></td></>}<td>{tab === 'runs' ? copy.batchStatuses[item.status] || item.status : item.status}</td><td>{tab === 'runs' ? item.case_count : reconciliationCaseLabel(item.case_type, copy)}</td>{tab === 'runs' && <><td>{item.provider_row_count}</td><td>{item.source_mode}</td></>}<td><button disabled={busy} onClick={() => { if (tab === 'runs') { setRunID(item.reconciliation_run_id); setTab('cases'); } else setSelected(item); }}>{copy.cases}</button></td></tr>)}</tbody></table>}
     <nav><button disabled={busy || !history.length} onClick={() => { const values = [...history]; const next = values.pop(); setHistory(values); void load(next); }}>{copy.previous}</button><button disabled={busy || !visiblePage?.next_cursor} onClick={() => { setHistory(values => [...values, cursor]); void load(visiblePage.next_cursor); }}>{copy.next}</button></nav>
     {selected && <CaseActions key={selected.case_id} client={client} item={selected} owner={owner} copy={copy} canWrite={canWrite} canRequestRepair={canRequestRepair} canReadCase={canReadCase} repairCopy={repairCopy} operationCopy={operationCopy} onViewApproval={onViewApproval} onChanged={item => { setSelected(item); setPage(current => current && ({ ...current, items: current.items.map(value => value.case_id === item.case_id ? item : value) })); }} />}
   </section>;
