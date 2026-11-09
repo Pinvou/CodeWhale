@@ -3717,7 +3717,7 @@ function formatAttachmentDisplayText(text, attachments) { return pinvouSharedweb
     if (!submission.retrySameRequest) {
       var modelRef = state.pendingDraftModelRef;
       if (modelRef && !canSubmitFirstTurnWithModel(modelRef)) {
-        addSystemItem(window.PinvouWebClientStrings?.incompatibleDesktop || bt("newChatFailed"));
+        addSystemItem(firstTurnModelUnavailableMessage(modelRef));
         return;
       }
       submission.modelRef = modelRef;
@@ -3743,6 +3743,13 @@ function formatAttachmentDisplayText(text, attachments) { return pinvouSharedweb
     return modelRef.source === "LOCAL_CONFIG" && canInvoke("web_access_create_session_and_chat_with_model");
   }
 
+  function firstTurnModelUnavailableMessage(modelRef) {
+    var key = modelRef.source === "ACCOUNT_PLATFORM"
+      ? "accountPlatformFirstTurnUnsupported"
+      : "incompatibleDesktop";
+    return window.PinvouWebClientStrings?.[key] || bt("newChatFailed");
+  }
+
   // Web first turn (no session yet): an existing atomic submission owns the
   // draft. Null lets the caller join an already running legacy materialization.
   function maybeSubmitFirstWebTurn(text, displayText, readyAttachments, attachmentsPayload, meta) {
@@ -3753,7 +3760,7 @@ function formatAttachmentDisplayText(text, attachments) { return pinvouSharedweb
     if (hasPendingMaterialization()) return null;
     var modelRef = state.pendingDraftModelRef;
     if (modelRef && !canSubmitFirstTurnWithModel(modelRef)) {
-      addSystemItem(window.PinvouWebClientStrings?.incompatibleDesktop || bt("newChatFailed"));
+      addSystemItem(firstTurnModelUnavailableMessage(modelRef));
       return false;
     }
     submitFirstWebTurn(text, displayText, readyAttachments, attachmentsPayload, meta);
