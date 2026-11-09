@@ -381,6 +381,12 @@ impl ControllingSessionManager {
         self.intents.lock().clear();
     }
 
+    pub(crate) fn clear_connection(&self, connection_id: &str) {
+        self.intents
+            .lock()
+            .retain(|intent| intent.lease.connection_id != connection_id);
+    }
+
     #[cfg(test)]
     pub(crate) fn pending_capability_ids_for_test(&self, remote_ref: &str) -> Result<Vec<String>> {
         let mut intents = self.intents.lock();

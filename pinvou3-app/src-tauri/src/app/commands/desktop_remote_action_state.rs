@@ -59,6 +59,16 @@ impl DesktopRemoteActionState {
         inner.uploads.clear();
     }
 
+    pub(crate) fn clear_connection(&self, connection_id: &str) {
+        let mut inner = self.inner.lock();
+        inner
+            .pending
+            .retain(|_, pending| pending.live.connection_id != connection_id);
+        inner
+            .uploads
+            .retain(|_, upload| upload.live.connection_id != connection_id);
+    }
+
     pub(crate) fn pending_binding(
         &self,
         request_id: &str,

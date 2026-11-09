@@ -108,18 +108,26 @@ pub async fn desktop_remote_controller_disconnect(
     let result = async {
         ensure_supported(&manager)?;
         // E2E-06：先尽力把显式断开告诉 Relay/B（本地断开始终权威，发送失败不阻塞）。
-        if let Some(receipt) = manager.send_disconnect_with_receipt("user_disconnect") {
+        let mut attempt = manager.begin_disconnect("user_disconnect");
+        if let Some(receipt) = attempt.receipt.take() {
             // Queue admission is not delivery. Let the socket flush the final frame
             // before local cleanup cancels its transport; offline peers stay bounded.
             let _ = tokio::time::timeout(std::time::Duration::from_secs(2), receipt).await;
         }
-        sessions.clear();
-        actions.clear_all();
-        if let Ok((lease, _)) = manager.live_runtime_context() {
-            artifacts.clear_connection(&lease.connection_id);
+        let (status, connection_id, applied) = manager.complete_disconnect(&attempt);
+        if let Some(connection_id) = connection_id {
+            sessions.clear_connection(&connection_id);
+            actions.clear_connection(&connection_id);
+            // The A-side operation owns this download/index scope. B-side capture
+            // admission and publication remain with the B lifecycle owner.
+            artifacts.downloads().cleanup_for_connection(&connection_id);
         }
-        let status = manager.disconnect();
-        emit_status(&app, &status);
+        if applied
+            && !manager
+                .publish_disconnect_if_current(&attempt, &status, || emit_status(&app, &status))
+        {
+            return Ok(manager.status());
+        }
         Ok(status)
     }
     .await;

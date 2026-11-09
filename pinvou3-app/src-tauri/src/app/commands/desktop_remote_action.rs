@@ -575,6 +575,34 @@ mod tests {
     }
 
     #[test]
+    fn disconnect_cleanup_drops_only_the_original_connection_waiters() {
+        let state = DesktopRemoteActionState::default();
+        let mut original = register(
+            &state,
+            "request-original",
+            "permission_list",
+            Some("task-1"),
+            None,
+        );
+        let mut next = live();
+        next.connection_id = "connection-successor".to_owned();
+        let mut successor = state
+            .register(
+                "request-successor".into(),
+                "local-0001".into(),
+                "remote-0001".into(),
+                next,
+                "permission_list".into(),
+                Some("task-2".into()),
+                None,
+            )
+            .unwrap();
+        state.clear_connection("connection-0001");
+        assert_eq!(original.try_recv(), Err(TryRecvError::Closed));
+        assert_eq!(successor.try_recv(), Err(TryRecvError::Empty));
+    }
+
+    #[test]
     fn failed_chunk_retires_only_the_exact_upload_attestation() {
         let state = DesktopRemoteActionState::default();
         let mut begin = register(
