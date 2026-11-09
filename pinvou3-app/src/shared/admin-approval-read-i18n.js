@@ -213,3 +213,30 @@ const executionDetailMessages = {
   }
 };
 export const executionApprovalReadCopy = Object.fromEntries(Object.entries(executionMessages).map(([language, messages]) => [language, { ...approvalReadCopy[language], ...messages, ...executionDetailMessages[language] }]));
+
+export const approvalDirectoryCopy = {
+  "zh": {
+    "requestable": "当前可申请",
+    "unavailable": "当前不可申请",
+    "eligibleHelp": "具体对象和提交条件仍须由业务页面核验。",
+    "unavailableHelp": "目录未提供具体原因。申请条件由服务核验。",
+    "unknown": "暂无法确认",
+    "unknownHelp": "目录未提供可核实的申请状态。"
+  },
+  "en": {
+    "requestable": "Currently requestable",
+    "unavailable": "Currently unavailable to request",
+    "eligibleHelp": "The business page still checks the specific resource and submission requirements.",
+    "unavailableHelp": "The directory does not provide a specific reason. The service checks request eligibility.",
+    "unknown": "Eligibility unavailable",
+    "unknownHelp": "The directory did not provide a verified eligibility status."
+  },
+  "ja": {
+    "requestable": "現在申請できます",
+    "unavailable": "現在申請できません",
+    "eligibleHelp": "対象リソースと申請条件は業務ページで確認されます。",
+    "unavailableHelp": "具体的な理由は表示されていません。申請条件はサービスで確認されます。",
+    "unknown": "確認できません",
+    "unknownHelp": "申請可否を確認できる情報が提供されていません。"
+  }
+};
