@@ -82,3 +82,7 @@
 .adm-approval-target-help{font-size:12px;line-height:1.5;overflow-wrap:break-word;overflow-wrap:anywhere}
 .adm-restored-shell .adm-approval-workspace .adm-approval-mine-status{max-width:100%;white-space:normal;overflow-wrap:break-word;overflow-wrap:anywhere}
 .adm-approval-mine-status::before{flex:none}
+
+.adm-approval-expiry-help{flex:1 1 100%;color:var(--adm-muted);font-size:12px;line-height:1.5}
+.adm-approval-expiry-help p{margin:4px 0;color:var(--adm-danger)}
+.adm-approval-current-page-count{display:block;margin:6px 0;color:var(--adm-muted)}
