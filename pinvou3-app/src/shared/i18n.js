@@ -151,3 +151,5 @@ export { adminRolePresentationCopy } from './admin-role-presentation-i18n.js';
 
 export { registrationRepairCopy } from './registration-repair-i18n.js';
 export { productAdmissionCopy } from './product-admission-i18n.js';
+
+export { auditPrivacyCopy } from './admin-audit-presentation-i18n.js';
