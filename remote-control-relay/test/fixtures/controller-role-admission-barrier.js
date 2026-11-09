@@ -32,13 +32,13 @@ if (process.env.PINVOU_TEST_ROLE_RESUME_REQUEST) {
   const handle = ControllerRouter.prototype.handle;
   ControllerRouter.prototype.handle = function (input) {
     const requestId = input.message?.request_id;
-    if (requestId === process.env.PINVOU_TEST_ROLE_RESUME_REQUEST) {
-      process.send({ type: "role-resume-seen" });
-    }
     const result = handle.call(this, input);
     if (input.message?.type === "controller_resume_prepare") {
       void result.then(
-        (outcome) => process.send({ type: "role-resume-finished", endpointId: requestId, deliveries: outcome?.deliveries?.length ?? 0 }),
+        (outcome) => process.send({
+          type: outcome === undefined ? "role-resume-coalesced" : "role-resume-finished",
+          endpointId: requestId, deliveries: outcome?.deliveries?.length ?? 0,
+        }),
         (error) => process.send({ type: "role-resume-finished", endpointId: requestId, error: error?.code }),
       );
     }

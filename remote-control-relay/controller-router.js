@@ -175,13 +175,14 @@ export class ControllerRouter {
       && (!peer.roleAdmission || peer.roleAdmission.role === role);
   }
 
-  #reserveRole(peer, role, kind) {
+  #reserveRole(peer, role, kind, operationId = null) {
     if (!this.#isLivePeer(peer)) fail("endpoint_offline");
-    if (!this.#canAdmitRole(peer, role) || (peer.roleAdmission && peer.roleAdmission.kind !== kind)) {
+    if (!this.#canAdmitRole(peer, role) || (peer.roleAdmission
+      && (peer.roleAdmission.kind !== kind || peer.roleAdmission.operationId !== operationId))) {
       fail("controller_role_invalid");
     }
     // Same-role claim retries keep sharing the lease manager's existing flight.
-    const admission = peer.roleAdmission ??= { role, kind, count: 0 };
+    const admission = peer.roleAdmission ??= { role, kind, operationId, count: 0 };
     admission.count += 1;
     return () => {
       admission.count -= 1;
@@ -216,6 +217,19 @@ export class ControllerRouter {
     admission.resumeDigest = digest;
     if (!await admission.ready) fail("endpoint_offline");
     return true;
+  }
+
+  #assertResumePeer(peer, role, lease) {
+    if (!this.#isLivePeer(peer)) fail("endpoint_offline");
+    if (!lease) fail("controller_lease_not_found");
+    const admission = peer.roleAdmission;
+    if (!this.#canAdmitRole(peer, role) || peer.pendingReservationId
+      || (admission && (admission.kind !== "resume" || admission.operationId !== lease.controller_lease_id))
+      || (peer.controllerLeaseId && peer.controllerLeaseId !== lease.controller_lease_id)
+      || (role === "B" && (peer.role !== "B" || peer.endpointId !== lease.endpoint_id
+        || this.#controlled.get(lease.endpoint_id) !== peer.socketIdentity))) {
+      fail("controller_role_invalid");
+    }
   }
 
   authenticateControlled({ socketIdentity, endpointId, authenticatedContext } = {}) {
@@ -397,10 +411,9 @@ export class ControllerRouter {
           if (message.sender_role === "B" && registration?.kind === "registration") {
             if (!await this.#waitForControlledRegistration(registration, message, lease)) return undefined;
             lease = this.#leases.lease(message.controller_lease_id);
-            if (peer.endpointId !== registration.endpointId || lease?.endpoint_id !== registration.endpointId
-              || this.#controlled.get(registration.endpointId) !== socketIdentity) fail("endpoint_offline");
           }
-          releaseRole = this.#reserveRole(peer, message.sender_role, "resume");
+          this.#assertResumePeer(peer, message.sender_role, lease);
+          releaseRole = this.#reserveRole(peer, message.sender_role, "resume", lease.controller_lease_id);
         }
         // A heartbeat for the frozen lease's current liveness epoch can be in flight when its
         // counterpart closes. During recovery it is neither new evidence nor
@@ -500,27 +513,29 @@ export class ControllerRouter {
 
   #applyPeerUpdates(updates, lease) {
     if (!updates) return;
-    if (!Array.isArray(updates)) fail("controller_peer_updates_invalid");
+    if (!Array.isArray(updates) || !lease || this.#leases.lease(lease.controller_lease_id) !== lease) {
+      fail("controller_peer_updates_invalid");
+    }
+    const bindings = new Map();
     for (const update of updates) {
       if (!update || !new Set(["A", "B"]).has(update.role)
         || update.controller_lease_id !== lease.controller_lease_id
-        || !isControllerIdentifier(update.socket_identity)) {
+        || !isControllerIdentifier(update.socket_identity) || bindings.has(update.socket_identity)) {
         fail("controller_peer_updates_invalid");
       }
       const peer = this.#peers.get(update.socket_identity);
-      if (!this.#isLivePeer(peer)) fail("endpoint_offline");
-      if (!this.#canAdmitRole(peer, update.role)) fail("controller_role_invalid");
+      this.#assertResumePeer(peer, update.role, lease);
+      bindings.set(update.socket_identity, { peer, update });
+    }
+    for (const { peer, update } of bindings.values()) {
+      if (update.counterpart && bindings.get(update.counterpart)?.update.counterpart !== peer.socketIdentity) {
+        fail("controller_peer_updates_invalid");
+      }
+    }
+    for (const { peer, update } of bindings.values()) {
       peer.role = update.role;
       peer.controllerLeaseId = lease.controller_lease_id;
       peer.counterpart = update.counterpart ?? null;
-    }
-    for (const update of updates) {
-      if (!update.counterpart) continue;
-      const peer = this.#peers.get(update.socket_identity);
-      const counterpart = this.#peers.get(update.counterpart);
-      if (!peer || !counterpart || counterpart.counterpart !== peer.socketIdentity) {
-        fail("controller_peer_updates_invalid");
-      }
     }
   }
 

@@ -793,7 +793,9 @@ On reconnect, B may send `controller_resume_prepare` immediately after
 of that endpoint, coalesces exact retransmissions while registration is
 pending, and processes it after successful registration and its ACK. The
 resume token, current endpoint binding and original recovery deadline still
-apply.
+apply. The same endpoint ownership check applies when the prepare arrives
+after the ACK. Neither desktop role may replace an active lease or pending
+handshake by preparing a different recovery on that socket.
 If an older Relay or proxy omits the requested subprotocol in its upgrade
 response, the desktop opens a fresh v2-only connection to preserve WebUI
 access. That connection cannot carry controller v1 traffic: already queued v1

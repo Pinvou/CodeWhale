@@ -26,6 +26,7 @@ function fixture({ clock = Date.now, capabilities = ["encrypted_frames_v1", "tas
     transcript: Object.freeze({ endpoint_id: "endpoint-0001" }),
   });
   const activeLease = Object.freeze({
+    endpoint_id: "endpoint-0001",
     connection_id: "connection-0001",
     controller_lease_id: "controller-lease-0001",
     lease_epoch: "1",
@@ -157,6 +158,75 @@ test("an unsuccessful claim releases only its own role admission", async () => {
   release();
   assert.deepEqual(value.router.resolveControlledEndpoint("endpoint-0002"), { socketIdentity: "socket-A" });
   assert.deepEqual(value.router.resolveControlledEndpoint("endpoint-0001"), { socketIdentity: "socket-B" });
+});
+
+test("an active controller cannot use another recovery lease to replace its business link", async () => {
+  const value = fixture();
+  await connectController(value.router);
+  const otherLease = Object.freeze({ ...value.activeLease,
+    controller_lease_id: "controller-lease-other", endpoint_id: "endpoint-other",
+  });
+  const findLease = value.leases.lease;
+  value.leases.lease = (id) => id === otherLease.controller_lease_id ? otherLease : findLease(id);
+  let handled = 0;
+  value.resume.handle = async () => {
+    handled += 1;
+    return { peer_updates: [{ role: "A", socket_identity: "socket-A",
+      controller_lease_id: otherLease.controller_lease_id }] };
+  };
+  await assert.rejects(value.router.handle({ socketIdentity: "socket-A", message: {
+    type: "controller_resume_prepare", sender_role: "A", request_id: "request-resume-other-lease",
+    controller_lease_id: otherLease.controller_lease_id,
+  } }), { code: "controller_role_invalid" });
+  assert.equal(handled, 0);
+  const business = encryptedFrame("A", "capability_snapshot_request");
+  await value.router.handle({ socketIdentity: "socket-A", message: business });
+  assert.deepEqual(value.sent.get("socket-B").at(-1), business);
+});
+
+test("resume updates publish no links after the controlled socket is replaced", async () => {
+  const value = fixture();
+  let finishHook;
+  value.resume.handle = () => new Promise((resolve) => { finishHook = resolve; });
+  value.leases.terminateLease = async (input) => { value.terminated.push(input); return false; };
+  const pending = value.router.handle({ socketIdentity: "socket-B", message: {
+    type: "controller_resume_prepare", sender_role: "B", request_id: "request-resume-old-reader",
+    controller_lease_id: value.activeLease.controller_lease_id,
+  } });
+  const rejected = assert.rejects(pending, { code: "controller_role_invalid" });
+  value.router.addSocket({ socketIdentity: "socket-B-successor", source: "198.51.100.3", socket: "socket-B-successor" });
+  value.router.authenticateControlled({ socketIdentity: "socket-B-successor", endpointId: "endpoint-0001" });
+  finishHook({ peer_updates: [
+    { role: "A", socket_identity: "socket-A", counterpart: "socket-B", controller_lease_id: value.activeLease.controller_lease_id },
+    { role: "B", socket_identity: "socket-B", counterpart: "socket-A", controller_lease_id: value.activeLease.controller_lease_id },
+  ] });
+  await rejected;
+  assert.equal(value.terminated.length, 1);
+  assert.equal(value.terminated[0].expectedLease, value.activeLease);
+  assert.deepEqual(value.router.resolveControlledEndpoint("endpoint-0001"), { socketIdentity: "socket-B-successor" });
+  const release = value.router.reserveControlledRegistration("socket-A", "endpoint-0002");
+  assert.equal(typeof release, "function", "the other peer did not receive a partial A binding");
+  release();
+});
+
+test("one socket cannot prepare two different leases while its first resume is pending", async () => {
+  const value = fixture();
+  const otherLease = Object.freeze({ ...value.activeLease, controller_lease_id: "controller-lease-other" });
+  const findLease = value.leases.lease;
+  value.leases.lease = (id) => id === otherLease.controller_lease_id ? otherLease : findLease(id);
+  let finish;
+  let handled = 0;
+  const hook = new Promise((resolve) => { finish = resolve; });
+  value.resume.handle = () => { handled += 1; return hook; };
+  const prepare = (lease, requestId) => value.router.handle({ socketIdentity: "socket-A", message: {
+    type: "controller_resume_prepare", sender_role: "A", request_id: requestId,
+    controller_lease_id: lease.controller_lease_id,
+  } });
+  const first = prepare(value.activeLease, "request-resume-original");
+  const rejected = assert.rejects(prepare(otherLease, "request-resume-concurrent"), { code: "controller_role_invalid" });
+  finish({ deliveries: [] });
+  await Promise.all([first, rejected]);
+  assert.equal(handled, 1);
 });
 
 test("a claim returning after its socket closes cannot publish or abort a replacement", async () => {

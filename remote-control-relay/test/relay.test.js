@@ -2512,6 +2512,9 @@ test("controller v1 completes a real three-party handshake and resumes B beside 
       + '"stream_epoch":null,"after_seq":0}');
     assert.equal((await conflict).code, "endpoint_not_found");
 
+    const sibling = await registerDesktop("endpoint-controller-sibling", "sibling-access-token-000000000000001",
+      "sibling-desktop-secret-000000000001", isolated.wsUrl, 15_000, true);
+    sockets.push(sibling.ws);
     const removed = waitForRegistrationProbe(isolated.child, "role-socket-removed", endpointId);
     closeSocket(desktop.ws);
     await removed;
@@ -2525,10 +2528,16 @@ test("controller v1 completes a real three-party handshake and resumes B beside 
     const preparedA = waitForRegistrationProbe(isolated.child, "role-resume-finished", prepareA);
     controller.send(JSON.stringify(prepare("A", controllerJoined, prepareA)));
     assert.equal((await preparedA).error, undefined);
+    const wrongEndpoint = nextMessageOneOf(sibling.ws, ["controller_resume_provisional", "error"], 10_000);
+    sibling.ws.send(JSON.stringify(prepare("B", desktopJoined, "request-resume-wrong-endpoint")));
+    const rejected = await wrongEndpoint;
+    assert.equal(rejected.type, "error");
+    assert.equal(rejected.code, "invalid_message");
+
     const rebound = await openControllerSocket(isolated.wsUrl);
     sockets.push(rebound);
     const registrationReady = waitForRegistrationProbe(isolated.child, "role-registration-ready", endpointId);
-    const resumeSeen = waitForRegistrationProbe(isolated.child, "role-resume-seen");
+    const coalesced = waitForRegistrationProbe(isolated.child, "role-resume-coalesced", resumeRequest);
     const first = nextMessageOneOf(rebound, ["desktop_endpoint_registered", "controller_resume_provisional", "error"], 10_000);
     const provisional = nextMessageOneOf(rebound, ["controller_resume_provisional", "error"], 10_000);
     rebound.send(JSON.stringify({ v: 2, type: "desktop_endpoint_register", endpoint_id: endpointId,
@@ -2536,7 +2545,7 @@ test("controller v1 completes a real three-party handshake and resumes B beside 
     const prepareB = JSON.stringify(prepare("B", desktopJoined, resumeRequest));
     rebound.send(prepareB);
     rebound.send(prepareB);
-    await Promise.all([registrationReady, resumeSeen]);
+    await Promise.all([registrationReady, coalesced]);
     isolated.child.send({ type: "release-role-admission" });
     const [ack, resumed] = await Promise.all([first, provisional]);
     assert.equal(ack.type, "desktop_endpoint_registered", ack.code);
