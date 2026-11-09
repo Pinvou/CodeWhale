@@ -25,8 +25,8 @@ async function rejectedMutation(mutate, expected) {
 
 test('authorization release gate classifies every HTTP task event callback and CLI entrypoint', async () => {
   const catalog = JSON.parse(await readFile(catalogURL, 'utf8'));
-  // The six existing Portal transports use Any, alongside the 396 verb-specific
-  // registrations. Keep the expected complete graph independent of its parser.
+  // The six Portal transports use Any alongside the verb-specific routes.
+  // Keep the expected complete graph independent of its parser.
   const wildcardPaths = [
     '/api/account/*resource', '/api/token/*resource',
     '/api/admin/account/*resource', '/api/admin/billing/*resource',
@@ -37,9 +37,15 @@ test('authorization release gate classifies every HTTP task event callback and C
     wildcardPaths.map(path => ({source: wildcardSource, receiver: 'router', method: 'ANY', path})));
   const portal = await readFile(new URL('../../internal/portal/service.go', import.meta.url), 'utf8');
   for (const route of wildcardPaths) assert.ok(portal.includes(`router.Any("${route}",`), `missing existing Portal transport ${route}`);
+  const billing = await readFile(new URL('../../internal/billing/service.go', import.meta.url), 'utf8');
+  const repairContext = authorizationRoutes('account-platform/internal/billing/service.go', billing)
+    .filter(route => route.path === '/reconciliation-cases/:case_id/repair-context');
+  assert.deepEqual(repairContext.map(route => route.registration.trim()), [
+    'admin.GET("/reconciliation-cases/:case_id/repair-context", s.authorizer.Require("platform.billing.reconciliation.read"), httpserver.AdaptFunc(s.adminReconciliationRepairContext))',
+  ]);
   // The real checker still rejects missing, stale, duplicate or mis-scoped
   // entries before returning these exact inventory sizes.
-  assert.deepEqual(await runAuthorizationCoverage(), { routes: 410, tasks: 32, events: 18, cli: 27 });
+  assert.deepEqual(await runAuthorizationCoverage(), { routes: 411, tasks: 32, events: 18, cli: 27 });
 });
 
 function assertLedgerRepairProofAuthorization(service, handler) {
