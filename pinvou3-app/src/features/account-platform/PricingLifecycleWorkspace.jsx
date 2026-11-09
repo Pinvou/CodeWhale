@@ -6,7 +6,8 @@ import { secureRequestID } from './request-id.js';
 import { ConfiguredPriceUnits, PricingDate, PricingIdentifiers, ResolvedPriceEvidence } from './AdminPriceListPresentation.jsx';
 import { PricingActionImpact } from './PricingActionImpact.jsx';
 import { exactPricingInteger, MeteringBasis, PricingReadProgress } from './PricingTechnicalPresentation.jsx';
-import React, { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
+import './admin-pricing-presentation-panes.css';
+import React, { useCallback, useEffect, useId, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { buildPriceDraftInput, matchingContinuationDrafts, newModelPriceAllowed, priceDraftForm, priceSpaceQuery, priceTransitionModes, pricingLifecycleMutationLock, publishedPricingFormulas } from './pricing-lifecycle.js';
 
 const shortID = (value) => {
@@ -30,7 +31,7 @@ function fieldError(labels, value) {
   return labels.required;
 }
 
-export function PricingLifecycleWorkspace({ copy, client, permissions, owner, contextModel = null, contextFormula = null, onExit = null, onOpenModel = null }) {
+export function PricingLifecycleWorkspace({ copy, client, permissions, owner, contextModel = null, contextFormula = null, onExit = null, onOpenModel = null, pricingPane = null, onPricingPaneChange = null }) {
   const recoveryEpoch = client.financeSessionEpoch;
   const unknownStorageKey = pricingUnknownStorageKey(owner, recoveryEpoch);
   const intentRevision = pricingUnknownStateSnapshot(unknownStorageKey).revision;
@@ -41,6 +42,8 @@ export function PricingLifecycleWorkspace({ copy, client, permissions, owner, co
   const listWords = labels.listPresentation;
   const { language } = listWords;
   const technicalWords = labels.technicalPresentation;
+  const paneWords = labels.panePresentation;
+  const paneID = useId();
   const contextual = Boolean(contextModel?.model_id && contextFormula?.formula_version_id);
   const [priceAccessDenied, setPriceAccessDenied] = useState(false);
   const canManage = new Set(permissions || []).has('platform.pricing.manage') && !priceAccessDenied && recoveryScopeCurrent;
@@ -66,7 +69,8 @@ export function PricingLifecycleWorkspace({ copy, client, permissions, owner, co
   const [loading, setLoading] = useState({});
   const [errors, setErrors] = useState({});
   const [updatedAt, setUpdatedAt] = useState({});
-  const [notice, setNotice] = useState('');
+  const [notice, setNoticeState] = useState(null);
+  const setNotice = (text, pane = 'shared') => setNoticeState(text ? { text, pane } : null);
   const [editorState, setEditorState] = useState(null);
   const editor = editorState?.revision === intentRevision ? editorState.value : null;
   const setEditor = value => setIntent(setEditorState, value);
@@ -82,6 +86,16 @@ export function PricingLifecycleWorkspace({ copy, client, permissions, owner, co
   const pendingAction = pendingActionState?.revision === intentRevision ? pendingActionState.value : null;
   const riskyAction = pendingAction?.type === 'DEACTIVATE' || pendingAction?.type === 'TRANSITION' && pendingAction.item.derived_status === 'ACTIVE';
   const riskyActionTitle = riskyAction ? pendingAction.type === 'DEACTIVATE' ? labels.deactivate : labels.endActive : '';
+  const [paneChoice, setPaneChoice] = useState(null);
+  const savedPane = paneChoice?.owner === previewOwner.current ? paneChoice.pane : 'prices';
+  const pane = contextual ? 'prices' : pricingPane || savedPane;
+  const pendingPane = pendingAction?.type === 'DEACTIVATE' ? 'units' : 'prices';
+  const switchLocked = Boolean(loading.mutation || loading.recovery || pendingAction && pendingPane === pane || preview && pane === 'prices');
+  const choosePane = value => {
+    if (switchLocked || value === pane) return;
+    if (onPricingPaneChange) onPricingPaneChange(value);
+    else setPaneChoice({ owner: previewOwner.current, pane: value });
+  };
   const setPendingAction = value => setIntent(setPendingActionState, value);
   const recoveryGate = useRef(null);
   if (!recoveryGate.current) recoveryGate.current = createPricingUnknownRecoveryGate();
@@ -426,7 +440,7 @@ export function PricingLifecycleWorkspace({ copy, client, permissions, owner, co
       await replayPricingMutation(client, dispatched);
       if (!mounted.current || !sharedOperationCurrent(dispatched) || !setUnknownMutation(null, dispatched)) return;
       setEditor(null);
-      setNotice(labels.draftSaved);
+      setNotice(labels.draftSaved, 'prices');
       void loadPrices().catch(() => {});
     } catch (error) {
       if (!mounted.current || !sharedOperationCurrent(dispatched)) return;
@@ -494,7 +508,7 @@ export function PricingLifecycleWorkspace({ copy, client, permissions, owner, co
       await replayPricingMutation(client, dispatched);
       if (!mounted.current || !sharedOperationCurrent(dispatched) || !setUnknownMutation(null, dispatched)) return;
       setUnitForm(null);
-      setNotice(labels.unitCreated);
+      setNotice(labels.unitCreated, 'units');
       void loadUnits().catch(() => {});
     } catch (error) {
       if (!mounted.current || !sharedOperationCurrent(dispatched)) return;
@@ -553,7 +567,7 @@ export function PricingLifecycleWorkspace({ copy, client, permissions, owner, co
       await replayPricingMutation(client, dispatched);
       if (!mounted.current || !sharedOperationCurrent(dispatched) || !setUnknownMutation(null, dispatched)) return;
       setPendingAction(null);
-      setNotice(labels.actionCompleted);
+      setNotice(labels.actionCompleted, type === 'DEACTIVATE' ? 'units' : 'prices');
       if (type === 'DEACTIVATE') void loadUnits().catch(() => {}); else void loadPrices().catch(() => {});
     } catch (error) {
       if (!mounted.current || !sharedOperationCurrent(dispatched)) return;
@@ -658,21 +672,31 @@ export function PricingLifecycleWorkspace({ copy, client, permissions, owner, co
   // Hide every previous-owner presenter until the retained state is rebound.
   if (!recoveryScopeCurrent) return <div className="adm-pricing-workspace" aria-busy="true">{labels.verifying}</div>;
 
+  const pendingDialog = pendingAction && <div className="adm-pricing-action-backdrop"><form className={riskyAction ? "adm-pricing-action adm-pricing-action-risk" : "adm-pricing-action"} role="dialog" aria-modal="true" aria-label={riskyActionTitle || labels.confirmAction} onSubmit={runPendingAction}><header><div><strong>{pendingAction.type === 'PUBLISH' ? labels.publish : pendingAction.type === 'DEACTIVATE' ? labels.deactivate : pendingAction.item.derived_status === 'PUBLISHED' ? labels.cancelFuture : labels.endActive}</strong><code>{pendingAction.item.price_version_id || pendingAction.item.unit_definition_id}</code></div><button type="button" disabled={Boolean(unknownMutation)} onClick={() => setPendingAction(null)} aria-label={labels.cancel}>×</button></header>{pendingAction.error && <div className="adm-inline-message error" role="alert">{pendingAction.error}</div>}{riskyAction ? <PricingActionImpact action={pendingAction} prices={errors.prices || priceAccessDenied ? [] : prices} formulas={errors.formulas || formulaAccessDenied ? [] : protocols.formulas || []} labels={labels} /> : <p>{pendingAction.type === 'PUBLISH' ? labels.publishConfirmation : labels.transitionConfirmation}</p>}{pendingAction.type === 'TRANSITION' && <>{pendingAction.item.derived_status === 'ACTIVE' && <label>{labels.transitionMode}<select disabled={Boolean(loading.mutation || unknownMutation || !canManage)} value={pendingAction.mode} onChange={(event) => setPendingAction((current) => ({ ...current, mode: event.target.value, replacementID: event.target.value === 'CONTINUATION' ? current.replacementID : '' }))}>{priceTransitionModes(pendingAction.item).map((mode) => <option key={mode} value={mode}>{labels.riskPresentation.modes[mode] || mode}</option>)}</select></label>}{pendingAction.mode === 'CONTINUATION' && <label>{labels.replacementDraft}<select disabled={Boolean(loading.mutation || unknownMutation || !canManage)} required value={pendingAction.replacementID} onChange={(event) => setPendingAction((current) => ({ ...current, replacementID: event.target.value }))}><option value="">{labels.chooseReplacement}</option>{(pendingAction.candidates || []).map((item) => <option key={item.price_version_id} value={item.price_version_id}>v{item.version} · {shortID(item.price_version_id)}</option>)}</select></label>}<label>{labels.reason}<textarea disabled={Boolean(loading.mutation || unknownMutation || !canManage)} required maxLength="500" value={pendingAction.reason} onChange={(event) => setPendingAction((current) => ({ ...current, reason: event.target.value }))} /></label></>}{riskyAction ? <footer><button type="button" disabled={Boolean(unknownMutation)} onClick={() => setPendingAction(null)}>{labels.cancel}</button><button type="submit" className="danger" disabled={loading.mutation || unknownMutation || !canManage}>{riskyActionTitle}</button></footer> : <footer><button type="submit" className={pendingAction.type === 'DEACTIVATE' || pendingAction.type === 'TRANSITION' ? 'danger' : ''} disabled={loading.mutation || unknownMutation || !canManage}>{labels.confirmAction}</button><button type="button" disabled={Boolean(unknownMutation)} onClick={() => setPendingAction(null)}>{labels.cancel}</button></footer>}</form></div>;
+  const sourceErrors = group => Object.entries(errors).filter(([key]) => (key === 'units' || key === 'unitMutation' ? 'units' : 'prices') === group).map(([key, error]) => <div key={key} className="adm-inline-message error" role="alert">{error}</div>);
   return (
     <div className="adm-pricing-workspace">
+      {!contextual && <nav className="adm-tabs adm-pricing-panes" aria-label={paneWords.switchLabel}>
+        <button type="button" aria-pressed={pane === 'prices'} aria-controls={paneID + '-prices'} disabled={switchLocked} onClick={() => choosePane('prices')}>{labels.priceVersions}</button>
+        <button type="button" aria-pressed={pane === 'units'} aria-controls={paneID + '-units'} disabled={switchLocked} onClick={() => choosePane('units')}>{labels.meteringUnits}</button>
+      </nav>}
+      {!contextual && switchLocked && !loading.mutation && !loading.recovery && <p className="adm-pricing-pane-note">{paneWords.locked}</p>}
       <div className="adm-section-tools">
         <span>{contextual ? labels.modelContextBoundary(contextModel.display_name) : labels.lifecycleBoundary}</span>
         <div className="adm-row-actions">
-          {canManage && <button type="button" onClick={openCreate} disabled={loading.formulaSelection || loading.mutation || unknownMutation || formulaAccessDenied || !formulas.length}>{labels.createDraft}</button>}
+          {canManage && pane === 'prices' && <button type="button" onClick={openCreate} disabled={loading.formulaSelection || loading.mutation || unknownMutation || formulaAccessDenied || !formulas.length}>{labels.createDraft}</button>}
           {onExit && <button type="button" onClick={onExit}>{labels.readOnlySummary}</button>}
-          <button type="button" onClick={() => { void loadPrices().catch(() => {}); void loadUnits().catch(() => {}); void loadProtocols({ q: activeFormulaQuery }).catch(() => {}); void loadModels().catch(() => {}); }} disabled={Boolean(priceNavigationLocked || loading.prices || loading.units || loading.formulas || loading.models)}>{copy.refresh}</button>
+          <button type="button" onClick={() => { void loadPrices().catch(() => {}); void loadUnits().catch(() => {}); void loadProtocols({ q: activeFormulaQuery }).catch(() => {}); void loadModels().catch(() => {}); }} disabled={Boolean(priceNavigationLocked || loading.prices || loading.units || loading.formulas || loading.models)}>{contextual ? copy.refresh : paneWords.refreshAll}</button>
         </div>
       </div>
       {recoveryScopeCurrent && unknownMutation && <div className="adm-inline-message error" role="alert">{labels.resultUnknown}<code>{unknownMutation.idempotencyKey}</code><button type="button" onClick={() => void verifyUnknown()} disabled={loading.recovery}>{loading.recovery ? labels.verifying : labels.verifyResult}</button><details><summary>{labels.unknownOriginal}</summary><pre>{JSON.stringify(unknownMutation, null, 2)}</pre></details><p>{labels.unknownNewOperationLead}</p><button type="button" onClick={() => void reloadUnknownConfiguration()} disabled={!canManage || loading.recovery || loading.unknownConfiguration}>{labels.unknownReload}</button>{unknownConfiguration && <><pre>{JSON.stringify(unknownConfiguration.facts, null, 2)}</pre><button type="button" onClick={startAfterUnknown} disabled={!canManage || loading.recovery || loading.unknownConfiguration || unknownConfiguration.boundary !== recoveryBoundary()}>{labels.unknownStartNew}</button></>}</div>}
       {recoveryScopeCurrent && unknownHistory.length > 0 && <details className="adm-unknown-history"><summary>{labels.unknownHistory}</summary><p>{labels.unknownLocalOnly}</p>{unknownHistory.map(record => <details key={record.operation.idempotencyKey}><summary>UNKNOWN · {record.operation.kind} · {record.operation.idempotencyKey}</summary><pre>{JSON.stringify(record.operation, null, 2)}</pre></details>)}</details>}
-      {notice && <div className="adm-inline-message ok" role="status">{notice}</div>}
-      {Object.entries(errors).map(([key, error]) => <div key={key} className="adm-inline-message error" role="alert">{error}</div>)}
+      {notice && (notice.pane === "shared" || notice.pane === pane) && <div className="adm-inline-message ok" role="status">{notice.text}</div>}
+      <div className="adm-pricing-pane" id={paneID + "-prices"} hidden={pane !== "prices"}>
+      {sourceErrors("prices")}
+      {contextual && sourceErrors("units")}
       {!contextual && formulaPage.mode !== 'aggregate' && <section className="adm-finance-subpanel" aria-label={labels.formulaDirectory}>
+        <h3>{labels.formulaDirectory}</h3>
         <p>{labels.formulaActiveFilter}: {activeFormulaQuery || labels.formulaAll}</p>
         <form onSubmit={event => { event.preventDefault(); void loadProtocols({ q: formulaQuery }).catch(() => {}); }}>
           <label>{labels.formulaSearch}<input maxLength="160" value={formulaQuery} disabled={Boolean(loading.formulas || unknownMutation)} onChange={event => setFormulaQuery(event.target.value)} /></label>
@@ -757,7 +781,13 @@ export function PricingLifecycleWorkspace({ copy, client, permissions, owner, co
         </tbody></table></div>
       </section>
 
-      {!contextual && <section className="adm-finance-subpanel">
+      {preview && <aside className="adm-pricing-preview" role="dialog" aria-modal="true" aria-label={labels.preview}><header><div><strong>{labels.resolvedPreview}</strong><code>{preview.price_version_id}</code></div><button type="button" onClick={() => setPreview(null)} aria-label={labels.cancel}>×</button></header><ResolvedPriceEvidence preview={preview} labels={labels} language={language} /></aside>}
+      {pendingPane === "prices" && pendingDialog}
+      </div>
+
+      {!contextual && <div className="adm-pricing-pane" id={paneID + "-units"} hidden={pane !== "units"}>
+      {sourceErrors("units")}
+      <section className="adm-finance-subpanel">
         <header className="adm-pricing-panel-head"><div><h3>{labels.meteringUnits}</h3><p>{labels.meteringUnitsLead}</p></div><div className="adm-row-actions adm-pricing-resource-tools"><button type="button" onClick={() => void loadUnits().catch(() => {})} disabled={loading.units || loading.recovery}>{errors.units ? copy.retry : copy.refresh}</button>{canManage && <button type="button" onClick={() => setUnitForm({ unit_code: '', minimum_precision: '1', price_denominator: '1000000', rounding_rule: 'CEILING' })} disabled={loading.mutation || unknownMutation}>{labels.createUnitVersion}</button>}<PricingReadProgress loaded={updatedAt.units} pending={loading.units} failed={errors.units} words={technicalWords}>{technicalWords.unitsLoaded(units.length)}</PricingReadProgress></div></header>
         {unitForm && <form className="adm-pricing-unit-form" onSubmit={submitUnit}><fieldset className="adm-pricing-fieldset" disabled={Boolean(loading.mutation || unknownMutation || !canManage)}><label>{labels.unitCode}<input maxLength="80" value={unitForm.unit_code} onChange={(event) => setUnitForm((current) => ({ ...current, unit_code: event.target.value }))} /></label><label>{labels.minimumPrecision}<input type="number" min="1" step="1" value={unitForm.minimum_precision} onChange={(event) => setUnitForm((current) => ({ ...current, minimum_precision: event.target.value }))} /></label><label>{labels.priceDenominator}<input type="number" min="1" step="1" value={unitForm.price_denominator} onChange={(event) => setUnitForm((current) => ({ ...current, price_denominator: event.target.value }))} /></label><label>{labels.roundingRule}<select value={unitForm.rounding_rule} onChange={(event) => setUnitForm((current) => ({ ...current, rounding_rule: event.target.value }))}><option>CEILING</option><option>FLOOR</option><option>HALF_UP</option></select></label><button disabled={loading.mutation || unknownMutation || !canManage}>{labels.createUnitVersion}</button><button type="button" disabled={Boolean(unknownMutation)} onClick={() => setUnitForm(null)}>{labels.cancel}</button></fieldset></form>}
         {/* biome-ignore lint/a11y/noNoninteractiveTabindex: This named overflow region needs keyboard focus for native table scrolling. */}
@@ -765,11 +795,11 @@ export function PricingLifecycleWorkspace({ copy, client, permissions, owner, co
           {units.map((item) => <tr key={item.unit_definition_id}><td><strong>{item.unit_code}</strong><PricingIdentifiers label={technicalWords.advanced} target={item.unit_code + " · v" + item.version} scope={priceContext} client={client} owner={owner} language={language} identifiers={[[technicalWords.unitID, item.unit_definition_id]]} /></td><td>v{item.version}</td><td><MeteringBasis unit={item} labels={labels} /></td><td><PricingStatus value={item.status} /></td><td>{canManage && item.status === 'ACTIVE' ? <button type="button" className="danger adm-pricing-risk-trigger" onClick={() => openDeactivate(item)} disabled={loading.mutation || unknownMutation}>{labels.deactivate}</button> : '—'}</td></tr>)}
           {!units.length && !loading.units && !errors.units && updatedAt.units && <tr><td colSpan="5" className="adm-empty">{labels.noUnits}</td></tr>}
         </tbody></table></div>
-      </section>}
+      </section>
+      {pendingPane === "units" && pendingDialog}
+      </div>}
 
-      {preview && <aside className="adm-pricing-preview" role="dialog" aria-modal="true" aria-label={labels.preview}><header><div><strong>{labels.resolvedPreview}</strong><code>{preview.price_version_id}</code></div><button type="button" onClick={() => setPreview(null)} aria-label={labels.cancel}>×</button></header><ResolvedPriceEvidence preview={preview} labels={labels} language={language} /></aside>}
 
-      {pendingAction && <div className="adm-pricing-action-backdrop"><form className={riskyAction ? "adm-pricing-action adm-pricing-action-risk" : "adm-pricing-action"} role="dialog" aria-modal="true" aria-label={riskyActionTitle || labels.confirmAction} onSubmit={runPendingAction}><header><div><strong>{pendingAction.type === 'PUBLISH' ? labels.publish : pendingAction.type === 'DEACTIVATE' ? labels.deactivate : pendingAction.item.derived_status === 'PUBLISHED' ? labels.cancelFuture : labels.endActive}</strong><code>{pendingAction.item.price_version_id || pendingAction.item.unit_definition_id}</code></div><button type="button" disabled={Boolean(unknownMutation)} onClick={() => setPendingAction(null)} aria-label={labels.cancel}>×</button></header>{pendingAction.error && <div className="adm-inline-message error" role="alert">{pendingAction.error}</div>}{riskyAction ? <PricingActionImpact action={pendingAction} prices={errors.prices || priceAccessDenied ? [] : prices} formulas={errors.formulas || formulaAccessDenied ? [] : protocols.formulas || []} labels={labels} /> : <p>{pendingAction.type === 'PUBLISH' ? labels.publishConfirmation : labels.transitionConfirmation}</p>}{pendingAction.type === 'TRANSITION' && <>{pendingAction.item.derived_status === 'ACTIVE' && <label>{labels.transitionMode}<select disabled={Boolean(loading.mutation || unknownMutation || !canManage)} value={pendingAction.mode} onChange={(event) => setPendingAction((current) => ({ ...current, mode: event.target.value, replacementID: event.target.value === 'CONTINUATION' ? current.replacementID : '' }))}>{priceTransitionModes(pendingAction.item).map((mode) => <option key={mode} value={mode}>{labels.riskPresentation.modes[mode] || mode}</option>)}</select></label>}{pendingAction.mode === 'CONTINUATION' && <label>{labels.replacementDraft}<select disabled={Boolean(loading.mutation || unknownMutation || !canManage)} required value={pendingAction.replacementID} onChange={(event) => setPendingAction((current) => ({ ...current, replacementID: event.target.value }))}><option value="">{labels.chooseReplacement}</option>{(pendingAction.candidates || []).map((item) => <option key={item.price_version_id} value={item.price_version_id}>v{item.version} · {shortID(item.price_version_id)}</option>)}</select></label>}<label>{labels.reason}<textarea disabled={Boolean(loading.mutation || unknownMutation || !canManage)} required maxLength="500" value={pendingAction.reason} onChange={(event) => setPendingAction((current) => ({ ...current, reason: event.target.value }))} /></label></>}{riskyAction ? <footer><button type="button" disabled={Boolean(unknownMutation)} onClick={() => setPendingAction(null)}>{labels.cancel}</button><button type="submit" className="danger" disabled={loading.mutation || unknownMutation || !canManage}>{riskyActionTitle}</button></footer> : <footer><button type="submit" className={pendingAction.type === 'DEACTIVATE' || pendingAction.type === 'TRANSITION' ? 'danger' : ''} disabled={loading.mutation || unknownMutation || !canManage}>{labels.confirmAction}</button><button type="button" disabled={Boolean(unknownMutation)} onClick={() => setPendingAction(null)}>{labels.cancel}</button></footer>}</form></div>}
     </div>
   );
 }
