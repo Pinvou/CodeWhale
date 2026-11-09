@@ -21,6 +21,7 @@ import { AdminIdentifier } from './AdminIdentifier.jsx';
 import { usePortalDialogScope } from './portal-dialog-scope.jsx';
 import { AdminFinanceReadWorkspace } from './AdminFinanceReadWorkspace.jsx';
 import { approvalLabel } from './admin-approval-presentation.js';
+import { PortalDialog } from './PortalDialog.jsx';
 import { AdminOrderStatusSummary } from './AdminOrderStatusSummary.jsx';
 import { AdminOrderResults } from './AdminOrderResults.jsx';
 
@@ -519,17 +520,34 @@ function Wallets({ client, copy, language, permissions, owner, requesterID, onVi
 function ProviderControls({ client, copy, permissions, owner, language }) {
   const words = adminLayoutCopy[language].providerControlStatus;
   const [control, setControl] = useState(null);
+
+  const resumeWords = adminLayoutCopy[language].providerControlRecovery;
+  const [selection, setSelection] = useState(null);
   const [reason, setReason] = useState('');
   const operation = useFinanceOperation(owner, copy, client, 'provider-controls');
-  const load = async () => { const value = await operation.read(() => client.paymentProviderControls()); if (value) setControl(value); };
-  useEffect(() => { void load(); }, [client, owner]); // eslint-disable-line react-hooks/exhaustive-deps
-  const resume = async product => {
-    const result = await operation.mutate(operation.pendingFacts || { control, product, reason: reason.trim() }, (facts, key) => {
-      const draft = buildPaymentControlApprovalDraft(facts.control, facts.product, facts.reason, key);
+  const epoch = client.financeSessionEpoch || 0;
+  const canResume = permissions.includes('platform.billing.payment-controls.resume.request');
+  const isCurrentIdentity = facts => facts?.client === client && facts.owner === owner && facts.epoch === epoch;
+  const close = () => { setSelection(null); setReason(''); };
+  const load = async () => { close(); const value = await operation.read(() => client.paymentProviderControls()); if (value) setControl(value); };
+  useEffect(() => { void load(); }, [client, owner, epoch]); // eslint-disable-line react-hooks/exhaustive-deps
+  const selected = canResume && isCurrentIdentity(selection) && selection.control === control && !operation.unknown && !operation.pendingFacts ? selection : null;
+  const pending = operation.unknown && canResume && isCurrentIdentity(operation.pendingFacts) ? operation.pendingFacts : null;
+  const resume = async facts => {
+    if (!facts || !canResume || !isCurrentIdentity(facts) || operation.busy) return;
+    const result = await operation.mutate(facts, (savedFacts, key) => {
+      const draft = buildPaymentControlApprovalDraft(savedFacts.control, savedFacts.product, savedFacts.reason, key);
       if (!draft) throw Object.assign(new Error('unavailable draft'), { status: 409 });
       return createAndSubmitFreshGovernedApproval(client, draft);
     });
     if (result) await load();
+  };
+  const confirm = event => {
+    event.preventDefault();
+    if (!selected || reason.trim().length < 10 || operation.busy || operation.unknown || operation.pendingFacts) return;
+    const facts = { ...selected, reason: reason.trim() };
+    close();
+    void resume(facts);
   };
   const controlStatus = row => row.new_orders_enabled === true ? words.enabled : row.new_orders_enabled === false ? words.disabled : words.unknown;
   const controlReason = row => {
@@ -537,8 +555,27 @@ function ProviderControls({ client, copy, permissions, owner, language }) {
     if (!code) return '—';
     return Object.prototype.hasOwnProperty.call(words.reasons, code) ? <>{words.reasons[code]} <code>{code}</code></> : <code>{code}</code>;
   };
-  const resumeAction = (row, product) => row.resume_draft && permissions.includes('platform.billing.payment-controls.resume.request') ? <button type="button" disabled={operation.busy || operation.unknown || reason.trim().length < 10} onClick={() => void resume(product)}>{operation.unknown ? copy.retry : copy.resume}</button> : '—';
-  return <section><h3>{copy.providerControls}</h3><button disabled={operation.busy} onClick={() => void load()}>{copy.refresh}</button><Feedback operation={operation} copy={copy} />{operation.unknown && <button disabled={operation.busy} onClick={() => void resume(null)}>{copy.retry}</button>}<label>{copy.reason}<textarea disabled={operation.busy || operation.unknown} value={reason} onChange={event => setReason(event.target.value)} /></label>
+
+  const targetName = (row, dictionary, key) => Object.prototype.hasOwnProperty.call(dictionary, row[key]) ? dictionary[row[key]] : row[key];
+  const targetDetails = facts => <dl>
+    <dt>{resumeWords.provider}</dt><dd>{targetName(facts.control, words.providers, 'provider_id')} · <code>{facts.control.provider_id}</code>{facts.control.provider_version && <> · <code>{facts.control.provider_version}</code></>}</dd>
+    {facts.product && <><dt>{resumeWords.product}</dt><dd>{targetName(facts.product, words.catalog, 'product_id')} · <code>{facts.product.product_id}</code></dd></>}
+    <dt>{resumeWords.current}</dt><dd>{controlStatus(facts.product || facts.control)}</dd>
+    <dt>{resumeWords.target}</dt><dd>{words.enabled}</dd>
+  </dl>;
+  const resumeAction = (row, product) => row.resume_draft && canResume ? <button type="button" disabled={operation.busy || operation.unknown || Boolean(operation.pendingFacts)} onClick={() => {
+    if (operation.busy || operation.unknown || operation.pendingFacts) return;
+    setReason(''); setSelection({ client, owner, epoch, control, product });
+  }}>{resumeWords.open}</button> : '—';
+  return <section><h3>{copy.providerControls}</h3><button type="button" disabled={operation.busy} onClick={() => void load()}>{copy.refresh}</button><Feedback operation={operation} copy={copy} />
+    {pending && <section className="adm-action-confirmation"><h4>{resumeWords.pending}</h4>{targetDetails(pending)}<p><strong>{resumeWords.reason}:</strong> {pending.reason}</p><div className="adm-row-actions"><button type="button" disabled={operation.busy} onClick={() => void resume(pending)}>{resumeWords.retry}</button></div></section>}
+    {selected && <PortalDialog title={resumeWords.open} closeLabel={resumeWords.cancel} busy={operation.busy} onClose={close}>
+      <p>{resumeWords.effect}</p>{targetDetails(selected)}
+      <form onSubmit={confirm}>
+        <label>{resumeWords.reason}<textarea required value={reason} onChange={event => setReason(event.target.value)} /><small>{resumeWords.minimum}</small></label>
+        <div className="ap-dialog-actions"><button type="button" onClick={close}>{resumeWords.cancel}</button><button type="submit" disabled={operation.busy || reason.trim().length < 10}>{resumeWords.submit}</button></div>
+      </form>
+    </PortalDialog>}
     {control && <>
       <section aria-label={words.provider}>
         <h4>{words.provider}</h4>
