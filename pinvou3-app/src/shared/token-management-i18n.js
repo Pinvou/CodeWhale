@@ -605,3 +605,31 @@ Object.assign(tokenManagementCopy.en.modelToken, {
 Object.assign(tokenManagementCopy.ja.modelToken, {
   "tokenResourceAccountID": "トークンアカウント ID"
 });
+
+Object.assign(tokenManagementCopy.zh.modelToken, {
+  "accountRecoverySearchDisclosure": "按命令引用精确查询",
+  "accountRecoverySearchGuide": "输入完整命令引用，在当前可见的待处理队列中查找。",
+  "accountRecoveryActiveQuery": "已应用的命令引用",
+  "accountRecoveryClearQuery": "清除命令引用",
+  "accountRecoveryEmpty": "当前没有待人工处理的账户创建命令。",
+  "accountRecoveryNoMatch": "当前没有与此命令引用匹配的待处理项。",
+  "accountRecoveryEmptyPage": "当前页没有可显示的待处理项。"
+});
+Object.assign(tokenManagementCopy.en.modelToken, {
+  "accountRecoverySearchDisclosure": "Find an exact command reference",
+  "accountRecoverySearchGuide": "Enter the full command reference to search the pending items you can access.",
+  "accountRecoveryActiveQuery": "Applied command reference",
+  "accountRecoveryClearQuery": "Clear command reference",
+  "accountRecoveryEmpty": "No account creation commands currently need manual review.",
+  "accountRecoveryNoMatch": "No pending item matches this command reference.",
+  "accountRecoveryEmptyPage": "No pending items are shown on this page."
+});
+Object.assign(tokenManagementCopy.ja.modelToken, {
+  "accountRecoverySearchDisclosure": "コマンド参照を完全一致で検索",
+  "accountRecoverySearchGuide": "完全なコマンド参照を入力し、閲覧可能な保留中の項目を検索します。",
+  "accountRecoveryActiveQuery": "適用中のコマンド参照",
+  "accountRecoveryClearQuery": "コマンド参照を消去",
+  "accountRecoveryEmpty": "現在、手動確認が必要なアカウント作成コマンドはありません。",
+  "accountRecoveryNoMatch": "このコマンド参照に一致する保留中の項目はありません。",
+  "accountRecoveryEmptyPage": "このページに表示できる保留中の項目はありません。"
+});
