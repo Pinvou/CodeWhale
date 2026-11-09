@@ -74,7 +74,20 @@ test('dedicated user and operations views expose closure progress, blockers and 
   assert.match(operationsView, /^\s*\['closures', 'platform\.account-closures\.read',/m);
   assert.match(operationsView, /^\s*\{view === 'closures' && <AdminAccountClosureWorkspace \{\.\.\.\{ client, me, language \}\} \/>\}/m);
   assert.match(operationsView, /const closureDenied = route\.operationsTab === 'closures' && !permissions\.includes\('platform\.account-closures\.read'\)/);
-  assert.match(operationsView, /const active = closureDenied \? null : tabs\.some\(\(\[key\]\) => key === route\.operationsTab\) \? route\.operationsTab/);
+  const operationsStart = operationsView.indexOf('export function AdminOperationsPage(');
+  const tabsStart = operationsView.indexOf('  const tabs =', operationsStart);
+  const activeStart = operationsView.indexOf('  const active =', tabsStart);
+  const activeEnd = operationsView.indexOf(';', activeStart);
+  assert.ok(operationsStart >= 0 && tabsStart > operationsStart && activeStart > tabsStart && activeEnd > activeStart);
+  const selectOperation = new Function('route', 'permissions', 'copy', 'accountClosureCopy', 'language',
+    `${operationsView.slice(tabsStart, activeEnd + 1)}\nreturn { active, closureDenied };`);
+  const labels = { operations: { nav: 'policy' }, userManagement: { registrationRepair: 'registration', profileRepair: 'profile' } };
+  const select = (tab, permissions) => selectOperation({ operationsTab: tab }, permissions, labels, { zh: { listTitle: 'closures' } }, 'zh');
+  assert.deepEqual(select('closures', ['platform.account-closures.read']), { active: 'closures', closureDenied: false });
+  for (const permissions of [[], ['platform.registration-bonus.read'], ['platform.registrations.repair'], ['platform.profile-changes.repair']]) {
+    assert.deepEqual(select('closures', permissions), { active: null, closureDenied: true },
+      'denied closure navigation must not fall back to another permitted operation');
+  }
   assert.match(operationsView, /\{closureDenied && <p role="alert">\{accountClosureCopy\[language\]\.listPermissionDenied\}<\/p>\}/);
   assert.match(adminNavigation, /const route = resolveAdminRoute\(search, flags, available\)/);
   assert.match(adminNavigation, /adminRouteLocation\(search, section, route\.tab \? \{ finance_tab: route\.tab \} : \{\}/);
