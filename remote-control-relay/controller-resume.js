@@ -541,11 +541,28 @@ export class ControllerResumeHooks {
         zeroCandidate(state);
         // Retire all old per-attempt request IDs/ACKs, not just the tokens.
         // Otherwise a valid second cycle conflicts with the previous prepare.
-        await this.onLeaseCreated(updated);
-        this.#states.get(updated.controller_lease_id).retired = retired;
+        await this.onLeaseCreated(updated, { awaitingDelivery: true });
+        const installed = this.#states.get(updated.controller_lease_id);
+        if (installed?.leaseOwner !== updated
+          || this.#leaseManager.lease(updated.controller_lease_id) !== updated) {
+          fail("controller_lease_not_found");
+        }
+        installed.retired = retired;
         return Object.freeze({ lease: updated });
       },
-      finalize: () => { cleanupSettled = true; },
+      beforeDelivery: () => {
+        if (now(this.#clock) >= state.deadline) fail("controller_resume_deadline_expired");
+        const installed = this.#states.get(lease.controller_lease_id);
+        if (!installed?.awaitingDelivery || installed.leaseOwner !== cleanupOwner
+          || this.#leaseManager.lease(lease.controller_lease_id) !== cleanupOwner) {
+          fail("controller_lease_not_found");
+        }
+      },
+      finalize: () => {
+        const installed = this.#states.get(lease.controller_lease_id);
+        if (installed?.leaseOwner === cleanupOwner) installed.awaitingDelivery = false;
+        cleanupSettled = true;
+      },
       abort: async () => {
         if (cleanupSettled) return;
         cleanupSettled = true;
@@ -563,7 +580,7 @@ export class ControllerResumeHooks {
     });
   }
 
-  async onLeaseCreated(lease) {
+  async onLeaseCreated(lease, { awaitingDelivery = false } = {}) {
     if (!lease || typeof lease.controller_lease_id !== "string") {
       fail("controller_resume_lease_invalid");
     }
@@ -581,6 +598,7 @@ export class ControllerResumeHooks {
       leaseOwner: lease,
       lease: { ...lease },
       phase: "connected",
+      awaitingDelivery,
       // The wire deadline is a cycle identity, not a connected-phase timer.
       // Freeze the actual authenticated role evidence only on the first close.
       deadline: null,
@@ -600,13 +618,12 @@ export class ControllerResumeHooks {
   }
 
   async onSocketClosed({ socket_identity: socketIdentity, role, lease, evidence_deadline_ms: evidenceDeadline } = {}) {
-    if (!lease || !this.#states.has(lease.controller_lease_id)) {
+    const state = this.#states.get(lease?.controller_lease_id);
+    if (!state || state.leaseOwner !== lease
+      || !ROLES.includes(role) || lease.sockets?.[role] !== socketIdentity) {
       return Object.freeze({ retain_lease: false });
     }
-    const state = this.#states.get(lease.controller_lease_id);
-    if (!ROLES.includes(role) || lease.sockets?.[role] !== socketIdentity) {
-      return Object.freeze({ retain_lease: false });
-    }
+    if (state.awaitingDelivery) return Object.freeze({ retain_lease: false });
     let timestamp;
     try { timestamp = now(this.#clock); } catch {
       zeroCandidate(state);
@@ -634,7 +651,8 @@ export class ControllerResumeHooks {
   }
 
   isBusinessAllowed(controllerLeaseId) {
-    return this.#states.get(controllerLeaseId)?.phase === "connected";
+    const state = this.#states.get(controllerLeaseId);
+    return state?.phase === "connected" && !state.awaitingDelivery;
   }
 
   phase(controllerLeaseId) {
