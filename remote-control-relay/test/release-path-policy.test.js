@@ -153,6 +153,31 @@ test("a change to one remote dispatch or authority entry routes all release chec
     "pinvou3-app/src-tauri/src/platform/os/posix.rs",
     "pinvou3-app/src-tauri/src/platform/os/linux/linux_system.rs",
     "pinvou3-app/src-tauri/src/features/files/spreadsheet_structure.rs",
+    "pinvou3-app/scripts/vite-runtime-assets.mjs",
+    "pinvou3-app/src-tauri/tauri.conf.json",
+    "pinvou3-app/src-tauri/Cargo.toml",
+    "pinvou3-app/src-tauri/src/main.rs",
+    "pinvou3-app/scripts/tauri/effective-config.js",
+    "pinvou3-app/src-tauri/src/features/files/ingest_pdf.rs",
+    "pinvou3-app/src-tauri/src/features/files/file_ingest.rs",
+    "pinvou3-app/src-tauri/src/platform/os/linux/linux_path.rs",
+    "pinvou3-app/src-tauri/src/platform/os/interface/system.rs",
+    "pinvou3-app/src-tauri/src/platform/os/interface/path.rs",
+    "pinvou3-app/src/shared/chunked-file-upload.js",
+    "pinvou3-app/src-tauri/src/platform/os/mod.rs",
+    "pinvou3-app/src-tauri/src/platform/os/interface/mod.rs",
+    "pinvou3-app/src-tauri/src/platform/os/linux/mod.rs",
+    "pinvou3-app/src-tauri/src/platform/os/windows/mod.rs",
+    "pinvou3-app/src-tauri/src/features/assistant/platform/mod.rs",
+    "pinvou3-app/src-tauri/src/features/sessions/application/mod.rs",
+    "pinvou3-app/src-tauri/src/features/assistant/mod.rs",
+    "pinvou3-app/src-tauri/src/features/files/mod.rs",
+    "pinvou3-app/src-tauri/src/app/mod.rs",
+    "pinvou3-app/src-tauri/src/platform/mod.rs",
+    "pinvou3-app/src-tauri/src/core/mod.rs",
+    "pinvou3-app/src-tauri/src/features/mod.rs",
+    "pinvou3-app/scripts/tauri/build.js",
+    "pinvou3-app/scripts/tauri/platform-config.js",
   ]) {
     assert.equal(changedPathsRequireRemoteControlRelease(`${path}\n`), true, `release diff misses ${path}`);
     for (const [route, patterns] of routes) {
@@ -163,8 +188,6 @@ test("a change to one remote dispatch or authority entry routes all release chec
     "pinvou3-app/src-tauri/src/features/assistant/multiagent_regression_tests.rs",
     "pinvou3-app/src-tauri/src/features/codex_acp/login.rs",
     "pinvou3-app/src-tauri/src/features/sessions/application/admission.rs",
-    "pinvou3-app/src-tauri/src/features/files/ingest_pdf.rs",
-    "pinvou3-app/src-tauri/src/platform/os/linux/linux_path.rs",
   ]) {
     assert.equal(changedPathsRequireRemoteControlRelease(`${path}\n`), false, `release diff overmatches ${path}`);
     for (const [route, patterns] of routes) {
