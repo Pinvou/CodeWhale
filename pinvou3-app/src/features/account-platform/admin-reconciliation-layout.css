@@ -21,3 +21,11 @@
 .adm-restored-shell .adm-case-batch-summary dd{margin:0}
 .adm-restored-shell .adm-case-batch-summary code,.adm-restored-shell .adm-case-batch-candidates code{min-width:0;white-space:normal;overflow-wrap:break-word;overflow-wrap:anywhere}
 .adm-restored-shell .adm-case-batch-picker details>.adm-reconciliation-toolbar{margin-top:12px}
+
+.adm-restored-shell .adm-reconciliation-table.adm-reconciliation-cases table{min-width:58rem}
+.adm-restored-shell .adm-case-facts{display:grid;gap:6px;margin:0}
+.adm-restored-shell .adm-case-facts>div{display:grid;gap:2px;min-width:0}
+.adm-restored-shell .adm-case-facts dt{color:var(--adm-muted);font-size:12px}
+.adm-restored-shell .adm-case-facts dd{margin:0}
+.adm-restored-shell .adm-case-facts code{white-space:normal;overflow-wrap:break-word;overflow-wrap:anywhere}
+.adm-restored-shell .adm-case-evidence pre{max-width:100%;white-space:pre-wrap;overflow-wrap:break-word;overflow-wrap:anywhere}
