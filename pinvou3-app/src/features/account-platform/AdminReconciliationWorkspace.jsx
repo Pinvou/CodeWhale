@@ -3,6 +3,7 @@ import { reconciliationCopy, ledgerRepairCopy, financeCopy } from '../../shared/
 import { AdminReconciliationFinancialRepairForm } from './AdminReconciliationFinancialRepairForm.jsx';
 import { AdminReconciliationBillImport } from './AdminReconciliationBillImport.jsx';
 import './admin-reconciliation-layout.css';
+import { AdminReconciliationBatchPicker, ReconciliationBatchSummary } from './AdminReconciliationBatchPicker.jsx';
 import { requireFinanceCollection, requireFinanceID } from './finance-contract.js';
 import { RECONCILIATION_ACTIONS, reconciliationCommand, reconciliationDayRange, reconciliationCaseLabel, reconciliationReadError, reconciliationWriteError, requireReconciliationDate } from './reconciliation-contract.js';
 import { loadFinancePage } from './admin-finance-pagination.js';
@@ -66,6 +67,8 @@ function Workspace({ client, me, copy, repairCopy, operationCopy, onViewApproval
   const [channel, setChannel] = useState('WECHAT');
   const [date, setDate] = useState(today);
   const [runID, setRunID] = useState('');
+  const [runContext, setRunContext] = useState(null);
+  const chooseRun = (id, item) => { setRunContext(previous => item || (previous?.reconciliation_run_id === id ? previous : null)); setRunID(id); };
   const [status, setStatus] = useState('');
   const filterKey = JSON.stringify([tab, channel, date, runID, status]);
   const currentFilter = useRef(filterKey);
@@ -148,9 +151,13 @@ function Workspace({ client, me, copy, repairCopy, operationCopy, onViewApproval
   };
   return <section className="adm-panel adm-reconciliation-workspace"><h2>{copy.title}</h2>
     <nav className="adm-tabs adm-reconciliation-navigation" aria-label={copy.reconciliationViews}>{['runs', 'cases'].map(value => <button type="button" key={value} disabled={busy} aria-pressed={tab === value} onClick={() => setTab(value)}>{copy[value]}</button>)}</nav>
+    {tab === 'cases' && canReadCase && <>
+      <ReconciliationBatchSummary id={runID} item={runContext} copy={copy} />
+      <AdminReconciliationBatchPicker {...{client,copy}} initialChannel={runContext?.reconciliation_run_id === runID ? runContext.channel : channel} initialDate={runContext?.reconciliation_run_id === runID ? runContext.business_date : date} selectedID={runID} onChoose={chooseRun} disabled={writing} />
+    </>}
     <div className="adm-reconciliation-toolbar" role="group" aria-label={copy.reconciliationFilters}>
       {tab === 'runs' ? <><label>{copy.channel}<select disabled={busy} value={channel} onChange={event => setChannel(event.target.value)}>{['WECHAT', 'ALIPAY', 'UNIONPAY'].map(value => <option key={value}>{value}</option>)}</select></label><label>{copy.businessDate}<input type="date" disabled={busy} value={date} onChange={event => setDate(event.target.value)} /></label></> :
-      <><label>{copy.batchID}<input disabled={busy} value={runID} onChange={event => setRunID(event.target.value)} /></label><label>{copy.status}<select disabled={busy} value={status} onChange={event => setStatus(event.target.value)}><option value="">{copy.all}</option>{['OPEN', 'IN_REVIEW', 'RESOLVED', 'IGNORED'].map(value => <option key={value}>{value}</option>)}</select></label></>}
+      <><label>{copy.status}<select disabled={busy} value={status} onChange={event => setStatus(event.target.value)}><option value="">{copy.all}</option>{['OPEN', 'IN_REVIEW', 'RESOLVED', 'IGNORED'].map(value => <option key={value}>{value}</option>)}</select></label></>}
       <button type="button" disabled={busy} onClick={refresh}>{copy.refresh}</button>
     </div>
     {tab === 'runs' && canRun && <>
@@ -165,7 +172,7 @@ function Workspace({ client, me, copy, repairCopy, operationCopy, onViewApproval
     <p role="status">{writing ? copy.batchSubmitting : !currentRead ? copy.batchNotRead : currentRead.stage === 'loading' ? copy.loading : visiblePage?.items.length === 0 ? copy.empty : ''}</p>
     {visiblePage && (
       // biome-ignore lint/a11y/noNoninteractiveTabindex: The named overflow region must remain keyboard-scrollable.
-      <div className="adm-reconciliation-table" role="region" aria-label={copy[tab]} tabIndex={0}><table><thead><tr><th>{tab === 'runs' ? copy.businessDate : copy.merchant}</th>{tab === 'runs' && <><th>{copy.channel}</th><th>{copy.batchID}</th></>}<th>{copy.status}</th><th>{tab === 'runs' ? copy.count : copy.caseType}</th>{tab === 'runs' && <><th>{copy.rows}</th><th>{copy.source}</th></>}<th>{copy.action}</th></tr></thead><tbody>{visiblePage.items.map(item => <tr key={tab === 'runs' ? item.reconciliation_run_id : item.case_id}><td>{tab === 'runs' ? item.business_date : item.merchant_order_no}</td>{tab === 'runs' && <><td>{item.channel}</td><td><code>{item.reconciliation_run_id}</code></td></>}<td>{tab === 'runs' ? copy.batchStatuses[item.status] || item.status : item.status}</td><td>{tab === 'runs' ? item.case_count : reconciliationCaseLabel(item.case_type, copy)}</td>{tab === 'runs' && <><td>{item.provider_row_count}</td><td>{item.source_mode}</td></>}<td><button type="button" disabled={busy} onClick={() => { if (tab === 'runs') { setRunID(item.reconciliation_run_id); setTab('cases'); } else setSelected(item); }}>{copy.cases}</button></td></tr>)}</tbody></table></div>)}
+      <div className="adm-reconciliation-table" role="region" aria-label={copy[tab]} tabIndex={0}><table><thead><tr><th>{tab === 'runs' ? copy.businessDate : copy.merchant}</th>{tab === 'runs' && <><th>{copy.channel}</th><th>{copy.batchID}</th></>}<th>{copy.status}</th><th>{tab === 'runs' ? copy.count : copy.caseType}</th>{tab === 'runs' && <><th>{copy.rows}</th><th>{copy.source}</th></>}<th>{copy.action}</th></tr></thead><tbody>{visiblePage.items.map(item => <tr key={tab === 'runs' ? item.reconciliation_run_id : item.case_id}><td>{tab === 'runs' ? item.business_date : item.merchant_order_no}</td>{tab === 'runs' && <><td>{item.channel}</td><td><code>{item.reconciliation_run_id}</code></td></>}<td>{tab === 'runs' ? copy.batchStatuses[item.status] || item.status : item.status}</td><td>{tab === 'runs' ? item.case_count : reconciliationCaseLabel(item.case_type, copy)}</td>{tab === 'runs' && <><td>{item.provider_row_count}</td><td>{item.source_mode}</td></>}<td><button type="button" disabled={busy} onClick={() => { if (tab === 'runs') { chooseRun(item.reconciliation_run_id, item); setTab('cases'); } else setSelected(item); }}>{copy.cases}</button></td></tr>)}</tbody></table></div>)}
     <nav className="adm-reconciliation-pagination" aria-label={copy.reconciliationPages}><button type="button" disabled={busy || !history.length} onClick={() => { const values = [...history]; const next = values.pop(); setHistory(values); void load(next); }}>{copy.previous}</button><button type="button" disabled={busy || !visiblePage?.next_cursor} onClick={() => { setHistory(values => [...values, cursor]); void load(visiblePage.next_cursor); }}>{copy.next}</button></nav>
     {selected && <CaseActions key={selected.case_id} client={client} item={selected} owner={owner} copy={copy} canWrite={canWrite} canRequestRepair={canRequestRepair} canReadCase={canReadCase} repairCopy={repairCopy} operationCopy={operationCopy} onViewApproval={onViewApproval} onChanged={item => { setSelected(item); setPage(current => current && ({ ...current, items: current.items.map(value => value.case_id === item.case_id ? item : value) })); }} />}
   </section>;
