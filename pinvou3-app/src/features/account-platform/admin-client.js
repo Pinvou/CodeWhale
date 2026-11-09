@@ -233,9 +233,12 @@ export class AdminPlatformClient {
     entry.controller.abort();
   }
 
-  accountClosures(signal, cursor = '') {
-    const query = cursor ? `?cursor=${encodeURIComponent(cursor)}` : '';
-    return this.request('account', `/admin/v1/account-closure-requests${query}`, signal);
+  accountClosures(signal, cursor = '', filters) {
+    // Preserve the exact existing opaque cursor encoding for old callers.
+    const parts = cursor ? [`cursor=${encodeURIComponent(cursor)}`] : [];
+    for (const key of ['status', 'stage']) if (filters?.[key]) parts.push(`${key}=${encodeURIComponent(filters[key])}`);
+    const query = parts.length ? `?${parts.join('&')}` : '';
+    return this.request('account', `/admin/v1/account-closure-requests${query}`, signal, null, { isolateRead: Boolean(filters) });
   }
   retryAccountClosure(id, reason, key, signal) {
     requireFinanceID(id);

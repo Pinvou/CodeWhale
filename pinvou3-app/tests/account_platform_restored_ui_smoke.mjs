@@ -502,6 +502,9 @@ try {
     assert.ok(!(await text()).includes((await copy()).closure.listEmpty));
     await page.evaluate(() => window.restored.releaseClosureRead()); await settled();
     assert.ok((await text()).includes(target)); assert.ok(!(await text()).includes((await copy()).closure.listEmpty));
+    assert.equal(await page.$$eval(`${directory} tr[data-closure-source="server"]`, nodes => nodes.length), 0, 'the confirmed empty result stays separate from local recovery');
+    assert.equal(await page.$$eval(`${directory} tr[data-closure-source="local"]`, nodes => nodes.length), 1, 'the original local recovery remains visible');
+    assert.ok(await page.$(`${directory} [data-closure-empty] [role=status]`), 'successful server empty has a separate state');
     await page.waitForFunction(selector => { const textarea = document.querySelector(`${selector} textarea`); return textarea?.disabled && textarea.value === 'Controlled original recovery'; }, {}, directory);
     assert.deepEqual(await page.evaluate(() => window.restored.readClosureRecovery()), proof);
     await plan({ code: 'ACCOUNT_CLOSURE_UNAVAILABLE' }, 503); await refresh(); await settled();
@@ -519,7 +522,7 @@ try {
     assert.equal(await page.evaluate(key => document.defaultView.sessionStorage.getItem(key), stored[0]), '{', 'failed recovery read never deletes evidence');
     await page.evaluate(([key, value]) => document.defaultView.sessionStorage.setItem(key, value), stored);
     await plan({ items: [row], next_cursor: null }); await refresh(); await settled();
-    assert.equal(await page.$$eval(`${directory} > article`, nodes => nodes.length), 1, 'server duplicate and local intent merge once');
+    assert.equal(await page.$$eval(`${directory} tr[data-closure-id]`, nodes => nodes.length), 1, 'server duplicate and local intent share one action');
     assert.deepEqual(await page.evaluate(() => window.restored.readClosureRecovery()), proof);
     await plan({ items: [row], next_cursor: null }, 200, true); await refresh();
     await page.waitForFunction(() => window.restored.pendingClosureReads.length === 1);
