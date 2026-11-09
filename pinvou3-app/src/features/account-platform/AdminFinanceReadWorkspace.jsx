@@ -15,10 +15,18 @@ function billingListEnumDisplayKey(raw) {
     return upper.length === 1 ? upper : rune;
   }).join('');
 }
+const adjustmentZone = 'Asia/Shanghai';
+const adjustmentDate = (value, language) => {
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(value) || !Number.isFinite(Date.parse(value))) return '';
+  const date = new Intl.DateTimeFormat({ zh: 'zh-CN', en: 'en-US', ja: 'ja-JP' }[language], { timeZone: adjustmentZone, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' });
+  const parts = Object.fromEntries(date.formatToParts(new Date(value)).map(({ type, value: part }) => [type, part]));
+  return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}:${parts.second}`;
+};
+
 const definitions = {
   receivables: { id: 'receivable_id', columns: ['receivable_id', 'wallet_id', 'original_microcredits', 'settled_microcredits', 'outstanding_microcredits', 'status'] },
   refunds: { id: 'operation_id', columns: ['operation_id', 'operation_type', 'payment_order_id', 'amount_fen', 'status', 'created_at'] },
-  adjustments: { id: 'adjustment_id', columns: ['adjustment_id', 'wallet_id', 'amount_microcredits', 'status', 'requested_by', 'created_at'] },
+  adjustments: { id: 'adjustment_id', columns: ['adjustment_id', 'wallet_id', 'amount_microcredits', 'status', 'requested_by', 'created_at', 'effective_at'] },
 };
 const statuses = {
   receivables: ['OPEN', 'PARTIALLY_SETTLED', 'SETTLED', 'WRITTEN_OFF'],
@@ -69,6 +77,22 @@ export function AdminFinanceReadWorkspace({ kind, client, language, route, onVie
   const visible = state.owner === client && state.signature === signature ? state : { data: null, error: null };
   const labelStatus = value => words[value] || accountLayoutCopy[language].statuses[value] || value;
   const cell = (key, value) => value == null ? '—' : key.endsWith('_microcredits') ? formatBalance(value, language) : key === 'amount_fen' ? formatFen(value, language) : key.endsWith('_at') ? Number.isFinite(Date.parse(value)) ? new Date(value).toLocaleString({ zh: 'zh-CN', en: 'en-US', ja: 'ja-JP' }[language]) : '—' : ['status', 'operation_type'].includes(key) ? labelStatus(value) : String(value);
+  const adjustmentFacts = kind === 'adjustments' ? adminLayoutCopy[language].adjustmentFacts : null;
+  const column = key => adjustmentFacts && key === 'amount_microcredits' ? adjustmentFacts.amount : adjustmentFacts && key === 'created_at' ? adjustmentFacts.requestTime + ' (' + adjustmentZone + ')' : adjustmentFacts && key === 'effective_at' ? adjustmentFacts.effectiveTime + ' (' + adjustmentZone + ')' : words[key] || copy[key];
+  const valueFor = (key, item) => {
+    if (adjustmentFacts && key === 'amount_microcredits') {
+      const amount = formatBalance(item.amount_microcredits, language);
+      return amount === '—' ? adjustmentFacts.unavailable : (amount === '0' ? amount : amount.startsWith('-') ? '−' + amount.slice(1) : '+' + amount) + ' ' + adjustmentFacts.points;
+    }
+    if (adjustmentFacts && key === 'created_at') return adjustmentDate(item.created_at, language) || adjustmentFacts.unavailable;
+    if (adjustmentFacts && key === 'effective_at') {
+      if (item.status !== 'POSTED') return ['PENDING_APPROVAL', 'APPROVED', 'REJECTED'].includes(item.status) ? adjustmentFacts.notEffective : adjustmentFacts.unavailable;
+      // Billing records the journal entry and decided_at in the same POSTED transaction.
+      try { requireFinanceID(item.journal_entry_id); } catch { return adjustmentFacts.unavailable; }
+      return adjustmentDate(item.decided_at, language) || adjustmentFacts.unavailable;
+    }
+    return cell(key, item[key]);
+  };
   const move = (query, selectedID = null, mode = 'push') => { setRevision(value => value + 1); route.navigate(route.section, financeListRouteUpdates(kind, query, selectedID, current.query), mode); };
   const dateInputValue = value => value?.endsWith('Z') ? localFinanceDate(value) : value || '';
   const fillDay = offset => {
@@ -112,16 +136,16 @@ export function AdminFinanceReadWorkspace({ kind, client, language, route, onVie
     key === 'source_type' ? receivableSources.includes(appliedSourceDisplayKey) ? receivableFilters.types[appliedSourceDisplayKey] : receivableFilters.unsupported : appliedQuery[key];
   const appliedLabel = key => key === 'created_from' ? timeWords.from : key === 'created_to' ? timeWords.to : words[key];
   const emptyReceivables = appliedCursor ? resultWords?.emptyPage : applied.length ? resultWords?.noMatches : resultWords?.noRecords;
-  const table = (items, columns, identify) => <div className="adm-table-wrap"><table className="adm-table"><thead><tr>{columns.map(key => <th key={key}>{words[key] || copy[key]}</th>)}{identify && <th>{copy.details}</th>}</tr></thead><tbody>{items.map((item, index) => <tr key={identify ? financeReadIdentity(kind, item) : index}>{columns.map(key => <td key={key} data-label={words[key] || copy[key]}>{cell(key, item[key])}</td>)}{identify && <td><button onClick={() => move(current.query, financeReadIdentity(kind, item))}>{copy.details}</button></td>}</tr>)}</tbody></table></div>;
+  const table = (items, columns, identify) => <div className="adm-table-wrap"><table className="adm-table"><thead><tr>{columns.map(key => <th key={key} data-adjustment-points={adjustmentFacts && key === 'amount_microcredits' ? true : undefined}>{column(key)}</th>)}{identify && <th>{copy.details}</th>}</tr></thead><tbody>{items.map((item, index) => <tr key={identify ? financeReadIdentity(kind, item) : index}>{columns.map(key => <td key={key} data-label={column(key)} data-adjustment-points={adjustmentFacts && key === 'amount_microcredits' ? true : undefined}>{valueFor(key, item)}</td>)}{identify && <td><button onClick={() => move(current.query, financeReadIdentity(kind, item))}>{copy.details}</button></td>}</tr>)}</tbody></table></div>;
   return <section className="adm-finance-read-view" aria-label={words[kind]}><header><h3>{words[kind]}</h3>{showAdjustmentView && !current.selectedID && <span>{adjustmentResults.view}: {adjustmentStatus ? labelStatus(adjustmentStatus) : words.allStatuses}</span>}<button onClick={refresh}>{copy.refresh}</button></header>
     {visible.error && <p role="alert">{visible.error.status === 403 ? copy.permissions : visible.error.status === 410 ? words.cursorExpired : copy.unavailable}<button onClick={refresh}>{copy.retry}</button></p>}
     {!visible.data && !visible.error && <p role="status">{copy.loading}</p>}
     {current.selectedID ? <><button onClick={() => move(current.query)}>{words.back}</button><h4>{current.selectedID}</h4>{visible.data && <>
-      {visible.data.selected ? <dl className="adm-user-details">{config.columns.map(key => <React.Fragment key={key}><dt>{words[key] || copy[key]}</dt><dd>{cell(key, visible.data.selected[key])}</dd></React.Fragment>)}</dl> : <p>{words.detailUnavailable}</p>}
+      {visible.data.selected ? <dl className="adm-user-details">{config.columns.map(key => <React.Fragment key={key}><dt>{column(key)}</dt><dd>{valueFor(key, visible.data.selected)}</dd></React.Fragment>)}</dl> : <p>{words.detailUnavailable}</p>}
       {visible.data.allocations && table(visible.data.allocations, ['amount_microcredits', 'created_at'])}
       {kind === 'adjustments' && onViewApproval && route.available.includes('approvals') && <button onClick={() => onViewApproval(null, { approval_command_type: 'WALLET_ADJUSTMENT', approval_target: current.selectedID })}>{copy.approvals}</button>}
     </>}</> : <><form className="adm-filter-row" onSubmit={event => { event.preventDefault(); move({ ...draft, cursor: '' }); }}>
-      {fields.map(key => timeWords && key === 'created_to' ? null : timeWords && key === 'created_from' ? <React.Fragment key={key}>{timeRange}</React.Fragment> : <label key={key}>{receivableFilters && key === 'wallet_id' ? <span id={walletHelpID + '-label'}>{words[key]}</span> : words[key]}{receivableFilters && key === 'wallet_id' ?
+      {fields.map(key => timeWords && key === 'created_to' ? null : timeWords && key === 'created_from' ? <React.Fragment key={key}>{timeRange}</React.Fragment> : <label key={key}>{receivableFilters && key === 'wallet_id' ? <span id={walletHelpID + '-label'}>{words[key]}</span> : words[key]}{adjustmentFacts && key.startsWith('created_') && <small>{adjustmentFacts.inputZone} ({Intl.DateTimeFormat().resolvedOptions().timeZone})</small>}{receivableFilters && key === 'wallet_id' ?
         <><input maxLength={200} value={draft[key] || ''} aria-labelledby={walletHelpID + '-label'} aria-describedby={walletHelpID} onChange={event => setDraft(value => ({ ...value, [key]: event.target.value }))} /><small id={walletHelpID}>{receivableFilters.help}</small></>
         : receivableFilters && key === 'source_type' ? <select value={unsupportedSource ? draft[key] : sourceDisplayKey} onChange={event => setDraft(value => ({ ...value, [key]: event.target.value }))}>
           <option value="">{receivableFilters.all}</option>
