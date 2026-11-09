@@ -11,55 +11,75 @@ then validate the claim after both locks, before the audit FK can request USER.
 A batch item whose lease has expired cannot dispatch recovery.
 Ordinary non-worker requests retain their existing interfaces.
 
-Profile logout is a separate internal command:
+## Durable Profile logout receipts
 
-- `POST /internal/v1/users/{subject}/profile-revocations`
-- Exact workload permission: `internal.identity.sessions.revoke`.
-- Required JSON: `{"operation_id":"<uuid>","first_attempt":false}`. The boolean is
-  required, not inferred from its default. Account durably records the first grant
-  before making this request; subsequent recovery always sends `false`.
-- `204`: an ACK for that operation and exact subject; a confirmed duplicate does
-  not call the provider again. `409 PROFILE_REVOCATION_CONFLICT`: subject conflict.
-- `503 PROFILE_REVOCATION_UNCONFIRMED`: no confirmed receipt for a non-first command
-  or a prior remote dispatch has an unknown outcome. No further logout is guessed.
+Account migration `900019_profile_revocation_receipts` persists the operation
+receipt. Before granting the first attempt, Account locks USER, profile and a
+global admission key, then reserves the receipt in the same transaction as the
+grant and its audit. `PROFILE_REVOCATION_CAPACITY` defaults to 4096 unresolved
+operations per Account database and accepts 1 through 1000000. Replicas must use
+the same capacity. Helm exposes `account.profileRevocationCapacity`; governed
+Compose reads the environment variable. Site capacity still requires measurement.
+Saturation returns `503 PROFILE_REVOCATION_CAPACITY`, creates neither receipt nor
+first grant, and follows the existing profile retry and SLA policy. Existing
+reservations and confirmed replays remain usable when admission is full.
 
-Adapter receipts are process-local and serialized per operation. An adapter
-restart does not turn an unknown operation into a new first attempt. Account sends
-non-first after its durable grant, so a missing post-restart receipt fails closed.
-The sender must not replay a stored first-attempt grant as a fresh command after
-restart; it resumes from Account's durable state. This is not a durable distributed
-exactly-once guarantee or a claim of complete automatic recovery after unknown ACK.
+The existing Identity `POST /internal/v1/users/{subject}/profile-revocations`
+retains `internal.identity.sessions.revoke`. Account sends the original operation
+and required `first_attempt` plus `receipt_protocol` equal to 2. An old Identity
+strict decoder rejects that added field before provider dispatch. A legacy DTO
+without the field can only replay a confirmed durable receipt. It cannot claim a
+new dispatch. The subject-only password-reset logout contract is unchanged.
 
-An unknown receipt puts the Account profile into `REPAIR_REQUIRED`, stops automatic
-worker claims, and records a redacted `account.profile_change.repair_required`
-audit. Merely scheduling an operator retry cannot invent a remote ACK: missing or
-unknown receipts still fail closed. Operator reconciliation of unknown remote
-facts remains necessary; this change adds no override or guessed-success action.
-The durable first grant has its own `account.profile_change.revocation_started`
-audit. A lost Account checkpoint can converge from a confirmed adapter receipt.
-Password-reset uses its existing subject-only `/revoke-sessions` path; profile
-commands never fall back to that path.
+Identity uses its existing Account URL, CA and rotating workload credential for
+`POST /internal/v1/profile-revocation-receipts/claim` and `/confirm`. Only the
+Identity workload receives `internal.account.profile-revocation.claim` and
+`internal.account.profile-revocation.confirm`. Commands bind the operation,
+exact subject and random dispatch token. The receipt copies no subject, mobile
+number, provider payload or credential from the original profile.
+
+RESERVED permits one atomic claim to DISPATCHED and records the token hash. Even
+reclaiming the same token cannot grant dispatch again. Identity calls the provider
+only after that committed claim and confirms with the exact token before replying
+204. Confirmation gets a bounded five-second attempt even when the caller leaves.
+Lost provider ACK, lost claim ACK or failed durable confirmation fails closed and
+requires operator investigation. No timeout renews a dispatch grant. Cancellation
+before claim leaves RESERVED and can resume the same operation.
+
+CONFIRMED replays 204 across Identity restarts and instances without a provider
+call. The original Account checkpoint then clears local sessions under its
+existing recovery fence. A lost checkpoint converges from the durable receipt.
+Confirmed history stays in Account for replay and releases active admission
+capacity. DISPATCHED and legacy UNKNOWN retain capacity slots. Identity has no
+process-level receipt map, and no TTL deletes known or unknown outcome evidence.
+Aggregate state counts, oldest unresolved time and `pg_total_relation_size` for
+this table provide Account capacity inputs. Database storage grows with retained
+history. Unknown cases cannot be evicted to create capacity. Manual disposition
+still requires authoritative evidence and the existing authorization policy.
 
 ## Upgrade and rollback
 
-Stop old Account/profile workers before migration and restart only the new
-binaries after it succeeds. Old binaries do not know the new claim fence; mixed
-old/new writers are unsupported during this repair rollout.
+Block profile ingress, stop all Account profile workers and drain Identity profile
+logout requests before installing 900019. Retain backup and package identities.
+Install the migration while old writers remain stopped, verify ledger identity
+and receipt counts, then update both binaries and the exact Identity-to-Account
+workload rules before reopening ingress. Mixed old/new profile writers are
+unsupported during cutover. Previous grants become UNKNOWN unless Account already
+held `sessions_revoked_at`, which becomes CONFIRMED. Migration neither invents an
+ACK nor renews a first grant. Unknown cases retain REPAIR_REQUIRED and redacted
+audit handling. Never clear an old marker to force a fresh logout.
 
-The user-approved conservative migration marks pre-upgrade profiles with
-`account_committed_at` as possibly already dispatched, using the existing committed
-or acknowledged timestamp as `sessions_revocation_started_at`. It does not invent
-an ACK. If Account has no ACK and the adapter has no confirmed receipt, these rows
-require manual investigation and cannot automatically issue a new logout. Earlier
-uncommitted rows have not reached logout and retain an empty first-grant field.
-Published SQL identities remain unchanged; new generation and dispatch facts are
-forward-only, and public DownOne refuses to remove them.
+900019 is forward-only. Application rollback also requires stop/drain and retains
+the new table and migration carrier. Old writers must not process new reservations
+or dispatches because they do not record durable claims. Registration generation
+fences retain their existing contract.
 
-Formal PostgreSQL roots are `TestIdentityRecoveryClaimsRuntimePostgres` and
-`TestProfileSessionRevocationRecoveryRuntimePostgres`. They use public migrations
-and a genuine non-superuser `account_service` runtime, then send the production
-HTTP DTO through the actual adapter handler with a controlled directory side
-effect counter. This is not a live Keycloak/provider or deployed rollout proof.
+Formal PostgreSQL roots are `TestIdentityRecoveryClaimsRuntimePostgres`,
+`TestProfileSessionRevocationRecoveryRuntimePostgres` and
+`TestProfileRevocationDurableAdmissionRuntimePostgres`. Public migrations and the
+non-superuser runtime exercise actual Account and Identity HTTP DTOs with a
+controlled provider counter. Live Keycloak and deployed cutover require separate
+site evidence.
 
 ## Password reset phase cutover (controlled stop required)
 

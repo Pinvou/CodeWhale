@@ -85,6 +85,7 @@ ACCOUNT_REQUIRED = {
     "TestOrdinaryDeadLetterReplayRuntimePostgres",
     "TestIdentityRecoveryClaimsRuntimePostgres",
     "TestProfileSessionRevocationRecoveryRuntimePostgres",
+    "TestProfileRevocationDurableAdmissionRuntimePostgres",
     "TestRegistrationCreateDispatchRuntimePostgres",
     "TestRegistrationUnknownInspectionPostgres",
     "TestRegistrationIdentityRejectionRuntimePostgres",
@@ -276,6 +277,13 @@ BILLING_LEAF_REQUIRED = {
 }
 BILLING_CHILD_REQUIRED = RETAINED_REQUIRED - BILLING_LEAF_REQUIRED
 EXACT_REQUIRED_CHILDREN = {
+    "TestProfileRevocationDurableAdmissionRuntimePostgres": {
+        "capacity-before-grant-confirmed-replay-and-unknown-retention",
+        "cancel-before-authority-preserves-reservation",
+        "dispatch-token-and-legacy-command-cannot-regrant",
+        "concurrent-global-admission-across-profiles",
+        "legacy-upgrade-preserves-confirmed-and-unknown-receipts",
+    },
     "TestBillingHistoricalCatalogRollbackPostgres": {
         f"version{version}/seeded={seeded}{suffix}"
         for version in (35, 36, 37, 51)

@@ -39,7 +39,7 @@ test('authorization release gate classifies every HTTP task event callback and C
   for (const route of wildcardPaths) assert.ok(portal.includes(`router.Any("${route}",`), `missing existing Portal transport ${route}`);
   // The real checker still rejects missing, stale, duplicate or mis-scoped
   // entries before returning these exact inventory sizes.
-  assert.deepEqual(await runAuthorizationCoverage(), { routes: 410, tasks: 32, events: 18, cli: 27 });
+  assert.deepEqual(await runAuthorizationCoverage(), { routes: 412, tasks: 32, events: 18, cli: 27 });
 });
 
 function assertLedgerRepairProofAuthorization(service, handler) {
@@ -180,6 +180,10 @@ test('usage waiver restores one human audit-only command and two distinct worklo
 test('history recovery routes retain exact workload permissions and handlers without human fallback', async () => {
   const catalog = JSON.parse(await readFile(catalogURL, 'utf8'));
   const expected = [
+    {source: 'account-platform/internal/account/service.go', receiver: 'internal', method: 'POST',
+      path: '/profile-revocation-receipts/claim', permission: 'internal.account.profile-revocation.claim', handler: 'claimProfileRevocation'},
+    {source: 'account-platform/internal/account/service.go', receiver: 'internal', method: 'POST',
+      path: '/profile-revocation-receipts/confirm', permission: 'internal.account.profile-revocation.confirm', handler: 'confirmProfileRevocation'},
     {source: 'account-platform/internal/identityadapter/service.go', receiver: 'internal', method: 'POST',
       path: '/users/:subject/profile-revocations', permission: 'internal.identity.sessions.revoke', handler: 'revokeProfileSessions'},
     {source: 'account-platform/internal/billing/service.go', receiver: 'protected', method: 'POST',
