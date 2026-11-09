@@ -11,8 +11,18 @@ const uiSmoke = fileURLToPath(new URL("../../pinvou3-app/scripts/remote-control-
 const pwsh = process.platform === "win32" ? "powershell.exe" : "pwsh";
 const quote = (value) => `'${value.replaceAll("'", "''")}'`;
 const psProbe = spawnSync(pwsh, ['-NoProfile', '-NonInteractive', '-Command', 'exit 0']);
-const test = (name, run) => nodeTest(name, {
-  skip: process.platform !== 'win32' && psProbe.error ? 'PowerShell unavailable; no production AST execution evidence' : false,
+// The staged-file hash contract executes Get-FileHash through both the test
+// fixture and the production helper. On runners whose PowerShell module path
+// is broken the cmdlet is genuinely absent; skip those two tests explicitly
+// instead of failing them on an environment precondition.
+const fileHashProbe = spawnSync(pwsh, ['-NoProfile', '-NonInteractive', '-Command', "if (-not (Get-Command Get-FileHash -ErrorAction SilentlyContinue)) { exit 1 }"]);
+const fileHashSkip = fileHashProbe.status === 0 ? false
+  : `Get-FileHash unavailable in ${pwsh}; the staged-file hash contract did not execute against the production helper`;
+const test = (name, run, skip = false) => nodeTest(name, {
+  skip: [
+    process.platform !== 'win32' && psProbe.error ? 'PowerShell unavailable; no production AST execution evidence' : false,
+    skip,
+  ].filter(Boolean).join('; ') || false,
 }, run);
 // Load definitions from the production script without running its deployment.
 const productionAst = `$tokens=$null;$errors=$null;$ast=[Management.Automation.Language.Parser]::ParseFile(${quote(orchestrator)},[ref]$tokens,[ref]$errors);if($errors.Count){throw 'production-parse-failed'}; `;
@@ -90,7 +100,7 @@ test("per-run staging is hash checked, collision-safe and ownership-bound on cle
     + `try{& $cleanup;throw 'owner-mismatch-accepted'}catch{if($_.Exception.Message -notmatch 'e2e_staging_cleanup_owner_mismatch'){throw}};if(-not(Test-Path $s.root)){throw 'foreign-owner-deleted'};[IO.File]::WriteAllText($markerPath,$marker); `
     + `& $cleanup; if(Test-Path $s.root){throw 'cleanup-incomplete'} } finally { if(Test-Path $base){Remove-Item -LiteralPath $base -Recurse -Force} }`;
   assert.doesNotThrow(() => execFileSync(pwsh, ["-NoProfile", "-NonInteractive", "-Command", script], { stdio: "pipe" }));
-});
+}, fileHashSkip);
 
 test("production cleanup continues after route and role faults and reports their aggregate", () => {
   const result = spawnSync(pwsh, ["-NoProfile", "-NonInteractive", "-Command",
@@ -145,4 +155,4 @@ test("production bootstrap retains the complete helper call chain across runspac
     + `[void]$ps.AddScript($call.ToString()).AddArgument($base).AddArgument(($files|ConvertTo-Json -Compress));$second=@($ps.Invoke());if($ps.Streams.Error.Count){throw ($ps.Streams.Error|Out-String)};if($second[-1] -ne 'scope-contract-pass'){throw 'second-invocation-did-not-run'} `
     + `} finally { $ps.Dispose();$runspace.Dispose();if(Test-Path -LiteralPath $base){Remove-Item -LiteralPath $base -Recurse -Force} }`;
   assert.doesNotThrow(() => execFileSync(pwsh, ["-NoProfile", "-NonInteractive", "-Command", script], { stdio: "pipe", timeout: 30_000 }));
-});
+}, fileHashSkip);

@@ -1941,10 +1941,16 @@ jobs:
         if: ${{ runner.os == 'Windows' }}
         env:
           PINVOU_DESKTOP_CONTROLLER_ENABLED: '0'
+        # Windows 默认 pwsh 只把最后一行原生命令的退出码作为步骤退出码,
+        # 中间行失败会被静默掩蔽;逐行检查 $LASTEXITCODE 并立即传播。
         run: |
+          $ErrorActionPreference = 'Stop'
           npm --prefix remote-control-relay run release:gate
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node --test --test-concurrency=1 remote-control-relay/test/controller-release-evidence.test.js remote-control-relay/test/controller-release-gates.test.js remote-control-relay/test/controller-release-telemetry-query.test.js remote-control-relay/test/github-workflow-run-identity.test.js remote-control-relay/test/installer-spdx.test.js remote-control-relay/test/windows-e2e-orchestrator-contract.test.js remote-control-relay/test/windows-e2e-orchestrator-helpers.test.js remote-control-relay/test/windows-e2e-path-guard.test.js
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node --test pinvou3-app/tests/remote_control_real_ui_smoke_contract.test.mjs pinvou3-app/tests/nsis_resource_staging_contract.test.js
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
   # pinvou-knowledge 是可单独部署的 crate，必须直接验证自己的默认 feature 图、
   # 测试与部署入口，而不只依赖 Tauri 作为 client-only path dependency 的间接编译。

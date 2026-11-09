@@ -4,7 +4,7 @@ import { execFileSync } from "node:child_process";
 import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
-import { test } from "node:test";
+import { test as nodeTest } from "node:test";
 import { runControllerReleaseGate } from "../scripts/controller-release-gate.mjs";
 import { validateMonotonicDeadlineObservation, validateReleaseEvidence } from "../scripts/validate-controller-release-evidence.mjs";
 import { providerAttestationPayload } from "../scripts/verify-provider-attestation.mjs";
@@ -28,19 +28,42 @@ const testPublicKeyPem = testKeys.publicKey.export({ type: "spki", format: "pem"
 const testPublicKeySha256 = crypto.createHash("sha256")
   .update(testKeys.publicKey.export({ type: "spki", format: "der" })).digest("hex");
 const certificateRoot = await mkdtemp(join(tmpdir(), "pinvou-provider-chain-"));
-const openssl = process.platform === "win32" ? "C:\\Program Files\\Git\\usr\\bin\\openssl.exe" : "openssl";
-// Explicit extensions: LibreSSL emits no Basic Constraints by default and its
-// x509 subcommand lacks -addext, so the leaf profile comes from an extfile.
-const leafExtensions = join(certificateRoot, "leaf-extensions.cnf");
-await writeFile(leafExtensions, "basicConstraints=critical,CA:FALSE\n", "utf8");
-execFileSync(openssl, ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", join(certificateRoot, "root.key"), "-out", join(certificateRoot, "root.pem"), "-subj", "/CN=Pinvou Test Provider Root", "-days", "2", "-addext", "basicConstraints=critical,CA:TRUE"], { stdio: "ignore" });
-execFileSync(openssl, ["req", "-newkey", "rsa:2048", "-nodes", "-keyout", join(certificateRoot, "leaf.key"), "-out", join(certificateRoot, "leaf.csr"), "-subj", "/CN=Pinvou Test Provider Verifier"], { stdio: "ignore" });
-execFileSync(openssl, ["x509", "-req", "-in", join(certificateRoot, "leaf.csr"), "-CA", join(certificateRoot, "root.pem"), "-CAkey", join(certificateRoot, "root.key"), "-CAcreateserial", "-out", join(certificateRoot, "leaf.pem"), "-days", "2", "-extfile", leafExtensions], { stdio: "ignore" });
-const providerRootPem = await readFile(join(certificateRoot, "root.pem"), "utf8");
-const providerLeafPem = await readFile(join(certificateRoot, "leaf.pem"), "utf8");
-const providerLeafKey = crypto.createPrivateKey(await readFile(join(certificateRoot, "leaf.key"), "utf8"));
-const providerRootSha256 = hash(new crypto.X509Certificate(providerRootPem).raw);
-const providerLeafSha256 = hash(new crypto.X509Certificate(providerLeafPem).raw);
+// The provider X.509 fixture chain needs a real openssl build. Prefer the
+// Git for Windows bundle path, then fall back to PATH lookup so self-hosted
+// runners with a relocated Git install still execute the contract. When no
+// candidate responds, skip every test in this file explicitly instead of
+// failing the whole file on a missing environment precondition.
+const opensslCandidates = process.platform === "win32"
+  ? ["C:\\Program Files\\Git\\usr\\bin\\openssl.exe", "openssl"]
+  : ["openssl"];
+const openssl = opensslCandidates.find((candidate) => {
+  try {
+    execFileSync(candidate, ["version"], { stdio: "ignore" });
+    return true;
+  } catch {
+    return false;
+  }
+});
+const opensslSkip = openssl ? false
+  : `openssl unavailable (tried: ${opensslCandidates.join(", ")}); the provider X.509 certificate fixtures cannot be generated, so the release evidence contract did not execute`;
+const test = (name, run) => nodeTest(name, { skip: opensslSkip }, run);
+let providerRootPem = null;
+let providerLeafPem = null;
+let providerLeafKey = null;
+if (openssl) {
+  // Explicit extensions: LibreSSL emits no Basic Constraints by default and its
+  // x509 subcommand lacks -addext, so the leaf profile comes from an extfile.
+  const leafExtensions = join(certificateRoot, "leaf-extensions.cnf");
+  await writeFile(leafExtensions, "basicConstraints=critical,CA:FALSE\n", "utf8");
+  execFileSync(openssl, ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", join(certificateRoot, "root.key"), "-out", join(certificateRoot, "root.pem"), "-subj", "/CN=Pinvou Test Provider Root", "-days", "2", "-addext", "basicConstraints=critical,CA:TRUE"], { stdio: "ignore" });
+  execFileSync(openssl, ["req", "-newkey", "rsa:2048", "-nodes", "-keyout", join(certificateRoot, "leaf.key"), "-out", join(certificateRoot, "leaf.csr"), "-subj", "/CN=Pinvou Test Provider Verifier"], { stdio: "ignore" });
+  execFileSync(openssl, ["x509", "-req", "-in", join(certificateRoot, "leaf.csr"), "-CA", join(certificateRoot, "root.pem"), "-CAkey", join(certificateRoot, "root.key"), "-CAcreateserial", "-out", join(certificateRoot, "leaf.pem"), "-days", "2", "-extfile", leafExtensions], { stdio: "ignore" });
+  providerRootPem = await readFile(join(certificateRoot, "root.pem"), "utf8");
+  providerLeafPem = await readFile(join(certificateRoot, "leaf.pem"), "utf8");
+  providerLeafKey = crypto.createPrivateKey(await readFile(join(certificateRoot, "leaf.key"), "utf8"));
+}
+const providerRootSha256 = providerRootPem === null ? null : hash(new crypto.X509Certificate(providerRootPem).raw);
+const providerLeafSha256 = providerLeafPem === null ? null : hash(new crypto.X509Certificate(providerLeafPem).raw);
 const testStartedAt = new Date().toISOString();
 const testFinishedAt = new Date(Date.parse(testStartedAt) + 3_600_000).toISOString();
 const uiActions = {
