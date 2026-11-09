@@ -1,4 +1,4 @@
-import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import React, { useId, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { adminLayoutCopy, accountLayoutCopy } from '../../shared/i18n.js';
 import { financeReadDefinition, financeListRouteUpdates, readFinanceListRoute } from './admin-finance-read-route.js';
 
@@ -48,8 +48,10 @@ export function useFinanceRouteLoader({ route, signature, client, owner, operati
   };
 }
 
-export function AdminFinanceFilters({ kind, language, value, onChange, onSubmit, disabled = false }) {
+export function AdminFinanceFilters({ kind, language, value, onChange, onSubmit, disabled = false, orderFilterOptions }) {
   const words = adminLayoutCopy[language].financeLists;
+  const orderListContext = orderFilterOptions ? adminLayoutCopy[language].orderListContext : null;
+  const orderOptionsID = useId();
   const config = financeReadDefinition(kind);
   const options = key => {
     if (['status', 'lifecycle_status'].includes(key)) return config.statuses;
@@ -64,7 +66,11 @@ export function AdminFinanceFilters({ kind, language, value, onChange, onSubmit,
   return <form className="adm-filter-row" onSubmit={event => { event.preventDefault(); onSubmit(); }}>
     {config.fields.map(key => key === 'include_deleted' ? (
       <label key={key} className="adm-checkbox-field"><input type="checkbox" disabled={disabled} checked={value[key] === 'true'} onChange={event => onChange({ ...value, [key]: event.target.checked ? 'true' : '' })} />{words[key]}</label>
-    ) : <label key={key}>{words[key]}{options(key) ? <select disabled={disabled} value={value[key] || ''} onChange={event => onChange({ ...value, [key]: event.target.value })}><option value="">{words.allValues}</option>{options(key).map(option => <option key={option} value={option}>{words[option] || accountLayoutCopy[language].statuses[option] || option}</option>)}</select> : <input disabled={disabled} maxLength={key === 'q' || key === 'business_reference' ? 160 : 120} step={/_(from|to|before)$/.test(key) ? '0.001' : undefined} type={/_(from|to|before)$/.test(key) ? 'datetime-local' : 'text'} value={value[key] || ''} onChange={event => onChange({ ...value, [key]: event.target.value })} />}</label>)}
+    ) : <label key={key}>{words[key]}{orderListContext && key === 'q' && <small>{orderListContext.searchHelp}</small>}{orderListContext && /_(from|to)$/.test(key) && <small>{orderListContext.inputZone} ({Intl.DateTimeFormat().resolvedOptions().timeZone})</small>}{orderListContext && ['provider_id', 'channel'].includes(key) ? <>
+      <input list={orderOptionsID + '-' + key} disabled={disabled} maxLength={key === 'channel' ? 32 : 120} value={value[key] || ''} onChange={event => onChange({ ...value, [key]: event.target.value })} />
+      <datalist id={orderOptionsID + '-' + key}>{orderFilterOptions[key].map(option => <option key={option} value={option} />)}</datalist>
+      <small>{orderListContext.optionHelp}</small>
+    </> : options(key) ? <select disabled={disabled} value={value[key] || ''} onChange={event => onChange({ ...value, [key]: event.target.value })}><option value="">{words.allValues}</option>{options(key).map(option => <option key={option} value={option}>{words[option] || accountLayoutCopy[language].statuses[option] || option}</option>)}</select> : <input disabled={disabled} maxLength={key === 'q' || key === 'business_reference' ? 160 : 120} step={/_(from|to|before)$/.test(key) ? '0.001' : undefined} type={/_(from|to|before)$/.test(key) ? 'datetime-local' : 'text'} value={value[key] || ''} onChange={event => onChange({ ...value, [key]: event.target.value })} />}</label>)}
     <label>{words.limit}<select disabled={disabled} value={value.limit} onChange={event => onChange({ ...value, limit: event.target.value })}>{['25', '50', '100', '200'].map(limit => <option key={limit}>{limit}</option>)}</select></label><button disabled={disabled}>{words.search}</button>
   </form>;
 }

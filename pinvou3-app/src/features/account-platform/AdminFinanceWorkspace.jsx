@@ -22,6 +22,7 @@ import { usePortalDialogScope } from './portal-dialog-scope.jsx';
 import { AdminFinanceReadWorkspace } from './AdminFinanceReadWorkspace.jsx';
 import { approvalLabel } from './admin-approval-presentation.js';
 import { AdminOrderStatusSummary } from './AdminOrderStatusSummary.jsx';
+import { AdminOrderResults } from './AdminOrderResults.jsx';
 
 function Feedback({ operation, copy }) {
   return <>{operation.busy && <p role="status">{copy.loading}</p>}{operation.error && <p role="alert">{operation.error}</p>}{operation.message && <p role="status">{operation.message}</p>}</>;
@@ -51,14 +52,15 @@ function Payments({ client, copy, language, permissions, owner, route }) {
   const [reason, setReason] = useState('');
   const [refundReason, setRefundReason] = useState('');
   const [refundEnabled, setRefundEnabled] = useState(null);
+  const [paymentCapabilities, setPaymentCapabilities] = useState(null);
   const operation = useFinanceOperation(owner, copy, client, 'payments');
   const list = useFinanceRouteLoader({ route, signature: filters.signature, client, owner, operation, load: () => load(filters.query.cursor), reset: () => setPage(null) });
   const load = async (next = cursor) => {
     const result = await list.read(async () => {
       const [orders, overview] = await Promise.all([loadFinancePage({ ...(route ? filters.query : { q: query }), cursor: next }, filters => client.paymentOrders(filters), () => { setCursor(''); setPrevious([]); }), client.request('billing', '/admin/v1/overview')]);
-      return { orders: orders.value, cursor: orders.query.cursor, enabled: typeof overview?.payment_capabilities?.normal_refund_creation_enabled === 'boolean' ? overview.payment_capabilities.normal_refund_creation_enabled : null };
+      return { orders: orders.value, cursor: orders.query.cursor, capabilities: overview?.payment_capabilities, enabled: typeof overview?.payment_capabilities?.normal_refund_creation_enabled === 'boolean' ? overview.payment_capabilities.normal_refund_creation_enabled : null };
     });
-    if (result) { setPage(result.orders); setCursor(result.cursor); setRefundEnabled(result.enabled); }
+    if (result) { setPage(result.orders); setCursor(result.cursor); setRefundEnabled(result.enabled); setPaymentCapabilities(result.capabilities); }
   };
   useEffect(() => { if (!route) void load(''); }, [client, owner]); // eslint-disable-line react-hooks/exhaustive-deps
   const open = async (id, visit = detailVisit) => {
@@ -114,9 +116,13 @@ function Payments({ client, copy, language, permissions, owner, route }) {
   const canRequestOrderAction = permissions.includes('platform.billing.repairs.request');
   const syncOrder = async () => { const value = await operation.read(() => client.syncOrder(detail.order_id)); if (value) await open(detail.order_id); };
   const refundUnavailable = !canRequestOrderAction ? orderActions.noPermission : refundEnabled === null ? orderActions.capabilityUnknown : !refundEnabled ? orderActions.capabilityOff : !targets.length ? orderActions.noTarget : '';
-  return <section><h3>{copy.orders}</h3>{route ? <AdminFinanceFilters kind="orders" language={language} value={filters.draft} onChange={filters.setDraft} disabled={operation.busy || operation.unknown} onSubmit={() => { setPrevious([]); filters.move({ ...filters.draft, cursor: '' }, null); }} /> : <form onSubmit={event => { event.preventDefault(); setPrevious([]); void load(''); }}><label>{copy.search}<input value={query} onChange={event => setQuery(event.target.value)} /></label><button disabled={operation.busy || operation.unknown}>{copy.search}</button></form>}<Feedback operation={operation} copy={copy} />
+  const usableCodes = values => [...new Set(values.filter(x => typeof x === 'string' && x.trim()))];
+  const visibleOrders = page?.items || [];
+  const orderFilterOptions = { provider_id: usableCodes([paymentCapabilities?.provider_id, ...visibleOrders.map(item => item.provider_id)]), channel: usableCodes([...(Array.isArray(paymentCapabilities?.channels) ? paymentCapabilities.channels : []), ...visibleOrders.map(item => item.channel)]) };
+  const listContext = adminLayoutCopy[language].orderListContext;
+  return <section><h3>{copy.orders}</h3>{route && <p><small>{listContext.window}</small></p>}{route ? <AdminFinanceFilters kind="orders" orderFilterOptions={orderFilterOptions} language={language} value={filters.draft} onChange={filters.setDraft} disabled={operation.busy || operation.unknown} onSubmit={() => { setPrevious([]); filters.move({ ...filters.draft, cursor: '' }, null); }} /> : <form onSubmit={event => { event.preventDefault(); setPrevious([]); void load(''); }}><label>{copy.search}<input value={query} onChange={event => setQuery(event.target.value)} /></label><button disabled={operation.busy || operation.unknown}>{copy.search}</button></form>}<Feedback operation={operation} copy={copy} />
     {operation.unknown && <div data-retained-finance-command><code>{operation.pendingFacts?.orderID} / {operation.pendingKey}</code><button disabled={operation.busy} onClick={() => void refund()}>{copy.retry}</button></div>}
-    {page && <table><thead><tr><th>{copy.orderID}</th><th>{copy.amount}</th><th>{copy.status}</th><th>{copy.actions}</th></tr></thead><tbody>{page.items.map(item => <tr key={item.order_id}><td>{item.order_id}</td><td>{formatFen(item.amount_fen, language)}</td><td>{item.status}</td><td><button disabled={operation.busy || operation.unknown} onClick={() => selectDetail(item.order_id)}>{copy.details}</button></td></tr>)}</tbody></table>}
+    {page && (route ? <AdminOrderResults page={page} language={language} disabled={operation.busy || operation.unknown} onOpen={selectDetail} /> : <table><thead><tr><th>{copy.orderID}</th><th>{copy.amount}</th><th>{copy.status}</th><th>{copy.actions}</th></tr></thead><tbody>{page.items.map(item => <tr key={item.order_id}><td>{item.order_id}</td><td>{formatFen(item.amount_fen, language)}</td><td>{item.status}</td><td><button disabled={operation.busy || operation.unknown} onClick={() => selectDetail(item.order_id)}>{copy.details}</button></td></tr>)}</tbody></table>)}
     <button disabled={operation.busy || operation.unknown || !previous.length} onClick={() => { const values = [...previous]; const value = values.pop(); setPrevious(values); if (route) filters.move({ ...filters.query, cursor: value }, null); else void load(value); }}>{copy.previous}</button><button disabled={operation.busy || operation.unknown || !page?.next_cursor} onClick={() => { setPrevious(values => [...values, cursor]); if (route) filters.move({ ...filters.query, cursor: page.next_cursor }, null); else void load(page.next_cursor); }}>{copy.next}</button>
     {currentDetailError && currentDetailError !== operation.error && <p role="alert">{currentDetailError}</p>}{route && filters.selectedID && (currentDetailError || operation.error) && !operation.unknown && <button disabled={operation.busy} onClick={() => void open(filters.selectedID)}>{copy.retry}</button>}{detail && (!route || operation.unknown || (detailSnapshot.visit === detailVisit && detail.order_id === filters.selectedID)) && <article>{route && <button disabled={operation.busy || operation.unknown} onClick={() => filters.move(filters.query, null)}>{adminLayoutCopy[language].backToDirectory}</button>}<h4>{copy.details}: {detail.order_id}</h4>{route ? <AdminOrderStatusSummary detail={detail} language={language} /> : <p>{detail.status} / {detail.fulfillment_status} / {detail.attention_summary}</p>}
       {route ? <>
