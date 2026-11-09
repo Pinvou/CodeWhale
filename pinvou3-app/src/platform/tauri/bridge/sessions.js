@@ -656,27 +656,10 @@ async function createNewSession() { return pinvouSharedtauriSessions().createNew
           draftOutcome.createdSessionId = meta.id;
           return null;
         }
-        // 草稿期开的多智能体开关此刻才落后端（开关本身不物化会话）。先取后
-        // 清：switchActiveTo 会把寄存意图当作已消费。
-        var pendingMultiAgent = state.pendingDraftMultiAgent === true;
+        // Keep this session unpublished until its explicit model is confirmed.
+        // Otherwise a second send can bypass ensureSession and use the default
+        // model while selection is pending, then lose its session on rollback.
         var pendingModelRef = state.pendingDraftModelRef;
-        state.pendingDraftModelRef = null;
-        state.pendingDraftMultiAgent = false;
-        // The bound draft's staged explicit mode is read-then-cleared the
-        // same way (an explicit switch during the await is user intent too).
-        const stagedDraftMode = state.pendingDraftMode;
-        state.pendingDraftMode = null;
-        // Materialization committed: clear the draft directory; on
-        // create_session failure (outer catch) it is kept for retry.
-        state.draftWorkspacePath = null;
-        state.draftWorkspaceRoots = [];
-        state.draftProjectId = null;
-        switchActiveTo(meta.id, { fresh: true });
-        draftOutcome.createdSessionId = meta.id;
-        // 草稿态因首条消息/加卡等实质操作物化为 session 时，输入草稿也要
-        // 跟随迁移；这不是用户主动切换到另一个已有会话。
-        state.composerDraft = composerDraft;
-        sessionStates[meta.id].composerDraft = composerDraft;
         if (pendingModelRef) {
           try {
             if (pendingModelRef.source === "ACCOUNT_PLATFORM") {
@@ -691,37 +674,62 @@ async function createNewSession() { return pinvouSharedtauriSessions().createNew
             } else {
               throw new Error("unsupported model selection source");
             }
-            if (state.activeSessionId === meta.id && draftOutcome.navToken === sessionSwitchRequestToken) {
-              state.currentSessionModelRef = pendingModelRef;
-            }
           } catch (modelError) {
+            if (!state.activeSessionId && draftOutcome.navToken === sessionSwitchRequestToken) {
+              draftOutcome.rollbackEpoch = Number(state.draftEpoch || 0);
+            }
+            // A newer navigation or model choice owns its own state. In
+            // particular, never delete a session adopted by a newer navigation.
+            if (state.activeSessionId || draftOutcome.navToken !== sessionSwitchRequestToken
+              || state.pendingDraftModelRef !== pendingModelRef) return null;
             try {
               await invoke("delete_session", { id: meta.id });
             } catch (cleanupError) {
               // 空会话残留可手动删除，不掩盖模型选择失败。
             }
             draftOutcome.createdSessionId = null;
-            if (state.activeSessionId !== meta.id || draftOutcome.navToken !== sessionSwitchRequestToken) return null;
-            var rollbackComposerDraft = state.composerDraft || "";
-            enterDraft();
-            state.composerDraft = rollbackComposerDraft;
-            state.pendingDraftModelRef = pendingModelRef;
-            state.pendingDraftMultiAgent = pendingMultiAgent;
+            if (state.activeSessionId || draftOutcome.navToken !== sessionSwitchRequestToken
+              || state.pendingDraftModelRef !== pendingModelRef) return null;
+            // Nothing was consumed or published: keep the current draft and
+            // retry ownership rather than resetting its epoch or newer edits.
             draftOutcome.rollbackEpoch = Number(state.draftEpoch || 0);
-            state.draftWorkspacePath = boundWorkspace;
-            state.draftWorkspaceRoots = boundRoots;
-            state.draftProjectId = boundProjectId;
-            state.pendingDraftMode = stagedDraftMode || null;
-            state.modeState = {
-              mode: stagedDraftMode || currentDraftModeState().mode,
-              multiAgent: pendingMultiAgent,
-            };
             addSystemItem(bt("newChatFailed"));
             await refreshHistoryList();
             notify();
             return null;
           }
         }
+        const currentBinding = captureDraftWorkspaceBinding();
+        const workspaceChanged = pendingModelRef && (
+          currentBinding.boundWorkspace !== boundWorkspace
+          || currentBinding.boundProjectId !== boundProjectId
+          || JSON.stringify(currentBinding.boundRoots) !== JSON.stringify(boundRoots));
+        if (state.activeSessionId || draftOutcome.navToken !== sessionSwitchRequestToken
+          || state.pendingDraftModelRef !== pendingModelRef || workspaceChanged) {
+          if (!sessionStates[meta.id]) {
+            sessionStates[meta.id] = freshBuffer();
+            sessionStates[meta.id].loadedFromDisk = true;
+          }
+          // A navigation may recover its original message in the background
+          // session. A newer model choice in the same draft keeps that draft.
+          if (draftOutcome.navToken !== sessionSwitchRequestToken) draftOutcome.createdSessionId = meta.id;
+          else if (!state.activeSessionId) draftOutcome.rollbackEpoch = Number(state.draftEpoch || 0);
+          return null;
+        }
+        var pendingMultiAgent = state.pendingDraftMultiAgent === true;
+        const stagedDraftMode = state.pendingDraftMode;
+        state.pendingDraftMode = null;
+        state.draftWorkspacePath = null;
+        state.draftWorkspaceRoots = [];
+        state.draftProjectId = null;
+        // Read after model confirmation: edits during the await belong to this
+        // draft and must follow it, not the pre-confirmation composer snapshot.
+        composerDraft = state.composerDraft || "";
+        switchActiveTo(meta.id, { fresh: true });
+        draftOutcome.createdSessionId = meta.id;
+        state.composerDraft = composerDraft;
+        sessionStates[meta.id].composerDraft = composerDraft;
+        if (pendingModelRef) state.currentSessionModelRef = pendingModelRef;
         if (state.activeSessionId !== meta.id || draftOutcome.navToken !== sessionSwitchRequestToken) return null;
         if (pendingMultiAgent) {
           try {

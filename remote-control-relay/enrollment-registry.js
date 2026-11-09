@@ -209,10 +209,14 @@ function validateMigrationResult(raw) {
 }
 
 function validateMigrationRequest(raw) {
-  const request = exactObject(raw, [
+  const fields = [
     "request_id", "operation", "endpoint_ids", "parameters", "status",
     "created_at", "completed_at", "outcome",
-  ], "migration_request");
+  ];
+  if (raw?.operation === "restore" && Object.hasOwn(raw, "expected_namespace_revision")) {
+    fields.push("expected_namespace_revision");
+  }
+  const request = exactObject(raw, fields, "migration_request");
   if (!isMigrationRequestIdentifier(request.request_id)) {
     fail("migration_request_malformed");
   }
@@ -228,6 +232,9 @@ function validateMigrationRequest(raw) {
   }
   if (request.operation === "batch" && endpointIds.length === 0) fail("migration_request_malformed");
   if (request.operation === "restore" && endpointIds.length !== 0) fail("migration_request_malformed");
+  if (Object.hasOwn(request, "expected_namespace_revision")) {
+    validateRevision(request.expected_namespace_revision, "expected_namespace_revision");
+  }
   const parameters = exactObject(request.parameters, ["algorithm", "key_id", "digest_hex"], "migration_parameters");
   if (parameters.algorithm !== "hmac-sha256-v1" || !KEY_ID.test(parameters.key_id)
     || !HEX_64.test(parameters.digest_hex)) fail("migration_request_malformed");
@@ -351,6 +358,8 @@ function publicMigrationRequest(request) {
     created_at: request.created_at,
     completed_at: request.completed_at,
     outcome: structuredClone(request.outcome),
+    ...(Object.hasOwn(request, "expected_namespace_revision")
+      ? { expected_namespace_revision: request.expected_namespace_revision } : {}),
   });
 }
 
@@ -403,8 +412,9 @@ function prepareAtomicOperations(operations) {
         expectedRevision: validateRevision(raw.expected_revision, "expected_endpoint_revision") };
     }
     if (raw.operation === "restore") {
-      exactObject(raw, ["operation", "snapshot"], "enrollment_batch_operation");
-      return { operation: "restore", snapshot: validateRegistry(raw.snapshot) };
+      exactObject(raw, ["operation", "snapshot", "expected_namespace_revision"], "enrollment_batch_operation");
+      return { operation: "restore", snapshot: validateRegistry(raw.snapshot),
+        expectedNamespaceRevision: validateRevision(raw.expected_namespace_revision, "expected_namespace_revision") };
     }
     fail("enrollment_batch_operation_invalid");
   });
@@ -452,6 +462,15 @@ function migrationDescriptor(prepared) {
       : prepared.map((operation) => operation.endpointId).sort(compareEnrollmentIdentifiers),
     canonicalParameters: canonicalMigrationParameters(prepared),
   };
+}
+
+function requireRestoreRevision(prepared, snapshot, pending = false) {
+  const restore = prepared[0];
+  if (restore.operation !== "restore") return;
+  // Only this request's durable intent may advance the captured namespace.
+  // Any intervening write (including another migration intent) invalidates it.
+  const expected = pending ? incrementRevision(restore.expectedNamespaceRevision) : restore.expectedNamespaceRevision;
+  if (snapshot.namespace_revision !== expected) fail("migration_restore_revision_conflict");
 }
 
 function applyPreparedOperations(registry, prepared, config, clock) {
@@ -788,6 +807,17 @@ export class EnrollmentRegistry {
       || !safeEqualHex(request.parameters.digest_hex, expected.digest_hex)) {
       fail("migration_request_conflict");
     }
+    if (request.operation === "restore") {
+      if (Object.hasOwn(request, "expected_namespace_revision")) {
+        if (request.expected_namespace_revision !== context.prepared[0].expectedNamespaceRevision) {
+          fail("migration_request_conflict");
+        }
+      } else if (request.status === "pending") {
+        // Preserve historical sealed outcomes, but never resume an unfenced
+        // intent. Its original precondition cannot be reconstructed safely.
+        fail("migration_restore_fence_missing");
+      }
+    }
   }
 
   #migrationResponse(request, replayed) {
@@ -886,6 +916,7 @@ export class EnrollmentRegistry {
   previewAtomicBatch({ operations } = {}) {
     const prepared = prepareAtomicOperations(operations);
     const snapshot = this.#read();
+    requireRestoreRevision(prepared, snapshot);
     const applied = applyPreparedOperations(snapshot.registry, prepared, this.#config, this.#clock);
     return deepFreeze({
       namespace_revision: snapshot.namespace_revision,
@@ -899,6 +930,7 @@ export class EnrollmentRegistry {
     expectedNamespaceRevision = validateRevision(expectedNamespaceRevision, "expected_namespace_revision");
     const snapshot = this.#read();
     if (snapshot.namespace_revision !== expectedNamespaceRevision) fail("enrollment_revision_conflict");
+    requireRestoreRevision(prepared, snapshot);
     const applied = applyPreparedOperations(snapshot.registry, prepared, this.#config, this.#clock);
     if (!applied.changed) {
       return deepFreeze({
@@ -939,6 +971,7 @@ export class EnrollmentRegistry {
         this.#assertMigrationRequestMatches(existing, context);
         return publicMigrationRequest(existing);
       }
+      requireRestoreRevision(context.prepared, snapshot);
       if (snapshot.registry.migration_requests.length >= MAX_MIGRATION_REQUESTS) {
         fail("migration_request_capacity_reached");
       }
@@ -958,6 +991,8 @@ export class EnrollmentRegistry {
         created_at: isoTimestamp(this.#clock),
         completed_at: null,
         outcome: null,
+        ...(context.descriptor.operation === "restore"
+          ? { expected_namespace_revision: context.prepared[0].expectedNamespaceRevision } : {}),
       };
       const registry = {
         ...snapshot.registry,
@@ -987,6 +1022,7 @@ export class EnrollmentRegistry {
       let applied;
       let failure = null;
       try {
+        requireRestoreRevision(context.prepared, snapshot, true);
         applied = applyPreparedOperations(snapshot.registry, context.prepared, this.#config, this.#clock);
       } catch (error) {
         if (!(error instanceof EnrollmentRegistryError)) throw error;

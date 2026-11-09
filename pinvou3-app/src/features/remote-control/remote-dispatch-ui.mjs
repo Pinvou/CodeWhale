@@ -80,15 +80,17 @@ export function forgetRemoteDispatch(localSessionId, taskId) {
   return removed;
 }
 
-export function markRemoteDispatchPayloadLost(localSessionId, taskId) {
+export function markRemoteDispatchPayloadLost(localSessionId, taskId, { preserveContext = false } = {}) {
   const item = casesBySession.get(localSessionId)?.get(taskId);
   if (!item || item.state !== 'prepared_not_sent') return false;
   // Abandon drops the ephemeral payload before persisting retirement. A
   // failed command can leave the durable handle, but same-ID retry is gone.
   item.origin = 'history';
-  item.text = null;
-  item.remoteRef = null;
-  item.identity = null;
+  if (!preserveContext) {
+    item.text = null;
+    item.remoteRef = null;
+    item.identity = null;
+  }
   return true;
 }
 

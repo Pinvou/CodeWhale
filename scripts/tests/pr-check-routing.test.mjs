@@ -137,6 +137,28 @@ function assertAccountFailurePolicy(job) {
 
 
 const goStepName = "Test and vet all Account Platform Go modules";
+const goGatePhase = "PINVOU_GO_GATE_PHASE";
+
+// Only fixed fixture markers and process metadata enter this diagnostic. Do
+// not dump the inherited environment, arbitrary commands or native error text.
+function goGateDiagnostic(result, elapsedMs) {
+  const phases = (result.stderr || "").split(/\r?\n/)
+    .filter(line => /^PINVOU_GO_GATE_PHASE\|(bash-start|fixture-ready|gate-complete|shell-exit:[0-9]+|go:(test|vet):(begin|complete))$/.test(line));
+  const token = value => typeof value === "string" && /^[A-Z0-9_]+$/.test(value) ? value : null;
+  return JSON.stringify({ status: result.status ?? null, signal: token(result.signal),
+    errorCode: token(result.error?.code), elapsedMs: Math.round(elapsedMs), phases });
+}
+
+function runGoGateFixture(prefix, run, directory) {
+  const script = `printf '${goGatePhase}|bash-start\\n' >&2\n`
+    + `trap 'fixture_status=$?; printf "${goGatePhase}|shell-exit:%s\\n" "$fixture_status" >&2' EXIT\n`
+    + prefix + `printf '${goGatePhase}|fixture-ready\\n' >&2\n`
+    + run + `\nprintf '${goGatePhase}|gate-complete\\n' >&2\n`;
+  const started = performance.now();
+  const result = spawnSync(bash, ["-c", script], { cwd: directory, encoding: "utf8", timeout: 30_000, windowsHide: true });
+  return { ...result, diagnostic: goGateDiagnostic(result, performance.now() - started) };
+}
+
 const auditPGStepName = "Audit export finite PostgreSQL rollback and persisted boundaries";
 const existingBrokerStepName = "Existing broker compatibility on owned PostgreSQL and TLS NATS";
 const pgPreflightStepName = "Verify account CI PostgreSQL service isolation";
@@ -586,6 +608,52 @@ test("each independently changed Account Platform translation input triggers its
   assert.match(releaseGate, /check-account-platform-i18n\.mjs/);
 });
 
+test("Account Go routing skips desktop notes and generated assets but retains mixed changes", () => {
+  const paths = filterPaths(workflow, "account_platform");
+  assert.match(workflow, /predicate-quantifier: some-with-excludes/);
+  const required = changed => changed.some(file =>
+    paths.some(pattern => !pattern.startsWith("!") && matchesGlob(file, pattern)) &&
+    !paths.some(pattern => pattern.startsWith("!") && matchesGlob(file, pattern.slice(1))));
+  const desktop = [
+    "account-platform/docs/draft-model-confirmation.md",
+    "pinvou3-app/src/platform/tauri/bridge/chat.js",
+    "pinvou3-app/src/platform/tauri/bridge/sessions.js",
+    "pinvou3-app/tests/session_nav_race.test.mjs",
+  ];
+  const assets = [
+    "account-platform/internal/portal/static/account.html",
+    "account-platform/internal/portal/static/assets/admin-old.js",
+    "account-platform/internal/portal/static/assets/admin-new.js",
+  ];
+  assert.equal(required(desktop), false);
+  assert.equal(required(assets), false);
+  for (const file of [
+    "account-platform/internal/billing/payment_admission.go",
+    "account-platform/internal/portal/static.go",
+    "account-platform/go.mod",
+    "account-platform/go.sum",
+    "account-platform/migrations/billing/new.sql",
+    "account-platform/deploy/helm/account-platform/values.yaml",
+    "account-platform/contracts/openapi/new.yaml",
+    "account-platform/test/contract/new.test.mjs",
+    "account-platform/docs/requirements.md",
+    "account-platform/docs/new-policy.md",
+    "scripts/test-token-financial-postgres.py",
+    ".github/workflows/pr-check.yml",
+    "scripts/tests/pr-check-routing.test.mjs",
+  ]) {
+    assert.equal(required([file]), true, file);
+    assert.equal(required([...desktop, ...assets, file]), true, `mixed ${file}`);
+  }
+  const frontend = filterPaths(workflow, "frontend");
+  for (const file of assets) {
+    assert.ok(frontend.some(pattern => !pattern.startsWith("!") && matchesGlob(file, pattern)), file);
+  }
+  const gate = jobBlock("required-gate");
+  assert.match(gate, /ACCOUNT_PLATFORM_REQUIRED: \$\{\{ needs\.changes\.outputs\.account_platform \}\}/);
+  assert.match(gate, /if \[\[ "\$ACCOUNT_PLATFORM_REQUIRED" == "true" && "\$ACCOUNT_PLATFORM_RESULT" != success \]\]/);
+});
+
 test("Account Platform changes cannot bypass the Go gate at any PR or queue stage", () => {
   const paths = filterPaths(workflow, "account_platform");
   for (const path of ["scripts/check-account-platform-authorization-coverage.mjs", "scripts/tests/account-platform-authorization-coverage.test.mjs", "scripts/tests/test_postgres_backup.py", "scripts/tests/test_postgres_backup_job.py", "scripts/tests/test_user_realm.py"]) {
@@ -766,9 +834,16 @@ test("Go gate executes test and vet for root and future nested modules, and fail
       mkdirSync(join(directory, module), { recursive: true });
       writeFileSync(join(directory, module, "go.mod"), "module example.test/fixture\n");
     }
-    const prefix = "go() { printf '%s|%s\\n' \"$PWD\" \"$*\"; }; export -f go;\n";
-    const result = spawnSync(bash, ["-c", prefix + run], { cwd: directory, encoding: "utf8", timeout: 30_000, windowsHide: true });
-    assert.equal(result.status, 0, result.stderr);
+    const traceStart = `printf '${goGatePhase}|go:%s:begin\\n' "$1" >&2; `;
+    const traceEnd = `printf '${goGatePhase}|go:%s:complete\\n' "$1" >&2; `;
+    const prefix = `go() { ${traceStart}printf '%s|%s\\n' "$PWD" "$*"; ${traceEnd}}; export -f go;\n`;
+    const result = runGoGateFixture(prefix, run, directory);
+    assert.equal(result.status, 0, result.diagnostic);
+    const successPhases = JSON.parse(result.diagnostic).phases;
+    assert.equal(successPhases.filter(line => line.endsWith(":begin")).length, 6);
+    assert.equal(successPhases.filter(line => line.endsWith(":complete")).length, 6);
+    assert.ok(successPhases.includes(`${goGatePhase}|gate-complete`));
+    assert.equal(successPhases.at(-1), `${goGatePhase}|shell-exit:0`);
     const calls = result.stdout.split("\n").filter((line) => line.includes("|"));
     assert.equal(calls.length, 6, result.stdout);
     for (const module of ["account-platform", "account-platform/tools/kms-recovery", "account-platform/tools/future tool"]) {
@@ -778,14 +853,25 @@ test("Go gate executes test and vet for root and future nested modules, and fail
       assert.ok(moduleCalls.some((line) => line.endsWith("|vet -tags=nomsgpack -mod=readonly ./...")));
     }
     for (const command of ["test", "vet"]) {
-      const failed = spawnSync(bash, ["-c", `go() { if [[ "$1" == "${command}" ]]; then return 7; fi; }; export -f go;\n` + run], { cwd: directory, encoding: "utf8", timeout: 30_000, windowsHide: true });
-      assert.equal(failed.status, 7, `a failing go ${command} must fail the gate: ${failed.stderr}`);
-      const nestedFailed = spawnSync(bash, ["-c", `go() { if [[ "$PWD" == */"tools/future tool" && "$1" == "${command}" ]]; then return 7; fi; }; export -f go;\n` + run], { cwd: directory, encoding: "utf8", timeout: 30_000, windowsHide: true });
-      assert.equal(nestedFailed.status, 7, `a failing nested-module go ${command} must fail the gate: ${nestedFailed.stderr}`);
+      const failed = runGoGateFixture(`go() { ${traceStart}if [[ "$1" == "${command}" ]]; then return 7; fi; ${traceEnd}}; export -f go;\n`, run, directory);
+      assert.equal(failed.status, 7, `a failing go ${command} must fail the gate: ${failed.diagnostic}`);
+      assert.equal(JSON.parse(failed.diagnostic).phases.at(-1), `${goGatePhase}|shell-exit:7`);
+      const nestedFailed = runGoGateFixture(`go() { ${traceStart}if [[ "$PWD" == */"tools/future tool" && "$1" == "${command}" ]]; then return 7; fi; ${traceEnd}}; export -f go;\n`, run, directory);
+      assert.equal(nestedFailed.status, 7, `a failing nested-module go ${command} must fail the gate: ${nestedFailed.diagnostic}`);
+      assert.equal(JSON.parse(nestedFailed.diagnostic).phases.at(-1), `${goGatePhase}|shell-exit:7`);
     }
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
+});
+
+test("Go gate diagnostics retain null exits, error codes and only fixed phase markers", () => {
+  const diagnostic = JSON.parse(goGateDiagnostic({ status: null, signal: "SIGTERM", error: { code: "ETIMEDOUT", message: "private native detail" },
+    stderr: `${goGatePhase}|bash-start\n${goGatePhase}|fixture-ready\nprivate environment or command\n${goGatePhase}|untrusted detail\n` }, 30_025.3));
+  assert.deepEqual(diagnostic, { status: null, signal: "SIGTERM", errorCode: "ETIMEDOUT", elapsedMs: 30_025,
+    phases: [`${goGatePhase}|bash-start`, `${goGatePhase}|fixture-ready`] });
+  assert.throws(() => assert.equal(diagnostic.status, 0), /null/);
+  assert.equal(JSON.parse(goGateDiagnostic({ status: null, error: { code: "ENOENT" } }, 2)).errorCode, "ENOENT");
 });
 
 test("named Go step extraction excludes later YAML and fails closed on missing or duplicate names", () => {

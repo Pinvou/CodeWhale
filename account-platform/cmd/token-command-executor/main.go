@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -53,7 +54,7 @@ func main() {
 	go func() {
 		if err := token.RunTokenApprovalConsumers(ctx, broker, reader, os.Getenv("TOKEN_GATEWAY_HTTP_URL"), os.Getenv("ACCOUNT_HTTP_URL"), credential); err != nil {
 			stopped.Store(true)
-			log.Print("TOKEN_APPROVAL_CONSUMER_STOPPED")
+			slog.Error("TOKEN_APPROVAL_CONSUMER_STOPPED", "error_code", "CONSUMER_STOPPED")
 			cancel()
 		}
 	}()
@@ -71,8 +72,13 @@ func main() {
 		log.Fatal(err)
 	}
 	if stopped.Load() {
-		log.Fatal("TOKEN_APPROVAL_CONSUMER_STOPPED")
+		exitStoppedTokenApprovalConsumer()
 	}
+}
+
+func exitStoppedTokenApprovalConsumer() {
+	slog.Error("TOKEN_APPROVAL_CONSUMER_STOPPED", "error_code", "CONSUMER_STOPPED")
+	os.Exit(1)
 }
 
 // The privileged consumer uses only pre-provisioned resources and the explicit
