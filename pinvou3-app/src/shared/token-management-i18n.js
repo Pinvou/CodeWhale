@@ -403,8 +403,9 @@ function completeTokenManagementCopy(translations) {
       en: { title: 'Provisioning overview', boundary: 'Current authoritative route provisioning facts only.', unavailable: 'The provisioning overview is temporarily unavailable.' },
       ja: { title: 'Provisioning 概要', boundary: '現在のルート Provisioning の正式な情報のみを集計します。', unavailable: 'リソース設定の概要を一時的に読み込めません。' },
     }[language];
-    copy.pageOverviews.titles.modelOperations = provisioningCopy.title;
-    copy.pageOverviews.boundaries.modelOperations = provisioningCopy.boundary;
+    copy.provisioningPresentation = {"zh":{"listTitle":"资源配置任务","overviewTitle":"资源配置任务概览","overviewLead":"汇总当前可读取的路由配置任务。","versions":"配置版本","effective":"已生效版本","target":"计划版本","choose":"选择或手动输入","fromPage":"从本页选择"},"en":{"listTitle":"Resource provisioning tasks","overviewTitle":"Resource provisioning overview","overviewLead":"Current route provisioning tasks you can access.","versions":"Configuration versions","effective":"Active version","target":"Planned version","choose":"Choose or enter an ID","fromPage":"Choose from this page"},"ja":{"listTitle":"リソース設定タスク","overviewTitle":"リソース設定タスクの概要","overviewLead":"現在参照できるルート設定タスクを集計します。","versions":"設定バージョン","effective":"適用済みバージョン","target":"予定バージョン","choose":"選択または ID を入力","fromPage":"このページから選択"}}[language];
+    copy.pageOverviews.titles.modelOperations = copy.provisioningPresentation.overviewTitle;
+    copy.pageOverviews.boundaries.modelOperations = copy.provisioningPresentation.overviewLead;
     copy.pageOverviews.unavailable.modelOperations = provisioningCopy.unavailable;
     copy.pageOverviews.provisioningFailure = { language, ...{"zh":{"diagnostics":"查看诊断信息","code":"服务错误码","localList":"任务列表独立加载，请以下方状态为准。"},"en":{"diagnostics":"View diagnostics","code":"Service error code","localList":"The task list loads separately. Check its status below."},"ja":{"diagnostics":"診断情報を表示","code":"サービスエラーコード","localList":"タスク一覧は個別に読み込まれます。下の状態をご確認ください。"}}[language] };
 
