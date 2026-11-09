@@ -1,0 +1,5 @@
+.adm-restored-shell .adm-profile-repair-table{margin-top:12px}
+.adm-restored-shell .adm-profile-repair-table:focus{outline:3px solid var(--adm-primary);outline-offset:-2px}
+.adm-profile-repair-table tbody td{vertical-align:top}
+.adm-profile-repair-table tbody code{display:block;min-width:120px;white-space:normal;overflow-wrap:break-word;overflow-wrap:anywhere}
+.adm-profile-repair-table td:nth-child(6){min-width:120px;white-space:normal;overflow-wrap:break-word;overflow-wrap:anywhere}
