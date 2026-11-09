@@ -83,3 +83,7 @@ Object.assign(financeCopy.ja, {"catalogValueMissing":"提供されていませ�
 Object.assign(financeCopy.zh, {"catalogMetricsMissing":"本次快照未提供全部指标。","catalogAdmissionStatus":{"PENDING":"待完成","MISSING":"缺少验证","FAILED":"验证失败","EXPIRED":"已过期","REVOKED":"已撤销"}});
 Object.assign(financeCopy.en, {"catalogMetricsMissing":"Some metrics were not provided in this snapshot.","catalogAdmissionStatus":{"PENDING":"Pending","MISSING":"Missing verification","FAILED":"Failed","EXPIRED":"Expired","REVOKED":"Revoked"}});
 Object.assign(financeCopy.ja, {"catalogMetricsMissing":"このスナップショットには一部の指標が含まれていません。","catalogAdmissionStatus":{"PENDING":"未完了","MISSING":"検証なし","FAILED":"失敗","EXPIRED":"期限切れ","REVOKED":"取り消し済み"}});
+
+Object.assign(financeCopy.zh, { catalogPagination: "商品目录分页" });
+Object.assign(financeCopy.en, { catalogPagination: "Product catalog pages" });
+Object.assign(financeCopy.ja, { catalogPagination: "商品カタログのページ" });
