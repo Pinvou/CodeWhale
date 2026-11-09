@@ -319,7 +319,7 @@ class WebpkiCiContractTests(unittest.TestCase):
 
     def test_existing_account_go_action_is_exactly_reviewed(self):
         workflow = WORKFLOW.read_text(encoding='utf-8')
-        self.assertEqual(workflow.count('uses: actions/setup-go@v6'), 1)
+        self.assertEqual(workflow.count('uses: actions/setup-go@v6'), 2)
         self.verify_workflow(workflow)
         for replacement in ['actions/setup-go@v7', 'actions/setup-go@main', 'actions/setup-go']:
             with self.subTest(action=replacement), self.assertRaisesRegex(AssertionError, 'unreviewed action'):
@@ -331,7 +331,8 @@ class WebpkiCiContractTests(unittest.TestCase):
         # version may silently inherit this review.
         reviewed = [('frontend-test', 'Test resource lifecycle receipts'),
                     ('account-platform-test', 'Financial parallel diagnostics'),
-                    ('account-platform-test', 'Account test resource lifecycle receipts')]
+                    ('account-platform-test', 'Account test resource lifecycle receipts'),
+                    ('account-closure-test', 'Account closure resource lifecycle receipts')]
         self.assertEqual(workflow.count('uses: actions/upload-artifact@v7'), len(reviewed))
         for job, name in reviewed:
             steps = job_block(workflow, job).split('\n      - ')
