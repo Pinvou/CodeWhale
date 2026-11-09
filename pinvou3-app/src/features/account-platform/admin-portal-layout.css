@@ -543,3 +543,6 @@
 .adm-adjustment-lookup-results { display: grid; gap: .375rem; min-width: 0; }
 .adm-adjustment-lookup-results ul { list-style: none; margin: 0; padding: 0; }
 .adm-adjustment-lookup-results li button { text-align: start; display: grid; grid-template-columns: minmax(0, 1fr); width: 100%; overflow-wrap: break-word; }
+
+.adm-order-action-group { display: grid; gap: .5rem; justify-items: start; padding-block: 1rem; border-top: 1px solid var(--adm-line, #e0e5ee); }
+.adm-order-action-group label { width: min(100%, 44rem); }
