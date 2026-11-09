@@ -1096,12 +1096,22 @@
       {
         "file": "900017_sms_provider_admission_window.down.sql",
         "version": 900017,
-        "sha256": "a1d07505a7f165773713830200eeaf4e0edaee0f3b9f3af36e233637c8333402"
+        "sha256": "96321720f42bccb1289916b30297d5a5f06a2f87b28417685edda9ebfffe0920"
       },
       {
         "file": "900017_sms_provider_admission_window.up.sql",
         "version": 900017,
         "sha256": "81a290e74e4b3b720599c9aa1d0f6e2dca4ec80623ff5344ddd3a7c43116c27f"
+      },
+      {
+        "file": "900018_sms_send_provider_snapshot_fence.down.sql",
+        "version": 900018,
+        "sha256": "19aa3d6cfc8d5810d2fc76612f1f4cc4ab1c0f668e98bbfa3aff672d13a45137"
+      },
+      {
+        "file": "900018_sms_send_provider_snapshot_fence.up.sql",
+        "version": 900018,
+        "sha256": "45969693d43e7d82ab1595c760ceef47c9295c774741a1137a9e68aba77bac8b"
       }
     ],
     "billing": [

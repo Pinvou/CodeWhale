@@ -1,6 +1,7 @@
 package account
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/binary"
@@ -10,9 +11,11 @@ import (
 	"time"
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/accountschema"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/identity"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/migrations"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 func TestProviderQuotaConcurrentBoundary(t *testing.T) {
@@ -68,6 +71,22 @@ WHERE c.relname IN ('sms_send_attempts_accepted_provider_window_idx','sms_verifi
 			if err != nil || actual != phase.want || applied != (phase.want != 0) || snapshot() != before {
 				t.Fatalf("%s did not preserve facts and the expected valid indexes: indexes=%d applied=%t error=%v", phase.name, actual, applied, err)
 			}
+		}
+		for _, migration := range loaded {
+			if migration.Version == 900018 {
+				throughUpgrade = append(throughUpgrade, migration)
+			}
+		}
+		if err := accountschema.Up(ctx, migrator, throughUpgrade); err != nil {
+			t.Fatal("install snapshot fence on the upgraded historical ledger", err)
+		}
+		err = accountschema.DownOne(ctx, migrator, throughUpgrade)
+		var rejected *pgconn.PgError
+		if !errors.As(err, &rejected) || rejected.Code != "55000" || rejected.Message != "SMS send provider snapshot fence is forward-only" {
+			t.Fatal("public rollback unexpectedly removed the provider snapshot fence", err)
+		}
+		if _, err := accountschema.VerifyApplied(ctx, migrator, throughUpgrade); err != nil {
+			t.Fatal("forward-only rejection altered the migration ledger", err)
 		}
 	})
 	for _, kind := range []string{"send", "verify"} {
@@ -180,5 +199,114 @@ FROM generate_series(1,$1+2) i`
 				t.Fatalf("PROVIDER_QUOTA_OVERSHOOT accepted=%d limited=%d total=%d limit=%d", accepted, limited, total, limit)
 			}
 		})
+	}
+	for _, kind := range []string{"registration", "profile"} {
+		t.Run("login-"+kind, func(t *testing.T) { testMixedSMSSendAdmission(t, f, kind) })
+	}
+}
+
+// LOGIN holds the provider gate in a Read Committed transaction. The other
+// entry has already fixed a Serializable snapshot when it reaches that gate.
+func testMixedSMSSendAdmission(t *testing.T, f *retainedWalletFenceFixture, kind string) {
+	t.Helper()
+	repo := f.repository(t)
+	ctx, cancel := context.WithTimeout(f.ctx, 25*time.Second)
+	defer cancel()
+	config := f.config.Copy()
+	config.Database = repo.pool.Config().ConnConfig.Database
+	control, err := pgx.ConnectConfig(ctx, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer control.Close(context.Background())
+	now := time.Now().UTC().Truncate(time.Second)
+	repo.now = func() time.Time { return now }
+	provider := SMSProviderDescriptor{ID: "fixture-mixed-provider", AdapterVersion: "v1"}
+	if _, err := repo.pool.Exec(ctx, `INSERT INTO sms_send_attempts(id,mobile_hash,source_hash,device_hash,purpose,provider_id,result,occurred_at)
+SELECT gen_random_uuid(),decode(repeat('11',32),'hex'),decode(repeat('22',32),'hex'),decode(repeat('33',32),'hex'),
+'LOGIN',$1,'ACCEPTED',$2 FROM generate_series(1,99)`, provider.ID, now); err != nil {
+		t.Fatal(err)
+	}
+	login := SMSChallenge{ID: uuid.New(), Mobile: "+8613800138010", Purpose: SMSPurposeLogin, ExpiresAt: now.Add(5 * time.Minute), Source: "fixture-login-source", Device: "fixture-login-device", Provider: provider}
+	other := SMSChallenge{ID: uuid.New(), Mobile: "+8613800138011", Purpose: SMSPurposeRegister, ExpiresAt: login.ExpiresAt, Source: "fixture-other-source", Device: "fixture-other-device", Provider: provider}
+	var runOther func() error
+	var unchanged func() bool
+	if kind == "registration" {
+		op := RegistrationOperation{ID: uuid.New(), CandidateUserID: uuid.New(), QueryTokenHash: bytes.Repeat([]byte{1}, 32), RequestFingerprint: bytes.Repeat([]byte{2}, 32), Username: "mixedfixture", Mobile: other.Mobile, ChallengeID: other.ID, PasswordPolicyVersion: "user-v1"}
+		runOther = func() error { return repo.CreateRegistrationOperation(ctx, op, other) }
+		unchanged = func() bool {
+			var absent bool
+			err := repo.pool.QueryRow(ctx, `SELECT NOT EXISTS(SELECT 1 FROM registration_operations WHERE id=$1)`, op.ID).Scan(&absent)
+			return err == nil && absent
+		}
+	} else {
+		other.Purpose = SMSPurposeProfileMobile
+		principal := identity.Principal{Issuer: "https://identity.example.test", Subject: uuid.NewString(), SessionID: uuid.NewString(), Username: "mixedprofile"}
+		if _, _, err := repo.Bootstrap(ctx, principal); err != nil {
+			t.Fatal(err)
+		}
+		change, err := repo.CreateProfileChange(ctx, principal, "MOBILE", other.Mobile)
+		if err != nil {
+			t.Fatal(err)
+		}
+		captcha := SliderCaptcha{ID: uuid.New(), Mobile: other.Mobile, Purpose: other.Purpose, TargetX: 100, ExpiresAt: other.ExpiresAt}
+		if err := repo.CreateSliderCaptcha(ctx, captcha); err != nil {
+			t.Fatal(err)
+		}
+		runOther = func() error {
+			_, err := repo.ReserveProfileSMSChallenge(ctx, change.ID, change.UserID, captcha.ID, captcha.TargetX, other)
+			return err
+		}
+		unchanged = func() bool {
+			var unbound bool
+			err := repo.pool.QueryRow(ctx, `SELECT r.sms_challenge_id IS NULL AND c.status='PASSED' AND c.attempts=0
+FROM profile_change_requests r CROSS JOIN slider_captcha_challenges c WHERE r.id=$1 AND c.id=$2`, change.ID, captcha.ID).Scan(&unbound)
+			return err == nil && unbound
+		}
+	}
+	if _, err := control.Exec(ctx, `SELECT pg_advisory_lock(671152406)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := control.Exec(ctx, fmt.Sprintf(`CREATE FUNCTION fixture_wait_mixed_login() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN IF NEW.id='%s'::uuid THEN PERFORM pg_advisory_xact_lock(671152406); END IF; RETURN NEW; END $$;
+CREATE TRIGGER fixture_wait_mixed_login BEFORE INSERT ON sms_challenges FOR EACH ROW EXECUTE FUNCTION fixture_wait_mixed_login();`, login.ID)); err != nil {
+		t.Fatal(err)
+	}
+	wait := func(want int) {
+		t.Helper()
+		deadline := time.Now().Add(10 * time.Second)
+		for time.Now().Before(deadline) {
+			var waiting int
+			err := control.QueryRow(ctx, `SELECT count(*) FROM pg_stat_activity WHERE datname=$1 AND usename='account_service' AND wait_event='advisory'`, config.Database).Scan(&waiting)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if waiting == want {
+				return
+			}
+			time.Sleep(15 * time.Millisecond)
+		}
+		t.Fatalf("could not observe %d SMS gate waiters", want)
+	}
+	loginResult := make(chan error, 1)
+	otherResult := make(chan error, 1)
+	go func() { loginResult <- repo.CreateSMSChallenge(ctx, login) }()
+	wait(1)
+	go func() { otherResult <- runOther() }()
+	wait(2)
+	if _, err := control.Exec(ctx, `SELECT pg_advisory_unlock(671152406)`); err != nil {
+		t.Fatal(err)
+	}
+	loginErr, otherErr := <-loginResult, <-otherResult
+	var limited *SMSRateLimitError
+	if loginErr != nil || !errors.As(otherErr, &limited) || limited.RetryAfter != time.Minute {
+		t.Fatalf("fresh snapshot did not return the correct quota decision: login=%v %s=%v", loginErr, kind, otherErr)
+	}
+	var accepted, blocked int
+	var otherChallenge bool
+	err = repo.pool.QueryRow(ctx, `SELECT count(*) FILTER(WHERE result='ACCEPTED'),count(*) FILTER(WHERE result='RATE_LIMITED'),
+EXISTS(SELECT 1 FROM sms_challenges WHERE id=$2) FROM sms_send_attempts WHERE provider_id=$1`, provider.ID, other.ID).Scan(&accepted, &blocked, &otherChallenge)
+	if err != nil || accepted != 100 || blocked != 1 || otherChallenge || !unchanged() {
+		t.Fatalf("mixed isolation overshot quota or left reservation facts: accepted=%d blocked=%d challenge=%t err=%v", accepted, blocked, otherChallenge, err)
 	}
 }

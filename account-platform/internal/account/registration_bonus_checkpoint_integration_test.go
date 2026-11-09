@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -18,9 +19,9 @@ import (
 
 // The first page commits through the real public schema and account_service.
 // A fixture trigger interrupts the next page, without guessing a timing window.
-func registrationBonusCheckpoint(t *testing.T) (*PostgresRepository, time.Time) {
+func registrationBonusCheckpoint(t *testing.T, throughVersion int64) (*PostgresRepository, time.Time) {
 	t.Helper()
-	r := retainedWalletFenceActors(t).repository(t)
+	r := retainedWalletFenceActors(t).repositoryThroughVersion(t, throughVersion, nil)
 	ctx := context.Background()
 	now := time.Now().UTC().Truncate(time.Microsecond)
 	r.now = func() time.Time { return now }
@@ -81,7 +82,7 @@ func registrationBonusCheckpointSnapshot(t *testing.T, r *PostgresRepository) st
 }
 
 func TestRegistrationBonusEligibilityCheckpointPostgresIntegration(t *testing.T) {
-	r, snapshotAt := registrationBonusCheckpoint(t)
+	r, snapshotAt := registrationBonusCheckpoint(t, 0)
 	ctx := context.Background()
 	before := registrationBonusCheckpointSnapshot(t, r)
 	for _, keyID := range []string{"different-key", "checkpoint-key"} {
@@ -170,7 +171,7 @@ func TestRegistrationBonusCheckpointForeignFactsPostgresIntegration(t *testing.T
 		t.Run(map[bool]string{false: "unbound-existing-facts", true: "foreign-key-before-finalize"}[bound], func(t *testing.T) {
 			var r *PostgresRepository
 			if bound {
-				r, _ = registrationBonusCheckpoint(t)
+				r, _ = registrationBonusCheckpoint(t, 0)
 			} else {
 				r = retainedWalletFenceActors(t).repository(t)
 				if err := r.ConfigureRegistrationBonusFingerprint("checkpoint-key", bytes.Repeat([]byte{0x51}, 32)); err != nil {
@@ -198,7 +199,7 @@ func TestRegistrationBonusCheckpointForeignFactsPostgresIntegration(t *testing.T
 }
 
 func TestRegistrationBonusCheckpointGuardsPostgresIntegration(t *testing.T) {
-	r, _ := registrationBonusCheckpoint(t)
+	r, _ := registrationBonusCheckpoint(t, 900015)
 	ctx := context.Background()
 	before := registrationBonusCheckpointSnapshot(t, r)
 	for _, mutation := range []map[string]string{
@@ -236,8 +237,9 @@ func TestRegistrationBonusCheckpointGuardsPostgresIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The current chain refuses at its new forward-only head. Exercise the
-	// original checkpoint guard independently so that refusal cannot mask it.
+	// Verify the 900015 chain and its refusal. Exercise the original checkpoint
+	// guard independently so the later refusal cannot mask it.
+	loaded = slices.DeleteFunc(loaded, func(m migrations.Migration) bool { return m.Version > 900015 })
 	assertHistoricalRollbackRefusal(t, r, loaded, 900014, "P0001", "registration bonus eligibility facts exist; destructive rollback is forbidden")
 	if err = accountschema.DownOne(ctx, connection, loaded); err == nil || !strings.Contains(err.Error(), "organization evidence truncate protection is forward-only") {
 		t.Fatalf("public down discarded a committed checkpoint: %v", err)

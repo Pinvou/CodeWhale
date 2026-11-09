@@ -2073,7 +2073,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
     def test_provider_quota_requires_migration_send_and_verify(self):
         root = "TestProviderQuotaConcurrentBoundary"
         self.assertIn(root, RUNNER.ACCOUNT_CHILD_REQUIRED)
-        expected = {"migration-round-trip", "send", "verify"}
+        expected = {"migration-round-trip", "send", "verify", "login-registration", "login-profile"}
         self.assertEqual(RUNNER.EXACT_REQUIRED_CHILDREN[root], expected)
         events = self.events({root}, RUNNER.ACCOUNT_PACKAGE, children=True)
         options = {"package": RUNNER.ACCOUNT_PACKAGE, "require_children": True, "exact_roots": True}

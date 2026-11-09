@@ -21,6 +21,13 @@ const (
 )
 
 func (r *PostgresRepository) CreateRegistrationOperation(ctx context.Context, operation RegistrationOperation, challenge SMSChallenge) error {
+	_, err := retrySMSAdmission(ctx, func() (struct{}, error) {
+		return struct{}{}, r.createRegistrationOperation(ctx, operation, challenge)
+	})
+	return err
+}
+
+func (r *PostgresRepository) createRegistrationOperation(ctx context.Context, operation RegistrationOperation, challenge SMSChallenge) error {
 	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
 	if err != nil {
 		return err
