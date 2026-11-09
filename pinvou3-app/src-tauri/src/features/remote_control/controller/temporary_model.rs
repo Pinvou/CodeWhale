@@ -1,7 +1,8 @@
 //! `temporary_model_package/v1` construction, validation and cleanup (DEV-15).
 //!
 //! A exports one task-scoped API-key route; B keeps it in memory only, bound to
-//! `connection_id + controller_lease_id + lease_epoch + task_id`, and releases
+//! `connection_id + controller_lease_id + lease_epoch + relay_epoch +
+//! remote_control_generation + task_id`, and releases
 //! it on every terminal path. Nothing here can carry a `credential_ref`,
 //! OAuth/cookie/subscription state or a host path, and a missing package is a
 //! hard failure — the task never falls back to a B model.
