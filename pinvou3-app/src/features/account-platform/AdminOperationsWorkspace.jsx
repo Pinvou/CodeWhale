@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import { secureRequestID } from './request-id.js';
 import { integerMoney } from './finance-contract.js';
+import { ledgerMicrocreditsToPoints } from './ledger-amount-input.js';
 import { bonusRevision, MAX_BONUS_POINTS, registrationBonusReasonIsValid, registrationBonusFormIsValid } from './registration-bonus-contract.js';
 import { readBonusPending, persistBonusPending, clearBonusPending, bonusAttemptProvesNoWrite } from './registration-bonus-recovery.js';
 
@@ -96,6 +97,7 @@ function clearReauthenticationDraft() {
 
 export function AdminOperationsWorkspace({ client, copy, language = 'en', permissions = EMPTY_PERMISSIONS, currentUserID = '', authorizationRefreshing = false, authorizationRefreshGuard = null }) {
   const labels = copy.operations;
+  const editor = labels.policyEditor;
   const permissionSet = new Set(permissions);
   const canManage = permissionSet.has('platform.registration-bonus.manage');
   const canRead = permissionSet.has('platform.registration-bonus.read');
@@ -122,12 +124,13 @@ export function AdminOperationsWorkspace({ client, copy, language = 'en', permis
     } catch { pendingWrite.current = null; setRecoveryBlocked(true); }
   }, [currentUserID]);
   const [policy, setPolicy] = useState(null);
+  const [policyReadStale, setPolicyReadStale] = useState(false);
   const [form, setForm] = useState(() => policyForm());
   const [state, setState] = useState({ loading: true, saving: false, error: '', errorCode: '', notice: '' });
   const initialPolicyReadPending = useRef(false);
   initialPolicyReadPending.current = !policy && state.loading;
 
-  const load = useCallback(async (signal, { fresh = false } = {}) => {
+  const load = useCallback(async (signal, { fresh = false, confirmedOriginal = false } = {}) => {
     const request = ++loadGeneration.current;
     setState((value) => ({ ...value, loading: true, error: '', errorCode: '', notice: '' }));
     try {
@@ -139,6 +142,7 @@ export function AdminOperationsWorkspace({ client, copy, language = 'en', permis
       const usableDraft = draftCleared && !draftExpired ? draft : null;
       const draftConflict = Boolean(usableDraft && usableDraft.expectedRevision !== bonusRevision(result.revision));
       setPolicy(result);
+      setPolicyReadStale(false);
       setForm(usableDraft?.form || policyForm(result));
       formOwnerUserID.current = usableDraft?.userID || currentUserIDRef.current;
       if (returnAttemptID.current) {
@@ -154,10 +158,13 @@ export function AdminOperationsWorkspace({ client, copy, language = 'en', permis
       });
       return true;
     } catch (error) {
-      if (mountedRef.current && request === loadGeneration.current && currentUserID === currentUserIDRef.current) setState({ loading: false, saving: false, error: labels.loadFailed, errorCode: error?.code || '', notice: '' });
+      if (mountedRef.current && request === loadGeneration.current && currentUserID === currentUserIDRef.current) {
+        setPolicyReadStale(true);
+        setState({ loading: false, saving: false, error: confirmedOriginal ? labels.policyEditor.originalSavedReadFailed : labels.loadFailed, errorCode: error?.code || '', notice: '' });
+      }
       return false;
     }
-  }, [client, currentUserID, labels.loadFailed, labels.reauthenticationDraftCleanupFailed, labels.reauthenticationDraftConflict, labels.reauthenticationDraftExpired]);
+  }, [client, currentUserID, labels.loadFailed, labels.policyEditor.originalSavedReadFailed, labels.reauthenticationDraftCleanupFailed, labels.reauthenticationDraftConflict, labels.reauthenticationDraftExpired]);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -221,7 +228,7 @@ export function AdminOperationsWorkspace({ client, copy, language = 'en', permis
         }
         if (!mountedRef.current) return;
         const reconciliationGeneration = Number(authorizationRefreshGuard?.current?.generation || 0);
-        loaded = await load(undefined, { fresh: true });
+        loaded = await load(undefined, { fresh: true, confirmedOriginal: confirmed });
         if (!authorizationRefreshGuard?.current?.active && Number(authorizationRefreshGuard?.current?.generation || 0) === reconciliationGeneration) break;
       }
       if (loaded && mountedRef.current && confirmed) setState((value) => ({ ...value, notice: labels.saveReconciled }));
@@ -274,12 +281,13 @@ export function AdminOperationsWorkspace({ client, copy, language = 'en', permis
       if (replayingUnknown) {
         // A replay receipt is the original result, which may no longer be the
         // active policy. Confirm it, then show current authoritative facts.
-        const loaded = await load(undefined, { fresh: true });
+        const loaded = await load(undefined, { fresh: true, confirmedOriginal: true });
         if (refreshInterrupted()) { await reconcileAfterAuthorizationRefresh(true); return; }
         if (loaded) setState(value => ({ ...value, notice: labels.saveReconciled }));
         return;
       }
       setPolicy(updated);
+      setPolicyReadStale(false);
       setForm(policyForm(updated));
       setState({ loading: false, saving: false, error: '', errorCode: '', notice: labels.saved });
     } catch (error) {
@@ -317,6 +325,38 @@ export function AdminOperationsWorkspace({ client, copy, language = 'en', permis
 
   const valid = registrationBonusFormIsValid(form);
   const eligibilityReady = policy?.eligibility_status === 'READY';
+  const canCompare = Boolean(policy && canManage && formOwnerUserID.current === currentUserID);
+  const baseForm = canCompare ? policyForm(policy) : null;
+  const activePoints = policy ? (integerMoney(policy.amount_microcredits) === 0n ? '0' : ledgerMicrocreditsToPoints(policy.amount_microcredits)) : '';
+  const statusLabel = (enabled) => enabled ? editor.on : editor.off;
+  const enteredAmount = form.amount_points.trim() !== '' && Number.isSafeInteger(Number(form.amount_points))
+    && Number(form.amount_points) >= 0 && Number(form.amount_points) <= MAX_BONUS_POINTS;
+  const enteredDays = form.validity_days.trim() !== '' && Number.isInteger(Number(form.validity_days))
+    && Number(form.validity_days) >= 1 && Number(form.validity_days) <= 3650;
+  const changes = !baseForm ? [] : [
+    baseForm.enabled !== form.enabled && [labels.enabled, statusLabel(baseForm.enabled), statusLabel(form.enabled)],
+    enteredAmount && Number(baseForm.amount_points) !== Number(form.amount_points)
+      && [labels.amount, editor.points(activePoints), editor.points(String(Number(form.amount_points)))],
+    enteredDays && Number(baseForm.validity_days) !== Number(form.validity_days)
+      && [labels.validityDays, editor.days(baseForm.validity_days), editor.days(String(Number(form.validity_days)))],
+  ].filter(Boolean);
+  const legacyAmountNote = canCompare && enteredAmount && activePoints !== baseForm.amount_points
+    && Number(baseForm.amount_points) === Number(form.amount_points);
+  const needsReload = ['REGISTRATION_BONUS_DRAFT_CONFLICT', 'REGISTRATION_BONUS_DRAFT_CLEANUP_FAILED', 'REGISTRATION_BONUS_DRAFT_IDENTITY_CHANGED'].includes(state.errorCode);
+  const saveDisabled = unknownWrite || recoveryBlocked || state.saving || authorizationRefreshing || !valid || needsReload || (form.enabled && !eligibilityReady);
+  const saveExplanation = state.saving ? editor.saving
+    : recoveryBlocked ? labels.pendingStorageFailed
+    : unknownWrite ? labels.outcomeUnknown
+    : authorizationRefreshing ? editor.refreshingAuthorization
+    : state.errorCode === 'RECENT_AUTHENTICATION_REQUIRED' ? labels.recentAuthenticationRequired
+    : state.errorCode === 'REGISTRATION_BONUS_DRAFT_CLEANUP_FAILED' ? labels.reauthenticationDraftCleanupFailed
+    : state.errorCode === 'REGISTRATION_BONUS_DRAFT_IDENTITY_CHANGED' ? labels.reauthenticationDraftIdentityChanged
+    : state.errorCode === 'REGISTRATION_BONUS_DRAFT_CONFLICT' || state.errorCode === 'REGISTRATION_BONUS_CONFLICT' ? editor.reloadForConflict
+    : form.enabled && !eligibilityReady ? labels.eligibilityNotReady
+    : !enteredAmount || !enteredDays ? editor.checkValues
+    : !registrationBonusReasonIsValid(form.reason) ? editor.checkReason
+    : '';
+  const saveStatusID = useId();
   const reauthenticate = () => {
     if (pendingWrite.current?.actor === currentUserID && canManage) {
       // The durable original command already retains its actor/key/body. A
@@ -421,18 +461,23 @@ export function AdminOperationsWorkspace({ client, copy, language = 'en', permis
       <header className="adm-section-head"><div><h2>{labels.title}</h2><p>{labels.lead}</p></div></header>
       <div className="adm-inline-message warn" role="note">{labels.lifetimeWarning}</div>
       {pendingDraft && <div className="adm-inline-message warn adm-registration-bonus-draft-prompt" role="status"><span>{labels.unfinishedReauthenticationDraft}</span><div><button type="button" onClick={recoverPendingDraft} disabled={state.loading || !policy}>{labels.recoverDraft}</button><button type="button" onClick={discardPendingDraft}>{labels.discardDraft}</button></div></div>}
-      {(unknownWrite || recoveryBlocked) && !state.error && <div className="adm-inline-message error" role="alert"><span>{recoveryBlocked ? labels.pendingStorageFailed : labels.outcomeUnknown}</span>{unknownWrite && canManage && <button type="button" disabled={state.saving || authorizationRefreshing || recoveryBlocked} onClick={() => void save()}>{labels.retryUnknown}</button>}{unknownWrite && !canManage && canRead && <button type="button" disabled={state.loading || authorizationRefreshing || recoveryBlocked} onClick={() => void load()}>{copy.retry}</button>}</div>}
+      {((unknownWrite && !state.saving) || recoveryBlocked) && !state.error && <div className="adm-inline-message error" role="alert"><span>{recoveryBlocked ? labels.pendingStorageFailed : labels.outcomeUnknown}</span>{unknownWrite && canManage && <button type="button" disabled={state.saving || authorizationRefreshing || recoveryBlocked} onClick={() => void save()}>{labels.retryUnknown}</button>}{unknownWrite && !canManage && canRead && <button type="button" disabled={state.loading || authorizationRefreshing || recoveryBlocked} onClick={() => void load()}>{copy.retry}</button>}</div>}
       {state.error && <div className="adm-inline-message error" role="alert"><span>{state.error}</span><button type="button" onClick={errorAction.run} disabled={state.loading || state.saving || authorizationRefreshing || (errorAction.read ? !canRead : !canManage) || (errorAction.save && (!valid || (form.enabled && !eligibilityReady))) || recoveryBlocked}>{errorAction.label}</button></div>}
       {state.notice && <div className="adm-inline-message ok" role="status">{state.notice}</div>}
       {state.loading && <p className="adm-muted">{copy.loading}</p>}
       {!state.loading && policy && (
         <form className="adm-sms-form" onSubmit={save}>
+          <h3 className="adm-registration-bonus-policy-heading">{policyReadStale ? editor.lastRead : editor.current}</h3>
           <dl className="adm-registration-bonus-summary">
             <div><dt>{labels.revision}</dt><dd>{policy.revision}</dd></div>
             <div><dt>{labels.updatedAt}</dt><dd>{new Date(policy.updated_at).toLocaleString(locale)}</dd></div>
+            <div><dt>{labels.enabled}</dt><dd>{statusLabel(policy.enabled)}</dd></div>
+            <div><dt>{labels.amount}</dt><dd>{editor.points(activePoints)}</dd></div>
+            <div><dt>{labels.validityDays}</dt><dd>{editor.days(policy.validity_days)}</dd></div>
           </dl>
           <div className={`adm-inline-message ${eligibilityReady ? 'ok' : 'warn'}`} role="status" data-testid="registration-bonus-readiness">{eligibilityReady ? labels.eligibilityReady : labels.eligibilityBlocked.replace('{count}', String(policy.unrecoverable_registration_count || 0))}</div>
           <div className="adm-registration-bonus-editor">
+            {canManage && <h3 className="adm-registration-bonus-policy-heading">{editor.draft}</h3>}
             <label className="adm-sms-switch"><input type="checkbox" checked={form.enabled} disabled={!canManage || unknownWrite || recoveryBlocked || state.saving || (!eligibilityReady && !form.enabled)} onChange={(event) => setForm((value) => ({ ...value, enabled: event.target.checked }))} /><span>{labels.enabled}</span></label>
             <div className="adm-sms-fields">
               <label><span>{labels.amount}</span><input required type="number" min="0" step="1" value={form.amount_points} disabled={!canManage || unknownWrite || recoveryBlocked || state.saving} onChange={(event) => setForm((value) => ({ ...value, amount_points: event.target.value }))} /></label>
@@ -440,7 +485,15 @@ export function AdminOperationsWorkspace({ client, copy, language = 'en', permis
             </div>
             {canManage && <label className="adm-sms-reason"><span>{labels.reason}</span><textarea required rows="4" value={form.reason} disabled={unknownWrite || recoveryBlocked || state.saving} onChange={(event) => setForm((value) => ({ ...value, reason: event.target.value }))} placeholder={labels.reasonPlaceholder} /></label>}
             {!canManage && <div className="adm-inline-message info" role="status">{labels.readOnly}</div>}
-            {canManage && <div className="adm-registration-bonus-actions"><button type="submit" className="adm-primary-button" disabled={unknownWrite || recoveryBlocked || state.saving || authorizationRefreshing || !valid || state.errorCode === 'REGISTRATION_BONUS_DRAFT_CONFLICT' || state.errorCode === 'REGISTRATION_BONUS_DRAFT_CLEANUP_FAILED' || state.errorCode === 'REGISTRATION_BONUS_DRAFT_IDENTITY_CHANGED' || (form.enabled && !eligibilityReady)}>{state.saving ? labels.saving : labels.save}</button></div>}
+            {canCompare && !unknownWrite && !recoveryBlocked && <div className="adm-registration-bonus-diff" aria-label={editor.compare}>
+              {changes.length > 0 ? <><h4>{editor.compare}</h4><ul>{changes.map(([field, oldValue, newValue]) => <li key={field}><strong>{field}</strong><span>{editor.before}: {oldValue}</span><span>{editor.after}: {newValue}</span></li>)}</ul></>
+                : enteredAmount && enteredDays && <p>{editor.noChanges}</p>}
+              {legacyAmountNote && <p>{editor.legacyPrecision(editor.points(activePoints), editor.points(baseForm.amount_points))}</p>}
+            </div>}
+            {canManage && <div className="adm-registration-bonus-actions">
+              {saveExplanation && <p id={saveStatusID} className="adm-registration-bonus-save-status" role="status">{saveExplanation}</p>}
+              <button type="submit" className="adm-primary-button" disabled={saveDisabled} aria-describedby={saveExplanation ? saveStatusID : undefined}>{state.saving ? labels.saving : labels.save}</button>
+            </div>}
           </div>
         </form>
       )}

@@ -107,6 +107,19 @@ test('all three languages provide every policy and recovery label without fallba
   const keys = Object.keys(adminPlatformCopy.zh.operations).sort();
   for (const language of ['zh','en','ja']) {
     assert.deepEqual(Object.keys(adminPlatformCopy[language].operations).sort(), keys);
-    assert.ok(Object.values(adminPlatformCopy[language].operations).every(value => typeof value === 'string' && value.trim()));
+    const checkLabels = (reference, actual, prefix = 'operations') => {
+      assert.deepEqual(Object.keys(actual).sort(), Object.keys(reference).sort(), prefix);
+      for (const [key, expected] of Object.entries(reference)) {
+        const value = actual[key], label = prefix + '.' + key;
+        assert.equal(typeof value, typeof expected, label);
+        if (typeof expected === 'object' && expected !== null) checkLabels(expected, value, label);
+        else if (typeof expected === 'function') {
+          const rendered = value('12', '34');
+          assert.equal(typeof rendered, 'string', label);
+          assert.ok(rendered.trim() && !rendered.includes('undefined'), label);
+        } else assert.ok(typeof value === 'string' && value.trim(), label);
+      }
+    };
+    checkLabels(adminPlatformCopy.zh.operations, adminPlatformCopy[language].operations);
   }
 });
