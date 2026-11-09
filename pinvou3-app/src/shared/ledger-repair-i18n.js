@@ -1060,3 +1060,6 @@ ledgerRepairCopy.ja.chargebackTask = {
   "target": "確認済みのチャージバック案件の UUID を入力します。",
   "factsFailed": "チャージバックの確認用スナップショットを読み込めませんでした。案件と決済証拠を確認して再試行してください。"
 };
+Object.assign(ledgerRepairCopy.zh, { usageSettlementTask: {"lead":"填写对应的用量引用，加载结算快照并核对，再提交修复审批。","load":"加载用量结算快照","technical":"技术信息","submit":"提交结算修复审批","submitting":"正在提交审批…","submitted":"已确认送审。审批编号："} });
+Object.assign(ledgerRepairCopy.en, { usageSettlementTask: {"lead":"Enter the usage references, load and review the settlement snapshot, then submit the repair for approval.","load":"Load usage settlement snapshot","technical":"Technical information","submit":"Submit settlement repair for approval","submitting":"Submitting for approval…","submitted":"Approval submission confirmed. Approval ID:"} });
+Object.assign(ledgerRepairCopy.ja, { usageSettlementTask: {"lead":"利用量の参照情報を入力し、精算スナップショットを取得して確認してから修復の承認を申請します。","load":"利用量の精算スナップショットを読み込む","technical":"技術情報","submit":"精算修復を承認申請","submitting":"承認申請を送信中…","submitted":"承認申請の送信を確認しました。承認 ID："} });
