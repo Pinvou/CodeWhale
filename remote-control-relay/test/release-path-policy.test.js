@@ -83,6 +83,44 @@ const criticalPaths = [
   ".github/workflows/pr-check.yml",
 ];
 
+test("a change to one remote dispatch or authority entry routes all release checks", async () => {
+  const pr = await readFile(new URL("../../.github/workflows/pr-check.yml", import.meta.url), "utf8");
+  const release = await readFile(new URL("../../.github/workflows/release-packages.yml", import.meta.url), "utf8");
+  const routes = [
+    ["PR release_contract", releaseContractPatterns(pr)],
+    ["release push", workflowTriggerPathPatterns(release, "push")],
+    ["release pull_request", workflowTriggerPathPatterns(release, "pull_request")],
+  ];
+  // Derive the cases from the production dispatch and composition boundaries,
+  // independently of the policy list so a missing entry fails this test.
+  for (const path of [
+    "pinvou3-app/src-tauri/src/lib.rs",
+    "pinvou3-app/src-tauri/src/features/sessions/application/dispatch_remote.rs",
+    "pinvou3-app/src-tauri/src/features/sessions/application/project_remote.rs",
+    "pinvou3-app/src-tauri/src/features/sessions/application/submit_controlled.rs",
+    "pinvou3-app/src-tauri/src/features/assistant/remote_turn.rs",
+    "pinvou3-app/src-tauri/src/features/codex_acp/mod.rs",
+    "pinvou3-app/src-tauri/src/features/codex_acp/operation_gate.rs",
+    "pinvou3-app/src-tauri/src/features/codex_acp/remote_ownership.rs",
+    "pinvou3-app/src-tauri/src/features/codex_acp/remote_turn.rs",
+  ]) {
+    assert.equal(changedPathsRequireRemoteControlRelease(`${path}\n`), true, `release diff misses ${path}`);
+    for (const [route, patterns] of routes) {
+      assert.ok(patterns.some((pattern) => globMatches(pattern, path)), `${route} misses ${path}`);
+    }
+  }
+  for (const path of [
+    "pinvou3-app/src-tauri/src/features/assistant/multiagent_regression_tests.rs",
+    "pinvou3-app/src-tauri/src/features/codex_acp/install.rs",
+    "pinvou3-app/src-tauri/src/features/sessions/application/admission.rs",
+  ]) {
+    assert.equal(changedPathsRequireRemoteControlRelease(`${path}\n`), false, `release diff overmatches ${path}`);
+    for (const [route, patterns] of routes) {
+      assert.ok(!patterns.some((pattern) => globMatches(pattern, path)), `${route} overmatches ${path}`);
+    }
+  }
+});
+
 test("single release path policy covers every remote-control security boundary", () => {
   for (const path of criticalPaths) assert.equal(isRemoteControlReleasePath(path), true, path);
   assert.equal(changedPathsRequireRemoteControlRelease(`docs/unrelated.md\n${criticalPaths[0]}\n`), true);
