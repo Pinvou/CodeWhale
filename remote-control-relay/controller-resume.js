@@ -513,6 +513,7 @@ export class ControllerResumeHooks {
     state.phase = "committing";
     let cleanupOwner = lease;
     let cleanupSettled = false;
+    let deliveryLatencyMs;
     return Object.freeze({
       deliveries: Object.freeze([delivery("A", resumedA), delivery("B", resumedB)]),
       commit: async () => {
@@ -532,9 +533,6 @@ export class ControllerResumeHooks {
           tokenA: state.candidate.tokenA,
           tokenB: state.candidate.tokenB,
           resumeDeadlineMs: String(resumeDeadline),
-          latencyMs: state.resumeStartedAt === null
-            ? undefined
-            : Math.max(0, now(this.#clock) - state.resumeStartedAt),
         });
         cleanupOwner = updated;
         const retired = Object.freeze({ activationId: state.activationId, accepted: new Map(state.accepted) });
@@ -551,16 +549,21 @@ export class ControllerResumeHooks {
         return Object.freeze({ lease: updated });
       },
       beforeDelivery: () => {
-        if (now(this.#clock) >= state.deadline) fail("controller_resume_deadline_expired");
+        const timestamp = now(this.#clock);
+        if (timestamp >= state.deadline) fail("controller_resume_deadline_expired");
         const installed = this.#states.get(lease.controller_lease_id);
         if (!installed?.awaitingDelivery || installed.leaseOwner !== cleanupOwner
           || this.#leaseManager.lease(lease.controller_lease_id) !== cleanupOwner) {
           fail("controller_lease_not_found");
         }
+        if (state.resumeStartedAt !== null) deliveryLatencyMs = Math.max(0, timestamp - state.resumeStartedAt);
       },
       finalize: () => {
         const installed = this.#states.get(lease.controller_lease_id);
-        if (installed?.leaseOwner === cleanupOwner) installed.awaitingDelivery = false;
+        if (installed?.leaseOwner === cleanupOwner && installed.awaitingDelivery) {
+          installed.awaitingDelivery = false;
+          this.#leaseManager.reportResumeDelivery(cleanupOwner, deliveryLatencyMs);
+        }
         cleanupSettled = true;
       },
       abort: async () => {

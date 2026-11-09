@@ -19,7 +19,7 @@ function publicKey() {
     .subarray(-32).toString("base64");
 }
 
-function fixture({ startClock = 1_000, onLeaseTerminated = async () => {},
+function fixture({ startClock = 1_000, onLeaseTerminated = async () => {}, audit = () => {},
   consumeForControllerLease = async (value) => value } = {}) {
   let clock = startClock;
   const pairing = Object.freeze({
@@ -47,6 +47,7 @@ function fixture({ startClock = 1_000, onLeaseTerminated = async () => {},
     signTranscript: (preimage) => crypto.sign(null, preimage, crypto.generateKeyPairSync("ed25519").privateKey),
     resolveControlledEndpoint: async () => ({ socketIdentity: "old-socket-B" }),
     clock: () => clock,
+    audit,
     onLeaseTerminated,
   });
   const hooks = new ControllerResumeHooks({
@@ -646,7 +647,10 @@ test("commit failure invokes the same terminal cleanup path", async () => {
 });
 
 test("router commits the rotated revision and gates business through both final sends", async () => {
-  const value = fixture();
+  let completions = 0;
+  const value = fixture({ audit: (event) => {
+    if (event === "controller_resume_completed") completions += 1;
+  } });
   const sent = new Map([["new-socket-A", []], ["new-socket-B", []]]);
   const router = new ControllerRouter({
     pairingRegistrationHandler: { register: async (message) => message },
@@ -657,6 +661,7 @@ test("router commits the rotated revision and gates business through both final 
         assert.equal(current.liveness_epoch_a, message.liveness_epoch_a);
         assert.equal(current.resume_deadline_ms, message.resume_deadline_ms);
         assert.equal(value.hooks.isBusinessAllowed(message.controller_lease_id), false);
+        assert.equal(completions, 0);
       }
       sent.get(socket).push(message);
       return true;
@@ -724,6 +729,7 @@ test("router commits the rotated revision and gates business through both final 
   assert.equal(updated.sockets.A, "new-socket-A");
   assert.equal(updated.sockets.B, "new-socket-B");
   assert.equal(value.hooks.isBusinessAllowed(lease.controller_lease_id), true);
+  assert.equal(completions, 1);
 });
 
 test("losing either final delivery terminates instead of leaving an active lease", async () => {
@@ -1067,8 +1073,10 @@ test("each accepted resume delivery failure releases the authoritative lease and
   ];
   for (const [failedType, failedRole] of failures) {
     let notifications = 0;
+    let completions = 0;
     const value = await routedFixture({
       onLeaseTerminated: async () => { notifications += 1; },
+      audit: (event) => { if (event === "controller_resume_completed") completions += 1; },
       send: (socket, message) => !(message.type === failedType && socket === `new-socket-${failedRole}`),
     });
     const run = async () => {
@@ -1082,6 +1090,7 @@ test("each accepted resume delivery failure releases the authoritative lease and
     assert.equal(value.hooks.phase(value.committed.lease.controller_lease_id), null);
     assert.equal(value.liveness.resumeDeadline(value.committed.lease), null);
     assert.equal(notifications, 1);
+    assert.equal(completions, 0);
     for (const role of ["A", "B"]) {
       await assert.rejects(value.router.handle({ socketIdentity: `new-socket-${role}`, message: { type: "controller_disconnect" } }), /controller_role_invalid/u);
     }
