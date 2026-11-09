@@ -595,3 +595,10 @@
 .adm-restored-shell .adm-token-recovery-state{padding:12px 16px;color:var(--adm-muted);line-height:1.45}
 .adm-restored-shell .adm-token-recovery-queue :is(summary,button,input):focus{outline:3px solid var(--adm-primary);outline-offset:2px}
 @media(max-width:480px){.adm-restored-shell .adm-token-recovery-search form,.adm-restored-shell .adm-token-recovery-current{grid-template-columns:minmax(0,1fr)}}
+
+.adm-restored-shell .adm-token-account-overview .adm-token-detail-metrics-help{margin:10px 0 0;color:var(--adm-muted);font-size:12px;line-height:1.45}
+.adm-restored-shell .adm-token-detail-technical{min-width:0;margin-top:12px;padding:0 12px 2px;border:1px solid var(--adm-line);border-radius:10px;background:var(--adm-surface)}
+.adm-restored-shell .adm-token-detail-technical>summary{min-height:44px;padding:12px 0;color:var(--adm-text);font-weight:650;cursor:pointer}
+.adm-restored-shell .adm-token-detail-technical>summary:focus{outline:3px solid var(--adm-primary);outline-offset:2px}
+.adm-restored-shell .adm-token-detail-technical>.adm-model-detail-facts{grid-template-columns:repeat(2,minmax(0,1fr));margin:0 0 10px}
+@media(max-width:480px){.adm-restored-shell .adm-token-detail-technical>.adm-model-detail-facts{grid-template-columns:minmax(0,1fr)}}

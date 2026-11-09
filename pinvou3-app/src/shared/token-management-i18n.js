@@ -655,3 +655,22 @@ Object.assign(tokenManagementCopy.ja.modelToken, {
   "tokenAccountProvisioning": "プロビジョニング履歴",
   "tokenAccountProvisioningItem": "プロビジョニングタスク"
 });
+
+Object.assign(tokenManagementCopy.zh.modelToken, {
+  "tokenAccountSnapshotTime": "数据快照时间",
+  "tokenAccountSnapshotUnknown": "数据快照时间未提供",
+  "tokenAccountRecordTime": "账户记录更新时间",
+  "tokenAccountTechnical": "账户技术信息"
+});
+Object.assign(tokenManagementCopy.en.modelToken, {
+  "tokenAccountSnapshotTime": "Data snapshot time",
+  "tokenAccountSnapshotUnknown": "Data snapshot time not provided",
+  "tokenAccountRecordTime": "Account record updated",
+  "tokenAccountTechnical": "Account technical details"
+});
+Object.assign(tokenManagementCopy.ja.modelToken, {
+  "tokenAccountSnapshotTime": "データのスナップショット時刻",
+  "tokenAccountSnapshotUnknown": "データのスナップショット時刻は未提供",
+  "tokenAccountRecordTime": "アカウントレコードの更新時刻",
+  "tokenAccountTechnical": "アカウントの技術情報"
+});
