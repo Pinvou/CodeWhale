@@ -18,6 +18,7 @@ use tauri::{Listener as _, Manager as _};
 use tokio_util::sync::CancellationToken;
 
 use super::{AcpPool, AcpSession, RemotePermissionOwner};
+use crate::features::remote_control::controller::controlled::PERMISSION_DISPATCH_DEFERRED;
 use crate::features::remote_control::controller::journal::{
     JournalKind, StreamingTextSanitizer, sanitize_text,
 };
@@ -28,7 +29,7 @@ use crate::features::remote_control::controller::task::{
     RemoteTaskState, TASK_CANCELLED_CODE, TaskLeaseBinding,
 };
 use crate::features::remote_control::controller::transfer::download::ArtifactDescriptor;
-use crate::features::remote_control::controller::turn_budget::TurnBudget;
+use crate::features::remote_control::controller::turn_budget::{TURN_TIMEOUT_CODE, TurnBudget};
 
 const POLL_INTERVAL: Duration = Duration::from_millis(200);
 const BUSY_GRACE: Duration = Duration::from_secs(5);
@@ -599,15 +600,29 @@ impl AcpPoolCodeTurnPort {
                         .pool
                         .respond_remote_permission(owner, approval_id, allow)
                         .await;
-                    if resolution.is_err()
-                        && self
-                            .pool
-                            .pending_remote_permissions(owner)
-                            .await
-                            .iter()
-                            .any(|pending| pending.approval_id.as_deref() == Some(approval_id))
-                    {
-                        return Err("permission_dispatch_failed".to_owned());
+                    if let Err(error) = resolution {
+                        let code = error.to_string();
+                        if code == PERMISSION_DISPATCH_DEFERRED {
+                            continue;
+                        }
+                        if matches!(code.as_str(), TURN_TIMEOUT_CODE | TASK_CANCELLED_CODE) {
+                            return Err(code);
+                        }
+                        if (allow
+                            && !self.permission_authority.allow_delivery_observed(
+                                &owner.lease,
+                                &owner.task_id,
+                                approval_id,
+                            ))
+                            || self
+                                .pool
+                                .pending_remote_permissions(owner)
+                                .await
+                                .iter()
+                                .any(|pending| pending.approval_id.as_deref() == Some(approval_id))
+                        {
+                            return Err("permission_dispatch_failed".to_owned());
+                        }
                     }
                 }
                 continue;
@@ -669,6 +684,15 @@ impl AcpPoolCodeTurnPort {
                 .permission_authority
                 .view(request_id)
                 .map_err(|error| error.code.to_owned())?;
+            if view.state == "allowed"
+                && !self.permission_authority.allow_delivery_observed(
+                    &owner.lease,
+                    &owner.task_id,
+                    request_id,
+                )
+            {
+                return Err("permission_dispatch_failed".to_owned());
+            }
             events.emit_journal(
                 JournalKind::Permission,
                 &owner.session_id,

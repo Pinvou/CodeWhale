@@ -66,7 +66,7 @@ use agent_client_protocol::schema::v1::{
     SessionModeState, SessionNotification, SetSessionConfigOptionRequest, SetSessionModeRequest,
     StopReason, ToolKind,
 };
-use agent_client_protocol::{Agent, ByteStreams, Client, ConnectionTo};
+use agent_client_protocol::{Agent, ByteStreams, Client, ConnectionTo, Responder};
 use agent_probe::{CliProbeCache, CliProbeGates, ResolvedCli};
 use anyhow::{Context, Result, anyhow, bail};
 use auth_probe::{AgentAuthProbeState, CachedAuthStatus};
@@ -1219,7 +1219,31 @@ struct PendingPermission {
     turn_id: Option<String>,
     activity: stall::ActivityClock,
     response_tx: oneshot::Sender<RequestPermissionResponse>,
+    sdk_responder: Option<Responder<RequestPermissionResponse>>,
     bridge: Option<EventBridge>,
+}
+
+impl PendingPermission {
+    fn respond(self, response: RequestPermissionResponse) -> Result<()> {
+        if let Some(responder) = self.sdk_responder {
+            if self.response_tx.is_closed() {
+                bail!("remote_permission_closed");
+            }
+            // The ACP connection must accept the real response before an
+            // allow receipt is written. The local channel only wakes cleanup.
+            let accepted = responder
+                .respond(response)
+                .map_err(|_| anyhow!("remote_permission_closed"));
+            let _ = self.response_tx.send(RequestPermissionResponse::new(
+                RequestPermissionOutcome::Cancelled,
+            ));
+            accepted
+        } else {
+            self.response_tx
+                .send(response)
+                .map_err(|_| anyhow!("remote_permission_closed"))
+        }
+    }
 }
 
 /// Exact owner of ACP interactive requests raised by a controller-sourced code
@@ -1323,23 +1347,33 @@ async fn insert_pending_permission(
     let mut pending = pending.lock().await;
     let owners = owners.lock();
     let bridge = request.bridge.clone();
+    let mut request = Some(request);
     let insert = || {
+        let candidate = request.as_ref().expect("permission insertion runs once");
         if !owners
-            .callback_owner(&request.view.session_id, identity)
-            .is_ok_and(|current| current.as_ref() == request.remote_owner.as_ref())
+            .callback_owner(&candidate.view.session_id, identity)
+            .is_ok_and(|current| current.as_ref() == candidate.remote_owner.as_ref())
         {
-            let _ = request.response_tx.send(RequestPermissionResponse::new(
-                RequestPermissionOutcome::Cancelled,
-            ));
             return false;
         }
-        pending.insert(key, request);
+        let candidate = request.take().expect("checked permission candidate");
+        if let Some(previous) = pending.insert(key, candidate) {
+            let _ = previous.respond(RequestPermissionResponse::new(
+                RequestPermissionOutcome::Cancelled,
+            ));
+        }
         true
     };
-    match bridge {
+    let inserted = match bridge {
         Some(bridge) => bridge.with_active_runtime(insert).unwrap_or(false),
         None => insert(),
+    };
+    if let Some(request) = request {
+        let _ = request.respond(RequestPermissionResponse::new(
+            RequestPermissionOutcome::Cancelled,
+        ));
     }
+    inserted
 }
 
 async fn take_pending_elicitation(
@@ -5411,7 +5445,7 @@ impl AcpPool {
                     }
                 });
             }
-            let _ = request.response_tx.send(RequestPermissionResponse::new(
+            let _ = request.respond(RequestPermissionResponse::new(
                 RequestPermissionOutcome::Cancelled,
             ));
         }
@@ -5485,8 +5519,7 @@ impl AcpPool {
         bridge
             .with_active_runtime(|| -> Result<()> {
                 request
-                    .response_tx
-                    .send(response)
+                    .respond(response)
                     .map_err(|_| anyhow::anyhow!("Codex ACP 权限请求已关闭"))?;
                 bridge.emit(
                     "permission_resolved",
@@ -5521,12 +5554,15 @@ impl AcpPool {
         let (runtime, turn_id) = owners
             .active_runtime(owner)
             .context("remote_permission_binding_stale")?;
+        let (budget, cancel) = owners
+            .dispatch_budget(owner)
+            .context("remote_permission_binding_stale")?;
         let key = remote_permission_response_key(&pending, owner, permission_request_id)
             .context("remote_permission_binding_stale")?;
         let request = pending
             .get(&key)
             .context("remote_permission_binding_stale")?;
-        if request.turn_id.as_deref() != Some(turn_id.as_str()) {
+        if request.turn_id.as_deref() != Some(turn_id.as_str()) || request.sdk_responder.is_none() {
             bail!("remote_permission_binding_stale");
         }
         let tool_call_id = request.view.tool_call_id.clone();
@@ -5545,23 +5581,32 @@ impl AcpPool {
                 None if !allow => (RequestPermissionOutcome::Cancelled, "cancelled"),
                 None => bail!("remote_permission_allow_option_missing"),
             };
+            if allow {
+                if request
+                    .sdk_responder
+                    .as_ref()
+                    .is_some_and(|responder| responder.cancellation().is_cancelled())
+                {
+                    bail!("remote_permission_closed");
+                }
+                budget.checkpoint(cancel).map_err(anyhow::Error::msg)?;
+            }
             pending
                 .remove(&key)
                 .context("remote_permission_binding_stale")?
-                .response_tx
-                .send(RequestPermissionResponse::new(response))
-                .map_err(|_| anyhow::anyhow!("remote_permission_closed"))?;
+                .respond(RequestPermissionResponse::new(response))?;
             Ok((option, outcome))
         };
         let authority = self.app.try_state::<Arc<PermissionAuthority>>();
-        let telemetry = runtime
+        let mut dispatch_telemetry = None;
+        let result = runtime
             .bridge
             .with_active_runtime(|| -> Result<_> {
-                let ((option_id, outcome), telemetry) = runtime
+                let (option_id, outcome) = runtime
                     .bridge
                     .with_current_turn(&turn_id, || -> Result<_> {
                         if !allow {
-                            return Ok((send(false)?, None));
+                            return send(false);
                         }
                         let controlled = self
                             .app
@@ -5576,7 +5621,7 @@ impl AcpPool {
                             .context("remote_permission_binding_stale")?;
                         let mut sent = None;
                         let result = controlled
-                            .with_current_business_lease(&owner.lease, || {
+                            .with_permission_dispatch_lease(&owner.lease, || {
                                 ledger.with_live_permission_task(
                                     &owner.task_id,
                                     owner.task_sequence,
@@ -5608,13 +5653,14 @@ impl AcpPool {
                                 bail!(error.code);
                             }
                         };
+                        dispatch_telemetry = telemetry;
                         match commit {
                             DispatchCommit::Committed => {
-                                Ok((sent.context("permission_dispatch_failed")??, telemetry))
+                                sent.context("permission_dispatch_failed")?
                             }
                             DispatchCommit::Rejected {
                                 code: "permission_expired",
-                            } => Ok((send(false)?, telemetry)),
+                            } => send(false),
                             DispatchCommit::Rejected { code } => bail!(code),
                         }
                     })
@@ -5627,15 +5673,16 @@ impl AcpPool {
                         "outcome": outcome,
                     }),
                 );
-                Ok(telemetry)
+                Ok(())
             })
-            .context("remote_permission_closed")??;
+            .context("remote_permission_closed")
+            .and_then(|result| result);
         drop(owners);
         drop(pending);
         if let Some(authority) = authority {
-            authority.publish_dispatch_telemetry(telemetry);
+            authority.publish_dispatch_telemetry(dispatch_telemetry);
         }
-        Ok(())
+        result
     }
 
     pub async fn respond_elicitation(
@@ -5686,7 +5733,7 @@ impl AcpPool {
             .collect::<Vec<_>>();
         for key in keys {
             if let Some(request) = pending.remove(&key) {
-                let _ = request.response_tx.send(RequestPermissionResponse::new(
+                let _ = request.respond(RequestPermissionResponse::new(
                     RequestPermissionOutcome::Cancelled,
                 ));
             }
@@ -5740,7 +5787,7 @@ impl AcpPool {
             if let Some(request) = pending.remove(&key) {
                 stall::mark_activity(&request.activity);
                 cancelled.push(request.view.tool_call_id.clone());
-                let _ = request.response_tx.send(RequestPermissionResponse::new(
+                let _ = request.respond(RequestPermissionResponse::new(
                     RequestPermissionOutcome::Cancelled,
                 ));
             }
@@ -6293,6 +6340,12 @@ impl AcpPool {
                             request: request_value.clone(),
                         };
                         let (response_tx, response_rx) = oneshot::channel();
+                        let mut local_responder = Some(responder);
+                        let sdk_responder = if remote_owner.is_some() {
+                            local_responder.take()
+                        } else {
+                            None
+                        };
                         let callback_instance = Arc::new(());
                         if !insert_pending_permission(
                             &pending_for_permission,
@@ -6312,14 +6365,17 @@ impl AcpPool {
                                 turn_id: bridge_for_permission.current_turn_id(),
                                 activity: bridge_for_permission.activity(),
                                 response_tx,
+                                sdk_responder,
                                 bridge: Some(bridge_for_permission.clone()),
                             },
                         )
                         .await
                         {
-                            return responder.respond(RequestPermissionResponse::new(
-                                RequestPermissionOutcome::Cancelled,
-                            ));
+                            return local_responder.map_or(Ok(()), |responder| {
+                                responder.respond(RequestPermissionResponse::new(
+                                    RequestPermissionOutcome::Cancelled,
+                                ))
+                            });
                         }
                         bridge_for_permission.emit(
                             "permission_requested",
@@ -6344,7 +6400,7 @@ impl AcpPool {
                         // the stall clock. Without this reset, answering an
                         // old card can immediately cancel healthy follow-up
                         // work using the time spent waiting for the user.
-                        responder.respond(response)
+                        local_responder.map_or(Ok(()), |responder| responder.respond(response))
                     },
                     agent_client_protocol::on_receive_request!(),
                 )
@@ -7662,6 +7718,7 @@ mod tests {
             turn_id: None,
             activity: stall::new_activity_clock(),
             response_tx: oneshot::channel().0,
+            sdk_responder: None,
             bridge: None,
         };
         let elicitation = |generation: u64| PendingElicitation {
@@ -8667,6 +8724,7 @@ mod tests {
                     bridge: None,
                     callback_instance: Arc::new(()),
                     response_tx,
+                    sdk_responder: None,
                 },
             )]));
             let owners =
@@ -8834,6 +8892,7 @@ mod tests {
             activity: stall::new_activity_clock(),
             bridge: None,
             response_tx,
+            sdk_responder: None,
         };
         let permission_clock = Arc::new(std::sync::atomic::AtomicU64::new(9_001_000));
         let observed = Arc::clone(&permission_clock);
@@ -9091,6 +9150,7 @@ mod tests {
             turn_id: Some("new-turn".into()),
             activity: stall::new_activity_clock(),
             response_tx,
+            sdk_responder: None,
             bridge: None,
             callback_instance: Arc::new(()),
         };
@@ -9703,6 +9763,7 @@ mod tests {
                 turn_id: None,
                 activity: activity.clone(),
                 response_tx,
+                sdk_responder: None,
                 bridge: None,
             },
         );
@@ -9730,6 +9791,159 @@ mod tests {
             "removing a user decision must reset the stall clock immediately"
         );
         drop(request);
+    }
+
+    #[tokio::test]
+    async fn remote_permission_receipt_requires_the_actual_sdk_response_queue() {
+        use crate::features::remote_control::controller::permission::{
+            DecisionAuthority, DispatchCommit, PermissionAuthority, PermissionDecision,
+            PermissionRequest,
+        };
+        use crate::features::remote_control::controller::protocol::LeaseContext;
+        use agent_client_protocol::schema::v1::RequestId;
+        use agent_client_protocol::{Channel, RawJsonRpcMessage, TransportFrame};
+        use futures_util::StreamExt as _;
+
+        for disconnect in [false, true] {
+            let (transport, mut peer) = Channel::duplex();
+            let (responder_tx, responder_rx) = oneshot::channel();
+            let responder_tx = Mutex::new(Some(responder_tx));
+            let connection = tokio::spawn(async move {
+                Client
+                    .builder()
+                    .on_receive_request(
+                        async move |_request: RequestPermissionRequest, responder, _cx| {
+                            assert!(
+                                responder_tx
+                                    .lock()
+                                    .await
+                                    .take()
+                                    .unwrap()
+                                    .send(responder)
+                                    .is_ok()
+                            );
+                            Ok(())
+                        },
+                        agent_client_protocol::on_receive_request!(),
+                    )
+                    .connect_with(transport, async move |_: ConnectionTo<Agent>| {
+                        std::future::pending::<agent_client_protocol::Result<()>>().await
+                    })
+                    .await
+            });
+            let frame = RawJsonRpcMessage::request(
+                "session/request_permission".into(),
+                json!({
+                    "sessionId": "sdk-session",
+                    "toolCall": {"toolCallId": "sdk-tool"},
+                    "options": [{"optionId": "allow", "name": "Allow", "kind": "allow_once"}]
+                }),
+                RequestId::Number(1),
+            )
+            .unwrap();
+            peer.tx
+                .unbounded_send(TransportFrame::Single(frame))
+                .unwrap();
+            let sdk_responder = tokio::time::timeout(Duration::from_secs(5), responder_rx)
+                .await
+                .expect("SDK did not dispatch the typed permission callback")
+                .unwrap();
+            let connection = if disconnect {
+                connection.abort();
+                assert!(connection.await.unwrap_err().is_cancelled());
+                None
+            } else {
+                Some(connection)
+            };
+
+            let authority = PermissionAuthority::with_clock(Arc::new(|| 1_100));
+            let lease = LeaseContext {
+                connection_id: "connection-1".into(),
+                controller_lease_id: "lease-1".into(),
+                lease_epoch: "1".into(),
+                relay_epoch: "relay-1".into(),
+                remote_control_generation: "generation-1".into(),
+            };
+            let task_id = "task-0001";
+            let approval = authority
+                .request(
+                    &lease,
+                    task_id,
+                    PermissionRequest {
+                        operation_type: "shell_command".into(),
+                        risk_level: "high".into(),
+                        target_scope: "workspace-0001".into(),
+                        preview: "test approval".into(),
+                        expires_at_ms: 61_000,
+                    },
+                    1_000,
+                )
+                .unwrap()
+                .permission_request_id;
+            authority
+                .decide(
+                    DecisionAuthority::ControllerA,
+                    &lease,
+                    task_id,
+                    &approval,
+                    PermissionDecision::Allow,
+                    1_100,
+                )
+                .unwrap();
+
+            let (response_tx, response_rx) = oneshot::channel();
+            let request = PendingPermission {
+                callback_instance: Arc::new(()),
+                view: CodexAcpPendingPermission {
+                    session_id: "sdk-session".into(),
+                    tool_call_id: "sdk-tool".into(),
+                    request: Value::Null,
+                },
+                option_ids: vec!["allow".into()],
+                option_kinds: HashMap::new(),
+                remote_owner: None,
+                remote_request_id: None,
+                remote_approval_id: Some(approval.clone()),
+                remote_projection: None,
+                generation: 1,
+                turn_id: None,
+                activity: stall::new_activity_clock(),
+                bridge: None,
+                response_tx,
+                sdk_responder: Some(sdk_responder),
+            };
+            let outcome = authority.dispatch_bound_allow(&lease, task_id, &approval, || {
+                request
+                    .respond(RequestPermissionResponse::new(
+                        RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new("allow")),
+                    ))
+                    .is_ok()
+            });
+            // Even when SDK delivery fails, the callback cleanup gets its wake signal.
+            assert!(response_rx.await.is_ok());
+            assert_eq!(
+                authority.allow_delivery_observed(&lease, task_id, &approval),
+                !disconnect
+            );
+            if let Some(connection) = connection {
+                assert_eq!(outcome.unwrap().0, DispatchCommit::Committed);
+                let Some(TransportFrame::Single(response)) =
+                    tokio::time::timeout(Duration::from_secs(5), peer.rx.next())
+                        .await
+                        .unwrap()
+                else {
+                    panic!("SDK did not send a permission response");
+                };
+                let response = serde_json::to_value(response).unwrap();
+                assert_eq!(response["id"], 1);
+                assert_eq!(response["result"]["outcome"]["optionId"], "allow");
+                connection.abort();
+                assert!(connection.await.unwrap_err().is_cancelled());
+            } else {
+                assert_eq!(outcome.unwrap_err().code, "permission_dispatch_failed");
+                assert!(peer.rx.next().await.is_none());
+            }
+        }
     }
 
     #[tokio::test]
@@ -9771,6 +9985,7 @@ mod tests {
             activity: stall::new_activity_clock(),
             bridge: None,
             response_tx,
+            sdk_responder: None,
         };
         // Deterministic barrier: the callback has captured its remote owner,
         // but cannot insert until terminal cleanup has removed that owner.

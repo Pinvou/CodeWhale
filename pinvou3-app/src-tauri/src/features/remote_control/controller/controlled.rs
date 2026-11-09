@@ -22,6 +22,8 @@ use super::protocol::LeaseContext;
 use super::relay_transport::ControllerTransportSender;
 use super::resume::{ControllerResumeGate, ResumePhase};
 
+pub(crate) const PERMISSION_DISPATCH_DEFERRED: &str = "permission_dispatch_deferred";
+
 /// A and B use different physical transports. Both must consume a real,
 /// current-reader final proof; absence of either implementation fails closed.
 pub(crate) trait ControlledTransportAuthority: Send + Sync {
@@ -1835,19 +1837,43 @@ impl ControlledDeviceManager {
         expected: &LeaseContext,
         action: impl FnOnce() -> T,
     ) -> Result<T> {
-        self.with_current_business_inner(expected, |_| action())
+        self.with_current_business_inner(expected, false, |_| action())
+    }
+
+    /// A queued decision can wait for the same retained lease to recover.
+    /// No mutation is admitted during the pause or for a replacement lease.
+    pub(crate) fn with_permission_dispatch_lease<T>(
+        &self,
+        expected: &LeaseContext,
+        action: impl FnOnce() -> T,
+    ) -> Result<T> {
+        self.with_current_business_inner(expected, true, |_| action())
     }
 
     fn with_current_business_inner<T>(
         &self,
         expected: &LeaseContext,
+        defer_permission: bool,
         action: impl FnOnce(&Inner) -> T,
     ) -> Result<T> {
         let inner = self.inner.lock();
-        if inner.phase != ControlledStatusKind::Connected
-            || inner.lease_context.as_ref() != Some(expected)
-        {
+        if inner.lease_context.as_ref() != Some(expected) {
             return Err(ControlledStateError::new("desktop_remote_not_connected"));
+        }
+        if inner.phase != ControlledStatusKind::Connected {
+            let code = if defer_permission
+                && inner.reconnect_reason.is_some()
+                && matches!(
+                    inner.phase,
+                    ControlledStatusKind::Reconnecting
+                        | ControlledStatusKind::ResumeProvisional
+                        | ControlledStatusKind::ResumeActivatedPendingLiveness
+                ) {
+                PERMISSION_DISPATCH_DEFERRED
+            } else {
+                "desktop_remote_not_connected"
+            };
+            return Err(ControlledStateError::new(code));
         }
         let Some(transport) = inner.transport.as_ref() else {
             return Err(ControlledStateError::new("desktop_remote_not_connected"));
@@ -1869,7 +1895,7 @@ impl ControlledDeviceManager {
     /// Capture only an owner already issued to this exact authenticated lease.
     /// The journal revalidates it at the final operation after this lock exits.
     pub(crate) fn business_journal_owner(&self, expected: &LeaseContext) -> Result<JournalOwner> {
-        self.with_current_business_inner(expected, |inner| inner.journal_owner.clone())?
+        self.with_current_business_inner(expected, false, |inner| inner.journal_owner.clone())?
             .ok_or_else(|| ControlledStateError::new("desktop_remote_not_connected"))
     }
 
@@ -3198,6 +3224,25 @@ mod tests {
             manager.mark_transport_disconnected(5_000).status,
             ControlledStatusKind::Reconnecting
         );
+        let never_dispatch = || -> () { panic!("a paused or foreign lease must not dispatch") };
+        assert_eq!(
+            manager
+                .with_permission_dispatch_lease(&current.context, never_dispatch)
+                .unwrap_err()
+                .code,
+            PERMISSION_DISPATCH_DEFERRED
+        );
+        let foreign = LeaseContext {
+            connection_id: "foreign-connection".into(),
+            ..current.context.clone()
+        };
+        assert_eq!(
+            manager
+                .with_permission_dispatch_lease(&foreign, never_dispatch)
+                .unwrap_err()
+                .code,
+            "desktop_remote_not_connected"
+        );
         let material = manager.begin_resume(operation.clone(), 6_000).unwrap();
         assert_eq!(material.relay_deadline_identity_ms, 30_000);
         assert!(format!("{material:?}").contains("[REDACTED]"));
@@ -3249,6 +3294,13 @@ mod tests {
             assert_eq!(manager.status().status, expected);
             assert_eq!(
                 manager
+                    .with_permission_dispatch_lease(&current.context, never_dispatch)
+                    .unwrap_err()
+                    .code,
+                PERMISSION_DISPATCH_DEFERRED
+            );
+            assert_eq!(
+                manager
                     .with_local_cancel_lease(|lease| lease.remote_control_generation.clone())
                     .unwrap(),
                 operation.generation
@@ -3275,6 +3327,12 @@ mod tests {
             )
             .unwrap();
         assert_eq!(resumed.status, ControlledStatusKind::Connected);
+        assert_eq!(
+            manager
+                .with_permission_dispatch_lease(&current.context, || "accepted")
+                .unwrap(),
+            "accepted"
+        );
         let (_, resumed_owner) = manager.local_journal_context().unwrap();
         assert_eq!(
             journal

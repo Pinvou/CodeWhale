@@ -6,6 +6,9 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
 
 use anyhow::{Context, Result, bail};
+use tokio_util::sync::CancellationToken;
+
+use crate::features::remote_control::controller::turn_budget::TurnBudget;
 
 use super::{AcpPool, AcpSession, RemotePermissionOwner, operation_gate};
 
@@ -55,7 +58,11 @@ impl Drop for PromptFlight {
 
 enum Phase {
     Reserved,
-    Submitted(String),
+    Submitted {
+        turn_id: String,
+        budget: TurnBudget,
+        cancel: CancellationToken,
+    },
     Closing(Option<String>),
 }
 
@@ -173,7 +180,7 @@ impl RemoteTurnRegistry {
         if !Arc::ptr_eq(&binding.identity, identity) {
             bail!("remote_turn_runtime_stale");
         }
-        let Phase::Submitted(turn_id) = &binding.phase else {
+        let Phase::Submitted { turn_id, .. } = &binding.phase else {
             bail!("remote_turn_not_submitted");
         };
         let runtime = binding
@@ -203,10 +210,24 @@ impl RemoteTurnRegistry {
             return None;
         }
         let binding = self.0.get(&owner.session_id)?;
-        let Phase::Submitted(turn) = &binding.phase else {
+        let Phase::Submitted { turn_id, .. } = &binding.phase else {
             return None;
         };
-        Some((binding.runtime.upgrade()?, turn.clone()))
+        Some((binding.runtime.upgrade()?, turn_id.clone()))
+    }
+
+    pub(super) fn dispatch_budget(
+        &self,
+        owner: &RemotePermissionOwner,
+    ) -> Option<(&TurnBudget, &CancellationToken)> {
+        let binding = self.0.get(&owner.session_id)?;
+        if binding.owner != *owner {
+            return None;
+        }
+        let Phase::Submitted { budget, cancel, .. } = &binding.phase else {
+            return None;
+        };
+        Some((budget, cancel))
     }
 
     fn bind(
@@ -214,7 +235,8 @@ impl RemoteTurnRegistry {
         owner: &RemotePermissionOwner,
         identity: &Arc<RuntimeIdentity>,
         turn: &str,
-        cancel: &tokio_util::sync::CancellationToken,
+        cancel: &CancellationToken,
+        budget: TurnBudget,
     ) -> Option<PromptFlight> {
         let binding = self.0.get_mut(&owner.session_id)?;
         if cancel.is_cancelled()
@@ -225,7 +247,11 @@ impl RemoteTurnRegistry {
         {
             return None;
         }
-        binding.phase = Phase::Submitted(turn.to_owned());
+        binding.phase = Phase::Submitted {
+            turn_id: turn.to_owned(),
+            budget,
+            cancel: cancel.clone(),
+        };
         Some(PromptFlight::new(identity))
     }
 
@@ -256,7 +282,7 @@ impl RemoteTurnRegistry {
         let runtime = binding.runtime.upgrade()?;
         let turn = match &binding.phase {
             Phase::Reserved => None,
-            Phase::Submitted(turn) => Some(turn.clone()),
+            Phase::Submitted { turn_id, .. } => Some(turn_id.clone()),
             Phase::Closing(turn) => turn.clone(),
         };
         binding.phase = Phase::Closing(turn.clone());
@@ -390,8 +416,8 @@ impl RemoteTurnReservation {
         content: &str,
         display_content: &str,
         attachments: &[crate::features::files::file_ingest::IngestResult],
-        cancel: &tokio_util::sync::CancellationToken,
-        budget: crate::features::remote_control::controller::turn_budget::TurnBudget,
+        cancel: &CancellationToken,
+        budget: TurnBudget,
     ) -> Result<()> {
         verify_frozen_remote_mode(
             &self.pool.session_store,
@@ -429,7 +455,13 @@ impl RemoteTurnReservation {
                         ),
                     )?;
                     let flight = owners
-                        .bind(&self.owner, &self.runtime.identity, &self.turn_id, cancel)
+                        .bind(
+                            &self.owner,
+                            &self.runtime.identity,
+                            &self.turn_id,
+                            cancel,
+                            budget,
+                        )
                         .context("remote_turn_reservation_stale")?;
                     self.submitted = true;
                     crate::features::assistant::timing::start_turn(&self.owner.session_id);
@@ -641,7 +673,8 @@ mod tests {
                             &selected,
                             &identity,
                             "never-started",
-                            &tokio_util::sync::CancellationToken::new()
+                            &tokio_util::sync::CancellationToken::new(),
+                            TurnBudget::for_test(std::time::Duration::from_secs(60)),
                         )
                         .is_none()
                 );
@@ -693,7 +726,8 @@ mod tests {
                         &selected,
                         &identity,
                         "never-started",
-                        &tokio_util::sync::CancellationToken::new()
+                        &tokio_util::sync::CancellationToken::new(),
+                        TurnBudget::for_test(std::time::Duration::from_secs(60)),
                     )
                     .is_none()
             );
@@ -809,6 +843,7 @@ mod tests {
                 &identity,
                 "remote-turn-exact",
                 &tokio_util::sync::CancellationToken::new(),
+                TurnBudget::for_test(std::time::Duration::from_secs(60)),
             )
             .unwrap();
         assert!(
@@ -817,7 +852,8 @@ mod tests {
                     &owner,
                     &identity,
                     "remote-turn-retry",
-                    &tokio_util::sync::CancellationToken::new()
+                    &tokio_util::sync::CancellationToken::new(),
+                    TurnBudget::for_test(std::time::Duration::from_secs(60)),
                 )
                 .is_none(),
             "one-shot submit"
@@ -848,6 +884,7 @@ mod tests {
                 &identity,
                 "remote-turn-exact",
                 &tokio_util::sync::CancellationToken::new(),
+                TurnBudget::for_test(std::time::Duration::from_secs(60)),
             )
             .unwrap();
         assert!(
@@ -881,6 +918,37 @@ mod tests {
                 .is_none()
         );
         drop(flight);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn permission_dispatch_uses_only_the_original_turn_deadline_and_cancellation() {
+        use std::time::Duration;
+
+        let identity = Arc::new(RuntimeIdentity::default());
+        let owner = owner("remote");
+        let mut registry = RemoteTurnRegistry::test_reserved(owner.clone(), &identity);
+        let mut successor = owner.clone();
+        successor.task_sequence += 1;
+        let cancel = CancellationToken::new();
+        let budget = TurnBudget::for_test(Duration::from_secs(10));
+        assert!(registry.dispatch_budget(&owner).is_none());
+        tokio::time::advance(Duration::from_secs(9)).await;
+        let _flight = registry
+            .bind(&owner, &identity, "turn", &cancel, budget)
+            .unwrap();
+        assert!(registry.dispatch_budget(&successor).is_none());
+        let (budget, bound_cancel) = registry.dispatch_budget(&owner).unwrap();
+        assert!(budget.checkpoint(bound_cancel).is_ok());
+        tokio::time::advance(Duration::from_secs(1)).await;
+        assert_eq!(
+            budget.checkpoint(bound_cancel).unwrap_err(),
+            "task_turn_timeout"
+        );
+        cancel.cancel();
+        assert_eq!(
+            budget.checkpoint(bound_cancel).unwrap_err(),
+            "task_cancelled"
+        );
     }
 
     #[test]
@@ -963,7 +1031,13 @@ mod tests {
         cancel.cancel();
         assert!(
             registry
-                .bind(&owner, &identity, "must-not-start", &cancel)
+                .bind(
+                    &owner,
+                    &identity,
+                    "must-not-start",
+                    &cancel,
+                    TurnBudget::for_test(std::time::Duration::from_secs(60))
+                )
                 .is_none()
         );
         assert_eq!(identity.flights.load(Ordering::Acquire), 0);
@@ -992,6 +1066,7 @@ mod tests {
                 &identity,
                 "remote-turn-exact",
                 &tokio_util::sync::CancellationToken::new(),
+                TurnBudget::for_test(std::time::Duration::from_secs(60)),
             )
             .unwrap();
         assert!(
