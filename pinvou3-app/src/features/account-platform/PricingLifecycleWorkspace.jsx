@@ -5,6 +5,7 @@ import { pricingUnknownSnapshot, pricingUnknownStateSnapshot, storePricingUnknow
 import { secureRequestID } from './request-id.js';
 import { ConfiguredPriceUnits, PricingDate, PricingIdentifiers, ResolvedPriceEvidence } from './AdminPriceListPresentation.jsx';
 import { PricingActionImpact } from './PricingActionImpact.jsx';
+import { exactPricingInteger, MeteringBasis, PricingReadProgress } from './PricingTechnicalPresentation.jsx';
 import React, { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { buildPriceDraftInput, matchingContinuationDrafts, newModelPriceAllowed, priceDraftForm, priceSpaceQuery, priceTransitionModes, pricingLifecycleMutationLock, publishedPricingFormulas } from './pricing-lifecycle.js';
 
@@ -39,6 +40,7 @@ export function PricingLifecycleWorkspace({ copy, client, permissions, owner, co
   const labels = copy.billing.pricingLifecycle;
   const listWords = labels.listPresentation;
   const { language } = listWords;
+  const technicalWords = labels.technicalPresentation;
   const contextual = Boolean(contextModel?.model_id && contextFormula?.formula_version_id);
   const [priceAccessDenied, setPriceAccessDenied] = useState(false);
   const canManage = new Set(permissions || []).has('platform.pricing.manage') && !priceAccessDenied && recoveryScopeCurrent;
@@ -676,13 +678,13 @@ export function PricingLifecycleWorkspace({ copy, client, permissions, owner, co
           <label>{labels.formulaSearch}<input maxLength="160" value={formulaQuery} disabled={Boolean(loading.formulas || unknownMutation)} onChange={event => setFormulaQuery(event.target.value)} /></label>
           <button type="submit" disabled={Boolean(loading.formulas || unknownMutation)}>{labels.formulaSearchAction}</button>
         </form>
-        {formulaPage.has_more !== null && !errors.formulas && <p>{formulaPage.has_more ? labels.formulaPageMore : labels.formulaPageEnd}</p>}
         {formulaPageExpired && <p role="alert">{labels.formulaPageExpired}</p>}
-        <div className="adm-row-actions">
+        <nav className="adm-row-actions adm-pricing-resource-tools" aria-label={technicalWords.formulaPages}>
           <button type="button" disabled={!formulaPage.has_more || Boolean(loading.formulas || errors.formulas || formulaPageExpired || unknownMutation)} onClick={() => void loadProtocols({ q: activeFormulaQuery, cursor: formulaPage.next_cursor }).catch(() => {})}>{labels.formulaNext}</button>
           {errors.formulas && !formulaPageExpired && <button type="button" disabled={Boolean(loading.formulas || unknownMutation)} onClick={() => void loadProtocols(formulaAttempt.current).catch(() => {})}>{labels.formulaRetry}</button>}
           <button type="button" disabled={Boolean(loading.formulas || unknownMutation)} onClick={() => void loadProtocols({ q: activeFormulaQuery }).catch(() => {})}>{labels.formulaRestart}</button>
-        </div>
+          {!formulaPageExpired && <PricingReadProgress loaded={updatedAt.formulas} pending={loading.formulas} failed={errors.formulas} words={technicalWords}>{formulaPage.has_more ? labels.formulaPageMore : labels.formulaPageEnd}</PricingReadProgress>}
+        </nav>
       </section>}
       {!publishedPricingFormulas(protocols).length && !loading.formulas && !errors.formulas && (contextual || formulaPage.has_more === false) && <div className="adm-inline-message">{activeFormulaQuery ? labels.formulaSearchEmpty : labels.noPublishedFormula}</div>}
 
@@ -713,16 +715,16 @@ export function PricingLifecycleWorkspace({ copy, client, permissions, owner, co
       )}
 
       <section className="adm-finance-subpanel">
-        <header className="adm-pricing-panel-head"><div><h3>{labels.priceVersions}</h3><p>{contextual ? labels.modelPriceVersionsLead : labels.priceVersionsLead}</p></div><div className="adm-row-actions"><span>{labels.returnedCount(prices.length)}</span>{updatedAt.prices && <small>{labels.lastUpdated} {updatedAt.prices.toLocaleString()}</small>}<button type="button" onClick={() => void loadPrices().catch(() => {})} disabled={loading.prices || priceNavigationLocked}>{copy.refresh}</button></div></header>
-        {!contextual && <nav className="adm-row-actions" aria-label={labels.pricePages}>
+        <header className="adm-pricing-panel-head"><div><h3>{labels.priceVersions}</h3><p>{contextual ? labels.modelPriceVersionsLead : labels.priceVersionsLead}</p></div><div className="adm-row-actions">{updatedAt.prices && !errors.prices && !loading.prices && <span>{labels.returnedCount(prices.length)}</span>}{updatedAt.prices && <small>{labels.lastUpdated} {updatedAt.prices.toLocaleString()}</small>}<button type="button" onClick={() => void loadPrices().catch(() => {})} disabled={loading.prices || priceNavigationLocked}>{copy.refresh}</button></div></header>
+        {!contextual && <nav className="adm-row-actions adm-pricing-resource-tools" aria-label={labels.pricePages}>
           <button type="button" disabled={loading.prices || priceNavigationLocked || pricePage.index === 0} onClick={() => void loadPrices({ cursors: pricePage.cursors.slice(0, pricePage.index), index: pricePage.index - 1 }).catch(() => {})}>{labels.pricePrevious}</button>
           <button type="button" disabled={loading.prices || priceNavigationLocked || !pricePage.has_more} onClick={() => void loadPrices({ cursors: [...pricePage.cursors.slice(0, pricePage.index + 1), pricePage.next_cursor], index: pricePage.index + 1 }).catch(() => {})}>{labels.priceNext}</button>
           <button type="button" disabled={loading.prices || priceNavigationLocked} onClick={() => void loadPrices({ cursors: [''], index: 0 }).catch(() => {})}>{labels.priceRestart}</button>
           {errors.prices && <button type="button" disabled={loading.prices || priceNavigationLocked} onClick={() => void loadPrices(priceAttempt.current).catch(() => {})}>{labels.priceRetry}</button>}
-          <small>{pricePage.has_more ? labels.priceMore : labels.priceEnd}</small>
+          <PricingReadProgress loaded={updatedAt.prices} pending={loading.prices} failed={errors.prices} words={technicalWords}>{technicalWords.pageNumber(pricePage.index + 1)} · {pricePage.has_more ? labels.priceMore : labels.priceEnd}</PricingReadProgress>
         </nav>}
         {/* biome-ignore lint/a11y/noNoninteractiveTabindex: This named overflow region needs keyboard focus for native table scrolling. */}
-        <div className="adm-table-wrap" tabIndex="0" role="region" aria-label={labels.priceVersions}><table className="adm-table adm-pricing-version-table"><thead><tr><th scope="col">{labels.scope}</th><th scope="col">{labels.protocolFormula}</th><th scope="col">{labels.version}</th><th scope="col">{copy.accounts.status}</th><th scope="col">{labels.effectivity}</th><th scope="col">{listWords.configuredColumn}</th><th scope="col">{labels.etag}</th><th scope="col">{copy.accounts.actions}</th></tr></thead><tbody>
+        <div className="adm-table-wrap" tabIndex="0" role="region" aria-label={labels.priceVersions}><table className="adm-table adm-pricing-version-table"><thead><tr><th scope="col">{labels.scope}</th><th scope="col">{labels.protocolFormula}</th><th scope="col">{labels.version}</th><th scope="col">{copy.accounts.status}</th><th scope="col">{labels.effectivity}</th><th scope="col">{listWords.configuredColumn}</th><th scope="col">{copy.accounts.actions}</th></tr></thead><tbody>
           {prices.map((item) => {
             const model = item.scope_type === 'MODEL' ? listModels.get(item.scope_id) : null;
             const formula = listFormulas.get(item.formula_version_id);
@@ -746,23 +748,22 @@ export function PricingLifecycleWorkspace({ copy, client, permissions, owner, co
                 {item.effective_to ? <PricingDate value={item.effective_to} language={language} missing={listWords.unavailable} /> : <small>{labels.openEnded}</small>}
               </div></td>
               <td><ConfiguredPriceUnits item={item} formula={formula} unitByID={unitByID} words={listWords} /></td>
-              <td>{item.lifecycle_status === 'DRAFT' ? item.space_etag : item.current_space_etag || item.space_etag}</td>
               <td><div className="adm-row-actions"><button type="button" onClick={() => void showPreview(item)} disabled={loading.preview}>{labels.preview}</button>{canManage && item.lifecycle_status === 'DRAFT' && <button type="button" onClick={() => void openEdit(item)} disabled={loading.prices || loading.mutation || unknownMutation || formulaAccessDenied || loading.formulaSelection}>{labels.editDraft}</button>}{canManage && item.lifecycle_status === 'DRAFT' && <button type="button" onClick={() => openPublish(item)} disabled={loading.prices || loading.mutation || unknownMutation}>{labels.publish}</button>}{canManage && ['PUBLISHED', 'ACTIVE'].includes(item.derived_status) && <button type="button" className={item.derived_status === 'ACTIVE' ? 'danger adm-pricing-risk-trigger' : ''} onClick={() => void openTransition(item)} disabled={loading.prices || loading.mutation || unknownMutation}>{item.derived_status === 'PUBLISHED' ? labels.cancelFuture : labels.endActive}</button>}</div>
-                <PricingIdentifiers label={listWords.identifiers} target={title} scope={priceContext} client={client} owner={owner} language={language} identifiers={[[listWords.priceID, item.price_version_id], [listWords.formulaID, item.formula_version_id], [listWords.modelID, item.scope_id]]} />
+                <PricingIdentifiers label={technicalWords.advanced} target={title} scope={priceContext} client={client} owner={owner} language={language} identifiers={[[listWords.priceID, item.price_version_id], [listWords.formulaID, item.formula_version_id], [listWords.modelID, item.scope_id], [technicalWords.recordETag, exactPricingInteger(item.space_etag)], [technicalWords.currentETag, exactPricingInteger(item.current_space_etag)]]} />
               </td>
             </tr>;
           })}
-          {!prices.length && !loading.prices && !errors.prices && <tr><td colSpan="8" className="adm-empty">{contextual ? labels.noModelPrices : labels.noPrices}</td></tr>}
+          {!prices.length && !loading.prices && !errors.prices && <tr><td colSpan="7" className="adm-empty">{contextual ? labels.noModelPrices : labels.noPrices}</td></tr>}
         </tbody></table></div>
       </section>
 
       {!contextual && <section className="adm-finance-subpanel">
-        <header className="adm-pricing-panel-head"><div><h3>{labels.meteringUnits}</h3><p>{labels.meteringUnitsLead}</p></div><div className="adm-row-actions"><button type="button" onClick={() => void loadUnits().catch(() => {})} disabled={loading.units || loading.recovery}>{copy.refresh}</button>{canManage && <button type="button" onClick={() => setUnitForm({ unit_code: '', minimum_precision: '1', price_denominator: '1000000', rounding_rule: 'CEILING' })} disabled={loading.mutation || unknownMutation}>{labels.createUnitVersion}</button>}</div></header>
+        <header className="adm-pricing-panel-head"><div><h3>{labels.meteringUnits}</h3><p>{labels.meteringUnitsLead}</p></div><div className="adm-row-actions adm-pricing-resource-tools"><button type="button" onClick={() => void loadUnits().catch(() => {})} disabled={loading.units || loading.recovery}>{errors.units ? copy.retry : copy.refresh}</button>{canManage && <button type="button" onClick={() => setUnitForm({ unit_code: '', minimum_precision: '1', price_denominator: '1000000', rounding_rule: 'CEILING' })} disabled={loading.mutation || unknownMutation}>{labels.createUnitVersion}</button>}<PricingReadProgress loaded={updatedAt.units} pending={loading.units} failed={errors.units} words={technicalWords}>{technicalWords.unitsLoaded(units.length)}</PricingReadProgress></div></header>
         {unitForm && <form className="adm-pricing-unit-form" onSubmit={submitUnit}><fieldset className="adm-pricing-fieldset" disabled={Boolean(loading.mutation || unknownMutation || !canManage)}><label>{labels.unitCode}<input maxLength="80" value={unitForm.unit_code} onChange={(event) => setUnitForm((current) => ({ ...current, unit_code: event.target.value }))} /></label><label>{labels.minimumPrecision}<input type="number" min="1" step="1" value={unitForm.minimum_precision} onChange={(event) => setUnitForm((current) => ({ ...current, minimum_precision: event.target.value }))} /></label><label>{labels.priceDenominator}<input type="number" min="1" step="1" value={unitForm.price_denominator} onChange={(event) => setUnitForm((current) => ({ ...current, price_denominator: event.target.value }))} /></label><label>{labels.roundingRule}<select value={unitForm.rounding_rule} onChange={(event) => setUnitForm((current) => ({ ...current, rounding_rule: event.target.value }))}><option>CEILING</option><option>FLOOR</option><option>HALF_UP</option></select></label><button disabled={loading.mutation || unknownMutation || !canManage}>{labels.createUnitVersion}</button><button type="button" disabled={Boolean(unknownMutation)} onClick={() => setUnitForm(null)}>{labels.cancel}</button></fieldset></form>}
         {/* biome-ignore lint/a11y/noNoninteractiveTabindex: This named overflow region needs keyboard focus for native table scrolling. */}
-        <div className="adm-table-wrap" tabIndex="0" role="region" aria-label={labels.meteringUnits}><table className="adm-table"><thead><tr><th>{labels.unitCode}</th><th>{labels.version}</th><th>{labels.minimumPrecision}</th><th>{labels.priceDenominator}</th><th>{labels.roundingRule}</th><th>{copy.accounts.status}</th><th>{copy.accounts.actions}</th></tr></thead><tbody>
-          {units.map((item) => <tr key={item.unit_definition_id}><td><strong>{item.unit_code}</strong><br /><code title={item.unit_definition_id}>{shortID(item.unit_definition_id)}</code></td><td>v{item.version}</td><td>{item.minimum_precision}</td><td>{item.price_denominator}</td><td>{item.rounding_rule}</td><td><PricingStatus value={item.status} /></td><td>{canManage && item.status === 'ACTIVE' ? <button type="button" className="danger adm-pricing-risk-trigger" onClick={() => openDeactivate(item)} disabled={loading.mutation || unknownMutation}>{labels.deactivate}</button> : '—'}</td></tr>)}
-          {!units.length && !loading.units && <tr><td colSpan="7" className="adm-empty">{labels.noUnits}</td></tr>}
+        <div className="adm-table-wrap" tabIndex="0" role="region" aria-label={labels.meteringUnits}><table className="adm-table adm-pricing-unit-table"><thead><tr><th scope="col">{labels.unitCode}</th><th scope="col">{labels.version}</th><th scope="col">{technicalWords.pricingBasis}</th><th scope="col">{copy.accounts.status}</th><th scope="col">{copy.accounts.actions}</th></tr></thead><tbody>
+          {units.map((item) => <tr key={item.unit_definition_id}><td><strong>{item.unit_code}</strong><PricingIdentifiers label={technicalWords.advanced} target={item.unit_code + " · v" + item.version} scope={priceContext} client={client} owner={owner} language={language} identifiers={[[technicalWords.unitID, item.unit_definition_id]]} /></td><td>v{item.version}</td><td><MeteringBasis unit={item} labels={labels} /></td><td><PricingStatus value={item.status} /></td><td>{canManage && item.status === 'ACTIVE' ? <button type="button" className="danger adm-pricing-risk-trigger" onClick={() => openDeactivate(item)} disabled={loading.mutation || unknownMutation}>{labels.deactivate}</button> : '—'}</td></tr>)}
+          {!units.length && !loading.units && !errors.units && updatedAt.units && <tr><td colSpan="5" className="adm-empty">{labels.noUnits}</td></tr>}
         </tbody></table></div>
       </section>}
 

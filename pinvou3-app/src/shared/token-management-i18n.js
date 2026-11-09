@@ -305,6 +305,80 @@ function completeTokenManagementCopy(translations) {
       }
     }
   };
+  const pricingTechnicalCopy = {
+    "zh": {
+      "advanced": "高级信息",
+      "recordETag": "此价格版本的 ETag",
+      "currentETag": "当前价格范围的 ETag",
+      "unitID": "计量单位版本 ID",
+      "pricingBasis": "计量与舍入",
+      "precision": "每组 {n} 个原始计量单位",
+      "denominator": "价格按每 {n} 组计量计",
+      "unknownBasis": "部分计量参数未提供。",
+      "example": "计算示例",
+      "exampleText": "以原始量 {q}、每 {d} 组价格 {p} 为例。先按最小精度 {m} 向上取到 {s} 组，再计算 {n}/{d}，按所选舍入规则得到 {r} 个原计价单位。",
+      "exampleUnavailable": "此单位不展示算法示例。",
+      "rounding": {
+        "CEILING": "向上舍入",
+        "FLOOR": "向下舍入",
+        "HALF_UP": "四舍五入"
+      },
+      "formulaPages": "公式分页",
+      "pageNumber": "价格第 {n} 页",
+      "initial": "等待读取",
+      "updateFailed": "最近读取失败；请使用本区的重试。",
+      "refreshing": "正在读取…",
+      "unitsLoaded": "已返回 {n} 个单位版本"
+    },
+    "en": {
+      "advanced": "Advanced information",
+      "recordETag": "Price version ETag",
+      "currentETag": "Current price scope ETag",
+      "unitID": "Metering unit version ID",
+      "pricingBasis": "Metering and rounding",
+      "precision": "{n} raw metering units per step",
+      "denominator": "Price per {n} metering steps",
+      "unknownBasis": "Some metering settings are not provided.",
+      "example": "Calculation example",
+      "exampleText": "For a raw quantity of {q} and a price of {p} per {d} steps, round up to {s} steps of size {m}. Then apply the selected rounding rule to {n}/{d} to get {r} in the rate’s credit unit.",
+      "exampleUnavailable": "No calculation example is shown for this unit.",
+      "rounding": {
+        "CEILING": "Round up",
+        "FLOOR": "Round down",
+        "HALF_UP": "Round half up"
+      },
+      "formulaPages": "Formula pages",
+      "pageNumber": "Price page {n}",
+      "initial": "Waiting to load",
+      "updateFailed": "The latest read failed. Use the retry for this section.",
+      "refreshing": "Loading…",
+      "unitsLoaded": "{n} unit versions returned"
+    },
+    "ja": {
+      "advanced": "詳細情報",
+      "recordETag": "価格バージョンの ETag",
+      "currentETag": "現在の価格範囲の ETag",
+      "unitID": "計量単位バージョン ID",
+      "pricingBasis": "計量と丸め",
+      "precision": "1 ステップあたり元の計量単位 {n} 個",
+      "denominator": "{n} ステップあたりの価格",
+      "unknownBasis": "一部の計量設定が提供されていません。",
+      "example": "計算例",
+      "exampleText": "元の数量 {q}、{d} ステップあたりの価格 {p} の例です。最小精度 {m} で切り上げて {s} ステップにし、{n}/{d} を選択した方式で丸めると、元の価格単位で {r} になります。",
+      "exampleUnavailable": "この単位の計算例は表示していません。",
+      "rounding": {
+        "CEILING": "切り上げ",
+        "FLOOR": "切り下げ",
+        "HALF_UP": "四捨五入"
+      },
+      "formulaPages": "計算式のページ",
+      "pageNumber": "価格の {n} ページ目",
+      "initial": "読み込み待ち",
+      "updateFailed": "最新の取得に失敗しました。この領域で再試行してください。",
+      "refreshing": "読み込み中…",
+      "unitsLoaded": "{n} 件の単位バージョンを取得"
+    }
+  };
   for (const language of ['zh', 'en', 'ja']) {
     const copy = translations[language].modelToken;
     const provisioningCopy = {
@@ -320,8 +394,12 @@ function completeTokenManagementCopy(translations) {
     const { pricingControls, ...modelAdditions } = additions[language];
     const list = priceListCopy[language];
     const risk = priceRiskCopy[language];
+    const technical = pricingTechnicalCopy[language];
     const fill = key => value => list[key].replace('{n}', String(value));
     Object.assign(translations[language].pricingLifecycle, pricingControls, formulaSelectionCopy[language], {
+      technicalPresentation: { ...technical, precision: value => technical.precision.replace('{n}', String(value)), denominator: value => technical.denominator.replace('{n}', String(value)),
+        pageNumber: value => technical.pageNumber.replace('{n}', String(value)), unitsLoaded: value => technical.unitsLoaded.replace('{n}', String(value)),
+        exampleText: fields => technical.exampleText.replace(/\{([a-z])\}/g, (_, key) => String(fields[key])) },
       riskPresentation: { ...risk, visibleTotals: (prices, formulas) => risk.visibleTotals.replace('{p}', String(prices)).replace('{f}', String(formulas)) },
       listPresentation: { ...list, language, perDenominator: fill("perDenominator"), unitVersion: fill("unitVersion"), formulaVersion: fill("formulaVersion") },
     });
