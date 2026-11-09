@@ -163,7 +163,7 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
     else { await logout(); }
   };
   if (reauthentication && reauthentication.ticket.client === client) return <div className="ap-shell ap-login">
-    <AccountLogin key={reauthentication.ticket.id} client={reauthenticationClient} copy={copy} reauthentication
+    <AccountLogin key={reauthentication.ticket.id} client={reauthenticationClient} copy={copy} language={language} reauthentication
       onAuthenticated={() => reauthentication.coordinator.complete(reauthentication.ticket)}
       onAuthenticationFailure={reason => reauthentication.coordinator.fail(reauthentication.ticket, reason)} />
     <button type="button" onClick={() => reauthentication.coordinator.cancel(reauthentication.ticket)}>{copy.desktopReauthenticationCancel}</button>
@@ -174,7 +174,7 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
   if (auth !== 'ready') return <div className="ap-shell ap-login">
     {error && <div className="ap-alert error" role="alert">{error}</div>}
     {auth === 'error' && <button disabled={busy} onClick={() => void refresh()}>{copy.retry}</button>}
-    {portal ? <a href={portalLoginLocation(globalThis.location?.pathname, globalThis.location?.search)}>{copy.login}</a> : <AccountLogin key={auth} client={client} copy={copy} onAuthenticated={async () => { const profile = await refresh(); if (profile) onAuthenticated?.(profile); }} />}
+    {portal ? <a href={portalLoginLocation(globalThis.location?.pathname, globalThis.location?.search)}>{copy.login}</a> : <AccountLogin key={auth} client={client} copy={copy} language={language} onAuthenticated={async () => { const profile = await refresh(); if (profile) onAuthenticated?.(profile); }} />}
     {onClose && <button onClick={onClose}>{copy.close}</button>}
   </div>;
   const rechargeAllowed = !rechargeRequest || rechargeRequest.client === client
