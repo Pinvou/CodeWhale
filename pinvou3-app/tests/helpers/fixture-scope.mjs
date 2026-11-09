@@ -69,11 +69,19 @@ export class FixtureScope {
     return this.#closing ||= (async () => {
       const failures = [];
       for (const resource of [...this.#resources].reverse()) {
-        try { await resource.closeOnly(); } catch (error) { failures.push(error); }
+        try { await resource.closeOnly(); } catch (error) {
+          // A later resource can stall until the signal watchdog exits. Keep
+          // this failure visible now, before the final aggregate is available.
+          console.error(error);
+          failures.push(error);
+        }
       }
       if (failures.length) throw new AggregateError(failures, 'fixture scope did not become clean');
       for (const resource of [...this.#resources].reverse()) {
-        try { await resource.destroy(); } catch (error) { failures.push(error); }
+        try { await resource.destroy(); } catch (error) {
+          console.error(error);
+          failures.push(error);
+        }
       }
       if (failures.length) throw new AggregateError(failures, 'fixture files could not be retired');
     })();
@@ -101,15 +109,33 @@ export function ownedDirectory(label) {
 // The supervisor handles killed processes. These hooks cover cooperative
 // cancellation and ordinary completion without replacing the primary failure.
 let stopping;
+let signalDeadline;
+// Vite's own SIGTERM callback awaits server.close() before calling process.exit.
+// During shared shutdown it must join the whole scope, not only its own lease.
+export function pendingFixtureShutdown() { return stopping; }
 async function stop(signal) {
-  if (stopping) return stopping;
-  stopping = fixtureScope.close().catch(error => {
+  if (signal && !signalDeadline) {
+    signalDeadline = setTimeout(() => {
+      console.error('fixture signal cleanup deadline exceeded; unfinished resource receipts retained');
+      process.exit(process.exitCode || 1);
+    }, 30_000);
+  }
+  stopping ||= fixtureScope.close().catch(error => {
     console.error(error);
     process.exitCode = process.exitCode || 1;
   });
   await stopping;
-  if (signal) process.exitCode = process.exitCode || (signal === 'SIGINT' ? 130 : 143);
+  if (signal) {
+    clearTimeout(signalDeadline);
+    // exitCode alone cannot stop a listener left alive by a failed close.
+    // A nonzero primary failure and unfinished receipts remain authoritative;
+    // only the owning supervisor may retire any surviving child processes.
+    process.exit(process.exitCode || (signal === 'SIGINT' ? 130 : 143));
+  }
 }
 process.once('beforeExit', () => stop());
-process.once('SIGINT', () => stop('SIGINT'));
-process.once('SIGTERM', () => stop('SIGTERM'));
+// Keep listeners present throughout async cleanup. Dependencies such as
+// signal-exit re-send the OS signal if they appear to be its sole listener.
+// stop() still shares one close promise and never resets the deadline.
+process.on('SIGINT', () => stop('SIGINT'));
+process.on('SIGTERM', () => stop('SIGTERM'));
