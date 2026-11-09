@@ -170,14 +170,15 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
     {onClose && <button type="button" onClick={() => { reauthentication.coordinator.cancel(reauthentication.ticket); onClose(); }}>{copy.close}</button>}
   </div>;
   if (auth === 'loading' || profileOwner !== client) return <div className="ap-shell ap-centered" role="status">{copy.loading}</div>;
-  if (rechargeRequest && auth !== 'ready') return <main className="ap-shell ap-app"><p role="alert">{organizationCopy[language].permissions}</p>{onClose && <button onClick={onClose}>{copy.close}</button>}</main>;
+  const personalRecharge = rechargeRequest?.contextType === 'PERSONAL' && rechargeRequest.view === 'recharge';
+  if (rechargeRequest && !personalRecharge && auth !== 'ready') return <main className="ap-shell ap-app"><p role="alert">{organizationCopy[language].permissions}</p>{onClose && <button onClick={onClose}>{copy.close}</button>}</main>;
   if (auth !== 'ready') return <div className="ap-shell ap-login">
     {error && <div className="ap-alert error" role="alert">{error}</div>}
     {auth === 'error' && <button disabled={busy} onClick={() => void refresh()}>{copy.retry}</button>}
     {portal ? <a href={portalLoginLocation(globalThis.location?.pathname, globalThis.location?.search)}>{copy.login}</a> : <AccountLogin key={auth} client={client} copy={copy} language={language} onAuthenticated={async () => { const profile = await refresh(); if (profile) onAuthenticated?.(profile); }} />}
     {onClose && <button onClick={onClose}>{copy.close}</button>}
   </div>;
-  const rechargeAllowed = !rechargeRequest || rechargeRequest.client === client
+  const rechargeAllowed = !rechargeRequest || personalRecharge || rechargeRequest.client === client
     && rechargeRequest.sessionEpoch === (client.financeSessionEpoch || 0)
     && rechargeRequest.actor === me.user_id && rechargeRequest.contextVersion === me.active_context.context_version
     && organizationRechargeTargetAllowed(me, rechargeRequest);
@@ -209,6 +210,7 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
     {me.active_context?.context_type !== 'ORGANIZATION' && <PersonalFinanceWorkspace key={`portal-finance:${me.user_id}`} client={client} me={me} language={language} presentationTargets={{ section: navigation.section, credits: creditTarget, orders: ordersTarget, feedback: financeFeedbackTarget }} onPaid={() => { if (renderedEpoch === epoch.current) return refresh(false); }} />}
     {me.active_context?.context_type === 'ORGANIZATION' && <OrganizationFinanceWorkspace key={`${me.user_id}:${me.active_context.organization_id}:${me.active_context.context_version}`} client={client} me={me} language={language} presentationTargets={{ section: navigation.section, credits: creditTarget, management: organizationFinanceTarget, feedback: financeFeedbackTarget }} />}
   </AccountPortalLayout>;
-  return <DesktopAccountCenter key={`${me.user_id}:${me.active_context.context_version}:${client.financeSessionEpoch || 0}`} client={client} me={me} balance={balance} copy={copy} language={language} onLanguageChange={onLanguageChange} busy={busy} error={error} notice={notice} rechargeRequest={rechargeRequest}
+  const desktopRechargeRequest = personalRecharge && me.active_context.context_type !== 'PERSONAL' ? null : rechargeRequest;
+  return <DesktopAccountCenter key={`${me.user_id}:${me.active_context.context_version}:${client.financeSessionEpoch || 0}`} client={client} me={me} balance={balance} copy={copy} language={language} onLanguageChange={onLanguageChange} busy={busy} error={error} notice={notice} rechargeRequest={desktopRechargeRequest}
     onRefresh={() => refresh()} onLogout={logout} onPaid={() => { if (renderedEpoch === epoch.current) return refresh(false); }} />;
 }

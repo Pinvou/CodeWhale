@@ -1,4 +1,4 @@
-import { PortalDialogScope } from './portal-dialog-scope.jsx';
+import { PortalDialogScope, usePortalDialogScope } from './portal-dialog-scope.jsx';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { OrganizationCreditOverview } from './OrganizationCreditOverview.jsx';
@@ -23,6 +23,7 @@ export function OrganizationFinanceWorkspace({ client, me, language, presentatio
  const sessionEpoch = client.financeSessionEpoch || 0;
  const owner = `${me.user_id}:${org}:${me.active_context.context_version}:${me.active_context.organization_authorization_version}:${sessionEpoch}`;
  const purchaseSection = useRef(null), focusedPurchase = useRef(null);
+ const scopeActive = usePortalDialogScope();
  const canPurchase = hasPermission(me, 'org.entitlements.purchase');
  const orderClient = useMemo(() => ({
   get financeSessionEpoch() { return client.financeSessionEpoch || 0; },
@@ -124,23 +125,24 @@ export function OrganizationFinanceWorkspace({ client, me, language, presentatio
   });
  }, [orderClient, owner, sessionEpoch, canPurchase, busy, payment.order?.order_id, payment.order?.status, payment.order?.close_status, payment.order?.expires_at]); // eslint-disable-line react-hooks/exhaustive-deps
  useEffect(() => {
-  if (!purchaseFocusRequest || focusedPurchase.current === purchaseFocusRequest || !dataReady || !canPurchase
+  if (!scopeActive || !purchaseFocusRequest || focusedPurchase.current === purchaseFocusRequest || !dataReady || !canPurchase
     || readDenied.current || purchaseFocusRequest.client !== client || purchaseFocusRequest.actor !== me.user_id
     || purchaseFocusRequest.organizationId !== org || purchaseFocusRequest.contextVersion !== me.active_context.context_version
     || purchaseFocusRequest.sessionEpoch !== sessionEpoch || (client.financeSessionEpoch || 0) !== sessionEpoch) return;
   const focus = () => {
    if (focusedPurchase.current === purchaseFocusRequest || readDenied.current || !currentView.current.canPurchase
      || currentView.current.owner !== owner || (client.financeSessionEpoch || 0) !== sessionEpoch) return;
-   if (globalThis.document?.querySelector('[role=dialog], [role=alertdialog]')) return;
    const section = purchaseSection.current;
-   if (!section) return;
+   if (!section || section.closest('[hidden], [inert]')) return;
+   const dialogs = section.ownerDocument.querySelectorAll('[role=dialog], [role=alertdialog]');
+   if (Array.from(dialogs).some(dialog => !dialog.contains(section) && !dialog.closest('[hidden], [inert]'))) return;
    focusedPurchase.current = purchaseFocusRequest;
    section.focus(); section.scrollIntoView?.({ block: 'nearest' });
   };
   focus();
   globalThis.document?.addEventListener('focusin', focus);
   return () => globalThis.document?.removeEventListener('focusin', focus);
- }, [purchaseFocusRequest, dataReady, canPurchase, client, me.user_id, me.active_context.context_version, org, sessionEpoch, owner]);
+ }, [scopeActive, purchaseFocusRequest, dataReady, canPurchase, client, me.user_id, me.active_context.context_version, org, sessionEpoch, owner]);
  const purchaseProducts = data.products.filter(product => organizationPaymentChannels(product, data.capabilities).length > 0);
  const workspace = <section className={rechargeOnly ? 'ap-recharge-only' : undefined} tabIndex={-1}>{payment.order && <RechargePaymentDialog error={error} order={payment.order} copy={financeCopy[language]} language={language} now={now} busy={busy} onDismiss={payment.dismiss} onQuery={() => void query(false)} canRestoreFocus={payment.canRestoreFocus} returnFocus={payment.trigger} />}<h3>{copy.balance}</h3><button disabled={busy} onClick={() => void refresh()}>{copy.refresh}</button>{!presentationTargets && error && <p role="alert">{error}</p>}{!presentationTargets && busy && <p role="status">{copy.loading}</p>}
   {can('org.wallet.read') && data.balance && <dl><dt>{copy.available}</dt><dd>{formatBalance(data.balance.available_microcredits, language)}</dd><dt>{copy.reserved}</dt><dd>{formatBalance(data.balance.reserved_microcredits, language)}</dd></dl>}

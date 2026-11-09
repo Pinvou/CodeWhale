@@ -15,7 +15,7 @@ try {
  browser=await puppeteer.launch({executablePath:chrome,headless:'new',userDataDir:profile,args:['--disable-gpu','--no-first-run']});
  const page=await browser.newPage();page.setDefaultTimeout(10000);const errors=[];page.on('pageerror',e=>errors.push(e.message));
  const url=`http://127.0.0.1:${vite.httpServer.address().port}/tests/fixtures/account-platform-j16-organization.html`;
- const fresh=async()=>{errors.length=0;await page.goto(url);await page.waitForFunction(()=>window.j16&&document.querySelector('button'));};
+ const fresh=async(search='')=>{errors.length=0;await page.goto(url+search);await page.waitForFunction(()=>window.j16&&document.querySelector('button'));};
  const clickNotice=()=>page.evaluate(()=>{const b=[...document.querySelectorAll('button')].find(b=>b.textContent==='Recharge now');if(!b)throw Error('notice CTA missing');b.click();});
  await fresh();await clickNotice();await page.waitForSelector('[data-organization-purchase]');
  await page.waitForFunction(()=>document.activeElement?.hasAttribute('data-organization-purchase'));
@@ -27,6 +27,8 @@ try {
  await page.$eval('[data-organization-purchase] form.ap-org-action',form=>form.requestSubmit());
  await page.waitForFunction(()=>document.querySelector('[data-organization-purchase] form.ap-org-action fieldset')?.disabled);
  await page.evaluate(()=>{window.j16.section=document.querySelector('[data-organization-purchase]');window.j16.beforeAuth=window.j16.bootstrapReads;window.j16.before=window.j16.calls.filter(c=>c.path.endsWith('/recharge/products')).length;});
+ await page.click('.ap-center-tabs button:first-child');
+ await page.waitForFunction(()=>window.j16.section.closest('[hidden]'));
  await clickNotice();await page.waitForFunction(()=>document.activeElement?.hasAttribute('data-organization-purchase'));
  assert.equal(await page.evaluate(()=>window.j16.section===document.querySelector('[data-organization-purchase]')),true);
  assert.equal(await page.evaluate(()=>window.j16.calls.filter(c=>c.path.endsWith('/recharge/products')).length===window.j16.before),true);
@@ -47,6 +49,17 @@ try {
   await fresh();await page.evaluate(bad=>{window.j16[bad]=bad==='authenticated'?false:true;},bad);await clickNotice();await page.waitForFunction(()=>document.querySelector('[data-host-error]')?.textContent);
   assert.equal(await page.$('[data-organization-purchase]'),null);assert.equal(await page.evaluate(()=>window.j16.calls.length),0);passed++;console.log('PASS no fallback or purchase dispatch for '+bad);
  }
+ await fresh('?personal-notice&personal-context');await clickNotice();
+ await page.waitForSelector('.ap-finance.ap-recharge-only', {visible:true});
+ await page.waitForFunction(()=>window.j16.personalProducts===1);
+ assert.equal(await page.$('[data-organization-purchase]'),null);passed++;console.log('PASS personal notice opens the personal recharge tab and loads its catalogue');
+ await fresh('?personal-notice');await clickNotice();
+ await page.waitForSelector('.ap-center-tabs button:first-child[aria-pressed=true]');
+ assert.equal(await page.$('[data-organization-purchase]'),null);passed++;console.log('PASS personal notice cannot open another context’s recharge tab');
+ await fresh('?background-dialog');await clickNotice();
+ await page.waitForFunction(()=>document.activeElement?.hasAttribute('data-organization-purchase'));
+ assert.equal(await page.$eval('[data-background-dialog]',node=>Boolean(node.closest('[inert]'))),true);
+ passed++;console.log('PASS isolated background dialog cannot block current organization purchase focus');
  assert.deepEqual(errors,[]);console.log(`RESULT ${passed} PASS 0 FAIL 0 SKIP`);
 } finally {if(browser)await browser.close();if(vite)await vite.close();assert.ok(profile.startsWith(path.join(os.tmpdir(),'pinvou-j16-')));fs.rmSync(profile,{recursive:true,force:true});}
 function windowOrg(){return '0199a100-0001-7000-8000-000000000201';}
