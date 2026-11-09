@@ -162,6 +162,7 @@ function Payments({ client, copy, language, permissions, owner, route }) {
     </header>}
     {visibleDetail && <article aria-labelledby={route ? frameHeading : undefined}>{!route && <h4>{copy.details}: {detail.order_id}</h4>}{route ? <AdminOrderStatusSummary detail={detail} language={language} /> : <p>{detail.status} / {detail.fulfillment_status} / {detail.attention_summary}</p>}
       {route ? <>
+        <button type="button" className="adm-name-link" disabled={operation.busy || operation.unknown} onClick={() => route.navigate('payments', { finance_tab: 'refunds', refund_q: visibleDetail.order_id, refund_status: null, refund_provider_id: null, refund_created_from: null, refund_created_to: null, refund_cursor: null, refund_id: null })}>{adminLayoutCopy[language].financeLists.refundSearch.fromOrder}</button>
         {canSyncOrder && <section className="adm-order-action-group"><h5>{orderActions.queryTitle}</h5><p>{orderActions.queryHelp}</p><button type="button" disabled={operation.busy || operation.unknown} onClick={() => void syncOrder()}>{copy.query}</button></section>}
         {detail.status === 'MANUAL_REVIEW' && canRequestOrderAction && <section className="adm-order-action-group">
           <h5>{copy.orderRepair}</h5><label>{orderActions.repairReason}<textarea disabled={operation.busy || operation.unknown} maxLength={500} value={reason} onChange={event => setReason(event.target.value)} /></label>

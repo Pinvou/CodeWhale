@@ -25,6 +25,28 @@ const adjustmentDate = (value, language) => {
   return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}:${parts.second}`;
 };
 
+function RefundProviderFilter({ label, words, value, onChange, providers }) {
+  const help = useId(), selectID = useId(), customID = useId();
+  const [manual, setManual] = useState(false);
+  const names = Object.fromEntries([...new Set(providers)].map(id => [id, Object.prototype.hasOwnProperty.call(words.providers, id) ? words.providers[id] : id]));
+  const known = value === '' || Object.prototype.hasOwnProperty.call(names, value);
+  const showManual = manual || !known;
+  return <div className="adm-refund-provider-filter">
+    <label htmlFor={selectID}>{label}</label>
+    <select id={selectID} value={showManual ? '__other_provider__' : value} aria-describedby={help} onChange={event => {
+      const id = event.target.value;
+      if (id === '__other_provider__') { setManual(true); if (known) onChange(''); }
+      else { setManual(false); onChange(id); }
+    }}>
+      <option value="">{words.allProviders}</option>
+      {Object.entries(names).map(([id, name]) => <option key={id} value={id}>{name}</option>)}
+      <option value="__other_provider__">{words.otherProvider}</option>
+    </select>
+    {showManual && <label htmlFor={customID}>{words.providerCode}<input id={customID} maxLength={200} value={value} onChange={event => onChange(event.target.value)} /></label>}
+    <small id={help}>{words.providerHelp}</small>
+  </div>;
+}
+
 const definitions = {
   receivables: { id: 'receivable_id', columns: ['receivable_id', 'wallet_id', 'original_microcredits', 'settled_microcredits', 'outstanding_microcredits', 'status'] },
   refunds: { id: 'operation_id', columns: ['operation_id', 'operation_type', 'payment_order_id', 'amount_fen', 'status', 'created_at'] },
@@ -41,6 +63,8 @@ export function AdminFinanceReadWorkspace({ kind, client, language, route, onVie
   const copy = financeCopy[language], words = adminLayoutCopy[language].financeLists, config = definitions[kind], fields = financeReadDefinition(kind).fields;
   const current = readFinanceListRoute(kind, route.search), signature = JSON.stringify(current);
   const walletHelpID = useId();
+  const refundSearchHelp = useId();
+  const refundSearch = kind === 'refunds' ? words.refundSearch : null;
   const receivableFilters = kind === 'receivables' ? words.receivableFilter : null;
   const timeWords = kind === 'receivables' ? words.receivableTime : null;
   const resultWords = kind === 'receivables' ? words.receivableResults : null;
@@ -104,6 +128,11 @@ export function AdminFinanceReadWorkspace({ kind, client, language, route, onVie
   };
   const column = key => adjustmentFacts && key === 'amount_microcredits' ? adjustmentFacts.amount : adjustmentFacts && key === 'created_at' ? adjustmentFacts.requestTime + ' (' + adjustmentZone + ')' : adjustmentFacts && key === 'effective_at' ? adjustmentFacts.effectiveTime + ' (' + adjustmentZone + ')' : words[key] || copy[key];
   const valueFor = (key, item) => {
+    if (refundSearch && key === 'payment_order_id' && route.available.includes('payments')) {
+      let id;
+      try { id = requireFinanceID(item[key]); } catch { return cell(key, item[key]); }
+      return <button type="button" className="adm-name-link" aria-label={refundSearch.viewOrder + ': ' + id} onClick={() => route.navigate('payments', { finance_tab: 'orders', order_id: id })}><code>{id}</code></button>;
+    }
     if (adjustmentLookup && ['wallet_id', 'requested_by'].includes(key)) return related(key, item[key]);
     if (adjustmentFacts && key === 'amount_microcredits') {
       const amount = formatBalance(item.amount_microcredits, language);
@@ -171,7 +200,7 @@ export function AdminFinanceReadWorkspace({ kind, client, language, route, onVie
       {visible.data.allocations && table(visible.data.allocations, ['amount_microcredits', 'created_at'])}
       {kind === 'adjustments' && onViewApproval && route.available.includes('approvals') && <button onClick={() => onViewApproval(null, { approval_command_type: 'WALLET_ADJUSTMENT', approval_target: current.selectedID })}>{copy.approvals}</button>}
     </>}</> : <><form className="adm-filter-row" onSubmit={event => { event.preventDefault(); move({ ...draft, cursor: '' }); }}>
-      {fields.map(key => adjustmentLookup && ['wallet_id', 'requested_by'].includes(key) ? <AdminAdjustmentLookup key={key} routeSignature={signature} appliedValue={current.query[key]} client={client} kind={key === 'wallet_id' ? 'wallet' : 'requester'} label={words[key]} words={adjustmentLookup} available={key === 'wallet_id' || canReadRequester} onOpenRelated={key === 'wallet_id' ? openWallet : openRequester} onDirectoryAccess={key === 'requested_by' ? onRequesterDirectoryAccess : undefined} value={draft[key] || ''} onChange={id => setDraft(value => ({ ...value, [key]: id }))} /> : timeWords && key === 'created_to' ? null : timeWords && key === 'created_from' ? <React.Fragment key={key}>{timeRange}</React.Fragment> : <label key={key}>{receivableFilters && key === 'wallet_id' ? <span id={walletHelpID + '-label'}>{words[key]}</span> : words[key]}{adjustmentFacts && key.startsWith('created_') && <small>{adjustmentFacts.inputZone} ({Intl.DateTimeFormat().resolvedOptions().timeZone})</small>}{receivableFilters && key === 'wallet_id' ?
+      {fields.map(key => refundSearch && key === 'q' ? <label key={key}>{words[key]}<input maxLength={200} aria-describedby={refundSearchHelp} value={draft[key] || ''} onChange={event => setDraft(value => ({ ...value, [key]: event.target.value }))} /><small id={refundSearchHelp}>{refundSearch.keyHelp}</small></label> : refundSearch && key === 'provider_id' ? <RefundProviderFilter key={key + signature} label={words[key]} words={refundSearch} providers={(visible.data?.items || []).map(item => item.provider_id).filter(id => typeof id === 'string' && id)} value={draft[key] || ''} onChange={id => setDraft(value => ({ ...value, [key]: id }))} /> : adjustmentLookup && ['wallet_id', 'requested_by'].includes(key) ? <AdminAdjustmentLookup key={key} routeSignature={signature} appliedValue={current.query[key]} client={client} kind={key === 'wallet_id' ? 'wallet' : 'requester'} label={words[key]} words={adjustmentLookup} available={key === 'wallet_id' || canReadRequester} onOpenRelated={key === 'wallet_id' ? openWallet : openRequester} onDirectoryAccess={key === 'requested_by' ? onRequesterDirectoryAccess : undefined} value={draft[key] || ''} onChange={id => setDraft(value => ({ ...value, [key]: id }))} /> : timeWords && key === 'created_to' ? null : timeWords && key === 'created_from' ? <React.Fragment key={key}>{timeRange}</React.Fragment> : <label key={key}>{receivableFilters && key === 'wallet_id' ? <span id={walletHelpID + '-label'}>{words[key]}</span> : words[key]}{adjustmentFacts && key.startsWith('created_') && <small>{adjustmentFacts.inputZone} ({Intl.DateTimeFormat().resolvedOptions().timeZone})</small>}{receivableFilters && key === 'wallet_id' ?
         <><input maxLength={200} value={draft[key] || ''} aria-labelledby={walletHelpID + '-label'} aria-describedby={walletHelpID} onChange={event => setDraft(value => ({ ...value, [key]: event.target.value }))} /><small id={walletHelpID}>{receivableFilters.help}</small></>
         : receivableFilters && key === 'source_type' ? <select value={unsupportedSource ? draft[key] : sourceDisplayKey} onChange={event => setDraft(value => ({ ...value, [key]: event.target.value }))}>
           <option value="">{receivableFilters.all}</option>
