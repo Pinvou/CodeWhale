@@ -160,6 +160,89 @@ function completeTokenManagementCopy(translations) {
       "formulaSearchEmpty": "現在の条件に一致する公開済みの式はありません。"
     }
   };
+  const priceListCopy = {
+    "zh": {
+      "configuredColumn": "本行配置价",
+      "previewBoundary": "按所选价格版本的生效时点解析，适用范围及来源以本次预览为准。",
+      "unavailable": "未提供",
+      "unitUnknown": "未识别计费项",
+      "creditUnknown": "计价单位未提供",
+      "denominatorUnknown": "计量分母未提供",
+      "perDenominator": "每 {n} 个计量单位",
+      "unitVersion": "单位版本 {n}",
+      "formulaVersion": "公式版本 {n}",
+      "inherited": "继承全局，需预览解析",
+      "inheritedConfiguration": "继承全局",
+      "fixedConfiguration": "固定价格",
+      "identifiers": "查看完整标识",
+      "priceID": "价格版本 ID",
+      "formulaID": "公式版本 ID",
+      "modelID": "模型 ID",
+      "scopes": {
+        "GLOBAL": "全局",
+        "MODEL": "模型"
+      },
+      "charges": {
+        "INPUT_TOKEN": "输入 Token",
+        "CACHED_INPUT_TOKEN": "缓存输入 Token",
+        "OUTPUT_TOKEN": "输出 Token"
+      }
+    },
+    "en": {
+      "configuredColumn": "Configured prices",
+      "previewBoundary": "Resolved at the selected version’s effective start. The scope and source shown apply to this preview.",
+      "unavailable": "Not provided",
+      "unitUnknown": "Unidentified charge",
+      "creditUnknown": "Credit unit not provided",
+      "denominatorUnknown": "Metering denominator not provided",
+      "perDenominator": "per {n} metering units",
+      "unitVersion": "Unit version {n}",
+      "formulaVersion": "Formula version {n}",
+      "inherited": "Inherits global price; resolve in preview",
+      "inheritedConfiguration": "Inherits global price",
+      "fixedConfiguration": "Fixed price",
+      "identifiers": "View full identifiers",
+      "priceID": "Price version ID",
+      "formulaID": "Formula version ID",
+      "modelID": "Model ID",
+      "scopes": {
+        "GLOBAL": "Global",
+        "MODEL": "Model"
+      },
+      "charges": {
+        "INPUT_TOKEN": "Input tokens",
+        "CACHED_INPUT_TOKEN": "Cached input tokens",
+        "OUTPUT_TOKEN": "Output tokens"
+      }
+    },
+    "ja": {
+      "configuredColumn": "行の設定価格",
+      "previewBoundary": "選択したバージョンの適用開始時点で解決した結果です。適用範囲と価格の出所は、このプレビューに対応します。",
+      "unavailable": "未提供",
+      "unitUnknown": "不明な課金項目",
+      "creditUnknown": "価格の単位は未提供",
+      "denominatorUnknown": "計量の分母は未提供",
+      "perDenominator": "計量単位 {n} あたり",
+      "unitVersion": "単位バージョン {n}",
+      "formulaVersion": "計算式バージョン {n}",
+      "inherited": "全体価格を継承。プレビューで確認",
+      "inheritedConfiguration": "全体価格を継承",
+      "fixedConfiguration": "固定価格",
+      "identifiers": "完全な識別子を表示",
+      "priceID": "価格バージョン ID",
+      "formulaID": "計算式バージョン ID",
+      "modelID": "モデル ID",
+      "scopes": {
+        "GLOBAL": "全体",
+        "MODEL": "モデル"
+      },
+      "charges": {
+        "INPUT_TOKEN": "入力トークン",
+        "CACHED_INPUT_TOKEN": "キャッシュ入力トークン",
+        "OUTPUT_TOKEN": "出力トークン"
+      }
+    }
+  };
   for (const language of ['zh', 'en', 'ja']) {
     const copy = translations[language].modelToken;
     const provisioningCopy = {
@@ -173,7 +256,11 @@ function completeTokenManagementCopy(translations) {
     copy.pageOverviews.provisioningFailure = { language, ...{"zh":{"diagnostics":"查看诊断信息","code":"服务错误码","localList":"任务列表独立加载，请以下方状态为准。"},"en":{"diagnostics":"View diagnostics","code":"Service error code","localList":"The task list loads separately. Check its status below."},"ja":{"diagnostics":"診断情報を表示","code":"サービスエラーコード","localList":"タスク一覧は個別に読み込まれます。下の状態をご確認ください。"}}[language] };
 
     const { pricingControls, ...modelAdditions } = additions[language];
-    Object.assign(translations[language].pricingLifecycle, pricingControls, formulaSelectionCopy[language]);
+    const list = priceListCopy[language];
+    const fill = key => value => list[key].replace('{n}', String(value));
+    Object.assign(translations[language].pricingLifecycle, pricingControls, formulaSelectionCopy[language], {
+      listPresentation: { ...list, language, perDenominator: fill("perDenominator"), unitVersion: fill("unitVersion"), formulaVersion: fill("formulaVersion") },
+    });
     Object.assign(copy, modelAdditions, { enumLabels: { ...copy.enumLabels, ...additions[language].enumLabels }, commandErrors: { ...copy.commandErrors, ...additions[language].commandErrors } });
   }
   return translations;
