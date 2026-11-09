@@ -26,6 +26,7 @@ func TestManagementPublicMigrationInstallation(t *testing.T) {
 	t.Run("installed-f07-36-upgrade", func(t *testing.T) { testManagementPublicMigrationInstallation(t, false, 36, false) })
 	t.Run("installed-pre-runtime-37-upgrade", func(t *testing.T) { testManagementPublicMigrationInstallation(t, false, 37, false) })
 	t.Run("installed-pre-cleanup-39-upgrade", func(t *testing.T) { testManagementPublicMigrationInstallation(t, false, 39, false) })
+	t.Run("installed-pre-governance-index-40-upgrade", func(t *testing.T) { testManagementPublicMigrationInstallation(t, false, 40, false) })
 }
 func testManagementPublicMigrationInstallation(t *testing.T, legacy bool, previousStage int, retainedManagement bool) {
 	dsn := os.Getenv("PINVOU_TEST_TOKEN_DATABASE_URL")
@@ -137,6 +138,13 @@ func testManagementPublicMigrationInstallation(t *testing.T, legacy bool, previo
 	if previousStage > 0 {
 		previous := []migrations.Migration{}
 		for _, m := range loaded {
+			if m.Version == 900009 {
+				continue // Governance indexes are absent from every retained predecessor.
+			}
+			if previousStage == 40 {
+				previous = append(previous, m)
+				continue
+			}
 			if previousStage == 39 {
 				if m.Version != 900006 {
 					previous = append(previous, m)
@@ -278,6 +286,18 @@ VALUES('11111111-1111-4111-8111-111111111116','11111111-1111-4111-8111-111111111
 	if err != nil || verification.AppliedCount != len(installed) {
 		t.Fatalf("public migration verification: %+v err=%v", verification, err)
 	}
+	for name, columns := range map[string]string{"usage_governance_account_credential_idx": "token_account_id, credential_id", "usage_governance_model_idx": "model_id"} {
+		var definition, owner string
+		var ready bool
+		if err := connection.QueryRow(ctx, `SELECT pg_get_indexdef(i.indexrelid),pg_get_userbyid(c.relowner),i.indisvalid AND i.indisready FROM pg_index i JOIN pg_class c ON c.oid=i.indexrelid WHERE i.indexrelid=to_regclass($1)`, "public."+name).Scan(&definition, &owner, &ready); err != nil || !ready || owner != "token_schema_owner" || !strings.Contains(definition, "USING btree ("+columns+")") || !strings.Contains(definition, "WHERE (execution_status") {
+			t.Fatal("governance resource index shape or owner differs", name, definition, owner, ready, err)
+		}
+		for _, state := range []string{"RECEIVED", "HOLD_RESERVING", "HOLD_RESERVED", "DISPATCH_INTENT_PERSISTED", "UPSTREAM_DISPATCHING", "STREAMING", "SETTLEMENT_PENDING"} {
+			if !strings.Contains(definition, "'"+state+"'") {
+				t.Fatal("governance index omits an active state", name, state)
+			}
+		}
+	}
 	if retainedManagement {
 		var history string
 		if err = connection.QueryRow(ctx, `SELECT coalesce(jsonb_agg(to_jsonb(history) ORDER BY version),'[]'::jsonb)::text FROM schema_migrations history WHERE version=ANY($1)`, retainedVersions).Scan(&history); err != nil || history != retainedHistory {
@@ -324,6 +344,9 @@ VALUES('11111111-1111-4111-8111-111111111116','11111111-1111-4111-8111-111111111
 		t.Fatalf("installed lifecycle/replay storage mismatch: readiness=%v usage=%v org=%v unit=%v replay=%v future=%v err=%v", readiness, usageHistory, organization, units, replayFence, futureStorage, err)
 	}
 	migrations.Unlock(ctx, connection)
+	if previousStage == 40 {
+		t.Run("governance-index-public-cli-rollback", func(t *testing.T) { testGovernanceIndexPublicRollback(t, ctx, connection, config.Copy(), loaded) })
+	}
 	config.User = admin.Config().User
 	operator, err := connectManagementFixture(t, ctx, config)
 	if err != nil {

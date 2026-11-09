@@ -2688,6 +2688,16 @@
         "file": "900006_replay_cleanup_indexes.up.sql",
         "version": 900006,
         "sha256": "bf8521c04a898ba68675b828d09ad98afcc86c4b11115530520844dd9a2bae58"
+      },
+      {
+        "file": "900009_governance_usage_resource_indexes.down.sql",
+        "version": 900009,
+        "sha256": "598096cef42942aa7d4950436604e99599edbf5883d9ad9e77d48e8af71f481e"
+      },
+      {
+        "file": "900009_governance_usage_resource_indexes.up.sql",
+        "version": 900009,
+        "sha256": "6ba3fb063eb36f50888456cb0c665ac6828dca795bce295a44997c1ecd3ccaad"
       }
     ]
   }

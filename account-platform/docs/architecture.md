@@ -236,6 +236,12 @@ Web 个人中心的信息架构固定为三个一级 Tab：“额度与用量”
 
 同一轮次的费用和状态不是从任意一笔请求复制：只把 `SETTLED` 请求计入消费，`RELEASED / CANCELLED_BEFORE_DISPATCH` 计零，存在执行中、待结算或核对请求时轮次总额保持未知。展示代表请求按“可取消执行 → 待结算/核对 → 已结算 → 全部未消费”选择，停止/取消入口只绑定仍处于 `RECEIVED / HOLD_RESERVING / HOLD_RESERVED / DISPATCH_INTENT_PERSISTED / UPSTREAM_DISPATCHING / STREAMING` 的具体 `usage_request_id`，不得向已进入结算或核对阶段的请求提供无效操作。
 
+Token 迁移 `900009` 为七种活动执行状态增加账户/凭证复合部分索引及模型部分索引，供治理用量计数和完整事实指纹使用。目录回退依赖聚合在连接用量时采用相同活动状态条件，保留路由、装配和会话的原去重计数。指纹继续逐条读取全部命中事实并计算完整摘要。
+
+发布先排空 Token 进程，在维护窗口安装迁移并部署识别 `900009` 身份的服务版本。安装沿用 Token 所有权硬化流程，维护窗口须覆盖全部 Token 表的锁等待，索引构建会阻塞用量表写入。合成执行计划只支持本地查询对照，现场规模、持锁预算、磁盘与写入成本仍需验收。
+
+如获授权回退 `900009`，先停止相关写入、保留备份回执并确认最高迁移版本及 checksum 恰为本发布包。复用 `token_migrator` 登录，仅该次命令选择 `MIGRATION_ROLE=token_schema_owner`，运行原迁移入口 `/service --dir /migrations/token --direction down`。核对仅两个新索引及对应账本行被移除，原用量与此前迁移保留。索引归 `token_schema_owner` 所有，默认 `token_gateway` 的 Down 权限检查会返回拒绝结果。重新安装使用同一发布包，将角色恢复为 `token_gateway` 后执行原 Up 入口，核对索引、迁移身份与运行权限。服务恢复版本须识别当前账本身份，旧清单版本的启动校验会拒绝新增账本。
+
 ## 5. 身份、上下文和权限
 
 ### 5.1 目标权限模型
