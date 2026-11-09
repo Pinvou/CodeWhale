@@ -3,7 +3,7 @@ import { adminLayoutCopy } from '../../shared/i18n.js';
 import { requireFinanceCollection } from './finance-contract.js';
 import { loadFinancePage } from './admin-finance-pagination.js';
 import { useFinanceOperation } from './useFinanceOperation.js';
-import { paymentAnomalyResolutions } from './payment-anomaly-resolutions.js';
+import { paymentAnomalyResolutions, unmatchedCallbackEvidence } from './payment-anomaly-resolutions.js';
 import { freshLatePaymentQuery, latePaymentQueryAuthority } from './late-payment-query-contract.js';
 import { useLatePaymentQuery } from './useLatePaymentQuery.js';
 import { AdminFinanceFilters, useFinanceReadRoute, useFinanceRouteLoader } from './AdminFinanceFilters.jsx';
@@ -72,7 +72,7 @@ export function AdminPaymentReviewQueue({ client, copy, me, anomaly = false, rou
     // instant is immutable with the key even if the system time zone changes.
     const scheduleDate = !operation.pendingFacts && action === 'schedule' ? new Date(nextReview) : null;
     const facts = operation.pendingFacts || { action, id: detail?.case?.case_id, reason: reason.trim(), resolution, nextReview: scheduleDate && Number.isFinite(scheduleDate.getTime()) ? scheduleDate.toISOString() : nextReview, commandProtocol: action === 'schedule' || action === 'provider-blind' || action === 'archive' ? 1 : undefined };
-    if (!facts.id || (!operation.pendingFacts && action === 'resolve' && !resolutions.includes(resolution)) || (!operation.unknown && !globalThis.confirm(copy.confirmAction))) return;
+    if (!facts.id || (!operation.pendingFacts && action === 'resolve' && !paymentAnomalyResolutions(detail?.case?.anomaly_type, detail?.case).includes(resolution)) || (!operation.unknown && !globalThis.confirm(copy.confirmAction))) return;
     const value = await operation.mutate(facts, async (current, key) => {
       const receipt = await execute(current, key);
       if ((receipt?.case_id || receipt?.case?.case_id) !== current.id) throw new Error('INVALID_FINANCE_ACK');
@@ -85,10 +85,8 @@ export function AdminPaymentReviewQueue({ client, copy, me, anomaly = false, rou
   const statuses = anomaly ? ['OPEN', 'RESOLVED'] : ['REVIEW_REQUIRED_LATE_PAYMENT', 'PROVIDER_BLIND', 'ARCHIVED_CONFIRMED_UNPAID', 'RESOLVED_PAID'];
   const active = item && (anomaly ? item.status === 'OPEN' : ['REVIEW_REQUIRED_LATE_PAYMENT', 'PROVIDER_BLIND'].includes(item.review_status));
   const owned = item?.owner_id === me.user_id;
-  const snapshot = item?.resource_snapshot;
-  const unmatchedCallback = anomaly && item?.anomaly_type === 'PAYMENT_FACT_CONFLICT' && !item?.payment_order_id &&
-    snapshot?.reason === 'PAYMENT_ORDER_NOT_FOUND' && snapshot?.notification_id ? snapshot : null;
-  const resolutions = unmatchedCallback ? ['DISMISS'] : paymentAnomalyResolutions(item?.anomaly_type);
+  const unmatchedCallback = anomaly ? unmatchedCallbackEvidence(item) : null;
+  const resolutions = paymentAnomalyResolutions(item?.anomaly_type, item);
   const confirmQuery = () => {
     if (busy || query.retired || (operation.unknown && !legacyQuery) || anomaly || !canQuery || !active || !owned) return;
     setQueryConfirmation({ facts: freshLatePaymentQuery(item, me.user_id, queryAuthority), owner, epoch: client.financeSessionEpoch || 0 });
