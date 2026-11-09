@@ -98,6 +98,7 @@ function clearReauthenticationDraft() {
 export function AdminOperationsWorkspace({ client, copy, language = 'en', permissions = EMPTY_PERMISSIONS, currentUserID = '', authorizationRefreshing = false, authorizationRefreshGuard = null }) {
   const labels = copy.operations;
   const editor = labels.policyEditor;
+  const eligibility = labels.eligibilityPresentation;
   const permissionSet = new Set(permissions);
   const canManage = permissionSet.has('platform.registration-bonus.manage');
   const canRead = permissionSet.has('platform.registration-bonus.read');
@@ -160,11 +161,12 @@ export function AdminOperationsWorkspace({ client, copy, language = 'en', permis
     } catch (error) {
       if (mountedRef.current && request === loadGeneration.current && currentUserID === currentUserIDRef.current) {
         setPolicyReadStale(true);
-        setState({ loading: false, saving: false, error: confirmedOriginal ? labels.policyEditor.originalSavedReadFailed : labels.loadFailed, errorCode: error?.code || '', notice: '' });
+        setState({ loading: false, saving: false, error: confirmedOriginal ? labels.policyEditor.originalSavedReadFailed
+            : error?.code === 'REGISTRATION_BONUS_ELIGIBILITY_UNAVAILABLE' ? labels.eligibilityPresentation.loadFailed : labels.loadFailed, errorCode: error?.code || '', notice: '' });
       }
       return false;
     }
-  }, [client, currentUserID, labels.loadFailed, labels.policyEditor.originalSavedReadFailed, labels.reauthenticationDraftCleanupFailed, labels.reauthenticationDraftConflict, labels.reauthenticationDraftExpired]);
+  }, [client, currentUserID, labels.loadFailed, labels.policyEditor.originalSavedReadFailed, labels.eligibilityPresentation.loadFailed, labels.reauthenticationDraftCleanupFailed, labels.reauthenticationDraftConflict, labels.reauthenticationDraftExpired]);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -342,6 +344,18 @@ export function AdminOperationsWorkspace({ client, copy, language = 'en', permis
   ].filter(Boolean);
   const legacyAmountNote = canCompare && enteredAmount && activePoints !== baseForm.amount_points
     && Number(baseForm.amount_points) === Number(form.amount_points);
+  const expectedImpact = canCompare && enteredAmount && enteredDays && !unknownWrite && !recoveryBlocked && !state.saving
+    && (changes.length > 0 || legacyAmountNote)
+    && (baseForm.enabled !== form.enabled || (form.enabled && Number(form.amount_points) === 0 && activePoints !== '0'))
+    ? !form.enabled ? eligibility.disabledImpact : Number(form.amount_points) === 0 ? eligibility.zeroImpact : ''
+    : '';
+  const eligibilityStatus = policyReadStale ? 'UNCONFIRMED' : policy?.eligibility_status;
+  const unrecoverable = policy?.unrecoverable_registration_count;
+  const eligibilityText = eligibilityStatus === 'READY' ? labels.eligibilityReady
+    : eligibilityStatus === 'PENDING' ? eligibility.pending
+    : eligibilityStatus === 'BLOCKED' ? (unrecoverable != null && integerMoney(unrecoverable) > 0n ? eligibility.blockedCount(String(unrecoverable)) : eligibility.blocked)
+    : eligibilityStatus === 'UNCONFIRMED' ? eligibility.unconfirmed
+    : eligibility.unavailable;
   const needsReload = ['REGISTRATION_BONUS_DRAFT_CONFLICT', 'REGISTRATION_BONUS_DRAFT_CLEANUP_FAILED', 'REGISTRATION_BONUS_DRAFT_IDENTITY_CHANGED'].includes(state.errorCode);
   const saveDisabled = unknownWrite || recoveryBlocked || state.saving || authorizationRefreshing || !valid || needsReload || (form.enabled && !eligibilityReady);
   const saveExplanation = state.saving ? editor.saving
@@ -459,7 +473,11 @@ export function AdminOperationsWorkspace({ client, copy, language = 'en', permis
   return (
     <section className="adm-panel adm-settings-panel adm-registration-bonus" data-testid="registration-bonus-policy">
       <header className="adm-section-head"><div><h2>{labels.title}</h2><p>{labels.lead}</p></div></header>
-      <div className="adm-inline-message warn" role="note">{labels.lifetimeWarning}</div>
+      <aside className="adm-inline-message warn adm-registration-bonus-lifetime" aria-labelledby={saveStatusID + '-lifetime'}>
+        <h3 id={saveStatusID + '-lifetime'}>{eligibility.title}</h3>
+        <p>{labels.lifetimeWarning}</p>
+        <p>{eligibility.example}</p>
+      </aside>
       {pendingDraft && <div className="adm-inline-message warn adm-registration-bonus-draft-prompt" role="status"><span>{labels.unfinishedReauthenticationDraft}</span><div><button type="button" onClick={recoverPendingDraft} disabled={state.loading || !policy}>{labels.recoverDraft}</button><button type="button" onClick={discardPendingDraft}>{labels.discardDraft}</button></div></div>}
       {((unknownWrite && !state.saving) || recoveryBlocked) && !state.error && <div className="adm-inline-message error" role="alert"><span>{recoveryBlocked ? labels.pendingStorageFailed : labels.outcomeUnknown}</span>{unknownWrite && canManage && <button type="button" disabled={state.saving || authorizationRefreshing || recoveryBlocked} onClick={() => void save()}>{labels.retryUnknown}</button>}{unknownWrite && !canManage && canRead && <button type="button" disabled={state.loading || authorizationRefreshing || recoveryBlocked} onClick={() => void load()}>{copy.retry}</button>}</div>}
       {state.error && <div className="adm-inline-message error" role="alert"><span>{state.error}</span><button type="button" onClick={errorAction.run} disabled={state.loading || state.saving || authorizationRefreshing || (errorAction.read ? !canRead : !canManage) || (errorAction.save && (!valid || (form.enabled && !eligibilityReady))) || recoveryBlocked}>{errorAction.label}</button></div>}
@@ -475,7 +493,7 @@ export function AdminOperationsWorkspace({ client, copy, language = 'en', permis
             <div><dt>{labels.amount}</dt><dd>{editor.points(activePoints)}</dd></div>
             <div><dt>{labels.validityDays}</dt><dd>{editor.days(policy.validity_days)}</dd></div>
           </dl>
-          <div className={`adm-inline-message ${eligibilityReady ? 'ok' : 'warn'}`} role="status" data-testid="registration-bonus-readiness">{eligibilityReady ? labels.eligibilityReady : labels.eligibilityBlocked.replace('{count}', String(policy.unrecoverable_registration_count || 0))}</div>
+          <div className={`adm-inline-message ${eligibilityStatus === 'READY' ? 'ok' : 'warn'}`} role="status" data-testid="registration-bonus-readiness">{eligibilityText}</div>
           <div className="adm-registration-bonus-editor">
             {canManage && <h3 className="adm-registration-bonus-policy-heading">{editor.draft}</h3>}
             <label className="adm-sms-switch"><input type="checkbox" checked={form.enabled} disabled={!canManage || unknownWrite || recoveryBlocked || state.saving || (!eligibilityReady && !form.enabled)} onChange={(event) => setForm((value) => ({ ...value, enabled: event.target.checked }))} /><span>{labels.enabled}</span></label>
@@ -488,6 +506,7 @@ export function AdminOperationsWorkspace({ client, copy, language = 'en', permis
             {canCompare && !unknownWrite && !recoveryBlocked && <div className="adm-registration-bonus-diff" aria-label={editor.compare}>
               {changes.length > 0 ? <><h4>{editor.compare}</h4><ul>{changes.map(([field, oldValue, newValue]) => <li key={field}><strong>{field}</strong><span>{editor.before}: {oldValue}</span><span>{editor.after}: {newValue}</span></li>)}</ul></>
                 : enteredAmount && enteredDays && <p>{editor.noChanges}</p>}
+              {expectedImpact && <p className="adm-registration-bonus-impact"><strong>{eligibility.preview}</strong> {expectedImpact}</p>}
               {legacyAmountNote && <p>{editor.legacyPrecision(editor.points(activePoints), editor.points(baseForm.amount_points))}</p>}
             </div>}
             {canManage && <div className="adm-registration-bonus-actions">
