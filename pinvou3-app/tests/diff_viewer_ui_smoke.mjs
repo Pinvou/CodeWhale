@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import react from '@vitejs/plugin-react';
+import { navigateFixture } from './helpers/navigate-fixture.mjs';
 import * as puppeteer from './helpers/puppeteer-fixture.mjs';
 import { createServer } from './helpers/vite-fixture.mjs';
 
@@ -73,8 +74,9 @@ try {
     if (response.status() >= 400) recordResourceFailure(response.request(), { status: response.status() });
   });
   await page.setViewport({ width: 1200, height: 900, deviceScaleFactor: 1 });
-  await page.goto(url, { waitUntil: 'networkidle0' });
-  await page.waitForSelector('[data-testid="edit-output"] [data-testid="diff-view"]', { timeout: 10000 });
+  await navigateFixture(page, url, signal => page.waitForSelector(
+    '[data-testid="edit-output"] [data-testid="diff-view"]', { timeout: 10000, signal },
+  ), { waitUntil: 'networkidle0' });
 
   const initial = await page.evaluate(() => {
     const scope = document.querySelector('[data-testid="edit-output"]');
