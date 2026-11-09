@@ -67,15 +67,13 @@ impl super::super::SessionStore {
         if !quarantine_confirmed {
             bail!("remote_proxy_recovery_retry_failed");
         }
-        match failure.downcast_ref::<RemoteProxyLoadFailure>() {
-            Some(
-                RemoteProxyLoadFailure::Unreadable
-                | RemoteProxyLoadFailure::UnsupportedVersion
-                | RemoteProxyLoadFailure::ArchiveUnavailable,
-            ) => {
-                bail!("remote_proxy_recovery_quarantine_unavailable");
-            }
-            _ => {}
+        if let Some(
+            RemoteProxyLoadFailure::Unreadable
+            | RemoteProxyLoadFailure::UnsupportedVersion
+            | RemoteProxyLoadFailure::ArchiveUnavailable,
+        ) = failure.downcast_ref::<RemoteProxyLoadFailure>()
+        {
+            bail!("remote_proxy_recovery_quarantine_unavailable");
         }
 
         // Verify the independent archive bank before taking the active file
