@@ -24,7 +24,15 @@ export const profileRepairQueueCopy = {
       "SESSION_REVOCATION_FAILED": "会话撤销未完成",
       "LEGACY_SESSION_REVOCATION_UNCERTAIN": "历史请求的会话撤销无法确认",
       "PASSWORD_SESSION_ORDER_UNPROVEN": "无法确认密码更新与会话撤销的顺序"
-    }
+    },
+    "details": "查看原请求",
+    "requestID": "原请求 ID",
+    "blocked": "此记录目前不能手动重试。可刷新以查看最新状态。",
+    "confirmation": "继续此未完成请求？系统会重新安排重试，不会回退资料。原请求 ID：",
+    "scheduling": "正在申请安排重试：",
+    "scheduled": "服务已安排重试。请查看后续状态。原请求：",
+    "uncertain": "暂时无法确认是否已安排重试。可刷新查看队列。原请求：",
+    "rejected": "服务未接受此次重试。请查看错误提示。原请求："
   },
   "en": {
     "kind": "Change type",
@@ -51,7 +59,15 @@ export const profileRepairQueueCopy = {
       "SESSION_REVOCATION_FAILED": "Session revocation did not complete",
       "LEGACY_SESSION_REVOCATION_UNCERTAIN": "Session revocation is unconfirmed for this older request",
       "PASSWORD_SESSION_ORDER_UNPROVEN": "The order of password update and session revocation could not be confirmed"
-    }
+    },
+    "details": "View original request",
+    "requestID": "Original request ID",
+    "blocked": "This record cannot currently be retried manually. Refresh to see the latest status.",
+    "confirmation": "Continue this unfinished request? This asks the service to schedule a retry. It does not restore previous values. Original request ID:",
+    "scheduling": "Requesting a retry for:",
+    "scheduled": "The service scheduled a retry. Check the subsequent status. Original request:",
+    "uncertain": "Could not confirm whether the service scheduled a retry. Refresh to check the queue. Original request:",
+    "rejected": "The service did not accept this retry. Review the error message. Original request:"
   },
   "ja": {
     "kind": "変更の種類",
@@ -78,6 +94,14 @@ export const profileRepairQueueCopy = {
       "SESSION_REVOCATION_FAILED": "セッションの無効化が完了しませんでした",
       "LEGACY_SESSION_REVOCATION_UNCERTAIN": "以前のリクエストのセッション無効化を確認できません",
       "PASSWORD_SESSION_ORDER_UNPROVEN": "パスワード更新とセッション無効化の順序を確認できません"
-    }
+    },
+    "details": "元のリクエストを表示",
+    "requestID": "元のリクエスト ID",
+    "blocked": "この記録は現在手動で再試行できません。更新して最新の状態を確認してください。",
+    "confirmation": "未完了のリクエストを続行しますか？再試行を依頼します。以前の値に戻す操作ではありません。元のリクエスト ID：",
+    "scheduling": "再試行を依頼中：",
+    "scheduled": "再試行が予定されました。以降の状態を確認してください。元のリクエスト：",
+    "uncertain": "再試行が予定されたか確認できません。キューを更新して確認してください。元のリクエスト：",
+    "rejected": "サービスがこの再試行を受け付けませんでした。エラーを確認してください。元のリクエスト："
   }
 };

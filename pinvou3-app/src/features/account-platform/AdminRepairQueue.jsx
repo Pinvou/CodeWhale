@@ -43,6 +43,14 @@ function RegistrationQueueTime({ value, queryCopy }) {
 const profileUUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const validProfileID = value => typeof value === 'string' && profileUUID.test(value) && value !== '00000000-0000-0000-0000-000000000000';
 const knownProfileWord = (table, key) => typeof key === 'string' && Object.prototype.hasOwnProperty.call(table, key) ? table[key] : '';
+function profileRetryIsBlocked(item) {
+  return item?.field === 'PASSWORD' && item.status === 'REPAIR_REQUIRED' &&
+    (item.reason === 'LEGACY_SESSION_REVOCATION_UNCERTAIN' || item.reason === 'PASSWORD_SESSION_ORDER_UNPROVEN');
+}
+function profileRetryReceiptIsKnown(result) {
+  return result?.resource_type === 'profile_change' && result.action === 'RETRY_SCHEDULED' ||
+    result?.resource_type === 'password_reset' && result.action === 'ATOMIC_PASSWORD_RECOVERY_SCHEDULED';
+}
 function ProfileRepairRow({ item, copy, adminCopy, busy, act }) {
   const requestID = validProfileID(item?.profile_change_request_id) ? item.profile_change_request_id : '';
   const userID = validProfileID(item?.user_id) ? item.user_id : '';
@@ -56,7 +64,15 @@ function ProfileRepairRow({ item, copy, adminCopy, busy, act }) {
     <td>{status}</td><td>{kind}</td>
     <td>{userID ? <code>{userID}</code> : copy.notReported}</td>
     <td>{count}</td><td>{lastError}</td>
-    <td>{requestID && <button type="button" disabled={busy} onClick={() => void act(item)}>{adminCopy.userManagement.retry}</button>}</td>
+    <td>{requestID && <>
+      {profileRetryIsBlocked(item) ? <p className="adm-profile-repair-blocked">{copy.blocked}</p> : <button type="button" disabled={busy} onClick={() => void act(item)}>{adminCopy.userManagement.retry}</button>}
+      <details className="adm-profile-repair-detail"><summary aria-label={copy.details + ' · ' + requestID}>{copy.details}</summary>
+        <dl><div><dt>{copy.requestID}</dt><dd><code>{requestID}</code></dd></div>
+          <div><dt>{copy.kind}</dt><dd>{kind}</dd></div><div><dt>{adminCopy.accounts.status}</dt><dd>{status}</dd></div>
+          <div><dt>{copy.lastError}</dt><dd>{lastError}</dd></div>
+        </dl>
+      </details>
+    </>}</td>
   </tr>;
 }
 
@@ -66,6 +82,7 @@ export function AdminRepairQueue({ client, copy, language, profile = false }) {
   const [receivedAt, setReceivedAt] = useState(null);
   const [readState, setReadState] = useState("loading");
   const [readOwner, setReadOwner] = useState(null);
+  const [profileReceipt, setProfileReceipt] = useState(null);
   const [filters, setFilters] = useState(initialFilters);
   const [unit, setUnit] = useState('minutes');
   const adopted = useRef({}), readController = useRef(null);
@@ -96,20 +113,33 @@ export function AdminRepairQueue({ client, copy, language, profile = false }) {
       }
     } finally { if (request === generation.current) setBusy(false); }
   };
-  useEffect(() => { adopted.current = {}; void load({}); return () => { generation.current++; readController.current?.abort(); }; }, [client, profile]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { adopted.current = {}; setProfileReceipt(null); void load({}); return () => { generation.current++; readController.current?.abort(); }; }, [client, profile]); // eslint-disable-line react-hooks/exhaustive-deps
   const act = async (item, compensate = false) => {
     const allowed = profile ? { retry: true, compensate: false } : registrationRepairActions(item);
     if (mutation.current || busy || !(compensate ? allowed.compensate : allowed.retry)) return;
-    if (!globalThis.confirm(compensate ? copy.userManagement.confirmCompensation : copy.userManagement.confirmRetry)) return;
+    if (profile && (!validProfileID(item?.profile_change_request_id) || profileRetryIsBlocked(item))) return;
+    const confirmation = profile ? profileCopy.confirmation + '\n' + item.profile_change_request_id
+      : compensate ? copy.userManagement.confirmCompensation : copy.userManagement.confirmRetry;
+    if (!globalThis.confirm(confirmation)) return;
     mutation.current = true;
     const request = ++generation.current;
     setBusy(true); setError('');
+    const profileID = profile ? item.profile_change_request_id : '';
+    if (profile) setProfileReceipt({ client, id:profileID, state:'scheduling' });
     try {
-      if (profile) await client.retryProfileChange(item.profile_change_request_id);
+      if (profile) {
+        const result = await client.retryProfileChange(profileID);
+        if (request === generation.current) setProfileReceipt({ client, id:profileID, state:profileRetryReceiptIsKnown(result) ? 'scheduled' : 'uncertain' });
+      }
       else if (compensate) await client.compensateRegistration(item.registration_operation_id);
       else await client.retryRegistration(item.registration_operation_id);
       if (request === generation.current) await load();
-    } catch (reason) { if (request === generation.current) setError(localizedAccountPlatformError(copy, reason)); }
+    } catch (reason) {
+      if (request === generation.current) {
+        if (profile) setProfileReceipt({ client, id:profileID, state:!reason?.status || reason.status >= 500 || reason.status === 202 ? 'uncertain' : 'rejected' });
+        setError(localizedAccountPlatformError(copy, reason));
+      }
+    }
     finally { mutation.current = false; if (request === generation.current) setBusy(false); }
   };
   const submitFilters = (event) => {
@@ -153,6 +183,7 @@ export function AdminRepairQueue({ client, copy, language, profile = false }) {
       {(readState === 'error' || readState === 'loading') && <p className="adm-registration-previous">{currentItems.length ? queryCopy.previousRows : queryCopy.previousEmpty}</p>}
     </div>}
     {!profile && readState === 'denied' ? <p role="alert">{queryCopy.denied}</p> : error && <div role="alert">{error.filter ? queryCopy[error.filter] : error}</div>}
+    {profile && profileReceipt?.client === client && <p className="adm-profile-repair-receipt" role="status">{profileCopy[profileReceipt.state]} <code>{profileReceipt.id}</code></p>}
     {busy && <p role="status">{!profile && readState === 'loading' ? queryCopy.reading : copy.loading}</p>}
     {/* biome-ignore lint/a11y/noNoninteractiveTabindex: The read-only wide table needs keyboard access to native horizontal scrolling. */}
     {(profile ? currentItems : currentItems?.length > 0) && <div className={profile ? "adm-table-wrap adm-profile-repair-table" : "adm-table-wrap adm-registration-table"} tabIndex="0" role="region" aria-label={profile ? copy.userManagement.profileRepair : copy.userManagement.registrationRepair}><table><thead><tr><th>{copy.userManagement.operation}</th><th>{copy.accounts.status}</th>{profile && <><th>{profileCopy.kind}</th><th>{profileCopy.userID}</th><th>{profileCopy.attempts}</th><th>{profileCopy.lastError}</th></>}{!profile && <><th>{labels.responsibility}</th><th>{queryCopy.sinceUpdate}<small>{queryCopy.sinceUpdateHelp}</small></th><th>{labels.nextRetryAt}</th><th>{labels.sla}</th></>}<th>{copy.accounts.actions}</th></tr></thead><tbody>{currentItems.map((item,index) => {
