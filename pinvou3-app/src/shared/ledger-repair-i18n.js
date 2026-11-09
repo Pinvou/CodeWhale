@@ -715,3 +715,49 @@ ledgerRepairCopy.ja.paymentTask = {
   "target": "プラットフォームの決済注文 UUID を入力します。加盟店の注文番号は使えません。",
   "factsFailed": "決済の確認用スナップショットを読み込めませんでした。注文と決済証拠を確認して再試行してください。"
 };
+
+ledgerRepairCopy.zh.refundRelation = {
+  "intro": "请提供这次退款、已保存的支付凭证及对应异常案件。系统会在同一次读取中核对三个对象。",
+  "title": "退款、凭证与案件核对",
+  "fields": [
+    "退款 ID",
+    "已保存的支付凭证 ID",
+    "异常案件 ID",
+    "渠道退款流水"
+  ],
+  "limit": "此快照未提供原支付订单详情或可选凭证列表。",
+  "reading": "正在核对当前输入…",
+  "matched": "已核对本次读取的关联。",
+  "pending": "仍在确认上一次审批请求的结果。",
+  "waiting": "请读取快照以核对当前输入。"
+};
+ledgerRepairCopy.en.refundRelation = {
+  "intro": "Provide the refund, its recorded payment evidence, and the related exception case. The snapshot checks the three references together.",
+  "title": "Refund, evidence and exception case",
+  "fields": [
+    "Refund ID",
+    "Recorded payment evidence ID",
+    "Exception case ID",
+    "Provider refund reference"
+  ],
+  "limit": "This snapshot does not include the original payment order details or a list of eligible evidence.",
+  "reading": "Checking the current references…",
+  "matched": "These references match in the loaded snapshot.",
+  "pending": "The previous approval request is still being confirmed.",
+  "waiting": "Load the snapshot to check the current references."
+};
+ledgerRepairCopy.ja.refundRelation = {
+  "intro": "対象の返金、記録済みの支払い証拠、対応する例外案件を入力してください。スナップショットで三つの参照をまとめて照合します。",
+  "title": "返金・証拠・例外案件の確認",
+  "fields": [
+    "返金 ID",
+    "記録済みの支払い証拠 ID",
+    "例外案件 ID",
+    "決済事業者の返金参照"
+  ],
+  "limit": "元の支払い注文の詳細や選択可能な証拠の一覧は、このスナップショットに含まれません。",
+  "reading": "現在の参照を照合中…",
+  "matched": "取得したスナップショットでこれらの参照が一致しました。",
+  "pending": "前回の承認リクエストの結果を確認中です。",
+  "waiting": "スナップショットを取得して現在の参照を照合してください。"
+};
