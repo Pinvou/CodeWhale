@@ -898,3 +898,46 @@ ledgerRepairCopy.ja.refundTask = {
   "target": "決済事業者が返金を完了した返金記録の UUID を入力します。",
   "factsFailed": "返金の確認用スナップショットを読み込めませんでした。返金、決済証拠、異常案件を確認して再試行してください。"
 };
+
+ledgerRepairCopy.zh.chargebackRelation = {
+  "intro": "请输入已经登记的拒付案件及该笔支付已保存的凭证。读取后可核对案件和凭证是否匹配。",
+  "title": "拒付案件与凭证核对",
+  "fields": [
+    "拒付案件 ID",
+    "已保存的支付凭证 ID",
+    "渠道拒付流水"
+  ],
+  "limit": "此快照未提供商户单号、渠道名称、货币拒付金额或可选凭证列表。",
+  "reading": "正在核对当前输入…",
+  "matched": "已核对本次读取的关联。",
+  "pending": "仍在确认上一次审批请求的结果。",
+  "waiting": "请读取快照以核对当前输入。"
+};
+ledgerRepairCopy.en.chargebackRelation = {
+  "intro": "Enter an existing chargeback case and the evidence recorded for its payment. The snapshot checks that the evidence belongs to this case.",
+  "title": "Chargeback case and evidence",
+  "fields": [
+    "Chargeback case ID",
+    "Recorded payment evidence ID",
+    "Provider chargeback reference"
+  ],
+  "limit": "This snapshot does not include the merchant order number, provider name, chargeback amount in currency, or an eligible evidence list.",
+  "reading": "Checking the current references…",
+  "matched": "These references match in the loaded snapshot.",
+  "pending": "The previous approval request is still being confirmed.",
+  "waiting": "Load the snapshot to check the current references."
+};
+ledgerRepairCopy.ja.chargebackRelation = {
+  "intro": "登録済みのチャージバック案件と、その支払いについて記録済みの証拠を入力してください。スナップショットで証拠が案件に対応するかを確認します。",
+  "title": "チャージバック案件と証拠の確認",
+  "fields": [
+    "チャージバック案件 ID",
+    "記録済みの支払い証拠 ID",
+    "決済事業者のチャージバック参照"
+  ],
+  "limit": "このスナップショットには加盟店の注文番号、決済事業者名、通貨建てのチャージバック額、選択可能な証拠の一覧が含まれません。",
+  "reading": "現在の参照を照合中…",
+  "matched": "取得したスナップショットでこれらの参照が一致しました。",
+  "pending": "前回の承認リクエストの結果を確認中です。",
+  "waiting": "スナップショットを取得して現在の参照を照合してください。"
+};
