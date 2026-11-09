@@ -141,31 +141,6 @@ surviving child resources stopped; use the owning process supervisor and ledger.
 
 ## CI and merge queue
 
-`account-platform-test` and `frontend-test` can reuse a successful ready PR
-execution in a single-PR merge group. The lightweight `changes` job verifies the
-entire tested Git tree (not just the PR head), the same base commit, unchanged
-workflow/verifier blobs, test-selection and repository-variable configuration hashes, runner
-labels, successful required test/cleanup steps and a successful `required-gate`
-from the exact source run attempt. The source must be a same-repository PR with
-a completed successful PR Check run and a non-expired success proof less than
-24 hours old. Multi-member queues, forks, draft-only evidence, changed bases or
-inputs, edited verifier policy, missing/ambiguous evidence and API/transport
-failures retain normal tests. Other jobs, especially history/policy checks,
-continue to run. No source credentials or raw runtime configuration enter the
-proof artifact, and no status/check-write permission is used.
-
-The proof records the versioned environment recipe and repository configuration;
-it is not an attestation of an externally modified runner machine. Rotate the
-repository variable `PINVOU_CI_REUSE_EPOCH` when changing runner images/toolchains
-or other test inputs outside the repository, and keep test dependencies pinned.
-Setting `PINVOU_CI_REUSE_FORCE_RUN` to the literal `true` disables reuse. A missing
-proof (including a failed advisory proof upload) never blocks a previously green
-PR; it simply requires another real execution in the queue. Reused jobs appear
-as skipped; `required-gate` accepts that state only for these two allowlisted jobs
-when the current `changes` job produced verified queue evidence. A failed or
-cancelled execution cannot be normalized into success. The notice in `changes`
-links reuse to the source Actions run ID.
-
 Pull requests use a staged, path-aware gate. Draft pull requests run fast feedback
 (lint, build, deterministic logic tests, and Rust formatting where applicable).
 Ready pull requests add browser smokes selected from the actual diff, platform
@@ -324,6 +299,31 @@ green. Queue independent ready pull requests without routine rebases; resolve ac
 conflicts, and let the queue validate freshness. Maintainers may queue at most two
 low-risk, independent pull requests in one merge group. Dependency-lock, CI, release,
 permission, session, CodeWhale gitlink, and other high-risk changes enter alone.
+
+`account-platform-test` and `frontend-test` can reuse a successful ready PR
+execution in a single-PR merge group. The lightweight `changes` job verifies the
+entire tested Git tree (not just the PR head), the same base commit, unchanged
+workflow/verifier blobs, test-selection and repository-variable configuration hashes, runner
+labels, successful required test/cleanup steps and a successful `required-gate`
+from the exact source run attempt. The source must be a same-repository PR with
+a completed successful PR Check run and a non-expired success proof less than
+24 hours old. Multi-member queues, forks, draft-only evidence, changed bases or
+inputs, edited verifier policy, missing/ambiguous evidence and API/transport
+failures retain normal tests. Other jobs, especially history/policy checks,
+continue to run. No source credentials or raw runtime configuration enter the
+proof artifact, and no status/check-write permission is used.
+
+The proof records the versioned environment recipe and repository configuration;
+it is not an attestation of an externally modified runner machine. Rotate the
+repository variable `PINVOU_CI_REUSE_EPOCH` when changing runner images/toolchains
+or other test inputs outside the repository, and keep test dependencies pinned.
+Setting `PINVOU_CI_REUSE_FORCE_RUN` to the literal `true` disables reuse. A missing
+proof (including a failed advisory proof upload) never blocks a previously green
+PR; it simply requires another real execution in the queue. Reused jobs appear
+as skipped; `required-gate` accepts that state only for these two allowlisted jobs
+when the current `changes` job produced verified queue evidence. A failed or
+cancelled execution cannot be normalized into success. The notice in `changes`
+links reuse to the source Actions run ID.
 
 ## Pull requests
 

@@ -3472,6 +3472,11 @@ class CiGatePolicyTests(unittest.TestCase):
                   run: python scripts/ci-windows-imports-diagnose.py "$env:PINVOU3_TEST_EXE"
             """).rstrip(), "      "),
         )
+        transport = _step_named(_extract_job_block(body, 'required-gate'), 'PR test success proof transport')
+        self.assertIn('timeout-minutes: 3', transport)
+        self.assertIn('uses: actions/upload-artifact@v7', transport)
+        self.assertIn('path: ${{ steps.success_proof.outputs.directory }}/proof.json', transport)
+        self.assertNotRegex(transport, r'(?m)^        (?:run|env):')
         diagnostic_job = _extract_job_block(body, 'frontend-test')
         matches = list(re.finditer(
             r"(?ms)^      - name: Test resource lifecycle receipts\n.*?(?=^      - |\Z)", diagnostic_job
@@ -3493,11 +3498,6 @@ class CiGatePolicyTests(unittest.TestCase):
                     retention-days: 7
             """).rstrip(), "      "),
         )
-        transport = _step_named(_extract_job_block(body, 'required-gate'), 'PR test success proof transport')
-        self.assertIn('timeout-minutes: 3', transport)
-        self.assertIn('uses: actions/upload-artifact@v7', transport)
-        self.assertIn('path: ${{ steps.success_proof.outputs.directory }}/proof.json', transport)
-        self.assertNotRegex(transport, r'(?m)^        (?:run|env):')
         diagnostic_job = _extract_job_block(body, 'account-platform-test')
         matches = list(re.finditer(
             r"(?ms)^      - name: Account test resource lifecycle receipts\n.*?(?=^      - |\Z)", diagnostic_job
