@@ -785,7 +785,11 @@ impl ModelManager {
         }))
     }
 
-    pub fn versions(&self, card_id: &str) -> Result<serde_json::Value, ModelManagerError> {
+    pub fn versions(
+        &self,
+        card_id: &str,
+        measure: bool,
+    ) -> Result<serde_json::Value, ModelManagerError> {
         let current = self.get_record(card_id)?;
         version_store::recover_interrupted(card_id).map_err(fail)?;
         let mut versions = version_store::list(Some(card_id)).map_err(fail)?;
@@ -793,6 +797,12 @@ impl ModelManager {
         let deleting = versions
             .iter()
             .any(|v| v.version_id == id && v.state == "deleting");
+        // The injected current row reuses the active version row's registered
+        // measurement (its own row is folded into the injected one below).
+        let active_measured = versions
+            .iter()
+            .find(|v| v.version_id == id)
+            .and_then(|v| v.measured_bytes);
         versions.retain(|v| v.version_id != id);
         versions.insert(
             0,
@@ -812,13 +822,33 @@ impl ModelManager {
                 record: Some(current),
                 error: None,
                 planned_bytes: 0,
+                measured_bytes: active_measured,
             },
         );
+        if measure {
+            // Explicit re-measure (review round 7): walk each row's tree once,
+            // refresh the returned sizes and persist them so quota admission
+            // and later dialog opens read the fresh values. Best effort per
+            // row — an unreadable tree keeps its registered size instead of
+            // failing the whole dialog.
+            for version in &mut versions {
+                if let Some(root) = version
+                    .models_root
+                    .as_deref()
+                    .filter(|_| version.managed)
+                    .or(version.resource_dir.as_deref())
+                    && let Ok(bytes) = version_store::quota_dir_size_bytes(Path::new(root))
+                {
+                    version.measured_bytes = Some(bytes);
+                    let _ = version_store::update_measured(card_id, &version.version_id, bytes);
+                }
+            }
+        }
         Ok(serde_json::json!(versions.iter().map(|v|serde_json::json!({
             "version_id":v.version_id,"state":v.state,"created_at":v.created_at,"error":v.error,
             "engine_version":v.record.as_ref().and_then(|r|r.engine_version.clone()),
             "filename":v.record.as_ref().and_then(|r|r.source_filename.clone()),
-            "size_bytes":v.models_root.as_ref().filter(|_|v.managed).or(v.resource_dir.as_ref()).map(|p|super::super::disk::dir_size_bytes(Path::new(p))).unwrap_or_else(||v.record.as_ref().map(|r|r.size_bytes.max(0) as u64).unwrap_or(0)),
+            "size_bytes":v.measured_bytes.or_else(||v.record.as_ref().map(|r|r.size_bytes.max(0) as u64)).unwrap_or(0),
             "can_switch":(["ready","history"].contains(&v.state.as_str())),
             "can_delete":v.version_id != id && v.state!="current" && v.state!="downloading",
             "can_retry":v.state=="failed",
@@ -944,6 +974,83 @@ impl ModelManager {
                 .as_deref()
                 .ok_or_else(|| fail("已登记历史版本缺少权重目录，未创建或登记新版。"))?;
             check(Path::new(root))?;
+        }
+        Ok(())
+    }
+
+    /// Ordinary downloads share one configured root by design: other cards'
+    /// protected resources may legitimately live inside it (per-card weight
+    /// subdirectories, `.versions` siblings). The reverse containment is the
+    /// harmful one — a download root placed at or inside another card's
+    /// registered resource publishes `LMM_MODELS_DIR` into that tree, and
+    /// `current_purge_preflight`'s conservative overlap guard would then
+    /// refuse that card's full deletion forever (review round 7). Reject
+    /// before any script runs; the caller keeps existing records and files
+    /// untouched. Isolated (managed) trees are already rejected by the
+    /// download reservation's own containment check.
+    pub(super) fn ensure_ordinary_download_root_disjoint(
+        &self,
+        root: &Path,
+        card_id: &str,
+    ) -> Result<(), ModelManagerError> {
+        // Settings::models_path creates its directory even when only reading
+        // the path; use the raw configured value until disjointness is proven.
+        let configured_root = Path::new(&self.settings.models_dir);
+        let target = planned_directory(root)?;
+        let inside = |resource: &Path| -> Result<bool, ModelManagerError> {
+            if target.starts_with(resource) {
+                return Ok(true);
+            }
+            let resource = planned_directory(resource)?;
+            Ok(target.starts_with(&resource))
+        };
+        let reject = || {
+            fail(
+                "普通下载目录与其它卡片的已登记权重目录重叠，已保留现有记录和文件；请为这张卡选择独立的下载目录。",
+            )
+        };
+        for other in db::list_store_models().map_err(|e| fail(e.to_string()))? {
+            if other.card_id == card_id || managed_storage(&other)? {
+                // The card's own retry target legitimately overlaps its own
+                // registered resource; managed generations are covered by the
+                // reservation's isolated-tree containment check.
+                continue;
+            }
+            if let Some(resource) = legacy_resource_dir(&other, configured_root) {
+                if inside(&resource)? {
+                    return Err(reject());
+                }
+            } else if let Some(declared) = declared_resource_dir(&other)? {
+                // A missing legacy directory is still an explicit reference:
+                // creating the download root inside it could make it
+                // resolvable again and wedge the unchanged deletion guard.
+                let allowed = planned_directory(
+                    other
+                        .models_root
+                        .as_deref()
+                        .map(Path::new)
+                        .unwrap_or(configured_root),
+                )?;
+                let declared_root = planned_directory(&declared)?;
+                if declared_root != allowed
+                    && declared_root.starts_with(&allowed)
+                    && inside(&declared_root)?
+                {
+                    return Err(reject());
+                }
+            }
+        }
+        for version in version_store::list(None).map_err(fail)? {
+            if version.card_id == card_id || version.managed {
+                continue;
+            }
+            if let Some(resource) = version.resource_dir.as_deref()
+                && inside(Path::new(resource))?
+            {
+                return Err(fail(
+                    "普通下载目录与其它卡片的历史版本权重目录重叠，已保留现有记录和文件；请为这张卡选择独立的下载目录。",
+                ));
+            }
         }
         Ok(())
     }
@@ -1124,6 +1231,10 @@ impl ModelManager {
                 .unwrap_or_else(now),
             error: None,
             planned_bytes,
+            // Registered at publish from the admission walk above, so later
+            // quota reads charge this candidate's preexisting files without
+            // re-walking the tree (review round 7).
+            measured_bytes: Some(actual),
         };
         version_store::put(&version).map_err(fail)?;
         drop(reservation);
@@ -1219,13 +1330,26 @@ impl ModelManager {
             || on_progress("等待提交新版下载状态，可取消…"),
         )
         .map_err(fail)?;
+        // Register the tree's post-script size at the terminal transition so
+        // later quota reads and the versions dialog need no walk (review
+        // round 7). Best effort: a walk error must not mask the download's
+        // own result; the fail-closed quota calibration covers a stale value.
+        let measure_registered = |version: &mut Version| {
+            if let Some(root) = version.models_root.as_deref() {
+                if let Ok(bytes) = version_store::quota_dir_size_bytes(Path::new(root)) {
+                    version.measured_bytes = Some(bytes);
+                }
+            }
+        };
         if let Err(error) = result {
             version.state = "failed".into();
             version.planned_bytes = 0;
             version.error = Some(error.to_string());
+            measure_registered(&mut version);
             version_store::put(&version).map_err(fail)?;
             return Err(error);
         }
+        measure_registered(&mut version);
         version_store::put(&version).map_err(fail)?;
         on_progress("新版已验证，当前部署未切换；停用当前模型后，可在历史版本中切换。");
         Ok(serde_json::json!({"version_id":revision}))

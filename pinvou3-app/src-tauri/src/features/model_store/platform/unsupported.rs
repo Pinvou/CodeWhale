@@ -66,7 +66,7 @@ pub async fn startup_update_check(_service: Arc<ModelStoreService>) -> Result<Va
     Ok(serde_json::json!({"checked":0,"skipped":0,"updates":[]}))
 }
 
-pub async fn versions(_card_id: String) -> Result<Value, String> {
+pub async fn versions(_card_id: String, _measure: Option<bool>) -> Result<Value, String> {
     nope()
 }
 pub fn start_version_action(

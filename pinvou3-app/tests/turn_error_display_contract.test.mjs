@@ -122,6 +122,14 @@ const LOCALE_MARKERS = {
   ja: { marker: '無効になりました', tail: '選び直し' },
   'zh-Hans': { marker: '已失效', tail: '重新选择模型' },
 };
+// engine_pool.rs rejects sends/voice postprocess with a stable code plus a
+// hardcoded English hint; both bridges must localize the recovery copy and
+// never leak the raw English tail (review round-7 P2).
+const SELECTION_REQUIRED_MARKERS = {
+  en: /Pick a model in model settings before sending/,
+  ja: /モデル設定でモデルを選んでください/,
+  'zh-Hans': /先在模型设置中选择模型后再发送/,
+};
 
 for (const [language, { marker, tail }] of Object.entries(LOCALE_MARKERS)) {
   await withLanguage(language, () => {
@@ -139,6 +147,18 @@ for (const [language, { marker, tail }] of Object.entries(LOCALE_MARKERS)) {
       displayTurnError(`session_model_binding_stale:${STALE_ID}`),
       text,
       `${language}: Error-object and string rejections must localize identically`,
+    );
+
+    // model_selection_required keeps its localization on both rejection
+    // shapes and drops the backend's hardcoded English hint.
+    const selectionCopy = displayTurnError(new Error('model_selection_required: choose a model before sending'));
+    assert.match(selectionCopy, SELECTION_REQUIRED_MARKERS[language], `${language}: selection-required copy must be shown`);
+    assert.ok(!selectionCopy.includes('model_selection_required'), `${language}: raw code must not leak`);
+    assert.ok(!selectionCopy.includes('choose a model'), `${language}: English hint must not leak`);
+    assert.equal(
+      displayTurnError('model_selection_required: choose a model before voice postprocess'),
+      selectionCopy,
+      `${language}: send and voice variants share one recovery copy`,
     );
   });
 }
@@ -223,10 +243,16 @@ const displaySection = chatSource.slice(
 );
 assert.match(displaySection, /String\(err && err\.message \? err\.message : err \|\| ""\)/);
 assert.match(displaySection, /indexOf\("session_model_binding_stale:"\) === 0/);
+assert.match(displaySection, /indexOf\("model_selection_required"\) === 0/);
 assert.ok(
   displaySection.indexOf('session_model_binding_stale') <
   displaySection.indexOf('redactRawError'),
   'stable-code localization must run before the redact fallback',
+);
+assert.ok(
+  displaySection.indexOf('model_selection_required') <
+  displaySection.indexOf('redactRawError'),
+  'selection-required localization must run before the redact fallback',
 );
 
 // Exercise the real #148 helper, not only its optional/missing fallback.
@@ -282,7 +308,8 @@ for (const [language, { marker, tail }] of Object.entries(LOCALE_MARKERS)) {
     const pathRedacted = displayTurnError(new Error(withSecret));
     assert.ok(pathRedacted.includes('C:\\fixture-project\\private-notes.md'));
     assert.ok(!pathRedacted.includes('fixture sensitive text'));
-    for (const input of [`session_model_binding_stale: ${STALE_ID}`, `session_model_binding_stale:${STALE_ID}`, raw, withSecret, 'disk full',
+    for (const input of [`session_model_binding_stale: ${STALE_ID}`, `session_model_binding_stale:${STALE_ID}`,
+      'model_selection_required: choose a model before sending', raw, withSecret, 'disk full',
       'send_user_message failed: account_platform_migration_incomplete: internal detail',
       'account_platform_migration_invalid: internal detail']) {
       assert.equal(desktopContext.displayDesktopError(new Error(input)), displayTurnError(new Error(input)),

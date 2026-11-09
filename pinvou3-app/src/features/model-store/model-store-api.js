@@ -304,5 +304,9 @@ export {
   fetchActiveRuns,
 };
 
-export function fetchVersions(cardId) { return invokeTauri("model_store_versions", { cardId }); }
+// measure=true 时后端逐行重测目录大小并登记（评审第 7 轮的显式测量入口）。
+export function fetchVersions(cardId, opts) {
+  const measure = !!(opts && opts.measure);
+  return invokeTauri("model_store_versions", measure ? { cardId, measure } : { cardId });
+}
 export function startVersionAction(cardId, action, versionId) { return invokeTauri("model_store_start_version_action", { cardId, action, versionId }); }

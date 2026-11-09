@@ -847,3 +847,72 @@ fn assert_strict_selection_round_trip(expected: &UserPrefs) {
     assert_selection(&UserPrefs::load_read_only_model_snapshot().unwrap());
     assert_eq!(std::fs::read(&path).unwrap(), recommitted);
 }
+
+#[test]
+fn effective_model_config_snapshot_reports_empty_selection_after_default_removed() {
+    use crate::features::assistant::platform::bridge::Pinvou3Bridge;
+
+    with_temp_home("effective-config-default-removed", || {
+        let mut prefs = UserPrefs::default();
+        prefs.memory_enabled = false;
+        prefs.advanced.saved_models = vec![
+            serde_json::from_value(serde_json::json!({
+                "id": "store-default", "name": "Store default", "preset": "openai_compatible",
+                "model": "store-wire", "base_url": "http://127.0.0.1:8911/v1",
+                "provider_kind": "custom", "model_store_card_id": "store-card",
+                "credential_ref": { "service": "pinvou3-model-api-key", "account": "model:store-default", "version": 1 },
+                "credential_state": "configured", "has_secret": true
+            }))
+            .unwrap(),
+            serde_json::from_value(serde_json::json!({
+                "id": "user-fallback", "name": "User fallback", "preset": "openai_compatible",
+                "model": "user-wire", "base_url": "https://example.test/v1", "provider_kind": "custom"
+            }))
+            .unwrap(),
+        ];
+        prefs
+            .set_default_model_ref(crate::platform::prefs::ModelSelectionRef::local(
+                "store-default",
+            ))
+            .unwrap();
+        assert!(prefs.model_selection_schema_version >= 1);
+        // Deleting the registered default clears the typed reference without
+        // re-selecting another retained configuration (user-confirmed PR
+        // semantics); the display snapshot must agree with the send gate.
+        prefs.remove_model("store-default");
+        assert!(prefs.advanced.default_model_ref.is_none());
+        assert!(prefs.advanced.active_model_id.is_none());
+        let mut bridge = Pinvou3Bridge::test_fixture(None);
+        bridge.prefs = prefs;
+        let config = effective_model_config_snapshot(&bridge, false, Vec::new());
+        assert_eq!(config.model, "");
+        assert_eq!(config.base_url, "");
+        assert_eq!(config.provider, "");
+        assert_eq!(config.preset, "");
+        assert_eq!(config.credential_state, CredentialState::Missing);
+        assert!(!config.has_secret);
+        assert!(
+            !config.requires_user_api_key,
+            "no endpoint is selected; the API-key gate must not fire"
+        );
+        assert_eq!(
+            serde_json::to_value(&config).unwrap()["model"],
+            serde_json::json!("")
+        );
+
+        // Re-registering an explicit default restores the resolved display.
+        let mut restored = bridge.prefs.clone();
+        restored
+            .set_default_model_ref(crate::platform::prefs::ModelSelectionRef::local(
+                "user-fallback",
+            ))
+            .unwrap();
+        bridge.prefs = restored;
+        let config = effective_model_config_snapshot(&bridge, false, Vec::new());
+        assert_eq!(config.model, "user-wire");
+        assert_eq!(config.base_url, "https://example.test/v1");
+        // The remote endpoint keeps the ordinary key requirement; only the
+        // selection-required state suppresses it.
+        assert!(config.requires_user_api_key);
+    });
+}

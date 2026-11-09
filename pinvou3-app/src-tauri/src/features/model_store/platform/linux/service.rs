@@ -543,10 +543,11 @@ pub async fn startup_update_check(service: Arc<ModelStoreService>) -> Result<Val
     serde_json::to_value(report).map_err(|e| e.to_string())
 }
 
-pub async fn versions(card_id: String) -> Result<Value, String> {
+pub async fn versions(card_id: String, measure: Option<bool>) -> Result<Value, String> {
+    let measure = measure.unwrap_or(false);
     tokio::task::spawn_blocking(move || {
         ModelManager::new(None, None)
-            .versions(&card_id)
+            .versions(&card_id, measure)
             .map_err(|e| e.to_string())
     })
     .await
