@@ -38,7 +38,7 @@ class AccountCIAdmissionTests(unittest.TestCase):
         self.assertIn('      - account-closure-test\n', gate)
         self.assertIn('ACCOUNT_CLOSURE_RESULT: ${{ needs.account-closure-test.result }}', gate)
         self.assertIn('"$ACCOUNT_CLOSURE_RESULT" != success', gate)
-        self.assertIn("needs.changes.outputs.reuse_verified == 'true'", closure)
+        self.assertIn("fromJSON(toJSON(needs.changes.outputs)).reuse_verified == 'true'", closure)
         self.assertIn("'account-closure-test'))", closure)
         self.assertIn('"$ACCOUNT_CLOSURE_RESULT" == skipped && "${CLOSURE_REUSE_VERIFIED:-false}" == true', gate)
 
