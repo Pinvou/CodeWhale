@@ -279,6 +279,34 @@ test('a failed refresh releases only its own navigation intent and mirrors the t
   assert.equal(state.controlledNavigationPending, false);
 });
 
+test('B registration task failure settles the refreshed generation and permits the next start', async () => {
+  // These projections are checked against real manager output in Rust.
+  const fixture = JSON.parse(fs.readFileSync(new URL('./fixtures/controller_registration_exit.json', import.meta.url), 'utf8'));
+  const refresh = Promise.withResolvers();
+  const { feature, state, listeners, logic } = installFeature(command => {
+    if (command === 'desktop_remote_controlled_refresh') return refresh.promise;
+    if (command === 'desktop_remote_controlled_start') return Promise.resolve(fixture.next);
+    return undefined;
+  });
+  state.desktopRemoteControl = logic.applyControlledStatus(state.desktopRemoteControl, fixture.old);
+  const pending = feature.controlledRefresh();
+  const publish = payload => listeners.get('desktop-remote-controlled-status')({ payload });
+  publish(fixture.retiring);
+  publish(fixture.registering);
+  publish(fixture.failed);
+  refresh.reject('pairing_registration_failed');
+  await assert.rejects(pending, { code: 'pairing_registration_failed' });
+  assert.equal(state.desktopRemoteControl.controlledDevice.status, 'error');
+  assert.equal(state.desktopRemoteControl.controlledDevice.generation, fixture.failed.generation);
+  assert.equal(state.desktopRemoteControl.controlledDevice.errorCode, 'pairing_registration_failed');
+  assert.equal(state.controlledNavigationPending, false);
+  await feature.controlledStart('B', []);
+  assert.equal(state.desktopRemoteControl.controlledDevice.generation, fixture.next.generation);
+  publish(fixture.failed);
+  assert.equal(state.desktopRemoteControl.controlledDevice.status, 'waiting_for_pairing');
+  assert.equal(state.desktopRemoteControl.controlledDevice.generation, fixture.next.generation);
+});
+
 test('a stale control completion cannot release the newer navigation intent', async () => {
   const first = Promise.withResolvers();
   const second = Promise.withResolvers();
