@@ -618,3 +618,11 @@
 .adm-restored-shell .adm-catalog-code-filter details>ul{display:grid;gap:5px;list-style:none}
 .adm-restored-shell .adm-catalog-code-filter details button{width:100%;white-space:normal;overflow-wrap:break-word}
 .adm-restored-shell .adm-model-token-filters .adm-catalog-code-filter :is(input,summary,button):focus{outline:3px solid #3159e8;outline-offset:2px}
+
+.adm-restored-shell .adm-catalog-directory>.adm-source-head{padding-top:11px;padding-bottom:11px;gap:8px;align-items:center}
+.adm-restored-shell .adm-catalog-directory>.adm-source-head h2{margin:0;line-height:1.25}
+.adm-restored-shell .adm-catalog-directory>.adm-source-head p{margin:3px 0 0}
+.adm-restored-shell .adm-catalog-directory .adm-table :is(th,td){font-variant-numeric:tabular-nums}
+.adm-restored-shell .adm-catalog-directory .adm-table .adm-secondary-id{overflow-wrap:break-word}
+.adm-restored-shell .adm-catalog-directory .adm-table button:focus{outline:3px solid #3159e8;outline-offset:2px}
+@media(max-width:600px){.adm-restored-shell .adm-catalog-directory>.adm-source-head{align-items:stretch}}

@@ -690,3 +690,10 @@ const catalogFilterCopy = {
   ja: { protocolHelp: 'プロトコルコードを完全に入力するか、このページで読み込んだコードから選択してください。', adapterHelp: 'このカタログは Adapter の候補を提供しません。Adapter バージョンの完全なコードを入力してください。', knownProtocols: 'このページで読み込んだプロトコルコード', noKnownProtocols: '読み込んだコードに一致はありません。完全なコードで検索できます。' },
 };
 for (const language of ['zh', 'en', 'ja']) Object.assign(tokenManagementCopy[language].modelToken.catalogDirectory, catalogFilterCopy[language]);
+
+const catalogListCopy = {
+  zh: { locale: 'zh-CN', tokenLength: '上下文长度（Token）', unknown: '未提供', listDenied: '当前无权读取模型目录', empty: '当前目录没有模型。', noMatches: '没有模型符合当前筛选条件。', stale: '下方显示上一次成功读取的结果。' },
+  en: { locale: 'en-US', tokenLength: 'Context length (tokens)', unknown: 'Not available', listDenied: 'You do not have access to read the model catalog', empty: 'The current catalog has no models.', noMatches: 'No models match the applied filters.', stale: 'The list below shows the last successful results.' },
+  ja: { locale: 'ja-JP', tokenLength: 'コンテキスト長（トークン）', unknown: '未提供', listDenied: 'モデルカタログの読み取り権限がありません', empty: '現在のカタログにモデルはありません。', noMatches: '適用した条件に一致するモデルはありません。', stale: '下には前回正常に読み取った結果を表示しています。' },
+};
+for (const language of ['zh', 'en', 'ja']) Object.assign(tokenManagementCopy[language].modelToken.catalogDirectory, catalogListCopy[language]);
