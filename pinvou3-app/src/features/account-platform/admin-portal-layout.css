@@ -602,3 +602,10 @@
 .adm-restored-shell .adm-token-detail-technical>summary:focus{outline:3px solid var(--adm-primary);outline-offset:2px}
 .adm-restored-shell .adm-token-detail-technical>.adm-model-detail-facts{grid-template-columns:repeat(2,minmax(0,1fr));margin:0 0 10px}
 @media(max-width:480px){.adm-restored-shell .adm-token-detail-technical>.adm-model-detail-facts{grid-template-columns:minmax(0,1fr)}}
+
+.adm-restored-shell .adm-source-head .adm-catalog-directory-actions{display:flex;flex-direction:row;flex-wrap:wrap;align-items:center;justify-content:flex-end;margin:-4px}
+.adm-restored-shell .adm-source-head .adm-catalog-directory-actions>button{max-width:100%;margin:4px;white-space:normal;overflow-wrap:break-word}
+.adm-restored-shell .adm-source-head .adm-catalog-directory-actions>button.adm-catalog-preview{border-color:var(--adm-primary);background:var(--adm-primary);color:#fff}
+.adm-restored-shell .adm-source-head .adm-catalog-directory-actions>button.adm-catalog-rollback{border-color:currentColor;color:var(--adm-danger);background:var(--adm-surface)}
+.adm-restored-shell .adm-source-head .adm-catalog-directory-actions>button:focus{outline:3px solid #3159e8;outline-offset:2px}
+@media(max-width:600px){.adm-restored-shell .adm-source-head .adm-catalog-directory-actions{justify-content:flex-start}.adm-restored-shell .adm-source-head .adm-catalog-directory-actions>button{width:auto;min-width:0;max-width:calc(100% - 8px)}}

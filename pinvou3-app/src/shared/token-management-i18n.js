@@ -676,3 +676,10 @@ Object.assign(tokenManagementCopy.ja.modelToken, {
   "tokenAccountRecordTime": "アカウントレコードの更新時刻",
   "tokenAccountTechnical": "アカウントの技術情報"
 });
+
+const catalogDirectoryCopy = {
+  zh: { previewSync: '预览目录同步', syncLead: '比较当前目录与来源快照。预览不会修改目录，确认后才提交同步。', noVersion: '尚未选择来源版本', selectVersion: '输入有效的来源版本以查看回滚影响。', observedVersion: (current, observed) => '当前目录版本：' + current + ' · 来源快照：' + observed },
+  en: { previewSync: 'Preview catalog sync', syncLead: 'Compare the current catalog with the source snapshot. Preview makes no changes; syncing requires confirmation.', noVersion: 'No source version selected', selectVersion: 'Enter a valid source version to preview rollback impact.', observedVersion: (current, observed) => 'Current catalog version: ' + current + ' · Source snapshot: ' + observed },
+  ja: { previewSync: 'カタログ同期をプレビュー', syncLead: '現在のカタログとソースのスナップショットを比較します。プレビューでは変更せず、確認後に同期を送信します。', noVersion: 'ソースバージョン未選択', selectVersion: '有効なソースバージョンを入力してロールバックの影響を確認してください。', observedVersion: (current, observed) => '現在のカタログバージョン：' + current + ' · ソーススナップショット：' + observed },
+};
+for (const language of ['zh', 'en', 'ja']) tokenManagementCopy[language].modelToken.catalogDirectory = catalogDirectoryCopy[language];
