@@ -574,3 +574,7 @@
 
 .adm-restored-shell .adm-refund-provider-filter{display:grid;min-width:0;gap:5px;align-self:start}
 .adm-restored-shell .adm-refund-provider-filter small{color:var(--adm-muted);overflow-wrap:anywhere}
+
+.adm-restored-shell .adm-refund-date-range{display:grid;min-width:0;gap:6px}
+.adm-restored-shell .adm-refund-date-range p{margin:0;color:var(--adm-muted);font-size:.85em;overflow-wrap:anywhere}
+.adm-restored-shell .adm-finance-read-view [data-refund-amount]{text-align:end;font-variant-numeric:tabular-nums}
