@@ -549,3 +549,6 @@
 
 .adm-order-list small { display: block; margin-top: .2rem; }
 .adm-order-list code { overflow-wrap: break-word; }
+
+.adm-order-detail-header { display: grid; gap: .5rem; justify-items: start; margin-bottom: 1rem; }
+.adm-order-detail-header code { overflow-wrap: break-word; }
