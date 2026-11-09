@@ -24,3 +24,16 @@
 @media(max-width:1350px){.adm-restored-shell .adm-finance-overview[data-finance-overview=products] .adm-finance-overview-grid{grid-template-columns:repeat(3,minmax(0,1fr))}}
 @media(max-width:780px){.adm-restored-shell .adm-finance-overview[data-finance-overview=products] .adm-finance-overview-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media(max-width:360px){.adm-restored-shell .adm-finance-overview[data-finance-overview=products] .adm-finance-overview-grid{grid-template-columns:minmax(0,1fr)}}
+
+
+.adm-restored-shell .adm-product-list-toolbar{display:grid;grid-template-columns:minmax(0,1fr) max-content;align-items:center;gap:12px;margin-block:16px 12px}
+.adm-restored-shell .adm-product-list-toolbar h3{margin:0}
+.adm-restored-shell .adm-product-toolbar-actions{display:grid;grid-auto-flow:column;align-items:center;gap:8px}
+.adm-restored-shell .adm-product-toolbar-actions>.adm-product-create{border-color:var(--adm-primary,#3159e8);color:#fff;background:var(--adm-primary,#3159e8);font-weight:650}
+.adm-restored-shell .adm-product-filter-zone .adm-filter-row{display:grid;grid-template-columns:minmax(9rem,1.25fr) repeat(3,minmax(0,1fr)) max-content;align-items:end;gap:12px;margin-block:0 12px}
+.adm-restored-shell .adm-product-filter-zone .adm-filter-row label{min-width:0}
+.adm-restored-shell .adm-product-filter-zone .adm-filter-row label.adm-checkbox-field{display:grid;grid-template-columns:auto minmax(0,1fr);align-items:center;gap:8px;min-height:40px;margin:0;line-height:1.4;cursor:pointer}
+.adm-restored-shell .adm-product-filter-zone label.adm-checkbox-field>input[type=checkbox]{width:16px;min-width:16px;height:16px;min-height:16px;padding:0;margin:0}
+.adm-restored-shell .adm-product-pagination{display:grid;grid-auto-flow:column;justify-content:end;gap:8px;margin-top:12px}
+@media(max-width:1000px){.adm-restored-shell .adm-product-filter-zone .adm-filter-row{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:560px){.adm-restored-shell .adm-product-list-toolbar{grid-template-columns:minmax(0,1fr)}.adm-restored-shell .adm-product-toolbar-actions{justify-content:start}.adm-restored-shell .adm-product-filter-zone .adm-filter-row{grid-template-columns:minmax(0,1fr)}}
