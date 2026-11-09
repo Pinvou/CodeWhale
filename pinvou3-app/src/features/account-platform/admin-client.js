@@ -2,7 +2,7 @@ import { decideWithOriginalReceipt } from './approval-decision-recovery.js';
 import { platformRoleBindingUserID, requirePlatformRoles, requirePlatformRoleBinding } from './platform-role-management.js';
 import { parseSystemStatusJSON } from './admin-system-status.js';
 import { parseUsageJSON, encodeUsageJSON } from './admin-usage-governance.js';
-import { parseFinanceJSON, encodeFinanceJSON, requireFinanceID, requirePaymentOrder, integerMoney } from './finance-contract.js';
+import { parseFinanceJSON, encodeFinanceJSON, requireFinanceID, requirePaymentOrder, integerMoney, preserveJSONIntegerFields } from './finance-contract.js';
 import { ENTITLEMENT_CORRECTION_COMMAND, parseEntitlementCorrectionJSON, encodeEntitlementCorrectionJSON, parseApprovalEntitlementJSON } from './admin-entitlement-correction.js';
 import { requireSession } from './personal-contract.js';
 import { mergeObservedVersions } from './authorization-ui.js';
@@ -1240,6 +1240,10 @@ tokenAccountRecoveryActionByIdempotencyKey(commandReference, idempotencyKey, sig
 tokenModelCatalogOverview(signal) { return this.request('token', '/admin/v1/overviews/model-catalog', signal); }
   tokenResourcesPageOverview(signal) { return this.request('token', '/admin/v1/overviews/token-resources', signal); }
   tokenProvisioningPageOverview(signal, window = '') { return this.request('token', `/admin/v1/overviews/model-operations${window === '24h' ? '?window=24h' : ''}`, signal); }
+  provisioningsForPresentation(filters = {}, signal) {
+    const query = tokenAdminCollectionQuery('provisionings', filters);
+    return this.request('token', `/admin/v1/provisionings?${query}`, signal, text => JSON.parse(preserveJSONIntegerFields(text, key => key === 'actual_generation' || key === 'desired_generation')), { isolateRead: true });
+  }
   provisionings(filtersOrSignal = {}, signal) {
     if (isAbortSignal(filtersOrSignal)) {
       return this.request('token', '/admin/v1/provisionings?limit=100', filtersOrSignal);
