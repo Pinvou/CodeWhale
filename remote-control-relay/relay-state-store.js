@@ -516,15 +516,24 @@ export class RelayStateStore {
     return store;
   }
 
-  static async recoverStagedBackup(options, { primaryRevision, primarySha256, backupSha256 } = {}) {
+  static async recoverStagedBackup(options, { primaryRevision, primarySha256, backupSha256, archiveRoot } = {}) {
     const revision = decimal(primaryRevision, "expected_primary_revision");
     const sha256 = /^[a-f0-9]{64}$/u;
     if (typeof primarySha256 !== "string" || typeof backupSha256 !== "string"
       || !sha256.test(primarySha256) || !sha256.test(backupSha256)
       || primarySha256 === backupSha256) fail("relay_state_recovery_evidence_invalid");
+    if (archiveRoot !== undefined && (typeof archiveRoot !== "string" || !isAbsolute(archiveRoot))) {
+      fail("relay_state_recovery_archive_root_invalid");
+    }
     const store = new RelayStateStore(options);
-    const recovered = await store.#open({ revision, primarySha256, backupSha256 });
-    await store.close();
+    const recovered = await store.#open({ revision, primarySha256, backupSha256, archiveRoot });
+    try {
+      await store.close();
+    } catch (error) {
+      store.#markAbandonedOpen();
+      throw Object.assign(new RelayStateStoreError("relay_state_recovery_close_failed",
+        "relay_state_recovery_close_failed", { cause: error }), { recoveryArchive: recovered.archive });
+    }
     return recovered;
   }
 
@@ -653,10 +662,18 @@ export class RelayStateStore {
   }
 
   async #recoveryCandidate(path) {
-    const identity = await this.#pathIdentity(path);
+    const metadata = await this.#fs.lstat(path, { bigint: true });
     const bytes = await this.#readBoundedBytes(path, this.#maxBytes, "relay_state_file_unsafe", true);
-    if (!sameFileIdentity(identity, await this.#pathIdentity(path))) fail("relay_state_recovery_changed");
-    return { identity, bytes, sha256: crypto.createHash("sha256").update(bytes).digest("hex") };
+    await this.#assertRecoveryFileVersion(path, metadata);
+    return { identity: fileIdentity(metadata), metadata, bytes,
+      sha256: crypto.createHash("sha256").update(bytes).digest("hex") };
+  }
+
+  async #assertRecoveryFileVersion(path, expected) {
+    const current = await this.#fs.lstat(path, { bigint: true });
+    if (!sameFileIdentity(fileIdentity(expected), fileIdentity(current))
+      || current.size !== expected.size || current.mtimeNs !== expected.mtimeNs
+      || current.ctimeNs !== expected.ctimeNs) fail("relay_state_recovery_changed");
   }
 
   async #recoverStagedBackup(evidence) {
@@ -672,32 +689,42 @@ export class RelayStateStore {
     }
 
     const directory = dirname(this.#path);
-    const archive = join(dirname(directory),
+    const archiveRoot = resolve(evidence.archiveRoot ?? dirname(directory));
+    if (pathWithin(archiveRoot, directory)) fail("relay_state_recovery_archive_root_invalid");
+    const archiveRootSnapshot = await this.#validatePathAncestors(archiveRoot, true);
+    if (process.platform !== "win32" || evidence.archiveRoot !== undefined) {
+      await this.#verifyFilesystemPath(archiveRoot, "directory");
+    }
+    const archive = join(archiveRoot,
       `${basename(directory)}-recovery-${this.#randomBytes(8).toString("hex")}`);
     await this.#assertAncestorSnapshot();
-    await this.#fs.mkdir(archive, { mode: 0o700 });
+    await this.#assertPathSnapshot(archiveRootSnapshot);
+    try {
+      await this.#fs.mkdir(archive, { mode: 0o700 });
+    } catch (error) {
+      if (["EACCES", "EPERM"].includes(error?.code)) fail("relay_state_recovery_archive_root_unwritable", error);
+      throw error;
+    }
     const archiveIdentity = await this.#pathIdentity(archive);
     const verifyArchive = async () => {
       await this.#assertAncestorSnapshot();
+      await this.#assertPathSnapshot(archiveRootSnapshot);
       await this.#verifyFilesystemPath(archive, "directory");
       if (comparablePath(await this.#fs.realpath(archive)) !== comparablePath(archive)
         || !sameFileIdentity(archiveIdentity, await this.#pathIdentity(archive))) {
         fail("relay_state_recovery_changed");
       }
     };
-    await this.#protectFilesystemPath(archive, "directory");
-    const archiveIdentities = new Map();
+    await this.#prepareRecoveryArchivePath(archive, "directory", archiveIdentity);
+    const archived = [];
     for (const [name, snapshot] of [["primary.json", primary], ["backup.json", backup]]) {
       await verifyArchive();
       const target = join(archive, name);
       const handle = await this.#fs.open(target, "wx", 0o600);
       try {
-        await this.#protectFilesystemPath(target, "file");
         const identity = await this.#handleIdentity(handle);
-        if (!sameFileIdentity(identity, await this.#pathIdentity(target))) {
-          fail("relay_state_recovery_changed");
-        }
-        archiveIdentities.set(name, identity);
+        await this.#prepareRecoveryArchivePath(target, "file", identity);
+        archived.push([target, identity, snapshot.sha256]);
         await handle.writeFile(snapshot.bytes);
         await handle.sync();
       } finally {
@@ -707,24 +734,53 @@ export class RelayStateStore {
     await this.#syncDirectory(archive);
     await this.#syncDirectory(dirname(archive));
 
-    const assertUnchanged = async () => {
+    const verifySnapshots = async (snapshots) => {
       await this.#guard.assertIdentity();
       await verifyArchive();
-      for (const [name, path, expected] of [
-        ["primary.json", this.#path, primary], ["backup.json", this.#backupPath, backup],
-      ]) {
+      const sampled = [];
+      for (const [path, identity, sha256] of snapshots) {
         const current = await this.#recoveryCandidate(path);
-        const archived = await this.#recoveryCandidate(join(archive, name));
-        if (!sameFileIdentity(current.identity, expected.identity)
-          || !sameFileIdentity(archived.identity, archiveIdentities.get(name))
-          || current.sha256 !== expected.sha256 || archived.sha256 !== expected.sha256) {
+        if (!sameFileIdentity(current.identity, identity) || current.sha256 !== sha256) {
           fail("relay_state_recovery_changed");
         }
+        sampled.push([path, current.metadata]);
       }
       await verifyArchive();
+      await Promise.all(sampled.map(([path, metadata]) => this.#assertRecoveryFileVersion(path, metadata)));
     };
-    await this.#legacyAliasGuardedWrite(this.#backupPath, primary.bytes, assertUnchanged);
+    const primarySnapshot = [this.#path, primary.identity, primary.sha256];
+    let published = false;
+    try {
+      const installed = await this.#legacyAliasGuardedWrite(this.#backupPath, primary.bytes, {
+        beforeReplace: async (temporaryPath, temporaryIdentity) => {
+          await verifySnapshots([
+            ...archived, primarySnapshot,
+            [this.#backupPath, backup.identity, backup.sha256],
+            [temporaryPath, temporaryIdentity, primary.sha256],
+          ]);
+        },
+        published: () => { published = true; },
+      });
+      await verifySnapshots([...archived, primarySnapshot, [this.#backupPath, installed, primary.sha256]]);
+    } catch (error) {
+      if (published) {
+        throw Object.assign(new RelayStateStoreError("relay_state_recovery_outcome_unknown",
+          "relay_state_recovery_outcome_unknown", { cause: error }), { recoveryArchive: archive });
+      }
+      throw error;
+    }
     return Object.freeze({ revision: committed.state.revision, archive });
+  }
+
+  async #prepareRecoveryArchivePath(target, kind, identity) {
+    const metadata = await this.#fs.lstat(target, { bigint: true });
+    if (metadata.isSymbolicLink() || !sameFileIdentity(identity, fileIdentity(metadata))
+      || (kind === "directory" ? !metadata.isDirectory() : !metadata.isFile())) {
+      fail("relay_state_recovery_changed");
+    }
+    if (process.platform === "win32") await this.#protectFilesystemPath(target, kind);
+    await this.#verifyFilesystemPath(target, kind);
+    if (!sameFileIdentity(identity, await this.#pathIdentity(target))) fail("relay_state_recovery_changed");
   }
 
   async #prepareDedicatedDirectory() {
@@ -831,7 +887,11 @@ export class RelayStateStore {
 
   async #assertAncestorSnapshot() {
     if (!this.#ancestorSnapshot) fail("relay_state_unavailable");
-    for (const expected of this.#ancestorSnapshot) {
+    await this.#assertPathSnapshot(this.#ancestorSnapshot);
+  }
+
+  async #assertPathSnapshot(snapshot) {
+    for (const expected of snapshot) {
       const metadata = await this.#fs.lstat(expected.path);
       const canonical = await this.#fs.realpath(expected.path);
       const identity = await this.#pathIdentity(expected.path);
@@ -995,7 +1055,7 @@ export class RelayStateStore {
     }
   }
 
-  async #legacyAliasGuardedWrite(path, contents, beforeReplace) {
+  async #legacyAliasGuardedWrite(path, contents, recovery) {
     await this.#guard.assertIdentity();
     await this.#assertAncestorSnapshot();
     const transaction = { protectedIdentities: new Set(), legacyBeforeIdentity: null };
@@ -1004,8 +1064,9 @@ export class RelayStateStore {
       transaction.protectedIdentities,
     );
     let operationError = null;
+    let installed;
     try {
-      await this.#writeAtomic(path, contents, transaction, beforeReplace);
+      installed = await this.#writeAtomic(path, contents, transaction, recovery);
     } catch (error) {
       operationError = error;
     }
@@ -1025,6 +1086,7 @@ export class RelayStateStore {
       throw operationError;
     }
     if (auditError) throw auditError;
+    return installed;
   }
 
   async #readBoundedFile(target, limit, errorCode = "relay_state_file_unsafe", verifyAcl = true) {
@@ -1391,7 +1453,7 @@ export class RelayStateStore {
     throw lastError;
   }
 
-  async #writeAtomic(path, contents, transaction, beforeReplace) {
+  async #writeAtomic(path, contents, transaction, recovery) {
     const temporaryPath = `${path}.${process.pid}.${this.#randomBytes(8).toString("hex")}.tmp`;
     let handle;
     try {
@@ -1413,12 +1475,13 @@ export class RelayStateStore {
       const retired = await this.#optionalIdentity(path);
       const retiredKey = fileIdentityKey(retired?.identity);
       if (retiredKey) transaction.protectedIdentities.add(retiredKey);
-      await this.#replaceWithRetry(temporaryPath, path, beforeReplace && (async () => {
-        await beforeReplace();
+      await this.#replaceWithRetry(temporaryPath, path, recovery && (async () => {
+        await recovery.beforeReplace(temporaryPath, temporaryIdentity);
         if (!sameFileIdentity(temporaryIdentity, await this.#pathIdentity(temporaryPath))) {
           fail("relay_state_temporary_file_changed");
         }
       }));
+      recovery?.published();
       const installed = await this.#fs.lstat(path);
       if (installed.isSymbolicLink()
         || !sameFileIdentity(temporaryIdentity, await this.#pathIdentity(path))) {
@@ -1426,6 +1489,7 @@ export class RelayStateStore {
       }
       await this.#syncDirectory(dirname(path));
       await this.#assertAncestorSnapshot();
+      return temporaryIdentity;
     } catch (error) {
       try { await handle?.close(); } catch {}
       try { await this.#fs.rm(temporaryPath, { force: true }); } catch {}

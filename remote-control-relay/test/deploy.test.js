@@ -159,6 +159,12 @@ test("staged controller smoke resolves its protocol after the real module instal
   assert.equal(loaded.status, 0, loaded.stderr);
   assert.equal(await readFile(join(installed, "protocol-controller.js"), "utf8"), await readFile(join(stage, "protocol-controller.js"), "utf8"));
   assert.equal(await readFile(join(installed, "cli-entrypoint.js"), "utf8"), await readFile(join(stage, "cli-entrypoint.js"), "utf8"));
+  await copyFile(join(relayDir, "package.json"), join(installed, "package.json"));
+  const recovery = spawnSync(process.execPath, ["recover-controller-state.js"], {
+    cwd: installed, encoding: "utf8", timeout: 10_000,
+  });
+  assert.equal(recovery.status, 1, recovery.error?.message || recovery.stderr);
+  assert.equal(recovery.stderr.trim(), "expected_primary_revision_malformed");
   // Replay the deployment's preflight command with invalid input. Its staged
   // helper dependency must resolve, and the gate must execute before mutation.
   const command = source.match(/^node "\$code_stage\/scripts\/deploy-controller-preflight\.mjs" "\$controller_env"$/m);

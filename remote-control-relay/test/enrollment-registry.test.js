@@ -707,6 +707,145 @@ test("offline recovery archives the exact interrupted pair and preserves committ
   await rejectsCode(restored.authorizeWebRegistration({ endpointId: "staged-enrollment", accessToken: SECOND_CREDENTIAL }), "enrollment_required");
 });
 
+async function interruptedRecovery(t) {
+  const statePath = await temporaryState(t);
+  const backupPath = `${statePath}.bak`;
+  const options = { statePath, legacyStatePath: legacyStatePath(statePath), ...testSecurityOptions(),
+    processIdentity: async (pid) => `test-process:${pid}` };
+  let failPrimary = false;
+  const store = await openStateStore(statePath, { fs: { ...fs, async rename(source, target) {
+    if (failPrimary && target === statePath) throw Object.assign(new Error("interrupted primary"), { code: "EIO" });
+    return fs.rename(source, target);
+  } } });
+  resourcesFor(t).stores.push(store);
+  await store.compareAndSwap("recovery_test", "0", { committed: true });
+  const primary = await fs.readFile(statePath);
+  failPrimary = true;
+  await rejectsCode(store.compareAndSwap("recovery_test", "1", { committed: false }), "relay_state_persist_failed");
+  await store.close();
+  const staged = await fs.readFile(backupPath);
+  const digest = (bytes) => crypto.createHash("sha256").update(bytes).digest("hex");
+  const evidence = { primaryRevision: JSON.parse(primary).revision,
+    primarySha256: digest(primary), backupSha256: digest(staged) };
+  return { options, statePath, backupPath, primary, staged, evidence };
+}
+
+test("offline recovery verifies actual staged bytes and live primary before publishing", async (t) => {
+  for (const target of ["temporary", "primary"]) {
+    await t.test(target, async (subtest) => {
+      const value = await interruptedRecovery(subtest);
+      let temporary;
+      let injected = false;
+      const guardedFs = { ...fs, async open(filename, flags, mode) {
+        if (flags === "wx" && filename.startsWith(`${value.backupPath}.`)) temporary = filename;
+        if (temporary && !injected && path.basename(filename) === "backup.json") {
+          injected = true;
+          if (target === "temporary") {
+            const before = await fs.stat(temporary, { bigint: true });
+            await fs.writeFile(temporary, value.staged);
+            assert.equal((await fs.stat(temporary, { bigint: true })).ino, before.ino);
+          } else {
+            const alternate = path.join(path.dirname(path.dirname(value.statePath)), "external-primary.json");
+            await fs.writeFile(alternate, value.staged, { mode: 0o600 });
+            await fs.rename(alternate, value.statePath);
+          }
+        }
+        return fs.open(filename, flags, mode);
+      } };
+      await rejectsCode(RelayStateStore.recoverStagedBackup({ ...value.options, fs: guardedFs }, value.evidence),
+        "relay_state_recovery_changed");
+      assert(injected);
+      assert.deepEqual(await fs.readFile(value.backupPath), value.staged);
+    });
+  }
+});
+
+test("offline recovery reports an unknown outcome when the pair changes after rename", async (t) => {
+  const value = await interruptedRecovery(t);
+  let injected = false;
+  const guardedFs = { ...fs, async rename(source, target) {
+    await fs.rename(source, target);
+    if (!injected && target === value.backupPath) {
+      injected = true;
+      await fs.writeFile(value.statePath, value.staged);
+    }
+  } };
+  let archive;
+  await assert.rejects(
+    RelayStateStore.recoverStagedBackup({ ...value.options, fs: guardedFs }, value.evidence),
+    (error) => { archive = error.recoveryArchive; return error.code === "relay_state_recovery_outcome_unknown"; },
+  );
+  // The backup was published, but the mismatched pair must never receive a success result.
+  assert(injected);
+  assert.deepEqual(await fs.readFile(value.backupPath), value.primary);
+  assert.deepEqual(await fs.readFile(path.join(archive, "primary.json")), value.primary);
+  assert.deepEqual(await fs.readFile(path.join(archive, "backup.json")), value.staged);
+  await rejectsCode(openStateStore(value.statePath), "relay_state_unavailable");
+});
+
+test("offline recovery preserves the lock owner after a transient close failure", async (t) => {
+  const value = await interruptedRecovery(t);
+  let locked = false;
+  const guardedFs = { ...fs, async rm(filename, options) {
+    if (!locked && filename === `${value.statePath}.lock`) {
+      locked = true;
+      throw Object.assign(new Error("injected owner close"), { code: "EIO" });
+    }
+    return fs.rm(filename, options);
+  } };
+  let archive;
+  await assert.rejects(RelayStateStore.recoverStagedBackup({ ...value.options, fs: guardedFs }, value.evidence),
+    (error) => { archive = error.recoveryArchive; return error.code === "relay_state_recovery_close_failed"; });
+  assert(locked);
+  assert.deepEqual(await fs.readFile(path.join(archive, "backup.json")), value.staged);
+  const reopened = await openStateStore(value.statePath);
+  resourcesFor(t).stores.push(reopened);
+  assert.equal(reopened.readNamespaceRevision("recovery_test").store_revision, value.evidence.primaryRevision);
+});
+
+test("offline recovery can archive outside a read-only state parent", {
+  skip: process.platform === "win32" || process.getuid?.() === 0,
+}, async (t) => {
+  const value = await interruptedRecovery(t);
+  const parent = path.dirname(path.dirname(value.statePath));
+  const archiveRoot = await fs.mkdtemp(path.join(os.tmpdir(), "pinvou-private-recovery-"));
+  t.after(() => fs.rm(archiveRoot, { recursive: true, force: true }));
+  await fs.chmod(parent, 0o500);
+  try {
+    await rejectsCode(RelayStateStore.recoverStagedBackup(value.options, value.evidence),
+      "relay_state_recovery_archive_root_unwritable");
+    const result = await RelayStateStore.recoverStagedBackup(value.options, { ...value.evidence, archiveRoot });
+    assert.equal(path.dirname(result.archive), archiveRoot);
+    assert.deepEqual(await fs.readFile(value.backupPath), value.primary);
+  } finally {
+    await fs.chmod(parent, 0o700);
+  }
+});
+
+test("offline recovery does not change a substituted archive symlink target's mode", {
+  skip: process.platform === "win32",
+}, async (t) => {
+  const value = await interruptedRecovery(t);
+  const parent = path.dirname(path.dirname(value.statePath));
+  const unrelated = path.join(parent, "unrelated");
+  await fs.mkdir(unrelated, { mode: 0o755 });
+  await fs.chmod(unrelated, 0o755);
+  let swapped = false;
+  const guardedFs = { ...fs, async mkdir(filename, options) {
+    await fs.mkdir(filename, options);
+    if (!swapped && filename.startsWith(path.join(parent, "controller-recovery-"))) {
+      swapped = true;
+      await fs.rename(filename, `${filename}-moved`);
+      await fs.symlink(unrelated, filename, "dir");
+    }
+  } };
+  await rejectsCode(RelayStateStore.recoverStagedBackup({ ...value.options, fs: guardedFs }, value.evidence),
+    "relay_state_recovery_changed");
+  assert(swapped);
+  assert.equal((await fs.stat(unrelated)).mode & 0o777, 0o755);
+  assert.deepEqual(await fs.readFile(value.backupPath), value.staged);
+});
+
 test("manual development enrollment never claims TOFU admission", async (t) => {
   for (const tofu of ["false", "true"]) {
     const { registry, store } = await openRegistry(t, {

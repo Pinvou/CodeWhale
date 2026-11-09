@@ -369,21 +369,35 @@ service stopped if the evidence is missing or the mismatch is unexplained.
 Run as the Relay state owner with the same supported Node runtime. Set
 `PINVOU_REMOTE_CONTROLLER_STATE_PATH` and `PINVOU_REMOTE_STATE_PATH` to the
 absolute paths used by the stopped Relay, then run from `remote-control-relay`.
+Use the installed Relay application directory for a managed production or
+test deployment, or the `remote-control-relay` directory of the matching
+source checkout for a self-hosted installation. The recovery entry is shipped
+with the other root JavaScript modules of both deployments.
+
+Choose an existing private archive directory outside the dedicated controller
+state directory. It must be owned by the Relay state owner, with mode `0700`
+on POSIX or the same private ACL as the state directory on Windows. The archive
+root may live elsewhere when the parent of the state directory is read-only.
 
 ```sh
-node scripts/recover-controller-state.mjs \
+node recover-controller-state.js \
   --confirmed-primary-revision "$CONFIRMED_PRIMARY_REVISION" \
   --primary-sha256 "$CONFIRMED_PRIMARY_SHA256" \
-  --staged-backup-sha256 "$STAGED_BACKUP_SHA256"
+  --staged-backup-sha256 "$STAGED_BACKUP_SHA256" \
+  --archive-root "$ABSOLUTE_PRIVATE_ARCHIVE_ROOT"
 ```
 
 The command takes the same exclusive writer lock as startup. It copies both
-files byte for byte to a new private sibling directory, rechecks the file
-identities and digests, and atomically installs the primary bytes as the backup.
-Its result gives the archive path and recovered revision. The original primary
-stays in place. Keep the whole-directory incident archive and these two copies
-access-restricted. If an error interrupts recovery, keep the Relay stopped and
-inspect the current pair and the retained copies before attempting it again.
+files byte for byte to a new private directory under the archive root. It
+rechecks both source files, the archives and the actual staged file before
+publishing the backup. It then verifies the installed pair and archives while
+still holding the writer lock. The success result gives the archive path and
+recovered revision. Keep the whole-directory incident archive and these copies
+access-restricted. If installation happened before a verification or lock
+release error, the command exits unsuccessfully and reports the archive path.
+Keep the Relay stopped and inspect the current pair and retained copies before
+attempting recovery again. The writer lock coordinates Relay and maintenance
+processes using the store. Stop any other offline writer before recovery.
 
 Before restarting, verify that both candidates are valid, canonically equivalent
 and have the correct owner/protection. Retain the archive and recovery decision
