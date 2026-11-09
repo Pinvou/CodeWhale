@@ -626,9 +626,16 @@ impl DesktopRemoteTaskRuntime {
     }
 
     pub(crate) fn recover_after_restart(&self) -> usize {
-        self.service
-            .recover_after_restart(controlled_monotonic_millis())
-            .len()
+        let report = self
+            .service
+            .recover_after_restart(controlled_monotonic_millis());
+        if let Some((_, failure)) = report.failed.first() {
+            crate::features::remote_control::controller::relay_runtime::log_controlled_event(
+                "task_restart_persistence_failed",
+                failure.code,
+            );
+        }
+        report.committed.len()
     }
 }
 
@@ -1279,7 +1286,7 @@ fn finish_prepared_admission_owned(
     use crate::features::remote_control::controller::task::PreparedTaskAdmission;
     let record = match &prepared {
         PreparedTaskAdmission::Accepted(AdmissionOutcome::Admitted(ticket)) => Some(&ticket.record),
-        PreparedTaskAdmission::InstallationFailed(record, _) => Some(record),
+        PreparedTaskAdmission::InstallationFailed(record, _, _) => Some(record),
         _ => None,
     };
     let mut cleanup = record.map(|record| AdmittedTaskCleanup {
