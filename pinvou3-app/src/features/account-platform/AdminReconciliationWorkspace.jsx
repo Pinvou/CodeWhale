@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { reconciliationCopy } from '../../shared/i18n.js';
+import { reconciliationCopy, ledgerRepairCopy, financeCopy } from '../../shared/i18n.js';
+import { AdminReconciliationFinancialRepairForm } from './AdminReconciliationFinancialRepairForm.jsx';
 import { requireFinanceCollection, requireFinanceID } from './finance-contract.js';
 import { RECONCILIATION_ACTIONS, reconciliationCommand, reconciliationDayRange, reconciliationImportItems, reconciliationCaseLabel, reconciliationReadError, reconciliationWriteError, requireReconciliationDate } from './reconciliation-contract.js';
 import { loadFinancePage } from './admin-finance-pagination.js';
@@ -11,7 +12,8 @@ function today() {
   return `${part('year')}-${part('month')}-${part('day')}`;
 }
 
-function CaseActions({ client, item, owner, copy, canWrite, onChanged }) {
+function CaseActions({ client, item, owner, copy, canWrite, onChanged, canRequestRepair, canReadCase, repairCopy, operationCopy, onViewApproval }) {
+  const [repairOpen, setRepairOpen] = useState(false);
   const op = useFinanceOperation(owner, { ...copy, permissions: copy.permission, inputInvalid: copy.invalid }, client, `reconciliation-case:${item.case_id}`);
   const [action, setAction] = useState('CLAIM');
   const [fields, setFields] = useState({ reason: '', owner: '', repair: '', review: '' });
@@ -43,15 +45,21 @@ function CaseActions({ client, item, owner, copy, canWrite, onChanged }) {
       {['RESOLVE', 'IGNORE'].includes(action) && <label>{copy.review}<textarea disabled={disabled} value={fields.review} onChange={update('review')} /></label>}
       <label>{copy.reason}<textarea disabled={disabled} value={fields.reason} onChange={update('reason')} /></label>
       <button disabled={op.busy} onClick={() => void submit()}>{op.unknown ? copy.retry : copy.submit}</button></>}
+    {canRequestRepair && <>
+      <button type="button" disabled={op.busy || op.unknown} onClick={() => setRepairOpen(true)}>{repairCopy.caseRepairStart}</button>
+      {repairOpen && <AdminReconciliationFinancialRepairForm client={client} owner={owner} copy={{ ...repairCopy, title: repairCopy.reconciliationRepairTitle }} operationCopy={operationCopy} sourceCaseID={item.case_id} canReadCase={canReadCase} onCreated={onViewApproval} />}
+    </>}
     {(invalid || op.error) && <p role="alert">{invalid ? copy.invalid : op.error}</p>}{op.message && <p role="status">{op.message}</p>}
   </section>;
 }
 
-function Workspace({ client, me, copy }) {
+function Workspace({ client, me, copy, repairCopy, operationCopy, onViewApproval }) {
   const owner = `${me.user_id}:${me.platform_authorization_version || me.active_context?.platform_authorization_version || 0}`;
   const permissions = me.platform_permissions || [];
   const canRun = permissions.includes('platform.billing.reconciliation.run');
   const canWrite = permissions.includes('platform.billing.reconciliation.manage');
+  const canRequestRepair = permissions.includes('platform.billing.repairs.request');
+  const canReadCase = permissions.includes('platform.billing.reconciliation.read');
   const [tab, setTab] = useState('runs');
   const [channel, setChannel] = useState('WECHAT');
   const [date, setDate] = useState(today);
@@ -115,10 +123,10 @@ function Workspace({ client, me, copy }) {
     {visiblePage && <table><thead><tr><th>{tab === 'runs' ? copy.businessDate : copy.merchant}</th><th>{copy.status}</th><th>{tab === 'runs' ? copy.count : copy.caseType}</th>{tab === 'runs' && <><th>{copy.rows}</th><th>{copy.source}</th></>}<th>{copy.action}</th></tr></thead><tbody>{visiblePage.items.map(item => <tr key={tab === 'runs' ? item.reconciliation_run_id : item.case_id}><td>{tab === 'runs' ? item.business_date : item.merchant_order_no}</td><td>{item.status}</td><td>{tab === 'runs' ? item.case_count : reconciliationCaseLabel(item.case_type, copy)}</td>{tab === 'runs' && <><td>{item.provider_row_count}</td><td>{item.source_mode}</td></>}<td><button disabled={busy} onClick={() => { if (tab === 'runs') { setRunID(item.reconciliation_run_id); setTab('cases'); } else setSelected(item); }}>{copy.cases}</button></td></tr>)}</tbody></table>}
     {visiblePage?.items.length === 0 && <p>{copy.empty}</p>}
     <nav><button disabled={busy || !history.length} onClick={() => { const values = [...history]; const next = values.pop(); setHistory(values); void load(next); }}>{copy.previous}</button><button disabled={busy || !visiblePage?.next_cursor} onClick={() => { setHistory(values => [...values, cursor]); void load(visiblePage.next_cursor); }}>{copy.next}</button></nav>
-    {selected && <CaseActions key={selected.case_id} client={client} item={selected} owner={owner} copy={copy} canWrite={canWrite} onChanged={item => { setSelected(item); setPage(current => current && ({ ...current, items: current.items.map(value => value.case_id === item.case_id ? item : value) })); }} />}
+    {selected && <CaseActions key={selected.case_id} client={client} item={selected} owner={owner} copy={copy} canWrite={canWrite} canRequestRepair={canRequestRepair} canReadCase={canReadCase} repairCopy={repairCopy} operationCopy={operationCopy} onViewApproval={onViewApproval} onChanged={item => { setSelected(item); setPage(current => current && ({ ...current, items: current.items.map(value => value.case_id === item.case_id ? item : value) })); }} />}
   </section>;
 }
 
-export function AdminReconciliationWorkspace({ client, me, language }) {
-  return <Workspace key={`${me.user_id}:${client.financeSessionEpoch || 0}:${me.platform_authorization_version || me.active_context?.platform_authorization_version || 0}`} client={client} me={me} copy={reconciliationCopy[language]} />;
+export function AdminReconciliationWorkspace({ client, me, language, onViewApproval }) {
+  return <Workspace key={`${me.user_id}:${client.financeSessionEpoch || 0}:${me.platform_authorization_version || me.active_context?.platform_authorization_version || 0}`} client={client} me={me} copy={reconciliationCopy[language]} repairCopy={ledgerRepairCopy[language]} operationCopy={financeCopy[language]} onViewApproval={onViewApproval} />;
 }

@@ -68,7 +68,7 @@ try{
   await page.waitForFunction(()=>window.f10 && [...document.querySelectorAll('nav button')].some(b=>b.textContent===window.f10.ledgerRepairCopy[window.f10.language].title));
   await page.evaluate(()=>[...document.querySelectorAll('nav button')].find(b=>b.textContent===window.f10.ledgerRepairCopy[window.f10.language].title).click());
   await page.waitForSelector('.adm-financial-repair-target');
-  const values=await page.evaluate(()=>[window.f10.id(1),window.f10.id(2),window.f10.id(3),window.f10.id(4),'9223372036854775807']);const inputs=await page.$$('.adm-financial-repair-target input');for(let i=0;i<inputs.length;i++)await inputs[i].type(values[i]);
+  const values=await page.evaluate(()=>[window.f10.id(1),window.f10.id(2),window.f10.id(3),window.f10.id(4),'922337203685477.5807']);const inputs=await page.$$('.adm-financial-repair-target input');for(let i=0;i<inputs.length;i++)await inputs[i].type(values[i]);
   await page.click('.adm-financial-repair-target button');await page.waitForSelector('.adm-financial-repair-draft');
   assert.ok(await page.evaluate(()=>{const c=window.f10.calls.find(c=>c.url==='/api/admin/account/admin/v2/approval-command-prechecks');return c.body.includes('"amount_microcredits":9223372036854775807')&&JSON.parse(c.body).reason_code==='ATTRIBUTION_TO_WRONG_PLATFORM_ACCOUNT'&&c.headers['X-CSRF-Token']==='controlled-csrf';}));
   await page.type('.adm-financial-repair-draft textarea','Controlled ledger correction justification');await page.type('.adm-financial-repair-draft input','controlled-ledger-key');await page.click('.adm-financial-repair-draft button');

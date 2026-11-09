@@ -26,7 +26,6 @@ export const ledgerRepairCopy = {
       "allocations_digest": "分配摘要",
       "hold_updated_at": "冻结更新时间",
       "loss_review_updated_at": "损失复核更新时间",
-
       "receivable_id": "应收 ID",
       "write_off_microcredits": "核销金额（微积分）",
       "expected_version": "预期应收版本",
@@ -63,7 +62,7 @@ export const ledgerRepairCopy = {
       "component_digest": "组件摘要",
       "provider_chargeback_id": "支付渠道拒付引用",
       "reconciliation_case_id": "对账案件 ID",
-      "business_date": "业务日期",
+      "business_date": "上海业务日期（YYYY-MM-DD）",
       "run_id": "对账运行 ID",
       "provider_snapshot_digest": "渠道快照摘要",
       "currency": "币种",
@@ -91,8 +90,13 @@ export const ledgerRepairCopy = {
     "paymentRepairTitle": "支付财务修复",
     "refundRepairTitle": "退款例外修复",
     "chargebackRepairTitle": "拒付财务修复",
-    "reconciliationRepairTitle": "对账财务修复",
-    "ledgerEffectNone": "仅根据确认的渠道退款证据结案，账务效果为 NONE；不会补记账、增加钱包余额或发起渠道操作。"
+    "reconciliationRepairTitle": "对账证据确认",
+    "reconciliationLead": "适用于渠道有付款记录、平台无对应记录且渠道退款证据已确认的差异。加载证据并核对后提交审批；本申请需经审批并执行成功，才会据此结案匹配差异。",
+    "ledgerEffectNone": "执行会登记证据引用与结案结果，并结案关联的人工复核案件（如有）。不会补记账、增加钱包余额或发起渠道操作。",
+    "businessDateHint": "按对账运行的上海业务日期填写（UTC+08:00），不按浏览器时区换算。可选取日期，或手动输入 YYYY-MM-DD。",
+    "dateManualEntry": "手动输入日期",
+    "dateUseCalendar": "使用日期选择器",
+    "dateCalendarUnavailableHelp": "日期选择器不支持当前值；请手动填写，或清空日期后切换。"
   },
   "en": {
     "title": "Start a financial repair approval",
@@ -121,7 +125,6 @@ export const ledgerRepairCopy = {
       "allocations_digest": "Allocations digest",
       "hold_updated_at": "Hold updated at",
       "loss_review_updated_at": "Loss review updated at",
-
       "receivable_id": "Receivable ID",
       "write_off_microcredits": "Write-off amount (microcredits)",
       "expected_version": "Expected receivable version",
@@ -158,7 +161,7 @@ export const ledgerRepairCopy = {
       "component_digest": "Component digest",
       "provider_chargeback_id": "Provider chargeback reference",
       "reconciliation_case_id": "Reconciliation case ID",
-      "business_date": "Business date",
+      "business_date": "Shanghai business date (YYYY-MM-DD)",
       "run_id": "Reconciliation run ID",
       "provider_snapshot_digest": "Provider snapshot digest",
       "currency": "Currency",
@@ -186,8 +189,13 @@ export const ledgerRepairCopy = {
     "paymentRepairTitle": "Payment financial repair",
     "refundRepairTitle": "Refund exception repair",
     "chargebackRepairTitle": "Chargeback financial repair",
-    "reconciliationRepairTitle": "Reconciliation financial repair",
-    "ledgerEffectNone": "Closes the case using confirmed provider refund evidence. Ledger effect is NONE: no ledger posting, wallet credit or provider action."
+    "reconciliationRepairTitle": "Reconciliation evidence review",
+    "reconciliationLead": "For a provider payment missing internally with confirmed provider refund evidence. Load and review the evidence, then submit for approval. This request closes the matched difference only after approval and successful execution.",
+    "ledgerEffectNone": "Execution records the evidence reference and closure result, including closure of any linked manual review case. It does not post ledger entries, credit wallets, or initiate provider operations.",
+    "businessDateHint": "Use the reconciliation run’s Shanghai business date (UTC+08:00), without browser time zone conversion. Pick a date or enter YYYY-MM-DD manually.",
+    "dateManualEntry": "Enter date manually",
+    "dateUseCalendar": "Use date picker",
+    "dateCalendarUnavailableHelp": "The date picker cannot represent this value. Enter it manually, or clear the date before switching."
   },
   "ja": {
     "title": "財務修復の承認を起動",
@@ -216,7 +224,6 @@ export const ledgerRepairCopy = {
       "allocations_digest": "配分ダイジェスト",
       "hold_updated_at": "保留更新日時",
       "loss_review_updated_at": "損失審査更新日時",
-
       "receivable_id": "売掛金 ID",
       "write_off_microcredits": "償却額（マイクロクレジット）",
       "expected_version": "予想売掛金版",
@@ -253,7 +260,7 @@ export const ledgerRepairCopy = {
       "component_digest": "構成要素ダイジェスト",
       "provider_chargeback_id": "決済チャージバック参照",
       "reconciliation_case_id": "照合案件 ID",
-      "business_date": "業務日",
+      "business_date": "上海の業務日（YYYY-MM-DD）",
       "run_id": "照合実行 ID",
       "provider_snapshot_digest": "決済スナップショットダイジェスト",
       "currency": "通貨",
@@ -281,8 +288,13 @@ export const ledgerRepairCopy = {
     "paymentRepairTitle": "支払財務修復",
     "refundRepairTitle": "返金例外修復",
     "chargebackRepairTitle": "チャージバック財務修復",
-    "reconciliationRepairTitle": "照合財務修復",
-    "ledgerEffectNone": "確認済み決済返金証拠で案件を終了します。台帳への効果は NONE で、仕訳、ウォレット加算、決済操作は行いません。"
+    "reconciliationRepairTitle": "照合証拠の確認",
+    "reconciliationLead": "決済事業者に支払記録があり、内部記録がなく、事業者の返金証拠を確認できる差異が対象です。証拠を読み込んで照合し、承認申請します。この申請による差異の終了は、承認と実行の成功後に行われます。",
+    "ledgerEffectNone": "実行では返金証拠の参照と終了結果を記録し、関連する手動確認案件があれば併せて終了します。仕訳の追加、ウォレットへの加算、決済事業者の操作は行いません。",
+    "businessDateHint": "照合実行の上海業務日（UTC+08:00）を指定します。ブラウザーの時間帯では変換しません。日付を選ぶか、YYYY-MM-DD で手入力できます。",
+    "dateManualEntry": "日付を手入力",
+    "dateUseCalendar": "日付選択を使用",
+    "dateCalendarUnavailableHelp": "現在の値は日付選択で扱えません。手入力するか、日付を空にしてから切り替えてください。"
   }
 };
 
@@ -292,6 +304,28 @@ const recoveryCopy = {
   ja: { retry: '元のリクエストで再試行', unknown: 'ドラフト作成の結果は未確認です。元の事実とリクエストキーを保持してください。', permissions: '現在の権限が不足しています。未確認の元のリクエストは保持されます。', sourceChanged: 'リクエストが拒否されました。固定事実と承認条件を確認してください。', recoveryUnavailable: '復元記録を確実に読み書きできないため、新しいリクエストは送信していません。', recoveryPending: '再読み込みや再認証後も元のドラフト要求のみを再実行し、承認を自動提出しません。', saved: 'ドラフトの作成を確認しました。' },
 };
 for (const language of ['zh', 'en', 'ja']) Object.assign(ledgerRepairCopy[language], recoveryCopy[language]);
+
+const ledgerAmountCopy = {
+  zh: {
+    amountPointsLabel: '金额（积分）',
+    amountPointsHint: '1 积分 = 10,000 微积分。最多 4 位小数，使用小数点，不含空格或千位分隔符。',
+    amountPointsEquivalent: '内部记账值：{amount} 微积分。',
+    amountPointsInvalid: '请输入大于 0 且不超过 922337203685477.5807 的积分金额，最多 4 位小数；不支持正负号、空格、千位分隔符或科学计数法。',
+  },
+  en: {
+    amountPointsLabel: 'Amount (points)',
+    amountPointsHint: '1 point = 10,000 microcredits. Use a decimal point and up to 4 decimal places, without spaces or grouping separators.',
+    amountPointsEquivalent: 'Internal amount: {amount} microcredits.',
+    amountPointsInvalid: 'Enter points greater than 0 and no more than 922337203685477.5807, with up to 4 decimal places; signs, spaces, grouping separators and exponent notation are unsupported.',
+  },
+  ja: {
+    amountPointsLabel: '金額（ポイント）',
+    amountPointsHint: '1 ポイント = 10,000 マイクロクレジット。小数点を使用し、小数部は 4 桁以内で、空白や桁区切りを含めないでください。',
+    amountPointsEquivalent: '内部金額：{amount} マイクロクレジット。',
+    amountPointsInvalid: '0 より大きく 922337203685477.5807 以下のポイントを小数部 4 桁以内で入力してください。符号、空白、桁区切り、指数表記は使用できません。',
+  },
+};
+for (const language of ['zh', 'en', 'ja']) Object.assign(ledgerRepairCopy[language], ledgerAmountCopy[language]);
 
 const authenticationCopy = {
   zh: { recentAuthenticationRequired: '\u9700\u8981\u91cd\u65b0\u8ba4\u8bc1\u540e\u7ee7\u7eed\u539f\u8349\u7a3f\u8bf7\u6c42\u3002', reauthenticate: '\u91cd\u65b0\u8ba4\u8bc1' },
@@ -303,3 +337,216 @@ for (const language of ['zh', 'en', 'ja']) Object.assign(ledgerRepairCopy[langua
 ledgerRepairCopy.zh.writeOffRecentAuthenticationRequired = '需要重新认证。当前页面保留原事实和请求键；门户跳转后，未知操作请到审批中心打开原草稿，用 EDIT 核验并继续，不要另建请求。';
 ledgerRepairCopy.en.writeOffRecentAuthenticationRequired = 'Authenticate again. This page retains the original facts and key. After portal navigation, open the original draft in the approval center and use EDIT to verify and continue an unconfirmed operation; do not create another request.';
 ledgerRepairCopy.ja.writeOffRecentAuthenticationRequired = '再認証が必要です。このページでは元の事実とキーを保持します。ポータル移動後、未確認の操作は承認センターで元のドラフトを開き、EDIT で確認して続行してください。別の要求を作成しないでください。';
+
+const reconciliationCaseContextCopy = {
+  "zh": {
+    "caseRepairStart": "核对此案件的支付证据",
+    "caseContextTitle": "案件来源（仅供核对）",
+    "caseContextHelp": "这是案件原始对账批次中的记录，不代表证据已匹配或可以结案。核对渠道、账期和金额后，继续读取服务端事实验证支付证据。",
+    "caseContextRead": "读取案件来源",
+    "caseContextReading": "正在读取案件来源…",
+    "caseContextDenied": "没有读取对账案件的权限；未加载案件来源。原有手填和审批前校验入口仍可使用。",
+    "caseContextUnavailable": "案件来源未能确认。请重试读取；不要把未加载信息当作匹配结果。",
+    "caseContextMissing": "来源金额缺失或无法解析",
+    "evidenceMatchTitle": "审批前证据匹配记录（已通过）",
+    "evidenceMatchHelp": "以下来自原服务端审批前校验及冻结投影。此校验记录不代表审批或结案执行已完成；执行时仍会重新核验。",
+    "caseContextLabels": {
+      "case_id": "对账案件 ID",
+      "reconciliation_case_id": "对账案件 ID",
+      "reconciliation_run_id": "案件原始对账批次 ID",
+      "run_id": "案件原始对账批次 ID",
+      "case_type": "差异类型",
+      "status": "案件状态",
+      "case_version": "案件版本",
+      "provider_id": "供应商",
+      "provider_version": "供应商版本",
+      "channel": "支付渠道",
+      "business_date": "案件原始批次业务日期",
+      "merchant_order_no": "商户订单号",
+      "amount_fen": "渠道记录金额（分）",
+      "currency": "币种",
+      "provider_transaction_id": "支付渠道交易 ID",
+      "payment_evidence_id": "已校验支付证据 ID"
+    }
+  },
+  "en": {
+    "caseRepairStart": "Check payment evidence for this case",
+    "caseContextTitle": "Case source (for review only)",
+    "caseContextHelp": "These records belong to the case’s original reconciliation run. They do not establish an evidence match or eligibility for closure. Review the channel, business date and amount, then read the owner facts to validate the payment evidence.",
+    "caseContextRead": "Read case source",
+    "caseContextReading": "Reading case source…",
+    "caseContextDenied": "You do not have permission to read reconciliation cases. Case source was not loaded. The existing manual input and approval precheck remain available.",
+    "caseContextUnavailable": "The case source could not be confirmed. Retry the read; unloaded information is not a matching result.",
+    "caseContextMissing": "Source amount is missing or unusable",
+    "evidenceMatchTitle": "Evidence precheck record (passed)",
+    "evidenceMatchHelp": "These facts come from the original server precheck and frozen projection. Passing this precheck does not establish that approval or closure execution is complete; execution revalidates the facts.",
+    "caseContextLabels": {
+      "case_id": "Reconciliation case ID",
+      "reconciliation_case_id": "Reconciliation case ID",
+      "reconciliation_run_id": "Case original reconciliation run ID",
+      "run_id": "Case original reconciliation run ID",
+      "case_type": "Difference type",
+      "status": "Case status",
+      "case_version": "Case version",
+      "provider_id": "Provider",
+      "provider_version": "Provider version",
+      "channel": "Payment channel",
+      "business_date": "Case original run business date",
+      "merchant_order_no": "Merchant order number",
+      "amount_fen": "Provider record amount (fen)",
+      "currency": "Currency",
+      "provider_transaction_id": "Provider payment transaction ID",
+      "payment_evidence_id": "Validated payment evidence ID"
+    }
+  },
+  "ja": {
+    "caseRepairStart": "この案件の支払証拠を確認",
+    "caseContextTitle": "案件の出所（照合用）",
+    "caseContextHelp": "案件の元の照合実行に属する記録です。証拠の一致や結案資格を示すものではありません。チャネル・業務日・金額を照合してから、サーバーの事前検証で支払証拠を確認してください。",
+    "caseContextRead": "案件の出所を読み込む",
+    "caseContextReading": "案件の出所を読み込み中…",
+    "caseContextDenied": "照合案件の読取権限がありません。出所は読み込まれていません。従来の手入力と承認前検証は引き続き利用できます。",
+    "caseContextUnavailable": "案件の出所を確認できませんでした。再読込してください。未取得の情報は一致結果ではありません。",
+    "caseContextMissing": "元の金額が未記録または解析不能です",
+    "evidenceMatchTitle": "証拠の事前検証記録（合格）",
+    "evidenceMatchHelp": "元のサーバー事前検証と凍結投影の記録です。この記録は承認や結案実行の完了を意味しません。実行時に事実が再検証されます。",
+    "caseContextLabels": {
+      "case_id": "照合案件 ID",
+      "reconciliation_case_id": "照合案件 ID",
+      "reconciliation_run_id": "案件の元の照合実行 ID",
+      "run_id": "案件の元の照合実行 ID",
+      "case_type": "差異の種類",
+      "status": "案件状態",
+      "case_version": "案件バージョン",
+      "provider_id": "プロバイダー",
+      "provider_version": "プロバイダーバージョン",
+      "channel": "支払チャネル",
+      "business_date": "案件の元の実行の業務日",
+      "merchant_order_no": "加盟店注文番号",
+      "amount_fen": "チャネル記録金額（分）",
+      "currency": "通貨",
+      "provider_transaction_id": "支払チャネル取引 ID",
+      "payment_evidence_id": "検証済み支払証拠 ID"
+    }
+  }
+};
+for (const language of ['zh', 'en', 'ja']) Object.assign(ledgerRepairCopy[language], reconciliationCaseContextCopy[language]);
+
+const reconciliationCaseHostCopy = {
+  "zh": {
+    "caseTargetLocked": "案件已固定。如需处理其他案件，请返回案件列表选择。"
+  },
+  "en": {
+    "caseTargetLocked": "This case is fixed. To work on another case, select it from the case list."
+  },
+  "ja": {
+    "caseTargetLocked": "対象案件は固定されています。別の案件を処理するには、案件一覧から選択してください。"
+  }
+};
+for (const language of ['zh', 'en', 'ja']) Object.assign(ledgerRepairCopy[language], reconciliationCaseHostCopy[language]);
+
+const reconciliationCaseDateCopy = {
+  "zh": {
+    "caseDateUse": "采用案件业务日期",
+    "caseDateHelp": "空白或上次自动带入的日期会随案件来源更新；手动填写的日期会保留。可主动采用此案件原始批次的业务日期。"
+  },
+  "en": {
+    "caseDateUse": "Use case business date",
+    "caseDateHelp": "An empty date or the previous automatic date follows the accepted case source. Manual edits are preserved. You can explicitly use the business date of this case’s original run."
+  },
+  "ja": {
+    "caseDateUse": "案件の業務日を使用",
+    "caseDateHelp": "空欄または前回自動入力した日付は、取得した案件の出所に合わせて更新されます。手動入力は保持されます。案件の元の実行の業務日を明示的に採用できます。"
+  }
+};
+for (const language of ['zh', 'en', 'ja']) Object.assign(ledgerRepairCopy[language], reconciliationCaseDateCopy[language]);
+
+ledgerRepairCopy.zh.ledgerTargetEntry = {
+  task: '修正平台账户的入账归属', help: '根据已获权的账务资料填写完整 ID。读取服务端快照后，再核对分录和两侧账户。',
+  fields: {
+    target_resource_id: { label: '待修复过账 ID', help: '需要更正归属的过账记录。' },
+    target_journal_entry_id: { label: '关联账目分录 ID', help: '包含该笔过账的账目分录。' },
+    wrong_ledger_account_id: { label: '当前入账的平台账户 ID', help: '原过账错误计入的账户。' },
+    correct_ledger_account_id: { label: '应入账的平台账户 ID', help: '更正后应归属的账户。' },
+  },
+};
+ledgerRepairCopy.en.ledgerTargetEntry = {
+  task: 'Correct the platform account assigned to a posting', help: 'Enter full IDs from records you are authorized to view. Check the journal entry and both accounts after reading the server snapshot.',
+  fields: {
+    target_resource_id: { label: 'Posting ID to correct', help: 'The posting recorded under the wrong account.' },
+    target_journal_entry_id: { label: 'Related journal entry ID', help: 'The journal entry that contains this posting.' },
+    wrong_ledger_account_id: { label: 'Platform account ID currently posted to', help: 'The account that received the original posting in error.' },
+    correct_ledger_account_id: { label: 'Intended platform account ID', help: 'The account that should receive the posting.' },
+  },
+};
+ledgerRepairCopy.ja.ledgerTargetEntry = {
+  task: '転記先のプラットフォーム口座を訂正', help: '閲覧権限のある帳簿から ID をすべて入力します。サーバーのスナップショット取得後に、仕訳と両方の口座を確認してください。',
+  fields: {
+    target_resource_id: { label: '訂正する転記 ID', help: '誤った口座に記録された転記です。' },
+    target_journal_entry_id: { label: '関連する仕訳 ID', help: 'この転記を含む仕訳です。' },
+    wrong_ledger_account_id: { label: '現在の転記先口座 ID', help: '誤って転記されたプラットフォーム口座です。' },
+    correct_ledger_account_id: { label: '正しい転記先口座 ID', help: '本来の転記先となるプラットフォーム口座です。' },
+  },
+};
+
+ledgerRepairCopy.zh.ledgerImpact = {
+  refreshing: "正在重新读取这笔更正的预览。",
+  title: '受影响的账户', original: '当前入账账户', intended: '应入账账户', accountType: '账户类型',
+  requested: '申请更正金额', points: value => value + ' 积分', notProvided: '未提供', identifiers: '查看冻结标识和参数',
+  limit: '快照未提供账户增减方向和更正前后的余额。这里显示的是申请金额，实际结果以审批执行和账本为准。',
+  types: { PAYMENT_CLEARING: '支付清算', USAGE_REVENUE: '用量收入', WALLET_LIABILITY: '钱包负债', RECEIVABLE_ASSET: '应收资产', ADJUSTMENT: '调账', REFUND_CLEARING: '退款清算', CHARGEBACK_CLEARING: '拒付清算' },
+};
+ledgerRepairCopy.en.ledgerImpact = {
+  refreshing: "Refreshing the preview for this correction.",
+  title: 'Accounts affected', original: 'Account currently posted to', intended: 'Intended account', accountType: 'Account type',
+  requested: 'Requested correction amount', points: value => value + ' points', notProvided: 'Not provided', identifiers: 'View frozen IDs and parameters',
+  limit: 'The snapshot does not provide the direction of each balance change or before and after balances. This is the requested amount. Check approval execution and the ledger for the actual result.',
+  types: { PAYMENT_CLEARING: 'Payment clearing', USAGE_REVENUE: 'Usage revenue', WALLET_LIABILITY: 'Wallet liability', RECEIVABLE_ASSET: 'Receivable asset', ADJUSTMENT: 'Adjustment', REFUND_CLEARING: 'Refund clearing', CHARGEBACK_CLEARING: 'Chargeback clearing' },
+};
+ledgerRepairCopy.ja.ledgerImpact = {
+  refreshing: "この訂正のプレビューを再取得しています。",
+  title: '影響を受ける口座', original: '現在の転記先口座', intended: '正しい転記先口座', accountType: '口座種別',
+  requested: '訂正申請額', points: value => value + ' ポイント', notProvided: '未提供', identifiers: '取得時の ID とパラメーターを表示',
+  limit: 'スナップショットに各口座の増減方向や訂正前後の残高は含まれていません。表示額は申請額です。結果は承認の実行と台帳で確認してください。',
+  types: { PAYMENT_CLEARING: '支払い精算', USAGE_REVENUE: '利用収益', WALLET_LIABILITY: 'ウォレット負債', RECEIVABLE_ASSET: '未収資産', ADJUSTMENT: '調整', REFUND_CLEARING: '返金精算', CHARGEBACK_CLEARING: 'チャージバック精算' },
+};
+
+ledgerRepairCopy.zh.ledgerWorkflow = { title: '财务修复步骤', steps: ["核对修复目标","读取快照并核对影响","创建审批草稿"], phaseReading: "正在读取快照", phaseReview: "可核对影响", approvalNext: "草稿创建成功后，在审批中心继续处理。", load: '读取服务端快照', loading: '正在读取服务端快照…' };
+ledgerRepairCopy.en.ledgerWorkflow = { title: 'Financial repair steps', steps: ["Identify the target","Read the snapshot and check the impact","Create approval draft"], phaseReading: "Reading the snapshot", phaseReview: "Ready to check the impact", approvalNext: "After the draft is created, continue in the Approval Center.", load: 'Read server snapshot', loading: 'Reading server snapshot…' };
+ledgerRepairCopy.ja.ledgerWorkflow = { title: '財務修復の手順', steps: ["修復対象を確認","スナップショットを取得して影響を確認","承認の下書きを作成"], phaseReading: "スナップショットを取得中", phaseReview: "影響を確認できます", approvalNext: "下書きの作成後は承認センターで手続きを続けます。", load: 'サーバーのスナップショットを取得', loading: 'サーバーのスナップショットを取得中…' };
+
+ledgerRepairCopy.zh.receivableTarget = {
+  intro: '用同一条应收记录的完整 ID 和当前版本核对核销对象。版本用于检测记录变化。',
+  fields: { target_resource_id: { label: '待核销应收 ID', help: '输入要核销的那条应收记录。' }, expected_version: { label: '记录版本（核对用）', help: '输入已从获准的账务记录核实的当前版本。本页不会自动填入版本。' } },
+  confirmed: '快照对应的应收记录', version: '快照记录版本', recheck: '请核对原应收记录的 ID 和当前版本，再重新读取。',
+};
+ledgerRepairCopy.en.receivableTarget = {
+  intro: 'Verify the write-off target using the full ID and current version of the same receivable. The version detects changes to the record.',
+  fields: { target_resource_id: { label: 'Receivable ID to write off', help: 'Enter the ID of the exact receivable record.' }, expected_version: { label: 'Record version for verification', help: 'Enter the current version you verified from an authorized financial record. This form does not fill it in automatically.' } },
+  confirmed: 'Receivable in this snapshot', version: 'Record version in this snapshot', recheck: 'Check the ID and current version of the original receivable, then read again.',
+};
+ledgerRepairCopy.ja.receivableTarget = {
+  intro: '同じ未収金の完全な ID と現在の版で対象を確認します。版は記録の変更を検出するために使います。',
+  fields: { target_resource_id: { label: '償却する未収金の ID', help: '償却対象の未収金記録の ID を入力してください。' }, expected_version: { label: '記録の版（確認用）', help: '参照権限のある会計記録で確認した現在の版を入力してください。このフォームには自動入力されません。' } },
+  confirmed: 'スナップショットの未収金', version: 'スナップショットの記録の版', recheck: '元の未収金の ID と現在の版を確認してから、再度取得してください。',
+};
+
+ledgerRepairCopy.zh.receivableAmounts = {
+  title: '核销金额核对', field: { label: '申请核销金额（微积分）', help: '填写大于零的整数，不得超过该记录的未核销余额。10,000 微积分等于 1 积分。', invalid: '请输入 1 到 9223372036854775807 之间的整数微积分。' },
+  outstanding: '快照中的未核销余额', requested: '申请核销金额', points: value => value + ' 积分',
+  full: '拟全额核销', partial: '拟部分核销', limit: '这些金额来自已读取的快照，核销后的余额以审批执行和应收记录为准。',
+};
+ledgerRepairCopy.en.receivableAmounts = {
+  title: 'Review write-off amounts', field: { label: 'Requested write-off (microcredits)', help: 'Enter a positive whole amount no higher than this record’s outstanding balance. 10,000 microcredits equal 1 point.', invalid: 'Enter a whole number from 1 to 9223372036854775807 microcredits.' },
+  outstanding: 'Outstanding balance in this snapshot', requested: 'Requested write-off', points: value => value + ' points',
+  full: 'Requested in full', partial: 'Requested in part', limit: 'These amounts are from the snapshot. Check approval execution and the receivable record for the balance after write-off.',
+};
+ledgerRepairCopy.ja.receivableAmounts = {
+  title: '償却額の確認', field: { label: '申請する償却額（マイクロクレジット）', help: 'この記録の未償却残高を超えない正の整数を入力してください。10,000 マイクロクレジットは 1 ポイントです。', invalid: '1 から 9223372036854775807 までの整数をマイクロクレジットで入力してください。' },
+  outstanding: 'スナップショットの未償却残高', requested: '申請する償却額', points: value => value + ' ポイント',
+  full: '全額の償却を申請', partial: '一部の償却を申請', limit: '金額は取得済みのスナップショットに基づきます。償却後の残高は承認の実行結果と未収金記録で確認してください。',
+};
+
+ledgerRepairCopy.zh.receivableTask = { action: '当前任务', name: '应收核销', lead: '填写目标与金额，读取服务端快照并核对后，提交核销审批。', submit: '提交核销审批', submitting: '正在提交审批…', submitHelp: '系统会按当前状态创建草稿或更新已有的可编辑草稿，并在审批状态允许时提交。审批通过且执行完成后，才会核销应收。', recoveryHelp: '使用原请求确认提交结果。结果明确前，当前单据和已填内容会保留。', submissionConfirmed: '已确认提交核销审批。请在审批中心查看最新状态。' };
+ledgerRepairCopy.en.receivableTask = { action: 'Current task', name: 'Receivable write-off', lead: 'Enter the target and amount, read and review the server snapshot, then submit the write-off for approval.', submit: 'Submit for write-off approval', submitting: 'Submitting for approval…', submitHelp: 'The system creates a draft or updates an existing editable draft and submits it when the approval status allows. The receivable is written off only after approval and execution.', recoveryHelp: 'Use the original request to confirm the submission result. The current receivable and your entries stay in place until the result is confirmed.', submissionConfirmed: 'Write-off approval submission confirmed. Check the Approval Center for the latest status.' };
+ledgerRepairCopy.ja.receivableTask = { action: '現在のタスク', name: '未収金の償却', lead: '対象と金額を入力し、サーバーのスナップショットを取得して確認してから、償却の承認を申請します。', submit: '償却の承認を申請', submitting: '承認を申請中…', submitHelp: '現在の状態に応じて下書きを作成するか、編集可能な既存の下書きを更新し、承認状態が許可する場合に申請します。承認後、処理が実行されてから未収金が償却されます。', recoveryHelp: '元のリクエストで申請結果を確認します。結果が確認されるまで、対象の未収金と入力内容は保持されます。', submissionConfirmed: '償却の承認申請を確認しました。最新の状態は承認センターで確認してください。' };

@@ -76,7 +76,7 @@ function ScopedDirectory({ api, me, owner, root, context, copy, assertCurrent, o
  return <div>{error && <p role="alert">{copy[error]}</p>}{!tree && !error && <p role="status">{copy.loading}</p>}
   {tree && <><h4>{copy.units}</h4><ul>{tree.items.map(unit => <li key={unit.unit_id}>{unit.name} · {unit.unit_id === root ? copy.unitScopeRoot : unit.parent_id}</li>)}</ul>
    {!hasPermission(me, 'org.units.manage') && can('org.units.manage') && <>
-    {action('create', copy.createUnit, [{ name: 'name' }, { name: 'parent', options: units }], values => { if (!ids.has(values.parent)) input(); return { name: requiredText(values.name), parent_id: organizationID(values.parent) }; }, (facts, key) => api.createUnit(org, facts, key))}
+    {action('create', copy.createUnit, [{ name: 'name', nameRule: 'unit' }, { name: 'parent', options: units }], values => { if (!ids.has(values.parent)) input(); return { name: requiredText(values.name), parent_id: organizationID(values.parent) }; }, (facts, key) => api.createUnit(org, facts, key))}
     {action('move', copy.moveUnit, [{ name: 'unit', options: units.filter(item => item.value !== root) }, { name: 'parent', options: units }], values => { if (!ids.has(values.unit) || values.unit === root || !ids.has(values.parent)) input(); return { unit: organizationID(values.unit), parent_id: organizationID(values.parent), expected_structure_version: organizationVersion(tree.structure_version) }; }, (facts, key) => api.moveUnit(org, facts.unit, { parent_id: facts.parent_id, expected_structure_version: facts.expected_structure_version }, key))}
    </>}
    {can('org.members.read') && <section><h4>{copy.members}</h4><p>{copy.unitScopeMembersHint}</p>

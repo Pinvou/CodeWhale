@@ -155,12 +155,42 @@ export class OrganizationClient {
  }
 }
 
+// Fresh reads retire only this client's identical resource. Already-cancelled
+// callers retain the original request abort behavior without cancelling peers.
+function prepareOrganizationRead(client, resource, signal, fresh) {
+ if (!fresh || signal?.aborted) return;
+ if (typeof client.invalidateRead !== 'function') throw new Error('ORGANIZATION_FRESH_READ_UNSUPPORTED');
+ client.invalidateRead('account', resource);
+}
+
+export const adminOrganizationPageLimit = 25;
+
 export class OrganizationAdminClient {
  constructor(client) { this.client = client; }
- async summary(org, signal) { return requireOrganization(await this.client.request('account', `/admin/v1/organizations/${organizationID(org)}`, signal), org); }
- async list(filters = {}, signal) { const query = new URLSearchParams({ limit: '25' }); for (const name of ['q', 'status', 'cursor']) if (filters[name]) query.set(name, filters[name]); const value = await this.client.request('account', `/admin/v1/organizations?${query}`, signal); collection(value, adminOrganization); return value; }
- async read(org, resource, signal) { const value = await this.client.request('account', `/admin/v1/organizations/${organizationID(org)}/${resource}`, signal); if (resource === 'units') { organizationVersion(value.structure_version); collection(value, item => owned(item, org, 'unit_id')); } else if (resource === 'members') collection(value, requireMembership); else if (value?.organization_id !== org) invalid(); return value; }
- async members(org, cursor = '', signal, filters = {}) { const query = new URLSearchParams({ limit: '25' }); if (cursor) query.set('cursor', cursor); for (const key of ['q', 'role']) if (filters[key]) query.set(key, String(filters[key]).trim()); const value = await this.client.request('account', `/admin/v1/organizations/${organizationID(org)}/members?${query}`, signal); collection(value, requireMembership); return value; }
+ async summary(org, signal, { fresh = false } = {}) {
+  const resource = `/admin/v1/organizations/${organizationID(org)}`;
+  prepareOrganizationRead(this.client, resource, signal, fresh);
+  return requireOrganization(await this.client.request('account', resource, signal), org);
+ }
+ async list(filters = {}, signal, { fresh = false } = {}) {
+  const query = new URLSearchParams({ limit: String(adminOrganizationPageLimit) });
+  for (const name of ['q', 'status', 'cursor']) if (filters[name]) query.set(name, filters[name]);
+  const resource = `/admin/v1/organizations?${query}`;
+  prepareOrganizationRead(this.client, resource, signal, fresh);
+  const value = await this.client.request('account', resource, signal);
+  collection(value, adminOrganization); return value;
+ }
+ async read(org, resource, signal, { fresh = false } = {}) { const path = `/admin/v1/organizations/${organizationID(org)}/${resource}`; prepareOrganizationRead(this.client, path, signal, fresh); const value = await this.client.request('account', path, signal); if (resource === 'units') { organizationVersion(value.structure_version); collection(value, item => owned(item, org, 'unit_id')); } else if (resource === 'members') collection(value, requireMembership); else if (value?.organization_id !== org) invalid(); return value; }
+ async members(org, cursor = '', signal, filters = {}, { fresh = false } = {}) {
+  const query = new URLSearchParams({ limit: '25' });
+  if (cursor) query.set('cursor', cursor);
+  for (const key of ['q', 'role']) if (filters[key]) query.set(key, String(filters[key]).trim());
+  const resource = `/admin/v1/organizations/${organizationID(org)}/members?${query}`;
+  prepareOrganizationRead(this.client, resource, signal, fresh);
+  const value = await this.client.request('account', resource, signal);
+  collection(value, requireMembership);
+  return value;
+ }
  async write(org, action, body, key, target = '') {
   const root = `/admin/v1/organizations${org ? `/${organizationID(org)}` : ''}`;
   const id = target ? organizationID(target) : '';

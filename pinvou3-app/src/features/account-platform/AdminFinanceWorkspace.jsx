@@ -17,7 +17,11 @@ import { AdminReconciliationWorkspace } from './AdminReconciliationWorkspace.jsx
 import { AdminFinanceFilters, useFinanceReadRoute, useFinanceRouteLoader } from './AdminFinanceFilters.jsx';
 import { AdminFinanceOverview } from './AdminFinanceOverview.jsx';
 import { AdminWalletLedger } from './AdminWalletLedger.jsx';
+import { AdminIdentifier } from './AdminIdentifier.jsx';
+import { usePortalDialogScope } from './portal-dialog-scope.jsx';
 import { AdminFinanceReadWorkspace } from './AdminFinanceReadWorkspace.jsx';
+import { approvalLabel } from './admin-approval-presentation.js';
+import { AdminOrderStatusSummary } from './AdminOrderStatusSummary.jsx';
 
 function Feedback({ operation, copy }) {
   return <>{operation.busy && <p role="status">{copy.loading}</p>}{operation.error && <p role="alert">{operation.error}</p>}{operation.message && <p role="status">{operation.message}</p>}</>;
@@ -25,13 +29,23 @@ function Feedback({ operation, copy }) {
 
 function Payments({ client, copy, language, permissions, owner, route }) {
   const filters = useFinanceReadRoute('orders', route);
-  const attemptedDetail = React.useRef('');
+  const attemptedDetail = React.useRef(null);
   const [page, setPage] = useState(null);
   const [query, setQuery] = useState('');
   const [cursor, setCursor] = useState('');
   const [previous, setPrevious] = useState([]);
   useEffect(() => { setPrevious([]); }, [filters.filterSignature]);
-  const [detail, setDetail] = useState(null);
+  const [detailSnapshot, setDetailSnapshot] = useState(null);
+  const detail = detailSnapshot?.value || null;
+  const [detailFailure, setDetailFailure] = useState(null);
+  const detailEpoch = client.financeSessionEpoch || 0;
+  const selectedOrder = route ? filters.selectedID : null;
+  const [detailVisit, setDetailVisit] = useState(() => ({ id: selectedOrder, client, owner, epoch: detailEpoch }));
+  if (detailVisit.id !== selectedOrder || detailVisit.client !== client || detailVisit.owner !== owner || detailVisit.epoch !== detailEpoch) {
+    // Retire the previous visit before any detail feedback is rendered for this route.
+    setDetailVisit({ id: selectedOrder, client, owner, epoch: detailEpoch });
+  }
+  const currentDetailError = route && detailFailure?.visit === detailVisit ? copy[detailFailure.key] : '';
   const [targets, setTargets] = useState([]);
   const [targetID, setTargetID] = useState('');
   const [reason, setReason] = useState('');
@@ -46,17 +60,38 @@ function Payments({ client, copy, language, permissions, owner, route }) {
     if (result) { setPage(result.orders); setCursor(result.cursor); setRefundEnabled(result.enabled); }
   };
   useEffect(() => { if (!route) void load(''); }, [client, owner]); // eslint-disable-line react-hooks/exhaustive-deps
-  const open = async id => {
+  const open = async (id, visit = detailVisit) => {
     let started = false;
-    const result = await operation.read(async () => { started = true; const value = await client.paymentOrder(id); if (value?.order_id !== id) throw new Error('INVALID_FINANCE_ACK'); return { value, targets: wholeRefundTargets(value) }; });
-    if (result) { setDetail(result.value); setTargets(result.targets); setTargetID(result.targets[0]?.package.package_id || ''); setReason(''); }
+    const result = await operation.read(async () => { started = true; const value = await client.paymentOrder(id); if (value?.order_id !== id) throw new Error('INVALID_FINANCE_ACK'); return { value, targets: wholeRefundTargets(value) }; }, error => {
+      const key = error?.status === 403 ? 'permissions' : 'unavailable';
+      if (route && (client.financeSessionEpoch || 0) === detailEpoch) {
+        // A list reload must not clear feedback from a failed detail read.
+        if (visit.id === id) setDetailFailure({ visit, key });
+        if (error?.status === 401 || error?.status === 403) setDetailSnapshot(current => current?.value.order_id === id ? null : current);
+      }
+      // Routed detail errors belong to the selected order, not the shared
+      // list/write feedback slot that can be visible on a different order.
+      return route ? '' : key;
+    });
+    if (result) { setDetailFailure(current => current?.visit === visit && visit.id === id ? null : current); setDetailSnapshot({ visit, value: result.value }); setTargets(result.targets); setTargetID(result.targets[0]?.package.package_id || ''); setReason(''); }
     return started;
   };
   useEffect(() => {
-    const id = route && filters.selectedID;
-    if (id && !operation.busy && !operation.unknown && attemptedDetail.current !== id) { attemptedDetail.current = id; void open(id).then(started => { if (!started && attemptedDetail.current === id) attemptedDetail.current = ''; }); }
-    if (!id) { attemptedDetail.current = ''; if (route && !operation.unknown) setDetail(null); }
-  }, [client, owner, filters.selectedID, operation.busy, operation.unknown, operation.error, page]);
+    const id = detailVisit.id;
+    if (id && !operation.busy && !operation.unknown && attemptedDetail.current !== detailVisit) {
+      attemptedDetail.current = detailVisit;
+      void open(id).then(started => { if (!started && attemptedDetail.current === detailVisit) attemptedDetail.current = null; });
+    }
+    if (!id) { attemptedDetail.current = null; if (route && !operation.unknown) setDetailSnapshot(null); }
+  }, [detailVisit, operation.busy, operation.unknown, operation.error, page]);
+  const selectDetail = id => {
+    if (!route) { void open(id); return; }
+    const visit = detailVisit.id === id ? detailVisit : { ...detailVisit, id };
+    if (visit !== detailVisit) setDetailVisit(visit);
+    attemptedDetail.current = visit;
+    filters.move(filters.query, id);
+    void open(id, visit);
+  };
   const repair = async () => {
     const value = await operation.mutate({ action: 'repair', orderID: detail.order_id, reason: reason.trim(), commandProtocol: 1 }, (facts, key) => client.repairPaymentOrder(facts.orderID, facts.reason, key, facts.commandProtocol)); if (value) await open(detail.order_id);
   };
@@ -74,9 +109,9 @@ function Payments({ client, copy, language, permissions, owner, route }) {
   };
   return <section><h3>{copy.orders}</h3>{route ? <AdminFinanceFilters kind="orders" language={language} value={filters.draft} onChange={filters.setDraft} disabled={operation.busy || operation.unknown} onSubmit={() => { setPrevious([]); filters.move({ ...filters.draft, cursor: '' }, null); }} /> : <form onSubmit={event => { event.preventDefault(); setPrevious([]); void load(''); }}><label>{copy.search}<input value={query} onChange={event => setQuery(event.target.value)} /></label><button disabled={operation.busy || operation.unknown}>{copy.search}</button></form>}<Feedback operation={operation} copy={copy} />
     {operation.unknown && <div data-retained-finance-command><code>{operation.pendingFacts?.orderID} / {operation.pendingKey}</code><button disabled={operation.busy} onClick={() => void refund()}>{copy.retry}</button></div>}
-    {page && <table><thead><tr><th>{copy.orderID}</th><th>{copy.amount}</th><th>{copy.status}</th><th>{copy.actions}</th></tr></thead><tbody>{page.items.map(item => <tr key={item.order_id}><td>{item.order_id}</td><td>{formatFen(item.amount_fen, language)}</td><td>{item.status}</td><td><button disabled={operation.busy || operation.unknown} onClick={() => { if (route) { attemptedDetail.current = item.order_id; filters.move(filters.query, item.order_id); } void open(item.order_id); }}>{copy.details}</button></td></tr>)}</tbody></table>}
+    {page && <table><thead><tr><th>{copy.orderID}</th><th>{copy.amount}</th><th>{copy.status}</th><th>{copy.actions}</th></tr></thead><tbody>{page.items.map(item => <tr key={item.order_id}><td>{item.order_id}</td><td>{formatFen(item.amount_fen, language)}</td><td>{item.status}</td><td><button disabled={operation.busy || operation.unknown} onClick={() => selectDetail(item.order_id)}>{copy.details}</button></td></tr>)}</tbody></table>}
     <button disabled={operation.busy || operation.unknown || !previous.length} onClick={() => { const values = [...previous]; const value = values.pop(); setPrevious(values); if (route) filters.move({ ...filters.query, cursor: value }, null); else void load(value); }}>{copy.previous}</button><button disabled={operation.busy || operation.unknown || !page?.next_cursor} onClick={() => { setPrevious(values => [...values, cursor]); if (route) filters.move({ ...filters.query, cursor: page.next_cursor }, null); else void load(page.next_cursor); }}>{copy.next}</button>
-    {route && filters.selectedID && operation.error && !operation.unknown && <button disabled={operation.busy} onClick={() => void open(filters.selectedID)}>{copy.retry}</button>}{detail && (!route || operation.unknown || detail.order_id === filters.selectedID) && <article>{route && <button disabled={operation.busy || operation.unknown} onClick={() => filters.move(filters.query, null)}>{adminLayoutCopy[language].backToDirectory}</button>}<h4>{copy.details}: {detail.order_id}</h4><p>{detail.status} / {detail.fulfillment_status} / {detail.attention_summary}</p>
+    {currentDetailError && currentDetailError !== operation.error && <p role="alert">{currentDetailError}</p>}{route && filters.selectedID && (currentDetailError || operation.error) && !operation.unknown && <button disabled={operation.busy} onClick={() => void open(filters.selectedID)}>{copy.retry}</button>}{detail && (!route || operation.unknown || (detailSnapshot.visit === detailVisit && detail.order_id === filters.selectedID)) && <article>{route && <button disabled={operation.busy || operation.unknown} onClick={() => filters.move(filters.query, null)}>{adminLayoutCopy[language].backToDirectory}</button>}<h4>{copy.details}: {detail.order_id}</h4>{route ? <AdminOrderStatusSummary detail={detail} language={language} /> : <p>{detail.status} / {detail.fulfillment_status} / {detail.attention_summary}</p>}
       {permissions.includes('platform.billing.orders.sync') && <button disabled={operation.busy || operation.unknown} onClick={async () => { const value = await operation.read(() => client.syncOrder(detail.order_id)); if (value) await open(detail.order_id); }}>{copy.query}</button>}
       <label>{copy.reason}<textarea disabled={operation.busy || operation.unknown} maxLength={500} value={reason} onChange={event => setReason(event.target.value)} /></label>
       {detail.status === 'MANUAL_REVIEW' && permissions.includes('platform.billing.repairs.request') && <button disabled={operation.busy || operation.unknown || !reason.trim()} onClick={() => void repair()}>{copy.orderRepair}</button>}
@@ -96,7 +131,7 @@ export function Approvals({ client, copy, permissions, owner, commandTypes = def
   const [previous, setPrevious] = useState([]);
   const [detail, setDetail] = useState(null);
   const [reason, setReason] = useState('');
-  const operation = useFinanceOperation(owner, copy, client, 'approvals');
+  const operation = useFinanceOperation(owner, { ...copy, unavailable: copy.approvalReadUnavailable || copy.unavailable }, client, 'approvals');
   const load = async (next = cursor) => { const result = await operation.read(() => loadFinancePage({ ...query, cursor: next }, filters => client.governedApprovalRequests(filters), () => { setCursor(''); setPrevious([]); })); if (result) { const value = result.value; setPage(value); setCursor(result.query.cursor); setItems(requireFinanceCollection(value).filter(item => commandTypes.includes(item.command_type) && (!pendingUserID || approvalRequester(item) !== pendingUserID))); } };
   const queryKey = JSON.stringify(query);
   useEffect(() => {
@@ -124,9 +159,9 @@ export function Approvals({ client, copy, permissions, owner, commandTypes = def
     if (value) { await open(facts.detail.approval_request_id); await load(); }
   };
   const businessRoute = approvalBusinessRoute(detail);
-  return <section><h3>{copy.approvals}</h3><button disabled={operation.busy} onClick={() => void load()}>{copy.refresh}</button><Feedback operation={operation} copy={copy} />{operation.unknown && <button disabled={operation.busy} onClick={() => void act('')}>{copy.retry}</button>}<table><thead><tr><th>{copy.command}</th><th>{copy.status}</th>{centerCopy && <><th>{centerCopy.target}</th><th>{centerCopy.requester}</th><th>{centerCopy.updated}</th></>}<th>{copy.details}</th></tr></thead><tbody>{items.map(item => <tr key={item.approval_request_id}><td>{item.command_type}</td><td>{item.status}</td>{centerCopy && <><td>{item.target?.resource_id || item.target_resource_id}</td><td>{approvalRequester(item)}</td><td>{item.updated_at}</td></>}<td><button disabled={operation.busy || operation.unknown} onClick={() => void open(item.approval_request_id)}>{copy.details}</button></td></tr>)}</tbody></table>
+  return <section><h3>{copy.approvals}</h3><button disabled={operation.busy} onClick={() => void load()}>{copy.refresh}</button><Feedback operation={operation} copy={copy} />{operation.unknown && <button disabled={operation.busy} onClick={() => void act('')}>{copy.retry}</button>}<table><thead><tr><th>{copy.command}</th><th>{copy.status}</th>{centerCopy && <><th>{centerCopy.target}</th><th>{centerCopy.requester}</th><th>{centerCopy.updated}</th></>}<th>{copy.details}</th></tr></thead><tbody>{items.map(item => <tr key={item.approval_request_id}><td>{item.command_type}</td><td>{approvalLabel(centerCopy?.statusLabels, item.status)}{approvalLabel(centerCopy?.statusLabels, item.status) !== item.status && <small className="adm-approval-status-code">{item.status}</small>}</td>{centerCopy && <><td>{item.target?.resource_id || item.target_resource_id}</td><td>{approvalRequester(item)}</td><td>{item.updated_at}</td></>}<td><button disabled={operation.busy || operation.unknown} onClick={() => void open(item.approval_request_id)}>{copy.details}</button></td></tr>)}</tbody></table>
     <button disabled={operation.busy || operation.unknown || !previous.length} onClick={() => { const values = [...previous]; const value = values.pop(); setPrevious(values); void load(value); }}>{copy.previous}</button><button disabled={operation.busy || operation.unknown || !page?.next_cursor} onClick={() => { setPrevious(values => [...values, cursor]); void load(page.next_cursor); }}>{copy.next}</button>
-    {detail && <article><h4>{detail.approval_request_id}</h4><p>{detail.command_type} / {detail.status} / {copy.version}: {detail.version}</p><p>{detail.reason}</p>{businessRoute && onNavigate && <button disabled={operation.busy || operation.unknown} onClick={() => onNavigate(businessRoute)}>{centerCopy.openBusinessArea}</button>}<h5>{copy.command}</h5><pre>{JSON.stringify(detail.command || {}, null, 2)}</pre>{detail.command_type === 'TOKEN_MODEL_LIFECYCLE_CHANGE' && <><p>{copy.forceCancelInflight}: {detail.command?.force_cancel_inflight === true ? copy.forceCancelEnabled : copy.forceCancelDisabled}</p><p>{copy.forceCancelInflightHelp}</p></>}{detail.execution && <><h5>{copy.effects}</h5><p>{detail.execution.attempt_status} / {detail.execution.error_class} / {detail.execution.next_retry_at} / {detail.execution.execution_deadline}</p></>}<label>{copy.reason}<textarea disabled={operation.busy || operation.unknown} value={reason} onChange={event => setReason(event.target.value)} maxLength={2000} /></label>{['EDIT', 'SUBMIT', 'WITHDRAW', 'APPROVE', 'REJECT'].filter(action => detail.allowed_actions?.includes(action)).map(action => {
+    {detail && <article><h4>{detail.approval_request_id}</h4><p>{detail.command_type} / {approvalLabel(centerCopy?.statusLabels, detail.status)} / {copy.version}: {detail.version}</p>{approvalLabel(centerCopy?.statusLabels, detail.status) !== detail.status && <code className="adm-approval-status-code">{detail.status}</code>}<p>{detail.reason}</p>{businessRoute && onNavigate && <button disabled={operation.busy || operation.unknown} onClick={() => onNavigate(businessRoute)}>{centerCopy.openBusinessArea}</button>}<h5>{copy.command}</h5><pre>{JSON.stringify(detail.command || {}, null, 2)}</pre>{detail.command_type === 'TOKEN_MODEL_LIFECYCLE_CHANGE' && <><p>{copy.forceCancelInflight}: {detail.command?.force_cancel_inflight === true ? copy.forceCancelEnabled : copy.forceCancelDisabled}</p><p>{copy.forceCancelInflightHelp}</p></>}{detail.execution && <><h5>{copy.effects}</h5><p>{detail.execution.attempt_status} / {detail.execution.error_class} / {detail.execution.next_retry_at} / {detail.execution.execution_deadline}</p></>}<label>{copy.reason}<textarea disabled={operation.busy || operation.unknown} value={reason} onChange={event => setReason(event.target.value)} maxLength={2000} /></label>{['EDIT', 'SUBMIT', 'WITHDRAW', 'APPROVE', 'REJECT'].filter(action => detail.allowed_actions?.includes(action)).map(action => {
       const approver = action === 'APPROVE' || action === 'REJECT';
       const allowed = approver ? permissions.includes({ USAGE_SETTLEMENT_REPAIR: 'platform.billing.repairs.approve', RECONCILIATION_FINANCIAL_REPAIR: 'platform.billing.repairs.approve', CHARGEBACK_FINANCIAL_REPAIR: 'platform.billing.repairs.approve', REFUND_EXCEPTION_REPAIR: 'platform.billing.repairs.approve', PAYMENT_FINANCIAL_REPAIR: 'platform.billing.repairs.approve', RECEIVABLE_WRITE_OFF: 'platform.billing.repairs.approve', ENTITLEMENT_COMPONENT_ADJUSTMENT: 'platform.billing.repairs.approve', LEDGER_REPAIR: 'platform.billing.repairs.approve', WALLET_ADJUSTMENT: 'platform.billing.adjustments.approve', PAYMENT_PROVIDER_RESUME: 'platform.billing.payment-controls.resume.approve', PAYMENT_PRODUCT_RESUME: 'platform.billing.payment-controls.resume.approve', TOKEN_MODEL_LIFECYCLE_CHANGE: 'platform.models.lifecycle.approve', TOKEN_MODEL_CATALOG_ROLLBACK: 'platform.models.catalog.rollback.approve', TOKEN_CREDENTIAL_REVOKE: 'platform.tokens.credentials.revoke.approve' }[detail.command_type]) : true;
       return allowed && <button key={action} disabled={operation.busy || operation.unknown || ((approver || action === 'EDIT') && reason.trim().length < 10)} onClick={() => void act(action)}>{copy[{ EDIT: 'editSubmit', SUBMIT: 'submit', WITHDRAW: 'withdraw', APPROVE: 'approve', REJECT: 'reject' }[action]]}</button>;
@@ -134,7 +169,30 @@ export function Approvals({ client, copy, permissions, owner, commandTypes = def
   </section>;
 }
 
-function Wallets({ client, copy, language, permissions, owner, requesterID, onViewApproval, route }) {
+function walletFact(labels, value, unavailable) {
+  if (typeof value !== 'string' || !value.trim()) return unavailable;
+  return Object.prototype.hasOwnProperty.call(labels, value) ? labels[value] : value;
+}
+
+function adjustmentAmountView(value, language, words) {
+  if (value === '' || value == null) return null;
+  try {
+    const amount = integerMoney(value);
+    if (amount === 0n || amount === -(1n << 63n)) return { valid: false, text: words.invalidAmount };
+    const absolute = amount < 0n ? -amount : amount;
+    return { valid: true, text: words.change(amount > 0n ? words.increase : words.decrease, formatBalance(absolute.toString(), language)) };
+  } catch {
+    return { valid: false, text: words.invalidAmount };
+  }
+}
+
+function Wallets({ client, copy, language, permissions, owner, requesterID, onViewApproval, route, acceptedSessionEpoch, acceptedPlatformAuthorizationVersion }) {
+  const walletDirectoryVisible = usePortalDialogScope();
+  const [walletReadDenied, setWalletReadDenied] = useState(false);
+  const walletCopy = adminLayoutCopy[language].walletDirectory;
+  const walletIDLabel = adminLayoutCopy[language].financeLists.wallet_id;
+  const adjustmentCopy = adminLayoutCopy[language].walletAdjustmentForm;
+  const formID = React.useId();
   const filters = useFinanceReadRoute('wallets', route);
   const [page, setPage] = useState(null);
   const [cursor, setCursor] = useState('');
@@ -149,7 +207,7 @@ function Wallets({ client, copy, language, permissions, owner, requesterID, onVi
   const [adjustmentPrevious, setAdjustmentPrevious] = useState([]);
   const [selected, setSelected] = useState(null);
   const [replacement, setReplacement] = useState(null);
-  const operation = useFinanceOperation(owner, copy, client, 'wallets');
+  const operation = useFinanceOperation(owner, { ...copy, saved: adjustmentCopy.submissionConfirmed }, client, 'wallets');
   const list = useFinanceRouteLoader({ route, signature: filters.signature, client, owner, operation, load: async () => { if (await load(filters.query.cursor)) await loadAdjustments(''); }, reset: () => setPage(null) });
   const canRequest = permissions.includes('platform.billing.repairs.request');
   const loadAdjustments = async (next = adjustmentCursor) => {
@@ -157,7 +215,11 @@ function Wallets({ client, copy, language, permissions, owner, requesterID, onVi
     if (result) { setAdjustments(result.value); setAdjustmentCursor(result.query.cursor); setSelected(null); }
   };
   const load = async (next = cursor) => {
-    const result = await list.read(() => loadFinancePage({ ...(route ? filters.query : {}), cursor: next }, filters => client.wallets(filters), () => { setCursor(''); setPrevious([]); }));
+    const result = await list.read(() => loadFinancePage({ ...(route ? filters.query : {}), cursor: next }, filters => client.wallets(filters), () => { setCursor(''); setPrevious([]); }), (reason, current) => {
+      if (current && [401, 403].includes(reason?.status)) setWalletReadDenied(true);
+      return reason.status === 403 ? "permissions" : "unavailable";
+    });
+    if (result) setWalletReadDenied(false);
     if (result) { setPage(result.value); setCursor(result.query.cursor); return true; }
   };
   useEffect(() => { if (!route) void (async () => { await load(''); await loadAdjustments(''); })();  }, [client, owner]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -174,7 +236,7 @@ function Wallets({ client, copy, language, permissions, owner, requesterID, onVi
   };
   const adjust = async () => {
     const facts = operation.pendingFacts || { action: 'create', walletID, delta, reason: reason.trim(), replacement };
-    if (facts.action === 'create' && (!facts.walletID || facts.reason.length < 10)) return;
+    if (!operation.pendingFacts && !canSubmitAdjustment) return;
     const value = await operation.mutate(facts, async (facts, operationKey) => {
       if (facts.action === 'resume') {
         const fresh = await currentPendingAdjustment(client, facts.item, requesterID);
@@ -202,7 +264,10 @@ function Wallets({ client, copy, language, permissions, owner, requesterID, onVi
       try { return await createAndSubmitFreshGovernedApproval(client, walletAdjustmentApprovalDraft(item, facts.reason, key)); }
       catch (error) { throw financeWriteObserved(error); }
     });
-    if (value) { setReplacement(null); setWalletID(''); setDelta(''); setReason(''); await load(); await loadAdjustments(); }
+    if (value) {
+      if (facts.action === 'create') { setReplacement(null); setWalletID(''); setDelta(''); setReason(''); }
+      await load(); await loadAdjustments();
+    }
   };
   const resume = () => {
     if (!selected || adjustmentApprovalAction(selected.item, selected.approval, { canRequest: canRequest && selected.item.requested_by === requesterID }) !== 'resume') return;
@@ -217,7 +282,36 @@ function Wallets({ client, copy, language, permissions, owner, requesterID, onVi
     setWalletID(selected.item.wallet_id); setDelta(''); setReason('');
   };
   const resumeAvailable = selected && adjustmentApprovalAction(selected.item, selected.approval, { canRequest: canRequest && selected.item.requested_by === requesterID }) === 'resume';
-  return <section><h3>{copy.wallet}</h3>{route && <AdminFinanceFilters kind="wallets" language={language} value={filters.draft} onChange={filters.setDraft} disabled={operation.busy || operation.unknown} onSubmit={() => { setPrevious([]); filters.move({ ...filters.draft, cursor: '' }, null); }} />}<button disabled={operation.busy || operation.unknown} onClick={async () => { await load(); await loadAdjustments(); }}>{copy.refresh}</button><Feedback operation={operation} copy={copy} />{operation.unknown && <button disabled={operation.busy} onClick={() => void adjust()}>{copy.retry}</button>}{page && <table><thead><tr><th>{copy.wallet}</th><th>{copy.total}</th><th>{copy.remaining}</th><th>{copy.status}</th></tr></thead><tbody>{page.items.map(item => <tr key={item.wallet_id}><td><button disabled={operation.busy || operation.unknown || Boolean(replacement)} onClick={async () => { setWalletID(item.wallet_id); if (route) filters.move(filters.query, item.wallet_id); else if (permissions.includes('platform.billing.ledger.read')) { const value = await operation.read(() => client.walletLedger(item.wallet_id)); if (value) setLedger(value); } }}>{item.wallet_id}</button></td><td>{formatBalance(item.posted_microcredits, language)}</td><td>{formatBalance(item.available_microcredits, language)}</td><td>{item.status} / {item.financial_status}</td></tr>)}</tbody></table>}
+  const pendingAdjustment = operation.busy || operation.unknown ? operation.pendingFacts : null;
+  const pendingRecord = pendingAdjustment?.action === 'resume' ? pendingAdjustment.item : null;
+  const formReplacement = pendingAdjustment ? pendingAdjustment.replacement : replacement;
+  const originalAdjustmentWalletID = pendingRecord?.wallet_id || pendingAdjustment?.walletID;
+  const formWalletID = pendingAdjustment ? originalAdjustmentWalletID || '' : walletID;
+  const formDelta = pendingAdjustment ? pendingRecord?.amount_microcredits ?? pendingAdjustment.delta ?? '' : delta;
+  const formReason = pendingAdjustment ? pendingRecord?.reason ?? pendingAdjustment.reason ?? '' : reason;
+  const adjustmentWallet = canRequest && !walletReadDenied && !pendingAdjustment && !operation.unknown ? page?.items.find(item => item.wallet_id === walletID) : null;
+  const adjustmentAmount = adjustmentAmountView(formDelta, language, adjustmentCopy);
+  const canSubmitAdjustment = canRequest && !operation.busy && !operation.unknown && Boolean(walletID && adjustmentAmount?.valid && reason.trim().length >= 10);
+  const fieldHelp = suffix => `${formID}-${suffix}`;
+  const balanceSnapshot = field => {
+    const value = adjustmentWallet ? formatBalance(adjustmentWallet[field], language) : '—';
+    return value === '—' ? adjustmentCopy.unavailable : adjustmentCopy.points(value);
+  };
+  return <section><h3>{copy.wallet}</h3>{route && <AdminFinanceFilters kind="wallets" language={language} value={filters.draft} onChange={filters.setDraft} disabled={operation.busy || operation.unknown} onSubmit={() => { setPrevious([]); filters.move({ ...filters.draft, cursor: '' }, null); }} />}<button disabled={operation.busy || operation.unknown} onClick={async () => { await load(); await loadAdjustments(); }}>{copy.refresh}</button><Feedback operation={operation} copy={copy} />{operation.unknown && <button disabled={operation.busy} onClick={() => void adjust()}>{copy.retry}</button>}{page && <div className="adm-table-wrap adm-wallet-directory-scroll" role="region" aria-label={copy.wallet} tabIndex={0}>
+    <table className="adm-table adm-wallet-directory" role="table">
+      <thead role="rowgroup"><tr role="row"><th role="columnheader" scope="col">{copy.wallet}</th><th role="columnheader" scope="col">{copy.total}</th><th role="columnheader" scope="col">{copy.remaining}</th><th role="columnheader" scope="col">{copy.status}</th></tr></thead>
+      <tbody role="rowgroup">{page.items.map(item => {
+        const walletType = walletFact(walletCopy.types, item.owner_type, walletCopy.typeUnavailable);
+        return <tr role="row" key={item.wallet_id}>
+          <td role="cell"><button type="button" className="adm-wallet-directory-open" aria-label={walletCopy.select(walletType, item.wallet_id)} disabled={operation.busy || operation.unknown || Boolean(replacement)} onClick={async () => { setWalletID(item.wallet_id); if (route) filters.move(filters.query, item.wallet_id); else if (permissions.includes('platform.billing.ledger.read')) { const value = await operation.read(() => client.walletLedger(item.wallet_id)); if (value) setLedger(value); } }}>{walletType}</button>
+            <div className="adm-wallet-directory-id"><small>{walletIDLabel}</small>{walletDirectoryVisible && (walletReadDenied ? <code>{item.wallet_id}</code> : <AdminIdentifier client={client} owner={owner} routeScope={route?.search || 'wallets'} value={item.wallet_id} label={walletIDLabel} targetLabel={item.wallet_id} language={language} sessionEpoch={acceptedSessionEpoch} platformAuthorizationVersion={acceptedPlatformAuthorizationVersion} alwaysExpanded />)}</div>
+          </td>
+          <td role="cell"><span className="adm-wallet-directory-mobile-label" aria-hidden="true">{copy.total}</span>{formatBalance(item.posted_microcredits, language)}</td><td role="cell"><span className="adm-wallet-directory-mobile-label" aria-hidden="true">{copy.remaining}</span>{formatBalance(item.available_microcredits, language)}</td>
+          <td role="cell"><dl className="adm-wallet-directory-facts"><div><dt>{walletCopy.accountStatus}</dt><dd>{walletFact(walletCopy.account, item.status, walletCopy.unavailable)}</dd></div><div><dt>{walletCopy.riskStatus}</dt><dd>{walletFact(walletCopy.risk, item.financial_status, walletCopy.unavailable)}</dd></div></dl></td>
+        </tr>;
+      })}</tbody>
+    </table>
+  </div>}
     <button disabled={operation.busy || operation.unknown || !previous.length} onClick={() => { const values = [...previous]; const value = values.pop(); setPrevious(values); if (route) filters.move({ ...filters.query, cursor: value }, null); else void load(value); }}>{copy.previous}</button><button disabled={operation.busy || operation.unknown || !page?.next_cursor} onClick={() => { setPrevious(values => [...values, cursor]); if (route) filters.move({ ...filters.query, cursor: page.next_cursor }, null); else void load(page.next_cursor); }}>{copy.next}</button>
     {route && filters.selectedID && permissions.includes('platform.billing.ledger.read') && <AdminWalletLedger {...{ client, language, route }} walletID={filters.selectedID} />}
     {ledger && <ul>{requireFinanceCollection(ledger).map(item => <li key={item.posting_id}>{item.journal_entry_id} / {item.created_at}</li>)}</ul>}
@@ -225,8 +319,31 @@ function Wallets({ client, copy, language, permissions, owner, requesterID, onVi
       <button disabled={operation.busy || operation.unknown || !adjustmentPrevious.length} onClick={() => { const values = [...adjustmentPrevious]; const value = values.pop(); setAdjustmentPrevious(values); void loadAdjustments(value); }}>{copy.previous}</button><button disabled={operation.busy || operation.unknown || !adjustments?.next_cursor} onClick={() => { setAdjustmentPrevious(values => [...values, adjustmentCursor]); void loadAdjustments(adjustments.next_cursor); }}>{copy.next}</button>
       {selected && <article><h4>{selected.item.adjustment_id}</h4><p>{selected.item.reason}</p>{selected.approval && <><p>{copy.approvals}: {selected.approval.approval_request_id} / {selected.approval.status}</p><button disabled={operation.busy || operation.unknown} onClick={() => onViewApproval(selected.approval.approval_request_id)}>{copy.details}</button></>}{resumeAvailable && <button disabled={operation.busy || operation.unknown} onClick={resume}>{copy.submit}</button>}{canRequest && walletReplacementEligible(selected.approval, selected.item.adjustment_id, selected.item.wallet_id, requesterID) && <button disabled={operation.busy || operation.unknown} onClick={beginReplacement}>{copy.newInvocation}</button>}</article>}
     </section>
-    {replacement && <p>{copy.approvals}: {replacement.requestID} / {copy.wallet}: {replacement.walletID}</p>}
-    {canRequest && <form onSubmit={event => { event.preventDefault(); void adjust(); }}><label>{copy.wallet}<input disabled={operation.busy || operation.unknown} readOnly={Boolean(replacement)} value={walletID} onChange={event => setWalletID(event.target.value)} /></label><label>{copy.delta}<input disabled={operation.busy || operation.unknown} value={delta} onChange={event => setDelta(event.target.value)} pattern="-?(0|[1-9][0-9]*)" /></label><label>{copy.reason}<textarea disabled={operation.busy || operation.unknown} maxLength={2000} value={reason} onChange={event => setReason(event.target.value)} /></label><button disabled={operation.busy || operation.unknown || !walletID || !delta || reason.trim().length < 10}>{operation.unknown ? copy.retry : copy.draft}</button></form>}
+    {formReplacement && <p>{copy.approvals}: {formReplacement.requestID} / {copy.wallet}: {formReplacement.walletID}</p>}
+    {canRequest && <form className="adm-wallet-adjustment-form" aria-labelledby={fieldHelp('title')} onSubmit={event => { event.preventDefault(); if (canSubmitAdjustment) void adjust(); }}>
+      <header><h4 id={fieldHelp('title')}>{adjustmentCopy.title}</h4><p>{adjustmentCopy.approval}</p></header>
+      <div className="adm-wallet-adjustment-field">
+        <label htmlFor={fieldHelp('wallet')}>{walletIDLabel}</label>
+        <input id={fieldHelp('wallet')} aria-describedby={fieldHelp('wallet-help')} disabled={operation.busy || operation.unknown} readOnly={Boolean(formReplacement)} value={formWalletID} onChange={event => setWalletID(event.target.value)} />
+        <small id={fieldHelp('wallet-help')}>{adjustmentCopy.walletHelp}</small>
+      </div>
+      {operation.unknown && originalAdjustmentWalletID && <p className="adm-wallet-adjustment-direction">{adjustmentCopy.recoveryWallet} <code>{originalAdjustmentWalletID}</code></p>}
+      {!pendingAdjustment && !operation.unknown && <div className="adm-wallet-adjustment-snapshot">
+        {adjustmentWallet ? <><p>{adjustmentCopy.snapshot}</p><dl><div><dt>{adjustmentCopy.posted}</dt><dd>{balanceSnapshot('posted_microcredits')}</dd></div><div><dt>{adjustmentCopy.available}</dt><dd>{balanceSnapshot('available_microcredits')}</dd></div></dl></> : <p>{adjustmentCopy.noSnapshot}</p>}
+      </div>}
+      <div className="adm-wallet-adjustment-field">
+        <label htmlFor={fieldHelp('delta')}>{adjustmentCopy.amount}</label>
+        <input id={fieldHelp('delta')} aria-describedby={fieldHelp('delta-help') + (adjustmentAmount ? ' ' + fieldHelp('direction') : '')} aria-invalid={adjustmentAmount?.valid === false || undefined} disabled={operation.busy || operation.unknown} value={formDelta} onChange={event => setDelta(event.target.value)} pattern="-?(0|[1-9][0-9]*)" />
+        <small id={fieldHelp('delta-help')}>{adjustmentCopy.amountHelp}</small>
+        {adjustmentAmount && <p id={fieldHelp('direction')} className="adm-wallet-adjustment-direction">{adjustmentAmount.text}</p>}
+      </div>
+      <div className="adm-wallet-adjustment-field">
+        <label htmlFor={fieldHelp('reason')}>{copy.reason}</label>
+        <textarea id={fieldHelp('reason')} aria-describedby={fieldHelp('reason-help')} disabled={operation.busy || operation.unknown} maxLength={2000} value={formReason} onChange={event => setReason(event.target.value)} />
+        <small id={fieldHelp('reason-help')}>{adjustmentCopy.reasonHelp}</small>
+      </div>
+      <footer><button type="submit" disabled={!canSubmitAdjustment}>{adjustmentCopy.send}</button></footer>
+    </form>}
   </section>;
 }
 
@@ -255,7 +372,35 @@ function initialFinanceTab(initialTab, canReadFinance, canRequestRepair, default
   return defaultTab;
 }
 
-export function AdminFinanceWorkspace({ client, me, language, initialTab = 'orders', surface, route, onTabChange, onViewApproval }) {
+const billingTaskGroups = [
+  ['accounts', ['wallets', 'receivables', 'adjustments']],
+  ['ledger', ['ledger', 'writeoff', 'correction']],
+  ['exceptions', ['paymentrepair', 'refundrepair', 'chargebackrepair', 'reconciliationrepair', 'usagesettlementrepair']],
+];
+
+function BillingTaskNavigation({ tabs, active, choose, words }) {
+  const navID = React.useId();
+  if (!tabs.length) return null;
+  const remaining = new Map(tabs);
+  const groups = billingTaskGroups.map(([key, keys]) => [key, keys.flatMap(tab => {
+    if (!remaining.has(tab)) return [];
+    const label = remaining.get(tab);
+    remaining.delete(tab);
+    return [[tab, label]];
+  })]);
+  if (remaining.size) groups.push(['other', Array.from(remaining)]);
+  return <nav className="adm-billing-tasks" aria-label={words.title}>
+    {groups.filter(([, items]) => items.length).map(([key, items]) => {
+      const titleID = navID + '-' + key;
+      return <div className="adm-billing-task-group" role="group" aria-labelledby={titleID} key={key}>
+        <h4 id={titleID}>{words[key]}</h4>
+        <div className="adm-tabs">{items.map(([tab, label]) => <button type="button" key={tab} aria-pressed={active === tab} onClick={() => choose(tab)}>{label}</button>)}</div>
+      </div>;
+    })}
+  </nav>;
+}
+
+export function AdminFinanceWorkspace({ client, me, language, initialTab = 'orders', surface, route, onTabChange, onViewApproval, acceptedSessionEpoch, acceptedPlatformAuthorizationVersion }) {
   const copy = financeCopy[language];
   const permissions = me.platform_permissions || [];
   const owner = `${me.user_id}:${me.platform_authorization_version || me.active_context?.platform_authorization_version || 0}`;
@@ -277,5 +422,19 @@ export function AdminFinanceWorkspace({ client, me, language, initialTab = 'orde
   const approval = id => { if (onViewApproval) onViewApproval(id); else { setApprovalID(id); setTab('approvals'); } };
   useEffect(() => { if (initialTab === 'reconciliations' && permissions.includes('platform.billing.reconciliation.read')) setTab(initialTab); }, [initialTab, permissions.includes('platform.billing.reconciliation.read')]);
   const Views = surface ? RetainedWorkspace : ActiveWorkspace;
-  return <section className="adm-panel">{surface && canReadFinance && route && <AdminFinanceOverview client={client} language={language} surface={surface === 'billing' ? 'accounts' : 'payments'} route={route} permissions={permissions} />}{!surface && <h2>{copy.finance}</h2>}<nav className="adm-tabs">{displayedTabs.map(([key, label]) => <button key={key} aria-pressed={active === key} onClick={() => choose(key)}>{label}</button>)}</nav>{deniedTab && <p role="alert">{copy.permissions}</p>}<Views active={active} available={tabs.map(([key]) => key)}>{view => <>{['receivables', 'refunds', 'adjustments'].includes(view) && canReadFinance && route && <AdminFinanceReadWorkspace kind={view} {...{ client, language, route, onViewApproval }} />}{view === 'correction' && canRequestRepair && <AdminEntitlementCorrectionWorkspace {...{ client, copy, language, permissions, owner }} />}{view === 'ledger' && canRequestRepair && <AdminFinancialRepairDraftForm owner={owner} client={client} copy={ledgerRepairCopy[language]} commandTypes={['LEDGER_REPAIR']} onCreated={approval} />}{view === 'writeoff' && canRequestRepair && <AdminFinancialRepairDraftForm client={client} owner={owner} operationCopy={copy} copy={{ ...ledgerRepairCopy[language], title: ledgerRepairCopy[language].writeOffTitle }} commandTypes={['RECEIVABLE_WRITE_OFF']} onCreated={approval} />}{view === 'paymentrepair' && canRequestRepair && <AdminFinancialRepairDraftForm client={client} owner={owner} operationCopy={copy} copy={{ ...ledgerRepairCopy[language], title: ledgerRepairCopy[language].paymentRepairTitle }} commandTypes={['PAYMENT_FINANCIAL_REPAIR']} onCreated={approval} />}{view === 'usagesettlementrepair' && canRequestRepair && <AdminFinancialRepairDraftForm client={client} owner={owner} operationCopy={copy} copy={{ ...ledgerRepairCopy[language], title: ledgerRepairCopy[language].usageSettlementRepairTitle }} commandTypes={['USAGE_SETTLEMENT_REPAIR']} onCreated={approval} />}{view === 'reconciliationrepair' && canRequestRepair && <AdminFinancialRepairDraftForm client={client} owner={owner} operationCopy={copy} copy={{ ...ledgerRepairCopy[language], title: ledgerRepairCopy[language].reconciliationRepairTitle }} commandTypes={['RECONCILIATION_FINANCIAL_REPAIR']} onCreated={approval} />}{view === 'chargebackrepair' && canRequestRepair && <AdminFinancialRepairDraftForm client={client} owner={owner} operationCopy={copy} copy={{ ...ledgerRepairCopy[language], title: ledgerRepairCopy[language].chargebackRepairTitle }} commandTypes={['CHARGEBACK_FINANCIAL_REPAIR']} onCreated={approval} />}{view === 'refundrepair' && canRequestRepair && <AdminFinancialRepairDraftForm client={client} owner={owner} operationCopy={copy} copy={{ ...ledgerRepairCopy[language], title: ledgerRepairCopy[language].refundRepairTitle }} commandTypes={['REFUND_EXCEPTION_REPAIR']} onCreated={approval} />}{view === 'late' && canReadFinance && <AdminPaymentReviewQueue {...{ client, copy, me, route, language }} />}{view === 'anomalies' && canReadFinance && <AdminPaymentReviewQueue {...{ client, copy, me, route, language }} anomaly />}{view === 'orders' && canReadFinance && <Payments {...{ client, copy, language, permissions, owner, route }} />}{view === 'wallets' && canReadFinance && <Wallets {...{ client, copy, language, permissions, owner, route }} requesterID={me.user_id} onViewApproval={approval} />}{view === 'controls' && canReadFinance && <ProviderControls {...{ client, copy, permissions, owner }} />}{view === 'approvals' && <Approvals {...{ client, copy, permissions, owner }} initialRequestID={approvalID} />}{view === 'reconciliations' && permissions.includes('platform.billing.reconciliation.read') && <AdminReconciliationWorkspace client={client} me={me} language={language} />}</>}</Views></section>;
+  const compactOverview = surface === 'billing' && active === 'ledger';
+  const overview = surface && canReadFinance && route ? (surface === 'billing'
+    ? <details key="overview" className={compactOverview ? 'adm-billing-overview-disclosure' : undefined} open={!compactOverview}>
+      <summary hidden={!compactOverview}>{adminLayoutCopy[language].billingTasks.showOverview}</summary>
+      <AdminFinanceOverview client={client} language={language} surface="accounts" route={route} permissions={permissions} />
+    </details>
+    : <AdminFinanceOverview key="overview" client={client} language={language} surface="payments" route={route} permissions={permissions} />) : null;
+  const navigation = surface === 'billing'
+    ? <BillingTaskNavigation key="navigation" tabs={displayedTabs} active={active} choose={choose} words={adminLayoutCopy[language].billingTasks} />
+    : <nav key="navigation" className="adm-tabs">{displayedTabs.map(([key, label]) => <button key={key} aria-pressed={active === key} onClick={() => choose(key)}>{label}</button>)}</nav>;
+  const denied = deniedTab ? <p key="denied" role="alert">{copy.permissions}</p> : null;
+  const workspaces = <Views key="workspace" active={active} available={tabs.map(([key]) => key)}>{view => <>{['receivables', 'refunds', 'adjustments'].includes(view) && canReadFinance && route && <AdminFinanceReadWorkspace kind={view} {...{ client, language, route, onViewApproval, permissions }} />}{view === 'correction' && canRequestRepair && <AdminEntitlementCorrectionWorkspace {...{ client, copy, language, permissions, owner }} />}{view === 'ledger' && canRequestRepair && <AdminFinancialRepairDraftForm owner={owner} client={client} copy={ledgerRepairCopy[language]} commandTypes={['LEDGER_REPAIR']} onCreated={approval} />}{view === 'writeoff' && canRequestRepair && <AdminFinancialRepairDraftForm client={client} owner={owner} operationCopy={copy} copy={{ ...ledgerRepairCopy[language], title: ledgerRepairCopy[language].writeOffTitle }} commandTypes={['RECEIVABLE_WRITE_OFF']} onCreated={approval} />}{view === 'paymentrepair' && canRequestRepair && <AdminFinancialRepairDraftForm client={client} owner={owner} operationCopy={copy} copy={{ ...ledgerRepairCopy[language], title: ledgerRepairCopy[language].paymentRepairTitle }} commandTypes={['PAYMENT_FINANCIAL_REPAIR']} onCreated={approval} />}{view === 'usagesettlementrepair' && canRequestRepair && <AdminFinancialRepairDraftForm client={client} owner={owner} operationCopy={copy} copy={{ ...ledgerRepairCopy[language], title: ledgerRepairCopy[language].usageSettlementRepairTitle }} commandTypes={['USAGE_SETTLEMENT_REPAIR']} onCreated={approval} />}{view === 'reconciliationrepair' && canRequestRepair && <AdminFinancialRepairDraftForm client={client} owner={owner} operationCopy={copy} copy={{ ...ledgerRepairCopy[language], title: ledgerRepairCopy[language].reconciliationRepairTitle }} canReadCase={permissions.includes('platform.billing.reconciliation.read')} commandTypes={['RECONCILIATION_FINANCIAL_REPAIR']} onCreated={approval} />}{view === 'chargebackrepair' && canRequestRepair && <AdminFinancialRepairDraftForm client={client} owner={owner} operationCopy={copy} copy={{ ...ledgerRepairCopy[language], title: ledgerRepairCopy[language].chargebackRepairTitle }} commandTypes={['CHARGEBACK_FINANCIAL_REPAIR']} onCreated={approval} />}{view === 'refundrepair' && canRequestRepair && <AdminFinancialRepairDraftForm client={client} owner={owner} operationCopy={copy} copy={{ ...ledgerRepairCopy[language], title: ledgerRepairCopy[language].refundRepairTitle }} commandTypes={['REFUND_EXCEPTION_REPAIR']} onCreated={approval} />}{view === 'late' && canReadFinance && <AdminPaymentReviewQueue {...{ client, copy, me, route, language }} />}{view === 'anomalies' && canReadFinance && <AdminPaymentReviewQueue {...{ client, copy, me, route, language }} anomaly />}{view === 'orders' && canReadFinance && <Payments {...{ client, copy, language, permissions, owner, route }} />}{view === 'wallets' && canReadFinance && <Wallets {...{ client, copy, language, permissions, owner, route, acceptedSessionEpoch, acceptedPlatformAuthorizationVersion }} requesterID={me.user_id} onViewApproval={approval} />}{view === 'controls' && canReadFinance && <ProviderControls {...{ client, copy, permissions, owner }} />}{view === 'approvals' && <Approvals {...{ client, copy, permissions, owner }} initialRequestID={approvalID} />}{view === 'reconciliations' && permissions.includes('platform.billing.reconciliation.read') && <AdminReconciliationWorkspace client={client} me={me} language={language} onViewApproval={approval} />}</>}</Views>;
+  return <section className="adm-panel">{!surface && <h2>{copy.finance}</h2>}{compactOverview
+    ? [navigation, denied, workspaces, overview]
+    : [overview, navigation, denied, workspaces]}</section>;
 }

@@ -1,5 +1,5 @@
 import { decideWithOriginalReceipt } from './approval-decision-recovery.js';
-import { requirePlatformRoles, requirePlatformRoleBinding } from './platform-role-management.js';
+import { platformRoleBindingUserID, requirePlatformRoles, requirePlatformRoleBinding } from './platform-role-management.js';
 import { parseSystemStatusJSON } from './admin-system-status.js';
 import { parseUsageJSON, encodeUsageJSON } from './admin-usage-governance.js';
 import { parseFinanceJSON, encodeFinanceJSON, requireFinanceID, requirePaymentOrder, integerMoney } from './finance-contract.js';
@@ -8,6 +8,7 @@ import { requireSession } from './personal-contract.js';
 import { mergeObservedVersions } from './authorization-ui.js';
 import { secureRequestID } from './request-id.js';
 import { requireReconciliationDate, requireReconciliationRun } from './reconciliation-contract.js';
+import { requireReconciliationRepairContext } from './reconciliation-repair-context.js';
 import { responseRetryAfter } from './auth-error.js';
 import { beforeFinanceDispatch, financeNotDispatched } from './finance-operation-state.js';
 import { latePaymentQueryBody, requireLatePaymentQueryReceipt, isCurrentLatePaymentQueryAuthority } from './late-payment-query-contract.js';
@@ -92,6 +93,8 @@ export class AdminPlatformClient {
     this.baseURL = String(baseURL || '').replace(/\/$/, '');
     this.csrfToken = '';
     this.financeSessionEpoch = 0;
+    this.sessionTransportUnavailable = false;
+    this.sessionTransportListeners = new Set();
     this.authorizationVersions = {};
     this.financeQueryAuthorizationGeneration = 0;
     this.authorizationVersionListeners = new Set();
@@ -100,6 +103,11 @@ export class AdminPlatformClient {
     this.approvalControl = null;
     this.approvalControllers = new Set();
     this.approvalControlGeneration = 0;
+  }
+
+  onSessionTransportChange(listener) {
+    this.sessionTransportListeners.add(listener);
+    return () => this.sessionTransportListeners.delete(listener);
   }
 
   onAuthorizationVersion(listener) {
@@ -131,14 +139,17 @@ export class AdminPlatformClient {
     for (const listener of this.authorizationVersionListeners) listener({ ...next });
   }
 
-  retireSession(csrfToken = '') {
+  retireSession(csrfToken = '', authenticated = null) {
     this.financeSessionEpoch++;
+    this.sessionTransportUnavailable = authenticated === false;
     this.csrfToken = csrfToken;
     this.authorizationVersions = {};
     const retired = [...this.inflightReads.values()];
     this.inflightReads.clear();
     for (const entry of retired) entry.controller.abort();
     this.invalidateApprovalControl();
+    // Notify read-only consumers of an already established transport change.
+    for (const listener of this.sessionTransportListeners) listener();
   }
 
   requireCurrentSession(sessionEpoch, signal) {
@@ -153,13 +164,13 @@ export class AdminPlatformClient {
       signal,
     });
     this.requireCurrentSession(sessionEpoch, signal);
-    if (response.status === 401) { this.retireSession(); return { authenticated: false }; }
+    if (response.status === 401) { this.retireSession('', false); return { authenticated: false }; }
     if (!response.ok) throw errorFromResponse(response, await response.json().catch(() => ({})));
     const payload = await response.json();
     const current = requireSession(payload);
     this.requireCurrentSession(sessionEpoch, signal);
     const csrfToken = current.authenticated ? current.csrf_token : '';
-    if (!current.authenticated || this.csrfToken !== csrfToken) this.retireSession(csrfToken);
+    if (!current.authenticated || this.csrfToken !== csrfToken) this.retireSession(csrfToken, current.authenticated);
     return current;
   }
 
@@ -167,15 +178,18 @@ export class AdminPlatformClient {
     globalThis.location.assign(`${this.baseURL}/auth/login?reauthenticate=1&return_to=${encodeURIComponent(returnTo)}`);
   }
 
-  async request(area, resource, signal, decode = null) {
+  async request(area, resource, signal, decode = null, { isolateRead = false } = {}) {
     if (signal?.aborted) throw abortRequestError();
     const url = `${this.baseURL}/api/admin/${area}${resource}`;
-    let entry = this.inflightReads.get(url);
+    // A scoped picker must get its own authorization result, while an
+    // unrelated consumer can finish the shared request it already started.
+    const readKey = isolateRead ? Symbol('admin-read') : url;
+    let entry = this.inflightReads.get(readKey);
     if (!entry) {
       const sessionEpoch = this.financeSessionEpoch;
       entry = { controller: new globalThis.AbortController(), consumers: 0, settled: false, promise: null, abandon: null };
       entry.abandon = () => {
-        if (this.inflightReads.get(url) === entry) this.inflightReads.delete(url);
+        if (this.inflightReads.get(readKey) === entry) this.inflightReads.delete(readKey);
       };
       entry.promise = (async () => {
         const response = await fetch(url, {
@@ -188,10 +202,15 @@ export class AdminPlatformClient {
         const payload = response.ok && decode ? decode(await response.text()) : area === 'billing' && response.ok ? parseFinanceJSON(await response.text()) : await response.json().catch(() => ({}));
         this.requireCurrentSession(sessionEpoch, entry.controller.signal);
         this.observeAuthorizationVersions(response.headers, sessionEpoch);
-        if (!response.ok) throw errorFromResponse(response, payload);
+        if (!response.ok) {
+          const error = errorFromResponse(response, payload);
+          const version = Number(response.headers.get('X-Platform-Authorization-Version'));
+          if (Number.isSafeInteger(version) && version > 0) error.platformAuthorizationVersion = version;
+          throw error;
+        }
         return payload;
       })();
-      this.inflightReads.set(url, entry);
+      this.inflightReads.set(readKey, entry);
       const cleanup = () => {
         entry.settled = true;
         entry.abandon();
@@ -288,7 +307,15 @@ export class AdminPlatformClient {
     const payload = await response.json().catch(() => ({}));
     this.requireCurrentSession(sessionEpoch, signal);
     this.observeAuthorizationVersions(response.headers, sessionEpoch);
-    if (!response.ok) throw errorFromResponse(response, payload);
+    if (!response.ok) {
+      // Portal's explicit session rejection is presentation evidence for this
+      // current transport. Keep the original exception and lifecycle intact.
+      if (response.status === 401 && payload?.code === 'LOGIN_REQUIRED' && !this.sessionTransportUnavailable) {
+        this.sessionTransportUnavailable = true;
+        for (const listener of this.sessionTransportListeners) listener();
+      }
+      throw errorFromResponse(response, payload);
+    }
     return payload;
   }
 
@@ -364,9 +391,8 @@ export class AdminPlatformClient {
     return requirePlatformRoles(await this.request('account', '/admin/v1/roles', signal));
   }
   async platformRoleBindings(userID = '', signal) {
-    if (typeof userID === 'string') userID = userID.trim().toLowerCase();
-    if (userID) requireFinanceID(userID);
-    const payload = await this.request('account', '/admin/v1/role-bindings' + (userID ? `?user_id=${encodeURIComponent(userID)}` : ''), signal);
+    const target = platformRoleBindingUserID(userID);
+    const payload = await this.request('account', '/admin/v1/role-bindings' + (target ? `?user_id=${encodeURIComponent(target)}` : ''), signal);
     if (!Array.isArray(payload?.items) || typeof payload.truncated !== 'boolean' || payload.items.length > 500 || payload.truncated && payload.items.length !== 500) throw new Error('INVALID_ROLE_BINDINGS');
     const items = payload.items.map(item => requirePlatformRoleBinding(item));
     Object.defineProperty(items, 'truncated', { value: payload.truncated, enumerable: false });
@@ -386,13 +412,13 @@ export class AdminPlatformClient {
     return result;
   }
 
-  users(searchOrFilters = '', signal, cursor = '') {
+  users(searchOrFilters = '', signal, cursor = '', { isolateRead = false } = {}) {
     const filters = typeof searchOrFilters === 'string' ? { q:searchOrFilters, cursor } : (searchOrFilters || {});
     const query = new URLSearchParams({ limit: '25' });
     if (filters.q) query.set('q', filters.q);
     if (filters.cursor) query.set('cursor', filters.cursor);
     if (filters.exclude_organization_id) query.set('exclude_organization_id', filters.exclude_organization_id);
-    return this.request('account', `/admin/v1/users?${query}`, signal);
+    return this.request('account', `/admin/v1/users?${query}`, signal, null, { isolateRead });
   }
 
   async userByCode(userCode, signal) {
@@ -809,7 +835,7 @@ export class AdminPlatformClient {
     return this.mutate('billing', `/admin/v1/payment-anomalies/${encodeURIComponent(caseID)}/resolve`, 'POST', { resolution, reason }, idempotencyKey, undefined, 200);
   }
 
-  wallets(filters = {}, signal) { return this.request('billing', `/admin/v1/wallets?${billingCollectionQuery(filters, { keys: ['q', 'status', 'owner_type'] })}`, signal); }
+  wallets(filters = {}, signal, { isolateRead = false } = {}) { return this.request('billing', `/admin/v1/wallets?${billingCollectionQuery(filters, { keys: ['q', 'status', 'owner_type'] })}`, signal, null, { isolateRead }); }
   walletLedger(walletID, filters = {}, signal) { return this.request('billing', `/admin/v1/wallets/${encodeURIComponent(walletID)}/ledger?${billingCollectionQuery(filters, { keys: ['entry_type', 'business_reference'], dateTimeKeys: ['created_from', 'created_to'] })}`, signal); }
   receivables(filters = {}, signal) { return this.request('billing', `/admin/v1/receivables?${billingCollectionQuery(filters, { keys: ['wallet_id', 'status', 'source_type'], dateTimeKeys: ['created_from', 'created_to'] })}`, signal); }
   receivableAllocations(id, signal) { return this.request('billing', `/admin/v1/receivables/${encodeURIComponent(id)}/allocations`, signal); }
@@ -859,6 +885,11 @@ export class AdminPlatformClient {
   async importReconciliation(facts, signal) {
     requireReconciliationDate(facts.business_date);
     return requireReconciliationRun(await this.mutate('billing', '/admin/v1/reconciliation-imports', 'POST', facts, '', signal, 201), facts);
+  }
+  async reconciliationRepairContext(id, signal) {
+    requireFinanceID(id);
+    const value = await this.request('billing', `/admin/v1/reconciliation-cases/${encodeURIComponent(id)}/repair-context`, signal);
+    return requireReconciliationRepairContext(value, id);
   }
   async reconciliationCaseCommand(id, facts, key, signal) {
     requireFinanceID(id);

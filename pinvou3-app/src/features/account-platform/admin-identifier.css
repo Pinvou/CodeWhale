@@ -1,0 +1,13 @@
+.adm-restored-shell .adm-identifier{display:grid;justify-items:start;gap:6px;min-width:0;max-width:100%}
+.adm-restored-shell .adm-identifier-value{display:flex;align-items:start;gap:8px;min-width:0;max-width:100%}
+.adm-restored-shell .adm-identifier-value code{display:block;min-width:0;max-width:24ch;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;line-height:32px;color:var(--adm-muted)}
+.adm-restored-shell .adm-identifier-value code.is-expanded{max-width:100%;overflow:visible;white-space:normal;overflow-wrap:anywhere;line-height:1.6;padding-top:6px}
+.adm-shell.adm-restored-shell .adm-panel button.adm-identifier-copy{display:inline-flex;align-items:center;justify-content:center;flex:0 0 34px;width:34px;min-height:34px;padding:7px;border:1px solid var(--adm-line);border-radius:8px;background:var(--adm-surface);color:var(--adm-primary)}
+.adm-shell.adm-restored-shell .adm-panel button.adm-identifier-toggle{min-height:28px;padding:2px 0;border:0;background:transparent;color:var(--adm-primary);font-size:12px;white-space:normal;text-align:left;text-decoration:underline;text-underline-offset:3px}
+.adm-restored-shell .adm-identifier button:focus-visible,.adm-restored-shell a.adm-organization-name-link:focus-visible{outline:3px solid var(--adm-primary);outline-offset:3px}
+.adm-restored-shell .adm-identifier-feedback{max-width:32em;font-size:12px;line-height:1.5;overflow-wrap:anywhere;color:var(--adm-muted)}
+.adm-shell.adm-restored-shell .adm-organization-directory .adm-table a.adm-organization-name-link{display:inline;color:var(--adm-primary);font-weight:650;line-height:1.5;text-decoration:underline;text-underline-offset:3px;overflow-wrap:anywhere}
+.adm-restored-shell .adm-organization-directory .adm-table td:last-child{width:32%;min-width:180px;white-space:normal}
+@media(max-width:760px){.adm-restored-shell .adm-organization-directory .adm-table td:last-child{width:auto;min-width:0}.adm-restored-shell .adm-identifier-value code{max-width:20ch}}
+
+@media(pointer:coarse){.adm-shell.adm-restored-shell .adm-panel button.adm-identifier-copy{width:44px;min-height:44px;flex-basis:44px}.adm-shell.adm-restored-shell .adm-panel button.adm-identifier-toggle{min-height:44px;padding:10px 0}.adm-restored-shell .adm-identifier-value code{line-height:44px}.adm-restored-shell .adm-identifier-value code.is-expanded{padding-top:10px}}

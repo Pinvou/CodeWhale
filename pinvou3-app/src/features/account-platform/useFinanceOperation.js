@@ -27,7 +27,7 @@ export function useFinanceOperation(owner, copy, client, scope) {
     catch (reason) { if (stamp === generation.current) setError(classifyError ? classifyError(reason) : reason.status === 403 ? 'permissions' : 'unavailable'); }
     finally { if (stamp === generation.current) { running.current = false; setBusy(false); } }
   };
-  const mutate = async (facts, action) => {
+  const mutate = async (facts, action, onKnownRejection) => {
     if (running.current) return;
     // A denial of this replay cannot establish whether its earlier dispatch
     // committed. The retained invocation, rather than asynchronously rendered
@@ -46,7 +46,7 @@ export function useFinanceOperation(owner, copy, client, scope) {
       const uncertain = hadUnresolved || reason.financeRequestState === 'WRITE_OBSERVED' ||
         (reason.financeRequestState !== 'NOT_DISPATCHED' &&
           (!Number.isInteger(reason.status) || reason.status >= 500 || reason.code === 'COMMAND_RESULT_UNKNOWN'));
-      if (!uncertain) { intent.current = null; pending.delete(identity); }
+      if (!uncertain) { intent.current = null; pending.delete(identity); onKnownRejection?.(reason); }
       setUnknown(uncertain); setError(uncertain ? 'unknown' : reason.financeInputInvalid ? 'inputInvalid' : reason.status === 403 ? 'permissions' : 'sourceChanged');
     } finally { if (stamp === generation.current) { running.current = false; setBusy(false); } }
   };
