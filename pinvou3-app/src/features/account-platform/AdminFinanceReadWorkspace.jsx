@@ -1,8 +1,9 @@
-import React, { useEffect, useId, useState } from 'react';
+import React, { useEffect, useId, useRef, useState } from 'react';
 import { accountLayoutCopy, adminLayoutCopy, financeCopy } from '../../shared/i18n.js';
 import { formatBalance } from './balance-view.js';
 import { formatFen, requireFinanceCollection, requireFinanceID } from './finance-contract.js';
 import { localFinanceDate } from './AdminFinanceFilters.jsx';
+import { AdminAdjustmentLookup } from './AdminAdjustmentLookup.jsx';
 import { financeReadDefinition, financeReadIdentity, financeListRouteUpdates, readFinanceListRoute } from './admin-finance-read-route.js';
 
 const receivableSources = ['USAGE_OVERAGE', 'CHARGEBACK', 'FORCED_REFUND'];
@@ -35,7 +36,7 @@ const statuses = {
 };
 // A read-only view uses the installed typed clients. Financial commands remain
 // in their existing owners and are never dispatched by URL or refresh effects.
-export function AdminFinanceReadWorkspace({ kind, client, language, route, onViewApproval }) {
+export function AdminFinanceReadWorkspace({ kind, client, language, route, onViewApproval, permissions = [] }) {
   const copy = financeCopy[language], words = adminLayoutCopy[language].financeLists, config = definitions[kind], fields = financeReadDefinition(kind).fields;
   const current = readFinanceListRoute(kind, route.search), signature = JSON.stringify(current);
   const walletHelpID = useId();
@@ -78,8 +79,31 @@ export function AdminFinanceReadWorkspace({ kind, client, language, route, onVie
   const labelStatus = value => words[value] || accountLayoutCopy[language].statuses[value] || value;
   const cell = (key, value) => value == null ? '—' : key.endsWith('_microcredits') ? formatBalance(value, language) : key === 'amount_fen' ? formatFen(value, language) : key.endsWith('_at') ? Number.isFinite(Date.parse(value)) ? new Date(value).toLocaleString({ zh: 'zh-CN', en: 'en-US', ja: 'ja-JP' }[language]) : '—' : ['status', 'operation_type'].includes(key) ? labelStatus(value) : String(value);
   const adjustmentFacts = kind === 'adjustments' ? adminLayoutCopy[language].adjustmentFacts : null;
+  const adjustmentLookup = kind === 'adjustments' ? adminLayoutCopy[language].adjustmentLookup : null;
+  const canReadRequester = permissions.includes('platform.users.read') && route.available.includes('users');
+  const canReadWalletLedger = permissions.includes('platform.billing.ledger.read');
+  const [requesterDirectoryDenial, setRequesterDirectoryDenial] = useState(null);
+  const directoryEpoch = client.financeSessionEpoch || 0;
+  const currentRequesterOwner = useRef(null);
+  currentRequesterOwner.current = { client, epoch: directoryEpoch, allowed: canReadRequester };
+  const requesterDirectoryDenied = requesterDirectoryDenial?.client === client && requesterDirectoryDenial.epoch === directoryEpoch;
+  const onRequesterDirectoryAccess = allowed => {
+    const owner = currentRequesterOwner.current;
+    if (owner.client !== client || owner.epoch !== directoryEpoch || !owner.allowed || (client.financeSessionEpoch || 0) !== directoryEpoch) return;
+    setRequesterDirectoryDenial(allowed ? null : { client, epoch: directoryEpoch });
+  };
+  const openRequester = canReadRequester && !requesterDirectoryDenied ? id => route.navigate('users', { user_id: id }) : null;
+  const openWallet = canReadWalletLedger ? id => route.navigate('billing', { finance_tab: 'wallets', ...financeListRouteUpdates('wallets', { q: id, limit: '25' }, id), ...financeListRouteUpdates('ledger', { limit: '50' }) }) : null;
+  const related = (key, value) => {
+    let id;
+    try { id = requireFinanceID(value); } catch { return cell(key, value); }
+    const open = key === 'requested_by' ? openRequester : openWallet;
+    const label = key === 'requested_by' ? adjustmentLookup.openRequester : adjustmentLookup.openWallet;
+    return open ? <button type="button" className="adm-name-link" aria-label={label + ': ' + id} onClick={() => open(id)}><code>{id}</code></button> : <code>{id}</code>;
+  };
   const column = key => adjustmentFacts && key === 'amount_microcredits' ? adjustmentFacts.amount : adjustmentFacts && key === 'created_at' ? adjustmentFacts.requestTime + ' (' + adjustmentZone + ')' : adjustmentFacts && key === 'effective_at' ? adjustmentFacts.effectiveTime + ' (' + adjustmentZone + ')' : words[key] || copy[key];
   const valueFor = (key, item) => {
+    if (adjustmentLookup && ['wallet_id', 'requested_by'].includes(key)) return related(key, item[key]);
     if (adjustmentFacts && key === 'amount_microcredits') {
       const amount = formatBalance(item.amount_microcredits, language);
       return amount === '—' ? adjustmentFacts.unavailable : (amount === '0' ? amount : amount.startsWith('-') ? '−' + amount.slice(1) : '+' + amount) + ' ' + adjustmentFacts.points;
@@ -140,12 +164,13 @@ export function AdminFinanceReadWorkspace({ kind, client, language, route, onVie
   return <section className="adm-finance-read-view" aria-label={words[kind]}><header><h3>{words[kind]}</h3>{showAdjustmentView && !current.selectedID && <span>{adjustmentResults.view}: {adjustmentStatus ? labelStatus(adjustmentStatus) : words.allStatuses}</span>}<button onClick={refresh}>{copy.refresh}</button></header>
     {visible.error && <p role="alert">{visible.error.status === 403 ? copy.permissions : visible.error.status === 410 ? words.cursorExpired : copy.unavailable}<button onClick={refresh}>{copy.retry}</button></p>}
     {!visible.data && !visible.error && <p role="status">{copy.loading}</p>}
+    {adjustmentLookup && <p><small>{adjustmentLookup.relatedHelp}</small></p>}
     {current.selectedID ? <><button onClick={() => move(current.query)}>{words.back}</button><h4>{current.selectedID}</h4>{visible.data && <>
       {visible.data.selected ? <dl className="adm-user-details">{config.columns.map(key => <React.Fragment key={key}><dt>{column(key)}</dt><dd>{valueFor(key, visible.data.selected)}</dd></React.Fragment>)}</dl> : <p>{words.detailUnavailable}</p>}
       {visible.data.allocations && table(visible.data.allocations, ['amount_microcredits', 'created_at'])}
       {kind === 'adjustments' && onViewApproval && route.available.includes('approvals') && <button onClick={() => onViewApproval(null, { approval_command_type: 'WALLET_ADJUSTMENT', approval_target: current.selectedID })}>{copy.approvals}</button>}
     </>}</> : <><form className="adm-filter-row" onSubmit={event => { event.preventDefault(); move({ ...draft, cursor: '' }); }}>
-      {fields.map(key => timeWords && key === 'created_to' ? null : timeWords && key === 'created_from' ? <React.Fragment key={key}>{timeRange}</React.Fragment> : <label key={key}>{receivableFilters && key === 'wallet_id' ? <span id={walletHelpID + '-label'}>{words[key]}</span> : words[key]}{adjustmentFacts && key.startsWith('created_') && <small>{adjustmentFacts.inputZone} ({Intl.DateTimeFormat().resolvedOptions().timeZone})</small>}{receivableFilters && key === 'wallet_id' ?
+      {fields.map(key => adjustmentLookup && ['wallet_id', 'requested_by'].includes(key) ? <AdminAdjustmentLookup key={key} routeSignature={signature} appliedValue={current.query[key]} client={client} kind={key === 'wallet_id' ? 'wallet' : 'requester'} label={words[key]} words={adjustmentLookup} available={key === 'wallet_id' || canReadRequester} onOpenRelated={key === 'wallet_id' ? openWallet : openRequester} onDirectoryAccess={key === 'requested_by' ? onRequesterDirectoryAccess : undefined} value={draft[key] || ''} onChange={id => setDraft(value => ({ ...value, [key]: id }))} /> : timeWords && key === 'created_to' ? null : timeWords && key === 'created_from' ? <React.Fragment key={key}>{timeRange}</React.Fragment> : <label key={key}>{receivableFilters && key === 'wallet_id' ? <span id={walletHelpID + '-label'}>{words[key]}</span> : words[key]}{adjustmentFacts && key.startsWith('created_') && <small>{adjustmentFacts.inputZone} ({Intl.DateTimeFormat().resolvedOptions().timeZone})</small>}{receivableFilters && key === 'wallet_id' ?
         <><input maxLength={200} value={draft[key] || ''} aria-labelledby={walletHelpID + '-label'} aria-describedby={walletHelpID} onChange={event => setDraft(value => ({ ...value, [key]: event.target.value }))} /><small id={walletHelpID}>{receivableFilters.help}</small></>
         : receivableFilters && key === 'source_type' ? <select value={unsupportedSource ? draft[key] : sourceDisplayKey} onChange={event => setDraft(value => ({ ...value, [key]: event.target.value }))}>
           <option value="">{receivableFilters.all}</option>

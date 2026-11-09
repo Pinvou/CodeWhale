@@ -535,3 +535,11 @@
 .adm-restored-shell .adm-receivable-applied dt{color:var(--adm-muted);font-size:12px}
 
 .adm-finance-read-view .adm-table [data-adjustment-points] { text-align: end; font-variant-numeric: tabular-nums; white-space: nowrap; }
+
+.adm-filter-row .adm-adjustment-lookup { min-width: 0; margin: 0; padding: 0; border: 0; display: grid; align-content: start; gap: .375rem; }
+.adm-adjustment-lookup > legend { padding: 0; font-weight: 600; }
+.adm-adjustment-lookup-selection { display: flex; flex-wrap: wrap; align-items: baseline; gap: .25rem .5rem; min-width: 0; overflow-wrap: break-word; overflow-wrap: anywhere; }
+.adm-adjustment-lookup-selection > small { min-width: 0; max-width: 100%; overflow-wrap: break-word; overflow-wrap: anywhere; }
+.adm-adjustment-lookup-results { display: grid; gap: .375rem; min-width: 0; }
+.adm-adjustment-lookup-results ul { list-style: none; margin: 0; padding: 0; }
+.adm-adjustment-lookup-results li button { text-align: start; display: grid; grid-template-columns: minmax(0, 1fr); width: 100%; overflow-wrap: break-word; }
