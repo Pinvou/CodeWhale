@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { financeCopy } from '../../shared/i18n.js';
+import { accountDesktopCopy, accountLayoutCopy, financeCopy } from '../../shared/i18n.js';
 import { hasPermission } from './authorization-ui.js';
 import { formatBalance } from './balance-view.js';
 import { formatFen, requireFinanceCollection, requireFinanceID, requirePaymentOrder, integerMoney } from './finance-contract.js';
@@ -14,7 +14,7 @@ import { useRechargePaymentDialog } from './useRechargePaymentDialog.js';
 import { RechargePaymentDialog } from './RechargePaymentDialog.jsx';
 import { PersonalFinancePortalSections } from './PersonalFinancePortalSections.jsx';
 
-export function PersonalFinanceWorkspace({ client, me, language, onPaid, presentationTargets }) {
+export function PersonalFinanceWorkspace({ client, me, language, onPaid, presentationTargets, rechargeOnly = false }) {
   const copy = financeCopy[language];
   const [data, setData] = useState(null);
   const [productID, setProductID] = useState('');
@@ -100,7 +100,7 @@ export function PersonalFinanceWorkspace({ client, me, language, onPaid, present
   const load = async (stamp = generation.current, signal) => {
     const revision = orderRevision.current;
     const [products, capabilities, orders, packages] = await Promise.all([
-      client.products(signal), client.paymentCapabilities(signal), orderReader.current.readList().catch(reason => { if (ownsView(stamp)) readFailure(reason); throw reason; }), client.entitlementPackages(signal),
+      client.products(signal), client.paymentCapabilities(signal), orderReader.current.readList().catch(reason => { if (ownsView(stamp)) readFailure(reason); throw reason; }), rechargeOnly ? { items: [] } : client.entitlementPackages(signal),
     ]);
     const result = { products: requireFinanceCollection(products), capabilities, orders: requireFinanceCollection(orders), packages: requireFinanceCollection(packages) };
     for (const item of result.products) { integerMoney(item.amount_fen); if (!item.product_id || !Array.isArray(item.channels)) throw new Error('INVALID_FINANCE_ACK'); }
@@ -132,7 +132,7 @@ export function PersonalFinanceWorkspace({ client, me, language, onPaid, present
     return retire;
     // Identity/version changes invalidate all financial state and pending intent.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [client, owner, sessionEpoch, canRead]);
+  }, [client, owner, sessionEpoch, canRead, rechargeOnly]);
   useEffect(() => registerPersonalRechargeReauthentication(client, { owner, epoch: client.financeSessionEpoch || 0, getIntent: () => intent.current }), [client, owner, client.financeSessionEpoch]);
   useEffect(() => { const timer = globalThis.setInterval(() => setNow(Date.now()), 1000); return () => globalThis.clearInterval(timer); }, []);
   const selected = data?.products.find(item => item.product_id === productID) || data?.products[0];
@@ -307,32 +307,32 @@ export function PersonalFinanceWorkspace({ client, me, language, onPaid, present
       onQuery: () => void query(), onCloseOrder: close, onClaim: () => void claim(), onStatement: setStatement,
     }} />
   </>;
-  return <section tabIndex={-1} className="ap-finance" aria-label={copy.title}>
+  return <section tabIndex={-1} className={`ap-finance${rechargeOnly ? ' ap-recharge-only' : ''}`} aria-label={rechargeOnly ? accountDesktopCopy[language].recharge : copy.title}>
     {payment.order && <RechargePaymentDialog order={payment.order} copy={copy} language={language} now={now} busy={busy} onDismiss={payment.dismiss} onQuery={() => void queryPayment()} canRestoreFocus={payment.canRestoreFocus} returnFocus={payment.trigger} />}
     {closeConfirmation && closeIsCurrent(closeConfirmation) && <PersonalOrderCloseConfirmation copy={copy} orderID={closeConfirmation.orderID} amount={formatFen(closeConfirmation.order.amount_fen, language)} canRestoreFocus={() => closeIsCurrent(closeConfirmation)} onCancel={() => cancelClose(closeConfirmation)} onConfirm={() => void confirmClose(closeConfirmation)} />}
-    <header><h2>{copy.title}</h2><button disabled={busy} onClick={() => void run(async () => { refreshRecovery(); })}>{copy.refresh}</button></header>
+    <header><h2>{rechargeOnly ? accountDesktopCopy[language].recharge : copy.title}</h2><button disabled={busy} onClick={() => void run(async () => { refreshRecovery(); })}>{rechargeOnly ? accountDesktopCopy[language].refreshRecharge : copy.refresh}</button></header>
     {busy && <p role="status">{copy.loading}</p>}
     {error && <p role="alert">{copy[error]}</p>}
     {notice && <p role="status">{copy[notice]}</p>}
     {unknown && <button disabled={busy || recoveryBlocked || !canCreate} onClick={() => void create()}>{copy.retry}</button>}
     {data && <>
       <h3>{copy.products}</h3>
-      {data.products.length === 0 ? <p>{copy.empty}</p> : <form onSubmit={event => { event.preventDefault(); void create(); }}>
+      {data.products.length === 0 ? <p>{rechargeOnly ? accountDesktopCopy[language].noRechargeProducts : copy.empty}</p> : <form onSubmit={event => { event.preventDefault(); void create(); }}>
         <label>{copy.product}<select disabled={busy || unknown || recoveryBlocked} value={selected?.product_id || ''} onChange={event => { setProductID(event.target.value); setChannel(''); }}>
           {data.products.map(item => <option key={item.product_id} value={item.product_id}>{localizedProductDisplayName(item, language, 'product_id')} — {formatFen(item.amount_fen, language)}</option>)}
         </select></label>
-        <label>{copy.channel}<select disabled={busy || unknown || recoveryBlocked} value={selectedChannel} onChange={event => setChannel(event.target.value)}>{(selected?.channels || []).map(value => <option key={value} value={value}>{value}</option>)}</select></label>
+        <label>{copy.channel}<select disabled={busy || unknown || recoveryBlocked} value={selectedChannel} onChange={event => setChannel(event.target.value)}>{(selected?.channels || []).map(value => <option key={value} value={value}>{copy.channels?.[value] || value}</option>)}</select></label>
         {!selectedChannel && <p>{copy.noChannel}</p>}
         <button disabled={busy || unknown || recoveryBlocked || !canCreate || !selectedChannel}>{copy.create}</button>
       </form>}
-      <section aria-label={copy.pendingOrders}><h3>{copy.pendingOrders}</h3>
+      {(!rechargeOnly || hasPending) && <section aria-label={copy.pendingOrders}><h3>{rechargeOnly ? accountDesktopCopy[language].pendingRecharge : copy.pendingOrders}</h3>
         {!hasPending && <p>{copy.empty}</p>}
         <ul className="ap-pending-payments">{paymentOrderHistory(data.orders).filter(item => isPayablePaymentOrder(item, now)).map(item => <li key={item.order_id}>
-          <span>{localizedProductDisplayName(item, language, 'product_id')} · {formatFen(item.amount_fen, language)} · {orderSummaryStatus(item)} · {copy.countdown(Math.max(0, Math.ceil((new Date(item.expires_at).getTime() - now) / 1000)))}</span>
+          <span>{localizedProductDisplayName(item, language, 'product_id')} · {formatFen(item.amount_fen, language)} · {rechargeOnly ? accountLayoutCopy[language].statuses[orderSummaryStatus(item)] || copy.processing : orderSummaryStatus(item)} · {copy.countdown(Math.max(0, Math.ceil((new Date(item.expires_at).getTime() - now) / 1000)))}</span>
           <button disabled={busy || unknown || recoveryBlocked} onClick={() => void selectOrder(requireFinanceID(item.order_id), true)}>{copy.continuePayment}</button>
         </li>)}</ul>
-      </section>
-      <h3>{copy.orders}</h3>
+      </section>}
+      {!rechargeOnly && <><h3>{copy.orders}</h3>
       {data.orders.length === 0 && <p>{copy.empty}</p>}
       <table><thead><tr><th>{copy.product}</th><th>{copy.amount}</th><th>{copy.status}</th><th>{copy.paidAt}</th><th>{copy.history}</th></tr></thead><tbody>{paymentOrderHistory(data.orders).map(item => <tr key={item.order_id}>
         <td>{localizedProductDisplayName(item, language, 'product_id')}</td><td>{formatFen(item.amount_fen, language)}</td><td>{orderSummaryStatus(item)}</td><td>{orderHistoryTimestamp(item) || '—'}</td><td><button disabled={busy} onClick={() => void selectOrder(requireFinanceID(item.order_id))}>{copy.details}</button></td>
@@ -344,7 +344,7 @@ export function PersonalFinanceWorkspace({ client, me, language, onPaid, present
       </article>}
       <h3>{copy.packages}</h3>
       {data.packages.length === 0 && <p>{copy.empty}</p>}
-      <table><thead><tr><th>{copy.name}</th><th>{copy.type}</th><th>{copy.remaining}</th><th>{copy.used}</th><th>{copy.validUntil}</th><th>{copy.status}</th></tr></thead><tbody>{data.packages.map(item => <tr key={item.package_id}><td>{localizedProductDisplayName(item, language, 'plan_id')}</td><td>{item.source_type}</td><td>{formatBalance(item.points_remaining_microcredits, language)}</td><td>{formatBalance(item.points_used_microcredits, language)}</td><td>{item.valid_until || item.expires_at}</td><td>{item.status}</td></tr>)}</tbody></table>
+      <table><thead><tr><th>{copy.name}</th><th>{copy.type}</th><th>{copy.remaining}</th><th>{copy.used}</th><th>{copy.validUntil}</th><th>{copy.status}</th></tr></thead><tbody>{data.packages.map(item => <tr key={item.package_id}><td>{localizedProductDisplayName(item, language, 'plan_id')}</td><td>{item.source_type}</td><td>{formatBalance(item.points_remaining_microcredits, language)}</td><td>{formatBalance(item.points_used_microcredits, language)}</td><td>{item.valid_until || item.expires_at}</td><td>{item.status}</td></tr>)}</tbody></table></>}
     </>}
   </section>;
 }

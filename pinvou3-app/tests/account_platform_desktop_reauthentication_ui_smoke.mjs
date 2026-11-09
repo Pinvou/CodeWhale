@@ -6,7 +6,12 @@ import * as puppeteer from './helpers/puppeteer-fixture.mjs';
 const browserPath = [process.env.CHROME, '/usr/bin/google-chrome', '/usr/bin/chromium', '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', 'C:/Program Files/Microsoft/Edge/Application/msedge.exe', 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe'].find(value => value && fs.existsSync(value));
 assert.ok(browserPath, 'Chromium is required; set CHROME to its executable');
 const root = import.meta.dirname + '/..';
-const server = await createServer({ root, configFile: false, plugins: [react()], cacheDir: root + '/node_modules/.vite-desktop-reauthentication', server: { host: '127.0.0.1', port: 0, fs: { allow: [root, fs.realpathSync(root + '/node_modules')], deny: ['**/.env*', '**/*.{pem,crt,key}'] } } });
+// Exercise the real AccountPlatformView coordinator with an explicit protected
+// workspace host. Closure is no longer exposed by the production desktop UI.
+const protectedWorkspaceHost = { name: 'native-protected-workspace-host', enforce: 'pre', resolveId(source, importer) {
+  if (source === './DesktopAccountCenter.jsx' && importer?.replaceAll('\\', '/').endsWith('/AccountPlatformView.jsx')) return root + '/tests/fixtures/native-protected-workspaces.jsx';
+} };
+const server = await createServer({ root, configFile: false, plugins: [protectedWorkspaceHost, react()], cacheDir: root + '/node_modules/.vite-desktop-reauthentication', server: { host: '127.0.0.1', port: 0, fs: { allow: [root, fs.realpathSync(root + '/node_modules')], deny: ['**/.env*', '**/*.{pem,crt,key}'] } } });
 await server.listen();
 let browser, pass = 0, fail = 0;
 const results = [];

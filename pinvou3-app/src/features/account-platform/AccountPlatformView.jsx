@@ -8,13 +8,13 @@ import { requirePersonalAccount, organizationRechargeTargetAllowed } from './per
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { capturePersonalRechargeReauthentication, authorizePersonalRechargeReauthentication } from './personal-recharge-reauthentication.js';
 import { createDesktopReauthenticationCoordinator } from './desktop-reauthentication.js';
-import { supportedLocales, localeNames } from '../../shared/supported-locales.js';
 import { hasPermission } from './authorization-ui.js';
 import { formatBalance, formatWholeBalance } from './balance-view.js';
 import { accountDisplayLabel, maskedAccountMobile } from './account-display-label.js';
 import { localizedAccountPlatformError } from './error-localization.js';
 import { ProfileSettings } from './ProfileSettings.jsx';
 import { AccountLogin } from './AccountLogin.jsx';
+import { DesktopAccountCenter } from './DesktopAccountCenter.jsx';
 import { AccountPortalLayout, AccountPortalPanel } from './AccountPortalLayout.jsx';
 import { usePortalSections } from './usePortalSections.js';
 import { portalLoginLocation } from './portal-sections.js';
@@ -209,21 +209,6 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
     {me.active_context?.context_type !== 'ORGANIZATION' && <PersonalFinanceWorkspace key={`portal-finance:${me.user_id}`} client={client} me={me} language={language} presentationTargets={{ section: navigation.section, credits: creditTarget, orders: ordersTarget, feedback: financeFeedbackTarget }} onPaid={() => { if (renderedEpoch === epoch.current) return refresh(false); }} />}
     {me.active_context?.context_type === 'ORGANIZATION' && <OrganizationFinanceWorkspace key={`${me.user_id}:${me.active_context.organization_id}:${me.active_context.context_version}`} client={client} me={me} language={language} presentationTargets={{ section: navigation.section, credits: creditTarget, management: organizationFinanceTarget, feedback: financeFeedbackTarget }} />}
   </AccountPortalLayout>;
-  return <main className={`ap-shell ap-app ${portal ? 'ap-portal' : 'ap-desktop'}`}>
-    <header><h1>{copy.title}</h1><select aria-label={copy.language} value={language} onChange={event => onLanguageChange(event.target.value)}>{supportedLocales.map(locale => <option key={locale} value={locale}>{localeNames[locale]}</option>)}</select><button disabled={busy} onClick={() => void refresh()}>{copy.refresh}</button><button disabled={busy} onClick={logout}>{copy.logout}</button></header>
-    {error && <div className="ap-alert error" role="alert">{error}</div>}
-    {notice && <div className="ap-alert" role="status">{notice}</div>}
-    <section><h2>{accountDisplayLabel(me, copy.user)}</h2><dl><dt>{copy.username}</dt><dd>{me.username || '—'}</dd><dt>{copy.mobile}</dt><dd>{me.mobile || '—'}</dd><dt>{copy.accountStatus}</dt><dd>{me.status}</dd></dl></section>
-    <OrganizationDirectory key={`${me.user_id}:${client.financeSessionEpoch || 0}`} client={client} me={me} language={language} onChanged={() => refresh(false)} />
-    {me.active_context?.context_type === 'ORGANIZATION' ? <OrganizationWorkspace key={`${me.user_id}:${me.active_context.organization_id}:${me.active_context.context_version}`} client={client} me={me} language={language} purchaseFocusRequest={rechargeRequest} onChanged={() => refresh(false)} /> : <>
-    {hasPermission(me, 'personal.billing.read') && <section className="ap-balance-hero"><span>{copy.availableCredits}</span><strong>{formatBalance(balance?.available_microcredits, language)}</strong><small>{copy.reservedCredits}: {formatBalance(balance?.reserved_microcredits, language)}</small></section>}
-    <PersonalFinanceWorkspace key={`personal-finance:${me.user_id}`} client={client} me={me} language={language} onPaid={() => { if (renderedEpoch === epoch.current) return refresh(false); }} />
-    <PersonalUsageWorkspace key={`personal-usage:${me.user_id}`} client={client} me={me} language={language} />
-    <AccountClosureWorkspace key={`${me.user_id}:${me.personal_authorization_version || me.active_context?.personal_authorization_version || 0}:${client.financeSessionEpoch || 0}`} client={client} me={me} language={language} />
-    </>}
-    {hasPermission(me, 'personal.profile.update') && (portal ? <ProfileSettings key={me.user_id} copy={copy} me={me} client={client} onError={reason => { if (renderedEpoch === epoch.current) setError(localizedAccountPlatformError(copy, reason)); }} onChanged={result => changed(result, renderedEpoch)} onRecovering={() => { if (renderedEpoch === epoch.current) setNotice(copy.profileChangeRecovering); }} /> : <button onClick={() => client.openPortal(language).catch(reason => { if (renderedEpoch === epoch.current) setError(localizedAccountPlatformError(copy, reason)); })}>{copy.profileSettings}</button>)}
-    {portal && hasPermission(me, 'personal.security.manage') && <a href="/auth/login?reauthenticate=1&return_to=%2F">{copy.reauthenticate}</a>}
-    {portal && me.platform_permissions?.some(permission => permission.startsWith('platform.')) && <a href="/admin.html">{copy.adminCenter}</a>}
-    {onClose && <button onClick={onClose}>{copy.close}</button>}
-  </main>;
+  return <DesktopAccountCenter key={`${me.user_id}:${me.active_context.context_version}:${client.financeSessionEpoch || 0}`} client={client} me={me} balance={balance} copy={copy} language={language} onLanguageChange={onLanguageChange} busy={busy} error={error} notice={notice} rechargeRequest={rechargeRequest}
+    onRefresh={() => refresh()} onLogout={logout} onPaid={() => { if (renderedEpoch === epoch.current) return refresh(false); }} />;
 }

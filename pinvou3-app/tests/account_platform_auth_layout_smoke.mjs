@@ -6,7 +6,7 @@ import { createServer } from './helpers/vite-fixture.mjs';
 import * as puppeteer from './helpers/puppeteer-fixture.mjs';
 import { accountAuthCopy, accountPlatformCopy } from '../src/shared/i18n.js';
 
-const chrome = [process.env.CHROME, 'C:/Program Files/Google/Chrome/Application/chrome.exe', 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe', '/usr/bin/google-chrome', '/usr/bin/chromium', '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'].find(value => value && fs.existsSync(value));
+const chrome = [process.env.CHROME, 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe', 'C:/Program Files/Google/Chrome/Application/chrome.exe', '/usr/bin/google-chrome', '/usr/bin/chromium', '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'].find(value => value && fs.existsSync(value));
 assert.ok(chrome, 'Chromium is required for desktop account UI validation');
 const root = path.resolve(import.meta.dirname, '..');
 const server = await createServer({ root, configFile: false, plugins: [react()], server: { fs: { allow: [root, fs.realpathSync(path.join(root, 'node_modules'))] } } });
@@ -55,4 +55,4 @@ try {
     }
   });
   console.log(`Authentication layout: ${cases} cases passed`);
-} finally { if (browser) await browser.close(); await server.close(); }
+} finally { try { if (browser) await browser.close(); } finally { await server.close(); } }
