@@ -3,3 +3,12 @@
 .adm-profile-repair-table tbody td{vertical-align:top}
 .adm-profile-repair-table tbody code{display:block;min-width:120px;white-space:normal;overflow-wrap:break-word;overflow-wrap:anywhere}
 .adm-profile-repair-table td:nth-child(6){min-width:120px;white-space:normal;overflow-wrap:break-word;overflow-wrap:anywhere}
+
+.adm-profile-repair-receipt,.adm-profile-repair-blocked{padding:9px 10px;background:var(--adm-soft);border:1px solid var(--adm-line);border-radius:8px;white-space:normal;overflow-wrap:break-word;overflow-wrap:anywhere}
+.adm-profile-repair-detail{margin-top:8px}
+.adm-profile-repair-detail summary{min-height:32px;padding:6px 2px;cursor:pointer;color:var(--adm-primary);white-space:normal}
+.adm-profile-repair-detail summary:focus{outline:3px solid var(--adm-primary);outline-offset:-2px}
+.adm-profile-repair-detail dl{display:grid;gap:8px;margin:4px 0 0;padding:10px;background:var(--adm-soft);border:1px solid var(--adm-line);border-radius:8px;white-space:normal}
+.adm-profile-repair-detail dl>div{min-width:0}
+.adm-profile-repair-detail dt{color:var(--adm-muted)}
+.adm-profile-repair-detail dd{margin:2px 0 0;overflow-wrap:break-word;overflow-wrap:anywhere}
