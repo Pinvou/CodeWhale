@@ -1,0 +1,53 @@
+export const smsStatusCopy = {
+  "zh": {
+    "saved": "已读取的生效配置",
+    "switchLabel": "短信发送开关",
+    "on": "已开启",
+    "off": "已关闭",
+    "unknown": "未知",
+    "readinessBoundary": "运行状态和凭据就绪来自配置检查，不代表短信已发送或送达。",
+    "edit": "编辑短信配置",
+    "dirty": "有未保存更改",
+    "clean": "配置未更改",
+    "enableImpact": "保存并启用后，注册、登录、修改手机号及重置密码可以发起新的短信验证码。发送仍取决于服务与凭据。",
+    "disableImpact": "保存并关闭后，注册、登录、修改手机号及重置密码不再通过此服务发送新的短信验证码。",
+    "unknownWrite": "上一次保存结果未确认。重试将使用原请求，不提交当前草稿中的新改动。",
+    "retryTarget": "原请求",
+    "version": "基于版本",
+    "retryOriginal": "重试原保存请求"
+  },
+  "en": {
+    "saved": "Effective configuration last read",
+    "switchLabel": "SMS sending switch",
+    "on": "Enabled",
+    "off": "Disabled",
+    "unknown": "Unknown",
+    "readinessBoundary": "Runtime and credential readiness are configuration checks. They do not verify sending or delivery.",
+    "edit": "Edit SMS configuration",
+    "dirty": "Unsaved changes",
+    "clean": "No configuration changes",
+    "enableImpact": "After saving with SMS enabled, registration, sign-in, mobile number changes, and password resets can request new SMS codes. Sending still depends on service and credentials.",
+    "disableImpact": "After saving with SMS disabled, this service will stop sending new SMS codes for registration, sign-in, mobile number changes, and password resets.",
+    "unknownWrite": "The previous save result is unconfirmed. Retry uses the original request and does not send edits made since then.",
+    "retryTarget": "Original request",
+    "version": "based on revision",
+    "retryOriginal": "Retry original save"
+  },
+  "ja": {
+    "saved": "最後に取得した有効な設定",
+    "switchLabel": "SMS 送信の切り替え",
+    "on": "有効",
+    "off": "無効",
+    "unknown": "不明",
+    "readinessBoundary": "稼働状態と認証情報の準備状況は設定の確認結果です。SMS の送信や配信を確認するものではありません。",
+    "edit": "SMS 設定を編集",
+    "dirty": "未保存の変更があります",
+    "clean": "設定の変更はありません",
+    "enableImpact": "有効にして保存すると、登録、ログイン、携帯電話番号の変更、パスワードの再設定で新しい SMS 認証コードをリクエストできます。送信にはサービスと認証情報が必要です。",
+    "disableImpact": "無効にして保存すると、登録、ログイン、携帯電話番号の変更、パスワードの再設定で、このサービスから新しい SMS 認証コードは送信されなくなります。",
+    "unknownWrite": "前回の保存結果は確認できていません。再試行では元のリクエストを使い、その後の変更は送信しません。",
+    "retryTarget": "元のリクエスト",
+    "version": "元のリビジョン",
+    "retryOriginal": "元の保存を再試行"
+  }
+};
