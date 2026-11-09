@@ -35,6 +35,15 @@ async function recoverTokenApproval(client, reference, draft, signal) {
   return recoverGovernedApproval(client, reference, draft, signal);
 }
 
+function displayCatalogContextLength(value, locale, unknown) {
+  if (typeof value === 'number' && Number.isSafeInteger(value) && value >= 0) return value.toLocaleString(locale);
+  if (typeof value === 'string' && /^(?:0|[1-9]\d{0,18})$/.test(value)) {
+    const count = BigInt(value);
+    if (count <= (1n << 63n) - 1n) return count.toLocaleString(locale);
+  }
+  return unknown;
+}
+
 function ModelDirectory({ client, copy, permissions, actionsEnabled, detailsEnabled, routeVersion, onQueryChange, onOpenDetail, onNavigate, cursorHistory }) {
   const query = useMemo(() => readAdminModelTokenQuery('models'), [routeVersion]);
   const [refreshVersion, setRefreshVersion] = useState(0);
@@ -52,6 +61,10 @@ function ModelDirectory({ client, copy, permissions, actionsEnabled, detailsEnab
 	}, [action, activeActionAllowed]);
   const load = useMemo(() => (filters, signal) => client.catalogModels(filters, signal), [client]);
   const state = useAdminSource({ enabled: true, load, query, refreshVersion, trackReadAccess: true });
+  const catalog = copy.catalogDirectory;
+  const filtersApplied = Object.entries(query).some(([key, value]) => key !== 'cursor' && Boolean(value));
+  const readDenied = state.readDenied;
+  const feedbackState = readDenied ? { ...state, items: [] } : state;
   const protocolCodes = state.error || state.readDenied ? [] : [...new Set(state.items.map(item => item.protocol_code).filter(value => typeof value === 'string' && value))].sort();
   const retry = () => {
     if (state.error?.status === 410) {
@@ -60,7 +73,7 @@ function ModelDirectory({ client, copy, permissions, actionsEnabled, detailsEnab
     } else setRefreshVersion((value) => value + 1);
   };
   return (
-    <section className="adm-card adm-source-card" aria-labelledby="model-directory-title">
+    <section className="adm-card adm-source-card adm-catalog-directory" aria-labelledby="model-directory-title">
 			<SourceHeader title={copy.modelDirectory} titleID="model-directory-title" state={state} copy={copy} onRetry={retry} actionClassName="adm-catalog-directory-actions" actions={actionsEnabled && <>{canSync && <button type="button" className="adm-catalog-preview" onClick={() => setAction({ type: 'SYNC' })}>{copy.catalogDirectory.previewSync}</button>}{canRollback && <button type="button" className="adm-catalog-rollback" onClick={() => setAction({ type: 'ROLLBACK', sourceVersion: '' })}>{copy.rollbackCatalog}</button>}</>} />
       <FilterForm source="models" query={query} copy={copy} onQueryChange={onQueryChange} resetDraftOnClear fields={[
         { key: 'q', label: copy.modelSearch, placeholder: copy.modelSearchPlaceholder },
@@ -68,10 +81,10 @@ function ModelDirectory({ client, copy, permissions, actionsEnabled, detailsEnab
         { key: 'protocol_code', label: copy.protocol, suggestions: protocolCodes, suggestionsCopy: copy.catalogDirectory, help: copy.catalogDirectory.protocolHelp },
         { key: 'source_adapter', label: copy.sourceAdapter, help: copy.catalogDirectory.adapterHelp },
       ]} />
-      <SourceFeedback state={state} copy={copy} onRetry={retry} />
+      <SourceFeedback state={feedbackState} copy={copy} onRetry={retry} messages={{ denied: catalog.listDenied, empty: filtersApplied ? catalog.noMatches : catalog.empty, stale: catalog.stale }} />
       <p className="adm-source-lead adm-source-missing-policy">{copy.sourceMissingPolicy}</p>
-      {state.items.length > 0 && <div className="adm-table-wrap"><table className="adm-table"><thead><tr><th>{copy.model}</th><th>{copy.lifecycle}</th><th>{copy.protocol}</th><th>{copy.contextLength}</th><th>{copy.source}</th>{(actionsEnabled || detailsEnabled) && <th>{copy.actions}</th>}</tr></thead><tbody>
-				{state.items.map((item) => <tr key={item.model_id}><td data-label={copy.model}>{detailsEnabled ? <button type="button" className="adm-name-link" onClick={() => onOpenDetail(item.model_id)}><strong>{item.display_name}</strong></button> : <strong>{item.display_name}</strong>}<small className="adm-secondary-id">{item.model_id}</small></td><td data-label={copy.lifecycle}><Status value={item.lifecycle_status} copy={copy} /></td><td data-label={copy.protocol}>{item.protocol_code} · v{item.protocol_version}</td><td data-label={copy.contextLength}>{Number(item.context_length || 0).toLocaleString()}</td><td data-label={copy.source}><Status value={item.source_available ? 'ACTIVE' : 'UNAVAILABLE'} copy={copy} /></td>{(actionsEnabled || detailsEnabled) && <td data-label={copy.actions}><div className="adm-row-actions">{detailsEnabled && <button type="button" onClick={() => onOpenDetail(item.model_id)}>{copy.viewDetail}</button>}{canPublish && item.draft && <button type="button" onClick={() => setAction({ type: 'PUBLISH', item })}>{copy.publish}</button>}{canImmediateLifecycle && item.lifecycle_status === 'PUBLISHED' && <button type="button" onClick={() => setAction({ type: 'LIFECYCLE', targetStatus: 'DEPRECATED', item })}>{copy.deprecateModel}</button>}{canImmediateLifecycle && item.lifecycle_status !== 'REMOVED' && <button type="button" onClick={() => setAction({ type: 'LIFECYCLE', targetStatus: 'REMOVED', item })}>{copy.removeModel}</button>}</div></td>}</tr>)}
+      {!readDenied && state.items.length > 0 && <div className="adm-table-wrap"><table className="adm-table"><thead><tr><th scope="col">{copy.model}</th><th scope="col">{copy.lifecycle}</th><th scope="col">{copy.protocol}</th><th scope="col">{catalog.tokenLength}</th><th scope="col">{copy.source}</th>{(actionsEnabled || detailsEnabled) && <th scope="col">{copy.actions}</th>}</tr></thead><tbody>
+				{state.items.map((item) => <tr key={item.model_id}><td data-label={copy.model}>{detailsEnabled ? <button type="button" className="adm-name-link" onClick={() => onOpenDetail(item.model_id)}><strong>{item.display_name}</strong></button> : <strong>{item.display_name}</strong>}<small className="adm-secondary-id">{item.model_id}</small></td><td data-label={copy.lifecycle}><Status value={item.lifecycle_status} copy={copy} /></td><td data-label={copy.protocol}>{item.protocol_code} · v{item.protocol_version}</td><td data-label={catalog.tokenLength}>{displayCatalogContextLength(item.context_length, catalog.locale, catalog.unknown)}</td><td data-label={copy.source}>{typeof item.source_available === 'boolean' ? <Status value={item.source_available ? 'ACTIVE' : 'UNAVAILABLE'} copy={copy} /> : catalog.unknown}</td>{(actionsEnabled || detailsEnabled) && <td data-label={copy.actions}><div className="adm-row-actions">{detailsEnabled && <button type="button" onClick={() => onOpenDetail(item.model_id)}>{copy.viewDetail}</button>}{canPublish && item.draft && <button type="button" onClick={() => setAction({ type: 'PUBLISH', item })}>{copy.publish}</button>}{canImmediateLifecycle && item.lifecycle_status === 'PUBLISHED' && <button type="button" onClick={() => setAction({ type: 'LIFECYCLE', targetStatus: 'DEPRECATED', item })}>{copy.deprecateModel}</button>}{canImmediateLifecycle && item.lifecycle_status !== 'REMOVED' && <button type="button" onClick={() => setAction({ type: 'LIFECYCLE', targetStatus: 'REMOVED', item })}>{copy.removeModel}</button>}</div></td>}</tr>)}
       </tbody></table></div>}
       <Pagination source="models" query={query} state={state} copy={copy} cursorHistory={cursorHistory} onQueryChange={onQueryChange} />
 			{action?.type === 'PUBLISH' && action.item && canPublish && <AdminHighRiskActionDialog action={{ key: `model-publish-${action.item.model_id}`, impactAction: 'TOKEN_MODEL_PUBLISH', title: copy.publishModel, lead: copy.modelActionLead }} copy={copy} target={{ label: action.item.display_name, version: `${copy.catalogVersion}: ${action.item.catalog_version}`, effectiveAt: copy.actionImmediate }} policy="AUDIT_ONLY" recentAuth payloadDetails={{ model_id: action.item.model_id, expected_catalog_version: action.item.catalog_version, expected_draft_version: action.item.draft?.draft_version || 0 }} impactLoader={async (signal) => requireGovernedTokenPrecheck(await client.governedTokenCommandPrecheck({ command_type: 'TOKEN_MODEL_PUBLISH', target_resource_type: 'MODEL', target_resource_id: action.item.model_id, command: { model_id: action.item.model_id } }, signal), { commandType: 'TOKEN_MODEL_PUBLISH', targetResourceType: 'MODEL', targetResourceID: action.item.model_id })} onClose={() => setAction(null)} execute={async (payload, key, signal) => {

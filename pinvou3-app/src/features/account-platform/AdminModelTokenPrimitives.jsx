@@ -83,25 +83,26 @@ export function SourceHeader({ title, titleID, state, copy, onRetry, actions = n
   );
 }
 
-export function SourceFeedback({ state, copy, onRetry }) {
+export function SourceFeedback({ state, copy, onRetry, messages = null }) {
   const retryRemaining = useAdminRetryCountdown(state.retryAt);
   if (state.error) {
     const expired = state.error?.status === 410;
     const rateLimited = state.error?.status === 429;
+    const denied = messages?.denied && [401, 403].includes(state.error?.status);
     const details = [
       retryRemaining > 0 ? copy.retryAfter(retryRemaining) : '',
       state.error.requestID ? `${copy.requestID}: ${state.error.requestID}` : '',
     ].filter(Boolean).join(' · ') || copy.retryHelp;
     return (
       <div className="adm-source-error" role="alert">
-        <strong>{expired ? copy.cursorExpired : rateLimited ? copy.rateLimited : copy.sourceUnavailable}</strong>
-        <span>{details}</span>
+        <strong>{denied ? messages.denied : expired ? copy.cursorExpired : rateLimited ? copy.rateLimited : copy.sourceUnavailable}</strong>
+        <span>{details}{!denied && messages?.stale && state.items.length > 0 ? ' · ' + messages.stale : ''}</span>
         <button type="button" disabled={retryRemaining > 0} onClick={onRetry}>{retryRemaining > 0 ? copy.retryCountdown(retryRemaining) : copy.retry}</button>
       </div>
     );
   }
   if (state.loading && state.items.length === 0) return <div className="adm-source-state" role="status">{copy.loading}</div>;
-  if (!state.loading && state.items.length === 0) return <div className="adm-source-state">{copy.noResults}</div>;
+  if (!state.loading && state.items.length === 0) return <div className="adm-source-state" role={messages ? 'status' : undefined}>{messages?.empty || copy.noResults}</div>;
   return null;
 }
 
