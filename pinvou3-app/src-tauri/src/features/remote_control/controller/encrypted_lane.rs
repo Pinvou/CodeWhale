@@ -942,7 +942,7 @@ mod tests {
 
     #[test]
     fn controller_stop_clears_real_a_keys_and_preserves_the_b_lane() {
-        use super::super::controlling::{
+        use crate::features::remote_control::controller::controlling::{
             ControllerLease, ControllingDeviceManager, ControllingStatusKind,
         };
         for reconnecting in [false, true] {
