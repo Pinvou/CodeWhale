@@ -587,7 +587,7 @@ export class AdminPlatformClient {
     }
     return this.approvalControl;
   }
-  async governedApprovalRead(path, { detail = false, signal } = {}) {
+  async governedApprovalRead(path, { detail = false, signal, requireCollection = false } = {}) {
     const capability = await this.governedApprovalCapability(signal);
     const key = approvalControlKey(capability);
     const lineage = this.approvalLineage();
@@ -610,6 +610,7 @@ export class AdminPlatformClient {
       }
       if (!this.approvalLineageMatches(lineage) || approvalControlKey(this.approvalControl) !== key) throw approvalControlChanged();
       if (!detail) {
+        if (requireCollection && !Array.isArray(payload?.items)) throw new Error("INVALID_APPROVAL_COLLECTION");
         return { ...payload, items: (payload.items || []).map(item => ({ ...item, allowed_actions: [] })) };
       }
       if (capability.session_approval_wire_version === 2 &&
@@ -627,10 +628,10 @@ export class AdminPlatformClient {
       signal?.removeEventListener('abort', abort);
     }
   }
-  governedApprovalRequests(filters = {}, signal) {
+  governedApprovalRequests(filters = {}, signal, { requireCollection = false } = {}) {
     const query = new URLSearchParams({ limit: String(filters.limit || 50) });
     for (const [key, value] of Object.entries(filters)) if (key !== 'limit' && value) query.set(key, value);
-    return this.governedApprovalRead(`?${query}`, { signal });
+    return this.governedApprovalRead(`?${query}`, { signal, requireCollection });
   }
   governedApprovalRequest(requestID, signal) {
     return this.governedApprovalRead(`/${encodeURIComponent(requestID)}`, { detail: true, signal });
