@@ -2,7 +2,9 @@ package billing
 
 import (
 	"encoding/base64"
+	"errors"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -10,14 +12,46 @@ import (
 )
 
 func TestOrderHistoryCursorRejectsMalformedPositions(t *testing.T) {
-	for _, raw := range []string{" ", "bad=", "bad\n", base64.RawURLEncoding.EncodeToString([]byte("invalid|11111111-1111-4111-8111-111111111111")), base64.RawURLEncoding.EncodeToString([]byte("2026-11-06T00:00:00Z|00000000-0000-0000-0000-000000000000"))} {
-		if _, err := parseOrderHistoryCursor(raw); err == nil {
-			t.Fatalf("accepted malformed cursor %q", raw)
-		}
+	const id = "11111111-1111-4111-8aaa-aabbccddeeff"
+	const timestamp = "2026-11-06T00:00:00.123456Z"
+	encode := func(value string) string { return base64.RawURLEncoding.EncodeToString([]byte(value)) }
+	payload := timestamp + "|" + id
+	raw := encode(payload)
+	const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+	if len(raw)%4 == 0 {
+		t.Fatal("strict decoding fixture must have unused trailing bits")
 	}
-	raw := base64.RawURLEncoding.EncodeToString([]byte("2026-11-06T00:00:00.123456Z|11111111-1111-4111-8111-111111111111"))
+	last := strings.IndexByte(alphabet, raw[len(raw)-1])
+	noncanonical := raw[:len(raw)-1] + string(alphabet[last|1])
+	if decoded, err := base64.RawURLEncoding.DecodeString(noncanonical); err != nil || string(decoded) != payload {
+		t.Fatal("noncanonical fixture must decode to the valid position with a permissive decoder", err)
+	}
+	longTimestamp := "2026-11-06T00:00:00." + strings.Repeat("1", 200) + "Z"
+	tooLong := encode(longTimestamp + "|" + id)
+	if _, err := time.Parse(time.RFC3339Nano, longTimestamp); err != nil || len(tooLong) <= 256 {
+		t.Fatal("over-limit fixture must otherwise contain a valid RFC3339 position", err)
+	}
+	for _, tc := range []struct{ name, raw string }{
+		{"space", " "}, {"padding", "bad="}, {"invalid-base64-length", "a"},
+		{"newline-in-valid-position", raw + "\n"}, {"over-256-valid-position", tooLong},
+		{"noncanonical-base64-bits", noncanonical},
+		{"missing-position-field", encode(timestamp)}, {"extra-position-field", encode(payload + "|extra")},
+		{"invalid-time", encode("invalid|" + id)}, {"zero-time", encode("0001-01-01T00:00:00Z|" + id)},
+		{"invalid-uuid", encode(timestamp + "|invalid")},
+		{"nil-uuid", encode(timestamp + "|00000000-0000-0000-0000-000000000000")},
+		{"noncanonical-uuid", encode(timestamp + "|" + strings.ToUpper(id))},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if position, err := parseOrderHistoryCursor(tc.raw); !errors.Is(err, ErrConflict) || position != nil {
+				t.Fatalf("accepted malformed position or lost conflict mapping: %+v, %v", position, err)
+			}
+		})
+	}
+	if position, err := parseOrderHistoryCursor(""); err != nil || position != nil {
+		t.Fatal("omitted cursor must retain first-page semantics", position, err)
+	}
 	position, err := parseOrderHistoryCursor(raw)
-	if err != nil || position.CreatedAt.Nanosecond() != 123456000 || position.CreatedAt.Location() != time.UTC {
+	if err != nil || position == nil || position.ID.String() != id || position.CreatedAt.Nanosecond() != 123456000 || position.CreatedAt.Location() != time.UTC {
 		t.Fatalf("lost exact database timestamp position: %+v, %v", position, err)
 	}
 }

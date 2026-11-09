@@ -435,6 +435,9 @@
           },
           "503": {
             "description": "History unavailable; not an empty result."
+          },
+          "default": {
+            "description": "Existing bearer/organization authority and handler error mapping; no new response behavior is introduced."
           }
         }
       }

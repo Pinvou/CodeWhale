@@ -302,6 +302,41 @@ try{
   }
   assert.ok(await page.evaluate(()=>window.f06.calls.every(call=>call.method==='GET')),'failed reads and recovery never submit a role command');
  });
+ for(const language of ['zh','en','ja'])for(const mode of ['newer-list','retired-history'])await run(`${language} organization order history fences a late paid detail after ${mode}`,async()=>{
+  await fresh(language);
+  await page.evaluate(mode=>{
+   window.f06.historyHarness=true;window.f06.holdHistoryDetail=true;
+   window.f06.historyRows=[{...window.f06.historyOrder,status:mode==='retired-history'?'MANUAL_REVIEW':'PENDING'}];
+   window.f06.render();
+  },mode);
+  await page.waitForSelector('.ap-organization-orders tbody td:last-child button');
+  await page.click('.ap-organization-orders tbody td:last-child button');
+  await page.waitForFunction(()=>window.f06.historyDetailReads===1&&typeof window.f06.releaseHistoryDetail==='function');
+  if(mode==='newer-list') {
+   await page.evaluate(()=>{window.f06.historyRows[0].status='MANUAL_REVIEW';});
+   await page.click('.ap-organization-orders .ap-section-heading button');
+   await page.waitForFunction(()=>document.querySelector('.ap-organization-orders .ap-status')?.dataset.status==='MANUAL_REVIEW');
+  } else {
+   await page.click('[data-history-toggle]');
+   await page.waitForFunction(()=>!document.querySelector('.ap-organization-orders'));
+   const retry=await page.evaluate(async()=>{window.f06.holdHistoryDetail=false;const value=await window.f06.retryHistoryDetail();return{empty:value===undefined,reads:window.f06.historyDetailReads};});
+   assert.deepEqual(retry,{empty:true,reads:1},'retired detail callbacks cannot start another transport read');
+  }
+  await page.evaluate(()=>window.f06.releaseHistoryDetail());
+  await page.waitForFunction(()=>window.f06.historyDetailSettled===1);
+  await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
+  if(mode==='retired-history') {
+   await page.evaluate(()=>{window.f06.holdHistoryPage=true;});
+   await page.click('[data-history-toggle]');
+   await page.waitForFunction(()=>typeof window.f06.releaseHistoryPage==='function'&&document.querySelector('.ap-organization-orders')?.getAttribute('aria-busy')==='true');
+   assert.equal(await page.$eval('.ap-organization-orders .ap-status',node=>node.dataset.status),'MANUAL_REVIEW','a retired result must not corrupt the retained rows shown before the next response');
+   await page.evaluate(()=>window.f06.releaseHistoryPage());
+  }
+  await page.waitForFunction(()=>document.querySelector('.ap-organization-orders')?.getAttribute('aria-busy')==='false');
+  assert.equal(await page.$eval('.ap-organization-orders .ap-status',node=>node.dataset.status),'MANUAL_REVIEW','the older paid detail cannot overwrite the newer or retired collection');
+  assert.equal(await page.evaluate(()=>window.f06.historyDetailError),undefined);
+  assert.equal(await page.evaluate(()=>window.f06.calls.filter(call=>call.method==='POST').length),0);
+ });
  console.log(`RESULT ${passed} PASS 0 FAIL 0 SKIP`);
 }catch(error){console.error(`FAIL after ${passed} PASS: ${error.stack || error.message}`);if(page)console.error(JSON.stringify(await page.evaluate(()=>({dialog:Boolean(document.querySelector('[role=alertdialog]')),alerts:[...document.querySelectorAll('[role=alert]')].map(a=>a.firstChild?.textContent),deletePaths:window.f06?.calls.filter(c=>c.method==='DELETE').map(c=>c.path),roleRevoked:window.f06?.roleRevoked,revokedLabelVisible:document.body.textContent.includes(window.f06?.copy().enumStatus_REVOKED)}))));process.exitCode=1;}
 finally{if(browser)await browser.close();if(vite)await vite.close();fs.rmSync(profile,{recursive:true,force:true});}
