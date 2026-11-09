@@ -1,0 +1,9 @@
+.adm-provisioning-task-table .adm-provisioning-object-facts{display:grid;gap:5px;margin:0;min-width:0}
+.adm-provisioning-object-facts div{display:grid;grid-template-columns:minmax(86px,auto) minmax(0,1fr);align-items:baseline;gap:8px}
+.adm-provisioning-object-facts dt,.adm-provisioning-row-detail p{color:var(--adm-muted);font-size:12px}
+.adm-provisioning-object-facts dd{margin:0;min-width:0}
+.adm-provisioning-object-facts code,.adm-provisioning-row-detail code{overflow-wrap:break-word;overflow-wrap:anywhere}
+.adm-provisioning-task-table button:focus{outline:3px solid var(--adm-primary);outline-offset:2px}
+.adm-provisioning-row-detail{max-width:24ch;margin:8px 0 0;padding:8px 10px;border:1px solid var(--adm-line);border-radius:8px;background:var(--adm-soft)}
+.adm-provisioning-row-detail p{margin:0 0 4px}
+@media(max-width:680px){.adm-provisioning-object-facts div{grid-template-columns:minmax(0,1fr);gap:1px}.adm-provisioning-row-detail{max-width:none}}

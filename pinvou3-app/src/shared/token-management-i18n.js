@@ -408,6 +408,7 @@ function completeTokenManagementCopy(translations) {
     copy.pageOverviews.unavailable.modelOperations = provisioningCopy.unavailable;
     copy.pageOverviews.provisioningFailure = { language, ...{"zh":{"diagnostics":"查看诊断信息","code":"服务错误码","localList":"任务列表独立加载，请以下方状态为准。"},"en":{"diagnostics":"View diagnostics","code":"Service error code","localList":"The task list loads separately. Check its status below."},"ja":{"diagnostics":"診断情報を表示","code":"サービスエラーコード","localList":"タスク一覧は個別に読み込まれます。下の状態をご確認ください。"}}[language] };
 
+    copy.provisioningTaskIdentity = {"zh":{"object":"配置对象","model":"模型 ID","account":"活跃 Token 账户","noAccount":"未提供活跃账户","unavailable":"未提供","view":"查看任务详情","snapshot":"此处展示当前列表中的任务资料。","taskID":"任务 ID"},"en":{"object":"Provisioned resources","model":"Model ID","account":"Active Token account","noAccount":"Active account not provided","unavailable":"Not provided","view":"View task details","snapshot":"These task details come from the current list.","taskID":"Task ID"},"ja":{"object":"設定対象","model":"モデル ID","account":"有効な Token アカウント","noAccount":"有効なアカウントの情報なし","unavailable":"未提供","view":"タスクの詳細を表示","snapshot":"現在の一覧に含まれるタスク情報です。","taskID":"タスク ID"}}[language];
     const { pricingControls, ...modelAdditions } = additions[language];
     const list = priceListCopy[language];
     const risk = priceRiskCopy[language];
