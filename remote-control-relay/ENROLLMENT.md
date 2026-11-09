@@ -215,8 +215,13 @@ It also shares the configured serialized byte budget with pairing and migration
 state. Legacy Web revocation has a separate byte budget (`MAX_RELAY_STATE_BYTES`,
 default 16 MiB) and an entry limit (`MAX_REVOKED_ENDPOINTS`, default 100000,
 effectively at most one entry per 256 configured bytes). Each owning process logs
-a `[relay-capacity]` warning at 80 percent of its first reached limit. The
-warning gives aggregate entries and bytes, with no endpoint IDs or credentials.
+a `[relay-capacity]` warning at 80 percent of its first reached limit. The shared
+controller-state owner observes every successful namespace commit and restored
+snapshot, including pairing-only growth, independently of enrollment activity.
+Its byte warning is emitted at most once per store open; enrollment separately
+warns about its entry count. The warnings give aggregate counts and bytes, with
+no endpoint IDs, namespace values, paths or credentials. Warning-sink failures
+cannot change a committed authorization result.
 
 At enrollment admission capacity, new identities are refused with
 `enrollment_capacity_reached` or `enrollment_registry_capacity_reached`.

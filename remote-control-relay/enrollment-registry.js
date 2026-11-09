@@ -854,10 +854,9 @@ export class EnrollmentRegistry {
     if (this.#capacityWarning) return;
     // Operational telemetry cannot change the result of a committed mutation.
     try {
-      const capacity = this.#store.readCapacity?.();
       const maxEntries = this.#config.max_entries;
-      const nearBytes = capacity && capacity.serialized_bytes >= Math.ceil(capacity.max_bytes * 0.8);
-      if (entries >= Math.ceil(maxEntries * 0.8) || nearBytes) {
+      if (entries >= Math.ceil(maxEntries * 0.8)) {
+        const capacity = this.#store.readCapacity?.();
         this.#capacityWarning = true;
         console.warn("[relay-capacity] enrollment", JSON.stringify({
           entries, max_entries: maxEntries,
