@@ -88,3 +88,10 @@
 .adm-approval-current-page-count{display:block;margin:6px 0;color:var(--adm-muted)}
 
 .adm-approval-toolbar.adm-approval-pending-toolbar .adm-approval-query-actions{align-self:center}
+
+.adm-approval-execution-facts{margin:12px 0;padding:12px;border:1px solid var(--adm-line);border-radius:10px;background:var(--adm-soft);overflow-wrap:break-word;overflow-wrap:anywhere}
+.adm-approval-execution-facts h5{margin:0 0 8px;color:var(--adm-text)}
+.adm-approval-execution-facts dl{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 12px;margin:0}
+.adm-approval-execution-facts dt{color:var(--adm-muted)}.adm-approval-execution-facts dd{margin:3px 0 0}
+.adm-approval-execution-facts time{font-variant-numeric:tabular-nums}
+@media(max-width:560px){.adm-approval-execution-facts dl{grid-template-columns:1fr}}
