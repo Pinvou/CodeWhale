@@ -249,18 +249,23 @@ export class ControllerRouter {
     const peer = this.#peers.get(socketIdentity);
     if (!this.#isLivePeer(peer) || !this.#canAdmitRole(peer, "B")) fail("controller_socket_invalid");
     const previous = this.#controlled.get(endpointId);
-    if (previous && previous !== socketIdentity) {
-      const stale = this.#peers.get(previous);
-      if (stale) {
-        stale.role = "unknown";
-        stale.endpointId = null;
-        stale.authenticatedContext = null;
-      }
+    const stale = previous && previous !== socketIdentity ? this.#peers.get(previous) : null;
+    const displacedLease = stale?.controllerLeaseId ? this.#leases.lease(stale.controllerLeaseId) : null;
+    if (stale) {
+      stale.role = "unknown";
+      stale.endpointId = null;
+      stale.authenticatedContext = null;
     }
     peer.role = "B";
     peer.endpointId = endpointId;
     peer.authenticatedContext = authenticatedContext;
     this.#controlled.set(endpointId, socketIdentity);
+    if (displacedLease && displacedLease.sockets.B === previous) {
+      // The replacement is authoritative now. Start the old peer's close
+      // hooks before registration can release the successor's queued prepare.
+      // The eventual physical close shares the same one-shot retirement.
+      void this.removeSocket(previous).catch(() => this.#emit("resume_rejected"));
+    }
   }
 
   resolveControlledEndpoint(endpointId) {

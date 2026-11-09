@@ -1038,6 +1038,46 @@ test("a replaced committed B's late close preserves same-endpoint recovery", asy
   }
 });
 
+test("same-endpoint B can prepare before the displaced socket's physical close", async () => {
+  const value = fixture();
+  const router = new ControllerRouter({
+    pairingRegistrationHandler: { register: async (message) => message },
+    leaseManager: value.manager, send: () => true,
+    livenessHooks: value.liveness, resumeHooks: value.hooks,
+  });
+  const oldB = "old-socket-B";
+  const A = "old-socket-A";
+  const B = "new-socket-B";
+  addPairingSocket(router, A);
+  addPairingSocket(router, oldB, true);
+  const committed = await createLease(value, router);
+  const lease = committed.lease;
+  value.clock = 2_000;
+  addPairingSocket(router, B, true);
+  const first = await router.handle({ socketIdentity: B, message: prepare(
+    "B", lease, committed.messages.B.resume_token_b64, "replacement-B-first", "AQEBAQEBAQEBAQEBAQEBAQ==",
+  ) });
+  assert.deepEqual(first.deliveries, []);
+  assert.equal(value.hooks.phase(lease.controller_lease_id), "prepared");
+  assert.equal(value.manager.lease(lease.controller_lease_id), lease);
+  assert.equal(value.hooks.isBusinessAllowed(lease.controller_lease_id), false);
+
+  const provisional = await router.handle({ socketIdentity: A, message: prepare(
+    "A", lease, committed.messages.A.resume_token_b64, "replacement-A-still-connected",
+  ) });
+  assert.equal(provisional.deliveries[0].message.original_deadline_ms, lease.resume_deadline_ms);
+  await router.removeSocket(oldB);
+  assert.equal(value.manager.lease(lease.controller_lease_id), lease);
+  for (const { role, message } of recoverySteps(lease, provisional.deliveries[0].message.activation_id)) {
+    await router.handle({ socketIdentity: { A, B }[role], message });
+  }
+  const resumed = value.manager.lease(lease.controller_lease_id);
+  assert.deepEqual(resumed.sockets, { A, B });
+  assert.equal(value.hooks.isBusinessAllowed(lease.controller_lease_id), true);
+  await router.removeSocket(oldB);
+  assert.equal(value.manager.lease(lease.controller_lease_id), resumed);
+});
+
 test("A05 identifier propagation accepts actual colon resume peer updates through final rotation", async () => {
   const value = await routedFixture({ socketIdentities: { A: "new:socket:A", B: "new:socket:B" } });
   const result = await routedProvisional(value);

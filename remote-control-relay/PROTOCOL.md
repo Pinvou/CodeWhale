@@ -1141,12 +1141,19 @@ extension; changed or cross-socket retired traffic is rejected and has no
 cleanup authority over the new revision. New resume attempts replace the
 tombstone only after successful commit.
 
-Final deliveries precede the Relay's atomic token/epoch rotation so a failed
-delivery can still abort the old revision. This is not an atomic distributed
-commit: one peer may have seen a final before the other delivery fails. Any such
-uncertainty terminates the lease rather than opening business on the Relay.
-Accepted-result cleanup is fenced to the exact immutable lease revision; once
-router post-processing finishes, that result's abort authority is retired.
+An authenticated B socket that replaces the committed B for the same endpoint
+starts the old socket's retirement during registration. The successor can
+prepare within the frozen recovery window before the old socket's physical
+close arrives. The late close shares the old socket's one-time retirement.
+
+After both ready acknowledgements, the Relay rotates the exact lease and
+installs the next liveness state with business still suspended. It rechecks the
+frozen cutoff and both socket owners before queueing either final. After both
+queues accept their frames, the Relay opens business and records completion.
+If either queue fails, one peer may already have received a final, so the Relay
+terminates the exact rotated revision and leaves business suspended. A failure
+before rotation can retire only the original recovery revision. Finalization
+retires the accepted result's abort authority.
 Authoritative termination releases the interaction slot, clears all lease peer
 links and notifies stateful hooks even if replacement notification fails. Hook
 cleanup is owner-fenced, including a bounded immediate predecessor during a
