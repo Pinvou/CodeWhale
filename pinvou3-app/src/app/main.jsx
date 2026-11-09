@@ -4185,7 +4185,7 @@ const App = () => {
           if (!personalAccountAvailable || !target) return;
           const requestId = ++accountRechargeSequence.current;
           if (target.contextType === 'PERSONAL') {
-            setAccountRechargeRequest(null); setPersonalAccountOpen(true); return;
+            setAccountRechargeRequest(target); setPersonalAccountOpen(true); return;
           }
           const client = personalAccountClient, sessionEpoch = client.financeSessionEpoch || 0;
           try {
