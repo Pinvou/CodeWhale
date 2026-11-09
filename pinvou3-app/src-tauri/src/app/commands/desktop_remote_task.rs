@@ -3314,7 +3314,7 @@ mod tests {
                 .prepare_authenticated_task_session(&task, &context, "Code")
                 .unwrap();
             assert_eq!(counter.resolves.load(Ordering::SeqCst), 1);
-            manager.stop(&Default::default());
+            manager.stop();
             service.interrupt_generation_and_clear_sessions(
                 &context.remote_control_generation,
                 "stopped",
@@ -3837,7 +3837,7 @@ mod tests {
             })
             .unwrap()
             .unwrap();
-        manager.stop(&Default::default());
+        manager.stop();
         let AdmissionOutcome::Admitted(ticket) = service.finish_bound_admission(prepared).unwrap()
         else {
             panic!("expected only ticket")
