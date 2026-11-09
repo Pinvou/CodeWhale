@@ -236,6 +236,7 @@ func protectedMigrationDomain(version int64, name, checksum string) string {
 		{"account", 87, "registration_bonus_fingerprint", "1d76a6e9aa6b5fcee84e2eabe8912cbfb8fa53c79ba29ce2bb4c29852be070e1"},
 		{"account", 900004, "registration_bonus_required_facts", "ddfdb70370c3900c113efc918fb5586ab1a2cb977337b8df35e565e1a250772f"},
 		{"account", 900005, "account_closure_replay_ack", "2d0a1bb1f24fd37fa10b69f9ca4da3835f8d2619666afba0a692088361937adb"},
+		{"account", 900015, "organization_evidence_truncate_guards", "8ef3aea3b9923be58e6aa4460886e03df786db8771697e53bd86bdeea5809e78"},
 		{"account", 28, "account_closure_cleanup", "05eec7870758d9eb29248236a389f7facfbc4025d1fa711d40775d3fe96855b9"},
 		{"account", 27, "account_closure_saga", "cfd14d187cd1c3fa3aab134de59cbfb88a44a7bbc88bc3e3406d8d6c7d2505db"},
 		{"token", 900004, "account_closure_replay_fence", "1e662dda9e4b27674da7bda3949d8fefef10c18f84c0d626d4093271d46a5a30"},

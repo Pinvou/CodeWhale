@@ -22,6 +22,8 @@ import (
 // model bound to a conversation. Preserve its original validation receipt.
 var errOrganizationPolicyModelUnavailable = fmt.Errorf("organization policy model selection: %w", ErrModelUnavailable)
 
+var errOrganizationPolicyInvalidInput = errors.New("invalid organization model policy input")
+
 type organizationModelPolicyRepository interface {
 	GetOrganizationModelPolicy(context.Context, uuid.UUID) (OrganizationModelPolicy, error)
 	SaveOrganizationModelPolicy(context.Context, uuid.UUID, uuid.UUID, int64, int64, string, []uuid.UUID, string, string) (OrganizationModelPolicy, error)
@@ -63,13 +65,16 @@ func (r *PostgresRepository) GetOrganizationModelPolicy(ctx context.Context, org
 
 func (r *PostgresRepository) SaveOrganizationModelPolicy(ctx context.Context, organizationID, actor uuid.UUID, authorizationVersion, expectedVersion int64, mode string, modelIDs []uuid.UUID, key, reason string) (OrganizationModelPolicy, error) {
 	mode, reason, key = strings.ToUpper(strings.TrimSpace(mode)), strings.TrimSpace(reason), strings.TrimSpace(key)
-	if organizationID == uuid.Nil || actor == uuid.Nil || authorizationVersion < 1 || expectedVersion < 0 || reason == "" || len(reason) > 500 || len(key) < 16 || (mode != "ALLOW_ALL" && mode != "ALLOW_LIST" && mode != "DENY_LIST") {
+	if organizationID == uuid.Nil || actor == uuid.Nil || authorizationVersion < 1 {
 		return OrganizationModelPolicy{}, ErrForbidden
+	}
+	if expectedVersion < 0 || reason == "" || len(reason) > 500 || len(key) < 16 || (mode != "ALLOW_ALL" && mode != "ALLOW_LIST" && mode != "DENY_LIST") {
+		return OrganizationModelPolicy{}, errOrganizationPolicyInvalidInput
 	}
 	unique := map[uuid.UUID]bool{}
 	for _, id := range modelIDs {
 		if id == uuid.Nil {
-			return OrganizationModelPolicy{}, ErrForbidden
+			return OrganizationModelPolicy{}, errOrganizationPolicyInvalidInput
 		}
 		unique[id] = true
 	}
@@ -81,7 +86,7 @@ func (r *PostgresRepository) SaveOrganizationModelPolicy(ctx context.Context, or
 	}
 	sort.Slice(modelIDs, func(i, j int) bool { return modelIDs[i].String() < modelIDs[j].String() })
 	if mode == "ALLOW_ALL" && len(modelIDs) != 0 {
-		return OrganizationModelPolicy{}, ErrForbidden
+		return OrganizationModelPolicy{}, errOrganizationPolicyInvalidInput
 	}
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
