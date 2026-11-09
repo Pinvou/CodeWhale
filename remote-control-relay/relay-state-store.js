@@ -696,7 +696,7 @@ export class RelayStateStore {
       await this.#verifyFilesystemPath(archiveRoot, "directory");
     }
     const archive = join(archiveRoot,
-      `${basename(directory)}-recovery-${this.#randomBytes(8).toString("hex")}`);
+      `controller-recovery-${this.#randomBytes(8).toString("hex")}`);
     await this.#assertAncestorSnapshot();
     await this.#assertPathSnapshot(archiveRootSnapshot);
     try {

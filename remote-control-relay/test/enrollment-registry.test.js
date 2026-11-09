@@ -401,10 +401,10 @@ function environment(overrides = {}) {
   };
 }
 
-async function temporaryState(t) {
+async function temporaryState(t, stateDirectory = "controller") {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "pinvou-enrollment-test-"));
   resourcesFor(t).directories.push(directory);
-  return path.join(directory, "controller", "state.json");
+  return path.join(directory, stateDirectory, "state.json");
 }
 
 function legacyStatePath(statePath) {
@@ -707,8 +707,8 @@ test("offline recovery archives the exact interrupted pair and preserves committ
   await rejectsCode(restored.authorizeWebRegistration({ endpointId: "staged-enrollment", accessToken: SECOND_CREDENTIAL }), "enrollment_required");
 });
 
-async function interruptedRecovery(t) {
-  const statePath = await temporaryState(t);
+async function interruptedRecovery(t, stateDirectory) {
+  const statePath = await temporaryState(t, stateDirectory);
   const backupPath = `${statePath}.bak`;
   const options = { statePath, legacyStatePath: legacyStatePath(statePath), ...testSecurityOptions(),
     processIdentity: async (pid) => `test-process:${pid}` };
@@ -729,6 +729,28 @@ async function interruptedRecovery(t) {
     primarySha256: digest(primary), backupSha256: digest(staged) };
   return { options, statePath, backupPath, primary, staged, evidence };
 }
+
+test("offline recovery bounds archive names for long valid state directories", {
+  skip: process.platform === "win32",
+}, async (t) => {
+  const value = await interruptedRecovery(t, "c".repeat(230));
+  const archiveRoot = path.dirname(path.dirname(value.statePath));
+  const result = await RelayStateStore.recoverStagedBackup(value.options, { ...value.evidence, archiveRoot });
+  assert(Buffer.byteLength(path.basename(result.archive), "utf8") <= 255);
+  assert.equal(path.dirname(result.archive), archiveRoot);
+  assert.deepEqual(await fs.readFile(path.join(result.archive, "primary.json")), value.primary);
+  assert.deepEqual(await fs.readFile(path.join(result.archive, "backup.json")), value.staged);
+  assert.deepEqual(await fs.readFile(value.statePath), value.primary);
+  assert.deepEqual(await fs.readFile(value.backupPath), value.primary);
+  const reopened = await openStateStore(value.statePath);
+  resourcesFor(t).stores.push(reopened);
+  await reopened.compareAndSwap("recovery_test", "1", { afterRecovery: true });
+  await reopened.close();
+  const again = await openStateStore(value.statePath);
+  resourcesFor(t).stores.push(again);
+  assert.deepEqual(again.readNamespace("recovery_test").value, { afterRecovery: true });
+  assert.equal(again.readNamespaceRevision("recovery_test").store_revision, "2");
+});
 
 test("offline recovery verifies actual staged bytes and live primary before publishing", async (t) => {
   for (const target of ["temporary", "primary"]) {

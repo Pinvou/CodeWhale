@@ -389,6 +389,8 @@ node recover-controller-state.js \
 
 The command takes the same exclusive writer lock as startup. It copies both
 files byte for byte to a new private directory under the archive root. It
+uses a bounded `controller-recovery-<random>` directory name so valid long state
+directory names remain recoverable. It
 rechecks both source files, the archives and the actual staged file before
 publishing the backup. It then verifies the installed pair and archives while
 still holding the writer lock. The success result gives the archive path and
