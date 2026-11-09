@@ -13,7 +13,7 @@ export function AdminApprovalWorkspace({ client, copy, language, me, onNavigate,
   const [target, setTarget] = useState(route.target);
   const [mineStatus, setMineStatus] = useState(route.status);
   const [mineApplyGeneration, setMineApplyGeneration] = useState(0);
-  const mine = route.view === 'mine', mineWords = approvalReadCopy[language];
+  const mine = route.view === 'mine', mineWords = approvalReadCopy[language], mineTargetID = React.useId();
   const [blocked, setBlocked] = useState(false);
   const [directory, setDirectory] = useState(null);
   const [directoryState, setDirectoryState] = useState('loading');
@@ -70,10 +70,10 @@ export function AdminApprovalWorkspace({ client, copy, language, me, onNavigate,
     return () => controller.abort();
   }, [client, owner, route.view, refresh]);
   return <section className="adm-approval-workspace" aria-label={copy.nav.approvals}>
-    <nav className="adm-approval-tabs" aria-label={c.views}>{approvalViews.map(view => <button key={view} disabled={blocked} aria-current={route.view === view ? 'page' : undefined} onClick={() => { if (view !== route.view) setMineStatus(''); changeRoute({ view, status: '', requestID: '' }); }}>{c[view]}</button>)}</nav>
+    <nav className="adm-tabs adm-approval-tabs" aria-label={c.views}>{approvalViews.map(view => <button key={view} className={route.view === view ? 'active' : undefined} disabled={blocked} aria-current={route.view === view ? 'page' : undefined} onClick={() => { if (view !== route.view) setMineStatus(''); changeRoute({ view, status: '', requestID: '' }); }}>{c[view]}</button>)}</nav>
     {route.view !== 'directory' && <form className="adm-approval-toolbar" onSubmit={event => { event.preventDefault(); if (mine) applyMine(); else changeRoute({ commandType: command, target: target.trim(), requestID: '' }); }}>
-      <label>{c.commandType}<select disabled={blocked} value={command} onChange={event => setCommand(event.target.value)}><option value="">{c.allCommands}</option>{approvalCommands.map(type => <option key={type}>{type}</option>)}</select></label>
-      <label>{c.target}<input disabled={blocked} value={target} onChange={event => setTarget(event.target.value)} /></label>
+      <label>{c.commandType}<select disabled={blocked} value={command} onChange={event => setCommand(event.target.value)}><option value="">{c.allCommands}</option>{approvalCommands.map(type => <option key={type} value={type}>{mine ? approvalLabel(c.policyCommandLabels, type) : type}</option>)}</select></label>
+      <label>{mine ? <span id={mineTargetID + '-label'}>{mineWords.targetID}</span> : c.target}<input disabled={blocked} value={target} aria-labelledby={mine ? mineTargetID + '-label' : undefined} aria-describedby={mine ? mineTargetID + '-help' : undefined} onChange={event => setTarget(event.target.value)} />{mine && <small className="adm-approval-target-help" id={mineTargetID + '-help'}>{mineWords.targetHelp}</small>}</label>
       {route.view !== 'pending' && <label>{c.status}<select disabled={blocked} value={route.view === 'execution' ? query.status : mineStatus} onChange={event => mine ? setMineStatus(event.target.value) : changeRoute({ status: event.target.value, requestID: '' })}>
         {route.view === 'mine' && <option value="">{c.allStatuses}</option>}{(route.view === 'execution' ? executionStatuses : approvalStatuses).map(status => <option key={status} value={status}>{approvalLabel(c.statusLabels, status)}</option>)}
       </select></label>}{mine ? <div className="adm-approval-query-actions"><button type="submit" className="adm-approval-query" disabled={blocked}>{mineWords.query}</button><button type="button" disabled={blocked} onClick={() => applyMine(true)}>{mineWords.reset}</button></div> : <button disabled={blocked}>{copy.refresh}</button>}

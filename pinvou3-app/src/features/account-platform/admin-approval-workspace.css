@@ -78,3 +78,7 @@
 .adm-approval-mine-tools small{color:var(--adm-muted);overflow-wrap:anywhere}
 .adm-approval-mine-tools time{font-variant-numeric:tabular-nums}
 .adm-approval-mine-tools button{margin-left:auto}
+
+.adm-approval-target-help{font-size:12px;line-height:1.5;overflow-wrap:break-word;overflow-wrap:anywhere}
+.adm-restored-shell .adm-approval-workspace .adm-approval-mine-status{max-width:100%;white-space:normal;overflow-wrap:break-word;overflow-wrap:anywhere}
+.adm-approval-mine-status::before{flex:none}
