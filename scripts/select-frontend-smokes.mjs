@@ -40,6 +40,7 @@ export const FULL_FRONTEND_SMOKES = Object.freeze([
   command("npm", "test:account-platform-model-selection-ui"),
   command("npm", "test:account-platform-model-lifecycle-ui"),
   command("npm", "test:account-platform-native-code-ui"),
+  command("npm", "test:disabled-model-hover-ui"),
   command("npm", "test:account-platform-billing-notice-ui"),
   command("npm", "test:account-platform-usage-ui"),
   command("npm", "test:account-platform-usage-governance-ui"),
