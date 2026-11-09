@@ -82,6 +82,9 @@ func TestAuditExportPersistedBoundaries(t *testing.T) {
 	if err != nil {
 		t.Fatal("SETUP_EXPORT")
 	}
+	t.Run("csv_reference_masking", func(t *testing.T) {
+		testAuditExportCSVReferenceMasking(t, ctx, exports, principal, me.UserID)
+	})
 	create := func(reason string) AuditExportJob {
 		t.Helper()
 		now := time.Now().UTC()
