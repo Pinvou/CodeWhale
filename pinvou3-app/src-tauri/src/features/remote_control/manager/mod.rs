@@ -1257,14 +1257,49 @@ fn load_config_for_stop() -> Option<WebAccessConfig> {
 /// Retire the exact endpoint's controller authority before removing its socket.
 /// Must run under the owner lock: late old-reader callbacks cannot reach a new lane.
 fn take_retired_endpoint(inner: &mut Inner) -> Option<ActiveEndpoint> {
+    retire_controller_inbound(inner);
+    inner.endpoint.take()
+}
+
+fn retire_controller_inbound(inner: &mut Inner) {
     if let Some(generation) = inner.controller_relay_generation.take()
         && let Some(endpoint) = &inner.endpoint
     {
-        endpoint.sender.controller_authority.retire(&generation);
+        let authority = &endpoint.sender.controller_authority;
+        if let Some(binding) = inner.controller_binding {
+            authority.retire_owned(&generation, binding);
+        } else {
+            authority.retire(&generation);
+        }
     }
     inner.controller_binding = None;
     inner.controller_inbound = None;
-    inner.endpoint.take()
+}
+
+// The caller holds the same owner lock used to select the active reader.
+// Once a frame is lost, buffered frames cannot safely advance the handshake.
+fn enqueue_controller_inbound(
+    inner: &mut Inner,
+    frame: ControllerRelayFrame,
+) -> Result<(), &'static str> {
+    use tokio::sync::mpsc::error::TrySendError;
+    let Some(sender) = &inner.controller_inbound else {
+        return Ok(());
+    };
+    let code = match sender.try_send(frame) {
+        Ok(()) => return Ok(()),
+        Err(TrySendError::Full(_)) => "desktop_controller_inbound_full",
+        Err(TrySendError::Closed(_)) => "desktop_controller_inbound_closed",
+    };
+    retire_controller_inbound(inner);
+    Err(code)
+}
+
+fn report_controller_inbound_failure(code: &'static str) {
+    crate::features::remote_control::controller::relay_runtime::log_controlled_event(
+        "controller_inbound_retired",
+        code,
+    );
 }
 
 impl RemoteControlManager {
@@ -1341,7 +1376,7 @@ impl RemoteControlManager {
             self.clear_controller_channel(generation);
             return Err(error);
         }
-        let (owner, binding) = {
+        let (owner, binding, enqueue) = {
             let mut inner = self.inner.lock();
             if !inner
                 .controller_inbound
@@ -1365,28 +1400,30 @@ impl RemoteControlManager {
                 return Err("desktop_controller_authority_unavailable".to_owned());
             };
             inner.controller_binding = Some(binding);
-            (owner, binding)
-        };
-
-        // If the persistent endpoint was already active there will be no second
-        // desktop_endpoint_registered event. Replay a local projection so the
-        // caller can safely wait for one registration signal in both cases.
-        let already_registered = {
-            let inner = self.inner.lock();
-            inner
+            // An existing endpoint may already have registered. Do not await
+            // space before returning the only receiver to its consumer.
+            let already_registered = inner
                 .endpoint
                 .as_ref()
-                .is_some_and(|endpoint| endpoint.status != WebAccessStatusKind::ConnectingRelay)
-        };
-        if already_registered {
-            if let Some(message) = synthetic_registration {
-                let _ = sender
-                    .send(ControllerRelayFrame {
+                .is_some_and(|endpoint| endpoint.status != WebAccessStatusKind::ConnectingRelay);
+            let enqueue = if let Some(message) = synthetic_registration
+                && already_registered
+            {
+                enqueue_controller_inbound(
+                    &mut inner,
+                    ControllerRelayFrame {
                         message,
                         receipt: None,
-                    })
-                    .await;
-            }
+                    },
+                )
+            } else {
+                Ok(())
+            };
+            (owner, binding, enqueue)
+        };
+        if let Err(code) = enqueue {
+            report_controller_inbound_failure(code);
+            return Err(code.to_owned());
         }
         Ok(ControllerRelayChannel {
             manager: self.clone(),
@@ -1537,12 +1574,7 @@ impl RemoteControlManager {
             .as_deref()
             .is_some_and(|current| current == generation)
         {
-            if let Some(endpoint) = &inner.endpoint {
-                endpoint.sender.controller_authority.retire(generation);
-            }
-            inner.controller_relay_generation = None;
-            inner.controller_binding = None;
-            inner.controller_inbound = None;
+            retire_controller_inbound(&mut inner);
         }
     }
 
@@ -2896,7 +2928,7 @@ impl RemoteControlManager {
     ) {
         let message = json!({"type":"desktop_relay_connection", "endpoint_id":endpoint_id,
             "connected":connected, "error":error});
-        {
+        let enqueue = {
             let mut inner = self.inner.lock();
             let Some(endpoint) = inner.endpoint.as_mut() else {
                 return;
@@ -2924,12 +2956,16 @@ impl RemoteControlManager {
             }
             // Identity check, state projection and selection/enqueue of this
             // generation's channel are one transaction under the same lock.
-            if let Some(sender) = &inner.controller_inbound {
-                let _ = sender.try_send(ControllerRelayFrame {
+            enqueue_controller_inbound(
+                &mut inner,
+                ControllerRelayFrame {
                     message,
                     receipt: None,
-                });
-            }
+                },
+            )
+        };
+        if let Err(code) = enqueue {
+            report_controller_inbound_failure(code);
         }
         self.emit_status();
     }
@@ -2943,20 +2979,34 @@ impl RemoteControlManager {
         if !controller_relay_message(value) {
             return;
         }
-        let inner = self.inner.lock();
-        if reader_owner.is_some_and(|owner| {
-            !inner
-                .endpoint
-                .as_ref()
-                .is_some_and(|endpoint| endpoint.sender.same_channel(owner))
-        }) {
-            return;
-        }
-        if let Some(sender) = &inner.controller_inbound {
-            let _ = sender.try_send(ControllerRelayFrame {
+        self.enqueue_controller_relay_frame(
+            ControllerRelayFrame {
                 message: value.clone(),
                 receipt,
-            });
+            },
+            reader_owner,
+        );
+    }
+
+    fn enqueue_controller_relay_frame(
+        &self,
+        frame: ControllerRelayFrame,
+        reader_owner: Option<&RelaySender>,
+    ) {
+        let enqueue = {
+            let mut inner = self.inner.lock();
+            if reader_owner.is_some_and(|owner| {
+                !inner
+                    .endpoint
+                    .as_ref()
+                    .is_some_and(|endpoint| endpoint.sender.same_channel(owner))
+            }) {
+                return;
+            }
+            enqueue_controller_inbound(&mut inner, frame)
+        };
+        if let Err(code) = enqueue {
+            report_controller_inbound_failure(code);
         }
     }
 
@@ -2985,14 +3035,14 @@ impl RemoteControlManager {
             if controller_lane_unavailable_error(&value) {
                 // v1 controller 帧校验要求 relay-role error 必带 request_id，该
                 // 连接级信号没有可对应的请求，因此绕过 controller_relay_message
-                // 直推已绑定通道（reader 身份已在下方校验），且不触碰端点状态。
-                let inner = self.inner.lock();
-                if let Some(sender) = &inner.controller_inbound {
-                    let _ = sender.try_send(ControllerRelayFrame {
+                // 直推当前 reader 的通道，且不触碰 Legacy 端点状态。
+                self.enqueue_controller_relay_frame(
+                    ControllerRelayFrame {
                         message: value,
                         receipt: None,
-                    });
-                }
+                    },
+                    Some(reader_owner),
+                );
                 return;
             }
             // 注册终结码的处理先于 legacy error 折叠:reject 帧经 relay_client
@@ -4223,6 +4273,55 @@ mod tests {
         assert!(!controller_relay_message(&json!({
             "type": "chat:delta"
         })));
+    }
+
+    #[test]
+    fn saturated_or_closed_controller_inbound_retires_only_its_binding() {
+        for closed in [false, true] {
+            let mut inner = Inner::default();
+            let endpoint = test_active_endpoint(Some(TEST_LEASE_ID));
+            let owner = endpoint.sender.clone();
+            let generation = "generation-inbound";
+            let binding = owner.controller_authority.bind(generation).unwrap();
+            let (sender, receiver) = tokio::sync::mpsc::channel(128);
+            inner.endpoint = Some(endpoint);
+            inner.controller_relay_generation = Some(generation.to_owned());
+            inner.controller_binding = Some(binding);
+            inner.controller_inbound = Some(sender);
+            let frame = || ControllerRelayFrame {
+                message: json!({"type": "desktop_endpoint_registered"}),
+                receipt: None,
+            };
+            if closed {
+                drop(receiver);
+                assert_eq!(
+                    enqueue_controller_inbound(&mut inner, frame()),
+                    Err("desktop_controller_inbound_closed")
+                );
+            } else {
+                for _ in 0..128 {
+                    assert_eq!(enqueue_controller_inbound(&mut inner, frame()), Ok(()));
+                }
+                assert_eq!(receiver.len(), 128);
+                // Keep the receiver live until the overloaded send completes.
+                assert_eq!(
+                    enqueue_controller_inbound(&mut inner, frame()),
+                    Err("desktop_controller_inbound_full")
+                );
+                assert!(receiver.is_closed());
+            }
+            assert!(inner.controller_inbound.is_none());
+            assert!(inner.controller_binding.is_none());
+            assert!(!owner.controller_authority.owns(generation));
+            let next = owner.controller_authority.bind(generation).unwrap();
+            assert_ne!(next, binding);
+            owner.controller_authority.retire_owned(generation, binding);
+            assert_eq!(owner.controller_authority.binding(generation), Some(next));
+            let active = inner.endpoint.as_ref().unwrap();
+            assert!(active.sender.same_channel(&owner));
+            assert_eq!(active.lease_id.as_deref(), Some(TEST_LEASE_ID));
+            assert!(active.web_client_connected);
+        }
     }
 
     #[test]
