@@ -718,3 +718,49 @@ const formulaPresentation = {
   ja: { billingUnits: '請求に使える計量単位', noActiveUnits: '新しい計算式ドラフトに使える有効な単位がありません。', safeCalculation: '許可された入力パラメーターを使用', previewFacts: '保存済みの計算式設定を表示します。計算式は実行しません。', formulaVersion: '計算式バージョン', mappingHelp: '各計量単位を許可された入力パラメーターに対応付けます。', sampleNotice: '任意パラメーターがない場合、サーバーサンプルは 0 を示します。実際の使用量や請求額ではありません。', sampleUnknown: '確認できる既定サンプルは提供されていません。', sampleValue: value => '既定サンプル：' + value, units: { INPUT_TOKEN:'入力トークン', CACHED_INPUT_TOKEN:'キャッシュ入力トークン', OUTPUT_TOKEN:'出力トークン', IMAGE:'画像', REQUEST:'リクエスト', DOCUMENT:'ドキュメント' } },
 };
 for (const language of ['zh', 'en', 'ja']) tokenManagementCopy[language].modelToken.formulaPresentation = formulaPresentation[language];
+
+Object.assign(tokenManagementCopy.zh.modelToken, {
+  "modelModalities": {
+    "text": "文本",
+    "image": "图像",
+    "audio": "音频",
+    "video": "视频"
+  },
+  "modelNoModalities": "未列出支持的模态",
+  "modelFieldUnavailable": "未提供",
+  "modelFieldInvalid": "数值无效",
+  "modelFieldPrecisionUnknown": "数值精度无法确认",
+  "modelTechnicalDetails": "高级技术信息",
+  "modelFactLocale": "zh-CN",
+  "modelFactSeparator": "、"
+});
+Object.assign(tokenManagementCopy.en.modelToken, {
+  "modelModalities": {
+    "text": "Text",
+    "image": "Image",
+    "audio": "Audio",
+    "video": "Video"
+  },
+  "modelNoModalities": "No supported modalities listed",
+  "modelFieldUnavailable": "Not provided",
+  "modelFieldInvalid": "Invalid value",
+  "modelFieldPrecisionUnknown": "Value precision cannot be confirmed",
+  "modelTechnicalDetails": "Advanced technical details",
+  "modelFactLocale": "en",
+  "modelFactSeparator": ", "
+});
+Object.assign(tokenManagementCopy.ja.modelToken, {
+  "modelModalities": {
+    "text": "テキスト",
+    "image": "画像",
+    "audio": "音声",
+    "video": "動画"
+  },
+  "modelNoModalities": "対応モダリティの記載なし",
+  "modelFieldUnavailable": "未提供",
+  "modelFieldInvalid": "無効な値",
+  "modelFieldPrecisionUnknown": "値の精度を確認できません",
+  "modelTechnicalDetails": "詳細な技術情報",
+  "modelFactLocale": "ja-JP",
+  "modelFactSeparator": "、"
+});
