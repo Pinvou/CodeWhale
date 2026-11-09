@@ -280,6 +280,31 @@ function TokenAccountSharing({ account, copy }) {
   </div>;
 }
 
+const accountDetailDate = (value) => typeof value === 'string' && value.trim() && Number.isFinite(Date.parse(value)) ? date(value) : null;
+const accountDetailCount = (value, copy) => Number.isSafeInteger(value) && value >= 0 ? value : copy.tokenAccountMetricUnknown;
+
+function TokenAccountOverview({ account, copy }) {
+  const status = Object.prototype.hasOwnProperty.call(copy.tokenAccountStatuses, account.status) ? copy.tokenAccountStatuses[account.status] : copy.tokenAccountStatusUnknown;
+  return <section className="adm-card adm-model-detail-panel adm-token-account-overview" aria-labelledby="token-overview-heading">
+    <h2 id="token-overview-heading">{copy.tokenAccountOverview}</h2>
+    <Facts>
+      <Fact label={copy.tokenAccountStatus}>{status}</Fact>
+      <Fact label={copy.owner}><TokenAccountOwner account={account} copy={copy} /></Fact>
+      <Fact label={copy.tokenResourcePolicy}><TokenAccountSharing account={account} copy={copy} /></Fact>
+      <Fact label={copy.tokenAccountActiveCredentials}>{accountDetailCount(account.active_credential_count, copy)}</Fact>
+      <Fact label={copy.tokenAccountResolvedRoutes}>{accountDetailCount(account.route_count, copy)}</Fact>
+    </Facts>
+    <p className="adm-token-detail-metrics-help">{copy.tokenAccountMetricHelp}</p>
+    <details className="adm-token-detail-technical">
+      <summary>{copy.tokenAccountTechnical}</summary>
+      <Facts>
+        <Fact label={copy.accountVersion}>{Number.isSafeInteger(account.account_version) && account.account_version > 0 ? account.account_version : copy.tokenAccountMetricUnknown}</Fact>
+        <Fact label={copy.tokenAccountRecordTime}>{accountDetailDate(account.updated_at) || copy.tokenAccountMetricUnknown}</Fact>
+      </Facts>
+    </details>
+  </section>;
+}
+
 export function AdminTokenAccountDetailWorkspace({ accountID, client, copy, permissions, routeVersion, onRouteChange, onQueryChange, cursorHistory, onTabsKeyDown, actionsEnabled, onNavigate }) {
   const [refresh, setRefresh] = useState(0);
   const [readRejected, setReadRejected] = useState(null);
@@ -300,12 +325,13 @@ export function AdminTokenAccountDetailWorkspace({ accountID, client, copy, perm
   const state = useAdminSource({ enabled: true, load, query: { token_account_id: accountID }, refreshVersion: refresh });
   const denied = readRejected?.client === client && readRejected.accountID === accountID;
   const account = denied ? null : state.items[0];
+  const snapshotTime = accountDetailDate(account?.as_of);
   const queries = { credentials: readAdminModelTokenQuery('tokenCredentials'), routes: readAdminModelTokenQuery('tokenRoutes'), provisionings: readAdminModelTokenQuery('tokenProvisionings'), audit: readAdminModelTokenQuery('tokenAudit') };
   const back = () => onRouteChange({ token_account_id: null, token_detail_tab: null, ...adminModelTokenQueryUpdates('tokenCredentials', {}), ...adminModelTokenQueryUpdates('tokenRoutes', {}), ...adminModelTokenQueryUpdates('tokenProvisionings', {}), ...adminModelTokenQueryUpdates('tokenAudit', {}) }, 'push');
-  return <article className="adm-model-detail"><header className="adm-card adm-model-detail-header"><button type="button" className="adm-back" onClick={back}>← {copy.backToAccounts}</button><div><p>{copy.tokenAccountDetail}</p><h2>{account?.name || (state.error ? copy.sourceUnavailable : copy.loading)}</h2><span className="adm-mono">{accountID}</span></div><div><small>{state.updatedAt ? `${copy.lastUpdated} ${date(state.updatedAt)}` : copy.notUpdated}</small><button type="button" disabled={state.loading} onClick={() => setRefresh((v) => v + 1)}>{copy.refreshSource}</button></div></header><SourceFeedback state={state} copy={copy} onRetry={() => setRefresh((v) => v + 1)} />
+  return <article className="adm-model-detail"><header className="adm-card adm-model-detail-header"><button type="button" className="adm-back" onClick={back}>← {copy.backToAccounts}</button><div><p>{copy.tokenAccountDetail}</p><h2>{account?.name || (state.error ? copy.sourceUnavailable : copy.loading)}</h2><span className="adm-mono">{accountID}</span></div><div><small>{snapshotTime ? copy.tokenAccountSnapshotTime + ' · ' + snapshotTime : copy.tokenAccountSnapshotUnknown}</small><button type="button" disabled={state.loading} onClick={() => setRefresh((v) => v + 1)}>{copy.refreshSource}</button></div></header><SourceFeedback state={state} copy={copy} onRetry={() => setRefresh((v) => v + 1)} />
     {account && (state.loading || state.error) && <p className="adm-token-detail-stale" role="status">{copy.tokenAccountSnapshotStale}</p>}
     {account && <><div className="adm-tabs adm-model-detail-tabs" role="tablist" aria-label={copy.tokenAccountViews} onKeyDown={onTabsKeyDown}>{tabs.map((item) => <button type="button" role="tab" id={`token-detail-tab-${item}`} aria-controls={`token-detail-panel-${item}`} aria-selected={tab === item} tabIndex={tab === item ? 0 : -1} className={tab === item ? 'active' : ''} key={item} onClick={() => onRouteChange({ token_detail_tab: item }, 'push')}>{item === 'provisionings' ? copy.tokenAccountProvisioning : copy.tokenDetailTabs[item]}</button>)}</div><div role="tabpanel" id={`token-detail-panel-${tab}`} aria-labelledby={`token-detail-tab-${tab}`}>
-      {tab === 'overview' && <section className="adm-card adm-model-detail-panel" aria-labelledby="token-overview-heading"><h2 id="token-overview-heading">{copy.tokenAccountOverview}</h2><Facts><Fact label={copy.status}><Status value={account.status} copy={copy} /></Fact><Fact label={copy.owner}><TokenAccountOwner account={account} copy={copy} /></Fact><Fact label={copy.tokenResourcePolicy}><TokenAccountSharing account={account} copy={copy} /></Fact><Fact label={copy.accountVersion}>{account.account_version}</Fact><Fact label={copy.credentials}>{account.active_credential_count}</Fact><Fact label={copy.routes}>{account.route_count}</Fact><Fact label={copy.updatedAt}>{date(account.updated_at)}</Fact></Facts></section>}
+      {tab === 'overview' && <TokenAccountOverview account={account} copy={copy} />}
       {tab === 'credentials' && <CredentialsTab client={client} copy={copy} account={account} query={queries.credentials} onQueryChange={onQueryChange} cursorHistory={cursorHistory} actionsEnabled={actionsEnabled} permissions={permissions} onNavigate={onNavigate} />}
       {tab === 'routes' && <RoutesTab access={{ ...tokenResourceAccess(permissions, actionsEnabled), manage: Boolean(actionsEnabled && permissions.includes('platform.tokens.manage')) }} onAccountRefresh={() => setRefresh((v) => v + 1)} client={client} copy={copy} account={account} query={queries.routes} onQueryChange={onQueryChange} cursorHistory={cursorHistory} />}
       {tab === 'provisionings' && <ProvisioningsTab client={client} copy={copy} accountID={accountID} query={queries.provisionings} onQueryChange={onQueryChange} cursorHistory={cursorHistory} />}
