@@ -205,6 +205,26 @@ func TestF04ExpiredHoldFenceUsesPersistedCanonicalFacts(t *testing.T) {
 
 func TestF04ExpiredHoldIntentWinsSharedDatabaseGate(t *testing.T) {
 	r, ctx := retainedManagementTokenRepository(t)
+	started := time.Now()
+	stage := "intent-setup"
+	t.Cleanup(func() {
+		t.Logf("F04 shared gate: stage=%s elapsed_ms=%d", stage, time.Since(started).Milliseconds())
+		if !t.Failed() {
+			return
+		}
+		diagnostic, stop := context.WithTimeout(context.Background(), time.Second)
+		defer stop()
+		var locks string
+		// Fixed state only: no SQL, connection URL, credentials or row facts.
+		if err := r.pool.QueryRow(diagnostic, `SELECT COALESCE(jsonb_agg(jsonb_build_object(
+ 'state',state,'wait_type',wait_event_type,'wait_event',wait_event,
+ 'blockers',cardinality(pg_blocking_pids(pid))) ORDER BY pid),'[]'::jsonb)::text
+ FROM pg_stat_activity WHERE datname=current_database()`).Scan(&locks); err != nil {
+			t.Log("F04 shared gate lock diagnostics unavailable")
+		} else {
+			t.Log("F04 shared gate lock diagnostics: " + locks)
+		}
+	})
 	hold, wallet := uuid.New(), uuid.New()
 	usage := retainedCancellationUsage(t, r, ctx, uuid.New(), wallet, &hold, "HOLD_RESERVED")
 	if _, err := r.pool.Exec(ctx, `UPDATE usage_requests SET cancel_status='NOT_REQUESTED' WHERE id=$1`, usage); err != nil {
@@ -220,11 +240,13 @@ func TestF04ExpiredHoldIntentWinsSharedDatabaseGate(t *testing.T) {
 	}
 	bounded, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	result := make(chan error, 1)
+	deadline, _ := bounded.Deadline()
+	result := make(chan f04ProofOutcome, 1)
 	go func() {
 		_, e := r.fenceExpiredHold(bounded, holdexpiry.Identity{UsageRequestID: usage, HoldID: hold, WalletID: wallet, MaxMicrocredits: 100, ExpiresAt: time.Now().UTC().Add(-time.Minute)})
-		result <- e
+		result <- f04ProofOutcome{err: e, completedAt: time.Now()}
 	}()
+	stage = "await-proof-row-lock"
 	readyCtx, readyCancel := context.WithTimeout(ctx, 2*time.Second)
 	defer readyCancel()
 	for {
@@ -237,26 +259,93 @@ func TestF04ExpiredHoldIntentWinsSharedDatabaseGate(t *testing.T) {
 			t.Fatal("inspect proof lock wait", err)
 		}
 		if waiting {
+			t.Logf("F04 shared gate: row_wait_observed_ms=%d", time.Since(started).Milliseconds())
 			break
 		}
 		select {
 		case e := <-result:
-			t.Fatal("proof did not wait for in-flight intent", e)
+			t.Fatal("proof did not wait for in-flight intent", e.err)
 		case <-readyCtx.Done():
 			t.Fatal("proof did not reach the shared lock before deadline")
 		case <-time.After(10 * time.Millisecond):
 		}
 	}
+	stage = "commit-intent"
 	if err = tx.Commit(ctx); err != nil {
 		t.Fatal(err)
 	}
-	select {
-	case e := <-result:
-		if e == nil {
-			t.Fatal("committed intent did not deny proof")
-		}
-	case <-bounded.Done():
+	t.Logf("F04 shared gate: commit_ms=%d proof_remaining_ms=%d", time.Since(started).Milliseconds(), time.Until(deadline).Milliseconds())
+	stage = "await-proof-denial"
+	outcome, completed := f04AwaitProofOutcome(bounded, result)
+	if !completed {
 		t.Fatal("proof remained blocked after commit")
+	}
+	if !f04TimelyProofDenial(outcome, deadline) {
+		t.Fatal("committed intent must deny proof before the original deadline", outcome.err)
+	}
+	var preserved bool
+	if err := r.pool.QueryRow(ctx, `SELECT cancel_status='NOT_REQUESTED'
+ AND EXISTS(SELECT 1 FROM usage_dispatch_intents WHERE usage_request_id=$1 AND upstream_idempotency_key='committing-intent')
+ AND NOT EXISTS(SELECT 1 FROM usage_cancellation_evidence WHERE usage_request_id=$1 AND adapter_version='hold-expiry-v1' AND evidence_type='CANCEL_REQUESTED')
+ FROM usage_requests WHERE id=$1`, usage).Scan(&preserved); err != nil || !preserved {
+		t.Fatal("denial changed the committed intent or produced cancellation proof", err)
+	}
+	stage = "proof-denied"
+	t.Logf("F04 shared gate: proof_return_ms=%d", outcome.completedAt.Sub(started).Milliseconds())
+}
+
+type f04ProofOutcome struct {
+	err         error
+	completedAt time.Time
+}
+
+func f04AwaitProofOutcome(ctx context.Context, result <-chan f04ProofOutcome) (f04ProofOutcome, bool) {
+	select {
+	case outcome := <-result:
+		return outcome, true
+	case <-ctx.Done():
+		// A scheduled reader may see both ready. Preserve an already recorded
+		// result; its completion timestamp still has to meet the same deadline.
+		select {
+		case outcome := <-result:
+			return outcome, true
+		default:
+			return f04ProofOutcome{}, false
+		}
+	}
+}
+
+func f04TimelyProofDenial(outcome f04ProofOutcome, deadline time.Time) bool {
+	return errors.Is(outcome.err, ErrForbidden) && !outcome.completedAt.IsZero() && outcome.completedAt.Before(deadline)
+}
+
+func TestF04ProofResultAndDeadlineReadyTogether(t *testing.T) {
+	deadline := time.Now()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	for _, test := range []struct {
+		name string
+		err  error
+		at   time.Time
+		want bool
+	}{
+		{"timely-denial", ErrForbidden, deadline.Add(-time.Nanosecond), true},
+		{"deadline-is-not-denial", context.DeadlineExceeded, deadline.Add(-time.Nanosecond), false},
+		{"database-error-is-not-denial", errors.New("controlled database failure"), deadline.Add(-time.Nanosecond), false},
+		{"success-is-not-denial", nil, deadline.Add(-time.Nanosecond), false},
+		{"late-denial", ErrForbidden, deadline, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			result := make(chan f04ProofOutcome, 1)
+			result <- f04ProofOutcome{err: test.err, completedAt: test.at}
+			outcome, completed := f04AwaitProofOutcome(ctx, result)
+			if !completed || f04TimelyProofDenial(outcome, deadline) != test.want {
+				t.Fatal("result/deadline arbitration changed the observed denial")
+			}
+		})
+	}
+	if _, completed := f04AwaitProofOutcome(ctx, make(chan f04ProofOutcome, 1)); completed {
+		t.Fatal("missing result was accepted after cancellation")
 	}
 }
 

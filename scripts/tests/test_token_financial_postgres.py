@@ -101,6 +101,29 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
                 with self.subTest(child=child), self.assertRaises(RuntimeError):
                     RUNNER.verify_results(invalid, {root}, **options)
 
+    def test_organization_startup_diagnostics_require_actual_process_cases(self):
+        root = "TestOrganizationStartupDiagnosticsPostgres"
+        package = RUNNER.ACCOUNT_PACKAGE
+        self.assertIn(root, RUNNER.ACCOUNT_REQUIRED)
+        children = {"profile", "token", "billing-earlier-wallet-guard"}
+        self.assertEqual(RUNNER.EXACT_REQUIRED_CHILDREN[root], children)
+        self.run_main_fixture()
+        command = self.fixture_commands[self.fixture_phases.index("owner-account")]
+        self.assertIn(root, command[command.index("-run") + 1])
+        events = self.events({root}, package, children=True)
+        options = {"package": package, "exact_roots": True, "require_children": True}
+        self.assertGreater(RUNNER.verify_results(events, {root}, **options), 0)
+        for child in children:
+            name = root + "/" + child
+            for invalid in (
+                [event for event in events if event.get("Test", "").split("/", 1)[0] != root],
+                [event for event in events if event.get("Test") != name],
+                events + [{"Action": "skip", "Package": package, "Test": name}],
+                events + [{"Action": "fail", "Package": package, "Test": name}],
+            ):
+                with self.subTest(child=child), self.assertRaises(RuntimeError):
+                    RUNNER.verify_results(invalid, {root}, **options)
+
 
     def test_payment_cleanup_boundary_and_clearance_are_selected_with_real_cases(self):
         boundary = "TestPaymentCreditClosureBoundaryPostgres"
@@ -144,6 +167,32 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
                 [event for event in events if event.get("Test") != root + "/" + child],
                 events + [{"Action": "skip", "Package": RUNNER.ACCOUNT_PACKAGE, "Test": root + "/" + child}],
             ):
+                with self.subTest(child=child), self.assertRaises(RuntimeError):
+                    RUNNER.verify_results(invalid, {root}, **options)
+
+    def test_organization_policy_requires_input_rejection_and_original_receipt_paths(self):
+        root = "TestOrganizationModelPolicyPublicPostgres"
+        self.assertIn(root, RUNNER.REQUIRED)
+        self.assertIn(root, RUNNER.TOKEN_CHILD_REQUIRED)
+        expected = {
+            "initial-default-is-not-a-stored-policy",
+            "invalid-input-preserves-original-policy-and-next-write",
+            "nil-and-explicit-empty-model-sets-have-identical-meaning",
+            "immutable-replay-after-later-revision-and-actor-or-facts-conflict",
+            "same-key-first-writers-replay-one-version",
+            "different-key-initial-CAS-has-one-winner",
+            "stale-CAS-and-unavailable-model-do-not-write",
+        }
+        self.assertEqual(RUNNER.EXACT_REQUIRED_CHILDREN[root], expected)
+        self.run_main_fixture()
+        command = self.fixture_commands[self.fixture_phases.index("retained-token")]
+        self.assertEqual(command[-1], "./internal/token")
+        events = self.events({root}, RUNNER.TOKEN_PACKAGE, children=True)
+        options = {"package": RUNNER.TOKEN_PACKAGE, "require_children": True, "exact_roots": True}
+        RUNNER.verify_results(events, {root}, **options)
+        for child in expected:
+            for invalid in ([e for e in events if e.get("Test") != root + "/" + child],
+                            events + [{"Action": "skip", "Package": RUNNER.TOKEN_PACKAGE, "Test": root + "/" + child}]):
                 with self.subTest(child=child), self.assertRaises(RuntimeError):
                     RUNNER.verify_results(invalid, {root}, **options)
 
@@ -1544,6 +1593,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
 
     def test_account_phase_requires_real_cas_lifecycle_and_review_governance_roots(self):
         self.assertEqual(RUNNER.ACCOUNT_REQUIRED, {
+            "TestOrganizationStartupDiagnosticsPostgres",
             "TestRestoredAdminReadsWithPublicMigrationsAndRuntimeActor",
             "TestMemberUnitsReceiptSurvivesLegalUnitDeletion",
             "TestF06OrganizationStatusProjectionVersionPublicPostgres",
@@ -1650,7 +1700,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
     def test_actual_main_requires_token_waiver_children(self):
         self.assertEqual(
             RUNNER.TOKEN_CHILD_REQUIRED,
-            {"TestEmergencyCancellationClaimOwnershipPostgres", "TestEmergencyCancellationRequestLocksClaimPostgres", "TestUserUnusedIntentCancellationOwnerPostgres", "TestPendingUnusedExpiryRejectsInvalidProofTimestampPostgres", "TestPendingUnusedExpiryCancellationOwnerPostgres", "TestPendingUnusedExpiryLegacyCancellationFallbackPostgres", "TestRemoteModelCancellationOwnerLoopTransport", "TestLocalModelCancellationHandshakeHTTP", "TestLifecycleForceCancelApprovalPostgres", "TestHoldAcknowledgementSurvivesDispatchPersistenceFailurePostgres", "TestCancellationReceivedReadRechecksReservationPostgres", "TestCancellationFirstUserPreservesConfirmedReceiptPostgres", "TestModelTerminalObservationPreservesExpiryProofPostgres", "TestModelTerminalObservationRejectsUntrustedEvidencePostgres", "TestUsageWaiverCoordinatorRecoveryPostgres", "TestPersonalZeroBudgetCancellationAndExpiryPostgres", "TestCredentialRotationWindowReceiptPostgres", "TestCredentialFailurePersistenceBoundariesPostgres", "TestCircuitFailureBeforeDispatchPostgres", "TestPreparationFailurePreservesAcceptedUsagePostgres"},
+            {"TestOrganizationModelPolicyPublicPostgres", "TestEmergencyCancellationClaimOwnershipPostgres", "TestEmergencyCancellationRequestLocksClaimPostgres", "TestUserUnusedIntentCancellationOwnerPostgres", "TestPendingUnusedExpiryRejectsInvalidProofTimestampPostgres", "TestPendingUnusedExpiryCancellationOwnerPostgres", "TestPendingUnusedExpiryLegacyCancellationFallbackPostgres", "TestRemoteModelCancellationOwnerLoopTransport", "TestLocalModelCancellationHandshakeHTTP", "TestLifecycleForceCancelApprovalPostgres", "TestHoldAcknowledgementSurvivesDispatchPersistenceFailurePostgres", "TestCancellationReceivedReadRechecksReservationPostgres", "TestCancellationFirstUserPreservesConfirmedReceiptPostgres", "TestModelTerminalObservationPreservesExpiryProofPostgres", "TestModelTerminalObservationRejectsUntrustedEvidencePostgres", "TestUsageWaiverCoordinatorRecoveryPostgres", "TestPersonalZeroBudgetCancellationAndExpiryPostgres", "TestCredentialRotationWindowReceiptPostgres", "TestCredentialFailurePersistenceBoundariesPostgres", "TestCircuitFailureBeforeDispatchPostgres", "TestPreparationFailurePreservesAcceptedUsagePostgres"},
         )
         with self.assertRaisesRegex(RuntimeError, "no completed child"):
             self.run_main_fixture(missing_token_children=True)

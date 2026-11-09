@@ -663,15 +663,24 @@ explicit operation ID. A first applied restore returns `applied: true`,
 `restored: true`, `replayed: false`; response-loss retries with the same ID return
 `applied: false`, `restored: false`, `replayed: true` without writing anything.
 If records subsequently change, the old ID still only replays its sealed outcome
-and does not restore those changed records. Use a new explicit operation ID to
-intentionally apply the same backup again. Reusing an ID with another backup is
-a conflict. Do not generate a fresh ID automatically on each retry.
-Restore intentionally replaces endpoint records, not just missing entries.
-It currently has no backup/current-revision fence: a stale backup can remove
-enrollments created since that backup. Review that destructive scope explicitly
-before a maintenance restore; the durable request ledger alone does not protect
-newer endpoint records. A reused-ID conflict is currently exposed as
-`migration_restore_failed` with its original conflict retained as the cause.
+and does not restore those changed records. A new operation ID cannot force an
+old backup over newer records: its captured `namespace_revision` must match
+before the durable restore intent is created. That intent records the expected
+revision, and only its own single CAS is allowed before completion. An intervening
+enrollment, revocation, credential rotation or other namespace write causes
+`migration_restore_revision_conflict`; retries never silently rebase this fence.
+The final CAS preserves concurrent records even when a conflict occurs after
+preparation. Endpoint changes are all-or-nothing; a conflicting pending intent
+can only seal a failed ledger result, not restore any endpoint prefix.
+Use a freshly reviewed backup for a new operation; there is no force-restore
+compatibility path. Reusing an ID with another backup or fence exposes the
+precise `migration_request_conflict`. Do not generate fresh IDs on retries.
+Historical sealed restore records without the fence remain read-only replayable
+with the original parameters and HMAC keys. Historical pending restores lacking
+the original fence fail as `migration_restore_fence_missing` without rewriting
+their evidence; they require explicit operator investigation rather than automatic
+execution. All new restore intents include the fence. Restore continues to
+preserve the current monotonic request ledger instead of importing old request IDs.
 `re_enroll` rotates the access token and therefore explicitly invalidates old
 Web links. Backup files contain keyed digests, not credentials, and still need
 mode 0600/private ACL storage. The CLI rejects symlink/reparse-point ancestors,

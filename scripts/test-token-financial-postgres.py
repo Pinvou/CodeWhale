@@ -43,6 +43,7 @@ REQUIRED = {
     "TestUsageWaiverCoordinatorRecoveryPostgres",
     "TestF05AdditionalReservationProjectionPublicPostgres",
     "TestF06OrganizationAdmissionBoundariesPublicPostgres",
+    "TestOrganizationModelPolicyPublicPostgres",
     "TestContextEligibilityUsesCurrentScopedProductionRoutes",
     "TestReconciliationEvidenceMatchesPublicSchema",
     "TestF05DispatchLeaseLifecycle",
@@ -72,6 +73,7 @@ REQUIRED = {
 ACCOUNT_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/account"
 LIFECYCLE_RECONCILIATION_REQUIRED = {"TestLifecycleV3ApprovalReconciliationPostgres"}
 ACCOUNT_REQUIRED = {
+    "TestOrganizationStartupDiagnosticsPostgres",
     "TestRestoredAdminReadsWithPublicMigrationsAndRuntimeActor",
     "TestApprovalDecisionOriginalReceiptPostgres",
     "TestApprovalDecisionLegacyConcurrentReceiptPostgres",
@@ -123,6 +125,7 @@ ACCOUNT_LEAF_REQUIRED = {
 ACCOUNT_CHILD_REQUIRED = ACCOUNT_REQUIRED - ACCOUNT_LEAF_REQUIRED
 TOKEN_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/token"
 TOKEN_CHILD_REQUIRED = {
+    "TestOrganizationModelPolicyPublicPostgres",
     "TestEmergencyCancellationClaimOwnershipPostgres",
     "TestEmergencyCancellationRequestLocksClaimPostgres",
     "TestUserUnusedIntentCancellationOwnerPostgres",
@@ -296,6 +299,9 @@ EXACT_REQUIRED_CHILDREN = {
         for seeded in ("false", "true")
         for suffix in ("", "/actual-cli")
     },
+    "TestOrganizationStartupDiagnosticsPostgres": {
+        "profile", "token", "billing-earlier-wallet-guard",
+    },
     "TestPaymentCreditRetentionPublicPostgres": {"late-acknowledgement-survives-billing-retention", "waiting-old-ack-batch-does-not-starve-later-clearance"},
     "TestPaymentCreditClosureBoundaryPostgres": {
         "cleanup-wins-retains-evidence-without-credit",
@@ -406,6 +412,15 @@ EXACT_REQUIRED_CHILDREN = {
     "TestEscalatedForcedRefundEvidenceAndReceiptGuardsPostgres": {
         "manual-status", "manual-link", "order-link", "transaction-link",
         "evidence-link", "receipt-identity-and-terminal-replay",
+    },
+    "TestOrganizationModelPolicyPublicPostgres": {
+        "initial-default-is-not-a-stored-policy",
+        "invalid-input-preserves-original-policy-and-next-write",
+        "nil-and-explicit-empty-model-sets-have-identical-meaning",
+        "immutable-replay-after-later-revision-and-actor-or-facts-conflict",
+        "same-key-first-writers-replay-one-version",
+        "different-key-initial-CAS-has-one-winner",
+        "stale-CAS-and-unavailable-model-do-not-write",
     },
     "TestReconciliationOrphanPaidOrderPostgres": {"fresh-install", "historical-upgrade"},
     "TestRemoteModelCancellationOwnerLoopTransport": {
