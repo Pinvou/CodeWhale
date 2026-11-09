@@ -3,6 +3,11 @@
 This is a repository regression guard, not a SQL or JavaScript security parser.
 Runtime ownership/identity checks remain authoritative. Negative probes must be
 explicitly reviewed here instead of being exempted by a magic inline comment.
+
+Coverage is Go test database DDL and JavaScript server/browser factories. This
+guard does not inspect Docker commands or Python/shell subprocess paths. The CI
+job's PATH wrapper owns ordinary Docker CLI leases; absolute Docker executables
+and direct Docker APIs bypass that wrapper and need equivalent explicit leases.
 """
 from pathlib import Path
 import re
