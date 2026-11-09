@@ -47,7 +47,7 @@ export function confirmedProcessExited(pid, probe = process.kill) {
 
 // closeHost must first stop its poller, then may report its recorded failure.
 // Preserve that failure while still closing every owned child and server.
-export async function cleanupBrowserFixture({ closeHost, stopChildren, closeServer, removeFiles }) {
+export async function cleanupBrowserFixture({ closeHost, stopChildren, closeServer, removeFiles, primaryErrors = [] }) {
   const errors = [];
   const attempt = async cleanup => {
     try { await cleanup(); return true; }
@@ -60,5 +60,8 @@ export async function cleanupBrowserFixture({ closeHost, stopChildren, closeServ
   }
   const serverClosed = await attempt(closeServer);
   if (childrenStopped && serverClosed) await attempt(removeFiles);
-  if (errors.length) throw new AggregateError(errors, 'browser fixture cleanup failed');
+  if (errors.length) throw new AggregateError(
+    [...primaryErrors, ...errors],
+    primaryErrors.length ? 'browser fixture execution and cleanup failed' : 'browser fixture cleanup failed',
+  );
 }

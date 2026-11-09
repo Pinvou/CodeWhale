@@ -29,12 +29,15 @@ const testPublicKeyPem = testKeys.publicKey.export({ type: "spki", format: "pem"
 const testPublicKeySha256 = crypto.createHash("sha256")
   .update(testKeys.publicKey.export({ type: "spki", format: "der" })).digest("hex");
 const certificateRoot = await mkdtemp(join(tmpdir(), "pinvou-provider-chain-"));
-// Git for Windows may be installed outside Program Files on supported runners.
+// Git for Windows may be portable and may ship native or MSYS OpenSSL.
 let openssl = "openssl";
 if (process.platform === "win32") {
   const gitExecPath = execFileSync("git", ["--exec-path"], { encoding: "utf8" }).trim();
-  const bundledOpenSSL = resolve(gitExecPath, "../../../usr/bin/openssl.exe");
-  if (existsSync(bundledOpenSSL)) openssl = bundledOpenSSL;
+  const bundledOpenSSL = [
+    resolve(gitExecPath, "../../bin/openssl.exe"),
+    resolve(gitExecPath, "../../../usr/bin/openssl.exe"),
+  ].find(candidate => existsSync(candidate));
+  if (bundledOpenSSL) openssl = bundledOpenSSL;
 }
 // Explicit extensions: LibreSSL emits no Basic Constraints by default and its
 // x509 subcommand lacks -addext, so the leaf profile comes from an extfile.

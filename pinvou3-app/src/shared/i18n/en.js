@@ -1001,6 +1001,7 @@ stateNotReady: 'Remote control state is not ready; desktop events cannot be proc
 unnegotiatedEvent: event => `The desktop sent an unnegotiated remote control event: ${event}`,
 rpcFailed: 'Remote call failed',
 incompatibleDesktop: 'The desktop version does not support remote control. Update the desktop app first.',
+accountPlatformFirstTurnUnsupported: 'Account Platform models cannot be used for the first message of a new chat on the web. Choose another available model.',
 unsupportedCommand: command => `The current desktop does not support this remote control command: ${command}`,
 commandNotAllowed: command => `Remote control does not allow invoking ${command}`,
 invalidRequestId: 'Invalid remote call request ID',

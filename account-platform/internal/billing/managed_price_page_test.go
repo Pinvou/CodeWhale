@@ -130,6 +130,7 @@ func TestPostgresManagedPricePagination(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	t.Run("bounded-batch-queries", testManagedPriceBatchReadContract)
 }
 
 // Decode the actual administration wire DTO: financial unit values are strings.
