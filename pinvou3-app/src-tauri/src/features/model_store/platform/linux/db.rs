@@ -1099,7 +1099,7 @@ impl std::error::Error for DeleteStoreModelError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Database(error) => Some(error),
-            Self::RetainedVersions => None,
+            Self::RetainedVersions | Self::Measurement(_) => None,
         }
     }
 }

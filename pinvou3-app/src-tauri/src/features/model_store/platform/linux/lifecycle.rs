@@ -2193,6 +2193,13 @@ impl ModelManager {
                 db::DeleteStoreModelError::Database(error) => {
                     ModelManagerError::new(format!("删除模型记录失败：{error}"))
                 }
+                // 事务内刷新下载根登记测量失败：记录尚未删除（事务中止），
+                // 按配额核算的失败关闭口径如实上报，修复读取问题后重试。
+                db::DeleteStoreModelError::Measurement(error) => {
+                    ModelManagerError::new(format!(
+                        "刷新下载目录登记大小失败，未删除模型记录：{error}"
+                    ))
+                }
             })?;
         } else {
             db::mark_uninstalled(card_id)
@@ -4370,7 +4377,7 @@ echo '权重就绪'
         // inside) card A's protected tree. Admission must fail without
         // running any script or registering card B.
         let scripts = tmp.path().join("scripts");
-        let card = local_script_card(&scripts, None);
+        let mut card = local_script_card(&scripts, None);
         for (entry, body) in [
             ("install_engine", "#!/bin/sh\nexit 0\n"),
             (
