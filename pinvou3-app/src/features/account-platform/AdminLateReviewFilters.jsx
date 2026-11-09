@@ -29,7 +29,7 @@ export function AdminLateReviewFilters({ language, draft, applied, setDraft, onA
   };
   const clear = () => onApply({ ...Object.fromEntries(fields.map(key => [key, ''])), limit: applied.limit });
   const toLabel = value => words[value] || accountLayoutCopy[language].statuses[value] || value;
-  const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || ui.deviceTime;
+  const timezone = new Intl.DateTimeFormat().resolvedOptions().timeZone || ui.deviceTime;
   const dateLabel = value => value ? timeDisplay(value) + ' ' + timezone : '';
   const advanced = [
     [words.q, applied.q], [words.severity, toLabel(applied.severity)], [words.provider_id, applied.provider_id],
