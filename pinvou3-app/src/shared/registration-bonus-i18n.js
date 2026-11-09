@@ -102,3 +102,19 @@ registrationBonusRecoveryCopy.ja.eligibilityPresentation = {
   unconfirmed: '現在の補完状態を確認できません。再読み込みしてください。', unavailable: '携帯番号資格の補完状態を取得できません。',
   loadFailed: '携帯番号資格の補完状態を取得できないため、ポリシーを読み込めませんでした。再試行してください。',
 };
+
+registrationBonusRecoveryCopy.zh.fieldGuidance = {
+  amount: max => `整数积分，范围 0–${max}。`, amountInvalid: max => `请输入 0–${max} 之间的整数积分。`,
+  days: '整数天数，范围 1–3650。', daysInvalid: '请输入 1–3650 之间的整数天数。',
+  reason: '去掉首尾空白后，原因需有 10–500 个 Unicode 字符。', reasonCount: count => `当前 ${count} / 500`,
+};
+registrationBonusRecoveryCopy.en.fieldGuidance = {
+  amount: max => `Whole points from 0 to ${max}.`, amountInvalid: max => `Enter whole points from 0 to ${max}.`,
+  days: 'Whole days from 1 to 3650.', daysInvalid: 'Enter a whole number from 1 to 3650 days.',
+  reason: 'Use 10–500 Unicode code points, excluding spaces at the start and end.', reasonCount: count => `${count} / 500 now`,
+};
+registrationBonusRecoveryCopy.ja.fieldGuidance = {
+  amount: max => `0～${max} の整数ポイント。`, amountInvalid: max => `0～${max} の整数ポイントを入力してください。`,
+  days: '1～3650 の整数日。', daysInvalid: '1～3650 の整数日を入力してください。',
+  reason: '前後の空白を除いて Unicode コードポイント 10～500 個で入力してください。', reasonCount: count => `現在 ${count} / 500`,
+};
