@@ -379,6 +379,23 @@ function completeTokenManagementCopy(translations) {
       "unitsLoaded": "{n} 件の単位バージョンを取得"
     }
   };
+  const pricingPaneCopy = {
+    "zh": {
+      "switchLabel": "定价任务",
+      "refreshAll": "刷新定价数据",
+      "locked": "请先关闭当前确认或预览，再切换。"
+    },
+    "en": {
+      "switchLabel": "Pricing tasks",
+      "refreshAll": "Refresh pricing data",
+      "locked": "Close the current confirmation or preview before switching."
+    },
+    "ja": {
+      "switchLabel": "価格設定の作業",
+      "refreshAll": "価格データを更新",
+      "locked": "現在の確認画面またはプレビューを閉じてから切り替えてください。"
+    }
+  };
   for (const language of ['zh', 'en', 'ja']) {
     const copy = translations[language].modelToken;
     const provisioningCopy = {
@@ -397,6 +414,7 @@ function completeTokenManagementCopy(translations) {
     const technical = pricingTechnicalCopy[language];
     const fill = key => value => list[key].replace('{n}', String(value));
     Object.assign(translations[language].pricingLifecycle, pricingControls, formulaSelectionCopy[language], {
+      panePresentation: pricingPaneCopy[language],
       technicalPresentation: { ...technical, precision: value => technical.precision.replace('{n}', String(value)), denominator: value => technical.denominator.replace('{n}', String(value)),
         pageNumber: value => technical.pageNumber.replace('{n}', String(value)), unitsLoaded: value => technical.unitsLoaded.replace('{n}', String(value)),
         exampleText: fields => technical.exampleText.replace(/\{([a-z])\}/g, (_, key) => String(fields[key])) },
