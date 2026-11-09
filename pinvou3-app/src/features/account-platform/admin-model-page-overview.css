@@ -24,3 +24,14 @@
 .adm-model-page-overview .adm-model-overview-actions select,.adm-model-page-overview .adm-model-overview-actions button{min-height:44px}
 .adm-model-page-overview button:focus-visible{position:relative;z-index:1;outline:2px solid var(--adm-primary);outline-offset:2px}
 @media (max-width: 760px) { .adm-model-operations-overview > header { align-items: stretch; flex-direction: column; } .adm-model-page-overview .adm-model-overview-groups > article > div { grid-template-columns: 1fr; } }
+
+.adm-model-page-overview .adm-provisioning-overview-failure{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:8px 12px;margin:12px 20px;padding:10px 12px;border:1px solid var(--adm-line);border-inline-start:3px solid var(--adm-warning);border-radius:8px;background:var(--adm-soft);color:var(--adm-text)}
+.adm-provisioning-overview-failure>p{min-width:0;margin:0}
+.adm-provisioning-overview-failure>p span{display:block;margin-top:3px;color:var(--adm-muted);font-size:12px}
+.adm-provisioning-overview-failure>details{grid-column:1/-1;min-width:0}
+.adm-provisioning-overview-failure summary{width:fit-content;max-width:100%;color:var(--adm-primary);cursor:pointer}
+.adm-provisioning-overview-failure summary:focus{outline:3px solid var(--adm-primary);outline-offset:2px}
+.adm-provisioning-overview-failure dl{display:grid;gap:8px;margin:8px 0 0}
+.adm-provisioning-overview-failure dd{min-width:0;margin:3px 0 0}
+.adm-provisioning-overview-failure .adm-identifier code.is-expanded{word-break:break-word;overflow-wrap:break-word;overflow-wrap:anywhere}
+@media(max-width:560px){.adm-model-page-overview .adm-provisioning-overview-failure{grid-template-columns:minmax(0,1fr);justify-items:start;margin:10px 12px}.adm-provisioning-overview-failure>details{width:100%}}
