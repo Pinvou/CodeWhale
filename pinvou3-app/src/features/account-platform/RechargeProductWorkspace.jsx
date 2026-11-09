@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { encodeFinanceJSON, requireFinanceCollection } from './finance-contract.js';
-import { localizedProductDisplayName } from './localized-product-display-name.js';
+import { AdminProductCatalogTable } from './AdminProductCatalogTable.jsx';
+import './admin-product-catalog.css';
 import { AdminFinanceFilters, useFinanceReadRoute, useFinanceRouteLoader } from './AdminFinanceFilters.jsx';
 import { PortalDialog } from './PortalDialog.jsx';
 import { accountLayoutCopy } from '../../shared/i18n.js';
@@ -99,7 +100,7 @@ export function RechargeProductWorkspace({ client, me, copy, language, route }) 
   </>;
   return <section><h3>{copy.productAdmin}</h3>{route && <AdminFinanceFilters kind="products" language={language} value={filters.draft} onChange={filters.setDraft} disabled={operation.busy || operation.unknown} onSubmit={() => { setPrevious([]); filters.move({ ...filters.draft, cursor: '' }, null); }} />}<button disabled={operation.busy || operation.unknown} onClick={() => void load()}>{copy.refresh}</button>{validationError && <p role="alert">{copy[validationError]}</p>}{operation.error && <p role="alert">{operation.error}</p>}{operation.message && <p role="status">{operation.message}</p>}{operation.busy && <p role="status">{copy.loading}</p>}
     {operation.unknown && <button disabled={operation.busy} onClick={() => void submit('')}>{copy.retry}</button>}
-    {page && <table><thead><tr><th>{copy.name}</th><th>{copy.status}</th><th>{copy.version}</th><th>{copy.actions}</th></tr></thead><tbody>{page.items.map(item => <tr key={item.catalog_item_id}><td>{localizedProductDisplayName(item, language, 'product_id')}</td><td>{item.lifecycle_status}</td><td>{item.version}</td><td><button disabled={operation.busy || operation.unknown} onClick={() => void open(item)}>{copy.details}</button></td></tr>)}</tbody></table>}
+    {page && <AdminProductCatalogTable page={page} language={language} copy={copy} disabled={operation.busy || operation.unknown} onOpen={open} />}
     <button disabled={operation.busy || operation.unknown || !previous.length} onClick={() => { const values = [...previous]; const value = values.pop(); setPrevious(values); if (route) filters.move({ ...filters.query, cursor: value }, null); else void load(value); }}>{copy.previous}</button><button disabled={operation.busy || operation.unknown || !page?.next_cursor} onClick={() => { setPrevious(values => [...values, cursor]); if (route) filters.move({ ...filters.query, cursor: page.next_cursor }, null); else void load(page.next_cursor); }}>{copy.next}</button>
     {route ? <>
       {canCreate && <button disabled={operation.busy || operation.unknown} onClick={() => { setSelected(null); setInput(empty); setReason(''); setVerifications([]); setEditorOpen(true); }}>{copy.createProduct}</button>}
