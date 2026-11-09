@@ -81,7 +81,9 @@ use tokio::sync::{Mutex, MutexGuard, oneshot};
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 use wait_timeout::ChildExt;
 
-use crate::features::remote_control::controller::permission::PermissionAuthority;
+use crate::features::remote_control::controller::permission::{
+    PermissionAuthority, PermissionTelemetryEvent,
+};
 use crate::features::sessions::SessionStore;
 use attachments::prepare_codex_prompt;
 use deepseek_tui::session_manager::SessionMetadata;
@@ -1379,6 +1381,34 @@ async fn insert_pending_permission(
     inserted
 }
 
+// Call only outside an authority dispatch closure. The pending-map guard keeps
+// another poll from observing removal before the authority records cancellation.
+fn settle_cancelled_remote_permission(
+    pending: &mut HashMap<String, PendingPermission>,
+    key: &str,
+    callback: &Arc<()>,
+    authority: Option<&PermissionAuthority>,
+) -> Option<PermissionTelemetryEvent> {
+    let request = lifecycle::remove_owned_callback(pending, key, |request| {
+        Arc::ptr_eq(&request.callback_instance, callback)
+            && request
+                .sdk_responder
+                .as_ref()
+                .is_some_and(|responder| responder.cancellation().is_cancelled())
+    })?;
+    let telemetry = request.remote_owner.as_ref().and_then(|owner| {
+        authority?.cancel_bound_callback(
+            &owner.lease,
+            &owner.task_id,
+            request.remote_approval_id.as_deref()?,
+        )
+    });
+    let _ = request.respond(RequestPermissionResponse::new(
+        RequestPermissionOutcome::Cancelled,
+    ));
+    telemetry
+}
+
 async fn watch_remote_permission(
     pending: Arc<Mutex<HashMap<String, PendingPermission>>>,
     key: String,
@@ -1391,25 +1421,10 @@ async fn watch_remote_permission(
         _ = &mut response_rx => return,
         _ = cancellation.cancelled() => {}
     }
-    let (request, telemetry) = {
+    let telemetry = {
         let mut pending = pending.lock().await;
-        let request = lifecycle::remove_owned_callback(&mut *pending, &key, |request| {
-            Arc::ptr_eq(&request.callback_instance, &callback)
-        });
-        let telemetry = request.as_ref().and_then(|request| {
-            let owner = request.remote_owner.as_ref()?;
-            let approval = request.remote_approval_id.as_deref()?;
-            authority
-                .as_ref()?
-                .cancel_bound_callback(&owner.lease, &owner.task_id, approval)
-        });
-        (request, telemetry)
+        settle_cancelled_remote_permission(&mut pending, &key, &callback, authority.as_deref())
     };
-    if let Some(request) = request {
-        let _ = request.respond(RequestPermissionResponse::new(
-            RequestPermissionOutcome::Cancelled,
-        ));
-    }
     if let Some(authority) = authority {
         authority.publish_dispatch_telemetry(telemetry);
     }
@@ -5605,6 +5620,7 @@ impl AcpPool {
             bail!("remote_permission_binding_stale");
         }
         let tool_call_id = request.view.tool_call_id.clone();
+        let callback = Arc::clone(&request.callback_instance);
         let mut send = |allow: bool| -> Result<_> {
             let request = pending
                 .get(&key)
@@ -5716,6 +5732,18 @@ impl AcpPool {
             })
             .context("remote_permission_closed")
             .and_then(|result| result);
+        if result.is_err() {
+            // The SDK flag is visible before its watcher can acquire this map.
+            // Settle that exact cancellation before another poll reads pending
+            // callbacks. A closed SDK queue without cancellation stays an error.
+            let cancellation_telemetry = settle_cancelled_remote_permission(
+                &mut pending,
+                &key,
+                &callback,
+                authority.as_deref().map(Arc::as_ref),
+            );
+            dispatch_telemetry = cancellation_telemetry.or(dispatch_telemetry);
+        }
         drop(owners);
         drop(pending);
         if let Some(authority) = authority {
@@ -9925,7 +9953,12 @@ mod tests {
         use agent_client_protocol::{Channel, RawJsonRpcMessage, TransportFrame};
         use futures_util::StreamExt as _;
 
-        for scenario in ["accepted", "closed", "cancelled"] {
+        for scenario in [
+            "accepted",
+            "closed",
+            "cancelled",
+            "cancelled_before_watcher",
+        ] {
             let disconnect = scenario == "closed";
             let (transport, mut peer) = Channel::duplex();
             let (responder_tx, responder_rx) = oneshot::channel();
@@ -10041,17 +10074,22 @@ mod tests {
                 response_tx,
                 sdk_responder: Some(sdk_responder),
             };
-            if scenario == "cancelled" {
+            if scenario == "cancelled" || scenario == "cancelled_before_watcher" {
                 let key = permission_key("sdk-session", "sdk-tool");
                 let callback = Arc::clone(&request.callback_instance);
                 let cancellation = request.sdk_responder.as_ref().unwrap().cancellation();
                 let pending = Arc::new(Mutex::new(HashMap::from([(key.clone(), request)])));
+                let mut held_pending = if scenario == "cancelled_before_watcher" {
+                    Some(pending.lock().await)
+                } else {
+                    None
+                };
                 let watcher = tokio::spawn(watch_remote_permission(
                     Arc::clone(&pending),
-                    key,
-                    callback,
+                    key.clone(),
+                    Arc::clone(&callback),
                     response_rx,
-                    cancellation,
+                    cancellation.clone(),
                     Some(Arc::clone(&authority)),
                 ));
                 let cancel = RawJsonRpcMessage::notification(
@@ -10062,6 +10100,48 @@ mod tests {
                 peer.tx
                     .unbounded_send(TransportFrame::Single(cancel))
                     .unwrap();
+                if let Some(pending) = held_pending.as_mut() {
+                    tokio::time::timeout(Duration::from_secs(5), cancellation.cancelled())
+                        .await
+                        .expect("SDK did not publish its cancellation flag");
+                    assert!(pending.contains_key(&key), "watcher must still be fenced");
+                    assert_eq!(authority.view(&approval).unwrap().state, "allowed");
+                    assert!(
+                        settle_cancelled_remote_permission(
+                            pending,
+                            &key,
+                            &Arc::new(()),
+                            Some(&authority),
+                        )
+                        .is_none()
+                    );
+                    assert!(
+                        pending.contains_key(&key),
+                        "a different callback cannot remove it"
+                    );
+                    let telemetry = settle_cancelled_remote_permission(
+                        pending,
+                        &key,
+                        &callback,
+                        Some(&authority),
+                    );
+                    assert!(pending.is_empty());
+                    assert!(authority.callback_was_cancelled(&lease, task_id, &approval));
+                    assert!(!remote_turn::permission_dispatch_unresolved(
+                        &authority,
+                        &RemotePermissionOwner {
+                            task_sequence: 1,
+                            session_id: "sdk-session".into(),
+                            task_id: task_id.into(),
+                            lease: lease.clone(),
+                        },
+                        &approval,
+                        true,
+                        false,
+                    ));
+                    authority.publish_dispatch_telemetry(telemetry);
+                }
+                drop(held_pending);
                 let Some(TransportFrame::Single(response)) =
                     tokio::time::timeout(Duration::from_secs(5), peer.rx.next())
                         .await
