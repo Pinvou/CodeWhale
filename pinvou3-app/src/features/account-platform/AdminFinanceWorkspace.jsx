@@ -297,7 +297,10 @@ function Wallets({ client, copy, language, permissions, owner, requesterID, onVi
     const value = adjustmentWallet ? formatBalance(adjustmentWallet[field], language) : '—';
     return value === '—' ? adjustmentCopy.unavailable : adjustmentCopy.points(value);
   };
-  return <section><h3>{copy.wallet}</h3>{route && <AdminFinanceFilters kind="wallets" language={language} value={filters.draft} onChange={filters.setDraft} disabled={operation.busy || operation.unknown} onSubmit={() => { setPrevious([]); filters.move({ ...filters.draft, cursor: '' }, null); }} />}<button disabled={operation.busy || operation.unknown} onClick={async () => { await load(); await loadAdjustments(); }}>{copy.refresh}</button><Feedback operation={operation} copy={copy} />{operation.unknown && <button disabled={operation.busy} onClick={() => void adjust()}>{copy.retry}</button>}{page && <div className="adm-table-wrap adm-wallet-directory-scroll" role="region" aria-label={copy.wallet} tabIndex={0}>
+  return <section><h3>{copy.wallet}</h3>{route && <AdminFinanceFilters kind="wallets" language={language} value={filters.draft} onChange={filters.setDraft} disabled={operation.busy || operation.unknown} onSubmit={() => { setPrevious([]); filters.move({ ...filters.draft, cursor: '' }, null); }} />}<button disabled={operation.busy || operation.unknown} onClick={async () => { await load(); await loadAdjustments(); }}>{copy.refresh}</button><Feedback operation={operation} copy={copy} />{operation.unknown && <button disabled={operation.busy} onClick={() => void adjust()}>{copy.retry}</button>}{page && (
+    // biome-ignore lint/a11y/noNoninteractiveTabindex: The named overflow region must be keyboard-scrollable.
+    <div className="adm-table-wrap adm-wallet-directory-scroll" role="region" aria-label={copy.wallet} tabIndex={0}>
+    {/* biome-ignore-start lint/a11y/noRedundantRoles: The mobile card layout changes table display values, so older Safari needs explicit table semantics. */}
     <table className="adm-table adm-wallet-directory" role="table">
       <thead role="rowgroup"><tr role="row"><th role="columnheader" scope="col">{copy.wallet}</th><th role="columnheader" scope="col">{copy.total}</th><th role="columnheader" scope="col">{copy.remaining}</th><th role="columnheader" scope="col">{copy.status}</th></tr></thead>
       <tbody role="rowgroup">{page.items.map(item => {
@@ -311,7 +314,9 @@ function Wallets({ client, copy, language, permissions, owner, requesterID, onVi
         </tr>;
       })}</tbody>
     </table>
-  </div>}
+    {/* biome-ignore-end lint/a11y/noRedundantRoles: End of the responsive wallet table. */}
+    </div>
+  )}
     <button disabled={operation.busy || operation.unknown || !previous.length} onClick={() => { const values = [...previous]; const value = values.pop(); setPrevious(values); if (route) filters.move({ ...filters.query, cursor: value }, null); else void load(value); }}>{copy.previous}</button><button disabled={operation.busy || operation.unknown || !page?.next_cursor} onClick={() => { setPrevious(values => [...values, cursor]); if (route) filters.move({ ...filters.query, cursor: page.next_cursor }, null); else void load(page.next_cursor); }}>{copy.next}</button>
     {route && filters.selectedID && permissions.includes('platform.billing.ledger.read') && <AdminWalletLedger {...{ client, language, route }} walletID={filters.selectedID} />}
     {ledger && <ul>{requireFinanceCollection(ledger).map(item => <li key={item.posting_id}>{item.journal_entry_id} / {item.created_at}</li>)}</ul>}
