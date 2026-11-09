@@ -300,30 +300,46 @@ conflicts, and let the queue validate freshness. Maintainers may queue at most t
 low-risk, independent pull requests in one merge group. Dependency-lock, CI, release,
 permission, session, CodeWhale gitlink, and other high-risk changes enter alone.
 
-`account-platform-test` and `frontend-test` can reuse a successful ready PR
-execution in a single-PR merge group. The lightweight `changes` job verifies the
-entire tested Git tree (not just the PR head), the same base commit, unchanged
-workflow/verifier blobs, test-selection and repository-variable configuration hashes, runner
-labels, successful required test/cleanup steps and a successful `required-gate`
-from the exact source run attempt. The source must be a same-repository PR with
-a completed successful PR Check run and a non-expired success proof less than
-24 hours old. Multi-member queues, forks, draft-only evidence, changed bases or
-inputs, edited verifier policy, missing/ambiguous evidence and API/transport
-failures retain normal tests. Other jobs, especially history/policy checks,
-continue to run. No source credentials or raw runtime configuration enter the
-proof artifact, and no status/check-write permission is used.
+All reviewed content checks in PR Check can reuse a successful ready-PR
+execution in a single-PR merge group: version consistency, frontend, Account,
+Relay/Hub, release-console and packaging contracts, Rust/CLI/knowledge lint and
+regression, Windows/macOS runtime checks, native Windows matrix phases and
+LoongArch cross checks. `ci-reuse-policy.py` classifies the current product jobs;
+unclassified new jobs continue running until their input contract is reviewed.
+The independently introduced `account-closure-test` has matching optional wiring.
+The separate `rustc-wrapper-smoke` and `evidence-validator-container` workflows
+use the same verifier with independent proof profiles and aggregate gates.
+Wrapper reuse requires all three native platform legs. The container workflow
+diff-selects its real Docker test on queue entries; manual dispatch always runs it.
 
-The proof records the versioned environment recipe and repository configuration;
-it is not an attestation of an externally modified runner machine. Rotate the
-repository variable `PINVOU_CI_REUSE_EPOCH` when changing runner images/toolchains
-or other test inputs outside the repository, and keep test dependencies pinned.
-Setting `PINVOU_CI_REUSE_FORCE_RUN` to the literal `true` disables reuse. A missing
-proof (including a failed advisory proof upload) never blocks a previously green
-PR; it simply requires another real execution in the queue. Reused jobs appear
-as skipped; `required-gate` accepts that state only for these two allowlisted jobs
-when the current `changes` job produced verified queue evidence. A failed or
-cancelled execution cannot be normalized into success. The notice in `changes`
-links reuse to the source Actions run ID.
+The lightweight `changes` job verifies the entire tested Git tree (not only the
+PR head), base commit/ref, unchanged workflow/verifiers, all routing and policy
+outputs, repository-variable hashes, runner labels, source repository/PR/head,
+source run attempt and successful workflow aggregate gate. A matrix is reusable only if
+all configured legs are present exactly once and every step required in the
+queue has successful execution evidence. A format-only or partial ready-PR run
+cannot replace full queue regression. Unknown expressions require successful
+step evidence; unknown runner/matrix shapes, missing/duplicate/failed/skipped
+required evidence retain execution. Cache preparation and advisory diagnostics
+cannot substitute for a product test or resource-retirement step.
+
+`changes`, `required-gate`, `commit-message`, `merge-authored-audit`,
+`backflow-portability` and `fast-gate` retain their existing event-specific
+execution: they inspect current routing, history, provenance or mutable gitlink
+reachability, or verify the current queue proof. Separate metadata workflows
+retain their own existing policies. Deployment/publication is not replayed from
+old artifacts. Jobs exposing per-run outputs/reusable-workflow calls are excluded.
+
+Proofs must come from a successful same-repository ready PR and be less than
+24 hours old. Forks, multi-PR groups, changed inputs, edited verifier policy and
+API/transport failures execute normal tests. Only verified skipped jobs may be
+normalized; failures/cancellations never become success. Proofs contain no raw
+configuration or credentials, and no status/check-write permission is used.
+Rotate `PINVOU_CI_REUSE_EPOCH` when changing runner images/toolchains or other
+inputs outside the repository; the proof attests the versioned environment recipe,
+not an externally modified machine. `PINVOU_CI_REUSE_FORCE_RUN=true` disables reuse.
+Failed advisory proof transport only loses the reuse opportunity. `changes`
+reports the source Actions run ID for every verified reuse decision.
 
 ## Pull requests
 

@@ -16,6 +16,7 @@ name: rustc-wrapper-smoke
 # 导致所有 Cargo build/check/test/run 全断。
 on:
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
     paths:
       - 'pinvou3-app/src-tauri/.cargo/config.toml'
       - 'pinvou3-app/src-tauri/scripts/rustc-stack-wrapper'
@@ -23,6 +24,9 @@ on:
       - 'pinvou3-app/src-tauri/scripts/rustc-stack-wrapper-select.sh'
       - 'pinvou3-app/run-dev.sh'
       - '.github/workflows/rustc-wrapper-smoke.yml'
+      - 'scripts/ci-test-reuse.py'
+      - 'scripts/ci-reuse-policy.py'
+      - 'scripts/tests/test_ci_reuse_policy.py'
   merge_group:
   push:
     branches: [main]
@@ -33,8 +37,12 @@ on:
       - 'pinvou3-app/src-tauri/scripts/rustc-stack-wrapper-select.sh'
       - 'pinvou3-app/run-dev.sh'
       - '.github/workflows/rustc-wrapper-smoke.yml'
+      - 'scripts/ci-test-reuse.py'
+      - 'scripts/ci-reuse-policy.py'
+      - 'scripts/tests/test_ci_reuse_policy.py'
 
 permissions:
+  actions: read
   contents: read
   pull-requests: read
 
@@ -64,6 +72,8 @@ jobs:
     timeout-minutes: 10
     outputs:
       wrapper: ${{ steps.filter.outputs.wrapper }}
+      reused_jobs: ${{ steps.reuse.outputs.reused_jobs || '[]' }}
+      reuse_verified: ${{ steps.reuse.outputs.reuse_verified || 'false' }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -84,10 +94,25 @@ jobs:
               - 'pinvou3-app/src-tauri/scripts/rustc-stack-wrapper-select.sh'
               - 'pinvou3-app/run-dev.sh'
               - '.github/workflows/rustc-wrapper-smoke.yml'
+              - 'scripts/ci-test-reuse.py'
+              - 'scripts/ci-reuse-policy.py'
+              - 'scripts/tests/test_ci_reuse_policy.py'
+
+      - name: Verify identical-input PR success proofs
+        id: reuse
+        if: ${{ github.event_name == 'merge_group' }}
+        timeout-minutes: 2
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          CI_REUSE_WORKFLOW: .github/workflows/rustc-wrapper-smoke.yml
+          TESTED_SHA: ${{ github.sha }}
+          CI_REUSE_CONFIGURATION: ${{ toJSON(vars) }}
+          CI_REUSE_ROUTING_FILTERS: ${{ toJSON(steps.filter.outputs) }}
+        run: python3 scripts/ci-test-reuse.py lookup
 
   smoke:
     needs: changes
-    if: ${{ needs.changes.outputs.wrapper == 'true' }}
+    if: ${{ needs.changes.outputs.wrapper == 'true' && !(github.event_name == 'merge_group' && needs.changes.outputs.reuse_verified == 'true' && contains(fromJSON(needs.changes.outputs.reused_jobs || '[]'), 'smoke')) }}
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(vars.PINVOU_WINDOWS_ENABLED != 'false' && (vars.PINVOU_MACOS_ENABLED != 'false' && '{"include":[{"os":"macos-15"},{"os":"ubuntu-22.04"},{"os":"windows-latest"}]}' || '{"include":[{"os":"ubuntu-22.04"},{"os":"windows-latest"}]}') || (vars.PINVOU_MACOS_ENABLED != 'false' && '{"include":[{"os":"macos-15"},{"os":"ubuntu-22.04"}]}' || '{"include":[{"os":"ubuntu-22.04"}]}')) }}
@@ -278,3 +303,49 @@ jobs:
           chain_status=0
           CHAIN_PROBE_EXIT=42 RUSTC_WRAPPER_CHAIN="$PWD/chain-probe.exe" "$wrapper" rustc --version --verbose >/dev/null || chain_status=$?
           test "$chain_status" -eq 42
+
+  wrapper-gate:
+    name: wrapper-gate
+    needs: [changes, smoke]
+    if: ${{ always() }}
+    runs-on: ${{ fromJSON(vars.PINVOU_LINUX_LIGHT_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
+    timeout-minutes: 10
+    env:
+      CI_REUSE_WORKFLOW: .github/workflows/rustc-wrapper-smoke.yml
+    steps:
+      - uses: actions/checkout@v7
+      - name: Verify current workflow result
+        env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          TEST_RESULT: ${{ needs.smoke.result }}
+          APPLICABLE: ${{ needs.changes.outputs.wrapper }}
+          REUSED: ${{ github.event_name == 'merge_group' && needs.changes.outputs.reuse_verified == 'true' && contains(fromJSON(needs.changes.outputs.reused_jobs || '[]'), 'smoke') }}
+        run: |
+          set -euo pipefail
+          [[ "$CHANGES_RESULT" == success ]]
+          if [[ "$APPLICABLE" == true ]]; then
+            [[ "$TEST_RESULT" == success || ( "$TEST_RESULT" == skipped && "$REUSED" == true ) ]]
+          else
+            [[ "$TEST_RESULT" == skipped || "$TEST_RESULT" == success ]]
+          fi
+
+      - name: Record successful PR test inputs
+        id: success_proof
+        if: ${{ success() && github.event_name == 'pull_request' && github.event.pull_request.draft == false && github.event.pull_request.head.repo.full_name == github.repository }}
+        timeout-minutes: 2
+        env:
+          TESTED_SHA: ${{ github.sha }}
+          CI_REUSE_CONFIGURATION: ${{ toJSON(vars) }}
+          CI_REUSE_NEEDS: ${{ toJSON(needs) }}
+        run: python3 scripts/ci-test-reuse.py record
+
+      - name: PR test success proof transport
+        if: ${{ success() && steps.success_proof.outputs.directory != '' }}
+        timeout-minutes: 3
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: ci-success-proof-${{ github.run_attempt }}
+          path: ${{ steps.success_proof.outputs.directory }}/proof.json
+          if-no-files-found: error
+          retention-days: 2

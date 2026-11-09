@@ -18,6 +18,7 @@ ROOT = Path(__file__).resolve().parents[2]
 SPEC = importlib.util.spec_from_file_location('ci_test_reuse', ROOT/'scripts/ci-test-reuse.py')
 REUSE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(REUSE)
+TARGETS = ('account-platform-test', 'frontend-test')
 NOW = datetime(2026, 11, 9, 10, tzinfo=timezone.utc)
 
 
@@ -48,7 +49,7 @@ class ReuseTests(unittest.TestCase):
         cls.revisions = {name: getattr(fixture, name) for name in ('base', 'head', 'tree', 'tested', 'queued')}
         # These objects are immutable across the negative-evidence cases. Read
         # each object once instead of launching hundreds of identical Git reads.
-        cls.cached_git = staticmethod(lru_cache(None)(REUSE.git))
+        cls.cached_git = staticmethod(lru_cache(None)(fixture.git))
 
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -73,15 +74,15 @@ class ReuseTests(unittest.TestCase):
         self.expected = REUSE.fingerprint(self.queued, self.base, self.config)
         self.proof = {'schema': 1, 'repository': self.repository, 'pr': 7, 'run': 12, 'attempt': 1,
                       'head': self.head, 'tested': self.tested, 'base_ref': 'main', 'fingerprint': copy.deepcopy(self.expected),
-                      'created': NOW.isoformat(), 'jobs': sorted(REUSE.JOBS)}
+                      'created': NOW.isoformat(), 'jobs': sorted(TARGETS)}
         self.run = {'id': 12, 'run_attempt': 1, 'event': 'pull_request', 'conclusion': 'success', 'head_sha': self.head,
                     'path': REUSE.WORKFLOW, 'head_repository': {'full_name': self.repository},
                     'pull_requests': [{'number': 7, 'head': {'sha': self.head}, 'base': {'sha': self.base, 'ref': 'main'}}],
                     'updated_at': NOW.isoformat()}
         self.jobs = [{'name': 'required-gate', 'conclusion': 'success', 'run_id': 12}]
         self.jobs += [{'name': name, 'conclusion': 'success', 'run_id': 12, 'labels': ['ubuntu-22.04'],
-                       'steps': [{'name': step, 'conclusion': 'success'} for step in spec[1]]}
-                      for name, spec in REUSE.JOBS.items()]
+                       'steps': [{'name': step, 'conclusion': 'success'} for step in [item['name'] for item in REUSE.JOBS[name]['steps'] if item['name']]]}
+                      for name in TARGETS]
         self.artifact = {'id': 99, 'name': 'ci-success-proof-1', 'expired': False, 'size_in_bytes': 1024,
                          'workflow_run': {'id': 12, 'head_sha': self.head}}
         owner = self
@@ -101,7 +102,7 @@ class ReuseTests(unittest.TestCase):
         self.api = API()
 
     def git(self, *args):
-        return subprocess.check_output(['git', *args], cwd=self.root, text=True, encoding='utf-8', stderr=subprocess.DEVNULL, timeout=30).strip()
+        return subprocess.check_output(['git', *args], cwd=self.root, text=True, encoding='utf-8', stderr=subprocess.DEVNULL, timeout=120).strip()
 
     def archive(self):
         output = io.BytesIO()
@@ -114,7 +115,7 @@ class ReuseTests(unittest.TestCase):
 
     def test_different_commit_ids_with_identical_real_trees_reuse_success(self):
         self.assertNotEqual(self.tested, self.queued)
-        self.assertEqual(self.lookup(), (sorted(REUSE.JOBS), 12))
+        self.assertEqual(self.lookup(), (sorted(TARGETS), 12))
 
     def test_every_fingerprint_input_and_source_identity_invalidates(self):
         for key, bad in (('tree', 'f'*40), ('base', 'f'*40), ('configuration', 'bad'), ('policy', {}), ('selection', 'bad')):
@@ -164,12 +165,30 @@ class ReuseTests(unittest.TestCase):
         self.jobs[1]['labels']=['different-runner']
         self.assertNotIn(self.jobs[1]['name'],self.lookup()[0])
         self.jobs[1]['labels']=['ubuntu-22.04']
-        for step in self.jobs[1]['steps']:
+        for step in [item for item in self.jobs[1]['steps'] if item['name'] in (
+                'Token financial contracts on isolated PostgreSQL', 'Test and vet all Account Platform Go modules',
+                'Confirm Account test resource retirement')]:
             step['conclusion']='skipped'
             self.assertNotIn(self.jobs[1]['name'],self.lookup()[0])
             step['conclusion']='success'
         self.jobs[0]['conclusion']='failure'
         self.assertEqual(self.lookup(),([],None))
+
+    def test_matrix_reuse_requires_every_leg_and_every_queue_required_step(self):
+        self.proof['jobs'] = ['windows-rust-test']
+        policy = REUSE.JOBS['windows-rust-test']
+        gate = self.jobs[0]
+        self.jobs = [gate] + [
+            {'name': f'windows-rust-test ({phase})', 'conclusion': 'success', 'run_id': 12,
+             'labels': ['windows-latest'], 'steps': [{'name': step['name'], 'conclusion': 'success'}
+                                                    for step in policy['steps'] if step['name']]}
+            for phase in ('all-targets-check', 'regression')]
+        self.assertEqual(self.lookup(), (['windows-rust-test'], 12))
+        regression = self.jobs.pop()
+        self.assertEqual(self.lookup(), ([], None))
+        self.jobs.append(regression)
+        for step in regression['steps']: step['conclusion'] = 'skipped'
+        self.assertEqual(self.lookup(), ([], None))
 
     def test_queue_policy_edits_and_multi_member_shapes_force_execution(self):
         original=REUSE.git
@@ -209,6 +228,12 @@ class ReuseTests(unittest.TestCase):
         self.assertIsNone(redirected.get_header('Authorization'))
         with self.assertRaises(ValueError):
             REUSE.SafeRedirect().redirect_request(request,None,302,'',{},'http://example.invalid/proof')
+
+    def test_incomplete_paginated_job_evidence_is_rejected(self):
+        api = REUSE.GitHub('owner/repository', 'private-token')
+        with patch.object(api, 'request', side_effect=[{'total_count': 101, 'jobs': [{}] * 100},
+                                                     {'total_count': 101, 'jobs': []}]):
+            with self.assertRaises(ValueError): api.pages('actions/runs/12/jobs', 'jobs')
 
     def test_api_failure_falls_back_without_printing_token_or_configuration(self):
         event_path=self.root/'event.json';event_path.write_text(json.dumps(self.event),encoding='utf-8')

@@ -19,6 +19,15 @@ PUBLIC_SUBMODULE_VERIFIER = ROOT / "scripts/verify-public-submodule.sh"
 TAURI_MANIFEST = ROOT / "pinvou3-app/src-tauri/Cargo.toml"
 
 
+def _eval_default_without_reuse(code):
+    # Legacy route truth tables model the default without success evidence.
+    # Separate reuse regressions exercise verified and unverified skips.
+    code = re.sub(r"contains\(fromJSON\(needs\.changes\.outputs\.reused_jobs (?:\|\||or) '\[\]'\), '[\w-]+'\)", "False", code)
+    code = code.replace("needs.changes.outputs.reuse_verified", repr("False"))
+    code = re.sub(r"!(?!=)", "not ", code)
+    return eval(code, {"__builtins__": {}}, {})
+
+
 def _extract_quoted_paths(block):
     """提取 YAML 块中 `- 'path'` / `- "path"` 形式的路径条目(保持文本序)。
 
@@ -329,7 +338,7 @@ def _evaluate_github_condition(
     evaluated = re.sub(r"\btrue\b", "True", evaluated, flags=re.IGNORECASE)
     evaluated = re.sub(r"\bfalse\b", "False", evaluated, flags=re.IGNORECASE)
     evaluated = " ".join(evaluated.split())
-    return bool(eval(evaluated, {"__builtins__": {}}, {}))
+    return bool(_eval_default_without_reuse(evaluated))
 
 
 def _changes_block(text):
@@ -809,6 +818,16 @@ PINNED_GATE_STEP_NAMES = {
     ),
 }
 
+# Product checks retain their exact original route plus the verified-reuse guard.
+def _with_verified_reuse_guard(value, name):
+    expression = " ".join(value.removeprefix("${{").removesuffix("}}").split())
+    guard = "!(github.event_name == 'merge_group' && needs.changes.outputs.reuse_verified == 'true' && contains(fromJSON(needs.changes.outputs.reused_jobs || '[]'), '{name}'))".replace("{name}", name)
+    suffix = " && " + guard
+    if expression.endswith(suffix): expression = expression[:-len(suffix)]
+    return "${{ (" + expression + ") && " + guard + " }}"
+
+GATE_JOB_LEVEL_IFS = {name: _with_verified_reuse_guard(value, name) if name not in {'merge-authored-audit', 'fast-gate', 'commit-message', 'changes', 'backflow-portability', 'required-gate'} else value for name, value in GATE_JOB_LEVEL_IFS.items()}
+
 
 class CiGatePolicyTests(unittest.TestCase):
     @classmethod
@@ -853,7 +872,7 @@ class CiGatePolicyTests(unittest.TestCase):
                         condition = condition.replace("github.event.pull_request.draft", repr(draft))
                         condition = condition.replace("needs.changes.outputs.relay", repr(str(changed).lower()))
                         condition = condition.replace("&&", " and ").replace("||", " or ")
-                        self.assertEqual(bool(eval(condition, {"__builtins__": {}}, {})),
+                        self.assertEqual(bool(_eval_default_without_reuse(condition)),
                                          changed and action != "closed" and event in ("pull_request", "merge_group"))
         filters = re.search(r"\n            relay:\n((?:              .*\n)+)", self.workflow).group(1)
         paths = _extract_quoted_paths(filters)
@@ -2715,7 +2734,7 @@ class CiGatePolicyTests(unittest.TestCase):
         # lenient extractor and could hide a folded-scalar exclusion from this
         # sweep.
         bundle_chain_paths = re.split(
-            r"\n  [A-Za-z0-9_.-]+:", bundle_chain_paths, maxsplit=1
+            r"\n(?:  [A-Za-z0-9_.-]+:|      - (?:name|uses|id|run):)", bundle_chain_paths, maxsplit=1
         )[0]
         assert_group_paths_reachable(bundle_chain_paths, "bundle_chain")
 
@@ -3758,7 +3777,7 @@ class CiGatePolicyTests(unittest.TestCase):
         # success|skipped loop accepts it, and every routing pin above —
         # which asserts SUBSTRINGS of the condition — stays green. Pin the
         # exact full text of every gate job's job-level `if:` (extracted
-        # line-normalized, so pure re-indentation still matches but any
+        # whitespace-normalized for YAML folding, so re-indentation matches but any
         # content change does not): an appended `&& false`, a deleted
         # routing branch, or a flipped draft gate fails here.
         for job, expected in GATE_JOB_LEVEL_IFS.items():
@@ -3767,8 +3786,8 @@ class CiGatePolicyTests(unittest.TestCase):
                     _extract_job_block(self.pr_workflow, job)
                 )
                 self.assertEqual(
-                    actual,
-                    expected,
+                    re.findall(r"'(?:''|[^'])*'|[^\s]", actual),
+                    re.findall(r"'(?:''|[^'])*'|[^\s]", expected),
                     f"{job}'s job-level `if:` drifted from the pinned text; "
                     "an appended `&& false` (or a deleted routing branch) "
                     "silently skips the leg while required-gate accepts "
@@ -5275,7 +5294,7 @@ class CiGatePolicyTests(unittest.TestCase):
         changes = _without_yaml_comments(_changes_block(self.pr_workflow))
         self.assertIn("bundle_chain:", changes)
         bundle_chain_paths = _extract_quoted_paths(
-            changes.split("            bundle_chain:", maxsplit=1)[1]
+            _dorny_filter_group(changes, "bundle_chain")
         )
         self.assertTrue(bundle_chain_paths, "bundle_chain parsed to an empty path list")
         for entry in (
@@ -5345,7 +5364,7 @@ class CiGatePolicyTests(unittest.TestCase):
             [], leaked_groups,
             "a new filter group after bundle_chain must re-bound this extraction",
         )
-        bundle_chain_paths = _extract_quoted_paths(bundle_tail)
+        bundle_chain_paths = _extract_quoted_paths(_dorny_filter_group(changes, "bundle_chain"))
         self.assertNotIn(
             "pinvou3-app/src/**",
             bundle_chain_paths,
@@ -5792,7 +5811,7 @@ class CiGatePolicyTests(unittest.TestCase):
         console = _without_yaml_comments(_extract_job_block(self.pr_workflow, "update-release-console-test"))
         self.assertEqual(
             _extract_job_level_if(console),
-            "${{ !cancelled() && github.event.action != 'closed' && needs.changes.outputs.update_release_console == 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group') }}",
+            _with_verified_reuse_guard("${{ !cancelled() && github.event.action != 'closed' && needs.changes.outputs.update_release_console == 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group') }}", "update-release-console-test"),
         )
         self.assertRegex(console, r"(?m)^        run: bash scripts/ci-update-release-console-container\.sh$")
 
@@ -5985,7 +6004,7 @@ class CiGatePolicyTests(unittest.TestCase):
         self.assertIn("uses: dorny/paths-filter@v4", changes)
         self.assertIn("wrapper: ${{ steps.filter.outputs.wrapper }}", changes)
         self.assertIn("needs: changes", smoke)
-        self.assertIn("if: ${{ needs.changes.outputs.wrapper == 'true' }}", smoke)
+        self.assertIn("if: ${{ needs.changes.outputs.wrapper == 'true' && !(github.event_name == 'merge_group' && needs.changes.outputs.reuse_verified == 'true' && contains(fromJSON(needs.changes.outputs.reused_jobs || '[]'), 'smoke')) }}", smoke)
         self.assertIn("os: [macos-15, ubuntu-22.04, windows-latest]", smoke)
         # The 2026-10 concurrency fix: only PR runs cancel each other; queue
         # entries and main pushes must never cancel (queue entries carry the

@@ -178,7 +178,8 @@ jobs:
 
   version-consistency:
     name: version-consistency
-    if: ${{ (github.event_name == 'pull_request' && github.event.action != 'closed') || github.event_name == 'merge_group' || github.event_name == 'push' }}
+    needs: changes
+    if: ${{ ((github.event_name == 'pull_request' && github.event.action != 'closed') || github.event_name == 'merge_group' || github.event_name == 'push') && !(github.event_name == 'merge_group' && needs.changes.outputs.reuse_verified == 'true' && contains(fromJSON(needs.changes.outputs.reused_jobs || '[]'), 'version-consistency')) }}
     runs-on: ${{ fromJSON(vars.PINVOU_LINUX_LIGHT_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
     timeout-minutes: 5
     steps:
@@ -290,6 +291,8 @@ jobs:
             # All other platform paths stay included, including new ones.
             account_platform:
               - 'scripts/ci-test-reuse.py'
+              - 'scripts/ci-reuse-policy.py'
+              - 'scripts/tests/test_ci_reuse_policy.py'
               - 'scripts/tests/test_ci_test_reuse.py'
               - 'account-platform/**'
               - '!account-platform/docs/draft-model-confirmation.md'
@@ -667,6 +670,8 @@ jobs:
               - '.github/workflows/pr-check.yml'
             frontend:
               - 'scripts/ci-test-reuse.py'
+              - 'scripts/ci-reuse-policy.py'
+              - 'scripts/tests/test_ci_reuse_policy.py'
               - 'scripts/tests/test_ci_test_reuse.py'
               - 'scripts/tests/account-platform-invocation-environment.test.mjs'
               - 'account-platform/deploy/production/compose.personal.yaml'
@@ -877,10 +882,6 @@ jobs:
               - 'pinvou3-app/vite.config.mjs'
               - '.github/workflows/pr-check.yml'
 
-  # 回流可以在 Windows、macOS 或 Linux 上创建和处理。本 job 不替代实际处理
-  # 平台的本地 preflight，而是在 PR current head 与 Merge Queue 组合提交上都用
-  # 三平台执行一致的无依赖门禁。main push 不重复，重型产品测试仍按路径路由。
-
       - name: Verify identical-input PR success proofs
         id: reuse
         if: ${{ github.event_name == 'merge_group' }}
@@ -889,10 +890,14 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           TESTED_SHA: ${{ github.sha }}
           CI_REUSE_CONFIGURATION: ${{ toJSON(vars) }}
-          CI_REUSE_ROUTING: >-
-            {"frontend":${{ toJSON(steps.filter.outputs.frontend) }},"pet":${{ toJSON(steps.filter.outputs.pet) }},"account_platform":${{ toJSON(steps.filter.outputs.account_platform) }},"pure_release_backflow":${{ toJSON(steps.pr-rust-policy.outputs.pure_release_backflow || steps.queue-rust-policy.outputs.pure_release_backflow || 'false') }},"backflow_mode":${{ toJSON(steps.pr-rust-policy.outputs.backflow_mode || steps.queue-rust-policy.outputs.backflow_mode || 'full') }}}
+          CI_REUSE_ROUTING_FILTERS: ${{ toJSON(steps.filter.outputs) }}
+          CI_REUSE_ROUTING_POLICY: ${{ toJSON(steps.queue-rust-policy.outputs) }}
         run: python3 scripts/ci-test-reuse.py lookup
 
+
+  # 回流可以在 Windows、macOS 或 Linux 上创建和处理。本 job 不替代实际处理
+  # 平台的本地 preflight，而是在 PR current head 与 Merge Queue 组合提交上都用
+  # 三平台执行一致的无依赖门禁。main push 不重复，重型产品测试仍按路径路由。
 
   backflow-portability:
     name: backflow-portability (${{ matrix.os }})
@@ -1088,7 +1093,7 @@ jobs:
     # killed at the 45-minute budget before retirement); leave time for setup, a
     # complete pass and one largest-smoke retry while retaining a bounded job
     # lifetime.
-    if: ${{ !cancelled() && github.event.action != 'closed' && needs.changes.outputs.pure_release_backflow != 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group') && (needs.changes.outputs.frontend == 'true' || needs.changes.outputs.pet == 'true') && !(github.event_name == 'merge_group' && needs.changes.outputs.reuse_verified == 'true' && contains(fromJSON(needs.changes.outputs.reused_jobs || '[]'), 'frontend-test')) }}
+    if: ${{ (!cancelled() && github.event.action != 'closed' && needs.changes.outputs.pure_release_backflow != 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group') && (needs.changes.outputs.frontend == 'true' || needs.changes.outputs.pet == 'true')) && !(github.event_name == 'merge_group' && needs.changes.outputs.reuse_verified == 'true' && contains(fromJSON(needs.changes.outputs.reused_jobs || '[]'), 'frontend-test')) }}
     runs-on: ${{ fromJSON(vars.PINVOU_LINUX_MEDIUM_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
     timeout-minutes: 75
     defaults:
@@ -1263,7 +1268,7 @@ jobs:
   relay-test:
     name: relay-test
     needs: changes
-    if: ${{ !cancelled() && needs.changes.outputs.relay == 'true' && (github.event_name == 'merge_group' || github.event_name == 'pull_request') }}
+    if: ${{ (!cancelled() && needs.changes.outputs.relay == 'true' && (github.event_name == 'merge_group' || github.event_name == 'pull_request')) && !(github.event_name == 'merge_group' && needs.changes.outputs.reuse_verified == 'true' && contains(fromJSON(needs.changes.outputs.reused_jobs || '[]'), 'relay-test')) }}
     runs-on: ${{ fromJSON(vars.PINVOU_LINUX_MEDIUM_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
     timeout-minutes: 10
     steps:
@@ -1304,7 +1309,7 @@ jobs:
     needs: changes
     # Draft, Ready and the Merge Queue validate the same Go contracts. No
     # backflow exemption may suppress this independently deployable module.
-    if: ${{ !cancelled() && github.event.action != 'closed' && needs.changes.outputs.account_platform == 'true' && !(github.event_name == 'merge_group' && needs.changes.outputs.reuse_verified == 'true' && contains(fromJSON(needs.changes.outputs.reused_jobs || '[]'), 'account-platform-test')) }}
+    if: ${{ (!cancelled() && github.event.action != 'closed' && needs.changes.outputs.account_platform == 'true') && !(github.event_name == 'merge_group' && needs.changes.outputs.reuse_verified == 'true' && contains(fromJSON(needs.changes.outputs.reused_jobs || '[]'), 'account-platform-test')) }}
     runs-on: ${{ fromJSON(vars.PINVOU_LINUX_HEAVY_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
     # Four independent financial workers can use the heavy runner's CPU.
     # Preserve every worker's original limits and the finite overall budget.
@@ -1782,7 +1787,7 @@ jobs:
   windows-relay-dacl:
     name: windows-relay-dacl
     needs: changes
-    if: ${{ !cancelled() && needs.changes.outputs.relay == 'true' && (github.event_name == 'merge_group' || github.event_name == 'pull_request')  && vars.PINVOU_WINDOWS_ENABLED != 'false' }}
+    if: ${{ (!cancelled() && needs.changes.outputs.relay == 'true' && (github.event_name == 'merge_group' || github.event_name == 'pull_request') && vars.PINVOU_WINDOWS_ENABLED != 'false') && !(github.event_name == 'merge_group' && needs.changes.outputs.reuse_verified == 'true' && contains(fromJSON(needs.changes.outputs.reused_jobs || '[]'), 'windows-relay-dacl')) }}
     runs-on: ${{ fromJSON(vars.PINVOU_WINDOWS_LIGHT_RUNNER || vars.PINVOU_WINDOWS_RUNNER || '["windows-latest"]') }}
     timeout-minutes: 10
     steps:
@@ -1801,7 +1806,7 @@ jobs:
   windows-relay-tools-test:
     name: windows-relay-tools-test
     needs: changes
-    if: ${{ !cancelled() && github.event.action != 'closed' && needs.changes.outputs.relay == 'true' && (github.event_name == 'merge_group' || github.event_name == 'pull_request')  && vars.PINVOU_WINDOWS_ENABLED != 'false' }}
+    if: ${{ (!cancelled() && github.event.action != 'closed' && needs.changes.outputs.relay == 'true' && (github.event_name == 'merge_group' || github.event_name == 'pull_request') && vars.PINVOU_WINDOWS_ENABLED != 'false') && !(github.event_name == 'merge_group' && needs.changes.outputs.reuse_verified == 'true' && contains(fromJSON(needs.changes.outputs.reused_jobs || '[]'), 'windows-relay-tools-test')) }}
     runs-on: ${{ fromJSON(vars.PINVOU_WINDOWS_LIGHT_RUNNER || vars.PINVOU_WINDOWS_RUNNER || '["windows-latest"]') }}
     timeout-minutes: 10
     steps:
@@ -1820,7 +1825,7 @@ jobs:
   team-relay-hub-test:
     name: team-relay-hub-test
     needs: changes
-    if: ${{ !cancelled() && github.event.action != 'closed' && needs.changes.outputs.team_relay_hub == 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group') }}
+    if: ${{ (!cancelled() && github.event.action != 'closed' && needs.changes.outputs.team_relay_hub == 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group')) && !(github.event_name == 'merge_group' && needs.changes.outputs.reuse_verified == 'true' && contains(fromJSON(needs.changes.outputs.reused_jobs || '[]'), 'team-relay-hub-test')) }}
     runs-on: ${{ fromJSON(vars.PINVOU_LINUX_MEDIUM_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
     timeout-minutes: 10
     services:
@@ -1866,7 +1871,7 @@ jobs:
   update-release-console-test:
     name: update-release-console-test (Node ${{ matrix.node-version }})
     needs: changes
-    if: ${{ !cancelled() && github.event.action != 'closed' && needs.changes.outputs.update_release_console == 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group') }}
+    if: ${{ (!cancelled() && github.event.action != 'closed' && needs.changes.outputs.update_release_console == 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group')) && !(github.event_name == 'merge_group' && needs.changes.outputs.reuse_verified == 'true' && contains(fromJSON(needs.changes.outputs.reused_jobs || '[]'), 'update-release-console-test')) }}
     runs-on: ${{ fromJSON(vars.PINVOU_LINUX_MEDIUM_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
     timeout-minutes: 10
     strategy:
@@ -1915,7 +1920,7 @@ jobs:
     needs: changes
     # Ready PR/Queue/main 仅在发布链路相关路径变化时验证版本同步、
     # Tauri overlay 与各平台打包契约，不生成 deb/dmg/nsis。
-    if: ${{ !cancelled() && github.event.action != 'closed' && needs.changes.outputs.release_contract == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
+    if: ${{ (!cancelled() && github.event.action != 'closed' && needs.changes.outputs.release_contract == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)) && !(github.event_name == 'merge_group' && needs.changes.outputs.reuse_verified == 'true' && contains(fromJSON(needs.changes.outputs.reused_jobs || '[]'), 'release-contract-test')) }}
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(vars.PINVOU_WINDOWS_ENABLED != 'false' && (vars.PINVOU_MACOS_ENABLED != 'false' && '{"include":[{"os":"ubuntu-22.04"},{"os":"windows-latest"}]}' || '{"include":[{"os":"ubuntu-22.04"},{"os":"windows-latest"}]}') || (vars.PINVOU_MACOS_ENABLED != 'false' && '{"include":[{"os":"ubuntu-22.04"}]}' || '{"include":[{"os":"ubuntu-22.04"}]}')) }}
@@ -1981,15 +1986,14 @@ jobs:
     # keeps Official's existing paths shape for pull_request (drafts included,
     # same as before this change).
     if: >-
-      ${{
-        !cancelled() &&
+      ${{ (!cancelled() &&
         github.event.action != 'closed' &&
         needs.changes.outputs.pure_release_backflow != 'true' &&
         (
           github.event_name == 'push' ||
           needs.changes.outputs.knowledge_rust == 'true' ||
           needs.changes.outputs.knowledge_dependencies == 'true'
-        )
+        )) && !(github.event_name == 'merge_group' && needs.changes.outputs.reuse_verified == 'true' && contains(fromJSON(needs.changes.outputs.reused_jobs || '[]'), 'knowledge-rust'))
       }}
     runs-on: ${{ fromJSON(vars.PINVOU_LINUX_HEAVY_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
     # 冷跑时长未实测(~/.cargo 存档命中的运行 3–6min;cache-targets: false,
@@ -2124,15 +2128,14 @@ jobs:
     # stays paths-driven, and drafts keep the fmt + bounded-regression fast
     # pass via RUN_HEAVY_RUST_CHECKS below.
     if: >-
-      ${{
-        !cancelled() &&
+      ${{ (!cancelled() &&
         github.event.action != 'closed' &&
         needs.changes.outputs.pure_release_backflow != 'true' &&
         (
           github.event_name == 'push' ||
           needs.changes.outputs.rust_code == 'true' ||
           needs.changes.outputs.rust_dependencies == 'true'
-        )
+        )) && !(github.event_name == 'merge_group' && needs.changes.outputs.reuse_verified == 'true' && contains(fromJSON(needs.changes.outputs.reused_jobs || '[]'), 'rust-lint'))
       }}
     runs-on: ${{ fromJSON(vars.PINVOU_LINUX_HEAVY_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
     # 30m 上限在缓存冷启动下不够:Cargo cache 是 save-if main-only(PR 永不保存)。
@@ -2358,8 +2361,7 @@ jobs:
     # cache(防 concurrency pending 替换盲区),但只编译不执行测试(见下方 --no-run)。
     # Trusted same-repository Community backflows use their dedicated portability gate.
     if: >-
-      ${{
-        !cancelled() &&
+      ${{ (!cancelled() &&
         github.event.action != 'closed' &&
         (
           github.event_name == 'push' ||
@@ -2383,7 +2385,7 @@ jobs:
               )
             )
           )
-        )
+        )) && !(github.event_name == 'merge_group' && needs.changes.outputs.reuse_verified == 'true' && contains(fromJSON(needs.changes.outputs.reused_jobs || '[]'), 'rust-test'))
       }}
     runs-on: ${{ fromJSON(vars.PINVOU_LINUX_HEAVY_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
     # Tauri + fastembed + aws-lc-sys 全冷编译耗时长;设上限避免卡死 runner 占用。
@@ -2752,8 +2754,7 @@ jobs:
     name: cli-test
     needs: changes
     if: >-
-      ${{
-        !cancelled() &&
+      ${{ (!cancelled() &&
         github.event.action != 'closed' &&
         (
           github.event_name == 'push' ||
@@ -2772,7 +2773,7 @@ jobs:
               needs.changes.outputs.rust_full == 'true'
             )
           )
-        )
+        )) && !(github.event_name == 'merge_group' && needs.changes.outputs.reuse_verified == 'true' && contains(fromJSON(needs.changes.outputs.reused_jobs || '[]'), 'cli-test'))
       }}
     # 镜像按全仓单一镜像公约钉到发布基线(守卫:
     # test_ci_gate_policy.test_all_linux_jobs_pin_the_release_runner_image)。
@@ -2939,7 +2940,7 @@ jobs:
   windows-static-updater-contract:
     name: windows-static-updater-contract
     needs: changes
-    if: ${{ !cancelled() && github.event.action != 'closed' && needs.changes.outputs.windows_static_updater == 'true'  && vars.PINVOU_WINDOWS_ENABLED != 'false' }}
+    if: ${{ (!cancelled() && github.event.action != 'closed' && needs.changes.outputs.windows_static_updater == 'true' && vars.PINVOU_WINDOWS_ENABLED != 'false') && !(github.event_name == 'merge_group' && needs.changes.outputs.reuse_verified == 'true' && contains(fromJSON(needs.changes.outputs.reused_jobs || '[]'), 'windows-static-updater-contract')) }}
     runs-on: ${{ fromJSON(vars.PINVOU_WINDOWS_LIGHT_RUNNER || vars.PINVOU_WINDOWS_RUNNER || '["windows-latest"]') }}
     timeout-minutes: 10
     steps:
@@ -2989,8 +2990,7 @@ jobs:
     # matching Merge Queue combined tree, and main push (cumulative
     # verification independent of a single push's paths-filter).
     if: >-
-      ${{
-        !cancelled() &&
+      ${{ (!cancelled() &&
         github.event.action != 'closed' &&
         (
           github.event_name == 'push' ||
@@ -3009,7 +3009,7 @@ jobs:
               needs.changes.outputs.rust_full == 'true'
             )
           )
-        )
+        )) && !(github.event_name == 'merge_group' && needs.changes.outputs.reuse_verified == 'true' && contains(fromJSON(needs.changes.outputs.reused_jobs || '[]'), 'cli-lint'))
       }}
     runs-on: ${{ fromJSON(vars.PINVOU_LINUX_HEAVY_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
     timeout-minutes: 90
@@ -3180,7 +3180,7 @@ jobs:
     # It only runs on the queue when policy/API/diff resolution fails and mode=full,
     # so skipped cannot mask uncertainty.
     if: >-
-      ${{
+      ${{ (
         vars.PINVOU_WINDOWS_ENABLED != 'false' &&
         !cancelled() &&
         (
@@ -3208,7 +3208,7 @@ jobs:
             github.event_name == 'merge_group' &&
             needs.changes.outputs.backflow_mode == 'full'
           )
-        )
+        )) && !(github.event_name == 'merge_group' && needs.changes.outputs.reuse_verified == 'true' && contains(fromJSON(needs.changes.outputs.reused_jobs || '[]'), 'windows-rust-test'))
       }}
     # `cargo check --all-targets --features dev-tools` produces a metadata-only graph,
     # while `cargo test --lib --no-run` must codegen/link the default-feature test
@@ -3807,7 +3807,7 @@ jobs:
   windows-rustup-repair-test:
     name: windows-rustup-repair-test
     needs: changes
-    if: ${{ !cancelled() && github.event.action != 'closed' && needs.changes.outputs.pure_release_backflow != 'true' && needs.changes.outputs.windows_rustup_repair == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)  && vars.PINVOU_WINDOWS_ENABLED != 'false' }}
+    if: ${{ (!cancelled() && github.event.action != 'closed' && needs.changes.outputs.pure_release_backflow != 'true' && needs.changes.outputs.windows_rustup_repair == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && vars.PINVOU_WINDOWS_ENABLED != 'false') && !(github.event_name == 'merge_group' && needs.changes.outputs.reuse_verified == 'true' && contains(fromJSON(needs.changes.outputs.reused_jobs || '[]'), 'windows-rustup-repair-test')) }}
     runs-on: ${{ fromJSON(vars.PINVOU_WINDOWS_HEAVY_RUNNER || vars.PINVOU_WINDOWS_RUNNER || '["windows-latest"]') }}
     # smoke 保留引擎生产环境的 1500s 修复预算;"所有下载源都僵死"的病态情形
     # 必须在引擎自身的诊断输出之后再截断,而不是提前,因此上限要盖过
@@ -3894,7 +3894,7 @@ jobs:
     # The independent deployment regression below needs only Node itself
     # and does not extend this job's applicability.
     if: >-
-      ${{
+      ${{ (
         vars.PINVOU_MACOS_ENABLED != 'false' &&
         !cancelled() &&
         (
@@ -3911,7 +3911,7 @@ jobs:
               )
             )
           )
-        )
+        )) && !(github.event_name == 'merge_group' && needs.changes.outputs.reuse_verified == 'true' && contains(fromJSON(needs.changes.outputs.reused_jobs || '[]'), 'macos-rust-check'))
       }}
     runs-on: macos-15
     # A cold check build is slow (macOS runners slower still); same rationale
@@ -4402,7 +4402,7 @@ jobs:
   windows-codex-runtime-test:
     name: windows-codex-runtime-test
     needs: changes
-    if: ${{ !cancelled() && github.event.action != 'closed' && needs.changes.outputs.pure_release_backflow != 'true' && (needs.changes.outputs.windows_codex == 'true' || needs.changes.outputs.acp_runtime == 'true') && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)  && vars.PINVOU_WINDOWS_ENABLED != 'false' }}
+    if: ${{ (!cancelled() && github.event.action != 'closed' && needs.changes.outputs.pure_release_backflow != 'true' && (needs.changes.outputs.windows_codex == 'true' || needs.changes.outputs.acp_runtime == 'true') && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && vars.PINVOU_WINDOWS_ENABLED != 'false') && !(github.event_name == 'merge_group' && needs.changes.outputs.reuse_verified == 'true' && contains(fromJSON(needs.changes.outputs.reused_jobs || '[]'), 'windows-codex-runtime-test')) }}
     runs-on: ${{ fromJSON(vars.PINVOU_WINDOWS_LIGHT_RUNNER || vars.PINVOU_WINDOWS_RUNNER || '["windows-latest"]') }}
     timeout-minutes: 15
     steps:
@@ -4454,7 +4454,7 @@ jobs:
   windows-runtime-test:
     name: windows-runtime-test
     needs: changes
-    if: ${{ !cancelled() && github.event.action != 'closed' && needs.changes.outputs.pure_release_backflow != 'true' && needs.changes.outputs.windows_runtime == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)  && vars.PINVOU_WINDOWS_ENABLED != 'false' }}
+    if: ${{ (!cancelled() && github.event.action != 'closed' && needs.changes.outputs.pure_release_backflow != 'true' && needs.changes.outputs.windows_runtime == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && vars.PINVOU_WINDOWS_ENABLED != 'false') && !(github.event_name == 'merge_group' && needs.changes.outputs.reuse_verified == 'true' && contains(fromJSON(needs.changes.outputs.reused_jobs || '[]'), 'windows-runtime-test')) }}
     runs-on: ${{ fromJSON(vars.PINVOU_WINDOWS_LIGHT_RUNNER || vars.PINVOU_WINDOWS_RUNNER || '["windows-latest"]') }}
     timeout-minutes: 10
     steps:
@@ -4467,7 +4467,7 @@ jobs:
   macos-codex-runtime-test:
     name: macos-codex-runtime-test
     needs: changes
-    if: ${{ !cancelled() && github.event.action != 'closed' && needs.changes.outputs.pure_release_backflow != 'true' && needs.changes.outputs.acp_runtime == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)  && vars.PINVOU_MACOS_ENABLED != 'false' }}
+    if: ${{ (!cancelled() && github.event.action != 'closed' && needs.changes.outputs.pure_release_backflow != 'true' && needs.changes.outputs.acp_runtime == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && vars.PINVOU_MACOS_ENABLED != 'false') && !(github.event_name == 'merge_group' && needs.changes.outputs.reuse_verified == 'true' && contains(fromJSON(needs.changes.outputs.reused_jobs || '[]'), 'macos-codex-runtime-test')) }}
     runs-on: macos-15
     timeout-minutes: 20
     steps:
@@ -4515,7 +4515,7 @@ jobs:
     name: macos-cli-check
     needs: changes
     if: >-
-      ${{
+      ${{ (
         vars.PINVOU_MACOS_ENABLED != 'false' &&
         !cancelled() &&
         github.event.action != 'closed' &&
@@ -4536,7 +4536,7 @@ jobs:
               needs.changes.outputs.rust_full == 'true'
             )
           )
-        )
+        )) && !(github.event_name == 'merge_group' && needs.changes.outputs.reuse_verified == 'true' && contains(fromJSON(needs.changes.outputs.reused_jobs || '[]'), 'macos-cli-check'))
       }}
     runs-on: macos-15
     # A cold run compiles the whole workspace (the app crate path-dep included)
@@ -4615,8 +4615,7 @@ jobs:
     needs: changes
     # Temporary operational switch; unset/true restores the existing routing.
     if: >-
-      ${{
-        vars.PINVOU_LOONGARCH64_CHECK_ENABLED != 'false' &&
+      ${{ (vars.PINVOU_LOONGARCH64_CHECK_ENABLED != 'false' &&
         !cancelled() &&
         github.event.action != 'closed' &&
         (
@@ -4638,7 +4637,7 @@ jobs:
               needs.changes.outputs.knowledge_rust == 'true'
             )
           )
-        )
+        )) && !(github.event_name == 'merge_group' && needs.changes.outputs.reuse_verified == 'true' && contains(fromJSON(needs.changes.outputs.reused_jobs || '[]'), 'rust-loongarch64-check'))
       }}
     runs-on: ${{ fromJSON(vars.PINVOU_LINUX_HEAVY_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
     # 冷缓存要交叉编译三个 workspace(含 700+ crate 的 src-tauri)加下载
@@ -4881,8 +4880,7 @@ jobs:
           FAST_GATE_RESULT: ${{ needs.fast-gate.result }}
           MERGE_AUTHORED_AUDIT_RESULT: ${{ needs.merge-authored-audit.result }}
           CI_REUSE_VERIFIED: ${{ needs.changes.outputs.reuse_verified }}
-          ACCOUNT_PLATFORM_REUSED: ${{ contains(fromJSON(needs.changes.outputs.reused_jobs || '[]'), 'account-platform-test') }}
-          FRONTEND_REUSED: ${{ contains(fromJSON(needs.changes.outputs.reused_jobs || '[]'), 'frontend-test') }}
+          CI_REUSE_IDS: ${{ join(fromJSON(needs.changes.outputs.reused_jobs || '[]'), ',') }}
           FRONTEND_RESULT: ${{ needs.frontend-test.result }}
           RELAY_RESULT: ${{ needs.relay-test.result }}
           ACCOUNT_PLATFORM_RESULT: ${{ needs.account-platform-test.result }}
@@ -4913,15 +4911,39 @@ jobs:
           BACKFLOW_MODE: ${{ needs.changes.outputs.backflow_mode }}
           WINDOWS_RUST_REQUIRED_BY_POLICY: ${{ vars.PINVOU_WINDOWS_ENABLED != 'false' && ((github.event_name == 'merge_group' && needs.changes.outputs.backflow_mode == 'full') || (github.event_name == 'pull_request' && github.event.pull_request.draft == false && (needs.changes.outputs.backflow_mode == 'full' || needs.changes.outputs.backflow_mode == 'windows_full'))) }}
         run: |
-          # Only a skipped allowlisted job with verified queue evidence can be
-          # normalized. Failures/cancellations and PR runs remain strict.
+          # A verified source covers every required queue step/matrix leg.
+          # Only skipped executions are normalized; failures remain failures.
           if [[ "$GITHUB_EVENT_NAME" == merge_group && "${CI_REUSE_VERIFIED:-false}" == true ]]; then
-            if [[ "$ACCOUNT_PLATFORM_RESULT" == skipped && "${ACCOUNT_PLATFORM_REUSED:-false}" == true ]]; then
-              ACCOUNT_PLATFORM_RESULT=success
-            fi
-            if [[ "$FRONTEND_RESULT" == skipped && "${FRONTEND_REUSED:-false}" == true ]]; then
-              FRONTEND_RESULT=success
-            fi
+            for binding in \
+              "version-consistency:VERSION_CONSISTENCY_RESULT" \
+              "frontend-test:FRONTEND_RESULT" \
+              "relay-test:RELAY_RESULT" \
+              "account-platform-test:ACCOUNT_PLATFORM_RESULT" \
+              "windows-relay-dacl:WINDOWS_RELAY_DACL_RESULT" \
+              "windows-relay-tools-test:WINDOWS_RELAY_RESULT" \
+              "team-relay-hub-test:TEAM_RELAY_HUB_RESULT" \
+              "update-release-console-test:UPDATE_RELEASE_CONSOLE_RESULT" \
+              "release-contract-test:RELEASE_CONTRACT_RESULT" \
+              "knowledge-rust:KNOWLEDGE_RUST_RESULT" \
+              "rust-lint:RUST_LINT_RESULT" \
+              "rust-test:RUST_RESULT" \
+              "cli-test:CLI_TEST_RESULT" \
+              "cli-lint:CLI_LINT_RESULT" \
+              "windows-rust-test:WINDOWS_RUST_RESULT" \
+              "macos-rust-check:MACOS_RUST_CHECK_RESULT" \
+              "windows-static-updater-contract:WINDOWS_STATIC_UPDATER_RESULT" \
+              "macos-codex-runtime-test:MACOS_CODEX_RESULT" \
+              "macos-cli-check:MACOS_CLI_RESULT" \
+              "rust-loongarch64-check:RUST_LOONGARCH64_CHECK_RESULT" \
+              "windows-codex-runtime-test:WINDOWS_CODEX_RESULT" \
+              "windows-runtime-test:WINDOWS_RUNTIME_RESULT" \
+              "windows-rustup-repair-test:WINDOWS_RUSTUP_REPAIR_RESULT"; do
+              reused_job="${binding%%:*}"
+              result_variable="${binding#*:}"
+              if [[ "${!result_variable}" == skipped && ",${CI_REUSE_IDS:-}," == *",$reused_job,"* ]]; then
+                printf -v "$result_variable" '%s' success
+              fi
+            done
           fi
           if [[ "${LOONGARCH64_CHECK_ENABLED:-true}" == false ]]; then
             echo "::notice::LoongArch64 cross check temporarily disabled by PINVOU_LOONGARCH64_CHECK_ENABLED=false"

@@ -1112,17 +1112,34 @@ test("queue reuse normalizes only verified skips and never failed executions", (
   ]) {
     const result = spawnSync(bash, ["-c", run], { encoding: "utf8", timeout: 30_000, windowsHide: true,
       env: { ...baseEnv, GITHUB_EVENT_NAME: event, CI_REUSE_VERIFIED: verified,
-        ACCOUNT_PLATFORM_REUSED: listed, ACCOUNT_PLATFORM_RESULT: status } });
+        CI_REUSE_IDS: listed === "true" ? "account-platform-test" : "", ACCOUNT_PLATFORM_RESULT: status } });
     assert.equal(result.status, accepted ? 0 : 1, `${event}/${verified}/${listed}/${status}: ${result.stderr}`);
   }
   const lookup = namedStep(jobBlock("changes"), "Verify identical-input PR success proofs");
   assert.match(lookup, /if: \$\{\{ github.event_name == 'merge_group' \}\}/);
   assert.match(lookup, /timeout-minutes: 2/);
   assert.match(lookup, /python3 scripts\/ci-test-reuse.py lookup/);
-  for (const name of ["account-platform-test", "frontend-test"]) {
+  const productJobs = ["version-consistency", "account-platform-test", "frontend-test", "relay-test",
+    "windows-relay-dacl", "windows-relay-tools-test", "team-relay-hub-test", "update-release-console-test",
+    "release-contract-test", "knowledge-rust", "rust-lint", "rust-test", "cli-test", "cli-lint",
+    "windows-static-updater-contract", "windows-rust-test", "windows-rustup-repair-test", "macos-rust-check",
+    "windows-codex-runtime-test", "windows-runtime-test", "macos-codex-runtime-test", "macos-cli-check", "rust-loongarch64-check"];
+  for (const name of productJobs) {
     const block = jobBlock(name);
     assert.ok(block.includes("needs.changes.outputs.reuse_verified == 'true'"));
     assert.ok(block.includes(`contains(fromJSON(needs.changes.outputs.reused_jobs || '[]'), '${name}')`));
+  }
+  const bindings = [...run.matchAll(/"([\w-]+):([A-Z0-9_]+_RESULT)"/g)];
+  assert.deepEqual(bindings.map(match => match[1]).sort(), [...productJobs].sort());
+  const allReused = { ...baseEnv, GITHUB_EVENT_NAME: "merge_group", CI_REUSE_VERIFIED: "true",
+    CI_REUSE_IDS: productJobs.join(","), WINDOWS_RUST_REQUIRED_BY_POLICY: "true",
+    RELAY_REQUIRED_BY_POLICY: "true", BACKFLOW_MODE: "full" };
+  for (const match of bindings) allReused[match[2]] = "skipped";
+  for (const [override, accepted] of [[{}, true], [{ RUST_RESULT: "failure" }, false],
+    [{ FAST_GATE_RESULT: "skipped", CI_REUSE_IDS: productJobs.join(",") + ",fast-gate" }, false]]) {
+    const result = spawnSync(bash, ["-c", run], { encoding: "utf8", timeout: 30_000, windowsHide: true,
+      env: { ...allReused, ...override } });
+    assert.equal(result.status, accepted ? 0 : 1, result.stderr);
   }
   const producer = namedStep(gate, "Record successful PR test inputs");
   assert.ok(producer.includes("success() && github.event_name == 'pull_request'"));

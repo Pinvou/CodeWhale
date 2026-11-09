@@ -2,6 +2,7 @@ name: evidence-validator-container
 
 on:
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
     paths:
       - 'account-platform/cmd/evidence-image-validator/**'
       - 'account-platform/internal/billing/evidence_image_validator_client*.go'
@@ -10,14 +11,59 @@ on:
       - 'account-platform/go.mod'
       - 'account-platform/go.sum'
       - '.github/workflows/evidence-validator-container.yml'
+      - 'scripts/ci-test-reuse.py'
+      - 'scripts/ci-reuse-policy.py'
+      - 'scripts/tests/test_ci_reuse_policy.py'
   merge_group:
   workflow_dispatch:
 
 permissions:
+  actions: read
+  pull-requests: read
   contents: read
 
 jobs:
+  changes:
+    runs-on: ${{ fromJSON(vars.PINVOU_LINUX_LIGHT_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
+    timeout-minutes: 10
+    outputs:
+      validator: ${{ steps.filter.outputs.validator }}
+      reused_jobs: ${{ steps.reuse.outputs.reused_jobs || '[]' }}
+      reuse_verified: ${{ steps.reuse.outputs.reuse_verified || 'false' }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: dorny/paths-filter@v4
+        id: filter
+        with:
+          filters: |
+            validator:
+              - 'account-platform/cmd/evidence-image-validator/**'
+              - 'account-platform/internal/billing/evidence_image_validator_client*.go'
+              - 'account-platform/internal/billing/evidence_image_validator_container_test.go'
+              - 'account-platform/Dockerfile.evidence-*validator*'
+              - 'account-platform/go.mod'
+              - 'account-platform/go.sum'
+              - '.github/workflows/evidence-validator-container.yml'
+              - 'scripts/ci-test-reuse.py'
+              - 'scripts/ci-reuse-policy.py'
+              - 'scripts/tests/test_ci_reuse_policy.py'
+      - name: Verify identical-input PR success proofs
+        id: reuse
+        if: ${{ github.event_name == 'merge_group' }}
+        timeout-minutes: 2
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          CI_REUSE_WORKFLOW: .github/workflows/evidence-validator-container.yml
+          TESTED_SHA: ${{ github.sha }}
+          CI_REUSE_CONFIGURATION: ${{ toJSON(vars) }}
+          CI_REUSE_ROUTING_FILTERS: ${{ toJSON(steps.filter.outputs) }}
+        run: python3 scripts/ci-test-reuse.py lookup
+
   linux-amd64:
+    needs: changes
+    if: ${{ (github.event_name == 'workflow_dispatch' || needs.changes.outputs.validator == 'true') && !(github.event_name == 'merge_group' && needs.changes.outputs.reuse_verified == 'true' && contains(fromJSON(needs.changes.outputs.reused_jobs || '[]'), 'linux-amd64')) }}
     runs-on: ${{ fromJSON(vars.PINVOU_LINUX_MEDIUM_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
     timeout-minutes: 40
     steps:
@@ -40,3 +86,49 @@ jobs:
           docker buildx version
           python -I -B account-platform/cmd/evidence-image-validator/test_container_ci.py
           python -I -B account-platform/cmd/evidence-image-validator/container_ci.py
+
+  validator-gate:
+    name: validator-gate
+    needs: [changes, linux-amd64]
+    if: ${{ always() }}
+    runs-on: ${{ fromJSON(vars.PINVOU_LINUX_LIGHT_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
+    timeout-minutes: 10
+    env:
+      CI_REUSE_WORKFLOW: .github/workflows/evidence-validator-container.yml
+    steps:
+      - uses: actions/checkout@v7
+      - name: Verify current workflow result
+        env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          TEST_RESULT: ${{ needs.linux-amd64.result }}
+          APPLICABLE: ${{ needs.changes.outputs.validator }}
+          REUSED: ${{ github.event_name == 'merge_group' && needs.changes.outputs.reuse_verified == 'true' && contains(fromJSON(needs.changes.outputs.reused_jobs || '[]'), 'linux-amd64') }}
+        run: |
+          set -euo pipefail
+          [[ "$CHANGES_RESULT" == success ]]
+          if [[ "$APPLICABLE" == true ]]; then
+            [[ "$TEST_RESULT" == success || ( "$TEST_RESULT" == skipped && "$REUSED" == true ) ]]
+          else
+            [[ "$TEST_RESULT" == skipped || "$TEST_RESULT" == success ]]
+          fi
+
+      - name: Record successful PR test inputs
+        id: success_proof
+        if: ${{ success() && github.event_name == 'pull_request' && github.event.pull_request.draft == false && github.event.pull_request.head.repo.full_name == github.repository }}
+        timeout-minutes: 2
+        env:
+          TESTED_SHA: ${{ github.sha }}
+          CI_REUSE_CONFIGURATION: ${{ toJSON(vars) }}
+          CI_REUSE_NEEDS: ${{ toJSON(needs) }}
+        run: python3 scripts/ci-test-reuse.py record
+
+      - name: PR test success proof transport
+        if: ${{ success() && steps.success_proof.outputs.directory != '' }}
+        timeout-minutes: 3
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: ci-success-proof-${{ github.run_attempt }}
+          path: ${{ steps.success_proof.outputs.directory }}/proof.json
+          if-no-files-found: error
+          retention-days: 2

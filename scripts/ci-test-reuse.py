@@ -12,6 +12,7 @@ import json
 import os
 from pathlib import Path
 import re
+import runpy
 import subprocess
 import tempfile
 import time
@@ -20,14 +21,22 @@ import urllib.request
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
-WORKFLOW = '.github/workflows/pr-check.yml'
-POLICY = (WORKFLOW, 'scripts/ci-test-reuse.py')
+WORKFLOW = os.environ.get('CI_REUSE_WORKFLOW', '.github/workflows/pr-check.yml')
+PROFILES = {
+    '.github/workflows/pr-check.yml': ('required-gate', None),
+    '.github/workflows/rustc-wrapper-smoke.yml': ('wrapper-gate', {'smoke'}),
+    '.github/workflows/evidence-validator-container.yml': ('validator-gate', {'linux-amd64'}),
+}
+if WORKFLOW not in PROFILES:
+    raise ValueError('unsupported workflow proof profile')
+POLICY = (WORKFLOW, 'scripts/ci-test-reuse.py', 'scripts/ci-reuse-policy.py')
 MAX_AGE = 24 * 60 * 60
 MAX_BYTES = 65536
-JOBS = {
-    'account-platform-test': ('HEAVY', ('Test and vet all Account Platform Go modules', 'Token financial contracts on isolated PostgreSQL', 'Confirm Account test resource retirement')),
-    'frontend-test': ('MEDIUM', ('前端逻辑测试 (pet 全套 + diff parser + markdown)', 'Ready PR 定向浏览器 smoke', 'Confirm test resource retirement')),
-}
+PLAN = runpy.run_path(str(ROOT / 'scripts/ci-reuse-policy.py'))
+WORKFLOW_SOURCE = (ROOT / WORKFLOW).read_text(encoding='utf-8')
+GATE_NAME, PROFILE_JOBS = PROFILES[WORKFLOW]
+JOBS = PLAN['catalog'](WORKFLOW_SOURCE, jobs=PROFILE_JOBS)
+ROUTING_KEYS = PLAN['routing_keys'](WORKFLOW_SOURCE)
 
 
 def git(*args):
@@ -58,8 +67,9 @@ def parents(revision):
 
 
 def selection(outputs):
-    return {key: outputs.get(key, 'full' if key == 'backflow_mode' else 'false')
-            for key in ('frontend', 'pet', 'account_platform', 'pure_release_backflow', 'backflow_mode')}
+    # All route and policy outputs matter, including Rust/full-regression and
+    # matrix routing. Reuse's own outputs are observations, not test inputs.
+    return {key: outputs.get(key, 'full' if key == 'backflow_mode' else 'false') for key in ROUTING_KEYS}
 
 
 def fingerprint(tested, base, configuration, routing=None):
@@ -134,12 +144,16 @@ class GitHub:
 
     def pages(self, path, field, *, pages=3):
         result = []
+        total = None
         for page in range(1, pages + 1):
             value = self.request(path + ('&' if '?' in path else '?') + f'per_page=100&page={page}')
             items = value[field]
+            total = value.get('total_count', total)
             result.extend(items)
             if len(items) < 100:
                 break
+        if total is not None and len(result) < total:
+            raise ValueError('incomplete evidence pagination')
         return result
 
 
@@ -151,15 +165,7 @@ def read_proof(raw):
         return json.loads(archive.read(members[0]))
 
 
-def runner_labels(configuration, pool):
-    labels = json.loads(configuration.get(f'PINVOU_LINUX_{pool}_RUNNER')
-                        or configuration.get('PINVOU_LINUX_RUNNER') or '["ubuntu-22.04"]')
-    if not isinstance(labels, list) or not labels or any(not isinstance(label, str) or not label for label in labels):
-        raise ValueError('invalid runner contract')
-    return sorted(labels)
-
-
-def verified_jobs(proof, run, jobs, expected, repository, pr_number, head, now, configuration):
+def verified_jobs(proof, run, jobs, expected, repository, pr_number, head, now, configuration, routing, head_ref):
     if (proof.get('schema') != 1 or proof.get('repository') != repository
             or proof.get('pr') != pr_number or proof.get('run') != run['id']
             or proof.get('attempt') != run['run_attempt'] or proof.get('head') != head
@@ -168,21 +174,16 @@ def verified_jobs(proof, run, jobs, expected, repository, pr_number, head, now, 
     age = (now - datetime.fromisoformat(proof['created'])).total_seconds()
     if not 0 <= age <= MAX_AGE or not isinstance(proof.get('jobs'), list) or len(set(proof['jobs'])) != len(proof['jobs']):
         return []
-    gates = [job for job in jobs if job.get('name') == 'required-gate']
+    gates = [job for job in jobs if job.get('name') == GATE_NAME]
     if len(gates) != 1 or gates[0].get('conclusion') != 'success':
         return []
     result = []
     for name in proof['jobs']:
         if name not in JOBS:
             return []
-        matches = [job for job in jobs if job.get('name') == name]
-        if len(matches) != 1 or matches[0].get('conclusion') != 'success' or matches[0].get('run_id') != run['id']:
-            continue
-        if sorted(matches[0].get('labels', [])) != runner_labels(configuration, JOBS[name][0]):
-            continue
-        steps = matches[0].get('steps', [])
-        if all(sum(step.get('name') == required and step.get('conclusion') == 'success' for step in steps) == 1
-               for required in JOBS[name][1]):
+        candidates = [job for job in jobs if PLAN['matches'](JOBS[name], job.get('name', '')) is not None]
+        if (candidates and all(job.get('run_id') == run['id'] for job in candidates)
+                and PLAN['complete_group'](JOBS[name], candidates, routing, head_ref, configuration)):
             result.append(name)
     return sorted(result)
 
@@ -196,7 +197,13 @@ def lookup(event, configuration, api, *, now=None):
     tested, base = sha(group['head_sha']), sha(group['base_sha'])
     if tested != sha(os.environ['TESTED_SHA']):
         return [], None
-    expected = fingerprint(tested, base, configuration, json.loads(os.environ.get('CI_REUSE_ROUTING', '{}')))
+    routing = json.loads(os.environ.get('CI_REUSE_ROUTING_FILTERS', os.environ.get('CI_REUSE_ROUTING', '{}')))
+    policy_outputs = json.loads(os.environ.get('CI_REUSE_ROUTING_POLICY', '{}'))
+    if 'CI_REUSE_ROUTING_FILTERS' in os.environ:
+        routing = {key: value for key, value in routing.items() if key != 'changes' and not key.endswith('_files')}
+        routing.update({key: policy_outputs.get(key) or fallback for key, fallback in
+                        (('trusted_backflow', 'false'), ('backflow_mode', 'full'), ('pure_release_backflow', 'false'))})
+    expected = fingerprint(tested, base, configuration, routing)
     # A PR which edits the verifier or workflow cannot authorize its own reuse.
     if any(expected['policy'][path] != git('rev-parse', f'{base}:{path}') for path in POLICY):
         return [], None
@@ -212,7 +219,7 @@ def lookup(event, configuration, api, *, now=None):
     head = sha(pr['head']['sha'])
     if parents(tested) != [base, head]:
         return [], None  # Combined/multi-member queues retain full validation.
-    runs = api.request('actions/workflows/pr-check.yml/runs?event=pull_request&status=success&head_sha=' + head + '&per_page=30')['workflow_runs']
+    runs = api.request('actions/workflows/' + WORKFLOW.rsplit('/', 1)[1] + '/runs?event=pull_request&status=success&head_sha=' + head + '&per_page=30')['workflow_runs']
     for run in runs[:30]:
         if (run.get('event') != 'pull_request' or run.get('conclusion') != 'success'
                 or run.get('head_sha') != head or run.get('path') != WORKFLOW
@@ -243,7 +250,7 @@ def lookup(event, configuration, api, *, now=None):
                 or [item.get('sha') for item in commit.get('parents', [])] != [base, head]):
             continue
         jobs = api.pages(f'actions/runs/{run_id}/attempts/{attempt}/jobs', 'jobs')
-        reusable = verified_jobs(proof, run, jobs, expected, repository, pr_number, head, now, configuration)
+        reusable = verified_jobs(proof, run, jobs, expected, repository, pr_number, head, now, configuration, routing, group['head_ref'])
         if reusable:
             return reusable, run_id
     return [], None
