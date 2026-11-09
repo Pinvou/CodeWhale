@@ -552,3 +552,13 @@
 
 .adm-order-detail-header { display: grid; gap: .5rem; justify-items: start; margin-bottom: 1rem; }
 .adm-order-detail-header code { overflow-wrap: break-word; }
+
+/* Admin model detail: keep call evidence with the model identity. */
+.adm-restored-shell .adm-model-detail-header>.adm-model-call-summary{grid-column:1/-1;display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:12px;min-width:0;padding:12px 14px;border:1px solid var(--adm-line);border-radius:10px;background:var(--adm-soft)}
+.adm-restored-shell .adm-model-detail-header>.adm-model-call-summary.is-blocked{border-left:4px solid var(--adm-warning)}
+.adm-restored-shell .adm-model-call-summary h3{margin:0 0 3px;font-size:14px;line-height:1.4}
+.adm-restored-shell .adm-model-call-summary p,.adm-restored-shell .adm-model-call-snapshot{margin:0;color:var(--adm-muted);overflow-wrap:break-word}
+.adm-restored-shell .adm-model-detail-header>.adm-model-call-snapshot{grid-column:1/-1;font-size:12px}
+.adm-restored-shell .adm-model-call-summary>button{min-height:44px;white-space:normal}
+.adm-restored-shell .adm-model-call-summary>button:focus{outline:3px solid var(--adm-primary);outline-offset:2px}
+@media(max-width:480px){.adm-restored-shell .adm-model-detail-header>.adm-model-call-summary{grid-template-columns:minmax(0,1fr)}.adm-restored-shell .adm-model-call-summary>button{width:100%}}
