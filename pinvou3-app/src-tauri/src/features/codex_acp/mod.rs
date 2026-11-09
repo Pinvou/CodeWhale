@@ -1230,6 +1230,9 @@ struct PendingPermission {
 
 impl PendingPermission {
     fn respond(self, response: RequestPermissionResponse) -> Result<()> {
+        // Answering or cancelling this callback ends the user's waiting time.
+        // The remote task's immutable total deadline uses a separate clock.
+        stall::mark_activity(&self.activity);
         if let Some(responder) = self.sdk_responder {
             if self.response_tx.is_closed() {
                 bail!("remote_permission_closed");
@@ -10031,7 +10034,7 @@ mod tests {
                         risk_level: "high".into(),
                         target_scope: "workspace-0001".into(),
                         preview: "test approval".into(),
-                        expires_at_ms: 61_000,
+                        expires_at_ms: 301_000,
                     },
                     1_000,
                 )
@@ -10048,6 +10051,12 @@ mod tests {
                 )
                 .unwrap();
 
+            let activity = stall::new_activity_clock();
+            *activity.lock() = Instant::now() - Duration::from_secs(200);
+            assert_eq!(
+                stall::stall_step(stall::quiet_for(&activity), false, None),
+                stall::StallStep::Notice,
+            );
             let (response_tx, response_rx) = oneshot::channel();
             let request = PendingPermission {
                 callback_instance: Arc::new(()),
@@ -10069,7 +10078,7 @@ mod tests {
                 remote_projection: None,
                 generation: 1,
                 turn_id: None,
-                activity: stall::new_activity_clock(),
+                activity: Arc::clone(&activity),
                 bridge: None,
                 response_tx,
                 sdk_responder: Some(sdk_responder),
@@ -10126,6 +10135,10 @@ mod tests {
                         Some(&authority),
                     );
                     assert!(pending.is_empty());
+                    assert_eq!(
+                        stall::stall_step(stall::quiet_for(&activity), false, None),
+                        stall::StallStep::Idle,
+                    );
                     assert!(authority.callback_was_cancelled(&lease, task_id, &approval));
                     assert!(!remote_turn::permission_dispatch_unresolved(
                         &authority,
@@ -10153,6 +10166,10 @@ mod tests {
                 assert_eq!(response["id"], 1);
                 assert_eq!(response["result"]["outcome"]["outcome"], "cancelled");
                 watcher.await.unwrap();
+                assert_eq!(
+                    stall::stall_step(stall::quiet_for(&activity), false, None),
+                    stall::StallStep::Idle,
+                );
                 assert!(pending.lock().await.is_empty());
                 assert_eq!(authority.view(&approval).unwrap().state, "denied");
                 assert!(!authority.allow_delivery_observed(&lease, task_id, &approval));
@@ -10185,6 +10202,10 @@ mod tests {
             });
             // Even when SDK delivery fails, the callback cleanup gets its wake signal.
             assert!(response_rx.await.is_ok());
+            assert_eq!(
+                stall::stall_step(stall::quiet_for(&activity), false, None),
+                stall::StallStep::Idle,
+            );
             assert_eq!(
                 authority.allow_delivery_observed(&lease, task_id, &approval),
                 !disconnect
