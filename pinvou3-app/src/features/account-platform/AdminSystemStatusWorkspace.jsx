@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { localizedAccountPlatformError } from "./error-localization.js";
 import { formatSystemCount, requireSystemStatus, systemDiagnosticMessage } from "./admin-system-status.js";
-import { systemGroupsCopy } from '../../shared/admin-system-presentation-i18n.js';
+import { systemGroupsCopy, systemDiagnosticCopy } from '../../shared/admin-system-presentation-i18n.js';
 import './admin-system-presentation.css';
 const NO_PERMISSIONS = [];
 
@@ -94,6 +94,12 @@ export function AdminSystemStatusWorkspace({
       : "—";
   const date = (value) =>
     value && Number.isFinite(Date.parse(value)) ? new Date(value).toLocaleString(language) : "—";
+  const diagnostic = (_value, item) => {
+    const message = systemDiagnosticMessage(item, labels);
+    if (typeof message === "string" && message.trim()) return message;
+    const words = systemDiagnosticCopy[language] || systemDiagnosticCopy.zh;
+    return <span className="adm-muted">{item.status === "HEALTHY" && !item.code ? words.healthy : words.unavailable}</span>;
+  };
   const status = visible.status;
   const checkedAt = typeof status?.checked_at === "string" && Number.isFinite(Date.parse(status.checked_at)) ? status.checked_at : null;
   const snapshotHelp = <p className="adm-system-snapshot-help">{labels.snapshotHelp}</p>;
@@ -173,7 +179,7 @@ export function AdminSystemStatusWorkspace({
                   labels.latency,
                   (value) => { const rendered = count(value); return rendered === "—" ? rendered : `${rendered} ms`; },
                 ],
-                ["message", labels.message, (_value, item) => systemDiagnosticMessage(item, labels)],
+                ["message", labels.message, diagnostic],
               ]}
             />
             <ReadTable
@@ -186,7 +192,7 @@ export function AdminSystemStatusWorkspace({
                 ["pending_events", labels.pending, count],
                 ["dead_lettered_events", labels.deadLetters, count],
                 ["oldest_pending_seconds", labels.oldest, age],
-                ["message", labels.message, (_value, item) => systemDiagnosticMessage(item, labels)],
+                ["message", labels.message, diagnostic],
               ]}
             />
             <ReadTable
@@ -199,7 +205,7 @@ export function AdminSystemStatusWorkspace({
               columns={[
                 ["source", labels.source, name],
                 ["resource", labels.resource, (value) => <code>{value || "—"}</code>],
-                ["message", labels.message, (_value, item) => systemDiagnosticMessage(item, labels)],
+                ["message", labels.message, diagnostic],
                 ["updated_at", labels.updated, date],
               ]}
             />
