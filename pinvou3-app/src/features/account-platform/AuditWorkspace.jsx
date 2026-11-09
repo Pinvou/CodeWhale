@@ -76,6 +76,7 @@ function Empty({ copy }) {
 function Table({ columns, items, copy }) {
   if (!items?.length) return <Empty copy={copy} />;
   return (
+    // biome-ignore lint/a11y/noNoninteractiveTabindex: The named overflow region must remain keyboard-scrollable.
     <div className="adm-table-wrap adm-audit-table" role="region" aria-label={copy.audit.title} tabIndex={0}>
       <table className="adm-table">
         <thead>
