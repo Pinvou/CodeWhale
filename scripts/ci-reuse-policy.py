@@ -147,8 +147,8 @@ def catalog(workflow, *, jobs=None):
             run = bool(re.search(r'^        run:', text, re.M) or re.match(r'^      - run:', text))
             uses = re.search(r'(?:^      - |^        )uses: (.+)', text, re.M)
             # Caches and diagnostic transport do not prove product execution.
-            optional = bool(uses and (uses[1].startswith(('actions/cache', 'Swatinem/rust-cache'))
-                                     or re.search(r'^        continue-on-error: true$', text, re.M)))
+            optional = bool((uses and uses[1].startswith(('actions/cache', 'Swatinem/rust-cache')))
+                            or re.search(r'^        continue-on-error: true$', text, re.M))
             if label and label[1].startswith('Warn when ') and re.search(r"^        run: echo '::warning::[^\n]*'$", text, re.M):
                 optional = True
             steps.append({'name': literal(label[1]) if label else None, 'run': run,
@@ -253,12 +253,10 @@ def complete(policy, job, routing, head_ref, configuration):
     for step in policy['steps']:
         if step['optional'] or (step['if'] is not None and condition(step['if'], context) is False): continue
         if not step['name']:
-            # Unnamed run commands still must have a successful API step.
-            # Missing/ambiguous API evidence is rejected below.
+            # catalog excludes unnamed run commands. Keep that fail-closed
+            # contract even if another caller supplies a handcrafted policy.
             if step['run']:
-                unnamed = [item for item in job['steps'] if item.get('name', '').startswith('Run ')
-                           and item.get('conclusion') == 'success']
-                if not unnamed: return False
+                return False
             continue
         required = step['name']
         # Both paths run the same diff selector on the proven base/tree. The

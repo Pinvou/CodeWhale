@@ -1223,13 +1223,23 @@ jobs:
       - name: Ready PR 定向浏览器 smoke
         if: ${{ github.event_name == 'pull_request' && github.event.pull_request.draft == false }}
         env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          TESTED_SHA: ${{ github.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           # dist was already built unconditionally above; skip the identical
           # in-smoke rebuild (see scripts/run-webui-smoke.mjs).
           PINVOU_WEBUI_SKIP_BUILD: "1"
         run: |
-          git diff --name-only "$BASE_SHA" "$HEAD_SHA" \
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$TESTED_SHA"
+          # Match the queue's diff over the actual tested merge, including
+          # main-side renames. Mutable PR event base/head diffs can select a
+          # different smoke set despite an identical tested product tree.
+          read -r tested base head extra < <(git rev-list --parents -n 1 "$TESTED_SHA")
+          test "$tested" = "$TESTED_SHA"
+          test -n "$base"
+          test "$head" = "$PR_HEAD_SHA"
+          test -z "$extra"
+          git diff --name-only "$base" "$TESTED_SHA" \
             | node ../scripts/select-frontend-smokes.mjs \
             | node ../scripts/run-frontend-smokes.mjs --selected
 

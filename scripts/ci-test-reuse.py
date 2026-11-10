@@ -95,11 +95,20 @@ def read_context():
 def record(event, configuration, needs):
     pr = event['pull_request']
     repository = os.environ['GITHUB_REPOSITORY']
-    if pr.get('draft') is not False or pr['head']['repo']['full_name'] != repository:
+    if pr.get('draft') is not False:
+        print('::notice::CI success proof not recorded: draft PRs do not donate evidence')
         return
-    tested, base, head = map(sha, (os.environ['TESTED_SHA'], pr['base']['sha'], pr['head']['sha']))
-    if parents(tested) != [base, head]:
+    if pr['head']['repo']['full_name'] != repository:
+        print('::notice::CI success proof not recorded: source PR is not in this repository')
+        return
+    tested, head = map(sha, (os.environ['TESTED_SHA'], pr['head']['sha']))
+    tested_parents = parents(tested)
+    if len(tested_parents) != 2 or tested_parents[1] != head:
+        print('::notice::CI success proof not recorded: tested commit is not the PR merge')
         return  # A custom head checkout is not proof for the merged result.
+    # Event/API PR associations can retain an older base SHA. The tested Git
+    # object is the immutable source of the base actually covered by this run.
+    base = tested_parents[0]
     value = {'schema': 1, 'repository': repository, 'pr': number(pr['number']),
              'run': number(os.environ['GITHUB_RUN_ID']), 'attempt': number(os.environ['GITHUB_RUN_ATTEMPT']),
              'head': head, 'tested': tested, 'base_ref': pr['base']['ref'],
@@ -162,7 +171,11 @@ def read_proof(raw):
         members = archive.infolist()
         if len(members) != 1 or members[0].filename != 'proof.json' or members[0].file_size > MAX_BYTES:
             raise ValueError('unexpected proof archive')
-        return json.loads(archive.read(members[0]))
+        with archive.open(members[0]) as stream:
+            content = stream.read(MAX_BYTES + 1)
+        if len(content) > MAX_BYTES:
+            raise ValueError('oversized proof content')
+        return json.loads(content)
 
 
 def verified_jobs(proof, run, jobs, expected, repository, pr_number, head, now, configuration, routing, head_ref):
@@ -200,7 +213,7 @@ def lookup(event, configuration, api, *, now=None):
     routing = json.loads(os.environ.get('CI_REUSE_ROUTING_FILTERS', os.environ.get('CI_REUSE_ROUTING', '{}')))
     policy_outputs = json.loads(os.environ.get('CI_REUSE_ROUTING_POLICY', '{}'))
     if 'CI_REUSE_ROUTING_FILTERS' in os.environ:
-        routing = {key: value for key, value in routing.items() if key != 'changes' and not key.endswith('_files')}
+        routing = {key: value for key, value in routing.items() if key in ROUTING_KEYS}
         routing.update({key: policy_outputs.get(key) or fallback for key, fallback in
                         (('trusted_backflow', 'false'), ('backflow_mode', 'full'), ('pure_release_backflow', 'false'))})
     expected = fingerprint(tested, base, configuration, routing)
@@ -225,7 +238,7 @@ def lookup(event, configuration, api, *, now=None):
                 or run.get('head_sha') != head or run.get('path') != WORKFLOW
                 or run.get('head_repository', {}).get('full_name') != repository
                 or not any(row.get('number') == pr_number and row.get('head', {}).get('sha') == head
-                           and row.get('base', {}).get('sha') == base and row['base'].get('ref') == branch
+                           and row.get('base', {}).get('ref') == branch
                            for row in run.get('pull_requests', []))):
             continue
         run_id, attempt = number(run['id']), number(run['run_attempt'])
@@ -243,7 +256,8 @@ def lookup(event, configuration, api, *, now=None):
         proof = read_proof(api.request(f'actions/artifacts/{number(artifact["id"])}/zip', binary=True))
         if proof.get('base_ref') != branch:
             continue
-        # The producer's immutable tested SHA must identify the exact same tree.
+        # PR associations above establish ownership, not an immutable base.
+        # The producer's tested Git object must identify the exact base and tree.
         # Fetching it through the API is read-only; no PR-controlled URL is used.
         commit = api.request(f'git/commits/{sha(proof["tested"])}')
         if (commit.get('tree', {}).get('sha') != expected['tree']

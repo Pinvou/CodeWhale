@@ -7,8 +7,10 @@ import io
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import tempfile
+import textwrap
 import unittest
 import urllib.request
 from unittest.mock import patch
@@ -215,6 +217,139 @@ class ReuseTests(unittest.TestCase):
         self.assertEqual(proof['jobs'],['account-platform-test'])
         self.assertNotIn(self.config['PRIVATE_CONFIGURATION'],json.dumps(proof))
         self.assertEqual(proof['fingerprint'],self.expected)
+
+    def test_record_uses_tested_merge_parent_when_event_base_is_stale(self):
+        self.pr['base']['sha'] = 'f'*40
+        with patch.dict(os.environ, {'TESTED_SHA': self.tested}):
+            REUSE.record({'pull_request': self.pr}, self.config, {name: {'result': 'success'} for name in TARGETS})
+        proof = json.loads(next(Path(self.temp.name).glob('ci-success-proof-*/proof.json')).read_text())
+        self.assertEqual(proof['fingerprint'], self.expected)
+        self.assertEqual(proof['tested'], self.tested)
+        self.proof = proof
+        self.proof['created'] = NOW.isoformat()
+        # The Actions API association can also be stale; the immutable tested
+        # object's parents/tree below remain the authoritative consumer check.
+        self.run['pull_requests'][0]['base']['sha'] = 'e'*40
+        self.assertEqual(self.lookup(), (sorted(TARGETS), 12))
+
+    def test_ready_smoke_uses_the_tested_merge_diff_after_main_renames(self):
+        workflow = (ROOT/'.github/workflows/pr-check.yml').read_text(encoding='utf-8')
+        ready = workflow.split('      - name: Ready PR 定向浏览器 smoke\n', 1)[1].split('      - name:', 1)[0]
+        self.assertIn('TESTED_SHA: ${{ github.sha }}', ready)
+        self.assertIn('PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}', ready)
+        command = textwrap.dedent(ready.split('        run: |\n', 1)[1])
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            def git(*args):
+                return subprocess.check_output(['git', *args], cwd=root, encoding='utf-8', stderr=subprocess.DEVNULL).strip()
+            git('init', '-q'); git('config', 'user.name', 'Fixture'); git('config', 'user.email', 'fixture@example.invalid')
+            scripts = root/'scripts'; scripts.mkdir()
+            (scripts/'select-frontend-smokes.mjs').write_bytes((ROOT/'scripts/select-frontend-smokes.mjs').read_bytes())
+            # Only the final browser-command executor is replaced. Git, the
+            # actual workflow Bash and selector execute unchanged.
+            (scripts/'run-frontend-smokes.mjs').write_text('process.stdin.pipe(process.stdout);\n', encoding='utf-8')
+            old = root/'pinvou3-app/src/features/settings/review.js'
+            new = root/'pinvou3-app/src/shared/review.js'
+            old.parent.mkdir(parents=True); old.write_text(''.join(f'line {i}\n' for i in range(100)), encoding='utf-8')
+            git('add', '.'); git('commit', '-qm', 'base'); stale = git('rev-parse', 'HEAD')
+            git('checkout', '-qb', 'main-advanced'); new.parent.mkdir(parents=True)
+            git('mv', str(old.relative_to(root)), str(new.relative_to(root))); git('commit', '-qm', 'main rename')
+            base = git('rev-parse', 'HEAD')
+            git('checkout', '-qb', 'pr', stale)
+            old.write_text(old.read_text(encoding='utf-8').replace('line 50', 'edited 50'), encoding='utf-8')
+            git('add', '.'); git('commit', '-qm', 'PR edit'); head = git('rev-parse', 'HEAD')
+            tree = git('merge-tree', '--write-tree', base, head)
+            tested = git('commit-tree', tree, '-p', base, '-p', head, '-m', 'tested merge')
+            git('checkout', '--detach', tested)
+            def select(start, end):
+                return subprocess.check_output([shutil.which('node'), str(scripts/'select-frontend-smokes.mjs')],
+                                               input=git('diff', '--name-only', start, end), encoding='utf-8')
+            old_selection, expected = select(stale, head), select(base, tested)
+            self.assertNotIn('test:bridge-smoke', old_selection)
+            self.assertIn('test:bridge-smoke', expected)
+            environment = {**os.environ, 'TESTED_SHA': tested, 'PR_HEAD_SHA': head,
+                           'BASE_SHA': stale, 'HEAD_SHA': head}
+            def execute(changes=None):
+                return subprocess.run([shutil.which('bash'), '-c', command], cwd=root/'pinvou3-app',
+                                      env={**environment, **(changes or {})}, capture_output=True, encoding='utf-8')
+            result = execute()
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout, expected)
+            for invalid in ({'TESTED_SHA': head}, {'PR_HEAD_SHA': 'f'*40}):
+                with self.subTest(invalid=invalid):
+                    rejected = execute(invalid)
+                    self.assertNotEqual(rejected.returncode, 0)
+                    self.assertEqual(rejected.stdout, '')
+
+    def test_record_rejections_are_observable_and_do_not_create_proofs(self):
+        for problem in ('draft', 'fork', 'head-checkout', 'wrong-head', 'three-parents'):
+            pr = copy.deepcopy(self.pr)
+            if problem == 'draft': pr['draft'] = True
+            if problem == 'fork': pr['head']['repo']['full_name'] = 'fork/repository'
+            if problem == 'wrong-head': pr['head']['sha'] = 'f'*40
+            tested = self.head if problem == 'head-checkout' else self.tested
+            if problem == 'three-parents':
+                tested = self.git('commit-tree', self.tree, '-p', self.base, '-p', self.head,
+                                  '-p', self.queued, '-m', 'unsupported merge')
+            with self.subTest(problem=problem), patch.dict(os.environ, {'TESTED_SHA': tested}), \
+                    patch('sys.stdout', new_callable=io.StringIO) as stdout:
+                REUSE.record({'pull_request': pr}, self.config, {})
+                self.assertIn('::notice::CI success proof not recorded:', stdout.getvalue())
+                self.assertNotIn(self.config['PRIVATE_CONFIGURATION'], stdout.getvalue())
+                self.assertFalse(list(Path(self.temp.name).glob('ci-success-proof-*')))
+
+    def test_independent_consumer_fences_reject_inconsistent_evidence(self):
+        for problem in ('tested-env', 'queue-base-suffix', 'target-ref', 'run-age', 'proof-base-ref',
+                        'api-tree', 'api-parents', 'unknown-job'):
+            # Each fixture changes one producer/API/queue fact, preserving the
+            # other valid witnesses so redundant fences have independent tests.
+            with self.subTest(problem=problem):
+                event, pr, run, proof = map(copy.deepcopy, (self.event, self.pr, self.run, self.proof))
+                commit = {'tree': {'sha': self.tree}, 'parents': [{'sha': self.base}, {'sha': self.head}]}
+                environment = {'TESTED_SHA': self.queued}
+                if problem == 'tested-env': environment['TESTED_SHA'] = 'f'*40
+                if problem == 'queue-base-suffix': event['merge_group']['head_ref'] = 'refs/heads/gh-readonly-queue/main/pr-7-'+'f'*40
+                if problem == 'target-ref': pr['base']['ref'] = 'other'
+                if problem == 'run-age': run['updated_at'] = (NOW-timedelta(days=2)).isoformat()
+                if problem == 'proof-base-ref': proof['base_ref'] = 'other'
+                if problem == 'api-tree': commit['tree']['sha'] = 'f'*40
+                if problem == 'api-parents': commit['parents'][0]['sha'] = 'f'*40
+                if problem == 'unknown-job': proof['jobs'].append('unclassified-job')
+                original_request = self.api.request
+                def request(path, **kwargs):
+                    if path == f'git/commits/{self.tested}': return commit
+                    return original_request(path, **kwargs)
+                with patch.object(self, 'pr', pr), patch.object(self, 'run', run), patch.object(self, 'proof', proof), \
+                        patch.dict(os.environ, environment), patch.object(self.api, 'request', side_effect=request):
+                    self.assertEqual(REUSE.lookup(event, self.config, self.api, now=NOW), ([], None))
+
+    def test_filter_cleanup_preserves_declared_routing_keys(self):
+        routing = {'changes': 'true', 'product_files': 'true'}
+        keys = (*REUSE.ROUTING_KEYS, *routing)
+        expected = REUSE.fingerprint
+        def fingerprint(tested, base, configuration, actual):
+            self.assertEqual(actual['changes'], 'true')
+            self.assertEqual(actual['product_files'], 'true')
+            self.assertNotIn('unrelated_files', actual)
+            return expected(tested, base, configuration, actual)
+        with patch.object(REUSE, 'ROUTING_KEYS', keys), patch.object(REUSE, 'fingerprint', side_effect=fingerprint), \
+                patch.dict(os.environ, {'CI_REUSE_ROUTING_FILTERS': json.dumps({**routing, 'unrelated_files': ['path']})}):
+            self.assertEqual(self.lookup(), ([], None))  # new route inputs invalidate the old proof
+
+    def test_proof_stream_read_is_bounded_even_if_member_metadata_is_wrong(self):
+        reads = []
+        class Stream(io.BytesIO):
+            def read(self, size=-1):
+                reads.append(size)
+                return super().read(size)
+        class Archive:
+            def __enter__(self): return self
+            def __exit__(self, *args): pass
+            def infolist(self): return [type('Member', (), {'filename': 'proof.json', 'file_size': 1})()]
+            def open(self, member): return Stream(b'{}'+b' '*REUSE.MAX_BYTES)
+        with patch.object(REUSE.zipfile, 'ZipFile', return_value=Archive()), self.assertRaises(ValueError):
+            REUSE.read_proof(b'controlled archive')
+        self.assertEqual(reads, [REUSE.MAX_BYTES+1])
 
     def test_archives_are_bounded_and_never_extract_paths(self):
         for name,size in (('../proof.json',1),('proof.json',REUSE.MAX_BYTES+1)):

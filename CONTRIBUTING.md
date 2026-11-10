@@ -323,8 +323,15 @@ unclassified new jobs continue running until their input contract is reviewed.
 The independently introduced `account-closure-test` has matching optional wiring.
 The separate `rustc-wrapper-smoke` and `evidence-validator-container` workflows
 use the same verifier with independent proof profiles and aggregate gates.
-Wrapper reuse requires all three native platform legs. The container workflow
+Wrapper reuse requires every configured native platform leg. The container workflow
 diff-selects its real Docker test on queue entries; manual dispatch always runs it.
+
+When enabling these auxiliary queue workflows in branch protection, require
+`wrapper-gate` and `validator-gate`, rather than the individual `smoke` matrix
+checks or `linux-amd64`: those product jobs can legitimately skip after verified
+reuse or a non-applicable diff. Replace any existing requirements on those old
+names before enabling this behavior. This PR does not change server-side rules
+or make these auxiliary workflows mandatory where they were not required.
 
 The lightweight `changes` job verifies the entire tested Git tree (not only the
 PR head), base commit/ref, unchanged workflow/verifiers, all routing and policy
@@ -336,6 +343,14 @@ cannot replace full queue regression. Unknown expressions require successful
 step evidence; unknown runner/matrix shapes, missing/duplicate/failed/skipped
 required evidence retain execution. Cache preparation and advisory diagnostics
 cannot substitute for a product test or resource-retirement step.
+
+Only a wholly successful ready-PR workflow donates proof; a red aggregate gate
+does not donate successful individual jobs. The recorded base comes from the
+actual tested merge commit's first parent, not the mutable PR event/API base SHA.
+Lookup independently verifies that immutable commit's base, head and tree against
+the queue. Ready-PR browser smoke selection uses that same actual merge parent
+and tested tree, including main-side renames, so its named step can witness the
+queue selection. Expected record refusals emit notices without configuration values.
 
 `changes`, `required-gate`, `commit-message`, `merge-authored-audit`,
 `backflow-portability` and `fast-gate` retain their existing event-specific

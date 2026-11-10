@@ -1,5 +1,7 @@
 """Queue coverage, matrix isolation and unknown-condition fallback regressions."""
+import copy
 import importlib.util
+import json
 from pathlib import Path
 import unittest
 
@@ -9,6 +11,64 @@ PLAN = importlib.util.module_from_spec(SPEC); SPEC.loader.exec_module(PLAN)
 
 
 class ReusePlanTests(unittest.TestCase):
+    def test_real_ready_frontend_evidence_accepts_optional_failures_and_maps_smoke(self):
+        policy = PLAN.catalog((ROOT/'.github/workflows/pr-check.yml').read_text(encoding='utf-8'))['frontend-test']
+        fixture = json.loads((ROOT/'scripts/tests/fixtures/ci-reuse-ready-frontend.json').read_text(encoding='utf-8'))
+        job = {'name': 'frontend-test', 'conclusion': 'success', 'labels': ['ubuntu-22.04'], 'steps': fixture['steps']}
+        self.assertTrue(PLAN.complete(policy, job, {}, 'refs/heads/queue', {}))
+        # Real PR shape: queue-only smoke skipped, warning skipped, PR smoke
+        # passed. Diagnostic delivery is advisory even if its action fails.
+        optional_failure = copy.deepcopy(job)
+        for step in optional_failure['steps']:
+            if step['name'] == 'Test resource lifecycle receipts': step['conclusion'] = 'failure'
+        self.assertTrue(PLAN.complete(policy, optional_failure, {}, 'refs/heads/queue', {}))
+        for bad in ('failure', 'skipped', 'missing'):
+            broken = copy.deepcopy(optional_failure)
+            for step in broken['steps']:
+                if step['name'] == 'Ready PR 定向浏览器 smoke': step['conclusion'] = bad
+                if step['name'] == 'Merge Queue diff-selected browser smoke': step['conclusion'] = 'success'
+            if bad == 'missing': broken['steps'] = [s for s in broken['steps'] if s['name'] != 'Ready PR 定向浏览器 smoke']
+            with self.subTest(pr_smoke=bad):
+                self.assertFalse(PLAN.complete(policy, broken, {}, 'refs/heads/queue', {}))
+        broken = copy.deepcopy(job)
+        for step in broken['steps']:
+            if step['name'] == 'Confirm test resource retirement': step['conclusion'] = 'skipped'
+        self.assertFalse(PLAN.complete(policy, broken, {}, 'refs/heads/queue', {}))
+
+    def test_named_cache_and_run_only_diagnostics_do_not_replace_required_tests(self):
+        real = PLAN.catalog((ROOT/'.github/workflows/pr-check.yml').read_text(encoding='utf-8'))
+        diagnostic = next(step for step in real['windows-rust-test']['steps']
+                          if step['name'] == 'Windows 测试二进制导入诊断')
+        self.assertTrue(diagnostic['optional'])
+        source = '''name: fixture
+jobs:
+  suite:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Dependency cache
+        uses: actions/cache@v4
+      - name: Advisory diagnostic
+        continue-on-error: true
+        run: diagnose
+      - name: Required contract
+        run: test
+'''
+        policy = PLAN.catalog(source, jobs={'suite'})['suite']
+        job = {'name': 'suite', 'conclusion': 'success', 'labels': ['ubuntu-22.04'], 'steps': [
+            {'name': 'Dependency cache', 'conclusion': 'failure'},
+            {'name': 'Advisory diagnostic', 'conclusion': 'failure'},
+            {'name': 'Required contract', 'conclusion': 'success'}]}
+        self.assertTrue(PLAN.complete(policy, job, {}, 'refs/heads/queue', {}))
+        job['steps'][-1]['conclusion'] = 'skipped'
+        self.assertFalse(PLAN.complete(policy, job, {}, 'refs/heads/queue', {}))
+
+    def test_handcrafted_unnamed_run_policy_cannot_reuse_arbitrary_run_evidence(self):
+        policy = PLAN.catalog(self.workflow(), jobs={'suite'})['suite']
+        policy['steps'].append({'name': None, 'run': True, 'if': None, 'optional': False})
+        job = self.job()
+        job['steps'].append({'name': 'Run unrelated-command', 'conclusion': 'success'})
+        self.assertFalse(PLAN.complete(policy, job, {}, 'refs/heads/queue', {}))
+
     def test_independent_workflows_require_all_platforms_and_real_test_steps(self):
         for filename, name, gate in (
             ('rustc-wrapper-smoke.yml', 'smoke', 'wrapper-gate'),
