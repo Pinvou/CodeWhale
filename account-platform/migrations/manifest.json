@@ -2688,6 +2688,16 @@
         "file": "900006_replay_cleanup_indexes.up.sql",
         "version": 900006,
         "sha256": "bf8521c04a898ba68675b828d09ad98afcc86c4b11115530520844dd9a2bae58"
+      },
+      {
+        "file": "900007_outbox_publication_generation.down.sql",
+        "version": 900007,
+        "sha256": "bf0f689c2b1fca5c836a53dca77d163d79c4667d6782a0fa12a1b4a797fe9836"
+      },
+      {
+        "file": "900007_outbox_publication_generation.up.sql",
+        "version": 900007,
+        "sha256": "b100fa80e195e33883bcd75053691bc7c405babf67c595566559e04350c51348"
       }
     ]
   }

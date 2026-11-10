@@ -194,6 +194,20 @@ test('actual current models Compose keeps migrator credentials out of runtime mo
   });
 });
 
+test('optional Token overlay uses current models render and independent runtime files', compose, () => {
+  const f = currentRenderFixture('compose', 'models', {tokenEvents: true});
+  try {
+    assert.equal(checkProductionBusiness(f.render, f.inventory).decision, 'BUSINESS_CONFIG_VALID');
+    const relay = f.render.config.services['token-event-relay'];
+    assert.equal(relay.environment.EVENT_SOURCE, 'token');
+    assert.equal(relay.depends_on['token-migrate'].condition, 'service_completed_successfully');
+    assert.equal(relay.environment.NATS_CREDENTIALS_FILE, undefined);
+    f.updatePrivate('TOKEN_RELAY_PRIVATE_ENV_FILE', 'DATABASE_URL', f.raw.EVENT_RELAY_PRIVATE_ENV_FILE.DATABASE_URL);
+    f.rerender(); rejected(f, undefined, /production_render_database_identity/);
+  } finally { f.dispose(); }
+  assert.throws(() => currentRenderFixture('compose', 'personal', {tokenEvents: true}), /production_render_composition/);
+});
+
 test('actual production Helm migration hooks bind resolved Secret keys and backup evidence', helm, async t => {
   await fixtureCase(t, 'helm', 'models', 'all current workloads and three original hooks validated', f => {
     currentWaiverBindings(f);

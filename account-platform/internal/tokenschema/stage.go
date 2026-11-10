@@ -17,6 +17,7 @@ import (
 type identity struct{ name, checksum, downChecksum string }
 
 var installed = map[int64]identity{
+	900007: {name: "outbox_publication_generation", checksum: "b100fa80e195e33883bcd75053691bc7c405babf67c595566559e04350c51348", downChecksum: "bf0f689c2b1fca5c836a53dca77d163d79c4667d6782a0fa12a1b4a797fe9836"},
 	900006: {name: "replay_cleanup_indexes", checksum: "bf8521c04a898ba68675b828d09ad98afcc86c4b11115530520844dd9a2bae58", downChecksum: "8e61b6454d78cc307b7d060699b9f8f0b936d4fc98aed1c0048536ed525cf17f"},
 	900005: {name: "usage_waiver_intents", checksum: "110f4c6961fa6c213e270e1ee047ffc512233941f374c809474ea16a8eeef2fe", downChecksum: "c3c6638e29d450571d15a3a88254fa116241442dc08e7691e05155fd34c2100c"},
 	1:      {name: "foundation", checksum: "8d9b0e0a9a025079fb0c3549b19fde8d15bba429199756c1fb3696427d5b6530", downChecksum: "694f148cedb118328e90ee64d56d747f98819e13455eb4ab13f1f49ad644b4a9"},

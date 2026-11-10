@@ -7,14 +7,14 @@ import { checkHelmNATSCredentials } from '../../../scripts/account-platform-nats
 
 const chart = path.resolve(import.meta.dirname, '../../deploy/helm/account-platform');
 const enabled = { skip: process.env.PINVOU_TEST_KMS_HELM !== '1' };
-function render(governed, native = false) {
+function render(governed, native = false, tokenEvents = false) {
   const args = governed ? ['-f', path.join(chart, 'values-model-token-test.yaml'),
     ...(native ? ['-f', path.join(chart, 'values-kms-native-test.yaml')] : [])] :
     ['-f', path.join(chart, 'values-staging.yaml'), '--set-string', 'dependencies.natsUrl=tls://nats.fixture.invalid:4222',
       '--set-string', 'newApi.tlsSecretName=fixture-only-newapi', '--set-string', 'newApi.caConfigMap=fixture-only-ca',
       '--set-string', 'images.newApiTLS.repository=registry.example.invalid/config-only',
       '--set-string', `images.newApiTLS.digest=sha256:${'0'.repeat(64)}`];
-  const result = spawnSync(process.env.PINVOU_TEST_KMS_HELM_BINARY || 'helm', ['template', 'fixture', chart, ...args, '--set-json', 'workloadIdentity.kubernetesApiServerPorts=[443]', '--set-json', 'external.workloadJwksCidrs=["192.0.2.40/32"]'],
+  const result = spawnSync(process.env.PINVOU_TEST_KMS_HELM_BINARY || 'helm', ['template', 'fixture', chart, ...args, '--set', 'availability.enabled=true', '--set', `tokenEventRelay.enabled=${tokenEvents}`, '--set-json', 'workloadIdentity.kubernetesApiServerPorts=[443]', '--set-json', 'external.workloadJwksCidrs=["192.0.2.40/32"]'],
     { encoding: 'utf8', timeout: 30000, maxBuffer: 4 * 1024 * 1024,
       env: Object.fromEntries(Object.entries(process.env).filter(([key]) =>
         ['PATH', 'HOME', 'USERPROFILE', 'SYSTEMROOT', 'TEMP', 'TMP'].includes(key.toUpperCase()))) });
@@ -36,6 +36,27 @@ test('real Helm wires private same-image non-root NATS preparation across all ex
     assert.equal(get(items, 'account-event-relay').initContainers.length, 2);
     assert.equal(get(items, 'billing-event-relay').initContainers.length, 1);
     assert.equal(items.filter(item => item.kind === 'Job' && item.metadata.annotations?.['helm.sh/hook']).length, 3);
+  }
+});
+
+test('optional Token Helm publisher keeps independent seed, database and trusted public identity', enabled, () => {
+  const items = render(true, false, true), disabled = render(true);
+  assert.doesNotThrow(() => checkHelmNATSCredentials(items));
+  assert.equal(disabled.some(v => v.kind === 'Deployment' && v.metadata.name.endsWith('-token-event-relay')), false);
+  for (const client of ['account-event-relay', 'billing-event-relay']) assert.deepEqual(get(items, client), get(disabled, client));
+  const token = get(items, 'token-event-relay');
+  assert.equal(token.initContainers[0].args[0], 'prepare-nats-seed');
+  assert.equal(token.containers[0].env.find(v => v.name === 'DATABASE_URL').valueFrom.secretKeyRef.key, 'token-event-relay-database-url');
+  for (const kind of ['Service', 'ServiceAccount', 'PodDisruptionBudget']) assert.equal(items.filter(v => v.kind === kind && v.metadata.name.endsWith('-token-event-relay')).length, 1);
+  for (const mutate of [
+    pod => { pod.containers[0].env.find(v => v.name === 'TOKEN_RELAY_NATS_CURRENT_PUBLIC_KEYS_SHA256').valueFrom.secretKeyRef.key = 'other-digest'; },
+    pod => { delete pod.containers[0].volumeMounts.find(v => v.name === 'token-relay-public-artifact').subPath; },
+    pod => { pod.initContainers[0].args[0] = 'prepare-nats-credentials'; },
+    pod => { pod.containers[0].env.find(v => v.name === 'DATABASE_URL').valueFrom.secretKeyRef.key = 'account-service-database-url'; },
+  ]) {
+    const changed = structuredClone(items);
+    mutate(get(changed, 'token-event-relay'));
+    assert.throws(() => checkHelmNATSCredentials(changed), /model_token_deployment_nats_/);
   }
 });
 

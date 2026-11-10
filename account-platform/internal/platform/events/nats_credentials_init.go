@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+
+	"github.com/nats-io/nkeys"
 )
 
 // PrepareNATSCredentials handles only the init-container command. Paths are fixed
@@ -24,10 +26,41 @@ func PrepareNATSCredentials(args []string, clients ...string) (bool, error) {
 		"/run/pinvou/nats/private/"+args[1]+".creds")
 }
 
+// PrepareNATSSeed is a separate, closed init operation for an explicitly
+// enabled ordinary Token publisher. JWT credential clients remain unchanged.
+func PrepareNATSSeed(args []string, clients ...string) (bool, error) {
+	if len(args) == 0 || args[0] != "prepare-nats-seed" {
+		return false, nil
+	}
+	if len(args) != 2 || !slices.Contains(clients, args[1]) {
+		return true, ErrNATSResources
+	}
+	return true, StageNATSSeed("/var/run/bootstrap/pinvou/nats/"+args[1]+".seed", "/run/pinvou/nats/private/"+args[1]+".seed")
+}
+
 // StageNATSCredentials copies a Kubernetes projected input into a private real
 // file. Only this init operation accepts source symlinks. The unchanged runtime
 // reader validates the complete multi-line JWT/NKey document before publication.
 func StageNATSCredentials(source, destination string) error {
+	return stageNATSIdentity(source, destination, false)
+}
+
+func StageNATSSeed(source, destination string) error {
+	return stageNATSIdentity(source, destination, true)
+}
+
+func stageNATSIdentity(source, destination string, seedOnly bool) error {
+	maximum := int64(64 << 10)
+	if seedOnly {
+		maximum = 4096
+	}
+	readKey := func(path string) (nkeys.KeyPair, error) {
+		if seedOnly {
+			return readNATSUserSeed(path)
+		}
+		_, pair, err := readNATSUserCredentials(path)
+		return pair, err
+	}
 	if source == destination || !filepath.IsAbs(source) || filepath.Clean(source) != source ||
 		!filepath.IsAbs(destination) || filepath.Clean(destination) != destination {
 		return ErrNATSResources
@@ -48,7 +81,7 @@ func StageNATSCredentials(source, destination string) error {
 		return ErrNATSResources
 	}
 	before, err := os.Stat(source)
-	if err != nil || !before.Mode().IsRegular() || before.Size() <= 0 || before.Size() > 64<<10 {
+	if err != nil || !before.Mode().IsRegular() || before.Size() <= 0 || before.Size() > maximum {
 		return ErrNATSResources
 	}
 	input, err := os.Open(source)
@@ -60,9 +93,9 @@ func StageNATSCredentials(source, destination string) error {
 	if err != nil || !os.SameFile(before, opened) || !opened.Mode().IsRegular() {
 		return ErrNATSResources
 	}
-	body, err := io.ReadAll(io.LimitReader(input, (64<<10)+1))
+	body, err := io.ReadAll(io.LimitReader(input, maximum+1))
 	defer clear(body)
-	if err != nil || len(body) == 0 || len(body) > 64<<10 {
+	if err != nil || len(body) == 0 || int64(len(body)) > maximum {
 		return ErrNATSResources
 	}
 	output, err := os.CreateTemp(parent, ".nats-credentials-*")
@@ -82,7 +115,7 @@ func StageNATSCredentials(source, destination string) error {
 	if err := output.Close(); err != nil {
 		return ErrNATSResources
 	}
-	_, pair, err := readNATSUserCredentials(output.Name())
+	pair, err := readKey(output.Name())
 	if err != nil {
 		return ErrNATSResources
 	}
@@ -95,7 +128,7 @@ func StageNATSCredentials(source, destination string) error {
 	}
 	// A killed init may have published before reporting success. Accept only the
 	// same complete private file on retry; rotation needs a fresh Pod/emptyDir.
-	_, current, err := readNATSUserCredentials(destination)
+	current, err := readKey(destination)
 	if err != nil {
 		return ErrNATSResources
 	}

@@ -46,6 +46,7 @@ export function checkRuntimeDatabases(all, inventory, render) {
   const identities = {
     'account-service': ['account', 'account_service'], 'account-event-relay': ['account', 'account_service'],
     'billing-service': ['billing', 'billing_service'], 'billing-event-relay': ['billing', 'billing_service'],
+    'token-event-relay': ['token', 'token_gateway'],
     'token-gateway': ['token', 'token_gateway'], 'token-credential-portal': ['token', 'token_gateway'],
   };
   for (const workload of all) {

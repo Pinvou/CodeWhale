@@ -6,6 +6,10 @@ global:
   trustedTimeSources: [time.cloudflare.com:123, pool.ntp.org:123, ntp.aliyun.com:123, time1.cloud.tencent.com:123, time.windows.com:123]
   manualReviewOnCallUserIds: ["00000000-0000-0000-0000-000000000101", "00000000-0000-0000-0000-000000000102"]
 
+tokenEventRelay:
+  # Requires the explicit Token publisher authorization and dedicated credential.
+  enabled: false
+
 approvalRelay:
   # Enable when the release requires frozen authorization delivery.
   requireReady: false
