@@ -25,6 +25,13 @@ replacement or observed metadata changes fail validation; no earlier successful
 hash authorizes a later unverified read. This is validation of supplied evidence,
 not proof that a physical release run or signing ceremony took place.
 
+Where available, `O_NONBLOCK` also prevents a regular-to-FIFO replacement from
+waiting for a writer before the opened-descriptor regular-file check can reject
+it. It does not impose a general timeout on regular-file storage I/O. The
+POSIX-only regression creates an actual FIFO with no writer; Windows explicitly
+skips that kernel scenario and separately tests admission wiring and non-regular
+descriptor rejection with a controlled filesystem boundary.
+
 The Windows orchestrator includes the artifact reader in its source snapshot and
 validator dependency hash map, so later validator invocations reject reader
 changes during a run. The release-contract CI suite runs through
