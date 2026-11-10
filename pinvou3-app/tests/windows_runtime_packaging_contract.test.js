@@ -295,6 +295,22 @@ assert.match(
   /Get-PlainPath \(\[System\.IO\.Path\]::GetFullPath\(\(Get-ExtendedPath \(\$Path\.Replace\('\/', '\\'\)\)\)\)\)/u,
   "the containment comparison must strip the device prefix by shape (Get-PlainPath), not by a fixed offset that corrupts UNC roots",
 );
+// Review 5800111649 non-blocking follow-up: root and child must reach the
+// containment comparison in the SAME path namespace — GetFullPath keeps an
+// explicit \\?\ prefix on the root while the child chain strips it, so an
+// explicitly extended RuntimeRoot used to be mis-rejected as outside the
+// root for its own children. Both containment helpers must run the root
+// through the same extend-canonicalize-strip chain (plain inputs unchanged).
+assert.match(
+  runtimeScript,
+  /Get-PlainPath \(\[System\.IO\.Path\]::GetFullPath\(\(Get-ExtendedPath \(\$Root\.Replace\('\/', '\\'\)\)\)\)\)/u,
+  "the root side of containment must take the same namespace form as the child (an explicitly extended RuntimeRoot must not be mis-rejected for its own children)",
+);
+assert.match(
+  runtimeScript,
+  /\$script:RuntimeExpandCleanupFailures = @\(\$script:RuntimeExpandCleanupFailures\) \+ @\{ Path = \$temporary/u,
+  "extraction cleanup failures must be recorded by path so litter is claimed by record instead of diffing pinvou3-runtime-expand-* names in shared TEMP (a before/after name diff can swallow a concurrent run's active extraction tree on a self-hosted runner)",
+);
 for (const destination of [
   "runtime/poppler",
   "runtime/pandoc",

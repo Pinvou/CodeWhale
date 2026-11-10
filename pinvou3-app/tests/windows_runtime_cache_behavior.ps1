@@ -369,8 +369,12 @@ try {
     "@echo off`r`nexit /b 8`r`n",
     [System.Text.Encoding]::ASCII
   )
-  $expandRoot = [System.IO.Path]::GetTempPath()
-  $expandLitterBefore = @(Get-ChildItem -LiteralPath $expandRoot -Filter "pinvou3-runtime-expand-*" -Directory -ErrorAction SilentlyContinue | ForEach-Object { $_.Name })
+  # Claim leftover extraction trees by the resolver's own cleanup-failure
+  # record instead of diffing pinvou3-runtime-expand-* names in shared TEMP:
+  # a before/after name diff can swallow a concurrent run's active extraction
+  # tree on a self-hosted runner, while the record names exactly the trees
+  # this run created and failed to clean.
+  $script:RuntimeExpandCleanupFailures = @()
   $previousRobocopyPath = $env:PATH
   try {
     $env:PATH = "$robocopyStubDirectory;$previousRobocopyPath"
@@ -396,14 +400,37 @@ try {
     $env:PATH = $previousRobocopyPath
   }
   # The stubbed flattened copy fails inside Expand-FlattenedRuntime, whose
-  # cleanup failures degrade to a loud warning: sweep only the extraction
-  # trees this stub run created (their deep entries again need the long-path
+  # cleanup failures degrade to a loud warning: claim only the extraction
+  # trees this stub run recorded (their deep entries again need the long-path
   # arm, so plain Remove-Item would leave past-MAX_PATH litter behind).
-  foreach ($expandLitter in @(Get-ChildItem -LiteralPath $expandRoot -Filter "pinvou3-runtime-expand-*" -Directory -ErrorAction SilentlyContinue)) {
-    if ($expandLitterBefore -notcontains $expandLitter.Name) {
-      Remove-TreeLongPath -Path $expandLitter.FullName -MissingOk
-    }
+  $expandCleanupFailures = @($script:RuntimeExpandCleanupFailures)
+  Assert-True -Condition ($expandCleanupFailures.Count -ge 1) -Message "the stubbed extraction cleanup failure must be recorded for precise claiming"
+  foreach ($expandFailure in $expandCleanupFailures) {
+    Assert-True -Condition ((Split-Path -Leaf $expandFailure.Path) -like "pinvou3-runtime-expand-*") -Message "recorded extraction cleanup failures must point at pinvou3-runtime-expand-* trees: $($expandFailure.Path)"
+    Remove-TreeLongPath -Path $expandFailure.Path -MissingOk
+    Assert-True -Condition (-not (Test-Path -LiteralPath $expandFailure.Path)) -Message "claiming a recorded extraction tree must actually remove it: $($expandFailure.Path)"
   }
+
+  # Explicit \\?\-prefixed roots and children must reach containment checks in
+  # the same namespace: GetFullPath keeps the prefix on the root while the
+  # child chain strips it, so an explicitly extended RuntimeRoot used to be
+  # mis-rejected as "outside the expected root" for its own children.
+  $nsRoot = Join-Path $testRoot "ns-unified"
+  $nsChild = Join-Path $nsRoot "child\file.txt"
+  Write-TestFile -Path $nsChild -Content "ns"
+  $nsExtendedRoot = Get-ExtendedPath $nsRoot
+  $nsExtendedChild = Get-ExtendedPath $nsChild
+  $nsAcceptThrew = $false
+  try { Assert-ChildPath -Root $nsExtendedRoot -Path $nsChild } catch { $nsAcceptThrew = $true }
+  Assert-True -Condition (-not $nsAcceptThrew) -Message "an extended RuntimeRoot must not be mis-rejected for a contained plain child"
+  $nsAcceptThrew = $false
+  try { Assert-ChildPath -Root $nsExtendedRoot -Path $nsExtendedChild } catch { $nsAcceptThrew = $true }
+  Assert-True -Condition (-not $nsAcceptThrew) -Message "an extended RuntimeRoot must not be mis-rejected for a contained extended child"
+  $nsOutsidePath = Join-Path $testRoot "ns-outside.txt"
+  $nsRejectThrew = $false
+  try { Assert-ChildPath -Root $nsExtendedRoot -Path $nsOutsidePath } catch { $nsRejectThrew = $_.Exception.Message -match "outside the expected root" }
+  Assert-True -Condition $nsRejectThrew -Message "an extended RuntimeRoot must still reject a path outside it"
+  Assert-True -Condition ((Get-RelativeStagePath -Root $nsExtendedRoot -Path $nsExtendedChild) -eq (Get-RelativeStagePath -Root $nsRoot -Path $nsChild)) -Message "extended and plain root/path pairs must yield the same relative staging path"
 
   # Write-Utf8Atomically keeps shared-visibility descriptors continuously
   # present for the unlocked readers in scripts/tauri/windows-runtime.js:

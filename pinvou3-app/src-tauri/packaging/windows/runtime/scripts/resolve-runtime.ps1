@@ -270,7 +270,14 @@ function Assert-ChildPath {
   if (($Path -split '[\\/]') -contains '..') {
     throw "Refusing to use a path with traversal segments: $Path"
   }
-  $rootFull = [System.IO.Path]::GetFullPath($Root).TrimEnd('\') + '\'
+  # Root and child must reach the containment comparison in the SAME path
+  # namespace: GetFullPath keeps an explicit \\?\ prefix on the root while
+  # the child chain strips it, so an explicitly extended RuntimeRoot used to
+  # be mis-rejected as "outside the expected root" for its own children. Run
+  # both sides through the identical extend-canonicalize-strip chain (plain
+  # inputs keep their historical plain form, so default behavior is
+  # unchanged); Get-PlainPath strips the prefix by shape and keeps UNC valid.
+  $rootFull = Get-PlainPath ([System.IO.Path]::GetFullPath((Get-ExtendedPath ($Root.Replace('/', '\'))))).TrimEnd('\') + '\'
   # Canonicalize through the \\?\ namespace: GetFullPath on an unprefixed
   # child past MAX_PATH throws instead of comparing, and device paths skip
   # normalization, so strip the pass-through prefix by shape (Get-PlainPath
@@ -284,8 +291,11 @@ function Assert-ChildPath {
 
 function Get-RelativeStagePath {
   param([string]$Root, [string]$Path)
-  $rootFull = [System.IO.Path]::GetFullPath($Root).TrimEnd('\') + '\'
-  $pathFull = [System.IO.Path]::GetFullPath($Path)
+  # Same namespace unification as Assert-ChildPath: both sides must share one
+  # canonical form before containment and substring, or an explicitly
+  # extended root/path pair mis-rejects or emits a prefixed relative key.
+  $rootFull = Get-PlainPath ([System.IO.Path]::GetFullPath((Get-ExtendedPath ($Root.Replace('/', '\'))))).TrimEnd('\') + '\'
+  $pathFull = Get-PlainPath ([System.IO.Path]::GetFullPath((Get-ExtendedPath ($Path.Replace('/', '\')))))
   if (-not $pathFull.StartsWith($rootFull, [System.StringComparison]::OrdinalIgnoreCase)) {
     throw "Path is outside the Windows runtime staging root: $Path"
   }
@@ -765,6 +775,15 @@ function Expand-FlattenedRuntime {
     [string]$RequiredFile,
     [switch]$OnnxOnly
   )
+  # Claim record for the extraction root this call creates. The finally
+  # cleanup below degrades to a warning when it fails, so tests (and any
+  # future caller) claim leftover trees by this record instead of diffing
+  # names in shared TEMP — a name diff can swallow a concurrent run's active
+  # extraction tree. Initialized here because -ImportFunctionsOnly skips the
+  # top-level statements.
+  if (-not (Get-Variable -Name RuntimeExpandCleanupFailures -Scope Script -ErrorAction SilentlyContinue)) {
+    $script:RuntimeExpandCleanupFailures = @()
+  }
   $temporary = Join-Path ([System.IO.Path]::GetTempPath()) ("pinvou3-runtime-expand-" + [System.Guid]::NewGuid().ToString("N"))
   try {
     Expand-ZipArchiveLongPath -ZipPath $ZipPath -Destination $temporary
@@ -810,6 +829,7 @@ function Expand-FlattenedRuntime {
     try {
       Remove-TreeLongPath -Path $temporary -MissingOk
     } catch {
+      $script:RuntimeExpandCleanupFailures = @($script:RuntimeExpandCleanupFailures) + @{ Path = $temporary; Error = $_.Exception.Message }
       Write-Warning ("Windows runtime expansion cleanup left a partial tree behind: {0} ({1})" -f $temporary, $_.Exception.Message)
     }
   }
