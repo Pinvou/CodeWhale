@@ -158,7 +158,11 @@ export function FilterForm({ source, query, fields, copy, onQueryChange }) {
         </label>
       ))}
       <button type="submit">{copy.search}</button>
-      <button type="button" className="secondary" onClick={() => onQueryChange(source, Object.fromEntries(Object.keys(query).map((key) => [key, ''])))}>{copy.clear}</button>
+      <button type="button" className="secondary" onClick={() => {
+        const empty = Object.fromEntries(Object.keys(query).map(key => [key, '']));
+        setDraft(empty);
+        onQueryChange(source, empty);
+      }}>{copy.clear}</button>
     </form>
   );
 }
