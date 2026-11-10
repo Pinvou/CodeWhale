@@ -123,3 +123,19 @@
 .adm-grant-target-summary-ui .adm-grant-manual-target summary{cursor:pointer;color:var(--adm-primary);overflow-wrap:anywhere}
 
 .adm-grant-target-summary-ui .adm-grant-query-context{margin:8px 0;color:var(--adm-muted);overflow-wrap:anywhere}
+
+.ap-restored-dialog.ap-restored-drawer.adm-role-grant-drawer{display:flex;flex-direction:column}
+.adm-role-grant-drawer>header,.adm-role-grant-layout>.adm-role-steps,.adm-role-grant-layout>.adm-inline-message{flex:none}
+.adm-role-grant-layout,.adm-role-grant-layout>.adm-grant-step{display:flex;flex:1 1 auto;flex-direction:column;min-height:0;min-width:0}
+.adm-role-grant-layout>.adm-grant-step{gap:0}
+.adm-role-grant-layout .adm-grant-step-body{flex:1 1 auto;min-height:6rem;min-width:0;overflow:auto;padding:4px;margin:0 -4px}
+.adm-role-grant-layout .adm-grant-step-body:focus-visible{outline:2px solid var(--adm-primary);outline-offset:-2px}
+.adm-role-grant-layout .adm-grant-step-body>h3{margin-top:4px}
+.adm-role-grant-layout form.adm-grant-step>.adm-grant-step-body{display:grid;align-content:start;gap:12px}
+.adm-role-grant-layout>.adm-grant-step>.adm-role-drawer-foot{flex:none;flex-wrap:wrap;margin-top:0;padding:12px 0 0}
+.adm-role-grant-layout>.adm-grant-step>.adm-role-drawer-foot>button{max-width:100%;white-space:normal;overflow-wrap:anywhere}
+.adm-role-grant-layout .adm-role-steps li{min-width:0;white-space:normal;overflow-wrap:anywhere}
+@media(max-height:580px){
+  .adm-role-grant-layout,.adm-role-grant-layout>.adm-grant-step,.adm-role-grant-layout .adm-grant-step-body{flex:1 0 auto;min-height:0}
+  .adm-role-grant-layout .adm-grant-step-body{overflow:visible}
+}
