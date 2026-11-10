@@ -1,6 +1,6 @@
 import { runSMSConflictCases } from './account_platform_sms_conflict_cases.mjs';
 import { navigateFixture } from './helpers/navigate-fixture.mjs';
-import { registrationRepairCopy } from '../src/shared/i18n.js';
+import { registrationRepairCopy, smsStatusCopy, smsTemplateCopy } from '../src/shared/i18n.js';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -75,7 +75,17 @@ try {
     await clickText(await page.evaluate(() => globalThis.f01.copy().admin.retry));
     await page.waitForSelector('tbody tr'); await waitText('managed-account');
   });
-  await caseRun('admin users keep enable and disable with no direct delete', async () => { await fresh('admin'); assert(await page.evaluate(() => ![...document.querySelectorAll('button')].some(button => /delete/i.test(button.textContent))), 'delete exposed'); await clickText(await page.evaluate(() => globalThis.f01.copy().admin.accounts.disable)); await page.click('[role=dialog] > button'); await page.waitForFunction(() => globalThis.f01.status === 'DISABLED'); await clickText(await page.evaluate(() => globalThis.f01.copy().admin.accounts.enable)); await page.click('[role=dialog] > button'); await page.waitForFunction(() => globalThis.f01.status === 'ACTIVE'); assert(await page.evaluate(() => globalThis.f01.calls.filter(call => call.url.endsWith('/status')).every(call => call.method === 'PATCH')), 'wrong status method'); });
+  await caseRun('admin users keep enable and disable with no direct delete', async () => {
+    await fresh('admin');
+    assert(await page.evaluate(() => ![...document.querySelectorAll('button')].some(button => /delete/i.test(button.textContent))), 'delete exposed');
+    await clickText(await page.evaluate(() => globalThis.f01.copy().admin.accounts.disable));
+    await page.click('[role=dialog] [data-user-status-confirm="DISABLED"]');
+    await page.waitForFunction(() => globalThis.f01.status === 'DISABLED');
+    await clickText(await page.evaluate(() => globalThis.f01.copy().admin.accounts.enable));
+    await page.click('[role=dialog] [data-user-status-confirm="ACTIVE"]');
+    await page.waitForFunction(() => globalThis.f01.status === 'ACTIVE');
+    assert(await page.evaluate(() => globalThis.f01.calls.filter(call => call.url.endsWith('/status')).every(call => call.method === 'PATCH')), 'wrong status method');
+  });
   for (const language of ['zh','en','ja']) await caseRun(`${language}: unknown identity manual query uses original retry route without compensation`, async () => {
     await fresh('admin'); await page.select('.ap-sidebar-foot select, .adm-sidebar-foot select, header select',language);
     await page.evaluate(() => { globalThis.f01.unknownRegistration=true;globalThis.f01.calls.length=0; });
@@ -104,7 +114,27 @@ try {
     await page.$eval(row, (element, label) => [...element.querySelectorAll('button')].find(button => button.textContent.trim() === label)?.click(), await page.evaluate(() => globalThis.f01.copy().admin.userManagement.compensate)); await page.waitForFunction(() => globalThis.f01.calls.some(call => call.url.endsWith('/actions/compensate'))); });
   await caseRun('profile queue loads on first navigation and rejects wrong retry ACK', async () => { await fresh('admin'); await page.evaluate(() => { globalThis.f01.badRetry = true; }); await clickText(await page.evaluate(() => globalThis.f01.copy().admin.userManagement.profileRepair)); await waitText('REPAIR_REQUIRED'); await clickText(await page.evaluate(() => globalThis.f01.copy().admin.userManagement.retry)); await page.waitForSelector('[role=alert]'); assert(await page.evaluate(() => document.querySelector('[role=alert]').textContent.length > 0), 'wrong ACK silently accepted'); });
   await caseRun('queue 503 shows error rather than fake empty list', async () => { await fresh('admin'); await page.evaluate(() => { globalThis.f01.adminError = true; }); await clickText(await page.evaluate(() => globalThis.f01.copy().admin.userManagement.profileRepair)); await page.waitForSelector('[role=alert]'); assert(await page.evaluate(() => !document.querySelector('[data-workspace=profile]:not([hidden]) tbody')), 'fake collection displayed'); });
-  await caseRun('SMS unknown ACK keeps the original key and body across language change', async () => { await fresh('admin'); await clickText(await page.evaluate(() => globalThis.f01.copy().admin.settings.title)); await page.waitForSelector('.adm-sms-form textarea'); await page.type('.adm-sms-form textarea', 'controlled correction reason'); assert(await page.$eval('.adm-sms-form textarea', node => node.value === 'controlled correction reason'), 'SMS reason input was reset before submission'); await page.waitForFunction(() => !document.querySelector('.adm-sms-form button[type=submit]').disabled); await page.evaluate(() => { globalThis.f01.smsFail = true; }); await page.click('.adm-sms-form button[type=submit]'); await page.waitForFunction(() => globalThis.f01.smsCalls.length === 1); await page.waitForSelector('[role=alert]'); await page.select('.adm-sidebar-foot select', 'ja'); await page.evaluate(() => { globalThis.f01.smsFail = false; }); await page.click('.adm-sms-form button[type=submit]'); await page.waitForFunction(() => globalThis.f01.smsCalls.length === 2); assert(await page.evaluate(() => globalThis.f01.smsCalls[0].key === globalThis.f01.smsCalls[1].key && JSON.stringify(globalThis.f01.smsCalls[0].command) === JSON.stringify(globalThis.f01.smsCalls[1].command)), 'lost ACK changed immutable facts'); await waitText(await page.evaluate(() => globalThis.f01.copy().admin.settings.sms.saved)); });
+  await caseRun('SMS unknown ACK keeps the original key and body across language change', async () => {
+    await fresh('admin');
+    await clickText(await page.evaluate(() => globalThis.f01.copy().admin.settings.title));
+    await page.waitForSelector('.adm-sms-form textarea');
+    await page.type('.adm-sms-form textarea', 'controlled correction reason');
+    assert(await page.$eval('.adm-sms-form textarea', node => node.value === 'controlled correction reason'), 'SMS reason input was reset before submission');
+    await page.waitForFunction(() => !document.querySelector('.adm-sms-form button[type=submit]').disabled);
+    await page.evaluate(() => { globalThis.f01.smsFail = true; });
+    await page.click('.adm-sms-form button[type=submit]');
+    await page.waitForFunction(() => globalThis.f01.smsCalls.length === 1);
+    const language = await page.$eval('.adm-sidebar-foot select', select => select.value);
+    await page.waitForFunction(text => document.querySelector('.adm-sms-unknown[role=status]')?.textContent.includes(text), {}, smsStatusCopy[language].unknownWrite);
+    await page.select('.adm-sidebar-foot select', 'ja');
+    await page.waitForFunction(text => document.querySelector('.adm-sms-unknown[role=status]')?.textContent.includes(text), {}, smsStatusCopy.ja.unknownWrite);
+    await page.evaluate(() => { globalThis.f01.smsFail = false; });
+    await page.click('.adm-sms-form button[type=submit]');
+    await page.waitForFunction(() => globalThis.f01.smsCalls.length === 2);
+    assert(await page.evaluate(() => globalThis.f01.smsCalls[0].key === globalThis.f01.smsCalls[1].key && JSON.stringify(globalThis.f01.smsCalls[0].command) === JSON.stringify(globalThis.f01.smsCalls[1].command)), 'lost ACK changed immutable facts');
+    const revision = await page.evaluate(() => globalThis.f01.smsCalls[0].command.expected_revision + 1);
+    await page.waitForFunction(text => document.querySelector('.adm-sms-save-feedback[role=status]')?.textContent.includes(text), {}, smsTemplateCopy.ja.replaySaved.replace('{revision}', String(revision)));
+  });
   await caseRun('all three languages display real personal labels', async () => { await fresh(); for (const language of ['ja', 'zh', 'en']) { await page.select('.ap-sidebar-foot select, .adm-sidebar-foot select, header select', language); await waitText(await page.evaluate(() => globalThis.f01.copy().account.profileSettings)); } });
   const desktopGuest = async () => { await fresh(); await page.evaluate(() => { globalThis.f01.authenticated = false; globalThis.f01.render('desktop'); }); await page.waitForSelector('.ap-login input[autocomplete=username]'); };
   await caseRun('desktop rejected password displays its localized reason without provider text', async () => {
