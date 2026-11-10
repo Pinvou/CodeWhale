@@ -1268,7 +1268,8 @@ mod tests {
         let business = super::super::encrypted_lane::ControllingLaneState::default();
         let operation = manager.connect("2345678").unwrap();
         manager.complete_reserved(operation.clone()).unwrap();
-        let disconnect = manager.disconnect_business(&business, |_| {});
+        let sessions = super::super::controlling_session::ControllingSessionManager::default();
+        let disconnect = manager.disconnect_business(&sessions, &business, |_| {});
         let installed = std::cell::Cell::new(false);
         assert!(
             manager

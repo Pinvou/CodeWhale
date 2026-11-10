@@ -110,8 +110,7 @@ pub async fn desktop_remote_controller_disconnect(
         let business = app.state::<crate::features::remote_control::controller::encrypted_lane::ControllingLaneState>();
         // Retire this connection and its keys atomically before yielding. The
         // receipt scope retains only its old socket, never a later connection.
-        let disconnect = manager.disconnect_business(&business, |lease| {
-            sessions.clear();
+        let disconnect = manager.disconnect_business(&sessions, &business, |lease| {
             actions.clear_all();
             if let Some(lease) = lease {
                 artifacts.clear_connection(&lease.connection_id);
