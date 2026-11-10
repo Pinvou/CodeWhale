@@ -293,6 +293,22 @@ fn key_is_secret(key: &str) -> bool {
             lowered.as_str(),
             "credential" | "signature" | "security-token"
         )
+        // r31 P1-1③：`Authorization=v` env 形态——两名字进 `=` 臂判据。
+        || auth_header_name(&lowered)
+}
+
+/// r31 P1-1：Authorization 族头名（非 `-H` 语境的名字侧统一收口）。
+/// 只含这两个头名；SigV4 三员走 key_is_secret 的既有 matches!。
+fn auth_header_name(lowered: &str) -> bool {
+    lowered == "authorization" || lowered == "proxy-authorization"
+}
+
+/// r31 P1-1/P2-1：冒号/JSON 语境的名字侧收口——authorization 族 + SigV4 三员里
+/// 此前只活在 key_is_secret 的 credential/security-token（两表分裂，:627 注释
+/// 「同一张名单」教训的又一次应验）。bare 空格形态刻意不收（见 bare 键臂注释）。
+fn colon_side_secret_name(name: &str) -> bool {
+    auth_header_name(&name.to_ascii_lowercase())
+        || matches!(name, "credential" | "security-token" | "signature")
 }
 
 /// 「这个名字是不是机密键名」的统一判据（r21 P2-8② 冒号黏连形态用）：
@@ -305,7 +321,24 @@ fn secret_key_name(name: &str) -> bool {
         && (SECRET_ENV_KEYS
             .iter()
             .any(|known| name.eq_ignore_ascii_case(known))
-            || query_key_is_secret(name))
+            || query_key_is_secret(name)
+            // r31 P1-1⑤⑥/P2-1：紧凑 JSON、python dict、冒号黏连的 auth 族与
+            // SigV4 两员（signature 已在 query 表）。
+            || colon_side_secret_name(&name.to_ascii_lowercase()))
+}
+
+/// r31 P1-1：colon_glued 命中的名字是否 authorization 族——值侧为空时不能直接
+/// redact_next（会把 Basic/Bearer scheme 词当凭据吃掉、放过真凭据，P2-09 陷阱），
+/// 要转 auth_pending（scheme 感知）。名字可能带 `headers={'` 类前缀，按同一把
+/// rfind 切法化简后再比。
+fn is_authorization_glued_name(name: &str) -> bool {
+    let cut = name
+        .rfind(['{', ',', '='])
+        .map(|i| &name[i + 1..])
+        .unwrap_or(name);
+    let bare =
+        cut.trim_matches(|c: char| matches!(c, '"' | '\'' | '\\' | '{' | '}' | '[' | ']' | '$'));
+    auth_header_name(&bare.to_ascii_lowercase())
 }
 
 /// 取值侧「长得像机密」的判据（r21 P2-8①：键不在名单、值本身像机密的
@@ -477,7 +510,24 @@ fn redact_url_secrets(word: &str) -> String {
 ///
 /// 压平之后这两行看起来是同一层，一份读不顺的日志会让人放弃往下看。所以行首那段
 /// 原样搬过去。
+/// r31 P2-2：跨物理行延续的 pending 状态。redact_next 此前按单行调用生灭——
+/// pretty-print JSON 的键行（`  "api_key":`）在行尾置位后没有下一个词可抹，
+/// 下一行的值词以全新状态透传落盘。落盘写入侧按 run 持有本状态逐行传入。
+#[derive(Default)]
+pub struct DiskCarry {
+    pub redact_next: bool,
+    /// r31 P1-1：`Authorization:`（非 -H 语境）已出现、等下一个词判 scheme/凭据。
+    pub auth_pending: bool,
+}
+
+/// 定向脱敏：落盘走这一道（单行、无跨行状态的兼容入口；测试与既有调用方用）。
 pub fn sanitize_for_disk(line: &str) -> String {
+    let mut carry = DiskCarry::default();
+    sanitize_line_with(line, &mut carry)
+}
+
+/// r31 P2-2：带跨行状态的落盘脱敏——run 写入侧每行调用、行间延续 pending。
+pub fn sanitize_line_with(line: &str, carry: &mut DiskCarry) -> String {
     let masked = mask_literal_secrets(line);
     let mut out = String::with_capacity(masked.len());
     let indent: String = masked
@@ -490,7 +540,8 @@ pub fn sanitize_for_disk(line: &str) -> String {
         .collect();
     out.push_str(&indent);
     // 上一个词要求把下一个词抹掉（`--token abc` / `Bearer abc` 这种分开写的）。
-    let mut redact_next = false;
+    let mut redact_next = carry.redact_next;
+    let mut auth_pending = carry.auth_pending;
     // r21 P2-8③：curl 的 `-u` / `--user`，取值形态是 `user:password`。**要求
     // 取值里带冒号**才整词抹（用户名+密码一起，与 URL userinfo 同口径）：
     // `sudo -u root` 的 -u 是「以该用户执行」，值是普通用户名、没有冒号——
@@ -518,6 +569,29 @@ pub fn sanitize_for_disk(line: &str) -> String {
             } else {
                 out.push_str(REDACTED);
                 redact_next = false;
+            }
+            continue;
+        }
+        // r31 P1-1：auth 名待定态——`Authorization:`（非 -H 语境）后的下一个词：
+        // 是 basic/bearer 则它只是 scheme 声明，真凭据在再下一个词（走既有
+        // redact_next 链）；否则它就是凭据本体，整词抹。**不能直接置
+        // redact_next**——会把 scheme 词吃掉、放过真凭据（P2-09 陷阱）。
+        if auth_pending {
+            let scheme = word.trim_matches(|c: char| {
+                matches!(c, '"' | '\'' | ',' | ';' | '}' | ')' | '>' | '`')
+            });
+            let is_operator = word
+                .chars()
+                .all(|c| matches!(c, '=' | '>' | '<' | '|' | '&' | ':' | ',' | ';' | '"'));
+            if scheme.eq_ignore_ascii_case("basic") || scheme.eq_ignore_ascii_case("bearer") {
+                out.push_str(word);
+                auth_pending = false;
+                redact_next = true;
+            } else if is_operator {
+                out.push_str(word);
+            } else {
+                out.push_str(REDACTED);
+                auth_pending = false;
             }
             continue;
         }
@@ -567,34 +641,62 @@ pub fn sanitize_for_disk(line: &str) -> String {
             }
             continue;
         }
-        if word.len() > 14
+        // r31 P1-1①②⑦：非 -H 语境的裸 `Authorization:` / `Proxy-Authorization:`
+        // 空格分离形态（curl -v 的 `> ` 回显、python 打印、set -x 整参数引号
+        // `'Authorization:`）。此前的黏连臂只认 len>14（词尾冒号的裸形态恰好
+        // 14 字节被排除）、名字又不在任何名字表——值词以无上下文透传落盘。
+        // 值在下一个词 → 置 auth_pending（scheme 感知，见上方消费块）。
+        {
+            let probe = word.trim_matches(|c| {
+                char::is_ascii_whitespace(&c) || matches!(c, '"' | '\'' | ',' | ';' | '`')
+            });
+            if probe.eq_ignore_ascii_case("authorization:")
+                || probe.eq_ignore_ascii_case("proxy-authorization:")
+            {
+                out.push_str(word);
+                auth_pending = true;
+                continue;
+            }
+        }
+        // r31 P1-1④：黏连臂扩到 Proxy-Authorization 前缀（20 字节）。
+        //
+        // r22（10:21 分片 P2-1b）：`Authorization:Basic <b64>` 冒号黏连的
+        // scheme 声明词——词本身不含机密（值是 Basic/Bearer），base64 凭证
+        // 在**下一个词**。与 bare bearer/basic 同语义：标记下一个词整词抹除，
+        // 本词保留供排查。**必须长于前缀**（冒号后真的黏了内容）才走这臂：
+        // 裸 `Authorization:`（空格分离形态）由上方的 auth_pending 探测块接。
+        //
+        // r29 P1-2：黏连值**不是 scheme**（basic/bearer）时是凭证本体
+        // （`Authorization:$TOKEN` set -x 展开的标准产物）——不能只标下一词
+        // （值在本词内），必须当场抹值。
+        //
+        // r30 P1-2：r29 把这臂放在下方 bare 链里，而主链此刻已把整词推入
+        // out（word_is_secret / colon_glued / `=` / URL 兜底四路必推其一），
+        // 臂内再 push 等于原值照落 + 追加垃圾。重构为替换式：以 continue
+        // 收口，整词不经其它任何臂。scheme 词两侧引号/尾随标点剥掉再比。
+        let auth_glued_prefix = if word.len() > 20
+            && word
+                .get(..20)
+                .is_some_and(|p| p.eq_ignore_ascii_case("proxy-authorization:"))
+        {
+            20
+        } else if word.len() > 14
             && word
                 .get(..14)
-                .is_some_and(|prefix| prefix.eq_ignore_ascii_case("authorization:"))
+                .is_some_and(|p| p.eq_ignore_ascii_case("authorization:"))
         {
-            // r22（10:21 分片 P2-1b）：`Authorization:Basic <b64>` 冒号黏连的
-            // scheme 声明词——词本身不含机密（值是 Basic/Bearer），base64 凭证
-            // 在**下一个词**。与 bare bearer/basic 同语义：标记下一个词整词抹除，
-            // 本词保留供排查。**必须长于 14 字符**（冒号后真的黏了内容）才走这臂：
-            // 裸 `Authorization:`（空格分离形态）的下一词是 basic/bearer 本身，
-            // 得留给 Value 臂的 scheme 链去标真正的凭证词。
-            //
-            // r29 P1-2：黏连值**不是 scheme**（basic/bearer）时是凭证本体
-            // （`Authorization:$TOKEN` set -x 展开的标准产物）——不能只标下一词
-            // （值在本词内），必须当场抹值。
-            //
-            // r30 P1-2：r29 把这臂放在下方 bare 链里，而主链此刻已把整词推入
-            // out（word_is_secret / colon_glued / `=` / URL 兜底四路必推其一），
-            // 臂内再 push 等于原值照落 + 追加垃圾（实测 `Authorization:plainsecret…`
-            // 输出 `Authorization:plainsecret…Authorization:[REDACTED]` 双份）。
-            // 重构为替换式：臂上移进主链、以 continue 收口，整词不经其它任何臂。
-            // scheme 词两侧的引号/尾随标点（`Authorization:"Basic"`）剥掉再比。
-            let glued = word[14..].trim_matches(|c: char| matches!(c, '"' | '\'' | ',' | ';'));
+            14
+        } else {
+            0
+        };
+        if auth_glued_prefix > 0 {
+            let glued = word[auth_glued_prefix..]
+                .trim_matches(|c: char| matches!(c, '"' | '\'' | ',' | ';'));
             if glued.eq_ignore_ascii_case("basic") || glued.eq_ignore_ascii_case("bearer") {
                 out.push_str(word);
                 redact_next = true;
             } else {
-                out.push_str("Authorization:");
+                out.push_str(&word[..auth_glued_prefix]);
                 out.push_str(REDACTED);
             }
             continue;
@@ -612,7 +714,14 @@ pub fn sanitize_for_disk(line: &str) -> String {
             out.push_str(name);
             out.push(':');
             if value.is_empty() {
-                redact_next = true;
+                // r31 P1-1：authorization 族的空值命中不能直接 redact_next——
+                // 下一词若是 Basic/Bearer scheme，直接置位会把 scheme 词当凭据
+                // 吃掉、真凭据漏网（P2-09 陷阱）。转 auth_pending（scheme 感知）。
+                if is_authorization_glued_name(name) {
+                    auth_pending = true;
+                } else {
+                    redact_next = true;
+                }
             } else {
                 out.push_str(REDACTED);
             }
@@ -727,6 +836,8 @@ pub fn sanitize_for_disk(line: &str) -> String {
             curl_user_next = true;
         }
     }
+    carry.redact_next = redact_next;
+    carry.auth_pending = auth_pending;
     clamp_line(&out)
 }
 
@@ -940,6 +1051,9 @@ struct FileState {
     written: u64,
     /// 进度行的"日志省略"说明只留一次。
     progress_notice_emitted: bool,
+    /// r31 P2-2：脱敏 pending 跨行延续——pretty JSON 的键行在行尾置位后，
+    /// 值在下一行；单行调用会让它以全新状态透传落盘。
+    carry: DiskCarry,
 }
 
 impl RunLogFile {
@@ -978,6 +1092,7 @@ impl RunLogFile {
                 file: Some(file),
                 written: written + header.len() as u64,
                 progress_notice_emitted: false,
+                carry: DiskCarry::default(),
             }),
         })
     }
@@ -1005,7 +1120,16 @@ impl RunLogFile {
             self.append("…… 下载进度已在界面实时显示，日志省略重复的进度行 ……");
             return;
         }
-        let text = sanitize_for_disk(line);
+        // r31 P2-2：pending 跨行延续——先借出 carry，脱敏完再还回（锁外做字符串活）。
+        let mut carry = {
+            let mut state = self.state.lock();
+            std::mem::take(&mut state.carry)
+        };
+        let text = sanitize_line_with(line, &mut carry);
+        {
+            let mut state = self.state.lock();
+            state.carry = carry;
+        }
         if text.trim().is_empty() {
             return;
         }
@@ -2029,5 +2153,77 @@ mod tests {
         let cleaned =
             sanitize_for_disk("curl --header=Authorization:basic dXNlcjpwYXNzMTIzNA https://x");
         assert!(!cleaned.contains("dXNlcjpwYXNzMTIzNA"), "{cleaned}");
+    }
+
+    /// r31 P1-1 七形态钉：Authorization/Proxy-Authorization 非 -H 语境名字侧。
+    #[test]
+    fn sanitiser_pins_r31_authorization_name_side_forms() {
+        let cases = [
+            // ① 空格分离（此前 len>14 门恰好排除 14 字节裸词）
+            "debug Authorization: shortsecret12345 tail",
+            // ② curl -v 的 `> ` 回显
+            "> Authorization: shortsecret12345",
+            // ③ env `=` 形态
+            "Authorization=shortsecret12345",
+            // ④ Proxy-authorization 冒号黏连
+            "Proxy-Authorization:shortsecret12345",
+            // ⑤ 紧凑 JSON
+            "{\"Authorization\":\"shortsecret12345\"}",
+            // ⑥ python dict 双词
+            "headers={'Authorization': 'shortsecret12345'}",
+            // ⑦ set -x 整参数引号
+            "+ echo 'Authorization: shortsecret12345'",
+        ];
+        for line in cases {
+            let cleaned = sanitize_for_disk(line);
+            assert!(
+                !cleaned.contains("shortsecret12345"),
+                "形态泄漏：{line} -> {cleaned}"
+            );
+            assert!(
+                cleaned.contains(REDACTED),
+                "无脱敏输出：{line} -> {cleaned}"
+            );
+        }
+        // scheme 两步链不误伤：scheme 词保留语义、真凭据被抹。
+        let cleaned = sanitize_for_disk("Authorization: Basic dXNlcjpwYXNzMTIzNA tail");
+        assert!(!cleaned.contains("dXNlcjpwYXNzMTIzNA"), "{cleaned}");
+        assert!(cleaned.contains("Basic"), "scheme 词应保留：{cleaned}");
+        // 无冒号裸词（普通英语）不受影响。
+        let cleaned = sanitize_for_disk("authorization failed for user bob");
+        assert_eq!(cleaned, "authorization failed for user bob");
+    }
+
+    /// r31 P2-1：SigV4 三员名字侧进 colon/JSON 语境（两表分裂收口）。
+    #[test]
+    fn sanitiser_pins_r31_sigv4_colon_side_names() {
+        for line in [
+            "Security-Token:shortsecret12345",
+            "Credential:shortsecret12345",
+            "{\"security-token\":\"shortsecret12345\"}",
+        ] {
+            let cleaned = sanitize_for_disk(line);
+            assert!(!cleaned.contains("shortsecret12345"), "{line} -> {cleaned}");
+        }
+    }
+
+    /// r31 P2-2：redact_next 跨物理行延续（pretty JSON 两行形态）。
+    #[test]
+    fn sanitiser_carries_pending_across_lines() {
+        let mut carry = DiskCarry::default();
+        let l1 = sanitize_line_with("  \"api_key\":", &mut carry);
+        assert!(carry.redact_next, "键行行尾应置位：{l1}");
+        let l2 = sanitize_line_with("  \"supersecretvalue1234\"", &mut carry);
+        assert!(
+            !l2.contains("supersecretvalue1234"),
+            "跨行值词透传泄漏：{l2}"
+        );
+        assert!(!carry.redact_next, "消费后应复位");
+        // auth_pending 同样跨行。
+        let mut carry = DiskCarry::default();
+        let l1 = sanitize_line_with("Authorization:", &mut carry);
+        assert!(carry.auth_pending, "{l1}");
+        let l2 = sanitize_line_with("shortsecret12345", &mut carry);
+        assert!(!l2.contains("shortsecret12345"), "{l2}");
     }
 }
