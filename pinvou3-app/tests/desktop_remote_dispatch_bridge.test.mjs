@@ -468,16 +468,19 @@ test('independent A status cannot discard the current B failure read', async () 
   const fixture = JSON.parse(fs.readFileSync(new URL('./fixtures/controller_registration_exit.json', import.meta.url), 'utf8'));
   const read = Promise.withResolvers();
   const entered = Promise.withResolvers();
-  const { feature, state, listeners, logic } = installFeature(command => {
+  const { feature, state, logic } = installFeature(command => {
     if (command === 'desktop_remote_controlled_refresh') return Promise.reject(new Error('pairing_registration_failed'));
     if (command === 'desktop_remote_controlled_status') { entered.resolve(); return read.promise; }
+    if (command === 'desktop_remote_controller_connect') return Promise.resolve({
+      status: 'connecting', claimRequestId: 'claim_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', lease: null,
+    });
     return undefined;
   });
   state.desktopRemoteControl = logic.applyControlledStatus(state.desktopRemoteControl, fixture.old);
   const rejected = assert.rejects(feature.controlledRefresh(), { code: 'pairing_registration_failed' });
   await entered.promise;
   const revision = state.desktopRemoteControl.revision;
-  listeners.get('desktop-remote-controller-status')({ payload: { status: 'idle' } });
+  await feature.controllerConnect('2345678');
   assert.ok(state.desktopRemoteControl.revision > revision);
   read.resolve(fixture.failed);
   await rejected;
