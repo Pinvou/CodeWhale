@@ -77,7 +77,8 @@ func main() {
 	}
 	wallets, err := account.NewHTTPWalletProvisioner(os.Getenv("BILLING_HTTP_URL"), credential)
 	if err != nil {
-		log.Fatal("ACCOUNT_WALLET_AUTHORITY_INVALID")
+		logOrganizationStartupFailure(ctx, errOrganizationWallet)
+		os.Exit(1)
 	}
 	identities, err := account.NewHTTPIdentityProvisioner(os.Getenv("IDENTITY_HTTP_URL"), credential)
 	if err != nil {
@@ -92,7 +93,8 @@ func main() {
 	clear(ownerCandidateCursorKey)
 
 	if err := configureOrganizationLifecycle(service, credential); err != nil {
-		log.Fatal("ACCOUNT_ORGANIZATION_AUTHORITY_INVALID")
+		logOrganizationStartupFailure(ctx, err)
+		os.Exit(1)
 	}
 	if err := configureApprovals(ctx, repository, service, credential, cfg.Environment); err != nil {
 		log.Fatal(err)
