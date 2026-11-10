@@ -16,6 +16,14 @@
 
 普通 `events.Relay` 必须显式设置非空 `AllowedSubjects`（精确主题或末尾 `.>` 子树）。`OutboxStore.Claim` 的最后一个参数为该主题范围，存储必须在领取租约前过滤，并同时保留自身的事件排除规则。越域返回整批失败且不修改重试或死信状态。普通崩溃重领保留 `PublicationGeneration` 和 broker 去重 ID；仅明确重新发布可推进代次。冻结投递使用独立协议。
 
+## 构建基础镜像
+
+主 `Dockerfile` 的默认 Go 构建镜像和 `deploy/keycloak/Dockerfile` 的 Maven provider 构建镜像均按多架构 **index digest** 固定。供应商平台 manifest/config 的 SHA256 与 OS/架构核验记录见 [构建基础镜像证据](deploy/build-base-image-evidence.json)；其中 Go 记录 8 个可运行平台、Maven 记录 5 个，`unknown/unknown` 的 attestation 不作为可运行平台。不能用单个 amd64 子 manifest digest 替换多架构 index。
+
+`GO_BUILD_IMAGE` 保留既有构建参数覆盖能力；使用镜像代理或自定义 SDK 时，应显式选择已核验的不可变 digest，并独立确认所需平台和版本。这个证据文件不参与构建时解析，也不会自动跟随 tag 更新。更新默认镜像时，先从官方 registry 核对 index 原文字节摘要、所有可运行平台的 manifest/config 摘要与 OS/架构，再同步更新 Dockerfile 与证据记录；版本 tag 只帮助识别，实际内容由 digest 固定。
+
+该记录只证明取得的元数据及其摘要关系，不代表 SDK 已执行、各架构镜像已构建、发布者签名已验证或平台支持范围扩大。Go 最终服务仍使用 scratch，Keycloak 最终镜像沿用其独立的固定引用；实际镜像构建和部署验收须按原发布流程完成。
+
 ## 本地验证
 
 在本目录执行 `go test -count=1 ./...`、`go vet ./...`。工具使用独立模块，在 `tools/kms-recovery/` 执行同样命令。真实 PostgreSQL、Keycloak 和 OpenBao 用例为显式 opt-in；条件跳过不代表实际集成或部署验收通过。Windows 的文件 mode 测试不证明 POSIX 权限或 Windows ACL，实际使用须按各工具文档限制宿主权限。
