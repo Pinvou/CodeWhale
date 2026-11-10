@@ -67,7 +67,7 @@ struct Session {
     port: u16,
     cards: Arc<Mutex<HashMap<String, SharedCard>>>,
     stop: watch::Sender<bool>,
-    task: JoinHandle<()>,
+    task: Option<JoinHandle<()>>,
 }
 impl Drop for Session {
     fn drop(&mut self) {
@@ -111,7 +111,9 @@ impl Gateway {
         let (enabled, address, port) = {
             let mut session = self.session.lock().await;
             if session.as_ref().is_some_and(|s| {
-                *s.stop.borrow() || s.task.is_finished() || !interfaces.contains(&s.interface)
+                *s.stop.borrow()
+                    || s.task.as_ref().is_none_or(|t| t.is_finished())
+                    || !interfaces.contains(&s.interface)
             }) && let Some(s) = session.take()
             {
                 let _ = s.stop.send(true);
@@ -177,10 +179,12 @@ impl Gateway {
                         let _ = c.stop.send(true);
                     }
                     if s.cards.lock().await.is_empty()
-                        && let Some(mut s) = session.take()
+                        && let Some(s) = session.take()
                     {
                         let _ = s.stop.send(true);
-                        drained_task = Some(s.task);
+                        // Session 实现 Drop，不能整体移出字段——用 Option::take
+                        // 把任务句柄搬走，Drop 留给空壳。
+                        drained_task = s.task.take();
                     }
                 }
             } else {
@@ -207,10 +211,9 @@ impl Gateway {
                     .await
                     .map_err(|_| "lan_model_unavailable")?;
                 let mut session = self.session.lock().await;
-                if session
-                    .as_ref()
-                    .is_some_and(|s| *s.stop.borrow() || s.task.is_finished())
-                {
+                if session.as_ref().is_some_and(|s| {
+                    *s.stop.borrow() || s.task.as_ref().is_none_or(|t| t.is_finished())
+                }) {
                     session.take();
                 }
                 if let Some(s) = session.as_ref() {
@@ -249,7 +252,7 @@ impl Gateway {
                         port,
                         cards,
                         stop,
-                        task,
+                        task: Some(task),
                     });
                 }
             }
