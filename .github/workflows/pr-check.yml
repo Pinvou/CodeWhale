@@ -792,6 +792,8 @@ jobs:
               - 'pinvou3-app/package-lock.json'
               - '.github/workflows/pr-check.yml'
             windows_codex:
+              - 'scripts/test-windows-acp-runtime.py'
+              - 'scripts/tests/test_windows_acp_runtime_scope.py'
               - '.gitmodules'
               - 'private-runtimes/windows'
               - 'pinvou3-app/scripts/codex-bridge-runtime/**'
@@ -4574,7 +4576,20 @@ jobs:
         run: npm --prefix pinvou3-app run test:windows-runtime
 
       - name: Windows ACP bridge runtime smoke
-        run: npm --prefix pinvou3-app run test:codex-acp-windows-runtime
+        run: python scripts/ci-fixture-process.py --receipt "${{ runner.temp }}/windows-acp-${{ github.run_id }}-${{ github.run_attempt }}.json" -- python scripts/test-windows-acp-runtime.py
+
+      - name: Preserve ACP fixture exit receipt
+        if: always()
+        timeout-minutes: 3
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-acp-exit-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 7
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}/windows-acp-${{ github.run_id }}-${{ github.run_attempt }}.json
+            ${{ runner.temp }}/windows-acp-${{ github.run_id }}-${{ github.run_attempt }}-resources/*.json
 
   windows-runtime-test:
     name: windows-runtime-test

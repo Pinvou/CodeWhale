@@ -255,21 +255,24 @@ function assertWorkflowFailurePolicy(workflowText) {
     ].join("\n"));
     remainder = remainder.replace(receipt, "");
   }
-  {
-    const receipt = namedStep(jobBlock("windows-codex-runtime-test", text), "Preserve browser fixture exit receipts");
+  for (const [stepName, artifact, prefix] of [
+    ["Preserve browser fixture exit receipts", "windows-browser-exit", "windows-browser-*"],
+    ["Preserve ACP fixture exit receipt", "windows-acp-exit", "windows-acp"],
+  ]) {
+    const receipt = namedStep(jobBlock("windows-codex-runtime-test", text), stepName);
     assert.equal(receipt.trimEnd(), [
-      "      - name: Preserve browser fixture exit receipts",
+      "      - name: " + stepName,
       "        if: always()",
       "        timeout-minutes: 3",
       "        continue-on-error: true",
       "        uses: actions/upload-artifact@v7",
       "        with:",
-      "          name: windows-browser-exit-${{ github.run_id }}-${{ github.run_attempt }}",
+      "          name: " + artifact + "-${{ github.run_id }}-${{ github.run_attempt }}",
       "          retention-days: 7",
       "          if-no-files-found: warn",
       "          path: |",
-      "            ${{ runner.temp }}/windows-browser-*-${{ github.run_id }}-${{ github.run_attempt }}.json",
-      "            ${{ runner.temp }}/windows-browser-*-${{ github.run_id }}-${{ github.run_attempt }}-resources/*.json",
+      "            ${{ runner.temp }}/" + prefix + "-${{ github.run_id }}-${{ github.run_attempt }}.json",
+      "            ${{ runner.temp }}/" + prefix + "-${{ github.run_id }}-${{ github.run_attempt }}-resources/*.json",
     ].join("\n"));
     remainder = remainder.replace(receipt, "");
   }
@@ -366,6 +369,7 @@ test("all workflow legs reject unreviewed job and step failure exemptions", () =
     ["account-platform-test", "Account test resource lifecycle receipts"],
     ["account-closure-test", "Account closure resource lifecycle receipts"],
     ["windows-codex-runtime-test", "Preserve browser fixture exit receipts"],
+    ["windows-codex-runtime-test", "Preserve ACP fixture exit receipt"],
   ]) {
     const receipt = namedStep(jobBlock(jobName, original), stepName);
     const withoutReceiptExemption = original.replace(receipt,

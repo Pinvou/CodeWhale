@@ -3442,6 +3442,7 @@ class CiGatePolicyTests(unittest.TestCase):
             "Account test resource lifecycle receipts",
             "Account closure resource lifecycle receipts",
             "Preserve browser fixture exit receipts",
+            "Preserve ACP fixture exit receipt",
         )
         self.assertEqual(
             len(step_level),
