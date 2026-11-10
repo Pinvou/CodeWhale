@@ -9,8 +9,16 @@ const orchestrator = fileURLToPath(new URL("../../scripts/run-windows-remote-con
 const guard = fileURLToPath(new URL("../../scripts/windows-e2e-process-guard.ps1", import.meta.url));
 const uiSmoke = fileURLToPath(new URL("../../pinvou3-app/scripts/remote-control-ui-smoke.mjs", import.meta.url));
 const pwsh = process.platform === "win32" ? "powershell.exe" : "pwsh";
+// A Windows PowerShell 5.1 child must build its own native module paths;
+// inherited PowerShell 7 module binaries cannot provide its Get-FileHash.
+const shellEnv = { ...process.env };
+if (process.platform === "win32") {
+  for (const name of Object.keys(shellEnv)) {
+    if (name.toUpperCase() === "PSMODULEPATH") delete shellEnv[name];
+  }
+}
 const quote = (value) => `'${value.replaceAll("'", "''")}'`;
-const psProbe = spawnSync(pwsh, ['-NoProfile', '-NonInteractive', '-Command', 'exit 0']);
+const psProbe = spawnSync(pwsh, ['-NoProfile', '-NonInteractive', '-Command', 'exit 0'], { env: shellEnv });
 const test = (name, run) => nodeTest(name, {
   skip: process.platform !== 'win32' && psProbe.error ? 'PowerShell unavailable; no production AST execution evidence' : false,
 }, run);
@@ -58,7 +66,7 @@ for (const shell of process.platform === 'win32' ? ['powershell.exe', 'pwsh'] : 
       if(($script:calls -join ',') -cne 'legacy-configure-gateway,legacy-traffic-counter,legacy-probe,legacy-traffic-counter,legacy-bare-v2-probe,legacy-deconfigure-gateway'){throw 'legacy-flow-order-invalid'};
       if($script:pidForwards -ne 4 -or $result.counter_before -ne 0 -or $result.counter_after -ne 1 -or $result.restoration.owned_route_removed -ne $true){throw 'legacy-flow-incomplete'};
       [Console]::Out.Write('production-legacy-flow-binding-pass');`;
-    const result = spawnSync(shell, ['-NoProfile', '-NonInteractive', '-Command', script], { encoding: 'utf8', timeout: 30000 });
+    const result = spawnSync(shell, ['-NoProfile', '-NonInteractive', '-Command', script], { env: shellEnv, encoding: 'utf8', timeout: 30000 });
     assert.equal(result.status, 0, result.error?.message ?? result.stderr);
     assert.equal(result.stdout, 'production-legacy-flow-binding-pass');
   });
@@ -68,11 +76,11 @@ test("production orchestrator functions enforce measured elapsed time and route 
   const digest = "a".repeat(64);
   const combined = crypto.createHash("sha256").update(JSON.stringify(["pinvou-gateway-state-v1", digest, digest])).digest("hex");
   assert.doesNotThrow(() => execFileSync(pwsh, ["-NoProfile", "-NonInteractive", "-Command",
-    `${productionFunctions} Assert-PinvouJourneyElapsed 23900 24000; Assert-PinvouRouteStateBinding '${digest}' '${digest}' '${combined}' '${digest}' '${combined}' '${combined}'`], { stdio: "pipe" }));
-  const fast = spawnSync(pwsh, ["-NoProfile", "-NonInteractive", "-Command", `${productionFunctions} Assert-PinvouJourneyElapsed 1000 23900`], { encoding: "utf8" });
+    `${productionFunctions} Assert-PinvouJourneyElapsed 23900 24000; Assert-PinvouRouteStateBinding '${digest}' '${digest}' '${combined}' '${digest}' '${combined}' '${combined}'`], { env: shellEnv, stdio: "pipe" }));
+  const fast = spawnSync(pwsh, ["-NoProfile", "-NonInteractive", "-Command", `${productionFunctions} Assert-PinvouJourneyElapsed 1000 23900`], { env: shellEnv, encoding: "utf8" });
   assert.notEqual(fast.status, 0); assert.match(`${fast.stdout}${fast.stderr}`, /e2e_monotonic_elapsed_mismatch/u);
   const wrongRoute = spawnSync(pwsh, ['-NoProfile', '-NonInteractive', '-Command',
-    `${productionFunctions} Assert-PinvouRouteStateBinding '${digest}' '${digest}' '${digest}' '${digest}' '${combined}' '${combined}'`], { encoding: 'utf8' });
+    `${productionFunctions} Assert-PinvouRouteStateBinding '${digest}' '${digest}' '${digest}' '${digest}' '${combined}' '${combined}'`], { env: shellEnv, encoding: 'utf8' });
   assert.notEqual(wrongRoute.status, 0);
   assert.match(`${wrongRoute.stdout}${wrongRoute.stderr}`, /e2e_legacy_gateway_original_state_mismatch/u);
 });
@@ -89,7 +97,7 @@ test("per-run staging is hash checked, collision-safe and ownership-bound on cle
     + `$markerPath=Join-Path $s.root '.pinvou-e2e-owner.json';$marker=Get-Content -Raw $markerPath;$wrong=$marker.Replace('${nonce}','${'e'.repeat(64)}');[IO.File]::WriteAllText($markerPath,$wrong); `
     + `try{& $cleanup;throw 'owner-mismatch-accepted'}catch{if($_.Exception.Message -notmatch 'e2e_staging_cleanup_owner_mismatch'){throw}};if(-not(Test-Path $s.root)){throw 'foreign-owner-deleted'};[IO.File]::WriteAllText($markerPath,$marker); `
     + `& $cleanup; if(Test-Path $s.root){throw 'cleanup-incomplete'} } finally { if(Test-Path $base){Remove-Item -LiteralPath $base -Recurse -Force} }`;
-  assert.doesNotThrow(() => execFileSync(pwsh, ["-NoProfile", "-NonInteractive", "-Command", script], { stdio: "pipe" }));
+  assert.doesNotThrow(() => execFileSync(pwsh, ["-NoProfile", "-NonInteractive", "-Command", script], { env: shellEnv, stdio: "pipe" }));
 });
 
 test("production cleanup continues after route and role faults and reports their aggregate", () => {
@@ -101,7 +109,7 @@ test("production cleanup continues after route and role faults and reports their
     + `[IO.File]::WriteAllText((Join-Path $s.root 'pinvou-e2e-driver.exe'),'fixture');$script:calls=@();function Invoke-PinvouTrustedGuard{param($FilePath,$Arguments);$script:calls+=@($Arguments[0]);$global:LASTEXITCODE=0;switch($Arguments[0]){ `
     + `'legacy-deconfigure-gateway'{throw 'route-fixture-fault'} 'legacy-owned-pids'{[ordered]@{schema='pinvou-legacy-owned-processes';version=1;run_nonce=$runNonce;mock=$false;active=@();terminated=@()}|ConvertTo-Json -Compress} 'legacy-stop'{} 'stop-role'{throw 'role-fixture-fault'} default{throw 'unexpected-fixture-command'}}}; `
     + `$message='';try{& $cleanup}catch{$message=$_.Exception.Message};if($message -notmatch 'route:route-fixture-fault.*role-process:role-fixture-fault'){throw 'faults-not-aggregated'};if(($script:calls -join ',') -ne 'legacy-deconfigure-gateway,legacy-owned-pids,legacy-stop,legacy-owned-pids,stop-role'){throw 'later-cleanup-skipped'};if(Test-Path $s.root){throw 'files-cleanup-skipped'};[Console]::Out.Write('production-cleanup-aggregate-pass') `
-    + `}finally{if(Test-Path -LiteralPath $base){Remove-Item -LiteralPath $base -Recurse -Force}}`], { encoding: "utf8" });
+    + `}finally{if(Test-Path -LiteralPath $base){Remove-Item -LiteralPath $base -Recurse -Force}}`], { env: shellEnv, encoding: "utf8" });
   assert.equal(result.status, 0, result.stderr);
   assert.equal(result.stdout, 'production-cleanup-aggregate-pass');
 });
@@ -113,9 +121,9 @@ test("legacy ownership registry is strict and recovers a lost response PID", () 
     + `function Expect-Rejected([scriptblock]$Action){try{& $Action;throw 'invalid-registry-accepted'}catch{if($_.Exception.Message -eq 'invalid-registry-accepted'){throw}}}; `
     + `$registry.mock='false';Expect-Rejected {Assert-PinvouLegacyOwnershipRegistry -RunNonce '${nonce}' -Registry $registry};$registry.mock=$false; `
     + `$registry.active=[object[]]@([int]43210,[int]43210);Expect-Rejected {Assert-PinvouLegacyOwnershipRegistry -RunNonce '${nonce}' -Registry $registry}`;
-  assert.doesNotThrow(() => execFileSync(pwsh, ["-NoProfile", "-NonInteractive", "-Command", command], { stdio: "pipe" }));
+  assert.doesNotThrow(() => execFileSync(pwsh, ["-NoProfile", "-NonInteractive", "-Command", command], { env: shellEnv, stdio: "pipe" }));
   const invalid = spawnSync(pwsh, ["-NoProfile", "-NonInteractive", "-Command",
-    `${command.replace("$resolved=Assert-PinvouLegacyOwnershipRegistry", "$registry | Add-Member -NotePropertyName injected -NotePropertyValue $true; $resolved=Assert-PinvouLegacyOwnershipRegistry")}`], { encoding: "utf8" });
+    `${command.replace("$resolved=Assert-PinvouLegacyOwnershipRegistry", "$registry | Add-Member -NotePropertyName injected -NotePropertyValue $true; $resolved=Assert-PinvouLegacyOwnershipRegistry")}`], { env: shellEnv, encoding: "utf8" });
   assert.notEqual(invalid.status, 0);
   assert.match(`${invalid.stdout}${invalid.stderr}`, /e2e_legacy_ownership_query_failed/u);
 });
@@ -144,5 +152,5 @@ test("production bootstrap retains the complete helper call chain across runspac
     + `if((Get-PinvouSha256Hex ([Text.Encoding]::UTF8.GetBytes('scope'))).Length -ne 64){throw 'digest-chain-failed'}; 'scope-contract-pass' }; `
     + `[void]$ps.AddScript($call.ToString()).AddArgument($base).AddArgument(($files|ConvertTo-Json -Compress));$second=@($ps.Invoke());if($ps.Streams.Error.Count){throw ($ps.Streams.Error|Out-String)};if($second[-1] -ne 'scope-contract-pass'){throw 'second-invocation-did-not-run'} `
     + `} finally { $ps.Dispose();$runspace.Dispose();if(Test-Path -LiteralPath $base){Remove-Item -LiteralPath $base -Recurse -Force} }`;
-  assert.doesNotThrow(() => execFileSync(pwsh, ["-NoProfile", "-NonInteractive", "-Command", script], { stdio: "pipe", timeout: 30_000 }));
+  assert.doesNotThrow(() => execFileSync(pwsh, ["-NoProfile", "-NonInteractive", "-Command", script], { env: shellEnv, stdio: "pipe", timeout: 30_000 }));
 });
