@@ -124,6 +124,13 @@ never grants permission to retry another smoke. Existing business assertions,
 required roots, dependency skips and retries remain unchanged. Download/build
 caches are reusable resources and must not be deleted as fixture residue.
 
+Account PostgreSQL service retirement shares the existing 105-second stop budget
+with exact container and anonymous-volume disappearance checks. Docker stop is
+issued once; bounded inventory observations wait for AutoRemove acknowledgement.
+A failed stop, incomplete registration, query failure, or exhausted budget remains
+a failed gate with its original receipt retained; no force removal or pruning is
+used.
+
 Run `python3 scripts/ci-fixture-guard.py` plus its regression tests when adding
 fixtures. The guard covers test database DDL and JS/CommonJS resource imports;
 runtime identity checks remain authoritative. A new resource type needs a shared

@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import time
 import uuid
 
 SERVICES = {
@@ -95,6 +96,7 @@ def stop_owned_services(metadata, receipt_path=None):
     receipt = {'schema': 1, 'kind': 'postgres-services', 'state': 'registered', 'ids': sorted(ids), 'volumes': sorted(volumes), 'unregistered': missing}
     save_receipt(receipt_path, receipt)
     stop_error = None
+    deadline = None
     if selected:
         # AutoRemove also removes container logs. Preserve the diagnostics that
         # the runner normally prints after the job, before retiring the service.
@@ -104,15 +106,37 @@ def stop_owned_services(metadata, receipt_path=None):
                 print(run(['docker', 'logs', identifier], include_stderr=True), flush=True)
             except (RuntimeError, subprocess.TimeoutExpired):
                 print('::warning::PostgreSQL service log read failed; continuing owned-service cleanup', flush=True)
+        # Stop and AutoRemove acknowledgement share the existing 105s budget.
+        # A successful stop can precede disappearance from Docker's inventory.
+        deadline = time.monotonic() + 105
         try:
             run(['docker', 'stop', '--time', '15', *selected], timeout=105)
         except (RuntimeError, subprocess.TimeoutExpired) as error:
             stop_error = error
     # Command success is not a resource-release acknowledgement. Inspect only
     # the IDs/anonymous volumes admitted above; never prune or guess old names.
-    remaining_ids = ids.intersection(run(['docker', 'ps', '--all', '--quiet', '--no-trunc']).splitlines())
-    remaining_volumes = volumes.intersection(run(['docker', 'volume', 'ls', '--quiet']).splitlines())
-    clean = not remaining_ids and not remaining_volumes and not missing
+    # Pending sets are retained if the budget expires before an observation.
+    remaining_ids, remaining_volumes = set(ids), set(volumes)
+    clean = False
+    try:
+        while True:
+            def observe(argv):
+                budget = 30 if deadline is None else min(30, deadline - time.monotonic())
+                if budget <= 0:
+                    raise subprocess.TimeoutExpired(argv, 105)
+                return run(argv, timeout=budget)
+            remaining_ids = ids.intersection(observe(['docker', 'ps', '--all', '--quiet', '--no-trunc']).splitlines())
+            remaining_volumes = volumes.intersection(observe(['docker', 'volume', 'ls', '--quiet']).splitlines())
+            clean = not remaining_ids and not remaining_volumes and not missing
+            if clean or missing or deadline is None:
+                break
+            budget = deadline - time.monotonic()
+            if budget <= 0:
+                break
+            time.sleep(min(0.25, budget))
+    except (RuntimeError, subprocess.TimeoutExpired) as error:
+        if stop_error is None:
+            stop_error = error
     receipt.update(state='released' if clean else 'unconfirmed', remaining_ids=sorted(remaining_ids), remaining_volumes=sorted(remaining_volumes))
     save_receipt(receipt_path, receipt)
     if stop_error is not None:
