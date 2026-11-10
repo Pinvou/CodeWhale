@@ -380,10 +380,10 @@
       var error = asBoundedError(failure);
       if (error.code !== "pairing_registration_failed" || current().intents.controlled !== intent) throw error;
       controlledRegistrationFailureIntent = intent;
-      var revision = current().revision;
+      var observedDevice = current().controlledDevice;
       var terminalSequence = controlledTerminalSequence;
       return invoke("desktop_remote_controlled_status", {}).then(function (authoritative) {
-        if (current().revision !== revision || terminalSequence !== controlledTerminalSequence
+        if (current().controlledDevice !== observedDevice || terminalSequence !== controlledTerminalSequence
           || controlledRegistrationFailureIntent !== intent) return;
         reconcileRegistrationFailure(intent, authoritative);
       }, function () {
@@ -413,13 +413,16 @@
       subscribe();
       var intent = current().intents.controlled;
       var revision = current().revision;
+      var failureIntent = controlledRegistrationFailureIntent;
+      var observedDevice = current().controlledDevice;
       var terminalSequence = controlledTerminalSequence;
       return invoke("desktop_remote_controlled_status", {}).then(function (result) {
-        if (current().revision !== revision) return result;
-        if (controlledRegistrationFailureIntent === intent) {
-          if (terminalSequence !== controlledTerminalSequence) return result;
+        if (failureIntent === intent) {
+          if (controlledRegistrationFailureIntent !== failureIntent || current().controlledDevice !== observedDevice
+            || terminalSequence !== controlledTerminalSequence) return result;
           return reconcileRegistrationFailure(intent, result);
         }
+        if (current().revision !== revision) return result;
         return applyControlled(intent, result);
       }).catch(function (failure) { throw asBoundedError(failure); });
     }
