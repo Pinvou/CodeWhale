@@ -28,7 +28,10 @@ const testPublicKeyPem = testKeys.publicKey.export({ type: "spki", format: "pem"
 const testPublicKeySha256 = crypto.createHash("sha256")
   .update(testKeys.publicKey.export({ type: "spki", format: "der" })).digest("hex");
 const certificateRoot = await mkdtemp(join(tmpdir(), "pinvou-provider-chain-"));
-const openssl = process.platform === "win32" ? "C:\\Program Files\\Git\\usr\\bin\\openssl.exe" : "openssl";
+// Use the active Git installation, including portable/custom Windows installs.
+const openssl = process.platform === "win32"
+  ? join(execFileSync("git", ["--exec-path"], { encoding: "utf8" }).trim(), "..", "..", "bin", "openssl.exe")
+  : "openssl";
 // Explicit extensions: LibreSSL emits no Basic Constraints by default and its
 // x509 subcommand lacks -addext, so the leaf profile comes from an extfile.
 const leafExtensions = join(certificateRoot, "leaf-extensions.cnf");
