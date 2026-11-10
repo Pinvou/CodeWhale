@@ -637,6 +637,7 @@ async function initializeWrapper(wrapper, clientName) {
 
 async function cleanupFixture(fixture, host, ...wrappers) {
   await cleanupBrowserFixture({
+    primaryErrors: fixture.primaryErrors,
     closeHost: () => host.close(),
     stopChildren: [
       ...wrappers.filter(Boolean).map(wrapper => () => wrapper.stopConfirmed()),
@@ -703,6 +704,9 @@ test('Windows proxy: a deliberately killed failed startup returns to reusable sh
       2,
       'the next distinct request must launch exactly one fresh MCP child',
     );
+  } catch (error) {
+    fixture.primaryErrors = [error];
+    throw error;
   } finally {
     await cleanupFixture(fixture, host, wrapper);
   }
@@ -745,6 +749,9 @@ test('Windows proxy: post-handshake setup failure retires child before shim retr
       2,
       'retry must launch one fresh child after retiring the failed setup child',
     );
+  } catch (error) {
+    fixture.primaryErrors = [error];
+    throw error;
   } finally {
     await cleanupFixture(fixture, host, wrapper);
   }
@@ -783,6 +790,9 @@ test('Windows proxy: stdin shutdown cannot release a request buffered during sta
       0,
       'a buffered page action must not dispatch after stdin has closed',
     );
+  } catch (error) {
+    fixture.primaryErrors = [error];
+    throw error;
   } finally {
     await cleanupFixture(fixture, host, wrapper);
   }
@@ -846,6 +856,9 @@ test('Windows proxy: committed close with unusable host acknowledgement is non-r
       [22],
       'the wrapper remains usable and discovers the already-committed close',
     );
+  } catch (error) {
+    fixture.primaryErrors = [error];
+    throw error;
   } finally {
     await cleanupFixture(fixture, host, wrapper);
   }
@@ -895,6 +908,9 @@ test('Windows proxy: committed close stays non-retryable when post-commit page s
       ['aaaaaaaaaaaaaaaa'],
       'the close was committed before the synthetic list failure',
     );
+  } catch (error) {
+    fixture.primaryErrors = [error];
+    throw error;
   } finally {
     await cleanupFixture(fixture, host, wrapper);
   }
@@ -937,6 +953,9 @@ test('Windows proxy: native tab-close uncertainty is structured and non-retryabl
     assert.equal(closed.result.structuredContent.actionCommitState, 'unknown');
     assert.equal(closed.result.structuredContent.retryable, false);
     assert.equal((host.state.operationCalls.get('close_tab') || 0) - beforeClose, 1);
+  } catch (error) {
+    fixture.primaryErrors = [error];
+    throw error;
   } finally {
     await cleanupFixture(fixture, host, wrapper);
   }
@@ -1035,6 +1054,9 @@ test('Windows proxy: settled mutation errors are commit-unknown and never redisp
       (host.state.operationCalls.get('end_agent_operation') || 0) - beforeLifecycle.end,
       5,
     );
+  } catch (error) {
+    fixture.primaryErrors = [error];
+    throw error;
   } finally {
     await cleanupFixture(fixture, host, wrapper);
   }
@@ -1070,6 +1092,9 @@ test('Windows proxy: host tab-navigation uncertainty is never compensated into a
       0,
       'network/script effects cannot be proven undone by closing a staging tab',
     );
+  } catch (error) {
+    fixture.primaryErrors = [error];
+    throw error;
   } finally {
     await cleanupFixture(fixture, host, wrapper);
   }
@@ -1106,6 +1131,9 @@ test('Windows proxy: bootstrap navigation remains committed when its post-sync f
       1,
       'the bootstrap navigation must be dispatched exactly once',
     );
+  } catch (error) {
+    fixture.primaryErrors = [error];
+    throw error;
   } finally {
     await cleanupFixture(fixture, host, wrapper);
   }
@@ -1169,6 +1197,9 @@ test('Windows proxy: external close cancellation reaches the host tombstone befo
       2,
       'a host mutation cancelled before claim must not close a tab',
     );
+  } catch (error) {
+    fixture.primaryErrors = [error];
+    throw error;
   } finally {
     await cleanupFixture(fixture, host, wrapper);
   }
@@ -1222,6 +1253,9 @@ test('Windows proxy: external cancellation tombstones an in-flight tab activatio
       0,
       'a cancelled activation must not dispatch the upstream page tool',
     );
+  } catch (error) {
+    fixture.primaryErrors = [error];
+    throw error;
   } finally {
     await cleanupFixture(fixture, host, wrapper);
   }
@@ -1283,6 +1317,9 @@ test('Windows proxy: stdin shutdown tombstones an in-flight close before exit', 
     }
     assert.equal(host.state.operationCalls.get('close_tab') || 0, 0);
     assert.equal(JSON.parse(readFileSync(fixture.workspacePath, 'utf8')).tabs.length, 2);
+  } catch (error) {
+    fixture.primaryErrors = [error];
+    throw error;
   } finally {
     await cleanupFixture(fixture, host, wrapper);
   }
@@ -1703,6 +1740,9 @@ test('Windows proxy: same wrapper recovers A once after stop while B keeps share
       expectedClickDelta: 1,
       expectedMutationUnknown: true,
     });
+  } catch (error) {
+    fixture.primaryErrors = [error];
+    throw error;
   } finally {
     await cleanupFixture(fixture, host, wrapper);
   }
@@ -1767,6 +1807,9 @@ test('Windows proxy: upstream crash settles the claimed dispatch before wrapper 
         sleep(10_000).then(() => { throw new Error('wrapper did not exit after upstream crash'); }),
       ]);
     }
+  } catch (error) {
+    fixture.primaryErrors = [error];
+    throw error;
   } finally {
     await cleanupFixture(fixture, host, wrapper);
   }
@@ -1863,6 +1906,9 @@ test('Windows proxy: cancelled uncooperative dispatch shuts down on the first de
       arguments: {},
     });
     assert.equal(recovered.result.structuredContent.pages.length, 1);
+  } catch (error) {
+    fixture.primaryErrors = [error];
+    throw error;
   } finally {
     await cleanupFixture(fixture, host, wrapper, replacement);
   }

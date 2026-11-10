@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"time"
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/events"
@@ -201,8 +202,13 @@ func evaluateAccountStopLoss(ctx context.Context, tx pgx.Tx, item struct {
 	return events.AppendOutbox(ctx, tx, "account.manual-review.stop-loss-evaluated.v1", item.id, 1, map[string]any{"case_id": item.id, "severity": item.severity, "high_risk_command_type": commandType, "automatic_execution_paused": true})
 }
 
+type manualReviewSLARepository interface {
+	SyncManualReviewCases(context.Context, int) (int, error)
+	EscalateOverdueManualReviews(context.Context, manualreview.OnCallSchedule, int) (int, error)
+}
+
 type ManualReviewSLAWorker struct {
-	repository *PostgresRepository
+	repository manualReviewSLARepository
 	schedule   manualreview.OnCallSchedule
 	interval   time.Duration
 }
@@ -215,11 +221,7 @@ func NewManualReviewSLAWorker(repository *PostgresRepository, schedule manualrev
 }
 
 func (worker *ManualReviewSLAWorker) Run(ctx context.Context) {
-	run := func() {
-		_, _ = worker.repository.SyncManualReviewCases(ctx, 100)
-		_, _ = worker.repository.EscalateOverdueManualReviews(ctx, worker.schedule, 100)
-	}
-	run()
+	worker.runOne(ctx)
 	ticker := time.NewTicker(worker.interval)
 	defer ticker.Stop()
 	for {
@@ -227,7 +229,16 @@ func (worker *ManualReviewSLAWorker) Run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			run()
+			worker.runOne(ctx)
 		}
+	}
+}
+
+func (worker *ManualReviewSLAWorker) runOne(ctx context.Context) {
+	if _, err := worker.repository.SyncManualReviewCases(ctx, 100); err != nil && (ctx.Err() == nil || !errors.Is(err, ctx.Err())) {
+		slog.ErrorContext(ctx, "manual_review_sync_failed", "error_code", "MANUAL_REVIEW_SYNC_FAILED")
+	}
+	if _, err := worker.repository.EscalateOverdueManualReviews(ctx, worker.schedule, 100); err != nil && (ctx.Err() == nil || !errors.Is(err, ctx.Err())) {
+		slog.ErrorContext(ctx, "manual_review_escalation_failed", "error_code", "MANUAL_REVIEW_ESCALATION_FAILED")
 	}
 }
