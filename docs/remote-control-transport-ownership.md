@@ -65,6 +65,46 @@ keeper 在所有编译模式都必须带原 transport 注册；缺失时在读�
 证明注册检查及状态派发，不替代实际 socket writer。实际 adapter/reader 回归另验
 事件生产与传输边界。
 
+## Controller transport 的调度和异常退休
+
+`spawn_controller_transport` 在提交异步任务前创建本实例的生命周期 guard。任务正常
+意外返回、panic 或取消/未轮询即丢弃时，guard 先竞争本 sender 的一次性终态，再取消
+发送权、清除 active/saved lease 与最终恢复安装凭据。显式 Stop 已领取终态时不另发
+异常断线；异常结束只投影一次捕获的 owner、generation 和完整租约，继续由原 keeper
+核对，不能借全局当前实例清理替换后的 sender。外部 sink panic 不跳过先行的退休。
+
+持续就绪的出站最多连续领取 8 个帧后，下一次选择优先检查已到期心跳及入站，再继续
+出站；Stop 和入站绝对静默截止始终优先。过期出站也占用该轮询额度。单次挂起写仍
+受既有写截止和更早的入站静默截止约束，不声称能抢占同步阻塞的 poll。控制/业务队列
+内的既有控制优先语义保持；这不是共享 relay_client 的另一个公平调度修复。
+
+合法但无安装租约的控制帧仍可交付握手/协商，不能重置重连退避。只有同一 socket、
+同一次已认证租约安装的正向上下文匹配帧，至少两次跨越既有一个心跳窗口，才重置
+退避；换 socket 或重新安装等值租约也重新积累证据。该 transport 证据不替代领域的
+MAC、存活挑战或首次断线冻结预算。入站 Ping、合法当前帧与当前未消费探测的 Pong
+可更新 transport 静默时间；非法/旧代帧、任意或重放的 Pong、二进制噪声和本地发送
+不更新它。Ping 的 16 字节负载包含本地时间和本 socket 的探测序号，Pong 按 WebSocket
+规则原样回显；序号不作为远控 wire JSON 或认证材料。
+
+transport 只严格解析一次原始 JSON（含重复键和原始字节长度检查），随后在同一个
+parsed/validated 视图上执行角色、协议、能力和上下文检查。已安装租约的不可变 Arc
+快照避免热路径复制完整能力列表；队列和退休事件仍捕获需要保留的上下文。JSON
+验证入口继续保留原有错误顺序、大小、能力和租约约束。
+
+共享恢复夹具的 pending、confirmed 和 resumed 回执分别引用真实 B 发出的 ACK、
+liveness 和 ready 请求，保持与生产 Relay 写方一致后再验证协议重构的完整恢复链路。
+
+相关定向回归入口（需使用仓库共享进程/资源作用域）：
+
+```sh
+cargo test --locked --manifest-path pinvou3-app/src-tauri/Cargo.toml --lib controller::relay_transport:: -- --test-threads=1
+cargo test --locked --manifest-path pinvou3-app/src-tauri/Cargo.toml --lib controller::protocol:: -- --test-threads=1
+```
+
+实际 loopback WebSocket 验证裸合法控制与短命连接、无有效响应的噪声、真实任务 panic
+及清理；可控时钟/队列另验轮询边界、安装替换、Stop 和原有建连/写总截止。这些
+本地入口不等价于部署 Relay、完整界面、双机、负载性能或发布验收。
+
 B 的两个平台无关回归分别保持 operation、generation、租约不变只替换 transport，
 验证旧 owner 无权执行闭包；以及在后继握手已开始后交付旧安装，验证安装闭包从未
 执行、后继仍可正常完成。Linux 完整 lib 测试和 Windows 回归均可收集这些用例：
