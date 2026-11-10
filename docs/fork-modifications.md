@@ -79,10 +79,19 @@
 
 ## 0. 当前状态（2026-11-10）
 
-- 当前公开维护头与父仓 gitlink：`6f7a3a748f408568468ace45aa5cdbb34f882d73`（2026-11-10，#136/#142/#148/#150/#152 合入线）。#123 已合入为 `e5a8af221`，#124 为 `449edbf0b`，#129 为 `4e560354c`，#131 为 `e2a0e14fd`，#133 为 `4e75c6a07`，#134 为 `8a4719fd4`，#135 为 `11cba403d`，#136 为 `37be2844f`，#142 为 `78804c83e`，#148 为 `5f15cce57`，#150 为 `e972a9a05`，#152 为 `6f7a3a748`；本轮推进维护分支并同步父仓引用与登记。
+- 当前公开维护头与父仓 gitlink：`6f7a3a748f408568468ace45aa5cdbb34f882d73`（2026-11-10）。在原 `11cba403d` 之上消费已合入的 #136 `37be2844f`、#142 `78804c83e`、#148 `5f15cce57` 、#150 `e972a9a05` 与 #152 `6f7a3a748`。父仓只消费已公开提交，不推进维护分支、不移动标签。
 - 实测历史：上游 v0.9.12 `dcd4c200f` 之上 98 个提交，r1 `1fafee7e2` 之上 83 个；96 个带 DCO sign-off。未签名的 squash 为 #107 `f27672935` 与 #116 `e9a7f48da1`，不能继续声称只有一个未签名提交。保留已发布历史，不改写维护分支。
 - 不可变 tag `pinvou-v0.9.12-r3` 仍在 `61cb769be5b33abc64f64da4272f5b39a8b6c1fd`；r1 仍在 `1fafee7e26b60a59457a43bce50c63aa2ad9dbaf`。公开门禁仍要求 gitlink 等于维护头并验证 r3 标签，未放宽任何条件。
 - 实测 drift：548 files, +121115/-49797，净增 71318；301 个独立 `forkguard_*` 行为名（登记下限仍为 64）。原生 Windows 证据仅适用于原记录的执行提交，不扩展为本次集成树已执行；当前父仓 CI 和最终集成树审核仍须独立确认。
+
+### 2026-11-10 公开维护头对齐（#136/#142/#148/#150/#152）
+
+- 公共 CI 的 `verify-public-submodule.sh` 仍严格要求父仓 gitlink 等于 `pinvou3-clean`。外部维护操作推进公开分支后，旧 `11cba403d` 引用导致 fast-gate / merge-authored-audit 失败；本批只按既定过渡规则更新消费点，保留 r3 标签及全部门禁。
+- #136 归入既有 T2/T3：对齐模型可见工具/提示与实际执行边界，迁移内置 Skill 文案并保留用户改动，补充 FIM、媒体、Shell、任务及 Skill 结果式回归。该公开提交包含行为和测试，不能表述为父仓行为完全不变或单纯改注释。
+- #142 归入 T1：终态选中错误携带 Model/Runtime 来源，局部恢复后不把旧模型错误当最终失败，普通路由的本地准备错误有独立类型。内部 `TurnComplete` 新增可选来源字段。父仓 forwarder 显式忽略此元数据以保持既有归类，两条 strict-mode 构造填 `None`；没有借公共引用更新混入遥测分类功能。
+- #148 归入 T2：`work_update` 的 todo 项 schema 不再强制 status，省略时仍由既有执行器产生 pending；content 保持必填。随公开提交消费 `todo_item_status_is_optional_with_a_pending_default` 与 `work_update_treats_a_missing_status_as_pending` 两条既有结果回归，并登记指纹，不修改底座源码来重命名测试或放宽契约。
+- #150 归入 T1：公开导出 `route_effective_max_output_tokens`，委托既有预算组合路径供宿主一次性请求复用；父仓本批不新增调用。消费 `route_effective_max_output_tokens_matches_the_transport_composition` 的精确输入/输出回归并登记导出指纹。
+- #152 已以 `6f7a3a748` 合入公开维护分支：rusqlite 0.41.1 / libsqlite3-sys 0.39.1、rmcp 3.9.0 与 rio-vt 0.5.29 修复相应安全通告，底座 rust-version 声明对齐锁图已有的 1.89 下限。继续使用本 PR #2519 已有的父仓 manifest 与五份锁文件，不将旧候选 `a4c83ad12` 误作 squash 后公开头。公开合入同时包含 #136/#142/#148/#150，父仓补齐 Event 编译适配与行为登记；没有重新实现依赖升级或放宽 advisories 门禁。验证记录和当前对应 CI 另行验收；CodeWhale 已合入与静态指纹通过不代表本批宿主全平台编译、真实模型或发布验收完成。
 
 ### 2026-10-29 公开维护头对齐（#114/#125）
 
