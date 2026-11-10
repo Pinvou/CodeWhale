@@ -216,9 +216,11 @@ func migrationDomain(ctx context.Context, connection *pgx.Conn, loaded []migrati
 }
 
 func protectedMigrationDomain(version int64, name, checksum string) string {
-	// These F02 names are reserved even if a carrier moves their version and
-	// recomputes its checksum; the Billing wrapper must validate the identity.
-	if name == "refund_dispatch_fencing" || name == "payment_notification_provenance" {
+	// These F02 names and canonical SQL digests remain reserved across version
+	// changes; the Billing wrapper must validate the complete identity.
+	if name == "refund_dispatch_fencing" || name == "payment_notification_provenance" ||
+		checksum == "b21624f92414a8ec464138ab5bab13ac5d6e2d982881cb2b1e72ca22f7e8c694" ||
+		checksum == "26c694e7b99c7d070654a2bd26d3b2af693d4a15e400c5c677fb93f5f3a88eee" {
 		return "billing"
 	}
 	for _, identity := range []struct {
