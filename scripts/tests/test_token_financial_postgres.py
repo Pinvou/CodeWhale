@@ -566,11 +566,32 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
             with self.subTest(action=action), self.assertRaises(RuntimeError):
                 RUNNER.verify_results(events + [{"Action": action, "Package": RUNNER.ACCOUNT_PACKAGE, "Test": name}], RUNNER.ACCOUNT_REQUIRED, **options)
 
+    def test_unstarted_grant_actual_leaf_is_required_without_synthetic_children(self):
+        root = "TestUnstartedApprovalGrantInventoryPostgres"
+        self.assertIn(root, RUNNER.ACCOUNT_REQUIRED)
+        self.assertIn(root, RUNNER.ACCOUNT_LEAF_REQUIRED)
+        self.assertNotIn(root, RUNNER.ACCOUNT_CHILD_REQUIRED)
+        self.run_main_fixture()
+        command = self.fixture_commands[self.fixture_phases.index("owner-account")]
+        self.assertIn(root, command[command.index("-run") + 1])
+        valid = self.events(RUNNER.ACCOUNT_REQUIRED, RUNNER.ACCOUNT_PACKAGE, children=True)
+        valid = [e for e in valid if not e.get("Test", "").startswith(root + "/")]
+        options = dict(package=RUNNER.ACCOUNT_PACKAGE, require_children=True, exact_roots=True, children_required=RUNNER.ACCOUNT_CHILD_REQUIRED)
+        self.assertGreater(RUNNER.verify_results(valid, RUNNER.ACCOUNT_REQUIRED, **options), 0)
+        for bad in (
+            [e for e in valid if e.get("Test") != root],
+            valid + [{"Action": "skip", "Package": RUNNER.ACCOUNT_PACKAGE, "Test": root}],
+            valid + [{"Action": "skip", "Package": RUNNER.ACCOUNT_PACKAGE, "Test": root + "/unexpected"}],
+            [{**e, "Package": RUNNER.BILLING_PACKAGE} if e.get("Test") == root else e for e in valid],
+        ):
+            with self.assertRaises(RuntimeError):
+                RUNNER.verify_results(bad, RUNNER.ACCOUNT_REQUIRED, **options)
+
     def test_registration_bonus_checkpoint_roots_are_mandatory(self):
         names = CHECKPOINT_LEAF_ROOTS | {CHECKPOINT_FOREIGN_ROOT}
         self.assertTrue(names <= RUNNER.ACCOUNT_REQUIRED)
-        self.assertEqual(RUNNER.ACCOUNT_LEAF_REQUIRED, CHECKPOINT_LEAF_ROOTS)
-        self.assertEqual(RUNNER.ACCOUNT_CHILD_REQUIRED, RUNNER.ACCOUNT_REQUIRED - CHECKPOINT_LEAF_ROOTS)
+        self.assertEqual(RUNNER.ACCOUNT_LEAF_REQUIRED, CHECKPOINT_LEAF_ROOTS | {"TestUnstartedApprovalGrantInventoryPostgres"})
+        self.assertEqual(RUNNER.ACCOUNT_CHILD_REQUIRED, RUNNER.ACCOUNT_REQUIRED - CHECKPOINT_LEAF_ROOTS - {"TestUnstartedApprovalGrantInventoryPostgres"})
         self.assertEqual(RUNNER.EXACT_REQUIRED_CHILDREN[CHECKPOINT_FOREIGN_ROOT], CHECKPOINT_FOREIGN_CHILDREN)
         self.run_main_fixture()
         command = self.fixture_commands[self.fixture_phases.index("owner-account")]
@@ -1733,7 +1754,6 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
             "TestTokenAuthorizationWriterToBillingNonTargetPostgres",
             "TestOwnerCombinedActualHTTPPostgres",
             "TestApprovalRecoveryQueryAllRegisteredCommandsPostgres",
-            "TestUnstartedApprovalGrantInventoryPostgres",
             "TestApprovalRecoveryQueryForwardMigrationPostgres",
             "TestApprovalAuthorizationWallClockPostgres",
             "TestApprovalMutationWallClockPostgres",

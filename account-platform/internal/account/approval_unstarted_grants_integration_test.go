@@ -5,14 +5,20 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/Pinvou/pinvou3/account-platform/internal/accountschema"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/approvalconsumer"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/approvalencoding"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/events"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/migrations"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 func TestUnstartedApprovalGrantInventoryPostgres(t *testing.T) {
@@ -22,7 +28,7 @@ func TestUnstartedApprovalGrantInventoryPostgres(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
 	defer cancel()
-	repo, _, relay, _ := newEntitlementApprovalFixture(t, ctx, raw)
+	repo, operator, relay, _ := newEntitlementApprovalFixture(t, ctx, raw)
 	tokenRecentAuthActors(t, ctx, repo)
 	requester := seedEntitlementApprovalActor(t, ctx, repo.pool, "PLATFORM_SUPER_ADMIN", "prebegin-diagnostic-requester")
 	approver := seedEntitlementApprovalActor(t, ctx, repo.pool, "PLATFORM_SUPER_ADMIN", "prebegin-diagnostic-approver")
@@ -131,6 +137,31 @@ func TestUnstartedApprovalGrantInventoryPostgres(t *testing.T) {
 			t.Fatal("invalid limit accepted", err)
 		}
 	}
+	// Execute the actual CLI factory and JSON writer against this owned DB.
+	suffix := ""
+	if runtime.GOOS == "windows" {
+		suffix = ".exe"
+	}
+	binary := filepath.Join(t.TempDir(), "approval-grant-inventory"+suffix)
+	build := exec.CommandContext(ctx, filepath.Join(runtime.GOROOT(), "bin", "go"+suffix), "build", "-o", binary, "../../cmd/approval-grant-inventory")
+	if err = build.Run(); err != nil {
+		t.Fatal("build actual inventory CLI", err)
+	}
+	command := exec.CommandContext(ctx, binary, "--limit", "200")
+	command.Env = append(os.Environ(), "APPROVAL_GRANT_INVENTORY_DATABASE_URL="+repo.pool.Config().ConnString())
+	output, err := command.Output()
+	if err != nil {
+		t.Fatal("actual inventory CLI failed", err)
+	}
+	var cliInventory UnstartedGrantInventory
+	if err = json.Unmarshal(output, &cliInventory); err != nil || cliInventory.SchemaVersion != 1 || len(cliInventory.Items) != 2 || cliInventory.Next != nil {
+		t.Fatal("actual CLI JSON inventory invalid", err)
+	}
+	for _, i := range cliInventory.Items {
+		if !combined[i.RequestID] || i.EffectConclusion != "UNKNOWN" || i.NextAction != "QUERY_ONLY_NO_REEXECUTION" {
+			t.Fatal("actual CLI lost unknown binding")
+		}
+	}
 	afterGrant, err := repo.ApprovalAuthorizationDeliveryState(ctx, eventID, binding.Durable, binding.Workload)
 	if err != nil || afterGrant.Version != granted.Version || afterGrant.State != granted.State {
 		t.Fatal("inventory changed delivery", err)
@@ -188,6 +219,43 @@ func TestUnstartedApprovalGrantInventoryPostgres(t *testing.T) {
 	invalidated, err := repo.InspectUnstartedApprovalGrants(ctx, 200, nil)
 	if err != nil || len(invalidated.Items) != 1 || invalidated.Items[0].RequestStatus != "INVALIDATED" || invalidated.Items[0].EffectConclusion != "UNKNOWN" {
 		t.Fatal("invalidation hid unknown grant", invalidated, err)
+	}
+	// Real migration caller cannot impersonate a runtime reader via SET ROLE.
+	if _, err = operator.Exec(ctx, "SET ROLE account_service"); err != nil {
+		t.Fatal(err)
+	}
+	_, err = operator.Exec(ctx, "SELECT * FROM public.list_approval_unstarted_grants(1,NULL,NULL)")
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) || pgErr.Code != "42501" {
+		t.Fatal("migration caller bypassed session identity", err)
+	}
+	var privileged bool
+	if err = repo.pool.QueryRow(ctx, `SELECT has_schema_privilege('account_approval_authorization_owner','public','CREATE')
+ OR has_function_privilege('account_approval_writer','public.list_approval_unstarted_grants(integer,uuid,text)','EXECUTE')
+ OR has_function_privilege('account_approval_recovery','public.list_approval_unstarted_grants(integer,uuid,text)','EXECUTE')`).Scan(&privileged); err != nil || privileged {
+		t.Fatal("inventory ACL widened", err)
+	}
+	identitySQL := `SELECT (SELECT jsonb_agg(to_jsonb(s) ORDER BY version)::text FROM schema_migrations s),pg_get_functiondef(p.oid)||p.proacl::text FROM pg_proc p WHERE p.oid='public.list_approval_unstarted_grants(integer,uuid,text)'::regprocedure`
+	var ledgerBefore, fnBefore, ledgerAfter, fnAfter string
+	if err = operator.QueryRow(ctx, identitySQL).Scan(&ledgerBefore, &fnBefore); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := migrations.Load("../../migrations/account")
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = accountschema.DownOne(ctx, operator, loaded)
+	if !errors.As(err, &pgErr) || pgErr.Code != "55000" {
+		t.Fatal("inventory down did not refuse", err)
+	}
+	if err = operator.QueryRow(ctx, identitySQL).Scan(&ledgerAfter, &fnAfter); err != nil || ledgerBefore != ledgerAfter || fnBefore != fnAfter {
+		t.Fatal("refused down changed ledger/function", err)
+	}
+	afterDown, err := repo.InspectUnstartedApprovalGrants(ctx, 200, nil)
+	beforeItems, _ := json.Marshal(invalidated.Items)
+	afterItems, _ := json.Marshal(afterDown.Items)
+	if err != nil || string(beforeItems) != string(afterItems) {
+		t.Fatal("refused down changed unknown facts", err)
 	}
 	t.Log("BASELINE_LATE_BEGIN: real original now visible to normal recovery; no domain execution performed")
 }
