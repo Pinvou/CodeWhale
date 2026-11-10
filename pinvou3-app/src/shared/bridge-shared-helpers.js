@@ -4369,18 +4369,21 @@
   }
 
   // web+tauriSettings 共享
+  let modelConfigurationReadSequence = 0;
   async function loadEffectiveModelConfig(sessionId) {
+    const seq = ++modelConfigurationReadSequence;
     const requestedSessionId = arguments.length ? (sessionId || null) : (state.activeSessionId || null);
     try {
       const config = await invoke("get_effective_model_config", { sessionId: requestedSessionId });
       // When switching sessions quickly, an older request may return after the new one; never let the old session's config overwrite the current overlay state.
-      if ((state.activeSessionId || null) !== requestedSessionId) return;
+      if (seq !== modelConfigurationReadSequence || (state.activeSessionId || null) !== requestedSessionId) return false;
       state.effectiveModelConfig = config;
     } catch {
-      if ((state.activeSessionId || null) !== requestedSessionId) return;
-      state.effectiveModelConfig = null;
+      if (seq !== modelConfigurationReadSequence || (state.activeSessionId || null) !== requestedSessionId) return false;
+      return false;
     }
     notify();
+    return true;
   }
 
   // web+tauriInteraction 共享（FE14 残余批：原 tauri interaction.js / web bridge.js
