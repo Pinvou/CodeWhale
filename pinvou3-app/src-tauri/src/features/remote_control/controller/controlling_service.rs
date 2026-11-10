@@ -716,7 +716,17 @@ async fn serve_controlling_lane_with_evidence_context(
                             continue;
                         }
                         if resume.is_active() {
-                            continue;
+                            // A second loss belongs to this candidate only if
+                            // the complete original registration still matches.
+                            // Do not restart or extend the first frozen budget.
+                            if context != registration {
+                                continue;
+                            }
+                            if manager.with_lane_owner(&operation, || business.clear()).is_err() {
+                                return;
+                            }
+                            fail_resume(manager, &operation, sinks);
+                            return;
                         }
                         // A pre-authentication D carries no lease authority.
                         // Its non-reusable original port/intent may still fail
@@ -2261,6 +2271,11 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn actual_adapter_second_disconnect_ends_candidate_before_inbox_terminal() {
+        assert_actual_adapter_case("second").await;
+    }
+
+    #[tokio::test]
     async fn actual_adapter_pre_auth_disconnect_fails_only_its_original_attempt() {
         assert_actual_adapter_case("pre_auth").await;
     }
@@ -2322,6 +2337,9 @@ mod tests {
         // adapter, inbox, production port and keeper. The WebSocket driver
         // itself is outside this A adapter test's scope.
         super::super::relay_transport::disconnect_test_transport_to_sink(&sender, &sink);
+        if case == "second" {
+            super::super::relay_transport::disconnect_test_transport_to_sink(&sender, &sink);
+        }
         drop(sink);
         drop(ingress_tx);
         if case == "pre_auth" {
@@ -2372,6 +2390,25 @@ mod tests {
         )
         .await;
         match case {
+            "second" => {
+                assert_eq!(
+                    seen,
+                    [
+                        ControllingStatusKind::Reconnecting,
+                        ControllingStatusKind::Error
+                    ]
+                );
+                assert!(
+                    matches!(
+                        port.next_lane_event().await,
+                        Some(ControllerLaneEvent::Failed(ControllerLaneFailure::Closed))
+                    ),
+                    "second disconnect was ignored until inbox terminal"
+                );
+                assert!(!business.is_installed());
+                assert!(manager.live_lease().is_err());
+                assert_eq!(receiver.pending_control_for_test(), 1);
+            }
             "current" => {
                 // The accepted disconnect still drives Reconnecting and the
                 // validated resume prepare; the producer teardown's Closed

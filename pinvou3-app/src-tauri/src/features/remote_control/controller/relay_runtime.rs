@@ -2668,6 +2668,17 @@ pub(crate) fn handle_controlled_resume_frame<P: ControlledRelayPort + ?Sized>(
     {
         return ControlledResumeOutcome::Ignored;
     }
+    // This notice is synthesized by the current local reader, not a wire
+    // protocol message (the manager rejects wire imitations). It deliberately
+    // has no lease tuple. The captured transport owner above supplies the
+    // authority; a second loss terminates this candidate without a new budget.
+    if kind == "desktop_relay_connection" {
+        return if message.get("connected").and_then(Value::as_bool) == Some(false) {
+            ControlledResumeOutcome::Failed
+        } else {
+            ControlledResumeOutcome::Ignored
+        };
+    }
     let advance = |step, now| manager.advance_owned_resume(&owner, step, now);
     // Relay errors deliberately have no lease tuple. Authority comes from
     // strict protocol validation and this operation's locally sent request.

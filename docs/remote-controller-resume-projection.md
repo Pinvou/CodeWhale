@@ -38,10 +38,29 @@ Legacy Web v2。完整成功才开启下轮有限预算；中间阶段和重复�
 遥测上传或部署端到端验证。测试同步点只存在于 cfg(test)，不增加产品接口。
 正常脚本恢复帧均经过实际 reader 的 schema/context 校验及事件出口后再交 keeper，
 重复 final 按 reader 拒绝结果丢弃；无 reader 权限的 final 是明确的拒绝性注入。
-第二次恢复失败使用真实预算超时，发布时直接核原租约业务已激活。重复中断置于
+第二轮恢复的预算失败仍按首次截止收口，发布时直接核原租约业务已激活。异租约中断置于
 受控时钟的第 5、10 秒，并直接核交付时刻。计时器和 gate 输入使用同源时钟，
 从预算建立后同一同步 poll 的首次断线交付计时，final 绝对计划在第 30 或 50 秒；
 仍按首次 30 秒收口，断言仅容纳 Tokio 定时器一次至多 1 毫秒的向上取整。
+
+恢复中的当前通道再次断线会立即终止候选，不等冻结预算耗尽，也不重启恢复。
+A 在完整原始 transport registration（owner、generation、租约）仍匹配后清理
+业务并提交一次恢复失败；旧 owner、旧租约和无租约的迟到通知不能终止新候选。
+B 的本地 `desktop_relay_connection` 通知由持有当前 reader 的管理器产生，
+恢复处理器先核捕获的 transport owner，再沿既有终态清理链结束本代。
+该通知不带租约，不能按普通恢复帧的完整租约筛选丢弃。来自 socket JSON 的
+同名输入被管理器拒绝，不能冒充本地断线；`connected:true` 不终止候选。
+
+当前 controller-v1 线协议没有独立的 peer-offline 消息，Relay 的 socket-close
+钩子也不向另一端生成这种帧。本修复不新增未发布消息或桌面兼容分支：只有
+可信本地 transport 事件走即时路径；本地连接尚在而对端失联时，仍由既有认证
+存活证据和有界 watchdog 处理。未知或无法绑定的帧不能续期首次预算。
+
+定向回归在 Prepared、Provisional、pending 阶段分别断线。A 使用真实 keeper、
+manager、密码通道和生产事件适配器，投递与时钟受控；B 使用 Windows 进程私有
+真实 Wry host、loopback WebSocket、RelayClient、管理器、worker 和生产清理适配器，
+核验即时退出、仅一次本代清理及下一次可重新登记。伪造 wire 通知经过真实 reader
+入口后不得改变状态或冻结截止；这些测试不代表双机现场或发布验收。
 
 Windows linked exe 的独立非零筛选及 Linux 全 lib 门禁须实际运行；本地 GNU
 验证不能替代正式 MSVC/Linux 和 Merge Queue。发布仍受 #1428 独立安全前置约束。

@@ -1042,6 +1042,15 @@ impl ControllingDeviceManager {
     pub(crate) fn status(&self) -> ControllingStatus {
         status_locked(&self.inner.lock())
     }
+
+    #[cfg(test)]
+    pub(crate) fn resume_phase_for_test(&self) -> Option<super::resume::ResumePhase> {
+        self.inner
+            .lock()
+            .resume_gate
+            .as_ref()
+            .map(|gate| gate.phase())
+    }
 }
 
 impl Drop for ControllingDeviceManager {
