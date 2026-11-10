@@ -95,9 +95,11 @@ func main() {
 		logOrganizationStartupFailure(ctx, err)
 		os.Exit(1)
 	}
-	if err := configureApprovals(ctx, repository, service, credential, cfg.Environment); err != nil {
+	approvalWorkers, err := configureApprovals(ctx, repository, service, credential, cfg.Environment)
+	if err != nil {
 		log.Fatal(err)
 	}
+	workers = append(workers, approvalWorkers...)
 	if err := configureRegistrationBonus(ctx, repository, enabled("MOBILE_AUTH_ENABLED"), os.Getenv("REGISTRATION_BONUS_FINGERPRINT_KEY_ID"), os.Getenv("REGISTRATION_BONUS_FINGERPRINT_HMAC_KEY_BASE64")); err != nil {
 		log.Fatal("REGISTRATION_BONUS_CONFIGURATION_INVALID")
 	}
