@@ -162,8 +162,15 @@ impl Gateway {
         address: Option<String>,
         port: u16,
     ) -> Result<Status, String> {
+        // r31 P2-4：drained_task 跨出第一锁段，供锁外等待。
+        let mut drained_task = None;
         {
             let mut session = self.session.lock().await;
+            // r31 P2-4：停用不再持锁等待 serve 任务退出——此前锁内 await 2s 会把
+            // status() 轮询与并发 set() 全阻塞，且快速关→开时在途流超时让 serve
+            // 带着监听器脱管、撞 lan_bind_failed。改为：锁内只摘会话+发停信号，
+            // 任务句柄移出锁外等待。重绑竞态窗口由启用路径锁外的 ~6s 慢验证
+            // （route+verify_model）天然覆盖——旧任务 2s 内退出，新绑定晚于它。
             if !enabled {
                 if let Some(s) = session.as_ref() {
                     if let Some(c) = s.cards.lock().await.remove(&card) {
@@ -173,7 +180,7 @@ impl Gateway {
                         && let Some(mut s) = session.take()
                     {
                         let _ = s.stop.send(true);
-                        let _ = tokio::time::timeout(Duration::from_secs(2), &mut s.task).await;
+                        drained_task = Some(s.task);
                     }
                 }
             } else {
@@ -246,6 +253,10 @@ impl Gateway {
                     });
                 }
             }
+        }
+        // r31 P2-4：锁外等待被摘下的 serve 任务退出（至多 2s）。
+        if let Some(mut task) = drained_task {
+            let _ = tokio::time::timeout(Duration::from_secs(2), &mut task).await;
         }
         self.status(&store, &card).await
     }
