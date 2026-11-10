@@ -31,6 +31,22 @@ class FinancialParallelTests(unittest.TestCase):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 RUNNER.FIN["billing_partitions"](roots, {**durations, "default_seconds": value})
 
+    def test_weight_entries_reject_invalid_values_but_preserve_zero_cost_roots(self):
+        for value in (-1, float("nan"), float("inf"), True, "slow", None):
+            with self.subTest(weight=value), self.assertRaises(ValueError):
+                RUNNER.FIN["billing_partitions"]({"root"}, {"default_seconds": 1, "seconds": {"root": value}})
+        partition = RUNNER.FIN["billing_partitions"]({"root"}, {"default_seconds": 1, "seconds": {"root": 0}})
+        self.assertEqual(set().union(*partition.values()), {"root"})
+
+    def test_equal_weight_roots_have_a_stable_name_tie_break(self):
+        roots = ("alpha", "bravo", "charlie", "delta", "echo")
+        durations = {"default_seconds": 1, "seconds": dict.fromkeys(roots, 10)}
+        expected = {"billing-0": {"alpha", "echo"}, "billing-1": {"bravo"},
+                    "billing-2": {"charlie"}, "billing-3": {"delta"}}
+        for order in (roots, tuple(reversed(roots)), ("echo", "bravo", "delta", "alpha", "charlie")):
+            with self.subTest(order=order):
+                self.assertEqual(RUNNER.FIN["billing_partitions"](order, durations), expected)
+
     def services(self):
         return {group: {"url": f"postgres://postgres@127.0.0.1:{49173+i}/postgres?sslmode=disable",
                         "port": str(49173+i), "system": str(100+i),

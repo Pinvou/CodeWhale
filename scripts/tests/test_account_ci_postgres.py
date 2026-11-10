@@ -7,6 +7,8 @@ import json
 import os
 from pathlib import Path
 import re
+import runpy
+import subprocess
 import sys
 import tempfile
 import textwrap
@@ -22,6 +24,49 @@ PG = module('account_ci_postgres', 'scripts/account-ci-postgres.py')
 FIN = module('financial_identity', 'scripts/test-token-financial-postgres.py')
 
 class AccountCIAdmissionTests(unittest.TestCase):
+    def test_closure_cli_admits_and_retires_only_its_single_service(self):
+        self.assertEqual(PG.CLOSURE_SERVICES, {'financial': PG.SERVICES['financial']})
+        meta, item = self.fixture()
+        identity = '12345|/var/lib/postgresql/data|5432|postgres|postgres|postgres|t|160015'
+        for stop in (False, True):
+            calls, stopped = [], []
+            def run(argv, **kwargs):
+                calls.append(argv)
+                if argv[:2] == ['docker', 'inspect']:
+                    self.assertEqual(argv[2], meta['id']); value = json.dumps([item])
+                elif argv[:2] == ['docker', 'exec']:
+                    self.assertEqual(argv[2], meta['id']); value = identity
+                elif argv[0] == 'psql':
+                    self.assertIn('127.0.0.1:49173/', argv[1]); value = identity
+                elif argv[:2] == ['docker', 'ps']: value = '' if stopped else meta['id']
+                elif argv[:3] == ['docker', 'volume', 'ls']: value = '' if stopped else 'b'*64
+                elif argv[:2] == ['docker', 'logs']:
+                    self.assertEqual(argv[2], meta['id']); value = 'owned service log'
+                elif argv[:2] == ['docker', 'stop']:
+                    self.assertEqual(argv[2:], ['--time', '15', meta['id']]); stopped.append(meta['id']); value = ''
+                else: raise AssertionError('unexpected closure subprocess')
+                return subprocess.CompletedProcess(argv, 0, stdout=value, stderr='')
+            with self.subTest(stop=stop), tempfile.TemporaryDirectory() as directory:
+                output = Path(directory)/'output'
+                env = {'GITHUB_ACTIONS': 'true', 'ACCOUNT_CI_SERVICES': json.dumps({'financial-postgres': meta}),
+                       'GITHUB_OUTPUT': str(output), 'PINVOU_CI_RESOURCE_LEDGER': directory}
+                argv = ['account-ci-postgres.py', '--profile', 'closure'] + (['--stop-owned-services'] if stop else [])
+                with patch.dict(os.environ, env), patch.object(sys, 'argv', argv), \
+                        patch.object(subprocess, 'run', side_effect=run), contextlib.redirect_stdout(io.StringIO()):
+                    runpy.run_path(str(ROOT/'scripts/account-ci-postgres.py'), run_name='__main__')
+                if stop:
+                    self.assertEqual(stopped, [meta['id']])
+                    receipt = json.loads((Path(directory)/'postgres-services.json').read_text())
+                    self.assertEqual(receipt['state'], 'released')
+                    self.assertEqual(receipt['ids'], [meta['id']])
+                else:
+                    self.assertEqual(stopped, [])
+                    values = output.read_text()
+                    self.assertIn('financial_system=12345', values)
+                    self.assertNotIn('audit_url=', values)
+                    self.assertNotIn('financial_token_url=', values)
+                    self.assertEqual(sum(argv[:2] == ['docker', 'inspect'] for argv in calls), 1)
+
     def test_closure_job_has_independent_admission_and_required_result(self):
         source=(ROOT/'.github/workflows/pr-check.yml').read_text(encoding='utf-8')
         closure=source.split('\n  account-closure-test:',1)[1].split('\n  windows-relay-dacl:',1)[0]

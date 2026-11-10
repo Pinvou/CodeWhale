@@ -17,6 +17,7 @@ FINANCIAL_GROUPS = {"owners": "financial", "token": "financial_token",
 for key in ("financial_token", *(f"financial_billing_{index}" for index in range(4))):
     original = SERVICES["financial"]
     SERVICES[key] = (key.replace("_", "-") + "-postgres", *original[1:])
+CLOSURE_SERVICES = {'financial': SERVICES['financial']}
 
 IDENTITY_SQL = "SELECT system_identifier::text,current_setting('data_directory'),current_setting('port'),session_user,current_user,current_database(),(SELECT rolsuper FROM pg_roles WHERE rolname=session_user),current_setting('server_version_num') FROM pg_control_system()"
 
@@ -164,7 +165,7 @@ if __name__ == '__main__':
     parser.add_argument('--stop-owned-services', action='store_true')
     parser.add_argument('--profile', choices=('full', 'closure'), default='full')
     args = parser.parse_args()
-    services = {'financial': SERVICES['financial']} if args.profile == 'closure' else SERVICES
+    services = CLOSURE_SERVICES if args.profile == 'closure' else SERVICES
     if args.stop_owned_services:
         ledger = os.environ.get('PINVOU_CI_RESOURCE_LEDGER')
         stop_owned_services(json.loads(os.environ['ACCOUNT_CI_SERVICES']), Path(ledger) / 'postgres-services.json' if ledger else None, services=services)
