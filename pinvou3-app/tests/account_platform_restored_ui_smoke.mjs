@@ -547,20 +547,21 @@ try {
     await page.goto(`${origin}/tests/account_platform_audit_fixture.html?section=audit&readOnly=1&longAction=1`, { waitUntil: 'domcontentloaded', timeout: 60000 });
     await page.waitForSelector('.adm-table tbody tr:nth-child(3)');
     const expected = ['APPROVAL_EXISTING_BROKER_INITIALIZATION', `UNKNOWN_${'X'.repeat(160)}`, 'user.active_context.set'];
+    const displayed = await page.evaluate(codes => codes.map(code => window.f17.auditLabels[code] || code), expected);
     const measure = async () => {
       const rows = await page.$$eval('.adm-table tbody tr', rows => rows.map(row => {
-        const cell = row.cells[0], button = cell.querySelector('button'), box = cell.getBoundingClientRect();
-        const range = document.createRange(); range.selectNodeContents(button);
-        const fragments = [...range.getClientRects()], buttonBox = button.getBoundingClientRect();
+        const cell = row.cells[0], action = cell.querySelector('.adm-audit-action'), box = cell.getBoundingClientRect();
+        const range = document.createRange(); range.selectNodeContents(action);
+        const fragments = [...range.getClientRects()], actionBox = action.getBoundingClientRect();
         const lineTops = [];
         for (const fragment of fragments) if (!lineTops.some(top => Math.abs(top - fragment.top) <= 0.5)) lineTops.push(fragment.top);
         const style = getComputedStyle(cell), contentWidth = box.width - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight) - parseFloat(style.borderLeftWidth) - parseFloat(style.borderRightWidth);
         const valid = rect => [rect.left, rect.top, rect.right, rect.bottom, rect.width, rect.height].every(Number.isFinite) && rect.width > 0 && rect.height > 0;
         const contained = rect => valid(rect) && rect.left >= box.left - 0.5 && rect.right <= box.right + 0.5 && rect.top >= box.top - 0.5 && rect.bottom <= box.bottom + 0.5;
-        return { text: button.textContent, lines: lineTops.length, cellWidth: box.width, contentWidth, validCell: valid(box) && Number.isFinite(contentWidth) && contentWidth > 0, buttonFits: contained(buttonBox), textFits: fragments.length > 0 && fragments.every(contained), beforeResource: fragments.every(rect => rect.right <= row.cells[1].getBoundingClientRect().left + 0.5) };
+        return { text: action.textContent, lines: lineTops.length, cellWidth: box.width, contentWidth, validCell: valid(box) && Number.isFinite(contentWidth) && contentWidth > 0, actionFits: contained(actionBox), textFits: fragments.length > 0 && fragments.every(contained), beforeResource: fragments.every(rect => rect.right <= row.cells[1].getBoundingClientRect().left + 0.5) };
       }));
-      assert.deepEqual(rows.map(row => row.text), expected, 'full known, unknown and short operation strings are retained');
-      assert.ok(rows.every(row => row.validCell && row.buttonFits && row.textFits && row.beforeResource), `audit text stays within its own cell: ${JSON.stringify(rows)}`);
+      assert.deepEqual(rows.map(row => row.text), displayed, 'known operations use their localized label; unknown operation codes remain complete');
+      assert.ok(rows.every(row => row.validCell && row.actionFits && row.textFits && row.beforeResource), `audit text stays within its own cell: ${JSON.stringify(rows)}`);
       assert.ok(rows.every((row, index) => row.lines <= [2, 8, 1][index]), `fixed audit samples remain readable without text pillars: ${JSON.stringify(rows)}`);
       console.log('AUDIT_LAYOUT', JSON.stringify({ viewport: await page.evaluate(() => innerWidth), rows }));
     };
@@ -576,14 +577,14 @@ try {
         await page.screenshot({ path: path.join(process.env.UI_ARTIFACT_DIR, `admin-audit-actions-${width}.png`), fullPage: true });
       }
       for (const [index, suffix] of [[0, '17'], [1, '18']]) {
-        const action = await page.$(`.adm-table tbody tr:nth-child(${index + 1}) td:first-child button`);
+        const action = await page.$(`.adm-table tbody tr:nth-child(${index + 1}) button.adm-audit-row-detail`);
         if (index === 0) await action.click();
         else { await action.focus(); await page.keyboard.press('Enter'); }
         await action.dispose();
         await page.waitForSelector('.adm-detail-drawer');
         assert.equal(await page.evaluate(({ action, suffix }) => {
           const reads = window.f17.calls.filter(call => /\/audit-logs\/[^/?]+$/.test(call.url));
-          return reads.at(-1)?.method === 'GET' && reads.at(-1).url.endsWith(`/audit-logs/00000000-0000-4000-8000-0000000000${suffix}`) && [...document.querySelectorAll('.adm-detail-list dd')].some(node => node.textContent === action);
+          return reads.at(-1)?.method === 'GET' && reads.at(-1).url.endsWith(`/audit-logs/00000000-0000-4000-8000-0000000000${suffix}`) && [...document.querySelectorAll('.adm-audit-action-code code')].some(node => node.textContent === action);
         }, { action: expected[index], suffix }), true, 'pointer and keyboard open the original canonical audit record');
         await page.keyboard.press('Escape'); await page.waitForSelector('.adm-table tbody tr:nth-child(3)');
       }
