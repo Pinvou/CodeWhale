@@ -1176,16 +1176,20 @@ pub(crate) async fn resume_round_trip<T>(
     pending["request_id"] = activation_ack["request_id"].clone();
     send(&mut socket, &pending).await;
     let liveness = receive(&mut socket, "controller_post_activation_liveness").await;
+    assert_ne!(liveness["request_id"], activation_ack["request_id"]);
     let mut confirmed = pending.clone();
     confirmed
         .as_object_mut()
         .unwrap()
         .remove("original_deadline_ms");
     confirmed["type"] = json!("controller_post_activation_liveness_confirmed");
+    // The Relay confirms the current liveness request, not the activation ACK.
+    confirmed["request_id"] = liveness["request_id"].clone();
     confirmed["liveness_epoch_b"] = liveness["liveness_epoch_b"].clone();
     confirmed["heartbeat_sequence_b"] = json!("1");
     send(&mut socket, &confirmed).await;
-    receive(&mut socket, "controller_resume_ready_ack").await;
+    let ready_ack = receive(&mut socket, "controller_resume_ready_ack").await;
+    assert_ne!(ready_ack["request_id"], liveness["request_id"]);
     assert_eq!(manager.watchdog_deadline_for_test(), Some(frozen));
     let mut resumed = confirmed.clone();
     resumed
@@ -1193,6 +1197,8 @@ pub(crate) async fn resume_round_trip<T>(
         .unwrap()
         .remove("heartbeat_sequence_b");
     resumed["type"] = json!("controller_resumed");
+    // Relay's B delivery is correlated to B's actual ready ACK request.
+    resumed["request_id"] = ready_ack["request_id"].clone();
     resumed["liveness_epoch_a"] = json!("live-a-reader-2");
     resumed["resume_deadline_ms"] = json!("1700000030000");
     resumed["new_resume_token_b64"] =
