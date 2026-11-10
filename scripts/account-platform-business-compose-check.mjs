@@ -119,6 +119,9 @@ function checkRequiredPrivate(workload, render) {
 function checkEnvironment(workload, inventory, render) {
   const env = workload.environment;
   checkRequiredPrivate(workload, render);
+  if (workload.kind === 'helm' && workload.service.name === 'event-relay' && env.EVENT_SOURCE === 'token') {
+    check(/^[a-f0-9]{64}$/.test(env.TOKEN_RELAY_NATS_CURRENT_PUBLIC_KEYS_SHA256 || ''), 'token_relay_identity');
+  }
   if (workload.kind === 'compose' && workload.id === 'token-event-relay') {
     check(env.EVENT_SOURCE === 'token' && !env.NATS_CREDENTIALS_FILE
       && env.NATS_NKEY_SEED_FILE === '/run/pinvou/nats/nkey.seed'

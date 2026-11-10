@@ -146,6 +146,7 @@ export function currentRenderFixture(kind, profile = 'personal', settings = {}) 
           : { repository: `registry.fixture.invalid/${key.toLowerCase()}`, tag: 'fixture', digest: `sha256:${'a'.repeat(64)}` }]));
     fixture.recipe = { kind, namespace: 'public-fixture', release: 'public-fixture',
       valuesFile: file('helm-values.json', JSON.stringify({ images, external,
+        tokenEventRelay: { enabled: Boolean(settings.tokenEvents) },
         global: { manualReviewOnCallUserIds: [subjects['account-service']] },
         ...(settings.credentialPortal ? { public: { portalUrl: 'https://account.pinvou.com' },
           tokenGateway: { runtimeSecret: 'public-fixture-gateway' },
@@ -181,6 +182,7 @@ export function currentRenderFixture(kind, profile = 'personal', settings = {}) 
         else if (ref.key === 'migration-backup-sha256') value = backup.sha256;
         // Independent config-only digest values; no public artifact or resource readiness is asserted.
         else if (/^BILLING_APPROVAL_CONSUMER_.*_SHA256$/.test(env.name)) value = 'a'.repeat(64);
+        else if (env.name === 'TOKEN_RELAY_NATS_CURRENT_PUBLIC_KEYS_SHA256') value = 'a'.repeat(64);
         else if (/REDIS_URL/.test(env.name)) value = 'rediss://fixture:fixture@redis.fixture.invalid:6379/0';
         else if (env.name === 'NATS_URL') value = 'tls://nats.fixture.invalid:4222';
         else if (env.name.endsWith('_BASE64URL')) value = Buffer.alloc(32, 'f').toString('base64url');

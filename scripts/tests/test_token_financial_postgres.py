@@ -123,9 +123,10 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
                 with self.subTest(child=child), self.assertRaises(RuntimeError):
                     RUNNER.verify_results(invalid, {root}, **options)
 
-    def test_token_public_upgrade_phase_requires_retained_pre_cleanup_stage(self):
+    def test_token_public_upgrade_phase_requires_retained_cleanup_and_publication_stages(self):
         root = "TestManagementPublicMigrationInstallation"
         self.assertEqual(RUNNER.TOKEN_SCHEMA_REQUIRED, {root})
+        self.assertIn("installed-pre-publication-40-upgrade", RUNNER.EXACT_REQUIRED_CHILDREN[root])
         self.run_main_fixture()
         index = self.fixture_phases.index("owner-token-schema")
         command = self.fixture_commands[index]
