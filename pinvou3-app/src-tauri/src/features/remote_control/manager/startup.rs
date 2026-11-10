@@ -1,6 +1,7 @@
 //! Endpoint startup commits. Lock order is lifecycle -> inner. Reader retirement
-//! uses inner only; the exact pending sender fences it without taking lifecycle
-//! from a reader callback. Filesystem commits never reenter Inner, and status
+//! shares lifecycle with endpoint writes; narrow controller-lane stop uses only
+//! inner and is fenced by the exact pending sender. Filesystem commits never
+//! reenter Inner, and status
 //! emission / reader dispatch always happen after releasing its guard.
 
 use super::*;

@@ -1,6 +1,6 @@
 //! App-owned real-host entry. Only the operation boundary is paused; startup,
 //! reader dispatch, persistence, authority retirement and cleanup stay real.
-use super::persistence::pending_revocations_path;
+use super::persistence::{pending_revocations_path, rpc_ledger_path};
 use super::*;
 use std::sync::mpsc;
 use std::thread::JoinHandle;
@@ -56,6 +56,78 @@ impl Drop for PendingStart {
     }
 }
 
+struct PendingReader {
+    release: Option<mpsc::Sender<()>>,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl PendingReader {
+    fn pause(manager: &RemoteControlManager, endpoint_id: &str, reader: &RelaySender) -> Self {
+        let (retired, observed) = mpsc::channel();
+        let (release, released) = mpsc::channel();
+        *manager.reader_retired_hook.lock() = Some(Box::new(move || {
+            retired.send(()).unwrap();
+            released.recv_timeout(Duration::from_secs(10)).unwrap();
+        }));
+        let manager = manager.clone();
+        let endpoint_id = endpoint_id.to_owned();
+        let reader = reader.clone();
+        let thread = std::thread::spawn(move || {
+            manager.handle_relay_message(
+                json!({"v":2,"type":"desktop_endpoint_revoked","endpoint_id":endpoint_id}),
+                &reader,
+            )
+        });
+        let pending = Self {
+            release: Some(release),
+            thread: Some(thread),
+        };
+        observed.recv_timeout(Duration::from_secs(10)).unwrap();
+        pending
+    }
+
+    fn finish(mut self) {
+        self.unpause();
+        self.thread.take().unwrap().join().unwrap();
+    }
+
+    fn unpause(&mut self) {
+        if let Some(release) = self.release.take() {
+            let _ = release.send(());
+        }
+    }
+}
+
+impl Drop for PendingReader {
+    fn drop(&mut self) {
+        self.unpause();
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+struct CleanupTransition<T> {
+    cleanup: Option<PendingReader>,
+    transition: Option<JoinHandle<T>>,
+}
+
+impl<T> CleanupTransition<T> {
+    fn finish(mut self) -> T {
+        self.cleanup.take().unwrap().finish();
+        self.transition.take().unwrap().join().unwrap()
+    }
+}
+
+impl<T> Drop for CleanupTransition<T> {
+    fn drop(&mut self) {
+        drop(self.cleanup.take());
+        if let Some(thread) = self.transition.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
 struct EndpointGuard(RemoteControlManager);
 impl Drop for EndpointGuard {
     fn drop(&mut self) {
@@ -103,6 +175,26 @@ impl RemoteControlManager {
         let (manager, _host) = build_host();
         let _endpoint = EndpointGuard(manager.clone());
         match case {
+            "lane-stop" => {
+                let pending = PendingStart::pause(&manager, "controller-start-lane-stop");
+                // This narrow operation is inner-only and can retire a pending
+                // sender even while startup holds lifecycle. The owner fence
+                // must reject before minting/persisting config or spawning a socket.
+                manager.stop_controller_relay("controller-start-lane-stop");
+                assert_eq!(
+                    pending.finish().err().as_deref(),
+                    Some("desktop_controller_generation_stale")
+                );
+                assert!(load_config().unwrap().is_none());
+                assert!(manager.inner.lock().endpoint.is_none());
+                let next = manager
+                    .start_controller_relay("controller-start-next")
+                    .await
+                    .unwrap();
+                assert!(manager.inner.lock().endpoint.is_some());
+                assert!(load_config().unwrap().is_some());
+                drop(next);
+            }
             "reader-revocation" => {
                 let previous = manager.start(false).unwrap();
                 let reader = manager
@@ -114,32 +206,90 @@ impl RemoteControlManager {
                     .sender
                     .clone();
                 let pending = PendingStart::pause(&manager, "controller-start-revoked");
-                assert!(
-                    manager.lifecycle.try_lock().is_none(),
-                    "installation must hold lifecycle"
-                );
-                // The actual reader dispatch is allowed to retire the pending
-                // lane without acquiring lifecycle or reversing lock order.
-                manager.handle_relay_message(
-                    json!({"v":2,"type":"desktop_endpoint_revoked","endpoint_id":previous.endpoint_id}),
-                    &reader,
-                );
-                assert!(load_config().unwrap().is_none());
-                assert_eq!(
-                    pending.finish().err().as_deref(),
-                    Some("desktop_controller_generation_stale")
-                );
-                // Returning stale alone is insufficient: no late fresh_config
-                // or socket activation may revive the retired endpoint.
+                assert!(manager.lifecycle.try_lock().is_none());
+                let (attempt, observed) = mpsc::channel();
+                let retiring = manager.clone();
+                let revoke = std::thread::spawn(move || {
+                    attempt.send(()).unwrap();
+                    retiring.handle_relay_message(
+                        json!({"v":2,"type":"desktop_endpoint_revoked","endpoint_id":previous.endpoint_id}), &reader,
+                    );
+                });
+                let transition = PendingTransition {
+                    start: Some(pending),
+                    transition: Some(revoke),
+                };
+                observed.recv_timeout(Duration::from_secs(10)).unwrap();
+                // Startup linearizes first, then the reader retires that exact
+                // endpoint and its files. Never synchronously wait for a reader
+                // while retaining the deliberately paused lifecycle owner.
+                let (started, ()) = transition.finish();
+                let old = started.unwrap();
                 assert!(load_config().unwrap().is_none());
                 assert!(manager.inner.lock().endpoint.is_none());
-                assert!(manager.inner.lock().controller_inbound.is_none());
                 let next = manager
-                    .start_controller_relay("controller-start-next")
+                    .start_controller_relay("controller-start-after-revoke")
                     .await
                     .unwrap();
-                assert!(manager.inner.lock().endpoint.is_some());
-                assert!(load_config().unwrap().is_some());
+                let binding = next.binding;
+                drop(old);
+                assert_eq!(manager.inner.lock().controller_binding, Some(binding));
+                drop(next);
+            }
+            "cleanup-refresh" => {
+                let previous = manager.start(false).unwrap();
+                let reader = manager
+                    .inner
+                    .lock()
+                    .endpoint
+                    .as_ref()
+                    .unwrap()
+                    .sender
+                    .clone();
+                let cleanup = PendingReader::pause(&manager, &previous.endpoint_id, &reader);
+                assert!(
+                    manager.lifecycle.try_lock().is_none(),
+                    "retirement and both unlinks must share the lifecycle commit"
+                );
+                assert!(
+                    manager.inner.try_lock().is_some(),
+                    "no inner guard is retained by the reader hook"
+                );
+                assert!(
+                    config_path().exists(),
+                    "barrier must precede actual file removal"
+                );
+                let (attempt, observed) = mpsc::channel();
+                let refreshing = manager.clone();
+                let refresh = std::thread::spawn(move || {
+                    attempt.send(()).unwrap();
+                    refreshing.refresh()
+                });
+                let transition = CleanupTransition {
+                    cleanup: Some(cleanup),
+                    transition: Some(refresh),
+                };
+                observed.recv_timeout(Duration::from_secs(10)).unwrap();
+                let refreshed = transition.finish().unwrap();
+                assert_ne!(refreshed.endpoint_id, previous.endpoint_id);
+                assert_eq!(
+                    load_config().unwrap().unwrap().endpoint_id,
+                    refreshed.endpoint_id
+                );
+                let ledger: RpcLedger =
+                    serde_json::from_slice(&std::fs::read(rpc_ledger_path()).unwrap()).unwrap();
+                assert_eq!(
+                    ledger.endpoint_id, refreshed.endpoint_id,
+                    "old reader must not unlink the successor ledger"
+                );
+                let next = manager
+                    .start_controller_relay("controller-start-cleanup-next")
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    manager.controller_endpoint_id().unwrap(),
+                    refreshed.endpoint_id
+                );
                 drop(next);
             }
             "stop" => {

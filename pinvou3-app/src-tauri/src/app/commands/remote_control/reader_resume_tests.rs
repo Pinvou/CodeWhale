@@ -27,7 +27,9 @@ fn real_controller_start_lifecycle_fences() {
     let module = module_path!().split_once("::").unwrap().1;
     let filter = format!("{module}::real_controller_start_lifecycle_fences");
     for case in [
+        "lane-stop",
         "reader-revocation",
+        "cleanup-refresh",
         "stop",
         "refresh",
         "failed-start",

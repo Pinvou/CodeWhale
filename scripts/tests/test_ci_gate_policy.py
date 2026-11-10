@@ -4490,7 +4490,7 @@ class CiGatePolicyTests(unittest.TestCase):
         ):
             with self.subTest(module=module):
                 self.assertEqual(filters.count(module), 1)
-        self.assertIn('"$test_exe" "$filter" --test-threads=1', step)
+        self.assertIn('-- "$(cygpath -w "$test_exe")" "$filter" --test-threads=1', step)
         self.assertIn(
             "grep -qE 'running [1-9][0-9]* tests?' /tmp/windows_regression.log || {",
             step,
@@ -4755,7 +4755,7 @@ class CiGatePolicyTests(unittest.TestCase):
         regression = windows_rust_test.split(
             "- name: Windows 原子替换状态机回归", maxsplit=1
         )[1]
-        self.assertIn('"$test_exe" "$filter" --test-threads=1', regression)
+        self.assertIn('-- "$(cygpath -w "$test_exe")" "$filter" --test-threads=1', regression)
         self.assertNotIn("cargo test", regression)
         self.assertIn(
             "'connector_introspection_guard_matches_complete_names_only'",
@@ -4795,7 +4795,15 @@ class CiGatePolicyTests(unittest.TestCase):
                 filters.count("'app::commands::remote_control::reader_resume_tests::'"),
                 1,
             )
-            self.assertIn('"$test_exe" "$filter" --test-threads=1', commands)
+            self.assertIn('-- "$(cygpath -w "$test_exe")" "$filter" --test-threads=1', commands)
+            execution = [line.strip() for line in commands.splitlines() if '"$filter" --test-threads=1' in line]
+            self.assertEqual(len(execution), 1)
+            self.assertTrue(execution[0].startswith('python ../../scripts/ci-fixture-process.py --receipt '))
+            for ownership in ("$RUNNER_TEMP", "$GITHUB_RUN_ID", "$GITHUB_RUN_ATTEMPT", "$index"):
+                self.assertIn(ownership, execution[0])
+            self.assertIn('2>&1 | tee /tmp/windows_regression.log', execution[0])
+            self.assertTrue((ROOT / "scripts/ci-fixture-process.py").is_file())
+            self.assertIn("cd pinvou3-app/src-tauri", block)
             self.assertIn("running [1-9][0-9]* tests?", commands)
             self.assertRegex(commands, r"grep -qE[^\n]+\|\|\s*\{[^}]*exit 1")
             self.assertIn("set -euo pipefail", block)
@@ -4806,9 +4814,11 @@ class CiGatePolicyTests(unittest.TestCase):
         # cannot satisfy this wiring contract. These are not Wry runtime evidence.
         for old, new in (
             ("'app::commands::remote_control::reader_resume_tests::'", "'features::remote_control::'"),
-            ('"$test_exe" "$filter" --test-threads=1', "echo compile-only"),
+            ('-- "$(cygpath -w "$test_exe")" "$filter" --test-threads=1', "echo compile-only"),
             ("running [1-9][0-9]* tests?", "running [0-9]+ tests?"),
             ("exit 1", "exit 0"),
+            ("python ../../scripts/ci-fixture-process.py --receipt", "echo bypass-supervisor --receipt"),
+            ("$GITHUB_RUN_ATTEMPT-$index", "$GITHUB_RUN_ATTEMPT-fixed"),
         ):
             with self.subTest(mutation=old):
                 with self.assertRaises(AssertionError):
@@ -4832,7 +4842,7 @@ class CiGatePolicyTests(unittest.TestCase):
             filters, commands = loop.split("; do", maxsplit=1)
             for prefix in required:
                 self.assertEqual(filters.count(prefix), 1)
-            self.assertIn('"$test_exe" "$filter" --test-threads=1', commands)
+            self.assertIn('-- "$(cygpath -w "$test_exe")" "$filter" --test-threads=1', commands)
             self.assertIn("running [1-9][0-9]* tests?", commands)
             self.assertRegex(commands, r"grep -qE[^\n]+\|\|\s*\{[^}]*exit 1")
             self.assertIn("set -euo pipefail", block)
@@ -4844,7 +4854,7 @@ class CiGatePolicyTests(unittest.TestCase):
         mutations = [(prefix, change) for prefix in required
                      for change in ("", "'renamed_no_matching_tests'")]
         mutations += [
-            ('"$test_exe" "$filter" --test-threads=1', "echo compiled-only"),
+            ('-- "$(cygpath -w "$test_exe")" "$filter" --test-threads=1', "echo compiled-only"),
             ("running [1-9][0-9]* tests?", "running [0-9]+ tests?"),
             ("exit 1", "exit 0"),
         ]
@@ -4874,7 +4884,7 @@ class CiGatePolicyTests(unittest.TestCase):
             filters, commands = loop.split("; do", maxsplit=1)
             for required in required_filters:
                 self.assertEqual(filters.count(required), 1)
-            self.assertIn('"$test_exe" "$filter" --test-threads=1', commands)
+            self.assertIn('-- "$(cygpath -w "$test_exe")" "$filter" --test-threads=1', commands)
             self.assertIn("running [1-9][0-9]* tests?", commands)
             self.assertRegex(commands, r"grep -qE[^\n]+\|\|\s*\{[^}]*exit 1")
             self.assertIn("set -euo pipefail", block)
@@ -4888,7 +4898,7 @@ class CiGatePolicyTests(unittest.TestCase):
             for required in required_filters
             for replacement in ("", "'features::remote_control::'")
         ] + [
-            ('"$test_exe" "$filter" --test-threads=1', "echo compile-only"),
+            ('-- "$(cygpath -w "$test_exe")" "$filter" --test-threads=1', "echo compile-only"),
             ("running [1-9][0-9]* tests?", "running [0-9]+ tests?"),
             ("exit 1", "exit 0"),
         ]

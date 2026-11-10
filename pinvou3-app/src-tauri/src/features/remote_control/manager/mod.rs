@@ -506,6 +506,8 @@ pub struct RemoteControlManager {
     policy_error: Option<String>,
     #[cfg(test)]
     controller_start_hook: Arc<Mutex<Option<Box<dyn FnOnce() + Send>>>>,
+    #[cfg(test)]
+    reader_retired_hook: Arc<Mutex<Option<Box<dyn FnOnce() + Send>>>>,
 }
 
 struct Inner {
@@ -1292,6 +1294,8 @@ impl RemoteControlManager {
             policy_error,
             #[cfg(test)]
             controller_start_hook: Arc::new(Mutex::new(None)),
+            #[cfg(test)]
+            reader_retired_hook: Arc::new(Mutex::new(None)),
         };
         manager.start_web_session_transfer_reaper();
         manager
@@ -1633,13 +1637,9 @@ impl RemoteControlManager {
         let latched = config.allow_host_workspace;
         if latched {
             config.allow_host_workspace = false;
-            // 并发 desktop_endpoint_revoked(消息泵臂,
-            // 不持生命周期锁)可能恰好在本读取与落盘之间删除了配置文件;
-            // 此时撤销目标已达成(relay 侧端点已入墓碑,本地凭据已清),
-            // 不得把 flag=false 的配置文件复活成「已配置」的幻影(否则下
-            // 次 start 拿墓碑端点空转一轮再被 handle_revoked 清理)。存在
-            // 性检查缩小而非闭合窗口(彻底闭合需泵臂持生命周期锁,死锁面
-            // 不划算);残余形状自愈且无访问增益,与本函数既有注释一致。
+            // Reader retirement now uses the same lifecycle commit. Keep this
+            // existence check for an externally removed file; it is not an
+            // atomicity promise against writers outside this manager.
             if config_path().exists() {
                 persist_config(&config)?;
             }
@@ -3113,32 +3113,47 @@ impl RemoteControlManager {
     }
 
     fn handle_revoked(&self, endpoint_id: &str, reader_owner: &RelaySender) {
-        let revoked = {
-            let mut inner = self.inner.lock();
-            if inner.endpoint.as_ref().is_none_or(|endpoint| {
-                endpoint.config.endpoint_id != endpoint_id
-                    || !endpoint.sender.same_channel(reader_owner)
-            }) {
-                return;
+        let (config_remove_failed, ledger_remove_failed) = {
+            // Production callers release inner/authority before this boundary.
+            // The same lifecycle -> inner order as start/refresh serializes the
+            // entire retirement + unlink commit against their filesystem writes.
+            let _lifecycle = self.lifecycle.lock();
+            let revoked = {
+                let mut inner = self.inner.lock();
+                if inner.endpoint.as_ref().is_none_or(|endpoint| {
+                    endpoint.config.endpoint_id != endpoint_id
+                        || !endpoint.sender.same_channel(reader_owner)
+                }) {
+                    return;
+                }
+                let revoked = take_retired_endpoint(&mut inner);
+                inner.rpc_ledger = RpcLedger::default();
+                reset_web_state(&mut inner);
+                inner.stream.reset();
+                inner.idle_status = WebAccessStatusKind::Revoked;
+                inner.idle_error = None;
+                revoked
+            };
+            if let Some(endpoint) = revoked {
+                let _ = endpoint.sender.try_send(RelayOutbound::Shutdown);
             }
-            let revoked = take_retired_endpoint(&mut inner);
-            inner.rpc_ledger = RpcLedger::default();
-            reset_web_state(&mut inner);
-            inner.stream.reset();
-            inner.idle_status = WebAccessStatusKind::Revoked;
-            inner.idle_error = None;
-            revoked
+            #[cfg(test)]
+            {
+                let hook = self.reader_retired_hook.lock().take();
+                if let Some(hook) = hook {
+                    hook();
+                }
+            }
+            (remove_config().is_err(), remove_rpc_ledger().is_err())
         };
-        if let Some(endpoint) = revoked {
-            let _ = endpoint.sender.try_send(RelayOutbound::Shutdown);
-        }
-        if remove_config().is_err() {
+        // No application callbacks or status emission while lifecycle is held.
+        if config_remove_failed {
             crate::features::remote_control::controller::relay_runtime::log_controlled_event(
                 "revoked_config_remove_failed",
                 "failed",
             );
         }
-        if remove_rpc_ledger().is_err() {
+        if ledger_remove_failed {
             crate::features::remote_control::controller::relay_runtime::log_controlled_event(
                 "revoked_ledger_remove_failed",
                 "failed",

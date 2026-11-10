@@ -30,15 +30,20 @@ Windows 原生回归贯穿真实 RelayClient、manager 与 worker，并核验冻
 ## Controller 通道启动与 endpoint 生命周期
 
 启动在安装 pending sender 之前取得生命周期锁，与 Stop/Refresh 串行化；同步准备
-函数返回后才进行异步通知，不跨 await 持有锁。读端撤销继续只取状态锁，不反向取得
-生命周期锁。启动在同一状态锁内核对精确 pending sender，并完成配置创建、落盘及
-endpoint 安装；读端已退休的启动返回 stale，不能在返回错误之前重新创建配置或 socket。
+函数返回后才进行异步通知，不跨 await 持有锁。读端撤销在不持状态锁或权限锁的入口
+按相同顺序取得生命周期锁，覆盖精确 reader 退休及两个持久文件删除，在推送状态前
+释放生命周期锁。这样旧清理不能擦掉后继 Refresh/Start 已提交的配置或 RPC 账本。
+窄范围通道停止仍只取状态锁；启动在同一状态锁内核对精确 pending sender，并完成
+配置创建、落盘及 endpoint 安装。pending sender 已退休的启动返回 stale，不能在返回
+错误之前重新创建配置或 socket。
 启动失败只清理仍由本次 sender 持有的 pending 通道，不按同名代际清除替换者。
 
 状态推送与 reader 派发在状态锁外进行，避免回调重入。Legacy WebUI 的共享 endpoint、
 重复启用与已有持久配置的恢复语义继续保留。真实 Wry 无窗口宿主回归通过独立子进程
-和私有目录固定 Stop、Refresh、读端撤销、启动失败及迟到旧 Drop；撤销消息通过实际
-manager reader 入口受控投递。它验证本地启动状态与副作用，不替代真实 Relay 部署演练。
+和私有目录固定七个场景：pending 通道停止、Stop、Refresh、读端撤销串行化、旧清理与
+后继 Refresh、启动失败和迟到旧 Drop。撤销消息通过实际 manager reader 入口受控投递。
+CI 的实际二进制过滤器也通过共享进程监督器执行，保留非零退出与零命中检查。回归验证
+本地启动状态与副作用，不替代真实 Relay 部署演练。
 
 ## A07 本轮修复传入 A08 的保全边界
 
