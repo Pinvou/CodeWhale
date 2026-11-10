@@ -56,6 +56,13 @@ export function reconciliationImportPreview(text) {
     for (const field of ['merchant_order_no', 'currency', 'status', 'paid_at']) {
       if (typeof item[field] !== 'string' || !item[field].trim()) throw billIssue('billInvalidField', row, field);
     }
+    // time.Time's JSON contract is RFC3339, not the browser's permissive date
+    // parser. Validate the calendar too, without changing the original value.
+    const timestamp = /^(\d{4}-\d{2}-\d{2})T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:[.,]\d+)?(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d)$/.exec(item.paid_at);
+    try {
+      if (!timestamp) throw new Error('INVALID_RECONCILIATION_INPUT');
+      requireReconciliationDate(timestamp[1]);
+    } catch { throw billIssue('billInvalidField', row, 'paid_at'); }
     if (![item.provider_reference_id, item.channel_transaction_id].some(value => typeof value === 'string' && value.trim())) throw billIssue('billMissingReference', row);
     let amount;
     try { amount = integerMoney(item.amount_fen); }
