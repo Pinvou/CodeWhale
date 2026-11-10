@@ -4408,15 +4408,20 @@
   }
 
   // web+tauriSettings 共享
+  let modelConfigurationReadSequence = 0;
   async function loadEffectiveModelConfig(sessionId) {
+    const seq = ++modelConfigurationReadSequence;
     const requestedSessionId = arguments.length ? (sessionId || null) : (state.activeSessionId || null);
     const read = beginModelRead(state, requestedSessionId);
     try {
       const config = await invoke("get_effective_model_config", { sessionId: requestedSessionId });
-      if (!read.configIsCurrent()) return false;
+      // 双守卫并存（合并保全双方）：main #2495 的读取序号拦住同会话内的
+      // 迟到响应；本 PR 的 beginModelRead 纪元进一步覆盖会话切换与选择
+      // 变化。任一失配都不得覆盖当前覆盖层状态。
+      if (seq !== modelConfigurationReadSequence || !read.configIsCurrent()) return false;
       state.effectiveModelConfig = config;
     } catch {
-      if (!read.configIsCurrent()) return false;
+      if (seq !== modelConfigurationReadSequence || !read.configIsCurrent()) return false;
       // A transport failure does not replace an authoritative config snapshot.
       return false;
     }
