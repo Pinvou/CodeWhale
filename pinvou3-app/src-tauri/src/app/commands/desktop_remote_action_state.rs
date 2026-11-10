@@ -252,7 +252,12 @@ impl DesktopRemoteActionState {
             }
             upload.touched_at = Instant::now();
         }
-        if ok && pending.operation == "attachment_abort" {
+        if ok
+            && matches!(
+                pending.operation.as_str(),
+                "attachment_abort" | "attachment_abort_confirmed"
+            )
+        {
             let Some(transfer_id) = pending.transfer_id.as_deref() else {
                 let _ = pending
                     .reply
@@ -271,12 +276,21 @@ impl DesktopRemoteActionState {
                     .send(Err("remote_attachment_binding_mismatch".into()));
                 return true;
             }
+            if pending.operation == "attachment_abort_confirmed"
+                && (body.get("cleanup_confirmed").and_then(Value::as_bool) != Some(true)
+                    || body.get("transfer_id").and_then(Value::as_str) != Some(transfer_id))
+            {
+                let _ = pending
+                    .reply
+                    .send(Err("remote_attachment_unconfirmed".into()));
+                return true;
+            }
             inner.uploads.remove(transfer_id);
         }
         if !ok
             && matches!(
                 pending.operation.as_str(),
-                "attachment_chunk" | "attachment_abort"
+                "attachment_chunk" | "attachment_abort" | "attachment_abort_confirmed"
             )
         {
             if let Some(transfer_id) = pending.transfer_id.as_deref() {
@@ -286,7 +300,12 @@ impl DesktopRemoteActionState {
                         && upload.live == pending.live
                         && Some(upload.task_id.as_str()) == pending.task_id.as_deref()
                 });
-                if bound && pending.operation == "attachment_chunk" {
+                if bound
+                    && matches!(
+                        pending.operation.as_str(),
+                        "attachment_chunk" | "attachment_abort_confirmed"
+                    )
+                {
                     // Retain only the authenticated binding for cleanup. An
                     // out-of-order successful reply cannot re-attest this upload.
                     if let Some(upload) = inner.uploads.get_mut(transfer_id) {

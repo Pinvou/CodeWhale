@@ -126,7 +126,7 @@ import {
 import {
   downloadRemoteArtifact,
   createRemoteTransferGuard,
-  abortCompletedRemoteUpload,
+  abandonRemoteUpload,
   retireCompletedRemoteUpload,
   saveRemoteArtifactBlob,
   uploadRemoteFiles,
@@ -217,6 +217,7 @@ function remoteActionFailureCopyKey(code) {
   switch (code) {
     case 'result_unknown': return 'actionResultUnknown';
     case 'remote_attachment_fenced': return 'attachmentFenced';
+    case 'remote_attachment_completed': return 'attachmentCompleted';
     case 'remote_attachment_count_invalid': return 'attachmentCountInvalid';
     case 'remote_attachment_capacity': return 'attachmentCapacity';
     case 'remote_attachment_size_invalid': return 'attachmentSizeInvalid';
@@ -3308,13 +3309,13 @@ const openChatExternalUrl = (url) => {
         setRemoteDispatchActionError(null);
         try {
           if (remoteBinding && item.localSessionId === remoteBinding.localSessionId && item.remoteRef === remoteBinding.remoteRef) {
-            await abortCompletedRemoteUpload(bridge.desktopRemoteControl, remoteComposerIdentity, remoteBinding, item.taskId,
-              () => isCurrentRemoteAction(operation));
-            if (!isCurrentRemoteAction(operation)) return;
+            if (!await abandonRemoteUpload(bridge.desktopRemoteControl, remoteComposerIdentity, remoteBinding, item.handle,
+              () => isCurrentRemoteAction(operation))) return;
+          } else {
+            await bridge.desktopRemoteControl.abandonRemoteTask(
+              item.localSessionId, item.handle.clientRequestId, item.handle.taskId,
+            );
           }
-          await bridge.desktopRemoteControl.abandonRemoteTask(
-            item.localSessionId, item.handle.clientRequestId, item.handle.taskId,
-          );
           forgetRemoteDispatch(item.localSessionId, item.taskId);
           if (item.text) {
             bridge.chat.restoreTaskDraft(item.text, { sessionId: item.localSessionId, restored: false });

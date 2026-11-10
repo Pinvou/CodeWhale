@@ -50,6 +50,45 @@ export async function abortCompletedRemoteUpload(api, owner, binding, taskId, is
   return true;
 }
 
+// A navigation cancellation is recoverable only after its producer has exited
+// and every issued RPC has a definitive successful reply. A lost begin ACK can
+// hide a server-minted handle; neither local abandon nor logical absence proves
+// that unknown batch was physically cleaned up.
+export async function abandonRemoteUpload(api, owner, binding, handle, isCurrent = () => true) {
+  const key = uploadAttemptKey(String(owner || ''), binding, handle.taskId);
+  const attempt = uploadAttempts.get(key);
+  let cleaned = false;
+  if (attempt && ['unknown', 'completed'].includes(attempt.state)
+    && attempt.settled && !attempt.rpcUnknown && isCurrent()) {
+    attempt.state = 'cleaning';
+    try {
+      cleaned = true;
+      for (const transferId of attempt.knownIds) {
+        if (!isCurrent() || uploadAttempts.get(key) !== attempt) { cleaned = false; break; }
+        if (attempt.cleanedIds.has(transferId)) continue;
+        const receipt = await api.attachmentAbortConfirmed(
+          binding.localSessionId, binding.remoteRef, handle.taskId, transferId,
+        );
+        if (receipt?.cleanup_confirmed !== true || receipt.transfer_id !== transferId) {
+          cleaned = false;
+          break;
+        }
+        attempt.cleanedIds.add(transferId);
+      }
+    } catch (_) {
+      cleaned = false;
+    } finally {
+      attempt.state = 'unknown';
+    }
+  }
+  if (!isCurrent()) return false;
+  // Offline or older peers still permit the local never-attempted task to be
+  // abandoned. Without both acknowledgements its upload fence remains intact.
+  await api.abandonRemoteTask(binding.localSessionId, handle.clientRequestId, handle.taskId);
+  if (cleaned && isCurrent() && uploadAttempts.get(key) === attempt) uploadAttempts.delete(key);
+  return true;
+}
+
 // Operation identity is revision-bound; finishing an old operation may never
 // clear a newer upload. Tokens are local UI ownership, not remote authority.
 export function createRemoteTransferGuard() {
@@ -134,13 +173,18 @@ export async function uploadRemoteFiles(api, binding, taskId, files, onProgress 
     error.code = 'remote_attachment_fenced';
     throw error;
   }
+  if (previous?.state === 'completed' || matching?.state === 'completed') {
+    const error = new Error('remote_attachment_completed');
+    error.code = 'remote_attachment_completed';
+    throw error;
+  }
   if (previous || matching) throw uncertainUpload();
   if (uploadAttempts.size >= MAX_UPLOAD_ATTEMPTS) {
     const error = new Error('remote_attachment_capacity');
     error.code = 'remote_attachment_capacity';
     throw error;
   }
-  const attempt = { state: 'uploading', knownIds: [], files: selected, lease,
+  const attempt = { state: 'uploading', knownIds: [], cleanedIds: new Set(), files: selected, lease, settled: false, rpcUnknown: false,
     localSessionId: binding.localSessionId, remoteRef: binding.remoteRef };
   uploadAttempts.set(key, attempt);
   const attachmentIds = [];
@@ -153,22 +197,29 @@ export async function uploadRemoteFiles(api, binding, taskId, files, onProgress 
     const bytes = new Uint8Array(buffer);
     const sha256 = hex(new Uint8Array(await crypto.subtle.digest('SHA-256', buffer)));
     if (!isCurrent()) throw uncertainUpload();
+    attempt.rpcUnknown = true;
     const begin = await api.attachmentBegin(
       binding.localSessionId, binding.remoteRef, taskId,
       file.name, file.type || 'application/octet-stream', bytes.length, sha256,
     );
     if (!begin || typeof begin.transferId !== 'string' || !begin.transferId) throw uncertainUpload();
     attempt.knownIds.push(begin.transferId);
+    attempt.rpcUnknown = false;
     if (!isCurrent()) throw uncertainUpload();
     let completed = false;
     const chunkBytes = Math.max(1, Math.min(Number(begin.chunkBytes) || 1, 256 * 1024));
       for (let offset = 0, chunkIndex = 0; offset < bytes.length; offset += chunkBytes, chunkIndex += 1) {
         if (!isCurrent()) throw uncertainUpload();
         const chunk = bytes.subarray(offset, Math.min(offset + chunkBytes, bytes.length));
+        attempt.rpcUnknown = true;
         const receipt = await api.attachmentChunk(
           binding.localSessionId, binding.remoteRef, taskId, begin.transferId,
           chunkIndex, bytesToBase64(chunk), chunk.length,
         );
+        if (!receipt || !['accepted', 'duplicate', 'completed'].includes(receipt.state)
+          || !Number.isSafeInteger(receipt.receivedBytes) || receipt.receivedBytes < 0
+          || receipt.receivedBytes > bytes.length) throw uncertainUpload();
+        attempt.rpcUnknown = false;
         if (!isCurrent()) throw uncertainUpload();
         onProgress({ fileIndex, fileName: file.name, receivedBytes: receipt.receivedBytes, totalBytes: bytes.length });
         completed = receipt.state === 'completed';
@@ -200,6 +251,8 @@ export async function uploadRemoteFiles(api, binding, taskId, files, onProgress 
     }
     uploadAttempts.delete(key);
     throw error;
+  } finally {
+    attempt.settled = true;
   }
 }
 

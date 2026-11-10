@@ -34,6 +34,21 @@ test("remote operation ownership regression runs for its product and fixture pat
   assert.ok(!knip.ignore.includes("tests/remote_dispatch_ownership_smoke.mjs"));
 });
 
+test("upload cleanup mounted contract runs for its real inputs and in full CI", () => {
+  const smoke = "node:tests/remote_upload_cleanup_smoke.mjs";
+  assert.ok(fullLabels.includes(smoke));
+  for (const path of ["pinvou3-app/src/features/chat/ChatView.jsx",
+    "pinvou3-app/src/features/remote-control/remote-file-transfer.mjs",
+    "pinvou3-app/src/platform/tauri/bridge/desktop-remote-control.js",
+    "pinvou3-app/tests/fixtures/remote_dispatch_ownership_smoke.jsx",
+    "pinvou3-app/tests/remote_upload_cleanup_smoke.mjs"]) {
+    assert.ok(labels(selectFrontendSmokes([path])).includes(smoke), path);
+  }
+  const knip = JSON.parse(readFileSync(new URL("../../pinvou3-app/knip.json", import.meta.url), "utf8"));
+  assert.ok(knip.entry.includes("tests/remote_upload_cleanup_smoke.mjs"));
+  assert.ok(!knip.ignore.includes("tests/remote_upload_cleanup_smoke.mjs"));
+});
+
 test("the real archive component smoke is included in the full CI suite", () => {
   assert.ok(fullLabels.includes("node:tests/remote_archive_smoke.mjs"));
   assert.ok(labels(selectFrontendSmokes([

@@ -179,6 +179,7 @@ pub(crate) const REMOTE_ACTION_OPERATIONS: &[&str] = &[
     "attachment_begin",
     "attachment_chunk",
     "attachment_abort",
+    "attachment_abort_confirmed",
     "artifact_index",
     "artifact_preview",
     "artifact_download_begin",
@@ -2904,7 +2905,9 @@ fn validate_remote_action(payload: &Map<String, Value>, result: bool) -> Result<
             ],
             &[],
         ),
-        (false, "attachment_abort") => (&["task_id", "transfer_id"], &[]),
+        (false, "attachment_abort" | "attachment_abort_confirmed") => {
+            (&["task_id", "transfer_id"], &[])
+        }
         (false, "artifact_index") => (&[], &[]),
         (false, "artifact_preview") => (&["artifact_id"], &[]),
         (false, "artifact_download_begin") => (&["task_id", "artifact_id"], &[]),
@@ -2934,6 +2937,7 @@ fn validate_remote_action(payload: &Map<String, Value>, result: bool) -> Result<
         (true, "attachment_begin") => (&["transfer_id", "chunk_bytes", "total_bytes"], &[]),
         (true, "attachment_chunk") => (&["state", "received_bytes"], &["sha256"]),
         (true, "attachment_abort") => (&["aborted"], &[]),
+        (true, "attachment_abort_confirmed") => (&["transfer_id", "cleanup_confirmed"], &[]),
         (true, "artifact_index") => (&["artifacts"], &[]),
         (true, "artifact_preview") => (&["artifact_id", "preview_kind", "truncated"], &["text"]),
         (true, "artifact_download_begin") => (&["transfer_id", "chunk_bytes", "total_bytes"], &[]),
@@ -2966,7 +2970,7 @@ fn validate_remote_action(payload: &Map<String, Value>, result: bool) -> Result<
     for field in required.iter().chain(optional.iter()) {
         if let Some(value) = body.get(*field) {
             match *field {
-                "aborted" | "completed" | "truncated" => {
+                "aborted" | "completed" | "truncated" | "cleanup_confirmed" => {
                     if !value.is_boolean() {
                         return Err(ControllerProtocolError::new(
                             "invalid_field",
@@ -5665,6 +5669,12 @@ mod tests {
                 "attachment_abort",
                 json!({"task_id":"task-1","transfer_id":"ctr-up-1"}),
                 json!({"aborted":true}),
+                "attachment_v1",
+            ),
+            (
+                "attachment_abort_confirmed",
+                json!({"task_id":"task-1","transfer_id":"ctr-up-1"}),
+                json!({"transfer_id":"ctr-up-1","cleanup_confirmed":true}),
                 "attachment_v1",
             ),
             (

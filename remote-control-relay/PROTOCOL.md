@@ -703,6 +703,18 @@ or bare IPv6, fragment, whitespace, or backslash. The suffix is an optional
 each percent escape is exactly `%` plus two uppercase hex digits. Lowercase
 escapes and malformed escapes fail rather than normalize.
 
+`attachment_abort_confirmed` is an opt-in physical-cleanup RPC under
+`attachment_v1`. Its request body is exactly `task_id, transfer_id`; success is
+exactly `transfer_id, cleanup_confirmed` with `cleanup_confirmed: true`. B checks
+the authenticated lease, authoritative session, task and handle and refuses
+consumed/admitted uploads. It acknowledges only after staging and published read
+owners are released. Unknown handles and failed cleanup are errors, never proof
+of absence. Legacy `attachment_abort` retains its logical-abort contract. An old
+B rejects the new operation without a reply and continues its lane; A times out,
+keeps the upload fence and can still abandon the local never-attempted task.
+No new capability or handshake field is advertised. See
+[`remote-upload-cleanup.md`](../docs/remote-upload-cleanup.md) for the batch fence.
+
 The `artifact_index` operation returns bounded metadata (at most 256 artifacts,
 the `MAX_ARTIFACTS` limit) in `body.artifacts`
 of a successful `remote_action_result`, never as a standalone payload.
