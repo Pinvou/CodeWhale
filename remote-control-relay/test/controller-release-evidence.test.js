@@ -29,13 +29,20 @@ const testPublicKeySha256 = crypto.createHash("sha256")
   .update(testKeys.publicKey.export({ type: "spki", format: "der" })).digest("hex");
 const certificateRoot = await mkdtemp(join(tmpdir(), "pinvou-provider-chain-"));
 // The provider X.509 fixture chain needs a real openssl build. Prefer the
-// Git for Windows bundle path, then fall back to PATH lookup so self-hosted
-// runners with a relocated Git install still execute the contract. When no
-// candidate responds, skip every test in this file explicitly instead of
-// failing the whole file on a missing environment precondition.
-const opensslCandidates = process.platform === "win32"
-  ? ["C:\\Program Files\\Git\\usr\\bin\\openssl.exe", "openssl"]
-  : ["openssl"];
+// openssl bundled with the active Git installation (git --exec-path also
+// covers portable or relocated Windows installs), then fall back to a PATH
+// lookup so self-hosted runners still execute the contract. When no candidate
+// responds, skip every test in this file explicitly instead of failing the
+// whole file on a missing environment precondition.
+const opensslCandidates = [];
+if (process.platform === "win32") {
+  try {
+    opensslCandidates.push(join(execFileSync("git", ["--exec-path"], { encoding: "utf8" }).trim(), "..", "..", "bin", "openssl.exe"));
+  } catch {
+    // git itself unavailable; the remaining candidates still apply.
+  }
+}
+opensslCandidates.push("openssl");
 const openssl = opensslCandidates.find((candidate) => {
   try {
     execFileSync(candidate, ["version"], { stdio: "ignore" });
