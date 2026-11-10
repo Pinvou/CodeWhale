@@ -11,7 +11,7 @@ function template(channel, date) {
   return 'data:application/json;charset=utf-8,' + encodeURIComponent(JSON.stringify(example, null, 2) + '\n');
 }
 
-export function AdminReconciliationBillImport({ channel, date, copy, disabled, onImport }) {
+function ReconciliationBillImport({ channel, date, copy, disabled, onImport }) {
   const [mode, setMode] = useState('file'), [source, setSource] = useState(''), [fileName, setFileName] = useState('');
   const [preview, setPreview] = useState(null), [error, setError] = useState(null), [reading, setReading] = useState(false);
   const generation = useRef(0), submitting = useRef(false);
@@ -79,4 +79,10 @@ export function AdminReconciliationBillImport({ channel, date, copy, disabled, o
       try { await onImport(preview.items); } finally { submitting.current = false; }
     }}>{copy.import}</button></footer>
   </section>;
+}
+
+export function AdminReconciliationBillImport(props) {
+  // A file and its preview belong to one verified channel/day. Remounting also
+  // retires the old generation before any delayed File.text result can arrive.
+  return <ReconciliationBillImport key={JSON.stringify([props.channel, props.date])} {...props} />;
 }
