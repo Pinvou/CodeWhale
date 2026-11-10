@@ -335,6 +335,7 @@
     function controlledStart(deviceName, workspaces) {
       ensureAvailable();
       subscribe();
+      var owner = subscriptionOwner;
       var intent = controlledIntent(true);
       return invoke("desktop_remote_controlled_start", {
         deviceName: deviceName || null,
@@ -351,16 +352,17 @@
           });
         }
         return applyControlled(intent, result, true);
-      }).catch(function (failure) { return failedControlledOpen(intent, failure); }).finally(function () { settleControlledIntent(intent); });
+      }).catch(function (failure) { return failedControlledOpen(intent, failure, owner); }).finally(function () { settleControlledIntent(intent); });
     }
 
     function controlledRefresh() {
       ensureAvailable();
       subscribe();
+      var owner = subscriptionOwner;
       var intent = controlledIntent(true);
       return invoke("desktop_remote_controlled_refresh", {}).then(function (result) {
         return applyControlled(intent, result, true);
-      }).catch(function (failure) { return failedControlledOpen(intent, failure); }).finally(function () { settleControlledIntent(intent); });
+      }).catch(function (failure) { return failedControlledOpen(intent, failure, owner); }).finally(function () { settleControlledIntent(intent); });
     }
 
     function reconcileRegistrationFailure(intent, result) {
@@ -376,9 +378,10 @@
       return result;
     }
 
-    function failedControlledOpen(intent, failure) {
+    function failedControlledOpen(intent, failure, owner) {
       var error = asBoundedError(failure);
-      if (error.code !== "pairing_registration_failed" || current().intents.controlled !== intent) throw error;
+      if (!owner || subscriptionOwner !== owner || error.code !== "pairing_registration_failed"
+        || current().intents.controlled !== intent) throw error;
       controlledRegistrationFailureIntent = intent;
       var observedDevice = current().controlledDevice;
       var terminalSequence = controlledTerminalSequence;
