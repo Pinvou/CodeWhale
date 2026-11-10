@@ -20,6 +20,11 @@ func DownOne(ctx context.Context, conn *pgx.Conn, input []migrations.Migration) 
 
 func retainedRollbackGuard(ctx context.Context, tx pgx.Tx, migration migrations.Migration) error {
 	switch migration.Version {
+	case 17:
+		// The frozen Down removes approval/request/execution evidence and the
+		// constraint/trigger contract for future adjustments, even with an empty
+		// adjustment table. Preserve history and enforcement; recover forward.
+		return errors.New("manual adjustment approval proof rollback is forward-only")
 	case 23:
 		// Serialize both inputs to the frozen Down's SKU projection. Original
 		// 010 excludes empty SKUs; 023 Down's unique index includes them.

@@ -46,6 +46,7 @@ func TestRetainedBillingRollbackGuard(t *testing.T) {
 		}
 	})
 	for version, reason := range map[int64]string{
+		17: "adjustment approval proof rollback is forward-only",
 		35: "prior payment mappings and prices",
 		36: "prior payment mappings and prices",
 		37: "prior payment mappings and prices",
@@ -90,7 +91,7 @@ func TestRetainedBillingRollbackGuard(t *testing.T) {
 		})
 	}
 	t.Run("unrelated-history", func(t *testing.T) {
-		for _, v := range []int64{10, 24, 26, 28, 900001, 900002, 900003} {
+		for _, v := range []int64{10, 16, 24, 26, 28, 900001, 900002, 900003} {
 			if err := retainedRollbackGuard(context.Background(), nil, migrations.Migration{Version: v}); err != nil {
 				t.Fatalf("unrelated migration %d blocked", v)
 			}
