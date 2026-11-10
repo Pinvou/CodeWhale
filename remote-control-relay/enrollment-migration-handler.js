@@ -258,6 +258,7 @@ function validateBackup(value) {
     || JSON.stringify(keys) !== JSON.stringify(["namespace_revision", "registry", "registry_sha256", "schema", "version"])
     || value.schema !== BACKUP_SCHEMA || value.version !== BACKUP_VERSION
     || typeof value.namespace_revision !== "string" || !/^(?:0|[1-9][0-9]{0,19})$/u.test(value.namespace_revision)
+    || BigInt(value.namespace_revision) > 0xffffffffffffffffn
     || typeof value.registry_sha256 !== "string"
     || value.registry_sha256 !== backupDigest(value.registry)) {
     fail("migration_backup_invalid");
@@ -295,7 +296,8 @@ export async function restoreEnrollmentBackup({ registry, backup, requestId: sta
   try {
     const restored = await registry.executeMigrationRequest({
       requestId: restoreRequestId,
-      operations: [{ operation: "restore", snapshot: parsed.registry }],
+      operations: [{ operation: "restore", snapshot: parsed.registry,
+        expected_namespace_revision: parsed.namespace_revision }],
       reportReplay: true,
     });
     return Object.freeze({
@@ -307,6 +309,10 @@ export async function restoreEnrollmentBackup({ registry, backup, requestId: sta
       restored_entry_count: restored.replayed ? 0 : restored.outcome.restored_entry_count,
     });
   } catch (error) {
+    if (["migration_request_conflict", "migration_restore_revision_conflict", "migration_restore_fence_missing",
+      "enrollment_revision_conflict", "migration_request_capacity_reached", "migration_request_key_unavailable"].includes(error?.code)) {
+      fail(error.code, error);
+    }
     fail("migration_restore_failed", error);
   }
 }

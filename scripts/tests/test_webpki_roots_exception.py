@@ -331,7 +331,8 @@ class WebpkiCiContractTests(unittest.TestCase):
         # version may silently inherit this review.
         reviewed = [('frontend-test', 'Test resource lifecycle receipts'),
                     ('account-platform-test', 'Financial parallel diagnostics'),
-                    ('account-platform-test', 'Account test resource lifecycle receipts')]
+                    ('account-platform-test', 'Account test resource lifecycle receipts'),
+                    ('windows-codex-runtime-test', 'Preserve browser fixture exit receipts')]
         self.assertEqual(workflow.count('uses: actions/upload-artifact@v7'), len(reviewed))
         for job, name in reviewed:
             steps = job_block(workflow, job).split('\n      - ')
@@ -354,7 +355,8 @@ class WebpkiCiContractTests(unittest.TestCase):
     def test_diagnostic_transport_never_relaxes_tests_or_resource_retirement(self):
         workflow = WORKFLOW.read_text(encoding='utf-8')
         for name in ['Confirm test resource retirement', 'Confirm Account test resource retirement',
-                     'Test and vet all Account Platform Go modules']:
+                     'Test and vet all Account Platform Go modules',
+                     'Windows browser wrapper lifecycle regression', 'Windows browser wrapper lazy regression']:
             with self.subTest(step=name), self.assertRaises(AssertionError):
                 self.verify_diagnostic_uploads(workflow.replace(
                     f'      - name: {name}\n', f'      - name: {name}\n        continue-on-error: true\n'))
