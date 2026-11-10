@@ -1404,7 +1404,7 @@ function inputSelects(text, filter, input) {
 
 function assertHistoryExportRouting(text) {
   for (const input of ["scripts/export-account-history.ps1", "scripts/account-platform-history-export-tools.sh",
-    "account-platform/test/integration/history-export-directory-race.ps1"]) {
+    "account-platform/test/integration/history-export-directory-race.ps1", "scripts/tests/test_account_history_key.py"]) {
     assert.ok(inputSelects(text, "account_platform", input), `${input} alone must select the export fixture job`);
   }
   const job = jobBlock("account-platform-test", text);

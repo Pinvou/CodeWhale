@@ -301,6 +301,7 @@ jobs:
               - 'pinvou3-app/src/shared/i18n.js'
               - 'scripts/account-platform*'
               - 'scripts/export-account-history.ps1'
+              - 'scripts/tests/test_account_history_key.py'
               - 'scripts/check-account-platform*'
               - 'scripts/build-credential-handoff.mjs'
               - 'scripts/check-recharge-product-document-baseline.mjs'
@@ -1691,6 +1692,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          python3 scripts/ci-fixture-process.py --receipt "$RUNNER_TEMP/history-export-key-process.json" -- python3 scripts/tests/test_account_history_key.py
           python3 scripts/ci-fixture-process.py --receipt "$RUNNER_TEMP/history-export-tools-process.json" -- bash scripts/account-platform-history-export-tools.sh
 
       - name: Read-only history export on public domain schemas
