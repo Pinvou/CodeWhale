@@ -57,6 +57,11 @@ func TestOrphanPaidOrderIndexPublicMigration(t *testing.T) {
 		if err != nil || !valid || !reflect.DeepEqual(keys, []string{"provider_id", "provider_version", "channel", "paid_at"}) || !strings.Contains(predicate, "status = 'PAID'") || !strings.Contains(predicate, "fulfillment_status = 'CREDITED'") {
 			t.Fatalf("index catalog/authority differs: keys=%v valid=%v predicate=%s err=%v", keys, valid, predicate, err)
 		}
+		// The access path must retain both known and unproven payment dates.
+		// Checking retained table facts alone cannot detect a partial-index filter.
+		if strings.Contains(predicate, "paid_at") {
+			t.Fatalf("orphan lookup predicate restricts payment dates: %s", predicate)
+		}
 		return oid
 	}
 	t.Run("fresh-failure-atomicity-and-retry", func(t *testing.T) {
