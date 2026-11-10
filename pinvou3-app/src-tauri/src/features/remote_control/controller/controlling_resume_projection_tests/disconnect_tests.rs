@@ -86,7 +86,14 @@ async fn foreign_disconnects_in_recovery_preserve_the_current_authenticated_comp
             lane.events
                 .insert(index, ControllerLaneEvent::Disconnected(foreign));
             let mut states = Vec::new();
-            serve(&f, &mut lane, &mut |status| states.push(status.kind())).await;
+            serve(&f, &mut lane, &mut |status| {
+                if status.kind() == ControllingStatusKind::Connected {
+                    assert!(f.business.is_installed());
+                    assert!(!f.business.is_suspended());
+                }
+                states.push(status.kind());
+            })
+            .await;
             assert_eq!(
                 states,
                 [
@@ -97,8 +104,6 @@ async fn foreign_disconnects_in_recovery_preserve_the_current_authenticated_comp
             );
             assert_eq!(f.manager.status().kind(), ControllingStatusKind::Connected);
             assert!(f.manager.live_lease().is_ok());
-            assert!(f.business.is_installed());
-            assert!(!f.business.is_suspended());
         }
     }
 }

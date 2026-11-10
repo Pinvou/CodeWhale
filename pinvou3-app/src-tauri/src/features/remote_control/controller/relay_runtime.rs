@@ -1811,7 +1811,10 @@ impl ControlledRelayWorker {
         // Exact operation validation precedes all cleanup. A retired worker
         // must not clear the replacement generation's keys or projection.
         let result = match self.transport_owner.as_ref() {
-            Some(owner) => manager.fail_owned_transport(owner, sanitize_error(error)),
+            Some(owner) => {
+                let lane = self.app.state::<ControlledLaneState>();
+                manager.fail_owned_transport(owner, sanitize_error(error), || lane.clear())
+            }
             None => manager.fail_operation(self.operation.clone(), sanitize_error(error)),
         };
         if let Ok(status) = result {

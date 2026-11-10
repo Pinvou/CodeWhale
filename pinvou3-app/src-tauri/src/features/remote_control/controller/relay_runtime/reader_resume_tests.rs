@@ -1185,10 +1185,13 @@ pub(crate) async fn resume_round_trip<T>(
         .seal_resume_confirm("request-peer-current", activation)
         .unwrap();
     send(&mut socket, &confirm).await;
-    receive(&mut socket, "controller_resume_activation_ack").await;
+    let activation_ack = receive(&mut socket, "controller_resume_activation_ack").await;
+    assert_ne!(activation_ack["request_id"], prepare["request_id"]);
     assert_eq!(manager.watchdog_deadline_for_test(), Some(frozen));
     let mut pending = provisional.clone();
     pending["type"] = json!("controller_resume_activation_pending");
+    // The actual Relay uses the validated B activation ACK's request id.
+    pending["request_id"] = activation_ack["request_id"].clone();
     send(&mut socket, &pending).await;
     let liveness = receive(&mut socket, "controller_post_activation_liveness").await;
     if disconnect_stage == Some("pending") {

@@ -48,6 +48,8 @@ A 在完整原始 transport registration（owner、generation、租约）仍匹�
 业务并提交一次恢复失败；旧 owner、旧租约和无租约的迟到通知不能终止新候选。
 B 的本地 `desktop_relay_connection` 通知由持有当前 reader 的管理器产生，
 恢复处理器先核捕获的 transport owner，再沿既有终态清理链结束本代。
+终态提交在同一 owner 锁内退休实际业务密钥，随后释放锁再通知生产清理适配器；
+旧 worker 或重复终态不能执行新通道的清钥动作。
 该通知不带租约，不能按普通恢复帧的完整租约筛选丢弃。来自 socket JSON 的
 同名输入被管理器拒绝，不能冒充本地断线；`connected:true` 不终止候选。
 

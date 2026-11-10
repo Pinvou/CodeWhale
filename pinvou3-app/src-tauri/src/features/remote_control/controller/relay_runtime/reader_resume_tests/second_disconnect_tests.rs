@@ -87,6 +87,10 @@ pub(super) async fn end_current_candidate(
     assert!(manager.retained_liveness_epoch_for_test().is_none());
     assert!(manager.watchdog_deadline_for_test().is_none());
     assert!(manager.live_lease().is_err());
+    assert!(
+        !lane.is_installed(),
+        "terminal loss retained the actual session cipher"
+    );
     assert!(outbound.sender().is_none());
     let calls = observer.0.lock().unwrap().clone();
     assert_eq!(
