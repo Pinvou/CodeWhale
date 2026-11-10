@@ -54,7 +54,16 @@ func productionBackupEvidence(now time.Time) (string, string, string, error) {
 func main() {
 	directory := flag.String("dir", os.Getenv("MIGRATIONS_DIR"), "directory containing SQL migrations")
 	direction := flag.String("direction", "up", "migration direction: up or down")
+	timeoutDefault := os.Getenv("MIGRATION_TIMEOUT")
+	if timeoutDefault == "" {
+		timeoutDefault = defaultMigrationTimeout
+	}
+	timeout := flag.String("timeout", timeoutDefault, "database operation budget, greater than zero and at most 24h (MIGRATION_TIMEOUT; default 2m)")
 	flag.Parse()
+	budget, err := migrationTimeout(*timeout)
+	if err != nil {
+		log.Fatal("MIGRATION_TIMEOUT_INVALID")
+	}
 	if *directory == "" {
 		log.Fatal("migration directory is required through --dir or MIGRATIONS_DIR")
 	}
@@ -71,11 +80,11 @@ func main() {
 	if err != nil {
 		log.Fatal("MIGRATION_SOURCE_INVALID")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), budget)
 	defer cancel()
 	connection, err := pgx.Connect(ctx, databaseURL)
 	if err != nil {
-		log.Fatal("MIGRATION_DATABASE_CONNECTION_FAILED")
+		log.Fatal(migrationFailureCode(ctx, err, "MIGRATION_DATABASE_CONNECTION_FAILED"))
 	}
 	defer connection.Close(context.Background())
 	defer migrations.Unlock(context.Background(), connection)
@@ -84,13 +93,13 @@ func main() {
 			log.Fatal("MIGRATION_ROLE is invalid")
 		}
 		if _, err = connection.Exec(ctx, "SET ROLE "+pgx.Identifier{migrationRole}.Sanitize()); err != nil {
-			log.Fatal("MIGRATION_ROLE_SELECTION_FAILED")
+			log.Fatal(migrationFailureCode(ctx, err, "MIGRATION_ROLE_SELECTION_FAILED"))
 		}
 	}
 
 	domain, err := migrationDomain(ctx, connection, loaded, *directory)
 	if err != nil {
-		log.Fatal("MIGRATION_DOMAIN_IDENTITY_INVALID")
+		log.Fatal(migrationFailureCode(ctx, err, "MIGRATION_DOMAIN_IDENTITY_INVALID"))
 	}
 
 	switch *direction {
@@ -149,7 +158,7 @@ func main() {
 		err = fmt.Errorf("unsupported migration direction %q", *direction)
 	}
 	if err != nil {
-		log.Fatal("MIGRATION_EXECUTION_FAILED")
+		log.Fatal(migrationFailureCode(ctx, err, "MIGRATION_EXECUTION_FAILED"))
 	}
 }
 
