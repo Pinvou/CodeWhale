@@ -1938,7 +1938,12 @@ fn ensure_recheck_outside_installed_refs(
 /// 身份相等的三元组也不构成等价证明：不同 kind 的同名记录（如非 Ollama
 /// 的 "qwen3" 与 Ollama 的 "Qwen3"）是入口明确允许并存的独立登记，
 /// note/installed_at/原始 name 各异的同 kind 冲突存量同样保留咨询（读取
-/// 端对它们只告警不吞）。
+/// 端对它们只告警不吞）。集合元素的路径解析同样三态（2026-11-10 复审 P2，
+/// review 5839950561）：登记权重路径 canonicalize 失败时 NotFound 沿原始
+/// 路径继续比对，其余错误（权限/I-O/环）按 Err 上抛——回退原路径等于把
+/// "解析不了"折叠成"互不关联"，别名引用待删目标的登记会被整树删除连带
+/// 毁掉；两个消费方（边界初检、删除时刻复查）共用本集合，任何一侧都不能
+/// 在引用关系无法确认时放行。
 fn other_registry_weights_checked(
     dir: &Path,
     exclude: &RegistryRecord,
@@ -2022,9 +2027,26 @@ fn other_registry_weights_checked(
             continue;
         }
         let candidate = PathBuf::from(weights);
-        // canonical 解析软链对齐真实落点，失败回退原路径（与商店
-        // installed_weight_paths_checked 同一把尺）。
-        let resolved = candidate.canonicalize().unwrap_or(candidate);
+        // canonical 解析软链对齐真实落点，失败按三态分流（2026-11-10 复审 P2，
+        // review 5839950561）：此前的 `unwrap_or(candidate)` 把权限/I-O 等解析
+        // 失败一律折叠成原始路径——别名指向待删目标的登记从此判为"互不关联"，
+        // 整树删除仍会毁掉它依赖的权重，且初检与删除时刻复查共用这份集合，两
+        // 道防线一起失明。现区分：NotFound（登记指向的位置物理不存在，含悬空
+        // 中间符号链接）没有可保护的权重字节，保留原始路径继续比对（原始分量
+        // 判定不受影响，与商店 installed_weight_paths_checked 既有回退同尺）；
+        // 其余解析错误（EACCES/EIO/ELOOP 等）= 无法确认 ≠ 确认不存在，按 Err
+        // 上抛——两个消费方（边界初检 `?`、删除时刻复查 map_err）都按既有
+        // fail-closed 口径整单拒绝，权重与登记都保留，恢复可解析后即可重试。
+        let resolved = match candidate.canonicalize() {
+            Ok(resolved) => resolved,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => candidate,
+            Err(error) => {
+                return Err(format!(
+                    "登记权重路径（{}）无法解析（{error}）：无法确认它是否别名引用待删权重",
+                    truncate_path_echo(weights)
+                ));
+            }
+        };
         if !out.contains(&resolved) {
             out.push(resolved);
         }
@@ -4036,6 +4058,73 @@ mod tests {
         assert!(
             error.contains("超出扫描上限"),
             "error must name the scan cap, got: {error}"
+        );
+    }
+
+    #[test]
+    fn other_registry_weights_checked_fails_closed_on_unresolvable_weight_paths() {
+        // 引用路径解析三态（2026-11-10 复审 P2，review 5839950561）：邻居登记
+        // 的权重路径解析报权限/I-O 错误时，旧的 `unwrap_or` 回退把它折叠成原
+        // 始路径——别名指向待删目标的登记从此判为"互不关联"；初检与删除时刻
+        // 复查共用这份集合，两道防线一起失明，整树删除仍会毁掉它依赖的权重。
+        // 非 NotFound 解析失败必须按 Err 拒绝（权重与登记都保留，恢复可解析即
+        // 重试入口）；NotFound（登记指向的位置物理不存在）没有可保护的权重字
+        // 节，保留原始路径放行（别名不存在时原始分量判定照常生效）。
+        let dir = TempDir::new("registry-cross-unresolvable");
+        std::fs::create_dir_all(dir.path().join("weights")).expect("create target weights dir");
+        // 邻居登记经 gated/ 中转指向真实落点；gated 失去执行位后整条路径不可
+        // 解析（EACCES ≠ NotFound）。
+        std::fs::create_dir_all(dir.path().join("gated")).expect("create gated dir");
+        let gated = dir.path().join("gated");
+        let weights_display = gated.join("qwen3").display().to_string();
+        std::fs::write(
+            dir.path().join("m-alias.json"),
+            format!(
+                r#"{{"id": "m-alias", "name": "alias", "kind": "other", "weights_path": "{weights_display}"}}"#
+            ),
+        )
+        .expect("write alias record");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&gated, std::fs::Permissions::from_mode(0o000))
+                .expect("strip gated dir permissions");
+            let error =
+                other_registry_weights_checked(dir.path(), &exclude_record("m-self", "other", "x"))
+                    .expect_err("unresolvable reference path must fail closed");
+            assert!(
+                error.contains("无法解析") && error.contains("无法确认它是否别名引用待删权重"),
+                "error must carry the unresolvable-path guidance, got: {error}"
+            );
+            assert!(
+                error.contains("qwen3"),
+                "error must echo the unresolvable path, got: {error}"
+            );
+            // 恢复权限后重试入口真实存在（此例叶目录本就不存在，NotFound 沿
+            // 原始路径回退，集合照常返回）。
+            std::fs::set_permissions(&gated, std::fs::Permissions::from_mode(0o755))
+                .expect("restore gated dir permissions");
+            let weights =
+                other_registry_weights_checked(dir.path(), &exclude_record("m-self", "other", "x"))
+                    .expect("resolvable reference path must resolve");
+            assert!(
+                weights.contains(&gated.join("qwen3")),
+                "restored reference must be consulted again, got: {weights:?}"
+            );
+        }
+        // NotFound（登记指向的位置不存在）≠ 失败：没有可保护的权重字节，沿
+        // 原始路径继续比对（与既有 excluded_self_and_unregistered 口径一致）。
+        std::fs::write(
+            dir.path().join("m-dangling.json"),
+            r#"{"id": "m-dangling", "name": "dangling", "kind": "other", "weights_path": "/definitely/absent/weights"}"#,
+        )
+        .expect("write dangling record");
+        let weights =
+            other_registry_weights_checked(dir.path(), &exclude_record("m-self", "other", "x"))
+                .expect("dangling reference is not a failure");
+        assert!(
+            weights.contains(&PathBuf::from("/definitely/absent/weights")),
+            "dangling reference must stay on its raw path, got: {weights:?}"
         );
     }
 
