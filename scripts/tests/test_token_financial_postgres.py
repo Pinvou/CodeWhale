@@ -707,7 +707,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
                 with self.subTest(child=child), self.assertRaises(RuntimeError):
                     RUNNER.verify_results(invalid, {root}, **options)
 
-    def test_retained_billing_budget_preserves_all_phase_commands_and_cleanup(self):
+    def test_financial_phase_budgets_preserve_all_commands_and_cleanup(self):
         self.run_main_fixture()
         self.assertEqual(self.fixture_phases, [
             "owner-account", "owner-wallet", "owner-schema", "owner-token-schema",
@@ -716,7 +716,8 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
         for phase, command in zip(self.fixture_phases, self.fixture_commands, strict=True):
             with self.subTest(phase=phase):
                 budgets = [arg for arg in command if arg.startswith("-timeout=")]
-                self.assertEqual(budgets, ["-timeout=75m" if phase == "retained-billing" else "-timeout=20m"])
+                expected = "75m" if phase == "retained-billing" else "40m" if phase == "retained-token" else "20m"
+                self.assertEqual(budgets, ["-timeout=" + expected])
                 self.assertIn("-race", command)
                 self.assertIn("-count=1", command)
         billing = self.fixture_commands[-1]
@@ -1368,13 +1369,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
             "PINVOU_ACCOUNT_FINANCIAL_TEST_DATABASE_URL": "postgres://postgres@127.0.0.1:5433/postgres?sslmode=disable",
             "PINVOU_TEST_SCHEMA_DATABASE_URL": "must-not-reach-tests",
             "GOFLAGS": "-trimpath",
-        }, clear=True), patch.object(RUNNER.subprocess, "run", side_effect=run), patch.object(
-            # This fixture models one logical phase's SQL/actor lifecycle. The
-            # actual three-command selection is exercised separately, without
-            # this replacement, in test_token_financial_batches.py.
-            RUNNER, "run_token_batches", side_effect=lambda command, **options: RUNNER.subprocess.run(
-                command, cwd=options["cwd"], env=options["env"], capture_output=True,
-                text=True, encoding="utf-8", check=False)), contextlib.redirect_stdout(io.StringIO()):
+        }, clear=True), patch.object(RUNNER.subprocess, "run", side_effect=run), contextlib.redirect_stdout(io.StringIO()):
             try:
                 RUNNER.main(group=group)
             finally:
