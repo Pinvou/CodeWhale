@@ -188,9 +188,12 @@ rotation readiness requires zero old-key ciphertext. After disabling the old key
 Token Gateway instance and archive the scrubbed per-instance status, observation
 time, and release identity with the release record. These checks do not replace
 the separate external KMS/Vault, payment, and model-provider release evidence.
-Registry names, provider hosts, and CIDRs in the production values file are
-documentation examples; replace every one with the reviewed deployment values
-before rendering a release manifest.
+The staging and production values files are profile skeletons. Use the reviewed
+site overlay to supply the `external.*Cidrs` for the actual dependencies and
+configure the approved registry and provider hosts before rendering a release
+manifest. Apply the site overlay after the profile. An empty CIDR list adds no
+IP allow rule for that dependency. The production values schema requires all
+eleven `external.*Cidrs` lists to be nonempty at render time.
 
 ### User realm prerequisite
 
