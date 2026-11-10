@@ -4,6 +4,56 @@ use std::time::{Duration, Instant};
 use tauri::Manager as _;
 
 #[test]
+fn real_controller_start_lifecycle_fences() {
+    const CASE: &str = "PINVOU_CONTROLLER_START_FENCE_CASE";
+    if let Ok(case) = std::env::var(CASE) {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(crate::features::remote_control::RemoteControlManager::verify_controller_start_fence(|| {
+            let mut context = crate::build_tauri_context();
+            context.config_mut().app.windows.clear();
+            let app = tauri::Builder::default().any_thread()
+                .manage(crate::features::remote_control::controller::controlled::ControlledDeviceManager::default())
+                .manage(crate::features::remote_control::controller::encrypted_lane::ControlledLaneState::default())
+                .manage(crate::features::remote_control::controller::relay_runtime::ControlledOutboundState::default())
+                .build(context).unwrap();
+            let relay = crate::features::remote_control::RemoteControlManager::new(app.handle().clone());
+            (relay, app)
+        }, &case));
+        return;
+    }
+    let module = module_path!().split_once("::").unwrap().1;
+    let filter = format!("{module}::real_controller_start_lifecycle_fences");
+    for case in [
+        "reader-revocation",
+        "stop",
+        "refresh",
+        "failed-start",
+        "late-drop",
+    ] {
+        let child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", &filter, "--nocapture"])
+            .env(CASE, case)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let (status, output, errors) = collect_reader_child(child, Duration::from_secs(30));
+        assert!(
+            status.success(),
+            "controller-start {case} failed: {output}\n{errors}"
+        );
+        assert!(
+            output.contains("test result: ok. 1 passed;"),
+            "zero-match child is not evidence"
+        );
+        println!("controller-start {case}: isolated real host passed");
+    }
+}
+
+#[test]
 fn real_reader_manager_worker_resume_round_trip() {
     run_isolated_reader(false, false, false, None);
 }
