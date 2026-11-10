@@ -86,8 +86,10 @@ func main() {
 	if err != nil {
 		log.Fatal(migrationFailureCode(ctx, err, "MIGRATION_DATABASE_CONNECTION_FAILED"))
 	}
-	defer connection.Close(context.Background())
-	defer migrations.Unlock(context.Background(), connection)
+	// Success-path cleanup shares the database budget too. pgx Close always
+	// closes the underlying socket even when this context has expired.
+	defer connection.Close(ctx)
+	defer migrations.Unlock(ctx, connection)
 	if migrationRole := strings.TrimSpace(os.Getenv("MIGRATION_ROLE")); migrationRole != "" {
 		if !regexp.MustCompile(`^[a-z][a-z0-9_]{0,62}$`).MatchString(migrationRole) {
 			log.Fatal("MIGRATION_ROLE is invalid")
