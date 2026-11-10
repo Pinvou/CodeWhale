@@ -106,21 +106,22 @@ impl ToolSpec for RunTool {
                 },
                 "commands": {
                     "type": "array",
-                    "description": "Optional explicit verifier gates (action=verifiers)",
+                    "description": "Optional explicit verifier gates (action=verifiers). Foreground gates run directly as program+args, not through a shell; use program='bash', args=['-lc', '...'] only when the shell is intentionally part of the verifier. Background gates are rendered into a single command line and run through the detected platform shell, so shell quoting rules apply there (a POSIX-quoted path can fail under PowerShell).",
                     "items": {
                         "type": "object",
                         "properties": {
-                            "name": { "type": "string" },
-                            "program": { "type": "string" },
-                            "args": { "type": "array", "items": { "type": "string" } },
-                            "cwd": { "type": "string" }
+                            "name": { "type": "string", "description": "Short unique gate name." },
+                            "program": { "type": "string", "description": "Executable to spawn, for example 'cargo', 'npm', 'pytest', or 'make'." },
+                            "args": { "type": "array", "items": { "type": "string" }, "description": "Arguments passed directly to the executable." },
+                            "cwd": { "type": "string", "description": "Optional working directory relative to the workspace." }
                         },
-                        "required": ["name", "program"]
+                        "required": ["name", "program"],
+                        "additionalProperties": false
                     }
                 },
                 "background": {
                     "type": "boolean",
-                    "description": "Start verifier gates as background jobs (action=verifiers)"
+                    "description": "Start verifier gates as background jobs and return immediately with a task id per gate, null when a gate is skipped or fails to start (action=verifiers). Use for long build/test/lint gates; completion is tracked in task/status state, and task_shell_wait is only for early output, final output, or true dependency barriers."
                 }
             },
             "required": ["action"]
@@ -205,5 +206,43 @@ mod tests {
             .map(|value| value.as_str().expect("string"))
             .collect();
         assert_eq!(advertised, RunTool::ACTIONS);
+    }
+
+    #[test]
+    fn run_verifier_copy_pins_the_per_path_semantics() {
+        // These sentences were corrected by review rounds against the actual
+        // spawn paths (foreground direct spawn vs. background shell render);
+        // pin them so a revert cannot restate a falsehood silently.
+        let schema = RunTool::new("Run").input_schema();
+        let commands = schema["properties"]["commands"]["description"]
+            .as_str()
+            .expect("commands description");
+        assert!(
+            commands.contains("Foreground gates run directly as program+args, not through a shell"),
+            "{commands}"
+        );
+        assert!(
+            commands
+                .contains("Background gates are rendered into a single command line and run through the detected platform shell"),
+            "{commands}"
+        );
+        assert!(
+            commands.contains("a POSIX-quoted path can fail under PowerShell"),
+            "{commands}"
+        );
+        let background = schema["properties"]["background"]["description"]
+            .as_str()
+            .expect("background description");
+        assert!(
+            background
+                .contains("a task id per gate, null when a gate is skipped or fails to start"),
+            "{background}"
+        );
+        assert!(
+            !background.contains("task_ids"),
+            "the visible payload carries per-gate jobs, not a task_ids array: {background}"
+        );
+        let items = &schema["properties"]["commands"]["items"];
+        assert_eq!(items["additionalProperties"], json!(false));
     }
 }
