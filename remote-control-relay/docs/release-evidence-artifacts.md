@@ -24,3 +24,9 @@ Text accumulation is bounded by the admitted size. Growth, truncation, identity
 replacement or observed metadata changes fail validation; no earlier successful
 hash authorizes a later unverified read. This is validation of supplied evidence,
 not proof that a physical release run or signing ceremony took place.
+
+The Windows orchestrator includes the artifact reader in its source snapshot and
+validator dependency hash map, so later validator invocations reject reader
+changes during a run. The release-contract CI suite runs through
+`scripts/ci-fixture-process.py` with a per-run receipt and preserves its failure
+exit code; local test cleanup alone does not establish CI resource retirement.
