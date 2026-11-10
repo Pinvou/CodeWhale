@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { localeNames, supportedLocales } from '../../shared/supported-locales.js';
+import { AdminLanguageControl } from './AdminLanguageControl.jsx';
 import { secureRequestID } from './request-id.js';
 import { useAccountOwner } from './useAccountOwner.js';
 import { smsStatusCopy, smsTemplateCopy } from '../../shared/i18n.js';
@@ -20,7 +20,7 @@ function smsConfigurationForm(configuration = {}) {
   };
 }
 
-export function SettingsWorkspace({ copy, language, onLanguageChange, client, permissions }) {
+export function SettingsWorkspace({ copy, language, languageFeedback, onLanguageChange, client, permissions }) {
   const permissionSet = useMemo(() => new Set(permissions || []), [permissions]);
   const canReadSMS = permissionSet.has('platform.sms-config.read');
   const canManageSMS = permissionSet.has('platform.sms-config.manage');
@@ -151,19 +151,7 @@ export function SettingsWorkspace({ copy, language, onLanguageChange, client, pe
     <div className="adm-settings-stack">
       <section className="adm-panel adm-settings-panel">
         <SectionHeader title={copy.settings.title} copy={copy} />
-        <div className="adm-detail-grid">
-          <label>
-            <span>{copy.settings.language}</span>
-            <select value={language} onChange={(event) => onLanguageChange(event.target.value)}>
-              {supportedLocales.map((locale) => (
-                <option key={locale} value={locale}>
-                  {localeNames[locale]}
-                </option>
-              ))}
-            </select>
-          </label>
-        </div>
-        <p className="adm-muted">{copy.settings.boundary}</p>
+        <AdminLanguageControl label={copy.settings.language} language={language} feedback={languageFeedback} onChange={onLanguageChange} />
       </section>
       {canReadSMS && (
         <section className="adm-panel adm-settings-panel adm-sms-configuration" data-readiness={sms?.readiness || 'LOADING'}>
