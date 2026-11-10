@@ -103,7 +103,7 @@ try {
     assert.equal(await page.evaluate(() => window.restored.calls.filter(call => call.method !== 'GET' && !call.url.endsWith('/account/bootstrap')).length), 0);
   });
   await run('user detail heading keeps real identity and the applied directory context', async () => {
-    const target = '22222222-2222-4222-8222-222222222222', name = '用于验证用户详情标题和返回入口布局的测试用户名称';
+    const target = '22222222-2222-4222-8222-222222222222', name = '用于验证用户详情标题和返回入口布局的测试用户名称 WWWWWWWWWWWWWWWWWWWW';
     const cursor = 'eyJ1cGRhdGVkX2F0IjoiMjAyNi0xMC0wMVQwMDowMDowMFoiLCJ1c2VyX2lkIjoiMzMzMzMzMzMtMzMzMy00MzMzLTgzMzMtMzMzMzMzMzMzMzMzIn0';
     const directoryCalls = () => page.evaluate(() => window.restored.calls.filter(call => call.method === 'GET' && new URL(call.url, location.origin).pathname === '/api/admin/account/admin/v1/users'));
     await fresh(`?mode=admin&userDetailHeader=1&section=users&user_q=${encodeURIComponent('验证')}&user_cursor=${cursor}`);
@@ -874,7 +874,9 @@ try {
       if (operation === 'deleteUnit') assert.ok(target.includes('Sample unit') && target.includes(unitID), 'unit deletion identifies both parent and unit');
       assert.equal(await page.$$eval('[role=dialog] fieldset', nodes => nodes.length), 0, 'fieldless actions must not show an empty fieldset');
       const description = words[operation === 'deleteUnit' ? 'deleteUnitDescription' : operation === 'disable' ? 'disableOrganizationDescription' : 'enableOrganizationDescription'];
-      assert.equal(await page.$eval('[role=dialog] .ap-org-action-description', node => node.textContent), description);
+      const precheckInfo = operation === 'disable' ? await page.evaluate(() => window.restored.copy().adminLayout.organization.lifecycleTasks.disablePrecheckInfo) : '';
+      const initialDescription = [description, precheckInfo].filter(Boolean).join(' ');
+      assert.equal(await page.$eval('[role=dialog] .ap-org-action-description', node => node.textContent), initialDescription);
       assert.deepEqual(await page.$$eval('[role=dialog] .ap-org-action-footer>button', nodes => nodes.map(node => node.textContent)), [words.cancelConfirmation, words[operation]]);
       const actionColor = operation === 'enable' ? 'rgb(49, 89, 232)' : 'rgb(195, 59, 70)';
       assert.equal(await page.$eval('[role=dialog] .ap-org-action-footer>button[type=submit]', node => getComputedStyle(node).backgroundColor), actionColor);
@@ -897,7 +899,15 @@ try {
       assert.equal(await page.$eval('[role=alertdialog]', node => getComputedStyle(node).fontSize), '14px', 'body-portalled confirmation uses the standard dialog font');
       assert.equal(await page.$eval('[role=alertdialog] footer>button:last-child', node => getComputedStyle(node).backgroundColor), actionColor);
       assert.equal(await page.$eval('[role=alertdialog] footer>button:first-child', node => getComputedStyle(node).backgroundColor), 'rgb(255, 255, 255)');
-      assert.ok((await page.$eval('[role=alertdialog]', node => node.textContent)).includes(description), 'final confirmation retains impact explanation');
+      const finalText = await page.$eval('[role=alertdialog]', node => node.textContent);
+      if (operation === 'deleteUnit') {
+        const impact = await page.evaluate(() => window.restored.copy().adminLayout.organization.unitDeleteImpact);
+        assert.ok(finalText.includes(impact.confirmRequest), 'unit deletion confirms a request with server-side resource checks');
+        const facts = await page.$eval('[role=alertdialog] .ap-admin-unit-delete-facts', node => node.textContent);
+        assert.ok(facts.includes(impact.children) && facts.includes(impact.scope), 'unit deletion retains the direct-child facts and deletion scope');
+        const finalTarget = await page.$eval('[role=alertdialog] dd', node => node.textContent);
+        assert.ok(finalTarget.includes(orgID) && finalTarget.includes(unitID), 'unit deletion identifies both canonical targets at final confirmation');
+      } else assert.ok(finalText.includes(description), 'final confirmation retains impact explanation');
       assert.ok((await page.$eval('[role=alertdialog] dd', node => node.textContent)).includes('Sample organization'));
       assert.equal((await writes()).length, 0, 'first submit still requires confirmation');
       await page.keyboard.press('Escape'); await page.waitForSelector('[role=dialog] .ap-org-action-target');
@@ -987,7 +997,7 @@ try {
     await page.waitForSelector('[data-workspace=refunds] tbody tr');
     assert.equal(await page.$$eval('[data-workspace=refunds] tbody tr', nodes => nodes.length), 2);
     assert.ok((await page.$eval('[data-workspace=refunds]', node => node.textContent)).includes('90,071,992,547,409.93'));
-    const details = await page.$$('[data-workspace=refunds] tbody button'); await details[1].click();
+    const details = await page.$$('[data-workspace=refunds] tbody tr > td:last-child > button'); assert.equal(details.length, 2); await details[1].click();
     await page.waitForFunction(() => new URL(location.href).searchParams.get('refund_id')?.startsWith('FORCED:'));
     await page.reload({ waitUntil: 'domcontentloaded' }); await page.waitForSelector('[data-workspace=refunds] dl');
     assert.ok((await page.$eval('[data-workspace=refunds] dl', node => node.textContent)).includes('强制退款'));
@@ -1040,16 +1050,22 @@ try {
     await fresh('?mode=admin&section=payments&finance_tab=orders&order_status=PAID&order_provider_id=controlled-provider&order_channel=ALIPAY&order_created_from=2026-10-01T00%3A00%3A12.345Z&order_limit=50&order_id=00000000-0000-4000-8000-000000000002');
     await page.waitForFunction(() => window.restored.calls.some(call => call.url.includes('/payment-orders?') && call.url.includes('status=PAID') && call.url.includes('provider_id=controlled-provider') && call.url.includes('channel=ALIPAY') && call.url.includes('limit=50') && call.url.includes('created_from=')));
     await page.waitForSelector('[data-workspace=orders] article');
-    assert.ok((await page.$eval('[data-workspace=orders] article', node => node.textContent)).includes('00000000-0000-4000-8000-000000000002'));
+    assert.equal(await page.$eval('[data-workspace=orders] .adm-order-detail-header code', node => node.textContent), '00000000-0000-4000-8000-000000000002');
+    assert.ok(await page.$eval('[data-workspace=orders] article', node => Boolean(node.getAttribute('aria-labelledby')) && node.getAttribute('aria-labelledby') === node.closest('[data-workspace=orders]').querySelector('.adm-order-detail-header h3').id));
     await page.reload({ waitUntil: 'domcontentloaded' });
     await page.waitForSelector('[data-workspace=orders] article');
     await page.waitForFunction(() => window.restored.calls.some(call => call.url.includes('/payment-orders?') && call.url.includes('status=PAID')));
+    assert.equal(await page.$eval('[data-workspace=orders] .adm-order-detail-header code', node => node.textContent), '00000000-0000-4000-8000-000000000002');
     assert.equal(new URL(page.url()).searchParams.get('order_channel'), 'ALIPAY');
   });
   await run('history during a pending filtered read coalesces the latest URL without stale rows', async () => {
     await fresh('?mode=admin&section=payments&finance_tab=orders&order_status=PENDING');
     await page.evaluate(() => { window.restored.filteredOrders = true; window.restored.reload(); });
-    await page.waitForFunction(() => document.querySelector('[data-workspace=orders] tbody')?.textContent.includes('PENDING'));
+    const expected = await page.evaluate(() => ({ orderID: '00000000-0000-4000-8000-000000000002', pending: window.restored.copy().accountLayout.statuses.PENDING, paid: window.restored.copy().accountLayout.statuses.PAID }));
+    await page.waitForFunction(({ orderID, pending }) => {
+      const rows = document.querySelectorAll('[data-workspace=orders] tbody tr');
+      return rows.length === 1 && rows[0].cells[0]?.querySelector('code')?.textContent === orderID && rows[0].cells[6]?.textContent === pending;
+    }, {}, expected);
     await page.waitForFunction(() => !document.querySelector('[data-workspace=orders] .adm-filter-row button').disabled);
     await page.evaluate(() => { window.restored.delayAdminOrders = true; });
     await page.select('[data-workspace=orders] .adm-filter-row select', 'PAID'); await page.$eval('[data-workspace=orders] .adm-filter-row', form => form.requestSubmit());
@@ -1057,22 +1073,29 @@ try {
     const before = await page.evaluate(() => window.restored.calls.filter(call => call.url.includes('/payment-orders?') && new URL(call.url, location.origin).searchParams.get('status') === 'PENDING').length);
     await page.goBack(); await page.waitForFunction(() => new URLSearchParams(location.search).get('order_status') === 'PENDING');
     await page.evaluate(() => window.restored.releaseAdminOrders());
-    await page.waitForFunction(before => window.restored.calls.filter(call => call.url.includes('/payment-orders?') && new URL(call.url, location.origin).searchParams.get('status') === 'PENDING').length === before + 1 && document.querySelector('[data-workspace=orders] tbody')?.textContent.includes('PENDING'), {}, before);
-    assert.ok(!(await page.$eval('[data-workspace=orders] tbody', node => node.textContent)).includes('PAID'));
+    await page.waitForFunction(({ before, orderID, pending }) => {
+      const rows = document.querySelectorAll('[data-workspace=orders] tbody tr');
+      return window.restored.calls.filter(call => call.url.includes('/payment-orders?') && new URL(call.url, location.origin).searchParams.get('status') === 'PENDING').length === before + 1 && rows.length === 1 && rows[0].cells[0]?.querySelector('code')?.textContent === orderID && rows[0].cells[6]?.textContent === pending;
+    }, {}, { ...expected, before });
+    assert.notEqual(await page.$eval('[data-workspace=orders] tbody tr td:nth-child(7)', node => node.textContent), expected.paid);
     assert.equal(await page.evaluate(() => window.restored.calls.filter(call => call.method !== 'GET' && !call.url.endsWith('/account/bootstrap')).length), 0);
   });
   await run('review detail failure and mismatched receipt never expose the previously selected case', async () => {
     const first = '22222222-2222-4222-8222-222222222222', second = '33333333-3333-4333-8333-333333333333';
+    const failedDetailReady = ({ tab, endpoint, second, count }) => {
+      const retry = [...document.querySelectorAll(`[data-workspace=${tab}] nav button`)].find(node => node.textContent.trim() === window.restored.copy().finance.retry);
+      return window.restored.calls.filter(call => call.url.endsWith('/' + endpoint + '/' + second)).length === count && document.querySelector(`[data-workspace=${tab}] [role=alert]`) && Boolean(retry && retry.getClientRects().length && !retry.disabled);
+    };
     for (const [tab, prefix, endpoint] of [['late', 'late', 'late-payment-reviews'], ['anomalies', 'anomaly', 'payment-anomalies']]) {
       await fresh(`?mode=admin&section=payments&finance_tab=${tab}`);
       await page.evaluate(({ tab, prefix, first }) => { window.restored.reviewFixture = true; window.restored.permissions = ['platform.billing.wallets.read', 'platform.billing.orders.sync', 'platform.billing.repairs.request']; history.replaceState({}, '', `?mode=admin&section=payments&finance_tab=${tab}&${prefix}_id=${first}`); dispatchEvent(new PopStateEvent('popstate')); window.restored.reload(); }, { tab, prefix, first });
       await page.waitForFunction(({ tab, first }) => document.querySelector(`[data-workspace=${tab}] article h4`)?.textContent === first, {}, { tab, first });
       await page.evaluate(({ tab, prefix, second }) => { window.restored.failReviewID = second; history.pushState({}, '', `?mode=admin&section=payments&finance_tab=${tab}&${prefix}_id=${second}`); dispatchEvent(new PopStateEvent('popstate')); }, { tab, prefix, second });
-      await page.waitForFunction(({ tab, endpoint, second }) => window.restored.calls.some(call => call.url.endsWith('/' + endpoint + '/' + second)) && document.querySelector(`[data-workspace=${tab}] [role=alert]`) && !document.querySelector(`[data-workspace=${tab}] .adm-filter-row button`).disabled, {}, { tab, endpoint, second });
+      await page.waitForFunction(failedDetailReady, {}, { tab, endpoint, second, count: 1 });
       assert.equal(await page.$(`[data-workspace=${tab}] article`), null);
       await page.evaluate(first => { window.restored.failReviewID = ''; window.restored.reviewAckID = first; }, first);
       await click(`[data-workspace=${tab}] nav button`, await page.evaluate(() => window.restored.copy().finance.retry));
-      await page.waitForFunction(({ tab, endpoint, second }) => window.restored.calls.filter(call => call.url.endsWith('/' + endpoint + '/' + second)).length === 2 && !document.querySelector(`[data-workspace=${tab}] .adm-filter-row button`).disabled, {}, { tab, endpoint, second });
+      await page.waitForFunction(failedDetailReady, {}, { tab, endpoint, second, count: 2 });
       assert.equal(await page.$(`[data-workspace=${tab}] article`), null);
       await page.evaluate(() => { window.restored.reviewAckID = ''; });
       await click(`[data-workspace=${tab}] nav button`, await page.evaluate(() => window.restored.copy().finance.retry));
@@ -1146,10 +1169,15 @@ try {
   await run('submitting displayed date filters sends timezone-bearing RFC3339', async () => {
     for (const [section, tab, prefix, endpoint] of [['payments', 'orders', 'order', 'payment-orders'], ['payments', 'late', 'late', 'late-payment-reviews'], ['payments', 'anomalies', 'anomaly', 'payment-anomalies']]) {
       await fresh(`?mode=admin&section=${section}&finance_tab=${tab}&${prefix}_created_from=2026-10-01T00%3A00%3A12.345Z`);
-      await page.waitForSelector(`[data-workspace=${tab}] .adm-filter-row input[type=datetime-local]`);
-      await page.waitForFunction(selector => !document.querySelector(selector).disabled, {}, `[data-workspace=${tab}] .adm-filter-row button`);
+      const formSelector = `[data-workspace=${tab}] form`;
+      await page.waitForSelector(`${formSelector} input[type=datetime-local]`);
+      assert.equal(await page.$$eval(formSelector, forms => forms.length), 1, 'the read workspace exposes one filter form');
+      await page.waitForFunction(selector => {
+        const submit = document.querySelector(selector)?.querySelector('button[type=submit], button:not([type])');
+        return Boolean(submit && !submit.matches(':disabled'));
+      }, {}, formSelector);
       const before = await page.evaluate(endpoint => window.restored.calls.filter(call => call.url.includes('/' + endpoint + '?')).length, endpoint);
-      await page.$eval(`[data-workspace=${tab}] .adm-filter-row`, form => form.requestSubmit());
+      await page.$eval(formSelector, form => form.requestSubmit());
       await page.waitForFunction(({ endpoint, before }) => window.restored.calls.filter(call => call.url.includes('/' + endpoint + '?')).length > before, {}, { endpoint, before });
       const value = await page.evaluate(endpoint => new URL(window.restored.calls.filter(call => call.url.includes('/' + endpoint + '?')).at(-1).url, location.origin).searchParams.get('created_from'), endpoint);
       assert.match(value, /Z$/); assert.equal(value, '2026-10-01T00:00:12.345Z');
