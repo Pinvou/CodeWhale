@@ -630,8 +630,9 @@ def main(*, group="all"):
             env["PINVOU_TEST_TOKEN_DATABASE_URL"] = raw
             env["PINVOU_TEST_BILLING_DATABASE_URL"] = raw
         # The retained Billing roots create hundreds of isolated migration
-        # fixtures. Other phases retain their existing finite 20-minute bound.
-        timeout = "75m" if label == "retained-billing" else "20m"
+        # fixtures. Retained Token keeps its full package within a 40-minute
+        # test-binary budget; other phases retain their 20-minute bound.
+        timeout = {"retained-billing": "75m", "retained-token": "40m"}.get(label, "20m")
         command = [go, "test", "-p=1", "-race", "-tags=nomsgpack", "-mod=readonly", "-count=1", "-timeout=" + timeout, "-json"]
         if scoped:
             command += ["-run", "^(" + "|".join(sorted(required)) + ")$"] if len(required) > 1 else ["-run", "^" + next(iter(required)) + "$"]

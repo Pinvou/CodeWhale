@@ -707,7 +707,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
                 with self.subTest(child=child), self.assertRaises(RuntimeError):
                     RUNNER.verify_results(invalid, {root}, **options)
 
-    def test_retained_billing_budget_preserves_all_phase_commands_and_cleanup(self):
+    def test_financial_phase_budgets_preserve_all_commands_and_cleanup(self):
         self.run_main_fixture()
         self.assertEqual(self.fixture_phases, [
             "owner-account", "owner-wallet", "owner-schema", "owner-token-schema",
@@ -716,7 +716,8 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
         for phase, command in zip(self.fixture_phases, self.fixture_commands, strict=True):
             with self.subTest(phase=phase):
                 budgets = [arg for arg in command if arg.startswith("-timeout=")]
-                self.assertEqual(budgets, ["-timeout=75m" if phase == "retained-billing" else "-timeout=20m"])
+                expected = "75m" if phase == "retained-billing" else "40m" if phase == "retained-token" else "20m"
+                self.assertEqual(budgets, ["-timeout=" + expected])
                 self.assertIn("-race", command)
                 self.assertIn("-count=1", command)
         billing = self.fixture_commands[-1]
