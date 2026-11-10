@@ -10,6 +10,18 @@ import {
 const labels = (items) => items.map(({ kind, target }) => `${kind}:${target}`);
 const fullLabels = labels(FULL_FRONTEND_SMOKES);
 
+test("remote download budget browser runs for production, test and full-suite paths", () => {
+  const target = "node:tests/remote_download_budget_smoke.mjs";
+  for (const paths of [["pinvou3-app/src/features/remote-control/remote-file-transfer.mjs"],
+    ["pinvou3-app/tests/remote_download_budget_smoke.mjs"], ["pinvou3-app/src/platform/tauri/bridge/desktop-remote-control.js"]]) {
+    assert.equal(labels(selectFrontendSmokes(paths)).filter(value => value === target).length, 1);
+  }
+  assert.equal(fullLabels.filter(value => value === target).length, 1);
+  const knip = JSON.parse(readFileSync(new URL("../../pinvou3-app/knip.json", import.meta.url), "utf8"));
+  assert.ok(knip.entry.includes("tests/remote_download_budget_smoke.mjs"));
+  assert.ok(!knip.ignore.includes("tests/remote_download_budget_smoke.mjs"));
+});
+
 test("quarantine confirmation smoke runs in full CI and for its real public facade", () => {
   const smoke = "node:tests/remote_quarantine_smoke.mjs";
   assert.ok(fullLabels.includes(smoke));
