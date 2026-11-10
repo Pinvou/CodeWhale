@@ -9,6 +9,16 @@ fn real_reader_manager_worker_resume_round_trip() {
 }
 
 #[test]
+fn real_reader_resume_prepare_survives_failed_write() {
+    run_isolated_reader(false, false, false, Some("prepare_write"));
+}
+
+#[test]
+fn real_reader_resume_prepare_survives_legacy_socket_epoch() {
+    run_isolated_reader(false, false, false, Some("prepare_legacy"));
+}
+
+#[test]
 fn real_reader_endpoint_retirement_closes_waiting_and_connected_workers() {
     run_isolated_reader(true, false, false, None);
 }
@@ -198,6 +208,8 @@ fn run_isolated_reader(
         Some("disconnect") => "real_reader_old_received_disconnect_cannot_mutate_successor",
         Some("joined") => "real_reader_old_received_joined_cannot_install_or_clear_successor",
         Some("activation") => "real_reader_resume_activation_holds_lifecycle_owner_commit",
+        Some("prepare_write") => "real_reader_resume_prepare_survives_failed_write",
+        Some("prepare_legacy") => "real_reader_resume_prepare_survives_legacy_socket_epoch",
         Some("challenge") => "real_reader_old_tick_challenge_cannot_mask_successor_suspicion",
         Some(other) => panic!("unknown isolated ownership case: {other}"),
         None if final_admission => {

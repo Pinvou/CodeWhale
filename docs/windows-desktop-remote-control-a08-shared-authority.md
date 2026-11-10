@@ -17,15 +17,35 @@ manager 在同一锁中验证 reader 所属 endpoint 并投递到相应通道。
 绑定序号还须在实际入队前由权限锁再次验证，旧 reader、旧 sender 与迟到 Drop/Stop
 均不能影响替换后的通道。锁内不调用业务生命周期、执行 await 或触发外部回调。
 
-业务帧只能在当前认证连接上发送，旧队列不能跨 socket 重放。唯一允许在断线时提前
-入队的是严格验证、匹配已登记租约的 `controller_resume_prepare`，它只定位到下一次
-连接轮次。首次断线冻结的最后有效认证存活证据预算不会因重连或恢复消息延长。
+业务帧只能在当前认证连接上发送，旧队列不能跨 socket 重放。底层已有的断线 prepare
+scope 仍只定位到下一次连接轮次；写失败保留的旧 scope 不会被重定向到更晚的 socket。
+B 的生产恢复候选现在等待真正协商 controller 协议的 socket 就绪，再从原 owner
+管理器锁内借用当前令牌，重新构造匹配当前 epoch、binding、generation 和完整租约的
+prepare。只有原候选仍处于 Prepared 且首次冻结的本地截止尚有效时才准入；不重新
+执行 prepare 状态转换，不旋转令牌，也不启动新预算。初始材料的临时令牌副本立即
+清零，重排时的借用副本由 Zeroizing 清零，不把令牌额外留在 worker 的重试状态。
+
+同一 socket epoch 最多排队一次；后继 controller socket 复用同一请求 ID 和挑战，
+保持 Relay 对精确 prepare 的幂等合同，重试不会增长五阶段错误回执集合。Legacy
+socket 可以消耗 epoch，但不能接纳 controller prepare；下一次 controller socket
+再按仍有效的原候选重建。Relay 已接纳到旧 socket 的候选仍遵守原冲突及截止拒绝，
+不借重连把已确认阶段移植到新 socket。其他控制帧和业务帧不取得跨 epoch 重放权限。
+
+新 prepare 的队列元数据携带同域的本地截止，在开始写操作前再次核对；Relay wire
+deadline 只作原协议身份，不当作本地时钟。已经开始的异步网络写仍遵守既有取消和
+断线边界，此处不声称硬实时中断阻塞写。首次断线冻结的最后有效认证存活证据预算
+不会因重连、重复通知或恢复消息延长。
 Legacy WebUI v2 的共享连接及本地 Chat/ACP/Stop 不引入此远控权限门禁。
 
 回归使用实际 loopback WebSocket reader，而非手工写入凭据：覆盖首轮登记、恢复成功、
 错配/重复 final、关闭/停止/同代替换、断线 prepare，以及旧 reader 的投递隔离。
 Windows 原生回归贯穿真实 RelayClient、manager 与 worker，并核验冻结预算和保留的
 存活 epoch；不等价于真实双机部署、外部 provider 或发布验收。
+prepare 重排另覆盖已知未写出故障和 Legacy 中间 socket 后的完整认证恢复。写故障
+只在测试中由该实例的 writer 在发送前注入，沿生产保留队列及重连分支处理；只保留
+失败帧的摘要，用后继帧摘要核对请求、挑战和证明未被重建成另一候选。Legacy 使用
+真实缺失子协议协商和 Ping/Pong 顺序屏障，验证无 controller 帧泄漏。pending 夹具
+采用实际 B activation ACK 的 request ID，与 Relay 生产写方一致。
 
 ## A07 本轮修复传入 A08 的保全边界
 
