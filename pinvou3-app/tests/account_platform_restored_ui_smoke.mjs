@@ -1224,6 +1224,54 @@ try {
     await page.waitForSelector('[role=dialog] .adm-role-preview');
     return words;
   };
+  await run('roles: grant drawer keeps three steps reachable with native focus at normal and short heights', async () => {
+    for (const sample of [{ language: 'zh', width: 1440, height: 900 }, { language: 'en', width: 390, height: 844 }, { language: 'ja', width: 1024, height: 420 }]) {
+      await readyRoles();
+      await page.evaluate(language => { window.restored.language = language; window.restored.reload(); }, sample.language);
+      await page.waitForSelector('.adm-role-workspace-head .adm-role-primary');
+      await page.setViewport({ width: sample.width, height: sample.height });
+      const words = await roleWords();
+      const trigger = '.adm-role-workspace-head .adm-role-primary';
+      await page.focus(trigger); await page.keyboard.press('Enter');
+      await page.waitForSelector('.adm-role-grant-drawer .adm-grant-step');
+      const measure = async step => {
+        await page.$eval('.adm-grant-step .adm-role-drawer-foot button:last-child', node => node.scrollIntoView({ block: 'nearest' }));
+        const geometry = await page.evaluate(() => {
+          const drawer = document.querySelector('.adm-role-grant-drawer'), body = drawer.querySelector('.adm-grant-step-body'), footer = drawer.querySelector('.adm-role-drawer-foot');
+          const box = footer.getBoundingClientRect(), outer = drawer.getBoundingClientRect();
+          return { top: box.top, bottom: box.bottom, left: box.left, right: box.right, outerTop: outer.top, outerBottom: outer.bottom, bodyOverflow: getComputedStyle(body).overflowY, footerFlex: getComputedStyle(footer).flexShrink, height: innerHeight, width: innerWidth };
+        });
+        assert.ok(geometry.top >= -1 && geometry.bottom <= geometry.height + 1 && geometry.left >= -1 && geometry.right <= geometry.width + 1, JSON.stringify({ sample, step, geometry }));
+        if (sample.height > 580) {
+          assert.equal(geometry.bodyOverflow, 'auto'); assert.equal(geometry.footerFlex, '0');
+          const before = geometry.top;
+          await page.$eval('.adm-grant-step-body', node => { node.scrollTop = node.scrollHeight; });
+          assert.ok(Math.abs(await page.$eval('.adm-role-drawer-foot', node => node.getBoundingClientRect().top) - before) <= 1, 'body scrolling keeps the footer in its slot');
+        } else assert.equal(geometry.bodyOverflow, 'visible', 'short-height mode keeps one outer scroll area');
+        console.log('GRANT_LAYOUT', JSON.stringify({ sample, step, geometry }));
+      };
+      await measure(1);
+      await page.focus('.adm-role-grant-drawer > header button');
+      await page.keyboard.press('Tab');
+      assert.equal(await page.evaluate(() => Boolean(document.activeElement.closest('.adm-role-grant-drawer'))), true);
+      await typeGrantTarget('22222222-2222-4222-8222-222222222222');
+      await click('[role=dialog] button', words.next);
+      await page.waitForSelector('[role=dialog] select'); await measure(2);
+      await page.select('[role=dialog] select', 'PLATFORM_BILLING_OPERATOR');
+      await page.type('[role=dialog] textarea', 'Synthetic drawer review');
+      await click('[role=dialog] button', words.next);
+      await page.waitForSelector('[role=dialog] .adm-role-preview'); await measure(3);
+      await page.focus('.adm-grant-step .adm-role-drawer-foot button:last-child');
+      await page.keyboard.press('Tab');
+      assert.equal(await page.$eval('.adm-role-grant-drawer > header button', node => document.activeElement === node), true, 'last Tab stays inside the native dialog');
+      await page.keyboard.down('Shift'); await page.keyboard.press('Tab'); await page.keyboard.up('Shift');
+      assert.equal(await page.$eval('.adm-grant-step .adm-role-drawer-foot button:last-child', node => document.activeElement === node), true);
+      await page.keyboard.press('Escape');
+      await page.waitForFunction(() => !document.querySelector('[role=dialog]'));
+      assert.equal(await page.$eval(trigger, node => document.activeElement === node), true);
+      assert.equal(await page.evaluate(() => window.restored.calls.filter(call => call.method === 'POST' && call.url.endsWith('/role-bindings')).length), 0, 'review and cancellation never grant a role');
+    }
+  });
   await run('roles: original catalog and permission groups fit desktop and narrow viewports', async () => {
     await readyRoles();
     for (const language of ['zh', 'en', 'ja']) {

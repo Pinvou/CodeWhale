@@ -167,17 +167,16 @@ function readFormulaPreview(payload, target) {
 }
 
 function FormulaPreviewLoading({ copy, onClose }) {
-  const root = useRef(null), close = useRef(null), previousFocus = useRef(document.activeElement);
+  const root = useRef(null), close = useRef(null);
   const title = React.useId();
-  useEffect(() => { close.current?.focus(); return () => previousFocus.current?.focus?.(); }, []);
+  useEffect(() => { close.current?.focus(); }, []);
   return <div className="adm-protocol-dialog-backdrop"><section ref={root} className="adm-protocol-dialog" role="dialog" aria-modal="true" aria-labelledby={title} onKeyDown={event => { keepDialogFocus(event, root.current); if (event.key === 'Escape' && !isImeComposing(event)) onClose(); }}><header><div><h3 id={title}>{copy.previewTitle}</h3><p role="status">{copy.loading}</p></div><button ref={close} type="button" aria-label={copy.close} onClick={onClose}>×</button></header></section></div>;
 }
 
 function Preview({ preview, copy, onClose }) {
   const root = useRef(null);
   const close = useRef(null);
-  const previousFocus = useRef(document.activeElement);
-  useEffect(() => { close.current?.focus(); return () => previousFocus.current?.focus?.(); }, []);
+  useEffect(() => { close.current?.focus(); }, []);
   const words = copy.formulaPresentation;
   return <div className="adm-protocol-dialog-backdrop"><section ref={root} className="adm-protocol-dialog adm-formula-preview adm-formula-explained" role="dialog" aria-modal="true" aria-labelledby="formula-preview-title" onKeyDown={event => { keepDialogFocus(event, root.current); if (event.key === 'Escape' && !isImeComposing(event)) onClose(); }}>
     <header><div><h3 id="formula-preview-title">{copy.previewTitle}</h3><p>{words.previewFacts}</p></div><button ref={close} type="button" onClick={onClose} aria-label={copy.close}>×</button></header>
@@ -191,9 +190,21 @@ function Preview({ preview, copy, onClose }) {
 function PreviewFailure({ failure, copy, onClose }) {
   const root = useRef(null);
   const close = useRef(null);
-  const previousFocus = useRef(document.activeElement);
-  useEffect(() => { close.current?.focus(); return () => previousFocus.current?.focus?.(); }, []);
+  useEffect(() => { close.current?.focus(); }, []);
   return <div className="adm-protocol-dialog-backdrop"><section ref={root} className="adm-protocol-dialog adm-formula-preview" role="dialog" aria-modal="true" aria-labelledby="formula-preview-error-title" onKeyDown={(event) => { keepDialogFocus(event, root.current); if (event.key === 'Escape') onClose(); }}><div className="adm-source-error" role="alert"><strong id="formula-preview-error-title">{copy.previewFailed}</strong>{failure.requestID && <span>{copy.requestID}: {failure.requestID}</span>}<button ref={close} type="button" onClick={onClose}>{copy.close}</button></div></section></div>;
+}
+
+function FormulaPreviewDialog({ preview, copy, onClose }) {
+  // One owner spans loading, success and failure. A phase must not capture the
+  // loading button as its return target immediately before that button unmounts.
+  const previousFocus = useRef(document.activeElement);
+  useEffect(() => () => {
+    const trigger = previousFocus.current;
+    if (trigger?.isConnected && !trigger.closest('[hidden]')) trigger.focus();
+  }, []);
+  if (preview.loading) return <FormulaPreviewLoading copy={copy} onClose={onClose} />;
+  if (preview.error) return <PreviewFailure failure={preview.error} copy={copy} onClose={onClose} />;
+  return <Preview preview={preview} copy={copy} onClose={onClose} />;
 }
 
 const schemaRecord = value => Boolean(value && typeof value === 'object' && !Array.isArray(value));
@@ -403,8 +414,6 @@ export function AdminProtocolFormulaWorkspace({ client, copy, canManage, routeVe
     </section>
     {definition && <ProtocolDefinitionPreview item={selectedDefinition} snapshot={protocols.page?.asOf} copy={copy} onClose={() => setDefinition(null)} />}
     {action && canManage && <Dialog action={action} copy={copy} units={units.items} busy={busy} onClose={() => setAction(null)} onSubmit={runAction} />}
-    {preview?.loading && <FormulaPreviewLoading copy={copy} onClose={closePreview} />}
-    {preview?.error && <PreviewFailure failure={preview.error} copy={copy} onClose={closePreview} />}
-    {preview && !preview.loading && !preview.error && <Preview preview={preview} copy={copy} onClose={closePreview} />}
+    {preview && <FormulaPreviewDialog preview={preview} copy={copy} onClose={closePreview} />}
   </div>;
 }
