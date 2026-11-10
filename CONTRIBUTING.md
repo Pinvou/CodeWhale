@@ -77,6 +77,13 @@ cargo test --manifest-path pinvou3-app/src-tauri/Cargo.toml --lib -- --test-thre
 
 Run additional frontend, Relay, Rust, CodeWhale, or platform checks when relevant. The workflows in [`.github/workflows/`](.github/workflows/) are the source of truth for automated gates. Disclose checks that could not be run locally.
 
+The retained Token financial phase has a 40-minute Go test-binary timeout,
+including the complete selected package. Retained Billing keeps its 75-minute
+budget and other financial phases keep 20 minutes. Compilation, startup and
+ownership checks are outside these test-binary budgets; the Account job retains
+its existing outer limit. Increasing the Token budget does not accelerate tests
+or relax required roots, subcases, race detection or resource retirement.
+
 When a change regenerates a `package-lock.json`, regenerate against the official
 registry (`https://registry.npmjs.org/`): a mirror configured in a local npmrc is
 copied verbatim into the lock's `resolved` URLs, and
