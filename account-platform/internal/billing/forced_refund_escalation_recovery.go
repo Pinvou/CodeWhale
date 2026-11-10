@@ -46,6 +46,26 @@ func (r *PostgresRepository) CompleteEscalatedForcedRefund(ctx context.Context, 
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return PaymentAnomalyCase{}, err
 	}
+	var forcedID, orderID *uuid.UUID
+	err = tx.QueryRow(ctx, `SELECT forced_refund_case_id,payment_order_id FROM payment_anomaly_cases WHERE id=$1`, caseID).Scan(&forcedID, &orderID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return PaymentAnomalyCase{}, ErrNotFound
+	}
+	if err != nil {
+		return PaymentAnomalyCase{}, err
+	}
+	if forcedID == nil || orderID == nil {
+		return PaymentAnomalyCase{}, ErrConflict
+	}
+	// Keep the standalone forced-refund writer's advisory gate before the
+	// wallet, then follow the anomaly update's wallet/order/review order.
+	if err := lockForcedRefundApplication(ctx, tx, *forcedID); err != nil {
+		return PaymentAnomalyCase{}, err
+	}
+	order, err := getPaymentOrderByID(ctx, tx, *orderID, true)
+	if err != nil {
+		return PaymentAnomalyCase{}, err
+	}
 	item, found, err := scanPaymentAnomaly(tx.QueryRow(ctx, paymentAnomalySelect+` WHERE anomaly.id=$1 FOR UPDATE OF anomaly,manual`, caseID))
 	if err != nil || !found {
 		if err == nil {
@@ -56,6 +76,9 @@ func (r *PostgresRepository) CompleteEscalatedForcedRefund(ctx context.Context, 
 	if item.AnomalyType != "FORCED_REFUND" || item.Status != "RESOLVED" || item.ResolutionCode == nil || *item.ResolutionCode != "ESCALATE_FINANCIAL_REPAIR" || item.FinancialActionStatus != "PENDING" || item.ForcedRefundCaseID == nil || item.OwnerID == nil || *item.OwnerID == actorID {
 		return PaymentAnomalyCase{}, ErrConflict
 	}
+	if !equalUUID(item.PaymentOrderID, orderID) || !equalUUID(item.ForcedRefundCaseID, forcedID) {
+		return PaymentAnomalyCase{}, ErrConflict
+	}
 	var manualStatus string
 	if err := tx.QueryRow(ctx, `SELECT status FROM manual_review_cases WHERE id=$1`, caseID).Scan(&manualStatus); err != nil {
 		return PaymentAnomalyCase{}, err
@@ -63,14 +86,14 @@ func (r *PostgresRepository) CompleteEscalatedForcedRefund(ctx context.Context, 
 	if manualStatus != "LONG_TERM_PLAN" {
 		return PaymentAnomalyCase{}, ErrConflict
 	}
-	var linkedOrderID, linkedTransactionID, linkedEvidenceID uuid.UUID
-	if err := tx.QueryRow(ctx, `SELECT forced.payment_order_id,forced.payment_transaction_id,forced.payment_evidence_id FROM forced_refund_cases forced WHERE forced.id=$1 AND forced.manual_review_case_id=$2`, *item.ForcedRefundCaseID, caseID).Scan(&linkedOrderID, &linkedTransactionID, &linkedEvidenceID); err != nil {
+	var linkedOrderID, linkedTransactionID, linkedEvidenceID, linkedWalletID uuid.UUID
+	if err := tx.QueryRow(ctx, `SELECT forced.payment_order_id,forced.payment_transaction_id,forced.payment_evidence_id,forced.wallet_id FROM forced_refund_cases forced WHERE forced.id=$1 AND forced.manual_review_case_id=$2`, *item.ForcedRefundCaseID, caseID).Scan(&linkedOrderID, &linkedTransactionID, &linkedEvidenceID, &linkedWalletID); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return PaymentAnomalyCase{}, ErrConflict
 		}
 		return PaymentAnomalyCase{}, err
 	}
-	if item.PaymentOrderID == nil || item.PaymentTransactionID == nil || item.PaymentEvidenceID == nil || *item.PaymentOrderID != linkedOrderID || *item.PaymentTransactionID != linkedTransactionID || *item.PaymentEvidenceID != linkedEvidenceID {
+	if item.PaymentTransactionID == nil || item.PaymentEvidenceID == nil || order.ID != linkedOrderID || order.WalletID != linkedWalletID || *item.PaymentTransactionID != linkedTransactionID || *item.PaymentEvidenceID != linkedEvidenceID {
 		return PaymentAnomalyCase{}, ErrConflict
 	}
 	before, _ := json.Marshal(item)

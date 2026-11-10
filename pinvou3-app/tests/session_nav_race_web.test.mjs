@@ -23,6 +23,7 @@ import path from 'node:path';
 import test from 'node:test';
 import vm from 'node:vm';
 import { fileURLToPath } from 'node:url';
+import { dict } from './helpers/i18n-all.js';
 
 const webBridgeRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'src', 'platform', 'web');
 const read = relativePath => fs.readFileSync(path.join(webBridgeRoot, relativePath), 'utf8');
@@ -32,7 +33,7 @@ const readSharedHelpers = () => fs.readFileSync(path.join(webBridgeRoot, '..', '
 // rerenderFromMessages 的信封判定经 window.PinvouBridgeMessages（同样先于桥加载）。
 const readSharedMessages = () => fs.readFileSync(path.join(webBridgeRoot, '..', '..', 'shared', 'bridge-messages.js'), 'utf8');
 
-function bootWebBridge({ negotiated = false, modelAdmission = true } = {}) {
+function bootWebBridge({ negotiated = false, modelAdmission = true, language = 'zh' } = {}) {
   const allowed = new Set(JSON.parse(read('access-policy.json')).allowed_commands);
   if (!modelAdmission) allowed.delete('web_access_create_session_and_chat_with_model');
   let capabilitiesReady = true;
@@ -69,6 +70,7 @@ function bootWebBridge({ negotiated = false, modelAdmission = true } = {}) {
     return Promise.resolve(null);
   };
   const windowObject = {
+    PinvouWebClientStrings: dict[language].uiPlatformMisc.webClientErrors,
     PinvouPlatform: {
       kind: 'web',
       isWeb: true,
@@ -575,19 +577,24 @@ test('web selected atomic first turn retries a local timeout with the same reque
   const rt = bootWebBridge({ negotiated: true });
   const requests = [];
   rt.setHandler('web_access_create_session_and_chat_with_model', (args, requestId) => {
-    requests.push([args.modelId, requestId]);
+    requests.push({ args: structuredClone(args), requestId });
     return requests.length === 1
       ? Promise.reject(Object.assign(new Error('controlled timeout'), { code: 'rpc_timeout' }))
       : Promise.resolve({ id: 'atomic-selected-session' });
   });
+  rt.setHandler('web_access_ingest_file', () => Promise.resolve({ handle: 'replay-attachment' }));
+  await rt.flat.addAttachmentByPath('/controlled/replay.txt');
   await rt.flat.switchModel(null, 'chosen-model');
-  assert.equal(await rt.chat.sendMessage('first turn with one request identity'), true);
+  assert.equal(await rt.chat.sendMessage('first turn with one request identity', { pinvouPayloadText: 'original payload' }), true);
   await waitFor(() => rt.view().chatItems.some(item => item.deliveryState === 'failed'), 'retry chip');
   rt.flat.setComposerDraft('typed while the first turn was pending');
   rt.chat.retryFirstTurn(rt.view().chatItems.find(item => item.deliveryState === 'failed').clientMessageId);
   await waitFor(() => rt.view().activeSessionId === 'atomic-selected-session', 'confirmed session published');
   assert.equal(requests.length, 2);
   assert.deepEqual(requests[0], requests[1]);
+  assert.deepEqual(requests[0].args, {
+    message: 'original payload', attachmentHandles: ['replay-attachment'], restrictTools: false, modelId: 'chosen-model',
+  });
   assert.equal(rt.view().currentSessionModelRef.saved_model_id, 'chosen-model');
   assert.equal(rt.view().composerDraft, 'typed while the first turn was pending');
   rt.setHandler('get_session_model_id', () => Promise.resolve('chosen-model'));
@@ -597,6 +604,71 @@ test('web selected atomic first turn retries a local timeout with the same reque
   await rt.flat.loadSessionModel('atomic-selected-session');
   assert.equal(rt.view().currentSessionModelRef, null, 'a platform runtime carrier is not a local model');
 });
+
+test('web definitive first-turn retry takes the current model, lane and navigation ownership', async () => {
+  const rt = bootWebBridge({ negotiated: true });
+  const requests = [];
+  const retryReply = rt.defer('retry-accepted');
+  rt.setHandler('web_access_create_session_and_chat_with_model', (args, requestId) => {
+    requests.push({ args: structuredClone(args), requestId });
+    return requests.length === 1
+      ? Promise.reject(Object.assign(new Error('controlled rejection'), { code: 'invalid_request' }))
+      : retryReply.promise;
+  });
+  rt.setHandler('load_session_chunk', () => Promise.reject(new Error('controlled history unavailable')));
+  await rt.flat.switchModel(null, 'first-model');
+  assert.equal(await rt.chat.sendMessage('retry this message'), true);
+  await waitFor(() => rt.view().chatItems.some(item => item.deliveryState === 'failed'), 'definitive rejection');
+  assert.equal(await rt.sessions.switchToSession('unavailable-history'), false);
+  await rt.flat.switchModel(null, 'retry-model');
+  rt.interaction.setModeLane('code');
+  rt.chat.retryFirstTurn(rt.view().chatItems.find(item => item.deliveryState === 'failed').clientMessageId);
+  assert.equal(requests.length, 2);
+  assert.notEqual(requests[0].requestId, requests[1].requestId);
+  assert.equal(requests[1].args.modelId, 'retry-model');
+  retryReply.resolve({ id: 'retry-selected-session' });
+  await waitFor(() => rt.view().activeSessionId === 'retry-selected-session', 'new retry owns the current draft');
+  assert.equal(rt.view().currentSessionModelRef.saved_model_id, 'retry-model');
+  assert.equal(rt.view().modeLane, 'code');
+});
+
+for (const language of ['zh', 'en', 'ja']) {
+  test(`web Account Platform first-turn refusal preserves draft and attachments in ${language}`, async () => {
+    const rt = bootWebBridge({ negotiated: true, language });
+    let requests = 0;
+    rt.setHandler('web_access_create_session_and_chat_with_model', () => {
+      requests++;
+      return Promise.reject(Object.assign(new Error('controlled rejection'), { code: 'invalid_request' }));
+    });
+    rt.setHandler('web_access_create_session_and_chat', () => { requests++; });
+    rt.setHandler('create_session', () => { requests++; });
+    rt.setHandler('web_access_ingest_file', () => Promise.resolve({ handle: 'preserved-attachment' }));
+    await rt.flat.addAttachmentByPath('/controlled/preserved.txt');
+    rt.flat.setComposerDraft('preserved composer text');
+    const attachment = rt.view().attachments[0];
+    const model = { source: 'ACCOUNT_PLATFORM', model_id: 'controlled-platform-model' };
+    await rt.flat.switchModelRef(null, model);
+    assert.equal(await rt.chat.sendMessage('preserved composer text'), false);
+    const notice = dict[language].uiPlatformMisc.webClientErrors.accountPlatformFirstTurnUnsupported;
+    assert.ok(notice);
+    assert.ok(rt.view().chatItems.some(item => item.text === notice));
+    assert.equal(requests, 0);
+    assert.equal(rt.view().activeSessionId, null);
+    assert.equal(rt.view().composerDraft, 'preserved composer text');
+    assert.deepEqual(rt.view().attachments[0], attachment);
+    assert.equal(rt.view().pendingDraftModelRef.model_id, model.model_id);
+
+    await rt.flat.switchModel(null, 'allowed-local-model');
+    assert.equal(await rt.chat.sendMessage('preserved composer text'), true);
+    await waitFor(() => rt.view().chatItems.some(item => item.deliveryState === 'failed'), 'local model refusal');
+    await rt.flat.switchModelRef(null, model);
+    rt.chat.retryFirstTurn(rt.view().chatItems.find(item => item.deliveryState === 'failed').clientMessageId);
+    assert.equal(requests, 1);
+    assert.deepEqual(rt.view().attachments[0], attachment);
+    assert.equal(rt.view().pendingDraftModelRef.model_id, model.model_id);
+    assert.equal(rt.view().chatItems.filter(item => item.text === notice).length, 2);
+  });
+}
 
 test('web host timeout and local capability refusal preserve the original request after a new choice', async () => {
   const rt = bootWebBridge({ negotiated: true });
