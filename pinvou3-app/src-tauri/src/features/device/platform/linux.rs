@@ -715,6 +715,64 @@ mod tests {
         });
     }
 
+    /// 同 id 内容冲突的原失效形状（2026-11-09 评审 P2 第二轮，review
+    /// 5834535377）：两个登记文件 id 全同（手写拷贝连 id 照抄的存量族）而
+    /// 内容不等价（note 不同）时，按 id 移除其一**不得**连带删掉两者共同
+    /// 引用的权重目录。id 相等此前是独立排除分支、会绕过内容等价核对——
+    /// 谓词回退该行为本测试必须转红。按 id 取记录的解析次序对两条同 id 文
+    /// 件二选一，无论选中哪条，另一条都是内容冲突的留存引用，交叉引用臂
+    /// 必须拒绝（谓词本体由
+    /// other_registry_weights_checked_consults_same_id_content_conflicts 直打）。
+    #[test]
+    fn removal_refuses_weights_when_same_id_sibling_differs() {
+        use crate::features::device::external_models::registry_dir;
+        use crate::features::device::remove_external_model;
+        use crate::features::model_store::platform::linux::{config, db};
+        let _ctx = config::TempHome::new();
+        point_ollama_at_dead_port();
+        db::init_db().expect("init store db");
+        // 家目录下恰好 3 层（深度臂放行），避开商店根、内置导入扫描根、
+        // daemon 根与 blobs/manifests 布局签名——让交叉引用臂成为唯一命中臂。
+        let weights = crate::platform::paths::user_home_dir()
+            .join("ai-weights")
+            .join("qwen3")
+            .join("weights");
+        std::fs::create_dir_all(&weights).expect("create weights dir");
+        std::fs::write(weights.join("weights.bin"), b"weight bytes").expect("write weight");
+        let dir = registry_dir();
+        std::fs::create_dir_all(&dir).expect("registry dir");
+        let weights_json = serde_json::to_string(&weights.to_string_lossy()).expect("json string");
+        std::fs::write(
+            dir.join("a-selected.json"),
+            format!(
+                r#"{{"schema":1,"id":"m-x","name":"qwen3","kind":"other","weights_path":{weights_json}}}"#
+            ),
+        )
+        .expect("write selected record");
+        std::fs::write(
+            dir.join("b-sibling.json"),
+            format!(
+                r#"{{"schema":1,"id":"m-x","name":"qwen3","kind":"other","weights_path":{weights_json},"note":"手工备份"}}"#
+            ),
+        )
+        .expect("write same-id content-conflicting sibling");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        runtime.block_on(async move {
+            let outcome =
+                remove_external_model("m-x".to_string(), true, "qwen3".to_string(), None).await;
+            let error = outcome
+                .expect_err("same-id content-conflicting sibling must veto the weight deletion");
+            assert!(
+                error.contains("与其他外部登记模型引用的权重路径相交"),
+                "rejection must come from the cross-reference arm, got: {error}"
+            );
+            assert!(weights.exists(), "weights must survive the refused removal");
+        });
+    }
+
     /// 移除端对 ollama 记录**跳过权重删除**的端到端接线（第七轮评审 P2）：
     /// 登记端已硬校验拒绝 ollama+weights_path（external_models 直打测试），这里
     /// 钉存量兜底——早期模板/AI 手写的 ollama 记录可能登记了权重路径，而

@@ -1467,9 +1467,9 @@ fn removal_boundary_error(
         // 受支持历史迁移写进本仓注册表的其他记录从不被咨询，其余记录的
         // weights_path 落在删除目标之内（例如以目标为权重父目录登记）时，
         // 整树删除会连带毁掉它们而四臂全放行。按其余记录的登记权重路径做
-        // 归属兜底（自身记录与除 id 外逐字段相等的真等价副本排除，见
-        // other_registry_weights_checked 的排除谓词），宁可误拒不误删；
-        // 解除方式随文案告知。
+        // 归属兜底（逐字段相等的真等价副本排除，含被删记录自身文件——exclude
+        // 即其完整读取副本，见 other_registry_weights_checked 的排除谓词），
+        // 宁可误拒不误删；解除方式随文案告知。
         return Err(format!(
             "该模型的权重目录与其他外部登记模型引用的权重路径相交，删除会破坏仍被引用的外部登记权重。请先移除引用该目录的其他登记记录（本臂随之放行）{STORE_BOUNDARY_ESCAPE_HINT}"
         ));
@@ -1891,27 +1891,23 @@ fn other_registry_weights_checked(
                 ));
             }
         };
-        let id = if record.id.trim().is_empty() {
-            path.file_stem()
-                .and_then(|stem| stem.to_str())
-                .unwrap_or("m-unknown")
-                .to_string()
-        } else {
-            record.id.clone()
-        };
-        // 「能确证等价的副本」只有两种：id 相同（含空 id 回落文件名的解析
-        // 口径），或**除 id 外整条记录逐字段相等**（weights_path 沿用归一口径
-        // 比较，tolerate 手写尾随空白；其余字段精确相等）。此前的「同 kind +
-        // 身份相等 + 引用相等」三元组不构成等价证明：读取端只告警不吞的
-        // 手写/AI 重复身份存量（warn_duplicate_identities 那一族，入口查重
-        // 拦不住落盘）完全可以三元组相同而 note/installed_at/schema/原始
-        // name 各异——内容并不等价的留存记录若被排除咨询，实际删除只清掉
-        // 选中登记，权重被连带删掉，留存记录沦为悬空引用（2026-11-09 评审
-        // P2，review 5824037828）。无法确证等价时保留咨询，由交叉引用臂拒绝
-        // 并指引先移除留存记录（fail-closed：无法确认 ≠ 确认不存在）；真等价
-        // 副本仍被排除，不回到"重复登记互为否决前提"的死锁（2026-11-08 评审
-        // P2-1 的初衷不变）。原始字段相等严格强于身份相等（ollama 标签归一
-        // 前的别名记录因此从"排除"转为"咨询"，宁可误拒不误删）。
+        // 「能确证等价的副本」判定 = **除 id 外整条记录逐字段相等**（weights_path
+        // 沿用归一口径比较，tolerate 手写尾随空白；其余字段精确相等）。id 相等
+        // 不再作为独立排除分支（2026-11-09 评审 P2 第二轮，review 5834535377）：
+        // 手写拷贝文件可以连 id 一起照抄而其余内容各异（读取端只告警的重复
+        // id 存量族），同 id 不同内容的留存记录若被排除咨询，实际删除只清掉
+        // 选中文件，权重被连带删掉，留存记录沦为悬空引用——同 id 冲突同样必须
+        // 经过内容等价核对；id 全同且内容全等的真副本由逐字段相等自然覆盖
+        // （比较本就不含 id）。此前的「同 kind + 身份相等 + 引用相等」三元组
+        // 同理不构成等价证明（2026-11-09 评审 P2 第一轮，review 5824037828）：
+        // warn_duplicate_identities 在册的手写/AI 重复身份存量可三元组相同而
+        // note/installed_at/schema/原始 name 各异。无法确证等价时保留咨询，由
+        // 交叉引用臂拒绝并指引先移除留存记录（fail-closed：无法确认 ≠ 确认
+        // 不存在）；真等价副本仍被排除，不回到"重复登记互为否决前提"的死锁
+        // （2026-11-08 评审 P2-1 的初衷不变）。原始字段相等严格强于身份相等
+        // （ollama 标签归一前的别名记录因此从"排除"转为"咨询"，宁可误拒不
+        // 误删）。被删记录自身的文件由同一逐字段相等排除（exclude 即其完整
+        // 读取副本）。
         let is_confirmed_copy = record.schema == exclude.schema
             && record.name == exclude.name
             && record.kind == exclude.kind
@@ -1921,7 +1917,7 @@ fn other_registry_weights_checked(
             && record.note == exclude.note
             && record.weights_path.as_deref().map(str::trim)
                 == exclude.weights_path.as_deref().map(str::trim);
-        if id == exclude.id || is_confirmed_copy {
+        if is_confirmed_copy {
             continue;
         }
         let Some(weights) = record.weights_path.as_deref() else {
@@ -3622,6 +3618,8 @@ mod tests {
     fn other_registry_weights_checked_excludes_self_and_unregistered() {
         let dir = TempDir::new("registry-cross");
         // 自身记录（被移除者）、未登记权重与空白权重的记录跳过；其余纳入。
+        // exclude 必须是被删记录的完整读取副本（生产口径）：id 相等不再独立
+        // 排除，自身文件靠逐字段相等排除。
         std::fs::write(
             dir.path().join("m-self.json"),
             r#"{"id": "m-self", "name": "self", "kind": "other", "weights_path": "/home/u/ai-weights"}"#,
@@ -3637,9 +3635,19 @@ mod tests {
             r#"{"id": "m-bare", "name": "bare", "kind": "other"}"#,
         )
         .expect("write bare record");
-        let weights =
-            other_registry_weights_checked(dir.path(), &exclude_record("m-self", "other", "self"))
-                .expect("readable registry must resolve");
+        let exclude = RegistryRecord {
+            schema: 1,
+            id: "m-self".to_string(),
+            name: "self".to_string(),
+            kind: "other".to_string(),
+            base_url: None,
+            model: None,
+            weights_path: Some("/home/u/ai-weights".to_string()),
+            installed_at: None,
+            note: None,
+        };
+        let weights = other_registry_weights_checked(dir.path(), &exclude)
+            .expect("readable registry must resolve");
         assert_eq!(
             weights,
             vec![PathBuf::from("/home/u/ai-weights/qwen3")],
@@ -3648,7 +3656,7 @@ mod tests {
         // 目录不存在（还没有任何外部登记）：空集合放行，不是失败。
         let missing = TempDir::new("registry-cross-none").path().join("absent");
         assert!(
-            other_registry_weights_checked(&missing, &exclude_record("m-self", "other", "self"))
+            other_registry_weights_checked(&missing, &exclude)
                 .expect("missing registry dir is an empty registry, not a failure")
                 .is_empty()
         );
@@ -3783,6 +3791,49 @@ mod tests {
             weights,
             vec![PathBuf::from("/home/u/ai-weights")],
             "identity-conflicted siblings with differing content must stay consulted, got: {weights:?}"
+        );
+    }
+
+    #[test]
+    fn other_registry_weights_checked_consults_same_id_content_conflicts() {
+        // id 全同但内容冲突的存量重复（手写拷贝连 id 照抄的族）同样必须经过
+        // 内容等价核对（2026-11-09 评审 P2 第二轮，review 5834535377）：id
+        // 相等不再是独立排除分支——同 id 不同 note 的留存记录若被排除咨询，
+        // 实际删除只清掉选中文件，权重被连带删掉、留存记录沦为悬空引用。
+        // id 全同且内容全等的真副本由逐字段相等自然覆盖、仍被排除。
+        let dir = TempDir::new("registry-cross-same-id");
+        std::fs::write(
+            dir.path().join("m-x.json"),
+            r#"{"id": "m-x", "name": "qwen3", "kind": "other", "weights_path": "/home/u/ai-weights"}"#,
+        )
+        .expect("write selected record");
+        std::fs::write(
+            dir.path().join("m-x-copy.json"),
+            r#"{"id": "m-x", "name": "qwen3", "kind": "other", "weights_path": "/home/u/ai-weights", "note": "备份副本"}"#,
+        )
+        .expect("write same-id content-conflicting sibling");
+        std::fs::write(
+            dir.path().join("m-x-twin.json"),
+            r#"{"id": "m-x", "name": "qwen3", "kind": "other", "weights_path": "/home/u/ai-weights"}"#,
+        )
+        .expect("write same-id identical copy");
+        let exclude = RegistryRecord {
+            schema: 1,
+            id: "m-x".to_string(),
+            name: "qwen3".to_string(),
+            kind: "other".to_string(),
+            base_url: None,
+            model: None,
+            weights_path: Some("/home/u/ai-weights".to_string()),
+            installed_at: None,
+            note: None,
+        };
+        let weights = other_registry_weights_checked(dir.path(), &exclude)
+            .expect("readable registry must resolve");
+        assert_eq!(
+            weights,
+            vec![PathBuf::from("/home/u/ai-weights")],
+            "same-id content-conflicting sibling must stay consulted while the identical copy stays excluded, got: {weights:?}"
         );
     }
 
