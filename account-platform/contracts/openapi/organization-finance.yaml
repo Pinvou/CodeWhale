@@ -99,8 +99,14 @@
               }
             }
           },
+          "400": {
+            "description": "INVALID_REQUEST for policy mode, reason, idempotency key, model IDs or expected version that violates the existing input constraints; no policy, audit or receipt is written."
+          },
+          "403": {
+            "description": "TOKEN_FORBIDDEN when current organization management authority is denied; authorization precedes input validation."
+          },
           "default": {
-            "description": "Existing bearer/organization authority and handler error mapping; no new response behavior is introduced."
+            "description": "Existing conflict, unavailable-model and infrastructure error mapping is retained."
           }
         },
         "requestBody": {

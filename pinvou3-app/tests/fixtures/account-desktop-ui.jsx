@@ -6,7 +6,7 @@ import { accountPlatformCopy } from '../../src/shared/i18n.js';
 
 const query = new URLSearchParams(location.search);
 const id = n => `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`;
-const state = window.accountFixture = { language: query.get('language') || 'zh', open: true, authenticated: !query.has('guest'), organization: query.has('organization'), calls: [], contextVersion: 1, order: null, portalFail: false, paid: false, pending: query.has('pending') };
+const state = window.accountFixture = { language: query.get('language') || 'zh', open: true, authenticated: !query.has('guest'), organization: query.has('organization'), calls: [], contextVersion: 1, order: null, organizationOrder: null, denyOrderRead: false, portalFail: false, paid: false, pending: query.has('pending') };
 const personal = ['personal.context.switch', 'personal.profile.update', 'personal.invitations.read', 'personal.invitations.accept', 'personal.account.close.read', 'personal.billing.read', 'personal.recharge.create', 'personal.recharge.manage'];
 const orgPermissions = ['org.entitlements.purchase', 'org.wallet.read', 'org.quota.read.self', 'org.quota.allocate'];
 const profile = () => ({ user_id: id(1), username: 'sample-user', mobile: '+8613800000000', status: 'ACTIVE', personal_permissions: query.has('no-permission') ? [] : personal, platform_permissions: [], active_context: { context_type: state.organization ? 'ORGANIZATION' : 'PERSONAL', organization_id: state.organization ? id(2) : null, context_version: state.contextVersion, membership_version: 1, organization_authorization_version: 1, permissions: state.organization && !query.has('no-permission') ? orgPermissions : [] } });
@@ -33,11 +33,16 @@ const client = {
     if (resource.endsWith('/balance')) return { owner_type: 'ORGANIZATION', owner_id: id(2), wallet_id: id(5), posted_microcredits: 100000, available_microcredits: 100000, reserved_microcredits: 0 };
     if (resource.endsWith('/recharge/products')) return { items: [product] };
     if (resource.endsWith('/payment-capabilities')) return { channels: ['ALIPAY'], test_only: true, formal_collection_admitted: false };
-    if (resource.endsWith('/recharge/orders') && options.method === 'POST') { state.calls.push(['org-create', options.body]); return { ...order(), product_id: id(3), beneficiary_organization_id: id(2) }; }
-    if (resource.endsWith(`/recharge/orders/${id(4)}`)) return { ...order(), product_id: id(3), beneficiary_organization_id: id(2) };
+    if (resource.endsWith('/recharge/orders') && options.method === 'POST') { state.calls.push(['org-create', options.body]); state.organizationOrder = { ...order(), product_id: id(3), beneficiary_organization_id: id(2) }; return { ...state.organizationOrder }; }
+    if (resource === `/v1/organizations/${id(2)}/recharge/orders/${id(4)}`) {
+      if (state.denyOrderRead) throw Object.assign(new Error('Synthetic order permission denied'), { status: 403 });
+      if (!state.organizationOrder) throw Object.assign(new Error('Synthetic order not found'), { status: 404 });
+      return { ...state.organizationOrder, status: state.paid ? 'PAID' : state.organizationOrder.status, fulfillment_status: state.paid ? 'CREDITED' : state.organizationOrder.fulfillment_status };
+    }
     throw new Error(`Unexpected fixture request: ${area} ${resource}`);
   },
 };
 const root = createRoot(document.getElementById('root'));
+state.advanceSession = () => { client.financeSessionEpoch++; state.contextVersion++; state.render(); };
 state.render = () => root.render(<><button id="background" onClick={() => { state.open = true; state.render(); }}>Open account</button><AccountPlatformPopover open={state.open} client={client} copy={accountPlatformCopy[state.language]} language={state.language} onLanguageChange={value => { state.language = value; state.render(); }} theme={query.get('theme') || 'light'} presentation={query.get('presentation')} onClose={() => { state.open = false; state.render(); }} /></>);
 state.render();

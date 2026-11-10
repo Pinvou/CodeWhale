@@ -4,7 +4,7 @@ import path from 'node:path';
 import react from '@vitejs/plugin-react';
 import { createServer } from './helpers/vite-fixture.mjs';
 import * as puppeteer from './helpers/puppeteer-fixture.mjs';
-import { accountDesktopCopy, accountPlatformCopy, financeCopy } from '../src/shared/i18n.js';
+import { accountDesktopCopy, accountPlatformCopy, financeCopy, organizationCopy } from '../src/shared/i18n.js';
 
 const chrome = [process.env.CHROME, 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe', 'C:/Program Files/Google/Chrome/Application/chrome.exe', '/usr/bin/google-chrome', '/usr/bin/chromium', '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'].find(value => value && fs.existsSync(value));
 assert.ok(chrome, 'Chromium is required for desktop account UI validation');
@@ -43,6 +43,34 @@ try {
     if (process.env.PINVOU_ACCOUNT_CASE && !name.includes(process.env.PINVOU_ACCOUNT_CASE)) return;
     try { await action(); assert.deepEqual(errors, []); cases++; console.log(`PASS ${name}`); }
     catch (error) { console.error(name, await page.evaluate(() => ({ text: document.body.innerText, calls: window.accountFixture?.calls }))); throw error; }
+  };
+  const createOrganizationOrder = async language => {
+    await fresh(`organization&language=${language}`);
+    await click(accountDesktopCopy[language].recharge);
+    await page.waitForSelector('[data-organization-purchase] option[value="00000000-0000-4000-8000-000000000003"]');
+    const selects = await page.$$('[data-organization-purchase] fieldset select');
+    await selects[0].select('00000000-0000-4000-8000-000000000003'); await selects[1].select('ALIPAY');
+    await page.click('[data-organization-purchase] button[type=submit]');
+    await page.waitForSelector('.ap-payment-dialog img');
+    return page.evaluate(() => window.accountFixture.organizationOrder.order_id);
+  };
+  const reopenOrganizationRecharge = async language => {
+    await page.keyboard.press('Escape'); await page.waitForFunction(() => !document.querySelector('.ap-payment-dialog'));
+    await page.click('.ap-account-close'); await page.waitForFunction(() => !document.querySelector('.ap-account-dialog'));
+    await page.evaluate(() => window.accountFixture.advanceSession());
+    await page.click('#background'); await page.waitForSelector('.ap-desktop-context');
+    await click(accountDesktopCopy[language].recharge);
+    await page.waitForSelector('[data-organization-order-query] input');
+    assert.equal(await page.$('.ap-payment-dialog'), null, 'reopening must not automatically present payment instructions');
+  };
+  const queryOrganizationOrder = async (id, denied = false) => {
+    await page.type('[data-organization-order-query] input', id);
+    await page.waitForFunction(() => !document.querySelector('[data-organization-order-query] button').disabled);
+    const before = await page.evaluate(() => window.accountFixture.calls.length);
+    await page.click('[data-organization-order-query] button');
+    await page.waitForFunction(({ id, before }) => window.accountFixture.calls.slice(before).includes(`/v1/organizations/00000000-0000-4000-8000-000000000002/recharge/orders/${id}`), {}, { id, before });
+    if (denied) await page.waitForFunction(text => [...document.querySelectorAll('[role=alert]')].some(node => node.textContent.includes(text)), {}, organizationCopy.en.permissions);
+    else await page.waitForFunction(() => !document.querySelector('[data-organization-order-query] button').disabled);
   };
   await run('compact profile excludes finance, invitations, closure, and full mobile number', async () => {
     await fresh();
@@ -92,6 +120,29 @@ try {
     await page.click('[data-organization-purchase] button[type=submit]'); await page.waitForSelector('.ap-payment-dialog img');
     await page.keyboard.press('Escape'); await page.waitForFunction(() => !document.querySelector('.ap-payment-dialog'));
     await click(financeCopy.zh.continuePayment); await page.waitForSelector('.ap-payment-dialog');
+    assert.equal(await page.evaluate(() => window.accountFixture.calls.filter(call => Array.isArray(call) && call[0] === 'org-create').length), 1);
+  });
+  for (const language of ['zh', 'en', 'ja']) await run(`${language}: reopened organization recharge queries the original order after retiring the local view`, async () => {
+    const id = await createOrganizationOrder(language);
+    await reopenOrganizationRecharge(language);
+    await queryOrganizationOrder(id); await page.waitForSelector('.ap-payment-dialog img');
+    assert.equal(await page.evaluate(() => window.accountFixture.calls.filter(call => Array.isArray(call) && call[0] === 'org-create').length), 1, 'querying an existing order must not create another purchase');
+    assert.equal(await page.evaluate(() => window.accountFixture.organizationOrder.order_id), id);
+    assert.equal(await page.evaluate(() => window.accountFixture.calls.some(call => typeof call === 'string' && /packages|grants|quota-members|units|usage|invitations/.test(call))), false);
+  });
+  await run('a paid organization order cannot restore payment instructions after reopening', async () => {
+    const id = await createOrganizationOrder('en'); await reopenOrganizationRecharge('en');
+    await page.evaluate(() => { window.accountFixture.paid = true; });
+    await queryOrganizationOrder(id);
+    assert.equal(await page.$('.ap-payment-dialog img'), null);
+    assert.equal(await page.evaluate(() => window.accountFixture.calls.filter(call => Array.isArray(call) && call[0] === 'org-create').length), 1);
+  });
+  await run('denied organization order lookup remains read-only and displays the permission failure', async () => {
+    const id = await createOrganizationOrder('en'); await reopenOrganizationRecharge('en');
+    await page.evaluate(() => { window.accountFixture.denyOrderRead = true; });
+    await queryOrganizationOrder(id, true);
+    await page.waitForFunction(text => [...document.querySelectorAll('[role=alert]')].some(node => node.textContent.includes(text)), {}, organizationCopy.en.permissions);
+    assert.equal(await page.$('.ap-payment-dialog img'), null);
     assert.equal(await page.evaluate(() => window.accountFixture.calls.filter(call => Array.isArray(call) && call[0] === 'org-create').length), 1);
   });
   await run('missing permission explains recharge availability', async () => {
