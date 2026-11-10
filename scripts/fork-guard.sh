@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# CodeWhale v0.9.12 clean re-fork guard: 96 maintenance commits, ten maintained themes (r3 closed at pinvou-v0.9.12-r3; inside a transition window the head may lead the tag).
+# CodeWhale v0.9.12 clean re-fork guard: 97 maintenance commits, ten maintained themes (r3 closed at pinvou-v0.9.12-r3; inside a transition window the head may lead the tag).
 set -uo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -7,9 +7,11 @@ CODEWHALE="$REPO/CodeWhale"
 APP="$REPO/pinvou3-app/src-tauri"
 EXPECTED_UPSTREAM="dcd4c200f72f0c1ffd60d8e7f6850313db879fc5"
 # Public maintenance after CodeWhale#123/#124/#129/#131/#133/#134/#135 merged,
-# plus the rusqlite 0.41, rmcp 3.9 and rio-vt 0.5.29 dependency bumps (deps/rusqlite-0.41-20261109).
-EXPECTED_HEAD="e6bdda45cddbecd2a66a55415e8745ad13c86572"
-EXPECTED_COMMITS=96
+# plus the rusqlite 0.41, rmcp 3.9, rio-vt 0.5.29 dependency bumps and the
+# rust-version 1.89 declaration sync (deps/rusqlite-0.41-20261109, candidate
+# branch of CodeWhale#152 — not yet the public maintenance head).
+EXPECTED_HEAD="a4c83ad12080e18f2b89f40ae8ed2efe4cc85988"
+EXPECTED_COMMITS=97
 # Published maintenance base of this integration.
 MAINTENANCE_BASE="11cba403dc6bd6ca5c4dca55042785b03449ac8e"
 # The immutable r1 closure must remain an ancestor of the registered head.
