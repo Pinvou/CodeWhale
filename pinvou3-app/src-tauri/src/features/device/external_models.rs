@@ -4096,9 +4096,14 @@ mod tests {
                 error.contains("无法解析") && error.contains("无法确认它是否别名引用待删权重"),
                 "error must carry the unresolvable-path guidance, got: {error}"
             );
+            // 回显断言按 `truncate_path_echo` 的 128 字符契约比对：runner 的
+            // temp 前缀（_work/_temp/<uuid>/）叠加记录路径可能超长，叶名被
+            // 截掉时按同一截断口径比对（本地短路径时即全路径；CI rust-test
+            // 首跑红正是 133 字符路径被截掉 "qwen3" 尾巴所致，行为本身
+            // expect_err 已过）。
             assert!(
-                error.contains("qwen3"),
-                "error must echo the unresolvable path, got: {error}"
+                error.contains(&truncate_path_echo(&weights_display)),
+                "error must echo the unresolvable path (truncation contract), got: {error}"
             );
             // 恢复权限后重试入口真实存在（此例叶目录本就不存在，NotFound 沿
             // 原始路径回退，集合照常返回）。
