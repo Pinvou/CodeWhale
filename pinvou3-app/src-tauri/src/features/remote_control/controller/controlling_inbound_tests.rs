@@ -22,6 +22,9 @@ use super::super::test_support::{
 };
 use super::*;
 
+#[path = "controlling_retirement_tests.rs"]
+mod retirement_tests;
+
 fn fixture() -> PairingFixture {
     let mut fixture = pairing_fixture("relay-inbound-tests");
     let mut capabilities: Vec<String> = super::super::controlling_handshake::claim_capabilities()

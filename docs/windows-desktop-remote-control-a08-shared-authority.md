@@ -27,6 +27,24 @@ Legacy WebUI v2 的共享连接及本地 Chat/ACP/Stop 不引入此远控权限�
 Windows 原生回归贯穿真实 RelayClient、manager 与 worker，并核验冻结预算和保留的
 存活 epoch；不等价于真实双机部署、外部 provider 或发布验收。
 
+### A 端业务密钥的退出退休
+
+主动断开在等待最终帧回执前，按 manager → business 顺序提交本地退休、清理托管业务
+密钥及本连接的会话/回执状态。回执等待仍以两秒为界，仅持有旧 socket；等待完成或
+取消只关闭该 socket，不重新读取并清理可能已重连的当前业务通道。等待结束返回当前
+状态。发送失败不改变本地断开的权威性。
+
+keeper 捕获通过当前 operation/原 transport 登记校验的业务密钥安装实例；正常退出、
+入站结束、失去 owner 或任务取消，均按该实例退休。实例标识不含密钥，不按 session ID
+或租约字符串清理；即使完整租约相同，迟到退出也不清替换后的密钥或恢复挂起状态。
+生产任务在 spawn 前持有退出清理范围，尚未首次 poll 就被取消也能收口。可恢复断线
+仍留在 keeper 循环中保留材料，只有确定退出才退休，沿用现有密码原语的 Drop 语义。
+
+`encrypted_lane::retirement_tests` 检查实例隔离、未 poll/已 poll 取消及恢复保留；
+`controlling_service::inbound_tests::retirement_tests` 使用真实握手、manager、transport
+和密钥状态，控制下一条事件的边界，检查入站结束、owner 更替和旧回执晚完成。
+这些受控边界测试不等价于 WebSocket 关闭、真实 Tauri IPC 或双机部署验收。
+
 ## A07 本轮修复传入 A08 的保全边界
 
 以普通双父 merge 保留 A07 与 A08 原提交，不恢复已批准退役的旧持久 history 模块、

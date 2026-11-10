@@ -5,7 +5,7 @@
 //! disconnection.
 
 use super::desktop_remote_state::DesktopRemoteState as State;
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager as _};
 
 use crate::features::behavior_telemetry::{RemoteControlEvent, RemoteStage, track_remote_control};
 use crate::features::remote_control::RemoteControlManager;
@@ -107,18 +107,19 @@ pub async fn desktop_remote_controller_disconnect(
     let started = std::time::Instant::now();
     let result = async {
         ensure_supported(&manager)?;
-        // E2E-06：先尽力把显式断开告诉 Relay/B（本地断开始终权威，发送失败不阻塞）。
-        if let Some(receipt) = manager.send_disconnect_with_receipt("user_disconnect") {
-            // Queue admission is not delivery. Let the socket flush the final frame
-            // before local cleanup cancels its transport; offline peers stay bounded.
-            let _ = tokio::time::timeout(std::time::Duration::from_secs(2), receipt).await;
-        }
-        sessions.clear();
-        actions.clear_all();
-        if let Ok((lease, _)) = manager.live_runtime_context() {
-            artifacts.clear_connection(&lease.connection_id);
-        }
-        let status = manager.disconnect();
+        let business = app.state::<crate::features::remote_control::controller::encrypted_lane::ControllingLaneState>();
+        // Retire this connection and its keys atomically before yielding. The
+        // receipt scope retains only its old socket, never a later connection.
+        let disconnect = manager.disconnect_business(&business, |lease| {
+            sessions.clear();
+            actions.clear_all();
+            if let Some(lease) = lease {
+                artifacts.clear_connection(&lease.connection_id);
+            }
+        });
+        disconnect.flush().await;
+        // A new connection may have started while the old receipt was pending.
+        let status = manager.status();
         emit_status(&app, &status);
         Ok(status)
     }

@@ -625,9 +625,12 @@ async fn serve_controlling_lane_with_evidence_context(
     };
     // Every keeper, including isolated tests, uses its original registration.
     let operation = evidence.operation.clone().for_lane(registration.clone());
-    if manager.with_lane_owner(&operation, || ()).is_err() {
+    // Acquire the key-slot identity only while this exact registration owns the
+    // manager. Every terminal return/cancellation retires that slot; a delayed
+    // old keeper cannot capture or clear a successor installation.
+    let Ok(_retirement) = manager.with_lane_owner(&operation, || business.retire_on_exit()) else {
         return;
-    }
+    };
     let mut owned_liveness = |frame: Value| {
         if manager.with_lane_owner(&operation, || ()).is_err() {
             return false;
@@ -1304,8 +1307,14 @@ pub(crate) async fn connect_controlling_device(
         }
     };
 
+    // Construct before spawning, not on the task's first poll: cancellation of
+    // an unpolled keeper must still retire this exact installed key slot.
+    let retirement = manager
+        .with_lane_owner(&operation, || business.retire_on_exit())
+        .ok();
     let keeper = app.clone();
     tauri::async_runtime::spawn(async move {
+        let _retirement = retirement;
         let manager = keeper.state::<ControllingDeviceManager>();
         let sessions = keeper.state::<ControllingSessionManager>();
         let business = keeper.state::<ControllingLaneState>();

@@ -9,6 +9,8 @@ use serde::Serialize;
 use uuid::Uuid;
 use zeroize::{Zeroize, Zeroizing};
 
+mod disconnect;
+
 use super::liveness::validate_liveness_epoch;
 use super::protocol::{LeaseContext, RuntimeValidationContext};
 use super::relay_transport::{
@@ -1259,6 +1261,27 @@ fn terminal_status_with_retired_identity(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn local_business_disconnect_rejects_late_handshake_install() {
+        let manager = ControllingDeviceManager::default();
+        let business = super::super::encrypted_lane::ControllingLaneState::default();
+        let operation = manager.connect("2345678").unwrap();
+        manager.complete_reserved(operation.clone()).unwrap();
+        let disconnect = manager.disconnect_business(&business, |_| {});
+        let installed = std::cell::Cell::new(false);
+        assert!(
+            manager
+                .complete_connected_with_install(operation, lease(), || {
+                    installed.set(true);
+                    Ok(())
+                })
+                .is_err()
+        );
+        assert!(!installed.get());
+        assert!(!business.is_installed());
+        drop(disconnect);
+    }
 
     #[test]
     fn status_projection_requires_current_phase_claim_and_every_lease_field() {
