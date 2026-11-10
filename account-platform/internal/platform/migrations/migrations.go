@@ -306,6 +306,9 @@ func DownOneWithHooks(ctx context.Context, connection *pgx.Conn, migrations []Mi
 			if err == nil {
 				_, err = tx.Exec(ctx, `DELETE FROM schema_migrations WHERE version = $1`, version)
 			}
+			if err == nil && hooks.LedgerRole != nil {
+				err = setMigrationRole(ctx, tx, role)
+			}
 		}
 		if err != nil {
 			_ = tx.Rollback(ctx)

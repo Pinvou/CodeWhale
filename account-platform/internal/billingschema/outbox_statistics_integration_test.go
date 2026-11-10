@@ -23,6 +23,7 @@ import (
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/migrations"
 	"github.com/Pinvou/pinvou3/account-platform/internal/tokenschema"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
@@ -237,7 +238,7 @@ func TestRetainedOutboxStatisticsPublicPostgres(t *testing.T) {
 				actor = "token_gateway"
 			}
 			databaseURL := f.serviceURL(t, setup, domain+"_migrator")
-			run := func(binary, directory, direction string, accepted bool) {
+			run := func(url, binary, directory, direction string, accepted bool) {
 				t.Helper()
 				environment := []string{}
 				for _, item := range os.Environ() {
@@ -247,7 +248,7 @@ func TestRetainedOutboxStatisticsPublicPostgres(t *testing.T) {
 					}
 				}
 				command := exec.CommandContext(ctx, binary, "--dir", directory, "--direction", direction)
-				command.Env = append(environment, "DATABASE_URL="+databaseURL, "MIGRATION_ROLE="+actor, "PINVOU_DEPLOYMENT_ENVIRONMENT=test")
+				command.Env = append(environment, "DATABASE_URL="+url, "MIGRATION_ROLE="+actor, "PINVOU_DEPLOYMENT_ENVIRONMENT=test")
 				output, e := command.CombinedOutput()
 				if (e == nil) != accepted {
 					t.Fatalf("actual %s migration %s accepted=%t: %v %s", domain, direction, accepted, e, output)
@@ -258,7 +259,7 @@ func TestRetainedOutboxStatisticsPublicPostgres(t *testing.T) {
 			if e != nil {
 				t.Fatal(e)
 			}
-			run(baselineCLI, oldDirectory, "up", true)
+			run(databaseURL, baselineCLI, oldDirectory, "up", true)
 			var absent bool
 			if e = operator.QueryRow(ctx, `SELECT to_regclass('public.outbox_events_dead_statistics_idx') IS NULL`).Scan(&absent); e != nil || !absent {
 				t.Fatal("baseline already contains the new index")
@@ -277,7 +278,7 @@ func TestRetainedOutboxStatisticsPublicPostgres(t *testing.T) {
 			facts := statisticsFacts(t, ctx, operator)
 			policy := statisticsAccessFacts(t, ctx, operator)
 			oldPlan := statisticsPlan(t, ctx, operator, oldQuery)
-			run(candidateCLI, newDirectory, "up", true)
+			run(databaseURL, candidateCLI, newDirectory, "up", true)
 			if statisticsFacts(t, ctx, operator) != facts {
 				t.Fatal("upgrade rewrote retained delivery facts")
 			}
@@ -343,16 +344,19 @@ func TestRetainedOutboxStatisticsPublicPostgres(t *testing.T) {
 			if _, e = operator.Exec(ctx, `DROP INDEX public.outbox_events_dead_statistics_idx; CREATE INDEX outbox_events_dead_statistics_idx ON public.outbox_events USING hash(event_type) WHERE dead_lettered_at IS NOT NULL`); e != nil {
 				t.Fatal(e)
 			}
-			run(candidateCLI, newDirectory, "down", false)
+			run(databaseURL, candidateCLI, newDirectory, "down", false)
 			var method string
 			var recorded bool
 			if e = operator.QueryRow(ctx, `SELECT a.amname,EXISTS(SELECT FROM public.schema_migrations WHERE name='outbox_dead_statistics_index') FROM pg_class c JOIN pg_am a ON a.oid=c.relam WHERE c.oid='public.outbox_events_dead_statistics_idx'::regclass`).Scan(&method, &recorded); e != nil || method != "hash" || !recorded {
 				t.Fatal("refused rollback changed the foreign index or consumed migration history")
 			}
+			if statisticsFacts(t, ctx, operator) != facts || statisticsAccessFacts(t, ctx, operator) != policy {
+				t.Fatal("refused rollback changed retained facts or authority")
+			}
 			if _, e = operator.Exec(ctx, `DROP INDEX public.outbox_events_dead_statistics_idx; CREATE INDEX outbox_events_dead_statistics_idx ON public.outbox_events(event_type) WHERE dead_lettered_at IS NOT NULL`); e != nil {
 				t.Fatal(e)
 			}
-			run(candidateCLI, newDirectory, "down", true)
+			run(databaseURL, candidateCLI, newDirectory, "down", true)
 			if e = operator.QueryRow(ctx, `SELECT to_regclass('public.outbox_events_dead_statistics_idx') IS NULL AND NOT EXISTS(SELECT FROM public.schema_migrations WHERE name='outbox_dead_statistics_index')`).Scan(&absent); e != nil || !absent {
 				t.Fatal("public rollback did not remove only the new index identity")
 			}
@@ -362,8 +366,47 @@ func TestRetainedOutboxStatisticsPublicPostgres(t *testing.T) {
 			if statisticsAccessFacts(t, ctx, operator) != policy {
 				t.Fatal("rollback changed ownership or grants")
 			}
-			run(candidateCLI, newDirectory, "up", true)
+			run(databaseURL, candidateCLI, newDirectory, "up", true)
 			check()
+			if domain != "account" {
+				verifyStatisticsRollbackRole(t, ctx, domain, databaseURL, actor, newDirectory)
+			}
+			freshSetup := f.database(t, ctx, domain, owner)
+			freshConfig := f.config.Copy()
+			freshConfig.Database = freshSetup.Config().Database
+			freshOperator, freshErr := pgx.ConnectConfig(ctx, freshConfig)
+			if freshErr != nil {
+				t.Fatal(freshErr)
+			}
+			defer freshOperator.Close(context.Background())
+			if domain == "token" {
+				bootstrap, readErr := os.ReadFile("../../deploy/production/token-database-bootstrap.sql")
+				if readErr != nil {
+					t.Fatal(readErr)
+				}
+				if _, freshErr = freshOperator.Exec(ctx, string(bootstrap)); freshErr != nil {
+					t.Fatal(freshErr)
+				}
+			}
+			freshURL := f.serviceURL(t, freshSetup, domain+"_migrator")
+			run(freshURL, candidateCLI, newDirectory, "up", true)
+			run(freshURL, candidateCLI, newDirectory, "up", true)
+			if statisticsAccessFacts(t, ctx, freshOperator) != policy {
+				t.Fatal("fresh and upgraded persistent authority differ")
+			}
+			var installed bool
+			if freshErr = freshOperator.QueryRow(ctx, `SELECT to_regclass('public.outbox_events_dead_statistics_idx') IS NOT NULL`).Scan(&installed); freshErr != nil || !installed {
+				t.Fatal("candidate fresh install omitted statistics index")
+			}
+			freshStore, freshErr := events.NewPostgresStore(ctx, f.serviceURL(t, freshSetup, actor))
+			if freshErr != nil {
+				t.Fatal(freshErr)
+			}
+			defer freshStore.Close()
+			empty, freshErr := freshStore.Stats(ctx)
+			if freshErr != nil || empty.Pending != 0 || empty.DeadLettered != 0 || empty.OldestPendingAge != 0 || empty.RetainedStorageBytes <= 0 {
+				t.Fatalf("fresh runtime statistics: %+v %v", empty, freshErr)
+			}
 			if domain == "billing" {
 				var retained int
 				if e = operator.QueryRow(ctx, `SELECT count(*) FROM payment_provider_health_observations WHERE provider_attempt_id='statistics-attempt' AND outcome='SUCCESS' AND evidence_digest=repeat('b',64)`).Scan(&retained); e != nil || retained != 1 {
@@ -495,3 +538,57 @@ const statisticsSeed = `INSERT INTO public.outbox_events(event_id,event_type,agg
  (gen_random_uuid(),'history.ignored.v1',gen_random_uuid(),1,'{"fixture":"retained"}','history-statistics',now()-interval '9 minutes',NULL,0),
  (gen_random_uuid(),'history.dead.v1',gen_random_uuid(),1,'{"fixture":"retained"}','history-statistics',now()-interval '6 minutes',now(),11),
  (gen_random_uuid(),'history.ignored.v1',gen_random_uuid(),1,'{"fixture":"retained"}','history-statistics',now()-interval '8 minutes',now(),11);`
+
+// Reuse the genuine migration connection after public wrapper return. A CLI
+// process exit cannot demonstrate that this public library restores its role.
+func verifyStatisticsRollbackRole(t *testing.T, ctx context.Context, domain, url, actor, directory string) {
+	t.Helper()
+	conn, err := pgx.Connect(ctx, url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close(context.Background())
+	if _, err = conn.Exec(ctx, "SET ROLE "+pgx.Identifier{actor}.Sanitize()); err != nil {
+		t.Fatal(err)
+	}
+	verifyStatisticsLedgerDenied(t, ctx, conn)
+	loaded, err := migrations.Load(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if domain == "billing" {
+		err = DownOne(ctx, conn, loaded)
+	} else {
+		err = tokenschema.DownOne(ctx, conn, loaded)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	var returned string
+	if err = conn.QueryRow(ctx, `SELECT current_user`).Scan(&returned); err != nil || returned != actor {
+		t.Fatalf("public rollback returned role %q; want original %q (%v)", returned, actor, err)
+	}
+	verifyStatisticsLedgerDenied(t, ctx, conn)
+	migrations.Unlock(ctx, conn)
+	if domain == "billing" {
+		err = Up(ctx, conn, loaded)
+	} else {
+		err = tokenschema.Up(ctx, conn, loaded)
+	}
+	if err != nil {
+		t.Fatal("next public migration after rollback", err)
+	}
+	if err = conn.QueryRow(ctx, `SELECT current_user`).Scan(&returned); err != nil || returned != actor {
+		t.Fatal("next call changed the caller identity")
+	}
+	migrations.Unlock(ctx, conn)
+}
+
+func verifyStatisticsLedgerDenied(t *testing.T, ctx context.Context, conn *pgx.Conn) {
+	t.Helper()
+	_, err := conn.Exec(ctx, `DELETE FROM public.schema_migrations WHERE false`)
+	failure, ok := err.(*pgconn.PgError)
+	if !ok || failure.Code != "42501" {
+		t.Fatalf("runtime ledger DELETE must remain forbidden: %v", err)
+	}
+}
