@@ -69,6 +69,20 @@ jobs:
         job['steps'].append({'name': 'Run unrelated-command', 'conclusion': 'success'})
         self.assertFalse(PLAN.complete(policy, job, {}, 'refs/heads/queue', {}))
 
+    def test_unrecognized_step_name_cannot_silently_lose_queue_required_work(self):
+        # Legal YAML beyond the supported literal-name dialect. If a future
+        # parser silently drops this queue-only step, the other successful
+        # steps would wrongly suffice. Conservatively reject this PR witness.
+        source = self.workflow() + '''      - name: >-
+          Queue-only additional contract
+        if: ${{ github.event_name == 'merge_group' }}
+        run: additional-contract
+'''
+        policy = PLAN.catalog(source, jobs={'suite'})['suite']
+        job = self.job()
+        job['steps'].append({'name': 'Queue-only additional contract', 'conclusion': 'skipped'})
+        self.assertFalse(PLAN.complete(policy, job, {}, 'refs/heads/queue', {}))
+
     def test_independent_workflows_require_all_platforms_and_real_test_steps(self):
         for filename, name, gate in (
             ('rustc-wrapper-smoke.yml', 'smoke', 'wrapper-gate'),

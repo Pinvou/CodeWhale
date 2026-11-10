@@ -258,9 +258,13 @@ class ReuseTests(unittest.TestCase):
             git('checkout', '-qb', 'pr', stale)
             old.write_text(old.read_text(encoding='utf-8').replace('line 50', 'edited 50'), encoding='utf-8')
             git('add', '.'); git('commit', '-qm', 'PR edit'); head = git('rev-parse', 'HEAD')
-            tree = git('merge-tree', '--write-tree', base, head)
-            tested = git('commit-tree', tree, '-p', base, '-p', head, '-m', 'tested merge')
-            git('checkout', '--detach', tested)
+            # The retained Ubuntu runner has Git 2.34. Use its ordinary merge
+            # entry point, retaining real rename detection and ordered parents.
+            git('checkout', '--detach', base)
+            git('merge', '--no-commit', '--no-ff', head)
+            git('commit', '-qm', 'tested merge')
+            tested = git('rev-parse', 'HEAD')
+            self.assertEqual(git('show', '-s', '--format=%P', tested).split(), [base, head])
             def select(start, end):
                 return subprocess.check_output([shutil.which('node'), str(scripts/'select-frontend-smokes.mjs')],
                                                input=git('diff', '--name-only', start, end), encoding='utf-8')
