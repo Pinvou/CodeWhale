@@ -153,7 +153,7 @@ impl ToolSpec for TasksTool {
         if self.read_only {
             "Inspect durable tasks and their PR attempts. Actions: \"list\", \"read\", \"pr_attempt_list\", \"pr_attempt_read\"."
         } else {
-            "Manage durable background tasks through TaskManager. Durable tasks are restart-aware executable work, distinct from sub-agents. Actions: \"create\" (enqueue; approval), \"list\", \"read\", \"cancel\" (approval), \"gate_run\" (run an approved verification gate command and return structured evidence; approval), \"pr_attempt_record\" (approval), \"pr_attempt_list\", \"pr_attempt_read\", \"pr_attempt_preflight\" (approval). Use task_shell_start for long-running shell work."
+            "Manage durable background tasks through TaskManager. Durable tasks are restart-aware executable work, distinct from sub-agents. Actions: \"create\" (enqueue; approval), \"list\", \"read\", \"cancel\" (approval), \"gate_run\" (run an approved verification gate command and return structured evidence; approval), \"pr_attempt_record\" (approval), \"pr_attempt_list\", \"pr_attempt_read\", \"pr_attempt_preflight\" (approval). When shell execution is enabled for the task (allow_shell on, non-plan mode), use task_shell_start for long-running shell work."
         }
     }
 
@@ -183,7 +183,7 @@ impl ToolSpec for TasksTool {
             );
             properties.insert(
                 "model".to_string(),
-                json!({ "type": "string", "description": "(action=create)" }),
+                json!({ "type": "string", "description": "Model id for the task's session, used as given. Omit to use the configured default model. Required when model_provider or model_provider_id is set. (action=create)" }),
             );
             properties.insert(
                 "workspace".to_string(),
@@ -191,19 +191,19 @@ impl ToolSpec for TasksTool {
             );
             properties.insert(
                 "mode".to_string(),
-                json!({ "type": "string", "enum": ["agent", "plan", "operate"], "description": "(action=create)" }),
+                json!({ "type": "string", "enum": ["agent", "plan", "operate"], "description": "Operating mode for the task's session. 'plan' runs read-only: shell is disabled even if allow_shell is true, and plan's read-only blocks are not lifted by auto_approve (which otherwise skips approval prompts; armed ask-on-guardrail guardrails still prompt). trust_mode's effects still apply in plan. 'agent' (default) and 'operate' run with the task's allow_shell/trust_mode/auto_approve values. (action=create)" }),
             );
             properties.insert(
                 "allow_shell".to_string(),
-                json!({ "type": "boolean", "description": "(action=create)" }),
+                json!({ "type": "boolean", "description": "Whether the task's session may run shell commands. Passing true or false is honored subject to the mode — plan keeps shell disabled even when this is true (see mode); omitting falls back to the configured durable-task allow-shell setting, which is false unless shell execution is enabled in config. (action=create)" }),
             );
             properties.insert(
                 "trust_mode".to_string(),
-                json!({ "type": "boolean", "description": "(action=create)" }),
+                json!({ "type": "boolean", "description": "Run the task with trust mode: file paths are accepted without workspace-boundary validation, and when auto_approve is on, a tool call the sandbox denies is retried with full access instead of being denied. Defaults to false. (action=create)" }),
             );
             properties.insert(
                 "auto_approve".to_string(),
-                json!({ "type": "boolean", "description": "(action=create)" }),
+                json!({ "type": "boolean", "description": "Run the task with tool calls auto-approved (full-access posture, no approval prompts — armed ask-on-guardrail guardrails still force a human approval for the calls they guard). Defaults to false. (action=create)" }),
             );
             properties.insert(
                 "gate".to_string(),
@@ -215,7 +215,7 @@ impl ToolSpec for TasksTool {
             );
             properties.insert(
                 "command".to_string(),
-                json!({ "type": "string", "description": "Command to run. (action=gate_run)" }),
+                json!({ "type": "string", "description": "Command to run. A command the safety classifier rates dangerous is refused with BLOCKED (nothing runs) unless the session itself runs with auto-approve. (action=gate_run)" }),
             );
             properties.insert(
                 "cwd".to_string(),
@@ -223,19 +223,19 @@ impl ToolSpec for TasksTool {
             );
             properties.insert(
                 "timeout_ms".to_string(),
-                json!({ "type": "integer", "minimum": 1000, "maximum": 600000, "description": "(action=gate_run)" }),
+                json!({ "type": "integer", "minimum": 1000, "maximum": 600000, "description": "Kill deadline for the gate command in milliseconds. Defaults to 120000; values outside the declared range are clamped into it when the gate runs — negative or non-integer values are rejected as a type error before that. On expiry the process group is killed, the result reports timed_out with no exit code, and any partial output is kept. (action=gate_run)" }),
             );
             properties.insert(
                 "attempt_group_id".to_string(),
-                json!({ "type": "string", "description": "(action=pr_attempt_record)" }),
+                json!({ "type": "string", "description": "Label grouping related attempts for correlation across pr_attempt_list and pr_attempt_read; shown in the task timeline. Any string; a fresh random group id is generated when omitted. (action=pr_attempt_record)" }),
             );
             properties.insert(
                 "attempt_index".to_string(),
-                json!({ "type": "integer", "minimum": 1, "description": "(action=pr_attempt_record)" }),
+                json!({ "type": "integer", "minimum": 1, "description": "This attempt's position within its group (1-based), shown as 'index/count' in the task timeline. Defaults to 1; values below 1 are clamped to 1, and negative or non-integer values are rejected as a type error. (action=pr_attempt_record)" }),
             );
             properties.insert(
                 "attempt_count".to_string(),
-                json!({ "type": "integer", "minimum": 1, "description": "(action=pr_attempt_record)" }),
+                json!({ "type": "integer", "minimum": 1, "description": "Total number of attempts intended for the group, shown as 'index/count' in the task timeline. Defaults to 1; values below 1 are clamped to 1, and negative or non-integer values are rejected as a type error. (action=pr_attempt_record)" }),
             );
             properties.insert(
                 "summary".to_string(),
@@ -243,20 +243,20 @@ impl ToolSpec for TasksTool {
             );
             properties.insert(
                 "verification".to_string(),
-                json!({ "type": "array", "items": { "type": "string" }, "description": "(action=pr_attempt_record)" }),
+                json!({ "type": "array", "items": { "type": "string" }, "description": "Verification evidence lines recorded with the attempt, returned by pr_attempt_list and pr_attempt_read. Omit for an empty list; non-string entries are dropped. (action=pr_attempt_record)" }),
             );
         }
         properties.insert(
             "attempt_id".to_string(),
-            json!({ "type": "string", "description": "(action=pr_attempt_read/preflight)" }),
+            json!({ "type": "string", "description": "Attempt id to fetch, as returned by pr_attempt_list. Matched exactly; an unknown id fails with 'Attempt not found'. (action=pr_attempt_read/preflight)" }),
         );
         properties.insert(
             "task_id".to_string(),
-            json!({ "type": "string", "description": "Full task id or unambiguous prefix (action=read/cancel); task id, defaults to active task (action=pr_attempt_*)." }),
+            json!({ "type": "string", "description": "Full task id or unambiguous prefix (action=cancel); omitted, it defaults to the active task (action=read/pr_attempt_*)." }),
         );
         properties.insert(
             "limit".to_string(),
-            json!({ "type": "integer", "minimum": 1, "maximum": 100, "default": 20, "description": "(action=list)" }),
+            json!({ "type": "integer", "minimum": 1, "maximum": 100, "default": 20, "description": "Maximum number of tasks returned, newest first. Values outside the declared range are clamped into it, and negative or non-integer values are rejected as a type error. (action=list)" }),
         );
         json!({
             "type": "object",
@@ -1409,6 +1409,134 @@ mod tests {
             canonical["properties"]["mode"]["enum"],
             json!(["agent", "plan", "operate"])
         );
+    }
+
+    #[test]
+    fn task_range_clamps_describe_the_type_error_boundary() {
+        // Negative integers never reach the clamps (the u64 parser rejects
+        // them as a type mismatch), so a blanket "clamped, not rejected"
+        // would be false; each description must state the boundary instead.
+        let schema = TasksTool::new("tasks").input_schema();
+        let timeout = schema["properties"]["timeout_ms"]["description"]
+            .as_str()
+            .expect("timeout_ms description");
+        assert!(timeout.contains("clamped into it"), "{timeout}");
+        assert!(timeout.contains("rejected as a type error"), "{timeout}");
+        assert!(!timeout.contains("clamped, not rejected"), "{timeout}");
+        for field in ["attempt_index", "attempt_count"] {
+            let description = schema["properties"][field]["description"]
+                .as_str()
+                .expect("attempt field description");
+            assert!(
+                description.contains("values below 1 are clamped to 1"),
+                "{description}"
+            );
+            assert!(
+                description.contains("rejected as a type error"),
+                "{description}"
+            );
+            assert!(
+                !description.contains("clamped, not rejected"),
+                "{description}"
+            );
+        }
+        let limit = schema["properties"]["limit"]["description"]
+            .as_str()
+            .expect("limit description");
+        assert!(limit.contains("clamped into it"), "{limit}");
+        assert!(limit.contains("rejected as a type error"), "{limit}");
+        assert!(!limit.contains("clamped, not rejected"), "{limit}");
+    }
+
+    #[test]
+    fn task_authority_copy_pins_the_reviewed_semantics() {
+        // Each sentence below was corrected by a review round against the
+        // execution path; pin the exact claims so a revert cannot slip back
+        // into the schema silently.
+        let schema = TasksTool::new("tasks").input_schema();
+        let mode = schema["properties"]["mode"]["description"]
+            .as_str()
+            .expect("mode description");
+        assert!(
+            mode.contains("plan's read-only blocks are not lifted by auto_approve"),
+            "{mode}"
+        );
+        assert!(
+            mode.contains("armed ask-on-guardrail guardrails still prompt"),
+            "the approval-skip parenthetical must carry the armed-guardrail exception: {mode}"
+        );
+        assert!(
+            mode.contains("trust_mode's effects still apply in plan"),
+            "the plan read-only lead-in must disclose trust_mode's in-plan effects: {mode}"
+        );
+        let allow_shell = schema["properties"]["allow_shell"]["description"]
+            .as_str()
+            .expect("allow_shell description");
+        assert!(
+            allow_shell
+                .contains("omitting falls back to the configured durable-task allow-shell setting"),
+            "{allow_shell}"
+        );
+        assert!(
+            allow_shell.contains("which is false unless shell execution is enabled in config"),
+            "{allow_shell}"
+        );
+        assert!(
+            allow_shell.contains("honored subject to the mode"),
+            "{allow_shell}"
+        );
+        assert!(
+            allow_shell.contains("plan keeps shell disabled even when this is true"),
+            "{allow_shell}"
+        );
+        let trust_mode = schema["properties"]["trust_mode"]["description"]
+            .as_str()
+            .expect("trust_mode description");
+        assert!(
+            trust_mode.contains("retried with full access instead of being denied"),
+            "{trust_mode}"
+        );
+        let auto_approve = schema["properties"]["auto_approve"]["description"]
+            .as_str()
+            .expect("auto_approve description");
+        assert!(auto_approve.contains("Defaults to false"), "{auto_approve}");
+        assert!(
+            auto_approve.contains(
+                "no approval prompts — armed ask-on-guardrail guardrails still force a human approval",
+            ),
+            "the auto-approve absolute must carry the armed-guardrail exception: {auto_approve}"
+        );
+        assert!(
+            !auto_approve.contains("no approval prompts)."),
+            "the unscoped no-prompts absolute must not return: {auto_approve}"
+        );
+        let tool = TasksTool::new("tasks");
+        let description = tool.description();
+        assert!(
+            description.contains(
+                "When shell execution is enabled for the task (allow_shell on, non-plan mode), use task_shell_start",
+            ),
+            "the shell-tool pointer must be scoped to surfaces that register it: {description}"
+        );
+        assert!(
+            !description.contains("Use task_shell_start for long-running shell work."),
+            "the unconditional shell-tool pointer must not return: {description}"
+        );
+        let task_id = schema["properties"]["task_id"]["description"]
+            .as_str()
+            .expect("task_id description");
+        assert!(
+            task_id.contains("defaults to the active task (action=read/pr_attempt_*)"),
+            "read and pr_attempt_* share the active-task default: {task_id}"
+        );
+        assert!(
+            !task_id.contains("(action=read/cancel)"),
+            "read must not be listed as requiring a task id: {task_id}"
+        );
+        let command = schema["properties"]["command"]["description"]
+            .as_str()
+            .expect("command description");
+        assert!(command.contains("refused with BLOCKED"), "{command}");
     }
 
     #[test]

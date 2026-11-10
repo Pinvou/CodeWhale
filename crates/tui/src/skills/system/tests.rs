@@ -13,6 +13,37 @@ fn marker_file(tmp: &TempDir) -> std::path::PathBuf {
     tmp.path().join(".system-installed-version")
 }
 
+/// The v4-best-practices body shipped before the tool-name fix. Kept as a
+/// fixture (instead of a source constant) so the pinned digest in
+/// `system.rs` is checked against the real historic bytes on every run.
+const V4_LEGACY_BODY_FIXTURE: &str = include_str!("fixtures/v4-best-practices-legacy.md");
+
+/// The generation-12 bodies the four short-description deletions replaced.
+/// Like the v4 fixture above, each is checked against its
+/// `SUPERSEDED_SHIPPED_BODY_DIGESTS` entry on every run, so a transcription
+/// error in the digest table fails the suite instead of silently
+/// fossilizing real generation-12 installs.
+const GEN12_BODY_FIXTURES: &[(&str, &str)] = &[
+    ("best-of-n", include_str!("fixtures/gen12-best-of-n.md")),
+    ("delegate", include_str!("fixtures/gen12-delegate.md")),
+    (
+        "fleet-manager",
+        include_str!("fixtures/gen12-fleet-manager.md"),
+    ),
+    (
+        "skill-creator",
+        include_str!("fixtures/gen12-skill-creator.md"),
+    ),
+];
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
 // ── fresh install ─────────────────────────────────────────────────────────
 
 #[test]
@@ -62,6 +93,10 @@ fn bundled_integration_skills_use_current_codewhale_commands_and_paths() {
         ("help", HELP_BODY),
         ("delegate", DELEGATE_BODY),
         ("best-of-n", BEST_OF_N_BODY),
+        // Not in BUNDLED_SKILLS (legacy, retirement-only), but the shipped
+        // asset still reaches installs until a launch retires their
+        // byte-exact copy, so the same visible-tool contract applies.
+        ("v4-best-practices", V4_BEST_PRACTICES_BODY),
     ] {
         assert!(
             !body.contains("read_file") && !body.contains("exec_shell"),
@@ -81,9 +116,9 @@ fn bundled_integration_skills_use_current_codewhale_commands_and_paths() {
 // `update_plan`, `rlm`) plus the canonical retired-name lists
 // (`RETIRED_TOOL_NAMES`, the `agents/*` family); `list_dir` is deliberately
 // absent because it is a live, searchable tool (tools/file.rs ListDirTool),
-// not a phantom. Scope note: `v4-best-practices` and `feishu` are not in
-// BUNDLED_SKILLS (legacy/optional, never auto-installed), so this sweep does
-// not cover them.
+// not a phantom. Scope note: `v4-best-practices` is not in BUNDLED_SKILLS
+// (legacy/optional, never auto-installed) but is swept explicitly below;
+// `feishu` is never installed and not swept.
 const PHANTOM_NAMES: &[&str] = &[
     "`File`",
     "`Bash`",
@@ -132,6 +167,15 @@ fn forkguard_bundled_skills_cite_no_hidden_or_retired_tool_names() {
                 skill.body
             );
         }
+    }
+    // Not in BUNDLED_SKILLS (legacy, retirement-only asset), but still
+    // shipped and installable, so it rides under the same contract.
+    for phantom in PHANTOM_NAMES {
+        assert!(
+            !V4_BEST_PRACTICES_BODY.contains(phantom),
+            "v4-best-practices cites {phantom}, which no model-visible \
+             catalog or `tool_search` result can ever return"
+        );
     }
 }
 
@@ -205,8 +249,9 @@ fn contributor_onboarding_ships_at_generation_8_and_keeps_its_refusals() {
     // The pin tracks the current catalog generation: 9 added handoff,
     // 10 added mcp-discovery (#5238), 11 corrected bundled skill bodies
     // from the model-facing text audit (#112) and refreshes superseded
-    // shipped copies; 12 updates host-aware discovery.
-    assert_eq!(BUNDLED_SKILL_VERSION, "12");
+    // shipped copies; 12 updates host-aware discovery; 13 refreshes bundled
+    // bodies stripped of dead short-description frontmatter.
+    assert_eq!(BUNDLED_SKILL_VERSION, "13");
 
     let body = skill.body;
     assert!(body.contains("invocation: explicit-only"));
@@ -543,7 +588,92 @@ fn version_bump_respects_deleted_existing_skill_while_adding_new_skill() {
 #[test]
 fn upgrade_from_v4_installs_pack_and_retires_unchanged_v4_best_practices() {
     let tmp = TempDir::new().unwrap();
-    // Simulate a v4 install: marker + legacy skill bodies.
+    // Simulate a v4 install: marker + legacy skill bodies. The installed copy
+    // carries the previously shipped body (still teaching read_file/edit_file),
+    // not the current asset. The digest self-check fails the suite if either
+    // the fixture or the pinned digest drifts.
+    assert_eq!(
+        sha256_hex(V4_LEGACY_BODY_FIXTURE.as_bytes()),
+        V4_BEST_PRACTICES_LEGACY_BODY_SHA256,
+        "legacy fixture must keep matching the pinned digest"
+    );
+    assert_ne!(
+        V4_LEGACY_BODY_FIXTURE, V4_BEST_PRACTICES_BODY,
+        "legacy pin must track the previously shipped body"
+    );
+    fs::create_dir_all(skill_dir(&tmp, "v4-best-practices")).unwrap();
+    fs::write(
+        skill_file(&tmp, "v4-best-practices"),
+        V4_LEGACY_BODY_FIXTURE,
+    )
+    .unwrap();
+    fs::write(marker_file(&tmp), "4").unwrap();
+
+    install_system_skills(tmp.path()).unwrap();
+
+    assert!(
+        !skill_dir(&tmp, "v4-best-practices").exists(),
+        "unchanged legacy v4-best-practices must be retired"
+    );
+    assert!(skill_file(&tmp, "debug").exists());
+    assert!(skill_file(&tmp, "docx").exists());
+    assert!(skill_file(&tmp, "release").exists());
+    // Feishu is optional — not auto-installed by the default pack.
+    assert!(
+        !skill_dir(&tmp, "feishu").exists(),
+        "feishu must not be universally installed"
+    );
+    let ver = fs::read_to_string(marker_file(&tmp)).unwrap();
+    assert_eq!(ver.trim(), BUNDLED_SKILL_VERSION);
+}
+
+#[test]
+fn gen12_superseded_digests_match_the_recorded_previous_bodies() {
+    // The digest table alone cannot tell a transcription error from a
+    // correct entry (the shape test only rejects digest == current), so
+    // each generation-12 fixture is hashed against its registered entry
+    // here. A wrong hex digit now fails the suite instead of silently
+    // leaving real generation-12 installs unrefreshed.
+    for (name, fixture) in GEN12_BODY_FIXTURES {
+        let digest = SUPERSEDED_SHIPPED_BODY_DIGESTS
+            .iter()
+            .find(|(skill, _)| skill == name)
+            .map(|(_, digest)| *digest)
+            .unwrap_or_else(|| panic!("no superseded digest registered for {name}"));
+        assert_eq!(
+            sha256_hex(fixture.as_bytes()),
+            digest,
+            "{name}: embedded generation-12 body must match the superseded digest"
+        );
+        assert!(
+            is_superseded_shipped_body(name, fixture),
+            "{name}: the embedded generation-12 body must be treated as superseded"
+        );
+    }
+}
+
+#[test]
+fn upgrade_preserves_legacy_v4_body_plus_user_addendum() {
+    let tmp = TempDir::new().unwrap();
+    fs::create_dir_all(skill_dir(&tmp, "v4-best-practices")).unwrap();
+    fs::write(
+        skill_file(&tmp, "v4-best-practices"),
+        format!("{V4_LEGACY_BODY_FIXTURE}\nAppended by the user\n"),
+    )
+    .unwrap();
+    fs::write(marker_file(&tmp), "4").unwrap();
+
+    install_system_skills(tmp.path()).unwrap();
+
+    assert!(
+        skill_dir(&tmp, "v4-best-practices").exists(),
+        "anything short of a byte-exact shipped body is a user edit and stays"
+    );
+}
+
+#[test]
+fn upgrade_retires_byte_exact_current_v4_body_installs() {
+    let tmp = TempDir::new().unwrap();
     fs::create_dir_all(skill_dir(&tmp, "v4-best-practices")).unwrap();
     fs::write(
         skill_file(&tmp, "v4-best-practices"),
@@ -556,18 +686,9 @@ fn upgrade_from_v4_installs_pack_and_retires_unchanged_v4_best_practices() {
 
     assert!(
         !skill_dir(&tmp, "v4-best-practices").exists(),
-        "unchanged v4-best-practices must be retired"
+        "the shipped v4 asset is retired alongside the legacy body; only \
+         user edits are preserved"
     );
-    assert!(skill_file(&tmp, "debug").exists());
-    assert!(skill_file(&tmp, "docx").exists());
-    assert!(skill_file(&tmp, "release").exists());
-    // Feishu is optional — not auto-installed by the default pack.
-    assert!(
-        !skill_dir(&tmp, "feishu").exists(),
-        "feishu must not be universally installed"
-    );
-    let ver = fs::read_to_string(marker_file(&tmp)).unwrap();
-    assert_eq!(ver.trim(), BUNDLED_SKILL_VERSION);
 }
 
 #[test]
@@ -642,7 +763,7 @@ fn version_bump_refreshes_superseded_shipped_body() {
         current,
         "superseded shipped body must be refreshed on bump"
     );
-    assert_eq!(fs::read_to_string(marker_file(&tmp)).unwrap().trim(), "12");
+    assert_eq!(fs::read_to_string(marker_file(&tmp)).unwrap().trim(), "13");
 }
 
 #[test]
@@ -749,7 +870,7 @@ fn forkguard_skill_upgrade_refreshes_shipped_mcp_discovery_and_preserves_user_ed
         let expected_version = if customized && !peer_present {
             "11"
         } else {
-            "12"
+            "13"
         };
         if peer_present {
             assert_eq!(
