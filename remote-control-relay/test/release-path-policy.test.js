@@ -71,8 +71,10 @@ const criticalPaths = [
   "remote-control-relay/docs/schemas/remote-control-release-evidence.v1.schema.json",
   "remote-control-relay/scripts/controller-release-gate.mjs",
   "remote-control-relay/scripts/validate-controller-release-evidence.mjs",
+  "remote-control-relay/scripts/release-evidence-artifacts.mjs",
   "remote-control-relay/scripts/verify-github-workflow-run.cjs",
   "remote-control-relay/test/controller-release-evidence.test.js",
+  "remote-control-relay/test/release-evidence-artifacts.test.js",
   "remote-control-relay/test/installer-spdx.test.js",
   "scripts/create-installer-spdx.mjs",
   "scripts/run-windows-remote-control-e2e.ps1",
@@ -126,7 +128,7 @@ test("PR and release workflows execute or route every policy-sensitive change", 
     assert.ok(pr.includes(marker), `PR path filter misses ${marker}`);
   }
   for (const executableTest of [
-    "release-path-policy.test.js", "installer-spdx.test.js", "github-workflow-run-identity.test.js",
+    "release-path-policy.test.js", "release-evidence-artifacts.test.js", "installer-spdx.test.js", "github-workflow-run-identity.test.js",
     "windows-e2e-orchestrator-contract.test.js", "windows-e2e-orchestrator-helpers.test.js",
     "windows-e2e-path-guard.test.js", "remote_control_real_ui_smoke_contract.test.mjs",
     "remote_control_feature_gate_contract.test.mjs", "nsis_resource_staging_contract.test.js",
