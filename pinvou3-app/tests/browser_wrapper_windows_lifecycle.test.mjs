@@ -1347,7 +1347,9 @@ test('Windows proxy: same wrapper recovers A once after stop while B keeps share
           }),
           // The wrapper shares the (often loaded) runner with this test and
           // the fake host; a starved wrapper pauses its heartbeat timer for
-          // seconds before catching up in a burst. 30s absorbs that stall
+          // seconds before catching up in a burst. Both barrier users ride
+          // this budget: the 250ms input heartbeat (count 4) and the 5s
+          // generic operation heartbeat (count 1). 30s absorbs that stall
           // while staying a bounded negative control: a wrapper that stops
           // refreshing entirely still fails here, it just fails later.
           30_000,
@@ -1424,10 +1426,12 @@ test('Windows proxy: same wrapper recovers A once after stop while B keeps share
       clicks: readAudit(fixture.auditPath)
         .filter((entry) => entry.kind === 'tool' && entry.name === 'click').length,
     };
+    // 31s per-request ceiling sits just above the 30s heartbeat barrier:
+    // the barrier, not the driver's 15s default, bounds a held request.
     const longInputRequest = wrapper.request('tools/call', {
       name: 'click',
       arguments: { uid: 'slow-button' },
-    });
+    }, 31_000);
     const longInput = await releaseAfterRefreshes({
       request: longInputRequest,
       before: longInputBefore,
@@ -1481,10 +1485,12 @@ test('Windows proxy: same wrapper recovers A once after stop while B keeps share
       end: host.state.operationCalls.get('end_agent_operation') || 0,
       log: host.state.operationLog.length,
     };
+    // 31s per-request ceiling sits just above the 30s heartbeat barrier:
+    // the barrier, not the driver's 15s default, bounds a held request.
     const slowSnapshotRequest = wrapper.request('tools/call', {
       name: 'take_snapshot',
       arguments: {},
-    });
+    }, 31_000);
     const slowSnapshot = await releaseAfterRefreshes({
       request: slowSnapshotRequest,
       before: slowSnapshotBefore,
