@@ -464,6 +464,28 @@ test('B terminal events or bridge disposal invalidate an in-flight failure read'
   }
 });
 
+test('B disposal before a failed open result cannot create a recovery owner', async () => {
+  const fixture = JSON.parse(fs.readFileSync(new URL('./fixtures/controller_registration_exit.json', import.meta.url), 'utf8'));
+  for (const method of ['controlledStart', 'controlledRefresh']) {
+    const open = Promise.withResolvers();
+    let reads = 0;
+    const { feature, state, logic } = installFeature(command => {
+      if (command === 'desktop_remote_controlled_start' || command === 'desktop_remote_controlled_refresh') return open.promise;
+      if (command === 'desktop_remote_controlled_status') { reads += 1; return Promise.resolve(fixture.failed); }
+      return undefined;
+    });
+    if (method === 'controlledRefresh') state.desktopRemoteControl = logic.applyControlledStatus(state.desktopRemoteControl, fixture.old);
+    const rejected = assert.rejects(feature[method](), { code: 'pairing_registration_failed' });
+    feature.stop();
+    const device = state.controlledDevice;
+    open.reject('pairing_registration_failed');
+    await rejected;
+    assert.equal(reads, 0, method);
+    assert.equal(state.controlledDevice, device, 'disposed recovery cannot replace the visible binding');
+    assert.equal(state.controlledNavigationPending, false, 'existing current-intent settlement remains intact');
+  }
+});
+
 test('independent A status cannot discard the current B failure read', async () => {
   const fixture = JSON.parse(fs.readFileSync(new URL('./fixtures/controller_registration_exit.json', import.meta.url), 'utf8'));
   const read = Promise.withResolvers();
