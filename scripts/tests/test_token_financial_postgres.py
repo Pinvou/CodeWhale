@@ -1368,7 +1368,13 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
             "PINVOU_ACCOUNT_FINANCIAL_TEST_DATABASE_URL": "postgres://postgres@127.0.0.1:5433/postgres?sslmode=disable",
             "PINVOU_TEST_SCHEMA_DATABASE_URL": "must-not-reach-tests",
             "GOFLAGS": "-trimpath",
-        }, clear=True), patch.object(RUNNER.subprocess, "run", side_effect=run), contextlib.redirect_stdout(io.StringIO()):
+        }, clear=True), patch.object(RUNNER.subprocess, "run", side_effect=run), patch.object(
+            # This fixture models one logical phase's SQL/actor lifecycle. The
+            # actual three-command selection is exercised separately, without
+            # this replacement, in test_token_financial_batches.py.
+            RUNNER, "run_token_batches", side_effect=lambda command, **options: RUNNER.subprocess.run(
+                command, cwd=options["cwd"], env=options["env"], capture_output=True,
+                text=True, encoding="utf-8", check=False)), contextlib.redirect_stdout(io.StringIO()):
             try:
                 RUNNER.main(group=group)
             finally:

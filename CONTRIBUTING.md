@@ -77,6 +77,16 @@ cargo test --manifest-path pinvou3-app/src-tauri/Cargo.toml --lib -- --test-thre
 
 Run additional frontend, Relay, Rust, CodeWhale, or platform checks when relevant. The workflows in [`.github/workflows/`](.github/workflows/) are the source of truth for automated gates. Disclose checks that could not be run locally.
 
+The retained Token financial runner executes one ordinary batch and two complete
+financial-root batches, sequentially on the same exclusive disposable service.
+Each Go invocation retains `-race`, `-count=1` and a 20-minute timeout; the Token
+phase can therefore take up to three such bounds, within the existing Account
+job limit. The ordinary batch keeps new unlisted tests selected. Every required
+financial root and its required child cases must pass, and the service must be
+restored between batches; a failed batch stops execution without retry.
+Compilation, startup and ownership checks add time outside Go's test-binary
+timeout; the three bounds are not a 60-minute wall-clock guarantee.
+
 When a change regenerates a `package-lock.json`, regenerate against the official
 registry (`https://registry.npmjs.org/`): a mirror configured in a local npmrc is
 copied verbatim into the lock's `resolved` URLs, and

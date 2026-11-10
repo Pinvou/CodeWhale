@@ -552,6 +552,50 @@ def billing_roots(group):
     return set(sorted(RETAINED_REQUIRED)[int(group[-1])::2])
 
 
+def run_token_batches(command, *, cwd, env, assert_restored):
+    """Keep the full Token selection, with complete financial roots bounded separately.
+
+    The ordinary batch has no allowlist: future ordinary tests, examples and fuzz
+    seeds remain selected. Only the already separately exercised provisioning
+    roots and the two explicit financial batches are excluded from that batch.
+    Every invocation retains the original race, count and 20-minute timeout.
+    """
+    if not REQUIRED or REQUIRED & PROVISIONING_REQUIRED or "-run" in command:
+        raise RuntimeError("invalid retained Token batch selection")
+    skip = command.index("-skip")
+    expected_skip = "^(" + "|".join(sorted(PROVISIONING_REQUIRED)) + ")$"
+    if command[skip + 1] != expected_skip or command[-1] != "./internal/token":
+        raise RuntimeError("unexpected retained Token command")
+    ordinary = list(command)
+    ordinary[skip + 1] = "^(" + "|".join(sorted(PROVISIONING_REQUIRED | REQUIRED)) + ")$"
+    batches = [("ordinary", ordinary, set())]
+    for index in range(2):
+        roots = set(sorted(REQUIRED)[index::2])
+        if not roots:
+            raise RuntimeError("empty retained Token financial batch")
+        selected = [*command[:-1], "-run", "^(" + "|".join(sorted(roots)) + ")$", command[-1]]
+        batches.append((f"financial-{index}", selected, roots))
+    stdout, stderr = [], []
+    for label, selected, roots in batches:
+        print(f"Financial Token batch: {label}", flush=True)
+        result = subprocess.run(selected, cwd=cwd, env=env, capture_output=True,
+                                text=True, encoding="utf-8", check=False)
+        # Emit evidence before validation/restoration, including the failed batch.
+        sys.stdout.write(result.stdout)
+        sys.stderr.write(result.stderr)
+        if result.returncode:
+            raise RuntimeError("Go financial Token batch failed: " + label)
+        verify_results([json.loads(line) for line in result.stdout.splitlines() if line.startswith("{")],
+                       roots, package=TOKEN_PACKAGE, require_children=bool(roots),
+                       exact_roots=bool(roots), children_required=TOKEN_CHILD_REQUIRED & roots)
+        assert_restored()
+        stdout.append(result.stdout)
+        stderr.append(result.stderr)
+    # The caller also verifies the original complete required-root/child contract.
+    # Output was emitted above and must not be printed a second time by the caller.
+    return subprocess.CompletedProcess(command, 0, "".join(stdout), "".join(stderr))
+
+
 def main(*, group="all"):
     if group not in ("all", *GROUPS):
         raise ValueError("unknown financial execution group")
@@ -623,11 +667,15 @@ def main(*, group="all"):
             command += ["-skip", "^(" + "|".join(sorted(PROVISIONING_REQUIRED)) + ")$"]
         command.append(target)
         print(f"Financial phase: {label}", flush=True)
-        result = subprocess.run(command, cwd=ROOT / "account-platform", env=env,
-                                capture_output=True, text=True, encoding="utf-8", check=False)
-        # Preserve real phase output even when Go failed, skipped or was truncated.
-        sys.stdout.write(result.stdout)
-        sys.stderr.write(result.stderr)
+        if label == "retained-token":
+            result = run_token_batches(command, cwd=ROOT / "account-platform", env=env,
+                                       assert_restored=lambda: assert_instance(ACTORS | {user}))
+        else:
+            result = subprocess.run(command, cwd=ROOT / "account-platform", env=env,
+                                    capture_output=True, text=True, encoding="utf-8", check=False)
+            # Preserve real output even when Go failed, skipped or was truncated.
+            sys.stdout.write(result.stdout)
+            sys.stderr.write(result.stderr)
         if result.returncode:
             raise RuntimeError("Go financial phase failed: " + label)
         count = verify_results([json.loads(line) for line in result.stdout.splitlines() if line.startswith("{")],

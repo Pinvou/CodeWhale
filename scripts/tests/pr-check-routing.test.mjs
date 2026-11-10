@@ -501,7 +501,7 @@ function assertFiniteAuditPGSetup(job) {
   for (const [name, environment, commands] of [
     ["Token financial contracts on isolated PostgreSQL", [
       "ACCOUNT_FINANCIAL_SERVICES: ${{ steps.account-pg.outputs.financial_services }}",
-    ], ["set -euo pipefail", "python3 -m unittest discover -s scripts/tests -p test_token_financial_postgres.py", "python3 -m unittest discover -s scripts/tests -p test_financial_parallel.py", "python3 scripts/test-financial-parallel.py"]],
+    ], ["set -euo pipefail", "python3 -m unittest discover -s scripts/tests -p 'test_token_financial*.py'", "python3 -m unittest discover -s scripts/tests -p test_financial_parallel.py", "python3 scripts/test-financial-parallel.py"]],
     ["Account closure contracts on isolated PostgreSQL", [
       "PINVOU_ACCOUNT_CLOSURE_TEST_DATABASE_URL: ${{ steps.account-pg.outputs.financial_url }}",
       ...pgIdentityEnvironment("financial"),
@@ -1058,6 +1058,7 @@ test("Token financial PostgreSQL gate is required and cannot swallow a failed ru
   assert.ok(paths.includes("scripts/test-financial-parallel.py"));
   assert.ok(paths.includes("scripts/tests/test_financial_parallel.py"));
   assert.ok(paths.includes("scripts/tests/test_token_financial_postgres.py"));
+  assert.ok(paths.includes("scripts/tests/test_token_financial_batches.py"));
   const job = jobBlock("account-platform-test");
   assert.match(job, /image: mirror\.gcr\.io\/library\/postgres@sha256:[a-f0-9]{64}/);
   const services = job.match(/^    services:\r?\n([\s\S]*?)^    env:/m)?.[1];

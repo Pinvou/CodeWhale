@@ -309,6 +309,7 @@ jobs:
               - 'scripts/tests/test_financial_parallel.py'
               - 'scripts/test-token-financial-postgres.py'
               - 'scripts/tests/test_token_financial_postgres.py'
+              - 'scripts/tests/test_token_financial_batches.py'
               - 'scripts/test-account-closure-postgres.py'
               - 'scripts/tests/test_account_closure_postgres.py'
               - 'scripts/tests/test_postgres_backup.py'
@@ -1691,7 +1692,7 @@ jobs:
           ACCOUNT_FINANCIAL_SERVICES: ${{ steps.account-pg.outputs.financial_services }}
         run: |
           set -euo pipefail
-          python3 -m unittest discover -s scripts/tests -p test_token_financial_postgres.py
+          python3 -m unittest discover -s scripts/tests -p 'test_token_financial*.py'
           python3 -m unittest discover -s scripts/tests -p test_financial_parallel.py
           python3 scripts/test-financial-parallel.py
 
