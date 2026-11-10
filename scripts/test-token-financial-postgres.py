@@ -74,6 +74,7 @@ REQUIRED = {
 ACCOUNT_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/account"
 LIFECYCLE_RECONCILIATION_REQUIRED = {"TestLifecycleV3ApprovalReconciliationPostgres"}
 ACCOUNT_REQUIRED = {
+    "TestOrganizationStartupDiagnosticsPostgres",
     "TestRestoredAdminReadsWithPublicMigrationsAndRuntimeActor",
     "TestApprovalDecisionOriginalReceiptPostgres",
     "TestApprovalDecisionLegacyConcurrentReceiptPostgres",
@@ -257,7 +258,6 @@ BILLING_LEAF_REQUIRED = {
     "TestEscalatedForcedRefundWalletLockOrderPostgres",
     "TestOrdinaryForcedRefundAppliedReceiptRecoveryPostgres",
     "TestPaymentPersonalWalletAdmissionStatusRacePostgres",
-    "TestPostgresManagedPricePagination",
     "TestLedgerRepairProofHistoricalUpgradePostgres",
     "TestLedgerRepairAuthorityMixedBatchPostgres",
     "TestLedgerRepairHistoryCapabilityPostgres",
@@ -284,7 +284,24 @@ EXACT_REQUIRED_CHILDREN = {
         for seeded in ("false", "true")
         for suffix in ("", "/actual-cli")
     },
+    "TestOrganizationStartupDiagnosticsPostgres": {
+        "profile", "token", "billing-earlier-wallet-guard",
+    },
     "TestRechargeProductCommandAtomicityPostgres": {"active-provider-admission-candidate-progress"},
+    "TestPostgresManagedPricePagination": {
+        "bounded-batch-queries",
+        *{f"bounded-batch-queries/{kind}-{size}" for kind in ("list", "namespace") for size in (1, 100, 200)},
+        "bounded-batch-queries/empty-page",
+        "bounded-batch-queries/model-zero-and-inherited-units",
+        "bounded-batch-queries/absent-namespace",
+        "bounded-batch-queries/snapshot-and-next-read",
+        "bounded-batch-queries/database-faults-and-recovery",
+        *{f"bounded-batch-queries/database-faults-and-recovery/{table}" for table in ("pricing_versions", "pricing_version_unit_configs", "pricing_space_versions")},
+        "bounded-batch-queries/cancelled-and-next-read",
+        "bounded-batch-queries/abnormal-read-shapes",
+        "bounded-batch-queries/abnormal-read-shapes/empty-units",
+        "bounded-batch-queries/abnormal-read-shapes/missing-namespace",
+    },
     "TestProductManualAdmissionPostgres": {
         "two-explicit-humans-first-publish-and-immutable-replay",
         "runtime-cannot-rewrite-frozen-manual-facts",

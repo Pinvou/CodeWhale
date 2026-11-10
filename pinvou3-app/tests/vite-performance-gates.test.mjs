@@ -113,6 +113,8 @@ test('scheduled task cards have a production lazy-chunk gate', () => {
 });
 
 test('rare global overlays stay out of the startup module graph', () => {
+  assert.match(mainSource, /lazy\(\(\) => import\('\.\.\/features\/settings\/ModelAccessController\.jsx'\)/u);
+  assert.doesNotMatch(mainSource, /import.*AccountPlatformDesktopClient.*from/u);
   assert.doesNotMatch(mainSource, /from ['"][^'"]*PinvouSummonCard\.jsx['"]/u);
   assert.doesNotMatch(mainSource, /from ['"][^'"]*UpdateNoticeButton\.jsx['"]/u);
   assert.match(mainSource, /LazyPinvouSummonModal/u);
@@ -138,7 +140,7 @@ test('new lazy global mounts contain chunk failures without exposing protected c
   // it must cover chat not only while the chunk loads but also after a chunk
   // failure (React.lazy caches the rejection, so the boundary's in-flow error
   // card must not be able to expose chat either).
-  const gateMountAt = mainSource.indexOf('modelAccessGateOpen && browserOverlayPublicationReady && (');
+  const gateMountAt = mainSource.indexOf('modelAccessLayerOpen && browserOverlayPublicationReady && (');
   assert.ok(gateMountAt >= 0, 'the model access gate mount must exist');
   const gateMount = mainSource.slice(gateMountAt, mainSource.indexOf('<LazyModelAccessGate', gateMountAt));
   const backdropAt = gateMount.indexOf('fixed inset-0 z-[2147483647]');
