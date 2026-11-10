@@ -42,6 +42,11 @@ pub mod mock;
 pub type StreamEventBox =
     Pin<Box<dyn futures_util::Stream<Item = Result<StreamEvent>> + Send + 'static>>;
 
+/// Marks local preparation performed during dispatch on an ordinary route.
+#[derive(Debug, thiserror::Error)]
+#[error(transparent)]
+pub(crate) struct DeferredStreamPreparationError(pub anyhow::Error);
+
 /// Request-local preparation reused by transport retries, never a global cache.
 /// Provider payloads remain opaque to the Engine and are not logged or serialized.
 #[derive(Clone)]

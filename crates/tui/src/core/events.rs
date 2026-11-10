@@ -24,6 +24,14 @@ pub enum TurnOutcomeStatus {
     Failed,
 }
 
+/// Producer of the error selected for a failed turn. This is not inferred
+/// from advisory errors, the selected route, or the error's display text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TurnErrorSource {
+    Model,
+    Runtime,
+}
+
 /// Provider/model route resolved for a model-backed turn.
 ///
 /// Emitted at `RouteDispatched` so hosts retain provenance until the matching
@@ -256,6 +264,8 @@ pub enum Event {
         usage: Usage,
         status: TurnOutcomeStatus,
         error: Option<String>,
+        /// Source of this exact terminal error, when known by its producer.
+        error_source: Option<TurnErrorSource>,
         /// Tool catalog sent with this turn's model request.
         tool_catalog: Option<Vec<Tool>>,
         /// API base URL used by this turn's client.

@@ -1,8 +1,6 @@
 ---
 name: fleet-manager
 description: Use when managing, triaging, restarting, escalating, or summarizing Codewhale fleet runs and workers.
-metadata:
-  short-description: Triage Codewhale fleet runs
 ---
 
 # Fleet Manager

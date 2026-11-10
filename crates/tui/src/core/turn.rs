@@ -13,7 +13,7 @@
 //! `/restore N` and the `revert_turn` tool both consume these
 //! snapshots.
 
-use crate::core::events::TurnRoute;
+use crate::core::events::{TurnErrorSource, TurnRoute};
 use crate::models::Usage;
 use crate::snapshot::SnapshotRepo;
 use std::path::Path;
@@ -57,6 +57,10 @@ pub struct TurnContext {
     /// Route facts resolved for this turn but not timestamped until the first
     /// provider request is actually dispatched.
     pub(crate) pending_route: Option<TurnRoute>,
+
+    /// Written only when run_turn selects its final failure, never by an
+    /// advisory event or an attempt which may still recover.
+    pub(crate) terminal_error_source: Option<TurnErrorSource>,
 }
 
 impl TurnContext {
@@ -76,6 +80,7 @@ impl TurnContext {
             latest_parent_input_tokens: None,
             compaction_refusal_notified: false,
             pending_route: None,
+            terminal_error_source: None,
         }
     }
 

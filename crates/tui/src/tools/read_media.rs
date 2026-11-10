@@ -214,7 +214,7 @@ impl ToolSpec for ReadMediaTool {
     }
 
     fn description(&self) -> &'static str {
-        "Read an image file (PNG, JPEG, GIF, WebP) into context for multimodal/vision inspection, with optional crop region and detail level. Safe, bounded decode with pixel and byte guards."
+        "Read an image file (PNG, JPEG, GIF, WebP) into context for multimodal/vision inspection, with optional crop region and detail level. Default reads (detail 'auto' or 'low') fit a ~256KB delivery budget; 'high'/'original' and crop reads keep the full 5 MiB payload limit. Safe, bounded decode with pixel and byte guards."
     }
 
     fn input_schema(&self) -> Value {
@@ -251,7 +251,7 @@ impl ToolSpec for ReadMediaTool {
                 "detail": {
                     "type": "string",
                     "enum": ["auto", "low", "high", "original"],
-                    "description": "Resolution/detail preference. 'auto' (default) downscales large images to max 2048px; 'low' to max 1024px; 'high' / 'original' preserves resolution up to max 4096px within the 5 MiB payload limit."
+                    "description": "Resolution/detail preference. 'auto' (default) downscales large images to max 2048px and fits the same ~256KB delivery budget as 'low' (max 1024px); 'high' / 'original' preserves resolution up to max 4096px within the full 5 MiB payload limit."
                 }
             },
             "required": ["path"]
@@ -401,7 +401,7 @@ pub(crate) async fn execute_read_media(
          Crop: {crop_summary}\n\
          Detail: {}\n\
          Delivery: {delivery_note}\n\
-         Size: {} (source) -> {} (wire payload)",
+         Size: {} (source) -> {} (encoded payload)",
         detail_mode.as_str(),
         human_bytes(processed.source_bytes),
         human_bytes(processed.encoded_bytes),
@@ -1725,6 +1725,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn read_media_crop_read_keeps_full_wire_budget_beyond_detail_budget() {
+        // Crop reads bypass the detail delivery budget entirely (the
+        // crop_applied arm picks MAX_WIRE_IMAGE_BYTES), so even at
+        // detail=auto a crop may deliver well past the ~256KB auto/low
+        // budget as long as it fits the full 5 MiB wire budget.
+        let dir = tempdir().unwrap();
+        let img_path = dir.path().join("photo.png");
+        let png_data = create_noise_png(1600, 1200);
+        assert!(
+            png_data.len() > READ_IMAGE_BYTE_BUDGET,
+            "test image must start over the auto/low delivery budget"
+        );
+        std::fs::write(&img_path, &png_data).unwrap();
+
+        let mut ctx = ToolContext::new(dir.path());
+        ctx.route_capabilities.image_input = CapabilityState::Supported;
+
+        let tool = ReadMediaTool;
+        let rich = tool
+            .execute_rich(
+                json!({
+                    "path": "photo.png",
+                    "detail": "auto",
+                    "crop": { "x": 0, "y": 0, "width": 800, "height": 1200 }
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        assert!(rich.success);
+        assert_eq!(rich.metadata.as_ref().unwrap()["cropped"], true);
+
+        let ToolResultContentBlock::Image { data, .. } = &rich.content_blocks[0];
+        let payload_len = BASE64.decode(data).unwrap().len();
+        assert!(
+            payload_len > READ_IMAGE_BYTE_BUDGET,
+            "a crop read must keep the full wire budget instead of the {}-byte detail budget (got {payload_len})",
+            READ_IMAGE_BYTE_BUDGET
+        );
+        assert!(
+            payload_len <= MAX_WIRE_IMAGE_BYTES,
+            "delivered payload {payload_len} must still fit the {}-byte wire budget",
+            MAX_WIRE_IMAGE_BYTES
+        );
+    }
+
+    #[tokio::test]
     async fn read_media_photo_over_budget_arrives_under_budget_as_jpeg() {
         let dir = tempdir().unwrap();
         let img_path = dir.path().join("photo.png");
@@ -1871,10 +1918,47 @@ mod tests {
         assert!(note.contains("downsampled to 2048x1024"), "{note}");
         assert!(note.contains("fine detail may be lost"), "{note}");
         assert!(
+            note.contains("(encoded payload)"),
+            "size line must label the pre-base64 bytes as encoded payload: {note}"
+        );
+        assert!(
+            !note.contains("(wire payload)"),
+            "the pre-base64 size must not be labeled as the wire payload: {note}"
+        );
+        assert!(
             note.contains(
                 "call read_media again with the crop parameter (original-image pixel coordinates)"
             ),
             "downsampled note must guide zoom via crop: {note}"
+        );
+    }
+
+    #[test]
+    fn read_media_copy_pins_the_delivery_budget_sentences() {
+        // The budget disclosure is the direct item-5b fix; pin both
+        // surfaces so a silent revert (or a silently widened figure)
+        // fails the suite.
+        let tool = ReadMediaTool;
+        let description = tool.description();
+        assert!(
+            description.contains("fit a ~256KB delivery budget"),
+            "the auto/low delivery budget must stay disclosed: {description}"
+        );
+        assert!(
+            description.contains("keep the full 5 MiB payload limit"),
+            "the high/original/crop wire budget must stay disclosed: {description}"
+        );
+        let schema = tool.input_schema();
+        let detail = schema["properties"]["detail"]["description"]
+            .as_str()
+            .expect("detail description");
+        assert!(
+            detail.contains("same ~256KB delivery budget as 'low'"),
+            "detail must tie auto to low's budget: {detail}"
+        );
+        assert!(
+            detail.contains("full 5 MiB payload limit"),
+            "detail must keep the high/original wire budget: {detail}"
         );
     }
 
