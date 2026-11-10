@@ -14,6 +14,9 @@ pub(super) type Socket = WebSocketStream<TcpStream>;
 #[path = "reader_resume_tests/journal_owner_tests.rs"]
 pub(crate) mod journal_owner_tests;
 
+#[path = "reader_resume_tests/prepare_requeue_tests.rs"]
+mod prepare_requeue_tests;
+
 fn fixture_wall_clock_millis() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1067,6 +1070,9 @@ pub(crate) async fn resume_round_trip<T>(
         return;
     }
     let frozen = manager.watchdog_deadline_for_test().unwrap();
+    if owner_case.as_deref() == Some("prepare_write") {
+        assert!(relay.arm_prepare_write_failure_for_test());
+    }
     // A real socket close goes through RelayClient's connection event and the
     // manager reader, rather than directly invoking a resume helper.
     socket.close(None).await.unwrap();
@@ -1076,9 +1082,31 @@ pub(crate) async fn resume_round_trip<T>(
     wait_prepared(&manager).await;
     assert!(!owned.worker.as_ref().unwrap().is_finished());
     assert_eq!(manager.watchdog_deadline_for_test(), Some(frozen));
-    let mut socket = accept(&listener).await;
-    registered(&mut socket).await;
-    let prepare = receive(&mut socket, "controller_resume_prepare").await;
+    let mut socket =
+        if let Some(case @ ("prepare_write" | "prepare_legacy")) = owner_case.as_deref() {
+            prepare_requeue_tests::successor_socket(
+                &listener,
+                &relay,
+                &manager,
+                &mut processed_rx,
+                case,
+            )
+            .await
+        } else {
+            let mut socket = accept(&listener).await;
+            registered(&mut socket).await;
+            socket
+        };
+    let prepare = prepare_requeue_tests::receive_prepare(&mut socket).await;
+    if owner_case.as_deref() == Some("prepare_write") {
+        use sha2::Digest as _;
+        let digest: [u8; 32] = sha2::Sha256::digest(prepare.to_string().as_bytes()).into();
+        assert_eq!(
+            relay.failed_prepare_digest_for_test(),
+            Some(digest),
+            "successor must regenerate the same prepare, not rotate its proof or request"
+        );
+    }
     assert_eq!(manager.watchdog_deadline_for_test(), Some(frozen));
     assert!(handle.state::<ControlledLaneState>().is_suspended());
     let activation = "activation-reader-0001";
@@ -1139,10 +1167,13 @@ pub(crate) async fn resume_round_trip<T>(
         .seal_resume_confirm("request-peer-current", activation)
         .unwrap();
     send(&mut socket, &confirm).await;
-    receive(&mut socket, "controller_resume_activation_ack").await;
+    let activation_ack = receive(&mut socket, "controller_resume_activation_ack").await;
+    assert_ne!(activation_ack["request_id"], prepare["request_id"]);
     assert_eq!(manager.watchdog_deadline_for_test(), Some(frozen));
     let mut pending = provisional.clone();
     pending["type"] = json!("controller_resume_activation_pending");
+    // The actual Relay writer uses the validated B ACK request, not prepare.
+    pending["request_id"] = activation_ack["request_id"].clone();
     send(&mut socket, &pending).await;
     let liveness = receive(&mut socket, "controller_post_activation_liveness").await;
     let mut confirmed = pending.clone();
