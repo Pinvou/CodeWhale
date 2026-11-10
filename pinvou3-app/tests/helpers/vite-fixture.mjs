@@ -1,5 +1,5 @@
 import { createServer as createViteServer } from 'vite';
-import { fixtureScope, ownedDirectory } from './fixture-scope.mjs';
+import { fixtureScope, ownedDirectory, pendingFixtureShutdown } from './fixture-scope.mjs';
 export { build } from 'vite';
 
 
@@ -31,7 +31,7 @@ export async function createServer(config = {}) {
       server: { ...config.server, host: '127.0.0.1', port: 0, strictPort: true, hmr: false, ws: config.server?.middlewareMode ? false : {}, watch: null },
     });
     nativeClose = server.close.bind(server);
-    server.close = release;
+    server.close = () => pendingFixtureShutdown() || release();
     return server;
   } catch (primary) {
     setupFailed = !server;

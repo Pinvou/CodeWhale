@@ -51,6 +51,37 @@ test('the actual assembled production entrypoints are all classified', async () 
   for (const key of ['routes', 'tasks', 'events', 'cli']) assert.ok(result[key] > 0);
 });
 
+for (const [source, suffix] of [
+  ['account-platform/internal/billing/organization_routes.go', '/quota-grants:batch'],
+  ['account-platform/internal/token/management_routes.go', '/commands:precheck'],
+  ['account-platform/internal/token/organization_finance_routes.go', '/account-closed-grants:reclaim-batch'],
+]) {
+  test(`actual ${source} keeps its exact action guard first and unique`, async () => {
+    const text = await readFile(new URL(`../../${source}`, import.meta.url), 'utf8');
+    const guard = `httpserver.RequirePathSuffix("${suffix}")`;
+    const routes = authorizationRoutes(source, text);
+    const route = routes.find(item => item.method === 'POST' && item.path.endsWith(suffix));
+    assert.ok(route);
+    assert.ok(route.registration.includes(guard));
+    const unguarded = route.registration.replace(`${guard}, `, '');
+    assert.notEqual(unguarded, route.registration);
+    const mutations = [
+      unguarded,
+      route.registration.replace(guard, `httpserver.RequirePathSuffix("${suffix}Other")`),
+      route.registration.replace(guard, `${guard}, ${guard}`),
+      unguarded.replace(/\)\s*$/, `, ${guard})`),
+      `${unguarded} // ${guard}`,
+    ];
+    for (const registration of mutations) {
+      assert.throws(() => authorizationRoutes(source, text.replace(route.registration, registration)), /invalid_path_suffix_guard:/);
+    }
+    assert.throws(() => authorizationRoutes(source,
+      text.replace(route.registration, unguarded) + `\nvar example = \`${guard}\`\n`), /invalid_path_suffix_guard:/);
+    assert.equal(authorizationRoutes(source,
+      text.replace(guard, `/* guarded action */ ${guard}`)).length, routes.length);
+  });
+}
+
 async function withActualCatalog(mutator, check) {
   const catalog = JSON.parse(await readFile(new URL('../../account-platform/deploy/authorization-entrypoints.json', import.meta.url), 'utf8'));
   mutator(catalog);
