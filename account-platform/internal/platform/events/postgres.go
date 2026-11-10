@@ -2,6 +2,7 @@ package events
 
 import (
 	"context"
+	_ "embed"
 
 	"errors"
 	"fmt"
@@ -18,10 +19,16 @@ type PostgresStore struct {
 	accountReplay      bool
 }
 
+//go:embed queries/outbox_stats.sql
+var outboxStatisticsSQL string
+
 type OutboxStats struct {
 	Pending          int64
 	DeadLettered     int64
 	OldestPendingAge time.Duration
+	// RetainedStorageBytes includes this table's indexes and TOAST, not inboxes
+	// or the separate frozen authorization sidecar. It is not a capacity grant.
+	RetainedStorageBytes int64
 }
 
 func NewPostgresStore(ctx context.Context, databaseURL string) (*PostgresStore, error) {
@@ -88,14 +95,14 @@ func (store *PostgresStore) Close() { store.pool.Close() }
 func (store *PostgresStore) Ping(ctx context.Context) error { return store.pool.Ping(ctx) }
 
 func (store *PostgresStore) Stats(ctx context.Context) (OutboxStats, error) {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
 	var stats OutboxStats
 	var oldestSeconds float64
-	var err error
-	if len(store.excludedEventTypes) == 0 {
-		err = store.pool.QueryRow(ctx, `SELECT count(*) FILTER (WHERE published_at IS NULL AND dead_lettered_at IS NULL),count(*) FILTER (WHERE dead_lettered_at IS NOT NULL),COALESCE(EXTRACT(EPOCH FROM now()-min(occurred_at) FILTER (WHERE published_at IS NULL AND dead_lettered_at IS NULL)),0) FROM outbox_events`).Scan(&stats.Pending, &stats.DeadLettered, &oldestSeconds)
-	} else {
-		err = store.pool.QueryRow(ctx, `SELECT count(*) FILTER (WHERE published_at IS NULL AND dead_lettered_at IS NULL),count(*) FILTER (WHERE dead_lettered_at IS NOT NULL),COALESCE(EXTRACT(EPOCH FROM now()-min(occurred_at) FILTER (WHERE published_at IS NULL AND dead_lettered_at IS NULL)),0) FROM outbox_events WHERE NOT(event_type=ANY($1::text[]))`, store.excludedEventTypes).Scan(&stats.Pending, &stats.DeadLettered, &oldestSeconds)
-	}
+	// An empty, non-NULL array preserves the unpartitioned case. Put predicates
+	// in WHERE so published history is not an input to every metrics aggregate.
+	excluded := append([]string{}, store.excludedEventTypes...)
+	err := store.pool.QueryRow(ctx, outboxStatisticsSQL, excluded).Scan(&stats.Pending, &stats.DeadLettered, &oldestSeconds, &stats.RetainedStorageBytes)
 	stats.OldestPendingAge = time.Duration(oldestSeconds * float64(time.Second))
 	return stats, err
 }

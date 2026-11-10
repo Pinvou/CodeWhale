@@ -238,6 +238,9 @@ func checksum(value string) string {
 type DownHooks struct {
 	Guard    func(context.Context, pgx.Tx, Migration) error
 	ApplySQL func(context.Context, pgx.Tx, Migration) error
+	// LedgerRole permits an exact domain migration to remove its history under
+	// the trusted owner used by Up. Empty preserves the original role.
+	LedgerRole func(Migration) string
 }
 
 func DownOne(ctx context.Context, connection *pgx.Conn, migrations []Migration) error {
@@ -294,6 +297,13 @@ func DownOneWithHooks(ctx context.Context, connection *pgx.Conn, migrations []Mi
 		}
 		if err == nil {
 			if err = setMigrationRole(ctx, tx, role); err == nil {
+				if hooks.LedgerRole != nil {
+					if ledgerRole := hooks.LedgerRole(migration); ledgerRole != "" {
+						err = setMigrationRole(ctx, tx, ledgerRole)
+					}
+				}
+			}
+			if err == nil {
 				_, err = tx.Exec(ctx, `DELETE FROM schema_migrations WHERE version = $1`, version)
 			}
 		}

@@ -464,6 +464,32 @@ function assertFiniteAuditPGSetup(job) {
   // F16's two separately bounded suites use only the other ephemeral service.
   // Validate each whole step before removing it from the audit-only env ban;
   // arbitrary env, commands, conditions and extra steps remain rejected.
+  const statistics = namedStep(text, "Retained outbox statistics public PostgreSQL contracts");
+  assert.equal(statistics.trimEnd(), [
+    "      - name: Retained outbox statistics public PostgreSQL contracts",
+    "        timeout-minutes: 10",
+    "        working-directory: account-platform",
+    "        env:",
+    "          PINVOU_TEST_SCHEMA_DATABASE_URL: ${{ steps.account-pg.outputs.audit_url }}",
+    "          PINVOU_ACCOUNT_CI_PG_PORT: ${{ steps.account-pg.outputs.audit_port }}",
+    "          PINVOU_ACCOUNT_CI_PG_SYSTEM_ID: ${{ steps.account-pg.outputs.audit_system }}",
+    "          PINVOU_ACCOUNT_CI_PG_DIRECTORY: ${{ steps.account-pg.outputs.audit_directory }}",
+    "          PINVOU_OUTBOX_STATISTICS_TEST: '1'",
+    "        run: |",
+    "          set -euo pipefail",
+    "          # Build the real previous CLI from this immutable public baseline.",
+    "          git fetch --no-tags --depth=1 origin 4bbf359d8cf3547af401d7cdb561f7bc0477ebd6",
+    "          go test -race -json -tags=nomsgpack -mod=readonly -count=1 -parallel=1 -timeout=7m ./internal/billingschema -run '^TestRetainedOutboxStatisticsPublicPostgres$' | tee \"$RUNNER_TEMP/outbox-statistics.jsonl\"",
+    "          python3 - \"$RUNNER_TEMP/outbox-statistics.jsonl\" <<'PY'",
+    "          import json, pathlib, sys",
+    "          events = [json.loads(line) for line in pathlib.Path(sys.argv[1]).read_text().splitlines() if line.strip()]",
+    "          terminal = [event for event in events if event.get(\"Test\") and event.get(\"Action\") in (\"pass\", \"fail\", \"skip\")]",
+    "          root = \"TestRetainedOutboxStatisticsPublicPostgres\"",
+    "          assert len(terminal) == 4 and all(event[\"Action\"] == \"pass\" for event in terminal), \"statistics PostgreSQL tests failed or skipped\"",
+    "          assert {event[\"Test\"] for event in terminal} == {root, root+\"/account\", root+\"/billing\", root+\"/token\"}, \"required public migration domains did not execute\"",
+    "          PY",
+  ].join("\n"));
+  assert.ok(text.indexOf(preflight) < text.indexOf(statistics), "identity preflight precedes statistics");
   const stop = namedStep(text, pgStopStepName);
   assert.equal(stop.trimEnd(), [
     `      - name: ${pgStopStepName}`,
@@ -476,7 +502,8 @@ function assertFiniteAuditPGSetup(job) {
     "Token financial contracts on isolated PostgreSQL", "Account closure contracts on isolated PostgreSQL"]) {
     assert.ok(text.indexOf(namedStep(text, name)) < text.indexOf(stop), "stop must follow database consumers");
   }
-  let outsidePGSteps = text.replace(pg, "").replace(preflight, "").replace(stop, "");
+  assert.ok(text.indexOf(statistics) < text.indexOf(stop), "statistics precedes service retirement");
+  let outsidePGSteps = text.replace(pg, "").replace(preflight, "").replace(stop, "").replace(statistics, "");
   // Admit only this bounded acceptance step before enforcing the job-wide ban
   // on incidental database inputs. The complete step is fixed deliberately.
   const existingBroker = namedStep(text, existingBrokerStepName);

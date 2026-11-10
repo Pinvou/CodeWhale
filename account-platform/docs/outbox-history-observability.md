@@ -1,0 +1,64 @@
+# 保留历史下的 Outbox 与健康观测
+
+账户平台历史事件、回执、人工案件和业务引用继续保留。本次变更不设置 TTL，
+不删除或重放业务记录，不自动补账，不批准任何后续清理。清理对象和期限仍须单独批准。
+
+## 迁移与回滚
+
+通过既有公开迁移入口，分别安装 Account `900021`、Billing `900040`、Token `900010`
+`outbox_dead_statistics_index`。沿用各域独立 migrator、既有备份证据及发布流程。
+不修改已安装迁移；两个方向均固定 SQL 身份。新增的部分 B-tree 索引只包含死信事件。
+现有 pending 部分索引服务待发布聚合，已发布且非死信的历史不再参与统计输入。
+
+索引在迁移事务内创建，可能等待写入或阻塞写入；它不是并发索引构建，也不承诺不停机。
+上线前按实际数据量评估维护窗口、磁盘空间和迁移总预算。预算不足时保留原数据及迁移台账，
+调查后重试，不手工标记迁移成功。数据库锁和调用者取消仍可能导致统计暂时不可用。
+
+公开 `--direction down` 只移除最新的这个索引及其台账；不删除事件或改变持久权限。
+Billing、Token 仅在这两个新增版本的台账删除事务中切换到原有受信任 schema owner，
+不会向运行角色授予台账 DELETE。已存在其他同名但结构、方法或 owner 不符的索引时拒绝回滚。
+后续若存在更高版本，应先依照其自身回滚规则处理，不能越过最新版本删除本条台账。
+
+## 指标和失败语义
+
+普通 event-relay 的统计查询最多使用 5 秒，父调用者更短的期限优先。
+统计仍精确计算当前 pending、dead-letter 数量和最老 pending 年龄，遵守 Account 的
+授权事件排除分区。开销随当前待处理和死信集合增长，不承诺无限积压下恒定时间。
+
+- `pinvou_outbox_statistics_available`：本轮成功为 1，尚未成功或读取失败为 0。
+- `pinvou_outbox_statistics_last_success_timestamp_seconds`：最近成功时间；失败不刷新。
+- `pinvou_outbox_statistics_errors_total`：统计读取错误次数。
+- `pinvou_outbox_retained_storage_bytes`：outbox 表、索引和 TOAST 的物理占用。
+  它包括同表其他事件分区，排除 inbox、授权 sidecar 等其他表；不是待发布事件大小。
+
+统计失败保留最近成功的计数和大小，并报告不可用；保留值不能当作当前状态。
+relay 原有发布循环和业务事件状态不因这些指标变更而重写。
+
+Billing 的 `/metrics` 同时提供 `pinvou_payment_health_retained_storage_bytes` 和
+`pinvou_payment_health_storage_available`。只读取健康观测表的物理占用元数据，
+不遍历观测正文，不含关联 attempts、cases。读取预算 2 秒，失败时 available 为 0，
+不输出一个伪造的零字节值；下一次成功 scrape 恢复。
+
+## Helm 告警与运维处置
+
+启用既有 `observability.prometheusRulesEnabled` 并保证原有 metrics 抓取链路工作。
+Helm 告警包含统计失败、成功时间过旧、支持域指标缺失，以及健康大小不可读。
+失效条件持续 2 分钟才触发，原有 backlog 和 dead-letter 告警继续生效。
+
+`observability.retainedOutboxWarningBytes` 和 `retainedHealthWarningBytes` 默认均为
+1,073,741,824 字节（1 GiB），可配置为 1 到 9,007,199,254,740,991 的整数。
+超过阈值持续 10 分钟触发 p2。副本读取同一表，使用 max 而非 sum，避免重复累加。
+这些阈值是预警，不是数据库配额、剩余空间或新请求准入承诺；其他表、WAL 和备份另行监控。
+规则沿用本 chart 的普通 source 聚合边界；跨站点共用 Prometheus 时须依照既有抓取隔离方式部署。
+Compose 的现有授权 relay 规则生成器只输出授权规则，本次不宣称它已装载这组 Helm 告警。
+
+告警后先检查服务与抓取是否可用、统计最后成功时间、迁移身份及当前积压；
+容量告警先评估存储扩容并保全证据。需要盘点或导出时使用已审核的受控只读工具。
+这些指标和告警不授予删除、退款、补账、重放、案件结案或更改保留规则的权限。
+
+## 验证边界
+
+公开基线和候选迁移 CLI 在隔离数据库上验证三域存量升级、允许回滚、错误索引拒绝、
+源数据和 ACL 保留、真实查询计划、阻塞超时及后续恢复；不连接生产。
+真实 Helm 渲染经 promtool 校验，包括缺失、失效、恢复、保持期、阈值边界和副本不重复累加。
+本地 Windows/PostgreSQL 17 结果不能代替 CI 的 Linux/PostgreSQL 16 或生产维护窗口演练。

@@ -108,6 +108,9 @@ public:
 observability:
   otlpEndpoint: ""
   prometheusRulesEnabled: false
+  # Warning thresholds, not deletion permissions or capacity admission limits.
+  retainedOutboxWarningBytes: 1073741824
+  retainedHealthWarningBytes: 1073741824
 
 security:
   rateLimitRPS: 100

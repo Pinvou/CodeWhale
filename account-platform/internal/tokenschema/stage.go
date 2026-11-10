@@ -57,6 +57,7 @@ var installed = map[int64]identity{
 	900002: {name: "hold_expiry_dispatch_fence", checksum: "70e1ab2e4df09da798f8960aef356fb91ed6cef675dcb0613b5e7f303839af55", downChecksum: "718410daef7dece72847123a0db47c6636ce7a7c008c4fd4d15470ddd058581d"},
 	900003: {name: "usage_history_storage_compatibility", checksum: "4bb49b9651b476a0eb6496e775c89e4a3f9da9c53d683064317d5364841bc840", downChecksum: "96991acf88092a3cbbd9eaf7c8d90743d919cca342c364aac59498db78506194"},
 	900004: {name: "account_closure_replay_fence", checksum: "1e662dda9e4b27674da7bda3949d8fefef10c18f84c0d626d4093271d46a5a30", downChecksum: "c608e17db02229461ea934f93debdc2f11f656f1005d49d4bc75890b51e1e1fa"},
+	900010: {name: "outbox_dead_statistics_index", checksum: "1d46d336edc90b8e94b45a41034d68e957e798c3c10e2efaf823433ee11112ff", downChecksum: "005d99a7e18db3b28c5a3d4f55a06cc082acf3b7b49884d00f90738a32475b9a"},
 }
 
 func Ordered(loaded []migrations.Migration) ([]migrations.Migration, error) {
