@@ -5,6 +5,15 @@ SET LOCAL search_path = pg_catalog, public, pg_temp;
 SET LOCAL statement_timeout = '60s';
 SET LOCAL lock_timeout = '5s';
 
+\if :{?audit_database}
+SET LOCAL TIME ZONE 'UTC';
+SELECT 1 / CASE WHEN current_database() = :'audit_database'
+  AND NOT row_security_active('public.schema_migrations'::regclass)
+  AND EXISTS (SELECT FROM public.schema_migrations WHERE version = 2 AND name = 'ledger')
+  THEN 1 ELSE 0 END AS audit_database_guard;
+SELECT 'billing' AS audit_domain, current_database() AS audit_database, transaction_timestamp() AS captured_at;
+\endif
+
 -- Fail closed before counting when this session cannot see every audited row.
 -- SELECT-only privileges do not bypass row security; hidden rows could fake zero.
 SELECT 1 / CASE WHEN count(*) = 17 AND bool_and(

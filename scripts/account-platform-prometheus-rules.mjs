@@ -12,7 +12,7 @@ export function prometheusRuleCommands(args) {
   assert.ok([args[1], args[3], args[5]].every(isAbsolute), 'all offline fixture paths must be absolute');
   return [
     [process.execPath, [fileURLToPath(new URL('../account-platform/test/integration/prometheus-rule-fixtures.mjs', import.meta.url)), args[1], args[3]]],
-    [args[5], ['test', 'rules', join(args[3], 'event-relay-missing.test.yaml')]],
+    [args[5], ['test', 'rules', join(args[3], 'event-relay-missing.test.yaml'), join(args[3], 'approval-multi-scope.test.yaml')]],
   ];
 }
 

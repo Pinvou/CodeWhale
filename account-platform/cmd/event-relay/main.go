@@ -109,10 +109,17 @@ func run(ctx context.Context, environment func(string) string, logger *slog.Logg
 	if address == "" {
 		address = ":9090"
 	}
-	server := metrics.serverWithApproval(address, func(c context.Context) error { return errors.Join(store.Ping(c), broker.Ping(c)) }, approval.ready)
-	if source == "billing" {
-		server = metrics.server(address, func(c context.Context) error { return errors.Join(store.Ping(c), broker.Ping(c)) })
+	var approvalReady func(context.Context) error
+	var monitor approvalMonitor
+	if source == "account" {
+		approvalReady = approval.ready
+		monitor.scope = strings.TrimSpace(environment("APPROVAL_RELAY_MONITOR_SCOPE"))
+		monitor.replica = strings.TrimSpace(environment("APPROVAL_RELAY_MONITOR_REPLICA"))
+		if monitor.scope != "" && monitor.replica == "" {
+			monitor.replica, _ = os.Hostname()
+		}
 	}
+	server := metrics.serverWithApproval(address, func(c context.Context) error { return errors.Join(store.Ping(c), broker.Ping(c)) }, approvalReady, monitor)
 	defer shutdownServer(server)
 	serverError := make(chan error, 1)
 	go func() {

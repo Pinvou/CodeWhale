@@ -78,8 +78,10 @@ pub fn notify_team_relay_changed(app: &AppHandle) {
     if !notifications_enabled() {
         return;
     }
+    // 主窗口可能挂了浏览器子 WebView，此时 get_webview_window("main") 返回 None，
+    // 焦点检查会静默失效；窗口级操作一律走原生窗口解析（见 backflow/community-838）。
     if app
-        .get_webview_window("main")
+        .get_window("main")
         .and_then(|window| window.is_focused().ok())
         .unwrap_or(false)
     {

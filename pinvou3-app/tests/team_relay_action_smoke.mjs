@@ -261,6 +261,96 @@ try {
   await page.waitForFunction(() => document.body.innerText.includes('NEW2-CODE'));
   const joinCodeReads = await page.evaluate(() => window.__teamRelayJoinCodeReads());
   assert(joinCodeReads === 2, '远端成员变更后应重新读取权威邀请码', joinCodeReads);
+
+  // Mount the real login view and bridge; only the Tauri command boundary is simulated.
+  const loginPage = await browser.newPage();
+  loginPage.on('pageerror', error => pageErrors.push(error.message));
+  for (const language of ['zh', 'en', 'ja']) {
+    await loginPage.goto(`http://127.0.0.1:${port}/team-relay-action-smoke.html`, { waitUntil: 'domcontentloaded' });
+    const expected = await loginPage.evaluate(async language => {
+      window.PinvouPlatform = { kind: 'tauri' };
+      const reactModule = await import('/@id/react');
+      const React = reactModule.default || reactModule;
+      const reactDomClient = await import('/@id/react-dom/client');
+      const createRoot = reactDomClient.createRoot || reactDomClient.default?.createRoot;
+      const { TeamRelayView } = await import('/features/team-relay/TeamRelayView.jsx');
+      const { dict, ensureLanguage } = await import('/shared/i18n.js');
+      await ensureLanguage(language);
+      await import('/platform/tauri/bridge/team-relay.js');
+      const capabilities = { loaded: true, teamRelaySupported: true };
+      const state = { teamRelay: { status: { configured: false }, loading: false } };
+      window.__teamRelayLoginState = state;
+      let listener;
+      window.__teamRelayLoginMode = 'legacy';
+      window.__teamRelayLoginCalls = [];
+      const feature = window.__PINVOU_TAURI_BRIDGE_FEATURES__['team-relay']({
+        state,
+        notify: () => listener?.({ platformCapabilities: capabilities, teamRelay: state.teamRelay }),
+        listen: async () => () => {},
+        async invoke(command, args) {
+          if (command === 'team_relay_status') return { configured: false };
+          if (command !== 'team_relay_register_account') throw new Error(`Unexpected command: ${command}`);
+          window.__teamRelayLoginCalls.push(args.input);
+          // These strings follow the unchanged Rust decode_error wire format.
+          const backendError = {
+            legacy: 'action_not_allowed: Self-service account enrollment is disabled on this Hub. (request req_login)',
+            generic: 'action_not_allowed: A transfer is pending. (request req_login)',
+            structured: 'action_not_allowed: Enrollment disabled (request req_login) [details={"reason":"self_service_enrollment_disabled"}]',
+          }[window.__teamRelayLoginMode];
+          return new Promise((resolve, reject) => {
+            window.__finishTeamRelayLogin = () => {
+              // Tauri rejects with the serialized Rust error string, not an Error object.
+              if (backendError) reject(backendError);
+              else resolve({ principal: { id: 'login-test', display_name: args.input.display_name }, teams: [] });
+            };
+          });
+        },
+      });
+      window.TauriBridge = {
+        teamRelay: feature,
+        state: {
+          get: domain => domain === 'platform' ? { platformCapabilities: capabilities } : { teamRelay: state.teamRelay },
+          subscribeMany: (_domains, callback) => { listener = callback; return () => { listener = null; }; },
+        },
+      };
+      createRoot(document.getElementById('root')).render(React.createElement(TeamRelayView, { theme: 'light', t: dict[language] }));
+      return dict[language].uiTeamRelay.errorMessages;
+    }, language);
+    for (const mode of ['legacy', 'generic', 'structured', 'success']) {
+      await loginPage.waitForSelector('input[name="email"]');
+      await loginPage.$eval('.team-relay-setup-form', form => form.reset());
+      await loginPage.type('input[name="email"]', 'login-test@example.com');
+      await loginPage.type('input[name="display_name"]', 'Login Test');
+      await loginPage.evaluate(mode => { window.__teamRelayLoginMode = mode; }, mode);
+      await loginPage.$eval('.team-relay-setup-form', form => form.requestSubmit());
+      await loginPage.waitForFunction(() => window.__teamRelayLoginState.teamRelay.loading
+        && !document.querySelector('.team-relay-setup-form') && typeof window.__finishTeamRelayLogin === 'function');
+      assert(!await loginPage.$('.team-relay-no-team-logout'), '请求未完成时不能显示账号页面');
+      await loginPage.evaluate(() => {
+        const finish = window.__finishTeamRelayLogin;
+        window.__finishTeamRelayLogin = null;
+        finish();
+      });
+      if (mode === 'success') {
+        await loginPage.waitForFunction(() => window.__teamRelayLoginState.teamRelay.status?.configured === true
+          && !window.__teamRelayLoginState.teamRelay.loading
+          && window.__teamRelayLoginState.teamRelay.account?.principal?.display_name === 'Login Test'
+          && !!document.querySelector('.team-relay-no-team-logout'));
+        continue;
+      }
+      const message = expected[mode === 'generic' ? 'action_not_allowed' : 'self_service_enrollment_disabled'];
+      try {
+        await loginPage.waitForFunction(message => document.querySelector('[role="alert"]')?.textContent === message
+          && !document.querySelector('.team-relay-setup-form button[type="submit"]')?.disabled, {}, message);
+      } catch (error) {
+        const actual = await loginPage.evaluate(() => ({ text: document.body.innerText, calls: window.__teamRelayLoginCalls.length }));
+        throw new Error(`Login error rendering failed (${language}/${mode}): ${JSON.stringify({ expected: message, actual, pageErrors })}`, { cause: error });
+      }
+    }
+    const loginCalls = await loginPage.evaluate(() => window.__teamRelayLoginCalls);
+    assert(loginCalls.length === 4 && loginCalls.every(input => input.email === 'login-test@example.com' && input.display_name === 'Login Test'), '登录失败后应允许重新提交', loginCalls);
+  }
+  await loginPage.close();
   assert(pageErrors.length === 0, '发布进展不应产生页面异常', pageErrors);
   console.log('team relay action smoke: ok');
 } finally {

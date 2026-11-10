@@ -4958,6 +4958,7 @@ mod tests {
             "web_access_update_settings",
             "web_access_create_session",
             "web_access_create_session_and_chat",
+            "web_access_create_session_and_chat_with_model",
             "web_access_list_sessions",
             "web_access_list_archived_sessions",
             "web_access_chat",

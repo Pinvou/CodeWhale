@@ -96,7 +96,7 @@ kcadm() {
         text = (DEPLOY / "nginx/personal.conf.template").read_text(encoding="utf-8")
         self.assertIn("resolver 127.0.0.11 valid=10s ipv6=off;", text)
         targets = re.findall(r"proxy_pass\s+([^;]+);", text)
-        self.assertEqual(len(targets), 10)
+        self.assertEqual(len(targets), 11)
         self.assertEqual(targets.count("http://$billing_origin"), 2)
         self.assertIn("set $billing_origin billing-service:8080;", text)
         self.assertTrue(all(re.fullmatch(r"https?://\$[a-z_]+", target) for target in targets))
@@ -133,21 +133,28 @@ kcadm() {
         self.assertEqual(re.findall(r"proxy_read_timeout\s+([^;]+);", legacy_token), ["300s"])
         text = nginx_active_text(text)
         locations = []
-        for match in re.finditer(r"\blocation\s+(?:(=|\^~|~\*?)\s+)?([^\s{]+)\s*\{", text):
+        for match in re.finditer(r'\blocation\s+(?:(=|\^~|~\*?)\s+)?(?:"([^"]+)"|([^\s{]+))\s*\{', text):
             depth = 1
             end = match.end()
             while depth:
                 depth += (text[end] == "{") - (text[end] == "}")
                 end += 1
-            self.assertNotIn(match.group(1), ("~", "~*"), "review regex precedence explicitly")
-            locations.append((match.group(1), match.group(2), text[match.end():end - 1]))
+            locations.append((match.group(1), match.group(2) or match.group(3), text[match.end():end - 1]))
         server_defaults = text.split("location", 1)[0]
         self.assertEqual(re.findall(r"proxy_read_timeout\s+([^;]+);", server_defaults), ["30s"])
 
         def selected_location(uri):
             exact = [item for item in locations if item[0] == "=" and item[1] == uri]
-            prefixes = [item for item in locations if item[0] != "=" and uri.startswith(item[1])]
-            return exact[0] if exact else max(prefixes, key=lambda item: len(item[1]))
+            if exact:
+                return exact[0]
+            prefixes = [item for item in locations if item[0] in (None, "^~") and uri.startswith(item[1])]
+            prefix = max(prefixes, key=lambda item: len(item[1]))
+            if prefix[0] == "^~":
+                return prefix
+            for item in locations:
+                if item[0] in ("~", "~*") and re.search(item[1], uri, re.I if item[0] == "~*" else 0):
+                    return item
+            return prefix
 
         for uri in ["/token/v1/chat/completions", "/token/v1/models"]:
             with self.subTest(uri=uri):
@@ -175,6 +182,24 @@ kcadm() {
         self.assertIn("client_max_body_size 64m;", block)
         self.assertIn("proxy_pass http://$portal_origin;", block)
         self.assertEqual(text.count("client_max_body_size 64m;"), 1)
+        self.assertIn("client_max_body_size 2m;", text)
+
+    def test_original_upload_alone_gets_larger_unbuffered_portal_budget(self):
+        text = (DEPLOY / "nginx/personal.conf.template").read_text(encoding="utf-8")
+        route, block = re.search(r'location ~ "([^"]+/admission-materials\$)"\s*\{([^}]+\}[^}]+)\}', text).groups()
+        root = "/api/admin/billing/admin/v1/recharge-products/"
+        catalog = "a3456789-0123-4567-8901-234567890abc"
+        upload = root + catalog + "/admission-materials"
+        self.assertIsNotNone(re.fullmatch(route, upload))
+        for other in [upload + "/", upload + "/" + catalog + "/content", root + catalog + "/publish",
+                      root + "00000000-0000-0000-0000-000000000000/admission-materials",
+                      root + catalog.upper() + "/admission-materials", root + "bad/admission-materials"]:
+            self.assertIsNone(re.fullmatch(route, other))
+        for directive in ["limit_except POST { deny all; }", "client_max_body_size 10m;",
+                          "proxy_request_buffering off;", "proxy_read_timeout 120s;", "proxy_pass http://$portal_origin;"]:
+            self.assertIn(directive, block)
+        for directive in ["client_max_body_size 10m;", "proxy_request_buffering off;", "proxy_read_timeout 120s;"]:
+            self.assertEqual(text.count(directive), 1)
         self.assertIn("client_max_body_size 2m;", text)
 
     def test_account_source_peers_are_explicit_and_pinned_in_production(self):

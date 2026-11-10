@@ -13,6 +13,11 @@ const humanPermissionSources = Object.freeze([
   'account-platform/internal/account/platform_roles.go',
 ]);
 const scopePrefixes = Object.freeze({ personal: ['personal.'], platform: ['platform.'], organization: ['org.'], active: ['personal.', 'org.'] });
+const requiredActionSuffixes = new Map([
+  ['account-platform/internal/billing/organization_routes.go|POST|/internal/v1/organizations/:organization_id/quota-grants:batch', '/quota-grants:batch'],
+  ['account-platform/internal/token/management_routes.go|POST|/commands:precheck', '/commands:precheck'],
+  ['account-platform/internal/token/organization_finance_routes.go|POST|/organizations/:organization_id/account-closed-grants:reclaim-batch', '/account-closed-grants:reclaim-batch'],
+]);
 
 function routeKey(item) {
   return `${item.source}|${item.receiver}|${item.method}|${item.path}`;
@@ -85,6 +90,15 @@ export function authorizationRoutes(sourceName, sourceText) {
     recognizedSelectors.add(match.index);
     const lineStart = text.lastIndexOf('\n', match.index) + 1;
     const lineEnd = text.indexOf('\n', match.index);
+    const suffix = requiredActionSuffixes.get(`${sourceName}|${match[2]}|${match[3]}`);
+    if (suffix) {
+      const expression = text.slice(match.index + match[0].length, lineEnd < 0 ? text.length : lineEnd);
+      const firstGuard = expression.match(/^\s*,\s*httpserver\s*\.\s*RequirePathSuffix\s*\(\s*"([^"]+)"\s*\)\s*,/);
+      const guards = [...goSource(expression).masked.matchAll(/\bhttpserver\s*\.\s*RequirePathSuffix\b/g)];
+      if (firstGuard?.[1] !== suffix || guards.length !== 1) {
+        throw new Error(`invalid_path_suffix_guard:${sourceName}|${match[2]}|${match[3]}`);
+      }
+    }
     routes.push({ source: sourceName, receiver: match[1], method: match[2].toUpperCase(), path: match[3], registration: text.slice(lineStart, lineEnd < 0 ? text.length : lineEnd) });
   }
   if ([...masked.matchAll(/\.\s*Any\b/g)].length !== routes.filter(route => route.method === 'ANY').length) {

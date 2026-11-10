@@ -43,6 +43,9 @@ func TestOrdinaryRelayHealthAndMetricsRemainIndependent(t *testing.T) {
 	if !strings.Contains(text, `pinvou_authorization_relay_active_handlers{source="account"} 0`) {
 		t.Fatal("authorization gauge must not claim an active publisher")
 	}
+	if strings.Contains(text, "pinvou_authorization_relay_ready") {
+		t.Fatal("ordinary-only relay must not advertise monitored authorization readiness")
+	}
 	ready := metrics.server(":0", func(context.Context) error { return nil })
 	response = httptest.NewRecorder()
 	ready.Handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/health/ready", nil))
@@ -53,7 +56,16 @@ func TestOrdinaryRelayHealthAndMetricsRemainIndependent(t *testing.T) {
 
 func TestAuthorizationReadinessDoesNotChangeOrdinaryReadiness(t *testing.T) {
 	metrics := newRelayMetrics("account")
-	server := metrics.serverWithApproval(":0", func(context.Context) error { return nil }, func(context.Context) error { return errors.New("private dependency details") })
+	var channelReady bool
+	server := metrics.serverWithApproval(":0", func(context.Context) error { return nil }, func(ctx context.Context) error {
+		if _, ok := ctx.Deadline(); !ok {
+			t.Error("authorization readiness must have a deadline")
+		}
+		if channelReady {
+			return nil
+		}
+		return errors.New("private dependency details")
+	}, approvalMonitor{scope: "site/release", replica: "site-replica"})
 	for _, tc := range []struct {
 		path   string
 		status int
@@ -64,9 +76,17 @@ func TestAuthorizationReadinessDoesNotChangeOrdinaryReadiness(t *testing.T) {
 			t.Fatal("readiness independence or redaction failed")
 		}
 	}
-	ready := metrics.serverWithApproval(":0", func(context.Context) error { return nil }, func(context.Context) error { return nil })
+	for _, want := range []string{"0", "1"} {
+		channelReady = want == "1"
+		response := httptest.NewRecorder()
+		server.Handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+		if response.Code != 200 || strings.Contains(response.Body.String(), "private dependency") ||
+			!strings.Contains(response.Body.String(), `pinvou_authorization_relay_ready{approval_replica="site-replica",approval_scope="site/release",source="account"} `+want+"\n") {
+			t.Fatalf("metrics did not reflect the authorization check result %s", want)
+		}
+	}
 	response := httptest.NewRecorder()
-	ready.Handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/health/ready/approval-authorization", nil))
+	server.Handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/health/ready/approval-authorization", nil))
 	if response.Code != 200 {
 		t.Fatal("authorization readiness not exposed")
 	}

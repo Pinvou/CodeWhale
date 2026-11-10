@@ -8,6 +8,7 @@ import {
 import { PinvouLogo } from '../../components/PinvouLogo.jsx';
 import { MaterialInspector } from './MaterialInspector.jsx';
 import { RelayAvatar } from './RelayAvatar.jsx';
+import { relayError } from './team-relay-errors.js';
 import { TeamBoard } from './TeamBoard.jsx';
 import { invokeTauri } from '../../platform/tauri/client.js';
 import { isWeb } from '../../shared/platform.js';
@@ -58,21 +59,6 @@ function displayListTime(value) {
 
 function bridgeState(domain, fallback) {
   try { return window.TauriBridge?.state?.get(domain) || fallback; } catch { return fallback; }
-}
-
-function relayError(copy, error) {
-  const text = String(error || '');
-  const code = text.split(':', 1)[0];
-  const localized = copy.errorMessages?.[code] || text.replace(/ \[details=.*\]$/, '');
-  const match = text.match(/ \[details=(\{.*\})\]$/);
-  if (!match) return localized;
-  try {
-    const blockers = JSON.parse(match[1])?.blocking_threads;
-    if (!Array.isArray(blockers) || !blockers.length) return localized;
-    return copy.blockingWork(localized, blockers.map(item => copy.blockingThread(item)));
-  } catch {
-    return localized;
-  }
 }
 
 function LifecycleSyncWarning({ copy, busy, onRetry }) {

@@ -189,7 +189,7 @@ for (const [language, [restart, restoreRead]] of Object.entries(migrationCases))
     ['connection ended after submit', 'outcome_unknown', 'unknown', null],
   ]) {
     const item = {};
-    const submission = { clientMessageId: 'recovery-test' };
+    const submission = { clientMessageId: 'recovery-test', command: 'web_access_create_session_and_chat' };
     const firstTurn = vm.createContext({
       window: windowObject, state: { settings: { language } },
       findFirstTurnItem: () => item, firstTurnStillVisible: () => true,

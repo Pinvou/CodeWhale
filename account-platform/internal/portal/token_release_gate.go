@@ -165,6 +165,9 @@ func tokenCredentialIsolationPath(method, resource string) bool {
 	if strings.Contains(resource, "..") {
 		return false
 	}
+	if method == http.MethodHead {
+		method = http.MethodGet
+	}
 	parts := strings.Split(strings.Trim(path.Clean(resource), "/"), "/")
 	if len(parts) == 4 && parts[0] == "admin" && parts[1] == "v2" && parts[2] == "token-accounts" && method == http.MethodGet {
 		_, err := uuid.Parse(parts[3])

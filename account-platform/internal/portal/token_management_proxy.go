@@ -13,6 +13,9 @@ func (s *Service) proxyAdminToken(w http.ResponseWriter, r *http.Request) {
 		api.WriteError(w, 404, "NOT_FOUND", "the portal endpoint was not found", httpserver.RequestID(r.Context()))
 		return
 	}
+	// Let the original actor close an already issued window after either
+	// feature is disabled. The proxy still enforces session and CSRF checks,
+	// and Token verifies ownership of the window before revoking it.
 	credentialCleanup := tokenCredentialRevokeWindowPath(r.Method, resource)
 	if tokenCredentialIsolationPath(r.Method, resource) && !credentialCleanup && (!s.config.AdminTokenDetailsEnabled || s.config.CredentialOrigin == nil) {
 		api.WriteError(w, 404, "NOT_FOUND", "the portal endpoint was not found", httpserver.RequestID(r.Context()))

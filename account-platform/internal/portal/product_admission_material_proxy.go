@@ -6,12 +6,18 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/api"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
 )
 
 const productAdmissionMaterialLimit int64 = 10 << 20
+
+// Keep the ordinary API at 15s. The original upload includes Billing's
+// bounded validation, Transit encryption and persistence after body ingress.
+const productAdmissionMaterialUpstreamTimeout = 70 * time.Second
+const productAdmissionMaterialWriteTimeout = 105 * time.Second
 
 func productAdmissionMaterialPathAllowed(method, resource string) bool {
 	parts := strings.Split(strings.TrimPrefix(resource, "/"), "/")

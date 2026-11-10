@@ -137,6 +137,28 @@ function assertAccountFailurePolicy(job) {
 
 
 const goStepName = "Test and vet all Account Platform Go modules";
+const goGatePhase = "PINVOU_GO_GATE_PHASE";
+
+// Only fixed fixture markers and process metadata enter this diagnostic. Do
+// not dump the inherited environment, arbitrary commands or native error text.
+function goGateDiagnostic(result, elapsedMs) {
+  const phases = (result.stderr || "").split(/\r?\n/)
+    .filter(line => /^PINVOU_GO_GATE_PHASE\|(bash-start|fixture-ready|gate-complete|shell-exit:[0-9]+|go:(test|vet):(begin|complete))$/.test(line));
+  const token = value => typeof value === "string" && /^[A-Z0-9_]+$/.test(value) ? value : null;
+  return JSON.stringify({ status: result.status ?? null, signal: token(result.signal),
+    errorCode: token(result.error?.code), elapsedMs: Math.round(elapsedMs), phases });
+}
+
+function runGoGateFixture(prefix, run, directory) {
+  const script = `printf '${goGatePhase}|bash-start\\n' >&2\n`
+    + `trap 'fixture_status=$?; printf "${goGatePhase}|shell-exit:%s\\n" "$fixture_status" >&2' EXIT\n`
+    + prefix + `printf '${goGatePhase}|fixture-ready\\n' >&2\n`
+    + run + `\nprintf '${goGatePhase}|gate-complete\\n' >&2\n`;
+  const started = performance.now();
+  const result = spawnSync(bash, ["-c", script], { cwd: directory, encoding: "utf8", timeout: 30_000, windowsHide: true });
+  return { ...result, diagnostic: goGateDiagnostic(result, performance.now() - started) };
+}
+
 const auditPGStepName = "Audit export finite PostgreSQL rollback and persisted boundaries";
 const existingBrokerStepName = "Existing broker compatibility on owned PostgreSQL and TLS NATS";
 const pgPreflightStepName = "Verify account CI PostgreSQL service isolation";
@@ -234,6 +256,24 @@ function assertWorkflowFailurePolicy(workflowText) {
     remainder = remainder.replace(receipt, "");
   }
   {
+    const receipt = namedStep(jobBlock("windows-codex-runtime-test", text), "Preserve browser fixture exit receipts");
+    assert.equal(receipt.trimEnd(), [
+      "      - name: Preserve browser fixture exit receipts",
+      "        if: always()",
+      "        timeout-minutes: 3",
+      "        continue-on-error: true",
+      "        uses: actions/upload-artifact@v7",
+      "        with:",
+      "          name: windows-browser-exit-${{ github.run_id }}-${{ github.run_attempt }}",
+      "          retention-days: 7",
+      "          if-no-files-found: warn",
+      "          path: |",
+      "            ${{ runner.temp }}/windows-browser-*-${{ github.run_id }}-${{ github.run_attempt }}.json",
+      "            ${{ runner.temp }}/windows-browser-*-${{ github.run_id }}-${{ github.run_attempt }}-resources/*.json",
+    ].join("\n"));
+    remainder = remainder.replace(receipt, "");
+  }
+  {
     const receipt = namedStep(jobBlock("account-platform-test", text), "Account test resource lifecycle receipts");
     assert.equal(receipt.trimEnd(), [
       "      - name: Account test resource lifecycle receipts",
@@ -255,7 +295,7 @@ function assertWorkflowFailurePolicy(workflowText) {
   // Explicit YAML keys may put comments/newlines before their value indicator.
   const keySeparator = String.raw`(?:\s|#[^\n]*(?:\n|$))*:`;
   assert.doesNotMatch(remainder, new RegExp(String.raw`\bcontinue-on-error\s*['"]?` + keySeparator),
-    "only the four exact reviewed diagnostic steps may be advisory in any job");
+    "only the five exact reviewed diagnostic steps may be advisory in any job");
   // YAML double-quoted keys decode numeric escapes and escaped line breaks.
   // Inspect each possible quoted key, including inside flow mappings. A
   // lookahead avoids a quote in unrelated shell text hiding a later real key.
@@ -306,6 +346,7 @@ test("all workflow legs reject unreviewed job and step failure exemptions", () =
   for (const [jobName, stepName] of [
     ["frontend-test", "Test resource lifecycle receipts"],
     ["account-platform-test", "Account test resource lifecycle receipts"],
+    ["windows-codex-runtime-test", "Preserve browser fixture exit receipts"],
   ]) {
     const receipt = namedStep(jobBlock(jobName, original), stepName);
     const withoutReceiptExemption = original.replace(receipt,
@@ -812,9 +853,16 @@ test("Go gate executes test and vet for root and future nested modules, and fail
       mkdirSync(join(directory, module), { recursive: true });
       writeFileSync(join(directory, module, "go.mod"), "module example.test/fixture\n");
     }
-    const prefix = "go() { printf '%s|%s\\n' \"$PWD\" \"$*\"; }; export -f go;\n";
-    const result = spawnSync(bash, ["-c", prefix + run], { cwd: directory, encoding: "utf8", timeout: 30_000, windowsHide: true });
-    assert.equal(result.status, 0, result.stderr);
+    const traceStart = `printf '${goGatePhase}|go:%s:begin\\n' "$1" >&2; `;
+    const traceEnd = `printf '${goGatePhase}|go:%s:complete\\n' "$1" >&2; `;
+    const prefix = `go() { ${traceStart}printf '%s|%s\\n' "$PWD" "$*"; ${traceEnd}}; export -f go;\n`;
+    const result = runGoGateFixture(prefix, run, directory);
+    assert.equal(result.status, 0, result.diagnostic);
+    const successPhases = JSON.parse(result.diagnostic).phases;
+    assert.equal(successPhases.filter(line => line.endsWith(":begin")).length, 6);
+    assert.equal(successPhases.filter(line => line.endsWith(":complete")).length, 6);
+    assert.ok(successPhases.includes(`${goGatePhase}|gate-complete`));
+    assert.equal(successPhases.at(-1), `${goGatePhase}|shell-exit:0`);
     const calls = result.stdout.split("\n").filter((line) => line.includes("|"));
     assert.equal(calls.length, 6, result.stdout);
     for (const module of ["account-platform", "account-platform/tools/kms-recovery", "account-platform/tools/future tool"]) {
@@ -824,14 +872,25 @@ test("Go gate executes test and vet for root and future nested modules, and fail
       assert.ok(moduleCalls.some((line) => line.endsWith("|vet -tags=nomsgpack -mod=readonly ./...")));
     }
     for (const command of ["test", "vet"]) {
-      const failed = spawnSync(bash, ["-c", `go() { if [[ "$1" == "${command}" ]]; then return 7; fi; }; export -f go;\n` + run], { cwd: directory, encoding: "utf8", timeout: 30_000, windowsHide: true });
-      assert.equal(failed.status, 7, `a failing go ${command} must fail the gate: ${failed.stderr}`);
-      const nestedFailed = spawnSync(bash, ["-c", `go() { if [[ "$PWD" == */"tools/future tool" && "$1" == "${command}" ]]; then return 7; fi; }; export -f go;\n` + run], { cwd: directory, encoding: "utf8", timeout: 30_000, windowsHide: true });
-      assert.equal(nestedFailed.status, 7, `a failing nested-module go ${command} must fail the gate: ${nestedFailed.stderr}`);
+      const failed = runGoGateFixture(`go() { ${traceStart}if [[ "$1" == "${command}" ]]; then return 7; fi; ${traceEnd}}; export -f go;\n`, run, directory);
+      assert.equal(failed.status, 7, `a failing go ${command} must fail the gate: ${failed.diagnostic}`);
+      assert.equal(JSON.parse(failed.diagnostic).phases.at(-1), `${goGatePhase}|shell-exit:7`);
+      const nestedFailed = runGoGateFixture(`go() { ${traceStart}if [[ "$PWD" == */"tools/future tool" && "$1" == "${command}" ]]; then return 7; fi; ${traceEnd}}; export -f go;\n`, run, directory);
+      assert.equal(nestedFailed.status, 7, `a failing nested-module go ${command} must fail the gate: ${nestedFailed.diagnostic}`);
+      assert.equal(JSON.parse(nestedFailed.diagnostic).phases.at(-1), `${goGatePhase}|shell-exit:7`);
     }
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
+});
+
+test("Go gate diagnostics retain null exits, error codes and only fixed phase markers", () => {
+  const diagnostic = JSON.parse(goGateDiagnostic({ status: null, signal: "SIGTERM", error: { code: "ETIMEDOUT", message: "private native detail" },
+    stderr: `${goGatePhase}|bash-start\n${goGatePhase}|fixture-ready\nprivate environment or command\n${goGatePhase}|untrusted detail\n` }, 30_025.3));
+  assert.deepEqual(diagnostic, { status: null, signal: "SIGTERM", errorCode: "ETIMEDOUT", elapsedMs: 30_025,
+    phases: [`${goGatePhase}|bash-start`, `${goGatePhase}|fixture-ready`] });
+  assert.throws(() => assert.equal(diagnostic.status, 0), /null/);
+  assert.equal(JSON.parse(goGateDiagnostic({ status: null, error: { code: "ENOENT" } }, 2)).errorCode, "ENOENT");
 });
 
 test("named Go step extraction excludes later YAML and fails closed on missing or duplicate names", () => {

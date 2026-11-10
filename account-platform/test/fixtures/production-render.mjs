@@ -135,12 +135,13 @@ export function currentRenderFixture(kind, profile = 'personal', settings = {}) 
     };
   } else {
     const defaults = YAML.parse(readFileSync(resolve(repositoryRoot, 'account-platform/deploy/helm/account-platform/values.yaml'), 'utf8'));
+    const { external } = YAML.parse(readFileSync(new URL('./production-site-network.yaml', import.meta.url), 'utf8'));
     const images = Object.fromEntries(Object.keys(defaults.images).map(key => [key,
       key === 'newApiTLS' ? { repository: 'registry.fixture.invalid/newapi-tls', digest: `sha256:${'a'.repeat(64)}` }
         : key === 'newApi' ? { repository: 'registry.fixture.invalid/newapi', tag: 'fixture', digest: `sha256:${'a'.repeat(64)}` }
           : { repository: `registry.fixture.invalid/${key.toLowerCase()}`, tag: 'fixture', digest: `sha256:${'a'.repeat(64)}` }]));
     fixture.recipe = { kind, namespace: 'public-fixture', release: 'public-fixture',
-      valuesFile: file('helm-values.json', JSON.stringify({ images,
+      valuesFile: file('helm-values.json', JSON.stringify({ images, external,
         global: { manualReviewOnCallUserIds: [subjects['account-service']] },
         ...(settings.credentialPortal ? { public: { portalUrl: 'https://account.pinvou.com' },
           tokenGateway: { runtimeSecret: 'public-fixture-gateway' },

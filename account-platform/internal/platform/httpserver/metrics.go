@@ -18,6 +18,7 @@ import (
 type httpMetrics struct {
 	requests  *prometheus.CounterVec
 	aborts    *prometheus.CounterVec
+	hijacks   *prometheus.CounterVec
 	duration  *prometheus.HistogramVec
 	inFlight  prometheus.Gauge
 	readiness prometheus.Gauge
@@ -29,12 +30,13 @@ func newHTTPMetrics(service string, collectors ...prometheus.Collector) *httpMet
 	metrics := &httpMetrics{
 		requests:  prometheus.NewCounterVec(prometheus.CounterOpts{Name: "pinvou_http_requests_total", Help: "Completed account platform HTTP requests; interrupted responses are aborted unless an already-written 5xx status is retained.", ConstLabels: labels}, []string{"method", "route", "status"}),
 		aborts:    prometheus.NewCounterVec(prometheus.CounterOpts{Name: "pinvou_http_response_aborts_total", Help: "HTTP responses aborted before completion.", ConstLabels: labels}, []string{"method", "route"}),
+		hijacks:   prometheus.NewCounterVec(prometheus.CounterOpts{Name: "pinvou_http_response_hijacks_total", Help: "HTTP connections handed over to the application; not evidence of completed response delivery.", ConstLabels: labels}, []string{"method", "route"}),
 		duration:  prometheus.NewHistogramVec(prometheus.HistogramOpts{Name: "pinvou_http_request_duration_seconds", Help: "Account platform HTTP request latency.", ConstLabels: labels, Buckets: []float64{0.005, 0.01, 0.025, 0.05, 0.1, 0.2, 0.5, 1, 2, 5}}, []string{"method", "route"}),
 		inFlight:  prometheus.NewGauge(prometheus.GaugeOpts{Name: "pinvou_http_in_flight_requests", Help: "Account platform HTTP requests currently executing.", ConstLabels: labels}),
 		readiness: prometheus.NewGauge(prometheus.GaugeOpts{Name: "pinvou_service_readiness", Help: "Whether the service's critical request dependencies are ready.", ConstLabels: labels}),
 		registry:  prometheus.NewRegistry(),
 	}
-	metrics.registry.MustRegister(metrics.requests, metrics.aborts, metrics.duration, metrics.inFlight, metrics.readiness)
+	metrics.registry.MustRegister(metrics.requests, metrics.aborts, metrics.hijacks, metrics.duration, metrics.inFlight, metrics.readiness)
 	if len(collectors) > 0 {
 		metrics.registry.MustRegister(collectors...)
 	}
@@ -67,10 +69,19 @@ func (metrics *httpMetrics) middleware(next http.Handler, logger *slog.Logger) h
 			status := strconv.Itoa(wrapped.status)
 			if aborted && !(wrapped.wroteHeader && wrapped.status >= 500 && wrapped.status < 600) {
 				status = "aborted"
+			} else if wrapped.hijacked && !wrapped.wroteHeader {
+				status = "hijacked"
 			}
 			method := metricMethod(r.Method)
 			if aborted {
 				metrics.aborts.WithLabelValues(method, route).Inc()
+			}
+			if wrapped.hijacked {
+				metrics.hijacks.WithLabelValues(method, route).Inc()
+			}
+			var loggedStatus any = wrapped.status
+			if !wrapped.wroteHeader && (aborted || wrapped.hijacked) {
+				loggedStatus = status
 			}
 			requestCounter := metrics.requests.WithLabelValues(method, route, status)
 			durationObserver := metrics.duration.WithLabelValues(method, route)
@@ -84,9 +95,11 @@ func (metrics *httpMetrics) middleware(next http.Handler, logger *slog.Logger) h
 				durationObserver.Observe(elapsed.Seconds())
 			}
 			if aborted {
-				logger.ErrorContext(r.Context(), "http request completed", "method", r.Method, "route", route, "status", wrapped.status, "duration_ms", elapsed.Milliseconds(), "error_code", "HTTP_RESPONSE_ABORTED")
+				logger.ErrorContext(r.Context(), "http request completed", "method", r.Method, "route", route, "status", loggedStatus, "duration_ms", elapsed.Milliseconds(), "error_code", "HTTP_RESPONSE_ABORTED")
+			} else if wrapped.hijacked {
+				logger.InfoContext(r.Context(), "http request completed", "method", r.Method, "route", route, "status", loggedStatus, "duration_ms", elapsed.Milliseconds(), "error_code", "HTTP_RESPONSE_HIJACKED")
 			} else {
-				logger.InfoContext(r.Context(), "http request completed", "method", r.Method, "route", route, "status", wrapped.status, "duration_ms", elapsed.Milliseconds())
+				logger.InfoContext(r.Context(), "http request completed", "method", r.Method, "route", route, "status", loggedStatus, "duration_ms", elapsed.Milliseconds())
 			}
 			if recovered != nil {
 				panic(recovered)
@@ -110,6 +123,7 @@ type metricResponseWriter struct {
 	http.ResponseWriter
 	status      int
 	wroteHeader bool
+	hijacked    bool
 }
 
 func (writer *metricResponseWriter) WriteHeader(status int) {
@@ -141,7 +155,11 @@ func (writer *metricResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error
 	if !ok {
 		return nil, nil, fmt.Errorf("response writer does not support hijacking")
 	}
-	return hijacker.Hijack()
+	connection, buffer, err := hijacker.Hijack()
+	if err == nil {
+		writer.hijacked = true
+	}
+	return connection, buffer, err
 }
 
 func (writer *metricResponseWriter) Push(target string, options *http.PushOptions) error {

@@ -324,7 +324,10 @@ for (const code of ['permission_denied', 'outcome_unknown']) {
     Object.assign(h.context, { findFirstTurnItem: () => ({}), firstTurnStillVisible: () => true,
       restoreFirstTurnUiState() {}, invokeWithRequestId: async () => { throw Object.assign(new Error(code), { code }); } });
     vm.runInContext(`${sources.web.slice(start, end)}\nthis.runFirstTurnSubmission = runFirstTurnSubmission;`, h.context);
-    const submission = { voiceOperationId: operation.operationId, clientMessageId: 'first-turn' };
+    const submission = {
+      voiceOperationId: operation.operationId, clientMessageId: 'first-turn',
+      command: 'web_access_create_session_and_chat',
+    };
     await h.context.runFirstTurnSubmission(submission);
     assert.equal(operation.pendingSubmission, code === 'outcome_unknown');
     assert.equal(h.api.getVoiceOperationId(null, 'chat'), code === 'outcome_unknown' ? null : operation.operationId);
@@ -885,7 +888,10 @@ for (const lane of ['desktop', 'web']) {
             'makeQueuedMessage', 'rebuiltQueuedPayload', 'rebuiltQueuedMetaPayload']
             .map(name => `this.${name} = (...args) => this.pinvouSharedwebSend().${name}(...args);`).join('\n'), ctx);
         }
-        if (lane === 'web') functions.push('restoreAbortedMaterialization', 'maybeSubmitFirstWebTurn');
+        if (lane === 'web') {
+          Object.assign(ctx, { ensureSessionInFlight: null, ensureSessionDraftOutcome: null });
+          functions.push('restoreAbortedMaterialization', 'maybeSubmitFirstWebTurn', 'isCurrentMaterialization', 'hasPendingMaterialization');
+        }
         vm.runInContext(functions.map(name => bridgeFunction(sendSource, name)).join('\n'), ctx);
         // 信封函数经簇访问（其内部的 mention 拆分依赖注入的 window 域），
         // 不再单独提取 helpers 谓词体。

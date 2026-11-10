@@ -25,6 +25,8 @@ type EmergencyModelCancellationWorker struct {
 	batchSize  int
 }
 
+const emergencyCancellationFailure = "model emergency cancellation failed"
+
 func NewEmergencyModelCancellationWorker(repository *PostgresRepository, service *Service, interval time.Duration) *EmergencyModelCancellationWorker {
 	if interval <= 0 {
 		interval = 5 * time.Second
@@ -47,20 +49,23 @@ func (w *EmergencyModelCancellationWorker) Run(ctx context.Context) {
 
 func (w *EmergencyModelCancellationWorker) runOnce(ctx context.Context) error {
 	if w == nil || w.repository == nil || w.service == nil || w.service.cancellationStore == nil || w.service.cancellationBilling == nil || w.service.cancellationAdapter == nil {
+		reportTokenWorkerFailure(ctx, emergencyCancellationFailure, "configure", ErrForbidden)
 		return ErrForbidden
 	}
 	if err := w.repository.syncEmergencyCancellationTargets(ctx); err != nil {
+		reportTokenWorkerFailure(ctx, emergencyCancellationFailure, "sync_targets", err)
 		return err
 	}
 	targets, err := w.repository.claimEmergencyCancellations(ctx, w.batchSize)
 	if err != nil {
+		reportTokenWorkerFailure(ctx, emergencyCancellationFailure, "claim_targets", err)
 		return err
 	}
 	capability := w.service.cancellationAdapter.CancelCapability()
 	for _, target := range targets {
 		preDispatch, terminal, requestErr := w.repository.requestEmergencyCancellation(ctx, target, capability, w.service.upstream.AdapterVersion())
 		if requestErr != nil {
-			_ = w.repository.retryEmergencyCancellation(ctx, target, requestErr)
+			w.retryTarget(ctx, target, "request_cancellation", requestErr)
 			continue
 		}
 		aborted := false
@@ -72,14 +77,26 @@ func (w *EmergencyModelCancellationWorker) runOnce(ctx context.Context) error {
 			}
 		}
 		if requestErr != nil {
-			_ = w.repository.retryEmergencyCancellation(ctx, target, requestErr)
+			w.retryTarget(ctx, target, "finish_pre_dispatch", requestErr)
 			continue
 		}
 		if err := w.repository.recordEmergencyCancellationAttempt(ctx, target, capability, aborted, preDispatch, terminal); err != nil {
-			_ = w.repository.retryEmergencyCancellation(ctx, target, err)
+			w.retryTarget(ctx, target, "record_attempt", err)
 		}
 	}
-	return w.repository.finalizeEmergencyCancellations(ctx, w.batchSize)
+	err = w.repository.finalizeEmergencyCancellations(ctx, w.batchSize)
+	if err != nil {
+		reportTokenWorkerFailure(ctx, emergencyCancellationFailure, "finalize_targets", err)
+	}
+	return err
+}
+
+func (w *EmergencyModelCancellationWorker) retryTarget(ctx context.Context, target EmergencyCancellationTarget, stage string, cause error) {
+	err := w.repository.retryEmergencyCancellation(ctx, target, cause)
+	reportTokenWorkerFailure(ctx, emergencyCancellationFailure, stage, cause)
+	if err != nil {
+		reportTokenWorkerFailure(ctx, emergencyCancellationFailure, "persist_retry", err)
+	}
 }
 
 func (r *PostgresRepository) syncEmergencyCancellationTargets(ctx context.Context) error {

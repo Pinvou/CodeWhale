@@ -24,6 +24,8 @@ recipe 是 JSON 对象：
 
 Helm 使用当前 chart、`values-production-new.yaml` 与私有站点 values，保留三域 `pre-install,pre-upgrade`、权重和删除策略。Secret 快照是离线配置输入，工具不调用 Kubernetes，不证明快照等于当前已安装 Secret；缺少被消费的 key 明确失败，optional key 可为空，但生产迁移的备份 key 始终必需。系统 CA 的 DSN 使用 `sslrootcert=system`；当前迁移 scratch 镜像已包含系统根证书。该模式不需要额外 pgpass/CA volume。Compose 的文件式 CA 和 pgpass 则必须来自准确只读 bind，并实际存在且没有 symlink 路径。
 
+仓库的 Helm 环境 values 只提供配置骨架。由最后加载的私有站点 values 提供实际依赖的 `external.*Cidrs`，渲染后核对每条 NetworkPolicy 的目标网段和端口。
+
 inventory 是 JSON，包含：
 
 | 字段 | 含义 |

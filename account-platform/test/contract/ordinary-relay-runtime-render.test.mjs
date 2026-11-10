@@ -38,13 +38,26 @@ function execute(binary, args, environment) {
   assert.equal(result.status, 0, `real config renderer failed: ${result.stderr}`);
   return result.stdout;
 }
-function renderHelm(native, environment, directory = chart) {
+function renderHelm(native, environment, directory = chart, authorizationRequired = false) {
   const text = execute(process.env.PINVOU_TEST_KMS_HELM_BINARY || 'helm', ['template', 'ordinary-relay-contract', directory,
     '--namespace', 'ordinary-relay-contract', '-f', join(directory, 'values-model-token-test.yaml'),
-    ...(native ? ['-f', join(directory, 'values-kms-native-test.yaml')] : []), '--set', 'observability.prometheusRulesEnabled=true', '--set', 'availability.enabled=true'], environment);
+    ...(native ? ['-f', join(directory, 'values-kms-native-test.yaml')] : []), '--set', 'observability.prometheusRulesEnabled=true', '--set', 'availability.enabled=true',
+    '--set', `approvalRelay.requireReady=${authorizationRequired}`], environment);
   const documents = YAML.parseAllDocuments(text, { uniqueKeys: true });
   assert.ok(documents.every(document => document.errors.length === 0));
   return documents.map(document => document.toJSON()).filter(Boolean);
+}
+const authorizationURL = 'http://127.0.0.1:9090/health/ready/approval-authorization';
+
+function checkHelmAuthorization(items, required) {
+  const relay = name => items.find(item => item.kind === 'Deployment' && component(item) === name).spec.template.spec.containers[0];
+  assert.equal(env(relay('account-event-relay')).HEALTHCHECK_URL, required ? authorizationURL : undefined);
+  assert.equal(env(relay('account-event-relay')).APPROVAL_RELAY_MONITOR_SCOPE, required ? 'ordinary-relay-contract/ordinary-relay-contract' : undefined);
+  assert.equal(env(relay('billing-event-relay')).APPROVAL_RELAY_MONITOR_SCOPE, undefined);
+  const groups = items.find(item => item.kind === 'PrometheusRule').spec.groups;
+  const group = groups.find(item => item.name === 'account-platform.approval-authorization');
+  assert.equal(group?.rules.length, required ? 4 : undefined);
+  assert.ok(!required || group.rules.every(rule => rule.expr.includes('approval_scope="ordinary-relay-contract/ordinary-relay-contract"')));
 }
 function checkProbes(raw, names) {
   const probes = JSON.parse(raw).filter(item => item.kind === 'relay');
@@ -156,7 +169,12 @@ for (const native of [false, true]) test(`actual Helm ordinary relay runtime, pr
 }, () => {
   const directory = mkdtempSync(join(tmpdir(), 'pinvou-relay-runtime-'));
   try {
-    const environment = isolatedEnvironment(directory); checkHelm(renderHelm(native, environment));
+    const environment = isolatedEnvironment(directory);
+    for (const required of [false, true]) {
+      const rendered = renderHelm(native, environment, chart, required);
+      checkHelm(rendered);
+      checkHelmAuthorization(rendered, required);
+    }
     const copy = join(directory, 'chart'); cpSync(chart, copy, { recursive: true });
     const path = join(copy, 'templates/event-relays.yaml'), original = readFileSync(path, 'utf8');
     assert.ok(original.includes('list "account" "billing"'));
@@ -176,7 +194,13 @@ for (const mode of ['base', 'remote', 'native']) test(`actual Compose ordinary r
   try {
     const environment = isolatedEnvironment(directory);
     const files = mode === 'base' ? ['compose.yaml'] : ['compose.yaml', 'compose.model-token.yaml'];
-    checkCompose(renderCompose(mode === 'native', environment, files));
+    const rendered = renderCompose(mode === 'native', environment, files);
+    checkCompose(rendered);
+    const account = rendered.services['account-event-relay'].environment;
+    assert.equal(account.HEALTHCHECK_URL, 'http://127.0.0.1:9090/health/ready');
+    assert.equal(account.APPROVAL_RELAY_HEALTHCHECK_URL, mode === 'base' ? undefined : authorizationURL);
+    assert.equal(account.APPROVAL_RELAY_MONITOR_SCOPE, mode === 'base' ? undefined : rendered.name);
+    assert.equal(rendered.services['billing-event-relay'].environment.APPROVAL_RELAY_HEALTHCHECK_URL, undefined);
     const retired = join(directory, 'retired-runtime.yaml');
     writeFileSync(retired, 'services:\n  token-event-relay:\n    image: controlled-retired-event-relay\n    environment: { EVENT_SOURCE: token }\n');
     assert.throws(() => checkCompose(renderCompose(mode === 'native', environment, [...files, retired])), /retired ordinary relay/);

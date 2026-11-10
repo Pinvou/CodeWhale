@@ -136,6 +136,7 @@
     "web_access_create_codex_acp_session",
     "web_access_create_session",
     "web_access_create_session_and_chat",
+    "web_access_create_session_and_chat_with_model",
     "web_access_get_codex_acp_timeline",
     "web_access_get_codex_acp_session_info",
     "web_access_get_codex_acp_pending_permissions",

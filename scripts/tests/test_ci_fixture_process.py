@@ -3,6 +3,7 @@ import ctypes
 import importlib.util
 import json
 import os
+import shutil
 from pathlib import Path
 import subprocess
 import sys
@@ -36,6 +37,35 @@ def alive(pid):
 
 @unittest.skipUnless(sys.platform in ('win32', 'linux'), 'process scope supports CI operating systems')
 class ProcessScopeTests(unittest.TestCase):
+    @unittest.skipUnless(shutil.which('node'), 'Node is required for the actual JavaScript signal hook')
+    def test_failed_fixture_signal_keeps_receipt_and_supervisor_retires_owned_descendant(self):
+        node = shutil.which('node')
+        fixture = (SUPERVISOR.parents[1] / 'pinvou3-app/tests/helpers/fixture-scope.mjs').as_uri()
+        script = """
+import { spawn } from 'node:child_process';
+import { once } from 'node:events';
+const { fixtureScope } = await import(FIXTURE);
+fixtureScope.register({kind:'probe',id:'signal-owned',close(){throw new Error('primary fixture close failure')},remove(){throw new Error('unconfirmed resource must not be removed')}});
+const child = spawn(process.execPath,['-e',"process.send({pid:process.pid});setInterval(()=>{},1000)"],{detached:true,stdio:['ignore','ignore','ignore','ipc']});
+const [ready] = await once(child,'message');
+console.log('OWNED_CHILD_PID='+ready.pid);
+child.disconnect(); child.unref();
+setInterval(()=>{},1000);
+if (process.platform === 'win32') process.emit('SIGTERM');
+else process.kill(process.pid,'SIGTERM');
+""".replace('FIXTURE', json.dumps(fixture))
+        source = 'import subprocess,sys;sys.exit(subprocess.run(' + repr([node, '--input-type=module', '--eval', script]) + ').returncode)'
+        with tempfile.TemporaryDirectory() as directory:
+            p, receipt, receipt_path = self.invoke(source, directory)
+            self.assertEqual(p.returncode, 1, p.stderr)
+            self.assertIn('primary fixture close failure', p.stderr)
+            self.assertTrue(receipt['cleanup_failed'], 'the surviving descendant must require supervisor intervention')
+            self.assertEqual(receipt['state'], 'released')
+            ledger = receipt_path.parent / (receipt_path.stem + '-resources') / 'signal-owned.json'
+            self.assertEqual(json.loads(ledger.read_text())['state'], 'unconfirmed')
+            pid = int(p.stdout.split('OWNED_CHILD_PID=')[1].splitlines()[0])
+            self.assertFalse(alive(pid))
+
     def invoke(self, source, directory, name='receipt'):
         receipt = Path(directory) / (name + '.json')
         p = subprocess.run([sys.executable, str(SUPERVISOR), '--receipt', str(receipt), '--cleanup-seconds', '0.2', '--', sys.executable, '-c', source], capture_output=True, text=True, timeout=15)

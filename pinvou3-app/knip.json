@@ -62,7 +62,8 @@
     "^/@id/react$",
     "^/@id/react-dom/client$",
     "^/features/team-relay/TeamRelayView.jsx$",
-    "^/shared/i18n.js$"
+    "^/shared/i18n.js$",
+    "^/platform/tauri/bridge/team-relay\\.js$"
   ],
   "ignoreDependencies": [
     "lightningcss"

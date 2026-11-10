@@ -919,6 +919,10 @@ func (s *Service) forward(w http.ResponseWriter, r *http.Request, upstream *url.
 		if !s.allowFinanceUpload(w, r, session, "platform.products.publish", "product publishing") {
 			return
 		}
+		if err := http.NewResponseController(w).SetWriteDeadline(time.Now().Add(productAdmissionMaterialWriteTimeout)); err != nil {
+			api.WriteError(w, http.StatusServiceUnavailable, "ADMISSION_MATERIAL_UNAVAILABLE", "product admission upload transport is unavailable", httpserver.RequestID(r.Context()))
+			return
+		}
 		limit = productAdmissionMaterialLimit
 	}
 	if authenticated && upstream == s.config.BillingURL && r.Method == http.MethodPost && resource == "/admin/v1/reconciliation-imports" {
@@ -1003,6 +1007,11 @@ func (s *Service) forward(w http.ResponseWriter, r *http.Request, upstream *url.
 		}
 	}
 	client := s.client
+	if materialUpload {
+		uploadClient := *client
+		uploadClient.Timeout = productAdmissionMaterialUpstreamTimeout
+		client = &uploadClient
+	}
 	var setup *time.Timer
 	if auditDownload {
 		client = s.auditClient
@@ -1045,8 +1054,7 @@ func (s *Service) forward(w http.ResponseWriter, r *http.Request, upstream *url.
 		}
 		return
 	}
-	w.WriteHeader(response.StatusCode)
-	_, _ = io.Copy(w, io.LimitReader(response.Body, 32<<20))
+	forwardOrdinaryAPIResponse(w, r, response)
 }
 
 // This read has an Account-owned durable audit and quota outcome. HEAD is not

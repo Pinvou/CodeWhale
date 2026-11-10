@@ -1,6 +1,6 @@
 # 图片校验器 socket 重启设计草案
 
-状态：**重启恢复仅设计、未实现和验证；校验器默认关闭**。本文不授权清理现有目录、启动工作负载或调整凭证保全策略。独立校验器候选由 [PR #2213](https://github.com/Pinvou/pinvou3/pull/2213) 跟踪，源码位于 `account-platform/cmd/evidence-image-validator/`，尚未接入 Billing 上传、Helm 或 Compose。
+状态：**同目录自动恢复仍是设计草案；校验器默认关闭**。独立校验器已接入 Billing 原件上传。[现场验收手册](../deploy/runbooks/formal-product-admission-acceptance.md)使用隔离 Compose 装配，保留手动更换专属空目录的恢复边界。
 
 ## 已观察的现状
 
@@ -16,7 +16,7 @@ Go 默认收到 SIGTERM 时退出，当前候选不安装优雅退出处理，�
 
 Kubernetes emptyDir 在 **容器重启时保留**，init container 也不因单个 worker 容器重启重新执行。因此，在当前候选不自动 unlink 的设计下，同一 Pod 内 worker 重启可能被旧 socket 阻塞；直接重启容器不等于得到新目录。应在设计中明确由受控流程重建整个 Pod，而不是声称会自动恢复。Pod 重建期间 Billing 对校验器不可用必须失败关闭，不能绕过图片校验。多个 Billing 副本各用本地专用目录；滚动更新或并行 Pod 可能使总 worker 数和资源总量增加，需单独限额与验证。
 
-Compose 不能把任意 host bind 路径当作 tmpfs。需要外部受控流程先验证专属挂载的类型、路径、owner、组和权限；关闭旧实例并确认其容器及全部子进程已退出后，安全替换或销毁该专属目录，再启动新实例。若身份、挂载、进程或清理边界不明，则保留原状并拒绝启动。Compose profile 不能条件化已合并的 Billing 挂载；默认不加载该 overlay，候选没有部署接线。
+Compose 不能把任意 host bind 路径当作 tmpfs。需要外部受控流程先验证专属挂载的类型、路径、owner、组和权限；关闭旧实例并确认其容器及全部子进程已退出后，安全替换或销毁该专属目录，再启动新实例。若身份、挂载、进程或清理边界不明，则保留原状并拒绝启动。Compose profile 不能条件化已合并的 Billing 挂载，因此隔离验收须显式加载 overlay。
 
 ## 可研究的同目录恢复方案
 
@@ -40,4 +40,4 @@ Compose 不能把任意 host bind 路径当作 tmpfs。需要外部受控流程�
 - 在 Kubernetes 验证单容器重启会保留 emptyDir、重建 Pod 后目录隔离、滚动更新与副本资源上限；在 Compose 验证独立 tmpfs、容器及子进程退出和受控目录重建。验证重建失败时 Billing 仍拒绝上传。
 - 验证独立 cgroup 的 memory/cpu/pids、worker 无业务凭据、网络与 core/swap 限制，以及 4,000 万像素极端 PNG/JPEG 的峰值、超时和 OOM；2 GiB 仅为测试起点。渲染、交叉编译和 Windows Job 数据不能证明上述限制。
 
-在上述证据及独立审核完成前，既不接入用户上传，也不声称可恢复或可交付。
+正式启用前须完成实际采用的恢复方案的 Linux 证据和独立审核。同目录自动恢复的额外负例仅在采用该方案时适用。
