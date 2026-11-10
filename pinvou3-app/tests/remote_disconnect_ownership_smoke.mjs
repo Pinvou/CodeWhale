@@ -1,6 +1,5 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import react from '@vitejs/plugin-react';
@@ -14,18 +13,22 @@ const chrome = process.env.CHROME || [
   '/usr/bin/chromium', '/usr/bin/google-chrome',
 ].find(candidate => fs.existsSync(candidate));
 if (!chrome) { console.error('SKIP: Chrome/Edge unavailable'); process.exit(2); }
-const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'pinvou-remote-disconnect-'));
-function removeOwnedProfile() {
-  const resolved = fs.realpathSync(profile);
-  if (path.dirname(resolved) !== fs.realpathSync(os.tmpdir())) throw new Error('Unexpected profile parent');
-  fs.rmSync(resolved, { recursive: true, force: true });
-}
 let browser, vite;
+async function closeFixtures() {
+  const errors = [];
+  for (const fixture of [browser, vite]) {
+    try {
+      if (fixture) await fixture.close();
+    } catch (error) { errors.push(error); }
+  }
+  return errors;
+}
+const failures = [];
 try {
   vite = await createServer({ root, configFile: false, appType: 'mpa', logLevel: 'error',
     plugins: [react()], server: { host: '127.0.0.1', port: 0, watch: null } });
   await vite.listen();
-  browser = await puppeteer.launch({ executablePath: chrome, headless: true, userDataDir: profile,
+  browser = await puppeteer.launch({ executablePath: chrome, headless: true,
     args: [...(process.env.CI === 'true' ? ['--no-sandbox'] : []), '--disable-gpu', '--no-first-run'] });
   const page = await browser.newPage();
   const errors = [];
@@ -99,9 +102,11 @@ try {
     await page.waitForSelector('[role="dialog"]', { hidden: true });
   }
   assert.deepEqual(errors, []);
-  console.log('remote_disconnect_ownership_smoke passed five mounted UI interleavings (controlled host IPC)');
+} catch (error) {
+  failures.push(error);
 } finally {
-  if (browser) await browser.close();
-  if (vite) await vite.close();
-  removeOwnedProfile();
+  failures.push(...await closeFixtures());
 }
+if (failures.length === 1) throw failures[0];
+if (failures.length > 1) throw new AggregateError(failures, 'Remote disconnect smoke or fixture cleanup failed');
+console.log('remote_disconnect_ownership_smoke passed five mounted UI interleavings (controlled host IPC)');

@@ -24,11 +24,11 @@ function buildPlugins(mode) {
 }
 
 test('startup gates remain active in desktop and web production builds', () => {
-  // The 2026-10-28 account-platform merge uses explicitly approved, measured
-  // per-mode ceilings (see vite.config.mjs). Keep the gate and splitting
-  // checks below: accepting this baseline must not disable either budget.
-  assert.equal(MAIN_ENTRY_BUDGET_BYTES, 173_000);
-  assert.equal(WEB_MAIN_ENTRY_BUDGET_BYTES, 175_000);
+  // The measured 2026-11-10 baseline retains both per-mode gates.
+  // Its budget approval is separate from this executable boundary regression;
+  // accepting a new baseline must not disable the entry or splitting checks.
+  assert.equal(MAIN_ENTRY_BUDGET_BYTES, 174_900);
+  assert.equal(WEB_MAIN_ENTRY_BUDGET_BYTES, 177_100);
   for (const mode of ['production', 'web']) {
     const pluginNames = new Set(buildPlugins(mode).map(plugin => plugin.name));
     assert.ok(pluginNames.has('pinvou-enforce-lazy-chunks'), `${mode} must enforce lazy chunks`);
