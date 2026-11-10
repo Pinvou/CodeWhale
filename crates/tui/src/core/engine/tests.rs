@@ -8900,13 +8900,19 @@ async fn max_steps_exhaustion_fails_as_budget_never_completed() {
         .expect("send step-budget trajectory");
 
     let mut rx = handle.rx_event.write().await;
-    let (status, error) = loop {
+    let (status, error, error_source) = loop {
         let event = tokio::time::timeout(model_turn_event_timeout(), rx.recv())
             .await
             .expect("timed out waiting for step-budget trajectory")
             .expect("engine event");
-        if let Event::TurnComplete { status, error, .. } = event {
-            break (status, error);
+        if let Event::TurnComplete {
+            status,
+            error,
+            error_source,
+            ..
+        } = event
+        {
+            break (status, error, error_source);
         }
     };
     drop(rx);
@@ -8915,6 +8921,10 @@ async fn max_steps_exhaustion_fails_as_budget_never_completed() {
         status,
         TurnOutcomeStatus::Failed,
         "step-budget exhaustion must never report Completed"
+    );
+    assert_eq!(
+        error_source,
+        Some(crate::core::events::TurnErrorSource::Runtime)
     );
     let error = error.expect("step-budget exhaustion must carry a terminal error");
     assert!(error.contains("Maximum model steps"), "{error}");
@@ -9260,8 +9270,17 @@ async fn injected_chat_content_filter_never_becomes_a_completed_answer() {
             Event::MessageComplete { .. } => {
                 panic!("content-filtered text must not be marked completed")
             }
-            Event::TurnComplete { status, error, .. } => {
+            Event::TurnComplete {
+                status,
+                error,
+                error_source,
+                ..
+            } => {
                 assert_eq!(status, TurnOutcomeStatus::Failed);
+                assert_eq!(
+                    error_source,
+                    Some(crate::core::events::TurnErrorSource::Model)
+                );
                 let error = error.expect("content-filtered turn needs a terminal error");
                 assert!(error.contains("Model response incomplete"), "{error}");
                 assert!(error.contains("content_filter"), "{error}");
@@ -31830,6 +31849,59 @@ async fn model_step_ceiling_fires_and_reports_the_limit() {
     );
 }
 
+#[tokio::test]
+async fn ordinary_route_preparation_failure_is_runtime_without_sending_http() {
+    let workspace = tempdir().expect("tempdir");
+    let server = wiremock::MockServer::start().await;
+    let api_config = Config {
+        provider: Some("anthropic".into()),
+        providers: Some(crate::config::ProvidersConfig {
+            anthropic: crate::config::ProviderConfig {
+                api_key: Some("test-key".into()),
+                base_url: Some(server.uri()),
+                ..Default::default()
+            },
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let client = std::sync::Arc::new(DeepSeekClient::new(&api_config).expect("anthropic client"));
+    let engine_config = EngineConfig {
+        model: "claude-sonnet-4-6".into(),
+        ..deterministic_engine_config(workspace.path())
+    };
+    let (mut engine, _handle) = Engine::new_with_model_client(engine_config, &api_config, client);
+    engine.session.messages.push(Message {
+        role: Role::Unrecognized("unexpected eof".into()),
+        content: vec![ContentBlock::Text {
+            text: "retained message".into(),
+            cache_control: None,
+        }],
+    });
+    let context = crate::tools::ToolContext::new(workspace.path().to_path_buf());
+    let surface = test_tool_surface(
+        &engine,
+        crate::tools::ToolRegistry::new(context),
+        None,
+        AppMode::Agent,
+    );
+    let mut turn = crate::core::turn::TurnContext::new(engine.config.max_steps);
+
+    let (status, error) = engine.run_turn(&mut turn, surface, None, None).await;
+
+    assert_eq!(status, TurnOutcomeStatus::Failed);
+    assert_eq!(
+        turn.terminal_error_source,
+        Some(crate::core::events::TurnErrorSource::Runtime)
+    );
+    let error = error.expect("local rejection");
+    assert!(
+        error.contains("unexpected eof") && error.contains("refused before it was sent"),
+        "{error}"
+    );
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
 /// R1: the per-step stream cap is overridable, and a tiny cap actually cuts
 /// the stream off instead of accumulating without bound.
 #[tokio::test]
@@ -31855,12 +31927,21 @@ async fn per_step_stream_content_cap_is_overridable_and_fires() {
     let surface = test_tool_surface(&engine, registry, None, AppMode::Agent);
     let mut turn = crate::core::turn::TurnContext::new(engine.config.max_steps);
 
-    let (status, _error) = engine.run_turn(&mut turn, surface, None, None).await;
+    let (status, error) = engine.run_turn(&mut turn, surface, None, None).await;
 
-    assert_ne!(
+    assert_eq!(
         status,
-        TurnOutcomeStatus::Completed,
-        "a stream cut off by the content cap must not report a clean completion"
+        TurnOutcomeStatus::Failed,
+        "a stream cut off by the content cap must report failure"
+    );
+    assert!(
+        error
+            .expect("content cap failure")
+            .contains("maximum content size of 64 bytes")
+    );
+    assert_eq!(
+        turn.terminal_error_source,
+        Some(crate::core::events::TurnErrorSource::Runtime)
     );
 }
 
