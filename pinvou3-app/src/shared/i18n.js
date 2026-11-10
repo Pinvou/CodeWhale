@@ -155,3 +155,5 @@ export { productAdmissionCopy } from './product-admission-i18n.js';
 export { auditActionCopy, auditActionLabels, auditPrivacyCopy, auditExportPresentation, auditListCopy } from './admin-audit-presentation-i18n.js';
 
 export { smsStatusCopy, smsTemplateCopy } from './admin-sms-presentation-i18n.js';
+
+export { adminLanguagePreferenceCopy } from './admin-language-preference-i18n.js';

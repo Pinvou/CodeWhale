@@ -19,6 +19,7 @@ function fixture({ storage = 'normal', saved = null, browser = 'ja-JP', href = '
   const realm = vm.createContext({ URL, URLSearchParams, navigator: { language: browser }, location: { href, search: new URL(href).search },
     history: { replaceState(...args) { trace.push(['replaceState', ...args]); } },
     document: { documentElement: {} }, setLanguage(value) { trace.push(['memory', value]); },
+    setPreference(value) { trace.push(['memory', value.language]); trace.push(['feedback', value.feedback]); },
     dispatchEvent(event) { trace.push(['event', event.type, event.detail.language]); },
     CustomEvent: class { constructor(type, options) { this.type = type; this.detail = options.detail; } }, trace, values });
   vm.runInContext(`const storageMode = ${JSON.stringify(storage)};
@@ -32,10 +33,19 @@ function fixture({ storage = 'normal', saved = null, browser = 'ja-JP', href = '
   Object.defineProperty(realm.document.documentElement, 'lang', { configurable: true,
     get() { return realm.htmlLanguage; }, set(value) { realm.htmlLanguage = value; trace.push(['html', value]); } });
   installModule(realm, read('features/account-platform/portal-language.js'));
+  installModule(realm, read('shared/supported-locales.js'));
+  const helpers = read('features/account-platform/AdminLanguageControl.jsx').match(/^export function (?:initialAdminLanguagePreference|applyAdminLanguagePreference)\([\s\S]*?^\}/gm);
+  assert.equal(helpers?.length, 2, 'execute the actual Admin preference helpers');
+  installModule(realm, helpers.join('\n'));
   return { realm, trace, values };
 }
 function initial(kind, options) {
   const actual = fixture(options);
+  if (kind === 'admin') {
+    assert.match(entries.admin, /useState\(initialAdminLanguagePreference\)/, 'Admin entry uses the tested initializer');
+    actual.language = vm.runInContext('initialAdminLanguagePreference().language', actual.realm, { filename: 'AdminLanguageControl.jsx' });
+    return actual;
+  }
   const definition = entries[kind].match(/^function initialLanguage\(\) \{[\s\S]*?^\}/m)?.[0];
   assert.ok(definition, `real ${kind} initializer must remain testable`);
   const constants = entries[kind].match(/^const LANGUAGE_BY_TAG = .*;$/m)?.[0] || '';
