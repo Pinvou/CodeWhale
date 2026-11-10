@@ -153,7 +153,8 @@ def verify_results(raw, required):
     if "TestMigrationCLIBudgetRecovery" in required:
         budget_cases = {"TestMigrationCLIBudgetRecovery/" + suffix for suffix in (
             "invalid_budget_before_database", "domain_lock_wait", "partial_up_timeout",
-            "explicit_flag_overrides_invalid_env_and_retry", "transactional_down_timeout", "down_retry")}
+            "explicit_flag_overrides_invalid_env_and_retry", "transactional_down_timeout", "down_retry",
+            "successful_unlock_preserves_connection", "expired_unlock_retires_owned_connection")}
         if not budget_cases <= passed_cases:
             raise RuntimeError("migration budget recovery cases did not execute")
     return count

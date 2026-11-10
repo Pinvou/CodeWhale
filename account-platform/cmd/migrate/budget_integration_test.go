@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/cifixture"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/migrations"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 )
@@ -169,5 +170,61 @@ func TestMigrationCLIBudgetRecovery(t *testing.T) {
 			t.Fatal("explicit down retry failed or emitted an up receipt")
 		}
 		assertState(t, 1)
+	})
+	t.Run("successful_unlock_preserves_connection", func(t *testing.T) {
+		owner, err := pgx.ConnectConfig(ctx, ownedConfig)
+		if err != nil {
+			t.Fatal("connect owned lock session")
+		}
+		defer owner.Close(context.Background())
+		for i := 0; i < 2; i++ {
+			if _, err := owner.Exec(ctx, `SELECT pg_advisory_lock(hashtext('pinvou_account_platform_migrations'))`); err != nil {
+				t.Fatal("acquire nested owned lock")
+			}
+		}
+		if err := migrations.Unlock(ctx, owner); err != nil || owner.IsClosed() {
+			t.Fatal("successful unlock retired a reusable session")
+		}
+		var acquired bool
+		if err := connection.QueryRow(ctx, `SELECT pg_try_advisory_lock(hashtext('pinvou_account_platform_migrations'))`).Scan(&acquired); err != nil || acquired {
+			t.Fatal("unlock released more than one nested acquisition")
+		}
+		if err := migrations.Unlock(ctx, owner); err != nil || owner.IsClosed() {
+			t.Fatal("second successful unlock failed")
+		}
+		if err := connection.QueryRow(ctx, `SELECT pg_try_advisory_lock(hashtext('pinvou_account_platform_migrations'))`).Scan(&acquired); err != nil || !acquired {
+			t.Fatal("balanced unlock retained the session lock")
+		}
+		if err := migrations.Unlock(ctx, connection); err != nil {
+			t.Fatal("release observer's owned lock")
+		}
+	})
+	t.Run("expired_unlock_retires_owned_connection", func(t *testing.T) {
+		owner, err := pgx.ConnectConfig(ctx, ownedConfig)
+		if err != nil {
+			t.Fatal("connect owned cancellation session")
+		}
+		defer owner.Close(context.Background())
+		if _, err := owner.Exec(ctx, `SELECT pg_advisory_lock(hashtext('pinvou_account_platform_migrations'))`); err != nil {
+			t.Fatal("acquire owned cancellation lock")
+		}
+		expired, stop := context.WithDeadline(ctx, time.Now().Add(-time.Second))
+		defer stop()
+		if owner.IsClosed() {
+			t.Fatal("cancellation fixture must start with a healthy session")
+		}
+		if err := migrations.Unlock(expired, owner); err == nil || !owner.IsClosed() {
+			t.Fatal("expired cleanup retained a healthy locked connection")
+		}
+		// The database itself acknowledges release: wait on the same lock with
+		// an independent finite observer, rather than assuming process exit did it.
+		observe, stopObserve := context.WithTimeout(ctx, 5*time.Second)
+		defer stopObserve()
+		if _, err := connection.Exec(observe, `SELECT pg_advisory_lock(hashtext('pinvou_account_platform_migrations'))`); err != nil {
+			t.Fatal("retired session still blocks the next owned acquisition")
+		}
+		if err := migrations.Unlock(observe, connection); err != nil {
+			t.Fatal("release observer's cancellation probe lock")
+		}
 	})
 }
