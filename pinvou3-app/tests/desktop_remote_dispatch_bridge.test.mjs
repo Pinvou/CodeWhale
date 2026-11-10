@@ -377,7 +377,7 @@ test('B held failure status cannot overwrite a stop or successor command', async
     let starts = 0;
     const { feature, state } = installFeature(command => {
       if (command === 'desktop_remote_controlled_start') return ++starts === 1
-        ? Promise.reject('pairing_registration_failed') : Promise.resolve(fixture.next);
+        ? Promise.reject(new Error('pairing_registration_failed')) : Promise.resolve(fixture.next);
       if (command === 'desktop_remote_controlled_status') { entered.resolve(); return read.promise; }
       if (command === 'desktop_remote_controlled_stop') return Promise.resolve({
         ...fixture.failed, status: 'stopped', statusIntent: '4', errorCode: null,
@@ -401,9 +401,9 @@ test('B failed status read retains the failure owner for later panel synchroniza
   const fixture = JSON.parse(fs.readFileSync(new URL('./fixtures/controller_registration_exit.json', import.meta.url), 'utf8'));
   let reads = 0;
   const { feature, state, listeners, logic } = installFeature(command => {
-    if (command === 'desktop_remote_controlled_refresh') return Promise.reject('pairing_registration_failed');
+    if (command === 'desktop_remote_controlled_refresh') return Promise.reject(new Error('pairing_registration_failed'));
     if (command === 'desktop_remote_controlled_status') return ++reads === 1
-      ? Promise.reject('status_unavailable') : Promise.resolve(fixture.failed);
+      ? Promise.reject(new Error('status_unavailable')) : Promise.resolve(fixture.failed);
     return undefined;
   });
   state.desktopRemoteControl = logic.applyControlledStatus(state.desktopRemoteControl, fixture.old);
@@ -447,7 +447,7 @@ test('B terminal events or bridge disposal invalidate an in-flight failure read'
     const read = Promise.withResolvers();
     const entered = Promise.withResolvers();
     const { feature, state, listeners, logic } = installFeature(command => {
-      if (command === 'desktop_remote_controlled_refresh') return Promise.reject('pairing_registration_failed');
+      if (command === 'desktop_remote_controlled_refresh') return Promise.reject(new Error('pairing_registration_failed'));
       if (command === 'desktop_remote_controlled_status') { entered.resolve(); return read.promise; }
       return undefined;
     });
@@ -462,6 +462,55 @@ test('B terminal events or bridge disposal invalidate an in-flight failure read'
     assert.equal(state.controlledDevice.generation, generation, interrupt);
     feature.stop();
   }
+});
+
+test('independent A status cannot discard the current B failure read', async () => {
+  const fixture = JSON.parse(fs.readFileSync(new URL('./fixtures/controller_registration_exit.json', import.meta.url), 'utf8'));
+  const read = Promise.withResolvers();
+  const entered = Promise.withResolvers();
+  const { feature, state, listeners, logic } = installFeature(command => {
+    if (command === 'desktop_remote_controlled_refresh') return Promise.reject(new Error('pairing_registration_failed'));
+    if (command === 'desktop_remote_controlled_status') { entered.resolve(); return read.promise; }
+    return undefined;
+  });
+  state.desktopRemoteControl = logic.applyControlledStatus(state.desktopRemoteControl, fixture.old);
+  const rejected = assert.rejects(feature.controlledRefresh(), { code: 'pairing_registration_failed' });
+  await entered.promise;
+  const revision = state.desktopRemoteControl.revision;
+  listeners.get('desktop-remote-controller-status')({ payload: { status: 'idle' } });
+  assert.ok(state.desktopRemoteControl.revision > revision);
+  read.resolve(fixture.failed);
+  await rejected;
+  assert.equal(state.controlledDevice.status, 'error');
+  assert.equal(state.controlledDevice.generation, fixture.failed.generation);
+  feature.stop();
+});
+
+test('B synchronized recovery cannot fall through after its bridge owner is disposed', async () => {
+  const fixture = JSON.parse(fs.readFileSync(new URL('./fixtures/controller_registration_exit.json', import.meta.url), 'utf8'));
+  const read = Promise.withResolvers();
+  const entered = Promise.withResolvers();
+  let reads = 0;
+  const { feature, state, listeners, logic } = installFeature(command => {
+    if (command === 'desktop_remote_controlled_refresh') return Promise.reject(new Error('pairing_registration_failed'));
+    if (command === 'desktop_remote_controlled_status') {
+      if (++reads === 1) return Promise.reject(new Error('status_unavailable'));
+      entered.resolve(); return read.promise;
+    }
+    return undefined;
+  });
+  state.desktopRemoteControl = logic.applyControlledStatus(state.desktopRemoteControl, fixture.old);
+  const rejected = assert.rejects(feature.controlledRefresh(), { code: 'pairing_registration_failed' });
+  const emit = payload => listeners.get('desktop-remote-controlled-status')({ payload });
+  emit(fixture.retiring); emit(fixture.registering);
+  await rejected;
+  const pending = feature.controlledSync();
+  await entered.promise;
+  const snapshot = state.desktopRemoteControl;
+  feature.stop();
+  read.resolve(fixture.failed);
+  await pending;
+  assert.equal(state.desktopRemoteControl, snapshot);
 });
 
 test('a stale control completion cannot release the newer navigation intent', async () => {
