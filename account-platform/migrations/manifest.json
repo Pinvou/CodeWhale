@@ -2224,6 +2224,16 @@
         "file": "900038_product_manual_admission.up.sql",
         "version": 900038,
         "sha256": "458f58680bc1ff48ceb59ec274329e429d5806a07000e0aae3c9551136eaaa70"
+      },
+      {
+        "file": "900039_chargeback_cash_principal.down.sql",
+        "version": 900039,
+        "sha256": "8d05baf139540fc3b3b7253103f88b6d3b6aae083b51c2b4c0759a110d4fda36"
+      },
+      {
+        "file": "900039_chargeback_cash_principal.up.sql",
+        "version": 900039,
+        "sha256": "88db1e44f110d364fbbf5c1b8b236088b40be09245f1710d18a13c53d5c33e0c"
       }
     ],
     "payment-simulator": [

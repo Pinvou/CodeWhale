@@ -213,6 +213,9 @@ DO $$ BEGIN
   REVOKE UPDATE(snapshot) ON public.product_manual_admission_submissions FROM billing_service;
   REVOKE UPDATE(reason) ON public.product_manual_admission_decisions FROM billing_service;
  END IF;
+ IF to_regclass('public.chargeback_principal_evidence') IS NOT NULL THEN
+  REVOKE UPDATE,DELETE,TRUNCATE ON public.chargeback_principal_evidence FROM billing_service;
+ END IF;
  IF to_regclass('public.usage_waiver_commands') IS NOT NULL THEN
   REVOKE UPDATE,DELETE,TRUNCATE ON public.usage_waiver_commands,public.usage_waiver_results,public.usage_waiver_rejections FROM billing_service;
  END IF;

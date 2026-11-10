@@ -161,6 +161,7 @@ ON CONFLICT(provider_id,provider_version,evidence_type,evidence_key,payload_dige
 }
 
 type ReconciliationInternalFact struct {
+	CashPrincipal                *ChargebackCashPrincipal
 	EntryType                    string
 	ProviderReferenceID          string
 	MerchantOrderNo              string
@@ -278,13 +279,26 @@ func CompareFourWayReconciliation(provider []ProviderBillEntry, internal []Recon
 		internalByKey[key] = fact
 		providerItem, exists := providerByKey[key]
 		caseTypePrefix := map[string]string{"PAYMENT": "PAID", "REFUND": "REFUND", "CHARGEBACK": "CHARGEBACK"}[fact.EntryType]
+		cashUnverified := fact.EntryType == "CHARGEBACK" && (fact.CashPrincipal == nil || fact.CashPrincipal.Status != "CONFIRMED")
+		if cashUnverified {
+			caseType := "CHARGEBACK_PRINCIPAL_MISSING"
+			if fact.CashPrincipal != nil && fact.CashPrincipal.Status == "CONFLICT" {
+				caseType = "CHARGEBACK_PRINCIPAL_CONFLICT"
+			}
+			var matched *ProviderBillEntry
+			if exists && providerItem.MerchantOrderNo == fact.MerchantOrderNo {
+				copy := providerItem
+				matched = &copy
+			}
+			differences = append(differences, differenceFromFact(fact, caseType, "P1", matched))
+		}
 		if !exists || providerItem.MerchantOrderNo != fact.MerchantOrderNo {
 			caseType := "INTERNAL_" + caseTypePrefix + "_PROVIDER_MISSING"
 			if fact.EntryType != "PAYMENT" && !fact.EventDateVerified {
 				caseType = fact.EntryType + "_DATE_UNVERIFIED"
 			}
 			differences = append(differences, differenceFromFact(fact, caseType, "P1", nil))
-		} else if providerItem.AmountFen != fact.AmountFen || !strings.EqualFold(providerItem.Currency, fact.Currency) {
+		} else if !cashUnverified && (providerItem.AmountFen != fact.AmountFen || !strings.EqualFold(providerItem.Currency, fact.Currency)) {
 			caseType := "AMOUNT_MISMATCH"
 			if fact.EntryType == "REFUND" {
 				caseType = "REFUND_AMOUNT_MISMATCH"
@@ -377,11 +391,11 @@ SELECT 'REFUND',btrim(forced.provider_refund_id,$7::text),payment.merchant_order
 FROM forced_refund_cases forced JOIN payment_orders payment ON payment.id=forced.payment_order_id
 WHERE payment.channel=$1 AND ((forced.resolved_at>=$2 AND forced.resolved_at<$3) OR (btrim(forced.provider_refund_id,$7::text),payment.merchant_order_no) IN (SELECT reference,merchant FROM jsonb_to_recordset($6::jsonb) AS supplied(reference text,merchant text,kind text) WHERE kind='REFUND')) AND forced.resolution_code='CONFIRM_FORCED_REFUND' AND payment.provider_id=$4 AND payment.provider_version=$5
 UNION ALL
-SELECT 'CHARGEBACK',btrim(chargeback.provider_chargeback_id,$7::text),payment.merchant_order_no,payment.id,transaction.amount_fen,transaction.currency,
-       jsonb_build_object('payment_order_id',payment.id,'payment_transaction_id',chargeback.payment_transaction_id),to_jsonb(chargeback),
+SELECT 'CHARGEBACK',btrim(chargeback.provider_chargeback_id,$7::text),payment.merchant_order_no,payment.id,COALESCE((principal.fact->>'amount_fen')::bigint,0),transaction.currency,
+       jsonb_build_object('payment_order_id',payment.id,'payment_transaction_id',chargeback.payment_transaction_id),to_jsonb(chargeback)||jsonb_build_object('cash_principal',principal.fact),
        COALESCE((SELECT jsonb_agg(to_jsonb(entry) ORDER BY entry.created_at,entry.id) FROM journal_entries entry WHERE entry.business_reference IN ('payment-transaction:'||chargeback.payment_transaction_id::text||':chargeback:'||chargeback.provider_chargeback_id,'chargeback-repair:'||chargeback.id::text)),'[]'::jsonb)
-FROM chargeback_cases chargeback JOIN payment_orders payment ON payment.id=chargeback.payment_order_id JOIN payment_transactions transaction ON transaction.id=chargeback.payment_transaction_id
-WHERE payment.channel=$1 AND ((chargeback.resolved_at>=$2 AND chargeback.resolved_at<$3) OR (btrim(chargeback.provider_chargeback_id,$7::text),payment.merchant_order_no) IN (SELECT reference,merchant FROM jsonb_to_recordset($6::jsonb) AS supplied(reference text,merchant text,kind text) WHERE kind='CHARGEBACK')) AND chargeback.status='CONFIRMED' AND transaction.provider_id=$4 AND transaction.provider_version=$5
+FROM chargeback_cases chargeback JOIN payment_orders payment ON payment.id=chargeback.payment_order_id JOIN payment_transactions transaction ON transaction.id=chargeback.payment_transaction_id JOIN chargeback_cash_principals principal ON principal.chargeback_case_id=chargeback.id
+WHERE payment.channel=$1 AND ((COALESCE(chargeback.resolved_at,chargeback.created_at)>=$2 AND COALESCE(chargeback.resolved_at,chargeback.created_at)<$3) OR (btrim(chargeback.provider_chargeback_id,$7::text),payment.merchant_order_no) IN (SELECT reference,merchant FROM jsonb_to_recordset($6::jsonb) AS supplied(reference text,merchant text,kind text) WHERE kind='CHARGEBACK')) AND chargeback.status IN ('CONFIRMED','REVIEW_REQUIRED') AND transaction.provider_id=$4 AND transaction.provider_version=$5
 UNION ALL
 SELECT 'PAYMENT','ORPHAN_PAYMENT_ORDER:'||payment.id::text,payment.merchant_order_no,payment.id,payment.amount_fen,payment.currency,
        jsonb_build_object('payment_order',to_jsonb(payment),'payment_date_verification_required',payment.paid_at IS NULL),NULL,'[]'::jsonb
@@ -400,6 +414,15 @@ ORDER BY 1,2`, channel, start, end, providerID, providerVersion, references, rec
 		var fact ReconciliationInternalFact
 		if err := rows.Scan(&fact.EntryType, &fact.ProviderReferenceID, &fact.MerchantOrderNo, &fact.PaymentOrderID, &fact.AmountFen, &fact.Currency, &fact.InternalSnapshot, &fact.RefundSnapshot, &fact.LedgerSnapshot); err != nil {
 			return nil, err
+		}
+		if fact.EntryType == "CHARGEBACK" {
+			var source struct {
+				CashPrincipal *ChargebackCashPrincipal `json:"cash_principal"`
+			}
+			if err := json.Unmarshal(fact.RefundSnapshot, &source); err != nil {
+				return nil, err
+			}
+			fact.CashPrincipal = source.CashPrincipal
 		}
 		// Match the established provider bill/proof identity without rewriting source evidence.
 		fact.ProviderReferenceID = strings.TrimSpace(fact.ProviderReferenceID)

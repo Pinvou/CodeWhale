@@ -357,12 +357,7 @@ SELECT COALESCE(sum(amount_fen) FILTER (WHERE status='SUCCEEDED'),0) succeeded_a
 FROM refunds WHERE payment_order_id=$1), forced_refunds AS (
 SELECT count(*) FILTER (WHERE status='REVIEW_REQUIRED') review_count
 FROM forced_refund_cases WHERE payment_order_id=$1), chargebacks AS (
-SELECT count(*) FILTER (WHERE chargeback.status='REVIEW_REQUIRED') review_count,
-       count(*) FILTER (WHERE chargeback.status='CONFIRMED') open_count,
-       COALESCE(sum(transaction.amount_fen) FILTER (WHERE chargeback.status='CONFIRMED'),0) lost_amount_fen
-FROM chargeback_cases chargeback
-JOIN payment_transactions transaction ON transaction.id=chargeback.payment_transaction_id
-WHERE chargeback.payment_order_id=$1), receivables AS (
+`+chargebackCashSummarySelect+`), receivables AS (
 SELECT count(*) FILTER (WHERE outstanding_microcredits>0) open_count
 FROM receivables WHERE payment_order_id=$1), anomalies AS (
 SELECT count(*) FILTER (WHERE status='OPEN') open_count
@@ -370,10 +365,10 @@ FROM payment_anomaly_cases WHERE payment_order_id=$1)
 UPDATE payment_orders payment SET
  payment_summary=jsonb_build_object('paid_count',facts.paid_count,'paid_amount_fen',facts.paid_amount_fen::text,'late_paid_count',facts.late_paid_count,'review_count',facts.review_count),
  refund_summary=jsonb_build_object('succeeded_amount_fen',refunds.succeeded_amount_fen::text,'pending_count',refunds.pending_count,'review_count',refunds.review_count,'forced_review_count',forced_refunds.review_count),
- chargeback_summary=jsonb_build_object('review_count',chargebacks.review_count,'open_count',chargebacks.open_count,'lost_amount_fen',chargebacks.lost_amount_fen::text),
+ chargeback_summary=`+chargebackCashSummaryJSON+`,
  attention_summary=CASE
    WHEN receivables.open_count>0 THEN 'RECEIVABLE_OPEN'
-   WHEN facts.review_count>0 OR refunds.review_count>0 OR forced_refunds.review_count>0 OR chargebacks.review_count>0 OR anomalies.open_count>0 THEN 'REVIEW_REQUIRED'
+   WHEN facts.review_count>0 OR refunds.review_count>0 OR forced_refunds.review_count>0 OR chargebacks.review_count>0 OR chargebacks.unverified_count>0 OR chargebacks.principal_review_count>0 OR anomalies.open_count>0 THEN 'REVIEW_REQUIRED'
    WHEN refunds.pending_count>0 OR (payment.status IN ('CREATED','PENDING') AND payment.close_status IN ('CLOSE_REQUESTED','LOCALLY_CLOSED_EXTERNAL_PENDING')) THEN 'PROCESSING'
    ELSE 'NORMAL' END,
  status=CASE WHEN facts.review_count>0 THEN 'MANUAL_REVIEW' WHEN facts.late_paid_count>0 THEN 'PAID_LATE' WHEN facts.paid_count>0 THEN 'PAID' ELSE payment.status END,

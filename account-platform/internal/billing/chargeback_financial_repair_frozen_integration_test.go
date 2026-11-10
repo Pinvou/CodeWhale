@@ -171,10 +171,12 @@ func TestChargebackFrozenExecutionPostgres(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		var open, loss, summary int64
-		var attention string
-		if err := r.pool.QueryRow(ctx, `SELECT (chargeback_summary->>'open_count')::bigint,(chargeback_summary->>'lost_amount_fen')::bigint,attention_summary,summary_version FROM payment_orders WHERE id=$1`, f.OrderID).Scan(&open, &loss, &attention, &summary); err != nil || open != 1 || loss != 100 || attention != "RECEIVABLE_OPEN" || summary != originalSummary+1 {
-			t.Fatalf("order summary %d/%d/%s/%d err=%v", open, loss, attention, summary, err)
+		var open, summary int64
+		var loss *int64
+		var attention, cashStatus string
+		var unverified int64
+		if err := r.pool.QueryRow(ctx, `SELECT (chargeback_summary->>'open_count')::bigint,(chargeback_summary->>'lost_amount_fen')::bigint,attention_summary,summary_version,chargeback_summary->>'cash_principal_status',(chargeback_summary->>'unverified_count')::bigint FROM payment_orders WHERE id=$1`, f.OrderID).Scan(&open, &loss, &attention, &summary, &cashStatus, &unverified); err != nil || open != 1 || loss != nil || cashStatus != "UNVERIFIED" || unverified != 1 || attention != "RECEIVABLE_OPEN" || summary != originalSummary+1 {
+			t.Fatalf("order summary %d/%v/%s/%d err=%v", open, loss, attention, summary, err)
 		}
 		set("INACTIVE")
 		before := chargebackEffectSnapshot(t, ctx, r)

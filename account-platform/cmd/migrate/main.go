@@ -216,6 +216,9 @@ func migrationDomain(ctx context.Context, connection *pgx.Conn, loaded []migrati
 }
 
 func protectedMigrationDomain(version int64, name, checksum string) string {
+	if name == "chargeback_cash_principal" || checksum == "88db1e44f110d364fbbf5c1b8b236088b40be09245f1710d18a13c53d5c33e0c" {
+		return "billing"
+	}
 	for _, identity := range []struct {
 		domain         string
 		version        int64

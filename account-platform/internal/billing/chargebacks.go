@@ -15,6 +15,13 @@ import (
 )
 
 func (r *PostgresRepository) RecordConfirmedChargebackForReview(ctx context.Context, transactionID uuid.UUID, providerChargebackID string, payload json.RawMessage) (ChargebackCase, error) {
+	return r.recordConfirmedChargebackForReview(ctx, transactionID, providerChargebackID, payload, nil)
+}
+
+func (r *PostgresRepository) recordConfirmedChargebackForReview(ctx context.Context, transactionID uuid.UUID, providerChargebackID string, payload json.RawMessage, principal *ChargebackPrincipalInput) (ChargebackCase, error) {
+	if err := validateChargebackPrincipal(ctx, principal, payload); err != nil {
+		return ChargebackCase{}, err
+	}
 	providerChargebackID = strings.TrimSpace(providerChargebackID)
 	if transactionID == uuid.Nil || providerChargebackID == "" || len(providerChargebackID) > 200 {
 		return ChargebackCase{}, ErrConflict
@@ -46,6 +53,15 @@ func (r *PostgresRepository) RecordConfirmedChargebackForReview(ctx context.Cont
 	var existing ChargebackCase
 	err = tx.QueryRow(ctx, chargebackCaseSelect+` WHERE payment_transaction_id=$1 AND provider_chargeback_id=$2`, transactionID, providerChargebackID).Scan(chargebackCaseScanTargets(&existing)...)
 	if err == nil {
+		if err := lockPaymentSourcePackage(ctx, tx, existing.EntitlementPackageID, transactionID, orderID, existing.WalletID); err != nil {
+			return ChargebackCase{}, err
+		}
+		if err := tx.QueryRow(ctx, chargebackCaseSelect+` WHERE id=$1 FOR UPDATE`, existing.ID).Scan(chargebackCaseScanTargets(&existing)...); err != nil {
+			return ChargebackCase{}, err
+		}
+		if err := r.recordChargebackPrincipal(ctx, tx, &existing, principal, payload); err != nil {
+			return ChargebackCase{}, err
+		}
 		return existing, tx.Commit(ctx)
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
@@ -58,7 +74,10 @@ func (r *PostgresRepository) RecordConfirmedChargebackForReview(ctx context.Cont
 		return ChargebackCase{}, err
 	}
 	if command.RowsAffected() == 0 {
-		if err := tx.QueryRow(ctx, `SELECT id FROM payment_evidence WHERE provider_id=$1 AND provider_version=$2 AND evidence_type='CHARGEBACK' AND evidence_key=$3 AND payload_digest=$4`, providerID, providerVersion, providerChargebackID, hex.EncodeToString(digest[:])).Scan(&evidenceID); err != nil {
+		if err := tx.QueryRow(ctx, `SELECT id FROM payment_evidence WHERE provider_id=$1 AND provider_version=$2 AND evidence_type='CHARGEBACK' AND evidence_key=$3 AND payload_digest=$4 AND payment_transaction_id=$5 AND payment_order_id=$6`, providerID, providerVersion, providerChargebackID, hex.EncodeToString(digest[:]), transactionID, orderID).Scan(&evidenceID); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return ChargebackCase{}, ErrConflict
+			}
 			return ChargebackCase{}, err
 		}
 	}
@@ -111,7 +130,15 @@ func (r *PostgresRepository) RecordConfirmedChargebackForReview(ctx context.Cont
 	if err := events.AppendOutbox(ctx, tx, "billing.chargeback.review-required.v1", result.ID, 1, map[string]any{"chargeback_case_id": result.ID, "manual_review_case_id": anomaly.ID, "payment_order_id": orderID, "payment_transaction_id": transactionID}); err != nil {
 		return ChargebackCase{}, err
 	}
-	return result, tx.Commit(ctx)
+	if err := r.recordChargebackPrincipal(ctx, tx, &result, principal, payload); err != nil {
+		return ChargebackCase{}, err
+	}
+	var stored ChargebackCase
+	if err := tx.QueryRow(ctx, chargebackCaseSelect+` WHERE id=$1`, result.ID).Scan(chargebackCaseScanTargets(&stored)...); err != nil {
+		return ChargebackCase{}, err
+	}
+	stored.CashPrincipal = result.CashPrincipal
+	return stored, tx.Commit(ctx)
 }
 
 func transferChargebackRefundsToReview(ctx context.Context, tx pgx.Tx, source ChargebackCase, now time.Time) error {
@@ -150,23 +177,24 @@ func transferChargebackRefundsToReview(ctx context.Context, tx pgx.Tx, source Ch
 }
 
 type ChargebackCase struct {
-	ID                       uuid.UUID  `json:"chargeback_case_id"`
-	PaymentEvidenceID        uuid.UUID  `json:"payment_evidence_id"`
-	PaymentOrderID           uuid.UUID  `json:"payment_order_id"`
-	PaymentTransactionID     uuid.UUID  `json:"payment_transaction_id"`
-	EntitlementPackageID     uuid.UUID  `json:"entitlement_package_id"`
-	WalletID                 uuid.UUID  `json:"wallet_id"`
-	ProviderChargebackID     string     `json:"provider_chargeback_id"`
-	Status                   string     `json:"status"`
-	RevokedBaseMicrocredits  int64      `json:"revoked_base_microcredits,string"`
-	RevokedBonusMicrocredits int64      `json:"revoked_bonus_microcredits,string"`
-	ReceivableID             *uuid.UUID `json:"receivable_id,omitempty"`
-	CreatedAt                time.Time  `json:"created_at"`
-	ResolvedAt               *time.Time `json:"resolved_at,omitempty"`
-	ManualReviewCaseID       *uuid.UUID `json:"manual_review_case_id,omitempty"`
-	ResolutionCode           *string    `json:"resolution_code,omitempty"`
-	ResolutionReason         *string    `json:"resolution_reason,omitempty"`
-	Version                  int64      `json:"version"`
+	CashPrincipal            *ChargebackCashPrincipal `json:"cash_principal,omitempty"`
+	ID                       uuid.UUID                `json:"chargeback_case_id"`
+	PaymentEvidenceID        uuid.UUID                `json:"payment_evidence_id"`
+	PaymentOrderID           uuid.UUID                `json:"payment_order_id"`
+	PaymentTransactionID     uuid.UUID                `json:"payment_transaction_id"`
+	EntitlementPackageID     uuid.UUID                `json:"entitlement_package_id"`
+	WalletID                 uuid.UUID                `json:"wallet_id"`
+	ProviderChargebackID     string                   `json:"provider_chargeback_id"`
+	Status                   string                   `json:"status"`
+	RevokedBaseMicrocredits  int64                    `json:"revoked_base_microcredits,string"`
+	RevokedBonusMicrocredits int64                    `json:"revoked_bonus_microcredits,string"`
+	ReceivableID             *uuid.UUID               `json:"receivable_id,omitempty"`
+	CreatedAt                time.Time                `json:"created_at"`
+	ResolvedAt               *time.Time               `json:"resolved_at,omitempty"`
+	ManualReviewCaseID       *uuid.UUID               `json:"manual_review_case_id,omitempty"`
+	ResolutionCode           *string                  `json:"resolution_code,omitempty"`
+	ResolutionReason         *string                  `json:"resolution_reason,omitempty"`
+	Version                  int64                    `json:"version"`
 }
 
 func (r *PostgresRepository) ApplyConfirmedChargeback(ctx context.Context, evidenceID uuid.UUID, providerChargebackID string) (ChargebackCase, error) {
@@ -228,6 +256,9 @@ func (r *PostgresRepository) ApplyConfirmedChargeback(ctx context.Context, evide
 			return ChargebackCase{}, ErrConflict
 		}
 		return lockedCase, tx.Commit(ctx)
+	}
+	if err := requireWholeChargebackPrincipal(ctx, tx, lockedCase.ID); err != nil {
+		return ChargebackCase{}, err
 	}
 	// This implementation represents a whole-payment chargeback. Earlier
 	// reviewed refunds are not a second authorization to recover the full BASE.
@@ -350,7 +381,7 @@ func (r *PostgresRepository) ApplyConfirmedChargeback(ctx context.Context, evide
 	if _, err := tx.Exec(ctx, `UPDATE chargeback_cases SET status='CONFIRMED',revoked_base_microcredits=$2,revoked_bonus_microcredits=$3,receivable_id=$4,resolved_at=$5,version=version+1 WHERE id=$1 AND status='REVIEW_REQUIRED'`, result.ID, revokedBase, revokedBonus, receivableID, now); err != nil {
 		return ChargebackCase{}, err
 	}
-	if _, err := tx.Exec(ctx, `UPDATE payment_orders payment_order SET chargeback_summary=(SELECT jsonb_build_object('open_count',count(*) FILTER(WHERE chargeback.status='CONFIRMED'),'lost_amount_fen',COALESCE(sum(transaction.amount_fen) FILTER(WHERE chargeback.status='CONFIRMED'),0)::text) FROM chargeback_cases chargeback JOIN payment_transactions transaction ON transaction.id=chargeback.payment_transaction_id WHERE chargeback.payment_order_id=$1),attention_summary=CASE WHEN EXISTS(SELECT 1 FROM receivables receivable WHERE receivable.payment_order_id=$1 AND receivable.outstanding_microcredits>0) THEN 'RECEIVABLE_OPEN' WHEN payment_order.attention_summary='RECEIVABLE_OPEN' THEN 'NORMAL' ELSE payment_order.attention_summary END,summary_version=summary_version+1,updated_at=$2 WHERE payment_order.id=$1`, orderID, now); err != nil {
+	if err := refreshChargebackCashSummary(ctx, tx, orderID, now); err != nil {
 		return ChargebackCase{}, err
 	}
 	return result, tx.Commit(ctx)
