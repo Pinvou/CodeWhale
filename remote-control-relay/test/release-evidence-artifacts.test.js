@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
+import { execFileSync } from "node:child_process";
+import { constants } from "node:fs";
 import fs from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -110,4 +112,53 @@ test("replacement between path check and open is rejected before reading", async
   });
   await assert.rejects(readEvidenceArtifact(root, item), /evidence_artifact_changed/u);
   assert.equal(reads, 0); assert.equal(closes, 1);
+});
+
+test("opened non-regular descriptor is rejected with nonblocking admission and zero reads", async (t) => {
+  const { root, item } = await fixture(t);
+  // Windows has no O_NONBLOCK constant. Supply a test-only capability bit and
+  // intercept it before the real Windows open. This checks actual admission
+  // wiring + descriptor rejection; it is not a POSIX kernel/FIFO execution.
+  const synthetic = typeof constants.O_NONBLOCK !== "number";
+  const nonblock = synthetic ? 0x40000000 : constants.O_NONBLOCK;
+  if (synthetic) {
+    Object.defineProperty(constants, "O_NONBLOCK", { value: nonblock, configurable: true });
+    t.after(() => { delete constants.O_NONBLOCK; });
+  }
+  const open = fs.open; let reads = 0; let closes = 0;
+  t.mock.method(fs, "open", async (path, flags) => {
+    assert.notEqual(nonblock, 0);
+    assert.equal(flags & nonblock, nonblock, "open must not wait for a FIFO writer");
+    const handle = await open(path, synthetic ? flags & ~nonblock : flags);
+    const stat = handle.stat.bind(handle); const close = handle.close.bind(handle);
+    handle.stat = async (...args) => Object.create(await stat(...args), { isFile: { value: () => false } });
+    handle.read = async () => { reads++; throw new Error("nonregular-read-forbidden"); };
+    handle.close = async () => { closes++; await close(); };
+    return handle;
+  });
+  await assert.rejects(readEvidenceArtifact(root, item), /evidence_artifact_size_invalid/u);
+  assert.equal(reads, 0); assert.equal(closes, 1);
+});
+
+test("POSIX regular-to-FIFO replacement fails without a writer", {
+  skip: process.platform === "win32" ? "real POSIX FIFO unavailable; Windows admission test is not kernel evidence" : false,
+  timeout: 5_000,
+}, async (t) => {
+  const { root, path, item } = await fixture(t);
+  const open = fs.open; let reads = 0; let closes = 0;
+  t.mock.method(fs, "open", async (...args) => {
+    // Fail a missing-flag regression before launching a potentially blocking
+    // kernel open, so the negative case cannot strand a libuv worker.
+    assert.ok(constants.O_NONBLOCK && (args[1] & constants.O_NONBLOCK));
+    await fs.unlink(path);
+    execFileSync("mkfifo", [path]);
+    const handle = await open(...args);
+    const close = handle.close.bind(handle);
+    handle.read = async () => { reads++; throw new Error("fifo-read-forbidden"); };
+    handle.close = async () => { closes++; await close(); };
+    return handle;
+  });
+  await assert.rejects(readEvidenceArtifact(root, item), /evidence_artifact_size_invalid/u);
+  assert.equal(reads, 0); assert.equal(closes, 1);
+  assert.equal((await fs.lstat(path)).isFIFO(), true);
 });

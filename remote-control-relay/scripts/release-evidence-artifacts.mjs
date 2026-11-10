@@ -57,7 +57,9 @@ export async function readEvidenceArtifact(evidenceRoot, item) {
     if (!metadata.isFile() || metadata.size <= 0n || metadata.size > BigInt(maxSize)) fail("evidence_artifact_size_invalid");
   };
   checkSize(before.target);
-  const handle = await fs.open(before.path, constants.O_RDONLY | (constants.O_NOFOLLOW || 0));
+  // A regular file can be replaced by a FIFO after lstat. Where supported,
+  // nonblocking open keeps the descriptor type check reachable without a writer.
+  const handle = await fs.open(before.path, constants.O_RDONLY | (constants.O_NOFOLLOW || 0) | (constants.O_NONBLOCK || 0));
   try {
     const metadata = await handle.stat({ bigint: true });
     checkSize(metadata);
