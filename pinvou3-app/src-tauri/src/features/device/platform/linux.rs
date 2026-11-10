@@ -1491,8 +1491,8 @@ mod tests {
     #[test]
     fn guard4_rechecks_store_names_before_delete_after_boundary() {
         use crate::features::device::{
-            external_models::{guard4_test_hooks, registry_dir}, get_external_models,
-            remove_external_model,
+            external_models::{guard4_test_hooks, registry_dir},
+            get_external_models, remove_external_model,
         };
         use crate::features::model_store::platform::linux::{config, db};
         let _ctx = config::TempHome::new();
