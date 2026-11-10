@@ -179,7 +179,7 @@ impl Gateway {
                         let _ = c.stop.send(true);
                     }
                     if s.cards.lock().await.is_empty()
-                        && let Some(s) = session.take()
+                        && let Some(mut s) = session.take()
                     {
                         let _ = s.stop.send(true);
                         // Session 实现 Drop，不能整体移出字段——用 Option::take
