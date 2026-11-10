@@ -298,13 +298,170 @@ test('B registration task failure settles the refreshed generation and permits t
   await assert.rejects(pending, { code: 'pairing_registration_failed' });
   assert.equal(state.desktopRemoteControl.controlledDevice.status, 'error');
   assert.equal(state.desktopRemoteControl.controlledDevice.generation, fixture.failed.generation);
-  assert.equal(state.desktopRemoteControl.controlledDevice.errorCode, 'pairing_registration_failed');
+  assert.equal(state.desktopRemoteControl.controlledDevice.lastError, 'pairing_registration_failed');
   assert.equal(state.controlledNavigationPending, false);
   await feature.controlledStart('B', []);
   assert.equal(state.desktopRemoteControl.controlledDevice.generation, fixture.next.generation);
   publish(fixture.failed);
   assert.equal(state.desktopRemoteControl.controlledDevice.status, 'waiting_for_pairing');
   assert.equal(state.desktopRemoteControl.controlledDevice.generation, fixture.next.generation);
+});
+
+test('B failed open reads its terminal binding without a registering event', async () => {
+  const fixture = JSON.parse(fs.readFileSync(new URL('./fixtures/controller_registration_exit.json', import.meta.url), 'utf8'));
+  for (const mode of ['first', 'refresh', 'restart', 'bound']) {
+    const failed = { ...fixture.failed, statusIntent: mode === 'first' ? '1' : fixture.failed.statusIntent };
+    const open = Promise.withResolvers();
+    let starts = 0;
+    const { feature, state, listeners, logic } = installFeature(command => {
+      if (command === 'desktop_remote_controlled_refresh') return open.promise;
+      if (command === 'desktop_remote_controlled_start') return ++starts === 1 && mode !== 'refresh' && mode !== 'bound'
+        ? open.promise : Promise.resolve(fixture.next);
+      if (command === 'desktop_remote_controlled_status') return Promise.resolve(failed);
+      return undefined;
+    });
+    if (mode !== 'first') {
+      state.desktopRemoteControl = logic.applyControlledStatus(state.desktopRemoteControl, fixture.old);
+      if (mode === 'restart') state.desktopRemoteControl = logic.applyControlledStatus(state.desktopRemoteControl,
+        { ...fixture.old, status: 'error', errorCode: 'endpoint_offline' });
+    }
+    const pending = mode === 'refresh' || mode === 'bound' ? feature.controlledRefresh() : feature.controlledStart('B', []);
+    const rejected = assert.rejects(pending, { code: 'pairing_registration_failed' });
+    const emit = payload => listeners.get('desktop-remote-controlled-status')({ payload });
+    if (mode === 'refresh' || mode === 'bound') emit(fixture.retiring);
+    if (mode === 'bound') emit(fixture.registering);
+    if (mode !== 'bound' && mode !== 'first') {
+      emit(failed);
+      if (mode !== 'first') assert.notEqual(state.controlledDevice.generation, failed.generation,
+        'an ordinary cross-generation Error cannot bind the replacement');
+    }
+    open.reject('pairing_registration_failed');
+    await rejected;
+    assert.equal(state.controlledDevice.status, 'error', mode);
+    assert.equal(state.controlledDevice.generation, failed.generation, mode);
+    assert.equal(state.controlledDevice.lastError, 'pairing_registration_failed', mode);
+    assert.equal(state.controlledNavigationPending, false, mode);
+    await feature.controlledStart('B', []);
+    assert.equal(state.controlledDevice.status, 'waiting_for_pairing', mode);
+    assert.equal(state.controlledDevice.generation, fixture.next.generation, mode);
+    emit(failed);
+    assert.equal(state.controlledDevice.generation, fixture.next.generation, mode);
+    feature.stop();
+  }
+});
+
+test('B failed open reconciles after an old terminal interrupted its pending intent', async () => {
+  const fixture = JSON.parse(fs.readFileSync(new URL('./fixtures/controller_registration_exit.json', import.meta.url), 'utf8'));
+  const open = Promise.withResolvers();
+  const { feature, state, listeners, logic } = installFeature(command => {
+    if (command === 'desktop_remote_controlled_start') return open.promise;
+    if (command === 'desktop_remote_controlled_status') return Promise.resolve(fixture.failed);
+    return undefined;
+  });
+  state.desktopRemoteControl = logic.applyControlledStatus(state.desktopRemoteControl, fixture.old);
+  const rejected = assert.rejects(feature.controlledStart('B', []), { code: 'pairing_registration_failed' });
+  listeners.get('desktop-remote-controlled-status')({ payload: { ...fixture.old, status: 'error' } });
+  assert.equal(state.desktopRemoteControl.controlledTerminatedOpenIntent, state.controlledNavigationIntent);
+  open.reject('pairing_registration_failed');
+  await rejected;
+  assert.equal(state.controlledDevice.generation, fixture.failed.generation);
+  assert.equal(state.controlledDevice.lastError, 'pairing_registration_failed');
+  feature.stop();
+});
+
+test('B held failure status cannot overwrite a stop or successor command', async () => {
+  const fixture = JSON.parse(fs.readFileSync(new URL('./fixtures/controller_registration_exit.json', import.meta.url), 'utf8'));
+  for (const replacement of ['stop', 'start']) {
+    const read = Promise.withResolvers();
+    const entered = Promise.withResolvers();
+    let starts = 0;
+    const { feature, state } = installFeature(command => {
+      if (command === 'desktop_remote_controlled_start') return ++starts === 1
+        ? Promise.reject('pairing_registration_failed') : Promise.resolve(fixture.next);
+      if (command === 'desktop_remote_controlled_status') { entered.resolve(); return read.promise; }
+      if (command === 'desktop_remote_controlled_stop') return Promise.resolve({
+        ...fixture.failed, status: 'stopped', statusIntent: '4', errorCode: null,
+      });
+      return undefined;
+    });
+    const rejected = assert.rejects(feature.controlledStart('B', []), { code: 'pairing_registration_failed' });
+    await entered.promise;
+    if (replacement === 'stop') await feature.controlledStop();
+    else await feature.controlledStart('B', []);
+    const snapshot = state.desktopRemoteControl;
+    read.resolve(fixture.failed);
+    await rejected;
+    assert.equal(state.desktopRemoteControl, snapshot, replacement);
+    assert.equal(state.controlledDevice.status, replacement === 'stop' ? 'stopped' : 'waiting_for_pairing');
+    feature.stop();
+  }
+});
+
+test('B failed status read retains the failure owner for later panel synchronization', async () => {
+  const fixture = JSON.parse(fs.readFileSync(new URL('./fixtures/controller_registration_exit.json', import.meta.url), 'utf8'));
+  let reads = 0;
+  const { feature, state, listeners, logic } = installFeature(command => {
+    if (command === 'desktop_remote_controlled_refresh') return Promise.reject('pairing_registration_failed');
+    if (command === 'desktop_remote_controlled_status') return ++reads === 1
+      ? Promise.reject('status_unavailable') : Promise.resolve(fixture.failed);
+    return undefined;
+  });
+  state.desktopRemoteControl = logic.applyControlledStatus(state.desktopRemoteControl, fixture.old);
+  const rejected = assert.rejects(feature.controlledRefresh(), { code: 'pairing_registration_failed' });
+  listeners.get('desktop-remote-controlled-status')({ payload: fixture.retiring });
+  await rejected;
+  assert.equal(state.controlledDevice.status, 'retiring_generation', 'no invented terminal on unavailable status');
+  assert.equal(state.controlledNavigationPending, false);
+  await feature.controlledSync();
+  assert.equal(state.controlledDevice.status, 'error');
+  assert.equal(state.controlledDevice.generation, fixture.failed.generation);
+  feature.stop();
+});
+
+test('B registration recovery keeps ordinary event, native sequence and retired identity fences', () => {
+  const { logic } = installFeature();
+  let state = logic.applyControlledStatus(logic.createState(), {
+    status: 'retiring_generation', generation: 'old', statusIntent: '5',
+  });
+  state = logic.beginControlledIntent(state, true);
+  const intent = state.intents.controlled;
+  const failed = { status: 'error', generation: 'new', statusIntent: '6', errorCode: 'pairing_registration_failed' };
+  assert.equal(logic.applyControlledStatus(state, failed), state);
+  for (const payload of [
+    { ...failed, statusIntent: '4' }, { ...failed, statusIntent: '5' },
+    { ...failed, statusIntent: 'not-an-integer' }, { ...failed, errorCode: 'endpoint_offline' },
+    { ...failed, generation: null }, { ...failed, status: 'registering' },
+  ]) assert.equal(logic.reconcileControlledRegistrationFailure(state, intent, payload), state);
+  assert.equal(logic.reconcileControlledRegistrationFailure(state, intent - 1, failed), state);
+  const retired = { ...state, retiredControlledGenerations: ['new'] };
+  assert.equal(logic.reconcileControlledRegistrationFailure(retired, intent, failed), retired);
+  const next = logic.reconcileControlledRegistrationFailure(state, intent, failed);
+  assert.equal(next.controlledDevice.generation, 'new');
+  assert.deepEqual([...next.retiredControlledGenerations], ['old', 'new']);
+  assert.equal(logic.reconcileControlledRegistrationFailure(next, intent, failed), next);
+});
+
+test('B terminal events or bridge disposal invalidate an in-flight failure read', async () => {
+  const fixture = JSON.parse(fs.readFileSync(new URL('./fixtures/controller_registration_exit.json', import.meta.url), 'utf8'));
+  for (const interrupt of ['terminal', 'dispose']) {
+    const read = Promise.withResolvers();
+    const entered = Promise.withResolvers();
+    const { feature, state, listeners, logic } = installFeature(command => {
+      if (command === 'desktop_remote_controlled_refresh') return Promise.reject('pairing_registration_failed');
+      if (command === 'desktop_remote_controlled_status') { entered.resolve(); return read.promise; }
+      return undefined;
+    });
+    state.desktopRemoteControl = logic.applyControlledStatus(state.desktopRemoteControl, fixture.old);
+    const rejected = assert.rejects(feature.controlledRefresh(), { code: 'pairing_registration_failed' });
+    await entered.promise;
+    if (interrupt === 'terminal') listeners.get('desktop-remote-controlled-status')({ payload: { ...fixture.old, status: 'error' } });
+    else feature.stop();
+    const generation = state.controlledDevice.generation;
+    read.resolve(fixture.failed);
+    await rejected;
+    assert.equal(state.controlledDevice.generation, generation, interrupt);
+    feature.stop();
+  }
 });
 
 test('a stale control completion cannot release the newer navigation intent', async () => {
