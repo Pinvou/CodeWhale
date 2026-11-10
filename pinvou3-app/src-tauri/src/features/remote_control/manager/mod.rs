@@ -2728,6 +2728,35 @@ impl RemoteControlManager {
         }
     }
 
+    fn start_endpoint_reader(&self, reader: startup::EndpointReader) {
+        self.emit_status();
+        let manager = self.clone();
+        tauri::async_runtime::spawn(async move {
+            let startup::EndpointReader {
+                owner,
+                mut receiver,
+            } = reader;
+            while let Some(inbound) = receiver.recv().await {
+                match inbound {
+                    RelayInbound::Message(text) => match serde_json::from_str::<Value>(&text) {
+                        Ok(value) => manager.handle_relay_message(value, &owner),
+                        Err(_) => crate::features::remote_control::controller::relay_runtime::log_controlled_event(
+                            "relay_message_rejected", "rejected",
+                        ),
+                    },
+                    RelayInbound::ControllerMessage { text, receipt } => {
+                        if let Ok(value) = serde_json::from_str::<Value>(&text) {
+                            manager.handle_relay_message_with_receipt(value, &owner, Some(receipt));
+                        }
+                    }
+                    RelayInbound::Connection { endpoint_id, connected, error } => {
+                        manager.handle_connection(&endpoint_id, connected, error, &owner);
+                    }
+                }
+            }
+        });
+    }
+
     fn handle_connection(
         &self,
         endpoint_id: &str,

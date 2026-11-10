@@ -20,7 +20,11 @@ impl PendingStart {
         }));
         let worker = manager.clone();
         let thread = std::thread::spawn(move || {
-            tauri::async_runtime::block_on(worker.start_controller_relay(generation))
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(worker.start_controller_relay(generation))
         });
         let pending = Self {
             release: Some(release),
