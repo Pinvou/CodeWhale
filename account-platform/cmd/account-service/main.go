@@ -212,8 +212,8 @@ func main() {
 	if err != nil {
 		log.Fatal("ACCOUNT_TRUSTED_SOURCE_CONFIGURATION_INVALID")
 	}
-	// Start only after all configuration succeeds. Drain every registered task
-	// before repository.Close's earlier defer; persisted leases still own recovery.
+	// Start after Account configuration and task registration. Later HTTP setup
+	// errors take the same drain path before the repository is closed.
 	workersDone := startAccountBackground(ctx, workers)
 	drainWorkers := func() {
 		stopWorkers()
