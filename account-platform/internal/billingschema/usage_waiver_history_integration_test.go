@@ -140,9 +140,8 @@ func TestUsageWaiverHistoricalSchemaPostgres(t *testing.T) {
 		}
 		before := stageShape(t, ctx, c)
 		ledger := stageValue(t, ctx, c, `SELECT jsonb_agg(to_jsonb(s) ORDER BY version)::text FROM schema_migrations s`)
-		if err := DownOne(ctx, c, loaded); err == nil {
-			t.Fatal("waiver forward-only migration rolled back")
-		}
+		assertHistoricalBillingRollback(t, ctx, f.database(t, ctx, "billing", "billing_schema_owner"), loaded, 900024, "P0001", "administrator waiver commands and outcomes are forward-only")
+		assertBillingCurrentReplay(t, ctx, c, loaded)
 		migrations.Unlock(ctx, c)
 		if before != stageShape(t, ctx, c) || ledger != stageValue(t, ctx, c, `SELECT jsonb_agg(to_jsonb(s) ORDER BY version)::text FROM schema_migrations s`) {
 			t.Fatal("failed rollback changed shape/ledger")

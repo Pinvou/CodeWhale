@@ -19,7 +19,7 @@ function CaseActions({ client, item, owner, copy, canWrite, onChanged }) {
   const submit = async () => {
     setInvalid(false);
     try {
-      const facts = op.pendingFacts || reconciliationCommand(action, fields);
+      const facts = op.pendingFacts || reconciliationCommand(action, fields, item.latest_observation);
       const result = await op.mutate(facts, async (frozen, key) => {
         try { return await client.reconciliationCaseCommand(item.case_id, frozen, key); }
         catch (error) {
@@ -36,7 +36,9 @@ function CaseActions({ client, item, owner, copy, canWrite, onChanged }) {
   const labels = ['claim', 'assign', 'setRepair', 'resolve', 'ignore', 'reopen'];
   return <section className="adm-panel">
     <h3>{item.merchant_order_no} · {reconciliationCaseLabel(item.case_type, copy)}</h3><p>{copy.status}: {item.status}</p>
-    <details><summary>{copy.snapshots}</summary>{['provider_snapshot', 'internal_snapshot', 'refund_snapshot', 'ledger_snapshot'].map(key => <pre key={key}>{JSON.stringify(item[key] || {}, null, 2)}</pre>)}</details>
+    <details><summary>{copy.snapshots}</summary>{['provider_snapshot', 'internal_snapshot', 'refund_snapshot', 'ledger_snapshot'].map(key => <pre key={key}>{JSON.stringify(item[key] || {}, null, 2)}</pre>)}
+      {item.latest_observation && <><h4>{copy.latestObservation}</h4><pre>{JSON.stringify(item.latest_observation, null, 2)}</pre></>}
+    </details>
     {canWrite && <><label>{copy.action}<select disabled={disabled} value={action} onChange={event => setAction(event.target.value)}>{RECONCILIATION_ACTIONS.map((value, index) => <option key={value} value={value} disabled={item.case_type === 'LEDGER_REPAIR_PROOF_UNAVAILABLE' && value === 'IGNORE'}>{copy[labels[index]]}</option>)}</select></label>
       {action === 'ASSIGN' && <label>{copy.owner}<input disabled={disabled} value={fields.owner} onChange={update('owner')} /></label>}
       {action === 'SET_REPAIR_ACTION' && <label>{copy.repair}<textarea disabled={disabled} value={fields.repair} onChange={update('repair')} /></label>}
@@ -86,6 +88,7 @@ function Workspace({ client, me, copy }) {
         requireFinanceCollection(value);
         value.items.forEach(item => requireFinanceID(tab === 'runs' ? item.reconciliation_run_id : item.case_id));
         setPage({ ...value, tab, filterKey }); setCursor(result.query.cursor);
+        if (tab === 'cases') setSelected(current => current && (value.items.find(item => item.case_id === current.case_id) || null));
       }
     } catch { setInvalid(true); }
   };
