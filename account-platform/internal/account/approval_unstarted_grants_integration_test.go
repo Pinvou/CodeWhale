@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -28,7 +29,7 @@ func TestUnstartedApprovalGrantInventoryPostgres(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
 	defer cancel()
-	repo, operator, relay, _ := newEntitlementApprovalFixture(t, ctx, raw)
+	repo, operator, relay, operatorDSN := newEntitlementApprovalFixture(t, ctx, raw)
 	tokenRecentAuthActors(t, ctx, repo)
 	requester := seedEntitlementApprovalActor(t, ctx, repo.pool, "PLATFORM_SUPER_ADMIN", "prebegin-diagnostic-requester")
 	approver := seedEntitlementApprovalActor(t, ctx, repo.pool, "PLATFORM_SUPER_ADMIN", "prebegin-diagnostic-approver")
@@ -148,7 +149,14 @@ func TestUnstartedApprovalGrantInventoryPostgres(t *testing.T) {
 		t.Fatal("build actual inventory CLI", err)
 	}
 	command := exec.CommandContext(ctx, binary, "--limit", "200")
-	command.Env = append(os.Environ(), "APPROVAL_GRANT_INVENTORY_DATABASE_URL="+repo.pool.Config().ConnString())
+	// ConnConfig.ConnString retains the original coordinator DSN even after
+	// fixture fields are changed. Use the fixture's explicit owned DB URL.
+	runtimeURL, err := url.Parse(operatorDSN)
+	if err != nil {
+		t.Fatal("owned fixture URL invalid")
+	}
+	runtimeURL.User = url.User("account_service")
+	command.Env = append(os.Environ(), "APPROVAL_GRANT_INVENTORY_DATABASE_URL="+runtimeURL.String())
 	output, err := command.Output()
 	if err != nil {
 		t.Fatal("actual inventory CLI failed", err)
