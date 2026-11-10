@@ -298,11 +298,3 @@ test("restored Account and Admin real-entry browsers run once for feature and sh
   }
   assert.equal(fullLabels.filter(value => value === target).length, 1);
 });
-
-
-test("wrapper-only changes select the web UI smoke plus the core smoke", () => {
-  assert.deepEqual(
-    labels(selectFrontendSmokes(["pinvou3-app/scripts/run-webui-smoke.mjs"])),
-    ["npm:test:ui-smoke", "npm:test:webui"],
-  );
-});

@@ -345,7 +345,10 @@ function injectSource() {
           return Promise.resolve(smokeSnapshot);
         case 'get_device_services':
           if (window.__DEVICE_MGR_TEST__.failServices) return Promise.reject(new Error('services down (smoke)'));
-          return Promise.resolve([{ key: 'ollama', running: false, detail: 'probe timeout' }, { key: 'docker', running: true, detail: null }]);
+          // reason 机器码在场是刻意的：⑤ 的 serviceChips 断言钉住
+          // SERVICE_REASON_KEYS 映射（tooltip 必须是三语映射文案而非中文
+          // detail 原句；2026-11-10 复审 P2——回退映射本套件曾照绿）。
+          return Promise.resolve([{ key: 'ollama', running: false, reason: 'timeout', detail: 'probe timeout' }, { key: 'docker', running: true, detail: null }]);
         case 'get_external_models':
           if (window.__DEVICE_MGR_TEST__.failExternalModels) return Promise.reject(new Error('external models down (smoke)'));
           if (window.__DEVICE_MGR_TEST__.emptyExternalModels) return Promise.resolve({ models: [], warnings: [] });
@@ -649,12 +652,17 @@ async function clickTestId(page, testId) {
       })(),
       // 服务探测 chips 真渲染（stub 返回停止的 ollama + 运行的 docker）。
       // 运行态用读屏 aria-label 断言而非实现细节 CSS 类（round-19 P3）。
+      // 停止态 tooltip 必须是 reason 映射的三语文案而非中文 detail 原句
+      // （round-21 P2 的行为锚；2026-11-10 复审 P2——stub 此前不带 reason，
+      // 映射回退成 detail 直出时本套件照绿）。
       serviceChips: (() => {
         const chips = [...document.querySelectorAll('[data-testid="device-manager-service-chip"]')];
         return chips.length === 2
           && (chips[0].innerText || '').includes('Ollama')
           && (chips[1].innerText || '').includes('Docker')
-          && chips[1].querySelector('[aria-label="运行中"]') != null;
+          && chips[1].querySelector('[aria-label="运行中"]') != null
+          && chips[0].title === '请求超时（服务可能未启动）'
+          && !(chips[0].title || '').includes('probe timeout');
       })(),
       // 远端端点行：接入被禁用并带说明（回环尺子，第三轮评审 P1）。
       remoteLinkBlocked: (() => {
