@@ -51,9 +51,10 @@ class ClosurePostgresResults(unittest.TestCase):
         root = "TestMigrationCLIBudgetRecovery"
         cases = {root + "/" + suffix for suffix in (
             "invalid_budget_before_database", "domain_lock_wait", "partial_up_timeout",
-            "explicit_flag_overrides_invalid_env_and_retry", "transactional_down_timeout", "down_retry")}
+            "explicit_flag_overrides_invalid_env_and_retry", "transactional_down_timeout", "down_retry",
+            "successful_unlock_preserves_connection", "expired_unlock_retires_owned_connection")}
         rows = [{"Action": "pass", "Test": name} for name in sorted(cases | {root})]
-        self.assertEqual(runner.verify_results(stream(*rows), {root}), 7)
+        self.assertEqual(runner.verify_results(stream(*rows), {root}), 9)
         for missing in cases:
             with self.subTest(missing=missing), self.assertRaises(RuntimeError):
                 runner.verify_results(stream(*(row for row in rows if row["Test"] != missing)), {root})
@@ -172,7 +173,8 @@ class ClosurePostgresResults(unittest.TestCase):
             if "TestMigrationCLIBudgetRecovery" in roots:
                 rows += [{"Action": "pass", "Test": "TestMigrationCLIBudgetRecovery/" + suffix} for suffix in (
                     "invalid_budget_before_database", "domain_lock_wait", "partial_up_timeout",
-                    "explicit_flag_overrides_invalid_env_and_retry", "transactional_down_timeout", "down_retry")]
+                    "explicit_flag_overrides_invalid_env_and_retry", "transactional_down_timeout", "down_retry",
+                    "successful_unlock_preserves_connection", "expired_unlock_retires_owned_connection")]
             return subprocess_result(stream(*rows),
                                      1 if name == bad_group and failure == "process-failed" else 0)
 
