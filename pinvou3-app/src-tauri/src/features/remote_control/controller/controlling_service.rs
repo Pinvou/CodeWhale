@@ -2966,6 +2966,19 @@ mod tests {
         lane.authorize_resume_final = reader_authorized;
         let mut statuses: Vec<String> = Vec::new();
         let mut on_status = |status: &ControllingStatus| {
+            if matches!(
+                status.kind(),
+                ControllingStatusKind::Reconnecting | ControllingStatusKind::Connected
+            ) {
+                assert!(
+                    business.is_installed(),
+                    "recoverable transitions retain the actual crypto slot"
+                );
+                assert_eq!(
+                    business.is_suspended(),
+                    status.kind() == ControllingStatusKind::Reconnecting
+                );
+            }
             statuses.push(projection(status)["status"].as_str().unwrap().to_owned());
         };
         let mut on_session = |_: &ControllingSessionProjection| {};
@@ -3024,7 +3037,10 @@ mod tests {
             Some("live-a-2"),
             "恢复必须采用 Relay 下发的 A 端 liveness epoch"
         );
-        assert!(!business.is_suspended(), "恢复后业务通道必须重新打开");
+        assert!(
+            !business.is_installed(),
+            "keeper input ended after successful resume; terminal exit retires the slot"
+        );
         let now_a = lane_monotonic_millis();
         manager.mark_transport_disconnected(now_a, Some(now_a + 30_000));
         let second = manager

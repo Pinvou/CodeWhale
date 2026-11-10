@@ -573,6 +573,16 @@ async fn retained_ordered_tail_reaches_authenticated_projection_after_resume_wit
     })
     .await
     .unwrap();
+    // Check replay rejection while the keeper and crypto slot are still live;
+    // after cancellation an absent slot would make that assertion vacuous.
+    assert!(fixture.business.is_installed());
+    assert!(!fixture.business.is_suspended());
+    assert!(
+        fixture
+            .business
+            .open(&frame, &fixture.capabilities)
+            .is_err()
+    );
     drop(serving);
     drop(sinks);
     drop(on_journal);
@@ -582,16 +592,8 @@ async fn retained_ordered_tail_reaches_authenticated_projection_after_resume_wit
         ControllingStatusKind::Connected
     );
     assert_eq!(fixture.manager.live_lease().unwrap(), fixture.lease);
-    assert!(!fixture.business.is_suspended());
+    assert!(!fixture.business.is_installed());
     assert!(fixture.sender.authenticated_lease().is_some());
-    // Replaying the exact B ciphertext is rejected by the unchanged cipher;
-    // the projection was reached by its first authenticated consumption.
-    assert!(
-        fixture
-            .business
-            .open(&frame, &fixture.capabilities)
-            .is_err()
-    );
 }
 
 #[tokio::test(start_paused = true)]
