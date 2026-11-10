@@ -202,6 +202,55 @@ func TestHistoryExportPublicDomainsPostgres(t *testing.T) {
 				t.Fatal(e)
 			}
 			assertFailure(filepath.Join(weak, "export"), domain, false, "30")
+			// Force both real CLIs to observe the same absent destination. A loser
+			// must return failure before writing into the winner's accepted archive.
+			raceWrapper, e := filepath.Abs("../../test/integration/history-export-directory-race.ps1")
+			if e != nil {
+				t.Fatal(e)
+			}
+			raceDestination := filepath.Join(root, domain+"-concurrent")
+			barrier := filepath.Join(root, domain+"-barrier")
+			if e = os.Mkdir(barrier, 0700); e != nil {
+				t.Fatal(e)
+			}
+			type raceResult struct {
+				output []byte
+				err    error
+			}
+			results := make(chan raceResult, 2)
+			for _, worker := range []string{"1", "2"} {
+				go func(worker string) {
+					c := exec.CommandContext(ctx, shell, "-NoProfile", "-File", raceWrapper, "-SourceScript", script, "-Domain", domain, "-OutputDirectory", raceDestination, "-BarrierRoot", barrier, "-Worker", worker)
+					c.Env = env
+					output, err := c.CombinedOutput()
+					results <- raceResult{output, err}
+				}(worker)
+			}
+			accepted, rejected := 0, 0
+			for i := 0; i < 2; i++ {
+				result := <-results
+				switch {
+				case result.err == nil && strings.TrimSpace(string(result.output)) == "ACCOUNT_HISTORY_EXPORT_COMPLETE":
+					accepted++
+				case result.err != nil && strings.TrimSpace(string(result.output)) == "ACCOUNT_HISTORY_EXPORT_FAILED":
+					rejected++
+				default:
+					t.Fatalf("unexpected concurrent CLI result: %v %s", result.err, result.output)
+				}
+			}
+			if accepted != 1 || rejected != 1 {
+				t.Fatal("concurrent exporters did not have exactly one destination owner")
+			}
+			if output, e := run(raceDestination, domain, true, "30"); e != nil {
+				t.Fatalf("losing CLI damaged accepted output: %v %s", e, output)
+			}
+			files, e := filepath.Glob(filepath.Join(raceDestination, ".failure-*.txt"))
+			if e != nil || len(files) != 0 {
+				t.Fatal("losing CLI wrote diagnostics into winner directory")
+			}
+			if _, e = os.Stat(filepath.Join(raceDestination, ".export-owner")); e != nil {
+				t.Fatal("destination ownership marker not retained")
+			}
 			wrong := "billing"
 			if domain == "billing" {
 				wrong = "account"

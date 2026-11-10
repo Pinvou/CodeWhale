@@ -10,6 +10,7 @@ param(
 $ErrorActionPreference='Stop'
 $script:historyClock=[Diagnostics.Stopwatch]::StartNew()
 $script:historyRoot=$null
+$script:historyLease=$null
 
 function Assert-PrivateDirectory([string]$Path) {
   $item=Get-Item -LiteralPath $Path -Force
@@ -43,6 +44,10 @@ function New-PrivateDirectory([string]$Path) {
     $null=[IO.Directory]::CreateDirectory($full,[IO.UnixFileMode]448)
   } else {throw 'HISTORY_PLATFORM_UNSUPPORTED'}
   Assert-PrivateDirectory $full
+  # Directory creation may return a concurrent creator's directory. Only the
+  # atomic CreateNew owner may write any metadata, dump, diagnostic or manifest.
+  # Retain this marker after exit: an interrupted destination is never adopted.
+  $script:historyLease=[IO.File]::Open((Join-Path $full '.export-owner'),[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
   return $full
 }
 
@@ -168,4 +173,6 @@ try {
   } catch { }
   [Console]::Error.WriteLine('ACCOUNT_HISTORY_EXPORT_FAILED')
   exit 1
+} finally {
+  if($script:historyLease){$script:historyLease.Dispose()}
 }

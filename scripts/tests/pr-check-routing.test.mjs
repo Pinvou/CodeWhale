@@ -1375,6 +1375,31 @@ function inputSelects(text, filter, input) {
     && !patterns.some(pattern => pattern.startsWith("!") && matchesGlob(input, pattern.slice(1)));
 }
 
+function assertHistoryExportRouting(text) {
+  for (const input of ["scripts/export-account-history.ps1", "scripts/account-platform-history-export-tools.sh",
+    "account-platform/test/integration/history-export-directory-race.ps1"]) {
+    assert.ok(inputSelects(text, "account_platform", input), `${input} alone must select the export fixture job`);
+  }
+  const job = jobBlock("account-platform-test", text);
+  const preparation = namedStep(job, "Prepare native history export tools");
+  const acceptance = namedStep(job, "Read-only history export on public domain schemas");
+  assert.doesNotMatch(preparation + acceptance, /^ {8}(?:if|continue-on-error):/m);
+  assert.match(stepRun(job, "Prepare native history export tools"), /ci-fixture-process\.py.*bash scripts\/account-platform-history-export-tools\.sh/);
+  assert.ok(job.indexOf(preparation) < job.indexOf(acceptance), "native tools must be prepared before the real fixture");
+  assert.match(stepRun(job, "Read-only history export on public domain schemas"), /\^TestHistoryExportPublicDomainsPostgres\$/);
+  assert.match(job, /needs\.changes\.outputs\.account_platform == 'true'/);
+  assert.match(jobBlock("required-gate", text), /ACCOUNT_PLATFORM_REQUIRED: \$\{\{ needs\.changes\.outputs\.account_platform \}\}/);
+}
+
+test("History export executable-only inputs select prepared real acceptance", () => {
+  assertHistoryExportRouting(workflow);
+  const withoutRoute = workflow.replace(/^ {14}- 'scripts\/export-account-history\.ps1'\r?\n/m, "");
+  assert.notEqual(withoutRoute, workflow);
+  assert.throws(() => assertHistoryExportRouting(withoutRoute));
+  const job = jobBlock("account-platform-test");
+  assert.throws(() => assertHistoryExportRouting(workflow.replace(namedStep(job, "Prepare native history export tools"), "")));
+});
+
 function assertAccountPlatformInputChecks(text) {
   assert.match(text, /predicate-quantifier: some-with-excludes/);
   for (const input of [handoffGenerator, documentBaselineChecker]) {
