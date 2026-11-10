@@ -36,8 +36,8 @@ try {
   const pageErrors = [];
   page.on('pageerror', error => pageErrors.push(error.message));
   await page.goto(`http://127.0.0.1:${server.address().port}/`);
-  const results = await page.evaluate(async () => {
-    const { downloadRemoteArtifact } = await import('/src/features/remote-control/remote-file-transfer.mjs');
+  const results = await page.evaluate(async moduleUrl => {
+    const { downloadRemoteArtifact } = await import(moduleUrl);
     const binding = { localSessionId: 'session-one', remoteRef: 'remote-one' };
     const artifact = { taskId: 'task-one', artifactId: 'artifact-one' };
     const NativeBlob = window.Blob;
@@ -83,7 +83,7 @@ try {
       }
       return results;
     } finally { window.Blob = NativeBlob; }
-  });
+  }, '/src/features/remote-control/remote-file-transfer.mjs');
   for (const row of results) {
     if (row.mode === 'exact-budget' || row.mode === 'recovery') {
       assert.equal(row.returned, true, JSON.stringify(row));

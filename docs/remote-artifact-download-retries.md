@@ -6,13 +6,20 @@ handle 和原末块索引读取同一结果；它不会重新读取可能变化�
 创建 transfer。其他块索引、会话/任务/产物、完整租约、任务 admission 或摘要
 变化均不能获得该回执，错误请求不消费合法重试。
 
-回执从首次完成时起保留现有 `TransferLimits.ttl`（默认 10 分钟，可部署收窄），
+服务层回执从首次完成时起保留现有 `TransferLimits.ttl`（默认 10 分钟，可部署收窄），
 读取不延长期限。显式 abort、任务/admission/连接清理和现有到期 worker 均会
 清除对应回执。活动及已完成 handle 合计最多占用现有产物索引上限 256 个槽位；
 begin 预留槽位，满时返回既有 `transfer_capacity`，不驱逐其他已接受回执。
 末块 payload 最多 256 KiB，因此终态 payload 总计最多 64 MiB，另有有界身份
 元数据；原 4 路共享 in-flight 和 64 MiB 连接预算保持。达到回执容量时，显式
 撤销已完成下载或等待到期后可恢复 begin；该容量合同独立于活跃字节预算。
+
+以上期限和清理针对 `ArtifactDownloads` 的 handle 查询。既有 remote-action
+request-id 结果幂等缓存另有 256 项容量及滑动 10 分钟到期合同；在完整租约、
+session、request-id、operation 和 body 指纹相同时，它可重放历史响应副本。
+该重放不会重新执行下载、读取源文件或建立 transfer。新的 request-id 则经过
+当前服务的权限、admission、handle 和回执期限检查；服务清理不宣称撤销独立
+结果缓存中的历史响应副本。
 
 前端 `downloadRemoteArtifact` 在下一次请求、解码及聚合之前检查独立 4096 块
 上限，同时保留 32 MiB 总字节上限。每个响应必须对应当前连续索引、正的有界
