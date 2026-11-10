@@ -2072,11 +2072,11 @@ function composePlanMarkdown(snapshots) { return pinvouSharedtauriMain().compose
     // working set the immediate first-delta notify is suppressed, so the
     // stream scheduler must fall through to its bounded frame instead.
     // r12 P2-2：谓词必须与 notify() 的真实短路条件一致（suppressNotify ||
-    // startupNotificationBatching）——启动批处理窗内 notify 不发布，若谓词
-    // 仍报「未抑制」，chat-events 的派发盖章门会把一次零发布的 dispatch
-    // 量成健康派发（漏报方向的假健康章）。scheduleStreamNotify 的直发/合并
-    // 分流同理受益：批处理窗内的首 delta 走合并帧腿，批处理结束后随首次
-    // 真实发布落章。
+    // startupNotificationBatching）——启动批处理窗内 notify 不发布。
+    // r13 P2-2 更正：合并帧 publish() 腿的盖章也按发射时刻本谓词分流
+    // （抑制→markThrottled / 否则→markDispatched），不是「批处理结束后
+    // 随首次真实发布落章」——窗内每个周期的 publish 腿在 immediateNotify
+    // 丢弃后自行分流，与直发臂同构。
     isNotifySuppressed: function () { return suppressNotify || startupNotificationBatching; },
     recordAuthoritySyncDiagnostic: recordAuthoritySyncDiagnostic,
     authoritySyncBufferSnapshot: authoritySyncBufferSnapshot,

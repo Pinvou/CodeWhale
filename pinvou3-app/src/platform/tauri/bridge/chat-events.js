@@ -153,17 +153,8 @@ function pinvouSharedtauriChatEvents() {
           function (other) { return other !== sid && pendingStreamNotifications[other]; }
         );
         Object.keys(pendingStreamNotifications).forEach(cancelPendingStreamNotify);
-        if (window.RenderStageProbe) {
-          try {
-            for (var d = 0; d < displaced.length; d++) {
-              if (displaced[d] === state.activeSessionId) {
-                window.RenderStageProbe.markDispatched(displaced[d]);
-              } else {
-                window.RenderStageProbe.markThrottled(displaced[d]);
-              }
-            }
-          } catch (_) {}
-        }
+        // r13 P2-2：displaced 补章移入 immediateNotify 后的抑制分流块——
+        // 此处（发布前）无法知道这次发布是否被批处理窗丢弃。
         // The synchronous event router has already saved every affected
         // buffer and restored the visible working set before this callback.
         // Publish that coherent host snapshot once, even if one of the
@@ -171,10 +162,30 @@ function pinvouSharedtauriChatEvents() {
         // working set merely to issue a suppressed notification.
         try {
           immediateNotify();
-          // 流式合并帧发布后打「派发」段标记（评审 rebase 指示：放在 main 新
-          // publish() 结构的 immediateNotify() 之后、既有 try 块内）。
+          // r13 P2-2：批处理窗内合并腿盖章按**发射时刻** isNotifySuppressed
+          // 分流——窗内基座 notify 直接丢弃（bridge suppressNotify ||
+          // startupNotificationBatching），零发布不能量成健康派发（假
+          // 健康章方向）。与 notify() :119-125 的直发臂同构：抑制→
+          // markThrottled（诚实声明「主动不发布」），否则 markDispatched。
+          // displaced 活跃臂同理（r8 P1 的补章语义在抑制窗内同样不成立）。
           if (window.RenderStageProbe) {
-            try { window.RenderStageProbe.markDispatched(sid); } catch (_) {}
+            var fireSuppressed = isNotifySuppressed();
+            try {
+              if (fireSuppressed) {
+                try { window.RenderStageProbe.markThrottled(sid); } catch (_) {}
+              } else {
+                try { window.RenderStageProbe.markDispatched(sid); } catch (_) {}
+              }
+              for (var d = 0; d < displaced.length; d++) {
+                if (displaced[d] === state.activeSessionId) {
+                  if (fireSuppressed) {
+                    try { window.RenderStageProbe.markThrottled(displaced[d]); } catch (_) {}
+                  } else {
+                    try { window.RenderStageProbe.markDispatched(displaced[d]); } catch (_) {}
+                  }
+                }
+              }
+            } catch (_) {}
           }
         } catch (error) {
           console.error("[chat] coalesced stream notify failed", error);
