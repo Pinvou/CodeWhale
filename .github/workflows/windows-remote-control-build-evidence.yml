@@ -45,10 +45,15 @@ jobs:
         working-directory: pinvou3-app
         run: |
           npm ci --prefer-offline --no-audit
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           npm run runtime:windows:init
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           npm run runtime:windows:onnx-smoke
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node ../scripts/sync-version.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           npm run build:nsis
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Resolve exactly one installer
         id: installer
