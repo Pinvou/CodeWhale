@@ -47,7 +47,7 @@ fn parsed_runtime_requires_strict_wire_context_role_and_negotiated_capability() 
     assert!(
         parsed
             .validate_runtime(
-                SenderRole::ControllerB,
+                SenderRole::ControlledB,
                 context.lease.as_ref(),
                 &context.negotiated_capabilities
             )

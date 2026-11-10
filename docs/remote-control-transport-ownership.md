@@ -73,6 +73,12 @@ keeper 在所有编译模式都必须带原 transport 注册；缺失时在读�
 异常断线；异常结束只投影一次捕获的 owner、generation 和完整租约，继续由原 keeper
 核对，不能借全局当前实例清理替换后的 sender。外部 sink panic 不跳过先行的退休。
 
+认证安装到 keeper 首次轮询之间也适用此规则：任务在清空 active/saved 之前固定一个
+精确的终态注册元数据，尚未登记的 keeper 仅通过专用来源取得该身份，再经过原
+manager 的 operation/owner/完整租约围栏消费已排队的断线或入站失败。元数据不包含
+密钥、token 或能力列表，不能用于发送、安装或恢复；不把缺失租约改成通配。终态
+通知先发生、旧 keeper 延迟启动且新实例已 Connected 时，原身份仍不能作用于新实例。
+
 持续就绪的出站最多连续领取 8 个帧后，下一次选择优先检查已到期心跳及入站，再继续
 出站；Stop 和入站绝对静默截止始终优先。过期出站也占用该轮询额度。单次挂起写仍
 受既有写截止和更早的入站静默截止约束，不声称能抢占同步阻塞的 poll。控制/业务队列
@@ -104,6 +110,13 @@ cargo test --locked --manifest-path pinvou3-app/src-tauri/Cargo.toml --lib contr
 实际 loopback WebSocket 验证裸合法控制与短命连接、无有效响应的噪声、真实任务 panic
 及清理；可控时钟/队列另验轮询边界、安装替换、Stop 和原有建连/写总截止。这些
 本地入口不等价于部署 Relay、完整界面、双机、负载性能或发布验收。
+
+实际 connected-loop 的内存 wire 探针使用生产轮询、严格入站和真实 backoff 状态，
+核对持续出站时入站处理上界、稳定正向的重置及仅 Pong/裸帧不重置，以及生产生成的
+16 字节探测被当前响应恰好消费一次。FIFO 帧标记确认先前响应已处理，不使用 sleep
+猜测交错。此处仅替代网络 I/O；loopback socket、真实 spawn、adapter 与实际 App
+恢复夹具分别核对其边界，父子/重复执行不累计成独立场景。Windows 定向过滤器显式
+包含新的 availability、parsed-message 与 adapter 回归，Linux 完整 lib 仍包含它们。
 
 B 的两个平台无关回归分别保持 operation、generation、租约不变只替换 transport，
 验证旧 owner 无权执行闭包；以及在后继握手已开始后交付旧安装，验证安装闭包从未

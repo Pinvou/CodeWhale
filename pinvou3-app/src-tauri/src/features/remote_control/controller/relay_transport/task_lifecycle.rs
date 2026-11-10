@@ -22,10 +22,7 @@ impl Drop for TaskLifetimeGuard {
         // Explicit Stop and unexpected termination compete for one local
         // terminal transition. All identities belong to this sender instance;
         // never look up and retire a replacement through global state.
-        let notify = !self.sender.stopping.swap(true, Ordering::AcqRel);
-        let context = self.sender.disconnect_context();
-        self.sender.stop();
-        if notify {
+        if let Some(context) = self.sender.retire_task() {
             let lease_epoch = context
                 .lease
                 .as_ref()

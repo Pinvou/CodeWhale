@@ -389,6 +389,9 @@ pub(crate) struct ControllerTransportSender {
     transport_epoch: Arc<AtomicU64>,
     shutdown: CancellationToken,
     stopping: Arc<AtomicBool>,
+    // Provenance for a keeper that has not started polling when this task
+    // retires. This contains public identity only, never runtime authority.
+    retired_task_registration: Arc<RwLock<Option<ControllerDisconnectContext>>>,
     #[cfg(test)]
     before_initial_install: Arc<parking_lot::Mutex<Option<InitialLeaseInstallHook>>>,
 }
@@ -413,6 +416,34 @@ impl ControllerTransportSender {
                 .or(saved.as_ref())
                 .map(|lease| lease.context.clone()),
         }
+    }
+
+    pub(crate) fn keeper_registration(&self) -> ControllerDisconnectContext {
+        let current = self.disconnect_context();
+        if current.lease.is_none() && self.is_stopped() {
+            self.retired_task_registration
+                .read()
+                .clone()
+                .unwrap_or(current)
+        } else {
+            current
+        }
+    }
+
+    pub(super) fn retire_task(&self) -> Option<ControllerDisconnectContext> {
+        let notify = !self.stopping.swap(true, Ordering::AcqRel);
+        let registration = self.disconnect_context();
+        if registration.lease.is_some() {
+            // Publish before clearing active/saved. Also preserve provenance
+            // when an ingress failure already requested Stop before the keeper
+            // started: its queued failure still needs the original registration.
+            let mut retired = self.retired_task_registration.write();
+            if retired.is_none() {
+                *retired = Some(registration.clone());
+            }
+        }
+        self.stop();
+        notify.then_some(registration)
     }
 
     /// E2E-02 受控绑定：A 端在验签 transcript 之后才有权把 transport 的
@@ -943,6 +974,7 @@ fn transport_channels_shared(
             transport_epoch: Arc::new(AtomicU64::new(0)),
             shutdown,
             stopping: Arc::new(AtomicBool::new(false)),
+            retired_task_registration: Arc::new(RwLock::new(None)),
             #[cfg(test)]
             before_initial_install: Arc::new(parking_lot::Mutex::new(None)),
         },
@@ -1565,6 +1597,14 @@ pub(super) fn disconnect_test_transport_to_sink(
     let config =
         ControllerTransportConfig::new("ws://127.0.0.1:1", sender.role, sender.generation());
     emit_disconnected(&config, sender, sink, "test socket closed".into());
+}
+
+#[cfg(test)]
+pub(super) fn retire_test_transport_to_sink(
+    sender: &ControllerTransportSender,
+    sink: Arc<dyn ControllerEventSink>,
+) {
+    drop(task_lifecycle::TaskLifetimeGuard::new(sender.clone(), sink));
 }
 
 #[cfg(test)]
@@ -3823,18 +3863,31 @@ mod tests {
         });
         let admitted = Arc::new(AtomicU64::new(0));
         let observed = admitted.clone();
+        let delivered = Arc::new(tokio::sync::Notify::new());
+        let signal = delivered.clone();
         let sender = spawn_controller_transport(
             ControllerTransportConfig::new(url, ControllerRole::ControlledB, "generation-0001"),
             Arc::new(move |event| {
                 if matches!(event, ControllerTransportEvent::Frame { .. }) {
                     observed.fetch_add(1, Ordering::SeqCst);
+                    signal.notify_one();
                 }
             }),
         );
         let result = tokio::time::timeout(Duration::from_secs(8), &mut server).await;
+        let observed = tokio::time::timeout(Duration::from_secs(3), async {
+            while admitted.load(Ordering::SeqCst) < 3 {
+                delivered.notified().await;
+            }
+        })
+        .await;
         sender.stop();
-        server.abort();
+        if result.is_err() {
+            server.abort();
+            let _ = server.await;
+        }
         let accepted = result.expect("three bounded attempts").unwrap();
+        observed.expect("all three bare controls reached the production reader before Stop");
         assert_eq!(
             admitted.load(Ordering::SeqCst),
             3,
