@@ -1,6 +1,8 @@
 -- Supplier-confirmed cash is independent of both original gross and points.
 -- No inferred/backfilled amounts and no financial effects are installed here.
 ALTER TABLE chargeback_cases ADD CONSTRAINT chargeback_case_transaction_identity UNIQUE(id,payment_transaction_id);
+CREATE INDEX chargeback_cases_active_order_idx ON chargeback_cases(payment_order_id,status,id)
+WHERE status IN ('REVIEW_REQUIRED','CONFIRMED');
 CREATE TABLE chargeback_principal_evidence (
  id UUID PRIMARY KEY,
  chargeback_case_id UUID NOT NULL REFERENCES chargeback_cases(id),
@@ -75,7 +77,9 @@ CROSS JOIN LATERAL (
 UPDATE payment_orders p SET chargeback_summary=p.chargeback_summary||jsonb_build_object(
  'lost_amount_fen',NULL,'verified_lost_amount_fen','0','cash_principal_status','UNVERIFIED',
  'unverified_count',(SELECT count(*) FROM chargeback_cases c WHERE c.payment_order_id=p.id AND c.status IN ('CONFIRMED','REVIEW_REQUIRED'))),
- summary_version=p.summary_version+1
+ summary_version=p.summary_version+1,
+ attention_summary=CASE WHEN EXISTS(SELECT 1 FROM receivables r WHERE r.payment_order_id=p.id AND r.outstanding_microcredits>0)
+  THEN 'RECEIVABLE_OPEN' ELSE 'REVIEW_REQUIRED' END
 WHERE EXISTS(SELECT 1 FROM chargeback_cases c WHERE c.payment_order_id=p.id AND c.status IN ('CONFIRMED','REVIEW_REQUIRED'));
 
 ALTER TABLE public.reconciliation_cases DROP CONSTRAINT reconciliation_cases_case_type_check;

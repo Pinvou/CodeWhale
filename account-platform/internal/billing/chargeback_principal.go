@@ -141,17 +141,16 @@ const chargebackCashSummarySelect = `SELECT
  count(*) FILTER(WHERE c.status IN ('CONFIRMED','REVIEW_REQUIRED') AND p.fact->>'status'<>'CONFIRMED') unverified_count,
 	count(*) FILTER(WHERE c.status='CONFIRMED' AND (p.fact->>'manual_review_required')::boolean) principal_review_count,
  COALESCE(sum((p.fact->>'amount_fen')::numeric) FILTER(WHERE c.status IN ('CONFIRMED','REVIEW_REQUIRED') AND p.fact->>'status'='CONFIRMED'),0) verified_lost_amount_fen
- FROM chargeback_cases c JOIN chargeback_cash_principals p ON p.chargeback_case_id=c.id WHERE c.payment_order_id=$1`
+ FROM chargeback_cases c JOIN chargeback_cash_principals p ON p.chargeback_case_id=c.id WHERE c.payment_order_id=$1 AND c.status IN ('REVIEW_REQUIRED','CONFIRMED')`
 
 const chargebackCashSummaryJSON = `jsonb_build_object('review_count',chargebacks.review_count,'open_count',chargebacks.open_count,
  'lost_amount_fen',CASE WHEN chargebacks.unverified_count=0 THEN chargebacks.verified_lost_amount_fen::text ELSE NULL END,
  'verified_lost_amount_fen',chargebacks.verified_lost_amount_fen::text,'unverified_count',chargebacks.unverified_count,'principal_review_count',chargebacks.principal_review_count,
  'cash_principal_status',CASE WHEN chargebacks.unverified_count=0 THEN 'CONFIRMED' ELSE 'UNVERIFIED' END)`
 
-const chargebackCashSummaryUpdateSQL = `UPDATE payment_orders payment_order SET chargeback_summary=` + chargebackCashSummaryJSON + `,
- attention_summary=CASE WHEN EXISTS(SELECT 1 FROM receivables r WHERE r.payment_order_id=$1 AND r.outstanding_microcredits>0) THEN 'RECEIVABLE_OPEN'
- WHEN chargebacks.review_count>0 OR chargebacks.unverified_count>0 OR chargebacks.principal_review_count>0 THEN 'REVIEW_REQUIRED' WHEN payment_order.attention_summary='RECEIVABLE_OPEN' THEN 'NORMAL' ELSE payment_order.attention_summary END,
- summary_version=summary_version+1,updated_at=$2 FROM (` + chargebackCashSummarySelect + `) chargebacks WHERE payment_order.id=$1`
+const chargebackCashSummaryUpdateSQL = `UPDATE payment_orders payment SET chargeback_summary=` + chargebackCashSummaryJSON + `,
+ attention_summary=` + paymentOrderAttentionSQL + `,
+ summary_version=summary_version+1,updated_at=$2 FROM (` + chargebackCashSummarySelect + `) chargebacks WHERE payment.id=$1`
 
 func refreshChargebackCashSummary(ctx context.Context, tx pgx.Tx, orderID uuid.UUID, now time.Time) error {
 	_, err := tx.Exec(ctx, chargebackCashSummaryUpdateSQL, orderID, now)

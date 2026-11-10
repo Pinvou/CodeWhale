@@ -723,7 +723,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
         self.assertEqual(billing[-1], "./internal/billing")
         self.assertEqual(billing[billing.index("-run") + 1],
                          "^(" + "|".join(sorted(RUNNER.RETAINED_REQUIRED)) + ")$")
-        self.assertEqual(len(RUNNER.RETAINED_REQUIRED), 76)
+        self.assertEqual(len(RUNNER.RETAINED_REQUIRED), 77)
         self.assertEqual(self.fixture_writes, ["create", "drop"])
         self.assertEqual(self.fixture_trace, [
             "owner-account", "owner-wallet", "owner-schema", "owner-token-schema", "owner-provisioning",
@@ -1960,7 +1960,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
         }
         self.assertEqual(RUNNER.REFUND_REQUIRED, expected)
         self.assertTrue(expected <= RUNNER.RETAINED_REQUIRED)
-        self.assertEqual(len(RUNNER.RETAINED_REQUIRED), 76)
+        self.assertEqual(len(RUNNER.RETAINED_REQUIRED), 77)
         valid = self.events(RUNNER.RETAINED_REQUIRED, RUNNER.BILLING_PACKAGE, children=True)
         options = {"package": RUNNER.BILLING_PACKAGE, "require_children": True, "exact_roots": True,
                    "children_required": RUNNER.BILLING_CHILD_REQUIRED}
@@ -2108,7 +2108,22 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
         self.assertNotIn(identity, RUNNER.TOKEN_SCHEMA_REQUIRED)
         self.assertIn(root, RUNNER.RETAINED_REQUIRED)
         self.assertIn(root, RUNNER.BILLING_CHILD_REQUIRED)
-        expected = {"authorized-original-writer-partial-and-replay", "conflicts-retained-paginated-and-fresh-whole-blocked", "legacy-missing-cash-and-completed-receipt-stable", "F14-partial-cash-fences-fresh-plan-and-retains-old-receipt", "binding-auth-input-rejections-zero-write-and-recovery", "combined-and-over-gross-cash-requires-review", "immutable-receipts-runtime-and-migration-owner", "shared-supplier-evidence-cannot-bind-another-payment", "storage-failure-rolls-back-and-next-attempt-recovers", "concurrent-peer-cash-serializes-and-retries-without-money", "retained-038-forward-upgrade-and-down-refusal"}
+        expected = {"authorized-original-writer-partial-and-replay", "conflicts-retained-paginated-and-fresh-whole-blocked", "legacy-missing-cash-and-completed-receipt-stable", "F14-partial-cash-fences-fresh-plan-and-retains-old-receipt", "binding-auth-input-rejections-zero-write-and-recovery", "combined-and-over-gross-cash-requires-review", "immutable-receipts-runtime-and-migration-owner", "active-cash-cache-refreshes-on-legacy-record-and-dismiss", "legacy-financial-completion-keeps-principal-review-marker", "recharge-and-permitted-write-off-retain-principal-review", "shared-supplier-evidence-cannot-bind-another-payment", "storage-failure-rolls-back-and-next-attempt-recovers", "concurrent-peer-cash-serializes-and-retries-without-money", "retained-038-forward-upgrade-and-down-refusal"}
+        self.assertEqual(RUNNER.EXACT_REQUIRED_CHILDREN[root], expected)
+        events = self.events({root}, RUNNER.BILLING_PACKAGE, children=True)
+        options = {"package": RUNNER.BILLING_PACKAGE, "require_children": True, "exact_roots": True}
+        RUNNER.verify_results(events, {root}, **options)
+        for child in expected:
+            for invalid in ([e for e in events if e.get("Test") != root + "/" + child],
+                            events + [{"Action": "skip", "Package": RUNNER.BILLING_PACKAGE, "Test": root + "/" + child}]):
+                with self.subTest(child=child), self.assertRaises(RuntimeError):
+                    RUNNER.verify_results(invalid, {root}, **options)
+
+    def test_chargeback_original_producer_frozen_root_and_every_child_are_required(self):
+        root = "TestChargebackFrozenExecutionPostgres"
+        self.assertIn(root, RUNNER.RETAINED_REQUIRED)
+        self.assertIn(root, RUNNER.BILLING_CHILD_REQUIRED)
+        expected = {"actual-payment-origin-two-leg-reconciliation", "empty-digest-zero-effect", "activation-version-receipt-and-order-summary", "proof-claim-same-effective-component-tuple-drift", "wallet-source-lock-before-final-recompute"}
         self.assertEqual(RUNNER.EXACT_REQUIRED_CHILDREN[root], expected)
         events = self.events({root}, RUNNER.BILLING_PACKAGE, children=True)
         options = {"package": RUNNER.BILLING_PACKAGE, "require_children": True, "exact_roots": True}

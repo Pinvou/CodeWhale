@@ -357,27 +357,19 @@ SELECT COALESCE(sum(amount_fen) FILTER (WHERE status='SUCCEEDED'),0) succeeded_a
 FROM refunds WHERE payment_order_id=$1), forced_refunds AS (
 SELECT count(*) FILTER (WHERE status='REVIEW_REQUIRED') review_count
 FROM forced_refund_cases WHERE payment_order_id=$1), chargebacks AS (
-`+chargebackCashSummarySelect+`), receivables AS (
-SELECT count(*) FILTER (WHERE outstanding_microcredits>0) open_count
-FROM receivables WHERE payment_order_id=$1), anomalies AS (
-SELECT count(*) FILTER (WHERE status='OPEN') open_count
-FROM payment_anomaly_cases WHERE payment_order_id=$1)
+`+chargebackCashSummarySelect+`)
 UPDATE payment_orders payment SET
  payment_summary=jsonb_build_object('paid_count',facts.paid_count,'paid_amount_fen',facts.paid_amount_fen::text,'late_paid_count',facts.late_paid_count,'review_count',facts.review_count),
  refund_summary=jsonb_build_object('succeeded_amount_fen',refunds.succeeded_amount_fen::text,'pending_count',refunds.pending_count,'review_count',refunds.review_count,'forced_review_count',forced_refunds.review_count),
  chargeback_summary=`+chargebackCashSummaryJSON+`,
- attention_summary=CASE
-   WHEN receivables.open_count>0 THEN 'RECEIVABLE_OPEN'
-   WHEN facts.review_count>0 OR refunds.review_count>0 OR forced_refunds.review_count>0 OR chargebacks.review_count>0 OR chargebacks.unverified_count>0 OR chargebacks.principal_review_count>0 OR anomalies.open_count>0 THEN 'REVIEW_REQUIRED'
-   WHEN refunds.pending_count>0 OR (payment.status IN ('CREATED','PENDING') AND payment.close_status IN ('CLOSE_REQUESTED','LOCALLY_CLOSED_EXTERNAL_PENDING')) THEN 'PROCESSING'
-   ELSE 'NORMAL' END,
+ attention_summary=`+paymentOrderAttentionSQL+`,
  status=CASE WHEN facts.review_count>0 THEN 'MANUAL_REVIEW' WHEN facts.late_paid_count>0 THEN 'PAID_LATE' WHEN facts.paid_count>0 THEN 'PAID' ELSE payment.status END,
  fulfillment_status=CASE WHEN facts.review_count>0 THEN 'MANUAL_REVIEW' WHEN facts.paid_count>0 AND facts.credited_count=facts.paid_count THEN 'CREDITED' ELSE payment.fulfillment_status END,
  payment_url=CASE WHEN facts.paid_count>0 OR facts.review_count>0 THEN NULL ELSE payment.payment_url END,
  qr_data=CASE WHEN facts.paid_count>0 OR facts.review_count>0 THEN NULL ELSE payment.qr_data END,
  primary_provider_transaction_id=COALESCE(payment.primary_provider_transaction_id,facts.primary_transaction),
  paid_at=COALESCE(payment.paid_at,facts.first_paid_at),summary_version=summary_version+1,updated_at=$2
-FROM facts,refunds,forced_refunds,chargebacks,receivables,anomalies WHERE payment.id=$1`, orderID, now)
+FROM facts,refunds,forced_refunds,chargebacks WHERE payment.id=$1`, orderID, now)
 	if err != nil {
 		return PaymentOrder{}, err
 	}

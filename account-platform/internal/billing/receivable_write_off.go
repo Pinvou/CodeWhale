@@ -359,10 +359,7 @@ VALUES($1,$2,$3,'APPROVED_WRITE_OFF',$4,$5,$6,$7)`, allocationID, plan.Receivabl
 		}
 		return ReceivableWriteOffResult{}, err
 	}
-	if _, err := tx.Exec(ctx, `UPDATE payment_orders payment_order SET attention_summary=CASE
-WHEN EXISTS(SELECT 1 FROM receivables receivable WHERE receivable.payment_order_id=payment_order.id AND receivable.outstanding_microcredits>0) THEN 'RECEIVABLE_OPEN'
-WHEN payment_order.attention_summary='RECEIVABLE_OPEN' THEN 'NORMAL' ELSE payment_order.attention_summary END,
-summary_version=summary_version+1,updated_at=$2 WHERE payment_order.id IN (
+	if _, err := tx.Exec(ctx, `UPDATE payment_orders payment SET attention_summary=`+paymentOrderAttentionSQL+`,summary_version=summary_version+1,updated_at=$2 WHERE payment.id IN (
 SELECT DISTINCT receivable.payment_order_id FROM receivables receivable WHERE receivable.wallet_id=$1 AND receivable.payment_order_id IS NOT NULL)`, plan.WalletID, now); err != nil {
 		return ReceivableWriteOffResult{}, err
 	}

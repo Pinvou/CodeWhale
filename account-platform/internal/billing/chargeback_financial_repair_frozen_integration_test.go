@@ -54,8 +54,12 @@ func TestChargebackFrozenExecutionPostgres(t *testing.T) {
 			t.Fatal(err)
 		}
 		providerReference := "audit-chargeback-repair-" + uuid.NewString()
-		source, err := r.RecordConfirmedChargebackForReview(ctx, transaction, providerReference, []byte(`{"controlled":true}`))
-		if err != nil || source.EntitlementPackageID != pack || source.ManualReviewCaseID == nil {
+		var paymentReference string
+		if err := r.pool.QueryRow(ctx, `SELECT provider_transaction_id FROM payment_transactions WHERE id=$1`, transaction).Scan(&paymentReference); err != nil {
+			t.Fatal(err)
+		}
+		source := principalSupplierHTTPFixture(t, ctx, r, transaction, providerReference, "100", paymentReference, "CNY")
+		if source.EntitlementPackageID != pack || source.ManualReviewCaseID == nil {
 			t.Fatalf("original chargeback evidence %+v %v", source, err)
 		}
 		actor, key := uuid.New(), uuid.NewString()
@@ -72,10 +76,7 @@ func TestChargebackFrozenExecutionPostgres(t *testing.T) {
 		if err != nil || result.BaseShortfallMicrocredits != 1000000 {
 			t.Fatalf("actual two-leg repair %+v %v", result, err)
 		}
-		var paymentReference string
-		if err := r.pool.QueryRow(ctx, `SELECT provider_transaction_id FROM payment_transactions WHERE id=$1`, transaction).Scan(&paymentReference); err != nil {
-			t.Fatal(err)
-		}
+
 		financialSnapshot := func() string {
 			var raw string
 			if err := r.pool.QueryRow(ctx, `SELECT jsonb_build_array(

@@ -124,7 +124,7 @@ func (r *PostgresRepository) recordConfirmedChargebackForReview(ctx context.Cont
 	if _, err := tx.Exec(ctx, `UPDATE chargeback_cases SET manual_review_case_id=$2 WHERE id=$1`, result.ID, anomaly.ID); err != nil {
 		return ChargebackCase{}, err
 	}
-	if _, err := tx.Exec(ctx, `UPDATE payment_orders SET chargeback_summary=chargeback_summary||jsonb_build_object('review_count',(SELECT count(*) FROM chargeback_cases WHERE payment_order_id=$1 AND status='REVIEW_REQUIRED')),attention_summary='REVIEW_REQUIRED',summary_version=summary_version+1,updated_at=$2 WHERE id=$1`, orderID, now); err != nil {
+	if err := refreshChargebackCashSummary(ctx, tx, orderID, now); err != nil {
 		return ChargebackCase{}, err
 	}
 	if err := events.AppendOutbox(ctx, tx, "billing.chargeback.review-required.v1", result.ID, 1, map[string]any{"chargeback_case_id": result.ID, "manual_review_case_id": anomaly.ID, "payment_order_id": orderID, "payment_transaction_id": transactionID}); err != nil {

@@ -190,6 +190,7 @@ REFUND_REQUIRED = {
     "TestRefundOriginalUnknownSuccessQueriesAndSettlesOrdinaryGrantsPostgres",
 }
 RETAINED_REQUIRED = {
+    "TestChargebackFrozenExecutionPostgres",
     "TestChargebackPrincipalIndependentCashPostgres",
     "TestClosedGrantEvidenceCurrentRoleGuardsPostgres",
     "TestEscalatedForcedRefundRequiresSecondActorAndReplays",
@@ -277,7 +278,8 @@ BILLING_LEAF_REQUIRED = {
 }
 BILLING_CHILD_REQUIRED = RETAINED_REQUIRED - BILLING_LEAF_REQUIRED
 EXACT_REQUIRED_CHILDREN = {
-    "TestChargebackPrincipalIndependentCashPostgres": {"authorized-original-writer-partial-and-replay", "conflicts-retained-paginated-and-fresh-whole-blocked", "legacy-missing-cash-and-completed-receipt-stable", "binding-auth-input-rejections-zero-write-and-recovery", "combined-and-over-gross-cash-requires-review", "immutable-receipts-runtime-and-migration-owner", "shared-supplier-evidence-cannot-bind-another-payment", "F14-partial-cash-fences-fresh-plan-and-retains-old-receipt", "storage-failure-rolls-back-and-next-attempt-recovers", "concurrent-peer-cash-serializes-and-retries-without-money", "retained-038-forward-upgrade-and-down-refusal"},
+    "TestChargebackFrozenExecutionPostgres": {"actual-payment-origin-two-leg-reconciliation", "empty-digest-zero-effect", "activation-version-receipt-and-order-summary", "proof-claim-same-effective-component-tuple-drift", "wallet-source-lock-before-final-recompute"},
+    "TestChargebackPrincipalIndependentCashPostgres": {"authorized-original-writer-partial-and-replay", "conflicts-retained-paginated-and-fresh-whole-blocked", "legacy-missing-cash-and-completed-receipt-stable", "binding-auth-input-rejections-zero-write-and-recovery", "combined-and-over-gross-cash-requires-review", "immutable-receipts-runtime-and-migration-owner", "active-cash-cache-refreshes-on-legacy-record-and-dismiss", "legacy-financial-completion-keeps-principal-review-marker", "recharge-and-permitted-write-off-retain-principal-review", "shared-supplier-evidence-cannot-bind-another-payment", "F14-partial-cash-fences-fresh-plan-and-retains-old-receipt", "storage-failure-rolls-back-and-next-attempt-recovers", "concurrent-peer-cash-serializes-and-retries-without-money", "retained-038-forward-upgrade-and-down-refusal"},
     "TestBillingHistoricalCatalogRollbackPostgres": {
         f"version{version}/seeded={seeded}{suffix}"
         for version in (35, 36, 37, 51)
