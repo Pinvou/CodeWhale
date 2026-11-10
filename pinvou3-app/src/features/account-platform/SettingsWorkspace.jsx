@@ -202,7 +202,7 @@ export function SettingsWorkspace({ copy, language, languageFeedback, onLanguage
               {canManageSMS && <footer className="adm-sms-form-actions">
                 <div className="adm-sms-save-feedback" role="status">{smsState.saving ? copy.settings.sms.saving : saveNotice}</div>
                 {smsState.notice?.original && <button type="button" disabled={smsState.saving || smsState.loading} onClick={() => void loadSMSConfiguration()}>{copy.refresh}</button>}
-                <button type="submit" className="adm-primary-button" disabled={smsState.saving || !formValid || Boolean(intent.current?.conflicted)}>{smsState.saving ? copy.settings.sms.saving : pendingAttempt ? smsWords.retryOriginal : copy.settings.sms.save}</button>
+                <button type="submit" className="adm-primary-button" formNoValidate={Boolean(pendingAttempt)} disabled={smsState.saving || (!pendingAttempt && !formValid) || Boolean(intent.current?.conflicted)}>{smsState.saving ? copy.settings.sms.saving : pendingAttempt ? smsWords.retryOriginal : copy.settings.sms.save}</button>
               </footer>}
               </form>
             </>

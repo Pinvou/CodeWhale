@@ -130,7 +130,7 @@ export function Pagination({ source, query, state, copy, cursorHistory, onQueryC
   );
 }
 
-export function FilterForm({ source, query, fields, copy, onQueryChange, resetDraftOnClear = false }) {
+export function FilterForm({ source, query, fields, copy, onQueryChange, resetDraftOnClear = true }) {
   const [draft, setDraft] = useState(query);
   const id = React.useId();
   const update = (key, value) => setDraft(current => ({ ...current, [key]: value }));

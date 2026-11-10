@@ -69,7 +69,11 @@ function ProvisioningFilters({ query, items, copy, onQueryChange }) {
       </select></label>}
     </div>)}
     <button type="submit">{copy.search}</button>
-    <button type="button" className="secondary" onClick={() => onQueryChange('provisionings', Object.fromEntries(Object.keys(query).map(key => [key, ''])))}>{copy.clear}</button>
+    <button type="button" className="secondary" onClick={() => {
+      const empty = Object.fromEntries(Object.keys(query).map(key => [key, '']));
+      setDraft(empty);
+      onQueryChange('provisionings', empty);
+    }}>{copy.clear}</button>
   </form>;
 }
 
