@@ -1054,8 +1054,7 @@ func (s *Service) forward(w http.ResponseWriter, r *http.Request, upstream *url.
 		}
 		return
 	}
-	w.WriteHeader(response.StatusCode)
-	_, _ = io.Copy(w, io.LimitReader(response.Body, 32<<20))
+	forwardOrdinaryAPIResponse(w, r, response)
 }
 
 // This read has an Account-owned durable audit and quota outcome. HEAD is not
