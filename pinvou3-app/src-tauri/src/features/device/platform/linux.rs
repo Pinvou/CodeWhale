@@ -1482,6 +1482,103 @@ mod tests {
         });
     }
 
+    /// 2026-11-10 复审 P2 的端到端：边界臂的名字两臂只在链首查一次，其后的
+    /// 守卫 3/2.5 与删除时刻复查全是路径臂，管不到 daemon 对象——边界查询
+    /// 之后、DELETE 之前商店并发部署同名卡时，DELETE 会真删刚接管的商店
+    /// 模型（含 daemon blob 权重）。守卫 4 入口的名字重查必须拒绝整单：此刻
+    /// ollama 记录尚未发生任何破坏性步骤，注册表记录与商店卡片都必须完好。
+    /// 回退重查即 DELETE 照发（死端口只产生警告）、移除成功，本测试转红。
+    #[test]
+    fn guard4_rechecks_store_names_before_delete_after_boundary() {
+        use crate::features::device::{
+            external_models::{guard4_test_hooks, registry_dir}, get_external_models,
+            remove_external_model,
+        };
+        use crate::features::model_store::platform::linux::{config, db};
+        let _ctx = config::TempHome::new();
+        point_ollama_at_dead_port();
+        db::init_db().expect("init store db");
+        let dir = registry_dir();
+        std::fs::create_dir_all(&dir).expect("registry dir");
+        std::fs::write(
+            dir.join("m-g4chk01.json"),
+            r#"{"schema":1,"id":"m-g4chk01","name":"g4-model","kind":"ollama","model":"g4-model:latest"}"#,
+        )
+        .expect("write ollama record");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        runtime.block_on(async {
+            // 确认面板所见地址（与真实前端一致：设置推导值）。
+            let view = get_external_models().await.expect("list external models");
+            let row = view
+                .models
+                .iter()
+                .find(|model| model.id == "m-g4chk01")
+                .expect("listed ollama row");
+            let listed_base = row.base_url.clone().expect("ollama rows carry base_url");
+
+            // 布闸 + 独立线程跑移除：闸门阻塞移除线程，测试线程负责窗口内布防。
+            guard4_test_hooks::arm(&dir.to_string_lossy());
+            let dir_for_record = dir.clone();
+            let removal_thread = std::thread::spawn(move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("removal runtime");
+                runtime.block_on(remove_external_model(
+                    "m-g4chk01".to_string(),
+                    true,
+                    "g4-model".to_string(),
+                    Some(listed_base),
+                ))
+            });
+            guard4_test_hooks::wait_arrival();
+
+            // 窗口内：商店部署同名卡（精确同名钉最小形状）。
+            db::add_store_model(db::AddStoreModelParams {
+                card_id: "c-g4",
+                model_name: "g4-model",
+                card_name: "c-g4",
+                org: None,
+                description: None,
+                engine_name: "e",
+                engine_version: None,
+                size_bytes: 0,
+                quantization: None,
+                source_repo_id: None,
+                source_filename: None,
+                scripts: &std::collections::BTreeMap::new(),
+                status: "downloaded",
+                profiles: &[],
+                deploy_topology:
+                    crate::features::model_store::platform::linux::store_client::DeployTopology::default(),
+                card_source: "store",
+            })
+            .expect("insert store model inside the guard-4 window");
+            guard4_test_hooks::release();
+
+            let error = removal_thread
+                .join()
+                .expect("removal thread must not panic")
+                .expect_err("guard-4 name recheck must refuse the takeover");
+            assert!(
+                error.contains("已被模型商店接管"),
+                "rejection must name the guard-4 recheck arm, got: {error}"
+            );
+            assert!(
+                dir_for_record.join("m-g4chk01.json").exists(),
+                "registry record must survive the refusal"
+            );
+
+            // 商店卡片完好（重查拒绝发生在 DELETE 之前，直接查库核实）。
+            let hit = db::get_store_model_by_name("g4-model", false)
+                .expect("store db query after refusal");
+            assert!(hit.is_some(), "store card must survive the refusal");
+        });
+    }
+
     /// 商店权重根**内置导入扫描根臂**的端到端接线（十二轮评审 P1）：
     /// `LMM_IMPORT_DIRS` 给脚本下发的是含 `~/Downloads` 等内置根的同一张列表，
     /// 卡片会就地复用其中的既有权重——这些目录下的权重同属"由模型商店管理"，

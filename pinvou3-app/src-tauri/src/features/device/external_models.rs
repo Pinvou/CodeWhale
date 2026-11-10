@@ -798,6 +798,68 @@ static SECTION_TEST_PAUSE: std::sync::Mutex<SectionPauseState> =
 #[cfg(test)]
 static SECTION_TEST_PAUSE_CV: std::sync::Condvar = std::sync::Condvar::new();
 
+/// 守卫 4 名字重查的专用测试闸门（2026-11-10 复审 P2）：与
+/// [`SECTION_TEST_PAUSE`]（登记发布临界区闸）**互相独立**——闸门状态是
+/// 进程级的，两条链路若共享同一组状态，并行测试会互相偷闸/误放行
+/// （36 轮评审 P2 教训）。钩子函数经 [`guard4_test_hooks`] 供
+/// `platform/linux.rs` 的受控交错回归使用。
+#[cfg(test)]
+static GUARD4_TEST_PAUSE: std::sync::Mutex<SectionPauseState> =
+    std::sync::Mutex::new(SectionPauseState {
+        armed: false,
+        armed_key: None,
+        arrived: false,
+        release: false,
+    });
+
+#[cfg(test)]
+static GUARD4_TEST_PAUSE_CV: std::sync::Condvar = std::sync::Condvar::new();
+
+#[cfg(test)]
+fn guard4_section_test_pause(key: &str) {
+    let mut state = GUARD4_TEST_PAUSE.lock().expect("guard4 pause lock");
+    if !state.armed || state.armed_key.as_deref() != Some(key) {
+        return;
+    }
+    state.armed = false;
+    state.arrived = true;
+    GUARD4_TEST_PAUSE_CV.notify_all();
+    while !state.release {
+        state = GUARD4_TEST_PAUSE_CV.wait(state).expect("guard4 pause cv");
+    }
+}
+
+/// 测试专用钩子（仅测试构建）：受控交错回归在守卫 4 入口强制出一个确定性
+/// 窗口（边界臂已放行、DELETE 未发），窗口内商店部署同名卡后放行，验证
+/// 名字重查拒绝整单。回退重查即 DELETE 照发（死端口只产生警告）、移除
+/// 成功，回归即红。见 `platform/linux.rs` 的
+/// `guard4_rechecks_store_names_before_delete_after_boundary`。
+#[cfg(test)]
+pub(crate) mod guard4_test_hooks {
+    use super::{GUARD4_TEST_PAUSE, GUARD4_TEST_PAUSE_CV};
+
+    pub(crate) fn arm(key: &str) {
+        let mut state = GUARD4_TEST_PAUSE.lock().expect("guard4 pause lock");
+        state.armed = true;
+        state.armed_key = Some(key.to_string());
+        state.arrived = false;
+        state.release = false;
+    }
+
+    pub(crate) fn wait_arrival() {
+        let mut state = GUARD4_TEST_PAUSE.lock().expect("guard4 pause lock");
+        while !state.arrived {
+            state = GUARD4_TEST_PAUSE_CV.wait(state).expect("guard4 pause cv");
+        }
+    }
+
+    pub(crate) fn release() {
+        let mut state = GUARD4_TEST_PAUSE.lock().expect("guard4 pause lock");
+        state.release = true;
+        GUARD4_TEST_PAUSE_CV.notify_all();
+    }
+}
+
 fn normalize_optional(raw: &Option<String>) -> Option<String> {
     raw.as_deref()
         .map(str::trim)
@@ -1268,7 +1330,8 @@ pub async fn remove_external_model(
                             // zhuowp，review 5801985394）：与商店根复查同一模式
                             // 重推导（守卫后到删除前注册表可能被并发改写），读取
                             // 失败按拒绝（fail-closed 同口径；排除口径与边界臂
-                            // 同一把尺：内容 id + 同 kind 身份等价副本）。
+                            // 同一把尺：除 id 外逐字段相等的真等价副本，见
+                            // other_registry_weights_checked）。
                             let registry_weights = other_registry_weights_checked(
                                 &registry_dir(),
                                 &exclude_record_for_task,
@@ -1330,6 +1393,37 @@ pub async fn remove_external_model(
     // 的解析值（2026-11-04 评审 P3：二次解析会在检查与删除之间重开改配窗口）。
     let mut ollama_deleted = false;
     if let Some(model_name) = &ollama_model_name {
+        // 守卫 4 名字重查（2026-11-10 复审 P2）：边界臂的名字两臂只在链首查
+        // 一次，其后的守卫 3/2.5 与删除时刻复查全是路径臂，管不到 daemon
+        // 对象——边界查询之后、DELETE 之前商店并发部署同名卡时，DELETE 会
+        // 真删刚接管的商店模型（含 daemon blob 权重）。此刻 ollama 记录尚未
+        // 发生任何破坏性步骤（守卫 3 对 ollama 一律跳过目录删除，注册表文件
+        // 在第 5 步才删），命中即整单 Err 拒绝，与名字臂同口径 fail-closed；
+        // 查询失败同样按 Err 拒绝（checked 版）。测试经
+        // guard4_section_test_pause 在此处强制出确定性窗口。
+        #[cfg(test)]
+        guard4_section_test_pause(&registry_dir().to_string_lossy());
+        let store_name_now_hit = tokio::task::spawn_blocking({
+            let record_name = record.name.clone();
+            let model_name = model_name.clone();
+            move || -> Result<Option<String>, String> {
+                let exact =
+                    crate::features::model_store::store_model_name_checked(&record_name, false)?;
+                if exact.is_some() {
+                    return Ok(exact);
+                }
+                crate::features::model_store::store_model_name_checked(&model_name, true)
+            }
+        })
+        .await
+        .map_err(|error| format!("商店名单复查失败：{error}"))?
+        .map_err(|error| format!("商店名单复查失败：{error}"))?;
+        if let Some(store_name) = store_name_now_hit {
+            return Err(format!(
+                "该 Ollama 模型“{store_name}”已被模型商店接管（边界检查之后商店部署了同名模型），\
+                 删除会破坏商店管理的模型，请前往模型商店操作{STORE_BOUNDARY_ESCAPE_HINT}"
+            ));
+        }
         let delete_result = match ollama_bound_base.as_deref() {
             Some(base) => ollama_delete_against(base, model_name).await,
             None => ollama_delete(model_name).await,
@@ -1837,13 +1931,14 @@ fn ensure_recheck_outside_installed_refs(
 /// 枚举失败（entry 错误）与文件元数据读取失败（`is_file` 把 EACCES/ELOOP
 /// 折叠成 false 再当"不是记录文件"）同口径拒绝（2026-11-09 评审 P2，review
 /// 5820385522：部分枚举或元数据失败 ≠ 记录不存在）；文件数超出扫描上限
-/// 同样按 Err 拒绝（截断即放弃核对截断之外的存在）。自身记录按**内容 id**
-/// 排除（删除自身的权重正是本次请求）；身份排除只对**同 kind** 且身份相等
-/// 的记录生效（2026-11-09 评审 P2：登记查重的冲突判定是 `record.kind ==
-/// kind` 范围内的——不同 kind 的同名记录（如非 Ollama 的 "qwen3" 与 Ollama
-/// 的 "Qwen3"）是入口明确允许并存的独立登记，不是同一逻辑登记的重复落盘，
-/// 必须保留咨询；同 kind 同身份的重复记录（含早期模板的 slug 文件名/空 id
-/// 存量）才是入口本会拒绝创建的等价副本，读取端对它们只告警不吞）。
+/// 同样按 Err 拒绝（截断即放弃核对截断之外的存在）。排除仅限两类：被删
+/// 记录自身的文件（exclude 即其完整读取副本，由逐字段相等自然排除），与
+/// 除 id 外整条记录逐字段相等的真等价副本（谓词与取舍见函数体内
+/// 2026-11-09/11-10 两轮评审注释）——id 相等不构成独立排除依据，同 kind
+/// 身份相等的三元组也不构成等价证明：不同 kind 的同名记录（如非 Ollama
+/// 的 "qwen3" 与 Ollama 的 "Qwen3"）是入口明确允许并存的独立登记，
+/// note/installed_at/原始 name 各异的同 kind 冲突存量同样保留咨询（读取
+/// 端对它们只告警不吞）。
 fn other_registry_weights_checked(
     dir: &Path,
     exclude: &RegistryRecord,
