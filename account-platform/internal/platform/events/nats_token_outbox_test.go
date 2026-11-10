@@ -101,6 +101,9 @@ func TestTokenOutboxAuthorizationPreservesExistingIdentities(t *testing.T) {
 
 func TestNATSInitialFileIdentityMatchesTrustedKey(t *testing.T) {
 	private := t.TempDir()
+	if err := os.Chmod(private, 0700); err != nil {
+		t.Fatal(err)
+	}
 	seed, public := natsFixtureSeed(t, private, "token")
 	_, other := natsFixtureSeed(t, private, "other-domain")
 	if _, err := natsAuthenticationWithExpectedIdentity("tls://localhost:4222", seed, "", public); err != nil {
