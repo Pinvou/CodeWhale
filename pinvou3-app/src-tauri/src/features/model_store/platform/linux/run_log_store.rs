@@ -154,7 +154,7 @@ const SECRET_PREFIXES: [&str; 9] = [
 /// `credential_store::redact_secret` 按**空白**分词，所以
 /// `https://host/f?token=abc123` 对它是一个整词、而这个整词不长得像机密——
 /// 嵌在 query 里的 token 它一个都抓不到。这一档就是补这个洞。
-const SECRET_QUERY_KEYS: [&str; 14] = [
+const SECRET_QUERY_KEYS: [&str; 15] = [
     "token",
     "access_token",
     "accesstoken",
@@ -164,13 +164,13 @@ const SECRET_QUERY_KEYS: [&str; 14] = [
     "secret",
     "apikey",
     "api_key",
+    // r32 P1-1：连字形态 `api-key`——三个兄弟拼写都在、独漏最常用的
+    // Azure OpenAI 生态主字面头名（名单碎片化第四次应验）。
+    "api-key",
     "signature",
-    // P2-10（r24）：注释声称「已并入」但树里没有——`> x-api-key: abc` 双泄漏。
     "x-api-key",
-    // P2-13（r24）：OAuth 常规参数双泄漏。
     "refresh_token",
     "client_secret",
-    // P2-10 同族：X-Auth-Token= 形态。
     "x-auth-token",
 ];
 
@@ -289,26 +289,30 @@ fn key_is_secret(key: &str) -> bool {
         || AZURE_SAS_QUERY_KEYS
             .iter()
             .any(|known| key.eq_ignore_ascii_case(known))
-        || matches!(
-            lowered.as_str(),
-            "credential" | "signature" | "security-token"
-        )
-        // r31 P1-1③：`Authorization=v` env 形态——两名字进 `=` 臂判据。
-        || auth_header_name(&lowered)
+        // r32 P1-1：单一谓词（不再手抄）——SigV4/auth/session/secret_key 族。
+        || auth_side_secret_name(&lowered)
 }
 
-/// r31 P1-1：Authorization 族头名（非 `-H` 语境的名字侧统一收口）。
-/// 只含这两个头名；SigV4 三员走 key_is_secret 的既有 matches!。
+/// r32 P1-1（第四次同族复发后的一次做对）：**单一名字侧谓词**。
+/// 此前 SigV4 三员/auth 头名在 key_is_secret / colon_side_secret_name 两处
+/// 独立 matches! 手抄，每次加名漏一处（credential/security-token→authorization
+/// →api-key 四连）。此后所有名字侧收口都走这一个函数，不再手抄名单。
+fn auth_side_secret_name(lowered: &str) -> bool {
+    auth_header_name(lowered)
+        || matches!(
+            lowered,
+            "credential" | "signature" | "security-token" | "session_token" | "secret_key"
+        )
+}
+
+/// r31 P1-1：Authorization 族头名。
 fn auth_header_name(lowered: &str) -> bool {
     lowered == "authorization" || lowered == "proxy-authorization"
 }
 
-/// r31 P1-1/P2-1：冒号/JSON 语境的名字侧收口——authorization 族 + SigV4 三员里
-/// 此前只活在 key_is_secret 的 credential/security-token（两表分裂，:627 注释
-/// 「同一张名单」教训的又一次应验）。bare 空格形态刻意不收（见 bare 键臂注释）。
+/// r31 P1-1/P2-1 + r32 P1-1 统一：冒号/JSON 语境名字侧 = 单一谓词。
 fn colon_side_secret_name(name: &str) -> bool {
-    auth_header_name(&name.to_ascii_lowercase())
-        || matches!(name, "credential" | "security-token" | "signature")
+    auth_side_secret_name(&name.to_ascii_lowercase())
 }
 
 /// 「这个名字是不是机密键名」的统一判据（r21 P2-8② 冒号黏连形态用）：
@@ -2201,6 +2205,30 @@ mod tests {
             "Security-Token:shortsecret12345",
             "Credential:shortsecret12345",
             "{\"security-token\":\"shortsecret12345\"}",
+        ] {
+            let cleaned = sanitize_for_disk(line);
+            assert!(!cleaned.contains("shortsecret12345"), "{line} -> {cleaned}");
+        }
+    }
+
+    /// r32 P1-1：api-key 连字形态三路钉 + 负控。
+    #[test]
+    fn sanitiser_pins_r32_api_key_hyphen_forms() {
+        for line in [
+            "curl -H api-key=shortsecret12345 https://x",
+            "config api-key:shortsecret12345 tail",
+            "curl 'https://host/v1?api-key=shortsecret12345'",
+        ] {
+            let cleaned = sanitize_for_disk(line);
+            assert!(!cleaned.contains("shortsecret12345"), "{line} -> {cleaned}");
+        }
+        // 负控：非机密的连字键不误伤。
+        let cleaned = sanitize_for_disk("curl 'https://host/v1?api-key-normal=abc' https://x");
+        assert!(cleaned.contains("api-key-normal=abc"), "{cleaned}");
+        // 尾部收：session_token / secret_key = 形态。
+        for line in [
+            "+ export session_token=shortsecret12345",
+            "config secret_key=shortsecret12345",
         ] {
             let cleaned = sanitize_for_disk(line);
             assert!(!cleaned.contains("shortsecret12345"), "{line} -> {cleaned}");
