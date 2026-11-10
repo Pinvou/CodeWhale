@@ -153,7 +153,7 @@ test('an uncommitted completed batch is reused only with the same file objects a
   };
   assert.deepEqual(await uploadRemoteFiles(api, binding, 'task-cached', files, () => {}, owner), ['owned-1']);
   assert.deepEqual(await uploadRemoteFiles(api, binding, 'task-cached', files, () => {}, owner), ['owned-1']);
-  await assert.rejects(uploadRemoteFiles(api, binding, 'task-cached', [file('a.txt', 'a')], () => {}, owner), { code: 'result_unknown' });
+  await assert.rejects(uploadRemoteFiles(api, binding, 'task-cached', [file('a.txt', 'a')], () => {}, owner), { code: 'remote_attachment_completed' });
   assert.equal(starts, 1);
   retireCompletedRemoteUpload(owner.ownerIdentity, binding, 'task-cached');
 });
