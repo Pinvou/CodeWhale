@@ -87,6 +87,7 @@ type passwordPreparationState struct {
 	peers       map[netip.Addr]struct{}
 	records     map[uuid.UUID]preparedPassword
 	locks       map[uuid.UUID]*passwordPreparationLock
+	expiry      credentialExpiryQueue[uuid.UUID]
 }
 
 // A grant has one local allocation/replay owner. The map mutex only protects
@@ -196,9 +197,14 @@ func (s *Service) preparePassword(w http.ResponseWriter, r *http.Request) {
 	unlock := state.lockGrant(id)
 	defer unlock()
 	state.mu.Lock()
-	for key, saved := range state.records {
-		if !saved.reference.ExpiresAt.After(s.vault.now()) {
-			delete(state.records, key)
+	now := s.vault.now()
+	for {
+		expired, ok := state.expiry.takeExpired(now, true)
+		if !ok {
+			break
+		}
+		if saved, exists := state.records[expired.key]; exists && saved.reference.ExpiresAt.Equal(expired.at) {
+			delete(state.records, expired.key)
 		}
 	}
 	digest := sha256.Sum256([]byte(token))
@@ -264,6 +270,7 @@ func (s *Service) preparePassword(w http.ResponseWriter, r *http.Request) {
 	record.mu.Unlock()
 	state.mu.Lock()
 	state.records[id] = preparedPassword{tokenDigest: digest, facts: facts, source: source, device: device, reference: reference}
+	state.expiry.add(id, reference.ExpiresAt)
 	state.mu.Unlock()
 	w.Header().Set("Cache-Control", "no-store")
 	api.WriteJSON(w, http.StatusCreated, reference)
