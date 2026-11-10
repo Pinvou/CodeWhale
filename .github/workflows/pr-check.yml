@@ -1544,6 +1544,47 @@ jobs:
           grep -Fxq '# fail 0' "$report"
           grep -Fxq '# skipped 0' "$report"
 
+      # The runner retries each selected smoke once so a transient runner
+      # flake (headless Chrome missing its 30 s DevTools-endpoint launch
+      # window) cannot evict a healthy PR from the merge queue; it fails
+      # closed on an empty selection, which also covers a masked upstream
+      # pipeline failure (select-frontend-smokes never emits an empty set).
+      - name: Ready PR 定向浏览器 smoke
+        if: ${{ github.event_name == 'pull_request' && github.event.pull_request.draft == false }}
+        env:
+          TESTED_SHA: ${{ github.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          # dist was already built unconditionally above; skip the identical
+          # in-smoke rebuild (see scripts/run-webui-smoke.mjs).
+          PINVOU_WEBUI_SKIP_BUILD: "1"
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$TESTED_SHA"
+          # Match the queue's diff over the actual tested merge, including
+          # main-side renames. Mutable PR event base/head diffs can select a
+          # different smoke set despite an identical tested product tree.
+          read -r tested base head extra < <(git rev-list --parents -n 1 "$TESTED_SHA")
+          test "$tested" = "$TESTED_SHA"
+          test -n "$base"
+          test "$head" = "$PR_HEAD_SHA"
+          test -z "$extra"
+          git diff --name-only "$base" "$TESTED_SHA" \
+            | node ../scripts/select-frontend-smokes.mjs \
+            | node ../scripts/run-frontend-smokes.mjs --selected
+
+      - name: Merge Queue diff-selected browser smoke
+        if: ${{ github.event_name == 'merge_group' }}
+        env:
+          BASE_SHA: ${{ github.event.merge_group.base_sha }}
+          HEAD_SHA: ${{ github.event.merge_group.head_sha }}
+          # Same dist reuse as the PR smoke step above.
+          PINVOU_WEBUI_SKIP_BUILD: "1"
+        run: |
+          git diff --name-only "$BASE_SHA" "$HEAD_SHA" \
+            | node ../scripts/select-frontend-smokes.mjs \
+            | node ../scripts/run-frontend-smokes.mjs --selected
+
+)
       - name: Confirm test resource retirement
         if: ${{ always() && env.PINVOU_CI_RESOURCE_LEDGER != '' }}
         run: python3 ../scripts/ci-resource-ledger.py --recover
