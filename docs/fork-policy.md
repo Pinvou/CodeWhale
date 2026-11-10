@@ -1,16 +1,16 @@
 # Pinvou 对 CodeWhale 底座的 fork 维护策略
 
-> 最后更新：2026-11-05。公开维护头 11cba403d 已包含 #114/#125 与 #123/#124/#129/#131/#133/#134/#135；父仓 gitlink 与公开维护头对齐。
+> 最后更新：2026-11-10。公开维护头 e6bdda45cd 已包含 #114/#125 与 #123/#124/#129/#131/#133/#134/#135 及 rusqlite 0.41 / rmcp 3.9 / rio-vt 0.5.29 依赖修复（CodeWhale#152 待合）；父仓 gitlink 与公开维护头对齐。
 > 配套：`docs/fork-modifications.md`、`scripts/fork-guard.sh`、`docs/底座升级验收清单.md`
 
 已集成的上游回移及历史溯源见[修改清单](fork-modifications.md#web-jsonpath-upstream-backport-integrated-historical-candidate-evidence-756)。公开维护头门禁及第 6 节的明确授权要求继续生效。
 
 ## 0. 当前维护基线与验证边界
 
-- 当前公开维护头与父仓 gitlink：`4adbbb9edb04ff14c6e7850315c9787a63e4625e`（2026-11-09，rusqlite 0.41 + rmcp 3.9 依赖升级提交，CodeWhale PR 待合）。#123 已合入为 `e5a8af221`，#124 为 `449edbf0b`，#129 为 `4e560354c`，#131 为 `e2a0e14fd`，#133 为 `4e75c6a07`，#134 为 `8a4719fd4`，#135 为 `11cba403d`；本轮仅更新父仓引用，没有推进维护分支。
-- 实测历史：上游 v0.9.12 `dcd4c200f` 之上 95 个提交，r1 `1fafee7e2` 之上 80 个；93 个带 DCO sign-off。未签名的 squash 为 #107 `f27672935` 与 #116 `e9a7f48da1`，不能继续声称只有一个未签名提交。保留已发布历史，不改写维护分支。
+- 当前公开维护头与父仓 gitlink：`e6bdda45cddbecd2a66a55415e8745ad13c86572`（2026-11-10，rusqlite 0.41 + rmcp 3.9 + rio-vt 0.5.29 依赖升级提交，CodeWhale PR 待合）。#123 已合入为 `e5a8af221`，#124 为 `449edbf0b`，#129 为 `4e560354c`，#131 为 `e2a0e14fd`，#133 为 `4e75c6a07`，#134 为 `8a4719fd4`，#135 为 `11cba403d`；本轮仅更新父仓引用，没有推进维护分支。
+- 实测历史：上游 v0.9.12 `dcd4c200f` 之上 96 个提交，r1 `1fafee7e2` 之上 81 个；94 个带 DCO sign-off。未签名的 squash 为 #107 `f27672935` 与 #116 `e9a7f48da1`，不能继续声称只有一个未签名提交。保留已发布历史，不改写维护分支。
 - 不可变 tag `pinvou-v0.9.12-r3` 仍在 `61cb769be5b33abc64f64da4272f5b39a8b6c1fd`；r1 仍在 `1fafee7e26b60a59457a43bce50c63aa2ad9dbaf`。公开门禁仍要求 gitlink 等于维护头并验证 r3 标签，未放宽任何条件。
-- 实测 drift：540 files, +119210/-49666，净增 69544；301 个独立 `forkguard_*` 行为名（登记下限仍为 64）。原生 Windows 证据仅适用于原记录的执行提交，不扩展为本次集成树已执行；当前父仓 CI 和最终集成树审核仍须独立确认。
+- 实测 drift：540 files, +119219/-49674，净增 69545；301 个独立 `forkguard_*` 行为名（登记下限仍为 64）。原生 Windows 证据仅适用于原记录的执行提交，不扩展为本次集成树已执行；当前父仓 CI 和最终集成树审核仍须独立确认。
 
 
 - 升级前公开回退点是不可变 tag `pinvou-v0.9.5-r13`，head `f853f8f1566c57e6be40d5439a222a932aa79ef5`；同 SHA 的本地 branch `backup/pre-v0.9.12-sync` 只作便利引用。
