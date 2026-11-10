@@ -16,7 +16,12 @@ import (
 
 var ErrClockUnsafe = errors.New("trusted clock offset exceeds the safe threshold")
 
-const ntpEpochOffset = 2208988800
+const (
+	ntpEpochOffset = 2208988800
+	// A source advertising more uncertainty than the readiness offset limit
+	// cannot supply a trusted sample. This is not full NTP peer selection.
+	maxRootDispersion = time.Second
+)
 
 type sampleFunc func(context.Context, string) (time.Duration, error)
 
@@ -134,9 +139,21 @@ func sampleNTP(ctx context.Context, source string) (time.Duration, error) {
 		return 0, errors.New("trusted time source returned an invalid or unsynchronized NTP response")
 	}
 	finished := time.Now().UTC()
-	seconds := binary.BigEndian.Uint32(response[40:44])
-	fraction := binary.BigEndian.Uint32(response[44:48])
-	server := time.Unix(int64(seconds)-ntpEpochOffset, int64(fraction)*int64(time.Second)>>32).UTC()
-	localMidpoint := started.Add(finished.Sub(started) / 2)
-	return server.Sub(localMidpoint), nil
+	// Root dispersion is an unsigned NTP short (16.16 seconds).
+	dispersion := time.Duration(uint64(binary.BigEndian.Uint32(response[8:12])) * uint64(time.Second) >> 16)
+	if dispersion > maxRootDispersion {
+		return 0, errors.New("trusted time source root dispersion exceeds the safe threshold")
+	}
+	return ntpOffset(started, finished, response), nil
+}
+
+func ntpOffset(started, finished time.Time, response []byte) time.Duration {
+	decode := func(raw []byte) time.Time {
+		seconds := binary.BigEndian.Uint32(raw[:4])
+		fraction := binary.BigEndian.Uint32(raw[4:8])
+		return time.Unix(int64(seconds)-ntpEpochOffset, int64(fraction)*int64(time.Second)>>32).UTC()
+	}
+	received, transmitted := decode(response[32:40]), decode(response[40:48])
+	// RFC 5905 section 8: theta = ((T2 - T1) + (T3 - T4)) / 2.
+	return (received.Sub(started) + transmitted.Sub(finished)) / 2
 }
