@@ -235,7 +235,7 @@ async fn capability_send_and_disconnect_follow_the_same_intent_owner_order() {
             .capability_request_with_send(&worker_ref, &expected.0, |payload| {
                 // This is the real session-intent guard and real producer callback.
                 held.send(()).unwrap();
-                    if released.recv_timeout(Duration::from_secs(30)) != Ok(true) {
+                if released.recv_timeout(Duration::from_secs(30)) != Ok(true) {
                     return Err("controlled_order_probe_abort".into());
                 }
                 worker_manager.send_capability_for_owner(
