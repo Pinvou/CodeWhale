@@ -471,6 +471,15 @@ function createFakeHost(fixture) {
     operationErrors: new Map(),
     malformedOperationResponses: new Set(),
     deferredOperations: new Set(),
+    // Barrier-visibility freeze: frozen operations are still handled and
+    // answered normally (the wrapper lease stays healthy), but their
+    // observations are withheld from operationCalls/Log/Timeline until the
+    // freeze lifts, then flushed in arrival order. This deterministically
+    // reproduces the loaded-runner shape behind the 30s barrier: the wrapper's
+    // heartbeat timer starves, so the barrier sees no refreshes for a long
+    // stretch and only then catches up in a burst.
+    deferredObservations: new Set(),
+    pendingObservations: [],
     failure: null,
   };
 
@@ -498,9 +507,26 @@ function createFakeHost(fixture) {
     );
   };
 
+  const recordOperation = (operation) => {
+    state.operationCalls.set(
+      operation,
+      (state.operationCalls.get(operation) || 0) + 1,
+    );
+    state.operationLog.push(operation);
+    state.operationTimeline.push({ operation, at: Date.now() });
+  };
+
   const timer = setInterval(() => {
     if (!existsSync(requestDirectory) || state.failure) return;
     try {
+      if (
+        state.deferredObservations.size === 0 &&
+        state.pendingObservations.length
+      ) {
+        for (const operation of state.pendingObservations.splice(0)) {
+          recordOperation(operation);
+        }
+      }
       for (const name of readdirSync(requestDirectory)) {
         if (!name.endsWith('.json') || handled.has(name)) continue;
         const raw = readPendingHostRequest(join(requestDirectory, name));
@@ -508,12 +534,11 @@ function createFakeHost(fixture) {
         const request = JSON.parse(raw);
         if (state.deferredOperations.has(request.operation)) continue;
         handled.add(name);
-        state.operationCalls.set(
-          request.operation,
-          (state.operationCalls.get(request.operation) || 0) + 1,
-        );
-        state.operationLog.push(request.operation);
-        state.operationTimeline.push({ operation: request.operation, at: Date.now() });
+        if (state.deferredObservations.has(request.operation)) {
+          state.pendingObservations.push(request.operation);
+        } else {
+          recordOperation(request.operation);
+        }
 
         if (request.operation === 'prepare') {
           state.prepareCalls += 1;
@@ -1530,6 +1555,90 @@ test('Windows proxy: same wrapper recovers A once after stop while B keeps share
       host.state.operationCalls.get('refresh_agent_operation') || 0,
       genericRefreshesAfterSnapshot,
       'no generic heartbeat may survive end_agent_operation',
+    );
+    writeFileSync(fixture.modePath, JSON.stringify({ clickDelayMs: 1_600 }));
+
+    // Deterministic late-recovery boundary for the 31s held-request ceiling.
+    // On a starved runner the wrapper pauses its heartbeat timer for many
+    // seconds and only then catches up in a burst, so the barrier can sit at
+    // zero observed refreshes far past the driver's historical 15s request
+    // default. Windows cannot suspend the wrapper process, so the fake host
+    // answers every refresh normally (the wrapper lease stays healthy) while
+    // freezing their barrier-visible observation for 15.5s: the held request,
+    // the 30s barrier, and the post-release response settle experience exactly
+    // the timing shape the ceiling must tolerate.
+    const lateRecoveryReleasePath = join(fixture.root, 'late-recovery.release');
+    writeFileSync(
+      fixture.modePath,
+      JSON.stringify({ clickDelayMs: 1_600, clickReleasePath: lateRecoveryReleasePath }),
+    );
+    const lateRecoveryBefore = {
+      begin: host.state.operationCalls.get('begin_agent_operation') || 0,
+      refresh: host.state.operationCalls.get('refresh_agent_input') || 0,
+      end: host.state.operationCalls.get('end_agent_operation') || 0,
+      log: host.state.operationLog.length,
+      clicks: readAudit(fixture.auditPath)
+        .filter((entry) => entry.kind === 'tool' && entry.name === 'click').length,
+    };
+    const lateRecoveryStartedAt = Date.now();
+    const lateRecoveryRequest = wrapper.request('tools/call', {
+      name: 'click',
+      arguments: { uid: 'late-heartbeat-button' },
+    }, 31_000);
+    host.state.deferredObservations.add('refresh_agent_input');
+    await sleep(15_500);
+    assert.equal(
+      (host.state.operationCalls.get('refresh_agent_input') || 0) - lateRecoveryBefore.refresh,
+      0,
+      'the fixture must really withhold every barrier-visible heartbeat during the stall',
+    );
+    // The backlog burst lands inside the 30s barrier window and the whole flow
+    // still settles: the barrier, not a 15s ceiling, bounds a held request.
+    host.state.deferredObservations.delete('refresh_agent_input');
+    const lateRecovery = await releaseAfterRefreshes({
+      request: lateRecoveryRequest,
+      before: lateRecoveryBefore,
+      operation: 'refresh_agent_input',
+      count: 4,
+      releasePath: lateRecoveryReleasePath,
+    });
+    assert.ok(
+      Date.now() - lateRecoveryStartedAt >= 15_500,
+      'the barrier must hold past the historical 15s default before the backlog burst',
+    );
+    assert.equal(lateRecovery.result.content[0].text, 'clicked');
+    assert.equal(
+      (host.state.operationCalls.get('begin_agent_operation') || 0) - lateRecoveryBefore.begin,
+      1,
+    );
+    assert.ok(
+      (host.state.operationCalls.get('refresh_agent_input') || 0) - lateRecoveryBefore.refresh >= 4,
+      'the delayed heartbeat burst must still cross the four-refresh barrier',
+    );
+    assert.equal(
+      (host.state.operationCalls.get('end_agent_operation') || 0) - lateRecoveryBefore.end,
+      1,
+    );
+    assert.equal(
+      readAudit(fixture.auditPath)
+        .filter((entry) => entry.kind === 'tool' && entry.name === 'click').length -
+        lateRecoveryBefore.clicks,
+      1,
+      'a late heartbeat burst must not redispatch the logical tool',
+    );
+    const lateRecoveryOperations = host.state.operationLog.slice(lateRecoveryBefore.log);
+    assert.ok(
+      lateRecoveryOperations.lastIndexOf('refresh_agent_input') <
+        lateRecoveryOperations.lastIndexOf('end_agent_operation'),
+      'the delayed in-flight heartbeat must settle before end_agent_operation',
+    );
+    const refreshesAfterLateRecovery =
+      host.state.operationCalls.get('refresh_agent_input') || 0;
+    await sleep(600);
+    assert.equal(
+      host.state.operationCalls.get('refresh_agent_input') || 0,
+      refreshesAfterLateRecovery,
+      'no delayed heartbeat may survive end_agent_operation',
     );
     writeFileSync(fixture.modePath, JSON.stringify({ clickDelayMs: 1_600 }));
 
