@@ -9,6 +9,11 @@ function emptySMSTemplates() {
   return { REGISTER: '', LOGIN: '', PROFILE_MOBILE: '', PASSWORD_RESET: '' };
 }
 
+function normalizeSMSField(value) {
+  // Match the server's strings.TrimSpace, including NEL but retaining BOM.
+  return value.replace(/^\p{White_Space}+|\p{White_Space}+$/gu, '');
+}
+
 function smsConfigurationForm(configuration = {}) {
   return {
     enabled: Boolean(configuration.enabled),
@@ -100,8 +105,8 @@ export function SettingsWorkspace({ copy, language, languageFeedback, onLanguage
         enabled: smsForm.enabled,
         provider_id: smsForm.provider_id,
         credential_profile: smsForm.credential_profile,
-        sign_name: smsForm.provider_id === 'aliyun-managed' ? smsForm.sign_name : '',
-        templates: smsForm.provider_id === 'aliyun-managed' ? smsForm.templates : emptySMSTemplates(),
+        sign_name: smsForm.provider_id === 'aliyun-managed' ? normalizeSMSField(smsForm.sign_name) : '',
+        templates: smsForm.provider_id === 'aliyun-managed' ? Object.fromEntries(Object.entries(smsForm.templates).map(([purpose, value]) => [purpose, normalizeSMSField(value)])) : emptySMSTemplates(),
         reason: smsForm.reason.trim(),
       };
       if (!Number.isSafeInteger(command.expected_revision) || command.expected_revision < 0) throw new Error('INVALID_SMS_REVISION');
@@ -145,7 +150,7 @@ export function SettingsWorkspace({ copy, language, languageFeedback, onLanguage
   const providerName = value => copy.settings.sms.providers[value] || value || smsWords.unknown;
   const selectedProfile = sms?.available_profiles?.find((profile) => profile.profile_id === smsForm.credential_profile);
   const formValid = smsForm.reason.trim().length >= 10 && (!smsForm.enabled || selectedProfile?.configured) && (smsForm.provider_id !== 'aliyun-managed' || (
-    smsForm.sign_name.trim() && Object.values(smsForm.templates).every((value) => value.trim())
+    normalizeSMSField(smsForm.sign_name) && Object.values(smsForm.templates).every((value) => normalizeSMSField(value))
   ));
   return (
     <div className="adm-settings-stack">
@@ -178,7 +183,7 @@ export function SettingsWorkspace({ copy, language, languageFeedback, onLanguage
                 <h3>{smsWords.edit}</h3>
                 <p role="status" className={draftChanged ? "adm-status warn" : "adm-status neutral"}>{draftChanged ? smsWords.dirty : smsWords.clean}</p>
               </div>}
-              {pendingAttempt && <p className="adm-sms-unknown" role="status">{smsWords.unknownWrite} {smsWords.retryTarget}: <strong>{onOff(pendingAttempt.enabled)} · {providerName(pendingAttempt.provider_id)} · {smsWords.version} {pendingAttempt.expected_revision}</strong></p>}
+              {pendingAttempt && <p className="adm-sms-unknown" role="status">{smsWords.unknownWrite} {smsWords.retryTarget}: <strong>{onOff(pendingAttempt.enabled)} · {providerName(pendingAttempt.provider_id)} · {smsWords.version} {pendingAttempt.expected_revision}</strong> <button type="button" disabled={smsState.loading || smsState.saving} onClick={() => void loadSMSConfiguration()}>{copy.refresh}</button></p>}
               <label className="adm-sms-switch"><input aria-describedby="adm-sms-impact" type="checkbox" checked={smsForm.enabled} disabled={!canManageSMS || smsState.saving} onChange={(event) => setSMSForm((value) => ({ ...value, enabled: event.target.checked }))} /><span>{copy.settings.sms.enabled}</span></label>
               <p className="adm-muted adm-sms-impact" id="adm-sms-impact">{smsForm.enabled ? smsWords.enableImpact : smsWords.disableImpact}</p>
               <div className="adm-sms-fields">
