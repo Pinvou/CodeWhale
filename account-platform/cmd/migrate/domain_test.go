@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -49,6 +50,43 @@ func TestProtectedMigrationIdentityUsesFrozenFacts(t *testing.T) {
 		if actual := protectedMigrationDomain(item.version, item.name, item.checksum); actual != item.domain {
 			t.Fatalf("migration identity domain %q, want %q", actual, item.domain)
 		}
+	}
+}
+
+func TestPaymentDispatchProvenanceLoadedDomainAliases(t *testing.T) {
+	canonical, err := migrations.Load("../../migrations/billing")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"refund_dispatch_fencing", "payment_notification_provenance"} {
+		t.Run(name, func(t *testing.T) {
+			var original migrations.Migration
+			for _, item := range canonical {
+				if item.Name == name {
+					original = item
+				}
+			}
+			if original.UpSQL == "" {
+				t.Fatal("missing original migration")
+			}
+			directory := t.TempDir()
+			for suffix, body := range map[string]string{"up": original.UpSQL, "down": "SELECT 1;\n"} {
+				if err := os.WriteFile(filepath.Join(directory, "999999_custom_alias."+suffix+".sql"), []byte(body), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			loaded, err := migrations.Load(directory)
+			if err != nil || len(loaded) != 1 {
+				t.Fatal("load renamed carrier", err)
+			}
+			alias := loaded[0]
+			if alias.Version != 999999 || alias.Name != "custom_alias" || alias.Checksum != original.Checksum {
+				t.Fatal("fixture did not retain the real canonical SQL identity")
+			}
+			if got := protectedMigrationDomain(alias.Version, alias.Name, alias.Checksum); got != "billing" {
+				t.Fatal("canonical SQL identity escaped the Billing domain", got)
+			}
+		})
 	}
 }
 
