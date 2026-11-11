@@ -29,7 +29,7 @@ use crate::features::remote_control::controller::relay_runtime::{
     ControlledBusinessPort, controlled_monotonic_millis, log_controlled_port_error,
 };
 use crate::features::remote_control::controller::task::{
-    RemoteTaskLedger, RemoteTaskService, RemoteTaskState, TaskLeaseBinding,
+    RemoteTaskLedger, RemoteTaskService, TaskLeaseBinding,
 };
 use crate::features::remote_control::controller::task::{
     RemoteTaskRequest, TASK_MODE_CHAT, TASK_MODE_CODE, TASK_MODEL_SOURCE_CONTROLLED,

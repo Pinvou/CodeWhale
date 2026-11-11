@@ -27,6 +27,7 @@ struct Fixture {
     lease: LeaseContext,
     body: Value,
     now: Arc<AtomicU64>,
+    request: RemoteTaskRequest,
 }
 
 impl Fixture {
@@ -111,7 +112,7 @@ impl Fixture {
             clock.load(Ordering::SeqCst)
         })));
         let approval = authority
-            .request(
+            .request_for_owner(
                 &lease,
                 "task-permission",
                 PermissionRequest {
@@ -122,6 +123,10 @@ impl Fixture {
                     expires_at_ms: 30_000,
                 },
                 3_250,
+                &PermissionDecisionOwner {
+                    session_id: "b-session-permission".into(),
+                    task_sequence: tasks.ledger().record("task-permission").unwrap().sequence,
+                },
             )
             .unwrap();
         let body = json!({"task_id":"task-permission", "permission_request_id":approval.permission_request_id, "decision":decision});
@@ -132,6 +137,7 @@ impl Fixture {
             lease,
             body,
             now,
+            request,
         }
     }
     fn bind_session(tasks: &RemoteTaskService, lease: &LeaseContext) {
@@ -425,4 +431,95 @@ async fn a_new_task_sequence_with_reused_visible_ids_cannot_read_the_old_receipt
             .unwrap_err(),
         "permission_binding_stale"
     );
+}
+
+#[tokio::test]
+async fn undecided_terminal_approval_cannot_be_adopted_after_actual_task_pruning_and_reuse() {
+    for expired in [false, true] {
+        let fixture = Fixture::new(if expired { "allow" } else { "deny" });
+        let original_sequence = fixture
+            .tasks
+            .ledger()
+            .record("task-permission")
+            .unwrap()
+            .sequence;
+        if expired {
+            fixture.now.store(30_000, Ordering::SeqCst);
+            fixture.authority.sweep_expired(30_000);
+        }
+        fixture.finish(RemoteTaskTerminal::Cancelled);
+        let original = fixture.authority.view(fixture.approval()).unwrap();
+        assert_eq!(original.state, if expired { "expired" } else { "denied" });
+        // Exercise the real bounded ledger's pruning and admission sequence,
+        // without fabricating an active persisted record or an approval owner.
+        for index in 0..256 {
+            let mut request = fixture.request.clone();
+            request.task_id = format!("task-filler-{index}");
+            request.client_request_id = format!("client-filler-{index}");
+            fixture
+                .tasks
+                .ledger()
+                .admit(&fixture.lease, &request, 4_000)
+                .unwrap();
+            fixture
+                .tasks
+                .ledger()
+                .begin_dispatch(&request.task_id, 4_001)
+                .unwrap();
+            fixture
+                .tasks
+                .ledger()
+                .complete(&request.task_id, RemoteTaskTerminal::Succeeded, None, 4_002)
+                .unwrap();
+        }
+        assert_eq!(
+            fixture
+                .tasks
+                .ledger()
+                .record("task-permission")
+                .unwrap_err()
+                .code,
+            "task_not_found"
+        );
+        fixture
+            .tasks
+            .ledger()
+            .admit(&fixture.lease, &fixture.request, 5_000)
+            .unwrap();
+        fixture
+            .tasks
+            .ledger()
+            .begin_dispatch("task-permission", 5_001)
+            .unwrap();
+        assert!(
+            fixture
+                .tasks
+                .ledger()
+                .record("task-permission")
+                .unwrap()
+                .sequence
+                > original_sequence
+        );
+        for _ in 0..2 {
+            assert_eq!(
+                fixture
+                    .handler()
+                    .handle(
+                        &fixture.lease,
+                        "a-ref-permission",
+                        &fixture.body,
+                        |_, _, _| async {
+                            panic!("replacement task must not dispatch an old approval")
+                        }
+                    )
+                    .await
+                    .unwrap_err(),
+                "permission_binding_stale"
+            );
+            assert_eq!(
+                fixture.authority.view(fixture.approval()).unwrap(),
+                original
+            );
+        }
+    }
 }
