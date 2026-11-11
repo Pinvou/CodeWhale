@@ -82,6 +82,8 @@ def prove_server(direct, forwarded):
 
 
 def save(path, value):
+    if path is None:
+        return
     tmp = path.with_suffix('.tmp')
     tmp.write_text(json.dumps(value, sort_keys=True), encoding='utf-8')
     os.replace(tmp, path)
@@ -98,8 +100,14 @@ def main():
     identifier = meta.get('id', '')
     if not re.fullmatch('[a-f0-9]{64}', identifier):
         raise ValueError('Redis job service registration unavailable')
-    path = Path(os.environ['PINVOU_CI_RESOURCE_LEDGER']) / 'portal-redis-service.json'
-    previous = json.loads(path.read_text(encoding='utf-8')) if path.exists() else None
+    ledger = os.environ.get('PINVOU_CI_RESOURCE_LEDGER', '')
+    # Services exist before job steps. Failed ledger initialization must not
+    # suppress exact metadata-owned retirement. Admission still requires a
+    # durable receipt before it can write any fixture state.
+    path = Path(ledger) / 'portal-redis-service.json' if ledger else None
+    if not args.stop and path is None:
+        raise RuntimeError('Redis admission requires an initialized resource ledger')
+    previous = json.loads(path.read_text(encoding='utf-8')) if path is not None and path.exists() else None
     present = identifier in run(['docker', 'ps', '--all', '--quiet', '--no-trunc']).splitlines()
     if args.stop and not present:
         # Only a prior receipt can prove which anonymous volume must be absent.
@@ -109,6 +117,7 @@ def main():
             raise ValueError('Redis anonymous volume remains')
         previous.update(state='released', cleanup_failed=False)
         save(path, previous)
+        print(json.dumps(previous, sort_keys=True), flush=True)
         return
     items = json.loads(run(['docker', 'inspect', identifier]))
     if len(items) != 1:
@@ -119,11 +128,13 @@ def main():
     receipt = {'schema': 1, 'kind': 'deployment-containers', 'id': identifier, 'volume': volume, 'state': 'registered'}
     save(path, receipt)
     if args.stop:
+        print(json.dumps(receipt, sort_keys=True), flush=True)
         run(['docker', 'stop', '--time', '15', identifier])
         if identifier in run(['docker', 'ps', '--all', '--quiet', '--no-trunc']).splitlines() or volume in run(['docker', 'volume', 'ls', '--quiet']).splitlines():
             raise ValueError('Redis service/volume retirement unconfirmed')
         receipt.update(state='released', cleanup_failed=False)
         save(path, receipt)
+        print(json.dumps(receipt, sort_keys=True), flush=True)
         return
     direct = run(['docker', 'exec', identifier, 'redis-cli', '--raw', 'INFO', 'server'])
     run_id = prove_server(direct, command(port, 'INFO', 'server'))

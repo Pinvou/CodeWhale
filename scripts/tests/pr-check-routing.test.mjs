@@ -436,7 +436,7 @@ function assertPortalRedisSteps(job) {
       '          python3 scripts/test-portal-redis.py --log "$PINVOU_CI_RESOURCE_LEDGER/portal-redis-tests.jsonl"',
     ]],
     ["Stop owned temporary Portal Redis service", [
-      "        if: ${{ always() && env.PINVOU_CI_RESOURCE_LEDGER != '' }}", "        env:",
+      "        if: ${{ always() }}", "        env:",
       "          ACCOUNT_CI_SERVICES: ${{ toJSON(job.services) }}", "        run: python3 scripts/account-ci-redis.py --stop",
     ]],
   ];
@@ -1731,6 +1731,10 @@ test("credential origin browser matrix shell rejects failed, empty or skipped re
 test("Portal real Redis gate rejects changed identity, skipped execution and unsafe lifecycle", () => {
   const job = jobBlock("account-platform-test").replaceAll("\r\n", "\n");
   assertFiniteAuditPGSetup(job);
+  const stop = namedStep(job, "Stop owned temporary Portal Redis service");
+  const gatedStop = stop.replace("if: ${{ always() }}", "if: ${{ always() && env.PINVOU_CI_RESOURCE_LEDGER != '' }}");
+  assert.notEqual(gatedStop,stop);
+  assert.throws(() => assertFiniteAuditPGSetup(job.replace(stop,gatedStop)));
   for (const [before, after] of [
     ['"127.0.0.1::6379"','"0.0.0.0::6379"'],
     ["redis:8.2-alpine@sha256:fe9daae35cd4fd6ec22416aa4fe0cf6b3e36741e06ff45b9986253fe2a81c041","redis:latest"],

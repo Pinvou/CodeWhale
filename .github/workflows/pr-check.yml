@@ -1824,7 +1824,7 @@ jobs:
           retention-days: 7
 
       - name: Stop owned temporary Portal Redis service
-        if: ${{ always() && env.PINVOU_CI_RESOURCE_LEDGER != '' }}
+        if: ${{ always() }}
         env:
           ACCOUNT_CI_SERVICES: ${{ toJSON(job.services) }}
         run: python3 scripts/account-ci-redis.py --stop

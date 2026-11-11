@@ -1,5 +1,7 @@
 """Pure fixture/selector negative controls; not a Docker runtime acceptance."""
 import copy
+import contextlib
+import io
 import importlib.util
 from pathlib import Path
 import unittest
@@ -74,6 +76,37 @@ class PortalRedisGuardTests(unittest.TestCase):
             with patch.dict(os.environ,env), patch('sys.argv',['account-ci-redis.py']), patch.object(CI,'run',docker), patch.object(CI,'command',endpoint):
                 with self.assertRaises(ValueError): CI.main()
         self.assertEqual(calls,[('INFO','server')])
+
+    def test_stop_without_ledger_still_retires_exact_job_service_and_volume(self):
+        meta, item = self.fixture()
+        calls, stopped = [], False
+        def docker(args):
+            nonlocal stopped
+            calls.append(args)
+            if args[1:3] == ['ps','--all']: return '' if stopped else meta['id']
+            if args[1] == 'inspect': return json.dumps([item])
+            if args[1] == 'stop':
+                self.assertEqual(args,['docker','stop','--time','15',meta['id']])
+                stopped = True
+                return meta['id']
+            if args[1:3] == ['volume','ls']: return ''
+            self.fail('unexpected Redis cleanup command')
+        env = {'GITHUB_ACTIONS':'true','ACCOUNT_CI_SERVICES':json.dumps({CI.SERVICE:meta})}
+        with patch.dict(os.environ,env,clear=True), patch('sys.argv',['account-ci-redis.py','--stop']), patch.object(CI,'run',docker), patch.object(CI,'command',side_effect=AssertionError('stop must not connect to Redis')), contextlib.redirect_stdout(io.StringIO()) as output:
+            CI.main()
+        self.assertTrue(stopped)
+        receipts = [json.loads(line) for line in output.getvalue().splitlines()]
+        self.assertEqual([x['state'] for x in receipts],['registered','released'])
+        self.assertTrue(all(x['id']==meta['id'] and x['volume']=='b'*64 for x in receipts))
+        self.assertFalse(any('prune' in x for args in calls for x in args))
+
+    def test_missing_ledger_cannot_start_fixture_writes_or_guess_gone_volume(self):
+        meta, item = self.fixture()
+        env = {'GITHUB_ACTIONS':'true','ACCOUNT_CI_SERVICES':json.dumps({CI.SERVICE:meta})}
+        with patch.dict(os.environ,env,clear=True), patch('sys.argv',['account-ci-redis.py']), patch.object(CI,'run',side_effect=AssertionError('no admission without receipt')), patch.object(CI,'command',side_effect=AssertionError('no fixture writes')):
+            with self.assertRaises(RuntimeError): CI.main()
+        with patch.dict(os.environ,env,clear=True), patch('sys.argv',['account-ci-redis.py','--stop']), patch.object(CI,'run',return_value=''), patch.object(CI,'command',side_effect=AssertionError('no fixture writes')):
+            with self.assertRaisesRegex(ValueError,'before volume registration'): CI.main()
 
     def events(self):
         names = SELECT.ROOTS | {'TestRealRedisPortalSharedAdmissionAndCapacity/' + x for x in SELECT.CAPACITY_CASES}
