@@ -42,13 +42,15 @@ func TestConcurrentHalfOpenAdmissionAndOutcomes(t *testing.T) {
 		}
 		now = now.Add(30 * time.Second)
 		var admitted atomic.Int32
+		permits := make(chan *Permit, 3)
 		var group sync.WaitGroup
 		start := make(chan struct{})
 		for range 32 {
 			group.Go(func() {
 				<-start
-				if err := b.Before(key); err == nil {
+				if permit, err := b.AdmitReadOnly(key); err == nil {
 					admitted.Add(1)
+					permits <- permit
 				} else if !errors.Is(err, ErrCircuitOpen) {
 					t.Errorf("admission error: %v", err)
 				}
@@ -60,12 +62,13 @@ func TestConcurrentHalfOpenAdmissionAndOutcomes(t *testing.T) {
 			t.Fatalf("admitted=%d, want 3", admitted.Load())
 		}
 		for index := range 3 {
+			permit := <-permits
 			group.Go(func() {
 				outcome := BusinessRejection
 				if failure && index == 0 {
 					outcome = InfrastructureFailure
 				}
-				b.Record(key, outcome)
+				permit.Record(outcome)
 			})
 		}
 		group.Wait()
@@ -89,10 +92,11 @@ func TestCircuitUsesThreeHalfOpenProbesAndExponentialReopen(t *testing.T) {
 	}
 	now = now.Add(30 * time.Second)
 	for range 3 {
-		if err := b.Before(key); err != nil {
+		permit, err := b.AdmitReadOnly(key)
+		if err != nil {
 			t.Fatal(err)
 		}
-		b.Record(key, Success)
+		permit.Record(Success)
 	}
 	if err := b.Before(key); err != nil {
 		t.Fatal("three successful probes must close the circuit")
@@ -101,10 +105,11 @@ func TestCircuitUsesThreeHalfOpenProbesAndExponentialReopen(t *testing.T) {
 		b.Record(key, InfrastructureFailure)
 	}
 	now = now.Add(30 * time.Second)
-	if err := b.Before(key); err != nil {
+	permit, err := b.AdmitReadOnly(key)
+	if err != nil {
 		t.Fatal(err)
 	}
-	b.Record(key, InfrastructureFailure)
+	permit.Record(InfrastructureFailure)
 	var open *CircuitOpenError
 	if err := b.Before(key); !errors.As(err, &open) || open.RetryAfter < time.Minute-time.Second {
 		t.Fatalf("expected exponential reopen, got %v", err)
@@ -135,13 +140,61 @@ func TestHalfOpenBusinessRejectionsCompleteHealthyProbes(t *testing.T) {
 	}
 	now = now.Add(30 * time.Second)
 	for range 3 {
-		if err := b.Before(key); err != nil {
+		permit, err := b.AdmitReadOnly(key)
+		if err != nil {
 			t.Fatal(err)
 		}
-		b.Record(key, BusinessRejection)
+		permit.Record(BusinessRejection)
 	}
 	if err := b.BeforeHighRisk(key); err != nil {
 		t.Fatalf("healthy business responses left circuit stuck: %v", err)
+	}
+}
+
+func TestHalfOpenAbandonedPermitsReleaseSlotsWithoutCompletingRecovery(t *testing.T) {
+	now := time.Date(2026, 11, 8, 0, 0, 0, 0, time.UTC)
+	b := NewBreaker()
+	b.now = func() time.Time { return now }
+	key := Key("provider", "READ_STATUS", "route")
+	for range 5 {
+		b.Record(key, InfrastructureFailure)
+	}
+	now = now.Add(30 * time.Second)
+	// These callers disappear: none of their permits is completed or cancelled.
+	for range 3 {
+		if _, err := b.AdmitReadOnly(key); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := b.AdmitReadOnly(key); !errors.Is(err, ErrCircuitOpen) {
+		t.Fatalf("three abandoned callers did not occupy all slots: %v", err)
+	}
+	item := b.items[key]
+	generation, openUntil := item.generation, item.openUntil
+	now = now.Add(30 * time.Second)
+	var replacements []*Permit
+	for range 3 {
+		permit, err := b.AdmitReadOnly(key)
+		if err != nil {
+			t.Fatalf("expired abandoned callers retained a probe slot: %v", err)
+		}
+		replacements = append(replacements, permit)
+	}
+	if item.generation != generation || !item.openUntil.Equal(openUntil) || item.halfOpenSuccesses != 0 {
+		t.Fatal("reclaiming abandoned slots changed the episode or counted a successful probe")
+	}
+	if _, err := b.AdmitReadOnly(key); !errors.Is(err, ErrCircuitOpen) {
+		t.Fatalf("replacement probes did not retain the three-slot limit: %v", err)
+	}
+	for _, permit := range replacements[:2] {
+		permit.Record(Success)
+		if err := b.BeforeHighRisk(key); !errors.Is(err, ErrCircuitOpen) {
+			t.Fatalf("recovery completed before three actual successful probes: %v", err)
+		}
+	}
+	replacements[2].Record(Success)
+	if err := b.BeforeHighRisk(key); err != nil {
+		t.Fatalf("three replacement successes did not finish recovery: %v", err)
 	}
 }
 
@@ -198,7 +251,11 @@ func TestReadAdmissionCancellationIsGenerationBound(t *testing.T) {
 				old()
 			}
 			if name == "stale generation" {
-				b.Record(key, InfrastructureFailure)
+				failed, err := b.AdmitReadOnly(key)
+				if err != nil {
+					t.Fatal(err)
+				}
+				failed.Record(InfrastructureFailure)
 				now = now.Add(time.Minute)
 				if _, err = testReadAdmission(b, key); err != nil {
 					t.Fatal(err)
