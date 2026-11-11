@@ -4,7 +4,7 @@ import { OrganizationClient } from './organization-client.js';
 import { hasPermission } from './authorization-ui.js';
 import { OrganizationDirectoryPortal } from './OrganizationDirectoryPortal.jsx';
 
-export function OrganizationDirectory({ client, me, language, onChanged, portalPresentation = false }) {
+export function OrganizationDirectory({ client, me, language, onChanged, portalPresentation = false, onOrganizationsRead, switchRequest = 0, refreshVersion = 0 }) {
  const copy = organizationCopy[language];
  const api = useMemo(() => new OrganizationClient(client), [client]);
  const [organizations, setOrganizations] = useState([]);
@@ -13,17 +13,18 @@ export function OrganizationDirectory({ client, me, language, onChanged, portalP
  const [busy, setBusy] = useState(false);
  const [error, setError] = useState('');
  const generation = useRef(0);
- const owner = `${me.user_id}:${me.active_context.context_version}:${client.financeSessionEpoch || 0}`;
+ const owner = `${me.user_id}:${me.active_context.context_version}:${me.personal_authorization_version || 0}:${me.active_context.organization_authorization_version || 0}:${client.financeSessionEpoch || 0}`;
+ useEffect(() => { setToken(''); }, [api, owner]);
  useEffect(() => {
-  const stamp = ++generation.current, controller = new AbortController(); setBusy(true); setError(''); setToken(''); setOrganizations([]); setInvitations([]);
+  const stamp = ++generation.current, controller = new AbortController(); setBusy(true); setError(''); setOrganizations([]); setInvitations([]);
   const load = async () => {
    const orgs = await api.organizations(controller.signal);
    const invites = hasPermission(me, 'personal.invitations.read') ? await api.invitations(controller.signal) : [];
-   if (stamp === generation.current) { setOrganizations(orgs); setInvitations(invites); }
+   if (stamp === generation.current) { setOrganizations(orgs); setInvitations(invites); onOrganizationsRead?.(orgs); }
   };
   void load().catch(reason => { if (stamp === generation.current && reason.name !== 'AbortError') setError(reason.status === 403 ? copy.permissions : copy.unavailable); }).finally(() => { if (stamp === generation.current) setBusy(false); });
   return () => { generation.current++; controller.abort(); };
- }, [api, owner]); // eslint-disable-line react-hooks/exhaustive-deps
+ }, [api, owner, refreshVersion]); // eslint-disable-line react-hooks/exhaustive-deps
  const perform = async (action, kind) => {
   if (busy) return;
   const stamp = generation.current; let confirmed = false; setBusy(true); setError('');
@@ -40,7 +41,7 @@ export function OrganizationDirectory({ client, me, language, onChanged, portalP
   }
   finally { if (stamp === generation.current) setBusy(false); }
  };
- if (portalPresentation) return <OrganizationDirectoryPortal copy={copy} language={language} me={me} organizations={organizations} invitations={invitations} busy={busy} error={error} token={token} onToken={setToken}
+ if (portalPresentation) return <OrganizationDirectoryPortal copy={copy} language={language} me={me} organizations={organizations} invitations={invitations} busy={busy} error={error} token={token} onToken={setToken} switchRequest={switchRequest}
   canSwitch={hasPermission(me, 'personal.context.switch')} canReadInvitations={hasPermission(me, 'personal.invitations.read')} canAccept={hasPermission(me, 'personal.invitations.accept')}
   onSwitch={id => void perform(() => api.switchContext(id, me.active_context.context_version), 'context')}
   onAccept={id => void perform(() => api.acceptInvitation(id), 'invitation')} onAcceptLink={() => void perform(() => api.acceptLink(token), 'invitation')} onRefresh={() => void onChanged()} />;
