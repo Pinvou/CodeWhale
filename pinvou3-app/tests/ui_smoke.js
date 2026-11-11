@@ -123,7 +123,14 @@ function injectSource() {
         // the capability to false (fail-closed) until the snapshot lands, so
         // a missing key silently gates the knowledge download/repair UI.
         case 'get_platform_capabilities': return Promise.resolve({codexAcpSupported:true,browserNativeDisplay:true,localModelSetup:true,localEmbedSupported:true,dependencyInstall:true});
-        case 'get_effective_model_config': return Promise.resolve({model:'qwen36_35b_256k',base_url:'http://127.0.0.1:8000/v1',api_key_set:false});
+        case 'get_effective_model_config': return Promise.resolve(window.__EFFECTIVE_MODEL_CONFIG__ || {model:'qwen36_35b_256k',base_url:'http://127.0.0.1:8000/v1',api_key_set:false});
+        // A supported Cube with no loaded local models must still leave chat usable.
+        case 'cms_device_status': return Promise.resolve({supported:true,detected:true,hardware:{state:'compatible'}});
+        case 'cms_service_status': return Promise.resolve({supported:true,installed:true,recoveryScope:'a'.repeat(64)});
+        case 'cms_status': return Promise.resolve({available:true,data:{}});
+        case 'cms_models': return Promise.resolve({available:true,data:{models:[]}});
+        case 'cms_tasks': return Promise.resolve({available:true,data:{tasks:[]}});
+        case 'discover_local_vllm': return Promise.resolve({candidates:[]});
         case 'list_models': return window.__MODEL_LIST_ERROR__ ? Promise.reject(new Error('temporary model catalog failure')) : Promise.resolve(window.__MODEL_CATALOG__ || {models:[],active_model_id:null});
         case 'list_sessions': return Promise.resolve(SESSIONS);
         case 'list_codex_acp_sessions': return Promise.resolve(CODEX_SESSIONS);
@@ -357,6 +364,40 @@ async function expand(page) {
       && visualShell.overflow === 'hidden'
       && visualShell.backgroundColor !== 'rgba(0, 0, 0, 0)',
     JSON.stringify(visualShell),
+  );
+
+  const modelServiceNotices = await page.evaluate(async () => {
+    const bridge = window.TauriBridge;
+    const hasBanner = () => !!document.querySelector('[data-testid="model-guidance"]');
+    const hasAccessGate = () => !!document.querySelector('[data-testid="model-access-gate"]');
+    const result = { localChatClear: !hasBanner() && !hasAccessGate() };
+    try {
+      window.__EFFECTIVE_MODEL_CONFIG__ = {
+        preset: 'openai_compatible', model: 'cloud-example',
+        base_url: 'https://api.example.test/v1', credential_state: 'configured',
+      };
+      await bridge.models.loadSessionModel(null);
+      await window.__uiStable__(() => document.body.innerText);
+      result.cloudChatClear = !hasBanner() && !hasAccessGate();
+      for (const credentialState of ['missing', 'unavailable']) {
+        window.__EFFECTIVE_MODEL_CONFIG__.credential_state = credentialState;
+        await bridge.models.loadSessionModel(null);
+        result[credentialState] = await window.__uiWait__(hasAccessGate);
+        result[credentialState + 'WithoutBanner'] = !hasBanner();
+      }
+      result.noAutomaticLocalDiscovery = !window.__TAURI_INVOKES__
+        .some(call => call.cmd === 'discover_local_vllm');
+    } finally {
+      delete window.__EFFECTIVE_MODEL_CONFIG__;
+      await bridge.models.loadSessionModel(null);
+      result.localRestored = await window.__uiWait__(() => !hasAccessGate() && !hasBanner());
+    }
+    return result;
+  });
+  rec(
+    '本地服务不可用时聊天无横幅，云端凭据缺失或不可读仍显示模型接入页',
+    Object.values(modelServiceNotices).every(Boolean),
+    JSON.stringify(modelServiceNotices),
   );
 
   const searchOverlayFirstOpen = await page.evaluate(async () => {

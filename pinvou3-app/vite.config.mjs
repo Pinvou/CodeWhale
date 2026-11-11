@@ -438,7 +438,6 @@ export const lazyChunkContracts = {
   knowledge: ['features/knowledge/KnowledgeView.jsx', 'KnowledgeView'],
   modelStore: ['features/model-store/ModelStoreView.jsx', 'ModelStoreView'],
   monitor: ['features/monitor/MonitorView.jsx', 'MonitorView'],
-  modelGuidance: ['features/megacube/ModelGuidancePanel.jsx', 'ModelGuidancePanel'],
   cmsdTaskRuntime: ['features/megacube/CmsdTaskRuntime.jsx', 'CmsdTaskRuntime'],
   deviceManager: ['features/device-manager/DeviceManagerView.jsx', 'DeviceManagerView'],
   search: ['features/search/SearchView.jsx', 'SearchView'],
