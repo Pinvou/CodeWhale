@@ -26,6 +26,97 @@ CHECKPOINT_FOREIGN_ROOT = "TestRegistrationBonusCheckpointForeignFactsPostgresIn
 CHECKPOINT_FOREIGN_CHILDREN = {"unbound-existing-facts", "foreign-key-before-finalize"}
 
 
+class PostgresQuiescenceTests(unittest.TestCase):
+    @staticmethod
+    def snapshot(**changes):
+        return json.dumps({"databases": ["postgres", "template0", "template1"],
+                           "roles": ["postgres"], "objects": 0, "clients": 0, **changes})
+
+    def observe(self, query, *, budget=15, clock=None):
+        clock = [0.0] if clock is None else clock
+        pauses = []
+        def pause(delay):
+            pauses.append(delay)
+            clock[0] += delay
+        RUNNER.require_exclusive_instance(query, ["postgres", "template0", "template1"], {"postgres"},
+                                         timeout_seconds=budget, now=lambda: clock[0], pause=pause)
+        return pauses
+
+    def test_zero_clients_requires_one_complete_observation_without_waiting(self):
+        calls = []
+        def query(sql, *, timeout):
+            calls.append((sql, timeout))
+            return self.snapshot()
+        self.assertEqual(self.observe(query), [])
+        self.assertEqual(calls, [(RUNNER.INSTANCE_SNAPSHOT_SQL, 15)])
+
+    def test_backend_exit_is_observed_before_accepting_and_query_budget_decreases(self):
+        responses = iter([self.snapshot(clients=2), self.snapshot(clients=1), self.snapshot()])
+        budgets = []
+        def query(sql, *, timeout):
+            budgets.append(timeout)
+            return next(responses)
+        self.assertEqual(self.observe(query), [0.05, 0.05])
+        self.assertEqual(len(budgets), 3)
+        self.assertGreater(budgets[0], budgets[1])
+        self.assertGreater(budgets[1], budgets[2])
+
+    def test_active_client_does_not_become_success_at_the_deadline(self):
+        calls = []
+        def query(sql, *, timeout):
+            calls.append((sql, timeout))
+            return self.snapshot(clients=1)
+        with self.assertRaisesRegex(RuntimeError, "another client"):
+            self.observe(query, budget=0.12)
+        self.assertEqual(len(calls), 3)
+        self.assertTrue(all(0 < timeout <= 0.12 for _, timeout in calls))
+
+    def test_catalog_and_observation_shape_are_rechecked_while_clients_drain(self):
+        bad = [self.snapshot(databases=["postgres", "template0", "template1", "other"]),
+               self.snapshot(roles=["postgres", "foreign"]), self.snapshot(roles=["postgres", "postgres"]),
+               self.snapshot(roles=None), self.snapshot(objects=1), self.snapshot(objects=False),
+               self.snapshot(clients=-1), self.snapshot(clients=False), self.snapshot(clients="0"),
+               self.snapshot(extra="unknown"), '{}', '[]', 'not-json']
+        for value in bad:
+            with self.subTest(observation=value):
+                replies = iter([self.snapshot(clients=1), value]); calls = []
+                def query(sql, *, timeout):
+                    calls.append(sql)
+                    return next(replies)
+                with self.assertRaises(RuntimeError):
+                    self.observe(query)
+                self.assertEqual(len(calls), 2)
+
+    def test_identity_or_transport_failure_is_not_retried_or_converted_to_idle(self):
+        import subprocess
+        for error in [RuntimeError("identity changed"), subprocess.TimeoutExpired("owned-psql", 1)]:
+            calls = []
+            def query(sql, *, timeout):
+                calls.append(sql)
+                raise error
+            with self.subTest(error=type(error).__name__), self.assertRaises(RuntimeError) as caught:
+                self.observe(query)
+            if type(error) is RuntimeError:
+                self.assertIs(caught.exception, error)
+            self.assertEqual(len(calls), 1)
+        clock = [0.0]
+        def too_late(sql, *, timeout):
+            clock[0] = 15
+            return self.snapshot()
+        with self.assertRaisesRegex(RuntimeError, "another client"):
+            self.observe(too_late, clock=clock)
+
+    def test_budget_cannot_be_disabled_or_extended_and_role_order_is_not_authority(self):
+        from unittest.mock import Mock
+        for budget in (0, -1, True, "15", 16, float("inf"), float("nan")):
+            query = Mock()
+            with self.subTest(budget=budget), self.assertRaises(ValueError):
+                self.observe(query, budget=budget)
+            query.assert_not_called()
+        RUNNER.require_exclusive_instance(lambda sql, **options: self.snapshot(roles=["postgres", "billing_migrator"]),
+            ["postgres", "template0", "template1"], {"billing_migrator", "postgres"})
+
+
 class FinancialPostgresRunnerTests(unittest.TestCase):
     def test_catalog_rollback_requires_all_historical_versions_and_actual_cli(self):
         root = "TestBillingHistoricalCatalogRollbackPostgres"
@@ -1342,6 +1433,23 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
                 trace.append("drop")
                 state["bootstrapped"] = False
                 value = ""
+            elif sql == RUNNER.INSTANCE_SNAPSHOT_SQL:
+                databases = ["postgres", "template0", "template1"]
+                if leftover and state["retained_done"]:
+                    databases.append("unknown_fixture")
+                roles = {"postgres"}
+                if existing_roles:
+                    roles.add("existing_runtime")
+                elif account_leftover and state["account_done"]:
+                    roles.add("account_service")
+                elif schema_leftover and state["schema_done"]:
+                    roles.add("billing_schema_owner")
+                elif provisioning_leftover and state["provisioning_done"]:
+                    roles.add("token_gateway")
+                elif state["bootstrapped"] or owner_leftover and state["owner_done"]:
+                    roles.update(RUNNER.ACTORS)
+                value = json.dumps({"databases": databases, "roles": sorted(roles),
+                                    "objects": 1 if user_objects else 0, "clients": 1 if active_client else 0})
             elif "FROM pg_database" in sql:
                 value = "postgres\ntemplate0\ntemplate1"
                 if leftover and state["retained_done"]:
@@ -1371,11 +1479,16 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
             else:
                 raise AssertionError("unexpected SQL")
             return SimpleNamespace(returncode=0, stdout=value, stderr="")
+        clock = [0.0]
+        observe = RUNNER.require_exclusive_instance
+        def observation(*args, **kwargs):
+            return observe(*args, now=lambda: clock[0], pause=lambda delay: clock.__setitem__(0, clock[0]+delay), **kwargs)
         with patch.dict(RUNNER.os.environ, {
             "PINVOU_ACCOUNT_FINANCIAL_TEST_DATABASE_URL": "postgres://postgres@127.0.0.1:5433/postgres?sslmode=disable",
             "PINVOU_TEST_SCHEMA_DATABASE_URL": "must-not-reach-tests",
             "GOFLAGS": "-trimpath",
-        }, clear=True), patch.object(RUNNER.subprocess, "run", side_effect=run), contextlib.redirect_stdout(io.StringIO()):
+        }, clear=True), patch.object(RUNNER.subprocess, "run", side_effect=run), \
+                patch.object(RUNNER, "require_exclusive_instance", side_effect=observation), contextlib.redirect_stdout(io.StringIO()):
             try:
                 RUNNER.main(group=group)
             finally:

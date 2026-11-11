@@ -252,6 +252,12 @@ rechecks the expected database owner; zero sessions remain mandatory, and the
 final drop never forces disconnection. The required real PostgreSQL regression
 holds an advisory-lock barrier to prove that a closed client can still have a
 live backend, and verifies timeout, owner and missing-database refusal.
+The Python financial and closure wrappers observe the same shutdown boundary:
+each identity-guarded SQL snapshot must retain exactly the expected databases
+and roles, no bootstrap objects, and zero other client backends. They may wait
+up to 15 seconds for backends to exit, checking all conditions on every sample;
+query/identity errors or catalog drift fail immediately. This never terminates
+a backend, removes an unknown actor, or retries a business contract.
 
 Repository administrators can set `PINVOU_LINUX_RUNNER` to a JSON label array
 (for example `["self-hosted","Linux","pinvou3"]`) to route x64 Linux jobs to
