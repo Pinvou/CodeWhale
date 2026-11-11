@@ -10,10 +10,12 @@ privilege contract. This runner must never accept a deployed database URL.
 """
 import argparse
 import json
+import math
 import os
 from pathlib import Path
 import subprocess
 import sys
+import time
 from urllib.parse import parse_qs, urlsplit
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -28,6 +30,9 @@ REQUIRED = {
     "TestPendingUnusedExpiryLegacyCancellationFallbackPostgres",
     "TestPreparationFailurePreservesAcceptedUsagePostgres",
     "TestCircuitFailureBeforeDispatchPostgres",
+    "TestDispatchCircuitReadOnlyRecoveryPublicPostgres",
+    "TestDispatchCircuitOpenAfterAdmissionNeverBecomesProbePostgres",
+    "TestDispatchCircuitRecoveryDoesNotRequireSharedHealthClaimPostgres",
     "TestCredentialRotationWindowReceiptPostgres",
     "TestCredentialRotationOtherActorEffectPostgres",
     "TestCredentialFailurePersistenceBoundariesPostgres",
@@ -43,6 +48,7 @@ REQUIRED = {
     "TestUsageWaiverCoordinatorRecoveryPostgres",
     "TestF05AdditionalReservationProjectionPublicPostgres",
     "TestF06OrganizationAdmissionBoundariesPublicPostgres",
+    "TestOrganizationModelPolicyPublicPostgres",
     "TestContextEligibilityUsesCurrentScopedProductionRoutes",
     "TestReconciliationEvidenceMatchesPublicSchema",
     "TestF05DispatchLeaseLifecycle",
@@ -72,6 +78,7 @@ REQUIRED = {
 ACCOUNT_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/account"
 LIFECYCLE_RECONCILIATION_REQUIRED = {"TestLifecycleV3ApprovalReconciliationPostgres"}
 ACCOUNT_REQUIRED = {
+    "TestOrganizationStartupDiagnosticsPostgres",
     "TestRestoredAdminReadsWithPublicMigrationsAndRuntimeActor",
     "TestApprovalDecisionOriginalReceiptPostgres",
     "TestApprovalDecisionLegacyConcurrentReceiptPostgres",
@@ -79,6 +86,7 @@ ACCOUNT_REQUIRED = {
     "TestF06OrganizationStatusProjectionVersionPublicPostgres",
     "TestF06OrganizationDeletionVersionAndTerminalScope",
     "TestF06Review5566377593PublicPostgres",
+    "TestOrganizationEvidenceTruncatePublicPostgres",
     "TestOrdinaryDeadLetterReplayRuntimePostgres",
     "TestIdentityRecoveryClaimsRuntimePostgres",
     "TestProfileSessionRevocationRecoveryRuntimePostgres",
@@ -122,6 +130,7 @@ ACCOUNT_LEAF_REQUIRED = {
 ACCOUNT_CHILD_REQUIRED = ACCOUNT_REQUIRED - ACCOUNT_LEAF_REQUIRED
 TOKEN_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/token"
 TOKEN_CHILD_REQUIRED = {
+    "TestOrganizationModelPolicyPublicPostgres",
     "TestEmergencyCancellationClaimOwnershipPostgres",
     "TestEmergencyCancellationRequestLocksClaimPostgres",
     "TestUserUnusedIntentCancellationOwnerPostgres",
@@ -186,6 +195,8 @@ REFUND_REQUIRED = {
     "TestRefundOriginalUnknownSuccessQueriesAndSettlesOrdinaryGrantsPostgres",
 }
 RETAINED_REQUIRED = {
+    "TestClosedGrantEvidenceCurrentRoleGuardsPostgres",
+    "TestExpiredHoldProofRetryDiagnosticsPostgres",
     "TestEscalatedForcedRefundRequiresSecondActorAndReplays",
     "TestEscalatedForcedRefundWalletLockOrderPostgres",
     "TestEscalatedForcedRefundAtomicRollbackPostgres",
@@ -251,7 +262,6 @@ BILLING_LEAF_REQUIRED = {
     "TestEscalatedForcedRefundWalletLockOrderPostgres",
     "TestOrdinaryForcedRefundAppliedReceiptRecoveryPostgres",
     "TestPaymentPersonalWalletAdmissionStatusRacePostgres",
-    "TestPostgresManagedPricePagination",
     "TestLedgerRepairProofHistoricalUpgradePostgres",
     "TestLedgerRepairAuthorityMixedBatchPostgres",
     "TestLedgerRepairHistoryCapabilityPostgres",
@@ -278,7 +288,28 @@ EXACT_REQUIRED_CHILDREN = {
         for seeded in ("false", "true")
         for suffix in ("", "/actual-cli")
     },
+    "TestOrganizationStartupDiagnosticsPostgres": {
+        "profile", "token", "billing-earlier-wallet-guard",
+    },
+    "TestExpiredHoldProofRetryDiagnosticsPostgres": {
+        "quick-failure", "timeout", "cancel", "unavailable", "invalid-proof",
+        "valid-proof", "persistence-failure", "operator",
+    },
     "TestRechargeProductCommandAtomicityPostgres": {"active-provider-admission-candidate-progress"},
+    "TestPostgresManagedPricePagination": {
+        "bounded-batch-queries",
+        *{f"bounded-batch-queries/{kind}-{size}" for kind in ("list", "namespace") for size in (1, 100, 200)},
+        "bounded-batch-queries/empty-page",
+        "bounded-batch-queries/model-zero-and-inherited-units",
+        "bounded-batch-queries/absent-namespace",
+        "bounded-batch-queries/snapshot-and-next-read",
+        "bounded-batch-queries/database-faults-and-recovery",
+        *{f"bounded-batch-queries/database-faults-and-recovery/{table}" for table in ("pricing_versions", "pricing_version_unit_configs", "pricing_space_versions")},
+        "bounded-batch-queries/cancelled-and-next-read",
+        "bounded-batch-queries/abnormal-read-shapes",
+        "bounded-batch-queries/abnormal-read-shapes/empty-units",
+        "bounded-batch-queries/abnormal-read-shapes/missing-namespace",
+    },
     "TestProductManualAdmissionPostgres": {
         "two-explicit-humans-first-publish-and-immutable-replay",
         "runtime-cannot-rewrite-frozen-manual-facts",
@@ -297,6 +328,15 @@ EXACT_REQUIRED_CHILDREN = {
         "retention-keeps-issued-grant-and-continues-later-artifact-cleanup",
         "retention-skips-locked-expired-captcha-and-rejects-late-grant",
         "retention-FK-protects-inflight-reference-and-subsequent-passes",
+    },
+    "TestOrganizationEvidenceTruncatePublicPostgres": {
+        scenario + suffix
+        for scenario in ("fresh-install", "retained-upgrade")
+        for suffix in ("", "/organization_creation_requests", "/organization_unit_commands",
+                       "/membership_commands", "/legal-replay-after-rejection", "/forward-only-public-down")
+    },
+    "TestClosedGrantEvidenceCurrentRoleGuardsPostgres": {
+        "account_closure_grant_isolations", "account_closed_grant_reclaim_commands",
     },
     "TestManagementPublicMigrationInstallation": {
         "fresh", "legacy-upgrade", "installed-29-upgrade", "installed-30-upgrade",
@@ -367,6 +407,15 @@ EXACT_REQUIRED_CHILDREN = {
     "TestEscalatedForcedRefundEvidenceAndReceiptGuardsPostgres": {
         "manual-status", "manual-link", "order-link", "transaction-link",
         "evidence-link", "receipt-identity-and-terminal-replay",
+    },
+    "TestOrganizationModelPolicyPublicPostgres": {
+        "initial-default-is-not-a-stored-policy",
+        "invalid-input-preserves-original-policy-and-next-write",
+        "nil-and-explicit-empty-model-sets-have-identical-meaning",
+        "immutable-replay-after-later-revision-and-actor-or-facts-conflict",
+        "same-key-first-writers-replay-one-version",
+        "different-key-initial-CAS-has-one-winner",
+        "stale-CAS-and-unavailable-model-do-not-write",
     },
     "TestReconciliationOrphanPaidOrderPostgres": {"fresh-install", "historical-upgrade"},
     "TestRemoteModelCancellationOwnerLoopTransport": {
@@ -500,17 +549,89 @@ def ci_identity_guard(raw):
     return ["-c", guard]
 
 
-GROUPS = ("owners", "token", "billing-0", "billing-1")
+INSTANCE_SNAPSHOT_SQL = """SELECT json_build_object(
+    'databases', (SELECT array_agg(datname ORDER BY datname) FROM pg_database),
+    'roles', (SELECT array_agg(rolname ORDER BY rolname) FROM pg_roles WHERE rolname !~ '^pg_'),
+    'objects', (SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+                WHERE n.nspname !~ '^pg_' AND n.nspname <> 'information_schema')
+             + (SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
+                WHERE n.nspname !~ '^pg_' AND n.nspname <> 'information_schema'),
+    'clients', (SELECT count(*) FROM pg_stat_activity
+                WHERE backend_type='client backend' AND pid<>pg_backend_pid()))"""
+
+
+def require_exclusive_instance(query, databases, roles, *, timeout_seconds=15, now=None, pause=None):
+    """Observe a clean private cluster, without disconnecting another backend.
+
+    A psql/Go process can exit before its PostgreSQL backend. Read all admission
+    conditions on one identity-guarded connection per observation: separate
+    catalog probes would themselves introduce more retiring client backends.
+    Only a positive client count is eligible to wait; identity/query errors,
+    catalog drift or malformed observations always fail immediately.
+    """
+    if type(timeout_seconds) not in (int, float) or not 0 < timeout_seconds <= 15:
+        raise ValueError("PostgreSQL observation budget must be positive and at most 15 seconds")
+    now = time.monotonic if now is None else now
+    pause = time.sleep if pause is None else pause
+    databases, roles = list(databases), set(roles)
+    deadline = now() + timeout_seconds
+    while True:
+        remaining = deadline - now()
+        if remaining <= 0:
+            raise RuntimeError("another client is active; exclusive fixture required")
+        try:
+            snapshot = json.loads(query(INSTANCE_SNAPSHOT_SQL, timeout=remaining))
+        except subprocess.TimeoutExpired:
+            raise RuntimeError("PostgreSQL fixture observation timed out; no writes permitted") from None
+        except (ValueError, TypeError):
+            raise RuntimeError("invalid PostgreSQL fixture observation; no writes permitted") from None
+        if (not isinstance(snapshot, dict) or set(snapshot) != {"databases", "roles", "objects", "clients"}
+                or snapshot["databases"] != databases or not isinstance(snapshot["roles"], list)
+                or any(not isinstance(role, str) for role in snapshot["roles"])
+                or len(snapshot["roles"]) != len(set(snapshot["roles"]))
+                or set(snapshot["roles"]) != roles):
+            raise RuntimeError("database or actors differ; no fixture writes or cleanup permitted")
+        if type(snapshot["objects"]) is not int or snapshot["objects"] != 0:
+            raise RuntimeError("bootstrap database contains user objects; no writes permitted")
+        clients = snapshot["clients"]
+        if type(clients) is not int or clients < 0:
+            raise RuntimeError("invalid PostgreSQL client observation; no writes permitted")
+        if now() >= deadline:
+            raise RuntimeError("another client is active; exclusive fixture required")
+        if clients == 0:
+            return
+        pause(min(0.05, max(0, deadline - now())))
+
+
+BILLING_GROUPS = tuple(f"billing-{index}" for index in range(4))
+GROUPS = ("owners", "token", *BILLING_GROUPS)
+
+
+def billing_partitions(roots, durations):
+    """Assign complete roots by measured cost; unknown/new roots are never omitted."""
+    fallback, weights = durations["default_seconds"], durations["seconds"]
+    if (not isinstance(weights, dict) or not isinstance(fallback, (int, float))
+            or isinstance(fallback, bool) or not math.isfinite(fallback) or fallback <= 0
+            or any(not isinstance(value, (int, float)) or isinstance(value, bool)
+                   or not math.isfinite(value) or value < 0 for value in weights.values())):
+        raise ValueError("invalid financial test durations")
+    buckets = {name: set() for name in BILLING_GROUPS}
+    loads = {name: 0.0 for name in BILLING_GROUPS}
+    for root in sorted(roots, key=lambda name: (-weights.get(name, fallback), name)):
+        group = min(BILLING_GROUPS, key=lambda name: (loads[name], name))
+        buckets[group].add(root)
+        loads[group] += weights.get(root, fallback)
+    return buckets
 
 
 def billing_roots(group):
-    # Partition complete roots, never individual race/locking subcases. Sorting
-    # makes both shards deterministic; their union always includes new roots.
+    # Keep each root's race/locking subcases and exclusive actor lifecycle intact.
     if group == "all":
         return RETAINED_REQUIRED
-    if group not in ("billing-0", "billing-1"):
+    if group not in BILLING_GROUPS:
         raise ValueError("not a Billing group")
-    return set(sorted(RETAINED_REQUIRED)[int(group[-1])::2])
+    durations = json.loads((ROOT / "scripts/account-financial-test-durations.json").read_text(encoding="utf-8"))
+    return billing_partitions(RETAINED_REQUIRED, durations)[group]
 
 
 def main(*, group="all"):
@@ -520,10 +641,10 @@ def main(*, group="all"):
     psql = os.environ.get("PINVOU_ACCOUNT_TEST_PSQL", "psql")
     go = os.environ.get("PINVOU_ACCOUNT_TEST_GO", "go")
 
-    def query(sql):
+    def query(sql, *, timeout=None):
         result = subprocess.run(
             [psql, raw, "-X", "-q", "-A", "-t", "-v", "ON_ERROR_STOP=1", *ci_identity_guard(raw), "-c", sql],
-            capture_output=True, text=True, encoding="utf-8", check=False,
+            capture_output=True, text=True, encoding="utf-8", check=False, timeout=timeout,
         )
         if result.returncode:
             raise RuntimeError("disposable PostgreSQL operation failed")
@@ -533,16 +654,7 @@ def main(*, group="all"):
     user = query("SELECT current_user")
     roles = query("SELECT rolname FROM pg_roles WHERE rolname !~ '^pg_' ORDER BY rolname")
     def assert_instance(expected_roles):
-        if query("SELECT datname FROM pg_database ORDER BY datname") != databases or set(query("SELECT rolname FROM pg_roles WHERE rolname !~ '^pg_' ORDER BY rolname").splitlines()) != expected_roles:
-            raise RuntimeError("database or deployment actors differ; no fixture writes or cleanup permitted")
-        if query("""SELECT
-            (SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
-             WHERE n.nspname !~ '^pg_' AND n.nspname <> 'information_schema') +
-            (SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
-             WHERE n.nspname !~ '^pg_' AND n.nspname <> 'information_schema')""") != "0":
-            raise RuntimeError("bootstrap database contains user objects; no writes permitted")
-        if query("SELECT count(*) FROM pg_stat_activity WHERE backend_type='client backend' AND pid<>pg_backend_pid()") != "0":
-            raise RuntimeError("another database client is active; exclusive fixture required")
+        require_exclusive_instance(query, databases.splitlines(), expected_roles)
 
     if databases != "postgres\ntemplate0\ntemplate1" or roles != user:
         raise RuntimeError("database or deployment actors already exist; no writes permitted")
@@ -572,8 +684,9 @@ def main(*, group="all"):
             env["PINVOU_TEST_TOKEN_DATABASE_URL"] = raw
             env["PINVOU_TEST_BILLING_DATABASE_URL"] = raw
         # The retained Billing roots create hundreds of isolated migration
-        # fixtures. Other phases retain their existing finite 20-minute bound.
-        timeout = "75m" if label == "retained-billing" else "20m"
+        # fixtures. Retained Token keeps its full package within a 40-minute
+        # test-binary budget; other phases retain their 20-minute bound.
+        timeout = {"retained-billing": "75m", "retained-token": "40m"}.get(label, "20m")
         command = [go, "test", "-p=1", "-race", "-tags=nomsgpack", "-mod=readonly", "-count=1", "-timeout=" + timeout, "-json"]
         if scoped:
             command += ["-run", "^(" + "|".join(sorted(required)) + ")$"] if len(required) > 1 else ["-run", "^" + next(iter(required)) + "$"]
