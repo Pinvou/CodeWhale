@@ -89,6 +89,97 @@ def save(path, value):
     os.replace(tmp, path)
 
 
+
+def retire_owned_service(meta, path):
+    """Diagnostic I/O must never gate retirement after live identity is proven.
+
+    A missing container still requires its valid durable volume receipt. Never
+    infer an old volume from a prefix, and never reclaim anything by pruning.
+    """
+    identifier = meta['id']
+    errors = set()
+    previous = None
+    output_path = path
+    if path is not None:
+        try:
+            previous = json.loads(path.read_text(encoding='utf-8'))
+            if not isinstance(previous, dict) or previous.get('schema') != 1 or previous.get('kind') != 'deployment-containers' or previous.get('id') != identifier or not re.fullmatch('[a-f0-9]{64}', previous.get('volume', '')):
+                raise ValueError('untrusted Redis receipt')
+            # A receipt is an ownership acknowledgement, never a log envelope
+            # for arbitrary fields. Preserve only nonsecret, validated identity.
+            safe = {key: previous[key] for key in ('schema', 'kind', 'id', 'volume')}
+            for key, pattern in [('run_id', '[a-f0-9]{40}'), ('owner_id', 'portal-ci-[a-f0-9]{32}')]:
+                value = previous.get(key)
+                if isinstance(value, str) and re.fullmatch(pattern, value):
+                    safe[key] = value
+            previous = safe
+        except FileNotFoundError:
+            previous = None
+        except (OSError, ValueError, TypeError):
+            errors.add('RECEIPT_READ_FAILED')
+            previous = None
+            output_path = None  # Preserve the unreadable/corrupt original.
+
+    def publish(receipt):
+        packet = dict(receipt, errors=sorted(errors), receipt_persisted=False)
+        if output_path is not None:
+            try:
+                save(output_path, dict(packet, receipt_persisted=True))
+                packet['receipt_persisted'] = True
+            except Exception:
+                # Keep the error visible after cleanup; neither ENOSPC nor a
+                # bookkeeping defect authorizes leaving an owned service alive.
+                errors.add('RECEIPT_WRITE_FAILED')
+        packet['errors'] = sorted(errors)
+        try:
+            print(json.dumps(packet, sort_keys=True), flush=True)
+        except (OSError, ValueError):
+            errors.add('RECEIPT_OUTPUT_FAILED')
+
+    present = identifier in run(['docker', 'ps', '--all', '--quiet', '--no-trunc']).splitlines()
+    if not present:
+        if previous is None:
+            raise ValueError('Redis service disappeared before volume registration')
+        if previous['volume'] in run(['docker', 'volume', 'ls', '--quiet']).splitlines():
+            raise ValueError('Redis anonymous volume remains')
+        previous.update(state='released', cleanup_failed=False)
+        publish(previous)
+        if errors:
+            raise RuntimeError('Redis retired; diagnostic acknowledgement failed')
+        return
+
+    items = json.loads(run(['docker', 'inspect', identifier]))
+    if len(items) != 1:
+        raise ValueError('ambiguous Redis service')
+    _, volume = inspect_service(meta, items[0], healthy=False)
+    if previous and previous['volume'] != volume:
+        # The live job metadata and exact inspect still identify this service.
+        # Do not overwrite the conflicting record or touch its former volume.
+        errors.add('RECEIPT_BINDING_MISMATCH')
+        output_path = None
+    receipt = {'schema': 1, 'kind': 'deployment-containers', 'id': identifier, 'volume': volume, 'state': 'registered'}
+    if previous:
+        for key in ('run_id', 'owner_id'):
+            if key in previous:
+                receipt[key] = previous[key]
+    publish(receipt)
+    try:
+        run(['docker', 'stop', '--time', '15', identifier])
+    except Exception:
+        errors.add('DOCKER_STOP_FAILED')
+    clean = False
+    try:
+        containers = run(['docker', 'ps', '--all', '--quiet', '--no-trunc']).splitlines()
+        volumes = run(['docker', 'volume', 'ls', '--quiet']).splitlines()
+        clean = identifier not in containers and volume not in volumes
+    except Exception:
+        errors.add('RETIREMENT_CHECK_FAILED')
+    receipt.update(state='released' if clean else 'unconfirmed', cleanup_failed=not clean)
+    publish(receipt)
+    if errors or not clean:
+        raise RuntimeError('Redis retirement or diagnostic acknowledgement failed')
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--stop', action='store_true')
@@ -107,35 +198,18 @@ def main():
     path = Path(ledger) / 'portal-redis-service.json' if ledger else None
     if not args.stop and path is None:
         raise RuntimeError('Redis admission requires an initialized resource ledger')
-    previous = json.loads(path.read_text(encoding='utf-8')) if path is not None and path.exists() else None
-    present = identifier in run(['docker', 'ps', '--all', '--quiet', '--no-trunc']).splitlines()
-    if args.stop and not present:
-        # Only a prior receipt can prove which anonymous volume must be absent.
-        if not previous or previous.get('id') != identifier:
-            raise ValueError('Redis service disappeared before volume registration')
-        if previous['volume'] in run(['docker', 'volume', 'ls', '--quiet']).splitlines():
-            raise ValueError('Redis anonymous volume remains')
-        previous.update(state='released', cleanup_failed=False)
-        save(path, previous)
-        print(json.dumps(previous, sort_keys=True), flush=True)
+    if args.stop:
+        retire_owned_service(meta, path)
         return
+    previous = json.loads(path.read_text(encoding='utf-8')) if path.exists() else None
     items = json.loads(run(['docker', 'inspect', identifier]))
     if len(items) != 1:
         raise ValueError('ambiguous Redis service')
-    port, volume = inspect_service(meta, items[0], healthy=not args.stop)
+    port, volume = inspect_service(meta, items[0])
     if previous and (previous.get('id') != identifier or previous.get('volume') != volume):
         raise ValueError('Redis lifecycle receipt differs from job service')
     receipt = {'schema': 1, 'kind': 'deployment-containers', 'id': identifier, 'volume': volume, 'state': 'registered'}
     save(path, receipt)
-    if args.stop:
-        print(json.dumps(receipt, sort_keys=True), flush=True)
-        run(['docker', 'stop', '--time', '15', identifier])
-        if identifier in run(['docker', 'ps', '--all', '--quiet', '--no-trunc']).splitlines() or volume in run(['docker', 'volume', 'ls', '--quiet']).splitlines():
-            raise ValueError('Redis service/volume retirement unconfirmed')
-        receipt.update(state='released', cleanup_failed=False)
-        save(path, receipt)
-        print(json.dumps(receipt, sort_keys=True), flush=True)
-        return
     direct = run(['docker', 'exec', identifier, 'redis-cli', '--raw', 'INFO', 'server'])
     run_id = prove_server(direct, command(port, 'INFO', 'server'))
     if command(port, 'DBSIZE') != '0' or run(['docker', 'exec', identifier, 'redis-cli', '--raw', 'ACL', 'USERS']) != 'default':

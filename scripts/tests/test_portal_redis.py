@@ -108,6 +108,95 @@ class PortalRedisGuardTests(unittest.TestCase):
         with patch.dict(os.environ,env,clear=True), patch('sys.argv',['account-ci-redis.py','--stop']), patch.object(CI,'run',return_value=''), patch.object(CI,'command',side_effect=AssertionError('no fixture writes')):
             with self.assertRaisesRegex(ValueError,'before volume registration'): CI.main()
 
+
+    def test_diagnostic_io_faults_cannot_suppress_verified_live_retirement(self):
+        for fault in ['malformed', 'read', 'write', 'missing_directory', 'output']:
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as directory:
+                meta, item = self.fixture()
+                ledger = Path(directory) / 'missing' if fault == 'missing_directory' else Path(directory)
+                receipt = ledger / 'portal-redis-service.json'
+                original = json.dumps({'schema':1,'kind':'deployment-containers','id':meta['id'],'volume':'b'*64,'state':'registered'})
+                if fault != 'missing_directory':
+                    receipt.write_text('{invalid' if fault == 'malformed' else original, encoding='utf-8')
+                stopped, calls = False, []
+                def docker(args):
+                    nonlocal stopped
+                    calls.append(args)
+                    if args[1:3] == ['ps','--all']: return '' if stopped else meta['id']
+                    if args[1] == 'inspect': return json.dumps([item])
+                    if args[1] == 'stop': stopped = True; return meta['id']
+                    if args[1:3] == ['volume','ls']: return ''
+                    self.fail('unexpected cleanup command')
+                class UnavailableOutput(io.StringIO):
+                    def write(self, text): raise OSError('controlled output failure')
+                output = UnavailableOutput() if fault == 'output' else io.StringIO()
+                env = {'GITHUB_ACTIONS':'true','ACCOUNT_CI_SERVICES':json.dumps({CI.SERVICE:meta}),'PINVOU_CI_RESOURCE_LEDGER':str(ledger)}
+                with contextlib.ExitStack() as stack:
+                    stack.enter_context(patch.dict(os.environ,env,clear=True))
+                    stack.enter_context(patch('sys.argv',['account-ci-redis.py','--stop']))
+                    stack.enter_context(patch.object(CI,'run',docker))
+                    stack.enter_context(patch.object(CI,'command',side_effect=AssertionError('cleanup cannot mutate Redis')))
+                    stack.enter_context(contextlib.redirect_stdout(output))
+                    if fault == 'read': stack.enter_context(patch.object(Path,'read_text',side_effect=PermissionError('controlled read failure')))
+                    if fault == 'write': stack.enter_context(patch.object(CI,'save',side_effect=OSError('controlled ENOSPC')))
+                    with self.assertRaises(RuntimeError): CI.main()
+                self.assertTrue(stopped, 'diagnostic error prevented exact owned stop')
+                self.assertEqual(sum(x[1]=='stop' for x in calls),1)
+                self.assertFalse(any('prune' in x for args in calls for x in args))
+                if fault != 'output':
+                    last = json.loads(output.getvalue().splitlines()[-1])
+                    self.assertEqual(last['state'],'released')
+                    self.assertFalse(last['cleanup_failed'])
+                    self.assertFalse(last['receipt_persisted'])
+                    self.assertTrue(last['errors'])
+                if fault in ('malformed','read','write'):
+                    self.assertEqual(receipt.read_text(encoding='utf-8'),'{invalid' if fault=='malformed' else original)
+
+    def test_receipt_write_failure_recovers_next_attempt_without_repeating_stop(self):
+        meta, item = self.fixture()
+        stopped, stop_count = False, 0
+        def docker(args):
+            nonlocal stopped, stop_count
+            if args[1:3] == ['ps','--all']: return '' if stopped else meta['id']
+            if args[1] == 'inspect': return json.dumps([item])
+            if args[1] == 'stop': stopped=True; stop_count+=1; return meta['id']
+            if args[1:3] == ['volume','ls']: return ''
+            self.fail('unexpected cleanup command')
+        with tempfile.TemporaryDirectory() as directory:
+            receipt=Path(directory)/'portal-redis-service.json'
+            receipt.write_text(json.dumps({'schema':1,'kind':'deployment-containers','id':meta['id'],'volume':'b'*64,'state':'registered'}),encoding='utf-8')
+            env={'GITHUB_ACTIONS':'true','ACCOUNT_CI_SERVICES':json.dumps({CI.SERVICE:meta}),'PINVOU_CI_RESOURCE_LEDGER':directory}
+            with patch.dict(os.environ,env,clear=True),patch('sys.argv',['account-ci-redis.py','--stop']),patch.object(CI,'run',docker),contextlib.redirect_stdout(io.StringIO()):
+                with patch.object(CI,'save',side_effect=OSError('controlled ENOSPC')):
+                    with self.assertRaises(RuntimeError): CI.main()
+                self.assertTrue(stopped)
+                CI.main()
+            self.assertEqual(stop_count,1)
+            self.assertEqual(json.loads(receipt.read_text(encoding='utf-8'))['state'],'released')
+
+    def test_untrusted_receipt_fields_are_not_logged_or_used_for_foreign_cleanup(self):
+        meta, item = self.fixture()
+        for live in [False,True]:
+            stopped=False
+            def docker(args):
+                nonlocal stopped
+                if args[1:3] == ['ps','--all']: return meta['id'] if live and not stopped else ''
+                if args[1]=='inspect': return json.dumps([item])
+                if args[1]=='stop': stopped=True;return meta['id']
+                if args[1:3]==['volume','ls']:return ''
+                self.fail('unexpected cleanup command')
+            with tempfile.TemporaryDirectory() as directory:
+                receipt=Path(directory)/'portal-redis-service.json'
+                receipt.write_text(json.dumps({'schema':1,'kind':'deployment-containers','id':meta['id'],'volume':'b'*64,'state':'registered','outside':'controlled-private-value','run_id':'a'*40,'owner_id':'portal-ci-'+'c'*32}),encoding='utf-8')
+                env={'GITHUB_ACTIONS':'true','ACCOUNT_CI_SERVICES':json.dumps({CI.SERVICE:meta}),'PINVOU_CI_RESOURCE_LEDGER':directory}
+                with patch.dict(os.environ,env,clear=True),patch('sys.argv',['account-ci-redis.py','--stop']),patch.object(CI,'run',docker),contextlib.redirect_stdout(io.StringIO()) as output:
+                    CI.main()
+                self.assertNotIn('controlled-private',output.getvalue())
+                state=json.loads(receipt.read_text(encoding='utf-8'))
+                self.assertEqual(state['run_id'],'a'*40)
+                self.assertEqual(state['owner_id'],'portal-ci-'+'c'*32)
+                self.assertNotIn('outside',state)
+
     def events(self):
         names = SELECT.ROOTS | {'TestRealRedisPortalSharedAdmissionAndCapacity/' + x for x in SELECT.CAPACITY_CASES}
         return [item for name in sorted(names) for item in [{'Action': 'run', 'Test': name}, {'Action': 'pass', 'Test': name}]] + [{'Action': 'pass', 'Package': 'portal'}]
