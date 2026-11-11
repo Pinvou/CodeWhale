@@ -201,6 +201,29 @@ for (const shell of ["powershell.exe", "pwsh"]) {
       assert.equal(result.stdout, "retired");
     });
 
+  test(`a zero root cannot hand off a service still holding command pipes [${shell}]`,
+    { skip: process.platform !== "win32" }, () => {
+      const code = "require('node:child_process').spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{detached:true,stdio:'inherit'}).unref();process.exit(0)";
+      const script = `$ErrorActionPreference='Stop'; . ${quote(guard)};
+        try { Invoke-PinvouWhitelistedProcess -FilePath ${quote(process.execPath)} -ExpectedSha256 '${nodeHash}' -Arguments @('-e',${quote(code)}) -TimeoutMilliseconds 1000 -RetainSuccessfulScope | Out-Null;throw 'incomplete-pipes-accepted' }
+        catch { $e=$_.Exception;while($e.InnerException){$e=$e.InnerException};if($e.Message -ne 'e2e_process_timeout' -or $e.ChildExitCode -ne 0 -or $e.CleanupFailed){throw} };
+        $next=Invoke-PinvouWhitelistedProcess -FilePath ${quote(process.execPath)} -ExpectedSha256 '${nodeHash}' -Arguments @('-e','process.stdout.write("next")') -TimeoutMilliseconds 5000;
+        if($next.ExitCode -ne 0 -or $next.StdOut -ne 'next'){throw 'next-command-failed'};[Console]::Out.Write('retired-and-recovered')`;
+      const result = ps(shell, script);
+      assert.equal(result.status, 0, result.stderr);
+      assert.equal(result.stdout, "retired-and-recovered");
+    });
+
+  test(`Windows capture rejects output beyond its actual character limit [${shell}]`,
+    { skip: process.platform !== "win32" }, () => {
+      const script = `$ErrorActionPreference='Stop'; . ${quote(guard)};
+        try { Invoke-PinvouWhitelistedProcess -FilePath ${quote(process.execPath)} -ExpectedSha256 '${nodeHash}' -Arguments @('-e',${quote("process.stdout.write('x'.repeat(17*1024*1024));setInterval(()=>{},1000)")}) -TimeoutMilliseconds 15000 | Out-Null;throw 'oversize-output-accepted' }
+        catch { $e=$_.Exception;while($e.InnerException){$e=$e.InnerException};if($e.Message -ne 'e2e_process_output_limit' -or $e.CleanupFailed){throw};[Console]::Out.Write('oversize-retired') }`;
+      const result = ps(shell, script);
+      assert.equal(result.status, 0, result.stderr);
+      assert.equal(result.stdout, "oversize-retired");
+    });
+
   test(`successful intentional Windows service remains owned until explicit cleanup [${shell}]`,
     { skip: process.platform !== "win32" }, () => {
       const script = `$ErrorActionPreference='Stop'; . ${quote(guard)};
