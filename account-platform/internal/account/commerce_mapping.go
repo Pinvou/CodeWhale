@@ -121,7 +121,7 @@ func (r *PostgresRepository) EnsureCommerceProviderMappings(ctx context.Context)
 	}
 	defer tx.Rollback(ctx)
 	rows, err := tx.Query(ctx, `
-SELECT u.id,u.mobile_e164 FROM users u
+SELECT u.id FROM users u
 LEFT JOIN commerce_customer_mappings m
   ON m.subject_type='USER' AND m.subject_id=u.id AND m.provider_id=$1
 WHERE u.mobile_verified_at IS NOT NULL AND u.mobile_e164 IS NOT NULL AND u.status='ACTIVE'
@@ -131,14 +131,10 @@ ORDER BY u.id FOR UPDATE OF u`, r.commerceProviderID, r.commerceAdapterVersion)
 	if err != nil {
 		return err
 	}
-	type candidate struct {
-		userID uuid.UUID
-		mobile string
-	}
-	var candidates []candidate
+	var candidates []uuid.UUID
 	for rows.Next() {
-		var item candidate
-		if err = rows.Scan(&item.userID, &item.mobile); err != nil {
+		var item uuid.UUID
+		if err = rows.Scan(&item); err != nil {
 			rows.Close()
 			return err
 		}
@@ -151,7 +147,26 @@ ORDER BY u.id FOR UPDATE OF u`, r.commerceProviderID, r.commerceAdapterVersion)
 	rows.Close()
 	now := r.now()
 	for _, item := range candidates {
-		if err = enqueueCommerceCustomerSync(ctx, tx, "USER", item.userID, item.mobile, r.commerceProviderID, r.commerceAdapterVersion, "CUSTOMER_PROVISIONING", now); err != nil {
+		// The candidate statement may have waited for the subject while an
+		// operator committed a quarantine without updating the users tuple.
+		// With that subject now exclusively locked, use a fresh statement
+		// snapshot for the complete startup admission predicate and contact.
+		var mobile *string
+		var eligible bool
+		err = tx.QueryRow(ctx, `SELECT u.mobile_e164,
+u.mobile_verified_at IS NOT NULL AND u.mobile_e164 IS NOT NULL AND u.status='ACTIVE'
+AND (m.id IS NULL OR (m.status<>'READY' AND m.adapter_version<>$3))
+AND NOT EXISTS(SELECT 1 FROM commerce_customer_repair_cases repair WHERE repair.mapping_id=m.id AND repair.mapping_version=m.version)
+FROM users u LEFT JOIN commerce_customer_mappings m
+ ON m.subject_type='USER' AND m.subject_id=u.id AND m.provider_id=$2
+WHERE u.id=$1`, item, r.commerceProviderID, r.commerceAdapterVersion).Scan(&mobile, &eligible)
+		if err != nil {
+			return err
+		}
+		if !eligible {
+			continue
+		}
+		if err = enqueueCommerceCustomerSync(ctx, tx, "USER", item, *mobile, r.commerceProviderID, r.commerceAdapterVersion, "CUSTOMER_PROVISIONING", now); err != nil {
 			return err
 		}
 	}

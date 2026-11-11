@@ -65,7 +65,7 @@ func (w *manualWorkerFailingLogWriter) Write([]byte) (int, error) {
 }
 
 func TestManualReviewWorkerFailuresRemainVisibleAndIndependent(t *testing.T) {
-	expectedSteps := []string{"sync", "commerce", "escalate"}
+	expectedSteps := []string{"sync", "escalate", "commerce"}
 	expectedEvents := map[string]string{"sync": "manual_review_sync_failed", "commerce": "commerce_manual_review_sync_failed", "escalate": "manual_review_escalation_failed"}
 	for _, fault := range expectedSteps {
 		t.Run(fault, func(t *testing.T) {
@@ -109,7 +109,7 @@ func TestManualReviewWorkerFailuresRemainVisibleAndIndependent(t *testing.T) {
 }
 
 func TestManualReviewWorkerRunsStartupAndLaterPassAfterFailure(t *testing.T) {
-	expectedSteps := []string{"sync", "commerce", "escalate"}
+	expectedSteps := []string{"sync", "escalate", "commerce"}
 	schedule, err := manualreview.ParseOnCallSchedule(uuid.NewString(), true)
 	if err != nil {
 		t.Fatal(err)
@@ -150,7 +150,7 @@ func TestManualReviewWorkerRunsStartupAndLaterPassAfterFailure(t *testing.T) {
 }
 
 func TestManualReviewWorkerBrokenLogSinkPreservesRemainingSteps(t *testing.T) {
-	expectedSteps := []string{"sync", "commerce", "escalate"}
+	expectedSteps := []string{"sync", "escalate", "commerce"}
 	store := &manualWorkerFaultStore{fault: expectedSteps[0]}
 	writer := &manualWorkerFailingLogWriter{}
 	previous := slog.Default()
@@ -166,7 +166,7 @@ func TestManualReviewWorkerBrokenLogSinkPreservesRemainingSteps(t *testing.T) {
 }
 
 func TestManualReviewWorkerArgumentsRemainPrivateWithoutFiltering(t *testing.T) {
-	expectedSteps := []string{"sync", "commerce", "escalate"}
+	expectedSteps := []string{"sync", "escalate", "commerce"}
 	for _, fault := range expectedSteps {
 		store := &manualWorkerFaultStore{fault: fault}
 		worker := &ManualReviewSLAWorker{repository: store, interval: time.Minute}
@@ -182,7 +182,7 @@ func TestManualReviewWorkerArgumentsRemainPrivateWithoutFiltering(t *testing.T) 
 }
 
 func TestManualReviewWorkerShutdownKeepsIndependentStorageFailure(t *testing.T) {
-	expectedSteps := []string{"sync", "commerce", "escalate"}
+	expectedSteps := []string{"sync", "escalate", "commerce"}
 	expectedEvents := map[string]string{"sync": "manual_review_sync_failed", "commerce": "commerce_manual_review_sync_failed", "escalate": "manual_review_escalation_failed"}
 	for _, tc := range []struct {
 		name             string

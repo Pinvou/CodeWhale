@@ -13,6 +13,7 @@ import (
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/commerce"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/identity"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/manualreview"
 	"github.com/google/uuid"
 )
 
@@ -661,6 +662,123 @@ func TestCommerceManualCompletionPostgres(t *testing.T) {
 		receipt := x.confirm(t, o)
 		if receipt.Resolution == nil || *receipt.Resolution != "SUCCEEDED_EVIDENCE_ONLY" || binding() != core {
 			t.Fatal("retired active lifecycle accepted original success")
+		}
+	})
+	t.Run("startup-wait-rechecks-committed-quarantine", func(t *testing.T) {
+		x := newCommerceRepairFixture(t, f, false)
+		if e := x.r.RetryCommerceCustomerSyncJob(x.ctx, x.j, "COMMERCE_PROVIDER_UNAVAILABLE", time.Now().Add(-time.Hour)); e != nil {
+			t.Fatal(e)
+		}
+		if e := x.r.ConfigureCommerceProvider(x.j.ProviderID, "v2"); e != nil {
+			t.Fatal(e)
+		}
+		gate, e := x.r.pool.Begin(x.ctx)
+		if e != nil {
+			t.Fatal(e)
+		}
+		defer gate.Rollback(x.ctx)
+		var pid int32
+		if e = gate.QueryRow(x.ctx, `SELECT pg_backend_pid()`).Scan(&pid); e != nil {
+			t.Fatal(e)
+		}
+		if _, e = gate.Exec(x.ctx, `SELECT id FROM commerce_customer_mappings WHERE id=$1 FOR UPDATE`, x.j.MappingID); e != nil {
+			t.Fatal(e)
+		}
+		manual := make(chan error, 1)
+		go func() { _, e := x.r.QuarantineCommerceRepair(x.ctx, x.proposer, x.j.ID); manual <- e }()
+		waitCommerceRepairBlocker(t, x, pid, 1, manual)
+		startup := make(chan error, 1)
+		go func() { startup <- x.r.EnsureCommerceProviderMappings(x.ctx) }()
+		waitCommerceRepairBlocker(t, x, pid, 2, startup)
+		if e = gate.Commit(x.ctx); e != nil {
+			t.Fatal(e)
+		}
+		if e = <-manual; e != nil {
+			t.Fatal(e)
+		}
+		if e = <-startup; e != nil {
+			t.Fatal(e)
+		}
+		var jobs, cases int
+		if e = x.r.pool.QueryRow(x.ctx, `SELECT (SELECT count(*) FROM commerce_customer_sync_jobs WHERE mapping_id=$1),(SELECT count(*) FROM commerce_customer_repair_cases WHERE mapping_id=$1)`, x.j.MappingID).Scan(&jobs, &cases); e != nil {
+			t.Fatal(e)
+		}
+		next, e := x.r.ClaimCommerceCustomerSyncJob(x.ctx, x.j.ProviderID, "v2", time.Minute)
+		if e != nil {
+			t.Fatal(e)
+		}
+		if jobs != 1 || cases != 1 || next != nil {
+			t.Fatalf("startup bypassed committed quarantine jobs=%d cases=%d next=%v", jobs, cases, next)
+		}
+		if e = x.r.EnsureCommerceProviderMappings(x.ctx); e != nil {
+			t.Fatal(e)
+		}
+		var protected bool
+		if e = x.r.pool.QueryRow(x.ctx, `SELECT adapter_version='v1' AND status='REPAIR_REQUIRED' AND version=$2 FROM commerce_customer_mappings WHERE id=$1`, x.j.MappingID, x.j.MappingVersion).Scan(&protected); e != nil || !protected {
+			t.Fatal("startup changed held mapping", e)
+		}
+
+	})
+
+	t.Run("busy-discovery-preserves-sla-and-next-candidate", func(t *testing.T) {
+		x := newCommerceRepairFixture(t, f, false)
+		other := seedEntitlementApprovalActor(t, x.ctx, x.r.pool, "PERSONAL_USER", "other-commerce-subject")
+		tx, err := x.r.pool.Begin(x.ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer tx.Rollback(x.ctx)
+		if err = enqueueCommerceCustomerSync(x.ctx, tx, "USER", other.ID, "+8613800005678", x.j.ProviderID, "v1", "PROFILE_SYNC", time.Now().UTC()); err != nil {
+			t.Fatal(err)
+		}
+		if err = tx.Commit(x.ctx); err != nil {
+			t.Fatal(err)
+		}
+		second, err := x.r.ClaimCommerceCustomerSyncJob(x.ctx, x.j.ProviderID, "v1", time.Minute)
+		if err != nil || second == nil || second.SubjectID != other.ID {
+			t.Fatal("second original dispatch", second, err)
+		}
+		// Two genuinely claimed original attempts cross a controlled lease boundary.
+		if _, err = x.r.pool.Exec(x.ctx, `UPDATE commerce_customer_sync_jobs SET lease_until=clock_timestamp()-interval '1 second' WHERE id=ANY($1::uuid[])`, []uuid.UUID{x.j.ID, second.ID}); err != nil {
+			t.Fatal(err)
+		}
+		overdue := uuid.New()
+		// Controlled pre-existing SLA record, independent of the busy sync task.
+		if _, err = x.r.pool.Exec(x.ctx, `INSERT INTO manual_review_cases(id,domain,case_type,resource_type,resource_id,severity,status,created_at,claim_due_at,first_response_due_at,mitigation_due_at,resolution_due_at,updated_at)
+VALUES($1,'ACCOUNT','PROFILE_CHANGE_REPAIR','PROFILE_CHANGE_REQUEST',$2,'P2','OPEN',now()-interval '2 days',now()-interval '1 day',now()-interval '1 day',now()-interval '1 day',now()-interval '1 day',now())`, overdue, uuid.New()); err != nil {
+			t.Fatal(err)
+		}
+		gate, err := x.r.pool.Begin(x.ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer gate.Rollback(context.Background())
+		if _, err = gate.Exec(x.ctx, `SELECT id FROM commerce_customer_mappings WHERE id=$1 FOR UPDATE`, x.j.MappingID); err != nil {
+			t.Fatal(err)
+		}
+		before := commerceRepairFacts(t, x, false)
+		schedule, err := manualreview.ParseOnCallSchedule(other.ID.String(), true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		worker := &ManualReviewSLAWorker{repository: x.r, schedule: schedule, interval: time.Minute}
+		// The gate remains held throughout runOne; this deadline is only a failure bound.
+		ctx, cancel := context.WithTimeout(x.ctx, 10*time.Second)
+		defer cancel()
+		worker.runOne(ctx)
+		if ctx.Err() != nil {
+			t.Fatal("busy Commerce discovery blocked the shared SLA worker", ctx.Err())
+		}
+		var level, ready, busyCases int
+		if err = x.r.pool.QueryRow(x.ctx, `SELECT (SELECT escalation_level FROM manual_review_cases WHERE id=$1),(SELECT count(*) FROM commerce_customer_repair_cases WHERE job_id=$2),(SELECT count(*) FROM commerce_customer_repair_cases WHERE job_id=$3)`, overdue, second.ID, x.j.ID).Scan(&level, &ready, &busyCases); err != nil || level != 1 || ready != 1 || busyCases != 0 || commerceRepairFacts(t, x, false) != before {
+			t.Fatal("busy candidate prevented SLA/next candidate or changed original facts", level, ready, busyCases, err)
+		}
+		if err = gate.Commit(x.ctx); err != nil {
+			t.Fatal(err)
+		}
+		worker.runOne(x.ctx)
+		if err = x.r.pool.QueryRow(x.ctx, `SELECT count(*) FROM commerce_customer_repair_cases WHERE job_id=ANY($1::uuid[])`, []uuid.UUID{x.j.ID, second.ID}).Scan(&ready); err != nil || ready != 2 {
+			t.Fatal("later tick did not recover released original task", ready, err)
 		}
 	})
 	t.Run("closed-job-can-open-evidence-only-case", func(t *testing.T) {

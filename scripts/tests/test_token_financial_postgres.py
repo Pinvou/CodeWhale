@@ -131,6 +131,8 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
                 "closed-job-can-open-evidence-only-case",
                 "concurrent-reviewers-write-one-receipt",
                 "current-success-http-and-receipt-replay",
+                "startup-wait-rechecks-committed-quarantine",
+                "busy-discovery-preserves-sla-and-next-candidate",
                 "expired-lease-quarantines-without-redispatch",
                 "no-effect-is-not-sync-success",
                 "observation-id-replay-and-payload-conflict",

@@ -6,7 +6,7 @@
 
 先暂停旧 Commerce worker，使用现有 `cmd/migrate`、真实 `account_migrator` 登录及 `account_service` 当前角色安装 `900025_commerce_manual_completion`，再启动新版本 Account 与 worker。迁移双向身份固定，Down 返回 55000；恢复采用向前修复，保留案件、回执和历史 SQL。DDL 会锁定相关表，需按站点规模安排维护窗口。未验证混用新旧 worker 的滚动发布，禁止据本地验收宣称现场就绪。
 
-新 worker 将耗尽重试与过期租约导入人工队列；过期本身不证明供应商调用结束或没有效果。SLA worker 也会发现历史记录。人工登记可冻结已有 RETRY，或为已经取消的历史调用建立仅保留证据的案件。首次尚未执行的 PENDING、正常已完成任务和资金任务不进入本流程。案件链接建立后不再取得原任务的派发权。
+新 worker 将耗尽重试与过期租约导入人工队列；过期本身不证明供应商调用结束或没有效果。SLA worker 也会发现历史记录；既有 SLA 升级先执行，随后商城扫描跳过正被占用的主体/映射/任务，每批最多使用 5 秒，下次扫描重试忙任务。人工登记可冻结已有 RETRY，或为已经取消的历史调用建立仅保留证据的案件。首次尚未执行的 PENDING、正常已完成任务和资金任务不进入本流程。案件链接建立后不再取得原任务的派发权。
 
 公开合同：[commerce-manual-completion.json](../contracts/openapi/commerce-manual-completion.json)。入口在受控 Account 服务，使用真实人类 OIDC 会话；本次不新增 Portal 代理或图形页面。
 

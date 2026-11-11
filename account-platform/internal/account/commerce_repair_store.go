@@ -9,6 +9,7 @@ import (
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/manualreview"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 const commerceRepairCaseColumns = `id,job_id,mapping_id,mapping_version,subject_type,subject_id,subject_lifecycle_version,
@@ -117,22 +118,30 @@ func loadCommerceRepairJob(ctx context.Context, q queryable, id uuid.UUID, suffi
 // No contact details are read or copied into repair evidence. Missing/retired
 // subjects remain evidence-only; they can never acquire a current mapping.
 func lockCommerceRepairJob(ctx context.Context, tx pgx.Tx, seed CommerceCustomerSyncJob) (CommerceCustomerSyncJob, string, *time.Time, string, int64, error) {
+	return lockCommerceRepairJobMode(ctx, tx, seed, false)
+}
+
+func lockCommerceRepairJobMode(ctx context.Context, tx pgx.Tx, seed CommerceCustomerSyncJob, nonblocking bool) (CommerceCustomerSyncJob, string, *time.Time, string, int64, error) {
 	state, lifecycle := "MISSING", int64(0)
+	lockSuffix := ""
+	if nonblocking {
+		lockSuffix = " NOWAIT"
+	}
 	var err error
 	if seed.SubjectType == "USER" {
-		err = tx.QueryRow(ctx, `SELECT status,subject_lifecycle_version FROM users WHERE id=$1 FOR SHARE`, seed.SubjectID).Scan(&state, &lifecycle)
+		err = tx.QueryRow(ctx, `SELECT status,subject_lifecycle_version FROM users WHERE id=$1 FOR SHARE`+lockSuffix, seed.SubjectID).Scan(&state, &lifecycle)
 	} else {
-		err = tx.QueryRow(ctx, `SELECT status FROM organizations WHERE id=$1 FOR SHARE`, seed.SubjectID).Scan(&state)
+		err = tx.QueryRow(ctx, `SELECT status FROM organizations WHERE id=$1 FOR SHARE`+lockSuffix, seed.SubjectID).Scan(&state)
 		lifecycle = 1
 	}
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return seed, "", nil, "", 0, err
 	}
 	var id uuid.UUID
-	if err = tx.QueryRow(ctx, `SELECT id FROM commerce_customer_mappings WHERE id=$1 FOR UPDATE`, seed.MappingID).Scan(&id); err != nil {
+	if err = tx.QueryRow(ctx, `SELECT id FROM commerce_customer_mappings WHERE id=$1 FOR UPDATE`+lockSuffix, seed.MappingID).Scan(&id); err != nil {
 		return seed, "", nil, "", 0, err
 	}
-	j, status, until, err := loadCommerceRepairJob(ctx, tx, seed.ID, "FOR UPDATE")
+	j, status, until, err := loadCommerceRepairJob(ctx, tx, seed.ID, "FOR UPDATE"+lockSuffix)
 	if err == nil && (j.MappingID != seed.MappingID || j.SubjectType != seed.SubjectType || j.SubjectID != seed.SubjectID || j.MappingVersion != seed.MappingVersion || j.SubjectLifecycleVersion != seed.SubjectLifecycleVersion || j.ProviderID != seed.ProviderID || j.AdapterVersion != seed.AdapterVersion || j.TaskCategory != seed.TaskCategory) {
 		err = ErrConflict
 	}
@@ -363,6 +372,10 @@ func (r *PostgresRepository) SyncCommerceRepairCases(ctx context.Context, limit 
 	if limit > 500 {
 		limit = 500
 	}
+	// Bound pool acquisition and non-row-lock writes as well as row discovery.
+	// Successfully committed cases remain available when a later item times out.
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
 	rows, err := r.pool.Query(ctx, `SELECT j.id FROM commerce_customer_sync_jobs j WHERE j.commerce_repair_case_id IS NULL AND j.task_category IN ('CUSTOMER_PROVISIONING','PROFILE_SYNC')
 AND (j.status='REPAIR_REQUIRED' OR j.status='LEASED' AND j.lease_until<=clock_timestamp())
 ORDER BY j.updated_at,j.id LIMIT $1`, limit)
@@ -385,6 +398,10 @@ ORDER BY j.updated_at,j.id LIMIT $1`, limit)
 	created := 0
 	for _, id := range ids {
 		added, e := r.syncCommerceRepairCase(ctx, id)
+		var busy *pgconn.PgError
+		if errors.As(e, &busy) && busy.Code == "55P03" {
+			continue // Busy original attempt: retain it for the next scan.
+		}
 		if e != nil && !errors.Is(e, ErrConflict) {
 			return created, e
 		}
@@ -405,7 +422,7 @@ func (r *PostgresRepository) syncCommerceRepairCase(ctx context.Context, id uuid
 	if err != nil {
 		return false, err
 	}
-	j, status, until, _, _, err := lockCommerceRepairJob(ctx, tx, seed)
+	j, status, until, _, _, err := lockCommerceRepairJobMode(ctx, tx, seed, true)
 	if err != nil {
 		return false, err
 	}
