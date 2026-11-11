@@ -1438,3 +1438,10 @@ python scripts/architecture-guard.py
 9. 官方与自托管生产环境均启用正式 desktop endpoint enrollment/allowlist，未 enrolled 首次注册和生产 TOFU 被验证为失败关闭。
 10. 既有 endpoint 迁移、旧 Web 链接、安全回滚下限、tombstone 多 key 轮换、Finished receipt 固定向量、A→B 加密 liveness、保守 30 秒公式、角色隔离、provisional/pending-liveness resume 和 B 黑洞 watchdog 均通过确定性故障注入与真实客户端 fixture 验收。
 11. 普通本地、ACP 与远程会话通过统一 ChatView 和薄用例编排完成验收，分别使用 `SessionStore + EnginePool`、`SessionStore + AcpPool` 和 `SessionStore(RemoteProxy) + RemoteControl`；A 远程任务不进入 A 本机 EnginePool/AcpPool，B 保持唯一权威 Session；未发布旧正文 UI、Command/Bridge、独立历史存储与状态别名均已删除，不实施兼容代理、旧格式迁移、双写或保留窗口，已发布 Web v2 回归和安全迁移不变。
+# ACP 审批状态投影
+
+同一远程代码回合可以先后产生多个待处理 callback。一个审批结束后，只要该精确任务 owner 仍有未完成 callback，任务保持 `WaitingPermission`；全部完成后才恢复 `Running`。迟到结果不得跨任务接纳序号、会话或完整租约更新状态，也不得恢复已取消或结束的任务。
+
+A 端审批卡按实际状态显示允许、拒绝和过期的三语文案；未知状态不提供决定按钮。当前 B 列表只返回 active 项，已结束项的展示回归用于验证消费者的状态合同，不表示正常列表会返回历史审批。列表及决定回执须与发起时的控制端身份匹配，成功决定还要使较早的待批列表失效。
+
+`remote_permission_state_smoke.mjs` 挂载真实 ChatView 并使用实际桌面桥接。执行前，将应用测试 `actual_authority_and_controller_wire_projection_preserve_each_state` 输出的 `PERMISSION_PROJECTION_JSON` JSON 保存到文件，并以 `PINVOU_PERMISSION_PROJECTION_FILE` 指定该文件；浏览器使用隔离夹具及 `CHROME` 指定的测试浏览器。该测试控制宿主调用及 provider 响应，不代表真实模型或网络双端验收。

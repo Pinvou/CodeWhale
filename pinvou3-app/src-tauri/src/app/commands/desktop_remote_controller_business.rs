@@ -1058,13 +1058,8 @@ impl DesktopControlledBusiness {
                         let views = self.app.state::<Arc<PermissionAuthority>>()
                             .pending_for_task(field("task_id")?);
                         if views.len() > 8 { return Err("permission_capacity".to_owned()); }
-                        let permissions: Vec<Value> = views.into_iter().map(|view| json!({
-                            "permission_request_id":view.permission_request_id,"task_id":view.task_id,
-                            "operation_type":view.operation_type,"risk_level":view.risk_level,
-                            "target_scope":view.target_scope,"preview":view.preview,
-                            "expires_at_ms":view.expires_at_ms.to_string(),"state":view.state,
-                            "decision":view.decision,"dispatch_state":view.dispatch_state,
-                        })).collect();
+                        let permissions: Vec<Value> = views.into_iter()
+                            .map(|view| view.into_remote_action_payload()).collect();
                         Ok(json!({"permissions": permissions}))
                     }
                     "permission_decide" => {

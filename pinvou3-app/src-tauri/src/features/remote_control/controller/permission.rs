@@ -273,6 +273,19 @@ pub(crate) struct PermissionView {
     pub(crate) dispatch_state: String,
 }
 
+impl PermissionView {
+    /// Controller wire projection; B's local camelCase view stays separate.
+    pub(crate) fn into_remote_action_payload(self) -> serde_json::Value {
+        serde_json::json!({
+            "permission_request_id":self.permission_request_id,"task_id":self.task_id,
+            "operation_type":self.operation_type,"risk_level":self.risk_level,
+            "target_scope":self.target_scope,"preview":self.preview,
+            "expires_at_ms":self.expires_at_ms.to_string(),"state":self.state,
+            "decision":self.decision,"dispatch_state":self.dispatch_state,
+        })
+    }
+}
+
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub(crate) enum DecisionOutcome {
     /// First effective decision for this request.

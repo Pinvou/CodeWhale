@@ -145,6 +145,7 @@ import {
 } from '../remote-control/remote-control-logic.mjs';
 import { createCapabilityRequestLoop } from '../remote-control/capability-request-loop.mjs';
 import { prepareRemoteTaskCapabilities } from '../remote-control/remote-task-preflight.mjs';
+import { permissionStateCopyKey } from '../remote-control/permission-state.mjs';
 import { permissionOperationCopyKey, permissionRedactionCopyKey } from '../remote-control/controlled-device-panel-state.mjs';
 import {
   canUseControllerTemporaryModel,
@@ -4930,7 +4931,7 @@ const openChatExternalUrl = (url) => {
                         <button type="button" data-testid="chat-remote-permission-deny" data-coordination-id={permission.permissionRequestId} onClick={() => decideRemotePermission(permission, 'deny')} disabled={!!remoteDispatchAction}
                           className="rounded-full border px-2 py-1 disabled:opacity-50">{t.remoteConversation.permissionDeny}</button>
                       </div>
-                    ) : <div className="mt-1 text-amber-700 dark:text-amber-300">{t.remoteConversation.permissionTimedOut}</div>}
+                    ) : <div className="mt-1 text-amber-700 dark:text-amber-300">{t.remoteConversation[permissionStateCopyKey(permission.state)]}</div>}
                   </div>
                 ))}
               </section>

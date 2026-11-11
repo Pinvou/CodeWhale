@@ -38,6 +38,8 @@
     var capabilityFlights = Object.create(null);
     var capabilityRenewalTimer = null;
     var modelListIntent = 0;
+    var permissionMirrorIntent = 0;
+    var permissionMirrorOwner = "";
     var capabilityReadIntent = 0;
     var capabilityReadFlight = null;
     var controlledTerminalSequence = 0;
@@ -1306,9 +1308,15 @@
 
     function permissionList(localSessionId, remoteRef, taskId) {
       if (!requiredOpaqueId(taskId)) return Promise.reject(invalidTaskIntent());
+      var before = current();
+      var terminal = controllerTerminalSequence;
+      var intent = ++permissionMirrorIntent;
+      permissionMirrorOwner = JSON.stringify([localSessionId, remoteRef, taskId]);
       return invokeRemoteAction(localSessionId, remoteRef, {
         operation: "permission_list", taskId: taskId,
       }).then(function (body) {
+        if (intent !== permissionMirrorIntent || terminal !== controllerTerminalSequence
+          || !sameControllerView(before, current())) return [];
         var permissions = body && body.permissions;
         var next = shallow(current());
         next.remotePermissions = Array.isArray(permissions)
@@ -1332,13 +1340,21 @@
     function permissionDecide(localSessionId, remoteRef, taskId, permissionRequestId, decision) {
       if (!requiredOpaqueId(taskId) || !requiredOpaqueId(permissionRequestId)
         || ["allow", "deny"].indexOf(decision) < 0) return Promise.reject(invalidTaskIntent());
+      var before = current();
+      var terminal = controllerTerminalSequence;
+      var owner = JSON.stringify([localSessionId, remoteRef, taskId]);
       return invokeRemoteAction(localSessionId, remoteRef, {
         operation: "permission_decide", taskId: taskId,
         permissionRequestId: permissionRequestId, decision: decision,
       }).then(function (result) {
+        if (owner !== permissionMirrorOwner || terminal !== controllerTerminalSequence
+          || !sameControllerView(before, current())) return result;
+        // A read started before this acknowledgement must not restore the old
+        // pending card after its successful decision removed it.
+        ++permissionMirrorIntent;
         var next = shallow(current());
         next.remotePermissions = (next.remotePermissions || []).filter(function (entry) {
-          return entry.permissionRequestId !== permissionRequestId;
+          return entry.taskId !== taskId || entry.permissionRequestId !== permissionRequestId;
         });
         publish(next);
         return result;

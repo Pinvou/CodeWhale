@@ -760,6 +760,51 @@ test('B permission reads use the local readonly command, never A remote authorit
   assert.equal(calls.some(call => call.command === 'desktop_remote_action_a'), false);
 });
 
+test('permission mirror drops reversed reads and every changed lease or controller intent', async () => {
+  const reads = [];
+  const { feature, state } = installFeature(command => command === 'desktop_remote_action_a'
+    ? new Promise(resolve => reads.push(resolve)) : undefined);
+  const body = id => ({ permissions: [{ permission_request_id: id, task_id: 'task-1', state: 'pending' }] });
+  const old = feature.permissionList('remote-1', 'ref-1', 'task-1');
+  const fresh = feature.permissionList('remote-1', 'ref-1', 'task-1');
+  reads[1](body('fresh'));
+  await fresh;
+  reads[0](body('old'));
+  assert.equal((await old).length, 0);
+  assert.equal(state.desktopRemoteControl.remotePermissions[0].permissionRequestId, 'fresh');
+  for (const key of ['connectionId', 'controllerLeaseId', 'leaseEpoch', 'relayEpoch', 'generation', 'sessionRef', 'capabilityRevision', 'status', 'intent']) {
+    const read = feature.permissionList('remote-1', 'ref-1', 'task-1');
+    const next = { ...state.desktopRemoteControl, controllerConnection: { ...state.desktopRemoteControl.controllerConnection }, intents: { ...state.desktopRemoteControl.intents } };
+    if (key === 'intent') next.intents.controller += 1;
+    else next.controllerConnection[key] = `changed-${key}`;
+    state.desktopRemoteControl = next;
+    reads.at(-1)(body('late'));
+    assert.equal((await read).length, 0);
+    assert.equal(state.desktopRemoteControl.remotePermissions[0].permissionRequestId, 'fresh');
+  }
+});
+
+test('decision acknowledgement invalidates an older pending read and cannot remove a successor mirror', async () => {
+  const requests = [];
+  const { feature, state } = installFeature(command => command === 'desktop_remote_action_a'
+    ? new Promise(resolve => requests.push(resolve)) : undefined);
+  const body = task => ({ permissions: [{ permission_request_id: 'approval', task_id: task, state: 'pending' }] });
+  const initial = feature.permissionList('remote-1', 'ref-1', 'task-1');
+  requests.at(-1)(body('task-1')); await initial;
+  const read = feature.permissionList('remote-1', 'ref-1', 'task-1');
+  const resolveRead = requests.at(-1);
+  const decided = feature.permissionDecide('remote-1', 'ref-1', 'task-1', 'approval', 'allow');
+  requests.at(-1)({ ok: true }); await decided;
+  resolveRead(body('task-1')); await read;
+  assert.equal(state.desktopRemoteControl.remotePermissions.length, 0);
+  const oldDecision = feature.permissionDecide('remote-1', 'ref-1', 'task-1', 'approval', 'deny');
+  const resolveDecision = requests.at(-1);
+  const successor = feature.permissionList('remote-2', 'ref-2', 'task-2');
+  requests.at(-1)(body('task-2')); await successor;
+  resolveDecision({ ok: true }); await oldDecision;
+  assert.equal(state.desktopRemoteControl.remotePermissions[0].taskId, 'task-2');
+});
+
 test('remote attachment, permission and artifact facades use only desktop_remote_action_a', async () => {
   const { feature, calls } = installFeature((command, args) => {
     if (command !== 'desktop_remote_action_a') return undefined;

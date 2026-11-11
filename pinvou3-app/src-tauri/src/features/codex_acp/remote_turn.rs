@@ -570,130 +570,20 @@ impl AcpPoolCodeTurnPort {
         resolved: &mut HashSet<String>,
         events: &Arc<dyn ControllerTaskEventSink>,
     ) -> std::result::Result<(), String> {
-        let pending = self.pool.pending_remote_permissions(owner).await;
-        let current = pending
-            .iter()
-            .map(|request| request.callback_id.clone())
-            .collect::<HashSet<_>>();
-        let now =
-            crate::features::remote_control::controller::relay_runtime::controlled_monotonic_millis(
-            );
-        self.permission_authority
-            .sweep_expired(self.permission_authority.now_ms());
-        for request in pending {
-            if let Some(approval_id) = registered.get(&request.callback_id) {
-                if request.approval_id.as_deref() != Some(approval_id) {
-                    return Err("permission_binding_stale".to_owned());
-                }
-                let view = self
-                    .permission_authority
-                    .view(approval_id)
-                    .map_err(|error| error.code.to_owned())?;
-                let decision = match view.state.as_str() {
-                    "allowed" => Some(true),
-                    "denied" | "expired" => Some(false),
-                    _ => None,
-                };
-                if let Some(allow) = decision {
-                    let resolution = self
-                        .pool
-                        .respond_remote_permission(owner, approval_id, allow)
-                        .await;
-                    if resolution.is_err()
-                        && self
-                            .pool
-                            .pending_remote_permissions(owner)
-                            .await
-                            .iter()
-                            .any(|pending| pending.approval_id.as_deref() == Some(approval_id))
-                    {
-                        return Err("permission_dispatch_failed".to_owned());
-                    }
-                }
-                continue;
-            }
-            let minted = self
-                .pool
-                .mint_remote_permission(
-                    owner,
-                    &request.callback_id,
-                    &self.permission_authority,
-                    &self.tasks.ledger(),
-                    REMOTE_PERMISSION_TTL_MS,
-                )
-                .await;
-            // No approval is minted during the brief journal resource gate.
-            // Retry at the next bounded poll without retiring this runtime.
-            let Some(view) = permission_mint_projection(minted)? else {
-                continue;
-            };
-            registered.insert(
-                request.callback_id.clone(),
-                view.permission_request_id.clone(),
-            );
-            let record = self
-                .tasks
-                .status(&owner.task_id)
-                .map_err(|error| error.code.to_owned())?;
-            if record.sequence != owner.task_sequence || record.session_id != owner.session_id
-                || record.lease != crate::features::remote_control::controller::task::TaskLeaseBinding::from_context(&owner.lease)
-            {
-                return Err("permission_binding_stale".to_owned());
-            }
-            if record.state == RemoteTaskState::Running {
-                self.tasks
-                    .enter_waiting_permission(&owner.task_id, owner.task_sequence, now)
-                    .map_err(|error| error.code.to_owned())?;
-            } else if record.state != RemoteTaskState::WaitingPermission {
-                return Err("task_state_conflict".to_owned());
-            }
-            events.emit_journal(
-                JournalKind::Permission,
-                &owner.session_id,
-                Some(&owner.task_id),
-                serde_json::json!({
-                    "status": "pending",
-                    "operation_type": view.operation_type,
-                    "risk_level": view.risk_level,
-                    "target_scope": view.target_scope,
-                }),
-            );
-        }
-
-        for (callback_id, request_id) in registered.iter().filter(|(id, _)| !current.contains(*id))
-        {
-            if !resolved.insert(callback_id.clone()) {
-                continue;
-            }
-            let view = self
-                .permission_authority
-                .view(request_id)
-                .map_err(|error| error.code.to_owned())?;
-            events.emit_journal(
-                JournalKind::Permission,
-                &owner.session_id,
-                Some(&owner.task_id),
-                serde_json::json!({
-                    "status": view.state,
-                    "operation_type": view.operation_type,
-                    "risk_level": view.risk_level,
-                    "target_scope": view.target_scope,
-                    "decision": view.decision,
-                }),
-            );
-            let record = self
-                .tasks
-                .status(&owner.task_id)
-                .map_err(|error| error.code.to_owned())?;
-            if record.state == RemoteTaskState::WaitingPermission {
-                self.tasks.resume_running(&owner.task_id, owner.task_sequence,
-                    crate::features::remote_control::controller::relay_runtime::controlled_monotonic_millis())
-                    .map_err(|error| error.code.to_owned())?;
-            }
-        }
-        Ok(())
+        permission_waiting::sync(
+            &*self.pool,
+            &self.permission_authority,
+            &self.tasks,
+            owner,
+            registered,
+            resolved,
+            events,
+        )
+        .await
     }
 }
+
+mod permission_waiting;
 
 #[async_trait]
 impl RemoteCodeTurnPort for AcpPoolCodeTurnPort {
