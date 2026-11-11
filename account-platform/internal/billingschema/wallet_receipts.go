@@ -70,6 +70,9 @@ func knownOriginalWalletReceiptHistory(ctx context.Context, source walletReceipt
 }
 
 func VerifyApplied(ctx context.Context, connection *pgx.Conn, loaded []migrations.Migration) (migrations.Verification, error) {
+	if err := validateFinancialJSONObjects(loaded); err != nil {
+		return migrations.Verification{}, err
+	}
 	if err := validateUsageWaivers(loaded); err != nil {
 		return migrations.Verification{}, err
 	}

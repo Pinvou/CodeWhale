@@ -80,6 +80,7 @@ LIFECYCLE_RECONCILIATION_REQUIRED = {"TestLifecycleV3ApprovalReconciliationPostg
 ACCOUNT_REQUIRED = {
     "TestOrganizationStartupDiagnosticsPostgres",
     "TestRestoredAdminReadsWithPublicMigrationsAndRuntimeActor",
+    "TestAccountFinancialJSONObjectsPostgres",
     "TestApprovalDecisionOriginalReceiptPostgres",
     "TestApprovalDecisionLegacyConcurrentReceiptPostgres",
     "TestMemberUnitsReceiptSurvivesLegalUnitDeletion",
@@ -196,6 +197,7 @@ REFUND_REQUIRED = {
 }
 RETAINED_REQUIRED = {
     "TestRetainedOrganizationOrderHistoryPagination",
+    "TestBillingFinancialJSONObjectsPostgres",
     "TestClosedGrantEvidenceCurrentRoleGuardsPostgres",
     "TestExpiredHoldProofRetryDiagnosticsPostgres",
     "TestEscalatedForcedRefundRequiresSecondActorAndReplays",
@@ -283,6 +285,8 @@ BILLING_LEAF_REQUIRED = {
 }
 BILLING_CHILD_REQUIRED = RETAINED_REQUIRED - BILLING_LEAF_REQUIRED
 EXACT_REQUIRED_CHILDREN = {
+    "TestAccountFinancialJSONObjectsPostgres": {"fresh-current-producer", "upgrade-current-producer", "dirty-critical-history", "dirty-financial-history"},
+    "TestBillingFinancialJSONObjectsPostgres": {"fresh-current-producer", "upgrade-current-producer", "dirty-details", "dirty-provider_capability_snapshot", "dirty-policy_snapshot", "dirty-evidence_summary", "dirty-payload_snapshot"},
     "TestBillingHistoricalCatalogRollbackPostgres": {
         f"version{version}/seeded={seeded}{suffix}"
         for version in (35, 36, 37, 51)

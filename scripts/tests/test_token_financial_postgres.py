@@ -566,6 +566,30 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
             with self.subTest(action=action), self.assertRaises(RuntimeError):
                 RUNNER.verify_results(events + [{"Action": action, "Package": RUNNER.ACCOUNT_PACKAGE, "Test": name}], RUNNER.ACCOUNT_REQUIRED, **options)
 
+    def test_financial_json_contract_roots_and_each_dirty_column_are_required(self):
+        account = "TestAccountFinancialJSONObjectsPostgres"
+        billing = "TestBillingFinancialJSONObjectsPostgres"
+        for root, roots, package, children, expected in (
+            (account, RUNNER.ACCOUNT_REQUIRED, RUNNER.ACCOUNT_PACKAGE, RUNNER.ACCOUNT_CHILD_REQUIRED,
+             {"fresh-current-producer", "upgrade-current-producer", "dirty-critical-history", "dirty-financial-history"}),
+            (billing, RUNNER.RETAINED_REQUIRED, RUNNER.BILLING_PACKAGE, RUNNER.BILLING_CHILD_REQUIRED,
+             {"fresh-current-producer", "upgrade-current-producer", "dirty-details", "dirty-provider_capability_snapshot", "dirty-policy_snapshot", "dirty-evidence_summary", "dirty-payload_snapshot"}),
+        ):
+            self.assertIn(root, roots)
+            self.assertIn(root, children)
+            self.assertEqual(RUNNER.EXACT_REQUIRED_CHILDREN[root], expected)
+            events = self.events({root}, package, children=True)
+            options = dict(package=package, require_children=True, exact_roots=True)
+            RUNNER.verify_results(events, {root}, **options)
+            for name in [root] + [root + "/" + child for child in expected]:
+                for broken in (
+                    [event for event in events if event.get("Test") != name],
+                    events + [{"Action": "skip", "Package": package, "Test": name}],
+                    events + [{"Action": "fail", "Package": package, "Test": name}],
+                ):
+                    with self.subTest(root=root, name=name), self.assertRaises(RuntimeError):
+                        RUNNER.verify_results(broken, {root}, **options)
+
     def test_registration_bonus_checkpoint_roots_are_mandatory(self):
         names = CHECKPOINT_LEAF_ROOTS | {CHECKPOINT_FOREIGN_ROOT}
         self.assertTrue(names <= RUNNER.ACCOUNT_REQUIRED)
@@ -815,7 +839,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
         self.assertEqual(billing[-1], "./internal/billing")
         self.assertEqual(billing[billing.index("-run") + 1],
                          "^(" + "|".join(sorted(RUNNER.RETAINED_REQUIRED)) + ")$")
-        self.assertEqual(len(RUNNER.RETAINED_REQUIRED), 76)
+        self.assertEqual(len(RUNNER.RETAINED_REQUIRED), 77)
         self.assertEqual(self.fixture_writes, ["create", "drop"])
         self.assertEqual(self.fixture_trace, [
             "owner-account", "owner-wallet", "owner-schema", "owner-token-schema", "owner-provisioning",
@@ -1676,6 +1700,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
         self.assertEqual(RUNNER.ACCOUNT_REQUIRED, {
             "TestOrganizationStartupDiagnosticsPostgres",
             "TestRestoredAdminReadsWithPublicMigrationsAndRuntimeActor",
+            "TestAccountFinancialJSONObjectsPostgres",
             "TestMemberUnitsReceiptSurvivesLegalUnitDeletion",
             "TestF06OrganizationStatusProjectionVersionPublicPostgres",
             "TestF06OrganizationDeletionVersionAndTerminalScope",
@@ -2081,7 +2106,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
         }
         self.assertEqual(RUNNER.REFUND_REQUIRED, expected)
         self.assertTrue(expected <= RUNNER.RETAINED_REQUIRED)
-        self.assertEqual(len(RUNNER.RETAINED_REQUIRED), 76)
+        self.assertEqual(len(RUNNER.RETAINED_REQUIRED), 77)
         valid = self.events(RUNNER.RETAINED_REQUIRED, RUNNER.BILLING_PACKAGE, children=True)
         options = {"package": RUNNER.BILLING_PACKAGE, "require_children": True, "exact_roots": True,
                    "children_required": RUNNER.BILLING_CHILD_REQUIRED}
