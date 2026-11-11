@@ -10,6 +10,21 @@ use crate::features::assistant::runtime_model::{
 use crate::features::sessions::SessionStore;
 use crate::platform::prefs::{ModelSelectionRef, SavedModel, UserPrefs};
 
+/// Shared by the runtime and its read-only UI projection. A platform carrier
+/// never owns a user API key; the current account authorizes each preparation.
+pub(crate) fn model_credential_mode(
+    model: Option<&SavedModel>,
+    user_api_key_required: bool,
+) -> ModelCredentialMode {
+    if model.is_some_and(SavedModel::is_builtin_account_platform) {
+        ModelCredentialMode::BackendManaged
+    } else if user_api_key_required {
+        ModelCredentialMode::UserManaged
+    } else {
+        ModelCredentialMode::None
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct RuntimeCatalog {
     catalog_version: u64,
@@ -325,13 +340,7 @@ impl RuntimeModelProvider for AccountPlatformRuntimeModelProvider {
         model: &SavedModel,
         user_api_key_required: bool,
     ) -> ModelCredentialMode {
-        if model.is_builtin_account_platform() {
-            ModelCredentialMode::BackendManaged
-        } else if user_api_key_required {
-            ModelCredentialMode::UserManaged
-        } else {
-            ModelCredentialMode::None
-        }
+        model_credential_mode(Some(model), user_api_key_required)
     }
 
     async fn prepare(&self, request: RuntimeModelRequest) -> Result<PreparedRuntimeModel> {
@@ -972,12 +981,23 @@ mod tests {
 
     #[test]
     fn account_platform_model_uses_backend_managed_credentials() {
-        // credential_mode is independent of AppHandle and can be exercised via
-        // a tiny provider built from an uninitialized test handle only in Tauri
-        // integration tests. Lock the model predicate here instead.
         let model = SavedModel::builtin_account_platform();
-        assert!(model.is_builtin_account_platform());
-        let _mode = ModelCredentialMode::BackendManaged;
+        for required in [true, false] {
+            assert_eq!(
+                super::model_credential_mode(Some(&model), required),
+                ModelCredentialMode::BackendManaged
+            );
+        }
+        let mut local = model.clone();
+        local.id = "user-model".into();
+        assert_eq!(
+            super::model_credential_mode(Some(&local), true),
+            ModelCredentialMode::UserManaged
+        );
+        assert_eq!(
+            super::model_credential_mode(Some(&local), false),
+            ModelCredentialMode::None
+        );
     }
 
     #[test]
