@@ -595,12 +595,15 @@ const accountPlatformPopover = source('features/account-platform/AccountPlatform
 assert.match(accountPlatformPopover, /<AccountPlatformView \{\.\.\.props\}/);
 const accountPlatformView = source('features/account-platform/AccountPlatformView.jsx');
 assert.match(accountPlatformView, /copy\.availableCredits/);
-assert.match(accountPlatformView, /copy\.reservedCredits/);
+assert.match(accountPlatformView, /center\.reserved/);
+const desktopAccountCenter = source('features/account-platform/DesktopAccountCenter.jsx');
+assert.match(desktopAccountCenter, /copy\.availableCredits/);
+assert.match(desktopAccountCenter, /copy\.reservedCredits/);
 assert.match(accountPlatformView, /localizedAccountPlatformError/);
 assert.doesNotMatch(accountPlatformPopover, /platformModel|selectPlatformModel|modelSelectionSaved/);
 assert.doesNotMatch(accountPlatformPopover, />可用余额</);
 assert.equal(accountPlatformCopy.zh.availableCredits, '可用积分');
-assert.equal(accountPlatformCopy.zh.reservedCredits, '使用中');
+assert.equal(accountPlatformCopy.zh.reservedCredits, '已预留积分');
 assert.match(accountPlatformView, /localizedAccountPlatformError\(copy, reason\)/);
 assert.match(accountPlatformView, /copy\.retry/);
 assert.doesNotMatch(main, /refreshLlmApiStatus/);
