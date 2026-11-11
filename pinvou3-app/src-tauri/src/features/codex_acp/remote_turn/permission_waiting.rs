@@ -115,8 +115,9 @@ pub(super) async fn sync(
                 REMOTE_PERMISSION_TTL_MS,
             )
             .await;
-        // No approval is minted during the brief journal resource gate.
-        // Retry at the next bounded poll without retiring this runtime.
+        // The authority admits one active approval per task. Keep other
+        // callbacks queued until it resolves (or the journal gate opens),
+        // and retry at the next bounded poll without retiring the runtime.
         let Some(view) = permission_mint_projection(minted)? else {
             continue;
         };

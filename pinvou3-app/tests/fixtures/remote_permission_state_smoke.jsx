@@ -122,10 +122,12 @@ fixture.permissionBridge = window.__PINVOU_TAURI_BRIDGE_FEATURES__['desktop-remo
   state: permissionState, notify() {}, can: () => true,
   listen: async () => () => {},
   invoke(command, args) {
+    if (command === 'desktop_remote_controller_status') return Promise.resolve({ status: 'idle' });
     if (command !== 'desktop_remote_action_a') throw new Error(`Unexpected permission command ${command}`);
     return new Promise((resolve, reject) => fixture.permissionRequests.push({ command, args, resolve, reject }));
   },
 });
+await fixture.permissionBridge.controllerStatus();
 const { ChatView } = await import('../../src/features/chat/ChatView.jsx');
 function App() {
   const [selected, setSelected] = useState(() => {

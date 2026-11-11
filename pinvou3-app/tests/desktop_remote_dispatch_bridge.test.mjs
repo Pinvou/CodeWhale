@@ -764,6 +764,8 @@ test('permission mirror drops reversed reads and every changed lease or controll
   const reads = [];
   const { feature, state } = installFeature(command => command === 'desktop_remote_action_a'
     ? new Promise(resolve => reads.push(resolve)) : undefined);
+  // Finish the bridge's automatic startup status read before issuing actions.
+  await feature.controllerStatus();
   const body = id => ({ permissions: [{ permission_request_id: id, task_id: 'task-1', state: 'pending' }] });
   const old = feature.permissionList('remote-1', 'ref-1', 'task-1');
   const fresh = feature.permissionList('remote-1', 'ref-1', 'task-1');
@@ -782,12 +784,20 @@ test('permission mirror drops reversed reads and every changed lease or controll
     assert.equal((await read).length, 0);
     assert.equal(state.desktopRemoteControl.remotePermissions[0].permissionRequestId, 'fresh');
   }
+  const stoppedRead = feature.permissionList('remote-1', 'ref-1', 'task-1');
+  feature.stop();
+  reads.at(-1)(body('after-stop'));
+  assert.equal((await stoppedRead).length, 0);
+  assert.equal(state.desktopRemoteControl.remotePermissions[0].permissionRequestId, 'fresh');
+
 });
 
 test('decision acknowledgement invalidates an older pending read and cannot remove a successor mirror', async () => {
   const requests = [];
   const { feature, state } = installFeature(command => command === 'desktop_remote_action_a'
     ? new Promise(resolve => requests.push(resolve)) : undefined);
+  // Finish the bridge's automatic startup status read before issuing actions.
+  await feature.controllerStatus();
   const body = task => ({ permissions: [{ permission_request_id: 'approval', task_id: task, state: 'pending' }] });
   const initial = feature.permissionList('remote-1', 'ref-1', 'task-1');
   requests.at(-1)(body('task-1')); await initial;
@@ -821,6 +831,8 @@ test('remote attachment, permission and artifact facades use only desktop_remote
       default: return Promise.resolve({ ok: true });
     }
   });
+  // Finish the bridge's automatic startup status read before issuing actions.
+  await feature.controllerStatus();
   const permissions = await feature.permissionList('remote-local-1', 'opaque-ref-1', 'task-1');
   assert.equal(permissions[0].permissionRequestId, 'permission-1');
   const begin = await feature.attachmentBegin(

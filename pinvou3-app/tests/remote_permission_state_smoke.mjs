@@ -8,14 +8,21 @@ import { createServer } from './helpers/vite-fixture.mjs';
 
 // These are captured actual Rust authority/production wire encoder outputs.
 // Closed states test defensive consumption, not normal list reachability.
-const producer = JSON.parse(fs.readFileSync(process.env.PINVOU_PERMISSION_PROJECTION_FILE, 'utf8'));
+const producer = JSON.parse(fs.readFileSync(process.env.PINVOU_PERMISSION_PROJECTION_FILE
+  || new URL('./fixtures/remote_permission_states.json', import.meta.url), 'utf8'));
 assert.deepEqual(producer.permissions.map(item => item.state), ['pending', 'allowed', 'denied', 'expired']);
+const chrome = process.env.CHROME || [
+  'C:/Program Files/Google/Chrome/Application/chrome.exe',
+  'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe',
+  '/usr/bin/chromium', '/usr/bin/google-chrome',
+].find(candidate => fs.existsSync(candidate));
+assert.ok(chrome, 'A test Chrome/Chromium executable is required');
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 let browser, vite;
 try {
   vite = await createServer({ root, configFile: false, appType: 'mpa', logLevel: 'error', plugins: [react()] });
   await vite.listen();
-  browser = await puppeteer.launch({ executablePath: process.env.CHROME, headless: true, args: ['--no-sandbox', '--disable-gpu', '--no-first-run'] });
+  browser = await puppeteer.launch({ executablePath: chrome, headless: true, args: ['--no-sandbox', '--disable-gpu', '--no-first-run'] });
   const page = await browser.newPage();
   const errors = [];
   page.on('pageerror', error => errors.push(error.message));

@@ -536,7 +536,14 @@ pub(super) fn permission_mint_projection(
 {
     match result {
         Ok(view) => Ok(Some(view)),
-        Err(error) if error.to_string() == "task_cleanup_busy" => Ok(None),
+        Err(error)
+            if matches!(
+                error.to_string().as_str(),
+                "task_cleanup_busy" | "permission_task_busy"
+            ) =>
+        {
+            Ok(None)
+        }
         Err(_) => Err("permission_binding_stale".to_owned()),
     }
 }

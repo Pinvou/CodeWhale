@@ -241,6 +241,8 @@
     }
 
     function stop() {
+      ++permissionMirrorIntent;
+      permissionMirrorOwner = "";
       subscriptionOwner = null;
       channelRegistrations = Object.create(null);
       var retiredUnlisten = unlisten.splice(0);

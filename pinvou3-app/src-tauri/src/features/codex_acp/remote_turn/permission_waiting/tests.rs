@@ -336,3 +336,82 @@ async fn actual_authority_and_controller_wire_projection_preserve_each_state() {
         json!({"permissions":views})
     );
 }
+
+#[tokio::test]
+async fn simultaneous_callbacks_queue_under_the_real_single_active_capacity() {
+    for decision in [PermissionDecision::Allow, PermissionDecision::Deny] {
+        let mut f = Fixture::new();
+        f.pool.insert(&f.owner, "parallel-a").await;
+        f.pool.insert(&f.owner, "parallel-b").await;
+        f.tick().await.unwrap();
+        assert_eq!(f.registered.len(), 1);
+        assert_eq!(f.authority.active_count(), 1);
+        assert_eq!(f.pool.pending_remote_permissions(&f.owner).await.len(), 2);
+        assert_eq!(f.state(), RemoteTaskState::WaitingPermission);
+        f.tick().await.unwrap();
+        assert_eq!(
+            f.registered.len(),
+            1,
+            "queued callback has not minted a second active approval"
+        );
+        let first = f.registered.keys().next().unwrap().clone();
+        let second = if first == "parallel-a" {
+            "parallel-b"
+        } else {
+            "parallel-a"
+        };
+        f.decide(&first, decision);
+        f.tick().await.unwrap();
+        assert_eq!(f.registered.len(), 2);
+        assert_eq!(f.authority.active_count(), 1);
+        assert_eq!(f.pool.pending_remote_permissions(&f.owner).await.len(), 1);
+        assert_eq!(
+            f.authority.view(&f.registered[second]).unwrap().state,
+            "pending"
+        );
+        assert_eq!(f.state(), RemoteTaskState::WaitingPermission);
+        f.tick().await.unwrap();
+        assert_eq!(f.state(), RemoteTaskState::WaitingPermission);
+        f.decide(second, PermissionDecision::Deny);
+        f.tick().await.unwrap();
+        assert_eq!(f.state(), RemoteTaskState::Running);
+        assert_eq!(f.authority.active_count(), 0);
+        assert!(f.pool.pending_remote_permissions(&f.owner).await.is_empty());
+        f.tick().await.unwrap();
+        assert_eq!(f.state(), RemoteTaskState::Running);
+    }
+}
+
+#[tokio::test]
+async fn simultaneous_callbacks_continue_after_first_expiry_without_retiring_the_turn() {
+    let mut f = Fixture::new();
+    f.pool.insert(&f.owner, "expire-a").await;
+    f.pool.insert(&f.owner, "expire-b").await;
+    f.tick().await.unwrap();
+    let first = f.registered.keys().next().unwrap().clone();
+    let deadline = f
+        .authority
+        .view(&f.registered[&first])
+        .unwrap()
+        .expires_at_ms;
+    f.clock.store(deadline, Ordering::SeqCst);
+    f.tick().await.unwrap();
+    let second = if first == "expire-a" {
+        "expire-b"
+    } else {
+        "expire-a"
+    };
+    assert_eq!(
+        f.authority.view(&f.registered[&first]).unwrap().state,
+        "expired"
+    );
+    assert_eq!(
+        f.authority.view(&f.registered[second]).unwrap().state,
+        "pending"
+    );
+    assert_eq!(f.authority.active_count(), 1);
+    assert_eq!(f.state(), RemoteTaskState::WaitingPermission);
+    f.decide(second, PermissionDecision::Deny);
+    f.tick().await.unwrap();
+    assert_eq!(f.state(), RemoteTaskState::Running);
+}
