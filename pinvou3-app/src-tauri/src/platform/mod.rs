@@ -7,6 +7,7 @@ pub mod connector_state;
 pub mod credential_store;
 #[cfg(target_os = "macos")]
 pub(crate) mod cursor;
+pub(crate) mod dmi;
 pub(crate) mod download;
 pub(crate) mod encoding;
 pub(crate) mod filesystem;
