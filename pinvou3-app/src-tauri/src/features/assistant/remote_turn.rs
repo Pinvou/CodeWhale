@@ -34,9 +34,9 @@ use crate::features::remote_control::controller::protocol::LeaseContext;
 )]
 use crate::features::remote_control::controller::task::{
     AdmissionOutcome, ChatTurnExecutor, ControllerTaskEventSink, JsonTaskLedgerStore,
-    PublishedAttachment, RemoteChatTurnPort, RemoteTaskLedger, RemoteTaskService, RemoteTaskState,
-    TASK_CANCELLED_CODE, TASK_MODE_CHAT, TASK_MODEL_SOURCE_CONTROLLED, TASK_MODEL_SOURCE_TEMPORARY,
-    task_input_digest_for_value,
+    PublishedAttachment, RemoteChatTurnPort, RemoteTaskLedger, RemoteTaskLedgerStore,
+    RemoteTaskRecord, RemoteTaskService, RemoteTaskState, TASK_CANCELLED_CODE, TASK_MODE_CHAT,
+    TASK_MODEL_SOURCE_CONTROLLED, TASK_MODEL_SOURCE_TEMPORARY, task_input_digest_for_value,
 };
 // The policy boundary is shared by production validation and the real-store
 // regression's fresh-session setup; initialization is never called by EnginePool.
@@ -48,7 +48,9 @@ use crate::features::remote_control::controller::task::{
     )
 )]
 use crate::features::remote_control::{
-    controller::temporary_model::SharedTemporaryModelStore,
+    controller::temporary_model::{
+        SharedTemporaryModelStore, TemporaryModelPackageV1, TemporaryModelStore,
+    },
     task_permissions::{for_session, initialize_new_session},
 };
 use crate::features::sessions::SessionStore;
@@ -1834,12 +1836,6 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn failed_retirement_cancels_the_running_chat_and_releases_its_copied_model() {
-        use crate::features::remote_control::controller::task::{
-            RemoteTaskLedgerStore, RemoteTaskRecord,
-        };
-        use crate::features::remote_control::controller::temporary_model::{
-            TemporaryModelPackageV1, TemporaryModelStore,
-        };
         struct SwitchStore(AtomicBool);
         impl RemoteTaskLedgerStore for SwitchStore {
             fn persist(&self, _: &[RemoteTaskRecord]) -> std::result::Result<(), String> {
