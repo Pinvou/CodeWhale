@@ -65,7 +65,7 @@ function requireRegistrationBytes(state, limits, reservedBytes = 0) {
   }
 }
 
-function requireRegistrationQuota(state, endpointId, now, limits) {
+function requireRegistrationQuota(state, endpointId, now, limits, attempts = []) {
   if (state.registrations.length >= limits.maxGlobalRecords || state.tombstones.length >= limits.maxGlobalRecords) {
     fail("controller_busy");
   }
@@ -84,11 +84,22 @@ function requireRegistrationQuota(state, endpointId, now, limits) {
       if (own) endpointWindow += 1;
     }
   }
+  for (const attempt of attempts) {
+    if (attempt.at > now - limits.windowMs) {
+      globalWindow += 1;
+      if (attempt.endpointId === endpointId) endpointWindow += 1;
+    }
+  }
   if (endpointRecords >= limits.maxPerEndpointRecords || endpointWindow >= limits.maxPerEndpointWindow
     || globalWindow >= limits.maxGlobalWindow) fail("controller_busy");
   // All closed registration fields, 32 digest-key rows and sealed-code bytes
   // fit this bound; the exact candidate is checked again before its CAS.
   requireRegistrationBytes(state, limits, MAX_REGISTRATION_ALLOCATION_BYTES);
+}
+
+function registrationAccountingKey(row) {
+  return JSON.stringify([row.registration_request_id, row.parameter_key_id, row.parameter_digest_hex,
+    row.pairing_id, row.pairing_id === null ? row.retain_until_ms : null]);
 }
 
 function exact(value, keys, code) {
@@ -234,6 +245,9 @@ export class PairingStore {
   #registrationTail = Promise.resolve();
   #registrationFlights = new Map();
   #registrationEndpoints = new Map();
+  // Unpublished failed admissions still consumed work. Bound them by the same
+  // window; reconcile a lost commit ACK with its exact durable candidate once.
+  #registrationAttempts = [];
 
   constructor({ stateStore, digestKeyring, clock = Date.now, randomBytes = crypto.randomBytes,
     registrationBudget } = {}, token) {
@@ -566,7 +580,23 @@ export class PairingStore {
     return Object.freeze({ result: Object.freeze({ ...structuredClone(known.outcome), request_id: request.request_id }), replayed: true });
   }
 
-  async #recordGenerationFailure(snapshot, request, parameters, now) {
+  #reconcileRegistrationAttempts(state, now) {
+    const published = new Set(state.registrations.map(registrationAccountingKey));
+    const reconciled = new Set();
+    this.#registrationAttempts = this.#registrationAttempts.filter((attempt) => {
+      if (attempt.at <= now - this.#registrationLimits.windowMs) return false;
+      const matched = [...attempt.candidates].find((key) => published.has(key) && !reconciled.has(key));
+      if (!matched) return true;
+      reconciled.add(matched);
+      return false;
+    });
+  }
+
+  #forgetRegistrationAttempt(attempt) {
+    this.#registrationAttempts = this.#registrationAttempts.filter((entry) => entry !== attempt);
+  }
+
+  async #recordGenerationFailure(snapshot, request, parameters, now, admission) {
     const outcome = {
       v: 1, type: "error", request_id: request.request_id,
       registration_request_id: request.registration_request_id,
@@ -585,7 +615,9 @@ export class PairingStore {
     };
     const next = { ...snapshot.state, registrations: [...snapshot.state.registrations, registration] };
     requireRegistrationBytes(next, this.#registrationLimits);
+    admission.candidates.add(registrationAccountingKey(registration));
     await this.#store.compareAndSwap(PAIRING_NAMESPACE, snapshot.revision, next);
+    this.#forgetRegistrationAttempt(admission);
     return Object.freeze({ result: Object.freeze(outcome), replayed: false });
   }
 
@@ -598,6 +630,7 @@ export class PairingStore {
     await this.#compact();
     const parameters = { ...request };
     delete parameters.request_id;
+    let admission = null;
     for (let casAttempt = 0; casAttempt < 8; casAttempt += 1) {
       const snapshot = this.#read();
       const known = snapshot.state.registrations.find((row) => row.registration_request_id === registrationId);
@@ -610,6 +643,7 @@ export class PairingStore {
         if (!crypto.timingSafeEqual(Buffer.from(known.parameter_digest_hex, "hex"), Buffer.from(knownHash, "hex"))) {
           fail("pairing_registration_conflict");
         }
+        if (admission) this.#forgetRegistrationAttempt(admission);
         return Object.freeze({
           result: Object.freeze({ ...structuredClone(known.outcome), request_id: request.request_id }),
           replayed: true,
@@ -617,7 +651,13 @@ export class PairingStore {
       }
       const now = this.#clock();
       if (!Number.isSafeInteger(now) || now < 0) fail("pairing_clock_invalid");
-      requireRegistrationQuota(snapshot.state, request.endpoint_id, now, this.#registrationLimits);
+      this.#reconcileRegistrationAttempts(snapshot.state, now);
+      requireRegistrationQuota(snapshot.state, request.endpoint_id, now, this.#registrationLimits,
+        this.#registrationAttempts.filter((entry) => entry !== admission));
+      if (!admission) {
+        admission = { endpointId: request.endpoint_id, at: now, candidates: new Set() };
+        this.#registrationAttempts.push(admission);
+      }
       let code;
       let digests;
       for (let attempt = 0; attempt < MAX_GENERATION_ATTEMPTS; attempt += 1) {
@@ -633,7 +673,7 @@ export class PairingStore {
       }
       if (code === null) {
         try {
-          return await this.#recordGenerationFailure(snapshot, request, parameters, now);
+          return await this.#recordGenerationFailure(snapshot, request, parameters, now, admission);
         } catch (error) {
           if (error?.code === "namespace_revision_conflict") continue;
           if (error?.code === "controller_busy") throw error;
@@ -682,7 +722,7 @@ export class PairingStore {
         // attempts. Persist the existing bounded failure receipt, never raw
         // crypto details or the generated plaintext code.
         try {
-          return await this.#recordGenerationFailure(snapshot, request, parameters, now);
+          return await this.#recordGenerationFailure(snapshot, request, parameters, now, admission);
         } catch (error) {
           if (error?.code === "namespace_revision_conflict") continue;
           if (error?.code === "controller_busy") throw error;
@@ -709,6 +749,7 @@ export class PairingStore {
         registrations: [...snapshot.state.registrations, registration],
       };
       requireRegistrationBytes(next, this.#registrationLimits);
+      admission.candidates.add(registrationAccountingKey(registration));
       try {
         await this.#store.compareAndSwap(PAIRING_NAMESPACE, snapshot.revision, next);
         const active = Object.freeze({
@@ -719,6 +760,7 @@ export class PairingStore {
           code_digests: Object.freeze(digests.map(Object.freeze)),
         });
         this.#active.set(pairingId, active);
+        this.#forgetRegistrationAttempt(admission);
         return Object.freeze({ result: Object.freeze(outcome), replayed: false });
       } catch (error) {
         if (error?.code === "namespace_revision_conflict") continue;
