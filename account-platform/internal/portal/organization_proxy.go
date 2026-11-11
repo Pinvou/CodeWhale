@@ -46,7 +46,7 @@ func organizationTokenPathAllowed(method, resource string) bool {
 		return method == http.MethodGet && (p[3] == "model-policy" || p[3] == "balance" || p[3] == "entitlement-packages" || p[3] == "quota-grants" || p[3] == "payment-capabilities") || method == http.MethodPost && (p[3] == "quota-grants:batch" || p[3] == "account-closed-grants:reclaim-batch") || method == http.MethodPut && p[3] == "model-policy"
 	}
 	if len(p) == 5 {
-		return p[3] == "recharge" && (method == http.MethodPost && p[4] == "orders" || method == http.MethodGet && p[4] == "products")
+		return p[3] == "recharge" && (method == http.MethodPost && p[4] == "orders" || method == http.MethodGet && (p[4] == "products" || p[4] == "orders"))
 	}
 	return len(p) == 6 && (method == http.MethodGet && p[3] == "recharge" && p[4] == "orders" && pathUUID(p[5]) || method == http.MethodPost && pathUUID(p[4]) && (p[3] == "quota-grants" && p[5] == "revoke" || p[3] == "account-closed-grants" && p[5] == "reclaim"))
 }
