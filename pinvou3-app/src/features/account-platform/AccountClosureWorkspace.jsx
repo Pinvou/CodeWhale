@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { accountClosureCopy, financeCopy } from '../../shared/i18n.js';
+import { accountClosureCopy, financeCopy, accountCenterCopy } from '../../shared/i18n.js';
 import { hasPermission } from './authorization-ui.js';
 import { accountClosureBlockerLabel, accountClosureResumeAction, accountClosurePresentation, submitAccountClosure } from './account-closure-flow.js';
 import { createAccountClosureReader } from './account-closure-reader.js';
@@ -214,14 +214,17 @@ export function AccountClosureWorkspace({ client, me, language }) {
   if (!canRead) return null;
   const displayed = confirmation && freshCurrent(confirmation);
   const item = query.closure;
-  return <section className="ap-danger-section"><h2>{copy.title}</h2><p>{copy.lead}</p>
+  const center = accountCenterCopy[language];
+  return <section className="ap-danger-section"><h2>{copy.title}</h2><p>{center.closureConsequences}</p>
     {displayed && <AccountClosureConfirmation key={confirmation.sequence} copy={copy} mismatch={notice === copy.confirmMismatch} onCancel={() => cancel(confirmation)} onConfirm={text => void accept(confirmation, text)} canRestoreFocus={() => freshCurrent(confirmation) && (!pending.current || pending.current === confirmation)} />}
     {operation.error && <p role="alert">{operation.error}</p>}{notice && <p role="status">{notice}</p>}
     {query.status === 'loading' && <p role="status">{copy.queryLoading}</p>}
     {query.status === 'error' && <p role="alert">{copy.queryFailed}</p>}
     <button disabled={operation.busy} onClick={() => { polling.current?.resume(); void load(); }}>{copy.queryRetry}</button>
-    {item && <><p>{copy.statuses[item.status]} · {copy.stages[item.stage]}</p><p>{copy.sla}: {item.sla_expires_at}</p>
-      {item.blockers.length ? <ul>{item.blockers.map((blocker, index) => <li key={`${blocker.domain}:${blocker.code}:${index}`}>{accountClosureBlockerLabel(blocker, copy)}</li>)}</ul> : <p>{copy.noBlockers}</p>}</>}
-    {canRequest && (presentation.canRequest || operation.unknown) && <><p>{copy.before}</p><button className="ap-danger" disabled={operation.busy || operation.blocked || !sameIdentity(ready.current)} onClick={() => void request()}>{operation.pendingFacts || operation.unknown ? financeCopy[language].retry : copy.start}</button></>}
+    {query.status === 'ready' && !item && <p><strong>{center.closureStatus}: </strong>{center.closureIdle}</p>}
+    {item && <><p><strong>{center.closureStatus}: </strong>{copy.statuses[item.status]} · {copy.stages[item.stage]}</p><p>{copy.sla}: {item.sla_expires_at}</p>
+      {item.blockers.length ? <div><h3>{center.closureChecklist}</h3><ul>{item.blockers.map((blocker, index) => <li key={`${blocker.domain}:${blocker.code}:${index}`}>{accountClosureBlockerLabel(blocker, copy)}</li>)}</ul></div> : <p>{copy.noBlockers}</p>}</>}
+    <details className="ap-closure-rules"><summary>{copy.beforeTitle}</summary><p>{copy.lead}</p><p>{copy.before}</p></details>
+    {canRequest && (presentation.canRequest || operation.unknown) && <button className="ap-danger" disabled={operation.busy || operation.blocked || !sameIdentity(ready.current)} onClick={() => void request()}>{operation.pendingFacts || operation.unknown ? financeCopy[language].retry : copy.start}</button>}
   </section>;
 }
