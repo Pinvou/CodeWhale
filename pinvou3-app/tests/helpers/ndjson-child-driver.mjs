@@ -38,13 +38,13 @@ export function spawnNdjsonChild({
   });
 
   const send = (message) => child.stdin.write(`${JSON.stringify(message)}\n`);
-  const startRequest = (method, params = {}) => {
+  const startRequest = (method, params = {}, timeoutOverrideMs) => {
     const id = nextId++;
     const response = new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {
         if (!pending.delete(id)) return;
         reject(new Error(`${method} timed out; child stderr: ${stderrOutput}`));
-      }, timeoutMs);
+      }, timeoutOverrideMs ?? timeoutMs);
       if (unrefTimeout) timeout.unref();
       pending.set(id, { resolve, timeout });
     });
@@ -61,8 +61,8 @@ export function spawnNdjsonChild({
       send({ jsonrpc: '2.0', method, params });
     },
     startRequest,
-    request(method, params = {}) {
-      return startRequest(method, params).response;
+    request(method, params = {}, timeoutOverrideMs) {
+      return startRequest(method, params, timeoutOverrideMs).response;
     },
     dropRequest(id, resolution) {
       const waiter = pending.get(id);
