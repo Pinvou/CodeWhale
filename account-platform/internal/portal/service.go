@@ -808,6 +808,9 @@ func tokenPathAllowed(method, resource string) bool {
 	return method == http.MethodGet && len(parts) == 4 || method == http.MethodPost && len(parts) == 5 && (parts[4] == "close" || parts[4] == "payment-claims")
 }
 func accountAdminPathAllowed(method, resource string) bool {
+	if grantRecoveryPathAllowed(method, resource) {
+		return true
+	}
 	if platformRoleAdminPathAllowed(method, resource) {
 		return true
 	}

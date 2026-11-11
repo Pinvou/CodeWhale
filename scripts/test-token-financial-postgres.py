@@ -79,6 +79,8 @@ ACCOUNT_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/account"
 LIFECYCLE_RECONCILIATION_REQUIRED = {"TestLifecycleV3ApprovalReconciliationPostgres"}
 ACCOUNT_REQUIRED = {
     "TestOrganizationStartupDiagnosticsPostgres",
+    "TestManualGrantRecoverySchemaPostgres",
+    "TestManualGrantRecoveryWorkflowPostgres",
     "TestRestoredAdminReadsWithPublicMigrationsAndRuntimeActor",
     "TestApprovalDecisionOriginalReceiptPostgres",
     "TestApprovalDecisionLegacyConcurrentReceiptPostgres",
@@ -283,6 +285,8 @@ BILLING_LEAF_REQUIRED = {
 }
 BILLING_CHILD_REQUIRED = RETAINED_REQUIRED - BILLING_LEAF_REQUIRED
 EXACT_REQUIRED_CHILDREN = {
+    "TestManualGrantRecoverySchemaPostgres": {"official-schema-runtime-and-migration-identities"},
+    "TestManualGrantRecoveryWorkflowPostgres": {"expired-grant-dual-human-recovery"},
     "TestBillingHistoricalCatalogRollbackPostgres": {
         f"version{version}/seeded={seeded}{suffix}"
         for version in (35, 36, 37, 51)

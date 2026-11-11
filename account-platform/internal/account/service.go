@@ -161,6 +161,7 @@ func (s *Service) Handler(verify identity.VerifyFunc) http.Handler {
 	}
 	admin.GET("/approval-policies", httpserver.AdaptFunc(s.adminApprovalPolicies))
 	admin.GET("/approval-requests", httpserver.AdaptFunc(s.adminApprovalRequests))
+	s.registerGrantRecoveryRoutes(admin)
 	admin.POST("/approval-requests", approvalpolicy.Require("APPROVAL_DRAFT_CREATE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminCreateApprovalDraft))
 	admin.GET("/approval-requests/:approval_request_id", httpserver.AdaptFunc(s.adminApprovalRequest))
 	admin.PUT("/approval-requests/:approval_request_id", approvalpolicy.Require("APPROVAL_DRAFT_UPDATE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminUpdateApprovalDraft))
