@@ -11,7 +11,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"os"
-	"strconv"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -524,16 +524,64 @@ has_table_privilege('billing_service',$1,'UPDATE'),has_table_privilege('billing_
 	if _, err := connection.Exec(ctx, "SET ROLE billing_service"); err != nil {
 		t.Fatal(err)
 	}
-	if len(loaded) == 0 {
-		t.Fatal("billing migration chain is empty")
+	currentFacts := entitlementFinancialFactsSnapshot(t, ctx, repository)
+	if err := billingschema.Up(ctx, connection, loaded); err != nil {
+		t.Fatal("current correction database replay", err)
 	}
-	head := loaded[len(loaded)-1].Version
-	if err := migrations.DownOne(ctx, connection, loaded); err == nil || !strings.Contains(err.Error(), "rollback migration "+strconv.FormatInt(head, 10)) {
-		t.Fatalf("forward-only migration down returned %v", err)
+	if _, err := billingschema.VerifyApplied(ctx, connection, loaded); err != nil {
+		t.Fatal("verify current correction database replay", err)
 	}
-	var latestVersion int64
-	if err := connection.QueryRow(ctx, `SELECT max(version) FROM schema_migrations`).Scan(&latestVersion); err != nil || latestVersion != head {
-		t.Fatalf("failed down changed migration version: %d err=%v", latestVersion, err)
+	if !reflect.DeepEqual(currentFacts, entitlementFinancialFactsSnapshot(t, ctx, repository)) {
+		t.Fatal("current replay changed correction or consumer financial facts")
+	}
+	migrations.Unlock(ctx, connection)
+
+	// The current highest migration may legally undo metadata. Exercise the
+	// previous financial refusal in a genuinely separate historical installation.
+	historical, historicalCtx := retainedFinanceRepository(t, 900038)
+	historyConfig := historical.pool.Config().ConnConfig.Copy()
+	historyConfig.User = "billing_migrator"
+	historyConfig.Password = ""
+	historyOperator, err := pgx.ConnectConfig(historicalCtx, historyConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer historyOperator.Close(context.Background())
+	if _, err := historyOperator.Exec(historicalCtx, `SET ROLE billing_service`); err != nil {
+		t.Fatal(err)
+	}
+	stage := selectEntitlementFixtureStage(loaded, 900038)
+	if _, err := billingschema.VerifyApplied(historicalCtx, historyOperator, stage); err != nil {
+		t.Fatal("verify historical financial refusal boundary", err)
+	}
+	var maximum int64
+	if err := historyOperator.QueryRow(historicalCtx, `SELECT max(version) FROM schema_migrations`).Scan(&maximum); err != nil || maximum != 900038 {
+		t.Fatal("unexpected financial refusal boundary", maximum, err)
+	}
+	historicalFacts := entitlementFinancialFactsSnapshot(t, historicalCtx, historical)
+	var beforeLedger, afterLedger string
+	if err := historyOperator.QueryRow(historicalCtx, `SELECT jsonb_agg(to_jsonb(m) ORDER BY version)::text FROM schema_migrations m`).Scan(&beforeLedger); err != nil {
+		t.Fatal(err)
+	}
+	var refused *pgconn.PgError
+	err = billingschema.DownOne(historicalCtx, historyOperator, stage)
+	if !errors.As(err, &refused) || refused.Code != "P0001" || refused.Message != "manual admission facts cannot be rolled back; restore a compatible application version" {
+		t.Fatal("unexpected historical financial refusal", err)
+	}
+	if err := historyOperator.QueryRow(historicalCtx, `SELECT jsonb_agg(to_jsonb(m) ORDER BY version)::text FROM schema_migrations m`).Scan(&afterLedger); err != nil || afterLedger != beforeLedger || !reflect.DeepEqual(historicalFacts, entitlementFinancialFactsSnapshot(t, historicalCtx, historical)) {
+		t.Fatal("historical refusal changed ledger or financial facts", err)
+	}
+	for range 2 {
+		if err := billingschema.Up(historicalCtx, historyOperator, loaded); err != nil {
+			t.Fatal("historical financial boundary current upgrade/replay", err)
+		}
+		if _, err := billingschema.VerifyApplied(historicalCtx, historyOperator, loaded); err != nil {
+			t.Fatal("verify historical financial boundary current upgrade/replay", err)
+		}
+	}
+	migrations.Unlock(historicalCtx, historyOperator)
+	if !reflect.DeepEqual(historicalFacts, entitlementFinancialFactsSnapshot(t, historicalCtx, historical)) {
+		t.Fatal("current upgrade/replay changed historical financial facts")
 	}
 }
 

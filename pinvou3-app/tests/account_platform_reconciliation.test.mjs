@@ -37,6 +37,15 @@ test('case commands require actual owner/review fields without future financial 
   assert.throws(() => reconciliationCommand('CONFIRM_FORCED_REFUND', fields));
   assert.throws(() => reconciliationCommand('ASSIGN', { ...fields, owner: '' }));
 });
+test('unknown-date IGNORE binds its displayed observation and leaves other actions unchanged', () => {
+  const fields = { reason: 'controlled review reason', review: 'controlled finding' };
+  const observation = { observation_id: ID };
+  assert.equal(reconciliationCommand('IGNORE', fields, observation).observed_observation_id, ID);
+  assert.equal(Object.hasOwn(reconciliationCommand('CLAIM', fields, observation), 'observed_observation_id'), false);
+  assert.equal(Object.hasOwn(reconciliationCommand('IGNORE', fields), 'observed_observation_id'), false);
+  assert.throws(() => reconciliationCommand('IGNORE', fields, { observation_id: 'untrusted-observation' }));
+  for (const language of ['zh', 'en', 'ja']) assert.ok(reconciliationCopy[language].latestObservation);
+});
 test('actual client rejects unknown success or wrong run identity facts', async t => {
   const saved = globalThis.fetch; t.after(() => { globalThis.fetch = saved; });
   const client = new AdminPlatformClient(); client.csrfToken = 'public-fixture-csrf';
