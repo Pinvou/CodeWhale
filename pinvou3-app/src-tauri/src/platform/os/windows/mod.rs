@@ -16,8 +16,8 @@ pub use windows_permission::{
 };
 pub use windows_system::{
     archive_dependency_packages, archive_tool_exists, archive_tool_path, bios_serial_number,
-    bundled_node, command_exists, current_system_locale, email_dependency_packages,
-    email_manual_hint, email_tool_exists, libreoffice_missing_message,
+    bundled_node, command_exists, current_system_locale, docker_candidates,
+    email_dependency_packages, email_manual_hint, email_tool_exists, libreoffice_missing_message,
     libreoffice_open_fallback_needed, libreoffice_tool_path, make_private_dir,
     msg_converter_required, nvidia_smi_candidates, ocr_dependency_packages, ocr_tessdata_dir,
     ocr_tool_exists, ocr_tool_path, open_target, pandoc_dependency_packages,

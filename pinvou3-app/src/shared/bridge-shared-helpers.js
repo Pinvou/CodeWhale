@@ -71,6 +71,8 @@
     knowledge: ["kbModelSetup", "mountedCollection", "mountedCollections", "mountedRemoteCollections", "mountedCollectionsRevision"],
     scheduled: ["scheduledRunContext", "scheduledTaskAutoOpenId", "scheduledTaskBusyAction", "scheduledTaskCreationSessionId", "scheduledTaskDetail", "scheduledTaskError", "scheduledTaskErrorKind", "scheduledTaskLoading", "scheduledTaskPendingGuide", "scheduledTaskRecentRuns", "scheduledTaskRuns", "scheduledTasks", "scheduledTaskSelectionGeneration", "selectedScheduledTaskId"],
     monitor: ["monitor", "monitorError"],
+    // Registered by the device feature (bridge/device.js, MegaCube 设备管理).
+    device: ["device", "deviceStale", "deviceError", "deviceServices", "deviceServicesError", "externalModels", "externalModelsError"],
     settings: ["settings", "selectedPet", "behaviorTelemetry"],
     models: ["activeModelId", "currentSessionModelId", "currentSessionModelRef", "pendingDraftModelRef", "defaultModelRef", "effectiveModelConfig", "savedModels", "modelsLoaded"],
     vllm: [],
@@ -3623,7 +3625,19 @@
     const content = String(text || "").trim();
     if (!sid) throw new Error(bt("targetSessionMissing"));
     if (!content) throw new Error(bt("replyContentEmpty"));
-    const exists = state.sessions.some(function (session) { return String(session.id) === sid; });
+    // 存在性校验双尺子（第七轮评审 P3）：常规路径的目标会话来自后端列表（pet
+    // 回复等），列表命中即可；但**本端刚物化**的会话由 switchActiveTo 直接建
+    // buffer，state.sessions 只在 list_sessions 刷新时更新——物化完立刻发送
+    // （设备管理排查直达）会撞上"列表里还没有它"的窗口而误报目标不存在。
+    // 本地 buffer 即物化事实，放行；下游 getBuffer/排队机制本就按
+    // sessionStates 工作，后端拒绝仍由 doSendFor 的 completion 上报。
+    const exists = state.sessions.some(function (session) { return String(session.id) === sid; })
+      // aux 会话就住 sessionStates（后端刻意把它们过滤在 list_sessions 之外），
+      // 第二把尺子若无条件放行就把 aux-chat 赖以成立的隔离不变量打穿了——
+      // 全工具链的普通发送通道会绕过 auxChatSend 的 restrictTools 直进 aux
+      // 会话（第二十轮评审 P2）。今天没有调用方传 aux id，这里把防线钉回去。
+      || (!auxChatIsAuxSession(sid)
+          && Object.prototype.hasOwnProperty.call(sessionStates.value, sid));
     if (!exists) throw new Error(bt("targetSessionMissing"));
 
     await ensureSessionBufferLoaded(sid);
@@ -4360,9 +4374,17 @@
         notify();
       }
     } catch (e) {
-      state.monitorError = e && e.message ? e.message : String(e || "monitor poll failed");
-      console.warn("monitor poll failed", e);
-      notify();
+      const message = e && e.message ? e.message : String(e || "monitor poll failed");
+      // Same-message guard: the monitor channel polls at 1 Hz, so re-writing
+      // state + notify on every failed tick re-renders the whole App tree each
+      // second while the failure persists (console.warn spams likewise). Mirror
+      // the device channel's discipline: identical consecutive failures stay
+      // silent; only the first failure or a changed message notifies.
+      if (state.monitorError !== message) {
+        state.monitorError = message;
+        console.warn("monitor poll failed", e);
+        notify();
+      }
     } finally {
       monitorPollInFlight.value = false;
     }

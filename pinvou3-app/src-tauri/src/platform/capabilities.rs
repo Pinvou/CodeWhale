@@ -2,6 +2,9 @@
 pub(crate) struct DesktopCapabilities {
     pub(crate) os: &'static str,
     pub(crate) show_megacube_site: bool,
+    /// 运行时探测到的 MegaCube 一体机（DMI 产品名含 "megacube"，如 "LinSeer MegaCube"）。
+    /// 「设备管理」等 MegaCube 专属界面据此开启，与静态的 show_megacube_site（官网入口）区分。
+    pub(crate) megacube_device: bool,
     pub(crate) show_super_permission_settings: bool,
     pub(crate) uses_bundled_dependency_installer: bool,
     pub(crate) uses_homebrew_dependency_installer: bool,
@@ -56,6 +59,7 @@ pub(crate) fn current() -> DesktopCapabilities {
     DesktopCapabilities {
         os: std::env::consts::OS,
         show_megacube_site: cfg!(target_os = "linux"),
+        megacube_device: is_megacube_device(),
         show_super_permission_settings: cfg!(target_os = "linux"),
         uses_bundled_dependency_installer: cfg!(target_os = "windows"),
         // macOS 用 Homebrew 安装依赖(对称 Windows 的 uses_bundled_dependency_installer),
@@ -218,6 +222,51 @@ pub(crate) fn global_shortcut_session_is_ambiguous(
         && session_env(env, "WAYLAND_DISPLAY").is_some()
 }
 
+/// 运行时探测当前设备是否为 MegaCube 一体机（DMI 产品名含 "megacube"）。
+/// 结果按进程缓存；环境变量 `PINVOU3_MEGACUBE_DEVICE` 可覆盖：`1` 强制开启
+/// （开发/自动化测试在非 MegaCube 硬件上预览「设备管理」），`0` 强制关闭
+/// （在误报 DMI 的硬件上的逃生口）；未设或其他值走 DMI 探测。
+///
+/// DMI 字段读取收敛在 `platform::dmi`（设备页展示同一份候选表）；这里的运行时
+/// OS 判断而非 `cfg` 是刻意的：探测是纯运行时能力（测试要在任意主机上跑、行为
+/// fail-closed），且读不到文件自然返回 false，架构守卫已放行。
+pub(crate) fn is_megacube_device() -> bool {
+    static CACHED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *CACHED.get_or_init(|| {
+        megacube_device_decision(
+            std::env::consts::OS,
+            super::dmi::any_field_contains("megacube"),
+            std::env::var("PINVOU3_MEGACUBE_DEVICE").ok().as_deref(),
+        )
+    })
+}
+
+/// 判定核心（纯函数，测试直打）：环境覆盖优先（`1`/`0` 字面量），未覆盖时
+/// 仅 Linux 且 DMI 命中才开启。拆出来是因为 OnceLock 的进程级缓存让运行时
+/// 入口无法在测试里安全地变换输入（第八轮评审 P3：`=1` 是文档化的开发覆盖，
+/// 旧测试直接断言 `!is_megacube_device()` 会在带覆盖跑测试的机器上误红）。
+fn megacube_device_decision(os: &str, dmi_matches: bool, env_override: Option<&str>) -> bool {
+    if let Some(forced) = parse_megacube_env_override(env_override) {
+        return forced;
+    }
+    os == "linux" && dmi_matches
+}
+
+#[cfg(test)]
+fn forced_megacube_device_override() -> Option<bool> {
+    parse_megacube_env_override(std::env::var("PINVOU3_MEGACUBE_DEVICE").ok().as_deref())
+}
+
+/// 环境变量取值语义（纯函数，测试直打）：字面 "1"/"0"（容忍首尾空白，env 文件
+/// 里手滑带个换行不该静默丢掉覆盖）优先，其余一律不覆盖、走 DMI 探测。
+fn parse_megacube_env_override(value: Option<&str>) -> Option<bool> {
+    match value.map(str::trim) {
+        Some("1") => Some(true),
+        Some("0") => Some(false),
+        _ => None,
+    }
+}
+
 pub(crate) const fn is_windows() -> bool {
     cfg!(target_os = "windows")
 }
@@ -273,6 +322,46 @@ mod tests {
             capabilities.paste_image_clipboard_read,
             cfg!(target_os = "linux")
         );
+        assert_eq!(capabilities.megacube_device, is_megacube_device());
+    }
+
+    #[test]
+    fn megacube_env_override_only_accepts_literal_0_and_1() {
+        assert_eq!(parse_megacube_env_override(Some("1")), Some(true));
+        assert_eq!(parse_megacube_env_override(Some("0")), Some(false));
+        // 首尾空白容忍：env 文件里手滑的换行/空格不该静默丢掉覆盖。
+        assert_eq!(parse_megacube_env_override(Some(" 1")), Some(true));
+        assert_eq!(parse_megacube_env_override(Some("0\n")), Some(false));
+        // 其他值/未设一律不覆盖，走 DMI 探测（fail-closed，不会误开启）。
+        assert_eq!(parse_megacube_env_override(Some("true")), None);
+        assert_eq!(parse_megacube_env_override(Some("")), None);
+        assert_eq!(parse_megacube_env_override(Some("  ")), None);
+        assert_eq!(parse_megacube_env_override(None), None);
+    }
+
+    #[test]
+    fn megacube_device_detection_never_reports_non_linux_hosts() {
+        // 探测逻辑只在 Linux 主机上读取 DMI 字段;其余平台无论文件系统如何都返回 false。
+        // `=1` 是文档化的开发覆盖（优先于 OS 判断），带覆盖跑测试的机器上
+        // 运行时入口合法地返回 true——fail-closed 语义改在纯函数上断言。
+        if forced_megacube_device_override().is_some() || std::env::consts::OS == "linux" {
+            return;
+        }
+        assert!(!is_megacube_device());
+    }
+
+    #[test]
+    fn megacube_device_decision_matrix() {
+        // 未覆盖：仅 Linux 且 DMI 命中才开启（fail-closed）。
+        assert!(megacube_device_decision("linux", true, None));
+        assert!(!megacube_device_decision("linux", false, None));
+        assert!(!megacube_device_decision("macos", true, None));
+        assert!(!megacube_device_decision("windows", true, None));
+        // `=1` 任何 OS 强制开启；`=0` 压过 DMI（误报硬件的逃生口）。
+        assert!(megacube_device_decision("macos", false, Some("1")));
+        assert!(!megacube_device_decision("linux", true, Some("0")));
+        // 其他取值不覆盖，走 OS+DMI。
+        assert!(!megacube_device_decision("macos", true, Some("true")));
     }
 
     #[test]
