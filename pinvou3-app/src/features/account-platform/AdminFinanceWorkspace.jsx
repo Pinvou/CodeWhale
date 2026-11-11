@@ -45,6 +45,8 @@ function Payments({ client, copy, language, permissions, owner, route }) {
     // Retire the previous visit before any detail feedback is rendered for this route.
     setDetailVisit({ id: selectedOrder, client, owner, epoch: detailEpoch });
   }
+  const liveDetailVisit = React.useRef(detailVisit);
+  liveDetailVisit.current = detailVisit;
   const currentDetailError = route && detailFailure?.visit === detailVisit ? copy[detailFailure.key] : '';
   const [targets, setTargets] = useState([]);
   const [targetID, setTargetID] = useState('');
@@ -73,7 +75,7 @@ function Payments({ client, copy, language, permissions, owner, route }) {
       // list/write feedback slot that can be visible on a different order.
       return route ? '' : key;
     });
-    if (result) { setDetailFailure(current => current?.visit === visit && visit.id === id ? null : current); setDetailSnapshot({ visit, value: result.value }); setTargets(result.targets); setTargetID(result.targets[0]?.package.package_id || ''); setReason(''); }
+    if (result && (!route || liveDetailVisit.current === visit) && (client.financeSessionEpoch || 0) === detailEpoch) { setDetailFailure(current => current?.visit === visit && visit.id === id ? null : current); setDetailSnapshot({ visit, value: result.value }); setTargets(result.targets); setTargetID(result.targets[0]?.package.package_id || ''); setReason(''); }
     return started;
   };
   useEffect(() => {
