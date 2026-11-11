@@ -3308,7 +3308,12 @@ const openChatExternalUrl = (url) => {
         if (!operation) return;
         setRemoteDispatchActionError(null);
         try {
-          if (remoteBinding && item.localSessionId === remoteBinding.localSessionId && item.remoteRef === remoteBinding.remoteRef) {
+          // A failed local abandon discards dispatch payload/context, but the
+          // upload owner may still hold exact cleanup proofs for this task.
+          // Let that private owner match the current lease/batch even when the
+          // history notice no longer carries a remote ref. Never restore payload.
+          if (remoteBinding && item.localSessionId === remoteBinding.localSessionId
+            && (item.remoteRef === null || item.remoteRef === remoteBinding.remoteRef)) {
             if (!await abandonRemoteUpload(bridge.desktopRemoteControl, remoteComposerIdentity, remoteBinding, item.handle,
               () => isCurrentRemoteAction(operation))) return;
           } else {

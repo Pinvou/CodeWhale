@@ -3,8 +3,8 @@ import { createRoot } from 'react-dom/client';
 import { dictZh } from '../../src/shared/i18n/zh.js';
 import { dictEn } from '../../src/shared/i18n/en.js';
 import { dictJa } from '../../src/shared/i18n/ja.js';
-import { remoteDispatchCases } from '../../src/features/remote-control/remote-dispatch-ui.mjs';
-import { remoteProxyComposerIdentity } from '../../src/features/remote-control/remote-session-adapter.mjs';
+import { markRemoteDispatchPayloadLost, recordRemoteDispatch, remoteDispatchCases } from '../../src/features/remote-control/remote-dispatch-ui.mjs';
+import { remoteProxyComposerIdentity, remoteProxyLeaseIdentity } from '../../src/features/remote-control/remote-session-adapter.mjs';
 import { uploadRemoteFiles } from '../../src/features/remote-control/remote-file-transfer.mjs';
 
 // Mount the real ChatView once. Only the host bridge is controlled; React
@@ -109,6 +109,8 @@ window.TauriBridge = {
     },
     abandonRemoteTask: async (id, request, taskId) => {
       fixture.calls.push({ kind: 'abandon', id, request, taskId });
+      if (fixture.scenario === 'cleanup-local-failure'
+        && fixture.calls.filter(call => call.kind === 'abandon').length === 1) throw new Error('store_failed');
       if (fixture.scenario.startsWith('cleanup')) session(id).history.unattemptedPending = [];
     },
     controlledCapabilitiesSnapshot: () => new Promise((resolve, reject) =>
@@ -123,6 +125,10 @@ window.TauriBridge = {
 if (fixture.scenario.startsWith('cleanup')) {
   const original = session('remote-a');
   original.history.unattemptedPending = [{ ...original.handle, dispatchState: 'prepared_never_attempted' }];
+  recordRemoteDispatch(original.id, original.connection.sessionRef,
+    remoteProxyLeaseIdentity(original.id, original.connection), '',
+    { state: 'prepared_not_sent', retryHandle: original.handle }, original.history);
+  if (fixture.scenario === 'cleanup-history') markRemoteDispatchPayloadLost(original.id, original.handle.taskId);
   const binding = { localSessionId: original.id, remoteRef: original.connection.sessionRef };
   const options = { ownerIdentity: remoteProxyComposerIdentity(original.id, original.connection),
     leaseIdentity: JSON.stringify([original.connection.connectionId, original.connection.controllerLeaseId,
