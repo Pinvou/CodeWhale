@@ -507,6 +507,11 @@ pub fn nvidia_smi_candidates() -> Vec<&'static str> {
     Vec::new()
 }
 
+/// 设备管理只在 MegaCube（Linux）启用；这里只保证接口完整，裸名即可。
+pub fn docker_candidates() -> Vec<&'static str> {
+    vec!["docker"]
+}
+
 /// Returns the installer-provisioned `runtime/node/node.exe`, resolved through
 /// windows_path::bundled_node_dir. Consumers fall back to PATH when it is absent.
 pub fn bundled_node() -> Option<PathBuf> {
