@@ -1440,7 +1440,10 @@ mod tests {
         for (tool, (name, schema, description)) in tools.iter().zip(&original) {
             assert_eq!(tool.strict, None, "{name} must ship non-strict");
             assert_eq!(&tool.input_schema, schema, "{name} keeps its schema");
-            assert_eq!(&tool.description, description, "{name} keeps its description");
+            assert_eq!(
+                &tool.description, description,
+                "{name} keeps its description"
+            );
         }
     }
 
