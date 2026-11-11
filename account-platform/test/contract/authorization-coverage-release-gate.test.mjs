@@ -25,8 +25,8 @@ async function rejectedMutation(mutate, expected) {
 
 test('authorization release gate classifies every HTTP task event callback and CLI entrypoint', async () => {
   const catalog = JSON.parse(await readFile(catalogURL, 'utf8'));
-  // The six Portal transports use Any alongside the verb-specific routes.
-  // Keep the expected complete graph independent of its parser.
+  // The six existing Portal transports use Any, alongside the verb-specific
+  // registrations. Keep the expected complete graph independent of its parser.
   const wildcardPaths = [
     '/api/account/*resource', '/api/token/*resource',
     '/api/admin/account/*resource', '/api/admin/billing/*resource',
@@ -45,7 +45,8 @@ test('authorization release gate classifies every HTTP task event callback and C
   ]);
   // The real checker still rejects missing, stale, duplicate or mis-scoped
   // entries before returning these exact inventory sizes.
-  assert.deepEqual(await runAuthorizationCoverage(), { routes: 411, tasks: 32, events: 18, cli: 27 });
+  // main's complete graph plus this PR's reconciliation repair-context GET.
+  assert.deepEqual(await runAuthorizationCoverage(), { routes: 412, tasks: 32, events: 18, cli: 27 });
 });
 
 function assertLedgerRepairProofAuthorization(service, handler) {

@@ -2,10 +2,71 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { act } from 'react';
 import { adminComponent, adminDOM } from './helpers/admin-component-fixture.mjs';
-import { reconciliationImportPreview } from '../src/features/account-platform/reconciliation-contract.js';
+import { RECONCILIATION_BILL_MAX_BYTES, reconciliationImportPreview } from '../src/features/account-platform/reconciliation-contract.js';
 import { reconciliationCopy } from '../src/shared/i18n.js';
 
 const bill = (paid_at = '2026-10-07T10:00:00+08:00') => JSON.stringify([{ merchant_order_no: 'SYNTHETIC-ORDER', channel_transaction_id: 'SYNTHETIC-TRANSACTION', channel: 'WECHAT', amount_fen: 100, currency: 'CNY', status: 'SUCCESS', paid_at }]);
+
+for (const language of ['zh', 'en', 'ja']) for (const mode of ['file', 'paste']) test('typed bill fields block malformed values and recover to valid import: ' + language + '/' + mode, async t => {
+  const { AdminReconciliationBillImport } = await adminComponent('AdminReconciliationBillImport.jsx');
+  const ui = await adminDOM(t), copy = reconciliationCopy[language], imports = [];
+  await ui.render(AdminReconciliationBillImport, { channel: 'WECHAT', date: '2026-10-07', copy, onImport: items => imports.push(items) });
+  if (mode === 'paste') await ui.click(ui.document.querySelector('.adm-reconciliation-bill-source button'));
+  const input = async text => {
+    if (mode === 'file') {
+      const node = ui.document.querySelector('input[type=file]');
+      Object.defineProperty(node, 'files', { configurable: true, value: [{ name: 'synthetic.json', size: Buffer.byteLength(text), text: async () => text }] });
+      await ui.change(node, '');
+    } else {
+      await ui.change(ui.document.querySelector('textarea'), text);
+      await ui.click(Array.from(ui.document.querySelectorAll('button')).find(node => node.textContent === copy.billPreview));
+    }
+  };
+  for (const field of ['entry_type', 'channel']) for (const value of [123, {}, [], true]) {
+    const rows = JSON.parse(bill()); rows[0][field] = value;
+    await input(JSON.stringify(rows));
+    const alert = ui.document.querySelector('[role=alert]'); assert.ok(alert, field);
+    assert.equal(alert.textContent, copy.billInvalidField.replace('{row}', '1').replace('{field}', field));
+    assert.equal(ui.document.querySelector('footer button').disabled, true);
+    await ui.click(ui.document.querySelector('footer button'));
+    assert.equal(imports.length, 0);
+  }
+  for (const value of [undefined, '', null]) {
+    const rows = JSON.parse(bill()); rows[0].entry_type = value; rows[0].channel = value;
+    await input(JSON.stringify(rows));
+    assert.ok(!ui.document.querySelector('[role=alert]'));
+    assert.equal(ui.document.querySelector('footer button').disabled, false, 'retain Go string default semantics');
+  }
+  await ui.click(ui.document.querySelector('footer button'));
+  assert.equal(imports.length, 1);
+  assert.equal(imports[0][0].entry_type, null);
+  assert.equal(imports[0][0].channel, null);
+});
+
+for (const language of ['zh', 'en', 'ja']) test('six bill validation errors render exact localized feedback and block import: ' + language, async t => {
+  const { AdminReconciliationBillImport } = await adminComponent('AdminReconciliationBillImport.jsx');
+  const ui = await adminDOM(t), copy = reconciliationCopy[language];
+  const missingReference = JSON.parse(bill()); delete missingReference[0].channel_transaction_id;
+  const cases = [
+    ['billMissingReference', JSON.stringify(missingReference)],
+    ['billInvalidAmount', bill().replace('"amount_fen":100', '"amount_fen":9223372036854775808')],
+    ['billEmpty', '[]'], ['billNotArray', '{}'],
+    ['billTooMany', JSON.stringify(Array(100001).fill({}))],
+    ['billTooLarge', null],
+  ];
+  let writes = 0, oversizedReads = 0;
+  for (const [kind, text] of cases) {
+    await ui.render(AdminReconciliationBillImport, { channel: 'WECHAT', date: '2026-10-07', copy, onImport() { writes++; } });
+    const input = ui.document.querySelector('input[type=file]');
+    Object.defineProperty(input, 'files', { configurable: true, value: [{ name: 'synthetic-invalid.json', size: text === null ? RECONCILIATION_BILL_MAX_BYTES + 1 : Buffer.byteLength(text), text: async () => { if (text === null) oversizedReads++; return text; } }] });
+    await ui.change(input, '');
+    assert.equal(ui.document.querySelector('[role=alert]').textContent, copy[kind].replace('{row}', kind === 'billMissingReference' ? '1' : '').replace('{field}', ''), kind);
+    assert.equal(ui.document.querySelector('footer button').disabled, true, kind);
+    await ui.click(ui.document.querySelector('footer button'));
+    assert.equal(writes, 0, kind);
+  }
+  assert.equal(oversizedReads, 0, 'reject size before reading the file');
+});
 test('preview rejects malformed RFC3339 timestamps and impossible calendar dates at their row/field', () => {
   for (const timestamp of ['not-a-date', '2026-02-29T10:00:00Z', '2026-02-30T10:00:00Z', '2026-10-07', '2026-10-07T24:00:00Z', '2026-10-07T10:60:00Z', '2026-10-07T10:00:00', '2026-10-07T10:00:00+25:00', '2026-10-07T10:00:00+08:00\n', '2026-10-07T10:00:00+08:00\r']) {
     assert.throws(() => reconciliationImportPreview(bill(timestamp)), error => error.kind === 'billInvalidField' && error.row === 1 && error.field === 'paid_at', timestamp);

@@ -45,11 +45,12 @@ try {
 }
 const cache = join(root, '.vite-cache');
 const id = '33333333-3333-4333-8333-333333333333';
+let qrMode = 'inline';
 let actor = 'A', status = 'PENDING', closeStatus = 'OPEN', hold = false, created = Date.now(), lifetime = 120000, denyDetail = 0, denyList = 0, denyCreate = 0, denyWallet = 0, denyPurchase = 0, unknownCreate = false, requests = [], held = new Map();
 const createdKeys = new Map(), heldLists = new Map(), heldCreates = new Map(); let holdList = false, holdCreate = false;
 const order = (org = '') => ({ ...(org ? { beneficiary_organization_id: org } : {}), order_id: id, product_id: 'public-fixture-product', plan_name: 'Public fixture plan', amount_fen: '1234', status,
   channel: 'ALIPAY', qr_scan_apps: ['ALIPAY'], close_status: closeStatus, fulfillment_status: ['PAID', 'PAID_LATE'].includes(status) ? 'CREDITED' : 'PENDING', expires_at: new Date(created + lifetime).toISOString(), created_at: new Date(created).toISOString(),
-  payment_url: ['CREATED', 'PENDING'].includes(status) && closeStatus === 'OPEN' ? 'https://example.com/public-fixture-payment' : '', qr_data: ['CREATED', 'PENDING'].includes(status) && closeStatus === 'OPEN' ? 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aNbQAAAAASUVORK5CYII=' : '' });
+  payment_url: qrMode !== 'missing' && ['CREATED', 'PENDING'].includes(status) && closeStatus === 'OPEN' ? 'https://example.com/public-fixture-payment' : '', qr_data: qrMode !== 'missing' && ['CREATED', 'PENDING'].includes(status) && closeStatus === 'OPEN' ? qrMode === 'remote' ? 'https://example.com/public-fixture-qr.png' : 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aNbQAAAAASUVORK5CYII=' : '' });
 // Match the public history projection: collection rows never carry payment instructions.
 const historyOrder = () => {
   const { payment_url, qr_data, qr_scan_apps, ...facts } = order();
@@ -65,7 +66,8 @@ const fixtureAPI = async (req, res, next) => {
     if (path === '/__fixture__/control' && req.method === 'POST') {
       let body = ''; for await (const chunk of req) { body += chunk; if (body.length > 4096) { send(res, { error: 'TOO_LARGE' }, 413); return; } }
       const input = JSON.parse(body);
-      if (input.reset) { actor = 'A'; status = 'PENDING'; closeStatus = 'OPEN'; hold = false; created = Date.now(); lifetime = 120000; denyDetail = 0; denyList = 0; denyCreate = 0; denyWallet = 0; denyPurchase = 0; unknownCreate = false; createdKeys.clear(); holdList = false; holdCreate = false; for (const response of [...heldLists.keys(), ...heldCreates.keys()]) response.destroy(); heldLists.clear(); heldCreates.clear(); requests = []; for (const r of held.keys()) r.destroy(); held.clear(); }
+      if (['inline', 'remote', 'missing'].includes(input.qrMode)) qrMode = input.qrMode;
+      if (input.reset) { qrMode = 'inline'; actor = 'A'; status = 'PENDING'; closeStatus = 'OPEN'; hold = false; created = Date.now(); lifetime = 120000; denyDetail = 0; denyList = 0; denyCreate = 0; denyWallet = 0; denyPurchase = 0; unknownCreate = false; createdKeys.clear(); holdList = false; holdCreate = false; for (const response of [...heldLists.keys(), ...heldCreates.keys()]) response.destroy(); heldLists.clear(); heldCreates.clear(); requests = []; for (const r of held.keys()) r.destroy(); held.clear(); }
       if (input.actor === 'B') actor = 'B'; if (['CREATED','PENDING','PAID','PAID_LATE','FAILED','CLOSED','EXPIRED','MANUAL_REVIEW'].includes(input.status)) status = input.status;
       if (typeof input.closeStatus === 'string') closeStatus = input.closeStatus;
       if (Number.isSafeInteger(input.expiresInMS)) lifetime = Date.now() - created + input.expiresInMS;
@@ -103,7 +105,8 @@ const fixtureAPI = async (req, res, next) => {
       if (route === '/recharge/orders/' + id) {
         if (denyDetail) { send(res, { code: 'CONTROLLED_DENIAL' }, denyDetail); return; }
         if (hold) { held.set(res, { org, snapshot: order(org) }); res.on('close', () => held.delete(res)); } else send(res, order(org));
-      } else if (route === '/balance') send(res, { owner_type: 'ORGANIZATION', owner_id: org, wallet_id: '66666666-6666-4666-8666-666666666666', posted_microcredits: status === 'PAID' ? '100000000' : '0', reserved_microcredits: '0', available_microcredits: status === 'PAID' ? '100000000' : '0' });
+      } else if (route === '/recharge/orders') send(res, { organization_id: org, items: actor === 'A' ? [historyOrder()] : [], next_cursor: null });
+      else if (route === '/balance') send(res, { owner_type: 'ORGANIZATION', owner_id: org, wallet_id: '66666666-6666-4666-8666-666666666666', posted_microcredits: status === 'PAID' ? '100000000' : '0', reserved_microcredits: '0', available_microcredits: status === 'PAID' ? '100000000' : '0' });
       else if (route === '/entitlement-packages') send(res, { items: [] });
       else if (route === '/recharge/products') send(res, { items: [{ product_id: 'public-fixture-product', availability_status: 'AVAILABLE', name: 'Public fixture plan', amount_fen: '1234', channels: ['ALIPAY'] }] });
       else if (route === '/payment-capabilities') send(res, { channels: ['ALIPAY'], test_only: true, formal_collection_admitted: false });

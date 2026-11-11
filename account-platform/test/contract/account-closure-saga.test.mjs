@@ -88,6 +88,19 @@ test('dedicated user and operations views expose closure progress, blockers and 
     assert.deepEqual(select('closures', permissions), { active: null, closureDenied: true },
       'denied closure navigation must not fall back to another permitted operation');
   }
+  const selectRepair = new Function('route', 'permissions', 'copy', 'accountClosureCopy', 'language',
+    `${operationsView.slice(tabsStart, activeEnd + 1)}\nreturn { active, registrationDenied, profileDenied };`);
+  for (const [tab, permission, denied] of [
+    ['registration', 'platform.registrations.repair', 'registrationDenied'],
+    ['profile', 'platform.profile-changes.repair', 'profileDenied'],
+  ]) {
+    const select = permissions => selectRepair({ operationsTab: tab }, permissions, labels, { zh: { listTitle: 'closures' } }, 'zh');
+    assert.deepEqual(select([permission]), { active: tab, registrationDenied: false, profileDenied: false });
+    for (const permissions of [[], ['platform.registration-bonus.read'], ['platform.account-closures.read'], [tab === 'registration' ? 'platform.profile-changes.repair' : 'platform.registrations.repair']]) {
+      assert.deepEqual(select(permissions), { active: null, registrationDenied: denied === 'registrationDenied', profileDenied: denied === 'profileDenied' },
+        'denied repair navigation must not fall back to a different permitted operation');
+    }
+  }
   assert.match(operationsView, /\{closureDenied && <p role="alert">\{accountClosureCopy\[language\]\.listPermissionDenied\}<\/p>\}/);
   assert.match(adminNavigation, /const route = resolveAdminRoute\(search, flags, available\)/);
   assert.match(adminNavigation, /adminRouteLocation\(search, section, route\.tab \? \{ finance_tab: route\.tab \} : \{\}/);
