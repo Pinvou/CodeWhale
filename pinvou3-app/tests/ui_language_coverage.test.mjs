@@ -106,6 +106,7 @@ for (const language of ['zh', 'en', 'ja']) {
   for (const section of [
     'uiRemote',
     'uiMonitor',
+    'uiDeviceMgr',
     'uiSettings',
     'uiSettingsDetail',
     'uiPetSettings',
@@ -215,6 +216,131 @@ for (const language of ['zh', 'en', 'ja']) {
     23,
     `${language}.uiAuxChat must hold exactly the 23 pinned keys`,
   );
+    // All 125 uiDeviceMgr keys are pinned (PR #1661 评审跟进：三语**同时**删掉一个
+    // key 时 parity 检查全绿、视图渲染 undefined——uiAuxChat round-14 事故的同款
+    // 洞；chipGpuTemp→chipMaxTemp 与评审新增键（servicesStale 随 round-6；
+    // peakLabel/linkReasonBridge/linkReasonUnknown/registerNoId 随 round-7）随本
+    // 清单一起钉死。任何键面变更必须同提交更新此清单与计数)。
+    for (const key of [
+      'loading', 'bridgeNotReady', 'errorBanner', 'retry', 'updatedAtLabel',
+      'chipDisk', 'chipMemory', 'chipMaxTemp', 'chipDriver', 'chipCuda',
+      'sectionOverview', 'sectionSensors', 'sectionStorage', 'sectionNetwork',
+      'sectionProcesses', 'sectionModels', 'sectionDoctor',
+      'sensorEmpty', 'chipNvme', 'chipWifi', 'chipFan', 'chipBoard', 'chipPower',
+      'sensorWarnAdvice', 'sensorCritAdvice', 'critLimit', 'peakLabel',
+      // round-30 评审 P3：非温度量的 crit 建议不得误指温度（sensorCritAdviceNonTemp）；
+      // 旧行在场的刷新失败常驻陈旧行提示（externalStaleRowsHint）。
+      'sensorCritAdviceNonTemp', 'externalStaleRowsHint',
+      'storageEmpty', 'diskSystemBadge', 'diskWarnAdvice', 'diskCritAdvice',
+      'networkEmpty', 'netTypeEthernet', 'netTypeWifi', 'netTypeLoopback',
+      'netTypeBridge', 'netTypeVirtual', 'netTypeOther',
+      'procCpuTitle', 'procMemTitle', 'procGpuTitle', 'procGpuUnavailable', 'procNote',
+      'modelsTitle', 'storeSubtitle', 'externalSubtitle', 'refresh', 'install',
+      'servicesLoading', 'servicesFailed', 'servicesStale', 'svcOllama', 'svcVllm', 'svcLmStudio', 'svcDocker',
+      'storeManaged', 'gotoModelStore', 'statusRunning', 'statusDeployed', 'statusPending',
+      'kindOllama', 'kindEndpoint', 'kindWeights', 'kindOther',
+      'registeredBadge', 'statusAvailable', 'statusUnreachable',
+      'linked', 'link', 'linkDone', 'linkDisabledRemote', 'linkFailed',
+      // round-31 评审 P2：商店归属未知（读取中/失败）时接入禁用的说明文案。
+      'linkDisabledStoreUnknown',
+      'remove', 'removeArmed', 'removeCancel', 'removeConfirmIntro', 'deleteWeights',
+      'removeWeightsPath', 'removeIrreversible', 'linkDisabledUnreachable',
+      // round-33 评审 P2：改属保留行的 toast 文案（条件删除返回 false）。
+      'linkRowKept',
+      'doctorSendFailed', 'doctorFailed', 'refreshFailed', 'linkRowStale', 'linkRowRecycled', 'removeDone', 'removeFailed', 'warn',
+      'linkReasonBridge', 'linkReasonUnknown', 'registerNoId',
+      // Store/device shared deletion boundary owns four localized failures.
+      'weightRemovalBusy', 'weightRemovalLockFailed', 'weightRemovalPathInvalid', 'weightRemovalPathUnavailable',
+      'ollamaOfflineHint', 'localSourceHint',
+      'doctorPackages', 'doctorPackagesDesc', 'doctorDependencies', 'doctorDependenciesDesc',
+      'doctorCuda', 'doctorCudaDesc', 'doctorServices', 'doctorServicesDesc',
+      'doctorHogs', 'doctorHogsDesc', 'doctorCustomPlaceholder', 'doctorCharCounter', 'doctorSend',
+      // round-21: 快照陈旧旗 / 无模型标识的接入占位 / 服务失败原因码（后端
+      // ServiceStatus.reason 的机器码 → 三语文案，替代中文 detail 直出 tooltip）。
+      'dataStale', 'linkDisabledNoModel',
+      'svcReasonTimeout', 'svcReasonRefused', 'svcReasonNetwork', 'svcReasonClientInit',
+      'svcReasonHttp', 'svcReasonNotDetected', 'svcReasonDockerExit', 'svcReasonDockerUnavailable',
+      'svcReasonDockerTaskFailed',
+    ]) {
+      assert.ok(dict[language].uiDeviceMgr[key], `${language}.uiDeviceMgr.${key} must exist`);
+    }
+    // Count guard：清单看不到新增——加键必须同步更新计数（见 uiAuxChat round-36 同款）。
+    assert.equal(
+      Object.keys(dict[language].uiDeviceMgr).length,
+      125,
+      `${language}.uiDeviceMgr must hold exactly the 125 pinned keys`,
+    );
+    // Single-language whole-section loss guard（十九轮评审 P2）：dictJa 以
+    // `...dictEn` 铺底，整段删掉 `jaBase.uiDeviceMgr` / `jaBase.deviceMgr` 时
+    // 上面的逐键存在/计数/typeof 钉全部照绿（回落英文），而 ja 用户看到整页
+    // 英文。kbEmbedOn 的 notEqual 先例补两枚 ja≠en 探针。
+    assert.notEqual(
+      dict.ja.uiDeviceMgr.loading, dict.en.uiDeviceMgr.loading,
+      'ja.uiDeviceMgr must not silently fall back to the en section',
+    );
+    assert.notEqual(
+      dict.ja.deviceMgr, dict.en.deviceMgr,
+      'ja.deviceMgr must not silently fall back to the en nav key',
+    );
+    // Interpolation keys must stay functions in all three languages (round-7
+    // review P3): a fn→string flip in one language passes the existence and
+    // count loops while rendering literal text at the call site — the typed
+    // pins below close that hole (same pattern as uiMultiAgent).
+    for (const key of [
+      'updatedAtLabel', 'critLimit', 'peakLabel', 'servicesFailed', 'removeConfirmIntro',
+      'removeWeightsPath', 'linkFailed', 'doctorFailed', 'refreshFailed', 'linkRowStale',
+      'linkRowRecycled', 'removeDone', 'removeFailed', 'warn', 'doctorCharCounter',
+      'svcReasonHttp', 'svcReasonDockerExit',
+      // round-33 新增的改属保留 toast 也是插值函数（copy.linkRowKept(name)）：
+      // 缺这枚钉时单语翻成字符串全套件照绿、运行时 TypeError（三十五轮评审 P2）。
+      'linkRowKept',
+      'weightRemovalLockFailed', 'weightRemovalPathUnavailable',
+    ]) {
+      assert.equal(
+        typeof dict[language].uiDeviceMgr[key],
+        'function',
+        `${language}.uiDeviceMgr.${key} must be an interpolation function`,
+      );
+    }
+    for (const key of ['weightRemovalBusy', 'weightRemovalPathInvalid']) {
+      assert.equal(typeof dict[language].uiDeviceMgr[key], 'string', `${language}.uiDeviceMgr.${key} must be text`);
+    }
+    for (const key of ['weightRemovalBusy', 'weightRemovalLockFailed', 'weightRemovalPathInvalid', 'weightRemovalPathUnavailable']) {
+      const render = locale => {
+        const value = dict[locale].uiDeviceMgr[key];
+        return typeof value === 'function' ? value('native diagnostic') : value;
+      };
+      const rendered = render(language);
+      assert.equal(typeof rendered, 'string', `${language}.uiDeviceMgr.${key} must render text`);
+      assert.ok(rendered.trim().length > 0, `${language}.uiDeviceMgr.${key} must not be empty`);
+      if (language !== 'zh') assert.notEqual(rendered, render('zh'), `${language}.uiDeviceMgr.${key} must not fall back to zh`);
+      if (language === 'ja') assert.notEqual(rendered, render('en'), `ja.uiDeviceMgr.${key} must not fall back to en`);
+    }
+    // Value-language + arity guard (round-21 review P3 mutation evidence: an en
+    // value flipped to Chinese used to pass every check). en string leaves must
+    // carry no Han characters — ja is exempt because Japanese legitimately uses
+    // kanji; the ja-vs-en non-fallback probes above cover ja's direction. Every
+    // interpolation fn must have the same arity as zh (the interpolation contract
+    // is keyed, so a fn/1 vs fn/2 drift in one language breaks the call site
+    // silently).
+    for (const [key, value] of Object.entries(dict[language].uiDeviceMgr)) {
+      if (language === 'en' && typeof value === 'string') {
+        assert.ok(
+          !/\p{Script=Han}/u.test(value),
+          `en.uiDeviceMgr.${key} must not contain Han characters`,
+        );
+      }
+      if (typeof value === 'function') {
+        assert.equal(
+          value.length,
+          dict.zh.uiDeviceMgr[key].length,
+          `${language}.uiDeviceMgr.${key} arity must match zh`,
+        );
+      }
+    }
+    // Nav key pin: uiDeviceMgr pins cannot see the sibling nav key — deleting
+    // `deviceMgr` from all three dicts would render an undefined entry label.
+    assert.ok(dict[language].deviceMgr, `${language}.deviceMgr must exist`);
   assert.ok(dict[language].uiSettings.providers, `${language}.uiSettings.providers must exist`);
   for (const key of [
     'addProvider', 'switch', 'official', 'current', 'export', 'import',
@@ -520,6 +646,16 @@ assert.match(followHook, /listen\(['"]ui:language_changed['"]/);
 assert.match(petWindow, /const petCopy = t\.uiPet/);
 
 assert.match(source('features/monitor/MonitorView.jsx'), /t\.uiMonitor/);
+// MegaCube 设备管理页：整页文案走 uiDeviceMgr（含嵌入式 MonitorView 复用）。
+const deviceManagerView = source('features/device-manager/DeviceManagerView.jsx');
+assert.match(deviceManagerView, /const copy = t\.uiDeviceMgr/);
+assert.doesNotMatch(deviceManagerView, /[\u{3000}-\u{30ff}\u{4e00}-\u{9fff}\u{f900}-\u{faff}\u{ff00}-\u{ffef}]/u, 'device-manager view must stay free of CJK literals incl. kana/fullwidth punctuation (i18n only)');
+const deviceRemovalErrors = source('features/device-manager/removal-errors.js');
+assert.match(stripComments(deviceManagerView), /deviceModelRemovalError\(/);
+for (const key of ['weightRemovalBusy', 'weightRemovalLockFailed', 'weightRemovalPathInvalid', 'weightRemovalPathUnavailable']) {
+  assert.match(stripComments(deviceRemovalErrors), new RegExp(`copy\\.${key}\\b`), `device removal must consume the pinned ${key} copy`);
+}
+assert.doesNotMatch(deviceRemovalErrors, /[\u{3000}-\u{30ff}\u{4e00}-\u{9fff}\u{f900}-\u{faff}\u{ff00}-\u{ffef}]/u, 'device removal helper must keep owned copy in shared i18n');
 const scheduledTasks = source('features/scheduled/ScheduledTasksView.jsx');
 assert.match(scheduledTasks, /const scheduledCopy = t\.uiScheduled/);
 assert.match(scheduledTasks, /scheduledCopy\.taskName/);

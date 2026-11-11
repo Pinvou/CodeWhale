@@ -1064,14 +1064,21 @@ pub fn get_store_model(card_id: &str) -> rusqlite::Result<Option<StoreModelRecor
     .optional()
 }
 
-pub fn get_store_model_by_name(model_name: &str) -> rusqlite::Result<Option<StoreModelRecord>> {
+/// 按模型名查商店记录。`case_insensitive` 供设备管理的 Ollama 有效删除名臂：
+/// daemon 标签按小写归一，BINARY 精确匹配会漏掉大小写变体别名（第四轮 P3）；
+/// name 臂保持精确匹配（显示名契约）。
+pub fn get_store_model_by_name(
+    model_name: &str,
+    case_insensitive: bool,
+) -> rusqlite::Result<Option<StoreModelRecord>> {
     let conn = connect()?;
-    conn.query_row(
-        "SELECT * FROM store_models WHERE model_name = ?1",
-        params![model_name],
-        StoreModelRecord::from_row,
-    )
-    .optional()
+    let sql = if case_insensitive {
+        "SELECT * FROM store_models WHERE model_name = ?1 COLLATE NOCASE"
+    } else {
+        "SELECT * FROM store_models WHERE model_name = ?1"
+    };
+    conn.query_row(sql, params![model_name], StoreModelRecord::from_row)
+        .optional()
 }
 
 /// Distinguish a retained-version refusal from an actual database failure.

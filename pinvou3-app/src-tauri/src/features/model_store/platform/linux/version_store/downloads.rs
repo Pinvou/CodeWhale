@@ -450,6 +450,20 @@ pub fn retained_download_bytes() -> Result<u64, String> {
         })
 }
 
+/// In-flight ordinary roots remain protected before the first store-model row
+/// exists. Historical roots retained solely for residual quota accounting do
+/// not acquire ownership through this query.
+pub(in super::super) fn active_download_roots() -> Result<Vec<PathBuf>, String> {
+    let mut roots: Vec<PathBuf> = downloads()?
+        .into_iter()
+        .filter(|download| download.downloading)
+        .map(|download| download.root)
+        .collect();
+    roots.sort();
+    roots.dedup();
+    Ok(roots)
+}
+
 pub fn download_paths(card_id: &str) -> Result<Vec<PathBuf>, String> {
     let mut paths = retained_roots(Some(card_id))?;
     paths.extend(
