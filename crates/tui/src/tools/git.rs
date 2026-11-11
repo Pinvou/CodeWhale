@@ -5,6 +5,8 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
@@ -16,9 +18,22 @@ use super::spec::{
     optional_bool, optional_str, optional_u64,
 };
 
-const MAX_OUTPUT_CHARS: usize = 40_000;
+/// Inline cap on git stdout, in characters. The shell-tool spillover helpers
+/// are not a drop-in here: `shell_output::truncate_with_meta` is hard-wired to
+/// the shell tools' 30KB budget and their cargo/rustc preserved-summary
+/// heuristics, and the spill writers in `truncate.rs` need a tool-call id plus
+/// ownership publication these call sites do not carry. Oversized results are
+/// still spilled engine-side by the evidence router (`truncate.rs`, applied to
+/// every tool result before fan-out) at its own thresholds, so raising this cap
+/// only moves when the transcript copy condenses.
+const MAX_OUTPUT_CHARS: usize = 100_000;
 const DEFAULT_UNIFIED: u64 = 3;
 const MAX_UNIFIED: u64 = 50;
+
+/// Total wall-clock budget for one git subprocess. Pathological repositories
+/// (textconv/diff-driver helpers, huge worktrees, network-backed remotes
+/// reached by innocent-looking reads) previously could hang the turn forever.
+const GIT_COMMAND_BUDGET: Duration = Duration::from_secs(120);
 
 // === GitStatusTool ===
 
@@ -80,7 +95,7 @@ impl ToolSpec for GitStatusTool {
         }
 
         let command_str = format_command(&git_ctx.working_dir, &args);
-        let output = run_git_command(&git_ctx.working_dir, &args)?;
+        let output = run_git_command(&git_ctx.working_dir, &args).await?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -182,7 +197,7 @@ impl ToolSpec for GitDiffTool {
         }
 
         let command_str = format_command(&git_ctx.working_dir, &args);
-        let output = run_git_command(&git_ctx.working_dir, &args)?;
+        let output = run_git_command(&git_ctx.working_dir, &args).await?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -269,20 +284,31 @@ fn pathspec_from(working_dir: &Path, resolved: &Path) -> PathBuf {
     }
 }
 
-fn run_git_command(working_dir: &Path, args: &[String]) -> Result<std::process::Output, ToolError> {
-    let Some(mut cmd) = crate::dependencies::Git::command() else {
+/// Run one read-only git subprocess under a wall-clock budget.
+///
+/// The child runs through the crate's bounded runner (process-group kill +
+/// reap on expiry, concurrent pipe drains) instead of a blocking
+/// `Command::output()` on the executor thread, so a hung git helper fails the
+/// call at [`GIT_COMMAND_BUDGET`] rather than stalling the turn forever.
+async fn run_git_command(
+    working_dir: &Path,
+    args: &[String],
+) -> Result<std::process::Output, ToolError> {
+    let Some(mut cmd) = crate::dependencies::Git::tokio_command() else {
         return Err(ToolError::not_available(
             "git is not installed or not in PATH",
         ));
     };
+    // Mirror `Git::command`'s `GIT_OPTIONAL_LOCKS=0`; the tokio builder default
+    // does not set it, and git status/diff opportunistically refresh the index,
+    // which would take `.git/index.lock` out from under the user's own git
+    // work (#5617). Genuine writes are unaffected either way.
+    cmd.env("GIT_OPTIONAL_LOCKS", "0");
+    // `Command::output()` runs the child with a null stdin; keep that
+    // semantics so git never reads (or waits on) our own stdin.
+    cmd.stdin(Stdio::null());
     cmd.args(args).current_dir(working_dir);
-    cmd.output().map_err(|e| {
-        if e.kind() == std::io::ErrorKind::NotFound {
-            ToolError::not_available("git is not installed or not in PATH")
-        } else {
-            ToolError::execution_failed(format!("Failed to run git: {e}"))
-        }
-    })
+    super::process::run_bounded_child(&mut cmd, None, GIT_COMMAND_BUDGET, "git").await
 }
 
 fn format_command(working_dir: &Path, args: &[String]) -> String {

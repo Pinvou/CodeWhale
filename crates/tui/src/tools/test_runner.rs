@@ -10,14 +10,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use super::cargo_failure_summary::summarize_cargo_failure;
+use super::shell_output::truncate_with_meta;
 use super::spec::{
     ApprovalRequirement, ToolCapability, ToolContext, ToolError, ToolResult, ToolSpec,
     optional_bool, optional_str,
 };
 
 use crate::dependencies::ExternalTool;
-
-const MAX_OUTPUT_CHARS: usize = 40_000;
 
 /// Tool for running `cargo test` in the workspace root.
 pub struct RunTestsTool;
@@ -95,8 +94,11 @@ impl ToolSpec for RunTestsTool {
         let exit_code = output.status.code().unwrap_or(-1);
         let stdout_raw = String::from_utf8_lossy(&output.stdout);
         let stderr_raw = String::from_utf8_lossy(&output.stderr);
-        let stdout = truncate_with_note(&stdout_raw, MAX_OUTPUT_CHARS);
-        let stderr = truncate_with_note(&stderr_raw, MAX_OUTPUT_CHARS);
+        // Reuse the shell tool's tail-keep truncation (#242): `test result:`
+        // and the failure list print at the end of cargo output, so
+        // head-only truncation dropped exactly the actionable part.
+        let (stdout, _) = truncate_with_meta(&stdout_raw);
+        let (stderr, _) = truncate_with_meta(&stderr_raw);
 
         let result = RunTestsOutput {
             success: output.status.success(),
@@ -150,34 +152,6 @@ fn format_command(workspace: &Path, args: &[String]) -> String {
             .collect::<Vec<_>>()
             .join(" ")
     )
-}
-
-fn truncate_with_note(text: &str, max_chars: usize) -> String {
-    if text.chars().count() <= max_chars {
-        return text.to_string();
-    }
-    let end = char_boundary_index(text, max_chars);
-    let truncated = &text[..end];
-    let omitted_chars = text
-        .chars()
-        .count()
-        .saturating_sub(truncated.chars().count());
-    let note = format!(
-        "\n\n[output truncated to {max_chars} characters; {omitted_chars} characters omitted]"
-    );
-    format!("{truncated}{note}")
-}
-
-fn char_boundary_index(text: &str, max_chars: usize) -> usize {
-    if max_chars == 0 {
-        return 0;
-    }
-    for (count, (idx, _)) in text.char_indices().enumerate() {
-        if count == max_chars {
-            return idx;
-        }
-    }
-    text.len()
 }
 
 #[cfg(test)]
@@ -306,9 +280,17 @@ mod tests {
     }
 
     #[test]
-    fn truncation_adds_note() {
-        let long = "x".repeat(MAX_OUTPUT_CHARS + 128);
-        let truncated = truncate_with_note(&long, MAX_OUTPUT_CHARS);
-        assert!(truncated.contains("output truncated"));
+    fn truncation_keeps_tail_and_adds_note() {
+        // Long enough to exceed the shell_output truncation threshold, with
+        // the cargo summary in the tail where it actually prints.
+        let mut long = "x".repeat(40_000);
+        long.push_str("\ntest result: FAILED. 0 passed; 1 failed\n");
+        let (truncated, meta) = truncate_with_meta(&long);
+        assert!(meta.truncated);
+        assert!(truncated.contains("Output truncated"));
+        assert!(
+            truncated.contains("test result: FAILED"),
+            "the tail holding the cargo summary must survive truncation"
+        );
     }
 }

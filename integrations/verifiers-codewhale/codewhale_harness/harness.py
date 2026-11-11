@@ -2,17 +2,21 @@
 
 The harness owns an isolated Codewhale home for every rollout, forwards only
 the interception secret supplied by Verifiers, and retains a bounded terminal
-receipt rather than copying raw program output into trace metadata.
+receipt rather than copying raw program output into trace metadata. Every
+runtime call is bounded by a rollout timeout so a hung agent run fails the
+rollout closed instead of wedging the eval loop.
 """
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
 import re
 import shlex
 from collections import Counter
+from collections.abc import Awaitable
 from typing import Any, Literal
 
 from verifiers.v1.clients import ModelContext
@@ -29,6 +33,9 @@ STREAM_SCHEMA = "codewhale.exec-stream"
 STREAM_SCHEMA_VERSION = 1
 MAX_TERMINAL_RECEIPT_BYTES = 8_192
 MAX_TERMINAL_STRING_CHARS = 512
+# A hung agent run must not block the eval loop indefinitely: every runtime
+# call is bounded, and expiry fails the rollout closed.
+ROLLOUT_TIMEOUT_SECS = 1_800
 _VERSION = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$")
 _TOOL = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 _SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -121,7 +128,9 @@ class CodewhaleHarness(Harness[CodewhaleHarnessConfig]):
         self._validate_config()
         if self.config.binary_path:
             logger.info("codewhale: verifying preinstalled %s", self.binary)
-            result = await runtime.run([self.binary, "--version"], {})
+            result = await _await_bounded(
+                runtime.run([self.binary, "--version"], {}), "binary version check"
+            )
             version_text = f"{result.stdout}\n{result.stderr}"
             if result.exit_code != 0 or not _has_version(
                 version_text, self.config.version
@@ -134,7 +143,9 @@ class CodewhaleHarness(Harness[CodewhaleHarnessConfig]):
 
         logger.info("codewhale: ensuring Codewhale %s is installed", self.config.version)
         script = _install_script(self.config.version)
-        result = await runtime.run(["sh", "-c", script], {})
+        result = await _await_bounded(
+            runtime.run(["sh", "-c", script], {}), "binary install"
+        )
         if result.exit_code != 0:
             raise RuntimeError(
                 "Codewhale install failed: "
@@ -220,7 +231,7 @@ class CodewhaleHarness(Harness[CodewhaleHarnessConfig]):
             argv.extend(["--append-system-prompt", system])
         argv.extend(["--", str(prompt or "")])
 
-        result = await runtime.run_program(argv, env)
+        result = await _await_bounded(runtime.run_program(argv, env), "agent rollout")
         if result.exit_code == 0:
             receipt = _parse_stream_receipt(result.stdout)
             terminal = receipt["terminal"]
@@ -240,6 +251,18 @@ class CodewhaleHarness(Harness[CodewhaleHarnessConfig]):
                 raise RuntimeError("Codewhale terminal receipt was not resolved")
             trace.info["codewhale"] = receipt
         return result
+
+
+async def _await_bounded(
+    awaitable: Awaitable[ProgramResult], what: str
+) -> ProgramResult:
+    """Await a runtime call, failing the rollout closed on expiry."""
+    try:
+        return await asyncio.wait_for(awaitable, timeout=ROLLOUT_TIMEOUT_SECS)
+    except asyncio.TimeoutError as error:
+        raise RuntimeError(
+            f"Codewhale {what} did not finish within {ROLLOUT_TIMEOUT_SECS}s"
+        ) from error
 
 
 def _has_version(output: str, version: str) -> bool:

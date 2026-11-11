@@ -44,7 +44,9 @@ Stage 2 of the loop: [cw-orient](../cw-orient/SKILL.md) → **slice** →
    ls crates
    grep -rln 'model_\|_config\|provider_' crates/*/src --include='*.rs' | head -30
    ```
-   Search behavior and symbols, not just filenames. If you find an owner, edit
+   Search behavior and symbols, not just filenames. `head` caps each listing —
+   if output was truncated, narrow the pattern and re-run rather than assuming
+   the first screen held every match. If you find an owner, edit
    it. If you are still adding a new layer, its module doc must name the
    predecessor it replaces — otherwise you are editing the wrong file.
 

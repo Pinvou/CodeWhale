@@ -20,7 +20,7 @@
 //!
 //! Uses platform-specific command-line tools (sox, rec, arecord) to capture
 //! 16kHz mono 16-bit PCM audio. Records until a silence gap is detected or
-//! the maximum duration is reached (default 10 s).
+//! the maximum duration is reached (default 60 s).
 
 use std::process::{Command, Stdio};
 use std::sync::LazyLock;
@@ -193,16 +193,31 @@ fn encode_wav(samples: &[i16]) -> Vec<u8> {
 
 // --- Recording -------------------------------------------------------------
 
-/// Maximum recording duration in seconds before auto-stopping.
-const MAX_RECORD_SECS: u64 = 10;
+/// Maximum recording duration in seconds before auto-stopping. Roomy enough
+/// for multi-sentence dictation; silence detection still stops early.
+const MAX_RECORD_SECS: u64 = 60;
+/// Transcription request budget, derived from the recording cap: a full-length
+/// recording must not race the ASR request timeout (1.5× is generous for
+/// upload plus transcription of ≤60 s of audio).
+const ASR_REQUEST_TIMEOUT: Duration = Duration::from_secs(MAX_RECORD_SECS * 3 / 2);
+/// How long the capture loop waits for the recorder to produce data before
+/// concluding it is silent or wedged. A healthy recorder emits a chunk every
+/// ~10 ms, so this only fires on a dead or stalled pipe; killing the child
+/// unblocks the read and lets the max-duration deadline stay meaningful.
+const RECORDER_IDLE_TIMEOUT: Duration = Duration::from_secs(2);
 /// Minimum segment duration in seconds to consider as valid speech.
 const MIN_SEGMENT_SECS: f64 = 0.3;
 
 /// Record audio from the default microphone.
 ///
 /// Returns raw 16kHz mono S16_LE PCM samples. Returns `None` if no recorder
-/// is available, the recording failed, or no speech was detected.
+/// is available, the recording failed, the recorder went silent, or no speech
+/// was detected.
 fn record_audio() -> Option<(Vec<i16>, Duration)> {
+    use std::io::Read;
+    use std::sync::{Arc, Mutex};
+    use std::sync::mpsc::RecvTimeoutError;
+
     let recorder = detect_recorder()?;
     let start = std::time::Instant::now();
 
@@ -215,21 +230,43 @@ fn record_audio() -> Option<(Vec<i16>, Duration)> {
         .ok()?;
 
     let stdout = child.stdout.take()?;
-    let mut reader = std::io::BufReader::new(stdout);
-    let mut all_samples: Vec<i16> = Vec::with_capacity(16000 * MAX_RECORD_SECS as usize);
+    let child = Arc::new(Mutex::new(child));
 
-    // Read until timeout or silence
-    let mut buf = [0u8; 320]; // 10ms of 16kHz S16_LE
+    // A blocking `read_exact` on the recorder pipe cannot time out, so reads
+    // run on a helper thread and the loop below receives chunks with an idle
+    // deadline. Without this, a recorder that emits nothing would wedge the
+    // capture thread forever: the max-duration check only runs after a
+    // successful read.
+    let (tx, rx) = std::sync::mpsc::channel::<std::io::Result<[u8; 320]>>();
+    let reader_thread = std::thread::spawn(move || {
+        let mut reader = std::io::BufReader::new(stdout);
+        let mut buf = [0u8; 320]; // 10ms of 16kHz S16_LE
+        loop {
+            match reader.read_exact(&mut buf) {
+                Ok(()) => {
+                    if tx.send(Ok(buf)).is_err() {
+                        break; // receiver gone; stop reading
+                    }
+                }
+                Err(err) => {
+                    let _ = tx.send(Err(err));
+                    break;
+                }
+            }
+        }
+    });
+
+    let mut all_samples: Vec<i16> = Vec::with_capacity(16000 * MAX_RECORD_SECS as usize);
     let max_duration = Duration::from_secs(MAX_RECORD_SECS);
     let mut silence_samples = 0u32;
     let mut had_speech = false;
     let speech_threshold: i16 = 500; // RMS-based speech detection threshold
     let silence_duration_samples = 16000u32; // 1 second of silence to stop
+    let mut recorder_stalled = false;
 
     loop {
-        use std::io::Read;
-        match reader.read_exact(&mut buf) {
-            Ok(()) => {
+        match rx.recv_timeout(RECORDER_IDLE_TIMEOUT) {
+            Ok(Ok(buf)) => {
                 let chunk: Vec<i16> = buf
                     .as_chunks::<2>()
                     .0
@@ -256,24 +293,39 @@ fn record_audio() -> Option<(Vec<i16>, Duration)> {
                 }
 
                 if start.elapsed() > max_duration {
-                    let _ = child.kill();
+                    let _ = child.lock().unwrap().kill();
                     break;
                 }
                 if had_speech && silence_samples >= silence_duration_samples {
-                    let _ = child.kill();
+                    let _ = child.lock().unwrap().kill();
                     break;
                 }
             }
-            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
-            Err(_) => {
-                let _ = child.kill();
+            Ok(Err(_read_err)) => {
+                // Recorder exited or the pipe failed; keep what was captured.
+                let _ = child.lock().unwrap().kill();
                 break;
             }
+            Err(RecvTimeoutError::Timeout) => {
+                // No data within the idle budget: the recorder is silent or
+                // wedged. Kill it (which also unblocks the reader thread) and
+                // drop the partial capture — a half-buffered recording must
+                // not be transcribed as if it were complete.
+                let _ = child.lock().unwrap().kill();
+                recorder_stalled = true;
+                break;
+            }
+            Err(RecvTimeoutError::Disconnected) => break,
         }
     }
 
-    let _ = child.wait();
+    let _ = child.lock().unwrap().wait();
+    let _ = reader_thread.join();
     let elapsed = start.elapsed();
+
+    if recorder_stalled {
+        return None;
+    }
 
     let min_samples = (MIN_SEGMENT_SECS * 16000.0) as usize;
     if all_samples.len() < min_samples {
@@ -322,7 +374,7 @@ async fn post_chat_completions(
         .post(chat_completions_url(base_url))
         .header("Content-Type", "application/json")
         .header("Authorization", format!("Bearer {api_key}"))
-        .timeout(Duration::from_secs(30))
+        .timeout(ASR_REQUEST_TIMEOUT)
         .json(&body)
         .send()
         .await

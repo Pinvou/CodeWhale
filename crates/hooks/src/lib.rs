@@ -283,7 +283,10 @@ impl HookSink for WebhookHookSink {
 /// Each event is serialized as a single JSON line (`{"at": "...", "event": {...}}\n`)
 /// and written to the socket. If the socket is not available (listener not running),
 /// the event is silently dropped - hook sinks are best-effort observability, not
-/// control flow.
+/// control flow. Connect and write are bounded by
+/// [`UNIX_SOCKET_EMIT_TIMEOUT_SECS`] so a listener that accepts but never reads
+/// cannot wedge the sequential hook fan-out (same budget shape as the webhook
+/// sink's HTTP timeout).
 ///
 /// On non-Unix platforms this struct exists but its [`HookSink::emit`] is a no-op.
 #[derive(Debug, Clone)]
@@ -291,6 +294,10 @@ pub struct UnixSocketHookSink {
     #[cfg(unix)]
     path: PathBuf,
 }
+
+/// Total budget for one Unix-socket hook delivery (connect + write).
+#[cfg(unix)]
+const UNIX_SOCKET_EMIT_TIMEOUT_SECS: u64 = 5;
 
 impl UnixSocketHookSink {
     /// Create a sink that connects to the Unix domain socket at `path`.
@@ -311,21 +318,34 @@ impl UnixSocketHookSink {
 impl HookSink for UnixSocketHookSink {
     #[cfg(unix)]
     async fn emit(&self, event: &HookEvent) -> Result<()> {
-        let mut stream = match tokio::net::UnixStream::connect(&self.path).await {
-            Ok(s) => s,
-            Err(_) => return Ok(()), // listener not running, skip silently
-        };
         let payload = json!({
             "at": Utc::now().to_rfc3339(),
             "event": event
         });
         let mut line = serde_json::to_string(&payload).context("failed to encode hook event")?;
         line.push('\n');
-        stream
-            .write_all(line.as_bytes())
-            .await
-            .context("failed to write to unix socket")?;
-        Ok(())
+        let deliver = async {
+            let mut stream = match tokio::net::UnixStream::connect(&self.path).await {
+                Ok(s) => s,
+                Err(_) => return Ok(()), // listener not running, skip silently
+            };
+            stream
+                .write_all(line.as_bytes())
+                .await
+                .context("failed to write to unix socket")
+        };
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(UNIX_SOCKET_EMIT_TIMEOUT_SECS),
+            deliver,
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => Err(anyhow::anyhow!(
+                "unix socket hook delivery timed out after {}s",
+                UNIX_SOCKET_EMIT_TIMEOUT_SECS
+            )),
+        }
     }
 
     #[cfg(not(unix))]

@@ -1430,7 +1430,6 @@ async fn caller_cancellation_after_engine_acceptance_keeps_owned_turn_lifecycle(
             compaction_id: None,
             usage: Usage::default(),
             status: TurnOutcomeStatus::Completed,
-            error_source: None,
             error: None,
             tool_catalog: None,
             base_url: None,
@@ -1546,7 +1545,6 @@ async fn operation_key_replays_torn_response_survives_restart_and_rejects_mismat
             compaction_id: None,
             usage: Usage::default(),
             status: TurnOutcomeStatus::Completed,
-            error_source: None,
             error: None,
             tool_catalog: None,
             base_url: None,
@@ -1761,7 +1759,6 @@ async fn thread_updates_while_start_waits_for_capacity_survive_latest_turn_write
             compaction_id: None,
             usage: Usage::default(),
             status: TurnOutcomeStatus::Completed,
-            error_source: None,
             error: None,
             tool_catalog: None,
             base_url: None,
@@ -1927,7 +1924,6 @@ async fn compact_lifecycle_outlives_caller_and_preserves_concurrent_thread_updat
             compaction_id: None,
             usage: Usage::default(),
             status: TurnOutcomeStatus::Completed,
-            error_source: None,
             error: None,
             tool_catalog: None,
             base_url: None,
@@ -3547,7 +3543,8 @@ fn routed_usage_append_is_bounded_and_idempotent_for_every_delivery_path() {
         Some(ApiProvider::Deepseek.default_base_url()),
         Utc::now(),
     );
-    for index in 0..90 {
+    let extra = 30usize;
+    for index in 0..MAX_ROUTED_USAGE_RECORDS_PER_TURN + extra {
         let path = match index % 3 {
             0 => "sink",
             1 => "mailbox",
@@ -3559,7 +3556,7 @@ fn routed_usage_append_is_bounded_and_idempotent_for_every_delivery_path() {
             crate::cost_status::EffectiveRouteUsage {
                 route: route.clone(),
                 usage: Usage {
-                    input_tokens: index,
+                    input_tokens: index as u32,
                     ..Usage::default()
                 },
             },
@@ -3567,8 +3564,11 @@ fn routed_usage_append_is_bounded_and_idempotent_for_every_delivery_path() {
     }
 
     assert_eq!(turn.routed_usage.len(), MAX_ROUTED_USAGE_RECORDS_PER_TURN);
-    assert_eq!(turn.routed_usage_dropped_records, 26);
-    assert_eq!(turn.routed_usage_source_ids.len(), 90);
+    assert_eq!(turn.routed_usage_dropped_records, extra as u64);
+    assert_eq!(
+        turn.routed_usage_source_ids.len(),
+        MAX_ROUTED_USAGE_RECORDS_PER_TURN + extra
+    );
     let before = turn.clone();
     assert!(!append_routed_usage_record(
         &mut turn,
@@ -5291,7 +5291,6 @@ async fn thread_lifecycle_persists_across_restart() -> Result<()> {
                     },
                     status: TurnOutcomeStatus::Completed,
                     error: None,
-                    error_source: None,
                     tool_catalog: None,
                     base_url: None,
                 })
@@ -5434,7 +5433,6 @@ async fn monitor_separates_lifecycle_start_from_billing_dispatch_and_child_usage
             },
             status: TurnOutcomeStatus::Completed,
             error: None,
-            error_source: None,
             tool_catalog: None,
             // Completion-time endpoint evidence must be ignored.
             base_url: Some("https://api.stepfun.com/v1/coding".to_string()),
@@ -5536,7 +5534,6 @@ async fn monitor_separates_lifecycle_start_from_billing_dispatch_and_child_usage
             compaction_id: None,
             usage: Usage::default(),
             status: TurnOutcomeStatus::Completed,
-            error_source: None,
             error: None,
             tool_catalog: None,
             base_url: None,
@@ -5591,7 +5588,6 @@ async fn completed_turn_without_engine_output_fails() -> Result<()> {
                     },
                     status: TurnOutcomeStatus::Completed,
                     error: None,
-                    error_source: None,
                     tool_catalog: None,
                     base_url: None,
                 })
@@ -5678,7 +5674,6 @@ async fn preturn_control_status_does_not_make_empty_turn_succeed() -> Result<()>
                     compaction_id: None,
                     usage: Usage::default(),
                     status: TurnOutcomeStatus::Completed,
-                    error_source: None,
                     error: None,
                     tool_catalog: None,
                     base_url: None,
@@ -5743,7 +5738,6 @@ async fn engine_error_remains_failed_after_nominal_turn_complete() -> Result<()>
                     compaction_id: None,
                     usage: Usage::default(),
                     status: TurnOutcomeStatus::Completed,
-                    error_source: None,
                     error: None,
                     tool_catalog: None,
                     base_url: None,
@@ -6858,7 +6852,6 @@ async fn compact_interrupt_persists_canceled_item_for_the_exact_request() -> Res
             compaction_id: None,
             usage: Usage::default(),
             status: TurnOutcomeStatus::Interrupted,
-            error_source: None,
             error: None,
             tool_catalog: None,
             base_url: None,
@@ -7101,7 +7094,6 @@ async fn multi_turn_continuity_same_thread() -> Result<()> {
                     },
                     status: TurnOutcomeStatus::Completed,
                     error: None,
-                    error_source: None,
                     tool_catalog: None,
                     base_url: None,
                 })
@@ -7337,7 +7329,6 @@ async fn host_goal_loop_kickoff_arms_one_continuation_and_parks_at_engine_cap() 
                     },
                     status: TurnOutcomeStatus::Completed,
                     error: None,
-                    error_source: None,
                     tool_catalog: Some(vec![catalog_tool("update_goal")]),
                     base_url: None,
                 })
@@ -7454,7 +7445,6 @@ async fn host_goal_loop_skips_rearm_without_update_goal_and_after_failed_pass() 
                     },
                     status: TurnOutcomeStatus::Completed,
                     error: None,
-                    error_source: None,
                     tool_catalog: Some(vec![catalog_tool("read")]),
                     base_url: None,
                 })
@@ -7531,7 +7521,6 @@ async fn host_goal_loop_skips_rearm_without_update_goal_and_after_failed_pass() 
                     },
                     status: TurnOutcomeStatus::Failed,
                     error: Some("provider exploded".to_string()),
-                    error_source: None,
                     tool_catalog: Some(vec![catalog_tool("update_goal")]),
                     base_url: None,
                 })
@@ -7627,7 +7616,6 @@ async fn host_goal_loop_mirrors_terminal_snapshot_and_does_not_rearm() -> Result
                         },
                         status: TurnOutcomeStatus::Completed,
                         error: None,
-                        error_source: None,
                         tool_catalog: Some(vec![catalog_tool("update_goal")]),
                         base_url: None,
                     })
@@ -7916,7 +7904,6 @@ async fn approval_required_with_stale_active_turn_is_denied() -> Result<()> {
             },
             status: TurnOutcomeStatus::Completed,
             error: None,
-            error_source: None,
             tool_catalog: None,
             base_url: None,
         })
@@ -8034,7 +8021,6 @@ async fn approval_required_awaits_external_decision_allow() -> Result<()> {
             compaction_id: None,
             usage: Usage::default(),
             status: TurnOutcomeStatus::Completed,
-            error_source: None,
             error: None,
             tool_catalog: None,
             base_url: None,
@@ -8150,7 +8136,6 @@ async fn user_input_snapshot_survives_reload_and_clears_after_submission() -> Re
             compaction_id: None,
             usage: Usage::default(),
             status: TurnOutcomeStatus::Completed,
-            error_source: None,
             error: None,
             tool_catalog: None,
             base_url: None,
@@ -8502,7 +8487,6 @@ async fn thread_detail_cursor_precedes_projection_reads_at_terminal_boundary() -
             compaction_id: None,
             usage: Usage::default(),
             status: TurnOutcomeStatus::Completed,
-            error_source: None,
             error: None,
             tool_catalog: None,
             base_url: None,
@@ -8757,7 +8741,6 @@ async fn thread_detail_materializes_stream_prefixes_before_their_delta_cursor() 
             compaction_id: None,
             usage: Usage::default(),
             status: TurnOutcomeStatus::Interrupted,
-            error_source: None,
             error: None,
             tool_catalog: None,
             base_url: None,
@@ -8900,7 +8883,6 @@ async fn thread_detail_delta_boundary_is_replay_idempotent() -> Result<()> {
             compaction_id: None,
             usage: Usage::default(),
             status: TurnOutcomeStatus::Interrupted,
-            error_source: None,
             error: None,
             tool_catalog: None,
             base_url: None,
@@ -8973,7 +8955,6 @@ async fn terminal_turn_cancels_pending_user_input_and_clears_snapshot() -> Resul
             compaction_id: None,
             usage: Usage::default(),
             status: TurnOutcomeStatus::Completed,
-            error_source: None,
             error: None,
             tool_catalog: None,
             base_url: None,
@@ -9166,7 +9147,6 @@ async fn dynamic_tool_result_settles_snapshot_and_emits_one_safe_resolution() ->
             compaction_id: None,
             usage: Usage::default(),
             status: TurnOutcomeStatus::Completed,
-            error_source: None,
             error: None,
             tool_catalog: None,
             base_url: None,
@@ -9355,7 +9335,6 @@ async fn dynamic_tool_result_receipt_outlives_canceled_delivery_future() -> Resu
             compaction_id: None,
             usage: Usage::default(),
             status: TurnOutcomeStatus::Completed,
-            error_source: None,
             error: None,
             tool_catalog: None,
             base_url: None,
@@ -10188,7 +10167,6 @@ async fn dynamic_tool_timeout_clears_snapshot_and_emits_once() -> Result<()> {
             compaction_id: None,
             usage: Usage::default(),
             status: TurnOutcomeStatus::Completed,
-            error_source: None,
             error: None,
             tool_catalog: None,
             base_url: None,
@@ -10265,7 +10243,6 @@ async fn terminal_turn_cancels_pending_dynamic_tool_exactly_once() -> Result<()>
             compaction_id: None,
             usage: Usage::default(),
             status: TurnOutcomeStatus::Interrupted,
-            error_source: None,
             error: None,
             tool_catalog: None,
             base_url: None,
@@ -10383,7 +10360,6 @@ async fn approval_required_external_deny_is_denied() -> Result<()> {
             compaction_id: None,
             usage: Usage::default(),
             status: TurnOutcomeStatus::Completed,
-            error_source: None,
             error: None,
             tool_catalog: None,
             base_url: None,
@@ -10457,7 +10433,6 @@ async fn auto_review_force_prompt_is_denied_without_opening_a_modal() -> Result<
             compaction_id: None,
             usage: Usage::default(),
             status: TurnOutcomeStatus::Completed,
-            error_source: None,
             error: None,
             tool_catalog: None,
             base_url: None,
@@ -10574,7 +10549,6 @@ async fn forkguard_pump_never_auto_approves_a_force_prompt_hold() -> Result<()> 
             usage: Usage::default(),
             status: TurnOutcomeStatus::Completed,
             error: None,
-            error_source: None,
             tool_catalog: None,
             base_url: None,
         })
@@ -10654,7 +10628,6 @@ async fn forkguard_pump_never_auto_approves_a_force_prompt_hold() -> Result<()> 
             usage: Usage::default(),
             status: TurnOutcomeStatus::Completed,
             error: None,
-            error_source: None,
             tool_catalog: None,
             base_url: None,
         })
@@ -10774,7 +10747,6 @@ async fn approval_pends_until_interrupt_and_next_turn_can_start() -> Result<()> 
             compaction_id: None,
             usage: Usage::default(),
             status: TurnOutcomeStatus::Completed,
-            error_source: None,
             error: None,
             tool_catalog: None,
             base_url: None,
@@ -11224,7 +11196,6 @@ async fn thinking_delta_emits_agent_reasoning_item() -> Result<()> {
             compaction_id: None,
             usage: Usage::default(),
             status: TurnOutcomeStatus::Completed,
-            error_source: None,
             error: None,
             tool_catalog: None,
             base_url: None,
@@ -11365,7 +11336,6 @@ async fn approval_required_remember_flips_thread_auto_approve() -> Result<()> {
             compaction_id: None,
             usage: Usage::default(),
             status: TurnOutcomeStatus::Completed,
-            error_source: None,
             error: None,
             tool_catalog: None,
             base_url: None,
@@ -11454,7 +11424,6 @@ async fn elevation_required_with_stale_active_turn_is_denied() -> Result<()> {
             },
             status: TurnOutcomeStatus::Completed,
             error: None,
-            error_source: None,
             tool_catalog: None,
             base_url: None,
         })
@@ -11525,7 +11494,6 @@ async fn steer_turn_on_active_turn_records_item_and_event() -> Result<()> {
                     },
                     status: TurnOutcomeStatus::Completed,
                     error: None,
-                    error_source: None,
                     tool_catalog: None,
                     base_url: None,
                 })
@@ -11687,7 +11655,6 @@ async fn steer_receipts_outlive_caller_cancellation_after_engine_acceptance() ->
             compaction_id: None,
             usage: Usage::default(),
             status: TurnOutcomeStatus::Completed,
-            error_source: None,
             error: None,
             tool_catalog: None,
             base_url: None,
@@ -11778,7 +11745,6 @@ async fn steer_rejects_a_terminal_durable_turn_without_dispatch_or_item() -> Res
             compaction_id: None,
             usage: Usage::default(),
             status: TurnOutcomeStatus::Completed,
-            error_source: None,
             error: None,
             tool_catalog: None,
             base_url: None,
@@ -12057,7 +12023,6 @@ async fn compaction_lifecycle_emits_item_events_with_compaction_counts() -> Resu
                             },
                             status: TurnOutcomeStatus::Completed,
                             error: None,
-                            error_source: None,
                             tool_catalog: None,
                             base_url: None,
                         })
@@ -12098,7 +12063,6 @@ async fn compaction_lifecycle_emits_item_events_with_compaction_counts() -> Resu
                             },
                             status: TurnOutcomeStatus::Completed,
                             error: None,
-                            error_source: None,
                             tool_catalog: None,
                             base_url: None,
                         })
@@ -13117,7 +13081,6 @@ async fn agent_mail_release_acceptance_two_task_matrix() -> Result<()> {
             compaction_id: None,
             usage: Usage::default(),
             status: TurnOutcomeStatus::Completed,
-            error_source: None,
             error: None,
             tool_catalog: None,
             base_url: None,

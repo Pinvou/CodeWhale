@@ -34,7 +34,7 @@ use super::spec::{optional_u64, required_str};
 #[cfg(unix)]
 const BUFFER_LIMIT: usize = 512 * 1024;
 #[cfg(unix)]
-const OUTPUT_LIMIT: usize = 12 * 1024;
+const OUTPUT_LIMIT: usize = 32 * 1024;
 #[cfg(unix)]
 const DEFAULT_TIMEOUT_SECS: u64 = 120;
 #[cfg(unix)]
@@ -804,7 +804,7 @@ pub struct TerminalWaitTool;
 impl ToolSpec for TerminalWaitTool {
     terminal_tool_common!(
         "terminal/wait",
-        "Wait for the current foreground command in a live persistent terminal session and return the output produced since the previous call — at most 12KiB per call; if more was produced the middle is omitted in-band and cannot be re-fetched, so poll promptly for chatty commands. A prior-process shell is reported as stale/lost rather than reattached. The session buffer holds at most 512KiB; older bytes are dropped silently. (Unix only)"
+        "Wait for the current foreground command in a live persistent terminal session and return the output produced since the previous call — at most 32KiB per call; if more was produced the middle is omitted in-band and cannot be re-fetched, so poll promptly for chatty commands. A prior-process shell is reported as stale/lost rather than reattached. The session buffer holds at most 512KiB; older bytes are dropped silently. (Unix only)"
     );
     fn input_schema(&self) -> serde_json::Value {
         json!({"type":"object","properties":{"session":{"type":"string"},"timeout_secs":{"type":"integer","default":120,"minimum":1,"maximum":600}},"required":["session"]})

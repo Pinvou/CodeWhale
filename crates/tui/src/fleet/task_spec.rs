@@ -14,7 +14,10 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-const MAX_SCORER_READ_BYTES: u64 = 1_000_000;
+/// Upper bound on a scorer evidence file. Roomy enough for a full build/test
+/// log to serve as evidence; parsing a JSON file of this size is cheap, and a
+/// hard reject here fails the whole task verdict, not just slows it down.
+const MAX_SCORER_READ_BYTES: u64 = 10_000_000;
 const MAX_FLEET_ID_BYTES: usize = 128;
 const MAX_FLEET_NAME_BYTES: usize = 256;
 

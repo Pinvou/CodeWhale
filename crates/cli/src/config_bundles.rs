@@ -40,8 +40,10 @@ pub const BUNDLE_SCHEMA_VERSION: u64 = 1;
 /// Maximum number of HTTP redirects followed during a remote fetch.
 const MAX_REDIRECTS: usize = 5;
 
-/// Timeout for the remote fetch, in seconds.
-const FETCH_TIMEOUT_SECS: u64 = 30;
+/// Timeout for the remote fetch, in seconds. A full 5 MiB bundle needs a
+/// minute-scale budget on a slow link; failing at 30 s forced a full re-run
+/// of the import.
+const FETCH_TIMEOUT_SECS: u64 = 120;
 
 /// Credential-shaped value prefixes rejected even under a benign key name.
 /// Conservative on purpose: only well-known provider token shapes.

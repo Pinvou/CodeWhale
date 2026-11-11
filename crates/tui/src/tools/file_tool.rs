@@ -60,7 +60,7 @@ impl ToolSpec for ReadTool {
     }
 
     fn description(&self) -> &'static str {
-        "Read a file. PNG, JPEG, GIF, and WebP files up to 5 MiB are returned as images for visual inspection; BMP files and images above 5 MiB are detected but replaced with an omission note. Anything else is decoded as UTF-8 text; bytes that are not valid UTF-8 become replacement characters instead of failing the read, except that a payload carrying a NUL byte in its first 8 KiB, or beginning with a UTF-16 byte-order mark, is refused as binary. By default, text output is limited to 2000 complete lines or 50KB, whichever comes first. Use offset and limit to continue through large files."
+        "Read a text file. By default, output is limited to 2000 complete lines or 50KB, whichever comes first. Use offset and limit to continue through large files."
     }
 
     fn input_schema(&self) -> Value {
@@ -118,7 +118,7 @@ impl ToolSpec for WriteTool {
     }
 
     fn description(&self) -> &'static str {
-        "Write content to a file. Creates the file if it does not exist, overwrites it if it does, and creates parent directories automatically. Recommended at most 32KB; hard limit 64KB per call."
+        "Write content to a file. Creates the file if it does not exist, overwrites it if it does, and creates parent directories automatically. Recommended at most 32KB; hard limit 256KB per call."
     }
 
     fn input_schema(&self) -> Value {
@@ -129,7 +129,7 @@ impl ToolSpec for WriteTool {
                     "type": "string",
                     "description": "Path to the file to write (relative or absolute)."
                 },
-                "content": { "type": "string", "description": "Content; aim <=32KB, max 64KB." }
+                "content": { "type": "string", "description": "Content; aim <=32KB, max 256KB." }
             },
             "required": ["path", "content"],
             "additionalProperties": false

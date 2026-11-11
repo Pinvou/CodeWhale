@@ -116,7 +116,7 @@ impl ToolSpec for WebTool {
                 },
                 "max_results": {
                     "type": "integer",
-                    "description": "Maximum search results (action=search; 1-10, default 5)"
+                    "description": "Maximum search results (action=search; 1-25, default 10)"
                 },
                 "timeout_ms": {
                     "type": "integer",

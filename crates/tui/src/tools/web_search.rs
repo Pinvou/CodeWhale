@@ -215,7 +215,7 @@ impl ToolSpec for WebSearchTool {
                 },
                 "max_results": {
                     "type": "integer",
-                    "description": "Maximum number of results to return (default: 5, max: 10)"
+                    "description": "Maximum number of results to return (default: 10, max: 25)"
                 },
                 "timeout_ms": {
                     "type": "integer",

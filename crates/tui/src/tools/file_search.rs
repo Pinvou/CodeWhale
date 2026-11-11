@@ -40,7 +40,7 @@ impl ToolSpec for FileSearchTool {
     }
 
     fn description(&self) -> &'static str {
-        "Find workspace files by name using fuzzy matching with score-based ranking. Use this instead of `find -name` or `fd` in `bash` for filename search. Respects .gitignore; by default skips target/**, node_modules/**, lock files, and similar generated artifacts — any `exclude` you provide fully replaces that default list, so repeat the defaults you still want. `limit` accepts at most 200. Pass `extensions` to filter by suffix."
+        "Find workspace files by name using fuzzy matching with score-based ranking. Use this instead of `find -name` or `fd` in `bash` for filename search. Respects .gitignore; by default skips target/**, node_modules/**, lock files, and similar generated artifacts — any `exclude` you provide fully replaces that default list, so repeat the defaults you still want. `limit` accepts at most 1000. Pass `extensions` to filter by suffix."
     }
 
     fn input_schema(&self) -> Value {
@@ -57,7 +57,7 @@ impl ToolSpec for FileSearchTool {
                 },
                 "limit": {
                     "type": "integer",
-                    "description": "Maximum number of results to return (default: 20)."
+                    "description": "Maximum number of results to return (default: 50)."
                 },
                 "extensions": {
                     "type": "array",
@@ -93,7 +93,7 @@ impl ToolSpec for FileSearchTool {
             return Err(ToolError::invalid_input("query cannot be empty"));
         }
 
-        let limit = optional_u64(&input, "limit", 20)?.clamp(1, 200) as usize;
+        let limit = optional_u64(&input, "limit", 50)?.clamp(1, 1000) as usize;
         // S1: enumerating names inside a denied tree is a read of that tree —
         // Seatbelt's `deny file-read*` blocks readdir of denied dirs, so a
         // denied search root is refused rather than walked. The raw spelling is

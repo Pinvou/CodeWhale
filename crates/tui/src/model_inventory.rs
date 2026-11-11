@@ -747,11 +747,14 @@ mod tests {
     fn inventory_router_timeout_secs_respects_config_with_clamp() {
         let _env_lock = crate::test_support::lock_test_env();
 
-        // Unset: the legacy default (4 s) survives.
+        // Unset: the default classifier timeout survives.
         let config = Config {
             ..Default::default()
         };
-        assert_eq!(ModelInventory::from_config(&config).router_timeout_secs, 4);
+        assert_eq!(
+            ModelInventory::from_config(&config).router_timeout_secs,
+            crate::config::DEFAULT_AUTO_ROUTER_TIMEOUT_SECS
+        );
 
         // Explicit value is honored.
         let config = Config {
@@ -760,13 +763,13 @@ mod tests {
                     provider: Some("custom".to_string()),
                     model: Some("local-router".to_string()),
                     thinking: None,
-                    timeout_secs: Some(15),
+                    timeout_secs: Some(20),
                 }),
                 ..Default::default()
             }),
             ..Default::default()
         };
-        assert_eq!(ModelInventory::from_config(&config).router_timeout_secs, 15);
+        assert_eq!(ModelInventory::from_config(&config).router_timeout_secs, 20);
 
         // Out-of-range values clamp to the safety ceiling, never to zero.
         let config = Config {
@@ -799,7 +802,10 @@ mod tests {
             }),
             ..Default::default()
         };
-        assert_eq!(ModelInventory::from_config(&config).router_timeout_secs, 4);
+        assert_eq!(
+            ModelInventory::from_config(&config).router_timeout_secs,
+            crate::config::DEFAULT_AUTO_ROUTER_TIMEOUT_SECS
+        );
     }
 
     #[test]
