@@ -321,6 +321,43 @@ async fn first_acp_error_is_preserved_but_committed_retry_does_not_dispatch_agai
 }
 
 #[tokio::test]
+async fn disconnect_during_acp_response_rejects_the_old_lease_and_later_receipt_read() {
+    let fixture = Fixture::new("allow");
+    let stopped = &fixture;
+    assert_eq!(
+        fixture
+            .handler()
+            .handle(
+                &fixture.lease,
+                "a-ref-permission",
+                &fixture.body,
+                move |_, _, _| async move {
+                    stopped.controlled.stop();
+                    Ok(())
+                },
+            )
+            .await
+            .unwrap_err(),
+        "desktop_remote_not_connected"
+    );
+    let before = fixture.authority.view(fixture.approval()).unwrap();
+    assert_eq!(
+        fixture
+            .handler()
+            .handle(
+                &fixture.lease,
+                "a-ref-permission",
+                &fixture.body,
+                |_, _, _| async { panic!("disconnected old lease cannot dispatch") },
+            )
+            .await
+            .unwrap_err(),
+        "desktop_remote_not_connected"
+    );
+    assert_eq!(fixture.authority.view(fixture.approval()).unwrap(), before);
+}
+
+#[tokio::test]
 async fn a_terminal_task_without_a_committed_receipt_never_obtains_a_new_allow() {
     let fixture = Fixture::new("allow");
     fixture.finish(RemoteTaskTerminal::Cancelled);
