@@ -8,6 +8,7 @@ import unittest
 import json
 import os
 import tempfile
+import subprocess
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -63,7 +64,7 @@ class PortalRedisGuardTests(unittest.TestCase):
         meta, item = self.fixture()
         info = 'run_id:' + 'a' * 40 + '\r\nredis_version:8.2.11\r\nredis_mode:standalone\r\ntcp_port:6379\r\n'
         calls = []
-        def docker(args):
+        def docker(args, **kwargs):
             if args[1:3] == ['ps', '--all']: return meta['id']
             if args[1] == 'inspect': return json.dumps([item])
             if args[1] == 'exec': return info
@@ -80,7 +81,7 @@ class PortalRedisGuardTests(unittest.TestCase):
     def test_stop_without_ledger_still_retires_exact_job_service_and_volume(self):
         meta, item = self.fixture()
         calls, stopped = [], False
-        def docker(args):
+        def docker(args, **kwargs):
             nonlocal stopped
             calls.append(args)
             if args[1:3] == ['ps','--all']: return '' if stopped else meta['id']
@@ -119,7 +120,7 @@ class PortalRedisGuardTests(unittest.TestCase):
                 if fault != 'missing_directory':
                     receipt.write_text('{invalid' if fault == 'malformed' else original, encoding='utf-8')
                 stopped, calls = False, []
-                def docker(args):
+                def docker(args, **kwargs):
                     nonlocal stopped
                     calls.append(args)
                     if args[1:3] == ['ps','--all']: return '' if stopped else meta['id']
@@ -155,7 +156,7 @@ class PortalRedisGuardTests(unittest.TestCase):
     def test_receipt_write_failure_recovers_next_attempt_without_repeating_stop(self):
         meta, item = self.fixture()
         stopped, stop_count = False, 0
-        def docker(args):
+        def docker(args, **kwargs):
             nonlocal stopped, stop_count
             if args[1:3] == ['ps','--all']: return '' if stopped else meta['id']
             if args[1] == 'inspect': return json.dumps([item])
@@ -178,7 +179,7 @@ class PortalRedisGuardTests(unittest.TestCase):
         meta, item = self.fixture()
         for live in [False,True]:
             stopped=False
-            def docker(args):
+            def docker(args, **kwargs):
                 nonlocal stopped
                 if args[1:3] == ['ps','--all']: return meta['id'] if live and not stopped else ''
                 if args[1]=='inspect': return json.dumps([item])
@@ -196,6 +197,39 @@ class PortalRedisGuardTests(unittest.TestCase):
                 self.assertEqual(state['run_id'],'a'*40)
                 self.assertEqual(state['owner_id'],'portal-ci-'+'c'*32)
                 self.assertNotIn('outside',state)
+
+
+    def test_retirement_waits_for_delayed_autoremove_with_bounded_query_timeouts(self):
+        now, volume_reads, waits = [0.0], [0], []
+        def docker(args, **kwargs):
+            self.assertGreater(kwargs['timeout'],0)
+            self.assertLessEqual(kwargs['timeout'],5)
+            if args[1:3]==['ps','--all']: return ''
+            if args[1:3]==['volume','ls']:
+                volume_reads[0]+=1
+                return 'b'*64 if volume_reads[0]==1 else ''
+            self.fail('observer must not mutate Docker')
+        def pause(seconds): waits.append(seconds);now[0]+=seconds
+        with patch.object(CI,'run',docker),patch.object(CI.time,'monotonic',lambda:now[0]),patch.object(CI.time,'sleep',pause):
+            self.assertTrue(CI.observe_retirement('a'*64,'b'*64,budget=1))
+        self.assertEqual(volume_reads[0],2)
+        self.assertEqual(waits,[0.25])
+
+    def test_retirement_deadline_never_turns_persistent_resources_into_success(self):
+        now, calls = [0.0], []
+        def docker(args, **kwargs):
+            calls.append((args,kwargs['timeout']))
+            elapsed=min(0.2,kwargs['timeout'])
+            now[0]+=elapsed  # The subprocess honors its actual remaining timeout.
+            if elapsed<0.2: raise subprocess.TimeoutExpired(args,kwargs['timeout'])
+            return 'a'*64 if args[1]=='ps' else 'b'*64
+        def pause(seconds): now[0]+=seconds
+        with patch.object(CI,'run',docker),patch.object(CI.time,'monotonic',lambda:now[0]),patch.object(CI.time,'sleep',pause):
+            with self.assertRaises(subprocess.TimeoutExpired):
+                CI.observe_retirement('a'*64,'b'*64,budget=1)
+        self.assertLessEqual(now[0],1.0)
+        self.assertTrue(all(0<timeout<=1 for _,timeout in calls))
+        self.assertTrue(all(args[1] in ('ps','volume') for args,_ in calls))
 
     def events(self):
         names = SELECT.ROOTS | {'TestRealRedisPortalSharedAdmissionAndCapacity/' + x for x in SELECT.CAPACITY_CASES}

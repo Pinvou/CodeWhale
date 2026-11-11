@@ -7,6 +7,7 @@ import re
 import socket
 import subprocess
 import uuid
+import time
 
 IMAGE = 'redis:8.2-alpine@sha256:fe9daae35cd4fd6ec22416aa4fe0cf6b3e36741e06ff45b9986253fe2a81c041'
 SERVICE = 'portal-redis'
@@ -35,8 +36,8 @@ def inspect_service(meta, item, healthy=True):
     return port, mounts[0]['Name']
 
 
-def run(args):
-    result = subprocess.run(args, capture_output=True, text=True, timeout=35)
+def run(args, *, timeout=35):
+    result = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
     if result.returncode:
         raise RuntimeError('owned Redis service operation failed')
     return result.stdout.strip()
@@ -90,6 +91,26 @@ def save(path, value):
 
 
 
+
+def observe_retirement(identifier, volume, *, budget=30):
+    # Stop completion and AutoRemove completion are distinct. Observe only the
+    # two already-proven identities, with one budget covering subprocess waits.
+    deadline = time.monotonic() + budget
+    while True:
+        observations = []
+        for command in [['docker', 'ps', '--all', '--quiet', '--no-trunc'], ['docker', 'volume', 'ls', '--quiet']]:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            observations.append(run(command, timeout=min(5, remaining)).splitlines())
+        if identifier not in observations[0] and volume not in observations[1]:
+            return True
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        time.sleep(min(0.25, remaining))
+
+
 def retire_owned_service(meta, path):
     """Diagnostic I/O must never gate retirement after live identity is proven.
 
@@ -140,7 +161,7 @@ def retire_owned_service(meta, path):
     if not present:
         if previous is None:
             raise ValueError('Redis service disappeared before volume registration')
-        if previous['volume'] in run(['docker', 'volume', 'ls', '--quiet']).splitlines():
+        if not observe_retirement(identifier, previous['volume']):
             raise ValueError('Redis anonymous volume remains')
         previous.update(state='released', cleanup_failed=False)
         publish(previous)
@@ -169,9 +190,7 @@ def retire_owned_service(meta, path):
         errors.add('DOCKER_STOP_FAILED')
     clean = False
     try:
-        containers = run(['docker', 'ps', '--all', '--quiet', '--no-trunc']).splitlines()
-        volumes = run(['docker', 'volume', 'ls', '--quiet']).splitlines()
-        clean = identifier not in containers and volume not in volumes
+        clean = observe_retirement(identifier, volume)
     except Exception:
         errors.add('RETIREMENT_CHECK_FAILED')
     receipt.update(state='released' if clean else 'unconfirmed', cleanup_failed=not clean)
