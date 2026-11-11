@@ -104,6 +104,7 @@
     "test:web-bootstrap": "node tests/web_bootstrap_transport.test.mjs",
     "test:api-key-gate": "node tests/api_key_gate_logic.test.js && node --test tests/model_access_state.test.mjs tests/account_platform_model_access_gate.test.mjs",
     "test:model-access-ui": "node tests/model_access_ui_smoke.mjs",
+    "test:disabled-model-hover-ui": "node tests/disabled_model_hover_ui_smoke.mjs",
     "test:artifact-deliverable": "node tests/artifact_deliverable_logic.test.js",
     "test:canonical-tools": "node tests/canonical_tool_contract.test.js",
     "test:artifact-preview": "node tests/artifact_preview_navigation.test.mjs",
