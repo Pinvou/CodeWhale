@@ -14,6 +14,7 @@ export const VIEW_LOADERS = {
   knowledge: () => import('../features/knowledge/KnowledgeView.jsx'),
   modelStore: () => import('../features/model-store/ModelStoreView.jsx'),
   monitor: () => import('../features/monitor/MonitorView.jsx'),
+  deviceManager: () => import('../features/device-manager/DeviceManagerView.jsx'),
   search: () => import('../features/search/SearchView.jsx'),
   teamRelay: () => import('../features/team-relay/TeamRelayView.jsx'),
   accountPlatformPopover: () => import('../features/account-platform/AccountPlatformPopover.jsx'),
