@@ -20,33 +20,28 @@ func providerCallWithAdmissionHook[T any](ctx context.Context, coordinator *Paym
 	capabilities := coordinator.Capabilities()
 	key := resilience.Key(capabilities.ProviderID+"@"+capabilities.Version, capability, route)
 	var admissionErr error
-	var cancelProbe func()
+	var permit *resilience.Permit
 	if uncertainOnFailure {
-		admissionErr = coordinator.breaker.BeforeHighRisk(key)
+		permit, admissionErr = coordinator.breaker.AdmitHighRisk(key)
 	} else {
-		cancelProbe, admissionErr = coordinator.breaker.BeforeReadOnly(key)
+		permit, admissionErr = coordinator.breaker.AdmitReadOnly(key)
 	}
 	if admissionErr != nil {
 		return zero, admissionErr
 	}
+	defer permit.Cancel()
 	if beforeAttempt != nil {
 		if err := beforeAttempt(); err != nil {
-			if cancelProbe != nil {
-				cancelProbe()
-			}
 			return zero, err
 		}
 	}
 	attempt, err := coordinator.repository.beginProviderAttempt(ctx, capabilities.ProviderID, capabilities.Version, capability, route, route, scope)
 	if err != nil {
-		if cancelProbe != nil {
-			cancelProbe()
-		}
 		return zero, err
 	}
 	result, err := call()
 	if err == nil {
-		coordinator.breaker.Record(key, resilience.Success)
+		permit.Record(resilience.Success)
 		if coordinator.repository.finishProviderAttempt(ctx, attempt, "SUCCESS", nil) == nil {
 			_, _ = coordinator.repository.EvaluateProviderStopLosses(ctx, 100)
 		}
@@ -61,7 +56,7 @@ func providerCallWithAdmissionHook[T any](ctx context.Context, coordinator *Paym
 		outcome = resilience.UncertainResult
 		observationOutcome = "UNCERTAIN_RESULT"
 	}
-	coordinator.breaker.Record(key, outcome)
+	permit.Record(outcome)
 	if coordinator.repository.finishProviderAttempt(ctx, attempt, observationOutcome, err) == nil {
 		_, _ = coordinator.repository.EvaluateProviderStopLosses(ctx, 100)
 	}

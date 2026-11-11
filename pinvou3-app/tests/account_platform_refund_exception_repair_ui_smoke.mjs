@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import { adminLayoutCopy } from '../src/shared/account-layout-i18n.js';
 import { createServer } from './helpers/vite-fixture.mjs';
+import { navigateFixture } from './helpers/navigate-fixture.mjs';
 import react from '@vitejs/plugin-react';
 import * as puppeteer from './helpers/puppeteer-fixture.mjs';
 const root = import.meta.dirname + '/..';
@@ -16,8 +17,23 @@ const browser = await puppeteer.launch({ executablePath: browserPath, headless: 
 const results = []; let pass = 0, fail = 0;
 async function run(name, query, action) {
   const page = await browser.newPage(); page.setDefaultTimeout(5000); const errors = []; page.on('pageerror', error => errors.push(error.message));
-  try { await page.goto(server.resolvedUrls.local[0] + 'tests/fixtures/refund-exception-repair-host.html?' + query); await page.waitForFunction(() => window.f13 && document.querySelector('main')); await action(page); assert.deepEqual(errors, []); pass++; results.push({ name, pass: true }); }
-  catch (error) { fail++; results.push({ name, pass: false, error: error.message, diagnostic: await page.evaluate(() => ({ text: document.body.innerText, calls: window.f13?.calls })).catch(() => null) }); }
+  const url = server.resolvedUrls.local[0] + 'tests/fixtures/refund-exception-repair-host.html?' + query;
+  const failedFixtureLoads = []; let stage = 'load';
+  page.on('requestfailed', request => {
+    if (failedFixtureLoads.length >= 8 || request.method() !== 'GET'
+        || !['document', 'script', 'stylesheet', 'image', 'font'].includes(request.resourceType())) return;
+    try { if (new URL(request.url()).origin !== new URL(url).origin) return; } catch { return; }
+    const code = request.failure()?.errorText;
+    failedFixtureLoads.push({ type: request.resourceType(), code: /^net::ERR_[A-Z_]{1,64}$/.test(code || '') ? code : 'unclassified' });
+  });
+  try {
+    await navigateFixture(page, url, signal => {
+      signal.throwIfAborted();
+      return page.waitForFunction(() => window.f13 && document.querySelector('main'), { signal });
+    });
+    stage = 'action'; await action(page); assert.deepEqual(errors, []); pass++; results.push({ name, pass: true });
+  }
+  catch (error) { fail++; results.push({ name, pass: false, error: error.message, diagnostic: { stage, pageErrorCount: errors.length, failedFixtureLoads, ...await page.evaluate(() => ({ text: document.body.innerText, calls: window.f13?.calls })).catch(() => ({})) } }); }
   finally { await page.close(); }
 }
 async function openForm(page) {
