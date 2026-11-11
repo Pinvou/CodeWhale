@@ -275,7 +275,7 @@ impl ToolSpec for RunVerifiersTool {
                 },
                 "commands": {
                     "type": "array",
-                    "description": "Optional explicit verifier gates. Commands run directly as program+args, not through a shell. Use program='bash', args=['-lc', '...'] only when Bash is intentionally part of the verifier.",
+                    "description": "Optional explicit verifier gates. Foreground gates run directly as program+args, not through a shell; background gates are rendered into a single command line and run through the detected platform shell, so shell quoting rules apply there. Use program='bash', args=['-lc', '...'] only when Bash is intentionally part of the verifier.",
                     "items": {
                         "type": "object",
                         "properties": {
@@ -1389,6 +1389,55 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(unix)]
+    async fn run_verifiers_gate_truncation_keeps_the_tail_where_failures_print() {
+        // #242: compilers and test runners print their failure summaries at
+        // the END of long output, so gate truncation must keep the tail, not
+        // the head. ~40 KB of noise, then the summary, then a failing exit.
+        let tmp = tempdir().expect("tempdir");
+        let ctx = ToolContext::new(tmp.path());
+        let tool = RunVerifiersTool;
+        let script = "printf 'x%.0s' $(seq 1 40000); printf '\\ntest result: FAILED. 0 passed; 1 failed\\n'; exit 1";
+        let result = tool
+            .execute(
+                json!({
+                    "profile": "auto",
+                    "commands": [
+                        { "name": "noisy-failure", "program": "sh", "args": ["-c", script] }
+                    ]
+                }),
+                &ctx,
+            )
+            .await
+            .expect("execute");
+
+        let parsed: RunVerifiersOutput =
+            serde_json::from_str(&result.content).expect("verifier output json");
+        assert_eq!(parsed.failed, 1, "result: {}", result.content);
+        let gate = &parsed.gates[0];
+        assert!(
+            gate.stdout_truncated,
+            "40 KB of gate output must be marked truncated"
+        );
+        assert!(
+            gate.stdout.len() < 40_000,
+            "the kept form must be the truncated shape, got {} bytes",
+            gate.stdout.len()
+        );
+        assert!(
+            gate.stdout.contains("test result: FAILED"),
+            "the failure summary in the tail must survive truncation: …{:?}",
+            gate.stdout.chars().rev().take(200).collect::<String>()
+        );
+        assert!(
+            gate.stdout
+                .trim_end()
+                .ends_with("test result: FAILED. 0 passed; 1 failed"),
+            "the summary must sit at the end of the kept output"
+        );
+    }
+
+    #[tokio::test]
     async fn run_verifiers_emits_hunt_verdict_mapping() {
         let tmp = tempdir().expect("tempdir");
         let ctx = ToolContext::new(tmp.path());
@@ -1556,5 +1605,70 @@ mod tests {
             "stdout should include the test listing: {:?}",
             output.stdout
         );
+    }
+
+    #[tokio::test]
+    async fn run_verifiers_background_reports_null_task_ids_for_skipped_and_failed_gates() {
+        // The background copy promises "a task id per gate, null when a gate
+        // is skipped or fails to start". Pin both null arms: a gate without
+        // a program is skipped before spawn, and a gate whose working
+        // directory does not exist fails validation inside the shell
+        // manager, reporting failed_to_start with the accurate error.
+        let tmp = tempdir().expect("tempdir");
+        let ctx = ToolContext::new(tmp.path());
+
+        let missing = tmp.path().join("definitely-missing-cwd");
+        let failed = start_background_gates(
+            &ctx,
+            VerifierProfile::Auto,
+            VerifierLevel::Quick,
+            vec![VerifierGate {
+                name: "no-such-cwd".to_string(),
+                ecosystem: "custom".to_string(),
+                cwd: missing,
+                program: Some("true".to_string()),
+                args: vec![],
+                env: vec![],
+                skipped_reason: None,
+            }],
+        )
+        .expect("background result");
+        let parsed: RunVerifiersBackgroundOutput =
+            serde_json::from_str(&failed.content).expect("background output json");
+        assert_eq!(parsed.failed_to_start, 1, "{}", parsed.summary);
+        assert!(!parsed.success);
+        let job = &parsed.jobs[0];
+        assert_eq!(job.status, "failed_to_start");
+        assert!(
+            job.task_id.is_none(),
+            "a failed-to-start gate must carry no task id"
+        );
+        let error = job.error.as_deref().expect("failure reason");
+        assert!(error.contains("unavailable"), "{error}");
+
+        let skipped = start_background_gates(
+            &ctx,
+            VerifierProfile::Auto,
+            VerifierLevel::Quick,
+            vec![VerifierGate {
+                name: "not-applicable".to_string(),
+                ecosystem: "custom".to_string(),
+                cwd: tmp.path().to_path_buf(),
+                program: None,
+                args: vec![],
+                env: vec![],
+                skipped_reason: Some("tooling not installed".to_string()),
+            }],
+        )
+        .expect("background result");
+        let parsed: RunVerifiersBackgroundOutput =
+            serde_json::from_str(&skipped.content).expect("background output json");
+        let job = &parsed.jobs[0];
+        assert_eq!(job.status, "skipped");
+        assert!(
+            job.task_id.is_none(),
+            "a skipped gate must carry no task id"
+        );
+        assert_eq!(job.skipped_reason.as_deref(), Some("tooling not installed"));
     }
 }

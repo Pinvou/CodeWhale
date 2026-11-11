@@ -2134,6 +2134,11 @@ fn valid_sandbox_id(id: &str) -> bool {
 mod tests {
     use super::*;
 
+    #[test]
+    fn cloud_prompt_cap_is_the_audited_literal() {
+        assert_eq!(MAX_PROMPT_CHARS, 64_000, "4k → 64k audit raise");
+    }
+
     fn remotes(rows: &[(&str, &str)]) -> Vec<GitRemote> {
         rows.iter()
             .map(|(name, url)| GitRemote {

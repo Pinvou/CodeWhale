@@ -1161,6 +1161,7 @@
   "VoiceErrNetwork": "Giọng nói: yêu cầu chuyển giọng nói thất bại",
   "VoiceErrEmptySend": "Giọng nói: không có nội dung để gửi",
   "VoiceErrTooShort": "Giọng nói: không phát hiện giọng nói, bản ghi quá ngắn",
+  "VoiceErrRecorderStalled": "Giọng nói: trình ghi âm không phản hồi, âm thanh đã ghi bị loại bỏ. Hãy kiểm tra micrô và thử lại.",
   "VoiceRecording": "🎙 Đang ghi âm... hãy nói",
   "VoiceProcessing": "🎙 Đang chuyển thành văn bản...",
   "VoiceTranscribed": "🎙 Đã chuyển xong",

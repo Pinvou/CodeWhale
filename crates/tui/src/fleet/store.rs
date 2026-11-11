@@ -349,6 +349,14 @@ impl FleetFile {
                         "member `{}` display_name exceeded {MAX_MEMBER_DISPLAY_NAME_CHARS} characters; clamped",
                         member.id,
                     ));
+                    // `logging::warn` is verbose-gated and the TUI force-disables
+                    // verbose, so the primary fleet surface would never see it;
+                    // `tracing` lands in the file log unconditionally.
+                    tracing::warn!(
+                        "fleet member `{}` display_name exceeded \
+                         {MAX_MEMBER_DISPLAY_NAME_CHARS} characters; clamped",
+                        member.id,
+                    );
                     member.display_name = Some(clipped);
                 }
             }
@@ -1123,10 +1131,7 @@ display_name = "{long}"
             .display_name
             .as_deref()
             .expect("display_name kept");
-        assert_eq!(
-            display_name.chars().count(),
-            MAX_MEMBER_DISPLAY_NAME_CHARS
-        );
+        assert_eq!(display_name.chars().count(), MAX_MEMBER_DISPLAY_NAME_CHARS);
     }
 
     #[test]

@@ -792,7 +792,7 @@ impl ReadFileTool {
         // delegate, so the message says so instead of naming unreachable commands.
         if contract_read_payload_is_binary(&bytes) {
             return Err(ToolError::execution_failed(format!(
-                "{path_str} is a binary file ({}); read returns text only. Identify it with `file` if your role has a shell; if it is a zip-based document (.pptx/.docx/.xlsx/.zip), list its members with `unzip -l` and read them with `unzip -p` under a role that permits unzip. If neither command is available to you, hand the file to a role that can extract it instead of re-reading.",
+                "{path_str} is a binary file ({}); read returns text or inline images, never raw binary. Identify it with `file` if your role has a shell; if it is a zip-based document (.pptx/.docx/.xlsx/.zip), list its members with `unzip -l` and read them with `unzip -p` under a role that permits unzip. If neither command is available to you, hand the file to a role that can extract it instead of re-reading.",
                 contract_format_size(bytes.len())
             )));
         }

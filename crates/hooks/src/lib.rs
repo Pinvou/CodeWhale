@@ -630,6 +630,59 @@ mod tests {
         cleanup();
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn unix_socket_sink_times_out_when_the_receiver_never_reads() {
+        use tokio::net::UnixListener;
+
+        let (root, socket_path) = unique_short_socket_path("slowreader");
+        std::fs::create_dir_all(&root).expect("mkdir");
+        let _ = std::fs::remove_file(&socket_path);
+        let listener = UnixListener::bind(&socket_path).expect("bind");
+        let sink = UnixSocketHookSink::new(socket_path.clone());
+        let cleanup = || {
+            let _ = std::fs::remove_file(&socket_path);
+            let _ = std::fs::remove_dir_all(&root);
+        };
+
+        // Accept but never read: once the socket buffer fills, `write_all`
+        // pends until the sink's total delivery budget expires — the wedge
+        // the timeout exists to bound (a hook sink previously blocked the
+        // dispatcher forever here).
+        let filler = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept");
+            let _ = stream;
+            tokio::time::sleep(Duration::from_secs(30)).await;
+        });
+
+        // A multi-megabyte payload guarantees the buffer fills even though
+        // the peer accepted the connection.
+        let event = HookEvent::ResponseStart {
+            response_id: "x".repeat(2 * 1024 * 1024),
+        };
+        let started = std::time::Instant::now();
+        let result = sink.emit(&event).await;
+        let elapsed = started.elapsed();
+
+        assert!(
+            result.is_err(),
+            "a receiver that never reads must hit the delivery budget; got Ok"
+        );
+        let message = format!("{}", result.unwrap_err());
+        assert!(
+            message.contains("timed out after 5s"),
+            "the error must name the expired budget; got: {message}"
+        );
+        assert!(
+            elapsed >= Duration::from_secs(4),
+            "the write must pend until the budget, not fail early; took {elapsed:?}"
+        );
+
+        filler.abort();
+        let _ = filler.await;
+        cleanup();
+    }
+
     #[derive(Default)]
     struct RecordingSink {
         events: Mutex<Vec<Value>>,

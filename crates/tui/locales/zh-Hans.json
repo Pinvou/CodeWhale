@@ -1161,6 +1161,7 @@
   "VoiceErrNetwork": "语音：转录请求失败",
   "VoiceErrEmptySend": "语音：没有可发送的内容",
   "VoiceErrTooShort": "语音：未检测到有效语音，录制时间过短",
+  "VoiceErrRecorderStalled": "语音：录音程序停止响应，已捕获的音频被丢弃，请检查麦克风设备后重试",
   "VoiceRecording": "🎙 正在录音...请说话",
   "VoiceProcessing": "🎙 正在转录...",
   "VoiceTranscribed": "🎙 转录完成",

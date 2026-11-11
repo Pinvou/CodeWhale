@@ -47,12 +47,14 @@ use crate::logging;
 /// — survives shortening. Over-length descriptions are reported by
 /// `/skills` as a load warning rather than silently cut mid-sentence.
 pub(crate) const MAX_SKILL_DESCRIPTION_CHARS: usize = 400;
-/// Upper bound on `SKILL.md` size during discovery. Mirrors the audit-side
-/// guard in `skills/audit.rs` (`AUDIT_MAX_SKILL_MD_BYTES`): instruction files
-/// are small, so a file near this cap is corrupt or hostile, and discovery
-/// must not read arbitrary disk contents into memory. Oversized files are
-/// reported as a discovery warning and the skill is skipped.
-const DISCOVERY_MAX_SKILL_MD_BYTES: u64 = 1024 * 1024;
+/// Upper bound on `SKILL.md` size during discovery. One shared constant with
+/// the audit-side guard in `skills/audit.rs`: discovery and `/skills` audit
+/// must agree on what "oversized" means, or a file loads into the
+/// model-facing registry and is then flagged Oversized by audit. Instruction
+/// files are small, so a file near this cap is corrupt or hostile, and
+/// discovery must not read arbitrary disk contents into memory. Oversized
+/// files are reported as a discovery warning and the skill is skipped.
+const DISCOVERY_MAX_SKILL_MD_BYTES: u64 = audit::AUDIT_MAX_SKILL_MD_BYTES;
 /// Floor for the model-facing skill index budget, in chars. The real budget
 /// scales with the route's context window ([`skills_prompt_budget_chars`]);
 /// this floor keeps tiny local windows from erasing the index altogether.
