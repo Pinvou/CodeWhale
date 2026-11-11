@@ -266,6 +266,108 @@ test('web ensureSession：尾部 await 期间再进草稿 → 物化中止不漂
   await p;
 });
 
+// ── materializeSession 草稿内容保护（round-38 review P2，诊断直达）──
+// 与桌面桥同款（session_nav_race.test.mjs 的 tauri 侧钉）：等待窗口之后
+// 晚到的物化遇「未物化草稿 + 未发送文本」必须拒答 null，草稿原地保留；
+// 空草稿与无参调用保持既有语义。Web 无目录选择通道，只钉文本半边。
+
+test('web materializeSession：protectUserDraft 遇未发送草稿 → 放弃且草稿存活', async () => {
+  const rt = bootWebBridge();
+  rt.flat.setComposerDraft('采样窗口里新写的未发送草稿');
+  const refused = await rt.sessions.materializeSession({ protectUserDraft: true });
+  assert.equal(refused, null);
+  const view = rt.view();
+  assert.equal(view.activeSessionId, null, '不得物化覆盖用户草稿');
+  assert.equal(view.composerDraft, '采样窗口里新写的未发送草稿', '未发送文本必须原地保留');
+});
+
+test('web materializeSession：protectUserDraft 空草稿照常物化', async () => {
+  const rt = bootWebBridge();
+  const create = rt.defer('web_access_create_session');
+  const list = rt.defer('list_sessions');
+  const pending = rt.sessions.materializeSession({ protectUserDraft: true });
+  create.resolve({ id: 'chat-ok', transcript_revision: 1 });
+  await new Promise(r => { setTimeout(r, 0); });
+  list.resolve([]);
+  assert.equal(await pending, 'chat-ok');
+  assert.equal(rt.view().activeSessionId, 'chat-ok');
+});
+
+test('web materializeSession：无参调用遇草稿保持显式入口语义', async () => {
+  const rt = bootWebBridge();
+  rt.flat.setComposerDraft('显式入口前的旧草稿');
+  const create = rt.defer('web_access_create_session');
+  const list = rt.defer('list_sessions');
+  const pending = rt.sessions.materializeSession();
+  create.resolve({ id: 'chat-ok', transcript_revision: 1 });
+  await new Promise(r => { setTimeout(r, 0); });
+  list.resolve([]);
+  assert.equal(await pending, 'chat-ok');
+  assert.equal(rt.view().activeSessionId, 'chat-ok');
+});
+
+// ── materializeSession 后台物化（round-39 review P2，zhuowp）──
+// 与桌面桥同款（session_nav_race.test.mjs 的 tauri 侧钉）：prompt 窗口决算
+// 发现用户已切到既有会话 B 时，晚到的物化改走 background——只创建 + 登记
+// （sessionStates buffer + refreshHistoryList 侧栏注册），不进草稿、不切工作
+// 集；随后 sendMessageToSession 钉定投递落进新会话，B 的活动地位、正文与
+// 未发送输入全程原样保留。
+
+test('web materializeSession：background 只登记不抢工作集，B 保持活动', async () => {
+  const rt = bootWebBridge();
+  rt.setHandler('web_access_load_session_chunk', ({ id }) => chunkResponse({
+    metadata: { id, title: id }, artifacts: [], transcript_revision: 1,
+    messages: [{ role: 'user', content: [{ type: 'text', text: 'B 的正文' }] }],
+  }));
+  await rt.sessions.switchToSession('chat-b');
+  rt.flat.setComposerDraft('B 里未发送的文字');
+  const create = rt.defer('web_access_create_session');
+  const list = rt.defer('list_sessions');
+  const pending = rt.sessions.materializeSession({ background: true });
+  create.resolve({ id: 'chat-bg', transcript_revision: 1 });
+  await new Promise(r => { setTimeout(r, 0); });
+  list.resolve([{ id: 'chat-b', title: 'B', updated_at: 1 }, { id: 'chat-bg', title: '新对话', updated_at: 2 }]);
+  assert.equal(await pending, 'chat-bg');
+  const view = rt.view();
+  assert.equal(view.activeSessionId, 'chat-b', 'B 仍是活动会话（不得 enterDraft/switchActiveTo）');
+  assert.equal(view.composerDraft, 'B 里未发送的文字', '未发送文字原地保留');
+  const bubble = view.chatItems.find(item => item.type === 'user');
+  assert.ok(bubble && String(bubble.text).includes('B 的正文'), 'B 的正文不被诊断会话顶掉');
+  assert.ok((view.sessions || []).some(s => s && s.id === 'chat-bg'), '新会话已登记侧栏历史');
+});
+
+test('web 后台物化会话的钉定发送：消息进新会话，B 视图不动', async () => {
+  const rt = bootWebBridge();
+  rt.setHandler('web_access_load_session_chunk', ({ id }) => chunkResponse({
+    metadata: { id, title: id }, artifacts: [], transcript_revision: 1,
+    messages: [{ role: 'user', content: [{ type: 'text', text: 'B 的正文' }] }],
+  }));
+  await rt.sessions.switchToSession('chat-b');
+  rt.flat.setComposerDraft('B 里未发送的文字');
+  const create = rt.defer('web_access_create_session');
+  const list = rt.defer('list_sessions');
+  const pending = rt.sessions.materializeSession({ background: true });
+  create.resolve({ id: 'chat-bg', transcript_revision: 1 });
+  await new Promise(r => { setTimeout(r, 0); });
+  list.resolve([{ id: 'chat-b', title: 'B', updated_at: 1 }, { id: 'chat-bg', title: '新对话', updated_at: 2 }]);
+  assert.equal(await pending, 'chat-bg');
+  // 钉定投递：chat 命令按 sessionId 落到后台新会话，B 的工作集不出现消息。
+  const chatCalls = [];
+  rt.setHandler('web_access_chat', (args) => { chatCalls.push(args); return Promise.resolve({}); });
+  const sent = await rt.flat.sendMessageToSession('chat-bg', '排查提示词');
+  assert.equal(sent.accepted, true);
+  const outcome = await sent.completion;
+  assert.equal(outcome.ok, true);
+  assert.equal(chatCalls.length, 1);
+  assert.equal(chatCalls[0].sessionId, 'chat-bg', '投递钉定后台新会话');
+  assert.equal(chatCalls[0].message, '排查提示词');
+  const view = rt.view();
+  assert.equal(view.activeSessionId, 'chat-b', '发送不改变活动会话');
+  assert.equal(view.composerDraft, 'B 里未发送的文字', '发送不吞 B 的未发送文字');
+  assert.ok(!view.chatItems.some(item => item.type === 'user' && String(item.text).includes('排查提示词')),
+    '排查消息不得出现在 B 的视图里');
+});
+
 // ── archiveSession：失败回滚不劫持新草稿 ──────────────────────────
 
 // Build the scheduled-run scenario: register the task via loadScheduledTasks

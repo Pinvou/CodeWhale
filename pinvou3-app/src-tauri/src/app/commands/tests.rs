@@ -3636,6 +3636,173 @@ fn web_settings_deferred_delete_serializes_with_a_concurrent_replacement() {
     });
 }
 
+// ---- conditional model cleanup: the deferred delete must stay inside the prefs lock ----
+// 三十五轮评审 P2：`delete_model_if_matches` 此前在事务返回（锁已释放）后才删
+// 凭据——A 的行删除提交后、凭据删除前，B 可为同 id 保存新配置与新密钥（同一
+// 确定性 `model:{id}` 引用），A 迟到的删除毁掉 B 的新密钥，两次操作都报成功。
+
+const BARRIER_MODEL_ID: &str = "m-recycle";
+const BARRIER_MODEL_ORIGINAL_KEY: &str = "model-original-secret-1234567890";
+const BARRIER_MODEL_REPLACEMENT_KEY: &str = "model-replacement-secret-1234567890";
+
+fn model_barrier_reference() -> crate::platform::credential_store::CredentialReference {
+    crate::platform::credential_store::CredentialReference::for_model(BARRIER_MODEL_ID)
+}
+
+fn model_barrier_store() -> (
+    std::sync::Arc<GatedDeleteStore>,
+    DeleteGate,
+    std::sync::mpsc::Receiver<()>,
+) {
+    let inner = MemoryCredentialStore::default();
+    inner
+        .set(&model_barrier_reference(), BARRIER_MODEL_ORIGINAL_KEY)
+        .expect("seed the original model keyring secret");
+    let (delete_started, delete_started_rx) = std::sync::mpsc::channel();
+    let gate = DeleteGate::default();
+    let store = std::sync::Arc::new(GatedDeleteStore {
+        inner,
+        delete_started,
+        gate: gate.clone(),
+    });
+    (store, gate, delete_started_rx)
+}
+
+fn model_barrier_replacement() -> SavedModel {
+    let mut model = model_deletion_test_model(BARRIER_MODEL_ID, true);
+    // 用户在等待窗口里把同 id 配置改属到另一端点/模型并保存；Replace 臂在
+    // prefs 锁内写入同一确定性引用的新密钥。
+    model.base_url = "http://127.0.0.1:8000/v1".to_string();
+    model.model = "user-picked-model".to_string();
+    model.api_key = BARRIER_MODEL_REPLACEMENT_KEY.to_string();
+    model.credential_action = Some(CredentialEditAction::Replace);
+    model
+}
+
+/// 与 [`run_delete_replacement_barrier`] 同一驱动结构，终态断言换成模型域：
+/// B 的替换密钥必须存活、同 id 行必须是 B 的改属配置。
+fn run_model_delete_replacement_barrier(
+    a_delete: impl FnOnce() -> Result<bool, String> + Send + 'static,
+    b_replace: impl FnOnce() -> Result<(), String> + Send + 'static,
+    store: std::sync::Arc<GatedDeleteStore>,
+    gate: DeleteGate,
+    delete_started: std::sync::mpsc::Receiver<()>,
+) {
+    let a = std::thread::spawn(a_delete);
+    // Deterministic pause: A's save committed and its deferred delete is
+    // blocked before the keyring removal.
+    delete_started
+        .recv()
+        .expect("the deferred delete must start once A's save committed");
+
+    let b = std::thread::spawn(b_replace);
+    if crate::platform::prefs::UserPrefs::user_prefs_lock_free_for_test() {
+        // Racy ordering (pre-fix): the deferred delete runs OUTSIDE the prefs
+        // lock, so B's replacement commits first; resuming A's delete
+        // afterwards destroys B's fresh secret and the final assertions fail
+        // red.
+        b.join()
+            .unwrap()
+            .expect("B's replacement save must succeed");
+        gate.open();
+    } else {
+        // Fixed ordering: the deferred delete runs INSIDE the prefs-lock
+        // critical section, so B's replacement is blocked on the lock until
+        // the delete finished; opening the gate now lands the delete strictly
+        // before B's keyring write.
+        gate.open();
+        b.join()
+            .unwrap()
+            .expect("B's replacement save must succeed");
+    }
+    assert!(
+        a.join()
+            .unwrap()
+            .expect("A's conditional delete must succeed"),
+        "A's snapshot-identical row must be recycled"
+    );
+
+    let secret = store
+        .inner
+        .get(&model_barrier_reference())
+        .expect("the keyring read must succeed");
+    assert_eq!(
+        secret.as_deref(),
+        Some(BARRIER_MODEL_REPLACEMENT_KEY),
+        "B's committed replacement secret must survive A's deferred delete"
+    );
+    let prefs = UserPrefs::load();
+    let row = prefs
+        .model_by_id(BARRIER_MODEL_ID)
+        .expect("B's upsert must keep the row");
+    assert_eq!(
+        row.base_url, "http://127.0.0.1:8000/v1",
+        "the surviving row must be B's re-homed configuration"
+    );
+    assert_eq!(row.model, "user-picked-model");
+}
+
+#[test]
+fn delete_model_if_matches_credential_delete_serializes_with_a_concurrent_replacement() {
+    crate::platform::test_support::with_temp_home("delete-if-matches-race", || {
+        seed_model_deletion_prefs(&[model_deletion_test_model(BARRIER_MODEL_ID, true)]);
+        let (store, gate, delete_started) = model_barrier_store();
+        let a_store = store.clone();
+        let b_store = store.clone();
+
+        run_model_delete_replacement_barrier(
+            move || {
+                super::settings::delete_model_if_matches_inner(
+                    BARRIER_MODEL_ID,
+                    Some("https://api.deepseek.com".to_string()),
+                    Some("deepseek-v4-pro".to_string()),
+                    a_store.as_ref(),
+                )
+            },
+            move || {
+                super::settings::save_model_inner(model_barrier_replacement(), b_store.as_ref())
+            },
+            store,
+            gate,
+            delete_started,
+        );
+    });
+}
+
+// architecture-guard: allow-target-cfg -- 条件删除 fail-closed 的读失败（EACCES）
+// 回归需要 chmod 000 拿真实 io::Error，unix 专属权限语义（Windows 侧由
+// delete_model_if_matches_read_failure 的解析失败臂覆盖同一折叠点）。
+#[cfg(unix)]
+#[test]
+fn delete_model_if_matches_unreadable_file_fails_closed_without_writing() {
+    use std::os::unix::fs::PermissionsExt;
+    crate::platform::test_support::with_temp_home("delete-if-matches-unreadable", || {
+        seed_model_deletion_prefs(&[model_deletion_test_model(BARRIER_MODEL_ID, true)]);
+        let path = crate::platform::paths::settings_path();
+        let original = std::fs::read_to_string(&path).expect("seeded settings");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000))
+            .expect("drop read permission");
+        let store = MemoryCredentialStore::default();
+        let result = super::settings::delete_model_if_matches_inner(
+            BARRIER_MODEL_ID,
+            Some("https://api.deepseek.com".to_string()),
+            Some("deepseek-v4-pro".to_string()),
+            &store,
+        );
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))
+            .expect("restore read permission");
+        assert!(
+            result.is_err(),
+            "EACCES on the settings file must refuse the destructive transaction"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("file back to readable"),
+            original,
+            "an unreadable settings file must survive the failed cleanup byte-exactly"
+        );
+    });
+}
+
 /// Round-54 audit A5 wiring pin (round-1 review m5: per-command labels and
 /// ordering, not file-level markers — the file-granular form was
 /// satisfiable by unrelated joins, e.g. interaction.rs's spawn_blocking
