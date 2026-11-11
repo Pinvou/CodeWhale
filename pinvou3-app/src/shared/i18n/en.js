@@ -418,6 +418,7 @@ export const dictEn = {
           versionCostHint: 'Version sizes show registered measurements, so opening the list no longer scans directories; use "Re-measure" to recalibrate against current disk contents. Switching or cleanup may verify entire weight files and queue operations such as downloads on other cards; you can cancel while waiting.',
           versionMeasure:"Re-measure",
           versionMeasuring:"Measuring directory sizes…",
+          versionMeasurementErrors:{"version_measurement_busy": "Model resources are busy. Try measuring again after the operation finishes.", "version_measurement_path_unknown": "The version weights directory could not be confirmed. No measurements were updated.", "version_measurement_snapshot_changed": "The model changed. No measurements were updated; refresh and try again.", "version_measurement_version_changed": "The version record changed. No measurements were updated; refresh and try again."},
           versionStopFirst:"Stop the running model before switching versions.",
           versionStage:"Download new version; keep old",
           versionSwitch:"Switch to this version",

@@ -106,6 +106,29 @@ fn walk_root_now(root: &Path) -> Result<u64, String> {
     quota_dir_size_bytes_excluding(root, &isolated_roots)
 }
 
+/// Explicit calibration changes no root membership or ownership. Refresh the
+/// complete roots already registered for this ordinary card, never substitute
+/// its smaller deployment resource's size for a shared download root's total.
+pub(super) fn remeasure_roots_on(conn: &rusqlite::Connection, card_id: &str) -> Result<(), String> {
+    table(conn).map_err(|error| error.to_string())?;
+    let roots = conn
+        .prepare(
+            "SELECT models_root FROM model_download_reservations WHERE card_id=?1
+             UNION SELECT models_root FROM model_download_retained_roots WHERE card_id=?1",
+        )
+        .and_then(|mut query| {
+            query
+                .query_map([card_id], |row| row.get::<_, String>(0))
+                .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
+        })
+        .map_err(|error| error.to_string())?;
+    for root in roots {
+        let root = PathBuf::from(root);
+        upsert_root_measurement_on(conn, &root, walk_root_now(&root)?)?;
+    }
+    Ok(())
+}
+
 /// Register a download root's freshly measured size (review round 7): quota
 /// admission reads this instead of walking every download root under the
 /// global quota lock. Measurements are refreshed at publish, completion and
@@ -172,9 +195,9 @@ pub(super) fn release_plan(card_id: &str) -> Result<(), String> {
     let pending = "card_id=?1 AND target_started=0
         AND NOT EXISTS(SELECT 1 FROM store_models WHERE card_id=?1)";
     // Started rows are demoted below while their script outputs stay on disk;
-    // capture their roots so the registered measurement can be refreshed after
-    // the commit (the publish-time value predates those files — review
-    // round 7's crash/failure invalidation point).
+    // Measure before committing their demotion. If any scan/write fails, the
+    // transaction retains the complete plan; never publish downloading=0 with
+    // the old pre-script measurement still considered valid.
     let started_roots: Vec<String> = tx
         .prepare(
             "SELECT models_root FROM model_download_reservations
@@ -185,7 +208,14 @@ pub(super) fn release_plan(card_id: &str) -> Result<(), String> {
                 .query_map([card_id], |row| row.get::<_, String>(0))
                 .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
         })
-        .unwrap_or_default();
+        .map_err(|error| error.to_string())?;
+    if !started_roots.is_empty() {
+        super::current_measurements::invalidate_on(&tx, card_id)?;
+    }
+    for root in started_roots {
+        let root = PathBuf::from(root);
+        upsert_root_measurement_on(&tx, &root, walk_root_now(&root)?)?;
+    }
     tx.execute(
         &format!(
             "INSERT OR IGNORE INTO model_download_retained_roots(card_id,models_root)
@@ -205,10 +235,6 @@ pub(super) fn release_plan(card_id: &str) -> Result<(), String> {
     )
     .map_err(|e| e.to_string())?;
     tx.commit().map_err(|e| e.to_string())?;
-    for root in started_roots {
-        let root = PathBuf::from(root);
-        upsert_root_measurement(&root, walk_root_now(&root)?)?;
-    }
     Ok(())
 }
 
@@ -293,6 +319,7 @@ impl DownloadReservation {
     pub fn publish(&self, size_bytes: u64) -> Result<(), String> {
         let conn = connection()?;
         table(&conn).map_err(|e| e.to_string())?;
+        super::current_measurements::invalidate_on(&conn, &self.card_id)?;
         conn.execute(
             "INSERT INTO model_download_reservations(card_id,models_root,size_bytes,downloading,target_started)
             VALUES(?1,?2,?3,1,?4) ON CONFLICT(card_id) DO UPDATE SET
@@ -441,6 +468,7 @@ pub fn download_paths(card_id: &str) -> Result<Vec<PathBuf>, String> {
 /// disclosure; a subsequent new installation may use the configured directory.
 pub(super) fn retire_on(conn: &rusqlite::Connection, card_id: &str) -> Result<(), String> {
     table(conn).map_err(|e| e.to_string())?;
+    super::current_measurements::invalidate_on(conn, card_id)?;
     let roots: Vec<String> = conn
         .prepare("SELECT models_root FROM model_download_reservations WHERE card_id=?1")
         .and_then(|mut query| {
@@ -465,14 +493,14 @@ pub(super) fn retire_on(conn: &rusqlite::Connection, card_id: &str) -> Result<()
     // matches what actually remains (caches, unrelated files) instead of the
     // pre-uninstall walk.
     for root in roots {
-        let _ =
-            upsert_root_measurement_on(conn, Path::new(&root), walk_root_now(Path::new(&root))?);
+        upsert_root_measurement_on(conn, Path::new(&root), walk_root_now(Path::new(&root))?)?;
     }
     Ok(())
 }
 
 pub(super) fn forget_on(conn: &rusqlite::Connection, card_id: &str) -> Result<(), String> {
     table(conn).map_err(|e| e.to_string())?;
+    super::current_measurements::invalidate_on(conn, card_id)?;
     // Abandonment drops every charge for the card's roots by design; a later
     // read of a still-shared root calibrates a fresh measurement once. The
     // roots must be captured before their membership rows are deleted.

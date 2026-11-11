@@ -3,6 +3,7 @@ use super::*;
 mod digest_paths;
 mod lease_completion;
 mod recovery_admission;
+mod registered_measurements;
 mod stage_admission;
 
 fn blob(content: &str) -> db::ScriptBlob {

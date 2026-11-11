@@ -800,8 +800,16 @@ impl ModelManager {
         card_id: &str,
         measure: bool,
     ) -> Result<serde_json::Value, ModelManagerError> {
+        let _measurement = measure
+            .then(|| version_store::current_measurements::lock(card_id))
+            .transpose()
+            .map_err(fail)?;
+        // An explicit scan owns the canonical card/resource/lease/quota locks
+        // before reading this snapshot. Plain display remains walk-free.
+        if !measure {
+            version_store::recover_interrupted(card_id).map_err(fail)?;
+        }
         let current = self.get_record(card_id)?;
-        version_store::recover_interrupted(card_id).map_err(fail)?;
         let mut versions = version_store::list(Some(card_id)).map_err(fail)?;
         let id = version_store::active_id(&current);
         let deleting = versions
@@ -829,30 +837,22 @@ impl ModelManager {
                     .map(|p| p.to_string_lossy().into_owned()),
                 managed: managed_storage(&current)?,
                 created_at: current.downloaded_at.clone(),
-                record: Some(current),
+                record: Some(current.clone()),
                 error: None,
                 planned_bytes: 0,
                 measured_bytes: active_measured,
             },
         );
+        if let Some(active) = versions.first_mut().filter(|version| !version.managed)
+            && let Some(resource) = active.resource_dir.as_deref()
+            && let Some(bytes) =
+                version_store::current_measurements::get(card_id, &id, resource).map_err(fail)?
+        {
+            active.measured_bytes = Some(bytes);
+        }
         if measure {
-            // Explicit re-measure (review round 7): walk each row's tree once,
-            // refresh the returned sizes and persist them so quota admission
-            // and later dialog opens read the fresh values. Best effort per
-            // row — an unreadable tree keeps its registered size instead of
-            // failing the whole dialog.
-            for version in &mut versions {
-                if let Some(root) = version
-                    .models_root
-                    .as_deref()
-                    .filter(|_| version.managed)
-                    .or(version.resource_dir.as_deref())
-                    && let Ok(bytes) = version_store::quota_dir_size_bytes(Path::new(root))
-                {
-                    version.measured_bytes = Some(bytes);
-                    let _ = version_store::update_measured(card_id, &version.version_id, bytes);
-                }
-            }
+            version_store::current_measurements::remeasure(&current, &mut versions)
+                .map_err(fail)?;
         }
         Ok(serde_json::json!(versions.iter().map(|v|serde_json::json!({
             "version_id":v.version_id,"state":v.state,"created_at":v.created_at,"error":v.error,
@@ -1339,23 +1339,17 @@ impl ModelManager {
         // Register the tree's post-script size at the terminal transition so
         // later quota reads and the versions dialog need no walk (review
         // round 7). Best effort: a walk error must not mask the download's
-        // own result; the fail-closed quota calibration covers a stale value.
-        let measure_registered = |version: &mut Version| {
-            if let Some(root) = version.models_root.as_deref() {
-                if let Ok(bytes) = version_store::quota_dir_size_bytes(Path::new(root)) {
-                    version.measured_bytes = Some(bytes);
-                }
-            }
-        };
+        // own result. Invalidate the old publish-time value on failure so the
+        // next quota read must calibrate, rather than trusting stale Some(0).
         if let Err(error) = result {
             version.state = "failed".into();
             version.planned_bytes = 0;
             version.error = Some(error.to_string());
-            measure_registered(&mut version);
+            version_store::refresh_measured(&mut version);
             version_store::put(&version).map_err(fail)?;
             return Err(error);
         }
-        measure_registered(&mut version);
+        version_store::refresh_measured(&mut version);
         version_store::put(&version).map_err(fail)?;
         on_progress("新版已验证，当前部署未切换；停用当前模型后，可在历史版本中切换。");
         Ok(serde_json::json!({"version_id":revision}))
@@ -1480,6 +1474,7 @@ impl ModelManager {
             )
             .map_err(|e| fail(format!("记录引擎安装状态失败：{e}")))?;
         }
+        version_store::current_measurements::invalidate(card_id).map_err(fail)?;
         self.run_card_script(&source, "deploy", &env, on_progress, control.clone(), false)?;
         if control.cancelled() {
             return Err(fail("已取消"));
