@@ -38,6 +38,15 @@ async function create(page) {
   await page.type('.adm-financial-repair-draft textarea', 'Controlled chargeback-repair justification'); await page.type('.adm-financial-repair-draft input', 'controlled-chargeback-repair');
   await page.click('.adm-financial-repair-draft button');
 }
+async function activateReauthentication(page) {
+  const selector='.adm-chargeback-repair-reauthentication button';
+  await page.waitForFunction(selector=>{const button=document.querySelector(selector);return button&&!button.disabled;},{},selector);
+  // The target may lie underneath the sticky portal header after the snapshot
+  // disappears. Expose it and verify the real mouse hit before activating it.
+  await page.$eval(selector,button=>button.scrollIntoView({block:'center',inline:'nearest'}));
+  await page.waitForFunction(selector=>{const button=document.querySelector(selector),rect=button.getBoundingClientRect(),hit=document.elementFromPoint(rect.x+rect.width/2,rect.y+rect.height/2);return hit&&button.contains(hit);},{},selector);
+  await page.click(selector);await page.waitForFunction(()=>window.f14.reauthentication==='/admin.html');
+}
 async function center(page, view) {
   await page.waitForSelector('nav button[data-section="approvals"]');
   await page.click('nav button[data-section="approvals"]');
@@ -57,7 +66,7 @@ try {
     } else {
       await page.waitForSelector('.adm-financial-repair [role=alert]');
       assert.equal(await page.$('.adm-financial-repair-draft'), null);
-      assert.equal(await page.$eval('.adm-financial-repair [role=alert]', node => node.textContent), await page.evaluate(() => window.f14.ledgerRepairCopy.en.factsFailed));
+      assert.equal(await page.$eval('.adm-financial-repair [role=alert]', node => node.textContent), await page.evaluate(() => window.f14.ledgerRepairCopy.en.chargebackTask.factsFailed));
       assert.equal(await page.evaluate(() => window.f14.calls.some(call => call.url === '/api/admin/approvals/requests' && call.method === 'POST')), false);
     }
   });
@@ -79,7 +88,17 @@ try {
     });
   }
   for (const language of ['zh', 'en', 'ja']) await run(`ChargebackRepair real host/precheck/create/submit ${language}`, `language=${language}`, async page => {
-    await openForm(page); await create(page); await page.waitForFunction(() => window.f14.status === 'SUBMITTED' && document.querySelector('nav button[data-section="approvals"][aria-current="page"]') && [...document.querySelectorAll('.adm-financial-repair')].every(form => form.closest('[hidden]')));
+    await openForm(page); await page.waitForSelector('.adm-repair-impact');
+    const presentation=await page.evaluate(()=>{const c=window.f14,words=c.ledgerRepairCopy[c.language],impact=document.querySelector('.adm-repair-impact');return {relationship:[...document.querySelectorAll('.adm-repair-relationship:not(.adm-repair-impact) dd')].map(node=>node.textContent),values:[...impact.querySelectorAll('dd')].map(node=>node.textContent),missing:words.chargebackImpact.missing,points:words.chargebackImpact.unit,amount:words.chargebackImpact.amount,ids:[1, 2].map(c.id),accountIDs:[3, 4].map(c.id)};});
+    assert.deepEqual(presentation.relationship,[...presentation.ids,...['controlled-provider-chargeback']]);
+    const expectedNumbers=['900719925474.0993'];
+    for(const [index,value] of expectedNumbers.entries())assert.equal(presentation.values[index],value+' '+presentation.points);
+    assert.deepEqual(presentation.values.slice(expectedNumbers.length,expectedNumbers.length+presentation.accountIDs.length),presentation.accountIDs);
+    assert.deepEqual(presentation.values.slice(expectedNumbers.length+presentation.accountIDs.length),[presentation.missing],'unavailable chargeback money must not be invented');
+    await create(page); await page.waitForFunction(() => window.f14.status === 'SUBMITTED' && document.querySelector('nav button[data-section="approvals"][aria-current="page"]') && [...document.querySelectorAll('.adm-financial-repair')].every(form => form.closest('[hidden]')));
+    await page.waitForSelector('.adm-repair-approval-receipt');
+    const receipt=await page.$eval('.adm-repair-approval-receipt',node=>({text:node.textContent,id:window.f14.id(9),status:window.f14.ledgerRepairCopy[window.f14.language].chargebackImpact.states.SUBMITTED}));
+    assert.ok(receipt.text.includes(receipt.id));assert.ok(receipt.text.includes(receipt.status));
     const calls = await page.evaluate(() => window.f14.calls); const precheck = calls.find(call => call.url.endsWith('/approval-command-prechecks'));
     assert.equal(JSON.parse(precheck.body).target_resource_id, await page.evaluate(() => window.f14.id(1))); assert.equal(JSON.parse(precheck.body).payment_evidence_id, await page.evaluate(() => window.f14.id(2))); assert.equal(Object.hasOwn(JSON.parse(precheck.body), 'expected_case_version'), false);
     const draft = calls.find(call => call.url === '/api/admin/approvals/requests' && call.method === 'POST'); assert.ok(draft.body.includes('"wallet_version":9223372036854775806')); assert.ok(draft.body.includes('"chargeback_case_version":9007199254740993'));
@@ -102,18 +121,21 @@ try {
     assert.ok(calls.some(call => call.url.includes('command_type=CHARGEBACK_FINANCIAL_REPAIR') && call.url.includes('target=')));
     await page.waitForFunction(() => [...document.querySelectorAll('article button')].some(button => button.textContent === window.f14.adminPlatformCopy.zh.approvalCenter.openBusinessArea && !button.disabled));
     await page.evaluate(() => [...document.querySelectorAll('article button')].find(button => button.textContent === window.f14.adminPlatformCopy.zh.approvalCenter.openBusinessArea).click());
-    await page.waitForSelector('[data-workspace="chargebackrepair"]:not([hidden]) .adm-financial-repair-target select', { visible: true }); assert.equal(await page.$eval('[data-workspace="chargebackrepair"]:not([hidden]) .adm-financial-repair-target select', select => select.value), 'CHARGEBACK_FINANCIAL_REPAIR');
+    await page.waitForSelector('[data-workspace="chargebackrepair"]:not([hidden]) .adm-financial-repair-target input', {visible:true});
+    assert.equal(await page.$eval('[data-workspace="chargebackrepair"]:not([hidden]) .adm-repair-task-code code', code=>code.textContent),'CHARGEBACK_FINANCIAL_REPAIR');
+    assert.equal(await page.$$eval('[data-workspace="chargebackrepair"]:not([hidden]) .adm-financial-repair-target input', inputs=>inputs.length),2);
   });
   await run('ChargebackRepair fresh EDIT refuses changed original case CAS without UPDATE', 'existing=1&edit-version-changed=1', async page => {
     await center(page, 'mine'); await page.waitForSelector('tbody tr button'); await page.click('tbody tr button'); await page.waitForSelector('article textarea');
     await page.type('article textarea', 'Controlled original chargeback CAS intent');
     await page.evaluate(() => [...document.querySelectorAll('article button')].find(button => button.textContent === window.f14.financeCopy.zh.editSubmit).click());
-    await page.waitForFunction(() => [...document.querySelectorAll('[role=alert]')].some(node => node.textContent === window.f14.financeCopy.zh.unavailable));
+    await page.waitForFunction(() => [...document.querySelectorAll('[role=alert]')].some(node => node.textContent === window.f14.financeCopy.zh.approvalReadUnavailable));
     assert.equal(await page.evaluate(() => window.f14.calls.some(call => call.method === 'PUT' || call.url.endsWith('/actions/submit'))), false);
   });
   await run('ChargebackRepair approver-only real detail decide without requester or wallet calls', 'approve=1&existing=1', async page => {
+    await page.evaluate(()=>{window.f14.status='SUBMITTED';});await center(page,'pending');
     await page.waitForSelector('tbody tr button'); assert.equal(await page.$('.adm-financial-repair'), null);
-    await page.evaluate(() => { window.f14.status = 'SUBMITTED'; }); await page.click('tbody tr button'); await page.waitForSelector('article textarea');
+    await page.click('tbody tr button'); await page.waitForSelector('article textarea');
     await page.type('article textarea', 'Independent approved chargeback-repair review');
     await page.evaluate(() => [...document.querySelectorAll('article button')].find(button => button.textContent === window.f14.financeCopy.zh.approve).click());
     await page.waitForFunction(() => document.querySelector('article')?.textContent.includes('EXECUTED'));
@@ -164,7 +186,7 @@ try {
       assert.equal(await page.$eval('.adm-chargeback-repair-reauthentication p', node => node.textContent), await page.evaluate(() => window.f14.ledgerRepairCopy[window.f14.language].writeOffRecentAuthenticationRequired));
       const first = await page.evaluate(() => window.f14.calls.find(call => call.method === 'POST' && call.url === '/api/admin/approvals/requests').body);
       assert.equal(await page.evaluate(() => window.f14.created), false);
-      await page.click('.adm-chargeback-repair-reauthentication button');
+      await activateReauthentication(page);
       assert.equal(await page.evaluate(() => window.f14.reauthentication), '/admin.html');
       assert.equal(await page.$eval('.adm-financial-repair-draft input', input => input.value), 'controlled-chargeback-repair');
       await page.evaluate(() => { window.f14.authenticatedAgain = true; });
@@ -178,7 +200,7 @@ try {
       await openForm(page); await page.waitForSelector('.adm-chargeback-repair-reauthentication button');
       assert.equal(await page.$('.adm-financial-repair-draft'), null);
       assert.equal(await page.evaluate(() => window.f14.calls.some(call => call.method === 'POST' && call.url === '/api/admin/approvals/requests')), false);
-      await page.click('.adm-chargeback-repair-reauthentication button'); assert.equal(await page.evaluate(() => window.f14.reauthentication), '/admin.html');
+      await activateReauthentication(page); assert.equal(await page.evaluate(() => window.f14.reauthentication), '/admin.html');
     });
   }
   await run('ChargebackRepair unknown recent-auth denial retains original frozen facts and explicit replay', 'lost-recent=1', async page => {

@@ -77,7 +77,7 @@ export function AdminModelTokenPageOverview({ section, client, copy, permissions
     controllerRef.current?.abort();
     const controller = new globalThis.AbortController();
     controllerRef.current = controller;
-    setState((current) => ({ key: cacheKey, loading: true, data: current.key === cacheKey ? current.data : null, error: null, retryAt: 0 }));
+    setState((current) => ({ key: cacheKey, loading: true, data: current.key === cacheKey ? current.data : null, updatedAt: current.key === cacheKey ? current.updatedAt : 0, error: null, retryAt: 0 }));
     try {
       const raw = await plan.load(client, controller.signal);
       const data = validate(section, raw, plan.permissionView);
