@@ -267,7 +267,7 @@ func runApplication(ctx context.Context, serviceName string, application http.Ha
 	if metricsAddress == "" {
 		metricsAddress = ":9090"
 	}
-	metricsServer := &http.Server{Addr: metricsAddress, Handler: metrics.handler(), ReadHeaderTimeout: 3 * time.Second, IdleTimeout: 30 * time.Second}
+	metricsServer := newMetricsServer(metricsAddress, metrics.handler())
 
 	type serverError struct {
 		name string
@@ -305,6 +305,11 @@ func runApplication(ctx context.Context, serviceName string, application http.Ha
 
 func newLogger(cfg config.Config) *slog.Logger {
 	return observability.ConfigureDefaultLogger(observability.Config{Service: cfg.ServiceName, Environment: cfg.Environment, Version: version, Commit: commit})
+}
+
+func newMetricsServer(address string, handler http.Handler) *http.Server {
+	return &http.Server{Addr: address, Handler: handler, ReadHeaderTimeout: 3 * time.Second,
+		ReadTimeout: 10 * time.Second, WriteTimeout: 10 * time.Second, IdleTimeout: 30 * time.Second}
 }
 
 func withRequestID(next http.Handler) http.Handler {
