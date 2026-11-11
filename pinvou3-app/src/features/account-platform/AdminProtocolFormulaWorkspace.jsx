@@ -1,4 +1,4 @@
-import { statusLabel } from './status-label.js';
+import { statusLabel, tokenStatusLabel } from './status-label.js';
 import { isImeComposing } from '../../shared/ime-guard.mjs';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { adminModelTokenQueryUpdates, previousAdminModelTokenCursor, readAdminModelTokenQuery, rememberAdminModelTokenNextCursor, synchronizeAdminModelTokenCursorHistory } from './admin-navigation.js';
@@ -68,7 +68,7 @@ function Paging({ source, query, state, copy, cursorHistory, onChange }) {
 
 function Status({ value, copy }) {
   const tone = value === 'PUBLISHED' ? 'ok' : value === 'DRAFT' ? 'warn' : '';
-  return <span className={`adm-status ${tone}`}>{statusLabel(value, copy.statusLanguage, copy.enumLabels)}</span>;
+  return <span className={`adm-status ${tone}`}>{tokenStatusLabel(value, copy.statusLanguage)}</span>;
 }
 
 function SourceHead({ title, titleID, state, copy, retry, action }) {

@@ -1,4 +1,4 @@
-import { statusLabel } from './status-label.js';
+import { statusLabel, tokenStatusLabel } from './status-label.js';
 import React, { useEffect, useRef, useState } from 'react';
 import { previousAdminModelTokenCursor, rememberAdminModelTokenNextCursor, synchronizeAdminModelTokenCursorHistory } from './admin-navigation.js';
 import { executeAdminSourceRequest, initialAdminSourceState, reduceAdminSourceState, visibleAdminSourceState } from './admin-model-token-state.js';
@@ -31,7 +31,7 @@ function sourceCursorHistory(cursorHistory, source, query) {
 }
 
 export function Status({ value, copy }) {
-  const label = statusLabel(value, copy.statusLanguage, copy.enumLabels);
+  const label = tokenStatusLabel(value, copy.statusLanguage);
   const normalized = typeof value === 'string' ? value : '';
   const tone = ['ACTIVE', 'READY', 'PUBLISHED', 'HEALTHY', 'SETTLED', 'SUCCEEDED'].includes(normalized)
     ? 'ok'

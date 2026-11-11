@@ -1,4 +1,4 @@
-import { statusLabel } from './status-label.js';
+import { tokenStatusLabel } from './status-label.js';
 import { secureRequestID } from './request-id.js';
 import React, { useEffect, useMemo, useState } from 'react';
 import { adminModelTokenQueryUpdates, readAdminModelTokenQuery } from './admin-navigation.js';
@@ -130,7 +130,7 @@ function OperationsTab({ modelID, client, copy, query, onQueryChange, cursorHist
     ]} />
     <SourceFeedback state={state} copy={copy} onRetry={retry} />
     {state.items.length > 0 && <div className="adm-table-wrap"><table className="adm-table"><thead><tr><th>{copy.provisioning}</th><th>{copy.status}</th><th>{copy.stage}</th><th>{copy.generation}</th><th>{copy.updatedAt}</th></tr></thead><tbody>
-      {state.items.map((item) => <tr key={item.provisioning_id}><td data-label={copy.provisioning}><span className="adm-mono">{item.provisioning_id}</span></td><td data-label={copy.status}><Status value={item.status} copy={copy} /></td><td data-label={copy.stage}>{statusLabel(item.stage, copy.statusLanguage, copy.enumLabels)}</td><td data-label={copy.generation}>{item.actual_generation ?? '—'} / {item.desired_generation}</td><td data-label={copy.updatedAt}>{formatDate(item.updated_at)}</td></tr>)}
+      {state.items.map((item) => <tr key={item.provisioning_id}><td data-label={copy.provisioning}><span className="adm-mono">{item.provisioning_id}</span></td><td data-label={copy.status}><Status value={item.status} copy={copy} /></td><td data-label={copy.stage}>{tokenStatusLabel(item.stage, copy.statusLanguage)}</td><td data-label={copy.generation}>{item.actual_generation ?? '—'} / {item.desired_generation}</td><td data-label={copy.updatedAt}>{formatDate(item.updated_at)}</td></tr>)}
     </tbody></table></div>}
     <Pagination source="modelProvisionings" query={query} state={state} copy={copy} cursorHistory={cursorHistory} onQueryChange={onQueryChange} />
   </section>;

@@ -91,8 +91,9 @@ const anomalies = [
   ['RESOLVED', '处置已记录', 'Resolution recorded', '対処記録済み'],
 ];
 function translatedStatusCopy(language, index) {
+  const tokenStatuses = Object.fromEntries(tokenStatusCodes.map(code => [code, tokenManagementCopy[language].modelToken.enumLabels[code]]));
   const labels = {
-    ...Object.fromEntries(tokenStatusCodes.map(code => [code, tokenManagementCopy[language].modelToken.enumLabels[code]])),
+    ...tokenStatuses,
     ...accountLayoutCopy[language].statuses,
     ...registrationRepairCopy[language].statuses,
     ...accountClosureCopy[language].statuses,
@@ -100,7 +101,7 @@ function translatedStatusCopy(language, index) {
     ...Object.fromEntries(['ON_SALE', 'OFF_SALE'].map(code => [code, adminLayoutCopy[language].financeLists[code]])),
   };
   return {
-    unknown: unknown[language], missing: missing[language], labels,
+    unknown: unknown[language], missing: missing[language], labels, tokenStatuses,
     accountUsers: {
       ...Object.fromEntries(['ACTIVE', 'DISABLED', 'CLOSING', 'DELETED'].map(code => [code, accountLayoutCopy[language].statuses[code]])),
       CLOSING: ['注销处理中', 'Account closure in progress', '退会処理中'][index],

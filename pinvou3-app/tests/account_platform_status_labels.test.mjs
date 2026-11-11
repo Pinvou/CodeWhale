@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
-import { statusLabel, accountUserStatusLabel, paymentOrderStatusLabel, auditExportStatusLabel } from '../src/features/account-platform/status-label.js';
+import { statusLabel, tokenStatusLabel, accountUserStatusLabel, paymentOrderStatusLabel, auditExportStatusLabel } from '../src/features/account-platform/status-label.js';
 import { accountStatusCopy, accountPlatformCopy, adminPlatformCopy, financeCopy, accountClosureCopy, tokenManagementCopy } from '../src/shared/i18n.js';
 
 const languages = ['zh', 'en', 'ja'];
@@ -72,6 +72,20 @@ test('malformed values are never coerced or treated as known statuses', () => {
   const hostile = { toString() { throw new Error('must not coerce'); } };
   for (const language of languages) for (const value of [undefined, null, '', false, 0, [], hostile, Symbol('status'), () => 'ACTIVE']) {
     assert.equal(statusLabel(value, language), accountStatusCopy[language].missing);
+  }
+});
+
+test('token status vocabulary excludes mixed owner and priority labels while retaining status semantics', () => {
+  for (const language of languages) {
+    const mixed = tokenManagementCopy[language].modelToken.enumLabels;
+    for (const code of ['PERSONAL', 'P0']) {
+      assert.equal(typeof mixed[code], 'string');
+      assert.equal(tokenStatusLabel(code, language), `${accountStatusCopy[language].unknown} (${code})`);
+    }
+    for (const code of Object.keys(accountStatusCopy[language].tokenStatuses)) {
+      assert.equal(tokenStatusLabel(code, language), mixed[code]);
+      assert.ok(typeof mixed[code] === 'string' && mixed[code].length > 0);
+    }
   }
 });
 

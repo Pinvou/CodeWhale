@@ -65,6 +65,11 @@ try {
       await navigateFixture(page, `${origin}/tests/fixtures/account-status-labels-ui.html?language=${language}`, signal => page.waitForFunction(() => window.statusLabelsProbe && document.querySelector('tbody tr'), { signal }));
       assert.equal(await page.$eval('#probe-status', node => node.textContent), `${expected[language].unknown} (constructor)`);
       assert.equal(await page.$eval('#probe-status .adm-status', node => node.classList.contains('ok') || node.classList.contains('warn')), false);
+      for (const code of ['PERSONAL', 'P0']) {
+        await page.evaluate(value => window.statusLabelsProbe.setValue(value), code);
+        await page.waitForFunction(value => window.statusLabelsProbe.renderedValue === value, {}, code);
+        assert.equal(await page.$eval('#probe-status', node => node.textContent), `${expected[language].unknown} (${code})`);
+      }
       await page.select('.adm-role-toolbar select', 'ACTIVE');
       assert.equal(await page.$$eval('tbody tr', rows => rows.length), 1);
       assert.equal(await page.$eval('.adm-role-toolbar select', node => node.value), 'ACTIVE');
@@ -75,6 +80,23 @@ try {
       await page.evaluate(() => window.statusLabelsProbe.setValue('<svg onload=alert(1)>'));
       await page.waitForFunction(label => document.querySelector('#probe-status')?.textContent === `${label} (<svg onload=alert(1)>)`, {}, expected[language].unknown);
       assert.equal(await page.$('#probe-status svg'), null);
+    });
+    await run(`${language}: real reconciliation list, detail and filter retain locale and raw query values`, async page => {
+      const review = { zh: '复核中', en: 'Under review', ja: '確認中' };
+      await navigateFixture(page, `${origin}/tests/fixtures/account-status-labels-ui.html?language=${language}&reconciliation=1`, signal => page.waitForFunction(() => window.statusLabelsProbe && document.querySelector('section nav button:nth-child(2)'), { signal }));
+      await page.click('section nav button:nth-child(2)');
+      await page.waitForFunction(label => document.querySelector('tbody tr td:nth-child(2)')?.textContent === label, {}, review[language]);
+      const options = await page.$$eval('option', nodes => nodes.filter(node => ['OPEN', 'IN_REVIEW', 'RESOLVED', 'IGNORED'].includes(node.value)).map(node => ({ value: node.value, label: node.textContent })));
+      assert.deepEqual(options.map(option => option.value), ['OPEN', 'IN_REVIEW', 'RESOLVED', 'IGNORED']);
+      assert.ok(options.every(option => option.label && option.label !== option.value));
+      assert.equal(options[1].label, review[language]);
+      await page.evaluate(() => { const select = [...document.querySelectorAll('select')].find(node => [...node.options].some(option => option.value === 'IN_REVIEW')); select.value = 'IN_REVIEW'; select.dispatchEvent(new Event('change', { bubbles: true })); });
+      await page.waitForFunction(() => window.statusLabelsProbe.reconciliationCalls.some(call => call.kind === 'cases' && call.status === 'IN_REVIEW'));
+      await page.click('tbody tr button');
+      assert.ok((await page.$eval('h3', node => node.nextElementSibling.textContent)).includes(review[language]));
+      const nextLanguage = language === 'ja' ? 'zh' : 'ja';
+      await page.select('#probe-language', nextLanguage);
+      await page.waitForFunction(label => document.querySelector('tbody tr td:nth-child(2)')?.textContent === label && document.querySelector('h3')?.nextElementSibling.textContent.includes(label), {}, review[nextLanguage]);
     });
   }
 } catch (error) { primary = error; }

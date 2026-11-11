@@ -125,7 +125,7 @@ try{
   assert.equal(JSON.parse(saved.raw).exportID,'00000000-0000-4000-8000-000000000017');
   assert.equal(saved.raw.includes('controlled-page-only-key'),false);assert.equal(saved.raw.includes('download_token'),false);
   await page.goto(server.resolvedUrls.local[0]+'tests/account_platform_audit_fixture.html?'+new URL(saved.url,'https://controlled.invalid').searchParams.toString()+'&ticketRecent=1&reauthenticated=1');
-  await page.waitForFunction(()=>window.f17&&document.body.textContent.includes('Ready to download'));
+  await page.waitForFunction(()=>window.f17&&document.body.textContent.includes('可下载'));
   assert.equal(await page.evaluate(()=>window.f17.calls.some(c=>c.method!=='GET'&&c.url.startsWith('/api/admin/account/admin/v1/audit-exports'))),false);
   assert.ok(await page.evaluate(()=>{const writes=window.f17.calls.filter(c=>c.method!=='GET');return writes.length>0&&writes.every(c=>c.method==='POST'&&c.url==='/api/account/v1/account/bootstrap');}));
   assert.equal(await page.evaluate(()=>document.body.textContent.includes('controlled-page-only-key')),false);

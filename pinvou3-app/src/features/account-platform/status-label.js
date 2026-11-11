@@ -37,3 +37,8 @@ export function paymentOrderStatusLabel(value, language) {
   const copy = own(accountStatusCopy, language) ? accountStatusCopy[language] : accountStatusCopy.en;
   return statusLabel(value, language, copy.paymentOrders, true);
 }
+
+export function tokenStatusLabel(value, language) {
+  const copy = own(accountStatusCopy, language) ? accountStatusCopy[language] : accountStatusCopy.en;
+  return statusLabel(value, language, copy.tokenStatuses);
+}
