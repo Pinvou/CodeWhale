@@ -158,6 +158,10 @@ pub fn nvidia_smi_candidates() -> Vec<&'static str> {
     vec!["nvidia-smi"]
 }
 
+pub fn docker_candidates() -> Vec<&'static str> {
+    vec!["docker"]
+}
+
 pub fn user_home_dir() -> PathBuf {
     std::env::var("HOME")
         .map(PathBuf::from)
