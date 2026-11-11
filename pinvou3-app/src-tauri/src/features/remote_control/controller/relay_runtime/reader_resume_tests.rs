@@ -14,6 +14,9 @@ pub(super) type Socket = WebSocketStream<TcpStream>;
 #[path = "reader_resume_tests/journal_owner_tests.rs"]
 pub(crate) mod journal_owner_tests;
 
+#[path = "reader_resume_tests/reservation_replay_tests.rs"]
+pub(crate) mod reservation_replay_tests;
+
 fn fixture_wall_clock_millis() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

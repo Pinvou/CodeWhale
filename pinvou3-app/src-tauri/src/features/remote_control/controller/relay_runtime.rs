@@ -906,13 +906,17 @@ impl ControlledHandshakeDriver {
     }
 
     /// `controller_pairing_reserved`：验签 transcript、派生会话密钥与 receipt，
-    /// 产出本端 `finished_receipt_commit`。未验签或重复接管都失败关闭。
+    /// 产出本端 `finished_receipt_commit`。同一已验签预留的通知仅忽略；
+    /// 不同绑定或无效签名仍失败关闭，不重发一次性帧。
     pub(crate) fn accept_reserved(
         &mut self,
         message: &Value,
         trust: &AuthenticatedRelayTrustConfig,
-    ) -> Result<Value, &'static str> {
-        if self.handshake.is_some() {
+    ) -> Result<Option<Value>, &'static str> {
+        if let Some(handshake) = self.handshake.as_ref() {
+            if handshake.is_reserved_replay(message, trust) {
+                return Ok(None);
+            }
             return Err("controller_handshake_stage_invalid");
         }
         let keys = self.keys.take().ok_or("controller_handshake_key_invalid")?;
@@ -920,7 +924,7 @@ impl ControlledHandshakeDriver {
             ControlledHandshake::new(message, keys, trust).map_err(|error| error.code)?;
         let commit = handshake.commit().map_err(|error| error.code)?;
         self.handshake = Some(handshake);
-        Ok(commit)
+        Ok(Some(commit))
     }
 
     /// `finished_receipt_commit`：记录对端 commitment 后产出本端 Finished。
@@ -1697,12 +1701,18 @@ impl ControlledRelayWorker {
         message: &Value,
         driver: &mut ControlledHandshakeDriver,
     ) -> Result<Option<Value>, String> {
+        let manager = self.app.state::<ControlledDeviceManager>();
+        if !manager.is_pending_handshake(self.operation.clone()) {
+            return Err("controller_handshake_stage_invalid".to_owned());
+        }
         let trust = load_relay_trust_config(|name| std::env::var(name).ok())
             .map_err(|_| RELAY_TRUST_UNCONFIGURED.to_owned())?;
-        let manager = self.app.state::<ControlledDeviceManager>();
-        let commit = driver
+        let Some(commit) = driver
             .accept_reserved(message, &trust)
-            .map_err(str::to_owned)?;
+            .map_err(str::to_owned)?
+        else {
+            return Ok(None);
+        };
         let now_b = controlled_monotonic_millis();
         let deadline_b =
             handshake_deadline_b(driver.signed_expires_at_ms().map_err(str::to_owned)?, now_b)?;
@@ -3403,7 +3413,10 @@ mod tests {
             a_keys,
             relay.trust.clone(),
         );
-        let b_commit = driver.accept_reserved(&reservation, &relay.trust).unwrap();
+        let b_commit = driver
+            .accept_reserved(&reservation, &relay.trust)
+            .unwrap()
+            .unwrap();
         let a_commit = a.accept_reserved(&reservation).unwrap();
         let b_finished = driver.accept_peer_commitment(&a_commit).unwrap();
         let a_finished = a.accept_peer_commitment(&b_commit).unwrap();
@@ -4041,7 +4054,7 @@ mod tests {
         trust: &AuthenticatedRelayTrustConfig,
     ) -> (ControlledHandshakeDriver, ControllingHandshake) {
         let mut driver = ControlledHandshakeDriver::new(b_keys);
-        let b_commit = driver.accept_reserved(reservation, trust).unwrap();
+        let b_commit = driver.accept_reserved(reservation, trust).unwrap().unwrap();
         let mut a = ControllingHandshake::new(
             reservation["request_id"].as_str().unwrap(),
             "claim-0001",
@@ -4091,16 +4104,24 @@ mod tests {
         );
         assert!(!driver.is_active());
 
-        let b_commit = driver.accept_reserved(&reservation, &relay.trust).unwrap();
+        let b_commit = driver
+            .accept_reserved(&reservation, &relay.trust)
+            .unwrap()
+            .unwrap();
         assert!(driver.is_active());
         assert_eq!(b_commit["type"], "finished_receipt_commit");
         assert_eq!(b_commit["sender_role"], "B");
-        // 重复接管同一预留必须拒绝。
-        assert_eq!(
+        // 同一已验签通知是无副作用重放，不重发commit或生成收据秘密。
+        assert!(
             driver
                 .accept_reserved(&reservation, &relay.trust)
-                .unwrap_err(),
-            "controller_handshake_stage_invalid"
+                .unwrap()
+                .is_none()
+        );
+        assert!(driver.keys.is_none());
+        assert_eq!(
+            driver.handshake.as_ref().unwrap().stage(),
+            super::super::controlled_handshake::ControlledHandshakeStage::Committed
         );
         // 收到 A 的 commitment 之前不能回送 Finished。
         assert_eq!(

@@ -121,6 +121,32 @@ fn real_relay_manager_routes_controller_lane_outage_signal() {
 }
 
 #[test]
+fn real_reader_reservation_retries_preserve_single_handshake_and_deadline() {
+    if std::env::var("PINVOU_READER_RESUME_TEST_CHILD").as_deref() != Ok("1") {
+        run_reader_child(
+            "real_reader_reservation_retries_preserve_single_handshake_and_deadline",
+            false,
+            false,
+            20,
+        );
+        return;
+    }
+    tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
+        tokio::time::timeout(Duration::from_secs(20),
+            crate::features::remote_control::controller::relay_runtime::reader_resume_tests::reservation_replay_tests::round_trip(|| {
+                let mut context = crate::build_tauri_context();
+                context.config_mut().app.windows.clear();
+                let app = tauri::Builder::default().any_thread()
+                    .manage(crate::features::remote_control::controller::controlled::ControlledDeviceManager::default())
+                    .manage(crate::features::remote_control::controller::encrypted_lane::ControlledLaneState::default())
+                    .manage(crate::features::remote_control::controller::relay_runtime::ControlledOutboundState::default())
+                    .build(context).unwrap();
+                (app.handle().clone(), app)
+            })).await.unwrap();
+    });
+}
+
+#[test]
 fn real_worker_final_admission_preserves_timeout_and_signed_deadline() {
     run_isolated_reader(false, false, true, None);
 }
