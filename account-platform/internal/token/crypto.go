@@ -125,9 +125,21 @@ type RemoteEnvelopeProvider struct {
 	client  *http.Client
 }
 
+const (
+	// Remote also protects dispatch and replay data. Keep room for Base64 of a
+	// 32 MiB replay result and its envelope instead of importing Transit limits.
+	remoteEnvelopeMaximumRequestBytes  = 64 << 20
+	remoteEnvelopeMaximumResponseBytes = 1 << 20 // The original Remote read budget.
+	remoteEnvelopeMaximumKeyIDBytes    = 1 << 20 // Bound JSON escaping of opaque key metadata.
+)
+
+func validRemoteEnvelopeKeyID(keyID string) bool {
+	return len(keyID) <= remoteEnvelopeMaximumKeyIDBytes && strings.TrimSpace(keyID) != ""
+}
+
 func NewRemoteEnvelopeProvider(environment, keyID, rawURL, token string) (*RemoteEnvelopeProvider, error) {
 	parsed, err := url.Parse(strings.TrimRight(strings.TrimSpace(rawURL), "/"))
-	if err != nil || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" || strings.TrimSpace(keyID) == "" || len(strings.TrimSpace(token)) < 32 {
+	if err != nil || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" || !validRemoteEnvelopeKeyID(keyID) || len(strings.TrimSpace(token)) < 32 {
 		return nil, ErrInvalidSecret
 	}
 	production := platformconfig.IsProduction(environment)
@@ -142,9 +154,6 @@ func NewRemoteEnvelopeProvider(environment, keyID, rawURL, token string) (*Remot
 func (p *RemoteEnvelopeProvider) KeyID() string { return p.keyID }
 
 func (p *RemoteEnvelopeProvider) Encrypt(plaintext, associatedData []byte) ([]byte, error) {
-	if len(plaintext) == 0 || len(associatedData) == 0 {
-		return nil, ErrInvalidSecret
-	}
 	return p.call("encrypt", p.keyID, plaintext, associatedData)
 }
 
@@ -153,18 +162,31 @@ func (p *RemoteEnvelopeProvider) Decrypt(ciphertext, associatedData []byte) ([]b
 }
 
 func (p *RemoteEnvelopeProvider) DecryptWithKeyID(keyID string, ciphertext, associatedData []byte) ([]byte, error) {
-	if strings.TrimSpace(keyID) == "" || len(ciphertext) == 0 || len(associatedData) == 0 {
-		return nil, ErrInvalidSecret
-	}
 	return p.call("decrypt", keyID, ciphertext, associatedData)
 }
 
+func encodeRemoteEnvelopeRequest(keyID string, value, associatedData []byte, maximum int) ([]byte, error) {
+	if !validRemoteEnvelopeKeyID(keyID) || len(value) == 0 || len(associatedData) == 0 || len(value) > maximum || len(associatedData) > maximum {
+		return nil, ErrInvalidSecret
+	}
+	encodedBytes := base64.StdEncoding.EncodedLen(len(value)) + base64.StdEncoding.EncodedLen(len(associatedData))
+	if encodedBytes > maximum {
+		return nil, ErrInvalidSecret
+	}
+	fields := map[string]string{"key_id": keyID, "value_base64": "", "associated_data_b64": ""}
+	// Base64 adds no JSON escapes. Measure the same encoder's fixed fields and
+	// opaque key ID before allocating the potentially large encoded payloads.
+	metadata, err := json.Marshal(fields)
+	if err != nil || len(metadata) > maximum-encodedBytes {
+		return nil, ErrInvalidSecret
+	}
+	fields["value_base64"] = base64.StdEncoding.EncodeToString(value)
+	fields["associated_data_b64"] = base64.StdEncoding.EncodeToString(associatedData)
+	return json.Marshal(fields)
+}
+
 func (p *RemoteEnvelopeProvider) call(operation, keyID string, value, associatedData []byte) ([]byte, error) {
-	payload, err := json.Marshal(map[string]string{
-		"key_id":              keyID,
-		"value_base64":        base64.StdEncoding.EncodeToString(value),
-		"associated_data_b64": base64.StdEncoding.EncodeToString(associatedData),
-	})
+	payload, err := encodeRemoteEnvelopeRequest(keyID, value, associatedData, remoteEnvelopeMaximumRequestBytes)
 	if err != nil {
 		return nil, ErrInvalidSecret
 	}
@@ -188,7 +210,8 @@ func (p *RemoteEnvelopeProvider) call(operation, keyID string, value, associated
 	var body struct {
 		Value string `json:"value_base64"`
 	}
-	if err := json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(&body); err != nil {
+	raw, err := readBoundedUpstreamBody(response.Body, remoteEnvelopeMaximumResponseBytes)
+	if err != nil || json.Unmarshal(raw, &body) != nil {
 		return nil, ErrInvalidSecret
 	}
 	decoded, err := base64.StdEncoding.DecodeString(body.Value)
