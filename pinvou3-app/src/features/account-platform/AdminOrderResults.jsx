@@ -2,9 +2,14 @@ import React from 'react';
 import { accountLayoutCopy, adminLayoutCopy, financeCopy } from '../../shared/i18n.js';
 import { formatFen } from './finance-contract.js';
 
+const dateFormatters = new Map();
 const dateLabel = (value, locale) => {
   if (!value || !Number.isFinite(Date.parse(value))) return '—';
-  const fmt = new Intl.DateTimeFormat(locale, { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' });
+  let fmt = dateFormatters.get(locale);
+  if (!fmt) {
+    fmt = new Intl.DateTimeFormat(locale, { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' });
+    dateFormatters.set(locale, fmt);
+  }
   const fields = Object.fromEntries(fmt.formatToParts(new Date(value)).map(part => [part.type, part.value]));
   return [fields.year, fields.month, fields.day].join('-') + ' ' + [fields.hour, fields.minute, fields.second].join(':');
 };

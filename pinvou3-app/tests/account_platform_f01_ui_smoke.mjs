@@ -54,7 +54,8 @@ try {
   for (const language of ['zh', 'en', 'ja']) for (const malformed of ['missing', 'null']) await caseRun(`${language}: ${malformed} bootstrap context shows recoverable error before child workspaces`, async () => {
     await fresh(); await page.select('.ap-sidebar-foot select, .adm-sidebar-foot select, header select', language);
     await page.evaluate(malformed => { globalThis.f01.badBootstrapContext = malformed; globalThis.f01.calls.length = 0; }, malformed);
-    await clickText(await page.evaluate(() => globalThis.f01.copy().account.refresh));
+    await page.click('[data-section=accountSettings]');
+    await clickText(await page.evaluate(() => globalThis.f01.copy().center.refreshAccount));
     await page.waitForFunction(() => document.querySelector('.ap-login [role=alert]')?.textContent === globalThis.f01.copy().account.requestFailed);
     assert(await page.evaluate(() => !document.querySelector('.ap-app') && !globalThis.f01.calls.some(call => call.url.includes('/me/balance') || call.url.includes('/me/organizations'))), 'invalid context mounted child or queried financial data');
     assert(await page.evaluate(() => document.querySelector('.ap-login a')?.textContent === globalThis.f01.copy().account.login), 'existing login recovery missing');
@@ -134,6 +135,27 @@ try {
     assert(await page.evaluate(() => globalThis.f01.smsCalls[0].key === globalThis.f01.smsCalls[1].key && JSON.stringify(globalThis.f01.smsCalls[0].command) === JSON.stringify(globalThis.f01.smsCalls[1].command)), 'lost ACK changed immutable facts');
     const revision = await page.evaluate(() => globalThis.f01.smsCalls[0].command.expected_revision + 1);
     await page.waitForFunction(text => document.querySelector('.adm-sms-save-feedback[role=status]')?.textContent.includes(text), {}, smsTemplateCopy.ja.replaySaved.replace('{revision}', String(revision)));
+  });
+  for (const [firstError, definiteError] of [[{ status: 503, code: 'UPSTREAM_UNAVAILABLE' }, { status: 400, code: 'INVALID_SMS_CONFIGURATION' }], ['network', { status: 409, code: 'IDEMPOTENCY_KEY_CONFLICT' }]]) await caseRun(`SMS unknown retry exposes definite ${definiteError.status} and keeps the original invocation`, async () => {
+    await fresh('admin');
+    await clickText(await page.evaluate(() => globalThis.f01.copy().admin.settings.title));
+    await page.waitForSelector('.adm-sms-form textarea');
+    await page.type('.adm-sms-form textarea', 'controlled correction reason');
+    await page.waitForFunction(() => !document.querySelector('.adm-sms-form button[type=submit]').disabled);
+    await page.evaluate(error => { globalThis.f01.smsWriteError = error; }, firstError);
+    await page.click('.adm-sms-form button[type=submit]');
+    await page.waitForSelector('.adm-sms-unknown[role=status]');
+    await page.evaluate(error => { globalThis.f01.smsWriteError = error; }, definiteError);
+    await page.click('.adm-sms-form button[type=submit]');
+    const failure = await page.evaluate(() => globalThis.f01.copy().admin.settings.sms.saveFailed);
+    await page.waitForFunction(text => document.querySelector('.adm-sms-error[role=alert] > span')?.textContent === text, {}, failure);
+    assert((await page.evaluate(() => globalThis.f01.smsCalls.length)) === 2, 'the definite response belongs to the second attempt');
+    assert(await page.$('.adm-sms-unknown[role=status]'), 'a rejected retry does not resolve the original unknown write');
+    await page.evaluate(() => { globalThis.f01.smsWriteError = null; });
+    await page.click('.adm-sms-form button[type=submit]');
+    await page.waitForFunction(() => globalThis.f01.smsCalls.length === 3 && !document.querySelector('.adm-sms-unknown'));
+    assert((await page.evaluate(() => new Set(globalThis.f01.smsCalls.map(call => call.key)).size)) === 1, 'all attempts retain the original key');
+    assert((await page.evaluate(() => new Set(globalThis.f01.smsCalls.map(call => JSON.stringify(call.command))).size)) === 1, 'all attempts retain the original command');
   });
   await caseRun('all three languages display real personal labels', async () => { await fresh(); for (const language of ['ja', 'zh', 'en']) { await page.select('.ap-sidebar-foot select, .adm-sidebar-foot select, header select', language); await waitText(await page.evaluate(() => globalThis.f01.copy().account.profileSettings)); } });
   const desktopGuest = async () => { await fresh(); await page.evaluate(() => { globalThis.f01.authenticated = false; globalThis.f01.render('desktop'); }); await page.waitForSelector('.ap-login input[autocomplete=username]'); };
@@ -272,9 +294,10 @@ try {
     const input = await page.$('input[autocomplete=username]');
     await input.click(); await input.evaluate(node => node.select()); await input.type('draft-for-a');
     assert(await input.evaluate(node => node.value === 'draft-for-a'), 'profile draft was not entered');
-    await clickText(await page.evaluate(() => globalThis.f01.copy().account.refresh));
+    await page.click('[data-section=accountSettings]');
+    await clickText(await page.evaluate(() => globalThis.f01.copy().center.refreshAccount));
     await page.waitForFunction(() => {
-      const refresh = [...document.querySelectorAll('header button')].find(button => button.textContent.trim() === globalThis.f01.copy().account.refresh);
+      const refresh = [...document.querySelectorAll('.ap-account-information button, header button')].find(button => button.textContent.trim() === globalThis.f01.copy().center.refreshAccount);
       return refresh && !refresh.disabled && document.querySelector('input[autocomplete=username]')?.value === 'draft-for-a';
     });
     await page.evaluate(() => globalThis.f01.switchIdentity()); await waitText('account-b'); await openProfile();

@@ -1,3 +1,4 @@
+import { TokenAccountStatus, TokenAccountCount } from './TokenAccountSummary.jsx';
 import { isImeComposing } from '../../shared/ime-guard.mjs';
 import { TokenResourceFeedback, TokenResourcePaging } from './TokenResourcePrimitives.jsx';
 import { useAdminSource } from './AdminModelTokenPrimitives.jsx';
@@ -201,16 +202,6 @@ function AccountRecoveryQueue({ client, copy, routeVersion, onQueryChange, histo
     {enabled && <TokenResourcePaging source="accountRecovery" query={query} state={state} copy={copy} histories={histories} onChange={(next) => onQueryChange('accountRecovery', next)} />}
     {enabled && selected && <TokenAccountRecoveryDialog client={client} copy={copy} command={selected} onClose={() => setSelected(null)} onCompleted={() => { delete histories.current.accountRecovery; onQueryChange('accountRecovery', { ...query, cursor: '' }, 'replace'); setRefresh((value) => value + 1); }} />}
   </section>;
-}
-
-function TokenAccountStatus({ value, copy }) {
-  const text = Object.prototype.hasOwnProperty.call(copy.tokenAccountStatuses, value) ? copy.tokenAccountStatuses[value] : copy.tokenAccountStatusUnknown;
-  return <span className="adm-status">{text}</span>;
-}
-
-function TokenAccountCount({ value, missing, open, label }) {
-  if (!Number.isSafeInteger(value) || value < 0) return missing;
-  return open ? <button type="button" className="adm-token-account-metric" aria-label={label + ' · ' + value} onClick={open}>{value}</button> : value;
 }
 
 export function AdminTokenResourcesWorkspace({ client, copy, permissions, formsEnabled, actionsEnabled, detailsEnabled, routeVersion, onQueryChange, onRouteChange, histories }) {

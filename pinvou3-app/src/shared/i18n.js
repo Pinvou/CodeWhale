@@ -7,6 +7,7 @@
 // 比 zh 多出的 settings 相关键是历史遗留);ja 以 en 兜底(i18n/ja.js 内 spread);
 // settings 详情文案已并入各语言文件(原 settings-i18n.js)。
 export { CHAT_RECOVERY_COPY } from './i18n/chat-recovery.js';
+export { accountCenterCopy } from './account-center-i18n.js';
 export { modelAccessCopy } from './model-access-i18n.js';
 
 // Startup-budget (round-41 merge with #586): zh joins en/ja behind the
@@ -156,3 +157,4 @@ export { productAdmissionCopy } from './product-admission-i18n.js';
 export { auditActionCopy, auditActionLabels, auditPrivacyCopy, auditExportPresentation, auditListCopy } from './admin-audit-presentation-i18n.js';
 
 export { smsStatusCopy, smsTemplateCopy } from './admin-sms-presentation-i18n.js';
+export { approvalReadCopy, pendingApprovalReadCopy, executionApprovalReadCopy, approvalDirectoryCopy, approvalDirectoryToolbarCopy } from './admin-approval-read-i18n.js';
