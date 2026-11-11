@@ -239,6 +239,22 @@ function assertWorkflowFailurePolicy(workflowText) {
   ].join("\n"));
   let remainder = text.replace(financial, "").replace(windows, "");
   {
+    const receipt = namedStep(jobBlock("required-gate", text), "PR test success proof transport");
+    assert.equal(receipt.trimEnd(), [
+      "      - name: PR test success proof transport",
+      "        if: ${{ success() && steps.success_proof.outputs.directory != '' }}",
+      "        timeout-minutes: 3",
+      "        continue-on-error: true",
+      "        uses: actions/upload-artifact@v7",
+      "        with:",
+      "          name: ci-success-proof-${{ github.run_attempt }}",
+      "          path: ${{ steps.success_proof.outputs.directory }}/proof.json",
+      "          if-no-files-found: error",
+      "          retention-days: 2",
+    ].join("\n"));
+    remainder = remainder.replace(receipt, "");
+  }
+  {
     const receipt = namedStep(jobBlock("frontend-test", text), "Test resource lifecycle receipts");
     assert.equal(receipt.trimEnd(), [
       "      - name: Test resource lifecycle receipts",
@@ -255,21 +271,24 @@ function assertWorkflowFailurePolicy(workflowText) {
     ].join("\n"));
     remainder = remainder.replace(receipt, "");
   }
-  {
-    const receipt = namedStep(jobBlock("windows-codex-runtime-test", text), "Preserve browser fixture exit receipts");
+  for (const [stepName, artifact, prefix] of [
+    ["Preserve browser fixture exit receipts", "windows-browser-exit", "windows-browser-*"],
+    ["Preserve ACP fixture exit receipt", "windows-acp-exit", "windows-acp"],
+  ]) {
+    const receipt = namedStep(jobBlock("windows-codex-runtime-test", text), stepName);
     assert.equal(receipt.trimEnd(), [
-      "      - name: Preserve browser fixture exit receipts",
+      "      - name: " + stepName,
       "        if: always()",
       "        timeout-minutes: 3",
       "        continue-on-error: true",
       "        uses: actions/upload-artifact@v7",
       "        with:",
-      "          name: windows-browser-exit-${{ github.run_id }}-${{ github.run_attempt }}",
+      "          name: " + artifact + "-${{ github.run_id }}-${{ github.run_attempt }}",
       "          retention-days: 7",
       "          if-no-files-found: warn",
       "          path: |",
-      "            ${{ runner.temp }}/windows-browser-*-${{ github.run_id }}-${{ github.run_attempt }}.json",
-      "            ${{ runner.temp }}/windows-browser-*-${{ github.run_id }}-${{ github.run_attempt }}-resources/*.json",
+      "            ${{ runner.temp }}/" + prefix + "-${{ github.run_id }}-${{ github.run_attempt }}.json",
+      "            ${{ runner.temp }}/" + prefix + "-${{ github.run_id }}-${{ github.run_attempt }}-resources/*.json",
     ].join("\n"));
     remainder = remainder.replace(receipt, "");
   }
@@ -292,10 +311,28 @@ function assertWorkflowFailurePolicy(workflowText) {
     ].join("\n"));
     remainder = remainder.replace(receipt, "");
   }
+  {
+    const receipt = namedStep(jobBlock("account-closure-test", text), "Account closure resource lifecycle receipts");
+    assert.equal(receipt.trimEnd(), [
+      "      - name: Account closure resource lifecycle receipts",
+      "        id: account_receipts_upload",
+      "        if: ${{ always() && env.PINVOU_CI_RESOURCE_LEDGER != '' }}",
+      "        timeout-minutes: 3",
+      "        continue-on-error: true",
+      "        uses: actions/upload-artifact@v7",
+      "        with:",
+      "          name: account-closure-resource-lifecycle-${{ github.run_attempt }}",
+      "          path: |",
+      "            ${{ env.PINVOU_CI_RESOURCE_LEDGER }}/",
+      "          if-no-files-found: error",
+      "          retention-days: 7",
+    ].join("\n"));
+    remainder = remainder.replace(receipt, "");
+  }
   // Explicit YAML keys may put comments/newlines before their value indicator.
   const keySeparator = String.raw`(?:\s|#[^\n]*(?:\n|$))*:`;
   assert.doesNotMatch(remainder, new RegExp(String.raw`\bcontinue-on-error\s*['"]?` + keySeparator),
-    "only the five exact reviewed diagnostic steps may be advisory in any job");
+    "only the exact reviewed diagnostic steps may be advisory in any job");
   // YAML double-quoted keys decode numeric escapes and escaped line breaks.
   // Inspect each possible quoted key, including inside flow mappings. A
   // lookahead avoids a quote in unrelated shell text hiding a later real key.
@@ -346,7 +383,9 @@ test("all workflow legs reject unreviewed job and step failure exemptions", () =
   for (const [jobName, stepName] of [
     ["frontend-test", "Test resource lifecycle receipts"],
     ["account-platform-test", "Account test resource lifecycle receipts"],
+    ["account-closure-test", "Account closure resource lifecycle receipts"],
     ["windows-codex-runtime-test", "Preserve browser fixture exit receipts"],
+    ["windows-codex-runtime-test", "Preserve ACP fixture exit receipt"],
   ]) {
     const receipt = namedStep(jobBlock(jobName, original), stepName);
     const withoutReceiptExemption = original.replace(receipt,
@@ -375,7 +414,7 @@ test("all workflow legs reject unreviewed job and step failure exemptions", () =
 
 function assertFiniteAuditPGSetup(job) {
   const text = job.replaceAll("\r\n", "\n");
-  // These are exactly six approved ephemeral services, not permission for arbitrary
+  // These are exactly eight approved ephemeral services, not permission for arbitrary
   // services, production credentials, public ports or persistent volumes.
   const service = text.match(/^ {4}services:\n[\s\S]*?(?=^ {4}\S|$(?![\s\S]))/m);
   assert.ok(service, "isolated audit PostgreSQL service not found");
@@ -410,7 +449,7 @@ function assertFiniteAuditPGSetup(job) {
     "          --health-interval 5s",
     "          --health-timeout 5s",
     "          --health-retries 12",
-    ...["financial-postgres", "financial-token-postgres", "financial-billing-0-postgres", "financial-billing-1-postgres"].flatMap(name => [
+    ...["financial-postgres", "financial-token-postgres", "financial-billing-0-postgres", "financial-billing-1-postgres", "financial-billing-2-postgres", "financial-billing-3-postgres"].flatMap(name => [
       `      ${name}:`,
     "        # Same immutable PostgreSQL image already used by team-relay-hub-test.",
     "        # Disposable runner only; trust is never a deployment configuration.",
@@ -445,7 +484,7 @@ function assertFiniteAuditPGSetup(job) {
     "          python3 scripts/account-ci-postgres.py",
   ].join("\n"));
   for (const name of [existingBrokerStepName, auditPGStepName,
-    "Token financial contracts on isolated PostgreSQL", "Account closure contracts on isolated PostgreSQL"]) {
+    "Token financial contracts on isolated PostgreSQL"]) {
     assert.ok(text.indexOf(preflight) < text.indexOf(namedStep(text, name)),
       `service identity verification must precede ${name}`);
   }
@@ -473,7 +512,7 @@ function assertFiniteAuditPGSetup(job) {
     "          python3 scripts/account-ci-postgres.py --stop-owned-services",
   ].join("\n"));
   for (const name of [existingBrokerStepName, auditPGStepName,
-    "Token financial contracts on isolated PostgreSQL", "Account closure contracts on isolated PostgreSQL"]) {
+    "Token financial contracts on isolated PostgreSQL"]) {
     assert.ok(text.indexOf(namedStep(text, name)) < text.indexOf(stop), "stop must follow database consumers");
   }
   let outsidePGSteps = text.replace(pg, "").replace(preflight, "").replace(stop, "");
@@ -501,12 +540,8 @@ function assertFiniteAuditPGSetup(job) {
   for (const [name, environment, commands] of [
     ["Token financial contracts on isolated PostgreSQL", [
       "ACCOUNT_FINANCIAL_SERVICES: ${{ steps.account-pg.outputs.financial_services }}",
-    ], ["set -euo pipefail", "python3 -m unittest discover -s scripts/tests -p test_token_financial_postgres.py", "python3 -m unittest discover -s scripts/tests -p test_financial_parallel.py", "python3 scripts/test-financial-parallel.py"]],
-    ["Account closure contracts on isolated PostgreSQL", [
-      "PINVOU_ACCOUNT_CLOSURE_TEST_DATABASE_URL: ${{ steps.account-pg.outputs.financial_url }}",
-      ...pgIdentityEnvironment("financial"),
-      "PINVOU_ACCOUNT_CLOSURE_TEST_ARTIFACT_DIR: ${{ runner.temp }}/account-closure-postgres",
-    ], ["set -euo pipefail", "python3 -m unittest discover -s scripts/tests -p test_account_closure_postgres.py", "python3 scripts/test-account-closure-postgres.py"]],
+    ], ["set -euo pipefail", "python3 -m unittest discover -s scripts/tests -p test_token_financial_postgres.py", "python3 -m unittest discover -s scripts/tests -p test_financial_parallel.py", 'python3 scripts/ci-fixture-process.py --receipt "$PINVOU_CI_RESOURCE_LEDGER/financial-process.json" -- python3 scripts/test-financial-parallel.py']],
+
   ]) {
     const step = namedStep(text, name);
     assert.equal(step.trimEnd(), [
@@ -924,13 +959,12 @@ test("finite audit PostgreSQL exception rejects unsafe or unrelated service and 
     ["PINVOU_TEST_SCHEMA_DATABASE_URL: ${{ steps.account-pg.outputs.broker_url }}", "PINVOU_TEST_SCHEMA_DATABASE_URL: postgres://postgres@remote.invalid:5434/postgres?sslmode=disable"],
     ["npm --prefix account-platform run test:existing-broker", "npm --prefix account-platform run test:existing-broker || true"],
     ["ACCOUNT_FINANCIAL_SERVICES: ${{ steps.account-pg.outputs.financial_services }}", "ACCOUNT_FINANCIAL_SERVICES: ${{ toJSON(needs.other.outputs.services) }}"],
-    ["PINVOU_ACCOUNT_CLOSURE_TEST_DATABASE_URL: ${{ steps.account-pg.outputs.financial_url }}", "PINVOU_ACCOUNT_CLOSURE_TEST_DATABASE_URL: ${{ steps.account-pg.outputs.audit_url }}"],
     ["ACCOUNT_CI_SERVICES: ${{ toJSON(job.services) }}", "ACCOUNT_CI_SERVICES: ${{ toJSON(needs.other.outputs.services) }}"],
     ["        id: account-pg", "        id: unrelated-pg"],
     ["python3 scripts/account-ci-postgres.py", "python3 scripts/account-ci-postgres.py || true"],
     ["python3 -m unittest discover -s scripts/tests -p test_account_ci_postgres.py", "true"],
     ["python3 scripts/test-financial-parallel.py", "python3 scripts/test-financial-parallel.py || true"],
-    ["python3 scripts/test-account-closure-postgres.py", "python3 scripts/test-account-closure-postgres.py || true"],
+    ['python3 scripts/ci-fixture-process.py --receipt "$PINVOU_CI_RESOURCE_LEDGER/financial-process.json" -- ', ""],
     ["      GOTOOLCHAIN: local", "      F17_TEST_DATABASE_URL: postgres://postgres@127.0.0.1:5432/postgres\n      GOTOOLCHAIN: local"],
     ["        shell: bash", "        env:\n          F17_TEST_DATABASE_PROFILE: github-actions-service\n        shell: bash"],
     ["          POSTGRES_HOST_AUTH_METHOD: trust", "          POSTGRES_PASSWORD: ${{ secrets.DB_PASSWORD }}"],
@@ -955,13 +989,12 @@ test("finite audit PostgreSQL exception rejects unsafe or unrelated service and 
     const mutated = job.replace(step, () => changed);
     assert.equal(namedStep(mutated, name), changed, "mutation must preserve the literal step payload");
     for (const required of [pgPreflightStepName, auditPGStepName, existingBrokerStepName,
-      "Token financial contracts on isolated PostgreSQL", "Account closure contracts on isolated PostgreSQL"]) {
+      "Token financial contracts on isolated PostgreSQL"]) {
       namedStep(mutated, required); // Missing/duplicate steps cannot satisfy a negative control.
     }
     assert.throws(() => assertFiniteAuditPGSetup(mutated), expected);
   };
-  for (const [name, service] of [[auditPGStepName, "audit"], [existingBrokerStepName, "broker"],
-    ["Account closure contracts on isolated PostgreSQL", "financial"]]) {
+  for (const [name, service] of [[auditPGStepName, "audit"], [existingBrokerStepName, "broker"]]) {
     const step = namedStep(job, name);
     const miswired = step.replace(`outputs.${service}_url`, "outputs.unrelated_url");
     assert.notEqual(miswired, step, "URL mutation must hit the selected consumer");
@@ -1062,14 +1095,23 @@ test("Token financial PostgreSQL gate is required and cannot swallow a failed ru
   assert.match(job, /image: mirror\.gcr\.io\/library\/postgres@sha256:[a-f0-9]{64}/);
   const services = job.match(/^    services:\r?\n([\s\S]*?)^    env:/m)?.[1];
   assert.ok(services, "the disposable PostgreSQL service must exist");
-  assert.deepEqual([...services.matchAll(/^ {6}([a-z][a-z0-9-]*):\r?$/gm)].map(match => match[1]), ["audit-export-postgres", "existing-broker-postgres", "financial-postgres", "financial-token-postgres", "financial-billing-0-postgres", "financial-billing-1-postgres"]);
-  assert.deepEqual([...services.matchAll(/^ {10}- (.+)\r?$/gm)].map(match => match[1]), Array(6).fill('"127.0.0.1::5432"'));
+  assert.deepEqual([...services.matchAll(/^ {6}([a-z][a-z0-9-]*):\r?$/gm)].map(match => match[1]), ["audit-export-postgres", "existing-broker-postgres", "financial-postgres", "financial-token-postgres", "financial-billing-0-postgres", "financial-billing-1-postgres", "financial-billing-2-postgres", "financial-billing-3-postgres"]);
+  assert.deepEqual([...services.matchAll(/^ {10}- (.+)\r?$/gm)].map(match => match[1]), Array(8).fill('"127.0.0.1::5432"'));
   assertFiniteAuditPGSetup(job);
   const run = stepRun(job, "Token financial contracts on isolated PostgreSQL");
-  for (const failedPhase of ["guard", "postgres"]) {
-    const mock = `python3() { case "$*" in *unittest*) ${failedPhase === "guard" ? "return 7" : "return 0"};; *) ${failedPhase === "postgres" ? "return 7" : "return 0"};; esac; }; export -f python3;\n`;
-    const result = spawnSync(bash, ["-c", mock + run], { encoding: "utf8", timeout: 30_000, windowsHide: true });
-    assert.equal(result.status, 7, `${failedPhase} failure must fail the gate: ${result.stderr}`);
+  const directory = mkdtempSync(join(tmpdir(), "pinvou-financial-gate-"));
+  try {
+    for (const failedPhase of ["none", "guard", "postgres"]) {
+      const mock = `python3() { case "$*" in *unittest*) ${failedPhase === "guard" ? "return 7" : "return 0"};; *) ${failedPhase === "postgres" ? "return 7" : "return 0"};; esac; }; export -f python3;\n`;
+      const result = spawnSync(bash, ["-c", mock + run], {
+        encoding: "utf8", timeout: 30_000, windowsHide: true,
+        env: { ...process.env, PINVOU_CI_RESOURCE_LEDGER: directory },
+      });
+      assert.equal(result.status, failedPhase === "none" ? 0 : 7,
+        `${failedPhase} must preserve the selected gate result: ${result.stderr}`);
+    }
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
   }
 });
 
@@ -1086,7 +1128,7 @@ test("required-gate rejects skipped applicable Go checks and permits unrelated s
   assert.match(gate, /^      - account-platform-test$/m);
   assert.match(gate, /ACCOUNT_PLATFORM_REQUIRED: \$\{\{ needs\.changes\.outputs\.account_platform \}\}/);
   assert.match(gate, /ACCOUNT_PLATFORM_RESULT: \$\{\{ needs\.account-platform-test\.result \}\}/);
-  const run = gate.match(/        run: \|\r?\n([\s\S]*)/)[1].replace(/^ {10}/gm, "");
+  const run = stepRun(gate, "汇总所有适用检查");
   const baseEnv = { ...process.env, GITHUB_EVENT_NAME: "pull_request", WINDOWS_RUST_REQUIRED_BY_POLICY: "false" };
   for (const match of gate.matchAll(/^          ([A-Z0-9_]+_RESULT):/gm)) baseEnv[match[1]] = "success";
   for (const event of ["pull_request", "merge_group"]) {
@@ -1098,6 +1140,55 @@ test("required-gate rejects skipped applicable Go checks and permits unrelated s
       }
     }
   }
+});
+
+test("queue reuse normalizes only verified skips and never failed executions", () => {
+  const gate = jobBlock("required-gate");
+  const run = stepRun(gate, "汇总所有适用检查");
+  const baseEnv = { ...process.env, WINDOWS_RUST_REQUIRED_BY_POLICY: "false", ACCOUNT_PLATFORM_REQUIRED: "true" };
+  for (const match of gate.matchAll(/^          ([A-Z0-9_]+_RESULT):/gm)) baseEnv[match[1]] = "success";
+  for (const [event, verified, listed, status, accepted] of [
+    ["merge_group", "true", "true", "skipped", true],
+    ["merge_group", "false", "true", "skipped", false],
+    ["merge_group", "true", "false", "skipped", false],
+    ["pull_request", "true", "true", "skipped", false],
+    ["merge_group", "true", "true", "failure", false],
+    ["merge_group", "true", "true", "cancelled", false],
+  ]) {
+    const result = spawnSync(bash, ["-c", run], { encoding: "utf8", timeout: 30_000, windowsHide: true,
+      env: { ...baseEnv, GITHUB_EVENT_NAME: event, CI_REUSE_VERIFIED: verified,
+        CI_REUSE_IDS: listed === "true" ? "account-platform-test" : "", ACCOUNT_PLATFORM_RESULT: status } });
+    assert.equal(result.status, accepted ? 0 : 1, `${event}/${verified}/${listed}/${status}: ${result.stderr}`);
+  }
+  const lookup = namedStep(jobBlock("changes"), "Verify identical-input PR success proofs");
+  assert.match(lookup, /if: \$\{\{ github.event_name == 'merge_group' \}\}/);
+  assert.match(lookup, /timeout-minutes: 2/);
+  assert.match(lookup, /python3 scripts\/ci-test-reuse.py lookup/);
+  const productJobs = ["version-consistency", "account-platform-test", "frontend-test", "relay-test",
+    "windows-relay-dacl", "windows-relay-tools-test", "team-relay-hub-test", "update-release-console-test",
+    "release-contract-test", "knowledge-rust", "rust-lint", "rust-test", "cli-test", "cli-lint",
+    "windows-static-updater-contract", "windows-rust-test", "windows-rustup-repair-test", "macos-rust-check",
+    "windows-codex-runtime-test", "windows-runtime-test", "macos-codex-runtime-test", "macos-cli-check", "rust-loongarch64-check"];
+  for (const name of productJobs) {
+    const block = jobBlock(name);
+    assert.ok(block.includes("needs.changes.outputs.reuse_verified == 'true'"));
+    assert.ok(block.includes(`contains(fromJSON(needs.changes.outputs.reused_jobs || '[]'), '${name}')`));
+  }
+  const bindings = [...run.matchAll(/"([\w-]+):([A-Z0-9_]+_RESULT)"/g)];
+  assert.deepEqual(bindings.map(match => match[1]).sort(), [...productJobs].sort());
+  const allReused = { ...baseEnv, GITHUB_EVENT_NAME: "merge_group", CI_REUSE_VERIFIED: "true",
+    CI_REUSE_IDS: productJobs.join(","), WINDOWS_RUST_REQUIRED_BY_POLICY: "true",
+    RELAY_REQUIRED_BY_POLICY: "true", BACKFLOW_MODE: "full" };
+  for (const match of bindings) allReused[match[2]] = "skipped";
+  for (const [override, accepted] of [[{}, true], [{ RUST_RESULT: "failure" }, false],
+    [{ FAST_GATE_RESULT: "skipped", CI_REUSE_IDS: productJobs.join(",") + ",fast-gate" }, false]]) {
+    const result = spawnSync(bash, ["-c", run], { encoding: "utf8", timeout: 30_000, windowsHide: true,
+      env: { ...allReused, ...override } });
+    assert.equal(result.status, accepted ? 0 : 1, result.stderr);
+  }
+  const producer = namedStep(gate, "Record successful PR test inputs");
+  assert.ok(producer.includes("success() && github.event_name == 'pull_request'"));
+  assert.ok(producer.includes("github.event.pull_request.head.repo.full_name == github.repository"));
 });
 
 test("rust_code filter covers plain Rust source changes", () => {
