@@ -5,6 +5,7 @@ use super::{
     PermissionDecisionOwner, RemotePermissionOwner, RemoteTaskService, TaskLeaseBinding, Value,
     commit_effective_permission_allow, json,
 };
+use crate::features::remote_control::controller::task::RemoteTaskState;
 
 pub(super) struct PermissionDecisionHandler<'a> {
     pub(super) controlled: &'a super::ControlledDeviceManager,
@@ -77,7 +78,10 @@ impl PermissionDecisionHandler<'_> {
                     // authority call is allowed on this path, including terminal tasks.
                     return Ok(Admission::Receipt(view.state));
                 }
-                if record.is_terminal() {
+                if !matches!(
+                    record.state,
+                    RemoteTaskState::Running | RemoteTaskState::WaitingPermission
+                ) {
                     return Err("task_session_binding_mismatch".to_owned());
                 }
                 let outcome = self
