@@ -2639,6 +2639,18 @@ mod tests {
     use std::cell::RefCell;
     use std::collections::VecDeque;
 
+    #[test]
+    fn acp_tool_round_cap_stays_aligned_with_the_interactive_turn_budget() {
+        // The "aligned with the interactive default" claim is prose otherwise:
+        // pin both the audited literal (50 → 200) and the alignment itself so
+        // either side drifting alone fails here.
+        assert_eq!(MAX_ACP_TOOL_ROUNDS, 200);
+        assert_eq!(
+            MAX_ACP_TOOL_ROUNDS as u32,
+            crate::core::engine::turn_budget::DEFAULT_MAX_MODEL_STEPS,
+        );
+    }
+
     #[tokio::test]
     async fn tool_update_emits_typed_acp_image_content() {
         let mut output = Vec::new();

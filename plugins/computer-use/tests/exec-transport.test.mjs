@@ -31,6 +31,30 @@ test("run enforces timeouts", async () => {
   assert.equal(r.timedOut, true);
 });
 
+test("run appends a byte-accurate truncation marker for CJK output past maxBuffer", async () => {
+  // 50 CJK chars = 150 UTF-8 bytes against a 100-byte cap: the marker must
+  // fire and the kept prefix must stay within cap bytes.
+  const r = await run("node", ["-e", "process.stdout.write('\\u6c49'.repeat(50))"], { maxBuffer: 100 });
+  assert.equal(r.code, 0);
+  assert.match(r.stdout, /\n…\[stdout truncated at 100 byte capture limit\]$/);
+  const kept = r.stdout.replace(/\n…\[stdout truncated at 100 byte capture limit\]$/, "");
+  assert.ok(
+    Buffer.byteLength(kept, "utf8") <= 100,
+    `kept prefix should be <= 100 bytes, got ${Buffer.byteLength(kept, "utf8")}`,
+  );
+});
+
+test("run does not mark truncation when output fits or exactly fills maxBuffer", async () => {
+  // 10 CJK chars = 30 UTF-8 bytes: under a 100-byte cap, and exactly at a
+  // 30-byte cap, nothing is dropped so no marker may appear.
+  for (const maxBuffer of [100, 30]) {
+    const r = await run("node", ["-e", "process.stdout.write('\\u6c49'.repeat(10))"], { maxBuffer });
+    assert.equal(r.code, 0);
+    assert.equal(r.stdout, "\u6c49".repeat(10));
+    assert.ok(!r.stdout.includes("truncated"), `no marker expected at cap ${maxBuffer}`);
+  }
+});
+
 test("have() detects real and missing tools", async () => {
   assert.equal(await have("node"), true);
   assert.equal(await have("definitely-not-a-real-tool-xyz"), false);

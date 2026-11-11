@@ -1431,6 +1431,7 @@ async fn caller_cancellation_after_engine_acceptance_keeps_owned_turn_lifecycle(
             usage: Usage::default(),
             status: TurnOutcomeStatus::Completed,
             error: None,
+            error_source: None,
             tool_catalog: None,
             base_url: None,
         })
@@ -1546,6 +1547,7 @@ async fn operation_key_replays_torn_response_survives_restart_and_rejects_mismat
             usage: Usage::default(),
             status: TurnOutcomeStatus::Completed,
             error: None,
+            error_source: None,
             tool_catalog: None,
             base_url: None,
         })
@@ -1760,6 +1762,7 @@ async fn thread_updates_while_start_waits_for_capacity_survive_latest_turn_write
             usage: Usage::default(),
             status: TurnOutcomeStatus::Completed,
             error: None,
+            error_source: None,
             tool_catalog: None,
             base_url: None,
         })
@@ -1925,6 +1928,7 @@ async fn compact_lifecycle_outlives_caller_and_preserves_concurrent_thread_updat
             usage: Usage::default(),
             status: TurnOutcomeStatus::Completed,
             error: None,
+            error_source: None,
             tool_catalog: None,
             base_url: None,
         })
@@ -3494,6 +3498,12 @@ fn runtime_usage_sink_survives_parent_terminal_and_restart_exactly_once() -> Res
         },
     );
     drop(lease);
+    // Settlement-shaped flush: the production turn settlement persists the
+    // staged routed-usage form with its terminal save (the disclosed batching
+    // trade means an unflushed crash window exists, but this test pins the
+    // restart contract, so it settles explicitly before dropping the store).
+    let settled = manager.store.load_turn(&turn.id)?;
+    manager.store.save_turn(&settled)?;
     drop(manager);
 
     let reopened = test_manager(data_dir.clone())?;
@@ -3564,6 +3574,10 @@ fn routed_usage_append_is_bounded_and_idempotent_for_every_delivery_path() {
     }
 
     assert_eq!(turn.routed_usage.len(), MAX_ROUTED_USAGE_RECORDS_PER_TURN);
+    assert_eq!(
+        MAX_ROUTED_USAGE_RECORDS_PER_TURN, 2_048,
+        "the audited per-turn routed-usage cap"
+    );
     assert_eq!(turn.routed_usage_dropped_records, extra as u64);
     assert_eq!(
         turn.routed_usage_source_ids.len(),
@@ -3586,6 +3600,122 @@ fn routed_usage_append_is_bounded_and_idempotent_for_every_delivery_path() {
         turn.routed_usage_dropped_records,
         before.routed_usage_dropped_records
     );
+}
+
+#[test]
+fn routed_usage_staging_batches_disk_writes_and_stays_read_coherent() {
+    // Raising the routed-usage cap to 2048 with per-record turn-file rewrites
+    // would cost ~950 MB of O(N²) disk churn on a maximal fleet turn. The
+    // staging layer batches those writes; this pins the three contracts that
+    // make it safe: staged appends stay visible to `load_turn` readers, disk
+    // trails by at most one batch, and a plain save supersedes the stage.
+    let dir = test_runtime_dir();
+    let store = RuntimeThreadStore::open(dir.clone()).expect("open store");
+    let turn = sample_turn("thr_staged", "turn_staged", RuntimeTurnStatus::InProgress);
+    store.save_turn(&turn).expect("persist base turn");
+    let turn_path = store.turns_dir.join(format!("{}.json", turn.id));
+
+    let route = crate::cost_status::EffectiveRouteEnvelope::capture(
+        None,
+        ApiProvider::Deepseek,
+        "deepseek-primary",
+        "deepseek-v4-flash",
+        Some(ApiProvider::Deepseek.default_base_url()),
+        Utc::now(),
+    );
+    let record = |index: usize| crate::cost_status::EffectiveRouteUsage {
+        route: route.clone(),
+        usage: Usage {
+            input_tokens: index as u32,
+            ..Usage::default()
+        },
+    };
+    let disk_routed_len = || -> usize {
+        let raw = std::fs::read_to_string(&turn_path).expect("read turn from disk");
+        serde_json::from_str::<TurnRecord>(&raw)
+            .expect("parse persisted turn")
+            .routed_usage
+            .len()
+    };
+
+    // BATCH - 1 appends stay staged: readers see them through `load_turn`,
+    // the disk file does not grow.
+    for index in 0..ROUTED_USAGE_FLUSH_BATCH - 1 {
+        assert!(
+            store
+                .append_routed_usage_staged(
+                    &turn.id,
+                    &format!("sink:response:{index}"),
+                    record(index)
+                )
+                .expect("staged append"),
+            "append {index} must be accepted"
+        );
+    }
+    assert_eq!(
+        store
+            .load_turn(&turn.id)
+            .expect("coherent read")
+            .routed_usage
+            .len(),
+        ROUTED_USAGE_FLUSH_BATCH - 1,
+        "load_turn returns the staged form"
+    );
+    assert_eq!(
+        disk_routed_len(),
+        0,
+        "no per-record disk write below the batch threshold"
+    );
+
+    // The BATCH-th append flushes: disk catches up with every staged record.
+    assert!(
+        store
+            .append_routed_usage_staged(
+                &turn.id,
+                &format!("sink:response:{}", ROUTED_USAGE_FLUSH_BATCH - 1),
+                record(ROUTED_USAGE_FLUSH_BATCH - 1)
+            )
+            .expect("batched append")
+    );
+    assert_eq!(
+        disk_routed_len(),
+        ROUTED_USAGE_FLUSH_BATCH,
+        "batch flush persists every staged record"
+    );
+    assert_eq!(
+        store
+            .load_turn(&turn.id)
+            .expect("post-flush read")
+            .routed_usage
+            .len(),
+        ROUTED_USAGE_FLUSH_BATCH
+    );
+
+    // A plain save of the loaded (staged) record supersedes the stage — the
+    // settlement path's shape: staged records must ride along, not vanish.
+    assert!(
+        store
+            .append_routed_usage_staged(&turn.id, "mailbox:response:0", record(100))
+            .expect("stage one more")
+    );
+    let mut settlement = store.load_turn(&turn.id).expect("load staged turn");
+    settlement.status = RuntimeTurnStatus::Completed;
+    store.save_turn(&settlement).expect("settlement save");
+    assert_eq!(
+        disk_routed_len(),
+        ROUTED_USAGE_FLUSH_BATCH + 1,
+        "the settlement save carries staged records"
+    );
+    assert_eq!(
+        store
+            .load_turn(&turn.id)
+            .expect("final read")
+            .routed_usage
+            .len(),
+        ROUTED_USAGE_FLUSH_BATCH + 1
+    );
+
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 #[tokio::test]
@@ -5292,6 +5422,7 @@ async fn thread_lifecycle_persists_across_restart() -> Result<()> {
                     status: TurnOutcomeStatus::Completed,
                     error: None,
                     tool_catalog: None,
+                    error_source: None,
                     base_url: None,
                 })
                 .await;
@@ -5434,6 +5565,7 @@ async fn monitor_separates_lifecycle_start_from_billing_dispatch_and_child_usage
             status: TurnOutcomeStatus::Completed,
             error: None,
             tool_catalog: None,
+            error_source: None,
             // Completion-time endpoint evidence must be ignored.
             base_url: Some("https://api.stepfun.com/v1/coding".to_string()),
         })
@@ -5535,6 +5667,7 @@ async fn monitor_separates_lifecycle_start_from_billing_dispatch_and_child_usage
             usage: Usage::default(),
             status: TurnOutcomeStatus::Completed,
             error: None,
+            error_source: None,
             tool_catalog: None,
             base_url: None,
         })
@@ -5589,6 +5722,7 @@ async fn completed_turn_without_engine_output_fails() -> Result<()> {
                     status: TurnOutcomeStatus::Completed,
                     error: None,
                     tool_catalog: None,
+                    error_source: None,
                     base_url: None,
                 })
                 .await;
@@ -5675,6 +5809,7 @@ async fn preturn_control_status_does_not_make_empty_turn_succeed() -> Result<()>
                     usage: Usage::default(),
                     status: TurnOutcomeStatus::Completed,
                     error: None,
+                    error_source: None,
                     tool_catalog: None,
                     base_url: None,
                 })
@@ -5739,6 +5874,7 @@ async fn engine_error_remains_failed_after_nominal_turn_complete() -> Result<()>
                     usage: Usage::default(),
                     status: TurnOutcomeStatus::Completed,
                     error: None,
+                    error_source: None,
                     tool_catalog: None,
                     base_url: None,
                 })
@@ -6853,6 +6989,7 @@ async fn compact_interrupt_persists_canceled_item_for_the_exact_request() -> Res
             usage: Usage::default(),
             status: TurnOutcomeStatus::Interrupted,
             error: None,
+            error_source: None,
             tool_catalog: None,
             base_url: None,
         })
@@ -7095,6 +7232,7 @@ async fn multi_turn_continuity_same_thread() -> Result<()> {
                     status: TurnOutcomeStatus::Completed,
                     error: None,
                     tool_catalog: None,
+                    error_source: None,
                     base_url: None,
                 })
                 .await;
@@ -7330,6 +7468,7 @@ async fn host_goal_loop_kickoff_arms_one_continuation_and_parks_at_engine_cap() 
                     status: TurnOutcomeStatus::Completed,
                     error: None,
                     tool_catalog: Some(vec![catalog_tool("update_goal")]),
+                    error_source: None,
                     base_url: None,
                 })
                 .await;
@@ -7446,6 +7585,7 @@ async fn host_goal_loop_skips_rearm_without_update_goal_and_after_failed_pass() 
                     status: TurnOutcomeStatus::Completed,
                     error: None,
                     tool_catalog: Some(vec![catalog_tool("read")]),
+                    error_source: None,
                     base_url: None,
                 })
                 .await;
@@ -7522,6 +7662,7 @@ async fn host_goal_loop_skips_rearm_without_update_goal_and_after_failed_pass() 
                     status: TurnOutcomeStatus::Failed,
                     error: Some("provider exploded".to_string()),
                     tool_catalog: Some(vec![catalog_tool("update_goal")]),
+                    error_source: None,
                     base_url: None,
                 })
                 .await;
@@ -7617,6 +7758,7 @@ async fn host_goal_loop_mirrors_terminal_snapshot_and_does_not_rearm() -> Result
                         status: TurnOutcomeStatus::Completed,
                         error: None,
                         tool_catalog: Some(vec![catalog_tool("update_goal")]),
+                        error_source: None,
                         base_url: None,
                     })
                     .await;
@@ -7905,6 +8047,7 @@ async fn approval_required_with_stale_active_turn_is_denied() -> Result<()> {
             status: TurnOutcomeStatus::Completed,
             error: None,
             tool_catalog: None,
+            error_source: None,
             base_url: None,
         })
         .await?;
@@ -8022,6 +8165,7 @@ async fn approval_required_awaits_external_decision_allow() -> Result<()> {
             usage: Usage::default(),
             status: TurnOutcomeStatus::Completed,
             error: None,
+            error_source: None,
             tool_catalog: None,
             base_url: None,
         })
@@ -8137,6 +8281,7 @@ async fn user_input_snapshot_survives_reload_and_clears_after_submission() -> Re
             usage: Usage::default(),
             status: TurnOutcomeStatus::Completed,
             error: None,
+            error_source: None,
             tool_catalog: None,
             base_url: None,
         })
@@ -8488,6 +8633,7 @@ async fn thread_detail_cursor_precedes_projection_reads_at_terminal_boundary() -
             usage: Usage::default(),
             status: TurnOutcomeStatus::Completed,
             error: None,
+            error_source: None,
             tool_catalog: None,
             base_url: None,
         })
@@ -8742,6 +8888,7 @@ async fn thread_detail_materializes_stream_prefixes_before_their_delta_cursor() 
             usage: Usage::default(),
             status: TurnOutcomeStatus::Interrupted,
             error: None,
+            error_source: None,
             tool_catalog: None,
             base_url: None,
         })
@@ -8884,6 +9031,7 @@ async fn thread_detail_delta_boundary_is_replay_idempotent() -> Result<()> {
             usage: Usage::default(),
             status: TurnOutcomeStatus::Interrupted,
             error: None,
+            error_source: None,
             tool_catalog: None,
             base_url: None,
         })
@@ -8956,6 +9104,7 @@ async fn terminal_turn_cancels_pending_user_input_and_clears_snapshot() -> Resul
             usage: Usage::default(),
             status: TurnOutcomeStatus::Completed,
             error: None,
+            error_source: None,
             tool_catalog: None,
             base_url: None,
         })
@@ -9148,6 +9297,7 @@ async fn dynamic_tool_result_settles_snapshot_and_emits_one_safe_resolution() ->
             usage: Usage::default(),
             status: TurnOutcomeStatus::Completed,
             error: None,
+            error_source: None,
             tool_catalog: None,
             base_url: None,
         })
@@ -9336,6 +9486,7 @@ async fn dynamic_tool_result_receipt_outlives_canceled_delivery_future() -> Resu
             usage: Usage::default(),
             status: TurnOutcomeStatus::Completed,
             error: None,
+            error_source: None,
             tool_catalog: None,
             base_url: None,
         })
@@ -10168,6 +10319,7 @@ async fn dynamic_tool_timeout_clears_snapshot_and_emits_once() -> Result<()> {
             usage: Usage::default(),
             status: TurnOutcomeStatus::Completed,
             error: None,
+            error_source: None,
             tool_catalog: None,
             base_url: None,
         })
@@ -10244,6 +10396,7 @@ async fn terminal_turn_cancels_pending_dynamic_tool_exactly_once() -> Result<()>
             usage: Usage::default(),
             status: TurnOutcomeStatus::Interrupted,
             error: None,
+            error_source: None,
             tool_catalog: None,
             base_url: None,
         })
@@ -10361,6 +10514,7 @@ async fn approval_required_external_deny_is_denied() -> Result<()> {
             usage: Usage::default(),
             status: TurnOutcomeStatus::Completed,
             error: None,
+            error_source: None,
             tool_catalog: None,
             base_url: None,
         })
@@ -10434,6 +10588,7 @@ async fn auto_review_force_prompt_is_denied_without_opening_a_modal() -> Result<
             usage: Usage::default(),
             status: TurnOutcomeStatus::Completed,
             error: None,
+            error_source: None,
             tool_catalog: None,
             base_url: None,
         })
@@ -10550,6 +10705,7 @@ async fn forkguard_pump_never_auto_approves_a_force_prompt_hold() -> Result<()> 
             status: TurnOutcomeStatus::Completed,
             error: None,
             tool_catalog: None,
+            error_source: None,
             base_url: None,
         })
         .await?;
@@ -10629,6 +10785,7 @@ async fn forkguard_pump_never_auto_approves_a_force_prompt_hold() -> Result<()> 
             status: TurnOutcomeStatus::Completed,
             error: None,
             tool_catalog: None,
+            error_source: None,
             base_url: None,
         })
         .await?;
@@ -10748,6 +10905,7 @@ async fn approval_pends_until_interrupt_and_next_turn_can_start() -> Result<()> 
             usage: Usage::default(),
             status: TurnOutcomeStatus::Completed,
             error: None,
+            error_source: None,
             tool_catalog: None,
             base_url: None,
         })
@@ -11197,6 +11355,7 @@ async fn thinking_delta_emits_agent_reasoning_item() -> Result<()> {
             usage: Usage::default(),
             status: TurnOutcomeStatus::Completed,
             error: None,
+            error_source: None,
             tool_catalog: None,
             base_url: None,
         })
@@ -11337,6 +11496,7 @@ async fn approval_required_remember_flips_thread_auto_approve() -> Result<()> {
             usage: Usage::default(),
             status: TurnOutcomeStatus::Completed,
             error: None,
+            error_source: None,
             tool_catalog: None,
             base_url: None,
         })
@@ -11425,6 +11585,7 @@ async fn elevation_required_with_stale_active_turn_is_denied() -> Result<()> {
             status: TurnOutcomeStatus::Completed,
             error: None,
             tool_catalog: None,
+            error_source: None,
             base_url: None,
         })
         .await?;
@@ -11495,6 +11656,7 @@ async fn steer_turn_on_active_turn_records_item_and_event() -> Result<()> {
                     status: TurnOutcomeStatus::Completed,
                     error: None,
                     tool_catalog: None,
+                    error_source: None,
                     base_url: None,
                 })
                 .await;
@@ -11656,6 +11818,7 @@ async fn steer_receipts_outlive_caller_cancellation_after_engine_acceptance() ->
             usage: Usage::default(),
             status: TurnOutcomeStatus::Completed,
             error: None,
+            error_source: None,
             tool_catalog: None,
             base_url: None,
         })
@@ -11746,6 +11909,7 @@ async fn steer_rejects_a_terminal_durable_turn_without_dispatch_or_item() -> Res
             usage: Usage::default(),
             status: TurnOutcomeStatus::Completed,
             error: None,
+            error_source: None,
             tool_catalog: None,
             base_url: None,
         })
@@ -12024,6 +12188,7 @@ async fn compaction_lifecycle_emits_item_events_with_compaction_counts() -> Resu
                             status: TurnOutcomeStatus::Completed,
                             error: None,
                             tool_catalog: None,
+                            error_source: None,
                             base_url: None,
                         })
                         .await;
@@ -12064,6 +12229,7 @@ async fn compaction_lifecycle_emits_item_events_with_compaction_counts() -> Resu
                             status: TurnOutcomeStatus::Completed,
                             error: None,
                             tool_catalog: None,
+                            error_source: None,
                             base_url: None,
                         })
                         .await;
@@ -13082,6 +13248,7 @@ async fn agent_mail_release_acceptance_two_task_matrix() -> Result<()> {
             usage: Usage::default(),
             status: TurnOutcomeStatus::Completed,
             error: None,
+            error_source: None,
             tool_catalog: None,
             base_url: None,
         })

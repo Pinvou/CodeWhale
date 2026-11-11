@@ -1140,6 +1140,7 @@
   "VoiceErrNetwork": "Veu: la petició de transcripció ha fallat",
   "VoiceErrEmptySend": "Veu: no hi ha res a enviar",
   "VoiceErrTooShort": "Veu: no s'ha detectat veu, gravació massa curta",
+  "VoiceErrRecorderStalled": "Veu: el gravador ha deixat de respondre, l'àudio capturat s'ha descartat. Comproveu el micròfon i torneu-ho a provar.",
   "VoiceRecording": "🎙 Gravant... parla ara",
   "VoiceProcessing": "🎙 Transcrivint...",
   "VoiceTranscribed": "🎙 Transcrit",

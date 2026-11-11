@@ -1163,6 +1163,7 @@
   "VoiceErrNetwork": "Voice: transcription request failed",
   "VoiceErrEmptySend": "Voice: nothing to send",
   "VoiceErrTooShort": "Voice: no speech detected, recording too short",
+  "VoiceErrRecorderStalled": "Voice: the recorder stopped responding, captured audio was discarded. Check your microphone device and try again.",
   "VoiceRecording": "🎙 Recording... speak now",
   "VoiceProcessing": "🎙 Transcribing...",
   "VoiceTranscribed": "🎙 Transcribed",

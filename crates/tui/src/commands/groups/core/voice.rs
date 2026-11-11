@@ -205,31 +205,57 @@ const ASR_REQUEST_TIMEOUT: Duration = Duration::from_secs(MAX_RECORD_SECS * 3 / 
 /// ~10 ms, so this only fires on a dead or stalled pipe; killing the child
 /// unblocks the read and lets the max-duration deadline stay meaningful.
 const RECORDER_IDLE_TIMEOUT: Duration = Duration::from_secs(2);
+/// Interim-transcript polling cadence while a capture is running.
+const INTERIM_POLL_MS: u64 = 700;
+/// Extra polls past the recording cap before the interim loop gives up;
+/// capture-end is normally signalled via the shared done flag first.
+const INTERIM_TICK_MARGIN: u32 = 5;
 /// Minimum segment duration in seconds to consider as valid speech.
 const MIN_SEGMENT_SECS: f64 = 0.3;
 
+/// What a capture attempt produced.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RecordOutcome {
+    /// Speech captured: raw 16kHz mono S16_LE PCM samples plus elapsed time.
+    Audio(Vec<i16>, Duration),
+    /// Nothing usable captured: no recorder available, the recording failed,
+    /// or the capture is too short to contain speech.
+    TooShort,
+    /// The recorder stopped delivering data mid-capture (stalled pipe, e.g.
+    /// after a PipeWire restart or suspend/resume); captured audio discarded.
+    RecorderStalled,
+}
+
 /// Record audio from the default microphone.
 ///
-/// Returns raw 16kHz mono S16_LE PCM samples. Returns `None` if no recorder
-/// is available, the recording failed, the recorder went silent, or no speech
-/// was detected.
-fn record_audio() -> Option<(Vec<i16>, Duration)> {
+/// Returns raw 16kHz mono S16_LE PCM samples on success. Returns
+/// [`RecordOutcome::TooShort`] when no recorder is available, the recording
+/// failed, or no speech was detected, and [`RecordOutcome::RecorderStalled`]
+/// when the recorder stopped delivering data and the partial capture had to
+/// be discarded.
+fn record_audio() -> RecordOutcome {
     use std::io::Read;
-    use std::sync::{Arc, Mutex};
     use std::sync::mpsc::RecvTimeoutError;
+    use std::sync::{Arc, Mutex};
 
-    let recorder = detect_recorder()?;
+    let Some(recorder) = detect_recorder() else {
+        return RecordOutcome::TooShort;
+    };
     let start = std::time::Instant::now();
 
-    let mut child = Command::new(recorder.cmd)
+    let Ok(mut child) = Command::new(recorder.cmd)
         .args(recorder.pipe_args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
-        .ok()?;
+    else {
+        return RecordOutcome::TooShort;
+    };
 
-    let stdout = child.stdout.take()?;
+    let Some(stdout) = child.stdout.take() else {
+        return RecordOutcome::TooShort;
+    };
     let child = Arc::new(Mutex::new(child));
 
     // A blocking `read_exact` on the recorder pipe cannot time out, so reads
@@ -324,15 +350,15 @@ fn record_audio() -> Option<(Vec<i16>, Duration)> {
     let elapsed = start.elapsed();
 
     if recorder_stalled {
-        return None;
+        return RecordOutcome::RecorderStalled;
     }
 
     let min_samples = (MIN_SEGMENT_SECS * 16000.0) as usize;
     if all_samples.len() < min_samples {
-        return None;
+        return RecordOutcome::TooShort;
     }
 
-    Some((all_samples, elapsed))
+    RecordOutcome::Audio(all_samples, elapsed)
 }
 
 // --- Auto-send suffix ------------------------------------------------------
@@ -635,23 +661,25 @@ pub async fn capture_and_transcribe(
         // poll the final buffer. A true streaming recorder (cpal/pw-record) is
         // the next step — see grokbuild's xai-grok-voice::audio for the subprocess
         // isolation pattern we should mirror.
-        let result = record_audio();
-        if let Some((samples, dur)) = result {
+        let outcome = record_audio();
+        if let RecordOutcome::Audio(samples, _dur) = &outcome {
             *shared_buf_clone.lock() = samples.clone();
-            shared_done_clone.store(true, std::sync::atomic::Ordering::SeqCst);
-            Some((samples, dur))
-        } else {
-            shared_done_clone.store(true, std::sync::atomic::Ordering::SeqCst);
-            None
         }
+        shared_done_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+        outcome
     });
 
     // Interim polling loop — updates composer with "original + interim ▍" so text
     // appears as you talk, just like Spark's live transcript.
     let mut last_interim = String::new();
     let mut ticks: u32 = 0;
+    // Keep the interim display alive for the whole recording cap (plus a small
+    // margin) — a fixed tick cap sized for the old, shorter recording limit
+    // would freeze the live transcript halfway through a legal capture.
+    let interim_max_ticks =
+        ((MAX_RECORD_SECS * 1000) / INTERIM_POLL_MS) as u32 + INTERIM_TICK_MARGIN;
     loop {
-        tokio::time::sleep(Duration::from_millis(700)).await;
+        tokio::time::sleep(Duration::from_millis(INTERIM_POLL_MS)).await;
         ticks += 1;
         if shared_done.load(std::sync::atomic::Ordering::SeqCst) {
             break;
@@ -698,16 +726,19 @@ pub async fn capture_and_transcribe(
             // Also keep status as Spark does
             app.status_message = Some(format!("● Listening — “{trimmed}”  (⌥V to finish)"));
         }
-        if ticks > 40 {
-            break; // safety: ~28s max interim polling
+        if ticks > interim_max_ticks {
+            break; // safety cap; normally released earlier by shared_done
         }
     }
 
-    let (samples, _duration) = recorder_handle
-        .await
-        .ok()
-        .flatten()
-        .ok_or_else(|| tr(locale, MessageId::VoiceErrTooShort).to_string())?;
+    let outcome = recorder_handle.await.unwrap_or(RecordOutcome::TooShort);
+    let (samples, _duration) = match outcome {
+        RecordOutcome::Audio(samples, duration) => (samples, duration),
+        RecordOutcome::RecorderStalled => {
+            return Err(tr(locale, MessageId::VoiceErrRecorderStalled).to_string());
+        }
+        RecordOutcome::TooShort => return Err(tr(locale, MessageId::VoiceErrTooShort).to_string()),
+    };
 
     // Restore composer to original before final insert (interim was preview only)
     app.composer.input = original_input.clone();

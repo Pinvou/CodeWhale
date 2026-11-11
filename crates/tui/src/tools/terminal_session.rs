@@ -452,9 +452,12 @@ fn prune_output(input: &str) -> String {
         .char_indices()
         .find(|(index, _)| *index >= head)
         .map_or(input.len(), |(index, _)| index);
+    // Forward find: the smallest boundary whose suffix fits the tail budget,
+    // i.e. the real start of the kept tail. A reverse scan would match the
+    // last character (every index satisfies `len - index <= tail` near the
+    // end) and preserve only one character of the errors the tail exists for.
     let tail_start = input
         .char_indices()
-        .rev()
         .find(|(index, _)| input.len() - *index <= tail)
         .map_or(0, |(index, _)| index);
     format!(
@@ -1180,5 +1183,27 @@ mod tests {
         let result = run(&session, "yes x | head -n 100000", Duration::from_secs(3));
         assert!(result.content.len() <= OUTPUT_LIMIT + 100);
         assert!(result.content.contains("output truncated"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn prune_output_keeps_a_real_tail_not_just_the_last_character() {
+        // The kept tail is the point of head+tail pruning: failures print at
+        // the end, so a regression that preserves only one character (a
+        // reverse scan finds the final boundary trivially) must fail here.
+        let payload = format!("{}{}", "h".repeat(OUTPUT_LIMIT), "TAIL-MARKER\n".repeat(10));
+        let pruned = prune_output(&payload);
+        assert!(pruned.contains("output truncated"));
+        // A generous suffix of the original survives — not a lone character.
+        let kept_tail = pruned.rsplit("…\n").next().unwrap_or("");
+        assert!(
+            kept_tail.contains("TAIL-MARKER"),
+            "the pruned output must keep actual tail content: {kept_tail:?}"
+        );
+        assert!(
+            kept_tail.len() > OUTPUT_LIMIT / 10,
+            "the kept tail must be a real window (~2/3 of the cap), got {len} bytes",
+            len = kept_tail.len()
+        );
     }
 }

@@ -45,7 +45,7 @@ impl ToolSpec for LspTool {
                 "line": {
                     "type": "integer",
                     "minimum": 1,
-                    "description": "1-based line."
+                    "description": "1-based line. Required for definition and references."
                 },
                 "character": {
                     "type": "integer",
@@ -498,7 +498,10 @@ mod tests {
                 .unwrap()
                 .contains("1-64 newline-separated")
         );
-        assert_eq!(properties["line"]["description"], "1-based line.");
+        assert_eq!(
+            properties["line"]["description"],
+            "1-based line. Required for definition and references."
+        );
         assert_eq!(properties["character"]["default"], 1);
         assert_eq!(
             properties["character"]["description"],

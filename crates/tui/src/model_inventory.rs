@@ -747,7 +747,9 @@ mod tests {
     fn inventory_router_timeout_secs_respects_config_with_clamp() {
         let _env_lock = crate::test_support::lock_test_env();
 
-        // Unset: the default classifier timeout survives.
+        // Unset: the default classifier timeout survives. The literal pin
+        // keeps the audited value (4s → 15s) from drifting silently.
+        assert_eq!(crate::config::DEFAULT_AUTO_ROUTER_TIMEOUT_SECS, 15);
         let config = Config {
             ..Default::default()
         };

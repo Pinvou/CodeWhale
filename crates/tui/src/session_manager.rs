@@ -1871,16 +1871,20 @@ impl SessionManager {
     pub fn cleanup_old_sessions_keeping(&self, keep: Option<&str>) -> std::io::Result<()> {
         let sessions = self.list_sessions()?;
 
-        if sessions.len() > MAX_SESSIONS {
-            for session in sessions.iter().skip(MAX_SESSIONS) {
-                if session.archived {
-                    continue;
-                }
-                if keep.is_some_and(|id| id == session.id) {
-                    continue;
-                }
-                let _ = self.delete_session(&session.id);
+        // Cap only the non-archived history: archived records are exempt (see
+        // `MAX_SESSIONS`), and the retention window must be cut from the
+        // non-archived sub-list — otherwise archived records occupying the
+        // newest slots push old live sessions past the window where they would
+        // be deleted even though their own count is far below the cap.
+        for session in sessions
+            .iter()
+            .filter(|session| !session.archived)
+            .skip(MAX_SESSIONS)
+        {
+            if keep.is_some_and(|id| id == session.id) {
+                continue;
             }
+            let _ = self.delete_session(&session.id);
         }
         self.reclaim_orphaned_session_dirs();
 
@@ -3199,9 +3203,11 @@ mod tests {
 
     /// The retention janitor keeps the `MAX_SESSIONS` newest records and
     /// deletes the rest. Driven by the constant so raising the cap never
-    /// leaves a stale literal behind.
+    /// leaves a stale literal behind; the literal pin below keeps the audit's
+    /// headline number (50 → 1000) honest in the other direction.
     #[test]
     fn cleanup_keeps_max_sessions_newest_records_and_deletes_the_rest() {
+        assert_eq!(MAX_SESSIONS, 1_000, "the audited retention cap");
         let tmp = tempdir().expect("tempdir");
         let manager = SessionManager::new(tmp.path().join("sessions")).expect("manager");
         let workspace = tmp.path().join("ws");
@@ -3283,6 +3289,56 @@ mod tests {
             remaining.iter().filter(|s| !s.archived).count(),
             MAX_SESSIONS,
             "non-archived records are still bounded by MAX_SESSIONS"
+        );
+    }
+
+    /// Archived records occupying the newest slots must not push live
+    /// sessions out of the retention window. The cap bounds non-archived
+    /// history only, so archiving recent work preserves older active
+    /// sessions even though the combined record count exceeds
+    /// `MAX_SESSIONS`.
+    #[test]
+    fn cleanup_bounds_non_archived_history_when_archived_records_fill_the_window() {
+        let tmp = tempdir().expect("tempdir");
+        let manager = SessionManager::new(tmp.path().join("sessions")).expect("manager");
+        let workspace = tmp.path().join("ws");
+        let extra = 5usize;
+
+        // `MAX_SESSIONS` archived records are the newest; only `extra` old
+        // non-archived records exist. The combined count exceeds the cap.
+        for i in 0..MAX_SESSIONS {
+            let id = format!("archived-recent-{i:04}");
+            write_session_record(
+                &manager,
+                &id,
+                &workspace,
+                Utc::now() - chrono::Duration::minutes((MAX_SESSIONS - i) as i64),
+                true,
+            );
+        }
+        for i in 0..extra {
+            let id = format!("active-old-{i:04}");
+            write_session_record(
+                &manager,
+                &id,
+                &workspace,
+                Utc::now() - chrono::Duration::hours((MAX_SESSIONS + extra - i) as i64),
+                false,
+            );
+        }
+
+        manager.cleanup_old_sessions().expect("cleanup");
+
+        let remaining = manager.list_sessions().expect("list");
+        assert_eq!(
+            remaining.iter().filter(|s| !s.archived).count(),
+            extra,
+            "every non-archived record is under the cap and must survive"
+        );
+        assert_eq!(
+            remaining.iter().filter(|s| s.archived).count(),
+            MAX_SESSIONS,
+            "archived records survive the retention janitor"
         );
     }
 

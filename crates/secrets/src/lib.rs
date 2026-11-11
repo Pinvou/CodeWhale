@@ -557,7 +557,18 @@ impl FileKeyringStore {
                 let _ = fs::set_permissions(parent, perms);
             }
         }
+        // Mirror the read cap on the write side: without this, one oversized
+        // `set` (or a legacy migration merge) would persist a blob the store
+        // then refuses to read on every later get/set/delete until the file
+        // is deleted by hand.
         let body = serde_json::to_string_pretty(blob)?;
+        if body.len() as u64 > FILE_BLOB_READ_LIMIT {
+            return Err(SecretsError::SecretsFileTooLarge {
+                path: self.path.clone(),
+                size: body.len() as u64,
+                limit: FILE_BLOB_READ_LIMIT,
+            });
+        }
         write_private_file(&self.path, body.as_bytes())?;
         #[cfg(unix)]
         {
@@ -2417,6 +2428,31 @@ mod tests {
         );
         let on_disk = fs::read_to_string(&path).unwrap();
         assert_eq!(on_disk, "{ this is not valid json");
+    }
+
+    #[test]
+    fn file_store_set_refuses_an_oversized_blob_instead_of_writing_it() {
+        // The read cap must be mirrored on the write side: without this, one
+        // oversized `set` persists a blob the store then refuses to read on
+        // every later get/set/delete until the file is deleted by hand.
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("secrets.json");
+        let store = FileKeyringStore::new(path.clone());
+
+        // A single value whose serialized store exceeds the cap (16 MiB).
+        let huge = "x".repeat((FILE_BLOB_READ_LIMIT as usize) + 1024);
+        let err = store.set("deepseek", &huge).unwrap_err();
+        assert!(
+            matches!(err, SecretsError::SecretsFileTooLarge { .. }),
+            "oversized set must fail with the explicit cap error; got: {err}"
+        );
+        assert!(
+            !path.exists(),
+            "the over-cap blob must not be written to disk"
+        );
+        // The store stays usable for normal values afterwards.
+        store.set("deepseek", "sk-ok").unwrap();
+        assert_eq!(store.get("deepseek").unwrap(), Some("sk-ok".to_string()));
     }
 
     #[test]

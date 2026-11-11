@@ -1652,6 +1652,13 @@ mod tests {
         let patch = fixture_patch();
         let body = compose_pr_body_for_head(&job, &patch, &patch.head_sha);
         assert!(body.chars().count() <= MAX_BODY_CHARS);
+        // Literal pins for the audited forge bounds (96/6000 → 200/60000):
+        // GitHub's real caps are 256/65,536, so a bound raised past those or
+        // lowered back toward the old ones fails here.
+        assert_eq!(MAX_TITLE_CHARS, 200);
+        assert_eq!(MAX_BODY_CHARS, 60_000);
+        assert!(MAX_TITLE_CHARS <= 256);
+        assert!(MAX_BODY_CHARS <= 65_536);
     }
 
     #[test]

@@ -167,9 +167,12 @@ class CodewhaleHarness(Harness[CodewhaleHarnessConfig]):
         home = f".vf-codewhale/{trace_key}"
         mcp_path = f"{home}/mcp.json"
         mcp = {"servers": {name: {"url": url} for name, url in mcp_urls.items()}}
-        await runtime.write(
-            mcp_path,
-            json.dumps(mcp, sort_keys=True, separators=(",", ":")).encode(),
+        await _await_bounded(
+            runtime.write(
+                mcp_path,
+                json.dumps(mcp, sort_keys=True, separators=(",", ":")).encode(),
+            ),
+            "mcp config write",
         )
 
         endpoint = endpoint.rstrip("/")
