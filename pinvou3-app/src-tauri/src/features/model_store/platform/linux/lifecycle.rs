@@ -1957,6 +1957,8 @@ impl ModelManager {
             env.insert("LMM_DEPLOY_PROFILE".into(), pid.clone());
         }
 
+        super::version_store::current_measurements::invalidate(card_id)
+            .map_err(ModelManagerError::new)?;
         self.run_card_script(
             &source,
             "deploy",
@@ -2166,6 +2168,8 @@ impl ModelManager {
             total_size(&candidates)
         };
 
+        super::version_store::current_measurements::invalidate(card_id)
+            .map_err(ModelManagerError::new)?;
         self.run_card_script(
             &source,
             "uninstall",

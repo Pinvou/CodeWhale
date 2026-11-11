@@ -76,8 +76,8 @@ try {
       if (command !== 'model_store_versions') throw Error(`Unexpected command: ${command}`);
       return new Promise((resolve) => window.pendingVersions.push(resolve));
     } } };
-    window.renderVersions = (busy) => root.render(createElement(ModelVersionsDialog, {
-      record, copy: dictZh.uiModelStore, theme: 'light', busy,
+    window.renderVersions = (busy, copy = dictZh.uiModelStore) => root.render(createElement(ModelVersionsDialog, {
+      record, copy, theme: 'light', busy,
       onClose() {}, onAction() {},
     }));
     window.answerVersions = ({ state, error = null }) => window.pendingVersions.shift()([{
@@ -151,6 +151,50 @@ try {
   );
   await page.waitForFunction(() => document.body.textContent.includes('4.0KB'),
     { timeout: 5000 }, 're-measured sizes must render');
+  // A slow measurement must not overwrite a newer busy-state refresh, nor
+  // publish its stale failure over the latest successful list.
+  await page.evaluate(() => {
+    const previous = window.__TAURI__.core.invoke;
+    window.pendingMeasurements = [];
+    window.__TAURI__.core.invoke = (command, payload) => {
+      if (command === 'model_store_versions' && payload?.measure) {
+        return new Promise((resolve, reject) => window.pendingMeasurements.push({ resolve, reject }));
+      }
+      return previous(command, payload);
+    };
+  });
+  for (const reject of [false, true]) {
+    await page.click('[data-testid="model-version-measure-row"] button');
+    await page.waitForFunction(() => window.pendingMeasurements.length === 1);
+    await page.evaluate(() => window.renderVersions(true));
+    await answer('downloading');
+    await page.evaluate(() => window.renderVersions(false));
+    await answer('ready');
+    await expectActions(2);
+    await page.evaluate((shouldReject) => {
+      const pending = window.pendingMeasurements.shift();
+      if (shouldReject) pending.reject(new Error('version_measurement_busy'));
+      else pending.resolve([{ version_id: 'stale-measurement', state: 'downloading', size_bytes: 8192 }]);
+    }, reject);
+    await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    assert.equal(await page.$eval('[data-testid="model-version-row"]', (row) => row.textContent.includes('test.weights')), true);
+    assert.equal(await page.$('[role="alert"]'), null, 'stale measurement errors must be ignored');
+    await expectActions(2);
+  }
+  // Errors are translated when rendered, so changing language while the
+  // dialog remains mounted must not retain an earlier language or raw code.
+  await page.click('[data-testid="model-version-measure-row"] button');
+  await page.waitForFunction(() => window.pendingMeasurements.length === 1);
+  await page.evaluate(() => window.pendingMeasurements.shift().reject(new Error('version_measurement_busy')));
+  for (const language of ['zh', 'en', 'ja']) {
+    const expected = await page.evaluate(async (locale) => {
+      const catalog = await import(`/shared/i18n/${locale}.js`);
+      const copy = catalog[locale === 'zh' ? 'dictZh' : locale === 'en' ? 'dictEn' : 'dictJa'].uiModelStore;
+      window.renderVersions(false, copy);
+      return copy.versionMeasurementErrors.version_measurement_busy;
+    }, language);
+    await page.waitForFunction((message) => document.querySelector('[role="alert"] p')?.textContent === message, {}, expected);
+  }
   assert.equal(await page.$('[data-testid="model-version-mtp-network-hint"]'), null,
     'other cards must not inherit the built-in MTP template disclosure');
   // Both entry points must show the active language's disclosure without

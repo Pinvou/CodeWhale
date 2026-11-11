@@ -3,6 +3,7 @@ use super::{card_update, db};
 use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
+pub(super) mod current_measurements;
 mod download_lease;
 mod downloads;
 pub(super) use download_lease::{
@@ -383,6 +384,16 @@ pub(super) fn update_measured(card_id: &str, version_id: &str, bytes: u64) -> Re
     Ok(())
 }
 
+/// A terminal/recovery scan must invalidate the pre-script value on failure.
+/// Preserve the operation's original error; the next quota read then retries
+/// the NULL calibration and refuses unknown occupancy until it succeeds.
+pub(super) fn refresh_measured(version: &mut Version) {
+    version.measured_bytes = version
+        .models_root
+        .as_deref()
+        .and_then(|root| quota_dir_size_bytes(std::path::Path::new(root)).ok());
+}
+
 fn retained_bytes_replacing(replacing: Option<(&str, &str)>) -> Result<u64, String> {
     // A current managed generation is already charged by store_models. Keep
     // charging its files above that amount, and deduplicate shared resources
@@ -542,11 +553,7 @@ fn recover_interrupted_records(card_id: &str) -> Result<(), String> {
         version.state = "failed".into();
         version.planned_bytes = 0;
         version.error = Some("version_download_interrupted".into());
-        if let Some(root) = version.models_root.as_deref()
-            && let Ok(bytes) = quota_dir_size_bytes(std::path::Path::new(root))
-        {
-            version.measured_bytes = Some(bytes);
-        }
+        refresh_measured(&mut version);
         put_on(&tx, &version)?;
     }
     tx.commit().map_err(|e| e.to_string())?;

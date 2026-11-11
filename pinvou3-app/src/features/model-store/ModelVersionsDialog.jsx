@@ -1,6 +1,7 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { fetchVersions } from './model-store-api.js';
 import { formatBytes } from './model-store-logic.js';
+import { versionMeasurementError } from './version-measurement-errors.js';
 import { MsButton, MsDialog, MsDialogTitle, TEXT_SECONDARY } from './model-store-ui.jsx';
 
 const sizeLabel = (bytes) => formatBytes(Math.max(0, bytes || 0));
@@ -12,24 +13,31 @@ export function ModelVersionsDialog({ record, copy, theme, busy, onClose, onActi
   const [attempt, setAttempt] = useState(0);
   const [measuring, setMeasuring] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(null);
+  const readSequence = useRef(0);
   useEffect(() => {
-    let cancelled = false;
+    const sequence = ++readSequence.current;
+    setMeasuring(false);
     fetchVersions(record.card_id).then((rows) => {
-      if (!cancelled) { setVersions(rows); setError(null); }
-    }).catch((failure) => { if (!cancelled) setError(String(failure?.message || failure)); });
-    return () => { cancelled = true; };
+      if (sequence === readSequence.current) { setVersions(rows); setError(null); }
+    }).catch((failure) => {
+      if (sequence === readSequence.current) setError(String(failure?.message || failure));
+    });
+    return () => { readSequence.current += 1; };
   }, [record.card_id, attempt, busy]);
 
   // Registered sizes can go stale when files change outside the app; the
   // explicit re-measure is the invalidation entry (review round 7).
   const remeasure = () => {
     if (measuring) return;
+    const sequence = ++readSequence.current;
     setMeasuring(true);
     fetchVersions(record.card_id, { measure: true }).then((rows) => {
-      setVersions(rows);
-      setError(null);
-    }).catch((failure) => { setError(String(failure?.message || failure)); })
-      .finally(() => { setMeasuring(false); });
+      if (sequence === readSequence.current) { setVersions(rows); setError(null); }
+    }).catch((failure) => {
+      if (sequence === readSequence.current) setError(String(failure?.message || failure));
+    }).finally(() => {
+      if (sequence === readSequence.current) setMeasuring(false);
+    });
   };
 
   const act = (action, version) => {
@@ -47,7 +55,7 @@ export function ModelVersionsDialog({ record, copy, theme, busy, onClose, onActi
         <p className={`mb-4 text-[13px] leading-6 ${TEXT_SECONDARY}`} data-testid="model-version-mtp-network-hint">{copy.mtpNetworkHint}</p>
       ) : null}
       {record.running ? <p role="status" className="mb-3 text-[13px] text-amber-700 dark:text-amber-300">{copy.versionStopFirst}</p> : null}
-      {error ? <div role="alert"><p>{error}</p><MsButton tone="ghost" onClick={() => setAttempt((n) => n + 1)}>{copy.retry}</MsButton></div> : null}
+      {error ? <div role="alert"><p>{versionMeasurementError(error, copy)}</p><MsButton tone="ghost" onClick={() => setAttempt((n) => n + 1)}>{copy.retry}</MsButton></div> : null}
       {!versions && !error ? <p role="status">{copy.cardUpdateChecking}</p> : null}
       {versions ? (
         <div className="mb-2 flex justify-end" data-testid="model-version-measure-row">
