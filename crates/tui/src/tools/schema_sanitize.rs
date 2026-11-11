@@ -96,13 +96,73 @@ fn sanitize_inner(schema: &mut Value, inside_literal: bool) {
 /// `status: "complete"`, `blocker` for `"blocked"`, `verification` for
 /// `"not_achieved"`, and `advisory` for `"advisory"` (`tools/goal.rs`);
 /// `send_later` runtime-requires `message` for `action: "schedule"` and
-/// `trigger_id` for `"read"`/`"cancel"` (`tools/send_later.rs`). The
+/// `trigger_id` for `"read"`/`"cancel"` (`tools/send_later.rs`);
+/// `agents/message` and `agents/followup` runtime-require a target
+/// (`agent_id`/`name`, `tools/subagent/coord.rs`) for every call. The
 /// documented strict subset cannot express those per-value requirements —
 /// `if`/`then` and root alternatives are outside it — and widening the
 /// schema requirements would make non-strict callers send junk for every
 /// other value, so the tools ship unchanged and non-strict instead.
-/// Per-action schema honesty would retire this list.
-const STRICT_UNUSABLE_TOOLS: &[&str] = &["update_goal", "send_later"];
+/// Per-action schema honesty would retire this list. The full-catalog
+/// census test (core/engine/tests.rs) pins that nothing outside this list
+/// reduces to an unusable strict shape.
+const STRICT_UNUSABLE_TOOLS: &[&str] = &[
+    "update_goal",
+    "send_later",
+    "agents/message",
+    "agents/followup",
+];
+
+/// Tools that stay strict but lose specific capabilities to the
+/// optional-removal pass: some actions runtime-require parameters the
+/// strict schema no longer accepts, so those calls are rejected by the
+/// runtime no matter what the model sends. The generic removal note only
+/// says the parameters "must not be sent" — for these tools that sentence
+/// points away from values the model actually needs, so an honest
+/// per-tool sentence is appended naming what stopped working. Keep this
+/// in lockstep with the full-catalog census manifest.
+const STRICT_REMOVAL_CONTEXT_NOTES: &[(&str, &str)] = &[
+    (
+        "Git",
+        "In strict mode `show` and `blame` are unavailable: they require \
+         `rev`/`path`, which the strict schema no longer accepts. Use \
+         `status`, `diff`, or `log`, or the shell tool for exact revisions.",
+    ),
+    (
+        "lsp",
+        "In strict mode `definition` and `references` are unavailable: they \
+         require `line`. `read_lints`, `symbols`, and `diagnostics` still work.",
+    ),
+    (
+        "pandoc_convert",
+        "In strict mode binary target formats are unavailable: they require \
+         `output_path`. Text targets still convert and return inline.",
+    ),
+    (
+        "remember",
+        "In strict mode only `append` is available: `revise` and `retire` \
+         require `replaces`/`evidence`, which the strict schema no longer accepts.",
+    ),
+    (
+        "Bash",
+        "In strict mode the sandbox-escalation retry is unavailable: \
+         `sandbox_permissions` and `justification` are no longer accepted, \
+         so a sandbox-denied command cannot be escalated.",
+    ),
+    (
+        "bash",
+        "In strict mode the sandbox-escalation retry is unavailable: \
+         `sandbox_permissions` and `justification` are no longer accepted, \
+         so a sandbox-denied command cannot be escalated.",
+    ),
+];
+
+/// Cap for the removal note. Names are schema-controlled (hostile MCP
+/// schemas reach the pipeline verbatim) and the note joins the
+/// model-facing description sent on every request, so both the name count
+/// and each name's length are bounded before assembly.
+const STRICT_NOTE_MAX_NAMES: usize = 20;
+const STRICT_NOTE_MAX_NAME_CHARS: usize = 120;
 
 /// Structural and conditional keywords outside the documented strict
 /// subset. Their constraints cannot be expressed by the reshaping — the
@@ -134,6 +194,9 @@ pub fn prepare_tools_for_strict_mode(tools: &mut [Tool]) -> bool {
             continue;
         }
         if strict_schema_supported(&tool.input_schema) {
+            // Count the hybrid-map narrowings on the authored shape before
+            // the enforce pass overwrites them, so the note can say so.
+            let narrowed_maps = count_strict_map_narrowings(&tool.input_schema);
             let original_schema = tool.input_schema.clone();
             let removed_optionals = sanitize_for_strict(&mut tool.input_schema);
             // The strict contract removes every property the schema left
@@ -150,23 +213,24 @@ pub fn prepare_tools_for_strict_mode(tools: &mut [Tool]) -> bool {
                 .get("properties")
                 .and_then(Value::as_object)
                 .is_some_and(Map::is_empty)
-                && original_schema
-                    .get("properties")
-                    .and_then(Value::as_object)
-                    .is_some_and(|properties| !properties.is_empty());
+                && !removed_optionals.is_empty();
             if emptied {
                 tool.input_schema = original_schema;
                 tool.strict = None;
                 all_strict = false;
                 continue;
             }
-            if !removed_optionals.is_empty() {
-                let note = format!(
-                    "Strict mode: these optional parameters were removed from the schema and \
-                     must not be sent: {}.",
-                    removed_optionals.join(", ")
-                );
+            if !removed_optionals.is_empty() || narrowed_maps > 0 {
+                let note = strict_removal_note(&removed_optionals, narrowed_maps);
+                let context = STRICT_REMOVAL_CONTEXT_NOTES
+                    .iter()
+                    .find(|(name, _)| name == &tool.name)
+                    .map(|(_, context)| context);
                 let description = tool.description.trim();
+                let note = match context {
+                    Some(context) => format!("{note}\n\n{context}"),
+                    None => note,
+                };
                 tool.description = if description.is_empty() {
                     note
                 } else {
@@ -180,6 +244,86 @@ pub fn prepare_tools_for_strict_mode(tools: &mut [Tool]) -> bool {
         }
     }
     all_strict
+}
+
+/// Assemble the model-facing removal note. Names are backticked (they are
+/// schema-controlled and must read as data, not prose), individually
+/// truncated, and capped in count — a hostile schema may carry arbitrarily
+/// many long names, and this text ships on every request.
+fn strict_removal_note(removed: &[String], narrowed_maps: usize) -> String {
+    let mut note = String::from(
+        "Strict mode: these optional parameters were removed from the schema and \
+         must not be sent:",
+    );
+    let shown = removed.len().min(STRICT_NOTE_MAX_NAMES);
+    let parts: Vec<String> = removed
+        .iter()
+        .take(shown)
+        .map(|name| {
+            let truncated: String = name.chars().take(STRICT_NOTE_MAX_NAME_CHARS).collect();
+            format!("`{truncated}`")
+        })
+        .collect();
+    note.push_str(&format!(" {}.", parts.join(", ")));
+    if removed.len() > shown {
+        note.push_str(&format!(
+            " (and {} more removed parameters)",
+            removed.len() - shown
+        ));
+    }
+    if narrowed_maps > 0 {
+        note.push_str(&format!(
+            " Extra-key acceptance (`additionalProperties`) was also narrowed to `false` \
+             on {narrowed_maps} object schema{} under the strict contract.",
+            if narrowed_maps == 1 { "" } else { "s" }
+        ));
+    }
+    note
+}
+
+/// Count object schemas that carry named properties beside a schema-form or
+/// `true` `additionalProperties`: the enforce pass overwrites that keyword
+/// with `false` (the documented strict contract mandates it), silently
+/// removing extra-key acceptance — the note says so instead.
+fn count_strict_map_narrowings(schema: &Value) -> usize {
+    let Some(obj) = schema.as_object() else {
+        return schema
+            .as_array()
+            .map(|values| {
+                values
+                    .iter()
+                    .map(count_strict_map_narrowings)
+                    .sum::<usize>()
+            })
+            .unwrap_or(0);
+    };
+    let mut count = 0;
+    if is_object_schema(obj)
+        && obj
+            .get("properties")
+            .and_then(Value::as_object)
+            .is_some_and(|properties| !properties.is_empty())
+        && obj.get("additionalProperties").is_some_and(|additional| {
+            !additional.is_boolean() || additional.as_bool() != Some(false)
+        })
+    {
+        count += 1;
+    }
+    for (key, value) in obj {
+        match key.as_str() {
+            "properties" | "$defs" | "definitions" | "$def" => {
+                if let Some(named_schemas) = value.as_object() {
+                    count += named_schemas
+                        .values()
+                        .map(count_strict_map_narrowings)
+                        .sum::<usize>();
+                }
+            }
+            "enum" | "const" | "default" | "examples" => {}
+            _ => count += count_strict_map_narrowings(value),
+        }
+    }
+    count
 }
 
 /// Sanitize a schema for DeepSeek strict function-calling.
@@ -1442,8 +1586,8 @@ mod tests {
         assert!(tools[0].input_schema["properties"].get("query").is_none());
         assert_eq!(tools[0].input_schema["additionalProperties"], false);
         assert!(
-            tools[0].description.contains("must not be sent: query"),
-            "the note names the removed optional: {}",
+            tools[0].description.contains("must not be sent: `query`."),
+            "the note names the removed optional, quoted as data: {}",
             tools[0].description
         );
     }
