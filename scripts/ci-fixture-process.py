@@ -8,6 +8,7 @@ import argparse
 import ctypes
 import hashlib
 import json
+import ntpath
 import os
 from pathlib import Path
 import shutil
@@ -202,6 +203,28 @@ def atomic_receipt(path, value):
     os.replace(temporary, path)
 
 
+def windows_extended_path(path):
+    value = ntpath.normpath(str(path))
+    if not ntpath.isabs(value):
+        raise ValueError('owned Windows workspace path must be absolute')
+    prefix = '\\\\?\\'
+    if value.startswith(prefix):
+        return value
+    if value.startswith('\\\\'):
+        return prefix + 'UNC\\' + value[2:]
+    return prefix + value
+
+
+def remove_owned_workspace(root, identity):
+    current = root.lstat()
+    if root.is_symlink() or (current.st_dev, current.st_ino) != identity:
+        raise RuntimeError('test workspace identity changed')
+    # Node/npm can create legal paths beyond MAX_PATH. Keep the same verified
+    # owned directory, expressed through Windows' extended path namespace.
+    target = windows_extended_path(root) if sys.platform == 'win32' else root
+    shutil.rmtree(target)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--receipt', type=Path, required=True)
@@ -248,10 +271,7 @@ def main(argv=None):
             if value.get('schema') != 1 or value.get('state') != 'released':
                 dirty = True
         if clean:
-            current = root.lstat()
-            if root.is_symlink() or (current.st_dev, current.st_ino) != (identity.st_dev, identity.st_ino):
-                raise RuntimeError('test workspace identity changed')
-            shutil.rmtree(root)
+            remove_owned_workspace(root, (identity.st_dev, identity.st_ino))
         receipt.update(state='released' if clean else 'unconfirmed', cleanup_failed=dirty or not clean, exit_code=code)
         return code if code else 86 if receipt['cleanup_failed'] else 0
     except Exception as error:

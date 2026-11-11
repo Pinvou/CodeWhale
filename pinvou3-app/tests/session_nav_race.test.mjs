@@ -691,6 +691,168 @@ test('direct materialization retires a controlled owner before creating its new 
   assert.equal(rt.state.activeSessionId, 'created-local');
 });
 
+// ── materializeSession 草稿内容保护（round-38 review P2，诊断直达）──
+// 设备页排查动作在 prompt 采样 resolve 后才物化；等待窗口里用户新建对话并
+// 输入未发送文本 / 选了工作目录时，enterDraft 的工作集清空会把内容原地吞掉。
+// protectUserDraft 见「未物化草稿 + 用户内容」必须拒答 null，内容原地保留。
+
+test('protected materialization refuses a content-bearing draft and keeps text and workspace', async () => {
+  const rt = loadSessionsFeature();
+  rt.state.composerDraft = '采样窗口里新写的未发送草稿';
+  rt.state.draftWorkspacePath = '/tmp/选中的工作目录';
+  const refused = await rt.api.materializeSession({ protectUserDraft: true });
+  assert.equal(refused, null);
+  assert.equal(rt.calls.invoke.filter(name => name === 'create_session').length, 0);
+  assert.equal(rt.state.composerDraft, '采样窗口里新写的未发送草稿');
+  assert.equal(rt.state.draftWorkspacePath, '/tmp/选中的工作目录');
+  assert.equal(rt.state.activeSessionId, null);
+});
+
+test('protected materialization refuses a workspace-only draft', async () => {
+  const rt = loadSessionsFeature();
+  rt.state.draftWorkspacePath = '/tmp/ws-only';
+  const refused = await rt.api.materializeSession({ protectUserDraft: true });
+  assert.equal(refused, null);
+  assert.equal(rt.calls.invoke.filter(name => name === 'create_session').length, 0);
+  assert.equal(rt.state.draftWorkspacePath, '/tmp/ws-only');
+});
+
+test('protected materialization still materializes an empty draft', async () => {
+  const rt = loadSessionsFeature();
+  const creation = rt.defer('create_session');
+  const pending = rt.api.materializeSession({ protectUserDraft: true });
+  creation.resolve({ id: 'created-local' });
+  assert.equal(await pending, 'created-local');
+  assert.equal(rt.state.activeSessionId, 'created-local');
+});
+
+test('protected materialization ignores content inside an active session', async () => {
+  const rt = loadSessionsFeature();
+  rt.state.activeSessionId = 'local-a';
+  rt.state.composerDraft = '活动会话里的未发送文本';
+  const creation = rt.defer('create_session');
+  const pending = rt.api.materializeSession({ protectUserDraft: true });
+  creation.resolve({ id: 'created-local' });
+  assert.equal(await pending, 'created-local');
+});
+
+test('unprotected materialization keeps the explicit-entry semantics', async () => {
+  const rt = loadSessionsFeature();
+  rt.state.composerDraft = '显式入口前的旧草稿';
+  rt.state.draftWorkspacePath = '/tmp/旧目录';
+  const creation = rt.defer('create_session');
+  const pending = rt.api.materializeSession();
+  creation.resolve({ id: 'created-local' });
+  assert.equal(await pending, 'created-local');
+  assert.equal(rt.calls.invoke.filter(name => name === 'create_session').length, 1);
+});
+
+// ── materializeSession 后台物化（round-39 review P2，zhuowp）──
+// prompt 窗口决算发现用户已切到既有会话 B：B 非空使 protectUserDraft 拦不住，
+// 前台物化的 enterDraft + switchActiveTo 会把活动工作集切到新诊断会话并
+// notify——订阅快照携带诊断会话的正文，B 的视图在 ChatView 被顶掉。background
+// 选项只创建 + 登记（sessionStates buffer + refreshHistoryList 侧栏注册），
+// 不进草稿、不切工作集，返回真实 sid 供调用方后台钉定发送。
+
+test('background materialization keeps session B active and its body intact', async () => {
+  const localInvokeCalls = [];
+  let created = false;
+  let resolveCreation;
+  const creation = new Promise((resolve) => { resolveCreation = resolve; });
+  const rt = loadSessionsFeature({ invoke(name) {
+    localInvokeCalls.push(name);
+    if (name === 'create_session') return creation;
+    if (name === 'list_sessions') {
+      // create_session 落定后后端列表才含新会话；物化链在创建之后才刷新列表。
+      return Promise.resolve(created
+        ? [{ id: 'local-b' }, { id: 'created-bg' }]
+        : [{ id: 'local-b' }]);
+    }
+    if (name === 'list_archived_sessions') return Promise.resolve([]);
+    return Promise.resolve({});
+  } });
+  // 用户已切到既有会话 B：活动工作集带 B 的正文与未发送输入。
+  rt.state.activeSessionId = 'local-b';
+  rt.state.messages = [{ role: 'user', content: [{ type: 'text', text: 'B 的正文' }] }];
+  rt.state.chatItems = [{ type: 'user', text: 'B 的正文', id: 'b-1' }];
+  rt.state.composerDraft = 'B 里未发送的文字';
+  const navigationEpochs = [];
+  rt.api.onLocalNavigation(() => navigationEpochs.push(rt.api.getLocalNavigationEpoch()));
+  const pending = rt.api.materializeSession({ background: true });
+  created = true;
+  resolveCreation({ id: 'created-bg' });
+  assert.equal(await pending, 'created-bg');
+  assert.equal(rt.state.activeSessionId, 'local-b', 'B 仍是活动会话（不得 enterDraft/switchActiveTo）');
+  assert.equal(rt.state.composerDraft, 'B 里未发送的文字', '未发送文字原地保留');
+  assert.equal(rt.state.messages.length, 1, 'B 的正文不被诊断会话顶掉');
+  assert.equal(rt.state.chatItems.length, 1, 'B 的展示层不被诊断会话顶掉');
+  assert.ok(rt.state.sessions.some(s => s && s.id === 'created-bg'), '新会话已登记侧栏历史');
+  assert.equal(rt.sessionStates['created-bg']?.loadedFromDisk, true, 'buffer 已登记（sendMessageToSession 存在性第二把尺子）');
+  assert.equal(localInvokeCalls.filter(name => name === 'create_session').length, 1);
+  assert.equal(navigationEpochs.length, 0, '后台物化不得发布本地导航（enterDraft 才会推进导航纪元）');
+});
+
+test('background materialization failure stays silent on the user session', async () => {
+  const rt = loadSessionsFeature();
+  rt.state.activeSessionId = 'local-b';
+  rt.state.chatItems = [{ type: 'user', text: 'B 的正文', id: 'b-1' }];
+  const creation = rt.defer('create_session');
+  const pending = rt.api.materializeSession({ background: true });
+  creation.reject(new Error('backend down'));
+  assert.equal(await pending, null, '创建失败按 null 返回，调用方按发送失败契约处理');
+  assert.equal(rt.state.activeSessionId, 'local-b', '失败不得改变活动会话');
+  assert.equal(rt.state.chatItems.length, 1, '报错卡不得写进用户当前会话正文');
+  assert.equal(rt.state.composerDraft, '');
+});
+
+// ── 后台物化不得抢占后端活动会话（review P2，zhuowp：setActive 契约）──
+// 前端工作集停在 B 只是半边契约：create_session 的 set_active 后端缺省
+// unwrap_or(true)（src-tauri app/commands/sessions.rs），缺省调用会静默把
+// SessionStore.active 切到诊断会话——按活动会话键控的后端操作（定时记忆
+// 压缩等）随之改道。桌面桥必须显式 setActive:false，与 Web 宿主
+// web_access_create_session（Some(false)）同契；前台物化保持缺省激活不变。
+
+test('background materialization invokes create_session with setActive false', async () => {
+  const createCalls = [];
+  const rt = loadSessionsFeature({ invoke(name, args) {
+    if (name === 'create_session') {
+      createCalls.push(args);
+      return Promise.resolve({ id: 'created-bg' });
+    }
+    if (name === 'list_sessions') return Promise.resolve([{ id: 'local-b' }, { id: 'created-bg' }]);
+    if (name === 'list_archived_sessions') return Promise.resolve([]);
+    return Promise.resolve({});
+  } });
+  rt.state.activeSessionId = 'local-b';
+  assert.equal(await rt.api.materializeSession({ background: true }), 'created-bg');
+  assert.equal(createCalls.length, 1);
+  assert.equal(createCalls[0].setActive, false,
+    '后台创建必须显式 setActive:false（后端缺省 unwrap_or(true) 会抢占后端活动会话）');
+  // 逐键断言（invoke 参数对象产自 vm realm，不能与测试字面量 deepStrictEqual）：
+  // 与前台空草稿物化同参（无目录绑定），且键面无多余项。
+  assert.equal(createCalls[0].workspacePath, null);
+  assert.equal(createCalls[0].workspaceRoots, null);
+  assert.equal(createCalls[0].projectId, null);
+  assert.equal(Object.keys(createCalls[0]).length, 4, '参数面无多余键');
+  assert.equal(rt.state.activeSessionId, 'local-b', '前端活动目标仍停在 B');
+});
+
+test('foreground materialization keeps the backend activation default', async () => {
+  const createCalls = [];
+  const rt = loadSessionsFeature({ invoke(name, args) {
+    if (name === 'create_session') {
+      createCalls.push(args);
+      return Promise.resolve({ id: 'created-fg' });
+    }
+    if (name === 'list_sessions' || name === 'list_archived_sessions') return Promise.resolve([]);
+    return Promise.resolve({});
+  } });
+  assert.equal(await rt.api.materializeSession(), 'created-fg');
+  assert.equal(createCalls.length, 1);
+  assert.notEqual(createCalls[0].setActive, false,
+    '前台物化保持后端缺省激活，不得传 setActive:false（负向对照）');
+});
+
 test('direct scheduled-run navigation invalidates a previously captured controlled owner', async () => {
   const rt = loadSessionsFeature();
   rt.state.desktopRemoteControl = {
