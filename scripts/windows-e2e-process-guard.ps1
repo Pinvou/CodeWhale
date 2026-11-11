@@ -39,6 +39,20 @@ function global:Invoke-PinvouOwnedProcess {
     $result
 }
 
+function global:Invoke-PinvouCleanupPreservingFailure {
+    param(
+        [Parameter(Mandatory = $true)][scriptblock]$Cleanup,
+        [Management.Automation.ErrorRecord]$PrimaryFailure,
+        [Parameter(Mandatory = $true)][ValidatePattern('^[a-z][a-z0-9_]{0,127}$')][string]$FailureCode
+    )
+    try { & $Cleanup } catch {
+        if ($PrimaryFailure) {
+            $PrimaryFailure.Exception.Data[$FailureCode] = $true
+            [Console]::Error.WriteLine($FailureCode)
+        } else { throw }
+    }
+}
+
 function global:Close-PinvouOwnedProcessScopes {
     $scopes = Get-Variable -Name PinvouE2EOwnedProcessScopes -Scope Global -ErrorAction SilentlyContinue
     if (-not $scopes) { return }

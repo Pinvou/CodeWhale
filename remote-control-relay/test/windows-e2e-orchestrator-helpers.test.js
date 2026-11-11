@@ -37,7 +37,7 @@ const productionCleanup = `$cleanupNode=@($ast.FindAll({param($n)$n -is [Managem
 // the top-level orchestrator. Only the external trusted-driver boundary is fake.
 for (const shell of process.platform === 'win32' ? ['powershell.exe', 'pwsh'] : ['pwsh']) {
   test(`production legacy flow binds and forwards the owned process ID [${shell}]`, () => {
-    const script = `$ErrorActionPreference='Stop'; ${productionAst}
+    const script = `$ErrorActionPreference='Stop'; . ${quote(guard)}; ${productionAst}
       $nodes=@($ast.FindAll({param($n) $n -is [Management.Automation.Language.ScriptBlockExpressionAst] -and $n.Extent.Text.Contains('legacy-configure-gateway') -and $n.Extent.Text.Contains('legacy-deconfigure-gateway') -and $n.Extent.Text.Contains('$configureExitCode')},$true));
       if($nodes.Count -ne 1){throw 'legacy-flow-not-unique'};
       $text=$nodes[0].Extent.Text;$flow=[scriptblock]::Create($text.Substring(1,$text.Length-2));
@@ -88,7 +88,7 @@ test("production orchestrator functions enforce measured elapsed time and route 
 
 test("per-run staging is hash checked, collision-safe and ownership-bound on cleanup", () => {
   const nonce = "d".repeat(64);
-  const script = `$ErrorActionPreference='Stop'; . ${quote(helper)}; ${productionStaging} ${productionCleanup} $base=Join-Path ([IO.Path]::GetTempPath()) ('pinvou-e2e-stage-'+[Guid]::NewGuid().ToString('N')); `
+  const script = `$ErrorActionPreference='Stop'; . ${quote(helper)}; . ${quote(guard)}; ${productionStaging} ${productionCleanup} $base=Join-Path ([IO.Path]::GetTempPath()) ('pinvou-e2e-stage-'+[Guid]::NewGuid().ToString('N')); `
     + `try { $s=& $create $base '${nonce}' ([DateTime]::UtcNow); if(-not [IO.Path]::IsPathRooted($s.root)){throw 'staging-contract'}; `
     + `$file=Join-Path $s.root 'probe.bin'; [IO.File]::WriteAllBytes($file,[byte[]](1,2,3)); $sha=(Get-FileHash $file -Algorithm SHA256).Hash.ToLowerInvariant(); `
     + `[void](Assert-PinvouTrustedStagedFile 'probe.bin' $sha); `
@@ -103,11 +103,11 @@ test("per-run staging is hash checked, collision-safe and ownership-bound on cle
 
 test("production cleanup continues after route and role faults and reports their aggregate", () => {
   const result = spawnSync(pwsh, ["-NoProfile", "-NonInteractive", "-Command",
-    `$ErrorActionPreference='Stop'; . ${quote(helper)}; ${productionStaging} ${productionCleanup} `
+    `$ErrorActionPreference='Stop'; . ${quote(helper)}; . ${quote(guard)}; ${productionStaging} ${productionCleanup} `
     + `$base=Join-Path ([IO.Path]::GetTempPath()) ('pinvou-e2e-fault-'+[Guid]::NewGuid().ToString('N'));try{ `
     + `$runNonce='${'d'.repeat(64)}';$s=& $create $base $runNonce ([DateTime]::UtcNow);$RemoteRoot=$s.root;$RemoteBase=$base;$cleanupLegacyOwned=$true;$cleanupLegacyPid=$null; `
     + `$LegacyGatewayUrl='fixture';$cleanupRouteId='fixture';$cleanupOriginalStateDigest='fixture';$cleanupCanonicalInputDigest='fixture';$cleanupControlPlaneDigest='fixture';$actualHead='fixture'; `
-    + `[IO.File]::WriteAllText((Join-Path $s.root 'pinvou-e2e-driver.exe'),'fixture');$script:calls=@();function Close-PinvouOwnedProcessScopes {};function Invoke-PinvouTrustedGuard{param($FilePath,$Arguments);$script:calls+=@($Arguments[0]);$global:LASTEXITCODE=0;switch($Arguments[0]){ `
+    + `[IO.File]::WriteAllText((Join-Path $s.root 'pinvou-e2e-driver.exe'),'fixture');$script:calls=@();function Invoke-PinvouTrustedGuard{param($FilePath,$Arguments);$script:calls+=@($Arguments[0]);$global:LASTEXITCODE=0;switch($Arguments[0]){ `
     + `'legacy-deconfigure-gateway'{throw 'route-fixture-fault'} 'legacy-owned-pids'{[ordered]@{schema='pinvou-legacy-owned-processes';version=1;run_nonce=$runNonce;mock=$false;active=@();terminated=@()}|ConvertTo-Json -Compress} 'legacy-stop'{} 'stop-role'{throw 'role-fixture-fault'} default{throw 'unexpected-fixture-command'}}}; `
     + `$message='';try{& $cleanup}catch{$message=$_.Exception.Message};if($message -notmatch 'route:route-fixture-fault.*role-process:role-fixture-fault'){throw 'faults-not-aggregated'};if(($script:calls -join ',') -ne 'legacy-deconfigure-gateway,legacy-owned-pids,legacy-stop,legacy-owned-pids,stop-role'){throw 'later-cleanup-skipped'};if(Test-Path $s.root){throw 'files-cleanup-skipped'};[Console]::Out.Write('production-cleanup-aggregate-pass') `
     + `}finally{if(Test-Path -LiteralPath $base){Remove-Item -LiteralPath $base -Recurse -Force}}`], { env: shellEnv, encoding: "utf8" });
@@ -117,7 +117,7 @@ test("production cleanup continues after route and role faults and reports their
 
 test("legacy ownership registry is strict and recovers a lost response PID", () => {
   const nonce = "e".repeat(64);
-  const command = `. ${quote(helper)}; $registry=[pscustomobject]@{schema='pinvou-legacy-owned-processes';version=[int]1;run_nonce='${nonce}';mock=$false;active=[object[]]@([int]43210);terminated=[object[]]@()}; `
+  const command = `. ${quote(helper)}; . ${quote(guard)}; $registry=[pscustomobject]@{schema='pinvou-legacy-owned-processes';version=[int]1;run_nonce='${nonce}';mock=$false;active=[object[]]@([int]43210);terminated=[object[]]@()}; `
     + `$resolved=Assert-PinvouLegacyOwnershipRegistry -RunNonce '${nonce}' -Registry $registry -CallerObservedPid $null; if($resolved.active.Count -ne 1 -or $resolved.active[0] -ne 43210){throw 'failure_window_pid_not_recovered'}; `
     + `function Expect-Rejected([scriptblock]$Action){try{& $Action;throw 'invalid-registry-accepted'}catch{if($_.Exception.Message -eq 'invalid-registry-accepted'){throw}}}; `
     + `$registry.mock='false';Expect-Rejected {Assert-PinvouLegacyOwnershipRegistry -RunNonce '${nonce}' -Registry $registry};$registry.mock=$false; `

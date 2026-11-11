@@ -61,6 +61,19 @@ test("real release cancellation is bounded and never becomes success", async () 
   });
 });
 
+test("a failed root exit remains the primary error during later descendant retirement", async () => {
+  await assert.rejects(runReleaseProcess(process.execPath, ["-e", `
+    require('node:child_process').spawn(process.execPath,['-e','setInterval(()=>{},1000)'],
+      {detached:true,stdio:'ignore'}).unref();
+    process.exitCode=23;
+  `], { env, timeoutMs: 1500 }), (error) => {
+    assert.equal(error.code, "release_subgate_failed");
+    assert.equal(error.exitCode, 23);
+    assert.equal(error.cleanupConfirmed, true);
+    return true;
+  });
+});
+
 test("release runner pre-start cancellation and invalid budget launch nothing", async () => {
   await assert.rejects(runReleaseProcess("does-not-exist", [],
     { env, signal: AbortSignal.abort() }), { code: "release_subgate_cancelled" });
@@ -92,11 +105,11 @@ for (const shell of ["powershell.exe", "pwsh"]) {
         $r=Invoke-PinvouWhitelistedProcess -FilePath ${quote(process.execPath)} -ExpectedSha256 '${nodeHash}' -Arguments @('-e',$code) -TimeoutMilliseconds 15000;
         if($r.ExitCode -ne 0 -or $r.StdOut.Length -ne 2097152 -or $r.StdErr.Length -ne 2097152){throw 'pipe-drain-failed'};
         $argsCode=${quote("process.stdout.write(JSON.stringify(process.argv.slice(1)))")};
-        $a=Invoke-PinvouWhitelistedProcess -FilePath ${quote(process.execPath)} -ExpectedSha256 '${nodeHash}' -Arguments @('-e',$argsCode,'','a b','a"b','x\') -TimeoutMilliseconds 15000;
+        $a=Invoke-PinvouWhitelistedProcess -FilePath ${quote(process.execPath)} -ExpectedSha256 '${nodeHash}' -Arguments @('-e',$argsCode,'','a b','a"b',('x'+[char]92)) -TimeoutMilliseconds 15000;
         [Console]::Out.Write($a.StdOut)`;
       const result = ps(shell, script);
       assert.equal(result.status, 0, result.stderr);
-      assert.deepEqual(JSON.parse(result.stdout), ["", "a b", 'a"b', "x\"]);
+      assert.deepEqual(JSON.parse(result.stdout), ["", "a b", 'a"b', "x" + String.fromCharCode(92)]);
       assert.doesNotMatch(result.stderr, /PRIVATE_ENV_SENTINEL/u);
     });
 
@@ -149,6 +162,20 @@ for (const shell of ["powershell.exe", "pwsh"]) {
       const result = ps(shell, script);
       assert.equal(result.status, 0, result.stderr);
       assert.equal(result.stdout, "cancelled-and-retired");
+    });
+
+  test(`cleanup failure preserves an existing error and remains fatal on its own [${shell}]`,
+    { skip: process.platform !== "win32" }, () => {
+      const script = `$ErrorActionPreference='Stop'; . ${quote(guard)};
+        $primary=$null;try{throw 'primary_fixture_failure'}catch{$primary=$_};
+        Invoke-PinvouCleanupPreservingFailure -PrimaryFailure $primary -FailureCode 'e2e_fixture_cleanup_failed' -Cleanup {throw 'secondary_fixture_failure'};
+        if($primary.Exception.Message -ne 'primary_fixture_failure' -or $primary.Exception.Data['e2e_fixture_cleanup_failed'] -ne $true){throw 'primary-lost'};
+        try{Invoke-PinvouCleanupPreservingFailure -FailureCode 'e2e_fixture_cleanup_failed' -Cleanup {throw 'cleanup_only_fixture_failure'};throw 'cleanup-error-hidden'}catch{if($_.Exception.Message -ne 'cleanup_only_fixture_failure'){throw}};
+        [Console]::Out.Write('primary-preserved')`;
+      const result = ps(shell, script);
+      assert.equal(result.status, 0, result.stderr);
+      assert.equal(result.stdout, "primary-preserved");
+      assert.equal(result.stderr.trim(), "e2e_fixture_cleanup_failed");
     });
 }
 

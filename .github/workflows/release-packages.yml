@@ -103,6 +103,7 @@ on:
       - 'remote-control-relay/test/installer-spdx.test.js'
       - 'scripts/run-windows-remote-control-e2e.ps1'
       - 'scripts/windows-e2e-process-guard.ps1'
+      - 'scripts/ci-fixture-process.py'
       - 'scripts/windows-owned-process.cs'
       - 'scripts/release-owned-process.py'
       - 'remote-control-relay/scripts/release-process.mjs'
@@ -300,6 +301,7 @@ on:
       - 'remote-control-relay/test/installer-spdx.test.js'
       - 'scripts/run-windows-remote-control-e2e.ps1'
       - 'scripts/windows-e2e-process-guard.ps1'
+      - 'scripts/ci-fixture-process.py'
       - 'scripts/windows-owned-process.cs'
       - 'scripts/release-owned-process.py'
       - 'remote-control-relay/scripts/release-process.mjs'
@@ -503,7 +505,7 @@ jobs:
           else
             CHANGED_FILES=$(git diff --name-only "$BEFORE" "$GITHUB_SHA")
             if printf '%s\n' "$CHANGED_FILES" | node scripts/remote-control-release-path-policy.mjs || printf '%s\n' "$CHANGED_FILES" | grep -Eq \
-              '^(VERSION|scripts/(sync-version\.mjs|run-windows-remote-control-e2e\.ps1|windows-e2e-process-guard\.ps1|windows-owned-process\.cs|release-owned-process\.py|windows-e2e-orchestrator-helpers\.ps1|create-installer-spdx\.mjs|check-enrollment-gated-v2-rollback\.mjs|asr/(build-sensevoice-runtime\.sh|sensevoice-source\.env)|check-linux-(elf-policy|glibc-floor)\.sh)|remote-control-relay/(docs/schemas/|package(-lock)?\.json|scripts/(release-process|controller-release-gate|validate-controller-release-evidence|deploy-controller-preflight|query-controller-release-telemetry|prepare-legacy-gateway-route|verify-provider-attestation|verify-installer-supply-chain)\.mjs|controller-sensitive-scan\.js|test/(release-process\.test\.js|controller-(release-|sensitive-scan|telemetry)|windows-e2e-(orchestrator-contract|orchestrator-helpers|path-guard)))|\.github/workflows/(release-packages|windows-remote-control-(evidence|build-evidence))\.yml|\.gitmodules|private-runtimes/windows|pinvou3-app/(package(-lock)?\.json|scripts/(remote-control-ui-smoke\.mjs|tauri/(build|codex-bridge|linux-asr-runtime|platform-config|windows-installer|windows-runtime)\.js)|src-tauri/(config/platforms/(linux|windows)|packaging/windows)/|src-tauri/resources/platforms/linux/asr/|tests/(codex_acp_windows_|linux_asr_runtime_packaging\.test\.js|remote_control_real_ui_smoke_contract\.test\.mjs|windows_runtime_packaging_contract\.test\.js)))'; then
+              '^(VERSION|scripts/(sync-version\.mjs|run-windows-remote-control-e2e\.ps1|windows-e2e-process-guard\.ps1|ci-fixture-process\.py|windows-owned-process\.cs|release-owned-process\.py|windows-e2e-orchestrator-helpers\.ps1|create-installer-spdx\.mjs|check-enrollment-gated-v2-rollback\.mjs|asr/(build-sensevoice-runtime\.sh|sensevoice-source\.env)|check-linux-(elf-policy|glibc-floor)\.sh)|remote-control-relay/(docs/schemas/|package(-lock)?\.json|scripts/(release-process|controller-release-gate|validate-controller-release-evidence|deploy-controller-preflight|query-controller-release-telemetry|prepare-legacy-gateway-route|verify-provider-attestation|verify-installer-supply-chain)\.mjs|controller-sensitive-scan\.js|test/(release-process\.test\.js|controller-(release-|sensitive-scan|telemetry)|windows-e2e-(orchestrator-contract|orchestrator-helpers|path-guard)))|\.github/workflows/(release-packages|windows-remote-control-(evidence|build-evidence))\.yml|\.gitmodules|private-runtimes/windows|pinvou3-app/(package(-lock)?\.json|scripts/(remote-control-ui-smoke\.mjs|tauri/(build|codex-bridge|linux-asr-runtime|platform-config|windows-installer|windows-runtime)\.js)|src-tauri/(config/platforms/(linux|windows)|packaging/windows)/|src-tauri/resources/platforms/linux/asr/|tests/(codex_acp_windows_|linux_asr_runtime_packaging\.test\.js|remote_control_real_ui_smoke_contract\.test\.mjs|windows_runtime_packaging_contract\.test\.js)))'; then
               BUILD_REQUIRED=true
             else
               BUILD_REQUIRED=false
@@ -634,6 +636,10 @@ jobs:
           path: remote-control-evidence
           github-token: ${{ github.token }}
           run-id: ${{ inputs.remote_control_evidence_run_id || vars.PINVOU_REMOTE_CONTROL_EVIDENCE_RUN_ID }}
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
 
       - name: 执行远控发布门禁
         run: node remote-control-relay/scripts/controller-release-gate.mjs

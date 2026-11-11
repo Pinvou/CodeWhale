@@ -68,14 +68,20 @@ function global:Invoke-PinvouTrustedGuard {
     $result = Invoke-PinvouWhitelistedProcess -FilePath $target -ExpectedSha256 $global:PinvouE2EExpectedFileHashes[$targetRelative] -Arguments $Arguments -AdditionalExpectedSha256 $additionalExpected -RetainSuccessfulScope:$retain
     if ($result.OwnedScope) {
         $retained = $false
+        $handoffFailure = $null
         try {
             $marker = Get-Content -LiteralPath (Join-Path $root '.pinvou-e2e-owner.json') -Raw -Encoding UTF8 -ErrorAction Stop | ConvertFrom-Json
             if ($marker.schema -ne 'pinvou-e2e-staging' -or $marker.run_nonce -notmatch '^[a-f0-9]{64}$' -or (Split-Path -Leaf $root) -cne $marker.run_nonce) { throw 'e2e_process_scope_owner_invalid' }
             if (-not (Get-Variable -Name PinvouE2EOwnedProcessScopes -Scope Global -ErrorAction SilentlyContinue)) { $global:PinvouE2EOwnedProcessScopes = @() }
             $global:PinvouE2EOwnedProcessScopes += $result.OwnedScope
             $retained = $true
+        } catch {
+            $handoffFailure = $_
+            throw
         } finally {
-            if (-not $retained) { $result.OwnedScope.Dispose() }
+            if (-not $retained) {
+                Invoke-PinvouCleanupPreservingFailure -Cleanup { $result.OwnedScope.Dispose() } -PrimaryFailure $handoffFailure -FailureCode 'e2e_process_scope_cleanup_failed'
+            }
         }
     }
     $global:LASTEXITCODE = $result.ExitCode

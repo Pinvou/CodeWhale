@@ -678,6 +678,7 @@ $flagOffEvidence = [Collections.Generic.List[object]]::new()
         $listenerUrl = 'ws://127.0.0.1:' + $ListenerPort
         $configuration = (Invoke-PinvouTrustedGuard -FilePath $driverPath -Arguments @('legacy-configure-gateway', '--gateway-url', $Gateway, '--listener-url', $listenerUrl, '--expected-pid', [string]$LegacyRuntimePid, '--route-spec', $routeSpecPath, '--route-spec-sha256', $RouteSpecSha, '--run-nonce', $RunNonce, '--route-id', $RouteId, '--require-no-bypass', '--require-full-control-plane-snapshot', '--source-commit', $Commit, '--output-root', $global:PinvouE2EOutput) -AdditionalFilePaths @($routeSpecPath)) | ConvertFrom-Json
         $configureExitCode = $LASTEXITCODE
+        $legacyFlowFailure = $null
         try {
             if ($configureExitCode -ne 0 -or $configuration.route_activated -ne $true -or $configuration.mock -ne $false) { throw 'e2e_legacy_gateway_activation_failed' }
             $before = (Invoke-PinvouTrustedGuard -FilePath $driverPath -Arguments @('legacy-traffic-counter', '--gateway-url', $Gateway, '--expected-pid', [string]$LegacyRuntimePid, '--run-nonce', $RunNonce, '--route-id', $RouteId, '--source-commit', $Commit)) | ConvertFrom-Json
@@ -689,10 +690,16 @@ $flagOffEvidence = [Collections.Generic.List[object]]::new()
             $bareV2 = (Invoke-PinvouTrustedGuard -FilePath $driverPath -Arguments @('legacy-bare-v2-probe', '--gateway-url', $Gateway, '--request-nonce', $Nonce, '--run-nonce', $RunNonce, '--route-id', $RouteId, '--role', 'A', '--source-commit', $Commit, '--output-root', $global:PinvouE2EOutput)) | ConvertFrom-Json
             if ($LASTEXITCODE -ne 0 -or $bareV2.schema -ne 'pinvou-legacy-bare-v2-rejection' -or $bareV2.gateway_url_sha256 -ne $GatewaySha `
                 -or $bareV2.request_nonce -ne $Nonce -or $bareV2.response_kind -ne 'upgrade_rejected' -or $bareV2.rejected -ne $true -or $bareV2.mock -ne $false) { throw 'e2e_legacy_bare_v2_probe_invalid' }
+        } catch {
+            $legacyFlowFailure = $_
+            throw
         } finally {
-            $restoration = (Invoke-PinvouTrustedGuard -FilePath $driverPath -Arguments @('legacy-deconfigure-gateway', '--gateway-url', $Gateway, '--run-nonce', $RunNonce, '--route-id', $RouteId, '--restore-original-state', $configuration.original_state_digest, '--canonical-input-state-digest', $configuration.canonical_input_state_digest, '--expected-control-plane-state-digest', $configuration.control_plane_state_before_digest, '--require-full-control-plane-reread', '--require-public-route-withdrawn', '--source-commit', $Commit, '--output-root', $global:PinvouE2EOutput)) | ConvertFrom-Json
-            if ($LASTEXITCODE -ne 0 -or $restoration.owned_route_removed -ne $true -or $restoration.public_route_withdrawn -ne $true `
-                -or $restoration.restored_state_digest -ne $configuration.original_state_digest -or $restoration.mock -ne $false) { throw 'e2e_legacy_gateway_restore_failed' }
+            $restoration = Invoke-PinvouCleanupPreservingFailure -PrimaryFailure $legacyFlowFailure -FailureCode 'e2e_legacy_gateway_cleanup_failed' -Cleanup {
+                $restored = (Invoke-PinvouTrustedGuard -FilePath $driverPath -Arguments @('legacy-deconfigure-gateway', '--gateway-url', $Gateway, '--run-nonce', $RunNonce, '--route-id', $RouteId, '--restore-original-state', $configuration.original_state_digest, '--canonical-input-state-digest', $configuration.canonical_input_state_digest, '--expected-control-plane-state-digest', $configuration.control_plane_state_before_digest, '--require-full-control-plane-reread', '--require-public-route-withdrawn', '--source-commit', $Commit, '--output-root', $global:PinvouE2EOutput)) | ConvertFrom-Json
+            if ($LASTEXITCODE -ne 0 -or $restored.owned_route_removed -ne $true -or $restored.public_route_withdrawn -ne $true `
+                -or $restored.restored_state_digest -ne $configuration.original_state_digest -or $restored.mock -ne $false) { throw 'e2e_legacy_gateway_restore_failed' }
+                $restored
+            }
         }
         [ordered]@{ configuration = $configuration; probe = $probe; bare_v2 = $bareV2; restoration = $restoration; counter_before = [long]$before.count; counter_after = [long]$after.count } | ConvertTo-Json -Depth 10 -Compress
     } -ArgumentList $LegacyGatewayUrl, $gatewayUrlSha, $legacyRouteSpecSha, $routeSpec.route_id, $runNonce, $legacyRuntimePid, $legacyRuntime.listener_port, $legacyRequestNonce, $actualHead
@@ -924,6 +931,7 @@ $flagOffEvidence = [Collections.Generic.List[object]]::new()
         } else {
             $roleIndex = if ($artifact.machine_role -eq 'A') { 0 } else { 1 }; $remoteAttestPath = "$RemoteOutput\attest-$([Guid]::NewGuid().ToString('N')).bin"
             Copy-Item -LiteralPath $artifactPath -Destination $remoteAttestPath -ToSession $sessions[$roleIndex]
+            $attestationFailure = $null
             try {
                 $attestationJson = Invoke-Command -Session $sessions[$roleIndex] -ScriptBlock {
                     param($Provider, $KeyId, $RolePolicy, $Path, $Relative, $Kind, $Role, $RunNonce, $Commit)
@@ -931,7 +939,14 @@ $flagOffEvidence = [Collections.Generic.List[object]]::new()
                     if ($LASTEXITCODE -ne 0) { throw 'e2e_remote_artifact_attestation_failed' }; $output
                 } -ArgumentList $AttestationProvider, $identity[0].key_id, $identity[0].role_policy_sha256, $remoteAttestPath, $artifact.path, $artifact.kind, $artifact.machine_role, $runNonce, $actualHead
                 $attestationResult = $attestationJson | ConvertFrom-Json; $attestationExitCode = 0
-            } finally { Invoke-Command -Session $sessions[$roleIndex] -ScriptBlock { Remove-Item -LiteralPath $using:remoteAttestPath -Force -ErrorAction Stop } }
+            } catch {
+                $attestationFailure = $_
+                throw
+            } finally {
+                Invoke-PinvouCleanupPreservingFailure -PrimaryFailure $attestationFailure -FailureCode 'e2e_attestation_cleanup_failed' -Cleanup {
+                    Invoke-Command -Session $sessions[$roleIndex] -ScriptBlock { Remove-Item -LiteralPath $using:remoteAttestPath -Force -ErrorAction Stop }
+                }
+            }
         }
         if ($attestationExitCode -ne 0 -or $attestationResult.schema -ne 'pinvou-e2e-artifact-attestation' `
             -or $attestationResult.sha256 -ne $artifact.sha256 `

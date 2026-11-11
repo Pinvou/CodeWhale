@@ -34,11 +34,22 @@ export function runReleaseProcess(command, args, {
     let hardKilled = false;
     let finished = false;
     let hard;
+    const forceUnconfirmed = () => {
+      if (finished) return;
+      hardKilled = true;
+      // SIGKILL is not a cooperative request on POSIX. Still do not claim
+      // retirement without the supervisor's acknowledgement, or wait forever
+      // for EOF inherited by an unconfirmed descendant.
+      child.kill("SIGKILL");
+      child.stdout.destroy(); child.stderr.destroy(); child.stdin.destroy();
+      child.unref();
+      settle(failure("release_subgate_cleanup_unconfirmed", { cleanupConfirmed: false }));
+    };
     const requestStop = (reason) => {
       requested ||= reason;
       if (!child.stdin.destroyed) child.stdin.end("cancel\n");
       clearTimeout(hard);
-      hard = setTimeout(() => { hardKilled = true; child.kill(); }, 20000);
+      hard = setTimeout(forceUnconfirmed, 20000);
     };
     const abort = () => requestStop("cancelled");
     signal?.addEventListener("abort", abort, { once: true });
@@ -60,7 +71,7 @@ export function runReleaseProcess(command, args, {
     const timeout = setTimeout(() => requestStop("timeout"), timeoutMs);
     // Missing cleanup acknowledgement fails closed; this is never a retry or
     // a claimed successful retirement. The supervisor owns its own child Job.
-    hard = setTimeout(() => { hardKilled = true; child.kill(); }, timeoutMs + 20000);
+    hard = setTimeout(forceUnconfirmed, timeoutMs + 20000);
     const settle = (error) => {
       if (finished) return;
       finished = true;

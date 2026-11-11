@@ -543,6 +543,7 @@ jobs:
               - 'scripts/tests/test_release_size_policy.py'
               - 'scripts/run-windows-remote-control-e2e.ps1'
               - 'scripts/windows-e2e-process-guard.ps1'
+              - 'scripts/ci-fixture-process.py'
               - 'scripts/windows-owned-process.cs'
               - 'scripts/release-owned-process.py'
               - 'remote-control-relay/scripts/release-process.mjs'
@@ -1398,6 +1399,10 @@ jobs:
           # still write a 107MB PR-scoped cache copy per run (invisible to
           # other PRs — pure quota weight). Same policy as release-contract-test.
 
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+
       - name: 安装 relay 依赖
         run: npm --prefix remote-control-relay ci --prefer-offline --no-audit
 
@@ -1429,7 +1434,7 @@ jobs:
         run: |
           bash -n scripts/deploy-remote-relay.sh
           bash -n scripts/deploy-remote-relay-test.sh
-          npm --prefix remote-control-relay test
+          python3 scripts/ci-fixture-process.py --receipt "${{ runner.temp }}/relay-process-${{ github.run_id }}-${{ github.run_attempt }}.json" -- npm --prefix remote-control-relay test
 
   account-platform-test:
     name: account-platform-test
@@ -2218,6 +2223,11 @@ jobs:
           npm --prefix pinvou3-app run test:macos-phase2
           npm --prefix pinvou3-app run test:knowledge-host-packaging
           npm --prefix pinvou3-app run test:linux-asr-runtime
+
+      - uses: actions/setup-python@v7
+        if: ${{ runner.os == 'Windows' }}
+        with:
+          python-version: "3.13"
 
       - name: Windows 原生命令退出码回归
         if: ${{ runner.os == 'Windows' }}

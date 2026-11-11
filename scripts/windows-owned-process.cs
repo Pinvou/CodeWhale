@@ -149,7 +149,7 @@ namespace Pinvou.Release {
                     if (capturedOut.Exceeded != 0 || capturedErr.Exceeded != 0) { failure = "e2e_process_output_limit"; break; }
                     Thread.Sleep(10);
                 }
-                if (capturedOut.Exceeded != 0 || capturedErr.Exceeded != 0) failure = "e2e_process_output_limit";
+                if (failure == null && (capturedOut.Exceeded != 0 || capturedErr.Exceeded != 0)) failure = "e2e_process_output_limit";
                 if (failure == null) {
                     // GetResult observes decoder/pipe failures rather than using partial JSON.
                     result = new ProcessResult { ExitCode = exit.Value, ProcessId = unchecked((int)pi.ProcessId),
