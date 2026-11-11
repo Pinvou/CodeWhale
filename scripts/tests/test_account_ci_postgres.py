@@ -7,6 +7,8 @@ import json
 import os
 from pathlib import Path
 import re
+import runpy
+import subprocess
 import sys
 import tempfile
 import textwrap
@@ -22,6 +24,69 @@ PG = module('account_ci_postgres', 'scripts/account-ci-postgres.py')
 FIN = module('financial_identity', 'scripts/test-token-financial-postgres.py')
 
 class AccountCIAdmissionTests(unittest.TestCase):
+    def test_closure_cli_admits_and_retires_only_its_single_service(self):
+        self.assertEqual(PG.CLOSURE_SERVICES, {'financial': PG.SERVICES['financial']})
+        meta, item = self.fixture()
+        identity = '12345|/var/lib/postgresql/data|5432|postgres|postgres|postgres|t|160015'
+        for stop in (False, True):
+            calls, stopped = [], []
+            def run(argv, **kwargs):
+                calls.append(argv)
+                if argv[:2] == ['docker', 'inspect']:
+                    self.assertEqual(argv[2], meta['id']); value = json.dumps([item])
+                elif argv[:2] == ['docker', 'exec']:
+                    self.assertEqual(argv[2], meta['id']); value = identity
+                elif argv[0] == 'psql':
+                    self.assertIn('127.0.0.1:49173/', argv[1]); value = identity
+                elif argv[:2] == ['docker', 'ps']: value = '' if stopped else meta['id']
+                elif argv[:3] == ['docker', 'volume', 'ls']: value = '' if stopped else 'b'*64
+                elif argv[:2] == ['docker', 'logs']:
+                    self.assertEqual(argv[2], meta['id']); value = 'owned service log'
+                elif argv[:2] == ['docker', 'stop']:
+                    self.assertEqual(argv[2:], ['--time', '15', meta['id']]); stopped.append(meta['id']); value = ''
+                else: raise AssertionError('unexpected closure subprocess')
+                return subprocess.CompletedProcess(argv, 0, stdout=value, stderr='')
+            with self.subTest(stop=stop), tempfile.TemporaryDirectory() as directory:
+                output = Path(directory)/'output'
+                env = {'GITHUB_ACTIONS': 'true', 'ACCOUNT_CI_SERVICES': json.dumps({'financial-postgres': meta}),
+                       'GITHUB_OUTPUT': str(output), 'PINVOU_CI_RESOURCE_LEDGER': directory}
+                argv = ['account-ci-postgres.py', '--profile', 'closure'] + (['--stop-owned-services'] if stop else [])
+                with patch.dict(os.environ, env), patch.object(sys, 'argv', argv), \
+                        patch.object(subprocess, 'run', side_effect=run), contextlib.redirect_stdout(io.StringIO()):
+                    runpy.run_path(str(ROOT/'scripts/account-ci-postgres.py'), run_name='__main__')
+                if stop:
+                    self.assertEqual(stopped, [meta['id']])
+                    receipt = json.loads((Path(directory)/'postgres-services.json').read_text())
+                    self.assertEqual(receipt['state'], 'released')
+                    self.assertEqual(receipt['ids'], [meta['id']])
+                else:
+                    self.assertEqual(stopped, [])
+                    values = output.read_text()
+                    self.assertIn('financial_system=12345', values)
+                    self.assertNotIn('audit_url=', values)
+                    self.assertNotIn('financial_token_url=', values)
+                    self.assertEqual(sum(argv[:2] == ['docker', 'inspect'] for argv in calls), 1)
+
+    def test_closure_job_has_independent_admission_and_required_result(self):
+        source=(ROOT/'.github/workflows/pr-check.yml').read_text(encoding='utf-8')
+        closure=source.split('\n  account-closure-test:',1)[1].split('\n  windows-relay-dacl:',1)[0]
+        account=source.split('\n  account-platform-test:',1)[1].split('\n  account-closure-test:',1)[0]
+        self.assertIn('\n    needs: changes\n', closure)
+        self.assertIn("needs.changes.outputs.account_platform == 'true'", closure)
+        self.assertEqual(closure.count('"127.0.0.1::5432"'), 1)
+        self.assertIn('scripts/account-ci-postgres.py --profile closure\n', closure)
+        self.assertIn('scripts/account-ci-postgres.py --profile closure --stop-owned-services', closure)
+        self.assertIn('PINVOU_ACCOUNT_CLOSURE_TEST_DATABASE_URL: ${{ steps.account-pg.outputs.financial_url }}', closure)
+        self.assertIn('Confirm Account test resource retirement', closure)
+        self.assertNotIn('python3 scripts/test-account-closure-postgres.py', account)
+        gate=source.split('\n  required-gate:',1)[1]
+        self.assertIn('      - account-closure-test\n', gate)
+        self.assertIn('ACCOUNT_CLOSURE_RESULT: ${{ needs.account-closure-test.result }}', gate)
+        self.assertIn('"$ACCOUNT_CLOSURE_RESULT" != success', gate)
+        self.assertIn("fromJSON(toJSON(needs.changes.outputs)).reuse_verified == 'true'", closure)
+        self.assertIn("'account-closure-test'))", closure)
+        self.assertIn('"$ACCOUNT_CLOSURE_RESULT" == skipped && "${CLOSURE_REUSE_VERIFIED:-false}" == true', gate)
+
     def fixture(self):
         meta = {'id': 'a'*64, 'ports': {'5432':'49173'}}
         item = {'Id': meta['id'], 'State': {'Running':True, 'Health': {'Status':'healthy'}},
@@ -65,7 +130,7 @@ class AccountCIAdmissionTests(unittest.TestCase):
             meta['ports']['5432'] = str(49173+index)
             item['Id'] = meta['id']; item['Config']['Image'] = image
             item['NetworkSettings']['Ports']['5432/tcp'][0]['HostPort'] = meta['ports']['5432']
-            item['Mounts'][0].update(Name=str(index+4)*64, Destination='/var/lib/postgresql' if major=='18' else '/var/lib/postgresql/data')
+            item['Mounts'][0].update(Name=format(index+4,'x')*64, Destination='/var/lib/postgresql' if major=='18' else '/var/lib/postgresql/data')
             metadata[name] = meta; items[meta['id']] = item
         for problem in ('none', 'unhealthy', 'gone', 'all-gone', 'image', 'bind', 'reused-volume', 'reused-id', 'logs-failed', 'stop-failed', 'remaining-container', 'remaining-volume', 'partial-registration'):
             current, actual = copy.deepcopy(metadata), copy.deepcopy(items)
@@ -127,7 +192,7 @@ class AccountCIAdmissionTests(unittest.TestCase):
             meta,item=self.fixture();meta['id']=str(index+1)*64;meta['ports']['5432']=str(49173+index)
             item['Id']=meta['id'];item['Config']['Image']=image
             item['NetworkSettings']['Ports']['5432/tcp'][0]['HostPort']=meta['ports']['5432']
-            item['Mounts'][0].update(Name=str(index+4)*64,Destination='/var/lib/postgresql' if major=='18' else '/var/lib/postgresql/data')
+            item['Mounts'][0].update(Name=format(index+4,'x')*64,Destination='/var/lib/postgresql' if major=='18' else '/var/lib/postgresql/data')
             metadata[name]=meta;items[meta['id']]=item
             identities[meta['id']]=f"{100+index}|{directory}|5432|postgres|postgres|postgres|t|{int(major)*10000}"
         for failure in ('none','namespace','volume','port','id'):
@@ -168,16 +233,16 @@ class AccountCIAdmissionTests(unittest.TestCase):
 
     def test_workflow_consumers_and_anonymous_lifecycle(self):
         source=(ROOT/'.github/workflows/pr-check.yml').read_text(encoding='utf-8')
-        job=source.split('\n  account-platform-test:',1)[1].split('\n  windows-relay-dacl:',1)[0]
+        job=source.split('\n  account-platform-test:',1)[1].split('\n  account-closure-test:',1)[0]
         routes=[line.strip() for line in job.splitlines() if line.lstrip().startswith('runs-on:')]
         self.assertEqual(routes, ["""runs-on: ${{ fromJSON(vars.PINVOU_LINUX_HEAVY_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}"""])
-        self.assertEqual(job.count('"127.0.0.1::5432"'),6);self.assertEqual(job.count('          --rm\n'),6)
-        for variable,key in [('PINVOU_TEST_SCHEMA_DATABASE_URL','broker'),('F17_TEST_DATABASE_URL','audit'),('PINVOU_ACCOUNT_CLOSURE_TEST_DATABASE_URL','financial')]:
+        self.assertEqual(job.count('"127.0.0.1::5432"'),8);self.assertEqual(job.count('          --rm\n'),8)
+        for variable,key in [('PINVOU_TEST_SCHEMA_DATABASE_URL','broker'),('F17_TEST_DATABASE_URL','audit')]:
             self.assertIn(variable+': ${{ steps.account-pg.outputs.'+key+'_url }}',job)
         self.assertIn('ACCOUNT_FINANCIAL_SERVICES: ${{ steps.account-pg.outputs.financial_services }}',job)
-        self.assertEqual(job.count('          --memory 1g\n'),4)
-        self.assertEqual(job.count('          --memory-swap 1g\n'),4)
-        self.assertEqual(job.count('          --cpus 2\n'),4)
+        self.assertEqual(job.count('          --memory 1g\n'),6)
+        self.assertEqual(job.count('          --memory-swap 1g\n'),6)
+        self.assertEqual(job.count('          --cpus 2\n'),6)
         self.assertIn('ACCOUNT_CI_SERVICES: ${{ toJSON(job.services) }}',job)
         self.assertIn('F17_TEST_SERVICE_PORT: ${{ steps.account-pg.outputs.audit_port }}',job)
         self.assertIn('lua5.1 postgresql-client',job)
