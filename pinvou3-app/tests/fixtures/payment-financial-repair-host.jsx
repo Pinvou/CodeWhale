@@ -26,11 +26,11 @@ window.fetch = async (url, options = {}) => {
     platform_permissions: params.has('deny') ? [] : params.has('approve') ? ['platform.billing.repairs.approve'] : ['platform.billing.repairs.request'], platform_authorization_version: 1 });
   if (url === '/api/admin/approvals/capability') return reply({ session_approval_wire_version: 2, control: { version: 1, epoch: 1, authorization_relay_epoch: 1 } });
   if (url === '/api/admin/approvals/directory') return reply({ schema_version: 1, platform_authorization_version: 1, items: [
-    { command_type: 'LEDGER_REPAIR', policy_version: 1, risk_class: 'FINANCIAL_FACT_CHANGE', requestable: true },
-    { command_type: 'ENTITLEMENT_COMPONENT_ADJUSTMENT', policy_version: 2, risk_class: 'FINANCIAL_FACT_CHANGE', requestable: true },
-    { command_type: 'RECEIVABLE_WRITE_OFF', policy_version: 1, risk_class: 'FINANCIAL_FACT_CHANGE', requestable: true },
-    { command_type: 'PAYMENT_FINANCIAL_REPAIR', policy_version: 1, risk_class: 'FINANCIAL_FACT_CHANGE', requestable: true },
-    { command_type: 'UNKNOWN_REPAIR', policy_version: 1, risk_class: 'FINANCIAL_FACT_CHANGE', requestable: true },
+    { command_type: 'LEDGER_REPAIR', policy_version: 1, risk_class: 'FINANCIAL_FACT_CHANGE', visible: true, requestable: true },
+    { command_type: 'ENTITLEMENT_COMPONENT_ADJUSTMENT', policy_version: 2, risk_class: 'FINANCIAL_FACT_CHANGE', visible: true, requestable: true },
+    { command_type: 'RECEIVABLE_WRITE_OFF', policy_version: 1, risk_class: 'FINANCIAL_FACT_CHANGE', visible: true, requestable: true },
+    { command_type: 'PAYMENT_FINANCIAL_REPAIR', policy_version: 1, risk_class: 'FINANCIAL_FACT_CHANGE', visible: true, requestable: true },
+    { command_type: 'UNKNOWN_REPAIR', policy_version: 1, risk_class: 'FINANCIAL_FACT_CHANGE', visible: true, requestable: true },
   ] }, 200, { 'X-Platform-Authorization-Version': '1' });
   if (url === '/api/admin/account/admin/v2/approval-command-prechecks') {
     state.prechecks++;

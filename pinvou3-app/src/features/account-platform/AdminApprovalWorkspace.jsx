@@ -1,6 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { financeCopy } from '../../shared/i18n.js';
-import { approvalReadCopy, pendingApprovalReadCopy, executionApprovalReadCopy, approvalDirectoryCopy, approvalDirectoryToolbarCopy } from '../../shared/admin-approval-read-i18n.js';
+import { financeCopy, approvalReadCopy, pendingApprovalReadCopy, executionApprovalReadCopy, approvalDirectoryCopy, approvalDirectoryToolbarCopy } from '../../shared/i18n.js';
 import { Approvals } from './AdminFinanceWorkspace.jsx';
 import { approvalCommands, approvalViews, approvalStatuses, executionStatuses, approvalQuery, approvalExpiryDate, readApprovalRoute } from './admin-approval-actions.js';
 import { approvalLabel } from './admin-approval-presentation.js';
@@ -116,7 +115,7 @@ export function AdminApprovalWorkspace({ client, copy, language, me, onNavigate,
   }, [client, directoryScope, route.view, refresh]);
   useEffect(() => { setDirectoryFilters(emptyDirectoryFilters); }, [directoryScope]);
   return <section className="adm-approval-workspace" aria-label={copy.nav.approvals}>
-    <nav className="adm-tabs adm-approval-tabs" aria-label={c.views}>{approvalViews.map(view => <button key={view} className={route.view === view ? 'active' : undefined} disabled={blocked} aria-current={route.view === view ? 'page' : undefined} onClick={() => { if (view !== route.view) { setMineStatus(''); setExpiryDraft({ from: '', to: '' }); setInvalidExpiry(false); } changeRoute({ view, status: '', requestID: '', ...(view !== route.view ? { expiresFrom: '', expiresTo: '' } : {}) }); }}>{c[view]}</button>)}</nav>
+    <nav className="adm-tabs adm-approval-tabs" aria-label={c.views}>{approvalViews.map(view => <button key={view} className={route.view === view ? 'active' : undefined} disabled={blocked} aria-current={route.view === view ? 'page' : undefined} onClick={() => { if (view === route.view) return; setMineStatus(''); setExpiryDraft({ from: '', to: '' }); setInvalidExpiry(false); changeRoute({ view, status: '', requestID: '', expiresFrom: '', expiresTo: '' }); }}>{c[view]}</button>)}</nav>
     {route.view !== 'directory' && <form className={'adm-approval-toolbar' + (pending ? ' adm-approval-pending-toolbar' : '')} onSubmit={event => { event.preventDefault(); if (mine) applyMine(); else if (route.view === 'pending') applyPendingDeadline(); else changeRoute({ commandType: command, target: target.trim(), requestID: '' }); }}>
       <label>{c.commandType}<select disabled={blocked} value={command} onChange={event => setCommand(event.target.value)}><option value="">{c.allCommands}</option>{approvalCommands.map(type => <option key={type} value={type}>{mine || pending ? approvalLabel(c.policyCommandLabels, type) : type}</option>)}</select></label>
       <label>{mine || pending ? <span id={mineTargetID + '-label'}>{listWords.targetID}</span> : c.target}<input disabled={blocked} value={target} aria-labelledby={mine || pending ? mineTargetID + '-label' : undefined} aria-describedby={mine || pending ? mineTargetID + '-help' : undefined} onChange={event => setTarget(event.target.value)} />{(mine || pending) && <small className="adm-approval-target-help" id={mineTargetID + '-help'}>{listWords.targetHelp}</small>}</label>

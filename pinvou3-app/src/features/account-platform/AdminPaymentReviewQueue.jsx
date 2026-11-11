@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { adminLayoutCopy } from '../../shared/i18n.js';
 import { requireFinanceCollection } from './finance-contract.js';
-import { loadFinancePage } from './admin-finance-pagination.js';
+import { isFinanceSnapshotExpired, loadFinancePage } from './admin-finance-pagination.js';
 import { useFinanceOperation } from './useFinanceOperation.js';
 import { paymentAnomalyResolutions } from './payment-anomaly-resolutions.js';
 import { freshLatePaymentQuery, latePaymentQueryAuthority } from './late-payment-query-contract.js';
@@ -62,7 +62,7 @@ export function AdminPaymentReviewQueue({ client, copy, me, anomaly = false, rou
         const current = await loadFinancePage(readQuery, query => anomaly ? client.paymentAnomalies(query) : client.latePaymentReviews(query), () => { restarted = true; });
         return { kind: 'ready', ...current, restarted };
       } catch (reason) {
-        const kind = reason?.status === 403 ? 'denied' : reason?.code === 'PAGINATION_CURSOR_INVALID' ? 'cursorInvalid' :
+        const kind = reason?.status === 403 ? 'denied' : isFinanceSnapshotExpired(reason) ? 'cursorExpired' : reason?.code === 'PAGINATION_CURSOR_INVALID' ? 'cursorInvalid' :
           reason?.code === 'INVALID_FILTER' ? 'filterInvalid' : 'unavailable';
         return { kind, restarted };
       }
@@ -154,7 +154,7 @@ export function AdminPaymentReviewQueue({ client, copy, me, anomaly = false, rou
   const emptyMessage = cursor ? queueWords.emptyBatch : hasQueueFilters ? queueWords.emptyFiltered : queueWords.empty;
   const clearWhenFiltered = !cursor && hasQueueFilters && <div className="adm-row-actions"><button type="button" onClick={clearQueueFilters} disabled={busy || blocked}>{queueWords.clear}</button></div>;
   const retryQueueRead = () => {
-    const first = queueList.restarted || queueList.kind === 'cursorInvalid';
+    const first = queueList.restarted || ['cursorInvalid', 'cursorExpired'].includes(queueList.kind);
     if (first) setPrevious([]);
     filters.move({ ...filters.query, ...(first ? { cursor: '' } : {}) }, filters.selectedID || null, 'replace');
   };
@@ -172,7 +172,7 @@ export function AdminPaymentReviewQueue({ client, copy, me, anomaly = false, rou
     {queueRoute && queueList.kind === 'loading' && <p className="adm-inline-message" role="status">{queueWords.loading}</p>}
     {queueFailure && <div className="adm-inline-message error">
       <p role="alert">{queueWords[queueList.kind]}</p>
-      {queueList.kind !== 'denied' && <div className="adm-row-actions"><button type="button" onClick={retryQueueRead} disabled={busy || blocked}>{queueList.restarted || queueList.kind === 'cursorInvalid' ? queueWords.firstBatch : copy.retry}</button></div>}
+      {queueList.kind !== 'denied' && <div className="adm-row-actions"><button type="button" onClick={retryQueueRead} disabled={busy || blocked}>{queueList.restarted || ['cursorInvalid', 'cursorExpired'].includes(queueList.kind) ? queueWords.firstBatch : copy.retry}</button></div>}
     </div>}
     {queueRoute && queueList.recovered && <p className="adm-inline-message" role="status">{queueWords.recovered}</p>}
     {busy && (!queueRoute || queueList.kind !== 'loading') && <p role="status">{copy.loading}</p>}{operation.error && !(legacyQuery && operation.error === copy.unknown) && <p role="alert">{operation.error}</p>}{operation.message && <p role="status">{operation.message}</p>}
