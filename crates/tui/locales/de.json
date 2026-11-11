@@ -1140,6 +1140,7 @@
   "VoiceErrNetwork": "Sprache: Transkriptionsanfrage fehlgeschlagen",
   "VoiceErrEmptySend": "Sprache: nichts zu senden",
   "VoiceErrTooShort": "Sprache: keine Sprache erkannt, Aufnahme zu kurz",
+  "VoiceErrRecorderStalled": "Sprache: Der Recorder reagiert nicht mehr, aufgenommenes Audio wurde verworfen. Mikrofon prüfen und erneut versuchen.",
   "VoiceRecording": "🎙 Aufnahme... jetzt sprechen",
   "VoiceProcessing": "🎙 Transkribiere...",
   "VoiceTranscribed": "🎙 Transkribiert",

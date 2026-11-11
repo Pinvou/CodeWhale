@@ -25,6 +25,8 @@ export function run(cmd, args = [], opts = {}) {
     }
     let stdout = "";
     let stderr = "";
+    let stdoutBytes = 0;
+    let stderrBytes = 0;
     let stdoutTruncated = false;
     let stderrTruncated = false;
     let timedOut = false;
@@ -36,21 +38,30 @@ export function run(cmd, args = [], opts = {}) {
       setTimeout(() => { try { child.kill("SIGKILL"); } catch {} }, 1500);
     }, timeoutMs);
     child.stdout.on("data", (d) => {
-      if (stdout.length < maxBuffer) stdout += d.toString();
-      else stdoutTruncated = true;
+      if (stdoutBytes < maxBuffer) stdout += d.toString();
+      stdoutBytes += Buffer.byteLength(d);
+      if (stdoutBytes > maxBuffer) stdoutTruncated = true;
     });
     child.stderr.on("data", (d) => {
-      if (stderr.length < maxBuffer) stderr += d.toString();
-      else stderrTruncated = true;
+      if (stderrBytes < maxBuffer) stderr += d.toString();
+      stderrBytes += Buffer.byteLength(d);
+      if (stderrBytes > maxBuffer) stderrTruncated = true;
     });
+    // Cap the kept prefix to maxBuffer bytes on a UTF-8 boundary so the
+    // truncation marker's byte claim stays truthful for multi-byte output.
+    const capToBytes = (s) => {
+      let capped = Buffer.from(s, "utf8").subarray(0, maxBuffer).toString("utf8");
+      while (Buffer.byteLength(capped, "utf8") > maxBuffer) capped = capped.slice(0, -1);
+      return capped;
+    };
     const finish = (code, signal) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
       // Collection stops at maxBuffer; mark the cut so consumers know data
       // was dropped instead of mistaking the prefix for the whole output.
-      if (stdoutTruncated) stdout += `\n…[stdout truncated at ${maxBuffer} byte capture limit]`;
-      if (stderrTruncated) stderr += `\n…[stderr truncated at ${maxBuffer} byte capture limit]`;
+      if (stdoutTruncated) stdout = capToBytes(stdout) + `\n…[stdout truncated at ${maxBuffer} byte capture limit]`;
+      if (stderrTruncated) stderr = capToBytes(stderr) + `\n…[stderr truncated at ${maxBuffer} byte capture limit]`;
       resolve({ code, stdout, stderr, timedOut, signal });
     };
     child.on("error", (err) => {
