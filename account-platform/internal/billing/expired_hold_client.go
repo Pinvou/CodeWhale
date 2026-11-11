@@ -48,7 +48,7 @@ func (c *HTTPExpiredHoldProofClient) call(ctx context.Context, path string, body
 	}
 	res, err := c.client.Do(req)
 	if err != nil {
-		return errors.New("hold proof transport unavailable")
+		return safeHoldProofTransportError(err, "hold proof transport unavailable")
 	}
 	defer res.Body.Close()
 	if res.StatusCode != http.StatusOK {
@@ -59,10 +59,24 @@ func (c *HTTPExpiredHoldProofClient) call(ctx context.Context, path string, body
 		return err
 	}
 	raw, err = io.ReadAll(io.LimitReader(res.Body, 65537))
-	if err != nil || len(raw) > 65536 {
+	if err != nil {
+		return safeHoldProofTransportError(err, "hold proof response invalid")
+	}
+	if len(raw) > 65536 {
 		return errors.New("hold proof response invalid")
 	}
 	return json.Unmarshal(raw, out)
+}
+
+func safeHoldProofTransportError(err error, fallback string) error {
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		return context.DeadlineExceeded
+	case errors.Is(err, context.Canceled):
+		return context.Canceled
+	default:
+		return errors.New(fallback)
+	}
 }
 func (c *HTTPExpiredHoldProofClient) FenceExpiredHold(ctx context.Context, i ExpiredHoldIdentity) (ExpiredHoldProof, error) {
 	var p ExpiredHoldProof

@@ -81,7 +81,7 @@ class DetachedMergeAuditTests(unittest.TestCase):
 
     @unittest.skipUnless(BASH, "actual Bash is required to execute the aggregate")
     def test_failed_cancelled_missing_or_skipped_audit_blocks_pr_and_queue(self):
-        script = textwrap.dedent(self.gate.split("        run: |\n", 1)[1])
+        script = textwrap.dedent(self.gate.split("        run: |\n", 1)[1].split("\n      - ", 1)[0])
         result_names = re.findall(r"(?m)^          ([A-Z][A-Z0-9_]*_RESULT):", self.gate)
         for event in ("pull_request", "merge_group"):
             for result in ("success", "failure", "cancelled", "skipped", "timed_out", "", "queued"):
