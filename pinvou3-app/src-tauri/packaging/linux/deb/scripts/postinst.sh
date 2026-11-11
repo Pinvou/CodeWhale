@@ -1,12 +1,36 @@
 #!/bin/sh
 # pinvou3 .deb 装后处理:
-#   1) 刷新 desktop 数据库 + 图标缓存 → 应用菜单/启动器立即出现带图标的 pinvou3(免重新登录)
-#   2) 在每个真实用户桌面放一个快捷方式(Windows 习惯;Linux .deb 默认只进菜单不上桌面)
+#   1) 把真实用户加入 docker 组（模型商店引擎安装/部署的前置条件）
+#   2) 刷新 desktop 数据库 + 图标缓存
+#   3) 在每个真实用户桌面放一个快捷方式
 # 全程 best-effort,任何失败都不阻塞安装(故意不开 set -e)。
 
 APP_DESKTOP=/usr/share/applications/pinvou3.desktop
 
-# ── 1) 缓存刷新 ──────────────────────────────────────────────
+# ── 1) docker 组（最先——这是模型商店能用的前提） ────────────
+# postinst 以 root 运行,直接 usermod。幂等：已在组里的不加。
+# 此前每个客户首次下载模型都撞 "permission denied while trying to
+# connect to the docker API" → pkexec 弹窗，违背「一键部署」承诺。
+if command -v docker >/dev/null 2>&1 && getent group docker >/dev/null 2>&1; then
+  for uhome in /home/*; do
+    [ -d "$uhome" ] || continue
+    uowner=$(stat -c %U "$uhome" 2>/dev/null) || continue
+    [ -n "$uowner" ] && [ "$uowner" != "UNKNOWN" ] || continue
+    # 跳过系统用户（uid < 1000）
+    uuid=$(id -u "$uowner" 2>/dev/null) || continue
+    [ "$uuid" -ge 1000 ] 2>/dev/null || continue
+    # 幂等：不在 docker 组才加
+    if ! id -nG "$uowner" 2>/dev/null | tr ' ' '\n' | grep -qx docker; then
+      usermod -aG docker "$uowner" 2>/dev/null || true
+      echo "[pinvou3] 已将 $uowner 加入 docker 组（重新登录后模型商店可直接使用）" >&2
+    fi
+  done
+else
+  echo "[pinvou3] 注意：未检测到 docker——模型商店的引擎安装需要 docker。" >&2
+  echo "[pinvou3] 请先安装 docker 并运行：sudo usermod -aG docker <用户名>" >&2
+fi
+
+# ── 2) 缓存刷新 ──────────────────────────────────────────────
 command -v update-desktop-database >/dev/null 2>&1 && \
   update-desktop-database -q /usr/share/applications 2>/dev/null || true
 command -v gtk-update-icon-cache >/dev/null 2>&1 && \
