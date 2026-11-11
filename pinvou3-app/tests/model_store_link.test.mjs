@@ -4,12 +4,16 @@ import test from 'node:test';
 
 import {
   buildSavedModel,
+  canonicalOllamaModelName,
   checkLinkable,
   findLinkedRows,
   findCardLinkedRows,
+  findLinkedRowsForEndpoint,
+  findLinkedRowsForOllamaEndpoint,
   isLocalGatewayUrl,
   isOpenAiChatEndpoint,
   makeModelId,
+  normalizeLoopbackEndpoint,
   pickApiKey,
 } from '../src/features/model-store/pinvou-model-link.js';
 
@@ -282,5 +286,160 @@ test('endpoint_url 不指向本机的模型不许接入', () => {
   assert.equal(
     checkLinkable({ record: { ...remote, endpoint_url: 'https://evil.example.com/generate' } }).reason,
     'linkNotChatModel'
+  );
+});
+
+test('findLinkedRowsForEndpoint：同名不同端口的行互不代办（十轮评审 P2）', () => {
+  // 设备管理的外部模型：一台机器上 8000/v1 和 8001/v1 可以各挂一个 qwen3。
+  // 宽版 findLinkedRows 按“任意回环”匹配，移除 8000 的记录会把 8001 的品悟
+  // 配置一起交给 deleteModel；接入处复用首个 existingId 也会顶掉另一端。
+  const rows = [
+    { id: 'a-8000', model: 'qwen3', base_url: 'http://127.0.0.1:8000/v1' },
+    { id: 'a-8001', model: 'qwen3', base_url: 'http://127.0.0.1:8001/v1' },
+    // 规范化等价：尾斜杠、host 大小写不改变端点身份
+    { id: 'a-8000-slash', model: 'qwen3', base_url: 'http://127.0.0.1:8000/v1/' },
+    // 非回环行永远不匹配（删除侧安全网不因端点匹配而放宽）
+    { id: 'remote', model: 'qwen3', base_url: 'http://192.0.2.10:8000/v1' },
+  ];
+  assert.deepEqual(
+    findLinkedRowsForEndpoint(rows, 'http://127.0.0.1:8000/v1', 'qwen3').map((r) => r.id),
+    ['a-8000', 'a-8000-slash']
+  );
+  assert.deepEqual(
+    findLinkedRowsForEndpoint(rows, 'http://127.0.0.1:8001/v1', 'qwen3').map((r) => r.id),
+    ['a-8001']
+  );
+  // 端点缺失/不可解析：宁可返回空，不能退化回“任意回环”
+  assert.deepEqual(findLinkedRowsForEndpoint(rows, null, 'qwen3'), []);
+  assert.deepEqual(findLinkedRowsForEndpoint(rows, 'not a url', 'qwen3'), []);
+});
+
+test('normalizeLoopbackEndpoint：规范化形态稳定', () => {
+  assert.equal(normalizeLoopbackEndpoint('http://127.0.0.1:8000/v1'), 'http://127.0.0.1:8000/v1');
+  assert.equal(normalizeLoopbackEndpoint('http://127.0.0.1:8000/v1/'), 'http://127.0.0.1:8000/v1');
+  assert.equal(normalizeLoopbackEndpoint('http://LOCALHOST:11434/v1'), 'http://localhost:11434/v1');
+  assert.equal(normalizeLoopbackEndpoint('http://[::1]:11434/v1'), 'http://[::1]:11434/v1');
+  assert.equal(normalizeLoopbackEndpoint('http://127.0.0.1:8000'), 'http://127.0.0.1:8000');
+  // 显式默认端口与省略形态同身份（round-22 评审 P3 补钉）：WHATWG URL 序列化
+  // 本来就会剥掉 scheme 默认端口，这里钉住，防止未来换手工解析时悄悄分叉。
+  assert.equal(
+    normalizeLoopbackEndpoint('http://127.0.0.1:80/v1'),
+    normalizeLoopbackEndpoint('http://127.0.0.1/v1')
+  );
+  assert.deepEqual(
+    findLinkedRowsForEndpoint(
+      [{ id: 'default-port', model: 'qwen3', base_url: 'http://127.0.0.1:80/v1' }],
+      'http://127.0.0.1/v1',
+      'qwen3',
+    ).map((r) => r.id),
+    ['default-port']
+  );
+  // query 原样参与身份（十一轮评审 P2）；fragment 不发往服务端，不参与。
+  assert.equal(
+    normalizeLoopbackEndpoint('http://127.0.0.1:8000/v1?tenant=a'),
+    'http://127.0.0.1:8000/v1?tenant=a'
+  );
+  assert.equal(normalizeLoopbackEndpoint('http://127.0.0.1:8000/v1#f'), 'http://127.0.0.1:8000/v1');
+  assert.equal(normalizeLoopbackEndpoint(null), null);
+  assert.equal(normalizeLoopbackEndpoint(42), null);
+});
+
+test('findLinkedRowsForEndpoint：query 不同的端点互不代办（十一轮评审 P2）', () => {
+  // 登记校验与探测 URL（Rust endpoint_models_url）都保留 query，vLLM 等服务
+  // 靠它路由租户，所以 `?tenant=a` 与 `?tenant=b` 是两份独立配置。接入复用
+  // （linkExternal 取 [0] 当 existingId）与移除回收（confirmRemove 的
+  // linkedRows 全部 deleteModel）都走本函数：静默合并会顶掉/删掉另一份。
+  const rows = [
+    { id: 'row-a', model: 'qwen3', base_url: 'http://127.0.0.1:8000/v1?tenant=a' },
+    { id: 'row-b', model: 'qwen3', base_url: 'http://127.0.0.1:8000/v1?tenant=b' },
+  ];
+  // 从 b 接入只复用 b 自己的行，不得顶掉 a 的配置；从 a 接入同理（回收侧
+  // 同一调用形状：回收 a 的记录不得把 b 的行交给 deleteModel）。
+  assert.deepEqual(
+    findLinkedRowsForEndpoint(rows, 'http://127.0.0.1:8000/v1?tenant=b', 'qwen3').map((r) => r.id),
+    ['row-b']
+  );
+  assert.deepEqual(
+    findLinkedRowsForEndpoint(rows, 'http://127.0.0.1:8000/v1?tenant=a', 'qwen3').map((r) => r.id),
+    ['row-a']
+  );
+  // 不带 query 的目标是第三种身份，谁都不匹配——宁漏不误删。
+  assert.deepEqual(findLinkedRowsForEndpoint(rows, 'http://127.0.0.1:8000/v1', 'qwen3'), []);
+});
+
+test('canonicalOllamaModelName：与后端 ollama_canonical_name 同一把尺子（三十二轮评审 P2）', () => {
+  // 裸名补 :latest；显式 tag 原样；整体小写折叠（ollama_name_matches 口径）。
+  assert.equal(canonicalOllamaModelName('qwen3'), 'qwen3:latest');
+  assert.equal(canonicalOllamaModelName('qwen3:latest'), 'qwen3:latest');
+  assert.equal(canonicalOllamaModelName('Qwen3:8B'), 'qwen3:8b');
+  // 显式非 latest tag 是身份，不改写。
+  assert.equal(canonicalOllamaModelName('qwen3:30b'), 'qwen3:30b');
+  // registry 形如 host:port/ns/model：主机端口不算 tag。
+  assert.equal(canonicalOllamaModelName('host:5000/ns/qwen3'), 'host:5000/ns/qwen3:latest');
+  // 空值收敛为空串（不参与命中）。
+  assert.equal(canonicalOllamaModelName(''), '');
+  assert.equal(canonicalOllamaModelName('   '), '');
+  assert.equal(canonicalOllamaModelName(null), '');
+  assert.equal(canonicalOllamaModelName(undefined), '');
+  assert.equal(canonicalOllamaModelName(42), '');
+});
+
+test('findLinkedRowsForOllamaEndpoint：裸名登记与 :latest 接入行同一身份（三十二轮评审 P2）', () => {
+  // 生产序列：qwen3 先以 daemon 的 qwen3:latest 接入（saved 行存原串），
+  // 随后合法登记有效 model=qwen3（裸名）。后端把两者判为同一模型（注册行
+  // 可替代 daemon 行），接入/回收却按原串比较——匹配数变 0，页面误显未接入、
+  // 重接创建重复配置，移除后旧行还可能作为默认模型指向已删对象。
+  const rows = [
+    { id: 'saved-latest', model: 'qwen3:latest', base_url: 'http://127.0.0.1:11434/v1' },
+    { id: 'saved-bare', model: 'qwen3', base_url: 'http://127.0.0.1:11434/v1' },
+  ];
+  // 裸名目标命中 :latest 行（旧行为漏掉的全部场景），反之亦然。
+  assert.deepEqual(
+    findLinkedRowsForOllamaEndpoint(rows, 'http://127.0.0.1:11434/v1', 'qwen3').map((r) => r.id),
+    ['saved-latest', 'saved-bare']
+  );
+  assert.deepEqual(
+    findLinkedRowsForOllamaEndpoint(rows, 'http://127.0.0.1:11434/v1', 'qwen3:latest').map(
+      (r) => r.id
+    ),
+    ['saved-latest', 'saved-bare']
+  );
+  // 大小写折叠与后端同口径。
+  assert.deepEqual(
+    findLinkedRowsForOllamaEndpoint(rows, 'http://127.0.0.1:11434/v1', 'Qwen3').map((r) => r.id),
+    ['saved-latest', 'saved-bare']
+  );
+});
+
+test('findLinkedRowsForOllamaEndpoint：显式 tag/端点/非 Ollama 区别一律保留', () => {
+  const rows = [
+    { id: 'tag-8b', model: 'qwen3:8b', base_url: 'http://127.0.0.1:11434/v1' },
+    { id: 'tag-30b', model: 'qwen3:30b', base_url: 'http://127.0.0.1:11434/v1' },
+    { id: 'other-port', model: 'qwen3:latest', base_url: 'http://127.0.0.1:11435/v1' },
+  ];
+  // 显式 tag 是身份：latest 目标不吃掉 8b/30b 行。
+  assert.deepEqual(
+    findLinkedRowsForOllamaEndpoint(rows, 'http://127.0.0.1:11434/v1', 'qwen3').map((r) => r.id),
+    []
+  );
+  assert.deepEqual(
+    findLinkedRowsForOllamaEndpoint(rows, 'http://127.0.0.1:11434/v1', 'qwen3:8b').map((r) => r.id),
+    ['tag-8b']
+  );
+  // 端点仍是第二身份元：11435 的行不替 11434 的目标代办。
+  assert.deepEqual(
+    findLinkedRowsForOllamaEndpoint(rows, 'http://127.0.0.1:11435/v1', 'qwen3:latest').map(
+      (r) => r.id
+    ),
+    ['other-port']
+  );
+  // 非 Ollama 模型继续用原串版：裸名与带 tag 名就是两个不同的模型字符串。
+  assert.deepEqual(
+    findLinkedRowsForEndpoint(
+      [{ id: 'vllm-bare', model: 'qwen3', base_url: 'http://127.0.0.1:8000/v1' }],
+      'http://127.0.0.1:8000/v1',
+      'qwen3:latest'
+    ),
+    []
   );
 });

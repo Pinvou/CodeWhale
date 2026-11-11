@@ -10,6 +10,7 @@ pub(super) use download_lease::{
     BUSY as DOWNLOAD_STILL_RUNNING, DownloadLease, acquire as acquire_download_lease,
     try_acquire as try_download_lease,
 };
+pub(super) use downloads::active_download_roots;
 pub use downloads::{DownloadReservation, download_paths};
 
 pub(super) fn retire_download_on(conn: &rusqlite::Connection, card_id: &str) -> Result<(), String> {
@@ -64,6 +65,21 @@ fn try_resource_lock(lock: &std::fs::File, exclusive: bool) -> Result<(), std::f
         lock.try_lock()
     } else {
         lock.try_lock_shared()
+    }
+}
+
+/// Device deletion must use the identical inode as store shared operations.
+/// Admission is immediate: a busy store operation never parks an async request
+/// or waits while the caller holds settings/database guards.
+pub(super) fn try_exclusive_resource_operation_lock() -> Result<std::fs::File, String> {
+    let lock = operation_lock_file("version-operations.lock")
+        .map_err(|error| format!("model_store_weight_removal_lock_failed: {error}"))?;
+    match try_resource_lock(&lock, true) {
+        Ok(()) => Ok(lock),
+        Err(std::fs::TryLockError::WouldBlock) => Err("model_store_weight_removal_busy".into()),
+        Err(std::fs::TryLockError::Error(error)) => {
+            Err(format!("model_store_weight_removal_lock_failed: {error}"))
+        }
     }
 }
 

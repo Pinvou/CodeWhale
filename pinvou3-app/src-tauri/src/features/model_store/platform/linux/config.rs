@@ -144,6 +144,42 @@ pub struct Settings {
     #[serde(default)]
     pub import_scan_dirs: Vec<String>,
 
+    /// 历史上用过的权重目录（`set_storage_settings` 换目录时把旧值记进来）。
+    ///
+    /// 为什么必须留痕：改权重目录**不搬运已下载的权重**（见
+    /// `set_storage_settings` 的注释），老目录下的模型在商店库里仍然记着——
+    /// 它们依旧是商店管理的权重，只是换目录那一刻起不再位于当前 `models_dir`。
+    /// 设备管理的外部模型移除守卫按"商店权重根"拒绝删除（boundary.rs），不把
+    /// 历史目录算进去的话，改过目录的机器上旧根就处于无保护状态。只留最近
+    /// [`MAX_MODELS_DIR_HISTORY`] 个，足够覆盖正常使用（换盘不频繁），又不让
+    /// 手改配置的脏数据无限堆积。
+    ///
+    /// 已知边界（第七轮评审 P3 披露）：留痕只发生在 `set_storage_settings`。
+    /// 绕过设置页、直接手改本配置文件的 `models_dir` 不会触发留痕，旧根在
+    /// 下次经设置页保存前不进保护集合——此时在册模型仍受名字臂保护，只是
+    /// 路径臂不覆盖旧根。
+    #[serde(default)]
+    pub models_dir_history: Vec<String>,
+
+    /// 历史上挂过、后来从设置里移除的补充扫描目录。
+    ///
+    /// 为什么必须留痕：下载脚本会在扫描目录里**就地复用**已存在的权重（复用
+    /// 不搬家，商店在册权重可能就落在里面），而权重的实际落点由卡片脚本自己
+    /// 决定、宿主无从枚举「哪些文件仍被已安装卡片引用」——保护只能取保守
+    /// 超集。扫描目录一旦挂过，目录里的既有权重就可能被某张在册卡片以原路径
+    /// 引用；把它从设置里移除的那一刻起，若不留痕，目录立即脱出商店权重根
+    /// 集合（boundary.rs），设备管理「名称不同的外部模型记录 + 删除权重」
+    /// 就能把仍在使用的唯一副本连目录删掉（2026-11-04 评审 P2：评审者以隔离
+    /// 探针实证守卫在设置变更前拦截、变更后放行）。与 `models_dir_history`
+    /// 同一先例：移除不等于脱管，曾经扫过的目录永久留在保护集合里。
+    ///
+    /// 已知边界（与上方 `models_dir_history` 同一条披露）：留痕只发生在
+    /// `set_storage_settings`；手改配置文件移除扫描目录不触发留痕。另见
+    /// 容量取舍：超出 [`MAX_IMPORT_SCAN_DIRS_HISTORY`] 的最老根被挤出后
+    /// 脱出保护集合，在册模型只剩名字臂。
+    #[serde(default)]
+    pub import_scan_dirs_history: Vec<String>,
+
     /// 测试模型商店是否开着。
     ///
     /// 入口是隐藏的：在模型商店页面连点标题 7 次（相邻两次间隔不超过 1.5 秒）弹出
@@ -175,12 +211,23 @@ impl Default for Settings {
             gateway_port: 8090,
             max_concurrent_downloads: 1,
             import_scan_dirs: Vec::new(),
+            import_scan_dirs_history: Vec::new(),
+            models_dir_history: Vec::new(),
             test_mode_enabled: false,
         }
     }
 }
 
 pub const HF_ENDPOINT_PRESETS: &[&str] = &["https://huggingface.co", "https://hf-mirror.com"];
+
+/// `models_dir_history` 的保留上限。换权重目录不是高频操作，16 个足够覆盖
+/// "换盘—换回—再换"的正常弧线；超出后丢最老的。
+pub const MAX_MODELS_DIR_HISTORY: usize = 16;
+
+/// `import_scan_dirs_history` 的保留上限。与 [`MAX_MODELS_DIR_HISTORY`] 同一
+/// 量级：增删扫描目录同样是低频设置操作，16 个足够覆盖正常弧线；超出后丢
+/// 最老的（被挤出的根脱出权重保护集合，属既定容量取舍，见字段注释）。
+pub const MAX_IMPORT_SCAN_DIRS_HISTORY: usize = 16;
 
 impl Settings {
     /// 夹到 1..=3。配置文件可能被手改成 0（那样谁都下不了）或者 99，不能信。
@@ -210,6 +257,12 @@ impl Settings {
 /// 一直"连不上"——而且报错里看不出任何线索。
 const LEGACY_DEFAULT_STORE_URLS: &[&str] = &["http://47.120.8.237/model-store"];
 
+/// 隔离留存的落点：`config.json` → `config.json.bad`。读取端据此区分"全新安装"
+/// 和"上一拍刚隔离改名"——两者在原文件上都表现为 NotFound。
+fn quarantine_bad_path(cfg_file: &Path) -> PathBuf {
+    cfg_file.with_extension("json.bad")
+}
+
 /// 解析不了的配置文件改名留存成 `config.json.bad`，再回退默认值。
 ///
 /// **不能静默**，理由跟 `write_token_fallback` 那条一样，后果还更重：
@@ -222,8 +275,15 @@ const LEGACY_DEFAULT_STORE_URLS: &[&str] = &["http://47.120.8.237/model-store"];
 /// 所以坏文件先改名留在原地：至少还能手工把值抄回来，排查的人在日志里也看得见。
 /// 只留最近一份（`.bad` 已存在时 rename 直接覆盖）——这种文件不该攒成一堆，
 /// 真要看的也是刚坏掉的那一份。
+///
+/// 留存文件同时也是 [`try_load_settings`] 的隔离标记：原文件改名后，后续读取在
+/// 文件系统里看到的就是"缺失"，破坏性消费方必须凭这份残留继续 fail-closed，
+/// 而不是把保护范围未知的半拍当成全新安装（十六轮评审 P1）。写端同一口径：
+/// [`update_settings`] 以严格读取为闸门，读不过去的态（缺失+留存、在但不可读、
+/// 解析坏）一律拒绝普通保存，防止宽松读取的默认值被固化成合法配置、把读端的
+/// fail-closed 洗掉（二十六/二十七轮评审 P1）。
 fn quarantine_broken_config(cfg_file: &Path, reason: &str) {
-    let bad = cfg_file.with_extension("json.bad");
+    let bad = quarantine_bad_path(cfg_file);
     match fs::rename(cfg_file, &bad) {
         Ok(()) => eprintln!(
             "[model-store] 配置文件{reason}，已改名留存为 {}，本次回退默认设置",
@@ -271,14 +331,23 @@ fn normalize_settings(mut settings: Settings) -> Settings {
 
 /// Strict fresh read while the caller holds settings_lock. Writers must not
 /// turn read/parse failures into a replacement configuration.
-fn read_settings_unlocked() -> std::io::Result<Settings> {
-    let settings = match fs::read_to_string(config_file()) {
-        Ok(text) => serde_json::from_str::<Settings>(&text)
-            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => missing_settings_default(),
+fn read_settings_snapshot_unlocked() -> std::io::Result<(Settings, bool)> {
+    let (settings, missing) = match read_config_text(&config_file()) {
+        Ok(text) => (
+            serde_json::from_str::<Settings>(&text)
+                .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?,
+            false,
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            (missing_settings_default(), true)
+        }
         Err(error) => return Err(error),
     };
-    Ok(normalize_settings(settings))
+    Ok((normalize_settings(settings), missing))
+}
+
+fn read_settings_unlocked() -> std::io::Result<Settings> {
+    read_settings_snapshot_unlocked().map(|(settings, _)| settings)
 }
 
 pub fn load_settings() -> Settings {
@@ -317,14 +386,87 @@ pub fn read_settings() -> Result<Settings, String> {
     read_settings_unlocked().map_err(|error| format!("读取模型商店设置失败：{error}"))
 }
 
+/// 配置文本的唯一读取口。生产上就是 [`fs::read_to_string`]。
+///
+/// 抽出来只有一个理由：测试要能注入**瞬态**读取失败（见下方
+/// `arm_transient_read_failure`）。权限位（mode 000）构造不出「同一拍里首读
+/// 失败、保存端重读已恢复」的时序——权限失败到重读时仍在；而 fd 耗尽（EMFILE）、
+/// 一拍 EIO 这类真实瞬态故障恰恰是"过一下自己就好了"。二十八轮评审 P1 的回归
+/// 需要能受控地打出这个时序。
+fn read_config_text(cfg_file: &Path) -> std::io::Result<String> {
+    #[cfg(test)]
+    {
+        let left = TEST_TRANSIENT_READ_FAILURES.load(std::sync::atomic::Ordering::Relaxed);
+        if left > 0 {
+            TEST_TRANSIENT_READ_FAILURES.store(left - 1, std::sync::atomic::Ordering::Relaxed);
+            // 错误类别只要不是 NotFound 就会走 `try_load_settings` 的"读取失败"
+            // 分支（报错、不隔离）——正是瞬态 I/O 故障的形态。
+            return Err(std::io::Error::other("注入的瞬态读取失败（测试）"));
+        }
+    }
+    fs::read_to_string(cfg_file)
+}
+
+/// 注入接下来 `times` 次配置读取的瞬态失败。仅测试存在（`#[cfg(test)]`），
+/// 由 `TempHome` 的全局测试锁串行化，计数器无并发竞争。
+#[cfg(test)]
+pub fn arm_transient_read_failure(times: usize) {
+    TEST_TRANSIENT_READ_FAILURES.store(times, std::sync::atomic::Ordering::Relaxed);
+}
+
+#[cfg(test)]
+static TEST_TRANSIENT_READ_FAILURES: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// Destructive device-boundary queries and every production settings patch
+/// require known settings roots. Missing config plus a quarantine marker is not
+/// a fresh install, even when the patch explicitly enables automatic checks.
+/// A valid restored config takes precedence over the retained backup. Removing
+/// the backup is an explicit manual abandonment, never a settings-save effect.
+/// The unlocked helper's caller already owns the single configuration lock.
+fn try_load_settings_unlocked() -> Result<Settings, String> {
+    let cfg_file = config_file();
+    match read_settings_snapshot_unlocked() {
+        Ok((settings, missing)) => {
+            if missing {
+                let bad = quarantine_bad_path(&cfg_file);
+                match fs::symlink_metadata(&bad) {
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
+                    _ => {
+                        return Err(format!(
+                            "配置文件缺失，但此前读取失败的隔离留存 {} 仍在或无法确认：自定义设置（如权重目录）的保护范围未知。请恢复配置文件，或确认放弃后删除该留存文件",
+                            bad.display()
+                        ));
+                    }
+                }
+            }
+            Ok(settings)
+        }
+        Err(error) => {
+            if error.kind() == std::io::ErrorKind::InvalidData {
+                quarantine_broken_config(&cfg_file, "解析失败");
+            }
+            Err(format!("配置文件读取失败：{error}"))
+        }
+    }
+}
+
+pub fn try_load_settings() -> Result<Settings, String> {
+    let _lock = settings_lock().map_err(|error| format!("读取模型商店设置失败：{error}"))?;
+    try_load_settings_unlocked()
+}
+
 /// One domain transaction for all production settings patches. Waiting writers
 /// reread after acquiring the cross-process lock; None fields retain that value.
+/// Failed reads never run the patch or publish defaults. A parse failure may
+/// quarantine the original bytes under this same lock, preserving main's
+/// recovery contract without a second settings read before writing.
 pub fn update_settings(
     patch: impl FnOnce(&mut Settings) -> Result<(), String>,
 ) -> Result<Settings, String> {
     let _lock = settings_lock().map_err(|error| format!("锁定模型商店设置失败：{error}"))?;
-    let mut settings =
-        read_settings_unlocked().map_err(|error| format!("读取模型商店设置失败：{error}"))?;
+    let mut settings = try_load_settings_unlocked()
+        .map_err(|error| format!("读取当前配置失败，未做任何修改：{error}"))?;
     patch(&mut settings)?;
     write_settings_unlocked(&settings).map_err(|error| format!("保存设置失败：{error}"))?;
     Ok(settings)
@@ -346,6 +488,9 @@ pub fn update_settings(
 #[cfg(test)]
 pub fn save_settings(settings: &Settings) -> std::io::Result<()> {
     let _lock = settings_lock()?;
+    try_load_settings_unlocked().map_err(|reason| std::io::Error::other(format!(
+        "普通保存被拒绝：当前配置严格读取失败（{reason}）——请先恢复有效配置，或确认放弃后清理隔离留存再重试",
+    )))?;
     write_settings_unlocked(settings)
 }
 
@@ -697,6 +842,167 @@ mod tests {
             kept.contains("192.0.2.10"),
             "留存的必须是原样内容，用户还指着它把值抄回来：{kept}"
         );
+    }
+
+    /// 隔离态下普通保存必须被拒绝（二十六轮评审 P1）：普通 setter 走宽松读取
+    /// 拿到默认值再整体写回——放行的话，一次与删除无关的开关切换就把默认值
+    /// 固化成合法 `config.json`，此后严格读取走"合法 JSON"分支接受它，隔离留存
+    /// 里未知的自定义 `models_dir` 保护整个失效（写端把读端的 fail-closed 洗掉）。
+    /// 回归场景即评审点名的三拍：隔离 → 普通 toggle/save → 严格查询仍拒绝。
+    #[test]
+    fn quarantined_config_blocks_plain_save_until_resolved() {
+        let _home = TempHome::new();
+        let path = config_file();
+
+        // 第一拍：带自定义权重目录的合法配置损坏被隔离（与现有隔离测试同一坏法）。
+        std::fs::write(
+            &path,
+            r#"{"store_url": "http://192.0.2.10:8088", "models_dir": "/home/u/ai/shared/weights", "gateway_port": "不是数字"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            load_settings().store_url,
+            Settings::default().store_url,
+            "坏文件应当回退到默认值"
+        );
+        let bad = path.with_extension("json.bad");
+        assert!(bad.exists(), "坏文件应已隔离留存");
+        assert!(!path.exists(), "原文件应已改名让位");
+
+        // 第二拍：写端闸门（纵深防御）。生产 setter 的首读现在就走严格读取、
+        // 还没到保存就会报错（二十八轮评审 P1）；本拍打的是首读之后、落盘之前
+        // 配置才进入本态的窗口——`save_settings` 自己的严格重读必须兜住，不能
+        // 把宽松口径的默认值固化成合法配置。
+        let mut toggled = load_settings();
+        toggled.test_mode_enabled = true;
+        let error = save_settings(&toggled).expect_err("隔离态普通保存必须被拒绝");
+        assert!(
+            error.to_string().contains("隔离留存"),
+            "报错应指明隔离留存与出路：{error}"
+        );
+        assert!(
+            !path.exists(),
+            "被拒的保存不得留下半截产物（合法 config.json 会洗掉 fail-closed）"
+        );
+        let kept = std::fs::read_to_string(&bad).expect("隔离留存必须原样保留");
+        assert!(
+            kept.contains("/home/u/ai/shared/weights"),
+            "留存内容不得被改动：{kept}"
+        );
+
+        // 第三拍：严格查询仍拒绝——写端被拒后，保护范围未知的判定没有变化。
+        assert!(
+            try_load_settings().is_err(),
+            "隔离态下严格读取必须继续 fail-closed"
+        );
+        let roots = crate::features::model_store::store_weights_roots_checked();
+        assert!(roots.is_err(), "破坏性消费方的权重根查询同样必须继续拒绝");
+
+        // 对照流程 1：显式恢复（用户把留存修好放回原位）→ 保存放行、严格读取
+        // 接受；历史留存不永久阻断已恢复的有效配置。
+        std::fs::write(
+            &path,
+            r#"{"store_url": "http://192.0.2.10:8088", "models_dir": "/home/u/ai/shared/weights"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            try_load_settings()
+                .expect("显式恢复后严格读取应接受")
+                .models_dir,
+            "/home/u/ai/shared/weights"
+        );
+        save_settings(&toggled).expect("显式恢复后普通保存放行");
+
+        // 对照流程 2：显式放弃（确认不要旧配置，删掉新配置与历史留存）→ 回到
+        // "配置缺失、无留存"的全新安装态 → 保存放行并建立新配置，严格读取从此
+        // 接受。
+        std::fs::remove_file(&path).expect("remove config");
+        std::fs::remove_file(&bad).expect("abandon quarantine leftover");
+        let mut fresh = load_settings();
+        fresh.test_mode_enabled = true;
+        save_settings(&fresh).expect("显式放弃残留后普通保存放行");
+        assert!(
+            try_load_settings().is_ok(),
+            "显式放弃后严格读取不应再被阻断"
+        );
+    }
+
+    /// 不可读的配置同样挡住普通保存（二十七轮评审 P1）：config.json 在但读不出
+    /// 来（如 mode 000）时，严格读取走"读取失败"分支报错且**不**隔离——留存不
+    /// 存在，"缺失+留存"的旧判断为 false；宽松 setter 拿到默认值后整体写回，
+    /// 父目录可写就能 rename 覆盖掉读不出来的原文件（rename(2) 不要求读被替换
+    /// 文件），下一拍严格读取接受合法默认 JSON，原配置里未知的保护范围就此被
+    /// 洗掉。回归场景即评审点名的三拍：不可读 → 普通 toggle/save → 严格保护
+    /// 仍拒绝——不能只覆盖成功隔离后的 missing+.bad 分支。
+    #[test]
+    fn unreadable_config_blocks_plain_save_until_resolved() {
+        let _home = TempHome::new();
+        let path = config_file();
+
+        // 第一拍：带自定义权重目录的合法配置落盘，随后对属主收走读权限——文件
+        // 还在、内容未知（比如被同机其他用户或备份工具误伤）。
+        std::fs::write(
+            &path,
+            r#"{"store_url": "http://192.0.2.10:8088", "models_dir": "/home/u/ai/shared/weights"}"#,
+        )
+        .unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mut perm = fs::metadata(&path).unwrap().permissions();
+            perm.set_mode(0o000);
+            fs::set_permissions(&path, perm).unwrap();
+        }
+        assert!(try_load_settings().is_err(), "不可读必须让严格读取拒绝");
+        assert!(path.exists(), "读取失败分支不得改名留存");
+        assert!(
+            !quarantine_bad_path(&path).exists(),
+            "不可读分支不产生隔离留存"
+        );
+
+        // 第二拍：写端闸门（纵深防御，框架同隔离测试的第二拍）：生产 setter 的
+        // 首读走严格读取在这里之前就报错；本拍钉住 `save_settings` 自己的严格
+        // 重读兜住首读之后才变坏的窗口。宽松读取拿到默认值，保存必须被拒，
+        // 而不是 rename 覆盖掉读不出来的原文件。
+        let mut toggled = load_settings();
+        toggled.test_mode_enabled = true;
+        let error = save_settings(&toggled).expect_err("不可读配置的普通保存必须被拒绝");
+        assert!(
+            error.to_string().contains("严格读取失败"),
+            "报错应说明写端闸门来自严格读取：{error}"
+        );
+        assert!(
+            path.exists(),
+            "被拒的保存不得动原文件：文件被覆盖就是不可恢复的重置"
+        );
+
+        // 第三拍：严格保护仍拒绝——写端被拒后，保护范围未知的判定没有变化。
+        assert!(try_load_settings().is_err());
+        let roots = crate::features::model_store::store_weights_roots_checked();
+        assert!(roots.is_err(), "破坏性消费方的权重根查询同样必须继续拒绝");
+
+        // 对照：用户修复权限（显式恢复可读）→ 严格读取接受原配置；普通 setter
+        // 从此按真实设置正常工作，写回的不丢自定义 models_dir。
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mut perm = fs::metadata(&path).unwrap().permissions();
+            perm.set_mode(0o600);
+            fs::set_permissions(&path, perm).unwrap();
+        }
+        assert_eq!(
+            try_load_settings()
+                .expect("权限修复后严格读取应接受")
+                .models_dir,
+            "/home/u/ai/shared/weights"
+        );
+        let mut recovered = load_settings();
+        recovered.test_mode_enabled = true;
+        save_settings(&recovered).expect("权限修复后普通保存放行");
+        let restored = try_load_settings().expect("写回后仍可读");
+        assert_eq!(
+            restored.models_dir, "/home/u/ai/shared/weights",
+            "放行的保存写回的是真实设置，不是默认值"
+        );
+        assert!(restored.test_mode_enabled, "setter 的改动要落进新配置");
     }
 
     #[test]
