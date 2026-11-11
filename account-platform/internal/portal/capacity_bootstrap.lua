@@ -19,7 +19,10 @@ local page = redis.call('SCAN', cursor, 'MATCH', prefix..'*', 'COUNT', 128)
 -- COUNT is a Redis hint. Refuse an oversized page instead of unbounded work
 -- or advancing the cursor past unprocessed original objects.
 if #page[2] > 512 then error('PORTAL_INVENTORY_PAGE_TOO_LARGE') end
-for _, key in ipairs(page[2]) do need('PEXPIRETIME', key) end
+for _, key in ipairs(page[2]) do
+  expect(key, 'string')
+  need('PEXPIRETIME', key)
+end
 local now = milliseconds()
 local last = redis.call('ZREVRANGE', index, 0, 0, 'WITHSCORES')
 local latest = tonumber(last[2]) or 0

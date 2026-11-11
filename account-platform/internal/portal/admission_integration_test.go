@@ -437,7 +437,9 @@ func TestRealRedisPortalSharedAdmissionAndCapacity(t *testing.T) {
 		options := *a.transientClient.Options()
 		// go-redis normalizes disabled retries to zero in Options(); a fresh
 		// NewClient needs the explicit -1 input again.
-		options.MaxRetries = -1
+		if options.MaxRetries == 0 {
+			options.MaxRetries = -1
+		}
 		a.transientClient.Close()
 		var target atomic.Value
 		target.Store("")
@@ -524,6 +526,94 @@ func TestRealRedisPortalSharedAdmissionAndCapacity(t *testing.T) {
 		case <-done:
 		case <-time.After(time.Second):
 			t.Fatal("worker did not drain")
+		}
+	})
+
+	t.Run("PersonalProductionACLServesAllFourAdmissionAndCapacityOperations", func(t *testing.T) {
+		a, b, admin := capacityScenario(t, DefaultAdmissionLimits())
+		installOwnedPortalFixtureACL(t, admin, "redis-personal.acl.template")
+		defer installOwnedPortalFixtureACL(t, admin, "redis-accounts.acl.template")
+		for _, operation := range []PortalOperation{LoginStartOperation, LoginCallbackOperation, HandoffCreateOperation, HandoffConsumeOperation} {
+			if e := a.AdmitOperation(ctx, operation); e != nil {
+				t.Fatal("published personal actor cannot admit operation", operation, e)
+			}
+		}
+		flow := LoginFlow{Verifier: "personal-original", ExpiresAt: time.Now().Add(time.Minute)}
+		if e := a.SaveFlow(ctx, "personal-flow", flow); e != nil {
+			t.Fatal(e)
+		}
+		got, e := b.TakeFlow(ctx, "personal-flow")
+		if e != nil || got.Verifier != flow.Verifier {
+			t.Fatal("personal flow consumption failed", e)
+		}
+		if e = a.ReserveSessionHandoff(ctx, "personal-handoff", time.Now().Add(time.Minute)); e != nil {
+			t.Fatal(e)
+		}
+		if e = b.SaveSessionHandoff(ctx, "personal-handoff", SessionHandoff{Session: validSession("personal-browser"), ExpiresAt: time.Now().Add(30 * time.Second)}); e != nil {
+			t.Fatal(e)
+		}
+		if e = a.ReleaseSessionHandoffReservation(ctx, "personal-handoff"); e != nil {
+			t.Fatal(e)
+		}
+		if _, e = a.TakeSessionHandoff(ctx, "personal-handoff"); e != nil {
+			t.Fatal(e)
+		}
+		if _, _, e = a.transientClient.Scan(ctx, 0, "*", 1).Result(); e == nil {
+			t.Fatal("personal actor gained enumeration")
+		}
+		service := testService(t, a)
+		w := httptest.NewRecorder()
+		service.Handler(http.NotFoundHandler()).ServeHTTP(w, httptest.NewRequest("GET", "/", nil))
+		if w.Code != 302 {
+			t.Fatal("personal public root login failed", w.Code)
+		}
+	})
+	t.Run("WrongTypeLegacyObjectsFailInventoryWithoutMutation", func(t *testing.T) {
+		_, _, admin := capacityScenario(t, DefaultAdmissionLimits())
+		ops, e := NewRedisStore(osFixtureURL())
+		if e != nil {
+			t.Fatal(e)
+		}
+		defer ops.Close()
+		for _, kind := range []transientKind{flowTransient, handoffTransient} {
+			for _, shape := range []string{"list", "hash"} {
+				key := transientPrefix(kind) + "wrong-type"
+				if e = admin.Del(ctx, transientInventory(kind)).Err(); e != nil {
+					t.Fatal(e)
+				}
+				if shape == "list" {
+					e = admin.LPush(ctx, key, "original").Err()
+				} else {
+					e = admin.HSet(ctx, key, "original", "evidence").Err()
+				}
+				if e != nil {
+					t.Fatal(e)
+				}
+				if e = admin.PExpire(ctx, key, time.Minute).Err(); e != nil {
+					t.Fatal(e)
+				}
+				deadline, e := admin.PExpireTime(ctx, key).Result()
+				if e != nil {
+					t.Fatal(e)
+				}
+				if e = ops.InventoryTransientCapacity(ctx); e == nil {
+					t.Fatal("wrong-type original marked ready", kind, shape)
+				}
+				actual, e := admin.Type(ctx, key).Result()
+				if e != nil || actual != shape {
+					t.Fatal("original type mutated", e)
+				}
+				after, e := admin.PExpireTime(ctx, key).Result()
+				if e != nil || after != deadline {
+					t.Fatal("original TTL mutated", e)
+				}
+				if ready, _ := admin.HGet(ctx, transientInventory(kind), "ready").Result(); ready == "1" {
+					t.Fatal("wrong type falsely marked ready")
+				}
+				if e = admin.Del(ctx, key).Err(); e != nil {
+					t.Fatal(e)
+				}
+			}
 		}
 	})
 

@@ -31,6 +31,8 @@ CAPACITY_CASES = {
     'PhysicalOOMPreservesAcceptedObjectsAndDeletionRecovery',
     'PublicRoutersRejectBeforeConsumingOriginalObjects', 'UnknownSaveAndConsumptionRepliesAreNotAutomaticallyRetried',
     'BackgroundInventoryProgressesAndStops',
+    'PersonalProductionACLServesAllFourAdmissionAndCapacityOperations',
+    'WrongTypeLegacyObjectsFailInventoryWithoutMutation',
 }
 
 
@@ -48,6 +50,9 @@ def verify(events):
         if not name and action == 'pass':
             packages += 1
     expected = ROOTS | {'TestRealRedisPortalSharedAdmissionAndCapacity/' + name for name in CAPACITY_CASES}
+    actual_roots = {name for name in ran if '/' not in name}
+    if actual_roots != ROOTS:
+        raise ValueError('unregistered or missing Portal Redis roots')
     missing = expected - (passed & ran)
     if missing or failures or packages != 1:
         raise ValueError('Portal Redis execution incomplete: missing=' + ','.join(sorted(missing)) + '; failures=' + ','.join(failures))

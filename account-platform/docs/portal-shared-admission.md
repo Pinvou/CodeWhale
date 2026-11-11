@@ -1,6 +1,6 @@
 # Portal 跨实例准入、容量与首次接管
 
-本说明适用于 `token-portal` 和 Redis 8.2 standalone、数据库 0、`noeviction`。生产配置见 `deploy/production/redis.conf` 和 `redis-accounts.acl.template`。不支持 Redis Cluster 的跨槽脚本。不得用淘汰登录票据的策略释放空间。
+本说明适用于 `token-portal` 和 Redis 8.2 standalone、数据库 0、`noeviction`。生产配置见 `deploy/production/redis.conf` 和 `redis-accounts.acl.template`（个人部署采用 `redis-personal.acl.template`）。不支持 Redis Cluster 的跨槽脚本。不得用淘汰登录票据的策略释放空间。
 
 ## 站点配置
 
@@ -13,7 +13,7 @@
 
 `/auth/login`（包括强制登录及未登录首页跳转）、`/auth/callback`、`POST /portal-session-handoff`、`POST /portal-session-handoff/consume` 分别使用一个所有实例共享的令牌桶。四类互不借用突发额度；不按 IP、用户或请求标识创建限流键。既有 HTTP 按进程限制继续生效。这里的默认值已按全站总量确认，不能按副本数相乘。
 
-Compose 的 `.env.example` 和 Helm 的 `portal.operationRps`、`operationBurst`、`loginFlowCapacity`、`sessionHandoffCapacity` 对应上述变量。所有副本必须一致。改变配置时先停止旧副本并排空在途操作，再按同一组值启动新副本；不支持不同策略的滚动混用。旧令牌桶存活期间不匹配的策略返回 503，不覆盖旧桶。等待旧桶自然到期后可继续；桶到期时间是 `max(1 秒, burst/rps 秒)`，极端配置可能等待较久。不得手工删除活动票据或清空 Redis。
+开发 Compose 的 `.env.example`、生产个人 Compose 的站点插值环境 和 Helm 的 `portal.operationRps`、`operationBurst`、`loginFlowCapacity`、`sessionHandoffCapacity` 对应上述变量。所有副本必须一致。改变配置时先停止旧副本并排空在途操作，再按同一组值启动新副本；不支持不同策略的滚动混用。旧令牌桶存活期间不匹配的策略返回 503，不覆盖旧桶。等待旧桶自然到期后可继续；桶到期时间是 `max(1 秒, burst/rps 秒)`，极端配置可能等待较久。不得手工删除活动票据或清空 Redis。
 
 数量上限不是内存预留。生产 Redis 的 96 MiB 由所有已获授权的业务共同使用，大对象、会话和索引可能先触及物理上限。登录流程最大 16 KiB/10 分钟，handoff 最大 64 KiB/1 分钟；应结合实际对象大小与剩余内存调低数量阈值。写入遭遇 OOM 返回 503，保留原对象。仅四个固定且有界的速率哈希及删除脚本允许在 OOM 时工作，便于已接受的消费者释放空间；这不保证内存不足时新会话能写入成功。
 

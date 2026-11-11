@@ -412,14 +412,52 @@ test("all workflow legs reject unreviewed job and step failure exemptions", () =
   assertWorkflowFailurePolicy(original);
 });
 
+
+const portalRedisServiceLines = [
+  "      portal-redis:",
+  "        image: redis:8.2-alpine@sha256:fe9daae35cd4fd6ec22416aa4fe0cf6b3e36741e06ff45b9986253fe2a81c041",
+  "        ports:", '          - "127.0.0.1::6379"',
+  "        options: >-", "          --rm", "          --memory 256m", "          --memory-swap 256m",
+  '          --health-cmd "redis-cli ping"', "          --health-interval 5s", "          --health-timeout 5s", "          --health-retries 12",
+];
+function assertPortalRedisSteps(job) {
+  const text = job.replaceAll("\r\n", "\n");
+  const specifications = [
+    ["Verify Portal Redis service isolation", [
+      "        id: portal-redis", "        env:", "          ACCOUNT_CI_SERVICES: ${{ toJSON(job.services) }}",
+      "        run: |", "          python3 -m unittest discover -s scripts/tests -p test_portal_redis.py", "          python3 scripts/account-ci-redis.py",
+    ]],
+    ["Require real Portal Redis admission and session contracts", [
+      "        timeout-minutes: 12", "        env:",
+      ...[["URL","url"],["PORT","port"],["RUN_ID","run_id"],["OWNER_ID","owner_id"],["CONTAINER_ID","container_id"]].map(([name,key]) => `          PINVOU_PORTAL_TEST_REDIS_${name}: \u0024{{ steps.portal-redis.outputs.${key} }}`),
+      "          PINVOU_PORTAL_TEST_REDIS_PROFILE: ci-owned", "        run: >-",
+      "          python3 scripts/ci-fixture-process.py",
+      '          --receipt "$PINVOU_CI_RESOURCE_LEDGER/portal-redis-process.json" --',
+      '          python3 scripts/test-portal-redis.py --log "$PINVOU_CI_RESOURCE_LEDGER/portal-redis-tests.jsonl"',
+    ]],
+    ["Stop owned temporary Portal Redis service", [
+      "        if: ${{ always() && env.PINVOU_CI_RESOURCE_LEDGER != '' }}", "        env:",
+      "          ACCOUNT_CI_SERVICES: ${{ toJSON(job.services) }}", "        run: python3 scripts/account-ci-redis.py --stop",
+    ]],
+  ];
+  const steps = specifications.map(([name, body]) => {
+    const step = namedStep(text,name);
+    assert.equal(step.trimEnd(), [`      - name: ${name}`, ...body].join("\n"));
+    return step;
+  });
+  assert.ok(text.indexOf(steps[0]) < text.indexOf(steps[1]) && text.indexOf(steps[1]) < text.indexOf(steps[2]), "Redis identity admission, consumers and retirement must remain ordered");
+  return steps;
+}
+
 function assertFiniteAuditPGSetup(job) {
   const text = job.replaceAll("\r\n", "\n");
-  // These are exactly eight approved ephemeral services, not permission for arbitrary
+  // These are exactly eight PostgreSQL services plus one bounded Portal Redis, not permission for arbitrary
   // services, production credentials, public ports or persistent volumes.
   const service = text.match(/^ {4}services:\n[\s\S]*?(?=^ {4}\S|$(?![\s\S]))/m);
   assert.ok(service, "isolated audit PostgreSQL service not found");
   assert.equal(service[0].trimEnd(), [
     "    services:",
+    ...portalRedisServiceLines,
     "      audit-export-postgres:",
     "        image: mirror.gcr.io/library/postgres@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea",
     "        env:",
@@ -516,6 +554,7 @@ function assertFiniteAuditPGSetup(job) {
     assert.ok(text.indexOf(namedStep(text, name)) < text.indexOf(stop), "stop must follow database consumers");
   }
   let outsidePGSteps = text.replace(pg, "").replace(preflight, "").replace(stop, "");
+  for (const redisStep of assertPortalRedisSteps(text)) outsidePGSteps = outsidePGSteps.replace(redisStep, "");
   // Admit only this bounded acceptance step before enforcing the job-wide ban
   // on incidental database inputs. The complete step is fixed deliberately.
   const existingBroker = namedStep(text, existingBrokerStepName);
@@ -1095,8 +1134,8 @@ test("Token financial PostgreSQL gate is required and cannot swallow a failed ru
   assert.match(job, /image: mirror\.gcr\.io\/library\/postgres@sha256:[a-f0-9]{64}/);
   const services = job.match(/^    services:\r?\n([\s\S]*?)^    env:/m)?.[1];
   assert.ok(services, "the disposable PostgreSQL service must exist");
-  assert.deepEqual([...services.matchAll(/^ {6}([a-z][a-z0-9-]*):\r?$/gm)].map(match => match[1]), ["audit-export-postgres", "existing-broker-postgres", "financial-postgres", "financial-token-postgres", "financial-billing-0-postgres", "financial-billing-1-postgres", "financial-billing-2-postgres", "financial-billing-3-postgres"]);
-  assert.deepEqual([...services.matchAll(/^ {10}- (.+)\r?$/gm)].map(match => match[1]), Array(8).fill('"127.0.0.1::5432"'));
+  assert.deepEqual([...services.matchAll(/^ {6}([a-z][a-z0-9-]*):\r?$/gm)].map(match => match[1]), ["portal-redis", "audit-export-postgres", "existing-broker-postgres", "financial-postgres", "financial-token-postgres", "financial-billing-0-postgres", "financial-billing-1-postgres", "financial-billing-2-postgres", "financial-billing-3-postgres"]);
+  assert.deepEqual([...services.matchAll(/^ {10}- (.+)\r?$/gm)].map(match => match[1]), ['"127.0.0.1::6379"', ...Array(8).fill('"127.0.0.1::5432"')]);
   assertFiniteAuditPGSetup(job);
   const run = stepRun(job, "Token financial contracts on isolated PostgreSQL");
   const directory = mkdtempSync(join(tmpdir(), "pinvou-financial-gate-"));
@@ -1685,5 +1724,24 @@ test("credential origin browser matrix shell rejects failed, empty or skipped re
   } finally {
     assert.ok(directory.startsWith(join(tmpdir(), "pinvou-credential-matrix-gate-")));
     rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+
+test("Portal real Redis gate rejects changed identity, skipped execution and unsafe lifecycle", () => {
+  const job = jobBlock("account-platform-test").replaceAll("\r\n", "\n");
+  assertFiniteAuditPGSetup(job);
+  for (const [before, after] of [
+    ['"127.0.0.1::6379"','"0.0.0.0::6379"'],
+    ["redis:8.2-alpine@sha256:fe9daae35cd4fd6ec22416aa4fe0cf6b3e36741e06ff45b9986253fe2a81c041","redis:latest"],
+    ["PINVOU_PORTAL_TEST_REDIS_PROFILE: ci-owned","PINVOU_PORTAL_TEST_REDIS_PROFILE: local-owned"],
+    ["PINVOU_PORTAL_TEST_REDIS_RUN_ID: ${{ steps.portal-redis.outputs.run_id }}","PINVOU_PORTAL_TEST_REDIS_RUN_ID: another-job"],
+    ['python3 scripts/test-portal-redis.py --log "$PINVOU_CI_RESOURCE_LEDGER/portal-redis-tests.jsonl"','true'],
+    ['python3 scripts/account-ci-redis.py --stop','python3 scripts/account-ci-redis.py --stop || true'],
+    ["Verify Portal Redis service isolation","Missing Portal preflight"],
+  ]) {
+    const mutant = job.replace(before,after);
+    assert.notEqual(mutant,job);
+    assert.throws(() => assertFiniteAuditPGSetup(mutant));
   }
 });

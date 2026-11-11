@@ -232,3 +232,42 @@ func TestPortalOwnedRedisFixtureRejectsUnboundInputs(t *testing.T) {
 		env[key] = old
 	}
 }
+
+// Reuse the running actor's ephemeral password without logging it, while loading
+// the exact published profile. Only the proven owned server can be reconfigured.
+func installOwnedPortalFixtureACL(t *testing.T, admin *redis.Client, template string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := checkPortalFixtureIdentity(ctx, admin); err != nil {
+		t.Fatal(err)
+	}
+	u, err := url.Parse(checkedPortalFixture(t))
+	if err != nil {
+		t.Fatal("invalid runtime fixture endpoint")
+	}
+	password, ok := u.User.Password()
+	if !ok {
+		t.Fatal("fixture runtime password missing")
+	}
+	digest := sha256.Sum256([]byte(password))
+	data, err := os.ReadFile("../../deploy/production/" + template)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if !strings.HasPrefix(line, "user portal ") {
+			continue
+		}
+		rules := strings.Fields(strings.ReplaceAll(line, "PORTAL_PASSWORD_SHA256", hex.EncodeToString(digest[:])))[2:]
+		args := []any{"ACL", "SETUSER", "portal"}
+		for _, rule := range rules {
+			args = append(args, rule)
+		}
+		if err = admin.Do(ctx, args...).Err(); err != nil {
+			t.Fatal("published fixture ACL rejected")
+		}
+		return
+	}
+	t.Fatal("published Portal actor missing")
+}

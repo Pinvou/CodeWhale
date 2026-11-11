@@ -23,9 +23,11 @@ function render(extra = []) {
 
 test('Portal Compose exposes approved site defaults and overrides', () => {
   const root = new URL('../../deploy/compose/', import.meta.url);
-  const compose = YAML.parse(readFileSync(new URL('compose.yaml', root), 'utf8'), { merge: true });
-  const env = compose.services['token-portal'].environment;
-  for (const [name, , expected] of mapping) assert.equal(env[name], '${' + name + ':-' + expected + '}');
+  for (const file of [new URL('compose.yaml', root), new URL('../production/compose.personal.yaml', root)]) {
+    const compose = YAML.parse(readFileSync(file, 'utf8'), { merge: true });
+    const env = compose.services['token-portal'].environment;
+    for (const [name, , expected] of mapping) assert.equal(env[name], '${' + name + ':-' + expected + '}');
+  }
 });
 
 test('Portal actual Helm deployment receives defaults and all four overrides', { skip: process.env.PINVOU_TEST_KMS_HELM !== '1' }, () => {
