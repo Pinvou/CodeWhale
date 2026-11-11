@@ -26,6 +26,7 @@ for (const shell of ["powershell.exe", "pwsh"]) {
         $extra=@{};$extra[${quote(driverSource)}]=(Get-FileHash -LiteralPath ${quote(driverSource)} -Algorithm SHA256).Hash.ToLowerInvariant();$extra[$reference]=(Get-FileHash -LiteralPath $reference -Algorithm SHA256).Hash.ToLowerInvariant();
         $build=Invoke-PinvouWhitelistedProcess -FilePath $csc -ExpectedSha256 (Get-FileHash -LiteralPath $csc -Algorithm SHA256).Hash.ToLowerInvariant() -Arguments @('/nologo','/target:exe',('/out:'+$compiled),('/r:'+$reference),${quote(driverSource)}) -AdditionalExpectedSha256 $extra;
         if($build.ExitCode -ne 0){throw 'fixture-driver-build-failed'};
+        Add-Type -TypeDefinition 'using System;using System.Collections.Generic;using System.Diagnostics;using System.Runtime.InteropServices;public static class FixtureJobMembers{[DllImport("kernel32.dll")]static extern bool QueryInformationJobObject(IntPtr j,int c,IntPtr p,int n,IntPtr r);public static string Describe(object scope){var h=(IntPtr)scope.GetType().GetField("Handle",System.Reflection.BindingFlags.NonPublic|System.Reflection.BindingFlags.Instance).GetValue(scope);var p=Marshal.AllocHGlobal(520);try{if(!QueryInformationJobObject(h,3,p,520,IntPtr.Zero))throw new Exception("fixture_job_query_failed");var result=new List<string>();int count=Marshal.ReadInt32(p,4);for(int i=0;i<count;i++){int id=(int)Marshal.ReadIntPtr(p,8+i*IntPtr.Size);using(var process=Process.GetProcessById(id))result.Add(id+":"+process.ProcessName);}return String.Join(",",result);}finally{Marshal.FreeHGlobal(p);}}}';
         [Console]::Error.WriteLine('fixture-phase:compiled');
         $tokens=$null;$errors=$null;$ast=[Management.Automation.Language.Parser]::ParseFile(${quote(orchestrator)},[ref]$tokens,[ref]$errors);if($errors.Count){throw 'orchestrator-parse-failed'};
         $create=$ast.Find({param($n)$n -is [Management.Automation.Language.AssignmentStatementAst] -and $n.Left.Extent.Text -eq '$RemoteCreateStaging'},$true).Right.Extent.Text;
@@ -59,7 +60,7 @@ for (const shell of ["powershell.exe", "pwsh"]) {
             if($owned.active.Count -ne 1){throw 'durable-ownership-not-confirmed'};
             [void](Invoke-PinvouTrustedGuard -FilePath $driver -Arguments @('start-role','--role','A'));
             if($global:PinvouE2EOwnedProcessScopes.Count -ne 2){throw 'run-scopes-not-retained'};
-            foreach($scope in $global:PinvouE2EOwnedProcessScopes){if($scope.ActiveProcesses -ne 1){throw ('real-service-not-live:'+ $scope.ActiveProcesses)}};
+            foreach($scope in $global:PinvouE2EOwnedProcessScopes){if($scope.ActiveProcesses -ne 1){throw ('real-service-not-live:'+ $scope.ActiveProcesses+':'+[FixtureJobMembers]::Describe($scope))}};
             $runtime.pid
           }).AddArgument($nonce);
           $second=@($ps.Invoke());if($ps.HadErrors){throw ($ps.Streams.Error|Out-String)};$legacyPid=[int]$second[-1];$ps.Commands.Clear();
