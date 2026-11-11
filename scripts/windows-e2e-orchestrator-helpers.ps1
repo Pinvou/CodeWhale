@@ -61,7 +61,23 @@ function global:Invoke-PinvouTrustedGuard {
         if (-not $global:PinvouE2EExpectedFileHashes.ContainsKey($relative)) { throw 'e2e_process_dependency_not_attested' }
         $additionalExpected[$absoluteAdditional] = $global:PinvouE2EExpectedFileHashes[$relative]
     }
-    $result = Invoke-PinvouWhitelistedProcess -FilePath $target -ExpectedSha256 $global:PinvouE2EExpectedFileHashes[$targetRelative] -Arguments $Arguments -AdditionalExpectedSha256 $additionalExpected
+    # Only the two attested driver start commands intentionally create a
+    # long-lived run resource. Keep their exact Job handles under this run;
+    # ordinary commands and every failed/cancelled start retire their Job.
+    $retain = $Arguments.Count -gt 0 -and $Arguments[0] -in @('legacy-start', 'start-role')
+    $result = Invoke-PinvouWhitelistedProcess -FilePath $target -ExpectedSha256 $global:PinvouE2EExpectedFileHashes[$targetRelative] -Arguments $Arguments -AdditionalExpectedSha256 $additionalExpected -RetainSuccessfulScope:$retain
+    if ($result.OwnedScope) {
+        $retained = $false
+        try {
+            $marker = Get-Content -LiteralPath (Join-Path $root '.pinvou-e2e-owner.json') -Raw -Encoding UTF8 -ErrorAction Stop | ConvertFrom-Json
+            if ($marker.schema -ne 'pinvou-e2e-staging' -or $marker.run_nonce -notmatch '^[a-f0-9]{64}$' -or (Split-Path -Leaf $root) -cne $marker.run_nonce) { throw 'e2e_process_scope_owner_invalid' }
+            if (-not (Get-Variable -Name PinvouE2EOwnedProcessScopes -Scope Global -ErrorAction SilentlyContinue)) { $global:PinvouE2EOwnedProcessScopes = @() }
+            $global:PinvouE2EOwnedProcessScopes += $result.OwnedScope
+            $retained = $true
+        } finally {
+            if (-not $retained) { $result.OwnedScope.Dispose() }
+        }
+    }
     $global:LASTEXITCODE = $result.ExitCode
     if ($ReturnProcessResult) { $result } else { if ($result.StdErr) { [Console]::Error.Write($result.StdErr) }; $result.StdOut }
 }

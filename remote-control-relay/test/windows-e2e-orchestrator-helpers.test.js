@@ -6,6 +6,7 @@ import { test as nodeTest } from "node:test";
 
 const helper = fileURLToPath(new URL("../../scripts/windows-e2e-orchestrator-helpers.ps1", import.meta.url));
 const orchestrator = fileURLToPath(new URL("../../scripts/run-windows-remote-control-e2e.ps1", import.meta.url));
+const ownedSource = fileURLToPath(new URL("../../scripts/windows-owned-process.cs", import.meta.url));
 const guard = fileURLToPath(new URL("../../scripts/windows-e2e-process-guard.ps1", import.meta.url));
 const uiSmoke = fileURLToPath(new URL("../../pinvou3-app/scripts/remote-control-ui-smoke.mjs", import.meta.url));
 const pwsh = process.platform === "win32" ? "powershell.exe" : "pwsh";
@@ -106,7 +107,7 @@ test("production cleanup continues after route and role faults and reports their
     + `$base=Join-Path ([IO.Path]::GetTempPath()) ('pinvou-e2e-fault-'+[Guid]::NewGuid().ToString('N'));try{ `
     + `$runNonce='${'d'.repeat(64)}';$s=& $create $base $runNonce ([DateTime]::UtcNow);$RemoteRoot=$s.root;$RemoteBase=$base;$cleanupLegacyOwned=$true;$cleanupLegacyPid=$null; `
     + `$LegacyGatewayUrl='fixture';$cleanupRouteId='fixture';$cleanupOriginalStateDigest='fixture';$cleanupCanonicalInputDigest='fixture';$cleanupControlPlaneDigest='fixture';$actualHead='fixture'; `
-    + `[IO.File]::WriteAllText((Join-Path $s.root 'pinvou-e2e-driver.exe'),'fixture');$script:calls=@();function Invoke-PinvouTrustedGuard{param($FilePath,$Arguments);$script:calls+=@($Arguments[0]);$global:LASTEXITCODE=0;switch($Arguments[0]){ `
+    + `[IO.File]::WriteAllText((Join-Path $s.root 'pinvou-e2e-driver.exe'),'fixture');$script:calls=@();function Close-PinvouOwnedProcessScopes {};function Invoke-PinvouTrustedGuard{param($FilePath,$Arguments);$script:calls+=@($Arguments[0]);$global:LASTEXITCODE=0;switch($Arguments[0]){ `
     + `'legacy-deconfigure-gateway'{throw 'route-fixture-fault'} 'legacy-owned-pids'{[ordered]@{schema='pinvou-legacy-owned-processes';version=1;run_nonce=$runNonce;mock=$false;active=@();terminated=@()}|ConvertTo-Json -Compress} 'legacy-stop'{} 'stop-role'{throw 'role-fixture-fault'} default{throw 'unexpected-fixture-command'}}}; `
     + `$message='';try{& $cleanup}catch{$message=$_.Exception.Message};if($message -notmatch 'route:route-fixture-fault.*role-process:role-fixture-fault'){throw 'faults-not-aggregated'};if(($script:calls -join ',') -ne 'legacy-deconfigure-gateway,legacy-owned-pids,legacy-stop,legacy-owned-pids,stop-role'){throw 'later-cleanup-skipped'};if(Test-Path $s.root){throw 'files-cleanup-skipped'};[Console]::Out.Write('production-cleanup-aggregate-pass') `
     + `}finally{if(Test-Path -LiteralPath $base){Remove-Item -LiteralPath $base -Recurse -Force}}`], { env: shellEnv, encoding: "utf8" });
@@ -132,13 +133,13 @@ test("production bootstrap retains the complete helper call chain across runspac
   const script = `$ErrorActionPreference='Stop'; $base=Join-Path ([IO.Path]::GetTempPath()) ('pinvou-e2e-scope-'+[Guid]::NewGuid().ToString('N')); `
     + `$runspace=[RunspaceFactory]::CreateRunspace(); $runspace.Open(); $ps=[PowerShell]::Create(); $ps.Runspace=$runspace; `
     + `try { New-Item -ItemType Directory -Path $base | Out-Null; `
-    + `$inputs=@{ 'windows-e2e-orchestrator-helpers.ps1'=${quote(helper)}; 'windows-e2e-process-guard.ps1'=${quote(guard)}; 'remote-control-ui-smoke.mjs'=${quote(uiSmoke)}; 'pinvou-node.exe'=${quote(process.execPath)} }; `
+    + `$inputs=@{ 'windows-e2e-orchestrator-helpers.ps1'=${quote(helper)}; 'windows-e2e-process-guard.ps1'=${quote(guard)}; 'windows-owned-process.cs'=${quote(ownedSource)}; 'remote-control-ui-smoke.mjs'=${quote(uiSmoke)}; 'pinvou-node.exe'=${quote(process.execPath)} }; `
     + `$files=@(foreach($name in $inputs.Keys){$path=Join-Path $base $name; Copy-Item -LiteralPath $inputs[$name] -Destination $path; [pscustomobject]@{RelativePath=$name;Sha256=(Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant();SignaturePolicy='none'}}); `
     + `$tokens=$null;$errors=$null;$ast=[Management.Automation.Language.Parser]::ParseFile(${quote(orchestrator)},[ref]$tokens,[ref]$errors);if($errors.Count){throw 'bootstrap-parse-failed'}; `
     + `$assignment=$ast.Find({param($n)$n -is [Management.Automation.Language.AssignmentStatementAst] -and $n.Left.Extent.Text -eq '$RemoteBootstrap'},$true);if(-not $assignment){throw 'bootstrap-missing'}; `
     + `$literal=$assignment.Right.Extent.Text;$bootstrap=$literal.Substring(1,$literal.Length-2); `
     + `[void]$ps.AddScript('param($root,$bootstrap,$files); & { param($root,$bootstrap,$files); $global:PinvouE2ERunRoot=$root; & ([scriptblock]::Create($bootstrap)) $root $files fixture fixture fixture fixture } $root $bootstrap $files').AddArgument($base).AddArgument($bootstrap).AddArgument(($files|ConvertTo-Json -Compress)); `
-    + `$first=@($ps.Invoke());if($ps.HadErrors){throw ($ps.Streams.Error|Out-String)};if($first[0].verified_file_count -ne 4){throw 'bootstrap-did-not-run'};$ps.Commands.Clear(); `
+    + `$first=@($ps.Invoke());if($ps.HadErrors){throw ($ps.Streams.Error|Out-String)};if($first[0].verified_file_count -ne 5){throw 'bootstrap-did-not-run'};$ps.Commands.Clear(); `
     // Only Authenticode is a local test stub. Bootstrap and every transitive
     // production helper run unmodified, after the first local scope has ended.
     + `$call={ param($root,$files); $ErrorActionPreference='Stop'; function global:Get-AuthenticodeSignature { [pscustomobject]@{Status='Valid';SignerCertificate=[pscustomobject]@{Thumbprint='fixture';Subject='fixture'}} }; `

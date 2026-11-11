@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-import { spawn } from "node:child_process";
 import crypto from "node:crypto";
 import { readFile, stat } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve } from "node:path";
@@ -7,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { isDirectCliEntry } from "../cli-entrypoint.js";
 import { parseControllerEnvironment } from "./deploy-controller-preflight.mjs";
 import { validateReleaseEvidenceFile } from "./validate-controller-release-evidence.mjs";
+import { runReleaseProcess } from "./release-process.mjs";
 
 const relayRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 const repoRoot = dirname(relayRoot);
@@ -18,15 +18,7 @@ function fail(code) {
 }
 
 function run(command, args, env = process.env) {
-  return new Promise((resolvePromise, reject) => {
-    const child = spawn(command, args, { cwd: repoRoot, env, shell: false, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
-    // Drain stdout so a chatty sub-gate cannot fill the pipe and block forever.
-    child.stdout.resume();
-    let stderr = "";
-    child.stderr.on("data", (chunk) => { stderr += String(chunk); });
-    child.once("error", reject);
-    child.once("close", (code) => code === 0 ? resolvePromise() : reject(Object.assign(new Error("release_subgate_failed"), { code: "release_subgate_failed", cause: stderr })));
-  });
+  return runReleaseProcess(command, args, { cwd: repoRoot, env });
 }
 
 export async function validateTrustedGh(env) {
