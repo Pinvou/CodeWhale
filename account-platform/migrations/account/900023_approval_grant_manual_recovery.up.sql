@@ -5,7 +5,8 @@ DO $$ BEGIN
  END IF;
 END $$;
 GRANT CREATE ON SCHEMA public TO account_approval_authorization_owner;
-GRANT SELECT(command_fingerprint,execution_deadline) ON public.approval_requests TO account_approval_authorization_owner;
+GRANT SELECT(command_fingerprint,execution_deadline,updated_at) ON public.approval_requests TO account_approval_authorization_owner;
+GRANT UPDATE(updated_at) ON public.approval_requests TO account_approval_authorization_owner;
 GRANT SELECT(requester_permission,approver_permission) ON public.approval_command_policies TO account_approval_authorization_owner;
 GRANT SELECT(id,domain,case_type,resource_type,resource_id) ON public.manual_review_cases TO account_approval_authorization_owner;
 GRANT REFERENCES(id) ON public.manual_review_cases TO account_approval_authorization_owner;
@@ -94,7 +95,7 @@ BEGIN
  AND r.execution_deadline<=statement_timestamp()
  AND NOT EXISTS(SELECT 1 FROM public.approval_executions e WHERE e.approval_request_id=r.id)
  AND NOT EXISTS(SELECT 1 FROM account_approval_authorization.grant_recovery_cases c WHERE c.original_event_id=d.original_event_id AND c.durable=d.durable)
- ORDER BY d.approval_request_id,d.original_event_id,d.durable LIMIT p_limit FOR UPDATE OF r SKIP LOCKED;
+ ORDER BY d.approval_request_id,d.original_event_id,d.durable LIMIT p_limit FOR UPDATE OF r,d SKIP LOCKED;
 END $$;
 
 CREATE FUNCTION public.list_approval_grant_recovery(p_after UUID,p_limit INTEGER)
@@ -252,8 +253,12 @@ DECLARE d account_approval_authorization.approval_delivery_states; fingerprint T
 BEGIN
  IF session_user<>'account_service' THEN RAISE EXCEPTION 'grant recovery forbidden' USING ERRCODE='42501'; END IF;
  SELECT * INTO STRICT d FROM account_approval_authorization.approval_delivery_states s WHERE s.original_event_id=p_event AND s.durable=p_durable;
- SELECT encode(r.command_fingerprint,'hex'),r.execution_deadline INTO STRICT fingerprint,deadline FROM public.approval_requests r WHERE r.id=d.approval_request_id FOR UPDATE;
- SELECT * INTO STRICT d FROM account_approval_authorization.approval_delivery_states s WHERE s.original_event_id=p_event AND s.durable=p_durable FOR UPDATE;
+ -- Touch the locked tuple without changing its logical values. A stale
+ -- RepeatableRead/Serializable INSERT must fail rather than miss this case.
+ -- Only the unchanged metadata column is writable by this NOLOGIN owner.
+ UPDATE public.approval_requests r SET updated_at=r.updated_at WHERE r.id=d.approval_request_id
+ RETURNING encode(r.command_fingerprint,'hex'),r.execution_deadline INTO STRICT fingerprint,deadline;
+ SELECT * INTO STRICT d FROM account_approval_authorization.approval_delivery_states s WHERE s.original_event_id=p_event AND s.durable=p_durable FOR UPDATE NOWAIT;
  IF d.state<>'DOMAIN_INFLIGHT' OR d.serialization_version<>'APPROVAL_RFC8785_DECIMAL_V1' OR d.executor_identity<>'billing-command-executor'
  OR d.durable='billing-command-executor-v1' OR d.domain_attempt_count<1 OR deadline IS NULL OR deadline>clock_timestamp()
  OR EXISTS(SELECT 1 FROM public.approval_executions e WHERE e.approval_request_id=d.approval_request_id)

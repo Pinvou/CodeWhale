@@ -11,7 +11,7 @@ import (
 
 const manualGrantRecoveryVersion int64 = 900023
 const manualGrantRecoveryName = "approval_grant_manual_recovery"
-const manualGrantRecoveryUp = "9ecb8e4aacdbacaf90a60621f3bc2cee09c82561ab042f78616875e4a883885e"
+const manualGrantRecoveryUp = "aee7a5cd278fdf8b0f5d6e2b96ae16a331c6203ac9c05f30d4a65b1b86f91ba9"
 const manualGrantRecoveryDown = "418626025543dde9ce6b36e9ad35200f974f5d05a4b74e3b4a71aaeecd3dbf86"
 
 func manualGrantRecoveryChecksum(sql string) string {

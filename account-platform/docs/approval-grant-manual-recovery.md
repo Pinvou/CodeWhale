@@ -17,11 +17,12 @@
 只有数据库实际执行期限已过、投递仍 DOMAIN_INFLIGHT、且没有任何 Account
 execution 的原授权才会建案；不会在正常 grant→Begin 的有效窗口抢占主流程。
 每批合计不超过原 SLA 同步上限，新发现最多 100 项、最多使用 5 秒调用预算；
-被锁请求跳过，下一轮继续。每个 `(original_event_id,durable)` 只有一个案件，
+被锁请求或投递跳过，下一轮继续。每个 `(original_event_id,durable)` 只有一个案件，
 并关联原有 P1 SLA、分配/升级及普通 manual-review outbox 事件。
 
 案件一旦建立，数据库触发器永久阻止该原请求插入 execution，覆盖仍运行的
-旧 Account 二进制；这只是执行围栏，不证明过去没有外部效果。发现前已合法
+旧 Account 二进制；建案同时触碰原请求元组而不改逻辑值，使旧 RR/Serializable
+快照的插入得到序列化冲突。这只是执行围栏，不证明过去没有外部效果。发现前已合法
 Begin 的请求继续使用原执行恢复合同，不会被误纳入本流程。请求后来被 expiry
 标记 INVALIDATED，不能自动关闭本案件。
 
@@ -110,14 +111,17 @@ reviews 的 `evidence` 为 `proposal_id`（提案操作的 operation_id）、相
 收到网络超时或结果未知时，原样重发相同 operation_id、expected_version 和 evidence。
 同键异内容会冲突；原样重放返回该操作的不可变原始回执，可能不是案件当前版本，
 应另用 GET 读取当前状态。401 表示需重新认证，403 表示当前权限不足，409 表示
-版本、绑定或证据冲突；均不能通过生成新 nonce 自动绕过业务门禁。
+版本、绑定或证据冲突；5xx 表示服务或依赖故障，不代表权限不足。
+均不能通过生成新 nonce 自动绕过业务门禁。
 
 ## 收尾与后续观察
 
 双人确认在一个 Account 事务内持久化人工回执、审计、SLA 结案和原授权结束状态，
 将该投递置为 RESULT_CONFIRMED，不增加领域尝试次数。原消费者之后才执行真实
 DoubleAck 并登记 TERMINAL_CONFIRMED。NATS 不可用时保留 RESULT_CONFIRMED，等待原
-投递恢复；不会以人工决定伪造 ACK。完成回执记录外部结果，不把缺失的 Account
+投递恢复；不会以人工决定伪造 ACK。若 ACK 已确认而随后 Account 终态登记
+失败，既有消费者只记录 pending 错误；投递可能保持 RESULT_CONFIRMED，本流程
+不承诺该既有元数据窗口自动收敛，也不会据此重执行。人工回执和执行围栏保留。完成回执记录外部结果，不把缺失的 Account
 execution 补成成功或失败，也不把原审批的 INVALIDATED 当成零资金效果。
 
 结案后的新观察仍追加到同一案件并重新打开人工关注，旧完成回执保留不改。

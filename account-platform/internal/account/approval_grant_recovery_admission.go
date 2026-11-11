@@ -10,6 +10,7 @@ import (
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/manualreview"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // Existing partial installations keep their old SLA worker contract. The new
@@ -98,6 +99,12 @@ func (r *PostgresRepository) admitGrantRecoveryCase(ctx context.Context, eventID
 	if err != nil {
 		// A concurrent Begin or result may legitimately win after discovery. This
 		// is not zero-effect evidence and does not create a partial generic case.
+		// A delivery lock acquired after discovery must not consume the whole
+		// batch budget or prevent unrelated grants and legacy cases progressing.
+		var pg *pgconn.PgError
+		if errors.As(err, &pg) && pg.Code == "55P03" {
+			return false, nil
+		}
 		if errors.Is(classifyGrantRecoveryError(err), ErrConflict) {
 			return false, nil
 		}

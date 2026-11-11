@@ -1101,7 +1101,7 @@
       {
         "file": "900023_approval_grant_manual_recovery.up.sql",
         "version": 900023,
-        "sha256": "9ecb8e4aacdbacaf90a60621f3bc2cee09c82561ab042f78616875e4a883885e"
+        "sha256": "aee7a5cd278fdf8b0f5d6e2b96ae16a331c6203ac9c05f30d4a65b1b86f91ba9"
       }
     ],
     "billing": [

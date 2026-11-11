@@ -174,7 +174,10 @@ func (r *PostgresRepository) GrantRecoveryCases(ctx context.Context, p identity.
 	}
 	defer tx.Rollback(bounded)
 	actor, err := adminActorID(bounded, tx, p)
-	if err != nil || actor == nil {
+	if err != nil {
+		return GrantRecoveryPage{}, err
+	}
+	if actor == nil {
 		return GrantRecoveryPage{}, ErrForbidden
 	}
 	if _, _, _, err = strongPlatformAuthorization(bounded, tx, *actor, "platform.billing.ledger.read"); err != nil {
@@ -245,7 +248,10 @@ func (r *PostgresRepository) GrantRecoveryCase(ctx context.Context, p identity.P
 		return GrantRecoveryDetail{}, err
 	}
 	actor, err := adminActorID(bounded, tx, p)
-	if err != nil || actor == nil {
+	if err != nil {
+		return GrantRecoveryDetail{}, err
+	}
+	if actor == nil {
 		return GrantRecoveryDetail{}, ErrForbidden
 	}
 	allowed := false
@@ -343,7 +349,10 @@ func (r *PostgresRepository) ApplyGrantRecovery(ctx context.Context, p identity.
 		return GrantRecoveryCase{}, err
 	}
 	actor, err := adminActorID(bounded, tx, p)
-	if err != nil || actor == nil {
+	if err != nil {
+		return GrantRecoveryCase{}, err
+	}
+	if actor == nil {
 		return GrantRecoveryCase{}, ErrForbidden
 	}
 	var previous []byte

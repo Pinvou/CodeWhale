@@ -23,6 +23,7 @@ import (
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/identity"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/migrations"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
@@ -153,7 +154,7 @@ func TestManualGrantRecoveryWorkflowPostgres(t *testing.T) {
 		}
 
 		first, firstBinding, firstGrant := createGrant()
-		second, _, _ := createGrant()
+		second, secondBinding, _ := createGrant()
 		thirdReviewer := seedEntitlementApprovalActor(t, ctx, repo.pool, "PLATFORM_SUPER_ADMIN", "manual-third-reviewer")
 		denied := seedEntitlementApprovalActor(t, ctx, repo.pool, "PLATFORM_SUPER_ADMIN", "manual-no-permission")
 		if _, err = repo.pool.Exec(ctx, `UPDATE role_assignments SET revoked_at=clock_timestamp() WHERE user_id=$1`, denied.ID); err != nil {
@@ -256,6 +257,20 @@ func TestManualGrantRecoveryWorkflowPostgres(t *testing.T) {
 			case <-timer.C:
 			}
 		}
+		// Snapshot the request before admission, as an old binary may do.
+		staleTransactions := make([]pgx.Tx, 0, 2)
+		for _, level := range []pgx.TxIsoLevel{pgx.RepeatableRead, pgx.Serializable} {
+			stale, beginErr := repo.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: level})
+			if beginErr != nil {
+				t.Fatal(beginErr)
+			}
+			defer stale.Rollback(ctx)
+			var originalID uuid.UUID
+			if beginErr = stale.QueryRow(ctx, `SELECT id FROM approval_requests WHERE id=$1`, first.ID).Scan(&originalID); beginErr != nil {
+				t.Fatal(beginErr)
+			}
+			staleTransactions = append(staleTransactions, stale)
+		}
 		// A locked old candidate must not starve another eligible authorization.
 		lockedID := first.ID
 		if second.ID.String() < lockedID.String() {
@@ -274,6 +289,52 @@ func TestManualGrantRecoveryWorkflowPostgres(t *testing.T) {
 		}
 		if e != nil || n != 1 {
 			t.Fatal("locked candidate starved eligible work", n, e)
+		}
+		// A delivery-only holder must not consume this batch, including legacy
+		// cases. This is an owned DB barrier, not a timing guess or fake clock.
+		lockedBinding := firstBinding
+		if lockedID == second.ID {
+			lockedBinding = secondBinding
+		}
+		deliveryGate, gateErr := operator.Begin(ctx)
+		if gateErr != nil {
+			t.Fatal(gateErr)
+		}
+		defer deliveryGate.Rollback(ctx)
+		if _, gateErr = deliveryGate.Exec(ctx, `SET LOCAL ROLE account_approval_authorization_owner`); gateErr != nil {
+			t.Fatal(gateErr)
+		}
+		if _, gateErr = deliveryGate.Exec(ctx, `SELECT original_event_id FROM account_approval_authorization.approval_delivery_states WHERE original_event_id=$1 AND durable=$2 FOR UPDATE`, lockedBinding.EventID, lockedBinding.Durable); gateErr != nil {
+			t.Fatal(gateErr)
+		}
+		// Exercise the post-discovery race too: open must NOWAIT and roll back
+		// its generic case instead of treating contention as a failed grant.
+		admitCtx, admitCancel := context.WithTimeout(ctx, 2*time.Second)
+		admitted, admitErr := repo.admitGrantRecoveryCase(admitCtx, lockedBinding.EventID, lockedBinding.Durable, lockedBinding.ApprovalRequestID)
+		admitCancel()
+		if admitErr != nil || admitted {
+			t.Fatal("post-discovery lock did not skip", admitted, admitErr)
+		}
+		var partialCases int
+		if gateErr = repo.pool.QueryRow(ctx, `SELECT count(*) FROM manual_review_cases WHERE resource_type='APPROVAL_AUTHORIZATION' AND resource_id=$1`, lockedBinding.EventID).Scan(&partialCases); gateErr != nil || partialCases != 0 {
+			t.Fatal("busy delivery left partial public case", partialCases, gateErr)
+		}
+		legacyID := uuid.New()
+		if _, gateErr = repo.pool.Exec(ctx, `INSERT INTO profile_change_requests(id,user_id,identity_issuer,identity_subject,field,old_value,new_value,expected_profile_version,status,next_attempt_at,sla_expires_at,created_at,updated_at) VALUES($1,$2,'controlled','controlled','USERNAME','old','manual-recovery-new',1,'REPAIR_REQUIRED',clock_timestamp(),clock_timestamp(),clock_timestamp(),clock_timestamp())`, legacyID, requester.ID); gateErr != nil {
+			t.Fatal(gateErr)
+		}
+		progressCtx, progressCancel := context.WithTimeout(ctx, 2*time.Second)
+		made, progressErr := repo.SyncManualReviewCases(progressCtx, 100)
+		progressCancel()
+		if gateErr = deliveryGate.Rollback(ctx); gateErr != nil {
+			t.Fatal(gateErr)
+		}
+		if progressErr != nil || made != 1 {
+			t.Fatal("delivery lock starved legacy case", made, progressErr)
+		}
+		var legacyCases int
+		if gateErr = repo.pool.QueryRow(ctx, `SELECT count(*) FROM manual_review_cases WHERE case_type='PROFILE_CHANGE_REPAIR' AND resource_id=$1`, legacyID).Scan(&legacyCases); gateErr != nil || legacyCases != 1 {
+			t.Fatal("legacy recovery missing", legacyCases, gateErr)
 		}
 		if n, e = repo.SyncManualReviewCases(ctx, 100); e != nil || n != 1 {
 			t.Fatal("remaining original case missing", n, e)
@@ -295,11 +356,54 @@ func TestManualGrantRecoveryWorkflowPostgres(t *testing.T) {
 		if c1.ID == uuid.Nil || c2.ID == uuid.Nil || c1.ID == c2.ID || c1.Version != 1 || c2.Version != 1 {
 			t.Fatal("cases not idempotently bound")
 		}
+		identityGate, identityErr := operator.Begin(ctx)
+		if identityErr != nil {
+			t.Fatal(identityErr)
+		}
+		defer identityGate.Rollback(ctx)
+		if _, identityErr = identityGate.Exec(ctx, `LOCK TABLE identities IN ACCESS EXCLUSIVE MODE`); identityErr != nil {
+			t.Fatal(identityErr)
+		}
+		for _, probe := range []struct{ method, path, body string }{
+			{http.MethodGet, base, ""},
+			{http.MethodGet, base + "/" + c1.ID.String(), ""},
+			{http.MethodPost, base + "/" + c1.ID.String() + "/observations", fmt.Sprintf(`{"operation_id":%q,"expected_version":%d,"evidence":{"state":"ABSENT","reference":"CONTROLLED-QUERY","sha256":%q}}`, uuid.NewString(), c1.Version, strings.Repeat("a", 64))},
+		} {
+			faultCtx, faultCancel := context.WithTimeout(ctx, 150*time.Millisecond)
+			req := httptest.NewRequest(probe.method, probe.path, strings.NewReader(probe.body)).WithContext(faultCtx)
+			req.Header.Set("Authorization", "Bearer "+requester.Subject)
+			if probe.body != "" {
+				req.Header.Set("Content-Type", "application/json")
+			}
+			result := httptest.NewRecorder()
+			handler.ServeHTTP(result, req)
+			faultCancel()
+			if result.Code != 500 {
+				t.Fatalf("identity dependency failure became business denial: %s status=%d body=%s", probe.path, result.Code, result.Body.String())
+			}
+		}
+		if identityErr = identityGate.Rollback(ctx); identityErr != nil {
+			t.Fatal(identityErr)
+		}
 		// Use the real old insert contract to reach the new DB fence. This rejected
 		// statement creates no execution; its exact error rules out an older guard.
-		_, err = repo.pool.Exec(ctx, `INSERT INTO approval_executions(id,approval_request_id,command_type,command_fingerprint,execution_idempotency_key,executor_identity,job_run_id,status,authorization_snapshot,critical_resource_versions,financial_snapshot,started_at,
+		executionSQL := `INSERT INTO approval_executions(id,approval_request_id,command_type,command_fingerprint,execution_idempotency_key,executor_identity,job_run_id,status,authorization_snapshot,critical_resource_versions,financial_snapshot,started_at,
 authorization_event_id,authorization_durable,authorization_approved_request_version,authorization_event_digest,authorization_digest_kind,authorization_serialization_version,authorization_provenance,authorization_approval_epoch)
-VALUES($1,$2,$3,decode($4,'hex'),$5,$6,$7,'EXECUTING','{}',$8,$9,clock_timestamp(),$10,$11,$12,$13,$14,$15,$16,$17)`, uuid.New(), first.ID, first.CommandType, first.CommandFingerprint, fmt.Sprintf("approval:%s:%s:%s", first.ID, first.CommandType, first.CommandFingerprint), firstBinding.Workload, firstBinding.EventID.String(), input.CriticalResourceVersions, input.FinancialSnapshot, firstBinding.EventID, firstBinding.Durable, firstBinding.ApprovedRequestVersion, firstBinding.EventDigest, firstBinding.DigestKind, firstBinding.SerializationVersion, firstBinding.Provenance, firstBinding.ApprovalEpoch)
+VALUES($1,$2,$3,decode($4,'hex'),$5,$6,$7,'EXECUTING','{}',$8,$9,clock_timestamp(),$10,$11,$12,$13,$14,$15,$16,$17)`
+		executionArgs := []any{uuid.New(), first.ID, first.CommandType, first.CommandFingerprint, fmt.Sprintf("approval:%s:%s:%s", first.ID, first.CommandType, first.CommandFingerprint), firstBinding.Workload, firstBinding.EventID.String(), input.CriticalResourceVersions, input.FinancialSnapshot, firstBinding.EventID, firstBinding.Durable, firstBinding.ApprovedRequestVersion, firstBinding.EventDigest, firstBinding.DigestKind, firstBinding.SerializationVersion, firstBinding.Provenance, firstBinding.ApprovalEpoch}
+		for _, stale := range staleTransactions {
+			_, staleErr := stale.Exec(ctx, executionSQL, executionArgs...)
+			var serial *pgconn.PgError
+			rejected := errors.As(staleErr, &serial) && serial.Code == "40001"
+			if rollbackErr := stale.Rollback(ctx); rollbackErr != nil {
+				t.Fatal(rollbackErr)
+			}
+			if !rejected {
+				t.Fatal("pre-admission snapshot missed permanent fence", staleErr)
+			}
+		}
+		_, err = repo.pool.Exec(ctx, executionSQL, executionArgs...)
+
 		var pg *pgconn.PgError
 		if !errors.As(err, &pg) || pg.Code != "55000" || pg.Message != "manual recovery owns this authorization" {
 			t.Fatal("manual DB execution fence was not reached", err)
@@ -455,6 +559,6 @@ VALUES($1,$2,$3,decode($4,'hex'),$5,$6,$7,'EXECUTING','{}',$8,$9,clock_timestamp
 			t.Fatal("generic sync erased conflict attention")
 		}
 		check(call(denied.Subject, http.MethodGet, base+"/"+c2.ID.String(), nil), 403)
-		t.Log("MANUAL_RECOVERY: real five-minute window; 2 original cases; absence is observation only; concurrent dual review/idempotent receipt; changed evidence and revoked checkpoints block; no executions or premature ACK")
+		t.Log("MANUAL_RECOVERY: real five-minute window; 2 original cases; absence is observation only; concurrent dual review/idempotent receipt; changed evidence and revoked checkpoints block; no executions or premature ACK; delivery-only lock preserves legacy progress; stale RR/Serializable snapshots rejected; identity IO is5xx")
 	})
 }
