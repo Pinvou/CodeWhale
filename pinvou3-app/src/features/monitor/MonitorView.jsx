@@ -5,7 +5,8 @@ import { bridge } from '../../hooks/useBridge.js';
 import { formatCompactCount } from '../../shared/format-number.js';
 import { useConversationSecondClock } from '../../hooks/useConversationSecondClock.js';
 
-// 界面语言 → BCP 47 locale，用于时钟等本地化格式化
+// 界面语言 → BCP 47 locale，用于时钟等本地化格式化（设备管理页的内嵌卡片
+// 复用同一映射，第四轮评审 P3 收敛重复声明）。
 const MONITOR_CLOCK_LOCALE = { zh: 'zh-CN', en: 'en-US', ja: 'ja-JP' };
 
     const MONITOR_BRAND_ICONS = {
@@ -213,7 +214,10 @@ const MONITOR_CLOCK_LOCALE = { zh: 'zh-CN', en: 'en-US', ja: 'ja-JP' };
     };
 
     /* eslint-disable sonarjs/cognitive-complexity -- monitoring dashboard is a single view with many metrics, splitting has low payoff;legacy view; tracked separately */
-    const MonitorView = ({ theme, t, bs }) => {
+    // embedded: MegaCube 设备管理页（features/device-manager）内嵌复用全部卡片与
+    // 轮询，只隐藏本页的 h1 页首（标题/桥接错误徽章/时钟）。默认 false，
+    // 非 MegaCube 平台行为不变。
+    const MonitorView = ({ theme, t, bs, embedded = false }) => {
       const isDark = theme === 'dark';
       const fmt = bs && bs.monitor && bs.monitor._fmt;
       const monitorError = bs && bs.monitorError;
@@ -406,6 +410,7 @@ const MONITOR_CLOCK_LOCALE = { zh: 'zh-CN', en: 'en-US', ja: 'ja-JP' };
         <div className="flex-1 w-full h-full overflow-y-auto custom-scrollbar">
           <div className="min-h-full bg-white dark:bg-[#131314] text-[#1F1F1F] dark:text-[#E3E3E3] p-4 sm:p-6 lg:p-10 font-sans selection:bg-blue-500/30 relative overflow-hidden transition-colors duration-500">
             <div className="max-w-[1400px] mx-auto relative z-10 space-y-6">
+              {!embedded && (
               <header
                 className="flex flex-col md:flex-row justify-between items-start md:items-center gap-6 pb-6 mb-4 border-b border-[rgba(198,198,200,.55)] dark:border-[rgba(255,255,255,.10)]"
               >
@@ -428,6 +433,22 @@ const MONITOR_CLOCK_LOCALE = { zh: 'zh-CN', en: 'en-US', ja: 'ja-JP' };
                   </div>
                 </div>
               </header>
+              )}
+
+              {/* embedded 页首被隐藏后,监控通道的读取失败不能再无处安放:
+                  已有一份成功快照时旧指标继续展示,但必须带陈旧标记,否则
+                  MegaCube 上"监控失败、设备通道正常"时旧值看起来仍像实时值
+                  (round-29 review P2)。无快照的失败臂由各卡的 loading 文案
+                  (readFailed)覆盖,这里只补"有数据"的半边。恢复后下一拍
+                  (hadMonitorError 强制发布)标记消失。 */}
+              {embedded && monitorError && fmt && (
+                <div
+                  data-testid="monitor-embedded-stale"
+                  className="flex w-fit items-center gap-2 rounded-full bg-rose-50 px-3 py-1.5 dark:bg-rose-500/10"
+                >
+                  <span className="text-[12px] font-medium text-rose-700 dark:text-rose-300">{t.uiMonitor.staleHint}</span>
+                </div>
+              )}
 
               <div className="grid grid-cols-1 md:grid-cols-12 gap-6">
                 <MonitorCard className="md:col-span-12 lg:col-span-4">
@@ -576,5 +597,5 @@ const MONITOR_CLOCK_LOCALE = { zh: 'zh-CN', en: 'en-US', ja: 'ja-JP' };
 
     // 统一排版原语：卡片 / 行(label 左 + 控件右) / 纵向输入字段 / 分段选择 / 改动操作条
 
-export { MonitorView };
+export { MonitorView, MONITOR_CLOCK_LOCALE };
 /* eslint-enable sonarjs/cognitive-complexity -- legacy view; tracked separately */
