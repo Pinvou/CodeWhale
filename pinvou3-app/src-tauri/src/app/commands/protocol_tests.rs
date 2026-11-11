@@ -217,6 +217,116 @@ command_protocol!(
     ["set_global_shortcut_config"]
 );
 command_protocol!(
+    device_protocol,
+    "device.rs",
+    [
+        "get_device_snapshot",
+        "get_device_services",
+        "get_external_models",
+        "device_register_external_model",
+        "device_remove_external_model",
+        "device_doctor_prompt"
+    ]
+);
+
+/// 命令清单（上一测试）必须真的注册进 `generate_handler!`：protocol 宏只读
+/// device.rs 源码，从 lib.rs 删掉注册行不会红、运行时才炸。这里做弱文本包含
+/// 检查兜住该缝（五轮评审 P3；全仓既有模式，聊胜于无）。
+#[test]
+fn device_commands_are_registered_in_the_handler() {
+    let lib = include_str!("../../lib.rs");
+    for command in [
+        "get_device_snapshot",
+        "get_device_services",
+        "get_external_models",
+        "device_register_external_model",
+        "device_remove_external_model",
+        "device_doctor_prompt",
+    ] {
+        assert!(
+            lib.contains(command),
+            "device 命令 {command} 未注册进 lib.rs 的 generate_handler!"
+        );
+    }
+}
+
+/// 命令体切分（纯函数，测试直打）：先把 CRLF 归一成 LF 再按独占一行的属性
+/// 切分——.gitattributes 未固定 Rust 文件换行，CRLF 检出下源码里的
+/// `\r\n#[tauri::command]\r\n` 不匹配精确 LF 针，会切出 0 条命令使契约假红
+/// （二十三轮评审 P2）。属性独占一行才算命令（文件头注释里的反引号
+/// `#[tauri::command]` 不算）。
+fn command_bodies(source: &str) -> Vec<String> {
+    source
+        .replace("\r\n", "\n")
+        .split("\n#[tauri::command]\n")
+        .skip(1)
+        .map(str::to_string)
+        .collect()
+}
+
+/// 六条设备命令必须**每条**先过 `ensure_device_supported()` 能力门禁（第二十轮
+/// 评审 P2 的破坏面收口）：从任一命令删掉门禁调用，Rust/JS 全部测试照绿
+/// （二十一轮评审变异实证）。与上一测试同一弱文本锚定模式：每个
+/// `#[tauri::command]` 之后、下一条命令之前的函数体必须含门禁调用。
+#[test]
+fn every_device_command_calls_the_capability_gate() {
+    let bodies = command_bodies(include_str!("device.rs"));
+    assert_eq!(
+        bodies.len(),
+        6,
+        "device.rs 命令数量变了，请同步本测试与协议清单"
+    );
+    for body in &bodies {
+        let signature_end = body.find('{').expect("command body");
+        let name = body[..signature_end]
+            .split("fn ")
+            .nth(1)
+            .and_then(|rest| rest.split('(').next())
+            .unwrap_or("<unknown>");
+        assert!(
+            body.contains("ensure_device_supported()?;"),
+            "device 命令 {name} 没有调用 ensure_device_supported() 能力门禁"
+        );
+    }
+}
+
+#[test]
+fn command_body_split_is_line_ending_agnostic() {
+    let lf = "header\n#[tauri::command]\nfn a() { ensure_device_supported()?; }\n#[tauri::command]\nfn b() { ensure_device_supported()?; }\n";
+    let crlf = lf.replace('\n', "\r\n");
+    assert_eq!(command_bodies(lf).len(), 2);
+    assert_eq!(command_bodies(&crlf).len(), 2, "CRLF 检出不得把命令切丢");
+    assert_eq!(command_bodies(lf), command_bodies(&crlf));
+    // 文件头注释里的反引号属性不是命令（既有口径，归一后仍保持）。
+    assert_eq!(command_bodies("see `#[tauri::command]` docs\n").len(), 0);
+}
+
+/// doctor 上下文的命令路径必须经由带脱敏的组合函数（round-22 评审 P2）：
+/// `build_doctor_context` 是生产路径唯一的上下文组装点，改调未脱敏的
+/// `assemble_doctor_context` 会让家目录/MAC 等静默进入送往云端模型的提示词，
+/// 而 `finish_doctor_context` 本体的直打测试照绿——它们测的是函数自己，不是
+/// 这条接线。与上方门禁锚同一弱文本形状模式：函数体断言。
+#[test]
+fn build_doctor_context_routes_through_the_masking_wrapper() {
+    let source = include_str!("device.rs");
+    let start = source
+        .find("async fn build_doctor_context")
+        .expect("build_doctor_context must exist in device.rs");
+    let body = &source[start..];
+    let end = body
+        .find("\n}")
+        .expect("build_doctor_context body terminator (rustfmt closing brace)");
+    let body = &body[..end];
+    assert!(
+        body.contains("finish_doctor_context("),
+        "build_doctor_context 必须经由 finish_doctor_context（拼装+脱敏组合）组装上下文"
+    );
+    assert!(
+        !body.contains("assemble_doctor_context("),
+        "build_doctor_context 不得直接调用未脱敏的 assemble_doctor_context"
+    );
+}
+command_protocol!(
     files_protocol,
     "files.rs",
     [
@@ -599,6 +709,8 @@ command_protocol!(
         "reveal_model_api_key",
         "save_model",
         "delete_model",
+        // 三十三轮评审 P2：移除回收的条件删除（最终事务按快照身份核对）。
+        "delete_model_if_matches",
         "set_active_model",
         "set_session_model",
         "get_session_model_id",
