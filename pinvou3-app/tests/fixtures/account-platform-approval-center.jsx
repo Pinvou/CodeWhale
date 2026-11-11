@@ -16,9 +16,12 @@ globalThis.fetch = async (url, options={}) => {
  if (url.endsWith('/api/session')) return json({ authenticated: true, csrf_token: 'SYNTHETIC_ONLY_CSRF' });
  if (url.endsWith('/v1/account/bootstrap')) return json({ user_id: id, status: 'ACTIVE', personal_permissions: [], platform_permissions: control.permission ? permissions : [], platform_authorization_version: 1, active_context: { context_type: 'PERSONAL', membership_version: 1, context_version: 1, authorization_version: 1, personal_authorization_version: 1, platform_authorization_version: 1, organization_authorization_version: 1, permissions: [] } });
  if (url.endsWith('/approvals/capability')) return json({ control: { version: 1, epoch: 1, authorization_relay_epoch: 1 }, session_approval_wire_version: 2 });
- if (url.endsWith('/approvals/directory')) return control.brokenDirectory ? json({ code: 'UNAVAILABLE' }, 503) : json({ schema_version: 1, platform_authorization_version: 1, items: [ { command_type:'WALLET_ADJUSTMENT', policy_version:1, risk_class:'FINANCIAL_FACT_CHANGE', requestable:false }, { command_type:'PAYMENT_PROVIDER_RESUME', policy_version:2, risk_class:'FINANCIAL_FACT_CHANGE', requestable:true } ] }, 200, { 'X-Platform-Authorization-Version': '1' });
+ if (url.endsWith('/approvals/directory')) return control.brokenDirectory ? json({ code: 'UNAVAILABLE' }, 503) : json({ schema_version: 1, platform_authorization_version: 1, items: [ { command_type:'WALLET_ADJUSTMENT', policy_version:1, risk_class:'FINANCIAL_FACT_CHANGE', visible:true, requestable:false }, { command_type:'PAYMENT_PROVIDER_RESUME', policy_version:2, risk_class:'FINANCIAL_FACT_CHANGE', visible:true, requestable:true } ] }, 200, { 'X-Platform-Authorization-Version': '1' });
  if (url.includes('/approvals/requests?')) {
   const params=new URL(url, location.origin).searchParams;
+  if (control.listStatus) return json({code: control.listStatus === 403 ? 'PERMISSION_DENIED' : 'CONTROLLED_READ_FAILURE'},control.listStatus);
+  if (control.invalidCollection) return json(control.invalidCollection === 'foreign' ? {items:[{...detail(),requester:{user_id:other}}]} : {items:{unexpected:true}});
+  if (control.cursorStatus && params.get('cursor')) return json({code:'CONTROLLED_CONTINUATION_FAILURE'},control.cursorStatus);
   if (control.expired && params.get('cursor')) return json({code:'PAGINATION_CURSOR_EXPIRED'},410);
   const own={...detail(), allowed_actions:[]};
   const foreign={...own, approval_request_id:other, requester:{user_id:other},status:params.get('status') || 'SUBMITTED'};

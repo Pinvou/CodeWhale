@@ -123,9 +123,10 @@ export function SettingsWorkspace({ copy, language, languageFeedback, onLanguage
       setSMSState({ loading: false, saving: false, error: '', notice: { revision: result.revision, original: Boolean(attempt.unknown) } });
     } catch (error) {
       if (!current(token)) return;
+      const outcomeUnknown = !error?.status || error.status >= 500;
       if (attempt && intent.current === attempt) {
         if (error?.status === 409 && error?.code === 'SMS_CONFIGURATION_CONFLICT') attempt.conflicted = true;
-        else if (!error?.status || error.status >= 500) attempt.unknown = true;
+        else if (outcomeUnknown) attempt.unknown = true;
       }
       const message = error?.code === 'SMS_CONFIGURATION_CONFLICT'
         ? copy.settings.sms.conflict
@@ -133,7 +134,7 @@ export function SettingsWorkspace({ copy, language, languageFeedback, onLanguage
           ? copy.settings.sms.profileUnavailable
           : error?.code === 'RECENT_AUTHENTICATION_REQUIRED'
             ? copy.settings.sms.recentAuthenticationRequired
-            : attempt?.unknown ? '' : copy.settings.sms.saveFailed;
+            : attempt?.unknown && outcomeUnknown ? '' : copy.settings.sms.saveFailed;
       setSMSState({ loading: false, saving: false, error: message, notice: '' });
     }
   };

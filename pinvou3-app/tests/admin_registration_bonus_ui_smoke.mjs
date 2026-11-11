@@ -34,6 +34,7 @@ const reauthenticationRequests = [];
 const writes = [];
 let failingPolicyReads = 0;
 let invalidNextPolicyWrite = false;
+let conflictNextPolicyWrite = false;
 const rejectedPolicyWrites = [];
 let policyReads = 0;
 let pauseNextPolicyRead = false;
@@ -162,6 +163,11 @@ const server = createServer(async (request, response) => {
     const chunks = [];
     for await (const chunk of request) chunks.push(chunk);
     const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+    if (conflictNextPolicyWrite) {
+      conflictNextPolicyWrite = false;
+      rejectedPolicyWrites.push({ body, idempotencyKey: request.headers['idempotency-key'] });
+      return json(response, { code: 'REGISTRATION_BONUS_CONFLICT' }, 409);
+    }
     if (invalidNextPolicyWrite) {
       invalidNextPolicyWrite = false;
       rejectedPolicyWrites.push({ body, idempotencyKey: request.headers['idempotency-key'] });
@@ -735,6 +741,29 @@ try {
       console.log(JSON.stringify({ action: 'pass', test: `new administrator draft survives retired write ${reject ? 'network rejection' : 'ACK'}` }));
     } catch (error) { newFailures++; console.log(JSON.stringify({ action: 'fail', test: 'new administrator independent draft', reject, message: error.message })); }
     finally { release(); policyWriteGate = null; await page.close(); }
+  }
+  {
+    const stalePage=await browser.newPage(),root='[data-testid="registration-bonus-policy"]';
+    try {
+      permissions=['platform.registration-bonus.read','platform.registration-bonus.manage'];currentUserID='0199a100-0001-7000-8000-000000000101';csrfToken='csrf-user-a';
+      recentAuthenticationRequired=false;invalidNextPolicyWrite=false;failingPolicyReads=0;writes.length=0;rejectedPolicyWrites.length=0;
+      policy={...policy,revision:1400,enabled:true,amount_microcredits:250000,validity_days:30,eligibility_status:'READY'};
+      await stalePage.evaluateOnNewDocument(()=>localStorage.setItem('pinvou.admin.language','en'));
+      await stalePage.goto(`http://127.0.0.1:${port}/admin.html?section=operations`,{waitUntil:'networkidle0'});await stalePage.waitForSelector(`${root} form`);
+      await stalePage.type(`${root} textarea`,'Confirm the existing enabled policy');conflictNextPolicyWrite=true;await stalePage.click(`${root} button[type=submit]`);
+      await stalePage.waitForSelector(`${root} [role=alert] button`);assert.equal(rejectedPolicyWrites.length,1);assert.equal(writes.length,0);
+      assert.equal(await stalePage.$eval(`${root} button[type=submit]`,node=>node.disabled),true,'CAS conflict requires a fresh read');
+      const forceSubmit=()=>stalePage.$eval(`${root} form`,form=>form.dispatchEvent(new Event('submit',{bubbles:true,cancelable:true})));
+      await forceSubmit();await stalePage.waitForNetworkIdle({idleTime:100});assert.equal(rejectedPolicyWrites.length,1);assert.equal(writes.length,0,'submit handler also blocks conflict replay');
+      failingPolicyReads=1;await stalePage.click(`${root} [role=alert] button`);await stalePage.waitForFunction(text=>document.querySelector('[data-testid="registration-bonus-policy"] [role=alert] span')?.textContent===text,{},adminPlatformCopy.en.operations.loadFailed);
+      await stalePage.waitForSelector(`${root} form`);assert.equal(await stalePage.$eval(`${root} button[type=submit]`,node=>node.disabled),true,'stale enabled intent must stay blocked');
+      await forceSubmit();await stalePage.waitForNetworkIdle({idleTime:100});assert.equal(writes.length,0);assert.equal(rejectedPolicyWrites.length,1);
+      await stalePage.click(`${root} input[type=checkbox]`);assert.equal(await stalePage.$eval(`${root} button[type=submit]`,node=>node.disabled),false,'emergency disabling remains available with stale reads');
+      await stalePage.click(`${root} button[type=submit]`);await stalePage.waitForFunction(()=>document.querySelector('[data-testid="registration-bonus-policy"] .adm-registration-bonus-summary dd')?.textContent==='1401');
+      assert.equal(writes.length,1);assert.equal(writes[0].body.enabled,false);assert.equal(writes[0].body.expected_revision,1400);
+      console.log(JSON.stringify({action:'pass',test:'CAS conflict and stale enabled intents send zero writes; stale emergency disabling stays available'}));
+    } catch(error){newFailures++;console.log(JSON.stringify({action:'fail',test:'CAS conflict/stale guard and emergency disabling',message:error.message}));}
+    finally{conflictNextPolicyWrite=false;failingPolicyReads=0;await stalePage.close();}
   }
   if (newFailures) process.exitCode = 1;
   console.log('Admin registration bonus UI smoke passed');

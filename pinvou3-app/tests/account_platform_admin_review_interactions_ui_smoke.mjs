@@ -32,6 +32,13 @@ try {
       await page.waitForSelector(outcome === 'success' ? '.adm-formula-explained' : '[role=dialog] [role=alert]');
       await page.waitForFunction(() => document.activeElement?.closest('[role=dialog]'));
     }
+    if (outcome === 'failure') {
+      for (const event of [{ isComposing: true, keyCode: 0 }, { isComposing: false, keyCode: 229 }]) {
+        await page.evaluate(event => document.activeElement.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, ...event })), event);
+        assert.ok(await page.$('[role=dialog] [role=alert]'), 'IME Escape must keep the failed preview open');
+        assert.equal(await page.evaluate(() => Boolean(document.activeElement?.closest('[role=dialog]'))), true);
+      }
+    }
     await page.keyboard.press('Escape');
     await page.waitForFunction(() => !document.querySelector('[role=dialog]'));
     assert.equal(await page.$eval(trigger, node => document.activeElement === node), true, 'closing restores the original connected keyboard trigger');
