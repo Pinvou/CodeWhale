@@ -3,7 +3,7 @@ import React, { useLayoutEffect, useId, useRef } from 'react';
 import { createPortal } from 'react-dom';
 
 // Feature-local confirmation does not depend on native dialog commands.
-export function OrganizationActionConfirmation({ copy, title, target, details, onCancel, onConfirm, canRestoreFocus }) {
+export function OrganizationActionConfirmation({ copy, title, tone, target, details, onCancel, onConfirm, canRestoreFocus }) {
  const visible = usePortalDialogScope();
  const titleID = useId(), descriptionID = useId(), dialog = useRef(null), cancelButton = useRef(null), restoreAllowed = useRef(canRestoreFocus);
  restoreAllowed.current = canRestoreFocus;
@@ -25,7 +25,7 @@ export function OrganizationActionConfirmation({ copy, title, target, details, o
   <div className="ap-org-confirm-dialog" ref={dialog} role="alertdialog" aria-modal="true" aria-labelledby={titleID} aria-describedby={descriptionID} onKeyDown={keyDown}>
    <h3 id={titleID}>{title}</h3><p id={descriptionID}>{copy.confirm}</p>
    <dl>{target && <><dt>{copy.confirmationTarget}</dt><dd>{target}</dd></>}{details.map(item => <React.Fragment key={item.name}><dt>{item.label}</dt><dd>{item.value}</dd></React.Fragment>)}</dl>
-   <footer><button type="button" ref={cancelButton} onClick={onCancel}>{copy.cancelConfirmation}</button><button type="button" onClick={onConfirm}>{copy.confirmAction}</button></footer>
+   <footer><button type="button" ref={cancelButton} onClick={onCancel}>{copy.cancelConfirmation}</button><button type="button" className={tone === 'danger' ? 'ap-danger' : 'ap-primary'} onClick={onConfirm}>{copy.confirmAction}</button></footer>
   </div>
  </div>, document.body);
 }
