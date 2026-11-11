@@ -243,6 +243,18 @@ function renderMarkdown(text) { return pinvouSharedtauriMain().renderMarkdown(te
     turnPresentedArtifacts: [],
     busy: false,
     monitor: null,
+    // MegaCube 设备管理快照（bridge/device.js 轮询组装 _fmt）；非 MegaCube 平台恒 null。
+    device: null,
+    // 陈旧旗由 bridge 持有（checkDeviceStale，「最近一次成功采样超 10s」，
+    // 边缘触发 notify）；与显示等价抑制解耦（round-22 review P2）。
+    deviceStale: false,
+    deviceError: null,
+    deviceServices: null,
+    deviceServicesError: null,
+    externalModels: null,
+    // 外部模型读取错误槽：bridge 持有并按回读世代消费（手刷与登记/移除的
+    // 内部回读同一把 seq 尺子；device.js fetchExternalModels 边缘触发 notify）。
+    externalModelsError: null,
     backendOnline: null, // null=checking, true, false
     platformCapabilities: {
       loaded: false,
@@ -261,6 +273,8 @@ function renderMarkdown(text) { return pinvouSharedtauriMain().renderMarkdown(te
       // Linux. Fail-closed so the settings toggle stays disabled until
       // load_platform_capabilities corrects the slice.
       globalShortcutsAvailable: false,
+      // MegaCube 一体机（DMI product_name 含 megacube）：监控入口换成设备管理。
+      megacubeDevice: false,
     },
     settings: null,
     behaviorTelemetry: null,
@@ -2135,6 +2149,17 @@ function composePlanMarkdown(snapshots) { return pinvouSharedtauriMain().compose
   var stopMonitorPolling = monitorFeature.stopMonitorPolling;
   var clearMonitorStats = monitorFeature.clearMonitorStats;
   var pollBackendStatus = monitorFeature.pollBackendStatus;
+  // MegaCube 设备管理（bridge/device.js）：快照轮询、服务探测、外部模型与
+  // 故障排查提示词都在 feature 内组装，facade 只暴露方法面。#727 收敛后
+  // notify 即单快照全域发布，不再有 notifyDomains 通道。
+  var deviceFeature = installBridgeFeature("device", { state: state, notify: notify, invoke: invoke });
+  var startDevicePolling = deviceFeature.startDevicePolling;
+  var stopDevicePolling = deviceFeature.stopDevicePolling;
+  var pollDeviceServices = deviceFeature.pollDeviceServices;
+  var fetchExternalModels = deviceFeature.fetchExternalModels;
+  var registerExternalModel = deviceFeature.registerExternalModel;
+  var removeExternalModel = deviceFeature.removeExternalModel;
+  var buildDoctorPrompt = deviceFeature.buildDoctorPrompt;
   var settingsFeature = installBridgeFeature("settings", { state: state, notify: notify, invoke: invoke, listen: listen });
   var loadSettings = settingsFeature.loadSettings;
   var loadBehaviorTelemetryStatus = settingsFeature.loadBehaviorTelemetryStatus;
@@ -2153,6 +2178,7 @@ function composePlanMarkdown(snapshots) { return pinvouSharedtauriMain().compose
   var saveModel = settingsFeature.saveModel;
   var revealModelApiKey = settingsFeature.revealModelApiKey;
   var deleteModel = settingsFeature.deleteModel;
+  var deleteModelIfMatches = settingsFeature.deleteModelIfMatches;
   var setActiveModel = settingsFeature.setActiveModel;
   var loadSessionModel = settingsFeature.loadSessionModel;
   var switchModel = settingsFeature.switchModel;
@@ -2686,6 +2712,15 @@ function composePlanMarkdown(snapshots) { return pinvouSharedtauriMain().compose
       stopMonitorPolling: stopMonitorPolling,
       clearMonitorStats: clearMonitorStats,
     },
+    device: {
+      startDevicePolling: startDevicePolling,
+      stopDevicePolling: stopDevicePolling,
+      pollDeviceServices: pollDeviceServices,
+      fetchExternalModels: fetchExternalModels,
+      registerExternalModel: registerExternalModel,
+      removeExternalModel: removeExternalModel,
+      buildDoctorPrompt: buildDoctorPrompt,
+    },
     settings: {
       setSelectedPet: setSelectedPet,
       saveSettings: saveSettings,
@@ -2721,6 +2756,7 @@ function composePlanMarkdown(snapshots) { return pinvouSharedtauriMain().compose
       saveModel: saveModel,
       revealModelApiKey: revealModelApiKey,
       deleteModel: deleteModel,
+      deleteModelIfMatches: deleteModelIfMatches,
       setActiveModel: setActiveModel,
       loadSessionModel: loadSessionModel,
       switchModel: switchModel,

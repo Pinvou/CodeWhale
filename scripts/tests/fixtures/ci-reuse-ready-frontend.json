@@ -1,0 +1,133 @@
+{
+  "source_job": "https://github.com/Pinvou/pinvou3/actions/runs/42853460310/job/129960642043",
+  "steps": [
+    {
+      "name": "Set up job",
+      "conclusion": "success"
+    },
+    {
+      "name": "Set up runner",
+      "conclusion": "success"
+    },
+    {
+      "name": "Run actions/checkout@v7",
+      "conclusion": "success"
+    },
+    {
+      "name": "Set up zram and swap",
+      "conclusion": "success"
+    },
+    {
+      "name": "Initialize owned test resource ledger",
+      "conclusion": "success"
+    },
+    {
+      "name": "Run actions/setup-node@v7",
+      "conclusion": "success"
+    },
+    {
+      "name": "安装前端依赖",
+      "conclusion": "success"
+    },
+    {
+      "name": "Install Account Platform probe dependencies",
+      "conclusion": "success"
+    },
+    {
+      "name": "安装 Remote relay 依赖 (供 test:webui smoke)",
+      "conclusion": "success"
+    },
+    {
+      "name": "ESLint (含 pet 缺失项,现已全覆盖)",
+      "conclusion": "success"
+    },
+    {
+      "name": "ESLint (tests/scripts/eslint.config.mjs)",
+      "conclusion": "success"
+    },
+    {
+      "name": "oxlint (fast pre-check)",
+      "conclusion": "success"
+    },
+    {
+      "name": "Biome lint",
+      "conclusion": "success"
+    },
+    {
+      "name": "knip (unused files/exports)",
+      "conclusion": "success"
+    },
+    {
+      "name": "madge (circular imports)",
+      "conclusion": "success"
+    },
+    {
+      "name": "Vite build",
+      "conclusion": "success"
+    },
+    {
+      "name": "Verify embedded Account Portal assets are current",
+      "conclusion": "success"
+    },
+    {
+      "name": "Verify credential handoff built deployment boundary",
+      "conclusion": "success"
+    },
+    {
+      "name": "Vite web build (remote relay)",
+      "conclusion": "success"
+    },
+    {
+      "name": "WebView compatibility audit (Safari 14 baseline)",
+      "conclusion": "success"
+    },
+    {
+      "name": "前端逻辑测试 (pet 全套 + diff parser + markdown)",
+      "conclusion": "success"
+    },
+    {
+      "name": "Verify Account invocation environment contracts",
+      "conclusion": "success"
+    },
+    {
+      "name": "准备浏览器",
+      "conclusion": "success"
+    },
+    {
+      "name": "Credential origin real browser scope matrix",
+      "conclusion": "success"
+    },
+    {
+      "name": "Ready PR 定向浏览器 smoke",
+      "conclusion": "success"
+    },
+    {
+      "name": "Merge Queue diff-selected browser smoke",
+      "conclusion": "skipped"
+    },
+    {
+      "name": "Confirm test resource retirement",
+      "conclusion": "success"
+    },
+    {
+      "name": "Test resource lifecycle receipts",
+      "conclusion": "success"
+    },
+    {
+      "name": "Warn when frontend diagnostic delivery fails",
+      "conclusion": "skipped"
+    },
+    {
+      "name": "Post Run actions/setup-node@v7",
+      "conclusion": "success"
+    },
+    {
+      "name": "Post Run actions/checkout@v7",
+      "conclusion": "success"
+    },
+    {
+      "name": "Complete job",
+      "conclusion": "success"
+    }
+  ]
+}
