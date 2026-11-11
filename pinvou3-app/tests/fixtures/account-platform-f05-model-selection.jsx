@@ -15,7 +15,8 @@ window.TauriBridge = { available: true, models: {
  loadEffectiveModelConfig: async () => { control.calls.push('effective'); if (control.refreshFail) throw new Error('controlled refresh unavailable'); state.effectiveModelConfig = control.selected ? { model: 'public-model-a', requires_user_api_key: false, credential_state: 'backend_managed' } : null; publishModels(); return true; },
 }, state: { getMany: () => ({ ...state }), subscribeMany: (domains, callback) => { const subscriber = { domains, callback }; subscribers.add(subscriber); return () => subscribers.delete(subscriber); } }, lifecycle: { init: async () => {} } };
 const { SettingsView } = await import('../../src/features/settings/SettingsView.jsx');
-const { shouldShowModelAccessGate, useBridgeState } = await import('../../src/hooks/useBridge.js');
+const { useBridgeState } = await import('../../src/hooks/useBridge.js');
+const { resolveModelAccessState } = await import('../../src/shared/model-access-state.js');
 const client = { session: async () => ({ authenticated: control.authenticated }), modelCatalog: async () => { const retiredNow = control.retired && control.selected; if (control.retired) control.selected = false; return ({ selected_model_id: control.selected ? 'public-model-a' : null, default_model_retired: retiredNow && control.retirementMarker, catalog_version: 1, items: [{ model_id: 'public-model-a', display_name: 'Public selectable model', context_eligible: true, lifecycle_status: control.retired ? 'DEPRECATED' : 'PUBLISHED' }, { model_id: 'deprecated-future', display_name: 'Deprecated future model', context_eligible: true, lifecycle_status: 'DEPRECATED', new_session_cutoff_at: '2099-01-01T00:00:00Z' }, { model_id: 'removed-model', display_name: 'Removed model', context_eligible: true, lifecycle_status: 'REMOVED' }, { model_id: 'public-model-b', display_name: 'Public unavailable model', context_eligible: false, lifecycle_status: 'PUBLISHED' }] }); }, selectCatalogModel: async id => { control.calls.push(`select:${id}`); if (control.fail) throw new Error('controlled unavailable'); control.selected = true; } };
 const root = createRoot(document.querySelector('#root'));
 function SelectionHarness() {
@@ -25,7 +26,7 @@ function SelectionHarness() {
 control.render = async () => { await ensureLanguage(control.language); root.render(<SelectionHarness key={control.epoch} />); };
 control.seedExistingDefault = () => { control.selected = true; state.effectiveModelConfig = { model: 'public-model-a', requires_user_api_key: false, credential_state: 'backend_managed' }; state.defaultModelRef = { source: 'ACCOUNT_PLATFORM', model_id: 'public-model-a' }; publishModels(); };
 control.retire = async () => { control.retired = true; control.epoch++; await control.render(); };
-control.gate = () => shouldShowModelAccessGate(state, 'chat', true);
+control.needsModel = () => resolveModelAccessState(state, { accountStatus: 'authenticated', refreshStatus: control.refreshFail ? 'error' : 'ready' }).kind !== 'ready';
 control.defaultModelRef = () => state.defaultModelRef ?? null;
 control.copy = () => dict[control.language].uiSettingsDetail;
 window.f05 = control; await control.render();

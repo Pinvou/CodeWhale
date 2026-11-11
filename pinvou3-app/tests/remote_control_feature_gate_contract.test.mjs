@@ -65,12 +65,24 @@ test('compiled production gate is immutable under runtime environment overrides'
   rustc(['--test', helper, '-o', helperTests]);
   assert.match(run(helperTests, process.env), /2 passed; 0 failed/u);
   const host = join(directory, 'host.rs');
-  await writeFile(host, `#[path=${JSON.stringify(capabilities)}] mod capabilities;\nfn main(){ println!("{} {}", capabilities::desktop_remote_control_enabled(), capabilities::ensure_desktop_remote_control_enabled().is_ok()); }\n`);
+  // capabilities.rs 依赖同级的 platform::dmi（DMI 字段清单单一真相源，设备管理
+  // PR 第三轮评审 P2 收敛）。隔离编译改用 dmi + capabilities 双模块包装：
+  // `super::dmi` 在包装 crate 根合法解析，dmi 只读 sysfs、不触碰门禁环境变量，
+  // 门禁自身的 env 矩阵断言语义不变。
+  const dmi = fileURLToPath(new URL('platform/dmi.rs', root)).replaceAll('\\', '/');
+  const includeBoth = `#[path=${JSON.stringify(dmi)}] mod dmi;\n#[path=${JSON.stringify(capabilities)}] mod capabilities;\n`;
+  await writeFile(host, `${includeBoth}fn main(){ println!("{} {}", capabilities::desktop_remote_control_enabled(), capabilities::ensure_desktop_remote_control_enabled().is_ok()); }\n`);
   for (const buildFlag of ['0', '1']) {
     const env = { ...process.env, PINVOU_DESKTOP_CONTROLLER_BUILD_ENABLED: buildFlag };
     const unit = executable(`capabilities-${buildFlag}-tests`);
-    rustc(['--test', capabilities, '-o', unit], env);
-    assert.match(run(unit, env), /11 passed; 0 failed/u);
+    const unitWrapper = join(directory, `unit-wrapper-${buildFlag}.rs`);
+    await writeFile(unitWrapper, includeBoth);
+    rustc(['--test', unitWrapper, '-o', unit], env);
+    // 全绿且零失败：不硬钉总数——上游给 dmi/capabilities 增删测试不该让本
+    // 契约红（11→17→18 的两次跨 PR 摩擦，round-21 review P3）。首位非零保住
+    // 「测试面非空」性质：单元测试被整体删空（0 passed; 0 failed）仍要红
+    // （round-37 review P3）。
+    assert.match(run(unit, env), /[1-9]\d* passed; 0 failed/u);
     const binary = executable(`artifact-${buildFlag}`);
     rustc([host, '-o', binary], env);
     for (const runtimeFlag of [undefined, '0', '1', 'true']) {
