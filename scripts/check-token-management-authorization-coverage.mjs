@@ -148,6 +148,13 @@ export function organizationFinanceRoutes(source, handlers) {
     const pathGuard = shape?.[1];
     const handler = shape?.[2];
     if (!handler || (pathGuard && !suffix.endsWith(pathGuard)) || !shape) fail('unrecognized organization handler');
+    // A whole /:parameter is not an action. The supported action syntax is a
+    // final literal resource:action segment, guarded before every other handler.
+    const segments = suffix.split('/');
+    const actions = segments.filter(segment => segment.includes(':') && !/^:[a-z_]+$/.test(segment));
+    if (actions.length > 1 || (actions.length === 1 && (actions[0] !== segments.at(-1)
+      || !/^[a-z][a-z0-9-]*:[a-z][a-z0-9-]*$/.test(actions[0])))) fail('unrecognized organization action path');
+    if (actions.length === 1 && pathGuard !== '/' + actions[0]) fail('organization action path guard missing or mismatched');
     const body = realFunctionBody(handler);
     if (!body) fail('organization handler source missing');
     let permission;
