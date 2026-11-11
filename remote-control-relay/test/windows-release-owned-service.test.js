@@ -10,6 +10,26 @@ const core = fileURLToPath(new URL("../../scripts/windows-owned-process.cs", imp
 const orchestrator = fileURLToPath(new URL("../../scripts/run-windows-remote-control-e2e.ps1", import.meta.url));
 const driverSource = fileURLToPath(new URL("./fixtures/windows-owned-driver.cs", import.meta.url));
 const ui = fileURLToPath(new URL("../../pinvou3-app/scripts/remote-control-ui-smoke.mjs", import.meta.url));
+const jobDiagnostics = `using System;
+using System.Runtime.InteropServices;
+public static class FixtureJobMembers {
+  [DllImport("kernel32.dll")]
+  static extern bool QueryInformationJobObject(IntPtr job, int kind, IntPtr data, int size, IntPtr returned);
+  public static int[] Read(object scope) {
+    var field = scope.GetType().GetField("Handle", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+    var job = (IntPtr)field.GetValue(scope);
+    int size = 8 + 64 * IntPtr.Size;
+    var data = Marshal.AllocHGlobal(size);
+    try {
+      if (!QueryInformationJobObject(job, 3, data, size, IntPtr.Zero)) throw new Exception("fixture_job_query_failed");
+      int count = Marshal.ReadInt32(data, 4);
+      if (count < 1 || count > 64) throw new Exception("fixture_job_members_invalid");
+      var result = new int[count];
+      for (int i = 0; i < count; i++) result[i] = (int)Marshal.ReadIntPtr(data, 8 + i * IntPtr.Size);
+      return result;
+    } finally { Marshal.FreeHGlobal(data); }
+  }
+}`;
 
 for (const shell of ["powershell.exe", "pwsh"]) {
   test(`real runspace staging retains nonce-owned services until production final cleanup [${shell}]`,
@@ -26,7 +46,7 @@ for (const shell of ["powershell.exe", "pwsh"]) {
         $extra=@{};$extra[${quote(driverSource)}]=(Get-FileHash -LiteralPath ${quote(driverSource)} -Algorithm SHA256).Hash.ToLowerInvariant();$extra[$reference]=(Get-FileHash -LiteralPath $reference -Algorithm SHA256).Hash.ToLowerInvariant();
         $build=Invoke-PinvouWhitelistedProcess -FilePath $csc -ExpectedSha256 (Get-FileHash -LiteralPath $csc -Algorithm SHA256).Hash.ToLowerInvariant() -Arguments @('/nologo','/target:exe',('/out:'+$compiled),('/r:'+$reference),${quote(driverSource)}) -AdditionalExpectedSha256 $extra;
         if($build.ExitCode -ne 0){throw 'fixture-driver-build-failed'};
-        Add-Type -TypeDefinition 'using System;using System.Collections.Generic;using System.Diagnostics;using System.Runtime.InteropServices;public static class FixtureJobMembers{[DllImport("kernel32.dll")]static extern bool QueryInformationJobObject(IntPtr j,int c,IntPtr p,int n,IntPtr r);public static string Describe(object scope){var h=(IntPtr)scope.GetType().GetField("Handle",System.Reflection.BindingFlags.NonPublic|System.Reflection.BindingFlags.Instance).GetValue(scope);var p=Marshal.AllocHGlobal(520);try{if(!QueryInformationJobObject(h,3,p,520,IntPtr.Zero))throw new Exception("fixture_job_query_failed");var result=new List<string>();int count=Marshal.ReadInt32(p,4);for(int i=0;i<count;i++){int id=(int)Marshal.ReadIntPtr(p,8+i*IntPtr.Size);using(var process=Process.GetProcessById(id))result.Add(id+":"+process.ProcessName);}return String.Join(",",result);}finally{Marshal.FreeHGlobal(p);}}}';
+        Add-Type -TypeDefinition ${quote(jobDiagnostics)};
         [Console]::Error.WriteLine('fixture-phase:compiled');
         $tokens=$null;$errors=$null;$ast=[Management.Automation.Language.Parser]::ParseFile(${quote(orchestrator)},[ref]$tokens,[ref]$errors);if($errors.Count){throw 'orchestrator-parse-failed'};
         $create=$ast.Find({param($n)$n -is [Management.Automation.Language.AssignmentStatementAst] -and $n.Left.Extent.Text -eq '$RemoteCreateStaging'},$true).Right.Extent.Text;
@@ -60,7 +80,22 @@ for (const shell of ["powershell.exe", "pwsh"]) {
             if($owned.active.Count -ne 1){throw 'durable-ownership-not-confirmed'};
             [void](Invoke-PinvouTrustedGuard -FilePath $driver -Arguments @('start-role','--role','A'));
             if($global:PinvouE2EOwnedProcessScopes.Count -ne 2){throw 'run-scopes-not-retained'};
-            foreach($scope in $global:PinvouE2EOwnedProcessScopes){if($scope.ActiveProcesses -ne 1){throw ('real-service-not-live:'+ $scope.ActiveProcesses+':'+[FixtureJobMembers]::Describe($scope))}};
+            function global:Assert-FixtureLiveScopes {
+              $records=(Get-Content -LiteralPath (Join-Path $global:PinvouE2ERunRoot 'fixture-owned-processes.json') -Raw|ConvertFrom-Json).children;
+              if($records.Count -ne 2 -or $global:PinvouE2EOwnedProcessScopes.Count -ne 2){throw 'fixture-custody-count-invalid'};
+              for($i=0;$i -lt 2;$i++) {
+                $record=$records[$i];$scope=$global:PinvouE2EOwnedProcessScopes[$i];
+                # A logical service also has an OS console companion on Windows.
+                # Verify its exact identity and membership, not a guessed count.
+                if($scope.ActiveProcesses -lt 1 -or [FixtureJobMembers]::Read($scope) -notcontains [int]$record.pid){throw 'real-service-not-in-owned-job'};
+                $process=[Diagnostics.Process]::GetProcessById([int]$record.pid);
+                try {
+                  if($process.HasExited -or $process.StartTime.ToUniversalTime().Ticks -ne $record.creation_ticks -or $process.MainModule.FileName -ine $record.executable){throw 'real-service-identity-invalid'};
+                  if((Get-FileHash -LiteralPath $record.executable -Algorithm SHA256).Hash.ToLowerInvariant() -ne $record.sha256){throw 'real-service-image-invalid'};
+                } finally { $process.Dispose() }
+              }
+            };
+            Assert-FixtureLiveScopes;
             $runtime.pid
           }).AddArgument($nonce);
           $second=@($ps.Invoke());if($ps.HadErrors){throw ($ps.Streams.Error|Out-String)};$legacyPid=[int]$second[-1];$ps.Commands.Clear();
@@ -68,6 +103,7 @@ for (const shell of ["powershell.exe", "pwsh"]) {
           [void]$ps.AddScript({param($root,$base,$nonce,$legacyPid,$cleanup)
             $ErrorActionPreference='Stop';
             if($global:PinvouE2EOwnedProcessScopes.Count -ne 2){throw 'scope-custody-lost-between-invocations'};
+            Assert-FixtureLiveScopes;
             $global:savedScopes=@($global:PinvouE2EOwnedProcessScopes);
             $RemoteRoot=$root;$RemoteBase=$base;$runNonce=$nonce;$cleanupLegacyOwned=$true;$cleanupLegacyPid=[Nullable[int]]$legacyPid;
             $LegacyGatewayUrl='fixture';$cleanupRouteId='fixture';$cleanupOriginalStateDigest='original';$cleanupCanonicalInputDigest='canonical';$cleanupControlPlaneDigest='before';$actualHead='fixture';
