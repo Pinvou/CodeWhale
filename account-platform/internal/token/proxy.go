@@ -282,16 +282,21 @@ func (s *Service) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, ErrForbidden)
 		return
 	}
-	envelope := DispatchEnvelope{BaseURL: credential.BaseURL, Provider: credential.Provider, AdapterVersion: s.executionUpstream.AdapterVersion(), Credential: append([]byte(nil), secret...), RequestBody: upstreamBody, Price: price, Stream: request.Stream, MaximumCost: maximumCost, MaximumOutput: maximumUsage.OutputTokens, ContextType: resolved.ContextType, OrganizationID: resolved.OrganizationID, CanPurchaseOrganizationEntitlements: slices.Contains(resolved.Permissions, "org.entitlements.purchase")}
-	circuitKey := resilience.Key(envelope.Provider, "MODEL_DISPATCH", envelope.BaseURL)
+	circuitKey := resilience.Key(credential.Provider, "MODEL_DISPATCH", credential.BaseURL)
 	if circuitErr := s.breaker.BeforeHighRisk(circuitKey); circuitErr != nil {
 		var open *resilience.CircuitOpenError
 		if errors.As(circuitErr, &open) {
 			w.Header().Set("Retry-After", strconv.Itoa(max(1, int(open.RetryAfter.Seconds()+0.999))))
 		}
-		s.writeCircuitOpenFailure(w, r, usageRequest.ID)
+		s.writeCircuitOpenFailure(w, r, usageRequest.ID, func() {
+			s.probeDispatchCircuit(r.Context(), credential, catalogModel)
+			if current := s.breaker.BeforeHighRisk(circuitKey); errors.As(current, &open) {
+				w.Header().Set("Retry-After", strconv.Itoa(max(1, int(open.RetryAfter.Seconds()+0.999))))
+			}
+		})
 		return
 	}
+	envelope := DispatchEnvelope{BaseURL: credential.BaseURL, Provider: credential.Provider, AdapterVersion: s.executionUpstream.AdapterVersion(), Credential: append([]byte(nil), secret...), RequestBody: upstreamBody, Price: price, Stream: request.Stream, MaximumCost: maximumCost, MaximumOutput: maximumUsage.OutputTokens, ContextType: resolved.ContextType, OrganizationID: resolved.OrganizationID, CanPurchaseOrganizationEntitlements: slices.Contains(resolved.Permissions, "org.entitlements.purchase")}
 	if err := s.repository.PrepareDispatch(r.Context(), usageRequest.ID, envelope); err != nil {
 		// A preparation write may have committed despite a missing ACK, and a
 		// same-key actor may already hold funds or have dispatched. Read only:
@@ -441,6 +446,10 @@ func (s *Service) dispatchUsage(w http.ResponseWriter, r *http.Request, usageReq
 		api.WriteError(w, http.StatusAccepted, "USAGE_REVIEW", "the model request requires reconciliation", httpserver.RequestID(r.Context()))
 		return
 	}
+	// AcquireDispatch already consumed the one-shot envelope. Preserve that
+	// authorization; its result may not close or change a later circuit episode.
+	permit := s.breaker.TrackAccepted(resilience.Key(envelope.Provider, "MODEL_DISPATCH", envelope.BaseURL))
+	defer permit.Cancel()
 	holdID := *usageRequest.HoldID
 	r = r.WithContext(withDispatchLeaseOwner(r.Context(), envelope.leaseOwner))
 	dispatchContext, cancelDispatch := context.WithCancel(context.WithoutCancel(r.Context()))
@@ -482,7 +491,7 @@ func (s *Service) dispatchUsage(w http.ResponseWriter, r *http.Request, usageReq
 		response, err = s.executionUpstream.Do(upstreamContext, envelope.BaseURL, envelope.Credential, envelope.RequestBody, usageRequest.ID)
 	}
 	if err != nil {
-		s.breaker.Record(resilience.Key(envelope.Provider, "MODEL_DISPATCH", envelope.BaseURL), resilience.UncertainResult)
+		permit.Record(resilience.UncertainResult)
 		select {
 		case <-renewalFailed:
 			_ = s.repository.MarkReview(context.WithoutCancel(r.Context()), usageRequest.ID, "hold_renewal_failed", map[string]any{"upstream_cancelled": true})
@@ -496,11 +505,11 @@ func (s *Service) dispatchUsage(w http.ResponseWriter, r *http.Request, usageReq
 	}
 	defer response.Body.Close()
 	if response.StatusCode >= 200 && response.StatusCode < 300 {
-		s.breaker.Record(resilience.Key(envelope.Provider, "MODEL_DISPATCH", envelope.BaseURL), resilience.Success)
+		permit.Record(resilience.Success)
 	} else if response.StatusCode >= 500 || response.StatusCode == http.StatusTooManyRequests {
-		s.breaker.Record(resilience.Key(envelope.Provider, "MODEL_DISPATCH", envelope.BaseURL), resilience.InfrastructureFailure)
+		permit.Record(resilience.InfrastructureFailure)
 	} else {
-		s.breaker.Record(resilience.Key(envelope.Provider, "MODEL_DISPATCH", envelope.BaseURL), resilience.BusinessRejection)
+		permit.Record(resilience.BusinessRejection)
 	}
 	if upstreamRequestID := s.executionUpstream.UpstreamRequestID(response); upstreamRequestID != "" {
 		_ = s.repository.RecordUpstreamRequest(context.WithoutCancel(r.Context()), usageRequest.ID, UpstreamRequestEvidence{ProviderID: envelope.Provider, AdapterVersion: s.executionUpstream.AdapterVersion(), RequestID: upstreamRequestID})
@@ -763,17 +772,22 @@ func (s *Service) replayStoredUsage(w http.ResponseWriter, r *http.Request, usag
 // the original acceptance and persists its failure receipt in one transaction;
 // failed/unknown acknowledgements are resolved only through a fresh read.
 func (s *Service) writeCredentialLookupFailure(w http.ResponseWriter, r *http.Request, usageID uuid.UUID) {
-	s.writeUndispatchedFailure(w, r, usageID, "PROVIDER_CREDENTIAL_UNAVAILABLE", "the accepted model request failed before dispatch because its credential was unavailable", s.repository.FailCredentialBeforeDispatch)
+	s.writeUndispatchedFailure(w, r, usageID, "PROVIDER_CREDENTIAL_UNAVAILABLE", "the accepted model request failed before dispatch because its credential was unavailable", s.repository.FailCredentialBeforeDispatch, nil)
 }
 
-func (s *Service) writeCircuitOpenFailure(w http.ResponseWriter, r *http.Request, usageID uuid.UUID) {
-	s.writeUndispatchedFailure(w, r, usageID, "PROVIDER_CIRCUIT_OPEN", "the selected provider route is temporarily unavailable", s.repository.FailCircuitBeforeDispatch)
+func (s *Service) writeCircuitOpenFailure(w http.ResponseWriter, r *http.Request, usageID uuid.UUID, afterPersist func()) {
+	s.writeUndispatchedFailure(w, r, usageID, "PROVIDER_CIRCUIT_OPEN", "the selected provider route is temporarily unavailable", s.repository.FailCircuitBeforeDispatch, afterPersist)
 }
 
-func (s *Service) writeUndispatchedFailure(w http.ResponseWriter, r *http.Request, usageID uuid.UUID, code, message string, persist func(context.Context, uuid.UUID, ReplayResult) (bool, error)) {
+func (s *Service) writeUndispatchedFailure(w http.ResponseWriter, r *http.Request, usageID uuid.UUID, code, message string, persist func(context.Context, uuid.UUID, ReplayResult) (bool, error), afterPersist func()) {
 	payload, err := json.Marshal(api.Error{Code: code, Message: message, RequestID: httpserver.RequestID(r.Context()), Details: map[string]any{"usage_request_id": usageID, "execution_status": "FAILED", "settlement_status": "RELEASED", "status_url": "/v1/usage-requests/" + usageID.String()}})
 	if err == nil {
-		_, _ = persist(r.Context(), usageID, ReplayResult{Kind: "JSON", HTTPStatus: http.StatusServiceUnavailable, ContentType: "application/json", Payload: payload})
+		failed, persistErr := persist(r.Context(), usageID, ReplayResult{Kind: "JSON", HTTPStatus: http.StatusServiceUnavailable, ContentType: "application/json", Payload: payload})
+		// A bounded probe runs only after this untouched failure is confirmed.
+		// Unknown writes or another actor's effects still take only the old read.
+		if failed && persistErr == nil && afterPersist != nil {
+			afterPersist()
+		}
 	}
 	s.writeAcceptedUsageProjection(w, r, usageID)
 }

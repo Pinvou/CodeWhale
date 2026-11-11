@@ -50,6 +50,7 @@ pub use connectors::ima::{IMA_SKILL_ID, IMA_SKILL_VERSION, ImaConnectorStatus, s
 // mirror predated the widening).
 pub mod deliverables;
 pub mod dependencies;
+pub(crate) mod device;
 pub mod feedback;
 pub mod files;
 pub(crate) mod global_shortcut;

@@ -162,19 +162,28 @@ func TestOrdinaryPortalBodylessStatusUsesRealHTTPWriter(t *testing.T) {
 	}
 }
 
-type portalShortResponseWriter struct{ header http.Header }
+type portalShortResponseWriter struct {
+	header http.Header
+	writes int
+}
 
 func (w *portalShortResponseWriter) Header() http.Header { return w.header }
 func (w *portalShortResponseWriter) WriteHeader(int)     {}
 func (w *portalShortResponseWriter) Write(body []byte) (int, error) {
+	w.writes++
 	return len(body) - 1, nil
 }
 
 func TestOrdinaryPortalShortDeliveryAborts(t *testing.T) {
+	writer := &portalShortResponseWriter{header: make(http.Header)}
 	defer func() {
 		if recovered := recover(); recovered != http.ErrAbortHandler {
 			t.Fatal("short response write did not abort HTTP", recovered)
 		}
+		if writer.writes != 1 {
+			t.Fatalf("continued writing after short delivery: %d calls", writer.writes)
+		}
 	}()
-	forwardOrdinaryAPIResponse(&portalShortResponseWriter{header: make(http.Header)}, httptest.NewRequest(http.MethodGet, "/", nil), &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader("complete-original-body")), ContentLength: -1})
+	body := strings.NewReader(strings.Repeat("complete-original-body", 256))
+	forwardOrdinaryAPIResponse(writer, httptest.NewRequest(http.MethodGet, "/", nil), &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(body), ContentLength: -1})
 }
