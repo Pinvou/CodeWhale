@@ -197,29 +197,7 @@ pub fn prepare_tools_for_strict_mode(tools: &mut [Tool]) -> bool {
             // Count the hybrid-map narrowings on the authored shape before
             // the enforce pass overwrites them, so the note can say so.
             let narrowed_maps = count_strict_map_narrowings(&tool.input_schema);
-            let original_schema = tool.input_schema.clone();
             let removed_optionals = sanitize_for_strict(&mut tool.input_schema);
-            // The strict contract removes every property the schema left
-            // optional. A tool whose whole root property set was optional is
-            // left with no way to pass any parameter while its runtime still
-            // demands them (action-discriminated tools mark everything
-            // optional and dispatch on the values `execute` re-reads) — that
-            // shape cannot serve the tool's contract under a strict flag, so
-            // it ships unchanged and non-strict, the same fail-closed rule
-            // as required nullables. No removal note either: nothing was
-            // removed from the schema that ships.
-            let emptied = tool
-                .input_schema
-                .get("properties")
-                .and_then(Value::as_object)
-                .is_some_and(Map::is_empty)
-                && !removed_optionals.is_empty();
-            if emptied {
-                tool.input_schema = original_schema;
-                tool.strict = None;
-                all_strict = false;
-                continue;
-            }
             if !removed_optionals.is_empty() || narrowed_maps > 0 {
                 let note = strict_removal_note(&removed_optionals, narrowed_maps);
                 let context = STRICT_REMOVAL_CONTEXT_NOTES
@@ -401,29 +379,6 @@ pub fn sanitize_for_responses(schema: &mut Value) -> Option<String> {
 fn strict_schema_supported(schema: &Value) -> bool {
     let mut normalized = schema.clone();
     sanitize(&mut normalized);
-    // A root map shape — no properties of its own beside a `true` or
-    // schema-valued `additionalProperties` — collapses under the enforce
-    // pass into `additionalProperties: false` plus an empty `properties`
-    // map: `strict: true` callable only with `{}` while the tool's
-    // runtime reads arbitrary keys. The authored no-argument roots that
-    // stay strict are the ones whose `additionalProperties` is absent or
-    // already `false` (tools that take no values at all); the same shape
-    // fails closed one level down through the gate's nested rule, so the
-    // root fails closed here, while the authored keyword shape is still
-    // visible. A node the enforce pass would not normalize at all keeps
-    // the keyword and is caught by the detector below.
-    if normalized
-        .get("properties")
-        .and_then(Value::as_object)
-        .is_none_or(Map::is_empty)
-        && normalized
-            .get("additionalProperties")
-            .is_some_and(|additional| {
-                !additional.is_boolean() || additional.as_bool() == Some(true)
-            })
-    {
-        return false;
-    }
     // The enforce pass strips some constraints before the compatibility
     // gate below can judge them: a null `const` (dropped outright) and a
     // schema-form draft-7 `dependencies` table (dropped with the name-table
@@ -440,6 +395,27 @@ fn strict_schema_supported(schema: &Value) -> bool {
     // forces the tool non-strict, while the same shape under a required
     // property still does.
     enforce_strict_subset(&mut normalized, &mut Vec::new());
+    // A root whose enforced property set is empty cannot serve a strict
+    // flag: `properties: {}` beside `additionalProperties: false` is
+    // callable only with `{}`, and a runtime that reads any value at all —
+    // a kwargs-style map, or an action whose parameters were all optional —
+    // gets every call rejected by the endpoint no matter what the model
+    // sends. Authored no-argument tools lose nothing by shipping their
+    // original schema non-strict: strict adds nothing to a tool that takes
+    // no values. Map-shaped roots (schema-form or `true`
+    // `additionalProperties` beside no properties), bare `{"type":"object"}`,
+    // and all-optional roots all collapse to that empty shape once the
+    // enforce pass has run. A typeless node carrying a non-`false`
+    // `additionalProperties` is not normalized into an object at all and
+    // keeps the authored keyword — caught by the detector above.
+    if normalized.as_object().is_some_and(is_object_schema)
+        && normalized
+            .get("properties")
+            .and_then(Value::as_object)
+            .is_none_or(Map::is_empty)
+    {
+        return false;
+    }
     !has_strict_incompatible_composition(&normalized, true)
 }
 
@@ -867,14 +843,15 @@ fn strip_unsupported_strict_keywords(obj: &mut Map<String, Value>) {
         }
     }
     // `format` is documented with an enumerated set (email, hostname,
-    // ipv4, ipv6, uuid); any other value ships a constraint outside that
-    // list, so it is dropped — dropping a format only widens what the
+    // ipv4, ipv6, uuid); any other value — including a non-string one, a
+    // malformed shape in its own right — ships a constraint outside that
+    // list, so it is dropped. Dropping a format only widens what the
     // endpoint accepts. A draft-4 boolean `exclusiveMinimum`/`Maximum`
     // is likewise outside the documented numeric form.
-    if obj
+    if !obj
         .get("format")
         .and_then(Value::as_str)
-        .is_some_and(|format| !matches!(format, "email" | "hostname" | "ipv4" | "ipv6" | "uuid"))
+        .is_some_and(|format| matches!(format, "email" | "hostname" | "ipv4" | "ipv6" | "uuid"))
     {
         obj.remove("format");
     }
@@ -883,17 +860,14 @@ fn strip_unsupported_strict_keywords(obj: &mut Map<String, Value>) {
             obj.remove(key);
         }
     }
-    match obj.get("type").and_then(Value::as_str) {
-        Some("string") => {
-            obj.remove("minLength");
-            obj.remove("maxLength");
-        }
-        Some("array") => {
-            obj.remove("minItems");
-            obj.remove("maxItems");
-        }
-        _ => {}
-    }
+    // The length and item-count bounds are named "Unsupported parameters"
+    // by the strict documents without qualifying placement, so they strip
+    // wherever they appear — on typed nodes, and on typeless nodes that
+    // imply the bound's type. Both strips only widen.
+    obj.remove("minLength");
+    obj.remove("maxLength");
+    obj.remove("minItems");
+    obj.remove("maxItems");
 }
 
 fn is_object_schema(obj: &Map<String, Value>) -> bool {
@@ -1999,14 +1973,14 @@ mod tests {
 
     #[test]
     fn strict_mode_fails_closed_on_a_root_map_shape() {
-        // A root that declares no properties but takes arbitrary keys
-        // (`additionalProperties` in schema form or `true`) collapses under
-        // the enforce pass into `properties: {}` +
-        // `additionalProperties: false` — `strict: true` callable only with
-        // `{}` while the runtime reads the keys. It ships unchanged and
-        // non-strict instead. The authored no-argument roots that stay
-        // strict are the ones whose `additionalProperties` is absent or
-        // already `false`.
+        // A root whose enforced property set is empty ships `strict: true`
+        // callable only with `{}` while the runtime reads whatever it wants:
+        // a kwargs map (schema-form or `true` `additionalProperties`), a
+        // bare `{"type":"object"}`, an authored no-argument root, and an
+        // all-optional root all collapse to that shape under the enforce
+        // pass. Every one of them ships unchanged and non-strict — strict
+        // adds nothing to a tool that takes no values, and the model must
+        // never face a schema that forbids the parameters a call needs.
         let mut map_schema = vec![test_tool(
             "annotate",
             json!({
@@ -2035,6 +2009,8 @@ mod tests {
         assert!(!prepare_tools_for_strict_mode(&mut open_map));
         assert_eq!(open_map[0].strict, None);
 
+        // An authored no-argument root: strict adds nothing, so it ships
+        // non-strict like every other empty-property root.
         let mut no_arg = vec![test_tool(
             "ping",
             json!({
@@ -2042,8 +2018,45 @@ mod tests {
                 "additionalProperties": false
             }),
         )];
-        assert!(prepare_tools_for_strict_mode(&mut no_arg));
-        assert_eq!(no_arg[0].strict, Some(true));
+        assert!(!prepare_tools_for_strict_mode(&mut no_arg));
+        assert_eq!(no_arg[0].strict, None);
+        assert_eq!(
+            no_arg[0].input_schema,
+            json!({
+                "type": "object",
+                "additionalProperties": false
+            }),
+            "the authored schema ships unchanged"
+        );
+
+        // A bare object root — JSON-Schema semantics "any object with any
+        // keys", the kwargs shape free-form MCP tools use — is the same
+        // trap one keyword earlier.
+        let mut bare = vec![test_tool(
+            "kwargs",
+            json!({"type": "object"}),
+        )];
+        assert!(!prepare_tools_for_strict_mode(&mut bare));
+        assert_eq!(bare[0].strict, None);
+
+        // An all-optional root empties out under the removal pass.
+        let mut all_optional = vec![test_tool(
+            "dispatch",
+            json!({
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string"},
+                    "target": {"type": "string"}
+                }
+            }),
+        )];
+        assert!(!prepare_tools_for_strict_mode(&mut all_optional));
+        assert_eq!(all_optional[0].strict, None);
+        assert_eq!(
+            all_optional[0].input_schema["properties"]["action"],
+            json!({"type": "string"}),
+            "the authored schema ships unchanged"
+        );
     }
 
     #[test]
