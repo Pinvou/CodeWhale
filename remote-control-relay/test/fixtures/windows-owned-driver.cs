@@ -23,10 +23,20 @@ public sealed class DriverRegistry {
     public List<ChildRecord> children = new List<ChildRecord>();
 }
 public static class OwnedDriverFixture {
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern IntPtr GetStdHandle(int kind);
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern bool SetHandleInformation(IntPtr handle, uint mask, uint flags);
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    private struct Startup {
+        public int Size; public string Reserved, Desktop, Title;
+        public int X, Y, XSize, YSize, XCount, YCount, Fill, Flags;
+        public short Show, ReservedSize; public IntPtr ReservedBytes, Input, Output, Error;
+    }
+    [StructLayout(LayoutKind.Sequential)]
+    private struct Started { public IntPtr Process, Thread; public uint ProcessId, ThreadId; }
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern bool CreateProcessW(string application, StringBuilder command,
+        IntPtr processAttributes, IntPtr threadAttributes, bool inheritHandles, uint flags,
+        IntPtr environment, string directory, ref Startup startup, out Started started);
+    [DllImport("kernel32.dll")]
+    private static extern bool CloseHandle(IntPtr handle);
     private static readonly JavaScriptSerializer Json = new JavaScriptSerializer();
     private static readonly string Root = AppDomain.CurrentDomain.BaseDirectory;
     private static readonly string Ledger = Path.Combine(Root, "fixture-owned-processes.json");
@@ -54,21 +64,17 @@ public static class OwnedDriverFixture {
             if (registry.nonce != null && nonce != registry.nonce) throw new Exception("fixture_owner_mismatch");
             registry.nonce = nonce;
             if (args[0] == "legacy-start" || args[0] == "start-role") {
-                // A detached service owns fresh redirected streams. Do not let
-                // Framework Process.Start also inherit the launcher's original
-                // command pipes, which would keep its completion EOF open.
-                foreach (int kind in new[] { -10, -11, -12 }) {
-                    IntPtr handle = GetStdHandle(kind);
-                    if (handle != IntPtr.Zero && handle != new IntPtr(-1)
-                        && !SetHandleInformation(handle, 1, 0))
-                        throw new Exception("fixture_stdio_inheritance_failed");
-                }
                 string executable = Path.Combine(Root, "legacy-relay.exe");
-                var info = new ProcessStartInfo(executable, "-e \"setInterval(()=>{},1000)\"") {
-                    UseShellExecute = false, CreateNoWindow = true,
-                    RedirectStandardInput = true, RedirectStandardOutput = true, RedirectStandardError = true,
-                };
-                using (var child = Process.Start(info)) {
+                // A normal long-lived producer must detach its IO as well as
+                // its command root. Inherit no launcher pipe handles. Windows
+                // still assigns this child to the existing private nested Job.
+                var startup = new Startup { Size = Marshal.SizeOf(typeof(Startup)) };
+                Started started;
+                if (!CreateProcessW(executable, new StringBuilder("\"" + executable + "\" -e \"setInterval(()=>{},1000)\""),
+                    IntPtr.Zero, IntPtr.Zero, false, 0x08000000, IntPtr.Zero, Root, ref startup, out started))
+                    throw new Exception("fixture_service_start_failed");
+                CloseHandle(started.Thread);
+                try { using (var child = Process.GetProcessById((int)started.ProcessId)) {
                     File.AppendAllText(Path.Combine(Root, "fixture-driver-phase.log"), "child-started\n");
                     registry.children.Add(new ChildRecord { pid = child.Id,
                         creation_ticks = child.StartTime.ToUniversalTime().Ticks,
@@ -79,7 +85,7 @@ public static class OwnedDriverFixture {
                     File.AppendAllText(Path.Combine(Root, "fixture-driver-phase.log"), "ownership-saved\n");
                     Print(new { schema = "pinvou-fixture-runtime", pid = child.Id, mock = false });
                     File.AppendAllText(Path.Combine(Root, "fixture-driver-phase.log"), "response-written\n");
-                }
+                } } finally { CloseHandle(started.Process); }
             } else if (args[0] == "legacy-owned-pids") {
                 Print(new { schema = "pinvou-legacy-owned-processes", version = 1,
                     run_nonce = nonce, mock = false,
