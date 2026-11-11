@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { once } from "node:events";
+import { EventEmitter } from "node:events";
+import { PassThrough } from "node:stream";
 import crypto from "node:crypto";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -13,6 +15,62 @@ const orchestrator = fileURLToPath(new URL("../../scripts/run-windows-remote-con
 const env = buildReleaseSubprocessEnvironment(process.env, "test");
 const nodeHash = crypto.createHash("sha256").update(readFileSync(process.execPath)).digest("hex");
 const quote = (text) => `'${text.replaceAll("'", "''")}'`;
+
+test("a command cannot consume its supervisor's private control input", async () => {
+  await runReleaseProcess(process.execPath, ["-e", "if(require('node:fs').readFileSync(0).length!==0)process.exitCode=41"],
+    { env, timeoutMs: 5000 });
+});
+
+test("missing acknowledgement settles at the first bounded cleanup deadline without close", async () => {
+  // No OS child exists in this fault probe. Only spawn and the clock are
+  // controlled; execute the actual runner body, including its unchanged 20s
+  // budget, and never synthesize a child close/retirement acknowledgement.
+  const key = Symbol.for("pinvou.release.runner.clock.probe");
+  for (const mode of ["timeout", "cancelled"]) {
+    let now = 0, next = 0;
+    const timers = new Map();
+    const kills = [];
+    const child = Object.assign(new EventEmitter(), { pid: 1234, stdin: new PassThrough(),
+      stdout: new PassThrough(), stderr: new PassThrough(),
+      kill: (signal) => { kills.push(signal); return false; }, unref: () => {} });
+    const clock = {
+      spawn: () => child,
+      setTimeout: (fn, ms) => { const id = ++next; timers.set(id, { fn, at: now + ms }); return id; },
+      clearTimeout: (id) => timers.delete(id),
+      advance: (ms) => {
+        const end = now + ms;
+        while (true) {
+          const due = [...timers].filter(([, value]) => value.at <= end).sort((a, b) => a[1].at - b[1].at)[0];
+          if (!due) break;
+          timers.delete(due[0]); now = due[1].at; due[1].fn();
+        }
+        now = end;
+      },
+    };
+    globalThis[key] = clock;
+    try {
+      let source = readFileSync(new URL("../scripts/release-process.mjs", import.meta.url), "utf8");
+      assert.ok(source.includes('import { spawn } from "node:child_process";'));
+      source = source.replace('import { spawn } from "node:child_process";',
+        'const {spawn,setTimeout,clearTimeout}=globalThis[Symbol.for("pinvou.release.runner.clock.probe")];');
+      assert.match(source, /^const supervisor = .+;$/mu);
+      source = source.replace(/^const supervisor = .+;$/mu, 'const supervisor="controlled-supervisor";');
+      const module = await import(`data:text/javascript;base64,${Buffer.from(source + `\n//${crypto.randomUUID()}`).toString("base64")}`);
+      const abort = new AbortController();
+      const result = module.runReleaseProcess(process.execPath, [], { env, timeoutMs: 1000, signal: abort.signal })
+        .then(() => ({ success: true }), (error) => ({ error }));
+      if (mode === "cancelled") abort.abort();
+      clock.advance(mode === "cancelled" ? 20000 : 21000);
+      const actual = await Promise.race([result, new Promise((resolve) => setImmediate(() => resolve({ unsettled: true })))]);
+      assert.equal(actual.unsettled, undefined, "cleanup cannot depend on a missing close event or a later timeout resetting cancellation");
+      assert.equal(actual.error.code, `release_subgate_${mode}`);
+      assert.equal(actual.error.cleanupConfirmed, false);
+      assert.equal(actual.error.cleanupError, "release_subgate_cleanup_unconfirmed");
+      assert.deepEqual(kills, ["SIGKILL"]);
+      assert.ok(child.stdout.destroyed && child.stderr.destroyed && child.stdin.destroyed);
+    } finally { delete globalThis[key]; }
+  }
+});
 
 test("real release runner drains both pipes beyond capacity without exposing diagnostics", async () => {
   await runReleaseProcess(process.execPath, ["-e", `
@@ -79,6 +137,13 @@ test("release runner pre-start cancellation and invalid budget launch nothing", 
     { env, signal: AbortSignal.abort() }), { code: "release_subgate_cancelled" });
   await assert.rejects(runReleaseProcess("does-not-exist", [], { env, timeoutMs: 0 }),
     { code: "release_subgate_timeout_invalid" });
+});
+
+test("a missing command reports a bounded start failure without a leaked child", async () => {
+  await assert.rejects(runReleaseProcess("pinvou-missing-owned-command-1449", [], { env, timeoutMs: 5000 }),
+    { code: "release_subgate_start_failed", cleanupConfirmed: true });
+  await assert.rejects(runReleaseProcess(process.execPath, ["bad\0argument"], { env }),
+    { code: "release_subgate_command_invalid" });
 });
 
 test("owned command retirement does not terminate an unrelated live sentinel", async () => {

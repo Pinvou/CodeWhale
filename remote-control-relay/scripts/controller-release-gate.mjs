@@ -158,7 +158,8 @@ if (isDirectCliEntry(import.meta.url)) {
   runControllerReleaseGate()
     .then((result) => process.stdout.write(`${JSON.stringify(result)}\n`))
     .catch((error) => {
-      process.stderr.write(`${JSON.stringify({ ok: false, code: error?.code || "controller_release_gate_failed" })}\n`);
+      process.stderr.write(`${JSON.stringify({ ok: false, code: error?.code || "controller_release_gate_failed",
+        ...(typeof error?.cleanupConfirmed === "boolean" ? { cleanup_confirmed: error.cleanupConfirmed } : {}) })}\n`);
       process.exitCode = 1;
     });
 }

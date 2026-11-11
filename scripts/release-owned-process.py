@@ -36,6 +36,8 @@ def main():
         owner = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(owner)
         reason = []
+        exit_evidence = {}
+        primary_exit = []
         lock = threading.Lock()
         completed = threading.Event()
 
@@ -43,6 +45,11 @@ def main():
             with lock:
                 if not reason:
                     reason.append(value)
+                    # An already observed failing root is the primary error;
+                    # cancelling the remaining descendants must not replace it.
+                    known = exit_evidence.get('exit_code')
+                    if known is not None and known != 0:
+                        primary_exit.append(known)
                 owner.cancelled = signal.SIGTERM
 
         for number in (signal.SIGINT, signal.SIGTERM):
@@ -60,13 +67,28 @@ def main():
         timer.daemon = True
         timer.start()
         try:
-            if sys.platform == 'win32':
-                code, forced, retired = owner.windows_run(command, environment, 5)
-            elif sys.platform == 'linux':
-                code, forced, retired = owner.linux_run(command, environment, 5)
-            else:
-                raise RuntimeError('release_process_platform_unsupported')
+            execution_error = None
+            try:
+                if sys.platform == 'win32':
+                    code, forced, retired = owner.windows_run(command, environment, 5, exit_evidence=exit_evidence)
+                elif sys.platform == 'linux':
+                    code, forced, retired = owner.linux_run(command, environment, 5, exit_evidence=exit_evidence)
+                else:
+                    raise RuntimeError('release_process_platform_unsupported')
+            except Exception:
+                # The original ownership boundary has completed its finally.
+                # Only a positively unstarted command can be known empty here;
+                # a started command without retirement evidence stays unknown.
+                retired = exit_evidence.get('started') is False
+                execution_error = 'start_failed' if retired else 'execution_failed'
+                code, forced = None, False
+            root_exit = exit_evidence.get('exit_code')
+            first_failed_exit = primary_exit[0] if primary_exit else None
+            if not reason and root_exit is not None and root_exit != 0:
+                first_failed_exit = root_exit
             result = {'nonce': request['nonce'], 'exit_code': code, 'forced': forced,
+                      'root_exit_code': root_exit, 'primary_exit_code': first_failed_exit,
+                      'execution_error': execution_error,
                       'cleanup_confirmed': retired, 'reason': reason[0] if reason else None}
             # Descendants have retired before this final control receipt. The
             # random correlation value was never in the command's stdin/env.

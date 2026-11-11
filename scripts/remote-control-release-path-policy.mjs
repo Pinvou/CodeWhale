@@ -133,6 +133,7 @@ export const REMOTE_CONTROL_RELEASE_EXACT_PATHS = Object.freeze([
   "scripts/windows-e2e-orchestrator-helpers.ps1",
   "scripts/windows-e2e-process-guard.ps1",
   "scripts/ci-fixture-process.py",
+  "scripts/tests/test_ci_fixture_process.py",
   "scripts/release-owned-process.py",
   "scripts/windows-owned-process.cs",
 ]);

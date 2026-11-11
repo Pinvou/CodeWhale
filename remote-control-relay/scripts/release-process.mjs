@@ -16,10 +16,18 @@ export function runReleaseProcess(command, args, {
   cwd, env, timeoutMs = DEFAULT_TIMEOUT_MS, signal,
   python = process.env.PINVOU_CI_PYTHON || (process.platform === "win32" ? "python" : "python3"),
 } = {}) {
+  if (typeof command !== "string" || command.includes("\0") || !Array.isArray(args)
+    || args.some((arg) => typeof arg !== "string" || arg.includes("\0"))) {
+    return Promise.reject(failure("release_subgate_command_invalid"));
+  }
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 3600000) {
     return Promise.reject(failure("release_subgate_timeout_invalid"));
   }
   if (!env || typeof env !== "object") return Promise.reject(failure("release_subgate_environment_missing"));
+  if (Object.entries(env).some(([key, value]) => typeof value !== "string"
+    || key.includes("\0") || value.includes("\0"))) {
+    return Promise.reject(failure("release_subgate_environment_invalid"));
+  }
   if (signal?.aborted) return Promise.reject(failure("release_subgate_cancelled"));
   return new Promise((resolve, reject) => {
     const nonce = randomBytes(16).toString("hex");
@@ -34,19 +42,26 @@ export function runReleaseProcess(command, args, {
     let hardKilled = false;
     let finished = false;
     let hard;
+    const abandonUnconfirmed = () => {
+      child.stdout.destroy(); child.stderr.destroy(); child.stdin.destroy();
+      child.unref();
+      const primaryCode = requested === "timeout" ? "release_subgate_timeout"
+        : requested === "cancelled" ? "release_subgate_cancelled" : "release_subgate_cleanup_unconfirmed";
+      settle(failure(primaryCode, { cleanupConfirmed: false, cleanupError: "release_subgate_cleanup_unconfirmed" }));
+    };
     const forceUnconfirmed = () => {
-      if (finished) return;
+      if (finished || hardKilled) return;
       hardKilled = true;
       // SIGKILL is not a cooperative request on POSIX. Still do not claim
       // retirement without the supervisor's acknowledgement, or wait forever
       // for EOF inherited by an unconfirmed descendant.
-      child.kill("SIGKILL");
-      child.stdout.destroy(); child.stderr.destroy(); child.stdin.destroy();
-      child.unref();
-      settle(failure("release_subgate_cleanup_unconfirmed", { cleanupConfirmed: false }));
+      try { child.kill("SIGKILL"); } catch { /* retirement stays unconfirmed */ }
+      finally { abandonUnconfirmed(); }
     };
     const requestStop = (reason) => {
-      requested ||= reason;
+      if (requested !== null || finished) return;
+      requested = reason;
+      clearTimeout(timeout);
       if (!child.stdin.destroyed) child.stdin.end("cancel\n");
       clearTimeout(hard);
       hard = setTimeout(forceUnconfirmed, 20000);
@@ -80,7 +95,11 @@ export function runReleaseProcess(command, args, {
       child.stdin.destroy();
       if (error) reject(error); else resolve();
     };
-    child.once("error", () => settle(failure("release_subgate_start_failed")));
+    child.once("error", () => {
+      if (child.pid == null) settle(failure("release_subgate_start_failed", { cleanupConfirmed: true }));
+      else if (!hardKilled) forceUnconfirmed();
+      else abandonUnconfirmed();
+    });
     child.once("close", (code) => {
       if (hardKilled) { settle(failure("release_subgate_cleanup_unconfirmed")); return; }
       const lines = stderr.toString("utf8").split(/\r?\n/u);
@@ -92,16 +111,35 @@ export function runReleaseProcess(command, args, {
           if (candidate.nonce === nonce) receipt = candidate;
         } catch { /* malformed child text is never a control receipt */ }
       }
-      if (code !== 0 || !receipt || receipt.cleanup_confirmed !== true
-        || !Number.isInteger(receipt.exit_code) || typeof receipt.forced !== "boolean") {
+      if (code !== 0 || !receipt
+        || (receipt.execution_error !== null && receipt.execution_error !== "start_failed" && receipt.execution_error !== "execution_failed")
+        || (!Number.isInteger(receipt.exit_code) && !(receipt.exit_code === null && receipt.execution_error !== null))
+        || typeof receipt.forced !== "boolean"
+        || (receipt.root_exit_code !== null && !Number.isInteger(receipt.root_exit_code))
+        || (receipt.primary_exit_code !== null && (!Number.isInteger(receipt.primary_exit_code)
+          || receipt.primary_exit_code === 0 || receipt.primary_exit_code !== receipt.root_exit_code))) {
         settle(failure("release_subgate_cleanup_unconfirmed")); return;
       }
+      if (receipt.cleanup_confirmed !== true) {
+        const primaryCode = receipt.primary_exit_code !== null ? "release_subgate_failed"
+          : receipt.execution_error ? `release_subgate_${receipt.execution_error}` : "release_subgate_cleanup_unconfirmed";
+        settle(failure(primaryCode,
+          { exitCode: receipt.root_exit_code ?? receipt.exit_code, cleanupConfirmed: false,
+            cleanupError: "release_subgate_cleanup_unconfirmed" }));
+        return;
+      }
       const reason = requested || receipt.reason;
-      if (reason) {
+      const rootExit = receipt.root_exit_code ?? receipt.exit_code;
+      if (receipt.primary_exit_code !== null) {
+        settle(failure("release_subgate_failed", { exitCode: receipt.primary_exit_code,
+          supervisionExitCode: receipt.exit_code, cleanupConfirmed: true, forced: receipt.forced }));
+      } else if (reason) {
         settle(failure(reason === "timeout" ? "release_subgate_timeout" : "release_subgate_cancelled",
-          { exitCode: receipt.exit_code, cleanupConfirmed: true, forced: receipt.forced }));
+          { exitCode: rootExit, supervisionExitCode: receipt.exit_code, cleanupConfirmed: true, forced: receipt.forced }));
+      } else if (receipt.execution_error) {
+        settle(failure(`release_subgate_${receipt.execution_error}`, { cleanupConfirmed: true }));
       } else if (receipt.exit_code !== 0) {
-        settle(failure("release_subgate_failed", { exitCode: receipt.exit_code, cleanupConfirmed: true, forced: receipt.forced }));
+        settle(failure("release_subgate_failed", { exitCode: rootExit, supervisionExitCode: receipt.exit_code, cleanupConfirmed: true, forced: receipt.forced }));
       } else if (receipt.forced) {
         settle(failure("release_subgate_leftover_process", { exitCode: 0, cleanupConfirmed: true }));
       } else settle();
