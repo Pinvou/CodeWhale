@@ -7,6 +7,8 @@ import json
 import os
 from pathlib import Path
 import re
+import runpy
+import subprocess
 import sys
 import tempfile
 import textwrap
@@ -22,6 +24,69 @@ PG = module('account_ci_postgres', 'scripts/account-ci-postgres.py')
 FIN = module('financial_identity', 'scripts/test-token-financial-postgres.py')
 
 class AccountCIAdmissionTests(unittest.TestCase):
+    def test_closure_cli_admits_and_retires_only_its_single_service(self):
+        self.assertEqual(PG.CLOSURE_SERVICES, {'financial': PG.SERVICES['financial']})
+        meta, item = self.fixture()
+        identity = '12345|/var/lib/postgresql/data|5432|postgres|postgres|postgres|t|160015'
+        for stop in (False, True):
+            calls, stopped = [], []
+            def run(argv, **kwargs):
+                calls.append(argv)
+                if argv[:2] == ['docker', 'inspect']:
+                    self.assertEqual(argv[2], meta['id']); value = json.dumps([item])
+                elif argv[:2] == ['docker', 'exec']:
+                    self.assertEqual(argv[2], meta['id']); value = identity
+                elif argv[0] == 'psql':
+                    self.assertIn('127.0.0.1:49173/', argv[1]); value = identity
+                elif argv[:2] == ['docker', 'ps']: value = '' if stopped else meta['id']
+                elif argv[:3] == ['docker', 'volume', 'ls']: value = '' if stopped else 'b'*64
+                elif argv[:2] == ['docker', 'logs']:
+                    self.assertEqual(argv[2], meta['id']); value = 'owned service log'
+                elif argv[:2] == ['docker', 'stop']:
+                    self.assertEqual(argv[2:], ['--time', '15', meta['id']]); stopped.append(meta['id']); value = ''
+                else: raise AssertionError('unexpected closure subprocess')
+                return subprocess.CompletedProcess(argv, 0, stdout=value, stderr='')
+            with self.subTest(stop=stop), tempfile.TemporaryDirectory() as directory:
+                output = Path(directory)/'output'
+                env = {'GITHUB_ACTIONS': 'true', 'ACCOUNT_CI_SERVICES': json.dumps({'financial-postgres': meta}),
+                       'GITHUB_OUTPUT': str(output), 'PINVOU_CI_RESOURCE_LEDGER': directory}
+                argv = ['account-ci-postgres.py', '--profile', 'closure'] + (['--stop-owned-services'] if stop else [])
+                with patch.dict(os.environ, env), patch.object(sys, 'argv', argv), \
+                        patch.object(subprocess, 'run', side_effect=run), contextlib.redirect_stdout(io.StringIO()):
+                    runpy.run_path(str(ROOT/'scripts/account-ci-postgres.py'), run_name='__main__')
+                if stop:
+                    self.assertEqual(stopped, [meta['id']])
+                    receipt = json.loads((Path(directory)/'postgres-services.json').read_text())
+                    self.assertEqual(receipt['state'], 'released')
+                    self.assertEqual(receipt['ids'], [meta['id']])
+                else:
+                    self.assertEqual(stopped, [])
+                    values = output.read_text()
+                    self.assertIn('financial_system=12345', values)
+                    self.assertNotIn('audit_url=', values)
+                    self.assertNotIn('financial_token_url=', values)
+                    self.assertEqual(sum(argv[:2] == ['docker', 'inspect'] for argv in calls), 1)
+
+    def test_closure_job_has_independent_admission_and_required_result(self):
+        source=(ROOT/'.github/workflows/pr-check.yml').read_text(encoding='utf-8')
+        closure=source.split('\n  account-closure-test:',1)[1].split('\n  windows-relay-dacl:',1)[0]
+        account=source.split('\n  account-platform-test:',1)[1].split('\n  account-closure-test:',1)[0]
+        self.assertIn('\n    needs: changes\n', closure)
+        self.assertIn("needs.changes.outputs.account_platform == 'true'", closure)
+        self.assertEqual(closure.count('"127.0.0.1::5432"'), 1)
+        self.assertIn('scripts/account-ci-postgres.py --profile closure\n', closure)
+        self.assertIn('scripts/account-ci-postgres.py --profile closure --stop-owned-services', closure)
+        self.assertIn('PINVOU_ACCOUNT_CLOSURE_TEST_DATABASE_URL: ${{ steps.account-pg.outputs.financial_url }}', closure)
+        self.assertIn('Confirm Account test resource retirement', closure)
+        self.assertNotIn('python3 scripts/test-account-closure-postgres.py', account)
+        gate=source.split('\n  required-gate:',1)[1]
+        self.assertIn('      - account-closure-test\n', gate)
+        self.assertIn('ACCOUNT_CLOSURE_RESULT: ${{ needs.account-closure-test.result }}', gate)
+        self.assertIn('"$ACCOUNT_CLOSURE_RESULT" != success', gate)
+        self.assertIn("fromJSON(toJSON(needs.changes.outputs)).reuse_verified == 'true'", closure)
+        self.assertIn("'account-closure-test'))", closure)
+        self.assertIn('"$ACCOUNT_CLOSURE_RESULT" == skipped && "${CLOSURE_REUSE_VERIFIED:-false}" == true', gate)
+
     def fixture(self):
         meta = {'id': 'a'*64, 'ports': {'5432':'49173'}}
         item = {'Id': meta['id'], 'State': {'Running':True, 'Health': {'Status':'healthy'}},
@@ -65,7 +130,7 @@ class AccountCIAdmissionTests(unittest.TestCase):
             meta['ports']['5432'] = str(49173+index)
             item['Id'] = meta['id']; item['Config']['Image'] = image
             item['NetworkSettings']['Ports']['5432/tcp'][0]['HostPort'] = meta['ports']['5432']
-            item['Mounts'][0].update(Name=str(index+4)*64, Destination='/var/lib/postgresql' if major=='18' else '/var/lib/postgresql/data')
+            item['Mounts'][0].update(Name=format(index+4,'x')*64, Destination='/var/lib/postgresql' if major=='18' else '/var/lib/postgresql/data')
             metadata[name] = meta; items[meta['id']] = item
         for problem in ('none', 'unhealthy', 'gone', 'all-gone', 'image', 'bind', 'reused-volume', 'reused-id', 'logs-failed', 'stop-failed', 'remaining-container', 'remaining-volume', 'partial-registration'):
             current, actual = copy.deepcopy(metadata), copy.deepcopy(items)
@@ -98,7 +163,9 @@ class AccountCIAdmissionTests(unittest.TestCase):
                     if problem == 'stop-failed': raise RuntimeError('controlled stop failure')
                     return ''
                 raise AssertionError('unexpected Docker operation')
-            with patch.dict(os.environ, {'GITHUB_ACTIONS':'true'}), patch.object(PG, 'run', side_effect=run), contextlib.redirect_stdout(io.StringIO()) as output:
+            elapsed = [0.0]
+            def advance(delay): elapsed[0] += delay
+            with patch.dict(os.environ, {'GITHUB_ACTIONS':'true'}), patch.object(PG, 'run', side_effect=run), patch('time.monotonic', side_effect=lambda: elapsed[0]), patch('time.sleep', side_effect=advance), contextlib.redirect_stdout(io.StringIO()) as output:
                 if problem in ('image', 'bind', 'reused-volume', 'reused-id'):
                     with self.assertRaises(ValueError): PG.stop_owned_services(current)
                     self.assertEqual(stops, [])
@@ -125,7 +192,7 @@ class AccountCIAdmissionTests(unittest.TestCase):
             meta,item=self.fixture();meta['id']=str(index+1)*64;meta['ports']['5432']=str(49173+index)
             item['Id']=meta['id'];item['Config']['Image']=image
             item['NetworkSettings']['Ports']['5432/tcp'][0]['HostPort']=meta['ports']['5432']
-            item['Mounts'][0].update(Name=str(index+4)*64,Destination='/var/lib/postgresql' if major=='18' else '/var/lib/postgresql/data')
+            item['Mounts'][0].update(Name=format(index+4,'x')*64,Destination='/var/lib/postgresql' if major=='18' else '/var/lib/postgresql/data')
             metadata[name]=meta;items[meta['id']]=item
             identities[meta['id']]=f"{100+index}|{directory}|5432|postgres|postgres|postgres|t|{int(major)*10000}"
         for failure in ('none','namespace','volume','port','id'):
@@ -166,16 +233,16 @@ class AccountCIAdmissionTests(unittest.TestCase):
 
     def test_workflow_consumers_and_anonymous_lifecycle(self):
         source=(ROOT/'.github/workflows/pr-check.yml').read_text(encoding='utf-8')
-        job=source.split('\n  account-platform-test:',1)[1].split('\n  windows-relay-dacl:',1)[0]
+        job=source.split('\n  account-platform-test:',1)[1].split('\n  account-closure-test:',1)[0]
         routes=[line.strip() for line in job.splitlines() if line.lstrip().startswith('runs-on:')]
         self.assertEqual(routes, ["""runs-on: ${{ fromJSON(vars.PINVOU_LINUX_HEAVY_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}"""])
-        self.assertEqual(job.count('"127.0.0.1::5432"'),6);self.assertEqual(job.count('          --rm\n'),6)
-        for variable,key in [('PINVOU_TEST_SCHEMA_DATABASE_URL','broker'),('F17_TEST_DATABASE_URL','audit'),('PINVOU_ACCOUNT_CLOSURE_TEST_DATABASE_URL','financial')]:
+        self.assertEqual(job.count('"127.0.0.1::5432"'),8);self.assertEqual(job.count('          --rm\n'),8)
+        for variable,key in [('PINVOU_TEST_SCHEMA_DATABASE_URL','broker'),('F17_TEST_DATABASE_URL','audit')]:
             self.assertIn(variable+': ${{ steps.account-pg.outputs.'+key+'_url }}',job)
         self.assertIn('ACCOUNT_FINANCIAL_SERVICES: ${{ steps.account-pg.outputs.financial_services }}',job)
-        self.assertEqual(job.count('          --memory 1g\n'),4)
-        self.assertEqual(job.count('          --memory-swap 1g\n'),4)
-        self.assertEqual(job.count('          --cpus 2\n'),4)
+        self.assertEqual(job.count('          --memory 1g\n'),6)
+        self.assertEqual(job.count('          --memory-swap 1g\n'),6)
+        self.assertEqual(job.count('          --cpus 2\n'),6)
         self.assertIn('ACCOUNT_CI_SERVICES: ${{ toJSON(job.services) }}',job)
         self.assertIn('F17_TEST_SERVICE_PORT: ${{ steps.account-pg.outputs.audit_port }}',job)
         self.assertIn('lua5.1 postgresql-client',job)
@@ -215,5 +282,91 @@ class AccountCIAdmissionTests(unittest.TestCase):
                                 [dict(e,Action='skip') if e['Test']==invitation+'/'+child else e for e in events]):
                     with self.subTest(child=child),self.assertRaises(AssertionError):verify(invalid)
             with self.assertRaises(AssertionError):verify([e for e in events if not e['Test'].startswith(invitation)])
+
+# Controlled Docker acknowledgements do not replace real CI services.
+class PostgresRetirementTests(unittest.TestCase):
+    def exercise(self, scenario):
+        metadata, items = {}, {}
+        for index, (name, image, _, _) in enumerate(PG.SERVICES.values()):
+            identifier, volume, port = f'{index + 1:064x}', f'{index + 101:064x}', str(49000 + index)
+            metadata[name] = {'id': identifier, 'ports': {'5432': port}}
+            items[identifier] = {'Id': identifier, 'State': {'Running': True},
+                'Config': {'Image': image}, 'HostConfig': {'AutoRemove': True},
+                'NetworkSettings': {'Ports': {'5432/tcp': [{'HostIp': '127.0.0.1', 'HostPort': port}]}},
+                'Mounts': [{'Type': 'volume', 'Name': volume, 'Destination': '/var/lib/postgresql/data'}]}
+        owned_ids = set(items)
+        owned_volumes = {item['Mounts'][0]['Name'] for item in items.values()}
+        if scenario == 'partial-registration':
+            metadata.pop(next(iter(metadata)))
+        elapsed, stopped, observations = [0.0], [], [0]
+        calls = []
+
+        def run(argv, **kwargs):
+            calls.append((copy.deepcopy(argv), kwargs))
+            self.assertGreater(kwargs.get('timeout', 30), 0)
+            self.assertLessEqual(kwargs.get('timeout', 30), 105)
+            if argv[:2] == ['docker', 'ps']:
+                if not stopped:
+                    return '\n'.join([*owned_ids, 'f' * 64])
+                observations[0] += 1
+                if scenario == 'query-error':
+                    raise RuntimeError('controlled query failure')
+                delayed = scenario == 'delayed-container' and observations[0] < 3
+                persistent = scenario == 'persistent-container'
+                return '\n'.join([next(iter(owned_ids)), 'f' * 64] if delayed or persistent else ['f' * 64])
+            if argv[:3] == ['docker', 'volume', 'ls']:
+                delayed = scenario == 'delayed-volume' and observations[0] < 3
+                return '\n'.join([next(iter(owned_volumes)), 'e' * 64] if delayed or scenario == 'persistent-volume' else ['e' * 64])
+            if argv[:2] == ['docker', 'inspect']:
+                return json.dumps([items[argv[2]]])
+            if argv[:2] == ['docker', 'logs']:
+                return 'controlled logs'
+            if argv[:2] == ['docker', 'stop']:
+                self.assertEqual(argv[2:4], ['--time', '15'])
+                self.assertFalse(stopped, 'the stop operation must never be retried')
+                stopped.extend(argv[4:])
+                if scenario == 'stop-failed':
+                    raise RuntimeError('controlled stop failure')
+                if scenario == 'budget-exhausted':
+                    elapsed[0] = 105.0
+                return ''
+            self.fail(f'unexpected operation {argv[:2]}')
+
+        def sleep(delay):
+            self.assertGreater(delay, 0)
+            self.assertLessEqual(delay, .25)
+            elapsed[0] += delay
+
+        with tempfile.TemporaryDirectory(prefix='pg-retirement-contract-') as directory:
+            receipt = Path(directory) / 'receipt.json'
+            with patch.dict(os.environ, {'GITHUB_ACTIONS': 'true'}), patch.object(PG, 'run', side_effect=run), \
+                    patch('time.monotonic', side_effect=lambda: elapsed[0]), patch('time.sleep', side_effect=sleep), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                if scenario in ('delayed-container', 'delayed-volume', 'immediate'):
+                    PG.stop_owned_services(metadata, receipt)
+                    self.assertEqual(json.loads(receipt.read_text())['state'], 'released')
+                else:
+                    with self.assertRaises(RuntimeError):
+                        PG.stop_owned_services(metadata, receipt)
+                    state = json.loads(receipt.read_text())['state']
+                    self.assertEqual(state, 'released' if scenario == 'stop-failed' else 'unconfirmed')
+            self.assertEqual(set(stopped), {v['id'] for v in metadata.values()})
+            self.assertNotIn('f' * 64, stopped)
+            self.assertLessEqual(elapsed[0], 105)
+            if scenario.startswith('delayed-'):
+                self.assertEqual(observations[0], 3)
+            return json.loads(receipt.read_text()), calls
+
+    def test_waits_for_exact_container_and_volume_acknowledgements(self):
+        for scenario in ('immediate', 'delayed-container', 'delayed-volume'):
+            with self.subTest(scenario=scenario):
+                self.exercise(scenario)
+
+    def test_unknown_or_failed_retirement_never_becomes_success(self):
+        for scenario in ('persistent-container', 'persistent-volume', 'partial-registration',
+                         'stop-failed', 'query-error', 'budget-exhausted'):
+            with self.subTest(scenario=scenario):
+                self.exercise(scenario)
+
 
 if __name__=='__main__':unittest.main()
