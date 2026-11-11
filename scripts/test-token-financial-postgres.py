@@ -28,6 +28,9 @@ REQUIRED = {
     "TestPendingUnusedExpiryLegacyCancellationFallbackPostgres",
     "TestPreparationFailurePreservesAcceptedUsagePostgres",
     "TestCircuitFailureBeforeDispatchPostgres",
+    "TestDispatchCircuitReadOnlyRecoveryPublicPostgres",
+    "TestDispatchCircuitOpenAfterAdmissionNeverBecomesProbePostgres",
+    "TestDispatchCircuitRecoveryDoesNotRequireSharedHealthClaimPostgres",
     "TestCredentialRotationWindowReceiptPostgres",
     "TestCredentialRotationOtherActorEffectPostgres",
     "TestCredentialFailurePersistenceBoundariesPostgres",
@@ -191,6 +194,7 @@ REFUND_REQUIRED = {
 }
 RETAINED_REQUIRED = {
     "TestClosedGrantEvidenceCurrentRoleGuardsPostgres",
+    "TestExpiredHoldProofRetryDiagnosticsPostgres",
     "TestEscalatedForcedRefundRequiresSecondActorAndReplays",
     "TestEscalatedForcedRefundWalletLockOrderPostgres",
     "TestEscalatedForcedRefundAtomicRollbackPostgres",
@@ -284,6 +288,10 @@ EXACT_REQUIRED_CHILDREN = {
     },
     "TestOrganizationStartupDiagnosticsPostgres": {
         "profile", "token", "billing-earlier-wallet-guard",
+    },
+    "TestExpiredHoldProofRetryDiagnosticsPostgres": {
+        "quick-failure", "timeout", "cancel", "unavailable", "invalid-proof",
+        "valid-proof", "persistence-failure", "operator",
     },
     "TestRechargeProductCommandAtomicityPostgres": {"active-provider-admission-candidate-progress"},
     "TestPostgresManagedPricePagination": {

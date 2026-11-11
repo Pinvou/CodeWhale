@@ -29,10 +29,13 @@ try {
   const geometry = async () => {
     const result = await page.evaluate(() => {
       const shell = document.querySelector('.ap-shell').getBoundingClientRect();
+      const backdrop = document.querySelector('.ap-popover-backdrop.ap-desktop-backdrop');
+      const frame = backdrop.getBoundingClientRect();
+      const style = getComputedStyle(backdrop);
       const inputs = [...document.querySelectorAll('.ap-auth-form input')].map(node => (node.closest('.ap-auth-code') || node).getBoundingClientRect());
-      return { centered: Math.abs(shell.left + shell.width / 2 - innerWidth / 2) < 2, fits: shell.left >= 0 && shell.right <= innerWidth && shell.height <= innerHeight, aligned: inputs.every(rect => Math.abs(rect.left - inputs[0].left) < 2 && Math.abs(rect.width - inputs[0].width) < 2), overflow: document.documentElement.scrollWidth > innerWidth };
+      return { centered: Math.abs(shell.left + shell.width / 2 - innerWidth / 2) < 2, fits: shell.left >= 0 && shell.right <= innerWidth && shell.height <= innerHeight, fitsBackdrop: shell.left >= frame.left + parseFloat(style.paddingLeft) - 1 && shell.right <= frame.right - parseFloat(style.paddingRight) + 1, desktopWidth: innerWidth < 600 || Math.abs(shell.width - 480) < 1, aligned: inputs.every(rect => Math.abs(rect.left - inputs[0].left) < 2 && Math.abs(rect.width - inputs[0].width) < 2), overflow: document.documentElement.scrollWidth > innerWidth };
     });
-    assert.deepEqual(result, { centered: true, fits: true, aligned: true, overflow: false });
+    assert.deepEqual(result, { centered: true, fits: true, fitsBackdrop: true, desktopWidth: true, aligned: true, overflow: false });
   };
   const screenshot = async name => {
     if (!process.env.PINVOU_ACCOUNT_SCREENSHOTS) return;
@@ -40,7 +43,7 @@ try {
     await page.screenshot({ path: path.join(process.env.PINVOU_ACCOUNT_SCREENSHOTS, `${name}.png`) });
   };
   const run = async (name, action) => { await action(); assert.deepEqual(errors, []); cases++; console.log(`PASS ${name}`); };
-  for (const language of ['zh', 'en', 'ja']) for (const width of [1920, 390]) await run(`${language} ${width}px: centered and aligned authentication flows`, async () => {
+  for (const language of ['zh', 'en', 'ja']) for (const width of [1920, 390, 560, 561]) await run(`${language} ${width}px: centered and aligned authentication flows`, async () => {
     await fresh(`guest&language=${language}`, width);
     const words = accountAuthCopy[language], copy = accountPlatformCopy[language];
     for (const mode of ['password', 'sms', 'register', 'forgot']) {
