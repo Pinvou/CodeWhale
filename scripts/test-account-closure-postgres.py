@@ -18,12 +18,20 @@ ROOT = Path(__file__).resolve().parents[1]
 _financial_helpers = runpy.run_path(str(ROOT / "scripts/test-token-financial-postgres.py"))
 local_database_url = _financial_helpers["local_database_url"]
 ci_identity_guard = _financial_helpers["ci_identity_guard"]
+require_exclusive_instance = _financial_helpers["require_exclusive_instance"]
 LEDGER_REPAIR_APPROVAL_ROOT = "TestLedgerRepairCrossDomainActivationPostgresIntegration"
 LEDGER_REPAIR_PAYMENT_E2E_ROOT = "TestLedgerRepairPaymentAuthorityE2EPostgresIntegration"
 PAYMENT_CREDIT_F12_ROOT = "TestPaymentFinancialRepairCrossDomainActivationPostgresIntegration"
 PAYMENT_CREDIT_F12_CHILDREN = {"active-subject-and-legacy-closed-receipt-replay", "closed-subject-cannot-create-a-new-repair-effect"}
 LEDGER_REPAIR_APPROVAL_ROOTS = {LEDGER_REPAIR_APPROVAL_ROOT, LEDGER_REPAIR_PAYMENT_E2E_ROOT, PAYMENT_CREDIT_F12_ROOT}
 BILLING_ACTORS = {"billing_migrator", "billing_schema_owner", "billing_service"}
+MIGRATION_CLI_ROOTS = {"TestAccountClosureLegacyRollbackCLI", "TestPhaseMigrationCLIPinsBeforeDown", "TestAccountClosureSagaIdentityDispatchPostgres"}
+MIGRATION_IDENTITY_ROOT = "TestAccountClosureSagaIdentityDispatchPostgres"
+MIGRATION_IDENTITY_CASES = {
+    "source-only-name-and-checksum", "ledger-only-renamed-directory",
+    "ledger-checksum-only-from-original-writer", "actual-cli-rejects-mutated-down-without-effects",
+    "mixed-domains-reject-before-writes", "unknown-custom027-keeps-generic-cli",
+}
 BILLING_ROOTS = {
     "TestClosedGrantPublishedOwnerEffects",
     "TestAccountClosureIsolationPreservesPriorAuditFacts",
@@ -61,7 +69,7 @@ CLOSED_GRANT_GROUPS = [
 CONTRACTS = [
     ("account-pagination", "./internal/account", {"TestAccountClosurePaginationPostgres"}, {}),
     ("migration-cli", "./cmd/migrate",
-     {"TestAccountClosureLegacyRollbackCLI", "TestPhaseMigrationCLIPinsBeforeDown"}, {}),
+     MIGRATION_CLI_ROOTS, {}),
     ("closure-combination", "./internal/billingschema", {"TestClosurePrivatePublicCombination"},
      {"": {"TestClosureClaimACKOrder"}}),
     ("membership-closure-event", "./internal/billingschema",
@@ -79,6 +87,9 @@ CONTRACTS = [
 
 
 def validate_closed_grant_contracts(contracts):
+    migration = ("migration-cli", "./cmd/migrate", MIGRATION_CLI_ROOTS, {})
+    if [row for row in contracts if row[0] == migration[0]] != [migration]:
+        raise RuntimeError("all original migration CLI and Account027 identity roots are required exactly once")
     ledger = ("ledger-repair-approval-proof", "./internal/account", LEDGER_REPAIR_APPROVAL_ROOTS, {})
     if [row for row in contracts if row[0] == ledger[0]] != [ledger]:
         raise RuntimeError("ledger repair approval proof phase is required exactly once")
@@ -158,6 +169,29 @@ def verify_results(raw, required):
     return count
 
 
+def verify_migration_identity_results(raw):
+    """Bind the027 contract to its actual package and complete named cases."""
+    wanted = {MIGRATION_IDENTITY_ROOT, *(MIGRATION_IDENTITY_ROOT + "/" + case for case in MIGRATION_IDENTITY_CASES)}
+    observed = {name: [] for name in wanted}
+    for index, line in enumerate(raw.splitlines()):
+        if not line.startswith("{"):
+            continue
+        event = json.loads(line)
+        name = event.get("Test", "")
+        if name != MIGRATION_IDENTITY_ROOT and not name.startswith(MIGRATION_IDENTITY_ROOT + "/"):
+            continue
+        if name not in wanted or event.get("Package") != "github.com/Pinvou/pinvou3/account-platform/cmd/migrate":
+            raise RuntimeError("unreviewed027 case or wrong migration CLI package")
+        if event.get("Action") != "output":
+            observed[name].append((event.get("Action"), index))
+    for events in observed.values():
+        if [action for action, _ in events] != ["run", "pass"]:
+            raise RuntimeError("original027 identity root/case must run and pass exactly once")
+    start, end = [index for _, index in observed[MIGRATION_IDENTITY_ROOT]]
+    if any(not start < events[0][1] < events[1][1] < end for name, events in observed.items() if name != MIGRATION_IDENTITY_ROOT):
+        raise RuntimeError("027 child cases escaped their root lifecycle")
+
+
 def main():
     validate_closed_grant_contracts(CONTRACTS)
     raw = local_database_url(os.environ.get("PINVOU_ACCOUNT_CLOSURE_TEST_DATABASE_URL", ""))
@@ -166,10 +200,10 @@ def main():
     if not go:
         raise RuntimeError("Go executable is required by the child fixtures")
 
-    def query(sql):
+    def query(sql, *, timeout=30):
         result = subprocess.run(
             [psql, raw, "-X", "-q", "-A", "-t", "-v", "ON_ERROR_STOP=1", *ci_identity_guard(raw), "-c", sql],
-            capture_output=True, text=True, encoding="utf-8", check=False, timeout=30,
+            capture_output=True, text=True, encoding="utf-8", check=False, timeout=timeout,
         )
         if result.returncode:
             raise RuntimeError("disposable PostgreSQL operation failed")
@@ -180,18 +214,7 @@ def main():
 
     def require_instance(billing=False):
         expected = {user} | (BILLING_ACTORS if billing else set())
-        roles = set(query("SELECT rolname FROM pg_roles WHERE rolname !~ '^pg_' ORDER BY rolname").splitlines())
-        if query("SELECT datname FROM pg_database ORDER BY datname") != databases or roles != expected:
-            raise RuntimeError("database or actors differ; retain them for diagnosis, no setup writes permitted")
-        if query("SELECT count(*) FROM pg_stat_activity WHERE backend_type='client backend' AND pid<>pg_backend_pid()") != "0":
-            raise RuntimeError("another client is active; exclusive fixture required")
-        objects = query("""SELECT
-            (SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
-             WHERE n.nspname !~ '^pg_' AND n.nspname <> 'information_schema') +
-            (SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
-             WHERE n.nspname !~ '^pg_' AND n.nspname <> 'information_schema')""")
-        if objects != "0":
-            raise RuntimeError("bootstrap database contains user objects; no setup writes permitted")
+        require_exclusive_instance(query, databases.splitlines(), expected)
 
     require_instance()
     if int(query("SHOW server_version_num")) < 160000:
@@ -249,6 +272,8 @@ COMMIT;""")
             if result.returncode:
                 raise RuntimeError("closure PostgreSQL parent fixture failed; logs retained at " + str(artifacts))
             parent_count = verify_results(result.stdout, roots)
+            if name == "migration-cli":
+                verify_migration_identity_results(result.stdout)
             child_counts = {}
             for suffix, required in children.items():
                 if suffix not in child_logs:

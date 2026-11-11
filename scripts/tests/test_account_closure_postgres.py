@@ -16,9 +16,9 @@ runner = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(runner)
 
 
-def stream(*events):
-    rows = [{"Package": "fixture", **event} for event in events]
-    rows.append({"Action": "pass", "Package": "fixture"})
+def stream(*events, package="fixture"):
+    rows = [{"Package": package, **event} for event in events]
+    rows.append({"Action": "pass", "Package": package})
     return "\n".join(json.dumps(event) for event in rows)
 
 
@@ -51,9 +51,17 @@ class ClosurePostgresResults(unittest.TestCase):
         self.addCleanup(environment.stop)
 
     def test_real_migration_cli_roots_cannot_silently_drop(self):
-        expected = {"TestAccountClosureLegacyRollbackCLI", "TestPhaseMigrationCLIPinsBeforeDown"}
+        expected = {"TestAccountClosureLegacyRollbackCLI", "TestPhaseMigrationCLIPinsBeforeDown", "TestAccountClosureSagaIdentityDispatchPostgres"}
         selected = [row for row in runner.CONTRACTS if row[0] == "migration-cli"]
         self.assertEqual(selected, [("migration-cli", "./cmd/migrate", expected, {})])
+        runner.validate_closed_grant_contracts(runner.CONTRACTS)
+        for missing in expected:
+            changed = [(name, package, roots - {missing}, children) if name == "migration-cli" else (name, package, roots, children) for name, package, roots, children in runner.CONTRACTS]
+            with self.subTest(selection=missing), self.assertRaises(RuntimeError):
+                runner.validate_closed_grant_contracts(changed)
+        for broken in ([row for row in runner.CONTRACTS if row[0] != "migration-cli"], runner.CONTRACTS + selected):
+            with self.assertRaises(RuntimeError):
+                runner.validate_closed_grant_contracts(broken)
         for missing in expected:
             with self.subTest(missing=missing), self.assertRaises(RuntimeError):
                 runner.verify_results(stream(*({"Action": "pass", "Test": name} for name in sorted(expected - {missing}))), expected)
@@ -131,6 +139,13 @@ class ClosurePostgresResults(unittest.TestCase):
                 calls.append(("query", sql))
                 if sql == "SELECT current_user":
                     output = "fixture_owner"
+                elif sql.startswith("SELECT json_build_object("):
+                    roles = {"fixture_owner"} | (runner.BILLING_ACTORS if owned_billing else set())
+                    if failure == "actor-conflict" and not owned_billing:
+                        roles.add("foreign_actor")
+                    output = json.dumps({"databases": ["postgres", "template0", "template1"]
+                        + (["retained_for_diagnosis"] if failure == "cleanup" and last_group == bad_group else []),
+                        "roles": sorted(roles), "objects": 0, "clients": 0})
                 elif sql == "SELECT datname FROM pg_database ORDER BY datname":
                     output = "postgres\ntemplate0\ntemplate1"
                     if failure == "cleanup" and last_group == bad_group:
@@ -168,10 +183,13 @@ class ClosurePostgresResults(unittest.TestCase):
                 log.write_text(stream(*rows), encoding="utf-8")
             if name == bad_group and failure == "missing-parent-process":
                 return subprocess_result("")
-            rows = [{"Action":"pass","Test":root} for root in sorted(roots)]
+            rows = [{"Action": "pass", "Test": root} for root in sorted(roots) if root != runner.MIGRATION_IDENTITY_ROOT]
+            if runner.MIGRATION_IDENTITY_ROOT in roots:
+                rows += self.identity_rows()
             if runner.PAYMENT_CREDIT_F12_ROOT in roots:
                 rows += [{"Action":"pass","Test":runner.PAYMENT_CREDIT_F12_ROOT+"/"+child} for child in sorted(runner.PAYMENT_CREDIT_F12_CHILDREN)]
-            return subprocess_result(stream(*rows), 1 if name == bad_group and failure == "process-failed" else 0)
+            return subprocess_result(stream(*rows, package="github.com/Pinvou/pinvou3/account-platform/cmd/migrate" if name == "migration-cli" else "fixture"),
+                                     1 if name == bad_group and failure == "process-failed" else 0)
 
         def subprocess_result(output, code=0):
             return mock.Mock(stdout=output, stderr="", returncode=code)
@@ -191,6 +209,31 @@ class ClosurePostgresResults(unittest.TestCase):
                 error = caught
         return error, calls
 
+    @staticmethod
+    def identity_rows():
+        package = "github.com/Pinvou/pinvou3/account-platform/cmd/migrate"
+        root = "TestAccountClosureSagaIdentityDispatchPostgres"
+        cases = {"source-only-name-and-checksum", "ledger-only-renamed-directory",
+                 "ledger-checksum-only-from-original-writer", "actual-cli-rejects-mutated-down-without-effects",
+                 "mixed-domains-reject-before-writes", "unknown-custom027-keeps-generic-cli"}
+        return [{"Action": "run", "Test": root, "Package": package},
+                *({"Action": action, "Test": root + "/" + name, "Package": package} for name in sorted(cases) for action in ("run", "pass")),
+                {"Action": "pass", "Test": root, "Package": package}]
+
+    def test_027_parent_pass_cannot_replace_cases_or_package(self):
+        rows = self.identity_rows()
+        runner.verify_migration_identity_results(stream(*rows))
+        for row in rows:
+            with self.subTest(missing=row), self.assertRaises(RuntimeError):
+                runner.verify_migration_identity_results(stream(*(item for item in rows if item is not row)))
+        for action in ("skip", "fail"):
+            with self.subTest(action=action), self.assertRaises(RuntimeError):
+                runner.verify_migration_identity_results(stream(*[{**row, "Action": action if index == 2 else row["Action"]} for index, row in enumerate(rows)]))
+        with self.assertRaises(RuntimeError):
+            runner.verify_migration_identity_results(stream(*[{**row, "Package": "wrong/package"} for row in rows]))
+        with self.assertRaises(RuntimeError):
+            runner.verify_migration_identity_results(stream(*rows, rows[-1]))
+
     def test_public_entry_runs_each_fixed_group_with_cleanup_between_processes(self):
         for platform in ["linux", "win32"]:
             with self.subTest(platform=platform):
@@ -205,7 +248,7 @@ class ClosurePostgresResults(unittest.TestCase):
                 for current, following in zip(positions, positions[1:]):
                     # The finally cleanup check and the next invocation's
                     # absence guard both precede the next process launch.
-                    self.assertEqual(sum(call == ("query", "SELECT datname FROM pg_database ORDER BY datname")
+                    self.assertEqual(sum(call[0] == "query" and call[1].startswith("SELECT json_build_object(")
                                          for call in calls[current + 1:following]), 2
                                      + (actual[positions.index(current)][1] == "ledger-repair-approval-proof")
                                      + (actual[positions.index(following)][1] == "ledger-repair-approval-proof"))
