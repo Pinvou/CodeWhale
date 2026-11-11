@@ -13,6 +13,9 @@ import unittest
 from unittest.mock import patch
 
 SUPERVISOR = Path(__file__).resolve().parents[1] / 'ci-fixture-process.py'
+spec = importlib.util.spec_from_file_location('fixture_workspace', SUPERVISOR)
+WORKSPACE = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(WORKSPACE)
 
 
 def alive(pid):
@@ -37,6 +40,48 @@ def alive(pid):
 
 @unittest.skipUnless(sys.platform in ('win32', 'linux'), 'process scope supports CI operating systems')
 class ProcessScopeTests(unittest.TestCase):
+    def test_windows_namespace_preserves_drive_unc_and_extended_paths(self):
+        for plain, expected in (
+            (r'C:\owned\path', '\\\\?\\C:\\owned\\path'),
+            (r'\\server\share\owned', '\\\\?\\UNC\\server\\share\\owned'),
+            ('\\\\?\\C:\\owned\\path', '\\\\?\\C:\\owned\\path'),
+            ('\\\\?\\UNC\\server\\share\\owned', '\\\\?\\UNC\\server\\share\\owned'),
+        ):
+            with self.subTest(path=plain):
+                self.assertEqual(WORKSPACE.windows_extended_path(plain), expected)
+        with self.assertRaises(ValueError):
+            WORKSPACE.windows_extended_path('relative')
+
+    def test_workspace_identity_mismatch_never_deletes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)/'owned'; root.mkdir()
+            (root/'sentinel').write_text('retained')
+            identity = root.stat()
+            with patch.object(WORKSPACE.shutil, 'rmtree') as remove:
+                with self.assertRaises(RuntimeError):
+                    WORKSPACE.remove_owned_workspace(root, (identity.st_dev, identity.st_ino+1))
+                remove.assert_not_called()
+            self.assertEqual((root/'sentinel').read_text(), 'retained')
+
+    @unittest.skipUnless(sys.platform == 'win32', 'actual Windows deep-path retirement')
+    def test_supervisor_retires_deep_owned_workspace_after_process_exit(self):
+        source = (
+            "import os,pathlib;"
+            "root=pathlib.Path(os.environ['PINVOU_CI_FIXTURE_ROOT']);"
+            "deep=root.joinpath(*(['deep-segment-0123456789']*12));"
+            "raw='\\\\\\\\?\\\\'+str(deep);"
+            "os.makedirs(raw);"
+            "pathlib.Path(raw,'proof.txt').write_text('owned');"
+            "print(len(str(deep)),flush=True)"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            p, receipt, _ = self.invoke(source, directory)
+            self.assertEqual(p.returncode, 0, p.stderr)
+            self.assertGreater(int(p.stdout.strip()), 260)
+            self.assertEqual(receipt['state'], 'released')
+            self.assertFalse(receipt['cleanup_failed'])
+            self.assertFalse(Path(receipt['workspace']['path']).exists())
+
     @unittest.skipUnless(shutil.which('node'), 'Node is required for the actual JavaScript signal hook')
     def test_failed_fixture_signal_keeps_receipt_and_supervisor_retires_owned_descendant(self):
         node = shutil.which('node')
