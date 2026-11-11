@@ -331,6 +331,29 @@ async fn actual_authority_and_controller_wire_projection_preserve_each_state() {
     // Browser fixture consumes these actual authority/production encoder
     // outputs. Closed-state inputs exercise defensive consumer semantics;
     // they are not evidence that the current normal list returns history.
+    let fixture: Value = serde_json::from_str(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../tests/fixtures/remote_permission_states.json"
+    )))
+    .unwrap();
+    let mut actual = json!({"permissions":views});
+    let mut ids = HashSet::new();
+    for (actual, expected) in actual["permissions"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .zip(fixture["permissions"].as_array().unwrap())
+    {
+        let id = actual["permission_request_id"].as_str().unwrap().to_owned();
+        assert!(!id.is_empty() && id.len() <= 128 && ids.insert(id));
+        // Only the intentionally fresh process nonce/sequence is normalized.
+        // State, owner task, expiry, decision, dispatch and redaction must match.
+        actual["permission_request_id"] = expected["permission_request_id"].clone();
+    }
+    assert_eq!(
+        actual, fixture,
+        "committed UI fixture must match the real producer"
+    );
     println!(
         "PERMISSION_PROJECTION_JSON {}",
         json!({"permissions":views})

@@ -1440,8 +1440,8 @@ python scripts/architecture-guard.py
 11. 普通本地、ACP 与远程会话通过统一 ChatView 和薄用例编排完成验收，分别使用 `SessionStore + EnginePool`、`SessionStore + AcpPool` 和 `SessionStore(RemoteProxy) + RemoteControl`；A 远程任务不进入 A 本机 EnginePool/AcpPool，B 保持唯一权威 Session；未发布旧正文 UI、Command/Bridge、独立历史存储与状态别名均已删除，不实施兼容代理、旧格式迁移、双写或保留窗口，已发布 Web v2 回归和安全迁移不变。
 # ACP 审批状态投影
 
-同一远程代码回合可以先后产生多个待处理 callback。一个审批结束后，只要该精确任务 owner 仍有未完成 callback，任务保持 `WaitingPermission`；全部完成后才恢复 `Running`。迟到结果不得跨任务接纳序号、会话或完整租约更新状态，也不得恢复已取消或结束的任务。
+同一远程代码回合可以先后产生多个待处理 callback。同时到达的 callback 按现有单任务一个 active 审批的限制等待处理，不因第二项到达而退休回合。一个审批结束后，只要该精确任务 owner 仍有未完成 callback，任务保持 `WaitingPermission`；全部完成后才恢复 `Running`。迟到结果不得跨任务接纳序号、会话或完整租约更新状态，也不得恢复已取消或结束的任务。
 
 A 端审批卡按实际状态显示允许、拒绝和过期的三语文案；未知状态不提供决定按钮。当前 B 列表只返回 active 项，已结束项的展示回归用于验证消费者的状态合同，不表示正常列表会返回历史审批。列表及决定回执须与发起时的控制端身份匹配，成功决定还要使较早的待批列表失效。
 
-`remote_permission_state_smoke.mjs` 挂载真实 ChatView 并使用实际桌面桥接。执行前，将应用测试 `actual_authority_and_controller_wire_projection_preserve_each_state` 输出的 `PERMISSION_PROJECTION_JSON` JSON 保存到文件，并以 `PINVOU_PERMISSION_PROJECTION_FILE` 指定该文件；浏览器使用隔离夹具及 `CHROME` 指定的测试浏览器。该测试控制宿主调用及 provider 响应，不代表真实模型或网络双端验收。
+`remote_permission_state_smoke.mjs` 挂载真实 ChatView 并使用实际桌面桥接。CI 的完整前端 smoke 集合包含本回归，默认输入为真实 Rust 产物固化的 JSON，应用测试逐字段验证它与当前生产者一致，仅归一化不可复用的审批 ID。专项跨端验证时，将应用测试 `actual_authority_and_controller_wire_projection_preserve_each_state` 输出的 `PERMISSION_PROJECTION_JSON` JSON 保存到文件，并以 `PINVOU_PERMISSION_PROJECTION_FILE` 指定该文件，直接消费此次原生产物；浏览器使用隔离夹具及 `CHROME` 指定的测试浏览器。该测试控制宿主调用及 provider 响应，不代表真实模型或网络双端验收。
