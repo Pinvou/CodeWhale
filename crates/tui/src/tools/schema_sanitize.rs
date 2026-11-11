@@ -599,12 +599,12 @@ fn has_strict_incompatible_composition(schema: &Value, is_root: bool) -> bool {
         for (key, value) in obj {
             match key.as_str() {
                 "properties" | "$defs" | "definitions" | "$def" => {
-                    if let Some(named_schemas) = value.as_object() {
-                        if named_schemas.values().any(|named_schema| {
+                    if let Some(named_schemas) = value.as_object()
+                        && named_schemas.values().any(|named_schema| {
                             has_strict_incompatible_composition(named_schema, false)
-                        }) {
-                            return true;
-                        }
+                        })
+                    {
+                        return true;
                     }
                 }
                 "enum" | "const" | "default" | "examples" => {}
@@ -828,13 +828,13 @@ fn strip_unsupported_strict_keywords(obj: &mut Map<String, Value>) {
     // for a null const; this is the defense for direct `sanitize_for_strict`
     // calls). `default` stays verbatim (the documents show it, and list no
     // ban).
-    if let Some(const_value) = obj.remove("const") {
-        if !const_value.is_null() {
-            if const_value.is_number() {
-                obj.insert("const".into(), const_value);
-            } else if !obj.contains_key("enum") {
-                obj.insert("enum".into(), Value::Array(vec![const_value]));
-            }
+    if let Some(const_value) = obj.remove("const")
+        && !const_value.is_null()
+    {
+        if const_value.is_number() {
+            obj.insert("const".into(), const_value);
+        } else if !obj.contains_key("enum") {
+            obj.insert("enum".into(), Value::Array(vec![const_value]));
         }
     }
     // `format` is documented with an enumerated set (email, hostname,
