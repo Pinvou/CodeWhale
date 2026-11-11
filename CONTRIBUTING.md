@@ -77,6 +77,13 @@ cargo test --manifest-path pinvou3-app/src-tauri/Cargo.toml --lib -- --test-thre
 
 Run additional frontend, Relay, Rust, CodeWhale, or platform checks when relevant. The workflows in [`.github/workflows/`](.github/workflows/) are the source of truth for automated gates. Disclose checks that could not be run locally.
 
+The retained Token financial phase has a 40-minute Go test-binary timeout,
+including the complete selected package. Retained Billing keeps its 75-minute
+budget and other financial phases keep 20 minutes. Compilation, startup and
+ownership checks are outside these test-binary budgets; the Account job retains
+its existing outer limit. Increasing the Token budget does not accelerate tests
+or relax required roots, subcases, race detection or resource retirement.
+
 When a change regenerates a `package-lock.json`, regenerate against the official
 registry (`https://registry.npmjs.org/`): a mirror configured in a local npmrc is
 copied verbatim into the lock's `resolved` URLs, and
@@ -123,6 +130,13 @@ current GitHub job ledger. Unknown or unconfirmed cleanup fails the gate and
 never grants permission to retry another smoke. Existing business assertions,
 required roots, dependency skips and retries remain unchanged. Download/build
 caches are reusable resources and must not be deleted as fixture residue.
+
+Account PostgreSQL service retirement shares the existing 105-second stop budget
+with exact container and anonymous-volume disappearance checks. Docker stop is
+issued once; bounded inventory observations wait for AutoRemove acknowledgement.
+A failed stop, incomplete registration, query failure, or exhausted budget remains
+a failed gate with its original receipt retained; no force removal or pruning is
+used.
 
 Run `python3 scripts/ci-fixture-guard.py` plus its regression tests when adding
 fixtures. The guard covers test database DDL and JS/CommonJS resource imports;
@@ -299,6 +313,62 @@ green. Queue independent ready pull requests without routine rebases; resolve ac
 conflicts, and let the queue validate freshness. Maintainers may queue at most two
 low-risk, independent pull requests in one merge group. Dependency-lock, CI, release,
 permission, session, CodeWhale gitlink, and other high-risk changes enter alone.
+
+All reviewed content checks in PR Check can reuse a successful ready-PR
+execution in a single-PR merge group: version consistency, frontend, Account,
+Relay/Hub, release-console and packaging contracts, Rust/CLI/knowledge lint and
+regression, Windows/macOS runtime checks, native Windows matrix phases and
+LoongArch cross checks. `ci-reuse-policy.py` classifies the current product jobs;
+unclassified new jobs continue running until their input contract is reviewed.
+The independently introduced `account-closure-test` has matching optional wiring.
+The separate `rustc-wrapper-smoke` and `evidence-validator-container` workflows
+use the same verifier with independent proof profiles and aggregate gates.
+Wrapper reuse requires every configured native platform leg. The container workflow
+diff-selects its real Docker test on queue entries; manual dispatch always runs it.
+
+When enabling these auxiliary queue workflows in branch protection, require
+`wrapper-gate` and `validator-gate`, rather than the individual `smoke` matrix
+checks or `linux-amd64`: those product jobs can legitimately skip after verified
+reuse or a non-applicable diff. Replace any existing requirements on those old
+names before enabling this behavior. This PR does not change server-side rules
+or make these auxiliary workflows mandatory where they were not required.
+
+The lightweight `changes` job verifies the entire tested Git tree (not only the
+PR head), base commit/ref, unchanged workflow/verifiers, all routing and policy
+outputs, repository-variable hashes, runner labels, source repository/PR/head,
+source run attempt and successful workflow aggregate gate. A matrix is reusable only if
+all configured legs are present exactly once and every step required in the
+queue has successful execution evidence. A format-only or partial ready-PR run
+cannot replace full queue regression. Unknown expressions require successful
+step evidence; unknown runner/matrix shapes, missing/duplicate/failed/skipped
+required evidence retain execution. Cache preparation and advisory diagnostics
+cannot substitute for a product test or resource-retirement step.
+
+Only a wholly successful ready-PR workflow donates proof; a red aggregate gate
+does not donate successful individual jobs. The recorded base comes from the
+actual tested merge commit's first parent, not the mutable PR event/API base SHA.
+Lookup independently verifies that immutable commit's base, head and tree against
+the queue. Ready-PR browser smoke selection uses that same actual merge parent
+and tested tree, including main-side renames, so its named step can witness the
+queue selection. Expected record refusals emit notices without configuration values.
+
+`changes`, `required-gate`, `commit-message`, `merge-authored-audit`,
+`backflow-portability` and `fast-gate` retain their existing event-specific
+execution: they inspect current routing, history, provenance or mutable gitlink
+reachability, or verify the current queue proof. Separate metadata workflows
+retain their own existing policies. Deployment/publication is not replayed from
+old artifacts. Jobs exposing per-run outputs/reusable-workflow calls are excluded.
+
+Proofs must come from a successful same-repository ready PR and be less than
+24 hours old. Forks, multi-PR groups, changed inputs, edited verifier policy and
+API/transport failures execute normal tests. Only verified skipped jobs may be
+normalized; failures/cancellations never become success. Proofs contain no raw
+configuration or credentials, and no status/check-write permission is used.
+Rotate `PINVOU_CI_REUSE_EPOCH` when changing runner images/toolchains or other
+inputs outside the repository; the proof attests the versioned environment recipe,
+not an externally modified machine. `PINVOU_CI_REUSE_FORCE_RUN=true` disables reuse.
+Failed advisory proof transport only loses the reuse opportunity. `changes`
+reports the source Actions run ID for every verified reuse decision.
 
 ## Pull requests
 
