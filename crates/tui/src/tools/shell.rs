@@ -124,24 +124,30 @@ pub(crate) fn abort_pending_persistent_process_groups_for_exit() {
 
 fn validate_shell_working_dir(path: &Path, inherited_session_workspace: bool) -> Result<()> {
     let metadata = std::fs::metadata(path).with_context(|| {
-        let source = if inherited_session_workspace {
-            "saved session workspace"
+        if inherited_session_workspace {
+            // Resume re-anchors to this same saved directory and a CLI fork
+            // copies it, so neither recovers a missing workspace; only
+            // recreating the directory or switching (in-app) does.
+            format!(
+                "saved session workspace is unavailable: {}. Recreate the directory to continue here, or continue the session from a different workspace (/workspace <path>, or /fork after switching)",
+                path.display()
+            )
         } else {
-            "requested working directory"
-        };
-        format!(
-            "{source} is unavailable: {}. Restore or remap that directory, resume/fork the session from an existing workspace, or pass an explicit `working_dir`/`cwd` to exec_shell",
-            path.display()
-        )
+            format!(
+                "requested working directory is unavailable: {}. Recreate it, or use a directory that exists",
+                path.display()
+            )
+        }
     })?;
     if !metadata.is_dir() {
-        let source = if inherited_session_workspace {
-            "saved session workspace"
-        } else {
-            "requested working directory"
-        };
+        if inherited_session_workspace {
+            return Err(anyhow!(
+                "saved session workspace is not a directory: {}. Restore it as a directory to continue here, or continue the session from a different workspace (/workspace <path>, or /fork after switching)",
+                path.display()
+            ));
+        }
         return Err(anyhow!(
-            "{source} is not a directory: {}. Resume/fork from an existing workspace or pass an explicit `working_dir`/`cwd`",
+            "requested working directory is not a directory: {}. Use a directory that exists",
             path.display()
         ));
     }
@@ -4775,7 +4781,7 @@ impl ToolSpec for LowercaseBashTool {
     }
 
     fn description(&self) -> &'static str {
-        "Execute a shell command in the workspace and return stdout and stderr. The command runs in the detected platform shell — `$SHELL` on Unix (any shell it names, falling back to `/bin/sh`); on Windows, bash when the session provides one, otherwise PowerShell (pwsh 7 or Windows PowerShell 5.1) or cmd.exe. Windows PowerShell 5.1 lacks `&&`; prefer forms the detected shell supports. In read-only shell sessions a single approved command runs directly as argv instead (only pipelines still go through the shell); with an external sandbox backend configured this tool is unavailable (use the backend-specific shell tool instead). Output keeps the last 2000 lines or 50KB. An optional timeout is expressed in seconds; when omitted the command is killed after 120 seconds, so pass an explicit timeout for work expected to take longer. In Ask, after a sandbox denial, retry the exact command once with sandbox_permissions (the narrowest wider mode that suffices) and a one-sentence justification; the approval prompt asks the user."
+        "Execute a shell command in the workspace and return its output. stdout and stderr arrive as one merged stream in arrival order, so a line cannot be attributed to one stream; redirect a command's stderr to a file when that attribution matters. Each call runs in a fresh shell — `cd` and exported variables do not persist between calls. The command runs in the detected platform shell — `$SHELL` on Unix (any shell it names, falling back to `/bin/sh`); on Windows, bash when the session provides one, otherwise PowerShell (pwsh 7 or Windows PowerShell 5.1) or cmd.exe. Windows PowerShell 5.1 lacks `&&`; prefer forms the detected shell supports. In read-only shell sessions a single approved command runs directly as argv instead (only pipelines still go through the shell); with an external sandbox backend configured this tool is unavailable (use the backend-specific shell tool instead). Output keeps the last 2000 lines or 50KB. An optional timeout is expressed in seconds; when omitted the command is killed after 120 seconds, so pass an explicit timeout for work expected to take longer. In Ask, after a sandbox denial, retry the exact command once with sandbox_permissions (the narrowest wider mode that suffices) and a one-sentence justification; the approval prompt asks the user."
     }
 
     fn input_schema(&self) -> serde_json::Value {

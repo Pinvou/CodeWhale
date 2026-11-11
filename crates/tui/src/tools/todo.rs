@@ -281,10 +281,10 @@ impl ToolSpec for TodoWriteTool {
                             "status": {
                                 "type": "string",
                                 "enum": ["pending", "in_progress", "completed", "cancelled"],
-                                "description": "Task status"
+                                "description": "Task status. Defaults to pending when omitted."
                             }
                         },
-                        "required": ["content", "status"]
+                        "required": ["content"]
                     }
                 }
             },
@@ -579,6 +579,50 @@ mod tests {
             Some(TodoStatus::InProgress)
         );
         assert_eq!(TodoStatus::from_str("blocked"), None);
+    }
+
+    #[test]
+    fn todo_item_status_is_optional_with_a_pending_default() {
+        // The executor reads a missing status as TodoStatus::Pending, so
+        // "leave status out = new pending todo" is the tool's real contract;
+        // requiring status made the schema stricter than the execution
+        // semantics. content stays required — an item without text is not a
+        // todo — and the schema states the default where the model reads it.
+        let schema = TodoWriteTool::new(new_shared_todo_list()).input_schema();
+        assert_eq!(
+            schema["properties"]["todos"]["items"]["required"],
+            json!(["content"]),
+            "status leaves required; content stays"
+        );
+        let status_description =
+            schema["properties"]["todos"]["items"]["properties"]["status"]["description"]
+                .as_str()
+                .unwrap_or_default();
+        assert!(
+            status_description
+                .to_ascii_lowercase()
+                .contains("defaults to pending"),
+            "the schema must state the default where the model reads it: {status_description}"
+        );
+    }
+
+    #[tokio::test]
+    async fn work_update_treats_a_missing_status_as_pending() {
+        let tool = TodoWriteTool::new(new_shared_todo_list());
+        let context = ToolContext::new(std::env::temp_dir());
+        let result = tool
+            .execute(
+                json!({"todos": [{ "content": "fresh todo without status" }]}),
+                &context,
+            )
+            .await
+            .expect("a status-less todo is the documented default path");
+        let metadata = result.metadata.expect("metadata");
+        assert_eq!(
+            metadata["task_updates"]["checklist"]["items"][0]["status"],
+            json!("pending"),
+            "the execution default is pending"
+        );
     }
 
     #[tokio::test]

@@ -23,6 +23,44 @@ use codewhale_core::request::{PrimaryTurnRequest, prepare_primary_turn_request};
 
 const MAX_APPROVAL_INTENT_SUMMARY_CHARS: usize = 2_000;
 
+/// Keep the chosen error and its producer together through first-error wins,
+/// retries, and local-error replacement. No source survives a cleared error.
+struct TurnFailure {
+    message: String,
+    source: crate::core::events::TurnErrorSource,
+}
+
+impl TurnFailure {
+    fn model(message: String) -> Self {
+        Self {
+            message,
+            source: crate::core::events::TurnErrorSource::Model,
+        }
+    }
+
+    fn runtime(message: String) -> Self {
+        Self {
+            message,
+            source: crate::core::events::TurnErrorSource::Runtime,
+        }
+    }
+
+    fn finish(self, turn: &mut TurnContext) -> (TurnOutcomeStatus, Option<String>) {
+        turn.terminal_error_source = Some(self.source);
+        (TurnOutcomeStatus::Failed, Some(self.message))
+    }
+}
+
+fn split_stream_open_error(
+    error: anyhow::Error,
+    default_source: crate::core::events::TurnErrorSource,
+) -> (anyhow::Error, crate::core::events::TurnErrorSource) {
+    match error.downcast::<crate::llm_client::DeferredStreamPreparationError>() {
+        Ok(error) => (error.0, crate::core::events::TurnErrorSource::Runtime),
+        Err(error) => (error, default_source),
+    }
+}
+
 /// Monotonic counter for rewritten text-fallback tool-call ids. The wall-clock
 /// millis alone can repeat within one process, so the counter disambiguates
 /// incarnations; the millis keep ids unique across engine restarts within the
@@ -787,7 +825,7 @@ struct StreamOutcome {
     stream_start: Instant,
     first_token_at: Option<Instant>,
     request_dispatched_at: Instant,
-    stream_error: Option<String>,
+    stream_error: Option<TurnFailure>,
     rate_limit_interrupted: bool,
 }
 
@@ -1545,7 +1583,7 @@ impl Engine {
             .clone()
             .expect("model client should be configured");
 
-        let mut turn_error: Option<String> = None;
+        let mut turn_error: Option<TurnFailure> = None;
         // While the spawn-time MCP boot is still settling, the pool fills
         // incrementally and a new turn's snapshot can differ from the pinned
         // prefix the moment any server stores its tools (#588). Declare the
@@ -1686,7 +1724,7 @@ impl Engine {
                     self.turn_wall_clock.budget().as_secs(),
                 );
                 let _ = self.tx_event.send(Event::status(error.clone())).await;
-                return (TurnOutcomeStatus::Failed, Some(error));
+                return TurnFailure::runtime(error).finish(turn);
             }
 
             if self.apply_pending_runtime_authority().await {
@@ -1807,7 +1845,7 @@ impl Engine {
                         self.config.max_steps
                     );
                     let _ = self.tx_event.send(Event::status(error.clone())).await;
-                    return (TurnOutcomeStatus::Failed, Some(error));
+                    return TurnFailure::runtime(error).finish(turn);
                 }
             }
 
@@ -2088,12 +2126,12 @@ impl Engine {
                             "Context remains above model limit after {MAX_CONTEXT_RECOVERY_ATTEMPTS} recovery attempts \
                          (~{estimated_input} token estimate, ~{input_budget} budget). Please run /compact or /clear."
                         );
-                        turn_error = Some(message.clone());
+                        turn_error = Some(TurnFailure::runtime(message.clone()));
                         let _ = self
                             .tx_event
                             .send(Event::error(ErrorEnvelope::context_overflow(message)))
                             .await;
-                        return (TurnOutcomeStatus::Failed, turn_error);
+                        return turn_error.expect("failure was assigned").finish(turn);
                     }
 
                     if self
@@ -2395,6 +2433,11 @@ impl Engine {
                         let _ = tx.send(Event::ModelRecovery { receipt }).await;
                     })
                 });
+            let request_error_source = if preparation.is_ok() {
+                crate::core::events::TurnErrorSource::Model
+            } else {
+                crate::core::events::TurnErrorSource::Runtime
+            };
             let stream_result = tokio::select! {
                 biased;
                 () = self.cancel_token.cancelled() => {
@@ -2414,6 +2457,8 @@ impl Engine {
                     s
                 }
                 Err(e) => {
+                    let (e, request_error_source) =
+                        split_stream_open_error(e, request_error_source);
                     let message = self.decorate_auth_error_message(
                         initial_stream_error_user_message(&self.config.locale_tag, &e),
                     );
@@ -2456,21 +2501,26 @@ impl Engine {
                         )
                     );
                     self.model_recovery_interrupted |= rate_limited;
-                    turn_error = Some(message.clone());
+                    turn_error = Some(TurnFailure {
+                        message: message.clone(),
+                        source: request_error_source,
+                    });
                     let _ = self
                         .tx_event
                         .send(Event::error(crate::error_taxonomy::envelope_for_llm_error(
                             e, message,
                         )))
                         .await;
-                    return (
-                        if rate_limited {
-                            TurnOutcomeStatus::Interrupted
-                        } else {
-                            TurnOutcomeStatus::Failed
-                        },
-                        turn_error,
-                    );
+                    if rate_limited {
+                        // The recovery episode owns the resume, so the turn
+                        // parks as interrupted instead of consuming the typed
+                        // failure as a terminal model error.
+                        return (
+                            TurnOutcomeStatus::Interrupted,
+                            turn_error.map(|failure| failure.message),
+                        );
+                    }
+                    return turn_error.expect("failure was assigned").finish(turn);
                 }
             };
             let StreamOutcome {
@@ -2555,7 +2605,10 @@ impl Engine {
 
             if rate_limit_interrupted {
                 self.model_recovery_interrupted = true;
-                return (TurnOutcomeStatus::Interrupted, turn_error);
+                return (
+                    TurnOutcomeStatus::Interrupted,
+                    turn_error.map(|failure| failure.message),
+                );
             }
 
             if is_incomplete_stop_reason(stop_reason.as_deref()) {
@@ -2598,7 +2651,7 @@ impl Engine {
                         "Model response incomplete: provider stop reason `{reason}`; no complete response or tool call was accepted."
                     );
                     crate::logging::warn(&error);
-                    return (TurnOutcomeStatus::Failed, Some(error));
+                    return TurnFailure::model(error).finish(turn);
                 }
             }
 
@@ -2897,7 +2950,7 @@ impl Engine {
                             "benchmark final-only mode produced repeated tool-only responses"
                                 .to_string();
                         let _ = self.tx_event.send(Event::status(reason.clone())).await;
-                        return (TurnOutcomeStatus::Failed, Some(reason));
+                        return TurnFailure::runtime(reason).finish(turn);
                     }
                     self.add_session_message(self.runtime_text_message_with_turn_metadata(
                     "All tools are disabled. The previous tool markers were ignored. Respond now with only the requested final answer in the exact required format."
@@ -3090,7 +3143,8 @@ impl Engine {
                                     .tx_event
                                     .send(Event::status(format!("REPL init failed: {e}")))
                                     .await;
-                                turn_error = Some(format!("REPL init failed: {e}"));
+                                turn_error =
+                                    Some(TurnFailure::runtime(format!("REPL init failed: {e}")));
                                 break;
                             }
                         };
@@ -3113,7 +3167,9 @@ impl Engine {
                             .tx_event
                             .send(Event::status(format!("REPL context refresh failed: {e}")))
                             .await;
-                        turn_error = Some(format!("REPL context refresh failed: {e}"));
+                        turn_error = Some(TurnFailure::runtime(format!(
+                            "REPL context refresh failed: {e}"
+                        )));
                         break;
                     }
 
@@ -3522,7 +3578,7 @@ impl Engine {
                         "Model stream ended with no answer or tool call.".to_string()
                     };
                     crate::logging::warn(&message);
-                    turn_error = Some(message.clone());
+                    turn_error = Some(TurnFailure::model(message.clone()));
                     let _ = self
                         .tx_event
                         .send(Event::error(ErrorEnvelope::classify(message, true)))
@@ -3745,7 +3801,7 @@ impl Engine {
                 )))
                 .await;
             }
-            return (TurnOutcomeStatus::Failed, Some(err));
+            return err.finish(turn);
         }
         let running = foreground_children
             .as_ref()
@@ -5787,7 +5843,7 @@ impl Engine {
         // is `Unpin`, so we can rebind it on a transparent retry without
         // breaking the existing pin invariants.
         let mut stream = stream;
-        let mut stream_error: Option<String> = None;
+        let mut stream_error: Option<TurnFailure> = None;
         let mut rate_limit_interrupted = false;
 
         let mut current_text_raw = String::new();
@@ -5890,7 +5946,7 @@ impl Engine {
                             // fails the turn with the real reason instead
                             // of ending "Completed" over a frozen block.
                             stream_errors = stream_errors.saturating_add(1);
-                            stream_error.get_or_insert(envelope.message.clone());
+                            stream_error.get_or_insert_with(|| TurnFailure::model(envelope.message.clone()));
                             let _ = self.tx_event.send(Event::error(envelope)).await;
                             None
                         }
@@ -5915,7 +5971,7 @@ impl Engine {
                 }
                 .into_envelope();
                 crate::logging::warn(&envelope.message);
-                stream_error.get_or_insert(envelope.message.clone());
+                stream_error.get_or_insert_with(|| TurnFailure::runtime(envelope.message.clone()));
                 let _ = self.tx_event.send(Event::error(envelope)).await;
                 break;
             }
@@ -5927,7 +5983,7 @@ impl Engine {
                 }
                 .into_envelope();
                 crate::logging::warn(&envelope.message);
-                stream_error.get_or_insert(envelope.message.clone());
+                stream_error.get_or_insert_with(|| TurnFailure::runtime(envelope.message.clone()));
                 let _ = self.tx_event.send(Event::error(envelope)).await;
                 break;
             }
@@ -6006,6 +6062,10 @@ impl Engine {
                                 continue;
                             }
                             Err(retry_err) => {
+                                let (retry_err, source) = split_stream_open_error(
+                                    retry_err,
+                                    crate::core::events::TurnErrorSource::Model,
+                                );
                                 rate_limit_interrupted = matches!(
                                     retry_err.downcast_ref::<crate::llm_client::LlmError>(),
                                     Some(
@@ -6016,7 +6076,10 @@ impl Engine {
                                 let retry_msg = self.decorate_auth_error_message(format!(
                                     "Stream retry failed: {retry_err}"
                                 ));
-                                stream_error.get_or_insert(retry_msg.clone());
+                                stream_error.get_or_insert_with(|| TurnFailure {
+                                    message: retry_msg.clone(),
+                                    source,
+                                });
                                 let _ = self
                                     .tx_event
                                     .send(Event::error(
@@ -6062,10 +6125,12 @@ impl Engine {
                         // outcome; the post-loop retry clears it, and if
                         // the turn still fails the last attempt surfaces
                         // it through the normal path below.
-                        stream_error.get_or_insert(stream_read_error_user_message(
-                            &message,
-                            any_content_received,
-                        ));
+                        stream_error.get_or_insert_with(|| {
+                            TurnFailure::model(stream_read_error_user_message(
+                                &message,
+                                any_content_received,
+                            ))
+                        });
                         pending_resume = Some(StreamResume::HeadlessNetworkDrop);
                         break;
                     }
@@ -6087,16 +6152,18 @@ impl Engine {
                         crate::logging::warn(format!(
                             "Interactive stream resume: network drop after partial content; scheduling typed resume: {message}"
                         ));
-                        stream_error.get_or_insert(stream_read_error_user_message(
-                            &message,
-                            any_content_received,
-                        ));
+                        stream_error.get_or_insert_with(|| {
+                            TurnFailure::model(stream_read_error_user_message(
+                                &message,
+                                any_content_received,
+                            ))
+                        });
                         pending_resume = Some(StreamResume::InteractiveNetworkDrop);
                         break;
                     }
                     let user_message =
                         stream_read_error_user_message(&message, any_content_received);
-                    stream_error.get_or_insert(user_message.clone());
+                    stream_error.get_or_insert_with(|| TurnFailure::model(user_message.clone()));
                     let envelope = crate::error_taxonomy::envelope_for_llm_error(e, user_message);
                     // A terminal (non-recoverable) stream failure must stop
                     // consumption immediately: re-issuing a wrong-model or
@@ -6539,7 +6606,7 @@ impl Engine {
                         crate::logging::warn(format!("Provider stream error event: {message}"));
                     }
                     let _ = self.tx_event.send(Event::error(envelope)).await;
-                    stream_error.get_or_insert(message.to_string());
+                    stream_error.get_or_insert_with(|| TurnFailure::model(message.to_string()));
                     break;
                 }
             }

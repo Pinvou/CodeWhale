@@ -1,8 +1,6 @@
 ---
 name: best-of-n
 description: Generate a small set of independent candidate solutions in worktrees, judge them against one explicit rubric, and apply the winner only after PASS verification.
-metadata:
-  short-description: Compare independent candidates
 ---
 
 # Best of N

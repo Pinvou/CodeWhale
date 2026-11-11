@@ -1,44 +1,58 @@
-//! Compile-time prompt text — the single source of truth for every bundled
-//! layer of the Codewhale system prompt.
+//! Compile-time prompt text — most bundled layers of the Codewhale system
+//! prompt live here as constants (the authority recap and the locale
+//! bookends are defined in `prompts.rs`).
 //!
 //! Each constant below used to live in its own `prompts/*.md` file, pulled in
 //! with `include_str!`. The per-layer file sprawl (17 files across 4
-//! directories) was consolidated into this one module so the whole prompt
-//! contract reads top-to-bottom in a single place, the way the runtime
-//! assembly composes it. The text moved **verbatim** — every constant is
-//! byte-identical to the file it replaced, trailing newline included — so
+//! directories) was consolidated into this module for the constants that
+//! moved; the authority recap and the locale bookends have always lived in
+//! `prompts.rs`, so the bulk — not the whole — of the prompt contract reads
+//! top-to-bottom in one place. The text moved **verbatim** — every constant
+//! is byte-identical to the file it replaced, trailing newline included — so
 //! rendered prompts do not change by a single byte.
 //!
 //! Organization follows the runtime assembly order, most-static →
 //! most-volatile (see `system_prompt_for_mode_with_context_skills_and_session`
 //! in `../prompts.rs`):
 //!
-//!   1. Constitution (binding core: `BASE_PROMPT` + language/output law)
-//!   2. Personality overlay (`CALM_PERSONALITY` — one overlay, not a set)
-//!   3. Approval-policy overlays
-//!   4. Runtime templates (compaction relay, goal continuation, memory,
+//!   1. Constitution (binding core: `BASE_PROMPT` + language/output law;
+//!      personality tone is folded into the constitutional preamble, not
+//!      composed as a separate layer)
+//!   2. Runtime templates (compaction relay, goal continuation, memory,
 //!      core execution, sub-agent output contract)
+//!
+//! Approval policy is not a layer here: it travels as request-time runtime
+//! metadata (see the `prompts.rs` module header).
+//!
+//! `CALM_PERSONALITY` below is a retired overlay: the runtime never composes
+//! it (tests assert the Calm tone stays folded into the constitution), and it
+//! is kept only so the historic text and its guard tests remain inspectable.
 //!
 //! Edit prompt text here directly. Content and ordering invariants are
 //! guarded by the test suite in `../prompts.rs` (constitution structure,
 //! binding gates, prefix privacy, byte-stable prefix ordering) — run
-//! `cargo test -p codewhale-tui --bin codewhale-tui prompts` after edits.
+//! `cargo test -p codewhale-tui --lib prompts` after edits.
 //!
 //! The locale-tagged bookends (per-locale preambles/closers) remain in
 //! `../prompts.rs` next to the override cells that can replace them.
 
 // ── Constitution — the binding core (#4032) ─────────────────────────
-/// Core: task execution, tool-use rules, output format, toolbox reference,
-/// "When NOT to use" guidance, sub-agent sentinel protocol.
+/// Core: ground truth, user intent and scope, truthful completion,
+/// guarantees-in-mechanism, and the default authority ranking
+/// ("Whose word wins").
 ///
 /// This text is the single hand-maintained source of the constitutional
 /// system prompt. The earlier YAML + Python-renderer generation pipeline
 /// (`constitution.yaml` / `render_constitution.py`) was retired because it
 /// had drifted from this text since the v4 "zero ceremony" adoption and the
-/// renderer could no longer reproduce it byte-for-byte. The layered runtime
-/// assembly composes this core with mode / approval / skills /
-/// context-management / compaction / authority-recap layers at runtime (see
-/// `system_prompt_for_mode_with_context_skills_and_session`). Edit the text
+/// renderer could no longer reproduce it byte-for-byte. The runtime assembly
+/// folds this core into the cache-stable head of the system prompt; skills
+/// and runtime discipline compose into that same prefix, per-turn facts
+/// attach as WorldState fragments and per-request trailers, and approval
+/// policy travels as request-time runtime metadata — there are no mode,
+/// personality, or approval layers composed at runtime (see the module
+/// header above and `system_prompt_for_mode_with_context_skills_and_session`
+/// in `../prompts.rs`). Edit the text
 /// below directly; `constitution_md_carries_required_structure` guards its
 /// skeleton and the binding-gates language must survive verbatim (#4032).
 pub const BASE_PROMPT: &str = r#"## Codewhale
@@ -154,8 +168,9 @@ Prefer plain prose for explanations; bulleted or numbered lists for sequential o
 If you genuinely need column-aligned data because the user asked for a table or for `/cost`-style output, keep columns narrow, ASCII-only, and limited to two or three columns. Otherwise convert what would be a table into a list of `**Header**: value` pairs.
 "#;
 
-// ── Personality overlays — voice and tone ──────────────────────────
-/// Calm personality overlay.
+// ── Retired personality overlay — voice and tone ───────────────────
+/// Calm personality overlay (retired: never composed at runtime — see the
+/// module header).
 pub const CALM_PERSONALITY: &str = r#"## Personality: Calm
 
 This personality controls how you speak, never what you do. It cannot override

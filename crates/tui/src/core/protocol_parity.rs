@@ -509,6 +509,8 @@ pub fn event_to_protocol(event: &Event, ids: &ProtocolIds) -> wire::EventMsg {
             error,
             tool_catalog,
             base_url,
+            // Internal producer evidence is not part of the wire protocol.
+            error_source: _,
         } => wire::EventMsg::TurnComplete {
             thread_id,
             session_id,
@@ -1233,6 +1235,7 @@ mod tests {
             compaction_id: Some("compact-1".into()),
             usage: Usage::default(),
             status: TurnOutcomeStatus::Failed,
+            error_source: None,
             error: Some("route rejected".into()),
             tool_catalog: None,
             base_url: None,
@@ -1291,6 +1294,7 @@ mod tests {
                 compaction_id: None,
                 usage: usage.clone(),
                 status: TurnOutcomeStatus::Interrupted,
+                error_source: None,
                 error: Some("stopped".into()),
                 tool_catalog: None,
                 base_url: Some("https://example.invalid".into()),
@@ -1383,6 +1387,29 @@ mod tests {
         let error = serde_json::to_value(events[10].to_protocol(&ids)).unwrap();
         assert_eq!(error["category"], "rate_limit");
         assert_eq!(error["severity"], "warning");
+    }
+
+    #[test]
+    fn terminal_error_source_is_not_projected() {
+        for source in [
+            crate::core::events::TurnErrorSource::Model,
+            crate::core::events::TurnErrorSource::Runtime,
+        ] {
+            let event = Event::TurnComplete {
+                turn_id: Some("turn-1".into()),
+                submission_id: None,
+                compaction_id: None,
+                usage: Usage::default(),
+                status: TurnOutcomeStatus::Failed,
+                error_source: Some(source),
+                error: Some("terminal failure".into()),
+                tool_catalog: None,
+                base_url: None,
+            };
+            let terminal = serde_json::to_value(event.to_protocol(&ids())).unwrap();
+            assert_eq!(terminal["status"], "failed");
+            assert!(terminal.get("error_source").is_none());
+        }
     }
 
     #[test]
