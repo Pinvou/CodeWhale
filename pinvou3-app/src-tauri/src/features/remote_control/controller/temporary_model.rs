@@ -942,6 +942,8 @@ pub(crate) struct TemporaryModelStore {
 struct InstalledPackage {
     package: TemporaryModelPackageV1,
     installed_at_ms: u64,
+    // Local lifecycle ownership; deliberately not a new wire-package field.
+    generation: String,
 }
 
 impl TemporaryModelStore {
@@ -962,6 +964,7 @@ impl TemporaryModelStore {
             InstalledPackage {
                 package,
                 installed_at_ms: now_b,
+                generation: live.remote_control_generation.clone(),
             },
         );
         Ok(())
@@ -1051,6 +1054,13 @@ impl TemporaryModelStore {
         installed.len() != before
     }
 
+    pub(crate) fn register_controlled_cleanup(
+        self: &Arc<Self>,
+        manager: &super::controlled::ControlledDeviceManager,
+    ) {
+        manager.register_cleanup_sink(self.clone());
+    }
+
     pub(crate) fn clear_all(&self) {
         self.installed.lock().clear();
     }
@@ -1063,6 +1073,19 @@ impl TemporaryModelStore {
 impl RemoteTaskModelScope for TemporaryModelStore {
     fn release_task_credentials(&self, task_id: &str) {
         self.clear_task(task_id);
+    }
+}
+
+impl super::controlled::ControlledCleanupSink for TemporaryModelStore {
+    fn cleanup(&self, generation: &str, scope: super::controlled::ControlledCleanupScope) {
+        if scope.temporary_models {
+            // The task-ledger write may fail during retirement. Release these
+            // transient credentials independently, without claiming a durable
+            // task transition or clearing a successor with reused visible IDs.
+            self.installed
+                .lock()
+                .retain(|_, installed| installed.generation != generation);
+        }
     }
 }
 
@@ -1130,6 +1153,66 @@ mod tests {
             primary: route("https://api.deepseek.com/v1", "deepseek", key),
             vision_fallback: None,
         }
+    }
+
+    #[test]
+    fn controlled_retirement_releases_only_the_exact_model_generation() {
+        use super::super::controlled::{ControlledCleanupScope, ControlledCleanupSink};
+        let store = TemporaryModelStore::default();
+        let old = lease();
+        store
+            .install(package("fixture-old-secret"), &old, "task-0001", 1_000)
+            .unwrap();
+        let mut other = old.clone();
+        other.remote_control_generation = "generation-other".into();
+        let mut other_package = package("fixture-other-secret");
+        other_package.binding.task_id = "task-other".into();
+        store
+            .install(other_package, &other, "task-other", 1_001)
+            .unwrap();
+        let mut scope = ControlledCleanupScope {
+            remote_tasks: false,
+            pending_permissions: false,
+            session_keys: false,
+            temporary_models: false,
+            workspace_grants: false,
+        };
+        store.cleanup(&old.remote_control_generation, scope);
+        assert!(store.contains_task("task-0001"));
+        scope.temporary_models = true;
+        store.cleanup(&old.remote_control_generation, scope);
+        assert!(!store.contains_task("task-0001"));
+        assert!(
+            store
+                .with_credentials("task-0001", &old, |_, _| ())
+                .is_err()
+        );
+        assert!(
+            store
+                .with_credentials("task-other", &other, |_, _| ())
+                .is_ok()
+        );
+        store.cleanup(&old.remote_control_generation, scope);
+        assert!(store.contains_task("task-other"));
+        // A delayed retirement must preserve a new owner, even if all public
+        // connection/lease/task fields have been reused by that new generation.
+        store
+            .install(
+                package("fixture-successor-secret"),
+                &other,
+                "task-0001",
+                1_002,
+            )
+            .unwrap();
+        store.cleanup(&old.remote_control_generation, scope);
+        assert!(store.contains_task("task-0001"));
+        assert!(
+            store
+                .with_credentials("task-0001", &other, |_, _| ())
+                .is_ok()
+        );
+        store.cleanup(&other.remote_control_generation, scope);
+        assert!(store.is_empty());
     }
 
     fn saved_model() -> SavedModel {
