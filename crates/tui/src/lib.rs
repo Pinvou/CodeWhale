@@ -4729,13 +4729,7 @@ async fn run_doctor(
         strict_icon, strict_tool_mode.message
     );
     if let Some(recommended) = strict_tool_mode.recommended_base_url.as_deref() {
-        // The recommendation is a built-in constant, never a configured
-        // URL, so its path must survive verbatim: the authority-only
-        // redaction used for configured endpoints would render
-        // `https://api.deepseek.com/beta` as `https://api.deepseek.com`,
-        // and the bare host is exactly where the chat wire still strips
-        // `function.strict`.
-        println!("    Use the {recommended} endpoint for DeepSeek strict schemas.");
+        println!("{}", strict_recommendation_line(recommended));
     }
     let capability = crate::config::provider_capability(config.api_provider(), &api_target.model);
     if let Some(alias) = capability.alias_deprecation.as_ref() {
@@ -7653,6 +7647,17 @@ fn doctor_strict_tool_mode_report_json(status: &DoctorStrictToolModeStatus) -> s
         // chat wire still strips `function.strict`.
         "recommended_base_url": status.recommended_base_url,
     })
+}
+
+/// The human-output recommendation line. The recommendation is a built-in
+/// constant, never a configured URL, so its path must survive verbatim
+/// here too: the authority-only redaction used for configured endpoints
+/// would render `https://api.deepseek.com/beta` as `https://api.deepseek.com`,
+/// and the bare host is exactly where the chat wire still strips
+/// `function.strict` — advice that lands the user straight back in the
+/// same verdict.
+fn strict_recommendation_line(recommended: &str) -> String {
+    format!("    Use the {recommended} endpoint for DeepSeek strict schemas.")
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -14077,6 +14082,19 @@ mod doctor_endpoint_tests {
         assert!(status.function_strict_sent);
         assert!(status.message.contains("beta endpoint"));
         assert!(status.recommended_base_url.is_none());
+    }
+
+    #[test]
+    fn strict_tool_mode_doctor_recommendation_line_is_verbatim() {
+        // The human-output line shares the JSON surface's honesty duty: the
+        // recommendation is a built-in constant whose `/beta` path is the
+        // whole point, so re-introducing the authority redaction on the
+        // human path alone must fail here too.
+        let line = strict_recommendation_line(crate::config::DEFAULT_DEEPSEEK_BASE_URL);
+        assert!(
+            line.contains("https://api.deepseek.com/beta"),
+            "the human recommendation carries the full /beta path: {line}"
+        );
     }
 
     #[test]

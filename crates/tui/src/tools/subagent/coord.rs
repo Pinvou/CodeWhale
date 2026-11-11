@@ -1384,6 +1384,67 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
+    fn strict_mode_fails_the_agents_message_and_followup_tools_closed() {
+        // Every call runtime-requires a target (`agent_id`/`name`) while the
+        // schema marks those optional, so under strict mode only `message`
+        // survives and every call dies on the missing target — the same
+        // every-call-broken class as `update_goal`. Both tools ship
+        // unchanged and non-strict via `STRICT_UNUSABLE_TOOLS`; this census
+        // feeds their real schemas through the pipeline so the list and the
+        // tools cannot drift apart.
+        let manager = Arc::new(tokio::sync::RwLock::new(
+            crate::tools::subagent::SubAgentManager::new(std::path::PathBuf::from("."), 1),
+        ));
+        let message = AgentsMessageTool::new(Arc::clone(&manager));
+        let followup = AgentsFollowupTool::new(manager);
+        let mut tools = vec![
+            crate::models::Tool {
+                tool_type: None,
+                name: ToolSpec::name(&message).to_string(),
+                description: ToolSpec::description(&message).to_string(),
+                input_schema: ToolSpec::input_schema(&message),
+                allowed_callers: None,
+                defer_loading: None,
+                input_examples: None,
+                strict: None,
+                cache_control: None,
+            },
+            crate::models::Tool {
+                tool_type: None,
+                name: ToolSpec::name(&followup).to_string(),
+                description: ToolSpec::description(&followup).to_string(),
+                input_schema: ToolSpec::input_schema(&followup),
+                allowed_callers: None,
+                defer_loading: None,
+                input_examples: None,
+                strict: None,
+                cache_control: None,
+            },
+        ];
+        let original: Vec<(String, serde_json::Value, String)> = tools
+            .iter()
+            .map(|tool| {
+                (
+                    tool.name.clone(),
+                    tool.input_schema.clone(),
+                    tool.description.clone(),
+                )
+            })
+            .collect();
+
+        assert!(
+            !crate::tools::schema_sanitize::prepare_tools_for_strict_mode(&mut tools),
+            "agents/message and agents/followup must fail closed, not ship strict \
+             with only `message`"
+        );
+        for (tool, (name, schema, description)) in tools.iter().zip(&original) {
+            assert_eq!(tool.strict, None, "{name} must ship non-strict");
+            assert_eq!(&tool.input_schema, schema, "{name} keeps its schema");
+            assert_eq!(&tool.description, description, "{name} keeps its description");
+        }
+    }
+
+    #[test]
     fn coordinate_tool_does_not_declare_read_only() {
         // #5123-class: the tool mutates the coordination ledger and expands
         // write claims; its declared capabilities must not say ReadOnly.

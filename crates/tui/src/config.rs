@@ -3122,11 +3122,15 @@ pub struct Config {
     /// stripped, per the strict contract. Schemas the strict subset cannot
     /// represent faithfully — root alternatives, required nullables
     /// (`nullable` / null-type union branches), or tools whose runtime
-    /// demands schema-optional parameters (`update_goal`, `send_later`) —
+    /// demands schema-optional parameters (`update_goal`, `send_later`,
+    /// `agents/message`, `agents/followup`) —
     /// stay non-strict: they keep their original schema. `tool_choice`
-    /// follows the route gate, not per-tool outcomes: it stays `required`
-    /// on an in-scope route even when some tools fail closed, and falls
-    /// back to `auto` only when the route itself is out of scope.
+    /// follows the route gate on the parent turn surface, not per-tool
+    /// outcomes: it stays `required` on an in-scope route even when some
+    /// tools fail closed, and falls back to `auto` only when the route
+    /// itself is out of scope. (The child sub-agent surface requests with
+    /// `auto`, and thinking-mode chat requests may drop `tool_choice`
+    /// entirely — pre-existing surfaces this field does not change.)
     pub strict_tool_mode: Option<bool>,
     /// Additional user-owned system-prompt sources concatenated in declared
     /// order (#454). Paths are expanded via `expand_path` so `~` and env vars

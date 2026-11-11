@@ -36572,3 +36572,172 @@ async fn turn_surface_strict_tool_mode_follows_the_official_route_gate() {
         "a non-family provider on an official URL stays out of scope"
     );
 }
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn strict_mode_full_catalog_census_pins_every_removal() {
+    // The strict pipeline removes every optional property from every
+    // tool on an in-scope route — a capability loss the catalog pays on
+    // every request. This census feeds the REAL turn-surface catalog
+    // through the pipeline and pins the per-tool outcome so a new tool
+    // (or a schema change) that adds removals — or worse, reduces a tool
+    // to a lone discriminator or an empty root — must update this test
+    // instead of silently degrading on the wire. Tools whose lost
+    // parameters break specific runtime actions carry a context note
+    // (STRICT_REMOVAL_CONTEXT_NOTES in tools/schema_sanitize.rs); the
+    // census asserts the note actually renders for each of them.
+    let _env_lock = lock_test_env();
+    let tmp = tempdir().expect("tempdir");
+    let home = tmp.path().join("home");
+    fs::create_dir_all(&home).expect("create isolated home");
+    let _home = EnvVarGuard::set("HOME", &home);
+    let _userprofile = EnvVarGuard::set("USERPROFILE", &home);
+    let _codewhale_home = EnvVarGuard::set("CODEWHALE_HOME", home.join(".codewhale"));
+    let workspace = tmp.path().join("workspace");
+    fs::create_dir_all(&workspace).expect("create workspace");
+
+    let api_config = Config {
+        api_key: Some("strict-census-fixture".to_string()),
+        default_text_model: Some(DEFAULT_TEXT_MODEL.to_string()),
+        strict_tool_mode: Some(true),
+        ..Config::default()
+    };
+    let (mut engine, _engine_handle) = Engine::new(
+        EngineConfig {
+            workspace,
+            allow_shell: true,
+            strict_tool_mode: true,
+            ..EngineConfig::default()
+        },
+        &api_config,
+    );
+    engine.config.features.disable(Feature::Mcp);
+    let client = engine.deepseek_client.clone();
+    let locale_tag = engine.config.locale_tag.clone();
+    let role_models = engine.subagent_role_models();
+    let authority = crate::core::authority::TurnAuthority::from_effective_fields(
+        AppMode::Agent,
+        true,
+        false,
+        false,
+        crate::tui::approval::ApprovalMode::Suggest,
+    );
+    let route = TurnRouteContext {
+        provider: ApiProvider::Deepseek,
+        model: DEFAULT_TEXT_MODEL.to_string(),
+        capabilities: codewhale_config::route::RouteCapabilities::default(),
+        limits: None,
+        client,
+        api_config: Box::new(api_config),
+        locale_tag,
+        role_models,
+        auto_model: false,
+        reasoning_effort: None,
+        reasoning_effort_auto: false,
+    };
+    let build = engine
+        .build_turn_tool_registry_and_catalog(
+            &authority,
+            &[],
+            None,
+            SubAgentWiring::Inert,
+            McpAccess::PassiveSnapshot,
+            route,
+            "",
+        )
+        .await;
+    assert!(
+        build.surface.strict_tool_mode,
+        "the census runs on an in-scope official route"
+    );
+
+    let original: Vec<crate::models::Tool> = build.surface.catalog.clone();
+    assert!(
+        original.len() >= 10,
+        "the census needs the real catalog, got {} tools",
+        original.len()
+    );
+    let mut processed = original.clone();
+    assert!(
+        !crate::tools::schema_sanitize::prepare_tools_for_strict_mode(&mut processed),
+        "the built-in catalog contains tools the strict pipeline fails closed \
+         by name (the census ran on the full surface)"
+    );
+
+    for (before, after) in original.iter().zip(&processed) {
+        assert_eq!(
+            before.name, after.name,
+            "the census pairs original and processed entries by position"
+        );
+        if after.strict != Some(true) {
+            // Failed closed (unusable-by-name or unrepresentable): the
+            // schema must ship untouched.
+            assert_eq!(
+                before.input_schema, after.input_schema,
+                "{} failed closed and must keep its authored schema",
+                after.name
+            );
+            continue;
+        }
+        // Every strict-shipped tool that lost parameters must carry the
+        // removal note, and the tools whose lost parameters break specific
+        // runtime actions must carry their per-tool context sentence.
+        let removed_any = before
+            .input_schema
+            .get("properties")
+            .and_then(serde_json::Value::as_object)
+            .map(|before_properties| {
+                let after_properties = after
+                    .input_schema
+                    .get("properties")
+                    .and_then(serde_json::Value::as_object)
+                    .expect("strict keeps the properties map");
+                before_properties
+                    .keys()
+                    .any(|name| !after_properties.contains_key(name))
+            })
+            .unwrap_or(false);
+        if removed_any {
+            assert!(
+                after.description.contains("Strict mode:"),
+                "{} lost optional parameters without the removal note",
+                after.name
+            );
+        }
+        let context_note_fragments: &[(&str, &str)] = &[
+            ("Git", "In strict mode `show` and `blame` are unavailable"),
+            ("lsp", "In strict mode `definition` and `references` are unavailable"),
+            (
+                "pandoc_convert",
+                "In strict mode binary target formats are unavailable",
+            ),
+            ("remember", "In strict mode only `append` is available"),
+            ("Bash", "the sandbox-escalation retry is unavailable"),
+        ];
+        for (name, fragment) in context_note_fragments {
+            if before.name == *name {
+                assert!(
+                    after.description.contains(fragment),
+                    "{name} lost runtime-required parameters — its context \
+                     note must name the dead capabilities: {}",
+                    after.description
+                );
+            }
+        }
+        // No strict tool may ship an empty property set: the gate fails
+        // such roots closed, so an empty map here means the gate lost an
+        // arm.
+        if let Some(shipped_properties) = after
+            .input_schema
+            .get("properties")
+            .and_then(serde_json::Value::as_object)
+        {
+            assert!(
+                !shipped_properties.is_empty(),
+                "{} shipped strict with no parameters left — the gate lost \
+                 the empty-root arm",
+                after.name
+            );
+        }
+    }
+}
