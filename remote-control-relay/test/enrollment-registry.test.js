@@ -2364,7 +2364,11 @@ test("missing primary never promotes staged enrollment and preserves prior commi
   const staged = await fs.readFile(`${statePath}.bak`);
   assert.equal(JSON.parse(staged).namespaces[ENROLLMENT_NAMESPACE].value.entries.length, 2);
   await fs.unlink(statePath);
-  await rejectsCode(openStateStore(statePath), "relay_state_unavailable");
+  // A faulty implementation/negative control may unexpectedly open the store.
+  // Register it before the rejection assertion so that failure still closes it.
+  await rejectsCode(openStateStore(statePath).then(unexpected => {
+    resourcesFor(t).stores.push(unexpected);
+  }), "relay_state_unavailable");
   await assert.rejects(fs.stat(statePath), { code: "ENOENT" });
   assert.deepEqual(await fs.readFile(`${statePath}.bak`), staged);
   // Test-only offline restoration has exact evidence of the last successful
