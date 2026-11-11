@@ -53,6 +53,7 @@ export function AdminAdjustmentLookup({ client, kind, label, words, value, onCha
     const controller = new AbortController();
     active.current = controller;
     const stamp = { client, epoch, query, routeSignature };
+    const previousPage = cursor ? visible : null;
     setResult({ ...stamp, busy: true, items: cursor ? visible?.items || [] : [] });
     try {
       const page = await (kind === 'wallet' ? client.wallets({ q: query, cursor, limit: 25 }, controller.signal, { isolateRead: true }) : client.users({ q: query, cursor }, controller.signal, '', { isolateRead: true }));
@@ -70,7 +71,7 @@ export function AdminAdjustmentLookup({ client, kind, label, words, value, onCha
           setSelected(null);
           onDirectoryAccess?.(false);
         }
-        setResult({ ...stamp, items: [], error: denied ? 'forbidden' : 'error' });
+        setResult({ ...stamp, items: denied ? [] : previousPage?.items || [], next: denied ? '' : previousPage?.next || '', error: denied ? 'forbidden' : 'error' });
       }
     } finally { if (active.current === controller) active.current = null; }
   };
@@ -94,7 +95,7 @@ export function AdminAdjustmentLookup({ client, kind, label, words, value, onCha
       {visible?.busy && <p role="status">{words.loading}</p>}
       {visible?.error && <p role="alert">{words[visible.error]}</p>}
       {visible && !visible.busy && !visible.error && !visible.items.length && <p role="status">{words.noMatches}</p>}
-      {visible && !visible.busy && !visible.error && visible.items.length > 0 && <ul>{visible.items.map(option => <li key={option.id}><button type="button" onClick={() => select(option)}><bdi>{optionName(kind, option, words)}</bdi><small><bdi>{option.code}</bdi></small>{option.code !== option.id && <code>{option.id}</code>}</button></li>)}</ul>}
+      {visible && !visible.busy && visible.items.length > 0 && <ul>{visible.items.map(option => <li key={option.id}><button type="button" onClick={() => select(option)}><bdi>{optionName(kind, option, words)}</bdi><small><bdi>{option.code}</bdi></small>{option.code !== option.id && <code>{option.id}</code>}</button></li>)}</ul>}
       {visible?.next && !visible.busy && <button type="button" onClick={() => void search(visible.next)}>{words.more}</button>}
     </div>}
   </fieldset>;

@@ -48,6 +48,42 @@ async function button(page, key) {
  await page.evaluate(key => [...document.querySelectorAll('button')].find(node => node.textContent.trim() === window.f17.copy.audit[key]).click(), key);
 }
 try{
+ await run('audit deep link applies the displayed filters on the first HTTP read', async page => {
+  const resource='00000000-0000-4000-8000-000000000017';
+  await open(page, 'audit_action=CONTROLLED_AUDIT_ACTION&audit_resource='+resource);
+  const reads=await page.evaluate(()=>window.f17.calls.filter(call=>call.method==='GET'&&/\/audit-logs(?:\?|$)/.test(call.url)).map(call=>call.url));
+  assert.ok(reads.length>0);
+  const first=new URL(reads[0],'https://controlled.invalid');
+  assert.equal(first.searchParams.get('action'),'CONTROLLED_AUDIT_ACTION');
+  assert.equal(first.searchParams.get('resource'),resource);
+  assert.ok(await page.$eval('.adm-panel',node=>node.textContent.includes('CONTROLLED_AUDIT_ACTION')));
+  assert.equal(await page.evaluate(()=>window.f17.createCount),0);
+ });
+ await run('audit drawer first reverse Tab loops inside and Escape restores the row', async page => {
+  await open(page);
+  await page.click('.adm-audit-row-detail');
+  await page.waitForFunction(()=>document.activeElement===document.querySelector('.adm-detail-drawer'));
+  const focus=()=>page.evaluate(()=>{
+   const drawer=document.querySelector('.adm-detail-drawer');
+   const nodes=[...drawer.querySelectorAll('button:not(:disabled),a[href],input:not(:disabled),select:not(:disabled),textarea:not(:disabled),[tabindex]:not([tabindex="-1"])')].filter(node=>node.getClientRects().length);
+   return {inside:drawer.contains(document.activeElement),first:document.activeElement===nodes[0],last:document.activeElement===nodes.at(-1),count:nodes.length};
+  });
+  await page.keyboard.down('Shift');await page.keyboard.press('Tab');await page.keyboard.up('Shift');
+  assert.equal((await focus()).last,true,'initial reverse Tab reaches the last drawer control');
+  await page.keyboard.press('Tab');assert.equal((await focus()).first,true);
+  const count=(await focus()).count;assert.ok(count>0);
+  for(let index=0;index<count;index++){await page.keyboard.press('Tab');assert.equal((await focus()).inside,true);}
+  assert.equal((await focus()).first,true,'one complete forward cycle returns to the first control');
+  for(const reverse of [false,true]) {
+   await page.$eval('.adm-topbar button',button=>button.focus());
+   assert.equal((await focus()).inside,false,'the outside target must actually own focus before the native key event');
+   if(reverse)await page.keyboard.down('Shift');await page.keyboard.press('Tab');if(reverse)await page.keyboard.up('Shift');
+   assert.equal((await focus())[reverse?'last':'first'],true,'Tab from outside returns to the appropriate end of the current drawer');
+  }
+  await page.keyboard.press('Escape');await page.waitForFunction(()=>!document.querySelector('.adm-detail-drawer'));
+  assert.equal(await page.$eval('.adm-audit-row-detail',node=>node===document.activeElement),true);
+  assert.equal(await page.evaluate(()=>window.f17.createCount),0);
+ });
  await run('review cancellation keeps export creation explicit', async page => {
   await open(page); await fill(page); await button(page, 'reviewOnly');
   await page.waitForSelector('.adm-audit-confirm-submit');

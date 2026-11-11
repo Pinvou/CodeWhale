@@ -44,6 +44,12 @@ export function reconciliationImportItems(text) {
     for (const [key, limit] of BILL_FIELDS) {
       if (item[key] !== undefined && (typeof item[key] !== 'string' || encoder.encode(item[key]).length > limit)) throw billIssue('billInvalidField', index + 1, key);
     }
+    // Go's optional string fields accept null as the empty/default value. Reject
+    // other JSON types before advertising a format-ready bill, without copying
+    // the server's entry-type or channel business rules into this preview.
+    for (const key of ['entry_type', 'channel']) {
+      if (item[key] !== undefined && item[key] !== null && typeof item[key] !== 'string') throw billIssue('billInvalidField', index + 1, key);
+    }
   }
   if (encoder.encode(encodeFinanceJSON(items)).length > RECONCILIATION_BILL_MAX_BYTES) throw billIssue('billTooLarge');
   return items;

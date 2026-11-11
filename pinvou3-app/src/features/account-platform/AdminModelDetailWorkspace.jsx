@@ -33,8 +33,16 @@ function DetailSource({ title, titleID, state, copy, onRetry, children }) {
   </section>;
 }
 
+function runtimeProtocolPresentation(model, copy) {
+  const value = model.runtime_protocol;
+  return {
+    blocked: value === '',
+    label: value === '' ? copy.modelCallProtocolUnset : typeof value === 'string' && value.trim() ? value : copy.modelCallProtocolUnknown,
+  };
+}
+
 function ModelCallStatus({ model, copy, onViewOperations }) {
-  const desktopBlocked = model.runtime_protocol === '';
+  const desktopBlocked = runtimeProtocolPresentation(model, copy).blocked;
   const catalogRemoved = model.lifecycle_status === 'REMOVED';
   const sourceUnavailable = model.source_available === false;
   const catalogBlocked = catalogRemoved || sourceUnavailable;
@@ -67,7 +75,7 @@ function OverviewTab({ detail, copy }) {
       <Fact label={copy.maximumOutputTokens}>{Number(model.maximum_output_tokens || 0).toLocaleString()}</Fact>
       <Fact label={copy.modalities}>{(model.supported_modalities || []).join(', ') || '—'}</Fact>
       <Fact label={copy.tokenizerVersion}>{model.tokenizer_version || '—'}</Fact>
-      <Fact label={copy.runtimeProtocol}>{model.runtime_protocol === '' ? copy.modelCallProtocolUnset : typeof model.runtime_protocol === 'string' && model.runtime_protocol.trim() ? model.runtime_protocol : copy.modelCallProtocolUnknown}</Fact>
+      <Fact label={copy.runtimeProtocol}>{runtimeProtocolPresentation(model, copy).label}</Fact>
       <Fact label={copy.source}>{model.source_available === true ? copy.modelCallSourceAvailable : model.source_available === false ? copy.enumLabels.UNAVAILABLE : copy.modelCallSourceUnknown}</Fact>
     </Facts>
     {model.description && <p className="adm-model-detail-description">{model.description}</p>}
@@ -106,7 +114,7 @@ function CapabilitiesTab({ detail, client, copy, historyQuery, onQueryChange, cu
         <Fact label={copy.capabilityVersion}>{model.capability_version}</Fact>
         <Fact label={copy.capabilityVersionID}><span className="adm-mono">{model.model_capability_version_id}</span></Fact>
         <Fact label={copy.protocol}>{protocol.protocol_code} · v{protocol.version}</Fact>
-        <Fact label={copy.runtimeProtocol}>{model.runtime_protocol || copy.runtimeProtocolMissing}</Fact>
+        <Fact label={copy.runtimeProtocol}>{runtimeProtocolPresentation(model, copy).label}</Fact>
         <Fact label={copy.protocolID}><span className="adm-mono">{protocol.protocol_definition_id}</span></Fact>
         <Fact label={copy.schemaSummary}>{copy.schemaFields(protocol.schema_field_count)}</Fact>
         <Fact label={copy.status}><Status value={protocol.status} copy={copy} /></Fact>
@@ -121,7 +129,7 @@ function CapabilitiesTab({ detail, client, copy, historyQuery, onQueryChange, cu
         <Fact label={copy.version}>{model.draft.draft_version}</Fact>
         <Fact label={copy.catalogVersion}>{model.draft.base_catalog_version}</Fact>
         <Fact label={copy.protocol}>{model.draft.protocol_code} · v{model.draft.protocol_version}</Fact>
-        <Fact label={copy.runtimeProtocol}>{model.draft.runtime_protocol || copy.runtimeProtocolMissing}</Fact>
+        <Fact label={copy.runtimeProtocol}>{runtimeProtocolPresentation(model.draft, copy).label}</Fact>
         <Fact label={copy.updatedAt}>{formatDate(model.draft.updated_at)}</Fact>
       </Facts> : <p className="adm-source-lead">{copy.noDraft}</p>}
     </section>
@@ -131,7 +139,7 @@ function CapabilitiesTab({ detail, client, copy, historyQuery, onQueryChange, cu
 
 function OperationsTab({ modelID, client, copy, query, onQueryChange, cursorHistory }) {
   const [refreshVersion, setRefreshVersion] = useState(0);
-  const load = useMemo(() => (filters, signal) => client.provisionings({ ...filters, model_id: modelID }, signal), [client, modelID]);
+  const load = useMemo(() => (filters, signal) => client.provisioningsForPresentation({ ...filters, model_id: modelID }, signal), [client, modelID]);
   const state = useAdminSource({ enabled: true, load, query, refreshVersion });
   const retry = () => {
     if (state.error?.status === 410) {
