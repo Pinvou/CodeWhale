@@ -192,6 +192,15 @@ function pinvouSharedweb() {
     turnPresentedArtifacts: [],
     busy: false,
     monitor: null,
+    // MegaCube 设备管理切片（桌面专属）：Web 恒无 MegaCube，只播种静态空默认
+    // 保证 device 域切片逐键有定义（与桌面 STATE_SLICE_FIELDS 同形）。
+    device: null,
+    deviceStale: false,
+    deviceError: null,
+    deviceServices: null,
+    deviceServicesError: null,
+    externalModels: null,
+    externalModelsError: null,
     backendOnline: null, // null=checking, true, false
     settings: null,
     selectedPet: "lingling",
@@ -2225,7 +2234,43 @@ function timeStr() { return pinvouSharedweb().timeStr(); }
 async function createNewSession() { return pinvouSharedweb().createNewSession(); }
 
   // 与桌面域契约保持一致；显式工作流需要一个可持久关联的 session id。
-  async function materializeSession() {
+  // 前台物化的草稿内容保护（round-38 review P2，诊断直达）：与桌面桥同款——
+  // protectUserDraft 供「等待窗口之后才晚到」的物化调用方使用，活动目标仍是
+  // 未物化草稿（activeSessionId 为空）且草稿带用户内容（未发送文本；Web 无
+  // 目录选择通道，draftWorkspacePath 为同形恒 null 桩）时返回 null 放弃，
+  // enterDraft 不得吞掉用户输入；无参调用保持原语义。
+  //
+  // 后台物化（round-39 review P2，zhuowp：切到既有会话后不得前台物化）：与
+  // 桌面桥同款——prompt 窗口决算发现用户已切到既有会话 B 时，晚到的物化
+  // 调用方改走 background：B 非空使 protectUserDraft 拦不住，前台路径
+  // enterDraft 的工作集清空 + switchActiveTo 会把活动工作集切到新会话并
+  // notify，订阅快照随之携带诊断会话的 chatItems/activeSessionId，B 的正文
+  // 在 ChatView 被顶掉。本路径只做创建与登记：后端 create_session（与前台
+  // 同参）+ 空 buffer 登记 sessionStates（sendMessageToSession 的存在性第二
+  // 把尺子，与 ensureSession 导航中止分支同款）+ refreshHistoryList 入侧栏
+  // 历史（其 notify 只刷列表，不动 activeSessionId/chatItems）；不
+  // enterDraft、不切工作集、不抢活动会话，返回真实 sid 供调用方后台发送。
+  // 创建失败静默返回 null（addSystemItem 会把报错卡写进用户当前会话的正文，
+  // 后台路径不得污染），由调用方按发送失败契约处理。
+  async function createBackgroundSession() {
+    try {
+      var meta = await invoke(IS_WEB ? "web_access_create_session" : "create_session");
+      var bg = sessionStates[meta.id] = freshBuffer();
+      bg.loadedFromDisk = true;
+      bg.sessionRevision = String(meta.transcript_revision || meta.transcriptRevision || "");
+      await refreshHistoryList();
+      return meta.id;
+    } catch (e) {
+      console.warn("background create_session failed", e);
+      return null;
+    }
+  }
+  async function materializeSession(options) {
+    if (options && options.protectUserDraft && !state.activeSessionId
+      && (String(state.composerDraft || "").length > 0 || state.draftWorkspacePath)) {
+      return null;
+    }
+    if (options && options.background) return createBackgroundSession();
     enterDraft();
     return ensureSession();
   }
@@ -5461,6 +5506,18 @@ async function revealModelApiKey(id) { return pinvouSharedweb().revealModelApiKe
    await loadModels();
    await loadEffectiveModelConfig();
   }
+ // 设备管理移除回收专用（三十三轮评审 P2）：最终事务按期望身份核对，
+ // 等待期间被用户改属的同 id 配置保留。true=已删，false=保留。
+ async function deleteModelIfMatches(id, expectedBaseUrl, expectedModel) {
+   const deleted = await invoke("delete_model_if_matches", {
+     id: id,
+     expectedBaseUrl: expectedBaseUrl || null,
+     expectedModel: expectedModel || null,
+   });
+   await loadModels();
+   await loadEffectiveModelConfig();
+   return deleted;
+  }
   async function setActiveModel(id) {
     await invoke("set_active_model", { id: id });
     await loadModels();
@@ -7709,6 +7766,7 @@ function appendVoiceText(base, text) { return pinvouSharedweb().appendVoiceText(
    saveModel: saveModel,
    revealModelApiKey: revealModelApiKey,
    deleteModel: deleteModel,
+   deleteModelIfMatches: deleteModelIfMatches,
     getImageInputCapability: getImageInputCapability,
     testImageInputCapability: testImageInputCapability,
     setActiveModel: setActiveModel,
