@@ -1,4 +1,6 @@
 use super::prelude::*;
+use crate::features::account_platform::runtime_model::model_credential_mode;
+use crate::features::assistant::runtime_model::ModelCredentialMode;
 use crate::platform::credential_store::{
     CREDENTIAL_STORE_UNAVAILABLE_ERROR, CredentialReference, CredentialStore,
 };
@@ -208,9 +210,31 @@ pub struct EffectiveModelConfig {
     pub vendor: Option<String>,
     pub endpoint_mode: Option<String>,
     pub requires_user_api_key: bool,
+    pub credential_mode: ModelCredentialMode,
+    pub model_ref: Option<ModelSelectionRef>,
     /// 被环境变量覆盖的字段名列表（如 `["model", "base_url"]`）。
     /// 空列表表示全部走 settings.json，用户修改会生效。
     pub env_overrides: Vec<String>,
+}
+
+fn resolve_effective_model_selection(
+    prefs: &UserPrefs,
+    selection: Option<&ModelSelectionRef>,
+) -> Result<Option<SavedModel>, String> {
+    match selection {
+        Some(selection) => prefs.resolve_model_ref(selection).map(Some).ok_or_else(|| {
+            "model_selection_unavailable: the selected model no longer exists".to_string()
+        }),
+        // A cleared typed default is an explicit absence. Do not turn the
+        // legacy active-model fallback into a new session binding: that would
+        // bypass the same selection-required state the send path enforces.
+        None if prefs.model_selection_schema_version >= 1
+            && prefs.advanced.default_model_ref.is_none() =>
+        {
+            Ok(None)
+        }
+        None => Ok(prefs.active_model().cloned()),
+    }
 }
 
 #[tauri::command]
@@ -222,12 +246,21 @@ pub async fn get_effective_model_config(
     // 读 disk 最新 prefs，并按当前会话解析真正绑定的模型。
     let mut bridge = pool.bridge.clone();
     bridge.prefs = refresh_safe_prefs(UserPrefs::load());
-    let session_model_id = session_id
+    let session_model_ref = session_id
         .as_deref()
-        .and_then(|id| store.session_model_id(id));
-    bridge.session_model = session_model_id
-        .as_deref()
-        .and_then(|id| bridge.prefs.model_by_id(id).cloned());
+        .and_then(|id| store.session_model_ref(id));
+    effective_model_config_for_selection(&mut bridge, session_model_ref)
+}
+
+/// The command's read-only projection pipeline, shared with its regression
+/// tests so reference resolution and bridge binding cannot diverge from the
+/// final credential/selection snapshot.
+fn effective_model_config_for_selection(
+    bridge: &mut crate::features::assistant::platform::bridge::Pinvou3Bridge,
+    session_model_ref: Option<ModelSelectionRef>,
+) -> Result<EffectiveModelConfig, String> {
+    let model_ref = session_model_ref.or_else(|| bridge.prefs.advanced.default_model_ref.clone());
+    bridge.session_model = resolve_effective_model_selection(&bridge.prefs, model_ref.as_ref())?;
     let mut env_overrides = Vec::new();
     if std::env::var("DEEPSEEK_MODEL").is_ok() {
         env_overrides.push("model".to_string());
@@ -245,9 +278,10 @@ pub async fn get_effective_model_config(
         env_overrides.push("provider".to_string());
     }
     Ok(effective_model_config_snapshot(
-        &bridge,
+        bridge,
         env_api_key,
         env_overrides,
+        model_ref,
     ))
 }
 
@@ -259,7 +293,8 @@ pub async fn get_effective_model_config(
 pub(super) fn effective_model_config_snapshot(
     bridge: &crate::features::assistant::platform::bridge::Pinvou3Bridge,
     env_api_key: bool,
-    env_overrides: Vec<String>,
+    mut env_overrides: Vec<String>,
+    model_ref: Option<ModelSelectionRef>,
 ) -> EffectiveModelConfig {
     let selection_required = bridge.session_model.is_none()
         && bridge.prefs.model_selection_schema_version >= 1
@@ -278,25 +313,38 @@ pub(super) fn effective_model_config_snapshot(
             .unwrap_or_default()
             .as_str()
     };
-    // 运行时模型准备固定 passthrough（无后台托管凭据），是否要求用户 Key
-    // 完全由 bridge 的鉴权判定（provider + base_url）决定。选择必需态没有
-    // 已选端点，无从派生 Key 要求；置 false 避免前端弹出按 Key 的引导门，
-    // 正确的恢复动作是先在模型选择器里挑一个模型。
-    let requires_user_api_key = !selection_required && bridge.api_key_required();
+    // Share the runtime's credential ownership decision. No selected endpoint
+    // means no API-key requirement; the recovery action is to select a model.
+    let credential_mode = model_credential_mode(
+        effective.as_ref(),
+        !selection_required && bridge.api_key_required(),
+    );
+    let backend_managed = credential_mode == ModelCredentialMode::BackendManaged;
+    let requires_user_api_key = credential_mode == ModelCredentialMode::UserManaged;
+    if selection_required || backend_managed {
+        env_overrides.clear();
+    }
     EffectiveModelConfig {
         preset: preset.to_string(),
         model: if selection_required {
             String::new()
+        } else if backend_managed {
+            effective
+                .as_ref()
+                .map(|model| model.model.clone())
+                .unwrap_or_default()
         } else {
             bridge.model()
         },
-        base_url: if selection_required {
+        base_url: if selection_required || backend_managed {
             String::new()
         } else {
             bridge.base_url()
         },
         api_key: String::new(),
-        credential_state: if env_api_key {
+        credential_state: if selection_required || backend_managed {
+            CredentialState::Missing
+        } else if env_api_key {
             CredentialState::EnvOverride
         } else {
             effective
@@ -304,12 +352,17 @@ pub(super) fn effective_model_config_snapshot(
                 .map(|model| model.credential_state)
                 .unwrap_or(CredentialState::Missing)
         },
-        has_secret: effective
-            .as_ref()
-            .map(|model| model.has_secret)
-            .unwrap_or(false),
+        has_secret: !backend_managed
+            && effective
+                .as_ref()
+                .map(|model| model.has_secret)
+                .unwrap_or(false),
         provider: if selection_required {
             String::new()
+        } else if backend_managed {
+            // Prepared Account Gateway bridges always use the OpenAI wire
+            // provider. Ordinary process overrides do not apply to that route.
+            "openai".to_string()
         } else {
             bridge.provider()
         },
@@ -321,6 +374,8 @@ pub(super) fn effective_model_config_snapshot(
             .as_ref()
             .and_then(|model| model.endpoint_mode.clone()),
         requires_user_api_key,
+        credential_mode,
+        model_ref,
         env_overrides,
     }
 }
@@ -2928,6 +2983,67 @@ mod tests {
                 "a no-op cleanup must not rewrite the file (bytes stay, unknown key survives)"
             );
         });
+    }
+
+    #[test]
+    fn effective_model_credential_projection_preserves_session_catalog_reference() {
+        let mut prefs = UserPrefs::default();
+        prefs.advanced.saved_models = vec![SavedModel::builtin_account_platform()];
+        prefs
+            .set_default_model_ref(ModelSelectionRef::account_platform("global-catalog-model"))
+            .unwrap();
+        let selection = ModelSelectionRef::account_platform("session-catalog-model");
+        let model = resolve_effective_model_selection(&prefs, Some(&selection))
+            .unwrap()
+            .unwrap();
+        assert_eq!(model.model, "session-catalog-model");
+        assert_eq!(
+            model_credential_mode(Some(&model), true),
+            ModelCredentialMode::BackendManaged
+        );
+        assert_eq!(
+            prefs.advanced.default_model_ref,
+            Some(ModelSelectionRef::account_platform("global-catalog-model"))
+        );
+    }
+
+    #[test]
+    fn effective_model_credential_projection_preserves_user_key_failure() {
+        let mut prefs = UserPrefs::default();
+        let mut model = SavedModel::builtin_account_platform();
+        model.id = "user-cloud".into();
+        model.credential_ref = Some(CredentialReference::for_model(&model.id));
+        model.credential_state = CredentialState::Unavailable;
+        prefs.advanced.saved_models = vec![model.clone()];
+        let selection = ModelSelectionRef::local(&model.id);
+        let projected = resolve_effective_model_selection(&prefs, Some(&selection))
+            .unwrap()
+            .unwrap();
+        assert_eq!(projected.credential_ref, model.credential_ref);
+        assert_eq!(projected.credential_state, CredentialState::Unavailable);
+        assert_eq!(
+            model_credential_mode(Some(&projected), true),
+            ModelCredentialMode::UserManaged
+        );
+        assert_eq!(
+            model_credential_mode(Some(&projected), false),
+            ModelCredentialMode::None
+        );
+    }
+
+    #[test]
+    fn effective_model_credential_projection_rejects_deleted_selection_without_fallback() {
+        let mut prefs = UserPrefs::default();
+        prefs.advanced.saved_models = vec![SavedModel::builtin_account_platform()];
+        prefs
+            .set_default_model_ref(ModelSelectionRef::account_platform("global-catalog-model"))
+            .unwrap();
+        let selection = ModelSelectionRef::local("deleted-user-model");
+        assert!(
+            resolve_effective_model_selection(&prefs, Some(&selection))
+                .unwrap_err()
+                .starts_with("model_selection_unavailable:")
+        );
     }
 
     #[test]
