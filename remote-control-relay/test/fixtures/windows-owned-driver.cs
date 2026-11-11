@@ -5,6 +5,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Web.Script.Serialization;
@@ -22,6 +23,10 @@ public sealed class DriverRegistry {
     public List<ChildRecord> children = new List<ChildRecord>();
 }
 public static class OwnedDriverFixture {
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr GetStdHandle(int kind);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool SetHandleInformation(IntPtr handle, uint mask, uint flags);
     private static readonly JavaScriptSerializer Json = new JavaScriptSerializer();
     private static readonly string Root = AppDomain.CurrentDomain.BaseDirectory;
     private static readonly string Ledger = Path.Combine(Root, "fixture-owned-processes.json");
@@ -48,6 +53,15 @@ public static class OwnedDriverFixture {
             if (registry.nonce != null && nonce != registry.nonce) throw new Exception("fixture_owner_mismatch");
             registry.nonce = nonce;
             if (args[0] == "legacy-start" || args[0] == "start-role") {
+                // A detached service owns fresh redirected streams. Do not let
+                // Framework Process.Start also inherit the launcher's original
+                // command pipes, which would keep its completion EOF open.
+                foreach (int kind in new[] { -10, -11, -12 }) {
+                    IntPtr handle = GetStdHandle(kind);
+                    if (handle != IntPtr.Zero && handle != new IntPtr(-1)
+                        && !SetHandleInformation(handle, 1, 0))
+                        throw new Exception("fixture_stdio_inheritance_failed");
+                }
                 string executable = Path.Combine(Root, "legacy-relay.exe");
                 var info = new ProcessStartInfo(executable, "-e \"setInterval(()=>{},1000)\"") {
                     UseShellExecute = false, CreateNoWindow = true,

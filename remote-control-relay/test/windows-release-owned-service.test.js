@@ -26,6 +26,7 @@ for (const shell of ["powershell.exe", "pwsh"]) {
         $extra=@{};$extra[${quote(driverSource)}]=(Get-FileHash -LiteralPath ${quote(driverSource)} -Algorithm SHA256).Hash.ToLowerInvariant();$extra[$reference]=(Get-FileHash -LiteralPath $reference -Algorithm SHA256).Hash.ToLowerInvariant();
         $build=Invoke-PinvouWhitelistedProcess -FilePath $csc -ExpectedSha256 (Get-FileHash -LiteralPath $csc -Algorithm SHA256).Hash.ToLowerInvariant() -Arguments @('/nologo','/target:exe',('/out:'+$compiled),('/r:'+$reference),${quote(driverSource)}) -AdditionalExpectedSha256 $extra;
         if($build.ExitCode -ne 0){throw 'fixture-driver-build-failed'};
+        [Console]::Error.WriteLine('fixture-phase:compiled');
         $tokens=$null;$errors=$null;$ast=[Management.Automation.Language.Parser]::ParseFile(${quote(orchestrator)},[ref]$tokens,[ref]$errors);if($errors.Count){throw 'orchestrator-parse-failed'};
         $create=$ast.Find({param($n)$n -is [Management.Automation.Language.AssignmentStatementAst] -and $n.Left.Extent.Text -eq '$RemoteCreateStaging'},$true).Right.Extent.Text;
         $bootstrap=$ast.Find({param($n)$n -is [Management.Automation.Language.AssignmentStatementAst] -and $n.Left.Extent.Text -eq '$RemoteBootstrap'},$true).Right.Extent.Text;
@@ -43,10 +44,12 @@ for (const shell of ["powershell.exe", "pwsh"]) {
             $stage.root
           }).AddArgument($base).AddArgument($nonce).AddArgument($create).AddArgument($bootstrap).AddArgument($inputs);
           $first=@($ps.Invoke());if($ps.HadErrors){throw ($ps.Streams.Error|Out-String)};$root=[string]$first[-1];$ps.Commands.Clear();
+          [Console]::Error.WriteLine('fixture-phase:bootstrapped');
           [void]$ps.AddScript({param($nonce)
             $ErrorActionPreference='Stop';$driver=Join-Path $global:PinvouE2ERunRoot 'pinvou-e2e-driver.exe';
             $runtime=(Invoke-PinvouTrustedGuard -FilePath $driver -Arguments @('legacy-start','--run-nonce',$nonce,'--persist-ownership-before-response'))|ConvertFrom-Json;
             if($LASTEXITCODE -ne 0){throw 'legacy-start-failed'};
+            [Console]::Error.WriteLine('fixture-phase:legacy-started');
             $registry=(Invoke-PinvouTrustedGuard -FilePath $driver -Arguments @('legacy-owned-pids','--run-nonce',$nonce,'--durable-registry-only'))|ConvertFrom-Json;
             $owned=Assert-PinvouLegacyOwnershipRegistry -RunNonce $nonce -Registry $registry -CallerObservedPid ([Nullable[int]][int]$runtime.pid);
             if($owned.active.Count -ne 1){throw 'durable-ownership-not-confirmed'};
@@ -56,6 +59,7 @@ for (const shell of ["powershell.exe", "pwsh"]) {
             $runtime.pid
           }).AddArgument($nonce);
           $second=@($ps.Invoke());if($ps.HadErrors){throw ($ps.Streams.Error|Out-String)};$legacyPid=[int]$second[-1];$ps.Commands.Clear();
+          [Console]::Error.WriteLine('fixture-phase:services-retained');
           [void]$ps.AddScript({param($root,$base,$nonce,$legacyPid,$cleanup)
             $ErrorActionPreference='Stop';
             if($global:PinvouE2EOwnedProcessScopes.Count -ne 2){throw 'scope-custody-lost-between-invocations'};
