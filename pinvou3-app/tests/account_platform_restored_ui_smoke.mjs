@@ -6,6 +6,7 @@ import react from '@vitejs/plugin-react';
 import * as puppeteer from './helpers/puppeteer-fixture.mjs';
 
 const root = path.resolve(import.meta.dirname, '..');
+if (process.env.UI_ARTIFACT_DIR) fs.mkdirSync(process.env.UI_ARTIFACT_DIR, { recursive: true });
 const chrome = [process.env.CHROME, 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe', 'C:/Program Files/Microsoft/Edge/Application/msedge.exe', '/usr/bin/chromium', '/usr/bin/google-chrome', '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'].find(value => value && fs.existsSync(value));
 assert.ok(chrome, 'Chromium required; validation cannot be skipped');
 const server = await createServer({ root, configFile: false, logLevel: 'error', plugins: [react()], css: { postcss: { plugins: [] } }, server: { host: '127.0.0.1', port: 0 } });
@@ -43,7 +44,134 @@ try {
     try { await action(); assert.deepEqual(errors, [], 'uncaught UI error'); console.log(`PASS ${name}`); passed++; }
     catch (error) { console.error(JSON.stringify({ case: name, pageErrors: errors, dialog: await page.evaluate(() => document.querySelector('[role=dialog]')?.textContent.slice(0, 1200)) })); throw error; }
   };
-  await run('personal original visual semantics distinguish closure, query, cancel and recharge', async () => {
+  await run('approved merged identity keeps localized controls and one settings card across sizes', async () => {
+    for (const language of ['zh', 'en', 'ja']) {
+      await fresh();
+      await page.evaluate(language => {
+        window.restored.language = language;
+        window.restored.personal = ['personal.context.switch', 'personal.profile.update', 'personal.invitations.read', 'personal.invitations.accept'];
+        window.restored.reload();
+      }, language);
+      await accountTab('accountSettings'); await activeAccount('accountSettings');
+      await page.waitForSelector('.ap-current-context-row button:not(:disabled)');
+      assert.deepEqual(await page.$eval('.ap-sidebar-switch', node => ({ label: node.getAttribute('aria-label'), title: node.title, popup: node.getAttribute('aria-haspopup'), text: node.textContent.trim() })), { label: await page.evaluate(() => window.restored.copy().center.switchIdentity), title: await page.evaluate(() => window.restored.copy().center.switchIdentity), popup: 'dialog', text: '' });
+      assert.equal(await page.$$eval('.ap-sidebar .ap-identity-card', nodes => nodes.length), 1);
+      assert.equal(await page.$$eval('#ap-panel-accountSettings > .ap-account-overview', nodes => nodes.length), 1);
+      assert.equal(await page.$$eval('.ap-account-overview > .ap-account-information, .ap-account-overview > .ap-context-settings', nodes => nodes.length), 2);
+      assert.equal(await page.$eval('.ap-account-overview > .ap-context-settings', node => getComputedStyle(node).borderTopWidth), '1px');
+      assert.equal(await page.$eval('.ap-account-information', node => getComputedStyle(node).borderTopWidth), '0px');
+      assert.equal(await page.$eval('.ap-sidebar-context strong', node => node.textContent), await page.$eval('.ap-current-context-row strong', node => node.textContent));
+      for (const width of [1440, 390, 320]) {
+        await page.setViewport({ width, height: 1000 }); await noOverflow();
+        for (const selector of ['.ap-sidebar-switch', '.ap-current-context-row button', '.ap-invitations .ap-section-action']) {
+          assert.ok(await page.$eval(selector, node => { const r = node.getBoundingClientRect(); return r.width >= 36 && r.height >= 36 && node.scrollWidth <= node.clientWidth + 1; }), `control fits at ${width}: ${selector}`);
+        }
+        if (process.env.UI_ARTIFACT_DIR && language === 'zh') await page.screenshot({ path: path.join(process.env.UI_ARTIFACT_DIR, `merged-identity-${width}.png`), fullPage: true });
+      }
+      await page.focus('.ap-sidebar-switch'); await page.keyboard.press('Enter');
+      await page.waitForSelector('[role=dialog]'); await page.keyboard.press('Escape');
+      await page.waitForFunction(() => !document.querySelector('[role=dialog]') && document.activeElement?.classList.contains('ap-sidebar-switch'));
+      await page.click('.ap-current-context-row button'); await page.waitForSelector('[role=dialog]'); await page.keyboard.press('Escape');
+      await page.click('.ap-invitations .ap-section-action'); await page.waitForSelector('[role=dialog] input[type=password]');
+      await page.type('[role=dialog] input', 'controlled-draft'); await page.keyboard.press('Escape');
+      await page.click('.ap-invitations .ap-section-action');
+      assert.equal(await page.$eval('[role=dialog] input', node => node.value), 'controlled-draft');
+      await page.keyboard.press('Escape');
+    }
+  });
+  await run('approved merged identity switches through the real controller and preserves permission boundaries', async () => {
+    await fresh();
+    await page.evaluate(() => { window.restored.centerOrganization = true; window.restored.personal = ['personal.context.switch', 'personal.profile.update']; window.restored.reload(); });
+    await page.waitForSelector('.ap-sidebar-switch:not(:disabled)');
+    await page.click('.ap-sidebar-switch'); await page.waitForSelector('[role=dialog] option[value="33333333-3333-4333-8333-333333333333"]');
+    await page.select('[role=dialog] select', '33333333-3333-4333-8333-333333333333');
+    await page.click('[role=dialog] .ap-primary');
+    await page.waitForFunction(() => !document.querySelector('[role=dialog]') && document.querySelector('.ap-sidebar-context strong')?.textContent === 'Sample organization');
+    assert.equal(await page.$eval('.ap-current-context-row strong', node => node.textContent), 'Sample organization');
+    assert.deepEqual(await page.evaluate(() => JSON.parse(window.restored.calls.find(call => call.url.endsWith('/active-context')).body)), { context_type: 'ORGANIZATION', organization_id: '33333333-3333-4333-8333-333333333333', expected_context_version: 1 });
+    await page.click('.ap-current-context-row button'); await page.waitForSelector('[role=dialog] select'); await page.select('[role=dialog] select', '');
+    await page.evaluate(() => { window.restored.contextSwitchStatus = 403; }); await page.click('[role=dialog] .ap-primary');
+    await page.waitForSelector('[role=dialog] [role=alert]');
+    assert.equal(await page.$eval('.ap-sidebar-context strong', node => node.textContent), 'Sample organization', 'denied write cannot change the displayed owner');
+    await page.keyboard.press('Escape');
+    await page.evaluate(() => { window.restored.contextSwitchStatus = 0; });
+    await page.click('.ap-current-context-row button'); await page.waitForSelector('[role=dialog] select'); await page.select('[role=dialog] select', ''); await page.click('[role=dialog] .ap-primary');
+    await page.waitForFunction(() => !document.querySelector('[role=dialog]') && document.querySelector('.ap-sidebar-context strong')?.textContent === window.restored.copy().center.personal);
+    await page.evaluate(() => { window.restored.personal = []; window.restored.reload(); });
+    await page.waitForFunction(() => !document.querySelector('.ap-sidebar-switch'));
+    assert.equal(await page.$$eval('.ap-current-context-row button, .ap-invitations', nodes => nodes.length), 0);
+    assert.ok(await page.$('.ap-account-overview .ap-account-information dl'), 'read-only masked profile remains available');
+    assert.ok(!(await page.$eval('.ap-account-overview', node => node.textContent)).includes('+8613800000000'));
+  });
+  await run('approved merged identity contains long organization names and coarse pointer targets', async () => {
+    await fresh();
+    await page.setViewport({ width: 1440, height: 1000, hasTouch: true });
+    await page.waitForSelector('.ap-product-picker');
+    await page.evaluate(() => {
+      window.restored.centerOrganization = true; window.restored.organizationName = 'Long organization name '.repeat(16); window.restored.username = 'LongAccountName'.repeat(12);
+      window.restored.personal = ['personal.context.switch', 'personal.profile.update', 'personal.invitations.read', 'personal.invitations.accept'];
+      window.restored.context = { context_type: 'ORGANIZATION', organization_id: '33333333-3333-4333-8333-333333333333', context_version: 1, membership_version: 1, organization_authorization_version: 1, permissions: [] }; window.restored.reload();
+    });
+    await accountTab('accountSettings'); await page.waitForFunction(() => document.querySelector('.ap-sidebar-context')?.title.includes('Long organization name'));
+    for (const width of [1440, 390, 320]) {
+      await page.setViewport({ width, height: 1000, hasTouch: true }); await noOverflow();
+      assert.ok(await page.$eval('.ap-sidebar-switch', node => { const r = node.getBoundingClientRect(); return r.width >= 44 && r.height >= 44; }));
+      assert.equal(await page.$eval('.ap-sidebar-context strong', node => getComputedStyle(node).textOverflow), 'ellipsis');
+      assert.ok(await page.$eval('.ap-current-context-row strong', node => node.scrollWidth <= node.clientWidth + 1));
+      if (process.env.UI_ARTIFACT_DIR) await page.screenshot({ path: path.join(process.env.UI_ARTIFACT_DIR, `merged-long-identity-${width}.png`), fullPage: true });
+    }
+  });
+  await run('refresh actions preserve section geometry during held HTTP reads', async () => {
+    for (const viewport of [{ width: 1440, height: 850 }, { width: 390, height: 720 }]) {
+      for (const target of [
+        { section: 'creditsUsage', button: '.ap-portal-finance .ap-section-heading button', content: '.ap-recharge-form', endpoint: '/v1/recharge/products' },
+        { section: 'ordersInvoices', button: '.ap-order-history > .ap-section-heading button', content: '.ap-order-history table', endpoint: '/v1/recharge/products' },
+        { section: 'creditsUsage', button: '.ap-usage-workspace > .ap-section-heading button', content: '.ap-usage-filters', endpoint: '/v1/me/usage-' },
+      ]) {
+        await fresh(); await page.setViewport(viewport); await accountTab(target.section);
+        await page.waitForFunction(selector => !document.querySelector(selector)?.disabled, {}, target.button);
+        await page.$eval(target.button, node => node.scrollIntoView({ block: 'center' }));
+        await page.evaluate(endpoint => {
+          const fetch = globalThis.fetch;
+          globalThis.fetch = async (...args) => {
+            if (String(args[0]).includes(endpoint)) await new Promise(resolve => { window.restored.releaseSectionRefresh = resolve; });
+            return fetch(...args);
+          };
+        }, target.endpoint);
+        const geometry = () => page.evaluate(({ button, content }) => {
+          const box = selector => { const r = document.querySelector(selector).getBoundingClientRect(); return [r.x, r.y, r.width, r.height]; };
+          return { scroll: scrollY, button: box(button), content: box(content) };
+        }, target);
+        const before = await geometry(); await page.click(target.button);
+        await page.waitForFunction(() => typeof window.restored.releaseSectionRefresh === 'function');
+        assert.deepEqual(await geometry(), before, `loading must not move ${target.content}`);
+        assert.equal(await page.$eval(target.button, b => b.getAttribute('aria-busy')), 'true');
+        await page.evaluate(() => window.restored.releaseSectionRefresh());
+        await page.waitForFunction(selector => !document.querySelector(selector).disabled, {}, target.button);
+        assert.deepEqual(await geometry(), before, `completion must not move ${target.content}`);
+      }
+    }
+  });
+  await run('approved section actions are card-local and profile refresh belongs only to settings', async () => {
+    for (const language of ['zh', 'en', 'ja']) {
+      await fresh(); await page.select('.ap-sidebar-foot select', language);
+      await page.waitForFunction(() => !document.querySelector('.ap-portal-finance .ap-section-heading button')?.disabled);
+      assert.equal(await page.$$eval('.ap-page-header button', nodes => nodes.length), 0);
+      assert.deepEqual(await page.$eval('.ap-portal-finance', node => { const style = getComputedStyle(node); return [style.paddingTop, style.paddingLeft, style.backgroundColor]; }), ['0px', '0px', 'rgba(0, 0, 0, 0)']);
+      assert.ok(await page.$eval('.ap-recharge-form', node => Boolean(node.closest('.ap-recharge-card')?.querySelector('.ap-section-heading h3'))));
+      for (const selector of ['.ap-recharge-card', '.ap-benefits', '.ap-usage-workspace']) {
+        const style = await page.$eval(`${selector} > .ap-section-heading button`, node => { const s = getComputedStyle(node); return { border: s.borderTopWidth, height: node.getBoundingClientRect().height, radius: s.borderRadius, icon: Boolean(node.querySelector('svg')) }; });
+        assert.deepEqual(style, { border: '1px', height: 40, radius: '8px', icon: true });
+      }
+      await accountTab('ordersInvoices'); assert.equal(await page.$$eval('.ap-page-header button', nodes => nodes.length), 0);
+      await accountTab('accountSettings'); assert.equal(await page.$$eval('#ap-panel-accountSettings .ap-account-information .ap-section-action', nodes => nodes.length), 1);
+      if (process.env.UI_ARTIFACT_DIR && language === 'zh') {
+        await page.screenshot({ path: path.join(process.env.UI_ARTIFACT_DIR, 'approved-settings-actions.png'), fullPage: true });
+        await accountTab('creditsUsage'); await activeAccount('creditsUsage'); await page.waitForFunction(() => document.querySelector('[data-section=creditsUsage]').getAttribute('aria-selected') === 'true'); await page.screenshot({ path: path.join(process.env.UI_ARTIFACT_DIR, 'approved-credit-actions.png'), fullPage: true });
+      }
+    }
+  });
+  await run('personal action hierarchy distinguish closure, query, cancel and recharge', async () => {
     for (const language of ['zh', 'en', 'ja']) {
       await fresh();
       await page.evaluate(language => {
@@ -52,9 +180,9 @@ try {
         window.restored.reload();
       }, language);
       await page.waitForSelector('.ap-product-picker label.selected');
-      assert.equal(await page.$eval('.ap-balance-hero', node => getComputedStyle(node).marginTop), '36px');
+      assert.equal(await page.$eval('.ap-balance-hero', node => getComputedStyle(node).marginTop), '0px');
       const recharge = await page.$eval('.ap-recharge-controls > button', node => ({ color: getComputedStyle(node).color, background: getComputedStyle(node).backgroundColor }));
-      assert.deepEqual(recharge, { color: 'rgb(32, 33, 36)', background: 'rgb(236, 236, 236)' });
+      assert.deepEqual(recharge, { color: 'rgb(255, 255, 255)', background: 'rgb(19, 118, 71)' });
       await accountTab('accountSettings');
       await page.waitForSelector('.ap-danger-section button.ap-danger:not(:disabled)');
       const dangerStyle = async selector => page.$eval(selector, node => ({ color: getComputedStyle(node).color, border: getComputedStyle(node).borderTopColor, background: getComputedStyle(node).backgroundColor }));
@@ -85,20 +213,193 @@ try {
       }
     }
   });
+  await run('late paid details preserve a newer review but still refresh a payable order', async () => {
+    for (const mode of ['paid-to-review', 'unchanged-paid', 'newer-review', 'removed-review', 'other-order-paid', 'removed-first-paid']) {
+      await fresh(); await accountTab('ordersInvoices');
+      await page.evaluate(mode => {
+        const originalFetch = globalThis.fetch, state = window.restored;
+        const review = mode.endsWith('review');
+        const initiallyPaid = mode === 'paid-to-review' || mode === 'unchanged-paid';
+        state.newProjection = false; state.oldDetailReleased = false;
+        const target = '00000000-0000-4000-8000-000000000001';
+        globalThis.fetch = async (input, options = {}) => {
+          const url = String(input);
+          if (url.endsWith('/v1/recharge/products') && state.rejectFollowupProducts) return new Response(JSON.stringify({ code: 'UPSTREAM_UNAVAILABLE' }), { status: 503 });
+          const response = await originalFetch(input, options);
+          if ((options.method || 'GET') !== 'GET') return response;
+          if (url.endsWith('/v1/recharge/orders')) {
+            const body = await response.json();
+            body.items = body.items.map((item, index) => {
+              if (index === 0) return { ...item, status: state.newProjection && review ? 'MANUAL_REVIEW' : initiallyPaid ? 'PAID' : 'PENDING', fulfillment_status: state.newProjection && review ? 'MANUAL_REVIEW' : initiallyPaid ? 'CREDITED' : 'PENDING', paid_at: initiallyPaid || state.newProjection && review ? '2026-11-06T00:00:00Z' : null };
+              if (index === 1 && mode !== 'newer-review') return { ...item, status: state.newProjection && !review && !initiallyPaid ? 'PAID' : 'PENDING', fulfillment_status: state.newProjection && !review && !initiallyPaid ? 'CREDITED' : 'PENDING', paid_at: state.newProjection && !review && !initiallyPaid ? '2026-11-06T00:00:00Z' : null };
+              return item;
+            });
+            if (state.dropTarget) body.items = body.items.filter(item => item.order_id !== target);
+            return new Response(JSON.stringify(body), { status: 200 });
+          }
+          if (url.endsWith(`/v1/recharge/orders/${target}`)) {
+            const body = await response.json();
+            // Valid producer sequence: a credited payment, then a distinct
+            // provider transaction moves the projection to MANUAL_REVIEW.
+            if (state.oldDetailReleased) return new Response(JSON.stringify({ ...body, status: 'MANUAL_REVIEW', fulfillment_status: 'MANUAL_REVIEW' }), { status: 200 });
+            return new Promise(resolve => {
+              state.releasePriorPaid = () => {
+                state.oldDetailReleased = true; state.rejectFollowupProducts = review;
+                resolve(new Response(JSON.stringify({ ...body, status: 'PAID', fulfillment_status: 'CREDITED', paid_at: '2026-11-06T00:00:00Z' }), { status: 200 }));
+              };
+            });
+          }
+          return response;
+        };
+        state.reload();
+      }, mode);
+      await page.waitForFunction(() => { const button = document.querySelector('.ap-order-history .ap-section-action'); return button && !button.disabled; });
+      await page.click('.ap-order-history tbody tr:has(code[title="00000000-0000-4000-8000-000000000001"]) td:last-child button');
+      await page.waitForFunction(() => typeof window.restored.releasePriorPaid === 'function');
+      const readsBeforeProjection = await page.evaluate(() => window.restored.calls.filter(c => c.url.includes('/v1/me/balance?')).length);
+      const collectionsBeforeProjection = await page.evaluate(() => window.restored.calls.filter(c => c.method === 'GET' && c.url.endsWith('/v1/recharge/orders')).length);
+      await page.evaluate(() => { window.restored.newProjection = true; });
+      const review = mode.endsWith('review');
+      const projected = review ? 'MANUAL_REVIEW' : 'COMPLETED';
+      const row = review ? 1 : 2;
+      if (mode === 'unchanged-paid') {
+        await page.waitForFunction(count => window.restored.calls.filter(c => c.method === 'GET' && c.url.endsWith('/v1/recharge/orders')).length >= count + 2, {}, collectionsBeforeProjection);
+      } else {
+        await page.waitForFunction(({ row, projected }) => document.querySelector(`.ap-order-history tbody tr:has(code[title="00000000-0000-4000-8000-${String(row).padStart(12, '0')}"]) .ap-status`)?.dataset.status === projected, {}, { row, projected });
+      }
+      if (!review && mode !== 'unchanged-paid') {
+        await page.waitForFunction(count => window.restored.calls.filter(c => c.url.includes('/v1/me/balance?')).length > count && !document.querySelector('.ap-account-information .ap-section-action').disabled, {}, readsBeforeProjection);
+      }
+      if (mode.startsWith('removed-')) {
+        await page.evaluate(() => { window.restored.dropTarget = true; });
+        await page.waitForFunction(() => !document.querySelector('.ap-order-history tr:has(code[title="00000000-0000-4000-8000-000000000001"])'));
+      }
+      const balances = await page.evaluate(() => window.restored.calls.filter(c => c.url.includes('/v1/me/balance?')).length);
+      await page.evaluate(() => window.restored.releasePriorPaid());
+      await page.waitForFunction(() => document.querySelector('.ap-order-details-body')?.getAttribute('aria-busy') === 'false');
+      if (review) {
+        if (mode === 'removed-review') {
+          assert.equal(await page.$$eval('.ap-order-history tr:has(code[title="00000000-0000-4000-8000-000000000001"])', nodes => nodes.length), 0, 'old paid cannot reinsert an evicted reviewed order');
+        } else {
+          assert.equal(await page.$eval('.ap-order-history tbody tr:has(code[title="00000000-0000-4000-8000-000000000001"]) .ap-status', n => n.dataset.status), 'MANUAL_REVIEW');
+          assert.ok((await page.$eval('.ap-order-details-body dl', n => n.textContent)).includes(await page.evaluate(() => window.restored.copy().center.orderStatuses.MANUAL_REVIEW || window.restored.copy().accountLayout.statuses.MANUAL_REVIEW)));
+        }
+        assert.equal(await page.$$eval('.ap-order-details-body .ap-dialog-actions', nodes => nodes.length), 0, 'stale paid read must not unlock detail actions');
+        await page.click('.ap-order-details-body > button');
+        await page.waitForSelector('.ap-order-details-body textarea');
+      } else {
+        assert.equal(await page.$$eval('.ap-order-details-body .ap-dialog-actions', nodes => nodes.length), 1, 'unchanged facts must still admit the authorized paid detail');
+        assert.ok((await page.$eval('.ap-order-details-body dl', n => n.textContent)).includes(await page.evaluate(() => window.restored.copy().center.orderStatuses.COMPLETED || window.restored.copy().accountLayout.statuses.COMPLETED)));
+        await page.waitForFunction(count => window.restored.calls.filter(c => c.url.includes('/v1/me/balance?')).length > count, {}, balances);
+      }
+      assert.equal(await page.evaluate(() => window.restored.calls.filter(c => c.method === 'POST' && c.url.includes('/recharge/orders')).length), 0);
+    }
+  });
+  await run('order details keep the underlying list and dialog geometry stable through delayed reads', async () => {
+    for (const viewport of [{ width: 1440, height: 700 }, { width: 390, height: 560 }]) {
+    await fresh(); await accountTab('ordersInvoices'); await activeAccount('ordersInvoices');
+    await page.setViewport(viewport);
+    await page.$eval('.ap-order-history tbody tr:nth-child(2) td:last-child button', node => node.scrollIntoView({ block: 'center' }));
+    await page.evaluate(() => { window.restored.holdOrderDetail = true; });
+    const geometry = () => page.evaluate(() => {
+      const table = document.querySelector('.ap-order-history table').getBoundingClientRect();
+      const dialog = document.querySelector('.ap-order-details-dialog')?.getBoundingClientRect();
+      const facts = document.querySelector('.ap-order-details-dialog dl')?.getBoundingClientRect();
+      return { scroll: scrollY, table: [table.x, table.y, table.width], dialog: dialog && [dialog.x, dialog.y, dialog.width, dialog.height], facts: facts && [facts.x, facts.y, facts.width] };
+    });
+    const before = await geometry();
+    await page.click('.ap-order-history tbody tr:nth-child(2) td:last-child button');
+    await page.waitForFunction(() => typeof window.restored.releaseOrderDetail === 'function');
+    const loading = await geometry(); assert.deepEqual(loading.table, before.table); assert.equal(loading.scroll, before.scroll); assert.ok(loading.dialog); assert.ok(loading.facts, 'known order facts must be present while the read is pending');
+    await page.evaluate(() => { window.restored.holdOrderDetail = false; window.restored.releaseOrderDetail(); });
+    await page.waitForFunction(() => document.querySelector('.ap-order-details-dialog dd code'));
+    await page.waitForFunction(() => !document.querySelector('.ap-order-details-dialog [aria-busy=true]'));
+    const loaded = await geometry(); assert.deepEqual(loaded, loading);
+    await page.keyboard.press('Escape'); await page.waitForFunction(() => !document.querySelector('[role=dialog]'));
+    assert.deepEqual(await geometry(), before);
+    }
+  });
+  await run('order detail read errors close in place and retired sessions withdraw the old selection', async () => {
+    await fresh(); await accountTab('ordersInvoices'); await activeAccount('ordersInvoices');
+    await page.evaluate(() => { window.restored.orderReadFail = true; });
+    const before = await page.$eval('.ap-order-history', node => [node.getBoundingClientRect().x, node.getBoundingClientRect().y]);
+    await page.click('.ap-order-history tbody tr:nth-child(2) td:last-child button');
+    await page.waitForSelector('.ap-order-details-dialog [role=alert]');
+    await page.keyboard.press('Escape'); await page.waitForFunction(() => !document.querySelector('[role=dialog]'));
+    assert.deepEqual(await page.$eval('.ap-order-history', node => [node.getBoundingClientRect().x, node.getBoundingClientRect().y]), before);
+    for (const status of [401, 403]) {
+      await fresh(); await accountTab('ordersInvoices'); await activeAccount('ordersInvoices');
+      await page.evaluate(status => { window.restored.orderReadFail = true; window.restored.orderReadStatus = status; }, status);
+      await page.click('.ap-order-history tbody tr:nth-child(2) td:last-child button');
+      await page.waitForFunction(() => !document.querySelector('.ap-order-details-dialog') && document.querySelector('[role=alert]'));
+      assert.equal(await page.$eval('.ap-order-history > .ap-section-heading button', node => node.disabled), true);
+      assert.equal(await page.$$eval('.ap-order-details-dialog', nodes => nodes.length), 0);
+    }
+    for (const change of ['epoch', 'client']) {
+      await fresh(); await accountTab('ordersInvoices'); await activeAccount('ordersInvoices');
+      await page.evaluate(() => { window.restored.holdOrderDetail = true; });
+      await page.click('.ap-order-history tbody tr:nth-child(2) td:last-child button');
+      await page.waitForFunction(() => typeof window.restored.releaseOrderDetail === 'function');
+      await page.evaluate(change => {
+        window.restored.holdOrderDetail = false;
+        if (change === 'epoch') window.restored.client.financeSessionEpoch++;
+        else window.restored.reload();
+        window.restored.releaseOrderDetail();
+      }, change);
+      await page.waitForSelector('.ap-sidebar-foot select');
+      await page.select('.ap-sidebar-foot select', 'en');
+      await page.waitForFunction(() => !document.querySelector('.ap-order-details-dialog'));
+      assert.equal(await page.$$eval('.ap-order-details-dialog', nodes => nodes.length), 0);
+    }
+  });
+  await run('personal startup read failure reports a workspace error without an uncaught exception', async () => {
+    await fresh();
+    await page.evaluate(() => { window.restored.failInitialProducts = true; window.restored.reload(); });
+    await page.waitForSelector('.ap-finance-feedback-target [role=alert]');
+    assert.equal(await page.$eval('.ap-finance-feedback-target [role=alert]', node => node.textContent), await page.evaluate(() => window.restored.copy().finance.unavailable));
+    assert.equal(await page.$$eval('.ap-order-details-dialog', nodes => nodes.length), 0);
+  });
   await run('personal original tabs, five benefits, exact balance and history navigation', async () => {
     await fresh('?section=usage');
     await activeAccount('creditsUsage');
     assert.equal(await page.$$eval('.ap-sidebar [role=tab]', nodes => nodes.length), 3);
     assert.equal(await page.$$eval('#ap-panel-creditsUsage .ap-benefit-card', nodes => nodes.length), 5);
-    assert.equal(await page.$eval('.ap-balance-hero>strong', node => node.textContent), '922,337,203,685,477');
+    assert.equal(await page.$eval('.ap-balance-hero > div:first-child strong', node => node.textContent), '922,337,203,685,477.5807');
     await accountTab('ordersInvoices'); await activeAccount('ordersInvoices');
     assert.equal(await page.$$eval('.ap-order-history tbody tr', nodes => nodes.length), 6);
     await page.goBack(); await activeAccount('creditsUsage'); await page.goForward(); await activeAccount('ordersInvoices');
     assert.equal(await page.evaluate(() => window.restored.calls.filter(call => call.method !== 'GET' && !call.url.endsWith('/account/bootstrap')).length), 0, 'URL navigation wrote business data');
   });
+  await run('render review: compact products and white settings cards at desktop and mobile widths', async () => {
+    await fresh();
+    await page.evaluate(() => { window.restored.personal = ['personal.billing.read', 'personal.recharge.create', 'personal.recharge.manage', 'personal.usage.read', 'personal.profile.update', 'personal.security.manage']; window.restored.reload(); });
+    await page.waitForSelector('.ap-product-picker');
+    for (const width of [1440, 390]) {
+      await page.setViewport({ width, height: 1100 }); await accountTab('creditsUsage'); await activeAccount('creditsUsage');
+      const box = await page.$eval('.ap-product-picker label', node => ({ height: node.getBoundingClientRect().height, text: node.textContent }));
+      assert.ok(box.height < 200, 'purchase cards should stay compact without hiding facts');
+      const price = await page.$eval('.ap-product-price', node => ({ size: getComputedStyle(node).fontSize, weight: getComputedStyle(node).fontWeight }));
+      assert.deepEqual(price, { size: '18px', weight: '500' });
+      const borders = await page.$$eval('.ap-product-picker label', nodes => nodes.map(node => ({ border: getComputedStyle(node).borderWidth, shadow: getComputedStyle(node).boxShadow })));
+      assert.ok(borders.every(item => item.border === '1px' && item.shadow === 'none'));
+
+      assert.ok(box.text.includes('110') && box.text.includes('30'));
+      assert.ok(await page.$$eval('.ap-benefit-card p', nodes => nodes.every(node => node.scrollWidth <= node.clientWidth + 1)), 'exact large balances must fit inside benefit cards');
+      await noOverflow();
+      if (process.env.UI_ARTIFACT_DIR) await page.screenshot({ path: path.join(process.env.UI_ARTIFACT_DIR, 'render-review-personal-' + width + '.png'), fullPage: true });
+      await accountTab('ordersInvoices'); await activeAccount('ordersInvoices'); await noOverflow();
+      assert.ok(await page.$$eval('.ap-order-table-wrap td:last-child button', nodes => nodes.every(node => node.getBoundingClientRect().width >= 60)));
+      await accountTab('accountSettings'); await activeAccount('accountSettings');
+      for (const selector of ['.ap-account-overview', '.ap-profile-rows', '.ap-security-actions']) {
+        assert.equal(await page.$eval('#ap-panel-accountSettings > ' + selector, node => getComputedStyle(node).backgroundColor), 'rgb(255, 255, 255)');
+      }
+      await noOverflow();
+      if (process.env.UI_ARTIFACT_DIR) await page.screenshot({ path: path.join(process.env.UI_ARTIFACT_DIR, 'render-review-settings-' + width + '.png'), fullPage: true });
+    }
+  });
   await run('personal unknown recharge survives tab changes with the original key and facts', async () => {
     await fresh(); await page.evaluate(() => { window.restored.unknown = true; });
-    await click('.ap-recharge-form button', await page.evaluate(() => window.restored.copy().finance.create));
+    await page.click('.ap-recharge-controls > button');
     await page.waitForFunction(() => window.restored.calls.some(call => call.method === 'POST' && call.url.endsWith('/recharge/orders')) && document.querySelector('.ap-finance-feedback button'));
     await accountTab('ordersInvoices'); await accountTab('accountSettings'); await accountTab('creditsUsage');
     await click('.ap-finance-feedback button', await page.evaluate(() => window.restored.copy().finance.retry));
@@ -118,6 +419,424 @@ try {
     await page.waitForFunction(() => !document.querySelector('[role=dialog]'));
     await page.waitForFunction(() => document.activeElement.closest('.ap-profile-row'));
     assert.ok(await page.evaluate(() => Boolean(document.activeElement.closest('.ap-profile-row'))), `focus did not return to edit trigger: ${await page.evaluate(() => document.activeElement.outerHTML.slice(0, 300))}`);
+  });
+  await run('account center facts, invoice removal, page-scoped usage filters and profile rows', async () => {
+    await fresh();
+    await page.evaluate(() => {
+      window.restored.usage = [
+        { usage_request_id: 'usage-paid', model: 'Sample A', started_at: '2026-11-01T12:00:00Z', execution_status: 'SUCCEEDED', settlement_status: 'SETTLED', charged_microcredits: '10001', display_status: 'SETTLED', input_tokens: 10, output_tokens: 5, cached_input_tokens: 0 },
+        { usage_request_id: 'usage-failed', model: 'Sample B', started_at: '2026-11-02T12:00:00Z', execution_status: 'FAILED', settlement_status: 'RELEASED', charged_microcredits: '0', display_status: 'RELEASED' },
+        { usage_request_id: 'usage-pending', model: 'Sample A', started_at: '2026-11-03T12:00:00Z', execution_status: 'SETTLEMENT_PENDING', settlement_status: 'USAGE_PENDING', charged_microcredits: null, display_status: 'SETTLEMENT_PENDING' },
+      ]; window.restored.reload();
+    });
+    await page.waitForSelector('.ap-usage-table tbody tr');
+    assert.equal(await page.$$eval('.ap-usage-table tbody tr', nodes => nodes.length), 3);
+    const usageLayout = () => page.$$eval('.ap-usage-table tbody tr:first-child td', nodes => nodes.map(node => { const r = node.getBoundingClientRect(); return [r.x, r.width, r.height]; }));
+    const beforeDetails = await usageLayout();
+    await page.click('.ap-usage-table tbody tr:first-child td:last-child button');
+    await page.waitForSelector('.ap-restored-dialog');
+    assert.ok((await page.$eval('.ap-restored-dialog', node => node.textContent)).includes('usage-paid'));
+    assert.deepEqual(await usageLayout(), beforeDetails, 'usage dialog must not resize any table cell');
+    await page.keyboard.press('Escape');
+    await page.waitForFunction(() => !document.querySelector('.ap-restored-dialog'));
+    assert.ok(await page.evaluate(() => Boolean(document.activeElement.closest('.ap-usage-table'))), 'detail focus returns to its table trigger');
+
+    assert.ok((await page.$eval('.ap-usage-summary', node => node.textContent)).includes('1.0001'));
+    assert.ok((await page.$eval('.ap-usage-workspace', node => node.textContent)).includes(await page.evaluate(() => window.restored.copy().center.usageScope)));
+    assert.equal(await page.$eval('.ap-product-picker dd', node => node.textContent), '110');
+    await page.type('.ap-usage-filters label:nth-child(3) input', 'Sample B');
+    assert.equal(await page.$$eval('.ap-usage-table tbody tr', nodes => nodes.length), 1);
+    const result = await page.$eval('.ap-usage-table tbody tr', node => node.textContent);
+    assert.equal(await page.$eval('.ap-usage-table .ap-status', node => node.textContent), await page.evaluate(() => window.restored.copy().center.callFailedNoCharge));
+    await page.click('.ap-usage-table tbody tr td:last-child button');
+    await page.waitForSelector('.ap-restored-dialog');
+    assert.ok((await page.$eval('.ap-restored-dialog', node => node.textContent)).includes(await page.evaluate(() => window.restored.copy().usage.executionStatuses.FAILED || 'FAILED')));
+    await page.keyboard.press('Escape');
+    assert.ok(!result.includes('usage-paid'));
+    await page.$eval('.ap-usage-filters label:nth-child(3) input', node => { Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(node, ''); node.dispatchEvent(new Event('input', { bubbles: true })); });
+    await page.$eval('.ap-usage-filters input[type=date]', node => { Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(node, '2026-11-03'); node.dispatchEvent(new Event('input', { bubbles: true })); });
+    await page.waitForFunction(() => document.querySelectorAll('.ap-usage-table tbody tr').length === 1);
+    if (process.env.UI_ARTIFACT_DIR) await page.screenshot({ path: path.join(process.env.UI_ARTIFACT_DIR, 'personal-credits-desktop.png'), fullPage: true });
+    await accountTab('ordersInvoices');
+    assert.equal(await page.$eval('.ap-order-history tbody tr:nth-child(2) td:nth-child(4)', node => node.textContent), '—', 'unpaid order must not borrow its created timestamp');
+    assert.equal(await page.$$eval('.ap-invoice-notice', nodes => nodes.length), 0);
+    assert.equal(await page.$eval('.ap-sidebar [data-section=ordersInvoices]', node => node.textContent), await page.evaluate(() => window.restored.copy().account.sections.ordersInvoices));
+    const id = await page.$eval('.ap-order-history tbody .ap-copy-identifier code', node => ({ title: node.title, text: node.textContent }));
+    assert.ok(id.title.length > id.text.length);
+    await page.evaluate(() => { window.copiedIdentifier = ''; Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: async value => { window.copiedIdentifier = value; } } }); });
+    await page.click('.ap-order-history tbody .ap-copy-identifier button');
+    await page.waitForFunction(id => window.copiedIdentifier === id, {}, id.title);
+    await page.evaluate(() => { Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: async () => { throw new Error('CONTROL_CLIPBOARD_DENIED'); } } }); });
+    await page.click('.ap-order-history tbody .ap-copy-identifier button');
+    assert.equal(await page.$eval('.ap-order-history tbody .ap-copy-identifier code', node => node.textContent), id.title, 'failed copying exposes the selectable full identifier');
+    await accountTab('accountSettings');
+    assert.equal(await page.$$eval('.ap-account-information dl', nodes => nodes.length), 0, 'editable profile is the single field owner');
+    assert.equal(await page.$$eval('.ap-profile-rows > .ap-profile-row', nodes => nodes.length), 2);
+    assert.equal(await page.evaluate(() => window.restored.calls.filter(call => call.method !== 'GET' && !call.url.endsWith('/account/bootstrap')).length), 0);
+  });
+  await run('period totals cross pages, include older-only models and retire a delayed old session', async () => {
+    await fresh();
+    await page.evaluate(() => {
+      const row = index => ({ usage_request_id: `00000000-0000-4000-8000-${String(index).padStart(12, '0')}`, model: index === 21 ? 'Older model' : 'Current model', started_at: '2026-11-04T12:00:00Z', charged_microcredits: '10000', execution_status: 'SUCCEEDED', settlement_status: 'SETTLED', display_status: 'SETTLED' });
+      const cursor = 'turn-v1.' + btoa('2026-11-04T12:00:00Z|00000000-0000-4000-8000-000000000020').replaceAll('+', '-').replaceAll('/', '_').replaceAll('=', '');
+      window.restored.usagePages = [{ items: Array.from({ length: 20 }, (_, index) => row(index + 1)), next_cursor: cursor }, { items: [row(21)], next_cursor: null }];
+      window.restored.reload();
+    });
+    await page.waitForFunction(() => document.querySelectorAll('.ap-usage-table tbody tr').length === 20);
+    for (const [index, value] of [[1, '2026-11-01'], [2, '2026-11-07']]) await page.$eval(`.ap-usage-filters label:nth-child(${index}) input`, (node, value) => { Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(node, value); node.dispatchEvent(new Event('input', { bubbles: true })); }, value);
+    await page.click('.ap-period-summary .ap-primary');
+    await page.waitForSelector('[data-period-total]');
+    assert.equal(await page.$eval('[data-period-total]', node => node.textContent), await page.evaluate(() => window.restored.copy().center.periodTotal('21')));
+    await page.click('.ap-period-summary .ap-disclosure');
+    assert.equal(await page.$eval('.ap-period-body', node => node.hidden), true);
+    assert.equal(await page.$eval('.ap-period-summary', node => node.dataset.periodState), 'complete');
+    await page.click('.ap-period-summary .ap-disclosure');
+    assert.equal(await page.$eval('[data-period-total]', node => node.textContent), await page.evaluate(() => window.restored.copy().center.periodTotal('21')));
+    await page.type('.ap-usage-filters label:nth-child(3) input', 'Older model');
+    assert.equal(await page.$('[data-period-total]'), null);
+    await page.click('.ap-period-summary .ap-primary');
+    await page.waitForSelector('[data-period-total]');
+    assert.equal(await page.$eval('[data-period-total]', node => node.textContent), await page.evaluate(() => window.restored.copy().center.periodTotal('1')));
+    await page.evaluate(() => { window.restored.holdUsage = true; });
+    await page.click('.ap-period-summary .ap-primary');
+    await page.waitForFunction(() => typeof window.restored.releaseUsage === 'function');
+    await page.evaluate(() => { window.restored.client.financeSessionEpoch++; window.restored.releaseUsage(); });
+    await page.waitForFunction(() => !document.querySelector('[data-period-total]') && !document.querySelector('.ap-period-summary [role=status]'));
+    const usageReads = () => page.evaluate(() => window.restored.calls.filter(call => /\/usage-(requests|turns)(?:[/?]|$)/.test(call.url)).length);
+    const before = await usageReads();
+    await page.click('.ap-period-summary .ap-primary');
+    assert.equal(await usageReads(), before, 'stale parent epoch cannot dispatch a new usage query');
+  });
+  await run('period bounded continuation and failed batches never present a partial or doubled total', async () => {
+    await fresh();
+    await page.evaluate(() => {
+      const pages = [], index = { '': 0 };
+      for (let page = 0; page < 21; page++) {
+        const items = Array.from({ length: 20 }, (_, row) => ({ usage_request_id: `00000000-0000-4000-8000-${String(1000 - page * 20 - row).padStart(12, '0')}`, model: 'A', started_at: '2026-11-04T12:00:00Z', charged_microcredits: '10000', execution_status: 'SUCCEEDED', settlement_status: 'SETTLED', display_status: 'SETTLED' }));
+        const cursor = 'turn-v1.' + btoa('2026-11-04T12:00:00Z|' + items.at(-1).usage_request_id).replaceAll('+', '-').replaceAll('/', '_').replaceAll('=', '');
+        pages.push({ items, next_cursor: page === 20 ? null : cursor }); index[cursor] = page + 1;
+      }
+      window.restored.usagePages = pages; window.restored.usageCursorPages = index; window.restored.reload();
+    });
+    await page.waitForSelector('.ap-usage-table tbody tr');
+    for (const [index, value] of [[1, '2026-11-01'], [2, '2026-11-07']]) await page.$eval(`.ap-usage-filters label:nth-child(${index}) input`, (node, value) => { Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(node, value); node.dispatchEvent(new Event('input', { bubbles: true })); }, value);
+    await page.evaluate(() => { window.restored.failUsageOnce = true; });
+    await page.click('.ap-period-summary .ap-primary');
+    await page.waitForSelector('.ap-period-summary[data-period-state=error]');
+    assert.equal(await page.$('[data-period-total]'), null);
+    await click('.ap-period-summary .ap-period-body > button', await page.evaluate(() => window.restored.copy().account.retry));
+    await page.waitForSelector('.ap-period-summary[data-period-state=partial]');
+    assert.equal(await page.$('[data-period-total]'), null);
+    await page.evaluate(() => {
+      const node = [...document.querySelectorAll('.ap-period-summary .ap-period-body > button')].find(node => node.textContent === window.restored.copy().center.periodContinue);
+      window.oldPeriodContinue = node[Object.keys(node).find(key => key.startsWith('__reactProps$'))].onClick;
+    });
+    await page.type('.ap-usage-filters label:nth-child(3) input', 'B');
+    const retiredUsageReads = () => page.evaluate(() => window.restored.calls.filter(call => /\/usage-(requests|turns)(?:[/?]|$)/.test(call.url)).length);
+    const retiredReadCount = await retiredUsageReads();
+    await page.evaluate(() => window.oldPeriodContinue());
+    assert.equal(await retiredUsageReads(), retiredReadCount, 'retired Continue cannot revive an old checkpoint under new filters');
+    assert.equal(await page.$('[data-period-total]'), null);
+    await page.$eval('.ap-usage-filters label:nth-child(3) input', node => { Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(node, ''); node.dispatchEvent(new Event('input', { bubbles: true })); });
+    await page.evaluate(() => { window.restored.holdUsage = true; });
+    await page.click('.ap-period-summary .ap-primary');
+    await page.waitForFunction(() => typeof window.restored.releaseUsage === 'function');
+    await page.evaluate(() => {
+      window.oldUsageRelease = window.restored.releaseUsage;
+      const node = [...document.querySelectorAll('.ap-period-summary .ap-period-body > button')].find(node => node.textContent === window.restored.copy().center.periodCancel);
+      window.oldPeriodCancel = node[Object.keys(node).find(key => key.startsWith('__reactProps$'))].onClick;
+    });
+    await click('.ap-period-summary .ap-period-body > button', await page.evaluate(() => window.restored.copy().center.periodCancel));
+    await page.click('.ap-period-summary .ap-primary');
+    await page.waitForFunction(() => window.restored.releaseUsage !== window.oldUsageRelease);
+    await page.evaluate(() => window.oldPeriodCancel());
+    assert.equal(await page.evaluate(() => window.restored.heldUsageSignal.aborted), false, 'retired Cancel cannot abort a newer query');
+    await page.evaluate(() => { window.restored.holdUsage = false; window.oldUsageRelease(); window.restored.releaseUsage(); });
+    await page.waitForSelector('.ap-period-summary[data-period-state=partial]');
+    await click('.ap-period-summary .ap-period-body > button', await page.evaluate(() => window.restored.copy().center.periodContinue));
+    await page.waitForSelector('[data-period-total]');
+    assert.equal(await page.$eval('[data-period-total]', node => node.textContent), await page.evaluate(() => window.restored.copy().center.periodTotal('420')));
+  });
+  const organizationCenter = async language => {
+    await fresh();
+    await page.evaluate(language => {
+      window.restored.language = language; window.restored.centerOrganization = true;
+      window.restored.personal = ['personal.context.switch', 'personal.profile.update', 'personal.invitations.read', 'personal.invitations.accept'];
+      window.restored.context = { context_type: 'ORGANIZATION', organization_id: '33333333-3333-4333-8333-333333333333', context_version: 1, membership_version: 1, organization_authorization_version: 1, permissions: ['org.profile.read', 'org.units.read', 'org.units.manage', 'org.members.read', 'org.members.manage', 'org.roles.read', 'org.roles.assign', 'org.wallet.read', 'org.quota.read.self', 'org.quota.allocate', 'org.models.read', 'org.models.manage'] };
+      window.restored.reload();
+    }, language);
+    await page.waitForFunction(() => document.querySelector('.ap-identity-card strong')?.textContent === 'Sample organization');
+    await accountTab('myOrganization');
+    await page.waitForSelector('.ap-org-tabs');
+  };
+  await run('organization order details keep rows stable while a paid read refreshes history', async () => {
+    await organizationCenter('en');
+    await page.evaluate(() => { window.restored.context.permissions.push('org.entitlements.purchase'); window.restored.reload(); });
+    await page.waitForSelector('.ap-org-tabs'); await page.click('[data-org-section=billing]');
+    await page.waitForSelector('.ap-organization-orders tbody tr');
+    await page.setViewport({ width: 1440, height: 900 });
+    await page.$eval('.ap-organization-orders tbody tr:first-child td:last-child button', node => node.scrollIntoView({ block: 'center' }));
+    await page.evaluate(() => { window.restored.holdOrderDetail = true; window.restored.detailPaid = true; window.restored.historyPaid = true; });
+    const geometry = () => page.evaluate(() => {
+      const table = document.querySelector('.ap-organization-orders table').getBoundingClientRect();
+      const dialog = document.querySelector('.ap-order-details-dialog')?.getBoundingClientRect();
+      return { scroll: scrollY, table: [table.x, table.y, table.width], dialog: dialog && [dialog.x, dialog.y, dialog.width, dialog.height] };
+    });
+    const before = await geometry();
+    await page.click('.ap-organization-orders tbody tr:first-child td:last-child button');
+    await page.waitForFunction(() => typeof window.restored.releaseOrderDetail === 'function');
+    const loading = await geometry(); assert.deepEqual(loading.table, before.table); assert.equal(loading.scroll, before.scroll); assert.ok(loading.dialog);
+    await page.evaluate(() => { window.restored.holdOrderDetail = false; window.restored.releaseOrderDetail(); });
+    await page.waitForFunction(() => !document.querySelector('.ap-order-details-body[aria-busy=true]') && !document.querySelector('.ap-organization-orders[aria-busy=true]'));
+    assert.ok(await page.$eval('.ap-order-details-body dd code', node => node.textContent.length > 20));
+    assert.equal(await page.$eval('.ap-organization-orders tbody tr:first-child .ap-status', node => node.dataset.status), 'COMPLETED');
+    assert.deepEqual(await geometry(), loading);
+    await page.keyboard.press('Escape'); await page.waitForFunction(() => !document.querySelector('[role=dialog]'));
+    assert.deepEqual(await geometry(), before);
+  });
+  await run('organization detail retries preserve later pages and payment queries use the displayed order', async () => {
+    await organizationCenter('en');
+    await page.evaluate(() => { window.restored.context.permissions.push('org.entitlements.purchase'); window.restored.reload(); });
+    await page.waitForSelector('.ap-org-tabs'); await page.click('[data-org-section=billing]');
+    await page.waitForSelector('.ap-organization-orders tbody tr');
+    await page.click('.ap-organization-orders > .ap-action-group button');
+    await page.waitForFunction(() => document.querySelectorAll('.ap-organization-orders tbody tr').length === 3);
+    const rows = () => page.$$eval('.ap-organization-orders tbody .ap-copy-identifier code', nodes => nodes.map(node => node.title));
+    const ids = await rows();
+    await page.$eval('.ap-organization-orders tbody tr:last-child td:last-child button', node => node.scrollIntoView({ block: 'center' }));
+    const before = await page.$eval('.ap-organization-orders table', node => [node.getBoundingClientRect().x, node.getBoundingClientRect().y, node.getBoundingClientRect().height]);
+    await page.evaluate(() => { window.restored.orgOrderReadStatus = 503; });
+    await page.click('.ap-organization-orders tbody tr:last-child td:last-child button');
+    await page.waitForSelector('.ap-order-details-dialog [role=alert]');
+    await page.evaluate(() => { window.restored.orgOrderReadStatus = 0; window.restored.detailPaid = true; });
+    await page.click('.ap-order-details-body > button');
+    await page.waitForFunction(() => document.querySelector('.ap-organization-orders tbody tr:last-child .ap-status')?.dataset.status === 'COMPLETED');
+    assert.ok((await page.$eval('.ap-order-details-body', node => node.textContent)).includes(ids.at(-1)));
+    assert.deepEqual(await rows(), ids);
+    await page.keyboard.press('Escape'); await page.waitForFunction(() => !document.querySelector('[role=dialog]'));
+    assert.deepEqual(await page.$eval('.ap-organization-orders table', node => [node.getBoundingClientRect().x, node.getBoundingClientRect().y, node.getBoundingClientRect().height]), before);
+    await page.evaluate(() => { window.restored.detailPaid = false; });
+    await page.click('.ap-organization-orders tbody tr:first-child td:last-child button');
+    await page.waitForFunction(() => document.querySelector('.ap-order-details-body .ap-primary') && !document.querySelector('.ap-order-details-body[aria-busy=true]'));
+    await page.click('.ap-order-details-body .ap-primary'); await page.waitForSelector('.ap-payment-dialog');
+    await page.waitForFunction(() => !document.querySelector('.ap-payment-dialog footer button:disabled'));
+    await page.$eval('.ap-order-lookup input', node => { Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(node, '00000000-0000-4000-8000-000000000002'); node.dispatchEvent(new Event('input', { bubbles: true })); });
+    const count = await page.evaluate(() => window.restored.calls.length);
+    await page.click('.ap-payment-dialog footer button:last-child');
+    await page.waitForFunction(count => window.restored.calls.slice(count).some(call => call.method === 'GET' && call.url.endsWith('/recharge/orders/00000000-0000-4000-8000-000000000001')), {}, count);
+    assert.equal(await page.evaluate(count => window.restored.calls.slice(count).some(call => call.url.endsWith('/recharge/orders/00000000-0000-4000-8000-000000000002')), count), false);
+  });
+  await run('organization detail authorization denial withdraws its dialog and retires reads', async () => {
+    for (const status of [401, 403]) {
+      await organizationCenter('en');
+      await page.evaluate(status => { window.restored.context.permissions.push('org.entitlements.purchase'); window.restored.orgOrderReadStatus = status; window.restored.reload(); }, status);
+      await page.waitForSelector('.ap-org-tabs'); await page.click('[data-org-section=billing]');
+      await page.waitForSelector('.ap-organization-orders tbody tr');
+      await page.click('.ap-organization-orders tbody tr:first-child td:last-child button');
+      await page.waitForFunction(() => !document.querySelector('.ap-order-details-dialog') && document.querySelector('[role=alert]'));
+      assert.equal(await page.$$eval('.ap-order-details-dialog', nodes => nodes.length), 0);
+      await accountTab('accountSettings');
+      assert.equal(await page.$eval('.ap-account-information .ap-section-action', node => node.disabled), false);
+    }
+  });
+  await run('render review: model forms, owner removal and responsive control geometry', async () => {
+    await organizationCenter('en');
+    await page.evaluate(() => { window.restored.includeOwner = true; window.restored.context.permissions.push('org.owner.transfer'); window.restored.reload(); });
+    await page.waitForSelector('.ap-sidebar [data-section=myOrganization]');
+    await accountTab('myOrganization'); await page.click('[data-org-section=members]');
+    await page.waitForFunction(() => document.querySelectorAll('.ap-member-table tbody tr').length === 2);
+    assert.equal(await page.$eval('.ap-member-table tbody tr:first-child button.ap-danger', node => node.disabled), true);
+    assert.ok((await page.$eval('.ap-member-table tbody tr:first-child', node => node.textContent)).includes(await page.evaluate(() => window.restored.copy().center.noDepartment)));
+    for (const width of [1908, 1440, 768, 390]) {
+      await page.setViewport({ width, height: 1000 });
+      await page.waitForFunction(vertical => document.querySelector('.ap-sidebar [role=tablist]').getAttribute('aria-orientation') === (vertical ? 'vertical' : 'horizontal'), {}, width > 850);
+      await page.click('[data-org-section=models]'); await page.waitForSelector('.ap-policy-form');
+      for (const mode of ['ALLOW_ALL', 'ALLOW_LIST', 'DENY_LIST']) {
+        await page.select('.ap-policy-form > fieldset > label select', mode);
+        const controls = await page.$$eval('.ap-policy-form > fieldset > label', nodes => nodes.map(node => { const r = node.getBoundingClientRect(); const control = node.querySelector('select,input'); return { left: r.left, right: r.right, top: r.top, bottom: r.bottom, controlHeight: control.getBoundingClientRect().height }; }));
+        assert.equal(controls.length, 2); assert.equal(controls[0].controlHeight, controls[1].controlHeight);
+        assert.ok(controls[0].right <= controls[1].left || controls[0].bottom <= controls[1].top, 'policy fields must never overlap');
+        if (mode !== 'ALLOW_ALL') assert.equal(await page.$$eval('.ap-model-checklist input[type=checkbox]', nodes => nodes.length), 1);
+        await noOverflow();
+      }
+      if (process.env.UI_ARTIFACT_DIR) await page.screenshot({ path: path.join(process.env.UI_ARTIFACT_DIR, `render-review-models-${width}.png`), fullPage: true });
+      await page.click('[data-org-section=roles]'); await page.waitForSelector('.ap-role-table tbody tr'); await noOverflow();
+      assert.ok((await page.$eval('.ap-role-table tbody tr', node => node.textContent)).includes(await page.evaluate(() => window.restored.copy().center.permanent)));
+      assert.ok((await page.$eval('.ap-role-table tbody tr', node => node.textContent)).includes(await page.evaluate(() => window.restored.copy().center.roleDescriptions.ORG_ADMIN)));
+      const actions = await page.$$eval('#ap-org-panel-roles > .ap-action-group > button', nodes => nodes.map(node => { const r = node.getBoundingClientRect(); return { left: r.left, right: r.right, top: r.top }; }));
+      assert.equal(actions.length, 2); assert.ok(actions[1].top > actions[0].top || actions[1].left - actions[0].right >= 8);
+    }
+    await click('#ap-org-panel-roles button', await page.evaluate(() => window.restored.copy().organization.grantRole));
+    await page.waitForSelector('[role=dialog] select');
+    await page.select('[role=dialog] label:nth-child(2) select', 'ORG_MODEL_ADMIN');
+    assert.ok((await page.$eval('[role=dialog]', node => node.textContent)).includes(await page.evaluate(() => window.restored.copy().center.roleDescriptions.ORG_MODEL_ADMIN)));
+    await page.keyboard.press('Escape');
+    assert.equal(await page.evaluate(() => window.restored.calls.filter(call => ['POST', 'PUT', 'DELETE'].includes(call.method) && !call.url.endsWith('/account/bootstrap')).length), 0);
+  });
+  await run('render review: organization purchase facts, history pagination, details and stale reads', async () => {
+    await organizationCenter('en');
+    await page.evaluate(() => { window.restored.zeroBalance = true; window.restored.context.permissions.push('org.entitlements.purchase'); window.restored.reload(); });
+    await page.waitForSelector('.ap-sidebar [data-section=creditsUsage]'); await accountTab('creditsUsage');
+    await click('#ap-panel-creditsUsage button', await page.evaluate(() => window.restored.copy().center.buyOrganization));
+    await page.waitForFunction(() => document.activeElement?.hasAttribute('data-organization-purchase'));
+    const purchase = '[data-org-action=organization-purchase]';
+    await page.waitForSelector(purchase + ' select');
+    assert.equal(await page.$eval(purchase + ' button[type=submit]', node => node.disabled), true);
+    await page.select(purchase + ' select:first-of-type', 'sample-points');
+    await page.waitForFunction(selector => document.querySelector(selector).textContent.includes('110'), {}, purchase);
+    assert.ok((await page.$eval(purchase, node => node.textContent)).includes('30'));
+    assert.equal(await page.$eval(purchase + ' button[type=submit]', node => node.disabled), true);
+    await page.select(purchase + ' label:nth-child(2) select', 'ALIPAY');
+    assert.equal(await page.$eval(purchase + ' button[type=submit]', node => node.disabled), false);
+    const history = '.ap-organization-orders';
+    await page.waitForFunction(selector => document.querySelector(selector)?.querySelectorAll('tbody tr').length === 2, {}, history);
+    await page.evaluate(() => { window.restored.historyFail = true; });
+    await page.click(history + ' > .ap-action-group button'); await page.waitForSelector(history + ' [role=alert]');
+    assert.equal(await page.$$eval(history + ' tbody tr', nodes => nodes.length), 2, 'failed continuation keeps loaded orders');
+    await page.evaluate(() => { window.restored.historyFail = false; });
+    await page.click(history + ' > .ap-action-group button');
+    await page.waitForFunction(selector => document.querySelector(selector)?.querySelectorAll('tbody tr').length === 3, {}, history);
+    assert.equal(await page.$(history + ' > .ap-action-group button'), null);
+    for (const width of [1440, 768, 390]) {
+      await page.setViewport({ width, height: 1100 }); await noOverflow();
+      assert.ok(await page.$$eval(history + ' tbody td:last-child button', nodes => nodes.every(node => node.getBoundingClientRect().width >= 60)));
+      if (process.env.UI_ARTIFACT_DIR) await page.screenshot({ path: path.join(process.env.UI_ARTIFACT_DIR, 'render-review-billing-' + width + '.png'), fullPage: true });
+    }
+    await page.click(history + ' tbody tr:first-child td:last-child button'); await page.waitForSelector('[role=dialog]');
+    assert.ok((await page.$eval('[role=dialog]', node => node.textContent)).includes('9.90'));
+    await click('[role=dialog] button', await page.evaluate(() => window.restored.copy().finance.continuePayment));
+    await page.waitForSelector('.ap-payment-dialog [data-qr-state=loaded]');
+    await page.keyboard.press('Escape'); await page.waitForFunction(() => !document.querySelector('[role=dialog]'));
+    await page.evaluate(() => { window.restored.historyPaid = true; });
+    await page.click(history + ' > .ap-section-heading button');
+    await page.waitForFunction(text => document.querySelector('.ap-organization-orders tbody tr:first-child')?.textContent.includes(text), {}, await page.evaluate(() => window.restored.copy().accountLayout.statuses.COMPLETED));
+    await page.evaluate(() => { window.restored.holdHistory = true; });
+    await page.click(history + ' > .ap-section-heading button');
+    await page.waitForFunction(() => typeof window.restored.releaseHistory === 'function');
+    await page.evaluate(() => { window.restored.context = { context_type: 'PERSONAL', context_version: 2, permissions: [] }; window.restored.reload(); window.restored.releaseHistory(); });
+    await page.waitForFunction(() => !document.querySelector('.ap-organization-orders'));
+    assert.equal(await page.evaluate(() => window.restored.calls.filter(call => call.method === 'POST' && call.url.includes('/recharge/orders')).length), 0);
+  });
+  await run('render review: zero quota members receive administrator guidance without a purchase action', async () => {
+    for (const language of ['zh', 'en', 'ja']) {
+      await organizationCenter(language);
+      await page.evaluate(() => { window.restored.organizationRoles = ['MEMBER']; window.restored.context.permissions = ['org.profile.read', 'org.quota.read.self']; window.restored.reload(); });
+      await page.waitForSelector('.ap-sidebar [data-section=creditsUsage]'); await accountTab('creditsUsage');
+      await page.waitForFunction(text => document.querySelector('#ap-panel-creditsUsage')?.textContent.includes(text), {}, await page.evaluate(() => window.restored.copy().center.contactOrganizationAdmin));
+      assert.equal(await page.evaluate(() => [...document.querySelectorAll('#ap-panel-creditsUsage button')].some(button => button.textContent === window.restored.copy().center.buyOrganization)), false);
+    }
+  });
+  await run('organization directory refreshes same-context names and role changes', async () => {
+    await organizationCenter('en');
+    await page.evaluate(() => {
+      window.restored.organizationName = 'Renamed organization'; window.restored.organizationRoles = ['MEMBER'];
+      window.restored.context = { ...window.restored.context, organization_authorization_version: 2 };
+      dispatchEvent(new Event('focus'));
+    });
+    await page.waitForFunction(() => document.querySelector('.ap-identity-card strong')?.textContent === 'Renamed organization');
+    assert.ok(!(await page.$eval('.ap-identity-card', node => node.textContent)).includes(await page.evaluate(() => window.restored.copy().organization.enumRole_OWNER)));
+    await page.evaluate(() => { window.restored.organizationName = 'Renamed again'; });
+    await accountTab('accountSettings'); await page.click('.ap-account-information .ap-section-action');
+    await page.waitForFunction(() => document.querySelector('.ap-identity-card strong')?.textContent === 'Renamed again');
+    assert.equal(await page.evaluate(() => window.restored.context.context_version), 1);
+    await accountTab('myOrganization');
+    await page.evaluate(() => { window.restored.organizationName = 'Renamed through organization refresh'; });
+    await page.click('.ap-organization-workspace > .ap-section-heading button');
+    await page.waitForFunction(() => document.querySelector('.ap-identity-card strong')?.textContent === 'Renamed through organization refresh');
+    await accountTab('accountSettings');
+    await click('.ap-invitations button', await page.evaluate(() => window.restored.copy().center.enterInvitation));
+    await page.waitForSelector('[role=dialog] input[type=password]');
+    await page.type('[role=dialog] input[type=password]', 'CONTROLLED_INVITATION_DRAFT');
+    const reads = await page.evaluate(() => window.restored.calls.filter(call => call.url.endsWith('/v1/me/organizations')).length);
+    await page.evaluate(() => dispatchEvent(new Event('focus')));
+    await page.waitForFunction(reads => window.restored.calls.filter(call => call.url.endsWith('/v1/me/organizations')).length > reads && !document.querySelector('[role=dialog] input[type=password]')?.disabled, {}, reads);
+    assert.equal(await page.$eval('[role=dialog] input[type=password]', node => node.value), 'CONTROLLED_INVITATION_DRAFT', 'ordinary focus refresh preserves the invitation intent');
+    await page.keyboard.press('Escape');
+    assert.equal(await page.evaluate(() => window.restored.calls.some(call => call.url.endsWith('/v1/invitations/accept'))), false);
+  });
+  await run('organization center tabs and member actions select the row and retain UNKNOWN after removal', async () => {
+    await organizationCenter('en');
+    await page.click('[data-org-section=members]');
+    await page.waitForSelector('.ap-org-row-actions');
+    await page.evaluate(() => { window.restored.unknown = true; });
+    await click('.ap-org-row-actions button', await page.evaluate(() => window.restored.copy().organization.remove));
+    await page.waitForSelector('[role=dialog] form[data-org-action=remove-member]');
+    assert.equal(await page.$eval('[data-org-action=remove-member] select', node => node.value), '22222222-2222-4222-8222-222222222222');
+    await page.$eval('[data-org-action=remove-member]', node => node.requestSubmit());
+    await page.waitForSelector('.ap-org-confirm-dialog');
+    assert.ok((await page.$eval('.ap-org-confirm-dialog', node => node.textContent)).includes('Sample member'));
+    assert.equal(await page.evaluate(() => window.restored.calls.some(call => call.method === 'DELETE')), false);
+    await page.click('.ap-org-confirm-dialog footer button:last-child');
+    await page.waitForFunction(() => document.querySelector('[data-org-action=remove-member] fieldset')?.disabled);
+    await page.evaluate(() => document.querySelector('.ap-organization-workspace .ap-section-heading button').click());
+    await page.waitForFunction(() => document.querySelectorAll('.ap-org-row-actions').length === 0);
+    await accountTab('creditsUsage'); await accountTab('myOrganization');
+    await page.evaluate(() => { window.restored.unknown = false; });
+    await click('[data-org-action=remove-member] > button', await page.evaluate(() => window.restored.copy().organization.retry));
+    await page.waitForFunction(() => window.restored.calls.filter(call => call.method === 'DELETE').length === 2);
+    const calls = await page.evaluate(() => window.restored.calls.filter(call => call.method === 'DELETE'));
+    assert.equal(calls[0].key, calls[1].key); assert.equal(calls[0].url, calls[1].url);
+    assert.ok(calls[0].url.endsWith('/members/22222222-2222-4222-8222-222222222222'));
+  });
+  await run('organization center point allocation derives sources, confirms decimals and preserves same-key retry', async () => {
+    await organizationCenter('en');
+    await page.click('[data-org-section=billing]');
+    const form = '[data-org-action=quota-allocation]'; await page.waitForSelector(form);
+    const fields = await page.$$(`${form} select`);
+    await fields[0].select('22222222-2222-4222-8222-222222222222');
+    await fields[1].select('44444444-4444-4444-8444-444444444444');
+    await page.type(`${form} input`, '1.2345');
+    await page.evaluate(() => { window.restored.unknown = true; });
+    await page.$eval(form, node => node.requestSubmit());
+    await page.waitForSelector('.ap-org-confirm-dialog');
+    assert.ok((await page.$eval('.ap-org-confirm-dialog', node => node.textContent)).includes('1.2345'));
+    await page.click('.ap-org-confirm-dialog footer button:last-child');
+    await page.waitForFunction(() => window.restored.calls.some(call => call.url.endsWith('/quota-grants:batch')));
+    await page.click('[data-org-section=members]'); await page.click('[data-org-section=billing]');
+    await page.evaluate(() => { window.restored.unknown = false; window.restored.noSources = true; });
+    await click(`${form} > button`, await page.evaluate(() => window.restored.copy().organization.retry));
+    await page.waitForFunction(() => window.restored.calls.filter(call => call.url.endsWith('/quota-grants:batch')).length === 2);
+    const calls = await page.evaluate(() => window.restored.calls.filter(call => call.url.endsWith('/quota-grants:batch')));
+    assert.equal(calls[0].key, calls[1].key); assert.equal(calls[0].body, calls[1].body);
+    const item = JSON.parse(calls[0].body).items[0];
+    assert.equal(item.amount_microcredits, 12345); assert.equal(item.component_type, 'BASE'); assert.equal(item.membership_version, 1);
+    await page.waitForFunction(() => document.querySelector('[data-org-action=quota-allocation]')?.textContent.includes(window.restored.copy().center.noSources));
+    assert.equal(await page.$(`${form} > button`), null, 'resolved empty allocation has no executable submit control');
+    assert.ok((await page.$eval(form, node => node.textContent)).includes(await page.evaluate(() => window.restored.copy().center.noSources)));
+  });
+  await run('allocation lifecycle replay closes UNKNOWN and permits the next versioned allocation', async () => {
+    await organizationCenter('en'); await page.click('[data-org-section=billing]');
+    const form = '[data-org-action=quota-allocation]'; await page.waitForSelector(form);
+    await page.select(`${form} label:nth-child(1) select`, '22222222-2222-4222-8222-222222222222');
+    await page.select(`${form} label:nth-child(2) select`, '44444444-4444-4444-8444-444444444444');
+    await page.type(`${form} input`, '1');
+    await page.evaluate(() => { window.restored.unknown = true; });
+    await page.$eval(form, node => node.requestSubmit()); await page.waitForSelector('.ap-org-confirm-dialog'); await page.click('.ap-org-confirm-dialog footer button:last-child');
+    await page.waitForFunction(() => [...document.querySelectorAll('[data-org-action=quota-allocation] > button')].some(node => node.textContent === window.restored.copy().organization.retry && !node.disabled));
+    await page.evaluate(() => { window.restored.unknown = false; window.restored.membershipVersion = 2; window.restored.replayVersion = 2; });
+    await click(`${form} > button`, await page.evaluate(() => window.restored.copy().organization.retry));
+    await page.waitForFunction(() => document.querySelector('[data-org-action=quota-allocation] fieldset')?.disabled === false && document.querySelector('[data-org-action=quota-allocation]')?.textContent.includes(window.restored.copy().organization.saved));
+    await page.$eval(`${form} input`, node => { Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(node, '2'); node.dispatchEvent(new Event('input', { bubbles: true })); });
+    await page.$eval(form, node => node.requestSubmit()); await page.waitForSelector('.ap-org-confirm-dialog'); await page.click('.ap-org-confirm-dialog footer button:last-child');
+    await page.waitForFunction(() => window.restored.calls.filter(call => call.url.endsWith('/quota-grants:batch')).length === 3);
+    const calls = await page.evaluate(() => window.restored.calls.filter(call => call.url.endsWith('/quota-grants:batch')));
+    assert.equal(calls[0].key, calls[1].key); assert.equal(calls[0].body, calls[1].body); assert.notEqual(calls[1].key, calls[2].key);
+    assert.equal(JSON.parse(calls[2].body).items[0].membership_version, 2); assert.equal(JSON.parse(calls[2].body).items[0].amount_microcredits, 20000);
+  });
+  await run('organization center responsive hierarchy, keyboard tabs and three languages', async () => {
+    for (const language of ['zh', 'en', 'ja']) {
+      await organizationCenter(language);
+      for (const width of [1440, 768, 390]) {
+        await page.setViewport({ width, height: 1000 });
+        for (const section of ['overview', 'members', 'roles', 'billing', 'models']) {
+          await page.click(`[data-org-section=${section}]`); await noOverflow();
+          if (process.env.UI_ARTIFACT_DIR && language === 'zh' && width !== 768) await page.screenshot({ path: path.join(process.env.UI_ARTIFACT_DIR, `organization-${section}-${width}.png`), fullPage: true });
+        }
+      }
+      await page.focus('[data-org-section=overview]'); await page.keyboard.press('ArrowRight');
+      assert.equal(await page.$eval('[data-org-section=members]', node => node.getAttribute('aria-selected')), 'true');
+      assert.equal(await page.evaluate(() => window.restored.calls.some(call => call.method === 'DELETE' || call.url.endsWith('/quota-grants:batch'))), false);
+    }
   });
   await run('admin original groups, canonical aliases, and back/forward', async () => {
     await fresh('?mode=admin&section=users');
@@ -274,7 +993,7 @@ try {
   });
   await run('personal order modal keeps history in its originating tab and exposes read failures', async () => {
     await fresh('?section=creditsUsage'); await accountTab('ordersInvoices');
-    await page.waitForSelector('.ap-order-history tbody button'); await page.click('.ap-order-history tbody button');
+    await page.waitForSelector('.ap-order-history tbody td:last-child button'); await page.click('.ap-order-history tbody td:last-child button');
     await page.waitForSelector('[role=dialog]'); await page.goBack();
     await activeAccount('ordersInvoices'); assert.ok(await page.$('[role=dialog]'));
     await page.evaluate(() => { window.restored.orderReadFail = true; });
@@ -391,12 +1110,12 @@ try {
   });
   await run('late accepted recharge stays with its origin tab and retains its one order', async () => {
     await fresh('?section=creditsUsage'); await page.evaluate(() => { window.restored.delayCreate = true; });
-    await click('.ap-recharge-form button', await page.evaluate(() => window.restored.copy().finance.create));
+    await page.click('.ap-recharge-controls > button');
     await page.waitForFunction(() => typeof window.restored.releaseCreate === 'function'); await accountTab('accountSettings');
     await page.evaluate(() => window.restored.releaseCreate()); await page.waitForFunction(() => !document.querySelector('.ap-recharge-form button').disabled);
     assert.equal(await page.$('.ap-payment-dialog'), null); await activeAccount('accountSettings');
     await accountTab('creditsUsage'); await page.waitForSelector('.ap-payment-dialog');
-    assert.equal(await page.$eval('.ap-payment-dialog [role=status]', node => node.textContent), await page.evaluate(() => window.restored.copy().finance.saved));
+    assert.equal(await page.$eval('.ap-payment-dialog [role=status]', node => node.textContent), await page.evaluate(() => window.restored.copy().finance.paymentOrderCreated));
     assert.equal(await page.evaluate(() => window.restored.calls.filter(call => call.method === 'POST' && call.url.endsWith('/recharge/orders')).length), 1);
   });
   await run('submitting displayed date filters sends timezone-bearing RFC3339', async () => {
