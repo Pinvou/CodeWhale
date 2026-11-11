@@ -270,7 +270,7 @@ test('the installed Token Handler must still register the invocation routes', ()
 
 test('organization finance registration cannot disappear outside the management inventory', () => {
   const result = checkCoverage(inputs);
-  assert.equal(result.organizationFinanceRoutes, 13);
+  assert.equal(result.organizationFinanceRoutes, 14);
 });
 
 test('organization finance recognizes the path guard without weakening its middleware grammar', () => {
@@ -283,7 +283,7 @@ test('organization finance recognizes the path guard without weakening its middl
   assert.ok(legacySource.includes(legacy));
   assert.throws(() => checkCoverage({ ...inputs, organizationFinanceSource: legacySource }), /organization action path guard/);
   const guardedSource = legacySource.replace(legacy, route);
-  assert.equal(checkCoverage({ ...inputs, organizationFinanceSource: guardedSource }).organizationFinanceRoutes, 13);
+  assert.equal(checkCoverage({ ...inputs, organizationFinanceSource: guardedSource }).organizationFinanceRoutes, 14);
   for (const replacement of [
     route.replace('httpserver.RequirePathSuffix("/quota-grants:batch")', 'httpserver.RequirePathSuffix("/quota-grants:batchOther")'),
     route.replace('httpserver.RequirePathSuffix("/quota-grants:batch"), ', 'httpserver.RequirePathSuffix("/quota-grants:batch"), httpserver.RequirePathSuffix("/quota-grants:batch"), '),
@@ -321,7 +321,7 @@ test('new literal organization actions obey the same guard rule without treating
   const source = inputs.organizationFinanceSource.replace(/\n\}\s*$/, '\n' + next + '\n}\n');
   assert.notEqual(source, inputs.organizationFinanceSource);
   const parsed = organizationFinanceRoutes(source, inputs.organizationHandlerSource);
-  assert.equal(parsed.length, 14);
+  assert.equal(parsed.length, 15);
   assert.ok(parsed.some(route => route.path === '/v1/organizations/{organization_id}/quota-grants:preview'));
   assert.throws(() => organizationFinanceRoutes(source.replace('httpserver.RequirePathSuffix("/quota-grants:preview"), ', ''), inputs.organizationHandlerSource), /organization action path guard/);
   // Unsupported mixed parameter/action and non-final action shapes must demand
@@ -330,7 +330,7 @@ test('new literal organization actions obey the same guard rule without treating
     const changed = source.replaceAll('/quota-grants:preview', path);
     assert.throws(() => organizationFinanceRoutes(changed, inputs.organizationHandlerSource), /unrecognized organization action path/);
   }
-  assert.equal(organizationFinanceRoutes(inputs.organizationFinanceSource, inputs.organizationHandlerSource).length, 13);
+  assert.equal(organizationFinanceRoutes(inputs.organizationFinanceSource, inputs.organizationHandlerSource).length, 14);
 });
 
 test('closed-grant authority helper cannot disappear or change permission', () => {
@@ -486,7 +486,7 @@ const withReceiver = (handler, call, declaration, receiver) => organizationHandl
 });
 const ordinaryHandlers = inputs.manifest.organizationFinanceRoutes.filter(route =>
   !['organizationModelPolicy', 'reclaimClosedGrant', 'reclaimClosedGrantsBatch'].includes(route.handler));
-assert.equal(ordinaryHandlers.length, 9);
+assert.equal(ordinaryHandlers.length, 10);
 for (const route of ordinaryHandlers) {
   test(`ordinary ${route.handler} rejects a qualified field instead of its root receiver`, () => {
     const call = `s.resolveOrganizationBilling(w, r, "${route.authority.all[0]}")`;
