@@ -47,6 +47,24 @@ func TestLoggerCollapsesUnknownDynamicMessages(t *testing.T) {
 	}
 }
 
+func TestTokenApprovalEventsRemainDistinctAndRedacted(t *testing.T) {
+	const marker = "private-token-approval-log-canary"
+	for _, event := range []string{"TOKEN_APPROVAL_CONSUMER_STOPPED", "TOKEN_APPROVAL_AUTHORIZATION_DELIVERY_PENDING", "TOKEN_APPROVAL_AUTHORIZATION_NAK_FAILED"} {
+		t.Run(event, func(t *testing.T) {
+			var output bytes.Buffer
+			NewLogger(&output, Config{Service: "token-command-executor", Environment: "test"}).Error(event,
+				"error_code", "SAFE_FAILURE", "error", errors.New(marker), "credential", marker, "payload", marker, "resource_id", marker)
+			var entry map[string]any
+			if err := json.Unmarshal(output.Bytes(), &entry); err != nil {
+				t.Fatal(err)
+			}
+			if entry["event"] != strings.ToLower(event) || entry["error_code"] != "SAFE_FAILURE" || strings.Contains(output.String(), marker) {
+				t.Fatalf("unsafe or collapsed approval event: %s", output.String())
+			}
+		})
+	}
+}
+
 func TestRecoverySummaryRetainsCountsWithoutRecoverySecrets(t *testing.T) {
 	var output bytes.Buffer
 	NewLogger(&output, Config{Service: "account-approval-recovery", Environment: "test"}).Info("approval recovery pass",
