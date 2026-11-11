@@ -47,7 +47,11 @@ for (const shell of ["powershell.exe", "pwsh"]) {
           [Console]::Error.WriteLine('fixture-phase:bootstrapped');
           [void]$ps.AddScript({param($nonce)
             $ErrorActionPreference='Stop';$PSDefaultParameterValues['Invoke-PinvouWhitelistedProcess:TimeoutMilliseconds']=5000;$driver=Join-Path $global:PinvouE2ERunRoot 'pinvou-e2e-driver.exe';
-            $runtime=(Invoke-PinvouTrustedGuard -FilePath $driver -Arguments @('legacy-start','--run-nonce',$nonce,'--persist-ownership-before-response'))|ConvertFrom-Json;
+            try { $runtime=(Invoke-PinvouTrustedGuard -FilePath $driver -Arguments @('legacy-start','--run-nonce',$nonce,'--persist-ownership-before-response'))|ConvertFrom-Json }
+            catch {
+              $e=$_.Exception;while($e.InnerException){$e=$e.InnerException};[Console]::Error.WriteLine(('fixture-root-exit:'+ $e.ChildExitCode));
+              $phase=Join-Path $global:PinvouE2ERunRoot 'fixture-driver-phase.log';if(Test-Path -LiteralPath $phase){[Console]::Error.WriteLine([IO.File]::ReadAllText($phase))};throw
+            };
             if($LASTEXITCODE -ne 0){throw 'legacy-start-failed'};
             [Console]::Error.WriteLine('fixture-phase:legacy-started');
             $registry=(Invoke-PinvouTrustedGuard -FilePath $driver -Arguments @('legacy-owned-pids','--run-nonce',$nonce,'--durable-registry-only'))|ConvertFrom-Json;

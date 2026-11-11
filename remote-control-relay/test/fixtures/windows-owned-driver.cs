@@ -48,6 +48,7 @@ public static class OwnedDriverFixture {
     public static int Main(string[] args) {
         Console.OutputEncoding = new UTF8Encoding(false);
         try {
+            File.AppendAllText(Path.Combine(Root, "fixture-driver-phase.log"), "entered\n");
             var registry = File.Exists(Ledger) ? Json.Deserialize<DriverRegistry>(File.ReadAllText(Ledger)) : new DriverRegistry();
             string nonce = Arg(args, "--run-nonce", registry.nonce);
             if (registry.nonce != null && nonce != registry.nonce) throw new Exception("fixture_owner_mismatch");
@@ -68,13 +69,16 @@ public static class OwnedDriverFixture {
                     RedirectStandardInput = true, RedirectStandardOutput = true, RedirectStandardError = true,
                 };
                 using (var child = Process.Start(info)) {
+                    File.AppendAllText(Path.Combine(Root, "fixture-driver-phase.log"), "child-started\n");
                     registry.children.Add(new ChildRecord { pid = child.Id,
                         creation_ticks = child.StartTime.ToUniversalTime().Ticks,
                         executable = executable, sha256 = Hash(executable),
                         kind = args[0] == "legacy-start" ? "legacy" : "role" });
                     // Durable ownership precedes the successful response.
                     Save(registry);
+                    File.AppendAllText(Path.Combine(Root, "fixture-driver-phase.log"), "ownership-saved\n");
                     Print(new { schema = "pinvou-fixture-runtime", pid = child.Id, mock = false });
+                    File.AppendAllText(Path.Combine(Root, "fixture-driver-phase.log"), "response-written\n");
                 }
             } else if (args[0] == "legacy-owned-pids") {
                 Print(new { schema = "pinvou-legacy-owned-processes", version = 1,
