@@ -55,10 +55,15 @@ test("release gate command executes and accepts only the disabled exact flag", (
 
 test("release gate executes the real lifecycle sensitive-surface scan", () => {
   const result = spawnSync(process.execPath, [
-    "--test", "--test-concurrency=1",
+    "--test", "--test-concurrency=1", "--test-reporter=tap",
     fileURLToPath(new URL("./controller-sensitive-scan.test.js", import.meta.url)),
-  ], { encoding: "utf8" });
+  ], { encoding: "utf8", env: buildReleaseSubprocessEnvironment(process.env, "test") });
   assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /ok \d+ - real lifecycle logs, controller persistence, encrypted capture and diagnostics are sentinel-clean/u);
+  assert.match(result.stdout, /# tests [1-9]\d*\b/u);
+  assert.match(result.stdout, /# fail 0\b/u);
+  assert.match(result.stdout, /# skipped 0\b/u);
+  assert.doesNotMatch(result.stderr, /Skipping running tests|recursive.*test/u);
 });
 
 test("release gate passes a purpose-specific environment and never forwards secret material", () => {
