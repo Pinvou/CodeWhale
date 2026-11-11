@@ -41,13 +41,15 @@ function assertDocumentedTemplate(text) {
   assert.equal(fields.F18_TEST_DATA_DIRECTORY, "<temp>/pinvou-f18-billing-<uuid>/data");
 }
 
-test("F18 runbook distinguishes implemented configuration from pending lifecycle acceptance", () => {
-  assert.match(runbook, /Owned configuration and pending lifecycle acceptance/u);
-  assert.match(runbook, /#1735 and #1979 track.*implementation.*acceptance/u);
+test("F18 runbook distinguishes implemented local lifecycle from external acceptance", () => {
+  assert.match(runbook, /Owned configuration and lifecycle acceptance/u);
+  assert.match(runbook, /#1735 and #1979 track.*configuration.*cleanup.*acceptance/u);
   assert.match(runbook, /#2244 has implemented the explicit owned configuration/u);
   assert.match(runbook, /An unset profile does not cause a skip/u);
   assert.match(runbook, /requires an external harness/u);
-  assert.match(runbook, /before DROP ROLE is still a target requirement/u);
+  assert.match(runbook, /Before DROP ROLE it rechecks both session and current user/u);
+  assert.match(runbook, /same-name replacement/u);
+  assert.match(runbook, /Linux\/macOS runtime execution remains separate/u);
   assert.match(runbook, /CI guard checks documented fields and prose/u);
   assert.match(runbook, /no TLS, fallback host, or runtime parameter/u);
   assert.match(runbook, /no non-system roles other than the declared fixture coordinator/u);

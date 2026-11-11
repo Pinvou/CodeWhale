@@ -46,8 +46,12 @@ func TestRetainedBillingRollbackGuard(t *testing.T) {
 		}
 	})
 	for version, reason := range map[int64]string{
+		35: "prior payment mappings and prices",
+		36: "prior payment mappings and prices",
+		37: "prior payment mappings and prices",
 		42: "prior payment mappings and prices",
 		46: "payment instruction cleanup is irreversible",
+		51: "pricing space version repair is irreversible",
 	} {
 		t.Run(fmt.Sprintf("irreversible-%d", version), func(t *testing.T) {
 			if err := retainedRollbackGuard(context.Background(), nil, migrations.Migration{Version: version}); err == nil || !strings.Contains(err.Error(), reason) {

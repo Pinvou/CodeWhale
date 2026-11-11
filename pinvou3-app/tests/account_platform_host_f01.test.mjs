@@ -54,7 +54,9 @@ test('personal/model bridge stays finite and desktop-only after mature LLMap ret
   assert.equal(desktopBridgeApi.llmapi, undefined);
   const main = read('src/app/main.jsx');
   assert.doesNotMatch(main, /getLlmApiStatus|isLlmApiAccountVisible|llmAccountVisible/);
-  assert.match(main, /shouldShowModelAccessGate/);
+  assert.match(main, /LazyModelAccessController/);
+  assert.match(main, /accountTransport=\{bridge.accountPlatform\}/);
+  assert.match(read('src/features/settings/ModelAccessController.jsx'), /new AccountPlatformDesktopClient\(accountTransport\)/);
   assert.match(main, /openSettingsSection\('model'\)/);
   assert.match(read('src/platform/tauri/bridge.js'), /switchModelRef:\s*settingsFeature\.switchModelRef/);
 });
