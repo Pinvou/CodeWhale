@@ -1,0 +1,866 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Account Commerce customer synchronization manual completion",
+    "version": "1.0.0",
+    "description": "Refs #1632. Operator-only Account HTTP surface; no implicit Portal proxy or GUI. One case per original job/provider/adapter. Immutable human-attested controlled-record references are not machine-verified supplier results. Confirmation attests authoritative original success or completed-no-effect evidence covering all original attempts. Two independent currently authorized users are required. Only matching active generation can become READY; stale/closed subjects preserve evidence only. No-effect never means sync success. No external execution or automatic redispatch is authorized. Newer evidence invalidates older proposals. Unknown replies recover the same case/observation; receipts remain immutable. In-flight callbacks remain separate immutable data-only evidence, with database sequence pagination. New callback evidence invalidates an open proposal; evidence after completion does not rewrite the receipt. New references are refused for retired/closed subjects; preserve the controlled record and digest instead."
+  },
+  "security": [
+    {
+      "bearerAuth": []
+    }
+  ],
+  "paths": {
+    "/admin/v1/commerce-repairs": {
+      "get": {
+        "operationId": "adminCommerceRepairs",
+        "x-required-permission": "platform.commerce.repairs.read",
+        "responses": {
+          "200": {
+            "description": "Durable redacted original binding or completion receipt",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Queue"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid closed operator protocol"
+          },
+          "401": {
+            "description": "OIDC authentication required; preserve any prior uncertain command"
+          },
+          "403": {
+            "description": "Current permission or independent human authority denied; does not disprove an earlier commit"
+          },
+          "404": {
+            "description": "Original case, job or observation not found"
+          },
+          "409": {
+            "description": "Original binding, evidence, version, state or idempotent input conflicts"
+          },
+          "429": {
+            "description": "Existing HTTP admission limit"
+          },
+          "500": {
+            "description": "Infrastructure failure; recover the original case/observation identity"
+          },
+          "503": {
+            "description": "Authorization or installed repair capability unavailable"
+          }
+        },
+        "parameters": [
+          {
+            "name": "after_id",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 50
+            }
+          }
+        ]
+      },
+      "post": {
+        "operationId": "adminQuarantineCommerceRepair",
+        "x-required-permission": "platform.commerce.repairs.request",
+        "responses": {
+          "200": {
+            "description": "Durable redacted original binding or completion receipt",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Case"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid closed operator protocol"
+          },
+          "401": {
+            "description": "OIDC authentication required; preserve any prior uncertain command"
+          },
+          "403": {
+            "description": "Current permission or independent human authority denied; does not disprove an earlier commit"
+          },
+          "404": {
+            "description": "Original case, job or observation not found"
+          },
+          "409": {
+            "description": "Original binding, evidence, version, state or idempotent input conflicts"
+          },
+          "429": {
+            "description": "Existing HTTP admission limit"
+          },
+          "500": {
+            "description": "Infrastructure failure; recover the original case/observation identity"
+          },
+          "503": {
+            "description": "Authorization or installed repair capability unavailable"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "description": "Exactly application/json, at most8192bytes. Duplicate keys, case-folded aliases, unknown members, UUID aliases, extra query fields and trailing documents are rejected.",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Quarantine"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/v1/commerce-repairs/{case_id}": {
+      "get": {
+        "operationId": "adminCommerceRepairDetail",
+        "x-required-permission": "platform.commerce.repairs.read",
+        "responses": {
+          "200": {
+            "description": "Durable redacted original binding or completion receipt",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Detail"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid closed operator protocol"
+          },
+          "401": {
+            "description": "OIDC authentication required; preserve any prior uncertain command"
+          },
+          "403": {
+            "description": "Current permission or independent human authority denied; does not disprove an earlier commit"
+          },
+          "404": {
+            "description": "Original case, job or observation not found"
+          },
+          "409": {
+            "description": "Original binding, evidence, version, state or idempotent input conflicts"
+          },
+          "429": {
+            "description": "Existing HTTP admission limit"
+          },
+          "500": {
+            "description": "Infrastructure failure; recover the original case/observation identity"
+          },
+          "503": {
+            "description": "Authorization or installed repair capability unavailable"
+          }
+        },
+        "parameters": [
+          {
+            "name": "case_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+            }
+          },
+          {
+            "name": "after_observation_version",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "after_callback_sequence",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            },
+            "description": "Last callback sequence from the previous page; sequence is allocated by the database."
+          }
+        ]
+      }
+    },
+    "/admin/v1/commerce-repairs/{case_id}/observations": {
+      "post": {
+        "operationId": "adminObserveCommerceRepair",
+        "x-required-permission": "platform.commerce.repairs.request",
+        "responses": {
+          "200": {
+            "description": "Durable redacted original binding or completion receipt",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Observation"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid closed operator protocol"
+          },
+          "401": {
+            "description": "OIDC authentication required; preserve any prior uncertain command"
+          },
+          "403": {
+            "description": "Current permission or independent human authority denied; does not disprove an earlier commit"
+          },
+          "404": {
+            "description": "Original case, job or observation not found"
+          },
+          "409": {
+            "description": "Original binding, evidence, version, state or idempotent input conflicts"
+          },
+          "429": {
+            "description": "Existing HTTP admission limit"
+          },
+          "500": {
+            "description": "Infrastructure failure; recover the original case/observation identity"
+          },
+          "503": {
+            "description": "Authorization or installed repair capability unavailable"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "description": "Exactly application/json, at most8192bytes. Duplicate keys, case-folded aliases, unknown members, UUID aliases, extra query fields and trailing documents are rejected.",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ObservationInput"
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "case_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+            }
+          }
+        ]
+      }
+    },
+    "/admin/v1/commerce-repairs/{case_id}/actions/confirm": {
+      "post": {
+        "operationId": "adminConfirmCommerceRepair",
+        "x-required-permission": "platform.commerce.repairs.approve",
+        "responses": {
+          "200": {
+            "description": "Durable redacted original binding or completion receipt",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Case"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid closed operator protocol"
+          },
+          "401": {
+            "description": "OIDC authentication required; preserve any prior uncertain command"
+          },
+          "403": {
+            "description": "Current permission or independent human authority denied; does not disprove an earlier commit"
+          },
+          "404": {
+            "description": "Original case, job or observation not found"
+          },
+          "409": {
+            "description": "Original binding, evidence, version, state or idempotent input conflicts"
+          },
+          "429": {
+            "description": "Existing HTTP admission limit"
+          },
+          "500": {
+            "description": "Infrastructure failure; recover the original case/observation identity"
+          },
+          "503": {
+            "description": "Authorization or installed repair capability unavailable"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "description": "Exactly application/json, at most8192bytes. Duplicate keys, case-folded aliases, unknown members, UUID aliases, extra query fields and trailing documents are rejected.",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Confirmation"
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "case_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+            }
+          }
+        ]
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "OIDC JWT",
+        "description": "Human session with issuer, subject, session id and auth time; independent current platform roles checked in Account."
+      }
+    },
+    "schemas": {
+      "Case": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+          },
+          "job_id": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+          },
+          "mapping_id": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+          },
+          "subject_id": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+          },
+          "approved_observation_id": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+          },
+          "reviewer_user_id": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+          },
+          "mapping_version": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 1
+          },
+          "subject_type": {
+            "enum": [
+              "USER",
+              "ORGANIZATION"
+            ]
+          },
+          "subject_lifecycle_version": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 1
+          },
+          "provider_id": {
+            "type": "string"
+          },
+          "adapter_version": {
+            "type": "string"
+          },
+          "task_category": {
+            "enum": [
+              "CUSTOMER_PROVISIONING",
+              "PROFILE_SYNC"
+            ]
+          },
+          "attempts": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "version": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 1
+          },
+          "status": {
+            "enum": [
+              "OPEN",
+              "RESOLVED"
+            ]
+          },
+          "resolution": {
+            "enum": [
+              "SUCCEEDED_CURRENT",
+              "SUCCEEDED_EVIDENCE_ONLY",
+              "ENDED_NO_EFFECT"
+            ]
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "resolved_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "id",
+          "job_id",
+          "mapping_id",
+          "subject_id",
+          "mapping_version",
+          "subject_type",
+          "subject_lifecycle_version",
+          "provider_id",
+          "adapter_version",
+          "task_category",
+          "attempts",
+          "version",
+          "status",
+          "created_at"
+        ],
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "status": {
+                  "const": "RESOLVED"
+                }
+              },
+              "required": [
+                "status"
+              ]
+            },
+            "then": {
+              "required": [
+                "resolution",
+                "approved_observation_id",
+                "reviewer_user_id",
+                "resolved_at"
+              ],
+              "properties": {
+                "resolution": {
+                  "enum": [
+                    "SUCCEEDED_CURRENT",
+                    "SUCCEEDED_EVIDENCE_ONLY",
+                    "ENDED_NO_EFFECT"
+                  ]
+                },
+                "approved_observation_id": {
+                  "type": "string",
+                  "format": "uuid",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+                },
+                "reviewer_user_id": {
+                  "type": "string",
+                  "format": "uuid",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+                },
+                "resolved_at": {
+                  "type": "string",
+                  "format": "date-time"
+                }
+              }
+            },
+            "else": {
+              "not": {
+                "anyOf": [
+                  {
+                    "required": [
+                      "resolution"
+                    ],
+                    "properties": {
+                      "resolution": {}
+                    }
+                  },
+                  {
+                    "required": [
+                      "approved_observation_id"
+                    ],
+                    "properties": {
+                      "approved_observation_id": {}
+                    }
+                  },
+                  {
+                    "required": [
+                      "reviewer_user_id"
+                    ],
+                    "properties": {
+                      "reviewer_user_id": {}
+                    }
+                  },
+                  {
+                    "required": [
+                      "resolved_at"
+                    ],
+                    "properties": {
+                      "resolved_at": {}
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        ]
+      },
+      "Observation": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+          },
+          "case_id": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+          },
+          "case_version": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 2
+          },
+          "outcome": {
+            "enum": [
+              "UNCONFIRMED",
+              "SUCCEEDED",
+              "ENDED_NO_EFFECT"
+            ]
+          },
+          "evidence_reference": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{7,159}$"
+          },
+          "evidence_sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "all_attempts_ended": {
+            "type": "boolean"
+          },
+          "external_reference_redacted": {
+            "type": "string",
+            "pattern": "^(|\\*{3}[A-Za-z0-9]{1,8})$"
+          },
+          "proposer_user_id": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "id",
+          "case_id",
+          "case_version",
+          "outcome",
+          "evidence_reference",
+          "evidence_sha256",
+          "all_attempts_ended",
+          "proposer_user_id",
+          "created_at"
+        ]
+      },
+      "Quarantine": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "job_id": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+          }
+        },
+        "required": [
+          "job_id"
+        ]
+      },
+      "ObservationInput": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "outcome": {
+            "enum": [
+              "UNCONFIRMED",
+              "SUCCEEDED",
+              "ENDED_NO_EFFECT"
+            ]
+          },
+          "evidence_reference": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{7,159}$"
+          },
+          "evidence_sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "all_attempts_ended": {
+            "type": "boolean"
+          },
+          "external_reference_redacted": {
+            "type": "string",
+            "pattern": "^(|\\*{3}[A-Za-z0-9]{1,8})$"
+          },
+          "expected_version": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 1
+          },
+          "observation_id": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+          }
+        },
+        "required": [
+          "expected_version",
+          "observation_id",
+          "outcome",
+          "evidence_reference",
+          "evidence_sha256"
+        ],
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "outcome": {
+                  "enum": [
+                    "SUCCEEDED",
+                    "ENDED_NO_EFFECT"
+                  ]
+                }
+              },
+              "required": [
+                "outcome"
+              ]
+            },
+            "then": {
+              "required": [
+                "all_attempts_ended"
+              ],
+              "properties": {
+                "all_attempts_ended": {
+                  "const": true
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "outcome": {
+                  "enum": [
+                    "UNCONFIRMED",
+                    "ENDED_NO_EFFECT"
+                  ]
+                }
+              },
+              "required": [
+                "outcome"
+              ]
+            },
+            "then": {
+              "properties": {
+                "external_reference_redacted": {
+                  "const": ""
+                }
+              }
+            }
+          }
+        ]
+      },
+      "Confirmation": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "expected_version": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 2
+          },
+          "observation_id": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+          }
+        },
+        "required": [
+          "expected_version",
+          "observation_id"
+        ]
+      },
+      "Detail": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "case": {
+            "$ref": "#/components/schemas/Case"
+          },
+          "observations": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Observation"
+            },
+            "maxItems": 100
+          },
+          "more_observations": {
+            "type": "boolean"
+          },
+          "callbacks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Callback"
+            },
+            "maxItems": 100
+          },
+          "more_callbacks": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "case",
+          "observations",
+          "more_observations",
+          "callbacks",
+          "more_callbacks"
+        ]
+      },
+      "Queue": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "items": {
+            "type": "array",
+            "maxItems": 100,
+            "items": {
+              "$ref": "#/components/schemas/Case"
+            }
+          }
+        },
+        "required": [
+          "items"
+        ]
+      },
+      "Callback": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+          },
+          "sequence": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 1
+          },
+          "case_id": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+          },
+          "attempts": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "kind": {
+            "enum": [
+              "SUCCEEDED",
+              "PROVIDER_ERROR"
+            ]
+          },
+          "external_reference_redacted": {
+            "type": "string",
+            "pattern": "^(|\\*{3}[A-Za-z0-9]{1,8})$"
+          },
+          "after_completion": {
+            "type": "boolean"
+          },
+          "recorded_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "id",
+          "sequence",
+          "case_id",
+          "attempts",
+          "kind",
+          "after_completion",
+          "recorded_at"
+        ]
+      }
+    }
+  }
+}

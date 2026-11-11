@@ -118,6 +118,116 @@ class PostgresQuiescenceTests(unittest.TestCase):
 
 
 class FinancialPostgresRunnerTests(unittest.TestCase):
+    def test_commerce_account_roots_and_each_required_case_cannot_be_faked(self):
+        expected = {
+            "TestCommerceManualCompletionMigrationPostgres": {
+                "late-catalog-collision-rolls-back",
+                "nonempty-upgrade-and-forward-only",
+            },
+            "TestCommerceManualCompletionPostgres": {
+                "audit-cancellation-rolls-back-completion",
+                "callback-evidence-invalidates-old-proposal",
+                "closed-identity-keeps-retired-facts",
+                "closed-job-can-open-evidence-only-case",
+                "concurrent-reviewers-write-one-receipt",
+                "current-success-http-and-receipt-replay",
+                "expired-lease-quarantines-without-redispatch",
+                "no-effect-is-not-sync-success",
+                "observation-id-replay-and-payload-conflict",
+                "operator-wire-boundaries-preserve-original-facts",
+                "proposer-expiry-during-mapping-wait", "proposer-expiry-during-sla-wait",
+                "retired-active-lifecycle-keeps-business-facts",
+                "reviewer-expiry-during-mapping-wait", "reviewer-expiry-during-sla-wait",
+                "reviewer-revocation-during-role-wait",
+                "self-and-unprivileged-confirmations-block",
+                "stale-mapping-keeps-new-generation",
+                "unknown-and-superseded-observation-block",
+            },
+        }
+        self.assertTrue(set(expected) <= RUNNER.ACCOUNT_REQUIRED)
+        for root, children in expected.items():
+            if children:
+                self.assertEqual(RUNNER.EXACT_REQUIRED_CHILDREN[root], children)
+            events = self.events({root}, RUNNER.ACCOUNT_PACKAGE, children=bool(children))
+            options = {"package": RUNNER.ACCOUNT_PACKAGE, "require_children": True, "exact_roots": True, "children_required": {root} if children else set()}
+            RUNNER.verify_results(events, {root}, **options)
+            for name in {root} | {root + "/" + child for child in children}:
+                invalid = [
+                    [event for event in events if event.get("Test") != name],
+                    events + [{"Action": "skip", "Package": RUNNER.ACCOUNT_PACKAGE, "Test": name}],
+                    events + [{"Action": "fail", "Package": RUNNER.ACCOUNT_PACKAGE, "Test": name}],
+                ]
+                for rejected in invalid:
+                    with self.subTest(root=root, missing_or_failed=name), self.assertRaises(RuntimeError):
+                        RUNNER.verify_results(rejected, {root}, **options)
+
+    def test_commerce_schema_roots_and_each_required_case_cannot_be_faked(self):
+        expected = {
+            "TestCommerceClaimMappingLockKeepsLeaseLive": set(),
+            "TestCommerceClaimSubjectLockKeepsLeaseLive": set(),
+            "TestCommerceClosureCallbacksRespectSubjectFence": {
+                "complete-after-anonymize",
+                "complete-user-wait",
+                "retry-after-anonymize",
+                "retry-user-wait",
+            },
+            "TestF02CommerceClaimWaitStartsFreshLease": {
+                "mapping",
+                "user",
+            },
+            "TestF02CommerceConfirmedProducersPreserveStatuses": {
+                "confirmed-mobile-ACTIVE",
+                "confirmed-mobile-DISABLED",
+                "confirmed-mobile-PROVISIONING",
+                "confirmed-mobile-REPAIR_REQUIRED",
+                "real-registration-provisioning",
+            },
+            "TestF02CommerceLeaseExpiresWhileWaitingForMappingLock": {
+                "complete",
+                "retry",
+            },
+            "TestF02CommerceOriginal15LateUpgradePreservesFacts": set(),
+            "TestF02CommerceSupersededGenerationCannotDispatch": {
+                "confirmed-mobile-wins-lock",
+                "expired-lease",
+                "inflight-complete",
+                "inflight-retry",
+            },
+            "TestF02PublicCommerceCustomerLifecycle": {
+                "bootstrap-wallet-ack-and-get-me",
+                "current-schema-with-subject-lifecycle",
+                "detached-current-mapping-cannot-resume",
+                "disabled-user-cannot-claim-or-complete",
+                "mapping-generation-and-adapter-fence",
+                "quarantined-lease-rejects-previous-worker",
+                "quarantined-lease-rejects-previous-worker/complete",
+                "quarantined-lease-rejects-previous-worker/retry",
+                "startup-ensure-claim-retry-complete",
+            },
+        }
+        self.assertTrue(set(expected) <= RUNNER.SCHEMA_REQUIRED)
+        self.assertEqual(RUNNER.SCHEMA_LEAF_REQUIRED, {
+            "TestCommerceClaimMappingLockKeepsLeaseLive",
+            "TestCommerceClaimSubjectLockKeepsLeaseLive",
+            "TestF02CommerceOriginal15LateUpgradePreservesFacts",
+        })
+        self.assertEqual(RUNNER.SCHEMA_CHILD_REQUIRED, RUNNER.SCHEMA_REQUIRED - RUNNER.SCHEMA_LEAF_REQUIRED)
+        for root, children in expected.items():
+            if children:
+                self.assertEqual(RUNNER.EXACT_REQUIRED_CHILDREN[root], children)
+            events = self.events({root}, RUNNER.SCHEMA_PACKAGE, children=bool(children))
+            options = {"package": RUNNER.SCHEMA_PACKAGE, "require_children": True, "exact_roots": True, "children_required": {root} if children else set()}
+            RUNNER.verify_results(events, {root}, **options)
+            for name in {root} | {root + "/" + child for child in children}:
+                invalid = [
+                    [event for event in events if event.get("Test") != name],
+                    events + [{"Action": "skip", "Package": RUNNER.SCHEMA_PACKAGE, "Test": name}],
+                    events + [{"Action": "fail", "Package": RUNNER.SCHEMA_PACKAGE, "Test": name}],
+                ]
+                for rejected in invalid:
+                    with self.subTest(root=root, missing_or_failed=name), self.assertRaises(RuntimeError):
+                        RUNNER.verify_results(rejected, {root}, **options)
+
     def test_catalog_rollback_requires_all_historical_versions_and_actual_cli(self):
         root = "TestBillingHistoricalCatalogRollbackPostgres"
         self.assertIn(root, RUNNER.SCHEMA_REQUIRED)
@@ -951,7 +1061,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
 
     def test_reconciliation_retry_identity_root_is_selected_and_cannot_be_faked(self):
         root = "TestReconciliationFairRetryRegisteredIdentity"
-        self.assertEqual(len(RUNNER.SCHEMA_REQUIRED), 12)
+        self.assertEqual(len(RUNNER.SCHEMA_REQUIRED), 21)
         self.assertIn(root, RUNNER.SCHEMA_REQUIRED)
         self.run_main_fixture()
         command = self.fixture_commands[self.fixture_phases.index("owner-schema")]
@@ -1596,7 +1706,29 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
     def test_package_index_schema_contract_is_selected_and_cannot_skip(self):
         self.run_main_fixture()
         roots, package = RUNNER.SCHEMA_REQUIRED, RUNNER.SCHEMA_PACKAGE
-        self.assertEqual(roots, {"TestLatePaymentQueryRegisteredIdentity", "TestReconciliationFairRetryRegisteredIdentity", "TestF09EntitlementPackageIndexPublicMigration", "TestTokenWalletReceiptSchemaPostgres", "TestLegacyEntitlementUpgradeAdmissionPostgres", "TestUsageWaiverHistoricalSchemaPostgres", "TestBillingOrdinaryReplayOriginalMigrationPostgres", "TestUnknownProviderEntryPublicMigrationPostgres", "TestLegacyExpiry025UpgradePreservesOriginalLedgerPostgres", "TestF04PublicTokenUserOwnerAuthorityAndDirectory", "TestManualRetentionHistoricalHardeningPostgres", "TestBillingHistoricalCatalogRollbackPostgres"})
+        self.assertEqual(roots, {
+            "TestBillingHistoricalCatalogRollbackPostgres",
+            "TestBillingOrdinaryReplayOriginalMigrationPostgres",
+            "TestCommerceClaimMappingLockKeepsLeaseLive",
+            "TestCommerceClaimSubjectLockKeepsLeaseLive",
+            "TestCommerceClosureCallbacksRespectSubjectFence",
+            "TestF02CommerceClaimWaitStartsFreshLease",
+            "TestF02CommerceConfirmedProducersPreserveStatuses",
+            "TestF02CommerceLeaseExpiresWhileWaitingForMappingLock",
+            "TestF02CommerceOriginal15LateUpgradePreservesFacts",
+            "TestF02CommerceSupersededGenerationCannotDispatch",
+            "TestF02PublicCommerceCustomerLifecycle",
+            "TestF04PublicTokenUserOwnerAuthorityAndDirectory",
+            "TestF09EntitlementPackageIndexPublicMigration",
+            "TestLatePaymentQueryRegisteredIdentity",
+            "TestLegacyEntitlementUpgradeAdmissionPostgres",
+            "TestLegacyExpiry025UpgradePreservesOriginalLedgerPostgres",
+            "TestManualRetentionHistoricalHardeningPostgres",
+            "TestReconciliationFairRetryRegisteredIdentity",
+            "TestTokenWalletReceiptSchemaPostgres",
+            "TestUnknownProviderEntryPublicMigrationPostgres",
+            "TestUsageWaiverHistoricalSchemaPostgres",
+        })
         command = self.fixture_commands[self.fixture_phases.index("owner-schema")]
         selection = command[command.index("-run") + 1]
         self.assertIn("TestF09EntitlementPackageIndexPublicMigration", selection)
@@ -1686,6 +1818,8 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
             "TestProfileSessionRevocationRecoveryRuntimePostgres",
             "TestRegistrationCreateDispatchRuntimePostgres",
     "TestRegistrationUnknownInspectionPostgres",
+            "TestCommerceManualCompletionMigrationPostgres",
+            "TestCommerceManualCompletionPostgres",
             "TestRegistrationIdentityRejectionRuntimePostgres",
             "TestRegistrationCompensationDatabaseErrorIdentityPostgres",
             "TestPlatformRoleManagementRuntimePostgres",

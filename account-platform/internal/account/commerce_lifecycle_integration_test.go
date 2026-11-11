@@ -76,11 +76,13 @@ func TestCommerceSyncLifecycleFence(t *testing.T) {
 	result := commerce.CustomerProvisionResult{ExternalReferenceRedacted: "customer***fixture"}
 	snapshot := func(t *testing.T, user, mapping uuid.UUID) string {
 		t.Helper()
+		// A new repair-case link is administrative evidence. Every original
+		// job field, mapping and original synchronization evidence stays exact.
 		var frozen string
 		if err := c.QueryRow(ctx, `SELECT jsonb_build_object(
 'user',(SELECT to_jsonb(u) FROM users u WHERE id=$1),
 'mapping',(SELECT to_jsonb(m) FROM commerce_customer_mappings m WHERE id=$2),
-'jobs',(SELECT jsonb_agg(to_jsonb(j) ORDER BY j.id) FROM commerce_customer_sync_jobs j WHERE mapping_id=$2),
+'jobs',(SELECT jsonb_agg(to_jsonb(j)-'commerce_repair_case_id' ORDER BY j.id) FROM commerce_customer_sync_jobs j WHERE mapping_id=$2),
 'evidence',(SELECT jsonb_agg(to_jsonb(e) ORDER BY e.id) FROM commerce_customer_sync_evidence e WHERE mapping_id=$2))::text`, user, mapping).Scan(&frozen); err != nil {
 			t.Fatal(err)
 		}

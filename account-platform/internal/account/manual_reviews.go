@@ -204,6 +204,7 @@ func evaluateAccountStopLoss(ctx context.Context, tx pgx.Tx, item struct {
 
 type manualReviewSLARepository interface {
 	SyncManualReviewCases(context.Context, int) (int, error)
+	SyncCommerceRepairCases(context.Context, int) (int, error)
 	EscalateOverdueManualReviews(context.Context, manualreview.OnCallSchedule, int) (int, error)
 }
 
@@ -237,6 +238,9 @@ func (worker *ManualReviewSLAWorker) Run(ctx context.Context) {
 func (worker *ManualReviewSLAWorker) runOne(ctx context.Context) {
 	if _, err := worker.repository.SyncManualReviewCases(ctx, 100); err != nil && (ctx.Err() == nil || !errors.Is(err, ctx.Err())) {
 		slog.ErrorContext(ctx, "manual_review_sync_failed", "error_code", "MANUAL_REVIEW_SYNC_FAILED")
+	}
+	if _, err := worker.repository.SyncCommerceRepairCases(ctx, 100); err != nil && (ctx.Err() == nil || !errors.Is(err, ctx.Err())) {
+		slog.ErrorContext(ctx, "commerce_manual_review_sync_failed", "error_code", "COMMERCE_MANUAL_REVIEW_SYNC_FAILED")
 	}
 	if _, err := worker.repository.EscalateOverdueManualReviews(ctx, worker.schedule, 100); err != nil && (ctx.Err() == nil || !errors.Is(err, ctx.Err())) {
 		slog.ErrorContext(ctx, "manual_review_escalation_failed", "error_code", "MANUAL_REVIEW_ESCALATION_FAILED")

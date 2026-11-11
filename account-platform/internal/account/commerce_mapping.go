@@ -126,6 +126,7 @@ LEFT JOIN commerce_customer_mappings m
   ON m.subject_type='USER' AND m.subject_id=u.id AND m.provider_id=$1
 WHERE u.mobile_verified_at IS NOT NULL AND u.mobile_e164 IS NOT NULL AND u.status='ACTIVE'
   AND (m.id IS NULL OR (m.status <> 'READY' AND m.adapter_version <> $2))
+  AND NOT EXISTS(SELECT 1 FROM commerce_customer_repair_cases repair WHERE repair.mapping_id=m.id AND repair.mapping_version=m.version)
 ORDER BY u.id FOR UPDATE OF u`, r.commerceProviderID, r.commerceAdapterVersion)
 	if err != nil {
 		return err
@@ -204,7 +205,7 @@ func (r *PostgresRepository) ClaimCommerceCustomerSyncJob(ctx context.Context, p
 	defer tx.Rollback(ctx)
 	var candidate CommerceCustomerSyncJob
 	err = tx.QueryRow(ctx, `SELECT id,mapping_id,subject_type,subject_id FROM commerce_customer_sync_jobs
- WHERE provider_id=$1 AND adapter_version=$2
+ WHERE provider_id=$1 AND adapter_version=$2 AND task_category IN ('CUSTOMER_PROVISIONING','PROFILE_SYNC') AND commerce_repair_case_id IS NULL
  AND EXISTS(SELECT 1 FROM commerce_customer_mappings m WHERE m.id=mapping_id
  AND m.subject_type=commerce_customer_sync_jobs.subject_type AND m.subject_id=commerce_customer_sync_jobs.subject_id
  AND m.provider_id=commerce_customer_sync_jobs.provider_id AND m.adapter_version=commerce_customer_sync_jobs.adapter_version
@@ -260,6 +261,14 @@ func (r *PostgresRepository) ClaimCommerceCustomerSyncJob(ctx context.Context, p
 	if mappingStatus == "DETACHED" || mappingSubjectType != job.SubjectType || mappingSubjectID != job.SubjectID || mappingProvider != job.ProviderID || mappingAdapter != job.AdapterVersion || mappingVersion != job.MappingVersion {
 		return nil, tx.Commit(ctx)
 	}
+	if status == "LEASED" {
+		// Expiry proves neither that the supplier call ended nor that it had
+		// no effect. Preserve the original attempt for independent review.
+		if _, _, err = ensureCommerceRepairCaseTx(ctx, tx, job, status, until, commerceRepairAutomatic, now); err != nil {
+			return nil, err
+		}
+		return nil, tx.Commit(ctx)
+	}
 	command, err := tx.Exec(ctx, `UPDATE commerce_customer_sync_jobs SET status='LEASED',attempts=attempts+1,lease_until=$2,updated_at=$1 WHERE id=$3 AND status=$4 AND attempts=$5`, now, now.Add(lease), job.ID, status, job.Attempts)
 	if err != nil {
 		return nil, err
@@ -278,8 +287,9 @@ func (r *PostgresRepository) ClaimCommerceCustomerSyncJob(ctx context.Context, p
 	return &job, tx.Commit(ctx)
 }
 
-// Both callbacks reject retired USER lifecycles before touching their mapping,
-// job or evidence. Non-USER callbacks retain the original status-only fence.
+// Retired USER lifecycles cannot change original job/mapping business facts.
+// A manual case can retain data-only callback evidence without restoring PII
+// or granting a dispatch. Organizations keep a status-only lifecycle fence.
 func commerceCallbackLifecycleConflict(subjectType string, expected, actual int64, status string) bool {
 	return subjectType == "USER" && actual != expected || status == "DELETED" || status == "ANONYMIZED"
 }
@@ -290,14 +300,20 @@ func (r *PostgresRepository) CompleteCommerceCustomerSyncJob(ctx context.Context
 		return err
 	}
 	defer tx.Rollback(ctx)
-	userStatus, lifecycle, err := lockCommerceSubjectTx(ctx, tx, job.SubjectType, job.SubjectID)
+	userStatus, lifecycle, err := lockCommerceCallbackSubjectTx(ctx, tx, job.SubjectType, job.SubjectID)
 	if err != nil {
 		return err
 	}
 	if commerceCallbackLifecycleConflict(job.SubjectType, job.SubjectLifecycleVersion, lifecycle, userStatus) {
+		if handled, evidenceErr := finishCommerceRepairCallback(ctx, tx, job, "SUCCEEDED", result.ExternalReferenceRedacted); handled || evidenceErr != nil {
+			return evidenceErr
+		}
 		return ErrConflict
 	}
 	if userStatus != "ACTIVE" && userStatus != "DISABLED" {
+		if handled, evidenceErr := finishCommerceRepairCallback(ctx, tx, job, "SUCCEEDED", result.ExternalReferenceRedacted); handled || evidenceErr != nil {
+			return evidenceErr
+		}
 		// Closure owns this generation; late results cannot recreate PII or
 		// append a new external reference after cleanup.
 		return tx.Commit(ctx)
@@ -311,6 +327,11 @@ func (r *PostgresRepository) CompleteCommerceCustomerSyncJob(ctx context.Context
 		return err
 	}
 	if err = lockCommerceCustomerSyncLease(ctx, tx, job); err != nil {
+		if errors.Is(err, ErrConflict) {
+			if handled, evidenceErr := finishCommerceRepairCallback(ctx, tx, job, "SUCCEEDED", result.ExternalReferenceRedacted); handled || evidenceErr != nil {
+				return evidenceErr
+			}
+		}
 		return err
 	}
 	userActive, userDisabled := userStatus == "ACTIVE", userStatus == "DISABLED"
@@ -380,14 +401,20 @@ func (r *PostgresRepository) RetryCommerceCustomerSyncJob(ctx context.Context, j
 		return err
 	}
 	defer tx.Rollback(ctx)
-	status, lifecycle, err := lockCommerceSubjectTx(ctx, tx, job.SubjectType, job.SubjectID)
+	status, lifecycle, err := lockCommerceCallbackSubjectTx(ctx, tx, job.SubjectType, job.SubjectID)
 	if err != nil {
 		return err
 	}
 	if commerceCallbackLifecycleConflict(job.SubjectType, job.SubjectLifecycleVersion, lifecycle, status) {
+		if handled, evidenceErr := finishCommerceRepairCallback(ctx, tx, job, "PROVIDER_ERROR", ""); handled || evidenceErr != nil {
+			return evidenceErr
+		}
 		return ErrConflict
 	}
 	if status != "ACTIVE" && status != "DISABLED" {
+		if handled, evidenceErr := finishCommerceRepairCallback(ctx, tx, job, "PROVIDER_ERROR", ""); handled || evidenceErr != nil {
+			return evidenceErr
+		}
 		return tx.Commit(ctx)
 	}
 	var mappingID uuid.UUID
@@ -395,6 +422,11 @@ func (r *PostgresRepository) RetryCommerceCustomerSyncJob(ctx context.Context, j
 		return err
 	}
 	if err = lockCommerceCustomerSyncLease(ctx, tx, job); err != nil {
+		if errors.Is(err, ErrConflict) {
+			if handled, evidenceErr := finishCommerceRepairCallback(ctx, tx, job, "PROVIDER_ERROR", ""); handled || evidenceErr != nil {
+				return evidenceErr
+			}
+		}
 		return err
 	}
 	now := r.now()
@@ -410,6 +442,11 @@ func (r *PostgresRepository) RetryCommerceCustomerSyncJob(ctx context.Context, j
 	}
 	if _, err = tx.Exec(ctx, `INSERT INTO commerce_customer_sync_evidence(id,job_id,mapping_id,provider_id,adapter_version,outcome,error_code,recorded_at) VALUES($1,$2,$3,$4,$5,'FAILED',$6,$7)`, uuid.Must(uuid.NewV7()), job.ID, job.MappingID, job.ProviderID, job.AdapterVersion, reason, now); err != nil {
 		return err
+	}
+	if jobStatus == "REPAIR_REQUIRED" && job.TaskCategory != "FINANCIAL" {
+		if _, _, err = ensureCommerceRepairCaseTx(ctx, tx, job, jobStatus, nil, commerceRepairAutomatic, now); err != nil {
+			return err
+		}
 	}
 	return tx.Commit(ctx)
 }
@@ -428,6 +465,20 @@ func lockCommerceSubjectTx(ctx context.Context, tx pgx.Tx, subjectType string, s
 		return "", 0, ErrNotFound
 	}
 	return status, lifecycle, err
+}
+
+// Organization callbacks keep a status-only fence and take their subject
+// mutex before mapping/job locks, including the data-only repair fallback.
+func lockCommerceCallbackSubjectTx(ctx context.Context, tx pgx.Tx, subjectType string, subjectID uuid.UUID) (string, int64, error) {
+	if subjectType != "ORGANIZATION" {
+		return lockCommerceSubjectTx(ctx, tx, subjectType, subjectID)
+	}
+	var status string
+	err := tx.QueryRow(ctx, `SELECT status FROM organizations WHERE id=$1 FOR SHARE`, subjectID).Scan(&status)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", 0, ErrNotFound
+	}
+	return status, 1, err
 }
 
 func (r *PostgresRepository) GetCommerceCustomerMapping(ctx context.Context, principal identity.Principal) (CommerceCustomerMapping, error) {

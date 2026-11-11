@@ -83,6 +83,9 @@ func expectedEventDeliveryHistory(ctx context.Context, c *pgx.Conn, input []migr
 }
 
 func VerifyApplied(ctx context.Context, c *pgx.Conn, input []migrations.Migration) (migrations.Verification, error) {
+	if err := validateCommerceManualCompletion(input); err != nil {
+		return migrations.Verification{}, err
+	}
 	if err := validateOrganizationEvidenceGuard(input); err != nil {
 		return migrations.Verification{}, err
 	}

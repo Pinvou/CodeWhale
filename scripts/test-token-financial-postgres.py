@@ -92,6 +92,8 @@ ACCOUNT_REQUIRED = {
     "TestProfileSessionRevocationRecoveryRuntimePostgres",
     "TestRegistrationCreateDispatchRuntimePostgres",
     "TestRegistrationUnknownInspectionPostgres",
+    "TestCommerceManualCompletionMigrationPostgres",
+    "TestCommerceManualCompletionPostgres",
     "TestRegistrationIdentityRejectionRuntimePostgres",
     "TestRegistrationCompensationDatabaseErrorIdentityPostgres",
     "TestPlatformRoleManagementRuntimePostgres",
@@ -157,6 +159,23 @@ SCHEMA_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/billingsch
 TOKEN_SCHEMA_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/tokenschema"
 TOKEN_SCHEMA_REQUIRED = {"TestManagementPublicMigrationInstallation"}
 SCHEMA_REQUIRED = {"TestLatePaymentQueryRegisteredIdentity", "TestReconciliationFairRetryRegisteredIdentity", "TestF09EntitlementPackageIndexPublicMigration", "TestTokenWalletReceiptSchemaPostgres", "TestLegacyEntitlementUpgradeAdmissionPostgres", "TestUsageWaiverHistoricalSchemaPostgres", "TestBillingOrdinaryReplayOriginalMigrationPostgres", "TestUnknownProviderEntryPublicMigrationPostgres", "TestLegacyExpiry025UpgradePreservesOriginalLedgerPostgres", "TestF04PublicTokenUserOwnerAuthorityAndDirectory", "TestManualRetentionHistoricalHardeningPostgres", "TestBillingHistoricalCatalogRollbackPostgres"}
+SCHEMA_REQUIRED |= {
+    "TestCommerceClaimMappingLockKeepsLeaseLive",
+    "TestCommerceClaimSubjectLockKeepsLeaseLive",
+    "TestCommerceClosureCallbacksRespectSubjectFence",
+    "TestF02CommerceClaimWaitStartsFreshLease",
+    "TestF02CommerceConfirmedProducersPreserveStatuses",
+    "TestF02CommerceLeaseExpiresWhileWaitingForMappingLock",
+    "TestF02CommerceOriginal15LateUpgradePreservesFacts",
+    "TestF02CommerceSupersededGenerationCannotDispatch",
+    "TestF02PublicCommerceCustomerLifecycle",
+}
+SCHEMA_LEAF_REQUIRED = {
+    "TestCommerceClaimMappingLockKeepsLeaseLive",
+    "TestCommerceClaimSubjectLockKeepsLeaseLive",
+    "TestF02CommerceOriginal15LateUpgradePreservesFacts",
+}
+SCHEMA_CHILD_REQUIRED = SCHEMA_REQUIRED - SCHEMA_LEAF_REQUIRED
 OWNER_REQUIRED = {
     "TestPaymentActionAdmissionPostgres",
     "TestF06OrganizationWalletRequiresLifecycleEvidence",
@@ -283,6 +302,67 @@ BILLING_LEAF_REQUIRED = {
 }
 BILLING_CHILD_REQUIRED = RETAINED_REQUIRED - BILLING_LEAF_REQUIRED
 EXACT_REQUIRED_CHILDREN = {
+    "TestCommerceClosureCallbacksRespectSubjectFence": {
+        "complete-after-anonymize",
+        "complete-user-wait",
+        "retry-after-anonymize",
+        "retry-user-wait",
+    },
+    "TestCommerceManualCompletionMigrationPostgres": {
+        "late-catalog-collision-rolls-back",
+        "nonempty-upgrade-and-forward-only",
+    },
+    "TestCommerceManualCompletionPostgres": {
+        "audit-cancellation-rolls-back-completion",
+        "callback-evidence-invalidates-old-proposal",
+        "closed-identity-keeps-retired-facts",
+        "closed-job-can-open-evidence-only-case",
+        "concurrent-reviewers-write-one-receipt",
+        "current-success-http-and-receipt-replay",
+        "expired-lease-quarantines-without-redispatch",
+        "no-effect-is-not-sync-success",
+        "observation-id-replay-and-payload-conflict",
+        "operator-wire-boundaries-preserve-original-facts",
+        "proposer-expiry-during-mapping-wait", "proposer-expiry-during-sla-wait",
+        "retired-active-lifecycle-keeps-business-facts",
+        "reviewer-expiry-during-mapping-wait", "reviewer-expiry-during-sla-wait",
+        "reviewer-revocation-during-role-wait",
+        "self-and-unprivileged-confirmations-block",
+        "stale-mapping-keeps-new-generation",
+        "unknown-and-superseded-observation-block",
+    },
+    "TestF02CommerceClaimWaitStartsFreshLease": {
+        "mapping",
+        "user",
+    },
+    "TestF02CommerceConfirmedProducersPreserveStatuses": {
+        "confirmed-mobile-ACTIVE",
+        "confirmed-mobile-DISABLED",
+        "confirmed-mobile-PROVISIONING",
+        "confirmed-mobile-REPAIR_REQUIRED",
+        "real-registration-provisioning",
+    },
+    "TestF02CommerceLeaseExpiresWhileWaitingForMappingLock": {
+        "complete",
+        "retry",
+    },
+    "TestF02CommerceSupersededGenerationCannotDispatch": {
+        "confirmed-mobile-wins-lock",
+        "expired-lease",
+        "inflight-complete",
+        "inflight-retry",
+    },
+    "TestF02PublicCommerceCustomerLifecycle": {
+        "bootstrap-wallet-ack-and-get-me",
+        "current-schema-with-subject-lifecycle",
+        "detached-current-mapping-cannot-resume",
+        "disabled-user-cannot-claim-or-complete",
+        "mapping-generation-and-adapter-fence",
+        "quarantined-lease-rejects-previous-worker",
+        "quarantined-lease-rejects-previous-worker/complete",
+        "quarantined-lease-rejects-previous-worker/retry",
+        "startup-ensure-claim-retry-complete",
+    },
     "TestBillingHistoricalCatalogRollbackPostgres": {
         f"version{version}/seeded={seeded}{suffix}"
         for version in (35, 36, 37, 51)
@@ -709,9 +789,15 @@ def main(*, group="all"):
         sys.stderr.write(result.stderr)
         if result.returncode:
             raise RuntimeError("Go financial phase failed: " + label)
+        phase_children = {
+            "owner-account": ACCOUNT_CHILD_REQUIRED,
+            "retained-token": TOKEN_CHILD_REQUIRED,
+            "retained-billing": BILLING_CHILD_REQUIRED & required,
+            "owner-schema": SCHEMA_CHILD_REQUIRED,
+        }.get(label)
         count = verify_results([json.loads(line) for line in result.stdout.splitlines() if line.startswith("{")],
                                required, package=package, require_children=scoped or label == "retained-token", exact_roots=scoped,
-                               children_required=ACCOUNT_CHILD_REQUIRED if label == "owner-account" else TOKEN_CHILD_REQUIRED if label == "retained-token" else BILLING_CHILD_REQUIRED & required if label == "retained-billing" else None)
+                               children_required=phase_children)
         print(f"Financial phase {label}: {count} named passes; all {len(required)} required roots completed", flush=True)
 
     if group in ("all", "owners"):

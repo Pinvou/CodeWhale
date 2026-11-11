@@ -17,6 +17,7 @@ var safeLogEvents = map[string]string{
 	"commerce_customer_sync_retry_failed":                             "commerce_customer_sync_retry_failed",
 	"commerce_customer_sync_complete_failed":                          "commerce_customer_sync_complete_failed",
 	"manual_review_sync_failed":                                       "manual_review_sync_failed",
+	"commerce_manual_review_sync_failed":                              "commerce_manual_review_sync_failed",
 	"manual_review_escalation_failed":                                 "manual_review_escalation_failed",
 	"payment_stop_loss_evaluation_failed":                             "payment_stop_loss_evaluation_failed",
 	"provider_stop_loss_evaluation_failed":                            "provider_stop_loss_evaluation_failed",
