@@ -30,7 +30,7 @@ try {
   async function load(lang) {
     errors.length = 0;
     await page.goto(`${url}?lang=${lang}`, { waitUntil: 'domcontentloaded' });
-    await page.waitForFunction(() => window.dispatchFixture?.permissionRequests.length === 1);
+    await page.waitForFunction(() => window.dispatchFixture?.permissionRequests?.length === 1);
     assert.deepEqual(errors, []);
   }
   async function supply(index, entry) {
