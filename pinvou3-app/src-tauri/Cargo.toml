@@ -203,7 +203,7 @@ notify = "8"
 # 本地知识底座 L0：全系统元数据索引 + 秒搜 + 去重（docs/本地知识底座-产品形态与架构.md）
 # rusqlite bundled —— 自带 SQLite + FTS5（名/路径秒搜），不依赖系统 libsqlite，
 # 对 .deb 离线分发友好（与 file_ingest 二进制依赖降 recommends 的思路一致）。
-rusqlite = { version = "0.40.2", features = ["bundled"] }
+rusqlite = { version = "0.41.0", features = ["bundled"] }
 # 全盘遍历：容错(权限不足跳过)、防 symlink 环。L0 扫描器用。
 walkdir = "2"
 
@@ -249,8 +249,15 @@ xcap = "0.9.8"
 enigo = "0.6"
 # ACP resource ledger: aggregate RSS + process-tree ownership on Linux/macOS/Windows.
 # Pin 0.36.x for the project's Rust 1.89 toolchain; 0.39 requires Rust 1.95.
-# Disable disk/network/user/component probes because the ledger only samples processes.
-sysinfo = { version = "=0.36.1", default-features = false, features = ["system"] }
+# Default-features off: the ledger (features/codex_acp/resource_ledger.rs) only
+# samples processes, while features/device additionally opts into the
+# component(temperature)/disk/network probes below.
+sysinfo = { version = "=0.36.1", default-features = false, features = [
+    "system",
+    "component",
+    "disk",
+    "network",
+] }
 
 # keyring 不再直接依赖 —— 凭证走底座 codewhale-secrets(它内部按平台引 keyring)。
 # 这条曾有过一处漏网:模型商店的 HF Token 自建 keyring::Entry,与本注释矛盾。
