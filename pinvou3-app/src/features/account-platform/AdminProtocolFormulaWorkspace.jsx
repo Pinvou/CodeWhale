@@ -191,7 +191,7 @@ function PreviewFailure({ failure, copy, onClose }) {
   const root = useRef(null);
   const close = useRef(null);
   useEffect(() => { close.current?.focus(); }, []);
-  return <div className="adm-protocol-dialog-backdrop"><section ref={root} className="adm-protocol-dialog adm-formula-preview" role="dialog" aria-modal="true" aria-labelledby="formula-preview-error-title" onKeyDown={(event) => { keepDialogFocus(event, root.current); if (event.key === 'Escape') onClose(); }}><div className="adm-source-error" role="alert"><strong id="formula-preview-error-title">{copy.previewFailed}</strong>{failure.requestID && <span>{copy.requestID}: {failure.requestID}</span>}<button ref={close} type="button" onClick={onClose}>{copy.close}</button></div></section></div>;
+  return <div className="adm-protocol-dialog-backdrop"><section ref={root} className="adm-protocol-dialog adm-formula-preview" role="dialog" aria-modal="true" aria-labelledby="formula-preview-error-title" onKeyDown={(event) => { if (isImeComposing(event)) return; keepDialogFocus(event, root.current); if (event.key === 'Escape') onClose(); }}><div className="adm-source-error" role="alert"><strong id="formula-preview-error-title">{copy.previewFailed}</strong>{failure.requestID && <span>{copy.requestID}: {failure.requestID}</span>}<button ref={close} type="button" onClick={onClose}>{copy.close}</button></div></section></div>;
 }
 
 function FormulaPreviewDialog({ preview, copy, onClose }) {

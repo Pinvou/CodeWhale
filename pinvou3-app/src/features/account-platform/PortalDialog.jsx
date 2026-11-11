@@ -10,12 +10,12 @@ export function PortalDialog({ title, descriptionID, closeLabel, onClose, childr
   useLayoutEffect(() => {
     if (!visible) return undefined;
     const previous = document.activeElement;
-    (close.current?.disabled ? dialog.current : close.current)?.focus();
+    (close.current?.disabled ? dialog.current : close.current)?.focus({ preventScroll: true });
     return () => {
-      if (previous?.isConnected && !previous.closest('[hidden]')) previous.focus();
+      if (previous?.isConnected && !previous.closest('[hidden]')) previous.focus({ preventScroll: true });
     };
   }, [visible]);
-  useLayoutEffect(() => { if (visible && busy && dialog.current && (!dialog.current.contains(document.activeElement) || document.activeElement?.disabled)) dialog.current.focus(); });
+  useLayoutEffect(() => { if (visible && busy && dialog.current && (!dialog.current.contains(document.activeElement) || document.activeElement?.disabled)) dialog.current.focus({ preventScroll: true }); });
   const keydown = event => {
     if (event.isComposing || event.keyCode === 229) return;
     if (event.key === 'Escape') {

@@ -2,7 +2,7 @@ import { requireFinanceCollection } from './finance-contract.js';
 
 const SNAPSHOT_EXPIRED_CODES = new Set(['PAGINATION_SNAPSHOT_EXPIRED', 'PAGINATION_CURSOR_EXPIRED']);
 
-function isFinanceSnapshotExpired(error) {
+export function isFinanceSnapshotExpired(error) {
   return error?.status === 410 || SNAPSHOT_EXPIRED_CODES.has(String(error?.code || ''));
 }
 
