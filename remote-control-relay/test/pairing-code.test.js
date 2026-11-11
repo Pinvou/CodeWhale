@@ -821,6 +821,7 @@ test("an unknown persistence acknowledgement does not poison the queue or double
   const stateStore = new MemoryStateStore();
   let entropy = 0;
   const store = await PairingStore.open({ stateStore, digestKeyring: keyring(), clock: () => 1000,
+    registrationBudget: smallRegistrationBudget({ maxPerEndpointWindow: 1, maxGlobalWindow: 2 }),
     randomBytes: (size) => { entropy += 1; return crypto.randomBytes(size); } });
   const originalCas = stateStore.compareAndSwap.bind(stateStore);
   let failReply = true;
@@ -838,6 +839,28 @@ test("an unknown persistence acknowledgement does not poison the queue or double
   assert.equal(stateStore.value.registrations.length, 1);
   assert.equal((await store.register({ request: registeredRequest("endpoint-after-failure", 1), relayEpoch: "epoch-quota", sealCode: sealPairingCode })).result.type,
     "desktop_pairing_registered");
+});
+
+test("unpublished persistence failures spend a bounded work rate without starving another endpoint", async () => {
+  const stateStore = new MemoryStateStore();
+  let now = 1000;
+  let entropy = 0;
+  const store = await PairingStore.open({ stateStore, digestKeyring: keyring(), clock: () => now,
+    registrationBudget: smallRegistrationBudget(),
+    randomBytes: (size) => { entropy += 1; return crypto.randomBytes(size); } });
+  stateStore.failWrites = true;
+  const request = registeredRequest("endpoint-write-failure", 1);
+  for (let index = 0; index < 2; index += 1) {
+    await assert.rejects(store.register({ request, relayEpoch: "epoch-quota", sealCode: sealPairingCode }), { code: "pairing_persist_failed" });
+  }
+  const before = entropy;
+  await assert.rejects(store.register({ request, relayEpoch: "epoch-quota", sealCode: sealPairingCode }), { code: "controller_busy" });
+  assert.equal(entropy, before, "refuse before further crypto even though no receipt was published");
+  assert.equal(stateStore.value.registrations.length, 0);
+  stateStore.failWrites = false;
+  await store.register({ request: registeredRequest("endpoint-other", 1), relayEpoch: "epoch-quota", sealCode: sealPairingCode });
+  now = 2000;
+  assert.equal((await store.register({ request, relayEpoch: "epoch-quota", sealCode: sealPairingCode })).result.type, "desktop_pairing_registered");
 });
 
 test("invalid or unfair registration budgets fail before any state publication", async () => {

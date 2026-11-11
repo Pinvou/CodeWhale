@@ -11,7 +11,7 @@ import { ControllerResumeHooks } from "../controller-resume.js";
 import { RelayStateStore } from "../relay-state-store.js";
 import { PairingStore } from "../pairing-store.js";
 import { PairingRegistrationHandler } from "../pairing-registration-handler.js";
-import { validateControllerMessage } from "../protocol-controller.js";
+import { validateControllerMessage, RegistrationValidationContext, validateControllerRegistrationMessage } from "../protocol-controller.js";
 
 function fixture({ clock = Date.now, capabilities = ["encrypted_frames_v1", "task_v1"], realLeaseHooks = false, pairingRegistrationHandler } = {}) {
   const sent = new Map([["socket-A", []], ["socket-B", []]]);
@@ -432,9 +432,11 @@ test("real persisted registration quota survives restart and routes bounded auth
   const initial = value.sent.get("socket-B").at(-1);
   assert.equal(initial.type, "desktop_pairing_registered");
   const before = state.readNamespace("desktop_pairing").namespace_revision;
-  await assert.rejects(value.router.handle({ socketIdentity: "socket-B", message: request(2) }), { code: "controller_busy" });
+  const limited = request(2);
+  await assert.rejects(value.router.handle({ socketIdentity: "socket-B", message: limited }), { code: "controller_busy" });
   const busy = value.sent.get("socket-B").at(-1);
   assert.equal(validateControllerMessage(busy, "relay").code, "controller_busy");
+  assert.equal(validateControllerRegistrationMessage(busy, "relay", new RegistrationValidationContext(limited)).code, "controller_busy");
   assert.deepEqual(Object.keys(busy).sort(), ["code", "message", "registration_request_id", "remote_control_generation", "request_id", "type", "v"]);
   assert.ok(!JSON.stringify(busy).includes("secret"));
   await assert.rejects(value.router.handle({ socketIdentity: "socket-B", message: request(3, "endpoint-forged") }), { code: "pairing_endpoint_unauthorized" });
