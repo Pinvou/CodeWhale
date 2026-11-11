@@ -9,6 +9,7 @@ import { adminPlatformCopy, tokenManagementCopy } from '../../src/shared/i18n.js
 import { parseFinanceJSON } from '../../src/features/account-platform/finance-contract.js';
 import { AdminHighRiskActionDialog } from '../../src/features/account-platform/AdminHighRiskActionDialog.jsx';
 import { AdminTokenAccountDetailWorkspace } from '../../src/features/account-platform/AdminTokenAccountDetailWorkspace.jsx';
+import { AdminTokenResourcesWorkspace } from '../../src/features/account-platform/AdminTokenResourcesWorkspace.jsx';
 import { requireGovernedTokenCommandResult } from '../../src/features/account-platform/admin-high-risk-action-state.js';
 const id = '11111111-1111-4111-8111-111111111111';
 const other = '22222222-2222-4222-8222-222222222222';
@@ -50,8 +51,23 @@ globalThis.fetch = async (target,options={}) => {
  if(path.endsWith(`/api/admin/approvals/requests/${id}`)){if(method==='PUT'){control.approvalVersion++;return json(null,204);}return json(approval());}
  if(path.endsWith(`/api/admin/approvals/requests/${id}/actions/submit`)){control.approvalStatus='SUBMITTED';control.approvalVersion++;return json(null,204);}
  if(method==='GET'){
-  if(path.endsWith(`/models/${id}`))return json({model:control.models[0],draft:null,protocol:{},formula:null,as_of:'2026-10-08T00:00:00Z'});
-  if(path.endsWith('/pricing'))return json({items:control.prices,current_space_etag:'9007199254740993',has_more:false});
+  if(/\/pricing\/[a-f0-9-]+\/preview$/.test(path)) {
+   const selectedID=path.split('/').at(-2),status=control.previewReadStatus||200;
+   const payload={price_version_id:selectedID,scope_type:'GLOBAL',protocol_code:'CONTROLLED',formula_version_id:id,credit_unit:'MICROCREDIT',resolved_at:'2026-11-11T00:00:00Z',units:[{unit_definition_id:id,unit_code:'INPUT',unit_version:1,configuration_type:'FIXED_PRICE',resolved_price:'9007199254740993',price_denominator:'1000000',price_source_scope:'GLOBAL',source_price_version_id:selectedID}]};
+   if(control.delayPreview){control.delayPreview=false;return new Promise(resolve=>{control.releasePreview=()=>{control.previewDelivered=(control.previewDelivered||0)+1;resolve(status===200?json(payload):json({code:'CONTROLLED_PREVIEW_FAILURE'},status));};(control.previewGates||={})[selectedID]=control.releasePreview;});}
+   return status===200?json(payload):json({code:'CONTROLLED_PREVIEW_FAILURE'},status);
+  }
+  if(control.surface==='summaries'&&path.endsWith('/token-resources/readiness'))return json({token_accounts_mode:'SNAPSHOT',recovery_queue_available:false});
+  if(control.surface==='summaries'&&path.endsWith('/token-accounts'))return json({items:[summaryAccount()],has_more:false,next_cursor:null});
+  if(control.surface==='summaries'&&path.endsWith(`/admin/v2/token-accounts/${id}`))return json(summaryAccount());
+  if(path.endsWith(`/models/${id}`))return json({model:{...control.models[0],...(control.modelDraft?{draft:control.modelDraft}:{})},protocol:{protocol_definition_id:id,protocol_code:'CONTROLLED',version:1,status:'PUBLISHED',schema_field_count:1},formula:null,as_of:'2026-10-08T00:00:00Z'});
+  if(path.endsWith(`/models/${id}/versions`))return json({items:[],has_more:false,next_cursor:null});
+  if(path.endsWith('/pricing')) {
+   const payload={items:control.prices,current_space_etag:'9007199254740993',has_more:false},status=control.priceReadStatus;
+   const reply=()=>status?json({code:'PERMISSION_DENIED'},status):json(payload);
+   if(control.delayPriceList){control.delayPriceList=false;return new Promise(resolve=>{control.releasePriceList=()=>resolve(reply());});}
+   return reply();
+  }
   if(path.endsWith('/metering-units'))return json({items:control.units});
   if(path.endsWith('/protocols'))return json({protocols:[],formulas:[formula]});
   if(path.endsWith('/models'))return json({items:control.models||[],limit:50,has_more:false,next_cursor:null,as_of:'2099-01-01T00:00:00Z'});
@@ -75,6 +91,20 @@ globalThis.fetch = async (target,options={}) => {
  return json(item,status);
 };
 const credentialClient={ tokenAccountSafeDetail:async()=>({token_account_id:id,name:'Controlled account',status:'ACTIVE',owner_type:'USER',owner_id:id,share_scope:'PRIVATE',account_version:1,active_credential_count:0,route_count:0,updated_at:'2026-10-08T00:00:00Z'}),tokenAccountCredentials:async()=>({items:[],has_more:false}) };
+
+const summaryAccount=()=>({token_account_id:id,name:'Controlled summary account',owner_type:'USER',owner_id:id,share_scope:'PRIVATE',account_version:1,updated_at:'2026-10-08T00:00:00Z',...control.summaryFacts});
+function SummaryComparison({copy}) {
+ const histories=React.useRef({});
+ const shared={client,copy,permissions:['platform.tokens.read'],routeVersion:0,onQueryChange:()=>{},onRouteChange:()=>{}};
+ return <><div data-summary-list><AdminTokenResourcesWorkspace {...shared} histories={histories} formsEnabled={false} actionsEnabled={false} detailsEnabled /></div><div data-summary-detail><AdminTokenAccountDetailWorkspace {...shared} accountID={id} cursorHistory={histories} actionsEnabled={false}/></div></>;
+}
+function ControlledPricing(props) {
+ const [revision,setRevision]=React.useState(0);
+ React.useEffect(()=>{const accept=()=>setRevision(value=>value+1);addEventListener('popstate',accept);return()=>removeEventListener('popstate',accept);},[]);
+ const pane=new URLSearchParams(location.search).get('pricing_pane')==='units'?'units':'prices';
+ const change=pane=>{const url=new URL(location.href);url.searchParams.set('pricing_pane',pane);history.pushState({},'',url);setRevision(revision+1);};
+ return <PricingLifecycleWorkspace {...props} pricingPane={pane} onPricingPaneChange={change}/>;
+}
 
 const governedAccount = { token_account_id:id,name:'Controlled account',status:'ACTIVE',owner_type:'USER',owner_id:id,share_scope:'PRIVATE',account_version:1,active_credential_count:0,route_count:1,updated_at:'2026-10-08T00:00:00Z' };
 const governedRoute = { route_id:other, token_account_id:id, model_id:id, protocol_version_id:id, protocol_code:'CONTROLLED', priority:100, default_scope:'NONE',health_status:'HEALTHY',health_diagnostic_code:'HEALTHY',health_observed_at:'2026-10-08T00:00:00Z',health_expires_at:'2099-01-01T00:00:00Z',route_version:1,route_generation:1,account_version:1,updated_at:'2026-10-08T00:00:00Z' };
@@ -120,6 +150,6 @@ function ControlledCommand({copy}) {
 function render(){
  const shared=tokenManagementCopy[control.language];const copy={...adminPlatformCopy[control.language],modelToken:shared.modelToken,billing:{pricingLifecycle:shared.pricingLifecycle}};
  const permissions=['platform.pricing.read','platform.models.read','platform.models.lifecycle.request',...(control.canManage?['platform.pricing.manage']:[])];
- root.render(control.surface==='governance-disabled'?<AdminModelTokenWorkspace section="tokenResources" client={governanceClient} copy={copy} permissions={['platform.tokens.read','platform.tokens.manage','platform.models.read']} tokenDetailsEnabled modelTokenActionsEnabled={false} routeVersion={0} onRouteChange={()=>{}} />:control.surface==='governance'?<AdminManagementWorkspace key={control.language} client={governanceClient} copy={copy} permissions={control.governancePermissions||['platform.tokens.read','platform.tokens.manage','platform.models.read']} language={control.language} owner={id} overviewFlags={{admin_token_resource_forms:true,admin_model_details:true,admin_model_pricing_edit:true,admin_token_details:true,admin_model_token_actions:true}} credentialOrigin="https://credentials.example.invalid"/>:control.surface==='command'?<ControlledCommand copy={shared.modelToken}/>:control.surface==='credentials'?<AdminTokenAccountDetailWorkspace accountID={id} client={credentialClient} copy={shared.modelToken} permissions={[]} routeVersion={0} onRouteChange={()=>{}} onQueryChange={()=>{}} cursorHistory={{current:{}}} actionsEnabled={false}/>:control.surface==='pricing'?<PricingLifecycleWorkspace key={`${control.owner}:${client.financeSessionEpoch}`} {...{client,copy,permissions}} owner={control.owner}/>:<AdminManagementWorkspace key={`${control.owner}:${client.financeSessionEpoch}`} {...{client,copy,permissions}} owner={control.owner} language={control.language} overviewFlags={{admin_token_resource_forms:true,admin_model_details:true,admin_model_pricing_edit:true,admin_token_details:true,admin_model_token_actions:true}} credentialOrigin="https://credentials.example.invalid"/>);
+ root.render(control.surface==='summaries'?<SummaryComparison key={control.summaryRevision || 0} copy={shared.modelToken}/>:control.surface==='governance-disabled'?<AdminModelTokenWorkspace section="tokenResources" client={governanceClient} copy={copy} permissions={['platform.tokens.read','platform.tokens.manage','platform.models.read']} tokenDetailsEnabled modelTokenActionsEnabled={false} routeVersion={0} onRouteChange={()=>{}} />:control.surface==='governance'?<AdminManagementWorkspace key={control.language} client={governanceClient} copy={copy} permissions={control.governancePermissions||['platform.tokens.read','platform.tokens.manage','platform.models.read']} language={control.language} owner={id} overviewFlags={{admin_token_resource_forms:true,admin_model_details:true,admin_model_pricing_edit:true,admin_token_details:true,admin_model_token_actions:true}} credentialOrigin="https://credentials.example.invalid"/>:control.surface==='command'?<ControlledCommand copy={shared.modelToken}/>:control.surface==='credentials'?<AdminTokenAccountDetailWorkspace accountID={id} client={credentialClient} copy={shared.modelToken} permissions={[]} routeVersion={0} onRouteChange={()=>{}} onQueryChange={()=>{}} cursorHistory={{current:{}}} actionsEnabled={false}/>:control.surface==='pricing'&&control.routePricing?<ControlledPricing key={`${control.owner}:${client.financeSessionEpoch}`} {...{client,copy,permissions}} owner={control.owner}/>:control.surface==='pricing'?<PricingLifecycleWorkspace key={`${control.owner}:${client.financeSessionEpoch}`} {...{client,copy,permissions}} owner={control.owner}/>:<AdminManagementWorkspace key={`${control.owner}:${client.financeSessionEpoch}`} {...{client,copy,permissions}} owner={control.owner} language={control.language} overviewFlags={{admin_token_resource_forms:true,admin_model_details:true,admin_model_pricing_edit:true,admin_token_details:true,admin_model_token_actions:true}} credentialOrigin="https://credentials.example.invalid"/>);
 }
 control.sourceMissingPolicyLabel=()=>tokenManagementCopy[control.language].modelToken.sourceMissingPolicy;control.modelStatusLabels=()=>tokenManagementCopy[control.language].modelToken.enumLabels;control.expiredEntryLabel=()=>tokenManagementCopy[control.language].modelToken.commandErrors.CREDENTIAL_REQUEST_DEADLINE_EXCEEDED;control.credentialProbeLabel=()=>tokenManagementCopy[control.language].modelToken.commandErrors.CREDENTIAL_PROBE_OUTCOME_UNKNOWN;control.render=render;control.labels=()=>tokenManagementCopy[control.language].pricingLifecycle;control.price=price;window.f04=control;render();

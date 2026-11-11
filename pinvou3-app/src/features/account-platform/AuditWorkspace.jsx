@@ -117,8 +117,30 @@ function DetailDrawer({ label, onClose, children, describedBy, role = 'dialog' }
   useEffect(() => {
     const previousFocus = document.activeElement;
     drawerRef.current?.focus();
+    const trapFocus = (event) => {
+      if (event.key !== 'Tab') return;
+      const focusable = [...(drawerRef.current?.querySelectorAll('button:not(:disabled), a[href], input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])') || [])].filter(node => node.getClientRects().length > 0);
+      if (!focusable.length) {
+        event.preventDefault();
+        drawerRef.current?.focus();
+        return;
+      }
+      const first = focusable[0];
+      const last = focusable.at(-1);
+      if (document.activeElement === drawerRef.current || !drawerRef.current?.contains(document.activeElement)) {
+        event.preventDefault();
+        (event.shiftKey ? last : first).focus();
+      } else if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
     const onKeyDown = (event) => {
-      if (event.key === 'Escape') onClose();
+      if (event.key === 'Tab') trapFocus(event);
+      else if (event.key === 'Escape') onClose();
     };
     globalThis.addEventListener?.('keydown', onKeyDown);
     return () => {
@@ -126,27 +148,10 @@ function DetailDrawer({ label, onClose, children, describedBy, role = 'dialog' }
       if (previousFocus?.isConnected) previousFocus.focus?.();
     };
   }, [onClose]);
-  const trapFocus = (event) => {
-    if (event.key !== 'Tab') return;
-    const focusable = [...(drawerRef.current?.querySelectorAll('button:not(:disabled), a[href], input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])') || [])];
-    if (!focusable.length) {
-      event.preventDefault();
-      drawerRef.current?.focus();
-      return;
-    }
-    const first = focusable[0];
-    const last = focusable.at(-1);
-    if (event.shiftKey && document.activeElement === first) {
-      event.preventDefault();
-      last.focus();
-    } else if (!event.shiftKey && document.activeElement === last) {
-      event.preventDefault();
-      first.focus();
-    }
-  };
+
   return (
     <div className="adm-drawer-backdrop" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
-      <aside ref={drawerRef} className="adm-detail-drawer" role={role} aria-modal="true" aria-label={label} aria-describedby={describedBy} tabIndex="-1" onKeyDown={trapFocus}>
+      <aside ref={drawerRef} className="adm-detail-drawer" role={role} aria-modal="true" aria-label={label} aria-describedby={describedBy} tabIndex="-1">
         {children}
       </aside>
     </div>
@@ -633,9 +638,10 @@ export function AuditWorkspace({client,copy,permissions,currentUserID,language =
  useEffect(()=>{
   let live=true;setLoading(true);setLoadError(false);
   if(!canRead){setData({audits:[]});setLoading(false);return()=>{live=false};}
-  client.audits().then(result=>{
+  const applied=readAuditQueryFilters();
+  client.audits(applied).then(result=>{
    if(!Array.isArray(result?.items))throw new Error('INVALID_AUDIT_LOGS_ACK');
-   if(live)setData({audits:result.items});
+   if(live)setData({audits:result.items,auditFilters:applied});
   }).catch(()=>{if(live)setLoadError(true)}).finally(()=>{if(live)setLoading(false)});
   return()=>{live=false};
  },[client,retry,canRead]);

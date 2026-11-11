@@ -22,7 +22,8 @@
 /* Application shell: the light, fixed Account OS frame from the approved prototype. */
 .adm-restored-shell .adm-sidebar{position:fixed;z-index:40;inset:0 auto 0 0;display:flex;width:var(--adm-sidebar);height:100vh;flex-direction:column;padding:20px 16px 18px;overflow:hidden;color:var(--adm-text);background:var(--adm-surface);border-right:1px solid var(--adm-line)}
 .adm-restored-shell .adm-brand{display:flex;align-items:center;gap:12px;padding:0 8px 18px;border-bottom:1px solid var(--adm-line)}
-.adm-restored-shell .adm-mark,.adm-restored-shell .adm-state-mark{display:grid;width:38px;height:38px;place-items:center;border-radius:12px;color:#fff;background:#11141a;font-weight:800;letter-spacing:-.04em}
+.adm-restored-shell .adm-mark{display:block;flex:0 0 38px;width:38px;height:38px;object-fit:contain}
+.adm-restored-shell .adm-state-mark{display:grid;width:38px;height:38px;place-items:center;border-radius:12px;color:#fff;background:#11141a;font-weight:800;letter-spacing:-.04em}
 .adm-restored-shell .adm-brand>div:last-child{display:grid;gap:2px}
 .adm-restored-shell .adm-brand strong{color:var(--adm-text);font-size:15px;font-weight:780;letter-spacing:.08em}
 .adm-restored-shell .adm-brand span{color:var(--adm-muted);font-size:10px;letter-spacing:.08em}

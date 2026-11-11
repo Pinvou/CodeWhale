@@ -236,7 +236,10 @@ export function AdminOperationsWorkspace({ client, copy, language = 'en', permis
       }
       if (loaded && mountedRef.current && confirmed) setState((value) => ({ ...value, notice: labels.saveReconciled }));
     };
-    if (!canManage || (!policy && !pendingWrite.current) || authorizationRefreshing || refreshInterrupted() || state.errorCode === 'REGISTRATION_BONUS_DRAFT_CONFLICT' || state.errorCode === 'REGISTRATION_BONUS_DRAFT_CLEANUP_FAILED' || state.errorCode === 'REGISTRATION_BONUS_DRAFT_IDENTITY_CHANGED') return;
+    if (!canManage || (!policy && !pendingWrite.current) || authorizationRefreshing || refreshInterrupted() || state.errorCode === 'REGISTRATION_BONUS_DRAFT_CONFLICT' || state.errorCode === 'REGISTRATION_BONUS_CONFLICT' || state.errorCode === 'REGISTRATION_BONUS_DRAFT_CLEANUP_FAILED' || state.errorCode === 'REGISTRATION_BONUS_DRAFT_IDENTITY_CHANGED') return;
+    // A retained unknown command replays its frozen facts; a new enabled policy
+    // requires a confirmed read. Emergency disabling remains available on stale reads.
+    if (!pendingWrite.current && form.enabled && (policyReadStale || policy.eligibility_status !== 'READY')) return;
     if (formOwnerUserID.current !== currentUserID) {
       formOwnerUserID.current = '';
       setForm(policyForm(policy));
@@ -357,8 +360,8 @@ export function AdminOperationsWorkspace({ client, copy, language = 'en', permis
     : eligibilityStatus === 'BLOCKED' ? (unrecoverable != null && integerMoney(unrecoverable) > 0n ? eligibility.blockedCount(String(unrecoverable)) : eligibility.blocked)
     : eligibilityStatus === 'UNCONFIRMED' ? eligibility.unconfirmed
     : eligibility.unavailable;
-  const needsReload = ['REGISTRATION_BONUS_DRAFT_CONFLICT', 'REGISTRATION_BONUS_DRAFT_CLEANUP_FAILED', 'REGISTRATION_BONUS_DRAFT_IDENTITY_CHANGED'].includes(state.errorCode);
-  const saveDisabled = unknownWrite || recoveryBlocked || state.saving || authorizationRefreshing || !valid || needsReload || (form.enabled && !eligibilityReady);
+  const needsReload = ['REGISTRATION_BONUS_DRAFT_CONFLICT', 'REGISTRATION_BONUS_CONFLICT', 'REGISTRATION_BONUS_DRAFT_CLEANUP_FAILED', 'REGISTRATION_BONUS_DRAFT_IDENTITY_CHANGED'].includes(state.errorCode);
+  const saveDisabled = unknownWrite || recoveryBlocked || state.saving || authorizationRefreshing || !valid || needsReload || (form.enabled && (policyReadStale || !eligibilityReady));
   const saveExplanation = state.saving ? editor.saving
     : recoveryBlocked ? labels.pendingStorageFailed
     : unknownWrite ? labels.outcomeUnknown
@@ -367,6 +370,7 @@ export function AdminOperationsWorkspace({ client, copy, language = 'en', permis
     : state.errorCode === 'REGISTRATION_BONUS_DRAFT_CLEANUP_FAILED' ? labels.reauthenticationDraftCleanupFailed
     : state.errorCode === 'REGISTRATION_BONUS_DRAFT_IDENTITY_CHANGED' ? labels.reauthenticationDraftIdentityChanged
     : state.errorCode === 'REGISTRATION_BONUS_DRAFT_CONFLICT' || state.errorCode === 'REGISTRATION_BONUS_CONFLICT' ? editor.reloadForConflict
+    : form.enabled && policyReadStale ? eligibility.unconfirmed
     : form.enabled && !eligibilityReady ? labels.eligibilityNotReady
     : !enteredAmount || !enteredDays ? editor.checkValues
     : !registrationBonusReasonIsValid(form.reason) ? editor.checkReason
