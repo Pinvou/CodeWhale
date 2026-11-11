@@ -1,3 +1,4 @@
+import { auditExportStatusLabel, statusLabel } from './status-label.js';
 import React, {useEffect,useRef,useState} from 'react';
 import {secureRequestID} from './request-id.js';
 import {acquireAuditExportTicket,newAuditExportAttempt,submitAuditExportAttempt} from './admin-audit-export.js';
@@ -389,7 +390,7 @@ function Audit({ copy, data, client, setData, permissions, currentUserID }) {
     {
       key: 'result',
       label: copy.audit.result,
-      render: (item) => <Status value={item.result} />,
+      render: (item) => <Status value={item.result} copy={copy} />,
     },
     {
       key: 'request_id',
@@ -477,7 +478,7 @@ function Audit({ copy, data, client, setData, permissions, currentUserID }) {
       {exportJob && (
         <div className="adm-inline-message">
           <strong>
-            {copy.audit.exportStatus}: {exportJob.status}
+            {copy.audit.exportStatus}: {auditExportStatusLabel(exportJob.status, copy.statusLanguage)}
           </strong>
           {exportKey && (
             <>
@@ -516,7 +517,7 @@ function AuditDetail({ copy, item, onBack }) {
     [copy.audit.actor, item.actor_display_name || item.actor_email || <TechnicalID key="audit.actor" value={item.actor_user_id} copy={copy} compact={false} />],
     [copy.audit.action, item.action],
     [copy.audit.resource, <span key="audit.resource">{item.resource_type} · <TechnicalID value={item.resource_id} copy={copy} compact={false} /></span>],
-    [copy.audit.result, <Status key="audit.result" value={item.result} />],
+    [copy.audit.result, <Status key="audit.result" value={item.result} copy={copy} />],
     [copy.audit.request, <TechnicalID key="audit.request" value={item.request_id} copy={copy} compact={false} />],
     [copy.audit.organization, <TechnicalID key="audit.organization" value={item.active_organization_id} copy={copy} compact={false} />],
     [copy.audit.occurred, formatDate(item.occurred_at)],
@@ -543,7 +544,7 @@ function AuditDetail({ copy, item, onBack }) {
   );
 }
 
-function Status({value}) {return <span className="adm-status">{String(value || '—')}</span>;}
+function Status({value,copy}) {return <span className="adm-status">{statusLabel(value, copy.statusLanguage)}</span>;}
 export function AuditWorkspace({client,copy,permissions,currentUserID}){
  const [data,setData]=useState({audits:[]});
  const [loading,setLoading]=useState(true);

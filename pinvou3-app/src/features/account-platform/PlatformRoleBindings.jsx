@@ -1,7 +1,8 @@
+import { statusLabel } from './status-label.js';
 import React, { useEffect, useState } from 'react';
 import { platformRoleName } from './platform-role-presentation.js';
 
-export function PlatformRoleBindings({ words, copy, bindings, target, blocked, onApplyTarget, canRevoke, onRevoke, onView }) {
+export function PlatformRoleBindings({ words, copy, language, bindings, target, blocked, onApplyTarget, canRevoke, onRevoke, onView }) {
   const [query, setQuery] = useState(''), [status, setStatus] = useState(''), [pageNumber, setPageNumber] = useState(1);
   const [targetDraft, setTargetDraft] = useState(target);
   useEffect(() => { setTargetDraft(target); setPageNumber(1); setQuery(''); setStatus(''); }, [target]);
@@ -16,7 +17,7 @@ export function PlatformRoleBindings({ words, copy, bindings, target, blocked, o
     </form>
     <div className="adm-role-toolbar">
       <label><span className="adm-visually-hidden">{words.bindingSearchPlaceholder}</span><input type="search" value={query} onChange={event => { setQuery(event.target.value); setPageNumber(1); }} placeholder={words.bindingSearchPlaceholder} /></label>
-      <select aria-label={copy.status} value={status} onChange={event => { setStatus(event.target.value); setPageNumber(1); }}><option value="">{words.allStatuses}</option>{['ACTIVE', 'SCHEDULED', 'EXPIRED', 'REVOKED'].map(value => <option key={value} value={value}>{words.statuses[value]}</option>)}</select>
+      <select aria-label={copy.status} value={status} onChange={event => { setStatus(event.target.value); setPageNumber(1); }}><option value="">{words.allStatuses}</option>{['ACTIVE', 'SCHEDULED', 'EXPIRED', 'REVOKED'].map(value => <option key={value} value={value}>{statusLabel(value, language, words.statuses)}</option>)}</select>
     </div>
     {bindings && <>
       {bindings.truncated && <p className="adm-inline-message" role="status">{copy.bindingsTruncated}</p>}
@@ -29,7 +30,7 @@ export function PlatformRoleBindings({ words, copy, bindings, target, blocked, o
             <td><strong>{platformRoleName(words, item.role_code)}</strong><small>{item.role_code}</small></td>
             <td>{date(item.starts_at)}<small>{date(item.expires_at)}</small></td>
             <td>{typeof words.sources[item.grant_source] === 'string' ? words.sources[item.grant_source] : item.grant_source}</td>
-            <td><span className={`adm-status ${item.status === 'ACTIVE' ? 'ok' : item.status === 'SCHEDULED' ? 'warn' : 'neutral'}`}>{words.statuses[item.status]}</span></td>
+            <td><span className={`adm-status ${item.status === 'ACTIVE' ? 'ok' : item.status === 'SCHEDULED' ? 'warn' : 'neutral'}`}>{statusLabel(item.status, language, words.statuses)}</span></td>
             <td><div className="adm-row-actions"><button type="button" onClick={() => onView(item)}>{words.view}</button>{canRevoke(item) && <button type="button" disabled={blocked} onClick={() => onRevoke(item)}>{copy.revoke}</button>}</div></td>
           </tr>)}</tbody>
         </table>{!items.length && <p className="adm-empty">{words.noBindings}</p>}

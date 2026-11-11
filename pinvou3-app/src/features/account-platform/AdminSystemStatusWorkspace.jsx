@@ -1,3 +1,4 @@
+import { statusLabel } from './status-label.js';
 import React, { useEffect, useRef, useState } from "react";
 import { localizedAccountPlatformError } from "./error-localization.js";
 import { formatSystemCount, requireSystemStatus, systemDiagnosticMessage } from "./admin-system-status.js";
@@ -76,9 +77,10 @@ export function AdminSystemStatusWorkspace({
   const visible = state.owner === client ? state : { status: null, loading: true, error: null };
   const labels = copy.system;
   const count = (value) => formatSystemCount(value, language);
-  const name = (value) => labels.names[value] || value;
+  const name = (value) => Object.prototype.hasOwnProperty.call(labels.names, value)
+    && typeof labels.names[value] === 'string' ? labels.names[value] : value;
   const statusCell = (value) => (
-    <span className={`adm-status ${value === "HEALTHY" ? "ok" : "warn"}`}>{value}</span>
+    <span className={`adm-status ${value === "HEALTHY" ? "ok" : "warn"}`}>{statusLabel(value, language)}</span>
   );
   const age = (value) =>
     typeof value === "number" && Number.isFinite(value) && value >= 0
@@ -179,7 +181,7 @@ export function AdminSystemStatusWorkspace({
           <details key={key}>
             <summary>
               <strong>{copy.runbooks[key]}</strong>
-              <span className="adm-status neutral">OUT_OF_BAND</span>
+              <span className="adm-status neutral">{statusLabel('OUT_OF_BAND', language)}</span>
             </summary>
             <p>{copy.runbooks[`${key}Help`]}</p>
             <p>{copy.runbooks.noExecution}</p>

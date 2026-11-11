@@ -1,3 +1,4 @@
+import { statusLabel } from './status-label.js';
 import React, { useEffect, useRef, useState } from 'react';
 import { entitlementCorrectionCopy } from '../../shared/i18n.js';
 import { entitlementCorrectionPrecheck, entitlementCorrectionApprovalDraft, entitlementCorrectionInputValid } from './admin-entitlement-correction.js';
@@ -83,6 +84,6 @@ export function AdminEntitlementCorrectionWorkspace({ client, copy, language, pe
       <label>{text.operatorReason}<textarea disabled={locked} maxLength={2000} value={pending?.reason || reason} onChange={event => setReason(event.target.value)} /></label>
       <button disabled={reading || operation.busy || operation.blocked || !operation.unknown && [...reason.trim()].length < 10} onClick={() => void submit()}>{operation.unknown ? copy.retry : text.submit}</button>
     </>}
-    {receipt && <article><h3>{text.approvalRecorded}</h3><p>{receipt.approval_request_id} · {text.approvalStatuses[receipt.status]}</p><p>{text.noFinancialAck}</p></article>}
+    {receipt && <article><h3>{text.approvalRecorded}</h3><p>{receipt.approval_request_id} · {statusLabel(receipt.status, language, text.approvalStatuses)}</p><p>{text.noFinancialAck}</p></article>}
   </section>;
 }

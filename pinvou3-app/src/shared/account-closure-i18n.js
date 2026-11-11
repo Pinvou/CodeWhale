@@ -1,5 +1,6 @@
 export const accountClosureCopy = {
   "zh": {
+    statusLanguage: 'zh',
     "title": "注销账号",
     "lead": "系统会先检查角色、账务和用量，再进入静默期。身份清理前如需你清零余额、结清应收或完成支付，系统会受控恢复账号操作；处理后原注销申请自动继续，无需重新申请。身份清理开始后不能恢复账号，运营重试也不能跳过阻断。",
     "beforeTitle": "开始前请确认",
@@ -52,6 +53,7 @@ export const accountClosureCopy = {
     "recentAuthenticationRequired": "申请注销前需要重新认证，请重新登录后再次申请。"
   },
   "en": {
+    statusLanguage: 'en',
     "title": "Close account",
     "lead": "Roles, billing, and usage are checked before the quiet period. Before identity cleanup, account access can be restored under safeguards so you can clear a balance, settle a receivable, or finish a payment. The original closure request then continues automatically; do not submit another request. Access cannot be restored after identity cleanup starts, and operations cannot bypass blockers.",
     "beforeTitle": "Before you begin",
@@ -104,6 +106,7 @@ export const accountClosureCopy = {
     "recentAuthenticationRequired": "Reauthenticate before requesting account closure. Sign in again, then retry the request."
   },
   "ja": {
+    statusLanguage: 'ja',
     "title": "アカウント削除",
     "lead": "役割、請求、利用量を確認してから静止期間に入ります。本人情報の削除開始前に残高、未収金、支払いの処理が必要な場合、安全条件を確認してアカウント操作を再開します。処理後は元の申請が自動的に続くため、再申請は不要です。本人情報の削除開始後は復帰できず、運用担当者もブロックを回避できません。",
     "beforeTitle": "開始前の確認",

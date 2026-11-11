@@ -1,5 +1,6 @@
+import { statusLabel } from './status-label.js';
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { adminLayoutCopy, accountLayoutCopy } from '../../shared/i18n.js';
+import { adminLayoutCopy, accountLayoutCopy, accountStatusCopy } from '../../shared/i18n.js';
 import { financeReadDefinition, financeListRouteUpdates, readFinanceListRoute } from './admin-finance-read-route.js';
 
 export function localFinanceDate(value) {
@@ -47,6 +48,9 @@ export function useFinanceRouteLoader({ route, signature, client, owner, operati
 
 export function AdminFinanceFilters({ kind, language, value, onChange, onSubmit, disabled = false }) {
   const words = adminLayoutCopy[language].financeLists;
+  const statusLabels = kind === 'anomalies' ? accountStatusCopy[language].anomalies
+    : kind === 'late' ? accountStatusCopy[language].latePayments : { ...accountLayoutCopy[language].statuses, ...words };
+  const closedStatuses = kind === 'anomalies' || kind === 'late';
   const config = financeReadDefinition(kind);
   const options = key => {
     if (['status', 'lifecycle_status'].includes(key)) return config.statuses;
@@ -59,7 +63,7 @@ export function AdminFinanceFilters({ kind, language, value, onChange, onSubmit,
     return null;
   };
   return <form className="adm-filter-row" onSubmit={event => { event.preventDefault(); onSubmit(); }}>
-    {config.fields.map(key => <label key={key}>{words[key]}{key === 'include_deleted' ? <input type="checkbox" disabled={disabled} checked={value[key] === 'true'} onChange={event => onChange({ ...value, [key]: event.target.checked ? 'true' : '' })} /> : options(key) ? <select disabled={disabled} value={value[key] || ''} onChange={event => onChange({ ...value, [key]: event.target.value })}><option value="">{words.allValues}</option>{options(key).map(option => <option key={option} value={option}>{words[option] || accountLayoutCopy[language].statuses[option] || option}</option>)}</select> : <input disabled={disabled} maxLength={key === 'q' || key === 'business_reference' ? 160 : 120} step={/_(from|to|before)$/.test(key) ? '0.001' : undefined} type={/_(from|to|before)$/.test(key) ? 'datetime-local' : 'text'} value={value[key] || ''} onChange={event => onChange({ ...value, [key]: event.target.value })} />}</label>)}
+    {config.fields.map(key => <label key={key}>{words[key]}{key === 'include_deleted' ? <input type="checkbox" disabled={disabled} checked={value[key] === 'true'} onChange={event => onChange({ ...value, [key]: event.target.checked ? 'true' : '' })} /> : options(key) ? <select disabled={disabled} value={value[key] || ''} onChange={event => onChange({ ...value, [key]: event.target.value })}><option value="">{words.allValues}</option>{options(key).map(option => <option key={option} value={option}>{key.endsWith('status') ? statusLabel(option, language, statusLabels, closedStatuses) : words[option] || accountLayoutCopy[language].statuses[option] || option}</option>)}</select> : <input disabled={disabled} maxLength={key === 'q' || key === 'business_reference' ? 160 : 120} step={/_(from|to|before)$/.test(key) ? '0.001' : undefined} type={/_(from|to|before)$/.test(key) ? 'datetime-local' : 'text'} value={value[key] || ''} onChange={event => onChange({ ...value, [key]: event.target.value })} />}</label>)}
     <label>{words.limit}<select disabled={disabled} value={value.limit} onChange={event => onChange({ ...value, limit: event.target.value })}>{['25', '50', '100', '200'].map(limit => <option key={limit}>{limit}</option>)}</select></label><button disabled={disabled}>{words.search}</button>
   </form>;
 }

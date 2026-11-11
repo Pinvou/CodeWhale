@@ -9,6 +9,7 @@
 export { CHAT_RECOVERY_COPY } from './i18n/chat-recovery.js';
 export { accountCenterCopy } from './account-center-i18n.js';
 export { modelAccessCopy } from './model-access-i18n.js';
+export { accountStatusCopy } from './account-status-i18n.js';
 
 // Startup-budget (round-41 merge with #586): zh joins en/ja behind the
 // dynamic loaders — the eager 152 kB dictionary pushed the main entry

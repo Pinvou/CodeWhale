@@ -1,3 +1,4 @@
+import { statusLabel } from './status-label.js';
 import { isImeComposing } from '../../shared/ime-guard.mjs';
 import { TokenResourceFeedback, TokenResourcePaging } from './TokenResourcePrimitives.jsx';
 import { useAdminSource } from './AdminModelTokenPrimitives.jsx';
@@ -21,7 +22,7 @@ function focusWithin(event, root) {
 
 function Status({ value, copy }) {
   const tone = ['ACTIVE', 'HEALTHY', 'PUBLISHED'].includes(value) ? 'ok' : ['PROBING', 'DEGRADED', 'STALE', 'PROVISIONING'].includes(value) ? 'warn' : '';
-  return <span className={`adm-status ${tone}`}>{copy.enumLabels[value] || value}</span>;
+  return <span className={`adm-status ${tone}`}>{statusLabel(value, copy.statusLanguage, copy.enumLabels)}</span>;
 }
 
 function TokenAccountRecoveryDialog({ client, copy, command, onClose, onCompleted }) {

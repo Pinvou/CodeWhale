@@ -1,3 +1,4 @@
+import { statusLabel } from './status-label.js';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { financeCopy } from '../../shared/i18n.js';
 import { Approvals } from './AdminFinanceWorkspace.jsx';
@@ -63,7 +64,7 @@ export function AdminApprovalWorkspace({ client, copy, language, me, onNavigate,
       <label>{c.commandType}<select disabled={blocked} value={command} onChange={event => setCommand(event.target.value)}><option value="">{c.allCommands}</option>{approvalCommands.map(type => <option key={type}>{type}</option>)}</select></label>
       <label>{c.target}<input disabled={blocked} value={target} onChange={event => setTarget(event.target.value)} /></label>
       {route.view !== 'pending' && <label>{c.status}<select disabled={blocked} value={route.status || (route.view === 'execution' ? 'EXECUTION_FAILED' : '')} onChange={event => changeRoute({ status: event.target.value, requestID: '' })}>
-        {route.view === 'mine' && <option value="">{c.allStatuses}</option>}{(route.view === 'execution' ? executionStatuses : approvalStatuses).map(status => <option key={status}>{status}</option>)}
+        {route.view === 'mine' && <option value="">{c.allStatuses}</option>}{(route.view === 'execution' ? executionStatuses : approvalStatuses).map(status => <option key={status} value={status}>{statusLabel(status, language)}</option>)}
       </select></label>}<button disabled={blocked}>{copy.refresh}</button>
     </form>}
     {route.view === 'directory' ? <><button onClick={() => setRefresh(value => value + 1)}>{c.refresh}</button>

@@ -1,3 +1,4 @@
+import { statusLabel } from './status-label.js';
 import React, { useEffect, useRef, useState } from 'react';
 import { registrationRepairCopy } from '../../shared/i18n.js';
 import { localizedAccountPlatformError } from './error-localization.js';
@@ -62,7 +63,7 @@ export function AdminRepairQueue({ client, copy, language, profile = false }) {
       const id = profile ? item.profile_change_request_id : item.registration_operation_id;
       const allowed = profile ? { retry: true, compensate: false } : registrationRepairActions(item);
       const age = registrationOperationAge(item.created_at);
-      return <tr key={id} data-operation-id={id} data-operation-status={item.status}><td><code>{id}</code><small>{profile ? item.stage : labels.stages[item.stage] || item.stage}</small></td><td>{profile ? item.status : labels.statuses[item.status] || item.status}{item.reason && <small>{item.reason}</small>}</td>
+      return <tr key={id} data-operation-id={id} data-operation-status={item.status}><td><code>{id}</code>{!profile && <small>{statusLabel(item.stage, language, labels.stages)}</small>}</td><td>{statusLabel(item.status, language, profile ? undefined : labels.statuses)}{item.reason && <small>{item.reason}</small>}</td>
         {!profile && <><td>{labels.responsibilities[item.responsibility] || item.responsibility}</td><td>{age === null ? '—' : labels.minutes(age)}</td><td><time dateTime={item.created_at}>{time(item.created_at)}</time></td><td><time dateTime={item.updated_at}>{time(item.updated_at)}</time></td><td><time dateTime={item.identity_create_attempted_at}>{time(item.identity_create_attempted_at)}</time></td><td><time dateTime={item.next_retry_at}>{time(item.next_retry_at)}</time></td><td><time dateTime={item.sla_expires_at}>{time(item.sla_expires_at)}</time></td></>}
         <td>{allowed.retry && <button disabled={busy} onClick={() => void act(item)}>{allowed.query ? labels.stages.IDENTITY_CREATING : copy.userManagement.retry}</button>}{allowed.compensate && <button disabled={busy} onClick={() => void act(item, true)}>{copy.userManagement.compensate}</button>}{!profile && (allowed.query || (!allowed.retry && !allowed.compensate)) && <small>{item.status === 'IDENTITY_CREATING' ? labels.identityUnknown : labels.readOnly}</small>}</td></tr>;
     })}</tbody></table></div>}

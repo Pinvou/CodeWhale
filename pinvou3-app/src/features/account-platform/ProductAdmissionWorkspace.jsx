@@ -1,3 +1,4 @@
+import { statusLabel } from './status-label.js';
 import React, { useEffect, useState } from 'react';
 import { productAdmissionCopy } from '../../shared/i18n.js';
 import { useFinanceOperation } from './useFinanceOperation.js';
@@ -95,8 +96,8 @@ export function ProductAdmissionWorkspace({ client, me, item, verifications, cop
     </>}
     <label>{copy.reason}<textarea disabled={locked} value={reason} onChange={event => setReason(event.target.value)} /></label>
     <button disabled={locked || !material || Boolean(material.verification_id) || Boolean(material.purged_at) || !reason.trim()} onClick={() => void submit('submit')}>{labels.submit}</button>
-    <ul>{verifications.filter(value => value.manual_submission).map(value => <li key={value.verification_id}>{value.status} <button disabled={locked} onClick={() => void loadReview(value.verification_id)}>{labels.review}</button></li>)}</ul>
-    {review && <article><h5>{labels.review}</h5><p>{review.verification_id} / {review.status}</p><p>{labels.digest}: {review.submission_sha}</p>
+    <ul>{verifications.filter(value => value.manual_submission).map(value => <li key={value.verification_id}>{statusLabel(value.status, language)} <button disabled={locked} onClick={() => void loadReview(value.verification_id)}>{labels.review}</button></li>)}</ul>
+    {review && <article><h5>{labels.review}</h5><p>{review.verification_id} / {statusLabel(review.status, language)}</p><p>{labels.digest}: {review.submission_sha}</p>
       <pre>{JSON.stringify(review.snapshot, null, 2)}</pre>
       <ul>{review.decisions.map(value => <li key={value.reviewer_id}>{value.reviewer_id} / {value.decision} / {value.reason} / {value.decided_at}</li>)}</ul>
       {alreadyVoted && <p>{labels.alreadyVoted}</p>}

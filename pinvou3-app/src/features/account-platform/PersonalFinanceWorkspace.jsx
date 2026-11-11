@@ -1,3 +1,4 @@
+import { statusLabel } from './status-label.js';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { accountDesktopCopy, accountLayoutCopy, financeCopy } from '../../shared/i18n.js';
 import { hasPermission } from './authorization-ui.js';
@@ -368,7 +369,7 @@ export function PersonalFinanceWorkspace({ client, me, language, onPaid, present
       </article>}
       <h3>{copy.packages}</h3>
       {data.packages.length === 0 && <p>{copy.empty}</p>}
-      <table><thead><tr><th>{copy.name}</th><th>{copy.type}</th><th>{copy.remaining}</th><th>{copy.used}</th><th>{copy.validUntil}</th><th>{copy.status}</th></tr></thead><tbody>{data.packages.map(item => <tr key={item.package_id}><td>{localizedProductDisplayName(item, language, 'plan_id')}</td><td>{item.source_type}</td><td>{formatBalance(item.points_remaining_microcredits, language)}</td><td>{formatBalance(item.points_used_microcredits, language)}</td><td>{item.valid_until || item.expires_at}</td><td>{item.status}</td></tr>)}</tbody></table></>}
+      <table><thead><tr><th>{copy.name}</th><th>{copy.type}</th><th>{copy.remaining}</th><th>{copy.used}</th><th>{copy.validUntil}</th><th>{copy.status}</th></tr></thead><tbody>{data.packages.map(item => <tr key={item.package_id}><td>{localizedProductDisplayName(item, language, 'plan_id')}</td><td>{item.source_type}</td><td>{formatBalance(item.points_remaining_microcredits, language)}</td><td>{formatBalance(item.points_used_microcredits, language)}</td><td>{item.valid_until || item.expires_at}</td><td>{statusLabel(item.status, language)}</td></tr>)}</tbody></table></>}
     </>}
   </section>;
 }
