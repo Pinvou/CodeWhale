@@ -77,6 +77,13 @@ cargo test --manifest-path pinvou3-app/src-tauri/Cargo.toml --lib -- --test-thre
 
 Run additional frontend, Relay, Rust, CodeWhale, or platform checks when relevant. The workflows in [`.github/workflows/`](.github/workflows/) are the source of truth for automated gates. Disclose checks that could not be run locally.
 
+The retained Token financial phase has a 40-minute Go test-binary timeout,
+including the complete selected package. Retained Billing keeps its 75-minute
+budget and other financial phases keep 20 minutes. Compilation, startup and
+ownership checks are outside these test-binary budgets; the Account job retains
+its existing outer limit. Increasing the Token budget does not accelerate tests
+or relax required roots, subcases, race detection or resource retirement.
+
 When a change regenerates a `package-lock.json`, regenerate against the official
 registry (`https://registry.npmjs.org/`): a mirror configured in a local npmrc is
 copied verbatim into the lock's `resolved` URLs, and
@@ -140,6 +147,18 @@ nonzero while preserving unfinished receipts. A process exit never confirms that
 surviving child resources stopped; use the owning process supervisor and ledger.
 
 ## CI and merge queue
+
+Account Platform PostgreSQL closure contracts run in `account-closure-test`,
+independently of `account-platform-test`; both are mandatory for Account changes.
+The financial gate runs six independently admitted services (owners, Token, and
+four Billing shards). Billing assigns complete test roots by longest estimated
+duration first using `scripts/account-financial-test-durations.json`; new roots
+receive the documented default weight and remain included exactly once. Weights
+affect scheduling only: race detection, required subcases, exclusive actors,
+identity checks and strict resource retirement remain mandatory. Closure uses
+its own job-owned service and its own cleanup receipt. Runner capacity must cover
+the extra PostgreSQL workers; the original per-worker CPU/memory caps remain.
+
 
 Pull requests use a staged, path-aware gate. Draft pull requests run fast feedback
 (lint, build, deterministic logic tests, and Rust formatting where applicable).

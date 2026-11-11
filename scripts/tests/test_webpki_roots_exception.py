@@ -319,7 +319,7 @@ class WebpkiCiContractTests(unittest.TestCase):
 
     def test_existing_account_go_action_is_exactly_reviewed(self):
         workflow = WORKFLOW.read_text(encoding='utf-8')
-        self.assertEqual(workflow.count('uses: actions/setup-go@v6'), 1)
+        self.assertEqual(workflow.count('uses: actions/setup-go@v6'), 2)
         self.verify_workflow(workflow)
         for replacement in ['actions/setup-go@v7', 'actions/setup-go@main', 'actions/setup-go']:
             with self.subTest(action=replacement), self.assertRaisesRegex(AssertionError, 'unreviewed action'):
@@ -332,7 +332,9 @@ class WebpkiCiContractTests(unittest.TestCase):
         reviewed = [('frontend-test', 'Test resource lifecycle receipts'),
                     ('account-platform-test', 'Financial parallel diagnostics'),
                     ('account-platform-test', 'Account test resource lifecycle receipts'),
-                    ('windows-codex-runtime-test', 'Preserve browser fixture exit receipts')]
+                    ('account-closure-test', 'Account closure resource lifecycle receipts'),
+                    ('windows-codex-runtime-test', 'Preserve browser fixture exit receipts'),
+                    ('windows-codex-runtime-test', 'Preserve ACP fixture exit receipt')]
         self.assertEqual(workflow.count('uses: actions/upload-artifact@v7'), len(reviewed))
         for job, name in reviewed:
             steps = job_block(workflow, job).split('\n      - ')
@@ -356,7 +358,8 @@ class WebpkiCiContractTests(unittest.TestCase):
         workflow = WORKFLOW.read_text(encoding='utf-8')
         for name in ['Confirm test resource retirement', 'Confirm Account test resource retirement',
                      'Test and vet all Account Platform Go modules',
-                     'Windows browser wrapper lifecycle regression', 'Windows browser wrapper lazy regression']:
+                     'Windows browser wrapper lifecycle regression', 'Windows browser wrapper lazy regression',
+                     'Windows ACP bridge runtime smoke']:
             with self.subTest(step=name), self.assertRaises(AssertionError):
                 self.verify_diagnostic_uploads(workflow.replace(
                     f'      - name: {name}\n', f'      - name: {name}\n        continue-on-error: true\n'))
