@@ -1,6 +1,7 @@
 package httpserver
 
 import (
+	"container/list"
 	"net"
 	"net/http"
 	"sync"
@@ -13,7 +14,14 @@ import (
 type rateLimitVisitor struct {
 	tokens float64
 	last   time.Time
+	node   *list.Element
 }
+
+const (
+	rateLimitMaxVisitors = 10000
+	rateLimitPruneBatch  = 32
+	rateLimitIdleTTL     = 10 * time.Minute
+)
 
 type rateLimiter struct {
 	mu       sync.Mutex
@@ -21,7 +29,8 @@ type rateLimiter struct {
 	rate     float64
 	burst    float64
 	now      func() time.Time
-	lastGC   time.Time
+	idle     list.List
+	capacity int
 }
 
 func withRateLimit(cfg config.Config, next http.Handler) http.Handler {
@@ -77,23 +86,40 @@ func withApplicationRateLimit(cfg config.Config, next, application http.Handler)
 }
 
 func (limiter *rateLimiter) allow(key string) bool {
-	now := limiter.now()
 	limiter.mu.Lock()
 	defer limiter.mu.Unlock()
-	if limiter.lastGC.IsZero() || now.Sub(limiter.lastGC) >= 10*time.Minute {
-		for visitorKey, visitor := range limiter.visitors {
-			if now.Sub(visitor.last) >= 10*time.Minute {
-				delete(limiter.visitors, visitorKey)
-			}
+	now := limiter.now()
+	// Touch order makes the oldest idle entry available without scanning the
+	// map. Even after a long idle period, one request retires at most one batch.
+	for range rateLimitPruneBatch {
+		oldest := limiter.idle.Front()
+		if oldest == nil {
+			break
 		}
-		limiter.lastGC = now
+		oldKey := oldest.Value.(string)
+		if now.Sub(limiter.visitors[oldKey].last) < rateLimitIdleTTL {
+			break
+		}
+		delete(limiter.visitors, oldKey)
+		limiter.idle.Remove(oldest)
 	}
 	visitor, found := limiter.visitors[key]
 	if !found {
-		visitor = rateLimitVisitor{tokens: limiter.burst, last: now}
+		capacity := limiter.capacity
+		if capacity <= 0 {
+			capacity = rateLimitMaxVisitors
+		}
+		if len(limiter.visitors) >= capacity {
+			// Never evict an active bucket to give a new source fresh credits.
+			return false
+		}
+		visitor = rateLimitVisitor{tokens: limiter.burst, last: now, node: limiter.idle.PushBack(key)}
 	} else {
-		visitor.tokens = min(limiter.burst, visitor.tokens+now.Sub(visitor.last).Seconds()*limiter.rate)
-		visitor.last = now
+		if !now.Before(visitor.last) {
+			visitor.tokens = min(limiter.burst, visitor.tokens+now.Sub(visitor.last).Seconds()*limiter.rate)
+			visitor.last = now
+		}
+		limiter.idle.MoveToBack(visitor.node)
 	}
 	allowed := visitor.tokens >= 1
 	if allowed {

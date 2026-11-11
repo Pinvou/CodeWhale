@@ -8,7 +8,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { WebSocket, WebSocketServer } from "ws";
-import { EnrollmentRegistry, loadEnrollmentRegistryConfig } from "../enrollment-registry.js";
+import { EnrollmentRegistry, ENROLLMENT_NAMESPACE, loadEnrollmentRegistryConfig } from "../enrollment-registry.js";
 import { createEnrollmentGateway, validateLegacyRollbackTopology } from "../enrollment-gateway.js";
 import {
   createOfficialEnrollmentProofVerifier,
@@ -360,8 +360,9 @@ test("self-hosted batch dry-run, apply, re-enroll and backup restore are explici
     backup: tampered,
   }), "migration_backup_invalid");
   await registry.enroll({ endpointId: "temporary-endpoint", credential: ACCESS_C });
-  await restoreEnrollmentBackup({ registry, backup, requestId: "restore-self-hosted-0001" });
-  assert.equal(registry.getStatus("temporary-endpoint"), null);
+  await rejectsCode(restoreEnrollmentBackup({ registry, backup, requestId: "restore-self-hosted-0001" }),
+    "migration_restore_revision_conflict");
+  assert.equal(registry.getStatus("temporary-endpoint").status, "active");
 });
 
 test("a failing batch performs no prefix write", async (t) => {
@@ -441,12 +442,12 @@ test("restore requires a stable ID and reports replay rather than pretending to 
   assert.equal(replay.restored_entry_count, 0);
   assert.deepEqual(registry.exportSnapshot(), beforeReplay);
   assert.equal(registry.getStatus("restore-drift").status, "active");
-  const appliedAgain = await restoreEnrollmentBackup({ registry, backup, requestId: "restore-operation-0002" });
-  assert.equal(appliedAgain.applied, true);
-  assert.equal(registry.getStatus("restore-drift"), null);
+  await rejectsCode(restoreEnrollmentBackup({ registry, backup, requestId: "restore-operation-0002" }),
+    "migration_restore_revision_conflict");
+  assert.equal(registry.getStatus("restore-drift").status, "active");
   assert.equal(registry.getMigrationRequest("restore-operation-0001").status, "succeeded");
   const changedBackup = createEnrollmentBackup(registry);
-  await rejectsCode(restoreEnrollmentBackup({ registry, backup: changedBackup, requestId: "restore-operation-0001" }), "migration_restore_failed");
+  await rejectsCode(restoreEnrollmentBackup({ registry, backup: changedBackup, requestId: "restore-operation-0001" }), "migration_request_conflict");
 });
 
 test("concurrent restore reports exactly one applied CAS and one replay", async (t) => {
@@ -456,6 +457,135 @@ test("concurrent restore reports exactly one applied CAS and one replay", async 
   assert.equal(results.filter((result) => result.applied).length, 1);
   assert.equal(results.filter((result) => result.replayed).length, 1);
   assert.equal(registry.exportSnapshot().namespace_revision, "2");
+});
+
+test("stale backup refuses a new restore ID without dropping newer enrollment", async (t) => {
+  const { registry } = await fixture(t, "self_hosted");
+  const backup = createEnrollmentBackup(registry);
+  await registry.enroll({ endpointId: "newer-than-backup", credential: ACCESS_A });
+  const before = registry.exportSnapshot();
+  await rejectsCode(restoreEnrollmentBackup({ registry, backup, requestId: "restore-stale-0001" }),
+    "migration_restore_revision_conflict");
+  assert.deepEqual(registry.exportSnapshot(), before);
+  assert.equal(registry.getStatus("newer-than-backup").status, "active");
+});
+
+test("a changed backup under a sealed restore ID exposes the actual conflict", async (t) => {
+  const { registry } = await fixture(t, "self_hosted");
+  const backup = createEnrollmentBackup(registry);
+  await restoreEnrollmentBackup({ registry, backup, requestId: "restore-identity-0001" });
+  await registry.enroll({ endpointId: "later-backup", credential: ACCESS_A });
+  const changed = createEnrollmentBackup(registry);
+  const before = registry.exportSnapshot();
+  await rejectsCode(restoreEnrollmentBackup({ registry, backup: changed, requestId: "restore-identity-0001" }),
+    "migration_request_conflict");
+  assert.deepEqual(registry.exportSnapshot(), before);
+});
+
+function restoreIntent(backup, requestId) {
+  return { requestId, operations: [{ operation: "restore", snapshot: backup.registry,
+    expected_namespace_revision: backup.namespace_revision }], reportReplay: true };
+}
+
+test("restore intent preserves concurrent enroll, revoke and both credential rotations", async (t) => {
+  for (const change of ["enroll", "revoke", "access", "desktop"]) await t.test(change, async (t) => {
+    const { registry } = await fixture(t, "self_hosted");
+    await registry.enroll({ endpointId: "restore-protected", credential: ACCESS_A });
+    await registry.applyAtomicBatch({ expectedNamespaceRevision: registry.exportSnapshot().namespace_revision,
+      operations: [{ operation: "set_desktop_credential", endpoint_id: "restore-protected",
+        desktop_credential: DESKTOP_SECRET, expected_revision: "1" }] });
+    const backup = createEnrollmentBackup(registry);
+    const requestId = `restore-race-${change}-0001`;
+    await registry.beginMigrationRequest(restoreIntent(backup, requestId));
+    if (change === "enroll") await registry.enroll({ endpointId: "restore-concurrent", credential: ACCESS_B });
+    if (change === "revoke") await registry.revoke({ endpointId: "restore-protected", expectedEndpointRevision: "2" });
+    if (change === "access") await registry.rotateAccessCredential({ endpointId: "restore-protected",
+      currentCredential: ACCESS_A, newCredential: ACCESS_B, expectedEndpointRevision: "2" });
+    if (change === "desktop") await registry.rotateDesktopCredential({ endpointId: "restore-protected",
+      currentCredential: DESKTOP_SECRET, newCredential: `${DESKTOP_SECRET}-next`, expectedEndpointRevision: "2" });
+    const entries = registry.exportSnapshot().registry.entries;
+    await rejectsCode(restoreEnrollmentBackup({ registry, backup, requestId }), "migration_restore_revision_conflict");
+    assert.deepEqual(registry.exportSnapshot().registry.entries, entries);
+    assert.equal(registry.getMigrationRequest(requestId).status, "failed");
+    const sealed = registry.exportSnapshot();
+    await rejectsCode(restoreEnrollmentBackup({ registry, backup, requestId }), "migration_restore_revision_conflict");
+    assert.deepEqual(registry.exportSnapshot(), sealed);
+    const fresh = createEnrollmentBackup(registry);
+    assert.equal((await restoreEnrollmentBackup({ registry, backup: fresh,
+      requestId: `restore-after-${change}-0002` })).applied, true);
+    assert.deepEqual(registry.exportSnapshot().registry.entries, entries);
+  });
+});
+
+test("a restore CAS retry never rebases the captured fence over a concurrent writer", async (t) => {
+  const { registry, store, env } = await fixture(t, "self_hosted");
+  const backup = createEnrollmentBackup(registry);
+  let interleaved = false;
+  const competing = EnrollmentRegistry.open({ stateStore: {
+    getPathPolicy: () => store.getPathPolicy(),
+    readNamespace: (...args) => store.readNamespace(...args),
+    readNamespaceRevision: (...args) => store.readNamespaceRevision(...args),
+    async compareAndSwap(namespace, revision, value, options) {
+      if (!interleaved && value.migration_requests.some((row) => row.request_id === "restore-cas-race-0001" && row.status === "succeeded")) {
+        interleaved = true;
+        await registry.enroll({ endpointId: "restore-cas-concurrent", credential: ACCESS_A });
+      }
+      return store.compareAndSwap(namespace, revision, value, options);
+    },
+  }, config: loadEnrollmentRegistryConfig(env) });
+  await rejectsCode(restoreEnrollmentBackup({ registry: competing, backup, requestId: "restore-cas-race-0001" }),
+    "migration_restore_revision_conflict");
+  assert.equal(interleaved, true);
+  assert.equal(registry.getStatus("restore-cas-concurrent").status, "active");
+  assert.equal(registry.getMigrationRequest("restore-cas-race-0001").status, "failed");
+});
+
+test("a lost successful restore response replays the same sealed result without writes", async (t) => {
+  const { registry, store, env } = await fixture(t, "self_hosted");
+  const backup = createEnrollmentBackup(registry);
+  let lost = false;
+  const lossy = EnrollmentRegistry.open({ stateStore: {
+    getPathPolicy: () => store.getPathPolicy(),
+    readNamespace: (...args) => store.readNamespace(...args),
+    readNamespaceRevision: (...args) => store.readNamespaceRevision(...args),
+    async compareAndSwap(namespace, revision, value, options) {
+      const committed = await store.compareAndSwap(namespace, revision, value, options);
+      if (!lost && value.migration_requests.some((row) => row.request_id === "restore-response-lost-0001" && row.status === "succeeded")) {
+        lost = true;
+        throw new Error("synthetic-response-lost-after-commit");
+      }
+      return committed;
+    },
+  }, config: loadEnrollmentRegistryConfig(env) });
+  await rejectsCode(restoreEnrollmentBackup({ registry: lossy, backup, requestId: "restore-response-lost-0001" }),
+    "migration_restore_failed");
+  assert.equal(lost, true);
+  const before = registry.exportSnapshot();
+  const replay = await restoreEnrollmentBackup({ registry: lossy, backup, requestId: "restore-response-lost-0001" });
+  assert.equal(replay.replayed, true);
+  assert.equal(replay.applied, false);
+  assert.deepEqual(registry.exportSnapshot(), before);
+});
+
+test("legacy sealed restore records remain replayable but unfenced pending records cannot resume", async (t) => {
+  for (const status of ["succeeded", "pending"]) await t.test(status, async (t) => {
+    const { registry, store } = await fixture(t, "self_hosted");
+    const backup = createEnrollmentBackup(registry);
+    const requestId = `restore-legacy-${status}-0001`;
+    if (status === "succeeded") await restoreEnrollmentBackup({ registry, backup, requestId });
+    else await registry.beginMigrationRequest(restoreIntent(backup, requestId));
+    const snapshot = store.readNamespace(ENROLLMENT_NAMESPACE);
+    const historical = structuredClone(snapshot.value);
+    delete historical.migration_requests.find((row) => row.request_id === requestId).expected_namespace_revision;
+    await store.compareAndSwap(ENROLLMENT_NAMESPACE, snapshot.namespace_revision, historical);
+    const before = registry.exportSnapshot();
+    if (status === "succeeded") {
+      assert.equal((await restoreEnrollmentBackup({ registry, backup, requestId })).replayed, true);
+    } else {
+      await rejectsCode(restoreEnrollmentBackup({ registry, backup, requestId }), "migration_restore_fence_missing");
+    }
+    assert.deepEqual(registry.exportSnapshot(), before);
+  });
 });
 
 test("rollback coverage requires both role digests and the current key, not just active status", async (t) => {
@@ -566,6 +696,11 @@ test("self-hosted CLI is machine-readable, private-file only, and never prints c
   assert.equal(await migrationCli(["--restore", "--input", backup, "--request-id", "cli-restore-operation-0001"], environment(root, "self_hosted"), io), 0);
   assert.equal(JSON.parse(output.at(-1)).replayed, true);
   assert.equal(JSON.parse(output.at(-1)).applied, false);
+  const beforeStale = await readFile(environment(root, "self_hosted").PINVOU_REMOTE_CONTROLLER_STATE_PATH);
+  assert.equal(await migrationCli(["--restore", "--input", backup, "--request-id", "cli-restore-operation-0002"],
+    environment(root, "self_hosted"), io), 1);
+  assert.equal(JSON.parse(errors.at(-1)).code, "migration_restore_revision_conflict");
+  assert.deepEqual(await readFile(environment(root, "self_hosted").PINVOU_REMOTE_CONTROLLER_STATE_PATH), beforeStale);
 });
 
 test("maintenance CLI refuses controller input/output and aliases before opening a writer", async (t) => {
