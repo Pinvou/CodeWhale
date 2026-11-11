@@ -341,7 +341,10 @@ fn has_unrepresentable_stripped_constraint(schema: &Value, ships: bool) -> bool 
     {
         return true;
     }
-    let required = required_names(obj);
+    // A set, not a Vec: this walker runs per property name, and a Vec scan
+    // would make each name cost the whole `required` list.
+    let required: std::collections::HashSet<String> =
+        required_names(obj).into_iter().collect();
     for (key, value) in obj {
         match key.as_str() {
             "properties" | "$defs" | "definitions" | "$def" => {
@@ -351,8 +354,16 @@ fn has_unrepresentable_stripped_constraint(schema: &Value, ships: bool) -> bool 
                         // so they are judged without the optional-property
                         // exemption; only a property the schema leaves
                         // optional is removed wholesale.
-                        let ships_child =
-                            key != "properties" || required.iter().any(|required| required == name);
+                        let ships_child = if key == "properties" {
+                            required.contains(name.as_str())
+                        } else {
+                            // A definitions map nested inside a subtree the
+                            // optional-removal takes away ships no more than
+                            // the subtree around it: inherit the parent's
+                            // shipping status instead of judging every
+                            // definition as live.
+                            ships
+                        };
                         if has_unrepresentable_stripped_constraint(named_schema, ships_child) {
                             return true;
                         }
@@ -561,7 +572,9 @@ fn prune_dangling_required(schema: &mut Value) {
         return;
     };
     // Collect known property names first (immutable borrow), then prune.
-    let known_keys: Vec<String> = obj
+    // A set, not a Vec: schemas reach this per request from every active
+    // tool, and a Vec turns each `required` entry into a full scan.
+    let known_keys: std::collections::HashSet<String> = obj
         .get("properties")
         .and_then(|v| v.as_object())
         .map(|props| props.keys().cloned().collect())
@@ -572,7 +585,7 @@ fn prune_dangling_required(schema: &mut Value) {
     required.retain(|entry| {
         entry
             .as_str()
-            .is_some_and(|k| known_keys.iter().any(|known| known == k))
+            .is_some_and(|k| known_keys.contains(k))
     });
     if required.is_empty() {
         obj.remove("required");
@@ -607,7 +620,10 @@ fn enforce_strict_subset(schema: &mut Value, removed_optionals: &mut Vec<String>
     if let Some(obj) = schema.as_object_mut() {
         strip_unsupported_strict_keywords(obj);
         if is_object_schema(obj) {
-            let originally_required = required_names(obj);
+            // A set, not a Vec: the membership test runs once per property,
+            // and a Vec scan would make each property cost the whole list.
+            let originally_required: std::collections::HashSet<String> =
+                required_names(obj).into_iter().collect();
             let properties = ensure_properties_object(obj);
             let mut property_names: Vec<String> = properties.keys().cloned().collect();
             property_names.sort();
@@ -618,7 +634,7 @@ fn enforce_strict_subset(schema: &mut Value, removed_optionals: &mut Vec<String>
             // `removed_optionals` (see `sanitize_for_strict`).
             let removed_here: Vec<String> = property_names
                 .iter()
-                .filter(|name| !originally_required.iter().any(|required| required == *name))
+                .filter(|name| !originally_required.contains(name.as_str()))
                 .cloned()
                 .collect();
             for name in &removed_here {
