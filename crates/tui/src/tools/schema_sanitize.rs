@@ -345,6 +345,14 @@ impl DefectWalk {
 #[derive(Default)]
 struct PairAdmission<'a> {
     enclosing: SchemaView<'a>,
+    /// Every branch of the union under judgment. The pin arm's witness
+    /// must fail not only the pair's right branch but every OTHER branch
+    /// together (review 4511007764): pairwise-distinct witnesses — one
+    /// value outside the right branch here, a different value outside the
+    /// right branch there — can coexist while no single instance works
+    /// against all branches at once (`kind` enums `{a,b}`, `{b,c}`,
+    /// `{a,c}` pass every ordered pair yet admit no value).
+    branches: &'a [Value],
 }
 
 /// The bounded slice of a schema node the admission arms read: its
@@ -398,16 +406,44 @@ impl<'a> SchemaView<'a> {
     }
 }
 
+/// Whether a declared `type` string admits a concrete default a witness
+/// could carry. Unknown or non-scalar spellings (type arrays, exotic
+/// names) keep the conservative answer: no provable default.
+fn type_has_default_value(expected: &str) -> bool {
+    matches!(
+        expected,
+        "string" | "boolean" | "object" | "array" | "null" | "number" | "integer"
+    )
+}
+
 /// Whether an entry constrains its field no further than a witness value
 /// can satisfy: only `type`, `const`, and `enum` keys, each of which
 /// admits a concrete value (a type default, the pinned value, an enum
 /// member). A `minLength`, `pattern`, or any other validation keyword
 /// could reject the witness, so the entry keeps its pair unproven.
+/// Contradictory spellings are fail-closed too (review 4509283666): a
+/// `{"type":"string","const":42}` pin, an empty enum, or an enum whose
+/// members all violate the declared type admits NO instance, so it is
+/// exactly the shape a witness must not be proven against.
 fn entry_is_value_permissive(entry: &Value) -> bool {
-    entry.as_object().is_some_and(|obj| {
-        obj.keys()
-            .all(|key| matches!(key.as_str(), "type" | "const" | "enum"))
-    })
+    let Some(obj) = entry.as_object() else {
+        return false;
+    };
+    if !obj
+        .keys()
+        .all(|key| matches!(key.as_str(), "type" | "const" | "enum"))
+    {
+        return false;
+    }
+    let declared = obj.get("type").and_then(Value::as_str);
+    if obj.contains_key("type") && declared.is_none_or(|expected| !type_has_default_value(expected))
+    {
+        return false;
+    }
+    if obj.contains_key("const") || obj.contains_key("enum") {
+        return pinned_value_set(entry).is_some();
+    }
+    true
 }
 
 /// Whether a schema node's own keys are structural only (see
@@ -427,7 +463,12 @@ fn shape_is_structural(schema: &Value) -> bool {
 /// The pin arm's value sets: `const` contributes the single value, `enum`
 /// the whole list; an entry carrying further validation keywords beside
 /// the pin could reject its own pinned value, so it stops being a
-/// witness-able pin. Anything else is not an instance-data pin.
+/// witness-able pin. Anything else is not an instance-data pin. A pin
+/// that contradicts its own declared `type` (`{"type":"string","const":42}`,
+/// review 4509283666) or whose enum is empty keeps no witness-able value:
+/// no instance satisfies it, so treating it as a pin would ship an
+/// unsatisfiable union. A non-string `type` spelling (type arrays) is
+/// outside the bounded grammar and stays fail-closed.
 fn pinned_value_set(entry: &Value) -> Option<Vec<Value>> {
     let obj = entry.as_object()?;
     if !obj
@@ -436,13 +477,26 @@ fn pinned_value_set(entry: &Value) -> Option<Vec<Value>> {
     {
         return None;
     }
-    if let Some(pinned) = obj.get("const") {
-        return Some(vec![pinned.clone()]);
+    let declared = obj.get("type").and_then(Value::as_str);
+    if obj.contains_key("type") && declared.is_none() {
+        return None;
     }
-    if let Some(values) = obj.get("enum").and_then(Value::as_array) {
-        return Some(values.clone());
+    let mut values = if let Some(pinned) = obj.get("const") {
+        vec![pinned.clone()]
+    } else {
+        let values = obj.get("enum").and_then(Value::as_array)?;
+        if values.is_empty() {
+            return None;
+        }
+        values.clone()
+    };
+    values.retain(|candidate| {
+        declared.is_none_or(|expected| json_value_is_type(candidate, expected))
+    });
+    if values.is_empty() {
+        return None;
     }
-    None
+    Some(values)
 }
 
 /// Bounded type check for the pin arm's enclosing-admissibility test.
@@ -488,8 +542,10 @@ impl<'a> PairAdmission<'a> {
     /// [`Self::witness_provable`]). Anything unproven takes the
     /// protective flattening fallback, which keeps the shared root
     /// properties usable.
+    #[allow(clippy::too_many_arguments)]
     fn pair_discriminated(
         &self,
+        left_index: usize,
         left: &Value,
         right: &Value,
         left_group: &[&str],
@@ -520,18 +576,31 @@ impl<'a> PairAdmission<'a> {
                 continue;
             };
             // Arm 2 — pin discrimination: both sides pin the field's
-            // value set (`const`/`enum`) with disjoint admitted sets, and
-            // a left-admitted value survives the enclosing entry for the
-            // field. The pin alone proves the right-branch failure (a
-            // pinned value is rejected absolutely); the witness gate and
-            // the enclosing check keep the witness left-branch- and
-            // root-valid.
+            // value set (`const`/`enum`), and ONE left-admitted value
+            // survives the enclosing entry for the field AND every other
+            // branch's pin together (review 4511007764). Ordered pairs
+            // checked in isolation could each pick a different witness —
+            // `kind` enums `{a,b}`, `{b,c}`, `{a,c}` pass every pair that
+            // way — while no instance works against all branches at once.
+            // The witness value must therefore be absent from every other
+            // branch's pin set for this field; a branch that does not pin
+            // the field cannot be proven to reject the witness, so the
+            // pair stays unproven and the union takes the flattening
+            // fallback (fail closed).
             if let (Some(left_set), Some(right_set)) =
                 (pinned_value_set(left_entry), pinned_value_set(right_entry))
                 && self.witness_provable(left, left_group, &self.enclosing)
                 && left_set.iter().any(|candidate| {
                     !right_set.contains(candidate)
                         && self.enclosing_entry_admits(name.as_str(), candidate)
+                        && self.branches.iter().enumerate().all(|(index, other)| {
+                            index == left_index
+                                || other
+                                    .get("properties")
+                                    .and_then(|props| props.get(name.as_str()))
+                                    .and_then(pinned_value_set)
+                                    .is_some_and(|set| !set.contains(candidate))
+                        })
                 })
             {
                 return true;
@@ -670,6 +739,7 @@ fn unions_lack_pairwise_discrimination(
     }
     let admission = PairAdmission {
         enclosing: SchemaView::of_object(enclosing),
+        branches,
     };
     let groups: Vec<Vec<&str>> = branches.iter().map(branch_required_names).collect();
     for (left, left_group) in groups.iter().enumerate() {
@@ -678,6 +748,7 @@ fn unions_lack_pairwise_discrimination(
                 continue;
             }
             if !admission.pair_discriminated(
+                left,
                 &branches[left],
                 &branches[right],
                 left_group,
@@ -730,9 +801,51 @@ fn oneof_node_defect(
     // sanitize has already dropped cross-branch groups (reviews
     // 5802378120, 5808313704). Required-free shapes take the compatible
     // flattening fallback.
-    let non_discriminating = branches
+    // A required-free branch is exempt from the count when its property
+    // pins on some shared field are disjoint from every other
+    // required-free branch's pins on that same field (reviews
+    // 4509301139 and 4509370633): `oneOf` branches discriminated by
+    // `kind: {"const":"email"}` vs `{"const":"sms"}` — no surviving
+    // `required`, yet each pin value matches exactly one branch — are a
+    // usable documented union, and flattening it would keep only the
+    // first branch's `kind` pin and reject the other variant. The pins
+    // go through `pinned_value_set`, so a contradictory or empty pin
+    // fails the exemption and the branch stays counted (fail closed).
+    // The exempted pairs must then still be PROVEN discriminable by the
+    // pairwise admission below — where the pin arm now demands a single
+    // witness that survives every other branch together — so an
+    // overlapping multi-branch pin set still falls back instead of
+    // shipping an unsatisfiable union.
+    let required_free: Vec<&Value> = branches
         .iter()
         .filter(|branch| empty_matching_object_branch(branch))
+        .collect();
+    let pin_discriminated = |left: &Value, right: &Value| -> bool {
+        let (Some(left_props), Some(right_props)) = (
+            left.get("properties").and_then(Value::as_object),
+            right.get("properties").and_then(Value::as_object),
+        ) else {
+            return false;
+        };
+        left_props.iter().any(|(name, left_entry)| {
+            let Some(left_set) = pinned_value_set(left_entry) else {
+                return false;
+            };
+            let Some(right_set) = right_props.get(name.as_str()).and_then(pinned_value_set) else {
+                return false;
+            };
+            left_set
+                .iter()
+                .all(|candidate| !right_set.contains(candidate))
+        })
+    };
+    let non_discriminating = required_free
+        .iter()
+        .filter(|branch| {
+            !required_free
+                .iter()
+                .all(|other| std::ptr::eq(**branch, *other) || pin_discriminated(branch, other))
+        })
         .count();
     if non_discriminating >= 2 {
         return Some(format!(
@@ -3671,6 +3784,128 @@ mod tests {
                 "the flattening fallback keeps the parameter-groups note: {case}"
             );
         }
+    }
+
+    /// Review 4509283666: a pin that contradicts its own declared `type`
+    /// admits NO instance, so it is not a witness-able pin. Both
+    /// contradictory spellings — a `const` of the wrong type and an enum
+    /// whose every member violates the type — must fail the pin arm and
+    /// take the flattening fallback instead of shipping a union whose
+    /// branch cannot be satisfied by any instance.
+    #[test]
+    fn xai_sanitize_takes_the_fallback_for_contradictory_pin_type_branch_pins() {
+        let cases = [
+            // const of the wrong type
+            json!({
+                "oneOf": [
+                    {"type": "object", "properties": {"a": {"type": "string", "const": 42}}, "required": ["a"]},
+                    {"type": "object", "properties": {"b": {"type": "string", "const": "keep"}}, "required": ["b"]}
+                ]
+            }),
+            // enum whose members all violate the declared type
+            json!({
+                "oneOf": [
+                    {"type": "object", "properties": {"a": {"type": "string", "enum": [1, 2]}}, "required": ["a"]},
+                    {"type": "object", "properties": {"b": {"type": "string", "const": "keep"}}, "required": ["b"]}
+                ]
+            }),
+            // empty enum: no value admits it at all
+            json!({
+                "oneOf": [
+                    {"type": "object", "properties": {"a": {"enum": []}}, "required": ["a"]},
+                    {"type": "object", "properties": {"b": {"type": "string", "const": "keep"}}, "required": ["b"]}
+                ]
+            }),
+        ];
+        for case in cases {
+            let mut schema = case.clone();
+            let note = sanitize_for_xai_parameters(&mut schema);
+            assert!(
+                schema.get("oneOf").is_none(),
+                "a contradictory pin must fail the witness proof and take the flattening fallback: {schema}"
+            );
+            assert!(
+                note.as_deref()
+                    .is_some_and(|note| note.contains("parameter groups")),
+                "the flattening fallback keeps the parameter-groups note: {case} -> {note:?}"
+            );
+        }
+    }
+
+    /// Reviews 4509301139 and 4509370637: a required-free object pair whose
+    /// `kind` const-pins are disjoint is a usable documented union — each
+    /// pin value matches exactly one branch — so it must keep pass-through
+    /// instead of being flattened (the fallback merges only the FIRST
+    /// branch's `kind` pin into the root and would reject the `sms`
+    /// variant). Both variants must survive verbatim.
+    #[test]
+    fn xai_sanitize_keeps_required_free_kind_discriminated_union_through() {
+        let mut schema = json!({
+            "oneOf": [
+                {"type": "object", "properties": {"kind": {"const": "email"}}},
+                {"type": "object", "properties": {"kind": {"const": "sms"}}}
+            ]
+        });
+
+        let note = sanitize_for_xai_parameters(&mut schema);
+
+        let branches = schema
+            .get("oneOf")
+            .and_then(Value::as_array)
+            .expect("a pin-discriminated required-free union must keep pass-through: {schema}");
+        assert_eq!(branches.len(), 2, "both variants must survive: {schema}");
+        assert_eq!(
+            branches[0]["properties"]["kind"]["const"],
+            json!("email"),
+            "the email variant must survive verbatim: {schema}"
+        );
+        assert_eq!(
+            branches[1]["properties"]["kind"]["const"],
+            json!("sms"),
+            "the sms variant must not be flattened away: {schema}"
+        );
+        assert_eq!(note, None);
+    }
+
+    /// The exemption above must not open a wider door: a required-free
+    /// branch whose pins are NOT disjoint from every sibling (or a pin
+    /// set that only pairwise-discriminates, review 4511007764) still
+    /// counts as non-discriminating or fails the pairwise admission, and
+    /// the union takes the flattening fallback. `kind` enums `{a,b}`,
+    /// `{b,c}`, `{a,c}` pass every ordered pair with per-pair witnesses
+    /// yet admit no instance against all branches together.
+    #[test]
+    fn xai_sanitize_takes_the_fallback_when_no_single_witness_survives_all_branches() {
+        let mut schema = json!({
+            "oneOf": [
+                {"type": "object", "properties": {"kind": {"enum": ["a", "b"]}}, "required": ["kind"]},
+                {"type": "object", "properties": {"kind": {"enum": ["b", "c"]}}, "required": ["kind"]},
+                {"type": "object", "properties": {"kind": {"enum": ["a", "c"]}}, "required": ["kind"]}
+            ]
+        });
+
+        sanitize_for_xai_parameters(&mut schema);
+
+        assert!(
+            schema.get("oneOf").is_none(),
+            "overlapping multi-branch pin sets must take the flattening fallback: {schema}"
+        );
+
+        // The required-free count layer refuses the same overlap too:
+        // three required-free branches whose only pins overlap on `kind`
+        // cannot all be exempt, so the count fires before any witness.
+        let mut required_free = json!({
+            "oneOf": [
+                {"type": "object", "properties": {"kind": {"enum": ["a", "b"]}}},
+                {"type": "object", "properties": {"kind": {"enum": ["b", "c"]}}},
+                {"type": "object", "properties": {"kind": {"enum": ["a", "c"]}}}
+            ]
+        });
+        sanitize_for_xai_parameters(&mut required_free);
+        assert!(
+            required_free.get("oneOf").is_none(),
+            "overlapping required-free pins must take the flattening fallback: {required_free}"
+        );
     }
 
     #[test]
