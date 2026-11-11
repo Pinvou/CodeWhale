@@ -122,28 +122,7 @@ fn real_relay_manager_routes_controller_lane_outage_signal() {
 
 #[test]
 fn real_reader_reservation_retries_preserve_single_handshake_and_deadline() {
-    if std::env::var("PINVOU_READER_RESUME_TEST_CHILD").as_deref() != Ok("1") {
-        run_reader_child(
-            "real_reader_reservation_retries_preserve_single_handshake_and_deadline",
-            false,
-            false,
-            20,
-        );
-        return;
-    }
-    tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
-        tokio::time::timeout(Duration::from_secs(20),
-            crate::features::remote_control::controller::relay_runtime::reader_resume_tests::reservation_replay_tests::round_trip(|| {
-                let mut context = crate::build_tauri_context();
-                context.config_mut().app.windows.clear();
-                let app = tauri::Builder::default().any_thread()
-                    .manage(crate::features::remote_control::controller::controlled::ControlledDeviceManager::default())
-                    .manage(crate::features::remote_control::controller::encrypted_lane::ControlledLaneState::default())
-                    .manage(crate::features::remote_control::controller::relay_runtime::ControlledOutboundState::default())
-                    .build(context).unwrap();
-                (app.handle().clone(), app)
-            })).await.unwrap();
-    });
+    run_isolated_reader(false, false, false, Some("reservation-replay"));
 }
 
 #[test]
@@ -221,6 +200,9 @@ fn run_isolated_reader(
     // A separate process owns Tauri's global runtime and path/env overrides.
     // Never alter the test runner's home or share its live managed states.
     let name = match owner_case {
+        Some("reservation-replay") => {
+            "real_reader_reservation_retries_preserve_single_handshake_and_deadline"
+        }
         Some("disconnect") => "real_reader_old_received_disconnect_cannot_mutate_successor",
         Some("joined") => "real_reader_old_received_joined_cannot_install_or_clear_successor",
         Some("activation") => "real_reader_resume_activation_holds_lifecycle_owner_commit",

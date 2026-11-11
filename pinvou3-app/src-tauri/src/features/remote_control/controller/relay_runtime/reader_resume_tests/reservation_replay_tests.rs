@@ -88,8 +88,8 @@ struct Port {
     socket: Socket,
     outgoing: Mutex<Vec<Value>>,
     incoming: VecDeque<Value>,
-    handle: tauri::AppHandle,
-    operation: ctl::controlled::ControlledOperation,
+    deadline_probe: Box<dyn Fn() -> u64 + Send>,
+    last_reserved: Option<Value>,
     first_deadline: Option<u64>,
     a_frames: Vec<String>,
     b_frames: Vec<String>,
@@ -106,6 +106,9 @@ impl Port {
             if delivery["role"] == "A" {
                 self.incoming.push_back(frame);
             } else {
+                if frame["type"] == "controller_pairing_reserved" {
+                    self.last_reserved = Some(frame.clone());
+                }
                 if frame["type"] == "controller_pairing_reserved"
                     && frame["request_id"]
                         .as_str()
@@ -154,12 +157,7 @@ impl ctl::controlling_runtime::ControllingRelayPort for Port {
                         | "finished_receipt_ack"
                 )
             ));
-            let manager = self.handle.state::<ControlledDeviceManager>();
-            let deadline = manager
-                .preconnect_deadline(&self.operation)
-                .unwrap()
-                .unwrap()
-                .deadline_b();
+            let deadline = (self.deadline_probe)();
             if let Some(first) = self.first_deadline {
                 assert_eq!(
                     deadline, first,
@@ -174,23 +172,15 @@ impl ctl::controlling_runtime::ControllingRelayPort for Port {
     }
 }
 
-pub(crate) async fn round_trip<T>(build_host: impl FnOnce() -> (tauri::AppHandle, T)) {
-    let directory = tempfile::tempdir().unwrap();
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let url = format!("ws://{}/relay", listener.local_addr().unwrap());
-    unsafe {
-        std::env::set_var("PINVOU3_HOME", directory.path());
-        std::env::set_var("PINVOU_REMOTE_RELAY_WS_URL", &url);
-        std::env::set_var("PINVOU_REMOTE_RUNTIME_RELAY_WS_URL", &url);
-    }
-    let (handle, _host) = build_host();
+pub(crate) async fn round_trip(mut worker: ControlledRelayWorker, listener: &TcpListener) {
+    let handle = worker.app.clone();
+    let operation = worker.operation.clone();
     let manager = handle.state::<ControlledDeviceManager>();
-    let operation = manager.start(None, Vec::new()).unwrap();
-    let b_keys = HandshakeKeyPair::generate().unwrap();
+    let b_public = worker.handshake.as_ref().unwrap().public_key().to_bytes();
     let a_keys = HandshakeKeyPair::generate().unwrap();
     let mut node = Relay::new();
     let hello = node.call(json!({"init":true,"generation":operation.generation(),
-        "publicKey":base64::engine::general_purpose::STANDARD.encode(b_keys.public_key().to_bytes())}));
+        "publicKey":base64::engine::general_purpose::STANDARD.encode(b_public)}));
     let key_id = hello["keyId"].as_str().unwrap();
     let public_key = hello["publicKey"].as_str().unwrap();
     unsafe {
@@ -202,45 +192,13 @@ pub(crate) async fn round_trip<T>(build_host: impl FnOnce() -> (tauri::AppHandle
         public_key.to_owned(),
     )])
     .unwrap();
-    let now = controlled_monotonic_millis();
-    manager
-        .complete_registration(
-            operation.clone(),
-            ControlledRegistration {
-                pairing_code: "2345678".into(),
-                sealed_code_b64: "sealed".into(),
-                expires_at_ms: now + 30_000,
-            },
-            now,
-        )
-        .unwrap();
-    let relay = RemoteControlManager::new(handle.clone());
-    let channel = relay
-        .start_controller_relay(operation.generation())
-        .await
-        .unwrap();
     let mut owned = OwnedLane {
-        relay: relay.clone(),
+        relay: worker.relay.clone(),
         generation: operation.generation().into(),
         worker: None,
     };
     let (processed_tx, mut processed_rx) = tokio::sync::mpsc::channel(128);
-    let worker = ControlledRelayWorker {
-        transport_owner: None,
-        app: handle.clone(),
-        relay,
-        operation: operation.clone(),
-        code_wrap: CodeWrapKeyPair::generate().unwrap(),
-        handshake: Some(b_keys),
-        channel,
-        business: std::sync::Arc::new(NoBusiness),
-        action_results: std::sync::Arc::new(RemoteActionResultCache::default()),
-        business_epoch: std::sync::Arc::new(AtomicU64::new(0)),
-        processed_frames: Some(processed_tx),
-        before_frame_effect: None,
-        activation_probe: None,
-        evidence_hooks: None,
-    };
+    worker.processed_frames = Some(processed_tx);
     owned.worker = Some(tokio::spawn(worker.serve()));
     let mut socket = accept(&listener).await;
     registered(&mut socket).await;
@@ -249,8 +207,19 @@ pub(crate) async fn round_trip<T>(build_host: impl FnOnce() -> (tauri::AppHandle
         socket,
         outgoing: Mutex::new(Vec::new()),
         incoming: VecDeque::new(),
-        handle: handle.clone(),
-        operation: operation.clone(),
+        deadline_probe: Box::new({
+            let handle = handle.clone();
+            let operation = operation.clone();
+            move || {
+                handle
+                    .state::<ControlledDeviceManager>()
+                    .preconnect_deadline(&operation)
+                    .unwrap()
+                    .unwrap()
+                    .deadline_b()
+            }
+        }),
+        last_reserved: None,
         first_deadline: None,
         a_frames: Vec::new(),
         b_frames: Vec::new(),
@@ -279,7 +248,7 @@ pub(crate) async fn round_trip<T>(build_host: impl FnOnce() -> (tauri::AppHandle
     )
     .await;
     assert_eq!(
-        manager.live_lease().unwrap().context.controller_lease_id,
+        manager.live_lease().unwrap().controller_lease_id,
         outcome.lease.controller_lease_id
     );
     assert!(handle.state::<ControlledLaneState>().is_installed());
@@ -323,12 +292,25 @@ pub(crate) async fn round_trip<T>(build_host: impl FnOnce() -> (tauri::AppHandle
         seen_replays, 7,
         "real B serve consumed initial notification plus six retries"
     );
+    let installed = manager.live_lease().unwrap();
+    let watchdog = manager.watchdog_deadline_for_test();
+    let old_notification = port.last_reserved.take().unwrap();
+    send(&mut port.socket, &old_notification).await;
+    processed(&mut processed_rx, &old_notification).await;
+    assert_eq!(manager.live_lease().unwrap(), installed);
+    assert_eq!(manager.watchdog_deadline_for_test(), watchdog);
+    // The old worker can receive a queued notification after explicit stop
+    // and successor admission; its operation cannot revive or replace either.
     manager.stop();
-    owned.relay.stop_controller_relay(operation.generation());
+    let successor = manager.start(None, Vec::new()).unwrap();
+    send(&mut port.socket, &old_notification).await;
     tokio::time::timeout(Duration::from_secs(3), owned.worker.take().unwrap())
         .await
         .unwrap()
         .unwrap();
-    port.socket.close(None).await.unwrap();
+    assert_eq!(manager.current_operation(), Some(successor));
+    assert_eq!(manager.status().kind(), ControlledStatusKind::Registering);
+    manager.stop();
+    owned.relay.stop_controller_relay(operation.generation());
     port.relay.finish();
 }
