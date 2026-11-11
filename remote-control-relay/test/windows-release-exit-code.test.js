@@ -10,6 +10,7 @@ const step = job.steps.find((value) => value.name === 'Windows 远控发布与�
 const buildWorkflow = parse(readFileSync(new URL('../../.github/workflows/windows-remote-control-build-evidence.yml', import.meta.url), 'utf8'));
 const buildStep = Object.values(buildWorkflow.jobs).flatMap((value) => value.steps)
   .find((value) => value.name === 'Build signed installer from checked-out commit');
+const nativeContractBudgetMs = 120_000;
 
 test('Windows release step retains every mandatory command and required-gate dependency', () => {
   assert.ok(step);
@@ -38,7 +39,8 @@ test('Windows release step retains every mandatory command and required-gate dep
 
 for (const [name, target, count] of [['contracts', step, 3], ['protected-build', buildStep, 5]]) {
  for (const shell of ['pwsh', 'powershell.exe']) {
-  test(`real ${name} workflow stops on each native failure in ${shell}`, { skip: process.platform !== 'win32', timeout: 120_000 }, () => {
+  test(`real ${name} workflow stops on each native failure in ${shell}`, { skip: process.platform !== 'win32', timeout: nativeContractBudgetMs }, () => {
+    const deadline = performance.now() + nativeContractBudgetMs;
     for (const failure of [...Array.from({ length: count }, (_, index) => index), null]) {
       let command = 0;
       // Substitute only the three external contracts. Execute their actual
@@ -50,9 +52,14 @@ for (const [name, target, count] of [['contracts', step, 3], ['protected-build',
         return `& $env:PINVOU_NATIVE_EXIT_TEST_NODE -e 'console.log(${index});process.exit(${exitCode})'`;
       }).join('\n');
       assert.equal(command, count);
+      // These are exit-code/control-flow contracts, not shell startup benchmarks.
+      // All cases share the existing test budget, including cold PowerShell and
+      // native-process startup; a stalled case must not reset that budget.
+      const remainingMs = Math.floor(deadline - performance.now());
+      assert.ok(remainingMs > 0, 'native exit-code contract exhausted its shared time budget');
       const result = spawnSync(shell, ['-NoProfile', '-NonInteractive', '-Command', script], {
         env: { ...process.env, PINVOU_NATIVE_EXIT_TEST_NODE: process.execPath },
-        encoding: 'utf8', windowsHide: true, timeout: 15_000,
+        encoding: 'utf8', windowsHide: true, timeout: remainingMs,
       });
       assert.ifError(result.error);
       assert.equal(result.status, failure === null ? 0 : 17, `failure=${failure}: ${result.stderr}`);
