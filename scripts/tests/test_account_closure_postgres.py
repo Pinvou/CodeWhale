@@ -128,6 +128,13 @@ class ClosurePostgresResults(unittest.TestCase):
                 calls.append(("query", sql))
                 if sql == "SELECT current_user":
                     output = "fixture_owner"
+                elif sql.startswith("SELECT json_build_object("):
+                    roles = {"fixture_owner"} | (runner.BILLING_ACTORS if owned_billing else set())
+                    if failure == "actor-conflict" and not owned_billing:
+                        roles.add("foreign_actor")
+                    output = json.dumps({"databases": ["postgres", "template0", "template1"]
+                        + (["retained_for_diagnosis"] if failure == "cleanup" and last_group == bad_group else []),
+                        "roles": sorted(roles), "objects": 0, "clients": 0})
                 elif sql == "SELECT datname FROM pg_database ORDER BY datname":
                     output = "postgres\ntemplate0\ntemplate1"
                     if failure == "cleanup" and last_group == bad_group:
@@ -228,7 +235,7 @@ class ClosurePostgresResults(unittest.TestCase):
                 for current, following in zip(positions, positions[1:]):
                     # The finally cleanup check and the next invocation's
                     # absence guard both precede the next process launch.
-                    self.assertEqual(sum(call == ("query", "SELECT datname FROM pg_database ORDER BY datname")
+                    self.assertEqual(sum(call[0] == "query" and call[1].startswith("SELECT json_build_object(")
                                          for call in calls[current + 1:following]), 2
                                      + (actual[positions.index(current)][1] == "ledger-repair-approval-proof")
                                      + (actual[positions.index(following)][1] == "ledger-repair-approval-proof"))
