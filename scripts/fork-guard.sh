@@ -1,19 +1,16 @@
 #!/usr/bin/env bash
-# CodeWhale v0.9.12 clean re-fork guard: local review candidate (87 commits, forked at registered baseline f1eb10efc and currently behind the 93-commit public maintenance head), ten maintained themes (r3 closed at pinvou-v0.9.12-r3; inside a transition window the head may lead the tag).
+# CodeWhale v0.9.12 clean re-fork guard: 98 maintenance commits, ten maintained themes (r3 closed at pinvou-v0.9.12-r3; inside a transition window the head may lead the tag).
 set -uo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CODEWHALE="$REPO/CodeWhale"
 APP="$REPO/pinvou3-app/src-tauri"
 EXPECTED_UPSTREAM="dcd4c200f72f0c1ffd60d8e7f6850313db879fc5"
-# Local review candidate (CodeWhale#142); public maintenance alignment remains a separate gate.
-EXPECTED_HEAD="a4fc2e914568da821c1776ad9918890481b99afb"
-EXPECTED_COMMITS=87
-# Published maintenance base this integration is registered against. While the
-# gitlink pins the local review candidate (parent f1eb10efc, which predates
-# CodeWhale#123..#135), the base stays at that baseline; it returns to the
-# public maintenance head when CodeWhale#142 lands and the gitlink re-aligns.
-MAINTENANCE_BASE="f1eb10efcfe2468fde42d1724d7f5f19d54b904c"
+# Public maintenance after CodeWhale#136/#142/#148/#150/#152 merged.
+EXPECTED_HEAD="6f7a3a748f408568468ace45aa5cdbb34f882d73"
+EXPECTED_COMMITS=98
+# Published maintenance base of this integration.
+MAINTENANCE_BASE="6f7a3a748f408568468ace45aa5cdbb34f882d73"
 # The immutable r1 closure must remain an ancestor of the registered head.
 # A review candidate may lead public maintenance; this does not waive the
 # separate public-head gate or change the immutable r3 transition baseline.
@@ -73,6 +70,13 @@ fi
 bold "── 第 1 层：登记主题与父仓适配指纹 ──"
 # 格式：主题|说明|文件（相对父仓根）|grep -F 固定串
 fingerprints=(
+  "T1|终态错误来源随真实选中结果传递     |CodeWhale/crates/tui/src/core/events.rs|error_source: Option<TurnErrorSource>,"
+  "T1|普通路由本地准备失败保持运行时来源 |CodeWhale/crates/tui/src/core/engine/tests.rs|ordinary_route_preparation_failure_is_runtime_without_sending_http"
+  "T1|宿主只消费明确模型来源终态         |pinvou3-app/src-tauri/src/features/assistant/forwarder.rs|== Some(deepseek_tui::core::events::TurnErrorSource::Model))"
+  "T2|待办缺省状态契约保持内容必填       |CodeWhale/crates/tui/src/tools/todo.rs|todo_item_status_is_optional_with_a_pending_default"
+  "T2|待办缺省执行结果保持 pending       |CodeWhale/crates/tui/src/tools/todo.rs|work_update_treats_a_missing_status_as_pending"
+  "T1|宿主输出预算复用真实组合导出       |CodeWhale/crates/tui/src/core/engine.rs|pub use context::route_effective_max_output_tokens;"
+  "T1|输出预算导出覆盖真实组合结果       |CodeWhale/crates/tui/src/core/engine/context.rs|route_effective_max_output_tokens_matches_the_transport_composition"
   "T1|Terminal error producer is explicit|CodeWhale/crates/tui/src/core/events.rs|pub enum TurnErrorSource"
   "T1|Chosen failure owns its provenance|CodeWhale/crates/tui/src/core/engine/turn_loop.rs|struct TurnFailure"
   "T1|Model and real local REPL EOF recover independently|pinvou3-app/src-tauri/src/features/behavior_telemetry/model_producer_tests.rs|fn forkguard_model_terminal_provenance_excludes_repl_eof_and_recovers"
@@ -136,7 +140,7 @@ fingerprints=(
   # 2026-11-05 批次：#124 把结构化摘要的恢复 footer 收敛到共享 helper
   # model_context_recovery_footer（truncate.rs），context.rs 的内联文案随之迁移——
   # 指纹钉同一文案的真实新位置，主题声明不变。
-  "T2|Engine recovery names the complete returned result|CodeWhale/crates/tui/src/core/engine/context.rs|complete returned tool result at"
+  "T2|Engine recovery names the complete returned result|CodeWhale/crates/tui/src/tools/truncate.rs|complete returned tool result at"
   "T2|Real interrupted child retains checkpoint recovery|CodeWhale/crates/tui/src/tools/subagent/tests.rs|fn forkguard_interrupted_snapshot_preserves_checkpoint_recovery"
   "T2|Complete structured output has no false recovery|CodeWhale/crates/tui/src/core/engine/tests.rs|fn forkguard_complete_structured_results_do_not_request_recovery"
   "T2|Structured field omissions retain recovery|CodeWhale/crates/tui/src/core/engine/tests.rs|fn forkguard_structured_field_cuts_still_request_recovery"

@@ -1,11 +1,11 @@
 # CodeWhale Fork 修改清单
 
-## 本地候选：终态错误来源（T1，2026-11-05）
+## 已集成底座契约与宿主接入：终态错误来源（T1，2026-11-11）
 
-- 通用底座缺口：同一 `TurnComplete.error` 可来自模型请求/流，也可来自本地 REPL、预算或 panic；宿主不能从采集点、路由、advisory 错误或文字还原来源。已有 `new_with_model_client` 会替换 client 并改变预检/路由生命周期，不能透明观察既有内部 client。最小来源契约属于上游优先候选，本轮已形成本地提交 `a4fc2e914568da821c1776ad9918890481b99afb`，现已推送并开立 CodeWhale #142 请求上游审核（2026-11-06 刷新）。
+- 同一 `TurnComplete.error` 可来自模型请求/流，也可来自本地 REPL、预算或 panic；宿主不能从采集点、路由、advisory 错误或文字还原来源。最小来源契约已由 CodeWhale #142 并入公开维护分支；本 PR 在现有 `TurnErrorSource` 契约上接入宿主诊断，不替换真实模型 client 或改变预检/路由生命周期。
 - `run_turn` 内的选中错误与 `TurnErrorSource` 成对保留、清空和覆盖；只在终态失败选定时写入本轮 `TurnContext`，随同一 `TurnComplete` 交付。实际 client 请求/流错误为 Model，本地请求准备、REPL、预算等为 Runtime；其他终态及未知来源为 None。panic、取消、重试、错误文本和既有结果状态保持原契约，无跨轮错误缓存。
 - 仅内部 Engine 事件增加可选来源，不扩展 wire/遥测字段；现有 protocol projection 明确忽略它。宿主保留模型原错误后才合并本地持久化错误，ACP 只在当前 prompt 失败边界赋予来源，普通终态保守降级；诊断写入按任务→诊断锁顺序验证当前已接纳 attempt、turn、租约及同源上下文；历史消息观察不能为待接纳提交选择 turn，匹配 attempt 的接纳事件才建立或校正归属。新增私有 attempt 缓存字段缺省兼容旧缓存，不扩展遥测字段。本地受控模型 transport 经真实 Engine，验证初始请求错误、流读取错误、provider error frame、真实 Python REPL CSV EOF 及下一用户回合恢复；默认 bash 工具增加实际 shell 语法错误与非零退出事实，退出码由宿主 shell 决定（Windows 默认 PowerShell 不是 Bash）。测试边界不是 live provider/Linux 原事故或发布构建。
-- 父仓 gitlink 引用本地候选 `a4fc2e914568da821c1776ad9918890481b99afb`，其父为 `f1eb10efcfe2468fde42d1724d7f5f19d54b904c`，源码 tree 为 `db5b9d4b13da36e4058b9662d416cdec7f75bd7c`，与此前审核的底座源码一致；相对已登记基线新增 1 个已签署提交，共 87 个。已登记公开维护基线仍为 `f1eb10efcfe2468fde42d1724d7f5f19d54b904c`；候选已推送审核分支并开立 CodeWhale #142，但尚未并入维护头，也未移动既有维护分支或标签。后续传播继续遵守公开维护流程，`verify-public-submodule.sh` 保持原门禁，不能凭本地快速指纹通过替代公开可达性。
+- 父仓 gitlink 对齐公开维护提交 `6f7a3a748f408568468ace45aa5cdbb34f882d73`，保留 #142 的终态来源契约以及之后的维护修复。原本地候选仅为历史审核来源；未移动任何 CodeWhale 维护分支或标签，`verify-public-submodule.sh` 的公开可达性门禁保持不变。
 
 ## 本轮同步接线：冷启动所有权与有界拆除（2026-10-13）
 
@@ -84,12 +84,21 @@
 - 既有作者本地 Windows 验证：`cargo test -p codewhale-tui --lib --locked sandbox::tests -- --test-threads=1` 通过 23 项（19 项 `sandbox::tests::*` + 4 项 `repl::sandbox::tests::*`；Linux 因 cfg 差异选择 26 项）。两个显式工具测试分别用系统 Python 3.14 和捆绑 Python 3.13.14 通过（共四次），另一个 Git Bash 环境探测通过一次。此前恢复原构造器时，两个工具测试在两种解释器下均失败，表现为 Python 中文乱码而 PowerShell 中文正常。格式、架构和快速指纹检查通过。这些是既有作者证据，不代表后续文档修订重新执行了原生测试。
 - 父仓 Windows regression 步骤新增执行默认值合并、shell 默认值接线及大小写覆盖三个确定性筛选器；每个筛选器都要求至少执行一项测试。`91e262ba2` 的远端 [Windows regression job](https://github.com/Pinvou/pinvou-agent/actions/runs/39761405525/job/119767350755) 已实际执行并通过这三个筛选器；该证据对应这个旧头及不变的底座，不代替后续提交的 CI。两个需 Python 的显式测试仍为作者本地证据。`pinvou3-clean` CI 仅 Ubuntu，不运行 Windows 限定回归。Linux 上的 `windows_shell_default_env_forces_python_pipe_stdio_utf8` 只验证 helper 返回值，不验证构造器接线；Windows 大小写覆盖逻辑也需原生 Windows 回归。上游 codewhale-hq/Codewhale#7041 是未来上游 Windows CI 的贡献路径，不证明该 CI 已执行。未验证客户设备、PowerShell 7 或安装包发布。
 
-## 0. 当前状态（2026-11-05）
+## 0. 当前状态（2026-11-10）
 
-- 当前公开维护头：`11cba403dc6bd6ca5c4dca55042785b03449ac8e`（2026-11-05）。#123 已合入为 `e5a8af221`，#124 为 `449edbf0b`，#129 为 `4e560354c`，#131 为 `e2a0e14fd`，#133 为 `4e75c6a07`，#134 为 `8a4719fd4`，#135 为 `11cba403d`。本 PR 内父仓 gitlink 仍引用本地审阅候选 `a4fc2e914568da821c1776ad9918890481b99afb`（其父为已登记基线 `f1eb10efc`），待 CodeWhale #142 并入维护头后再对齐公开维护头；公开门禁不放宽。
-- 实测历史：上游 v0.9.12 `dcd4c200f` 之上 93 个提交，r1 `1fafee7e2` 之上 78 个；91 个带 DCO sign-off。未签名的 squash 为 #107 `f27672935` 与 #116 `e9a7f48da1`，不能继续声称只有一个未签名提交。保留已发布历史，不改写维护分支。
+- 当前公开维护头与父仓 gitlink：`6f7a3a748f408568468ace45aa5cdbb34f882d73`（2026-11-10）。在原 `11cba403d` 之上消费已合入的 #136 `37be2844f`、#142 `78804c83e`、#148 `5f15cce57` 、#150 `e972a9a05` 与 #152 `6f7a3a748`。父仓只消费已公开提交，不推进维护分支、不移动标签。
+- 实测历史：上游 v0.9.12 `dcd4c200f` 之上 98 个提交，r1 `1fafee7e2` 之上 83 个；96 个带 DCO sign-off。未签名的 squash 为 #107 `f27672935` 与 #116 `e9a7f48da1`，不能继续声称只有一个未签名提交。保留已发布历史，不改写维护分支。
 - 不可变 tag `pinvou-v0.9.12-r3` 仍在 `61cb769be5b33abc64f64da4272f5b39a8b6c1fd`；r1 仍在 `1fafee7e26b60a59457a43bce50c63aa2ad9dbaf`。公开门禁仍要求 gitlink 等于维护头并验证 r3 标签，未放宽任何条件。
-- 实测 drift：540 files, +119210/-49666，净增 69544；301 个独立 `forkguard_*` 行为名（登记下限仍为 64）。原生 Windows 证据仅适用于原记录的执行提交，不扩展为本次集成树已执行；当前父仓 CI 和最终集成树审核仍须独立确认。
+- 实测 drift：548 files, +121115/-49797，净增 71318；301 个独立 `forkguard_*` 行为名（登记下限仍为 64）。原生 Windows 证据仅适用于原记录的执行提交，不扩展为本次集成树已执行；当前父仓 CI 和最终集成树审核仍须独立确认。
+
+### 2026-11-10 公开维护头对齐（#136/#142/#148/#150/#152）
+
+- 公共 CI 的 `verify-public-submodule.sh` 仍严格要求父仓 gitlink 等于 `pinvou3-clean`。外部维护操作推进公开分支后，旧 `11cba403d` 引用导致 fast-gate / merge-authored-audit 失败；本批只按既定过渡规则更新消费点，保留 r3 标签及全部门禁。
+- #136 归入既有 T2/T3：对齐模型可见工具/提示与实际执行边界，迁移内置 Skill 文案并保留用户改动，补充 FIM、媒体、Shell、任务及 Skill 结果式回归。该公开提交包含行为和测试，不能表述为父仓行为完全不变或单纯改注释。
+- #142 归入 T1：终态选中错误携带 Model/Runtime 来源，局部恢复后不把旧模型错误当最终失败，普通路由的本地准备错误有独立类型。内部 `TurnComplete` 新增可选来源字段。父仓 forwarder 显式忽略此元数据以保持既有归类，两条 strict-mode 构造填 `None`；没有借公共引用更新混入遥测分类功能。
+- #148 归入 T2：`work_update` 的 todo 项 schema 不再强制 status，省略时仍由既有执行器产生 pending；content 保持必填。随公开提交消费 `todo_item_status_is_optional_with_a_pending_default` 与 `work_update_treats_a_missing_status_as_pending` 两条既有结果回归，并登记指纹，不修改底座源码来重命名测试或放宽契约。
+- #150 归入 T1：公开导出 `route_effective_max_output_tokens`，委托既有预算组合路径供宿主一次性请求复用；父仓本批不新增调用。消费 `route_effective_max_output_tokens_matches_the_transport_composition` 的精确输入/输出回归并登记导出指纹。
+- #152 已以 `6f7a3a748` 合入公开维护分支：rusqlite 0.41.1 / libsqlite3-sys 0.39.1、rmcp 3.9.0 与 rio-vt 0.5.29 修复相应安全通告，底座 rust-version 声明对齐锁图已有的 1.89 下限。继续使用本 PR #2519 已有的父仓 manifest 与五份锁文件，不将旧候选 `a4c83ad12` 误作 squash 后公开头。公开合入同时包含 #136/#142/#148/#150，父仓补齐 Event 编译适配与行为登记；没有重新实现依赖升级或放宽 advisories 门禁。验证记录和当前对应 CI 另行验收；CodeWhale 已合入与静态指纹通过不代表本批宿主全平台编译、真实模型或发布验收完成。
 
 ### 2026-10-29 公开维护头对齐（#114/#125）
 

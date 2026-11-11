@@ -63,3 +63,49 @@ func TestExpiredHoldHTTPProofRequiresBoundConfirmedReceipt(t *testing.T) {
 		})
 	}
 }
+
+func TestExpiredHoldHTTPProofPreservesTransportTimeoutAndCancellation(t *testing.T) {
+	for _, scenario := range []string{"header-timeout", "body-timeout", "canceled"} {
+		t.Run(scenario, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			hit := make(chan struct{})
+			release := make(chan struct{})
+			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				close(hit)
+				if scenario == "body-timeout" {
+					w.WriteHeader(http.StatusOK)
+					w.(http.Flusher).Flush()
+				}
+				if scenario == "canceled" {
+					cancel()
+				}
+				select {
+				case <-r.Context().Done():
+				case <-release:
+				}
+			}))
+			defer server.Close()
+			defer close(release)
+			transport := server.Client()
+			transport.Timeout = time.Second
+			client, err := NewHTTPExpiredHoldProofClient(server.URL, "fixture-workload-token", transport)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = client.FenceExpiredHold(ctx, ExpiredHoldIdentity{})
+			want := context.DeadlineExceeded
+			if scenario == "canceled" {
+				want = context.Canceled
+			}
+			if err != want {
+				t.Fatalf("expected only the sanitized %v sentinel, got %v", want, err)
+			}
+			select {
+			case <-hit:
+			default:
+				t.Fatal("request did not reach the proof endpoint")
+			}
+		})
+	}
+}
