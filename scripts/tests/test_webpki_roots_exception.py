@@ -319,7 +319,7 @@ class WebpkiCiContractTests(unittest.TestCase):
 
     def test_existing_account_go_action_is_exactly_reviewed(self):
         workflow = WORKFLOW.read_text(encoding='utf-8')
-        self.assertEqual(workflow.count('uses: actions/setup-go@v6'), 1)
+        self.assertEqual(workflow.count('uses: actions/setup-go@v6'), 2)
         self.verify_workflow(workflow)
         for replacement in ['actions/setup-go@v7', 'actions/setup-go@main', 'actions/setup-go']:
             with self.subTest(action=replacement), self.assertRaisesRegex(AssertionError, 'unreviewed action'):
@@ -329,16 +329,20 @@ class WebpkiCiContractTests(unittest.TestCase):
         # Explicitly review each diagnostic-only entry. More uploads do not add
         # a Rust policy consumer, but neither an unknown entry nor a new action
         # version may silently inherit this review.
-        reviewed = [('frontend-test', 'Test resource lifecycle receipts'),
+        reviewed = [('required-gate', 'PR test success proof transport'),
+                    ('frontend-test', 'Test resource lifecycle receipts'),
                     ('account-platform-test', 'Financial parallel diagnostics'),
-                    ('account-platform-test', 'Account test resource lifecycle receipts')]
+                    ('account-platform-test', 'Account test resource lifecycle receipts'),
+                    ('account-closure-test', 'Account closure resource lifecycle receipts'),
+                    ('windows-codex-runtime-test', 'Preserve browser fixture exit receipts'),
+                    ('windows-codex-runtime-test', 'Preserve ACP fixture exit receipt')]
         self.assertEqual(workflow.count('uses: actions/upload-artifact@v7'), len(reviewed))
         for job, name in reviewed:
             steps = job_block(workflow, job).split('\n      - ')
             entries = [step for step in steps if step.startswith(f'name: {name}\n')]
             self.assertEqual(len(entries), 1)
             self.assertIn('uses: actions/upload-artifact@v7\n', entries[0])
-            self.assertIn('retention-days: 7\n', entries[0])
+            self.assertIn(f"retention-days: {2 if job == 'required-gate' else 7}\n", entries[0])
             self.assertIn('        timeout-minutes: 3\n', entries[0])
             self.assertIn('        continue-on-error: true\n', entries[0])
         # Only diagnostic transport may be non-blocking. In particular, a
@@ -354,7 +358,9 @@ class WebpkiCiContractTests(unittest.TestCase):
     def test_diagnostic_transport_never_relaxes_tests_or_resource_retirement(self):
         workflow = WORKFLOW.read_text(encoding='utf-8')
         for name in ['Confirm test resource retirement', 'Confirm Account test resource retirement',
-                     'Test and vet all Account Platform Go modules']:
+                     'Test and vet all Account Platform Go modules',
+                     'Windows browser wrapper lifecycle regression', 'Windows browser wrapper lazy regression',
+                     'Windows ACP bridge runtime smoke']:
             with self.subTest(step=name), self.assertRaises(AssertionError):
                 self.verify_diagnostic_uploads(workflow.replace(
                     f'      - name: {name}\n', f'      - name: {name}\n        continue-on-error: true\n'))

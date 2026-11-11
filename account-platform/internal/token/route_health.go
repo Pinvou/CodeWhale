@@ -6,6 +6,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/resilience"
+
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/prometheus/client_golang/prometheus"
@@ -55,6 +57,17 @@ type RouteHealthWorker struct {
 	workerID    string
 	interval    time.Duration
 	concurrency int
+	breaker     *resilience.Breaker
+}
+
+// WithRouteHealthCircuitRecovery must run before the health worker starts.
+// It shares the actual dispatch repository, adapter version and Breaker.
+func (s *Service) WithRouteHealthCircuitRecovery(w *RouteHealthWorker) error {
+	if w == nil || w.probe == nil || w.repository == nil || s.breaker == nil || s.executionUpstream == nil || s.repository != w.repository || s.executionUpstream.AdapterVersion() != w.probe.AdapterVersion() {
+		return ErrRouteReferenceInvalid
+	}
+	w.breaker = s.breaker
+	return nil
 }
 
 func NewRouteHealthWorker(repository *PostgresRepository, probe RouteHealthProbeAdapter, policy ProviderURLPolicy, interval time.Duration) (*RouteHealthWorker, error) {
@@ -180,6 +193,7 @@ func (w *RouteHealthWorker) execute(ctx context.Context, target routeProbeTarget
 	started := time.Now()
 	credential, secret, err := w.repository.CredentialSecret(ctx, target.AccountID, target.CredentialID)
 	found := false
+	var recovery *resilience.Permit
 	diagnostic := "PROVIDER_UNAVAILABLE"
 	if err == nil {
 		defer clear(secret)
@@ -187,6 +201,14 @@ func (w *RouteHealthWorker) execute(ctx context.Context, target routeProbeTarget
 		if !safe {
 			diagnostic = "PROBE_TARGET_REJECTED"
 		} else {
+			if w.breaker != nil {
+				// Route health retains its independent bounded read-only duty.
+				// Only an admitted current-episode result may recover dispatch.
+				recovery, _ = w.breaker.AdmitReadOnlyRecovery(resilience.Key(credential.Provider, "MODEL_DISPATCH", credential.BaseURL))
+				if recovery != nil {
+					defer recovery.Cancel()
+				}
+			}
 			probeContext, cancel := context.WithTimeout(ctx, 10*time.Second)
 			models, probeErr := w.probe.DiscoverModels(probeContext, credential.BaseURL, secret)
 			cancel()
@@ -201,7 +223,13 @@ func (w *RouteHealthWorker) execute(ctx context.Context, target routeProbeTarget
 	if found {
 		diagnostic = "PROBE_SUCCEEDED"
 	}
-	w.complete(ctx, target, found, diagnostic, time.Since(started))
+	if w.complete(ctx, target, found, diagnostic, time.Since(started)) && recovery != nil && ctx.Err() == nil {
+		if found {
+			recovery.Record(resilience.Success)
+		} else {
+			recovery.Record(resilience.InfrastructureFailure)
+		}
+	}
 }
 
 func (w *RouteHealthWorker) safeProbeTarget(credential Credential, target routeProbeTarget) bool {
@@ -210,22 +238,22 @@ func (w *RouteHealthWorker) safeProbeTarget(credential Credential, target routeP
 		w.policy.Validate(credential.BaseURL) == nil
 }
 
-func (w *RouteHealthWorker) complete(ctx context.Context, target routeProbeTarget, healthy bool, diagnostic string, duration time.Duration) {
+func (w *RouteHealthWorker) complete(ctx context.Context, target routeProbeTarget, healthy bool, diagnostic string, duration time.Duration) bool {
 	tx, err := w.repository.pool.Begin(ctx)
 	if err != nil {
-		return
+		return false
 	}
 	defer tx.Rollback(ctx)
 	var routeID uuid.UUID
 	if err := tx.QueryRow(ctx, `SELECT id FROM routing_policies WHERE id=$1 FOR UPDATE`, target.RouteID).Scan(&routeID); err != nil {
-		return
+		return false
 	}
 	if held, err := tokenRouteFinancialHold(ctx, tx, routeID); err != nil || held {
-		return
+		return false
 	}
 	var now time.Time
 	if err = tx.QueryRow(ctx, `SELECT transaction_timestamp()`).Scan(&now); err != nil {
-		return
+		return false
 	}
 	status, failures := "HEALTHY", 0
 	var expires any = now.Add(routeHealthyTTL)
@@ -243,18 +271,19 @@ func (w *RouteHealthWorker) complete(ctx context.Context, target routeProbeTarge
 		if w.repository.routeHealthMetrics != nil {
 			w.repository.routeHealthMetrics.probes.WithLabelValues("stale_completion").Inc()
 		}
-		return
+		return false
 	}
 	if _, err = tx.Exec(ctx, `INSERT INTO route_health_observations(id,route_id,route_version,health_version,status,diagnostic_code,duration_ms,observed_at,expires_at,worker_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`, uuid.Must(uuid.NewV7()), target.RouteID, target.RouteVersion, target.HealthVersion, status, diagnostic, max(int64(0), duration.Milliseconds()), now, expires, w.workerID); err != nil {
-		return
+		return false
 	}
 	if tx.Commit(ctx) != nil {
-		return
+		return false
 	}
 	if w.repository.routeHealthMetrics != nil {
 		w.repository.routeHealthMetrics.probes.WithLabelValues(strings.ToLower(status)).Inc()
 	}
 	_ = w.repository.refreshRouteHealthMetrics(ctx)
+	return true
 }
 
 func (r *PostgresRepository) refreshRouteHealthMetrics(ctx context.Context) error {
