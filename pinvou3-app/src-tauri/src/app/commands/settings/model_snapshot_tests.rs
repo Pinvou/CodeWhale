@@ -853,6 +853,7 @@ fn effective_model_config_snapshot_reports_empty_selection_after_default_removed
     use crate::features::assistant::platform::bridge::Pinvou3Bridge;
 
     with_temp_home("effective-config-default-removed", || {
+        let _env = effective_config_env(&[]);
         let mut prefs = UserPrefs::default();
         prefs.memory_enabled = false;
         prefs.advanced.saved_models = vec![
@@ -884,13 +885,20 @@ fn effective_model_config_snapshot_reports_empty_selection_after_default_removed
         assert!(prefs.advanced.active_model_id.is_none());
         let mut bridge = Pinvou3Bridge::test_fixture(None);
         bridge.prefs = prefs;
-        let config = effective_model_config_snapshot(&bridge, false, Vec::new());
+        assert_eq!(bridge.prefs.active_model().unwrap().id, "user-fallback");
+        // The command must clear a stale pool-bridge binding before projection.
+        bridge.session_model = bridge.prefs.active_model().cloned();
+        let config = effective_model_config_for_selection(&mut bridge, None).unwrap();
+        assert!(bridge.session_model.is_none());
         assert_eq!(config.model, "");
         assert_eq!(config.base_url, "");
         assert_eq!(config.provider, "");
         assert_eq!(config.preset, "");
         assert_eq!(config.credential_state, CredentialState::Missing);
         assert!(!config.has_secret);
+        assert_eq!(config.credential_mode, ModelCredentialMode::None);
+        assert!(config.model_ref.is_none());
+        assert!(config.env_overrides.is_empty());
         assert!(
             !config.requires_user_api_key,
             "no endpoint is selected; the API-key gate must not fire"
@@ -900,6 +908,27 @@ fn effective_model_config_snapshot_reports_empty_selection_after_default_removed
             serde_json::json!("")
         );
 
+        // Process overrides cannot conjure a selection after deletion either.
+        {
+            let _env = effective_config_env(&[
+                ("DEEPSEEK_MODEL", "unrelated-env-model"),
+                ("DEEPSEEK_BASE_URL", "https://env.example.invalid/v1"),
+                (MODEL_API_KEY_ENV_OVERRIDE, "fixture-only-key-sentinel"),
+                ("DEEPSEEK_PROVIDER", "unrelated-env-provider"),
+            ]);
+            let config = effective_model_config_for_selection(&mut bridge, None).unwrap();
+            assert_eq!(config.model, "");
+            assert_eq!(config.base_url, "");
+            assert_eq!(config.provider, "");
+            assert_eq!(config.api_key, "");
+            assert_eq!(config.credential_state, CredentialState::Missing);
+            assert_eq!(config.credential_mode, ModelCredentialMode::None);
+            assert!(!config.requires_user_api_key);
+            assert!(!config.has_secret);
+            assert!(config.model_ref.is_none());
+            assert!(config.env_overrides.is_empty());
+        }
+
         // Re-registering an explicit default restores the resolved display.
         let mut restored = bridge.prefs.clone();
         restored
@@ -908,11 +937,262 @@ fn effective_model_config_snapshot_reports_empty_selection_after_default_removed
             ))
             .unwrap();
         bridge.prefs = restored;
-        let config = effective_model_config_snapshot(&bridge, false, Vec::new());
+        let config = effective_model_config_for_selection(&mut bridge, None).unwrap();
         assert_eq!(config.model, "user-wire");
         assert_eq!(config.base_url, "https://example.test/v1");
         // The remote endpoint keeps the ordinary key requirement; only the
         // selection-required state suppresses it.
         assert!(config.requires_user_api_key);
+        assert_eq!(config.credential_mode, ModelCredentialMode::UserManaged);
+        assert_eq!(
+            config.model_ref,
+            Some(ModelSelectionRef::local("user-fallback"))
+        );
+    });
+}
+
+// Call only while holding ENV_LOCK (all callers use with_temp_home). The guard
+// restores even on panic, before that shared lock is released.
+fn effective_config_env(
+    overrides: &[(&'static str, &str)],
+) -> crate::platform::test_support::EnvRestore {
+    let names = [
+        "DEEPSEEK_MODEL",
+        "DEEPSEEK_BASE_URL",
+        MODEL_API_KEY_ENV_OVERRIDE,
+        "DEEPSEEK_PROVIDER",
+    ];
+    let restore = crate::platform::test_support::EnvRestore::capture(&names);
+    for name in names {
+        // SAFETY: the caller holds the crate-wide ENV_LOCK via with_temp_home.
+        unsafe { std::env::remove_var(name) };
+    }
+    for (name, value) in overrides {
+        // SAFETY: the caller holds the same ENV_LOCK for this guard's lifetime.
+        unsafe { std::env::set_var(name, value) };
+    }
+    restore
+}
+
+fn effective_config_user_model(id: &str, base_url: &str) -> SavedModel {
+    serde_json::from_value(serde_json::json!({
+        "id": id, "name": id, "preset": "openai_compatible",
+        "model": "user-wire", "base_url": base_url,
+        "provider_kind": "custom", "vendor": "openai",
+        "credential_state": "unavailable", "has_secret": true,
+        "credential_ref": { "service": "pinvou3-model-api-key", "account": format!("model:{id}"), "version": 1 }
+    }))
+    .unwrap()
+}
+
+#[test]
+fn effective_model_config_backend_projection_ignores_local_overrides_and_secret_metadata() {
+    use crate::features::assistant::platform::bridge::Pinvou3Bridge;
+
+    with_temp_home("effective-config-backend-projection", || {
+        let overrides = [
+            ("DEEPSEEK_MODEL", "unrelated-env-model"),
+            ("DEEPSEEK_BASE_URL", "https://env.example.invalid/v1"),
+            (MODEL_API_KEY_ENV_OVERRIDE, "fixture-only-key-sentinel"),
+            ("DEEPSEEK_PROVIDER", "unrelated-env-provider"),
+        ];
+        let _env = effective_config_env(&overrides);
+        let mut carrier = SavedModel::builtin_account_platform();
+        // A backend-managed carrier owns no user secret, even if stale metadata
+        // arrived at this projection before the ordinary prefs refresh.
+        carrier.has_secret = true;
+        carrier.credential_state = CredentialState::Configured;
+        carrier.credential_ref = Some(CredentialReference::for_model(&carrier.id));
+        let mut prefs = UserPrefs::default();
+        prefs.advanced.saved_models = vec![carrier];
+        let global = ModelSelectionRef::account_platform("global-catalog-model");
+        let session = ModelSelectionRef::account_platform("session-catalog-model");
+        prefs.set_default_model_ref(global.clone()).unwrap();
+        let store = SessionStore::boot().unwrap();
+        store
+            .set_session_model_ref("selected-chat", Some(session.clone()))
+            .unwrap();
+        let mut bridge = Pinvou3Bridge::test_fixture(Some(effective_config_user_model(
+            "stale-pool-binding",
+            "https://stale.example.invalid/v1",
+        )));
+        bridge.prefs = prefs;
+        let config = effective_model_config_for_selection(
+            &mut bridge,
+            store.session_model_ref("selected-chat"),
+        )
+        .unwrap();
+        assert_eq!(config.model_ref, Some(session));
+        assert_eq!(config.model, "session-catalog-model");
+        assert_eq!(bridge.session_model.as_ref().unwrap().model, config.model);
+        assert_eq!(
+            bridge.prefs.advanced.default_model_ref,
+            Some(global.clone())
+        );
+        assert_eq!(config.credential_mode, ModelCredentialMode::BackendManaged);
+        assert!(!config.requires_user_api_key);
+        assert_eq!(config.credential_state, CredentialState::Missing);
+        assert!(!config.has_secret);
+        assert_eq!(config.api_key, "");
+        assert_eq!(config.base_url, "");
+        // Same source as Pinvou3Bridge::provider's account_gateway_runtime
+        // branch after preparation; local provider env never owns that route.
+        assert_eq!(config.provider, "openai");
+        assert!(config.env_overrides.is_empty());
+        let serialized = serde_json::to_string(&config).unwrap();
+        for (_, sentinel) in overrides {
+            assert!(!serialized.contains(sentinel));
+        }
+
+        let config = effective_model_config_for_selection(
+            &mut bridge,
+            store.session_model_ref("unbound-chat"),
+        )
+        .unwrap();
+        assert_eq!(config.model_ref, Some(global));
+        assert_eq!(config.model, "global-catalog-model");
+        assert_eq!(config.credential_mode, ModelCredentialMode::BackendManaged);
+    });
+}
+
+#[test]
+fn effective_model_config_preserves_user_and_direct_credentials_and_source_refs() {
+    use crate::features::assistant::platform::bridge::Pinvou3Bridge;
+
+    with_temp_home("effective-config-user-direct", || {
+        let _env = effective_config_env(&[]);
+        let cloud = effective_config_user_model("cloud", "https://user.example.invalid/v1");
+        let direct = effective_config_user_model("direct", "http://127.0.0.1:8911/v1");
+        let mut prefs = UserPrefs::default();
+        prefs.advanced.saved_models = vec![SavedModel::builtin_account_platform(), cloud, direct];
+        prefs
+            .set_default_model_ref(ModelSelectionRef::account_platform("global-catalog-model"))
+            .unwrap();
+        let store = SessionStore::boot().unwrap();
+        let local = ModelSelectionRef::local("cloud");
+        store
+            .set_session_model_ref("user-chat", Some(local.clone()))
+            .unwrap();
+        let mut bridge = Pinvou3Bridge::test_fixture(None);
+        bridge.prefs = prefs;
+        let config =
+            effective_model_config_for_selection(&mut bridge, store.session_model_ref("user-chat"))
+                .unwrap();
+        assert_eq!(config.model_ref, Some(local));
+        assert_eq!(config.credential_mode, ModelCredentialMode::UserManaged);
+        assert!(config.requires_user_api_key);
+        assert_eq!(config.credential_state, CredentialState::Unavailable);
+        assert!(config.has_secret);
+        assert_eq!(config.model, "user-wire");
+        assert_eq!(config.base_url, "https://user.example.invalid/v1");
+        assert_eq!(config.provider, "openai");
+        assert_eq!(config.api_key, "");
+
+        // A retained explicit session selection also survives clearing the
+        // global typed default; only an unbound chat requires a new selection.
+        bridge.prefs.advanced.default_model_ref = None;
+        let config =
+            effective_model_config_for_selection(&mut bridge, store.session_model_ref("user-chat"))
+                .unwrap();
+        assert_eq!(config.model_ref, Some(ModelSelectionRef::local("cloud")));
+        assert_eq!(config.credential_state, CredentialState::Unavailable);
+
+        bridge
+            .prefs
+            .set_default_model_ref(ModelSelectionRef::local("direct"))
+            .unwrap();
+        let config = effective_model_config_for_selection(&mut bridge, None).unwrap();
+        assert_eq!(config.model_ref, Some(ModelSelectionRef::local("direct")));
+        assert_eq!(config.credential_mode, ModelCredentialMode::None);
+        assert!(!config.requires_user_api_key);
+        assert_eq!(config.credential_state, CredentialState::Unavailable);
+        assert!(config.has_secret);
+        assert_eq!(config.base_url, "http://127.0.0.1:8911/v1");
+
+        // User/direct paths retain their existing bridge env precedence. A
+        // loopback override remains unauthenticated; a cloud override needs a
+        // user key. Both report env status without returning any secret bytes.
+        for (base_url, mode) in [
+            ("http://127.0.0.1:8912/v1", ModelCredentialMode::None),
+            (
+                "https://env.example.invalid/v1",
+                ModelCredentialMode::UserManaged,
+            ),
+        ] {
+            let _env = effective_config_env(&[
+                ("DEEPSEEK_MODEL", "user-env-model"),
+                ("DEEPSEEK_BASE_URL", base_url),
+                (MODEL_API_KEY_ENV_OVERRIDE, "fixture-only-key-sentinel"),
+                ("DEEPSEEK_PROVIDER", "user-env-provider"),
+            ]);
+            let config = effective_model_config_for_selection(&mut bridge, None).unwrap();
+            assert_eq!(config.model_ref, Some(ModelSelectionRef::local("direct")));
+            assert_eq!(config.credential_mode, mode);
+            assert_eq!(
+                config.requires_user_api_key,
+                mode == ModelCredentialMode::UserManaged
+            );
+            assert_eq!(config.credential_state, CredentialState::EnvOverride);
+            assert!(config.has_secret);
+            assert_eq!(config.model, "user-env-model");
+            assert_eq!(config.base_url, base_url);
+            assert_eq!(config.provider, "user-env-provider");
+            assert_eq!(config.api_key, "");
+            assert_eq!(
+                config.env_overrides,
+                vec!["model", "base_url", "api_key", "provider"]
+            );
+        }
+    });
+}
+
+#[test]
+fn effective_model_config_rejects_deleted_references_and_preserves_legacy_fallback() {
+    use crate::features::assistant::platform::bridge::Pinvou3Bridge;
+
+    with_temp_home("effective-config-ref-boundaries", || {
+        let _env = effective_config_env(&[]);
+        let mut prefs = UserPrefs::default();
+        prefs.advanced.saved_models = vec![effective_config_user_model(
+            "retained",
+            "http://127.0.0.1:8911/v1",
+        )];
+        prefs
+            .set_default_model_ref(ModelSelectionRef::local("retained"))
+            .unwrap();
+        let mut bridge = Pinvou3Bridge::test_fixture(None);
+        bridge.prefs = prefs;
+        assert!(
+            effective_model_config_for_selection(
+                &mut bridge,
+                Some(ModelSelectionRef::local("deleted-session-model")),
+            )
+            .unwrap_err()
+            .starts_with("model_selection_unavailable:")
+        );
+        bridge.prefs.advanced.default_model_ref =
+            Some(ModelSelectionRef::local("deleted-default-model"));
+        assert!(
+            effective_model_config_for_selection(&mut bridge, None)
+                .unwrap_err()
+                .starts_with("model_selection_unavailable:")
+        );
+        assert!(
+            effective_model_config_for_selection(
+                &mut bridge,
+                Some(ModelSelectionRef::account_platform(" ")),
+            )
+            .unwrap_err()
+            .starts_with("model_selection_unavailable:")
+        );
+
+        bridge.prefs.advanced.default_model_ref = None;
+        bridge.prefs.model_selection_schema_version = 0;
+        let config = effective_model_config_for_selection(&mut bridge, None).unwrap();
+        assert_eq!(config.model, "user-wire");
+        assert_eq!(config.base_url, "http://127.0.0.1:8911/v1");
+        assert!(config.model_ref.is_none());
+        assert_eq!(config.credential_mode, ModelCredentialMode::None);
+        assert_eq!(bridge.session_model.as_ref().unwrap().id, "retained");
     });
 }
