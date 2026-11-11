@@ -46,7 +46,7 @@ for (const shell of ["powershell.exe", "pwsh"]) {
           $first=@($ps.Invoke());if($ps.HadErrors){throw ($ps.Streams.Error|Out-String)};$root=[string]$first[-1];$ps.Commands.Clear();
           [Console]::Error.WriteLine('fixture-phase:bootstrapped');
           [void]$ps.AddScript({param($nonce)
-            $ErrorActionPreference='Stop';$driver=Join-Path $global:PinvouE2ERunRoot 'pinvou-e2e-driver.exe';
+            $ErrorActionPreference='Stop';$PSDefaultParameterValues['Invoke-PinvouWhitelistedProcess:TimeoutMilliseconds']=5000;$driver=Join-Path $global:PinvouE2ERunRoot 'pinvou-e2e-driver.exe';
             $runtime=(Invoke-PinvouTrustedGuard -FilePath $driver -Arguments @('legacy-start','--run-nonce',$nonce,'--persist-ownership-before-response'))|ConvertFrom-Json;
             if($LASTEXITCODE -ne 0){throw 'legacy-start-failed'};
             [Console]::Error.WriteLine('fixture-phase:legacy-started');
