@@ -377,7 +377,7 @@ Reusing a stable registration ID with a different generation, endpoint,
 identity, public key, algorithm or capability list is `invalid_message`.
 
 New registrations additionally pass the state owner's endpoint/global retained
-record, fixed-window, serialized-byte and bounded fair-queue budgets before code
+record, rolling-window, serialized-byte and bounded fair-queue budgets before code
 allocation. Exact committed retries remain readable without spending a new
 quota; matching in-flight retries coalesce while echoing each transport request
 ID. A quota rejection is the existing bounded `controller_busy` admission error,
