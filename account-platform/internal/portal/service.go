@@ -57,14 +57,15 @@ type Config struct {
 	TrustedProxyIPs                     []netip.Addr
 }
 type Service struct {
-	probeClient     *http.Client
-	config          Config
-	store           Store
-	client          *http.Client
-	auditClient     *http.Client
-	now             func() time.Time
-	verifier        *oidc.IDTokenVerifier
-	trustedProxyIPs map[netip.Addr]struct{}
+	probeClient        *http.Client
+	config             Config
+	store              Store
+	client             *http.Client
+	auditClient        *http.Client
+	emptyCommandClient *http.Client
+	now                func() time.Time
+	verifier           *oidc.IDTokenVerifier
+	trustedProxyIPs    map[netip.Addr]struct{}
 }
 type oidcTokenEndpointError struct {
 	StatusCode int
@@ -150,6 +151,10 @@ func NewService(config Config, store Store) (*Service, error) {
 	if err != nil {
 		return nil, err
 	}
+	emptyCommandClient, err := newPortalEmptyCommandHTTPClient(config.PrivateCAFile)
+	if err != nil {
+		return nil, err
+	}
 	probeClient := client
 	if strings.TrimSpace(config.SystemProbeCAFile) != "" {
 		probeClient, err = newPortalHTTPClient(config.SystemProbeCAFile)
@@ -159,7 +164,7 @@ func NewService(config Config, store Store) (*Service, error) {
 	}
 	keyContext := oidc.ClientContext(context.Background(), client)
 	verifier := oidc.NewVerifier(strings.TrimRight(config.IssuerURL.String(), "/"), oidc.NewRemoteKeySet(keyContext, config.JWKSURL.String()), &oidc.Config{ClientID: config.ClientID})
-	return &Service{config: config, store: store, client: client, auditClient: auditClient, probeClient: probeClient, verifier: verifier, trustedProxyIPs: trustedProxies, now: func() time.Time { return time.Now().UTC() }}, nil
+	return &Service{config: config, store: store, client: client, auditClient: auditClient, emptyCommandClient: emptyCommandClient, probeClient: probeClient, verifier: verifier, trustedProxyIPs: trustedProxies, now: func() time.Time { return time.Now().UTC() }}, nil
 }
 func (s *Service) Handler(static http.Handler) http.Handler {
 	router := httpserver.NewRouter()
@@ -1007,6 +1012,16 @@ func (s *Service) forward(w http.ResponseWriter, r *http.Request, upstream *url.
 		}
 	}
 	client := s.client
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		// Keep the idempotency key without making a sent command replayable.
+		request.GetBody = nil
+		if request.Body == http.NoBody {
+			// An empty command carrying an idempotency key can be replayed
+			// even without GetBody. A fresh connection avoids that replay
+			// without changing empty-body framing.
+			client = s.emptyCommandClient
+		}
+	}
 	if materialUpload {
 		uploadClient := *client
 		uploadClient.Timeout = productAdmissionMaterialUpstreamTimeout
@@ -1027,17 +1042,14 @@ func (s *Service) forward(w http.ResponseWriter, r *http.Request, upstream *url.
 		return
 	}
 	defer response.Body.Close()
-	for _, name := range []string{"Content-Type", "Retry-After", "X-Context-Version", "X-Authorization-Version", "X-Personal-Authorization-Version", "X-Platform-Authorization-Version", "X-Organization-Authorization-Version"} {
-		if value := response.Header.Get(name); value != "" {
-			w.Header().Set(name, value)
-		}
-	}
-	w.Header().Set("Cache-Control", "no-store")
-	if authenticated && upstream == s.config.BillingURL && productAdmissionMaterialContent(r.Method, resource) && response.StatusCode == http.StatusOK {
+	materialContent := authenticated && upstream == s.config.BillingURL && productAdmissionMaterialContent(r.Method, resource) && response.StatusCode == http.StatusOK
+	if materialContent {
+		copyPortalResponseHeaders(w, response)
 		forwardProductAdmissionOriginal(w, r, response)
 		return
 	}
 	if auditDownload {
+		copyPortalResponseHeaders(w, response)
 		for _, name := range []string{"Content-Disposition", "Content-Length"} {
 			if value := response.Header.Get(name); value != "" {
 				w.Header().Set(name, value)

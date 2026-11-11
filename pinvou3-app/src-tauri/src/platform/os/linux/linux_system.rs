@@ -223,3 +223,12 @@ pub fn nvidia_smi_candidates() -> Vec<&'static str> {
         "/usr/local/bin/nvidia-smi",
     ]
 }
+
+pub fn docker_candidates() -> Vec<&'static str> {
+    vec![
+        "docker",
+        "/usr/bin/docker",
+        "/usr/local/bin/docker",
+        "/snap/bin/docker",
+    ]
+}
