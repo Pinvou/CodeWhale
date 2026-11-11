@@ -18,6 +18,7 @@ ROOT = Path(__file__).resolve().parents[1]
 _financial_helpers = runpy.run_path(str(ROOT / "scripts/test-token-financial-postgres.py"))
 local_database_url = _financial_helpers["local_database_url"]
 ci_identity_guard = _financial_helpers["ci_identity_guard"]
+require_exclusive_instance = _financial_helpers["require_exclusive_instance"]
 LEDGER_REPAIR_APPROVAL_ROOT = "TestLedgerRepairCrossDomainActivationPostgresIntegration"
 LEDGER_REPAIR_PAYMENT_E2E_ROOT = "TestLedgerRepairPaymentAuthorityE2EPostgresIntegration"
 LEDGER_REPAIR_APPROVAL_ROOTS = {LEDGER_REPAIR_APPROVAL_ROOT, LEDGER_REPAIR_PAYMENT_E2E_ROOT}
@@ -192,10 +193,10 @@ def main():
     if not go:
         raise RuntimeError("Go executable is required by the child fixtures")
 
-    def query(sql):
+    def query(sql, *, timeout=30):
         result = subprocess.run(
             [psql, raw, "-X", "-q", "-A", "-t", "-v", "ON_ERROR_STOP=1", *ci_identity_guard(raw), "-c", sql],
-            capture_output=True, text=True, encoding="utf-8", check=False, timeout=30,
+            capture_output=True, text=True, encoding="utf-8", check=False, timeout=timeout,
         )
         if result.returncode:
             raise RuntimeError("disposable PostgreSQL operation failed")
@@ -206,18 +207,7 @@ def main():
 
     def require_instance(billing=False):
         expected = {user} | (BILLING_ACTORS if billing else set())
-        roles = set(query("SELECT rolname FROM pg_roles WHERE rolname !~ '^pg_' ORDER BY rolname").splitlines())
-        if query("SELECT datname FROM pg_database ORDER BY datname") != databases or roles != expected:
-            raise RuntimeError("database or actors differ; retain them for diagnosis, no setup writes permitted")
-        if query("SELECT count(*) FROM pg_stat_activity WHERE backend_type='client backend' AND pid<>pg_backend_pid()") != "0":
-            raise RuntimeError("another client is active; exclusive fixture required")
-        objects = query("""SELECT
-            (SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
-             WHERE n.nspname !~ '^pg_' AND n.nspname <> 'information_schema') +
-            (SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
-             WHERE n.nspname !~ '^pg_' AND n.nspname <> 'information_schema')""")
-        if objects != "0":
-            raise RuntimeError("bootstrap database contains user objects; no setup writes permitted")
+        require_exclusive_instance(query, databases.splitlines(), expected)
 
     require_instance()
     if int(query("SHOW server_version_num")) < 160000:

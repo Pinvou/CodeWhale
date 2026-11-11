@@ -1166,16 +1166,24 @@ class CiGatePolicyTests(unittest.TestCase):
 
     def test_account_closure_ci_steps_are_precisely_pinned(self):
         """Keep the closure source and isolated-PG gates live and fail-closed."""
-        job = _without_inline_comments(_extract_job_block(self.pr_workflow, "account-platform-test"))
+        job = _without_inline_comments(_extract_job_block(self.pr_workflow, "account-platform-test")) + _without_inline_comments(_extract_job_block(self.pr_workflow, "account-closure-test"))
 
         def assert_contract(text):
-            _account_closure_source_shell_arguments(self.pr_workflow, text)
-            header = text.split("\n    steps:", 1)[0]
-            self.assertRegex(header, r"(?m)^    needs: changes$")
-            self.assertRegex(header, r"(?m)^    if:")
-            self.assertEqual(_step_if_tokens(header), "${{ !cancelled() && github.event.action != 'closed' && needs.changes.outputs.account_platform == 'true' }}")
-            self.assertNotRegex(header, r"(?m)^    continue-on-error:")
+            source_owner = _extract_job_block(text, "account-platform-test")
+            postgres_owner = _extract_job_block(text, "account-closure-test")
+            _account_closure_source_shell_arguments(self.pr_workflow, source_owner)
+            for owner, expected_route in (
+                (source_owner, "${{ !cancelled() && github.event.action != 'closed' && needs.changes.outputs.account_platform == 'true' }}"),
+                (postgres_owner, "${{ !cancelled() && github.event.action != 'closed' && needs.changes.outputs.account_platform == 'true' && !(github.event_name == 'merge_group' && fromJSON(toJSON(needs.changes.outputs)).reuse_verified == 'true' && contains(fromJSON(fromJSON(toJSON(needs.changes.outputs)).reused_jobs || '[]'), 'account-closure-test')) }}"),
+            ):
+                self.assertNotRegex(owner, r'''(?m)^    (?:defaults|'defaults'|"defaults")\s*:''')
+                header = owner.split("\n    steps:", 1)[0]
+                self.assertRegex(header, r"(?m)^    needs: changes$")
+                self.assertRegex(header, r"(?m)^    if:")
+                self.assertEqual(_step_if_tokens(header), expected_route)
+                self.assertNotRegex(header, r"(?m)^    continue-on-error:")
             source = _step_named(text, "Verify Account closure source and API contracts")
+            self.assertEqual(source, _step_named(source_owner, "Verify Account closure source and API contracts"))
             self.assertEqual(_step_run_lines(source), [
                 "npm --prefix account-platform ci --ignore-scripts --no-audit --fund=false",
                 "npm --prefix account-platform run test:closure-contracts",
@@ -1183,10 +1191,11 @@ class CiGatePolicyTests(unittest.TestCase):
             self.assertNotRegex(source, r"(?m)^        (?:if|continue-on-error):")
             self.assertNotRegex(source, r"(?m)^        shell:")
             postgres = _step_named(text, "Account closure contracts on isolated PostgreSQL")
+            self.assertEqual(postgres, _step_named(postgres_owner, "Account closure contracts on isolated PostgreSQL"))
             self.assertRegex(postgres, r"(?m)^        shell: bash$")
             self.assertEqual(_step_run_lines(postgres), ["set -euo pipefail",
                 "python3 -m unittest discover -s scripts/tests -p test_account_closure_postgres.py",
-                "python3 scripts/test-account-closure-postgres.py",
+                'python3 scripts/ci-fixture-process.py --receipt "$PINVOU_CI_RESOURCE_LEDGER/closure-process.json" -- python3 scripts/test-account-closure-postgres.py',
             ])
             for field, output in (("PINVOU_ACCOUNT_CLOSURE_TEST_DATABASE_URL", "financial_url"),
                     ("PINVOU_ACCOUNT_CI_PG_PORT", "financial_port"),
@@ -1204,7 +1213,13 @@ class CiGatePolicyTests(unittest.TestCase):
             job.replace(postgres, "", 1),
             job.replace("npm --prefix account-platform run test:closure-contracts", "true", 1),
             job.replace("python3 scripts/test-account-closure-postgres.py", "true", 1),
+            job.replace('python3 scripts/ci-fixture-process.py --receipt "$PINVOU_CI_RESOURCE_LEDGER/closure-process.json" -- ', "", 1),
             job.replace("account_platform == 'true'", "account_platform == 'true' && false", 1),
+            job.replace(postgres, "", 1).replace(source, source + "\n" + postgres, 1),
+            job.replace(source, "", 1) + "\n" + source,
+            job.replace("account_platform == 'true' && !(", "account_platform == 'true' && false && !(", 1),
+            job.replace(".reuse_verified == 'true'", ".reuse_verified == 'false'", 1),
+            job.replace("'account-closure-test'))", "'another-job'))", 1),
             job.replace(postgres, postgres.replace("financial_system", "other_system", 1), 1),
             job.replace(postgres, postgres.replace("${{ runner.temp }}/account-closure-postgres", "/tmp/uncollected", 1), 1),
             job.replace(source, source.replace(source.splitlines()[0], source.splitlines()[0] + "\n        shell: bash -c {0}", 1), 1),
@@ -1236,14 +1251,16 @@ class CiGatePolicyTests(unittest.TestCase):
                 workflow = defaults + "\n" + self.pr_workflow
                 with self.subTest(scope="workflow", defaults=defaults), self.assertRaises(AssertionError):
                     _account_closure_source_shell_arguments(workflow, job)
-                inherited = job.replace("\n    steps:", "\n" + textwrap.indent(defaults, "    ") + "\n    steps:", 1)
-                self.assertNotEqual(inherited, job)
-                with self.subTest(scope="job", defaults=defaults), self.assertRaises(AssertionError):
-                    assert_contract(inherited)
-                # YAML mapping key order does not affect the effective defaults.
-                after_steps = job + "\n" + textwrap.indent(defaults, "    ") + "\n"
-                with self.subTest(scope="job-after-steps", defaults=defaults), self.assertRaises(AssertionError):
-                    assert_contract(after_steps)
+                for owner_name in ("account-platform-test", "account-closure-test"):
+                    owner = _extract_job_block(job, owner_name)
+                    inherited = job.replace(owner, owner.replace("\n    steps:", "\n" + textwrap.indent(defaults, "    ") + "\n    steps:", 1), 1)
+                    self.assertNotEqual(inherited, job)
+                    with self.subTest(scope=owner_name, defaults=defaults), self.assertRaises(AssertionError):
+                        assert_contract(inherited)
+                    # YAML mapping key order does not affect the effective defaults.
+                    after_steps = job.replace(owner, owner + "\n" + textwrap.indent(defaults, "    ") + "\n", 1)
+                    with self.subTest(scope=owner_name+"-after-steps", defaults=defaults), self.assertRaises(AssertionError):
+                        assert_contract(after_steps)
 
     def test_account_required_gate_member_triple_is_pinned(self):
         original = self.pr_workflow
@@ -1284,7 +1301,6 @@ class CiGatePolicyTests(unittest.TestCase):
                     bash = str(candidate)
                     break
         self.assertIsNotNone(bash, "the existing Bash CI contracts require Bash")
-        job = _extract_job_block(self.pr_workflow, "account-platform-test")
         prefix = """fixture_calls=0
 fixture_mock() {
   ((fixture_calls+=1))
@@ -1294,7 +1310,9 @@ fixture_mock() {
 npm() { fixture_mock npm "$@"; }
 python3() { fixture_mock python3 "$@"; }
 """
-        for name in ("Verify Account closure source and API contracts", "Account closure contracts on isolated PostgreSQL"):
+        for name, owner in (("Verify Account closure source and API contracts", "account-platform-test"),
+                            ("Account closure contracts on isolated PostgreSQL", "account-closure-test")):
+            job = _extract_job_block(self.pr_workflow, owner)
             script = "\n".join(_step_run_lines(_step_named(job, name)))
             switches = (_account_closure_source_shell_arguments(self.pr_workflow, job)
                         if name == "Verify Account closure source and API contracts"
@@ -1302,7 +1320,8 @@ python3() { fixture_mock python3 "$@"; }
             for failure in (0, 1, 2):
                 with self.subTest(step=name, failure=failure), tempfile.TemporaryDirectory(prefix="account-closure-wiring-") as directory:
                     result = subprocess.run([bash, *switches, prefix + script], cwd=directory,
-                        env={**os.environ, "CI_FIXTURE_FAIL_AT": str(failure)}, capture_output=True, text=True, timeout=30, check=False)
+                        env={**os.environ, "CI_FIXTURE_FAIL_AT": str(failure),
+                             "PINVOU_CI_RESOURCE_LEDGER": directory}, capture_output=True, text=True, timeout=30, check=False)
                     self.assertEqual(result.returncode, 7 if failure else 0, result.stderr)
                     self.assertEqual(len(result.stdout.splitlines()), failure or 2, result.stdout)
 
@@ -3597,7 +3616,9 @@ python3() { fixture_mock python3 "$@"; }
             "Test resource lifecycle receipts",
             "Financial parallel diagnostics",
             "Account test resource lifecycle receipts",
+            "Account closure resource lifecycle receipts",
             "Preserve browser fixture exit receipts",
+            "Preserve ACP fixture exit receipt",
         )
         self.assertEqual(
             len(step_level),
@@ -3673,6 +3694,11 @@ python3() { fixture_mock python3 "$@"; }
                     retention-days: 7
             """).rstrip(), "      "),
         )
+        closure_receipt = _step_named(_extract_job_block(body, 'account-closure-test'), 'Account closure resource lifecycle receipts')
+        self.assertIn('timeout-minutes: 3', closure_receipt)
+        self.assertIn('uses: actions/upload-artifact@v7', closure_receipt)
+        self.assertIn('name: account-closure-resource-lifecycle-${{ github.run_attempt }}', closure_receipt)
+        self.assertNotRegex(closure_receipt, r'(?m)^        (?:run|env):')
         diagnostic_job = _extract_job_block(body, 'account-platform-test')
         matches = list(re.finditer(
             r"(?ms)^      - name: Account test resource lifecycle receipts\n.*?(?=^      - |\Z)", diagnostic_job

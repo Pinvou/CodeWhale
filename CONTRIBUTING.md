@@ -148,6 +148,18 @@ surviving child resources stopped; use the owning process supervisor and ledger.
 
 ## CI and merge queue
 
+Account Platform PostgreSQL closure contracts run in `account-closure-test`,
+independently of `account-platform-test`; both are mandatory for Account changes.
+The financial gate runs six independently admitted services (owners, Token, and
+four Billing shards). Billing assigns complete test roots by longest estimated
+duration first using `scripts/account-financial-test-durations.json`; new roots
+receive the documented default weight and remain included exactly once. Weights
+affect scheduling only: race detection, required subcases, exclusive actors,
+identity checks and strict resource retirement remain mandatory. Closure uses
+its own job-owned service and its own cleanup receipt. Runner capacity must cover
+the extra PostgreSQL workers; the original per-worker CPU/memory caps remain.
+
+
 Pull requests use a staged, path-aware gate. Draft pull requests run fast feedback
 (lint, build, deterministic logic tests, and Rust formatting where applicable).
 Ready pull requests add browser smokes selected from the actual diff, platform
@@ -240,6 +252,12 @@ rechecks the expected database owner; zero sessions remain mandatory, and the
 final drop never forces disconnection. The required real PostgreSQL regression
 holds an advisory-lock barrier to prove that a closed client can still have a
 live backend, and verifies timeout, owner and missing-database refusal.
+The Python financial and closure wrappers observe the same shutdown boundary:
+each identity-guarded SQL snapshot must retain exactly the expected databases
+and roles, no bootstrap objects, and zero other client backends. They may wait
+up to 15 seconds for backends to exit, checking all conditions on every sample;
+query/identity errors or catalog drift fail immediately. This never terminates
+a backend, removes an unknown actor, or retries a business contract.
 
 Repository administrators can set `PINVOU_LINUX_RUNNER` to a JSON label array
 (for example `["self-hosted","Linux","pinvou3"]`) to route x64 Linux jobs to
