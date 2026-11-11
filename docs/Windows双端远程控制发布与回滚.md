@@ -20,6 +20,8 @@
 
 ### 1.1 泄露扫描的非空执行证据
 
+哨兵扫描必须完整收集四个固定表面，缺面或非法值不得得到 clean 回执；编码检测范围与限制见[敏感证据扫描合同](remote-control-sensitive-evidence-scan.md)。
+
 已删除的 Rust `controller::telemetry` 不再是验证入口。以下每条必须实际报告 `1 passed; 0 failed`，不能仅用 cargo 退出码 0 或 `0 tests` 作为通过证据：
 
 ```bash

@@ -27,6 +27,9 @@ func TestSampleNTPValidatesLocalServerResponses(t *testing.T) {
 		{"wrong-request", func(packet []byte) []byte { packet[24] ^= 1; return packet }, false},
 		{"zero-receive-time", func(packet []byte) []byte { clear(packet[32:40]); return packet }, false},
 		{"zero-transmit-time", func(packet []byte) []byte { clear(packet[40:48]); return packet }, false},
+		{"root-dispersion-limit", func(packet []byte) []byte { binary.BigEndian.PutUint32(packet[8:12], 1<<16); return packet }, true},
+		{"root-dispersion-over-limit", func(packet []byte) []byte { binary.BigEndian.PutUint32(packet[8:12], 1<<16|1); return packet }, false},
+		{"root-dispersion-maximum", func(packet []byte) []byte { binary.BigEndian.PutUint32(packet[8:12], ^uint32(0)); return packet }, false},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -72,6 +75,38 @@ func TestSampleNTPValidatesLocalServerResponses(t *testing.T) {
 				}
 			} else if err == nil {
 				t.Fatal("invalid NTP response was accepted as a trusted sample")
+			}
+		})
+	}
+}
+
+func TestNTPOffsetAccountsForServerProcessingTime(t *testing.T) {
+	start := time.Date(2026, 11, 7, 0, 0, 0, 0, time.UTC)
+	for _, test := range []struct {
+		name       string
+		offset     time.Duration
+		processing time.Duration
+	}{
+		{"zero-offset-no-processing", 0, 0},
+		{"zero-offset-long-processing", 0, 600 * time.Millisecond},
+		{"positive-offset", 400 * time.Millisecond, 200 * time.Millisecond},
+		{"negative-offset", -400 * time.Millisecond, 400 * time.Millisecond},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			const transit = 20 * time.Millisecond
+			received := start.Add(transit + test.offset)
+			transmitted := received.Add(test.processing)
+			finished := start.Add(2*transit + test.processing)
+			packet := make([]byte, 48)
+			for _, value := range []struct {
+				raw []byte
+				at  time.Time
+			}{{packet[32:40], received}, {packet[40:48], transmitted}} {
+				binary.BigEndian.PutUint32(value.raw[:4], uint32(value.at.Unix()+ntpEpochOffset))
+				binary.BigEndian.PutUint32(value.raw[4:], uint32(uint64(value.at.Nanosecond())<<32/uint64(time.Second)))
+			}
+			if got := ntpOffset(start, finished, packet); absolute(got-test.offset) > time.Nanosecond {
+				t.Fatalf("offset=%v want=%v with processing=%v", got, test.offset, test.processing)
 			}
 		})
 	}

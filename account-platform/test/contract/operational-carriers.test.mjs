@@ -75,7 +75,7 @@ test('all five dashboard queries bind current HTTP and relay metric families', (
   assert.match(relay, /"source": source/);
 });
 
-test('twelve broken references become explicit immutable historical sources', () => {
+test('governance references use explicit immutable historical sources', () => {
   const files = [
     ['account-platform/docs/implementation-status.md', 2],
     ['account-platform/docs/implementation-tasks.md', 1],
@@ -83,7 +83,7 @@ test('twelve broken references become explicit immutable historical sources', ()
     ['account-platform/docs/payment-financial-repair-design.md', 2],
     ['account-platform/docs/receivable-write-off-design.md', 2],
     ['account-platform/docs/refund-exception-repair-design.md', 2],
-    ['account-platform/docs/requirements.md', 1],
+    ['account-platform/docs/requirements.md', 4],
   ];
   const targets = new Set([
     'account-platform/docs/admin-governance-security-tasks.md',
@@ -104,7 +104,7 @@ test('twelve broken references become explicit immutable historical sources', ()
     }
     total += restored.length;
   }
-  assert.equal(total, 12);
+  assert.equal(total, 15);
 });
 
 test('operator documentation distinguishes offline evidence and current lineage policy', () => {
