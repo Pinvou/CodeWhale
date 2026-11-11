@@ -196,6 +196,7 @@ REFUND_REQUIRED = {
     "TestRefundOriginalUnknownSuccessQueriesAndSettlesOrdinaryGrantsPostgres",
 }
 RETAINED_REQUIRED = {
+    "TestRetainedOrganizationOrderHistoryPagination",
     "TestClosedGrantEvidenceCurrentRoleGuardsPostgres",
     "TestExpiredHoldProofRetryDiagnosticsPostgres",
     "TestEscalatedForcedRefundRequiresSecondActorAndReplays",
@@ -365,6 +366,10 @@ EXACT_REQUIRED_CHILDREN = {
     },
     "TestClosedGrantEvidenceCurrentRoleGuardsPostgres": {
         "account_closure_grant_isolations", "account_closed_grant_reclaim_commands",
+    },
+    "TestRetainedOrganizationOrderHistoryPagination": {
+        "same-timestamp-cursor-and-owner-isolation",
+        "concurrent-new-order-does-not-shift-older-pages",
     },
     "TestManagementPublicMigrationInstallation": {
         "fresh", "legacy-upgrade", "installed-29-upgrade", "installed-30-upgrade",
