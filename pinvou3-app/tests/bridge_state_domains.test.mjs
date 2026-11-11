@@ -23,22 +23,10 @@ import test from 'node:test';
 import { readFileSync } from 'node:fs';
 
 import { desktopOnlyBridgeDomains } from './bridge_domain_contract.mjs';
+import { parseSliceFields } from './bridge_slice_fields.mjs';
 
 const read = (relative) =>
   readFileSync(new URL(`../src/${relative}`, import.meta.url), 'utf8');
-
-function parseSliceFields(source) {
-  const match = source.match(/const STATE_SLICE_FIELDS = \{([\s\S]*?)\n {2}\};/);
-  assert.ok(match, 'STATE_SLICE_FIELDS not found in shared/bridge-shared-helpers.js');
-  const domains = {};
-  for (const entry of match[1].matchAll(/(\w+): \[([^\]]*)\]/g)) {
-    domains[entry[1]] = entry[2]
-      .split(',')
-      .map((field) => field.trim().replace(/^"|"$/g, ''))
-      .filter(Boolean);
-  }
-  return domains;
-}
 
 function parseAppDomains(source) {
   const match = source.match(/const APP_BRIDGE_STATE_DOMAINS = \[([^\]]*)\]/);
@@ -108,6 +96,37 @@ test('projects domain is fully wired (feature -> slice -> app)', () => {
   assert.ok(
     appDomains.includes('projects'),
     'APP_BRIDGE_STATE_DOMAINS must subscribe the projects domain',
+  );
+});
+
+test('device domain is fully wired (feature -> slice -> app)', () => {
+  const feature = read('platform/tauri/bridge/device.js');
+  const sliceFields = parseSliceFields(read('shared/bridge-shared-helpers.js'));
+  const appDomains = parseAppDomains(read('app/main.jsx'));
+
+  assert.ok(
+    feature.includes('state.device'),
+    'device feature must publish its snapshot on state.device',
+  );
+  // Writer-side lock (round-8 review P2): the device feature must only write
+  // the fields its domain declares. A phantom extra write is silently invisible
+  // through state.get('device') — this is the same class the projects lock
+  // exists for, generalized to the device domain.
+  const featureWrites = [...feature.matchAll(/state\.(\w+)\s*=/g)].map((entry) => entry[1]);
+  assert.deepEqual(
+    [...new Set(featureWrites)].sort((a, b) => a.localeCompare(b)),
+    ['device', 'deviceError', 'deviceServices', 'deviceServicesError', 'deviceStale', 'externalModels', 'externalModelsError'],
+    'device feature must only write the fields its domain declares',
+  );
+  for (const field of ['device', 'deviceStale', 'deviceError', 'deviceServices', 'deviceServicesError', 'externalModels', 'externalModelsError']) {
+    assert.ok(
+      sliceFields.device.includes(field),
+      `STATE_SLICE_FIELDS.device must declare ${field}`,
+    );
+  }
+  assert.ok(
+    appDomains.includes('device'),
+    'APP_BRIDGE_STATE_DOMAINS must subscribe the device domain',
   );
 });
 
