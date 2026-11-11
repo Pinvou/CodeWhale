@@ -110,6 +110,7 @@ function global:Assert-PinvouLegacyOwnershipRegistry {
     foreach ($pidValue in @($Registry.active) + @($Registry.terminated)) {
         if (($pidValue -isnot [int] -and $pidValue -isnot [long]) -or [int]$pidValue -le 0 -or -not $seen.Add([int]$pidValue)) { throw 'e2e_legacy_ownership_pid_invalid' }
     }
-    if ($null -ne $CallerObservedPid -and -not $seen.Contains($CallerObservedPid.Value)) { throw 'e2e_legacy_ownership_caller_pid_missing' }
+    # PowerShell boxes a populated Nullable[int] as Int32; it has no .Value.
+    if ($null -ne $CallerObservedPid -and -not $seen.Contains([int]$CallerObservedPid)) { throw 'e2e_legacy_ownership_caller_pid_missing' }
     [pscustomobject]@{ active = @($Registry.active | ForEach-Object { [int]$_ }); terminated = @($Registry.terminated | ForEach-Object { [int]$_ }) }
 }
