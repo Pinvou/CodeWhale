@@ -36706,7 +36706,10 @@ async fn strict_mode_full_catalog_census_pins_every_removal() {
         }
         let context_note_fragments: &[(&str, &str)] = &[
             ("Git", "In strict mode `show` and `blame` are unavailable"),
-            ("lsp", "In strict mode `definition` and `references` are unavailable"),
+            (
+                "lsp",
+                "In strict mode `definition` and `references` are unavailable",
+            ),
             (
                 "pandoc_convert",
                 "In strict mode binary target formats are unavailable",

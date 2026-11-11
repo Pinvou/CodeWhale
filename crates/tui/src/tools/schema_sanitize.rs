@@ -463,8 +463,7 @@ fn has_unrepresentable_stripped_constraint(schema: &Value, ships: bool) -> bool 
     }
     // A set, not a Vec: this walker runs per property name, and a Vec scan
     // would make each name cost the whole `required` list.
-    let required: std::collections::HashSet<String> =
-        required_names(obj).into_iter().collect();
+    let required: std::collections::HashSet<String> = required_names(obj).into_iter().collect();
     for (key, value) in obj {
         match key.as_str() {
             "properties" | "$defs" | "definitions" | "$def" => {
@@ -702,11 +701,7 @@ fn prune_dangling_required(schema: &mut Value) {
     let Some(required) = obj.get_mut("required").and_then(|v| v.as_array_mut()) else {
         return;
     };
-    required.retain(|entry| {
-        entry
-            .as_str()
-            .is_some_and(|k| known_keys.contains(k))
-    });
+    required.retain(|entry| entry.as_str().is_some_and(|k| known_keys.contains(k)));
     if required.is_empty() {
         obj.remove("required");
     }
@@ -2032,10 +2027,7 @@ mod tests {
         // A bare object root — JSON-Schema semantics "any object with any
         // keys", the kwargs shape free-form MCP tools use — is the same
         // trap one keyword earlier.
-        let mut bare = vec![test_tool(
-            "kwargs",
-            json!({"type": "object"}),
-        )];
+        let mut bare = vec![test_tool("kwargs", json!({"type": "object"}))];
         assert!(!prepare_tools_for_strict_mode(&mut bare));
         assert_eq!(bare[0].strict, None);
 
@@ -2164,7 +2156,8 @@ mod tests {
     }
 
     #[test]
-    fn strict_mode_keeps_strict_when_definitions_under_an_optional_property_fail_the_old_detector() {
+    fn strict_mode_keeps_strict_when_definitions_under_an_optional_property_fail_the_old_detector()
+    {
         // The pre-strip detector judges definition maps by their parent's
         // shipping status: a null `const` inside an inline `definitions`
         // map under an OPTIONAL property ships nowhere (the removal takes
