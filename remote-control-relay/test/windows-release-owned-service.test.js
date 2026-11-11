@@ -33,7 +33,7 @@ for (const shell of ["powershell.exe", "pwsh"]) {
         $cleanup=@($ast.FindAll({param($n)$n -is [Management.Automation.Language.ScriptBlockExpressionAst] -and $n.Extent.Text.Contains('$remoteCleanupErrors =')},$true)|Sort-Object {$_.Extent.Text.Length})[0].Extent.Text;
         $create=$create.Substring(1,$create.Length-2);$bootstrap=$bootstrap.Substring(1,$bootstrap.Length-2);$cleanup=$cleanup.Substring(1,$cleanup.Length-2).Replace('$using:','$');
         $nonce='${"b".repeat(64)}';
-        $inputs=@{ 'windows-e2e-process-guard.ps1'=${quote(guard)};'windows-e2e-orchestrator-helpers.ps1'=${quote(helper)};'windows-owned-process.cs'=${quote(core)};'remote-control-ui-smoke.mjs'=${quote(ui)};'pinvou-e2e-driver.exe'=$compiled;'pinvou-node.exe'=${quote(process.execPath)};'legacy-relay.exe'=${quote(process.execPath)} };
+        $inputs=@{ 'windows-e2e-process-guard.ps1'=${quote(guard)};'windows-e2e-orchestrator-helpers.ps1'=${quote(helper)};'windows-owned-process.cs'=${quote(core)};'remote-control-ui-smoke.mjs'=${quote(ui)};'pinvou-e2e-driver.exe'=$compiled;'pinvou-node.exe'=${quote(process.execPath)};'legacy-relay.exe'=$compiled };
         $runspace=[RunspaceFactory]::CreateRunspace();$runspace.Open();$ps=[PowerShell]::Create();$ps.Runspace=$runspace;
         $testFailure=$null;
         try {

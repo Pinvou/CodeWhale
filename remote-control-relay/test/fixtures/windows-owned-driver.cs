@@ -8,6 +8,7 @@ using System.Linq;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
+using System.Threading;
 using System.Web.Script.Serialization;
 
 public sealed class ChildRecord {
@@ -56,6 +57,11 @@ public static class OwnedDriverFixture {
     }
     private static void Print(object value) { Console.Write(Json.Serialize(value)); }
     public static int Main(string[] args) {
+        if (args.Length == 1 && args[0] == "--fixture-service") {
+            File.WriteAllText(Path.Combine(Root, "fixture-service-" + Process.GetCurrentProcess().Id + ".ready"), "ready");
+            Thread.Sleep(Timeout.Infinite);
+            return 0;
+        }
         Console.OutputEncoding = new UTF8Encoding(false);
         try {
             File.AppendAllText(Path.Combine(Root, "fixture-driver-phase.log"), "entered\n");
@@ -70,11 +76,18 @@ public static class OwnedDriverFixture {
                 // still assigns this child to the existing private nested Job.
                 var startup = new Startup { Size = Marshal.SizeOf(typeof(Startup)) };
                 Started started;
-                if (!CreateProcessW(executable, new StringBuilder("\"" + executable + "\" -e \"setInterval(()=>{},1000)\""),
+                if (!CreateProcessW(executable, new StringBuilder("\"" + executable + "\" --fixture-service"),
                     IntPtr.Zero, IntPtr.Zero, false, 0x08000000, IntPtr.Zero, Root, ref startup, out started))
                     throw new Exception("fixture_service_start_failed");
                 CloseHandle(started.Thread);
                 try { using (var child = Process.GetProcessById((int)started.ProcessId)) {
+                    var ready = Path.Combine(Root, "fixture-service-" + child.Id + ".ready");
+                    var wait = Stopwatch.StartNew();
+                    while (!File.Exists(ready)) {
+                        if (child.HasExited || wait.ElapsedMilliseconds >= 3000)
+                            throw new Exception("fixture_service_not_ready");
+                        Thread.Sleep(10);
+                    }
                     File.AppendAllText(Path.Combine(Root, "fixture-driver-phase.log"), "child-started\n");
                     registry.children.Add(new ChildRecord { pid = child.Id,
                         creation_ticks = child.StartTime.ToUniversalTime().Ticks,
