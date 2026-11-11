@@ -27,6 +27,15 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
+// The fault-only handler bypasses optional response-header projection so a
+// locked identity lookup is reached inside the repository operation itself.
+// No authentication, authorization or recovery decision is replaced.
+type grantRecoveryFaultHeaders struct{ *PostgresRepository }
+
+func (grantRecoveryFaultHeaders) GetAuthorizationVersions(context.Context, identity.Principal) (AuthorizationVersions, error) {
+	return AuthorizationVersions{}, nil
+}
+
 // The five-minute window is elapsed in real wall-clock time. No deadline,
 // published schema or runtime clock is patched. Domain proof/activation and
 // broker PubAck remain controlled seams; no financial domain action is called.
@@ -161,7 +170,7 @@ func TestManualGrantRecoveryWorkflowPostgres(t *testing.T) {
 			t.Fatal(err)
 		}
 		actors := []entitlementFixtureActor{requester, approver, thirdReviewer, denied}
-		handler := NewService(repo, nil).Handler(func(_ context.Context, token string) (identity.Principal, error) {
+		verify := func(_ context.Context, token string) (identity.Principal, error) {
 			for _, a := range actors {
 				if token == a.Subject {
 					return entitlementApprovalPrincipal(a), nil
@@ -173,7 +182,8 @@ func TestManualGrantRecoveryWorkflowPostgres(t *testing.T) {
 				}
 			}
 			return identity.Principal{}, errors.New("controlled invalid token")
-		})
+		}
+		handler := NewService(repo, nil).Handler(verify)
 		const base = "/admin/v1/approval-grant-recovery-cases"
 		call := func(token, method, path string, body any) *httptest.ResponseRecorder {
 			var raw []byte
@@ -356,6 +366,7 @@ func TestManualGrantRecoveryWorkflowPostgres(t *testing.T) {
 		if c1.ID == uuid.Nil || c2.ID == uuid.Nil || c1.ID == c2.ID || c1.Version != 1 || c2.Version != 1 {
 			t.Fatal("cases not idempotently bound")
 		}
+		faultHandler := NewService(grantRecoveryFaultHeaders{repo}, nil).Handler(verify)
 		identityGate, identityErr := operator.Begin(ctx)
 		if identityErr != nil {
 			t.Fatal(identityErr)
@@ -376,7 +387,7 @@ func TestManualGrantRecoveryWorkflowPostgres(t *testing.T) {
 				req.Header.Set("Content-Type", "application/json")
 			}
 			result := httptest.NewRecorder()
-			handler.ServeHTTP(result, req)
+			faultHandler.ServeHTTP(result, req)
 			faultCancel()
 			if result.Code != 500 {
 				t.Fatalf("identity dependency failure became business denial: %s status=%d body=%s", probe.path, result.Code, result.Body.String())
