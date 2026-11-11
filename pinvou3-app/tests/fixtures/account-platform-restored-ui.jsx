@@ -12,6 +12,11 @@ const orgID = '33333333-3333-4333-8333-333333333333', unitID = '44444444-4444-44
 const root = createRoot(document.querySelector('#root'));
 const c = window.restored = { calls: [], effects: new Set(), user: id, language: 'zh', flags: {}, unknown: false, kind: new URLSearchParams(location.search).get('mode') || 'account' };
 const gridOverview = new URLSearchParams(location.search).get('gridOverview') === '1';
+if (new URLSearchParams(location.search).get('lookupPaging') === '1') {
+  c.lookupPaging = true;
+  c.language = 'en';
+  c.permissions = ['platform.billing.wallets.read', 'platform.users.read'];
+}
 if (gridOverview) {
   c.flags = { admin_model_token_ia: true, admin_model_details: true, admin_token_details: true };
   c.permissions = ['platform.billing.wallets.read', 'platform.products.read', 'platform.models.read', 'platform.tokens.read'];
@@ -262,6 +267,13 @@ globalThis.fetch = async (input, options = {}) => {
     const code = decodeURIComponent(url.split('/').at(-1)).replaceAll('-', '').toUpperCase();
     const user = c.searchUsers.find(item => item.user_code.replaceAll('-', '') === code);
     return user ? json(user) : json({ code: 'NOT_FOUND' }, 404);
+  }
+  if (c.lookupPaging && /\/admin\/v1\/(wallets|users)\?/.test(url) && new URL(url, location.origin).searchParams.get('q') === 'controlled-lookup') {
+    const query = new URL(url, location.origin).searchParams;
+    if (query.get('cursor') && c.lookupFailure) return json({ code: c.lookupFailure === 403 ? 'PERMISSION_DENIED' : 'UPSTREAM_UNAVAILABLE' }, c.lookupFailure);
+    const selectedID = query.get('cursor') ? otherID : id;
+    const item = url.includes('/wallets?') ? { wallet_id: selectedID, owner_type: 'PERSONAL', owner_id: selectedID, status: 'ACTIVE', financial_status: 'NORMAL', posted_microcredits: '10000', available_microcredits: '10000' } : { user_id: selectedID, username: query.get('cursor') ? 'controlled-second' : 'controlled-first', status: 'ACTIVE' };
+    return json({ items: [item], next_cursor: query.get('cursor') ? null : 'controlled-lookup-next' });
   }
   if (url.includes('/admin/v1/user-code-lookups/')) {
     const code = decodeURIComponent(url.split('/').at(-1)).replaceAll('-', '').toUpperCase();

@@ -1811,6 +1811,43 @@ try {
     assert.equal(await page.$$eval('.adm-order-status-summary dd', nodes => nodes.length), 4, 'a new visit remains usable after retiring the old response');
     assert.equal(await page.evaluate(() => window.restored.calls.filter(call => call.method !== 'GET' && !call.url.endsWith('/account/bootstrap')).length), 0, 'detail navigation performs no business writes');
   });
+  for (const [index,kind] of [[0,'wallet'],[1,'requester']]) await run(`adjustment lookup ${kind} retains a failed continuation and clears denied directory facts`, async () => {
+    await fresh('?mode=admin&section=billing&finance_tab=adjustments&lookupPaging=1');
+    await page.waitForSelector('.adm-adjustment-lookup');
+    const lookup = await page.$$('.adm-adjustment-lookup');
+    assert.equal(lookup.length,2);
+    // Tag the actual field without depending on other filter fieldset positions.
+    await lookup[index].evaluate(node=>{node.dataset.testLookup='current';});
+    for (const handle of lookup) await handle.dispose();
+    const selector='[data-test-lookup=current]',results=selector+' .adm-adjustment-lookup-results';
+    const words=await page.evaluate(()=>window.restored.copy().adminLayout.adjustmentLookup);
+    const originalID='33333333-3333-4333-8333-333333333333';
+    await page.type(selector+' > label input',originalID);
+    await click(selector+' > button',kind==='wallet'?words.findWallet:words.findRequester);
+    await page.type(results+' input[type=search]','controlled-lookup');
+    await click(results+' > button',words.search);
+    await page.waitForFunction(selector=>document.querySelectorAll(selector+' li').length===1,{},results);
+    const first=await page.$eval(results+' li',node=>node.textContent);
+    await page.evaluate(()=>{window.restored.lookupFailure=503;});
+    await click(results+' > button',words.more);
+    await page.waitForSelector(results+' [role=alert]');
+    assert.equal(await page.$eval(results+' [role=alert]',node=>node.textContent),words.error);
+    assert.deepEqual(await page.$$eval(results+' li',nodes=>nodes.map(node=>node.textContent)),[first],'continuation failure retains the accepted first page');
+    await page.evaluate(()=>{window.restored.lookupFailure=0;});
+    await click(results+' > button',words.more);
+    await page.waitForFunction(selector=>document.querySelectorAll(selector+' li').length===2,{},results);
+    assert.equal(await page.$(results+' [role=alert]'),null);
+    const continuations=await page.evaluate(kind=>window.restored.calls.filter(call=>call.method==='GET'&&call.url.includes(kind==='wallet'?'/wallets?':'/users?')&&new URL(call.url,location.origin).searchParams.get('cursor')==='controlled-lookup-next').map(call=>call.url),kind);
+    assert.equal(continuations.length,2);assert.equal(continuations[0],continuations[1],'retry preserves the failed cursor');
+    await click(results+' > button',words.search);
+    await page.waitForFunction(selector=>document.querySelectorAll(selector+' li').length===1,{},results);
+    await page.evaluate(()=>{window.restored.lookupFailure=403;});
+    await click(results+' > button',words.more);
+    await page.waitForFunction(selector=>document.querySelectorAll(selector+' li').length===0,{},results);
+    await page.waitForFunction(({selector,words})=>[...document.querySelectorAll(selector+' [role=alert],'+selector+' small')].some(node=>node.textContent===words.forbidden||node.textContent===words.directoryUnavailable),{},{selector,words});
+    assert.equal(await page.$eval(selector+' > label input',node=>node.value),originalID,'directory denial does not replace the independent exact filter ID');
+    assert.equal(await page.evaluate(()=>window.restored.calls.filter(call=>call.method!=='GET'&&!call.url.endsWith('/account/bootstrap')).length),0,'lookup and retries perform no business writes');
+  });
   await run('original payment filters and selected detail survive URL reload', async () => {
     await fresh('?mode=admin&section=payments&finance_tab=orders&order_status=PAID&order_provider_id=controlled-provider&order_channel=ALIPAY&order_created_from=2026-10-01T00%3A00%3A12.345Z&order_limit=50&order_id=00000000-0000-4000-8000-000000000002');
     await page.waitForFunction(() => window.restored.calls.some(call => call.url.includes('/payment-orders?') && call.url.includes('status=PAID') && call.url.includes('provider_id=controlled-provider') && call.url.includes('channel=ALIPAY') && call.url.includes('limit=50') && call.url.includes('created_from=')));
