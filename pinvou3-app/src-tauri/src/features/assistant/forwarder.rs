@@ -1168,6 +1168,7 @@ pub(crate) fn spawn_event_forwarder(
                     usage,
                     status,
                     error,
+                    error_source: _,
                     tool_catalog,
                     turn_id: _,
                     submission_id: _,

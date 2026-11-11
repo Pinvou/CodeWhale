@@ -52,6 +52,10 @@
 
 `TOKEN_SECRET_PROVIDER=remote` 与原生 fresh-install 分支独立。保留原 remote 服务协议，设置固定 `TOKEN_SECRET_KEY_ID`、不同的 `PINVOU_SECRET_ROTATION_PREVIOUS_KEY_ID`、受控的 `TOKEN_SECRET_PROVIDER_TOKEN`、`PINVOU_SECURITY_KMS_HEALTH_URL`，以及同名 public/readiness 配置；显式设置安装模式时必须为 `migration`。remote 不支持 prepare 命令。公开入口至少包含 `portal`、`identity`、`oidc`，各自声明精确状态；TLS 证书仍须超过 14 天。
 
+Remote 请求继续使用原三个 JSON 字段和 Base64。完整编码请求最多 64 MiB，计入原文或密文、AAD 以及 JSON 转义后的 key ID；不透明 key ID 的原始字节上限为 1 MiB。请求预算为现有较大的执行重放数据保留空间，不套用 Transit 的 1 MiB 原文上限。
+
+Remote 成功响应保留原 1 MiB 线格式预算，但必须完整读取并且只有一个 JSON 对象。允许预算内的 JSON 空白和原有扩展字段；超限、未读完或包含额外内容的响应以无效信封失败。这不扩大旧 Remote 模式可读的结果大小。Transit 原有操作和响应上限保持不变。
+
 运行 `npm --prefix account-platform run security:production-readiness` 后，只有真实 readiness 为 ready、remote 健康证据中 active key 为 `ENCRYPT_DECRYPT` 且旧 key 为 `DISABLED` 才产生该工具的 GO。不会执行旧密文迁移、禁用 key 或修改服务配置；现场必须另证所有旧密文、快照与恢复的兼容。remote 的旧 key 禁用条件不适用于 vault-transit 原生版本历史，不能据此提高原生最低解密版本。
 
 此手动汇总工具补充现有职责：`kms-agent-check` 检查运行身份/租约/ACL，`kms-monitor` 负责持续健康与到期监控，`kms-operator` 负责受控单次轮换及原上下文未知结果恢复。它不取代任一工具，也不改变 Compose `depends_on`、Helm hooks 或现有迁移启动流程。
