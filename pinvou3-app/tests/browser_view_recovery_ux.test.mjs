@@ -480,7 +480,7 @@ test('rapid bridge session changes always enqueue the latest serialized publicat
   assert.match(controlledRecovery, /import \{[^}]*retryControlledSessionOpen as retrySession[^}]*\} from '\.\/controlled-open-recovery\.mjs'/);
   assert.match(controlledRecovery, /return retrySession\(\{[^}]*runBrowserUiTransition/);
   for (const [source, expected] of [
-    [appMain, ['run.sessionId', 'null', 'id', 'sessionId']],
+    [appMain, ['run.sessionId', 'null', 'id', 'sid', 'sessionId']],
     [controlledRecovery, ['controlledTaskSessionId']],
     [controlledRecoveryActions, ['failure.sessionId']],
   ]) {
@@ -492,6 +492,10 @@ test('rapid bridge session changes always enqueue the latest serialized publicat
     assert.equal((source.match(/sessionTarget:/g) || []).length, serializedTargets.length,
       'no session target may bypass the serialized session/workspace channel');
   }
+  // appMain's 5 call sites: the scheduled run, handleNewChat, handleSwitchSession,
+  // openDeviceDoctorChat, and the relay/codex opener (round-4 review gave the
+  // doctor opener full transition parity); the controlled auto-open itself lives
+  // in ControlledOpenRecovery on current main.
   assert.match(syncEffect, /bridgeTransition\?\.sessionId !== nextSessionId/);
   assert.match(
     syncEffect,
