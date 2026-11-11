@@ -14,6 +14,7 @@ export const VIEW_LOADERS = {
   knowledge: () => import('../features/knowledge/KnowledgeView.jsx'),
   modelStore: () => import('../features/model-store/ModelStoreView.jsx'),
   monitor: () => import('../features/megacube/DeviceManagementView.jsx'),
+  modelGuidance: () => import('../features/megacube/ModelGuidancePanel.jsx'),
   cmsdTaskRuntime: () => import('../features/megacube/CmsdTaskRuntime.jsx'),
   deviceManager: () => import('../features/device-manager/DeviceManagerView.jsx'),
   search: () => import('../features/search/SearchView.jsx'),

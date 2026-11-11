@@ -128,7 +128,7 @@ test('rare global overlays stay out of the startup module graph', () => {
 });
 
 test('new lazy global mounts contain chunk failures without exposing protected chat actions', () => {
-  for (const component of ['LazyPinvouSummonModal', 'LazyUpdateNoticeButton']) {
+  for (const component of ['LazyPinvouSummonModal', 'LazyUpdateNoticeButton', 'LazyModelGuidancePanel']) {
     const mountAt = mainSource.indexOf(`<${component}`);
     const guardedMount = mainSource.slice(Math.max(0, mountAt - 220), mountAt);
     assert.ok(

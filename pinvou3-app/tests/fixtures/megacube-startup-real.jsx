@@ -14,11 +14,11 @@ const p = new URLSearchParams(location.search),
 const device = { isCube: true }, h = React.createElement;
 
 createRoot(document.getElementById('root')).render(
-  p.get('mode') === 'recovery-preview'
+  p.get('mode') === 'connection-preview'
     ? h(ModelGuidanceView, {
       copy: t.uiMegacube.guidance,
-      snapshot: { phase: 'recover', canTry: true },
-      onStart() {}, onOpenModelStore() {}, onOpenSettings() {},
+      snapshot: { phase: 'connectionUnavailable', selectedModelName: 'Selected local model', canTry: false },
+      onOpenModelStore() {}, onOpenSettings() {},
     })
     : h(React.Fragment, null,
       h(ModelGuidancePanel, {

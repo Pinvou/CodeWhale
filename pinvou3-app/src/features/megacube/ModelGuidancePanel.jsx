@@ -1,9 +1,7 @@
-import React, { useEffect } from 'react';
-import { canInvoke } from '../../shared/platform.js';
+import React from 'react';
 import { useModelGuidance } from './use-model-guidance.js';
-import { guidanceSelectedModel, modelGuidancePresentation } from './model-guidance-connection.js';
+import { guidanceConnectionRequest, guidanceSelectedModel, guidanceSelectionKey, selectedLocalModelConnection } from './model-guidance-connection.js';
 import { guidanceReminderCanMute } from './model-guidance-mute.js';
-import { useCmsInstallReminder } from './use-cms-install-reminder.js';
 const EMPTY_MODELS = Object.freeze([]);
 
 export function ModelGuidanceView({ copy, snapshot, busy = false, error = '', onStart, onRefresh, onDismiss, onMute, onMuteInstall, onOpenModelStore, onOpenSettings }) {
@@ -52,19 +50,26 @@ export function ModelGuidanceView({ copy, snapshot, busy = false, error = '', on
   </section>;
 }
 
-export function ModelGuidancePanel({ copy, device, modelSelection, savedModels = EMPTY_MODELS, existingUse = null, onGateChange, onOpenModelStore, onOpenSettings }) {
+export function ModelGuidancePanel({ copy, device, modelSelection, savedModels = EMPTY_MODELS, existingUse = null, onOpenModelStore, onOpenSettings }) {
   const selectedModel = guidanceSelectedModel({ ...modelSelection, savedModels });
+  // Cloud selections never mount the local-service polling hook. A selection
+  // change also retires any in-flight result from the previous local model.
+  if (!guidanceConnectionRequest(selectedModel)) return null;
+  return <SelectedLocalModelGuidance key={guidanceSelectionKey(selectedModel)} copy={copy} device={device}
+    selectedModel={selectedModel} savedModels={savedModels} existingUse={existingUse}
+    onOpenModelStore={onOpenModelStore} onOpenSettings={onOpenSettings} />;
+}
+
+function SelectedLocalModelGuidance({ copy, device, selectedModel, savedModels, existingUse, onOpenModelStore, onOpenSettings }) {
   const guide = useModelGuidance(device.isCube, selectedModel, savedModels, existingUse);
-  const installReminder = useCmsInstallReminder(guide.snapshot.service);
-  const snapshot = modelGuidancePresentation(guide.snapshot, selectedModel, savedModels);
-  const error = installReminder.failed && snapshot.phase === 'installCms' ? 'guidance_mute_failed' : guide.error;
-  const silenced = (snapshot.phase === 'installCms' ? installReminder.muted : guide.muted && guidanceReminderCanMute(snapshot.phase)) && !error;
-  const visible = !guide.dismissed && !silenced && !['available', 'hidden'].includes(snapshot.phase);
-  useEffect(() => { onGateChange?.(visible); }, [visible, onGateChange]);
+  const snapshot = selectedLocalModelConnection(guide.snapshot, selectedModel);
+  const error = guide.error;
+  const silenced = guide.muted && !error;
+  const visible = snapshot.phase === 'connectionUnavailable' && !guide.dismissed && !silenced;
   if (!visible) return null;
   const open = callback => callback && (() => { guide.dismiss(); callback(); });
-  return <ModelGuidanceView copy={copy} {...guide} error={error} snapshot={{ ...snapshot, canTry: snapshot.canTry && canInvoke('cms_model_action') }}
-    onStart={guide.start} onRefresh={guide.refresh} onDismiss={() => guide.dismiss()} onMute={guide.muteUntilAvailable}
-    onMuteInstall={() => installReminder.change(true)}
-    onOpenModelStore={open(onOpenModelStore)} onOpenSettings={open(onOpenSettings)} />;
+  // A failed chat endpoint does not authorize starting a device-wide default.
+  return <div className="px-4 pt-3"><ModelGuidanceView copy={copy} {...guide} error={error} snapshot={{ ...snapshot, canTry: false, modelName: null }}
+    onRefresh={guide.refresh} onDismiss={() => guide.dismiss()} onMute={guide.muteUntilAvailable}
+    onOpenModelStore={open(onOpenModelStore)} onOpenSettings={open(onOpenSettings)} /></div>;
 }

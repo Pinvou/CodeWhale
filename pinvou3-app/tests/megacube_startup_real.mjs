@@ -137,10 +137,10 @@ try{
  await Promise.race([ready,new Promise((_,reject)=>setTimeout(()=>reject(new Error('host not ready')),60000))]);
  server=await createServer({root:app,configFile:false,logLevel:'error',plugins:[react(),{name:'real-startup-acceptance',configureServer(s){s.middlewares.use((req,res,next)=>{if(req.url?.split('?')[0]!=='/')return next();res.setHeader('Content-Type','text/html');res.end('<!doctype html><html><head><meta name="viewport" content="width=device-width, initial-scale=1"></head><body><div id="root" style="padding:12px;min-width:0"></div><script type="module" src="/tests/fixtures/megacube-startup-real.jsx"></script></body></html>');});}}],server:{host:'127.0.0.1',port:0,watch:null,hmr:false,ws:false}});await server.listen();
  browser=await puppeteer.launch({executablePath:input.chrome||'/usr/bin/google-chrome',headless:true,args:['--no-sandbox','--disable-gpu']});
- for(const lang of ['zh','en','ja'])for(const width of [390,1200]){await open(lang,width,'recovery-preview');assert.equal(await page.$eval('[data-testid="model-guidance"]',n=>n.dataset.mode),'banner');assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false);if(width===390){const geometry=await page.$eval('[data-testid="model-guidance"]',n=>({width:n.querySelector('h3').getBoundingClientRect().width,height:n.getBoundingClientRect().height}));assert.ok(geometry.width>250&&geometry.height<330,JSON.stringify(geometry));}const screenshot=path.join(output,`recovery-${lang}-${width}.png`);await page.screenshot({path:screenshot});report.screenshots.push(screenshot);}
- report.checks.push('All three recovery banner translations fit 390px and 1200px (view-only layout fixtures)');
+ for(const lang of ['zh','en','ja'])for(const width of [390,1200]){await open(lang,width,'connection-preview');assert.equal(await page.$eval('[data-testid="model-guidance"]',n=>n.dataset.mode),'banner');assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false);if(width===390){const geometry=await page.$eval('[data-testid="model-guidance"]',n=>({width:n.querySelector('h3').getBoundingClientRect().width,height:n.getBoundingClientRect().height}));assert.ok(geometry.width>250&&geometry.height<330,JSON.stringify(geometry));}const screenshot=path.join(output,`local-connection-failure-${lang}-${width}.png`);await page.screenshot({path:screenshot});report.screenshots.push(screenshot);}
+ report.checks.push('All three selected-local-model failure banner translations fit 390px and 1200px (view-only layout fixtures)');
  for(const lang of ['zh','en','ja']){
-   await open(lang,390);await page.waitForSelector('[data-testid="guidance-install-cmsd"]');
+   await open(lang,390);assert.equal(await page.$('[data-testid="model-guidance"]'),null);
    assert.equal(await page.$eval('[data-testid="cms-service-introduction"] details',n=>n.open),true);
    assert.equal(await page.$$eval('[data-testid="cms-service-introduction"] li',nodes=>nodes.length),4);
    assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false);
@@ -152,24 +152,9 @@ try{
    const dialogShot=path.join(output,`bundled-confirm-${lang}-390.png`);await page.screenshot({path:dialogShot});report.screenshots.push(dialogShot);
    await page.click('[data-testid="cms-bundled-cancel"]');assert.equal((await cli('status')).installed,false);
    const screenshot=path.join(output,`install-introduction-${lang}-390.png`);await page.screenshot({path:screenshot,fullPage:true});report.screenshots.push(screenshot);
-   await page.click('[data-testid="guidance-mute"]');await page.waitForFunction(()=>!document.querySelector('[data-testid="model-guidance"]'));
-   await page.waitForSelector('[data-testid="cms-install-reminder-restore"]');
-   assert.equal((await cli('status')).installed,false);
-   await open(lang,390);await page.waitForSelector('[data-testid="cms-install-reminder-restore"]');
-   assert.equal(await page.$('[data-testid="model-guidance"]'),null);
-   assert.ok(await page.$('[data-testid="cms-service-prepare-install"]'));
-   await page.click('[data-testid="cms-install-reminder-restore"]');await page.waitForSelector('[data-testid="guidance-install-cmsd"]');
  }
- report.checks.push('Real absent-service state in three languages: installation intro expanded, persistent dismissal survives page reopen, direct installation remains reachable, manual restore synchronizes homepage');
- await open();await page.waitForSelector('[data-testid="guidance-install-cmsd"]');
- await page.evaluate(()=>Object.defineProperty(window,'localStorage',{configurable:true,get(){throw new Error('acceptance storage denied');}}));
- await page.click('[data-testid="guidance-mute"]');await page.waitForSelector('[data-testid="model-guidance"] [role="alert"]');
- assert.ok(await page.$('[data-testid="guidance-install-cmsd"]'));
- report.checks.push('Injected browser storage denial keeps installation banner visible and reports preference save failure');
- await open();await page.waitForSelector('[data-testid="guidance-install-cmsd"]');await page.click('[data-testid="guidance-install-cmsd"]');assert.equal(await page.evaluate(()=>window.__openedDevice),true);
- assert.equal((await cli('status')).installed,false);report.checks.push('Existing-user absent-service banner routes to device management without installing automatically');
- await open();await page.waitForSelector('[data-testid="guidance-install-cmsd"]');await page.click('[data-testid="guidance-mute"]');
- await page.waitForSelector('[data-testid="cms-install-reminder-restore"]');
+ report.checks.push('Real absent-service state in three languages has no generic chat banner; device installation intro, direct confirmation and cancellation remain reachable');
+ await open();assert.equal(await page.$('[data-testid="model-guidance"]'),null);
  const installsBefore=calls.filter(c=>c.name==='cms_service_action'&&c.action==='install').length;
  await page.click('[data-testid="cms-service-prepare-install"]');await page.waitForFunction(()=>{const button=document.querySelector('[data-testid="cms-bundled-install"]');return button&&!button.disabled;});
  assert.equal(calls.filter(c=>c.name==='cms_service_action'&&c.action==='install').length,installsBefore);
@@ -180,10 +165,9 @@ try{
  assert.equal(calls.filter(c=>c.name==='cms_service_action'&&c.action==='install').length,installsBefore+1);
  report.checks.push('Bundled package uses one modal confirmation with automatic integrity checks; cancellation leaves service absent; double click submits exactly one real private installation');
  const service=await cli('status');report.lingerEnabled=service.lingerEnabled;
- await page.waitForFunction(()=>!Object.keys(localStorage).some(key=>key.endsWith('.cmsInstallDismissed')));
  await page.waitForFunction(()=>!document.querySelector('[data-testid="guidance-install-cmsd"]'));
  assert.equal(await page.$eval('[data-testid="cms-service-introduction"] details',n=>n.open),false);
- report.checks.push('Actual confirmed cmsd installation clears only its installation dismissal and collapses the benefit details');
+ report.checks.push('Actual confirmed cmsd installation collapses the benefit details without introducing a generic chat banner');
  const configPath=path.join(profile,'megacube/cmsd-component/cmsd.toml');const config=fs.readFileSync(configPath,'utf8');const configValue=key=>JSON.parse(config.match(new RegExp('^'+key+'\\s*=\\s*(.+)$','m'))[1]);
  const cardPath=path.join(configValue('cards_dir'),card);fs.mkdirSync(cardPath,{recursive:true,mode:0o700});
  const weights=path.resolve(input.weights);const files=fs.readdirSync(weights).filter(n=>n.endsWith('.safetensors'));

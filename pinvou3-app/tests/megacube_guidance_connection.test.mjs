@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { guidanceSelectedModel, guidanceSelectionKey, guidanceConnectionRequest, probeGuidanceConnection, guidanceDiscoveryRequests, modelGuidancePresentation } from '../src/features/megacube/model-guidance-connection.js';
+import { guidanceSelectedModel, guidanceSelectionKey, guidanceConnectionRequest, probeGuidanceConnection, guidanceDiscoveryRequests, modelGuidancePresentation, selectedLocalModelConnection } from '../src/features/megacube/model-guidance-connection.js';
 
 const selected = { id: 'chat-local', name: 'Chat local', model: 'ornith', base_url: 'http://127.0.0.1:8000/v1' };
 const direct = { id: 'direct', model: 'ornith', base_url: 'http://127.0.0.1:18080/v1' };
@@ -24,6 +24,42 @@ test('explicit environment URL/model overrides apply but environment credential 
   } });
   assert.equal(model.base_url, direct.base_url); assert.equal(model.model, 'overridden');
   assert.equal(guidanceConnectionRequest(model), null);
+});
+
+test('explicit model references override legacy ids and never borrow the global local model for cloud chat', () => {
+  const cloud = { ...selected, id: 'cloud', base_url: 'https://example.test/v1' };
+  const bridge = { currentSessionModelId: selected.id, activeModelId: selected.id, savedModels: [selected, cloud] };
+  assert.equal(guidanceSelectedModel({ ...bridge, modelRef: { source: 'LOCAL_CONFIG', saved_model_id: cloud.id } }).id, cloud.id);
+  assert.equal(guidanceSelectedModel({ ...bridge, modelRef: { source: 'ACCOUNT_PLATFORM', model_id: 'cloud-model' } }), null);
+  assert.equal(guidanceSelectedModel({ ...bridge, modelRef: { source: 'LOCAL_CONFIG', saved_model_id: 'removed' } }), null);
+});
+
+test('confirmed local connection failures remain visible independently of device setup and recovery phases', () => {
+  for (const phase of ['checking', 'hidden', 'installCms', 'starting', 'recover', 'unknown', 'available']) {
+    const snapshot = { ...checked(selected, { ok: false, code: 'server_unavailable', http_status: 503 }), phase };
+    const result = selectedLocalModelConnection(snapshot, selected);
+    assert.equal(result.phase, 'connectionUnavailable', phase);
+    assert.equal(result.canTry, false, 'a chat failure must not offer to start an unrelated device default');
+    assert.equal(selectedLocalModelConnection(snapshot, { ...selected, base_url: 'https://example.test/v1' }).phase, 'hidden');
+    assert.equal(selectedLocalModelConnection(snapshot, direct).phase, 'connectionUnknown', 'an old endpoint result cannot describe a new selection');
+  }
+});
+
+test('uncertain and unsupported model-list responses never assert an unavailable local model', () => {
+  for (const code of ['endpoint_not_found', 'method_not_allowed', 'redirect', 'request_invalid', 'unsupported_query', 'client_error', 'credential_unavailable']) {
+    assert.equal(selectedLocalModelConnection(checked(selected, { ok: false, code }), selected).phase, 'connectionUnknown', code);
+  }
+  for (const models of [[{ id: selected.model, loaded: null }], [{ id: selected.model }], [null], [{}]]) {
+    const snapshot = checked(selected, { ok: true, code: 'ok' }, []);
+    snapshot.localCandidates = [{ base_url: selected.base_url, models }];
+    assert.equal(selectedLocalModelConnection(snapshot, selected).phase, 'connectionUnknown');
+  }
+});
+
+test('native discovery evidence can confirm the selected loaded model without a status field', () => {
+  const snapshot = checked(selected, { ok: true, code: 'ok' }, []);
+  snapshot.localCandidates = [{ base_url: selected.base_url, models: [{ id: selected.model, loaded: true }] }];
+  assert.equal(selectedLocalModelConnection(snapshot, selected).phase, 'available');
 });
 
 test('a healthy alternative never makes the failing selected connection appear usable, even when registered', () => {
