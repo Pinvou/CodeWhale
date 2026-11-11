@@ -504,6 +504,22 @@ fn is_exact_https_route(base_url: &str, expected_authority: &str, expected_path:
         && path == expected_path
 }
 
+/// Whether a configured route is a bare official HTTPS host with no path
+/// (`https://<authority>`, optional trailing slash).
+///
+/// Complements [`is_exact_https_route`] for the one shape the transport
+/// normalizes onto the exact route: a version-less base URL gets `/v1`
+/// appended by the client before the request is dialed, so a bare official
+/// host is the same first-party endpoint as its documented `/v1` spelling.
+fn is_bare_https_authority(base_url: &str, expected_authority: &str) -> bool {
+    let trimmed = base_url.trim();
+    let normalized = trimmed.strip_suffix('/').unwrap_or(trimmed);
+    let Some((scheme, authority)) = normalized.split_once("://") else {
+        return false;
+    };
+    scheme.eq_ignore_ascii_case("https") && authority.eq_ignore_ascii_case(expected_authority)
+}
+
 /// Whether a configured route is exactly the official Kimi Code endpoint.
 ///
 /// A trailing slash is insignificant, but neighboring Kimi-hosted paths must
@@ -586,11 +602,19 @@ pub fn is_exact_zai_chat_route(kind: ProviderKind, base_url: &str) -> bool {
 ///
 /// This deliberately excludes the `/anthropic` routes: those use the native
 /// Messages adapter and do not share Chat Completions token-limit fields.
+/// The bare official hosts (`https://api.minimax.io`, `https://api.minimaxi.com`,
+/// no path) count as first-party too: the client normalizes a version-less
+/// base URL by appending `/v1`, so a bare-host configuration dials the same
+/// documented endpoint as its `/v1` spelling and must not be classified as
+/// a gateway. Neighboring spellings — explicit ports, other paths, HTTP
+/// downgrades — stay fail-closed like the rest of the exact-route family.
 #[must_use]
 pub fn is_exact_minimax_chat_route(kind: ProviderKind, base_url: &str) -> bool {
     kind == ProviderKind::Minimax
         && (is_exact_https_route(base_url, "api.minimax.io", "v1")
-            || is_exact_https_route(base_url, "api.minimaxi.com", "v1"))
+            || is_exact_https_route(base_url, "api.minimaxi.com", "v1")
+            || is_bare_https_authority(base_url, "api.minimax.io")
+            || is_bare_https_authority(base_url, "api.minimaxi.com"))
 }
 
 /// Whether a configured route is one of MiniMax's exact first-party
@@ -2390,6 +2414,11 @@ mod tests {
             "https://api.minimax.io/v1",
             "https://api.minimaxi.com/v1/",
             "HTTPS://API.MINIMAX.IO/v1",
+            // Bare official hosts: the client appends `/v1` to a version-less
+            // base URL, so these dial the same first-party endpoint.
+            "https://api.minimax.io",
+            "https://api.minimaxi.com/",
+            "HTTPS://API.MINIMAXI.COM",
         ] {
             assert!(
                 is_exact_minimax_chat_route(ProviderKind::Minimax, route),
@@ -2407,6 +2436,13 @@ mod tests {
             "https://api.minimax.io/anthropic",
             "https://api.minimaxi.com/anthropic",
             "https://gateway.example/v1",
+            // Bare-host neighbors: a differently-cased scheme is a downgrade,
+            // an explicit port and lookalike or neighboring hosts stay
+            // fail-closed even without a path.
+            "http://api.minimax.io",
+            "https://api.minimax.io:443",
+            "https://api.minimax.io.evil.example",
+            "https://gateway.example",
         ] {
             assert!(
                 !is_exact_minimax_chat_route(ProviderKind::Minimax, neighboring_route),
