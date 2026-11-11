@@ -4,6 +4,7 @@ import path from 'node:path';
 import vm from 'node:vm';
 import { fileURLToPath } from 'node:url';
 import { expectedWebBridgeApi } from './bridge_domain_contract.mjs';
+import { desktopSliceFields } from './bridge_slice_fields.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const webBridgeRoot = path.join(root, 'src', 'platform', 'web');
@@ -107,6 +108,37 @@ for (const method of Object.keys(api.computerUse)) {
     api.computerUse[method](),
     /not supported on the web client/,
     `web computerUse.${method} stub must reject, never fake success`,
+  );
+}
+// Same for the device domain (round-3 review P2): the surface lock above would
+// not catch a device stub turning into a resolve(null) no-op, which the
+// domain-adapter comments call out as the "permanent skeleton" failure mode.
+for (const method of Object.keys(api.device)) {
+  await assert.rejects(
+    api.device[method](),
+    /not supported on the web client|MegaCube/,
+    `web device.${method} stub must reject, never fake success`,
+  );
+}
+// 桌面/双端 device 切片键集交叉锁定（round-5 review P3 → round-6 补严）：
+// 期望值不再手抄，直接解析桌面 bridge.js 的 STATE_SLICE_FIELDS.device——
+// 桌面加第 6 个字段而漏改 web 时切片缺键返回 undefined，此前硬编码数组是
+// 单向锁，恰好看不见这个方向的漂移（round-6 review P2）。
+assert.deepEqual(
+  Object.keys(api.state.get('device')).sort(),
+  desktopSliceFields().device.slice().sort(),
+  'web device slice keys must equal the desktop STATE_SLICE_FIELDS.device contract',
+);
+// seed 字面量亦须逐键有定义（round-36 review P3）：pick() 从共享注册表投影，
+// 上面的断言看不见初始 state——无 structuredClone 的引擎走 JSON 回退克隆时
+// undefined 键整个丢失，seed 漏一键 web 切片就比桌面少一键（externalModelsError
+// 曾漏）。对 bridge.js 源码做形状钉。
+const webBridgeSource = read('bridge.js');
+for (const key of desktopSliceFields().device) {
+  const keySeedPattern = new RegExp(`^ {4}${key}:`, 'm');
+  assert.ok(
+    keySeedPattern.test(webBridgeSource),
+    `web bridge seed must declare device key "${key}" explicitly`,
   );
 }
 assert.equal(api.sendMessage, undefined, 'Web flat command facade must stay private');

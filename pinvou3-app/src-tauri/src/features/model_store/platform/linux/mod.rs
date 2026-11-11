@@ -27,11 +27,19 @@
 //! 品悟有自己的更新机制）、`gateway.rs` / `worker.rs` / `system_probe.rs`（分别是
 //! 局域网暴露、双机从机控制、硬件探测，排在后面的阶段）。
 
+pub mod boundary;
 mod card_assets;
 pub mod card_update;
 pub mod config;
 pub mod db;
 pub mod deploy_profiles;
+
+// 商店边界在 platform/mod.rs 经 `use linux as backend` 转发，必须先在本模块根
+// re-export（boundary 是子模块，别名不透传子模块条目）。
+pub(crate) use boundary::{
+    ollama_base_url, ollama_base_url_checked, store_model_name, store_model_name_checked,
+    store_weights_roots, store_weights_roots_checked, with_weight_removal_boundary,
+};
 pub mod disk;
 pub mod errors;
 pub mod import_scan;
@@ -60,6 +68,17 @@ pub use service::{
     set_storage_settings, start_card_update, start_deploy, start_download, start_lifecycle,
     start_version_action, startup_update_check, storage_settings, take_startup_cleanup,
     test_store_state, unlock_test_store, versions,
+};
+
+// 可见性契约：`installed_weight_paths_checked` 与 `installed_weight_candidate_names_checked`
+// 是 crate 内部的设备守卫助手（service.rs 里 pub(crate)，非公开命令面），所以
+// 不进上面的 `pub use`——pub 重导出 crate 可见项是 E0364（Linux CI 编译错误
+// 2026-11-04）。下游 platform/mod.rs 与 model_store/mod.rs 的 `pub(crate) use`
+// 两跳照常转发。
+pub(crate) use service::{
+    installed_import_markers_checked, installed_ownership_unconfirmable_checked,
+    installed_weight_candidate_names_checked, installed_weight_filenames_checked,
+    installed_weight_paths_checked, installed_weight_paths_for_removal_checked,
 };
 
 /// Linux 上模型商店总是可用的。

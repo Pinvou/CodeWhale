@@ -72,6 +72,7 @@ const protocolSources = {
   knowledge: ['bridge/knowledge-model.js'],
   memory: ['bridge/memory.js'],
   monitor: ['bridge/monitor.js'],
+  device: ['bridge/device.js'],
   personas: ['bridge/personas.js'],
   remoteControl: ['bridge/remote-control.js'],
   scheduled: ['bridge/scheduled.js'],
@@ -227,6 +228,12 @@ const expectedProtocolHashes = {
   // 参数化薄包装），命令面无增删。
   memory: 'ca88a71d9f0f9b15f1df52cf80218694f76b2295add98e65a0d167fc88b627c8',
   monitor: 'e63e8d5d4edf813640e08c9951a12abdbc3cad4991763d3dd956e883e277fb1c',
+  // New domain: MegaCube 设备管理 (device manager). Six commands —
+  // get_device_snapshot (2s polling) / get_device_services / get_external_models /
+  // device_register_external_model / device_remove_external_model /
+  // device_doctor_prompt — no listen() entries (the device feature polls, it
+  // does not subscribe to events). Initial hash for bridge/device.js.
+  device: 'bf61134e5c434322c08b149ce68529c7588ff2cada3b58f44230a5643c22ea24',
   personas: '33efcab9c42a6830ade35861b8a6c60891da9cb282954e78c3bda42091e2474d',
   // 为 rebase 带入的已合并面重算（PR #2322，community #781）：
   // bridge/remote-control.js 增 web_access_revoke_host_workspace 一个 invoke
@@ -248,8 +255,18 @@ const expectedProtocolHashes = {
   // maybePruneFailedWorkspaceRecent wiring (single-entry workspace picker);
   // same command set, no new invoke or listen entries — the extractor scans
   // raw source, so the merged body/comment text is part of the digest.
-  // Combined local model rollback receipts and main workspace keychain carryover.
-  sessions: '70bec8acd21b45ce46ecce0cd9f1b78deb456c064693e64129aac339c9a72235',
+  // T0-b (#701 桥接面对齐) 重算：get_session_persona_events /
+  // get_session_pinvou_reviews 两支 invoke 移入 helpers 的
+  // loadPersonaEventsForSession / loadPinvouReviewsForSession（sessions.js 留
+  // 转发壳 + reportSidecarReadFailure 注入），命令面无增删。
+  // round-39 评审 P2 重算：sessions.js 新增 createBackgroundSession 的
+  // create_session invoke（后台物化——切到既有会话后晚到的诊断动作改走
+  // 不切工作集的创建/登记路径），复用既有 create_session 命令，命令面无增删。
+  // review P2 重算：createBackgroundSession 的 create_session invoke 显式
+  // 携带 setActive:false（后台诊断会话不得抢占后端 SessionStore.active，
+  // 与 Web 宿主 web_access_create_session 的 Some(false) 契约对齐），仍复用
+  // 既有 create_session 命令，命令面无增删。
+  sessions: 'c8e941ef800477dbd5eaf09482a946f8897429c29ddd3005ba76d658a4643069',
   // Recomputed for the builtin feature toggle hook: settings.js gains the
   // list_builtin_features / set_builtin_feature_enabled invoke wrappers (the
   // session-mention feature gate reads the list; the setter is the contract
@@ -260,9 +277,9 @@ const expectedProtocolHashes = {
   // stays untouched).
   // Retain PR #1995 model refresh ordering and Account builtin toggles and typed voice references; updater also
   // inherits main's Windows progress event and installation lifecycle.
-  // Guarded store deletion and models:changed are retained; list_models
+  // Guarded store deletion, endpoint-conditional deletion and models:changed are retained; list_models
   // uses the shared loader so cross-cluster reads share one ordering boundary.
-  settings: '01bd6ce4eeff17bc9ce001a4946a50248bdb412cc99cd82083931f7d578dc25a',
+  settings: 'c10e8fae21066d9b5c57f21d1b213734983dd9375c295e77fac5ac6b85cb14d6',
   updater: 'cfe92470008c2dade64f891c36a5fa70930478f803d4d2a6d100e68d9c29392b',
   // Voice draft preparation now carries its typed source/model reference;
   // session bindings remain authoritative and the command set is unchanged.

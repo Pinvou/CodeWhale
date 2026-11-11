@@ -8,6 +8,7 @@ import { createServer } from './helpers/vite-fixture.mjs';
 import { fixtureScope } from './helpers/fixture-scope.mjs';
 import { matchesViteModule } from './helpers/vite-fixture-module.mjs';
 import { exerciseLatestLinkedCleanup } from './helpers/model-store-cleanup-smoke.mjs';
+import { exercisePendingDeviceRemovalLocale } from './helpers/device-removal-locale-smoke.mjs';
 
 const appRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const chrome = process.env.CHROME || [
@@ -58,6 +59,7 @@ try {
   const errors = [];
   page.on('pageerror', (error) => errors.push(error.message));
   await page.goto(`http://127.0.0.1:${vite.httpServer.address().port}/versions.html`);
+  await exercisePendingDeviceRemovalLocale(page);
   await exerciseLatestLinkedCleanup(page);
   await page.evaluate(async () => {
     // These imports execute in the browser and are served by the Vite fixture.

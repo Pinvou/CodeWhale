@@ -189,3 +189,105 @@ pub fn run_startup_refresh(_service: &Arc<ModelStoreService>) {}
 pub fn take_startup_cleanup(_service: &Arc<ModelStoreService>) -> Result<Value, String> {
     nope()
 }
+
+// ── 商店边界（与 linux/boundary.rs 同名同签名，见 platform/mod.rs 的转发）──
+
+/// 非 Linux 没有商店，恒为未命中（宽松版，登记端用）。
+pub(crate) fn store_model_name(_model_name: &str) -> Option<String> {
+    None
+}
+
+/// 非 Linux 没有商店：查询"成功且未命中"。移除路径的 fail-closed 语义在
+/// Linux 侧由 Err 表达；这里没有查询可言，Ok(None) 即可。
+pub(crate) fn store_model_name_checked(
+    _model_name: &str,
+    _case_insensitive: bool,
+) -> Result<Option<String>, String> {
+    Ok(None)
+}
+
+/// 非 Linux 没有商店；保留数据根作为兜底边界（外部模型守卫统一走多根检查）。
+pub(crate) fn store_weights_roots() -> Vec<std::path::PathBuf> {
+    vec![crate::platform::paths::pinvou3_home().join("model-store")]
+}
+
+/// 非 Linux 无 settings 可读失败：恒 Ok（与上方宽松/可失败两版同根集合）。
+pub(crate) fn store_weights_roots_checked() -> Result<Vec<std::path::PathBuf>, String> {
+    Ok(store_weights_roots())
+}
+
+/// There are no store download/stage writers on this backend, hence no store
+/// resources to exclude. Preserve the device feature's existing platform guards
+/// and development override: this does not enable the unsupported model store,
+/// nor borrow a Linux lock implementation for another host.
+pub(crate) fn with_weight_removal_boundary<T>(
+    operation: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    operation()
+}
+
+#[cfg(test)]
+mod weight_removal_boundary_tests {
+    #[test]
+    fn absent_store_writers_do_not_disable_existing_device_operations() {
+        let called = std::cell::Cell::new(0);
+        let result = super::with_weight_removal_boundary(|| {
+            called.set(called.get() + 1);
+            Ok("device operation result")
+        })
+        .unwrap();
+        assert_eq!(result, "device operation result");
+        assert_eq!(called.get(), 1);
+    }
+
+    #[test]
+    fn device_guard_errors_remain_authoritative_without_store_writers() {
+        let result = super::with_weight_removal_boundary(|| {
+            Err::<(), _>("original device path/identity guard failure".to_owned())
+        });
+        assert_eq!(
+            result.unwrap_err(),
+            "original device path/identity guard failure"
+        );
+    }
+}
+
+/// 非 Linux 没有商店：空引用集合（设备守卫的该臂恒不命中）。
+pub(crate) fn installed_weight_paths_checked() -> Result<Vec<std::path::PathBuf>, String> {
+    Ok(Vec::new())
+}
+
+pub(crate) fn installed_weight_paths_for_removal_checked(
+    _include_persisted_roots: bool,
+) -> Result<Vec<std::path::PathBuf>, String> {
+    installed_weight_paths_checked()
+}
+
+/// 非 Linux 没有商店：空约定名集合（设备守卫的零痕迹旧根名字臂恒不命中）。
+pub(crate) fn installed_weight_candidate_names_checked() -> Result<Vec<String>, String> {
+    Ok(Vec::new())
+}
+
+/// 非 Linux 没有商店：空标记集合（设备守卫的就地导入原目录标记臂恒不命中）。
+pub(crate) fn installed_import_markers_checked() -> Result<Vec<String>, String> {
+    Ok(Vec::new())
+}
+
+/// 非 Linux 没有商店：空权重文件名集合（设备守卫的第四恢复臂恒不命中）。
+pub(crate) fn installed_weight_filenames_checked() -> Result<Vec<String>, String> {
+    Ok(Vec::new())
+}
+
+/// 非 Linux 没有商店：不存在在册卡片，归属恒可确认（设备守卫的第五臂恒不命中）。
+pub(crate) fn installed_ownership_unconfirmable_checked() -> Result<bool, String> {
+    Ok(false)
+}
+
+pub(crate) fn ollama_base_url() -> String {
+    "http://127.0.0.1:11434".to_string()
+}
+
+/// 非 Linux 无 settings 可读失败：恒 Ok 默认地址（与可失败版同口径）。
+pub(crate) fn ollama_base_url_checked() -> Result<String, String> {
+    Ok(ollama_base_url())
+}

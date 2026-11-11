@@ -898,7 +898,8 @@ pub fn test_store_state() -> Result<Value, String> {
 ///
 /// 口令不对不是错误：调用方要能区分「口令输错了」和「配置没写进去」——前者提示
 /// 用户重输，后者得让用户去看磁盘/权限。都压成 Err 的话这两件事在界面上长得
-/// 一模一样。真的写不进配置文件才返回 Err。
+/// 一模一样。配置读不出来（哪怕只是瞬态 I/O 故障，读不到就不改，二十八轮评审
+/// P1）或写不进配置文件才返回 Err。
 pub fn unlock_test_store(password: String) -> Result<Value, String> {
     if !test_store_password_matches(&password) {
         return Ok(json!({ "ok": false }));
@@ -991,6 +992,375 @@ pub fn take_startup_cleanup(service: &Arc<ModelStoreService>) -> Result<Value, S
 /// 返回里除了可编辑的 `import_scan_dirs`，还给出 `scan_dirs`——**实际会扫的完整
 /// 列表**，含内置位置和当前挂着的 U 盘。用户真正要问的是"到底找了哪些地方"，
 /// 只回一个补充列表答不了这个问题。
+/// 设备管理删除守卫的"已安装卡片实际引用的权重路径"集合（可失败版）。
+///
+/// 就地复用不搬家：卡片脚本按约定把 `$LMM_MODELS_DIR/<HF 仓库名>` 软链到扫描
+/// 目录原位（import_scan 候选约定），宿主不记录落点——2026-11-04 评审 P2 的
+/// 两条腿（升级空历史、历史淘汰不查引用）都源于"目录级保护超集覆盖不到存量
+/// 引用"，这里从**在册模型 + 约定候选路径**恢复实际引用：枚举全部在册记录的
+/// 约定权重候选（当前 models_dir 与历史根下各一份，换目录不搬权重），exists()
+/// 过滤后 canonicalize 解析软链得到真实落点。卡片目录（data_dir/cards/<id>）
+/// 不在集合里——它恒在商店数据根之下，路径臂本已覆盖。另并入卡片脚本自己
+/// 落盘的 .env MODEL_PATH 权威路径（改名目录/零痕迹旧根的兜底，见
+/// card_env_model_paths 的文档）。
+///
+/// fail-closed：settings/DB 读不了 → Err（与商店名单查询同口径，破坏性移除
+/// 路径不得当未命中放行）。与 residual_paths 同一把 exists() 尺子但方向相反：
+/// 提示文案宁可漏报，保护集合宁可多报。
+pub(crate) fn installed_weight_paths_checked() -> Result<Vec<std::path::PathBuf>, String> {
+    installed_weight_paths_for_removal_checked(true)
+}
+
+/// Keep main's legacy reference guards for every removal. The card-update
+/// records add protection only for physical weight deletion, so unregistering
+/// an otherwise removable external record does not acquire a new restriction.
+pub(crate) fn installed_weight_paths_for_removal_checked(
+    include_persisted_roots: bool,
+) -> Result<Vec<std::path::PathBuf>, String> {
+    let records = db::list_store_models().map_err(|e| format!("读取在册模型失败：{e}"))?;
+    // 候选根取商店权重根全集（当前+历史 models_dir、导入目录及其历史、staging、
+    // 内置家目录根）：旧版本允许一次设置变更同时换权重目录并移除扫描目录且
+    // 不留任何历史（2026-11-04 评审 P2），此时旧默认根（~/models 等）上的
+    // 在册引用只有内置根能恢复；集合同源 collect_weights_roots，与守卫的
+    // 目录级保护同口径。
+    let roots = crate::features::model_store::store_weights_roots_checked()?;
+    let mut out: Vec<std::path::PathBuf> = Vec::new();
+    for rec in &records {
+        // 与 lifecycle::candidate_paths 同一候选约定（权重两臂）：来源仓库名
+        // 末段与用户模型名，都过 safe_path_component 防逃逸。
+        let mut names: Vec<String> = Vec::new();
+        if let Some(repo) = rec.source_repo_id.as_deref() {
+            if let Some(base) = repo.rsplit('/').next() {
+                if let Ok(safe) = config::safe_path_component(base) {
+                    names.push(safe);
+                }
+            }
+        }
+        if let Ok(safe) = config::safe_path_component(&rec.model_name) {
+            names.push(safe);
+        }
+        for root in &roots {
+            for name in &names {
+                let candidate = root.join(name);
+                if candidate.exists() {
+                    let resolved = candidate.canonicalize().unwrap_or(candidate);
+                    if !out.contains(&resolved) {
+                        out.push(resolved);
+                    }
+                }
+            }
+        }
+    }
+    // The card-update PR persists authoritative roots that can outlive the
+    // bounded configuration history. Consume those references directly instead
+    // of attempting to reconstruct them only from current settings and names.
+    if include_persisted_roots {
+        let mut registered = Vec::new();
+        for record in &records {
+            if let Some(root) = &record.models_root {
+                registered.push(std::path::PathBuf::from(root));
+            }
+            registered.extend(super::version_store::download_paths(&record.card_id)?);
+        }
+        for version in super::version_store::list(None)? {
+            registered.extend(version.models_root.map(std::path::PathBuf::from));
+            registered.extend(version.resource_dir.map(std::path::PathBuf::from));
+        }
+        registered.extend(super::version_store::active_download_roots()?);
+        for path in registered {
+            if !path.is_absolute() {
+                return Err("model_store_weight_path_invalid".into());
+            }
+            // Keep a not-yet-created download target protected as well. A path
+            // resolution failure must not discard a registered reference.
+            let resolved = match path.canonicalize() {
+                Ok(resolved) => resolved,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => path,
+                Err(error) => return Err(format!("model_store_weight_path_unavailable: {error}")),
+            };
+            if !out.contains(&resolved) {
+                out.push(resolved);
+            }
+        }
+    }
+    // .env MODEL_PATH 恢复腿（2026-11-08 评审 P2-3 处方一）：约定候选覆盖不
+    // 了的「改名目录/零痕迹旧根」由卡片脚本自己落盘的权威路径兜底（存在性
+    // 过滤 + canonicalize 与上方同一把尺）；见 card_env_model_paths 的文档。
+    for resolved in card_env_model_paths(&records) {
+        if !out.contains(&resolved) {
+            out.push(resolved);
+        }
+    }
+    Ok(out)
+}
+
+/// 设备管理删除守卫的「在册卡片权重目录约定名」集合（可失败版）。
+///
+/// 与 [`installed_weight_paths_checked`] 互补：后者按「已知根 × 约定名」恢复
+/// 引用路径，只能覆盖根集合枚举得到的位置——旧版本允许在保存存储设置时换根
+/// 并同时移除扫描目录且不留任何历史（2026-11-04 评审 P2），那样的旧自定义根
+/// 升级后不在任何历史/内置根中，**零痕迹**。本函数返回名字集合，只依赖在册
+/// 记录、不依赖任何根——这正是它能覆盖零痕迹旧根的原因：设备侧在删除目标
+/// 不在任何已知商店根之下时按名字比对，命中即拒绝（「无法确认归属时拦住
+/// 删除」，fail-closed）。
+///
+/// 两臂约定名（来源仓库名末段 + 用户模型名）与 [`installed_weight_paths_checked`]
+/// 及 `lifecycle::candidate_paths` 同一候选约定，都过 `safe_path_component`
+/// 防逃逸；去重后返回，顺序稳定（按记录顺序首现排列）。
+///
+/// fail-closed：DB 读不了 → Err（与 installed_weight_paths_checked 同口径，
+/// 破坏性移除路径不得当未命中放行）。宁可多拒：约定名只由在册卡片占用，
+/// 同名非商店目录被拒是可接受的误伤方向（与目录级保护超集同一取舍）。
+pub(crate) fn installed_weight_candidate_names_checked() -> Result<Vec<String>, String> {
+    let records = db::list_store_models().map_err(|e| format!("读取在册模型失败：{e}"))?;
+    let mut out: Vec<String> = Vec::new();
+    for rec in &records {
+        // 与 installed_weight_paths_checked / lifecycle::candidate_paths 同一
+        // 两臂候选约定：来源仓库名末段与用户模型名，都过 safe_path_component。
+        if let Some(repo) = rec.source_repo_id.as_deref() {
+            if let Some(base) = repo.rsplit('/').next() {
+                if let Ok(safe) = config::safe_path_component(base) {
+                    if !out.contains(&safe) {
+                        out.push(safe);
+                    }
+                }
+            }
+        }
+        if let Ok(safe) = config::safe_path_component(&rec.model_name) {
+            if !out.contains(&safe) {
+                out.push(safe);
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// 官方卡片下载脚本「就地发现」原始模型目录所用的标记文件名全集。
+///
+/// 证据（脚本正文以商店/仓库下发件为准）：
+/// - 正式 Z-Image-Turbo 卡 `download_model.sh`：在扫描根里
+///   `find … -maxdepth 4 -type f -name "model_index.json"` 发现原目录，
+///   校验完整性（vae 权重 + 两处分片索引的 weight_map 全存在）后
+///   `ln -s <原目录> $LMM_MODELS_DIR/Z-Image-Turbo`——原目录名是用户自取的，
+///   不必匹配任何约定名（2026-11-05 评审 P2 zhuowp 场景）。
+/// - 内置测试商店 ornith15-bf16 / qwen38-27b-nvfp4-mtp 的
+///   `download_model.sh`：同一套查找-链接写法，标记文件是
+///   `model.safetensors.index.json`。
+///
+/// 因此在册卡片可能通过软链引用任意名字的原始目录，设备侧删除守卫在
+/// 无法确认归属时按标记文件拦截（见
+/// [`installed_import_markers_checked`]）。新卡片引入新标记时必须回到这里
+/// 登记显式清单（external_models.rs 的拒绝文案也逐一列了标记名，需同步）——
+/// 不从脚本正文现解析（对任意卡片脚本做正则提取会漏，
+/// 漏掉就是静默盲区，恰是这轮要堵死的那类洞）。
+const INSTALL_IMPORT_DISCOVERY_MARKERS: [&str; 2] =
+    ["model_index.json", "model.safetensors.index.json"];
+
+/// 设备管理删除守卫的「在册卡片就地导入原目录标记文件」集合（可失败版）。
+///
+/// 前两臂（[`installed_weight_paths_checked`] 按「已知根 × 约定名」恢复引用、
+/// [`installed_weight_candidate_names_checked`] 按名字兜底零痕迹旧根）都依赖
+/// 原目录名可推导；zhuowp 场景（2026-11-05 评审 P2）里原目录名是用户自取的，
+/// 两臂都失明。本函数换一条腿：官方脚本是**按标记文件**发现原目录的，删除
+/// 目标（含一级子目录）出现标记文件即说明它可能是某张在册卡片的就地导入
+/// 原目录——归属无法确认，设备侧按 fail-closed 拦截。
+///
+/// 空库返回空集合（没有任何在册卡片就没有任何未跟踪引用的可能，该臂关闭）；
+/// 有在册卡片时返回 [`INSTALL_IMPORT_DISCOVERY_MARKERS`] 全集。
+///
+/// 误拦面（如实披露）：装有任意在册卡片期间，用户自备的 diffusers / 分片
+/// safetensors 目录（叶子或一级子目录含标记文件）同样会被拦——这类目录与
+/// 在册卡片的原目录无法区分。解除方式：卸载对应卡片后本臂自动关闭，或按
+/// 守卫提示手工删除注册表记录后径直处理目录。
+///
+/// fail-closed：DB 读不了 → Err（与 installed_weight_paths_checked 同口径，
+/// 破坏性移除路径不得当未命中放行）。
+pub(crate) fn installed_import_markers_checked() -> Result<Vec<String>, String> {
+    let records = db::list_store_models().map_err(|e| format!("读取在册模型失败：{e}"))?;
+    if records.is_empty() {
+        return Ok(Vec::new());
+    }
+    Ok(INSTALL_IMPORT_DISCOVERY_MARKERS
+        .iter()
+        .map(|m| (*m).to_string())
+        .collect())
+}
+
+/// 设备管理删除守卫的「在册卡片登记的权重文件名」集合（可失败版）。
+///
+/// 第四条恢复腿（2026-11-06 评审 P2 zhuowp 场景 III，review 5797725367）：
+/// 路径臂（约定名 × 已知根）、名字臂（约定名叶/一级）、标记臂（就地导入标记）
+/// 共同的盲区是——权重目录名被用户改掉、目录内又没有标记文件，但记录里仍存有
+/// 权重文件名（`source_filename`）的在册卡片：三条腿都对它失明，删除其权重
+/// 目录的祖先时守卫会放行并连带毁掉它。目录名可以改，权重文件名是卡片运行
+/// 的必需组件、不会跟着改——把它作为实际引用数据并入恢复：集合非空时，设备
+/// 侧删除目标的子树内出现同名文件即「无法确认不是在册卡片的权重」，按
+/// fail-closed 拦截（与标记臂同一走查半径=删除物理范围、同一误拦方向）。
+///
+/// 集合按记录逐条取 `source_filename`（None/空串跳过，`safe_path_component`
+/// 防逃逸——存量记录可能带路径分量），去重后返回。记录连文件名都没存的卡片
+/// 在仓库数据里已无任何可恢复的引用痕迹，超出守卫可知边界（如实披露，不虚构
+/// 保护面）。空库返回空集合（该臂关闭）。
+///
+/// fail-closed：DB 读不了 → Err（与前两臂同口径，破坏性移除路径不得当未命中
+/// 放行）。
+pub(crate) fn installed_weight_filenames_checked() -> Result<Vec<String>, String> {
+    let records = db::list_store_models().map_err(|e| format!("读取在册模型失败：{e}"))?;
+    let mut out: Vec<String> = Vec::new();
+    for rec in &records {
+        let Some(filename) = rec.source_filename.as_deref() else {
+            continue;
+        };
+        let trimmed = filename.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if let Ok(safe) = config::safe_path_component(trimmed) {
+            if !out.contains(&safe) {
+                out.push(safe);
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// 卡片脚本自己落盘的 `.env`（官方卡片共用的 `MODEL_PATH=` 约定）恢复卡片
+/// 权重的**权威落点**。证据（脚本正文以商店/仓库下发件为准）：
+/// - ornith15-bf16 / qwen38-27b-nvfp4-mtp 的 `download_model.sh`：
+///   `sed -i -e "s#^MODEL_PATH=.*#MODEL_PATH=$MODELS_DIR#" .env`——下载完成即
+///   把真实权重目录写进 .env；VENDOR_DIR 是 `cards/<id>/vendor`（宿主 prepare
+///   约定）或脚本自带的旧约定 `~/.local/share/local-model-manager/vendor/<id>`。
+///
+/// 这是第五条恢复腿（2026-11-08 评审 P2-3 处方一「覆盖这类依赖」）：前四腿的
+/// 恢复数据全部来自商店库与约定推导，对「目录被改名/落在任何已知根之外的
+/// 零痕迹旧根」失明；.env 里的 MODEL_PATH 是卡片运行时自己记下的权威路径，
+/// 恰好覆盖这两类盲区（改名目录、任意深度祖先删除经路径相交两方向命中）。
+/// 五个落点逐一探测（2026-11-09 评审 P2 补旧写入约定，review 5820385522）：
+/// 现行宿主两处（`cards/<id>/.env`、`cards/<id>/vendor/.env`）+ 前代 LMM
+/// 独立应用的三处——LMM 的数据根是 `~/.local/share/local-model-manager/`
+/// （config.rs「不沿用 LMM 的老路径」一节记载，设备上原样保留），其宿主
+/// prepare 的卡片目录为 `<老根>/cards/<id>`，`.env` 落在卡片根与
+/// `cards/<id>/vendor/`，脚本自带的 vendor 老约定也在同一老根下——老商店
+/// 时期装的卡片，其 .env 仍记着现在仍在盘上的权重权威路径。找不到/无
+/// MODEL_PATH/路径非绝对按该卡片无数据处理；exists() 过滤（残留 .env 指向
+/// 已删除目录时不产生假引用）后 canonicalize 解析软链（与
+/// installed_weight_paths_checked 同一把尺）。
+///
+/// 解析失败的方向是「少恢复」（该卡片退回前四腿的保护面），不是「错恢复」：
+/// .env 是卡片脚本可写文件，不把它当信任边界，只当引用恢复的数据源。
+fn card_env_model_paths(records: &[db::StoreModelRecord]) -> Vec<std::path::PathBuf> {
+    let home = crate::platform::paths::user_home_dir();
+    let lmm_root = home.join(".local/share/local-model-manager");
+    let mut out: Vec<std::path::PathBuf> = Vec::new();
+    for rec in records {
+        let Ok(safe_id) = config::safe_path_component(&rec.card_id) else {
+            continue;
+        };
+        let candidates = [
+            config::data_dir().join("cards").join(&safe_id).join(".env"),
+            config::data_dir()
+                .join("cards")
+                .join(&safe_id)
+                .join("vendor")
+                .join(".env"),
+            lmm_root.join("cards").join(&safe_id).join(".env"),
+            lmm_root
+                .join("cards")
+                .join(&safe_id)
+                .join("vendor")
+                .join(".env"),
+            lmm_root.join("vendor").join(&safe_id).join(".env"),
+        ];
+        for env_path in candidates {
+            let Ok(text) = std::fs::read_to_string(&env_path) else {
+                continue;
+            };
+            let Some(raw) = parse_env_model_path(&text) else {
+                continue;
+            };
+            let candidate = std::path::PathBuf::from(&raw);
+            if !candidate.is_absolute() {
+                continue;
+            }
+            if !candidate.exists() {
+                continue;
+            }
+            let resolved = candidate.canonicalize().unwrap_or(candidate);
+            if !out.contains(&resolved) {
+                out.push(resolved);
+            }
+        }
+    }
+    out
+}
+
+/// 解析 `.env` 正文里的 `MODEL_PATH=`（支持 `export ` 前缀与成对引号；多次
+/// 赋值取最后一次——与卡片脚本 `sed -i` 覆盖写语义一致）。空值/缺键返回 None。
+fn parse_env_model_path(text: &str) -> Option<String> {
+    let mut found: Option<String> = None;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        let trimmed = trimmed.strip_prefix("export ").unwrap_or(trimmed).trim();
+        if let Some(value) = trimmed.strip_prefix("MODEL_PATH=") {
+            let value = value
+                .trim()
+                .trim_matches('"')
+                .trim_matches('\'')
+                .trim()
+                .to_string();
+            if !value.is_empty() {
+                found = Some(value);
+            }
+        }
+    }
+    found
+}
+
+/// 设备管理删除守卫的「归属无法确认的在册卡片」探测（可失败版）。
+///
+/// 处方二的收窄版（2026-11-08 评审 P2-3：「在归属无法确认时拒绝物理删除」）：
+/// 五条恢复腿（引用路径/约定名/导入标记/权重文件名/.env MODEL_PATH）对某张
+/// 卡片**全部无数据**（无 source_filename、仓库末段与模型名都过不了
+/// `safe_path_component`、卡片 .env 也没有可用的 MODEL_PATH）时，它的权重
+/// 可以落在任何位置而守卫无从确认任何删除目标的归属——这类卡片在册期间，
+/// 物理删除按整体拒绝处理（解除登记不受影响）；卸载对应卡片后本臂自动放行。
+/// 真实触发面：非 ASCII/含路径分量的 model_name 且无来源仓库与文件名的卡片
+/// （`safe_path_component` 只放行 `[A-Za-z0-9._-]`，中文自取名卡片正是这个
+/// 形状）。仍有任一腿可用（哪怕只是约定名）的卡片不触发本臂——它们由对应
+/// 腿按各自的半径保护，本臂不放大拒绝面（与名字臂「宁可漏」的边界处方一致）。
+///
+/// fail-closed：DB 读不了 → Err（与前四臂同口径，破坏性移除路径不得当未命中
+/// 放行）。
+pub(crate) fn installed_ownership_unconfirmable_checked() -> Result<bool, String> {
+    let records = db::list_store_models().map_err(|e| format!("读取在册模型失败：{e}"))?;
+    let filename_usable = |rec: &db::StoreModelRecord| -> bool {
+        let Some(filename) = rec.source_filename.as_deref() else {
+            return false;
+        };
+        let trimmed = filename.trim();
+        !trimmed.is_empty() && config::safe_path_component(trimmed).is_ok()
+    };
+    let names_usable = |rec: &db::StoreModelRecord| -> bool {
+        let repo_usable = rec
+            .source_repo_id
+            .as_deref()
+            .and_then(|repo| repo.rsplit('/').next())
+            .map(|base| config::safe_path_component(base).is_ok())
+            .unwrap_or(false);
+        repo_usable || config::safe_path_component(&rec.model_name).is_ok()
+    };
+    for rec in &records {
+        if filename_usable(rec) || names_usable(rec) {
+            continue;
+        }
+        if !card_env_model_paths(std::slice::from_ref(rec)).is_empty() {
+            continue;
+        }
+        return Ok(true);
+    }
+    Ok(false)
+}
+
 pub fn storage_settings() -> Result<Value, String> {
     let settings = config::read_settings()?;
     let models_dir = settings.models_path();
@@ -1025,8 +1395,9 @@ pub fn set_storage_settings(
     import_scan_dirs: Option<Vec<String>>,
     startup_update_check_enabled: Option<bool>,
 ) -> Result<Value, String> {
-    // Validate potentially slow target-directory work before the configuration
-    // lock. The lock only covers a fresh configuration read, patch and write.
+    // Validate all paths before filesystem side effects. Directory preparation
+    // stays outside the settings lock; the locked transaction rereads the current
+    // roots before it records history and patches the requested fields.
     let models_dir = models_dir
         .map(|dir| {
             let dir = dir.trim().to_string();
@@ -1036,22 +1407,68 @@ pub fn set_storage_settings(
             if !std::path::Path::new(&dir).is_absolute() {
                 return Err(format!("权重目录要填绝对路径，收到的是「{dir}」"));
             }
-            std::fs::create_dir_all(&dir).map_err(|e| format!("无法创建权重目录「{dir}」：{e}"))?;
             Ok(dir)
         })
         .transpose()?;
-    let import_scan_dirs = import_scan_dirs.map(|dirs| {
-        dirs.into_iter()
-            .map(|dir| dir.trim().to_string())
-            .filter(|dir| !dir.is_empty())
-            .collect()
-    });
+    let import_scan_dirs = import_scan_dirs
+        .map(|dirs| {
+            let cleaned: Vec<String> = dirs
+                .into_iter()
+                .map(|dir| dir.trim().to_string())
+                .filter(|dir| !dir.is_empty())
+                .collect();
+            for dir in &cleaned {
+                if !std::path::Path::new(dir).is_absolute() {
+                    return Err(format!("导入扫描目录要填绝对路径，收到的是「{dir}」"));
+                }
+            }
+            Ok(cleaned)
+        })
+        .transpose()?;
+    if let Some(dir) = &models_dir {
+        std::fs::create_dir_all(dir).map_err(|e| format!("无法创建权重目录「{dir}」：{e}"))?;
+    }
     config::update_settings(|settings| {
         if let Some(dir) = models_dir {
+            // Changing the active root never moves weights: retain the previous
+            // root for the device removal boundary, with main's existing cap.
+            if dir != settings.models_dir && !settings.models_dir.trim().is_empty() {
+                let old = settings.models_dir.clone();
+                settings
+                    .models_dir_history
+                    .retain(|d| d != &old && d != &dir);
+                settings.models_dir_history.push(old);
+                let keep = settings
+                    .models_dir_history
+                    .len()
+                    .saturating_sub(config::MAX_MODELS_DIR_HISTORY);
+                settings.models_dir_history.drain(..keep);
+            }
             settings.models_dir = dir;
         }
-        if let Some(dirs) = import_scan_dirs {
-            settings.import_scan_dirs = dirs;
+        if let Some(cleaned) = import_scan_dirs {
+            // Removed scan roots can still contain in-place imported weights.
+            let mut removed: Vec<String> = settings
+                .import_scan_dirs
+                .iter()
+                .map(|d| d.trim().to_string())
+                .filter(|d| !d.is_empty() && !cleaned.contains(d))
+                .collect();
+            removed.sort();
+            removed.dedup();
+            for old in removed {
+                settings.import_scan_dirs_history.retain(|d| d != &old);
+                settings.import_scan_dirs_history.push(old);
+            }
+            settings
+                .import_scan_dirs_history
+                .retain(|d| !cleaned.contains(d));
+            let keep = settings
+                .import_scan_dirs_history
+                .len()
+                .saturating_sub(config::MAX_IMPORT_SCAN_DIRS_HISTORY);
+            settings.import_scan_dirs_history.drain(..keep);
+            settings.import_scan_dirs = cleaned;
         }
         if let Some(enabled) = startup_update_check_enabled {
             settings.startup_update_check_enabled = enabled;
@@ -1414,6 +1831,853 @@ mod tests {
         assert_eq!(
             std::fs::metadata(&existing).unwrap().permissions().mode() & 0o777,
             0o600
+        );
+    }
+
+    #[test]
+    fn changing_models_dir_records_the_old_dir_in_history() {
+        let ctx = super::config::TempHome::new();
+        let a = ctx.path().join("weights-a");
+        let b = ctx.path().join("weights-b");
+        let path_of = |p: &std::path::Path| p.to_string_lossy().to_string();
+
+        // 默认（回填）→ A：旧值（数据根下的 models/）记入历史——它本就在
+        // 保护根里，重复无害；关键是 A 不出现在历史。
+        set_storage_settings(Some(path_of(&a)), None, None).expect("set first models_dir");
+        let settings = super::config::load_settings();
+        assert_eq!(settings.models_dir, path_of(&a));
+        assert!(
+            !settings.models_dir_history.contains(&path_of(&a)),
+            "当前目录不能留在历史里"
+        );
+
+        // A → B：A 进历史——换目录不搬权重，A 下的在册模型仍是商店地盘。
+        set_storage_settings(Some(path_of(&b)), None, None).expect("set second models_dir");
+        let settings = super::config::load_settings();
+        assert_eq!(settings.models_dir, path_of(&b));
+        assert!(settings.models_dir_history.contains(&path_of(&a)));
+
+        // B → 换回 A：A 从历史里清掉（它现在是当前值），B 进历史。
+        set_storage_settings(Some(path_of(&a)), None, None).expect("switch back");
+        let settings = super::config::load_settings();
+        assert!(settings.models_dir_history.contains(&path_of(&b)));
+        assert!(
+            !settings.models_dir_history.contains(&path_of(&a)),
+            "换回旧目录后它由当前值覆盖，历史里不该有第二份"
+        );
+
+        // 保护链路端到端：当前是 A、历史有 B 时，store_weights_roots 同时
+        // 覆盖两个目录（历史目录的守卫面见 boundary 的直打测试）。
+        set_storage_settings(Some(path_of(&b)), None, None).expect("set to b again");
+        let roots = crate::features::model_store::store_weights_roots();
+        assert!(roots.contains(&std::path::PathBuf::from(&path_of(&a))));
+        assert!(roots.contains(&std::path::PathBuf::from(&path_of(&b))));
+    }
+
+    #[test]
+    fn models_dir_history_evicts_the_oldest_root_past_the_cap() {
+        // 溢出裁剪方向（十九轮评审：`drain(..keep)` 丢最老端此前零钉——把它
+        // 改成丢最新端、或把上限改成任意值，现有用例照绿）。钉住：历史恰为
+        // 上限长、被挤出的是**最老**的根；被挤出的根同时脱出
+        // store_weights_roots 保护集（在册模型只剩名字臂，属既定容量取舍，
+        // 见 config 字段注释）。
+        let ctx = super::config::TempHome::new();
+        let path_of = |p: &std::path::Path| p.to_string_lossy().to_string();
+        for index in 0..=(super::config::MAX_MODELS_DIR_HISTORY + 1) {
+            let dir = ctx.path().join(format!("weights-{index:03}"));
+            set_storage_settings(Some(path_of(&dir)), None, None).expect("set models_dir");
+        }
+        let cap = super::config::MAX_MODELS_DIR_HISTORY;
+        let settings = super::config::load_settings();
+        assert_eq!(
+            settings.models_dir_history.len(),
+            cap,
+            "历史长度必须钉在 MAX_MODELS_DIR_HISTORY"
+        );
+        let dir = |index: usize| path_of(&ctx.path().join(format!("weights-{index:03}")));
+        // 第 18 次换入挤出的是最老端（000），次老的 001 与最新入史的 016 仍在；
+        // 当前值 017 不在历史里。
+        assert!(
+            !settings.models_dir_history.contains(&dir(0)),
+            "最老的根应被挤出历史"
+        );
+        assert!(settings.models_dir_history.contains(&dir(1)));
+        assert!(settings.models_dir_history.contains(&(dir(cap))));
+        assert!(!settings.models_dir_history.contains(&dir(cap + 1)));
+        // 保护集联动：留存的最新历史根在 store_weights_roots 里，被挤出的
+        // 最老根已不在（有意取舍，此断言钉住"溢出即失去路径臂保护"语义）。
+        let roots = crate::features::model_store::store_weights_roots();
+        assert!(roots.contains(&std::path::PathBuf::from(dir(cap - 1))));
+        assert!(!roots.contains(&std::path::PathBuf::from(dir(0))));
+    }
+
+    #[test]
+    fn removing_scan_dir_records_history_and_keeps_weights_protected() {
+        // 2026-11-04 评审 P2 的状态转换（settings 层）：卡片脚本会在扫描目录里
+        // 就地复用既有权重，从设置移除目录的那一刻起，若不留痕，目录立即脱出
+        // 商店权重根集合——设备管理「名称不同的外部模型记录 + 删除权重」就能
+        // 删掉仍被引用的唯一副本。钉住：移除 → 记入 import_scan_dirs_history →
+        // store_weights_roots 覆盖；重新挂回 → 由当前值接管、历史退掉。
+        let ctx = super::config::TempHome::new();
+        let kept = ctx.path().join("scan-kept");
+        let removed = ctx.path().join("scan-removed");
+        let path_of = |p: &std::path::Path| p.to_string_lossy().to_string();
+
+        set_storage_settings(None, Some(vec![path_of(&kept), path_of(&removed)]), None)
+            .expect("set scan dirs");
+        let settings = super::config::load_settings();
+        assert!(
+            settings.import_scan_dirs_history.is_empty(),
+            "首挂不该有历史，got: {:?}",
+            settings.import_scan_dirs_history
+        );
+
+        // 移除其一：被移除的目录入史，留下的不入。
+        set_storage_settings(None, Some(vec![path_of(&kept)]), None).expect("remove one scan dir");
+        let settings = super::config::load_settings();
+        assert_eq!(settings.import_scan_dirs, vec![path_of(&kept)]);
+        assert!(
+            settings
+                .import_scan_dirs_history
+                .contains(&path_of(&removed))
+        );
+        assert!(!settings.import_scan_dirs_history.contains(&path_of(&kept)));
+        // 保护集联动：被移除的目录仍在商店权重根集合里（守卫面的删除拒绝由
+        // device 侧 e2e 直打）。
+        let roots = crate::features::model_store::store_weights_roots();
+        assert!(roots.contains(&std::path::PathBuf::from(path_of(&removed))));
+
+        // 重新挂回：由当前值接管，历史里的同一目录退掉（不重复占位）。
+        set_storage_settings(None, Some(vec![path_of(&kept), path_of(&removed)]), None)
+            .expect("re-add scan dir");
+        let settings = super::config::load_settings();
+        assert!(
+            !settings
+                .import_scan_dirs_history
+                .contains(&path_of(&removed)),
+            "重新挂回的目录不该留在历史里，got: {:?}",
+            settings.import_scan_dirs_history
+        );
+
+        // trim 形状入史：设置里带首尾空白的登记，入史的是 cleaned 后的形状，
+        // 守卫前缀匹配才不失配（第七轮评审 P3 同一把尺子）。
+        let blank = ctx.path().join("scan-blank");
+        set_storage_settings(
+            None,
+            Some(vec![format!(" {} ", path_of(&blank)), path_of(&kept)]),
+            None,
+        )
+        .expect("set with whitespace");
+        set_storage_settings(None, Some(vec![path_of(&kept)]), None).expect("remove it");
+        let settings = super::config::load_settings();
+        assert!(settings.import_scan_dirs_history.contains(&path_of(&blank)));
+    }
+
+    #[test]
+    fn installed_weight_paths_recover_referenced_paths_from_records() {
+        use crate::features::model_store::platform::linux::db;
+
+        let ctx = super::config::TempHome::new();
+        db::init_db().expect("init store db");
+        // 空库 → 空引用集合（设备守卫的该臂恒不命中）。
+        let empty = crate::features::model_store::installed_weight_paths_checked()
+            .expect("empty store enumerates");
+        assert!(empty.is_empty(), "got {empty:?}");
+
+        // 在册卡片的两条约定候选（来源仓库名末段、用户模型名）各落一个真实
+        // 目录 → 枚举恢复两条 canonical 路径。
+        db::add_store_model(db::AddStoreModelParams {
+            card_id: "c-refs-1",
+            model_name: "my-model",
+            card_name: "c-refs-1",
+            org: None,
+            description: None,
+            engine_name: "e",
+            engine_version: None,
+            size_bytes: 0,
+            quantization: None,
+            source_repo_id: Some("org/qwen-weights"),
+            source_filename: None,
+            scripts: &std::collections::BTreeMap::new(),
+            status: "downloaded",
+            profiles: &[],
+            deploy_topology: crate::features::model_store::platform::linux::store_client::DeployTopology::default(),
+            card_source: "store",
+        })
+        .expect("insert downloaded model");
+        let models_dir = super::config::load_settings().models_path();
+        let by_repo = models_dir.join("qwen-weights");
+        let by_name = models_dir.join("my-model");
+        std::fs::create_dir_all(&by_repo).expect("create repo candidate");
+        std::fs::create_dir_all(&by_name).expect("create name candidate");
+        let refs = crate::features::model_store::installed_weight_paths_checked()
+            .expect("enumerate installed refs");
+        assert!(
+            refs.contains(&by_repo.canonicalize().expect("canonical repo")),
+            "repo-name candidate must be recovered, got {refs:?}"
+        );
+        assert!(
+            refs.contains(&by_name.canonicalize().expect("canonical name")),
+            "model-name candidate must be recovered, got {refs:?}"
+        );
+
+        // 不存在的候选被 exists() 过滤（与 residual_paths 同一尺子）。
+        assert!(
+            !refs.iter().any(|p| p.ends_with("absent-candidate")),
+            "missing candidates must be filtered, got {refs:?}"
+        );
+
+        // 就地复用形态：约定位置是软链 → canonicalize 解析到原位。
+        let original = ctx.path().join("legacy-scan").join("hf").join("qwen");
+        std::fs::create_dir_all(&original).expect("create original weights");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&original, models_dir.join("linked-repo"))
+            .expect("create reuse symlink");
+        db::add_store_model(db::AddStoreModelParams {
+            card_id: "c-refs-2",
+            model_name: "linked-model",
+            card_name: "c-refs-2",
+            org: None,
+            description: None,
+            engine_name: "e",
+            engine_version: None,
+            size_bytes: 0,
+            quantization: None,
+            source_repo_id: Some("org/linked-repo"),
+            source_filename: None,
+            scripts: &std::collections::BTreeMap::new(),
+            status: "downloaded",
+            profiles: &[],
+            deploy_topology: crate::features::model_store::platform::linux::store_client::DeployTopology::default(),
+            card_source: "store",
+        })
+        .expect("insert linked model");
+        let refs = crate::features::model_store::installed_weight_paths_checked()
+            .expect("enumerate after symlink");
+        assert!(
+            refs.contains(&original.canonicalize().expect("canonical original")),
+            "in-place reuse must recover the ORIGINAL path via the symlink, got {refs:?}"
+        );
+
+        // 历史根也参与枚举：换目录不搬权重，老根下的在册候选同样恢复。
+        let old_models_dir = models_dir.clone();
+        let new_models_dir = ctx.path().join("weights-new");
+        crate::features::model_store::set_storage_settings(
+            Some(new_models_dir.to_string_lossy().into_owned()),
+            None,
+            None,
+        )
+        .expect("switch models_dir");
+        // 老根（现入历史）下的既有候选仍被恢复。
+        let refs = crate::features::model_store::installed_weight_paths_checked()
+            .expect("enumerate with history roots");
+        assert!(
+            refs.contains(&by_repo.canonicalize().expect("canonical old root")),
+            "candidates under the historical models_dir root must still be recovered, got {refs:?}"
+        );
+        let _ = old_models_dir;
+    }
+
+    // 2026-11-05 评审 P2 zhuowp 场景 II：官方卡片脚本按标记文件就地发现用户
+    // 自取名的原目录，删除守卫在「目标含标记 + 仍有在册卡片」时拦。标记集合
+    // 必须由在册卡片开闸：空库 → 空集合（本臂关闭），有在册卡片 → 全集。
+    #[test]
+    fn installed_import_markers_gate_on_registered_cards() {
+        use crate::features::model_store::platform::linux::db;
+
+        // 生命周期守卫：临时 HOME 必须活到测试结束（`_ctx` 命名绑定保留
+        // 作用域内存活、同时让 deny(unused_variables) 不报——Linux CI
+        // 2026-11-05 评审 5783998563 P2）。
+        let _ctx = super::config::TempHome::new();
+        db::init_db().expect("init store db");
+        // 空库 → 空集合：没有任何在册卡片就没有未跟踪原目录引用的可能。
+        let empty = crate::features::model_store::installed_import_markers_checked()
+            .expect("empty store enumerates");
+        assert!(empty.is_empty(), "got {empty:?}");
+
+        db::add_store_model(db::AddStoreModelParams {
+            card_id: "c-markers-1",
+            model_name: "m",
+            card_name: "c-markers-1",
+            org: None,
+            description: None,
+            engine_name: "e",
+            engine_version: None,
+            size_bytes: 0,
+            quantization: None,
+            source_repo_id: Some("Tongyi-MAI/Z-Image-Turbo"),
+            source_filename: None,
+            scripts: &std::collections::BTreeMap::new(),
+            status: "downloaded",
+            profiles: &[],
+            deploy_topology: crate::features::model_store::platform::linux::store_client::DeployTopology::default(),
+            card_source: "store",
+        })
+        .expect("insert downloaded model");
+        let markers = crate::features::model_store::installed_import_markers_checked()
+            .expect("markers with a registered card");
+        assert!(
+            markers.contains(&"model_index.json".to_string()),
+            "official z-image-turbo discovery marker must be listed, got {markers:?}"
+        );
+        assert!(
+            markers.contains(&"model.safetensors.index.json".to_string()),
+            "builtin ornith15/qwen38 discovery marker must be listed, got {markers:?}"
+        );
+    }
+
+    #[test]
+    fn installed_weight_paths_cover_builtin_roots_for_legacy_migration() {
+        use crate::features::model_store::platform::linux::db;
+
+        // 旧版迁移组合（2026-11-04 评审 P2）：配置里换过权重目录、两类历史
+        // 均不存在，但安装记录仍在——旧默认根（内置家目录根 ~/models）上的
+        // 在册引用必须由内置根枚举恢复。
+        let ctx = super::config::TempHome::new();
+        db::init_db().expect("init store db");
+        std::fs::write(
+            super::config::config_dir().join("config.json"),
+            format!(
+                r#"{{"models_dir": "{}"}}"#,
+                ctx.path().join("custom-weights").to_string_lossy()
+            ),
+        )
+        .expect("write migrated config");
+        let settings = super::config::load_settings();
+        assert!(settings.models_dir_history.is_empty());
+        assert!(settings.import_scan_dirs_history.is_empty());
+        let legacy = crate::platform::paths::user_home_dir()
+            .join("models")
+            .join("qwen-weights");
+        std::fs::create_dir_all(&legacy).expect("create legacy weights");
+        db::add_store_model(db::AddStoreModelParams {
+            card_id: "c-legacy",
+            model_name: "legacy-model",
+            card_name: "c-legacy",
+            org: None,
+            description: None,
+            engine_name: "e",
+            engine_version: None,
+            size_bytes: 0,
+            quantization: None,
+            source_repo_id: Some("org/qwen-weights"),
+            source_filename: None,
+            scripts: &std::collections::BTreeMap::new(),
+            status: "downloaded",
+            profiles: &[],
+            deploy_topology: crate::features::model_store::platform::linux::store_client::DeployTopology::default(),
+            card_source: "store",
+        })
+        .expect("insert legacy model");
+        let refs = crate::features::model_store::installed_weight_paths_checked()
+            .expect("enumerate legacy refs");
+        assert!(
+            refs.contains(&legacy.canonicalize().expect("canonical legacy")),
+            "builtin-root legacy weights must be recovered without any history, got {refs:?}"
+        );
+        // 自定义新根下的同名候选不存在 → 不误报。
+        assert!(
+            !refs
+                .iter()
+                .any(|p| p.starts_with(ctx.path().join("custom-weights"))),
+            "missing candidates under the new custom root must not appear, got {refs:?}"
+        );
+    }
+
+    #[test]
+    fn installed_weight_candidate_names_derive_from_records_without_any_root() {
+        use crate::features::model_store::platform::linux::db;
+
+        let ctx = super::config::TempHome::new();
+        db::init_db().expect("init store db");
+        // 空库 → 空名字集合（设备守卫的名字臂恒不命中）。
+        let empty = crate::features::model_store::installed_weight_candidate_names_checked()
+            .expect("empty store enumerates");
+        assert!(empty.is_empty(), "got {empty:?}");
+
+        // 两臂约定名都派生：来源仓库名末段 + 用户模型名。**不依赖任何根、
+        // 不做存在性过滤**——这是它能覆盖零痕迹旧根的原因（与
+        // installed_weight_paths_checked 的 exists() 尺子方向相反）。
+        db::add_store_model(db::AddStoreModelParams {
+            card_id: "c-names-1",
+            model_name: "my-model",
+            card_name: "c-names-1",
+            org: None,
+            description: None,
+            engine_name: "e",
+            engine_version: None,
+            size_bytes: 0,
+            quantization: None,
+            source_repo_id: Some("org/qwen-weights"),
+            source_filename: None,
+            scripts: &std::collections::BTreeMap::new(),
+            status: "downloaded",
+            profiles: &[],
+            deploy_topology: crate::features::model_store::platform::linux::store_client::DeployTopology::default(),
+            card_source: "store",
+        })
+        .expect("insert downloaded model");
+        let names = crate::features::model_store::installed_weight_candidate_names_checked()
+            .expect("derive names");
+        assert_eq!(
+            names,
+            vec!["qwen-weights".to_string(), "my-model".to_string()]
+        );
+        // 盘上一个候选目录都不存在，名字集合照样返回（零痕迹语义）。
+        assert!(!ctx.path().join("qwen-weights").exists());
+
+        // 去重 + 防逃逸：第二条记录两臂同名（去重），第三条来源仓库名末段是
+        // `..`（safe_path_component 拒绝 → 该臂丢弃），模型名带非法字符
+        // （同拒）——名字集合不得出现任何可逃逸形状。
+        db::add_store_model(db::AddStoreModelParams {
+            card_id: "c-names-2",
+            model_name: "qwen-weights",
+            card_name: "c-names-2",
+            org: None,
+            description: None,
+            engine_name: "e",
+            engine_version: None,
+            size_bytes: 0,
+            quantization: None,
+            source_repo_id: Some("org/qwen-weights"),
+            source_filename: None,
+            scripts: &std::collections::BTreeMap::new(),
+            status: "downloaded",
+            profiles: &[],
+            deploy_topology: crate::features::model_store::platform::linux::store_client::DeployTopology::default(),
+            card_source: "store",
+        })
+        .expect("insert duplicate-name model");
+        db::add_store_model(db::AddStoreModelParams {
+            card_id: "c-names-3",
+            model_name: "../escape",
+            card_name: "c-names-3",
+            org: None,
+            description: None,
+            engine_name: "e",
+            engine_version: None,
+            size_bytes: 0,
+            quantization: None,
+            source_repo_id: Some("org/.."),
+            source_filename: None,
+            scripts: &std::collections::BTreeMap::new(),
+            status: "downloaded",
+            profiles: &[],
+            deploy_topology: crate::features::model_store::platform::linux::store_client::DeployTopology::default(),
+            card_source: "store",
+        })
+        .expect("insert escaping model");
+        let names = crate::features::model_store::installed_weight_candidate_names_checked()
+            .expect("derive names after dup and escape");
+        assert_eq!(
+            names,
+            vec!["qwen-weights".to_string(), "my-model".to_string()]
+        );
+        assert!(
+            !names.iter().any(|name| name.contains("..")),
+            "escape shapes must be filtered, got {names:?}"
+        );
+        let _ = ctx;
+    }
+
+    #[test]
+    fn installed_weight_filenames_derive_from_records_without_paths() {
+        use crate::features::model_store::platform::linux::db;
+
+        let ctx = super::config::TempHome::new();
+        db::init_db().expect("init store db");
+        // 空库 → 空集合（设备守卫的第四恢复臂恒不命中）。
+        let empty = crate::features::model_store::installed_weight_filenames_checked()
+            .expect("empty store enumerates");
+        assert!(empty.is_empty(), "got {empty:?}");
+
+        // 记录里的 source_filename 是唯一输入：None 与空串跳过，合法名保留。
+        let insert = |card_id: &str, filename: Option<&str>| {
+            db::add_store_model(db::AddStoreModelParams {
+                card_id,
+                model_name: "renamed-model",
+                card_name: card_id,
+                org: None,
+                description: None,
+                engine_name: "e",
+                engine_version: None,
+                size_bytes: 0,
+                quantization: None,
+                source_repo_id: None,
+                source_filename: filename,
+                scripts: &std::collections::BTreeMap::new(),
+                status: "downloaded",
+                profiles: &[],
+                deploy_topology: crate::features::model_store::platform::linux::store_client::DeployTopology::default(),
+                card_source: "store",
+            })
+            .expect("insert model");
+        };
+        insert("c-fn-1", Some("model-Q4_K_M.gguf"));
+        insert("c-fn-2", None);
+        let names = crate::features::model_store::installed_weight_filenames_checked()
+            .expect("derive filenames");
+        assert_eq!(names, vec!["model-Q4_K_M.gguf".to_string()]);
+
+        // 去重 + 防逃逸 + 空串跳过：第二张卡同名（去重），第三张带路径分量
+        // （safe_path_component 拒绝 → 丢弃），第四张空白串（跳过）。
+        insert("c-fn-5", Some("model-Q4_K_M.gguf"));
+        insert("c-fn-6", Some("sub/model-Q4_K_M.gguf"));
+        insert("c-fn-7", Some("   "));
+        let names = crate::features::model_store::installed_weight_filenames_checked()
+            .expect("derive filenames after dup/escape/blank");
+        assert_eq!(names, vec!["model-Q4_K_M.gguf".to_string()]);
+        let _ = ctx;
+    }
+
+    #[test]
+    fn installed_ownership_unconfirmable_tracks_fully_blind_cards() {
+        // 第五臂收窄版（2026-11-08 评审 P2-3）：只有恢复腿全部无数据的卡片
+        // （无 source_filename、仓库末段与模型名都过不了 safe_path_component、
+        // .env 也没有 MODEL_PATH）才令归属无法确认；任一腿可用（哪怕只是约定
+        // 名）都不触发——本臂不放大拒绝面（与名字臂「宁可漏」边界处方一致）。
+        use crate::features::model_store::platform::linux::db;
+
+        let ctx = super::config::TempHome::new();
+        db::init_db().expect("init store db");
+        let probe = || {
+            crate::features::model_store::installed_ownership_unconfirmable_checked()
+                .expect("probe ownership confirmability")
+        };
+        assert!(!probe(), "empty store must be confirmable");
+
+        let insert = |card_id: &str, filename: Option<&str>| {
+            db::add_store_model(db::AddStoreModelParams {
+                card_id,
+                model_name: "some-model",
+                card_name: card_id,
+                org: None,
+                description: None,
+                engine_name: "e",
+                engine_version: None,
+                size_bytes: 0,
+                quantization: None,
+                source_repo_id: Some("org/repo"),
+                source_filename: filename,
+                scripts: &std::collections::BTreeMap::new(),
+                status: "downloaded",
+                profiles: &[],
+                deploy_topology: crate::features::model_store::platform::linux::store_client::DeployTopology::default(),
+                card_source: "store",
+            })
+            .expect("insert model");
+        };
+        // 有合法文件名 / 有约定名（仓库末段或模型名）的卡片：可确认。
+        insert("c-own-1", Some("model.gguf"));
+        insert("c-own-2", None);
+        assert!(
+            !probe(),
+            "cards with any usable recovery leg must stay confirmable"
+        );
+        // 真盲行：无文件名 + 无仓库 + model_name 过不了 safe_path_component
+        // （中文自取名/路径分量形状）——登记入口会拒，走原始 SQL 注入
+        // （db::connect 私有，按 db_path 直开）。
+        let conn = rusqlite::Connection::open(db::db_path()).expect("open store db");
+        conn.execute(
+            "INSERT INTO store_models
+                 (card_id, model_name, card_name, engine_name, status, downloaded_at)
+             VALUES ('c-blind-1', '中文自取名', 'cb', 'e', 'downloaded', '2026-01-01'),
+                    ('c-blind-2', '..', 'cb2', 'e', 'downloaded', '2026-01-01')",
+            [],
+        )
+        .expect("insert fully blind rows");
+        drop(conn);
+        assert!(
+            probe(),
+            "a fully blind card must make ownership unconfirmable"
+        );
+        // .env 落盘的 MODEL_PATH 是恢复数据：真盲行带上它即恢复可确认
+        // （MODEL_PATH 指向的目录必须真实存在——exists() 过滤不产生假引用）。
+        for (card_id, weight_name) in [
+            ("c-blind-1", "renamed-weights"),
+            ("c-blind-2", "other-weights"),
+        ] {
+            let weights = ctx.path().join(weight_name);
+            std::fs::create_dir_all(&weights).expect("create weights dir");
+            let card_dir = super::config::data_dir()
+                .join("cards")
+                .join(card_id)
+                .join("vendor");
+            std::fs::create_dir_all(&card_dir).expect("create card vendor dir");
+            std::fs::write(
+                card_dir.join(".env"),
+                format!("MODEL_PATH={}\n", weights.to_string_lossy()),
+            )
+            .expect("write card env");
+        }
+        assert!(
+            !probe(),
+            "a blind card with an .env MODEL_PATH must stay confirmable"
+        );
+        // 卸载（删行）即放行的解锁路径真实存在。
+        db::delete_store_model("c-blind-1").expect("remove blind card 1");
+        db::delete_store_model("c-blind-2").expect("remove blind card 2");
+        assert!(
+            !probe(),
+            "uninstalling blind cards must restore confirmability"
+        );
+        let _ = ctx;
+    }
+
+    #[test]
+    fn parse_env_model_path_takes_the_last_assignment() {
+        // 解析口径：支持 export 前缀与成对引号；多次赋值取最后一次（与卡片
+        // 脚本 sed -i 覆盖写语义一致）；空值/缺键返回 None。
+        assert_eq!(
+            super::parse_env_model_path("MODEL_PATH=/home/u/weights\n"),
+            Some("/home/u/weights".to_string())
+        );
+        assert_eq!(
+            super::parse_env_model_path(
+                "export MODEL_PATH=\"/home/u/my weights\"\nCACHE_PATH=/tmp\n"
+            ),
+            Some("/home/u/my weights".to_string())
+        );
+        assert_eq!(
+            super::parse_env_model_path("MODEL_PATH=/old\nMODEL_PATH=/new\n"),
+            Some("/new".to_string())
+        );
+        assert_eq!(super::parse_env_model_path("MODEL_PATH=\n"), None);
+        assert_eq!(super::parse_env_model_path("CACHE_PATH=/tmp\n"), None);
+    }
+
+    #[test]
+    fn card_env_model_paths_recover_renamed_weight_dirs() {
+        // .env 恢复腿端到端（2026-11-08 评审 P2-3 处方一）：改名目录/零痕迹
+        // 旧根上的卡片权重由 .env 的 MODEL_PATH 恢复进 installed refs——
+        // 存在性过滤 + canonicalize 解析软链，与约定候选同一把尺。
+        use crate::features::model_store::platform::linux::db;
+
+        let ctx = super::config::TempHome::new();
+        db::init_db().expect("init store db");
+        db::add_store_model(db::AddStoreModelParams {
+            card_id: "c-env-1",
+            model_name: "some-model",
+            card_name: "c-env-1",
+            org: None,
+            description: None,
+            engine_name: "e",
+            engine_version: None,
+            size_bytes: 0,
+            quantization: None,
+            source_repo_id: None,
+            source_filename: None,
+            scripts: &std::collections::BTreeMap::new(),
+            status: "downloaded",
+            profiles: &[],
+            deploy_topology: crate::features::model_store::platform::linux::store_client::DeployTopology::default(),
+            card_source: "store",
+        })
+        .expect("insert model");
+        // 约定候选（some-model 目录）不存在，集合为空。
+        let empty = crate::features::model_store::installed_weight_paths_checked()
+            .expect("enumerate installed refs");
+        assert!(empty.is_empty(), "no candidates on disk, got {empty:?}");
+        // 卡片 .env 记录的改名目录（零痕迹旧根形状）恢复进集合。
+        let renamed = ctx.path().join("zero-trace-root").join("renamed-weights");
+        std::fs::create_dir_all(&renamed).expect("create renamed weights");
+        let card_dir = super::config::data_dir()
+            .join("cards")
+            .join("c-env-1")
+            .join("vendor");
+        std::fs::create_dir_all(&card_dir).expect("create card vendor dir");
+        std::fs::write(
+            card_dir.join(".env"),
+            format!("MODEL_PATH={}\n", renamed.to_string_lossy()),
+        )
+        .expect("write card env");
+        let refs = crate::features::model_store::installed_weight_paths_checked()
+            .expect("enumerate installed refs with env leg");
+        let resolved = renamed.canonicalize().expect("resolve renamed dir");
+        assert!(
+            refs.contains(&resolved),
+            ".env MODEL_PATH must be recovered, got {refs:?}"
+        );
+        let unregister_refs =
+            crate::features::model_store::installed_weight_paths_for_removal_checked(false)
+                .expect("unregister-only keeps main's legacy reference guards");
+        assert!(
+            unregister_refs.contains(&resolved),
+            "the legacy .env reference guard must remain active without physical deletion"
+        );
+        // 相对路径与不存在的路径不产生假引用。
+        std::fs::write(
+            card_dir.join(".env"),
+            "MODEL_PATH=relative/dir\nMODEL_PATH=/gone/dir\n",
+        )
+        .expect("write bad env");
+        let refs = crate::features::model_store::installed_weight_paths_checked()
+            .expect("enumerate installed refs with bad env");
+        assert!(
+            !refs
+                .iter()
+                .any(|p| p.ends_with("relative/dir") || p.ends_with("gone/dir")),
+            "relative and missing paths must be filtered, got {refs:?}"
+        );
+        // 旧写入约定（2026-11-09 评审 P2-3，review 5820385522）：前代 LMM 的
+        // 数据根 `~/.local/share/local-model-manager/cards/<id>/.env` 同样是
+        // 权威落点（config.rs 记载老根在设备上原样保留）。
+        let old_card_env = ctx
+            .path()
+            .join(".local/share/local-model-manager/cards/c-env-1");
+        std::fs::create_dir_all(&old_card_env).expect("create legacy card dir");
+        let legacy_weights = ctx.path().join("lmm-era-weights");
+        std::fs::create_dir_all(&legacy_weights).expect("create legacy weights");
+        std::fs::write(card_dir.join(".env"), "MODEL_PATH=/gone/dir\n").expect("write bad env");
+        std::fs::write(
+            old_card_env.join(".env"),
+            format!("MODEL_PATH={}\n", legacy_weights.to_string_lossy()),
+        )
+        .expect("write legacy card env");
+        let refs = crate::features::model_store::installed_weight_paths_checked()
+            .expect("enumerate installed refs with legacy root probe");
+        let legacy_resolved = legacy_weights
+            .canonicalize()
+            .expect("resolve legacy weights");
+        assert!(
+            refs.contains(&legacy_resolved),
+            "legacy LMM card .env must be recovered, got {refs:?}"
+        );
+        let _ = ctx;
+    }
+
+    #[test]
+    fn import_scan_dirs_history_evicts_the_oldest_root_past_the_cap() {
+        // 与 models_dir_history 同一溢出语义：超过 MAX_IMPORT_SCAN_DIRS_HISTORY
+        // 后丢最老端，被挤出的根脱出保护集合。
+        let ctx = super::config::TempHome::new();
+        let path_of = |p: &std::path::Path| p.to_string_lossy().to_string();
+        let cap = super::config::MAX_IMPORT_SCAN_DIRS_HISTORY;
+        for index in 0..=(cap + 1) {
+            let dir = ctx.path().join(format!("scan-{index:03}"));
+            set_storage_settings(None, Some(vec![path_of(&dir)]), None).expect("swap scan dir");
+        }
+        let settings = super::config::load_settings();
+        assert_eq!(settings.import_scan_dirs_history.len(), cap);
+        let dir = |index: usize| path_of(&ctx.path().join(format!("scan-{index:03}")));
+        assert!(!settings.import_scan_dirs_history.contains(&dir(0)));
+        assert!(settings.import_scan_dirs_history.contains(&dir(1)));
+        assert!(settings.import_scan_dirs_history.contains(&(dir(cap))));
+        // 溢出即失去路径臂保护（既定容量取舍，钉住语义）。
+        let roots = crate::features::model_store::store_weights_roots();
+        assert!(!roots.contains(&std::path::PathBuf::from(dir(0))));
+        assert!(roots.contains(&std::path::PathBuf::from(dir(cap))));
+    }
+
+    #[test]
+    fn import_scan_dirs_must_be_absolute() {
+        let ctx = super::config::TempHome::new();
+        // 相对扫描目录的解析随调用方工作目录漂移，设备侧移除守卫的前缀匹配
+        // 必然失配（第七轮评审 P3）——与 models_dir 同一把尺子在入口拒绝。
+        let error = set_storage_settings(
+            None,
+            Some(vec![
+                ctx.path().join("scan-ok").to_string_lossy().to_string(),
+                "relative/dir".to_string(),
+            ]),
+            None,
+        )
+        .expect_err("relative import_scan_dir must be rejected");
+        assert!(error.contains("绝对路径"), "unexpected error: {error}");
+        // 校验先于一切副作用（36 轮评审 P3）：组合保存「合法新权重目录 + 相对
+        // 扫描目录」整体报错时，权重目录不得被建出来——配置没写，盘上也不该
+        // 多出空目录。校验若排在 mkdir 之后，此断言必红。
+        let fresh_weights = ctx.path().join("weights-untouched");
+        assert!(!fresh_weights.exists(), "fixture dir must not pre-exist");
+        let error = set_storage_settings(
+            Some(fresh_weights.to_string_lossy().to_string()),
+            Some(vec!["relative/dir".to_string()]),
+            None,
+        )
+        .expect_err("combined save must still be rejected");
+        assert!(error.contains("绝对路径"), "unexpected error: {error}");
+        assert!(
+            !fresh_weights.exists(),
+            "failed save must not create the weights directory"
+        );
+        // 合法路径照常保存，空白项照常滤掉。
+        let ok = ctx.path().join("scan-ok").to_string_lossy().to_string();
+        let settings =
+            set_storage_settings(None, Some(vec![format!("  {ok}  "), String::new()]), None)
+                .expect("absolute dirs accepted");
+        assert_eq!(settings["import_scan_dirs"], serde_json::json!([ok]));
+    }
+
+    /// 「首读瞬态失败、保存端重读已恢复」不得把默认快照固化成配置（二十八轮评审
+    /// P1 的剩余分支）。
+    ///
+    /// 评审点名的时序：普通设置入口首拍宽松读取赶上瞬态 I/O 故障（fd 耗尽、一拍
+    /// EIO——过一下自己就好）拿到完整默认值；同一拍里 `save_settings` 闸门的重读
+    /// 已恢复，只判 Err/Ok 就把默认快照放行——真实 config.json（自定义
+    /// `models_dir` 等未知保护范围）被一次普通开关整体洗成默认，后续严格读取把它
+    /// 当合法配置接受，权重根保护失效。修复后两个入口首读走
+    /// [`super::config::try_load_settings`]、读不到就不改。权限位（mode 000）构造
+    /// 不出这个时序——权限失败到重读时仍在，所以用 config 的测试注入缝受控打出
+    /// 「首读 Err → 重读 Ok」，两个入口各打一遍再各验证一次恢复后的正常路径。
+    #[test]
+    fn transient_first_read_failure_must_not_persist_the_default_snapshot() {
+        let ctx = super::config::TempHome::new();
+        let path = super::config::config_dir().join("config.json");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        // 真实配置：自定义权重目录 + 非默认并发数——两者在默认快照里都会变成
+        // 默认值，是"覆盖是否发生"的判别标记。
+        let original =
+            r#"{"models_dir": "/home/u/ai/shared/weights", "max_concurrent_downloads": 3}"#;
+        std::fs::write(&path, original).unwrap();
+
+        // 注入恰好 1 次：入口首读 Err、保存端闸门重读 Ok——正是评审点名的恢复时序。
+        super::config::arm_transient_read_failure(1);
+        let error = set_test_store_enabled(true).expect_err("首读失败不得拿默认快照落盘");
+        assert!(
+            error.contains("读取当前配置失败"),
+            "报错应说明读取失败、未做任何修改：{error}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            original,
+            "失败的调用不得动真实配置：默认快照落盘就是不可恢复的重置"
+        );
+
+        // 存储入口同样的时序：改的只是补充扫描目录，真实设置必须原样保留。
+        super::config::arm_transient_read_failure(1);
+        let scan = ctx.path().join("scan-more");
+        let error =
+            set_storage_settings(None, Some(vec![scan.to_string_lossy().to_string()]), None)
+                .expect_err("首读失败不得拿默认快照落盘");
+        assert!(
+            error.contains("读取当前配置失败"),
+            "unexpected error: {error}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            original,
+            "失败的调用不得动真实配置"
+        );
+
+        // 注入耗尽后的下一次调用走真实设置：改动生效、自定义 models_dir 与真实
+        // 字段不丢——若默认快照曾被固化，这里读到的就是默认值了。
+        set_test_store_enabled(true).expect("恢复后普通开关放行");
+        set_storage_settings(None, Some(vec![scan.to_string_lossy().to_string()]), None)
+            .expect("恢复后普通保存放行");
+        let settings = super::config::try_load_settings().expect("恢复后严格读取应接受写回的配置");
+        assert!(settings.test_mode_enabled, "开关改动要落进新配置");
+        assert_eq!(
+            settings.models_dir, "/home/u/ai/shared/weights",
+            "自定义权重目录不得被默认值覆盖"
+        );
+        assert_eq!(
+            settings.max_concurrent_downloads, 3,
+            "真实配置的其他字段原样保留"
+        );
+        assert_eq!(
+            settings.import_scan_dirs,
+            vec![scan.to_string_lossy().to_string()],
+            "存储入口的改动要落进新配置"
         );
     }
 }

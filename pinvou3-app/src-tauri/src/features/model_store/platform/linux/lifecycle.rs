@@ -185,16 +185,14 @@ pub struct DiskSummary {
     pub stale_cache_bytes: u64,
 }
 
-pub fn suggest_model_name(card: &StoreCardDetail) -> String {
-    let mut base = card.summary.name.clone();
-    if let Some(q) = &card.summary.quantization {
-        base = format!("{base}-{q}");
-    }
-    let lowered = base.to_lowercase();
-    // 必须跟 Python 版的 re.sub(r"[^a-z0-9_.-]+", "-", name) 行为完全一致：
-    // 每一段连续的非法字符替换成一个 "-"（即使旁边已经有合法的 "-"，也会
-    // 出现 "--"）——这个名字是模型的身份标识，老用户数据库里存的就是 Python
-    // 算出来的值，这里算出不一样的名字会导致按名字查找对不上。
+/// 商店 `model_name` 的归一化：小写 + 每段连续非法字符替换为一个 `-`，再去
+/// 首尾 `-`。必须跟 Python 版的 re.sub(r"[^a-z0-9_.-]+", "-", name) 行为完全
+/// 一致（即使旁边已经有合法的 "-"，也会出现 "--"）——这个名字是模型的身份
+/// 标识，老用户数据库里存的就是 Python 算出来的值，这里算出不一样的名字会导
+/// 致按名字查找对不上。归一对**已干净**的名字幂等：合法字符原样保留，重复
+/// 归一不会二次改写。
+fn normalize_model_name(raw: &str) -> String {
+    let lowered = raw.to_lowercase();
     let mut name = String::with_capacity(lowered.len());
     let mut in_bad_run = false;
     for c in lowered.chars() {
@@ -206,12 +204,29 @@ pub fn suggest_model_name(card: &StoreCardDetail) -> String {
             in_bad_run = true;
         }
     }
-    let name = name.trim_matches('-').to_string();
-    if name.is_empty() {
-        card.summary.id.clone()
-    } else {
-        name
+    name.trim_matches('-').to_string()
+}
+
+pub fn suggest_model_name(card: &StoreCardDetail) -> String {
+    let mut base = card.summary.name.clone();
+    if let Some(q) = &card.summary.quantization {
+        base = format!("{base}-{q}");
     }
+    let name = normalize_model_name(&base);
+    if !name.is_empty() {
+        return name;
+    }
+    // 兜底（原名归一为空）同样必须过清洗（第九轮评审 P2）：card id 是商店
+    // /手写自由文本，可能带冒号；商店 `model_name` 永无冒号是移除守卫去
+    // tag 兜底（split(':').next()）的前提——冒号名会让守卫把 store 名切成
+    // 半截、不再等于商店名，别名记录就能对商店部署的模型执行真 DELETE。
+    let name = normalize_model_name(&card.summary.id);
+    if !name.is_empty() {
+        return name;
+    }
+    // 终态兜底（第二十轮评审 P3）：id 也全是非法字符（如 ":::"）时归一仍为空，
+    // 空名会流入按名记录/守卫链——回退固定字面量，保证建议名永非空。
+    "model".to_string()
 }
 
 /// 脚本来源。两种形态：
@@ -3054,6 +3069,40 @@ mod tests {
             "qwen3.8-27b-nvfp4-native-mtp--nvfp4"
         );
         assert_eq!(suggest_model_name(&make_card("Simple", None)), "simple");
+    }
+
+    #[test]
+    fn suggest_model_name_falls_back_to_sanitized_colon_free_card_id() {
+        // 原名归一为空的卡片走 card id 兜底，但 id 是自由文本可能带冒号（第九
+        // 轮评审 P2）：商店 model_name 永无冒号是移除守卫去 tag 兜底的
+        // 前提，兜底必须过同一归一化。
+        let mut card = make_card(":::", None);
+        card.summary.id = "Engine:Model/X".into();
+        let name = suggest_model_name(&card);
+        assert_eq!(name, "engine-model-x");
+        assert!(
+            !name.contains(':'),
+            "model_name must stay colon-free: {name}"
+        );
+        // id 也全是非法字符时归一仍为空——终态兜底回固定字面量，建议名永非空
+        // （第二十轮评审 P3；此前返回空串流入按名记录/守卫链）。
+        let mut degenerate = make_card(":::", None);
+        degenerate.summary.id = ":::".into();
+        let name = suggest_model_name(&degenerate);
+        assert_eq!(name, "model");
+        assert!(
+            !name.is_empty() && !name.contains(':'),
+            "model_name must stay non-empty and colon-free: {name}"
+        );
+        // 归一对已干净的名字幂等（含此前对拍产物的形态）。
+        for raw in ["simple", "qwen3.8-27b-nvfp4-native-mtp--nvfp4", "a-b_c.d"] {
+            let once = normalize_model_name(raw);
+            assert_eq!(
+                normalize_model_name(&once),
+                once,
+                "normalization must be idempotent for {raw}"
+            );
+        }
     }
 
     #[test]
