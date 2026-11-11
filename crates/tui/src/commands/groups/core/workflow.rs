@@ -39,7 +39,13 @@ impl RegisterCommand for WorkflowCmd {
 }
 
 const WORKFLOW_CONFIRM_INSTRUCTION_PREFIX: &str = "[codewhale.workflow-confirm.v1]";
-const WORKFLOW_OBJECTIVE_MAX_CHARS: usize = 1_000;
+/// Objective bound entering the model-reviewed draft envelope. Roomy enough
+/// for pasted multi-paragraph objectives; when a longer objective is cut, the
+/// command message discloses the truncation instead of silently clipping it.
+const WORKFLOW_OBJECTIVE_MAX_CHARS: usize = 8_000;
+/// Source-path bound for `/workflow run <path>`; merged with the path
+/// traversal guard as a path-sanity check, independent of the objective cap.
+const WORKFLOW_SOURCE_PATH_MAX_CHARS: usize = 1_000;
 const WORKFLOW_DISPLAY_MAX_CHARS: usize = 160;
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -217,11 +223,20 @@ pub fn workflow(app: &mut App, arg: Option<&str>) -> CommandResult {
     }
 
     let id = uuid::Uuid::new_v4().to_string();
-    let objective =
-        arg.map(|objective| truncate_workflow_text(objective, WORKFLOW_OBJECTIVE_MAX_CHARS));
+    let mut truncation_notice = String::new();
+    let objective = arg.map(|objective| {
+        if objective.chars().count() > WORKFLOW_OBJECTIVE_MAX_CHARS {
+            truncation_notice =
+                format!(" (objective truncated at {WORKFLOW_OBJECTIVE_MAX_CHARS} chars)");
+        }
+        truncate_workflow_text(objective, WORKFLOW_OBJECTIVE_MAX_CHARS)
+    });
     let display = workflow_display("Workflow draft: ", objective.as_deref());
     CommandResult::with_message_and_action(
-        "Drafting a workflow for review. Nothing will run until /workflow confirm.",
+        format!(
+            "Drafting a workflow for review. Nothing will run until /workflow \
+             confirm.{truncation_notice}"
+        ),
         AppAction::WorkflowInstruction {
             display,
             instruction: workflow_draft_instruction(&id, objective.as_deref()),
@@ -278,7 +293,7 @@ fn parse_workflow_control_action(app: &App, arg: Option<&str>) -> Option<Command
                             | std::path::Component::Prefix(_)
                     )
                 });
-            if unsafe_path || rest.chars().count() > WORKFLOW_OBJECTIVE_MAX_CHARS {
+            if unsafe_path || rest.chars().count() > WORKFLOW_SOURCE_PATH_MAX_CHARS {
                 return Some(CommandResult::error(
                     "Workflow source must be a bounded relative path inside this workspace.",
                 ));
@@ -589,6 +604,15 @@ mod tests {
 
         assert!(display.chars().count() <= WORKFLOW_DISPLAY_MAX_CHARS);
         assert!(!display.contains('\n'));
+        assert!(
+            drafted
+                .message
+                .as_deref()
+                .is_some_and(|message| message.contains(&format!(
+                    "(objective truncated at {WORKFLOW_OBJECTIVE_MAX_CHARS} chars)"
+                ))),
+            "objective truncation must be disclosed to the user"
+        );
         let draft = envelope_from_instruction(WORKFLOW_DRAFT_INSTRUCTION_PREFIX, &instruction)
             .expect("typed workflow draft envelope");
         let objective = draft.objective.as_deref().expect("bounded objective");

@@ -41,10 +41,13 @@ use crate::cloud_dispatch::{
 };
 use crate::dependencies::ExternalTool;
 
-/// Ceiling for PR titles (forges truncate longer titles).
-const MAX_TITLE_CHARS: usize = 96;
-/// Ceiling for the PR body, kept well under forge limits.
-const MAX_BODY_CHARS: usize = 6_000;
+/// Ceiling for PR titles. Real forge bounds are much higher (GitHub accepts
+/// roughly 256 characters), so this stays generous while keeping titles
+/// readable.
+const MAX_TITLE_CHARS: usize = 200;
+/// Ceiling for the PR body, kept well under forge limits (GitHub accepts
+/// roughly 65,536 characters).
+const MAX_BODY_CHARS: usize = 60_000;
 /// Harness timeout for one cloud-agent turn.
 const HARNESS_TIMEOUT_SECS: u32 = 3_600;
 
@@ -1629,7 +1632,7 @@ mod tests {
             id: "cloud_00000000000000bb".to_string(),
             kind: "cloud".to_string(),
             status: CloudJobStatus::OpeningPr,
-            prompt: "p".repeat(9_000),
+            prompt: "p".repeat(MAX_BODY_CHARS + 5_000),
             forge: Forge::Github,
             remote_name: "github".to_string(),
             remote_url: "https://github.com/org/repo.git".to_string(),

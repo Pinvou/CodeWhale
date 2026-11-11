@@ -26,7 +26,7 @@ impl ToolSpec for LspTool {
     }
 
     fn description(&self) -> &'static str {
-        "Query the configured session LSP for diagnostics, definition, references, symbols, or read_lints. The 1-16 newline-separated files contract with success/error/timeout statuses applies to read_lints; `symbols` without a `query` falls back to document symbols for `path`. Warning visibility is a session configuration, not a per-call parameter."
+        "Query the configured session LSP for diagnostics, definition, references, symbols, or read_lints. The 1-64 newline-separated files contract with success/error/timeout statuses applies to read_lints; `symbols` without a `query` falls back to document symbols for `path`. Warning visibility is a session configuration, not a per-call parameter."
     }
 
     fn input_schema(&self) -> Value {
@@ -40,12 +40,12 @@ impl ToolSpec for LspTool {
                 },
                 "path": {
                     "type": "string",
-                    "description": "Source path. For read_lints: 1-16 newline-separated workspace-relative files."
+                    "description": "Source path. For read_lints: 1-64 newline-separated workspace-relative files."
                 },
                 "line": {
                     "type": "integer",
                     "minimum": 1,
-                    "description": "1-based line. Required for definition and references."
+                    "description": "1-based line."
                 },
                 "character": {
                     "type": "integer",
@@ -108,7 +108,10 @@ impl ToolSpec for LspTool {
     }
 }
 
-const MAX_LINT_PATHS: usize = 16;
+/// Whole-crate lint sweeps legitimately exceed a handful of files, so the
+/// per-call fan-out bound stays generous; the output bytes are bounded
+/// separately by [`MAX_LINT_OUTPUT_BYTES`].
+const MAX_LINT_PATHS: usize = 64;
 const MAX_LINT_DIAGNOSTICS: usize = 100;
 const MAX_LINT_MESSAGE_CHARS: usize = 512;
 const MAX_LINT_OUTPUT_BYTES: usize = 12_000;
@@ -477,7 +480,7 @@ mod tests {
 
     #[test]
     fn schema_documents_read_lints_contract_query_and_character_default() {
-        assert!(LspTool.description().contains("1-16 newline-separated"));
+        assert!(LspTool.description().contains("1-64 newline-separated"));
         assert!(LspTool.description().contains("success/error/timeout"));
         assert!(LspTool.description().contains("session configuration"));
         assert!(!LspTool.description().contains("include_warnings"));
@@ -493,12 +496,9 @@ mod tests {
             properties["path"]["description"]
                 .as_str()
                 .unwrap()
-                .contains("1-16 newline-separated")
+                .contains("1-64 newline-separated")
         );
-        assert_eq!(
-            properties["line"]["description"],
-            "1-based line. Required for definition and references."
-        );
+        assert_eq!(properties["line"]["description"], "1-based line.");
         assert_eq!(properties["character"]["default"], 1);
         assert_eq!(
             properties["character"]["description"],

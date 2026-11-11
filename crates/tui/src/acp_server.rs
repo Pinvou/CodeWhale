@@ -63,8 +63,10 @@ const ACP_PROTOCOL_VERSION: u64 = 1;
 
 /// Hard cap on LLM <-> tool round-trips within a single `session/prompt`
 /// turn. Guards against a model that never stops calling tools; each round is
-/// one provider stream plus zero or more tool executions.
-const MAX_ACP_TOOL_ROUNDS: usize = 50;
+/// one provider stream plus zero or more tool executions. Aligned with the
+/// interactive turn budget's default of 200 model steps so the ACP lane does
+/// not undercut the same workload run from the TUI.
+const MAX_ACP_TOOL_ROUNDS: usize = 200;
 
 /// Maximum number of concurrent sessions kept in memory. When this limit is
 /// exceeded, the oldest session with no in-flight prompt is evicted.

@@ -12,7 +12,11 @@ use sha2::{Digest, Sha256};
 use super::install::{DEFAULT_MAX_SIZE_BYTES, INSTALLED_FROM_MARKER, TRUSTED_MARKER};
 
 pub const PACKAGE_DIGEST_MAX_BYTES: u64 = DEFAULT_MAX_SIZE_BYTES;
-pub const PACKAGE_DIGEST_MAX_FILES: usize = 256;
+/// File-count bound for the digest walk. Generous enough that a legitimately
+/// vendored skill with examples/assets still digests (a cap this walk exceeds
+/// permanently shows "digest unknown", degrading the trust signal without
+/// blocking use).
+pub const PACKAGE_DIGEST_MAX_FILES: usize = 1024;
 pub const PACKAGE_DIGEST_MAX_DEPTH: usize = 8;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

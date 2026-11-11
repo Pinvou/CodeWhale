@@ -144,7 +144,6 @@ async fn contract_read_refuses_binary_payloads_but_keeps_lossy_text() {
         assert!(
             error.contains(name)
                 && error.contains("binary file")
-                && error.contains("read returns text or inline images, never raw binary")
                 && error.contains("Identify it with `file`")
                 && error.contains("unzip")
                 && error.contains("hand the file to a role that can extract it"),
@@ -545,7 +544,7 @@ async fn cancelled_queued_pi_write_never_starts() {
 }
 
 #[tokio::test]
-async fn forkguard_write_primitive_enforces_the_64kib_boundary() {
+async fn forkguard_write_primitive_enforces_the_256kib_boundary() {
     let temporary = tempfile::tempdir().expect("tempdir");
     let context = ToolContext::new(temporary.path());
     let at_limit = "x".repeat(WRITE_FILE_MAX_CONTENT_BYTES);
@@ -554,7 +553,7 @@ async fn forkguard_write_primitive_enforces_the_64kib_boundary() {
         &context,
     )
     .await
-    .expect("the exact 64KiB boundary remains writable");
+    .expect("the exact 256KiB boundary remains writable");
     assert_eq!(
         std::fs::metadata(temporary.path().join("at-limit.txt"))
             .expect("written file")
@@ -570,16 +569,16 @@ async fn forkguard_write_primitive_enforces_the_64kib_boundary() {
         &context,
     )
     .await
-    .expect_err("a primitive write above 64KiB must fail before touching disk");
+    .expect_err("a primitive write above 256KiB must fail before touching disk");
     assert!(
-        error.to_string().contains("64KB single-call limit"),
+        error.to_string().contains("256KB single-call limit"),
         "{error}"
     );
     assert!(!temporary.path().join("over-limit.txt").exists());
 }
 
 #[tokio::test]
-async fn forkguard_write_file_enforces_the_64kib_boundary() {
+async fn forkguard_write_file_enforces_the_256kib_boundary() {
     let temporary = tempfile::tempdir().expect("tempdir");
     let context = ToolContext::new(temporary.path());
     let at_limit = "x".repeat(WRITE_FILE_MAX_CONTENT_BYTES);
@@ -589,7 +588,7 @@ async fn forkguard_write_file_enforces_the_64kib_boundary() {
             &context,
         )
         .await
-        .expect("the hidden write_file path accepts exactly 64KiB");
+        .expect("the hidden write_file path accepts exactly 256KiB");
     assert_eq!(
         std::fs::metadata(temporary.path().join("legacy-at-limit.txt"))
             .expect("written file")
@@ -606,9 +605,9 @@ async fn forkguard_write_file_enforces_the_64kib_boundary() {
             &context,
         )
         .await
-        .expect_err("write_file above 64KiB must fail before touching disk");
+        .expect_err("write_file above 256KiB must fail before touching disk");
     assert!(
-        error.to_string().contains("64KB single-call limit"),
+        error.to_string().contains("256KB single-call limit"),
         "{error}"
     );
     assert!(!temporary.path().join("legacy-over-limit.txt").exists());

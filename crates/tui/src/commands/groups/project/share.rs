@@ -10,6 +10,7 @@
 
 use std::io::Write;
 use std::path::Path;
+use std::time::Duration;
 
 use codewhale_command_contract::facets::CommandProjectContext;
 use codewhale_command_contract::handler::{CommandContexts, CommandHandler};
@@ -155,27 +156,38 @@ fn write_temp_html(html: &str) -> Result<tempfile::NamedTempFile, String> {
     Ok(tmp)
 }
 
+/// Total upload budget for `gh gist create`. An HTML session export uploads
+/// well within a minute on any real link; the deadline keeps a hung `gh` or a
+/// dead network from wedging `/share` forever.
+const GIST_UPLOAD_TIMEOUT: Duration = Duration::from_secs(300);
+
 /// Upload a file as a GitHub Gist using the `gh` CLI.
 async fn upload_gist(path: &Path) -> Result<String, String> {
-    let path_owned = path.to_path_buf();
-    let output = tokio::task::spawn_blocking(move || {
-        let mut cmd = crate::dependencies::Gh::command()
-            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "gh not found"))?;
-        cmd.args([
-            "gist",
-            "create",
-            "--public",
-            path_owned.to_string_lossy().as_ref(),
-            "--filename",
-            "session-export.html",
-            "--desc",
-            "codewhale Session Export",
-        ])
-        .output()
-    })
-    .await
-    .map_err(|join_err| format!("gh gist create panicked: {join_err}"))?
-    .map_err(|e| format!("Failed to run `gh gist create`: {e}"))?;
+    let mut cmd = crate::dependencies::Gh::tokio_command()
+        .ok_or_else(|| "`gh gist create` failed: gh not found".to_string())?;
+    // Kill `gh` when the timeout below drops the output() future; otherwise
+    // a hung upload would keep running orphaned after /share gave up.
+    cmd.kill_on_drop(true);
+    cmd.args([
+        "gist",
+        "create",
+        "--public",
+        path.to_string_lossy().as_ref(),
+        "--filename",
+        "session-export.html",
+        "--desc",
+        "codewhale Session Export",
+    ]);
+
+    let output = tokio::time::timeout(GIST_UPLOAD_TIMEOUT, cmd.output())
+        .await
+        .map_err(|_| {
+            format!(
+                "`gh gist create` timed out after {}s; the upload was aborted",
+                GIST_UPLOAD_TIMEOUT.as_secs()
+            )
+        })?
+        .map_err(|e| format!("Failed to run `gh gist create`: {e}"))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);

@@ -16,6 +16,7 @@ pub mod account;
 
 use std::collections::HashMap;
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -42,6 +43,11 @@ pub const SECRET_BACKEND_ENV: &str = "CODEWHALE_SECRET_BACKEND";
 /// Legacy alias for [`SECRET_BACKEND_ENV`].
 pub const LEGACY_SECRET_BACKEND_ENV: &str = "DEEPSEEK_SECRET_BACKEND";
 const FILE_BACKEND_LABEL: &str = "file-based (~/.codewhale/secrets/)";
+/// Upper bound on the file-backed secrets blob read. Real credential JSON is
+/// a few kilobytes; the cap keeps a corrupt or bloated file from being read
+/// into memory on every startup/read, mirroring the xAI OAuth file guard in
+/// `codewhale-config` (`XAI_OAUTH_FILE_LIMIT`).
+const FILE_BLOB_READ_LIMIT: u64 = 16 * 1024 * 1024;
 
 /// Errors that may arise from a [`KeyringStore`] backend.
 #[derive(Debug, Error)]
@@ -62,6 +68,19 @@ pub enum SecretsError {
         path: PathBuf,
         /// Observed unix permission mode.
         mode: u32,
+    },
+    /// Caught when the file-backed secrets blob exceeds the read cap. The blob
+    /// is a small JSON map of credentials; anything near the cap is corrupt or
+    /// hostile, and reading it unbounded would pull arbitrary disk contents
+    /// into memory on every startup/read.
+    #[error("file-backed secret store at {path} exceeds the {limit} byte read limit (size {size})")]
+    SecretsFileTooLarge {
+        /// Absolute path to the secrets file.
+        path: PathBuf,
+        /// Observed file size in bytes.
+        size: u64,
+        /// Configured read cap in bytes.
+        limit: u64,
     },
     /// A caller attempted to modify a diagnostic-only secret store.
     #[error("secret store is read-only")]
@@ -487,10 +506,10 @@ impl FileKeyringStore {
         // Reject files with unsafe permissions on unix. On Windows the
         // ACL model is too different to enforce here; the caller is
         // responsible for placing the file in a per-user directory.
+        let meta = fs::metadata(&self.path)?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let meta = fs::metadata(&self.path)?;
             let mode = meta.permissions().mode() & 0o777;
             if mode & 0o077 != 0 {
                 return Err(SecretsError::InsecurePermissions {
@@ -499,7 +518,27 @@ impl FileKeyringStore {
                 });
             }
         }
-        let raw = fs::read_to_string(&self.path)?;
+        // Cap the read so a corrupt or hostile secrets file cannot be pulled
+        // into memory in full. Reads up to limit+1 bytes so an over-limit file
+        // is detected explicitly instead of silently truncated.
+        if meta.len() > FILE_BLOB_READ_LIMIT {
+            return Err(SecretsError::SecretsFileTooLarge {
+                path: self.path.clone(),
+                size: meta.len(),
+                limit: FILE_BLOB_READ_LIMIT,
+            });
+        }
+        let file = fs::File::open(&self.path)?;
+        let mut raw = String::new();
+        file.take(FILE_BLOB_READ_LIMIT + 1)
+            .read_to_string(&mut raw)?;
+        if raw.len() as u64 > FILE_BLOB_READ_LIMIT {
+            return Err(SecretsError::SecretsFileTooLarge {
+                path: self.path.clone(),
+                size: raw.len() as u64,
+                limit: FILE_BLOB_READ_LIMIT,
+            });
+        }
         if raw.trim().is_empty() {
             return Ok(FileSecretsBlob::default());
         }

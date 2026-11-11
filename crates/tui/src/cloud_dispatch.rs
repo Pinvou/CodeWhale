@@ -27,7 +27,7 @@ use codewhale_paths::codewhale_home;
 use codewhale_secrets::Secrets;
 use serde::{Deserialize, Serialize};
 
-const MAX_PROMPT_CHARS: usize = 4_000;
+const MAX_PROMPT_CHARS: usize = 64_000;
 const MAX_REMOTE_BYTES: usize = 4 * 1024;
 const JOB_KIND: &str = "cloud";
 const DAYTONA_API_KEY_ENV: &str = "DAYTONA_API_KEY";
@@ -1631,7 +1631,7 @@ impl DaytonaLauncher for LiveDaytonaLauncher {
                 sanitize_error(result)
             );
         }
-        Ok(result.chars().take(MAX_HARNESS_OUTPUT_CHARS).collect())
+        Ok(truncate_harness_output(result, MAX_HARNESS_OUTPUT_CHARS))
     }
 
     fn collect_patch(&self, receipt: &SandboxReceipt) -> Result<PatchReceipt> {
@@ -2059,6 +2059,22 @@ pub fn sanitize_error(message: &str) -> String {
     .chars()
     .take(240)
     .collect()
+}
+
+/// Bound a harness result retained in the job record. When the cut fires the
+/// output ends with an explicit truncation marker naming the omitted size, so
+/// a clipped receipt is never mistaken for the agent's full reply.
+fn truncate_harness_output(result: &str, max_chars: usize) -> String {
+    let total = result.chars().count();
+    if total <= max_chars {
+        return result.to_string();
+    }
+    let omitted = total - max_chars;
+    let mut out: String = result.chars().take(max_chars).collect();
+    out.push_str(&format!(
+        "\n[…truncated: {omitted} of {total} characters omitted]"
+    ));
+    out
 }
 
 /// Replace anything shaped like a Codewhale account machine token with its
@@ -2521,6 +2537,36 @@ mod tests {
         assert!(!valid_snapshot_name("dot..dot"));
         assert!(!valid_snapshot_name("a".repeat(65).as_str()));
         assert!(valid_snapshot_name("a".repeat(64).as_str()));
+    }
+
+    #[test]
+    fn harness_output_within_the_cap_is_kept_verbatim() {
+        let result = "build succeeded\nall green";
+        assert_eq!(
+            truncate_harness_output(result, MAX_HARNESS_OUTPUT_CHARS),
+            result,
+            "a result inside the cap is never rewritten"
+        );
+    }
+
+    #[test]
+    fn harness_output_past_the_cap_carries_an_explicit_marker() {
+        let result = "a".repeat(MAX_HARNESS_OUTPUT_CHARS + 500);
+        let cut = truncate_harness_output(&result, MAX_HARNESS_OUTPUT_CHARS);
+        let kept_head: String = result.chars().take(MAX_HARNESS_OUTPUT_CHARS).collect();
+        assert!(
+            cut.starts_with(&kept_head),
+            "the cap still keeps the head of the output"
+        );
+        assert!(
+            cut.contains("\n[…truncated: 500 of ") && cut.contains(" characters omitted]"),
+            "the cut must be announced, not silent: {cut}"
+        );
+        let marker: String = cut
+            .chars()
+            .skip(MAX_HARNESS_OUTPUT_CHARS)
+            .collect::<String>();
+        assert_eq!(marker, "\n[…truncated: 500 of 200500 characters omitted]");
     }
 
     #[test]

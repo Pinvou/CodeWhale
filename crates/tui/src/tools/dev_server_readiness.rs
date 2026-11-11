@@ -18,8 +18,8 @@ use tokio::net::TcpStream;
 use tokio::time::{Instant, sleep, timeout};
 
 const DEFAULT_HOST: &str = "127.0.0.1";
-const DEFAULT_TIMEOUT_MS: u64 = 30_000;
-const HARD_MAX_TIMEOUT_MS: u64 = 120_000;
+const DEFAULT_TIMEOUT_MS: u64 = 60_000;
+const HARD_MAX_TIMEOUT_MS: u64 = 600_000;
 const DEFAULT_POLL_INTERVAL_MS: u64 = 250;
 const MIN_POLL_INTERVAL_MS: u64 = 10;
 const MAX_POLL_INTERVAL_MS: u64 = 5_000;
@@ -86,7 +86,7 @@ impl ToolSpec for WaitForDevServerTool {
                 },
                 "timeout_ms": {
                     "type": "integer",
-                    "description": "Maximum time to wait in milliseconds (default 30000; hard max 120000)."
+                    "description": "Maximum time to wait in milliseconds (default 60000; hard max 600000)."
                 },
                 "poll_interval_ms": {
                     "type": "integer",
