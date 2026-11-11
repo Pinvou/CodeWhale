@@ -50,6 +50,43 @@ fn recover_under_quota_lock() -> Result<(), String> {
     recover_interrupted_for_quota()
 }
 
+#[test]
+fn recovery_invalidates_publish_measurement_when_terminal_scan_is_unreadable() {
+    use std::os::unix::fs::MetadataExt;
+    if fs::metadata("/proc/self").unwrap().uid() == 0 {
+        return;
+    }
+    let home = super::super::config::TempHome::new();
+    db::init_db().unwrap();
+    let mut interrupted = candidate(&home.path().join("versions"), 'a', "downloading");
+    interrupted.measured_bytes = Some(0);
+    put(&interrupted).unwrap();
+    let root = PathBuf::from(interrupted.models_root.as_deref().unwrap());
+    fs::set_permissions(&root, fs::Permissions::from_mode(0o000)).unwrap();
+    let recovery = recover_under_quota_lock();
+    let recovered = get(&interrupted.card_id, &interrupted.version_id)
+        .unwrap()
+        .unwrap();
+    let blocked = retained_bytes();
+    fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+    recovery.unwrap();
+    assert_eq!(recovered.state, "failed");
+    assert_eq!(recovered.planned_bytes, 0);
+    assert_eq!(recovered.measured_bytes, None);
+    assert!(
+        blocked.is_err(),
+        "unknown residual occupancy must fail closed"
+    );
+    assert!(retained_bytes().unwrap() > 0);
+    assert!(
+        get(&interrupted.card_id, &interrupted.version_id)
+            .unwrap()
+            .unwrap()
+            .measured_bytes
+            .is_some()
+    );
+}
+
 struct LockChild(Child);
 
 impl LockChild {

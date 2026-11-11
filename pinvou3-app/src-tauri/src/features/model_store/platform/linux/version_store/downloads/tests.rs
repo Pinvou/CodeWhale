@@ -81,6 +81,60 @@ fn ordinary_download_crash_recovery_releases_only_plan_and_keeps_registered_root
 }
 
 #[test]
+fn release_plan_scan_failure_retains_the_complete_plan_until_calibration_succeeds() {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    if fs::metadata("/proc/self").unwrap().uid() == 0 {
+        return;
+    }
+    let home = setup();
+    let root = home.path().join("unreadable-terminal");
+    let download = DownloadReservation::acquire("first", &root, || false, || {}).unwrap();
+    download.publish(80).unwrap();
+    download.start_scripts().unwrap();
+    fs::write(root.join("partial"), vec![0; 64]).unwrap();
+    fs::set_permissions(&root, fs::Permissions::from_mode(0o000)).unwrap();
+    let failed = release_plan("first");
+    let still_pending = downloads().unwrap()[0].downloading;
+    let charged_while_lease_held = retained_download_bytes();
+    fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(failed.is_err());
+    assert!(still_pending, "a failed scan must not commit downloading=0");
+    assert!(charged_while_lease_held.unwrap() >= 80);
+    release_plan("first").unwrap();
+    assert!(!downloads().unwrap()[0].downloading);
+    assert_eq!(retained_download_bytes().unwrap(), 64);
+    drop(download);
+}
+
+#[test]
+fn release_plan_measurement_write_failure_rolls_back_its_demotion() {
+    let home = setup();
+    let root = home.path().join("measurement-sql-failure");
+    let download = DownloadReservation::acquire("first", &root, || false, || {}).unwrap();
+    download.publish(80).unwrap();
+    download.start_scripts().unwrap();
+    fs::write(root.join("partial"), vec![0; 64]).unwrap();
+    let conn = connection().unwrap();
+    conn.execute_batch(
+        "CREATE TRIGGER reject_root_measurement BEFORE UPDATE ON model_download_root_measurements
+         BEGIN SELECT RAISE(ABORT,'injected root measurement failure'); END;",
+    )
+    .unwrap();
+    assert!(
+        release_plan("first")
+            .unwrap_err()
+            .contains("injected root measurement failure")
+    );
+    assert!(downloads().unwrap()[0].downloading);
+    assert!(retained_download_bytes().unwrap() >= 80);
+    conn.execute_batch("DROP TRIGGER reject_root_measurement")
+        .unwrap();
+    release_plan("first").unwrap();
+    assert_eq!(retained_download_bytes().unwrap(), 64);
+    drop(download);
+}
+
+#[test]
 fn unstarted_crash_recovery_keeps_root_bytes_without_reusing_the_target() {
     for recover_by_scan in [false, true] {
         let home = setup();

@@ -431,6 +431,7 @@ export const dictZh = {
           versionCostHint: '各版本大小显示登记的实测值，打开列表不再扫描目录；如需按当前磁盘重新核算，点「重新测量」。切换或清理可能完整校验大权重，期间其他卡片的下载等操作会排队；等待时可取消。',
           versionMeasure:"重新测量",
           versionMeasuring:"正在测量目录大小…",
+          versionMeasurementErrors:{"version_measurement_busy": "模型资源正在操作，请稍后重新测量。", "version_measurement_path_unknown": "无法确认版本权重目录，未更新计量登记。", "version_measurement_snapshot_changed": "模型状态已变化，未更新计量；请刷新后重试。", "version_measurement_version_changed": "版本登记已变化，未更新计量；请刷新后重试。"},
           versionStopFirst:"当前模型正在运行，请先停用再切换版本。",
           versionStage:"下载新版并保留旧版",
           versionSwitch:"切换到此版本",

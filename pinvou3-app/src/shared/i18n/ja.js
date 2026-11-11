@@ -415,6 +415,7 @@ const jaBase = {
           versionCostHint: 'バージョン容量は登録された実測値を表示するため、一覧を開いてもディレクトリを走査しません。現在のディスク内容で再集計するには「再測定」を押してください。切り替えや削除では重み全体を検証し、その間は他のカードのダウンロードなどが待機する場合があります。待機中はキャンセルできます。',
           versionMeasure:"再測定",
           versionMeasuring:"ディレクトリ容量を測定中…",
+          versionMeasurementErrors:{"version_measurement_busy": "モデルのリソースを操作中です。完了後に再測定してください。", "version_measurement_path_unknown": "バージョンの重みディレクトリを確認できないため、測定値は更新していません。", "version_measurement_snapshot_changed": "モデルの状態が変わったため、測定値は更新していません。更新して再試行してください。", "version_measurement_version_changed": "バージョンの記録が変わったため、測定値は更新していません。更新して再試行してください。"},
           versionStopFirst:"バージョンを切り替える前にモデルを停止してください。",
           versionStage:"旧版を保持して新版を取得",
           versionSwitch:"このバージョンに切り替え",
