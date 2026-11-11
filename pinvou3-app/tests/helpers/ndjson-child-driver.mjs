@@ -38,7 +38,10 @@ export function spawnNdjsonChild({
   });
 
   const send = (message) => child.stdin.write(`${JSON.stringify(message)}\n`);
-  const startRequest = (method, params = {}, { timeoutMs: requestTimeoutMs = timeoutMs, label = method } = {}) => {
+  const startRequest = (method, params = {}, options) => {
+    // Preserve the numeric main caller and the labelled per-request options.
+    const { timeoutMs: requestTimeoutMs = timeoutMs, label = method } =
+      typeof options === 'number' ? { timeoutMs: options } : options ?? {};
     const id = nextId++;
     const response = new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {
