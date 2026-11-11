@@ -163,7 +163,9 @@ class AccountCIAdmissionTests(unittest.TestCase):
                     if problem == 'stop-failed': raise RuntimeError('controlled stop failure')
                     return ''
                 raise AssertionError('unexpected Docker operation')
-            with patch.dict(os.environ, {'GITHUB_ACTIONS':'true'}), patch.object(PG, 'run', side_effect=run), contextlib.redirect_stdout(io.StringIO()) as output:
+            elapsed = [0.0]
+            def advance(delay): elapsed[0] += delay
+            with patch.dict(os.environ, {'GITHUB_ACTIONS':'true'}), patch.object(PG, 'run', side_effect=run), patch('time.monotonic', side_effect=lambda: elapsed[0]), patch('time.sleep', side_effect=advance), contextlib.redirect_stdout(io.StringIO()) as output:
                 if problem in ('image', 'bind', 'reused-volume', 'reused-id'):
                     with self.assertRaises(ValueError): PG.stop_owned_services(current)
                     self.assertEqual(stops, [])
@@ -280,5 +282,91 @@ class AccountCIAdmissionTests(unittest.TestCase):
                                 [dict(e,Action='skip') if e['Test']==invitation+'/'+child else e for e in events]):
                     with self.subTest(child=child),self.assertRaises(AssertionError):verify(invalid)
             with self.assertRaises(AssertionError):verify([e for e in events if not e['Test'].startswith(invitation)])
+
+# Controlled Docker acknowledgements do not replace real CI services.
+class PostgresRetirementTests(unittest.TestCase):
+    def exercise(self, scenario):
+        metadata, items = {}, {}
+        for index, (name, image, _, _) in enumerate(PG.SERVICES.values()):
+            identifier, volume, port = f'{index + 1:064x}', f'{index + 101:064x}', str(49000 + index)
+            metadata[name] = {'id': identifier, 'ports': {'5432': port}}
+            items[identifier] = {'Id': identifier, 'State': {'Running': True},
+                'Config': {'Image': image}, 'HostConfig': {'AutoRemove': True},
+                'NetworkSettings': {'Ports': {'5432/tcp': [{'HostIp': '127.0.0.1', 'HostPort': port}]}},
+                'Mounts': [{'Type': 'volume', 'Name': volume, 'Destination': '/var/lib/postgresql/data'}]}
+        owned_ids = set(items)
+        owned_volumes = {item['Mounts'][0]['Name'] for item in items.values()}
+        if scenario == 'partial-registration':
+            metadata.pop(next(iter(metadata)))
+        elapsed, stopped, observations = [0.0], [], [0]
+        calls = []
+
+        def run(argv, **kwargs):
+            calls.append((copy.deepcopy(argv), kwargs))
+            self.assertGreater(kwargs.get('timeout', 30), 0)
+            self.assertLessEqual(kwargs.get('timeout', 30), 105)
+            if argv[:2] == ['docker', 'ps']:
+                if not stopped:
+                    return '\n'.join([*owned_ids, 'f' * 64])
+                observations[0] += 1
+                if scenario == 'query-error':
+                    raise RuntimeError('controlled query failure')
+                delayed = scenario == 'delayed-container' and observations[0] < 3
+                persistent = scenario == 'persistent-container'
+                return '\n'.join([next(iter(owned_ids)), 'f' * 64] if delayed or persistent else ['f' * 64])
+            if argv[:3] == ['docker', 'volume', 'ls']:
+                delayed = scenario == 'delayed-volume' and observations[0] < 3
+                return '\n'.join([next(iter(owned_volumes)), 'e' * 64] if delayed or scenario == 'persistent-volume' else ['e' * 64])
+            if argv[:2] == ['docker', 'inspect']:
+                return json.dumps([items[argv[2]]])
+            if argv[:2] == ['docker', 'logs']:
+                return 'controlled logs'
+            if argv[:2] == ['docker', 'stop']:
+                self.assertEqual(argv[2:4], ['--time', '15'])
+                self.assertFalse(stopped, 'the stop operation must never be retried')
+                stopped.extend(argv[4:])
+                if scenario == 'stop-failed':
+                    raise RuntimeError('controlled stop failure')
+                if scenario == 'budget-exhausted':
+                    elapsed[0] = 105.0
+                return ''
+            self.fail(f'unexpected operation {argv[:2]}')
+
+        def sleep(delay):
+            self.assertGreater(delay, 0)
+            self.assertLessEqual(delay, .25)
+            elapsed[0] += delay
+
+        with tempfile.TemporaryDirectory(prefix='pg-retirement-contract-') as directory:
+            receipt = Path(directory) / 'receipt.json'
+            with patch.dict(os.environ, {'GITHUB_ACTIONS': 'true'}), patch.object(PG, 'run', side_effect=run), \
+                    patch('time.monotonic', side_effect=lambda: elapsed[0]), patch('time.sleep', side_effect=sleep), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                if scenario in ('delayed-container', 'delayed-volume', 'immediate'):
+                    PG.stop_owned_services(metadata, receipt)
+                    self.assertEqual(json.loads(receipt.read_text())['state'], 'released')
+                else:
+                    with self.assertRaises(RuntimeError):
+                        PG.stop_owned_services(metadata, receipt)
+                    state = json.loads(receipt.read_text())['state']
+                    self.assertEqual(state, 'released' if scenario == 'stop-failed' else 'unconfirmed')
+            self.assertEqual(set(stopped), {v['id'] for v in metadata.values()})
+            self.assertNotIn('f' * 64, stopped)
+            self.assertLessEqual(elapsed[0], 105)
+            if scenario.startswith('delayed-'):
+                self.assertEqual(observations[0], 3)
+            return json.loads(receipt.read_text()), calls
+
+    def test_waits_for_exact_container_and_volume_acknowledgements(self):
+        for scenario in ('immediate', 'delayed-container', 'delayed-volume'):
+            with self.subTest(scenario=scenario):
+                self.exercise(scenario)
+
+    def test_unknown_or_failed_retirement_never_becomes_success(self):
+        for scenario in ('persistent-container', 'persistent-volume', 'partial-registration',
+                         'stop-failed', 'query-error', 'budget-exhausted'):
+            with self.subTest(scenario=scenario):
+                self.exercise(scenario)
+
 
 if __name__=='__main__':unittest.main()
