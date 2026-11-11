@@ -59,7 +59,7 @@ for (const shell of ["powershell.exe", "pwsh"]) {
             if($owned.active.Count -ne 1){throw 'durable-ownership-not-confirmed'};
             [void](Invoke-PinvouTrustedGuard -FilePath $driver -Arguments @('start-role','--role','A'));
             if($global:PinvouE2EOwnedProcessScopes.Count -ne 2){throw 'run-scopes-not-retained'};
-            foreach($scope in $global:PinvouE2EOwnedProcessScopes){if($scope.ActiveProcesses -ne 1){throw 'real-service-not-live'}};
+            foreach($scope in $global:PinvouE2EOwnedProcessScopes){if($scope.ActiveProcesses -ne 1){throw ('real-service-not-live:'+ $scope.ActiveProcesses)}};
             $runtime.pid
           }).AddArgument($nonce);
           $second=@($ps.Invoke());if($ps.HadErrors){throw ($ps.Streams.Error|Out-String)};$legacyPid=[int]$second[-1];$ps.Commands.Clear();
