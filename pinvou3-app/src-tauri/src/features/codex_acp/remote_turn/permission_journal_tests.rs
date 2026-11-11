@@ -470,7 +470,7 @@ async fn retired_owner_cannot_consume_or_project_into_the_reused_task() {
     foreign.task_sequence += 1;
     assert!(
         take_remote_permission_resolution(
-            &mut fixture.pending.lock().await,
+            &mut *fixture.pending.lock().await,
             &foreign,
             &view.permission_request_id,
             true
