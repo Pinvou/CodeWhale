@@ -39,3 +39,5 @@ PR Check 对账号平台路径改动在 Draft、Ready 和 Merge Queue 均执行 
 Billing 的本地与部署初始化、升级角色前置见 [数据库运行说明](deploy/postgres/README.md)。迁移必须由独立 migrator 执行，服务启动不创建 owner 或扩大权限。
 
 迁移包的身份校验、已知旧快照的实际拒绝条件和核验限制见[迁移准入与快照识别](docs/migration-snapshot-admission.md)。该说明不替代历史库升级实证，也不撤销已有兼容承诺。
+
+Portal 的跨实例速率、未过期票据容量、首次旧数据盘点与失败恢复见 [Portal 共享准入手册](docs/portal-shared-admission.md)。默认阈值按全站总量计算，所有副本应保持一致。

@@ -313,6 +313,9 @@ jobs:
               - 'scripts/build-credential-handoff.mjs'
               - 'scripts/check-recharge-product-document-baseline.mjs'
               - 'scripts/account-ci-postgres.py'
+              - 'scripts/account-ci-redis.py'
+              - 'scripts/test-portal-redis.py'
+              - 'scripts/tests/test_portal_redis.py'
               - 'scripts/tests/test_account_ci_postgres.py'
               - 'scripts/account-financial-test-durations.json'
               - 'scripts/test-financial-parallel.py'
@@ -1329,6 +1332,18 @@ jobs:
     # Preserve every worker's original limits and the finite overall budget.
     timeout-minutes: 180
     services:
+      portal-redis:
+        image: redis:8.2-alpine@sha256:fe9daae35cd4fd6ec22416aa4fe0cf6b3e36741e06ff45b9986253fe2a81c041
+        ports:
+          - "127.0.0.1::6379"
+        options: >-
+          --rm
+          --memory 256m
+          --memory-swap 256m
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
       audit-export-postgres:
         image: mirror.gcr.io/library/postgres@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea
         env:
@@ -1671,6 +1686,28 @@ jobs:
           python3 -m unittest discover -s scripts/tests -p test_account_ci_postgres.py
           python3 scripts/account-ci-postgres.py
 
+      - name: Verify Portal Redis service isolation
+        id: portal-redis
+        env:
+          ACCOUNT_CI_SERVICES: ${{ toJSON(job.services) }}
+        run: |
+          python3 -m unittest discover -s scripts/tests -p test_portal_redis.py
+          python3 scripts/account-ci-redis.py
+
+      - name: Require real Portal Redis admission and session contracts
+        timeout-minutes: 12
+        env:
+          PINVOU_PORTAL_TEST_REDIS_URL: ${{ steps.portal-redis.outputs.url }}
+          PINVOU_PORTAL_TEST_REDIS_PORT: ${{ steps.portal-redis.outputs.port }}
+          PINVOU_PORTAL_TEST_REDIS_RUN_ID: ${{ steps.portal-redis.outputs.run_id }}
+          PINVOU_PORTAL_TEST_REDIS_OWNER_ID: ${{ steps.portal-redis.outputs.owner_id }}
+          PINVOU_PORTAL_TEST_REDIS_CONTAINER_ID: ${{ steps.portal-redis.outputs.container_id }}
+          PINVOU_PORTAL_TEST_REDIS_PROFILE: ci-owned
+        run: >-
+          python3 scripts/ci-fixture-process.py
+          --receipt "$PINVOU_CI_RESOURCE_LEDGER/portal-redis-process.json" --
+          python3 scripts/test-portal-redis.py --log "$PINVOU_CI_RESOURCE_LEDGER/portal-redis-tests.jsonl"
+
       - name: Test and vet all Account Platform Go modules
         shell: bash
         run: |
@@ -1785,6 +1822,12 @@ jobs:
           path: ${{ runner.temp }}/financial-parallel-*/
           if-no-files-found: ignore
           retention-days: 7
+
+      - name: Stop owned temporary Portal Redis service
+        if: ${{ always() && env.PINVOU_CI_RESOURCE_LEDGER != '' }}
+        env:
+          ACCOUNT_CI_SERVICES: ${{ toJSON(job.services) }}
+        run: python3 scripts/account-ci-redis.py --stop
 
       - name: Stop owned temporary PostgreSQL services
         if: ${{ always() }}
