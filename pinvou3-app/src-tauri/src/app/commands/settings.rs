@@ -565,6 +565,100 @@ pub(super) fn require_local_model_selection<'a>(
     Ok(model)
 }
 
+/// 设备管理移除回收的**条件删除**（三十三轮评审 P2）：只有当该 id 的当前行
+/// 仍与前端快照捕获的身份（`base_url` + `model` 原串逐字节一致）相同时才删除，
+/// 返回 true = 已删除、false = 身份不匹配或该 id 已不存在（保持幂等，不改任何
+/// 数据）。
+///
+/// [`removeExternalModel`] 的等待窗口里，用户可以经侧栏去设置把同 id 的配置
+/// 改成另一端点/模型并保存（SettingsView 保留原 id；save 的最终事务只按 id
+/// 落盘）。旧清理若只按 id 删（[`delete_model_inner`] 的形态），会用移除开始
+/// 时捕获的陈旧 `savedModels` 快照把用户**改属后的独立配置**连同其凭据引用
+/// 一起删掉——所以前端回收臂必须走本命令，把快照行的 `(base_url, model)`
+/// 作为期望身份传下来，由最终事务内核对当前行。前端快照匹配已经过端点规范化
+/// 与 Ollama 规范身份（`findLinkedRowsForEndpoint`/`…ForOllamaEndpoint`），
+/// 这里的逐字节比对回答的是另一个问题——"这行还是我们决定回收的那一行吗"：
+/// 移除等待期间发生的任何改动都让该行成为用户的独立配置，不得回收。
+#[tauri::command]
+pub async fn delete_model_if_matches(
+    id: String,
+    expected_base_url: Option<String>,
+    expected_model: Option<String>,
+) -> Result<bool, String> {
+    // Round-51 review: same cross-process settings-lock rationale as
+    // [`delete_model`] — join the blocking transaction on a worker.
+    let store = SystemCredentialStore::new();
+    join_blocking("delete_model_if_matches", move || {
+        delete_model_if_matches_inner(&id, expected_base_url, expected_model, &store)
+    })
+    .await
+}
+
+pub(super) fn delete_model_if_matches_inner(
+    id: &str,
+    expected_base_url: Option<String>,
+    expected_model: Option<String>,
+    store: &dyn CredentialStore,
+) -> Result<bool, String> {
+    // Same ordering contract as [`save_model_inner`]（三十五轮评审 P2）：凭据
+    // 删除在 post-commit 钩子里执行——提交成功后、释放 prefs 锁前。放在锁外
+    // 时，A 的行删除提交后、凭据删除前，B 可为同 id 保存新配置和新密钥（同一
+    // 确定性 `model:{id}` 引用）；A 迟到的删除会毁掉 B 的新密钥——新配置保留、
+    // 新密钥丢失，两次操作仍都报成功。锁内后提交清理与 save 的替换写入全序：
+    // B 的替换要么整体先于 A（A 的删除就是更晚的用户意图），要么等 A 的删除
+    // 完成后才拿得到锁。
+    // 同时改走 fail-closed 事务（三十五轮评审 P2）：设置文件读取/解析失败时
+    // 报错且不落盘，而不是把宽松加载折叠出的默认快照当现状、在返回“未删除”
+    // 的同时覆盖用户配置；该 id 不存在或身份不匹配返回 Ok(false) 并跳过落盘，
+    // 原文件字节保持。
+    let deferred_reference = std::cell::RefCell::new(None);
+    let deleted = std::cell::Cell::new(false);
+    UserPrefs::update_transaction_fail_closed(
+        |prefs| {
+            // 该 id 已不存在（用户在等待窗口里自行删了它）：无事可做，如实报告
+            // "未删"而不是报错——回收语义是"清理仍然属于被移除记录的配置"。
+            let Some(model) = prefs.model_by_id(id) else {
+                return Ok(false);
+            };
+            // 期望身份逐字节比对原串；None（调用方拿不出身份）永不匹配——
+            // 拿不出身份的调用方就不该删用户的配置（fail-closed）。旧形态
+            // `unwrap_or("")` 会让 None 期望匹配「base_url/model 均空串」的行，
+            // 与本注释的 fail-closed 承诺自相矛盾（三十五轮评审 P3，唯一产品
+            // 回收链先筛有效身份故不可达；按防御性 API 契约收口）。
+            let matches = expected_base_url.as_deref() == Some(model.base_url.as_str())
+                && expected_model.as_deref() == Some(model.model.as_str());
+            if !matches {
+                return Ok(false);
+            }
+            if model.is_builtin_account_platform() {
+                return Err("内置模型不可删除".to_string());
+            }
+            if prefs.advanced.saved_models.len() <= 1 {
+                return Err("至少保留一个模型".to_string());
+            }
+            if let Some(reference) = model.credential_ref.clone() {
+                *deferred_reference.borrow_mut() = Some(reference);
+            }
+            prefs.remove_model(id);
+            deleted.set(true);
+            Ok(true)
+        },
+        || {
+            if let Some(reference) = deferred_reference.borrow_mut().take() {
+                if let Err(error) = store.delete(&reference) {
+                    log::warn!(
+                        "delete_model_if_matches: model {id} removed, but its keyring secret \
+                         could not be deleted: {}",
+                        error.user_message()
+                    );
+                }
+            }
+        },
+    )
+    .map_err(|e| sanitize_command_error("delete_model_if_matches", e))?;
+    Ok(deleted.get())
+}
+
 /// 设全局默认模型(新建会话继承它)。不打断已在用的会话——它们各自保持 spawn
 /// 时的模型,想换在该会话的 chip 里切。
 #[tauri::command]
@@ -1642,6 +1736,7 @@ use crate::platform::prefs::CredentialStateOps;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::platform::credential_store::MemoryCredentialStore;
 
     #[test]
     fn local_model_selection_rejects_platform_carrier() {
@@ -2230,6 +2325,337 @@ mod tests {
             Some("saved-active"),
             "未指定 id 时保留激活模型回退(显式测试连接的既有语义)"
         );
+    }
+
+    /// 设备管理条件删除（三十三轮评审 P2）的共享夹具：真实的 update_transaction
+    /// 需要 PINVOU3_HOME（ENV_LOCK 序列化），模型行走与生产同一落盘路径。
+    fn seed_two_models() {
+        UserPrefs::update_transaction(|prefs| {
+            // load 路径会自动补种内置 llmapi 行（ensure_builtin_llmapi_model），
+            // 真实状态永远含内置行——夹具保留它、只追加两条外部行。
+            prefs
+                .advanced
+                .saved_models
+                .retain(|m| m.id == crate::platform::prefs::BUILTIN_ACCOUNT_PLATFORM_MODEL_ID);
+            prefs.advanced.saved_models.push(SavedModel {
+                id: "m-recycle".to_string(),
+                name: "recycle".to_string(),
+                alias: None,
+                preset: Default::default(),
+                context_window_tokens: None,
+                max_output_tokens: None,
+                reasoning_effort: None,
+                model: "qwen3:latest".to_string(),
+                base_url: "http://127.0.0.1:11434/v1".to_string(),
+                provider_kind: None,
+                vendor: None,
+                endpoint_mode: None,
+                image_capability_override: Default::default(),
+                vision_model_id: None,
+                api_key: String::new(),
+                credential_ref: None,
+                credential_state: Default::default(),
+                has_secret: false,
+                credential_action: None,
+            });
+            prefs.advanced.saved_models.push(SavedModel {
+                id: "m-other".to_string(),
+                name: "other".to_string(),
+                alias: None,
+                preset: Default::default(),
+                context_window_tokens: None,
+                max_output_tokens: None,
+                reasoning_effort: None,
+                model: "other-model".to_string(),
+                base_url: "http://127.0.0.1:8001/v1".to_string(),
+                provider_kind: None,
+                vendor: None,
+                endpoint_mode: None,
+                image_capability_override: Default::default(),
+                vision_model_id: None,
+                api_key: String::new(),
+                credential_ref: None,
+                credential_state: Default::default(),
+                has_secret: false,
+                credential_action: None,
+            });
+            prefs.advanced.active_model_id = Some("m-recycle".to_string());
+            Ok(())
+        })
+        .expect("seed models should save");
+    }
+
+    fn with_temp_prefs_home<T>(run: impl FnOnce() -> T) -> T {
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let old_home = std::env::var_os("PINVOU3_HOME");
+        let tmp = std::env::temp_dir().join(format!(
+            "pinvou3-delete-if-matches-{}-{}",
+            std::process::id(),
+            crate::platform::paths::tests::unique_suffix()
+        ));
+        // SAFETY: holding the crate-level ENV_LOCK (acquired on this test's first line); env writes are serialized.
+        unsafe { std::env::set_var("PINVOU3_HOME", &tmp) };
+        let result = run();
+        match old_home {
+            Some(home) => unsafe { std::env::set_var("PINVOU3_HOME", home) },
+            None => unsafe { std::env::remove_var("PINVOU3_HOME") },
+        }
+        result
+    }
+
+    #[test]
+    fn delete_model_if_matches_deletes_only_on_snapshot_identity_match() {
+        with_temp_prefs_home(|| {
+            seed_two_models();
+            let store = MemoryCredentialStore::default();
+            let deleted = delete_model_if_matches_inner(
+                "m-recycle",
+                Some("http://127.0.0.1:11434/v1".to_string()),
+                Some("qwen3:latest".to_string()),
+                &store,
+            )
+            .expect("matching identity must delete");
+            assert!(deleted, "snapshot-identical row must be recycled");
+            let prefs = UserPrefs::load();
+            assert!(
+                prefs.model_by_id("m-recycle").is_none(),
+                "recycled row must be gone"
+            );
+            assert!(
+                prefs.model_by_id("m-other").is_some(),
+                "the sibling config must survive"
+            );
+            // remove_model 的 active 回退取 saved_models 首条（内置行在真正的
+            // 加载路径里永远在场并排在最前）。
+            assert_ne!(
+                prefs.advanced.active_model_id.as_deref(),
+                Some("m-recycle"),
+                "remove_model's active fallback must still run on a real delete"
+            );
+        });
+    }
+
+    #[test]
+    fn delete_model_if_matches_keeps_rehomed_row() {
+        with_temp_prefs_home(|| {
+            seed_two_models();
+            // 复现评审反例：removeExternalModel 等待期间，用户在设置里把同 id
+            // 配置改属到另一端点/模型并保存（SettingsView 保留原 id）。
+            UserPrefs::update_transaction(|prefs| {
+                let mut row = prefs.model_by_id("m-recycle").cloned().expect("row");
+                row.base_url = "http://127.0.0.1:8000/v1".to_string();
+                row.model = "user-picked-model".to_string();
+                prefs.upsert_model(row);
+                Ok(())
+            })
+            .expect("re-home should save");
+            let store = MemoryCredentialStore::default();
+            let deleted = delete_model_if_matches_inner(
+                "m-recycle",
+                Some("http://127.0.0.1:11434/v1".to_string()),
+                Some("qwen3:latest".to_string()),
+                &store,
+            )
+            .expect("identity mismatch must not error");
+            assert!(
+                !deleted,
+                "the re-homed row belongs to the user now and must be kept"
+            );
+            let prefs = UserPrefs::load();
+            let row = prefs
+                .model_by_id("m-recycle")
+                .expect("re-homed row must survive the late cleanup");
+            assert_eq!(row.base_url, "http://127.0.0.1:8000/v1");
+            assert_eq!(row.model, "user-picked-model");
+            assert_eq!(
+                prefs.advanced.active_model_id.as_deref(),
+                Some("m-recycle"),
+                "keeping the row must not disturb the active fallback either"
+            );
+        });
+    }
+
+    #[test]
+    fn delete_model_if_matches_keeps_when_row_missing_or_identity_unknown() {
+        with_temp_prefs_home(|| {
+            seed_two_models();
+            let store = MemoryCredentialStore::default();
+            // 该 id 已不存在（用户已自行删除）→ 幂等 false，不报错。
+            let deleted = delete_model_if_matches_inner(
+                "m-gone",
+                Some("http://127.0.0.1:11434/v1".to_string()),
+                Some("qwen3:latest".to_string()),
+                &store,
+            )
+            .expect("missing id must be a no-op, not an error");
+            assert!(!deleted);
+            // 调用方拿不出期望身份（None）→ fail-closed，永不匹配。
+            let deleted = delete_model_if_matches_inner(
+                "m-recycle",
+                None,
+                Some("qwen3:latest".to_string()),
+                &store,
+            )
+            .expect("unknown identity must be a no-op, not an error");
+            assert!(!deleted, "an identity-less caller must never delete");
+            assert!(UserPrefs::load().model_by_id("m-recycle").is_some());
+            // None 期望连「base_url/model 均空串」的行也不匹配（旧
+            // `unwrap_or("")` 形态下 None 期望会误删空身份行，三十五轮评审 P3
+            // 防御性契约收口）。
+            UserPrefs::update_transaction(|prefs| {
+                let mut row = prefs.model_by_id("m-recycle").cloned().expect("row");
+                row.base_url = String::new();
+                row.model = String::new();
+                prefs.upsert_model(row);
+                Ok(())
+            })
+            .expect("empty-identity fixture should save");
+            let deleted = delete_model_if_matches_inner("m-recycle", None, None, &store)
+                .expect("None expectations are a no-op, not an error");
+            assert!(
+                !deleted,
+                "None expectations must not match even an empty-identity row"
+            );
+            assert!(UserPrefs::load().model_by_id("m-recycle").is_some());
+        });
+    }
+
+    #[test]
+    fn delete_model_if_matches_keeps_builtin_guard() {
+        with_temp_prefs_home(|| {
+            seed_two_models();
+            // 内置臂：内置 id 的行即便身份完全匹配也不可删（与 delete_model_inner
+            // 同一条守卫、同一句错误文案）。期望身份取内置行自己的当前落盘值——
+            // ensure_builtin_llmapi_model 每次加载都会把内置行归一回默认身份。
+            let builtin = UserPrefs::load()
+                .model_by_id(crate::platform::prefs::BUILTIN_ACCOUNT_PLATFORM_MODEL_ID)
+                .cloned()
+                .expect("builtin row is auto-seeded on load");
+            let store = MemoryCredentialStore::default();
+            let result = delete_model_if_matches_inner(
+                &builtin.id,
+                Some(builtin.base_url.clone()),
+                Some(builtin.model.clone()),
+                &store,
+            )
+            .expect_err("builtin row must be refused even on identity match");
+            assert!(result.contains("内置模型不可删除"));
+            assert!(
+                UserPrefs::load()
+                    .model_by_id(crate::platform::prefs::BUILTIN_ACCOUNT_PLATFORM_MODEL_ID)
+                    .is_some(),
+                "the builtin row must survive"
+            );
+        });
+    }
+
+    #[test]
+    fn delete_model_if_matches_deletes_down_to_builtin_only() {
+        with_temp_prefs_home(|| {
+            seed_two_models();
+            // "至少保留一个模型"守卫在真实加载路径下不可达（内置行由
+            // ensure_builtin_llmapi_model 自动在场，内置臂先拦）；可达的边界
+            // 形态是删到只剩内置行——外部行按快照身份照常回收。
+            UserPrefs::update_transaction(|prefs| {
+                prefs.remove_model("m-other");
+                Ok(())
+            })
+            .expect("shrink to one external model should save");
+            let store = MemoryCredentialStore::default();
+            let deleted = delete_model_if_matches_inner(
+                "m-recycle",
+                Some("http://127.0.0.1:11434/v1".to_string()),
+                Some("qwen3:latest".to_string()),
+                &store,
+            )
+            .expect("deleting the last external model must succeed");
+            assert!(deleted);
+            let prefs = UserPrefs::load();
+            assert!(prefs.model_by_id("m-recycle").is_none());
+            assert_eq!(
+                prefs
+                    .advanced
+                    .saved_models
+                    .iter()
+                    .map(|m| m.id.as_str())
+                    .collect::<Vec<_>>(),
+                vec![crate::platform::prefs::BUILTIN_ACCOUNT_PLATFORM_MODEL_ID],
+                "only the auto-seeded builtin row remains",
+            );
+        });
+    }
+
+    #[test]
+    fn delete_model_if_matches_read_failure_fails_closed_without_writing() {
+        with_temp_prefs_home(|| {
+            seed_two_models();
+            let path = crate::platform::paths::settings_path();
+            let original = std::fs::read_to_string(&path).expect("seeded settings");
+            // 宽松加载把「解析失败」折叠成默认快照（与读取失败的 `.ok()` 同一
+            // 折叠点）；破坏性命令必须在报错的同时保持磁盘字节——否则返回
+            // "未删除"却用默认值覆盖用户配置（三十五轮评审 P2）。
+            std::fs::write(&path, "{not json").expect("corrupt settings");
+            let store = MemoryCredentialStore::default();
+            let result = delete_model_if_matches_inner(
+                "m-recycle",
+                Some("http://127.0.0.1:11434/v1".to_string()),
+                Some("qwen3:latest".to_string()),
+                &store,
+            );
+            assert!(
+                result.is_err(),
+                "a destructive transaction must refuse when the settings file is unreadable"
+            );
+            assert_eq!(
+                std::fs::read_to_string(&path).expect("file still readable"),
+                "{not json",
+                "the corrupted file must not be rewritten by the failed cleanup"
+            );
+            // 恢复合法文件后同一请求照常工作（fail-closed 只拦读不出，不残留
+            // 拒绝态）。
+            std::fs::write(&path, original).expect("restore settings");
+            let deleted = delete_model_if_matches_inner(
+                "m-recycle",
+                Some("http://127.0.0.1:11434/v1".to_string()),
+                Some("qwen3:latest".to_string()),
+                &store,
+            )
+            .expect("post-recovery delete must work");
+            assert!(deleted);
+        });
+    }
+
+    #[test]
+    fn delete_model_if_matches_legitimate_absence_keeps_file_bytes() {
+        with_temp_prefs_home(|| {
+            seed_two_models();
+            let path = crate::platform::paths::settings_path();
+            // 未知字段 + 非规范化排版：任何「取出快照再无条件落盘」的路径都会
+            // 改字节；"该 id 已不存在 → 不改任何数据" 必须连落盘都不做。
+            let mut original = std::fs::read_to_string(&path).expect("seeded settings");
+            let trimmed = original.trim_end();
+            assert!(trimmed.ends_with('}'), "seeded settings end with an object");
+            // 未知字段插进顶层对象**内部**（剥掉收尾 `}` 再补回），而非其后。
+            original = format!(
+                "{},\"futureUnknownKey\": 1}}\n",
+                &trimmed[..trimmed.len() - 1]
+            );
+            std::fs::write(&path, &original).expect("annotate settings");
+            let store = MemoryCredentialStore::default();
+            let deleted = delete_model_if_matches_inner(
+                "m-gone",
+                Some("http://127.0.0.1:11434/v1".to_string()),
+                Some("qwen3:latest".to_string()),
+                &store,
+            )
+            .expect("missing row is a no-op, not an error");
+            assert!(!deleted);
+            assert_eq!(
+                std::fs::read_to_string(&path).expect("file readable"),
+                original,
+                "a no-op cleanup must not rewrite the file (bytes stay, unknown key survives)"
+            );
+        });
     }
 
     #[test]
