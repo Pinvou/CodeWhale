@@ -67,6 +67,7 @@ const FEATURE_COMMANDS = new Map([
   ["scheduled", [command("node", "tests/scheduled_tasks_smoke.js")]],
   ["settings", [command("npm", "test:settings-ui"), command("npm", "test:composer-tools-smoke"), command("npm", "test:composer-pending-enable-smoke"), command("npm", "test:failure-diagnostics-ui")]],
   ["failure-diagnostics", [command("npm", "test:failure-diagnostics-ui")]],
+  ["device-manager", [command("npm", "test:device-manager-ui")]],
   ["team-relay", [command("npm", "test:team-relay-ui")]],
   ["tools", [command("npm", "test:tool-store"), command("npm", "test:tool-store-import"), command("npm", "test:tool-store-grouping"), command("npm", "test:tool-store-recycle-bin")]],
   ["updater", [command("node", "tests/update_notice_ui_smoke.js")]],
