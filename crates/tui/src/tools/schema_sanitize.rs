@@ -26,18 +26,33 @@ use crate::models::Tool;
 /// - Collapse single-element `oneOf` / `allOf`
 /// - Walk recursively through all subschemas
 pub fn sanitize(schema: &mut Value) {
-    collapse_nullable_unions(schema);
-    inject_properties_on_bare_objects(schema);
-    prune_dangling_required(schema);
-    collapse_single_element_unions(schema);
+    sanitize_inner(schema, false);
+}
+
+/// The shared transforms plus recursion. `inside_literal` marks subtrees that
+/// are VALUES (enum members, `const`, `default`, `examples`) rather than
+/// schemas: the transforms rewrite schema shapes, and applying them to a
+/// literal value corrupts it — an enum member `{"type":"object"}` is a value
+/// that happens to look like a schema, and injecting `properties:{}` into it
+/// changes the set of values the model may send while `required` pruning
+/// deletes keys of object-shaped defaults.
+fn sanitize_inner(schema: &mut Value, inside_literal: bool) {
+    if !inside_literal {
+        collapse_nullable_unions(schema);
+        inject_properties_on_bare_objects(schema);
+        prune_dangling_required(schema);
+        collapse_single_element_unions(schema);
+    }
     // Recurse into all sub-schemas
     if let Some(obj) = schema.as_object_mut() {
-        for (_, v) in obj.iter_mut() {
-            sanitize(v);
+        for (key, v) in obj.iter_mut() {
+            let child_literal =
+                inside_literal || matches!(key.as_str(), "enum" | "const" | "default" | "examples");
+            sanitize_inner(v, child_literal);
         }
     } else if let Some(arr) = schema.as_array_mut() {
         for v in arr.iter_mut() {
-            sanitize(v);
+            sanitize_inner(v, inside_literal);
         }
     }
 }
