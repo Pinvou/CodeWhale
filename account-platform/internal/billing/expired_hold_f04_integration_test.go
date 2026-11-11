@@ -67,7 +67,7 @@ func TestF04ExpiredHoldRecoveryPreservesUnknownAndReplaysRelease(t *testing.T) {
 	crashed, cancel := context.WithCancel(ctx)
 	defer cancel()
 	client.cancelAfterRelease = cancel
-	if err = worker.recoverOne(crashed, usage); err == nil {
+	if err = worker.recoverOne(crashed, usage, false); err == nil {
 		t.Fatal("post-release cancellation did not interrupt receipt persistence")
 	}
 	if err = r.pool.QueryRow(ctx, `SELECT h.status,w.reserved_microcredits,x.state FROM usage_holds h JOIN wallets w ON w.id=h.wallet_id JOIN usage_hold_expiry_recovery x ON x.hold_id=h.id WHERE h.id=$1`, hold.ID).Scan(&status, &reserved, &state); err != nil || status != "RELEASED" || reserved != 0 || state != "MANUAL_REVIEW" {
@@ -84,7 +84,7 @@ func TestF04ExpiredHoldRecoveryPreservesUnknownAndReplaysRelease(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if e := worker.recoverOne(ctx, usage); e != nil {
+			if e := worker.recoverOne(ctx, usage, false); e != nil {
 				t.Error(e)
 			}
 		}()
@@ -115,7 +115,7 @@ func TestF04ExpiredHoldRecoveryPreservesUnknownAndReplaysRelease(t *testing.T) {
 		interrupted, cancel := context.WithCancel(ctx)
 		defer cancel()
 		client.cancelAfterRelease = cancel
-		if err = worker.recoverOne(interrupted, freshUsage); err == nil {
+		if err = worker.recoverOne(interrupted, freshUsage, false); err == nil {
 			t.Fatal("first RPC did not interrupt receipt")
 		}
 		var pending string
