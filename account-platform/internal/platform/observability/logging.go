@@ -12,6 +12,7 @@ import (
 )
 
 var safeLogEvents = map[string]string{
+	"expired hold proof retry scheduled":                              "expired_hold_proof_retry_scheduled",
 	"commerce_customer_sync_claim_failed":                             "commerce_customer_sync_claim_failed",
 	"commerce_customer_sync_retry_failed":                             "commerce_customer_sync_retry_failed",
 	"commerce_customer_sync_complete_failed":                          "commerce_customer_sync_complete_failed",

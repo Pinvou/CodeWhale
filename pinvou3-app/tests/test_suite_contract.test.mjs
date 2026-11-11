@@ -19,6 +19,7 @@ const helperFiles = new Set([
   "behavior_telemetry_source.mjs",
   "bridge_domain_contract.mjs",
   "organization_unit_scope_cases.mjs",
+  "bridge_slice_fields.mjs",
   "ui_test_server.js",
 ]);
 const platformRuntimeSmokes = new Set([
