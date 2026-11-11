@@ -25,6 +25,8 @@ export function run(cmd, args = [], opts = {}) {
     }
     let stdout = "";
     let stderr = "";
+    let stdoutTruncated = false;
+    let stderrTruncated = false;
     let timedOut = false;
     let settled = false;
     const timer = setTimeout(() => {
@@ -35,14 +37,20 @@ export function run(cmd, args = [], opts = {}) {
     }, timeoutMs);
     child.stdout.on("data", (d) => {
       if (stdout.length < maxBuffer) stdout += d.toString();
+      else stdoutTruncated = true;
     });
     child.stderr.on("data", (d) => {
       if (stderr.length < maxBuffer) stderr += d.toString();
+      else stderrTruncated = true;
     });
     const finish = (code, signal) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      // Collection stops at maxBuffer; mark the cut so consumers know data
+      // was dropped instead of mistaking the prefix for the whole output.
+      if (stdoutTruncated) stdout += `\n…[stdout truncated at ${maxBuffer} byte capture limit]`;
+      if (stderrTruncated) stderr += `\n…[stderr truncated at ${maxBuffer} byte capture limit]`;
       resolve({ code, stdout, stderr, timedOut, signal });
     };
     child.on("error", (err) => {

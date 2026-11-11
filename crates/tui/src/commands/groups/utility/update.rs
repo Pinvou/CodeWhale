@@ -182,14 +182,26 @@ fn update(arg: Option<&str>) -> CommandResult {
 }
 
 fn run_updater(updater: &Path, mode: UpdateMode) -> CommandResult {
+    use std::io::Read;
+    use std::time::Instant;
+
+    // Total budget for the updater subprocess. Resolving, downloading, and
+    // checksum-verifying a release is a minutes-scale operation, but it must
+    // not wedge `/update` forever on a stalled link.
+    const UPDATER_TOTAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+
     let mut command = Command::new(updater);
     command.arg("update");
     if mode == UpdateMode::Check {
         command.arg("--check");
     }
 
-    let output = match command.output() {
-        Ok(output) => output,
+    let mut child = match command
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+    {
+        Ok(child) => child,
         Err(err) => {
             return CommandResult::error(format!(
                 "Failed to run `{} update`: {err}\nRun it in a shell instead, then restart Codewhale.",
@@ -198,8 +210,62 @@ fn run_updater(updater: &Path, mode: UpdateMode) -> CommandResult {
         }
     };
 
-    let transcript = updater_transcript(&output.stdout, &output.stderr);
-    if !output.status.success() {
+    // Drain both pipes on helper threads while polling for exit. Draining
+    // after exit alone could deadlock: a child blocked writing into a full
+    // pipe never exits, and `.output()` would wait forever, which is exactly
+    // what this bounded wait replaces.
+    let mut stdout_pipe = child.stdout.take();
+    let mut stderr_pipe = child.stderr.take();
+    let stdout_reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(pipe) = stdout_pipe.as_mut() {
+            let _ = pipe.read_to_end(&mut buf);
+        }
+        buf
+    });
+    let stderr_reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(pipe) = stderr_pipe.as_mut() {
+            let _ = pipe.read_to_end(&mut buf);
+        }
+        buf
+    });
+
+    let deadline = Instant::now() + UPDATER_TOTAL_TIMEOUT;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Some(status),
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break None;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+            Err(err) => {
+                return CommandResult::error(format!(
+                    "Failed to run `{} update`: {err}\nRun it in a shell instead, then restart Codewhale.",
+                    updater.display()
+                ));
+            }
+        }
+    };
+
+    let Some(status) = status else {
+        return CommandResult::error(format!(
+            "`{updater} update` did not finish within {} minutes and was stopped. \
+             The update may be incomplete; run `{updater} update` in a shell to retry, \
+             then restart Codewhale.",
+            UPDATER_TOTAL_TIMEOUT.as_secs() / 60,
+            updater = updater.display(),
+        ));
+    };
+
+    let stdout = stdout_reader.join().unwrap_or_default();
+    let stderr = stderr_reader.join().unwrap_or_default();
+    let transcript = updater_transcript(&stdout, &stderr);
+    if !status.success() {
         return CommandResult::error(format!(
             "`{updater} update` failed.\n{transcript}",
             updater = updater.display()

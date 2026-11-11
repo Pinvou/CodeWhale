@@ -10207,7 +10207,10 @@ fn run_sandbox_command(args: SandboxArgs) -> Result<()> {
         exclude_slash_tmp,
     )?;
     let cwd = cwd.unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-    let timeout = Duration::from_millis(timeout_ms.clamp(1000, 600_000));
+    // Clamp 1 s..4 h: build-like sandbox operations routinely exceed 10
+    // minutes, so the ceiling allows multi-hour runs without letting a typo
+    // block forever.
+    let timeout = Duration::from_millis(timeout_ms.clamp(1000, 14_400_000));
 
     let (program, args) = command
         .split_first()

@@ -28,7 +28,7 @@ fn grep_description_matches_default_exclusion_behavior() {
     assert!(description.contains(
         "Include globs support only `*`, `**`, and `?` — brace expansion like `*.{rs,ts}` matches nothing"
     ));
-    assert!(description.contains("after 30s"));
+    assert!(description.contains("after 120s"));
     assert!(description.contains("replaces that default list entirely"));
 }
 

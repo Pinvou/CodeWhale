@@ -17,7 +17,10 @@ use tokio_util::sync::CancellationToken;
 
 use super::spec::ToolError;
 
-const PDF_TEXT_TIMEOUT: Duration = Duration::from_secs(30);
+/// Large and scanned PDFs routinely need minutes for `pdftotext`; pandoc and
+/// OCR already run on minutes-scale budgets, so the extraction subprocess gets
+/// the same headroom.
+const PDF_TEXT_TIMEOUT: Duration = Duration::from_secs(300);
 const PDF_PIPE_DRAIN_TIMEOUT: Duration = Duration::from_secs(1);
 const MAX_PDF_STDOUT_BYTES: usize = 16 * 1024 * 1024;
 const MAX_PDF_STDERR_BYTES: usize = 32 * 1024;

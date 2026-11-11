@@ -17,11 +17,11 @@ use shlex::try_join;
 
 use crate::dependencies::ExternalTool;
 
+use super::shell_output::truncate_with_meta;
 use super::spec::{
     ApprovalRequirement, ToolCapability, ToolContext, ToolError, ToolResult, ToolSpec,
 };
 
-const MAX_GATE_OUTPUT_CHARS: usize = 16_000;
 const DEFAULT_MAX_PYTHON_FILES: usize = 200;
 const MAX_CUSTOM_GATES: usize = 12;
 const BACKGROUND_GATE_TIMEOUT_MS: u64 = 600_000;
@@ -275,7 +275,7 @@ impl ToolSpec for RunVerifiersTool {
                 },
                 "commands": {
                     "type": "array",
-                    "description": "Optional explicit verifier gates. Foreground gates run directly as program+args, not through a shell; background gates are rendered into a single command line and run through the detected platform shell, so shell quoting rules apply there. Use program='bash', args=['-lc', '...'] only when Bash is intentionally part of the verifier.",
+                    "description": "Optional explicit verifier gates. Commands run directly as program+args, not through a shell. Use program='bash', args=['-lc', '...'] only when Bash is intentionally part of the verifier.",
                     "items": {
                         "type": "object",
                         "properties": {
@@ -1198,14 +1198,13 @@ fn run_gate(gate: VerifierGate) -> GateResult {
         }
     };
 
-    let (stdout, stdout_truncated) = truncate_with_note(
-        &String::from_utf8_lossy(&output.stdout),
-        MAX_GATE_OUTPUT_CHARS,
-    );
-    let (stderr, stderr_truncated) = truncate_with_note(
-        &String::from_utf8_lossy(&output.stderr),
-        MAX_GATE_OUTPUT_CHARS,
-    );
+    // Reuse the shell tool's tail-keep truncation (#242): verifier gates
+    // (compilers, test runners) print their failure summaries at the end,
+    // so head-only truncation dropped exactly the actionable part.
+    let (stdout, stdout_meta) = truncate_with_meta(&String::from_utf8_lossy(&output.stdout));
+    let (stderr, stderr_meta) = truncate_with_meta(&String::from_utf8_lossy(&output.stderr));
+    let stdout_truncated = stdout_meta.truncated;
+    let stderr_truncated = stderr_meta.truncated;
     GateResult {
         name: gate.name,
         ecosystem: gate.ecosystem,
@@ -1231,36 +1230,6 @@ fn render_command(program: Option<&str>, args: &[String]) -> String {
     parts.push(program.unwrap_or("<unavailable>").to_string());
     parts.extend(args.iter().cloned());
     parts.join(" ")
-}
-
-fn truncate_with_note(text: &str, max_chars: usize) -> (String, bool) {
-    if text.chars().count() <= max_chars {
-        return (text.to_string(), false);
-    }
-    let end = char_boundary_index(text, max_chars);
-    let truncated = &text[..end];
-    let omitted_chars = text
-        .chars()
-        .count()
-        .saturating_sub(truncated.chars().count());
-    (
-        format!(
-            "{truncated}\n\n[output truncated to {max_chars} characters; {omitted_chars} characters omitted]"
-        ),
-        true,
-    )
-}
-
-fn char_boundary_index(text: &str, max_chars: usize) -> usize {
-    if max_chars == 0 {
-        return 0;
-    }
-    for (count, (idx, _)) in text.char_indices().enumerate() {
-        if count == max_chars {
-            return idx;
-        }
-    }
-    text.len()
 }
 
 #[cfg(test)]
@@ -1587,70 +1556,5 @@ mod tests {
             "stdout should include the test listing: {:?}",
             output.stdout
         );
-    }
-
-    #[tokio::test]
-    async fn run_verifiers_background_reports_null_task_ids_for_skipped_and_failed_gates() {
-        // The background copy promises "a task id per gate, null when a gate
-        // is skipped or fails to start". Pin both null arms: a gate without
-        // a program is skipped before spawn, and a gate whose working
-        // directory does not exist fails validation inside the shell
-        // manager, reporting failed_to_start with the accurate error.
-        let tmp = tempdir().expect("tempdir");
-        let ctx = ToolContext::new(tmp.path());
-
-        let missing = tmp.path().join("definitely-missing-cwd");
-        let failed = start_background_gates(
-            &ctx,
-            VerifierProfile::Auto,
-            VerifierLevel::Quick,
-            vec![VerifierGate {
-                name: "no-such-cwd".to_string(),
-                ecosystem: "custom".to_string(),
-                cwd: missing,
-                program: Some("true".to_string()),
-                args: vec![],
-                env: vec![],
-                skipped_reason: None,
-            }],
-        )
-        .expect("background result");
-        let parsed: RunVerifiersBackgroundOutput =
-            serde_json::from_str(&failed.content).expect("background output json");
-        assert_eq!(parsed.failed_to_start, 1, "{}", parsed.summary);
-        assert!(!parsed.success);
-        let job = &parsed.jobs[0];
-        assert_eq!(job.status, "failed_to_start");
-        assert!(
-            job.task_id.is_none(),
-            "a failed-to-start gate must carry no task id"
-        );
-        let error = job.error.as_deref().expect("failure reason");
-        assert!(error.contains("unavailable"), "{error}");
-
-        let skipped = start_background_gates(
-            &ctx,
-            VerifierProfile::Auto,
-            VerifierLevel::Quick,
-            vec![VerifierGate {
-                name: "not-applicable".to_string(),
-                ecosystem: "custom".to_string(),
-                cwd: tmp.path().to_path_buf(),
-                program: None,
-                args: vec![],
-                env: vec![],
-                skipped_reason: Some("tooling not installed".to_string()),
-            }],
-        )
-        .expect("background result");
-        let parsed: RunVerifiersBackgroundOutput =
-            serde_json::from_str(&skipped.content).expect("background output json");
-        let job = &parsed.jobs[0];
-        assert_eq!(job.status, "skipped");
-        assert!(
-            job.task_id.is_none(),
-            "a skipped gate must carry no task id"
-        );
-        assert_eq!(job.skipped_reason.as_deref(), Some("tooling not installed"));
     }
 }

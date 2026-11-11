@@ -84,7 +84,7 @@ const AGENT_MAIL_OWNER_FILE: &str = "owner.json";
 const TURN_OPERATION_BINDING_SCHEMA_VERSION: u32 = 1;
 const REQUEST_USER_INPUT_TOOL_NAME: &str = "request_user_input";
 const REDACTED_USER_INPUT_RECEIPT: &str = "User input submitted";
-pub(crate) const MAX_ROUTED_USAGE_RECORDS_PER_TURN: usize = 64;
+pub(crate) const MAX_ROUTED_USAGE_RECORDS_PER_TURN: usize = 2_048;
 
 #[cfg(test)]
 #[derive(Clone, Copy, PartialEq, Eq)]

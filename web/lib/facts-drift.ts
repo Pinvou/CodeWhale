@@ -362,12 +362,12 @@ export async function runFactsDrift(env: { CURATED_KV?: KVNamespace; GITHUB_TOKE
   // Write new facts. No TTL — they live until next drift overwrites them.
   await env.CURATED_KV.put(KV_KEY, JSON.stringify(remote));
 
-  // Append to drift log (last 20 entries).
+  // Append to drift log (last 200 entries).
   try {
     const logRaw = await env.CURATED_KV.get(LOG_KEY);
     const log = logRaw ? (JSON.parse(logRaw) as Array<{ at: string; diffs: DriftDiff[] }>) : [];
     log.unshift({ at: remote.generatedAt, diffs });
-    await env.CURATED_KV.put(LOG_KEY, JSON.stringify(log.slice(0, 20)));
+    await env.CURATED_KV.put(LOG_KEY, JSON.stringify(log.slice(0, 200)));
   } catch {
     /* non-fatal */
   }

@@ -11762,14 +11762,35 @@ pub(crate) fn subagent_completion_from_result_with_ref_for_session(
 }
 
 const SUBAGENT_EVIDENCE_CHAR_BUDGET: usize = 4_000;
+/// Head/tail split for a clipped evidence block. Evidence tails carry the
+/// outcome (final verdicts, last check results), so a head-only clip dropped
+/// exactly the actionable part; mirror the summary stamper's head+tail split.
+const SUBAGENT_EVIDENCE_HEAD_CHARS: usize = 2_500;
+const SUBAGENT_EVIDENCE_TAIL_CHARS: usize = 1_500;
 
 fn clip_evidence_block(block: &str) -> (String, bool) {
     let total = block.chars().count();
     if total <= SUBAGENT_EVIDENCE_CHAR_BUDGET {
         return (block.to_string(), false);
     }
-    let clipped: String = block.chars().take(SUBAGENT_EVIDENCE_CHAR_BUDGET).collect();
-    (format!("{clipped}…"), true)
+    let chars: Vec<char> = block.chars().collect();
+    let head: String = chars.iter().take(SUBAGENT_EVIDENCE_HEAD_CHARS).collect();
+    let tail: String = chars
+        .iter()
+        .skip(total.saturating_sub(SUBAGENT_EVIDENCE_TAIL_CHARS))
+        .collect();
+    let omitted = total
+        .saturating_sub(SUBAGENT_EVIDENCE_HEAD_CHARS)
+        .saturating_sub(SUBAGENT_EVIDENCE_TAIL_CHARS);
+    (
+        format!(
+            "{head}\n\n[Sub-agent evidence truncated: {SUBAGENT_EVIDENCE_HEAD_CHARS} + \
+             {SUBAGENT_EVIDENCE_TAIL_CHARS} of {total} chars shown; {omitted} chars omitted — \
+             the elided middle is not retrievable inline; re-open the child or read the changed \
+             files directly to verify material claims.]\n\n{tail}"
+        ),
+        true,
+    )
 }
 
 fn extract_evidence_block(text: &str) -> Option<String> {

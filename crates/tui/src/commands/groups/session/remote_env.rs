@@ -1,7 +1,8 @@
 //! `/remote-env` opens the hosted Work launcher without taking source custody.
 
 use std::path::Path;
-use std::process::Stdio;
+use std::process::{ExitStatus, Stdio};
+use std::time::Duration;
 
 use crate::commands::traits::{CommandInfo, RegisterCommand};
 use crate::dependencies::{ExternalTool, Git};
@@ -12,6 +13,11 @@ use super::CommandResult;
 
 const HOSTED_WORK_URL: &str = "https://app.codewhale.net/work";
 const MAX_GIT_VALUE_BYTES: usize = 4 * 1024;
+/// Budget for the local git reads (`config`, `symbolic-ref`,
+/// `check-ref-format`). These complete in milliseconds; the deadline exists
+/// so a wedged git (hung config include, PATH shim) reports the command as
+/// unavailable instead of freezing it.
+const GIT_READ_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub(in crate::commands) const COMMAND_INFO: CommandInfo = CommandInfo {
     name: "remote-env",
@@ -85,15 +91,11 @@ fn resolve_target(workspace: &Path) -> Option<RemoteEnvTarget> {
 }
 
 fn read_git_value(workspace: &Path, args: &[&str]) -> Option<String> {
-    let mut command = Git::command()?;
-    let output = command.arg("-C").arg(workspace).args(args).output().ok()?;
-    if !output.status.success()
-        || output.stdout.is_empty()
-        || output.stdout.len() > MAX_GIT_VALUE_BYTES
-    {
+    let (status, stdout) = run_git_bounded(Some(workspace), args)?;
+    if !status.success() || stdout.is_empty() || stdout.len() > MAX_GIT_VALUE_BYTES {
         return None;
     }
-    let value = String::from_utf8(output.stdout).ok()?;
+    let value = String::from_utf8(stdout).ok()?;
     let value = value.trim_end_matches(&['\r', '\n'][..]);
     if value.is_empty() {
         None
@@ -106,16 +108,56 @@ fn valid_branch_name(branch: &str) -> bool {
     if branch.is_empty() || branch.len() > MAX_GIT_VALUE_BYTES {
         return false;
     }
-    let Some(mut command) = Git::command() else {
-        return false;
+    run_git_bounded(None, &["check-ref-format", "--branch", branch])
+        .is_some_and(|(status, _)| status.success())
+}
+
+/// Run one local git query with a bounded wait, killing a wedged child.
+/// These queries emit at most a few bytes, so draining the pipes after exit
+/// cannot deadlock: a child that exits has already flushed, and a child that
+/// hits the deadline is killed and reported as unavailable (fail closed —
+/// the same outcome as any other spawn/wait failure).
+fn run_git_bounded(cwd: Option<&Path>, args: &[&str]) -> Option<(ExitStatus, Vec<u8>)> {
+    use std::io::Read;
+    use std::time::Instant;
+
+    let mut command = Git::command()?;
+    if let Some(dir) = cwd {
+        command.arg("-C").arg(dir);
+    }
+    command.args(args);
+
+    let mut child = command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .ok()?;
+
+    let deadline = Instant::now() + GIT_READ_TIMEOUT;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Some(status),
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return None;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Err(_) => return None,
+        }
     };
-    command
-        .args(["check-ref-format", "--branch"])
-        .arg(branch)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .is_ok_and(|status| status.success())
+
+    let mut stdout = Vec::new();
+    if let Some(mut pipe) = child.stdout.take() {
+        let _ = pipe.read_to_end(&mut stdout);
+    }
+    if let Some(mut pipe) = child.stderr.take() {
+        let mut sink = Vec::new();
+        let _ = pipe.read_to_end(&mut sink);
+    }
+    Some((status?, stdout))
 }
 
 fn hosted_work_url(repo: &str, branch: &str) -> String {

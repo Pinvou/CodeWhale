@@ -3,7 +3,8 @@
 //! Nothing above this file assembles an argv or resolves a binary path, so
 //! "what did the tool actually shell out to" has exactly one answer.
 
-use std::process::Command;
+use std::process::Stdio;
+use std::time::Duration;
 
 use serde_json::Value;
 
@@ -18,6 +19,12 @@ const FALLBACK_GH_PATHS: &[&str] = &[
     "/opt/homebrew/bin/gh",              // macOS Apple Silicon Homebrew
 ];
 
+/// Total wall-clock budget for one `gh` invocation. `gh` is network-bound
+/// (api.github.com) and can block on credential prompts; previously a hung
+/// `gh` ran on the executor thread with no timeout and stalled the turn
+/// indefinitely.
+const GH_COMMAND_BUDGET: Duration = Duration::from_secs(60);
+
 fn gh_bin() -> String {
     if let Ok(bin) = std::env::var("CODEWHALE_GH_BIN").or_else(|_| std::env::var("DEEPSEEK_GH_BIN"))
     {
@@ -31,20 +38,24 @@ fn gh_bin() -> String {
     DEFAULT_GH.to_string()
 }
 
-pub(super) fn run_gh_text(context: &ToolContext, args: &[&str]) -> Result<String, ToolError> {
-    let out = Command::new(gh_bin())
-        .args(args)
-        .current_dir(&context.workspace)
-        .output()
-        .map_err(|e| {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                ToolError::not_available(
-                    "gh CLI not found; install it or set CODEWHALE_GH_BIN (legacy: DEEPSEEK_GH_BIN)",
-                )
-            } else {
-                ToolError::execution_failed(format!("failed to run gh: {e}"))
-            }
-        })?;
+pub(super) async fn run_gh_text(context: &ToolContext, args: &[&str]) -> Result<String, ToolError> {
+    let bin = gh_bin();
+    // `run_bounded_child` reports spawn failures generically; resolve the
+    // install hint up front for the common "gh is not installed" case (the
+    // fallback paths are absolute). A bare-name env override resolves via
+    // PATH at spawn and keeps the generic error.
+    if bin.contains('/') && !std::path::Path::new(&bin).is_file() {
+        return Err(ToolError::not_available(
+            "gh CLI not found; install it or set CODEWHALE_GH_BIN (legacy: DEEPSEEK_GH_BIN)",
+        ));
+    }
+    let mut cmd = tokio::process::Command::new(&bin);
+    // `Command::output()` ran the child with a null stdin; keep that
+    // semantics so gh never reads (or waits on) our own stdin.
+    cmd.stdin(Stdio::null());
+    cmd.args(args).current_dir(&context.workspace);
+    let out =
+        crate::tools::process::run_bounded_child(&mut cmd, None, GH_COMMAND_BUDGET, "gh").await?;
     if !out.status.success() {
         return Err(ToolError::execution_failed(format!(
             "gh {} failed: {}",
@@ -55,8 +66,8 @@ pub(super) fn run_gh_text(context: &ToolContext, args: &[&str]) -> Result<String
     Ok(String::from_utf8_lossy(&out.stdout).to_string())
 }
 
-pub(super) fn run_gh_json(context: &ToolContext, args: &[&str]) -> Result<Value, ToolError> {
-    let text = run_gh_text(context, args)?;
+pub(super) async fn run_gh_json(context: &ToolContext, args: &[&str]) -> Result<Value, ToolError> {
+    let text = run_gh_text(context, args).await?;
     serde_json::from_str(&text).map_err(|e| ToolError::execution_failed(e.to_string()))
 }
 

@@ -71,8 +71,13 @@ pub const USER_CONSTITUTION_BACKUP_SUFFIX: &str = ".pre-migration.bak";
 
 /// Maximum number of clauses kept after bounding.
 pub const MAX_CLAUSES: usize = 40;
-/// Maximum length of a single clause body after bounding.
-pub const MAX_CLAUSE_TEXT_LEN: usize = 280;
+/// Maximum length of a single clause body after bounding. Roomy enough for a
+/// real standing rule; the whole rendered block stays well under the fragment
+/// budget enforced by the core prompt assembler. When a longer clause is cut,
+/// an explicit truncation marker is appended rather than silently dropping the
+/// tail. Bounding happens at write time, so the rendered form stays
+/// prompt-cache stable.
+pub const MAX_CLAUSE_TEXT_LEN: usize = 2000;
 /// Maximum length of a clause id after bounding.
 pub const MAX_CLAUSE_ID_LEN: usize = 64;
 
@@ -230,7 +235,7 @@ impl ConstitutionClause {
 
     fn bounded(&self) -> Option<Self> {
         let id = non_blank(&self.id).map(|s| truncate_chars(&s, MAX_CLAUSE_ID_LEN))?;
-        let text = non_blank(&self.text).map(|s| truncate_chars(&s, MAX_CLAUSE_TEXT_LEN))?;
+        let text = non_blank(&self.text).map(|s| truncate_clause_text(&s, MAX_CLAUSE_TEXT_LEN))?;
         Some(Self {
             id,
             text,
@@ -1284,6 +1289,21 @@ fn truncate_chars(s: &str, max: usize) -> String {
     }
 }
 
+/// Truncate a clause body to at most `max` characters (not bytes), preserving
+/// UTF-8. Unlike [`truncate_chars`], a cut appends an explicit `[…truncated N
+/// chars]` marker so the rendered clause never silently loses its tail. The
+/// result is a deterministic function of the input, which keeps the rendered
+/// constitution block prompt-cache stable.
+fn truncate_clause_text(s: &str, max: usize) -> String {
+    let dropped = s.chars().count().saturating_sub(max);
+    if dropped == 0 {
+        return s.to_string();
+    }
+    let mut out: String = s.chars().take(max).collect();
+    let _ = write!(out, "[…truncated {dropped} chars]");
+    out
+}
+
 /// FNV-1a 64-bit hash. Small, dependency-free, and deterministic across
 /// platforms — adequate for content fingerprinting (not cryptographic).
 fn fnv1a64(bytes: &[u8]) -> u64 {
@@ -2076,14 +2096,16 @@ mod tests {
 
     #[test]
     fn clauses_are_bounded_in_count_length_and_uniqueness() {
-        let mut clauses: Vec<ConstitutionClause> = (0..MAX_CLAUSES + 10)
-            .map(|i| ConstitutionClause::accepted(format!("c{i:03}"), format!("rule {i}")))
-            .collect();
-        clauses.push(ConstitutionClause::accepted("c000", "duplicate id"));
-        clauses.push(ConstitutionClause::accepted(
+        // "long" is inserted first so it survives the count bound; the tail
+        // of the numbered clauses is what the bound is expected to cut.
+        let mut clauses: Vec<ConstitutionClause> = vec![ConstitutionClause::accepted(
             "long",
             "z".repeat(MAX_CLAUSE_TEXT_LEN + 50),
-        ));
+        )];
+        clauses.extend(
+            (0..MAX_CLAUSES + 10).map(|i| ConstitutionClause::accepted(format!("c{i:03}"), format!("rule {i}"))),
+        );
+        clauses.push(ConstitutionClause::accepted("c000", "duplicate id"));
         let bounded = UserConstitution {
             clauses,
             ..UserConstitution::default()
@@ -2094,8 +2116,16 @@ mod tests {
             bounded
                 .clauses
                 .iter()
-                .all(|c| c.text.chars().count() <= MAX_CLAUSE_TEXT_LEN)
+                .all(|c| c.text.chars().count()
+                    <= MAX_CLAUSE_TEXT_LEN + "[…truncated 1 chars]".len())
         );
+        let long = bounded
+            .clauses
+            .iter()
+            .find(|c| c.id == "long")
+            .expect("long clause kept");
+        assert!(long.text.starts_with(&"z".repeat(MAX_CLAUSE_TEXT_LEN)));
+        assert!(long.text.ends_with("[…truncated 50 chars]"));
         assert!(!bounded.render_body().contains("duplicate id"));
     }
 

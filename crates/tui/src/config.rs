@@ -2798,8 +2798,10 @@ pub struct AutoConfig {
     pub router: Option<AutoRouterConfig>,
 }
 
-/// Default classifier call timeout for `[auto.router]` (seconds).
-pub(crate) const DEFAULT_AUTO_ROUTER_TIMEOUT_SECS: u64 = 4;
+/// Default classifier call timeout for `[auto.router]` (seconds). The
+/// classifier is a model call, so the default covers typical remote LLM
+/// latency rather than a local probe.
+pub(crate) const DEFAULT_AUTO_ROUTER_TIMEOUT_SECS: u64 = 15;
 /// Upper clamp for a configured classifier timeout: a hung local router must
 /// not stall an Auto turn forever.
 pub(crate) const MAX_AUTO_ROUTER_TIMEOUT_SECS: u64 = 300;
@@ -2827,7 +2829,7 @@ pub struct AutoRouterConfig {
     #[serde(default)]
     pub thinking: Option<String>,
     /// Classifier call timeout in seconds. Defaults to
-    /// `DEFAULT_AUTO_ROUTER_TIMEOUT_SECS` (4); `0` means "use the default".
+    /// `DEFAULT_AUTO_ROUTER_TIMEOUT_SECS` (15); `0` means "use the default".
     /// Values above `MAX_AUTO_ROUTER_TIMEOUT_SECS` (300) are clamped so a
     /// hung local router cannot stall a turn indefinitely.
     #[serde(default)]
@@ -4793,7 +4795,7 @@ impl Config {
     }
 
     /// Classifier call timeout for `[auto.router]` in seconds. Defaults to
-    /// `DEFAULT_AUTO_ROUTER_TIMEOUT_SECS` (4); `0` means "use the default".
+    /// `DEFAULT_AUTO_ROUTER_TIMEOUT_SECS` (15); `0` means "use the default".
     /// Values above `MAX_AUTO_ROUTER_TIMEOUT_SECS` (300) are clamped so a
     /// hung local router cannot stall a turn indefinitely.
     #[must_use]
