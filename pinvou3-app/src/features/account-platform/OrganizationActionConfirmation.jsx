@@ -3,7 +3,7 @@ import React, { useLayoutEffect, useId, useRef } from 'react';
 import { createPortal } from 'react-dom';
 
 // Feature-local confirmation does not depend on native dialog commands.
-export function OrganizationActionConfirmation({ copy, title, target, description = '', context, details, onCancel, onConfirm, canRestoreFocus, appearance = 'default', dangerous = false, className = '' }) {
+export function OrganizationActionConfirmation({ copy, title, tone, target, description = '', context, details, onCancel, onConfirm, canRestoreFocus, appearance = 'default', dangerous = false, className = '' }) {
  const visible = usePortalDialogScope();
  const titleID = useId(), descriptionID = useId(), dialog = useRef(null), cancelButton = useRef(null), restoreAllowed = useRef(canRestoreFocus);
  restoreAllowed.current = canRestoreFocus;
@@ -27,7 +27,7 @@ export function OrganizationActionConfirmation({ copy, title, target, descriptio
    <h3 id={titleID}>{title}</h3><p id={descriptionID}>{copy.confirm}{description && <> {description}</>}</p>
    <dl>{target && <><dt>{copy.confirmationTarget}</dt><dd>{target}</dd></>}{details.map(item => <React.Fragment key={item.name}><dt>{item.label}</dt><dd>{item.value}</dd></React.Fragment>)}</dl>
    {context && <div id={contextID}>{context}</div>}
-   <footer><button type="button" ref={cancelButton} onClick={onCancel}>{copy.cancelConfirmation}</button><button type="button" onClick={onConfirm}>{appearance === 'admin' && copy.confirmActionTemplate ? copy.confirmActionTemplate.replace('{action}', () => title) : copy.confirmAction}</button></footer>
+   <footer><button type="button" ref={cancelButton} onClick={onCancel}>{copy.cancelConfirmation}</button><button type="button" className={appearance === 'admin' ? undefined : tone === 'danger' ? 'ap-danger' : 'ap-primary'} onClick={onConfirm}>{appearance === 'admin' && copy.confirmActionTemplate ? copy.confirmActionTemplate.replace('{action}', () => title) : copy.confirmAction}</button></footer>
   </div>
  </div>, document.body);
 }

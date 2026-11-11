@@ -1,3 +1,4 @@
+import { TokenAccountStatus, TokenAccountCount } from './TokenAccountSummary.jsx';
 import { isImeComposing } from '../../shared/ime-guard.mjs';
 import { TokenAccountGovernanceActions } from './TokenAccountGovernanceActions.jsx';
 import { secureRequestID } from './request-id.js';
@@ -247,7 +248,7 @@ function RoutesTab({ client, copy, account, query, onQueryChange, cursorHistory,
 
 function ProvisioningsTab({ client, copy, accountID, query, onQueryChange, cursorHistory }) {
   const [refresh, setRefresh] = useState(0);
-  const load = useMemo(() => (filters, signal) => client.provisionings({ ...filters, token_account_id: accountID }, signal), [client, accountID]);
+  const load = useMemo(() => (filters, signal) => client.provisioningsForPresentation({ ...filters, token_account_id: accountID }, signal), [client, accountID]);
   const state = useAdminSource({ enabled: true, load, query, refreshVersion: refresh });
   return <Source title={copy.tokenAccountProvisioning} id="token-provisionings-heading" state={state} copy={copy} retry={() => setRefresh((v) => v + 1)}><FilterForm source="tokenProvisionings" query={query} copy={copy} onQueryChange={onQueryChange} fields={[{ key: 'q', label: copy.provisioningSearch }, { key: 'status', label: copy.status, options: ['PENDING', 'READY', 'FAILED', 'REPAIR_REQUIRED'] }]} /><div className="adm-table-wrap"><table className="adm-table"><thead><tr><th>{copy.tokenAccountProvisioningItem}</th><th>{copy.status}</th><th>{copy.stage}</th><th>{copy.generation}</th><th>{copy.updatedAt}</th></tr></thead><tbody>{state.items.map((item) => <tr key={item.provisioning_id}><td data-label={copy.tokenAccountProvisioningItem}><span className="adm-mono">{item.provisioning_id}</span></td><td data-label={copy.status}><Status value={item.status} copy={copy} /></td><td data-label={copy.stage}>{copy.enumLabels[item.stage] || item.stage}</td><td data-label={copy.generation}>{item.actual_generation ?? '—'} / {item.desired_generation}</td><td data-label={copy.updatedAt}>{date(item.updated_at)}</td></tr>)}</tbody></table></div><Pagination source="tokenProvisionings" query={query} state={state} copy={copy} cursorHistory={cursorHistory} onQueryChange={onQueryChange} /></Source>;
 }
@@ -281,18 +282,16 @@ function TokenAccountSharing({ account, copy }) {
 }
 
 const accountDetailDate = (value) => typeof value === 'string' && value.trim() && Number.isFinite(Date.parse(value)) ? date(value) : null;
-const accountDetailCount = (value, copy) => Number.isSafeInteger(value) && value >= 0 ? value : copy.tokenAccountMetricUnknown;
 
 function TokenAccountOverview({ account, copy }) {
-  const status = Object.prototype.hasOwnProperty.call(copy.tokenAccountStatuses, account.status) ? copy.tokenAccountStatuses[account.status] : copy.tokenAccountStatusUnknown;
   return <section className="adm-card adm-model-detail-panel adm-token-account-overview" aria-labelledby="token-overview-heading">
     <h2 id="token-overview-heading">{copy.tokenAccountOverview}</h2>
     <Facts>
-      <Fact label={copy.tokenAccountStatus}>{status}</Fact>
+      <Fact label={copy.tokenAccountStatus}>{<TokenAccountStatus value={account.status} copy={copy} />}</Fact>
       <Fact label={copy.owner}><TokenAccountOwner account={account} copy={copy} /></Fact>
       <Fact label={copy.tokenResourcePolicy}><TokenAccountSharing account={account} copy={copy} /></Fact>
-      <Fact label={copy.tokenAccountActiveCredentials}>{accountDetailCount(account.active_credential_count, copy)}</Fact>
-      <Fact label={copy.tokenAccountResolvedRoutes}>{accountDetailCount(account.route_count, copy)}</Fact>
+      <Fact label={copy.tokenAccountActiveCredentials}>{<TokenAccountCount value={account.active_credential_count} missing={copy.tokenAccountMetricUnknown} />}</Fact>
+      <Fact label={copy.tokenAccountResolvedRoutes}>{<TokenAccountCount value={account.route_count} missing={copy.tokenAccountMetricUnknown} />}</Fact>
     </Facts>
     <p className="adm-token-detail-metrics-help">{copy.tokenAccountMetricHelp}</p>
     <details className="adm-token-detail-technical">
