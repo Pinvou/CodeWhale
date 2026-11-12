@@ -1488,9 +1488,11 @@ mod tests {
             timeout: Some(Duration::from_secs(1)),
             ..Default::default()
         };
-        let started = Instant::now();
-        let err = with_isolated_data_dir(|| run_script(&path, &HashMap::new(), opts)).unwrap_err();
-        let elapsed = started.elapsed();
+        let (err, elapsed) = with_isolated_data_dir(|| {
+            let started = Instant::now();
+            let err = run_script(&path, &HashMap::new(), opts).unwrap_err();
+            (err, started.elapsed())
+        });
 
         assert!(
             err.to_string().contains("超过安全上限"),
@@ -1503,8 +1505,8 @@ mod tests {
         );
         assert!(
             elapsed < Duration::from_secs(12),
-            "打断之后等了 {elapsed:?} 才返回：宽限读循环没有总上限，杀不掉又一直在\
-             输出的进程能把 run_script 无限续下去，卡片会锁死在 ActiveCardOps 里"
+            "本次 run_script 用时 {elapsed:?} 超过 12 秒测试预算：宽限读循环已配置 \
+             EXIT_GRACE_TOTAL={EXIT_GRACE_TOTAL:?}，请检查退出路径或执行负载"
         );
     }
 

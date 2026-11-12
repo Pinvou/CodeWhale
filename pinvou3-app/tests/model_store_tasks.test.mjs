@@ -105,13 +105,15 @@ test('版本清理在没有视图订阅时完成，重挂后仍逐项保留所�
   for (const cardId of ['cleanup-a', 'cleanup-b']) {
     scripts.set(cardId, (from) => ({ done: true, ok: true, next: from, lines: [],
       result: { freed_bytes: 1024, remaining_paths: [`/${cardId}/retained.weights`] } }));
-    await runTask({ title: cardId, kind: 'version_delete', key: `card:${cardId}`,
+    await runTask({ title: cardId, cardName: `Name ${cardId}`, kind: 'version_delete', key: `card:${cardId}`,
       start: async () => ({ run_id: cardId }) });
   }
   assert.equal(notifications, 0);
   assert.deepEqual(before, [], 'published snapshots must not mutate in place');
   assert.deepEqual(getModelStoreOperationResults().map((entry) => entry.result.remaining_paths),
     [['/cleanup-a/retained.weights'], ['/cleanup-b/retained.weights']]);
+  assert.deepEqual(getModelStoreOperationResults().map((entry) => entry.cardName),
+    ['Name cleanup-a', 'Name cleanup-b'], 'completed tasks retain names for the active display language');
   const unsubscribeNext = subscribeModelStoreOperationResults(() => { notifications += 1; });
   dismissModelStoreOperationResult(getModelStoreOperationResults()[0].id);
   assert.equal(notifications, 1);
@@ -124,9 +126,10 @@ test('再附着版本清理也登记结果，不依赖已消失的发起调用�
   scripts.set('reattach-cleanup', (from) => ({ done: true, ok: true, next: from, lines: [],
     result: { remaining_paths: ['/reattached/remaining'] } }));
   reattachRuns([{ run_id: 'reattach-cleanup', card_id: 'cleanup', kind: 'version_delete' }],
-    () => ({ title: 'cleanup', key: 'card:cleanup' }));
+    () => ({ title: 'cleanup', cardName: 'Reattached cleanup', key: 'card:cleanup' }));
   await waitFor(() => getModelStoreOperationResults().length === 1, 'reattached cleanup result was lost');
   assert.deepEqual(getModelStoreOperationResults()[0].result.remaining_paths, ['/reattached/remaining']);
+  assert.equal(getModelStoreOperationResults()[0].cardName, 'Reattached cleanup');
 });
 
 test('版本下载和切换完成保留结果，取消和失败不登记成功', async () => {
@@ -144,12 +147,13 @@ test('版本下载和切换完成保留结果，取消和失败不登记成功',
 test('卸载残留与强制移除分别保留，确认一个结果不抹掉另一个', async () => {
   scripts.set('normal-uninstall-residual', (from) => ({ done: true, ok: true, next: from, lines: [],
     result: { purged_weights: true, remaining_paths: ['/uninstall/remaining'] } }));
-  await runTask({ title: 'uninstall', kind: 'uninstall', key: 'card:uninstall',
+  await runTask({ title: 'uninstall', cardName: 'Uninstalled card', kind: 'uninstall', key: 'card:uninstall',
     start: async () => ({ run_id: 'normal-uninstall-residual' }) });
   const target = { taskId: 99, cardName: 'force removal' };
   const forceId = rememberForceRemoveResult(target, { residual_paths: ['/force/remaining'] });
   rememberForceRemoveResult(target, { residual_paths: ['/force/remaining'] });
   assert.equal(getModelStoreOperationResults().length, 2, 'same force removal must not be duplicated');
+  assert.equal(getModelStoreOperationResults()[0].cardName, 'Uninstalled card');
   dismissModelStoreOperationResult(forceId);
   assert.deepEqual(getModelStoreOperationResults().map((entry) => entry.result.remaining_paths), [['/uninstall/remaining']]);
 });

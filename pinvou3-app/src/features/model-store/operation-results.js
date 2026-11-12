@@ -27,6 +27,7 @@ export function rememberTaskOperationResult(task, outcome) {
   replaceResults([...results, {
     id,
     title: task.title,
+    cardName: task.cardName,
     kind: task.kind,
     result: {
       ...outcome.result,

@@ -370,7 +370,7 @@ const ModelStoreView = ({ theme, t, bs, startupUpdates = EMPTY_STARTUP_UPDATES, 
    * 把这次运行丢掉(库还没加载完、或者卡片刚被删,恰恰是最需要看到这张任务卡的
    * 时刻)。
    * @param {{card_id?:string, kind?:string}} run - 后端给的活跃运行。
-   * @returns {{title:string, key:string}|null} 标题与任务 key;认不出的操作返回 null。
+   * @returns {{title:string, cardName?:string, key:string}|null} 标题与任务 key;认不出的操作返回 null。
    */
   const describeActiveRun = useCallback(
     (run) => {
@@ -386,7 +386,7 @@ const ModelStoreView = ({ theme, t, bs, startupUpdates = EMPTY_STARTUP_UPDATES, 
         case 'version_stage':
         case 'version_switch':
         case 'version_delete':
-          return { title: copy.versionTask(name), key: lifecycleTaskKey(cardId) };
+          return { title: copy.versionTask(name), cardName: name, key: lifecycleTaskKey(cardId) };
         case 'update':
           return { title: copy.taskCardUpdate(name), key: lifecycleTaskKey(cardId) };
         case 'enable':
@@ -394,7 +394,7 @@ const ModelStoreView = ({ theme, t, bs, startupUpdates = EMPTY_STARTUP_UPDATES, 
         case 'stop':
           return { title: copy.taskStop(name), key: lifecycleTaskKey(cardId) };
         case 'uninstall':
-          return { title: copy.taskUninstall(name), key: lifecycleTaskKey(cardId) };
+          return { title: copy.taskUninstall(name), cardName: name, key: lifecycleTaskKey(cardId) };
         // 认不出的操作不接:宁可不显示,也不要一张说不清自己在干什么、却点得了
         // 取消的任务卡。卡片脚本和应用可以不同版本,这条兜底不能省。
         default:
@@ -507,7 +507,7 @@ const ModelStoreView = ({ theme, t, bs, startupUpdates = EMPTY_STARTUP_UPDATES, 
   // 回的实际结果措辞，而那份结果在发请求时还不存在。
   const runLifecycle = useCallback(
     async ({ record, kind, title, start, doneText }) => {
-      const result = await runTask({ title, kind, key: lifecycleTaskKey(record.card_id), start });
+      const result = await runTask({ title, cardName: record.card_name, kind, key: lifecycleTaskKey(record.card_id), start });
       if (result.duplicate || result.aborted) return result;
       if (result.ok) showToast(result.result?.link_sync_error
         ? copy.linkSyncFailed(result.result.link_sync_error)

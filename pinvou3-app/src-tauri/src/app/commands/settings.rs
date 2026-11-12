@@ -1045,12 +1045,13 @@ pub struct ImageInputCapabilityInfo {
 pub async fn get_image_input_capability(
     session_id: Option<String>,
     pool: State<'_, EnginePool>,
-    store: State<'_, SessionStore>,
 ) -> Result<ImageInputCapabilityInfo, String> {
     // 与 chat 命令的图片路由同一套解析:fresh bridge 按 session 绑定模型(含本地
     // vLLM served name 探测与运行时凭据准备)。尚无会话(全新草稿)时退化为
     // get_effective_model_config 同款 prefs 直读,按全局默认模型解析。
-    let bridge = match session_id.or_else(|| store.active_id()) {
+    // A missing ID is the caller's draft, even when another window/session
+    // remains active in the backend. Never borrow that unrelated binding.
+    let bridge = match session_id {
         Some(sid) => pool.fresh_bridge_for(&sid).await.map_err(|error| {
             sanitize_command_error(
                 &format!("resolve image input capability for {sid}"),
@@ -1060,16 +1061,40 @@ pub async fn get_image_input_capability(
         None => {
             let mut bridge = pool.bridge.clone();
             bridge.prefs = refresh_safe_prefs(UserPrefs::load());
-            bridge.session_model = None;
-            bridge
+            return draft_image_input_capability(&mut bridge);
         }
     };
-    Ok(ImageInputCapabilityInfo {
+    Ok(image_input_capability_snapshot(&bridge))
+}
+
+fn draft_image_input_capability(
+    bridge: &mut crate::features::assistant::platform::bridge::Pinvou3Bridge,
+) -> Result<ImageInputCapabilityInfo, String> {
+    // Resolve the typed default just like the effective-config projection.
+    // A stale pool binding or the legacy first-model fallback must not report
+    // an image route after the user has cleared the default selection.
+    bridge.session_model = resolve_effective_model_selection(
+        &bridge.prefs,
+        bridge.prefs.advanced.default_model_ref.as_ref(),
+    )?;
+    if bridge.session_model.is_none()
+        && bridge.prefs.model_selection_schema_version >= 1
+        && bridge.prefs.advanced.default_model_ref.is_none()
+    {
+        return Err("model_selection_required: choose a model before sending".into());
+    }
+    Ok(image_input_capability_snapshot(bridge))
+}
+
+fn image_input_capability_snapshot(
+    bridge: &crate::features::assistant::platform::bridge::Pinvou3Bridge,
+) -> ImageInputCapabilityInfo {
+    ImageInputCapabilityInfo {
         capability: bridge.effective_image_capability().as_str().to_string(),
         image_mode: bridge.image_input_mode().as_str().to_string(),
         is_local_endpoint: bridge.is_local_endpoint(),
         vision_is_local_endpoint: bridge.vision_uses_local_endpoint(),
-    })
+    }
 }
 
 fn parse_search_provider(raw: &str) -> Result<SearchProvider, String> {

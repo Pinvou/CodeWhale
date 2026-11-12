@@ -115,3 +115,10 @@ host.
 Passing this manual host check does not prove that repository or organization
 runner groups prevent untrusted fork jobs from reaching persistent runners.
 Those access restrictions and workflow routing require separate evidence.
+This includes `merge_group`: its repository identity identifies the destination
+repository, not the source or trust of each queued contribution. The current
+Windows override predicates admit queue events without verifying constituent PR
+provenance. A repository-ID condition in editable workflow YAML would not close
+this gap. Keep the external Windows trust blocker open until the independently
+enforced workflow/ref restrictions and native per-runner acceptance are proven;
+neither queue admission nor a passing host check supplies that proof.

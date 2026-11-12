@@ -1125,15 +1125,19 @@ pub fn delete_store_model(card_id: &str) -> Result<(), DeleteStoreModelError> {
     delete_store_model_on(&mut conn, card_id)
 }
 
-fn delete_store_model_on(
-    conn: &mut Connection,
+/// Refuse a destructive uninstall before scripts or files can change. This is
+/// only admission: deletion must repeat the same guard in its writer transaction.
+pub(super) fn check_store_model_deletion(card_id: &str) -> Result<(), DeleteStoreModelError> {
+    check_store_model_deletion_on(&connect()?, card_id)
+}
+
+fn check_store_model_deletion_on(
+    conn: &Connection,
     card_id: &str,
 ) -> Result<(), DeleteStoreModelError> {
-    // Obtain the writer lock before reading the retained-version guard. In WAL
-    // mode a deferred read-to-write upgrade can fail without honoring the busy
-    // timeout; waiting here also makes the guard see the preceding writer.
-    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-    let retained: i64 = tx.query_row(
+    // A NULL active ID does not authorize deleting any registered generation,
+    // even if the lifecycle can derive a fallback identity for display.
+    let retained: i64 = conn.query_row(
         "SELECT COUNT(*) FROM model_versions WHERE card_id=?1
          AND version_id != COALESCE((SELECT active_version_id FROM store_models WHERE card_id=?1), '')",
         [card_id],
@@ -1142,6 +1146,18 @@ fn delete_store_model_on(
     if retained != 0 {
         return Err(DeleteStoreModelError::RetainedVersions);
     }
+    Ok(())
+}
+
+fn delete_store_model_on(
+    conn: &mut Connection,
+    card_id: &str,
+) -> Result<(), DeleteStoreModelError> {
+    // Obtain the writer lock before reading the retained-version guard. In WAL
+    // mode a deferred read-to-write upgrade can fail without honoring the busy
+    // timeout; waiting here also makes the guard see the preceding writer.
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    check_store_model_deletion_on(&tx, card_id)?;
     super::version_store::retire_download_on(&tx, card_id)
         .map_err(DeleteStoreModelError::Measurement)?;
     tx.execute("DELETE FROM model_versions WHERE card_id=?1", [card_id])?;

@@ -2,6 +2,7 @@ use super::*;
 
 mod digest_paths;
 mod lease_completion;
+mod operation_rechecks;
 mod recovery_admission;
 mod registered_measurements;
 mod stage_admission;
