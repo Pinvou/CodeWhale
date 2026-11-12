@@ -12,7 +12,6 @@ mod identity_selection;
 
 mod launch_receipt;
 mod operation_identity;
-
 fn built_in_whale_name_that_cannot_be_generated_for(agent_id: &str) -> &'static str {
     WHALE_NICKNAMES
         .iter()
@@ -33,7 +32,6 @@ fn built_in_whale_name_that_cannot_be_generated_for(agent_id: &str) -> &'static 
         .find(|name| generated_whale_name_base(agent_id, name).is_none())
         .expect("the combined pools contain labels not generated for one id")
 }
-
 #[test]
 fn generated_whale_names_follow_session_language_without_mixing() {
     let localized_pools: &[(&str, &[&str])] = &[
@@ -83,7 +81,6 @@ fn generated_whale_names_follow_session_language_without_mixing() {
         whale_name_for_id_in_locale("fallback", "en")
     );
 }
-
 #[test]
 fn locale_matched_whale_collision_suffix_stays_in_language() {
     let id = "agent_locale_collision";
@@ -95,7 +92,6 @@ fn locale_matched_whale_collision_suffix_stays_in_language() {
     assert!(unique.starts_with(&base));
     assert!(!unique.is_ascii());
 }
-
 #[test]
 fn localized_whale_displays_rederive_legacy_names_from_neutral_ids() {
     let generated_a = whale_name_for_id_in_locale("agent_english_a", "zh-Hans");
@@ -138,7 +134,6 @@ fn localized_whale_displays_rederive_legacy_names_from_neutral_ids() {
         "a built-in whale word belonging to another id remains user-owned"
     );
 }
-
 #[test]
 fn exact_deterministic_whale_match_remains_generated_without_provenance() {
     let agent_id = "agent_ambiguous_whale";
@@ -155,11 +150,9 @@ fn exact_deterministic_whale_match_remains_generated_without_provenance() {
         "a collision suffix remains presentation-only"
     );
 }
-
 fn make_assignment() -> SubAgentAssignment {
     SubAgentAssignment::new("prompt".to_string(), Some("worker".to_string()))
 }
-
 fn make_snapshot(status: SubAgentStatus) -> SubAgentResult {
     SubAgentResult {
         name: "agent_test".to_string(),
@@ -187,7 +180,6 @@ fn make_snapshot(status: SubAgentStatus) -> SubAgentResult {
         from_prior_session: false,
     }
 }
-
 #[test]
 fn forkguard_interrupted_snapshot_preserves_checkpoint_recovery() {
     let _spill = crate::tools::truncate::TEST_SPILLOVER_GUARD
@@ -257,7 +249,6 @@ fn forkguard_interrupted_snapshot_preserves_checkpoint_recovery() {
         }
     });
 }
-
 fn make_worker_spec(worker_id: &str, workspace: PathBuf) -> AgentWorkerSpec {
     let tool_profile =
         AgentWorkerToolProfile::Explicit(vec!["read_file".to_string(), "grep_files".to_string()]);
@@ -288,7 +279,6 @@ fn make_worker_spec(worker_id: &str, workspace: PathBuf) -> AgentWorkerSpec {
         launch_manifest: None,
     }
 }
-
 fn make_write_worker_spec(worker_id: &str, workspace: PathBuf, root: &str) -> AgentWorkerSpec {
     let mut spec = make_worker_spec(worker_id, workspace.clone());
     spec.agent_type = FleetRole::Builder;
@@ -313,7 +303,6 @@ fn make_write_worker_spec(worker_id: &str, workspace: PathBuf, root: &str) -> Ag
     });
     spec
 }
-
 #[test]
 fn child_approval_ids_stay_unique_within_and_across_manager_boots() {
     // #5615: the per-manager sequence restarts at zero, so a resumed agent
@@ -354,7 +343,6 @@ fn child_approval_ids_stay_unique_within_and_across_manager_boots() {
         );
     }
 }
-
 #[test]
 fn active_worker_records_are_never_pruned_by_history_retention() {
     let tmp = tempdir().expect("tempdir");
@@ -378,7 +366,6 @@ fn active_worker_records_are_never_pruned_by_history_retention() {
             .all(|record| !record.status.is_terminal())
     );
 }
-
 #[test]
 fn headless_worker_record_tracks_lifecycle_without_tui_projection() {
     let tmp = tempdir().expect("tempdir");
@@ -483,7 +470,6 @@ fn headless_worker_record_tracks_lifecycle_without_tui_projection() {
             .any(|event| event.tool_name.as_deref() == Some("read_file"))
     );
 }
-
 #[test]
 fn worker_record_usage_accumulates_provider_tokens() {
     let tmp = tempdir().expect("tempdir");
@@ -546,7 +532,6 @@ fn worker_record_usage_accumulates_provider_tokens() {
         record.usage.note
     );
 }
-
 #[test]
 fn token_budget_scope_is_shared_across_nested_workers_and_blocks_when_spent() {
     let tmp = tempdir().expect("tempdir");
@@ -617,7 +602,6 @@ fn token_budget_scope_is_shared_across_nested_workers_and_blocks_when_spent() {
     assert_eq!(override_scope.limit, 20);
     assert_eq!(override_scope.spent, 0);
 }
-
 #[test]
 fn agent_worker_profile_derives_from_parent_without_escalation() {
     let mut runtime = stub_runtime();
@@ -658,7 +642,6 @@ fn agent_worker_profile_derives_from_parent_without_escalation() {
         ToolScope::Explicit(vec!["read_file".to_string(), "write_file".to_string()])
     );
 }
-
 #[test]
 fn declared_read_only_write_roles_derive_without_mutating_shell() {
     for input in [
@@ -686,7 +669,6 @@ fn declared_read_only_write_roles_derive_without_mutating_shell() {
         assert_eq!(profile.shell, ShellPolicy::None, "{request:?}");
     }
 }
-
 #[test]
 fn custom_runtime_inherits_the_parent_posture_and_explicit_authority_is_a_no_op_superset() {
     let runtime = stub_runtime().background_runtime();
@@ -734,7 +716,6 @@ fn custom_runtime_inherits_the_parent_posture_and_explicit_authority_is_a_no_op_
         "scout parents carry the read-only inspection posture"
     );
 }
-
 #[test]
 fn subagent_progress_displays_legacy_shell_names_as_lowercase_bash() {
     assert_eq!(subagent_progress_tool_display_name("exec_shell"), "bash");
@@ -752,7 +733,6 @@ fn subagent_progress_displays_legacy_shell_names_as_lowercase_bash() {
         "read_file"
     );
 }
-
 #[test]
 fn agent_progress_preserves_event_channel_headroom_under_load() {
     let (tx, mut rx) = mpsc::channel(40);
@@ -803,7 +783,6 @@ fn agent_progress_preserves_event_channel_headroom_under_load() {
     ));
     assert!(rx.try_recv().is_err());
 }
-
 #[test]
 fn agent_progress_uses_small_event_channels_without_headroom_reservation() {
     let (tx, mut rx) = mpsc::channel(8);
@@ -828,7 +807,6 @@ fn agent_progress_uses_small_event_channels_without_headroom_reservation() {
                 && activity.step == Some(1)
     ));
 }
-
 #[test]
 fn headless_worker_records_persist_with_subagent_state() {
     let tmp = tempdir().expect("tempdir");
@@ -868,7 +846,6 @@ fn headless_worker_records_persist_with_subagent_state() {
             .any(|event| event.status == AgentWorkerStatus::Failed)
     );
 }
-
 #[test]
 fn persisted_subagent_state_has_bounded_serialized_size() {
     // #3885 / item 4: `subagents.v1.json` is transitively bounded but had no
@@ -916,7 +893,6 @@ fn persisted_subagent_state_has_bounded_serialized_size() {
         "all registered workers should be persisted"
     );
 }
-
 #[test]
 fn coordination_ledger_persists_and_replays_bounded_contracts() {
     let tmp = tempdir().expect("tempdir");
@@ -968,7 +944,6 @@ fn coordination_ledger_persists_and_replays_bounded_contracts() {
     assert_eq!(inspect["decisions"][0]["decision_id"], "decision_storage");
     assert_eq!(inspect["write_claims"][0]["claim"]["owner"], "agent_writer");
 }
-
 #[test]
 fn invalid_decision_and_reconciliation_inputs_cannot_poison_persisted_replay() {
     let tmp = tempdir().expect("tempdir");
@@ -1060,7 +1035,6 @@ fn invalid_decision_and_reconciliation_inputs_cannot_poison_persisted_replay() {
     assert_eq!(replayed.coordination.decisions.len(), 2);
     assert!(replayed.coordination.reconciliations.is_empty());
 }
-
 #[test]
 fn coordination_hot_paths_count_only_active_authoritative_owners() {
     let tmp = tempdir().expect("tempdir");
@@ -1099,7 +1073,6 @@ fn coordination_hot_paths_count_only_active_authoritative_owners() {
         }]
     );
 }
-
 #[test]
 fn headless_worker_registration_enforces_live_claims_and_projects_context() {
     let tmp = tempdir().expect("tempdir");
@@ -1180,7 +1153,6 @@ fn headless_worker_registration_enforces_live_claims_and_projects_context() {
         .expect("non-overlapping workers may proceed concurrently");
     assert_eq!(manager.coordination.write_claims.len(), 2);
 }
-
 #[test]
 fn session_close_finalizes_live_fleet_and_releases_write_claims() {
     let tmp = tempdir().expect("tempdir");
@@ -1254,7 +1226,6 @@ fn session_close_finalizes_live_fleet_and_releases_write_claims() {
         ))
         .expect("claim stays released after a second close pass");
 }
-
 #[test]
 fn terminal_result_releases_owner_from_write_claim_contention() {
     let tmp = tempdir().expect("tempdir");
@@ -1314,7 +1285,6 @@ fn terminal_result_releases_owner_from_write_claim_contention() {
         ))
         .expect("overlapping claim admitted after terminal result");
 }
-
 #[test]
 fn prior_session_owners_never_count_as_active_coordination_owners() {
     let tmp = tempdir().expect("tempdir");
@@ -1357,7 +1327,6 @@ fn prior_session_owners_never_count_as_active_coordination_owners() {
         ))
         .expect("prior-session owner must not block a new writer");
 }
-
 #[test]
 fn isolated_worktree_workers_skip_the_coordination_process_lock() {
     let tmp = tempdir().expect("tempdir");
@@ -1402,7 +1371,6 @@ fn isolated_worktree_workers_skip_the_coordination_process_lock() {
         .preflight_worker_coordination(&shared)
         .expect("shared-workspace writer proceeds once the lock is held");
 }
-
 #[test]
 fn coordination_detail_projection_reports_process_lock_ownership() {
     let tmp = tempdir().expect("tempdir");
@@ -1431,7 +1399,6 @@ fn coordination_detail_projection_reports_process_lock_ownership() {
         "shared projection carries no note"
     );
 }
-
 /// A second Codewhale session in the same workspace is ordinary usage. Losing
 /// the coordination flock means "I cannot append to the shared ledger" — it
 /// must never mean "my agents are dead". Bookkeeping failure and liveness are
@@ -1486,7 +1453,6 @@ fn a_second_session_without_the_lock_keeps_its_running_agents_live() {
         snap.status
     );
 }
-
 /// A second session shares the workspace coordination read-lock and must load
 /// the existing ledger before it persists any of its own state. That preserves
 /// prior decisions instead of replacing them with an empty ledger.
@@ -1556,7 +1522,6 @@ fn a_second_session_with_the_shared_lock_loads_the_workspace_ledger() {
         "the second session must not overwrite the workspace ledger with an empty one"
     );
 }
-
 /// The complement of the test above: an orphan still terminalizes, but only on
 /// heartbeat evidence. Lock ownership is not part of the decision either way.
 #[test]
@@ -1625,7 +1590,6 @@ fn cleanup_terminalizes_orphans_on_heartbeat_evidence_not_on_lock_ownership() {
         "a heartbeat-stale orphan still becomes Interrupted"
     );
 }
-
 #[test]
 fn neutral_reconciliation_requires_the_nearest_common_planner() {
     let tmp = tempdir().expect("tempdir");
@@ -1710,7 +1674,6 @@ fn neutral_reconciliation_requires_the_nearest_common_planner() {
     assert_eq!(receipt.retry_limit, 3);
     assert_eq!(receipt.candidate_handles.len(), 2);
 }
-
 #[test]
 fn coordination_acceptance_preserves_scopes_candidates_and_replay() {
     let repo = init_subagent_git_repo();
@@ -2005,7 +1968,6 @@ fn coordination_acceptance_preserves_scopes_candidates_and_replay() {
         "pub const B: u8 = 2;"
     );
 }
-
 fn init_subagent_git_repo() -> tempfile::TempDir {
     let dir = tempdir().expect("tempdir");
 
@@ -2055,7 +2017,6 @@ fn init_subagent_git_repo() -> tempfile::TempDir {
 
     dir
 }
-
 fn git(repo: &Path, args: &[&str]) {
     let output = Command::new("git")
         .args(args)
@@ -2068,7 +2029,6 @@ fn git(repo: &Path, args: &[&str]) {
         String::from_utf8_lossy(&output.stderr)
     );
 }
-
 fn git_stdout(repo: &Path, args: &[&str]) -> String {
     let output = Command::new("git")
         .args(args)
@@ -2082,7 +2042,6 @@ fn git_stdout(repo: &Path, args: &[&str]) -> String {
     );
     String::from_utf8_lossy(&output.stdout).trim().to_string()
 }
-
 fn text_message(role: &str, text: &str) -> Message {
     Message {
         role: Role::from(role),
@@ -2092,18 +2051,15 @@ fn text_message(role: &str, text: &str) -> Message {
         }],
     }
 }
-
 fn make_checkpoint(agent_id: &str, steps_taken: u32, messages: Vec<Message>) -> SubAgentCheckpoint {
     build_subagent_checkpoint(agent_id, "test_checkpoint", &messages, steps_taken, true)
 }
-
 fn message_text(message: &Message) -> &str {
     match message.content.first() {
         Some(ContentBlock::Text { text, .. }) => text.as_str(),
         other => panic!("expected text content block, got {other:?}"),
     }
 }
-
 async fn delayed_chat_client(
     first_delay: Duration,
     response_text: &str,
@@ -2171,7 +2127,6 @@ async fn delayed_chat_client(
     let client = DeepSeekClient::new(&config).expect("fake chat client");
     (client, calls, bodies)
 }
-
 #[tokio::test]
 async fn detached_interactive_usage_after_mailbox_seal_reaches_session_accounting() {
     let _cost_scope = crate::cost_status::test_scope();
@@ -2323,7 +2278,6 @@ async fn detached_interactive_usage_after_mailbox_seal_reaches_session_accountin
         );
     }
 }
-
 /// Like [`delayed_chat_client`] but delays *every* attempt, so the per-step
 /// API timeout fires on the first call and on every retry — the shape needed
 /// to drive the timeout-retry budget to exhaustion.
@@ -2381,7 +2335,6 @@ async fn always_delayed_chat_client(
     let client = DeepSeekClient::new(&config).expect("fake always-slow chat client");
     (client, calls)
 }
-
 #[tokio::test]
 async fn tool_free_subagent_omits_chat_tools_and_tool_choice() {
     let tmp = tempdir().expect("tempdir");
@@ -2423,7 +2376,6 @@ async fn tool_free_subagent_omits_chat_tools_and_tool_choice() {
         "tool_choice must be omitted: {body}"
     );
 }
-
 async fn transient_header_timeout_then_success_chat_client(
     response_text: &str,
 ) -> (DeepSeekClient, Arc<AtomicUsize>) {
@@ -2488,7 +2440,6 @@ async fn transient_header_timeout_then_success_chat_client(
     let client = DeepSeekClient::new(&config).expect("fake transient chat client");
     (client, calls)
 }
-
 async fn always_rate_limited_chat_client() -> (DeepSeekClient, Arc<AtomicUsize>) {
     let calls = Arc::new(AtomicUsize::new(0));
     let app = Router::new().route(
@@ -2537,7 +2488,6 @@ async fn always_rate_limited_chat_client() -> (DeepSeekClient, Arc<AtomicUsize>)
     let client = DeepSeekClient::new(&config).expect("fake rate-limited chat client");
     (client, calls)
 }
-
 async fn always_invalid_request_chat_client() -> (DeepSeekClient, Arc<AtomicUsize>) {
     let calls = Arc::new(AtomicUsize::new(0));
     let app = Router::new().route(
@@ -2587,11 +2537,9 @@ async fn always_invalid_request_chat_client() -> (DeepSeekClient, Arc<AtomicUsiz
     let client = DeepSeekClient::new(&config).expect("fake invalid-request chat client");
     (client, calls)
 }
-
 fn estimate_tool_description_tokens_conservative(text: &str) -> usize {
     text.chars().count().div_ceil(3)
 }
-
 #[test]
 fn test_agent_type_from_str() {
     assert_eq!(FleetRole::from_str("general"), Some(FleetRole::Worker));
@@ -2607,7 +2555,6 @@ fn test_agent_type_from_str() {
     assert_eq!(FleetRole::from_str("awaiter"), Some(FleetRole::Planner));
     assert_eq!(FleetRole::from_str("invalid"), None);
 }
-
 #[test]
 fn test_agent_type_implementer_aliases() {
     // #404 — Builder accepts the obvious legacy aliases the model is
@@ -2622,7 +2569,6 @@ fn test_agent_type_implementer_aliases() {
     // Case-insensitive.
     assert_eq!(FleetRole::from_str("IMPLEMENTER"), Some(FleetRole::Builder));
 }
-
 #[test]
 fn test_agent_type_verifier_aliases() {
     // #404 — Verifier accepts test/validate aliases distinct from
@@ -2636,7 +2582,6 @@ fn test_agent_type_verifier_aliases() {
     }
     assert_eq!(FleetRole::from_str("VERIFY"), Some(FleetRole::Verifier));
 }
-
 #[test]
 fn test_agent_type_round_trips_via_as_str() {
     // Every type should serialize to a string that round-trips back
@@ -2658,7 +2603,6 @@ fn test_agent_type_round_trips_via_as_str() {
         assert_eq!(back, t, "round-trip failed for {t:?} via {label:?}");
     }
 }
-
 #[test]
 fn fleet_role_labels_are_canonical_while_legacy_snapshot_wire_stays_readable() {
     assert_eq!(FleetRole::Scout.as_str(), "explore");
@@ -2689,7 +2633,6 @@ fn fleet_role_labels_are_canonical_while_legacy_snapshot_wire_stays_readable() {
         "\"explore\""
     );
 }
-
 #[test]
 fn fleet_role_deserialize_rejects_unknown_values_with_canonical_hint() {
     // Unknown role tokens fail closed at the serde boundary, and the error
@@ -2725,7 +2668,6 @@ fn fleet_role_deserialize_rejects_unknown_values_with_canonical_hint() {
         "error must not advertise legacy aliases: {message}"
     );
 }
-
 #[test]
 fn write_capable_children_get_verify_contract_in_system_prompt() {
     let implementer = build_subagent_system_prompt(
@@ -2751,7 +2693,6 @@ fn write_capable_children_get_verify_contract_in_system_prompt() {
         "read-only scout must not get write verify contract"
     );
 }
-
 #[test]
 fn test_implementer_and_verifier_have_distinct_prompts() {
     // The whole point of adding the types is that they carry distinct
@@ -2787,7 +2728,6 @@ fn test_implementer_and_verifier_have_distinct_prompts() {
         "Verifier prompt should reference its role: {verifier}"
     );
 }
-
 #[test]
 fn test_agent_type_prompts_include_shared_output_contract_once() {
     for (agent_type, marker) in [
@@ -2829,7 +2769,6 @@ fn test_agent_type_prompts_include_shared_output_contract_once() {
         }
     }
 }
-
 #[test]
 fn explore_prompt_orients_before_searching() {
     let prompt = FleetRole::Scout.system_prompt();
@@ -2838,7 +2777,6 @@ fn explore_prompt_orients_before_searching() {
     assert!(prompt.contains("workspace/project root"));
     assert!(prompt.contains("compressed evidence"));
 }
-
 #[test]
 fn explore_prompt_is_quick_bounded_and_read_only() {
     let prompt = FleetRole::Scout.system_prompt();
@@ -2858,7 +2796,6 @@ fn explore_prompt_is_quick_bounded_and_read_only() {
     assert!(reviewer.contains("allowed read-only navigation/rg"));
     assert!(reviewer.contains("shell control actions are unavailable"));
 }
-
 #[test]
 fn implementer_prompt_is_not_forced_into_explorer_cap() {
     let prompt = FleetRole::Builder.system_prompt();
@@ -2866,7 +2803,6 @@ fn implementer_prompt_is_not_forced_into_explorer_cap() {
     assert!(prompt.contains("Checkpoint before expanding scope"));
     assert!(!prompt.contains("Default to `EFFORT: quick`"));
 }
-
 #[test]
 fn role_prompts_use_lowercase_primitive_contract() {
     let explore = FleetRole::Scout.system_prompt();
@@ -2887,7 +2823,6 @@ fn role_prompts_use_lowercase_primitive_contract() {
         }
     }
 }
-
 #[test]
 fn review_and_verifier_prompts_stop_after_decisive_evidence() {
     let review = FleetRole::Reviewer.system_prompt();
@@ -2896,7 +2831,6 @@ fn review_and_verifier_prompts_stop_after_decisive_evidence() {
     assert!(review.contains("private `todo_write` list as editable working notes"));
     assert!(verifier.contains("stop after decisive pass/fail evidence"));
 }
-
 #[test]
 fn child_artifact_copy_surfaces_working_notes_in_the_complete_transcript() {
     let artifacts = default_subagent_artifacts("agent_scout_notes");
@@ -2908,7 +2842,6 @@ fn child_artifact_copy_surfaces_working_notes_in_the_complete_transcript() {
     assert!(transcript.description.contains("todo_write working notes"));
     assert!(transcript.description.contains("transcript_handle"));
 }
-
 #[test]
 fn agent_description_explains_background_child_and_transcript_handle() {
     let tmp = tempdir().expect("tempdir");
@@ -2931,7 +2864,7 @@ fn agent_description_explains_background_child_and_transcript_handle() {
         "planner (grounded strategy",
         "reviewer (reads and grades code)",
         "implement (lands focused code changes)",
-        "test (runs tests and reports evidence)",
+        "test (built-in verification gates; custom commands refused)",
         "advisor (read-only design counsel)",
         "custom (allowed_tools",
         "legacy aliases are still accepted",
@@ -2978,7 +2911,6 @@ fn agent_description_explains_background_child_and_transcript_handle() {
         description.chars().count()
     );
 }
-
 #[test]
 fn stringy_deliberate_is_refused_not_dropped() {
     // A stringy "true" used to coerce to the default `false`, which skipped
@@ -2995,7 +2927,6 @@ fn stringy_deliberate_is_refused_not_dropped() {
         "error must name expected and received types: {err}"
     );
 }
-
 #[test]
 fn bare_string_disallowed_tools_is_refused_not_dropped() {
     // A restriction the harness silently drops is worse than one never
@@ -3023,7 +2954,6 @@ fn bare_string_disallowed_tools_is_refused_not_dropped() {
         "trimming and de-duplication survive the strict parse"
     );
 }
-
 #[test]
 fn spawn_parameters_refuse_type_mismatches_by_name() {
     // A representative sample across the parameter kinds the spawn parser
@@ -3070,7 +3000,6 @@ fn spawn_parameters_refuse_type_mismatches_by_name() {
     }))
     .expect("explicit nulls read as absent");
 }
-
 #[test]
 fn deliberate_spawn_requires_delegation_fields() {
     let missing = parse_spawn_request(&json!({
@@ -3102,7 +3031,6 @@ fn deliberate_spawn_requires_delegation_fields() {
         "workspace_policy shared must not materialize a worktree"
     );
 }
-
 #[test]
 fn declared_workspace_policy_worktree_materializes_a_worktree_request() {
     // TUI-DOG-017: a declared policy must be enforced, not decorative. The
@@ -3127,7 +3055,6 @@ fn declared_workspace_policy_worktree_materializes_a_worktree_request() {
         "shared policy plus explicit worktree must fail closed"
     );
 }
-
 #[test]
 fn builder_plus_read_only_authority_fails_closed() {
     // #5123: never launch a labeled builder that will only get read-only inspection tools.
@@ -3146,7 +3073,6 @@ fn builder_plus_read_only_authority_fails_closed() {
         );
     }
 }
-
 #[test]
 fn read_only_worker_is_an_ordinary_general_child() {
     // Worker is the unnamed default (it renders as "general"); its capability
@@ -3162,7 +3088,6 @@ fn read_only_worker_is_an_ordinary_general_child() {
     assert_eq!(request.agent_type, FleetRole::Worker);
     assert_eq!(request.write_authority, Some(SpawnWriteAuthority::ReadOnly));
 }
-
 #[test]
 fn roster_role_plus_read_only_authority_still_spawns() {
     // #5123 fail-closed must not swallow the read-only roster task. `role` is
@@ -3195,7 +3120,6 @@ fn roster_role_plus_read_only_authority_still_spawns() {
         "a role alias resolves the type without claiming write capability"
     );
 }
-
 #[test]
 fn declared_write_authority_parses_and_worktree_write_requires_isolation() {
     let read_only = parse_spawn_request(&json!({
@@ -3260,7 +3184,6 @@ fn declared_write_authority_parses_and_worktree_write_requires_isolation() {
     .expect("explicit bounded custom write parses");
     assert!(spawn_request_is_write_capable(&custom_writer));
 }
-
 #[test]
 fn prompt_only_general_children_default_read_only_instead_of_claiming_the_repo() {
     let request = parse_spawn_request(&json!({
@@ -3303,7 +3226,6 @@ fn prompt_only_general_children_default_read_only_instead_of_claiming_the_repo()
         .expect("resolved write-capable fleet role defaults write scope to parent workspace");
     assert_eq!(fleet_role.write_roots, vec![".".to_string()]);
 }
-
 #[test]
 fn read_only_roles_reject_write_authority_but_implementers_can_be_narrowed() {
     let reviewer = parse_spawn_request(&json!({
@@ -3332,7 +3254,6 @@ fn read_only_roles_reject_write_authority_but_implementers_can_be_narrowed() {
         Some(SpawnWriteAuthority::ReadOnly)
     );
 }
-
 /// #4752: Consultant must be a role, not a special-cased code path — so it has to
 /// travel the same spawn/schema machinery as every other role, and be refused
 /// write authority by the same guard that refuses reviewer.
@@ -3355,7 +3276,6 @@ fn consultant_spawns_as_a_first_class_read_only_role() {
     .to_string();
     assert!(escalation.contains("read-only role"), "{escalation}");
 }
-
 #[test]
 fn direct_consultant_aliases_apply_role_reasoning_default_after_inheritance() {
     for parent_effort in [None, Some("low")] {
@@ -3441,7 +3361,6 @@ fn direct_consultant_aliases_apply_role_reasoning_default_after_inheritance() {
         "first-party DeepSeek keeps an explicit low child effort"
     );
 }
-
 /// The role name has to survive the wire, or receipts and resumed sessions
 /// silently reclassify a consultant as the default worker.
 #[test]
@@ -3474,7 +3393,6 @@ fn consultant_round_trips_canonically_and_accepts_compatibility_aliases() {
     assert!(!FLEET_ROLE_SCHEMA_VALUES.contains(&"oracle"));
     assert!(FLEET_ROLE_SCHEMA_VALUES.contains(&"advisor"));
 }
-
 #[test]
 fn declared_write_scope_is_normalized_and_rejects_traversal() {
     let request = parse_spawn_request(&json!({
@@ -3504,148 +3422,6 @@ fn declared_write_scope_is_normalized_and_rejects_traversal() {
         "{err}"
     );
 }
-/// A scoped child that spells its target as an absolute path inside its own
-/// workspace is writing the same file the relative spelling names (live
-/// session, 2026-10-24: `write` of `<workspace>/fixture/calc/inside.txt`
-/// was refused as "must be repo-relative" while `fixture/calc/inside.txt`
-/// succeeded). Absolute paths outside the workspace and `..` traversal stay
-/// refused.
-#[test]
-fn scoped_mutation_paths_accept_absolute_targets_inside_the_workspace() {
-    let tmp = tempdir().expect("tempdir");
-    let workspace = tmp.path().join("workspace");
-    std::fs::create_dir_all(workspace.join("fixture/calc")).expect("workspace tree");
-    let canonical = workspace.canonicalize().expect("canonical workspace");
-
-    // Existing target, canonical spelling.
-    std::fs::write(workspace.join("fixture/calc/existing.txt"), "x").expect("seed");
-    let paths = mutation_paths(
-        "write",
-        &json!({ "path": canonical.join("fixture/calc/existing.txt").to_string_lossy() }),
-        &workspace,
-    )
-    .expect("absolute in-workspace path is admitted");
-    assert_eq!(paths, vec!["fixture/calc/existing.txt".to_string()]);
-
-    // Not-yet-existing target (the write creates it), spelled through the
-    // un-canonicalized workspace path.
-    let paths = mutation_paths(
-        "write",
-        &json!({ "path": workspace.join("fixture/calc/new.txt").to_string_lossy() }),
-        &workspace,
-    )
-    .expect("absolute path to a file the write will create is admitted");
-    assert_eq!(paths, vec!["fixture/calc/new.txt".to_string()]);
-
-    // Relative spelling is unchanged.
-    let paths = mutation_paths(
-        "write",
-        &json!({ "path": "fixture/calc/new.txt" }),
-        &workspace,
-    )
-    .expect("relative path");
-    assert_eq!(paths, vec!["fixture/calc/new.txt".to_string()]);
-
-    // Outside the workspace: refused as before.
-    let err = mutation_paths(
-        "write",
-        &json!({ "path": tmp.path().join("escape.txt").to_string_lossy() }),
-        &workspace,
-    )
-    .expect_err("absolute path outside the workspace is refused")
-    .to_string();
-    assert!(err.contains("repo-relative"), "{err}");
-
-    // Traversal: refused as before, relative or absolute.
-    for path in ["../escape.txt", "fixture/../../escape.txt"] {
-        let err = mutation_paths("write", &json!({ "path": path }), &workspace)
-            .expect_err("traversal is refused")
-            .to_string();
-        assert!(err.contains("traversal"), "{path}: {err}");
-    }
-    let err = mutation_paths(
-        "write",
-        &json!({ "path": workspace.join("fixture/../../escape.txt").to_string_lossy() }),
-        &workspace,
-    )
-    .expect_err("absolute traversal out of the workspace is refused")
-    .to_string();
-    assert!(err.contains("repo-relative"), "{err}");
-
-    // Whitespace-padded spellings are judged EXACTLY as the write tool
-    // resolves them — the raw string, never trimmed. A padded absolute is
-    // NOT absolute to the tool (it joins onto the workspace as
-    // `<ws>/␣␣/<abs-ws>/…`), so the claim lane validates that literal
-    // space-led spelling, never the trimmed absolute target the tool does
-    // not touch. (The pre-round-4 trim made this spelling validate as
-    // `fixture/calc/padded.txt` while the tool wrote the space-led path.)
-    let padded_relative_target = "fixture/calc/padded.txt";
-    let padded_absolute = format!(
-        "  {}",
-        canonical.join(padded_relative_target).to_string_lossy()
-    );
-    let paths = mutation_paths("write", &json!({ "path": padded_absolute }), &workspace)
-        .expect("a padded spelling still normalizes");
-    // The expected is the ledger's canonical frame of the raw spelling, built
-    // here independently of the code under test: backslashes fold to forward
-    // slashes and leading separators collapse into the single one the
-    // component join emits (a Windows verbatim `\\?\` prefix reduces to its
-    // literal `?` component), while the space-led first component survives
-    // verbatim — trimming would instead validate the unpadded absolute target
-    // the tool never touches.
-    let ledger_frame = canonical
-        .join(padded_relative_target)
-        .to_string_lossy()
-        .replace('\\', "/");
-    assert_eq!(
-        paths,
-        vec![format!("  /{}", ledger_frame.trim_start_matches('/'))],
-        "the claim lane judges the raw spelling in the forward-slash ledger frame: \
-         the padded path is not absolute, so it validates as the literal \
-         space-led components the tool would join onto the workspace"
-    );
-
-    // A padded relative spelling keeps its literal form for the same
-    // reason: trimming here would validate one path and write another.
-    let paths = mutation_paths(
-        "write",
-        &json!({ "path": "fixture/calc/ tail.txt " }),
-        &workspace,
-    )
-    .expect("a padded relative spelling still normalizes");
-    assert_eq!(paths, vec!["fixture/calc/ tail.txt ".to_string()]);
-
-    // Whitespace-only spellings refuse outright instead of normalizing to
-    // "." — the whole-workspace scope no write input ever meant.
-    for path in ["   ", "\t"] {
-        let err = mutation_paths("write", &json!({ "path": path }), &workspace)
-            .expect_err("a whitespace-only path is refused")
-            .to_string();
-        assert!(
-            err.contains("non-empty repo-relative path"),
-            "{path}: {err}"
-        );
-    }
-}
-
-/// The ledger frame's separator contract, pinned cross-platform: a
-/// Windows-spelled relative path folds to forward slashes and a padded
-/// spelling keeps its space-led first component. This is the contract the
-/// padded-path assertion above relies on for native-Windows equality, where
-/// a verbatim canonical path would otherwise never compare equal to the
-/// raw backslash spelling.
-#[test]
-fn normalize_claim_path_folds_backslashes_into_the_ledger_frame() {
-    assert_eq!(
-        normalize_claim_path(r"fixture\calc\tail.txt").expect("windows-spelled relative path"),
-        "fixture/calc/tail.txt"
-    );
-    assert_eq!(
-        normalize_claim_path(" fixture\\calc\\tail.txt").expect("padded windows spelling"),
-        " fixture/calc/tail.txt"
-    );
-}
-
 #[test]
 fn shared_child_cwd_claims_use_one_root_namespace_for_collisions_and_mutations() {
     let repo = tempdir().expect("repo");
@@ -3728,7 +3504,6 @@ fn shared_child_cwd_claims_use_one_root_namespace_for_collisions_and_mutations()
         "{outside}"
     );
 }
-
 #[test]
 fn resident_file_context_is_workspace_relative_bounded_and_exclusive() {
     let tmp = tempdir().expect("tempdir");
@@ -3797,7 +3572,6 @@ fn resident_file_context_is_workspace_relative_bounded_and_exclusive() {
     rollback_pending_resident_lease(&resident.lease_key);
     rollback_pending_resident_lease(&other.lease_key);
 }
-
 #[cfg(unix)]
 #[test]
 fn resident_file_context_rejects_symlink_aliases() {
@@ -3811,13 +3585,11 @@ fn resident_file_context_rejects_symlink_aliases() {
         .to_string();
     assert!(error.contains("must not traverse symlinks"), "{error}");
 }
-
 #[test]
 fn new_session_tools_use_single_agent_name() {
     let manager = Arc::new(RwLock::new(SubAgentManager::new(PathBuf::from("."), 1)));
     assert_eq!(AgentTool::new(manager, stub_runtime()).name(), "agent");
 }
-
 #[test]
 fn test_parse_spawn_request_accepts_message_and_agent_type_aliases() {
     let input = json!({
@@ -3829,7 +3601,6 @@ fn test_parse_spawn_request_accepts_message_and_agent_type_aliases() {
     assert_eq!(parsed.agent_type, FleetRole::Scout);
     assert_eq!(parsed.assignment.role.as_deref(), Some("explore"));
 }
-
 #[test]
 fn test_parse_spawn_request_accepts_objective_and_role_alias() {
     let input = json!({
@@ -3841,7 +3612,6 @@ fn test_parse_spawn_request_accepts_objective_and_role_alias() {
     assert_eq!(parsed.agent_type, FleetRole::Planner);
     assert_eq!(parsed.assignment.role.as_deref(), Some("planner"));
 }
-
 #[test]
 fn test_parse_spawn_request_accepts_items_payload() {
     let input = json!({
@@ -3856,7 +3626,6 @@ fn test_parse_spawn_request_accepts_items_payload() {
     assert!(parsed.prompt.contains("[mention:$drive](app://drive)"));
     assert_eq!(parsed.agent_type, FleetRole::Scout);
 }
-
 #[test]
 fn test_parse_spawn_request_accepts_fork_context() {
     let input = json!({
@@ -3878,7 +3647,6 @@ fn test_parse_spawn_request_accepts_fork_context() {
     let parsed = parse_spawn_request(&input).expect("spawn request should parse");
     assert_eq!(parsed.fork_context, None);
 }
-
 #[test]
 fn test_parse_spawn_request_accepts_model_strength() {
     let input = json!({
@@ -3897,7 +3665,6 @@ fn test_parse_spawn_request_accepts_model_strength() {
     let parsed = parse_spawn_request(&input).expect("spawn request should parse");
     assert_eq!(parsed.model_strength, SubAgentModelStrength::Same);
 }
-
 #[test]
 fn explore_subagent_inherits_active_model_by_default() {
     // Role names never silently change the model. A Fleet without custom
@@ -3931,7 +3698,6 @@ fn explore_subagent_inherits_active_model_by_default() {
     assert_eq!(parsed.agent_type, FleetRole::Scout);
     assert_eq!(parsed.model_strength, SubAgentModelStrength::Same);
 }
-
 #[test]
 fn non_explore_subagents_keep_default_same_model_strength() {
     // Non-explore roles keep the conservative Same default even with no model.
@@ -3951,7 +3717,6 @@ fn non_explore_subagents_keep_default_same_model_strength() {
         );
     }
 }
-
 #[test]
 fn test_parse_spawn_request_accepts_child_thinking() {
     let input = json!({
@@ -3981,7 +3746,6 @@ fn test_parse_spawn_request_accepts_child_thinking() {
     let parsed = parse_spawn_request(&input).expect("spawn request should parse");
     assert_eq!(parsed.thinking, SubAgentThinking::Auto);
 }
-
 #[test]
 fn test_parse_spawn_request_rejects_invalid_model_strength() {
     let input = json!({
@@ -3994,7 +3758,6 @@ fn test_parse_spawn_request_rejects_invalid_model_strength() {
             .contains("model_strength must be one of: same, faster")
     );
 }
-
 #[test]
 fn test_parse_spawn_request_rejects_invalid_child_thinking() {
     let input = json!({
@@ -4007,7 +3770,6 @@ fn test_parse_spawn_request_rejects_invalid_child_thinking() {
             .contains("thinking must be one of: inherit, auto, off, low, medium, high, max")
     );
 }
-
 #[test]
 fn test_parse_spawn_request_accepts_session_name_for_agent() {
     let input = json!({
@@ -4021,7 +3783,6 @@ fn test_parse_spawn_request_accepts_session_name_for_agent() {
     assert_eq!(parsed.fork_context, Some(true));
     assert_eq!(parsed.max_depth, Some(0));
 }
-
 #[test]
 fn test_parse_spawn_request_rejects_invalid_session_name() {
     let input = json!({
@@ -4031,7 +3792,6 @@ fn test_parse_spawn_request_rejects_invalid_session_name() {
     let err = parse_spawn_request(&input).expect_err("space in name should fail");
     assert!(err.to_string().contains("name must not contain whitespace"));
 }
-
 #[test]
 fn test_parse_spawn_request_rejects_out_of_range_max_depth() {
     let ceiling = codewhale_config::MAX_SPAWN_DEPTH_CEILING;
@@ -4046,7 +3806,6 @@ fn test_parse_spawn_request_rejects_out_of_range_max_depth() {
             .contains(&format!("max_depth must be between 0 and {ceiling}"))
     );
 }
-
 #[test]
 fn test_parse_spawn_request_accepts_profile_and_preserves_safe_selector() {
     let input = json!({
@@ -4073,7 +3832,6 @@ fn test_parse_spawn_request_accepts_profile_and_preserves_safe_selector() {
     .expect("human model label should parse");
     assert_eq!(parsed.profile.as_deref(), Some("DeepSeek V4 Flash"));
 }
-
 #[test]
 fn test_parse_spawn_request_rejects_invalid_profile_token() {
     for bad in ["reviewer\nscout", "reviewer\tscout"] {
@@ -4090,7 +3848,6 @@ fn test_parse_spawn_request_rejects_invalid_profile_token() {
         .expect_err("oversized selector should fail");
     assert!(err.to_string().contains("at most 128"), "{err}");
 }
-
 #[tokio::test]
 async fn agent_roster_action_and_spawn_resolve_the_same_roles() {
     let tmp = tempdir().expect("tempdir");
@@ -4139,7 +3896,6 @@ async fn agent_roster_action_and_spawn_resolve_the_same_roles() {
     assert_eq!(request.agent_type, FleetRole::Scout);
     assert_eq!(request.profile.as_deref(), Some("explore"));
 }
-
 #[tokio::test]
 async fn agent_roster_lists_host_presented_profiles_spawn_resolves() {
     let tmp = tempdir().expect("tempdir");
@@ -4211,7 +3967,6 @@ async fn agent_roster_lists_host_presented_profiles_spawn_resolves() {
         assert_eq!(request.profile.as_deref(), Some(profile_id));
     }
 }
-
 #[tokio::test]
 async fn agent_roster_truncates_host_profiles_at_the_listing_cap() {
     let tmp = tempdir().expect("tempdir");
@@ -4256,7 +4011,6 @@ async fn agent_roster_truncates_host_profiles_at_the_listing_cap() {
     // Descriptions fall back to the role name when the profile carries none.
     assert_eq!(host_profiles[0]["description"], json!("exp-host-000"));
 }
-
 #[tokio::test]
 async fn agent_roster_profile_query_discovers_members_beyond_the_listing_cap() {
     // The T7 discovery-contract regression: a spawnable profile past
@@ -4365,7 +4119,6 @@ async fn agent_roster_profile_query_discovers_members_beyond_the_listing_cap() {
     assert_eq!(resolved.id, "exp-host-049");
     assert_eq!(request.profile.as_deref(), Some("exp-host-049"));
 }
-
 #[tokio::test]
 async fn agent_roster_never_lists_ids_that_spawn_a_different_profile() {
     // `[fleet.profiles]` is a byte-order BTreeMap, so `Expert`, `expert`, and
@@ -4446,7 +4199,6 @@ async fn agent_roster_never_lists_ids_that_spawn_a_different_profile() {
         .expect("host member is returned");
     assert_eq!(resolved.id, "Expert");
 }
-
 #[tokio::test]
 async fn agent_roster_listing_and_spawn_agree_on_conflatable_config_ids() {
     // The wiring-level half of the collapse invariant. The `action=roster`
@@ -4570,7 +4322,6 @@ async fn agent_roster_listing_and_spawn_agree_on_conflatable_config_ids() {
         );
     }
 }
-
 #[test]
 fn roster_host_profile_listing_cap_is_pinned_at_48() {
     // Copy-truth pin: the app-side roster contract teaches a 48-row
@@ -4579,7 +4330,6 @@ fn roster_host_profile_listing_cap_is_pinned_at_48() {
     // this test, in the same style as `subagent_runtime_default_max_depth_is_three`.
     assert_eq!(ROSTER_HOST_PROFILE_LIMIT, 48);
 }
-
 #[tokio::test]
 async fn forkguard_agent_roster_lists_only_spawnable_host_profiles() {
     let tmp = tempdir().expect("tempdir");
@@ -4695,7 +4445,6 @@ async fn forkguard_agent_roster_lists_only_spawnable_host_profiles() {
         "{error}"
     );
 }
-
 #[test]
 fn test_resolve_spawn_role_unknown_lists_roles() {
     let mut request =
@@ -4719,7 +4468,6 @@ fn test_resolve_spawn_role_unknown_lists_roles() {
         assert!(message.contains(role), "missing {role}: {message}");
     }
 }
-
 #[test]
 fn forkguard_host_profile_overlay_is_config_only_and_prompt_only() {
     let profile_id = "exp-host-reviewer";
@@ -4785,7 +4533,6 @@ fn forkguard_host_profile_overlay_is_config_only_and_prompt_only() {
         .to_string();
     assert!(error.contains("not prompt-only"), "{error}");
 }
-
 #[test]
 fn test_resolve_spawn_role_rejects_conflicting_explicit_type() {
     let mut request = parse_spawn_request(&json!({
@@ -4805,7 +4552,6 @@ fn test_resolve_spawn_role_rejects_conflicting_explicit_type() {
         "{message}"
     );
 }
-
 #[test]
 fn test_resolve_spawn_role_accepts_agreeing_explicit_type() {
     let mut request = parse_spawn_request(&json!({
@@ -4819,7 +4565,6 @@ fn test_resolve_spawn_role_accepts_agreeing_explicit_type() {
     assert_eq!(request.profile.as_deref(), Some("reviewer"));
     assert_eq!(request.assignment.role.as_deref(), Some("reviewer"));
 }
-
 #[test]
 fn test_resolve_spawn_role_scout_yields_explore_type_and_inherits_route() {
     let mut request = parse_spawn_request(&json!({"prompt": "map the parser", "profile": "scout"}))
@@ -4835,7 +4580,6 @@ fn test_resolve_spawn_role_scout_yields_explore_type_and_inherits_route() {
     );
     assert_eq!(selected.source, SpawnRouteSource::RunModel);
 }
-
 #[test]
 fn test_resolve_spawn_role_accepts_legacy_alias() {
     let mut request = parse_spawn_request(&json!({"prompt": "merge findings", "profile": "plan"}))
@@ -4844,7 +4588,6 @@ fn test_resolve_spawn_role_accepts_legacy_alias() {
     assert_eq!(request.agent_type, FleetRole::Planner);
     assert_eq!(request.profile.as_deref(), Some("planner"));
 }
-
 #[test]
 fn spawn_model_selection_has_stable_three_tier_precedence_and_source() {
     let mut runtime = stub_runtime();
@@ -4896,7 +4639,6 @@ fn spawn_model_selection_has_stable_three_tier_precedence_and_source() {
     assert_eq!(selected.model_route, ModelRoute::Inherit);
     assert_eq!(selected.source, SpawnRouteSource::RunModel);
 }
-
 #[test]
 fn providerless_spawn_model_gate_rejects_known_foreign_route_before_spawn() {
     let runtime = stub_runtime_for_provider("moonshot");
@@ -4948,7 +4690,6 @@ fn providerless_spawn_model_gate_rejects_known_foreign_route_before_spawn() {
         "the child and receipt must use the provider's exact wire id"
     );
 }
-
 #[test]
 fn providerless_foreign_spawn_default_inherits_session_route() {
     // #5099 / checklist §2.2: a moonshot parent spawning a default child whose
@@ -5001,7 +4742,6 @@ fn providerless_foreign_spawn_default_inherits_session_route() {
         owned.model_route
     );
 }
-
 #[test]
 fn spawn_route_sources_refresh_overlays_live_config_on_launch_time_defaults() {
     // #5099: role-model defaults are a launch-time snapshot, so a mid-session
@@ -5044,7 +4784,6 @@ fn spawn_route_sources_refresh_overlays_live_config_on_launch_time_defaults() {
         "worker override covers the general alias too"
     );
 }
-
 #[test]
 fn test_child_max_spawn_depth_request_only_narrows() {
     // No request: inherit unchanged.
@@ -5058,7 +4797,6 @@ fn test_child_max_spawn_depth_request_only_narrows() {
     // A request below the inherited budget is still honored (clamp, don't force).
     assert_eq!(child_max_spawn_depth_for_spawn(5, 0, Some(3)), 3);
 }
-
 /// A descendant subagent must not widen the absolute recursion budget its root
 /// session selected by supplying an explicit `max_depth` on a nested spawn
 /// (#5253). The inherited budget is a hard cap even when the request (clamped
@@ -5077,7 +4815,6 @@ fn test_child_max_spawn_depth_request_cannot_widen_inherited_budget() {
     // A request below the inherited budget is still honored (clamp, don't force).
     assert_eq!(child_max_spawn_depth_for_spawn(5, 0, Some(3)), 3);
 }
-
 /// An explicit spawn-time thinking tier reaches the request unchanged: roles
 /// carry no reasoning tier of their own, so there is nothing to outrank or
 /// inherit — the caller's tier is the tier.
@@ -5105,7 +4842,6 @@ fn test_explicit_spawn_thinking_reaches_the_request() {
     );
     assert_eq!(route.reasoning_effort.as_deref(), Some("off"));
 }
-
 #[test]
 fn test_unset_spawn_thinking_inherits_the_session_tier() {
     let mut request = parse_spawn_request(&json!({"prompt": "look around", "profile": "explore"}))
@@ -5113,7 +4849,6 @@ fn test_unset_spawn_thinking_inherits_the_session_tier() {
     resolve_spawn_role(&mut request).expect("resolve");
     assert_eq!(request.thinking, SubAgentThinking::Inherit);
 }
-
 /// Roles bind no route (#5046 inverted): the dispatching model may always set
 /// `model` or `model_strength` — every role accepts model routing options.
 #[test]
@@ -5164,7 +4899,6 @@ fn role_dispatch_allows_model_and_model_strength_options() {
     assert!(request.model_strength_explicit);
     assert_eq!(request.model_strength, SubAgentModelStrength::Faster);
 }
-
 /// A custom (non-role) profile name fails closed: only the closed role set
 /// resolves — there are no saved members to promote.
 #[test]
@@ -5183,7 +4917,6 @@ fn custom_profile_name_fails_closed() {
         "error must name the custom profile: {message}"
     );
 }
-
 /// A type alias dispatches as its role and keeps an explicit `model`: there
 /// is no saved member to promote to and no pinned model to collide with.
 #[test]
@@ -5203,7 +4936,6 @@ fn type_alias_dispatch_keeps_explicit_model() {
         "explicit model is kept: roles pin no model"
     );
 }
-
 /// A Fleet worker subprocess launches as `--model <exact> --reasoning-effort
 /// auto`. That is a FIXED model with Auto reasoning: the raw `"auto"` sentinel
 /// must resolve, not travel to a provider that has no such tier.
@@ -5234,7 +4966,6 @@ fn fixed_model_runtime_with_a_raw_auto_tier_resolves_instead_of_staying_raw() {
     assert_eq!(route.reasoning_effort.as_deref(), Some("max"));
     assert_eq!(route.tuning.reasoning_effort, Some(ReasoningEffort::Max));
 }
-
 #[test]
 fn a_concrete_runtime_tier_is_not_mistaken_for_auto() {
     let runtime = stub_runtime().with_reasoning_effort(Some("off".to_string()), false);
@@ -5249,7 +4980,6 @@ fn a_concrete_runtime_tier_is_not_mistaken_for_auto() {
 
     assert_eq!(route.reasoning_effort.as_deref(), Some("off"));
 }
-
 #[tokio::test]
 async fn session_projection_exposes_forked_prefix_cache_contract() {
     let mut snapshot = make_snapshot(SubAgentStatus::Running);
@@ -5277,7 +5007,6 @@ async fn session_projection_exposes_forked_prefix_cache_contract() {
     assert_eq!(projection.transcript_handle.kind, "var_handle");
     assert_eq!(projection.transcript_handle.name, "transcript");
 }
-
 #[tokio::test]
 async fn terminal_session_projection_prefers_full_transcript_handle() {
     let mut snapshot = make_snapshot(SubAgentStatus::Completed);
@@ -5309,7 +5038,6 @@ async fn terminal_session_projection_prefers_full_transcript_handle() {
     assert_eq!(projection.transcript_handle, full_handle);
     assert_eq!(projection.transcript_handle.name, "full_transcript");
 }
-
 #[tokio::test]
 async fn interrupted_projection_exposes_checkpoint_metadata_and_messages() {
     let mut snapshot = make_snapshot(SubAgentStatus::Interrupted(
@@ -5362,7 +5090,6 @@ async fn interrupted_projection_exposes_checkpoint_metadata_and_messages() {
     assert!(timed_out_projection.timed_out);
     assert!(timed_out_projection.timed_out_with_checkpoint);
 }
-
 #[test]
 fn test_delegate_defaults_to_fork_context() {
     let input = with_default_fork_context(json!({ "prompt": "review current work" }), true);
@@ -5376,7 +5103,6 @@ fn test_delegate_defaults_to_fork_context() {
     let parsed = parse_spawn_request(&input).expect("delegate override should parse");
     assert_eq!(parsed.fork_context, Some(false));
 }
-
 #[test]
 fn spawn_request_parses_token_budget_override() {
     let parsed = parse_spawn_request(&json!({
@@ -5403,7 +5129,6 @@ fn spawn_request_parses_token_budget_override() {
         "clear token budget error: {err}"
     );
 }
-
 #[test]
 fn forked_subagent_messages_preserve_parent_prefix_then_append_task() {
     let parent_message = Message {
@@ -5440,7 +5165,6 @@ fn forked_subagent_messages_preserve_parent_prefix_then_append_task() {
     assert_eq!(messages[3].role, "user");
     assert!(message_text(&messages[3]).contains("inspect parser"));
 }
-
 #[test]
 fn fresh_subagent_messages_keep_existing_single_turn_shape() {
     let assignment = SubAgentAssignment::new("list files".to_string(), None);
@@ -5451,7 +5175,6 @@ fn fresh_subagent_messages_keep_existing_single_turn_shape() {
     assert_eq!(messages[0].role, "user");
     assert!(message_text(&messages[0]).contains("list files"));
 }
-
 #[test]
 fn test_parse_spawn_request_rejects_text_and_items_together() {
     let input = json!({
@@ -5461,7 +5184,6 @@ fn test_parse_spawn_request_rejects_text_and_items_together() {
     let err = parse_spawn_request(&input).expect_err("text+items should fail");
     assert!(err.to_string().contains("either prompt text or items"));
 }
-
 #[test]
 fn test_parse_spawn_request_rejects_human_model_name_as_role() {
     // A model name is not a role: without a roster of saved members there is
@@ -5481,7 +5203,6 @@ fn test_parse_spawn_request_rejects_human_model_name_as_role() {
         "{err}"
     );
 }
-
 #[test]
 fn test_parse_spawn_request_accepts_fleet_role_token_for_runtime_resolution() {
     let input = json!({
@@ -5508,7 +5229,6 @@ fn test_parse_spawn_request_accepts_fleet_role_token_for_runtime_resolution() {
     resolve_spawn_role(&mut scout).expect("scout should resolve");
     assert_eq!(scout.agent_type, FleetRole::Scout);
 }
-
 #[test]
 fn test_parse_spawn_request_accepts_full_role_vocabulary() {
     // Regression for #2649: roles that `FleetRole::from_str` accepts must
@@ -5580,7 +5300,6 @@ fn test_parse_spawn_request_accepts_full_role_vocabulary() {
             .unwrap_or_else(|e| panic!("role {role:?} should resolve without a profile: {e}"));
     }
 }
-
 #[test]
 fn test_invalid_role_error_lists_real_aliases() {
     // Well-formed fleet role tokens parse and then fail clearly at role
@@ -5608,7 +5327,6 @@ fn test_invalid_role_error_lists_real_aliases() {
         "hint should explain compatibility aliases: {err}"
     );
 }
-
 #[test]
 fn plugin_agent_profile_loads_but_is_not_a_spawn_role() {
     let _lock = crate::test_support::lock_test_env();
@@ -5651,20 +5369,17 @@ fn plugin_agent_profile_loads_but_is_not_a_spawn_role() {
         "reload removes the disabled plugin Agent"
     );
 }
-
 fn schema_property_description<'a>(schema: &'a Value, property: &str) -> &'a str {
     schema["properties"][property]["description"]
         .as_str()
         .unwrap_or_else(|| panic!("missing description for schema property {property:?}"))
 }
-
 fn draft_2020_validator(schema: &Value) -> jsonschema::Validator {
     jsonschema::options()
         .with_draft(jsonschema::Draft::Draft202012)
         .build(schema)
         .expect("valid Draft 2020-12 tool schema")
 }
-
 #[test]
 fn subagent_tool_schemas_advertise_real_type_and_role_vocabulary() {
     let tmp = tempdir().expect("tempdir");
@@ -5850,7 +5565,6 @@ fn wait_bound_constants_agree_across_both_wait_faces() {
          same minimum timeout"
     );
 }
-
 #[test]
 fn wait_timeout_alias_stays_parse_accepted() {
     // docs/SUBAGENTS.md pins the `timeout` alias (same meaning as
@@ -5864,7 +5578,6 @@ fn wait_timeout_alias_stays_parse_accepted() {
     assert_eq!(read(json!({"timeout": 7})), Some(7));
     assert_eq!(read(json!({})), None);
 }
-
 #[test]
 fn agent_tool_unadvertised_fields_remain_parse_accepted() {
     // #5324 compat: the fields removed from the advertised schema must stay
@@ -5957,7 +5670,6 @@ fn agent_tool_unadvertised_fields_remain_parse_accepted() {
         AgentToolAction::Interrupt
     );
 }
-
 #[test]
 fn agent_tool_role_schema_is_a_closed_canonical_enum() {
     let tmp = tempdir().expect("tempdir");
@@ -6005,7 +5717,6 @@ fn agent_tool_role_schema_is_a_closed_canonical_enum() {
         );
     }
 }
-
 #[test]
 fn provider_schema_sanitizers_preserve_the_closed_fleet_role_enum() {
     use crate::tools::schema_sanitize;
@@ -6082,7 +5793,6 @@ fn provider_schema_sanitizers_preserve_the_closed_fleet_role_enum() {
         "Kimi MFJS must receive a schema without dependentSchemas"
     );
 }
-
 #[test]
 fn agent_tool_prompt_schema_keeps_ordinary_starts_message_first() {
     let tmp = tempdir().expect("tempdir");
@@ -6109,7 +5819,6 @@ fn agent_tool_prompt_schema_keeps_ordinary_starts_message_first() {
         );
     }
 }
-
 #[test]
 fn agent_tool_schema_advertises_lifecycle_and_coordination_actions() {
     let tmp = tempdir().expect("tempdir");
@@ -6132,7 +5841,6 @@ fn agent_tool_schema_advertises_lifecycle_and_coordination_actions() {
     // absence; `timeout_secs` returned to the advertised surface in #119,
     // and the compat test below still covers both plus the `timeout` alias.
 }
-
 #[test]
 fn agent_tool_schema_bounds_fields_by_explicit_action() {
     let tmp = tempdir().expect("tempdir");
@@ -6181,7 +5889,6 @@ fn agent_tool_schema_bounds_fields_by_explicit_action() {
         assert!(branch(action).get("anyOf").is_none());
     }
 }
-
 #[test]
 fn agent_tool_schema_rejects_empty_input_across_provider_forms() {
     use crate::tools::schema_sanitize;
@@ -6250,7 +5957,6 @@ fn agent_tool_schema_rejects_empty_input_across_provider_forms() {
         "agent schema must reject empty input because runtime defaults it to start and then rejects the missing prompt; permissive forms: {permissive:?}"
     );
 }
-
 #[tokio::test]
 async fn agent_message_queues_and_followup_delivers_as_user_provenance() {
     let tmp = tempdir().expect("tempdir");
@@ -6350,7 +6056,6 @@ async fn agent_message_queues_and_followup_delivers_as_user_provenance() {
         .to_string();
     assert!(absent.contains("not found"), "{absent}");
 }
-
 #[tokio::test]
 async fn agent_tool_status_returns_running_child_projection() {
     let tmp = tempdir().expect("tempdir");
@@ -6399,7 +6104,6 @@ async fn agent_tool_status_returns_running_child_projection() {
     assert!(result.content.contains("running"));
     assert!(result.content.contains("transcript_handle"));
 }
-
 #[tokio::test]
 async fn agent_tool_status_reconciles_stale_single_agent_projection() {
     let tmp = tempdir().expect("tempdir");
@@ -6450,7 +6154,6 @@ async fn agent_tool_status_reconciles_stale_single_agent_projection() {
     assert!(result.content.contains("Auto-cancelled"));
     assert_eq!(manager.read().await.running_count(), 0);
 }
-
 #[tokio::test]
 async fn agent_tool_cancel_stops_running_child() {
     let tmp = tempdir().expect("tempdir");
@@ -6519,7 +6222,6 @@ async fn agent_tool_cancel_stops_running_child() {
         "repeated stop must not append a second terminal outcome"
     );
 }
-
 #[tokio::test]
 async fn model_wait_cancel_fans_in_once_and_preserves_checkpoint() {
     use tokio_util::sync::CancellationToken;
@@ -6618,7 +6320,6 @@ async fn model_wait_cancel_fans_in_once_and_preserves_checkpoint() {
         1
     );
 }
-
 #[tokio::test]
 async fn coordination_interrupt_fans_in_once_and_preserves_checkpoint() {
     use tokio_util::sync::CancellationToken;
@@ -6739,7 +6440,6 @@ async fn coordination_interrupt_fans_in_once_and_preserves_checkpoint() {
         "repeated interrupt must not append a second terminal or parked outcome"
     );
 }
-
 #[tokio::test]
 async fn late_completion_does_not_overwrite_cancelled_outcome() {
     let tmp = tempdir().expect("tempdir");
@@ -6791,7 +6491,6 @@ async fn late_completion_does_not_overwrite_cancelled_outcome() {
     assert_eq!(terminal.len(), 1);
     assert_eq!(terminal[0].status, AgentWorkerStatus::Cancelled);
 }
-
 #[tokio::test]
 async fn completion_claim_preserves_running_gate_and_excludes_late_cancel() {
     let tmp = tempdir().expect("tempdir");
@@ -6867,7 +6566,6 @@ async fn completion_claim_preserves_running_gate_and_excludes_late_cancel() {
         .count();
     assert_eq!(terminal, 1, "exactly one terminal outcome is recorded");
 }
-
 #[test]
 fn test_parse_spawn_request_rejects_conflicting_type_and_role() {
     let input = json!({
@@ -6881,7 +6579,6 @@ fn test_parse_spawn_request_rejects_conflicting_type_and_role() {
             .contains("Fleet role conflicts with the explicit legacy agent type")
     );
 }
-
 #[test]
 fn test_build_allowed_tools_independent_of_allow_shell() {
     // v0.6.6: allow_shell no longer filters at the build_allowed_tools
@@ -6893,7 +6590,6 @@ fn test_build_allowed_tools_independent_of_allow_shell() {
     assert!(with_shell.is_none());
     assert!(without_shell.is_none());
 }
-
 #[test]
 fn test_allowed_tools_are_deduplicated() {
     let tools = build_allowed_tools(
@@ -6912,13 +6608,11 @@ fn test_allowed_tools_are_deduplicated() {
         Some(vec!["read_file".to_string(), "grep_files".to_string()])
     );
 }
-
 #[test]
 fn test_custom_agent_requires_allowed_tools() {
     let err = build_allowed_tools(&FleetRole::Custom, None, true).unwrap_err();
     assert!(err.to_string().contains("requires"));
 }
-
 #[test]
 fn role_posture_blocks_writes_and_shell_for_read_only_roles() {
     // #3217: read-only roles may never run write/edit/patch tools, regardless
@@ -6980,7 +6674,6 @@ fn role_posture_blocks_writes_and_shell_for_read_only_roles() {
         ApprovalRequirement::Required
     ));
 }
-
 #[test]
 fn test_build_assignment_prompt_includes_metadata() {
     let assignment = SubAgentAssignment::new(
@@ -6992,7 +6685,6 @@ fn test_build_assignment_prompt_includes_metadata() {
     assert!(prompt.contains("resolved_type: explore"));
     assert!(prompt.contains("role: explore"));
 }
-
 #[test]
 fn subagent_model_strength_defaults_to_parent_even_when_parent_auto_model() {
     let mut runtime = stub_runtime().with_auto_model(true);
@@ -7010,7 +6702,6 @@ fn subagent_model_strength_defaults_to_parent_even_when_parent_auto_model() {
         assert_eq!(route.model, "deepseek-v4-pro", "prompt {prompt:?}");
     }
 }
-
 #[test]
 fn subagent_model_strength_faster_uses_known_family_sibling() {
     let mut runtime = stub_runtime().with_auto_model(true);
@@ -7027,7 +6718,6 @@ fn subagent_model_strength_faster_uses_known_family_sibling() {
     assert_eq!(route.model, "deepseek-v4-flash");
     assert_eq!(route.reasoning_effort.as_deref(), Some("off"));
 }
-
 #[test]
 fn subagent_model_strength_explicit_model_wins_over_faster() {
     let runtime = stub_runtime().with_auto_model(true);
@@ -7045,7 +6735,6 @@ fn subagent_model_strength_explicit_model_wins_over_faster() {
     );
     assert_eq!(route.model, "deepseek-v4-pro");
 }
-
 #[test]
 fn explicit_child_thinking_overrides_faster_default_off() {
     let mut runtime = stub_runtime().with_reasoning_effort(Some("max".to_string()), false);
@@ -7062,7 +6751,6 @@ fn explicit_child_thinking_overrides_faster_default_off() {
     assert_eq!(route.reasoning_effort.as_deref(), Some("high"));
     assert_eq!(route.tuning.reasoning_effort, Some(ReasoningEffort::High));
 }
-
 #[test]
 fn explicit_child_auto_thinking_resolves_from_child_prompt() {
     let runtime = stub_runtime().with_reasoning_effort(Some("off".to_string()), false);
@@ -7076,7 +6764,6 @@ fn explicit_child_auto_thinking_resolves_from_child_prompt() {
     );
     assert_eq!(route.reasoning_effort.as_deref(), Some("max"));
 }
-
 #[tokio::test]
 async fn route_resolution_matrix_uses_explicit_model_strength_routes() {
     let mut runtime = stub_runtime()
@@ -7172,7 +6859,6 @@ async fn route_resolution_matrix_uses_explicit_model_strength_routes() {
         );
     }
 }
-
 #[test]
 fn subagent_auto_reasoning_resolves_to_distinct_v4_tiers() {
     let runtime = stub_runtime().with_reasoning_effort(Some("high".to_string()), true);
@@ -7200,7 +6886,6 @@ fn subagent_auto_reasoning_resolves_to_distinct_v4_tiers() {
         Some("max".to_string())
     );
 }
-
 #[test]
 fn test_subagent_tool_registry_reports_unavailable_tools() {
     let tmp = tempdir().expect("tempdir");
@@ -7224,7 +6909,6 @@ fn test_subagent_tool_registry_reports_unavailable_tools() {
         vec!["update_goal".to_string(), "missing_tool".to_string()]
     );
 }
-
 #[test]
 fn test_subagent_tools_respect_nested_agent_depth_budget() {
     let tmp = tempdir().expect("tempdir");
@@ -7263,11 +6947,9 @@ fn test_subagent_tools_respect_nested_agent_depth_budget() {
     );
     assert!(!capped.is_tool_allowed("agent"));
 }
-
 fn tool_names(tools: Vec<Tool>) -> HashSet<String> {
     tools.into_iter().map(|tool| tool.name).collect()
 }
-
 #[test]
 fn every_named_role_has_one_complete_capability_based_surface() {
     const INSPECTION: &[&str] = &[
@@ -7480,7 +7162,6 @@ fn every_named_role_has_one_complete_capability_based_surface() {
         assert_eq!(names, expected, "{role:?} visible surface drifted");
     }
 }
-
 /// An explicit parent tool subset is a restriction, not a note. The registry
 /// consults `allowed_tools`, so a `ToolScope::Explicit` that never reaches it
 /// leaves the child holding the parent's whole surface while the profile claims
@@ -7520,7 +7201,6 @@ fn an_explicit_parent_tool_scope_is_enforced_by_the_child_registry() {
     assert!(!names.contains("Bash"), "{names:?}");
     assert!(!names.contains("Git"), "{names:?}");
 }
-
 /// A child may narrow inside its parent's explicit subset; it may not step
 /// outside it, however it asks.
 #[test]
@@ -7563,7 +7243,6 @@ fn a_child_allowlist_cannot_widen_an_explicit_parent_tool_scope() {
         None
     );
 }
-
 fn enabled_agent_surface_options() -> AgentToolSurfaceOptions {
     let mut options = AgentToolSurfaceOptions::new(ShellPolicy::Full);
     options.apply_patch_enabled = true;
@@ -7572,7 +7251,6 @@ fn enabled_agent_surface_options() -> AgentToolSurfaceOptions {
     options.goal_state = Some(crate::tools::goal::new_shared_goal_state());
     options
 }
-
 /// Return the exact model-visible catalog built for a default General child.
 ///
 /// Request-boundary tests use this fixture so Moonshot compatibility coverage
@@ -7601,7 +7279,6 @@ pub(crate) fn kimi_general_child_request_tools_fixture() -> Vec<Tool> {
     let mut surface = SubAgentToolSurface::new(catalog, &[]);
     model_request_tools(&mut surface)
 }
-
 fn small_surface_registry(role: FleetRole) -> SubAgentToolRegistry {
     let mut runtime =
         stub_runtime().with_agent_tool_surface_options(enabled_agent_surface_options());
@@ -7614,11 +7291,9 @@ fn small_surface_registry(role: FleetRole) -> SubAgentToolRegistry {
         crate::tools::plan::new_shared_plan_state(),
     )
 }
-
 fn model_tool_names(tools: Vec<Tool>) -> BTreeSet<String> {
     tools.into_iter().map(|tool| tool.name).collect()
 }
-
 #[test]
 fn small_surface_legacy_rules_cover_lowercase_primitives_with_deny_wins() {
     let file = vec!["File".to_string()];
@@ -7665,11 +7340,9 @@ fn small_surface_legacy_rules_cover_lowercase_primitives_with_deny_wins() {
         );
     }
 }
-
 fn model_request_tools(surface: &mut SubAgentToolSurface) -> Vec<Tool> {
     surface.request_tools(surface.catalog.clone(), false)
 }
-
 fn forked_child_request_fixture(
     registry: &SubAgentToolRegistry,
     role: &FleetRole,
@@ -7685,7 +7358,6 @@ fn forked_child_request_fixture(
     let catalog = registry.deferred_catalog_for_model(role);
     (messages, SubAgentToolSurface::new(catalog, &[]))
 }
-
 async fn execute_surface_tool(
     registry: &SubAgentToolRegistry,
     surface: &mut SubAgentToolSurface,
@@ -7698,7 +7370,6 @@ async fn execute_surface_tool(
         .await
         .map(|result| result.result.content)
 }
-
 #[test]
 fn small_surface_starts_with_only_pi_head_and_search() {
     let registry = small_surface_registry(FleetRole::Builder);
@@ -7729,7 +7400,6 @@ fn small_surface_starts_with_only_pi_head_and_search() {
         Some(true)
     );
 }
-
 #[tokio::test]
 async fn small_surface_read_only_child_discovers_web_deferred() {
     let registry = small_surface_registry(FleetRole::Scout);
@@ -7773,7 +7443,6 @@ async fn small_surface_read_only_child_discovers_web_deferred() {
     assert!(same_batch.result.content.contains("deferred"));
     assert!(model_tool_names(model_request_tools(&mut surface)).contains("Web"));
 }
-
 #[tokio::test]
 async fn small_surface_fork_context_survives_fresh_child_discovery() {
     let registry = small_surface_registry(FleetRole::Builder);
@@ -7847,7 +7516,6 @@ async fn small_surface_fork_context_survives_fresh_child_discovery() {
     assert!(names.contains("Web"));
     assert!(names.contains("apply_patch"));
 }
-
 #[tokio::test]
 async fn small_surface_denied_warm_tool_is_not_resurrected() {
     let mut runtime =
@@ -7875,7 +7543,6 @@ async fn small_surface_denied_warm_tool_is_not_resurrected() {
     assert!(!searched.contains("\"tool_name\":\"Web\""));
     assert!(surface.hydrate("Web").is_err());
 }
-
 fn synthetic_deferred_tool(name: &str, description_bytes: usize) -> Tool {
     Tool {
         tool_type: Some("function".to_string()),
@@ -7942,7 +7609,6 @@ fn forkguard_small_surface_caches_are_independent_unbounded_and_revalidated() {
     assert!(byte_names.contains("bytes_0"));
     assert!(byte_names.contains("bytes_1") && byte_names.contains("bytes_2"));
 }
-
 #[tokio::test]
 async fn small_surface_successful_cached_use_touches_lru() {
     let registry = small_surface_registry(FleetRole::Builder);
@@ -7962,7 +7628,6 @@ async fn small_surface_successful_cached_use_touches_lru() {
     surface.hydrate(&ninth).expect("ninth activation");
     assert!(model_tool_names(model_request_tools(&mut surface)).contains("get_goal"));
 }
-
 /// The child's ride channel mirrors the parent's: parked notes ride success
 /// and error results alike (a note held back on `Err` would strand until a
 /// later `Ok` — or forever if the child ends first), and names the ride
@@ -8031,7 +7696,6 @@ fn child_parked_note_rides_success_and_error_results_and_nets_re_admissions() {
         netted.result.content
     );
 }
-
 /// The park side is covered above; this pin is the consumption side —
 /// `execute_from_surface` must hand parked notes to the child's recorded
 /// result, the production edge that once discarded every report. Driven
@@ -8064,7 +7728,6 @@ async fn parked_note_rides_through_the_execute_from_surface_glue() {
         surface.pending_eviction_notes
     );
 }
-
 #[test]
 fn small_surface_depth_cap_removes_only_agent() {
     let mut runtime =
@@ -8090,13 +7753,11 @@ fn small_surface_depth_cap_removes_only_agent() {
             .collect()
     );
 }
-
 fn disabled_feature_agent_surface_options() -> AgentToolSurfaceOptions {
     let mut options = AgentToolSurfaceOptions::new(ShellPolicy::Full);
     options.goal_state = Some(crate::tools::goal::new_shared_goal_state());
     options
 }
-
 #[test]
 fn subagent_general_catalog_keeps_parent_surface_except_root_goal_mutators() {
     let tmp = tempdir().expect("tempdir");
@@ -8138,7 +7799,6 @@ fn subagent_general_catalog_keeps_parent_surface_except_root_goal_mutators() {
         "default General sub-agent catalog must match the parent Agent surface except for root-owned goal mutators"
     );
 }
-
 #[test]
 fn subagent_feature_gates_match_parent_agent_surface() {
     let tmp = tempdir().expect("tempdir");
@@ -8179,7 +7839,6 @@ fn subagent_feature_gates_match_parent_agent_surface() {
         assert!(!child_names.contains(name), "{name} should be child-gated");
     }
 }
-
 /// Model the clamp's deny list the way a real spawn threads it in
 /// (fleet/worker_runtime.rs): a `write: false` member loses the raw shell
 /// surface and the non-shell execution surface even when its posture holds
@@ -8207,7 +7866,6 @@ fn seed_read_only_role_deny_list(runtime: &mut SubAgentRuntime) {
         }
     }
 }
-
 /// #5426 acceptance point 1, gate-level: a live scout must be able to run
 /// the three canonical read-only inspection commands DIRECTLY through
 /// canonical `bash` — `git -C ... log`, `find ... | head`, `npm view` — with
@@ -8288,7 +7946,6 @@ fn scout_posture_gate_admits_agent_readonly_bash_commands() {
         "legacy `Bash` is not the carve-out name; the envelope must keep refusing it"
     );
 }
-
 /// #5595: catalog admission, role posture, and the execution envelope are not
 /// enough. The concrete read-only executor must accept the canonical Git shape
 /// agents use when the repository is not their process cwd. This is the exact
@@ -8341,7 +7998,6 @@ async fn read_only_inspection_roles_execute_pwd_and_absolute_git_log() {
         }
     }
 }
-
 /// Read-only text filters may transform stdout, but they must not reach their
 /// file-output or helper-program forms through the same bounded bash carve-out.
 #[tokio::test]
@@ -8424,7 +8080,6 @@ async fn read_only_inspection_roles_cannot_write_through_text_filters() {
 // bounded read-only probes the inspection roles use — so "with evidence"
 // includes evidence the child gathered itself (`wc`, `ls`, `cat`, `grep`) —
 // while custom commands stay refused and the workspace stays read-only.
-
 /// The roster description must promise exactly the surface the role has:
 /// built-in gates plus a bounded read-only evidence shell, no custom commands.
 #[test]
@@ -8452,7 +8107,6 @@ fn verifier_roster_description_states_the_bounded_contract() {
         "type description must match the roster: {SUBAGENT_TYPE_DESCRIPTION}"
     );
 }
-
 /// Acceptance for the verifier lane, sibling of
 /// `read_only_inspection_roles_execute_pwd_and_absolute_git_log`: a live
 /// `test` child must execute a bounded read-only probe through canonical
@@ -8487,7 +8141,6 @@ async fn verifier_child_executes_a_bounded_readonly_bash_probe_for_evidence() {
         "verifier probe must report the fixture's byte count as wc's first field: {output}"
     );
 }
-
 /// The walls around the lane stay up: the legacy raw `Bash` spelling, a
 /// custom `Run` command, and a workspace write are all refused for a
 /// verifier — at dispatch, and with the `reject_unbounded_verification`
@@ -8572,7 +8225,6 @@ async fn verifier_child_still_refuses_raw_shell_custom_commands_and_writes() {
         "workspace-write refusal did not identify the denial: {write}"
     );
 }
-
 /// A registry for a write-capable role whose parent handed it a read-only
 /// shell and no writes — what `derive_child` produces for a Builder, Worker,
 /// or Custom child of a Scout or Planner on the plain `agent` nesting path,
@@ -8596,7 +8248,6 @@ fn read_only_shell_child_registry(role: FleetRole) -> (tempfile::TempDir, SubAge
     );
     (tmp, registry)
 }
-
 /// Shell authority is the Verifier's carve-out alone. Every other role whose
 /// runtime shell was narrowed to read-only — the Builder, Worker, or Custom
 /// child of a read-only parent — holds no process authority: the built-in
@@ -8651,7 +8302,6 @@ async fn read_only_shell_children_of_other_roles_hold_no_shell_authority() {
     assert!(verifier.posture_permits_tool("Run", Some(&gate)));
     assert!(verifier.envelope_refusal("Run", &gate).is_none());
 }
-
 /// The purpose survives the narrowing: default gates and test-selection
 /// arguments stay admitted for the verifier at posture and envelope, and the
 /// catalog still offers `Run`.
@@ -8687,7 +8337,6 @@ fn verifier_child_keeps_the_default_and_selection_bounded_run_surface() {
         "catalog must keep offering the probe lane beside the gates: {names:?}"
     );
 }
-
 /// A Verifier child of a read-only role parent (its shell was clamped by the
 /// parent, not narrowed by the Verifier role) regains nothing through the
 /// carve-out: the built-in gate runner stays refused at posture and envelope
@@ -8730,17 +8379,20 @@ async fn clamped_verifier_child_of_read_only_parent_holds_no_run_surface() {
         "the evidence lane stays classifier-bounded"
     );
 }
-
 /// The sub-subagent chain: a carve-out Verifier parent (its effective shell
 /// is the role's read-only narrowing; the Run grant is a registry surface,
-/// not shell authority) spawning a Builder child. Hop 2 is built from hop
-/// 1's actual published profile through the same intersection the
-/// production spawn path runs, so the pin is a real two-hop chain: the
-/// spawn ceiling the carve-out parent publishes stays read-only, and the
-/// child derived under that ceiling keeps the no-Run, lane-less shape. It
-/// guards the propagation side of the round-3 fix — if the registry ever
-/// leaked a pre-narrowing profile to its spawns, the Builder below would
-/// regain the gate surface, and this test would redden.
+/// not shell authority) spawning a Builder child through the REAL spawn
+/// path. Hop 2 is not hand-derived: the test starts the Builder through the
+/// verifier's own `agent` tool and reads the child's recorded
+/// `runtime_profile` — the profile `run_subagent` derived from the runtime
+/// the registry published (`worker_profile_for_spawn` ->
+/// `derive_child`). That recorded profile is the spawn ceiling the
+/// carve-out parent actually published; a Builder built under it keeps the
+/// no-Run, lane-less shape. This guards the propagation side of the
+/// round-3 fix: if the registry ever leaked a pre-narrowing profile to its
+/// spawns (`child_runtime.worker_profile` regressed to the parent-runtime
+/// profile), the recorded shell below would come out `full` and this test
+/// would redden.
 #[tokio::test]
 async fn sub_subagent_chain_of_a_carveout_verifier_holds_no_extra_authority() {
     // A carve-out Verifier in a full session: the coarse session flag stays
@@ -8757,34 +8409,68 @@ async fn sub_subagent_chain_of_a_carveout_verifier_holds_no_extra_authority() {
         codewhale_workflow::ShellCeiling::ReadOnly,
         "the carve-out must not widen the shell ceiling a verifier publishes for its own spawns"
     );
-    // Hop 2 is derived from hop 1's actual output: the carve-out verifier's
-    // narrowed effective profile is what the registry publishes to its own
-    // spawns, so a Builder one hop below the verifier is built through the
-    // same derivation the production spawn path runs
-    // (`worker_profile_for_spawn` intersects the parent's effective profile
-    // with the child's role request). If the registry ever leaked a
-    // pre-narrowing profile to its spawns, the Builder below would regain
-    // the gate surface — this pin exists to redden exactly that regression.
-    let (_verifier_tmp, verifier) = read_only_with_shell_registry();
+    // Hop 2 through the real spawn path: the write-capable `agent` start
+    // needs an auto-approved surface, so the fixture runs in its
+    // auto-approving variant. Everything else about the carve-out shape is
+    // the fixture's own.
+    let (verifier_tmp, verifier) = read_only_with_shell_registry_auto_approving(true);
     assert_eq!(
         verifier.runtime_profile.shell,
         crate::worker_profile::ShellPolicy::ReadOnly,
-        "the carve-out fixture must publish the narrowed shell to its spawns"
+        "the carve-out fixture must narrow the verifier's own profile"
     );
-    let derived = verifier
-        .runtime_profile
-        .derive_child(&WorkerRuntimeProfile::for_role(FleetRole::Builder));
+    let started = verifier
+        .execute(
+            "agent_chain_probe",
+            "agent",
+            json!({
+                "action": "start",
+                "type": "builder",
+                "prompt": "noop chain probe",
+            }),
+        )
+        .await
+        .expect("the carve-out verifier must be able to start a chain Builder");
+    let started: Value =
+        serde_json::from_str(&started).expect("the agent start must answer with a JSON payload");
+    let agent_id = started
+        .get("agent_id")
+        .and_then(Value::as_str)
+        .expect("the agent start must answer with an agent_id")
+        .to_string();
+    // The record appears once the spawned task registers the child; the
+    // recorded profile is what production derived from the published
+    // runtime, not a field this test set.
+    let manager = verifier.gate_runtime.manager.clone();
+    let record = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(record) = manager.read().await.get_worker_record(&agent_id)
+                && record.spec.runtime_profile != WorkerRuntimeProfile::default()
+            {
+                return record;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the chain Builder worker record must appear");
     assert_eq!(
-        derived.shell,
+        record.spec.agent_type,
+        FleetRole::Builder,
+        "the spawned hop must be the requested Builder"
+    );
+    assert_eq!(
+        record.spec.runtime_profile.shell,
         crate::worker_profile::ShellPolicy::ReadOnly,
-        "the chain Builder must derive the read-only shell from the verifier's narrowed profile"
+        "the profile the registry published to its spawn must derive the read-only shell; \
+         a pre-narrowing leak redds here"
     );
     let child_tmp = tempfile::tempdir().expect("tempdir");
     let mut child_runtime =
         stub_runtime().with_agent_tool_surface_options(enabled_agent_surface_options());
     child_runtime.context = ToolContext::new(child_tmp.path().to_path_buf());
     child_runtime.allow_shell = true;
-    child_runtime.worker_profile = derived;
+    child_runtime.worker_profile = record.spec.runtime_profile.clone();
     let builder = SubAgentToolRegistry::new(
         child_runtime,
         FleetRole::Builder,
@@ -8825,8 +8511,8 @@ async fn sub_subagent_chain_of_a_carveout_verifier_holds_no_extra_authority() {
         refused.to_string().contains("not permitted") || refused.to_string().contains("shell"),
         "chain Builder refusal did not identify the wall: {refused}"
     );
+    drop(verifier_tmp);
 }
-
 /// The verifier intro tells the child about its bounded read-only shell and
 /// the custom-command refusal, scoped to in-session delegations the way
 /// `FleetRole`'s roster description scopes the role. The gates claim is
@@ -8853,7 +8539,6 @@ fn verifier_intro_states_the_evidence_contract() {
         "the intro's gates claim must carry the read-only-parent conditional: {VERIFIER_AGENT_INTRO}"
     );
 }
-
 #[test]
 fn explore_catalog_inherits_web_but_hides_write_shell_and_fim_tools() {
     let tmp = tempdir().expect("tempdir");
@@ -8905,7 +8590,6 @@ fn explore_catalog_inherits_web_but_hides_write_shell_and_fim_tools() {
         file.input_schema
     );
 }
-
 /// Under the real spawn clamp — raw-shell deny list installed, `Bash`
 /// included — Scout and Reviewer reach exactly one shell entry point:
 /// canonical lowercase `bash`, bounded by the strict read-only classifier.
@@ -9120,7 +8804,6 @@ async fn read_only_roles_expose_and_dispatch_lowercase_bash_only() {
         );
     }
 }
-
 #[tokio::test]
 async fn planner_exposes_and_dispatches_read_only_bash_probes() {
     let tmp = tempdir().expect("tempdir");
@@ -9174,7 +8857,6 @@ async fn planner_exposes_and_dispatches_read_only_bash_probes() {
         .expect("planner must dispatch a bounded read");
     assert_eq!(output, sentinel);
 }
-
 #[tokio::test]
 async fn scout_shell_respects_parent_shell_and_network_ceilings() {
     let tmp = tempdir().expect("tempdir");
@@ -9266,7 +8948,6 @@ async fn scout_shell_respects_parent_shell_and_network_ceilings() {
         }
     }
 }
-
 /// An auto-approved Worker registry (shell-capable, everything else default)
 /// carrying the given exec-policy engine — the smallest fixture that reaches
 /// the delegated-call execpolicy gate past every posture gate.
@@ -9276,7 +8957,6 @@ fn auto_approved_worker_registry_with_engine(
 ) -> SubAgentToolRegistry {
     worker_registry_with_engine_and_approval(tmp, exec_policy_engine, true)
 }
-
 /// The same fixture with the parent session's approval posture under the
 /// caller's control: `false` models every prompting/fail-closed posture
 /// (Suggest/Auto/Never), where the main line would surface an approval
@@ -9300,7 +8980,6 @@ fn worker_registry_with_engine_and_approval(
         crate::tools::plan::new_shared_plan_state(),
     )
 }
-
 /// Fork-delta behavior test: a command the parent session's execpolicy
 /// hard-denies must fail closed inside the child with the main line's deny
 /// wording — the auto-approve escape hatch this wiring closes — while a
@@ -9492,7 +9171,6 @@ async fn subagent_execpolicy_empty_ruleset_keeps_auto_approve_behavior() {
         .to_string();
     assert!(error.contains("denied prefix rule 'echo'"), "{error}");
 }
-
 /// A typed Deny rule on a file path blocks the child's File read of that path
 /// while a workspace-relative read outside the rule still lands.
 #[tokio::test]
@@ -9529,7 +9207,6 @@ async fn subagent_execpolicy_blocks_denied_file_read_but_allows_workspace_relati
         .expect("a workspace-relative read outside the deny rule passes");
     assert!(output.contains("plain notes"), "{output}");
 }
-
 /// Typed ask rules are prompt decisions on the main line. Under a
 /// parent-auto-approving session the main line would auto-run, so the child
 /// passes the call through and it really executes; the refusal face under a
@@ -9555,7 +9232,6 @@ async fn subagent_execpolicy_prompt_decision_passes_under_parent_auto_approve() 
         .expect("an ask-rule (prompt) decision must not block a child");
     assert!(output.contains("askme"), "{output}");
 }
-
 /// The registry's engine handle is the parent's live engine, not a snapshot:
 /// a ruleset installed after the registry was built binds its delegated calls.
 #[tokio::test]
@@ -9589,7 +9265,6 @@ async fn subagent_execpolicy_ruleset_update_binds_already_delegated_calls() {
         .to_string();
     assert!(error.contains("denied prefix rule 'echo'"), "{error}");
 }
-
 #[test]
 fn implementer_catalog_inherits_patch_and_fim_when_enabled() {
     let tmp = tempdir().expect("tempdir");
@@ -9623,7 +9298,6 @@ fn implementer_catalog_inherits_patch_and_fim_when_enabled() {
         );
     }
 }
-
 #[test]
 fn every_fleet_role_catalog_advertises_one_executable_load_skill() {
     // load_skill contract (#4651): the parent Agent surface and every
@@ -9739,7 +9413,6 @@ fn every_fleet_role_catalog_advertises_one_executable_load_skill() {
         }
     }
 }
-
 #[test]
 fn custom_child_allowlist_omitting_load_skill_fails_closed() {
     // Custom children get exactly their explicit allow-list: load_skill is
@@ -9781,7 +9454,6 @@ fn custom_child_allowlist_omitting_load_skill_fails_closed() {
         "explicitly listed load_skill is granted: {names:?}"
     );
 }
-
 #[tokio::test]
 async fn plan_parent_profile_narrows_even_implementer_child_to_read_only() {
     let tmp = tempdir().expect("tempdir");
@@ -9829,7 +9501,6 @@ async fn plan_parent_profile_narrows_even_implementer_child_to_read_only() {
     );
     assert!(!workspace.join("plan-parent-write.txt").exists());
 }
-
 #[tokio::test]
 async fn api_timeout_preserves_checkpoint_and_returns_needs_input_without_parking() {
     let tmp = tempdir().expect("tempdir");
@@ -10004,7 +9675,6 @@ async fn api_timeout_preserves_checkpoint_and_returns_needs_input_without_parkin
         "projection inspection must not respawn the child implicitly"
     );
 }
-
 #[tokio::test]
 async fn subagent_retries_api_timeout_before_succeeding() {
     let tmp = tempdir().expect("tempdir");
@@ -10084,7 +9754,6 @@ async fn subagent_retries_api_timeout_before_succeeding() {
     assert_eq!(snapshot.status, SubAgentStatus::Completed);
     assert_eq!(snapshot.result.as_deref(), Some("recovered answer"));
 }
-
 #[test]
 fn api_timeout_retry_backoff_doubles_and_caps() {
     let base = SUBAGENT_API_TIMEOUT_INITIAL_BACKOFF;
@@ -10098,7 +9767,6 @@ fn api_timeout_retry_backoff_doubles_and_caps() {
         );
     }
 }
-
 #[test]
 fn api_timeout_retry_delay_stays_within_jitter_bounds() {
     let base = SUBAGENT_API_TIMEOUT_INITIAL_BACKOFF;
@@ -10118,14 +9786,12 @@ fn api_timeout_retry_delay_stays_within_jitter_bounds() {
         }
     }
 }
-
 #[test]
 fn transient_provider_classifier_matches_sse_header_timeout() {
     let err = anyhow::anyhow!("SSE stream request did not receive response headers after 45s");
 
     assert!(is_transient_subagent_provider_error(&err));
 }
-
 #[test]
 fn transient_provider_classifier_matches_body_decode_failures() {
     // A provider that accepts the request and dies mid-response is a
@@ -10146,7 +9812,6 @@ fn transient_provider_classifier_matches_body_decode_failures() {
         "auth failures stay fatal"
     );
 }
-
 #[test]
 fn transient_provider_classifier_matches_structured_rate_limit() {
     let err = anyhow::Error::new(crate::llm_client::LlmError::RateLimited {
@@ -10157,7 +9822,6 @@ fn transient_provider_classifier_matches_structured_rate_limit() {
 
     assert!(is_transient_subagent_provider_error(&err));
 }
-
 #[tokio::test]
 async fn subagent_retries_transient_provider_header_timeout_before_succeeding() {
     let tmp = tempdir().expect("tempdir");
@@ -10232,7 +9896,6 @@ async fn subagent_retries_transient_provider_header_timeout_before_succeeding() 
     assert_eq!(snapshot.status, SubAgentStatus::Completed);
     assert_eq!(snapshot.result.as_deref(), Some("recovered answer"));
 }
-
 #[tokio::test]
 async fn subagent_rate_limit_exhaustion_interrupts_with_checkpoint() {
     let tmp = tempdir().expect("tempdir");
@@ -10318,7 +9981,6 @@ async fn subagent_rate_limit_exhaustion_interrupts_with_checkpoint() {
     assert!(checkpoint.continuable);
     assert!(snapshot.needs_input.is_some());
 }
-
 #[tokio::test]
 async fn spawn_duplicate_session_name_error_names_conflicting_agent() {
     // #2656: the duplicate-name error must identify the conflicting agent so a
@@ -10379,7 +10041,6 @@ async fn spawn_duplicate_session_name_error_names_conflicting_agent() {
         "includes elapsed time since spawn: {msg}"
     );
 }
-
 #[tokio::test]
 async fn spawn_session_name_held_by_prior_session_agent_does_not_collide() {
     // A completed worker hydrated from an earlier session's ledger is not
@@ -10439,7 +10100,6 @@ async fn spawn_session_name_held_by_prior_session_agent_does_not_collide() {
     assert_eq!(fresh.session_name, "researcher");
     assert!(!guard.is_from_prior_session(fresh));
 }
-
 /// Seed a same-session child holding `name` in the given status; returns its
 /// agent id. Shared by the name-release tests below.
 async fn seed_named_same_session_agent(
@@ -10474,7 +10134,6 @@ async fn seed_named_same_session_agent(
     assert!(!guard.is_from_prior_session(&guard.agents[&id]));
     id
 }
-
 #[tokio::test]
 async fn spawn_session_name_released_once_same_session_holder_settles() {
     // 2026-10-23 research fan-out: the parent cancelled `macro-policy`, got
@@ -10540,7 +10199,6 @@ async fn spawn_session_name_released_once_same_session_holder_settles() {
         );
     }
 }
-
 #[tokio::test]
 async fn spawn_session_name_still_held_by_interrupted_same_session_child() {
     // An interrupted child is parked, not finished: its name stays reserved
@@ -10593,7 +10251,6 @@ async fn spawn_session_name_still_held_by_interrupted_same_session_child() {
         "cancel is a silent no-op on an interrupted child: {msg}"
     );
 }
-
 #[tokio::test]
 async fn spawn_session_name_running_holder_advises_wait_or_cancel() {
     // A running holder can be waited out or cancelled; the refusal must keep
@@ -10636,7 +10293,6 @@ async fn spawn_session_name_running_holder_advises_wait_or_cancel() {
         "a running holder can be waited out or cancelled: {msg}"
     );
 }
-
 #[test]
 fn session_name_resolution_prefers_live_holder_then_newest_settled() {
     let tmp = tempdir().expect("tempdir");
@@ -10686,7 +10342,6 @@ fn session_name_resolution_prefers_live_holder_then_newest_settled() {
         older_id
     );
 }
-
 #[test]
 fn session_name_resolution_ignores_prior_boot_interrupted_ghost() {
     // Hydration rewrites a child that was Running at shutdown into a
@@ -10740,7 +10395,6 @@ fn session_name_resolution_ignores_prior_boot_interrupted_ghost() {
         retry_id
     );
 }
-
 #[tokio::test]
 async fn id_shaped_session_name_requires_an_explicit_name_selector() {
     // Name reuse cannot reinterpret a durable receipt. Both live and settled
@@ -10798,7 +10452,6 @@ async fn id_shaped_session_name_requires_an_explicit_name_selector() {
         );
     }
 }
-
 #[test]
 fn spawn_contention_error_names_the_read_only_path() {
     // The ledger text is written for writers. The refusal seen in the
@@ -10824,7 +10477,6 @@ fn spawn_contention_error_names_the_read_only_path() {
     let other = "write-claim capacity is 64 active owners; complete, serialize, or isolate existing work before admitting another writer".to_string();
     assert_eq!(spawn_claim_error_with_guidance(other.clone()), other);
 }
-
 #[test]
 fn general_role_text_discloses_workspace_claim_and_read_only_alternative() {
     // The roster entry, the type enum text and the tool description are the
@@ -10850,7 +10502,6 @@ fn general_role_text_discloses_workspace_claim_and_read_only_alternative() {
         "{description}"
     );
 }
-
 #[tokio::test]
 async fn shared_write_claim_is_registered_before_parallel_launch_and_manifested() {
     let tmp = tempdir().expect("tempdir");
@@ -10932,7 +10583,6 @@ async fn shared_write_claim_is_registered_before_parallel_launch_and_manifested(
     assert_eq!(manifest.coordination_contracts, vec!["public-api"]);
     assert_eq!(manifest.expected_artifact.as_deref(), Some("tested patch"));
 }
-
 #[tokio::test]
 async fn write_capable_agent_does_not_launch_when_durable_registration_fails() {
     let tmp = tempdir().expect("tempdir");
@@ -10983,7 +10633,6 @@ async fn write_capable_agent_does_not_launch_when_durable_registration_fails() {
     );
     assert!(blocked_state_path.is_dir());
 }
-
 #[tokio::test]
 async fn write_scope_contention_covers_regular_agent_and_active_fleet_writer() {
     let tmp = tempdir().expect("tempdir");
@@ -11057,7 +10706,6 @@ async fn write_scope_contention_covers_regular_agent_and_active_fleet_writer() {
         "{launch}"
     );
 }
-
 #[tokio::test]
 async fn test_running_count_counts_only_agents_with_live_task_handles() {
     let mut manager = SubAgentManager::new(PathBuf::from("."), 1);
@@ -11090,7 +10738,6 @@ async fn test_running_count_counts_only_agents_with_live_task_handles() {
         .expect("live task handle")
         .abort();
 }
-
 #[test]
 fn test_running_count_ignores_running_status_without_task_handle() {
     let mut manager = SubAgentManager::new(PathBuf::from("."), 1);
@@ -11112,7 +10759,6 @@ fn test_running_count_ignores_running_status_without_task_handle() {
 
     assert_eq!(manager.running_count(), 0);
 }
-
 #[tokio::test]
 async fn test_running_count_counts_running_agents_until_status_reconciles() {
     let mut manager = SubAgentManager::new(PathBuf::from("."), 1);
@@ -11139,7 +10785,6 @@ async fn test_running_count_counts_running_agents_until_status_reconciles() {
 
     assert_eq!(manager.running_count(), 1);
 }
-
 #[tokio::test]
 async fn admission_limit_counts_queued_and_running_workers_separately() {
     let mut manager = SubAgentManager::new(PathBuf::from("."), 2).with_admission_limit(4);
@@ -11209,7 +10854,6 @@ async fn admission_limit_counts_queued_and_running_workers_separately() {
             .abort();
     }
 }
-
 #[tokio::test]
 async fn cleanup_auto_cancels_stale_running_agent_and_releases_slot() {
     use tokio_util::sync::CancellationToken;
@@ -11286,7 +10930,6 @@ async fn cleanup_auto_cancels_stale_running_agent_and_releases_slot() {
         AgentWorkerStatus::Cancelled
     );
 }
-
 #[tokio::test]
 async fn status_projection_reconciles_stale_running_agent() {
     let mut inner = SubAgentManager::new(PathBuf::from("."), 1)
@@ -11337,7 +10980,6 @@ async fn status_projection_reconciles_stale_running_agent() {
             .contains("Auto-cancelled")
     );
 }
-
 #[tokio::test]
 async fn cleanup_keeps_recent_running_agent() {
     let mut manager = SubAgentManager::new(PathBuf::from("."), 1)
@@ -11375,7 +11017,6 @@ async fn cleanup_keeps_recent_running_agent() {
         .expect("live task handle")
         .abort();
 }
-
 #[tokio::test]
 async fn touch_refreshes_stale_running_agent_heartbeat() {
     // Use a heartbeat timeout that is comfortably larger than the synchronous
@@ -11420,7 +11061,6 @@ async fn touch_refreshes_stale_running_agent_heartbeat() {
         .expect("live task handle")
         .abort();
 }
-
 #[test]
 fn test_persist_and_reload_marks_running_agent_as_interrupted() {
     let tmp = tempdir().expect("tempdir");
@@ -11461,7 +11101,6 @@ fn test_persist_and_reload_marks_running_agent_as_interrupted() {
             if message.contains(SUBAGENT_RESTART_REASON)
     ));
 }
-
 #[test]
 fn generated_whale_name_is_not_persisted_or_replayed_on_load() {
     let tmp = tempdir().expect("tempdir");
@@ -11518,7 +11157,6 @@ fn generated_whale_name_is_not_persisted_or_replayed_on_load() {
     assert_eq!(snapshot.name, "docs-worker");
     assert_eq!(snapshot.nickname, None);
 }
-
 #[test]
 fn explicit_nonmatching_whale_word_is_persisted_and_loaded() {
     let tmp = tempdir().expect("tempdir");
@@ -11564,7 +11202,6 @@ fn explicit_nonmatching_whale_word_is_persisted_and_loaded() {
     let snapshot = reloaded.get_result(agent_id).expect("agent survives load");
     assert_eq!(snapshot.nickname.as_deref(), Some(explicit_whale));
 }
-
 #[test]
 fn persist_and_reload_preserves_checkpoint_for_interrupted_running_agent() {
     let tmp = tempdir().expect("tempdir");
@@ -11615,7 +11252,6 @@ fn persist_and_reload_preserves_checkpoint_for_interrupted_running_agent() {
     assert_eq!(checkpoint.messages.len(), 2);
     assert_eq!(message_text(&checkpoint.messages[1]), "partial progress");
 }
-
 #[test]
 fn restart_reconciles_every_orphan_execution_status_once_and_preserves_receipts() {
     let tmp = tempdir().expect("tempdir");
@@ -11788,7 +11424,6 @@ fn restart_reconciles_every_orphan_execution_status_once_and_preserves_receipts(
         "a later restart does not append duplicate interrupted receipts"
     );
 }
-
 #[cfg(unix)]
 #[test]
 fn load_state_rejects_symlinked_state_file() {
@@ -11813,7 +11448,6 @@ fn load_state_rejects_symlinked_state_file() {
         .expect_err("symlinked state should fail");
     assert!(format!("{err:#}").contains("must not traverse symlinks"));
 }
-
 #[test]
 fn persist_state_rejects_state_path_outside_state_root() {
     let tmp = tempdir().expect("tempdir");
@@ -11828,7 +11462,6 @@ fn persist_state_rejects_state_path_outside_state_root() {
 
     assert!(format!("{err:#}").contains("must stay within state root"));
 }
-
 #[test]
 fn explicit_state_roots_isolate_managers_for_the_same_execution_workspace() {
     let tmp = tempdir().expect("tempdir");
@@ -11903,7 +11536,6 @@ fn explicit_state_roots_isolate_managers_for_the_same_execution_workspace() {
         "an explicit state root must keep control-plane files out of the execution workspace"
     );
 }
-
 #[cfg(unix)]
 #[test]
 fn persist_state_rejects_symlinked_state_directory() {
@@ -11923,7 +11555,6 @@ fn persist_state_rejects_symlinked_state_directory() {
             || format!("{err:#}").contains("must not traverse symlinks")
     );
 }
-
 #[test]
 fn test_interrupted_status_name_and_summary() {
     let snapshot = make_snapshot(SubAgentStatus::Interrupted(
@@ -11934,7 +11565,6 @@ fn test_interrupted_status_name_and_summary() {
 }
 
 // === v0.6.6 — sub-agent authority unification ===
-
 #[test]
 fn build_allowed_tools_general_returns_none_for_full_inheritance() {
     // Default behavior: General agent with no explicit list inherits the
@@ -11945,7 +11575,6 @@ fn build_allowed_tools_general_returns_none_for_full_inheritance() {
         "General with no explicit_tools should default to full inheritance (None), got {result:?}"
     );
 }
-
 #[test]
 fn build_allowed_tools_explore_returns_none_for_full_inheritance() {
     // Per-type allowlists are now advisory — Explore also gets the full
@@ -11956,7 +11585,6 @@ fn build_allowed_tools_explore_returns_none_for_full_inheritance() {
         "Explore with no explicit_tools should default to full inheritance"
     );
 }
-
 #[test]
 fn build_allowed_tools_custom_requires_explicit_list() {
     // Custom is the one type that REQUIRES explicit allowed_tools.
@@ -11966,14 +11594,12 @@ fn build_allowed_tools_custom_requires_explicit_list() {
         "got: {err}"
     );
 }
-
 #[test]
 fn build_allowed_tools_explicit_list_returned_as_some() {
     let explicit = vec!["read_file".to_string(), "list_dir".to_string()];
     let result = build_allowed_tools(&FleetRole::Custom, Some(explicit.clone()), true).unwrap();
     assert_eq!(result, Some(explicit));
 }
-
 #[test]
 fn build_allowed_tools_explicit_list_dedupes_and_trims() {
     let explicit = vec![
@@ -11988,7 +11614,6 @@ fn build_allowed_tools_explicit_list_dedupes_and_trims() {
         Some(vec!["read_file".to_string(), "list_dir".to_string()])
     );
 }
-
 #[test]
 fn parse_spawn_request_extracts_cwd_when_present() {
     let input = json!({
@@ -12001,7 +11626,6 @@ fn parse_spawn_request_extracts_cwd_when_present() {
         Some(".worktrees/feature-a".to_string())
     );
 }
-
 #[test]
 fn parse_spawn_request_accepts_worktree_isolation() {
     let input = json!({
@@ -12023,7 +11647,6 @@ fn parse_spawn_request_accepts_worktree_isolation() {
         Some("feature-a".to_string())
     );
 }
-
 #[test]
 fn parse_spawn_request_accepts_cwd_with_worktree_isolation() {
     let input = json!({
@@ -12035,7 +11658,6 @@ fn parse_spawn_request_accepts_cwd_with_worktree_isolation() {
     assert!(parsed.worktree.is_some());
     assert!(parsed.cwd.is_some());
 }
-
 #[test]
 fn git_repo_root_finds_repo_from_direct_cwd() {
     let repo = init_subagent_git_repo();
@@ -12045,7 +11667,6 @@ fn git_repo_root_finds_repo_from_direct_cwd() {
         repo.path().canonicalize().expect("canonical repo")
     );
 }
-
 #[test]
 fn git_repo_root_discovers_one_level_nested_repo_from_harness() {
     let repo = init_subagent_git_repo();
@@ -12065,7 +11686,6 @@ fn git_repo_root_discovers_one_level_nested_repo_from_harness() {
         nested.canonicalize().expect("canonical nested")
     );
 }
-
 #[test]
 fn git_repo_root_reports_attempted_paths_when_no_repo_found() {
     // Use the system temp dir rather than the checkout's parent: a checkout
@@ -12096,21 +11716,18 @@ fn git_repo_root_reports_attempted_paths_when_no_repo_found() {
         "expected friendly attempted-path error, got: {message}"
     );
 }
-
 #[test]
 fn parse_spawn_request_cwd_absent_yields_none() {
     let input = json!({ "prompt": "no cwd" });
     let parsed = parse_spawn_request(&input).expect("spawn request should parse");
     assert!(parsed.cwd.is_none());
 }
-
 #[test]
 fn parse_spawn_request_cwd_empty_string_yields_none() {
     let input = json!({ "prompt": "empty cwd", "cwd": "   " });
     let parsed = parse_spawn_request(&input).expect("spawn request should parse");
     assert!(parsed.cwd.is_none(), "whitespace-only cwd should be None");
 }
-
 #[test]
 fn create_isolated_worktree_creates_branch_checkout_outside_parent_repo() {
     let repo = init_subagent_git_repo();
@@ -12139,7 +11756,6 @@ fn create_isolated_worktree_creates_branch_checkout_outside_parent_repo() {
         Some("codex/agent-isolated-test")
     );
 }
-
 #[test]
 fn create_isolated_worktree_rejects_invalid_branch_as_input() {
     let repo = init_subagent_git_repo();
@@ -12163,7 +11779,6 @@ fn create_isolated_worktree_rejects_invalid_branch_as_input() {
         "unexpected error: {err}"
     );
 }
-
 fn init_git_repo_at(path: &std::path::Path) {
     let init = Command::new("git")
         .arg("init")
@@ -12187,7 +11802,6 @@ fn init_git_repo_at(path: &std::path::Path) {
         .expect("git commit should run");
     assert!(commit.status.success(), "git commit failed");
 }
-
 #[test]
 fn create_isolated_worktree_discovers_nested_repo_from_harness_parent() {
     let harness = tempdir().expect("harness");
@@ -12215,7 +11829,6 @@ fn create_isolated_worktree_discovers_nested_repo_from_harness_parent() {
         Some("codex/agent-harness-nested")
     );
 }
-
 #[test]
 fn create_isolated_worktree_reports_friendly_error_when_no_repo_found() {
     let harness = tempdir().expect("harness");
@@ -12249,7 +11862,6 @@ fn create_isolated_worktree_reports_friendly_error_when_no_repo_found() {
         "expected actionable discovery error, got: {message}"
     );
 }
-
 #[test]
 fn create_isolated_worktree_rejects_ambiguous_nested_repos() {
     let harness = tempdir().expect("harness");
@@ -12274,71 +11886,6 @@ fn create_isolated_worktree_rejects_ambiguous_nested_repos() {
         "expected ambiguity diagnostic, got: {message}"
     );
 }
-/// Discovery may adopt a nested checkout only at the anchor itself. A session
-/// workspace that is not a repository used to walk up to `$HOME` and scan
-/// *its* children (live session, 2026-10-24: "Multiple git repositories found
-/// under /Users/asto. Specify cwd to disambiguate: /Users/asto/flutter,
-/// /Users/asto/Spec2017-iOS") — leaking unrelated project names and, with a
-/// single sibling, silently adopting a stranger's repository.
-///
-/// The anchor probe itself (`git rev-parse` from the workspace) walks
-/// unboundedly, so this test assumes the tempdir is not inside a checkout
-/// (the base no-repo test nests six levels to dodge the same assumption).
-#[test]
-fn worktree_discovery_never_adopts_or_enumerates_an_ancestors_sibling_repos() {
-    let home = tempdir().expect("home");
-    for name in ["flutter", "Spec2017-iOS"] {
-        let sibling = home.path().join(name);
-        std::fs::create_dir_all(&sibling).expect("sibling dir");
-        init_git_repo_at(&sibling);
-    }
-    // `<home>/.pinvou3/sessions/<sid>/workspace`: not a repository, with the
-    // sibling repositories four hops up — home is exactly the fourth (last)
-    // probed ancestor, and the Tried-list assertion below fails if a fixture
-    // change pushes it out of the probe window and turns this test vacuous.
-    let workspace = home
-        .path()
-        .join(".pinvou3")
-        .join("sessions")
-        .join("sid")
-        .join("workspace");
-    std::fs::create_dir_all(&workspace).expect("workspace");
-    let worktree_home = tempdir().expect("worktree home");
-    let request = SubAgentWorktreeRequest {
-        branch: Some("codex/agent-session".to_string()),
-        path: Some(worktree_home.path().join("isolated")),
-        base_ref: None,
-    };
-
-    let message = create_isolated_worktree(&workspace, &request, None, &FleetRole::Worker)
-        .expect_err("a workspace outside any repository must not borrow an ancestor's sibling")
-        .to_string();
-    assert!(
-        message.contains("requires a git repository"),
-        "expected the no-repository diagnostic, got: {message}"
-    );
-    assert!(
-        !message.contains("Multiple git repositories")
-            && !message.contains("flutter")
-            && !message.contains("Spec2017-iOS"),
-        "ancestor siblings must not be scanned or named: {message}"
-    );
-    assert!(
-        message.contains(home.path().to_string_lossy().as_ref()),
-        "the walk must have actually probed home (last ancestor in the window): {message}"
-    );
-
-    // A single sibling must not be adopted silently either.
-    std::fs::remove_dir_all(home.path().join("Spec2017-iOS")).expect("drop one sibling");
-    let message = create_isolated_worktree(&workspace, &request, None, &FleetRole::Worker)
-        .expect_err("one sibling repository is still not the workspace's repository")
-        .to_string();
-    assert!(
-        message.contains("requires a git repository"),
-        "expected the no-repository diagnostic, got: {message}"
-    );
-}
-
 #[test]
 fn build_subagent_system_prompt_appends_role_when_set() {
     let assignment = SubAgentAssignment::new("p".to_string(), Some("worker".to_string()));
@@ -12351,21 +11898,18 @@ fn build_subagent_system_prompt_appends_role_when_set() {
     // The shared background-worker / caller framing follows the role line.
     assert!(prompt.contains("background sub-agent"));
 }
-
 #[test]
 fn build_subagent_system_prompt_skips_role_when_none() {
     let assignment = SubAgentAssignment::new("p".to_string(), None);
     let prompt = build_subagent_system_prompt(&FleetRole::Worker, &assignment);
     assert!(!prompt.contains("You are operating in the role of"));
 }
-
 #[test]
 fn build_subagent_system_prompt_skips_role_when_blank() {
     let assignment = SubAgentAssignment::new("p".to_string(), Some("   ".to_string()));
     let prompt = build_subagent_system_prompt(&FleetRole::Worker, &assignment);
     assert!(!prompt.contains("You are operating in the role of"));
 }
-
 #[test]
 fn fresh_forked_and_nested_subagents_share_authority_bound_skill_catalogs() {
     let _env = crate::test_support::lock_test_env();
@@ -12479,7 +12023,6 @@ fn fresh_forked_and_nested_subagents_share_authority_bound_skill_catalogs() {
         "workspace plugin authority must not leak into another worktree: {isolated_system}"
     );
 }
-
 #[test]
 fn subagent_done_sentinel_format_is_well_formed() {
     let res = make_snapshot(SubAgentStatus::Completed);
@@ -12506,7 +12049,6 @@ fn subagent_done_sentinel_format_is_well_formed() {
     assert!(parsed.get("duration_ms").is_none());
     assert!(parsed.get("steps").is_none());
 }
-
 #[test]
 fn subagent_done_sentinel_keeps_large_result_out_of_metadata() {
     let mut res = make_snapshot(SubAgentStatus::Completed);
@@ -12527,7 +12069,6 @@ fn subagent_done_sentinel_keeps_large_result_out_of_metadata() {
         "sentinel should not duplicate large result text"
     );
 }
-
 #[test]
 fn subagent_done_sentinel_marks_truncated_summaries() {
     // issue #2652: when the child summary was length-gated, the sentinel must
@@ -12540,7 +12081,6 @@ fn subagent_done_sentinel_marks_truncated_summaries() {
     let parsed: serde_json::Value = serde_json::from_str(inner).expect("inner JSON parses");
     assert_eq!(parsed["summary_kind"], "truncated");
 }
-
 #[test]
 fn failed_subagent_completion_is_high_priority_and_retrievable() {
     let mut res = make_snapshot(SubAgentStatus::Failed(
@@ -12574,7 +12114,6 @@ fn failed_subagent_completion_is_high_priority_and_retrievable() {
     let completed = subagent_completion_from_result(&make_snapshot(SubAgentStatus::Completed));
     assert!(!completed.is_high_priority_failure());
 }
-
 #[test]
 fn budget_exhaustion_is_a_high_priority_failure_event() {
     let completion =
@@ -12592,7 +12131,6 @@ fn budget_exhaustion_is_a_high_priority_failure_event() {
             .contains(r#""failure_class":"token_budget""#)
     );
 }
-
 #[test]
 fn stamp_subagent_summary_appends_note_when_short() {
     // issue #2652: a short (complete) summary gets the soft self-report note
@@ -12609,7 +12147,6 @@ fn stamp_subagent_summary_appends_note_when_short() {
         "short summary must not get the truncation footer"
     );
 }
-
 #[test]
 fn forkguard_subagent_report_artifact_keeps_exact_bytes() {
     let home = tempdir().expect("artifact home");
@@ -12651,7 +12188,6 @@ fn forkguard_subagent_report_artifact_keeps_exact_bytes() {
         assert!(spill_subagent_final_report(blocked_session, &result).is_none());
     });
 }
-
 #[test]
 fn stamp_subagent_summary_truncates_when_over_budget() {
     // issue #2652: a summary exceeding the budget is head+tail truncated using
@@ -12686,7 +12222,6 @@ fn stamp_subagent_summary_truncates_when_over_budget() {
     assert!(saved.contains("activate it via tool_search first"));
     assert!(saved.contains("if neither route is available"));
 }
-
 #[test]
 fn subagent_failed_sentinel_format_is_well_formed() {
     let mut result = make_snapshot(SubAgentStatus::Failed("boom".to_string()));
@@ -12712,7 +12247,6 @@ fn subagent_failed_sentinel_format_is_well_formed() {
     // Stays lean — the error text lives on the previous line, not the sentinel.
     assert!(parsed.get("error").is_none());
 }
-
 #[test]
 fn annotated_failure_message_composes_class_tag_and_model_hint() {
     // #3884: the failure recorder composes subagent_failure_message (adds the
@@ -12755,7 +12289,6 @@ fn annotated_failure_message_composes_class_tag_and_model_hint() {
     assert!(annotated.contains("route:"), "{annotated}");
     assert!(annotated.contains("explicit model id"), "{annotated}");
 }
-
 #[test]
 fn subagent_failure_message_preserves_error_chain() {
     // #3884: `to_string()` on an anyhow error prints only the outermost
@@ -12796,7 +12329,6 @@ fn subagent_failure_message_preserves_error_chain() {
     let message = subagent_failure_message(&err);
     assert_eq!(message, "outer: boom");
 }
-
 #[test]
 fn forkguard_quota_exhausted_skips_rate_limit_governor_and_stays_fatal() {
     // PR#43 follow-up: only LlmError::RateLimited feeds the rate-limit
@@ -12830,7 +12362,6 @@ fn forkguard_quota_exhausted_skips_rate_limit_governor_and_stays_fatal() {
     });
     assert!(is_governor_reported_rate_limit(&rate_limited_err));
 }
-
 #[test]
 fn annotate_child_model_error_adds_actionable_hint() {
     // #2653: a bare provider 403 becomes actionable by naming the model and the
@@ -12876,7 +12407,6 @@ fn annotate_child_model_error_adds_actionable_hint() {
         "OpenAI-style rejection gets the hint: {openai_style}"
     );
 }
-
 #[test]
 fn child_launch_error_names_provider_model_and_route_source() {
     // #4049: a model-not-found child launch failure must name the provider
@@ -12920,13 +12450,11 @@ fn child_launch_error_names_provider_model_and_route_source() {
         "inherit route source: {inherited}"
     );
 }
-
 #[test]
 fn subagent_runtime_default_max_depth_is_three() {
     // Sanity-check the constant — bumping it without a test means stale docs.
     assert_eq!(DEFAULT_MAX_SPAWN_DEPTH, 3);
 }
-
 #[test]
 fn would_exceed_depth_at_boundary() {
     // depth=2, max=3 → next spawn (depth 3) is allowed (allow-equal).
@@ -12948,7 +12476,6 @@ fn would_exceed_depth_at_boundary() {
         "depth 2 + max 3 → next is 3, allowed"
     );
 }
-
 #[test]
 fn clamp_child_max_spawn_depth_enforces_absolute_ceiling() {
     let ceiling = codewhale_config::MAX_SPAWN_DEPTH_CEILING;
@@ -12972,7 +12499,6 @@ fn clamp_child_max_spawn_depth_enforces_absolute_ceiling() {
         "at the ceiling, a further spawn must be blocked regardless of max_depth"
     );
 }
-
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
 async fn rate_limit_pause_blocks_subagent_spawn() {
@@ -13007,7 +12533,6 @@ async fn rate_limit_pause_blocks_subagent_spawn() {
         "refused spawn must not register or launch a worker"
     );
 }
-
 #[test]
 fn child_runtime_increments_depth_and_preserves_auto_approve() {
     let mut parent = stub_runtime();
@@ -13038,7 +12563,6 @@ fn child_runtime_increments_depth_and_preserves_auto_approve() {
 // `WorkRuntime::matches_todos` keys on `Arc::ptr_eq`, drove the parent's work
 // graph). These tests pin the invariant: every spawned agent owns its list,
 // and no agent can reach a parent's or a sibling's.
-
 /// Run `work_update` against `todos` with `runtime`'s own tool context, the
 /// way a live agent's registry would.
 async fn write_todos_as(runtime: &SubAgentRuntime, contents: &[&str]) {
@@ -13051,7 +12575,6 @@ async fn write_todos_as(runtime: &SubAgentRuntime, contents: &[&str]) {
         .await
         .expect("work_update must succeed against the agent's own list");
 }
-
 async fn todo_contents(todos: &crate::tools::todo::SharedTodoList) -> Vec<String> {
     todos
         .lock()
@@ -13062,7 +12585,6 @@ async fn todo_contents(todos: &crate::tools::todo::SharedTodoList) -> Vec<String
         .map(|item| item.content)
         .collect()
 }
-
 #[test]
 fn child_and_nested_runtimes_get_their_own_todo_list() {
     let parent = stub_runtime();
@@ -13095,7 +12617,6 @@ fn child_and_nested_runtimes_get_their_own_todo_list() {
         "a detached background child must not share a sibling's todo list"
     );
 }
-
 #[tokio::test]
 async fn direct_child_todo_write_cannot_mutate_parent_checklist() {
     let parent = stub_runtime();
@@ -13120,7 +12641,6 @@ async fn direct_child_todo_write_cannot_mutate_parent_checklist() {
         "the child must still be able to write and read its own list"
     );
 }
-
 #[tokio::test]
 async fn nested_child_todo_write_cannot_mutate_parent_or_grandparent() {
     let root = stub_runtime();
@@ -13136,7 +12656,6 @@ async fn nested_child_todo_write_cannot_mutate_parent_or_grandparent() {
     assert_eq!(todo_contents(&direct.todos).await, vec!["direct item"]);
     assert_eq!(todo_contents(&nested.todos).await, vec!["nested item"]);
 }
-
 #[tokio::test]
 async fn sibling_children_cannot_mutate_each_others_todo_lists() {
     let parent = stub_runtime();
@@ -13156,7 +12675,6 @@ async fn sibling_children_cannot_mutate_each_others_todo_lists() {
         "neither sibling may write into the parent's list"
     );
 }
-
 /// The parent's list is the one bound to the work graph. A child must not be
 /// able to reach that graph — `matches_todos` is what routes a write there.
 #[tokio::test]
@@ -13211,7 +12729,6 @@ async fn child_todo_write_cannot_reach_the_parent_work_graph() {
         "the child's own list still accepts writes"
     );
 }
-
 /// Isolating the list must not cut children off from *seeing* parent progress.
 /// The sanctioned channel is the fork-context structured-state block, which is
 /// immutable text — it still propagates through the whole spawn chain.
@@ -13249,14 +12766,12 @@ async fn parent_todo_state_still_reaches_children_as_immutable_fork_context() {
 }
 
 // === #3983: every child reads its own To-do list ===
-
 fn todo_source_for(runtime: &SubAgentRuntime) -> crate::todo_snapshot::TodoSource {
     crate::todo_snapshot::TodoSource::new(
         runtime.context.runtime.work.clone(),
         runtime.todos.clone(),
     )
 }
-
 /// A child sends its stored messages and nothing else. Its To-do state is
 /// already in those messages, as the result of its own `work_update` call —
 /// no step appends a synthetic copy of the list.
@@ -13295,7 +12810,6 @@ async fn child_request_messages_are_exactly_its_stored_messages() {
         assert!(!text.contains("child step one"), "{text}");
     }
 }
-
 /// Sibling and parent isolation: each agent's snapshot states only its own
 /// list. This is what the fork handoff and the agent card both read.
 #[tokio::test]
@@ -13343,7 +12857,6 @@ async fn child_todo_snapshot_never_leaks_across_siblings_or_to_the_parent() {
         }
     }
 }
-
 #[test]
 fn child_and_background_runtimes_preserve_step_api_timeout() {
     let timeout = Duration::from_secs(7);
@@ -13360,7 +12873,6 @@ fn child_and_background_runtimes_preserve_step_api_timeout() {
     assert_eq!(background.step_api_timeout, timeout);
     assert_eq!(background.api_timeout_retry_base_backoff, backoff);
 }
-
 #[tokio::test]
 async fn subagent_registry_blocks_approval_tools_without_parent_auto_approve() {
     let mut runtime = stub_runtime();
@@ -13387,7 +12899,6 @@ async fn subagent_registry_blocks_approval_tools_without_parent_auto_approve() {
         "unexpected error: {err}"
     );
 }
-
 #[tokio::test]
 async fn prompt_only_general_cannot_mutate_under_parent_auto_approve() {
     let tmp = tempdir().expect("tempdir");
@@ -13435,7 +12946,6 @@ async fn prompt_only_general_cannot_mutate_under_parent_auto_approve() {
 }
 
 const MCP_ACTION_TOOL: &str = "mcp_github_create_pull_request";
-
 fn subagent_registry_with_mcp_action(auto_approve: bool) -> SubAgentToolRegistry {
     let mut runtime = stub_runtime();
     runtime.context.auto_approve = auto_approve;
@@ -13453,7 +12963,6 @@ fn subagent_registry_with_mcp_action(auto_approve: bool) -> SubAgentToolRegistry
         ));
     registry
 }
-
 #[tokio::test]
 async fn child_write_tool_fails_closed_outside_registered_scope() {
     let _env_lock = crate::test_support::lock_test_env();
@@ -13655,7 +13164,6 @@ async fn child_write_tool_fails_closed_outside_registered_scope() {
     );
     assert!(!tmp.path().join("docs/run-escape.txt").exists());
 }
-
 /// A lone writer in the shared checkout keeps its shell.
 ///
 /// The gate above exists so concurrent children cannot overwrite each other.
@@ -13720,7 +13228,6 @@ async fn lone_shared_writer_keeps_unbounded_shell() {
         );
     }
 }
-
 #[test]
 fn shared_claim_shell_gate_normalizes_only_the_run_action() {
     assert!(is_unbounded_shell_run(
@@ -13739,7 +13246,6 @@ fn shared_claim_shell_gate_normalizes_only_the_run_action() {
         );
     }
 }
-
 /// Build one registry per contended child, both bound to the same shared
 /// manager and workspace — the two-builder shared-checkout topology.
 fn contended_builder_registry(
@@ -13762,7 +13268,6 @@ fn contended_builder_registry(
         Arc::new(Mutex::new(PlanState::default())),
     )
 }
-
 /// Two live write-capable children with disjoint `exact_files` claims in one
 /// shared checkout: a bash call the read-only classifier proves mutation-free
 /// must still run on both. The contention gate used to re-test
@@ -13809,7 +13314,6 @@ async fn contended_shared_writers_keep_proven_readonly_shell() {
             });
     }
 }
-
 /// The same contention still refuses a shell call the classifier cannot prove
 /// read-only — and the refusal names the blocking peer and its remediation so
 /// the child can recover instead of retrying blindly.
@@ -13870,236 +13374,6 @@ async fn contended_shared_writer_refusal_names_blocking_peer_and_remediation() {
         "the refused command must not have run"
     );
 }
-/// The isolated lane carries the same contention premise as the shared one:
-/// the same-worktree admission chain lets several unrelated writers share ONE
-/// checkout on disjoint claims (overlapping same-root scopes are refused at
-/// admission, so a live peer here always holds a disjoint share), and an
-/// unbounded shell command cannot prove it stays inside the owner's share —
-/// so a live same-worktree peer blocks it, naming that peer. The old
-/// assumption "isolated means sole writer of the worktree" no longer holds
-/// once a worktree parent can fan children out into its own checkout.
-#[tokio::test]
-async fn same_worktree_disjoint_sibling_blocks_unbounded_shell() {
-    let tmp = tempdir().expect("tempdir");
-    let worktree = tmp.path().join("wt-blocked");
-    std::fs::create_dir_all(worktree.join("a-dir")).expect("worktree layout");
-    let canonical_worktree = worktree.canonicalize().expect("canonical worktree");
-    let manager = new_shared_subagent_manager(tmp.path().to_path_buf(), 4);
-    {
-        let mut guard = manager.write().await;
-        assert_eq!(guard.insert_test_running_agent("a", &worktree), "agent_a");
-        assert_eq!(guard.insert_test_running_agent("b", &worktree), "agent_b");
-        let live: HashSet<String> = ["agent_a".to_string(), "agent_b".to_string()]
-            .into_iter()
-            .collect();
-        for (owner, root) in [("agent_a", "a-dir"), ("agent_b", "b-dir")] {
-            guard
-                .coordination
-                .register_claim(
-                    WriteScopeClaim {
-                        owner: owner.into(),
-                        roots: vec![root.into()],
-                        exact_files: vec![],
-                        contracts: vec![],
-                    },
-                    true,
-                    Some(canonical_worktree.to_string_lossy().into_owned()),
-                    &[],
-                    |candidate| live.contains(candidate),
-                )
-                .expect("disjoint same-worktree claims admit both live writers");
-        }
-    }
-    let registry = contended_builder_registry(&manager, &worktree, "agent_a");
-    let err = registry
-        .execute(
-            "agent_a",
-            "Bash",
-            json!({"action": "run", "command": "touch a-dir/unbounded.txt"}),
-        )
-        .await
-        .expect_err("unbounded shell against a live same-worktree peer must be refused")
-        .to_string();
-    assert!(
-        err.contains("cannot prove a bounded file target"),
-        "refusal kind: {err}"
-    );
-    assert!(
-        err.contains("this same worktree") && err.contains("agent_b"),
-        "refusal must name the same-worktree blocking peer: {err}"
-    );
-    assert!(
-        !worktree.join("a-dir/unbounded.txt").exists(),
-        "the refused command must not have run"
-    );
-}
-
-/// The ancestor chain keeps its unbounded shell inside the shared worktree:
-/// admission deliberately admits a descendant overlapping its ancestors (one
-/// delegated work unit), so the parent's live claim must not gate the child
-/// the way an unrelated sibling does. Dropping the exemption turns this into
-/// a contention refusal and a delegation chain could never run ordinary
-/// shell work at all.
-#[tokio::test]
-async fn same_worktree_ancestor_chain_keeps_unbounded_shell() {
-    let tmp = tempdir().expect("tempdir");
-    let coordination_root = tmp.path().join("workspace");
-    let worktree = tmp
-        .path()
-        .join(".codewhale-worktrees")
-        .join("workspace")
-        .join("codex-agent-parent");
-    std::fs::create_dir_all(worktree.join("c-dir")).expect("worktree layout");
-    let manager = new_shared_subagent_manager(coordination_root, 4);
-    let claim = |root: &str| WriteScopeClaim {
-        owner: String::new(),
-        roots: vec![root.into()],
-        exact_files: vec![],
-        contracts: vec![],
-    };
-
-    let mut guard = manager.write().await;
-    let mut parent_runtime = stub_runtime();
-    parent_runtime.manager = Arc::clone(&manager);
-    parent_runtime.context = ToolContext::new(&worktree);
-    let parent = guard
-        .spawn_background_with_assignment_options(
-            Arc::clone(&manager),
-            parent_runtime,
-            FleetRole::Builder,
-            "work in the worktree".into(),
-            make_assignment(),
-            Some(vec![]),
-            SubAgentSpawnOptions {
-                name: Some("shell-worktree-parent".into()),
-                write_claim: Some(claim(".")),
-                isolated_worktree: true,
-                ..Default::default()
-            },
-        )
-        .expect("worktree parent admitted");
-    // Live parent: otherwise the peer never exists and the test passes with
-    // the exemption removed (the round-4 mutation lesson).
-    if let Some(agent) = guard.agents.get_mut(&parent.agent_id) {
-        agent.status = SubAgentStatus::Running;
-    }
-    let child = {
-        let mut child_runtime = stub_runtime();
-        child_runtime.manager = Arc::clone(&manager);
-        child_runtime.context = ToolContext::new(&worktree);
-        child_runtime.parent_agent_id = Some(parent.agent_id.clone());
-        guard
-            .spawn_background_with_assignment_options(
-                Arc::clone(&manager),
-                child_runtime,
-                FleetRole::Builder,
-                "run shell in the delegated share".into(),
-                make_assignment(),
-                Some(vec![]),
-                SubAgentSpawnOptions {
-                    name: Some("shell-child".into()),
-                    write_claim: Some(claim("c-dir")),
-                    ..Default::default()
-                },
-            )
-            .expect("a disjoint descendant of the live worktree parent is admitted")
-    };
-    drop(guard);
-
-    let registry = contended_builder_registry(&manager, &worktree, &child.agent_id);
-    registry
-        .execute(
-            &child.agent_id,
-            "Bash",
-            json!({"action": "run", "command": "touch c-dir/chain.txt"}),
-        )
-        .await
-        .unwrap_or_else(|err| {
-            panic!(
-                "the parent's live claim must not gate the delegated child's unbounded shell: {err}"
-            )
-        });
-    assert!(
-        worktree.join("c-dir/chain.txt").exists(),
-        "the admitted command must actually have run"
-    );
-}
-
-/// Liveness and the worktree boundary stay load-bearing in the isolated gate:
-/// a settled sibling's claim cannot block (a terminal owner cannot write), and
-/// a peer keyed on a DIFFERENT worktree never shared this checkout.
-#[tokio::test]
-async fn same_worktree_gate_ignores_settled_and_foreign_worktree_peers() {
-    let tmp = tempdir().expect("tempdir");
-    let worktree = tmp.path().join("wt-live");
-    let other_worktree = tmp.path().join("wt-other");
-    std::fs::create_dir_all(worktree.join("a-dir")).expect("worktree layout");
-    std::fs::create_dir_all(&other_worktree).expect("other worktree layout");
-    let canonical_worktree = worktree.canonicalize().expect("canonical worktree");
-    let canonical_other = other_worktree.canonicalize().expect("canonical other");
-    let manager = new_shared_subagent_manager(tmp.path().to_path_buf(), 4);
-    {
-        let mut guard = manager.write().await;
-        assert_eq!(guard.insert_test_running_agent("a", &worktree), "agent_a");
-        assert_eq!(guard.insert_test_running_agent("b", &worktree), "agent_b");
-        assert_eq!(guard.insert_test_running_agent("c", &worktree), "agent_c");
-        let live: HashSet<String> = ["agent_a".to_string(), "agent_b".to_string()]
-            .into_iter()
-            .collect();
-        for (owner, scope, root) in [
-            (
-                "agent_a",
-                "a-dir",
-                canonical_worktree.to_string_lossy().into_owned(),
-            ),
-            (
-                "agent_b",
-                "b-dir",
-                canonical_worktree.to_string_lossy().into_owned(),
-            ),
-            (
-                "agent_c",
-                ".",
-                canonical_other.to_string_lossy().into_owned(),
-            ),
-        ] {
-            guard
-                .coordination
-                .register_claim(
-                    WriteScopeClaim {
-                        owner: owner.into(),
-                        roots: vec![scope.into()],
-                        exact_files: vec![],
-                        contracts: vec![],
-                    },
-                    true,
-                    Some(root),
-                    &[],
-                    |candidate| live.contains(candidate),
-                )
-                .expect("same-worktree disjoint-root claims and a foreign-worktree claim admit");
-        }
-        if let Some(agent) = guard.agents.get_mut("agent_b") {
-            agent.status = SubAgentStatus::Completed;
-        }
-    }
-    let registry = contended_builder_registry(&manager, &worktree, "agent_a");
-    registry
-        .execute(
-            "agent_a",
-            "Bash",
-            json!({"action": "run", "command": "touch a-dir/kept.txt"}),
-        )
-        .await
-        .unwrap_or_else(|err| {
-            panic!("a settled sibling and a foreign-worktree peer must not gate the shell: {err}")
-        });
-    assert!(
-        worktree.join("a-dir/kept.txt").exists(),
-        "the admitted command must actually have run"
-    );
-}
-
 /// A child whose task body panics must still reach a terminal state.
 /// `spawn_supervised` catches the panic to keep the parent alive; without the
 /// guard committing a crash result the child stayed `Running` and its write
@@ -14163,7 +13437,6 @@ async fn panicked_child_task_terminalizes_and_stops_gating_peers() {
         "a panicked child must not keep gating peers as a live writer"
     );
 }
-
 /// A headless fleet worker (a worker record with no paired agent entry) that
 /// reaches `WaitingForUser` can never be answered — nothing will resume or
 /// finalize it — so it must not count as a live coordination owner, and the
@@ -15097,7 +14370,6 @@ async fn claim_less_worktree_child_still_confers_isolation_through_its_manifest(
         "the manifest fallback still puts the claim on the isolated footing"
     );
 }
-
 #[tokio::test]
 async fn subagent_blocks_mcp_action_without_parent_auto_approve() {
     let registry = subagent_registry_with_mcp_action(false);
@@ -15114,7 +14386,6 @@ async fn subagent_blocks_mcp_action_without_parent_auto_approve() {
         "unexpected MCP approval error: {err}"
     );
 }
-
 #[tokio::test]
 async fn auto_approved_subagent_passes_mcp_action_approval_gate() {
     let registry = subagent_registry_with_mcp_action(true);
@@ -15133,7 +14404,6 @@ async fn auto_approved_subagent_passes_mcp_action_approval_gate() {
         "auto-approved MCP actions must not stop at the approval gate: {message}"
     );
 }
-
 #[tokio::test]
 async fn implementer_delegation_allows_suggest_write_without_parent_auto_approve() {
     // Issue #1828: implementer agents could not write files even when their
@@ -15171,7 +14441,6 @@ async fn implementer_delegation_allows_suggest_write_without_parent_auto_approve
         "successful write should not look like an approval error: {result}"
     );
 }
-
 #[tokio::test]
 async fn workflow_accept_edits_allows_general_file_write_without_parent_auto_approve() {
     // Workflow-spawned children accept Suggest-level file edits for write-capable
@@ -15220,7 +14489,6 @@ async fn workflow_accept_edits_allows_general_file_write_without_parent_auto_app
         "unexpected: {err}"
     );
 }
-
 #[tokio::test]
 async fn general_delegation_still_blocks_suggest_write_without_parent_auto_approve() {
     let tmp = tempdir().expect("tempdir");
@@ -15255,7 +14523,6 @@ async fn general_delegation_still_blocks_suggest_write_without_parent_auto_appro
         "general write must not land without parent auto-approve"
     );
 }
-
 #[tokio::test]
 async fn explore_role_still_blocks_suggest_writes_without_parent_auto_approve() {
     // Read-only stances (explore, plan, review, verifier) must not gain
@@ -15295,7 +14562,6 @@ async fn explore_role_still_blocks_suggest_writes_without_parent_auto_approve() 
         "file must not have been written"
     );
 }
-
 #[tokio::test]
 async fn explore_role_blocks_writes_even_under_parent_auto_approve() {
     // #3217: the authoritative per-role posture closes the auto-approve bypass —
@@ -15341,7 +14607,6 @@ async fn explore_role_blocks_writes_even_under_parent_auto_approve() {
         "file must not have been written under auto-approve"
     );
 }
-
 #[tokio::test]
 async fn delegated_write_role_still_blocks_required_tools() {
     // Required-level tools such as Bash remain gated behind parent
@@ -15373,7 +14638,6 @@ async fn delegated_write_role_still_blocks_required_tools() {
         "expected Required-level approval message, got: {err}"
     );
 }
-
 #[test]
 fn read_only_role_starts_do_not_require_approval() {
     // #5186: an explicit canonical read-only role spawns without a modal in
@@ -15414,7 +14678,6 @@ fn read_only_role_starts_do_not_require_approval() {
         ApprovalRequirement::Auto
     );
 }
-
 #[test]
 fn write_capable_or_unproven_starts_keep_the_approval_gate() {
     // #5186: anything the parser cannot prove read-only keeps the modal.
@@ -15454,7 +14717,6 @@ fn write_capable_or_unproven_starts_keep_the_approval_gate() {
         ApprovalRequirement::Auto
     );
 }
-
 #[tokio::test]
 async fn worker_child_inherits_workspace_write_carve_out_without_parent_auto_approve() {
     // #5186: a write-posture child that is NOT an explicit write-delegated
@@ -15505,7 +14767,6 @@ async fn worker_child_inherits_workspace_write_carve_out_without_parent_auto_app
         );
     }
 }
-
 #[tokio::test]
 async fn worker_child_write_carve_out_requires_a_git_work_tree() {
     // #5186: without a `.git` marker the child keeps the old delegation
@@ -15535,7 +14796,6 @@ async fn worker_child_write_carve_out_requires_a_git_work_tree() {
         "unexpected error: {err}"
     );
 }
-
 #[tokio::test]
 async fn builder_child_runs_bounded_verification_but_not_shell_without_parent_auto_approve() {
     // #5186: the bounded built-in verification surface is delegated to
@@ -15594,7 +14854,6 @@ async fn builder_child_runs_bounded_verification_but_not_shell_without_parent_au
         "unexpected error: {argv_err}"
     );
 }
-
 #[tokio::test]
 async fn auto_approved_parent_runs_required_tools_in_subagent() {
     // Baseline: when the parent runtime IS auto-approved, every approval
@@ -15623,7 +14882,6 @@ async fn auto_approved_parent_runs_required_tools_in_subagent() {
         .await
         .expect("auto-approved parent should allow writes");
 }
-
 #[test]
 fn subagent_request_budget_inherits_the_resolved_route_allowance() {
     assert_eq!(
@@ -15632,7 +14890,6 @@ fn subagent_request_budget_inherits_the_resolved_route_allowance() {
         "sub-agents must not impose a smaller internal output ceiling"
     );
 }
-
 #[test]
 fn incomplete_response_failure_keeps_the_provider_stop_cause() {
     let response = MessageResponse {
@@ -15652,7 +14909,6 @@ fn incomplete_response_failure_keeps_the_provider_stop_cause() {
     assert!(failure.contains("`content_filter`"), "{failure}");
     assert!(!failure.contains("budget exhausted"), "{failure}");
 }
-
 #[test]
 fn child_cancellation_cascades_from_parent() {
     let parent = stub_runtime();
@@ -15664,7 +14920,6 @@ fn child_cancellation_cascades_from_parent() {
         "parent cancel() must propagate to child via child_token()"
     );
 }
-
 #[test]
 fn detached_background_children_survive_parent_cancellation() {
     let parent = stub_runtime();
@@ -15678,7 +14933,6 @@ fn detached_background_children_survive_parent_cancellation() {
         "parent stop must leave every detached child running until explicitly cancelled"
     );
 }
-
 #[test]
 fn agent_start_is_turn_owned_unless_detached_is_explicit() {
     let owned = parse_spawn_request(&json!({"prompt": "inspect the workspace"}))
@@ -15698,7 +14952,6 @@ fn agent_start_is_turn_owned_unless_detached_is_explicit() {
         "only an explicit detached=true may outlive the turn"
     );
 }
-
 #[test]
 fn agent_start_marks_only_explicit_detachment_as_durable_work() {
     let runtime = stub_runtime();
@@ -15716,7 +14969,6 @@ fn agent_start_marks_only_explicit_detachment_as_durable_work() {
         "only detached=true may opt into durable background scheduling"
     );
 }
-
 #[tokio::test]
 async fn foreground_turn_cancellation_joins_direct_children_once_and_excludes_detached() {
     let registry = Arc::new(ForegroundChildRegistry::new());
@@ -15773,7 +15025,6 @@ async fn foreground_turn_cancellation_joins_direct_children_once_and_excludes_de
     assert!(late_token.is_cancelled());
     assert_eq!(registry.active_count(), 0);
 }
-
 #[tokio::test]
 async fn foreground_registration_releases_when_the_child_future_returns_or_unwinds() {
     let registry = Arc::new(ForegroundChildRegistry::new());
@@ -15804,7 +15055,6 @@ async fn foreground_registration_releases_when_the_child_future_returns_or_unwin
         .await
         .expect("return and panic-unwind both release foreground ownership");
 }
-
 #[tokio::test]
 async fn turn_owned_descendants_join_and_park_with_the_same_foreground_registry() {
     let registry = Arc::new(ForegroundChildRegistry::new());
@@ -15874,7 +15124,6 @@ async fn turn_owned_descendants_join_and_park_with_the_same_foreground_registry(
     );
     assert!(!detached.cancel_token.is_cancelled());
 }
-
 #[test]
 fn derived_child_cancellation_reaches_tool_context_while_detached_stays_independent() {
     let root = stub_runtime();
@@ -15915,7 +15164,6 @@ fn derived_child_cancellation_reaches_tool_context_while_detached_stays_independ
             .is_some_and(CancellationToken::is_cancelled)
     );
 }
-
 #[tokio::test]
 async fn turn_end_parking_preserves_a_step_zero_resumable_checkpoint() {
     let tmp = tempdir().expect("tempdir");
@@ -15988,7 +15236,6 @@ async fn turn_end_parking_preserves_a_step_zero_resumable_checkpoint() {
     assert!(explicit_needs_input.is_none());
     assert_eq!(explicit_worker_status, AgentWorkerStatus::Cancelled);
 }
-
 #[test]
 fn turn_end_parking_wins_over_the_final_child_step_limit() {
     let agent_id = "agent_turn_end_final_step";
@@ -16015,7 +15262,6 @@ fn turn_end_parking_wins_over_the_final_child_step_limit() {
     assert!(needs_input.is_some());
     assert_eq!(worker_status, AgentWorkerStatus::Interrupted);
 }
-
 #[test]
 fn mailbox_propagates_through_child_runtime_chain() {
     use crate::tools::subagent::mailbox::Mailbox;
@@ -16035,7 +15281,6 @@ fn mailbox_propagates_through_child_runtime_chain() {
         "grandchild inherits via the cloned Arc inside Mailbox"
     );
 }
-
 #[test]
 fn subagent_rejects_interactive_shell_terminal_takeover() {
     let err = reject_subagent_terminal_takeover(
@@ -16078,7 +15323,6 @@ fn subagent_rejects_interactive_shell_terminal_takeover() {
     )
     .expect("background shell remains allowed");
 }
-
 #[tokio::test]
 async fn mailbox_close_as_cancel_propagates_to_grandchild_runtime() {
     use crate::tools::subagent::mailbox::Mailbox;
@@ -16103,7 +15347,6 @@ async fn mailbox_close_as_cancel_propagates_to_grandchild_runtime() {
         "close-as-cancel must propagate across max_spawn_depth=3"
     );
 }
-
 #[tokio::test]
 async fn mailbox_orders_messages_from_parent_and_child_runtimes() {
     use crate::tools::subagent::mailbox::{Mailbox, MailboxMessage};
@@ -16155,7 +15398,6 @@ async fn mailbox_orders_messages_from_parent_and_child_runtimes() {
         other => panic!("unexpected message order: {other:?}"),
     }
 }
-
 #[test]
 fn persisted_empty_allowed_tools_loads_as_full_inheritance() {
     // Backward-compat: a v0.6.5 session that persisted with an empty Vec
@@ -16188,7 +15430,6 @@ fn persisted_empty_allowed_tools_loads_as_full_inheritance() {
         "empty Vec on disk → None (full inheritance)"
     );
 }
-
 #[test]
 fn persisted_non_empty_allowed_tools_loads_as_narrow() {
     // Backward-compat the other way: a v0.6.5 session that persisted with
@@ -16221,7 +15462,6 @@ fn persisted_non_empty_allowed_tools_loads_as_narrow() {
         "non-empty Vec → Some(list), narrow scope preserved"
     );
 }
-
 #[test]
 fn persisted_advisory_assignment_roles_replay_and_repersist_as_consultant() {
     for alias in ["oracle", "advisor"] {
@@ -16269,7 +15509,6 @@ fn persisted_advisory_assignment_roles_replay_and_repersist_as_consultant() {
         assert_eq!(repersisted["agents"][0]["agent_type"], json!("advisor"));
     }
 }
-
 /// Build a minimal `SubAgentRuntime` for tests that exercise pure runtime
 /// helpers (depth, cancellation, child_runtime). Doesn't construct a real
 /// HTTP client — calls that hit `runtime.client` would fail, but the
@@ -16335,7 +15574,6 @@ pub(crate) fn stub_runtime() -> SubAgentRuntime {
         ask_on_guardrail: false,
     }
 }
-
 #[test]
 fn root_operate_dispatch_delegates_file_edits_without_bypassing_required_tools() {
     let mut runtime = stub_runtime();
@@ -16353,7 +15591,6 @@ fn root_operate_dispatch_delegates_file_edits_without_bypassing_required_tools()
         "Operate dispatch must not silently grant Required tools such as shell"
     );
 }
-
 #[tokio::test]
 async fn root_operate_dispatch_delegates_builtin_verification_but_not_shell() {
     let tmp = tempdir().expect("tempdir");
@@ -16431,7 +15668,6 @@ async fn root_operate_dispatch_delegates_builtin_verification_but_not_shell() {
         "Operate verification delegation must not propagate past the direct worker"
     );
 }
-
 #[test]
 fn worker_lifecycle_records_direct_operate_approval_without_delegating_authority() {
     let todos = crate::tools::todo::new_shared_todo_list();
@@ -16530,7 +15766,6 @@ fn worker_lifecycle_records_direct_operate_approval_without_delegating_authority
         "nested workers must not inherit Operate approval authority"
     );
 }
-
 /// A minimal stub client. Test helpers below only ever check struct fields
 /// (depth, cancel_token, context); they don't call the network. We need a
 /// *some* `DeepSeekClient` because `SubAgentRuntime.client` isn't
@@ -16541,7 +15776,6 @@ fn stub_runtime_for_provider(provider: &str) -> SubAgentRuntime {
     runtime.client = stub_client_for_provider(provider);
     runtime
 }
-
 fn stub_client_for_provider(provider: &str) -> DeepSeekClient {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let mut providers = crate::config::ProvidersConfig::default();
@@ -16590,7 +15824,6 @@ fn stub_client_for_provider(provider: &str) -> DeepSeekClient {
     };
     DeepSeekClient::new(&config).expect("stub client should construct")
 }
-
 fn stub_client() -> DeepSeekClient {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let config = crate::config::Config {
@@ -16605,7 +15838,6 @@ fn stub_client() -> DeepSeekClient {
 // There are no provider pins outside the durable Fleet runs: every child runs
 // on the parent's provider. Child and background runtimes clone the session
 // client and config unchanged — no cross-provider build, no misroute.
-
 /// A session runtime on `deepseek` with the cross-provider `Config` threaded in,
 /// exactly as the engine wires it via `with_api_config`.
 fn cross_provider_runtime() -> SubAgentRuntime {
@@ -16633,7 +15865,6 @@ fn cross_provider_runtime() -> SubAgentRuntime {
     runtime.client = client;
     runtime
 }
-
 #[test]
 fn spawn_child_runtime_inherits_session_client_and_config() {
     let runtime = cross_provider_runtime();
@@ -16676,7 +15907,6 @@ fn spawn_child_runtime_inherits_session_client_and_config() {
 // carry the prior boot id and are classified as `from_prior_session`.
 // Listings default to current-session only; `include_archived=true` surfaces
 // the prior-session records with the flag set.
-
 fn insert_prior_session_agent(
     manager: &mut SubAgentManager,
     id: &str,
@@ -16722,7 +15952,6 @@ fn insert_prior_session_agent(
     }
     manager.agents.insert(id.to_string(), agent);
 }
-
 fn assign_test_session_owner(
     manager: &mut SubAgentManager,
     agent_id: &str,
@@ -16737,14 +15966,12 @@ fn assign_test_session_owner(
         record.owner_session_id = owner_session_id.to_string();
     }
 }
-
 #[test]
 fn session_boot_ids_are_unique_per_manager() {
     let a = SubAgentManager::new(PathBuf::from("."), 1);
     let b = SubAgentManager::new(PathBuf::from("."), 1);
     assert_ne!(a.session_boot_id(), b.session_boot_id());
 }
-
 #[test]
 fn terminal_synthesis_is_scoped_to_owner_and_keeps_delivery_history() {
     let mut manager = SubAgentManager::new(PathBuf::from("."), 5);
@@ -16787,7 +16014,6 @@ fn terminal_synthesis_is_scoped_to_owner_and_keeps_delivery_history() {
         "returning A -> B -> A must not re-synthesize an already delivered terminal result"
     );
 }
-
 #[test]
 fn active_session_owns_every_roster_and_control_resolution() {
     let workspace = tempdir().expect("tempdir");
@@ -16903,7 +16129,6 @@ fn active_session_owns_every_roster_and_control_resolution() {
         "A -> B -> A restores A's archived control row"
     );
 }
-
 #[test]
 fn forkguard_cancel_all_running_is_session_scoped_and_idempotent() {
     let workspace = tempdir().expect("tempdir");
@@ -16961,7 +16186,6 @@ fn forkguard_cancel_all_running_is_session_scoped_and_idempotent() {
         "idempotent cleanup may not append another terminal event"
     );
 }
-
 #[test]
 fn ownerless_legacy_rows_fail_closed_and_scoped_close_preserves_foreign_workers() {
     let workspace = tempdir().expect("tempdir");
@@ -17013,7 +16237,6 @@ fn ownerless_legacy_rows_fail_closed_and_scoped_close_preserves_foreign_workers(
             .is_terminal()
     );
 }
-
 #[test]
 fn scoped_handle_eviction_drain_preserves_foreign_pending_ids() {
     let mut manager = SubAgentManager::new(PathBuf::from("."), 2);
@@ -17031,7 +16254,6 @@ fn scoped_handle_eviction_drain_preserves_foreign_pending_ids() {
         vec!["agent-b".to_string()]
     );
 }
-
 #[test]
 fn coordination_records_are_visible_and_mutable_only_to_their_owner_session() {
     let mut manager = SubAgentManager::new(PathBuf::from("."), 2);
@@ -17062,7 +16284,6 @@ fn coordination_records_are_visible_and_mutable_only_to_their_owner_session() {
         "B must not gain mutation authority over A's decision"
     );
 }
-
 #[test]
 fn list_filtered_drops_prior_session_terminals_by_default() {
     let mut manager = SubAgentManager::new(PathBuf::from("."), 5);
@@ -17109,7 +16330,6 @@ fn list_filtered_drops_prior_session_terminals_by_default() {
         .unwrap();
     assert!(!current.from_prior_session);
 }
-
 #[test]
 fn list_snapshots_refresh_git_branch_from_agent_workspace() {
     let repo = init_subagent_git_repo();
@@ -17141,7 +16361,6 @@ fn list_snapshots_refresh_git_branch_from_agent_workspace() {
         .expect("current agent should still be listed");
     assert_eq!(agent.git_branch.as_deref(), Some("feature/agent-new"));
 }
-
 #[test]
 fn list_filtered_with_include_archived_returns_everything() {
     let mut manager = SubAgentManager::new(PathBuf::from("."), 5);
@@ -17175,7 +16394,6 @@ fn list_filtered_with_include_archived_returns_everything() {
         .unwrap();
     assert!(!current.from_prior_session);
 }
-
 #[test]
 fn agents_with_empty_boot_id_classify_as_prior_session() {
     // Records persisted before #405 land with an empty `session_boot_id`
@@ -17197,7 +16415,6 @@ fn agents_with_empty_boot_id_classify_as_prior_session() {
         .unwrap();
     assert!(legacy.from_prior_session);
 }
-
 #[test]
 fn persist_round_trip_preserves_session_and_boot_ownership() {
     let dir = tempdir().expect("tempdir");
@@ -17279,7 +16496,6 @@ fn persist_round_trip_preserves_session_and_boot_ownership() {
 // loop drains that channel; for nested agents the running parent sub-agent
 // owns a local receiver and injects the completion into its own transcript.
 // These tests cover the routing logic and no-channel safety.
-
 fn runtime_with_depth(
     spawn_depth: u32,
     parent_completion_tx: Option<mpsc::UnboundedSender<SubAgentCompletion>>,
@@ -17289,7 +16505,6 @@ fn runtime_with_depth(
     rt.parent_completion_tx = parent_completion_tx;
     rt
 }
-
 #[test]
 fn emit_parent_completion_fires_for_direct_child() {
     let (tx, mut rx) = mpsc::unbounded_channel::<SubAgentCompletion>();
@@ -17304,7 +16519,6 @@ fn emit_parent_completion_fires_for_direct_child() {
     assert_eq!(received.payload, "summary line\n<sentinel/>");
     assert!(rx.try_recv().is_err(), "should be exactly one message");
 }
-
 #[test]
 fn child_runtime_inherits_speech_output_dir() {
     let output_dir = PathBuf::from("configured-speech-output");
@@ -17318,7 +16532,6 @@ fn child_runtime_inherits_speech_output_dir() {
         Some(PathBuf::from("configured-speech-output"))
     );
 }
-
 #[test]
 fn emit_parent_completion_fires_for_nested_child() {
     let (tx, mut rx) = mpsc::unbounded_channel::<SubAgentCompletion>();
@@ -17332,7 +16545,6 @@ fn emit_parent_completion_fires_for_nested_child() {
     assert_eq!(received.agent_id, "agent_grandchild");
     assert_eq!(received.payload, "nested summary");
 }
-
 #[test]
 fn emit_parent_completion_skips_engine_self() {
     // depth 0 is the engine itself — the engine never spawns a task at
@@ -17348,7 +16560,6 @@ fn emit_parent_completion_skips_engine_self() {
     );
     assert!(rx.try_recv().is_err());
 }
-
 #[test]
 fn emit_parent_completion_no_channel_is_noop() {
     let runtime = runtime_with_depth(1, None);
@@ -17360,7 +16571,6 @@ fn emit_parent_completion_no_channel_is_noop() {
         "missing channel should be a silent no-op, not a panic"
     );
 }
-
 #[test]
 fn emit_parent_completion_dropped_receiver_does_not_panic() {
     let (tx, rx) = mpsc::unbounded_channel::<SubAgentCompletion>();
@@ -17377,7 +16587,6 @@ fn emit_parent_completion_dropped_receiver_does_not_panic() {
         "we still attempt the send; the engine being gone is not our problem"
     );
 }
-
 #[test]
 fn terminal_results_excluding_returns_only_current_root_undelivered_agents() {
     let tmp = tempdir().expect("tempdir");
@@ -17452,7 +16661,6 @@ fn terminal_results_excluding_returns_only_current_root_undelivered_agents() {
     let delivered = HashSet::from(["agent_root_done".to_string()]);
     assert!(manager.terminal_results_excluding(&delivered).is_empty());
 }
-
 #[tokio::test]
 async fn run_subagent_task_claims_before_delivery_and_then_finalizes() {
     let manager = Arc::new(RwLock::new(SubAgentManager::new(PathBuf::from("."), 2)));
@@ -17530,7 +16738,6 @@ async fn run_subagent_task_claims_before_delivery_and_then_finalizes() {
         snapshot.status
     );
 }
-
 #[tokio::test]
 async fn cancellation_wins_task_race_but_still_fans_in_exactly_once() {
     use tokio_util::sync::CancellationToken;
@@ -17652,7 +16859,6 @@ async fn cancellation_wins_task_race_but_still_fans_in_exactly_once() {
             if id == &snapshot.agent_id && result.contains(r#""status":"cancelled""#)
     ));
 }
-
 /// Call 1 answers with a tool call (so the child banks a real step);
 /// every later call fails with a non-retryable 400.
 async fn tool_call_then_invalid_request_chat_client() -> (DeepSeekClient, Arc<AtomicUsize>) {
@@ -17731,7 +16937,6 @@ async fn tool_call_then_invalid_request_chat_client() -> (DeepSeekClient, Arc<At
     let client = DeepSeekClient::new(&config).expect("fatal-midrun chat client");
     (client, calls)
 }
-
 #[tokio::test]
 async fn fatal_provider_failure_mid_run_parks_a_continuable_checkpoint() {
     // R4 (finish-operator 2026-08-02): the Fatal arm used to return bare
@@ -17900,7 +17105,6 @@ async fn fatal_provider_failure_mid_run_parks_a_continuable_checkpoint() {
     );
     assert_eq!(resumed.result.as_deref(), Some("resumed and finished"));
 }
-
 #[tokio::test]
 async fn non_retryable_provider_failure_fans_in_to_every_terminal_sink() {
     use tokio_util::sync::CancellationToken;
@@ -18013,7 +17217,6 @@ async fn non_retryable_provider_failure_fans_in_to_every_terminal_sink() {
         AgentWorkerStatus::Failed
     );
 }
-
 #[test]
 fn summarize_subagent_result_diagnoses_missing_completed_payload() {
     let snap = make_snapshot(SubAgentStatus::Completed);
@@ -18023,7 +17226,6 @@ fn summarize_subagent_result_diagnoses_missing_completed_payload() {
         "Completed without payload must not read as silent success: {summary}"
     );
 }
-
 #[test]
 fn summarize_subagent_result_budget_exhaustion_is_actionable_not_raw_done() {
     let mut snap = make_snapshot(SubAgentStatus::BudgetExhausted);
@@ -18039,7 +17241,6 @@ fn summarize_subagent_result_budget_exhaustion_is_actionable_not_raw_done() {
         "{summary}"
     );
 }
-
 #[test]
 fn child_runtime_propagates_completion_tx_for_gating() {
     // The channel is cloned through `child_runtime()` so descendants carry
@@ -18056,7 +17257,6 @@ fn child_runtime_propagates_completion_tx_for_gating() {
         "child carries the wakeup channel forward"
     );
 }
-
 #[test]
 fn nested_tool_runtime_routes_child_completions_to_local_inbox() {
     let (root_tx, mut root_rx) = mpsc::unbounded_channel::<SubAgentCompletion>();
@@ -18087,7 +17287,6 @@ fn nested_tool_runtime_routes_child_completions_to_local_inbox() {
         "root engine must not receive nested child completion directly"
     );
 }
-
 #[test]
 fn subagent_completion_from_result_surfaces_step_limit_not_silent_success() {
     let snap = make_snapshot(SubAgentStatus::Failed(
@@ -18101,7 +17300,6 @@ fn subagent_completion_from_result_surfaces_step_limit_not_silent_success() {
     assert!(completion.payload.contains("max_steps"), "{completion:?}");
     assert!(!completion.payload.contains("Completed (no output)"));
 }
-
 #[test]
 fn subagent_completion_from_result_preserves_missing_final_summary_diagnostic() {
     let snap = make_snapshot(SubAgentStatus::Completed);
@@ -18111,7 +17309,6 @@ fn subagent_completion_from_result_preserves_missing_final_summary_diagnostic() 
         "{completion:?}"
     );
 }
-
 #[test]
 fn subagent_budget_exhaustion_completion_carries_budget_exhausted_sentinel() {
     let mut snap = make_snapshot(SubAgentStatus::BudgetExhausted);
@@ -18134,7 +17331,6 @@ fn subagent_budget_exhaustion_completion_carries_budget_exhausted_sentinel() {
     assert_eq!(parsed["failure_class"], "token_budget");
     assert_eq!(parsed["error_location"], "previous_line");
 }
-
 #[test]
 fn subagent_completion_inlines_evidence_before_sentinel() {
     let mut snap = make_snapshot(SubAgentStatus::Completed);
@@ -18156,7 +17352,6 @@ fn subagent_completion_inlines_evidence_before_sentinel() {
         "summary before evidence"
     );
 }
-
 #[test]
 fn subagent_completion_skips_empty_evidence_on_failed_child() {
     let mut snap = make_snapshot(SubAgentStatus::Failed("boom".to_string()));
@@ -18164,7 +17359,6 @@ fn subagent_completion_skips_empty_evidence_on_failed_child() {
     let completion = subagent_completion_from_result(&snap);
     assert!(!completion.payload.contains("### EVIDENCE"));
 }
-
 #[test]
 fn child_completion_runtime_message_preserves_agent_and_provenance_guidance() {
     let message = child_completion_runtime_message(&[SubAgentCompletion {
@@ -18182,7 +17376,6 @@ fn child_completion_runtime_message_preserves_agent_and_provenance_guidance() {
     assert!(text.contains("cite the child agent_id and the EVIDENCE lines"));
     assert!(text.contains("src/lib.rs:1-3"));
 }
-
 #[test]
 fn subagent_runtime_default_step_api_timeout_matches_config_default() {
     // The runtime default is derived from the config default so call sites
@@ -18199,13 +17392,11 @@ fn subagent_runtime_default_step_api_timeout_matches_config_default() {
         std::time::Duration::from_secs(600)
     );
 }
-
 #[test]
 fn with_step_api_timeout_overrides_runtime_field() {
     let runtime = stub_runtime().with_step_api_timeout(std::time::Duration::from_secs(900));
     assert_eq!(runtime.step_api_timeout.as_secs(), 900);
 }
-
 #[test]
 fn tool_timeout_defaults_to_generous_budget_and_survives_spawn() {
     // Track A raised the per-tool timeout from the old 30s (which killed long
@@ -18220,7 +17411,6 @@ fn tool_timeout_defaults_to_generous_budget_and_survives_spawn() {
     assert_eq!(parent.child_runtime().tool_timeout, expected);
     assert_eq!(parent.background_runtime().tool_timeout, expected);
 }
-
 #[test]
 fn child_runtime_preserves_step_api_timeout() {
     // Real sub-agents spawn through `child_runtime()` / `background_runtime()`;
@@ -18241,7 +17431,6 @@ fn child_runtime_preserves_step_api_timeout() {
         "background_runtime (detached) must also preserve the parent's timeout"
     );
 }
-
 #[test]
 fn subagent_completion_payload_carries_existing_sentinel_format() {
     // The payload format is the same one already documented in
@@ -18277,7 +17466,6 @@ fn subagent_completion_payload_carries_existing_sentinel_format() {
         "sentinel should not duplicate the human summary line"
     );
 }
-
 /// #2683 — Verify the model-facing tool catalog only advertises canonical
 /// subagent tools and never exposes legacy superseded names.
 #[test]
@@ -18309,7 +17497,6 @@ fn model_catalog_only_advertises_canonical_subagent_tools() {
 }
 
 // ── #3018: provider-aware auto routing and model validation ─────────────────
-
 #[tokio::test]
 async fn faster_route_on_provider_without_known_sibling_stays_on_parent_model() {
     // AC: Ollama must never build a request with a DeepSeek id; even when the
@@ -18335,7 +17522,6 @@ async fn faster_route_on_provider_without_known_sibling_stays_on_parent_model() 
         );
     }
 }
-
 #[test]
 fn faster_route_uses_known_deepseek_and_glm_family_siblings() {
     let mut deepseek = stub_runtime();
@@ -18375,7 +17561,6 @@ fn faster_route_uses_known_deepseek_and_glm_family_siblings() {
     assert_eq!(route.model, "z-ai/glm-5-turbo");
     assert_ne!(route.model, "z-ai/glm-5.1");
 }
-
 #[test]
 fn inherit_route_remaps_stale_deepseek_model_for_sakana_provider() {
     let mut runtime = stub_runtime_for_provider("sakana");
@@ -18398,7 +17583,6 @@ fn inherit_route_remaps_stale_deepseek_model_for_sakana_provider() {
         "Sakana inherit must not keep DeepSeek ids: {validated}"
     );
 }
-
 #[test]
 fn faster_route_remaps_stale_deepseek_model_for_sakana_provider() {
     let mut runtime = stub_runtime_for_provider("sakana");
@@ -18415,7 +17599,6 @@ fn faster_route_remaps_stale_deepseek_model_for_sakana_provider() {
         .expect("faster should remap to operator route");
     assert_eq!(validated, crate::config::DEFAULT_SAKANA_MODEL);
 }
-
 #[test]
 fn fixed_route_rejects_deepseek_model_for_sakana_provider() {
     let runtime = stub_runtime_for_provider("sakana");
@@ -18430,7 +17613,6 @@ fn fixed_route_rejects_deepseek_model_for_sakana_provider() {
         "error should name the model: {err}"
     );
 }
-
 #[test]
 fn normalize_requested_subagent_model_rejects_cross_namespace_for_sakana() {
     let err = normalize_requested_subagent_model(
@@ -18444,7 +17626,6 @@ fn normalize_requested_subagent_model_rejects_cross_namespace_for_sakana() {
         "error should name the model: {err}"
     );
 }
-
 #[test]
 fn gpt55_faster_route_stays_on_gpt55_with_low_reasoning() {
     // AC: a faster/explore child of a GPT-5.5 (OpenAI Codex) parent must stay
@@ -18488,7 +17669,6 @@ fn gpt55_faster_route_stays_on_gpt55_with_low_reasoning() {
     assert_eq!(route.reasoning_effort.as_deref(), Some("low"));
     assert_ne!(route.reasoning_effort.as_deref(), Some("off"));
 }
-
 #[test]
 fn role_model_validation_accepts_provider_native_ids() {
     // AC: [subagents] worker_model = "kimi-k2.5" on Moonshot must not fail
@@ -18502,7 +17682,6 @@ fn role_model_validation_accepts_provider_native_ids() {
         .expect("provider-native id is accepted");
     assert_eq!(model.as_deref(), Some("kimi-k2.5"));
 }
-
 #[test]
 fn consultant_reads_released_advisory_role_model_override_keys() {
     for legacy_key in ["oracle", "consultant"] {
@@ -18516,7 +17695,6 @@ fn consultant_reads_released_advisory_role_model_override_keys() {
         assert_eq!(model.as_deref(), Some("deepseek-v4-flash"), "{legacy_key}");
     }
 }
-
 #[test]
 fn canonical_consultant_model_override_precedes_compatibility_keys() {
     let mut runtime = stub_runtime();
@@ -18534,7 +17712,6 @@ fn canonical_consultant_model_override_precedes_compatibility_keys() {
         .expect("canonical consultant override should resolve");
     assert_eq!(model.as_deref(), Some("deepseek-v4-pro"));
 }
-
 #[test]
 fn raw_advisory_role_prefers_canonical_consultant_model_override() {
     for alias in ["oracle", "consultant"] {
@@ -18552,7 +17729,6 @@ fn raw_advisory_role_prefers_canonical_consultant_model_override() {
         assert_eq!(model.as_deref(), Some("deepseek-v4-pro"), "alias={alias}");
     }
 }
-
 #[test]
 fn role_model_validation_stays_strict_on_official_deepseek() {
     let mut runtime = stub_runtime();
@@ -18569,7 +17745,6 @@ fn role_model_validation_stays_strict_on_official_deepseek() {
         "lists accepted ids from model_completion_names_for_provider: {msg}"
     );
 }
-
 #[test]
 fn operator_model_for_subagent_enumerates_from_catalog_facade() {
     // #4116: the operator-route fallback must source its model from the
@@ -18614,7 +17789,6 @@ fn operator_model_for_subagent_enumerates_from_catalog_facade() {
         );
     }
 }
-
 #[test]
 fn normalize_requested_subagent_model_is_provider_aware() {
     assert_eq!(
@@ -18647,18 +17821,15 @@ fn normalize_requested_subagent_model_is_provider_aware() {
 }
 
 // ── #3030: step-counter formatting ──────────────────────────────────────────
-
 #[test]
 fn format_step_counter_hides_unbounded_sentinel() {
     assert_eq!(format_step_counter(16, 0), "step 16");
 }
-
 #[test]
 fn format_step_counter_keeps_concrete_budgets() {
     assert_eq!(format_step_counter(3, 25), "step 3/25");
     assert_eq!(format_step_counter(0, 1), "step 0/1");
 }
-
 #[test]
 fn child_step_override_wins_and_clamps_to_hard_ceiling() {
     assert_eq!(resolve_max_steps(FleetRole::Scout, None, None), 0);
@@ -18678,7 +17849,6 @@ fn child_step_override_wins_and_clamps_to_hard_ceiling() {
         MAX_SUBAGENT_STEPS
     );
 }
-
 #[test]
 fn child_wall_timeout_reason_is_typed_and_actionable() {
     let reason = child_wall_time_exhausted_reason(Duration::from_millis(1));
@@ -18690,7 +17860,6 @@ fn child_wall_timeout_reason_is_typed_and_actionable() {
 }
 
 // ── #3095: sub-agent launch gate ─────────────────────────────────────────────
-
 #[test]
 fn launch_gate_defaults_to_launch_concurrency_capped_by_max_agents() {
     let tmp = tempdir().expect("tempdir");
@@ -18711,7 +17880,6 @@ fn launch_gate_defaults_to_launch_concurrency_capped_by_max_agents() {
         "clamps down to max_agents"
     );
 }
-
 #[tokio::test]
 async fn launch_gate_queues_extra_direct_children() {
     use tokio_util::sync::CancellationToken;
@@ -18859,7 +18027,6 @@ async fn launch_gate_queues_extra_direct_children() {
         "queued child must start only after queuing, then complete: {messages:?}"
     );
 }
-
 #[tokio::test]
 async fn queued_turn_owned_child_parks_without_a_false_start_transition() {
     use tokio_util::sync::CancellationToken;
@@ -19012,7 +18179,6 @@ async fn queued_turn_owned_child_parks_without_a_false_start_transition() {
     drop(manager);
     drop(held_launch_permit);
 }
-
 #[tokio::test]
 async fn launch_gate_wait_counts_against_child_wall_timeout() {
     use tokio_util::sync::CancellationToken;
@@ -19138,7 +18304,6 @@ async fn launch_gate_wait_counts_against_child_wall_timeout() {
     drop(manager);
     drop(held_launch_permit);
 }
-
 /// Stub chat server that always replies with a final assistant text whose
 /// `usage` reports the given token counts. Returns the client plus a call
 /// counter so tests can assert how many model turns ran before a budget cap
@@ -19199,7 +18364,6 @@ async fn token_heavy_chat_client(
     let client = DeepSeekClient::new(&config).expect("fake chat client");
     (client, calls)
 }
-
 /// First response carries partial text plus a tool call and the requested
 /// incomplete/output-limit reason. A second request, when the runtime is
 /// allowed to retry, completes normally.
@@ -19275,7 +18439,6 @@ async fn incomplete_then_complete_chat_client(
     let client = DeepSeekClient::new(&config).expect("fake incomplete-response client");
     (client, calls)
 }
-
 async fn run_incomplete_response_worker(
     workspace: &Path,
     stop_reason: &str,
@@ -19359,7 +18522,6 @@ async fn run_incomplete_response_worker(
     };
     (result, calls, mailbox_messages, total_tokens)
 }
-
 fn assert_partial_tool_was_not_executed(messages: &[MailboxMessage]) {
     assert!(
         !messages
@@ -19368,7 +18530,6 @@ fn assert_partial_tool_was_not_executed(messages: &[MailboxMessage]) {
         "an incomplete response must never dispatch its partial tool call: {messages:?}"
     );
 }
-
 #[tokio::test]
 async fn output_limit_on_last_step_preserves_partial_text_and_exact_cause() {
     let tmp = tempdir().expect("tempdir");
@@ -19403,7 +18564,6 @@ async fn output_limit_on_last_step_preserves_partial_text_and_exact_cause() {
         "the partial assistant text must remain in the transcript checkpoint"
     );
 }
-
 #[tokio::test]
 async fn output_limit_cause_wins_over_generic_token_budget() {
     let tmp = tempdir().expect("tempdir");
@@ -19427,7 +18587,6 @@ async fn output_limit_cause_wins_over_generic_token_budget() {
     assert_eq!(total_tokens, Some(15), "usage must still be recorded");
     assert_partial_tool_was_not_executed(&mailbox);
 }
-
 #[tokio::test]
 async fn non_output_incomplete_cause_wins_over_generic_token_budget() {
     let tmp = tempdir().expect("tempdir");
@@ -19448,7 +18607,6 @@ async fn non_output_incomplete_cause_wins_over_generic_token_budget() {
     assert_eq!(total_tokens, Some(15), "usage must still be recorded");
     assert_partial_tool_was_not_executed(&mailbox);
 }
-
 #[tokio::test]
 async fn output_limit_never_retries_or_executes_partial_tools() {
     let tmp = tempdir().expect("tempdir");
@@ -19468,7 +18626,6 @@ async fn output_limit_never_retries_or_executes_partial_tools() {
     assert_eq!(total_tokens, Some(15));
     assert_partial_tool_was_not_executed(&mailbox);
 }
-
 /// Shared scaffolding for the per-worker token-budget runtime tests: spins up
 /// a general worker against `token_heavy_chat_client` with the given cap and
 /// returns the manager, agent id, call counter, and spawned task handle.
@@ -19536,7 +18693,6 @@ async fn spawn_budget_capped_worker(
     let task_handle = tokio::spawn(run_subagent_task(task));
     (manager, agent_id, calls, task_handle)
 }
-
 #[tokio::test]
 async fn worker_stops_with_typed_wall_time_reason() {
     let tmp = tempdir().expect("tempdir");
@@ -19562,7 +18718,6 @@ async fn worker_stops_with_typed_wall_time_reason() {
         other => panic!("expected typed wall-time failure, got {other:?}"),
     }
 }
-
 #[tokio::test]
 async fn worker_stops_when_per_worker_token_budget_exceeded() {
     let tmp = tempdir().expect("tempdir");
@@ -19593,7 +18748,6 @@ async fn worker_stops_when_per_worker_token_budget_exceeded() {
         result.status
     );
 }
-
 #[tokio::test]
 async fn worker_without_per_worker_token_budget_runs_to_completion() {
     let tmp = tempdir().expect("tempdir");
@@ -19619,7 +18773,6 @@ async fn worker_without_per_worker_token_budget_runs_to_completion() {
         result.status
     );
 }
-
 #[tokio::test]
 async fn per_worker_token_budget_does_not_double_count_scope_accounting() {
     let tmp = tempdir().expect("tempdir");
@@ -19657,7 +18810,6 @@ async fn per_worker_token_budget_does_not_double_count_scope_accounting() {
         worker_record.usage
     );
 }
-
 /// Variant of [`spawn_budget_capped_worker`] that attaches the worker to a
 /// shared workflow budget scope before its first model turn (no per-worker
 /// cap), returning the manager, agent id, call counter, and task handle.
@@ -19723,7 +18875,6 @@ async fn spawn_scope_budgeted_worker(
     let task_handle = tokio::spawn(run_subagent_task(task));
     (calls, task_handle)
 }
-
 #[tokio::test]
 async fn shared_scope_budget_stops_admitted_children_mid_run() {
     // A workflow run's token_budget must be a collective ceiling for the
@@ -19809,7 +18960,6 @@ async fn shared_scope_budget_stops_admitted_children_mid_run() {
         "collective spend is accounted once per child"
     );
 }
-
 /// Clears the process-wide rate-limit window on drop so a panicking test
 /// body cannot leak a live pause into concurrently running tests.
 struct ClearRateLimitOnDrop;
@@ -19819,7 +18969,6 @@ impl Drop for ClearRateLimitOnDrop {
         crate::retry_status::clear_rate_limit();
     }
 }
-
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
 async fn worker_is_not_stranded_by_transient_global_rate_limit_window() {
@@ -19860,7 +19009,6 @@ async fn worker_is_not_stranded_by_transient_global_rate_limit_window() {
         result.status
     );
 }
-
 /// #4217: terminal worker records must age out of the persisted ledger so
 /// long-lived sessions do not rewrite multi-MB `subagents.v1.json` forever.
 #[test]
@@ -19942,7 +19090,6 @@ fn cleanup_evicts_stale_terminal_worker_records_and_keeps_live_ones() {
     assert!(reloaded.get_worker_record("agent_recent_done").is_some());
     assert!(reloaded.get_worker_record("agent_still_running").is_some());
 }
-
 #[test]
 fn cleanup_removes_complete_transcript_after_worker_retention_expires() {
     let tmp = tempdir().expect("tempdir");
@@ -19971,7 +19118,6 @@ fn cleanup_removes_complete_transcript_after_worker_retention_expires() {
         "artifact must share the terminal worker retention lifecycle"
     );
 }
-
 #[test]
 fn cleanup_due_gates_write_locked_cleanup_to_a_bounded_cadence() {
     // #3803: a fresh manager is always due (never cleaned); right after a
@@ -19998,7 +19144,6 @@ fn cleanup_due_gates_write_locked_cleanup_to_a_bounded_cadence() {
 }
 
 // ── #3882: bounded sub-agent output under Fleet fanout ─────────────────────
-
 /// Serialize-and-restore guard for the shared spillover test root, mirroring
 /// the pattern in `tools::truncate::tests`.
 fn with_spillover_root<F: FnOnce()>(root: &std::path::Path, f: F) {
@@ -20021,7 +19166,6 @@ fn with_spillover_root<F: FnOnce()>(root: &std::path::Path, f: F) {
     let _restore = Restore(prior, prior_artifacts);
     f();
 }
-
 #[test]
 fn bounded_tail_messages_keeps_recent_within_budget_and_counts_omitted() {
     let messages: Vec<Message> = (0..10)
@@ -20045,7 +19189,6 @@ fn bounded_tail_messages_keeps_recent_within_budget_and_counts_omitted() {
         "kept tail exceeds budget by more than one message: {total}"
     );
 }
-
 #[test]
 fn bounded_tail_messages_always_keeps_the_final_message() {
     let messages = vec![
@@ -20063,7 +19206,6 @@ fn bounded_tail_messages_always_keeps_the_final_message() {
     assert_eq!(omitted, 1);
     assert!(message_text(&kept[0]).starts_with('b'));
 }
-
 #[tokio::test]
 async fn complete_transcript_artifact_survives_resident_handle_compaction() {
     let tmp = tempdir().expect("tempdir");
@@ -20135,7 +19277,6 @@ async fn complete_transcript_artifact_survives_resident_handle_compaction() {
         );
     }
 }
-
 #[test]
 fn malformed_transcript_artifact_fails_closed_instead_of_showing_partial_chat() {
     let tmp = tempdir().expect("tempdir");
@@ -20157,7 +19298,6 @@ fn malformed_transcript_artifact_fails_closed_instead_of_showing_partial_chat() 
         .expect_err("a malformed stream must not masquerade as a complete chat");
     assert!(error.to_string().contains("line"), "{error:#}");
 }
-
 #[cfg(unix)]
 #[test]
 fn transcript_artifact_reader_rejects_symlink_replacement() {
@@ -20180,7 +19320,6 @@ fn transcript_artifact_reader_rejects_symlink_replacement() {
         .expect_err("transcript reader must reject symlink replacement");
     assert!(error.to_string().contains("must not traverse symlinks"));
 }
-
 #[test]
 fn checkpoints_are_byte_bounded_under_fanout_scale_output() {
     // Simulates the #3882 report shape: a worker whose tool results are
@@ -20211,7 +19350,6 @@ fn checkpoints_are_byte_bounded_under_fanout_scale_output() {
         serialized.len()
     );
 }
-
 #[test]
 fn checkpoint_without_omitted_field_still_deserializes() {
     // Records persisted before v0.8.67 carry no omitted_messages key.
@@ -20229,7 +19367,6 @@ fn checkpoint_without_omitted_field_still_deserializes() {
         serde_json::from_str(legacy).expect("legacy checkpoint should load");
     assert_eq!(checkpoint.omitted_messages, 0);
 }
-
 #[test]
 fn forkguard_subagent_classic_hint_names_the_actual_storage_call() {
     use crate::tools::large_output_router::WorkshopConfig;
@@ -20396,7 +19533,6 @@ fn subagent_tool_results_spill_to_disk_and_stay_bounded_inline() {
         );
     });
 }
-
 #[test]
 fn fanout_of_workers_with_huge_outputs_keeps_resident_state_bounded() {
     // Acceptance shape for #3882: multiple workers, each emitting multi-MB
@@ -20445,7 +19581,6 @@ fn fanout_of_workers_with_huge_outputs_keeps_resident_state_bounded() {
         );
     });
 }
-
 #[test]
 fn write_json_atomic_survives_concurrent_writers() {
     use std::sync::Arc;
@@ -20486,7 +19621,6 @@ fn write_json_atomic_survives_concurrent_writers() {
         .collect();
     assert!(leftover.is_empty(), "temp files leaked: {leftover:?}");
 }
-
 #[test]
 fn coordination_process_lock_rejects_second_process() {
     const ROLE_ENV: &str = "CODEWHALE_TEST_COORDINATION_LOCK_ROLE";
@@ -20579,7 +19713,6 @@ fn coordination_process_lock_rejects_second_process() {
 }
 
 // === agent(action="wait") + peek throttling (#4097) ===
-
 fn insert_running_agent(inner: &mut SubAgentManager, name: &str) -> String {
     let current_boot = inner.session_boot_id().to_string();
     let (input_tx, _input_rx) = mpsc::unbounded_channel();
@@ -20603,7 +19736,6 @@ fn insert_running_agent(inner: &mut SubAgentManager, name: &str) -> String {
     inner.agents.insert(agent_id.clone(), agent);
     agent_id
 }
-
 #[tokio::test]
 async fn agent_wait_returns_immediately_with_no_children() {
     let manager = Arc::new(RwLock::new(SubAgentManager::new(PathBuf::from("."), 1)));
@@ -20621,7 +19753,6 @@ async fn agent_wait_returns_immediately_with_no_children() {
             .is_empty()
     );
 }
-
 #[tokio::test]
 async fn agent_wait_wakes_when_child_settles() {
     let mut inner = SubAgentManager::new(PathBuf::from("."), 1);
@@ -20659,7 +19790,6 @@ async fn agent_wait_wakes_when_child_settles() {
     assert_eq!(settled[0]["status"], json!("completed"));
     assert_eq!(payload["timed_out"], json!(false));
 }
-
 #[tokio::test]
 async fn agent_wait_times_out_and_reports_running_child() {
     let mut inner = SubAgentManager::new(PathBuf::from("."), 1);
@@ -20685,7 +19815,6 @@ async fn agent_wait_times_out_and_reports_running_child() {
             .is_empty()
     );
 }
-
 #[tokio::test]
 async fn agent_wait_rejects_unknown_agent_ref() {
     let manager = Arc::new(RwLock::new(SubAgentManager::new(PathBuf::from("."), 1)));
@@ -20699,7 +19828,6 @@ async fn agent_wait_rejects_unknown_agent_ref() {
     .expect_err("unknown agent ref must fail fast instead of blocking");
     assert!(matches!(err, ToolError::InvalidInput { .. }));
 }
-
 #[tokio::test]
 async fn agent_peek_unchanged_within_window_returns_compact_nudge() {
     let mut inner = SubAgentManager::new(PathBuf::from("."), 1);
@@ -20734,7 +19862,6 @@ async fn agent_peek_unchanged_within_window_returns_compact_nudge() {
         "nudge should point at agent(action=wait)"
     );
 }
-
 #[test]
 fn agent_action_parses_wait_aliases() {
     for alias in ["wait", "join", "await", "block"] {
@@ -20759,7 +19886,6 @@ fn agent_action_parses_wait_aliases() {
 // Deny always wins over allow. Wildcards (`prefix*`) and case-insensitive
 // matching mirror the session-side `command_denies_tool()`.
 // ===========================================================================
-
 /// Build a stub runtime with the parent's `disallowed_tools` set on the
 /// `WorkerRuntimeProfile`. The registry reads deny lists from the profile at
 /// construction, and `child_runtime()` clones the profile so the list
@@ -20769,7 +19895,6 @@ fn stub_runtime_with_disallowed(disallowed: Vec<String>) -> SubAgentRuntime {
     rt.worker_profile.denied_tools = disallowed;
     rt
 }
-
 /// Build a `SubAgentToolRegistry` wired with `disallowed_tools`. Passes the
 /// runtime through `SubAgentToolRegistry::new()` so the constructor picks up
 /// `worker_profile.denied_tools`. `allowed_tools` is forwarded directly.
@@ -20785,7 +19910,6 @@ fn new_registry_with_disallowed(
         Arc::new(Mutex::new(PlanState::default())),
     )
 }
-
 #[test]
 fn test_disallowed_tools_inheritance_denies_tool() {
     let tmp = tempdir().expect("tempdir");
@@ -20825,7 +19949,6 @@ fn test_disallowed_tools_inheritance_denies_tool() {
         "the lowercase edit primitive survives: only write_file was denied"
     );
 }
-
 #[test]
 fn test_disallowed_tools_deny_wins_over_allow() {
     let tmp = tempdir().expect("tempdir");
@@ -20858,7 +19981,6 @@ fn test_disallowed_tools_deny_wins_over_allow() {
     );
     assert!(!names.contains("bash"), "denied shell alias removes bash");
 }
-
 #[test]
 fn test_disallowed_tools_wildcard_matching() {
     let tmp = tempdir().expect("tempdir");
@@ -20879,7 +20001,6 @@ fn test_disallowed_tools_wildcard_matching() {
         "non-MCP tools are unaffected by mcp_* deny"
     );
 }
-
 #[test]
 fn test_disallowed_tools_case_insensitive_match() {
     let tmp = tempdir().expect("tempdir");
@@ -20900,7 +20021,6 @@ fn test_disallowed_tools_case_insensitive_match() {
         "unrelated tool unaffected"
     );
 }
-
 #[test]
 fn test_disallowed_tools_specific_server_wildcard() {
     let tmp = tempdir().expect("tempdir");
@@ -20917,7 +20037,6 @@ fn test_disallowed_tools_specific_server_wildcard() {
         "different server prefix is not denied"
     );
 }
-
 #[test]
 fn test_disallowed_tools_tools_for_model_excludes_denied() {
     let tmp = tempdir().expect("tempdir");
@@ -20948,7 +20067,6 @@ fn test_disallowed_tools_tools_for_model_excludes_denied() {
         "the lowercase edit primitive survives: only write_file was denied"
     );
 }
-
 #[tokio::test]
 async fn test_disallowed_tools_execute_rejects_denied_tool() {
     let tmp = tempdir().expect("tempdir");
@@ -20972,7 +20090,6 @@ async fn test_disallowed_tools_execute_rejects_denied_tool() {
 }
 
 // === deny-list propagation through runtime cloning ===
-
 #[test]
 fn test_disallowed_tools_propagates_through_child_runtime() {
     let runtime = stub_runtime_with_disallowed(vec!["exec_shell".to_string()]);
@@ -20983,7 +20100,6 @@ fn test_disallowed_tools_propagates_through_child_runtime() {
         "child_runtime() must preserve parent's denied_tools"
     );
 }
-
 #[test]
 fn test_disallowed_tools_propagates_through_background_runtime() {
     let runtime = stub_runtime_with_disallowed(vec!["write_file".to_string()]);
@@ -20994,7 +20110,6 @@ fn test_disallowed_tools_propagates_through_background_runtime() {
         "background_runtime() must preserve parent's denied_tools"
     );
 }
-
 #[test]
 fn test_disallowed_tools_across_two_generations() {
     let tmp = tempdir().expect("tempdir");
@@ -21022,7 +20137,6 @@ fn test_disallowed_tools_across_two_generations() {
 }
 
 // === spawn-path opt-out simulation ===
-
 #[test]
 fn test_disallowed_tools_opt_out_clears_inherited_denies() {
     // Simulate the spawn-path merge: parent runtime has denies, child sets
@@ -21051,7 +20165,6 @@ fn test_disallowed_tools_opt_out_clears_inherited_denies() {
     );
     assert!(registry.is_tool_allowed("read_file"));
 }
-
 #[test]
 fn test_disallowed_tools_opt_out_keeps_explicit_caller_deny() {
     // Opt-out clears inherited denies, but explicit caller disallowed_tools
@@ -21085,7 +20198,6 @@ fn test_disallowed_tools_opt_out_keeps_explicit_caller_deny() {
 }
 
 // === parse_spawn_request disallowed_tools ===
-
 #[test]
 fn test_parse_spawn_request_reads_disallowed_tools() {
     let input = json!({
@@ -21098,7 +20210,6 @@ fn test_parse_spawn_request_reads_disallowed_tools() {
         Some(vec!["exec_shell".to_string(), "write_file".to_string()])
     );
 }
-
 #[test]
 fn test_parse_spawn_request_disallowed_tools_dedupes_and_trims() {
     let input = json!({
@@ -21112,7 +20223,6 @@ fn test_parse_spawn_request_disallowed_tools_dedupes_and_trims() {
         "blanks and duplicates are dropped"
     );
 }
-
 #[test]
 fn test_parse_spawn_request_disallowed_tools_defaults_to_none() {
     let input = json!({"prompt": "do something"});
@@ -21122,7 +20232,6 @@ fn test_parse_spawn_request_disallowed_tools_defaults_to_none() {
         "disallowed_tools should be None when not provided"
     );
 }
-
 #[test]
 fn test_parse_spawn_request_inherit_disallowed_tools_defaults_true() {
     let input = json!({"prompt": "do something"});
@@ -21132,7 +20241,6 @@ fn test_parse_spawn_request_inherit_disallowed_tools_defaults_true() {
         "inherit_disallowed_tools should default to true"
     );
 }
-
 #[test]
 fn test_parse_spawn_request_inherit_disallowed_tools_explicit_false() {
     let input = json!({
@@ -21145,7 +20253,6 @@ fn test_parse_spawn_request_inherit_disallowed_tools_explicit_false() {
         "inherit_disallowed_tools should parse an explicit false"
     );
 }
-
 /// #3874 acceptance: the no-progress heartbeat must not kill a worker whose
 /// only pending work is a tracked *running* background shell task.
 ///
@@ -21264,7 +20371,6 @@ async fn tracked_running_background_shell_keeps_its_owner_off_the_heartbeat_reap
         .expect("live task handle")
         .abort();
 }
-
 /// #4810: a child publishes its *own* list, only when it actually changes.
 #[tokio::test]
 async fn child_work_state_publishes_only_real_changes_from_its_own_list() {
@@ -21336,7 +20442,6 @@ async fn child_work_state_publishes_only_real_changes_from_its_own_list() {
 // These assert on the registry the child actually runs with, not on the
 // `ChildAuthority` value that produced it. A ceiling that is only a label on a
 // receipt is not a ceiling.
-
 /// `tools = false` must leave the child with **zero** model tools. The empty
 /// allowlist is the mechanism; this is the proof it lands.
 #[test]
@@ -21372,7 +20477,6 @@ fn an_exact_member_with_tools_false_gets_no_model_tools_at_all() {
         );
     }
 }
-
 /// `network_tool = false` removes every model-visible network, browser, and
 /// remote-MCP surface — even though `tools = true` — while keeping exactly the
 /// `Web` family's two read-only actions (`search`/`fetch`), and refusing a
@@ -21504,7 +20608,6 @@ async fn an_exact_member_without_a_network_tool_really_loses_the_network_surface
         "the standalone browse tool stays denied by name"
     );
 }
-
 /// A Runtime scout under a network-denied parent gets exactly the bounded web
 /// surface — `Web` with
 /// `search`/`fetch` — while every reaching spelling (`web.run`, `fetch_url`,
@@ -21619,7 +20722,6 @@ async fn a_read_only_inspection_member_gets_only_bounded_web_search() {
         "full member keeps the whole Web enum"
     );
 }
-
 /// The unified `rlm` tool routes to the same code as the legacy aliases through
 /// an `action` parameter. A deny list that stops at the alias names leaves
 /// `rlm{action:"open", url:...}` callable — the whole reach by another spelling.
@@ -21676,7 +20778,6 @@ fn the_unified_rlm_action_cannot_bypass_a_denied_alias() {
         "the compatibility RLM family must stay hidden from new child turns"
     );
 }
-
 /// The generic layer: a network-denied child that reaches a remote address
 /// through *any* tool's URL-bearing field is refused at the execution seam, even
 /// when the tool itself is local and permitted. This is what catches the next
@@ -21756,7 +20857,6 @@ fn a_network_denied_child_cannot_address_a_remote_location_through_any_tool() {
         );
     }
 }
-
 /// A read-only member keeps `Run.verifiers` so it can do its job, but the
 /// `commands` array spawns arbitrary programs — `bash -lc 'rm -rf src'` is the
 /// raw shell the deny list just removed, re-entered through the door left open
@@ -21811,7 +20911,6 @@ fn a_read_only_member_cannot_smuggle_commands_through_the_verifier_surface() {
         );
     }
 }
-
 /// The shipped `verifier` role is `write = false, shell = "full"`, and running
 /// the suite is its documented job. A test *selection* must survive at the same
 /// guard that refuses a command line — otherwise the indirect-execution fix has
@@ -21872,7 +20971,6 @@ fn a_shell_capable_read_only_member_keeps_test_selection_arguments() {
         );
     }
 }
-
 /// The parent posture wins. A saved `full` member inside a read-only,
 /// no-network session runs with the session's ceiling, in the real registry.
 #[tokio::test]
@@ -21946,7 +21044,6 @@ async fn a_parent_read_only_session_narrows_a_full_exact_member_in_the_child_reg
         "the URL-input guard stays deny-closed inside a read-only session"
     );
 }
-
 /// The session ceiling is read off the live parent runtime, so a Fleet can
 /// never widen what the operator is currently allowed to do.
 #[test]
@@ -21989,9 +21086,17 @@ fn the_session_ceiling_reflects_the_live_parent_posture() {
 // half-contract: visibility without dispatch means a model that guesses the
 // name still wins, and dispatch without visibility means the model is offered a
 // capability it will be refused for using.
-
 /// The child registry a Runtime verifier under a full parent actually runs with.
 fn read_only_with_shell_registry() -> (tempfile::TempDir, SubAgentToolRegistry) {
+    read_only_with_shell_registry_auto_approving(false)
+}
+
+/// The carve-out fixture with approvals auto-accepted, for tests that drive
+/// the real spawn path (a write-capable `agent` start is otherwise held for
+/// approval and never reaches `run_subagent`).
+fn read_only_with_shell_registry_auto_approving(
+    auto_approve: bool,
+) -> (tempfile::TempDir, SubAgentToolRegistry) {
     let tmp = tempdir().expect("tempdir");
     let authority = crate::fleet::role::ChildAuthority::from_runtime_role(
         "verifier",
@@ -22010,6 +21115,7 @@ fn read_only_with_shell_registry() -> (tempfile::TempDir, SubAgentToolRegistry) 
     let mut runtime =
         stub_runtime().with_agent_tool_surface_options(enabled_agent_surface_options());
     runtime.context = ToolContext::new(tmp.path().to_path_buf());
+    runtime.context.auto_approve = auto_approve;
     runtime.allow_shell = true;
     // The posture reaches the child through the Runtime authority envelope.
     runtime.worker_profile = WorkerRuntimeProfile::for_role(FleetRole::Verifier);
@@ -22024,7 +21130,6 @@ fn read_only_with_shell_registry() -> (tempfile::TempDir, SubAgentToolRegistry) 
     );
     (tmp, registry)
 }
-
 /// Adversarial payloads — raw mutation, deletion, network reach, and scheduled
 /// execution — refused at the real dispatch guard.
 #[test]
@@ -22056,7 +21161,6 @@ fn indirect_execution_payloads_are_refused_at_dispatch() {
         );
     }
 }
-
 /// The verifier's job, in the registry it actually runs with: a bounded test
 /// selection passes the real dispatch guard, and everything that could name a
 /// program or touch the workspace does not.
@@ -22109,7 +21213,6 @@ fn a_verifier_runs_bounded_test_selections_and_nothing_else_at_dispatch() {
         );
     }
 }
-
 /// Catalog and dispatch must agree: the verification surface the guard admits
 /// is offered, and the legacy raw-shell spellings it refuses are absent (the
 /// verifier's shell surface is the bounded canonical `bash` tool pinned by
@@ -22131,7 +21234,6 @@ fn the_verifier_catalog_offers_run_without_the_legacy_raw_shell_spellings() {
         );
     }
 }
-
 /// The refusal reaches the *real* `execute` path, not only the classifier: the
 /// envelope check sits behind the allowlist, posture, and approval gates, and a
 /// guard that is never reached is not a guard.
@@ -22156,7 +21258,6 @@ async fn a_verifier_is_refused_arbitrary_execution_at_the_real_execute_boundary(
         );
     }
 }
-
 /// The same payloads must never be *offered*. A model that can see a tool will
 /// try it, and a refusal is a worse experience than an absent capability.
 #[test]
@@ -22210,7 +21311,6 @@ fn indirect_execution_actions_are_pruned_from_the_model_catalog() {
         );
     }
 }
-
 /// The bounded positives. This is the half that makes the contract honest: the
 /// point of `shell = "full"` on a read-only member is that it can still run the
 /// checks, and durable-task bookkeeping is exactly what such a member is for.
@@ -22253,7 +21353,6 @@ fn bounded_read_only_and_verification_paths_survive_the_ceiling() {
         "durable-task bookkeeping must stay visible; got {actions:?}"
     );
 }
-
 /// A write-capable Runtime builder is unaffected. The guard narrows authority;
 /// it is not a new global restriction.
 #[test]
@@ -22293,7 +21392,6 @@ fn a_write_capable_member_keeps_every_execution_gate() {
         );
     }
 }
-
 /// The unified-family bypass, for the durable-work families this time: a deny
 /// list naming `task_gate_run` has to reach `tasks{action:"gate_run"}`, or the
 /// canonical name is simply a second spelling that nothing checks.
@@ -22331,7 +21429,6 @@ fn the_durable_work_families_resolve_their_actions_through_the_policy_seam() {
 }
 
 // ── A child may never widen its parent's envelope ───────────────────────────
-
 /// `inherit_disallowed_tools: false` is an escape hatch for *preference*, not
 /// for a ceiling. A Fleet member clamped to `network_tool = false` that spawns a
 /// grandchild asking for a clean surface must not hand it the network back.
@@ -22382,7 +21479,6 @@ fn posture_denials_survive_a_child_that_declines_to_inherit() {
 }
 
 // ── The launch authority must reach the runtime, or the spawn fails ─────────
-
 /// The fingerprint is the value the spawn boundary checks. It has to change
 /// whenever anything the child is constructed from changes, or checking it
 /// proves nothing.
@@ -22420,7 +21516,6 @@ fn the_authority_fingerprint_distinguishes_every_envelope_it_names() {
     );
     assert_ne!(narrow.fingerprint(), fingerprint("builder"));
 }
-
 /// The spawn boundary itself. A missing, unparseable, or mismatched fingerprint
 /// must refuse the launch — a Runtime envelope that does not reach the child
 /// is not enforced authority.
@@ -22482,7 +21577,6 @@ fn the_spawn_boundary_fails_closed_on_a_missing_or_mismatched_authority() {
         );
     }
 }
-
 /// End to end for the value that used to be computed and never read: the
 /// authority a launch resolves is the one whose fingerprint rides the receipt,
 /// and that fingerprint is what the spawn boundary accepts.
@@ -22518,7 +21612,6 @@ fn the_launched_authority_is_the_one_the_spawn_boundary_accepts() {
         "one member's receipt must not authorize another member's child"
     );
 }
-
 /// R6 injection-size regressions (finish-operator 2026-08-02): build — never
 /// send — the real assembled payloads and pin them to measured-current +10%.
 /// Growth past the ceiling must be a deliberate, reviewed act, not drift.
@@ -22532,7 +21625,6 @@ const READ_ONLY_CHILD_ENVELOPE_BYTE_CEILING: usize = 89_000;
 /// prompt-only start, review/tasks/verify/web/search/github/goal/terminal/
 /// git/ocr/extract truthful-limit disclosures); +10%.
 const PARENT_SURFACE_BYTE_CEILING: usize = 90_000;
-
 #[tokio::test]
 async fn read_only_child_envelope_stays_within_measured_ceiling() {
     let tmp = tempdir().expect("tempdir");
@@ -22566,7 +21658,6 @@ async fn read_only_child_envelope_stays_within_measured_ceiling() {
         "read-only child envelope grew past its reviewed ceiling: {envelope_bytes}B > {READ_ONLY_CHILD_ENVELOPE_BYTE_CEILING}B. If deliberate, re-measure and raise the ceiling in the same commit."
     );
 }
-
 #[tokio::test]
 async fn parent_agent_surface_stays_within_measured_ceiling() {
     let tmp = tempdir().expect("tempdir");
@@ -22597,7 +21688,6 @@ async fn parent_agent_surface_stays_within_measured_ceiling() {
         "parent prompt+catalog surface grew past its reviewed ceiling: {surface_bytes}B > {PARENT_SURFACE_BYTE_CEILING}B. If deliberate, re-measure and raise the ceiling in the same commit."
     );
 }
-
 fn init_claim_repo(root: &Path) {
     let run = |args: &[&str]| {
         let output = Command::new("git")
@@ -22627,7 +21717,6 @@ fn init_claim_repo(root: &Path) {
         .expect("git available");
     assert!(output.status.success(), "git commit: {output:?}");
 }
-
 #[test]
 fn completed_claim_of_untouched_file_taints_verification() {
     // R7 (finish-operator 2026-08-02): the morning report caught a child
@@ -22658,7 +21747,6 @@ fn completed_claim_of_untouched_file_taints_verification() {
 }
 
 // ─── resume_from continuation-chain tests (#425) ─────────────────────────────
-
 #[test]
 fn parse_spawn_request_accepts_resume_from() {
     let input = json!({
@@ -22668,7 +21756,6 @@ fn parse_spawn_request_accepts_resume_from() {
     let parsed = parse_spawn_request(&input).expect("spawn request should parse");
     assert_eq!(parsed.resume_from.as_deref(), Some("agent_abc123"));
 }
-
 #[test]
 fn parse_spawn_request_accepts_resume_from_camel_case() {
     let input = json!({
@@ -22678,14 +21765,12 @@ fn parse_spawn_request_accepts_resume_from_camel_case() {
     let parsed = parse_spawn_request(&input).expect("camelCase resumeFrom should parse");
     assert_eq!(parsed.resume_from.as_deref(), Some("my-session"));
 }
-
 #[test]
 fn parse_spawn_request_resume_from_absent_is_none() {
     let input = json!({ "prompt": "fresh start" });
     let parsed = parse_spawn_request(&input).expect("prompt-only request should parse");
     assert!(parsed.resume_from.is_none());
 }
-
 #[test]
 fn parse_spawn_request_resume_from_empty_string_is_none() {
     let input = json!({
@@ -22696,7 +21781,6 @@ fn parse_spawn_request_resume_from_empty_string_is_none() {
         .expect("whitespace-only resume_from should be treated as absent");
     assert!(parsed.resume_from.is_none());
 }
-
 /// Spawning with resume_from + fork_context=false is contradictory and must
 /// be rejected at the spawn seam (not at parse time, since that is too early
 /// to know whether fork_context was explicit).
@@ -22715,7 +21799,6 @@ fn parse_spawn_request_resume_from_with_fork_context_false_is_parseable() {
     assert_eq!(parsed.resume_from.as_deref(), Some("agent_abc123"));
     assert_eq!(parsed.fork_context, Some(false));
 }
-
 #[test]
 fn resume_from_rejects_running_source() {
     let tmp = tempdir().expect("tempdir");
@@ -22729,7 +21812,6 @@ fn resume_from_rejects_running_source() {
         "error should mention running status: {err}"
     );
 }
-
 #[test]
 fn completed_claim_matching_workspace_state_stays_untainted() {
     let tmp = tempdir().expect("tempdir");
@@ -22787,7 +21869,6 @@ fn completed_claim_matching_workspace_state_stays_untainted() {
         record.verification.summary
     );
 }
-
 #[tokio::test]
 async fn spawn_receipt_compacts_and_verbose_restores_the_archive() {
     // Morning-report issue #4 (W6 rest): every spawn returned ~12KB because
@@ -22869,7 +21950,6 @@ async fn spawn_receipt_compacts_and_verbose_restores_the_archive() {
     assert!(verbose.get("compact").is_none());
     assert_eq!(verbose, full, "verbose: true must restore the old shape");
 }
-
 fn spawn_route_metadata(provider: &str, model: &str, source: &str) -> WorkflowTaskSpawnMetadata {
     let child_route = ChildRouteReceipt {
         requested_type: "explore".to_string(),
@@ -22903,11 +21983,9 @@ fn spawn_route_metadata(provider: &str, model: &str, source: &str) -> WorkflowTa
         resume_from_agent_id: None,
     }
 }
-
 fn spawn_child_route_projection(metadata: &WorkflowTaskSpawnMetadata) -> ChildRouteReceipt {
     metadata.child_route.clone()
 }
-
 #[test]
 fn spawn_receipt_route_names_the_provider_and_model_the_child_actually_got() {
     // #5305: a Fleet profile can route a child onto a provider the parent
@@ -22941,7 +22019,6 @@ fn spawn_receipt_route_names_the_provider_and_model_the_child_actually_got() {
     assert_eq!(route["model_id"], json!("deepseek-v4-pro"));
     assert_eq!(route["route_source"], json!("task.model"));
 }
-
 #[tokio::test]
 async fn spawn_receipt_route_survives_compaction_for_a_type_only_spawn() {
     // A type-only spawn resolves no roster member: no profile, no pins. The
@@ -22995,7 +22072,6 @@ async fn spawn_receipt_route_survives_compaction_for_a_type_only_spawn() {
         "a type-only spawn resolves no profile: {receipt}"
     );
 }
-
 #[tokio::test]
 async fn unscoped_status_compacts_running_children_and_keeps_terminal_full() {
     // Morning-report issue #4: one unscoped status poll returned 203KB
@@ -23067,7 +22143,6 @@ async fn unscoped_status_compacts_running_children_and_keeps_terminal_full() {
     assert!(verbose_row.get("snapshot").is_some(), "{verbose_row}");
     assert!(verbose_row.get("compact").is_none(), "{verbose_row}");
 }
-
 #[test]
 fn resume_from_rejects_missing_source() {
     let tmp = tempdir().expect("tempdir");
@@ -23080,7 +22155,6 @@ fn resume_from_rejects_missing_source() {
         "error should mention not found: {err}"
     );
 }
-
 #[test]
 fn resume_from_accepts_completed_source() {
     let tmp = tempdir().expect("tempdir");
@@ -23094,7 +22168,6 @@ fn resume_from_accepts_completed_source() {
     validate_resume_from_source(&manager, &completed_id, tmp.path())
         .expect("completed agent must be accepted as a resume source");
 }
-
 #[test]
 fn resume_from_accepts_interrupted_source() {
     let tmp = tempdir().expect("tempdir");
@@ -23111,7 +22184,6 @@ fn resume_from_accepts_interrupted_source() {
     validate_resume_from_source(&manager, &interrupted_id, tmp.path())
         .expect("interrupted agent must be accepted as a resume source");
 }
-
 #[test]
 fn resume_from_accepts_failed_source() {
     let tmp = tempdir().expect("tempdir");
@@ -23124,7 +22196,6 @@ fn resume_from_accepts_failed_source() {
     validate_resume_from_source(&manager, &failed_id, tmp.path())
         .expect("failed agent may be used as a resume source");
 }
-
 #[test]
 fn resume_from_accepts_cancelled_source() {
     let tmp = tempdir().expect("tempdir");
@@ -23137,7 +22208,6 @@ fn resume_from_accepts_cancelled_source() {
     validate_resume_from_source(&manager, &cancelled_id, tmp.path())
         .expect("cancelled agent may be used as a resume source");
 }
-
 #[test]
 fn resume_from_rejects_cross_workspace_source() {
     let tmp_parent = tempdir().expect("parent tempdir");
@@ -23157,7 +22227,6 @@ fn resume_from_rejects_cross_workspace_source() {
         "error should mention workspace mismatch: {err}"
     );
 }
-
 #[test]
 fn resume_from_loads_transcript_artifact_when_available() {
     let tmp = tempdir().expect("tempdir");
@@ -23183,7 +22252,6 @@ fn resume_from_loads_transcript_artifact_when_available() {
         "resume transcript reads must not fall back to the execution workspace"
     );
 }
-
 #[test]
 fn resume_from_falls_back_to_checkpoint_when_artifact_missing() {
     let tmp = tempdir().expect("tempdir");
@@ -23213,7 +22281,6 @@ fn resume_from_falls_back_to_checkpoint_when_artifact_missing() {
     assert_eq!(fallback_messages.len(), 2);
     assert_eq!(message_text(&fallback_messages[0]), "checkpoint task");
 }
-
 #[test]
 fn resume_from_session_name_resolves_to_agent_id() {
     let tmp = tempdir().expect("tempdir");
@@ -23232,7 +22299,6 @@ fn resume_from_session_name_resolves_to_agent_id() {
     validate_resume_from_source(&manager, "named-source", tmp.path())
         .expect("resolution by session name must work for resume_from");
 }
-
 #[test]
 fn child_launch_manifest_carries_resume_from_agent_id() {
     let tmp = tempdir().expect("tempdir");
@@ -23252,7 +22318,6 @@ fn child_launch_manifest_carries_resume_from_agent_id() {
 }
 
 // ── validation helper exposed for the tests above ────────────────────────────
-
 /// Extracted validation logic mirroring what `spawn_subagent_from_input` does.
 /// Returns `Ok(agent_id)` when the source is acceptable, `Err(message)` when
 /// it must be rejected.
@@ -23290,7 +22355,6 @@ fn validate_resume_from_source(
 
     Ok(source_id)
 }
-
 /// Owner report 2026-08-04: a model/provider switch spawns the new engine's
 /// manager while the old engine still holds the workspace coordination flock
 /// in this same process. That losing acquisition must classify itself as a
@@ -23324,7 +22388,6 @@ fn coordination_lock_loss_to_own_process_reads_as_handover_and_self_heals() {
 }
 
 // -- resume-from-checkpoint tests (checkpoint-based continuation) --
-
 #[tokio::test]
 async fn resume_from_checkpoint_spawns_seeded_agent_with_checkpoint_context() {
     let tmp = tempdir().unwrap();
@@ -23385,7 +22448,6 @@ async fn resume_from_checkpoint_spawns_seeded_agent_with_checkpoint_context() {
     let prior = guard.agents.get(&agent_id).expect("prior record");
     assert!(matches!(prior.status, SubAgentStatus::Interrupted(_)));
 }
-
 #[tokio::test]
 async fn resume_from_checkpoint_is_idempotent_across_repeated_followups() {
     let tmp = tempdir().unwrap();
@@ -23435,7 +22497,6 @@ async fn resume_from_checkpoint_is_idempotent_across_repeated_followups() {
         "a repeated followup must reach the resumed target"
     );
 }
-
 #[tokio::test]
 async fn resume_from_checkpoint_rejects_non_interrupted_agents() {
     let tmp = tempdir().unwrap();
@@ -23457,7 +22518,6 @@ async fn resume_from_checkpoint_rejects_non_interrupted_agents() {
         "{err}"
     );
 }
-
 #[tokio::test]
 async fn resume_from_checkpoint_rejects_missing_continuable_checkpoint() {
     let tmp = tempdir().unwrap();
@@ -23490,7 +22550,6 @@ async fn resume_from_checkpoint_rejects_missing_continuable_checkpoint() {
         "{err}"
     );
 }
-
 /// The resume lane must honor the same isolation rule as a fresh worktree
 /// spawn: a worktree child's boundary is the worktree alone, so a multi-root
 /// parent's attached roots must not re-widen the resumed child. Both
@@ -23597,7 +22656,6 @@ async fn resume_of_isolated_worktree_child_keeps_the_worktree_as_its_only_root()
          root set — the parent's attached root must not stay writable"
     );
 }
-
 /// Isolation must not key on the write claim's existence: a claim can be
 /// released or never created for a worktree child. The worker record's
 /// launch manifest durably pins the worktree spawn, so the claim-less resume
@@ -23698,7 +22756,6 @@ async fn claim_less_resume_of_a_recorded_worktree_child_stays_isolated() {
         "a claim-less worktree child must not inherit the caller's writable roots"
     );
 }
-
 /// The rebuild idiom shared by both worktree clear sites: after the roots set
 /// is cleared, the WorkspaceWrite face of the cloned policy re-derives from
 /// the child's `(workspace, workspace_roots)` pair — the worktree alone — and
@@ -23747,7 +22804,6 @@ fn rederive_sandbox_policy_roots_confines_the_exec_lane_to_the_cleared_set() {
         assert_eq!(context.elevated_sandbox_policy, Some(policy));
     }
 }
-
 #[test]
 fn user_follow_up_to_running_child_counts_queued_until_the_loop_takes_it() {
     let tmp = tempdir().expect("tempdir");
@@ -23794,7 +22850,6 @@ fn user_follow_up_to_running_child_counts_queued_until_the_loop_takes_it() {
         "nothing queued once the loop took both"
     );
 }
-
 #[test]
 fn user_follow_up_to_cancelled_child_fails_closed_with_the_reason() {
     let tmp = tempdir().expect("tempdir");
@@ -23811,7 +22866,6 @@ fn user_follow_up_to_cancelled_child_fails_closed_with_the_reason() {
     assert!(err.to_string().contains("cancelled"), "{err}");
     assert!(manager.queued_follow_up_counts().is_empty());
 }
-
 #[test]
 fn user_follow_up_to_completed_child_requires_a_runtime_to_resume() {
     let tmp = tempdir().expect("tempdir");
@@ -24565,7 +23619,6 @@ mod child_permission_gate {
 }
 
 // ── #5462: `agent` is the only model-facing sub-agent surface ────────────────
-
 /// The six narrow tools that used to sit beside `agent` in the model catalog.
 /// Kept as one list so a test cannot silently check five of them.
 const RETIRED_AGENTS_TOOLS: &[&str] = &[
@@ -24576,7 +23629,6 @@ const RETIRED_AGENTS_TOOLS: &[&str] = &[
     "agents/coordinate",
     "agents/wait",
 ];
-
 fn subagent_registry_for_catalog(tmp: &std::path::Path) -> crate::tools::ToolRegistry {
     let runtime = stub_runtime();
     let manager = runtime.manager.clone();
@@ -24584,7 +23636,6 @@ fn subagent_registry_for_catalog(tmp: &std::path::Path) -> crate::tools::ToolReg
         .with_subagent_tools(manager, runtime)
         .build(crate::tools::spec::ToolContext::new(tmp.to_path_buf()))
 }
-
 /// The narrow tools must vanish from the advertised catalog while staying
 /// registered: a persisted transcript that replays `agents/followup` has to
 /// keep dispatching to the same implementation, exactly as `rlm` and
@@ -24621,7 +23672,6 @@ fn retired_agents_tools_stay_registered_but_leave_the_model_catalog() {
         );
     }
 }
-
 /// Hiding a tool from the initial catalog is worthless if `tool_search` can
 /// hand it back. Both matching paths read the same catalog, so both are
 /// exercised — with queries chosen to hit the retired tools' own names and
@@ -24674,7 +23724,6 @@ fn tool_search_cannot_return_a_retired_agents_tool() {
         }
     }
 }
-
 /// A name the model can read is a name the model will try to call. The `agent`
 /// description and schema must not advertise a tool that is no longer in the
 /// catalog — the failure mode that motivated this change was the description
@@ -24706,7 +23755,6 @@ fn the_agent_surface_never_names_a_retired_tool() {
         "the replacement action must be advertised"
     );
 }
-
 /// The claim case, end to end, through the `agent` surface.
 ///
 /// This is the test the audit demanded: the coordinate wire key is `roots`
@@ -24808,7 +23856,6 @@ async fn agent_claim_expands_the_callers_write_scope() {
         .expect("the expanded scope admits the previously refused write");
     assert!(tmp.path().join("docs/note.txt").exists());
 }
-
 /// `expand_write_claim` returns the unchanged claim with `Ok` when every list
 /// is empty, so an empty claim would read as "granted". Refuse it at the seam.
 #[test]
@@ -24835,7 +23882,6 @@ fn agent_claim_refuses_a_scopeless_call() {
         "the coordinate wire key is `roots`: {translated}"
     );
 }
-
 /// Folding six tools into one multi-action tool must not hand a read-only role
 /// an authority its catalog previously withheld. `agents/coordinate` was kept
 /// off an inspection role's surface by the execution envelope; `claim` has to
