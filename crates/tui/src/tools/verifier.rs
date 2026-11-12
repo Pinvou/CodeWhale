@@ -588,14 +588,13 @@ fn start_background_gates(
                 .as_ref()
                 .ok()
                 .and_then(|result| result.task_id.as_deref())
+                && let Err(error) = manager.write_stdin(task_id, "", true)
             {
-                if let Err(error) = manager.write_stdin(task_id, "", true) {
-                    // Unreachable today (the job was just inserted under the
-                    // held lock and the close writes nothing), but a silent
-                    // `.ok()` here would quietly revert gates to idling on
-                    // the open pipe until the background gate timeout.
-                    tracing::warn!(%task_id, %error, "closing the gate job's stdin failed; the gate may idle until its timeout");
-                }
+                // Unreachable today (the job was just inserted under the
+                // held lock and the close writes nothing), but a silent
+                // `.ok()` here would quietly revert gates to idling on
+                // the open pipe until the background gate timeout.
+                tracing::warn!(%task_id, %error, "closing the gate job's stdin failed; the gate may idle until its timeout");
             }
             spawned
         };
