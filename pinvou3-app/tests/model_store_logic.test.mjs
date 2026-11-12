@@ -20,6 +20,7 @@ import {
   libraryStatusOf,
   storeGuideState,
   missingFormFields,
+  operationErrorText,
   operationWarningText,
   weightVerificationNotice,
   weightVerificationOf,
@@ -33,6 +34,9 @@ import {
   uninstallOptionsFor,
   trimSamples,
 } from '../src/features/model-store/model-store-logic.js';
+import { dictZh } from '../src/shared/i18n/zh.js';
+import { dictEn } from '../src/shared/i18n/en.js';
+import { dictJa } from '../src/shared/i18n/ja.js';
 
 const emptyState = () => ({ lines: [], progress: null, speed: null, prompt: null, samples: [] });
 
@@ -362,4 +366,32 @@ test('operationWarningText：警告码按语言渲染，未知字符串原样回
   assert.equal(operationWarningText(copy, null), '');
   assert.equal(operationWarningText(copy, undefined), '');
   assert.equal(operationWarningText(copy, ''), '');
+});
+
+test('operationErrorText：链接资源拒绝说明现有资源保留和安全迁移步骤，按当前语言显示', () => {
+  const code = 'model_store_linked_resource_path';
+  const copies = [dictZh.uiModelStore, dictEn.uiModelStore, dictJa.uiModelStore];
+  const messages = copies.map((copy) => operationErrorText(copy, code));
+  assert.equal(new Set(messages).size, 3);
+  const required = [
+    [/符号链接/, /现有资源和记录已保留/, /停用.*退出.*备份/, /迁移文档.*实际目录/, /不要直接删除.*目标目录/],
+    [/symbolic link/, /Existing resources and records have been preserved/, /Stop.*exit.*back up/, /migration guide.*physical directories/, /Do not delete.*target directory/],
+    [/シンボリックリンク/, /現存するリソースと記録.*保持/, /停止.*終了.*バックアップ/, /移行手順.*実体のディレクトリ/, /リンク先.*直接削除しない/],
+  ];
+  for (const [index, message] of messages.entries()) {
+    assert.ok(!message.includes(code));
+    for (const phrase of required[index]) assert.match(message, phrase);
+    assert.equal(operationErrorText(copies[index], new Error(code)), message);
+  }
+});
+
+test('operationErrorText：未知诊断与原型名称保持原串，不接受继承的错误映射', () => {
+  for (const copy of [dictZh.uiModelStore, dictEn.uiModelStore, dictJa.uiModelStore]) {
+    for (const message of ['Permission denied (os error 13)\nretained detail', '__proto__', 'constructor', 'toString', '']) {
+      assert.equal(operationErrorText(copy, message), message);
+    }
+  }
+  const code = 'model_store_linked_resource_path';
+  assert.equal(operationErrorText({ operationErrors: Object.create({ [code]: 'inherited translation' }) }, code), code);
+  assert.equal(operationErrorText({}, 'diagnostic from an older host'), 'diagnostic from an older host');
 });

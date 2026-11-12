@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { fetchVersions } from './model-store-api.js';
-import { formatBytes } from './model-store-logic.js';
+import { formatBytes, operationErrorText } from './model-store-logic.js';
 import { versionMeasurementError } from './version-measurement-errors.js';
 import { MsButton, MsDialog, MsDialogTitle, TEXT_SECONDARY } from './model-store-ui.jsx';
 
@@ -55,7 +55,7 @@ export function ModelVersionsDialog({ record, copy, theme, busy, onClose, onActi
         <p className={`mb-4 text-[13px] leading-6 ${TEXT_SECONDARY}`} data-testid="model-version-mtp-network-hint">{copy.mtpNetworkHint}</p>
       ) : null}
       {record.running ? <p role="status" className="mb-3 text-[13px] text-amber-700 dark:text-amber-300">{copy.versionStopFirst}</p> : null}
-      {error ? <div role="alert"><p>{versionMeasurementError(error, copy)}</p><MsButton tone="ghost" onClick={() => setAttempt((n) => n + 1)}>{copy.retry}</MsButton></div> : null}
+      {error ? <div role="alert"><p>{operationErrorText(copy, versionMeasurementError(error, copy))}</p><MsButton tone="ghost" onClick={() => setAttempt((n) => n + 1)}>{copy.retry}</MsButton></div> : null}
       {!versions && !error ? <p role="status">{copy.cardUpdateChecking}</p> : null}
       {versions ? (
         <div className="mb-2 flex justify-end" data-testid="model-version-measure-row">
@@ -68,7 +68,7 @@ export function ModelVersionsDialog({ record, copy, theme, busy, onClose, onActi
         <div className="space-y-3" data-testid="model-version-delete-confirm">
           <p>{copy.versionDeleteConfirm(confirmDelete.filename || confirmDelete.version_id.slice(0, 12), sizeLabel(confirmDelete.size_bytes))}</p>
           <div className="flex justify-end gap-2">
-            <MsButton tone="ghost" onClick={() => setConfirmDelete(null)}>{copy.detailClose}</MsButton>
+            <MsButton tone="ghost" data-testid="model-version-delete-cancel" onClick={() => setConfirmDelete(null)}>{copy.versionDeleteCancel}</MsButton>
             <MsButton tone="danger" disabled={busy} onClick={() => act('delete', confirmDelete)}>{copy.versionDelete}</MsButton>
           </div>
         </div>
@@ -81,7 +81,7 @@ export function ModelVersionsDialog({ record, copy, theme, busy, onClose, onActi
                   <p className="break-all font-medium">{version.filename || version.version_id.slice(0, 12)}</p>
                   <p className={TEXT_SECONDARY}>{copy.versionStates[version.state] || copy.versionUnspecified} · {sizeLabel(version.size_bytes)}</p>
                   {version.engine_version ? <p className={TEXT_SECONDARY}>{version.engine_version}</p> : null}
-                  {version.error ? <p role="alert" className="text-rose-600 dark:text-rose-400">{version.error === "version_download_interrupted" ? copy.versionInterrupted : version.error}</p> : null}
+                  {version.error ? <p role="alert" className="text-rose-600 dark:text-rose-400">{version.error === "version_download_interrupted" ? copy.versionInterrupted : operationErrorText(copy, version.error)}</p> : null}
                 </div>
                 <div className="flex shrink-0 gap-1">
                   {version.can_retry ? <MsButton tone="ghost" disabled={busy} onClick={() => act('stage', version)}>{copy.retry}</MsButton> : null}

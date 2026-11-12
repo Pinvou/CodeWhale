@@ -2146,6 +2146,13 @@ impl ModelManager {
                 "请先在历史版本中清理保留版本，再卸载或删除当前模型。",
             ));
         }
+        if purge_weights {
+            // The DB deletion contract is stricter than display's derived
+            // legacy active ID. Refuse before scripts can destroy its weights;
+            // delete_store_model repeats this guard in the final transaction.
+            db::check_store_model_deletion(card_id)
+                .map_err(|error| ModelManagerError::new(error.to_string()))?;
+        }
         let rec = self.get_record(card_id)?;
         let mut env = self.env_for_record(&rec);
         // Isolated weights belong to the host's version manager. The card only

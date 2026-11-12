@@ -1196,3 +1196,71 @@ fn effective_model_config_rejects_deleted_references_and_preserves_legacy_fallba
         assert_eq!(bridge.session_model.as_ref().unwrap().id, "retained");
     });
 }
+
+#[test]
+fn draft_image_capability_rejects_cleared_default_without_reporting_a_retained_route() {
+    use crate::features::assistant::platform::bridge::Pinvou3Bridge;
+
+    with_temp_home("draft-image-cleared-default", || {
+        let _env = effective_config_env(&[
+            ("DEEPSEEK_MODEL", "gpt-4o"),
+            ("DEEPSEEK_BASE_URL", "https://env.example.invalid/v1"),
+            (MODEL_API_KEY_ENV_OVERRIDE, "image-projection-fixture"),
+        ]);
+        let mut retained = effective_config_user_model("retained", "https://example.test/v1");
+        retained.model = "gpt-4o".into();
+        let mut bridge = Pinvou3Bridge::test_fixture(None);
+        bridge.prefs.advanced.saved_models = vec![retained.clone()];
+        bridge.prefs.advanced.active_model_id = None;
+        bridge.prefs.advanced.default_model_ref = None;
+        bridge.prefs.model_selection_schema_version = 1;
+        bridge.session_model = Some(retained);
+
+        // The retained model and process overrides both advertise native
+        // cloud image input, but neither selects a model for this draft.
+        assert_eq!(bridge.effective_image_capability().as_str(), "supported");
+        let error = draft_image_input_capability(&mut bridge).unwrap_err();
+        assert!(error.starts_with("model_selection_required:"));
+        assert!(bridge.session_model.is_none());
+    });
+}
+
+#[test]
+fn draft_image_capability_resolves_the_typed_default_and_preserves_legacy_selection() {
+    use crate::features::assistant::platform::bridge::Pinvou3Bridge;
+
+    with_temp_home("draft-image-default-binding", || {
+        let _env = effective_config_env(&[]);
+        let mut first = effective_config_user_model("first", "https://example.test/v1");
+        first.model = "gpt-4o".into();
+        let selected = effective_config_user_model("selected", "http://127.0.0.1:8911/v1");
+        let mut bridge = Pinvou3Bridge::test_fixture(None);
+        bridge.prefs.advanced.saved_models = vec![first.clone(), selected];
+        bridge.prefs.advanced.active_model_id = Some("first".into());
+        bridge.prefs.advanced.default_model_ref = Some(ModelSelectionRef::local("selected"));
+        bridge.prefs.model_selection_schema_version = 1;
+        bridge.session_model = Some(first);
+
+        let info = draft_image_input_capability(&mut bridge).unwrap();
+        assert_eq!(bridge.session_model.as_ref().unwrap().id, "selected");
+        assert_eq!(info.capability, "unknown");
+        assert_eq!(info.image_mode, "unsupported");
+        assert!(info.is_local_endpoint);
+        assert_eq!(info.vision_is_local_endpoint, None);
+
+        bridge.prefs.advanced.default_model_ref = Some(ModelSelectionRef::local("deleted"));
+        assert!(
+            draft_image_input_capability(&mut bridge)
+                .unwrap_err()
+                .starts_with("model_selection_unavailable:")
+        );
+
+        bridge.prefs.advanced.default_model_ref = None;
+        bridge.prefs.model_selection_schema_version = 0;
+        let info = draft_image_input_capability(&mut bridge).unwrap();
+        assert_eq!(bridge.session_model.as_ref().unwrap().id, "first");
+        assert_eq!(info.capability, "supported");
+        assert_eq!(info.image_mode, "native");
+        assert!(!info.is_local_endpoint);
+    });
+}
