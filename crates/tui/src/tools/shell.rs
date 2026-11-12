@@ -1117,6 +1117,26 @@ fn bounded_stdin_write_owned(
     }
 }
 
+/// Duplicate `fd` with the close-on-exec flag set (`F_DUPFD_CLOEXEC`).
+///
+/// The dup'd PTY master stays in this process for a task's whole lifetime,
+/// so it must behave like every other handle this crate holds for the task:
+/// invisible to children spawned meanwhile. portable-pty opens the pty with
+/// `FD_CLOEXEC` and its own reader/writer clones re-apply it
+/// (`F_DUPFD_CLOEXEC`), but a bare `libc::dup` CLEARS the flag on the new
+/// descriptor — every command spawned while a terminal task runs would
+/// inherit a live master-side fd aliasing that task's terminal, so a child
+/// could write into (inject input to) or read (capture output from) another
+/// task's terminal and keep the master alive past the task's teardown.
+#[cfg(all(unix, not(target_env = "ohos")))]
+fn dup_cloexec(fd: std::os::fd::RawFd) -> std::io::Result<std::os::fd::RawFd> {
+    let dup_fd = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 0) };
+    if dup_fd < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(dup_fd)
+}
+
 fn spawn_reader_thread<R: Read + Send + 'static>(
     mut reader: R,
     buffer: SharedRawOutput,
@@ -3412,19 +3432,23 @@ impl ShellManager {
                 // itself through the bounded worker and claims end-of-file
                 // only when that write really landed; the final master
                 // handle closes at teardown, after the child can no longer
-                // observe it.
+                // observe it. The dup is CLOEXEC (`dup_cloexec`): children
+                // spawned while the task runs must not inherit a master-side
+                // fd, matching the `take_writer` box it replaces and
+                // portable-pty's own cloexec'd descriptors.
                 #[cfg(unix)]
                 let stdin_writer = {
                     use std::os::fd::FromRawFd;
                     match pair.master.as_raw_fd() {
                         Some(fd) => {
-                            let dup_fd = unsafe { libc::dup(fd) };
-                            if dup_fd < 0 {
-                                let _ = child.kill();
-                                let _ = child.wait();
-                                return Err(std::io::Error::last_os_error())
-                                    .context("Failed to dup the PTY master for the stdin writer");
-                            }
+                            let dup_fd = dup_cloexec(fd)
+                                .inspect_err(|_| {
+                                    let _ = child.kill();
+                                    let _ = child.wait();
+                                })
+                                .with_context(
+                                    || "Failed to dup the PTY master for the stdin writer",
+                                )?;
                             // SAFETY: `dup_fd` is a freshly duplicated fd owned
                             // by this call; `File::from_raw_fd` takes ownership.
                             Some(StdinWriter::PtyFile(unsafe {
@@ -3608,10 +3632,10 @@ impl ShellManager {
             // No task id exists yet — the record is only registered below —
             // so `write_stdin`'s "kill it and start a new one" recovery copy
             // has no target here. The spawn aborts instead: the child is
-            // killed and the caller learns the run never started.
+            // killed and the caller learns the run was ended at spawn.
             let _ = bg_shell.kill();
             return Err(err.context(
-                "the run never started: delivering the inline stdin payload failed, so the command was killed and NO task was created (the task id the error above mentions was never registered — do not try to cancel or kill it)",
+                "the run was killed at spawn: the process was created, but delivering the inline stdin payload failed, so the command was killed before it could do any work and NO task was created (the task id the error above mentions was never registered — do not try to cancel or kill it)",
             ));
         }
 
