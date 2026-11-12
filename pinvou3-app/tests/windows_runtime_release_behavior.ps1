@@ -98,6 +98,18 @@ try {
     Assert-Rejected { Assert-RuntimeReleaseUri ([Uri]$uri) } 'untrusted or downgraded download endpoint must fail'
   }
   Assert-RuntimeReleaseUri ([Uri]'https://release-assets.githubusercontent.com/example')
+  Assert-True ($null -eq (Get-RuntimeReleaseProxy -Environment @{})) 'absent proxy settings must preserve the system default'
+  $proxy = Get-RuntimeReleaseProxy -Environment @{ HTTPS_PROXY = 'http://proxy.example.invalid:8080'; no_proxy = 'localhost,.internal.invalid,github.com' }
+  Assert-True ($proxy.GetProxy([Uri]'https://release-assets.githubusercontent.com/a').Host -eq 'proxy.example.invalid') 'HTTPS assets must use the configured proxy'
+  Assert-True ($proxy.IsBypassed([Uri]'https://github.com/a')) 'NO_PROXY must preserve exact host bypass'
+  Assert-True ($proxy.IsBypassed([Uri]'https://api.github.com/a')) 'NO_PROXY must preserve subdomain bypass'
+  $proxy = Get-RuntimeReleaseProxy -Environment @{ HTTPS_PROXY = 'http://proxy.example.invalid:8080'; NO_PROXY = 'github.com:443' }
+  Assert-True ($proxy.IsBypassed([Uri]'https://github.com/a')) 'explicit default ports in NO_PROXY must bypass their matching origin'
+  Assert-True (-not $proxy.IsBypassed([Uri]'https://github.com:8443/a')) 'port-specific bypass must not apply to a different port'
+  $proxy = Get-RuntimeReleaseProxy -Environment @{ https_proxy = 'http://a:b@proxy.example.invalid:8080'; NO_PROXY = '*' }
+  Assert-True ($proxy.IsBypassed([Uri]'https://github.com/a')) 'wildcard NO_PROXY must preserve direct routing'
+  Assert-True ($proxy.Credentials.UserName -eq 'a' -and $proxy.Credentials.Password -eq 'b' -and -not $proxy.Address.UserInfo) 'proxy credentials must be separated from the address'
+  Assert-Rejected { Get-RuntimeReleaseProxy -Environment @{ HTTPS_PROXY = 'file:///tmp/proxy' } } 'unsupported proxy schemes must fail closed'
   Write-Host 'Windows runtime Release download, integrity, offline reuse, corruption repair and failure boundaries passed.'
 } finally {
   $resolved = [IO.Path]::GetFullPath($testRoot)

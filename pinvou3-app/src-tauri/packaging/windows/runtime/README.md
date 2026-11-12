@@ -31,6 +31,8 @@ submodule checkout 显式禁用 LFS smudge，只取得被锁定的 Git 元数据
 不使用 `latest`，不调用 `git lfs pull`。每个附件必须同时匹配 manifest 的大小和 SHA256，
 同名附件被替换或下载不完整都会失败，已验证文件会保留。归档版本和 gitlink 保持不变。
 缓存位于 `target/windows-runtime/release-assets/<sha256>`，命中时重新核对内容；损坏缓存会重新下载。
+下载器显式遵循 `HTTPS_PROXY` 和 `NO_PROXY`，兼容不会自动采用这些环境变量的 .NET Framework。
+代理仅改变网络路由，目标与重定向仍须为批准的 GitHub HTTPS 端点，附件大小和 SHA256 校验保持不变。
 `-ForceDownload` 强制重新下载，旧参数 `-ForceLfsPull` 作为兼容别名保留。
 不得把 `.git/modules/private-runtimes/windows/lfs/objects` 作为独立缓存路径。
 Jenkins 只恢复 `pinvou3-app/src-tauri/target/windows-runtime`，不恢复部分 submodule gitdir。

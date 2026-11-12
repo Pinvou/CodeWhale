@@ -8,11 +8,57 @@ function Assert-RuntimeReleaseUri {
   }
 }
 
+function Get-RuntimeReleaseProxy {
+  param([System.Collections.IDictionary]$Environment = [Environment]::GetEnvironmentVariables())
+  $setting = [string]$Environment['HTTPS_PROXY']
+  if (-not $setting) { $setting = [string]$Environment['https_proxy'] }
+  if (-not $setting) { return $null }
+  $uri = $null
+  if (-not [Uri]::TryCreate($setting, [UriKind]::Absolute, [ref]$uri) -or $uri.Scheme -notin @('http', 'https')) {
+    throw 'Windows runtime HTTPS_PROXY must specify an HTTP(S) proxy.'
+  }
+  $address = [UriBuilder]::new($uri)
+  $address.UserName = ''; $address.Password = ''
+  $proxy = [Net.WebProxy]::new($address.Uri)
+  if ($uri.UserInfo) {
+    $parts = $uri.UserInfo.Split(':', 2)
+    $name = [Uri]::UnescapeDataString($parts[0])
+    $secret = if ($parts.Count -gt 1) { [Uri]::UnescapeDataString($parts[1]) } else { '' }
+    $proxy.Credentials = [Net.NetworkCredential]::new($name, $secret)
+  }
+  $noProxy = [string]$Environment['NO_PROXY']
+  if (-not $noProxy) { $noProxy = [string]$Environment['no_proxy'] }
+  $bypass = @()
+  foreach ($value in $noProxy.Split(',')) {
+    $entry = $value.Trim()
+    if (-not $entry) { continue }
+    if ($entry -eq '*') { $bypass += '.*'; continue }
+    if ($entry -match '^(?<host>\*?\.?[A-Za-z0-9_.-]+)(?::(?<port>[0-9]+))?$') {
+      $hostName = $Matches['host'].TrimStart('*', '.')
+      $scheme = 'https?://'
+      $port = '(?::[0-9]+)?'
+      if ($Matches['port']) {
+        $number = [int]$Matches['port']
+        if ($number -eq 443) { $scheme = 'https://'; $port = '(?::443)?' }
+        elseif ($number -eq 80) { $scheme = 'http://'; $port = '(?::80)?' }
+        else { $port = ':' + [Regex]::Escape($Matches['port']) }
+      }
+      $bypass += '^' + $scheme + '(?:[^/:]+\.)*' + [Regex]::Escape($hostName) + $port + '$'
+    }
+  }
+  $proxy.BypassList = [string[]]$bypass
+  return $proxy
+}
+
 function Write-RuntimeReleaseDownload {
   param([Uri]$Uri, [string]$Destination)
   Add-Type -AssemblyName System.Net.Http
   $handler = New-Object System.Net.Http.HttpClientHandler
   $handler.AllowAutoRedirect = $false
+  # .NET Framework does not consume HTTPS_PROXY automatically, unlike the
+  # existing Git/Node download tools. Preserve the Runner's explicit routing.
+  $proxy = Get-RuntimeReleaseProxy
+  if ($null -ne $proxy) { $handler.Proxy = $proxy; $handler.UseProxy = $true }
   $client = New-Object System.Net.Http.HttpClient($handler)
   $client.Timeout = [TimeSpan]::FromMinutes(10)
   $client.DefaultRequestHeaders.UserAgent.ParseAdd('pinvou-windows-runtime/1')
