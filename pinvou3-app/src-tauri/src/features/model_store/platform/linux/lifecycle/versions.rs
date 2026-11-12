@@ -117,7 +117,7 @@ fn resource_presence(path: &Path) -> Result<bool, ModelManagerError> {
     for ancestor in path.ancestors() {
         match ancestor.symlink_metadata() {
             Ok(meta) if meta.file_type().is_symlink() => {
-                return Err(fail("拒绝清理链接资源路径。"));
+                return Err(fail("model_store_linked_resource_path"));
             }
             Ok(_) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => missing = true,
@@ -367,6 +367,45 @@ fn managed_version_root(
         return Err(fail("版本目录归属或权限不符，未切换部署。"));
     }
     Ok(root)
+}
+
+/// An already prepared row is not proof that its files still exist. Reuse the
+/// switch layout checks without re-reading a potentially huge weight for a
+/// repeated preparation request; switching still verifies the complete digest.
+fn check_prepared_version_structure(
+    version: &Version,
+    card_id: &str,
+    version_id: &str,
+    configured_root: &Path,
+) -> Result<(), ModelManagerError> {
+    let record = version
+        .record
+        .as_ref()
+        .ok_or_else(|| fail("目标版本缺少部署记录"))?;
+    let root = if version.managed {
+        managed_version_root(version, card_id, version_id)?
+    } else {
+        legacy_resource_dir(record, configured_root).ok_or_else(|| fail("无法确认目标权重目录"))?
+    };
+    for blob in record
+        .scripts_content
+        .values()
+        .chain(record.assets_content.values())
+    {
+        if !script_runner::sha256_hex(&blob.content).eq_ignore_ascii_case(&blob.sha256) {
+            return Err(fail("目标版本的本地卡片校验失败，未切换部署。"));
+        }
+    }
+    let (name, _) = single_weight(record)?;
+    let file = find_weight(&root, &name)?;
+    if !file
+        .symlink_metadata()
+        .map_err(|error| fail(error.to_string()))?
+        .is_file()
+    {
+        return Err(fail("校验权重不是普通文件，请检查路径后重试。"));
+    }
+    Ok(())
 }
 
 /// Downloaded legacy cards have no deploy-env yet. Their missing runtime path
@@ -1098,6 +1137,12 @@ impl ModelManager {
         let existing = version_store::get(card_id, revision).map_err(fail)?;
         if let Some(v) = &existing {
             if ["ready", "current", "history"].contains(&v.state.as_str()) {
+                check_prepared_version_structure(
+                    v,
+                    card_id,
+                    revision,
+                    Path::new(&self.settings.models_dir),
+                )?;
                 return Ok(serde_json::json!({"version_id":revision}));
             }
             if !["failed", "downloading"].contains(&v.state.as_str()) {
@@ -1462,6 +1507,14 @@ impl ModelManager {
         if let Some(profile) = &selected_profile {
             env.insert("LMM_DEPLOY_PROFILE".into(), profile.clone());
         }
+        if control.cancelled() {
+            return Err(fail("已取消"));
+        }
+        // Digest callbacks and large files leave time for an external process
+        // to start after the first checks. Recheck both generations before
+        // engine/deployment scripts; the shared lock only governs app actors.
+        ensure_unused(&runtime_path(&current)?, Some(&resource))?;
+        ensure_unused(&runtime_path(rec)?, Some(&root))?;
         let probe = self.engine_probe(&source, card_id, &env);
         if !probe.installed {
             let lines =
@@ -1649,6 +1702,9 @@ impl ModelManager {
         if control.cancelled() {
             return Err(fail("已取消"));
         }
+        // A process may have acquired the legacy resource during its digest.
+        // Refuse before publishing the irreversible deleting state.
+        ensure_unused(&runtime, Some(&resource))?;
         // Commit point: after this marker cleanup is resumable, never reported as
         // a rollbackable history item whose weights might already be gone.
         version.state = "deleting".into();

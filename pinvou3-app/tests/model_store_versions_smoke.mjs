@@ -74,13 +74,18 @@ try {
     const root = createRoot(document.getElementById('root'));
     const record = { card_id: 'isolated-test', card_name: 'Test', running: false };
     window.pendingVersions = [];
+    window.versionDialogCommands = [];
+    window.versionDialogActions = [];
+    window.versionDialogCloses = 0;
     window.__TAURI__ = { core: { invoke: (command) => {
+      window.versionDialogCommands.push(command);
       if (command !== 'model_store_versions') throw Error(`Unexpected command: ${command}`);
       return new Promise((resolve) => window.pendingVersions.push(resolve));
     } } };
     window.renderVersions = (busy, copy = dictZh.uiModelStore) => root.render(createElement(ModelVersionsDialog, {
       record, copy, theme: 'light', busy,
-      onClose() {}, onAction() {},
+      onClose() { window.versionDialogCloses += 1; },
+      onAction(...args) { window.versionDialogActions.push(args); },
     }));
     window.answerVersions = ({ state, error = null }) => window.pendingVersions.shift()([{
       version_id: 'test-version', filename: 'test.weights', state,
@@ -196,6 +201,30 @@ try {
       return copy.versionMeasurementErrors.version_measurement_busy;
     }, language);
     await page.waitForFunction((message) => document.querySelector('[role="alert"] p')?.textContent === message, {}, expected);
+  }
+  // Cancelling deletion only returns to the version list. It must not close
+  // this dialog or dispatch the destructive action, in any active language.
+  for (const language of ['zh', 'en', 'ja']) {
+    const expected = await page.evaluate(async (locale) => {
+      const catalog = await import(`/shared/i18n/${locale}.js`);
+      const copy = catalog[locale === 'zh' ? 'dictZh' : locale === 'en' ? 'dictEn' : 'dictJa'].uiModelStore;
+      window.renderVersions(false, copy);
+      return { deleteLabel: copy.versionDelete, cancelLabel: copy.versionDeleteCancel };
+    }, language);
+    await page.waitForFunction((label) => [...document.querySelectorAll('[data-testid="model-version-row"] button')]
+      .some((button) => button.textContent === label), {}, expected.deleteLabel);
+    const commandsBeforeCancel = await page.evaluate(() => window.versionDialogCommands.length);
+    await page.$eval('[data-testid="model-version-row"]', (row, label) => {
+      [...row.querySelectorAll('button')].find((button) => button.textContent === label).click();
+    }, expected.deleteLabel);
+    await page.waitForSelector('[data-testid="model-version-delete-cancel"]');
+    assert.equal(await page.$eval('[data-testid="model-version-delete-cancel"]', (button) => button.textContent), expected.cancelLabel);
+    await page.click('[data-testid="model-version-delete-cancel"]');
+    await page.waitForFunction(() => !document.querySelector('[data-testid="model-version-delete-confirm"]'));
+    assert.ok(await page.$('[data-testid="model-store-versions-dialog"]'));
+    assert.deepEqual(await page.evaluate(() => ({ commands: window.versionDialogCommands.length,
+      actions: window.versionDialogActions.length, closes: window.versionDialogCloses })),
+    { commands: commandsBeforeCancel, actions: 0, closes: 0 });
   }
   assert.equal(await page.$('[data-testid="model-version-mtp-network-hint"]'), null,
     'other cards must not inherit the built-in MTP template disclosure');
@@ -336,6 +365,52 @@ try {
     const { ModelStoreOperationResults } = await import('/features/model-store/ModelStoreOperationResults.jsx');
     const { rememberTaskOperationResult, rememberForceRemoveResult } = await import('/features/model-store/operation-results.js');
     const { dictZh } = await import('/shared/i18n/zh.js');
+    const { dictEn } = await import('/shared/i18n/en.js');
+    const { dictJa } = await import('/shared/i18n/ja.js');
+    /* eslint-enable import-x/no-unresolved, n/no-missing-import */
+    const copies = { zh: dictZh.uiModelStore, en: dictEn.uiModelStore, ja: dictJa.uiModelStore };
+    for (const kind of ['version_stage', 'version_switch', 'version_delete', 'uninstall']) {
+      rememberTaskOperationResult({ runId: `locale-${kind}`, kind, cardName: 'Test',
+        title: kind === 'uninstall' ? copies.zh.taskUninstall('Test') : copies.zh.versionTask('Test') },
+      { ok: true, result: { freed_bytes: 1024 ** 3,
+        remaining_paths: ['version_delete', 'uninstall'].includes(kind) ? [`/${kind}/retained.weights`] : [] } });
+    }
+    rememberTaskOperationResult({ runId: 'legacy-title', kind: 'version_switch', title: 'Legacy task title' }, { ok: true, result: {} });
+    rememberForceRemoveResult({ taskId: 'locale-force', cardName: 'Force card' }, { residual_paths: ['/force/retained.weights'] });
+    const createRoot = client.createRoot || client.default?.createRoot;
+    const root = createRoot(document.getElementById('root'));
+    window.renderResultLocale = (locale) => {
+      const copy = copies[locale];
+      root.render(createElement(ModelStoreOperationResults, { copy }));
+      return [
+        { title: copy.versionTask('Test'), body: copy.versionStaged },
+        { title: copy.versionTask('Test'), body: copy.versionSwitched },
+        { title: copy.versionTask('Test'), body: copy.versionDeleted(1) },
+        { title: copy.taskUninstall('Test'), body: copy.operationUninstallRemaining },
+        { title: 'Legacy task title', body: copy.versionSwitched },
+        { title: 'Force card', body: copy.forceRemoveDone('Force card', 1) },
+      ];
+    };
+  });
+  // One mounted result list changes language immediately. Legacy tasks keep
+  // their original title, while every completion keeps its residual paths.
+  for (const locale of ['zh', 'en', 'ja']) {
+    const expected = await page.evaluate((language) => window.renderResultLocale(language), locale);
+    await page.waitForFunction((entries) => JSON.stringify([...document.querySelectorAll('[data-testid="model-version-operation-result"]')]
+      .map((node) => ({ title: node.querySelector('.font-semibold')?.textContent, body: node.querySelector('[role="status"]')?.textContent }))) === JSON.stringify(entries), {}, expected);
+    assert.deepEqual(await page.$$eval('[data-testid="model-version-cleanup-result"] li', (nodes) => nodes.map((node) => node.textContent)),
+      ['/version_delete/retained.weights', '/uninstall/retained.weights', '/force/retained.weights']);
+  }
+
+  await page.reload();
+  await page.evaluate(async () => {
+    /* eslint-disable import-x/no-unresolved, n/no-missing-import */
+    const reactModule = await import('/@id/react');
+    const { createElement } = reactModule.default || reactModule;
+    const client = await import('/@id/react-dom/client');
+    const { ModelStoreOperationResults } = await import('/features/model-store/ModelStoreOperationResults.jsx');
+    const { rememberTaskOperationResult, rememberForceRemoveResult } = await import('/features/model-store/operation-results.js');
+    const { dictZh } = await import('/shared/i18n/zh.js');
     await import('/styles/tailwind.css');
     /* eslint-enable import-x/no-unresolved, n/no-missing-import */
     for (let i = 0; i < 40; i += 1) rememberTaskOperationResult({ runId: `scroll-${i}`, title: `Card ${i}`, kind: 'version_switch' }, { ok: true, result: {} });
@@ -350,6 +425,28 @@ try {
   }));
   assert.ok(region.height <= 320 && region.content > region.height);
   assert.equal(region.overflow, 'auto');
+  await page.evaluate(() => {
+    const before = document.createElement('button');
+    before.dataset.testid = 'model-version-results-before';
+    before.textContent = 'Before operation results';
+    document.getElementById('root').before(before);
+  });
+  const assertResultKeyboardEntry = async () => {
+    await page.focus('[data-testid="model-version-results-before"]');
+    await page.keyboard.press('Tab');
+    assert.ok(await page.$eval('[data-testid="model-version-operation-result"] button',
+      (button) => document.activeElement === button), 'the result region must not add a tab stop before its actions');
+  };
+  await assertResultKeyboardEntry();
+  // This explicit negative control must fail with the extra region tab stop
+  // that focusing the first action directly would have bypassed.
+  await page.$eval('[data-testid="model-version-results"]', (node) => { node.tabIndex = 0; });
+  try {
+    await assert.rejects(assertResultKeyboardEntry, /result region must not add a tab stop/);
+  } finally {
+    await page.$eval('[data-testid="model-version-results"]', (node) => node.removeAttribute('tabindex'));
+  }
+  await assertResultKeyboardEntry();
   // The semantic region adds no extra tab stop: navigate actual actions and
   // let the browser scroll the focused acknowledgement into view.
   await page.focus('[data-testid="model-version-operation-result"] button');
@@ -479,6 +576,8 @@ try {
     const client = await import('/@id/react-dom/client');
     const { ModelStoreView } = await import('/features/model-store/ModelStoreView.jsx');
     const { dictZh } = await import('/shared/i18n/zh.js');
+    const { dictEn } = await import('/shared/i18n/en.js');
+    const { dictJa } = await import('/shared/i18n/ja.js');
     /* eslint-enable import-x/no-unresolved, n/no-missing-import */
     const createRoot = client.createRoot || client.default?.createRoot;
     const root = createRoot(document.getElementById('root'));
@@ -494,6 +593,11 @@ try {
     window.versionTaskCopy = dictZh.uiModelStore;
     window.finishVersionRun = (runId, result = {}, cancelled = false) => {
       const chunk = { done: true, ok: true, cancelled, lines: [], next: 0, result };
+      completed.set(runId, chunk);
+      pending.get(runId)?.(chunk);
+    };
+    window.failVersionRun = (runId, error) => {
+      const chunk = { done: true, ok: false, error, lines: ['preserved cleanup output'], next: 1 };
       completed.set(runId, chunk);
       pending.get(runId)?.(chunk);
     };
@@ -529,14 +633,20 @@ try {
       }
       if (command === 'model_store_run_log') {
         if (payload.runId.startsWith('failed-uninstall-')) return { done: true, ok: false, lines: [], next: 0, error: 'uninstall failed' };
-        if (completed.has(payload.runId)) return completed.get(payload.runId);
+        if (completed.has(payload.runId)) {
+          const chunk = completed.get(payload.runId);
+          return payload.from >= chunk.next ? { ...chunk, lines: [] } : chunk;
+        }
         return new Promise((resolve) => pending.set(payload.runId, resolve));
       }
       throw Error(`Unexpected command: ${command}`);
     } } };
-    window.renderVersionStore = (visible) => root.render(visible ? createElement(ModelStoreView, {
-      theme: 'light', t: dictZh, bs: { savedModels: [] },
-    }) : null);
+    window.renderVersionStore = (visible, locale = 'zh') => {
+      const t = { zh: dictZh, en: dictEn, ja: dictJa }[locale];
+      root.render(visible ? createElement(ModelStoreView, { theme: 'light', t, bs: { savedModels: [] } }) : null);
+      return { title: t.uiModelStore.versionTask('alpha'), body: t.uiModelStore.versionStaged,
+        linkedResourceError: t.uiModelStore.operationErrors.model_store_linked_resource_path };
+    };
     window.openVersionHistory = (cardId) => {
       const row = document.querySelector(`[data-card-id="${cardId}"]`);
       [...row.querySelectorAll('button')].find((button) => button.textContent === dictZh.uiModelStore.versionHistory).click();
@@ -559,6 +669,14 @@ try {
   await page.waitForSelector('[data-testid="model-store-card-update-dialog"]');
   await page.evaluate(() => window.finishVersionRun(window.versionRuns[0]));
   await page.waitForSelector('[data-testid="model-version-operation-result"]');
+  for (const locale of ['zh', 'en', 'ja', 'zh']) {
+    const expected = await page.evaluate((language) => window.renderVersionStore(true, language), locale);
+    await page.waitForFunction(({ title, body }) => {
+      const result = document.querySelector('[data-operation-kind="version_stage"]');
+      return result?.querySelector('.font-semibold')?.textContent === title
+        && result.querySelector('[role="status"]')?.textContent === body;
+    }, {}, expected);
+  }
   assert.ok(await page.$eval('#card-update-title', (element) => element.textContent.includes('beta')));
   assert.equal(await page.$('[data-testid="model-store-versions-dialog"]'), null);
   await page.keyboard.press('Escape');
@@ -699,6 +817,35 @@ try {
     await page.click(`${resultSelector} button`);
     await page.waitForFunction((selector) => !document.querySelector(selector), {}, resultSelector);
   }
+  // The cleanup failure arrives through the real task pump. Both its compact
+  // summary and expanded details translate the retained code on every render.
+  const failedDeleteSelector = '[data-testid="model-store-task"][data-task-kind="version_delete"][data-task-status="error"]';
+  const linkedResourceRun = await beginVersionAction('delete');
+  await page.evaluate((id) => window.failVersionRun(id, 'model_store_linked_resource_path'), linkedResourceRun);
+  await page.waitForSelector(failedDeleteSelector);
+  for (const locale of ['zh', 'en', 'ja', 'zh']) {
+    const expected = await page.evaluate((language) => window.renderVersionStore(true, language).linkedResourceError, locale);
+    await page.waitForFunction(({ selector, message }) => document.querySelector(selector)
+      ?.querySelector('[data-testid="model-store-task-error"]')?.textContent === message, {},
+    { selector: failedDeleteSelector, message: expected });
+    assert.equal(await page.$eval(`${failedDeleteSelector} [data-testid="model-store-task-log"]`, (log) => log.textContent),
+      `preserved cleanup output\n\n${expected}`);
+    assert.ok(await page.$eval(failedDeleteSelector, (task) => !task.textContent.includes('model_store_linked_resource_path')));
+  }
+  assert.equal(await page.$('[data-testid="model-version-operation-result"]'), null, 'a rejected cleanup must not report completion');
+  await page.$eval(failedDeleteSelector, (task) => [...task.querySelectorAll('button')]
+    .find((button) => button.textContent === window.versionTaskCopy.taskClose).click());
+  await page.waitForFunction((selector) => !document.querySelector(selector), {}, failedDeleteSelector);
+  const unknownCleanupError = 'Unknown cleanup detail\nretained second line';
+  const unknownCleanupRun = await beginVersionAction('delete');
+  await page.evaluate(({ id, error }) => window.failVersionRun(id, error), { id: unknownCleanupRun, error: unknownCleanupError });
+  await page.waitForSelector(failedDeleteSelector);
+  assert.equal(await page.$eval(`${failedDeleteSelector} [data-testid="model-store-task-error"]`, (summary) => summary.textContent), 'Unknown cleanup detail');
+  assert.equal(await page.$eval(`${failedDeleteSelector} [data-testid="model-store-task-log"]`, (log) => log.textContent),
+    `preserved cleanup output\n\n${unknownCleanupError}`);
+  await page.$eval(failedDeleteSelector, (task) => [...task.querySelectorAll('button')]
+    .find((button) => button.textContent === window.versionTaskCopy.taskClose).click());
+  await page.waitForFunction((selector) => !document.querySelector(selector), {}, failedDeleteSelector);
   await page.reload();
   await page.evaluate(async () => {
     /* eslint-disable import-x/no-unresolved, n/no-missing-import */
@@ -1153,6 +1300,8 @@ try {
   console.log('PASS: existing settings forms preserve untouched routes after migration; edited routes and new drafts opt out');
   console.log('PASS: alias-only and untouched drafts do not claim context edits; explicit 32K and automatic choices retain their intent');
   console.log('PASS: unknown compatibility reasons remain visible; uninstall cleanup preserves sync failures');
+  console.log('PASS: completed result titles follow the active language with legacy-title compatibility; delete cancellation returns to the list without closing or invoking an action');
+  console.log('PASS: keyboard entry skips the result region itself and detects an injected extra tab stop before preserving all residual acknowledgements');
   console.log('PASS: zero-size legacy metadata retains update actions with translated unverified-weight notices; bounded results keep every completion and scroll to individual residual acknowledgements');
   console.log('PASS: startup update preference loads persisted false and preserves the draft and retry controls after a failed save');
   console.log('PASS: stale details retain explicit re-link intent and surface rejection without changing the active model');
@@ -1160,6 +1309,7 @@ try {
   console.log('PASS: force-remove results survive navigation; closing one result preserves other unread cleanup paths');
   console.log('PASS: late context/key/link results cannot refresh another card, overwrite its busy state, or show stale toasts');
   console.log('PASS: version stage/delete/switch expose Close only after cancellation; cancellation never reports success and normal completion retains results and refreshes the library');
+  console.log('PASS: linked-resource cleanup failures show current-language migration guidance in the task summary and details while preserving unknown diagnostics');
 } catch (error) {
   hasPrimaryFailure = true;
   primaryFailure = error;

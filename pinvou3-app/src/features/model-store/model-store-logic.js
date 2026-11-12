@@ -98,6 +98,13 @@ function operationWarningText(copy, warning) {
   return String(warning);
 }
 
+/** Translate owned operation codes at display time; keep other diagnostics intact. */
+function operationErrorText(copy, failure) {
+  const message = String(failure?.message || failure);
+  const messages = copy.operationErrors;
+  return messages && Object.prototype.hasOwnProperty.call(messages, message) ? messages[message] : message;
+}
+
 const PROMPT_KINDS = ['text', 'password', 'confirm'];
 
 /**
@@ -596,6 +603,7 @@ export {
   splitDuration,
   parseProgressLine,
   operationWarningText,
+  operationErrorText,
   parsePromptLine,
   computeSpeed,
   trimSamples,
