@@ -77,10 +77,12 @@ pub enum FleetRole {
     /// posture pushes hard on landing the change cleanly with the
     /// minimum surrounding edit (#404).
     Builder,
-    /// Verification — focused on running the test suite or other
-    /// validation gates and reporting pass/fail with evidence.
-    /// Distinct from `Reviewer` in that Reviewer reads code and grades it;
-    /// Verifier *runs* tests and reports the outcome (#404).
+    /// Verification — runs the built-in verification gates and reports
+    /// pass/fail with evidence; the gates are refused when a read-only-shell
+    /// parent clamps the child's shell authority. In-session delegations
+    /// also carry the bounded read-only probe lane. Distinct from `Reviewer`
+    /// in that Reviewer reads code and grades it; Verifier *runs* the gates
+    /// and reports the outcome (#404).
     Verifier,
     /// Advisory counsel — a strong-model second opinion the operator can ask
     /// for guidance, judgement calls, and design critique (#4752).
@@ -193,7 +195,7 @@ impl FleetRole {
                 "Lands focused code changes cleanly with the minimum surrounding edit."
             }
             Self::Verifier => {
-                "Runs the built-in verification gates with test-selection arguments, plus — for in-session delegations — a bounded read-only shell for evidence gathering; cannot execute custom commands — use a write-capable role for those."
+                "Runs the built-in verification gates with test-selection arguments unless a read-only-shell parent clamped its shell authority (the clamped child keeps the bounded read-only probes and loses the gates), plus — for in-session delegations — a bounded read-only shell for evidence gathering; cannot execute custom commands — use a write-capable role for those."
             }
             Self::Consultant => {
                 "Read-only high-reasoning counsel for judgement calls and design critique."
