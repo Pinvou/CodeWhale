@@ -627,6 +627,7 @@ mod tests {
             created_at: "2026-10-18T00:00:00Z".into(),
             error: None,
             planned_bytes: 0,
+            measured_bytes: None,
         };
         super::super::version_store::put(&version).unwrap();
         version
