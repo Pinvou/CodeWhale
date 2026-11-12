@@ -11,6 +11,11 @@ state.actor=state.reauthenticated&&params.has('otherActor')?'00000000-0000-4000-
 const original=window.fetch.bind(window);
 const response=(body,status=200)=>new Response(JSON.stringify(body),{status,headers:{'Content-Type':'application/json'}});
 state.piiAllowed=params.has('pii');
+const longAuditItems=params.has('longAction')?[
+ {audit_id:id,action:'APPROVAL_EXISTING_BROKER_INITIALIZATION'},
+ {audit_id:'00000000-0000-4000-8000-000000000018',action:'UNKNOWN_'+ 'X'.repeat(160)},
+ {audit_id:'00000000-0000-4000-8000-000000000019',action:'user.active_context.set'},
+].map(item=>({...item,result:'SUCCEEDED',request_id:'controlled-request',resource_type:'ADMIN_APPROVAL_CONTROL',resource_id:id})):null;
 const job=()=>({export_id:id,status:'READY',filename:'controlled-audit.pae',include_pii:Boolean(state.includePII),redacted:!state.includePII,...(state.ticketIssued?{download_ticket_issued_at:'2026-10-09T00:00:00Z'}:{})});
 window.fetch=async(url,options={})=>{
  if(!String(url).startsWith('/api/'))return original(url,options);
@@ -18,6 +23,8 @@ window.fetch=async(url,options={})=>{
  if(url==='/api/session')return response({authenticated:true,csrf_token:'controlled-csrf'});
  if(url==='/api/account/v1/account/bootstrap')return response({user_id:state.actor,status:'ACTIVE',active_context:{context_type:'PERSONAL',organization_id:null,membership_version:1,context_version:1,authorization_version:1,personal_authorization_version:1,platform_authorization_version:1,organization_authorization_version:1,permissions:[]},personal_permissions:[],platform_permissions:params.has('deny')||(state.reauthenticated&&params.has('lostPermission'))?[]:params.has('readOnly')?['platform.audit.read']:params.has('exportOnly')?['platform.audit.export']:params.has('piiOnly')?['platform.audit.pii.export']:state.piiAllowed?['platform.audit.read','platform.audit.export','platform.audit.pii.export']:['platform.audit.read','platform.audit.export']});
  if(String(url).includes('/audit-logs')&&params.has('exportOnly'))return response({code:'PERMISSION_DENIED'},403);
+ if(longAuditItems&&(String(url).includes('/audit-logs?')||String(url).endsWith('/audit-logs')))return response({items:longAuditItems});
+ if(longAuditItems&&String(url).includes('/audit-logs/')){const item=longAuditItems.find(item=>String(url).endsWith('/audit-logs/'+item.audit_id));return item?response({...item,change_summary:{status:'ACTIVE'}}):response({code:'CONTROLLED_NOT_FOUND'},404);}
  if(String(url).includes('/audit-logs?')||String(url).endsWith('/audit-logs'))return response({items:[{audit_id:id,action:'CONTROLLED_AUDIT_ACTION',result:'SUCCEEDED',request_id:'controlled-request',resource_type:'USER',resource_id:id}]});
  if(String(url).endsWith('/audit-logs/'+id))return response({audit_id:id,action:'CONTROLLED_AUDIT_ACTION',result:'SUCCEEDED',change_summary:{status:'ACTIVE'}});
  if(String(url).endsWith('/audit-exports')&&options.method==='POST'){
