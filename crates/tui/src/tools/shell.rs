@@ -937,9 +937,12 @@ impl StdinWriter {
 /// With SIGPIPE at SIG_DFL that would kill the process one instruction
 /// after the "handled" EPIPE, exactly where the guard ends. The drop
 /// therefore checks this thread's pending set and consumes a pending
-/// SIGPIPE with `sigwait` BEFORE restoring the mask (`sigpending` only
-/// sees thread-directed signals, so a pending SIGPIPE here is one this
-/// guarded region generated). Test binaries run with std's SIG_IGN, under
+/// SIGPIPE with `sigwait` BEFORE restoring the mask. A write-failure
+/// SIGPIPE is thread-directed, so a pending SIGPIPE inside a guarded
+/// region is one this region's write generated; `sigpending` also reports
+/// process-directed signals, but nothing in this process raises SIGPIPE
+/// that way, and consuming such a signal under SIG_DFL would only spare
+/// the process. Test binaries run with std's SIG_IGN, under
 /// which a generated SIGPIPE is discarded at generation and never becomes
 /// pending — which is why the suite cannot catch a block-and-restore guard;
 /// the consume path is pinned by re-arming SIG_DFL inside a helper process
@@ -1028,9 +1031,12 @@ enum BoundedEofDelivery {
 /// a delivery only when the write really completed, so the flag never
 /// claims an end-of-file that did not land. The EOF byte is written
 /// literally (`0x04`) rather than read from `c_cc[VEOF]`: portable-pty's
-/// unix writer injects the live byte at drop, so a terminal with VEOF
-/// disabled received plain bytes from the box too — the parity holds in
-/// every realistic termios state.
+/// unix writer reads the live byte at drop and writes nothing at all when
+/// VEOF is disabled (`_POSIX_VDISABLE`), so the two behaviors differ in
+/// that state — this close sends the two bytes as ordinary input, exactly
+/// like raw mode, and no end-of-file ever arrives. The `close_stdin`
+/// schema discloses that; the old box delivered nothing in the same
+/// state, so the close still reports honestly what it did.
 #[cfg(all(unix, not(target_env = "ohos")))]
 fn bounded_stdin_eof_delivery(file: &std::fs::File) -> BoundedEofDelivery {
     use std::os::fd::AsFd;
@@ -1303,10 +1309,11 @@ pub struct BackgroundShell {
     /// `interact` can state the true reason stdin is unavailable.
     stdin_closed_at_eof: bool,
     /// Set when a stdin write outlived [`STDIN_WRITE_DEADLINE`] because the
-    /// command stopped consuming its pipe. The abandoned bytes keep flowing
-    /// from the background writer if the child resumes, so further writes
-    /// are refused (two writers could interleave) instead of queued behind
-    /// an unknown pipe state.
+    /// command stopped consuming its pipe, or when a terminal close's own
+    /// ^D delivery stalled the same way (same deadline, same refusal
+    /// family). The abandoned bytes keep flowing from the background writer
+    /// if the child resumes, so further writes are refused (two writers
+    /// could interleave) instead of queued behind an unknown pipe state.
     stdin_write_stalled: bool,
     child: Option<ShellChild>,
     /// A stop was delivered but the direct child's exit was never observed:
@@ -1657,9 +1664,12 @@ impl BackgroundShell {
 
     fn write_stdin(&mut self, input: &str, close: bool) -> Result<()> {
         // Taken owned so the Windows/ohos fallback can move the writer into
-        // its bounded worker and hand it back; every exit below restores the
+        // its bounded worker and hand it back. Every unix exit restores the
         // slot first, keeping the stall/eof refusal ordering identical with
-        // the pinned unix behavior.
+        // the pinned unix behavior; on the ownership-fallback cfgs the
+        // Timeout, Disconnected, and spawn-failure arms deliberately leave
+        // the slot empty — the writer is gone with the worker, and the stall
+        // flag or the returned refusal reports that.
         // `mut` is real only on the ownership-fallback cfgs (they re-take and
         // reassign the slot); the unix fd-clone path only moves it, so the
         // same predicate that strips the fallback also silences `unused_mut`.
@@ -5317,9 +5327,9 @@ const MAX_INLINE_STDIN_BYTES: usize = 64 * 1024;
 const STDIN_WRITE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// One shared copy per stdin refusal shape so the unix fd-clone path and
-/// the owned-writer path (and the close paths) cannot drift apart — the
-/// pins assert substrings of these. They are functions rather than consts
-/// so the deadline interpolation stays a real format capture.
+/// the owned-writer path cannot drift apart — the pins assert substrings
+/// of these. They are functions rather than consts so the deadline
+/// interpolation stays a real format capture.
 fn stdin_stalled_write_refusal(task_id: &str) -> String {
     format!(
         "the write to task {task_id} did not complete within {STDIN_WRITE_DEADLINE:?}: the command stopped consuming its stdin, so its input buffer filled and the rest of the payload was abandoned to a background writer (it still lands if the command resumes reading). Further stdin writes to this task are refused; kill it and start a new one."
@@ -5332,12 +5342,19 @@ fn stdin_writer_failed_refusal(task_id: &str) -> String {
     )
 }
 
+/// Serves only the unix PTY close arm (the Windows/ohos close arm has its
+/// own inline copy and never takes the unix delivery path). Same
+/// predicate as the `PtyFile` variant, so `deny(warnings)`' fatal
+/// `dead_code` cannot fire on platforms where the arm is compiled out.
+#[cfg(all(unix, not(target_env = "ohos")))]
 fn stdin_stalled_close_refusal(task_id: &str) -> String {
     format!(
         "the stdin close for task {task_id} did not complete within {STDIN_WRITE_DEADLINE:?}: the terminal's input queue stayed full because the command stopped consuming input, so the end-of-file bytes were not delivered; the close was not applied and the interact surface stays attached. Further stdin writes to this task are refused; kill it and start a new one."
     )
 }
 
+/// See [`stdin_stalled_close_refusal`]: unix-PTY-only, same cfg predicate.
+#[cfg(all(unix, not(target_env = "ohos")))]
 fn stdin_stalled_close_not_applied_refusal(task_id: &str) -> String {
     format!(
         "the stdin close for task {task_id} was not applied: its last stdin write stalled because the command stopped consuming input, so the end-of-file was never delivered and no close can deliver it now; the interact surface stays attached and further stdin writes are refused; kill it and start a new one."
@@ -5726,7 +5743,7 @@ impl ToolSpec for BashTool {
                 },
                 "close_stdin": {
                     "type": "boolean",
-                    "description": "Close stdin after sending (action=interact); on a terminal task the close delivers end-of-file, sent as a literal newline followed by the EOF byte — a program that put its terminal into raw mode receives those bytes as ordinary input instead, and on Windows the close only releases the terminal handle (a console child has no end-of-file to deliver)"
+                    "description": "Close stdin after sending (action=interact); on a terminal task the close delivers end-of-file, sent as a literal newline followed by the EOF byte — a program that put its terminal into raw mode, or disabled VEOF, receives those bytes as ordinary input instead, and on Windows the close only releases the terminal handle (a console child has no end-of-file to deliver)"
                 },
                 "all": {
                     "type": "boolean",
