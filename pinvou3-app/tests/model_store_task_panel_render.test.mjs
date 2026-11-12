@@ -46,6 +46,30 @@ test('下载字节达到100%但任务未结束时，不显示完成百分比和�
   assert.doesNotMatch(html, /100\.0%|剩余约|aria-valuenow="100"/);
 });
 
+// r33 P2-3 UI 侧补钉：0370b9da9 的两处 UI 修（0% 条最小宽 2%、<1% 字节优先）
+// 此前零断言——评审变异（删掉两修）套件仍全绿。
+test('字节进度 <1% 时进度条有 2% 最小宽度且显示已下载字节数而非 0.0%', async () => {
+  const { formatBytes } = await import('../src/features/model-store/model-store-logic.js');
+  // 真实分母但才下了 728K/168G（0.0004%）——「0% 条不可见 + 0.0% 像卡死」两修的对象
+  const html = render(task({ progress: { done: 728000, total: 168e9 } }));
+  // 修②：条宽下限 2%（style width 由 Math.max(percent, 2) 兜底）
+  assert.match(html, /data-testid="model-store-progress-bar"[^>]*style="width:2%/);
+  // 修③：字节优先——展示已下载字节对，不展示误导性的 0.0%
+  assert.doesNotMatch(html, /0\.0%/);
+  assert.ok(html.includes(copy.taskProgress(formatBytes(728000), formatBytes(168e9))), '应出现「已下载 X / 共 Y」类字节进度文案');
+});
+
+test('分母可疑时条降为 estimated 2%；done 完成卡不再被拖回估算条', () => {
+  // running + total=0（分母可疑）→ estimated 条（原修复，钉住不回归）
+  const running = render(task({ progress: { done: 728000, total: 0 }, status: 'running' }));
+  assert.match(running, /data-progress-estimated="true"/);
+  assert.match(running, /style="width:2%/);
+  // r33 P2-3：done + 同一可疑分母 → 短路，完成卡根本不渲染进度条
+  const done = render(task({ progress: { done: 728000, total: 0 }, status: 'done' }));
+  assert.doesNotMatch(done, /model-store-progress-bar/);
+  assert.doesNotMatch(done, /data-progress-estimated="true"/);
+});
+
 /**
  * 造一张任务卡。默认是一张最普通的、正在跑的下载卡。
  * @param {object} overrides - 要覆盖的字段。
