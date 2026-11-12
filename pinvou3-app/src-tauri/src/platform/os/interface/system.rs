@@ -174,6 +174,12 @@ pub fn nvidia_smi_candidates() -> Vec<&'static str> {
     super::super::platform::nvidia_smi_candidates()
 }
 
+/// `docker` CLI 的候选路径（与 `nvidia_smi_candidates` 同一模式）：桌面入口启动的
+/// 应用 PATH 可能不含 docker，裸名探测会把"装了但不在 PATH"误报成"守护进程未运行"。
+pub fn docker_candidates() -> Vec<&'static str> {
+    super::super::platform::docker_candidates()
+}
+
 /// Returns the Node.js executable bundled with the application for Browser MCP and other
 /// runtimes, or `None` when no bundled runtime exists. Linux and macOS reuse the codex-bridge
 /// runtime; Windows uses installer-provisioned `runtime/node/node.exe`, shared with connector

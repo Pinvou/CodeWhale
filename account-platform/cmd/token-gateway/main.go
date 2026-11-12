@@ -254,7 +254,6 @@ func main() {
 	cancelInitialSync()
 	go observability.RunBackground(workerContext, "model-catalog-sync", catalogSync.Run)
 	go observability.RunBackground(workerContext, "default-route-provisioning", defaultRoutes.Run)
-	go observability.RunBackground(workerContext, "route-health-probe", routeHealth.Run)
 	validator, err := token.NewHTTPModelValidatorWithCA(providerURLPolicy, os.Getenv("TOKEN_PROVIDER_CA_FILE"))
 	if err != nil {
 		log.Fatal("TOKEN_PROVIDER_VALIDATION_TRUST_CONFIGURATION_FAILED")
@@ -265,6 +264,10 @@ func main() {
 	if err := installPersonalExecution(workerContext, service, repository, billingClient, gatewayAdapter, defaultRoutes, providerURLPolicy, cfg.Environment, serviceCredential); err != nil {
 		log.Fatal("TOKEN_PERSONAL_EXECUTION_CONFIGURATION_FAILED")
 	}
+	if err := service.WithRouteHealthCircuitRecovery(routeHealth); err != nil {
+		log.Fatal("TOKEN_ROUTE_HEALTH_CIRCUIT_CONFIGURATION_FAILED")
+	}
+	go observability.RunBackground(workerContext, "route-health-probe", routeHealth.Run)
 	governedWorkers, err := token.NewTokenGovernanceSupervisor(service, repository, governance, wallets, ownerAuthority)
 	if err != nil {
 		log.Fatal("TOKEN_STARTUP_CONFIGURATION_FAILED")
