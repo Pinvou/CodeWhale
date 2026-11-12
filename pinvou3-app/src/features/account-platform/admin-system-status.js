@@ -1,4 +1,5 @@
 import { integerMoney } from "./finance-contract.js";
+import { adminModelTokenQueryUpdates } from "./admin-navigation.js";
 
 const COUNTS = new Set([
   "latency_ms",
@@ -108,4 +109,15 @@ export function systemDiagnosticMessage(item, labels) {
   if (item.code === "RECONCILIATION_STATUS_UNAVAILABLE") return labels.reconciliationUnavailable;
   if (item.code === "RECONCILIATION_ERRORS_UNAVAILABLE") return labels.reconciliationErrorsUnavailable;
   return item.message;
+}
+
+// This is a related review queue, not an exact stopped-usage filter. Keep its
+// permission and route contract separate from the system-status read scope.
+export function systemRelatedReconciliationRoute(available = [], permissions = []) {
+  if (!permissions.includes("platform.usage.read")) return null;
+  const section = available.includes("modelOperations") ? "modelOperations" : available.includes("tokens") ? "tokens" : null;
+  return section ? { section, query: {
+    operations_tab: "reconciliation", usage_request_id: null,
+    ...adminModelTokenQueryUpdates("reconciliation", { case_type: "USAGE_RECONCILIATION_REVIEW" }),
+  } } : null;
 }

@@ -34,9 +34,12 @@
 .adm-shell.adm-restored-shell .adm-platform-roles .adm-role-panel{margin:0;padding:0;overflow:hidden}
 .adm-shell.adm-restored-shell .adm-platform-roles .adm-role-panel .adm-table-wrap{max-width:100%;margin:0}
 .adm-shell.adm-restored-shell .adm-platform-roles .adm-role-panel .adm-pagination{padding:13px 20px;border-top:1px solid var(--adm-line)}
-.adm-shell.adm-restored-shell .adm-platform-roles .adm-role-catalog-layout{grid-template-columns:minmax(0,1fr) minmax(300px,.9fr);min-height:520px}
-.adm-shell.adm-restored-shell .adm-platform-roles .adm-role-catalog-layout>.adm-table-wrap{min-width:0;max-height:580px;margin:0;overflow:auto}
-.adm-shell.adm-restored-shell .adm-platform-roles .adm-role-detail{max-height:580px;overflow:auto}
+.adm-shell.adm-restored-shell .adm-platform-roles .adm-role-catalog-layout{grid-template-columns:minmax(0,1fr) minmax(300px,.9fr);align-items:start;min-height:0}
+.adm-shell.adm-restored-shell .adm-platform-roles .adm-role-catalog-layout>.adm-table-wrap{min-width:0;margin:0;overflow:auto}
+.adm-shell.adm-restored-shell .adm-platform-roles .adm-role-detail{overflow:visible}
+.adm-restored-shell .adm-role-catalog-layout>.adm-role-detail>header>div{flex:1 1 0;min-width:0}
+/* Safari 14 supports break-word. The explicit flex size lets the text shrink without anywhere. */
+.adm-restored-shell .adm-role-catalog-layout>.adm-role-detail>header h3,.adm-restored-shell .adm-role-catalog-layout>.adm-role-detail>header code,.adm-restored-shell .adm-role-catalog-layout>.adm-role-detail>p{overflow-wrap:break-word;white-space:normal}
 .adm-shell.adm-restored-shell .adm-platform-roles .adm-role-table{min-width:0;width:100%;margin:0}
 .adm-shell.adm-restored-shell .adm-platform-roles .adm-role-table td{vertical-align:top}
 .adm-shell.adm-restored-shell .adm-platform-roles .adm-role-table td:first-child{width:78%;overflow-wrap:anywhere}
@@ -65,3 +68,58 @@
 .adm-shell.adm-restored-shell .adm-platform-roles .adm-visually-hidden{position:absolute;width:1px;height:1px;padding:0;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap}
 @media(max-width:1150px){.adm-shell.adm-restored-shell .adm-platform-roles .adm-role-catalog-layout{grid-template-columns:1fr}.adm-shell.adm-restored-shell .adm-platform-roles .adm-role-catalog-layout>.adm-table-wrap{border-right:0}.adm-shell.adm-restored-shell .adm-platform-roles .adm-role-detail{border-top:1px solid var(--adm-line)}}
 @media(max-width:760px){.adm-shell.adm-restored-shell .adm-platform-roles .adm-role-workspace-head{align-items:stretch}.adm-shell.adm-restored-shell .adm-platform-roles .adm-role-workspace-head>div:last-child{flex-wrap:wrap}.adm-role-grant .adm-role-preview{grid-template-columns:1fr}.adm-role-grant .adm-role-search{grid-template-columns:1fr}}
+
+.adm-role-grant .adm-role-steps li{min-width:0;font-size:14px;line-height:1.5;overflow-wrap:anywhere}
+.adm-role-grant .adm-role-next-help{margin:0;color:var(--adm-muted);font-size:12px;line-height:1.6;overflow-wrap:anywhere}
+
+.adm-restored-shell .adm-platform-roles .adm-role-permission-groups summary{justify-content:flex-start;gap:8px;padding:12px;font-size:13px;line-height:1.5}
+.adm-restored-shell .adm-platform-roles .adm-role-permission-groups summary>span:last-child{margin-left:auto;font-variant-numeric:tabular-nums}
+.adm-restored-shell .adm-platform-roles .adm-role-permission-chevron{flex:none;transform:rotate(0)}
+.adm-restored-shell .adm-platform-roles .adm-role-permission-groups details[open]>summary .adm-role-permission-chevron{transform:rotate(90deg)}
+.adm-restored-shell .adm-platform-roles .adm-role-permission-groups summary:focus-visible{outline:3px solid var(--adm-primary);outline-offset:-3px}
+.adm-restored-shell .adm-platform-roles .adm-role-permission{padding:12px}
+.adm-restored-shell .adm-platform-roles .adm-role-permission>strong{margin-bottom:6px;font-size:14px;line-height:1.6;overflow-wrap:anywhere}
+.adm-restored-shell .adm-platform-roles .adm-role-permission .adm-identifier-value code{font-size:12px;margin:0}
+
+@media(pointer:coarse){.adm-restored-shell .adm-platform-roles .adm-role-permission-groups summary{box-sizing:border-box;min-height:44px}}
+
+/* Keep optional profile labels subordinate to the canonical binding target. */
+.adm-restored-shell .adm-platform-roles .adm-binding-identity{display:block;min-width:0;max-width:310px;margin:0}
+.adm-binding-identity>strong{display:block;font-size:14px;line-height:1.5;overflow-wrap:anywhere}
+.adm-binding-identity>small{display:block;margin-top:5px;color:var(--adm-muted);font-size:12px;line-height:1.6;overflow-wrap:anywhere}
+.adm-binding-identity code,.adm-role-grant .adm-role-preview .adm-binding-identity code,.adm-restored-shell .adm-platform-roles .adm-role-binding-table .adm-binding-identity code{font-size:12px;overflow-wrap:anywhere;white-space:normal}
+.adm-binding-lookup-note{margin:12px 20px;font-size:12px;line-height:1.6;color:var(--adm-muted)}
+.adm-binding-danger{color:#b42318!important;background:#fff!important;border:1px solid #e7b7b3!important;border-radius:9px;font-weight:650}
+.adm-binding-danger:hover{background:#fff0ee!important;border-color:#b42318!important}
+.adm-binding-danger:focus-visible{outline:3px solid #b42318;outline-offset:3px}
+.adm-role-revoke-review .adm-role-preview code{font-size:12px}
+.adm-role-revoke-review .adm-role-drawer-foot .adm-binding-danger{padding:0 14px}
+@media(pointer:coarse){.adm-binding-danger{min-height:44px}}
+
+.adm-shell.adm-restored-shell .adm-platform-roles .adm-role-catalog-back{max-width:100%;min-height:40px;margin:12px 0 0;padding:0 12px;border:1px solid var(--adm-line);border-radius:9px;background:var(--adm-surface);color:var(--adm-primary);text-align:left;white-space:normal}
+.adm-restored-shell .adm-platform-roles .adm-role-detail h3,.adm-restored-shell .adm-platform-roles .adm-role-table .adm-name-link{scroll-margin-top:calc(var(--adm-topbar,72px) + 24px)}
+.adm-restored-shell .adm-platform-roles .adm-role-detail h3:focus{outline:3px solid var(--adm-primary);outline-offset:4px;border-radius:3px}
+.adm-restored-shell .adm-platform-roles .adm-role-catalog-layout>.adm-table-wrap:focus-visible{outline-offset:-3px}
+@media(pointer:coarse){.adm-shell.adm-restored-shell .adm-platform-roles .adm-role-catalog-back{min-height:44px}}
+
+.adm-restored-shell .adm-binding-filter-heading{padding:16px 20px 0;min-width:0}
+.adm-restored-shell .adm-binding-filter-heading h3{margin:0 0 6px;font-size:14px;line-height:1.5}
+.adm-restored-shell .adm-binding-filter-heading p,.adm-restored-shell .adm-binding-applied-query,.adm-restored-shell .adm-binding-filter-summary{margin:0;color:var(--adm-muted);font-size:12px;line-height:1.6;overflow-wrap:break-word}
+.adm-restored-shell .adm-binding-query .adm-role-toolbar,.adm-restored-shell .adm-binding-local-filters .adm-role-toolbar{display:grid;gap:9px;border-bottom:0;align-items:end}
+.adm-restored-shell .adm-binding-query .adm-role-toolbar{grid-template-columns:minmax(0,1fr) auto auto}
+.adm-restored-shell .adm-binding-local-filters .adm-role-toolbar{grid-template-columns:minmax(0,1fr) minmax(0,180px) auto}
+.adm-restored-shell .adm-binding-query .adm-role-toolbar label,.adm-restored-shell .adm-binding-local-filters .adm-role-toolbar label{display:grid;gap:6px;min-width:0}
+.adm-restored-shell .adm-binding-local-filters .adm-role-toolbar select{box-sizing:border-box;width:100%;min-width:0}
+.adm-restored-shell .adm-binding-query .adm-role-toolbar button,.adm-restored-shell .adm-binding-local-filters .adm-role-toolbar button{max-width:100%;white-space:normal}
+.adm-restored-shell .adm-binding-applied-query,.adm-restored-shell .adm-binding-filter-summary{padding:0 20px 14px;border-bottom:1px solid var(--adm-line)}
+.adm-restored-shell .adm-binding-applied-query code{margin-left:6px;font-size:12px;color:var(--adm-text);white-space:normal;overflow-wrap:break-word}
+.adm-restored-shell .adm-binding-invalid-query{color:var(--adm-danger,#b42318)}
+@media(max-width:760px){.adm-restored-shell .adm-binding-filter-heading{padding:14px 14px 0}.adm-restored-shell .adm-binding-applied-query,.adm-restored-shell .adm-binding-filter-summary{padding-right:14px;padding-left:14px}.adm-restored-shell .adm-binding-query .adm-role-toolbar{grid-template-columns:minmax(0,1fr) minmax(0,1fr)}.adm-restored-shell .adm-binding-query .adm-role-toolbar label{grid-column:1/-1}.adm-restored-shell .adm-binding-local-filters .adm-role-toolbar{grid-template-columns:minmax(0,1fr)}}
+
+.adm-grant-target-summary-ui .adm-grant-target-readback{display:grid;gap:5px;min-width:0;margin:14px 0;padding:10px 12px;border:1px solid var(--adm-line);border-radius:9px;background:var(--adm-soft)}
+.adm-grant-target-summary-ui .adm-grant-target-readback small{color:var(--adm-muted)}
+.adm-grant-target-summary-ui .adm-grant-target-readback code,.adm-grant-target-summary-ui .adm-grant-target-readback strong{white-space:normal;overflow-wrap:anywhere}
+.adm-grant-target-summary-ui .adm-grant-manual-target{min-width:0;margin:12px 0}
+.adm-grant-target-summary-ui .adm-grant-manual-target summary{cursor:pointer;color:var(--adm-primary);overflow-wrap:anywhere}
+
+.adm-grant-target-summary-ui .adm-grant-query-context{margin:8px 0;color:var(--adm-muted);overflow-wrap:anywhere}
