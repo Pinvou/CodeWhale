@@ -213,6 +213,24 @@ function Get-SuperprojectGitlinkCommit {
   return $Matches[1].ToLowerInvariant()
 }
 
+function Assert-RuntimeTrackedFilesClean {
+  param([string]$Root)
+  # Release downloads replace tiny LFS pointers with verified payloads outside
+  # Git's smudge process. Compare filtered content rather than cached stat size;
+  # check index and worktree separately so staged edits cannot be concealed.
+  foreach ($arguments in @(@('diff', '--cached', '--quiet', 'HEAD', '--'), @('diff', '--quiet', '--'))) {
+    $previousPreference = $ErrorActionPreference
+    try {
+      $ErrorActionPreference = 'Continue'
+      $null = & git -C $Root @arguments 2>&1
+      $code = $LASTEXITCODE
+    } finally { $ErrorActionPreference = $previousPreference }
+    if ($code -ne 0) {
+      throw 'Windows runtime submodule contains tracked local changes or cannot be inspected; commit and update the main-repository lock first.'
+    }
+  }
+}
+
 function Assert-RuntimeIdentity {
   $actualCommit = Get-GitOutput -Arguments @("rev-parse", "HEAD")
   $expectedCommit = ([string]$lock.source.commit).ToLowerInvariant()
@@ -228,10 +246,7 @@ function Assert-RuntimeIdentity {
   if ($actualUrl -ne $expectedUrl) {
     throw "Windows runtime submodule origin URL mismatch. Expected $expectedUrl, found $actualUrl."
   }
-  $dirty = Get-GitOutput -Arguments @("status", "--porcelain", "--untracked-files=no")
-  if (-not [string]::IsNullOrWhiteSpace($dirty)) {
-    throw "Windows runtime submodule contains tracked local changes; commit and update the main-repository lock first."
-  }
+  Assert-RuntimeTrackedFilesClean -Root $RuntimeRoot
   return $actualCommit
 }
 
@@ -286,7 +301,7 @@ function Get-VerifiedManifest {
       throw "Locked Windows runtime file is missing: $($entry.path)"
     }
     if (Test-LfsPointer -Path $sourcePath) {
-      throw "Git LFS object is not materialized: $($entry.path). Run 'git -C private-runtimes/windows lfs pull'."
+      throw "Runtime payload is not materialized: $($entry.path). Run 'npm run runtime:windows:init' to download the pinned Release assets."
     }
     $item = Get-Item -LiteralPath $sourcePath
     if ([long]$item.Length -ne [long]$entry.bytes) {

@@ -145,6 +145,31 @@ try {
     $env:PATH = $previousPath
   }
 
+  $gitFixture = Join-Path $testRoot "tracked-identity"
+  New-Item -ItemType Directory -Path $gitFixture -Force | Out-Null
+  foreach ($arguments in @(
+    @("init", "--quiet"),
+    @("config", "user.name", "Runtime Fixture"),
+    @("config", "user.email", "runtime-fixture@example.invalid")
+  )) { Invoke-Git -WorkingDirectory $gitFixture -Arguments $arguments -FailureMessage "Unable to initialize identity fixture" | Out-Null }
+  $identityFile = Join-Path $gitFixture "tracked.txt"
+  Write-TestFile -Path $identityFile -Content "original content"
+  Invoke-Git -WorkingDirectory $gitFixture -Arguments @("add", "--", "tracked.txt") -FailureMessage "Unable to stage identity fixture" | Out-Null
+  Invoke-Git -WorkingDirectory $gitFixture -Arguments @("-c", "commit.gpgsign=false", "-c", "core.hooksPath=.no-hooks", "commit", "--quiet", "-m", "identity fixture") -FailureMessage "Unable to commit identity fixture" | Out-Null
+  Assert-RuntimeTrackedFilesClean -Root $gitFixture
+  Write-TestFile -Path $identityFile -Content "modified content"
+  $dirtyRejected = $false
+  try { Assert-RuntimeTrackedFilesClean -Root $gitFixture } catch { $dirtyRejected = $true }
+  Assert-True $dirtyRejected "runtime identity must reject unstaged tracked edits"
+  Invoke-Git -WorkingDirectory $gitFixture -Arguments @("add", "--", "tracked.txt") -FailureMessage "Unable to stage modified identity fixture" | Out-Null
+  $stagedRejected = $false
+  try { Assert-RuntimeTrackedFilesClean -Root $gitFixture } catch { $stagedRejected = $true }
+  Assert-True $stagedRejected "runtime identity must reject staged edits"
+  Write-TestFile -Path $identityFile -Content "original content"
+  $concealedIndexRejected = $false
+  try { Assert-RuntimeTrackedFilesClean -Root $gitFixture } catch { $concealedIndexRejected = $true }
+  Assert-True $concealedIndexRejected "a HEAD-equivalent worktree must not conceal staged edits"
+
   $stagingParent = Join-Path $testRoot "windows-runtime"
   $stagingRoot = Join-Path $stagingParent $stageId
   $stageManifestPath = Join-Path $stagingRoot ".stage-manifest.json"

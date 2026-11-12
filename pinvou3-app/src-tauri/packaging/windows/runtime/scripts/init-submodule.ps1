@@ -1,5 +1,6 @@
 param(
-  [switch]$ForceLfsPull,
+  [Alias("ForceLfsPull")]
+  [switch]$ForceDownload,
   [switch]$CacheKeyOnly,
   [switch]$OnnxOnly,
   [switch]$ImportFunctionsOnly
@@ -35,8 +36,9 @@ $runtimeRoot = Join-Path $repoRoot $runtimePath
 $runtimeLockPath = Join-Path $repoRoot "pinvou3-app\src-tauri\config\platforms\windows\runtime\x86_64.lock.json"
 $resolverCacheRoot = Join-Path $repoRoot "pinvou3-app\src-tauri\target\windows-runtime"
 $resolverLockPath = Join-Path $resolverCacheRoot ".resolver.lock"
-$lfsStorageRoot = Join-Path $resolverCacheRoot "lfs-storage"
-$cacheSchema = "v5"
+$releaseCacheRoot = Join-Path $resolverCacheRoot "release-assets"
+$cacheSchema = "v6"
+. (Join-Path $PSScriptRoot "release-assets.ps1")
 
 function Invoke-Git {
   param(
@@ -96,39 +98,6 @@ function Get-CurrentRuntimeCommit {
     return ""
   }
   return ($output -join "`n").Trim().ToLowerInvariant()
-}
-
-function Test-LfsPointer {
-  param([string]$Path)
-
-  if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
-    return $true
-  }
-  $item = Get-Item -LiteralPath $Path
-  if ($item.Length -gt 1024) {
-    return $false
-  }
-  $firstLine = Get-Content -LiteralPath $Path -TotalCount 1 -ErrorAction SilentlyContinue
-  return [string]$firstLine -eq "version https://git-lfs.github.com/spec/v1"
-}
-
-function Get-LfsTrackedPaths {
-  $trackedPaths = Invoke-Git -WorkingDirectory $runtimeRoot -Arguments @("lfs", "ls-files", "-n") -FailureMessage "Unable to list Windows runtime Git LFS files."
-  return @(
-    $trackedPaths |
-      ForEach-Object { [string]$_ } |
-      Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
-  )
-}
-
-function Get-LfsPointerPaths {
-  return @(
-    Get-LfsTrackedPaths |
-      Where-Object {
-        $fullPath = Join-Path $runtimeRoot $_.Replace('/', '\')
-        Test-LfsPointer -Path $fullPath
-      }
-  )
 }
 
 function Update-RuntimeSubmoduleWithoutLfsSmudge {
@@ -193,34 +162,12 @@ try {
     Write-Host "Reused private Windows runtime submodule checkout: $expectedCommit"
   }
 
-  New-Item -ItemType Directory -Path $lfsStorageRoot -Force | Out-Null
-  $pointerPaths = if ($ForceLfsPull) { @(Get-LfsTrackedPaths) } else { @(Get-LfsPointerPaths) }
-  if ($OnnxOnly) {
-    $pointerPaths = @($pointerPaths | Where-Object { $_ -like "*/onnxruntime-win-x64-*-runtime.zip" })
-  }
-  if ($ForceLfsPull -or $pointerPaths.Count -gt 0) {
-    $lfsArguments = @("-c", "lfs.storage=$lfsStorageRoot", "lfs", "pull")
-    if ($OnnxOnly -or (-not $ForceLfsPull -and $pointerPaths.Count -gt 0)) {
-      $lfsArguments += "--include=$($pointerPaths -join ',')"
-      $lfsArguments += "--exclude="
-    }
-    Invoke-Git -WorkingDirectory $runtimeRoot -Arguments $lfsArguments -FailureMessage "Unable to materialize Git LFS objects for the private Windows runtime submodule." | Out-Null
-
-    $remainingPointers = if ($OnnxOnly) {
-      @($pointerPaths | Where-Object { Test-LfsPointer -Path (Join-Path $runtimeRoot $_.Replace('/', '\')) })
-    } else {
-      @(Get-LfsPointerPaths)
-    }
-    if ($remainingPointers.Count -gt 0) {
-      throw "Git LFS objects remain unmaterialized: $($remainingPointers -join ', ')"
-    }
-    Write-Host ("Materialized Windows runtime Git LFS files: {0}" -f $pointerPaths.Count)
-  } else {
-    Write-Host "Reused materialized Windows runtime Git LFS files; git lfs pull was skipped."
-  }
+  $runtimeLock = Get-Content -LiteralPath $runtimeLockPath -Raw -Encoding UTF8 | ConvertFrom-Json
+  Sync-RuntimeReleaseAssets -RuntimeRoot $runtimeRoot -CacheRoot $releaseCacheRoot `
+    -Lock $runtimeLock -Commit $expectedCommit -OnnxOnly:$OnnxOnly -ForceDownload:$ForceDownload
 
   Write-Host "Windows runtime Jenkins cache key: $cacheKey"
-  Write-Host "Windows runtime external Git LFS storage: $lfsStorageRoot"
+  Write-Host "Windows runtime verified Release cache: $releaseCacheRoot"
   Write-Output "PINVOU3_WINDOWS_RUNTIME_CACHE_KEY=$cacheKey"
 } finally {
   if ($null -ne $resolverLock) {

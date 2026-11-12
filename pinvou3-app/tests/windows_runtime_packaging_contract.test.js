@@ -37,6 +37,7 @@ const runtimeInitScript = readApp(
   "scripts",
   "init-submodule.ps1",
 );
+const releaseAssetsScript = readApp("src-tauri", "packaging", "windows", "runtime", "scripts", "release-assets.ps1");
 const runtimeScript = readApp(
   "src-tauri",
   "packaging",
@@ -220,10 +221,9 @@ assert.match(runtimeInitScript, /Select-Object -First 1 -ExpandProperty Source/u
 assert.match(runtimeInitScript, /& \$gitExecutable -C/u);
 assert.match(runtimeInitScript, /\$exitCode = \$LASTEXITCODE/u);
 assert.match(runtimeInitScript, /if \(\$exitCode -ne 0\)/u);
-assert.match(runtimeInitScript, /git lfs pull/);
-assert.match(runtimeInitScript, /--include=/);
+assert.match(runtimeInitScript, /Sync-RuntimeReleaseAssets/);
 assert.match(runtimeInitScript, /\[switch\]\$OnnxOnly/);
-assert.match(runtimeInitScript, /onnxruntime-win-x64-\*-runtime\.zip/);
+assert.match(releaseAssetsScript, /component -ceq 'onnxruntime'/);
 assert.match(runtimeInitScript, /pinvou3-windows-runtime-\$cacheSchema-\$expectedCommit/u);
 
 assert.match(runtimeWrapper, /runtime-descriptor\.json/);
@@ -480,13 +480,13 @@ assert.match(
 );
 assert.match(
   runtimeInitScript,
-  /Get-LfsPointerPaths/u,
-  "runtime initialization must inspect materialized LFS files before pulling",
+  /Sync-RuntimeReleaseAssets/u,
+  "runtime initialization must invoke the verified Release transport",
 );
 assert.match(
-  runtimeInitScript,
-  /git lfs pull was skipped/u,
-  "runtime initialization must expose the LFS reuse path",
+  releaseAssetsScript,
+  /Test-RuntimeReleaseFile -Path \$target -Entry \$entry/u,
+  "runtime initialization must verify materialized files before offline reuse",
 );
 assert.match(
   runtimeInitScript,
@@ -494,9 +494,9 @@ assert.match(
   "runtime initialization must emit a schema, commit and lock-scoped Jenkins cache key",
 );
 assert.ok(
-  runtimeInitScript.includes('$cacheSchema = "v5"') &&
+  runtimeInitScript.includes('$cacheSchema = "v6"') &&
     runtimeScript.includes('$verificationSchemaVersion = 5'),
-  "the external LFS cache and trusted staging marker must invalidate pre Python-dependency-gate caches",
+  "Release transport must use a fresh cache schema while retaining the trusted Python-dependency staging gate",
 );
 assert.match(
   runtimeScript,
@@ -515,28 +515,25 @@ assert.match(
 );
 assert.ok(
   runtimeInitScript.includes(
-    '$lfsStorageRoot = Join-Path $resolverCacheRoot "lfs-storage"',
+    '$releaseCacheRoot = Join-Path $resolverCacheRoot "release-assets"',
   ),
-  "Git LFS objects must be stored outside the submodule gitdir",
+  "verified Release assets must be cached outside the submodule gitdir",
 );
 assert.match(
   runtimeInitScript,
-  /\$lfsArguments = @\("-c", "lfs\.storage=\$lfsStorageRoot", "lfs", "pull"\)/u,
-  "Git LFS pulls must use the external workspace cache",
+  /Sync-RuntimeReleaseAssets -RuntimeRoot \$runtimeRoot -CacheRoot \$releaseCacheRoot/u,
+  "initialization must use the hash-verified Release transport",
 );
+assert.doesNotMatch(runtimeInitScript, /"lfs", "pull"/u, "initialization must not download Git LFS objects");
 assert.ok(
   runtimeInitScript.lastIndexOf("Update-RuntimeSubmoduleWithoutLfsSmudge") <
-    runtimeInitScript.indexOf(
-      "New-Item -ItemType Directory -Path $lfsStorageRoot",
-    ),
-  "a fresh submodule must be initialized before the external LFS cache is used",
+    runtimeInitScript.indexOf("  Sync-RuntimeReleaseAssets"),
+  "a fresh submodule must be initialized before its locked manifest selects Release assets",
 );
 assert.ok(
   runtimeInitScript.indexOf("if ($CacheKeyOnly)") <
-    runtimeInitScript.indexOf(
-      "New-Item -ItemType Directory -Path $lfsStorageRoot",
-    ),
-  "cache-key discovery must not create the external LFS storage directory",
+    runtimeInitScript.indexOf("  Sync-RuntimeReleaseAssets"),
+  "cache-key discovery must not initialize runtime payloads or contact GitHub",
 );
 assert.ok(
   runtimeGuide.includes(
@@ -550,7 +547,7 @@ assert.ok(
 assert.match(
   runtimeInitScript,
   /SetEnvironmentVariable\("GIT_LFS_SKIP_SMUDGE", "1", "Process"\)[\s\S]*?submodule", "update"/u,
-  "submodule checkout must disable automatic LFS smudge before selective pulls",
+  "submodule checkout must disable automatic LFS downloads before Release materialization",
 );
 assert.match(
   runtimeInitScript,

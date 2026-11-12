@@ -1342,8 +1342,8 @@ jobs:
         run: npm ci --prefer-offline --no-audit
 
       # private-runtimes/windows 在 .gitmodules 中显式 update = none，普通递归
-      # checkout 会跳过；Windows 发布构建必须按锁定 gitlink 匿名初始化并拉取 LFS。
-      - name: 初始化 Windows 独立运行时
+      # checkout 会跳过；按锁定 gitlink 初始化元数据，从同仓库固定 Release 下载并校验。
+      - name: 从固定 Release 初始化 Windows 独立运行时
         working-directory: pinvou3-app
         run: npm run runtime:windows:init
 

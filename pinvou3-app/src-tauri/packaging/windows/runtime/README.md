@@ -5,7 +5,8 @@ Windows 大型运行时存放在独立的公开仓库，不直接提交到主仓
 - `../../../config/platforms/windows/runtime/x86_64.lock.json`：锁定 runtime submodule commit 和 manifest SHA-256；
 - `scripts/resolve-runtime.ps1`：校验 submodule、manifest、ZIP 内部清单，原子 staging 并生成 runtime descriptor；
 - `scripts/stage-runtime.ps1`：供构建入口调用的轻量包装；
-- `scripts/init-submodule.ps1`：初始化 runtime submodule checkout；
+- `scripts/init-submodule.ps1`：初始化 runtime submodule checkout，并下载固定 Release 附件；
+- `scripts/release-assets.ps1`：校验 manifest 和附件 SHA256，复用或修复独立内容缓存；
 - `scripts/stage-onnx-runtime.ps1`：为开发启动展开 ONNX Runtime 组件；
 - `scripts/test-onnx-runtime.ps1`：验证 ONNX Runtime staging 产物。
 
@@ -20,15 +21,20 @@ npm run test:windows-runtime-manifest
 
 Windows desktop development requires a one-time `npm run runtime:windows:init:onnx`.
 It initializes the pinned runtime checkout but downloads only the ONNX Runtime
-Git LFS object. `npm run dev` then verifies and expands only that component into
+Release asset. `npm run dev` then verifies and expands only that component into
 `target/windows-runtime/<commit>-<manifest-sha>-onnx-dev/` and reuses the
 fingerprinted result on later starts.
 
 `runtime:windows:init` 只在当前 checkout 与主仓库 gitlink 不一致时更新 runtime submodule；gitlink 未变化时直接复用。
-submodule checkout 会显式禁用 LFS smudge，随后检查受 LFS 管理的实际文件，只有仍存在 pointer 时才按路径执行
-`git lfs pull`。LFS 对象通过命令级 `lfs.storage` 保存在 `target/windows-runtime/lfs-storage`，不得把
-`.git/modules/private-runtimes/windows/lfs/objects` 独立恢复到全新 workspace。脚本输出
-`pinvou3-windows-runtime-v5-<commit>-<lock-sha-prefix>` 形式的 Jenkins 缓存键；lock 或缓存 schema 变化时不会复用旧缓存。
+submodule checkout 显式禁用 LFS smudge，只取得被锁定的 Git 元数据和 manifest。
+脚本先校验 manifest SHA256，再从同仓库的 `runtime-<完整 commit>` Release 下载对应附件；
+不使用 `latest`，不调用 `git lfs pull`。每个附件必须同时匹配 manifest 的大小和 SHA256，
+同名附件被替换或下载不完整都会失败，已验证文件会保留。归档版本和 gitlink 保持不变。
+缓存位于 `target/windows-runtime/release-assets/<sha256>`，命中时重新核对内容；损坏缓存会重新下载。
+`-ForceDownload` 强制重新下载，旧参数 `-ForceLfsPull` 作为兼容别名保留。
+不得把 `.git/modules/private-runtimes/windows/lfs/objects` 作为独立缓存路径。
+Jenkins 只恢复 `pinvou3-app/src-tauri/target/windows-runtime`，不恢复部分 submodule gitdir。
+脚本输出 `pinvou3-windows-runtime-v6-<commit>-<lock-sha-prefix>` 形式的缓存键。
 
 校验内容包括 submodule commit、gitlink、origin URL、工作树状态、manifest SHA-256、文件大小与 SHA-256，以及受管理 ZIP 解压后的逐文件清单。`stagedFiles` 对应 payload 已复制、各组件已展开且按需分发的 ASR 主模型已移除，派生文件尚未生成且 payload 尚未清理的生命周期快照；缺失或多余文件都会导致校验失败。完整 staging 还会自动枚举所有声明 Windows Python 依赖的内置 MCP，核对暂存基础 Python ABI、target 绑定的锁 hash 及每个 wheel 的 PEP 425 标签（不预装第三方包），避免升级 Python 后沿用不兼容 wheel 锁。
 
