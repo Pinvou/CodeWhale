@@ -1665,15 +1665,36 @@ impl BackgroundShell {
                 }
             }
             if close {
-                // Only a dropped pipe delivers end-of-file; dropping a PTY
-                // writer is invisible to the child (the reader holds the
-                // master), so it must not be reported as EOF later. A task
-                // whose last write STALLED must not claim EOF either: the
-                // abandoned worker still holds a clone of the handle and the
-                // bytes have not finished landing, so the flag stays down
-                // and the tail refusal reports the stall instead.
-                self.stdin_closed_at_eof =
-                    matches!(slot, Some(StdinWriter::Pipe(_))) && !self.stdin_write_stalled;
+                // Only a dropped PIPE delivers end-of-file. An explicit
+                // close on a unix PTY writer must DELIVER it instead: the
+                // old ownership box injected `\n` + VEOF on drop (a `cat`
+                // on a pty exited 0 the instant it dropped), and the dup
+                // the terminal lane now holds delivers nothing on its own
+                // because the reader holds the master — so write the same
+                // ^D semantics through the dup, then drop it. The flag
+                // only follows a real delivery. A task whose last write
+                // STALLED must not claim EOF either: the abandoned worker
+                // still holds a clone of the handle and the bytes have not
+                // finished landing, so the flag stays down and the tail
+                // refusal reports the stall instead.
+                match slot {
+                    Some(StdinWriter::Pipe(_)) => {
+                        self.stdin_closed_at_eof = !self.stdin_write_stalled;
+                    }
+                    #[cfg(all(unix, not(target_env = "ohos")))]
+                    Some(StdinWriter::PtyFile(mut file)) if !self.stdin_write_stalled => {
+                        {
+                            use std::io::Write as _;
+                            // Ignored if the child is already gone; in raw
+                            // mode VEOF reads as ordinary input, exactly
+                            // like the box drop it replaces.
+                            let _ = file.write_all(b"\n\x04");
+                            let _ = file.flush();
+                        }
+                        self.stdin_closed_at_eof = true;
+                    }
+                    _ => {}
+                }
                 self.stdin = None;
             } else {
                 self.stdin = slot;

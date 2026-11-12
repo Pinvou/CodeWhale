@@ -5992,3 +5992,77 @@ fn bash_schema_stdin_max_length_matches_the_enforced_inline_cap() {
         );
     }
 }
+
+#[tokio::test]
+async fn interact_close_stdin_delivers_eof_to_a_terminal_command() {
+    // Base delivered end-of-file to a terminal task through the ownership
+    // box's drop (`cat` on a pty exited 0 the instant it dropped); the
+    // dup'd-master rewrite made that drop invisible, so an explicit
+    // `close_stdin: true` must write the ^D semantics itself. Without it
+    // the command below runs until the watchdog and this pin reddens.
+    let tmp = tempdir().expect("tempdir");
+    let ctx = ToolContext::new(tmp.path());
+    let shell_manager = ctx.shell_manager.clone();
+    let command = echo_stdin_command();
+    let task_ctx = ctx.clone();
+
+    let task = tokio::spawn(async move {
+        BashTool::new("Bash")
+            .execute(
+                json!({"command": command, "combined_output": true, "timeout_ms": 600_000}),
+                &task_ctx,
+            )
+            .await
+            .expect("execute")
+    });
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    shell_manager
+        .lock()
+        .expect("shell manager lock")
+        .request_foreground_background();
+    let result = tokio::time::timeout(Duration::from_secs(5), task)
+        .await
+        .expect("foreground shell should detach")
+        .expect("task should not panic");
+    let task_id = result
+        .metadata
+        .as_ref()
+        .and_then(|meta| meta.get("task_id"))
+        .and_then(Value::as_str)
+        .expect("task id")
+        .to_string();
+
+    let mut manager = shell_manager.lock().expect("shell manager lock");
+    // Feed one line first so the close proves itself against a command that
+    // is genuinely mid-read, then deliver end-of-file.
+    manager
+        .write_stdin(&task_id, "close-me\n", false)
+        .expect("the terminal lane keeps a writable stdin while the command runs");
+    manager
+        .write_stdin(&task_id, "", true)
+        .expect("an explicit stdin close on the terminal lane must succeed");
+    let mut exited = false;
+    for _ in 0..40 {
+        std::thread::sleep(Duration::from_millis(150));
+        let snapshot = manager.inspect_job(&task_id).expect("inspect job").snapshot;
+        if snapshot.exit_code.is_some() {
+            exited = true;
+            break;
+        }
+    }
+    assert!(
+        exited,
+        "closing stdin must end the terminal command (base parity with the \
+         ownership-box drop): {:?}",
+        manager.inspect_job(&task_id).expect("inspect job").snapshot
+    );
+    // The post-close refusal must tell the truth: stdin readers have really
+    // seen end-of-file now.
+    let error = manager
+        .write_stdin(&task_id, "again\n", false)
+        .expect_err("writes after the close must be refused");
+    assert!(
+        error.to_string().contains("end-of-file"),
+        "the post-close refusal must cite end-of-file: {error}"
+    );
+}
