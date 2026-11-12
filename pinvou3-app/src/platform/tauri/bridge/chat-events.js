@@ -110,7 +110,11 @@ function pinvouSharedtauriChatEvents() {
       // r5 P2-2：抑制态 notify 不盖章——后台路由期间（runSyncOnSession 翻转
       // activeSessionId + suppressNotify），此处没有任何渲染发布发生，盖章
       // 会产出假 stall 记录（recv→dispatch≈201ms 实测）或系统性量快（漏报）。
-      // 发布侧（publish 内）不需要门控：rAF/定时器腿在路由 finally 后才 fire。
+      // 发布侧（publish 内）**同样有门控**（r13 P2-2 修复；本行为注释为 r14
+      // 勘误）：rAF/定时器腿虽在路由 finally 后才 fire，但 init 启动批处理窗内
+      // 基座 notify 直接丢弃（suppressNotify || startupNotificationBatching），
+      // publish 按**发射时刻**的 isNotifySuppressed() 分流：抑制→markThrottled
+      // （零发布不能量成健康派发），否则 markDispatched。
       // r9 P1-A：抑制态**取消**掉的 pending 条目也不能就这么滞留——它已无
       // 发布者（合并帧被杀、抑制态又无直发），下一个无关事件终会把它盖章成
       // 假 stall（recv→dispatch= 整段工具执行时间）。按节流收口：markThrottled
@@ -146,9 +150,11 @@ function pinvouSharedtauriChatEvents() {
         // 滞留不章的话：活跃会话的条目会被 180ms 渲染腿补章成假 stall
         // （recv_to_dispatch≈180ms，真实派发在 16ms）并烧掉该会话的 10s
         // 节流配额——同窗口的真实冻结被静默丢弃（受控时钟亲证）。
-        // 活跃会话补 markDispatched（探针的 P2-A 新鲜度/P2-B 隐藏豁免等
-        // 既有门自然适用）；后台会话补 markThrottled（r7 P2-2 同款——
-        // 合并竞速出来的时差不是冻结，不上报、留 snapshot）。
+        // 只补**活跃**会话（displaced === activeSessionId）的条目（r14 勘误：
+        // 旧注释称「后台会话补 markThrottled」，实现从未盖过后台条目——
+        // 后台 displaced 条目不在此处收口，由 5s 新鲜度上界/刷新节流章/
+        // begin supersede/终态章封死，伪造出口已复核封死）；活跃补章随
+        // r13 分流：抑制窗内 markThrottled、窗外 markDispatched。
         var displaced = Object.keys(pendingStreamNotifications).filter(
           function (other) { return other !== sid && pendingStreamNotifications[other]; }
         );
