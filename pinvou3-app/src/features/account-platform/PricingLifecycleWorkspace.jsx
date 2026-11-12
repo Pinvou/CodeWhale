@@ -568,7 +568,11 @@ export function PricingLifecycleWorkspace({ copy, client, permissions, owner, co
     } catch (error) {
       if (currentPreview() && error?.name !== 'AbortError') setErrors((current) => ({ ...current, preview: labels.errors[error?.code] || labels.previewFailed }));
     } finally {
-      if (mounted.current && currentPreview()) setLoading((current) => ({ ...current, preview: false }));
+      // A concurrent mutation can block the result without retiring this read.
+      // Release its loading, but never clear a newer preview's loading.
+      if (mounted.current && transientGenerations.current.get('preview') === generation) {
+        setLoading(current => transientGenerations.current.get('preview') === generation ? { ...current, preview: false } : current);
+      }
     }
   };
 

@@ -74,6 +74,12 @@ globalThis.fetch = async (target,options={}) => {
   if(path.endsWith('/formulas'))return json({items:[formula],limit:50,has_more:false,next_cursor:null});
  }
  const input=parseFinanceJSON(options.body||'{}');const key=options.headers?.['Idempotency-Key'];
+ if(control.rejectPriceActionOnce && (path.endsWith('/publish') || path.endsWith('/transition'))) {
+  control.rejectPriceActionOnce=false;
+  const status=control.priceRejectionStatus || 409;
+  const rejection=()=>json({code:status===412?'PRICE_ETAG_CONFLICT':'PRICE_WINDOW_CONFLICT'},status);
+  return new Promise(resolve=>{control.releasePriceRejection=()=>resolve(rejection());});
+ }
  let receipt=control.receipts.get(key);
  if(receipt){if(receipt.body!==options.body||receipt.path!==path||receipt.method!==method)return json({code:'IDEMPOTENCY_CONFLICT'},409);return json(receipt.item,receipt.status);}
  let item,status=200;
