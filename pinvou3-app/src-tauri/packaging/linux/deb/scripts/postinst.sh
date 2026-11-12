@@ -12,6 +12,10 @@ APP_DESKTOP=/usr/share/applications/pinvou3.desktop
 # 此前每个客户首次下载模型都撞 "permission denied while trying to
 # connect to the docker API" → pkexec 弹窗，违背「一键部署」承诺。
 if command -v docker >/dev/null 2>&1 && getent group docker >/dev/null 2>&1; then
+  # 授权随包走（r33 P1-2）：真实加入的用户记入状态文件，prerm remove 时
+  # 对等回收——不留「卸载后仍在 docker 组」的遗留授权（与本包 sudoers 的
+  # prerm 主动清理同一惯例）。管理员手工加的用户不在文件里，卸载时不动。
+  DOCKER_GROUP_STATE=/var/lib/pinvou3/docker-group.added
   for uhome in /home/*; do
     [ -d "$uhome" ] || continue
     uowner=$(stat -c %U "$uhome" 2>/dev/null) || continue
@@ -19,10 +23,15 @@ if command -v docker >/dev/null 2>&1 && getent group docker >/dev/null 2>&1; the
     # 跳过系统用户（uid < 1000）
     uuid=$(id -u "$uowner" 2>/dev/null) || continue
     [ "$uuid" -ge 1000 ] 2>/dev/null || continue
-    # 幂等：不在 docker 组才加
+    # 幂等：不在 docker 组才加；只有真实加成功的才登记（加失败不记账，
+    # 免得 prerm 去回收一个从未生效的授权）。
     if ! id -nG "$uowner" 2>/dev/null | tr ' ' '\n' | grep -qx docker; then
-      usermod -aG docker "$uowner" 2>/dev/null || true
-      echo "[pinvou3] 已将 $uowner 加入 docker 组（重新登录后模型商店可直接使用）" >&2
+      if usermod -aG docker "$uowner" 2>/dev/null; then
+        mkdir -p /var/lib/pinvou3 2>/dev/null || true
+        grep -qx "$uowner" "$DOCKER_GROUP_STATE" 2>/dev/null || \
+          echo "$uowner" >> "$DOCKER_GROUP_STATE" 2>/dev/null || true
+        echo "[pinvou3] 已将 $uowner 加入 docker 组（重新登录后模型商店可直接使用；卸载本包时自动移出）" >&2
+      fi
     fi
   done
 else
