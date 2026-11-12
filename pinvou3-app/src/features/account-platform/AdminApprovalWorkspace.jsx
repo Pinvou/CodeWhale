@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { financeCopy } from '../../shared/i18n.js';
 import { Approvals } from './AdminFinanceWorkspace.jsx';
 import { approvalCommands, approvalViews, approvalStatuses, executionStatuses, approvalQuery, readApprovalRoute } from './admin-approval-actions.js';
+import { approvalLabel } from './admin-approval-presentation.js';
 import './admin-approval-workspace.css';
 
 export function AdminApprovalWorkspace({ client, copy, language, me, onNavigate, routeSearch, onRouteChange }) {
@@ -62,13 +63,21 @@ export function AdminApprovalWorkspace({ client, copy, language, me, onNavigate,
     {route.view !== 'directory' && <form className="adm-approval-toolbar" onSubmit={event => { event.preventDefault(); changeRoute({ commandType: command, target: target.trim(), requestID: '' }); }}>
       <label>{c.commandType}<select disabled={blocked} value={command} onChange={event => setCommand(event.target.value)}><option value="">{c.allCommands}</option>{approvalCommands.map(type => <option key={type}>{type}</option>)}</select></label>
       <label>{c.target}<input disabled={blocked} value={target} onChange={event => setTarget(event.target.value)} /></label>
-      {route.view !== 'pending' && <label>{c.status}<select disabled={blocked} value={route.status || (route.view === 'execution' ? 'EXECUTION_FAILED' : '')} onChange={event => changeRoute({ status: event.target.value, requestID: '' })}>
-        {route.view === 'mine' && <option value="">{c.allStatuses}</option>}{(route.view === 'execution' ? executionStatuses : approvalStatuses).map(status => <option key={status}>{status}</option>)}
+      {route.view !== 'pending' && <label>{c.status}<select disabled={blocked} value={route.view === 'execution' ? query.status : route.status || ''} onChange={event => changeRoute({ status: event.target.value, requestID: '' })}>
+        {route.view === 'mine' && <option value="">{c.allStatuses}</option>}{(route.view === 'execution' ? executionStatuses : approvalStatuses).map(status => <option key={status} value={status}>{approvalLabel(c.statusLabels, status)}</option>)}
       </select></label>}<button disabled={blocked}>{copy.refresh}</button>
     </form>}
+    {route.view === 'execution' && <p className="adm-approval-execution-scope">{c.executionScopeLabel}: <strong>{approvalLabel(c.statusLabels, query.status)}</strong><small>{c.executionDefaultHelp}</small></p>}
     {route.view === 'directory' ? <><button onClick={() => setRefresh(value => value + 1)}>{c.refresh}</button>
       {directoryState === 'loading' && <p role="status">{c.loading}</p>}{directoryState === 'error' && <p role="alert">{c.listUnavailable}</p>}
-      {directory && <table><thead><tr><th>{c.commandType}</th><th>{c.risk}</th><th>{c.requestable}</th></tr></thead><tbody>{directory.items.map(item => <tr key={`${item.command_type}:${item.policy_version}`}><td>{item.command_type} · v{item.policy_version}</td><td>{item.risk_class}</td><td>{item.requestable ? c.yes : c.no}</td></tr>)}</tbody></table>}
+      {directory && <div className="adm-table-wrap adm-approval-policy-wrap"><table className="adm-approval-policy-table"><thead><tr><th>{c.commandType}</th><th>{c.risk}</th><th>{c.requestable}</th></tr></thead><tbody>{directory.items.map(item => {
+        const commandLabel = approvalLabel(c.policyCommandLabels, item.command_type), riskLabel = approvalLabel(c.policyRiskLabels, item.risk_class);
+        return <tr key={`${item.command_type}:${item.policy_version}`}>
+          <td><strong>{commandLabel}</strong>{commandLabel !== item.command_type && <code>{item.command_type}</code>}<small>{financeCopy[language].version}: {item.policy_version}</small></td>
+          <td><span className="adm-approval-policy-risk">{riskLabel}</span>{riskLabel !== item.risk_class && <code>{item.risk_class}</code>}</td>
+          <td>{item.requestable ? c.yes : c.no}</td>
+        </tr>;
+      })}</tbody></table></div>}
     </> : <Approvals client={client} copy={financeCopy[language]} permissions={me.platform_permissions || []} owner={owner} requestID={route.requestID}
       query={query} pendingUserID={route.view === 'pending' ? me.user_id : null} onStateChange={setBlocked} onNavigate={onNavigate} centerCopy={c} />}
   </section>;
