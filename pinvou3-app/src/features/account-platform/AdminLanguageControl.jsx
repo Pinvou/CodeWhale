@@ -25,6 +25,6 @@ export function AdminLanguageControl({ label, language, feedback, onChange, side
     <select id={id} aria-label={sidebar ? label : undefined} aria-describedby={help ? id + '-help' : undefined} value={language} onChange={event => onChange(event.target.value)}>
       {supportedLocales.map(locale => <option key={locale} value={locale}>{localeNames[locale]}</option>)}
     </select>
-    <small id={id + '-help'} role={sidebar ? "status" : undefined} data-language-feedback={feedback || undefined}>{help}</small>
+    <small id={id + '-help'} role="status" data-language-feedback={feedback || undefined}>{help}</small>
   </div>;
 }

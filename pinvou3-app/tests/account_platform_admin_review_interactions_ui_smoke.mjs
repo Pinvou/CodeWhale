@@ -32,12 +32,16 @@ try {
       await page.waitForSelector(outcome === 'success' ? '.adm-formula-explained' : '[role=dialog] [role=alert]');
       await page.waitForFunction(() => document.activeElement?.closest('[role=dialog]'));
     }
-    if (outcome === 'failure') {
+    if (outcome === 'failure' || outcome === 'cancel') {
       for (const event of [{ isComposing: true, keyCode: 0 }, { isComposing: false, keyCode: 229 }]) {
         await page.evaluate(event => document.activeElement.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, ...event })), event);
-        assert.ok(await page.$('[role=dialog] [role=alert]'), 'IME Escape must keep the failed preview open');
+        assert.ok(await page.$('[role=dialog]'), 'IME Escape must keep loading/failed preview open');
         assert.equal(await page.evaluate(() => Boolean(document.activeElement?.closest('[role=dialog]'))), true);
       }
+    }
+    if (outcome === 'failure') {
+      assert.equal(await page.evaluate(() => document.activeElement.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true, isComposing: true }))), false, 'the one-control focus boundary must prevent Tab even during IME');
+      assert.equal(await page.evaluate(() => Boolean(document.activeElement?.closest('[role=dialog]'))), true, 'IME must not suspend the failed dialog Tab boundary');
     }
     await page.keyboard.press('Escape');
     await page.waitForFunction(() => !document.querySelector('[role=dialog]'));
@@ -55,6 +59,35 @@ try {
     await page.waitForFunction(() => !document.querySelector('[role=dialog]'));
     assert.equal(await page.$eval(trigger, node => document.activeElement === node), true, 'the next preview remains usable after the previous phase');
     assert.equal(await page.evaluate(() => window.adminReview.calls.some(call => call.method !== 'GET')), false);
+  });
+  for (const state of ['connected', 'hidden', 'removed']) await run('protocol definition restores only an available trigger: ' + state, async page => {
+    await page.goto(server.resolvedUrls.local[0] + 'tests/fixtures/admin-review-interactions.html');
+    const trigger = '.adm-protocol-definition-open'; await page.waitForSelector(trigger);
+    await page.focus(trigger); await page.keyboard.press('Enter'); await page.waitForSelector('.adm-protocol-definition');
+    await page.evaluate(state => {
+      const trigger = document.querySelector('.adm-protocol-definition-open'), focus = trigger.focus.bind(trigger);
+      window.adminReview.returnFocusCalls = 0;
+      trigger.focus = () => { window.adminReview.returnFocusCalls++; focus(); };
+      if (state === 'hidden') trigger.closest('[role=tabpanel]').hidden = true;
+      if (state === 'removed') trigger.remove();
+    }, state);
+    await page.keyboard.press('Escape'); await page.waitForFunction(() => !document.querySelector('[role=dialog]'));
+    assert.equal(await page.evaluate(() => window.adminReview.returnFocusCalls), state === 'connected' ? 1 : 0);
+    if (state === 'connected') assert.equal(await page.$eval(trigger, n => document.activeElement === n), true);
+  });
+  for (const blocked of [false, true]) await run('settings language feedback is announced with optional storage: ' + blocked, async page => {
+    await page.evaluateOnNewDocument(blocked => {
+      if (blocked) Object.defineProperty(window, 'localStorage', { get() { throw new Error('controlled unavailable storage'); } });
+      else localStorage.setItem('pinvou.admin.language', 'en');
+    }, blocked);
+    await page.goto(server.resolvedUrls.local[0] + 'tests/fixtures/admin-review-interactions.html?language-settings=1');
+    const selector = '.adm-language-settings select'; await page.waitForSelector(selector);
+    if (!blocked) assert.equal(await page.$eval('.adm-language-settings [role=status]', n => n.textContent.includes(window.adminReview.languageWords.en.saved)), true, 'initial persisted preference is actually presented');
+    for (const language of ['zh', 'en', 'ja']) {
+      await page.select(selector, language);
+      await page.waitForFunction(({language, blocked}) => document.querySelector('.adm-language-settings [role=status]')?.textContent.includes(window.adminReview.languageWords[language][blocked ? 'unsaved' : 'saved']), {}, {language, blocked});
+      assert.equal(await page.$eval(selector, n => n.value), language);
+    }
   });
   await run('SMS native required fields cannot block an original unknown replay', async page => {
     await page.goto(server.resolvedUrls.local[0] + 'tests/fixtures/admin-review-interactions.html?sms=1');
