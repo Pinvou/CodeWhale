@@ -19,6 +19,15 @@ PUBLIC_SUBMODULE_VERIFIER = ROOT / "scripts/verify-public-submodule.sh"
 TAURI_MANIFEST = ROOT / "pinvou3-app/src-tauri/Cargo.toml"
 
 
+def _eval_default_without_reuse(code):
+    # Legacy route truth tables model the default without success evidence.
+    # Separate reuse regressions exercise verified and unverified skips.
+    code = re.sub(r"contains\(fromJSON\(needs\.changes\.outputs\.reused_jobs (?:\|\||or) '\[\]'\), '[\w-]+'\)", "False", code)
+    code = code.replace("needs.changes.outputs.reuse_verified", repr("False"))
+    code = re.sub(r"!(?!=)", "not ", code)
+    return eval(code, {"__builtins__": {}}, {})
+
+
 def _extract_quoted_paths(block):
     """提取 YAML 块中 `- 'path'` / `- "path"` 形式的路径条目(保持文本序)。
 
@@ -329,7 +338,7 @@ def _evaluate_github_condition(
     evaluated = re.sub(r"\btrue\b", "True", evaluated, flags=re.IGNORECASE)
     evaluated = re.sub(r"\bfalse\b", "False", evaluated, flags=re.IGNORECASE)
     evaluated = " ".join(evaluated.split())
-    return bool(eval(evaluated, {"__builtins__": {}}, {}))
+    return bool(_eval_default_without_reuse(evaluated))
 
 
 def _changes_block(text):
@@ -469,6 +478,48 @@ def _step_named(job_block, name):
             f"expected exactly one step named {name!r}, found {len(matches)}"
         )
     return matches[0]
+
+
+def _step_run_lines(step_body):
+    """Extract one live run scalar, refusing duplicate or unknown shapes."""
+    lines = step_body.splitlines()
+    indices = [i for i, line in enumerate(lines) if re.match(r"^        run:", line)]
+    if len(indices) != 1:
+        raise AssertionError("expected exactly one live step run scalar")
+    index = indices[0]
+    value = lines[index].split(":", 1)[1].strip()
+    if value != "|":
+        if not value or value in {">", ">-", "|-"}:
+            raise AssertionError("unsupported run scalar; review command extraction")
+        return [value]
+    body = []
+    for line in lines[index + 1:]:
+        if not line.strip():
+            continue
+        if not line.startswith("          "):
+            break
+        body.append(line[10:].strip())
+    if not body:
+        raise AssertionError("empty run scalar")
+    return body
+
+
+def _account_closure_source_shell_arguments(workflow, job):
+    """Pin the existing implicit shell, including both defaults scopes.
+
+    This template has no workflow/Account job defaults. Adding either needs
+    explicit review instead of silently changing the source step's shell or
+    working directory while the execution probe assumes Bash errexit.
+    """
+    if re.search(r'''(?m)^(?:defaults|'defaults'|"defaults")\s*:''', workflow):
+        raise AssertionError("closure source must not inherit workflow defaults")
+    if re.search(r'''(?m)^    (?:defaults|'defaults'|"defaults")\s*:''', job):
+        raise AssertionError("closure source must not inherit Account job defaults")
+    source = _step_named(job, "Verify Account closure source and API contracts")
+    if re.search(r'''(?m)^        (?:shell|'shell'|"shell")\s*:''', source):
+        raise AssertionError("closure source must retain its implicit Bash shell")
+    # The Account job is pinned to ubuntu-22.04 by the existing job contract.
+    return ["-e", "-c"]
 
 
 def _step_if_tokens(step_body):
@@ -625,7 +676,7 @@ GATE_JOB_LEVEL_IFS = {
         "(github.event_name == 'pull_request' || "
         "github.event_name == 'merge_group') && "
         "(needs.changes.outputs.frontend == 'true' || "
-        "needs.changes.outputs.pet == 'true') }}"
+        "needs.changes.outputs.pet == 'true') && !(github.event_name == 'merge_group' && needs.changes.outputs.reuse_verified == 'true' && contains(fromJSON(needs.changes.outputs.reused_jobs || '[]'), 'frontend-test')) }}"
     ),
     "relay-test": (
         "${{ !cancelled() && needs.changes.outputs.relay == 'true' && "
@@ -809,6 +860,16 @@ PINNED_GATE_STEP_NAMES = {
     ),
 }
 
+# Product checks retain their exact original route plus the verified-reuse guard.
+def _with_verified_reuse_guard(value, name):
+    expression = " ".join(value.removeprefix("${{").removesuffix("}}").split())
+    guard = "!(github.event_name == 'merge_group' && needs.changes.outputs.reuse_verified == 'true' && contains(fromJSON(needs.changes.outputs.reused_jobs || '[]'), '{name}'))".replace("{name}", name)
+    suffix = " && " + guard
+    if expression.endswith(suffix): expression = expression[:-len(suffix)]
+    return "${{ (" + expression + ") && " + guard + " }}"
+
+GATE_JOB_LEVEL_IFS = {name: _with_verified_reuse_guard(value, name) if name not in {'merge-authored-audit', 'fast-gate', 'commit-message', 'changes', 'backflow-portability', 'required-gate'} else value for name, value in GATE_JOB_LEVEL_IFS.items()}
+
 
 class CiGatePolicyTests(unittest.TestCase):
     @classmethod
@@ -853,7 +914,7 @@ class CiGatePolicyTests(unittest.TestCase):
                         condition = condition.replace("github.event.pull_request.draft", repr(draft))
                         condition = condition.replace("needs.changes.outputs.relay", repr(str(changed).lower()))
                         condition = condition.replace("&&", " and ").replace("||", " or ")
-                        self.assertEqual(bool(eval(condition, {"__builtins__": {}}, {})),
+                        self.assertEqual(bool(_eval_default_without_reuse(condition)),
                                          changed and action != "closed" and event in ("pull_request", "merge_group"))
         filters = re.search(r"\n            relay:\n((?:              .*\n)+)", self.workflow).group(1)
         paths = _extract_quoted_paths(filters)
@@ -873,7 +934,7 @@ class CiGatePolicyTests(unittest.TestCase):
         self.assertIn("WINDOWS_RELAY_RESULT: ${{ needs.windows-relay-tools-test.result }}", gate)
         self.assertIn("RELAY_REQUIRED_BY_POLICY: ${{ needs.changes.outputs.relay == 'true' }}", gate)
         self.assertIn('"windows-relay-tools-test:$WINDOWS_RELAY_RESULT"', gate)
-        body = gate.split("        run: |\n", 1)[1]
+        body = _step_named(gate, "汇总所有适用检查").split("        run: |\n", 1)[1]
         shell = "\n".join(line[10:] for line in body.splitlines())
         environment = {**os.environ, "GITHUB_EVENT_NAME": "pull_request", "BACKFLOW_MODE": "full",
                        "WINDOWS_RUST_REQUIRED_BY_POLICY": "false"}
@@ -892,7 +953,7 @@ class CiGatePolicyTests(unittest.TestCase):
 
     def test_required_gate_requires_actual_success_for_applicable_windows_dacl(self):
         gate = self.workflow.split("\n  required-gate:", 1)[1]
-        body = gate.split("        run: |\n", 1)[1]
+        body = _step_named(gate, "汇总所有适用检查").split("        run: |\n", 1)[1]
         shell = "\n".join(line[10:] for line in body.splitlines())
         environment = {**os.environ, "BACKFLOW_MODE": "full",
                        "WINDOWS_RUST_REQUIRED_BY_POLICY": "false"}
@@ -1124,29 +1185,170 @@ class CiGatePolicyTests(unittest.TestCase):
 
     def test_account_closure_ci_steps_are_precisely_pinned(self):
         """Keep the closure source and isolated-PG gates live and fail-closed."""
-        job = _without_inline_comments(_extract_job_block(self.pr_workflow, "account-platform-test"))
+        job = _without_inline_comments(_extract_job_block(self.pr_workflow, "account-platform-test")) + _without_inline_comments(_extract_job_block(self.pr_workflow, "account-closure-test"))
 
         def assert_contract(text):
+            source_owner = _extract_job_block(text, "account-platform-test")
+            postgres_owner = _extract_job_block(text, "account-closure-test")
+            _account_closure_source_shell_arguments(self.pr_workflow, source_owner)
+            for owner, expected_route in (
+                (source_owner, _with_verified_reuse_guard(
+                    "${{ !cancelled() && github.event.action != 'closed' && needs.changes.outputs.account_platform == 'true' }}",
+                    "account-platform-test")),
+                (postgres_owner, "${{ !cancelled() && github.event.action != 'closed' && needs.changes.outputs.account_platform == 'true' && !(github.event_name == 'merge_group' && fromJSON(toJSON(needs.changes.outputs)).reuse_verified == 'true' && contains(fromJSON(fromJSON(toJSON(needs.changes.outputs)).reused_jobs || '[]'), 'account-closure-test')) }}"),
+            ):
+                self.assertNotRegex(owner, r'''(?m)^    (?:defaults|'defaults'|"defaults")\s*:''')
+                header = owner.split("\n    steps:", 1)[0]
+                self.assertRegex(header, r"(?m)^    needs: changes$")
+                self.assertRegex(header, r"(?m)^    if:")
+                self.assertEqual(_step_if_tokens(header), expected_route)
+                self.assertNotRegex(header, r"(?m)^    continue-on-error:")
             source = _step_named(text, "Verify Account closure source and API contracts")
-            self.assertIn("npm --prefix account-platform run test:closure-contracts", source)
+            self.assertEqual(source, _step_named(source_owner, "Verify Account closure source and API contracts"))
+            self.assertEqual(_step_run_lines(source), [
+                "npm --prefix account-platform ci --ignore-scripts --no-audit --fund=false",
+                "npm --prefix account-platform run test:closure-contracts",
+            ])
             self.assertNotRegex(source, r"(?m)^        (?:if|continue-on-error):")
+            self.assertNotRegex(source, r"(?m)^        shell:")
             postgres = _step_named(text, "Account closure contracts on isolated PostgreSQL")
-            self.assertIn("python3 -m unittest discover -s scripts/tests -p test_account_closure_postgres.py", postgres)
-            self.assertIn("python3 scripts/test-account-closure-postgres.py", postgres)
-            self.assertIn("PINVOU_ACCOUNT_CLOSURE_TEST_DATABASE_URL", postgres)
+            self.assertEqual(postgres, _step_named(postgres_owner, "Account closure contracts on isolated PostgreSQL"))
+            self.assertRegex(postgres, r"(?m)^        shell: bash$")
+            self.assertEqual(_step_run_lines(postgres), ["set -euo pipefail",
+                "python3 -m unittest discover -s scripts/tests -p test_account_closure_postgres.py",
+                'python3 scripts/ci-fixture-process.py --receipt "$PINVOU_CI_RESOURCE_LEDGER/closure-process.json" -- python3 scripts/test-account-closure-postgres.py',
+            ])
+            for field, output in (("PINVOU_ACCOUNT_CLOSURE_TEST_DATABASE_URL", "financial_url"),
+                    ("PINVOU_ACCOUNT_CI_PG_PORT", "financial_port"),
+                    ("PINVOU_ACCOUNT_CI_PG_SYSTEM_ID", "financial_system"),
+                    ("PINVOU_ACCOUNT_CI_PG_DIRECTORY", "financial_directory")):
+                self.assertEqual(re.findall(rf"(?m)^          {field}: (.*)$", postgres), ["${{ steps.account-pg.outputs." + output + " }}"])
+            self.assertEqual(re.findall(r"(?m)^          PINVOU_ACCOUNT_CLOSURE_TEST_ARTIFACT_DIR: (.*)$", postgres), ["${{ runner.temp }}/account-closure-postgres"])
             self.assertNotRegex(postgres, r"(?m)^        (?:if|continue-on-error):")
 
         assert_contract(job)
         source = _step_named(job, "Verify Account closure source and API contracts")
         postgres = _step_named(job, "Account closure contracts on isolated PostgreSQL")
-        for mutated in (
+        source_owner = _extract_job_block(job, "account-platform-test")
+        postgres_owner = _extract_job_block(job, "account-closure-test")
+        mutations = [
             job.replace(source, "", 1),
             job.replace(postgres, "", 1),
             job.replace("npm --prefix account-platform run test:closure-contracts", "true", 1),
             job.replace("python3 scripts/test-account-closure-postgres.py", "true", 1),
-        ):
-            with self.assertRaises(AssertionError):
+            job.replace('python3 scripts/ci-fixture-process.py --receipt "$PINVOU_CI_RESOURCE_LEDGER/closure-process.json" -- ', "", 1),
+            job.replace("account_platform == 'true'", "account_platform == 'true' && false", 1),
+            job.replace(source_owner, source_owner.replace("reuse_verified == 'true'", "reuse_verified == 'false'", 1), 1),
+            job.replace(source_owner, source_owner.replace("'account-platform-test'))", "'another-job'))", 1), 1),
+            job.replace(postgres, "", 1).replace(source, source + "\n" + postgres, 1),
+            job.replace(source, "", 1) + "\n" + source,
+            job.replace("account_platform == 'true' && !(", "account_platform == 'true' && false && !(", 1),
+            job.replace(postgres_owner, postgres_owner.replace(".reuse_verified == 'true'", ".reuse_verified == 'false'", 1), 1),
+            job.replace(postgres_owner, postgres_owner.replace("'account-closure-test'))", "'another-job'))", 1), 1),
+            job.replace(postgres, postgres.replace("financial_system", "other_system", 1), 1),
+            job.replace(postgres, postgres.replace("${{ runner.temp }}/account-closure-postgres", "/tmp/uncollected", 1), 1),
+            job.replace(source, source.replace(source.splitlines()[0], source.splitlines()[0] + "\n        shell: bash -c {0}", 1), 1),
+        ]
+        for step in (source, postgres):
+            name = step.splitlines()[0]
+            mutations.extend([
+                job.replace(step, step.replace(name, name + "\n        if: false", 1), 1),
+                job.replace(step, step.replace(name, name + "\n        continue-on-error: true", 1), 1),
+                job + "\n" + name + "\n        run: true\n",
+            ])
+            for command in _step_run_lines(step):
+                if command == "set -euo pipefail":
+                    continue
+                for replacement in ("# " + command, "echo " + command, command + " || true", "exit 0\n          " + command):
+                    mutations.append(job.replace(step, step.replace(command, replacement, 1), 1))
+        for index, mutated in enumerate(mutations):
+            self.assertNotEqual(mutated, job)
+            with self.subTest(mutation=index), self.assertRaises(AssertionError):
                 assert_contract(mutated)
+
+        # Both YAML defaults scopes affect an otherwise unchanged source step.
+        # Include block/flow and quoted-key forms; do not infer the shell from
+        # just the two run commands, or from an independently forced mock flag.
+        for key in ("defaults", "'defaults'", '"defaults"'):
+            for value in ("\n  run:\n    shell: bash -c {0}",
+                          " {run: {shell: 'echo {0}'}}"):
+                defaults = key + ":" + value
+                workflow = defaults + "\n" + self.pr_workflow
+                with self.subTest(scope="workflow", defaults=defaults), self.assertRaises(AssertionError):
+                    _account_closure_source_shell_arguments(workflow, job)
+                for owner_name in ("account-platform-test", "account-closure-test"):
+                    owner = _extract_job_block(job, owner_name)
+                    inherited = job.replace(owner, owner.replace("\n    steps:", "\n" + textwrap.indent(defaults, "    ") + "\n    steps:", 1), 1)
+                    self.assertNotEqual(inherited, job)
+                    with self.subTest(scope=owner_name, defaults=defaults), self.assertRaises(AssertionError):
+                        assert_contract(inherited)
+                    # YAML mapping key order does not affect the effective defaults.
+                    after_steps = job.replace(owner, owner + "\n" + textwrap.indent(defaults, "    ") + "\n", 1)
+                    with self.subTest(scope=owner_name+"-after-steps", defaults=defaults), self.assertRaises(AssertionError):
+                        assert_contract(after_steps)
+
+    def test_account_required_gate_member_triple_is_pinned(self):
+        original = self.pr_workflow
+        wires = ("      - account-platform-test\n",
+                 "          ACCOUNT_PLATFORM_RESULT: ${{ needs.account-platform-test.result }}\n",
+                 '            "account-platform-test:$ACCOUNT_PLATFORM_RESULT" \\\n')
+        def assert_member():
+            self.assert_required_gate_wiring("account-platform-test", "ACCOUNT_PLATFORM_RESULT")
+            self.assertEqual(re.findall(r"(?m)^          ACCOUNT_PLATFORM_RESULT: (.*)$", self._required_gate()), ["${{ needs.account-platform-test.result }}"])
+            self.assertEqual(re.findall(r"(?m)^          ACCOUNT_PLATFORM_REQUIRED: (.*)$", self._required_gate()), ["${{ needs.changes.outputs.account_platform }}"])
+        assert_member()
+        gate = self._required_gate()
+        self.assertIn("ACCOUNT_PLATFORM_REQUIRED: ${{ needs.changes.outputs.account_platform }}", gate)
+        try:
+            for wire in wires:
+                self.assertEqual(gate.count(wire), 1)
+                for replacement in ("", "# " + wire.lstrip()):
+                    self.pr_workflow = original.replace(gate, gate.replace(wire, replacement, 1), 1)
+                    with self.subTest(wire=wire, replacement=replacement), self.assertRaises(AssertionError):
+                        assert_member()
+            for replacement in ("", "          ACCOUNT_PLATFORM_REQUIRED: false\n"):
+                self.pr_workflow = original.replace(gate, gate.replace("          ACCOUNT_PLATFORM_REQUIRED: ${{ needs.changes.outputs.account_platform }}\n", replacement, 1), 1)
+                with self.subTest(required_flag=replacement), self.assertRaises(AssertionError):
+                    assert_member()
+            self.pr_workflow = original.replace(gate, gate.replace("          ACCOUNT_PLATFORM_RESULT: ${{ needs.account-platform-test.result }}\n", "          ACCOUNT_PLATFORM_RESULT: ${{ needs.account-platform-test.result }}\n          ACCOUNT_PLATFORM_RESULT: success\n", 1), 1)
+            with self.assertRaises(AssertionError):
+                assert_member()
+        finally:
+            self.pr_workflow = original
+
+    def test_account_closure_actual_commands_propagate_each_failure(self):
+        self.test_account_closure_ci_steps_are_precisely_pinned()
+        bash = shutil.which("bash")
+        if os.name == "nt":
+            for base in (os.environ.get("ProgramFiles"), os.environ.get("ProgramW6432")):
+                candidate = Path(base) / "Git/bin/bash.exe" if base else None
+                if candidate and candidate.is_file():
+                    bash = str(candidate)
+                    break
+        self.assertIsNotNone(bash, "the existing Bash CI contracts require Bash")
+        prefix = """fixture_calls=0
+fixture_mock() {
+  ((fixture_calls+=1))
+  printf 'MOCK|%s\\n' "$1"
+  if [[ "$fixture_calls" == "$CI_FIXTURE_FAIL_AT" ]]; then return 7; fi
+}
+npm() { fixture_mock npm "$@"; }
+python3() { fixture_mock python3 "$@"; }
+"""
+        for name, owner in (("Verify Account closure source and API contracts", "account-platform-test"),
+                            ("Account closure contracts on isolated PostgreSQL", "account-closure-test")):
+            job = _extract_job_block(self.pr_workflow, owner)
+            script = "\n".join(_step_run_lines(_step_named(job, name)))
+            switches = (_account_closure_source_shell_arguments(self.pr_workflow, job)
+                        if name == "Verify Account closure source and API contracts"
+                        else ["--noprofile", "--norc", "-e", "-o", "pipefail", "-c"])
+            for failure in (0, 1, 2):
+                with self.subTest(step=name, failure=failure), tempfile.TemporaryDirectory(prefix="account-closure-wiring-") as directory:
+                    result = subprocess.run([bash, *switches, prefix + script], cwd=directory,
+                        env={**os.environ, "CI_FIXTURE_FAIL_AT": str(failure),
+                             "PINVOU_CI_RESOURCE_LEDGER": directory}, capture_output=True, text=True, timeout=30, check=False)
+                    self.assertEqual(result.returncode, 7 if failure else 0, result.stderr)
+                    self.assertEqual(len(result.stdout.splitlines()), failure or 2, result.stdout)
 
     def test_deployment_contract_artifacts_are_attempt_scoped(self):
         job = _without_inline_comments(
@@ -2715,7 +2917,7 @@ class CiGatePolicyTests(unittest.TestCase):
         # lenient extractor and could hide a folded-scalar exclusion from this
         # sweep.
         bundle_chain_paths = re.split(
-            r"\n  [A-Za-z0-9_.-]+:", bundle_chain_paths, maxsplit=1
+            r"\n(?:  [A-Za-z0-9_.-]+:|      - (?:name|uses|id|run):)", bundle_chain_paths, maxsplit=1
         )[0]
         assert_group_paths_reachable(bundle_chain_paths, "bundle_chain")
 
@@ -3385,7 +3587,7 @@ class CiGatePolicyTests(unittest.TestCase):
         # whole suite before this pin existed). The bare `[[ ]]` must stay
         # bare so a nonzero count fails the step.
         self.assertTrue(
-            required_gate.rstrip().endswith('[[ "$failed" -eq 0 ]]'),
+            _step_named(required_gate, "汇总所有适用检查").rstrip().endswith('[[ "$failed" -eq 0 ]]'),
             "required-gate must end in the bare failed-count verdict",
         )
         for suffix in (
@@ -3435,11 +3637,14 @@ class CiGatePolicyTests(unittest.TestCase):
         # test or cleanup failure. Artifact transport is bounded separately;
         # adding another advisory step still requires explicit review here.
         reviewed_diagnostics = (
+            "PR test success proof transport",
             "Windows 测试二进制导入诊断",
             "Test resource lifecycle receipts",
             "Financial parallel diagnostics",
             "Account test resource lifecycle receipts",
+            "Account closure resource lifecycle receipts",
             "Preserve browser fixture exit receipts",
+            "Preserve ACP fixture exit receipt",
         )
         self.assertEqual(
             len(step_level),
@@ -3472,6 +3677,11 @@ class CiGatePolicyTests(unittest.TestCase):
                   run: python scripts/ci-windows-imports-diagnose.py "$env:PINVOU3_TEST_EXE"
             """).rstrip(), "      "),
         )
+        transport = _step_named(_extract_job_block(body, 'required-gate'), 'PR test success proof transport')
+        self.assertIn('timeout-minutes: 3', transport)
+        self.assertIn('uses: actions/upload-artifact@v7', transport)
+        self.assertIn('path: ${{ steps.success_proof.outputs.directory }}/proof.json', transport)
+        self.assertNotRegex(transport, r'(?m)^        (?:run|env):')
         diagnostic_job = _extract_job_block(body, 'windows-codex-runtime-test')
         matches = list(re.finditer(
             r"(?ms)^      - name: Preserve browser fixture exit receipts\n.*?(?=^      - |\Z)", diagnostic_job
@@ -3515,6 +3725,11 @@ class CiGatePolicyTests(unittest.TestCase):
                     retention-days: 7
             """).rstrip(), "      "),
         )
+        closure_receipt = _step_named(_extract_job_block(body, 'account-closure-test'), 'Account closure resource lifecycle receipts')
+        self.assertIn('timeout-minutes: 3', closure_receipt)
+        self.assertIn('uses: actions/upload-artifact@v7', closure_receipt)
+        self.assertIn('name: account-closure-resource-lifecycle-${{ github.run_attempt }}', closure_receipt)
+        self.assertNotRegex(closure_receipt, r'(?m)^        (?:run|env):')
         diagnostic_job = _extract_job_block(body, 'account-platform-test')
         matches = list(re.finditer(
             r"(?ms)^      - name: Account test resource lifecycle receipts\n.*?(?=^      - |\Z)", diagnostic_job
@@ -3775,7 +3990,7 @@ class CiGatePolicyTests(unittest.TestCase):
         # success|skipped loop accepts it, and every routing pin above —
         # which asserts SUBSTRINGS of the condition — stays green. Pin the
         # exact full text of every gate job's job-level `if:` (extracted
-        # line-normalized, so pure re-indentation still matches but any
+        # whitespace-normalized for YAML folding, so re-indentation matches but any
         # content change does not): an appended `&& false`, a deleted
         # routing branch, or a flipped draft gate fails here.
         for job, expected in GATE_JOB_LEVEL_IFS.items():
@@ -3784,8 +3999,8 @@ class CiGatePolicyTests(unittest.TestCase):
                     _extract_job_block(self.pr_workflow, job)
                 )
                 self.assertEqual(
-                    actual,
-                    expected,
+                    re.findall(r"'(?:''|[^'])*'|[^\s]", actual),
+                    re.findall(r"'(?:''|[^'])*'|[^\s]", expected),
                     f"{job}'s job-level `if:` drifted from the pinned text; "
                     "an appended `&& false` (or a deleted routing branch) "
                     "silently skips the leg while required-gate accepts "
@@ -5292,7 +5507,7 @@ class CiGatePolicyTests(unittest.TestCase):
         changes = _without_yaml_comments(_changes_block(self.pr_workflow))
         self.assertIn("bundle_chain:", changes)
         bundle_chain_paths = _extract_quoted_paths(
-            changes.split("            bundle_chain:", maxsplit=1)[1]
+            _dorny_filter_group(changes, "bundle_chain")
         )
         self.assertTrue(bundle_chain_paths, "bundle_chain parsed to an empty path list")
         for entry in (
@@ -5362,7 +5577,7 @@ class CiGatePolicyTests(unittest.TestCase):
             [], leaked_groups,
             "a new filter group after bundle_chain must re-bound this extraction",
         )
-        bundle_chain_paths = _extract_quoted_paths(bundle_tail)
+        bundle_chain_paths = _extract_quoted_paths(_dorny_filter_group(changes, "bundle_chain"))
         self.assertNotIn(
             "pinvou3-app/src/**",
             bundle_chain_paths,
@@ -5809,7 +6024,7 @@ class CiGatePolicyTests(unittest.TestCase):
         console = _without_yaml_comments(_extract_job_block(self.pr_workflow, "update-release-console-test"))
         self.assertEqual(
             _extract_job_level_if(console),
-            "${{ !cancelled() && github.event.action != 'closed' && needs.changes.outputs.update_release_console == 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group') }}",
+            _with_verified_reuse_guard("${{ !cancelled() && github.event.action != 'closed' && needs.changes.outputs.update_release_console == 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group') }}", "update-release-console-test"),
         )
         self.assertRegex(console, r"(?m)^        run: bash scripts/ci-update-release-console-container\.sh$")
 
@@ -6002,7 +6217,7 @@ class CiGatePolicyTests(unittest.TestCase):
         self.assertIn("uses: dorny/paths-filter@v4", changes)
         self.assertIn("wrapper: ${{ steps.filter.outputs.wrapper }}", changes)
         self.assertIn("needs: changes", smoke)
-        self.assertIn("if: ${{ needs.changes.outputs.wrapper == 'true' }}", smoke)
+        self.assertIn("if: ${{ needs.changes.outputs.wrapper == 'true' && !(github.event_name == 'merge_group' && needs.changes.outputs.reuse_verified == 'true' && contains(fromJSON(needs.changes.outputs.reused_jobs || '[]'), 'smoke')) }}", smoke)
         self.assertIn("os: [macos-15, ubuntu-22.04, windows-latest]", smoke)
         # The 2026-10 concurrency fix: only PR runs cancel each other; queue
         # entries and main pushes must never cancel (queue entries carry the

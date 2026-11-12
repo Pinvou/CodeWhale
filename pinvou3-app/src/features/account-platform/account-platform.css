@@ -78,3 +78,13 @@
 
 .ap-payment-dialog { box-sizing: border-box; }
 .ap-payment-dialog footer { flex-wrap: wrap; }
+.ap-payment-dialog { font: 14px/1.5 system-ui, sans-serif; }
+.ap-payment-dialog button { min-height: 40px; padding: 8px 14px; border: 1px solid #c4cdd8; border-radius: 8px; background: #fff; color: #202a36; font: inherit; cursor: pointer; }
+.ap-payment-dialog button:disabled { opacity: .5; cursor: default; }
+.ap-payment-dialog img[hidden] { display: none; }
+.ap-payment-code { margin: 16px 0; text-align: center; }
+.ap-payment-code-placeholder { display: grid; align-content: center; justify-items: center; gap: 12px; min-height: 260px; padding: 20px; border: 1px solid #eceef2; border-radius: 12px; background: #f7f8fa; }
+.ap-payment-code-placeholder p { margin: 0; }
+.ap-payment-spinner { width: 28px; height: 28px; border: 3px solid #dfe9e3; border-top-color: #137647; border-radius: 50%; animation: ap-payment-spin 1s linear infinite; }
+@keyframes ap-payment-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .ap-payment-spinner { animation: none; } }
