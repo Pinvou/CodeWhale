@@ -192,6 +192,11 @@ const SECRET_QUERY_PREFIXES: [&str; 2] = ["x-amz-", "x-goog-"];
 const AZURE_SAS_QUERY_KEYS: [&str; 3] = ["sig", "se", "sp"];
 
 /// query 参数名是否命中机密名单（整名或前缀，均大小写不敏感）。
+///
+/// r33 P2-2：最后一档并进 [`auth_side_secret_name`] 单一谓词。SigV4 的
+/// `credential`/`session_token`/`security-token` 此前只在名字侧名单里——
+/// URL query 语境（`?credential=AKIA…`）以原值落盘，实测三条全漏（名单
+/// 碎片化第五次应验）。谓词按小写收口，与名字侧同一份名单。
 fn query_key_is_secret(key: &str) -> bool {
     SECRET_QUERY_KEYS
         .iter()
@@ -202,6 +207,7 @@ fn query_key_is_secret(key: &str) -> bool {
         || SECRET_QUERY_PREFIXES
             .iter()
             .any(|prefix| key.to_ascii_lowercase().starts_with(prefix))
+        || auth_side_secret_name(&key.to_ascii_lowercase())
 }
 
 /// 命令行上叫这些名字的开关，紧跟的取值一律抹掉（`--token abc` 和 `--token=abc`）。
@@ -2233,6 +2239,27 @@ mod tests {
             let cleaned = sanitize_for_disk(line);
             assert!(!cleaned.contains("shortsecret12345"), "{line} -> {cleaned}");
         }
+    }
+
+    /// r33 P2-2：query 语境接统一谓词——SigV4 裸名此前只在名字侧名单，
+    /// `?credential=`/`?session_token=`/`?security-token=` 以原值落盘（评审实测三漏）。
+    #[test]
+    fn sanitiser_pins_r33_query_sigv4_bare_names() {
+        for line in [
+            "curl 'https://host/v1?credential=AKIAIOSFODNN7EXAMPLE'",
+            "curl 'https://host/v1?session_token=shortsecret12345'",
+            "curl 'https://host/v1?security-token=shortsecret12345'",
+        ] {
+            let cleaned = sanitize_for_disk(line);
+            assert!(!cleaned.contains("shortsecret12345"), "{line} -> {cleaned}");
+            assert!(
+                !cleaned.contains("AKIAIOSFODNN7EXAMPLE"),
+                "{line} -> {cleaned}"
+            );
+        }
+        // 负控：普通 query 参数不受统一谓词牵连。
+        let cleaned = sanitize_for_disk("curl 'https://host/v1?page=2&size=10'");
+        assert!(cleaned.contains("page=2"), "{cleaned}");
     }
 
     /// r31 P2-2：redact_next 跨物理行延续（pretty JSON 两行形态）。
