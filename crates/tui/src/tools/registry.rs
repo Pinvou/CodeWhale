@@ -263,7 +263,16 @@ impl ToolRegistry {
             .filter(|tool| tool.model_visible())
             .filter(|tool| {
                 read_only_authority.is_none_or(|authority| {
-                    readonly_evidence_tool(tool.as_ref())
+                    // The classifier-bounded probe lane is an evidence tool,
+                    // but a worker whose envelope grants no shell authority
+                    // refuses every bash call at dispatch
+                    // (`enforce_tool_authority` demands
+                    // `ToolShellAuthority::ReadOnly`); listing it would
+                    // advertise a surface the worker can never use.
+                    let evidence = readonly_evidence_tool(tool.as_ref())
+                        && !(matches!(tool.name(), "bash" | "Bash")
+                            && authority.shell != super::spec::ToolShellAuthority::ReadOnly);
+                    evidence
                         || (tool.name() == "Run"
                             && authority.verification
                                 == super::spec::ToolVerificationAuthority::Bounded)
