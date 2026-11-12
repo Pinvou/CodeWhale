@@ -97,6 +97,12 @@ try{
   assert.equal(await page.evaluate(()=>window.installed.calls.some(c=>c.url.includes('/billing/'))),false);
  });
  await run('ENT approver-only center can decide without exposing request or wallet tabs','mode=ent&approve-only',async page=>{
+  await page.waitForSelector('.adm-approval-mine-read time');
+  assert.equal(await page.$('.adm-approval-mine-read [role=alert]'),null);
+  assert.equal(await page.$('table tbody tr'),null);
+  assert.equal(await page.evaluate(()=>window.installed.calls.some(c=>c.method==='GET'&&c.url.startsWith('/api/admin/approvals/requests?')&&new URL(c.url,location.origin).searchParams.get('requester_user_id')===window.installed.user)),true);
+  assert.notEqual(await page.evaluate(()=>window.installed.entDetail().requester.user_id),await page.evaluate(()=>window.installed.user));
+  await page.evaluate(()=>[...document.querySelectorAll('.adm-approval-tabs button')].find(b=>b.textContent===window.installed.adminPlatformCopy.zh.approvalCenter.pending).click());
   await page.waitForFunction(()=>document.querySelector('table')?.textContent.includes('ENTITLEMENT_COMPONENT_ADJUSTMENT'));
   assert.equal(await page.evaluate(()=>[...document.querySelectorAll('nav button')].some(b=>b.textContent===window.installed.entitlementCorrectionCopy.zh.title)),false);
   await page.evaluate(()=>[...document.querySelectorAll('table button')].find(b=>b.textContent===window.installed.financeCopy.zh.details).click());
@@ -106,6 +112,8 @@ try{
   await page.waitForFunction(()=>window.installed.ent.status==='APPROVED');
   assert.ok(await page.evaluate(()=>{const c=window.installed.calls.find(c=>c.url.endsWith('/actions/decide'));return c.headers['X-CSRF-Token']==='controlled-csrf'&&JSON.parse(c.body).decision==='APPROVED'&&JSON.parse(c.body).expected_version===1;}));
   assert.equal(await page.evaluate(()=>window.installed.calls.some(c=>c.url.includes('/billing/')||c.url.includes('approval-command-prechecks'))),false);
+  assert.equal(await page.evaluate(()=>window.installed.calls.filter(c=>c.method==='POST'&&c.url.endsWith('/actions/decide')).length),1);
+  assert.equal(await page.evaluate(()=>window.installed.calls.some(c=>c.method==='PUT'||c.method==='POST'&&c.url==='/api/admin/approvals/requests')),false);
  });
  await run('ENT failed precheck cannot create an approval','mode=ent&precheck-error',async page=>{
   await page.waitForFunction(()=>[...document.querySelectorAll('nav button')].some(b=>b.textContent===window.installed.entitlementCorrectionCopy.zh.title));
