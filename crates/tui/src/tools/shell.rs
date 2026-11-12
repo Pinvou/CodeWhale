@@ -3632,10 +3632,13 @@ impl ShellManager {
             // No task id exists yet — the record is only registered below —
             // so `write_stdin`'s "kill it and start a new one" recovery copy
             // has no target here. The spawn aborts instead: the child is
-            // killed and the caller learns the run was ended at spawn.
+            // killed and the caller learns the run was ended at spawn. The
+            // copy must not claim the command did no work: the write may
+            // have delivered a payload prefix that the child already acted
+            // on before it stalled (review 4540510091).
             let _ = bg_shell.kill();
             return Err(err.context(
-                "the run was killed at spawn: the process was created, but delivering the inline stdin payload failed, so the command was killed before it could do any work and NO task was created (the task id the error above mentions was never registered — do not try to cancel or kill it)",
+                "the run was killed at spawn: the process was created, but delivering the inline stdin payload failed, so the command was killed and NO task was created (the task id the error above mentions was never registered — do not try to cancel or kill it; the child may already have consumed part of the stdin payload before the write stalled)",
             ));
         }
 

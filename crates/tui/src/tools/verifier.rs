@@ -1670,6 +1670,7 @@ mod tests {
             "a skipped gate must carry no task id"
         );
         assert_eq!(job.skipped_reason.as_deref(), Some("tooling not installed"));
+    }
 
     /// A machine-launched gate job has nobody to feed its stdin, so the
     /// spawn closes it at once: a gate that reads stdin (`cat`) must

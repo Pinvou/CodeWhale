@@ -5308,12 +5308,25 @@ fn pty_writer_dup_carries_close_on_exec() {
     use std::io::{Read, Write};
     use std::os::fd::{AsRawFd, FromRawFd};
 
+    // Plain `pipe` plus an explicit FD_CLOEXEC setup, not `pipe2`: macOS
+    // (and the other Apple targets this `unix` gate compiles on) has no
+    // `pipe2`, and the production `dup_cloexec` helper must stay verifiable
+    // there (review 4540510083).
     let mut fds = [0 as libc::c_int; 2];
     assert_eq!(
-        unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) },
+        unsafe { libc::pipe(fds.as_mut_ptr()) },
         0,
-        "pipe2() failed"
+        "pipe() failed"
     );
+    for fd in fds {
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+        assert!(flags >= 0, "F_GETFD on the fresh pipe failed: {flags}");
+        assert_eq!(
+            unsafe { libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) },
+            0,
+            "F_SETFD could not set FD_CLOEXEC on the pipe end"
+        );
+    }
     let mut reader = unsafe { std::fs::File::from_raw_fd(fds[0]) };
     let mut writer = unsafe { std::fs::File::from_raw_fd(fds[1]) };
     let dup_fd = dup_cloexec(writer.as_raw_fd()).expect("dup_cloexec");
@@ -5624,8 +5637,14 @@ fn spawn_aborts_with_run_never_started_context_when_the_payload_stalls() {
          so the copy must not claim the run never started); got: {text}"
     );
     assert!(
-        text.contains("the command was killed before it could do any work"),
-        "error must state the process was created and then killed; got: {text}"
+        text.contains("the command was killed and NO task was created"),
+        "the accurate invariant is that no task id was ever registered; got: {text}"
+    );
+    assert!(
+        text.contains("may already have consumed part of the stdin payload"),
+        "the copy must not claim the command did no work: the write may have \
+         delivered a payload prefix the child acted on before stalling \
+         (review 4540510091); got: {text}"
     );
     assert!(
         text.contains("never registered"),
