@@ -73,7 +73,9 @@ test('dedicated user and operations views expose closure progress, blockers and 
   assert.match(operationsView, /^import \{ AdminAccountClosureWorkspace \} from '\.\/AdminAccountClosureWorkspace\.jsx';$/m);
   assert.match(operationsView, /^\s*\['closures', 'platform\.account-closures\.read',/m);
   assert.match(operationsView, /^\s*\{view === 'closures' && <AdminAccountClosureWorkspace \{\.\.\.\{ client, me, language \}\} \/>\}/m);
-  assert.match(operationsView, /const active = tabs\.some\(\(\[key\]\) => key === route\.operationsTab\) \? route\.operationsTab/);
+  assert.match(operationsView, /const closureDenied = route\.operationsTab === 'closures' && !permissions\.includes\('platform\.account-closures\.read'\)/);
+  assert.match(operationsView, /const active = closureDenied \? null : tabs\.some\(\(\[key\]\) => key === route\.operationsTab\) \? route\.operationsTab/);
+  assert.match(operationsView, /\{closureDenied && <p role="alert">\{accountClosureCopy\[language\]\.listPermissionDenied\}<\/p>\}/);
   assert.match(adminNavigation, /const route = resolveAdminRoute\(search, flags, available\)/);
   assert.match(adminNavigation, /adminRouteLocation\(search, section, route\.tab \? \{ finance_tab: route\.tab \} : \{\}/);
   const { resolveAdminRoute, visibleAdminSections } = await import('../../../pinvou3-app/src/features/account-platform/admin-sections.js');

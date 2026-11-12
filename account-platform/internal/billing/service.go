@@ -209,6 +209,7 @@ func (s *Service) Handler(serviceToken string, adminVerify ...identity.VerifyFun
 		admin.POST("/reconciliation-runs", s.authorizer.Require("platform.billing.reconciliation.run"), approvalpolicy.Require("BILLING_RECONCILIATION_RUN", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminRunReconciliation))
 		admin.POST("/reconciliation-imports", s.authorizer.Require("platform.billing.reconciliation.run"), approvalpolicy.Require("BILLING_PROVIDER_BILL_IMPORT", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminImportReconciliation))
 		admin.GET("/reconciliation-cases", s.authorizer.Require("platform.billing.reconciliation.read"), httpserver.AdaptFunc(s.adminReconciliationCases))
+		admin.GET("/reconciliation-cases/:case_id/repair-context", s.authorizer.Require("platform.billing.reconciliation.read"), httpserver.AdaptFunc(s.adminReconciliationRepairContext))
 		admin.GET("/reconciliation-runs/:run_id/cases", s.authorizer.Require("platform.billing.reconciliation.read"), httpserver.AdaptFunc(s.adminReconciliationCases))
 		admin.POST("/reconciliation-cases/:case_id/commands", s.authorizer.Require("platform.billing.reconciliation.manage"), approvalpolicy.Require("BILLING_RECONCILIATION_CASE_UPDATE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminUpdateReconciliationCase))
 		admin.GET("/overview", s.authorizer.Require("platform.billing.wallets.read"), httpserver.AdaptFunc(s.adminOverview))
@@ -451,6 +452,25 @@ func (s *Service) listRechargeOrders(w http.ResponseWriter, r *http.Request) {
 	walletID, walletErr := uuid.Parse(r.URL.Query().Get("wallet_id"))
 	if requesterErr != nil || walletErr != nil {
 		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid recharge order list", httpserver.RequestID(r.Context()))
+		return
+	}
+	if r.URL.Query().Has("limit") || r.URL.Query().Has("cursor") {
+		limit, err := strconv.Atoi(r.URL.Query().Get("limit"))
+		if err != nil || limit < 1 || limit > 100 || len(r.URL.Query()["limit"]) != 1 || len(r.URL.Query()["cursor"]) > 1 {
+			api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid order history page", httpserver.RequestID(r.Context()))
+			return
+		}
+		if _, err := parseOrderHistoryCursor(r.URL.Query().Get("cursor")); err != nil {
+			api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid order history cursor", httpserver.RequestID(r.Context()))
+			return
+		}
+		page, err := s.payments.OrderHistoryPage(r.Context(), requesterID, walletID, limit, r.URL.Query().Get("cursor"))
+		if err != nil {
+			s.writeError(w, r, err)
+			return
+		}
+		w.Header().Set("Cache-Control", "no-store")
+		api.WriteJSON(w, http.StatusOK, page)
 		return
 	}
 	items, err := s.payments.ListOrders(r.Context(), requesterID, walletID, 50)

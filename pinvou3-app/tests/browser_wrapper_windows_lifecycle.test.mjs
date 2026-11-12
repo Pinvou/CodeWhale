@@ -471,6 +471,15 @@ function createFakeHost(fixture) {
     operationErrors: new Map(),
     malformedOperationResponses: new Set(),
     deferredOperations: new Set(),
+    // Barrier-visibility freeze: frozen operations are still handled and
+    // answered normally (the wrapper lease stays healthy), but their
+    // observations are withheld from operationCalls/Log/Timeline until the
+    // freeze lifts, then flushed in arrival order. This deterministically
+    // reproduces the loaded-runner shape behind the 30s barrier: the wrapper's
+    // heartbeat timer starves, so the barrier sees no refreshes for a long
+    // stretch and only then catches up in a burst.
+    deferredObservations: new Set(),
+    pendingObservations: [],
     failure: null,
   };
 
@@ -498,9 +507,26 @@ function createFakeHost(fixture) {
     );
   };
 
+  const recordOperation = (operation) => {
+    state.operationCalls.set(
+      operation,
+      (state.operationCalls.get(operation) || 0) + 1,
+    );
+    state.operationLog.push(operation);
+    state.operationTimeline.push({ operation, at: Date.now() });
+  };
+
   const timer = setInterval(() => {
     if (!existsSync(requestDirectory) || state.failure) return;
     try {
+      if (
+        state.deferredObservations.size === 0 &&
+        state.pendingObservations.length
+      ) {
+        for (const operation of state.pendingObservations.splice(0)) {
+          recordOperation(operation);
+        }
+      }
       for (const name of readdirSync(requestDirectory)) {
         if (!name.endsWith('.json') || handled.has(name)) continue;
         const raw = readPendingHostRequest(join(requestDirectory, name));
@@ -508,12 +534,11 @@ function createFakeHost(fixture) {
         const request = JSON.parse(raw);
         if (state.deferredOperations.has(request.operation)) continue;
         handled.add(name);
-        state.operationCalls.set(
-          request.operation,
-          (state.operationCalls.get(request.operation) || 0) + 1,
-        );
-        state.operationLog.push(request.operation);
-        state.operationTimeline.push({ operation: request.operation, at: Date.now() });
+        if (state.deferredObservations.has(request.operation)) {
+          state.pendingObservations.push(request.operation);
+        } else {
+          recordOperation(request.operation);
+        }
 
         if (request.operation === 'prepare') {
           state.prepareCalls += 1;
@@ -1345,7 +1370,14 @@ test('Windows proxy: same wrapper recovers A once after stop while B keeps share
             operations: host.state.operationTimeline.slice(before.log),
             audit: readAudit(fixture.auditPath).slice(-20),
           }),
-          10_000,
+          // The wrapper shares the (often loaded) runner with this test and
+          // the fake host; a starved wrapper pauses its heartbeat timer for
+          // seconds before catching up in a burst. Both barrier users ride
+          // this budget: the 250ms input heartbeat (count 4) and the 5s
+          // generic operation heartbeat (count 1). 30s absorbs that stall
+          // while staying a bounded negative control: a wrapper that stops
+          // refreshing entirely still fails here, it just fails later.
+          30_000,
         ),
         request.then(() => assert.fail('tool completed before its release barrier')),
       ]);
@@ -1419,10 +1451,12 @@ test('Windows proxy: same wrapper recovers A once after stop while B keeps share
       clicks: readAudit(fixture.auditPath)
         .filter((entry) => entry.kind === 'tool' && entry.name === 'click').length,
     };
+    // 31s per-request ceiling sits just above the 30s heartbeat barrier:
+    // the barrier, not the driver's 15s default, bounds a held request.
     const longInputRequest = wrapper.request('tools/call', {
       name: 'click',
       arguments: { uid: 'slow-button' },
-    });
+    }, 31_000);
     const longInput = await releaseAfterRefreshes({
       request: longInputRequest,
       before: longInputBefore,
@@ -1476,10 +1510,12 @@ test('Windows proxy: same wrapper recovers A once after stop while B keeps share
       end: host.state.operationCalls.get('end_agent_operation') || 0,
       log: host.state.operationLog.length,
     };
+    // 31s per-request ceiling sits just above the 30s heartbeat barrier:
+    // the barrier, not the driver's 15s default, bounds a held request.
     const slowSnapshotRequest = wrapper.request('tools/call', {
       name: 'take_snapshot',
       arguments: {},
-    });
+    }, 31_000);
     const slowSnapshot = await releaseAfterRefreshes({
       request: slowSnapshotRequest,
       before: slowSnapshotBefore,
@@ -1519,6 +1555,90 @@ test('Windows proxy: same wrapper recovers A once after stop while B keeps share
       host.state.operationCalls.get('refresh_agent_operation') || 0,
       genericRefreshesAfterSnapshot,
       'no generic heartbeat may survive end_agent_operation',
+    );
+    writeFileSync(fixture.modePath, JSON.stringify({ clickDelayMs: 1_600 }));
+
+    // Deterministic late-recovery boundary for the 31s held-request ceiling.
+    // On a starved runner the wrapper pauses its heartbeat timer for many
+    // seconds and only then catches up in a burst, so the barrier can sit at
+    // zero observed refreshes far past the driver's historical 15s request
+    // default. Windows cannot suspend the wrapper process, so the fake host
+    // answers every refresh normally (the wrapper lease stays healthy) while
+    // freezing their barrier-visible observation for 15.5s: the held request,
+    // the 30s barrier, and the post-release response settle experience exactly
+    // the timing shape the ceiling must tolerate.
+    const lateRecoveryReleasePath = join(fixture.root, 'late-recovery.release');
+    writeFileSync(
+      fixture.modePath,
+      JSON.stringify({ clickDelayMs: 1_600, clickReleasePath: lateRecoveryReleasePath }),
+    );
+    const lateRecoveryBefore = {
+      begin: host.state.operationCalls.get('begin_agent_operation') || 0,
+      refresh: host.state.operationCalls.get('refresh_agent_input') || 0,
+      end: host.state.operationCalls.get('end_agent_operation') || 0,
+      log: host.state.operationLog.length,
+      clicks: readAudit(fixture.auditPath)
+        .filter((entry) => entry.kind === 'tool' && entry.name === 'click').length,
+    };
+    const lateRecoveryStartedAt = Date.now();
+    const lateRecoveryRequest = wrapper.request('tools/call', {
+      name: 'click',
+      arguments: { uid: 'late-heartbeat-button' },
+    }, 31_000);
+    host.state.deferredObservations.add('refresh_agent_input');
+    await sleep(15_500);
+    assert.equal(
+      (host.state.operationCalls.get('refresh_agent_input') || 0) - lateRecoveryBefore.refresh,
+      0,
+      'the fixture must really withhold every barrier-visible heartbeat during the stall',
+    );
+    // The backlog burst lands inside the 30s barrier window and the whole flow
+    // still settles: the barrier, not a 15s ceiling, bounds a held request.
+    host.state.deferredObservations.delete('refresh_agent_input');
+    const lateRecovery = await releaseAfterRefreshes({
+      request: lateRecoveryRequest,
+      before: lateRecoveryBefore,
+      operation: 'refresh_agent_input',
+      count: 4,
+      releasePath: lateRecoveryReleasePath,
+    });
+    assert.ok(
+      Date.now() - lateRecoveryStartedAt >= 15_500,
+      'the barrier must hold past the historical 15s default before the backlog burst',
+    );
+    assert.equal(lateRecovery.result.content[0].text, 'clicked');
+    assert.equal(
+      (host.state.operationCalls.get('begin_agent_operation') || 0) - lateRecoveryBefore.begin,
+      1,
+    );
+    assert.ok(
+      (host.state.operationCalls.get('refresh_agent_input') || 0) - lateRecoveryBefore.refresh >= 4,
+      'the delayed heartbeat burst must still cross the four-refresh barrier',
+    );
+    assert.equal(
+      (host.state.operationCalls.get('end_agent_operation') || 0) - lateRecoveryBefore.end,
+      1,
+    );
+    assert.equal(
+      readAudit(fixture.auditPath)
+        .filter((entry) => entry.kind === 'tool' && entry.name === 'click').length -
+        lateRecoveryBefore.clicks,
+      1,
+      'a late heartbeat burst must not redispatch the logical tool',
+    );
+    const lateRecoveryOperations = host.state.operationLog.slice(lateRecoveryBefore.log);
+    assert.ok(
+      lateRecoveryOperations.lastIndexOf('refresh_agent_input') <
+        lateRecoveryOperations.lastIndexOf('end_agent_operation'),
+      'the delayed in-flight heartbeat must settle before end_agent_operation',
+    );
+    const refreshesAfterLateRecovery =
+      host.state.operationCalls.get('refresh_agent_input') || 0;
+    await sleep(600);
+    assert.equal(
+      host.state.operationCalls.get('refresh_agent_input') || 0,
+      refreshesAfterLateRecovery,
+      'no delayed heartbeat may survive end_agent_operation',
     );
     writeFileSync(fixture.modePath, JSON.stringify({ clickDelayMs: 1_600 }));
 
@@ -1822,10 +1942,18 @@ test('Windows proxy: cancelled uncooperative dispatch shuts down on the first de
   const host = createFakeHost(fixture);
   const wrapper = driveWrapper(fixture);
   let replacement = null;
+  // In this fixture the first tool call includes lazy startup. Allow for a
+  // slow handshake followed by a slow post-bind catalog response. The
+  // cancellation phase below has its own observer and timing assertion.
+  const startupObservationMs = 45_000;
 
   try {
     await initializeWrapper(wrapper, 'windows-cancel-shutdown-test');
-    await wrapper.request('tools/call', { name: 'list_pages', arguments: {} });
+    const initial = await wrapper.request('tools/call', { name: 'list_pages', arguments: {} }, {
+      timeoutMs: startupObservationMs,
+      label: 'original wrapper first list_pages',
+    });
+    assert.equal(initial.result?.structuredContent?.pages?.length, 1);
 
     writeFileSync(fixture.modePath, JSON.stringify({ clickDelayMs: 30_000 }));
     const before = {
@@ -1852,20 +1980,12 @@ test('Windows proxy: cancelled uncooperative dispatch shuts down on the first de
       requestId: inFlight.id,
       reason: 'cancel uncooperative dispatch',
     });
-    const queued = wrapper.startRequest('tools/call', {
+    const queuedOutcome = await wrapper.request('tools/call', {
       name: 'list_pages',
       arguments: {},
+    }, {
+      label: 'queued list_pages awaiting shutdown rejection',
     });
-    // The production grace is a single 5s settlement window armed on the
-    // cancellation notification, so rejection cannot arrive before ~5s; the
-    // 20s race only bounds delivery under runner load (and stays below the
-    // fixture's 30s in-flight click, which must never settle first). The
-    // first-deadline window below keeps the anti-extension contract: a second
-    // armed grace would land the rejection at >=10s and fail the 9.5s cap.
-    const queuedOutcome = await Promise.race([
-      queued.response,
-      sleep(20_000).then(() => { throw new Error('queued call was not rejected before shutdown deadline'); }),
-    ]);
     const rejectedAt = Date.now();
     assert.match(queuedOutcome.error?.message || '', /browser\/wrapper-shutting-down/);
 
@@ -1876,6 +1996,8 @@ test('Windows proxy: cancelled uncooperative dispatch shuts down on the first de
       ]);
     }
     const shutdownElapsedMs = rejectedAt - cancelledAt;
+    // Reject delivery that takes a full additional 5s grace window even if
+    // the response arrives within the driver's 15s observation budget.
     assert.ok(
       shutdownElapsedMs >= 4_500 && shutdownElapsedMs < 9_500,
       `cooperative cancel shutdown did not reject queued work on its single first deadline: ${shutdownElapsedMs}ms`,
@@ -1904,6 +2026,9 @@ test('Windows proxy: cancelled uncooperative dispatch shuts down on the first de
     const recovered = await replacement.request('tools/call', {
       name: 'list_pages',
       arguments: {},
+    }, {
+      timeoutMs: startupObservationMs,
+      label: 'replacement wrapper first list_pages',
     });
     assert.equal(recovered.result.structuredContent.pages.length, 1);
   } catch (error) {

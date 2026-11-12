@@ -29,7 +29,7 @@ export const accountClosureCopy = {
       "FORCED_REFUND_UNRESOLVED": "仍有强制退款待核实",
       "FINANCIAL_RECONCILIATION_OPEN": "仍有财务对账差异",
       "LATE_PAYMENT_REVIEW_OPEN": "仍有晚到支付复核",
-      "PAYMENT_ANOMALY_OPEN": "仍有支付异常",
+      "PAYMENT_ANOMALY_OPEN": "支付异常尚未解决，或其财务修复尚未完成",
       "UNSETTLED_USAGE_HOLD": "仍有用量预占",
       "MODEL_EXECUTION_ACTIVE": "仍有模型执行",
       "USAGE_RECONCILIATION_PENDING": "仍有用量待核对"
@@ -81,7 +81,7 @@ export const accountClosureCopy = {
       "FORCED_REFUND_UNRESOLVED": "A forced refund requires review",
       "FINANCIAL_RECONCILIATION_OPEN": "Financial reconciliation is open",
       "LATE_PAYMENT_REVIEW_OPEN": "A late-payment review is open",
-      "PAYMENT_ANOMALY_OPEN": "A payment anomaly is open",
+      "PAYMENT_ANOMALY_OPEN": "A payment anomaly is unresolved or its financial repair is pending",
       "UNSETTLED_USAGE_HOLD": "A usage hold remains",
       "MODEL_EXECUTION_ACTIVE": "Model execution is active",
       "USAGE_RECONCILIATION_PENDING": "Usage reconciliation is pending"
@@ -133,7 +133,7 @@ export const accountClosureCopy = {
       "FORCED_REFUND_UNRESOLVED": "強制返金の確認が必要です",
       "FINANCIAL_RECONCILIATION_OPEN": "財務照合が未解決です",
       "LATE_PAYMENT_REVIEW_OPEN": "遅延支払い確認が未解決です",
-      "PAYMENT_ANOMALY_OPEN": "支払い異常が未解決です",
+      "PAYMENT_ANOMALY_OPEN": "支払い異常が未解決か、財務修復が未完了です",
       "UNSETTLED_USAGE_HOLD": "利用予約が残っています",
       "MODEL_EXECUTION_ACTIVE": "モデル実行中です",
       "USAGE_RECONCILIATION_PENDING": "利用量の照合待ちです"
@@ -158,6 +158,12 @@ export const accountClosureCopy = {
 };
 
 Object.assign(accountClosureCopy.zh, {
+  listTitle: '账号注销申请',
+  listLead: '查看注销申请的处理状态与阶段，包括账务结清和身份清理。',
+  listLoading: '正在加载注销申请…',
+  listEmpty: '当前页暂无注销申请',
+  listUnavailable: '暂时无法加载注销申请，请重试。',
+  listPermissionDenied: '需要查看账号注销申请的权限。请联系平台管理员授予该权限。',
   reauthenticate: '重新认证',
   recoveryUnavailable: '无法安全读取或保存原操作凭据，已停止发送请求。请恢复此浏览器的会话存储后再试。',
   recoveryPending: '原操作结果尚未确认；只能使用原请求凭据重试。',
@@ -165,6 +171,12 @@ Object.assign(accountClosureCopy.zh, {
   stages: { CLOSURE_REQUESTED: '已申请注销', QUIESCING: '停止新业务', FINANCIAL_CLEARANCE: '账务结清', IDENTITY_CLEANUP: '身份清理', ANONYMIZED: '已匿名化', COMPLETED: '注销完成' },
 });
 Object.assign(accountClosureCopy.en, {
+  listTitle: 'Account closure requests',
+  listLead: 'View closure request status and stages, including financial clearance and identity cleanup.',
+  listLoading: 'Loading account closure requests…',
+  listEmpty: 'No account closure requests on this page',
+  listUnavailable: 'Account closure requests could not be loaded. Please retry.',
+  listPermissionDenied: 'Permission to view account closure requests is required. Contact a platform administrator for access.',
   reauthenticate: 'Reauthenticate',
   recoveryUnavailable: 'The original operation proof cannot be read or saved safely. Requests are blocked; restore this browser’s session storage before retrying.',
   recoveryPending: 'The original result is unconfirmed. Retry only with the original operation proof.',
@@ -172,6 +184,12 @@ Object.assign(accountClosureCopy.en, {
   stages: { CLOSURE_REQUESTED: 'Closure requested', QUIESCING: 'Stopping new activity', FINANCIAL_CLEARANCE: 'Financial clearance', IDENTITY_CLEANUP: 'Identity cleanup', ANONYMIZED: 'Anonymized', COMPLETED: 'Closure completed' },
 });
 Object.assign(accountClosureCopy.ja, {
+  listTitle: '退会申請',
+  listLead: '退会申請の処理状況と、会計精算や認証情報の削除などの段階を確認します。',
+  listLoading: '退会申請を読み込んでいます…',
+  listEmpty: 'このページに退会申請はありません',
+  listUnavailable: '退会申請を読み込めませんでした。再試行してください。',
+  listPermissionDenied: '退会申請を閲覧する権限が必要です。プラットフォーム管理者に権限を依頼してください。',
   reauthenticate: '再認証',
   recoveryUnavailable: '元の操作証跡を安全に読み取り・保存できないため、送信を停止しました。このブラウザーのセッション保存を復旧してから再試行してください。',
   recoveryPending: '元の操作結果は未確認です。元の要求証跡でのみ再試行できます。',

@@ -54,7 +54,8 @@ try {
   for (const language of ['zh', 'en', 'ja']) for (const malformed of ['missing', 'null']) await caseRun(`${language}: ${malformed} bootstrap context shows recoverable error before child workspaces`, async () => {
     await fresh(); await page.select('.ap-sidebar-foot select, .adm-sidebar-foot select, header select', language);
     await page.evaluate(malformed => { globalThis.f01.badBootstrapContext = malformed; globalThis.f01.calls.length = 0; }, malformed);
-    await clickText(await page.evaluate(() => globalThis.f01.copy().account.refresh));
+    await page.click('[data-section=accountSettings]');
+    await clickText(await page.evaluate(() => globalThis.f01.copy().center.refreshAccount));
     await page.waitForFunction(() => document.querySelector('.ap-login [role=alert]')?.textContent === globalThis.f01.copy().account.requestFailed);
     assert(await page.evaluate(() => !document.querySelector('.ap-app') && !globalThis.f01.calls.some(call => call.url.includes('/me/balance') || call.url.includes('/me/organizations'))), 'invalid context mounted child or queried financial data');
     assert(await page.evaluate(() => document.querySelector('.ap-login a')?.textContent === globalThis.f01.copy().account.login), 'existing login recovery missing');
@@ -75,7 +76,7 @@ try {
     await clickText(await page.evaluate(() => globalThis.f01.copy().admin.retry));
     await page.waitForSelector('tbody tr'); await waitText('managed-account');
   });
-  await caseRun('admin users keep enable and disable with no direct delete', async () => { await fresh('admin'); assert(await page.evaluate(() => ![...document.querySelectorAll('button')].some(button => /delete/i.test(button.textContent))), 'delete exposed'); await clickText(await page.evaluate(() => globalThis.f01.copy().admin.accounts.disable)); await page.click('[role=dialog] > button'); await page.waitForFunction(() => globalThis.f01.status === 'DISABLED'); await clickText(await page.evaluate(() => globalThis.f01.copy().admin.accounts.enable)); await page.click('[role=dialog] > button'); await page.waitForFunction(() => globalThis.f01.status === 'ACTIVE'); assert(await page.evaluate(() => globalThis.f01.calls.filter(call => call.url.endsWith('/status')).every(call => call.method === 'PATCH')), 'wrong status method'); });
+  await caseRun('admin users keep enable and disable with no direct delete', async () => { await fresh('admin'); assert(await page.evaluate(() => ![...document.querySelectorAll('button')].some(button => /delete/i.test(button.textContent))), 'delete exposed'); await clickText(await page.evaluate(() => globalThis.f01.copy().admin.accounts.disable)); await page.click('[data-user-status-confirm]'); await page.waitForFunction(() => globalThis.f01.status === 'DISABLED'); await clickText(await page.evaluate(() => globalThis.f01.copy().admin.accounts.enable)); await page.click('[data-user-status-confirm]'); await page.waitForFunction(() => globalThis.f01.status === 'ACTIVE'); assert(await page.evaluate(() => globalThis.f01.calls.filter(call => call.url.endsWith('/status')).every(call => call.method === 'PATCH')), 'wrong status method'); });
   for (const language of ['zh','en','ja']) await caseRun(`${language}: unknown identity manual query uses original retry route without compensation`, async () => {
     await fresh('admin'); await page.select('.ap-sidebar-foot select, .adm-sidebar-foot select, header select',language);
     await page.evaluate(() => { globalThis.f01.unknownRegistration=true;globalThis.f01.calls.length=0; });
@@ -242,9 +243,10 @@ try {
     const input = await page.$('input[autocomplete=username]');
     await input.click(); await input.evaluate(node => node.select()); await input.type('draft-for-a');
     assert(await input.evaluate(node => node.value === 'draft-for-a'), 'profile draft was not entered');
-    await clickText(await page.evaluate(() => globalThis.f01.copy().account.refresh));
+    await page.click('[data-section=accountSettings]');
+    await clickText(await page.evaluate(() => globalThis.f01.copy().center.refreshAccount));
     await page.waitForFunction(() => {
-      const refresh = [...document.querySelectorAll('header button')].find(button => button.textContent.trim() === globalThis.f01.copy().account.refresh);
+      const refresh = [...document.querySelectorAll('.ap-account-information button, header button')].find(button => button.textContent.trim() === globalThis.f01.copy().center.refreshAccount);
       return refresh && !refresh.disabled && document.querySelector('input[autocomplete=username]')?.value === 'draft-for-a';
     });
     await page.evaluate(() => globalThis.f01.switchIdentity()); await waitText('account-b'); await openProfile();
