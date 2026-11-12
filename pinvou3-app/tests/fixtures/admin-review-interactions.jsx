@@ -1,9 +1,10 @@
 import React from 'react';
 import { createRoot } from 'react-dom/client';
 import { AdminProtocolFormulaWorkspace } from '../../src/features/account-platform/AdminProtocolFormulaWorkspace.jsx';
+import { initialAdminLanguagePreference, applyAdminLanguagePreference } from '../../src/features/account-platform/AdminLanguageControl.jsx';
 import { SettingsWorkspace } from '../../src/features/account-platform/SettingsWorkspace.jsx';
 import { AdminPlatformClient } from '../../src/features/account-platform/admin-client.js';
-import { adminPlatformCopy, tokenManagementCopy } from '../../src/shared/i18n.js';
+import { adminPlatformCopy, tokenManagementCopy, adminLanguagePreferenceCopy } from '../../src/shared/i18n.js';
 import '../../src/features/account-platform/admin-platform.css';
 import '../../src/features/account-platform/admin-portal-layout.css';
 import '../../src/features/account-platform/admin-token-management.css';
@@ -38,6 +39,12 @@ window.fetch = async (url, options = {}) => {
 const client = new AdminPlatformClient();
 client.csrfToken = 'SYNTHETIC_CSRF';
 const sms = new URLSearchParams(location.search).has('sms');
-createRoot(document.querySelector('#root')).render(sms
+const root = createRoot(document.querySelector('#root'));
+if (new URLSearchParams(location.search).has('language-settings')) {
+  let preference = initialAdminLanguagePreference();
+  control.languageWords = adminLanguagePreferenceCopy;
+  const render = () => root.render(<SettingsWorkspace copy={adminPlatformCopy[preference.language]} language={preference.language} languageFeedback={preference.feedback} client={client} permissions={[]} onLanguageChange={language => { preference = applyAdminLanguagePreference(language); render(); }} />);
+  render();
+} else root.render(sms
   ? <SettingsWorkspace copy={adminPlatformCopy.en} language="en" client={client} permissions={['platform.sms-config.read', 'platform.sms-config.manage']} onLanguageChange={() => {}} />
   : <AdminProtocolFormulaWorkspace client={client} copy={tokenManagementCopy.en.modelToken} canManage={false} routeVersion={0} cursorHistory={{ current: {} }} onRouteChange={() => {}} />);
