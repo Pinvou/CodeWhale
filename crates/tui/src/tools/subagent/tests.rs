@@ -8442,6 +8442,10 @@ fn verifier_roster_description_states_the_bounded_contract() {
         description.contains("cannot execute custom commands"),
         "roster description must refuse custom commands: {description}"
     );
+    assert!(
+        description.contains("unless a read-only-shell parent clamped its shell authority"),
+        "roster description must condition the gates on shell authority — a clamped child keeps probes and loses gates: {description}"
+    );
     // The Agent-tool `type` description carries the same truth, briefly.
     assert!(
         SUBAGENT_TYPE_DESCRIPTION.contains("test: runs the built-in verification gates"),
@@ -8506,17 +8510,29 @@ async fn verifier_child_still_refuses_raw_shell_custom_commands_and_writes() {
         "raw Bash refusal did not identify the wall: {raw}"
     );
     // The second legacy-`Bash` wall is the posture's classifier-lane rule: a
-    // command the classifier cannot prove read-only must not re-enter
-    // through the alias, pinned here on this Verifier-labeled registry (the
-    // sibling pin covers the same wall through a Scout fixture). A
-    // proven-read-only shape still fails this wall — the posture rule
-    // refuses the legacy alias name itself (`bash_must_use_classifier_lane`
-    // is case-insensitive), so the alias never re-enters at any
-    // provability.
+    // command the classifier cannot prove read-only stays `Required`, the
+    // case-insensitive lane-door check refuses the alias name itself, and
+    // the call is refused at posture — pinned here on this Verifier-labeled
+    // registry (the sibling pin covers the same wall through a Scout
+    // fixture). A *proven*-read-only shape clears posture's Auto
+    // classification for any role, so the alias-at-any-provability refusal
+    // is pinned below at the wall that actually owns it: the role clamp.
     assert!(
         !registry.posture_permits_tool("Bash", Some(&json!({"command": "rm -rf src"}))),
         "the posture wall must refuse unprovable commands through the legacy `Bash` alias for a Verifier"
     );
+    // The exact-name asymmetry at the dispatch wall: only canonical
+    // lowercase `bash` reaches the lane, so the alias is refused even for a
+    // provably read-only shape — a case-relaxed lane check cannot re-admit
+    // it at any provability.
+    registry
+        .execute(
+            "agent_verifier_walls",
+            "Bash",
+            json!({"command": "pwd"}),
+        )
+        .await
+        .expect_err("the legacy `Bash` alias must stay refused even for a provably read-only command — the lane is exact-name");
 
     let custom_command = json!({
         "action": "verifiers",
@@ -8609,6 +8625,16 @@ async fn read_only_shell_children_of_other_roles_hold_no_shell_authority() {
             !names.iter().any(|name| name == "Run"),
             "{role:?} catalog must not offer the verification gate: {names:?}"
         );
+        // The probe lane is read-only-roles-only: a widened role set must not
+        // silently hand the classifier-bounded shell to write-capable
+        // children. The catalog refusal keys on the same
+        // `allows_bounded_readonly_bash` predicate the production dispatch
+        // walls (the raw-shell deny rules' role-gated rescue) key on, so a
+        // widened role set flips both — and this catalog pin reddens first.
+        assert!(
+            !names.iter().any(|name| name == "bash"),
+            "{role:?} catalog must not offer the classifier probe lane: {names:?}"
+        );
         let refused = registry
             .execute("agent_read_only_child", "Run", gate.clone())
             .await
@@ -8653,6 +8679,12 @@ fn verifier_child_keeps_the_default_and_selection_bounded_run_surface() {
     assert!(
         names.contains(&"Run"),
         "catalog must keep offering the verification gate: {names:?}"
+    );
+    // Catalog and dispatch must agree on the carve-out: the probe lane stays
+    // visible, not merely dispatchable.
+    assert!(
+        names.contains(&"bash"),
+        "catalog must keep offering the probe lane beside the gates: {names:?}"
     );
 }
 
@@ -8701,14 +8733,16 @@ async fn clamped_verifier_child_of_read_only_parent_holds_no_run_surface() {
 
 /// The sub-subagent chain: a carve-out Verifier parent (its effective shell
 /// is the role's read-only narrowing; the Run grant is a registry surface,
-/// not shell authority) spawns a Builder or Worker child. The child
-/// derivation re-clamps before it captures shell authority, so the chain
-/// holds no extra authority: the spawn ceiling the carve-out parent
-/// publishes stays read-only, and a child built under that ceiling keeps
-/// the same no-Run, classifier-bounded shape this module pins elsewhere.
-/// The round-3 re-key bug lived exactly in this ordering.
-#[test]
-fn sub_subagent_chain_of_a_carveout_verifier_holds_no_extra_authority() {
+/// not shell authority) spawning a Builder child. Hop 2 is built from hop
+/// 1's actual published profile through the same intersection the
+/// production spawn path runs, so the pin is a real two-hop chain: the
+/// spawn ceiling the carve-out parent publishes stays read-only, and the
+/// child derived under that ceiling keeps the no-Run, lane-less shape. It
+/// guards the propagation side of the round-3 fix — if the registry ever
+/// leaked a pre-narrowing profile to its spawns, the Builder below would
+/// regain the gate surface, and this test would redden.
+#[tokio::test]
+async fn sub_subagent_chain_of_a_carveout_verifier_holds_no_extra_authority() {
     // A carve-out Verifier in a full session: the coarse session flag stays
     // `allow_shell = true` while its effective runtime shell is the
     // read-only narrowing. The ceiling its spawns publish must read the
@@ -8723,29 +8757,82 @@ fn sub_subagent_chain_of_a_carveout_verifier_holds_no_extra_authority() {
         codewhale_workflow::ShellCeiling::ReadOnly,
         "the carve-out must not widen the shell ceiling a verifier publishes for its own spawns"
     );
-    // The chain child registry shape (what the derivation above produces for
-    // the next hop): no built-in gate surface, evidence lane classifier-
-    // bounded — for the Builder the chain would most plausibly reach for.
-    let (_tmp, registry) = read_only_shell_child_registry(FleetRole::Builder);
+    // Hop 2 is derived from hop 1's actual output: the carve-out verifier's
+    // narrowed effective profile is what the registry publishes to its own
+    // spawns, so a Builder one hop below the verifier is built through the
+    // same derivation the production spawn path runs
+    // (`worker_profile_for_spawn` intersects the parent's effective profile
+    // with the child's role request). If the registry ever leaked a
+    // pre-narrowing profile to its spawns, the Builder below would regain
+    // the gate surface — this pin exists to redden exactly that regression.
+    let (_verifier_tmp, verifier) = read_only_with_shell_registry();
+    assert_eq!(
+        verifier.runtime_profile.shell,
+        crate::worker_profile::ShellPolicy::ReadOnly,
+        "the carve-out fixture must publish the narrowed shell to its spawns"
+    );
+    let derived = verifier
+        .runtime_profile
+        .derive_child(&WorkerRuntimeProfile::for_role(FleetRole::Builder));
+    assert_eq!(
+        derived.shell,
+        crate::worker_profile::ShellPolicy::ReadOnly,
+        "the chain Builder must derive the read-only shell from the verifier's narrowed profile"
+    );
+    let child_tmp = tempfile::tempdir().expect("tempdir");
+    let mut child_runtime =
+        stub_runtime().with_agent_tool_surface_options(enabled_agent_surface_options());
+    child_runtime.context = ToolContext::new(child_tmp.path().to_path_buf());
+    child_runtime.allow_shell = true;
+    child_runtime.worker_profile = derived;
+    let builder = SubAgentToolRegistry::new(
+        child_runtime,
+        FleetRole::Builder,
+        None,
+        Arc::new(Mutex::new(TodoList::new())),
+        Arc::new(Mutex::new(PlanState::default())),
+    );
+    // No gate surface at any wall, and no probe lane: the Builder two hops
+    // into a shell-granting chain holds exactly the read-only shell its
+    // ancestors owned.
+    let gate = json!({"action": "tests", "args": "--lib fleet::exact"});
     assert!(
-        !registry.posture_permits_tool("Run", Some(&json!({"action": "tests"}))),
+        !builder.posture_permits_tool("Run", Some(&gate)),
         "a chain Builder must not hold the verification gate"
     );
     assert!(
-        registry
-            .envelope_refusal("Run", &json!({"action": "tests"}))
-            .is_some(),
+        builder.envelope_refusal("Run", &gate).is_some(),
         "a chain Builder envelope must refuse the verification gate"
     );
+    let names: Vec<String> = builder
+        .tools_for_model(&FleetRole::Builder)
+        .iter()
+        .map(|tool| tool.name.clone())
+        .collect();
     assert!(
-        !registry.posture_permits_tool("bash", Some(&json!({"command": "rm -rf src"}))),
-        "a chain Builder keeps the evidence lane classifier-bounded"
+        !names.iter().any(|name| name == "Run"),
+        "a chain Builder catalog must not offer the verification gate: {names:?}"
+    );
+    assert!(
+        !names.iter().any(|name| name == "bash"),
+        "a chain Builder catalog must not offer the classifier probe lane: {names:?}"
+    );
+    let refused = builder
+        .execute("agent_chain_builder", "Run", gate.clone())
+        .await
+        .expect_err("the test runner must stay refused one hop below the carve-out verifier");
+    assert!(
+        refused.to_string().contains("not permitted") || refused.to_string().contains("shell"),
+        "chain Builder refusal did not identify the wall: {refused}"
     );
 }
 
 /// The verifier intro tells the child about its bounded read-only shell and
 /// the custom-command refusal, scoped to in-session delegations the way
-/// `FleetRole`'s roster description scopes the role.
+/// `FleetRole`'s roster description scopes the role. The gates claim is
+/// conditional too: a child clamped by a read-only-shell parent keeps the
+/// probes and loses the gates — the intro must not promise the gates
+/// unconditionally.
 #[test]
 fn verifier_intro_states_the_evidence_contract() {
     assert!(
@@ -8759,6 +8846,11 @@ fn verifier_intro_states_the_evidence_contract() {
     assert!(
         VERIFIER_AGENT_INTRO.contains("in-session delegations"),
         "the verifier's bounded read-only shell must be scoped to in-session delegations: {VERIFIER_AGENT_INTRO}"
+    );
+    assert!(
+        VERIFIER_AGENT_INTRO
+            .contains("a child clamped by a read-only-shell parent keeps the read-only probes but has its gates refused"),
+        "the intro's gates claim must carry the read-only-parent conditional: {VERIFIER_AGENT_INTRO}"
     );
 }
 
