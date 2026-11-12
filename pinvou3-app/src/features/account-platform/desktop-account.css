@@ -1,0 +1,64 @@
+.ap-popover-backdrop.ap-desktop-backdrop {
+  --ad-page: #f6f8f9; --ad-card: #fff; --ad-text: #202a36; --ad-muted: #647283;
+  --ad-border: #dde3e8; --ad-accent: #0f766e; --ad-soft: #e8f4f1;
+  padding: 24px; color: var(--ad-text); font: 14px/1.5 system-ui, sans-serif;
+}
+.ap-desktop-backdrop[data-theme="dark"] {
+  --ad-page: #171c20; --ad-card: #20262b; --ad-text: #e5ebef; --ad-muted: #aeb8c1;
+  --ad-border: #39434c; --ad-accent: #5eead4; --ad-soft: #183c37;
+}
+.ap-desktop-backdrop.ap-account-screen { background: transparent; }
+.ap-desktop-backdrop .ap-shell.ap-centered { display: grid; place-items: center; min-height: 180px; width: min(480px, calc(100vw - 48px)); }
+.ap-account-dialog { position: relative; max-width: 100%; border-radius: 20px; box-shadow: 0 24px 80px #0003; }
+.ap-desktop-backdrop .ap-shell.ap-desktop { color: var(--ad-text); background: var(--ad-page); border-radius: 20px; padding: 52px 28px 24px; width: min(760px, calc(100vw - 48px)); max-height: calc(100vh - 48px); overscroll-behavior: contain; }
+.ap-account-close { position: absolute; top: 12px; right: 12px; z-index: 1; display: grid; place-items: center; width: 32px; height: 32px; border: 0; border-radius: 8px; background: transparent; color: var(--ad-muted); font: 24px/1 system-ui, sans-serif; cursor: pointer; }
+.ap-account-close:hover { background: var(--ad-soft); color: var(--ad-text); }
+.ap-desktop-backdrop .ap-shell.ap-desktop button, .ap-desktop-backdrop .ap-shell.ap-desktop select, .ap-desktop-backdrop .ap-shell.ap-desktop input { color: var(--ad-text); background: var(--ad-card); border-color: var(--ad-border); min-height: 40px; }
+.ap-desktop-backdrop .ap-shell.ap-desktop button:focus-visible, .ap-desktop-backdrop .ap-shell.ap-desktop input:focus-visible, .ap-desktop-backdrop .ap-shell.ap-desktop select:focus-visible, .ap-account-close:focus-visible { outline: 3px solid var(--ad-accent); outline-offset: 2px; }
+.ap-desktop-backdrop .ap-shell.ap-desktop button:hover:not(:disabled) { border-color: var(--ad-accent); }
+.ap-desktop-backdrop .ap-shell.ap-desktop h1 { font-size: 24px; line-height: 1.35; font-weight: 650; }
+.ap-desktop-backdrop .ap-shell.ap-desktop h2 { font-size: 16px; line-height: 1.4; font-weight: 600; }
+.ap-desktop-backdrop .ap-shell.ap-desktop h3 { font-size: 14px; font-weight: 600; }
+.ap-desktop-backdrop .ap-shell.ap-desktop p { margin: 0; }
+.ap-desktop-backdrop .ap-shell.ap-desktop section { margin: 0; background: var(--ad-card); }
+.ap-desktop-backdrop .ap-shell.ap-desktop .ap-muted, .ap-desktop-backdrop .ap-shell.ap-desktop small { color: var(--ad-muted); }
+.ap-desktop-backdrop .ap-center-heading { margin-bottom: 22px; padding-right: 12px; }
+.ap-center-heading h1 { margin: 0; }
+.ap-center-heading select { max-width: 160px; }
+.ap-center-tabs { display: flex; gap: 8px; margin-bottom: 20px; }
+.ap-desktop-backdrop .ap-center-tabs button { flex: 1; border-color: transparent; background: transparent; }
+.ap-desktop-backdrop .ap-center-tabs button[aria-pressed="true"] { color: var(--ad-accent); background: var(--ad-soft); font-weight: 600; }
+.ap-center-panel:not([hidden]) { display: grid; gap: 16px; }
+.ap-desktop .ap-center-panel[hidden] { display: none; }
+.ap-desktop-backdrop [hidden] { display: none !important; }
+.ap-identity-summary { display: flex; align-items: center; gap: 14px; margin-bottom: 18px; }
+.ap-identity-summary > div { flex: 1; min-width: 0; }.ap-identity-summary h2 { overflow-wrap: anywhere; margin: 0 0 2px; }
+.ap-identity-summary > button { flex: 0 0 auto; }
+.ap-desktop-backdrop .ap-shell.ap-desktop .ap-profile-lead { margin-top: 16px; color: var(--ad-muted); font-size: 12px; line-height: 1.7; }
+.ap-identity-avatar { display: grid; place-items: center; width: 48px; height: 48px; flex: 0 0 48px; border-radius: 50%; background: var(--ad-soft); color: var(--ad-accent); font-size: 20px; font-weight: 600; }
+.ap-identity-card dl { display: grid; gap: 12px; margin: 0; }
+.ap-identity-card dl > div { display: flex; justify-content: space-between; gap: 16px; }
+.ap-identity-card dt { color: var(--ad-muted); }.ap-identity-card dd { margin: 0; overflow-wrap: anywhere; text-align: right; }
+.ap-context-options { display: flex; flex-wrap: wrap; gap: 8px; }
+.ap-desktop-backdrop .ap-context-options button[aria-pressed="true"] { opacity: 1; background: var(--ad-soft); color: var(--ad-accent); border-color: transparent; }
+.ap-desktop-backdrop .ap-shell.ap-desktop .ap-web-center p, .ap-desktop-backdrop .ap-shell.ap-desktop .ap-center-lead { margin-bottom: 16px; color: var(--ad-muted); line-height: 1.7; }
+.ap-desktop-backdrop .ap-shell.ap-desktop .ap-web-center { margin-top: 16px; border: 1px solid var(--ad-border); background: transparent; }
+.ap-web-center button { text-align: left; }
+.ap-center-footer { display: flex; justify-content: space-between; gap: 12px; padding-top: 20px; }
+.ap-desktop-backdrop .ap-recharge-only { display: grid; gap: 16px; }
+.ap-recharge-only header { justify-content: space-between; }.ap-recharge-only header h2 { margin: 0; }
+.ap-recharge-only form, .ap-recharge-only fieldset { display: grid; gap: 16px; min-width: 0; }
+.ap-recharge-only label { display: grid; gap: 7px; min-width: 0; }
+.ap-recharge-only select { width: 100%; min-width: 0; }
+.ap-desktop-backdrop .ap-recharge-only form > button:not([type="button"]) { background: #0f766e; color: #fff; border-color: transparent; min-height: 44px; font-weight: 600; }
+.ap-recharge-only .ap-org-action { margin-top: 12px; }
+.ap-recharge-only fieldset { border: 0; padding: 0; margin: 0; }
+.ap-recharge-only .ap-pending-payments { margin: 0; }
+.ap-recharge-only .ap-pending-payments li { gap: 12px; }.ap-recharge-only .ap-pending-payments span { min-width: 0; overflow-wrap: anywhere; }
+@media (max-width: 560px) {
+  .ap-popover-backdrop.ap-desktop-backdrop { padding: 12px; }
+  .ap-desktop-backdrop .ap-shell.ap-desktop { width: calc(100vw - 24px); max-height: calc(100vh - 24px); padding: 52px 20px 20px; }
+  .ap-identity-card dl > div { flex-wrap: wrap; gap: 4px; }.ap-identity-card dd { text-align: left; }
+  .ap-identity-summary { flex-wrap: wrap; }.ap-identity-summary > button { margin-left: 62px; }
+  .ap-center-footer { flex-wrap: wrap; }
+}
