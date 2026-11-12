@@ -38,6 +38,7 @@ import {
   ACCOUNT_PLATFORM_SOURCE,
   LOCAL_CONFIG_SOURCE,
   platformModelSelectableAsDefault,
+  platformModelRuntimeSupported,
 } from '../account-platform/model-catalog-selection.js';
 import {
   VOICE_POSTPROCESS_ENABLED_KEY,
@@ -2872,6 +2873,7 @@ const formatMemoryTime = (item, copy) => {
                         {!selectable && <Tag tone="gray">{settingsCopy.modelUnavailable}</Tag>}
                       </div>
                       <div className="mt-0.5 text-[12px] leading-[17px] truncate text-[#8A8A8E] dark:text-[#98989D]">{item.model_id}</div>
+                      {!platformModelRuntimeSupported(item) && <p className="mt-1 text-[12px] leading-[17px] text-[#8A8A8E] dark:text-[#98989D]">{settingsCopy.modelRuntimeProtocolUnavailable}</p>}
                     </div>
                     <span className="text-[12px] text-[#8A8A8E] dark:text-[#98989D]">{settingsCopy.appliesToNewSessions}</span>
                   </div>
