@@ -144,9 +144,12 @@ pub fn sanitize_for_responses(schema: &mut Value) -> Option<String> {
 /// previous release line always forced it, and the model-facing contract
 /// otherwise loses its object shape even when the branches carried no
 /// properties to merge (an `allOf` of `$ref`s, required-only or boolean
-/// branches). When the merge contributes no properties at all, the dropped
-/// composition is surfaced as a generic note so the model is not left
-/// without any compensating guidance.
+/// branches). Whenever no specific required-group note exists, the dropped
+/// composition is surfaced as a generic note — merged properties or not
+/// (review 4539837534): a union of `additionalProperties:false` branches
+/// whose properties merge into the root accepts a mixture no original
+/// branch admits, so the model must still be told the branch contract was
+/// relaxed.
 ///
 /// The shared [`sanitize`] normalization still applies first, so a root
 /// nullable union can collapse (rewriting the root `type`), a bare object
@@ -181,23 +184,20 @@ pub fn sanitize_for_anthropic_messages(schema: &mut Value) -> Option<String> {
     obj.remove("oneOf");
     obj.remove("anyOf");
     obj.remove("allOf");
-    let merged_properties = obj
-        .get("properties")
-        .and_then(Value::as_object)
-        .is_some_and(|properties| !properties.is_empty());
     if stripped_composition.is_some() && !obj.contains_key("type") {
         obj.insert("type".into(), Value::String("object".to_string()));
     }
     prune_dangling_required(schema);
     constraint_note.or_else(|| {
-        // A composition whose branches carry no properties (an allOf of
-        // $refs, required-only or boolean branches) merges nothing, so the
-        // argument contract is erased without any required-group note to
-        // compensate; surface a generic note instead of leaving the model
-        // without guidance about the dropped constraint.
-        stripped_composition
-            .filter(|_| !merged_properties)
-            .map(|key| match key {
+        // Merged properties do not compensate for the dropped composition:
+        // a union of `additionalProperties:false` branches merges its branch
+        // properties into the root and then accepts a mixture no original
+        // branch admits (review 4539837534), and a property-less
+        // composition (an allOf of $refs, required-only or boolean branches)
+        // erases the argument contract outright. Whenever the specific
+        // required-group note is missing, surface the generic note so the
+        // model always learns the branch contract was relaxed.
+        stripped_composition.map(|key| match key {
                 "oneOf" => {
                     "Exactly one of the original argument alternatives must be provided (top-level `oneOf` is not supported by this API and was removed)."
                         .to_string()
@@ -1229,6 +1229,48 @@ mod tests {
     }
 
     #[test]
+    fn anthropic_messages_sanitize_notes_the_relaxed_union_when_branches_merge_without_required() {
+        // Review 4539837534: merged properties do not compensate for the
+        // dropped composition. An `anyOf` of two closed object branches whose
+        // properties merge into the root — each with
+        // `additionalProperties:false` and no `required`, so no required-group
+        // note exists — originally admitted an object with exactly one of the
+        // two fields; the merged root accepts both. The model must still be
+        // told the branch contract was relaxed via the generic note.
+        let mut schema = json!({
+            "anyOf": [
+                {
+                    "type": "object",
+                    "properties": {"file": {"type": "string"}},
+                    "additionalProperties": false
+                },
+                {
+                    "type": "object",
+                    "properties": {"url": {"type": "string"}},
+                    "additionalProperties": false
+                }
+            ]
+        });
+
+        let note = sanitize_for_anthropic_messages(&mut schema);
+
+        assert!(schema.get("anyOf").is_none(), "{schema}");
+        assert!(schema["properties"].get("file").is_some(), "{schema}");
+        assert!(schema["properties"].get("url").is_some(), "{schema}");
+        assert!(
+            schema.get("additionalProperties").is_none(),
+            "branch closures must not leak onto the merged root: {schema}"
+        );
+        assert_eq!(
+            note.as_deref(),
+            Some(
+                "At least one of the original argument alternatives must be provided (top-level `anyOf` is not supported by this API and was removed)."
+            ),
+            "the relaxed at-least-one contract must be surfaced even though properties merged: {note:?}"
+        );
+    }
+
+    #[test]
     fn anthropic_messages_sanitize_does_not_inject_type_without_a_root_composition() {
         // Type restoration is scoped to stripped compositions: a declared
         // typeless root with nothing to strip ships exactly as declared.
@@ -1475,7 +1517,13 @@ mod tests {
             json!(["x"]),
             "a nested composition is outside the recorded root-only scope: {nested}"
         );
-        assert_eq!(note, None);
+        assert_eq!(
+            note.as_deref(),
+            Some(
+                "Exactly one of the original argument alternatives must be provided (top-level `oneOf` is not supported by this API and was removed)."
+            ),
+            "the root branches carry properties but no required groups, so the dropped exactly-one contract is surfaced as the generic note (review 4539837534): {note:?}"
+        );
     }
 
     #[test]
@@ -1505,7 +1553,13 @@ mod tests {
             json!({"type": "string"}),
             "branch properties without a root collision still merge: {precedence}"
         );
-        assert_eq!(note, None);
+        assert_eq!(
+            note.as_deref(),
+            Some(
+                "Exactly one of the original argument alternatives must be provided (top-level `oneOf` is not supported by this API and was removed)."
+            ),
+            "the branches merge properties without required groups, so no group note exists and the generic note still names the dropped union (review 4539837534): {note:?}"
+        );
     }
 
     #[test]
@@ -1545,7 +1599,11 @@ mod tests {
         // two model-visible built-ins whose root compositions produced the
         // recorded Anthropic 400 — ship byte-identically to the previous
         // release line, which ran sanitize_for_responses on every lane. The
-        // registry pre-pass (registry.rs) both lines share runs first.
+        // registry pre-pass (registry.rs) both lines share runs first. The
+        // notes intentionally diverge after review 4539837534: the registry
+        // pre-pass leaves no required groups, so the previous line surfaced
+        // nothing while this pass names the dropped union contract — the
+        // model-facing compensation the narrowed pass exists to keep.
         use crate::tools::apply_patch::ApplyPatchTool;
         use crate::tools::finance::FinanceTool;
         use crate::tools::schema_canonicalize::canonicalize_schema;
@@ -1589,7 +1647,18 @@ mod tests {
                 current.to_string(),
                 "{name}: key order must match too (prompt-cache stability)"
             );
-            assert_eq!(previous_note, current_note, "{name}: notes must match");
+            // Bytes stay identical; the note is the deliberate divergence:
+            // the previous line dropped the union contract silently, this
+            // pass names it whenever no required-group note exists.
+            match (previous_note, current_note) {
+                (previous_note, Some(current_note))
+                    if previous_note.is_none()
+                        || previous_note == Some(current_note.clone()) => {}
+                (previous_note, current_note) => panic!(
+                    "{name}: notes diverged beyond the reviewed generic-note gap: \
+                     previous={previous_note:?} current={current_note:?}"
+                ),
+            }
         }
     }
 
