@@ -8254,6 +8254,87 @@ async fn verifier_child_still_refuses_raw_shell_custom_commands_and_writes() {
         "workspace-write refusal did not identify the denial: {write}"
     );
 }
+/// The bounded read-only bash lane overrides exactly ONE denial source: the
+/// role clamp's AUTOMATIC raw-shell rules. An operator (session
+/// `--disallowed-tools`) or spawn caller who denies `bash` — by exact name
+/// or by a rule that matches it (`ba*`, `exec_shell*`) — keeps that
+/// restriction authoritative at BOTH boundaries the lane serves: the tool
+/// leaves the model-visible catalog, and a direct dispatch is refused by the
+/// name gate instead of being judged by the lane's read-only classifier.
+/// The strings of an operator rule and the clamp's rule are identical
+/// (`Bash`), so the provenance must be carried (`explicit_denied_tools`),
+/// not re-derived — this pin holds the registry side of that contract.
+#[tokio::test]
+async fn verifier_explicit_bash_deny_rules_close_the_lane_at_admission_and_dispatch() {
+    for rule in ["bash", "ba*", "exec_shell*"] {
+        let tmp = tempdir().expect("tempdir");
+        let authority = crate::fleet::role::ChildAuthority::from_runtime_role(
+            "verifier",
+            codewhale_workflow::PermissionCeiling::preset("full").expect("preset"),
+        );
+        let mut runtime =
+            stub_runtime().with_agent_tool_surface_options(enabled_agent_surface_options());
+        runtime.context = ToolContext::new(tmp.path().to_path_buf());
+        runtime.allow_shell = true;
+        runtime.worker_profile = WorkerRuntimeProfile::for_role(FleetRole::Verifier);
+        runtime.worker_profile.denied_tools = authority.disallowed_tools.clone();
+        // What the spawn merge does with the caller's `disallowed_tools`
+        // entry: installs the rule AND books its operator/caller provenance.
+        runtime.worker_profile.denied_tools.push(rule.to_string());
+        runtime
+            .worker_profile
+            .explicit_denied_tools
+            .push(rule.to_string());
+        let registry = SubAgentToolRegistry::new(
+            runtime,
+            FleetRole::Verifier,
+            authority.allowed_tools.clone(),
+            Arc::new(Mutex::new(TodoList::new())),
+            Arc::new(Mutex::new(PlanState::default())),
+        );
+
+        // Catalog admission: the model must not even see the tool.
+        let names: Vec<String> = registry
+            .tools_for_model(&FleetRole::Verifier)
+            .iter()
+            .map(|tool| tool.name.clone())
+            .collect();
+        assert!(
+            !names.iter().any(|name| name == "bash"),
+            "explicit operator rule `{rule}` must keep bash out of the model-visible catalog: {names:?}"
+        );
+
+        // Dispatch: a hand-written call is refused before the lane's
+        // classifier could ever judge the command. With the lane closed,
+        // canonical bash is unhardened for this role, so the unhardened-
+        // process wall speaks first; the name gate is its backstop. Either
+        // refusal proves the operator rule outranks the lane's classifier.
+        let refused = registry
+            .execute(
+                "agent_verifier_explicit_deny",
+                "bash",
+                json!({"command": "wc -c src/main.rs"}),
+            )
+            .await
+            .expect_err("explicit operator rule `{rule}` must refuse bash dispatch");
+        let refused = refused.to_string();
+        assert!(
+            refused.contains("not available to this read-only worker")
+                || refused.contains("not allowed for this sub-agent"),
+            "explicit operator rule `{rule}` refusal must come from a dispatch wall: {refused}"
+        );
+    }
+
+    // Control: the lane still exists to override the clamp's AUTOMATIC
+    // raw-shell denial — with no operator rule matching bash, the canonical
+    // tool is admitted (the probe execution itself is pinned by
+    // `verifier_child_executes_a_bounded_readonly_bash_probe_for_evidence`).
+    let (_tmp, control) = read_only_with_shell_registry();
+    assert!(
+        control.is_tool_allowed("bash"),
+        "the bounded lane must keep overriding the automatic raw-shell denial when no operator rule matches bash"
+    );
+}
 /// A registry for a write-capable role whose parent handed it a read-only
 /// shell and no writes — what `derive_child` produces for a Builder, Worker,
 /// or Custom child of a Scout or Planner on the plain `agent` nesting path,

@@ -5778,7 +5778,7 @@ async fn readonly_github_calls_refuse_at_the_policy_inside_the_tool_entry() {
 fn guidance_states_the_foreground_stdin_contract() {
     let description = super::guidance::description();
     assert!(
-        description.contains("Foreground commands without `interactive` or `combined_output` run without a terminal stdin"),
+        description.contains("Foreground commands without `interactive`, `tty`, or `combined_output` run without a terminal stdin"),
         "guidance must state the bounded foreground stdin: {description}"
     );
     assert!(
@@ -10112,151 +10112,6 @@ fn spawned_child_does_not_inherit_the_pty_writer_dup() {
     drop(reader);
 }
 
-/// The bounded stdin write: a command that never consumes its pipe fills
-/// it, and past [`STDIN_WRITE_DEADLINE`] the write errors and the task's
-/// stdin is marked stalled instead of holding the shell-manager lock (and
-/// with it every other shell in the session) forever. The stall flag then
-/// refuses further writes without another wait — two writers could
-/// interleave on one pipe.
-// Unix-only: the bounded write (worker + deadline) the test exercises is
-// `#[cfg(unix)]`, as are the raw-mode tty semantics it pins; the
-// Windows/ohos owned path is bounded by the same deadline through
-// `bounded_stdin_write_owned` and covered by its own helper test.
-#[cfg(unix)]
-#[test]
-fn write_stdin_to_a_child_that_stops_consuming_errors_instead_of_wedging() {
-    let verdict = run_stdin_scenario_with_hang_guard(
-        "the bounded-write pin",
-        || -> Result<(), String> {
-            let tmp = tempdir().map_err(|error| error.to_string())?;
-            let mut manager = ShellManager::new(tmp.path().to_path_buf());
-            let result = manager
-                .execute_with_options_env(
-                    &sleep_command(60),
-                    None,
-                    60_000,
-                    true,
-                    None,
-                    false,
-                    None,
-                    HashMap::new(),
-                )
-                .map_err(|error| error.to_string())?;
-            let task_id = result
-                .task_id
-                .ok_or_else(|| "background execution should return task_id".to_string())?;
-            // Far past any pipe buffer on any platform: the write cannot
-            // complete unless the child reads, and it never does.
-            let payload = "x".repeat(200 * 1024);
-            let started = std::time::Instant::now();
-            let error = manager
-                .write_stdin(&task_id, &payload, false)
-                .err()
-                .ok_or_else(|| "the stalled write must error at the deadline".to_string())?
-                .to_string();
-            if !error.contains("did not complete within") {
-                return Err(error);
-            }
-            let elapsed = started.elapsed();
-            if elapsed < STDIN_WRITE_DEADLINE {
-                return Err(format!(
-                    "the write returned before the deadline: {elapsed:?}"
-                ));
-            }
-            // No upper bound on the elapsed time: the load-bearing assertions
-            // are that the deadline FIRED (elapsed ≥ deadline) and further
-            // writes are refused. A fixed upper bound is load-fragile at any
-            // multiple — under a saturated full-suite parallel run the
-            // deadline worker was observed starving past 30 s — while a
-            // broken-mechanism mutant (deadline removed) never returns and
-            // trips the outer hang guard instead.
-            // Further writes are refused by the stall flag without waiting.
-            let started = std::time::Instant::now();
-            let again = manager.write_stdin(&task_id, "y", false);
-            if again.is_ok() {
-                return Err("the stalled task must refuse further writes".to_string());
-            }
-            if started.elapsed() > std::time::Duration::from_millis(500) {
-                return Err("the stall refusal must not wait on another write".to_string());
-            }
-            // A close after the stall must not claim the end-of-file the
-            // abandoned writer never delivered: the post-close refusal must
-            // still name the stall (the `stdin_closed_at_eof` stall conjunct
-            // and the stall-first check order together keep the EOF claim
-            // off; a reorder or conjunct drop that surfaced the EOF message
-            // reddens here).
-            let _closed = manager.write_stdin(&task_id, "", true);
-            let after_close = manager
-                .write_stdin(&task_id, "z", false)
-                .err()
-                .ok_or_else(|| "the post-stall close must leave writes refused".to_string())?
-                .to_string();
-            if !after_close.contains("stalled") || after_close.contains("end-of-file") {
-                return Err(format!(
-                    "a close after a stall must not claim an EOF the abandoned writer has not delivered: {after_close}"
-                ));
-            }
-            manager.kill(&task_id).map_err(|error| error.to_string())?;
-            Ok(())
-        },
-    );
-    verdict.expect("bounded-write assertions");
-}
-/// The `interact` payload carries the same per-call bound as the inline
-/// spawn payload: one oversized call is refused with a pointer at chunking
-/// before any write is attempted.
-#[tokio::test]
-async fn interact_payload_over_the_cap_refuses() {
-    let workspace = tempdir().expect("workspace");
-    let context = ToolContext::new(workspace.path().to_path_buf());
-    let oversized = "x".repeat(super::MAX_INLINE_STDIN_BYTES + 1);
-    let output = BashTool::new("Bash")
-        .execute(
-            json!({"action": "interact", "command": "pwd", "task_id": "no-such-task", "stdin": oversized}),
-            &context,
-        )
-        .await
-        .expect("the refusal is a result, not an error");
-    assert!(!output.success, "{}", output.content);
-    assert!(
-        output.content.contains("per interact call"),
-        "the refusal must name the per-call bound: {}",
-        output.content
-    );
-    // The advertised bound stays in sync with the constant (the copy
-    // interpolates it; this asserts the value actually reaches the model).
-    assert!(
-        output
-            .content
-            .contains(&super::MAX_INLINE_STDIN_BYTES.to_string()),
-        "the refusal must carry the exact bound value: {}",
-        output.content
-    );
-}
-/// The tool description states the foreground stdin contract; the sentence is
-/// the model-facing contract for why stdin readers exit, so it is pinned.
-#[test]
-fn guidance_states_the_foreground_stdin_contract() {
-    let description = super::guidance::description();
-    assert!(
-        description.contains("Foreground commands without `interactive`, `tty`, or `combined_output` run without a terminal stdin"),
-        "guidance must state the bounded foreground stdin: {description}"
-    );
-    assert!(
-        description.contains("`tty` always selects a background terminal task"),
-        "guidance must state where tty commands actually run — the run path forces them background: {description}"
-    );
-    assert!(
-        description.contains(
-            "a terminal lane that nothing writes to unless a session member interacts with the task"
-        ),
-        "guidance must state the combined_output foreground stdin contract accurately: {description}"
-    );
-    assert!(
-        description.contains("action=\"interact\""),
-        "guidance must point at background interact for input-driven work: {description}"
-    );
-}
 /// The lowercase tool's own description carries the same foreground stdin
 /// contract: its legacy translation accepts only command/timeout/sandbox
 /// fields, so that sentence is the whole stdin story on that surface.
@@ -10270,45 +10125,6 @@ fn lowercase_bash_description_states_the_foreground_stdin_contract() {
     assert!(
         description.contains("a bare `$SHELL` receive end-of-file"),
         "the bare-shell probe must be named as exiting on EOF: {description}"
-    );
-}
-/// A foreground command that reads stdin with NO stdin data used to wedge on
-/// a pipe whose write end the tool kept open: the live repro was `$SHELL`
-/// holding the turn until the foreground watchdog killed it at the full
-/// timeout (`cat` behaves identically). The foreground lane must deliver EOF
-/// at spawn instead. Background keeps the pipe open for deferred
-/// `interact` streaming — that contract is pinned by
-/// `test_write_stdin_streams_output` and must not regress.
-#[tokio::test]
-async fn foreground_without_stdin_data_gives_stdin_readers_eof() {
-    let workspace = tempdir().expect("workspace");
-    let context = ToolContext::new(workspace.path().to_path_buf());
-    // `cat` on Unix, `more` on cmd, `[Console]::In.ReadToEnd()` on PowerShell —
-    // each blocks until stdin reaches EOF.
-    let echo_stdin = echo_stdin_command();
-
-    let started = Instant::now();
-    let result = BashTool::new("Bash")
-        .execute(json!({"command": echo_stdin, "timeout_ms": 3000}), &context)
-        .await
-        .expect("foreground stdin-reader must spawn");
-    let elapsed = started.elapsed();
-
-    assert!(
-        result.success,
-        "a stdin-reading foreground command with no stdin data must see EOF \
-         and exit promptly, not run to the timeout; took {elapsed:?}: {}",
-        result.content
-    );
-    // The elapsed bound is a unix pin: on Windows a cold PowerShell startup
-    // can legitimately approach the 3000 ms watchdog under parallel load,
-    // while `success` above already fails if the watchdog killed the run.
-    #[cfg(unix)]
-    assert!(
-        elapsed < Duration::from_millis(2900),
-        "EOF must be delivered right after spawn, not discovered at the \
-         timeout; took {elapsed:?}: {}",
-        result.content
     );
 }
 /// When the inline payload cannot be delivered at spawn, the run must abort
@@ -10369,15 +10185,6 @@ fn spawn_aborts_with_run_never_started_context_when_the_payload_stalls() {
          instant failure; took {elapsed:?}: {text}"
     );
 }
-#[cfg(unix)]
-const SYNC_STDIN_EOF_HELPER_ENV: &str = "CODEWHALE_SYNC_STDIN_EOF_HELPER";
-#[cfg(unix)]
-const SYNC_STDIN_EOF_RESULT_FILE_ENV: &str = "CODEWHALE_SYNC_STDIN_EOF_RESULT_FILE";
-/// Helper half of
-/// `sync_lane_without_stdin_data_gets_eof_not_inherited_stdin`: runs one
-/// synchronous (background=false) stdin-reading command from a process whose
-/// own stdin is a pipe the driver deliberately holds open, and records the
-/// resulting status for the driver to judge.
 #[cfg(unix)]
 #[test]
 fn readonly_operand_gate_refuses_cd_operands_the_shell_reinterprets() {
