@@ -9,6 +9,7 @@ export async function navigateFixture(page, url, ready, {
   attempts = 3,
   settleMs = 250,
   warn = message => console.warn(message),
+  waitUntil = 'load',
 } = {}) {
   const origin = new URL(url);
   if (origin.protocol !== 'http:' || origin.hostname !== '127.0.0.1') {
@@ -34,7 +35,7 @@ export async function navigateFixture(page, url, ready, {
     try {
       await Promise.race([
         (async () => {
-          await page.goto(url);
+          await page.goto(url, { waitUntil });
           await ready(controller.signal);
         })(),
         interrupted,

@@ -5,7 +5,7 @@ import { AdminPlatformView } from '../../src/features/account-platform/AdminPlat
 import { AccountPlatformBffClient } from '../../src/features/account-platform/bff-client.js';
 import { AccountPlatformDesktopClient } from '../../src/features/account-platform/desktop-client.js';
 import { AdminPlatformClient } from '../../src/features/account-platform/admin-client.js';
-import { accountPlatformCopy, adminPlatformCopy } from '../../src/shared/i18n.js';
+import { accountCenterCopy, accountPlatformCopy, adminPlatformCopy } from '../../src/shared/i18n.js';
 const root = createRoot(document.querySelector('#root'));
 const id = 'a7f21df2-d2ef-4d55-99c8-a5470f9968b9';
 const other = 'b7f21df2-d2ef-4d55-99c8-a5470f9968b9';
@@ -68,6 +68,6 @@ function render() {
 }
 control.render = value => { kind = value; client = value === 'admin' ? new AdminPlatformClient() : value === 'desktop' ? new AccountPlatformDesktopClient(native) : new AccountPlatformBffClient(); render(); };
 control.switchIdentity = () => { control.user = other; client = new AccountPlatformBffClient(); render(); };
-control.copy = () => ({ account: accountPlatformCopy[language], admin: adminPlatformCopy[language] });
+control.copy = () => ({ account: accountPlatformCopy[language], admin: adminPlatformCopy[language], center: accountCenterCopy[language] });
 control.render('account');
 window.f01 = control;
