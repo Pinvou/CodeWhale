@@ -11,9 +11,10 @@ window.TauriBridge = { available: true, models: { switchModelRef: async (...args
   state: { getMany: () => state, subscribeMany: () => () => {} }, lifecycle: { init: async () => {} } };
 const { ComposerModelSelector } = await import('../../src/features/settings/composer-shared.jsx');
 const client = { session: async () => ({ authenticated: control.authenticated }), modelCatalog: async () => ({ items: [
-  { model_id: 'public-a', display_name: 'Platform A', context_eligible: true, lifecycle_status: 'PUBLISHED' },
-  { model_id: 'public-b', display_name: 'Platform B', context_eligible: true, lifecycle_status: 'PUBLISHED' },
-  { model_id: 'blocked', display_name: 'Platform blocked', context_eligible: true, lifecycle_status: 'DEPRECATED', new_session_cutoff_at: '2000-01-01T00:00:00Z' },
+  { model_id: 'public-a', display_name: 'Platform A', runtime_protocol: 'OPENAI_CHAT_V1', context_eligible: true, lifecycle_status: 'PUBLISHED' },
+  { model_id: 'public-b', display_name: 'Platform B', runtime_protocol: 'OPENAI_CHAT_V1', context_eligible: true, lifecycle_status: 'PUBLISHED' },
+  { model_id: 'blocked', display_name: 'Platform blocked', runtime_protocol: 'OPENAI_CHAT_V1', context_eligible: true, lifecycle_status: 'DEPRECATED', new_session_cutoff_at: '2000-01-01T00:00:00Z' },
+  { model_id: 'unpublished', display_name: 'Platform unpublished', context_eligible: true, lifecycle_status: 'PUBLISHED' },
 ] }) };
 const root = createRoot(document.querySelector('#root'));
 control.render = async () => { await ensureLanguage(control.language); root.render(<ComposerModelSelector t={dict[control.language]} bs={state}
