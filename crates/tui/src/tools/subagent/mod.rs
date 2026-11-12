@@ -36,8 +36,8 @@ use crate::core::engine::tool_catalog::{
     TOOL_SEARCH_NAME, active_tools_for_request, apply_native_tool_deferral,
     bounded_toolbox_eviction_note, ensure_advanced_tooling, execute_tool_search_with_cache,
     initial_active_tools, is_tool_search_tool, park_toolbox_eviction, remove_toolbox_drops,
-    render_toolbox_eviction_notes, tool_matches_any_rule, toolbox_oversize_reason,
-    touch_cached_tool_after_execution,
+    render_toolbox_eviction_notes, rule_matches_tool, tool_matches_any_rule,
+    toolbox_oversize_reason, touch_cached_tool_after_execution,
 };
 use crate::core::events::{AgentProgressEventMeta, Event};
 use crate::core::session::{PendingToolboxEviction, ToolActivationCache, ToolboxEvictionTrigger};
@@ -10622,6 +10622,11 @@ async fn spawn_subagent_from_input(
             .worker_profile
             .denied_tools
             .retain(|rule| is_posture_denial(rule));
+        // The dropped preferences were the inherited operator rules; their
+        // explicit-bookkeeping twins go with them, so the child's explicit
+        // set holds exactly the caller's list below. An automatic clamp rule
+        // keeps its enforcement regardless.
+        child_runtime.worker_profile.explicit_denied_tools.clear();
     }
     if let Some(ref caller_deny) = spawn_request.disallowed_tools {
         for tool in caller_deny {
@@ -10632,6 +10637,21 @@ async fn spawn_subagent_from_input(
                 .any(|existing| existing == tool)
             {
                 child_runtime.worker_profile.denied_tools.push(tool.clone());
+            }
+            // Bookkeep the caller's provenance even when the rule string was
+            // already present (e.g. the role clamp installed the same
+            // `Bash` rule): the carve-outs override the clamp's automatic
+            // denial, never the caller's.
+            if !child_runtime
+                .worker_profile
+                .explicit_denied_tools
+                .iter()
+                .any(|existing| existing == tool)
+            {
+                child_runtime
+                    .worker_profile
+                    .explicit_denied_tools
+                    .push(tool.clone());
             }
         }
     }
@@ -15632,6 +15652,12 @@ struct SubAgentToolRegistry {
     // parent/child scope. Deny rules always win, including canonical prefixes.
     allowed_tools: Option<Vec<String>>,
     disallowed_tools: Vec<String>,
+    // The operator/caller subset of `disallowed_tools` (session
+    // `--disallowed-tools` preferences plus the spawn request's explicit
+    // `disallowed_tools`). The strings overlap the role clamp's automatic
+    // rules, so provenance is carried: the bounded read-only bash lane
+    // overrides the clamp's automatic denial, never one of these.
+    operator_denied_tools: Vec<String>,
     // Approval posture is separate from authority. Auto approval can remove a
     // prompt, but cannot restore a tool removed by role, scope, or envelope.
     auto_approve: bool,
@@ -15768,6 +15794,7 @@ impl SubAgentToolRegistry {
         Self {
             allowed_tools,
             disallowed_tools: effective_profile.denied_tools.clone(),
+            operator_denied_tools: effective_profile.explicit_denied_tools.clone(),
             auto_approve: runtime.context.auto_approve,
             accept_edits: runtime.accept_edits,
             agent_type,
@@ -16441,10 +16468,20 @@ impl SubAgentToolRegistry {
     /// case-insensitive compare would hand these roles back the raw shell this
     /// carve-out exists to withhold. Only the canonical lowercase tool the
     /// first-turn catalog actually offers is bounded by the classifier.
+    ///
+    /// The lane overrides exactly ONE denial source: the role clamp's
+    /// automatic raw-shell rules. An operator or caller who denied `bash` (or
+    /// any rule matching it — `exec_shell*`, a wildcard) by name keeps that
+    /// restriction authoritative at catalog admission and dispatch alike, so
+    /// any operator/caller rule matching `bash` disables the lane outright.
     fn allows_bounded_readonly_bash(&self, name: &str) -> bool {
         name == "bash"
             && crate::fleet::role::role_requires_read_only_shell(&self.agent_type)
             && self.runtime_profile.shell != crate::worker_profile::ShellPolicy::None
+            && !self
+                .operator_denied_tools
+                .iter()
+                .any(|rule| rule_matches_tool(rule, name))
     }
 
     fn legacy_action_alias(family: &str, action: &str) -> Option<&'static str> {

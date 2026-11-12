@@ -805,22 +805,29 @@ pub(super) fn tool_denied(disallowed_tools: Option<&[String]>, tool_name: &str) 
 }
 
 pub(crate) fn tool_matches_any_rule(rules: &[String], tool_name: &str) -> bool {
+    rules.iter().any(|rule| rule_matches_tool(rule, tool_name))
+}
+
+/// Whether one deny/allow rule matches `tool_name`, with the same
+/// canonicalization [`tool_matches_any_rule`] applies across a list. Split
+/// out so callers that must tell rules apart by provenance (an operator's
+/// explicit `bash` rule vs the role clamp's automatic `Bash` rule — the
+/// strings are identical) can classify each entry.
+pub(crate) fn rule_matches_tool(rule: &str, tool_name: &str) -> bool {
     let tool_name = tool_name.to_ascii_lowercase();
-    rules.iter().any(|rule| {
-        let rule = rule.to_ascii_lowercase();
-        let (rule_body, is_prefix) = rule
-            .strip_suffix('*')
-            .map_or((rule.as_str(), false), |prefix| (prefix, true));
-        std::iter::once(tool_name.as_str())
-            .chain(policy_tool_aliases(&tool_name).iter().copied())
-            .any(|candidate| {
-                if is_prefix {
-                    candidate.starts_with(rule_body)
-                } else {
-                    candidate == rule_body
-                }
-            })
-    })
+    let rule = rule.to_ascii_lowercase();
+    let (rule_body, is_prefix) = rule
+        .strip_suffix('*')
+        .map_or((rule.as_str(), false), |prefix| (prefix, true));
+    std::iter::once(tool_name.as_str())
+        .chain(policy_tool_aliases(&tool_name).iter().copied())
+        .any(|candidate| {
+            if is_prefix {
+                candidate.starts_with(rule_body)
+            } else {
+                candidate == rule_body
+            }
+        })
 }
 
 /// Whether an explicit tool allowlist is provably limited to the native file

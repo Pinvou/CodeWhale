@@ -162,6 +162,19 @@ pub struct WorkerRuntimeProfile {
     /// which clears the cloned runtime's list before the registry reads it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub denied_tools: Vec<String>,
+    /// The subset of `denied_tools` that an **operator or spawn caller asked
+    /// for by name** (the session's `--disallowed-tools` preferences and the
+    /// spawn request's explicit `disallowed_tools`), as opposed to the rules a
+    /// role clamp installs automatically (the raw-shell, network, and
+    /// verification-surface lists). The strings of the two sources overlap, so
+    /// the distinction must be carried, not re-derived: the bounded read-only
+    /// bash lane exists to override the clamp's automatic denial, and must
+    /// never override one of these.
+    ///
+    /// A child can only ever *add* entries — `derive_child()` unions this list
+    /// the same way it unions `denied_tools`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub explicit_denied_tools: Vec<String>,
     /// Remaining nested-delegation budget. A worker may spawn children while
     /// `max_spawn_depth > 0`; each level decrements it. Clamped to the workspace
     /// ceiling.
@@ -250,6 +263,7 @@ impl WorkerRuntimeProfile {
             // wins via `derive_child`, same as every other role.
             reasoning_effort: matches!(role, FleetRole::Consultant).then(|| "high".to_string()),
             denied_tools: Vec::new(),
+            explicit_denied_tools: Vec::new(),
             max_spawn_depth: codewhale_config::DEFAULT_SPAWN_DEPTH,
             max_steps: Self::default_max_steps(role.clone()),
             background: true,
@@ -280,6 +294,15 @@ impl WorkerRuntimeProfile {
         for rule in &requested.denied_tools {
             if !denied_tools.contains(rule) {
                 denied_tools.push(rule.clone());
+            }
+        }
+        // Same union for the operator/caller subset: a descendant cannot drop
+        // an explicit restriction an ancestor carries, and only
+        // `inherit_disallowed_tools: false` may clear the inherited half.
+        let mut explicit_denied_tools = self.explicit_denied_tools.clone();
+        for rule in &requested.explicit_denied_tools {
+            if !explicit_denied_tools.contains(rule) {
+                explicit_denied_tools.push(rule.clone());
             }
         }
         let tools = match (&self.tools, &requested.tools) {
@@ -315,6 +338,7 @@ impl WorkerRuntimeProfile {
                 .clone()
                 .or_else(|| self.reasoning_effort.clone()),
             denied_tools,
+            explicit_denied_tools,
             max_spawn_depth,
             max_steps: requested.max_steps,
             background: requested.background,
@@ -613,6 +637,34 @@ mod tests {
         assert!(child.denied_tools.contains(&"exec_shell".to_string()));
         assert!(child.denied_tools.contains(&"mcp_*".to_string()));
         assert!(child.denied_tools.contains(&"write_file".to_string()));
+    }
+
+    /// The operator/caller subset of the deny list unions the same way: a
+    /// descendant cannot drop an explicit restriction an ancestor carries.
+    /// The registry reads this list to keep role carve-outs (the bounded
+    /// read-only bash lane) from overriding operator rules whose strings are
+    /// identical to the clamp's own.
+    #[test]
+    fn child_explicit_denied_tools_union_never_drops_parent_rule() {
+        let mut parent = WorkerRuntimeProfile::for_role(FleetRole::Worker);
+        parent.explicit_denied_tools = vec!["bash".into()];
+        let requested = WorkerRuntimeProfile::for_role(FleetRole::Builder);
+
+        let child = parent.derive_child(&requested);
+        assert_eq!(child.explicit_denied_tools, vec!["bash".to_string()]);
+
+        let mut parent_with_both = parent.clone();
+        parent_with_both.explicit_denied_tools = vec!["bash".into(), "mcp_*".into()];
+        let mut requesting_child = WorkerRuntimeProfile::for_role(FleetRole::Builder);
+        requesting_child.explicit_denied_tools = vec!["write_file".into()];
+        let merged = parent_with_both.derive_child(&requesting_child);
+        for rule in ["bash", "mcp_*", "write_file"] {
+            assert!(
+                merged.explicit_denied_tools.contains(&rule.to_string()),
+                "explicit operator rule `{rule}` must survive derive_child: {:?}",
+                merged.explicit_denied_tools
+            );
+        }
     }
 
     /// Every built-in role keeps network reads by default: a worker cut off
