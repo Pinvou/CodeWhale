@@ -421,10 +421,11 @@ fn type_has_default_value(expected: &str) -> bool {
 /// admits a concrete value (a type default, the pinned value, an enum
 /// member). A `minLength`, `pattern`, or any other validation keyword
 /// could reject the witness, so the entry keeps its pair unproven.
-/// Contradictory spellings are fail-closed too (review 4509283666): a
-/// `{"type":"string","const":42}` pin, an empty enum, or an enum whose
-/// members all violate the declared type admits NO instance, so it is
-/// exactly the shape a witness must not be proven against.
+/// Contradictory spellings are fail-closed too (reviews 4509283666 and
+/// 4541468073): a `{"type":"string","const":42}` pin, a `const` outside a
+/// co-present `enum`, an empty enum, or an enum whose members all violate
+/// the declared type admits NO instance, so it is exactly the shape a
+/// witness must not be proven against.
 fn entry_is_value_permissive(entry: &Value) -> bool {
     let Some(obj) = entry.as_object() else {
         return false;
@@ -464,11 +465,15 @@ fn shape_is_structural(schema: &Value) -> bool {
 /// the whole list; an entry carrying further validation keywords beside
 /// the pin could reject its own pinned value, so it stops being a
 /// witness-able pin. Anything else is not an instance-data pin. A pin
-/// that contradicts its own declared `type` (`{"type":"string","const":42}`,
-/// review 4509283666) or whose enum is empty keeps no witness-able value:
+/// that contradicts its own constraints keeps no witness-able value:
 /// no instance satisfies it, so treating it as a pin would ship an
-/// unsatisfiable union. A non-string `type` spelling (type arrays) is
-/// outside the bounded grammar and stays fail-closed.
+/// unsatisfiable union. That covers a `const` outside a co-present
+/// `enum` (`{"const":"a","enum":["b"]}`, review 4541468073 — both
+/// keywords apply, so the admitted set is their intersection), a
+/// `const` contradicting its declared `type` (`{"type":"string","const":42}`,
+/// review 4509283666), an empty enum, and an enum whose members all
+/// violate the declared type. A non-string `type` spelling (type arrays)
+/// is outside the bounded grammar and stays fail-closed.
 fn pinned_value_set(entry: &Value) -> Option<Vec<Value>> {
     let obj = entry.as_object()?;
     if !obj
@@ -490,6 +495,11 @@ fn pinned_value_set(entry: &Value) -> Option<Vec<Value>> {
         }
         values.clone()
     };
+    // `const` and `enum` constrain jointly: a co-present `enum` admits the
+    // pinned const only when the const is one of its members.
+    if let Some(allowed) = obj.get("enum").and_then(Value::as_array) {
+        values.retain(|candidate| allowed.contains(candidate));
+    }
     values.retain(|candidate| {
         declared.is_none_or(|expected| json_value_is_type(candidate, expected))
     });
@@ -3830,6 +3840,65 @@ mod tests {
                 "the flattening fallback keeps the parameter-groups note: {case} -> {note:?}"
             );
         }
+    }
+
+    /// Review 4541468073 / 4541483630: `const` and a co-present `enum`
+    /// constrain jointly, so a `const` outside its `enum`
+    /// (`{"const":"a","enum":["b"]}`) admits NO instance and must not
+    /// ground an omission witness. Branches whose pins contradict each
+    /// other that way must fail the witness proof and take the flattening
+    /// fallback instead of shipping a union no instance can satisfy — and
+    /// a consistent `const` inside its `enum` must keep passing through.
+    #[test]
+    fn xai_sanitize_takes_the_fallback_for_const_outside_enum_branch_pins() {
+        // Both branches pin a const their own enum excludes: neither admits
+        // an instance, yet each const value is absent from the sibling's
+        // enum, so a const-only witness proof would wrongly pass the pair.
+        let mut both = json!({
+            "oneOf": [
+                {"type": "object", "properties": {"a": {"type": "string", "const": "first", "enum": ["second"]}}, "required": ["a"]},
+                {"type": "object", "properties": {"b": {"type": "string", "const": "second", "enum": ["first"]}}, "required": ["b"]}
+            ]
+        });
+        let note = sanitize_for_xai_parameters(&mut both);
+        assert!(
+            both.get("oneOf").is_none(),
+            "a const outside its enum admits no instance and must take the flattening fallback: {both}"
+        );
+        assert!(
+            note.as_deref()
+                .is_some_and(|note| note.contains("parameter groups")),
+            "the flattening fallback keeps the parameter-groups note: {note:?}"
+        );
+
+        // One contradictory branch is enough: its pin proves nothing, so
+        // the pair stays unproven and the union falls back.
+        let mut one_sided = json!({
+            "oneOf": [
+                {"type": "object", "properties": {"a": {"type": "string", "const": "first", "enum": ["second"]}}, "required": ["a"]},
+                {"type": "object", "properties": {"b": {"type": "string", "const": "keep"}}, "required": ["b"]}
+            ]
+        });
+        sanitize_for_xai_parameters(&mut one_sided);
+        assert!(
+            one_sided.get("oneOf").is_none(),
+            "one contradictory pin must still fail the witness proof: {one_sided}"
+        );
+
+        // A const inside its enum is a consistent pin: a disjoint pair of
+        // such pins keeps the documented pass-through.
+        let mut consistent = json!({
+            "oneOf": [
+                {"type": "object", "properties": {"kind": {"const": "email", "enum": ["email", "web"]}}},
+                {"type": "object", "properties": {"kind": {"const": "sms", "enum": ["sms", "web"]}}}
+            ]
+        });
+        sanitize_for_xai_parameters(&mut consistent);
+        let branches = consistent.get("oneOf").and_then(Value::as_array);
+        assert!(
+            branches.is_some_and(|branches| branches.len() == 2),
+            "consistent const-in-enum pins must keep pass-through: {consistent}"
+        );
     }
 
     /// Reviews 4509301139 and 4509370637: a required-free object pair whose
