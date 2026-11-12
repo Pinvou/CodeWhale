@@ -1,5 +1,6 @@
 import React from 'react';
 import { createRoot } from 'react-dom/client';
+import { AdminUsageSettlementFinancialRepairForm } from '../../src/features/account-platform/AdminUsageSettlementFinancialRepairForm.jsx';
 import { AdminPlatformView } from '../../src/features/account-platform/AdminPlatformView.jsx';
 import { AdminPlatformClient } from '../../src/features/account-platform/admin-client.js';
 import { encodeFinanceJSON, parseFinanceJSON } from '../../src/features/account-platform/finance-contract.js';
@@ -46,7 +47,7 @@ window.fetch = async (url, options = {}) => {
     if (params.has('edit-loss-changed')) facts.normalized_command.loss_review_id = id(4);
     if (params.has('loss-mismatch')) facts.normalized_command.loss_review_id = id(4);
     if (params.has('usage-mismatch')) facts.normalized_command.usage_request_id = id(4);
-    if (params.has('late')) return new Promise(resolve => { state.releasePrecheck = () => resolve(reply(facts)); });
+    if (params.has('late')) return new Promise(resolve => { state.releasePrecheck = () => { state.precheckReleased = true; resolve(reply(facts)); }; });
     return reply(facts);
   }
   if (url === '/api/admin/approvals/requests' && options.method === 'POST') {
@@ -74,4 +75,16 @@ window.fetch = async (url, options = {}) => {
     financial_snapshot: projection('a').financial_snapshot, execution: state.status === 'EXECUTED' ? { attempt_status: 'EXECUTED' } : undefined });
   throw new Error(`Uncontrolled production request: ${url}`);
 };
-root.render(<AdminPlatformView client={client} language={language} copy={adminPlatformCopy[language]} onLanguageChange={() => {}} />);
+if (params.has('display')) {
+  // Exercise the real form without remounting it when one display-scope axis changes.
+  let displayClient = client, owner = id(8), revision = 0;
+  const render = () => root.render(<main data-display-revision={revision}><AdminUsageSettlementFinancialRepairForm client={displayClient} owner={owner} copy={ledgerRepairCopy[language]} operationCopy={financeCopy[language]} /></main>);
+  state.changeDisplayScope = axis => {
+    if (axis === 'client') { displayClient = new AdminPlatformClient(); displayClient.csrfToken = 'controlled-next'; }
+    else if (axis === 'owner') owner = id(7);
+    else if (axis === 'epoch') displayClient.financeSessionEpoch++;
+    else throw new Error('Unsupported display-scope axis');
+    revision++; render();
+  };
+  render();
+} else root.render(<AdminPlatformView client={client} language={language} copy={adminPlatformCopy[language]} onLanguageChange={() => {}} />);
