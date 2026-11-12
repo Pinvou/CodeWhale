@@ -484,7 +484,17 @@ pub const fn credential_help(kind: ProviderKind) -> CredentialHelp {
     }
 }
 
-fn is_exact_https_route(base_url: &str, expected_authority: &str, expected_path: &str) -> bool {
+/// Whether a configured route is exactly
+/// `https://<expected_authority>/<expected_path>`.
+///
+/// This is the shared exact-route classification primitive for the route
+/// predicates below and for client-side route-scoped wire shaping: every
+/// consumer classifies through this one implementation, so scheme, authority,
+/// path, and trailing-slash semantics cannot drift between them. Callers that
+/// own a wider host or endpoint policy pass their own (authority, path)
+/// pairs; the matching semantics themselves stay defined exactly here.
+#[must_use]
+pub fn is_exact_https_route(base_url: &str, expected_authority: &str, expected_path: &str) -> bool {
     // URL schemes and host names are ASCII case-insensitive; paths are not.
     // Do not lowercase the whole URL here: a differently-cased path is a
     // neighboring route, not the official endpoint. Keep this intentionally
