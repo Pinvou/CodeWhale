@@ -29,8 +29,8 @@ function ProductPoints({ item, language, copy }) {
   const locale = formatLocale[language] || 'en-US';
   const value = points => sourceInteger(points)?.toLocaleString(locale) ?? copy.catalogValueMissing;
   return <dl className="adm-product-points">
-    <div><dt>{copy.basePoints}</dt><dd>{value(item.base_points)}</dd></div>
-    <div><dt>{copy.bonusPoints}</dt><dd>{value(item.bonus_points)}</dd></div>
+    <div><dt>{copy.base}</dt><dd>{value(item.base_points)}</dd></div>
+    <div><dt>{copy.bonus}</dt><dd>{value(item.bonus_points)}</dd></div>
   </dl>;
 }
 
