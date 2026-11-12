@@ -108,7 +108,7 @@ try {
     await center(page, 'mine'); await page.waitForSelector('tbody tr button'); await page.click('tbody tr button'); await page.waitForSelector('article textarea');
     await page.type('article textarea', 'Controlled original chargeback CAS intent');
     await page.evaluate(() => [...document.querySelectorAll('article button')].find(button => button.textContent === window.f14.financeCopy.zh.editSubmit).click());
-    await page.waitForFunction(() => [...document.querySelectorAll('[role=alert]')].some(node => node.textContent === window.f14.financeCopy.zh.unavailable));
+    await page.waitForFunction(() => [...document.querySelectorAll('[role=alert]')].some(node => node.textContent === window.f14.financeCopy.zh.approvalReadUnavailable));
     assert.equal(await page.evaluate(() => window.f14.calls.some(call => call.method === 'PUT' || call.url.endsWith('/actions/submit'))), false);
   });
   await run('ChargebackRepair approver-only real detail decide without requester or wallet calls', 'approve=1&existing=1', async page => {

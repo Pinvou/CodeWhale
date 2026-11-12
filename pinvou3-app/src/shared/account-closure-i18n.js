@@ -158,6 +158,12 @@ export const accountClosureCopy = {
 };
 
 Object.assign(accountClosureCopy.zh, {
+  listTitle: '账号注销申请',
+  listLead: '查看注销申请的处理状态与阶段，包括账务结清和身份清理。',
+  listLoading: '正在加载注销申请…',
+  listEmpty: '当前页暂无注销申请',
+  listUnavailable: '暂时无法加载注销申请，请重试。',
+  listPermissionDenied: '需要查看账号注销申请的权限。请联系平台管理员授予该权限。',
   reauthenticate: '重新认证',
   recoveryUnavailable: '无法安全读取或保存原操作凭据，已停止发送请求。请恢复此浏览器的会话存储后再试。',
   recoveryPending: '原操作结果尚未确认；只能使用原请求凭据重试。',
@@ -165,6 +171,12 @@ Object.assign(accountClosureCopy.zh, {
   stages: { CLOSURE_REQUESTED: '已申请注销', QUIESCING: '停止新业务', FINANCIAL_CLEARANCE: '账务结清', IDENTITY_CLEANUP: '身份清理', ANONYMIZED: '已匿名化', COMPLETED: '注销完成' },
 });
 Object.assign(accountClosureCopy.en, {
+  listTitle: 'Account closure requests',
+  listLead: 'View closure request status and stages, including financial clearance and identity cleanup.',
+  listLoading: 'Loading account closure requests…',
+  listEmpty: 'No account closure requests on this page',
+  listUnavailable: 'Account closure requests could not be loaded. Please retry.',
+  listPermissionDenied: 'Permission to view account closure requests is required. Contact a platform administrator for access.',
   reauthenticate: 'Reauthenticate',
   recoveryUnavailable: 'The original operation proof cannot be read or saved safely. Requests are blocked; restore this browser’s session storage before retrying.',
   recoveryPending: 'The original result is unconfirmed. Retry only with the original operation proof.',
@@ -172,6 +184,12 @@ Object.assign(accountClosureCopy.en, {
   stages: { CLOSURE_REQUESTED: 'Closure requested', QUIESCING: 'Stopping new activity', FINANCIAL_CLEARANCE: 'Financial clearance', IDENTITY_CLEANUP: 'Identity cleanup', ANONYMIZED: 'Anonymized', COMPLETED: 'Closure completed' },
 });
 Object.assign(accountClosureCopy.ja, {
+  listTitle: '退会申請',
+  listLead: '退会申請の処理状況と、会計精算や認証情報の削除などの段階を確認します。',
+  listLoading: '退会申請を読み込んでいます…',
+  listEmpty: 'このページに退会申請はありません',
+  listUnavailable: '退会申請を読み込めませんでした。再試行してください。',
+  listPermissionDenied: '退会申請を閲覧する権限が必要です。プラットフォーム管理者に権限を依頼してください。',
   reauthenticate: '再認証',
   recoveryUnavailable: '元の操作証跡を安全に読み取り・保存できないため、送信を停止しました。このブラウザーのセッション保存を復旧してから再試行してください。',
   recoveryPending: '元の操作結果は未確認です。元の要求証跡でのみ再試行できます。',
