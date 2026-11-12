@@ -471,7 +471,7 @@ Useful roles include:
 | `plan` | Design and migration planning |
 | `review` | Bug-focused review of an existing change |
 | `implementer` | A tightly specified edit |
-| `verifier` | Running checks and reporting pass/fail evidence |
+| `verifier` | Running the built-in verification gates and reporting pass/fail evidence |
 
 Sub-agents are most useful when work can be separated cleanly. Do not use them
 for tiny edits, and do not ask multiple agents to write the same files at the
