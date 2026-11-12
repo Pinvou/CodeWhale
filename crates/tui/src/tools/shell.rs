@@ -922,17 +922,24 @@ impl StdinWriter {
 /// The bounded stdin write for the platforms that cannot clone an fd out of
 /// their handle (Windows and ohos, see [`ShellTask::write_stdin`]): the
 /// worker thread takes the writer by value, finishes the payload, and hands
-/// the writer back through the channel. `Ok` returns `(Some(writer), ok)`;
-/// a deadline timeout returns `(None, TimedOut)` — the writer stays with
-/// the abandoned worker, the bytes still land if the command resumes
-/// reading, and the caller marks the stall. Present on every target so the
-/// unix-host test suite exercises it directly; production unix keeps the
-/// fd-clone path, which is why the allow only covers the non-unix side.
+/// the writer back through the channel. `Ok` returns `(Some(writer),
+/// Ok(io_result))`. `Err(RecvTimeoutError::Timeout)` returns `(None, ..)`:
+/// the writer stays with the abandoned worker, the bytes still land if the
+/// command resumes reading, and the caller marks the stall.
+/// `Err(RecvTimeoutError::Disconnected)` means the worker died before
+/// completing (a panic in the write path): the writer is gone, and the
+/// caller must NOT mark a stall — a writer failure is not the command's
+/// fault. Present on every target so the unix-host test suite exercises it
+/// directly; production unix keeps the fd-clone path, which is why the
+/// allow only covers the non-unix side.
 #[cfg_attr(all(unix, not(target_env = "ohos")), allow(dead_code))]
 fn bounded_stdin_write_owned(
     writer: StdinWriter,
     payload: Vec<u8>,
-) -> (Option<StdinWriter>, std::io::Result<()>) {
+) -> (
+    Option<StdinWriter>,
+    Result<std::io::Result<()>, std::sync::mpsc::RecvTimeoutError>,
+) {
     let (sender, receiver) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let mut writer = writer;
@@ -943,14 +950,8 @@ fn bounded_stdin_write_owned(
         let _ = sender.send((writer, result));
     });
     match receiver.recv_timeout(STDIN_WRITE_DEADLINE) {
-        Ok((writer, result)) => (Some(writer), result),
-        Err(_) => (
-            None,
-            Err(std::io::Error::new(
-                std::io::ErrorKind::TimedOut,
-                "the stdin write did not complete within the deadline",
-            )),
-        ),
+        Ok((writer, result)) => (Some(writer), Ok(result)),
+        Err(error) => (None, Err(error)),
     }
 }
 
@@ -1486,10 +1487,14 @@ impl BackgroundShell {
     /// Close the stdin pipe of this task, keeping a PTY writer attached —
     /// the foreground close: pipe readers get end-of-file at once, while a
     /// terminal command keeps the interact surface a session member can
-    /// write to while it runs. Only a PIPE is claimed as end-of-file.
+    /// write to while it runs. Only an unstalled PIPE is claimed as
+    /// end-of-file: after a stalled write the abandoned worker still holds
+    /// a clone of the handle and the bytes have not finished landing, so
+    /// the flag stays down and refusals report the stall instead — the
+    /// same conjunct the `write_stdin` close applies.
     fn close_stdin_pipe(&mut self) {
         if matches!(self.stdin, Some(StdinWriter::Pipe(_))) {
-            self.stdin_closed_at_eof = true;
+            self.stdin_closed_at_eof = !self.stdin_write_stalled;
             self.stdin = None;
         }
     }
@@ -1499,6 +1504,10 @@ impl BackgroundShell {
         // its bounded worker and hand it back; every exit below restores the
         // slot first, keeping the stall/eof refusal ordering identical with
         // the pinned unix behavior.
+        // `mut` is real only on the ownership-fallback cfgs (they re-take and
+        // reassign the slot); the unix fd-clone path only moves it, so the
+        // same predicate that strips the fallback also silences `unused_mut`.
+        #[cfg_attr(all(unix, not(target_env = "ohos")), allow(unused_mut))]
         let mut slot = self.stdin.take();
         if slot.is_some() {
             if !input.is_empty() {
@@ -1531,22 +1540,33 @@ impl BackgroundShell {
                 // and no dead binding, field, or methods under the workspace
                 // deny(warnings).
                 #[cfg(all(unix, not(target_env = "ohos")))]
-                if matches!(
-                    slot,
-                    Some(StdinWriter::Pipe(_)) | Some(StdinWriter::PtyFile(_))
-                ) {
+                if let Some(writer) = slot.as_ref() {
+                    // Exhaustive by construction: on this cfg `StdinWriter`
+                    // has exactly `Pipe` and `PtyFile`, so a future third
+                    // unix variant fails to COMPILE at the match below
+                    // instead of silently falling into an unbounded blocking
+                    // write under the session lock. The `else` arm only
+                    // covers the `None` slot the take site already ruled
+                    // out.
                     use std::os::fd::AsFd;
-                    let dup_fd = match slot.as_ref() {
-                        Some(StdinWriter::Pipe(pipe)) => pipe.as_fd().try_clone_to_owned(),
-                        Some(StdinWriter::PtyFile(file)) => file.as_fd().try_clone_to_owned(),
-                        // The matches! above proves Some(Pipe | PtyFile); the
-                        // None leg exists only for exhaustiveness (clippy
-                        // flags an expect-after-is_some here, and an
-                        // exhaustive match without it would be an
-                        // unreachable-pattern warning).
-                        _ => unreachable!("variant checked above"),
-                    }
-                    .context("Failed to clone the stdin handle for the bounded write")?;
+                    let dup_fd = match writer {
+                        StdinWriter::Pipe(pipe) => pipe.as_fd().try_clone_to_owned(),
+                        StdinWriter::PtyFile(file) => file.as_fd().try_clone_to_owned(),
+                    };
+                    let dup_fd = match dup_fd {
+                        Ok(fd) => fd,
+                        Err(error) => {
+                            // The clone failed without consuming the
+                            // handle: restore it so the task keeps its
+                            // interact surface instead of later refusals
+                            // misreporting a live task as "a finished
+                            // command has released its stdin".
+                            self.stdin = slot;
+                            return Err(anyhow!(error).context(
+                                "Failed to clone the stdin handle for the bounded write",
+                            ));
+                        }
+                    };
                     let mut writer = std::process::ChildStdin::from(dup_fd);
                     let payload = input.as_bytes().to_vec();
                     let (sender, receiver) = std::sync::mpsc::channel();
@@ -1555,7 +1575,16 @@ impl BackgroundShell {
                             sender.send(writer.write_all(&payload).and_then(|_| writer.flush()));
                     });
                     match receiver.recv_timeout(STDIN_WRITE_DEADLINE) {
-                        Ok(result) => result.context("Failed to write to stdin")?,
+                        Ok(Ok(())) => {}
+                        Ok(Err(error)) => {
+                            // The worker completed and handed the handle
+                            // back: restore it so a write error does not
+                            // silently strip the task's interact surface
+                            // (the base behavior kept the handle attached
+                            // after a write error too).
+                            self.stdin = slot;
+                            return Err(anyhow!(error).context("Failed to write to stdin"));
+                        }
                         // A channel close without a send means the worker
                         // died before completing (a panic in the write
                         // path): that is a writer failure, not a stall, so
@@ -1578,15 +1607,8 @@ impl BackgroundShell {
                         }
                     }
                 } else {
-                    // Armor for a future third variant on this cfg: the
-                    // matches! above proved Some, and this arm never runs on
-                    // Windows/ohos (stripped with the whole if-else).
-                    if let Some(writer) = slot.as_mut() {
-                        writer
-                            .write_all(input.as_bytes())
-                            .context("Failed to write to stdin")?;
-                        writer.flush().ok();
-                    }
+                    // The `None` slot the take site already ruled out:
+                    // no handle to write through, nothing to restore.
                 }
                 // Windows and ohos cannot clone an fd out of their handle
                 // (Windows strips the statement above because `unix` is
@@ -1606,10 +1628,18 @@ impl BackgroundShell {
                     let (returned, result) =
                         bounded_stdin_write_owned(writer, input.as_bytes().to_vec());
                     match result {
-                        Ok(()) => {
+                        Ok(Ok(())) => {
                             slot = returned;
                         }
-                        Err(error) if error.kind() == std::io::ErrorKind::TimedOut => {
+                        Ok(Err(error)) => {
+                            // The worker completed and handed the writer
+                            // back: keep it attached so a write error does
+                            // not silently strip the task's interact
+                            // surface (same as the unix path above).
+                            self.stdin = returned;
+                            return Err(anyhow!(error).context("Failed to write to stdin"));
+                        }
+                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                             self.stdin_write_stalled = true;
                             // `slot` stays None: the abandoned worker owns
                             // the handle, so the close below cannot claim
@@ -1619,8 +1649,17 @@ impl BackgroundShell {
                                 self.id
                             ));
                         }
-                        Err(error) => {
-                            return Err(anyhow!(error).context("Failed to write to stdin"));
+                        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                            // The worker died before completing (a panic in
+                            // the write path): that is a writer failure, not
+                            // a stall — the task is not marked stalled so a
+                            // healthy write after this is not refused, and
+                            // the writer is gone with the worker (nothing
+                            // to restore).
+                            return Err(anyhow!(
+                                "the stdin writer for task {} failed: the background write ended without completing or reporting (the writer task panicked); the payload's delivery is unknown. Kill the task and start a new one.",
+                                self.id
+                            ));
                         }
                     }
                 }
@@ -3397,7 +3436,7 @@ impl ShellManager {
     /// but destroys the interact surface a session member can still use
     /// while a terminal command runs — the foreground terminal lane's
     /// contract.
-    pub fn close_stdin_pipe(&mut self, task_id: &str) -> Result<()> {
+    fn close_stdin_pipe(&mut self, task_id: &str) -> Result<()> {
         let shell = self
             .processes
             .get_mut(task_id)
@@ -4881,10 +4920,10 @@ async fn execute_foreground_via_background(
     // them. The task-id extraction above is the one step between spawn and
     // close, and `spawn_background_sandboxed` always returns an id on `Ok`,
     // so the close reaches the shell layer without a fallible step in
-    // between (the manager-level `write_stdin` wrapper can still fail when
-    // the record was already evicted — and eviction drops the stdin handle
-    // with it, so the invariant that matters holds: no later failure can
-    // leave the pipe open).
+    // between (the manager-level `close_stdin_pipe` wrapper can still fail
+    // when the record was already evicted — and eviction drops the stdin
+    // handle with it, so the invariant that matters holds: no later
+    // failure can leave the pipe open).
     //
     // Foreground has no operator at the keyboard, so whatever the command
     // will ever read from stdin must be bounded now. With stdin data the
@@ -5127,7 +5166,7 @@ impl ToolSpec for LowercaseBashTool {
     }
 
     fn description(&self) -> &'static str {
-        "Execute a shell command in the workspace and return its output. stdout and stderr arrive as one merged stream in arrival order, so a line cannot be attributed to one stream; redirect a command's stderr to a file when that attribution matters. Each call runs in a fresh shell — `cd` and exported variables do not persist between calls. The command runs in the detected platform shell — `$SHELL` on Unix (any shell it names, falling back to `/bin/sh`); on Windows, bash when the session provides one, otherwise PowerShell (pwsh 7 or Windows PowerShell 5.1) or cmd.exe. Windows PowerShell 5.1 lacks `&&`; prefer forms the detected shell supports. In read-only shell sessions a single approved command runs directly as argv instead (only pipelines still go through the shell); This foreground surface runs without a terminal stdin: interactive programs and a bare `$SHELL` receive end-of-file and exit. with an external sandbox backend configured this tool is unavailable (use the backend-specific shell tool instead). Output keeps the last 2000 lines or 50KB. An optional timeout is expressed in seconds; when omitted the command is killed after 120 seconds, so pass an explicit timeout for work expected to take longer. In Ask, after a sandbox denial, retry the exact command once with sandbox_permissions (the narrowest wider mode that suffices) and a one-sentence justification; the approval prompt asks the user."
+        "Execute a shell command in the workspace and return its output. stdout and stderr arrive as one merged stream in arrival order, so a line cannot be attributed to one stream; redirect a command's stderr to a file when that attribution matters. Each call runs in a fresh shell — `cd` and exported variables do not persist between calls. The command runs in the detected platform shell — `$SHELL` on Unix (any shell it names, falling back to `/bin/sh`); on Windows, bash when the session provides one, otherwise PowerShell (pwsh 7 or Windows PowerShell 5.1) or cmd.exe. Windows PowerShell 5.1 lacks `&&`; prefer forms the detected shell supports. In read-only shell sessions a single approved command runs directly as argv instead (only pipelines still go through the shell). This foreground surface runs without a terminal stdin: interactive programs and a bare `$SHELL` receive end-of-file and exit. With an external sandbox backend configured this tool is unavailable (use the backend-specific shell tool instead). Output keeps the last 2000 lines or 50KB. An optional timeout is expressed in seconds; when omitted the command is killed after 120 seconds, so pass an explicit timeout for work expected to take longer. In Ask, after a sandbox denial, retry the exact command once with sandbox_permissions (the narrowest wider mode that suffices) and a one-sentence justification; the approval prompt asks the user."
     }
 
     fn input_schema(&self) -> serde_json::Value {
