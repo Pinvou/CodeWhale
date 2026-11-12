@@ -205,10 +205,11 @@ impl WorkerRuntimeProfile {
         // the network or from shell for no role reason cannot do its job.
         let (permissions, shell) = match role {
             // Read-only investigators: no workspace writes, but network reach
-            // and the bounded verification surface so a scout/reviewer lane
-            // can run git/gh/web inspection. Raw shell stays denied by the
-            // registry clamp (read-only classifier), so this widens capability
-            // without widening mutation authority.
+            // so a scout/reviewer lane can run git/gh/web inspection. Raw
+            // shell stays denied by the registry clamp (read-only
+            // classifier), so this widens capability without widening
+            // mutation authority; the bounded verification surface is the
+            // Verifier's own arm below, not a scout/reviewer tool.
             FleetRole::Scout | FleetRole::Reviewer => {
                 (PermissionSet::read_only_with_network(), ShellPolicy::Full)
             }

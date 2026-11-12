@@ -100,7 +100,7 @@ segment must individually be admitted (e.g. `wc -c f; wc -l f`,
 `cd sub && wc -c notes.md`, `cat x | od -c`) — and a workspace-confined
 `cd <one relative path>` in any sequence position its connector always runs (joined by `;`, or first — a `cd` after `&&`/`||` may never execute, so it refuses).
 Read-only is transitive through any delegation chain:
-the clamp (`ChildAuthority::clamp` in `fleet/exact.rs`) intersects every
+the clamp (`ChildAuthority::clamp` in `fleet/role.rs`) intersects every
 field with the narrower side, the deny-list union means a descendant can
 never drop an ancestor's restriction, and `inherit_disallowed_tools: false`
 cannot drop a posture denial (`is_posture_denial`). This is pinned by
