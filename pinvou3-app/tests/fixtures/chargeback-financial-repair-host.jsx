@@ -56,7 +56,14 @@ window.fetch = async (url, options = {}) => {
     if (state.lose) { state.lose = false; throw new TypeError('controlled committed POST lost ACK'); }
     return reply({ approval_request_id: id(9) }, 201);
   }
-  if (String(url).startsWith('/api/admin/approvals/requests?')) return reply({ items: state.created ? [{ approval_request_id: id(9), command_type: 'CHARGEBACK_FINANCIAL_REPAIR', requester: { user_id: id(8) }, status: state.status, version: state.version, target: { resource_type: 'CHARGEBACK_CASE', resource_id: id(1) } }] : [], has_more: false });
+  if (String(url).startsWith('/api/admin/approvals/requests?')) {
+    const query = new URL(url, location.href).searchParams;
+    const collection = { items: state.created ? [{ approval_request_id: id(9), command_type: 'CHARGEBACK_FINANCIAL_REPAIR', requester: { user_id: id(8) }, status: state.status, version: state.version, target: { resource_type: 'CHARGEBACK_CASE', resource_id: id(1) } }] : [], has_more: false };
+    collection.items = collection.items.filter(item =>
+      (!query.get('requester_user_id') || item.requester.user_id === query.get('requester_user_id')) &&
+      (!query.get('status') || item.status === query.get('status')));
+    return reply(collection);
+  }
   if (url === `/api/admin/approvals/requests/${id(9)}` && options.method === 'PUT') {
     if (params.has('lost-recent') && !state.authenticatedAgain) return reply({ code: 'RECENT_AUTHENTICATION_REQUIRED' }, 401);
     if (state.denyReplay) return reply({ code: 'FORBIDDEN' }, 403);
