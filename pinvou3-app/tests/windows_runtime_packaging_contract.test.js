@@ -760,6 +760,32 @@ assert.doesNotMatch(
 );
 assert.match(windowsBuildJob, /npm run runtime:windows:init/);
 assert.match(windowsBuildJob, /npm run runtime:windows:onnx-smoke/);
+assert.match(prValidationJob, /test_windows_release_workspace\.ps1/);
+const workspacePrepareStep = windowsBuildJob.indexOf("id: windows-workspace");
+assert.ok(workspacePrepareStep > 0);
+assert.ok(
+  workspacePrepareStep < windowsBuildJob.indexOf("git submodule update"),
+  "the pinned checkout must be selected before any submodule is initialized",
+);
+// All run steps that consume source or output must use the same checkout.
+// Toolchain actions have no project working directory; cleanup uses the original.
+for (const step of windowsBuildJob.split(/\n      - name:/u).slice(1)) {
+  if (!/\n        run:/u.test(step) || /id: windows-workspace| -Mode Cleanup/u.test(step)) continue;
+  assert.match(
+    step,
+    /working-directory: \$\{\{ env\.PINVOU_WINDOWS_BUILD_ROOT \}\}/u,
+    "Windows source, runtime and installer steps must share the selected short checkout",
+  );
+}
+assert.match(
+  windowsBuildJob,
+  /path: \|\n\s+\$\{\{ env\.PINVOU_WINDOWS_BUILD_ROOT \}\}[^\n]+\.exe\n\s+\$\{\{ env\.PINVOU_WINDOWS_BUILD_ROOT \}\}[^\n]+\.sha256/u,
+);
+assert.match(
+  windowsBuildJob,
+  /if: always\(\) && steps\.windows-workspace\.outputs\.state != ''[\s\S]+-Mode Cleanup/u,
+  "failed or successful builds must clean up only their owned temporary checkout",
+);
 // The installer integration test self-skips unless the runtime is staged and
 // it is invoked directly with --require-staged-runtime (node --test drops the
 // flag); without these pins a dropped or reordered step would make it skip
@@ -785,6 +811,8 @@ assert.doesNotMatch(
 
 for (const triggerPath of [
   ".gitmodules",
+  "scripts/windows-release-workspace.ps1",
+  "scripts/tests/test_windows_release_workspace.ps1",
   "private-runtimes/windows",
   "pinvou3-app/package-lock.json",
   "pinvou3-app/scripts/tauri/windows-runtime.js",

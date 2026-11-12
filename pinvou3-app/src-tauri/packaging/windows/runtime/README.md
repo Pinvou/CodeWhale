@@ -38,6 +38,12 @@ submodule checkout 显式禁用 LFS smudge，只取得被锁定的 Git 元数据
 Jenkins 只恢复 `pinvou3-app/src-tauri/target/windows-runtime`，不恢复部分 submodule gitdir。
 脚本输出 `pinvou3-windows-runtime-v6-<commit>-<lock-sha-prefix>` 形式的缓存键。
 
+GitHub Windows 发布由 `scripts/windows-release-workspace.ps1` 选择构建目录。
+原 checkout 路径超过 56 个字符或含空白时，在 Runner 的临时目录或工作区父目录创建同一提交的短路径本地克隆，
+避免 PowerShell 5.1 复制深层 Node/npm 文件时超过路径限制。submodule 初始化、staging、构建、校验和 artifact 上传均使用该目录；
+路径 remap 和 Rust wrapper 也随之更新。作业结束后校验提交与作业归属，只删除本次创建的临时克隆，保留原 checkout。
+该流程不修改 Runner 的持久配置。
+
 校验内容包括 submodule commit、gitlink、origin URL、工作树状态、manifest SHA-256、文件大小与 SHA-256，以及受管理 ZIP 解压后的逐文件清单。`stagedFiles` 对应 payload 已复制、各组件已展开且按需分发的 ASR 主模型已移除，派生文件尚未生成且 payload 尚未清理的生命周期快照；缺失或多余文件都会导致校验失败。完整 staging 还会自动枚举所有声明 Windows Python 依赖的内置 MCP，核对暂存基础 Python ABI、target 绑定的锁 hash 及每个 wheel 的 PEP 425 标签（不预装第三方包），避免升级 Python 后沿用不兼容 wheel 锁。
 
 首次完整校验后，脚本会在 `target/windows-runtime/.verified-lock` 记录 runtime commit、manifest SHA-256、lock 文件

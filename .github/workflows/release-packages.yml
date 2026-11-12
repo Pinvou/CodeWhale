@@ -27,7 +27,7 @@ name: release-packages
 # 签名:Windows nsis 不签名(config/platforms/windows 无证书配置);macOS ad-hoc
 # (signingIdentity="-",用户首次安装需 xattr -dr com.apple.quarantine)。
 # Windows 正式发布仍进入 windows-release Environment。运行时仓库已公开，
-# checkout 后不保留凭据，后续按锁定 gitlink 匿名拉取运行时和 Git LFS 对象。
+# checkout 后不保留凭据，后续按锁定 gitlink 匿名拉取元数据，并从固定 Release 获取运行时。
 # Linux/macOS 同样零 secret 依赖；所有路径均零外部写入副作用。
 
 on:
@@ -36,6 +36,8 @@ on:
     paths:
       - 'VERSION'
       - 'scripts/sync-version.mjs'
+      - 'scripts/windows-release-workspace.ps1'
+      - 'scripts/tests/test_windows_release_workspace.ps1'
       - 'scripts/asr/build-sensevoice-runtime.sh'
       - 'scripts/asr/sensevoice-source.env'
       - 'scripts/check-linux-elf-policy.sh'
@@ -229,6 +231,8 @@ on:
     paths:
       - 'VERSION'
       - 'scripts/sync-version.mjs'
+      - 'scripts/windows-release-workspace.ps1'
+      - 'scripts/tests/test_windows_release_workspace.ps1'
       - 'scripts/asr/build-sensevoice-runtime.sh'
       - 'scripts/asr/sensevoice-source.env'
       - 'scripts/check-linux-elf-policy.sh'
@@ -495,7 +499,7 @@ jobs:
           else
             CHANGED_FILES=$(git diff --name-only "$BEFORE" "$GITHUB_SHA")
             if printf '%s\n' "$CHANGED_FILES" | node scripts/remote-control-release-path-policy.mjs || printf '%s\n' "$CHANGED_FILES" | grep -Eq \
-              '^(VERSION|scripts/(sync-version\.mjs|run-windows-remote-control-e2e\.ps1|windows-e2e-process-guard\.ps1|windows-e2e-orchestrator-helpers\.ps1|create-installer-spdx\.mjs|check-enrollment-gated-v2-rollback\.mjs|asr/(build-sensevoice-runtime\.sh|sensevoice-source\.env)|check-linux-(elf-policy|glibc-floor)\.sh)|remote-control-relay/(docs/schemas/|package(-lock)?\.json|scripts/(controller-release-gate|validate-controller-release-evidence|deploy-controller-preflight|query-controller-release-telemetry|prepare-legacy-gateway-route|verify-provider-attestation|verify-installer-supply-chain)\.mjs|controller-sensitive-scan\.js|test/(controller-(release-|sensitive-scan|telemetry)|windows-e2e-(orchestrator-contract|orchestrator-helpers|path-guard)))|\.github/workflows/(release-packages|windows-remote-control-(evidence|build-evidence))\.yml|\.gitmodules|private-runtimes/windows|pinvou3-app/(package(-lock)?\.json|scripts/(remote-control-ui-smoke\.mjs|tauri/(build|codex-bridge|linux-asr-runtime|platform-config|windows-installer|windows-runtime)\.js)|src-tauri/(config/platforms/(linux|windows)|packaging/windows)/|src-tauri/resources/platforms/linux/asr/|tests/(codex_acp_windows_|linux_asr_runtime_packaging\.test\.js|remote_control_real_ui_smoke_contract\.test\.mjs|windows_runtime_packaging_contract\.test\.js)))'; then
+              '^(VERSION|scripts/(windows-release-workspace\.ps1|tests/test_windows_release_workspace\.ps1|sync-version\.mjs|run-windows-remote-control-e2e\.ps1|windows-e2e-process-guard\.ps1|windows-e2e-orchestrator-helpers\.ps1|create-installer-spdx\.mjs|check-enrollment-gated-v2-rollback\.mjs|asr/(build-sensevoice-runtime\.sh|sensevoice-source\.env)|check-linux-(elf-policy|glibc-floor)\.sh)|remote-control-relay/(docs/schemas/|package(-lock)?\.json|scripts/(controller-release-gate|validate-controller-release-evidence|deploy-controller-preflight|query-controller-release-telemetry|prepare-legacy-gateway-route|verify-provider-attestation|verify-installer-supply-chain)\.mjs|controller-sensitive-scan\.js|test/(controller-(release-|sensitive-scan|telemetry)|windows-e2e-(orchestrator-contract|orchestrator-helpers|path-guard)))|\.github/workflows/(release-packages|windows-remote-control-(evidence|build-evidence))\.yml|\.gitmodules|private-runtimes/windows|pinvou3-app/(package(-lock)?\.json|scripts/(remote-control-ui-smoke\.mjs|tauri/(build|codex-bridge|linux-asr-runtime|platform-config|windows-installer|windows-runtime)\.js)|src-tauri/(config/platforms/(linux|windows)|packaging/windows)/|src-tauri/resources/platforms/linux/asr/|tests/(codex_acp_windows_|linux_asr_runtime_packaging\.test\.js|remote_control_real_ui_smoke_contract\.test\.mjs|windows_runtime_packaging_contract\.test\.js)))'; then
               BUILD_REQUIRED=true
             else
               BUILD_REQUIRED=false
@@ -1231,6 +1235,7 @@ jobs:
         run: |
           npm run test:windows-runtime
           npm run test:windows-runtime-cache
+          pwsh -NoProfile -File ../scripts/tests/test_windows_release_workspace.ps1
           npm run test:codex-acp-windows-runtime
 
   build-windows-x64:
@@ -1251,10 +1256,6 @@ jobs:
       PINVOU_DESKTOP_CONTROLLER_ENABLED: ${{ vars.PINVOU_DESKTOP_CONTROLLER_ENABLED || '0' }}
       PINVOU_RELEASE_INSTALLER_SHA256: ${{ vars.PINVOU_RELEASE_INSTALLER_SHA256 }}
       AWS_LC_SYS_PREBUILT_NASM: "1"
-      # release 编译 codewhale-tui 的 SIGBUS 同源风险防护(三端统一注入;
-      # Windows 用 .exe 版 wrapper(本 job 先编译):.cmd 经 cmd /C 受 8191 字符
-      # 命令行上限限制,windows-sys 等大型 crate 的 rustc 命令行会超限)。
-      RUSTC_WRAPPER: ${{ github.workspace }}/pinvou3-app/src-tauri/scripts/rustc-stack-wrapper.exe
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -1263,7 +1264,13 @@ jobs:
           submodules: false
           persist-credentials: false
 
+      - name: 准备 Windows 短工作目录
+        id: windows-workspace
+        shell: pwsh
+        run: '& "$env:GITHUB_WORKSPACE/scripts/windows-release-workspace.ps1" -SourceRoot "$env:GITHUB_WORKSPACE"'
+
       - name: 初始化公共底座 submodule
+        working-directory: ${{ env.PINVOU_WINDOWS_BUILD_ROOT }}
         run: git submodule update --init --recursive -- CodeWhale
 
       - name: Install Rust toolchain
@@ -1293,6 +1300,7 @@ jobs:
       # linker, same source). Revert = delete this step.
       - name: Probe and export the Windows lld link flags
         shell: bash
+        working-directory: ${{ env.PINVOU_WINDOWS_BUILD_ROOT }}
         run: |
           set -euo pipefail
           probe="$(mktemp -d)"
@@ -1303,7 +1311,7 @@ jobs:
           # job-level RUSTFLAGS of the x64/arm64/macOS jobs. It is a top-level
           # rustc flag (NOT -C); both separator variants are exported because
           # the embedded form follows whatever cargo passed to rustc.
-          ws="${GITHUB_WORKSPACE}"
+          ws="${PINVOU_WINDOWS_BUILD_ROOT}"
           ws_fwd="${ws//\\//}"
           if rustc -C linker-features=+lld -o "$probe/probe.exe" "$probe/probe.rs" 2>"$probe/a.err"; then
             flags="-C linker-features=+lld"
@@ -1320,9 +1328,12 @@ jobs:
           echo "RUSTFLAGS=$flags" >> "$GITHUB_ENV"
 
       # 编译 Windows 专用 .exe 栈 wrapper(源码 scripts/rustc-stack-wrapper.rs)。
+      # 短工作目录脚本已注入对应 RUSTC_WRAPPER；.exe 避免 .cmd 的 8191 字符上限，
+      # 并为 release 编译提供与其他平台相同的 codewhale-tui 栈保护。
       # 直接调 rustc 编译、不经 cargo,故不受本 job 的 RUSTC_WRAPPER 影响,无自举依赖。
       - name: 编译 Windows 栈 wrapper(.exe)
         shell: bash
+        working-directory: ${{ env.PINVOU_WINDOWS_BUILD_ROOT }}
         run: rustc -O pinvou3-app/src-tauri/scripts/rustc-stack-wrapper.rs -o pinvou3-app/src-tauri/scripts/rustc-stack-wrapper.exe
 
       # No rust-cache here — same read-only quota policy as build-linux-x64
@@ -1338,34 +1349,35 @@ jobs:
           # test_release_cache_policy.
 
       - name: 安装前端依赖
-        working-directory: pinvou3-app
+        working-directory: ${{ env.PINVOU_WINDOWS_BUILD_ROOT }}/pinvou3-app
         run: npm ci --prefer-offline --no-audit
 
       # private-runtimes/windows 在 .gitmodules 中显式 update = none，普通递归
       # checkout 会跳过；按锁定 gitlink 初始化元数据，从同仓库固定 Release 下载并校验。
       - name: 从固定 Release 初始化 Windows 独立运行时
-        working-directory: pinvou3-app
+        working-directory: ${{ env.PINVOU_WINDOWS_BUILD_ROOT }}/pinvou3-app
         run: npm run runtime:windows:init
 
       # init 只物化私有运行时 submodule;本步才展开运行时并写入
       # runtime-descriptor.json(Stage 幂等:按 stageId 复用,后续
       # build:nsis 的 staging 直接命中本次产物,不重复展开)。
       - name: 展开 Windows 独立运行时并写入 descriptor
-        working-directory: pinvou3-app
+        working-directory: ${{ env.PINVOU_WINDOWS_BUILD_ROOT }}/pinvou3-app
         run: npm run runtime:windows:stage
 
       # descriptor 已就绪,直接调用集成测试钉住 stageWindowsInstaller
       # 的安装器适配(须直接调用:node --test 会丢弃未知 argv 参数,
       # --require-staged-runtime 到不了 process.argv)。
       - name: 运行时安装器集成测试
-        working-directory: pinvou3-app
+        working-directory: ${{ env.PINVOU_WINDOWS_BUILD_ROOT }}/pinvou3-app
         run: node tests/windows_runtime_installer_integration.test.js --require-staged-runtime
 
       - name: 验证 Windows ONNX Runtime 可加载
-        working-directory: pinvou3-app
+        working-directory: ${{ env.PINVOU_WINDOWS_BUILD_ROOT }}/pinvou3-app
         run: npm run runtime:windows:onnx-smoke
 
       - name: bge-m3 占位 (防御性保留)
+        working-directory: ${{ env.PINVOU_WINDOWS_BUILD_ROOT }}
         run: |
           d=pinvou3-app/src-tauri/resources/bge-m3
           mkdir -p "$d"
@@ -1375,7 +1387,7 @@ jobs:
 
       - name: 构建 nsis
         if: env.PINVOU_DESKTOP_CONTROLLER_ENABLED != '1'
-        working-directory: pinvou3-app
+        working-directory: ${{ env.PINVOU_WINDOWS_BUILD_ROOT }}/pinvou3-app
         # 此 workflow 只产出无签名 GitHub artifact；正式 WoSign 依赖本地 UKey
         # 与 gitignored secrets，不能在 GitHub-hosted runner 上调用。
         run: npm run build:nsis:local
@@ -1387,11 +1399,12 @@ jobs:
           artifact-ids: ${{ needs.remote-control-release-gate.outputs.evidence_artifact_id }}
           github-token: ${{ github.token }}
           run-id: ${{ needs.remote-control-release-gate.outputs.evidence_run_id }}
-          path: qualified-remote-control-evidence
+          path: ${{ env.PINVOU_WINDOWS_BUILD_ROOT }}/qualified-remote-control-evidence
 
       - name: Reuse the exact qualified signed installer
         if: env.PINVOU_DESKTOP_CONTROLLER_ENABLED == '1'
         shell: pwsh
+        working-directory: ${{ env.PINVOU_WINDOWS_BUILD_ROOT }}
         run: |
           $qualified = @(Get-ChildItem -LiteralPath qualified-remote-control-evidence -Filter pinvou-installer.exe -File -Recurse)
           if ($qualified.Count -ne 1) { throw 'qualified_installer_count_invalid' }
@@ -1403,7 +1416,7 @@ jobs:
           if ((Get-FileHash -LiteralPath $destination -Algorithm SHA256).Hash.ToLowerInvariant() -ne $actual) { throw 'qualified_installer_copy_mismatch' }
 
       - name: 校验产物 + sha256
-        working-directory: pinvou3-app/src-tauri/target/release/bundle/nsis
+        working-directory: ${{ env.PINVOU_WINDOWS_BUILD_ROOT }}/pinvou3-app/src-tauri/target/release/bundle/nsis
         run: |
           set -euo pipefail
           EXE="pinvou3_${VERSION}_x64-setup.exe"
@@ -1418,10 +1431,18 @@ jobs:
         with:
           name: pinvou3-windows-${{ needs.check-version-bump.outputs.version }}-x64
           path: |
-            pinvou3-app/src-tauri/target/release/bundle/nsis/pinvou3_${{ needs.check-version-bump.outputs.version }}_x64-setup.exe
-            pinvou3-app/src-tauri/target/release/bundle/nsis/pinvou3_${{ needs.check-version-bump.outputs.version }}_x64-setup.exe.sha256
+            ${{ env.PINVOU_WINDOWS_BUILD_ROOT }}/pinvou3-app/src-tauri/target/release/bundle/nsis/pinvou3_${{ needs.check-version-bump.outputs.version }}_x64-setup.exe
+            ${{ env.PINVOU_WINDOWS_BUILD_ROOT }}/pinvou3-app/src-tauri/target/release/bundle/nsis/pinvou3_${{ needs.check-version-bump.outputs.version }}_x64-setup.exe.sha256
           retention-days: 90
           if-no-files-found: error
+
+      - name: 清理 Windows 临时工作目录
+        if: always() && steps.windows-workspace.outputs.state != ''
+        shell: pwsh
+        working-directory: ${{ github.workspace }}
+        env:
+          PINVOU_WINDOWS_WORKSPACE_STATE: ${{ steps.windows-workspace.outputs.state }}
+        run: '& "$env:GITHUB_WORKSPACE/scripts/windows-release-workspace.ps1" -Mode Cleanup -SourceRoot "$env:GITHUB_WORKSPACE" -StatePath "$env:PINVOU_WINDOWS_WORKSPACE_STATE"'
 
   # ── Job 7: macOS universal dmg(沿用原 macOS 发布流程的做法) ──────────
   build-macos-universal:
