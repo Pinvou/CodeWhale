@@ -1,14 +1,17 @@
 import React, { useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { localizedAccountPlatformError } from "./error-localization.js";
 import { formatSystemCount, requireSystemStatus, systemDiagnosticMessage } from "./admin-system-status.js";
 const NO_PERMISSIONS = [];
 
-function ReadTable({ title, columns, items, copy }) {
+function ReadTable({ title, columns, items, copy, description, limitation, emptyLabel }) {
   return (
     <article className="adm-panel">
       <h2>{title}</h2>
+      {description && <p className="adm-system-snapshot-help">{description}</p>}
+      {limitation && <p className="adm-system-snapshot-help adm-system-source-limit">{limitation}</p>}
       {items.length === 0 ? (
-        <p>{copy.noData}</p>
+        <p>{emptyLabel || copy.noData}</p>
       ) : (
         <div className="adm-table-wrap">
           <table className="adm-table">
@@ -43,6 +46,9 @@ export function AdminSystemStatusWorkspace({
   language,
   permissions = NO_PERMISSIONS,
   compact = false,
+  showTitle = true,
+  headerTarget = null,
+  onOpenReconciliation,
 }) {
   const allowed = permissions.includes("platform.system.status.read");
   const [state, setState] = useState({ owner: null, status: null, loading: false, error: null });
@@ -76,9 +82,9 @@ export function AdminSystemStatusWorkspace({
   const visible = state.owner === client ? state : { status: null, loading: true, error: null };
   const labels = copy.system;
   const count = (value) => formatSystemCount(value, language);
-  const name = (value) => labels.names[value] || value;
+  const name = (value) => Object.prototype.hasOwnProperty.call(labels.names, value) ? labels.names[value] : value;
   const statusCell = (value) => (
-    <span className={`adm-status ${value === "HEALTHY" ? "ok" : "warn"}`}>{value}</span>
+    <span className={`adm-status ${value === "HEALTHY" ? "ok" : "warn"}`}>{Object.prototype.hasOwnProperty.call(labels.statusLabels, value) ? <>{labels.statusLabels[value]} <code>{value}</code></> : value}</span>
   );
   const age = (value) =>
     typeof value === "number" && Number.isFinite(value) && value >= 0
@@ -87,22 +93,41 @@ export function AdminSystemStatusWorkspace({
   const date = (value) =>
     value && Number.isFinite(Date.parse(value)) ? new Date(value).toLocaleString(language) : "—";
   const status = visible.status;
+  const checkedAt = typeof status?.checked_at === "string" && Number.isFinite(Date.parse(status.checked_at)) ? status.checked_at : null;
+  const snapshotHelp = <p className="adm-system-snapshot-help">{labels.snapshotHelp}</p>;
+  const metrics = status && <div className="adm-metrics">{[
+    [labels.healthyServices, `${count(status.services.filter(item => item.status === "HEALTHY").length)} / ${count(status.services.length)}`],
+    [labels.pendingReconciliation, count(status.reconciliation.pending)],
+    [labels.stoppedReconciliation, count(status.reconciliation.stopped)],
+  ].map(([label, value], index) => <article key={label}>
+    <span>{label}</span><strong>{value}</strong>
+    {index === 2 && <div className="adm-system-reconciliation-detail">
+      {onOpenReconciliation ? <button className="adm-system-reconciliation-link" type="button" onClick={onOpenReconciliation}>{labels.relatedQueue}</button> : <small>{permissions.includes("platform.usage.read") ? labels.relatedQueueUnavailable : labels.relatedQueuePermission}</small>}
+      <small>{labels.relatedQueueHelp}</small>
+    </div>}
+  </article>)}</div>;
   if (compact) return <section className="adm-panel adm-health-strip" aria-label={copy.nav.system}>
     <header><h3>{copy.nav.system}</h3><button disabled={visible.loading} onClick={() => setRefresh(value => value + 1)}>{copy.refresh}</button></header>
     {visible.loading && <p role="status">{copy.loading}</p>}
     {visible.error && <p role="alert">{localizedAccountPlatformError(copy, visible.error)}<button onClick={() => setRefresh(value => value + 1)}>{copy.retry}</button></p>}
-    {status && <div className="adm-metrics">{[[labels.healthyServices, `${count(status.services.filter(item => item.status === 'HEALTHY').length)} / ${count(status.services.length)}`], [labels.pendingReconciliation, count(status.reconciliation.pending)], [labels.stoppedReconciliation, count(status.reconciliation.stopped)]].map(([label, value]) => <article key={label}><span>{label}</span><strong>{value}</strong></article>)}</div>}
+    {status && <p className="adm-system-observation">{labels.checkStarted}: {checkedAt ? <time dateTime={checkedAt}>{new Date(checkedAt).toLocaleString(language, { timeZoneName: "short" })}</time> : labels.checkTimeUnavailable}</p>}
+    {snapshotHelp}
+    {metrics}
   </section>;
+  const refreshContents = <>
+    <span className="adm-system-observation">{visible.loading ? labels.readingSnapshot : status ? <>
+      <span>{labels.checkStarted}</span>
+      {checkedAt ? <time dateTime={checkedAt}>{new Date(checkedAt).toLocaleString(language, { timeZoneName: "short" })}</time> : <span>{labels.checkTimeUnavailable}</span>}
+    </> : labels.noSnapshot}</span>
+    <button className="adm-system-refresh" type="button" disabled={visible.loading} onClick={() => setRefresh((value) => value + 1)}>{copy.refresh}</button>
+  </>;
   return (
     <section className="adm-system-workspace">
-      <h1>{copy.nav.system}</h1>
-      <button
-        type="button"
-        disabled={visible.loading}
-        onClick={() => setRefresh((value) => value + 1)}
-      >
-        {copy.refresh}
-      </button>
+      {headerTarget ? createPortal(refreshContents, headerTarget) : <header className="adm-system-workspace-head">
+        {showTitle && <h1>{copy.nav.system}</h1>}
+        <div className="adm-page-head-actions">{refreshContents}</div>
+      </header>}
+      {snapshotHelp}
       {visible.loading && <p role="status">{copy.loading}</p>}
       {visible.error && (
         <div role="alert">
@@ -114,21 +139,8 @@ export function AdminSystemStatusWorkspace({
       )}
       {status && (
         <>
-          <div className="adm-metrics">
-            {[
-              [
-                labels.healthyServices,
-                count(status.services.filter((item) => item.status === "HEALTHY").length),
-              ],
-              [labels.pendingReconciliation, count(status.reconciliation.pending)],
-              [labels.stoppedReconciliation, count(status.reconciliation.stopped)],
-            ].map(([label, value]) => (
-              <article key={label}>
-                <span>{label}</span>
-                <strong>{value}</strong>
-              </article>
-            ))}
-          </div>
+          {metrics}
+          <p className="adm-system-snapshot-help">{labels.latencyHelp}</p>
           <div className="adm-system-sections">
             <ReadTable
               title={labels.services}
@@ -140,7 +152,7 @@ export function AdminSystemStatusWorkspace({
                 [
                   "latency_ms",
                   labels.latency,
-                  (value) => (value === undefined ? "—" : `${count(value)} ms`),
+                  (value) => { const rendered = count(value); return rendered === "—" ? rendered : `${rendered} ms`; },
                 ],
                 ["message", labels.message, (_value, item) => systemDiagnosticMessage(item, labels)],
               ]}
@@ -160,6 +172,9 @@ export function AdminSystemStatusWorkspace({
             />
             <ReadTable
               title={labels.recentErrors}
+              description={labels.recentErrorsScope}
+              limitation={labels.reconciliationErrorsScope}
+              emptyLabel={labels.recentErrorsEmpty}
               copy={copy}
               items={status.recent_errors}
               columns={[
@@ -178,11 +193,19 @@ export function AdminSystemStatusWorkspace({
         {["bootstrap", "idp"].map((key) => (
           <details key={key}>
             <summary>
+              <span aria-hidden="true" className="adm-runbook-chevron">›</span>
               <strong>{copy.runbooks[key]}</strong>
-              <span className="adm-status neutral">OUT_OF_BAND</span>
+              <span className="adm-status neutral">{copy.runbooks.readGuide}</span>
             </summary>
-            <p>{copy.runbooks[`${key}Help`]}</p>
-            <p>{copy.runbooks.noExecution}</p>
+            <div className="adm-runbook-guide">
+              <p>{copy.runbooks[key + 'Help']}</p>
+              <h3>{copy.runbooks.preflight}</h3>
+              <ol>{copy.runbooks.guides[key].checks.map(check => <li key={check}>{check}</li>)}</ol>
+              <h3>{copy.runbooks.sourceLabel}</h3>
+              <p>{copy.runbooks.manualLocatorHelp}</p>
+              <code>{key === 'bootstrap' ? 'account-platform/deploy/runbooks/full-redeployment.md' : 'account-platform/deploy/runbooks/keycloak-admin-access.md'}</code>
+              <p className="adm-runbook-boundary">{copy.runbooks.noExecution}</p>
+            </div>
           </details>
         ))}
       </section>
