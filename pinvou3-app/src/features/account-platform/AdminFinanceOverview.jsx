@@ -23,6 +23,8 @@ export function AdminFinanceOverview({ client, language, surface, route, permiss
     return () => controller.abort();
   }, [client, surface, revision]);
   const visible = state.client === client && state.surface === surface ? state : {};
+  // The accounts endpoint publishes all metrics in one point-in-time response.
+  const sharedAccountSnapshot = surface === 'accounts' && visible.data && visible.data.window == null;
   const number = value => integerMoney(value).toLocaleString({ zh: 'zh-CN', en: 'en-US', ja: 'ja-JP' }[language]);
   const date = value => new Date(value).toLocaleString({ zh: 'zh-CN', en: 'en-US', ja: 'ja-JP' }[language], { timeZone: 'UTC' });
   const drilldown = target => {
@@ -31,14 +33,14 @@ export function AdminFinanceOverview({ client, language, surface, route, permiss
     const updates = financeReadDefinition(target.tab) ? financeListRouteUpdates(target.tab, target.query) : {};
     route.navigate(section, { finance_tab: target.tab, ...updates });
   };
-  return <section className="adm-finance-overview" data-finance-overview={surface}><header><h3>{words.title}</h3><button onClick={() => setRevision(value => value + 1)}>{copy.refresh}</button></header>
+  return <section className="adm-finance-overview" data-finance-overview={surface}><header>{sharedAccountSnapshot ? <div><h3>{words.title}</h3><small>{words.point}: <time dateTime={visible.data.as_of}>{date(visible.data.as_of)} UTC</time></small></div> : <h3>{words.title}</h3>}<button onClick={() => setRevision(value => value + 1)}>{copy.refresh}</button></header>
     {visible.error && <p role="alert">{visible.error.status === 403 ? copy.permissions : copy.unavailable}<button onClick={() => setRevision(value => value + 1)}>{copy.retry}</button></p>}{!visible.data && !visible.error && <p role="status">{copy.loading}</p>}
     {visible.data && <><div className="adm-finance-overview-grid">{visible.data.metrics.map(metric => {
       const candidate = financeOverviewDrilldown(surface, metric.key, visible.data.window);
       const target = candidate?.tab === 'reconciliations' && !permissions.includes('platform.billing.reconciliation.read') ? null : candidate;
       const usesWindow = financeOverviewMetricTimeScope(surface, metric.key) === 'window' && visible.data.window;
-      const content = <><span>{words.metrics[metric.key] || metric.key}</span><strong>{formatFinanceOverviewValue(metric, { formatCount: number, formatPoints: value => formatBalance(value, language), formatMoney: value => formatFen(value, language) })}</strong><small>{usesWindow ? `${words.window}: ${date(visible.data.window.from)} – ${date(visible.data.window.to)} UTC` : `${words.point}: ${date(visible.data.as_of)} UTC`}</small><small>{words.units[metric.unit]} · {words.statuses}: {metric.included_statuses.join(', ') || '—'}</small>{target && <em>{target.exact ? words.filtered : words.all}</em>}</>;
+      const content = <><span>{words.metrics[metric.key] || metric.key}</span><strong>{formatFinanceOverviewValue(metric, { formatCount: number, formatPoints: value => formatBalance(value, language), formatMoney: value => formatFen(value, language) })}</strong>{sharedAccountSnapshot ? <small>{words.units[metric.unit]}</small> : <><small>{usesWindow ? `${words.window}: ${date(visible.data.window.from)} – ${date(visible.data.window.to)} UTC` : `${words.point}: ${date(visible.data.as_of)} UTC`}</small><small>{words.units[metric.unit]} · {words.statuses}: {metric.included_statuses.join(', ') || '—'}</small></>}{target && <em>{target.exact ? words.filtered : words.all}</em>}</>;
       return target ? <button className="adm-finance-overview-card" key={metric.key} onClick={() => drilldown(target)}>{content}</button> : <article className="adm-finance-overview-card" key={metric.key}>{content}</article>;
-    })}</div><small>{words.point}: {date(visible.data.as_of)} UTC</small></>}
+    })}</div>{sharedAccountSnapshot ? <footer><details className="adm-finance-overview-scope"><summary>{words.metricScope}</summary><dl>{visible.data.metrics.map(metric => <React.Fragment key={metric.key}><dt>{words.metrics[metric.key] || metric.key}</dt><dd>{words.statuses}: {metric.included_statuses.join(', ') || '—'}</dd></React.Fragment>)}</dl></details></footer> : <small>{words.point}: {date(visible.data.as_of)} UTC</small>}</>}
   </section>;
 }
