@@ -123,6 +123,9 @@ try {
     const decisions = await page.evaluate(() => window.f11.calls.filter(call => call.method === 'POST' && call.url.endsWith('/actions/decide')));
     assert.equal(decisions.length, 1);
     assert.equal(JSON.parse(decisions[0].body).decision, 'APPROVED');
+    assert.equal(JSON.parse(decisions[0].body).expected_version, 1);
+    assert.equal(decisions[0].headers['X-CSRF-Token'], 'controlled-csrf');
+    assert.equal(decisions[0].headers['X-Pinvou-Approval-Action-Control-Version'], '1');
     assert.equal(await page.evaluate(() => window.f11.calls.some(call => call.method === 'POST' && call.url === '/api/admin/approvals/requests')), false);
   });
   await run('No repair permission hides WriteOff and does not call its receiver', 'deny=1', async page => {
