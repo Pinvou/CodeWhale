@@ -20,7 +20,7 @@ const end = source.indexOf('  // Hide every previous-owner presenter', begin);
 assert.ok(begin >= 0 && end > begin);
 const body = source.slice(begin, end).replace('export function', 'function');
 const constants = source.slice(source.indexOf('const mutationKey'), source.indexOf('function PricingStatus'));
-const expose = 'return { editor, unitForm, pendingAction, editorErrors, errors, formulaPage, formulaAccessDenied, formulaAuthority, loadProtocols, unknownConfiguration, unknownMutation, setEditor, setUnitForm, setPendingAction, setProtocols, openEdit, openCreate, openTransition, submitDraft, submitUnit, runPendingAction, reloadUnknownConfiguration, startAfterUnknown, verifyUnknown }; }';
+const expose = 'return { editor, unitForm, pendingAction, editorErrors, errors, formulaPage, formulaAccessDenied, formulaAuthority, loadProtocols, unknownConfiguration, unknownMutation, setEditor, setUnitForm, setPendingAction, setProtocols, openEdit, openCreate, openTransition, submitDraft, submitUnit, runPendingAction, reloadUnknownConfiguration, startAfterUnknown, verifyUnknown, showPreview, loading, loadPrices, prices, preview }; }';
 let presenterSequence = 0;
 function presenter(client, owner, { effects = false } = {}) {
   let index = 0, defer = false, dirty = false;
@@ -287,5 +287,60 @@ test('cached formula denial follows owner and session scope changes', async () =
     v = p.render(); assert.equal(v.editor, null);
     denied = false; await v.loadProtocols({ q: 'CHAT' }); v = await p.settle();
     assert.equal(v.editor, null, 'scope-rebound callback cannot revive the rejected form');
+  }
+});
+
+test('a preview finishing during a rejected mutation releases its loading without accepting blocked facts', async () => {
+  for (const previewFails of [false, true]) {
+    let finishPreview, failPreview, finishMutation;
+    const previewResponse = new Promise((resolve, reject) => { finishPreview = resolve; failPreview = reject; });
+    const mutationResponse = new Promise(resolve => { finishMutation = resolve; });
+    const writes = [];
+    let reads = 0;
+    const client = {
+      financeSessionEpoch: 1,
+      managedPrices: async () => ({ items: [item], has_more: false, current_space_etag: 1 }),
+      previewPrice: async () => { reads++; return reads === 1 ? previewResponse : { price_version_id: id }; },
+      publishPrice: async (...args) => { writes.push(args); await mutationResponse; throw { status: 409, code: 'PRICE_WINDOW_CONFLICT' }; },
+    };
+    const owner = `public-preview-definite-failure-${previewFails}`, p = presenter(client, owner);
+    const key = mutation.pricingUnknownStorageKey(owner, 1);
+    const revision = state.pricingUnknownStateSnapshot(key).revision;
+    let reading, writing;
+    try {
+      let v = seed(p);
+      await v.loadPrices(); v = p.render();
+      reading = v.showPreview(v.prices[0]);
+      assert.equal(p.render().loading.preview, true);
+      writing = v.runPendingAction(event);
+      const dispatched = state.pricingUnknownSnapshot(key);
+      assert.equal(dispatched.kind, 'PRICE_PUBLISH');
+      assert.equal(dispatched.phase, 'DISPATCHED');
+      if (previewFails) failPreview({ status: 503, code: 'CONTROLLED_PREVIEW_FAILURE' });
+      else finishPreview({ price_version_id: id });
+      await reading;
+      v = p.render();
+      assert.equal(v.preview, null, 'a preview completing during DISPATCHED is not accepted');
+      assert.equal(v.errors.preview, undefined, 'a blocked read failure is not adopted');
+      assert.equal(v.loading.preview, false, 'the completed preview releases only its own loading');
+      assert.equal(v.loading.mutation, true);
+      assert.equal(state.pricingUnknownSnapshot(key), dispatched);
+      finishMutation(); await writing;
+      v = p.render();
+      assert.equal(state.pricingUnknownSnapshot(key), null);
+      assert.equal(state.pricingUnknownStateSnapshot(key).revision, revision, 'definite failure does not retire form intents');
+      assert.equal(v.loading.preview, false);
+      assert.equal(v.loading.mutation, false);
+      assert.equal(v.preview, null);
+      await v.showPreview(v.prices[0]);
+      assert.equal(p.render().preview.price_version_id, id, 'the next explicit preview works without reloading prices or changing pane');
+      assert.equal(reads, 2);
+      assert.deepEqual(writes, [[id, item.space_etag, action.idempotencyKey]], 'only the original frozen publish invocation was dispatched');
+    } finally {
+      finishPreview({ price_version_id: id }); finishMutation();
+      await Promise.allSettled([reading, writing]);
+      const active = state.pricingUnknownSnapshot(key);
+      if (active) state.storePricingUnknown(key, null, active);
+    }
   }
 });
