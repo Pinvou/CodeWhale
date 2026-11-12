@@ -10021,6 +10021,97 @@ fn sigpipe_guard_survives_a_broken_pipe_restore() {
     let _ = std::fs::remove_file(&canary);
 }
 
+/// The PTY interact writer dup must carry close-on-exec: it stays open in
+/// this process for a terminal task's whole lifetime, so a bare `dup`
+/// (which CLEARS `FD_CLOEXEC`) would leak a live master-side terminal fd
+/// into every command spawned while the task runs — a child could inject
+/// input into or capture output from another task's terminal, and hold the
+/// master open past the task's teardown. portable-pty's own descriptors are
+/// cloexec'd; this pin holds the dup to the same invariant, and to the
+/// same-description write semantics the writer relies on.
+#[cfg(all(unix, not(target_env = "ohos")))]
+#[test]
+fn pty_writer_dup_carries_close_on_exec() {
+    use std::io::{Read, Write};
+    use std::os::fd::{AsRawFd, FromRawFd};
+
+    let mut fds = [0 as libc::c_int; 2];
+    assert_eq!(
+        unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) },
+        0,
+        "pipe2() failed"
+    );
+    let mut reader = unsafe { std::fs::File::from_raw_fd(fds[0]) };
+    let mut writer = unsafe { std::fs::File::from_raw_fd(fds[1]) };
+    let dup_fd = dup_cloexec(writer.as_raw_fd()).expect("dup_cloexec");
+    let flags = unsafe { libc::fcntl(dup_fd, libc::F_GETFD) };
+    assert!(flags >= 0, "F_GETFD on the dup failed: {flags}");
+    assert!(
+        flags & libc::FD_CLOEXEC != 0,
+        "the PTY writer dup must set FD_CLOEXEC (a bare libc::dup clears it): flags={flags}"
+    );
+
+    // Same open description as the source: bytes written through the dup
+    // surface on the reader end, and the task keeps writing after the
+    // original handle is gone (both write ends must close before EOF).
+    let mut dup_file = unsafe { std::fs::File::from_raw_fd(dup_fd) };
+    dup_file
+        .write_all(b"cloexec-")
+        .and_then(|_| writer.write_all(b"dup"))
+        .expect("write through the dup and the original");
+    drop(writer);
+    drop(dup_file);
+    let mut rest = Vec::new();
+    reader.read_to_end(&mut rest).expect("read through the dup");
+    assert_eq!(rest, b"cloexec-dup", "bytes written via the dup must land");
+}
+
+/// Behavioral half of `pty_writer_dup_carries_close_on_exec`: a command
+/// spawned after the dup must not see the duplicated descriptor in its fd
+/// table (Linux `/proc` pin; the cloexec assert above holds the same
+/// invariant on every unix target).
+#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+#[test]
+fn spawned_child_does_not_inherit_the_pty_writer_dup() {
+    use std::os::fd::{AsRawFd, FromRawFd};
+
+    let mut fds = [0 as libc::c_int; 2];
+    assert_eq!(
+        unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) },
+        0,
+        "pipe2() failed"
+    );
+    let reader = unsafe { std::fs::File::from_raw_fd(fds[0]) };
+    let writer = unsafe { std::fs::File::from_raw_fd(fds[1]) };
+    let dup_fd = dup_cloexec(writer.as_raw_fd()).expect("dup_cloexec");
+    let dup_file = unsafe { std::fs::File::from_raw_fd(dup_fd) };
+
+    // Identify OUR pipe by kernel inode, not by fd number: a parallel test
+    // may legally hold (and leak) unrelated fds with colliding numbers.
+    let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+    assert_eq!(
+        unsafe { libc::fstat(writer.as_raw_fd(), &mut stat) },
+        0,
+        "fstat on the pipe write end failed"
+    );
+    let pipe_target = format!("pipe:[{}]", stat.st_ino);
+
+    let output = Command::new("sh")
+        .arg("-c")
+        .arg("for f in /proc/self/fd/*; do readlink \"$f\"; done")
+        .stdin(Stdio::null())
+        .output()
+        .expect("spawn fd-listing child");
+    let listing = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !listing.lines().any(|line| line.trim() == pipe_target),
+        "spawned child must not inherit the dup'd descriptor ({pipe_target}); its fd targets:\n{listing}"
+    );
+    drop(dup_file);
+    drop(writer);
+    drop(reader);
+}
+
 /// The bounded stdin write: a command that never consumes its pipe fills
 /// it, and past [`STDIN_WRITE_DEADLINE`] the write errors and the task's
 /// stdin is marked stalled instead of holding the shell-manager lock (and
@@ -10255,8 +10346,13 @@ fn spawn_aborts_with_run_never_started_context_when_the_payload_stalls() {
 
     let text = format!("{err:#}");
     assert!(
-        text.contains("the run never started"),
-        "error must carry the run-never-started context; got: {text}"
+        text.contains("the run was killed at spawn"),
+        "error must carry the killed-at-spawn context (the process WAS created, \
+         so the copy must not claim the run never started); got: {text}"
+    );
+    assert!(
+        text.contains("the command was killed before it could do any work"),
+        "error must state the process was created and then killed; got: {text}"
     );
     assert!(
         text.contains("never registered"),
