@@ -532,3 +532,80 @@ test('publish 置换活跃会话条目时当场补章（r8 P1 行为锁）', () 
   assert.ok(stamps.some(([k, sid]) => k === 'markDispatched' && sid === 's1'),
     's1 自己的 publish 正常盖章');
 });
+
+// r14 P1 行为锁三连（r13 P2-2 修复此前零测试，M1/M3 变异全绿）：
+// harness 的 setStartupBatching 与生产 bridge.js:2094 同读一个标志，把
+// publish 腿的「发射时刻抑制分流」从死分支变成可测行为。
+test('批处理窗内合并帧零发布且补 markThrottled（r13 P2-2 行为锁，M1/M3 红）', () => {
+  const stamps = [];
+  const h = createNativeStreamHarness({
+    count: 2,
+    probe: {
+      begin(sid) { stamps.push(['begin', sid]); },
+      markScheduled(sid) { stamps.push(['markScheduled', sid]); },
+      markThrottled(sid) { stamps.push(['markThrottled', sid]); },
+      markDispatched(sid) { stamps.push(['markDispatched', sid]); },
+    },
+  });
+  h.setStartupBatching(true); // init 批处理窗内
+  // 活跃会话首条 delta：谓词为真 → 走合并帧（武装），不直发。
+  h.emit('s0', 'chat:delta', { text: 'first' });
+  assert.ok(stamps.some(([k, sid]) => k === 'markScheduled' && sid === 's0'), '应武装合并帧');
+  const publishesBefore = h.notificationCount;
+  h.advance(200); // rAF/定时器腿 publish → 发射时刻仍在窗内
+  assert.equal(h.notificationCount, publishesBefore, '窗内基座 notify 必须零发布（零发布不能量成健康派发）');
+  assert.ok(stamps.some(([k, sid]) => k === 'markThrottled' && sid === 's0'),
+    '窗内 publish 必须对合并腿补 markThrottled（M1：强制 fireSuppressed=false 此断言必红）');
+  assert.ok(!stamps.some(([k, sid]) => k === 'markDispatched' && sid === 's0'),
+    '窗内不得打派发章——内容没有上屏，markDispatched 是假健康章');
+  // M3 锁：谓词若丢掉 startupNotificationBatching（只剩路由抑制），首条 delta
+  // 会走直发臂并盖章 markDispatched——上一条断言同场景变红。
+});
+
+test('窗外对照臂：合并帧正常发布并盖 markDispatched', () => {
+  const stamps = [];
+  const h = createNativeStreamHarness({
+    count: 1,
+    probe: {
+      begin(sid) { stamps.push(['begin', sid]); },
+      markScheduled(sid) { stamps.push(['markScheduled', sid]); },
+      markThrottled(sid) { stamps.push(['markThrottled', sid]); },
+      markDispatched(sid) { stamps.push(['markDispatched', sid]); },
+    },
+  });
+  // 批处理窗内武装（首条 delta 压进合并帧），窗外发射——模拟「窗内收到首批
+  // 事件、init finally 之后帧才落地」的真实时序。
+  h.setStartupBatching(true);
+  h.emit('s0', 'chat:delta', { text: 'first' });
+  h.setStartupBatching(false); // init finally 翻 false
+  const publishesBefore = h.notificationCount;
+  h.advance(200);
+  assert.ok(h.notificationCount > publishesBefore, '窗外 publish 必须真实发布');
+  assert.ok(stamps.some(([k, sid]) => k === 'markDispatched' && sid === 's0'),
+    '窗外的合并帧发布是真实派发，必须盖 markDispatched');
+});
+
+test('批处理窗内被置换的活跃条目补 markThrottled 而非 markDispatched（r13 displaced 抑制臂）', () => {
+  const stamps = [];
+  const h = createNativeStreamHarness({
+    count: 2,
+    probe: {
+      begin(sid) { stamps.push(['begin', sid]); },
+      markScheduled(sid) { stamps.push(['markScheduled', sid]); },
+      markThrottled(sid) { stamps.push(['markThrottled', sid]); },
+      markDispatched(sid) { stamps.push(['markDispatched', sid]); },
+    },
+  });
+  h.setStartupBatching(true);
+  // 与 r8 置换锁同构：后台 s1 先武装，活跃 s0 后武装；s1 的 publish 先落，
+  // cancel-all 置换 s0 的武装条目——此刻整窗都在批处理窗内（零发布），
+  // 置换补章必须走 markThrottled 分支（markDispatched=假健康章）。
+  h.emit('s1', 'chat:delta', { text: 'bg' });
+  h.emit('s0', 'chat:delta', { text: 'first' });
+  h.emit('s0', 'chat:delta', { text: ' latest' });
+  h.advance(48);
+  assert.ok(stamps.some(([k, sid]) => k === 'markThrottled' && sid === 's0'),
+    '窗内置换补章必须 markThrottled（删掉 displaced 抑制分流此断言必红）');
+  assert.ok(!stamps.some(([k, sid]) => k === 'markDispatched' && sid === 's0'),
+    '窗内零发布期间 s0 的任何条目都不得盖派发章');
+});

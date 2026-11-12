@@ -25,6 +25,12 @@ export function createNativeStreamHarness({ count = 2, events = eventSource, hos
   let now = 0;
   let timerId = 0;
   let suppressed = 0;
+  // r14 P1：启动批处理窗开关。生产谓词（bridge.js:2094）读
+  // `suppressNotify || startupNotificationBatching`——harness 原先只把路由抑制
+  // （suppressed>0）喂给 isNotifySuppressed，批处理窗内 publish 腿的抑制分流
+  // 在全部既有测试里是死分支（M1/M3 变异全绿的根因）。开关同时喂给 context
+  // 谓词与 sandbox 全局（host notify 的早退同读一个标志，与生产同构）。
+  let startupBatching = false;
   let notificationCount = 0;
   const jobs = new Map();
   const listeners = new Map();
@@ -47,11 +53,16 @@ export function createNativeStreamHarness({ count = 2, events = eventSource, hos
     window.cancelAnimationFrame = id => jobs.delete(id);
   }
   const state = { activeSessionId: 's0', sessions: Array.from({ length: count }, (_, i) => ({ id: `s${i}` })) };
+  // r14 P1：谓词实现盒。默认只有路由抑制；sandbox 建好后替换为**生产表达式
+  // 本体**（从 bridge.js 的 isNotifySuppressed 定义切片求值）——生产行改动/
+  // 回退（M3 形态）会直接改变 harness 行为，谓词锁由此获得判别力；切片失配
+  /// 会抛错（生产行挪动时测试 loud-fail，不允许静默漂移）。
+  const predicateBox = { impl: () => suppressed > 0 };
   const context = {
     state, sessionStates: sessions, turnUsageDirty: {},
     listen: (name, callback) => listeners.set(name, callback),
     invoke: async () => null, bt: key => key, timeStr: () => '12:00',
-    isNotifySuppressed: () => suppressed > 0,
+    isNotifySuppressed: (...args) => predicateBox.impl(...args),
     renderMarkdown(text) {
       renders.push({ sessionId: state.activeSessionId, at: now, length: text.length });
       return render(text);
@@ -109,7 +120,7 @@ export function createNativeStreamHarness({ count = 2, events = eventSource, hos
   context.runSyncOnSession = route;
   context.getBuffer = sid => { if (sid === state.activeSessionId) save(sid); return sessions[sid]; };
   const sandbox = vm.createContext({ window, Date, String, state, sessionStates: sessions,
-    startupNotificationBatching: false, refreshActiveStreamRender: null,
+    refreshActiveStreamRender: null,
     notificationQueue: [], notificationDispatching: false, subscriptionSliceRevision: 0,
     console: { ...console, error: (...args) => errors.push(args) },
     subscribers: [{ snapshot: () => {
@@ -123,6 +134,19 @@ export function createNativeStreamHarness({ count = 2, events = eventSource, hos
     ...(timers ? { setTimeout: later, clearTimeout: id => jobs.delete(id) } : {}),
   });
   Object.defineProperty(sandbox, 'suppressNotify', { get: () => suppressed > 0 });
+  // r14 P1：批处理窗开关经 getter 喂给 host notify 的早退判断——与 context 谓词
+  // 同读一个 startupBatching 标志（生产 bridge.js:2094 的同构）。
+  Object.defineProperty(sandbox, 'startupNotificationBatching', { get: () => startupBatching });
+  // 谓词盒换上生产本体（r14 P1）：harness 的 isNotifySuppressed 从此就是
+  // bridge.js:2094 的真实表达式，在 sandbox 全局（suppressNotify /
+  // startupNotificationBatching 两个 getter）上求值。M3 形态的生产行回退
+  // 会在这里同步回退 → 「窗内不得打派发章」断言变红。
+  {
+    const match = host.match(/isNotifySuppressed: function \(\) \{[^\n]*\}/);
+    if (!match) throw new Error('bridge.js isNotifySuppressed predicate not found (source drifted?)');
+    const expression = match[0].slice('isNotifySuppressed:'.length).trim().replace(/,$/, '');
+    predicateBox.impl = vm.runInContext(`(${expression})`, sandbox);
+  }
   vm.runInContext(sharedSource + '\n' + notificationSource(host) + '\n' + events, sandbox,
     { filename: fileURLToPath(new URL('src/platform/tauri/bridge/chat-events.js', app)) });
   context.notify = sandbox.notify;
@@ -136,6 +160,8 @@ export function createNativeStreamHarness({ count = 2, events = eventSource, hos
     state, context, sessions, renders, snapshots, errors, storageCalls, feature,
     get notificationCount() { return notificationCount; },
     get now() { return now; },
+    /** r14 P1：模拟 init 启动批处理窗（生产：bridge init 期间恒 true，finally 翻 false）。 */
+    setStartupBatching(value) { startupBatching = !!value; },
     emit(sid, name, payload = {}) {
       listeners.get(name)({ event: name, payload: { session_id: sid, ...payload } });
     },

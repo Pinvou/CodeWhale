@@ -13,10 +13,11 @@
  *   - 独立上报的段差只有两段：recv→dispatch、dispatch→frame。t_sched 仅在
  *     同步直发路径补齐（不差量、不独立上报）；React 提交与最终呈现合并在
  *     dispatch→frame 一段里，测不出二者之间的停顿。
- *   - 后台会话的段量是混合竞速（r5 P2-2 勘误）：publish 对流属 sid 打
- *     markDispatched，但抑制态 notify 也可能提前盖章——后台段的 recv→dispatch
- *     既非纯失测也非纯可靠，是两者竞速的产物。抑制态直发钩子已加门控
- *     （!isNotifySuppressed），publish 侧仍无条件。
+ *   - 后台会话的段量（r14 勘误，替代 r5 的「混合竞速」表述）：r9 直发钩子
+ *     门控 + r13 publish 腿按发射时刻分流之后，**不存在任何无条件
+ *     markDispatched 盖章点**（直发臂门控、publish 腿/displaced 臂分流）——
+ *     抑制态（后台路由/启动批处理窗）下的盖章只会是 markThrottled，
+ *     后台段的 recv→dispatch 由此不再有「真派发被抑制章抢先」的竞速臂。
  *   - 长任务阻塞期间「未派发即被取代」的周期只有恰处已派发帧未回相位才
  *     补报一条（begin 的 supersede 补报），其余静默收尾。
  *   - 防补盖伪差（r4）：派发标记带 5s 新鲜度上界——后台会话存活数分钟的
