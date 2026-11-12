@@ -702,7 +702,8 @@ try {
       assert.ok(await page.$$eval(history + ' tbody td:last-child button', nodes => nodes.every(node => node.getBoundingClientRect().width >= 60)));
       if (process.env.UI_ARTIFACT_DIR) await page.screenshot({ path: path.join(process.env.UI_ARTIFACT_DIR, 'render-review-billing-' + width + '.png'), fullPage: true });
     }
-    await page.click(history + ' tbody tr:first-child td:last-child button'); await page.waitForSelector('[role=dialog]');
+    await page.click(history + ' tbody tr:first-child td:last-child button');
+    await page.waitForFunction(() => document.querySelector('[role=dialog] .ap-order-details-body')?.textContent.includes('9.90'));
     assert.ok((await page.$eval('[role=dialog]', node => node.textContent)).includes('9.90'));
     await click('[role=dialog] button', await page.evaluate(() => window.restored.copy().finance.continuePayment));
     await page.waitForSelector('.ap-payment-dialog [data-qr-state=loaded]');
