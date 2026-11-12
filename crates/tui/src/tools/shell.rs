@@ -1939,7 +1939,7 @@ impl BackgroundShell {
 
         if self.stdin_closed_at_eof {
             return Err(anyhow!(
-                "stdin is not available for task {}: its stdin was closed, so stdin readers have seen end-of-file (a program that put its terminal into raw mode consumes the EOF byte as ordinary input instead); start input-driven work with background=true and feed it with action=\"interact\"",
+                "stdin is not available for task {}: its stdin was closed, so stdin readers have seen end-of-file (a program that put its terminal into raw mode — or disabled or remapped VEOF — consumes those bytes as ordinary input instead); start input-driven work with background=true and feed it with action=\"interact\"",
                 self.id
             ));
         }
@@ -3083,7 +3083,13 @@ impl ShellManager {
             // Same SIGPIPE discipline as the bounded stdin workers (see
             // [`BlockedSigpipeGuard`]): the child dying mid-write must
             // surface as a handled write error, not kill a process that
-            // runs with SIGPIPE at its default disposition.
+            // runs with SIGPIPE at its default disposition. Unlike the
+            // tool surface this manager-API lane has neither
+            // [`MAX_INLINE_STDIN_BYTES`] nor the bounded writer's
+            // deadline — every production payload goes through the
+            // background lane's bounded writer (see
+            // [`STDIN_WRITE_DEADLINE`]), so a direct caller passing a
+            // payload here must keep it within what the child reads.
             let _sigpipe = BlockedSigpipeGuard::new();
             stdin
                 .write_all(input.as_bytes())
@@ -3728,16 +3734,15 @@ impl ShellManager {
     /// PTY writer is invisible to the child (the reader holds the master)
     /// but destroys the interact surface a session member can still use
     /// while a terminal command runs — the foreground terminal lane's
-    /// contract. A missing record is success, not an error: only eviction
+    /// contract. A missing record is a no-op, not an error: only eviction
     /// removes a record, and eviction drops the stdin handle with it, so
     /// the pipe cannot still be open — and the close runs between spawn
     /// and the first caller-visible step, where an error would abort a run
     /// whose result is already determined.
-    fn close_stdin_pipe(&mut self, task_id: &str) -> Result<()> {
+    fn close_stdin_pipe(&mut self, task_id: &str) {
         if let Some(shell) = self.processes.get_mut(task_id) {
             shell.close_stdin_pipe();
         }
-        Ok(())
     }
 
     pub fn write_stdin_for_session(
@@ -8192,7 +8197,7 @@ async fn execute_foreground_via_background(
             .shell_manager
             .lock()
             .map_err(|_| anyhow!("shell manager lock poisoned"))?;
-        manager.close_stdin_pipe(&task_id)?;
+        manager.close_stdin_pipe(&task_id);
     }
     if let Some(permit) = heavy_permit {
         let mut manager = context
@@ -8664,7 +8669,7 @@ impl ToolSpec for BashTool {
                 "stdin": {
                     "type": "string",
                     "maxLength": 65536,
-                    "description": "Stdin data to send (action=run: before waiting; action=interact: to the background task). Also accepted as `input` or `data` — send only one. Inline payloads are capped at 64 KiB, counted as UTF-8 bytes (maxLength mirrors the same number): a larger write to a command that is not reading would block the executor; for bigger payloads run the command in the background and feed it through `action=interact` in chunks."
+                    "description": "Stdin data to send (action=run: before waiting; action=interact: to the background task). Also accepted as `input` or `data` — send only one. Inline payloads are capped at 64 KiB, counted as UTF-8 bytes (maxLength mirrors the same number): a write to a command that is not reading ends as a bounded deadline-stall refusal instead of blocking the session; for bigger payloads run the command in the background and feed it through `action=interact` in chunks."
                 },
                 "input": {
                     "type": "string",
@@ -8712,7 +8717,7 @@ impl ToolSpec for BashTool {
                 },
                 "close_stdin": {
                     "type": "boolean",
-                    "description": "Close stdin after sending (action=interact); on a terminal task the close delivers end-of-file, sent as a literal newline followed by the EOF byte — a program that put its terminal into raw mode, or disabled VEOF, receives those bytes as ordinary input instead, and on Windows the close only releases the terminal handle (a console child has no end-of-file to deliver)"
+                    "description": "Close stdin after sending (action=interact); on a terminal task the close delivers end-of-file, sent as a literal newline followed by the EOF byte — a program that put its terminal into raw mode, or disabled or remapped VEOF, receives those bytes as ordinary input instead, and on Windows the close only releases the terminal handle (a console child has no end-of-file to deliver)"
                 },
                 "all": {
                     "type": "boolean",
@@ -8882,16 +8887,17 @@ impl ToolSpec for BashTool {
                     .as_str()
                     .ok_or_else(|| type_mismatch(name, value, "a string"))?
                     .to_string();
-                // The spawn delivers the payload with a blocking write while
-                // the caller holds the shell-manager lock: past the pipe
-                // buffer a command that never reads would wedge the
-                // executor thread and every other shell in the session
-                // before any watchdog is reached. On Linux the cap equals
-                // the default pipe buffer, so a cap-sized write into an
-                // empty pipe completes without a reader there; smaller
-                // default buffers lean on the bounded writer's deadline.
-                // Bigger payloads belong on the background lane, fed
-                // through `action=interact` in chunks.
+                // The tool surface's inline cap keeps an oversized payload
+                // from ever reaching the writer; the spawn delivers the
+                // payload through the bounded stdin writer, so a command
+                // that never reads surfaces as the writer's 5-second
+                // deadline stall refusal rather than a wedged executor. On
+                // Linux the cap equals the default pipe buffer, so a
+                // cap-sized write into an empty pipe completes without a
+                // reader there; smaller default buffers lean on the same
+                // deadline on the bounded lanes. Bigger payloads belong on
+                // the background lane, fed through `action=interact` in
+                // chunks.
                 if payload.len() > MAX_INLINE_STDIN_BYTES {
                     return Ok(ToolResult::error(format!(
                         "The inline stdin payload is {} bytes; the shell tool accepts at most {MAX_INLINE_STDIN_BYTES} inline — run the command with background=true and feed it through action=interact in chunks.",

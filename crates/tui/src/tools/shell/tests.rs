@@ -10220,6 +10220,59 @@ async fn foreground_without_stdin_data_gives_stdin_readers_eof() {
         result.content
     );
 }
+/// When the inline payload cannot be delivered at spawn, the run must abort
+/// with the run-never-started context: no task id exists yet, so the child
+/// is killed and the error must say the mentioned task id was never
+/// registered — the caller must not try to cancel or kill it. The
+/// manager-level lane has no inline cap, so an over-pipe-buffer payload
+/// against a non-reading child reaches the bounded writer's deadline here;
+/// the tool surface cannot produce this stall on Linux (its 64 KiB cap
+/// equals the default pipe buffer), which is why this pin drives the
+/// manager API directly.
+#[test]
+#[cfg(unix)]
+fn spawn_aborts_with_run_never_started_context_when_the_payload_stalls() {
+    let tmp = tempdir().expect("tempdir");
+    let mut manager = ShellManager::new(tmp.path().to_path_buf());
+    // 2 MiB: far past any default pipe buffer, so the bounded writer's
+    // deadline is what ends the write.
+    let payload = "x".repeat(2 * 1024 * 1024);
+
+    let started = Instant::now();
+    let err = manager
+        .execute_with_options_env(
+            &sleep_command(60),
+            None,
+            60_000,
+            true,
+            Some(payload.as_str()),
+            false,
+            None,
+            HashMap::new(),
+        )
+        .expect_err("the spawn must abort when the inline payload stalls");
+    let elapsed = started.elapsed();
+
+    let text = format!("{err:#}");
+    assert!(
+        text.contains("the run never started"),
+        "error must carry the run-never-started context; got: {text}"
+    );
+    assert!(
+        text.contains("never registered"),
+        "error must tell the caller the task id was never registered; got: {text}"
+    );
+    assert!(
+        !text.contains("Kill the task"),
+        "the task-targeted recovery copy must not appear on the spawn-abort \
+         path; got: {text}"
+    );
+    assert!(
+        elapsed >= STDIN_WRITE_DEADLINE,
+        "the abort must come from the bounded writer's deadline, not an \
+         instant failure; took {elapsed:?}: {text}"
+    );
+}
 #[cfg(unix)]
 const SYNC_STDIN_EOF_HELPER_ENV: &str = "CODEWHALE_SYNC_STDIN_EOF_HELPER";
 #[cfg(unix)]
