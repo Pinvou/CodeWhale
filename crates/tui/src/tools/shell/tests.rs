@@ -5145,6 +5145,115 @@ async fn inline_stdin_payload_over_the_cap_refuses() {
         output.content
     );
 }
+/// Runs a stdin scenario on a worker thread behind a 60 s outer guard. The
+/// scenario's own deadline machinery is what should finish it; a mechanism
+/// regression that never returns trips this guard instead (the join can
+/// extend past the guard while the scenario's child still holds the blocked
+/// write open — the child's own watchdog releases it, so the guard
+/// terminates, loudly late). A worker panic surfaces as a failed verdict,
+/// never as a hung test.
+#[cfg(unix)]
+fn run_stdin_scenario_with_hang_guard(
+    name: &'static str,
+    body: impl FnOnce() -> Result<(), String> + Send + 'static,
+) -> Result<(), String> {
+    let (sender, receiver) = std::sync::mpsc::channel::<Result<(), String>>();
+    let handle = std::thread::spawn(move || {
+        let verdict = body();
+        let _ = sender.send(verdict.clone());
+        verdict
+    });
+    match receiver.recv_timeout(Duration::from_secs(60)) {
+        Ok(verdict) => {
+            // Reaps the worker; the verdict from the channel is the
+            // scenario outcome, so the join's own copy adds nothing.
+            let _ = handle.join().expect("the scenario worker panicked");
+            verdict
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            let _ = handle.join();
+            Err(format!("{name} hung past its 60 s guard"))
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            // The worker died before its verdict reached the channel.
+            let _ = handle.join().expect_err("the scenario worker panicked");
+            Err(format!("{name} panicked before reporting a verdict"))
+        }
+    }
+}
+
+#[cfg(unix)]
+const SIGPIPE_GUARD_HELPER_ENV: &str = "CODEWHALE_SIGPIPE_GUARD_HELPER";
+
+/// Helper half of `sigpipe_guard_survives_a_broken_pipe_restore`: runs in a
+/// process that re-armed SIGPIPE at SIG_DFL (what `run_with_args` does in
+/// production), takes the guard, writes into a readerless pipe, and only
+/// reaches the implicit test exit if the guard's mask restore did not
+/// deliver the pending signal.
+#[cfg(unix)]
+#[test]
+fn sigpipe_guard_helper_process() {
+    if std::env::var(SIGPIPE_GUARD_HELPER_ENV).ok().as_deref() != Some("1") {
+        return;
+    }
+    // The suite binary runs with std's SIG_IGN, under which a broken-pipe
+    // SIGPIPE is discarded at generation and never becomes pending — the
+    // bug cannot reproduce there, so the helper re-arms the production
+    // disposition first.
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+        let mut fds = [0 as libc::c_int; 2];
+        assert_eq!(libc::pipe(fds.as_mut_ptr()), 0, "pipe");
+        libc::close(fds[0]);
+        {
+            let guard = super::BlockedSigpipeGuard::new();
+            let buf = [b'x'; 4096];
+            let written = libc::write(fds[1], buf.as_ptr().cast(), buf.len());
+            assert_eq!(written, -1, "the readerless write must fail");
+            assert_eq!(
+                std::io::Error::last_os_error().raw_os_error(),
+                Some(libc::EPIPE),
+                "the readerless write must fail with EPIPE"
+            );
+            // Dropping the guard restores the mask. A block-and-restore
+            // guard delivers the pending SIGPIPE here and this process
+            // dies at signal 13 before reaching the end of the test; the
+            // consume-before-restore fix reaches it and exits 0.
+            drop(guard);
+        }
+        libc::close(fds[1]);
+    }
+}
+
+/// The SIGPIPE guard must consume the signal it blocked before restoring
+/// the mask: a bounded write that ends in EPIPE leaves SIGPIPE pending on
+/// the worker thread, and a plain block-and-restore delivers it at the
+/// process disposition (SIG_DFL in production, see `run_with_args`) —
+/// killing the whole host one instruction after the "handled" EPIPE. The
+/// suite cannot see this (test binaries run SIG_IGN, so no SIGPIPE ever
+/// becomes pending), so the driver re-execs this binary as a helper that
+/// re-arms SIG_DFL first: with the consume the helper exits 0; without it
+/// the helper dies at signal 13 and the non-success status fails here.
+#[cfg(unix)]
+#[test]
+fn sigpipe_guard_survives_a_broken_pipe_restore() {
+    let test_binary = std::env::current_exe().expect("current test binary");
+    let mut helper = Command::new(&test_binary)
+        .arg("--exact")
+        .arg("tools::shell::tests::sigpipe_guard_helper_process")
+        .env(SIGPIPE_GUARD_HELPER_ENV, "1")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn sigpipe guard helper");
+    let status = helper.wait().expect("wait sigpipe guard helper");
+    assert!(
+        status.success(),
+        "the guard's mask restore must not deliver the pending SIGPIPE (a broken guard kills the helper at signal 13): {status}"
+    );
+}
+
 /// The bounded stdin write: a command that never consumes its pipe fills
 /// it, and past [`STDIN_WRITE_DEADLINE`] the write errors and the task's
 /// stdin is marked stalled instead of holding the shell-manager lock (and
@@ -5158,9 +5267,9 @@ async fn inline_stdin_payload_over_the_cap_refuses() {
 #[cfg(unix)]
 #[test]
 fn write_stdin_to_a_child_that_stops_consuming_errors_instead_of_wedging() {
-    let (sender, receiver) = std::sync::mpsc::channel::<Result<(), String>>();
-    let handle = std::thread::spawn(move || {
-        let run = || -> Result<(), String> {
+    let verdict = run_stdin_scenario_with_hang_guard(
+        "the bounded-write pin",
+        || -> Result<(), String> {
             let tmp = tempdir().map_err(|error| error.to_string())?;
             let mut manager = ShellManager::new(tmp.path().to_path_buf());
             let result = manager
@@ -5231,18 +5340,9 @@ fn write_stdin_to_a_child_that_stops_consuming_errors_instead_of_wedging() {
             }
             manager.kill(&task_id).map_err(|error| error.to_string())?;
             Ok(())
-        };
-        let verdict = run();
-        let _ = sender.send(verdict.clone());
-        verdict
-    });
-    let _ = receiver
-        .recv_timeout(std::time::Duration::from_secs(60))
-        .expect("the bounded-write pin hung: the STDIN_WRITE_DEADLINE regression is live");
-    handle
-        .join()
-        .expect("the bounded-write worker panicked")
-        .expect("bounded-write assertions");
+        },
+    );
+    verdict.expect("bounded-write assertions");
 }
 /// The `interact` payload carries the same per-call bound as the inline
 /// spawn payload: one oversized call is refused with a pointer at chunking
@@ -5297,6 +5397,21 @@ fn guidance_states_the_foreground_stdin_contract() {
     assert!(
         description.contains("action=\"interact\""),
         "guidance must point at background interact for input-driven work: {description}"
+    );
+}
+/// The lowercase tool's own description carries the same foreground stdin
+/// contract: its legacy translation accepts only command/timeout/sandbox
+/// fields, so that sentence is the whole stdin story on that surface.
+#[test]
+fn lowercase_bash_description_states_the_foreground_stdin_contract() {
+    let description = LowercaseBashTool.description();
+    assert!(
+        description.contains("This foreground surface runs without a terminal stdin"),
+        "the lowercase description must state the bounded foreground stdin: {description}"
+    );
+    assert!(
+        description.contains("a bare `$SHELL` receive end-of-file"),
+        "the bare-shell probe must be named as exiting on EOF: {description}"
     );
 }
 /// A foreground command that reads stdin with NO stdin data used to wedge on
@@ -5563,9 +5678,9 @@ async fn foreground_terminal_command_keeps_its_interact_surface() {
 #[test]
 #[cfg(all(unix, not(target_env = "ohos")))]
 fn interact_write_to_a_stalled_tty_command_is_bounded() {
-    let (sender, receiver) = std::sync::mpsc::channel::<Result<(), String>>();
-    let handle = std::thread::spawn(move || {
-        let run = || -> Result<(), String> {
+    let verdict = run_stdin_scenario_with_hang_guard(
+        "the bounded tty-write pin",
+        || -> Result<(), String> {
             let tmp = tempdir().map_err(|error| error.to_string())?;
             let mut manager = ShellManager::new(tmp.path().to_path_buf());
             let result = manager
@@ -5645,33 +5760,24 @@ fn interact_write_to_a_stalled_tty_command_is_bounded() {
             }
             manager.kill(&task_id).map_err(|error| error.to_string())?;
             Ok(())
-        };
-        let verdict = run();
-        let _ = sender.send(verdict.clone());
-        verdict
-    });
-    let verdict = receiver
-        .recv_timeout(Duration::from_secs(60))
-        .unwrap_or_else(|_| {
-            let _ = handle.join();
-            Err("the bounded tty-write test hung past its 60 s guard".to_string())
-        });
+        },
+    );
     assert!(verdict.is_ok(), "{verdict:?}");
 }
 /// An explicit `close_stdin` on a terminal task whose last write already
-/// STALLED must stay bounded and must not claim an end-of-file the
-/// abandoned worker never delivered: the stall conjunct skips the ^D
-/// delivery, the close releases the handle, and the tail refusal still
-/// names the stall. A mutation that claims EOF unconditionally on the
-/// terminal close (dropping the stall conjunct) reddens on the refusal
-/// text; a close that wedges on the full input queue trips the outer
+/// STALLED must stay bounded, must not claim an end-of-file the abandoned
+/// worker never delivered, and must not read as success either: the stall
+/// skip refuses the close outright ("was not applied") and keeps the
+/// interact surface attached, and the tail refusal still names the stall.
+/// A mutation that reports the stalled close as Ok reddens on the
+/// expect_err; a close that wedges on the full input queue trips the outer
 /// guard instead.
 #[cfg(all(unix, not(target_env = "ohos")))]
 #[test]
 fn close_stdin_on_a_stalled_terminal_task_is_bounded_and_claims_no_eof() {
-    let (sender, receiver) = std::sync::mpsc::channel::<Result<(), String>>();
-    let handle = std::thread::spawn(move || {
-        let run = || -> Result<(), String> {
+    let verdict = run_stdin_scenario_with_hang_guard(
+        "the stalled-terminal-close pin",
+        || -> Result<(), String> {
             let tmp = tempdir().map_err(|error| error.to_string())?;
             let mut manager = ShellManager::new(tmp.path().to_path_buf());
             let result = manager
@@ -5715,43 +5821,44 @@ fn close_stdin_on_a_stalled_terminal_task_is_bounded_and_claims_no_eof() {
             if !error.contains("did not complete within") {
                 return Err(error);
             }
-            // The close itself must return promptly (bounded path, stall
-            // guard) instead of wedging on the full input queue.
+            // The close itself must return promptly (no delivery attempt
+            // on a stalled queue) and must NOT report success: with the
+            // end-of-file undelivered, an Ok close would tell the model
+            // stdin is closed when it is not.
             let started = std::time::Instant::now();
-            manager
+            let close_error = manager
                 .write_stdin(&task_id, "", true)
-                .map_err(|error| error.to_string())?;
-            if started.elapsed() > STDIN_WRITE_DEADLINE {
+                .expect_err("a close on a stalled terminal task must not claim success")
+                .to_string();
+            if started.elapsed() >= STDIN_WRITE_DEADLINE {
                 return Err(format!(
                     "the close on a stalled terminal task must not wait on the queue: {:?}",
                     started.elapsed()
                 ));
             }
-            // And the tail refusal must still report the stall: no EOF was
-            // delivered, so claiming end-of-file here would be a lie.
+            if !close_error.contains("was not applied") {
+                return Err(format!(
+                    "the stalled-close refusal must say the close was not applied: {close_error}"
+                ));
+            }
+            // And any further stdin traffic must still be refused without
+            // claiming an EOF: no delivery happened, so "end-of-file" would
+            // be a lie (the refusal here comes from the write-stall gate —
+            // the refused close left the handle attached).
             let after_close = manager
                 .write_stdin(&task_id, "y", false)
                 .err()
                 .ok_or_else(|| "the post-close write must be refused".to_string())?
                 .to_string();
-            if !after_close.contains("stalled") || after_close.contains("end-of-file") {
+            if after_close.contains("end-of-file") {
                 return Err(format!(
                     "a terminal close after a stall must not claim an EOF that never landed: {after_close}"
                 ));
             }
             manager.kill(&task_id).map_err(|error| error.to_string())?;
             Ok(())
-        };
-        let verdict = run();
-        let _ = sender.send(verdict.clone());
-        verdict
-    });
-    let verdict = receiver
-        .recv_timeout(Duration::from_secs(60))
-        .unwrap_or_else(|_| {
-            let _ = handle.join();
-            Err("the stalled-terminal-close test hung past its 60 s guard".to_string())
-        });
+        },
+    );
     assert!(verdict.is_ok(), "{verdict:?}");
 }
 /// The owned-writer bounded stdin write (the Windows/ohos fallback path):
@@ -5810,6 +5917,97 @@ fn bounded_stdin_write_owned_returns_the_writer_and_times_out_clean() {
     );
     let _ = child.kill();
     let _ = child.wait();
+}
+
+/// `bounded_stdin_eof_delivery` — the worker the explicit terminal close
+/// rides — must classify its outcome honestly: a write that lands reports
+/// `Delivered`, a write into a FULL pipe (nothing consuming) reports
+/// `Stalled` only at the deadline, and a write to a readerless pipe reports
+/// `Failed`. A Stalled that came back as Delivered would let `write_stdin`
+/// claim an end-of-file that never landed. The call is deadline-bounded by
+/// construction, so a broken deadline hangs this test into the nextest
+/// slow-timeout instead of passing.
+// Unix PTY-lane cfg, matching the function it pins.
+#[cfg(all(unix, not(target_env = "ohos")))]
+#[test]
+fn bounded_stdin_eof_delivery_reports_stalled_failed_and_delivered() {
+    use std::os::fd::FromRawFd;
+
+    // Delivered: /dev/null accepts the two bytes unconditionally.
+    let null = std::fs::OpenOptions::new()
+        .write(true)
+        .open("/dev/null")
+        .expect("open /dev/null");
+    assert!(
+        matches!(
+            super::bounded_stdin_eof_delivery(&null),
+            super::BoundedEofDelivery::Delivered
+        ),
+        "a write that lands must report Delivered"
+    );
+
+    // Failed: a readerless pipe errors the write without delivering (the
+    // suite runs with SIG_IGN, so the EPIPE surfaces as an error, not a
+    // signal — the process-death discipline is pinned by the sigpipe guard
+    // helper test).
+    let mut fds = [0 as libc::c_int; 2];
+    assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0, "pipe");
+    unsafe { libc::close(fds[0]) };
+    let orphan = unsafe { std::fs::File::from_raw_fd(fds[1]) };
+    assert!(
+        matches!(
+            super::bounded_stdin_eof_delivery(&orphan),
+            super::BoundedEofDelivery::Failed
+        ),
+        "a readerless pipe must report Failed"
+    );
+    drop(orphan);
+
+    // Stalled: fill a pipe to capacity without a consumer (O_NONBLOCK so
+    // the test thread never blocks), restore blocking mode for the worker,
+    // and the two-byte delivery cannot land until the deadline.
+    let mut fds = [0 as libc::c_int; 2];
+    assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0, "pipe");
+    let read_fd = fds[0];
+    let full = unsafe { std::fs::File::from_raw_fd(fds[1]) };
+    unsafe { libc::fcntl(fds[1], libc::F_SETFL, libc::O_NONBLOCK) };
+    let chunk = [b'x'; 4096];
+    loop {
+        let written = unsafe { libc::write(fds[1], chunk.as_ptr().cast(), chunk.len()) };
+        if written <= 0 {
+            break; // EAGAIN: the pipe is full
+        }
+    }
+    unsafe { libc::fcntl(fds[1], libc::F_SETFL, 0) };
+    let started = std::time::Instant::now();
+    let outcome = super::bounded_stdin_eof_delivery(&full);
+    drop(full);
+    assert!(
+        matches!(outcome, super::BoundedEofDelivery::Stalled),
+        "a full pipe must stall the delivery: {outcome:?}"
+    );
+    assert!(
+        started.elapsed() >= super::STDIN_WRITE_DEADLINE,
+        "the stall must honor the deadline: {:?}",
+        started.elapsed()
+    );
+    // Unblock the abandoned worker: a reader consumes the queued bytes, the
+    // worker's write lands, its send fails on the dropped receiver, and the
+    // thread exits instead of parking for the process lifetime. The drain
+    // is bounded so the reader cannot hang once the pipe ends are closed.
+    let drainer = std::thread::spawn(move || {
+        let mut buf = [0u8; 4096];
+        let mut total = 0usize;
+        while total < 512 * 1024 {
+            let n = unsafe { libc::read(read_fd, buf.as_mut_ptr().cast(), buf.len()) };
+            if n <= 0 {
+                break;
+            }
+            total += n as usize;
+        }
+        unsafe { libc::close(read_fd) };
+    });
+    drainer.join().expect("drain the stalled pipe");
 }
 
 /// An unconfirmed stop keeps its write scope across every coordination
