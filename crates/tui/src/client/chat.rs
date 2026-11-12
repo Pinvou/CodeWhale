@@ -5199,6 +5199,42 @@ mod minimax_reasoning_replay_tests {
     }
 
     #[test]
+    fn minimax_repeated_trailing_slash_host_dials_first_party_without_reasoning_details() {
+        // The transport trims every trailing slash (`trim_end_matches('/')`)
+        // before appending `/v1`, so `https://api.minimax.io//` reaches the
+        // official endpoint. The route guards must therefore strip all
+        // trailing slashes too (review 4539989149 / 4541485725): stripping
+        // only one left this spelling classified as a gateway and mirrored
+        // reasoning_details onto the first-party route.
+        let request = request_with_assistant_thinking();
+
+        let messages = build_chat_messages_for_request_and_provider_and_route(
+            &request,
+            ApiProvider::Minimax,
+            "https://api.minimax.io//",
+        );
+        let assistant = &messages[0];
+        assert!(
+            assistant.get("reasoning_details").is_none(),
+            "the repeated-slash official host dials the official /v1 endpoint: {assistant}"
+        );
+
+        let body = build_chat_wire_body(
+            &request,
+            ApiProvider::Minimax,
+            "https://api.minimaxi.com///",
+            false,
+        )
+        .expect("MiniMax wire body");
+        for message in body.body["messages"].as_array().expect("messages array") {
+            assert!(
+                message.get("reasoning_details").is_none(),
+                "wire body for the repeated-slash official host must not gain reasoning_details: {message}"
+            );
+        }
+    }
+
+    #[test]
     fn minimax_gateway_route_still_mirrors_thinking_as_reasoning_details() {
         // The route stays user-configurable through the `[providers.minimax]`
         // `base_url` table override (or the global `CODEWHALE_BASE_URL` /
