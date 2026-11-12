@@ -34,10 +34,26 @@ async function openForm(page) {
   });
   await page.click('.adm-financial-repair-target button');
 }
+async function readDisplayFacts(page) {
+  await page.waitForSelector('.adm-financial-repair-target input');
+  await page.evaluate(() => {
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+    [...document.querySelectorAll('.adm-financial-repair-target input')].forEach((input, i) => {
+      setter.call(input, window.f16.id(i + 1)); input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+  });
+  await page.click('.adm-financial-repair-target button');
+}
 async function create(page) {
   await page.waitForSelector('.adm-financial-repair-draft');
   await page.type('.adm-financial-repair-draft textarea', 'Controlled usage-settlement justification'); await page.type('.adm-financial-repair-draft input', 'controlled-usage-settlement');
   await page.click('.adm-financial-repair-draft button');
+}
+async function clickReauthentication(page) {
+  const selector = '.adm-usage-settlement-repair-reauthentication button';
+  await page.$eval(selector, button => button.scrollIntoView({ block: 'center', inline: 'nearest' }));
+  await page.waitForFunction(selector => { const button = document.querySelector(selector), rect = button.getBoundingClientRect(), hit = document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2); return hit && button.contains(hit) && !button.disabled; }, {}, selector);
+  await page.click(selector);
 }
 async function center(page, view) {
   await page.waitForSelector('nav button[data-section="approvals"]');
@@ -45,6 +61,40 @@ async function center(page, view) {
   if (view) await page.evaluate(view => [...document.querySelectorAll('.adm-approval-tabs button')].find(button => button.textContent === window.f16.adminPlatformCopy[window.f16.language].approvalCenter[view]).click(), view);
 }
 try {
+  for (const language of ['zh', 'en', 'ja']) await run(`UsageSettlementRepair exact plan and identity DOM ${language}`, `language=${language}&display=1`, async page => {
+    await readDisplayFacts(page); await page.waitForSelector('.adm-financial-repair-facts');
+    const rendered = await page.evaluate(() => {
+      const words = window.f16.ledgerRepairCopy[window.f16.language];
+      const plan = document.querySelector('.adm-financial-repair-facts section');
+      return { labels: [...plan.querySelectorAll('dt')].map(n => n.textContent), values: [...plan.querySelectorAll('dd')].map(n => n.textContent),
+        identity: [...document.querySelectorAll('.adm-financial-repair-facts>dl dd code')].map(n => n.textContent),
+        critical: document.querySelector('.adm-financial-repair-facts details pre').textContent,
+        expectedLabels: [words.usageSettlementPlan.expected, words.usageSettlementPlan.settle, words.usageSettlementPlan.overage], points: words.usageSettlementPlan.points };
+    });
+    assert.deepEqual(rendered.labels, rendered.expectedLabels);
+    assert.deepEqual(rendered.values, ['922,337,203,685,477.5807', '900,719,925,474.0993', '921,436,483,760,003.4814'].map(n => n + ' ' + rendered.points));
+    assert.deepEqual(rendered.identity, [1, 2, 3, 4].map(n => `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`));
+    assert.ok(rendered.critical.includes('2026-10-07T00:00:00.123456789Z') && rendered.critical.includes('a'.repeat(64)));
+    assert.equal(await page.$('.adm-financial-repair-target select'), null);
+    assert.equal(await page.evaluate(() => window.f16.calls.some(c => c.method !== 'GET' && !c.url.endsWith('/approval-command-prechecks'))), false);
+  });
+  for (const axis of ['client', 'owner', 'epoch']) for (const late of [false, true]) await run(`UsageSettlementRepair ${late ? 'late' : 'accepted'} display retires on ${axis}`, 'display=1' + (late ? '&late=1' : ''), async page => {
+    await readDisplayFacts(page);
+    await page.waitForFunction(late => late ? typeof window.f16.releasePrecheck === 'function' : Boolean(document.querySelector('.adm-financial-repair-facts')), {}, late);
+    await page.evaluate(axis => window.f16.changeDisplayScope(axis), axis);
+    await page.waitForSelector('main[data-display-revision="1"]');
+    if (late) {
+      await page.evaluate(() => window.f16.releasePrecheck());
+      await page.waitForFunction(() => window.f16.precheckReleased && !document.querySelector('.adm-financial-repair-target button').disabled);
+    }
+    assert.equal(await page.$('.adm-financial-repair-facts'), null, 'old identity/snapshot/amounts must not be presented in the new scope');
+    assert.equal(await page.evaluate(() => window.f16.calls.some(c => c.url === '/api/admin/approvals/requests' && c.method === 'POST')), false);
+    // Another explicit read remains possible after the previous scope retired.
+    if (late) await page.evaluate(() => { window.f16.releasePrecheck = null; });
+    await readDisplayFacts(page);
+    if (late) { await page.waitForFunction(() => typeof window.f16.releasePrecheck === 'function'); await page.evaluate(() => window.f16.releasePrecheck()); }
+    await page.waitForSelector('.adm-financial-repair-facts');
+  });
   for (const [label, key, valid] of [['ASCII111', 'a'.repeat(111), true], ['ASCII112', 'a'.repeat(112), false], ['UTF8-111bytes', '中'.repeat(37), true], ['UTF8-114bytes', '中'.repeat(38), false]]) {
     await run(`UsageSettlementRepair prefixed key byte boundary ${label}`, '', async page => {
       await openForm(page); await page.waitForSelector('.adm-financial-repair-draft');
@@ -87,18 +137,20 @@ try {
     assert.ok(calls.some(call => call.url.includes('command_type=USAGE_SETTLEMENT_REPAIR') && call.url.includes('target=')));
     await page.waitForFunction(() => [...document.querySelectorAll('article button')].some(button => button.textContent === window.f16.adminPlatformCopy.zh.approvalCenter.openBusinessArea && !button.disabled));
     await page.evaluate(() => [...document.querySelectorAll('article button')].find(button => button.textContent === window.f16.adminPlatformCopy.zh.approvalCenter.openBusinessArea).click());
-    await page.waitForSelector('[data-workspace="usagesettlementrepair"]:not([hidden]) .adm-financial-repair-target select', { visible: true }); assert.equal(await page.$eval('[data-workspace="usagesettlementrepair"]:not([hidden]) .adm-financial-repair-target select', select => select.value), 'USAGE_SETTLEMENT_REPAIR');
+    await page.waitForSelector('[data-workspace="usagesettlementrepair"]:not([hidden]) .adm-financial-repair-target input', { visible: true });
+    assert.equal(await page.$('[data-workspace="usagesettlementrepair"]:not([hidden]) .adm-financial-repair-target select'), null);
+    assert.equal(await page.$eval('[data-workspace="usagesettlementrepair"]:not([hidden]) .adm-financial-repair-technical code', node => node.textContent), 'USAGE_SETTLEMENT_REPAIR');
   });
   await run('UsageSettlementRepair fresh EDIT refuses changed original loss review without UPDATE', 'existing=1&edit-loss-changed=1', async page => {
     await center(page, 'mine'); await page.waitForSelector('tbody tr button'); await page.click('tbody tr button'); await page.waitForSelector('article textarea');
     await page.type('article textarea', 'Controlled original chargeback CAS intent');
     await page.evaluate(() => [...document.querySelectorAll('article button')].find(button => button.textContent === window.f16.financeCopy.zh.editSubmit).click());
-    await page.waitForFunction(() => [...document.querySelectorAll('[role=alert]')].some(node => node.textContent === window.f16.financeCopy.zh.unavailable));
+    await page.waitForFunction(() => [...document.querySelectorAll('[role=alert]')].some(node => node.textContent === window.f16.financeCopy.zh.approvalReadUnavailable));
     assert.equal(await page.evaluate(() => window.f16.calls.some(call => call.method === 'PUT' || call.url.endsWith('/actions/submit'))), false);
   });
   await run('UsageSettlementRepair approver-only real detail decide without requester or wallet calls', 'approve=1&existing=1', async page => {
-    await page.waitForSelector('tbody tr button'); assert.equal(await page.$('.adm-financial-repair'), null);
-    await page.evaluate(() => { window.f16.status = 'SUBMITTED'; }); await page.click('tbody tr button'); await page.waitForSelector('article textarea');
+    await page.evaluate(() => { window.f16.status = 'SUBMITTED'; }); await center(page, 'pending');
+    await page.waitForSelector('tbody tr button'); assert.equal(await page.$('.adm-financial-repair'), null); await page.click('tbody tr button'); await page.waitForSelector('article textarea');
     await page.type('article textarea', 'Independent approved usage-settlement review');
     await page.evaluate(() => [...document.querySelectorAll('article button')].find(button => button.textContent === window.f16.financeCopy.zh.approve).click());
     await page.waitForFunction(() => document.querySelector('article')?.textContent.includes('EXECUTED'));
@@ -150,7 +202,7 @@ try {
       assert.ok(await page.$eval('.adm-usage-settlement-repair-reauthentication p', node => node.textContent.includes('EDIT')));
       const first = await page.evaluate(() => window.f16.calls.find(call => call.method === 'POST' && call.url === '/api/admin/approvals/requests').body);
       assert.equal(await page.evaluate(() => window.f16.created), false);
-      await page.click('.adm-usage-settlement-repair-reauthentication button');
+      await clickReauthentication(page);
       assert.equal(await page.evaluate(() => window.f16.reauthentication), '/admin.html');
       assert.equal(await page.$eval('.adm-financial-repair-draft input', input => input.value), 'controlled-usage-settlement');
       await page.evaluate(() => { window.f16.authenticatedAgain = true; });
@@ -164,7 +216,7 @@ try {
       await openForm(page); await page.waitForSelector('.adm-usage-settlement-repair-reauthentication button');
       assert.equal(await page.$('.adm-financial-repair-draft'), null);
       assert.equal(await page.evaluate(() => window.f16.calls.some(call => call.method === 'POST' && call.url === '/api/admin/approvals/requests')), false);
-      await page.click('.adm-usage-settlement-repair-reauthentication button'); assert.equal(await page.evaluate(() => window.f16.reauthentication), '/admin.html');
+      await clickReauthentication(page); assert.equal(await page.evaluate(() => window.f16.reauthentication), '/admin.html');
     });
   }
   await run('UsageSettlementRepair unknown recent-auth denial retains original frozen facts and explicit replay', 'lost-recent=1', async page => {
