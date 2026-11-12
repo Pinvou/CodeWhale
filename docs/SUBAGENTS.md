@@ -67,11 +67,11 @@ stewardship.
 | Role          | Stance                                 | Writes? | Network? | Shell posture | Typical use                                  |
 |---------------|----------------------------------------|---------|----------|---------------|----------------------------------------------|
 | `general`     | flexible; do whatever the parent says  | yes     | yes      | yes           | the default; multi-step tasks                |
-| `explore`     | read-only; map the relevant code fast  | no      | yes      | read-only (net + bounded verify) | "find every call site of `Foo`; check the PR with gh" |
+| `explore`     | read-only; map the relevant code fast  | no      | yes      | read-only (net) | "find every call site of `Foo`; check the PR with gh" |
 | `planner`     | analyse and produce a strategy         | no      | yes      | read-only probes | "design the migration; don't execute"        |
 | `reviewer`    | read-and-grade with severity scores    | no      | yes      | read-only (net) | "audit this PR for bugs"                     |
 | `implement`   | land a specific change with min edit   | yes     | yes      | yes           | "rewrite `bar.rs::Foo::bar` to do X"         |
-| `test`        | run the built-in verification gates and report outcome | no      | yes      | built-in gates + read-only probes (no custom commands) | "verify the diff with the built-in checks; report PASS/FAIL" |
+| `test`        | run the built-in verification gates and report outcome | no      | yes      | built-in gates unless parent-clamped (then probes only) + read-only probes (no custom commands) | "verify the diff with the built-in checks; report PASS/FAIL" |
 | `advisor`     | short-lived, high-reasoning counsel     | no      | yes      | none          | "what are we missing in this design?"        |
 | `custom`      | explicit narrow tool allowlist         | inherits | inherits | inherits     | hand-picked tools on the parent's posture    |
 
@@ -257,8 +257,8 @@ OUTPUT: VERDICT, EVIDENCE, GAPS, NEXT
 ```
 
 `scout` briefs default to quick, read-only investigation (no writes, but
-network reach and the bounded verification surface are available for real
-scouting). About 3-5 tool calls
+network reach and the classifier-gated read-only probe lane are available
+for real scouting — no verification gates). About 3-5 tool calls
 is enough for quick exploration: orient, search, read the decisive lines, and
 return. Do not repeat `ALREADY_KNOWN` work unless evidence contradicts it. Review
 and verifier briefs can spend more calls, but should stop after decisive
@@ -320,11 +320,16 @@ OUTPUT: VERDICT, EVIDENCE, GAPS, NEXT.
   on the test suite or other validation. Verifiers don't fix
   failures; they capture the failing assertion + stack and put fix
   candidates under RISKS. The verifier posture never writes; its shell
-  is the bounded built-in verification surface plus — on in-session
-  delegations whose envelope grants it — the same classifier-gated
-  read-only probe lane the inspection roles hold (`wc`, `ls`, `cat`,
-  `grep` pipelines) for gathering evidence; envelopes without the
-  lane omit it and shell attempts refuse. The
+  is the bounded built-in verification surface — refused for an
+  in-session child only when a read-only-shell parent clamps its
+  authority (the clamped child keeps the probe lane and loses the
+  gates) — plus, on in-session delegations whose envelope grants it,
+  the same classifier-gated read-only probe lane the inspection roles
+  hold (`wc`, `ls`, `cat`, `grep` pipelines) for gathering evidence;
+  envelopes without the lane omit it and shell attempts refuse. On
+  Fleet members the envelope is stricter still: bounded verification
+  and Bash are mutually exclusive there, so a fleet verifier holds the
+  gates without the probe lane. The
   write ceiling is read-only, unbounded shell forms are refused
   (#5186), and custom commands are refused — use a write-capable role
   for those.
