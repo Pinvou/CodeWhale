@@ -949,32 +949,20 @@ fn apply_direct_moonshot_k3_fixed_sampling(
 /// <https://www.kimi.com/code/docs/en/third-party-tools/codex.html>, re-verified
 /// 2026-11-05), so the membership route contract spans both spellings.
 ///
-/// Matching semantics mirror `codewhale_config::provider::is_exact_https_route`
-/// (the config-crate matcher behind `is_exact_kimi_code_route`): scheme and
-/// authority compare ASCII case-insensitively, the path compares exactly, a
-/// single trailing slash is insignificant, and lookalike hosts or neighboring
-/// paths never match. That helper is private to the config crate and widening
-/// `is_exact_kimi_code_route` itself belongs to in-flight PR #137, so the
-/// sampling strip carries this route-scoped twin here; it must stay in sync
-/// with those semantics.
+/// Classification runs through the shared config-crate primitive
+/// `codewhale_config::provider::is_exact_https_route` (the matcher behind
+/// `is_exact_kimi_code_route`), so the scheme/authority/path and
+/// trailing-slash semantics here cannot drift from the route predicates.
+/// Widening `is_exact_kimi_code_route` itself belongs to in-flight PR #137,
+/// so the two-host membership policy stays at this caller.
 #[must_use]
 fn kimi_code_sampling_route(base_url: &str) -> bool {
     const KIMI_CODE_ENDPOINTS: [(&str, &str); 2] =
         [("api.kimi.com", "coding/v1"), ("api.kimi.ai", "coding/v1")];
 
-    let trimmed = base_url.trim();
-    let normalized = trimmed.strip_suffix('/').unwrap_or(trimmed);
-    let Some((scheme, authority_and_path)) = normalized.split_once("://") else {
-        return false;
-    };
-    let Some((authority, path)) = authority_and_path.split_once('/') else {
-        return false;
-    };
-
-    scheme.eq_ignore_ascii_case("https")
-        && KIMI_CODE_ENDPOINTS.iter().any(|(host, endpoint_path)| {
-            authority.eq_ignore_ascii_case(host) && path == *endpoint_path
-        })
+    KIMI_CODE_ENDPOINTS.iter().any(|(host, endpoint_path)| {
+        codewhale_config::provider::is_exact_https_route(base_url, host, endpoint_path)
+    })
 }
 
 /// Kimi Code's membership endpoints own the sampling behavior of every model
@@ -6953,9 +6941,11 @@ mod alias_thinking_detection_tests {
 
         // The sampling strip deliberately covers both membership hosts while
         // the config-crate matcher is still .com-only (widening it belongs to
-        // in-flight PR #137). Until that lands, pin the twin's semantics to
-        // the reference on the shared host so a config-side change cannot
-        // silently diverge from the hand-copied matcher.
+        // in-flight PR #137). Classification now runs through the shared
+        // config-crate matcher, so drift is structurally impossible; this
+        // loop still pins the caller-side agreement on the shared host —
+        // port, scheme, casing, and neighboring-path rejections included —
+        // so a host-set edit here cannot quietly change the route contract.
         for url in [
             "https://api.kimi.com/coding/v1",
             "https://api.kimi.com/coding/v1/",
@@ -6972,10 +6962,10 @@ mod alias_thinking_detection_tests {
             assert_eq!(
                 kimi_code_sampling_route(url),
                 crate::config::moonshot_base_url_is_exact_kimi_code(url),
-                "twin drift on {url}"
+                "route-contract drift on {url}"
             );
         }
-        // The overseas host is the deliberate twin-only widening until the
+        // The overseas host is the deliberate caller-side widening until the
         // shared matcher catches up; this assertion is what flips when the
         // widening lands.
         assert!(kimi_code_sampling_route("https://api.kimi.ai/coding/v1"));
