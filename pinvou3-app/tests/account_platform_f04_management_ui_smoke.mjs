@@ -105,6 +105,61 @@ try{
  const listedPrice=async()=>{await fresh();await page.evaluate(()=>{window.f04.prices=[window.f04.price];window.f04.render();});await click('panePresentation.refreshAll');await page.waitForSelector('.adm-pricing-pane:not([hidden]) tbody tr');};
  const refreshPricing=async()=>{const label=await page.evaluate(()=>window.f04.labels().panePresentation.refreshAll);assert.ok(await page.evaluate(label=>{const button=[...document.querySelectorAll('.adm-section-tools button')].find(button=>button.textContent===label&&!button.disabled);button?.click();return !!button;},label));};
  const settleRetiredPreview=async()=>{await page.evaluate(async()=>{window.f04.releasePreview();await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));});};
+ for (const [action, derived, pathEnd] of [['publish', 'DRAFT', '/publish'], ['cancelFuture', 'PUBLISHED', '/transition']]) {
+  for (const previewStatus of [200, 503]) for (const previewFirst of [true, false]) {
+   await caseRun(`${action} definite rejection restores preview after ${previewStatus}; preview settles ${previewFirst ? 'first' : 'last'}`, async () => {
+    await listedPrice();
+    if (derived === 'PUBLISHED') {
+     await page.evaluate(() => { window.f04.prices = [{ ...window.f04.price, lifecycle_status: 'PUBLISHED', derived_status: 'PUBLISHED' }]; });
+     await refreshPricing();
+     await page.waitForFunction(() => document.querySelector('.adm-pricing-pane:not([hidden]) tbody tr')?.textContent.includes(window.f04.labels().cancelFuture));
+    }
+    const before = await page.evaluate(() => ({ reads: window.f04.calls.filter(call => call.path.endsWith('/pricing')).length, price: window.f04.prices[0] }));
+    await page.evaluate(({ status, action }) => { window.f04.previewReadStatus = status; window.f04.delayPreview = true; window.f04.rejectPriceActionOnce = true; window.f04.priceRejectionStatus = action === 'publish' ? 409 : 412; }, { status: previewStatus, action });
+    await click('preview');
+    await page.waitForFunction(() => typeof window.f04.releasePreview === 'function');
+    await click(action);
+    await page.waitForSelector('.adm-pricing-action');
+    if (action === 'cancelFuture') await page.type('.adm-pricing-action textarea', 'Controlled cancellation conflict');
+    await submit('.adm-pricing-action');
+    await page.waitForFunction(() => typeof window.f04.releasePriceRejection === 'function');
+    if (previewFirst) {
+     await settleRetiredPreview();
+     await page.waitForFunction(() => !document.querySelector('.adm-pricing-pane:not([hidden]) tbody .adm-row-actions button').disabled, { timeout: 5000 }).catch(() => assert.fail('Preview cleanup remains blocked while mutation is DISPATCHED'));
+     assert.equal(await page.$eval('.adm-pricing-action button[type=submit]', button => button.disabled), true, 'the mutation has not been released before the preview cleanup assertion');
+    }
+    await page.evaluate(() => window.f04.releasePriceRejection());
+    await page.waitForSelector('.adm-pricing-action [role=alert]');
+    await page.waitForFunction(() => !document.querySelector('.adm-pricing-action button[type=submit]').disabled);
+    if (!previewFirst) await settleRetiredPreview();
+    const previewButton = '.adm-pricing-pane:not([hidden]) tbody .adm-row-actions button';
+    assert.equal(await page.$eval(previewButton, button => button.disabled), false, 'a completed preview must not require a price reload to unlock');
+    if (previewFirst) {
+     assert.equal(await page.$('.adm-pricing-preview'), null, 'results completed during DISPATCHED stay retired');
+     assert.equal(await page.$('.adm-pricing-pane:not([hidden]) [role=alert]'), null, 'errors completed during DISPATCHED stay retired');
+    } else if (previewStatus === 200) {
+     await page.waitForSelector('.adm-pricing-preview');
+     await page.click('.adm-pricing-preview header button');
+    }
+    await page.click('.adm-pricing-action header button');
+    await page.waitForFunction(() => !document.querySelector('.adm-pricing-action'));
+    assert.equal(await page.evaluate(() => window.f04.calls.filter(call => call.path.endsWith('/pricing')).length), before.reads, 'definite rejection does not reload prices to hide a stuck preview');
+    assert.deepEqual(await page.evaluate(() => window.f04.prices[0]), before.price, 'the rejected command has no controlled owner effect');
+    assert.equal(await page.evaluate(() => window.f04.receipts.size), 0);
+    const writes = await page.evaluate(() => window.f04.calls.filter(call => call.method !== 'GET'));
+    assert.equal(writes.length, 1);
+    assert.ok(writes[0].path.endsWith(pathEnd));
+    assert.ok(writes[0].key);
+    if (action === 'publish') assert.match(writes[0].body, /"expected_etag":9007199254740993(?:[,}])/);
+    else assert.deepEqual(JSON.parse(writes[0].body), { action: 'CANCEL', reason: 'Controlled cancellation conflict' });
+    await page.evaluate(() => { window.f04.previewReadStatus = 200; });
+    await click('preview'); await page.waitForSelector('.adm-pricing-preview');
+    assert.equal(await page.$eval('.adm-pricing-preview header code', code => code.textContent), await page.evaluate(() => window.f04.id));
+    assert.equal(await page.evaluate(() => window.f04.calls.filter(call => call.path.endsWith('/preview')).length), 2, 'only explicit preview requests are issued');
+    assert.equal(await page.evaluate(() => window.f04.calls.filter(call => call.method !== 'GET').length), 1, 'preview recovery does not retry the rejected command');
+   });
+  }
+ }
  await caseRun('pricing permission denial and recovery cannot revive a delayed preview; next preview remains usable',async()=>{
   // A completed preview has no outstanding SDK request to cancel. Its local
   // projection must still retire across a denial and subsequent recovery.
