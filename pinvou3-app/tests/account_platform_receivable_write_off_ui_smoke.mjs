@@ -38,6 +38,12 @@ async function create(page) {
   await page.type('.adm-financial-repair-draft textarea', 'Controlled write-off justification'); await page.type('.adm-financial-repair-draft input', 'controlled-write-off');
   await page.click('.adm-financial-repair-draft button');
 }
+async function clickReauthentication(page) {
+  const selector = '.adm-writeoff-reauthentication button';
+  await page.$eval(selector, button => button.scrollIntoView({ block: 'center', inline: 'nearest' }));
+  await page.waitForFunction(selector => { const button = document.querySelector(selector), rect = button.getBoundingClientRect(), hit = document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2); return hit && button.contains(hit) && !button.disabled; }, {}, selector);
+  await page.click(selector);
+}
 async function center(page, view) {
   await page.waitForSelector('nav button[data-section="approvals"]');
   await page.click('nav button[data-section="approvals"]');
@@ -137,7 +143,7 @@ try {
       assert.equal(await page.$eval('.adm-writeoff-reauthentication p', node => node.textContent), await page.evaluate(() => window.f11.ledgerRepairCopy[window.f11.language].writeOffRecentAuthenticationRequired));
       const first = await page.evaluate(() => window.f11.calls.find(call => call.method === 'POST' && call.url === '/api/admin/approvals/requests').body);
       assert.equal(await page.evaluate(() => window.f11.created), false);
-      await page.click('.adm-writeoff-reauthentication button');
+      await clickReauthentication(page);
       assert.equal(await page.evaluate(() => window.f11.reauthentication), '/admin.html');
       assert.equal(await page.$eval('.adm-financial-repair-draft input', input => input.value), 'controlled-write-off');
       await page.evaluate(() => { window.f11.authenticatedAgain = true; });
@@ -151,7 +157,7 @@ try {
       await openForm(page); await page.waitForSelector('.adm-writeoff-reauthentication button');
       assert.equal(await page.$('.adm-financial-repair-draft'), null);
       assert.equal(await page.evaluate(() => window.f11.calls.some(call => call.method === 'POST' && call.url === '/api/admin/approvals/requests')), false);
-      await page.click('.adm-writeoff-reauthentication button'); assert.equal(await page.evaluate(() => window.f11.reauthentication), '/admin.html');
+      await clickReauthentication(page); assert.equal(await page.evaluate(() => window.f11.reauthentication), '/admin.html');
     });
   }
   await run('WriteOff unknown recent-auth denial retains original frozen facts and explicit replay', 'lost-recent=1', async page => {
