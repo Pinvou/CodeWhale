@@ -23,7 +23,12 @@ try {
     if (page.url().startsWith(url)) await page.evaluate(() => document.defaultView.sessionStorage.clear());
     await page.goto(url); await page.waitForFunction(() => window.closure);
     await page.evaluate(options => { Object.assign(window.closure, options); window.closure.render(); }, options || {});
-    await page.waitForFunction(() => document.querySelector('section h2')?.textContent === window.closure.copy().title && !document.body.textContent.includes(window.closure.copy().queryLoading));
+    await page.waitForFunction(() => {
+      const c = window.closure;
+      const section = document.querySelector(c.admin ? '.adm-closure-directory' : '.ap-danger-section');
+      return section?.querySelector('h2')?.textContent === (c.admin ? c.copy().listTitle : c.copy().title)
+        && (c.admin ? section.getAttribute('aria-busy') === 'false' : !section.textContent.includes(c.copy().queryLoading));
+    });
   };
   const click = async (key, accept = true) => {
     await page.waitForFunction(key => [...document.querySelectorAll('button')].some(button => button.textContent === window.closure.copy()[key] && !button.disabled), {}, key);
@@ -174,8 +179,8 @@ try {
   for (const language of ['zh', 'en', 'ja']) await run(`${language}: fresh repair recent-authentication rejection is not a source change`, async () => {
     await fresh({ admin: true, language, repair401: true }); await page.waitForSelector('textarea'); await page.type('textarea', 'Controlled fresh closure retry');
     await page.evaluate(() => [...document.querySelectorAll('button')].find(button => button.textContent === window.closure.finance().retry).click());
-    await page.waitForFunction(() => document.body.textContent.includes(window.closure.copy().recentAuthenticationRequired) && document.querySelector('article [role="alert"]'));
-    assert.equal(await page.evaluate(() => [...document.querySelectorAll('article [role="alert"]')].some(alert => alert.textContent === window.closure.finance().sourceChanged)), false);
+    await page.waitForFunction(() => document.body.textContent.includes(window.closure.copy().recentAuthenticationRequired) && document.querySelector('textarea')?.closest('article, tr')?.querySelector('[role="alert"]'));
+    assert.equal(await page.evaluate(() => [...(document.querySelector('textarea')?.closest('article, tr')?.querySelectorAll('[role="alert"]') || [])].some(alert => alert.textContent === window.closure.finance().sourceChanged)), false);
     assert.equal(await page.evaluate(() => [...document.querySelectorAll('button')].some(button => button.textContent === window.closure.copy().reauthenticate)), true);
   });
   await run('UNKNOWN repair 401 preserves original warning, reason and key', async () => {
@@ -185,7 +190,7 @@ try {
     const proof = await page.evaluate(() => Object.entries(document.defaultView.sessionStorage));
     await page.evaluate(() => { window.closure.repair401 = true; [...document.querySelectorAll('button')].find(button => button.textContent === window.closure.finance().retry).click(); });
     await page.waitForFunction(() => document.body.textContent.includes(window.closure.copy().recentAuthenticationRequired));
-    assert.equal(await page.evaluate(() => [...document.querySelectorAll('article [role="alert"]')].some(alert => alert.textContent === window.closure.finance().unknown)), true);
+    assert.equal(await page.evaluate(() => [...(document.querySelector('textarea')?.closest('article, tr')?.querySelectorAll('[role="alert"]') || [])].some(alert => alert.textContent === window.closure.finance().unknown)), true);
     assert.deepEqual(await page.evaluate(() => Object.entries(document.defaultView.sessionStorage)), proof);
     const calls = await page.evaluate(() => window.closure.calls.filter(call => call.method === 'POST'));
     assert.equal(calls.length, 2); assert.equal(calls[0].body, calls[1].body); assert.equal(calls[0].headers['Idempotency-Key'], calls[1].headers['Idempotency-Key']);
