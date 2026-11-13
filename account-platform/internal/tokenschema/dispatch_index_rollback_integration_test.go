@@ -22,6 +22,45 @@ func testDispatchIndexPublicRollback(t *testing.T, ctx context.Context, connecti
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Retained facts include one indexed row and both kinds of nonmatching row.
+	// Use the public schema and current runtime role; do not grant fixture DDL
+	// privileges or disable the evidence table's immutable-record trigger.
+	var usageID string
+	var seeded, matching int
+	err = connection.QueryRow(ctx, `WITH account AS (
+INSERT INTO token_accounts(id,owner_type,owner_id,wallet_id,name,status,default_priority,created_by,created_at,updated_at,management_mode)
+VALUES(gen_random_uuid(),'USER',gen_random_uuid(),gen_random_uuid(),'dispatch index retained fixture','ACTIVE',100,gen_random_uuid(),'2026-01-01','2026-01-01','PLATFORM')
+RETURNING id,owner_id,wallet_id), credential AS (
+INSERT INTO provider_credentials(id,token_account_id,provider,base_url,ciphertext,key_id,fingerprint,version,status,allowed_models,created_by,created_at)
+SELECT gen_random_uuid(),id,'controlled','https://provider.invalid',decode('0102','hex'),'fixture-key',repeat('a',64),1,'ACTIVE',ARRAY['model'],owner_id,'2026-01-01' FROM account
+RETURNING id,token_account_id), request AS (
+INSERT INTO usage_requests(id,idempotency_key_digest,request_fingerprint,user_id,session_id,token_account_id,credential_id,wallet_id,model,status,maximum_microcredits,request_snapshot,started_at,updated_at,canonicalization_version,execution_status,cancel_status,cancel_requested_at)
+SELECT gen_random_uuid(),repeat('b',64),repeat('b',64),account.owner_id,'dispatch-index-fixture',account.id,credential.id,account.wallet_id,'model','CREATED',100,'{"context_type":"PERSONAL"}','2026-01-01','2026-01-01',1,'RECEIVED','CANCEL_REQUESTED','2026-01-01'
+FROM account JOIN credential ON credential.token_account_id=account.id RETURNING id), evidence AS (
+INSERT INTO usage_cancellation_evidence(id,usage_request_id,evidence_type,adapter_version,sanitized_evidence,occurred_at)
+SELECT gen_random_uuid(),request.id,facts.evidence_type,facts.adapter_version,'{}'::jsonb,'2026-01-01'::timestamptz
+FROM request CROSS JOIN (VALUES ('CANCEL_REQUESTED','hold-expiry-v1'),('CANCEL_REQUESTED','fixture-other-v1'),('PROVIDER_CONFIRMED','hold-expiry-v1')) AS facts(evidence_type,adapter_version)
+RETURNING usage_request_id)
+SELECT min(usage_request_id::text),count(*) FROM evidence`).Scan(&usageID, &seeded)
+	if err != nil || seeded != 3 {
+		t.Fatal("seed retained matching and nonmatching cancellation evidence", seeded, err)
+	}
+	if err = connection.QueryRow(ctx, `SELECT count(*) FROM usage_cancellation_evidence WHERE usage_request_id=$1::uuid AND adapter_version='hold-expiry-v1' AND evidence_type='CANCEL_REQUESTED'`, usageID).Scan(&matching); err != nil || matching != 1 {
+		t.Fatal("retained fixture must have exactly one dispatch-index match", matching, err)
+	}
+	// Advance the public history worker's scan cursor over the new request
+	// before the parent fixture checks that its backfill has no remaining work.
+	// Keep that original zero-work authority assertion unchanged.
+	var scanned int
+	var projectionComplete bool
+	if err = connection.QueryRow(ctx, `SELECT processed,complete FROM public.backfill_usage_history_projection(100)`).Scan(&scanned, &projectionComplete); err != nil || scanned != 1 || !projectionComplete {
+		t.Fatal("scan retained request through the public history worker", scanned, projectionComplete, err)
+	}
+	const evidenceSnapshot = `SELECT coalesce(jsonb_agg(to_jsonb(e) ORDER BY id),'[]'::jsonb)::text FROM usage_cancellation_evidence e`
+	var retainedEvidence string
+	if err = connection.QueryRow(ctx, evidenceSnapshot).Scan(&retainedEvidence); err != nil {
+		t.Fatal(err)
+	}
 	const snapshot = `SELECT jsonb_build_object('ledger',(SELECT jsonb_agg(to_jsonb(m) ORDER BY version) FROM schema_migrations m),'evidence',(SELECT coalesce(jsonb_agg(to_jsonb(e) ORDER BY id),'[]'::jsonb) FROM usage_cancellation_evidence e),'index',pg_get_indexdef('public.usage_cancellation_dispatch_fence_idx'::regclass))::text`
 	var before, after string
 	if err = connection.QueryRow(ctx, snapshot).Scan(&before); err != nil {
@@ -71,9 +110,15 @@ func testDispatchIndexPublicRollback(t *testing.T, ctx context.Context, connecti
 	if err = connection.QueryRow(ctx, `SELECT jsonb_agg(to_jsonb(m) ORDER BY version)::text FROM schema_migrations m`).Scan(&current); err != nil || current != retained {
 		t.Fatal("controlled rollback changed predecessor ledger", err)
 	}
+	if err = connection.QueryRow(ctx, evidenceSnapshot).Scan(&current); err != nil || current != retainedEvidence {
+		t.Fatal("controlled rollback changed retained cancellation evidence", err)
+	}
 	run("token_gateway", "up")
 	if err = connection.QueryRow(ctx, snapshot).Scan(&after); err != nil {
 		t.Fatal(err)
+	}
+	if err = connection.QueryRow(ctx, evidenceSnapshot).Scan(&current); err != nil || current != retainedEvidence {
+		t.Fatal("reinstallation changed retained cancellation evidence", err)
 	}
 	// Ledger installation timestamps legitimately change on re-install. Check
 	// original rows separately and verify every current published SQL identity.
