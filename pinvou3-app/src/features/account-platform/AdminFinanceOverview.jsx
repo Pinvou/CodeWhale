@@ -4,6 +4,10 @@ import { integerMoney, formatFen } from './finance-contract.js';
 import { formatBalance } from './balance-view.js';
 import { financeOverviewDrilldown, financeOverviewMetricTimeScope, formatFinanceOverviewValue } from './admin-finance-overview.js';
 import { financeListRouteUpdates, financeReadDefinition } from './admin-finance-read-route.js';
+import './admin-product-catalog.css';
+import './admin-pricing-presentation-panes.css';
+
+const catalogOverviewMetrics = ['product_draft_count', 'product_on_sale_count', 'product_off_sale_count', 'product_deleted_count', 'admission_pending_count', 'admission_blocked_count'];
 
 export function AdminFinanceOverview({ client, language, surface, route, permissions }) {
   const words = adminLayoutCopy[language].financeOverview, copy = financeCopy[language];
@@ -25,6 +29,11 @@ export function AdminFinanceOverview({ client, language, surface, route, permiss
   const visible = state.client === client && state.surface === surface ? state : {};
   // The accounts endpoint publishes all metrics in one point-in-time response.
   const sharedAccountSnapshot = surface === 'accounts' && visible.data && visible.data.window == null;
+  const productOverview = surface === "products";
+  const pricingOverview = surface === "pricing";
+  const sharedSnapshot = sharedAccountSnapshot || (productOverview || pricingOverview) && Boolean(visible.data) && !visible.data.window;
+  const missingProductMetrics = productOverview && visible.data && catalogOverviewMetrics.some(key => !visible.data.metrics.some(metric => metric.key === key));
+  const statusNames = metric => metric.included_statuses.map(status => productOverview ? copy.catalogLifecycle?.[status] || copy.catalogAdmissionStatus?.[status] || status : status).join(", ") || "—";
   const number = value => integerMoney(value).toLocaleString({ zh: 'zh-CN', en: 'en-US', ja: 'ja-JP' }[language]);
   const date = value => new Date(value).toLocaleString({ zh: 'zh-CN', en: 'en-US', ja: 'ja-JP' }[language], { timeZone: 'UTC' });
   const drilldown = target => {
@@ -33,14 +42,14 @@ export function AdminFinanceOverview({ client, language, surface, route, permiss
     const updates = financeReadDefinition(target.tab) ? financeListRouteUpdates(target.tab, target.query) : {};
     route.navigate(section, { finance_tab: target.tab, ...updates });
   };
-  return <section className="adm-finance-overview" data-finance-overview={surface}><header>{sharedAccountSnapshot ? <div><h3>{words.title}</h3><small>{words.point}: <time dateTime={visible.data.as_of}>{date(visible.data.as_of)} UTC</time></small></div> : <h3>{words.title}</h3>}<button onClick={() => setRevision(value => value + 1)}>{copy.refresh}</button></header>
+  return <section className="adm-finance-overview" data-finance-overview={surface}><header>{sharedSnapshot ? <div><h3>{words.title}</h3><small>{words.point}: <time dateTime={visible.data.as_of}>{date(visible.data.as_of)} UTC</time></small></div> : <h3>{words.title}</h3>}<button onClick={() => setRevision(value => value + 1)}>{copy.refresh}</button></header>
     {visible.error && <p role="alert">{visible.error.status === 403 ? copy.permissions : copy.unavailable}<button onClick={() => setRevision(value => value + 1)}>{copy.retry}</button></p>}{!visible.data && !visible.error && <p role="status">{copy.loading}</p>}
-    {visible.data && <><div className="adm-finance-overview-grid">{visible.data.metrics.map(metric => {
+    {visible.data && <>{missingProductMetrics && <p role="status" className="adm-product-overview-missing">{copy.catalogMetricsMissing}</p>}<div className="adm-finance-overview-grid">{visible.data.metrics.map(metric => {
       const candidate = financeOverviewDrilldown(surface, metric.key, visible.data.window);
       const target = candidate?.tab === 'reconciliations' && !permissions.includes('platform.billing.reconciliation.read') ? null : candidate;
       const usesWindow = financeOverviewMetricTimeScope(surface, metric.key) === 'window' && visible.data.window;
-      const content = <><span>{words.metrics[metric.key] || metric.key}</span><strong>{formatFinanceOverviewValue(metric, { formatCount: number, formatPoints: value => formatBalance(value, language), formatMoney: value => formatFen(value, language) })}</strong>{sharedAccountSnapshot ? <small>{words.units[metric.unit]}</small> : <><small>{usesWindow ? `${words.window}: ${date(visible.data.window.from)} – ${date(visible.data.window.to)} UTC` : `${words.point}: ${date(visible.data.as_of)} UTC`}</small><small>{words.units[metric.unit]} · {words.statuses}: {metric.included_statuses.join(', ') || '—'}</small></>}{target && <em>{target.exact ? words.filtered : words.all}</em>}</>;
-      return target ? <button className="adm-finance-overview-card" key={metric.key} onClick={() => drilldown(target)}>{content}</button> : <article className="adm-finance-overview-card" key={metric.key}>{content}</article>;
-    })}</div>{sharedAccountSnapshot ? <footer><details className="adm-finance-overview-scope"><summary>{words.metricScope}</summary><dl>{visible.data.metrics.map(metric => <React.Fragment key={metric.key}><dt>{words.metrics[metric.key] || metric.key}</dt><dd>{words.statuses}: {metric.included_statuses.join(', ') || '—'}</dd></React.Fragment>)}</dl></details></footer> : <small>{words.point}: {date(visible.data.as_of)} UTC</small>}</>}
+      const content = <><span>{words.metrics[metric.key] || metric.key}</span><strong>{formatFinanceOverviewValue(metric, { formatCount: number, formatPoints: value => formatBalance(value, language), formatMoney: value => formatFen(value, language) })}</strong>{sharedSnapshot ? <small>{words.units[metric.unit]}</small> : <><small>{usesWindow ? `${words.window}: ${date(visible.data.window.from)} – ${date(visible.data.window.to)} UTC` : `${words.point}: ${date(visible.data.as_of)} UTC`}</small><small>{words.units[metric.unit]} · {words.statuses}: {statusNames(metric)}</small></>}{target && <em>{target.exact ? words.filtered : words.all}</em>}</>;
+      return target ? <button className="adm-finance-overview-card" key={metric.key} onClick={() => drilldown(pricingOverview ? { ...target, query: { ...target.query, pricing_pane: metric.key.startsWith("metering_") ? "units" : "prices" } } : target)}>{content}</button> : <article className="adm-finance-overview-card" key={metric.key}>{content}</article>;
+    })}</div>{sharedSnapshot ? <footer><details className="adm-finance-overview-scope"><summary>{words.metricScope}</summary><dl>{visible.data.metrics.map(metric => <React.Fragment key={metric.key}><dt>{words.metrics[metric.key] || metric.key}</dt><dd>{words.statuses}: {statusNames(metric)}</dd></React.Fragment>)}</dl></details></footer> : <small>{words.point}: {date(visible.data.as_of)} UTC</small>}</>}
   </section>;
 }

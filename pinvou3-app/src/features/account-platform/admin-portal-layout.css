@@ -544,3 +544,118 @@
 .adm-adjustment-lookup-results { display: grid; gap: .375rem; min-width: 0; }
 .adm-adjustment-lookup-results ul { list-style: none; margin: 0; padding: 0; }
 .adm-adjustment-lookup-results li button { text-align: start; display: grid; grid-template-columns: minmax(0, 1fr); width: 100%; overflow-wrap: break-word; }
+
+.adm-order-action-group { display: grid; gap: .5rem; justify-items: start; padding-block: 1rem; border-top: 1px solid var(--adm-line, #e0e5ee); }
+.adm-order-action-group label { width: min(100%, 44rem); }
+
+.adm-order-list small { display: block; margin-top: .2rem; }
+.adm-order-list code { overflow-wrap: break-word; }
+
+.adm-order-detail-header { display: grid; gap: .5rem; justify-items: start; margin-bottom: 1rem; }
+.adm-order-detail-header code { overflow-wrap: break-word; }
+
+/* Admin model detail: keep call evidence with the model identity. */
+.adm-restored-shell .adm-model-detail-header>.adm-model-call-summary{grid-column:1/-1;display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:12px;min-width:0;padding:12px 14px;border:1px solid var(--adm-line);border-radius:10px;background:var(--adm-soft)}
+.adm-restored-shell .adm-model-detail-header>.adm-model-call-summary.is-blocked{border-left:4px solid var(--adm-warning)}
+.adm-restored-shell .adm-model-call-summary h3{margin:0 0 3px;font-size:14px;line-height:1.4}
+.adm-restored-shell .adm-model-call-summary p,.adm-restored-shell .adm-model-call-snapshot{margin:0;color:var(--adm-muted);overflow-wrap:break-word}
+.adm-restored-shell .adm-model-detail-header>.adm-model-call-snapshot{grid-column:1/-1;font-size:12px}
+.adm-restored-shell .adm-model-call-summary>button{min-height:44px;white-space:normal}
+.adm-restored-shell .adm-model-call-summary>button:focus{outline:3px solid var(--adm-primary);outline-offset:2px}
+@media(max-width:480px){.adm-restored-shell .adm-model-detail-header>.adm-model-call-summary{grid-template-columns:minmax(0,1fr)}.adm-restored-shell .adm-model-call-summary>button{width:100%}}
+
+.adm-restored-shell .adm-token-account-list .adm-token-account-metric-help{margin:10px 16px;color:var(--adm-muted);font-size:12px;line-height:1.45}
+.adm-restored-shell .adm-token-account-list .adm-token-account-metric{min-width:44px;min-height:44px;color:var(--adm-primary);font-variant-numeric:tabular-nums}
+.adm-restored-shell .adm-token-account-list .adm-token-account-metric:focus{outline:3px solid var(--adm-primary);outline-offset:2px}
+
+.adm-restored-shell .adm-token-detail-identity{display:grid;gap:5px;min-width:0;overflow-wrap:break-word}
+.adm-restored-shell .adm-token-detail-identity small,.adm-restored-shell .adm-token-detail-stale{color:var(--adm-muted);font-size:12px}
+.adm-restored-shell .adm-token-detail-policy>summary{min-height:32px;cursor:pointer;color:var(--adm-primary)}
+.adm-restored-shell .adm-token-detail-policy>summary:focus{outline:3px solid var(--adm-primary);outline-offset:2px}
+
+.adm-restored-shell .adm-refund-provider-filter{display:grid;min-width:0;gap:5px;align-self:start}
+.adm-restored-shell .adm-refund-provider-filter small{color:var(--adm-muted);overflow-wrap:anywhere}
+
+.adm-restored-shell .adm-refund-date-range{display:grid;min-width:0;gap:6px}
+.adm-restored-shell .adm-refund-date-range p{margin:0;color:var(--adm-muted);font-size:.85em;overflow-wrap:anywhere}
+.adm-restored-shell .adm-finance-read-view [data-refund-amount]{text-align:end;font-variant-numeric:tabular-nums}
+
+/* Keep each token-account identifier attached to its row and role. */
+.adm-restored-shell .adm-token-account-list .adm-token-account-identity{display:grid;gap:5px;min-width:0;overflow-wrap:break-word}
+.adm-restored-shell .adm-token-account-list .adm-token-account-identity strong{font-weight:650}
+.adm-restored-shell .adm-token-account-list .adm-token-account-identity small{color:var(--adm-muted);font-size:12px}
+.adm-restored-shell .adm-token-account-list .adm-identifier-copy:focus{outline:3px solid var(--adm-primary);outline-offset:2px}
+
+/* Only the token account recovery queue uses compact search and empty states. */
+.adm-restored-shell .adm-token-recovery-queue .adm-token-recovery-search{margin:12px 16px;border:1px solid var(--adm-line);border-radius:10px;background:var(--adm-surface)}
+.adm-restored-shell .adm-token-recovery-search>summary{min-height:44px;padding:11px 12px;font-weight:650;cursor:pointer}
+.adm-restored-shell .adm-token-recovery-search form{display:grid;grid-template-columns:minmax(0,1fr) auto auto;gap:8px;margin:0;border:0;padding:0 12px 12px;background:var(--adm-surface)}
+.adm-restored-shell .adm-token-recovery-search form p{grid-column:1/-1;margin:0;color:var(--adm-muted);font-size:12px}
+.adm-restored-shell .adm-token-recovery-current{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:8px;margin:12px 16px;color:var(--adm-muted)}
+.adm-restored-shell .adm-token-recovery-current code{overflow-wrap:break-word;word-break:break-all}
+.adm-restored-shell .adm-token-recovery-state{padding:12px 16px;color:var(--adm-muted);line-height:1.45}
+.adm-restored-shell .adm-token-recovery-queue :is(summary,button,input):focus{outline:3px solid var(--adm-primary);outline-offset:2px}
+@media(max-width:480px){.adm-restored-shell .adm-token-recovery-search form,.adm-restored-shell .adm-token-recovery-current{grid-template-columns:minmax(0,1fr)}}
+
+.adm-restored-shell .adm-token-account-overview .adm-token-detail-metrics-help{margin:10px 0 0;color:var(--adm-muted);font-size:12px;line-height:1.45}
+.adm-restored-shell .adm-token-detail-technical{min-width:0;margin-top:12px;padding:0 12px 2px;border:1px solid var(--adm-line);border-radius:10px;background:var(--adm-surface)}
+.adm-restored-shell .adm-token-detail-technical>summary{min-height:44px;padding:12px 0;color:var(--adm-text);font-weight:650;cursor:pointer}
+.adm-restored-shell .adm-token-detail-technical>summary:focus{outline:3px solid var(--adm-primary);outline-offset:2px}
+.adm-restored-shell .adm-token-detail-technical>.adm-model-detail-facts{grid-template-columns:repeat(2,minmax(0,1fr));margin:0 0 10px}
+@media(max-width:480px){.adm-restored-shell .adm-token-detail-technical>.adm-model-detail-facts{grid-template-columns:minmax(0,1fr)}}
+
+.adm-restored-shell .adm-source-head .adm-catalog-directory-actions{display:flex;flex-direction:row;flex-wrap:wrap;align-items:center;justify-content:flex-end;margin:-4px}
+.adm-restored-shell .adm-source-head .adm-catalog-directory-actions>button{max-width:100%;margin:4px;white-space:normal;overflow-wrap:break-word}
+.adm-restored-shell .adm-source-head .adm-catalog-directory-actions>button.adm-catalog-preview{border-color:var(--adm-primary);background:var(--adm-primary);color:#fff}
+.adm-restored-shell .adm-source-head .adm-catalog-directory-actions>button.adm-catalog-rollback{border-color:currentColor;color:var(--adm-danger);background:var(--adm-surface)}
+.adm-restored-shell .adm-source-head .adm-catalog-directory-actions>button:focus{outline:3px solid var(--adm-primary);outline-offset:2px}
+@media(max-width:600px){.adm-restored-shell .adm-source-head .adm-catalog-directory-actions{justify-content:flex-start}.adm-restored-shell .adm-source-head .adm-catalog-directory-actions>button{width:auto;min-width:0;max-width:calc(100% - 8px)}}
+
+.adm-restored-shell .adm-model-token-filters .adm-catalog-code-filter{display:grid;gap:5px;align-self:start;min-width:0}
+.adm-restored-shell .adm-model-token-filters .adm-catalog-code-filter small{color:var(--adm-muted);line-height:1.45}
+.adm-restored-shell .adm-catalog-code-filter details{min-width:0;border:1px solid var(--adm-line);border-radius:8px;background:var(--adm-surface)}
+.adm-restored-shell .adm-catalog-code-filter details>summary{padding:7px 9px;cursor:pointer;overflow-wrap:break-word}
+.adm-restored-shell .adm-catalog-code-filter details>p,.adm-restored-shell .adm-catalog-code-filter details>ul{margin:0;padding:8px 10px;overflow-wrap:break-word}
+.adm-restored-shell .adm-catalog-code-filter details>ul{display:grid;gap:5px;list-style:none}
+.adm-restored-shell .adm-catalog-code-filter details button{width:100%;white-space:normal;overflow-wrap:break-word}
+.adm-restored-shell .adm-model-token-filters .adm-catalog-code-filter :is(input,summary,button):focus{outline:3px solid var(--adm-primary);outline-offset:2px}
+
+.adm-restored-shell .adm-catalog-directory>.adm-source-head{padding-top:11px;padding-bottom:11px;gap:8px;align-items:center}
+.adm-restored-shell .adm-catalog-directory>.adm-source-head h2{margin:0;line-height:1.25}
+.adm-restored-shell .adm-catalog-directory>.adm-source-head p{margin:3px 0 0}
+.adm-restored-shell .adm-catalog-directory .adm-table :is(th,td){font-variant-numeric:tabular-nums}
+.adm-restored-shell .adm-catalog-directory .adm-table .adm-secondary-id{overflow-wrap:break-word}
+.adm-restored-shell .adm-catalog-directory .adm-table button:focus{outline:3px solid var(--adm-primary);outline-offset:2px}
+@media(max-width:600px){.adm-restored-shell .adm-catalog-directory>.adm-source-head{align-items:stretch}}
+
+.adm-restored-shell .adm-protocol-formula-workspace .adm-protocol-source-pane[hidden]{display:none}
+.adm-restored-shell .adm-protocol-formula-workspace .adm-protocol-source-tabs{display:flex;flex-wrap:wrap;gap:0;padding:3px;overflow:visible}
+.adm-restored-shell .adm-protocol-formula-workspace .adm-protocol-source-tabs>button{margin:3px;max-width:calc(100% - 6px);white-space:normal;overflow-wrap:break-word}
+.adm-restored-shell .adm-protocol-formula-workspace .adm-protocol-source-filters{display:grid;grid-template-columns:minmax(0,1fr);gap:10px;align-items:start}
+.adm-restored-shell .adm-protocol-formula-workspace .adm-protocol-filter-fields{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,185px),1fr));gap:9px}
+.adm-restored-shell .adm-protocol-formula-workspace .adm-protocol-advanced{border:1px solid var(--adm-line);border-radius:8px;padding:8px 10px}
+.adm-restored-shell .adm-protocol-formula-workspace .adm-protocol-advanced>summary{cursor:pointer}
+.adm-restored-shell .adm-protocol-formula-workspace .adm-protocol-advanced>summary>small{margin-inline-start:8px;color:var(--adm-muted)}
+.adm-restored-shell .adm-protocol-formula-workspace .adm-protocol-advanced>.adm-protocol-filter-fields{margin-top:9px}
+.adm-restored-shell .adm-protocol-formula-workspace .adm-protocol-filter-actions{display:flex;flex-wrap:wrap;margin:-3px}
+.adm-restored-shell .adm-protocol-formula-workspace .adm-protocol-filter-actions>button{width:auto;max-width:calc(100% - 6px);min-width:0;margin:3px;padding:0 14px;white-space:normal;overflow-wrap:break-word}
+.adm-shell.adm-restored-shell .adm-protocol-formula-workspace .adm-protocol-source-tabs>button:focus,.adm-shell.adm-restored-shell .adm-protocol-formula-workspace .adm-protocol-source-filters :is(summary,input,select,button):focus{outline:3px solid var(--adm-primary);outline-offset:2px}
+
+.adm-restored-shell .adm-protocol-definition :is(code,dd,dt,p){overflow-wrap:break-word;overflow-wrap:anywhere}
+.adm-restored-shell .adm-protocol-definition-fields{display:grid;gap:8px;margin:0;padding:0;list-style:none}
+.adm-restored-shell .adm-protocol-definition-fields>li{min-width:0;padding:9px 12px;border:1px solid var(--adm-line);border-radius:8px}
+.adm-restored-shell .adm-protocol-definition-fields li>dl{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,135px),1fr));gap:8px;margin:6px 0 0}
+.adm-restored-shell .adm-protocol-definition-fields :is(dt,dd){margin:0}
+.adm-restored-shell .adm-protocol-definition-fields dt{color:var(--adm-muted);font-size:12px}
+.adm-shell.adm-restored-shell .adm-protocol-definition button:focus,.adm-shell.adm-restored-shell .adm-protocol-formula-workspace .adm-protocol-definition-open:focus{outline:3px solid var(--adm-primary);outline-offset:2px}
+
+.adm-restored-shell .adm-formula-explained :is(code,dd,strong,p){overflow-wrap:break-word;overflow-wrap:anywhere}
+.adm-restored-shell .adm-formula-explained-mapping{display:grid;gap:8px;margin:0;padding:0;list-style:none}
+.adm-restored-shell .adm-formula-explained-mapping>li{display:grid;gap:4px;min-width:0;padding:9px 12px;border:1px solid var(--adm-line);border-radius:8px}
+.adm-shell.adm-restored-shell .adm-protocol-formula-workspace .adm-protocol-dialog button:focus{outline:3px solid var(--adm-primary);outline-offset:2px}
+
+/* Keep technical metadata in a native, keyboard-operable disclosure. */
+.adm-restored-shell .adm-model-technical-details{min-width:0;margin-top:12px;padding:0 12px 2px;border:1px solid var(--adm-line);border-radius:10px;background:var(--adm-surface)}
+.adm-restored-shell .adm-model-technical-details>summary{min-height:44px;padding:12px 0;color:var(--adm-text);font-weight:650;cursor:pointer;overflow-wrap:break-word}
+.adm-restored-shell .adm-model-technical-details>summary:focus{outline:3px solid var(--adm-primary);outline-offset:2px}
+.adm-restored-shell .adm-model-technical-details>.adm-model-detail-facts{grid-template-columns:minmax(0,1fr);margin:0 0 10px}

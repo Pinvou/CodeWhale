@@ -19,6 +19,7 @@ function fixture({ storage = 'normal', saved = null, browser = 'ja-JP', href = '
   const realm = vm.createContext({ URL, URLSearchParams, navigator: { language: browser }, location: { href, search: new URL(href).search },
     history: { replaceState(...args) { trace.push(['replaceState', ...args]); } },
     document: { documentElement: {} }, setLanguage(value) { trace.push(['memory', value]); },
+    setPreference(value) { trace.push(['memory', value.language]); trace.push(['feedback', value.feedback]); },
     dispatchEvent(event) { trace.push(['event', event.type, event.detail.language]); },
     CustomEvent: class { constructor(type, options) { this.type = type; this.detail = options.detail; } }, trace, values });
   vm.runInContext(`const storageMode = ${JSON.stringify(storage)};
@@ -32,10 +33,20 @@ function fixture({ storage = 'normal', saved = null, browser = 'ja-JP', href = '
   Object.defineProperty(realm.document.documentElement, 'lang', { configurable: true,
     get() { return realm.htmlLanguage; }, set(value) { realm.htmlLanguage = value; trace.push(['html', value]); } });
   installModule(realm, read('features/account-platform/portal-language.js'));
+  installModule(realm, read('shared/supported-locales.js'));
+  const helpers = read('features/account-platform/AdminLanguageControl.jsx').match(/^export function (?:initialAdminLanguagePreference|applyAdminLanguagePreference)\([\s\S]*?^\}/gm);
+  assert.equal(helpers?.length, 2, 'execute the actual Admin preference helpers');
+  installModule(realm, helpers.join('\n'));
   return { realm, trace, values };
 }
 function initial(kind, options) {
   const actual = fixture(options);
+  if (kind === 'admin') {
+    assert.match(entries.admin, /useState\(initialAdminLanguagePreference\)/, 'Admin entry uses the tested initializer');
+    actual.preference = vm.runInContext('initialAdminLanguagePreference()', actual.realm, { filename: 'AdminLanguageControl.jsx' });
+    actual.language = actual.preference.language;
+    return actual;
+  }
   const definition = entries[kind].match(/^function initialLanguage\(\) \{[\s\S]*?^\}/m)?.[0];
   assert.ok(definition, `real ${kind} initializer must remain testable`);
   const constants = entries[kind].match(/^const LANGUAGE_BY_TAG = .*;$/m)?.[0] || '';
@@ -62,7 +73,9 @@ test('real preference helpers report persistence success and contain both browse
   }
   for (const kind of ['account', 'admin']) {
     assert.equal(initial(kind, { storage: 'read-error', browser: 'en-US' }).language, 'en');
-    assert.deepEqual(update(kind, { storage: 'write-error' }, 'ja').trace.filter(item => item[0] === 'memory'), [['memory', 'ja']]);
+    const actual = update(kind, { storage: 'write-error' }, 'ja');
+    assert.deepEqual(actual.trace.filter(item => item[0] === 'memory'), [['memory', 'ja']]);
+    assert.deepEqual(actual.trace.filter(item => item[0] === 'feedback'), kind === 'admin' ? [['feedback', 'unsaved']] : []);
   }
 });
 
@@ -100,11 +113,16 @@ test('account aliases retain all three supported languages and consume duplicate
 });
 
 test('admin initializer retains saved-language and existing browser-tag behavior despite optional Storage failures', () => {
-  for (const language of ['zh', 'en', 'ja']) assert.equal(initial('admin', { saved: language, browser: 'fr-FR' }).language, language);
+  for (const language of ['zh', 'en', 'ja']) {
+    const actual = initial('admin', { saved: language, browser: 'fr-FR' });
+    assert.equal(actual.language, language);
+    assert.equal(actual.preference.feedback, 'saved');
+  }
   for (const storage of ['normal', 'getter-denied', 'read-denied', 'write-denied', 'missing']) {
     for (const [browser, expected] of [['zh-Hans', 'zh'], ['en-GB', 'en'], ['ja-JP', 'ja'], ['ja-extra', 'ja'], ['fr-FR', 'zh'], ['JA-JP', 'zh']]) {
       const actual = initial('admin', { storage, saved: 'unknown', browser, href: 'https://portal.example/admin.html?locale=en#anchor' });
       assert.equal(actual.language, expected, `${browser}/${storage}`);
+      assert.equal(actual.preference.feedback, '', 'a missing or unreadable preference must not claim persistence');
       assert.equal(actual.trace.some(item => item[0] === 'replaceState'), false, 'admin has no locale URL consumer');
     }
   }
@@ -123,6 +141,9 @@ test('real account and admin callbacks keep in-memory switching when preference 
     for (const storage of ['normal', 'getter-denied', 'read-denied', 'write-denied', 'missing']) {
       const actual = update(kind, { storage }, language);
       assert.deepEqual(actual.trace.filter(item => item[0] === 'memory'), [['memory', language]], `${kind}/${language}/${storage}`);
+      assert.deepEqual(actual.trace.filter(item => item[0] === 'feedback'), kind === 'admin'
+        ? [['feedback', storage === 'normal' || storage === 'read-denied' ? 'saved' : 'unsaved']]
+        : [], 'management feedback follows actual write outcome; personal entry keeps its existing contract');
       if (storage === 'normal' || storage === 'read-denied') assert.equal(actual.values.get(`pinvou.${kind}.language`), language);
       if (kind === 'admin') {
         const html = language === 'zh' ? 'zh-CN' : language === 'ja' ? 'ja-JP' : 'en';
