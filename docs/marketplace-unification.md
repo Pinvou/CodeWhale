@@ -62,7 +62,8 @@
 ### 3.1 分层
 
 - **存储层 `BundleRecord`**（bundles.json，唯一可写）：id / source
-  （`preset` | `upload:<zip名>` | 内置快照 + 内容指纹）/ installed / 内容指纹 /
+  （`preset` | `upload:<zip名>` | 内置快照 + 内容指纹）/ installed（资源缺失时置
+  `degraded` 并记原因）/ 内容指纹 /
   assets 引用（kind + name + version + sha256；读不懂的条目原样保留，不致整文件加载失败）/
   credentials 引用 / 安装时间。
 - **查询层 `BundleInfo`**（现算投影，不落盘）：在现有 `bundle.rs:145` 基础上演进：

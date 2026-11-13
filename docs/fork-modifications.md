@@ -31,6 +31,7 @@
 
 > 本文是 Pinvou 对 CodeWhale fork 的单一现状清单。
 > 维护策略见 [`fork-policy.md`](fork-policy.md)，升级证据见 [`codewhale-upgrade-0.9.5-to-0.9.12.md`](codewhale-upgrade-0.9.5-to-0.9.12.md)。
+> English: [`fork-modifications.en.md`](fork-modifications.en.md)
 
 ## T2: shell environment guidance (integrated upstream as CodeWhale #50)
 
