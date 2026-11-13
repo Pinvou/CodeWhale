@@ -1156,17 +1156,23 @@ fn sanitize_moonshot_chat_tools(chat_tools: &mut Vec<Value>) -> Vec<String> {
 /// path applies this — no other provider's documents carry the
 /// leading-character ban.
 ///
-/// The mapping must stay reversible: when the catalog already carries the
-/// minted spelling (registry keys `3d_render` and `_3d_render` are distinct
-/// and can coexist — review 5886233560), both would advertise as
-/// `_3d_render` and every response call spelling `_3d_render` would resolve
-/// onto the underscore sibling through exact-match precedence. The digit-led
-/// tool is dropped from THIS request instead, like the schema-incompatible
-/// drops: advertisement stays collision-free and response resolution stays
-/// exact. Returns the dropped tools' REGISTRY spellings, so the forced-choice
-/// check can refuse the shadowed registry name while still allowing a force
-/// of the surviving underscore spelling.
-fn prefix_digit_led_tool_names_for_moonshot(chat_tools: &mut Vec<Value>) -> Vec<String> {
+/// The mapping must stay reversible on two axes (review threads on
+/// 5896144003). Collision: when the catalog already carries the minted
+/// spelling (registry keys `3d_render` and `_3d_render` are distinct and can
+/// coexist — review 5886233560), both would advertise as `_3d_render` and
+/// every response call spelling `_3d_render` would resolve onto the
+/// underscore sibling through exact-match precedence — the digit-led tool is
+/// dropped from THIS request instead. Length: the pattern admits at most 128
+/// characters, so a 128-character digit-led name mints to 129 and the
+/// provider would 400 the whole request — that tool is dropped too. Both
+/// drops run against the catalog that already survived schema sanitization
+/// (the caller sanitizes first), so an invalid sibling never suppresses a
+/// valid tool. Returns the dropped tools' REGISTRY spellings plus the
+/// surviving mint spellings (registry -> wire), which the forced-choice
+/// check uses to tell a shadowed name from a live one.
+fn prefix_digit_led_tool_names_for_moonshot(
+    chat_tools: &mut Vec<Value>,
+) -> (Vec<String>, std::collections::HashMap<String, String>) {
     let wire_names: Vec<String> = chat_tools
         .iter()
         .filter_map(|tool| {
@@ -1176,7 +1182,9 @@ fn prefix_digit_led_tool_names_for_moonshot(chat_tools: &mut Vec<Value>) -> Vec<
                 .map(str::to_owned)
         })
         .collect();
+    const MFJS_MAX_NAME_LENGTH: usize = 128;
     let mut dropped = Vec::new();
+    let mut minted_names = std::collections::HashMap::new();
     chat_tools.retain_mut(|tool| {
         let Some(function) = tool
             .as_object_mut()
@@ -1196,6 +1204,15 @@ fn prefix_digit_led_tool_names_for_moonshot(chat_tools: &mut Vec<Value>) -> Vec<
             return true;
         }
         let minted = format!("_{name}");
+        if minted.len() > MFJS_MAX_NAME_LENGTH {
+            tracing::warn!(
+                tool = %name,
+                wire_length = minted.len(),
+                "dropping Moonshot tool from this request: the minted wire name exceeds the documented 128-character maximum"
+            );
+            dropped.push(name);
+            return false;
+        }
         if wire_names.iter().any(|existing| existing == &minted) {
             tracing::warn!(
                 tool = %name,
@@ -1205,10 +1222,11 @@ fn prefix_digit_led_tool_names_for_moonshot(chat_tools: &mut Vec<Value>) -> Vec<
             dropped.push(name);
             return false;
         }
+        minted_names.insert(name, minted.clone());
         function.insert("name".into(), json!(minted));
         true
     });
-    dropped
+    (dropped, minted_names)
 }
 
 /// Prefix one `function` object's `name` in place when it starts with an
@@ -1326,6 +1344,10 @@ pub(crate) fn build_chat_wire_body(
         body["top_p"] = json!(top_p);
     }
     let mut omitted_tool_names = Vec::new();
+    let mut advertised_moonshot_wire_names: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
+    let mut moonshot_minted_names: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
     if let Some(tools) = request.tools.as_ref() {
         let mut chat_tools: Vec<_> = tools
             .iter()
@@ -1338,8 +1360,25 @@ pub(crate) fn build_chat_wire_body(
         // whose parameters cannot pass MFJS validation so one incompatible
         // tool never sinks the whole request.
         if matches!(provider, crate::config::ApiProvider::Moonshot) {
-            omitted_tool_names = prefix_digit_led_tool_names_for_moonshot(&mut chat_tools);
-            omitted_tool_names.extend(sanitize_moonshot_chat_tools(&mut chat_tools));
+            // Schema sanitization runs FIRST and records registry spellings:
+            // the collision check below must count only tools that survive
+            // it, or an invalid `_3d_render` sibling would suppress a valid
+            // `3d_render` as a phantom collision and neither tool would be
+            // advertised (review thread on 5896144003).
+            omitted_tool_names = sanitize_moonshot_chat_tools(&mut chat_tools);
+            let (collision_dropped, minted_names) =
+                prefix_digit_led_tool_names_for_moonshot(&mut chat_tools);
+            omitted_tool_names.extend(collision_dropped);
+            advertised_moonshot_wire_names = chat_tools
+                .iter()
+                .filter_map(|tool| {
+                    tool.get("function")
+                        .and_then(|function| function.get("name"))
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                })
+                .collect();
+            moonshot_minted_names = minted_names;
         }
         // xAI rejects a parameters root that is not a plain object schema
         // (e.g. apply_patch's root `oneOf` required-groups) with a 400.
@@ -1405,19 +1444,25 @@ pub(crate) fn build_chat_wire_body(
             {
                 function.insert("name".into(), json!(wire_name.clone()));
             }
-            // Schema drops record the wire spelling they were advertised
-            // under; collision drops (see
-            // `prefix_digit_led_tool_names_for_moonshot`) record the REGISTRY
-            // spelling, because the minted wire name stays advertised by the
-            // surviving underscore tool. Refuse either form: a forced call
-            // naming a dropped tool — directly or through its digit-led
-            // spelling — would otherwise ask the model for a tool this
-            // request never offered.
-            if omitted_tool_names.iter().any(|omitted| {
-                omitted == &wire_name || omitted == &forced
-            }) {
+            // A forced call must name a tool THIS request actually offers
+            // under the forced spelling. A digit-led forced name is live
+            // only when THAT registry tool survived to mint that exact wire
+            // name (a collision or length drop shadows it even though a
+            // namesake twin advertises the same spelling); a non-digit-led
+            // forced name must itself be advertised. Membership in the
+            // omitted list alone cannot express this: after the sanitizer
+            // runs first, a dropped registry spelling can equal the wire
+            // spelling a surviving sibling advertises.
+            let forced_is_offered = if digit_led {
+                moonshot_minted_names
+                    .get(&forced)
+                    .is_some_and(|minted| minted == &wire_name)
+            } else {
+                advertised_moonshot_wire_names.contains(&forced)
+            };
+            if !forced_is_offered {
                 bail!(
-                    "Moonshot cannot force tool '{wire_name}' because its input schema is incompatible with this route"
+                    "Moonshot cannot force tool '{wire_name}' because it is not offered on this request (schema-incompatible or shadowed by a wire-name collision)"
                 );
             }
         }
@@ -6882,6 +6927,152 @@ mod alias_thinking_detection_tests {
         assert!(
             body.body["tools"].as_array().expect("tools on the wire").len() == 1,
             "only the underscore tool is advertised"
+        );
+    }
+
+    #[test]
+    fn moonshot_wire_lets_a_valid_digit_led_tool_survive_an_invalid_namesake() {
+        // The collision check must count only tools that survive schema
+        // sanitization (review thread on 5896144003): a valid `3d_render`
+        // beside an invalid-schema `_3d_render` must advertise and force the
+        // valid tool under the minted spelling, not drop both — one
+        // incompatible tool never sinks a compatible sibling.
+        let mut request = sampling_probe_request(crate::config::DEFAULT_MOONSHOT_MODEL);
+        let mut invalid_underscore = digit_led_name_probe_tool("_3d_render");
+        invalid_underscore.description = "invalid sibling".to_string();
+        // A non-object parameters root is rejected outright by the Kimi
+        // candidate validator, so this sibling cannot survive sanitization.
+        invalid_underscore.input_schema = json!({"type": "string"});
+        request.tools = Some(vec![
+            digit_led_name_probe_tool("3d_render"),
+            invalid_underscore,
+        ]);
+
+        let body = crate::client::chat::build_chat_wire_body(
+            &request,
+            ApiProvider::Moonshot,
+            crate::config::DEFAULT_MOONSHOT_BASE_URL,
+            false,
+        )
+        .expect("Moonshot wire body");
+
+        let tools = body.body["tools"].as_array().expect("tools on the wire");
+        assert_eq!(
+            tools.len(),
+            1,
+            "the invalid sibling is dropped, the valid tool survives: {tools:?}"
+        );
+        assert_eq!(tools[0]["function"]["name"], json!("_3d_render"));
+        assert_eq!(
+            tools[0]["function"]["description"],
+            json!("probe"),
+            "the survivor is the VALID digit-led tool: {tools:?}"
+        );
+        assert_eq!(
+            body.omitted_tool_names,
+            vec!["_3d_render".to_string()],
+            "the schema drop is reported under its registry spelling"
+        );
+
+        // Forcing the survivor proceeds under both spellings.
+        let mut request = sampling_probe_request(crate::config::DEFAULT_MOONSHOT_MODEL);
+        let mut invalid_underscore = digit_led_name_probe_tool("_3d_render");
+        invalid_underscore.input_schema = json!({"type": "string"});
+        request.tools = Some(vec![
+            digit_led_name_probe_tool("3d_render"),
+            invalid_underscore,
+        ]);
+        request.tool_choice = Some(json!({"type": "tool", "name": "3d_render"}));
+        let body = crate::client::chat::build_chat_wire_body(
+            &request,
+            ApiProvider::Moonshot,
+            crate::config::DEFAULT_MOONSHOT_BASE_URL,
+            false,
+        )
+        .expect("forcing the surviving digit-led tool must proceed");
+        assert_eq!(
+            body.body["tool_choice"]["function"]["name"],
+            json!("_3d_render"),
+            "the forced call names the minted wire spelling"
+        );
+    }
+
+    #[test]
+    fn moonshot_wire_drops_a_digit_led_tool_whose_minted_name_exceeds_the_maximum() {
+        // The documented pattern caps names at 128 characters and minting
+        // adds one, so a 127-character digit-led name survives at the exact
+        // boundary (minted = 128) and a 128-character name would mint to 129
+        // — that tool is dropped instead of baiting a whole-request 400
+        // (review thread on 5896144003).
+        let name_127 = format!("3{}", "a".repeat(126));
+        let name_128 = format!("3{}", "a".repeat(127));
+        assert_eq!(name_127.len(), 127);
+        assert_eq!(name_128.len(), 128);
+        let mut request = sampling_probe_request(crate::config::DEFAULT_MOONSHOT_MODEL);
+        let mut overlong = digit_led_name_probe_tool(&name_128);
+        overlong.description = "overlong".to_string();
+        request.tools = Some(vec![
+            digit_led_name_probe_tool(&name_127),
+            overlong,
+        ]);
+
+        let body = crate::client::chat::build_chat_wire_body(
+            &request,
+            ApiProvider::Moonshot,
+            crate::config::DEFAULT_MOONSHOT_BASE_URL,
+            false,
+        )
+        .expect("Moonshot wire body");
+
+        let tools = body.body["tools"].as_array().expect("tools on the wire");
+        assert_eq!(
+            tools.len(),
+            1,
+            "only the boundary-surviving tool is advertised: {tools:?}"
+        );
+        let minted = format!("_{name_127}");
+        assert_eq!(minted.len(), 128, "the survivor mints to exactly the cap");
+        assert_eq!(tools[0]["function"]["name"], json!(minted));
+        assert_eq!(
+            body.omitted_tool_names,
+            vec![name_128.clone()],
+            "the overlong tool is dropped under its registry spelling"
+        );
+
+        // Forcing the dropped tool fails fast; forcing the survivor
+        // proceeds.
+        let mut request = sampling_probe_request(crate::config::DEFAULT_MOONSHOT_MODEL);
+        let mut overlong = digit_led_name_probe_tool(&name_128);
+        overlong.description = "overlong".to_string();
+        request.tools = Some(vec![digit_led_name_probe_tool(&name_127), overlong]);
+        request.tool_choice = Some(json!({"type": "tool", "name": name_128}));
+        let error = crate::client::chat::build_chat_wire_body(
+            &request,
+            ApiProvider::Moonshot,
+            crate::config::DEFAULT_MOONSHOT_BASE_URL,
+            false,
+        )
+        .err()
+        .expect("forcing the overlong-dropped tool must bail");
+        assert!(
+            error.to_string().contains("not offered"),
+            "the bail must name the offered predicate: {error}"
+        );
+
+        let mut request = sampling_probe_request(crate::config::DEFAULT_MOONSHOT_MODEL);
+        request.tools = Some(vec![digit_led_name_probe_tool(&name_127)]);
+        request.tool_choice = Some(json!({"type": "tool", "name": name_127}));
+        let body = crate::client::chat::build_chat_wire_body(
+            &request,
+            ApiProvider::Moonshot,
+            crate::config::DEFAULT_MOONSHOT_BASE_URL,
+            false,
+        )
+        .expect("forcing the boundary survivor must proceed");
+        assert_eq!(
+            body.body["tool_choice"]["function"]["name"],
+            json!(minted),
+            "the forced call names the minted wire spelling"
         );
     }
 

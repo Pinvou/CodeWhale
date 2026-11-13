@@ -1803,7 +1803,14 @@ pub fn validate_mfjs_parameters(parameters: &Value) -> Result<(), KimiParameterS
     state.validate_schema(parameters, true, false, 0, 0)?;
 
     let mut visiting_refs = HashSet::new();
-    if !mfjs_schema_can_terminate(parameters, parameters, &mut visiting_refs, 0)? {
+    let mut prepass_work = 0usize;
+    if !mfjs_schema_can_terminate(
+        parameters,
+        parameters,
+        &mut visiting_refs,
+        0,
+        &mut prepass_work,
+    )? {
         return Err(KimiParameterSchemaError::NonTerminatingReference);
     }
 
@@ -2180,12 +2187,25 @@ fn resolve_mfjs_reference<'a>(document: &'a Value, reference: &str) -> Option<&'
         .filter(|target| target.is_object())
 }
 
+/// The termination prepass runs before the expanded-depth walk, and its
+/// per-branch/per-property `visiting_refs` clones can multiply shared-subgraph
+/// work the same way the walk did: a compact DAG of duplicate refs with a
+/// required non-terminating leaf explores every path before it can answer.
+/// The `work` counter bounds TOTAL visits under
+/// [`MFJS_MAX_EXPANDED_STATES`] and fails closed into the same per-tool drop
+/// (review thread on 5896144003) — the memoized walk downstream does not run
+/// when this prepass answers.
 fn mfjs_schema_can_terminate(
     schema: &Value,
     document: &Value,
     visiting_refs: &mut HashSet<String>,
     structural_depth: usize,
+    work: &mut usize,
 ) -> Result<bool, KimiParameterSchemaError> {
+    *work += 1;
+    if *work > MFJS_MAX_EXPANDED_STATES {
+        return Err(KimiParameterSchemaError::ResourceLimitExceeded);
+    }
     if structural_depth > MFJS_MAX_STRUCTURAL_DEPTH {
         return Err(KimiParameterSchemaError::ResourceLimitExceeded);
     }
@@ -2199,8 +2219,13 @@ fn mfjs_schema_can_terminate(
         }
         let target = resolve_mfjs_reference(document, reference)
             .ok_or(KimiParameterSchemaError::InvalidReference)?;
-        let terminates =
-            mfjs_schema_can_terminate(target, document, visiting_refs, structural_depth + 1)?;
+        let terminates = mfjs_schema_can_terminate(
+            target,
+            document,
+            visiting_refs,
+            structural_depth + 1,
+            work,
+        )?;
         visiting_refs.remove(reference);
         return Ok(terminates);
     }
@@ -2208,7 +2233,13 @@ fn mfjs_schema_can_terminate(
     if let Some(branches) = obj.get("anyOf").and_then(Value::as_array) {
         for branch in branches {
             let mut branch_refs = visiting_refs.clone();
-            if mfjs_schema_can_terminate(branch, document, &mut branch_refs, structural_depth + 1)?
+            if mfjs_schema_can_terminate(
+                branch,
+                document,
+                &mut branch_refs,
+                structural_depth + 1,
+                work,
+            )?
             {
                 return Ok(true);
             }
@@ -2239,6 +2270,7 @@ fn mfjs_schema_can_terminate(
                     document,
                     &mut property_refs,
                     structural_depth + 1,
+                    work,
                 )? {
                     return Ok(false);
                 }
@@ -2264,7 +2296,7 @@ fn mfjs_schema_can_terminate(
             let Some(items) = obj.get("items") else {
                 return Ok(true);
             };
-            mfjs_schema_can_terminate(items, document, visiting_refs, structural_depth + 1)
+            mfjs_schema_can_terminate(items, document, visiting_refs, structural_depth + 1, work)
         }
         Some(schema_type) if is_mfjs_concrete_type(schema_type) => Ok(true),
         _ => Err(KimiParameterSchemaError::MissingType),
@@ -2469,6 +2501,49 @@ mod kimi_tests {
         });
 
         validate_mfjs_parameters(&schema).expect("a shared-reference DAG must validate");
+    }
+
+    #[test]
+    fn mfjs_termination_prepass_is_bounded_on_shared_reference_dags() {
+        // The termination prepass clones its ref set per required property
+        // and memoizes nothing, so a compact shared DAG costs 2^depth walks
+        // even when every leaf terminates — synchronous request-preparation
+        // work the downstream memoized walk never reaches (review thread on
+        // 5896144003). The prepass now shares the total-work budget and
+        // fails closed into the same per-tool drop.
+        let mut definitions = serde_json::Map::new();
+        definitions.insert(
+            "D21".to_string(),
+            json!({"type": "object", "properties": {"end": {"type": "string"}}}),
+        );
+        for level in (0..21).rev() {
+            definitions.insert(
+                format!("D{level}"),
+                json!({
+                    "type": "object",
+                    "required": ["p", "q"],
+                    "properties": {
+                        "p": {"$ref": format!("#/$defs/D{}", level + 1)},
+                        "q": {"$ref": format!("#/$defs/D{}", level + 1)}
+                    }
+                }),
+            );
+        }
+        let schema = json!({
+            "type": "object",
+            "required": ["a"],
+            "properties": {"a": {"$ref": "#/$defs/D0"}},
+            "$defs": Value::Object(definitions)
+        });
+
+        assert!(
+            matches!(
+                validate_mfjs_parameters(&schema),
+                Err(KimiParameterSchemaError::ResourceLimitExceeded)
+            ),
+            "the termination prepass must trip the shared work budget on a \
+             shared-reference DAG: {schema}"
+        );
     }
 
     #[test]
