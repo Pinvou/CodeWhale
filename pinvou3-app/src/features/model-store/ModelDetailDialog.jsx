@@ -6,9 +6,9 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { KeyRound, Plus } from '../../components/icons.jsx';
 import { EmptyState } from '../../components/EmptyState.jsx';
 import { Spinner } from '../../components/Spinner.jsx';
-import { createApiKey, fetchApiKeys, fetchModelDetail } from './model-store-api.js';
+import { createApiKey, fetchApiKeys, fetchModelDetail, followDeploymentContext } from './model-store-api.js';
 import { tryGetTauriBridge } from '../../platform/tauri/client.js';
-import { buildSavedModel, checkLinkable, findLinkedRows, pickApiKey } from './pinvou-model-link.js';
+import { buildSavedModel, checkLinkable, findCardLinkedRows, pickApiKey } from './pinvou-model-link.js';
 import { formatBytes, libraryStatusOf } from './model-store-logic.js';
 import {
   HOVER_SURFACE,
@@ -65,7 +65,7 @@ function CopyRow({ label, value, hint, copyLabel, onCopy, testId }) {
  * 按 `none` 处理——宁可多出一条黄条,不能少出一条。
  * @returns {React.ReactElement} 弹窗。
  */
-function ModelDetailDialog({ cardId, card, copy, theme, onClose, onRedeploy, onToast, savedModels }) {
+function ModelDetailDialog({ cardId, card, copy, theme, onClose, onRedeploy, onToast, savedModels, onCheckUpdate, onVersions }) {
   const [detail, setDetail] = useState(null);
   const [keys, setKeys] = useState([]);
   const [error, setError] = useState(null);
@@ -81,11 +81,15 @@ function ModelDetailDialog({ cardId, card, copy, theme, onClose, onRedeploy, onT
   // 回来」之前,弹窗会短暂显示 A 的名字、运行时和接入地址——用户以为自己看的是 B。
   // ModelStoreView 里那个测试商店的 effect 用的是同一个套路(cancelled 标志)。
   const loadTokenRef = useRef(0);
+  // A request generation cannot protect callbacks that start a *new* request
+  // after an older mutation finishes. Scope those callbacks to this open card.
+  const viewTokenRef = useRef(0);
 
   const load = useCallback(async () => {
     if (!cardId) return;
     const token = (loadTokenRef.current += 1);
-    const stale = () => token !== loadTokenRef.current;
+    const viewToken = viewTokenRef.current;
+    const stale = () => token !== loadTokenRef.current || viewToken !== viewTokenRef.current;
     try {
       // Key 拿不到不算致命:模型本身的信息照样该显示出来。
       const [modelDetail, keyList] = await Promise.all([
@@ -109,44 +113,52 @@ function ModelDetailDialog({ cardId, card, copy, theme, onClose, onRedeploy, onT
   }, [cardId]);
 
   useEffect(() => {
+    viewTokenRef.current += 1;
     // eslint-disable-next-line react-hooks/set-state-in-effect -- 换一张卡时先把上一张的详情/Key 清空再拉新的;不清会让新卡短暂显示旧卡的运行时和 Key
     setDetail(null);
     setKeys([]);
     setError(null);
+    setBusy(false);
+    setRetrying(false);
     load();
+    return () => { viewTokenRef.current += 1; };
   }, [load]);
 
   // 错误态的重试入口。就是再跑一次 load()——失败原因基本都是瞬时的
   // (后端刚重启、请求超时、Key 接口抖了一下),重来一次往往就好了。
   const retry = async () => {
+    const viewToken = viewTokenRef.current;
     setRetrying(true);
     try {
       await load();
     } finally {
-      setRetrying(false);
+      if (viewToken === viewTokenRef.current) setRetrying(false);
     }
   };
 
   const copyText = async (text) => {
+    const viewToken = viewTokenRef.current;
     try {
       await navigator.clipboard.writeText(text);
-      onToast(copy.copied);
+      if (viewToken === viewTokenRef.current) onToast(copy.copied);
     } catch {
       // 没有剪贴板权限时不谎报成功 —— 内容本来就是可见可手选的。
-      onToast(copy.copyFailed);
+      if (viewToken === viewTokenRef.current) onToast(copy.copyFailed);
     }
   };
 
   const addKey = async () => {
+    const viewToken = viewTokenRef.current;
     setBusy(true);
     try {
       await createApiKey(cardId, null);
+      if (viewToken !== viewTokenRef.current) return;
       onToast(copy.keyCreated);
       await load();
     } catch (keyError) {
-      onToast(String(keyError?.message || keyError));
+      if (viewToken === viewTokenRef.current) onToast(String(keyError?.message || keyError));
     } finally {
-      setBusy(false);
+      if (viewToken === viewTokenRef.current) setBusy(false);
     }
   };
 
@@ -160,6 +172,7 @@ function ModelDetailDialog({ cardId, card, copy, theme, onClose, onRedeploy, onT
   // `model` 要填 `endpoint_model` 而不是 `model_name`：前者是推理服务真正认的 id。
   // 经网关时填 model_name 是对的（网关按它查表再替换），直连时填错就是 404。
   const useInPinvou = async () => {
+    const viewToken = viewTokenRef.current;
     const bridge = tryGetTauriBridge();
     if (!bridge?.models?.saveModel) {
       onToast(copy.linkBridgeMissing);
@@ -178,28 +191,53 @@ function ModelDetailDialog({ cardId, card, copy, theme, onClose, onRedeploy, onT
         modelName,
         displayName: copy.linkModelName(record.card_name || record.model_name),
         baseUrl: record.endpoint_url,
+        cardId,
         contextWindow: null,
-        // 已经接入过就**沿用那一行的 id**，让这次保存变成更新而不是新增。
+        // 已经接入过就沿用 id，并由后端窄事务保留最新用户参数与凭据。
         //
         // 不查重的话，`makeModelId()` 每次都生成新 id：用户连点两次、或者隔天
         // 再点一次，品悟的模型列表里就多一行指向同一个本地服务的重复项，而且
-        // 每次都会被设为当前模型。判据跟移除侧的 findLinkedRows 完全一致
-        // （model + 回环 base_url），两边用同一把尺子才不会出现"接得进、清不掉"。
-        existingId: findLinkedRows(savedModels, modelName)[0]?.id,
+        // 每次都会被设为当前模型。接入与移除都只认后端确认的卡片关联，
+        // 不复用用户自行配置或已经解除关联的同名本地接口。
+        existingId: findCardLinkedRows(savedModels, cardId)[0]?.id,
       });
       await bridge.models.saveModel(saved);
       // 选为当前模型。注意这只影响**新建的会话**，不会打断正在生成的那些。
       if (bridge.models.setActiveModel) await bridge.models.setActiveModel(saved.id);
+      if (viewToken !== viewTokenRef.current) return;
       onToast(copy.linkDone);
       await load();
     } catch (linkError) {
-      onToast(String(linkError?.message || linkError));
+      const message = String(linkError?.message || linkError);
+      if (viewToken === viewTokenRef.current) onToast(message.includes("model store endpoint changed or is unavailable") ? copy.linkEndpointChanged : message);
     } finally {
-      setBusy(false);
+      if (viewToken === viewTokenRef.current) setBusy(false);
     }
   };
 
   const record = detail?.record;
+  const linkedModels = findCardLinkedRows(savedModels, cardId);
+  const followContext = async (modelId) => {
+    const viewToken = viewTokenRef.current;
+    setBusy(true);
+    try {
+      await followDeploymentContext(cardId, modelId);
+      if (viewToken !== viewTokenRef.current) return;
+      onToast(copy.contextFollowDone);
+      await load();
+    } catch (contextError) {
+      const message = String(contextError?.message || contextError);
+      let failure = copy.contextFollowFailed;
+      if (message === 'model store endpoint changed or is unavailable; refresh the card and retry') {
+        failure = copy.linkEndpointChanged;
+      } else if (message === 'Command model_store_follow_deployment_context not found' || message === 'Tauri invoke is unavailable') {
+        failure = copy.contextFollowUnavailable;
+      }
+      if (viewToken === viewTokenRef.current) onToast(failure);
+    } finally {
+      if (viewToken === viewTokenRef.current) setBusy(false);
+    }
+  };
   // 能不能接进品悟。算一次给按钮的禁用态和下面那行原因共用——两处各算一次的话,
   // 很容易出现"按钮灰着但没给原因"或者反过来。
   const linkable = checkLinkable(detail);
@@ -342,6 +380,26 @@ function ModelDetailDialog({ cardId, card, copy, theme, onClose, onRedeploy, onT
             </div>
           </div>
 
+          {linkedModels.length > 0 ? (
+            <div className={`mt-4 rounded-[12px] p-3 ${SUBTLE_SURFACE}`} data-testid="model-store-context-settings">
+              <p className={`text-[12px] ${TEXT_SECONDARY}`}>{copy.contextFollowHint}</p>
+              {linkedModels.map((model) => (
+                <div key={model.id} className="mt-2 flex items-center justify-between gap-3">
+                  <span className={`text-[12px] ${TEXT_PRIMARY}`}>
+                    {model.name || model.model} · {model.context_window_tokens
+                      ? copy.contextFixed(model.context_window_tokens.toLocaleString()) : copy.contextAutomatic}
+                  </span>
+                  {model.context_window_tokens ? (
+                    <MsButton tone="ghost" disabled={busy || !linkable.ok} onClick={() => followContext(model.id)}
+                      data-testid="model-store-follow-context">
+                      {copy.contextFollow}
+                    </MsButton>
+                  ) : null}
+                </div>
+              ))}
+            </div>
+          ) : null}
+
           <div className="mt-6 flex items-center justify-between">
             {/* 修复入口:部署被外部破坏(比如手删了 vendor 目录)时需要能重来一次。
                 运行中的模型要先停用,否则重来一次只会撞上还占着端口的旧容器。 */}
@@ -367,6 +425,14 @@ function ModelDetailDialog({ cardId, card, copy, theme, onClose, onRedeploy, onT
                 </div>
               )}
             </div>
+            {record.card_source !== 'builtin' ? (
+          <>
+              <MsButton tone="ghost" disabled={busy} onClick={() => onCheckUpdate(record)}>
+                {copy.cardUpdateCheck}
+              </MsButton>
+              {onVersions ? <MsButton tone="ghost" onClick={() => onVersions(record)}>{copy.versionHistory}</MsButton> : null}
+          </>
+            ) : null}
             {/* 这个「重新部署」**刻意常驻**，跟列表行那个不是一回事：
                 - 列表行（ModelRow）只在 needs_redeploy 时出现——脚本更新了、跟上次
                   部署用的版本对不上。那是日常路径，不该让用户对着一个常亮的按钮

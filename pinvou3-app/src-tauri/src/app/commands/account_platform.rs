@@ -399,6 +399,18 @@ fn ensure_default_model_selectable(item: &serde_json::Value) -> Result<(), Strin
     }
 }
 
+fn ensure_model_runtime_selectable(item: &serde_json::Value) -> Result<(), String> {
+    let protocol = item
+        .get("runtime_protocol")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    if crate::features::account_platform::runtime_model::runtime_protocol_supported(protocol) {
+        Ok(())
+    } else {
+        Err("model_catalog_selection_unavailable: MODEL_RUNTIME_PROTOCOL_UNSUPPORTED".to_string())
+    }
+}
+
 fn ensure_new_session_model_selectable(item: &serde_json::Value) -> Result<(), String> {
     if item
         .get("context_eligible")
@@ -415,14 +427,14 @@ fn ensure_new_session_model_selectable(item: &serde_json::Value) -> Result<(), S
         .get("lifecycle_status")
         .and_then(serde_json::Value::as_str)
     {
-        Some("PUBLISHED") => Ok(()),
+        Some("PUBLISHED") => ensure_model_runtime_selectable(item),
         Some("DEPRECATED") => {
             let cutoff = item
                 .get("new_session_cutoff_at")
                 .and_then(serde_json::Value::as_str)
                 .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok());
             if cutoff.is_some_and(|value| value > chrono::Utc::now()) {
-                Ok(())
+                ensure_model_runtime_selectable(item)
             } else {
                 Err("model_catalog_selection_unavailable: NEW_SESSION_CUTOFF_REACHED".to_string())
             }
@@ -434,13 +446,47 @@ fn ensure_new_session_model_selectable(item: &serde_json::Value) -> Result<(), S
 #[cfg(test)]
 mod tests {
     #[test]
+    fn model_runtime_selection_requires_an_explicit_supported_capability() {
+        for protocol in [
+            None,
+            Some(""),
+            Some("UNKNOWN"),
+            Some("openai_chat_v1"),
+            Some("OPENAI_CHAT_V1"),
+            Some("DEEPSEEK_V4_CHAT_V1"),
+        ] {
+            let mut item =
+                serde_json::json!({"context_eligible":true,"lifecycle_status":"PUBLISHED"});
+            if let Some(protocol) = protocol {
+                item["runtime_protocol"] = serde_json::json!(protocol);
+            }
+            let supported = matches!(protocol, Some("OPENAI_CHAT_V1" | "DEEPSEEK_V4_CHAT_V1"));
+            assert_eq!(
+                super::ensure_new_session_model_selectable(&item).is_ok(),
+                supported
+            );
+            assert_eq!(
+                super::ensure_default_model_selectable(&item).is_ok(),
+                supported
+            );
+            item["lifecycle_status"] = serde_json::json!("DEPRECATED");
+            item["new_session_cutoff_at"] = serde_json::json!("2099-01-01T00:00:00Z");
+            assert_eq!(
+                super::ensure_new_session_model_selectable(&item).is_ok(),
+                supported
+            );
+            assert!(super::ensure_default_model_selectable(&item).is_err());
+        }
+    }
+
+    #[test]
     fn defaults_never_inherit_explicit_deprecated_grace() {
-        let item = serde_json::json!({"context_eligible":true,"lifecycle_status":"DEPRECATED","new_session_cutoff_at":"2099-01-01T00:00:00Z"});
+        let item = serde_json::json!({"runtime_protocol":"OPENAI_CHAT_V1","context_eligible":true,"lifecycle_status":"DEPRECATED","new_session_cutoff_at":"2099-01-01T00:00:00Z"});
         assert!(super::ensure_new_session_model_selectable(&item).is_ok());
         assert!(super::ensure_default_model_selectable(&item).is_err());
         assert!(
             super::ensure_default_model_selectable(
-                &serde_json::json!({"context_eligible":true,"lifecycle_status":"PUBLISHED"})
+                &serde_json::json!({"runtime_protocol":"OPENAI_CHAT_V1","context_eligible":true,"lifecycle_status":"PUBLISHED"})
             )
             .is_ok()
         );
@@ -506,7 +552,7 @@ mod tests {
     fn catalog_selection_obeys_new_session_cutoff_and_context_eligibility() {
         assert!(
             ensure_new_session_model_selectable(&serde_json::json!({
-                "lifecycle_status":"PUBLISHED", "context_eligible":true
+                "lifecycle_status":"PUBLISHED", "runtime_protocol":"OPENAI_CHAT_V1","context_eligible":true
             }))
             .is_ok()
         );
@@ -518,19 +564,19 @@ mod tests {
             .is_err()
         );
         assert!(ensure_new_session_model_selectable(&serde_json::json!({
-            "lifecycle_status":"DEPRECATED", "context_eligible":true,
+            "lifecycle_status":"DEPRECATED", "runtime_protocol":"OPENAI_CHAT_V1","context_eligible":true,
             "new_session_cutoff_at":(chrono::Utc::now()+chrono::Duration::minutes(5)).to_rfc3339()
         }))
         .is_ok());
         assert!(
             ensure_new_session_model_selectable(&serde_json::json!({
-                "lifecycle_status":"DEPRECATED", "context_eligible":true
+                "lifecycle_status":"DEPRECATED", "runtime_protocol":"OPENAI_CHAT_V1","context_eligible":true
             }))
             .is_err()
         );
         assert!(
             ensure_new_session_model_selectable(&serde_json::json!({
-                "lifecycle_status":"REMOVED", "context_eligible":true
+                "lifecycle_status":"REMOVED", "runtime_protocol":"OPENAI_CHAT_V1","context_eligible":true
             }))
             .is_err()
         );

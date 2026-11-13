@@ -2,6 +2,7 @@ import React, { useLayoutEffect, useEffect } from 'react';
 import '../../src/features/account-platform/account-platform.css';
 import { OrganizationActionForm } from '../../src/features/account-platform/OrganizationActionForm.jsx';
 import { OrganizationClient } from '../../src/features/account-platform/organization-client.js';
+import { OrganizationOrderHistory } from '../../src/features/account-platform/OrganizationOrderHistory.jsx';
 import { createRoot } from 'react-dom/client';
 import { OrganizationWorkspace } from '../../src/features/account-platform/OrganizationWorkspace.jsx';
 import { OrganizationAdminWorkspace } from '../../src/features/account-platform/OrganizationAdminWorkspace.jsx';
@@ -13,11 +14,27 @@ const root = createRoot(document.querySelector('#root'));
 const org='11111111-1111-4111-8111-111111111111',user='22222222-2222-4222-8222-222222222222',other='33333333-3333-4333-8333-333333333333',unit='44444444-4444-4444-8444-444444444444';
 const client = new AccountPlatformBffClient(); client.csrfToken='PUBLIC_SYNTHETIC_CSRF';
 const alternateClient = new AccountPlatformBffClient(); alternateClient.csrfToken='PUBLIC_SYNTHETIC_CSRF';
+const historyClient = new OrganizationClient(client);
+// Billing PaymentOrderHistoryItem's public summary projection. Organization
+// authority is page-level; the full detail endpoint adds its beneficiary.
+const historyOrder = { order_id: other, pinvou_order_id: other, provider_order_reference: 'CONTROLLED_ORDER_REFERENCE', product_id: 'controlled-history-product', plan_name: 'Controlled history package', sku_code: 'CONTROLLED_SKU', order_type: 'PLAN', amount_fen: 100, display_points: 100, channel: 'ALIPAY', status: 'PENDING', fulfillment_status: 'PENDING', close_status: 'OPEN', expires_at: '2026-11-01T00:15:00Z', invoice_status: 'NOT_SUPPORTED', created_at: '2026-11-01T00:00:00Z' };
 const adminClient = new AdminPlatformClient(); adminClient.csrfToken='PUBLIC_SYNTHETIC_CSRF';
 const control={authorizationVersion:1,modelPolicy:false,policy:{organization_id:org,version:0,mode:'ALLOW_ALL',model_ids:[],authorization_version:1},policyReceipts:new Map(),purchase:false,capabilityChannels:['ALIPAY'],productStatus:'AVAILABLE',testOnly:false,admin:false,org,user,other,unit,language:'en',readonly:false,unknown:false,delayed:false,context:'ORGANIZATION',contextVersion:1,calls:[],created:false};
 const json=(value,status=200)=>new Response(JSON.stringify(value),{status,headers:{'Content-Type':'application/json'}});
 globalThis.fetch=async(url,options={})=>{
  const requestURL=new URL(String(url),'http://fixture.invalid');const path=requestURL.pathname;const method=options.method||'GET';control.calls.push({path,method,body:options.body,key:options.headers?.['Idempotency-Key']});
+ if(control.historyHarness && method==='GET' && path===`/api/token/v1/organizations/${org}/recharge/orders`) {
+  const snapshot=structuredClone({organization_id:org,items:control.historyRows||[historyOrder],next_cursor:null});
+  control.historyPageReads=(control.historyPageReads||0)+1;
+  if(control.holdHistoryPage)return new Promise(resolve=>{control.releaseHistoryPage=()=>{control.releaseHistoryPage=null;resolve(json(snapshot));};});
+  return json(snapshot);
+ }
+ if(control.historyHarness && method==='GET' && path===`/api/token/v1/organizations/${org}/recharge/orders/${other}`) {
+  const snapshot=structuredClone({...historyOrder,beneficiary_organization_id:org,status:'PAID',fulfillment_status:'CREDITED',paid_at:'2026-11-02T00:00:00Z'});
+  control.historyDetailReads=(control.historyDetailReads||0)+1;
+  if(control.holdHistoryDetail)return new Promise(resolve=>{control.releaseHistoryDetail=()=>{control.releaseHistoryDetail=null;resolve(json(snapshot));};});
+  return json(snapshot);
+ }
  // Synthetic public admin DTOs consumed by the real AdminPlatformClient and
  // OrganizationAdminClient. No account service, credentials or real writes.
  if (control.renameMode && path.startsWith('/api/admin/account/admin/v1/organizations')) {
@@ -142,6 +159,15 @@ function PassiveProbe() {
  return null;
 }
 function render(){
+ if(control.historyHarness) {
+  // Mount the actual read-owner component and HTTP client. Only the surrounding
+  // visibility controls and delayed public responses belong to this fixture.
+  root.render(<><button data-history-toggle type="button" onClick={()=>{control.hideHistory=!control.hideHistory;render();}}>{control.hideHistory?'Open history fixture':'Close history fixture'}</button><OrganizationOrderHistory api={historyClient} org={org} owner={`${control.user}:${org}:${control.contextVersion}`} language={control.language} version={0} enabled={!control.hideHistory} busy={false} onSelect={(_id,_row,readDetail)=>{
+   control.retryHistoryDetail=()=>readDetail(()=>historyClient.order(org,other));
+   void control.retryHistoryDetail().then(()=>{control.historyDetailSettled=(control.historyDetailSettled||0)+1;render();},error=>{control.historyDetailError=error.message;control.historyDetailSettled=(control.historyDetailSettled||0)+1;render();});
+  }} /></>);
+  return;
+ }
  if (control.confirmHarness) {
   const transport = control.useAlternateClient ? alternateClient : client, api = new OrganizationClient(transport);
   const owner = `${control.user}:${org}:${control.contextVersion}:${control.authorizationVersion}`;
@@ -151,4 +177,4 @@ function render(){
   return;
  }
  if(control.admin){root.render(<OrganizationAdminWorkspace client={adminClient} me={me()} language={control.language} />);return;}root.render(<><OrganizationDirectory client={client} me={me()} language={control.language} onChanged={async()=>{if(control.refreshFail)throw new Error('Controlled refresh unavailable');render();}} />{control.context==='ORGANIZATION'&&<OrganizationWorkspace client={control.useAlternateWorkspaceClient ? alternateClient : client} me={me()} language={control.language} onChanged={async()=>{if(control.refreshFail)throw new Error('Controlled refresh unavailable');render();}} />}<MemberClientProbe /></>);}
-window.f06=Object.assign(control,{render,copy:()=>organizationCopy[control.language],client,alternateClient,unmount:()=>root.render(null),switchIdentity:()=>{control.user=other;client.financeSessionEpoch++;render();}});render();
+window.f06=Object.assign(control,{render,historyOrder,copy:()=>organizationCopy[control.language],client,alternateClient,unmount:()=>root.render(null),switchIdentity:()=>{control.user=other;client.financeSessionEpoch++;render();}});render();
