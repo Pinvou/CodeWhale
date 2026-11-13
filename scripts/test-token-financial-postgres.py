@@ -103,6 +103,7 @@ ACCOUNT_REQUIRED = {
     "TestTokenAuthorizationWriterToBillingNonTargetPostgres",
     "TestOwnerCombinedActualHTTPPostgres",
     "TestApprovalRecoveryQueryAllRegisteredCommandsPostgres",
+    "TestUnstartedApprovalGrantInventoryPostgres",
     "TestApprovalRecoveryQueryForwardMigrationPostgres",
     "TestApprovalAuthorizationWallClockPostgres",
     "TestApprovalMutationWallClockPostgres",
@@ -121,6 +122,7 @@ ACCOUNT_REQUIRED = {
 # These Account roots are real named leaf tests; all other required roots
 # still need completed child-case evidence. Root run/pass and no-skip stay mandatory.
 ACCOUNT_LEAF_REQUIRED = {
+    "TestUnstartedApprovalGrantInventoryPostgres",
     "TestRegistrationBonusEligibilityCheckpointPostgresIntegration",
     "TestRegistrationBonusCheckpointGuardsPostgresIntegration",
     "TestRegistrationBonusCheckpointMigrationPostgresIntegration",
