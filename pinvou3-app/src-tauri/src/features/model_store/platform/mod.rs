@@ -33,6 +33,7 @@ pub(crate) use unsupported as backend;
 pub(crate) use backend::{
     installed_import_markers_checked, installed_ownership_unconfirmable_checked,
     installed_weight_candidate_names_checked, installed_weight_filenames_checked,
-    installed_weight_paths_checked, ollama_base_url, ollama_base_url_checked, store_model_name,
-    store_model_name_checked, store_weights_roots, store_weights_roots_checked,
+    installed_weight_paths_checked, installed_weight_paths_for_removal_checked, ollama_base_url,
+    ollama_base_url_checked, store_model_name, store_model_name_checked, store_weights_roots,
+    store_weights_roots_checked, with_weight_removal_boundary,
 };

@@ -46,6 +46,7 @@ import {
 } from '../model-store/pinvou-model-link.js';
 import { MsButton, MsPill, MsToast } from '../model-store/model-store-ui.jsx';
 import { externalRowIdentity } from './externalRowIdentity.js';
+import { deviceModelRemovalError } from './removal-errors.js';
 
 const TOAST_MS = 3200;
 // Two-step confirmation dead-zone (ms): long enough to absorb a double-click's
@@ -932,8 +933,10 @@ const DeviceManagerView = ({ theme, t, bs, onOpenChat, captureChatOwnership, onO
       }
       showToast(notices.join('\n'));
     } catch (error) {
-      // Backend guard failures carry a human-readable message already.
-      showToast(copy.removeFailed(String(error?.message || error)));
+      // Owned boundary failures use the current locale even when a language
+      // switch occurred while removal was pending; unknown diagnostics survive.
+      const currentCopy = copyRef.current;
+      showToast(currentCopy.removeFailed(deviceModelRemovalError(error, currentCopy)));
     } finally {
       // Compare-and-set clear (round-5 review P2): busyKey is a single slot for
       // the whole page — an unconditional clear would revive the other row's

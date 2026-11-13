@@ -400,6 +400,7 @@ const RUST_FORWARDED_EVENTS: &[&str] = &[
     "chat:usage",
     "chat:user_message",
     "chat:user_input_required",
+    "models:changed",
     "multiagent:agent_progress",
     "remote_control:tools_changed",
     "scheduled_task:run_updated",
@@ -4905,6 +4906,7 @@ mod tests {
             "chat",
             "ingest_file",
             "delete_model",
+            "delete_model_if_store_link",
             "save_model",
             "set_active_model",
             "test_model_connection",
@@ -5031,6 +5033,11 @@ mod tests {
         assert!(RUST_FORWARDED_EVENTS.contains(&"session:list_changed"));
         assert!(policy.events.contains("session:model_changed"));
         assert!(RUST_FORWARDED_EVENTS.contains(&"session:model_changed"));
+        assert!(policy.events.contains("models:changed"));
+        assert!(
+            RUST_FORWARDED_EVENTS.contains(&"models:changed"),
+            "store model refreshes must be deduped against the desktop proxy's app.emit leg"
+        );
         assert!(policy.events.contains("session:persona_changed"));
         assert!(RUST_FORWARDED_EVENTS.contains(&"session:persona_changed"));
         assert!(policy.events.contains("multiagent:agent_progress"));
