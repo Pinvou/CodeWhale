@@ -443,6 +443,12 @@ try {
     await page.evaluate(() => document.querySelectorAll('[role=alertdialog] button')[1].click()); await settled();
     assert.equal(await closePosts(), 1); assert.ok(await page.evaluate(() => window.f02.calls.find(call => call.url.endsWith('/close')).url.endsWith(`/orders/${window.f02.other}/close`)));
   });
+  for (const [language, labels] of [['zh', ['充值积分', '赠送积分']], ['en', ['Recharge credits', 'Bonus credits']], ['ja', ['チャージポイント', '追加ポイント']]]) await caseRun(`Product entitlement labels and values are complete in ${language}`, async () => {
+    await fresh('products'); await page.select('[aria-label=fixture-language]', language);
+    await page.waitForFunction(labels => JSON.stringify([...document.querySelectorAll('.adm-product-points dt')].map(node => node.textContent)) === JSON.stringify(labels), {}, labels);
+    assert.deepEqual(await page.$$eval('.adm-product-points dd', nodes => nodes.map(node => node.textContent)), ['100', '0']);
+    assert.equal(await page.evaluate(() => window.f02.calls.some(call => call.method !== 'GET')), false, 'reading localized entitlement must not write');
+  });
   console.log(`RESULT ${passed} PASS 0 FAIL 0 SKIP`);
 } catch (error) {
   console.error(`FAIL after ${passed} PASS: ${error.message}`);
