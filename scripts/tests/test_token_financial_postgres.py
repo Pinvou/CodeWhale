@@ -15,6 +15,10 @@ RUNNER = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(RUNNER)
 
 
+# Explicit, reviewed cardinality; do not derive the expectation from the runner.
+EXPECTED_RETAINED_ROOT_COUNT = 78
+
+
 CHECKPOINT_LEAF_ROOTS = {
     "TestRegistrationBonusEligibilityCheckpointPostgresIntegration",
     "TestRegistrationBonusCheckpointGuardsPostgresIntegration",
@@ -877,7 +881,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
         self.assertEqual(billing[-1], "./internal/billing")
         self.assertEqual(billing[billing.index("-run") + 1],
                          "^(" + "|".join(sorted(RUNNER.RETAINED_REQUIRED)) + ")$")
-        self.assertEqual(len(RUNNER.RETAINED_REQUIRED), 77)
+        self.assertEqual(len(RUNNER.RETAINED_REQUIRED), EXPECTED_RETAINED_ROOT_COUNT)
         self.assertEqual(self.fixture_writes, ["create", "drop"])
         self.assertEqual(self.fixture_trace, [
             "owner-account", "owner-wallet", "owner-schema", "owner-token-schema", "owner-provisioning",
@@ -2164,7 +2168,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
         }
         self.assertEqual(RUNNER.REFUND_REQUIRED, expected)
         self.assertTrue(expected <= RUNNER.RETAINED_REQUIRED)
-        self.assertEqual(len(RUNNER.RETAINED_REQUIRED), 77)
+        self.assertEqual(len(RUNNER.RETAINED_REQUIRED), EXPECTED_RETAINED_ROOT_COUNT)
         valid = self.events(RUNNER.RETAINED_REQUIRED, RUNNER.BILLING_PACKAGE, children=True)
         options = {"package": RUNNER.BILLING_PACKAGE, "require_children": True, "exact_roots": True,
                    "children_required": RUNNER.BILLING_CHILD_REQUIRED}
