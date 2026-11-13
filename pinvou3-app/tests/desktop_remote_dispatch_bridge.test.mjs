@@ -1134,6 +1134,24 @@ test('remote attachment, permission and artifact facades use only desktop_remote
   assert.equal(JSON.stringify(calls).includes('connectionId'), false);
 });
 
+test('physical cleanup uses its own RPC and a legacy-peer timeout still permits local abandon', async () => {
+  const { feature, calls } = installFeature((command, args) => {
+    if (command !== 'desktop_remote_action_a') return undefined;
+    if (args.intent.operation === 'attachment_abort_confirmed') return Promise.reject(new Error('result_unknown'));
+    return Promise.resolve({ aborted: true });
+  });
+  await assert.rejects(feature.attachmentAbortConfirmed('local-1', 'ref-1', 'task-1', 'transfer-1'), { code: 'result_unknown' });
+  await feature.abandonRemoteTask('local-1', 'request-1', 'task-1');
+  await feature.attachmentAbort('local-1', 'ref-1', 'task-1', 'transfer-1');
+  const relevant = calls.filter(call => ['desktop_remote_action_a', 'desktop_remote_task_abandon_prepared_a'].includes(call.command));
+  assert.deepEqual(relevant.map(call => call.args.intent?.operation || call.command),
+    ['attachment_abort_confirmed', 'desktop_remote_task_abandon_prepared_a', 'attachment_abort']);
+  assert.deepEqual(JSON.parse(JSON.stringify(relevant[0].args.intent)), {
+    operation: 'attachment_abort_confirmed', taskId: 'task-1', transferId: 'transfer-1',
+  });
+  assert.notEqual(relevant[0].args.requestId, relevant[2].args.requestId);
+});
+
 test('unknown attachment actions are fenced rather than replayed as new uploads', async () => {
   const { feature, calls } = installFeature(command => {
     if (command === 'desktop_remote_action_a') return Promise.reject(new Error('result_unknown'));

@@ -144,7 +144,7 @@ export const CONTROLLER_PAYLOAD_TYPES = Object.freeze([
   "remote_action_request", "remote_action_result", "session_snapshot_request", "session_snapshot", "journal_replay_request", "journal_event",
 ]);
 export const REMOTE_ACTION_OPERATIONS = Object.freeze([
-  "permission_list", "permission_decide", "attachment_begin", "attachment_chunk", "attachment_abort",
+  "permission_list", "permission_decide", "attachment_begin", "attachment_chunk", "attachment_abort", "attachment_abort_confirmed",
   "artifact_index", "artifact_preview", "artifact_download_begin", "artifact_download_chunk", "artifact_download_abort",
 ]);
 export const LEASE_INSTALL_MESSAGE_TYPES = Object.freeze(["controller_joined"]);
@@ -936,6 +936,7 @@ function validateRemoteAction(payload, result) {
     attachment_begin: ["task_id", "file_name", "mime_type", "total_bytes", "sha256"],
     attachment_chunk: ["task_id", "transfer_id", "chunk_index", "chunk_b64", "chunk_bytes"],
     attachment_abort: ["task_id", "transfer_id"],
+    attachment_abort_confirmed: ["task_id", "transfer_id"],
     artifact_index: [],
     artifact_preview: ["artifact_id"],
     artifact_download_begin: ["task_id", "artifact_id"],
@@ -948,6 +949,7 @@ function validateRemoteAction(payload, result) {
     attachment_begin: [["transfer_id", "chunk_bytes", "total_bytes"], []],
     attachment_chunk: [["state", "received_bytes"], ["sha256"]],
     attachment_abort: [["aborted"], []],
+    attachment_abort_confirmed: [["transfer_id", "cleanup_confirmed"], []],
     artifact_index: [["artifacts"], []],
     artifact_preview: [["artifact_id", "preview_kind", "truncated"], ["text"]],
     artifact_download_begin: [["transfer_id", "chunk_bytes", "total_bytes"], []],
@@ -966,7 +968,7 @@ function validateRemoteAction(payload, result) {
   const body = exactObject(payload.body, required, optional, "body");
   for (const field of [...required, ...optional]) {
     if (body[field] === undefined) continue;
-    if (["aborted", "completed", "truncated"].includes(field)) {
+    if (["aborted", "completed", "truncated", "cleanup_confirmed"].includes(field)) {
       if (typeof body[field] !== "boolean") fail("invalid_field", `body.${field}`);
     } else if (field === "permissions") {
       if (!Array.isArray(body.permissions) || body.permissions.length > 8) fail("invalid_field", "body.permissions");

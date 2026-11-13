@@ -66,6 +66,10 @@ pub enum RemoteActionIntent {
         task_id: String,
         transfer_id: String,
     },
+    AttachmentAbortConfirmed {
+        task_id: String,
+        transfer_id: String,
+    },
     ArtifactIndex,
     ArtifactPreview {
         artifact_id: String,
@@ -95,6 +99,7 @@ impl RemoteActionIntent {
             Self::AttachmentBegin { .. } => "attachment_begin",
             Self::AttachmentChunk { .. } => "attachment_chunk",
             Self::AttachmentAbort { .. } => "attachment_abort",
+            Self::AttachmentAbortConfirmed { .. } => "attachment_abort_confirmed",
             Self::ArtifactIndex => "artifact_index",
             Self::ArtifactPreview { .. } => "artifact_preview",
             Self::ArtifactDownloadBegin { .. } => "artifact_download_begin",
@@ -110,6 +115,7 @@ impl RemoteActionIntent {
             | Self::AttachmentBegin { task_id, .. }
             | Self::AttachmentChunk { task_id, .. }
             | Self::AttachmentAbort { task_id, .. }
+            | Self::AttachmentAbortConfirmed { task_id, .. }
             | Self::ArtifactDownloadBegin { task_id, .. }
             | Self::ArtifactDownloadChunk { task_id, .. }
             | Self::ArtifactDownloadAbort { task_id, .. } => Some(task_id),
@@ -121,6 +127,7 @@ impl RemoteActionIntent {
         match self {
             Self::AttachmentChunk { transfer_id, .. }
             | Self::AttachmentAbort { transfer_id, .. }
+            | Self::AttachmentAbortConfirmed { transfer_id, .. }
             | Self::ArtifactDownloadChunk { transfer_id, .. }
             | Self::ArtifactDownloadAbort { transfer_id, .. } => Some(transfer_id),
             _ => None,
@@ -178,6 +185,10 @@ impl serde::Serialize for RemoteActionIntent {
                 json!({"task_id":task_id,"transfer_id":transfer_id,"chunk_index":chunk_index,"chunk_b64":chunk_b64,"chunk_bytes":chunk_bytes}),
             ),
             Self::AttachmentAbort {
+                task_id,
+                transfer_id,
+            }
+            | Self::AttachmentAbortConfirmed {
                 task_id,
                 transfer_id,
             } => (
@@ -522,6 +533,10 @@ mod tests {
                 task_id: "task-1".into(),
                 transfer_id: "transfer-1".into(),
             },
+            RemoteActionIntent::AttachmentAbortConfirmed {
+                task_id: "task-1".into(),
+                transfer_id: "transfer-1".into(),
+            },
             RemoteActionIntent::ArtifactIndex,
             RemoteActionIntent::ArtifactPreview {
                 artifact_id: "artifact-1".into(),
@@ -624,6 +639,86 @@ mod tests {
             );
             assert_eq!(reply.try_recv().unwrap(), Err("result_unknown".into()));
         }
+    }
+
+    #[test]
+    fn confirmed_cleanup_requires_authenticated_exact_positive_receipt() {
+        for body in [
+            json!({"aborted":true}),
+            json!({"transfer_id":"transfer-1","cleanup_confirmed":false}),
+            json!({"transfer_id":"transfer-other","cleanup_confirmed":true}),
+            json!({"transfer_id":"transfer-1","cleanup_confirmed":true}),
+        ] {
+            let state = DesktopRemoteActionState::default();
+            let mut begin = register(&state, "begin-1", "attachment_begin", Some("task-1"), None);
+            settle(
+                &state,
+                json!({"request_id":"begin-1","session_id":"remote-0001","operation":"attachment_begin","ok":true,"body":{"transfer_id":"transfer-1"}}),
+            );
+            assert!(begin.try_recv().unwrap().is_ok());
+            let mut cleanup = register(
+                &state,
+                "cleanup-1",
+                "attachment_abort_confirmed",
+                Some("task-1"),
+                Some("transfer-1"),
+            );
+            let payload = json!({"request_id":"cleanup-1","session_id":"remote-0001","operation":"attachment_abort_confirmed","ok":true,"body":body});
+            let mut wrong = lease();
+            wrong.lease_epoch = "2".into();
+            assert!(!state.settle_authenticated(&wrong, &live(), &payload));
+            assert_eq!(cleanup.try_recv(), Err(TryRecvError::Empty));
+            settle(&state, payload.clone());
+            let positive = body == json!({"transfer_id":"transfer-1","cleanup_confirmed":true});
+            assert_eq!(cleanup.try_recv().unwrap().is_ok(), positive);
+            assert_eq!(
+                state.inner.lock().uploads.contains_key("transfer-1"),
+                !positive
+            );
+            assert!(
+                !state.settle_authenticated(&lease(), &live(), &payload),
+                "duplicate has no pending request to settle"
+            );
+        }
+    }
+
+    #[test]
+    fn confirmed_cleanup_error_is_not_logical_absence_and_cannot_attest_completion() {
+        let state = DesktopRemoteActionState::default();
+        let mut begin = register(&state, "begin-1", "attachment_begin", Some("task-1"), None);
+        settle(
+            &state,
+            json!({"request_id":"begin-1","session_id":"remote-0001","operation":"attachment_begin","ok":true,"body":{"transfer_id":"transfer-1"}}),
+        );
+        assert!(begin.try_recv().unwrap().is_ok());
+        let mut cleanup = register(
+            &state,
+            "cleanup-1",
+            "attachment_abort_confirmed",
+            Some("task-1"),
+            Some("transfer-1"),
+        );
+        let mut late = register(
+            &state,
+            "late-chunk",
+            "attachment_chunk",
+            Some("task-1"),
+            Some("transfer-1"),
+        );
+        settle(
+            &state,
+            json!({"request_id":"cleanup-1","session_id":"remote-0001","operation":"attachment_abort_confirmed","ok":false,"error_code":"transfer_unknown","body":{}}),
+        );
+        assert_eq!(cleanup.try_recv().unwrap(), Err("transfer_unknown".into()));
+        assert!(state.inner.lock().uploads.contains_key("transfer-1"));
+        settle(
+            &state,
+            json!({"request_id":"late-chunk","session_id":"remote-0001","operation":"attachment_chunk","ok":true,"body":{"state":"completed"}}),
+        );
+        assert_eq!(
+            late.try_recv().unwrap(),
+            Err("remote_attachment_unconfirmed".into())
+        );
     }
 
     #[test]
