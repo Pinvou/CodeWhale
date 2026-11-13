@@ -25,6 +25,21 @@ node scripts/account-platform-performance-gate.mjs --require-evidence "$EVIDENCE
 
 低于样本量、非生产等价资源、超过70%声明容量或缺少任一计时分段的结果均不能作为发布证据。
 
+## PostgreSQL 连接容量采样
+
+在授权的容量演练中，使用站点已核对的只读连接服务和预期数据库名，按固定间隔采集[连接样本](sql/postgres-connection-capacity-sample.sql)。从仓库根目录执行。连接服务负责 TLS 主机校验和凭据投递，采样只需要连接权限和默认统计视图读取权限。
+
+```sh
+psql -X --no-password --quiet --csv \
+  --dbname="service=$APPROVED_CAPACITY_AUDIT_SERVICE connect_timeout=5" \
+  --set=expected_database="$EXPECTED_CAPACITY_DATABASE" \
+  --file=account-platform/deploy/runbooks/sql/postgres-connection-capacity-sample.sql
+```
+
+站点使用已核对的单一连接服务，服务名使用不含空格的配置项。采样调度器还应对整个 `psql` 进程设置截止时间，覆盖域名解析、连接与查询，并使截止时间小于采样间隔。将采样结果、退出码和缺失区间与候选制品、部署标识及测试时间绑定。每个样本报告数据库端的连接上限、两类预留槽、当前服务器及目标数据库的已连库后端数，排除采样会话。多库共享一个服务器时，服务器计数只能记一次。数据库重启或切换时分段记录。目标不符、超时或统计视图不可读时保留失败记录，不填零。
+
+统计使用 `pg_stat_database.numbackends`。它包含连接到数据库的后端进程，涵盖客户端和已连库的后台工作进程。计算连接预算时另取客户端连接和应用池测量，以固定镜像的应用池配置、副本上界及迁移和运维预留核对。并发重连、代理或连接池和负载端也分别留证。现场容量结论仍须满足上述完整演练和独立复核。
+
 ## 工件验证限制
 
 命令从仓库根目录执行；策略或字段格式通过、工件摘要绑定和真实演练/发布审批是不同结论。现有可信来源、全部原始工件和独立审批不可省略，详见 [运维证据](operational-evidence.md)。
