@@ -36,6 +36,9 @@ var retainedPermissions = map[int64][]permissionFact{
 // original versions remain in their order; no applied version is skipped based
 // on MAX(version). Every following delivery carries the same seed bytes.
 func Ordered(input []migrations.Migration) ([]migrations.Migration, error) {
+	if err := validateUnstartedGrantInventory(input); err != nil {
+		return nil, err
+	}
 	if err := validateOrganizationEvidenceGuard(input); err != nil {
 		return nil, err
 	}
@@ -162,7 +165,7 @@ func Up(ctx context.Context, connection *pgx.Conn, input []migrations.Migration)
 	if _, err = connection.Exec(ctx, `SELECT pg_advisory_lock(hashtext('pinvou_account_platform_migrations'))`); err != nil {
 		return err
 	}
-	defer migrations.Unlock(context.Background(), connection)
+	defer migrations.Unlock(ctx, connection)
 	ordered, err = expectedEventDeliveryHistory(ctx, connection, ordered)
 	if err != nil {
 		return err
