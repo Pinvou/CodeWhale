@@ -1248,6 +1248,14 @@ fn add<S: CredentialStore>(
         reasoning_effort,
         model: model.to_owned(),
         base_url: base_url.to_owned(),
+        model_store_card_id: None,
+        model_store_link_detached: true,
+        model_store_link_requested: false,
+        model_store_link_only: false,
+        preserve_model_store_route: false,
+        preserve_context_window_tokens: false,
+        context_window_edit_requested: false,
+        reasoning_effort_only: false,
         provider_kind: metadata.provider_kind,
         vendor: metadata.vendor,
         endpoint_mode: metadata.endpoint_mode,
@@ -1272,6 +1280,9 @@ fn add<S: CredentialStore>(
             .map_err(|error| format!("credential store unavailable: {error}"))?;
         credential_written.store(true, std::sync::atomic::Ordering::Release);
         prefs.upsert_model(stored);
+        if context_window.is_some() {
+            prefs.record_explicit_model_context_selection(&id);
+        }
         if set_active {
             prefs.set_default_model_ref(ModelSelectionRef::local(&active_id))?;
         }
@@ -1317,6 +1328,7 @@ fn require_known_vision_model(
 /// per-session model binding and scheduled-task model pin that referenced the
 /// old one).
 fn apply_model_edit(model: &mut SavedModel, changes: &ModelEdit) {
+    let previous_route = model.clone();
     if let Some(preset) = changes.preset {
         model.preset = preset;
     }
@@ -1352,6 +1364,10 @@ fn apply_model_edit(model: &mut SavedModel, changes: &ModelEdit) {
     }
     if let Some(value) = &changes.vision_model_id {
         model.vision_model_id = value.clone();
+    }
+    if !model.has_same_endpoint_route(&previous_route) {
+        model.model_store_card_id = None;
+        model.model_store_link_detached = true;
     }
 }
 
@@ -1557,6 +1573,9 @@ fn edit<S: CredentialStore>(
             // The plaintext key never reaches settings.json.
             updated.api_key = String::new();
             prefs.upsert_model(updated);
+            if changes.context_window.is_some() {
+                prefs.record_explicit_model_context_selection(&id);
+            }
             if set_active {
                 prefs.set_default_model_ref(ModelSelectionRef::local(&id))?;
             }
@@ -3823,6 +3842,97 @@ fn resolve_search_key<S: CredentialStore>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn store_card_link_survives_option_edits_and_clears_when_route_changes() {
+        let mut model: SavedModel = serde_json::from_value(serde_json::json!({
+            "id":"local", "name":"Local", "preset":"openai_compatible",
+            "model":"wire-model", "base_url":"http://127.0.0.1:8000/v1",
+            "model_store_card_id":"stable-card"
+        }))
+        .expect("model fixture");
+        apply_model_edit(
+            &mut model,
+            &ModelEdit {
+                name: Some("My name".into()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(model.model_store_card_id.as_deref(), Some("stable-card"));
+        let same_base = model.base_url.clone();
+        apply_model_edit(
+            &mut model,
+            &ModelEdit {
+                base_url: Some(same_base),
+                ..Default::default()
+            },
+        );
+        assert_eq!(model.model_store_card_id.as_deref(), Some("stable-card"));
+        apply_model_edit(
+            &mut model,
+            &ModelEdit {
+                model: Some("other-model".into()),
+                ..Default::default()
+            },
+        );
+        assert!(model.model_store_card_id.is_none());
+        assert!(model.model_store_link_detached);
+        let reloaded: SavedModel =
+            serde_json::from_value(serde_json::to_value(&model).unwrap()).unwrap();
+        assert!(reloaded.model_store_link_detached);
+    }
+    #[test]
+    fn store_card_link_detaches_for_protocol_metadata_changes_at_the_same_address() {
+        let original: SavedModel = serde_json::from_value(serde_json::json!({
+            "id":"local", "name":"Local", "preset":"openai_compatible",
+            "provider_kind":"custom", "model":"wire-model",
+            "base_url":"http://127.0.0.1:8000/v1", "model_store_card_id":"stable-card"
+        }))
+        .unwrap();
+        for changes in [
+            ModelEdit {
+                preset: Some(ModelPreset::Openai),
+                ..Default::default()
+            },
+            ModelEdit {
+                provider_kind: Some(Some("official_api".into())),
+                ..Default::default()
+            },
+            ModelEdit {
+                vendor: Some(Some("anthropic".into())),
+                ..Default::default()
+            },
+            ModelEdit {
+                endpoint_mode: Some(Some("full_chat_completions".into())),
+                ..Default::default()
+            },
+        ] {
+            let mut updated = original.clone();
+            apply_model_edit(&mut updated, &changes);
+            assert!(updated.model_store_card_id.is_none());
+            assert!(updated.model_store_link_detached);
+            assert_eq!(updated.model, original.model);
+            assert_eq!(updated.base_url, original.base_url);
+        }
+        let mut unchanged = original;
+        apply_model_edit(
+            &mut unchanged,
+            &ModelEdit {
+                preset: Some(ModelPreset::OpenaiCompatible),
+                // Clearing custom falls back to the same inferred provider kind.
+                provider_kind: Some(None),
+                vendor: Some(None),
+                endpoint_mode: Some(None),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            unchanged.model_store_card_id.as_deref(),
+            Some("stable-card")
+        );
+        assert!(!unchanged.model_store_link_detached);
+    }
+
     use pinvou3_lib::platform::credential_store::CredentialError;
 
     // The credential-lane tests all steer the product through the
@@ -4952,6 +5062,79 @@ mod tests {
             },
             OutputMode::Human,
         )
+    }
+
+    #[test]
+    fn explicit_cli_context_flags_record_choices_and_unrelated_edits_do_not() {
+        let _env_lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _home = TempHome::new("explicit-context");
+        let store = RecordingStore::new();
+        let id = add_model(
+            &store,
+            "Legacy route",
+            "wire",
+            "http://127.0.0.1:8000/v1",
+            None,
+        );
+        assert!(!UserPrefs::load().has_explicit_model_context_selection(&id));
+        let edit_fields = |changes| {
+            edit(
+                &store,
+                EditModel {
+                    id: id.clone(),
+                    changes: Box::new(changes),
+                    api_key_env: None,
+                    api_key_stdin: false,
+                    clear_api_key: false,
+                    yes: false,
+                    set_active: false,
+                },
+                OutputMode::Human,
+            )
+            .unwrap();
+        };
+        edit_fields(ModelEdit {
+            alias: Some(Some("Renamed only".into())),
+            ..Default::default()
+        });
+        assert!(!UserPrefs::load().has_explicit_model_context_selection(&id));
+        for context in [Some(32768), None] {
+            UserPrefs::update_transaction(|prefs| {
+                prefs.advanced.model_store_context_repairs.remove(&id);
+                Ok(())
+            })
+            .unwrap();
+            edit_fields(ModelEdit {
+                context_window: Some(context),
+                ..Default::default()
+            });
+            let prefs = UserPrefs::load();
+            assert!(prefs.has_explicit_model_context_selection(&id));
+            assert_eq!(
+                prefs.model_by_id(&id).unwrap().context_window_tokens,
+                context
+            );
+        }
+        let added = add(
+            &store,
+            AddModel {
+                preset: ModelPreset::OpenaiCompatible,
+                name: "Explicit limit".into(),
+                model: "wire".into(),
+                base_url: "http://127.0.0.1:8000/v1".into(),
+                api_key_env: None,
+                api_key_stdin: false,
+                context_window: Some(32768),
+                max_output: None,
+                reasoning_effort: None,
+                metadata: Default::default(),
+                set_active: false,
+            },
+            OutputMode::Human,
+        )
+        .unwrap();
+        let added_id = added.stdout.strip_prefix("id: ").unwrap().trim();
+        assert!(UserPrefs::load().has_explicit_model_context_selection(added_id));
     }
 
     /// Sets (or clears) one search provider's key through the real

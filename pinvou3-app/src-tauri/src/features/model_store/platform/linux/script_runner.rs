@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::ffi::OsString;
 use std::fs::File;
 use std::io::{Read, Write};
-use std::os::fd::{AsFd, OwnedFd};
+use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -197,7 +197,7 @@ const SECRET_ENV_KEYS: [&str; 1] = ["LMM_HF_TOKEN"];
 ///
 /// 拒绝绝对路径、`..`、以及 Windows 风格的盘符——卡片内容来自网络，路径直接
 /// 拿来拼接就等于把「往任意位置写文件」的能力交给了卡片作者（或中间人）。
-fn sanitize_relative_path(rel: &str) -> Result<PathBuf, ScriptError> {
+pub(super) fn sanitize_relative_path(rel: &str) -> Result<PathBuf, ScriptError> {
     let rel = rel.trim().replace('\\', "/");
     if rel.is_empty() {
         return Err(ScriptError::new("卡片里有一个空的文件路径"));
@@ -319,7 +319,14 @@ fn redirect_is_refused(url: &reqwest::Url, previous_hops: usize) -> bool {
     previous_hops >= 10 || url.scheme() != "https"
 }
 
+#[cfg(test)]
+pub(super) mod test_loopback_fetch;
+
 fn http_get_text(url: &str) -> Result<String, ScriptError> {
+    #[cfg(test)]
+    if let Some(response) = test_loopback_fetch::get(url) {
+        return response;
+    }
     let client = reqwest::blocking::Client::builder()
         .connect_timeout(Duration::from_secs(10))
         .timeout(Duration::from_secs(60))
@@ -657,6 +664,9 @@ pub struct RunScriptOptions<'a> {
     /// 相对自己的位置去找同级文件（例如 `megacube.sh` 要 cd 到自己目录再调
     /// `controller.py`），不设的话它们一个都找不到。
     pub cwd: Option<PathBuf>,
+    /// Only weight-download scripts inherit this already-held OFD. Ordinary
+    /// deployment/enable scripts must not pass it to long-lived model daemons.
+    pub download_lease: Option<&'a File>,
 }
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(21600);
@@ -747,6 +757,41 @@ pub fn run_script(
         opts.cwd.as_deref(),
     )?;
 
+    if opts.download_lease.is_some() && need_root {
+        return Err(ScriptError::new("下载租约不能传给提权脚本"));
+    }
+    // The duplicate preserves the same open file description/flock. Keep the
+    // parent's descriptor CLOEXEC; only the post-fork child changes its copy.
+    let inherited_lease = opts
+        .download_lease
+        .map(|file| {
+            // A closed GUI stdio descriptor must not let the duplicate land in
+            // 0/1/2, which Command installs before pre_exec. F_DUPFD shares the OFD.
+            // SAFETY: fcntl duplicates a borrowed live fd and returns a new owned fd.
+            let fd = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 3) };
+            if fd < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            // SAFETY: successful F_DUPFD_CLOEXEC returned an exclusively owned fd.
+            Ok(unsafe { File::from_raw_fd(fd) })
+        })
+        .transpose()
+        .map_err(|e| ScriptError::new(format!("复制下载租约失败：{e}")))?;
+    if let Some(lease) = &inherited_lease {
+        let fd = lease.as_raw_fd();
+        // SAFETY: the child closure performs only async-signal-safe fcntl calls
+        // on a live captured descriptor. It neither allocates nor takes locks.
+        // Parent descriptor flags are unchanged because pre_exec runs after fork.
+        unsafe {
+            cmd.pre_exec(move || {
+                let flags = libc::fcntl(fd, libc::F_GETFD);
+                if flags == -1 || libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -767,10 +812,11 @@ pub fn run_script(
     // 登记这次派生的进程。应用要是被强杀/覆盖安装、没走到下面的销号逻辑，
     // 下次启动时 core::orphans 会照着这份登记把残留进程收掉——否则它会一直
     // 占着 huggingface_hub 的文件锁，把用户下一次点的下载堵死在那儿。
-    let mut run_guard = super::orphans::RunGuard::register(
+    let mut run_guard = super::orphans::RunGuard::register_for_card(
         child_pid,
         need_root,
         opts.label.as_deref().unwrap_or("后台脚本"),
+        env_vars.get("LMM_CARD_ID").map(String::as_str),
     );
 
     let stop_process_tree = |sig: Signal| {
@@ -1442,9 +1488,11 @@ mod tests {
             timeout: Some(Duration::from_secs(1)),
             ..Default::default()
         };
-        let started = Instant::now();
-        let err = with_isolated_data_dir(|| run_script(&path, &HashMap::new(), opts)).unwrap_err();
-        let elapsed = started.elapsed();
+        let (err, elapsed) = with_isolated_data_dir(|| {
+            let started = Instant::now();
+            let err = run_script(&path, &HashMap::new(), opts).unwrap_err();
+            (err, started.elapsed())
+        });
 
         assert!(
             err.to_string().contains("超过安全上限"),
@@ -1457,8 +1505,8 @@ mod tests {
         );
         assert!(
             elapsed < Duration::from_secs(12),
-            "打断之后等了 {elapsed:?} 才返回：宽限读循环没有总上限，杀不掉又一直在\
-             输出的进程能把 run_script 无限续下去，卡片会锁死在 ActiveCardOps 里"
+            "本次 run_script 用时 {elapsed:?} 超过 12 秒测试预算：宽限读循环已配置 \
+             EXIT_GRACE_TOTAL={EXIT_GRACE_TOTAL:?}，请检查退出路径或执行负载"
         );
     }
 
