@@ -45,6 +45,7 @@
     var capabilityReadIntent = 0;
     var capabilityReadFlight = null;
     var controlledTerminalSequence = 0;
+    var controlledRegistrationFailureIntent = null;
     var controllerTerminalSequence = 0;
     var proxyListIntent = 0;
     var proxyReadIntents = Object.create(null);
@@ -237,6 +238,7 @@
     }
 
     function stop() {
+      controlledRegistrationFailureIntent = null;
       subscriptionOwner = null;
       channelRegistrations = Object.create(null);
       var retiredUnlisten = unlisten.splice(0);
@@ -270,6 +272,7 @@
     }
 
     function controlledIntent(openNewGeneration) {
+      controlledRegistrationFailureIntent = null;
       var next = logic.beginControlledIntent(current(), openNewGeneration);
       publish(next);
       return next.intents.controlled;
@@ -328,6 +331,7 @@
     function controlledStart(deviceName, workspaces) {
       ensureAvailable();
       subscribe();
+      var owner = subscriptionOwner;
       var intent = controlledIntent(true);
       return invoke("desktop_remote_controlled_start", {
         deviceName: deviceName || null,
@@ -344,16 +348,47 @@
           });
         }
         return applyControlled(intent, result, true);
-      }).catch(function (failure) { throw asBoundedError(failure); }).finally(function () { settleControlledIntent(intent); });
+      }).catch(function (failure) { return failedControlledOpen(intent, failure, owner); }).finally(function () { settleControlledIntent(intent); });
     }
 
     function controlledRefresh() {
       ensureAvailable();
       subscribe();
+      var owner = subscriptionOwner;
       var intent = controlledIntent(true);
       return invoke("desktop_remote_controlled_refresh", {}).then(function (result) {
         return applyControlled(intent, result, true);
-      }).catch(function (failure) { throw asBoundedError(failure); }).finally(function () { settleControlledIntent(intent); });
+      }).catch(function (failure) { return failedControlledOpen(intent, failure, owner); }).finally(function () { settleControlledIntent(intent); });
+    }
+
+    function reconcileRegistrationFailure(intent, result) {
+      var previous = current();
+      var next = logic.reconcileControlledRegistrationFailure(previous, intent, controlledStatusPayload(result));
+      if (next !== previous) {
+        controlledRegistrationFailureIntent = null;
+        publish(next);
+      } else if (previous.intents.controlled === intent && previous.controlledDevice.status === "error"
+        && previous.controlledDevice.generation === (result && result.generation)) {
+        controlledRegistrationFailureIntent = null;
+      }
+      return result;
+    }
+
+    function failedControlledOpen(intent, failure, owner) {
+      var error = asBoundedError(failure);
+      if (!owner || subscriptionOwner !== owner || error.code !== "pairing_registration_failed"
+        || current().intents.controlled !== intent) throw error;
+      controlledRegistrationFailureIntent = intent;
+      var observedDevice = current().controlledDevice;
+      var terminalSequence = controlledTerminalSequence;
+      return invoke("desktop_remote_controlled_status", {}).then(function (authoritative) {
+        if (current().controlledDevice !== observedDevice || terminalSequence !== controlledTerminalSequence
+          || controlledRegistrationFailureIntent !== intent) return;
+        reconcileRegistrationFailure(intent, authoritative);
+      }, function () {
+        // Keep the exact failed intent for a later controlledSync (including
+        // reopening the panel). A failed read is not a new terminal outcome.
+      }).then(function () { throw error; });
     }
 
     function controlledStop() {
@@ -377,7 +412,15 @@
       subscribe();
       var intent = current().intents.controlled;
       var revision = current().revision;
+      var failureIntent = controlledRegistrationFailureIntent;
+      var observedDevice = current().controlledDevice;
+      var terminalSequence = controlledTerminalSequence;
       return invoke("desktop_remote_controlled_status", {}).then(function (result) {
+        if (failureIntent === intent) {
+          if (controlledRegistrationFailureIntent !== failureIntent || current().controlledDevice !== observedDevice
+            || terminalSequence !== controlledTerminalSequence) return result;
+          return reconcileRegistrationFailure(intent, result);
+        }
         if (current().revision !== revision) return result;
         return applyControlled(intent, result);
       }).catch(function (failure) { throw asBoundedError(failure); });
