@@ -3882,6 +3882,9 @@ jobs:
             'features::remote_control::controller::controlling_service::inbound_tests::' \
             'features::remote_control::controller::transfer::staging::tests::' \
             'features::remote_control::controller::relay_transport::tests::' \
+            'features::remote_control::controller::relay_transport::availability_tests::' \
+            'features::remote_control::controller::protocol::parsed_message_tests::' \
+            'features::remote_control::controller::controlling_service::tests::actual_adapter_' \
             'features::remote_control::controller::controlling_service::tests::connect_attempt_' \
             'features::computer_use::platform::windows::tests::' \
             'failed_probe_never_deletes_an_existing_store_windows' \
