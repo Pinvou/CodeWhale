@@ -752,8 +752,17 @@ mod tests {
         let (mut engine, _handle) = fixture(home.path());
         let child = {
             let mut agents = engine.subagent_manager.write().await;
-            let (child, _continuation) =
-                agents.insert_test_interrupted_continuable_agent("parked", home.path(), Vec::new());
+            let (child, _continuation) = agents.insert_test_interrupted_continuable_agent(
+                "parked",
+                home.path(),
+                vec![crate::models::Message {
+                    role: crate::models::Role::User,
+                    content: vec![crate::models::ContentBlock::Text {
+                        text: "recoverable work".into(),
+                        cache_control: None,
+                    }],
+                }],
+            );
             agents.assign_test_session_owner(&child, &engine.session.id);
             child
         };
@@ -829,7 +838,13 @@ mod tests {
             let (child, _continuation) = agents.insert_test_interrupted_continuable_agent(
                 "dead-end",
                 home.path(),
-                Vec::new(),
+                vec![crate::models::Message {
+                    role: crate::models::Role::User,
+                    content: vec![crate::models::ContentBlock::Text {
+                        text: "recoverable work".into(),
+                        cache_control: None,
+                    }],
+                }],
             );
             agents.assign_test_session_owner(&child, &engine.session.id);
             child
@@ -912,6 +927,47 @@ mod tests {
         assert!(
             engine.can_retire_without_losing_work(),
             "a completed goal state no longer holds accepted work"
+        );
+    }
+
+    #[tokio::test]
+    async fn forkguard_idle_shutdown_empty_interrupt_checkpoint_does_not_gate_forever() {
+        let home = tempfile::tempdir().unwrap();
+        let (mut engine, _handle) = fixture(home.path());
+        {
+            let mut agents = engine.subagent_manager.write().await;
+            let (child, _rx) = agents.insert_test_running_agent_with_input("early", home.path());
+            agents.assign_test_session_owner(&child, &engine.session.id);
+            let (_, interrupted) = agents
+                .interrupt_child(&child, None, "before first checkpoint".into())
+                .unwrap();
+            assert!(interrupted.checkpoint.as_ref().unwrap().messages.is_empty());
+            let receipt = agents
+                .followup_child(&child, "no resume route".into())
+                .unwrap();
+            assert!(!receipt.woke);
+            assert!(receipt.continuation_handle.is_none());
+        }
+        assert!(
+            engine.can_retire_without_losing_work(),
+            "an empty placeholder is not a usable resume route"
+        );
+    }
+
+    #[tokio::test]
+    async fn forkguard_idle_shutdown_goal_lock_contention_retries_after_release() {
+        let home = tempfile::tempdir().unwrap();
+        let (mut engine, _handle) = fixture(home.path());
+        let goal = Arc::clone(&engine.config.goal_state);
+        let held = goal.lock().unwrap();
+        assert!(
+            !engine.can_retire_without_losing_work(),
+            "an unknown goal state must refuse retirement"
+        );
+        drop(held);
+        assert!(
+            engine.can_retire_without_losing_work(),
+            "contention must not latch the gate closed"
         );
     }
 }
