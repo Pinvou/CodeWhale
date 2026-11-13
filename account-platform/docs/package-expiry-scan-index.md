@@ -1,6 +1,6 @@
 # 跨钱包套餐到期扫描索引
 
-对应 #1632 的套餐到期扫描条目。原 `wallet_id` 前导的 ACTIVE 部分索引用于单钱包分配，不能提供跨钱包的 `valid_until, credited_at, id` 全局顺序。Billing 900039 增加相同三列顺序的 ACTIVE 部分索引，并 INCLUDE 查询返回的 `wallet_id`。
+对应 #1632 的套餐到期扫描条目。原 `wallet_id` 前导的 ACTIVE 部分索引用于单钱包分配，不能提供跨钱包的 `valid_until, credited_at, id` 全局顺序。Billing 900043 增加相同三列顺序的 ACTIVE 部分索引，并 INCLUDE 查询返回的 `wallet_id`。
 
 本片保留 `expireOnePackage` 的完整候选 SQL、REVIEW 分配排除、钱包先于套餐围栏的锁顺序、实际过期入账和幂等合同；不更改到期日期、金额、冻结状态或扫描批量。
 

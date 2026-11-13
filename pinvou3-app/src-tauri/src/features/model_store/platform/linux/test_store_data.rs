@@ -281,8 +281,8 @@ pub fn test_cards() -> Vec<TestCard> {
                 org: Some("Qwen".into()),
                 description: Some(
                     "SGLang + NVFP4 + Native MTP，面向 H3C Cube/GB10（ARM64）。同一个模型/\
-                     同一个引擎镜像下有研究团队验证过的多套部署参数方案：默认「基准测试\
-                     配置」，另可切换到面向生产/Agent 场景的「生产采样配置」。"
+                     同一个引擎镜像下有研究团队验证过的多套部署参数方案：默认使用面向\
+                     生产/Agent 场景的 256K「生产采样配置」，也可选择「基准测试配置」。"
                         .into(),
                 ),
                 size_bytes: 21_945_295_265,
@@ -303,15 +303,15 @@ pub fn test_cards() -> Vec<TestCard> {
             profiles: vec![
                 profile(
                     "benchmark",
-                    "基准测试配置（默认）",
+                    "基准测试配置",
                     "研究团队 Benchmark 验证的默认参数：8192 上下文（部署时覆盖为 65536）、\
                      BF16 KV Cache，默认只监听 127.0.0.1。",
                 ),
                 profile(
                     "production-sampling",
-                    "生产采样配置",
+                    "生产采样配置（默认，256K 上下文）",
                     "面向生产环境 + Agent/工具调用调过的参数：262144 上下文、FP8 E4M3 KV \
-                     Cache，默认监听 0.0.0.0，带工具调用/推理内容解析和生产默认采样参数。",
+                     Cache，默认只监听 127.0.0.1，带工具调用/推理内容解析和生产默认采样参数。",
                 ),
             ],
             scripts: card_scripts!("qwen38-27b-nvfp4-mtp"),
@@ -568,6 +568,227 @@ pub fn to_detail(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mtp_generated_production_defaults_to_loopback_256k_and_preserves_existing_env() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let cards = test_cards();
+        let card = cards
+            .iter()
+            .find(|card| card.summary.id == "qwen38-27b-nvfp4-mtp")
+            .expect("MTP card");
+        let production = card
+            .profiles
+            .iter()
+            .find(|profile| profile.id == "production-sampling")
+            .expect("production profile");
+        let description = production.description.as_deref().expect("description");
+        assert!(description.contains("127.0.0.1"));
+        assert!(!description.contains("0.0.0.0"));
+
+        let install = script_content(card, "install_engine").expect("install_engine");
+        // Only run the profile materialization block: never the installer, Docker,
+        // GPU probes, privilege changes or network operations.
+        let start = install
+            .find("mkdir -p \"$VENDOR_DIR/profiles\"\n")
+            .expect("profile materialization start");
+        let end = install[start..]
+            .find("cp \"$VENDOR_DIR/profiles/benchmark/compose.yaml\"")
+            .map(|offset| start + offset)
+            .expect("profile materialization end");
+        let temp = tempfile::tempdir().expect("temporary HOME");
+        let vendor = temp
+            .path()
+            .join(".local/share/local-model-manager/vendor/qwen38-nvfp4-mtp");
+        std::fs::create_dir_all(vendor.join("scripts")).expect("vendor scripts");
+        let generated = std::process::Command::new("bash")
+            .args(["-euo", "pipefail", "-c", &install[start..end]])
+            .env("HOME", temp.path())
+            .env("VENDOR_DIR", &vendor)
+            .output()
+            .expect("generate real profile templates");
+        assert!(
+            generated.status.success(),
+            "{}",
+            String::from_utf8_lossy(&generated.stderr)
+        );
+
+        // Exercise the actual entry script against a harmless deployment sink.
+        let sink = vendor.join("scripts/deploy.sh");
+        std::fs::write(
+            &sink,
+            "#!/bin/bash\nprintf '%s\\n' invoked >> .deploy-invocations\n",
+        )
+        .expect("deployment sink");
+        std::fs::set_permissions(&sink, std::fs::Permissions::from_mode(0o755))
+            .expect("executable sink");
+        let deploy = script_content(card, "deploy").expect("deploy");
+        let run_deploy = |profile: Option<&str>,
+                          models_root: &std::path::Path,
+                          invocation: usize| {
+            let mut command = std::process::Command::new("bash");
+            command
+                .args(["-c", &deploy])
+                .env("HOME", temp.path())
+                .env("LMM_MODELS_DIR", models_root)
+                .env_remove("LMM_DEPLOY_PROFILE");
+            if let Some(profile) = profile {
+                command.env("LMM_DEPLOY_PROFILE", profile);
+            }
+            let output = command.output().expect("deploy with generated profile");
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let profile = profile.unwrap_or("production-sampling");
+            for (generated, template) in [
+                ("compose.yaml", "compose.yaml"),
+                (".env.example", ".env.example"),
+                ("scripts/smoke-test.sh", "smoke-test.sh"),
+            ] {
+                assert_eq!(
+                    std::fs::read(vendor.join(generated)).expect("deployed profile file"),
+                    std::fs::read(vendor.join("profiles").join(profile).join(template))
+                        .expect("profile template"),
+                    "profile file {generated} must follow {profile}"
+                );
+            }
+            assert!(
+                std::fs::metadata(vendor.join("scripts/smoke-test.sh"))
+                    .expect("smoke script permissions")
+                    .permissions()
+                    .mode()
+                    & 0o111
+                    != 0
+            );
+            assert_eq!(
+                std::fs::read_to_string(vendor.join(".active_profile")).expect("active profile"),
+                format!("{profile}\n")
+            );
+            assert_eq!(
+                std::fs::read_to_string(vendor.join(".deploy-invocations"))
+                    .expect("deployment sink was called")
+                    .lines()
+                    .count(),
+                invocation
+            );
+            assert!(models_root.join("Qwen3.8-27B-NVFP4").is_dir());
+        };
+        let align_paths = |contents: &str, models_root: &std::path::Path| {
+            let model_path = models_root.join("Qwen3.8-27B-NVFP4");
+            contents
+                .lines()
+                .map(|line| {
+                    if line.starts_with("MODEL_PATH=") {
+                        format!("MODEL_PATH={}", model_path.display())
+                    } else if line.starts_with("CACHE_PATH=") {
+                        format!("CACHE_PATH={}", vendor.join("cache").display())
+                    } else {
+                        line.to_string()
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+                + "\n"
+        };
+        let production_template =
+            std::fs::read_to_string(vendor.join("profiles/production-sampling/.env.example"))
+                .expect("production template");
+        let benchmark_template =
+            std::fs::read_to_string(vendor.join("profiles/benchmark/.env.example"))
+                .expect("benchmark template");
+        let models_one = temp.path().join("models-one");
+        // An unset profile selects the production 256K loopback defaults.
+        run_deploy(None, &models_one, 1);
+        let env_file = vendor.join(".env");
+        let generated_env = std::fs::read_to_string(&env_file).expect("generated .env");
+        assert_eq!(
+            generated_env,
+            align_paths(&production_template, &models_one)
+        );
+        assert!(
+            generated_env
+                .lines()
+                .any(|line| line == "HOST_BIND=127.0.0.1")
+        );
+        assert!(
+            generated_env
+                .lines()
+                .any(|line| line == "CONTEXT_LENGTH=262144")
+        );
+
+        let configured_env = generated_env
+            .replace("HOST_BIND=127.0.0.1", "HOST_BIND=0.0.0.0")
+            .replace("CONTEXT_LENGTH=262144", "CONTEXT_LENGTH=131072")
+            .replace("PORT=30000", "PORT=30123")
+            .replace("KV_CACHE_DTYPE=fp8_e4m3", "KV_CACHE_DTYPE=user-custom")
+            .replace(
+                &format!(
+                    "MODEL_PATH={}",
+                    models_one.join("Qwen3.8-27B-NVFP4").display()
+                ),
+                "MODEL_PATH=/stale-model-path",
+            )
+            .replace(
+                &format!("CACHE_PATH={}", vendor.join("cache").display()),
+                "CACHE_PATH=/stale-cache-path",
+            )
+            + "USER_SETTING=retained\n";
+        std::fs::write(&env_file, &configured_env).expect("existing user configuration");
+        let models_two = temp.path().join("models-two");
+        run_deploy(Some("production-sampling"), &models_two, 2);
+        assert_eq!(
+            std::fs::read_to_string(&env_file).expect("retained production .env"),
+            align_paths(&configured_env, &models_two),
+            "same-profile redeploy retains user values while realigning both paths"
+        );
+
+        let models_three = temp.path().join("models-three");
+        run_deploy(Some("benchmark"), &models_three, 3);
+        let benchmark_env = std::fs::read_to_string(&env_file).expect("benchmark .env");
+        assert_eq!(
+            benchmark_env,
+            align_paths(&benchmark_template, &models_three)
+                .replace("CONTEXT_LENGTH=8192", "CONTEXT_LENGTH=65536"),
+            "profile switches rebuild the complete template, then apply the benchmark 64K override"
+        );
+        assert!(!benchmark_env.contains("USER_SETTING="));
+        let edited_benchmark = benchmark_env
+            .replace("CONTEXT_LENGTH=65536", "CONTEXT_LENGTH=2048")
+            .replace("HOST_BIND=127.0.0.1", "HOST_BIND=0.0.0.0")
+            .replace("PORT=30000", "PORT=30124")
+            .replace(
+                &format!(
+                    "MODEL_PATH={}",
+                    models_three.join("Qwen3.8-27B-NVFP4").display()
+                ),
+                "MODEL_PATH=/another-stale-model-path",
+            )
+            .replace(
+                &format!("CACHE_PATH={}", vendor.join("cache").display()),
+                "CACHE_PATH=/another-stale-cache-path",
+            )
+            + "BENCH_SETTING=retained\n";
+        std::fs::write(&env_file, &edited_benchmark).expect("edited benchmark configuration");
+        let models_four = temp.path().join("models-four");
+        run_deploy(Some("benchmark"), &models_four, 4);
+        assert_eq!(
+            std::fs::read_to_string(&env_file).expect("redeployed benchmark .env"),
+            align_paths(&edited_benchmark, &models_four)
+                .replace("CONTEXT_LENGTH=2048", "CONTEXT_LENGTH=65536"),
+            "every benchmark redeploy reapplies 64K and both paths without erasing other user values"
+        );
+
+        let models_five = temp.path().join("models-five");
+        run_deploy(Some("production-sampling"), &models_five, 5);
+        assert_eq!(
+            std::fs::read_to_string(&env_file).expect("restored production .env"),
+            align_paths(&production_template, &models_five),
+            "switching back restores production 256K and loopback defaults"
+        );
+    }
 
     #[test]
     fn all_cards_have_six_scripts() {

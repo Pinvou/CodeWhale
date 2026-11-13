@@ -7,6 +7,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
+  selectedDeployProfile,
+  deployProfileLabel,
   MAX_LOG_LINES,
   UNLOCK_CLICKS,
   UNLOCK_CLICK_GAP_MS,
@@ -18,6 +20,8 @@ import {
   libraryStatusOf,
   storeGuideState,
   missingFormFields,
+  operationErrorText,
+  operationWarningText,
   weightVerificationNotice,
   weightVerificationOf,
   parseProgressLine,
@@ -26,11 +30,32 @@ import {
   reduceLogChunk,
   splitDuration,
   uninstallDoneText,
+  uninstallCleanupWarning,
   uninstallOptionsFor,
   trimSamples,
 } from '../src/features/model-store/model-store-logic.js';
+import { dictZh } from '../src/shared/i18n/zh.js';
+import { dictEn } from '../src/shared/i18n/en.js';
+import { dictJa } from '../src/shared/i18n/ja.js';
 
 const emptyState = () => ({ lines: [], progress: null, speed: null, prompt: null, samples: [] });
+
+test('deployment selection uses the backend default and keeps valid saved choices', () => {
+  const record = {
+    card_id: 'qwen38-27b-nvfp4-mtp',
+    profiles: [{ id: 'benchmark' }, { id: 'production-sampling' }],
+    default_profile_id: 'production-sampling',
+  };
+  assert.equal(selectedDeployProfile(record), 'production-sampling');
+  assert.equal(selectedDeployProfile({ ...record, active_profile_id: 'benchmark' }), 'benchmark');
+  assert.equal(selectedDeployProfile({ ...record, active_profile_id: 'removed' }), 'production-sampling');
+  assert.equal(selectedDeployProfile({ ...record, default_profile_id: 'removed' }), 'benchmark');
+  assert.equal(selectedDeployProfile({ profiles: [] }), null);
+  const copy = { profileMtpBenchmark: 'Benchmark 64K', profileMtpProduction: 'Production 256K' };
+  assert.equal(deployProfileLabel(record, { id: 'benchmark', name: 'Old default 8K' }, copy), 'Benchmark 64K');
+  assert.equal(deployProfileLabel(record, { id: 'production-sampling' }, copy), 'Production 256K');
+  assert.equal(deployProfileLabel({ card_id: 'other' }, { id: 'benchmark', name: 'Other profile' }, copy), 'Other profile');
+});
 
 test('formatBytes：按 1024 进位，B 取整、其余保留一位小数', () => {
   assert.equal(formatBytes(0), '0B');
@@ -239,6 +264,17 @@ test('uninstallDoneText：结果缺失时退回"已保留"，宁可少说也不�
   assert.equal(uninstallDoneText(COPY, 'Qwen', {}), 'kept:Qwen');
 });
 
+test('uninstall cleanup keeps sync failures visible and combines both recovery warnings', () => {
+  const copy = {
+    uninstallLinksLeft: (name) => `links-left:${name}`,
+    linkSyncFailed: (error) => `sync-failed:${error}`,
+  };
+  assert.equal(uninstallCleanupWarning(copy, 'Qwen', true, null), '');
+  assert.equal(uninstallCleanupWarning(copy, 'Qwen', true, 'disk full'), 'sync-failed:disk full');
+  assert.equal(uninstallCleanupWarning(copy, 'Qwen', false, null), 'links-left:Qwen');
+  assert.equal(uninstallCleanupWarning(copy, 'Qwen', false, 'disk full'), 'links-left:Qwen sync-failed:disk full');
+});
+
 // ---------------------------------------------- 卸载对话框该给几个选项
 //
 // 「卸载」＝把模型从引擎上撤下来。卡片只是下载在本机时这件事无从做起，摆出来
@@ -308,4 +344,54 @@ test('weightVerificationNotice：达标卡不出黄条，不达标的两档各�
 test('weightVerificationNotice：没声明的卡出黄条，而且出的是最狠那一句', () => {
   assert.deepEqual(weightVerificationNotice({}), { bodyKey: 'weightVerifyNone' });
   assert.deepEqual(weightVerificationNotice(null), { bodyKey: 'weightVerifyNone' });
+});
+
+test('operationWarningText：警告码按语言渲染，未知字符串原样回退', () => {
+  const copy = {
+    forceRemoveRecordsOnlyWarning: '只删了记录，请自行核实磁盘。',
+    forceRemoveResidualWarning: '磁盘文件未删除，请核查以下路径。',
+  };
+  // 后端两个警告码各对应一句文案
+  assert.equal(
+    operationWarningText(copy, 'force_remove_records_only'),
+    '只删了记录，请自行核实磁盘。'
+  );
+  assert.equal(
+    operationWarningText(copy, 'force_remove_residual_paths'),
+    '磁盘文件未删除，请核查以下路径。'
+  );
+  // 旧版结果、测试桩的纯文本警告原样显示，不吞不译
+  assert.equal(operationWarningText(copy, 'files retained'), 'files retained');
+  // 无警告一律空串，界面上不渲染空段落
+  assert.equal(operationWarningText(copy, null), '');
+  assert.equal(operationWarningText(copy, undefined), '');
+  assert.equal(operationWarningText(copy, ''), '');
+});
+
+test('operationErrorText：链接资源拒绝说明现有资源保留和安全迁移步骤，按当前语言显示', () => {
+  const code = 'model_store_linked_resource_path';
+  const copies = [dictZh.uiModelStore, dictEn.uiModelStore, dictJa.uiModelStore];
+  const messages = copies.map((copy) => operationErrorText(copy, code));
+  assert.equal(new Set(messages).size, 3);
+  const required = [
+    [/符号链接/, /现有资源和记录已保留/, /停用.*退出.*备份/, /迁移文档.*实际目录/, /不要直接删除.*目标目录/],
+    [/symbolic link/, /Existing resources and records have been preserved/, /Stop.*exit.*back up/, /migration guide.*physical directories/, /Do not delete.*target directory/],
+    [/シンボリックリンク/, /現存するリソースと記録.*保持/, /停止.*終了.*バックアップ/, /移行手順.*実体のディレクトリ/, /リンク先.*直接削除しない/],
+  ];
+  for (const [index, message] of messages.entries()) {
+    assert.ok(!message.includes(code));
+    for (const phrase of required[index]) assert.match(message, phrase);
+    assert.equal(operationErrorText(copies[index], new Error(code)), message);
+  }
+});
+
+test('operationErrorText：未知诊断与原型名称保持原串，不接受继承的错误映射', () => {
+  for (const copy of [dictZh.uiModelStore, dictEn.uiModelStore, dictJa.uiModelStore]) {
+    for (const message of ['Permission denied (os error 13)\nretained detail', '__proto__', 'constructor', 'toString', '']) {
+      assert.equal(operationErrorText(copy, message), message);
+    }
+  }
+  const code = 'model_store_linked_resource_path';
+  assert.equal(operationErrorText({ operationErrors: Object.create({ [code]: 'inherited translation' }) }, code), code);
+  assert.equal(operationErrorText({}, 'diagnostic from an older host'), 'diagnostic from an older host');
 });

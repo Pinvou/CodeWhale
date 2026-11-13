@@ -59,7 +59,8 @@ try {
     await fresh('admin'); await page.evaluate(() => { window.f02.financeRecovery = true; window.f02.approvalCreated = true; window.f02.approvalStatus = 'REJECTED'; }); await click('wallet'); await settled();
     await page.evaluate(() => document.querySelector('[data-finance-adjustments] button').click()); await settled();
     await click('newInvocation'); await settled();
-    await page.type('form input[pattern]', '123'); await page.type('form textarea', 'Controlled replacement adjustment reason'); await click('draft'); await settled();
+    assert.equal(await page.$eval('form.adm-wallet-adjustment-form footer button[type=submit]', button => button.disabled), true, 'replacement requires amount and reason before submit');
+    await page.type('form input[pattern]', '123'); await page.type('form textarea', 'Controlled replacement adjustment reason'); await page.click('form.adm-wallet-adjustment-form footer button[type=submit]'); await settled();
     assert.ok(await page.evaluate(() => { const a = window.f02.calls.find(c => c.method === 'POST' && c.url.endsWith('/adjustments')); const p = window.f02.calls.find(c => c.method === 'POST' && c.url.endsWith('/api/admin/approvals/requests')); if (!a || !p) return false; const adjustment = JSON.parse(a.body), draft = JSON.parse(p.body); return adjustment.wallet_id === window.f02.id && adjustment.idempotency_key.startsWith(`replacement:${window.f02.id}:`) && draft.supersedes_request_id === window.f02.id && draft.target_resource_id === window.f02.other; }));
   });
   await caseRun('Existing adjustment draft resumes with the fresh version and no duplicate adjustment', async () => {
@@ -76,7 +77,7 @@ try {
     await fresh('admin'); await page.evaluate(() => { window.f02.financeRecovery = true; window.f02.approvalCreated = true; window.f02.approvalStatus = 'WITHDRAWN'; }); await click('wallet'); await settled();
     await page.evaluate(() => document.querySelector('[data-finance-adjustments] button').click()); await settled(); await click('newInvocation');
     await page.type('form input[pattern]', '123'); await page.type('form textarea', 'Controlled replacement adjustment reason');
-    await page.evaluate(() => { window.f02.replacementRequester = window.f02.other; }); await click('draft'); await settled();
+    await page.evaluate(() => { window.f02.replacementRequester = window.f02.other; }); await page.click('form.adm-wallet-adjustment-form footer button[type=submit]'); await settled();
     assert.ok(await page.evaluate(() => !window.f02.calls.some(c => c.method === 'POST' && c.url.endsWith('/adjustments'))));
   });
   await caseRun('Replacement locks the wallet and retains the same financial facts and key after unknown ACK', async () => {
@@ -84,7 +85,7 @@ try {
     await page.evaluate(() => document.querySelector('[data-finance-adjustments] button').click()); await settled(); await click('newInvocation');
     assert.equal(await page.evaluate(() => document.querySelector('form input:not([pattern])').readOnly), true);
     await page.type('form input[pattern]', '9007199254740993'); await page.type('form textarea', 'Controlled replacement adjustment reason');
-    await page.evaluate(() => { window.f02.unknownAdjustment = true; }); await click('draft'); await settled(); await page.select('[aria-label=fixture-language]', 'ja');
+    await page.evaluate(() => { window.f02.unknownAdjustment = true; }); await page.click('form.adm-wallet-adjustment-form footer button[type=submit]'); await settled(); await page.select('[aria-label=fixture-language]', 'ja');
     await page.evaluate(() => { window.f02.unknownAdjustment = false; }); await click('retry'); await settled();
     assert.ok(await page.evaluate(() => { const a = window.f02.calls.filter(c => c.method === 'POST' && c.url.endsWith('/adjustments')); return a.length === 2 && a[0].body === a[1].body && a[0].key === a[1].key && a[0].body.includes('9007199254740993') && window.f02.approvalStatus === 'SUBMITTED'; }));
   });

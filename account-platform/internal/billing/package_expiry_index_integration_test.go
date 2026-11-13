@@ -3,6 +3,7 @@ package billing
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -13,8 +14,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Pinvou/pinvou3/account-platform/internal/billingschema"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/migrations"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 const packageExpiryIndexName = "entitlement_packages_expiry_scan_idx"
@@ -82,7 +86,7 @@ func packageExpiryFacts(t *testing.T, ctx context.Context, r *PostgresRepository
 	}
 	var metadata string
 	if err := r.pool.QueryRow(ctx, `SELECT jsonb_build_array(
- (SELECT jsonb_agg(to_jsonb(m) ORDER BY version) FROM schema_migrations m WHERE version<>900039),
+ (SELECT jsonb_agg(to_jsonb(m) ORDER BY version) FROM schema_migrations m WHERE version<>900043),
  (SELECT jsonb_agg(jsonb_build_array(relname,pg_get_userbyid(relowner),relacl::text) ORDER BY relname) FROM pg_class WHERE relnamespace='public'::regnamespace AND relkind='r'),
  (SELECT jsonb_agg(pg_get_indexdef(indexrelid) ORDER BY indexrelid::regclass::text) FROM pg_index WHERE indexrelid<>COALESCE(to_regclass('public.entitlement_packages_expiry_scan_idx'),0)),
  (SELECT jsonb_agg(pg_get_triggerdef(oid) ORDER BY tgrelid,tgname) FROM pg_trigger WHERE NOT tgisinternal),
@@ -240,6 +244,26 @@ func TestPackageExpiryCrossWalletIndexPostgres(t *testing.T) {
 				if packageExpiryFacts(t, ctx, r) != before {
 					t.Fatal("refused Down changed facts", actor)
 				}
+			}
+			// The CLI deliberately redacts database details. Check the precise
+			// public API error separately without weakening that log boundary.
+			loaded, err := migrations.Load("../../migrations/billing")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err = owner.Exec(ctx, `SET ROLE billing_service`); err != nil {
+				t.Fatal(err)
+			}
+			refused := billingschema.DownOne(ctx, owner, loaded)
+			if _, err = owner.Exec(ctx, `SET ROLE billing_schema_owner`); err != nil {
+				t.Fatal(err)
+			}
+			var pgError *pgconn.PgError
+			if !errors.As(refused, &pgError) || pgError.Code != "55000" || pgError.Message != "package expiry scan index is forward-only" {
+				t.Fatal("public Down did not preserve its exact forward-only refusal", refused)
+			}
+			if packageExpiryFacts(t, ctx, r) != before {
+				t.Fatal("typed Down refusal changed retained facts")
 			}
 			if _, err = owner.Exec(ctx, `ANALYZE entitlement_packages; ANALYZE entitlement_components; ANALYZE usage_holds; ANALYZE usage_hold_allocations`); err != nil {
 				t.Fatal(err)
