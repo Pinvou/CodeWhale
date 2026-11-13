@@ -1,0 +1,7 @@
+{
+  "old": { "status": "waiting_for_pairing", "statusIntent": "1", "generation": "generation-old", "errorCode": null },
+  "retiring": { "status": "retiring_generation", "statusIntent": "2", "generation": "generation-old", "errorCode": null },
+  "registering": { "status": "registering", "statusIntent": "3", "generation": "generation-new", "errorCode": null },
+  "failed": { "status": "error", "statusIntent": "3", "generation": "generation-new", "errorCode": "pairing_registration_failed" },
+  "next": { "status": "waiting_for_pairing", "statusIntent": "4", "generation": "generation-next", "errorCode": null }
+}

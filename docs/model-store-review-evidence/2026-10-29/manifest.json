@@ -1,0 +1,639 @@
+{
+  "schema_version": 2,
+  "prepared_at_utc": "2026-10-29T11:17:39.355181+00:00",
+  "evidence_class": "author raw execution receipts; downloadable/replayable, not reviewer approval",
+  "tested_source_commit": "e768c60efdf52bbae38032bcb0565809aa8183ee",
+  "tested_source_tree": "e3700ee8906eeb2df226d5c14aff8b7e8358de62",
+  "base": "111121c6679d283313691a3ee447c08e3a7e8551",
+  "CodeWhale": "f1eb10efcfe2468fde42d1724d7f5f19d54b904c",
+  "frozen_source_sha256": {
+    "pinvou3-app/src-tauri/src/app/model_store_events.rs": "7a355850017ad48629a98da376d0f94cbbcd67a83833c59d00dad5b4785ea816",
+    "pinvou3-app/src-tauri/src/app/model_store_events/platform/mod.rs": "83c0f9603fd3cb14c9dbaa1e32f11c68b0da4e9a81ebdffe2eb03ae7cebb2166",
+    "pinvou3-app/src-tauri/src/app/model_store_events/platform/linux_live_pool_tests.rs": "b79d4ec1b287a44e63e73bcbdc50f0774b27e50d5abc70644336f3463c64377f",
+    "pinvou3-app/src-tauri/src/lib.rs": "7cb8d4615675e06478ef896b34a4698a02dec51ae7cda1fc681a91f0a4ad22af",
+    "pinvou3-app/tests/tauri_platform_layout.test.js": "95a1f7dcf3a9e804a330e03d9986e942eee639c3bf4019fbb3f94024434f108a",
+    "pinvou3-app/src-tauri/src/features/assistant/engine_pool.rs": "70b485d83453b39a8259aed88b12f2f2e21a55ac1cd57af93f00c24c328c779c",
+    "pinvou3-app/src-tauri/src/features/assistant/engine.rs": "2a1078440950cda949b72edb00c9fa86b68f88571f3c21e2cb47b269eae95032",
+    "pinvou3-app/src-tauri/src/features/model_store/platform/ipc_fixture.rs": "c7be5eed566ee82e8e55d044755cac2575283f03dd176062ceccd385f71d1e25",
+    ".github/workflows/connector-verify.yml": "4db32bdb97980acbf235fa59f7eb6883f0e75d449b6dc83ba816372e4767b8c4"
+  },
+  "source_qualification": "The five code files are signed in the tested source commit. Only model-store-updates.md and this new evidence directory were pending as docs during execution; these are not embedded by the product build. The publication commit must differ from the tested source commit only in these two documented paths.",
+  "runs": [
+    {
+      "name": "live-pool",
+      "head": "e768c60efdf52bbae38032bcb0565809aa8183ee",
+      "tree": "e3700ee8906eeb2df226d5c14aff8b7e8358de62",
+      "at": "2026-10-29T11:07:47.341808+00:00",
+      "argv": [
+        "cargo",
+        "test",
+        "--locked",
+        "--no-default-features",
+        "--lib",
+        "--features",
+        "benchmark-hooks",
+        "app::model_store_events::platform_tests::linux_live_pool_tests::identical_enable_rebuilds_real_pool_and_next_turn_preserves_history",
+        "--",
+        "--ignored",
+        "--exact",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "cwd": "pinvou3-app/src-tauri",
+      "exit": 0,
+      "seconds": 2.07,
+      "log": "oct29-review569630-fixed-head-live-pool.log",
+      "original_bytes": 481,
+      "original_sha256": "1b585c0aee3129a57ff1437f4504f66d77d606e85bf7f56b0c67ac56febf32fb",
+      "test_summaries": [
+        "1 passed; 0 failed; 0 ignored; 0 measured; 5421 filtered out; finished in 1.59s"
+      ],
+      "lib_test_warning_count": [],
+      "evidence_class": "author executed; not independent reviewer execution or cloud CI"
+    },
+    {
+      "name": "full-rust",
+      "head": "e768c60efdf52bbae38032bcb0565809aa8183ee",
+      "tree": "e3700ee8906eeb2df226d5c14aff8b7e8358de62",
+      "at": "2026-10-29T11:07:49.413847+00:00",
+      "argv": [
+        "cargo",
+        "test",
+        "--locked",
+        "--no-default-features",
+        "--lib",
+        "--features",
+        "benchmark-hooks",
+        "--",
+        "--test-threads=1"
+      ],
+      "cwd": "pinvou3-app/src-tauri",
+      "exit": 0,
+      "seconds": 388.97,
+      "log": "oct29-review569630-fixed-head-full-rust.log",
+      "original_bytes": 591754,
+      "original_sha256": "9d190d3663dd67520294643a9b0668cefbf1fdd3d5d4fb541d1abcc917a0434c",
+      "test_summaries": [
+        "5401 passed; 0 failed; 21 ignored; 0 measured; 0 filtered out; finished in 388.46s"
+      ],
+      "lib_test_warning_count": [],
+      "evidence_class": "author executed; not independent reviewer execution or cloud CI",
+      "counts": {
+        "passed": 5401,
+        "failed": 0,
+        "ignored": 21,
+        "model_store_pass_lines": 333
+      }
+    },
+    {
+      "name": "clippy-production",
+      "head": "e768c60efdf52bbae38032bcb0565809aa8183ee",
+      "tree": "e3700ee8906eeb2df226d5c14aff8b7e8358de62",
+      "at": "2026-10-29T11:14:18.384481+00:00",
+      "argv": [
+        "cargo",
+        "clippy",
+        "--locked",
+        "--lib",
+        "--bins",
+        "--no-deps",
+        "--features",
+        "dev-tools",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "cwd": "pinvou3-app/src-tauri",
+      "exit": 0,
+      "seconds": 20.61,
+      "log": "oct29-review569630-fixed-head-clippy-production.log",
+      "original_bytes": 184,
+      "original_sha256": "f59f8e2cc1f0c2119fa611526cb496b1c59f568ef9f269d40d4e0bbc784d2b1a",
+      "test_summaries": [],
+      "lib_test_warning_count": [],
+      "evidence_class": "author executed; not independent reviewer execution or cloud CI"
+    },
+    {
+      "name": "clippy-tests",
+      "head": "e768c60efdf52bbae38032bcb0565809aa8183ee",
+      "tree": "e3700ee8906eeb2df226d5c14aff8b7e8358de62",
+      "at": "2026-10-29T11:14:38.998811+00:00",
+      "argv": [
+        "cargo",
+        "clippy",
+        "--locked",
+        "--lib",
+        "--bins",
+        "--tests",
+        "--no-deps",
+        "--features",
+        "dev-tools"
+      ],
+      "cwd": "pinvou3-app/src-tauri",
+      "exit": 0,
+      "seconds": 26.5,
+      "log": "oct29-review569630-fixed-head-clippy-tests.log",
+      "original_bytes": 8991683,
+      "original_sha256": "d64828de99bb053eed8c1ea3fe2ddd93eafde752632d7c9098fa67d7a1bc03bb",
+      "test_summaries": [],
+      "lib_test_warning_count": [
+        "19018"
+      ],
+      "evidence_class": "author executed; not independent reviewer execution or cloud CI"
+    },
+    {
+      "name": "registry",
+      "head": "e768c60efdf52bbae38032bcb0565809aa8183ee",
+      "tree": "e3700ee8906eeb2df226d5c14aff8b7e8358de62",
+      "at": "2026-10-29T11:15:05.521606+00:00",
+      "argv": [
+        "python3",
+        "scripts/test-registry-guard.py"
+      ],
+      "cwd": ".",
+      "exit": 0,
+      "seconds": 6.11,
+      "log": "oct29-review569630-fixed-head-registry.log",
+      "original_bytes": 77,
+      "original_sha256": "1341d1398b5336e127cb662082ea9f454d89d2a7934e2e9c1288beb45729cf8a",
+      "test_summaries": [],
+      "lib_test_warning_count": [],
+      "evidence_class": "author executed; not independent reviewer execution or cloud CI"
+    },
+    {
+      "name": "fmt",
+      "head": "e768c60efdf52bbae38032bcb0565809aa8183ee",
+      "tree": "e3700ee8906eeb2df226d5c14aff8b7e8358de62",
+      "at": "2026-10-29T11:15:11.633225+00:00",
+      "argv": [
+        "cargo",
+        "fmt",
+        "--",
+        "--check"
+      ],
+      "cwd": "pinvou3-app/src-tauri",
+      "exit": 0,
+      "seconds": 2.63,
+      "log": "oct29-review569630-fixed-head-fmt.log",
+      "original_bytes": 0,
+      "original_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "test_summaries": [],
+      "lib_test_warning_count": [],
+      "evidence_class": "author executed; not independent reviewer execution or cloud CI"
+    },
+    {
+      "name": "node",
+      "head": "e768c60efdf52bbae38032bcb0565809aa8183ee",
+      "at": "2026-10-29T11:07:48.513429+00:00",
+      "argv": [
+        "npm",
+        "--prefix",
+        "pinvou3-app",
+        "run",
+        "test:node"
+      ],
+      "cwd": ".",
+      "exit": 0,
+      "seconds": 77.29,
+      "log": "oct29-review569630-fixed-head-node.log",
+      "original_bytes": 559784,
+      "original_sha256": "5823f9ee627fd1d4aed9a131f391c790eb7e677f39a06a86528dabf759cbbb79",
+      "python_summaries": [],
+      "node_counts": {
+        "tests": "2139",
+        "pass": "2123",
+        "fail": "0",
+        "skipped": "16"
+      },
+      "PASS_groups": 0,
+      "evidence_class": "author executed; not independent reviewer execution or cloud CI"
+    },
+    {
+      "name": "python",
+      "head": "e768c60efdf52bbae38032bcb0565809aa8183ee",
+      "at": "2026-10-29T11:09:05.816728+00:00",
+      "argv": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "scripts/tests",
+        "-p",
+        "test_*.py"
+      ],
+      "cwd": ".",
+      "exit": 0,
+      "seconds": 84.72,
+      "log": "oct29-review569630-fixed-head-python.log",
+      "original_bytes": 7722,
+      "original_sha256": "bca7ed76d2f1be5ae79b1e156740eecb2b6a5dd08cdfef5fe0a22703fe896db3",
+      "python_summaries": [
+        [
+          "846",
+          "84.558"
+        ]
+      ],
+      "node_counts": {},
+      "PASS_groups": 1,
+      "evidence_class": "author executed; not independent reviewer execution or cloud CI"
+    },
+    {
+      "name": "controller",
+      "head": "e768c60efdf52bbae38032bcb0565809aa8183ee",
+      "at": "2026-10-29T11:10:30.541116+00:00",
+      "argv": [
+        "python3",
+        "scripts/test-native-engine-launch-receipt.py",
+        "<PUBLISHER_CONTROLLER>"
+      ],
+      "cwd": ".",
+      "exit": 0,
+      "seconds": 8.84,
+      "log": "oct29-review569630-fixed-head-controller.log",
+      "original_bytes": 1434,
+      "original_sha256": "68e72a5b57dc040b07ba24fb2f6a24c69b68873e5329468743eac861333c4fc7",
+      "python_summaries": [
+        [
+          "8",
+          "8.760"
+        ]
+      ],
+      "node_counts": {},
+      "PASS_groups": 0,
+      "evidence_class": "author executed; not independent reviewer execution or cloud CI",
+      "publisher_input": {
+        "source": "https://account.pinvou.com/model-store/assets/by-hash/5cb4539ce50c34948ac22bc720d2fce2f08e840e615a963860453f9e1c321bc7",
+        "bytes": 14453,
+        "BROKEN_SHA256": "5cb4539ce50c34948ac22bc720d2fce2f08e840e615a963860453f9e1c321bc7",
+        "LAUNCH_FIXED_SHA256": "6b9968bf37c944d6a0ef6207000a88ebe36deb68bac400db206aafb39a55af24",
+        "FIXED_SHA256": "868605374b0f609f676bf826f72f314a4a1cdb9939464778842c4797368c7d01",
+        "HTTP200_source_receipt_at": "2026-10-29T06:31:09.693455+00:00",
+        "full_script_not_distributed_here": true
+      }
+    },
+    {
+      "name": "chrome",
+      "head": "e768c60efdf52bbae38032bcb0565809aa8183ee",
+      "at": "2026-10-29T11:10:39.385238+00:00",
+      "argv": [
+        "npm",
+        "--prefix",
+        "pinvou3-app",
+        "run",
+        "test:model-store-versions-ui"
+      ],
+      "cwd": ".",
+      "exit": 0,
+      "seconds": 9.13,
+      "log": "oct29-review569630-fixed-head-chrome.log",
+      "original_bytes": 1560,
+      "original_sha256": "3a7d77749c0407ce8e71da71791df4c64b017e65de22c587840b23e8ea48877a",
+      "python_summaries": [],
+      "node_counts": {},
+      "PASS_groups": 12,
+      "evidence_class": "author executed; not independent reviewer execution or cloud CI"
+    },
+    {
+      "name": "ui-build",
+      "head": "e768c60efdf52bbae38032bcb0565809aa8183ee",
+      "at": "2026-10-29T11:10:48.520722+00:00",
+      "argv": [
+        "npm",
+        "--prefix",
+        "pinvou3-app",
+        "run",
+        "build:ui"
+      ],
+      "cwd": ".",
+      "exit": 0,
+      "seconds": 2.52,
+      "log": "oct29-review569630-fixed-head-ui-build.log",
+      "original_bytes": 17307,
+      "original_sha256": "b87c8d1ff1616019cd7310ff6d3ce0354c5a85df836b8232d5357fc39cc2f0f1",
+      "python_summaries": [],
+      "node_counts": {},
+      "PASS_groups": 0,
+      "evidence_class": "author executed; not independent reviewer execution or cloud CI"
+    },
+    {
+      "name": "web-build",
+      "head": "e768c60efdf52bbae38032bcb0565809aa8183ee",
+      "at": "2026-10-29T11:10:51.042433+00:00",
+      "argv": [
+        "npm",
+        "--prefix",
+        "pinvou3-app",
+        "run",
+        "build:web"
+      ],
+      "cwd": ".",
+      "exit": 0,
+      "seconds": 2.37,
+      "log": "oct29-review569630-fixed-head-web-build.log",
+      "original_bytes": 14734,
+      "original_sha256": "5ac49f6880babbd8734955945e4321b7bb57bd4042110cc749039b57fc5c5608",
+      "python_summaries": [],
+      "node_counts": {},
+      "PASS_groups": 0,
+      "evidence_class": "author executed; not independent reviewer execution or cloud CI"
+    },
+    {
+      "name": "architecture",
+      "head": "e768c60efdf52bbae38032bcb0565809aa8183ee",
+      "at": "2026-10-29T11:10:53.415973+00:00",
+      "argv": [
+        "python3",
+        "scripts/architecture-guard.py"
+      ],
+      "cwd": ".",
+      "exit": 0,
+      "seconds": 11.4,
+      "log": "oct29-review569630-fixed-head-architecture.log",
+      "original_bytes": 58,
+      "original_sha256": "de5bff130d75700fdd1ec335b56d6149a8f099986718a127dbac577fcb556ea3",
+      "python_summaries": [],
+      "node_counts": {},
+      "PASS_groups": 0,
+      "evidence_class": "author executed; not independent reviewer execution or cloud CI"
+    },
+    {
+      "name": "fork",
+      "head": "e768c60efdf52bbae38032bcb0565809aa8183ee",
+      "at": "2026-10-29T11:11:04.814185+00:00",
+      "argv": [
+        "./scripts/fork-guard.sh",
+        "--fast"
+      ],
+      "cwd": ".",
+      "exit": 0,
+      "seconds": 0.47,
+      "log": "oct29-review569630-fixed-head-fork.log",
+      "original_bytes": 19407,
+      "original_sha256": "9c63347ca8d423c27b3cce72c17609e40fc198c02634c09281b124dc1c0bf5d1",
+      "python_summaries": [],
+      "node_counts": {},
+      "PASS_groups": 0,
+      "evidence_class": "author executed; not independent reviewer execution or cloud CI"
+    },
+    {
+      "name": "dco",
+      "head": "e768c60efdf52bbae38032bcb0565809aa8183ee",
+      "at": "2026-10-29T11:11:05.280738+00:00",
+      "argv": [
+        "python3",
+        "scripts/validate-commit-msg.py",
+        "--range",
+        "111121c6679d283313691a3ee447c08e3a7e8551",
+        "HEAD"
+      ],
+      "cwd": ".",
+      "exit": 0,
+      "seconds": 0.03,
+      "log": "oct29-review569630-fixed-head-dco.log",
+      "original_bytes": 0,
+      "original_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "python_summaries": [],
+      "node_counts": {},
+      "PASS_groups": 0,
+      "evidence_class": "author executed; not independent reviewer execution or cloud CI"
+    }
+  ],
+  "production_marker_control": {
+    "source_restored": true,
+    "source_freeze": "oct29-review569630-source-freeze.json",
+    "runs": [
+      {
+        "name": "negative-no-mark",
+        "at": "2026-10-29T11:04:53.490529+00:00",
+        "argv": [
+          "cargo",
+          "test",
+          "--locked",
+          "--no-default-features",
+          "--lib",
+          "--features",
+          "benchmark-hooks",
+          "app::model_store_events::platform_tests::linux_live_pool_tests::identical_enable_rebuilds_real_pool_and_next_turn_preserves_history",
+          "--",
+          "--ignored",
+          "--exact",
+          "--nocapture",
+          "--test-threads=1"
+        ],
+        "exit": 101,
+        "seconds": 42.88,
+        "log": "oct29-review569630-final-negative-no-mark.log",
+        "log_sha256": "5e2e3fd1c33806d7955e6ba29c65145f8a25de8610ec3e8a4a3db7897fe4b3c1",
+        "harness_sha256": "b79d4ec1b287a44e63e73bcbdc50f0774b27e50d5abc70644336f3463c64377f",
+        "helper_sha256": "84d3a165d7c5d97ffb77fdb4f26fc476fddb561043fdecb580c44c8d2edd9bd4"
+      },
+      {
+        "name": "live-pool-restored",
+        "at": "2026-10-29T11:05:36.367810+00:00",
+        "argv": [
+          "cargo",
+          "test",
+          "--locked",
+          "--no-default-features",
+          "--lib",
+          "--features",
+          "benchmark-hooks",
+          "app::model_store_events::platform_tests::linux_live_pool_tests::identical_enable_rebuilds_real_pool_and_next_turn_preserves_history",
+          "--",
+          "--ignored",
+          "--exact",
+          "--nocapture",
+          "--test-threads=1"
+        ],
+        "exit": 0,
+        "seconds": 42.46,
+        "log": "oct29-review569630-final-live-pool-restored.log",
+        "log_sha256": "af56d6c5b6a34e9f97713ac67bd57dbfc79cf0338bf17f0df2db22a6f2ec9745",
+        "harness_sha256": "b79d4ec1b287a44e63e73bcbdc50f0774b27e50d5abc70644336f3463c64377f",
+        "helper_sha256": "7a355850017ad48629a98da376d0f94cbbcd67a83833c59d00dad5b4785ea816"
+      }
+    ]
+  },
+  "connector_control": {
+    "command": "python3 docs/model-store-review-evidence/2026-10-29/replay-connector-matrix-controls.py",
+    "method": "Fresh Node process runs actual complete test with only connector workflow read replaced; no repository workflow writes.",
+    "negative_cases": 60,
+    "positive_cases": 2,
+    "all_matched": true
+  },
+  "historical_CodeWhale_scope": "Only the CodeWhale Engine6 loopback receipt retains its original parent948. The exact gitlink f1 is unchanged. It does not prove the Pinvou pool.",
+  "environment": {
+    "scope": "Captured by root during fixed-source e768 checks; Ubuntu24.04.4 is not the CI Ubuntu22.04 runner.",
+    "distribution": "Ubuntu24.04.4",
+    "architecture": "aarch64",
+    "glibc": "2.39",
+    "kernel_family": "6.17",
+    "rustc": "1.98.0",
+    "cargo": "1.98.0",
+    "Node.js": "22.23.1",
+    "Python": "3.12.3",
+    "Chrome": "153.0.8010.36",
+    "not_the_CI_Ubuntu22_04_runner": true
+  },
+  "sanitization": {
+    "local_prefix_replacements": true,
+    "generated_temp_prefixes_replaced": 15,
+    "runtime_user_directory_replaced": true,
+    "original_sha_vs_published_sha_separate": true,
+    "no_semantic_result_rewrite": true,
+    "trailing_spaces_and_extra_EOF_blank_lines_normalized": true
+  },
+  "files": [
+    {
+      "path": "current/linux-app-rust.stdout.txt",
+      "source_receipt_basename": "oct29-review569630-fixed-head-full-rust.log",
+      "excerpt": false,
+      "original_bytes": 591754,
+      "original_sha256": "9d190d3663dd67520294643a9b0668cefbf1fdd3d5d4fb541d1abcc917a0434c",
+      "published_bytes": 591668,
+      "published_sha256": "bd9a474ffb9ae5004d8d94aca3bf9f78801384ed88fa821bf7167de39d1939d7",
+      "transformation": "Documented local prefixes replaced, trailing spaces and extra EOF blank lines normalized for repository whitespace checks; test names/results unchanged."
+    },
+    {
+      "path": "current/live-wry-pool.stdout.txt",
+      "source_receipt_basename": "oct29-review569630-fixed-head-live-pool.log",
+      "excerpt": false,
+      "original_bytes": 481,
+      "original_sha256": "1b585c0aee3129a57ff1437f4504f66d77d606e85bf7f56b0c67ac56febf32fb",
+      "published_bytes": 422,
+      "published_sha256": "5b6f9db303820932c9870031a3747eb796a57ebbae6c3e5c45b6df9cbd55e1d8",
+      "transformation": "Documented local prefixes replaced, trailing spaces and extra EOF blank lines normalized for repository whitespace checks; test names/results unchanged."
+    },
+    {
+      "path": "current/production-marker-negative.stdout.txt",
+      "source_receipt_basename": "oct29-review569630-final-negative-no-mark.log",
+      "excerpt": false,
+      "original_bytes": 7905,
+      "original_sha256": "5e2e3fd1c33806d7955e6ba29c65145f8a25de8610ec3e8a4a3db7897fe4b3c1",
+      "published_bytes": 7759,
+      "published_sha256": "a806e9050fb62e23e22e8f62165027fa01359f08ffa4a400b4f2c04aece66782",
+      "transformation": "Documented local prefixes replaced, trailing spaces and extra EOF blank lines normalized for repository whitespace checks; test names/results unchanged."
+    },
+    {
+      "path": "current/restored-hostile-proxy.stdout.txt",
+      "source_receipt_basename": "oct29-review569630-final-live-pool-restored.log",
+      "excerpt": false,
+      "original_bytes": 593,
+      "original_sha256": "af56d6c5b6a34e9f97713ac67bd57dbfc79cf0338bf17f0df2db22a6f2ec9745",
+      "published_bytes": 494,
+      "published_sha256": "6ee36f3c35968e175262d8708f82cebf74888efe7eb88c9b0cf8be64e84f9ccb",
+      "transformation": "Documented local prefixes replaced, trailing spaces and extra EOF blank lines normalized for repository whitespace checks; test names/results unchanged."
+    },
+    {
+      "path": "current/node.stdout.txt.gz",
+      "source_receipt_basename": "oct29-review569630-fixed-head-node.log",
+      "excerpt": false,
+      "original_bytes": 559784,
+      "original_sha256": "5823f9ee627fd1d4aed9a131f391c790eb7e677f39a06a86528dabf759cbbb79",
+      "published_bytes": 102762,
+      "published_sha256": "a3b50e5611512771870252260e83aae22559c822e7aaada4b35babc97c03885c",
+      "transformation": "Documented local prefixes replaced, trailing spaces and extra EOF blank lines normalized for repository whitespace checks; test names/results unchanged.",
+      "encoding": "gzip",
+      "decoded_bytes": 550264,
+      "decoded_sha256": "4c6dab53b55ec5bdd5a1001204084503085e75cda2bfd27330a2ca2893c99492",
+      "lossless_full_output": true
+    },
+    {
+      "path": "current/python-fastgate.stdout.txt",
+      "source_receipt_basename": "oct29-review569630-fixed-head-python.log",
+      "excerpt": false,
+      "original_bytes": 7722,
+      "original_sha256": "bca7ed76d2f1be5ae79b1e156740eecb2b6a5dd08cdfef5fe0a22703fe896db3",
+      "published_bytes": 7426,
+      "published_sha256": "1be043597a8ff956fd9f563822b6ab557ef94787923414465047b88557cd211e",
+      "transformation": "Documented local prefixes replaced, trailing spaces and extra EOF blank lines normalized for repository whitespace checks; test names/results unchanged."
+    },
+    {
+      "path": "current/controller.stdout.txt",
+      "source_receipt_basename": "oct29-review569630-fixed-head-controller.log",
+      "excerpt": false,
+      "original_bytes": 1434,
+      "original_sha256": "68e72a5b57dc040b07ba24fb2f6a24c69b68873e5329468743eac861333c4fc7",
+      "published_bytes": 1434,
+      "published_sha256": "68e72a5b57dc040b07ba24fb2f6a24c69b68873e5329468743eac861333c4fc7",
+      "transformation": "Documented local prefixes replaced, trailing spaces and extra EOF blank lines normalized for repository whitespace checks; test names/results unchanged."
+    },
+    {
+      "path": "current/chrome.stdout.txt",
+      "source_receipt_basename": "oct29-review569630-fixed-head-chrome.log",
+      "excerpt": false,
+      "original_bytes": 1560,
+      "original_sha256": "3a7d77749c0407ce8e71da71791df4c64b017e65de22c587840b23e8ea48877a",
+      "published_bytes": 1560,
+      "published_sha256": "3a7d77749c0407ce8e71da71791df4c64b017e65de22c587840b23e8ea48877a",
+      "transformation": "Documented local prefixes replaced, trailing spaces and extra EOF blank lines normalized for repository whitespace checks; test names/results unchanged."
+    },
+    {
+      "path": "current/clippy-production.stdout.txt",
+      "source_receipt_basename": "oct29-review569630-fixed-head-clippy-production.log",
+      "excerpt": false,
+      "original_bytes": 184,
+      "original_sha256": "f59f8e2cc1f0c2119fa611526cb496b1c59f568ef9f269d40d4e0bbc784d2b1a",
+      "published_bytes": 144,
+      "published_sha256": "23ff92b0f996f56cdb655a2bf384d4dbb55b7b40d2adbc87e0c04cebe2c94905",
+      "transformation": "Documented local prefixes replaced, trailing spaces and extra EOF blank lines normalized for repository whitespace checks; test names/results unchanged."
+    },
+    {
+      "path": "current/clippy-tests.excerpt.txt",
+      "source_receipt_basename": "oct29-review569630-fixed-head-clippy-tests.log",
+      "excerpt": true,
+      "original_bytes": 8991683,
+      "original_sha256": "d64828de99bb053eed8c1ea3fe2ddd93eafde752632d7c9098fa67d7a1bc03bb",
+      "published_bytes": 2246,
+      "published_sha256": "281a39343566eed144091c8f558f0c611106b02cbfe90664974618a4dd5a59f9",
+      "transformation": "Documented local prefixes replaced, trailing spaces and extra EOF blank lines normalized for repository whitespace checks; test names/results unchanged."
+    },
+    {
+      "path": "current/registry.stdout.txt",
+      "source_receipt_basename": "oct29-review569630-fixed-head-registry.log",
+      "excerpt": false,
+      "original_bytes": 77,
+      "original_sha256": "1341d1398b5336e127cb662082ea9f454d89d2a7934e2e9c1288beb45729cf8a",
+      "published_bytes": 77,
+      "published_sha256": "1341d1398b5336e127cb662082ea9f454d89d2a7934e2e9c1288beb45729cf8a",
+      "transformation": "Documented local prefixes replaced, trailing spaces and extra EOF blank lines normalized for repository whitespace checks; test names/results unchanged."
+    },
+    {
+      "path": "current/connector-controls.stdout.txt",
+      "source_receipt_basename": "oct29-review569630-fixed-head-connector-controls.log",
+      "excerpt": false,
+      "original_bytes": 4922,
+      "original_sha256": "c591ad2d6515944c56eaf03c6f1c5d1d5b2d1a52ab1be3e9b46cbe7969a06409",
+      "published_bytes": 4922,
+      "published_sha256": "c591ad2d6515944c56eaf03c6f1c5d1d5b2d1a52ab1be3e9b46cbe7969a06409",
+      "transformation": "Documented local prefixes replaced, trailing spaces and extra EOF blank lines normalized for repository whitespace checks; test names/results unchanged."
+    },
+    {
+      "path": "historical/codewhale-f1-engine.stdout.txt",
+      "source_receipt_basename": "oct29-drift-native-real-engine.log",
+      "excerpt": false,
+      "original_bytes": 1090,
+      "original_sha256": "8e34ec00efef77a38953618f2f9645f050b27fe2cbd335360fa3d75fdfe9f998",
+      "published_bytes": 991,
+      "published_sha256": "82ad5ba005fcb55f81fbb83f89e4e79ae2d8ad027837dcb5e27c5774b6af0f73",
+      "transformation": "Documented local prefixes replaced, trailing spaces and extra EOF blank lines normalized for repository whitespace checks; test names/results unchanged."
+    }
+  ],
+  "limits": [
+    "Wry test requires an actual display; ignored in default lib execution, explicitly executed separately with nonzero count.",
+    "Generated native command dispatch on Wry is actual; JS page transport is not exercised. Loopback fake HTTP/SSE replaces the model service.",
+    "Chrome12 uses JS IPC stubs; it is a separate fixture, not browser-to-native inference end-to-end.",
+    "No GPU/weights, native Windows/macOS, real Docker/runner-image or final cloud required-gate pass.",
+    "Test Clippy follows the existing warn policy. Only a labeled excerpt is published for its large warning log.",
+    "Historical controller input only; full publisher source is not redistributed, its public by-hash URL and full three-stage hashes are recorded."
+  ],
+  "test_environment": {
+    "scope": "Rust commands",
+    "BINDGEN_EXTRA_CLANG_ARGS": "-isystem /usr/lib/gcc/aarch64-linux-gnu/13/include",
+    "CARGO_TARGET_DIR": "<CARGO_TARGET>",
+    "CHROME": "/usr/bin/google-chrome",
+    "PINVOU_REQUIRE_REMOTE_E2E": "1",
+    "display_test": "existing Linux X11 display; explicit isolated child"
+  }
+}

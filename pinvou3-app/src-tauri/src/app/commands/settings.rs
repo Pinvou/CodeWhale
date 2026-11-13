@@ -1,4 +1,6 @@
 use super::prelude::*;
+use crate::features::account_platform::runtime_model::model_credential_mode;
+use crate::features::assistant::runtime_model::ModelCredentialMode;
 use crate::platform::credential_store::{
     CREDENTIAL_STORE_UNAVAILABLE_ERROR, CredentialReference, CredentialStore,
 };
@@ -208,9 +210,31 @@ pub struct EffectiveModelConfig {
     pub vendor: Option<String>,
     pub endpoint_mode: Option<String>,
     pub requires_user_api_key: bool,
+    pub credential_mode: ModelCredentialMode,
+    pub model_ref: Option<ModelSelectionRef>,
     /// 被环境变量覆盖的字段名列表（如 `["model", "base_url"]`）。
     /// 空列表表示全部走 settings.json，用户修改会生效。
     pub env_overrides: Vec<String>,
+}
+
+fn resolve_effective_model_selection(
+    prefs: &UserPrefs,
+    selection: Option<&ModelSelectionRef>,
+) -> Result<Option<SavedModel>, String> {
+    match selection {
+        Some(selection) => prefs.resolve_model_ref(selection).map(Some).ok_or_else(|| {
+            "model_selection_unavailable: the selected model no longer exists".to_string()
+        }),
+        // A cleared typed default is an explicit absence. Do not turn the
+        // legacy active-model fallback into a new session binding: that would
+        // bypass the same selection-required state the send path enforces.
+        None if prefs.model_selection_schema_version >= 1
+            && prefs.advanced.default_model_ref.is_none() =>
+        {
+            Ok(None)
+        }
+        None => Ok(prefs.active_model().cloned()),
+    }
 }
 
 #[tauri::command]
@@ -222,12 +246,21 @@ pub async fn get_effective_model_config(
     // 读 disk 最新 prefs，并按当前会话解析真正绑定的模型。
     let mut bridge = pool.bridge.clone();
     bridge.prefs = refresh_safe_prefs(UserPrefs::load());
-    let session_model_id = session_id
+    let session_model_ref = session_id
         .as_deref()
-        .and_then(|id| store.session_model_id(id));
-    bridge.session_model = session_model_id
-        .as_deref()
-        .and_then(|id| bridge.prefs.model_by_id(id).cloned());
+        .and_then(|id| store.session_model_ref(id));
+    effective_model_config_for_selection(&mut bridge, session_model_ref)
+}
+
+/// The command's read-only projection pipeline, shared with its regression
+/// tests so reference resolution and bridge binding cannot diverge from the
+/// final credential/selection snapshot.
+fn effective_model_config_for_selection(
+    bridge: &mut crate::features::assistant::platform::bridge::Pinvou3Bridge,
+    session_model_ref: Option<ModelSelectionRef>,
+) -> Result<EffectiveModelConfig, String> {
+    let model_ref = session_model_ref.or_else(|| bridge.prefs.advanced.default_model_ref.clone());
+    bridge.session_model = resolve_effective_model_selection(&bridge.prefs, model_ref.as_ref())?;
     let mut env_overrides = Vec::new();
     if std::env::var("DEEPSEEK_MODEL").is_ok() {
         env_overrides.push("model".to_string());
@@ -244,21 +277,74 @@ pub async fn get_effective_model_config(
     if std::env::var("DEEPSEEK_PROVIDER").is_ok_and(|provider| provider == bridge.provider()) {
         env_overrides.push("provider".to_string());
     }
-    let effective = bridge.effective_model_owned();
-    let preset = effective
-        .as_ref()
-        .map(|model| model.preset)
-        .unwrap_or_default()
-        .as_str();
-    // 运行时模型准备固定 passthrough（无后台托管凭据），是否要求用户 Key
-    // 完全由 bridge 的鉴权判定（provider + base_url）决定。
-    let requires_user_api_key = bridge.api_key_required();
-    Ok(EffectiveModelConfig {
+    Ok(effective_model_config_snapshot(
+        bridge,
+        env_api_key,
+        env_overrides,
+        model_ref,
+    ))
+}
+
+/// 展示层快照：从已绑定会话/默认引用的 bridge 解析 EffectiveModelConfig。
+/// 与发送路径（engine_pool 的 model_selection_required 门）同一判定：没有会话
+/// 绑定、typed 默认引用已被清空（schema≥1）时，发送会被拒绝，展示层必须如实
+/// 回空配置，而不是靠 active_model() 的列表首条回退继续报告一个不会真正生效
+/// 的模型（评审第 7 轮 P2：删除默认商店模型后“不自动另选”要在展示层成立）。
+pub(super) fn effective_model_config_snapshot(
+    bridge: &crate::features::assistant::platform::bridge::Pinvou3Bridge,
+    env_api_key: bool,
+    mut env_overrides: Vec<String>,
+    model_ref: Option<ModelSelectionRef>,
+) -> EffectiveModelConfig {
+    let selection_required = bridge.session_model.is_none()
+        && bridge.prefs.model_selection_schema_version >= 1
+        && bridge.prefs.advanced.default_model_ref.is_none();
+    let effective = if selection_required {
+        None
+    } else {
+        bridge.effective_model_owned()
+    };
+    let preset = if selection_required {
+        ""
+    } else {
+        effective
+            .as_ref()
+            .map(|model| model.preset)
+            .unwrap_or_default()
+            .as_str()
+    };
+    // Share the runtime's credential ownership decision. No selected endpoint
+    // means no API-key requirement; the recovery action is to select a model.
+    let credential_mode = model_credential_mode(
+        effective.as_ref(),
+        !selection_required && bridge.api_key_required(),
+    );
+    let backend_managed = credential_mode == ModelCredentialMode::BackendManaged;
+    let requires_user_api_key = credential_mode == ModelCredentialMode::UserManaged;
+    if selection_required || backend_managed {
+        env_overrides.clear();
+    }
+    EffectiveModelConfig {
         preset: preset.to_string(),
-        model: bridge.model(),
-        base_url: bridge.base_url(),
+        model: if selection_required {
+            String::new()
+        } else if backend_managed {
+            effective
+                .as_ref()
+                .map(|model| model.model.clone())
+                .unwrap_or_default()
+        } else {
+            bridge.model()
+        },
+        base_url: if selection_required || backend_managed {
+            String::new()
+        } else {
+            bridge.base_url()
+        },
         api_key: String::new(),
-        credential_state: if env_api_key {
+        credential_state: if selection_required || backend_managed {
+            CredentialState::Missing
+        } else if env_api_key {
             CredentialState::EnvOverride
         } else {
             effective
@@ -266,11 +352,20 @@ pub async fn get_effective_model_config(
                 .map(|model| model.credential_state)
                 .unwrap_or(CredentialState::Missing)
         },
-        has_secret: effective
-            .as_ref()
-            .map(|model| model.has_secret)
-            .unwrap_or(false),
-        provider: bridge.provider(),
+        has_secret: !backend_managed
+            && effective
+                .as_ref()
+                .map(|model| model.has_secret)
+                .unwrap_or(false),
+        provider: if selection_required {
+            String::new()
+        } else if backend_managed {
+            // Prepared Account Gateway bridges always use the OpenAI wire
+            // provider. Ordinary process overrides do not apply to that route.
+            "openai".to_string()
+        } else {
+            bridge.provider()
+        },
         provider_kind: effective
             .as_ref()
             .and_then(|model| model.provider_kind.clone()),
@@ -279,8 +374,10 @@ pub async fn get_effective_model_config(
             .as_ref()
             .and_then(|model| model.endpoint_mode.clone()),
         requires_user_api_key,
+        credential_mode,
+        model_ref,
         env_overrides,
-    })
+    }
 }
 
 /// 「添加模型」方案:列出已保存模型 + 当前全局默认 id(前端高亮)。
@@ -314,8 +411,15 @@ pub struct ModelsView {
 }
 
 #[tauri::command]
-pub async fn list_models() -> Result<ModelsView, String> {
-    let prefs = refresh_safe_prefs(UserPrefs::load());
+pub async fn list_models(require_readable: Option<bool>) -> Result<ModelsView, String> {
+    // Destructive follow-up actions must distinguish unreadable settings from
+    // the compatible default list used by ordinary model selectors. The strict
+    // snapshot never writes normalization or touches the credential store.
+    let prefs = if require_readable == Some(true) {
+        UserPrefs::load_existing_read_only_model_snapshot().map_err(str::to_owned)?
+    } else {
+        refresh_safe_prefs(UserPrefs::load())
+    };
     Ok(ModelsView {
         models: prefs
             .advanced
@@ -430,7 +534,7 @@ pub async fn save_model(model: SavedModel, pool: State<'_, EnginePool>) -> Resul
 /// Testable core of [`save_model`]: the engine-pool notification stays with
 /// the command, mirroring [`delete_model_inner`].
 pub(super) fn save_model_inner(
-    model: SavedModel,
+    mut model: SavedModel,
     store: &dyn CredentialStore,
 ) -> Result<(), String> {
     let model_id = model.id.clone();
@@ -445,10 +549,146 @@ pub(super) fn save_model_inner(
     UserPrefs::update_transaction_with_post_commit(
         |prefs| {
             let old = prefs.model_by_id(&model.id).cloned();
+            // A repeated store import selects a route, not replacement values
+            // for the user's existing model. Resolve it against the latest row
+            // under the prefs lock rather than spreading a client snapshot.
+            if std::mem::take(&mut model.model_store_link_only) {
+                let requested_card = model.model_store_card_id.as_deref();
+                let latest = old.as_ref().filter(|latest| {
+                    model.model_store_link_requested
+                        && !model.reasoning_effort_only
+                        && !model.model_store_link_detached
+                        && requested_card.is_some()
+                        && latest.model_store_card_id.as_deref() == requested_card
+                        && !latest.model_store_link_detached
+                        && !latest.is_builtin_account_platform()
+                        && latest.is_operator_owned_endpoint()
+                });
+                let Some(latest) = latest else {
+                    return Err(
+                        "model store endpoint changed or is unavailable; refresh the card and retry"
+                            .to_string(),
+                    );
+                };
+                let mut linked = latest.clone();
+                linked.preset = model.preset;
+                linked.provider_kind = model.provider_kind.take();
+                linked.vendor = model.vendor.take();
+                linked.endpoint_mode = model.endpoint_mode.take();
+                linked.base_url = std::mem::take(&mut model.base_url);
+                linked.model = std::mem::take(&mut model.model);
+                linked.model_store_card_id = model.model_store_card_id.take();
+                linked.model_store_link_detached = false;
+                linked.model_store_link_requested = true;
+                linked.model_store_link_only = false;
+                linked.preserve_model_store_route = false;
+                linked.preserve_context_window_tokens = false;
+                linked.context_window_edit_requested = false;
+                linked.reasoning_effort_only = false;
+                linked.api_key.clear();
+                linked.credential_action = Some(CredentialEditAction::KeepExisting);
+                model = linked;
+            }
+            // Only a new client's explicit context-field edit records a user
+            // choice. Untouched-field and reasoning-only intent take precedence
+            // over inconsistent payloads; legacy/machine defaults do not opt out.
+            let explicit_context_selection = model.context_window_edit_requested
+                && !model.preserve_context_window_tokens
+                && !model.reasoning_effort_only;
+            model.context_window_edit_requested = false;
+            if std::mem::take(&mut model.reasoning_effort_only) {
+                let mut latest = old
+                    .clone()
+                    .ok_or_else(|| format!("model not found: {}", model.id))?;
+                latest.reasoning_effort = model.reasoning_effort.take();
+                model = latest;
+            }
+            // Editor intent: the context-window field was not edited, so a
+            // background store refresh (e.g. the verified 256K repair, which a
+            // one-time marker then protects) must survive the whole-row save.
+            // An edited field keeps its explicit value, including a deliberate
+            // downgrade or clear.
+            if model.preserve_context_window_tokens {
+                if let Some(old) = old.as_ref() {
+                    model.context_window_tokens = old.context_window_tokens;
+                }
+            }
+            model.preserve_context_window_tokens = false;
+            let explicit_store_link_requested = model.model_store_link_requested
+                || (old.is_none() && model.model_store_card_id.is_some());
+            model.model_store_link_requested = false;
+            if model.preserve_model_store_route && !explicit_store_link_requested {
+                if let Some(latest) = old.as_ref() {
+                    // Endpoint identity includes protocol metadata. Combining a
+                    // latest Responses URL with an older Chat preset changes
+                    // the actual request route despite preserving its address.
+                    model.preset = latest.preset;
+                    model.provider_kind.clone_from(&latest.provider_kind);
+                    model.vendor.clone_from(&latest.vendor);
+                    model.endpoint_mode.clone_from(&latest.endpoint_mode);
+                    model.base_url.clone_from(&latest.base_url);
+                    model.model.clone_from(&latest.model);
+                    model
+                        .model_store_card_id
+                        .clone_from(&latest.model_store_card_id);
+                    model.model_store_link_detached = latest.model_store_link_detached;
+                }
+            }
+            model.preserve_model_store_route = false;
+            // Settings editors predating store provenance omit this optional field.
+            // Keep it for non-route edits; a user-entered route change unlinks it.
+            let same_route = old
+                .as_ref()
+                .is_some_and(|old| old.has_same_endpoint_route(&model));
+            let previous = old
+                .as_ref()
+                .filter(|old| !old.model_store_link_detached)
+                .and_then(|old| old.model_store_card_id.as_deref());
+            let requested = model
+                .model_store_card_id
+                .as_deref()
+                .or_else(|| same_route.then_some(previous).flatten());
+            model.model_store_card_id = requested
+                .filter(|card| {
+                    !model.model_store_link_detached
+                        && !model.is_builtin_account_platform()
+                        && model.is_operator_owned_endpoint()
+                        && ((!explicit_store_link_requested
+                            && same_route
+                            && previous == Some(*card))
+                            // Returning the old card id is not explicit re-link
+                            // intent. A full-object client may edit only protocol
+                            // metadata while the card still serves this URL/model.
+                            || ((explicit_store_link_requested || previous != Some(*card))
+                                && crate::features::model_store::matches_current_model_route(
+                                    card,
+                                    &model.base_url,
+                                    &model.model,
+                                )))
+                })
+                .map(str::to_owned);
+            // A card may stop or enter its update window after the client read
+            // its endpoint. Reject that stale explicit link before writing either
+            // settings or credentials; it is not an intentional manual detach.
+            if explicit_store_link_requested && model.model_store_card_id.is_none() {
+                return Err(
+                    "model store endpoint changed or is unavailable; refresh the card and retry"
+                        .to_string(),
+                );
+            }
+            model.model_store_link_detached = model.model_store_card_id.is_none()
+                && (model.model_store_link_detached
+                    || old.as_ref().is_none_or(|old| {
+                        old.model_store_link_detached || old.model_store_card_id.is_some()
+                    })
+                    || !same_route);
             let (model, deferred) = apply_model_credential(model, old.as_ref(), store)
                 .map_err(|e| sanitize_command_error("save_model", e))?;
             *deferred_delete.borrow_mut() = deferred;
             prefs.upsert_model(model);
+            if explicit_context_selection {
+                prefs.record_explicit_model_context_selection(&model_id);
+            }
             Ok(())
         },
         || {
@@ -517,6 +757,70 @@ pub(super) fn delete_model_inner(id: &str, store: &dyn CredentialStore) -> Resul
     .map(|_| ())
     .map_err(|e| sanitize_command_error("delete_model", e))?;
     Ok(())
+}
+
+/// Remove a stale store-managed route only if its current persisted ownership still matches.
+/// A settings form may detach or repurpose the same row while an uninstall is running.
+#[tauri::command]
+pub async fn delete_model_if_store_link(id: String, card_id: String) -> Result<bool, String> {
+    let store = SystemCredentialStore::new();
+    join_blocking("delete_model_if_store_link", move || {
+        delete_model_if_store_link_inner(&id, &card_id, &store)
+    })
+    .await
+}
+
+fn is_store_link_cleanup_target(model: &SavedModel, card_id: &str) -> bool {
+    if card_id.is_empty()
+        || model.model_store_card_id.as_deref() != Some(card_id)
+        || model.model_store_link_detached
+        || model.is_builtin_account_platform()
+        || !model.is_operator_owned_endpoint()
+    {
+        return false;
+    }
+    crate::features::model_store::is_store_managed_route(&model.base_url)
+}
+
+pub(super) fn delete_model_if_store_link_inner(
+    id: &str,
+    card_id: &str,
+    store: &dyn CredentialStore,
+) -> Result<bool, String> {
+    let removed = std::cell::Cell::new(false);
+    let reference = std::cell::RefCell::new(None);
+    UserPrefs::update_readable_model_transaction_with_post_commit(
+        |prefs| {
+            let Some(model) = prefs.model_by_id(id) else {
+                return Ok(());
+            };
+            if !is_store_link_cleanup_target(model, card_id) {
+                return Ok(());
+            }
+            if prefs.advanced.saved_models.len() <= 1 {
+                return Err("至少保留一个模型".to_string());
+            }
+            *reference.borrow_mut() = model.credential_ref.clone();
+            prefs.remove_model(id);
+            removed.set(true);
+            Ok(())
+        },
+        || {
+            // Keep the settings lock until the credential is removed: another save of
+            // the same id must not replace its secret between this commit and cleanup.
+            if let Some(reference) = reference.borrow_mut().take() {
+                if let Err(error) = store.delete(&reference) {
+                    log::warn!(
+                        "delete_model_if_store_link: model {id} removed, but its keyring secret \
+                         could not be deleted: {}",
+                        error.user_message()
+                    );
+                }
+            }
+        },
+    )
+    .map_err(|e| sanitize_command_error("delete_model_if_store_link", e))?;
+    Ok(removed.get())
 }
 
 // Local selections must name a user configuration, not the platform runtime
@@ -741,12 +1045,13 @@ pub struct ImageInputCapabilityInfo {
 pub async fn get_image_input_capability(
     session_id: Option<String>,
     pool: State<'_, EnginePool>,
-    store: State<'_, SessionStore>,
 ) -> Result<ImageInputCapabilityInfo, String> {
     // 与 chat 命令的图片路由同一套解析:fresh bridge 按 session 绑定模型(含本地
     // vLLM served name 探测与运行时凭据准备)。尚无会话(全新草稿)时退化为
     // get_effective_model_config 同款 prefs 直读,按全局默认模型解析。
-    let bridge = match session_id.or_else(|| store.active_id()) {
+    // A missing ID is the caller's draft, even when another window/session
+    // remains active in the backend. Never borrow that unrelated binding.
+    let bridge = match session_id {
         Some(sid) => pool.fresh_bridge_for(&sid).await.map_err(|error| {
             sanitize_command_error(
                 &format!("resolve image input capability for {sid}"),
@@ -756,16 +1061,40 @@ pub async fn get_image_input_capability(
         None => {
             let mut bridge = pool.bridge.clone();
             bridge.prefs = refresh_safe_prefs(UserPrefs::load());
-            bridge.session_model = None;
-            bridge
+            return draft_image_input_capability(&mut bridge);
         }
     };
-    Ok(ImageInputCapabilityInfo {
+    Ok(image_input_capability_snapshot(&bridge))
+}
+
+fn draft_image_input_capability(
+    bridge: &mut crate::features::assistant::platform::bridge::Pinvou3Bridge,
+) -> Result<ImageInputCapabilityInfo, String> {
+    // Resolve the typed default just like the effective-config projection.
+    // A stale pool binding or the legacy first-model fallback must not report
+    // an image route after the user has cleared the default selection.
+    bridge.session_model = resolve_effective_model_selection(
+        &bridge.prefs,
+        bridge.prefs.advanced.default_model_ref.as_ref(),
+    )?;
+    if bridge.session_model.is_none()
+        && bridge.prefs.model_selection_schema_version >= 1
+        && bridge.prefs.advanced.default_model_ref.is_none()
+    {
+        return Err("model_selection_required: choose a model before sending".into());
+    }
+    Ok(image_input_capability_snapshot(bridge))
+}
+
+fn image_input_capability_snapshot(
+    bridge: &crate::features::assistant::platform::bridge::Pinvou3Bridge,
+) -> ImageInputCapabilityInfo {
+    ImageInputCapabilityInfo {
         capability: bridge.effective_image_capability().as_str().to_string(),
         image_mode: bridge.image_input_mode().as_str().to_string(),
         is_local_endpoint: bridge.is_local_endpoint(),
         vision_is_local_endpoint: bridge.vision_uses_local_endpoint(),
-    })
+    }
 }
 
 fn parse_search_provider(raw: &str) -> Result<SearchProvider, String> {
@@ -1536,6 +1865,7 @@ fn apply_general_settings_patch(current: &mut UserPrefs, patch: GeneralSettingsP
         // 模型列表和激活项有各自的专用写命令。即使高级设置来自旧快照，也无权覆盖它们。
         advanced.saved_models = current.advanced.saved_models.clone();
         advanced.active_model_id = current.advanced.active_model_id.clone();
+        advanced.model_store_context_repairs = current.advanced.model_store_context_repairs.clone();
         advanced.default_model_ref = current.advanced.default_model_ref.clone();
         advanced.default_model_selection_revision =
             current.advanced.default_model_selection_revision.clone();
@@ -1699,6 +2029,9 @@ pub async fn save_search_settings_and_restart(
 }
 // 凭据状态迁移(`mark_*` / `clear_plaintext_key`)自 prefs 的密封 trait 提供。
 use crate::platform::prefs::CredentialStateOps;
+
+#[cfg(test)]
+mod model_snapshot_tests;
 
 #[cfg(test)]
 mod tests {
@@ -2264,6 +2597,14 @@ mod tests {
             max_output_tokens: None,
             reasoning_effort: None,
             model: "active-model".to_string(),
+            model_store_card_id: None,
+            model_store_link_detached: false,
+            model_store_link_requested: false,
+            model_store_link_only: false,
+            preserve_model_store_route: false,
+            preserve_context_window_tokens: false,
+            context_window_edit_requested: false,
+            reasoning_effort_only: false,
             base_url: "https://active.example/v1".to_string(),
             provider_kind: None,
             vendor: None,
@@ -2314,6 +2655,14 @@ mod tests {
                 reasoning_effort: None,
                 model: "qwen3:latest".to_string(),
                 base_url: "http://127.0.0.1:11434/v1".to_string(),
+                model_store_card_id: None,
+                model_store_link_detached: false,
+                model_store_link_requested: false,
+                model_store_link_only: false,
+                preserve_model_store_route: false,
+                preserve_context_window_tokens: false,
+                context_window_edit_requested: false,
+                reasoning_effort_only: false,
                 provider_kind: None,
                 vendor: None,
                 endpoint_mode: None,
@@ -2335,6 +2684,14 @@ mod tests {
                 reasoning_effort: None,
                 model: "other-model".to_string(),
                 base_url: "http://127.0.0.1:8001/v1".to_string(),
+                model_store_card_id: None,
+                model_store_link_detached: false,
+                model_store_link_requested: false,
+                model_store_link_only: false,
+                preserve_model_store_route: false,
+                preserve_context_window_tokens: false,
+                context_window_edit_requested: false,
+                reasoning_effort_only: false,
                 provider_kind: None,
                 vendor: None,
                 endpoint_mode: None,
@@ -2368,6 +2725,34 @@ mod tests {
             None => unsafe { std::env::remove_var("PINVOU3_HOME") },
         }
         result
+    }
+
+    #[test]
+    fn delete_model_if_matches_clears_the_typed_default_without_selecting_a_sibling() {
+        with_temp_prefs_home(|| {
+            seed_two_models();
+            UserPrefs::update_transaction(|prefs| {
+                prefs.set_default_model_ref(crate::platform::prefs::ModelSelectionRef::local(
+                    "m-recycle",
+                ))
+            })
+            .unwrap();
+            let store = MemoryCredentialStore::default();
+            assert!(
+                delete_model_if_matches_inner(
+                    "m-recycle",
+                    Some("http://127.0.0.1:11434/v1".into()),
+                    Some("qwen3:latest".into()),
+                    &store,
+                )
+                .unwrap()
+            );
+            let prefs = UserPrefs::load();
+            assert!(prefs.advanced.default_model_ref.is_none());
+            assert!(prefs.advanced.active_model_id.is_none());
+            assert!(prefs.model_by_id("m-recycle").is_none());
+            assert!(prefs.model_by_id("m-other").is_some());
+        });
     }
 
     #[test]
@@ -2626,11 +3011,77 @@ mod tests {
     }
 
     #[test]
+    fn effective_model_credential_projection_preserves_session_catalog_reference() {
+        let mut prefs = UserPrefs::default();
+        prefs.advanced.saved_models = vec![SavedModel::builtin_account_platform()];
+        prefs
+            .set_default_model_ref(ModelSelectionRef::account_platform("global-catalog-model"))
+            .unwrap();
+        let selection = ModelSelectionRef::account_platform("session-catalog-model");
+        let model = resolve_effective_model_selection(&prefs, Some(&selection))
+            .unwrap()
+            .unwrap();
+        assert_eq!(model.model, "session-catalog-model");
+        assert_eq!(
+            model_credential_mode(Some(&model), true),
+            ModelCredentialMode::BackendManaged
+        );
+        assert_eq!(
+            prefs.advanced.default_model_ref,
+            Some(ModelSelectionRef::account_platform("global-catalog-model"))
+        );
+    }
+
+    #[test]
+    fn effective_model_credential_projection_preserves_user_key_failure() {
+        let mut prefs = UserPrefs::default();
+        let mut model = SavedModel::builtin_account_platform();
+        model.id = "user-cloud".into();
+        model.credential_ref = Some(CredentialReference::for_model(&model.id));
+        model.credential_state = CredentialState::Unavailable;
+        prefs.advanced.saved_models = vec![model.clone()];
+        let selection = ModelSelectionRef::local(&model.id);
+        let projected = resolve_effective_model_selection(&prefs, Some(&selection))
+            .unwrap()
+            .unwrap();
+        assert_eq!(projected.credential_ref, model.credential_ref);
+        assert_eq!(projected.credential_state, CredentialState::Unavailable);
+        assert_eq!(
+            model_credential_mode(Some(&projected), true),
+            ModelCredentialMode::UserManaged
+        );
+        assert_eq!(
+            model_credential_mode(Some(&projected), false),
+            ModelCredentialMode::None
+        );
+    }
+
+    #[test]
+    fn effective_model_credential_projection_rejects_deleted_selection_without_fallback() {
+        let mut prefs = UserPrefs::default();
+        prefs.advanced.saved_models = vec![SavedModel::builtin_account_platform()];
+        prefs
+            .set_default_model_ref(ModelSelectionRef::account_platform("global-catalog-model"))
+            .unwrap();
+        let selection = ModelSelectionRef::local("deleted-user-model");
+        assert!(
+            resolve_effective_model_selection(&prefs, Some(&selection))
+                .unwrap_err()
+                .starts_with("model_selection_unavailable:")
+        );
+    }
+
+    #[test]
     fn general_settings_patch_preserves_unmentioned_and_specialized_domains() {
         let mut current = UserPrefs::default();
         current.migrate_models();
         current.search.provider = SearchProvider::Metaso;
         current.pet.enabled = true;
+        current
+            .advanced
+            .model_store_context_repairs
+            .insert("stable-id".into(), "verified-256k-v1/card".into());
+        let context_repairs = current.advanced.model_store_context_repairs.clone();
         let saved_models = current.advanced.saved_models.clone();
         let active_model_id = current.advanced.active_model_id.clone();
 
@@ -2638,6 +3089,7 @@ mod tests {
             &mut current,
             GeneralSettingsPatch {
                 language: Some(Language::En),
+                advanced: Some(Default::default()),
                 ..Default::default()
             },
         );
@@ -2648,6 +3100,10 @@ mod tests {
         assert!(current.pet.enabled);
         assert_eq!(current.advanced.saved_models, saved_models);
         assert_eq!(current.advanced.active_model_id, active_model_id);
+        assert_eq!(
+            current.advanced.model_store_context_repairs,
+            context_repairs
+        );
     }
 
     #[test]

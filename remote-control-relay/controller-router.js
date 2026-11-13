@@ -527,6 +527,13 @@ export class ControllerRouter {
         request_id: requestId,
         code,
         message: errorMessage(code),
+        ...(message?.type === "desktop_pairing_register" && peer.role === "B"
+          && ["controller_busy", "pairing_registration_stale_relay_epoch"].includes(code)
+          && isControllerIdentifier(message.registration_request_id)
+          && isControllerIdentifier(message.remote_control_generation) ? {
+            registration_request_id: message.registration_request_id,
+            remote_control_generation: message.remote_control_generation,
+          } : {}),
       }); } catch { /* Error delivery cannot broaden or skip precise cleanup. */ }
       if (createdLease) {
         await this.#leases.terminateLease({ controllerLeaseId: createdLease.controller_lease_id,

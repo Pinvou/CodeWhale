@@ -376,6 +376,16 @@ must match it. This independent registration context is not a lease context.
 Reusing a stable registration ID with a different generation, endpoint,
 identity, public key, algorithm or capability list is `invalid_message`.
 
+New registrations additionally pass the state owner's endpoint/global retained
+record, rolling-window, serialized-byte and bounded fair-queue budgets before code
+allocation. Exact committed retries remain readable without spending a new
+quota; matching in-flight retries coalesce while echoing each transport request
+ID. A quota rejection is the existing bounded `controller_busy` admission error,
+not a terminal registration outcome, and allocates no code or retained receipt.
+The production default-deny and all claim-side protections remain unchanged.
+See [registration limits](docs/pairing-registration-limits.md) for the default
+budgets, persistence/restart boundaries and validation limits.
+
 The claim/reservation authority is connected by the later Relay composition
 when the controller feature flag is enabled. A claim
 normalizes ASCII case and removes whitespace/hyphen separators before applying
@@ -669,7 +679,7 @@ For `model_source=controller_temporary`, `task_submit` requires one strict,
 64-KiB `temporary_model_package/v1`; it is forbidden for `controlled_device`.
 The package requires `schema, package_id, binding, primary,
 primary_credential`, with optional one-level `vision_fallback`. Binding is
-exactly `connection_id + controller_lease_id + lease_epoch + task_id` and must
+exactly `connection_id + controller_lease_id + lease_epoch + relay_epoch + remote_control_generation + task_id` and must
 equal the containing task. A route requires `display_name, preset, wire_api,
 base_url, model, image_capability_override` and only optionally accepts
 `provider_kind, vendor, endpoint_mode, context_window_tokens,
@@ -703,6 +713,18 @@ or bare IPv6, fragment, whitespace, or backslash. The suffix is an optional
 each percent escape is exactly `%` plus two uppercase hex digits. Lowercase
 escapes and malformed escapes fail rather than normalize.
 
+`attachment_abort_confirmed` is an opt-in physical-cleanup RPC under
+`attachment_v1`. Its request body is exactly `task_id, transfer_id`; success is
+exactly `transfer_id, cleanup_confirmed` with `cleanup_confirmed: true`. B checks
+the authenticated lease, authoritative session, task and handle and refuses
+consumed/admitted uploads. It acknowledges only after staging and published read
+owners are released. Unknown handles and failed cleanup are errors, never proof
+of absence. Legacy `attachment_abort` retains its logical-abort contract. An old
+B rejects the new operation without a reply and continues its lane; A times out,
+keeps the upload fence and can still abandon the local never-attempted task.
+No new capability or handshake field is advertised. See
+[`remote-upload-cleanup.md`](../docs/remote-upload-cleanup.md) for the batch fence.
+
 The `artifact_index` operation returns bounded metadata (at most 256 artifacts,
 the `MAX_ARTIFACTS` limit) in `body.artifacts`
 of a successful `remote_action_result`, never as a standalone payload.
@@ -733,7 +755,7 @@ outcomes and already-admitted requests are not refusal receipts. Both clients
 must support these fields; older strict decoders may reject such receipts.
 
 The contract digest is
-`5208650492c4e37286a7322d12ffc6c401724b8f261f8672d830146839db9f63`.
+`98e97089e09533376d4e0df65a93d6434ab4ead2dc4dc6f403edfce3214748c1`.
 It is SHA-256 over canonical JSON (object keys recursively sorted, array order
 preserved, compact JSON scalars) of `{contract,fixture}`. `contract` is the
 executable manifest containing every schema required/optional field, role
@@ -1219,6 +1241,15 @@ non-Unicode configuration rejects admission with
 `task_turn_timeout_config_invalid`. A cannot set or extend this budget through
 the wire protocol. Progress, busy observations and retries do not refresh it.
 Expiry reports `task_turn_timeout`, not successful completion.
+
+The controlled desktop commits the terminal state and bounded reason to its
+task ledger before projecting the result or running terminal cleanup. Repeated
+completion returns the existing record and reason. On a stop or recovery
+write failure, the unsuccessful task stays non-terminal and retains its turn
+lock. The controlled desktop records a bounded persistence failure. A repeat
+of the interruption can retry the uncommitted tasks, and a restart after
+storage is writable reconciles any remaining in-flight records before
+exposing the task runtime.
 
 Chat cleanup targets the captured reservation generation and, where observed,
 the exact foundation turn identity. It never uses the session-wide subagent

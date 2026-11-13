@@ -1,0 +1,16 @@
+
+> pinvou3-app@0.10.16 test:model-store-versions-ui
+> node tests/model_store_versions_smoke.mjs
+
+PASS: uninstall reads latest linked settings after migration and preserves concurrent ownership edits and read failures
+PASS: startup hook lazy loading preserves unavailable-state acknowledgement, library reconciliation, cancellation, deadlines and private failure handling in real Chrome
+PASS: versions refresh after success/failure/cancellation and ignore stale responses
+PASS: MTP deployment and version dialogs disclose network defaults and retained .env in all three languages without changing the 256K default
+PASS: existing settings forms preserve untouched routes after migration; edited routes and new drafts opt out
+PASS: alias-only and untouched drafts do not claim context edits; explicit 32K and automatic choices retain their intent
+PASS: unknown compatibility reasons remain visible; uninstall cleanup preserves sync failures
+PASS: stale details retain explicit re-link intent and surface rejection without changing the active model
+PASS: staging preserves other cards’ dialogs; concurrent cleanup disclosures survive navigation and individual acknowledgement
+PASS: force-remove results survive navigation; closing one result preserves other unread cleanup paths
+PASS: late context/key/link results cannot refresh another card, overwrite its busy state, or show stale toasts
+PASS: version stage/delete/switch expose Close only after cancellation; cancellation never reports success and normal completion retains results and refreshes the library

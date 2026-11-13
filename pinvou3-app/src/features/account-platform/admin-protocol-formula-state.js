@@ -71,16 +71,3 @@ export function safeProtocolFormulaFailure(error) {
 function canonicalUnitCode(value) {
   return typeof value === 'string' && value.length > 0 && value === value.trim() && value === value.toUpperCase();
 }
-
-export function safeFormulaPreviewSummary(payload = {}) {
-  const formula = payload.formula || {};
-  return {
-    formulaVersionID: String(formula.formula_version_id || ''),
-    protocolCode: String(formula.protocol_code || ''),
-    version: Number(formula.version || 0),
-    unitCodes: Object.keys(formula.required_unit_versions || {}).sort(),
-    deterministic: payload.deterministic === true,
-    externalAccess: payload.external_access === true,
-    optionalParameterCount: Object.keys(payload.sample_missing_optional_parameters || {}).length,
-  };
-}
