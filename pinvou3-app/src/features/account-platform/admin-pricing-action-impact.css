@@ -1,0 +1,14 @@
+.adm-pricing-action.adm-pricing-action-risk{max-height:calc(100vh - 40px);overflow:auto;overflow-wrap:break-word}
+.adm-pricing-action-risk .adm-pricing-impact{display:grid;gap:8px;padding:12px;border:1px solid var(--adm-line);border-radius:10px;background:var(--adm-soft)}
+.adm-pricing-impact dl{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 16px;margin:0}
+.adm-pricing-impact dl>div{min-width:0}
+.adm-pricing-impact dt{color:var(--adm-muted);font-size:12px}
+.adm-pricing-impact dd{margin:3px 0 0;color:var(--adm-text);font-weight:650}
+.adm-pricing-impact h3{margin:5px 0 0;font-size:14px}
+.adm-pricing-impact ul{display:grid;gap:6px;margin:0;padding-inline-start:20px}
+.adm-pricing-action-risk code{overflow-wrap:break-word;overflow-wrap:anywhere;white-space:normal}
+.adm-pricing-workspace .adm-finance-subpanel button.adm-pricing-risk-trigger{color:var(--adm-danger);border-color:#e3abb0;background:var(--adm-surface)}
+.adm-pricing-action.adm-pricing-action-risk>footer{display:grid;grid-template-columns:auto auto;justify-content:end;gap:8px}
+.adm-pricing-action.adm-pricing-action-risk>footer button{min-width:0;white-space:normal;overflow-wrap:break-word}
+.adm-pricing-action.adm-pricing-action-risk button:focus,.adm-pricing-workspace .adm-finance-subpanel button.adm-pricing-risk-trigger:focus{outline:2px solid var(--adm-primary);outline-offset:2px}
+@media(max-width:500px){.adm-pricing-impact dl,.adm-pricing-action.adm-pricing-action-risk>footer{grid-template-columns:minmax(0,1fr)}.adm-pricing-action.adm-pricing-action-risk>footer button{justify-self:end;max-width:100%}}

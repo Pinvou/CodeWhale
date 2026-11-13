@@ -1,5 +1,5 @@
 import { isImeComposing } from '../../shared/ime-guard.mjs';
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { executeHighRiskCommand, resetHighRiskCommandAfterSafeFailure, validImpactPrecheck } from './admin-high-risk-action-state.js';
 import { validateCatalogDifference } from './admin-model-operations-overview.js';
 
@@ -22,7 +22,7 @@ function ImpactFacts({ impact, copy }) {
   const catalogDiffUnavailable = Object.prototype.hasOwnProperty.call(impact || {}, 'catalog_diff') && !catalogDiff;
   const providerObservation = catalogDiff?.target_observed_version !== null;
   return <><dl className="adm-command-target adm-high-risk-impact">{facts.map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{Number(value || 0).toLocaleString()}</dd></div>)}</dl>
-    {catalogDiff && <section className="adm-catalog-diff" aria-labelledby="catalog-diff-title"><h4 id="catalog-diff-title">{copy.catalogDiffTitle}</h4><dl><div><dt>{copy.catalogAdded}</dt><dd>{catalogDiff.added_count.toLocaleString()}</dd></div><div><dt>{copy.catalogModified}</dt><dd>{catalogDiff.modified_count.toLocaleString()}</dd></div><div><dt>{providerObservation ? copy.catalogMissing : copy.catalogRemoved}</dt><dd>{catalogDiff.removed_count.toLocaleString()}</dd></div></dl>{catalogDiff.total_count === 0 ? <p>{copy.catalogDiffEmpty}</p> : <ul>{catalogDiff.items.map((item, index) => <li key={item.model_id || `${item.change_type}-${index}`}><span>{item.change_type === 'REMOVED' && providerObservation ? copy.catalogMissing : copy.catalogChangeTypes[item.change_type]}</span><strong>{item.display_name || copy.catalogUnnamedModel}</strong>{item.model_id && <code>{item.model_id}</code>}</li>)}</ul>}{catalogDiff.truncated && <small>{copy.catalogDiffTruncated(catalogDiff.total_count, catalogDiff.items.length)}</small>}<small>{catalogDiff.target_catalog_version ? copy.catalogVersionPair(catalogDiff.baseline_catalog_version, catalogDiff.target_catalog_version) : copy.catalogObservedTarget(catalogDiff.baseline_catalog_version)}</small></section>}
+    {catalogDiff && <section className="adm-catalog-diff" aria-labelledby="catalog-diff-title"><h4 id="catalog-diff-title">{copy.catalogDiffTitle}</h4><dl><div><dt>{copy.catalogAdded}</dt><dd>{catalogDiff.added_count.toLocaleString()}</dd></div><div><dt>{copy.catalogModified}</dt><dd>{catalogDiff.modified_count.toLocaleString()}</dd></div><div><dt>{providerObservation ? copy.catalogMissing : copy.catalogRemoved}</dt><dd>{catalogDiff.removed_count.toLocaleString()}</dd></div></dl>{catalogDiff.total_count === 0 ? <p>{copy.catalogDiffEmpty}</p> : <ul>{catalogDiff.items.map((item, index) => <li key={item.model_id || `${item.change_type}-${index}`}><span>{item.change_type === 'REMOVED' && providerObservation ? copy.catalogMissing : copy.catalogChangeTypes[item.change_type]}</span><strong>{item.display_name || copy.catalogUnnamedModel}</strong>{item.model_id && <code>{item.model_id}</code>}</li>)}</ul>}{catalogDiff.truncated && <small>{copy.catalogDiffTruncated(catalogDiff.total_count, catalogDiff.items.length)}</small>}<small>{catalogDiff.target_catalog_version ? copy.catalogVersionPair(catalogDiff.baseline_catalog_version, catalogDiff.target_catalog_version) : (copy.catalogDirectory?.observedVersion?.(catalogDiff.baseline_catalog_version, catalogDiff.target_observed_version) || copy.catalogObservedTarget(catalogDiff.baseline_catalog_version))}</small></section>}
     {catalogDiffUnavailable && <div className="adm-inline-message error" role="alert">{copy.catalogDiffUnavailable}</div>}
     {typeof impact.critical_resource_versions?.force_cancel_inflight === 'boolean' && <><p>{copy.forceCancelInflight}: {impact.critical_resource_versions.force_cancel_inflight ? copy.forceCancelEnabled : copy.forceCancelDisabled}</p><p>{copy.forceCancelInflightHelp}</p></>}
     {impact.blockers.length > 0 && <div className="adm-inline-message error" role="alert"><strong>{copy.actionBlocked}</strong><ul>{impact.blockers.map((blocker) => <li key={blocker}>{copy.impactBlockers?.[blocker] || blocker}</li>)}</ul></div>}
@@ -31,7 +31,7 @@ function ImpactFacts({ impact, copy }) {
 
 const EMPTY_ACTION_DETAILS = Object.freeze({});
 
-export function AdminHighRiskActionDialog({ action, copy, target, policy = 'AUDIT_ONLY', recentAuth = false, impactLoader, precheckEnabled = true, impactRequired = true, payloadDetails = EMPTY_ACTION_DETAILS, execute, recover, recoverByIdempotencyKey, onClose, onCompleted, onManualReview, onOpenApproval, reasonMin = 10, reasonMax = 2000, dangerous = false, initialReason = '', children }) {
+export function AdminHighRiskActionDialog({ action, copy, target, policy = 'AUDIT_ONLY', recentAuth = false, impactLoader, precheckEnabled = true, impactRequired = true, payloadDetails = EMPTY_ACTION_DETAILS, execute, recover, recoverByIdempotencyKey, onClose, onCompleted, onManualReview, onOpenApproval, reasonMin = 10, reasonMax = 2000, dangerous = false, initialReason = '', bindImpactToAction = false, impactPrompt = '', children }) {
   const root = useRef(null);
   const first = useRef(null);
   const previousFocus = useRef(document.activeElement);
@@ -40,9 +40,15 @@ export function AdminHighRiskActionDialog({ action, copy, target, policy = 'AUDI
   const executionController = useRef(null);
   const [reason, setReason] = useState(initialReason);
   const [confirmed, setConfirmed] = useState(!dangerous);
-  const [impact, setImpact] = useState(null);
+  const [confirmationScope, setConfirmationScope] = useState(null);
+  const [impactResult, setImpact] = useState(null);
   const [impactGeneration, setImpactGeneration] = useState(0);
+  const impactScope = useMemo(() => ({}), [action.key, impactGeneration, impactRequired, precheckEnabled]);
+  const impact = !bindImpactToAction || impactResult?.scope === impactScope ? impactResult?.value ?? null : null;
   const [state, setState] = useState({ loading: Boolean(impactRequired && impactLoader && precheckEnabled), busy: false, error: null, commandError: false, unknown: false, success: '' });
+  const error = !bindImpactToAction || state.impactScope === impactScope ? state.error : null;
+  const loading = bindImpactToAction ? precheckEnabled && (state.impactScope !== impactScope || state.loading) : state.loading;
+  const confirmation = confirmed && (!bindImpactToAction || confirmationScope === impactScope);
   impactLoaderRef.current = impactLoader;
   useEffect(() => {
     first.current?.focus();
@@ -53,25 +59,25 @@ export function AdminHighRiskActionDialog({ action, copy, target, policy = 'AUDI
   }, []);
   useEffect(() => {
     if (!impactRequired) { setImpact(null); setState((current) => ({ ...current, loading: false, error: null })); return undefined; }
-    if (!impactLoaderRef.current || !precheckEnabled) { setImpact(null); setState((current) => ({ ...current, loading: false, error: { code: 'PRECHECK_UNAVAILABLE', requestID: '' } })); return undefined; }
+    if (!impactLoaderRef.current || !precheckEnabled) { setImpact(null); setState((current) => ({ ...current, impactScope, loading: false, error: impactPrompt ? null : { code: 'PRECHECK_UNAVAILABLE', requestID: '' } })); return undefined; }
     const controller = new globalThis.AbortController();
-    setState((current) => ({ ...current, loading: true, error: null }));
+    setState((current) => ({ ...current, impactScope, loading: true, error: null }));
     void impactLoaderRef.current(controller.signal).then((value) => {
       if (controller.signal.aborted) return;
       if (!validImpactPrecheck(value, action.impactAction)) throw Object.assign(new Error('invalid impact'), { code: 'INVALID_IMPACT_RESPONSE' });
-      setImpact(value);
+      setImpact({ scope: impactScope, value });
       setState((current) => ({ ...current, loading: false }));
     }).catch((error) => {
       if (!controller.signal.aborted) setState((current) => ({ ...current, loading: false, commandError: false, error: { code: error.code || 'PRECHECK_UNAVAILABLE', requestID: error.requestID || '' } }));
     });
     return () => controller.abort();
-  }, [action.key, impactGeneration, impactRequired, precheckEnabled]);
+  }, [impactScope, impactPrompt]);
   const normalizedReason = reason.trim();
   const reasonLength = [...normalizedReason].length;
   const frozenReference = command.current?.command?.unknown ? command.current.command.error?.commandReference : '';
   const recoveryBlocked = state.unknown && (!(recover && frozenReference) && !recoverByIdempotencyKey);
   const malformedCatalogDiff = Object.prototype.hasOwnProperty.call(impact || {}, 'catalog_diff') && !validateCatalogDifference(impact.catalog_diff);
-  const blocked = (impactRequired && (!impact || impact.blockers?.length > 0 || malformedCatalogDiff)) || state.loading || state.busy || state.terminal || recoveryBlocked || reasonLength < reasonMin || reasonLength > reasonMax || !confirmed;
+  const blocked = (impactRequired && (!impact || impact.blockers?.length > 0 || malformedCatalogDiff)) || loading || state.busy || state.terminal || recoveryBlocked || reasonLength < reasonMin || reasonLength > reasonMax || !confirmation;
   const closeDialog = () => {
     const completed = state.success;
     onClose();
@@ -102,14 +108,14 @@ export function AdminHighRiskActionDialog({ action, copy, target, policy = 'AUDI
     if (result.duplicate) return;
     if (result.ok) {
       setReason('');
-      setState({ loading: false, busy: false, error: null, commandError: false, unknown: false, terminal: true, success: result.value || {} });
+      setState({ impactScope, loading: false, busy: false, error: null, commandError: false, unknown: false, terminal: true, success: result.value || {} });
       return;
     }
 		if (result.error?.commandResult?.recovery_state === 'MANUAL_REVIEW') {
 			onManualReview?.(result.error.commandResult);
 			return;
 		}
-    setState({ loading: false, busy: false, error: result.error, commandError: true, unknown: result.command.unknown, terminal: result.command.terminal, success: '' });
+    setState({ impactScope, loading: false, busy: false, error: result.error, commandError: true, unknown: result.command.unknown, terminal: result.command.terminal, success: '' });
   };
   const retryPrecheck = () => {
     resetHighRiskCommandAfterSafeFailure(command, { preserveKey: action.impactAction === 'TOKEN_ACCOUNT_CREATE' });
@@ -121,14 +127,15 @@ export function AdminHighRiskActionDialog({ action, copy, target, policy = 'AUDI
     <header><div><h3 id={`${action.key}-dialog-title`}>{action.title}</h3><p>{action.lead || copy.actionLead}</p></div><button ref={first} type="button" disabled={state.busy || state.unknown} onClick={closeDialog} aria-label={copy.close}>×</button></header>
     <dl className="adm-command-target"><div><dt>{copy.target}</dt><dd>{target.label}</dd></div><div><dt>{copy.actionResourceVersion}</dt><dd>{target.version || copy.serverResolvedBeforeSubmit}</dd></div><div><dt>{copy.policy}</dt><dd>{policy === 'APPROVAL_REQUIRED' ? copy.approvalRequired : copy.auditOnly}</dd></div><div><dt>{copy.actionEffectiveAt}</dt><dd>{target.effectiveAt || copy.actionImmediate}</dd></div><div><dt>{copy.idempotency}</dt><dd>{copy.fixedIdempotency}</dd></div></dl>
     {recentAuth && <div className="adm-inline-message info" role="status">{copy.recentAuthRequired}</div>}
-    {state.loading && <div className="adm-source-state" role="status">{copy.actionLoadingImpact}</div>}
-    {state.error && <div className={`adm-inline-message error${state.unknown ? ' adm-command-unknown' : ''}`} role="alert"><strong>{state.unknown ? copy.actionUnknown : state.commandError ? copy.actionSubmitFailed : copy.actionPrecheckFailed}</strong>{copy.commandErrors?.[state.error.code] && <p>{copy.commandErrors[state.error.code]}</p>}{state.error.commandReference && <small>{copy.commandReference}: {state.error.commandReference}</small>}{state.error.requestID && <small>{copy.requestID}: {state.error.requestID}</small>}</div>}
+    {impactPrompt && !precheckEnabled && <div className="adm-source-state" role="status">{impactPrompt}</div>}
+    {loading && <div className="adm-source-state" role="status">{copy.actionLoadingImpact}</div>}
+    {error && <div className={`adm-inline-message error${state.unknown ? ' adm-command-unknown' : ''}`} role="alert"><strong>{state.unknown ? copy.actionUnknown : state.commandError ? copy.actionSubmitFailed : copy.actionPrecheckFailed}</strong>{copy.commandErrors?.[error.code] && <p>{copy.commandErrors[error.code]}</p>}{error.commandReference && <small>{copy.commandReference}: {error.commandReference}</small>}{error.requestID && <small>{copy.requestID}: {error.requestID}</small>}</div>}
     {state.success && <div className="adm-inline-message success" role="status"><strong>{copy.actionAccepted}</strong>{state.success.command_reference && <small>{copy.commandReference}: {state.success.command_reference}</small>}{state.success.approval_request_id && <small>{copy.actionApprovalReference}: {state.success.approval_request_id}</small>}{state.success.audit_request_id && <small>{copy.actionAuditReference}: {state.success.audit_request_id}</small>}{state.success.approval_request_id && onOpenApproval && <button type="button" onClick={() => { const id = state.success.approval_request_id; closeDialog(); onOpenApproval(id); }}>{copy.actionViewApproval}</button>}</div>}
     {impact && <ImpactFacts impact={impact} copy={copy} />}
     {children && <fieldset className="adm-high-risk-fields" disabled={state.busy || state.unknown || state.terminal}>{children}</fieldset>}
-    <label>{copy.reason}<textarea required minLength={reasonMin} maxLength={reasonMax} rows="4" disabled={state.busy || state.unknown || state.terminal} value={reason} onChange={(event) => { setReason(event.target.value); if (state.error && !state.unknown) { resetHighRiskCommandAfterSafeFailure(command); setState((current) => ({ ...current, error: null })); } }} /></label>
-    {dangerous && <label className="adm-danger-confirm"><input type="checkbox" checked={confirmed} disabled={state.busy || state.unknown || state.terminal} onChange={(event) => setConfirmed(event.target.checked)} /><span>{copy.actionDangerConfirm}</span></label>}
+    <label>{copy.reason}<textarea required minLength={reasonMin} maxLength={reasonMax} rows="4" disabled={state.busy || state.unknown || state.terminal} value={reason} onChange={(event) => { setReason(event.target.value); if (error && !state.unknown && (!bindImpactToAction || state.commandError)) { resetHighRiskCommandAfterSafeFailure(command); setState((current) => ({ ...current, error: null })); } }} /></label>
+    {dangerous && <label className="adm-danger-confirm"><input type="checkbox" checked={confirmation} disabled={state.busy || state.unknown || state.terminal || (bindImpactToAction && (!impact || loading))} onChange={(event) => { setConfirmed(event.target.checked); setConfirmationScope(impactScope); }} /><span>{copy.actionDangerConfirm}</span></label>}
     <p className="adm-safe-preview-note">{copy.actionAuditNotice}</p>
-    <footer><button type="button" disabled={state.busy || state.unknown} onClick={closeDialog}>{state.terminal ? copy.close : copy.cancel}</button>{state.error && !state.unknown && !state.terminal && <button type="button" onClick={retryPrecheck}>{copy.actionReload}</button>}{!state.terminal && <button className={dangerous ? 'danger' : ''} type="submit" disabled={blocked}>{state.busy ? copy.submitting : state.unknown && recoveryBlocked ? copy.actionRecoveryUnavailable : state.unknown ? copy.actionRecoverSameKey : policy === 'APPROVAL_REQUIRED' ? copy.actionRequestApproval : copy.confirm}</button>}</footer>
+    <footer><button type="button" disabled={state.busy || state.unknown} onClick={closeDialog}>{state.terminal ? copy.close : copy.cancel}</button>{error && !state.unknown && !state.terminal && <button type="button" onClick={retryPrecheck}>{copy.actionReload}</button>}{!state.terminal && <button className={dangerous ? 'danger' : ''} type="submit" disabled={blocked}>{state.busy ? copy.submitting : state.unknown && recoveryBlocked ? copy.actionRecoveryUnavailable : state.unknown ? copy.actionRecoverSameKey : policy === 'APPROVAL_REQUIRED' ? copy.actionRequestApproval : copy.confirm}</button>}</footer>
   </form></div>;
 }
