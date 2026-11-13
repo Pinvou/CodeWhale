@@ -38,10 +38,24 @@ async function create(page) {
   await page.type('.adm-financial-repair-draft textarea', 'Controlled write-off justification'); await page.type('.adm-financial-repair-draft input', 'controlled-write-off');
   await page.click('.adm-financial-repair-draft button');
 }
+async function clickReauthentication(page) {
+  const selector = '.adm-writeoff-reauthentication button';
+  await page.$eval(selector, button => button.scrollIntoView({ block: 'center', inline: 'nearest' }));
+  await page.waitForFunction(selector => { const button = document.querySelector(selector), rect = button.getBoundingClientRect(), hit = document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2); return hit && button.contains(hit) && !button.disabled; }, {}, selector);
+  await page.click(selector);
+}
 async function center(page, view) {
   await page.waitForSelector('nav button[data-section="approvals"]');
   await page.click('nav button[data-section="approvals"]');
-  if (view) await page.evaluate(view => [...document.querySelectorAll('.adm-approval-tabs button')].find(button => button.textContent === window.f11.adminPlatformCopy[window.f11.language].approvalCenter[view]).click(), view);
+  if (view) {
+    await page.waitForFunction(view => [...document.querySelectorAll('.adm-approval-tabs button')].some(button => button.textContent === window.f11.adminPlatformCopy[window.f11.language].approvalCenter[view] && !button.disabled), {}, view);
+    await page.evaluate(view => [...document.querySelectorAll('.adm-approval-tabs button')].find(button => button.textContent === window.f11.adminPlatformCopy[window.f11.language].approvalCenter[view]).click(), view);
+    await page.waitForFunction(view => [...document.querySelectorAll('.adm-approval-tabs button')].some(button => button.textContent === window.f11.adminPlatformCopy[window.f11.language].approvalCenter[view] && button.getAttribute('aria-current') === 'page'), {}, view);
+    if (view === 'directory') {
+      await page.waitForSelector('.adm-approval-directory-toolbar');
+      assert.equal(await page.evaluate(() => window.f11.calls.some(call => call.url === '/api/admin/approvals/directory')), true);
+    }
+  }
 }
 try {
   for (const [label, key, valid] of [['ASCII111', 'a'.repeat(111), true], ['ASCII112', 'a'.repeat(112), false], ['UTF8-111bytes', '中'.repeat(37), true], ['UTF8-114bytes', '中'.repeat(38), false]]) {
@@ -70,8 +84,8 @@ try {
     assert.ok(calls.some(call => call.url.endsWith('/actions/submit'))); assert.equal(calls.some(call => call.url.includes('/api/admin/billing/')), false);
   });
   await run('WriteOff directory/filter/typed EDIT/current proof/drilldown preserves original CAS', 'existing=1', async page => {
-    await center(page, 'directory'); await page.waitForFunction(() => document.querySelector('tbody')?.textContent.includes('RECEIVABLE_WRITE_OFF'));
-    assert.equal(await page.evaluate(() => document.querySelector('tbody').textContent.includes('UNKNOWN_REPAIR')), false);
+    await center(page, 'directory'); await page.waitForFunction(() => document.querySelector('.adm-approval-policy-table tbody')?.textContent.includes('RECEIVABLE_WRITE_OFF'));
+    assert.equal(await page.evaluate(() => document.querySelector('.adm-approval-policy-table tbody').textContent.includes('UNKNOWN_REPAIR')), false);
     await page.evaluate(() => [...document.querySelectorAll('.adm-approval-tabs button')].find(button => button.textContent === window.f11.adminPlatformCopy.zh.approvalCenter.mine).click());
     await page.waitForSelector('.adm-approval-toolbar select'); await page.select('.adm-approval-toolbar select', 'RECEIVABLE_WRITE_OFF');
     await page.type('.adm-approval-toolbar input', await page.evaluate(() => window.f11.id(1))); await page.click('.adm-approval-toolbar button');
@@ -85,15 +99,34 @@ try {
     assert.ok(calls.some(call => call.url.includes('command_type=RECEIVABLE_WRITE_OFF') && call.url.includes('target=')));
     await page.waitForFunction(() => [...document.querySelectorAll('article button')].some(button => button.textContent === window.f11.adminPlatformCopy.zh.approvalCenter.openBusinessArea && !button.disabled));
     await page.evaluate(() => [...document.querySelectorAll('article button')].find(button => button.textContent === window.f11.adminPlatformCopy.zh.approvalCenter.openBusinessArea).click());
-    await page.waitForSelector('[data-workspace="writeoff"]:not([hidden]) .adm-financial-repair-target select', { visible: true }); assert.equal(await page.$eval('[data-workspace="writeoff"]:not([hidden]) .adm-financial-repair-target select', select => select.value), 'RECEIVABLE_WRITE_OFF');
+    const taskLabel = '[data-workspace="writeoff"]:not([hidden]) .adm-writeoff-fixed-command dd';
+    await page.waitForSelector(taskLabel, { visible: true });
+    assert.equal(await page.$eval(taskLabel, node => node.textContent), await page.evaluate(() => window.f11.ledgerRepairCopy[window.f11.language].receivableTask.name));
   });
   await run('WriteOff approver-only real detail decide without requester or wallet calls', 'approve=1&existing=1', async page => {
+    // The approver's own directory is valid and empty; another requester's
+    // application is accessed through the independent pending-approval queue.
+    await page.waitForSelector('.adm-approval-mine-read time');
+    assert.equal(await page.$('.adm-approval-mine-read [role=alert]'), null);
+    assert.equal(await page.$('tbody tr'), null);
+    assert.equal(await page.evaluate(() => window.f11.calls.some(call => call.method === 'GET' && call.url.startsWith('/api/admin/approvals/requests?') && new URL(call.url, location.origin).searchParams.get('requester_user_id') === window.f11.id(7))), true);
+
+    await page.evaluate(() => { window.f11.status = 'SUBMITTED'; }); await center(page, 'pending');
     await page.waitForSelector('tbody tr button'); assert.equal(await page.$('.adm-financial-repair'), null);
-    await page.evaluate(() => { window.f11.status = 'SUBMITTED'; }); await page.click('tbody tr button'); await page.waitForSelector('article textarea');
+    await page.click('tbody tr button'); await page.waitForSelector('article textarea');
+    assert.equal(await page.evaluate(() => window.f11.calls.some(call => call.method === 'GET' && call.url.startsWith('/api/admin/approvals/requests?') && new URL(call.url, location.origin).searchParams.get('status') === 'SUBMITTED' && !new URL(call.url, location.origin).searchParams.has('requester_user_id'))), true);
+    assert.equal(await page.$eval('article h4', node => node.textContent), await page.evaluate(() => window.f11.id(9)));
     await page.type('article textarea', 'Independent approved write-off review');
     await page.evaluate(() => [...document.querySelectorAll('article button')].find(button => button.textContent === window.f11.financeCopy.zh.approve).click());
     await page.waitForFunction(() => document.querySelector('article')?.textContent.includes('EXECUTED'));
     assert.equal(await page.evaluate(() => window.f11.calls.some(call => call.url.includes('/billing/') || call.url.endsWith('/approval-command-prechecks') || call.method === 'PUT')), false);
+    const decisions = await page.evaluate(() => window.f11.calls.filter(call => call.method === 'POST' && call.url.endsWith('/actions/decide')));
+    assert.equal(decisions.length, 1);
+    assert.equal(JSON.parse(decisions[0].body).decision, 'APPROVED');
+    assert.equal(JSON.parse(decisions[0].body).expected_version, 1);
+    assert.equal(decisions[0].headers['X-CSRF-Token'], 'controlled-csrf');
+    assert.equal(decisions[0].headers['X-Pinvou-Approval-Action-Control-Version'], '1');
+    assert.equal(await page.evaluate(() => window.f11.calls.some(call => call.method === 'POST' && call.url === '/api/admin/approvals/requests')), false);
   });
   await run('No repair permission hides WriteOff and does not call its receiver', 'deny=1', async page => {
     await page.waitForFunction(message => document.querySelector('[role="alert"]')?.textContent === message, {}, adminLayoutCopy.zh.unauthorized); assert.equal(await page.$('.adm-financial-repair'), null);
@@ -117,7 +150,7 @@ try {
     assert.equal(await page.$eval('.adm-financial-repair-draft input', input => input.disabled), false); assert.equal(await page.evaluate(() => window.f11.created), false);
   });
   await run('Directory retirement releases only old child; current EDIT UNKNOWN keeps navigation locked', 'existing=1&edit-lost=1', async page => {
-    await center(page, 'directory'); await page.waitForFunction(() => document.querySelector('tbody')?.textContent.includes('RECEIVABLE_WRITE_OFF'));
+    await center(page, 'directory'); await page.waitForFunction(() => document.querySelector('.adm-approval-policy-table tbody')?.textContent.includes('RECEIVABLE_WRITE_OFF'));
     await page.evaluate(() => [...document.querySelectorAll('.adm-approval-tabs button')].find(button => button.textContent === window.f11.adminPlatformCopy.zh.approvalCenter.mine).click());
     await page.waitForSelector('tbody tr button'); await page.click('tbody tr button'); await page.waitForSelector('article textarea');
     await page.type('article textarea', 'Current original-intent controlled EDIT');
@@ -135,7 +168,7 @@ try {
       assert.equal(await page.$eval('.adm-writeoff-reauthentication p', node => node.textContent), await page.evaluate(() => window.f11.ledgerRepairCopy[window.f11.language].writeOffRecentAuthenticationRequired));
       const first = await page.evaluate(() => window.f11.calls.find(call => call.method === 'POST' && call.url === '/api/admin/approvals/requests').body);
       assert.equal(await page.evaluate(() => window.f11.created), false);
-      await page.click('.adm-writeoff-reauthentication button');
+      await clickReauthentication(page);
       assert.equal(await page.evaluate(() => window.f11.reauthentication), '/admin.html');
       assert.equal(await page.$eval('.adm-financial-repair-draft input', input => input.value), 'controlled-write-off');
       await page.evaluate(() => { window.f11.authenticatedAgain = true; });
@@ -149,7 +182,7 @@ try {
       await openForm(page); await page.waitForSelector('.adm-writeoff-reauthentication button');
       assert.equal(await page.$('.adm-financial-repair-draft'), null);
       assert.equal(await page.evaluate(() => window.f11.calls.some(call => call.method === 'POST' && call.url === '/api/admin/approvals/requests')), false);
-      await page.click('.adm-writeoff-reauthentication button'); assert.equal(await page.evaluate(() => window.f11.reauthentication), '/admin.html');
+      await clickReauthentication(page); assert.equal(await page.evaluate(() => window.f11.reauthentication), '/admin.html');
     });
   }
   await run('WriteOff unknown recent-auth denial retains original frozen facts and explicit replay', 'lost-recent=1', async page => {

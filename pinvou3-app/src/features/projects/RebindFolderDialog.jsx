@@ -4,6 +4,7 @@
 // attempt without confirmation, backend rejects when the original folder still
 // exists, then this dialog escalates to the strong warning).
 import { useEffect, useRef } from 'react';
+import { runRebindWorkspace } from './rebind-workspace-action.js';
 import { createPortal } from 'react-dom';
 import { AlertTriangle, RefreshCw, X } from '../../components/icons.jsx';
 import { isImeComposing } from '../../shared/ime-guard.mjs';
@@ -208,7 +209,7 @@ const RebindFolderDialog = ({ from, to, warnExisting, errorMessage, partial, bus
             type="button"
             ref={confirmButtonRef}
             disabled={busy}
-            onClick={() => onConfirm(!!warnExisting)}
+            onClick={() => onConfirm(!!warnExisting, runRebindWorkspace)}
             className="flex-1 h-10 rounded-full bg-[#0B57D0] text-white text-[14px] font-medium hover:bg-[#0A4CB8] disabled:opacity-50"
           >
             {partial ? t.uiProjects.rebindRetryRemaining : t.uiProjects.rebindConfirm}

@@ -1,0 +1,10 @@
+.adm-restored-shell .adm-system-metric-groups{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,2fr);align-items:start;gap:16px;margin:0 0 18px}
+.adm-restored-shell .adm-system-metric-group{min-width:0}
+.adm-restored-shell .adm-system-metric-group h2{margin:0 0 8px;font-size:15px}
+.adm-restored-shell .adm-system-metric-group .adm-metrics{grid-template-columns:minmax(0,1fr);gap:10px;margin:0}
+.adm-restored-shell .adm-system-metric-group .adm-system-job-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}
+.adm-restored-shell .adm-system-metric-group .adm-metrics article{min-width:0;overflow-wrap:anywhere}
+.adm-restored-shell .adm-system-metric-group .adm-metrics .adm-system-stopped-warning{border-color:var(--adm-warning);background:var(--adm-warning-soft)}
+.adm-restored-shell .adm-system-stopped-attention{margin:8px 0 0;color:var(--adm-warning);font-size:13px;font-weight:650;line-height:1.5}
+@media(max-width:850px){.adm-restored-shell .adm-system-metric-groups{grid-template-columns:minmax(0,1fr)}}
+@media(max-width:530px){.adm-restored-shell .adm-system-metric-group .adm-system-job-metrics{grid-template-columns:minmax(0,1fr)}}

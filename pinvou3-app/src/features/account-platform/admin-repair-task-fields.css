@@ -1,0 +1,12 @@
+.adm-restored-shell .adm-financial-repair .adm-repair-task-heading{display:grid;gap:4px;margin:0 0 12px}
+.adm-restored-shell .adm-financial-repair .adm-repair-task-heading h3,.adm-restored-shell .adm-financial-repair .adm-repair-task-heading p{margin:0}
+.adm-restored-shell .adm-financial-repair .adm-repair-task-code{color:var(--adm-muted);font-size:12px;overflow-wrap:break-word;overflow-wrap:anywhere}
+.adm-restored-shell .adm-financial-repair .adm-repair-task-label{display:grid;min-width:0;align-content:start;gap:5px}
+.adm-restored-shell .adm-financial-repair .adm-repair-task-label>input{min-width:0;width:100%}
+.adm-restored-shell .adm-financial-repair .adm-repair-task-label>small{min-width:0;color:var(--adm-muted);font-size:12px;line-height:1.45;overflow-wrap:break-word;overflow-wrap:anywhere}
+.adm-restored-shell .adm-financial-repair .adm-repair-task-label>input[aria-invalid=true]{border-color:var(--adm-danger,#a52837)}
+.adm-restored-shell .adm-financial-repair .adm-repair-task-label>.adm-repair-task-field-error{color:var(--adm-danger,#a52837);font-weight:600}
+.adm-restored-shell .adm-financial-repair .adm-repair-task-step{grid-column:1/-1;min-width:0;margin:0;font-size:15px}
+.adm-restored-shell .adm-financial-repair .adm-repair-task-actions{display:flex;justify-content:flex-end;grid-column:1/-1;min-width:0}
+.adm-restored-shell .adm-financial-repair .adm-repair-task-actions>button{max-width:100%;white-space:normal}
+@media(max-width:650px){.adm-restored-shell .adm-financial-repair .adm-repair-task-actions{justify-content:flex-start}.adm-restored-shell .adm-financial-repair .adm-repair-task-actions>button{width:100%}}
