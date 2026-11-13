@@ -9,6 +9,8 @@ const MAX_FILES = 8;
 // could keep a `completed:false` chunk stream going and grow this WebView's
 // memory without bound.
 const MAX_DOWNLOAD_BYTES = 32 * 1024 * 1024;
+const MAX_DOWNLOAD_CHUNKS = 4096;
+const MAX_DOWNLOAD_CHUNK_BYTES = 256 * 1024;
 // Unknown outcomes are retained for the lifetime of this process. Losing a
 // begin reply can also lose the server-minted handle, so retrying the batch
 // cannot safely be treated as a fresh operation.
@@ -211,28 +213,51 @@ export async function downloadRemoteArtifact(api, binding, artifact) {
   let nextChunk = 0;
   let receivedBytes = 0;
   try {
-    if (!Number.isSafeInteger(begin.totalBytes) || begin.totalBytes < 0
+    if (!Number.isSafeInteger(begin.totalBytes) || begin.totalBytes <= 0
       || begin.totalBytes > MAX_DOWNLOAD_BYTES) {
       throw new Error('remote_artifact_size_limit');
     }
+    if (!Number.isSafeInteger(begin.chunkBytes) || begin.chunkBytes <= 0
+      || begin.chunkBytes > MAX_DOWNLOAD_CHUNK_BYTES) {
+      throw new Error('remote_artifact_chunk_invalid');
+    }
     for (;;) {
+      // Bound array entries and requests independently of the byte budget.
+      // Reserve before requesting/decoding/retaining another chunk.
+      if (chunks.length >= MAX_DOWNLOAD_CHUNKS) throw new Error('remote_artifact_chunk_limit');
       const receipt = await api.artifactDownloadChunk(
         binding.localSessionId, binding.remoteRef, artifact.taskId, artifact.artifactId,
         begin.transferId, nextChunk,
       );
+      if (!receipt || receipt.chunkIndex !== nextChunk
+        || !Number.isSafeInteger(receipt.chunkBytes) || receipt.chunkBytes <= 0
+        || receipt.chunkBytes > begin.chunkBytes
+        || typeof receipt.chunkB64 !== 'string'
+        || receipt.chunkB64.length > 4 * Math.ceil(receipt.chunkBytes / 3)) {
+        throw new Error('remote_artifact_chunk_invalid');
+      }
       const bytes = base64ToBytes(receipt.chunkB64);
       if (bytes.length !== receipt.chunkBytes) throw new Error('remote_artifact_chunk_invalid');
       receivedBytes += bytes.length;
       if (receivedBytes > begin.totalBytes || receivedBytes > MAX_DOWNLOAD_BYTES) {
         throw new Error('remote_artifact_size_limit');
       }
-      chunks.push(bytes);
-      if (receipt.completed) break;
-      if (!Number.isSafeInteger(receipt.nextChunk) || receipt.nextChunk <= nextChunk) {
+      if (receipt.receivedBytes !== receivedBytes || receipt.nextChunk !== nextChunk + 1
+        || typeof receipt.completed !== 'boolean'
+        || receipt.completed !== (receivedBytes === begin.totalBytes)) {
         throw new Error('remote_artifact_chunk_invalid');
       }
+      chunks.push(bytes);
+      if (receipt.completed) break;
       nextChunk = receipt.nextChunk;
     }
+    const blob = new Blob(chunks, { type: artifact.mimeType || 'application/octet-stream' });
+    if (blob.size !== begin.totalBytes) throw new Error('remote_artifact_size_mismatch');
+    if (typeof artifact.sha256 === 'string' && /^[a-f0-9]{64}$/.test(artifact.sha256)) {
+      const digest = hex(new Uint8Array(await crypto.subtle.digest('SHA-256', await blob.arrayBuffer())));
+      if (digest !== artifact.sha256) throw new Error('remote_artifact_checksum_mismatch');
+    }
+    return blob;
   } catch (error) {
     if (error?.code !== 'result_unknown') {
       await api.artifactDownloadAbort(
@@ -241,13 +266,6 @@ export async function downloadRemoteArtifact(api, binding, artifact) {
     }
     throw error;
   }
-  const blob = new Blob(chunks, { type: artifact.mimeType || 'application/octet-stream' });
-  if (blob.size !== begin.totalBytes) throw new Error('remote_artifact_size_mismatch');
-  if (typeof artifact.sha256 === 'string' && /^[a-f0-9]{64}$/.test(artifact.sha256)) {
-    const digest = hex(new Uint8Array(await crypto.subtle.digest('SHA-256', await blob.arrayBuffer())));
-    if (digest !== artifact.sha256) throw new Error('remote_artifact_checksum_mismatch');
-  }
-  return blob;
 }
 
 export function saveRemoteArtifactBlob(blob, fileName) {
