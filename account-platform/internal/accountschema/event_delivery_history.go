@@ -83,6 +83,9 @@ func expectedEventDeliveryHistory(ctx context.Context, c *pgx.Conn, input []migr
 }
 
 func VerifyApplied(ctx context.Context, c *pgx.Conn, input []migrations.Migration) (migrations.Verification, error) {
+	if err := validateUnstartedGrantInventory(input); err != nil {
+		return migrations.Verification{}, err
+	}
 	if err := validateOutboxStatisticsIndex(input); err != nil {
 		return migrations.Verification{}, err
 	}

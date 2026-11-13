@@ -48,9 +48,11 @@ function pinvouSharedtauriSettings() {
   // 这里同步进内存副本，保证设置界面立即反映专用命令返回的桌宠状态。
   listen("pet:enabled_changed", function (e) {
     if (state.settings) {
-      state.settings.pet = Object.assign({}, state.settings.pet || {}, {
-        enabled: !!(e.payload && e.payload.enabled),
-      });
+      window.PinvouBridgeShared.publishSettings(state, Object.assign({}, state.settings, {
+        pet: Object.assign({}, state.settings.pet || {}, {
+          enabled: !!(e.payload && e.payload.enabled),
+        }),
+      }));
       notify();
     }
   });
@@ -64,6 +66,30 @@ function pinvouSharedtauriSettings() {
   });
 
   async function loadSettings() { return pinvouSharedtauriSettings().loadSettings(); }
+
+  // Store tasks finish independently of the visible page. Reload all model
+  // consumers after a route commit without changing global/session selection.
+  var modelsRefreshPromise = null;
+  var modelsRefreshPending = false;
+  function refreshChangedModels() {
+    modelsRefreshPending = true;
+    if (modelsRefreshPromise) return modelsRefreshPromise;
+    modelsRefreshPromise = (async function () {
+      do {
+        modelsRefreshPending = false;
+        await loadModels();
+        await loadSettings();
+        await loadEffectiveModelConfig();
+      } while (modelsRefreshPending);
+    })().finally(function () { modelsRefreshPromise = null; });
+    return modelsRefreshPromise;
+  }
+  listen("models:changed", function () {
+    return refreshChangedModels().catch(function () {
+      console.warn("[models] linked model refresh failed");
+    });
+  });
+
   async function loadBehaviorTelemetryStatus() {
     try {
       state.behaviorTelemetry = await invoke("get_behavior_telemetry_status");
@@ -93,19 +119,16 @@ function pinvouSharedtauriSettings() {
   }
   async function loadSelectedPet() { return pinvouSharedtauriSettings().loadSelectedPet(); }
   async function setSelectedPet(id) { return pinvouSharedtauriSettings().setSelectedPet(id); }
-  var effectiveModelLoadSeq = 0;
   async function loadEffectiveModelConfig(sessionId) {
-    var seq = ++effectiveModelLoadSeq;
     var requestedSessionId = arguments.length ? (sessionId || null) : (state.activeSessionId || null);
+    var read = window.PinvouBridgeShared.beginModelRead(state, requestedSessionId);
     try {
       var config = await invoke("get_effective_model_config", { sessionId: requestedSessionId });
-      if (seq !== effectiveModelLoadSeq || requestedSessionId !== (state.activeSessionId || null)) return false;
+      if (!read.configIsCurrent()) return false;
       state.effectiveModelConfig = config;
     } catch (e) {
-      if (seq !== effectiveModelLoadSeq || requestedSessionId !== (state.activeSessionId || null)) return false;
-      // Preserve the last authoritative snapshot. Callers can observe the
-      // explicit false result without a transient failure erasing a known
-      // missing/available credential state.
+      if (!read.configIsCurrent()) return false;
+      // Preserve the last authoritative snapshot across transient failures.
       return false;
     }
     notify();
@@ -116,7 +139,8 @@ function pinvouSharedtauriSettings() {
   async function saveSettings(patch) {
     return enqueueSettingsWrite(async function () {
       try {
-        state.settings = await invoke("update_settings", { patch: patch });
+        const settings = await invoke("update_settings", { patch: patch });
+        window.PinvouBridgeShared.publishSettings(state, settings);
         await loadEffectiveModelConfig();
         notify();
         return true;
@@ -140,7 +164,8 @@ function pinvouSharedtauriSettings() {
   async function saveSearchSettings(search) {
     return enqueueSettingsWrite(async function () {
       try {
-        state.settings = await invoke("update_search_settings", { search: search });
+        const settings = await invoke("update_search_settings", { search: search });
+        window.PinvouBridgeShared.publishSettings(state, settings);
         await loadEffectiveModelConfig();
         notify();
         return true;
@@ -177,23 +202,7 @@ function pinvouSharedtauriSettings() {
   // 整表覆盖加载：保存/删除/切换链式 loadModels 并发时旧列表不得覆盖新列表
   // （审计 b）。请求序号后发者胜（同本文件请求序号模式）。
   var modelsLoadSeq = 0;
-  async function loadModels() {
-    var seq = ++modelsLoadSeq;
-    try {
-      var v = await invoke("list_models");
-      if (seq !== modelsLoadSeq) return false;
-      state.savedModels = (v && v.models) || [];
-      state.activeModelId = (v && v.active_model_id) || null;
-      state.defaultModelRef = (v && v.default_model_ref) || null;
-      state.modelsLoaded = true;
-    } catch (e) {
-      if (seq !== modelsLoadSeq) return false;
-      // Keep the previous authoritative catalog on transport failure.
-      return false;
-    }
-    notify();
-    return true;
-  }
+  async function loadModels() { return pinvouSharedtauriSettings().loadModels(); }
   // model 对象字段须是 snake_case(SavedModel serde):
   // {id,name,preset,context_window_tokens,max_output_tokens,model,base_url,api_key,credential_action,image_capability_override,vision_model_id}
  function analyticsOperationId(prefix) {
@@ -265,6 +274,13 @@ function pinvouSharedtauriSettings() {
    await loadSettings();
    await loadEffectiveModelConfig();
   }
+ async function deleteModelIfStoreLink(id, cardId) {
+   var removed = await invoke("delete_model_if_store_link", { id: id, cardId: cardId });
+   await loadModels();
+   await loadSettings();
+   await loadEffectiveModelConfig();
+   return removed === true;
+ }
  // 设备管理移除回收专用（三十三轮评审 P2）：把快照行的身份原串交给最终事务
  // 核对——等待期间被用户改属的同 id 配置必须保留。true=已删，false=保留。
  async function deleteModelIfMatches(id, expectedBaseUrl, expectedModel) {
@@ -286,8 +302,8 @@ function pinvouSharedtauriSettings() {
   }
   // 读某会话当前绑定的模型 id(切会话时刷新 chip)。
   async function loadSessionModel(sessionId) {
-    var effectiveSeq = ++effectiveModelLoadSeq;
     var requestedSessionId = sessionId || null;
+    var read = window.PinvouBridgeShared.beginModelRead(state, requestedSessionId, true);
     var results = await Promise.all([
       requestedSessionId
         ? invoke("get_session_model_id", { sessionId: requestedSessionId }).catch(function () { return null; })
@@ -299,12 +315,13 @@ function pinvouSharedtauriSettings() {
         .then(function (value) { return { ok: true, value: value }; })
         .catch(function () { return { ok: false, value: null }; }),
     ]);
-    if (effectiveSeq !== effectiveModelLoadSeq || requestedSessionId !== (state.activeSessionId || null)) return false;
+    if (!read.selectionIsCurrent()) return false;
     state.currentSessionModelId = results[0];
     state.currentSessionModelRef = results[1];
-    if (results[2].ok) state.effectiveModelConfig = results[2].value;
+    var effectiveCurrent = read.configIsCurrent();
+    if (effectiveCurrent && results[2].ok) state.effectiveModelConfig = results[2].value;
     notify();
-    return results[2].ok;
+    return effectiveCurrent && results[2].ok;
   }
   // 切当前会话模型；草稿态只寄存到首条消息物化，不改全局默认。
   async function switchModelRef(sessionId, modelRef) {
@@ -398,7 +415,7 @@ function pinvouSharedtauriSettings() {
       if (typeof result.accelerator === "string" && result.accelerator) {
         mirror.global_shortcut_accelerator = result.accelerator;
       }
-      state.settings = Object.assign({}, state.settings, mirror);
+      window.PinvouBridgeShared.publishSettings(state, Object.assign({}, state.settings, mirror));
       notify();
     }
     return result;
@@ -437,6 +454,7 @@ function pinvouSharedtauriSettings() {
       saveModel: saveModel,
       revealModelApiKey: revealModelApiKey,
       deleteModel: deleteModel,
+      deleteModelIfStoreLink: deleteModelIfStoreLink,
       deleteModelIfMatches: deleteModelIfMatches,
       setActiveModel: setActiveModel,
       loadSessionModel: loadSessionModel,

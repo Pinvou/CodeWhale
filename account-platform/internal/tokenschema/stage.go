@@ -90,7 +90,7 @@ func Up(ctx context.Context, c *pgx.Conn, loaded []migrations.Migration) error {
 	// Balance this wrapper's ledger-validation guard on every exit. The shared
 	// migration engine acquires its own session lock, which remains the caller's
 	// responsibility to release once; a rejected ledger never reaches that engine.
-	defer migrations.Unlock(context.Background(), c)
+	defer migrations.Unlock(ctx, c)
 	ordered, err = ExpectedHistory(ctx, c, ordered)
 	if err != nil {
 		return err

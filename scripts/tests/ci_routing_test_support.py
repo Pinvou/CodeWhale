@@ -11,6 +11,22 @@ MATRIX = re.compile(
     r"(?m)^( *)matrix: \$\{\{ fromJSON\(vars\.PINVOU_WINDOWS_ENABLED != 'false' && \(vars\.PINVOU_MACOS_ENABLED != 'false' && '([^']+)' \|\| '([^']+)'\) \|\| \(vars\.PINVOU_MACOS_ENABLED != 'false' && '([^']+)' \|\| '([^']+)'\)\) \}\}$"
 )
 
+# Only this reviewed expression can be rendered as a default hosted route.
+# Unknown trust-policy edits must stay visible to the existing exact assertions.
+WINDOWS_PR_IDENTITY = (
+    "(github.event_name == 'pull_request' && github.repository != '' && "
+    "github.repository_id != '' && "
+    "github.event.pull_request.head.repo.full_name == github.repository && "
+    "github.event.pull_request.base.repo.full_name == github.repository && "
+    "github.event.pull_request.head.repo.id == github.repository_id && "
+    "github.event.pull_request.base.repo.id == github.repository_id)"
+)
+WINDOWS_POOL_TRUSTS = tuple(
+    "(github.event_name == 'push' || github.event_name == '" + event + "' || "
+    + WINDOWS_PR_IDENTITY + ")"
+    for event in ("merge_group", "workflow_dispatch")
+)
+
 def matrix_rows(value):
     matrix = json.loads(value)
     if not isinstance(matrix, dict) or set(matrix) != {'include'}:
@@ -38,6 +54,14 @@ def default_ci_routing(source, *, native_enabled=True, windows_enabled=None, mac
                 lines.append(indent + ('    - ' if index == 0 else '      ') + key + ': ' + scalar)
         return '\n'.join(lines)
     source = MATRIX.sub(expand, source)
+    # These legacy suites render unset runner variables in the default hosted
+    # configuration. The dedicated Windows trust suite replays the unrendered
+    # expressions for fork/missing metadata and configured private pools.
+    source = re.sub(
+        r"fromJSON\((?:" + "|".join(map(re.escape, WINDOWS_POOL_TRUSTS)) + r") && "
+        r"\((vars\.PINVOU_WINDOWS_[^()\n]+)\) \|\| '\[\"windows-latest\"\]'\)",
+        r"fromJSON(\1)", source,
+    )
     source = re.sub(r"vars\.PINVOU_WINDOWS_(?:HEAVY|MEDIUM|LIGHT)_RUNNER \|\| ", '', source)
     source = re.sub(r"runs-on: \$\{\{ fromJSON\(vars\.PINVOU_WINDOWS_RUNNER \|\| '\[\"windows-latest\"\]'\) \}\}", 'runs-on: windows-latest', source)
     source = re.sub(r" \|\| matrix\.(os|runs-on) == 'windows-latest' && fromJSON\(vars\.PINVOU_WINDOWS_RUNNER \|\| '\[\"windows-latest\"\]'\)", '', source)

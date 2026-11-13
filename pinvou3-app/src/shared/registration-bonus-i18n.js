@@ -45,3 +45,76 @@ export const registrationBonusRecoveryCopy = {
     pendingStorageFailed: '要求の復元情報を使用できません。新しい変更要求は送信していません。既存の要求を先に確認してください。',
   },
 };
+
+registrationBonusRecoveryCopy.zh.policyEditor = {
+  current: '已生效策略', lastRead: '上次读取的策略', draft: '编辑策略', compare: '待保存的改动',
+  on: '已启用', off: '已关闭', before: '当前', after: '保存后', points: value => `${value} 积分`, days: value => `${value} 天`,
+  noChanges: '策略值未改动。', legacyPrecision: (current, draft) => `当前历史额度为 ${current}；按现有整数表单保存时会提交 ${draft}。`,
+  saving: '正在保存，请等待结果。', refreshingAuthorization: '正在核对管理权限，请稍候。',
+  reloadForConflict: '策略版本已变更，请先重新读取并核对。', checkValues: '请检查赠送积分和有效期。', checkReason: '请填写符合要求的变更原因。',
+  originalSavedReadFailed: '原请求已确认保存，但未能读取当前策略。请重试读取。',
+};
+registrationBonusRecoveryCopy.en.policyEditor = {
+  current: 'Active policy', lastRead: 'Last policy read', draft: 'Edit policy', compare: 'Changes to save',
+  on: 'Enabled', off: 'Off', before: 'Current', after: 'After saving', points: value => `${value} points`, days: value => `${value} days`,
+  noChanges: 'The policy values are unchanged.', legacyPrecision: (current, draft) => `The current legacy amount is ${current}. This form saves whole points and will submit ${draft}.`,
+  saving: 'Saving. Wait for the result.', refreshingAuthorization: 'Checking management permission. Please wait.',
+  reloadForConflict: 'The policy version changed. Reload it and review the values.', checkValues: 'Check the bonus points and validity period.', checkReason: 'Enter a valid reason for saving.',
+  originalSavedReadFailed: 'The original save was confirmed, but the current policy could not be read. Try loading it again.',
+};
+registrationBonusRecoveryCopy.ja.policyEditor = {
+  current: '有効なポリシー', lastRead: '最後に取得したポリシー', draft: 'ポリシーの編集', compare: '保存する変更',
+  on: '有効', off: '無効', before: '現在', after: '保存後', points: value => `${value} ポイント`, days: value => `${value} 日`,
+  noChanges: 'ポリシーの設定値に変更はありません。', legacyPrecision: (current, draft) => `現在の旧形式の付与額は ${current} です。このフォームは整数の ${draft} を送信します。`,
+  saving: '保存中です。結果をお待ちください。', refreshingAuthorization: '管理権限を確認しています。',
+  reloadForConflict: 'ポリシーのバージョンが変わりました。再読み込みして設定値を確認してください。', checkValues: '付与ポイントと有効期間を確認してください。', checkReason: '有効な保存理由を入力してください。',
+  originalSavedReadFailed: '元の保存は確認できましたが、現在のポリシーを取得できませんでした。再読み込みしてください。',
+};
+
+registrationBonusRecoveryCopy.zh.eligibilityPresentation = {
+  title: '手机号终身资格',
+  example: '例如，同一个手机号在策略关闭或启用但为 0 积分时首次成功注册，两种情况都不赠送，且都会用掉资格。之后启用或调高积分，也不会补赠。',
+  preview: '保存生效后的影响：', disabledImpact: '关闭期间首次成功注册的手机号不会获赠，仍会用掉终身资格。',
+  zeroImpact: '赠送仍启用，但首次成功注册时赠送 0 积分，手机号仍会用掉终身资格。',
+  pending: '历史手机号资格仍在回填，暂时无法启用赠送。', blocked: '历史手机号资格回填受阻，暂时无法启用赠送。',
+  blockedCount: count => `历史手机号资格回填受阻：${count} 条已匿名注册记录无法安全恢复，暂时无法启用赠送。`,
+  unconfirmed: '当前回填状态未确认，请重新读取。', unavailable: '暂时无法获取手机号资格回填状态。',
+  loadFailed: '暂时无法读取策略：手机号资格回填状态不可用。请重试。',
+};
+registrationBonusRecoveryCopy.en.eligibilityPresentation = {
+  title: 'Lifetime eligibility by mobile number',
+  example: 'For example, suppose the same mobile number completes its first registration while the policy is off, or while it is on with a zero-point bonus. In either case no points are granted, and the number uses its eligibility. Turning the bonus on or increasing it later does not grant points retroactively.',
+  preview: 'If these changes take effect:', disabledImpact: 'A number that first registers while the policy is off receives no bonus and uses its lifetime eligibility.',
+  zeroImpact: 'The bonus stays on at zero points. A number that first registers then receives no points and uses its lifetime eligibility.',
+  pending: 'Historical mobile eligibility backfill is still in progress. The bonus cannot be enabled yet.',
+  blocked: 'Historical mobile eligibility backfill is blocked. The bonus cannot be enabled yet.',
+  blockedCount: count => `Historical mobile eligibility backfill is blocked: ${count} anonymized registrations cannot be reconstructed safely. The bonus cannot be enabled yet.`,
+  unconfirmed: 'The current backfill status could not be confirmed. Try loading it again.', unavailable: 'The mobile eligibility backfill status is unavailable.',
+  loadFailed: 'The policy could not be loaded because mobile eligibility backfill status is unavailable. Try again.',
+};
+registrationBonusRecoveryCopy.ja.eligibilityPresentation = {
+  title: '携帯番号ごとの生涯資格',
+  example: 'たとえば、同じ携帯番号で初回登録が完了したときに、ポリシーが無効、または有効でも付与が 0 ポイントだったとします。どちらも付与はなく、資格を使います。その後に有効化や増額をしても、さかのぼって付与されません。',
+  preview: '保存して適用された場合：', disabledImpact: '無効な期間に初回登録を完了した携帯番号には付与されず、生涯資格を使います。',
+  zeroImpact: '付与は有効ですが、初回登録時の付与は 0 ポイントで、携帯番号の生涯資格を使います。',
+  pending: '過去の携帯番号資格を補完しています。付与はまだ有効にできません。', blocked: '過去の携帯番号資格の補完が停止しています。付与はまだ有効にできません。',
+  blockedCount: count => `過去の携帯番号資格の補完が停止しています。匿名化済みの登録 ${count} 件を安全に復元できず、付与はまだ有効にできません。`,
+  unconfirmed: '現在の補完状態を確認できません。再読み込みしてください。', unavailable: '携帯番号資格の補完状態を取得できません。',
+  loadFailed: '携帯番号資格の補完状態を取得できないため、ポリシーを読み込めませんでした。再試行してください。',
+};
+
+registrationBonusRecoveryCopy.zh.fieldGuidance = {
+  amount: max => `整数积分，范围 0–${max}。`, amountInvalid: max => `请输入 0–${max} 之间的整数积分。`,
+  days: '整数天数，范围 1–3650。', daysInvalid: '请输入 1–3650 之间的整数天数。',
+  reason: '去掉首尾空白后，原因需有 10–500 个 Unicode 字符。', reasonCount: count => `当前 ${count} / 500`,
+};
+registrationBonusRecoveryCopy.en.fieldGuidance = {
+  amount: max => `Whole points from 0 to ${max}.`, amountInvalid: max => `Enter whole points from 0 to ${max}.`,
+  days: 'Whole days from 1 to 3650.', daysInvalid: 'Enter a whole number from 1 to 3650 days.',
+  reason: 'Use 10–500 Unicode code points, excluding spaces at the start and end.', reasonCount: count => `${count} / 500 now`,
+};
+registrationBonusRecoveryCopy.ja.fieldGuidance = {
+  amount: max => `0～${max} の整数ポイント。`, amountInvalid: max => `0～${max} の整数ポイントを入力してください。`,
+  days: '1～3650 の整数日。', daysInvalid: '1～3650 の整数日を入力してください。',
+  reason: '前後の空白を除いて Unicode コードポイント 10～500 個で入力してください。', reasonCount: count => `現在 ${count} / 500`,
+};

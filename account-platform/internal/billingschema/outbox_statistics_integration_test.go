@@ -7,12 +7,14 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -34,7 +36,7 @@ func TestOutboxStatisticsMigrationIdentity(t *testing.T) {
 		name    string
 		version int64
 		ordered func([]migrations.Migration) ([]migrations.Migration, error)
-	}{{"account", 900021, accountschema.Ordered}, {"billing", 900040, Ordered}, {"token", 900010, tokenschema.Ordered}} {
+	}{{"account", 900021, accountschema.Ordered}, {"billing", 900046, Ordered}, {"token", 900010, tokenschema.Ordered}} {
 		t.Run(domain.name, func(t *testing.T) {
 			loaded, err := migrations.Load("../../migrations/" + domain.name)
 			if err != nil {
@@ -63,7 +65,7 @@ func TestOutboxStatisticsMigrationIdentity(t *testing.T) {
 					case "down":
 						changed[index].DownSQL += "\nSELECT 1;"
 					case "alias":
-						changed[index].Version++
+						changed[index].Version += 1000000
 					case "duplicate":
 						changed = append(changed, changed[index])
 					}
@@ -150,6 +152,103 @@ func statisticsMigrationCLIs(t *testing.T, ctx context.Context) (string, string,
 	return build(baselineModule, "baseline-migrate"), build(module, "candidate-migrate"), baselineModule
 }
 
+// Keep real SQL bytes and filenames; never manufacture an older installed head
+// by deleting later ledger entries.
+func statisticsAccountPackage(t *testing.T, directory string, through, omit int64) string {
+	t.Helper()
+	entries, err := os.ReadDir(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := t.TempDir()
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".sql") {
+			continue
+		}
+		prefix, _, ok := strings.Cut(entry.Name(), "_")
+		version, err := strconv.ParseInt(prefix, 10, 64)
+		if !ok || err != nil {
+			t.Fatal("invalid original migration filename", entry.Name())
+		}
+		if (through != 0 && version > through) || version == omit {
+			continue
+		}
+		raw, err := os.ReadFile(filepath.Join(directory, entry.Name()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err = os.WriteFile(filepath.Join(result, entry.Name()), raw, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return result
+}
+
+func statisticsAccountUpgradeFacts(t *testing.T, ctx context.Context, operator *pgx.Conn, omitOwn bool) string {
+	t.Helper()
+	var identities string
+	if err := operator.QueryRow(ctx, `SELECT jsonb_build_object(
+'ledger',(SELECT jsonb_agg(to_jsonb(m) ORDER BY version) FROM schema_migrations m WHERE NOT $1 OR version<>900021),
+'indexes',(SELECT jsonb_agg(jsonb_build_array(indexname,indexdef) ORDER BY indexname) FROM pg_indexes WHERE schemaname='public' AND tablename='outbox_events' AND (NOT $1 OR indexname<>'outbox_events_dead_statistics_idx')),
+'triggers',(SELECT jsonb_agg(pg_get_triggerdef(oid) ORDER BY tgname) FROM pg_trigger WHERE tgrelid='public.outbox_events'::regclass AND NOT tgisinternal)
+)::text`, omitOwn).Scan(&identities); err != nil {
+		t.Fatal(err)
+	}
+	return statisticsFacts(t, ctx, operator) + statisticsAccessFacts(t, ctx, operator) + identities
+}
+
+func statisticsLedgerFacts(t *testing.T, ctx context.Context, operator *pgx.Conn) map[string]json.RawMessage {
+	t.Helper()
+	var raw []byte
+	if err := operator.QueryRow(ctx, `SELECT coalesce(jsonb_object_agg(version::text,to_jsonb(m)),'{}'::jsonb) FROM schema_migrations m`).Scan(&raw); err != nil {
+		t.Fatal(err)
+	}
+	var rows map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &rows); err != nil {
+		t.Fatal(err)
+	}
+	return rows
+}
+
+func requireStatisticsLedgerPreserved(t *testing.T, ctx context.Context, operator *pgx.Conn, before map[string]json.RawMessage, omit int64) {
+	t.Helper()
+	after := statisticsLedgerFacts(t, ctx, operator)
+	for version, raw := range before {
+		if version != strconv.FormatInt(omit, 10) && !bytes.Equal(raw, after[version]) {
+			t.Fatal("migration changed an original ledger identity, timestamp or checksum", version)
+		}
+	}
+}
+
+func statisticsOriginalIndexFacts(t *testing.T, ctx context.Context, operator *pgx.Conn) string {
+	t.Helper()
+	var raw string
+	if err := operator.QueryRow(ctx, `SELECT coalesce(jsonb_agg(jsonb_build_array(c.oid,c.relname,c.relowner,pg_get_indexdef(c.oid)) ORDER BY c.relname),'[]'::jsonb)::text FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public' AND c.relkind='i' AND c.relname<>'outbox_events_dead_statistics_idx'`).Scan(&raw); err != nil {
+		t.Fatal(err)
+	}
+	return raw
+}
+
+func requireStatisticsOriginalIndexesPreserved(t *testing.T, ctx context.Context, operator *pgx.Conn, before string) {
+	t.Helper()
+	var oldIndexes, newIndexes []json.RawMessage
+	if err := json.Unmarshal([]byte(before), &oldIndexes); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal([]byte(statisticsOriginalIndexFacts(t, ctx, operator)), &newIndexes); err != nil {
+		t.Fatal(err)
+	}
+	current := make(map[string]bool, len(newIndexes))
+	for _, index := range newIndexes {
+		current[string(index)] = true
+	}
+	for _, index := range oldIndexes {
+		if !current[string(index)] {
+			t.Fatal("upgrade changed an original index OID, owner or definition")
+		}
+	}
+}
+
 func TestRetainedOutboxStatisticsPublicPostgres(t *testing.T) {
 	if os.Getenv("PINVOU_OUTBOX_STATISTICS_TEST") != "1" {
 		t.Skip("explicit owned public-domain statistics fixture required")
@@ -209,6 +308,7 @@ func TestRetainedOutboxStatisticsPublicPostgres(t *testing.T) {
 	}
 	for _, domain := range []string{"account", "billing", "token"} {
 		t.Run(domain, func(t *testing.T) {
+			indexVersion := map[string]int64{"account": 900021, "billing": 900046, "token": 900010}[domain]
 			owner := domain + "_service"
 			if domain == "billing" {
 				owner = "billing_schema_owner"
@@ -253,11 +353,18 @@ func TestRetainedOutboxStatisticsPublicPostgres(t *testing.T) {
 				if (e == nil) != accepted {
 					t.Fatalf("actual %s migration %s accepted=%t: %v %s", domain, direction, accepted, e, output)
 				}
+				if !accepted && !strings.Contains(string(output), "MIGRATION_EXECUTION_FAILED") {
+					t.Fatal("refusal did not reach actual migration execution", string(output))
+				}
 			}
 			oldDirectory := filepath.Join(baselineModule, "migrations", domain)
 			newDirectory, e := filepath.Abs("../../migrations/" + domain)
 			if e != nil {
 				t.Fatal(e)
+			}
+			fullDirectory := newDirectory
+			if domain == "account" {
+				newDirectory = statisticsAccountPackage(t, fullDirectory, 900021, 0)
 			}
 			run(databaseURL, baselineCLI, oldDirectory, "up", true)
 			var absent bool
@@ -278,7 +385,13 @@ func TestRetainedOutboxStatisticsPublicPostgres(t *testing.T) {
 			facts := statisticsFacts(t, ctx, operator)
 			policy := statisticsAccessFacts(t, ctx, operator)
 			oldPlan := statisticsPlan(t, ctx, operator, oldQuery)
+			oldLedger := statisticsLedgerFacts(t, ctx, operator)
+			oldIndexes := statisticsOriginalIndexFacts(t, ctx, operator)
 			run(databaseURL, candidateCLI, newDirectory, "up", true)
+			requireStatisticsLedgerPreserved(t, ctx, operator, oldLedger, 0)
+			requireStatisticsOriginalIndexesPreserved(t, ctx, operator, oldIndexes)
+			installedLedger := statisticsLedgerFacts(t, ctx, operator)
+			originalIndexes := statisticsOriginalIndexFacts(t, ctx, operator)
 			if statisticsFacts(t, ctx, operator) != facts {
 				t.Fatal("upgrade rewrote retained delivery facts")
 			}
@@ -345,6 +458,10 @@ func TestRetainedOutboxStatisticsPublicPostgres(t *testing.T) {
 				t.Fatal(e)
 			}
 			run(databaseURL, candidateCLI, newDirectory, "down", false)
+			requireStatisticsLedgerPreserved(t, ctx, operator, installedLedger, 0)
+			if statisticsOriginalIndexFacts(t, ctx, operator) != originalIndexes {
+				t.Fatal("refused rollback changed an unrelated original index")
+			}
 			var method string
 			var recorded bool
 			if e = operator.QueryRow(ctx, `SELECT a.amname,EXISTS(SELECT FROM public.schema_migrations WHERE name='outbox_dead_statistics_index') FROM pg_class c JOIN pg_am a ON a.oid=c.relam WHERE c.oid='public.outbox_events_dead_statistics_idx'::regclass`).Scan(&method, &recorded); e != nil || method != "hash" || !recorded {
@@ -357,6 +474,10 @@ func TestRetainedOutboxStatisticsPublicPostgres(t *testing.T) {
 				t.Fatal(e)
 			}
 			run(databaseURL, candidateCLI, newDirectory, "down", true)
+			requireStatisticsLedgerPreserved(t, ctx, operator, installedLedger, indexVersion)
+			if statisticsOriginalIndexFacts(t, ctx, operator) != originalIndexes {
+				t.Fatal("rollback changed an unrelated original index")
+			}
 			if e = operator.QueryRow(ctx, `SELECT to_regclass('public.outbox_events_dead_statistics_idx') IS NULL AND NOT EXISTS(SELECT FROM public.schema_migrations WHERE name='outbox_dead_statistics_index')`).Scan(&absent); e != nil || !absent {
 				t.Fatal("public rollback did not remove only the new index identity")
 			}
@@ -367,9 +488,75 @@ func TestRetainedOutboxStatisticsPublicPostgres(t *testing.T) {
 				t.Fatal("rollback changed ownership or grants")
 			}
 			run(databaseURL, candidateCLI, newDirectory, "up", true)
+			requireStatisticsLedgerPreserved(t, ctx, operator, installedLedger, indexVersion)
+			if statisticsOriginalIndexFacts(t, ctx, operator) != originalIndexes {
+				t.Fatal("index replay changed an unrelated original index")
+			}
 			check()
 			if domain != "account" {
 				verifyStatisticsRollbackRole(t, ctx, domain, databaseURL, actor, newDirectory)
+			} else {
+				// The current chain is separately installed and its true head must
+				// retain the exact forward-only contract after the index roundtrip.
+				run(databaseURL, candidateCLI, fullDirectory, "up", true)
+				current, err := pgx.Connect(ctx, databaseURL)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer current.Close(context.Background())
+				if _, err = current.Exec(ctx, "SET ROLE account_service"); err != nil {
+					t.Fatal(err)
+				}
+				loaded, err := migrations.Load(fullDirectory)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err = accountschema.VerifyApplied(ctx, current, loaded); err != nil {
+					t.Fatal(err)
+				}
+				migrations.Unlock(ctx, current)
+				before := statisticsAccountUpgradeFacts(t, ctx, operator, false)
+				err = accountschema.DownOne(ctx, current, loaded)
+				migrations.Unlock(ctx, current)
+				var failure *pgconn.PgError
+				if !errors.As(err, &failure) || failure.Code != "55000" || !strings.Contains(failure.Message, "900022 inventory is forward-only") {
+					t.Fatal("current head did not preserve exact forward-only refusal", err)
+				}
+				if statisticsAccountUpgradeFacts(t, ctx, operator, false) != before {
+					t.Fatal("current-head refusal changed old ledger, events, indexes or authority")
+				}
+				run(databaseURL, candidateCLI, fullDirectory, "up", true)
+				check()
+
+				// An independent nonempty current database may already have22
+				// while missing lower21. Public installation must fill only21.
+				gapSetup := f.database(t, ctx, domain, owner)
+				gapConfig := f.config.Copy()
+				gapConfig.Database = gapSetup.Config().Database
+				gapOperator, err := pgx.ConnectConfig(ctx, gapConfig)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer gapOperator.Close(context.Background())
+				gapURL := f.serviceURL(t, gapSetup, domain+"_migrator")
+				gapPackage := statisticsAccountPackage(t, fullDirectory, 0, 900021)
+				run(gapURL, candidateCLI, gapPackage, "up", true)
+				var has22, has21 bool
+				if err = gapOperator.QueryRow(ctx, `SELECT EXISTS(SELECT FROM schema_migrations WHERE version=900022),EXISTS(SELECT FROM schema_migrations WHERE version=900021) OR to_regclass('public.outbox_events_dead_statistics_idx') IS NOT NULL`).Scan(&has22, &has21); err != nil || !has22 || has21 {
+					t.Fatal("current lower-gap precondition", has22, has21, err)
+				}
+				if _, err = gapOperator.Exec(ctx, statisticsSeed); err != nil {
+					t.Fatal(err)
+				}
+				gapFacts := statisticsAccountUpgradeFacts(t, ctx, gapOperator, true)
+				run(gapURL, candidateCLI, fullDirectory, "up", true)
+				if err = gapOperator.QueryRow(ctx, `SELECT to_regclass('public.outbox_events_dead_statistics_idx') IS NOT NULL AND EXISTS(SELECT FROM schema_migrations WHERE version=900021)`).Scan(&has21); err != nil || !has21 || statisticsAccountUpgradeFacts(t, ctx, gapOperator, true) != gapFacts {
+					t.Fatal("public lower-gap upgrade changed original facts or missed its own index", err)
+				}
+				run(gapURL, candidateCLI, fullDirectory, "up", true)
+				if statisticsAccountUpgradeFacts(t, ctx, gapOperator, true) != gapFacts {
+					t.Fatal("full current replay changed retained history")
+				}
 			}
 			freshSetup := f.database(t, ctx, domain, owner)
 			freshConfig := f.config.Copy()
@@ -389,8 +576,8 @@ func TestRetainedOutboxStatisticsPublicPostgres(t *testing.T) {
 				}
 			}
 			freshURL := f.serviceURL(t, freshSetup, domain+"_migrator")
-			run(freshURL, candidateCLI, newDirectory, "up", true)
-			run(freshURL, candidateCLI, newDirectory, "up", true)
+			run(freshURL, candidateCLI, fullDirectory, "up", true)
+			run(freshURL, candidateCLI, fullDirectory, "up", true)
 			if statisticsAccessFacts(t, ctx, freshOperator) != policy {
 				t.Fatal("fresh and upgraded persistent authority differ")
 			}

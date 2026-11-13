@@ -18,7 +18,7 @@ func DownOne(ctx context.Context, conn *pgx.Conn, input []migrations.Migration) 
 	return migrations.DownOneWithHooks(ctx, conn, ordered, migrations.DownHooks{
 		Guard: retainedRollbackGuard,
 		LedgerRole: func(m migrations.Migration) string {
-			if m.Version == 900040 {
+			if m.Version == 900046 {
 				return "billing_schema_owner"
 			}
 			return ""

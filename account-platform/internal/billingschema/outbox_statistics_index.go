@@ -11,7 +11,7 @@ import (
 
 // Freeze the forward index identity without editing any installed SQL bytes.
 func validateOutboxStatisticsIndex(input []migrations.Migration) error {
-	const version int64 = 900040
+	const version int64 = 900046
 	const name = "outbox_dead_statistics_index"
 	const up = "fdb45f949ce1fe97935022f6ffe057003243ba5b5cd1c6e863ffcb32cf1fed40"
 	const down = "bc2912f5c3ebef282384628699361874ba5dda08c0334815c54fbaabd8d41241"

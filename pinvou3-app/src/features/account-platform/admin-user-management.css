@@ -1,0 +1,42 @@
+.adm-shell.adm-restored-shell .adm-panel button.adm-user-disable-action{border-color:#f0c8cc;background:var(--adm-surface);color:var(--adm-danger)}
+.adm-shell.adm-restored-shell .adm-panel button.adm-user-disable-action:hover:not(:disabled){background:var(--adm-danger-soft)}
+.ap-restored-dialog button.adm-user-disable-action{border-color:var(--adm-danger,#c33b46);background:var(--adm-danger,#c33b46);color:#fff}
+.ap-restored-dialog button.adm-user-disable-action:hover:not(:disabled){filter:brightness(.95)}
+.adm-shell.adm-restored-shell .adm-panel button.adm-user-disable-action:focus-visible,.ap-restored-dialog button.adm-user-disable-action:focus-visible{outline:3px solid #c33b4648;outline-offset:2px}
+.adm-restored-shell .adm-user-status-blocked{display:block;max-width:24em;margin-top:6px;color:var(--adm-muted);font-size:12px;line-height:1.5;white-space:normal}
+.adm-restored-shell .adm-user-search-toolbar{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.2fr) auto;align-items:end;gap:16px;margin-bottom:8px}
+.adm-restored-shell .adm-user-search-toolbar form{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:end;gap:8px;min-width:0}
+.adm-restored-shell .adm-user-search-toolbar label{display:grid;gap:6px;min-width:0}
+.adm-restored-shell .adm-user-search-toolbar input{box-sizing:border-box;width:100%;min-width:0}
+.adm-restored-shell .adm-user-search-help{margin:0 0 20px;color:var(--adm-muted);font-size:12px;line-height:1.6}
+@media(max-width:1000px){.adm-restored-shell .adm-user-search-toolbar{grid-template-columns:minmax(0,1fr)}.adm-restored-shell .adm-user-search-toolbar>button{justify-self:start}}
+.adm-restored-shell .adm-user-memberships{padding:0;list-style:none}
+.adm-shell.adm-restored-shell .adm-user-memberships button.adm-name-link{max-width:100%;padding:0;border:0;background:transparent;color:var(--adm-primary);font-weight:600;text-align:left;white-space:normal;overflow-wrap:anywhere}
+.adm-restored-shell .adm-user-membership-label{display:inline-block;box-sizing:border-box;max-width:100%;margin:0 6px 4px 0;padding:2px 8px;border:1px solid var(--adm-line);border-radius:6px;overflow-wrap:anywhere}
+.adm-restored-shell .adm-user-membership-facts{display:flex;flex-wrap:wrap;gap:8px 24px;margin:8px 0 20px}
+.adm-restored-shell .adm-user-membership-facts>div{display:flex;align-items:baseline;flex-wrap:wrap;gap:6px;min-width:0;max-width:100%}
+.adm-restored-shell .adm-user-membership-facts dt{color:var(--adm-muted)}
+.adm-restored-shell .adm-user-membership-facts dd{min-width:0;max-width:100%;margin:0;overflow-wrap:anywhere}
+.adm-restored-shell .adm-user-detail-head{display:grid;gap:12px;margin-bottom:20px;min-width:0}
+.adm-restored-shell .adm-user-detail-head>button{justify-self:start;max-width:100%;white-space:normal}
+.adm-restored-shell .adm-user-detail-head>h3{margin:0;font-size:22px;line-height:1.4;overflow-wrap:anywhere}
+.adm-restored-shell .adm-user-detail-breadcrumbs{flex-wrap:wrap}
+
+.adm-restored-shell .adm-user-profile-identity{display:flex;align-items:center;flex-wrap:wrap;gap:10px 14px;min-width:0}
+.adm-restored-shell .adm-user-profile-identity h3{margin:0;font-size:22px;line-height:1.4;overflow-wrap:anywhere}
+.adm-restored-shell .adm-user-profile-status{padding:3px 9px;border:1px solid var(--adm-line);border-radius:6px;background:var(--adm-soft);font-size:12px;line-height:1.5;overflow-wrap:anywhere}
+.adm-restored-shell .adm-user-details.adm-user-profile-facts{display:grid;grid-template-columns:minmax(0,1fr);gap:0;margin:0 0 20px}
+.adm-restored-shell .adm-user-profile-facts>div{display:grid;grid-template-columns:minmax(96px,136px) minmax(0,1fr);align-items:start;gap:12px 20px;padding:14px 0;border-bottom:1px solid var(--adm-line);min-width:0}
+.adm-restored-shell .adm-user-profile-facts dt{color:var(--adm-muted);font-size:13px;line-height:1.6;overflow-wrap:anywhere}
+.adm-restored-shell .adm-user-profile-facts dd{min-width:0;margin:0;overflow-wrap:anywhere}
+.adm-restored-shell .adm-user-identifier-help{margin:0 0 8px;font-size:12px;line-height:1.6;color:var(--adm-muted)}
+@media(max-width:560px){.adm-restored-shell .adm-user-profile-facts>div{grid-template-columns:minmax(0,1fr);gap:6px}}
+
+.adm-restored-shell .adm-user-list .adm-table td:first-child{width:30%;overflow-wrap:anywhere}
+.adm-restored-shell .adm-user-list .adm-table td:nth-child(2){width:34%;min-width:0}
+.adm-shell.adm-restored-shell .adm-user-list .adm-table td:first-child .adm-name-link,.adm-restored-shell .adm-user-list .adm-table td:first-child>span{font-size:14px;font-weight:650;line-height:1.6;white-space:normal;overflow-wrap:anywhere}
+.adm-restored-shell .adm-user-list .adm-identifier-value code,.adm-restored-shell .adm-user-list .adm-user-retained-code{font-size:12px;white-space:normal;overflow-wrap:anywhere}
+.adm-restored-shell .adm-user-list .adm-user-result-summary{display:flex;flex-wrap:wrap;gap:6px 16px;margin:0 0 16px;padding:12px 14px;border:1px solid var(--adm-line);border-radius:10px;background:var(--adm-soft);font-size:12px;line-height:1.6;overflow-wrap:anywhere}
+.adm-restored-shell .adm-user-result-summary>strong{flex-basis:100%;font-size:14px}
+.adm-restored-shell .adm-user-list .adm-user-pagination{display:flex;align-items:center;flex-wrap:wrap;gap:10px;margin-top:16px}
+@media(max-width:760px){.adm-restored-shell .adm-user-list .adm-table td:first-child,.adm-restored-shell .adm-user-list .adm-table td:nth-child(2){width:auto}}

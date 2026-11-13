@@ -216,7 +216,7 @@ for (const language of ['zh', 'en', 'ja']) {
     23,
     `${language}.uiAuxChat must hold exactly the 23 pinned keys`,
   );
-    // All 121 uiDeviceMgr keys are pinned (PR #1661 评审跟进：三语**同时**删掉一个
+    // All 125 uiDeviceMgr keys are pinned (PR #1661 评审跟进：三语**同时**删掉一个
     // key 时 parity 检查全绿、视图渲染 undefined——uiAuxChat round-14 事故的同款
     // 洞；chipGpuTemp→chipMaxTemp 与评审新增键（servicesStale 随 round-6；
     // peakLabel/linkReasonBridge/linkReasonUnknown/registerNoId 随 round-7）随本
@@ -249,6 +249,8 @@ for (const language of ['zh', 'en', 'ja']) {
       'linkRowKept',
       'doctorSendFailed', 'doctorFailed', 'refreshFailed', 'linkRowStale', 'linkRowRecycled', 'removeDone', 'removeFailed', 'warn',
       'linkReasonBridge', 'linkReasonUnknown', 'registerNoId',
+      // Store/device shared deletion boundary owns four localized failures.
+      'weightRemovalBusy', 'weightRemovalLockFailed', 'weightRemovalPathInvalid', 'weightRemovalPathUnavailable',
       'ollamaOfflineHint', 'localSourceHint',
       'doctorPackages', 'doctorPackagesDesc', 'doctorDependencies', 'doctorDependenciesDesc',
       'doctorCuda', 'doctorCudaDesc', 'doctorServices', 'doctorServicesDesc',
@@ -265,8 +267,8 @@ for (const language of ['zh', 'en', 'ja']) {
     // Count guard：清单看不到新增——加键必须同步更新计数（见 uiAuxChat round-36 同款）。
     assert.equal(
       Object.keys(dict[language].uiDeviceMgr).length,
-      121,
-      `${language}.uiDeviceMgr must hold exactly the 121 pinned keys`,
+      125,
+      `${language}.uiDeviceMgr must hold exactly the 125 pinned keys`,
     );
     // Single-language whole-section loss guard（十九轮评审 P2）：dictJa 以
     // `...dictEn` 铺底，整段删掉 `jaBase.uiDeviceMgr` / `jaBase.deviceMgr` 时
@@ -292,12 +294,27 @@ for (const language of ['zh', 'en', 'ja']) {
       // round-33 新增的改属保留 toast 也是插值函数（copy.linkRowKept(name)）：
       // 缺这枚钉时单语翻成字符串全套件照绿、运行时 TypeError（三十五轮评审 P2）。
       'linkRowKept',
+      'weightRemovalLockFailed', 'weightRemovalPathUnavailable',
     ]) {
       assert.equal(
         typeof dict[language].uiDeviceMgr[key],
         'function',
         `${language}.uiDeviceMgr.${key} must be an interpolation function`,
       );
+    }
+    for (const key of ['weightRemovalBusy', 'weightRemovalPathInvalid']) {
+      assert.equal(typeof dict[language].uiDeviceMgr[key], 'string', `${language}.uiDeviceMgr.${key} must be text`);
+    }
+    for (const key of ['weightRemovalBusy', 'weightRemovalLockFailed', 'weightRemovalPathInvalid', 'weightRemovalPathUnavailable']) {
+      const render = locale => {
+        const value = dict[locale].uiDeviceMgr[key];
+        return typeof value === 'function' ? value('native diagnostic') : value;
+      };
+      const rendered = render(language);
+      assert.equal(typeof rendered, 'string', `${language}.uiDeviceMgr.${key} must render text`);
+      assert.ok(rendered.trim().length > 0, `${language}.uiDeviceMgr.${key} must not be empty`);
+      if (language !== 'zh') assert.notEqual(rendered, render('zh'), `${language}.uiDeviceMgr.${key} must not fall back to zh`);
+      if (language === 'ja') assert.notEqual(rendered, render('en'), `ja.uiDeviceMgr.${key} must not fall back to en`);
     }
     // Value-language + arity guard (round-21 review P3 mutation evidence: an en
     // value flipped to Chinese used to pass every check). en string leaves must
@@ -595,12 +612,15 @@ const accountPlatformPopover = source('features/account-platform/AccountPlatform
 assert.match(accountPlatformPopover, /<AccountPlatformView \{\.\.\.props\}/);
 const accountPlatformView = source('features/account-platform/AccountPlatformView.jsx');
 assert.match(accountPlatformView, /copy\.availableCredits/);
-assert.match(accountPlatformView, /copy\.reservedCredits/);
+assert.match(accountPlatformView, /center\.reserved/);
+const desktopAccountCenter = source('features/account-platform/DesktopAccountCenter.jsx');
+assert.match(desktopAccountCenter, /copy\.availableCredits/);
+assert.match(desktopAccountCenter, /copy\.reservedCredits/);
 assert.match(accountPlatformView, /localizedAccountPlatformError/);
 assert.doesNotMatch(accountPlatformPopover, /platformModel|selectPlatformModel|modelSelectionSaved/);
 assert.doesNotMatch(accountPlatformPopover, />可用余额</);
 assert.equal(accountPlatformCopy.zh.availableCredits, '可用积分');
-assert.equal(accountPlatformCopy.zh.reservedCredits, '使用中');
+assert.equal(accountPlatformCopy.zh.reservedCredits, '已预留积分');
 assert.match(accountPlatformView, /localizedAccountPlatformError\(copy, reason\)/);
 assert.match(accountPlatformView, /copy\.retry/);
 assert.doesNotMatch(main, /refreshLlmApiStatus/);
@@ -633,6 +653,12 @@ assert.match(source('features/monitor/MonitorView.jsx'), /t\.uiMonitor/);
 const deviceManagerView = source('features/device-manager/DeviceManagerView.jsx');
 assert.match(deviceManagerView, /const copy = t\.uiDeviceMgr/);
 assert.doesNotMatch(deviceManagerView, /[\u{3000}-\u{30ff}\u{4e00}-\u{9fff}\u{f900}-\u{faff}\u{ff00}-\u{ffef}]/u, 'device-manager view must stay free of CJK literals incl. kana/fullwidth punctuation (i18n only)');
+const deviceRemovalErrors = source('features/device-manager/removal-errors.js');
+assert.match(stripComments(deviceManagerView), /deviceModelRemovalError\(/);
+for (const key of ['weightRemovalBusy', 'weightRemovalLockFailed', 'weightRemovalPathInvalid', 'weightRemovalPathUnavailable']) {
+  assert.match(stripComments(deviceRemovalErrors), new RegExp(`copy\\.${key}\\b`), `device removal must consume the pinned ${key} copy`);
+}
+assert.doesNotMatch(deviceRemovalErrors, /[\u{3000}-\u{30ff}\u{4e00}-\u{9fff}\u{f900}-\u{faff}\u{ff00}-\u{ffef}]/u, 'device removal helper must keep owned copy in shared i18n');
 const scheduledTasks = source('features/scheduled/ScheduledTasksView.jsx');
 assert.match(scheduledTasks, /const scheduledCopy = t\.uiScheduled/);
 assert.match(scheduledTasks, /scheduledCopy\.taskName/);

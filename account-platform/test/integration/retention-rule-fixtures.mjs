@@ -25,11 +25,22 @@ export function retentionRuleCases(groups) {
   const available = (source, value = 1, instance) => flat('pinvou_outbox_statistics_available', source, value, instance);
   const fresh = (source, values = '0+60x20', instance) => series('pinvou_outbox_statistics_last_success_timestamp_seconds', source, values, instance);
   const healthy = [available('account'), available('billing'), fresh('account'), fresh('billing')];
-  const check = (index, labels = null, eval_time = '13m') => ({
-    alertname: names[index], eval_time,
-    exp_alerts: labels === null ? [] : [{ exp_labels: { severity: index % 2 === 0 ? 'p1' : 'p2', ...labels },
-      exp_annotations: selected[index].annotations }],
-  });
+  const severityByAlert = {
+    PinvouOutboxStatisticsUnavailable: 'p1',
+    PinvouOutboxRetainedStorageWarning: 'p2',
+    PinvouPaymentHealthStorageUnavailable: 'p1',
+    PinvouPaymentHealthRetainedStorageWarning: 'p2',
+  };
+  const check = (index, labels = null, eval_time = '13m') => {
+    const alertname = names[index];
+    const severity = severityByAlert[alertname];
+    assert.ok(severity, `independent severity expectation for ${alertname}`);
+    return {
+      alertname, eval_time,
+      exp_alerts: labels === null ? [] : [{ exp_labels: { severity, ...labels },
+        exp_annotations: selected[index].annotations }],
+    };
+  };
   const cases = [
     ['fresh-statistics', healthy, [check(0)]],
     ['failed-replica-is-visible', [...healthy, available('account', 0, 'a2')], [check(0, { source: 'account' })]],
